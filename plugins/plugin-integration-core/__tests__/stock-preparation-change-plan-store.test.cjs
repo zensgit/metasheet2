@@ -50,6 +50,7 @@ const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
 const kit = require(path.join(__dirname, 'support', 'stock-preparation-refresh-store-kit.cjs'))
+const { emptyIntentFor } = kit
 const F = require(path.join(__dirname, 'support', 'stock-preparation-continuation-fixtures.cjs'))
 const storeModule = require(path.join(LIB, 'stock-preparation-continuation-store.cjs'))
 const pairing = require(path.join(LIB, 'stock-preparation-continuation-pairing.cjs'))
@@ -215,6 +216,7 @@ async function beginBound(w, changePlanId, continuations = []) {
     plannedCounts: { update: 1 },
     refreshBinding: { continuations, changePlanId, holdSetFingerprint: null },
     startedBy: PULLER,
+    intent: emptyIntentFor('pd_cps'),
   })
 }
 
@@ -474,7 +476,7 @@ test('CP-S04 every fact is decided from the rows under the lock: a stale echo / 
   // (f) a failed execution recorded after the page was read: refused AFTER the bump, the bump rolled back with it.
   {
     const { w, proposal } = await base()
-    const execution = await w.store.beginExecution({ ...w.scope, lane: 'small_apply', guard: GUARD, tokenRevision: 'r', planDigest: 'p', plannedCounts: {}, refreshBinding: { continuations: [] }, startedBy: PULLER })
+    const execution = await w.store.beginExecution({ ...w.scope, lane: 'small_apply', guard: GUARD, tokenRevision: 'r', planDigest: 'p', plannedCounts: {}, refreshBinding: { continuations: [] }, startedBy: PULLER, intent: emptyIntentFor('p') })
     await finish(w, execution.id, 'failed')
     const snapshot = tablesSnapshot(w.db)
     await expectError(confirmPlan(w, { proposal }), { status: 409, code: CODES.RECOVERY_PENDING })
@@ -780,11 +782,31 @@ test('CP-S09 the bound begin asserts the plan under the state lock; the finish m
     assert.equal(rowsOf(w, 'execution').length, 0)
   }
   {
-    // An unbound begin is the pre-PR-8 autocommit insert (no state lock, no plan read).
+    // RE-PINNED by step 6a-1 (S6-1, R-91): an unbound begin is no longer PR-8's autocommit insert — it is ONE transaction
+    // with its intent journal (no state lock, no plan read; an empty plan journals zero chunks).
     const { w } = await setup()
     w.db.log.length = 0
-    await w.store.beginExecution({ ...w.scope, lane: 'small_apply', guard: GUARD, tokenRevision: 'r', planDigest: 'p', plannedCounts: {}, refreshBinding: { continuations: [] }, startedBy: PULLER })
-    assert.deepEqual(w.db.log.map(([method]) => method), ['insertOne'])
+    await w.store.beginExecution({ ...w.scope, lane: 'small_apply', guard: GUARD, tokenRevision: 'r', planDigest: 'p', plannedCounts: {}, refreshBinding: { continuations: [] }, startedBy: PULLER, intent: emptyIntentFor('p') })
+    assert.deepEqual(w.db.log.map(([method]) => method), ['transaction', 'trx.insertOne', 'commit'])
+  }
+  {
+    // Step 6a-1 (T6-4, design §3.7 P4 / P12; XS-02b / XS-02c): a bound run that wrote AND attempted nothing (an aborted
+    // decision-0 stop, a pre-IO writer refusal) self-verifies — the plan STAYS `confirmed` (asserted under its row lock,
+    // never written), the close stays a settlement subject; `partial` never qualifies (the loop above).
+    for (const status of ['failed', 'aborted']) {
+      const { w, id } = await setup()
+      const execution = await beginBound(w, id)
+      w.db.log.length = 0
+      const done = await finish(w, execution.id, status, { written: 0, attemptedWrites: 0 })
+      assert.deepEqual(done.changePlan, { id, status: 'confirmed', kept: true }, status)
+      const plan = rowsOf(w, 'changePlan')[0]
+      assert.equal(plan.status, 'confirmed', `${status}: the 0/0 path never invalidates (P12)`)
+      assert.equal(plan.execution_id, null)
+      assert.ok(statementsOf(w.db).includes('selectOneForUpdate:change_plan'), 'asserted under its row lock')
+      assert.ok(!statementsOf(w.db).includes('updateRow:change_plan'), 'never updated')
+      const row = rowsOf(w, 'execution')[0]
+      assert.deepEqual([row.status, row.verified_result, row.closed_mode, row.pre_close_status, row.settlement_subject], ['verified_closed', 'nothing_landed', 'self_verified', status, true])
+    }
   }
 })
 
@@ -851,7 +873,7 @@ test('CP-S10 the review: digest-bound, no bump, decision_version + 1, the state\
   {
     // A failed execution recorded since: RECOVERY_PENDING (nothing reviewed).
     const { w, plan } = await writtenWorld()
-    const execution = await w.store.beginExecution({ ...w.scope, lane: 'small_apply', guard: GUARD, tokenRevision: 'r', planDigest: 'p', plannedCounts: {}, refreshBinding: { continuations: [] }, startedBy: PULLER })
+    const execution = await w.store.beginExecution({ ...w.scope, lane: 'small_apply', guard: GUARD, tokenRevision: 'r', planDigest: 'p', plannedCounts: {}, refreshBinding: { continuations: [] }, startedBy: PULLER, intent: emptyIntentFor('p') })
     await finish(w, execution.id, 'failed')
     await expectError(review(w, plan), { status: 409, code: CODES.RECOVERY_PENDING })
     assert.equal(rowsOf(w, 'changePlan')[0].status, 'written')
@@ -1228,6 +1250,61 @@ test('CP-S17 (N1-b) the PLAIN continuation confirm (a continuation_candidate hol
   assert.equal(w.bump.calls.length, 1)
   assert.equal(rowsOf(w, 'continuation').length, 1)
   assert.deepEqual(w.pilotReads, [false, false, true])
+})
+
+// ── CP-S18 (pre-pilot fix batch 8(a), R-91) ────────────────────────────────────────────────────────
+
+test('CP-S18 (8a) the RE-CONFIRM (a relationship_reconfirm hold, PR-4) re-decides the pilot marker on its OWN transaction handle under the state lock, exactly as the plain confirm: cleared since the consult / on another sheet => 409 NOT_PILOT { decidedUnderLock }, nothing persisted, no bump, the relationship stays needs_reconfirmation; unwired => 501 pilot_read_within before any statement; the marker back => it commits (revision 2)', async () => {
+  const fixture = await kit.candidateHoldFixture()
+  const w = await world()
+  await reconcile(w, [fixture.hold])
+  const candidate = rowsOf(w, 'hold').find((entry) => entry.fingerprint === fixture.hold.fingerprint && entry.status === 'open')
+  const confirmed = await w.store.confirmContinuation({ ...w.scope, holdId: candidate.id, echo: kit.echoOf(fixture.hold), basis: { kind: 'puller_confirmed_same_demand' }, confirmedBy: PULLER, sourceIdentity: F.SOURCE_IDENTITY }, { bumpWithin: w.bump.bumpWithin, auditWithin: w.auditWithin, pilotWithin: w.pilotWithin })
+  const reconfirmHold = kit.reconfirmHoldFor(confirmed.continuationId, { confirmable: true, verdict: 'source_scope_changed' })
+  await reconcile(w, [reconfirmHold], { verdicts: { [confirmed.continuationId]: 'source_scope_changed' } })
+  const row = rowsOf(w, 'hold').find((entry) => entry.fingerprint === reconfirmHold.fingerprint && entry.status === 'open')
+  assert.ok(row && row.kind === 'relationship_reconfirm' && row.confirmable === true, 'one open confirmable re-confirm hold')
+  assert.equal(rowsOf(w, 'continuation')[0].status, 'needs_reconfirmation')
+  const reconfirm = (hooks = {}) => w.store.reconfirmContinuation({ ...w.scope, continuationId: confirmed.continuationId, revision: 1, holdId: row.id, echo: kit.echoOf(reconfirmHold), confirmedBy: PULLER, sourceIdentity: F.SOURCE_IDENTITY }, { bumpWithin: w.bump.bumpWithin, auditWithin: w.auditWithin, pilotWithin: w.pilotWithin, ...hooks })
+  const bumpsBefore = w.bump.calls.length
+  const readsBefore = w.pilotReads.length
+  // (a) the marker cleared between the route's consult and this transaction: refused under the lock, nothing written.
+  w.setRegistry({ pilot_enabled_at: null, pilot_enabled_by: null, pilot_readiness_version: null })
+  const before = tablesSnapshot(w.db)
+  w.db.log.length = 0
+  const cleared = await expectError(reconfirm(), { status: 409, code: CODES.NOT_PILOT })
+  assert.deepEqual(cleared.details, { decidedUnderLock: true, partial: false })
+  assert.equal(tablesSnapshot(w.db), before, 'nothing persisted')
+  assert.equal(w.bump.calls.length, bumpsBefore, 'refused before the bump')
+  assert.deepEqual(w.pilotReads.slice(readsBefore), [false])
+  // The read ran ON the re-confirm's transaction handle, after the state-row lock and the hold re-read, before any write.
+  const statements = statementsOf(w.db)
+  const stateLock = statements.indexOf('selectOneForUpdate:refresh_state')
+  const pilotRead = statements.indexOf('selectOne:project_target')
+  assert.ok(stateLock >= 0 && pilotRead > stateLock, statements.join(' > '))
+  assert.equal(statements.some((entry) => /^(insertOne|insertMany|updateRow|upsertOne):/.test(entry)), false, statements.join(' > '))
+  assert.equal(rowsOf(w, 'continuation')[0].status, 'needs_reconfirmation', 'the relationship is untouched')
+  assert.equal(rowsOf(w, 'hold').find((entry) => entry.id === row.id).status, 'open', 'the hold stays open')
+  // (b) a pilot row registered on ANOTHER sheet is not this sheet's pilot.
+  w.setRegistry({ pilot_enabled_at: new Date('2026-10-24T00:00:00.000Z'), pilot_enabled_by: 'u_admin', pilot_readiness_version: 1, sheet_id: 'sheet_cps_elsewhere' })
+  await expectError(reconfirm(), { status: 409, code: CODES.NOT_PILOT })
+  assert.equal(tablesSnapshot(w.db), before)
+  // (c) unwired: refused 501 by name BEFORE any statement (no transaction is opened).
+  w.setRegistry({ sheet_id: SHEET })
+  w.db.log.length = 0
+  await expectError(reconfirm({ pilotWithin: undefined }), { status: 501, code: CODES.STORE_UNAVAILABLE, reason: 'pilot_read_within' })
+  assert.equal(w.db.log.length, 0, 'no statement')
+  assert.equal(tablesSnapshot(w.db), before)
+  // (d) a pilot read that FAILS is never "not pilot": it propagates, nothing persisted.
+  const failure = Object.assign(new Error('synthetic pilot read failure'), { code: '08006' })
+  await assert.rejects(reconfirm({ pilotWithin: async () => { throw failure } }), (error) => error === failure || (error && error.code !== CODES.NOT_PILOT))
+  assert.equal(tablesSnapshot(w.db), before)
+  // (e) the marker back: the same re-confirm commits (one bump, revision 2), the read answered `enabled`.
+  const done = await reconfirm()
+  assert.equal(done.revision, 2)
+  assert.equal(w.bump.calls.length, bumpsBefore + 1)
+  assert.equal(rowsOf(w, 'continuation')[0].status, 'active')
+  assert.deepEqual(w.pilotReads.slice(readsBefore), [false, false, true])
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-change-plan-store.test.cjs', tests)

@@ -529,6 +529,10 @@ function installRoutes(behaviour: RouteBehaviour = {}): void {
     if (url.includes('/stock-preparation/preflight')) {
       return envelope(deploymentPreflightPayload())
     }
+    // 批次标识 BI-7 (R-65): the pull-batch settings read — the realistic default is the switch-off 404 (C6: invisible).
+    if (url.includes('/stock-preparation/pull-batch/settings')) {
+      return new Response(JSON.stringify({ ok: false, error: { code: 'STOCK_PREP_PULL_BATCH_SETTINGS_DISABLED' } }), { status: 404 })
+    }
     return envelope({})
   })
 }

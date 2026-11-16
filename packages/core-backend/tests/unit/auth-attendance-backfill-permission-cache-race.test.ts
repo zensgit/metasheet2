@@ -28,8 +28,8 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-// The cache-hit counts below assume the default permission-cache TTL, which rbac/service.ts reads once at
-// import. Pin it so a shell override (RBAC_CACHE_TTL_MS=0 disables the cache) cannot change them.
+// Pin the historical default TTL at import. Authorization lists no longer honor it. If a
+// process-local memo is reintroduced, these read counts fail while the TTL is still 60s.
 vi.hoisted(() => {
   process.env.RBAC_CACHE_TTL_MS = '60000'
 })
@@ -341,16 +341,16 @@ describe('attendance self-service backfill x permission-cache generation (real A
     expect(second.permissions).toEqual(STEADY_STATE_PERMISSIONS)
     expect(third.permissions).toEqual(STEADY_STATE_PERMISSIONS)
     // Steady state: every request still runs the backfill (the locked no-op re-insert), and none of them
-    // invalidates, so the victim's read is never retried and the third request is a cache hit.
+    // invalidates, so the victim's read is never retried. Each request reads committed permission codes.
     expect(fakeDb.count('role-insert')).toBe(3)
     expect(invalidationsOf('u-race-straddle')).toBe(0)
     expect(victimRetried).toBe(false)
-    expect(fakeDb.count('permission-codes')).toBe(2)
+    expect(fakeDb.count('permission-codes')).toBe(3)
     expect(fakeDb.heldRoles()).toEqual([ATTENDANCE_DEFAULT_ROLE_ID, STOCK_PREP_ADMIN_ROLE_ID])
     expect(fakeDb.unknownStatements()).toEqual([])
   })
 
-  it('steady state: sequential requests re-insert as a no-op, never invalidate, and read permissions once', async () => {
+  it('steady state: sequential requests re-insert as a no-op, never invalidate, and each request reads permissions', async () => {
     fakeDb.seed({
       userId: 'u-steady-sequential',
       roles: [STOCK_PREP_ADMIN_ROLE_ID, ATTENDANCE_DEFAULT_ROLE_ID],
@@ -366,7 +366,7 @@ describe('attendance self-service backfill x permission-cache generation (real A
 
     expect(fakeDb.count('role-insert')).toBe(5)
     expect(invalidationsOf('u-steady-sequential')).toBe(0)
-    expect(fakeDb.count('permission-codes')).toBe(1)
+    expect(fakeDb.count('permission-codes')).toBe(5)
     expect(fakeDb.unknownStatements()).toEqual([])
   })
 

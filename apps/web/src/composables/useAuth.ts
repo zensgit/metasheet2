@@ -13,6 +13,7 @@ import {
   parseJwtPayload,
   readStoredToken,
 } from './authPrincipal'
+import { adminAccessCapabilitiesState, reconcileAdminAccessCapabilities } from './adminAccessCapabilities'
 
 const USER_SNAPSHOT_KEYS = ['user_permissions', 'user_roles'] as const
 const TENANT_HINT_KEYS = ['tenantId', 'workspaceId'] as const
@@ -328,13 +329,14 @@ export function useAuth() {
     const roles = Array.from(new Set([...storedRoles, ...payloadRoles, ...singularRole]))
     const permissions = Array.from(new Set([...storedPermissions, ...payloadPermissions]))
     const email = typeof payload?.email === 'string' ? payload.email : ''
+    // Permission-snapshot marker only: the admin role, `*:*`, or `admin:all`.
+    // `users:write`, `roles:write`, and `permissions:write` stay ordinary codes,
+    // and `:write` still satisfies `:read` in the shared matcher. This flag is not
+    // live platform-admin authority; nav and requiresAdmin follow the capability endpoint.
     const isAdmin =
       roles.includes('admin') ||
       permissions.includes('*:*') ||
-      permissions.includes('admin:all') ||
-      permissions.includes('users:write') ||
-      permissions.includes('roles:write') ||
-      permissions.includes('permissions:write')
+      permissions.includes('admin:all')
 
     return {
       email,
@@ -535,7 +537,11 @@ export function useAuth() {
   }
 
   function hasAdminAccess(): boolean {
-    return getAccessSnapshot().isAdmin
+    // Live active DB authority only. Unknown (not loaded), a failed read, and an
+    // identity change all deny. A token role, `*:*`, or `admin:all` does not grant it.
+    reconcileAdminAccessCapabilities()
+    return adminAccessCapabilitiesState.loaded === true
+      && adminAccessCapabilitiesState.isPlatformAdmin === true
   }
 
   /**

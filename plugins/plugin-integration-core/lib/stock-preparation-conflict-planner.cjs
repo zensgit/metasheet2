@@ -10,6 +10,7 @@ const crypto = require('node:crypto')
 
 const {
   HUMAN_PRESERVED_FIELD_IDS,
+  MACHINE_WRITEBACK_FIELD_IDS,
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   normalizeStockPreparationTemplate,
 } = require('./stock-preparation-templates.cjs')
@@ -273,8 +274,15 @@ function fieldIdsByOwnership(template, ownership) {
   return template.fields.filter((field) => field.ownership === ownership).map((field) => field.id)
 }
 
+// R-71 ⑦.4 PR-4: a machine write-back column (MACHINE_WRITEBACK_FIELD_IDS, today `issueConfirmDate`) is
+// plm_system-owned but is NOT the refresh's to write, so it leaves the refresh band exactly as the RUN stamps
+// do — here and in derivePackAwarePlmWritableFields, the two derivations every write band is built from.
+function isOutsideRefreshBand(id) {
+  return RUN_FIELD_IDS.includes(id) || MACHINE_WRITEBACK_FIELD_IDS.includes(id)
+}
+
 function plmRefreshFieldIds(template) {
-  return fieldIdsByOwnership(template, 'plm_system').filter((id) => !RUN_FIELD_IDS.includes(id))
+  return fieldIdsByOwnership(template, 'plm_system').filter((id) => !isOutsideRefreshBand(id))
 }
 
 function fieldMapForTemplate(template) {
@@ -411,7 +419,7 @@ function derivePackAwarePlmWritableFields(input = {}) {
   const basePlm = templateFieldList
     .filter((field) => field.ownership === PACK_FIELD_OWNERSHIP_PLM)
     .map((field) => field.id)
-    .filter((id) => !RUN_FIELD_IDS.includes(id))
+    .filter((id) => !isOutsideRefreshBand(id))
 
   const packAware = input.installedFieldProperties !== undefined && input.installedFieldProperties !== null
   const installed = normalizeInstalledFieldProperties(input.installedFieldProperties)
@@ -1286,6 +1294,20 @@ function assertNoHumanFields(payload, humanFields, context) {
   }
 }
 
+// R-71 ⑦.4 PR-4: the same shape of wall for the machine write-back columns. They are already outside
+// `plmFields` (so `pickFields` cannot pick one), and this makes any OTHER road — a denormalization, an ext
+// mapping, a change-plan entry, a forged row — fail loudly instead of letting a refresh write the column.
+function assertNoMachineWritebackFields(payload, context) {
+  for (const field of MACHINE_WRITEBACK_FIELD_IDS) {
+    if (Object.prototype.hasOwnProperty.call(payload, field)) {
+      throw new StockPreparationConflictPlannerError(`${context} must not include machine write-back field ${field}`, {
+        field,
+        context,
+      })
+    }
+  }
+}
+
 function sameStringSet(left, right) {
   if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false
   const leftSet = new Set(left)
@@ -1346,6 +1368,7 @@ function makeAddDecision(row, runId, plannedAt, plmFields, humanFields) {
     ...runPatch(runId, plannedAt, DECISIONS.ADD),
   }
   assertNoHumanFields(record, humanFields, 'add record')
+  assertNoMachineWritebackFields(record, 'add record')
   return {
     decision: DECISIONS.ADD,
     idempotencyKey: row.idempotencyKey,
@@ -1360,6 +1383,7 @@ function makeUpdateDecision(row, existing, runId, plannedAt, plmFields, humanFie
     ...runPatch(runId, plannedAt, DECISIONS.UPDATE, JSON.stringify({ type: 'plm_system_refresh', changedFields: changed })),
   }
   assertNoHumanFields(patch, humanFields, 'update patch')
+  assertNoMachineWritebackFields(patch, 'update patch')
   return {
     decision: DECISIONS.UPDATE,
     idempotencyKey: row.idempotencyKey,
@@ -1389,6 +1413,7 @@ function makeChangePlanUpdateDecision(key, entry, runId, plannedAt, humanFields,
   for (const fieldId of changed) patch[fieldId] = entry.writeFields[fieldId].after
   Object.assign(patch, runPatch(runId, plannedAt, DECISIONS.UPDATE, JSON.stringify({ type: CHANGE_PLAN_UPDATE_TYPE, changePlanId, changedFields: changed })))
   assertNoHumanFields(patch, humanFields, 'change plan patch')
+  assertNoMachineWritebackFields(patch, 'change plan patch')
   return {
     decision: DECISIONS.UPDATE,
     idempotencyKey: key,
@@ -1490,6 +1515,7 @@ function makeInactiveDecision(existing, runId, plannedAt, humanFields) {
     ...runPatch(runId, plannedAt, DECISIONS.INACTIVE, JSON.stringify({ type: 'missing_from_plm' })),
   }
   assertNoHumanFields(patch, humanFields, 'inactive patch')
+  assertNoMachineWritebackFields(patch, 'inactive patch')
   return {
     decision: DECISIONS.INACTIVE,
     idempotencyKey: existing.idempotencyKey,
@@ -1996,6 +2022,7 @@ module.exports = {
     anonymousRowErrorIdentity,
     anonymousRowIdentity,
     assertNoHumanFields,
+    assertNoMachineWritebackFields,
     changedFields,
     denormalizedPlmFields,
     withDenormalizedPlmFields,
@@ -2013,6 +2040,7 @@ module.exports = {
     normalizeIsoTime,
     normalizeComparableValueForField,
     plmRefreshFieldIds,
+    isOutsideRefreshBand,
     sameStringSet,
     stableFingerprint,
     valuesEqual,

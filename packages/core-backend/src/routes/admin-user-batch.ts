@@ -2,8 +2,10 @@ import type { Request, Response, Router } from 'express'
 import * as bcrypt from 'bcryptjs'
 import * as crypto from 'crypto'
 import { auditLog } from '../audit/audit'
+import { ATTENDANCE_SELF_SERVICE_NAMESPACE } from '../auth/attendanceSelfServiceBackfill'
 import { claimNonEmptyLoginAliasesOrThrow } from '../auth/login-alias-service'
 import { revokeUserSessions } from '../auth/session-revocation'
+import { assertPendingUserCannotBeActivatedViaGenericStatusApi, PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE } from '../auth/user-activation'
 import {
   countLivePlatformAdmins,
   isLastSignInPlatformAdmin,
@@ -33,6 +35,7 @@ import {
   disableNamespaceAdmissionsWithoutRoles,
   listRoleNamespaces,
   lockNamespaceAdmissionWrites,
+  writeUserNamespaceAdmission,
 } from '../rbac/namespace-admission'
 import { assignUserRoles, unassignUserRoles } from '../rbac/role-assignment'
 import { invalidateUserPerms, isAdmin as isRbacAdmin } from '../rbac/service'
@@ -81,17 +84,21 @@ async function loadKnownUsers(ids: string[], emails: string[]): Promise<KnownBat
     id: string
     email: string | null
     name: string | null
-    role: string
+    role: string | null
     department: string | null
     is_active: boolean
+    activation_status: string | null
     deleted_at: string | null
     purged_at: string | null
-    is_platform_admin: boolean
+    has_admin_authority: boolean
   }>(
-    `SELECT id, email, name, role, department, is_active, deleted_at, purged_at,
-            (COALESCE(is_admin, FALSE) IS TRUE OR role = 'admin' OR EXISTS (
-              SELECT 1 FROM user_roles ur WHERE ur.user_id = users.id AND ur.role_id = 'admin'
-            )) AS is_platform_admin
+    `SELECT id, email, name, role, department, is_active, activation_status, deleted_at, purged_at,
+            (
+              role = 'admin'
+              OR EXISTS (
+                SELECT 1 FROM user_roles ur WHERE ur.user_id = users.id AND ur.role_id = 'admin'
+              )
+            ) AS has_admin_authority
      FROM users
      WHERE id = ANY($1::text[])
         OR lower(email) = ANY($2::text[])`,
@@ -104,9 +111,10 @@ async function loadKnownUsers(ids: string[], emails: string[]): Promise<KnownBat
     role: row.role,
     department: row.department,
     isActive: row.is_active,
+    activationStatus: row.activation_status,
     deletedAt: row.deleted_at ? String(row.deleted_at) : null,
     purgedAt: row.purged_at ? String(row.purged_at) : null,
-    isPlatformAdmin: row.is_platform_admin === true,
+    hasAdminAuthority: row.has_admin_authority === true,
   }))
 }
 
@@ -369,6 +377,15 @@ async function createOne(adminUserId: string, row: PlannedCreateRow): Promise<Ba
           executor: client,
         })
       }
+      // Batch create has no admission checkbox. A missing attendance row still
+      // bootstraps attendance_employee on login, so persist the disabled intent.
+      await writeUserNamespaceAdmission({
+        userId,
+        namespace: ATTENDANCE_SELF_SERVICE_NAMESPACE,
+        enabled: false,
+        actorId: adminUserId,
+        source: 'admin_batch_create',
+      }, client)
     })
     invalidateUserPerms(userId)
     await auditItem(adminUserId, 'create', userId, {
@@ -414,12 +431,17 @@ async function applyUpdate(adminUserId: string, row: PlannedUpdate): Promise<Bat
     const mayDropSignInAdmin = (row.roleId !== undefined && row.roleId !== PLATFORM_ADMIN_ROLE_ID) || row.isActive === false
     await transaction(async (client) => {
       if (mayDropSignInAdmin) await lockPlatformAdminInvariant(client)
+      if (row.roleId) {
+        const held = await client.query('SELECT id FROM roles WHERE id = $1 FOR SHARE', [row.roleId])
+        if (!held.rows.length) throw Object.assign(new Error('角色不存在'), { code: 'ROLE_NOT_FOUND' })
+      }
       await lockNamespaceAdmissionWrites(client, row.userId)
       const lockedUser = (await lockUsersForAccessGraphWrite(client, [row.userId])).get(row.userId)
       if (!lockedUser) throw Object.assign(new Error('找不到该用户'), { code: 'USER_NOT_FOUND' })
       if (lockedUser.deletedAt || lockedUser.purgedAt) {
         throw Object.assign(new Error('该用户在回收站中'), { code: 'USER_IN_RECYCLE_BIN' })
       }
+      assertPendingUserCannotBeActivatedViaGenericStatusApi(lockedUser.activationStatus, row.isActive === true)
       if (mayDropSignInAdmin && await isLastSignInPlatformAdmin(client, row.userId)) {
         throw Object.assign(new Error('至少保留一名可登录的平台管理员'), { code: 'LAST_PLATFORM_ADMIN' })
       }
@@ -492,13 +514,20 @@ async function applyUpdate(adminUserId: string, row: PlannedUpdate): Promise<Bat
     }
   } catch (error) {
     const code = error && typeof error === 'object' && 'code' in error ? String((error as { code?: unknown }).code || 'UPDATE_FAILED') : 'UPDATE_FAILED'
+    const message = code === 'LAST_PLATFORM_ADMIN'
+      ? '至少保留一名可登录的平台管理员'
+      : code === 'ROLE_NOT_FOUND'
+        ? '角色不存在'
+        : code === PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE && error instanceof Error
+          ? error.message
+          : '更新失败'
     return {
       index: row.index,
       ok: false,
       email: row.email,
       userId: row.userId,
       code,
-      message: code === 'LAST_PLATFORM_ADMIN' ? '至少保留一名可登录的平台管理员' : '更新失败',
+      message,
       changes: row.changes,
     }
   }
@@ -547,6 +576,12 @@ async function setActive(adminUserId: string, userId: string, isActive: boolean,
     const lockedUser = lockedUsers.get(userId)
     if (!lockedUser) return null
     if (lockedUser.deletedAt || lockedUser.purgedAt) return { email: null, recycled: true as const }
+    try {
+      assertPendingUserCannotBeActivatedViaGenericStatusApi(lockedUser.activationStatus, isActive)
+    } catch (error) {
+      if ((error as { code?: string }).code !== PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE) throw error
+      return { email: lockedUser.email, pendingActivation: (error as Error).message }
+    }
     if (!isActive && await isLastSignInPlatformAdmin(client, userId)) {
       return { email: lockedUser.email, lastAdmin: true as const }
     }
@@ -570,6 +605,9 @@ async function setActive(adminUserId: string, userId: string, isActive: boolean,
   }
   if ('recycled' in updated) {
     return { index, ok: false, email: null, userId, code: 'USER_IN_RECYCLE_BIN', message: '该用户在回收站中，请先恢复' }
+  }
+  if ('pendingActivation' in updated) {
+    return { index, ok: false, email: updated.email, userId, code: PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE, message: updated.pendingActivation }
   }
   if ('lastAdmin' in updated) {
     return { index, ok: false, email: updated.email, userId, code: 'LAST_PLATFORM_ADMIN', message: '至少保留一名可登录的平台管理员' }

@@ -92,6 +92,27 @@ export async function lockUsersForAccessGraphWrite(
   return lockedUsers
 }
 
+export class AccessGraphUserUnavailableError extends Error {
+  constructor(public readonly code: 'NOT_FOUND' | 'USER_IN_RECYCLE_BIN') {
+    super(code === 'NOT_FOUND' ? 'User not found' : '账号在回收站中，请先恢复后再修改权限')
+    this.name = 'AccessGraphUserUnavailableError'
+  }
+}
+
+/** The caller holds the transaction through the dependent access writes. */
+export async function lockVisibleUsersForAccessGraphWrite(
+  client: AccessGraphTransactionClient,
+  userIds: string[],
+): Promise<Map<string, LockedAccessGraphUser>> {
+  const locked = await lockUsersForAccessGraphWrite(client, userIds)
+  for (const userId of normalizeUserIds(userIds)) {
+    const user = locked.get(userId)
+    if (!user) throw new AccessGraphUserUnavailableError('NOT_FOUND')
+    if (user.deletedAt || user.purgedAt) throw new AccessGraphUserUnavailableError('USER_IN_RECYCLE_BIN')
+  }
+  return locked
+}
+
 export async function supersedeDeprovisionEvidenceForAccessGraphWrite(
   client: AccessGraphTransactionClient,
   options: {

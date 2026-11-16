@@ -1750,6 +1750,37 @@ async function theBoardCarriesTheRefreshStateAndUnionsTheOpenHolds() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// B-PB1 — 批次标识 BI-1b (review MF-5): THE PULL-BATCH STANZA NEVER FAILS THE BOARD
+// ---------------------------------------------------------------------------
+//
+// The status lib's board read is fail-soft on its own, so the board's catch (readPullBatchStanzaSoftly) is the
+// ONLY layer that catches a reader that throws — a deps closure that throws synchronously while the switch is on.
+// It answers the fixed fail-soft stanza and the board is 200; nothing of the throw reaches the body.
+async function aThrowingPullBatchStanzaReaderNeverFailsTheBoard() {
+  const status = require(path.join(LIB, 'stock-preparation-pull-batch-status.cjs'))
+  const original = status.readPullBatchBoardStanza
+  const switchBefore = process.env.STOCK_PREP_PULL_BATCH_ENABLED
+  let asked = 0
+  status.readPullBatchBoardStanza = () => {
+    asked += 1
+    throw new Error('pull-batch stanza defect ZZPBSENTINELZZ')
+  }
+  process.env.STOCK_PREP_PULL_BATCH_ENABLED = 'true'
+  try {
+    const { routes } = mount()
+    const res = await callBoard(routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200, `B-PB1: a throwing stanza reader does not fail the board — ${JSON.stringify(res.body)}`)
+    assert.equal(asked, 1, 'B-PB1: non-vacuous — the stanza reader was asked and threw synchronously')
+    assert.deepEqual({ ...res.body.data.pullBatch }, { enabled: true, ready: false, latest: null, batchCount: null, paused: 'ledger_unreadable' })
+    assert.equal(JSON.stringify(res.body).includes('ZZPBSENTINELZZ'), false, 'B-PB1: nothing of the throw is echoed')
+  } finally {
+    status.readPullBatchBoardStanza = original
+    if (switchBefore === undefined) delete process.env.STOCK_PREP_PULL_BATCH_ENABLED
+    else process.env.STOCK_PREP_PULL_BATCH_ENABLED = switchBefore
+  }
+}
+
 async function main() {
   await onlyTheOperatorTierReachesTheBoard()
   await anotherTenantsProjectIsIndistinguishableFromNoProject()
@@ -1769,6 +1800,7 @@ async function main() {
   await lastChangedFromPlmIsNeverReportedFromATruncatedScan()
   await oneProjectsNumbersAreReadOutOfASheetThatHoldsMany()
   await theBoardRefusesBeforeItsAuditActionCanBeStored()
+  await aThrowingPullBatchStanzaReaderNeverFailsTheBoard()
   console.log('✓ stock-preparation-project-board')
 }
 

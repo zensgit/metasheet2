@@ -408,6 +408,72 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     path: '/api/integration/stock-preparation/projects/:projectNo/target/manual-rows',
     control: 'stock-prep-project-manual-rows-set',
   }),
+  // 批次标识 BI-1b (R-65) — byte-equal to the plugin manifest's pull-batch status row. `control: null`: no control renders
+  // this ADMIN read yet (BI-3 / BI-7 give it one), so F-04 does not pair it.
+  Object.freeze({
+    capability: 'projectTarget.pullBatchRead',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch',
+    control: null,
+  }),
+  // 批次标识 BI-7 (R-65) — byte-equal to the plugin manifest's three pull-batch settings rows (ADMIN). Their controls
+  // live on 数据来源与体检's settings panel and render only after the read answered 200 (404 while a switch is off, C6);
+  // alignment asserted in apps/web/tests/StockPreparationPullBatchSettingsPanel.spec.ts (PBS-ALIGN).
+  Object.freeze({
+    capability: 'pullBatch.settingsRead',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/pull-batch/settings',
+    control: 'stock-prep-pull-batch-settings-status',
+  }),
+  Object.freeze({
+    capability: 'pullBatch.settingsSet',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/pull-batch/settings',
+    control: 'stock-prep-pull-batch-settings-set',
+  }),
+  Object.freeze({
+    capability: 'projectTarget.pullBatchSettingsSet',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch/settings',
+    control: 'stock-prep-project-pull-batch-settings-set',
+  }),
+  // 批次标识 BI-2 (R-65) — byte-equal to the plugin manifest's install row. `control: null`: there is no web install control
+  // (design §7.2), so F-04 does not pair it.
+  Object.freeze({
+    capability: 'projectTarget.pullBatchInstall',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch',
+    control: null,
+  }),
+  // 备料分批拉取第一期 step 6d-2a (S6-6; R-91) — byte-equal to the plugin manifest's three doubled-sheet repair rows
+  // (preview / execute, the values-free fills report, the run list). All ADMIN; all 404 while the repair switch is off.
+  // `control: null`: there is no web control for a repair (it runs under the owner's runbook), so F-04 does not pair them.
+  Object.freeze({
+    capability: 'projectTarget.sheetRepair',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/sheet-repair',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'projectTarget.sheetRepairFillsReport',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/sheet-repair/fills-report',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'projectTarget.sheetRepairRuns',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/sheet-repair/runs',
+    control: null,
+  }),
   // 备料分批拉取第一期 step 4 PR-4 (R-59) — byte-equal to the plugin manifest's six refresh rows: the puller's
   // private hold page, the evidence behind a hold, a relationship's detail, confirm / 「暂不处理」 / end. All
   // PULL tier. PR-7 (R-62) assigned their control ids: they live on 「拉取待确认」
@@ -455,27 +521,85 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     path: '/api/integration/stock-preparation/projects/:projectNo/refresh/continuations/:id/end',
     control: 'stock-prep-refresh-end',
   }),
-  // 备料分批拉取第一期 step 5 PR-8 (register R-63): the change plan (page / confirm / review), PULL tier, no control
-  // until PR-9 — byte-equal to the plugin manifest (F-01).
+  // 备料分批拉取第一期 step 5 PR-8 (register R-63): the change plan (page / confirm / review), PULL tier; the controls
+  // land with the 「变更计划」 / 「变更复核」 sections of 「拉取待确认」 in PR-9 (R-77 ⑩) — byte-equal to the plugin
+  // manifest (F-01).
   Object.freeze({
     capability: 'refresh.changePlan',
     code: STOCK_PREP_PULL,
     method: 'GET',
     path: '/api/integration/stock-preparation/projects/:projectNo/refresh/change-plans/current',
-    control: null,
+    control: 'stock-prep-refresh-change-plan',
   }),
   Object.freeze({
     capability: 'refresh.changePlanConfirm',
     code: STOCK_PREP_PULL,
     method: 'POST',
     path: '/api/integration/stock-preparation/projects/:projectNo/refresh/change-plans/confirm',
-    control: null,
+    control: 'stock-prep-refresh-change-plan-confirm',
   }),
   Object.freeze({
     capability: 'refresh.reviewComplete',
     code: STOCK_PREP_PULL,
     method: 'POST',
     path: '/api/integration/stock-preparation/projects/:projectNo/refresh/change-reviews/complete',
+    control: 'stock-prep-refresh-change-review-complete',
+  }),
+  // 备料分批拉取第一期 step 6a-2 (S6-2; step-6 design §3.5, §3.8, §5.1; register R-91) — THE RECOVERY of an unfinished
+  // execution: the values-free executions list and the verify-and-close (PULL tier: the puller recovers with their own
+  // account, G1), and the runbook escape close-unverified (ADMIN tier, owner runbook). Step 6a-3 (S6-3) assigned the
+  // control ids: they live on 「拉取待确认」's recovery card (StockPreparationRefreshRecoveryCard.vue).
+  Object.freeze({
+    capability: 'refresh.executions',
+    code: STOCK_PREP_PULL,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/executions',
+    control: 'stock-prep-refresh-executions',
+  }),
+  Object.freeze({
+    capability: 'refresh.recover',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/executions/:executionId/recover',
+    control: 'stock-prep-refresh-recover',
+  }),
+  Object.freeze({
+    capability: 'refresh.closeUnverified',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/executions/:executionId/close-unverified',
+    control: 'stock-prep-refresh-close-unverified',
+  }),
+  // 备料分批拉取第一期 step 6d-1b (S6-5; step-6 design §6.5; register R-91) — THE DOUBLED-SHEET CENSUS and THE REMNANT
+  // ACKNOWLEDGEMENT, all ADMIN: the census answers objectId and (the project form) the PRIVATE component handles, and an
+  // acknowledgement exempts a remnant from readiness v5 — recorded on site only on the customer's Q1 answer relayed by
+  // the owner. `control: null` is deliberate: S6-5 ships no web page (the runbook drives these routes).
+  Object.freeze({
+    capability: 'projectTarget.census',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/project-targets/census',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'projectTarget.censusRead',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/census',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'projectTarget.remnantAcknowledge',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/remnant-acknowledgements',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'projectTarget.remnantRevoke',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/remnant-acknowledgements/:acknowledgementId/revoke',
     control: null,
   }),
   Object.freeze({

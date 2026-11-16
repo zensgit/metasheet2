@@ -123,6 +123,14 @@
                 class="meta-log-viewer__step-reason"
                 data-field="step-reason"
               >{{ stepOutputView(step).reason }}</div>
+              <!-- R-69 1b-iii: one values-free line per project unit (configured project number, outcome, reason, counts). -->
+              <ul v-if="rijStepView(step)?.units.length" class="meta-log-viewer__step-units" data-field="step-units">
+                <li
+                  v-for="(unit, unitIdx) in rijStepView(step)?.units ?? []"
+                  :key="unitIdx"
+                  data-field="step-unit"
+                >{{ unit.projectNo ? `${unit.projectNo}: ` : '' }}{{ unit.text }}{{ unit.counts ? ` · ${unit.counts}` : '' }}</li>
+              </ul>
               <!-- 客户反馈 2026-10-21 item 1 (review round 1): the log names no recipient; who was skipped is in the
                    rule's 钉钉个人消息投递记录 — one click away, opened on 跳过（未绑定）. -->
               <MtButton
@@ -162,6 +170,11 @@ import {
   supportDownloadFailed,
   type AutomationStepOutputView,
 } from '../utils/meta-automation-labels'
+import {
+  RUN_INTEGRATION_JOB_ACTION_TYPE,
+  runIntegrationJobStepView,
+  type RunIntegrationJobStepView,
+} from '../runIntegrationJobAuthoring'
 import {
   redactString,
   summarizeStepError,
@@ -211,7 +224,16 @@ function logStatusLabel(status: string): string {
 }
 
 function stepOutputView(step: AutomationStepResult): AutomationStepOutputView {
+  // R-69 1b-iii: run_integration_job reads as a values-free sentence (outcome + reason); its output JSON is never
+  // rendered raw (each unit's scopeKey carries the tenant id). The per-project lines come from rijStepView().
+  const rij = rijStepView(step)
+  if (rij) return { reason: rij.text, output: null }
   return automationStepOutputView(step.output, isZh.value)
+}
+
+function rijStepView(step: AutomationStepResult): RunIntegrationJobStepView | null {
+  if (step.actionType !== RUN_INTEGRATION_JOB_ACTION_TYPE) return null
+  return runIntegrationJobStepView(step.output, isZh.value)
 }
 
 function showsPersonDeliveriesLink(step: AutomationStepResult): boolean {
@@ -219,6 +241,8 @@ function showsPersonDeliveriesLink(step: AutomationStepResult): boolean {
 }
 
 function stepErrorText(step: AutomationStepResult): string {
+  // R-69 1b-iii: the executor's error line repeats the same outcome/reason codes in English; the sentence above says it.
+  if (rijStepView(step)) return ''
   return summarizeStepError(automationStepErrorText(step.error, step.output, isZh.value))
 }
 

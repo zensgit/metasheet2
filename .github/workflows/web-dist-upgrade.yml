@@ -1,0 +1,64 @@
+name: Web dist upgrade compatibility
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
+    paths:
+      - 'scripts/ops/*web-dist*'
+      - 'scripts/ops/*onprem-package*'
+      - '.github/workflows/web-dist-upgrade.yml'
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publishers:
+    name: Web dist upgrade (${{ matrix.executor }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            executor: bash
+          - os: windows-latest
+            executor: powershell
+          - os: windows-latest
+            executor: pwsh
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+      - name: Test helper and execute Linux publisher
+        if: runner.os == 'Linux'
+        shell: bash
+        run: node --test scripts/ops/web-dist-retain-assets.test.mjs scripts/ops/attendance-onprem-publish-web-dist.test.mjs
+      - name: Test helper and execute Windows publisher in the selected shell
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WEB_DIST_TEST_SHELL: ${{ matrix.executor }}
+        run: |
+          # Process-only CI setting, inherited by the child publisher. No host policy changes.
+          $env:PSExecutionPolicyPreference = 'Bypass'
+          if ($env:WEB_DIST_TEST_SHELL -eq 'powershell') {
+            $env:WEB_DIST_TEST_POWERSHELL = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+            $expectedMajor = 5
+          } else {
+            $env:WEB_DIST_TEST_POWERSHELL = @(Get-Command pwsh -CommandType Application -ErrorAction Stop)[0].Source
+            $expectedMajor = 7
+          }
+          $major = & $env:WEB_DIST_TEST_POWERSHELL -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.Major'
+          if ($LASTEXITCODE -ne 0 -or [int]$major -ne $expectedMajor) { throw 'Unexpected publisher test shell' }
+          node --test scripts/ops/web-dist-retain-assets.test.mjs scripts/ops/attendance-onprem-publish-web-dist.test.mjs scripts/ops/web-dist-upgrade-inplace.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

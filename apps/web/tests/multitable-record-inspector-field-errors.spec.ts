@@ -110,19 +110,22 @@ describe('useMultitableGrid.patchCell — returns its own GridPatchFailure (PR-B
     })
   })
 
-  it('same-field requests are not serialized: both reach fetch before either response settles', async () => {
+  it('same-field requests of one record go one at a time: the second waits for the first answer, and each returns its own failure', async () => {
     const pending: Array<(response: Response) => void> = []
     const fetchFn = vi.fn(() => new Promise<Response>(resolve => { pending.push(resolve) }))
     const grid = gridWith(fetchFn)
     const first = grid.patchCell('r1', 'f1', 'first', 1)
     const second = grid.patchCell('r1', 'f1', 'second', 1)
-    expect(fetchFn).toHaveBeenCalledTimes(2)
-    expect(pending).toHaveLength(2)
-    for (const resolve of pending) {
-      resolve(new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Rejected' } }), { status: 400 }))
-    }
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(grid.rows.value[0].data.f1).toBe('second')
+    pending[0](new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Rejected' } }), { status: 400 }))
+    await vi.waitFor(() => expect(fetchFn).toHaveBeenCalledTimes(2))
+    // The first one's rollback leaves the second one shown; the second one rolls back to the value before both.
+    expect(grid.rows.value[0].data.f1).toBe('second')
+    pending[1](new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Rejected' } }), { status: 400 }))
     const failures = await Promise.all([first, second])
-    expect(failures.map(failure => [failure?.fieldId, failure?.attemptedValue])).toEqual([['f1', 'first'], ['f1', 'second']])
+    expect(failures.map(failure => typeof failure === 'object' ? [failure?.fieldId, failure?.attemptedValue] : failure)).toEqual([['f1', 'first'], ['f1', 'second']])
+    expect(grid.rows.value[0].data.f1).toBe('before')
   })
 
   it('the shape /patch ACTUALLY sends today — 400 VALIDATION_ERROR with no fieldErrors — returns status+code and no map', async () => {
@@ -212,7 +215,7 @@ describe('useMultitableGrid.patchCell — returns its own GridPatchFailure (PR-B
     expect(failure).toBeNull()
   })
 
-  it('two in-flight patchCell calls whose rejections settle in the SAME flush each return THEIR OWN failure (per call — not a shared slot read after await)', async () => {
+  it('two patchCell calls of one record, the second waiting for the first, each return THEIR OWN failure (per call — not a shared slot read after await)', async () => {
     const settlers: Array<{ body: string; resolve: (response: Response) => void }> = []
     const fetchFn = vi.fn((input: string, init?: RequestInit) => {
       if (!input.startsWith('/api/multitable/patch')) throw new Error(`Unexpected request: ${input}`)
@@ -223,12 +226,13 @@ describe('useMultitableGrid.patchCell — returns its own GridPatchFailure (PR-B
     const first = grid.patchCell('r1', 'f1', 'way too long', 1)
     const second = grid.patchCell('r1', 'f2', 'nope', 1)
     await Promise.resolve()
-    expect(settlers).toHaveLength(2)
+    expect(settlers).toHaveLength(1)
     expect(settlers[0].body).toContain('"fieldId":"f1"')
-    expect(settlers[1].body).toContain('"fieldId":"f2"')
 
-    // Both responses land in one flush: f1 → 400 VALIDATION_ERROR, f2 → 403 FORBIDDEN.
+    // f1 → 400 VALIDATION_ERROR; f2, sent once it is answered, → 403 FORBIDDEN.
     settlers[0].resolve(new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Title is too long' } }), { status: 400 }))
+    await vi.waitFor(() => expect(settlers).toHaveLength(2))
+    expect(settlers[1].body).toContain('"fieldId":"f2"')
     settlers[1].resolve(new Response(JSON.stringify({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } }), { status: 403 }))
     const [firstFailure, secondFailure] = await Promise.all([first, second])
 

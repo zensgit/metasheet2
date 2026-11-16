@@ -315,6 +315,13 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
   // apps/web/tests/StockPreparationProjectTargetManualRows.spec.ts (MR-ALIGN).
   'stock-prep-project-manual-rows-status',
   'stock-prep-project-manual-rows-set',
+  // 批次标识 BI-7 (R-65): the pull-batch settings panel's status root, its 「保存默认值」 and the per-sheet edit live on
+  // 数据来源与体检 (StockPreparationPullBatchSettingsPanel.vue), ADMIN tier, rendered only once the server's settings read
+  // answered 200 (404 while a switch is off, ruling C6). Their alignment, both directions, per actor, is asserted there in
+  // apps/web/tests/StockPreparationPullBatchSettingsPanel.spec.ts (PBS-ALIGN).
+  'stock-prep-pull-batch-settings-status',
+  'stock-prep-pull-batch-settings-set',
+  'stock-prep-project-pull-batch-settings-set',
   // S3 (R-37): the project-level fields form and its 「保存」 live on 项目备料页's sheet-state line, the
   // 「刷新项目总览」 button on 今天要处理's project-sheets line — OPERATE, each rendered only once the
   // server answered with the switch on. Their alignment, both directions, per actor, is asserted on
@@ -343,6 +350,20 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
   'stock-prep-refresh-confirm',
   'stock-prep-refresh-continuation',
   'stock-prep-refresh-end',
+  // 备料分批拉取第一期 step 5 PR-9 (R-77 ⑩): the change-plan read, the change-plan confirm and the review complete live
+  // on the 「变更计划」 / 「变更复核」 sections of 「拉取待确认」 (StockPreparationRefreshChangePlan.vue) — never on this
+  // view. Their alignment, both directions, per actor, through the real shell, is asserted where they live:
+  // apps/web/tests/StockPreparationRefreshChangePlan.spec.ts (CP-ALIGN).
+  'stock-prep-refresh-change-plan',
+  'stock-prep-refresh-change-plan-confirm',
+  'stock-prep-refresh-change-review-complete',
+  // 备料分批拉取第一期 step 6a-3 (S6-3, R-91): the executions read, the verify-and-close and the admin's runbook close live on
+  // the recovery card of 「拉取待确认」 (StockPreparationRefreshRecoveryCard.vue), rendered only while the project is
+  // 失败待恢复 — never on this view. Their alignment, both directions, per actor, through the real shell, is asserted where
+  // they live: apps/web/tests/StockPreparationRefreshRecovery.spec.ts (RC-ALIGN).
+  'stock-prep-refresh-executions',
+  'stock-prep-refresh-recover',
+  'stock-prep-refresh-close-unverified',
 ])
 
   /** The control testids actually present in the DOM, restricted to the manifest's control set. */

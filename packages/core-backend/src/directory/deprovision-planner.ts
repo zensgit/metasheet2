@@ -87,6 +87,12 @@ export type PlannedEffect = {
    * row left a rehired never-granted person permanently locked out of OAuth.
    */
   grantRowCreated?: boolean
+  /**
+   * Legacy login-grant provider a `grant_changed` effect acts on: the `(provider, local_user_id)`
+   * row of `user_external_auth_grants`. Present on every `grant_changed` effect; absent on the
+   * other effect types.
+   */
+  provider?: string
   type: DeprovisionEffectType
   orgId?: string | null
   beforeActive: boolean
@@ -102,10 +108,15 @@ export type DirectoryDeprovisionPlanInput = {
   orgId: string
   /** Whether the source org membership is currently active. */
   orgMembershipActive: boolean
-  /** Whether DingTalk grant is currently enabled. */
-  dingtalkGrantEnabled: boolean
-  /** Whether ANY grant row exists (enabled or not) — drives the Rev 4.4 creation effect. */
-  dingtalkGrantRowExists: boolean
+  /**
+   * Legacy login-grant provider of the source integration. The grant leg reads and writes the
+   * `(loginGrantProvider, localUserId)` row only.
+   */
+  loginGrantProvider: string
+  /** Whether the `(loginGrantProvider, localUserId)` grant row is currently enabled. */
+  loginGrantEnabled: boolean
+  /** Whether ANY grant row exists for that provider (enabled or not) — drives the Rev 4.4 creation effect. */
+  loginGrantRowExists: boolean
   /**
    * No other active linked directory account exists anywhere. This gates the
    * grant/user effects only; the source-org membership is independently scoped.
@@ -157,14 +168,15 @@ export function planDirectoryDeprovision(input: DirectoryDeprovisionPlanInput): 
   }
 
   if (input.globallyClear) {
-    if (input.dingtalkGrantEnabled) {
+    if (input.loginGrantEnabled) {
       effects.push({
         type: 'grant_changed',
         orgId: null,
         beforeActive: true,
         afterActive: false,
+        provider: input.loginGrantProvider,
       })
-    } else if (!input.dingtalkGrantRowExists) {
+    } else if (!input.loginGrantRowExists) {
       // Rev 4.4: the OPS-01 deny mark IS an access-graph change (it blocks ensureGrant's
       // creation-only auto-grant on the person's next OAuth attempt) and therefore must be
       // EVIDENCED, or restore cannot undo it. before/after both false: nothing was enabled at
@@ -175,6 +187,7 @@ export function planDirectoryDeprovision(input: DirectoryDeprovisionPlanInput): 
         beforeActive: false,
         afterActive: false,
         grantRowCreated: true,
+        provider: input.loginGrantProvider,
       })
     }
     if (input.policy === 'mark_inactive' && input.isActive) {

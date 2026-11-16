@@ -97,6 +97,57 @@ export async function recordInvite(options: {
   }
 }
 
+export const INVITE_NOT_PENDING = 'INVITE_NOT_PENDING'
+
+/**
+ * Whether the ledger holds this exact token on a pending row. An invite token is usable only while
+ * that is true: a revoked row, an accepted row, or a row whose token has been replaced by a later one
+ * all answer false, and so does a ledger that cannot be read because its schema is missing.
+ */
+export async function isInviteTokenPending(inviteToken: string): Promise<boolean> {
+  try {
+    const result = await query<{ pending: boolean }>(
+      `SELECT TRUE AS pending
+       FROM user_invites
+       WHERE invite_token = $1
+         AND status = 'pending'
+       LIMIT 1`,
+      [inviteToken],
+    )
+    return result.rows.length > 0
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return false
+    throw error
+  }
+}
+
+export const INVITE_ACCOUNT_ALREADY_ONBOARDED = 'INVITE_ACCOUNT_ALREADY_ONBOARDED'
+export const INVITE_RESEND_CONFLICT = 'INVITE_RESEND_CONFLICT'
+
+/**
+ * SQL condition: the account an invite row belongs to has completed its first sign-in. That is so
+ * once the account has a recorded sign-in, or once any invite for it has been accepted. An account
+ * in that state is not sent another invite.
+ *
+ * `inviteRow` is the name the enclosing statement gives the `user_invites` row (a fixed identifier
+ * written at the call site, never request data). The read and the write of a resend both use this one
+ * condition.
+ */
+export function inviteAccountOnboardedSql(inviteRow: 'inv' | 'user_invites'): string {
+  return `(
+    EXISTS (
+      SELECT 1 FROM users onboarded_user
+      WHERE onboarded_user.id = ${inviteRow}.user_id
+        AND onboarded_user.last_login_at IS NOT NULL
+    )
+    OR EXISTS (
+      SELECT 1 FROM user_invites accepted_invite
+      WHERE accepted_invite.user_id = ${inviteRow}.user_id
+        AND accepted_invite.status = 'accepted'
+    )
+  )`
+}
+
 type InviteLedgerQueryClient = {
   query: <T extends InviteLedgerRow = InviteLedgerRow>(
     sql: string,

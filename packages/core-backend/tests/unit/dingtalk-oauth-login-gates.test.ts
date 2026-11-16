@@ -488,7 +488,7 @@ describe('dingtalk oauth login gates', () => {
       name: 'DingTalkLoginPolicyError',
       statusCode: 403,
       code: 'unlinked_enabled_local_user',
-      message: 'DingTalk account beta@example.com is not linked to an enabled local user',
+      message: 'DingTalk account is not linked to an enabled local user',
     })
   })
 
@@ -504,8 +504,34 @@ describe('dingtalk oauth login gates', () => {
       name: 'DingTalkLoginPolicyError',
       statusCode: 403,
       code: 'unlinked_local_user',
-      message: 'DingTalk account alpha@example.com is not linked to a local user',
+      message: 'DingTalk account is not linked to a local user',
     })
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('INSERT INTO users'))).toBe(false)
+  })
+
+  it.each([
+    ['strict grant mode', { DINGTALK_AUTH_REQUIRE_GRANT: '1', DINGTALK_AUTH_AUTO_LINK_EMAIL: '1' }, 'unlinked_enabled_local_user', 'DingTalk account is not linked to an enabled local user'],
+    ['auto-provision off', {}, 'unlinked_local_user', 'DingTalk account is not linked to a local user'],
+    ['auto-provision without an allowlist', { DINGTALK_AUTH_AUTO_PROVISION: '1' }, 'unlinked_local_user', 'DingTalk account is not linked to a local user'],
+  ])('an unlinked scan (%s) is refused with a message that carries no profile value', async (_label, env, code, message) => {
+    for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value)
+    const syntheticEmail = 'marker-unlinked@example.test'
+    clientMocks.fetchDingTalkCurrentUser.mockResolvedValue({
+      openId: 'open-unlinked',
+      unionId: 'union-unlinked',
+      nick: 'Synthetic Unlinked',
+      email: syntheticEmail,
+      mobile: '13900000077',
+      avatarUrl: '',
+    })
+    pgMocks.query.mockResolvedValue({ rows: [] })
+
+    const refusal = await exchangeCodeForUser('code-unlinked').catch((caught: unknown) => caught)
+    expect(refusal).toMatchObject({ name: 'DingTalkLoginPolicyError', statusCode: 403, code, message })
+    const text = String((refusal as Error).message)
+    for (const value of [syntheticEmail, '13900000077', 'union-unlinked', 'open-unlinked', 'Synthetic Unlinked']) {
+      expect(text).not.toContain(value)
+    }
     expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('INSERT INTO users'))).toBe(false)
   })
 

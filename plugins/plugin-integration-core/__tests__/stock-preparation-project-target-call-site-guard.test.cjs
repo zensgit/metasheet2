@@ -53,6 +53,8 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
+// R-69 1b-i: a delegating route handler's chain lives in the governed entry it calls; see the module.
+const { governedEntrySourceFor } = require('./support/governed-entry-source.cjs')
 
 const LIB = path.join(__dirname, '..', 'lib')
 // Comments stripped BEFORE scanning so prose can neither satisfy nor trip a check.
@@ -183,7 +185,8 @@ check('C-04 every ADR write route runs the resolved-target tenant wall after its
     const start = CODE.indexOf(`    async ${handler}(req, res) {`)
     assert.notEqual(start, -1, `${handler} exists`)
     const end = CODE.indexOf('\n    },', start)
-    const body = CODE.slice(start, end)
+    // R-69 1b-i: `tableActionDryRun` is read with the governed entry it delegates to.
+    const body = CODE.slice(start, end) + governedEntrySourceFor(CODE, handler)
     const lookupAt = body.indexOf('getTableAction(')
     const wallAt = body.indexOf('assertResolvedProjectTargetTenancy(')
     assert.notEqual(lookupAt, -1, `${handler}: has a lookup`)
@@ -233,7 +236,7 @@ check('C-06 (R1) the three snapshot-driven large-BOM routes refuse a stale job t
       const at = body.search(new RegExp(`assertLargeBomJobTargetMatchesProjectTarget\\(\\s*${escaped},`))
       assert.notEqual(at, -1, `${handler}: checks ${target} against the registry`)
       // ...before the field probe, the existing-row / foreign-row reads and the write gate.
-      for (const io of ['assertTargetFieldsExist(', 'assertTargetSheetHoldsNoForeignActiveRows(', 'readExistingStockPreparationRows(', 'assertStockPrepApplyAllowed(', 'createLargeBomCheckpointApplyJob(', 'runLargeBomCheckpointApplyJobChunk(']) {
+      for (const io of ['assertTargetFieldsExist(', 'assertTargetSheetHoldsNoForeignActiveRows(', 'readExistingStockPreparationRows(', 'assertStockPrepApplyAllowed(', 'createLargeBomCheckpointApplyJob(', 'runLargeBomCheckpointApplyJobChunk(', 'prepareLargePlanPullBatch(', 'assertLargeApprovePullBatch(']) {
         const ioAt = body.indexOf(io)
         if (ioAt !== -1) assert.ok(at < ioAt, `${handler}: the staleness check on ${target} precedes ${io}`)
       }
@@ -497,6 +500,54 @@ check('C-14 (B4) the switch routes: READ = PULL gate, SET = ADMIN gate → switc
   for (const forbidden of ['.query(', 'UPDATE ', 'INSERT ', 'DELETE ']) {
     assert.ok(!LIB_CODE.includes(forbidden), `the switch library has no raw SQL (${forbidden})`)
   }
+})
+
+// C-15 (批次标识 BI-2, register R-65) BORN READY in the create handler: exactly one call, on the CREATE leg only — after the
+// packs are installed onto the just-provisioned sheet and BEFORE it is registered (no pull lane can resolve an
+// unregistered project, so the empty read is stable) — and the response key only when the birth answered; the replay
+// leg never births. The deps builder reads the switch FIRST and answers null while off (the create is then IO-identical).
+check('C-15 (BI-2) create: bornReadyBestEffort( lies after installPacks(createPlan and before store.create(; the replay leg has none; OFF answers null before any IO', () => {
+  const createStart = CODE.indexOf('    async stockPreparationProjectTargetCreate(req, res) {')
+  const body = CODE.slice(createStart, CODE.indexOf('\n    },', createStart))
+  assert.equal((body.match(/bornReadyBestEffort\(/g) || []).length, 1, 'one birth call')
+  const installAt = body.indexOf('installPacks(createPlan, provisioned.objectId)')
+  const birthAt = body.indexOf('pullBatchInstall.bornReadyBestEffort(pullBatchBirthDepsFor({ tenantId, projectNo, provisioned, createPlan, actor }))')
+  const registerAt = body.indexOf('registered = await store.create({')
+  assert.ok(installAt !== -1 && birthAt > installAt && birthAt < registerAt, 'after the pack install, before the register')
+  const replayStart = body.indexOf('const healed = await store.withActiveRowLocked(')
+  const replayEnd = body.indexOf('} else {', replayStart)
+  assert.ok(replayStart !== -1 && !body.slice(replayStart, replayEnd).includes('bornReady'), 'the replay leg never births')
+  assert.match(body, /\.\.\.\(provisioned && provisioned\.pullBatchBand \? \{ pullBatchBand: provisioned\.pullBatchBand \} : \{\}\),/, 'the answer key only when the birth answered')
+  const builderStart = CODE.indexOf('  function pullBatchBirthDepsFor(')
+  const builder = CODE.slice(builderStart, CODE.indexOf('\n  }\n', builderStart))
+  const switchAt = builder.indexOf('if (!pullBatchLanes.stockPrepPullBatchEnabled() || !provisioned) return null')
+  assert.ok(switchAt !== -1, 'the switch is read first')
+  for (const io of ['getMultitableRecordsApi(', 'stockPreparationPullBatchStore', 'pullBatchAuditWithinFor(', 'context.api']) {
+    const at = builder.indexOf(io)
+    assert.ok(at === -1 || at > switchAt, `${io} only after the switch`)
+  }
+})
+
+// C-16 (BI-2) THE INSTALL ROUTE: ADMIN gate → the project-sheets switch → the closed body (pure) → the pull-batch switch for
+// install / abort → the typed project number, all before any await; the WRITE lookup carries projectNo; the resolved
+// target is walled to the tenant; the handler never derives a tenant from the request.
+check('C-16 (BI-2) the install route: gate → switch → pure body → pull-batch switch → typed confirmation before any await; a write lookup walled to the tenant', () => {
+  const start = CODE.indexOf('    async stockPreparationProjectPullBatchInstall(req, res) {')
+  assert.notEqual(start, -1, 'the handler exists in the 4-space shape')
+  const body = CODE.slice(start, CODE.indexOf('\n    },', start))
+  const gateAt = body.indexOf('requireAccess(req, STOCK_PREP_ADMIN)')
+  const switchAt = body.indexOf('requireProjectSheetsEnabled()')
+  const bodyAt = body.indexOf('pullBatchInstall.normalizePullBatchInstallBody(requestBody(req))')
+  const offAt = body.indexOf("throw new HttpRouteError(409, 'STOCK_PREP_PULL_BATCH_DISABLED'")
+  const confirmAt = body.indexOf('body.confirmProjectNo !== projectNo')
+  const firstAwait = body.indexOf('await ')
+  assert.ok(gateAt === body.indexOf('const user = ') + 'const user = '.length, 'the ADMIN gate is the first statement')
+  assert.ok(gateAt < switchAt && switchAt < bodyAt && bodyAt < offAt && offAt < confirmAt, 'the order')
+  assert.ok(firstAwait > confirmAt, 'no IO before the switch, the body and the typed confirmation')
+  assert.match(body, /targetPurpose: 'write',/, 'a WRITE lookup')
+  assert.match(body, /await assertResolvedProjectTargetTenancy\(action, tenantId\)/, 'the tenant wall (awaited)')
+  assert.ok(!body.includes('resolveTenantId('), 'never a request-derived tenant')
+  assert.ok(!body.includes('resolveIntegrationStagingProjectId('), 'the staging project is derived in the deps helper, never inline')
 })
 
 if (failed) {
