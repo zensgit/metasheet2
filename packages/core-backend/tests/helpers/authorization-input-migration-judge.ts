@@ -75,7 +75,13 @@
  * and where it stands (`WrittenStatement`). It is still `unreadable`: the judge sets nothing aside;
  * the caller may set aside a statement it names exactly, never a kind of statement. Every literal of
  * a source is judged where it stands, whatever is done with it afterwards; a statement stands at the
- * top of its text only when that text is shown to reach what runs it unchanged (`Folded.direct`).
+ * top of its text only when its literal is passed, as written, in one of two syntactic shapes
+ * (`Folded.direct`). That is a shape of the literal, not a proof of what runs: the judge reads
+ * literals, not runtime values, so a runner wrapped or replaced (`.execute(wrap(db))`, a parameter
+ * reassigned, a helper called with a wrapping object, from this file or from another module) and
+ * SQL computed at run time are outside what it can see, here as for every migration on main. A
+ * caller that sets a statement aside therefore pins the whole content of the file as well (the
+ * digest of `authorization-input-migration-rules.ts`).
  */
 import path from 'node:path'
 import ts from 'typescript'
@@ -121,10 +127,11 @@ export type MigrationJudgment = Readonly<{
  * A substitution and a folded constant stay as the marks they are in the text, so neither is ever
  * equal to a name written out. Case and the inside of quoted text are kept as written.
  * `at` is where the statement stands: `text` at the top of one SQL text that is not assembled from
- * a `+` chain and that reaches what runs it unchanged (`Folded.direct`), `block` as a piece of a
- * dollar-quoted `DO` body of such a statement, and `other` anywhere else (the text of a dynamically
- * executed literal, a block inside one, any piece of an assembled text, a block inside a block, and
- * any text the source may change before it runs).
+ * a `+` chain and whose literal is passed as written in one of the two shapes of `Folded.direct`,
+ * `block` as a piece of a dollar-quoted `DO` body of such a statement, and `other` anywhere else
+ * (the text of a dynamically executed literal, a block inside one, any piece of an assembled text,
+ * a block inside a block, and any literal in another shape). `text` and `block` say how the literal
+ * is written and passed, not what the runner it is passed to does with it.
  */
 export type WrittenStatement = Readonly<{ text: string; written: string; at: 'text' | 'block' | 'other' }>
 
@@ -716,11 +723,13 @@ export function judgeInputWrite(table: string, verb: WriteVerb | string, tokens:
 
 /**
  * `concatenated`: the text was assembled from a `+` chain, so its substitutions are concatenation operands.
- * `direct`: the text is shown to reach what runs it unchanged. Set only for a whole SQL file, and for a
- * literal of a source in one of the two shapes `reachesRunnerUnchanged` admits; anything else (a member
- * call on the literal, a constant holding it, a template with a substitution, another tag, a helper
- * call, a conditional, an array) may change the text before it runs, so none of its statements stands
- * at the top of a text. Only `WrittenStatement.at` reads it.
+ * `direct`: the text is a whole SQL file, or a literal of a source passed as written in one of the two
+ * syntactic shapes `isPassedAsWrittenToRunner` admits. It is a shape of the literal and says nothing
+ * about the runner: the receiver of `.execute` or `.query` may itself be a wrapper that changes the
+ * text, which a literal judge cannot see. Anything else (a member call on the literal, a constant
+ * holding it, a template with a substitution, another tag, a helper call, a conditional, an array) is
+ * not one of the two shapes, so none of its statements stands at the top of a text. Only
+ * `WrittenStatement.at` reads it.
  */
 type Folded = Readonly<{ text: string; folds: readonly string[]; concatenated?: boolean; direct?: boolean }>
 
@@ -1460,17 +1469,20 @@ function judgeSource(file: string, source: string, sink: Sink): void {
   const isPlus = (node: ts.Node): node is ts.BinaryExpression => ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken
   const literalOf = (expression: ts.Expression): string | null => stringOf(expression)
   /**
-   * Whether the string literal or substitution-free template `literal` reaches what runs it
-   * unchanged, read from its parent alone and in exactly two shapes: the template of a `sql` tag,
-   * the one `sql` of the file imported by that name from kysely, that is run by calling `.execute`
-   * on it; and the first argument of a `.query` call on a name declared in the file only as a
-   * parameter. Anything else between the literal and what runs it may change the text: a member
-   * call on the literal (`.replace`, `.concat`, `.slice`, ...), a constant that holds it, another
-   * tag (`String.raw` among them), a helper call, a conditional, an array, parentheses or an
-   * assertion. Such a literal is still judged as before; none of its statements stands at the top
-   * of a text.
+   * Whether the string literal or substitution-free template `literal` is passed as written to a
+   * runner, read from its parent alone and in exactly two syntactic shapes: the template of a `sql`
+   * tag, the one `sql` of the file imported by that name from kysely, on which `.execute` is called;
+   * and the first argument of a `.query` call on a name declared in the file only as a parameter.
+   * The shape says nothing about the runner: the argument of `.execute`, or the parameter `.query`
+   * is called on, may be a wrapper that rewrites or extends the text (a parameter reassigned, a
+   * helper called with a wrapping object, from this file or from another module), and a literal
+   * judge cannot see that. Anything else between the literal and the runner is not one of the two
+   * shapes: a member call on the literal (`.replace`, `.concat`, `.slice`, ...), a constant that
+   * holds it, another tag (`String.raw` among them), a helper call, a conditional, an array,
+   * parentheses or an assertion. Such a literal is still judged as before; none of its statements
+   * stands at the top of a text.
    */
-  const reachesRunnerUnchanged = (literal: ts.StringLiteral | ts.NoSubstitutionTemplateLiteral): boolean => {
+  const isPassedAsWrittenToRunner = (literal: ts.StringLiteral | ts.NoSubstitutionTemplateLiteral): boolean => {
     const parent = literal.parent
     if (ts.isTaggedTemplateExpression(parent) && parent.template === literal) {
       const run = parent.parent
@@ -1552,7 +1564,7 @@ function judgeSource(file: string, source: string, sink: Sink): void {
       // may be the target of a write that has no text. The name of an input table is refused as text.
       const named = builderTable(node.text)
       if (named !== null && PARENTS.has(named)) sink.judgments.push({ line: lineOf(node), kind: 'literal', verdict: 'unreadable', detail: `names the cascade parent ${named} outside a call that is read`, inputWrite: false, table: named })
-      judgeText(node.text, [], node, false, reachesRunnerUnchanged(node))
+      judgeText(node.text, [], node, false, isPassedAsWrittenToRunner(node))
       return
     }
     if (ts.isTemplateExpression(node)) {

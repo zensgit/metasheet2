@@ -6,6 +6,7 @@
  * Green controls pin that the rules leave the repository's usual forms acceptable. Unless a case
  * says otherwise the file is a new migration and carries the compliant lock block.
  */
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -27,12 +28,15 @@ import {
   closureProblems,
   COMPLIANT_LOCK_BLOCK,
   D21_AUTHORIZATION_VERSION_MIGRATION,
+  D21_AUTHORIZATION_VERSION_MIGRATION_SHA256,
   D21_PINNED_TRIGGER_STATEMENTS,
   digestOfFiles,
   historicalMigrationFiles,
   isNewMigration,
+  migrationSourceDigest,
   pinnedStatementsSetAside,
 } from '../helpers/authorization-input-migration-rules'
+import type { PinnedStatementSet } from '../helpers/authorization-input-migration-rules'
 import { blankSqlComments, CASCADE_PARENT_TABLES, INPUT_TABLES } from '../helpers/authorization-input-scan'
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..', '..')
@@ -442,7 +446,20 @@ describe('the pinned trigger statements of the D21 migration (owner ruling 2026-
   ]
   const LAYOUT = [...DROPS, ...CREATES]
   const TEN = [...DROPS.map(() => DROP_PROBLEM), ...CREATES.map(() => CREATE_PROBLEM)]
-  const d21 = (blocks: readonly string[], file = D21) => checkNewMigration(file, up(...blocks), true).problems
+  /**
+   * The digest seam. No source synthesized here is the reviewed D21 content, so with the production
+   * sets none of them sets anything aside: `judgedAsReviewed` asserts that on every call (the same
+   * problems as with no pinned set). To keep testing the conditions that stand on top of the digest
+   * (exactly once, as written, where pinned, the verdict, the white space), it then judges the same
+   * source with the pinned set whose digest is that very source's, and returns that: what the other
+   * conditions alone decide.
+   */
+  const reviewedAs = (source: string): PinnedStatementSet[] => [{ ...D21_PINNED_TRIGGER_STATEMENTS, sha256: migrationSourceDigest(source) }]
+  const judgedAsReviewed = (source: string, file = D21) => {
+    expect(checkNewMigration(file, source, true).problems, 'a synthesized source is not the reviewed content').toEqual(checkNewMigration(file, source, true, AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS, []).problems)
+    return checkNewMigration(file, source, true, AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS, reviewedAs(source)).problems
+  }
+  const d21 = (blocks: readonly string[], file = D21) => judgedAsReviewed(up(...blocks), file)
   /** The ten blocks with the one at `index` replaced by `block` (or by several blocks). */
   const replaced = (index: number, ...blocks: string[]) => [...LAYOUT.slice(0, index), ...blocks, ...LAYOUT.slice(index + 1)]
   const USER_ROLES_CREATE = 5
@@ -451,9 +468,12 @@ describe('the pinned trigger statements of the D21 migration (owner ruling 2026-
   const USER_ROLES_CREATE_TEXT = `CREATE TRIGGER trg_user_roles_zz_authz_subject_version BEFORE INSERT OR UPDATE OR DELETE ON public.user_roles FOR EACH ROW EXECUTE FUNCTION ${SUBJECT_BUMP}('user_id')`
   const USER_ROLES_DROP_TEXT = 'DROP TRIGGER IF EXISTS trg_user_roles_zz_authz_subject_version ON public.user_roles'
 
-  it('the pinned set is pinned: one file, ten distinct statements, by count and by digest', () => {
+  it('the pinned set is pinned: one file, its reviewed content, ten distinct statements, by count and by digest', () => {
     expect(AUTHORIZATION_INPUT_PINNED_STATEMENT_SETS).toEqual([D21_PINNED_TRIGGER_STATEMENTS])
     expect(D21_PINNED_TRIGGER_STATEMENTS.file).toBe('packages/core-backend/src/db/migrations/zzzz20261106110500_add_authorization_version_rows.ts')
+    expect(D21_PINNED_TRIGGER_STATEMENTS.sha256).toBe('a7b1c9b2d8420b1e7999dff3da86786ae1b4c95ca8f7394eb5ae1fe8faefe105')
+    expect(D21_AUTHORIZATION_VERSION_MIGRATION_SHA256).toBe(D21_PINNED_TRIGGER_STATEMENTS.sha256)
+    expect(Object.isFrozen(AUTHORIZATION_INPUT_PINNED_STATEMENT_SETS) && Object.isFrozen(D21_PINNED_TRIGGER_STATEMENTS)).toBe(true)
     const statements = D21_PINNED_TRIGGER_STATEMENTS.statements
     expect(statements).toHaveLength(10)
     expect(new Set(statements.map((statement) => statement.text)).size).toBe(10)
@@ -461,13 +481,18 @@ describe('the pinned trigger statements of the D21 migration (owner ruling 2026-
     expect(digestOfFiles(statements.map((statement) => JSON.stringify(statement)))).toBe('f22a61a3115d68a082e5a18fa9dfa4482955cfa2efea5e07dbfdcb2da04fcd16')
   })
 
-  it('GREEN — exactly the ten statements under the pinned path, as the migration writes them or on one line with comments, set nothing else aside', () => {
+  it('RED — a synthesized file of exactly the ten under the pinned path is not the reviewed content: with the production sets it gives the ten problems', () => {
+    expect(checkNewMigration(D21, up(...LAYOUT), true).problems).toEqual(TEN)
+    expect(checkNewMigration(D21, up(...LAYOUT), true).problems).toEqual(checkNewMigration(D21, up(...LAYOUT), true, AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS, []).problems)
+  })
+
+  it('GREEN (digest seam) — exactly the ten statements under the pinned path, as the migration writes them or on one line with comments, set nothing else aside', () => {
     expect(d21(LAYOUT)).toEqual([])
     expect(d21([...CREATES, ...DROPS])).toEqual([])
     const compact = D21_PINNED_TRIGGER_STATEMENTS.statements.map((statement) =>
       statement.at === 'text' ? q(`${statement.text} -- pinned`) : q(`DO $$ ${statement.written.replace(/^BEGIN /, "BEGIN /* tolerant */ ")}; END IF; END $$`),
     )
-    expect(check(up(...compact), D21).problems).toEqual([])
+    expect(judgedAsReviewed(up(...compact))).toEqual([])
     // Anything else in the file is judged as before.
     expect(d21([...LAYOUT, sqlBlock("ALTER TABLE users ALTER COLUMN role SET DEFAULT 'admin'")])).toEqual(['unreadable ALTER TABLE: alters the sensitive column role'])
   })
@@ -610,11 +635,13 @@ describe('the pinned trigger statements of the D21 migration (owner ruling 2026-
   const CREATE_LITERAL = JSON.stringify(USER_ROLES_CREATE_TEXT)
   const USER_ROLES_DROP_BLOCK_TEXT = `DO $$ BEGIN IF to_regclass('public.user_roles') IS NOT NULL THEN ${USER_ROLES_DROP_TEXT}; END IF; END $$`
   // The judge reads every literal where it stands; what runs is what the source makes of it. A pinned
-  // text that reaches what runs it through anything that may change it is not the statement as
-  // written (round 2: `sql.raw(PINNED.replace('BEFORE', 'AFTER'))` set the ten aside and installed an
-  // AFTER trigger). Only a kysely `sql` template run with `.execute` and the first argument of
-  // `.query` on a parameter reach it unchanged; the case of parentheses shows that anything else is
-  // refused, even what changes nothing.
+  // text passed to a runner in any shape but two is not the statement as written (round 2:
+  // `sql.raw(PINNED.replace('BEFORE', 'AFTER'))` set the ten aside and installed an AFTER trigger).
+  // The two shapes are a kysely `sql` template on which `.execute` is called and the first argument
+  // of `.query` on a parameter; the case of parentheses shows that anything else is refused, even
+  // what changes nothing. The two shapes say nothing about the runner they pass the text to (a
+  // wrapped `db`, round 3): that is closed by the digest of the reviewed content, not by a shape
+  // (the describe block of the reviewed content below).
   const transformed: Array<[string, number, string[], string[]?]> = [
     ['sql.raw of the text with BEFORE replaced by AFTER', USER_ROLES_CREATE, [`await sql.raw(${CREATE_LITERAL}.replace('BEFORE', 'AFTER')).execute(db)`]],
     ['the text with the function name replaced', USER_ROLES_CREATE, [`await db.query(${CREATE_LITERAL}.replace('subject_authorization_version(', 'other_fn('))`]],
@@ -644,7 +671,7 @@ describe('the pinned trigger statements of the D21 migration (owner ruling 2026-
     ['a pinned drop block in a sql template that is not run with .execute', USER_ROLES_DROP, ['await sql.raw(sql`' + USER_ROLES_DROP_BLOCK_TEXT + "`.compile(db).sql.replace('IF EXISTS', '')).execute(db)"]],
   ]
   for (const [name, index, lines, problems = TEN] of transformed) {
-    it(`RED 9 — a pinned text reaching what runs it through ${name} is not the statement as written: nothing is set aside`, () => {
+    it(`RED 9 (digest seam) — a pinned text passed to its runner through ${name} is not the statement as written: nothing is set aside`, () => {
       const blocks = replaced(index, ...lines)
       expect(d21(blocks)).toEqual(problems)
       expect(d21(blocks)).toEqual(unpinned(blocks))
@@ -653,7 +680,7 @@ describe('the pinned trigger statements of the D21 migration (owner ruling 2026-
     })
   }
 
-  it('RED 9 — a `sql` tag that is not the kysely `sql`, or a kysely `sql` declared again in the file, is not a runner the text reaches unchanged', () => {
+  it('RED 9 (digest seam) — a `sql` tag that is not the kysely `sql`, or a kysely `sql` declared again in the file, is not one of the two shapes', () => {
     const body = LAYOUT.join('\n')
     const sources = [
       `import { sql } from './sql'\nexport async function up(db) {\n${body}\n}`,
@@ -663,11 +690,11 @@ describe('the pinned trigger statements of the D21 migration (owner ruling 2026-
       up("const sql = (strings) => db.query(strings[0].replace('BEFORE', 'AFTER'))", ...LAYOUT),
     ]
     for (const source of sources) {
-      expect(checkNewMigration(D21, source, true).problems, source.slice(0, 60)).toEqual(TEN)
-      expect(checkNewMigration(D21, source, true).problems).toEqual(checkNewMigration(D21, source, true, AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS, []).problems)
+      expect(judgedAsReviewed(source), source.slice(0, 60)).toEqual(TEN)
+      expect(judgedAsReviewed(source)).toEqual(checkNewMigration(D21, source, true, AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS, []).problems)
     }
     // With the kysely `sql` imported once the same body is the ten.
-    expect(checkNewMigration(D21, `import { sql } from 'kysely'\nexport async function up(db) {\n${body}\n}`, true).problems).toEqual([])
+    expect(judgedAsReviewed(`import { sql } from 'kysely'\nexport async function up(db) {\n${body}\n}`)).toEqual([])
   })
 
   // Every character JavaScript's `\s` matches but space, tab, line feed and carriage return. The judge
@@ -692,14 +719,20 @@ describe('the pinned trigger statements of the D21 migration (owner ruling 2026-
     })
   }
 
-  it('the set-aside reads every condition of a judgment: a pinned judgment that differs in any one of them leaves nothing set aside', () => {
+  it('the set-aside reads the digest and every condition of a judgment: a pinned judgment that differs in any one of them leaves nothing set aside', () => {
     const source = up(...LAYOUT)
     const judgments = judgeMigrationInputWrites(D21, source).judgments
-    expect(pinnedStatementsSetAside(D21, source, judgments).size).toBe(10)
-    expect(pinnedStatementsSetAside(NEW_TS, source, judgments).size).toBe(0)
+    expect(pinnedStatementsSetAside(D21, source, judgments, reviewedAs(source)).size).toBe(10)
+    expect(pinnedStatementsSetAside(NEW_TS, source, judgments, reviewedAs(source)).size).toBe(0)
     expect(pinnedStatementsSetAside(D21, source, judgments, []).size).toBe(0)
-    // The same judgments read from a source that holds a no-break space, even in a comment.
-    expect(pinnedStatementsSetAside(D21, `${source}\n// \u00a0`, judgments).size).toBe(0)
+    // The digest: the production set (this source is not the reviewed content), another digest, an empty one.
+    expect(pinnedStatementsSetAside(D21, source, judgments).size).toBe(0)
+    expect(pinnedStatementsSetAside(D21, source, judgments, reviewedAs(`${source}\n`)).size).toBe(0)
+    expect(pinnedStatementsSetAside(D21, source, judgments, [{ ...D21_PINNED_TRIGGER_STATEMENTS, sha256: '' }]).size).toBe(0)
+    expect(pinnedStatementsSetAside(D21, source, judgments, [{ ...D21_PINNED_TRIGGER_STATEMENTS, sha256: migrationSourceDigest(source).toUpperCase() }]).size).toBe(0)
+    // The same judgments read from a source that holds a no-break space, even in a comment, whose digest is the one of the set.
+    const nbsp = `${source}\n// \u00a0`
+    expect(pinnedStatementsSetAside(D21, nbsp, judgments, reviewedAs(nbsp)).size).toBe(0)
     const target = judgments.find((judgment) => judgment.statement?.text === USER_ROLES_CREATE_TEXT)!
     const variants: Array<Partial<MigrationJudgment>> = [
       { verdict: 'raising' },
@@ -716,9 +749,113 @@ describe('the pinned trigger statements of the D21 migration (owner ruling 2026-
     ]
     for (const variant of variants) {
       const mutated = judgments.map((judgment) => (judgment === target ? { ...judgment, ...variant } : judgment))
-      expect(pinnedStatementsSetAside(D21, source, mutated).size, JSON.stringify(variant)).toBe(0)
+      expect(pinnedStatementsSetAside(D21, source, mutated, reviewedAs(source)).size, JSON.stringify(variant)).toBe(0)
     }
   })
+})
+
+describe('the reviewed content of the D21 migration: the digest gate (owner ruling 2026-11-16 「按建议，A」)', () => {
+  // What the gate guarantees: the ten pinned statements are set aside only in the reviewed D21 file,
+  // byte-identical modulo CRLF; any other content, at the pinned path or at any other, gives the ten
+  // problems, as on main. What it does not: the judge reads literals, not what runs, so a runner
+  // wrapped or replaced from another module (the D21 helpers imported into another migration) and
+  // computed SQL there stay outside what a single-file literal judge can see, as for every migration.
+  const D21 = D21_AUTHORIZATION_VERSION_MIGRATION
+  /** The D21 migration at Y5a 3e597a2f5 (blob f60b0a2ec8f4); a Windows checkout of the fixture has CRLF line ends. */
+  const FIXTURE = path.resolve(__dirname, '..', 'fixtures', 'authorization-input-d21-migration-3e597a2f5.ts.txt')
+  const REAL_LF = fs.readFileSync(FIXTURE, 'utf8').replace(/\r\n/g, '\n')
+  const REAL_CRLF = REAL_LF.replace(/\n/g, '\r\n')
+  const CREATE_PROBLEM = 'unreadable CREATE TRIGGER: defines an object over an input table'
+  const DROP_PROBLEM = 'unreadable DROP TRIGGER: statement kind is not on the safe list'
+  /** The problems of the real file with no pinned set, in the order it writes the statements: the five drops, then the five creates. */
+  const TEN_REAL = [...Array<string>(5).fill(DROP_PROBLEM), ...Array<string>(5).fill(CREATE_PROBLEM)]
+  const withPins = (source: string, file = D21) => checkNewMigration(file, source, true).problems
+  const unpinned = (source: string, file = D21) => checkNewMigration(file, source, true, AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS, []).problems
+  /** `source` with the one occurrence of `find` replaced. */
+  const once = (source: string, find: string, replace: string) => {
+    expect(source.split(find).length - 1, find).toBe(1)
+    return source.replace(find, () => replace)
+  }
+  /** `source` with `edit` applied to the body of the function `name` only. */
+  const inFunction = (source: string, name: string, edit: (body: string) => string) => {
+    const start = source.indexOf(`async function ${name}(`)
+    const end = source.indexOf('\n}\n', start)
+    expect(start > 0 && end > start, name).toBe(true)
+    const body = edit(source.slice(start, end))
+    expect(body, name).not.toBe(source.slice(start, end))
+    return source.slice(0, start) + body + source.slice(end)
+  }
+  /** Code that builds a text from character codes: the judge sees no literal of it. */
+  const codes = (text: string) => `String.fromCharCode(${[...text].map((ch) => ch.charCodeAt(0)).join(', ')})`
+  const AFTER_IMPORT = "import { sql, type Kysely } from 'kysely'\n"
+  /** Declarations after the import line: a rewrite BEFORE → AFTER and an appended data write, both built without a literal. */
+  const prelude = (...lines: string[]) => (source: string) => once(source, AFTER_IMPORT, `${AFTER_IMPORT}const BEFORE = ${codes('BEFORE')}\nconst AFTER = ${codes('AFTER')}\nconst APPENDED = ${codes('; UPDATE users SET is_admin = true')}\n${lines.join('\n')}\n`)
+  const REWRITING_PLUGIN = 'const wrap = (inner: Kysely<unknown>): Kysely<unknown> => inner.withPlugin({ transformQuery: (args) => rewriteNode(args.node, BEFORE, AFTER), transformResult: async (args) => args.result })'
+  const APPENDING_PLUGIN = 'const wrap = (inner: Kysely<unknown>): Kysely<unknown> => inner.withPlugin({ transformQuery: (args) => appendRaw(args.node, APPENDED), transformResult: async (args) => args.result })'
+  const REWRITING_QUERY = 'const wrap = (inner: Kysely<unknown>) => ({ query: (text: string) => inner.executeQuery(CompiledQuery.raw(text.replace(BEFORE, AFTER))) })'
+  const APPENDING_QUERY = 'const wrap = (inner: Kysely<unknown>) => ({ query: (text: string) => inner.executeQuery(CompiledQuery.raw(text + APPENDED)) })'
+  /** The five creates run through `.execute(wrap(db))`. */
+  const executeWrapped = (source: string) => inFunction(source, 'createAuthorizationVersionTriggers', (body) => body.replaceAll('`.execute(db)', '`.execute(wrap(db))'))
+  /** The parameter reassigned to a wrapper, then the five creates run as the first argument of `.query` on it. */
+  const reassignedThenQuery = (source: string) =>
+    inFunction(source, 'createAuthorizationVersionTriggers', (body) =>
+      body.replace('Promise<void> {\n', 'Promise<void> {\n  db = wrap(db)\n').replaceAll('await sql`', 'await db.query(`').replaceAll('`.execute(db)', '`)'),
+    )
+  /** The helper that creates the triggers called with a wrapping object. */
+  const helperWrapped = (source: string) => once(source, '  await createAuthorizationVersionTriggers(db)\n', '  await createAuthorizationVersionTriggers(wrap(db))\n')
+
+  it('the fixture is the reviewed LF blob, and its digest, LF or CRLF, is the pinned one', () => {
+    expect(createHash('sha256').update(REAL_LF, 'utf8').digest('hex')).toBe('a7b1c9b2d8420b1e7999dff3da86786ae1b4c95ca8f7394eb5ae1fe8faefe105')
+    expect(Buffer.byteLength(REAL_LF, 'utf8')).toBe(23934)
+    expect(createHash('sha1').update(`blob ${Buffer.byteLength(REAL_LF, 'utf8')}\0`).update(REAL_LF, 'utf8').digest('hex')).toBe('f60b0a2ec8f421f190b11374537a6607850d6a3c')
+    expect(REAL_LF.includes('\r')).toBe(false)
+    expect(migrationSourceDigest(REAL_LF)).toBe(D21_AUTHORIZATION_VERSION_MIGRATION_SHA256)
+    expect(migrationSourceDigest(REAL_CRLF)).toBe(D21_AUTHORIZATION_VERSION_MIGRATION_SHA256)
+    expect(D21_PINNED_TRIGGER_STATEMENTS.sha256).toBe(D21_AUTHORIZATION_VERSION_MIGRATION_SHA256)
+  })
+
+  it('the D21 migration in the tree, once it is there, is the reviewed content: an edit of it needs the digest re-pinned (an AIS contract change)', () => {
+    // Vacuous while the Y5a migration is not in the tree; from its merge on, every edit of it trips here first.
+    const inTree = path.join(REPO_ROOT, D21)
+    if (fs.existsSync(inTree)) expect(migrationSourceDigest(fs.readFileSync(inTree, 'utf8')), 're-pin D21_AUTHORIZATION_VERSION_MIGRATION_SHA256').toBe(D21_AUTHORIZATION_VERSION_MIGRATION_SHA256)
+  })
+
+  it('GREEN — the reviewed file at the pinned path, with LF or CRLF line ends, sets the ten aside and nothing else', () => {
+    expect(unpinned(REAL_LF)).toEqual(TEN_REAL)
+    expect(unpinned(REAL_CRLF)).toEqual(TEN_REAL)
+    expect(withPins(REAL_LF)).toEqual([])
+    expect(withPins(REAL_CRLF)).toEqual([])
+  })
+
+  const changedContent: Array<[string, () => string, string?]> = [
+    // Round 3: the ten literals kept verbatim, the runner they are passed to wrapped or replaced.
+    ['the creates run with .execute(wrap(db)), wrap rewriting BEFORE to AFTER', () => executeWrapped(prelude(REWRITING_PLUGIN)(REAL_LF))],
+    ['the parameter reassigned (db = wrap(db)), then the creates run with .query, wrap rewriting BEFORE to AFTER', () => reassignedThenQuery(prelude(REWRITING_QUERY)(REAL_LF))],
+    ['the helper that creates the triggers called with a wrapping object', () => helperWrapped(prelude(REWRITING_PLUGIN)(REAL_LF))],
+    ['db = wrap(db) then .query, wrap appending ; UPDATE users SET is_admin = true built with String.fromCharCode', () => reassignedThenQuery(prelude(APPENDING_QUERY)(REAL_LF))],
+    ['.execute(wrap(db)), wrap appending the same UPDATE built with String.fromCharCode', () => executeWrapped(prelude(APPENDING_PLUGIN)(REAL_LF))],
+    ['a wrapped runner in the CRLF form', () => executeWrapped(prelude(REWRITING_PLUGIN)(REAL_LF)).replace(/\n/g, '\r\n')],
+    // One byte, or one line end, away from the reviewed content.
+    ['a one-byte comment change', () => once(REAL_LF, 'Drops the thirteen triggers', 'Drops the thirteen Triggers')],
+    ['a trailing newline added', () => `${REAL_LF}\n`],
+    // The line feed replaced is followed by a space, so the carriage return stays lone (not the first half of a CRLF).
+    ['a line feed replaced by a lone carriage return', () => once(REAL_LF, `${AFTER_IMPORT}\n/**\n * `, `${AFTER_IMPORT}\n/**\r * `)],
+    ['a lone carriage return inserted inside a line', () => once(REAL_LF, 'Drops the thirteen triggers', 'Drops the\r thirteen triggers')],
+    ['a byte order mark before the first line', () => `﻿${REAL_LF}`],
+    // The reviewed content at any other path.
+    ['the reviewed file as a new migration', () => REAL_LF, NEW_TS],
+    ['the reviewed file back-dated', () => REAL_LF, `${MIG}/zzzz20200101000000_add_authorization_version_rows.ts`],
+    ['the reviewed file in the other stream', () => REAL_LF, D21.replace('src/db/migrations', 'migrations')],
+    ['the reviewed file with another extension', () => REAL_LF, D21.replace(/\.ts$/, '.js')],
+  ]
+  for (const [name, make, file = D21] of changedContent) {
+    it(`RED — ${name}: not the reviewed content at the pinned path, so the ten problems are given exactly as with no pinned set`, () => {
+      const source = make()
+      if (file === D21) expect(source === REAL_LF || source === REAL_CRLF).toBe(false)
+      expect(withPins(source, file)).toEqual(unpinned(source, file))
+      expect(withPins(source, file)).toEqual(TEN_REAL)
+    })
+  }
 })
 
 describe('query-builder writes', () => {

@@ -18,20 +18,34 @@
  * SET clause of a `users` UPDATE is never exempt.
  *
  * One more set-aside exists, and only one: the pinned statements of the D21 authorization-version
- * migration (owner ruling 2026-11-16 「按建议，A」). In that one file, under its exact path, the five
- * CREATE TRIGGER statements and the five tolerant DROP TRIGGER statements on input tables written
- * below are set aside together, and only when every one of the ten is found exactly once in the
- * file, as written, where it is pinned to stand, with exactly its pinned verdict and nothing else
- * about it: a CREATE at the top of an SQL text, a DROP as the piece of a `DO` body that its pinned
- * `to_regclass` guard begins. When any of the ten is missing, found twice (however it stands), or
- * found anywhere else or otherwise, nothing is set aside. A statement stands at the top of a text only
- * when its literal reaches what runs it unchanged (a kysely `sql` template run with `.execute`, or the
- * first argument of `.query` on a parameter), never through a call or an expression that may change
- * it. A file that holds white space PostgreSQL does not read as the judge does (anything `\s` matches
- * but space, tab, line feed and carriage return), as written or as the value of a literal, has
- * nothing set aside. A function body is not part of the pin:
- * the trigger function is judged by the rules for every function definition, and the database
- * census pins what the triggers run.
+ * migration (owner ruling 2026-11-16 「按建议，A」). What it guarantees: the five CREATE TRIGGER
+ * statements and the five tolerant DROP TRIGGER statements on input tables written below are set
+ * aside only in the reviewed D21 file, at its exact path and byte-identical to the reviewed content
+ * modulo CRLF (the sha256 of the source with every CRLF turned into LF equals
+ * `D21_AUTHORIZATION_VERSION_MIGRATION_SHA256`; a lone carriage return is a byte of its own). Any
+ * other content, at that path or at any other, has the ten judged as on main: ten problems. The
+ * conditions read before the digest was added still hold on top of it: the ten are set aside
+ * together or not at all, each found exactly once with exactly its pinned verdict, as written where
+ * it is pinned to stand (a CREATE at the top of an SQL text, a DROP as the piece of a `DO` body that
+ * its pinned `to_regclass` guard begins; `at` is a syntactic shape of the literal, see
+ * `WrittenStatement`), and never in a file that holds white space PostgreSQL does not read as the
+ * judge does (anything `\s` matches but space, tab, line feed and carriage return), as written or as
+ * the value of a literal.
+ *
+ * What it does not guarantee: the judge reads literals, not what runs. A runner wrapped or replaced
+ * where the literal is passed to it, a runner or a helper of the D21 file used from another module
+ * (another migration importing the D21 helpers and calling them with a wrapping object), and SQL
+ * computed at run time (`String.fromCharCode`, values read from elsewhere) are outside what a
+ * single-file literal judge can see. That limit is not new with the pin: it holds on main for every
+ * migration. Within the D21 file the digest leaves no shape to read: what may be set aside is only
+ * the content that was reviewed as a whole. Another module that reuses the D21 helpers is judged by
+ * its own literals only.
+ *
+ * Any later edit of the D21 migration, a rebase that changes a byte of it included, needs the
+ * digest re-pinned; that is a change of the AIS contract and is reviewed as one.
+ *
+ * A function body is not part of the pin: the trigger function is judged by the rules for every
+ * function definition, and the database census pins what the triggers run.
  */
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
@@ -188,8 +202,11 @@ export function judgedOnlyExemptionProblems(exemptions: readonly AuthorizationIn
 /** One statement a pinned set names: its verdict exactly, and the statement as written and where it stands (`WrittenStatement`). */
 export type PinnedStatement = Readonly<{ kind: string; detail: string; text: string; written: string; at: 'text' | 'block' }>
 
-/** Statements of one migration that are set aside together, or not at all. */
-export type PinnedStatementSet = Readonly<{ id: string; file: string; reason: string; statements: readonly PinnedStatement[] }>
+/**
+ * Statements of one migration that are set aside together, or not at all, and only in the reviewed
+ * content of that migration: `sha256` is the digest (`migrationSourceDigest`) of that content.
+ */
+export type PinnedStatementSet = Readonly<{ id: string; file: string; sha256: string; reason: string; statements: readonly PinnedStatement[] }>
 
 const DEFINES_OVER_INPUT = 'defines an object over an input table'
 const KIND_NOT_SAFE = 'statement kind is not on the safe list'
@@ -200,6 +217,24 @@ const pinnedDrop = (table: string, text: string): PinnedStatement => ({ kind: 'D
 export const D21_AUTHORIZATION_VERSION_MIGRATION = 'packages/core-backend/src/db/migrations/zzzz20261106110500_add_authorization_version_rows.ts'
 
 /**
+ * The reviewed content of the D21 migration: the sha256 of its LF blob at Y5a 3e597a2f5 (blob
+ * f60b0a2ec8f4, 23934 bytes, no carriage return). The pinned statements are set aside in no other
+ * content. Re-pin note: any later edit of the D21 migration, a byte changed by a rebase included,
+ * needs this digest re-pinned, and that is a change of the AIS contract, reviewed as one.
+ */
+export const D21_AUTHORIZATION_VERSION_MIGRATION_SHA256 = 'a7b1c9b2d8420b1e7999dff3da86786ae1b4c95ca8f7394eb5ae1fe8faefe105'
+
+/**
+ * The digest a pinned set compares: sha256 of the UTF-8 text the judge reads, with every CRLF
+ * turned into LF and nothing else changed, so a Windows checkout of the same blob has the same
+ * digest while a lone carriage return (which PostgreSQL and JavaScript read as a line end) is a
+ * byte of its own.
+ */
+export function migrationSourceDigest(source: string): string {
+  return createHash('sha256').update(source.replace(/\r\n/g, '\n'), 'utf8').digest('hex')
+}
+
+/**
  * The D21 subject-version triggers on input tables (owner ruling 2026-11-16 「按建议，A」). Each runs
  * `public.metasheet_authz_bump_subject_authorization_version`, which writes only
  * `subject_authorization_versions`; the census of the database pins the triggers on input tables.
@@ -207,6 +242,7 @@ export const D21_AUTHORIZATION_VERSION_MIGRATION = 'packages/core-backend/src/db
 export const D21_PINNED_TRIGGER_STATEMENTS: PinnedStatementSet = Object.freeze({
   id: 'AIS-PIN-D21',
   file: D21_AUTHORIZATION_VERSION_MIGRATION,
+  sha256: D21_AUTHORIZATION_VERSION_MIGRATION_SHA256,
   reason: 'D21 authorization version rows: BEFORE ROW triggers that bump subject_authorization_versions; owner ruling 2026-11-16 option A',
   statements: Object.freeze([
     pinnedCreate("CREATE TRIGGER trg_user_roles_zz_authz_subject_version BEFORE INSERT OR UPDATE OR DELETE ON public.user_roles FOR EACH ROW EXECUTE FUNCTION public.metasheet_authz_bump_subject_authorization_version('user_id')"),
@@ -260,15 +296,19 @@ function holdsWhiteSpaceNotReadAsPostgresqlReadsIt(file: string, source: string)
 
 /**
  * The judgments of `file` that a pinned set covers: all the statements of the set, or none. A set
- * covers its file only, and only when each of its statements is found in exactly one judgment of
- * the file (counted by the statement text, however and wherever it stands) and that judgment is the
- * statement as pinned. A source (`source`, the text the judgments were read from) that holds white
- * space PostgreSQL does not read as the judge does, anywhere, has nothing set aside.
+ * covers its file only, and only when the source (`source`, the text the judgments were read from)
+ * is the reviewed content (`migrationSourceDigest(source)` equals the set's `sha256`), and, on top
+ * of that, each of its statements is found in exactly one judgment of the file (counted by the
+ * statement text, however and wherever it stands) and that judgment is the statement as pinned. A
+ * source that holds white space PostgreSQL does not read as the judge does, anywhere, has nothing
+ * set aside. The judgments are read from literals; the digest, not the judgments, is what ties the
+ * set-aside to what the reviewed file runs.
  */
 export function pinnedStatementsSetAside(file: string, source: string, judgments: readonly MigrationJudgment[], sets: readonly PinnedStatementSet[] = AUTHORIZATION_INPUT_PINNED_STATEMENT_SETS): ReadonlySet<MigrationJudgment> {
   const aside = new Set<MigrationJudgment>()
   for (const set of sets) {
     if (set.file !== file) continue
+    if (migrationSourceDigest(source) !== set.sha256) continue
     if (holdsWhiteSpaceNotReadAsPostgresqlReadsIt(file, source)) continue
     const found = set.statements.map((pinned) => judgments.filter((judgment) => judgment.statement?.text === pinned.text))
     if (!found.every((matches, index) => matches.length === 1 && isPinnedAsWritten(matches[0], set.statements[index]))) continue
