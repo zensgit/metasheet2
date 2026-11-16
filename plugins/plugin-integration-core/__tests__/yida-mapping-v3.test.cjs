@@ -364,3 +364,293 @@ test('the shipped v2 material template and the v3 material template share one ke
   assert.deepEqual(after.rowSpecs.map((spec) => spec.businessKeyDigest), before.rowSpecs.map((spec) => spec.businessKeyDigest))
   assert.notEqual(after.planDigest, before.planDigest)
 })
+
+// ---------------------------------------------------------------------------------------------
+// R-71 ⑦.4 PR-2 (owner addendum 2026-11-06, decision 1): the `generated` transform, a template of
+// closed parts (literal / field / hash / preset) under rule G1. Acceptance A1-A4 and A6 of design B.
+// The oracle below is independent of the planner and of the material-code leaf: node:crypto SHA-1
+// with the RFC 4122 / 9562 UUIDv5 bit layout.
+const crypto = require('node:crypto')
+const GENERATED_NAMESPACE = 'de2dfbd7-8b3f-41a4-9322-8487ec85637f'
+const MATERIAL_NAMESPACE = '6d37f698-e75c-4b5e-8eef-b702478a1cfb'
+function oracleUuidV5(namespace, name) {
+  const digest = crypto.createHash('sha1').update(Buffer.from(namespace.replace(/-/g, ''), 'hex'))
+    .update(Buffer.from(name, 'utf8')).digest().subarray(0, 16)
+  digest[6] = (digest[6] & 0x0f) | 0x50
+  digest[8] = (digest[8] & 0x3f) | 0x80
+  const h = digest.toString('hex')
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`.toUpperCase()
+}
+const oracleHash = (values, form = 'uuid-36') => {
+  const uuid = oracleUuidV5(GENERATED_NAMESPACE, JSON.stringify(['metasheet.stock-prep.yida-generated-hash', 'v1', ...values]))
+  return form === 'uuid-32' ? uuid.replaceAll('-', '') : uuid
+}
+const oracleMaterialCode = (keyValue, projectNo) =>
+  `WLBH-${oracleUuidV5(MATERIAL_NAMESPACE, JSON.stringify(['metasheet.stock-prep.yida-material-code', 'v1', keyValue, projectNo]))}`
+const WLBH_SHAPE = /^WLBH-[0-9A-F]{8}-[0-9A-F]{4}-5[0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12}$/
+
+const KEY_HASH = { hash: ['project', 'line', 'parent'], form: 'uuid-36' }
+// The small layout plus a non-key text column and one generated target.
+function generatedConfig(template = [{ literal: 'PRJ-' }, { field: 'project' }, { literal: '-' }, KEY_HASH], patch = {}, entryPatch = {}) {
+  const base = config()
+  return config({
+    fieldCatalog: [...base.fieldCatalog, { id: 'drawing', control: 'text', required: false }, { id: 'code', control: 'text', required: false }],
+    fieldMap: [...base.fieldMap,
+      { transform: 'direct', source: 'drawingNo', target: 'drawing', type: 'string', required: false },
+      { transform: 'generated', template, target: 'code', type: 'string', required: true, ...entryPatch }],
+    ...patch,
+  })
+}
+const generatedRow = (patch = {}) => row({ drawingNo: 'DRW-1', ...patch })
+const codeIssue = (index, code) => ({ index, code, fields: [{ target: 'code', type: 'string', transform: 'generated' }] })
+
+test('A1 generated config closure: shape, caps, part targets, G1 and key placement are all refused', async () => {
+  const { validateYidaStaticConfig } = await plannerPromise
+  const valid = {
+    'hash, field and literals': generatedConfig(),
+    'hash only, 32 form': generatedConfig([{ hash: ['parent', 'line', 'project'], form: 'uuid-32' }]),
+    'hash with an extra non-key member': generatedConfig([{ hash: ['project', 'line', 'parent', 'drawing'], form: 'uuid-36' }]),
+    'number field part': generatedConfig([{ field: 'qty' }, KEY_HASH]),
+    preset: generatedConfig([{ preset: 'material-code-v1', rowIdOf: 'drawing', projectOf: 'project' }]),
+    'eight parts': generatedConfig([...Array(7).fill({ literal: 'x' }), KEY_HASH]),
+    'literal of 128': generatedConfig([{ literal: 'L'.repeat(128) }, KEY_HASH]),
+    'sixteen hash members': (() => {
+      const extra = Array.from({ length: 12 }, (_, index) => `extra${index}`)
+      const layout = generatedConfig([{ hash: ['project', 'line', 'parent', 'drawing', ...extra], form: 'uuid-36' }])
+      layout.fieldCatalog = [...layout.fieldCatalog, ...extra.map((id) => ({ id, control: 'text', required: false }))]
+      layout.fieldMap = [...layout.fieldMap, ...extra.map((id) => ({ transform: 'direct', source: `${id}Source`, target: id, type: 'string', required: false }))]
+      return layout
+    })(),
+  }
+  for (const [name, layout] of Object.entries(valid)) {
+    const checked = validateYidaStaticConfig(layout)
+    assert.equal(checked.valid, true, `${name}: ${JSON.stringify(checked.issues)}`)
+  }
+  const normalized = validateYidaStaticConfig(generatedConfig([{ preset: 'material-code-v1', rowIdOf: 'drawing', projectOf: 'project' }, { literal: '#' }])).normalized
+  assert.deepEqual(normalized.fieldMap.at(-1), { transform: 'generated',
+    template: [{ preset: 'material-code-v1', rowIdOf: 'drawing', projectOf: 'project' }, { literal: '#' }], target: 'code', type: 'string', required: true })
+
+  const seventeen = (() => {
+    const extra = Array.from({ length: 13 }, (_, index) => `extra${index}`)
+    const layout = generatedConfig([{ hash: ['project', 'line', 'parent', 'drawing', ...extra], form: 'uuid-36' }])
+    layout.fieldCatalog = [...layout.fieldCatalog, ...extra.map((id) => ({ id, control: 'text', required: false }))]
+    layout.fieldMap = [...layout.fieldMap, ...extra.map((id) => ({ transform: 'direct', source: `${id}Source`, target: id, type: 'string', required: false }))]
+    return layout
+  })()
+  const refused = {
+    'unknown entry key': generatedConfig(undefined, {}, { separator: '-' }),
+    'entry without template': (() => { const layout = generatedConfig(); delete layout.fieldMap.at(-1).template; return layout })(),
+    'unknown part key': generatedConfig([{ literal: 'x', note: 'y' }, KEY_HASH]),
+    'part with two kinds': generatedConfig([{ field: 'project', literal: 'x' }, KEY_HASH]),
+    'unknown part kind': generatedConfig([{ date: 'project', format: 'YYYYMMDD' }, KEY_HASH]),
+    'template not an array': generatedConfig('PRJ-'),
+    'empty template': generatedConfig([]),
+    'nine parts': generatedConfig([...Array(8).fill({ literal: 'x' }), KEY_HASH]),
+    'literals only': generatedConfig([{ literal: 'a' }, { literal: 'b' }]),
+    'literal of 129': generatedConfig([{ literal: 'L'.repeat(129) }, KEY_HASH]),
+    'literal with a control character': generatedConfig([{ literal: 'a\u0007' }, KEY_HASH]),
+    'blank literal': generatedConfig([{ literal: '   ' }, KEY_HASH]),
+    'field on a copy target': generatedConfig([{ field: 'parentCopy' }, KEY_HASH]),
+    'field on an unknown target': generatedConfig([{ field: 'nowhere' }, KEY_HASH]),
+    'field on a source column': generatedConfig([{ field: 'projectNo' }, KEY_HASH]),
+    'hash on a constant target': generatedConfig([{ hash: ['project', 'line', 'parent', 'note'], form: 'uuid-36' }]),
+    'hash on an unknown target': generatedConfig([{ hash: ['project', 'line', 'parent', 'nowhere'], form: 'uuid-36' }]),
+    'hash on a number target': generatedConfig([{ hash: ['project', 'line', 'parent', 'qty'], form: 'uuid-36' }]),
+    'hash missing one key target': generatedConfig([{ hash: ['project', 'line'], form: 'uuid-36' }]),
+    'hash with a duplicate member': generatedConfig([{ hash: ['project', 'line', 'parent', 'line'], form: 'uuid-36' }]),
+    'hash with no member': generatedConfig([{ hash: [], form: 'uuid-36' }]),
+    'hash with seventeen members': seventeen,
+    'unknown hash form': generatedConfig([{ hash: ['project', 'line', 'parent'], form: 'uuid-16' }]),
+    'hash without form': generatedConfig([{ hash: ['project', 'line', 'parent'] }]),
+    'two hash parts': generatedConfig([KEY_HASH, { literal: '-' }, KEY_HASH]),
+    'hash and preset': generatedConfig([KEY_HASH, { preset: 'material-code-v1', rowIdOf: 'drawing', projectOf: 'project' }]),
+    'no identity part': generatedConfig([{ literal: 'PRJ-' }, { field: 'project' }, { field: 'line' }]),
+    'unknown preset': generatedConfig([{ preset: 'material-code-v2', rowIdOf: 'drawing', projectOf: 'project' }]),
+    'preset project not a key target': generatedConfig([{ preset: 'material-code-v1', rowIdOf: 'line', projectOf: 'drawing' }]),
+    'preset on a copy target': generatedConfig([{ preset: 'material-code-v1', rowIdOf: 'parentCopy', projectOf: 'project' }]),
+    'preset row id on a number target': generatedConfig([{ preset: 'material-code-v1', rowIdOf: 'qty', projectOf: 'project' }]),
+    'preset missing projectOf': generatedConfig([{ preset: 'material-code-v1', rowIdOf: 'line' }]),
+    'target not a text control': (() => {
+      const layout = generatedConfig()
+      layout.fieldCatalog = layout.fieldCatalog.map((item) => item.id === 'code' ? { id: 'code', control: 'select', required: false, options: ['SYN-A'] } : item)
+      return layout
+    })(),
+    'number type': (() => {
+      const layout = generatedConfig(undefined, {}, { type: 'number' })
+      layout.fieldCatalog = layout.fieldCatalog.map((item) => item.id === 'code' ? { ...item, control: 'number' } : item)
+      return layout
+    })(),
+    'target reused by another entry': generatedConfig(undefined, {}, { target: 'drawing' }),
+  }
+  for (const [name, layout] of Object.entries(refused)) {
+    assert.deepEqual(validateYidaStaticConfig(layout).issues, [{ code: 'CONFIG_FIELD_MAP_INVALID', field: 'fieldMap' }], name)
+  }
+  // A generated target can never be a key part or a nullable key part (keys name direct targets).
+  assert.deepEqual(validateYidaStaticConfig(generatedConfig(undefined, { businessKey: ['project', 'line', 'parent', 'code'] })).issues,
+    [{ code: 'CONFIG_KEY_INVALID', field: 'businessKey' }])
+  assert.deepEqual(validateYidaStaticConfig(generatedConfig(undefined, { emptyKeyFields: ['parent', 'code'] })).issues,
+    [{ code: 'CONFIG_EMPTY_KEY_FIELDS_INVALID', field: 'emptyKeyFields' }])
+})
+
+test('A2 generated golden vectors: hash forms, the preset, numbers, Chinese and supplementary-plane text', async () => {
+  const { buildYidaStaticPlan } = await plannerPromise
+  const { generateYidaMaterialCode } = await lib('yida-material-code.mjs')
+  const rows = [
+    generatedRow(),
+    generatedRow({ projectNo: '示例项目', lineId: '行-二', parentCode: null, quantity: 0.5 }),
+    generatedRow({ projectNo: 'P-\u{20000}', lineId: 'L-\u{1F600}', parentCode: '', quantity: 12 }),
+  ]
+  const golden = {
+    'uuid-36': ['4/781A858B-5D97-5465-8996-7B5637DDADB0', '0.5/DD254640-AEDF-52B0-B9B0-F8A4781327BA', '12/70DF3009-EE57-546E-8646-F337F886324A'],
+    'uuid-32': ['4/781A858B5D97546589967B5637DDADB0', '0.5/DD254640AEDF52B0B9B0F8A4781327BA', '12/70DF3009EE57546E8646F337F886324A'],
+  }
+  for (const form of ['uuid-36', 'uuid-32']) {
+    const plan = buildYidaStaticPlan({ config: generatedConfig([{ field: 'qty' }, { literal: '/' }, { hash: ['project', 'line', 'parent'], form }]), rows })
+    const codes = plan.rows.map((item) => item.payload.code)
+    assert.deepEqual(codes, golden[form], form)
+    assert.deepEqual(codes, rows.map((item) => `${String(item.quantity)}/${oracleHash([item.projectNo, item.lineId, item.parentCode ?? ''], form)}`), form)
+  }
+  // Member order is part of the name: the same columns listed in another order give another code.
+  const reordered = buildYidaStaticPlan({ config: generatedConfig([{ hash: ['parent', 'line', 'project'], form: 'uuid-36' }]), rows: [rows[0]] })
+  assert.equal(reordered.rows[0].payload.code, oracleHash(['PARENT-1', 'LINE-1', 'DEMO-P1']))
+  // The preset is the frozen material-code-v1 generator, byte for byte, on the row's own columns.
+  const preset = buildYidaStaticPlan({ config: generatedConfig([{ preset: 'material-code-v1', rowIdOf: 'drawing', projectOf: 'project' }]),
+    rows: rows.map((item, index) => ({ ...item, drawingNo: `SYN-LINE-${index}` })) })
+  for (const [index, planned] of preset.rows.entries()) {
+    assert.equal(planned.payload.code, generateYidaMaterialCode({ keyValue: `SYN-LINE-${index}`, projectNo: rows[index].projectNo }))
+    assert.equal(planned.payload.code, oracleMaterialCode(`SYN-LINE-${index}`, rows[index].projectNo))
+    assert.match(planned.payload.code, WLBH_SHAPE)
+  }
+  assert.equal(preset.rows[0].payload.code, 'WLBH-' + oracleUuidV5(MATERIAL_NAMESPACE, JSON.stringify(['metasheet.stock-prep.yida-material-code', 'v1', 'SYN-LINE-0', 'DEMO-P1'])))
+  // Domain separation: the generic hash of the same inputs is never the WLBH code's UUID.
+  const twoKeys = { businessKey: ['project', 'line'], emptyKeyFields: [] }
+  const generic = buildYidaStaticPlan({ config: generatedConfig([{ hash: ['line', 'project'], form: 'uuid-36' }], twoKeys), rows: [rows[0]] }).rows[0].payload.code
+  const material = buildYidaStaticPlan({ config: generatedConfig([{ preset: 'material-code-v1', rowIdOf: 'line', projectOf: 'project' }], twoKeys), rows: [rows[0]] }).rows[0].payload.code
+  assert.equal(material, oracleMaterialCode('LINE-1', 'DEMO-P1'))
+  assert.notEqual(`WLBH-${generic}`, material)
+  assert.equal(generic, oracleHash(['LINE-1', 'DEMO-P1']))
+})
+
+test('A3 generated blank and type rules: blank parts refuse, nullable keys hash as empty, no second key issue', async () => {
+  const { buildYidaStaticPlan } = await plannerPromise
+  const run = (template, rows, patch) => buildYidaStaticPlan({ config: generatedConfig(template, patch), rows }).rows
+  const withDrawing = [{ field: 'drawing' }, { literal: '/' }, KEY_HASH]
+  // A blank field part (absent, null, empty or blank text) is refused; literals never stand in for it.
+  const absent = generatedRow()
+  delete absent.drawingNo
+  for (const blankRow of [absent, generatedRow({ drawingNo: null }), generatedRow({ drawingNo: '' }), generatedRow({ drawingNo: '   ' })]) {
+    assert.deepEqual(run(withDrawing, [blankRow])[0].issues, [codeIssue(0, 'FIELD_PART_MISSING')])
+  }
+  // A blank nullable key (emptyKeyFields) inside the hash counts as '' -> the oracle with ''.
+  const parentAbsent = generatedRow()
+  delete parentAbsent.parentCode
+  for (const blankParent of [parentAbsent, generatedRow({ parentCode: null }), generatedRow({ parentCode: '' })]) {
+    const [planned] = run([KEY_HASH], [blankParent])
+    assert.equal(planned.status, 'planned_create')
+    assert.equal(planned.payload.code, oracleHash(['DEMO-P1', 'LINE-1', '']))
+  }
+  // ...but as a field part it is a blank part like any other.
+  assert.deepEqual(run([{ field: 'parent' }, KEY_HASH], [generatedRow({ parentCode: null })])[0].issues, [codeIssue(0, 'FIELD_PART_MISSING')])
+  // A blank required key is KEY_MISSING only: the generated entry (required) adds no issue of its own.
+  for (const template of [[KEY_HASH], [{ field: 'line' }, KEY_HASH], [{ preset: 'material-code-v1', rowIdOf: 'drawing', projectOf: 'project' }]]) {
+    const missingKey = template[0].preset ? generatedRow({ projectNo: null }) : generatedRow({ lineId: '  ' })
+    assert.deepEqual(run(template, [missingKey])[0].issues.map((issue) => issue.code), ['KEY_MISSING'], JSON.stringify(template))
+  }
+  // A whitespace-only nullable key is KEY_MISSING too, and again only that.
+  assert.deepEqual(run([KEY_HASH], [generatedRow({ parentCode: ' ' })])[0].issues.map((issue) => issue.code), ['KEY_MISSING'])
+  // Types: a boolean is never stringified; identity text is verbatim, so padding, control characters and
+  // lone surrogates are refused rather than normalized.
+  assert.deepEqual(run(withDrawing, [generatedRow({ drawingNo: true })])[0].issues.filter((issue) => issue.fields[0].target === 'code'),
+    [codeIssue(0, 'FIELD_TYPE')])
+  for (const lineId of [' LINE-1', 'LINE-1 ', 'LINE\u00011', 'LINE-\uD800', 'LINE-\uDC00x']) {
+    assert.deepEqual(run([KEY_HASH], [generatedRow({ lineId })])[0].issues, [codeIssue(0, 'FIELD_TYPE')], JSON.stringify(lineId))
+    assert.deepEqual(run([{ preset: 'material-code-v1', rowIdOf: 'line', projectOf: 'project' }], [generatedRow({ lineId })])[0].issues,
+      [codeIssue(0, 'FIELD_TYPE')], JSON.stringify(lineId))
+  }
+  // A field part keeps text verbatim (padding included) and writes numbers with String().
+  assert.equal(run([{ field: 'drawing' }, { field: 'qty' }, KEY_HASH], [generatedRow({ drawingNo: ' D ', quantity: 1.25 })])[0].payload.code,
+    ` D 1.25${oracleHash(['DEMO-P1', 'LINE-1', 'PARENT-1'])}`)
+  // Over 4096 characters is refused.
+  assert.deepEqual(run(withDrawing, [generatedRow({ drawingNo: 'x'.repeat(4096) })])[0].issues, [codeIssue(0, 'FIELD_VALUE_TOO_LONG')])
+  assert.equal(run(withDrawing, [generatedRow({ drawingNo: 'x'.repeat(4096 - 37) })])[0].payload.code.length, 4096)
+  // Collision probe: with two nullable members, [A, '', B] and [A, B, ''] are different inputs and get different codes.
+  const fourKeys = { businessKey: ['project', 'line', 'parent', 'drawing'], emptyKeyFields: ['parent', 'drawing'] }
+  const probe = run([{ hash: ['project', 'parent', 'drawing', 'line'], form: 'uuid-36' }],
+    [generatedRow({ parentCode: '', drawingNo: 'B' }), generatedRow({ parentCode: 'B', drawingNo: '' })], fourKeys)
+  assert.deepEqual(probe.map((item) => item.status), ['planned_create', 'planned_create'])
+  assert.notEqual(probe[0].payload.code, probe[1].payload.code)
+  assert.deepEqual(probe.map((item) => item.payload.code), [oracleHash(['DEMO-P1', '', 'B', 'LINE-1']), oracleHash(['DEMO-P1', 'B', '', 'LINE-1'])])
+})
+
+test('A4 generated batch duplicates: both rows refused, no payload, and the local draft refuses the batch', async () => {
+  const { buildYidaStaticPlan } = await plannerPromise
+  const { compileYidaLocalDraft } = await draftPromise
+  // Preset on a non-key row id: two rows with different keys but one row id and project share a code.
+  const preset = generatedConfig([{ preset: 'material-code-v1', rowIdOf: 'drawing', projectOf: 'project' }])
+  const rows = [generatedRow({ lineId: 'LINE-1' }), generatedRow({ lineId: 'LINE-2', quantity: 9 }), generatedRow({ lineId: 'LINE-3', drawingNo: 'DRW-3' })]
+  const plan = buildYidaStaticPlan({ config: preset, rows })
+  assert.deepEqual(plan.rows.map((item) => item.status), ['invalid', 'invalid', 'planned_create'])
+  assert.deepEqual(plan.rows[0].issues, [codeIssue(0, 'DUPLICATE_GENERATED_VALUE')])
+  assert.deepEqual(plan.rows[1].issues, [codeIssue(1, 'DUPLICATE_GENERATED_VALUE')])
+  for (const planned of plan.rows.slice(0, 2)) {
+    assert.equal(Object.hasOwn(planned, 'payload'), false)
+    assert.equal(Object.hasOwn(planned, 'protocolPreview'), false)
+  }
+  assert.equal(plan.evidence.invalid, 2)
+  assert.equal(plan.evidence.duplicateKeyCount, 0)
+  assert.throws(() => compileYidaLocalDraft({ config: preset, rowsText: JSON.stringify(rows), allocation: { mode: 'original' } }),
+    (error) => error.code === 'YIDA_DRAFT_PLAN')
+  assert.doesNotThrow(() => compileYidaLocalDraft({ config: preset, rowsText: JSON.stringify([rows[0], rows[2]]), allocation: { mode: 'original' } }))
+  // Hash inputs identical, other columns different: the generated duplicate is reported on both rows.
+  const hashed = buildYidaStaticPlan({ config: generatedConfig([KEY_HASH]), rows: [generatedRow(), generatedRow({ quantity: 7, drawingNo: 'DRW-9' })] })
+  assert.equal(hashed.evidence.invalid, 2)
+  for (const planned of hashed.rows) assert.ok(planned.issues.some((issue) => issue.code === 'DUPLICATE_GENERATED_VALUE'))
+})
+
+test('A6 generated re-push stability: same input same bytes; a template edit moves the payload, never the key', async () => {
+  const { compileYidaLocalDraft } = await draftPromise
+  const rows = JSON.stringify([generatedRow(), generatedRow({ lineId: 'LINE-2', parentCode: null })])
+  const compile = (layout) => compileYidaLocalDraft({ config: layout, rowsText: rows, allocation: { mode: 'original' } })
+  const first = compile(generatedConfig())
+  const again = compile(generatedConfig())
+  assert.equal(again.planDigest, first.planDigest)
+  assert.deepEqual(again.rowSpecs, first.rowSpecs)
+  assert.deepEqual(again.plan.rows.map((item) => item.payload.code), first.plan.rows.map((item) => item.payload.code))
+  assert.deepEqual(first.plan.rows.map((item) => item.payload.code),
+    [`PRJ-DEMO-P1-${oracleHash(['DEMO-P1', 'LINE-1', 'PARENT-1'])}`, `PRJ-DEMO-P1-${oracleHash(['DEMO-P1', 'LINE-2', ''])}`])
+  // An unrelated constant: the plan moves, the generated bytes and the business keys do not.
+  const constant = generatedConfig()
+  constant.fieldMap = constant.fieldMap.map((entry) => entry.target === 'note' ? { ...entry, value: 'SYN-OTHER' } : entry)
+  const changedConstant = compile(constant)
+  assert.notEqual(changedConstant.planDigest, first.planDigest)
+  assert.deepEqual(changedConstant.plan.rows.map((item) => item.payload.code), first.plan.rows.map((item) => item.payload.code))
+  assert.deepEqual(changedConstant.rowSpecs.map((spec) => spec.businessKeyDigest), first.rowSpecs.map((spec) => spec.businessKeyDigest))
+  // A template literal: payload and plan digests move, the business keys and key definition do not.
+  const literal = compile(generatedConfig([{ literal: 'PRJ2-' }, { field: 'project' }, { literal: '-' }, KEY_HASH]))
+  assert.notEqual(literal.planDigest, first.planDigest)
+  assert.equal(literal.keyDefinitionDigest, first.keyDefinitionDigest)
+  for (const [index, spec] of literal.rowSpecs.entries()) {
+    assert.notEqual(spec.payloadDigest, first.rowSpecs[index].payloadDigest)
+    assert.equal(spec.businessKeyDigest, first.rowSpecs[index].businessKeyDigest)
+  }
+})
+
+test('generatedTemplateDependencies: the source columns one generated entry reads, and only for its own config', async () => {
+  const { generatedTemplateDependencies, yidaTransformSourceColumns } = await plannerPromise
+  const layout = generatedConfig([{ field: 'qty' }, { hash: ['project', 'line', 'parent', 'drawing'], form: 'uuid-32' }, { field: 'project' }])
+  const entry = layout.fieldMap.at(-1)
+  const columns = generatedTemplateDependencies(entry, layout)
+  assert.equal(Object.isFrozen(columns), true)
+  assert.deepEqual(columns, ['drawingNo', 'lineId', 'parentCode', 'projectNo', 'quantity'])
+  const preset = generatedConfig([{ preset: 'material-code-v1', rowIdOf: 'drawing', projectOf: 'project' }])
+  assert.deepEqual(generatedTemplateDependencies(preset.fieldMap.at(-1), preset), ['drawingNo', 'projectNo'])
+  // Registered as the generated reader of the transform-column map (its columns are direct sources too).
+  assert.ok(columns.every((column) => yidaTransformSourceColumns(layout).includes(column)))
+  const code = (error) => error.code === 'YIDA_STATIC_CONFIG_INVALID'
+  assert.throws(() => generatedTemplateDependencies(entry, generatedConfig()), code)
+  assert.throws(() => generatedTemplateDependencies(layout.fieldMap[0], layout), code)
+  assert.throws(() => generatedTemplateDependencies({ ...entry, target: 'drawing' }, layout), code)
+  assert.throws(() => generatedTemplateDependencies(entry, { ...layout, version: 2 }), code)
+  assert.throws(() => generatedTemplateDependencies(null, layout), code)
+  assert.throws(() => generatedTemplateDependencies(entry, generatedConfig([{ hash: ['project'], form: 'uuid-32' }])), code)
+})

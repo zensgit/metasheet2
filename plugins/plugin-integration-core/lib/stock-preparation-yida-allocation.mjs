@@ -1,5 +1,5 @@
 // Local, exact project allocation for the static YiDa preview. No I/O or apply path.
-import { buildYidaStaticPlan, parseYidaStaticRows, validateYidaStaticConfig } from './yida-static-plan.mjs'
+import { buildYidaStaticPlan, generatedTemplateDependencies, parseYidaStaticRows, validateYidaStaticConfig } from './yida-static-plan.mjs'
 
 const INPUT_KEYS = new Set(['config', 'rowsText', 'allocation'])
 const ALLOCATION_KEYS = new Set(['mode', 'projects', 'projectField', 'quantityField'])
@@ -86,6 +86,13 @@ function normalizeTransformRuleFields(projectField, quantityField, config, mode)
     || projectField === quantityField || config.businessKey.length < 2
     || !projectEntry || !quantityEntry || !config.businessKey.includes(projectEntry.target)
     || projectEntry.type !== 'string' || quantityEntry.type !== 'number') {
+    throw new YidaAllocationError('YIDA_ALLOCATION_FIELDS_INVALID')
+  }
+  // R-71 ⑦.4: a generated value is evaluated on the split rows, so it must read the split project
+  // (and a preset must take it as its project). G1 already implies this; asserted here as well.
+  if (config.fieldMap.some((entry) => entry.transform === 'generated'
+    && (!generatedTemplateDependencies(entry, config).includes(projectField)
+      || entry.template.some((part) => Object.prototype.hasOwnProperty.call(part, 'preset') && part.projectOf !== projectEntry.target)))) {
     throw new YidaAllocationError('YIDA_ALLOCATION_FIELDS_INVALID')
   }
   return { mode, projectField, quantityField }

@@ -198,6 +198,7 @@ const MATERIAL_V3_RULES = deepFreeze({
     { transform: 'constant', value: 'SYN-NO', target: 'allowNegativeStock', type: 'string', required: true },
     { transform: 'constant', value: 'SYN-DEFAULT', target: 'defaultText', type: 'string', required: false },
     { transform: 'direct', source: 'idempotencyKey', target: 'sourceLineId', type: 'string', required: true },
+    { transform: 'generated', template: [{ preset: 'material-code-v1', rowIdOf: 'sourceLineId', projectOf: 'project' }], target: 'materialCodeText', type: 'string', required: true },
   ],
   fieldCatalog: [
     { id: 'project', control: 'text', required: true },
@@ -216,6 +217,7 @@ const MATERIAL_V3_RULES = deepFreeze({
     { id: 'allowNegativeStock', control: 'radio', required: true, options: ['SYN-YES', 'SYN-NO'] },
     { id: 'defaultText', control: 'text', required: false },
     { id: 'sourceLineId', control: 'text', required: true },
+    { id: 'materialCodeText', control: 'text', required: false },
   ],
 })
 
