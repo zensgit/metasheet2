@@ -912,6 +912,13 @@
          card class falls through onto the panel's own root, so a gated-off panel leaves no empty card. -->
     <StockPreparationManagedTableRelabelPanel class="stock-prep-install__card" />
 
+    <!-- 批次标识 BI-7 (register R-65; rulings C2 / C6 / C10): 「批次标识设置」 — the tenant default of the four
+         pull-batch settings (built-in = the 10-27 design), the facts that are not configurable, and the values each
+         project sheet captured. Self-gated on the routes' own tier (stock-prep:admin+) and INVISIBLE while the
+         pull-batch or the project-sheets switch is off (the read answers 404 and the panel renders nothing); the card
+         class falls through onto the panel's own root, so a hidden panel leaves no empty card. -->
+    <StockPreparationPullBatchSettingsPanel class="stock-prep-install__card" :scope="props.scope" />
+
     <!-- 列映射副驾: the first AI feature on the governed AI boundary. It PROPOSES what each opaque
          source column means; a human confirms; the confirmed result becomes a deterministic preset.
          Advisory-only, fail-open, admin-gated server-side. Signals come from a source discovery. -->
@@ -983,6 +990,7 @@ import StockPreparationGettingStarted from './StockPreparationGettingStarted.vue
 import SchemaMappingCopilotPanel from './SchemaMappingCopilotPanel.vue'
 import StockPreparationCodeHelpPanel from './StockPreparationCodeHelpPanel.vue'
 import StockPreparationManagedTableRelabelPanel from './StockPreparationManagedTableRelabelPanel.vue'
+import StockPreparationPullBatchSettingsPanel from './StockPreparationPullBatchSettingsPanel.vue'
 import type { SchemaMappingColumnInput, SchemaMappingSignalsInput } from '../../../services/integration/stockPreparation/schemaMappingCopilot'
 import {
   buildStockPreparationInstallDefaults,

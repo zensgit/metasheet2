@@ -6,7 +6,7 @@ import { auditLog } from '../audit/audit'
 import { pool, transaction } from '../db/pg'
 import { bumpSubjectAuthorizationVersions } from '../multitable/authz-version-protocol'
 import { invalidateUserPerms, isAdmin, userHasPermission } from '../rbac/service'
-import { deriveDelegatedAdminNamespace } from '../rbac/namespace-admission'
+import { deriveDelegatedAdminNamespace, lockNamespaceAdmissionWrites } from '../rbac/namespace-admission'
 import {
   auditDelegatedAdminScopeCleanup,
   isAdminLevelPermissionCode,
@@ -890,9 +890,14 @@ export function rolesRouter(): Router {
    * delete now removes the role's `user_roles` rows through the role-assignment boundary
    * (`unassignUserRoles`, scope `platform-admin` — the caller was just proven one) on THIS
    * transaction's client, which also drops each member's delegated audience for the namespace once
-   * no other held role derives it. Membership, audience and the role row commit or roll back
-   * together. Deliberately NOT for the seeded `admin` role: removing every platform administrator's
-   * membership is a lock-out, not a cleanup, and stays a separate, explicit decision.
+   * no other held role derives it. Before that unassign, the same transaction locks
+   * `namespace-admission:<member>` for the snapshotted members in sorted id order. The role row
+   * lock is already held, matching delegated unassign (role lock, then the user lock). A scope
+   * insert that holds the user lock cannot commit an audience row this cleanup did not see.
+   * A membership that arrives after the snapshot is not in that lock set. Membership, audience
+   * and the role row commit or roll back together. The seeded `admin` role is not deleted at
+   * all: a role_id ON DELETE CASCADE would remove every admin membership and bypass the
+   * last-admin guard. That DELETE answers 409 before any membership or role write.
    *
    * GRANTS GO WITH IT TOO (same roles, same transaction): `role_permissions` rows for the id are
    * deleted, so a later POST of the same id by a roles:write holder starts from an EMPTY set and any
@@ -902,6 +907,19 @@ export function rolesRouter(): Router {
   r.delete('/api/roles/:id', rbacGuard('roles', 'write'), async (req: Request, res: Response) => {
     const id = req.params.id
     const actorId = req.user?.id?.toString()
+    // Before any lock or write. A platform administrator used to be allowed through, and
+    // a role_id CASCADE then removed every admin membership. The refusal does not depend
+    // on whether that foreign key exists.
+    if (id === PLATFORM_ADMIN_ROLE_ID) {
+      const error = new RolePermissionRequestError(
+        409,
+        'RESERVED_ADMIN_ROLE_DELETE_FORBIDDEN',
+        'The reserved platform administrator role cannot be deleted',
+        { roleId: id },
+      )
+      await recordRoleWriteRefusal({ action: 'delete', actorId, roleId: id, error })
+      return sendRolePermissionRequestError(res, error)
+    }
     if (pool) {
       let before: unknown = null
       let memberIds: string[] = []
@@ -930,14 +948,13 @@ export function rolesRouter(): Router {
           // (migrations/033_create_rbac_core.sql:36) and the rows are gone afterwards. Inside,
           // because it is PRE-commit: a failed read answers the 500 below with nothing deleted.
           memberIds = await readRoleMemberIds(id, client)
-          // D21 (Y5a): every member's subject authorization version row, sorted, before any
-          // membership row goes — explicitly through unassignUserRoles below, or implicitly through
-          // the `roles → user_roles` cascade where that FK exists (the cascade's trigger bumps would
-          // otherwise land in scan order, racing a concurrent multi-user revocation).
-          await bumpSubjectAuthorizationVersions(client, memberIds)
           if (protection && protection.kind !== 'platform_admin_role') {
             removesMemberships = true
             if (memberIds.length > 0) {
+              const lockedMemberIds = [...memberIds].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0))
+              for (const memberId of lockedMemberIds) {
+                await lockNamespaceAdmissionWrites(client, memberId)
+              }
               membershipRemoval = await unassignUserRoles({
                 userIds: memberIds,
                 roleId: id,
@@ -952,6 +969,16 @@ export function rolesRouter(): Router {
             // any surviving membership keeps them. Same transaction, so it commits with the rest.
             await client.query('DELETE FROM role_permissions WHERE role_id=$1', [id])
           }
+          // D21 (Y5a): every member's subject authorization version row, sorted, before the role row
+          // goes and with it the `roles → user_roles` cascade where that FK exists (the cascade's
+          // trigger bumps would otherwise land in scan order, racing a concurrent multi-user
+          // revocation). It sits AFTER the namespace-admission locks above (the writer rule: locks
+          // outside the admission holder's set first, then the version row; every
+          // lockSharedAccessSubjects caller takes advisory → version row, so a version row taken
+          // before those locks is one half of a writer-vs-writer 40P01). The protected branch's
+          // membership removal already took the same rows, sorted, inside unassignUserRoles, after
+          // those locks and before its DELETE; here they are held, and an ordinary role takes them now.
+          await bumpSubjectAuthorizationVersions(client, memberIds)
           await client.query('DELETE FROM roles WHERE id=$1', [id])
         })
       } catch (error) {

@@ -46,7 +46,9 @@
 //                  same posture as the W6 smoke)
 //   leak scan    : every non-exempt response body scanned against the fixture + engine-message
 //                  sentinels; the ONLY exempt response is /mvp/sync/plan (same-origin echo), counted
-//                  and asserted to stay at exactly 1.
+//                  and asserted to stay at exactly 1. The two sandbox-target/ensure bodies are scanned
+//                  with ONLY their data.targetBinding removed (the caller's own objectId echo, #5459);
+//                  that binding is asserted on its own instead — see leakScanSubject().
 //
 // R5 (route-coverage 22/33 -> 33/33) — 11 PREVIOUSLY UNTOUCHED routes added:
 //   target       : target/readiness -> target/ensure x2 (idempotent — CANONICAL, tenant-level, no
@@ -255,9 +257,15 @@ export function buildExtendedSmokeFixture(salt, projectPrefix = 'stockprep-t4') 
       drawingA, drawingB, drawingC, pathA, pathB, pathC, unitPlm, unitErp,
       erpItemA, erpItemB, erpItemC, materialNameA, materialNameB, materialNameC,
       String(qtyA), String(qtyB), String(qtyC), sourceProjectNo, projectName,
-      // R5: neither ever crosses in cleartext (sandbox target/option-sync responses only ever project
-      // an objectIdHash, never the raw objectId or label), but every value-bearing request token this
-      // fixture mints doubles as a leak-scan sentinel per this file's own convention (see header).
+      // R5: every value-bearing request token this fixture mints doubles as a leak-scan sentinel per
+      // this file's own convention (see header). The label never crosses in cleartext, and the
+      // evidence/optionSync halves of the sandbox target responses only ever project an objectIdHash.
+      // ONE sanctioned exception since #5459: sandbox-target/ensure also returns `targetBinding`, the
+      // binding a deployer pastes into the table-actions config, which echoes the caller's OWN raw
+      // objectId (http-routes.cjs publicStockPreparationSandboxTargetResult). The global scan removes
+      // only that member, only on the two sandbox-target-ensure bodies (leakScanSubject), and the
+      // binding is asserted separately (sandboxTargetBindingEchoValid): objectId equals this sentinel,
+      // and nothing else in it carries any sentinel. Both sentinels stay in force for every response.
       sandboxObjectId, sandboxLabel,
     ],
   }
@@ -277,6 +285,40 @@ export function buildTargetOptionSetsFixture() {
     blank_type: set(['casting', 'forging', 'sheet']),
     stock_preparation_status: set(['pending', 'in_progress', 'completed']),
   }
+}
+
+// #5459: sandbox-target/ensure returns `data.targetBinding` ({ sheetId, objectId, keyField, fieldIdMap },
+// http-routes.cjs publicStockPreparationSandboxTargetResult). Its `objectId` is the caller's OWN raw
+// request value, which this fixture also uses as a leak-scan sentinel. These are the ONLY two collected
+// responses whose scan subject differs from the body, and the ONLY member removed is that one.
+export const TARGET_BINDING_ECHO_LABELS = Object.freeze(['sandbox-target-ensure-1', 'sandbox-target-ensure-2'])
+
+function isPlainRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+// The subject the global leak scan reads for one collected entry. A copy is built; the collected body
+// itself is never mutated, so the separate targetBinding assertion and every other reader still see
+// exactly what the server returned. Every other label, and every other member of these two bodies
+// (evidence, optionSync, mode, ...), is scanned unchanged.
+export function leakScanSubject(entry) {
+  const body = entry && entry.body !== undefined && entry.body !== null ? entry.body : {}
+  if (!TARGET_BINDING_ECHO_LABELS.includes(entry && entry.label)) return body
+  if (!isPlainRecord(body) || !isPlainRecord(body.data) || !Object.hasOwn(body.data, 'targetBinding')) return body
+  const { targetBinding: _echo, ...data } = body.data
+  return { ...body, data }
+}
+
+// The separate assertion for the member leakScanSubject() removes: the binding exists, its objectId is
+// EXACTLY the caller's own objectId, it names a sheet, and NOTHING ELSE in it carries any sentinel
+// (sheetId and fieldIdMap are sha1-derived; scanning them still proves the echo is the only plaintext).
+// Returns a boolean only, so no caller can put the objectId itself into a check detail.
+export function sandboxTargetBindingEchoValid(targetBinding, { objectId, sentinels }) {
+  if (!isPlainRecord(targetBinding)) return false
+  if (typeof objectId !== 'string' || objectId.length < 1 || targetBinding.objectId !== objectId) return false
+  if (typeof targetBinding.sheetId !== 'string' || targetBinding.sheetId.length < 1) return false
+  const { objectId: _echo, ...rest } = targetBinding
+  return leakScan(rest, sentinels)
 }
 
 // R5 route-coverage bookkeeping. `${API}/snapshot-batches/:id/diff(/rows)` carry a real batch id in the
@@ -651,6 +693,16 @@ async function main() {
     sandboxEnsure2.ok && sandboxEnsure2.body?.data?.ready === true &&
     sandboxEnsure2.body?.data?.mode !== 'sandbox_create',
     `http1=${sandboxEnsure1.status} mode1=${S.sandboxEnsure1Mode} http2=${sandboxEnsure2.status} mode2=${S.sandboxEnsure2Mode}`)
+  // #5459: the one sanctioned plaintext echo, asserted on its own because the global leak scan below
+  // reads these two bodies without data.targetBinding (leakScanSubject). Booleans only in the detail.
+  const bindingEcho = (res) => sandboxTargetBindingEchoValid(res.body?.data?.targetBinding, {
+    objectId: fixture.sandboxObjectId, sentinels: SELF_SCAN_SENTINELS,
+  })
+  const bindingEcho1 = bindingEcho(sandboxEnsure1)
+  const bindingEcho2 = bindingEcho(sandboxEnsure2)
+  S.sandboxEnsureTargetBindingEcho = bindingEcho1 && bindingEcho2 ? 'PASS' : 'FAIL'
+  must('R5 B2b sandbox-target/ensure targetBinding echoes exactly the caller objectId, names a sheet, and carries no other sentinel',
+    bindingEcho1 && bindingEcho2, `binding1=${bindingEcho1} binding2=${bindingEcho2}`)
 
   // ── R5 B3 options/sync — OPT-IN ONLY, and deliberately so ────────────────────────────────────
   // This route is DESTRUCTIVE on a SHARED CURATED surface and there is no way to aim it elsewhere:
@@ -1165,7 +1217,7 @@ async function main() {
   // ── 12. global leak scan over every collected (non-exempt) response body ─────────────────────
   const scanned = COLLECTED.filter((entry) => !entry.exempt)
   const exempted = COLLECTED.filter((entry) => entry.exempt)
-  const leakingLabels = scanned.filter((entry) => !leakScan(entry.body ?? {}, SELF_SCAN_SENTINELS)).map((entry) => entry.label)
+  const leakingLabels = scanned.filter((entry) => !leakScan(leakScanSubject(entry), SELF_SCAN_SENTINELS)).map((entry) => entry.label)
   S.leakScanResponses = scanned.length
   S.leakScanExempted = exempted.length
   S.leakScanClean = leakingLabels.length === 0

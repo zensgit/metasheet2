@@ -76,6 +76,7 @@ const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
 const kit = require(path.join(__dirname, 'support', 'stock-preparation-refresh-store-kit.cjs'))
+const { emptyIntentFor } = kit
 const storeModule = require(path.join(LIB, 'stock-preparation-continuation-store.cjs'))
 const pairing = require(path.join(LIB, 'stock-preparation-continuation-pairing.cjs'))
 const { readProjectRefreshState } = require(path.join(LIB, 'stock-preparation-refresh-state.cjs'))
@@ -204,7 +205,9 @@ test('ST-01 migrations 102 / 103: tables, vocabularies set-equal to the pure cor
   const sql103 = kit.readMigrationText(kit.MIGRATION_FILES.refreshState)
   // Step 5 PR-8: REFRESH_STORE_TABLES names the change-plan table too (migration 104; its own suite pins it).
   const sql104 = kit.readMigrationText(kit.MIGRATION_FILES.changePlan)
-  const both = `${sql102}\n${sql103}\n${sql104}`
+  // Step 6a-1 (S6-1): REFRESH_STORE_TABLES names the intent journal too (migration 106; KIT-01 pins its shape).
+  const sql106 = kit.readMigrationText(kit.MIGRATION_FILES.recovery)
+  const both = `${sql102}\n${sql103}\n${sql104}\n${sql106}`
   for (const table of Object.values(T)) assert.ok(both.includes(`CREATE TABLE IF NOT EXISTS ${table} (`), table)
   for (const sql of [sql102, sql103, sql104]) {
     assert.doesNotMatch(sql, /\bDROP\s+TABLE\b/i, 'forward migration must not drop tables')
@@ -802,7 +805,7 @@ test('ST-10 executions: begin -> running; finish succeeded stamps the bound cont
   await seedHolds(w, [hold])
   const confirmed = await confirmHold(w, hold)
   const guard = { leaseRunId: 'run_1', leaseId: 'lease_1', fencingEpoch: 3, generation: 9, generationToken: 'tok_9' }
-  const begin = { ...scope, lane: 'small_apply', guard, tokenRevision: 'rev_1', planDigest: 'plan_1', plannedCounts: { add: 2, update: 0, inactive: 0 }, refreshBinding: { continuations: [{ id: confirmed.continuationId, revision: 1 }], holdSetFingerprint: null }, startedBy: PULLER }
+  const begin = { ...scope, lane: 'small_apply', guard, tokenRevision: 'rev_1', planDigest: 'plan_1', plannedCounts: { add: 2, update: 0, inactive: 0 }, refreshBinding: { continuations: [{ id: confirmed.continuationId, revision: 1 }], holdSetFingerprint: null }, startedBy: PULLER, intent: emptyIntentFor('plan_1') }
   await expectError(store.beginExecution({ ...begin, lane: 'large_apply_chunk' }), { status: 500, code: CODES.INPUT_INVALID })
   await expectError(store.beginExecution({ ...begin, guard: { ...guard, leaseId: '' } }), { status: 500, code: CODES.INPUT_INVALID })
   const execution = await store.beginExecution(begin)
@@ -864,7 +867,7 @@ test('ST1-a lock order (TD-23, PR-3a ST-1): a SETTLING finish locks the refresh-
   await seedHolds(w, [w.hold])
   const confirmed = await confirmHold(w, w.hold)
   const guard = { leaseRunId: 'run_1', leaseId: 'lease_1', fencingEpoch: 3, generation: 9, generationToken: 'tok_9' }
-  const begin = { ...scope, lane: 'small_apply', guard, tokenRevision: 'rev_1', planDigest: 'plan_1', plannedCounts: { add: 0, update: 0, inactive: 0 }, refreshBinding: { continuations: [{ id: confirmed.continuationId, revision: 1 }], holdSetFingerprint: null }, startedBy: PULLER }
+  const begin = { ...scope, lane: 'small_apply', guard, tokenRevision: 'rev_1', planDigest: 'plan_1', plannedCounts: { add: 0, update: 0, inactive: 0 }, refreshBinding: { continuations: [{ id: confirmed.continuationId, revision: 1 }], holdSetFingerprint: null }, startedBy: PULLER, intent: emptyIntentFor('plan_1') }
   const settling = await store.beginExecution(begin)
   db.log.length = 0
   await store.finishExecution({ ...scope, executionId: settling.id, status: 'succeeded', written: 0, attemptedWrites: 0, counts: { add: 0, update: 0, inactive: 0, failed: 0 }, settlement: { executionId: settling.id, generationToken: 'tok_9', sourceContentDigest: 'src_1', sheetMachineDigest: 'machine_1' } })
@@ -1006,7 +1009,7 @@ test('ST-14 one consult snapshot (review X-1): every read in ONE transaction pin
   assert.deepEqual(log[1], ['trx.setTransactionIsolationLevel', 'repeatable read'], 'the pin is the transaction\'s FIRST statement')
   assert.deepEqual(log[log.length - 1], ['commit', null])
   const reads = log.slice(2, -1)
-  assert.equal(reads.length, 22, 'continuations x2, members x2, holds x2, states x2, executions (2 newest + 8 unfinished), change plans (PR-8: 2 pending statuses x 2; the latest reviewed plan only once a review wrote its digest — review fix N3)')
+  assert.equal(reads.length, 24, 'continuations x2, members x2, holds x2, states x2, executions (2 newest + 2 newest settlement subjects (step 6a-1) + 8 unfinished), change plans (PR-8: 2 pending statuses x 2; the latest reviewed plan only once a review wrote its digest — review fix N3)')
   assert.ok(reads.every(([method]) => method === 'trx.select'), `every read on the transaction handle, none in autocommit: ${JSON.stringify(reads)}`)
   // readFirst: once, on THE transaction handle, after BEGIN + the pin, before any step-4 read.
   assert.equal(seen.length, 1)
@@ -1353,7 +1356,7 @@ test('ST-20 (M4) the confirm re-reads the executions AFTER the bump: (i) a runni
     const { store, db, scope, bump } = w
     await seedHolds(w, [w.hold])
     const guard = { leaseRunId: 'run_st20', leaseId: 'lease_st20', fencingEpoch: 3, generation: 9, generationToken: 'tok_9' }
-    await store.beginExecution({ ...scope, lane: 'small_apply', guard, tokenRevision: 'rev_st20', planDigest: 'plan_st20', plannedCounts: { add: 1, update: 0, inactive: 0 }, refreshBinding: { continuations: [] }, startedBy: PULLER })
+    await store.beginExecution({ ...scope, lane: 'small_apply', guard, tokenRevision: 'rev_st20', planDigest: 'plan_st20', plannedCounts: { add: 1, update: 0, inactive: 0 }, refreshBinding: { continuations: [] }, startedBy: PULLER, intent: emptyIntentFor('plan_st20') })
     const before = tablesSnapshot(db)
     bump.refuseWith(kit.writeLockedError())
     db.log.length = 0
@@ -1368,7 +1371,7 @@ test('ST-20 (M4) the confirm re-reads the executions AFTER the bump: (i) a runni
     const { store, db, scope, bump } = w
     await seedHolds(w, [w.hold])
     const guard = { leaseRunId: 'run_st20b', leaseId: 'lease_st20b', fencingEpoch: 3, generation: 9, generationToken: 'tok_9' }
-    const execution = await store.beginExecution({ ...scope, lane: 'small_apply', guard, tokenRevision: 'rev_st20b', planDigest: 'plan_st20b', plannedCounts: { add: 1, update: 0, inactive: 0 }, refreshBinding: { continuations: [] }, startedBy: PULLER })
+    const execution = await store.beginExecution({ ...scope, lane: 'small_apply', guard, tokenRevision: 'rev_st20b', planDigest: 'plan_st20b', plannedCounts: { add: 1, update: 0, inactive: 0 }, refreshBinding: { continuations: [] }, startedBy: PULLER, intent: emptyIntentFor('plan_st20b') })
     await store.finishExecution({ ...scope, executionId: execution.id, status: 'failed', written: 0, attemptedWrites: 1 })
     const before = tablesSnapshot(db)
     const bumpsBefore = bump.calls.length

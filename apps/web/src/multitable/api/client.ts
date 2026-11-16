@@ -801,6 +801,56 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * (`GET /api/multitable/sheets/:sheetId/records/:recordId/tasks`): ids, the title, the status and the
  * dates. `isMine` is whether the viewer created it. No person and no record value.
  */
+/** C1/S2 synthetic integration preview: fixed catalog ids only (no rows, no connection, no URL). */
+export interface AutomationIntegrationPreviewCatalog {
+  planId: string
+  operation: { id: string; version: number }
+  consumer: string
+  fixtureIds: string[]
+  mappingPresetIds: string[]
+  budget: { maxPages: number; maxRows: number; maxBytes: number; maxInFlight: number; deadlineMs: number }
+}
+
+export interface AutomationIntegrationPreviewRequest {
+  planId: string
+  fixtureId: string
+  mappingPresetId: string
+}
+
+export interface AutomationIntegrationPreviewRow {
+  index: number
+  status: string
+  businessKeyDigest: string
+  payloadDigest: string
+  fields: Record<string, string | number | boolean | null>
+}
+
+/** Synthetic preview result. It is never a send/apply authority: the four flags are always false. */
+export interface AutomationIntegrationPreviewResult {
+  ok: true
+  synthetic: true
+  summary: {
+    outcome: string
+    fixtureId: string
+    mappingPresetId: string
+    counts: { pages: number; rows: number; bytes: number }
+    durationMs: number
+    steps: Array<{ stepId: string; type: string; status: string; durationMs: number }>
+  }
+  preview: {
+    intent: string
+    rowCount: number
+    planDigest: string
+    keyDefinitionDigest: string
+    locatorDigest: string
+    rows: AutomationIntegrationPreviewRow[]
+  }
+  canSend: false
+  canApply: false
+  tokenIssued: false
+  externalWriteAttempted: false
+}
+
 export interface MetaRecordTaskItem {
   id: string
   title: string
@@ -4461,6 +4511,39 @@ export class MultitableApiClient implements CommentsApiClient {
       { method: 'POST' },
     )
     return this.parseJson<AutomationExecution>(res)
+  }
+
+  // --- C1/S2 synthetic integration preview (default OFF; its own endpoint, never simulate/real_fire) ---
+
+  /** Values-free catalog of fixed ids. Rejects (404 INTEGRATION_PREVIEW_DISABLED) while the switch is off. */
+  async getAutomationIntegrationPreviewCatalog(sheetId: string): Promise<AutomationIntegrationPreviewCatalog> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/integration-preview/catalog`,
+      { cache: 'no-store' },
+    )
+    const data = await this.parseJson<{ catalog?: AutomationIntegrationPreviewCatalog }>(res)
+    if (!data?.catalog) throw new Error('INTEGRATION_PREVIEW_CATALOG_UNAVAILABLE')
+    return data.catalog
+  }
+
+  /** Manual synthetic preview. The body is exactly the three fixed ids; the result stays in caller memory. */
+  async previewAutomationIntegration(
+    sheetId: string,
+    ruleId: string,
+    request: AutomationIntegrationPreviewRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AutomationIntegrationPreviewResult> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}/integration-preview`,
+      {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ planId: request.planId, fixtureId: request.fixtureId, mappingPresetId: request.mappingPresetId }),
+        ...(options.signal ? { signal: options.signal } : {}),
+      },
+    )
+    return this.parseJson<AutomationIntegrationPreviewResult>(res)
   }
 
   async getAutomationLogs(sheetId: string, ruleId: string, limit?: number): Promise<AutomationExecution[]> {

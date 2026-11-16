@@ -29,6 +29,7 @@ import {
   INVITE_TARGET_UPDATE_MISMATCH,
   inviteAcceptWriteErrorCode,
 } from '../auth/invite-accept-writes'
+import { INVITE_NOT_PENDING, isInviteTokenPending } from '../auth/invite-ledger'
 import { verifyInviteToken } from '../auth/invite-tokens'
 import { validatePassword } from '../auth/password-policy'
 import { classifyRecoveryConflict, sendIfRecoveryConflict } from '../db/recovery-conflict'
@@ -45,6 +46,8 @@ import { isApprovalAttachmentsEnabled } from './approval-attachments'
 import { isApprovalCanvasV2Enabled } from '../services/approval-canvas-flag'
 import { isApprovalCcUnreadBadgeEnabled, isApprovalMineOutcomeBadgeEnabled } from '../services/approval-notify-badge-flags'
 import { isFwbWritebackEnabled } from '../multitable/approval-fwb-activation'
+import { isIntegrationAutomationRunActionEnabled } from '../multitable/automation-run-integration-job'
+import { isIntegrationAutomationRunEventEnabled } from '../core/integration-run-events'
 import { isAttendanceGroupEffectivePolicyPanelEnabledForOrgV1 } from '../attendance/w6-group-effective-policy-panel-flag'
 import { extractTenantFromHeaders } from '../db/sharding/tenant-context'
 import { parseUserActivationStatus } from '../auth/user-activation'
@@ -328,6 +331,16 @@ function buildFeaturePayload(authUser: User) {
     // /api/tasks. The web hides the 任务 entry, its badge and the /tasks route otherwise, so a
     // server without the flag issues no /api/tasks request at all. Never inferred from role.
     tasks: isTasksEnabled(),
+    // R-69 1b-iii: surfaces I3's INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED (default OFF, exact 'true') so the
+    // automation rule editor offers run_integration_job only when a save could succeed (ADR PR 1b-iii: not
+    // rendered while the switch is off). The SAME predicate gates the save (403 RUN_ACTION_DISABLED) and every
+    // trigger. Not a new flag. Never inferred from role/mode/plugin state.
+    integrationAutomationRunAction: isIntegrationAutomationRunActionEnabled(),
+    // R-69 1c: surfaces INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED (default OFF, exact 'true') so the rule editor
+    // offers the integration.run_finished trigger (and its alert template) only while summaries can actually be
+    // published and received. The SAME predicate gates publish, receipt and dispatch. Not a new flag. Never
+    // inferred from role/mode/plugin state.
+    integrationAutomationRunEvent: isIntegrationAutomationRunEventEnabled(),
     mode,
   }
 }
@@ -875,6 +888,16 @@ authRouter.get('/invite/preview', async (req: Request, res: Response) => {
       })
     }
 
+    // An invite token is usable only while the ledger holds it on a pending row. A revoked invite and
+    // a token replaced by a later one answer here, before anything about the invited account is read.
+    if (!(await isInviteTokenPending(token))) {
+      return res.status(409).json({
+        success: false,
+        error: 'Invite is no longer valid',
+        code: INVITE_NOT_PENDING,
+      })
+    }
+
     const target = await getInviteTarget(payload.userId, payload.email)
     if (!target) {
       return res.status(404).json({
@@ -939,6 +962,17 @@ authRouter.post('/invite/accept', async (req: Request, res: Response) => {
       return res.status(400).json({
         success: false,
         error: 'Invite token is invalid or expired',
+      })
+    }
+
+    // Same rule as the preview: a token the ledger does not hold on a pending row gets this one
+    // answer, before the password is looked at and before anything about the invited account is
+    // read. The ledger consume inside the acceptance transaction below remains the authority.
+    if (!(await isInviteTokenPending(token))) {
+      return res.status(409).json({
+        success: false,
+        error: 'Invite is no longer valid',
+        code: INVITE_NOT_PENDING,
       })
     }
 
@@ -1797,10 +1831,14 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
         ? classifyDirectoryFailureText(error, { fallback: 'DingTalk authentication failed' }).text
         : 'DingTalk authentication failed'
 
+    // Policy refusals carry their stable code (status unchanged) so the callback page can show
+    // fixed guidance instead of the message; the set of codes is pinned in auth-login-routes.test.ts.
     return res.status(statusCode).json({
       success: false,
       error: message,
-      ...(error instanceof DingTalkActivationIntentError ? { code: error.code } : {}),
+      ...(error instanceof DingTalkActivationIntentError || error instanceof DingTalkLoginPolicyError
+        ? { code: error.code }
+        : {}),
     })
   }
 })

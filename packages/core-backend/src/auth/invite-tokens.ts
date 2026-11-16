@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import jwt, { type SignOptions } from 'jsonwebtoken'
 import { secretManager } from '../security/SecretManager'
 import { resolveRuntimeJwtSecret } from '../security/auth-runtime-config'
@@ -7,6 +8,8 @@ export interface InviteTokenPayload {
   userId: string
   email: string
   presetId?: string | null
+  /** Identifier of this one token. */
+  jti?: string
   iat?: number
   exp?: number
 }
@@ -24,6 +27,11 @@ function getInviteSecret(): string {
   return resolveRuntimeJwtSecret(process.env.JWT_SECRET)
 }
 
+/**
+ * Every issued invite token is distinct: each carries its own random `jti`, so two tokens issued for
+ * the same account, preset and lifetime are never the same string. The invite ledger matches a token
+ * by exact equality, so replacing the token on a ledger row always retires the one before it.
+ */
 export function issueInviteToken(options: {
   userId: string
   email: string
@@ -36,6 +44,7 @@ export function issueInviteToken(options: {
     userId: options.userId,
     email: options.email,
     presetId: options.presetId || null,
+    jti: randomUUID(),
   }
 
   return jwt.sign(payload, getInviteSecret(), {

@@ -35,6 +35,19 @@ import {
   updateDirectoryIntegrationIdentity,
 } from '../directory/directory-sync'
 import { getDirectoryInactiveLinkedMetric, getDirectoryManagerBindingCoverage } from '../directory/directory-sync-alert-delivery'
+import {
+  DIRECTORY_ROUTING_POLICY_REQUIRED_CODE,
+  DIRECTORY_ROUTING_POLICY_REQUIRED_MESSAGE,
+  DirectoryRoutingPolicyRequiredError,
+} from '../directory/pull-source-rule'
+import {
+  DIRECTORY_ROUTING_GATE_BUSY_CODE,
+  DIRECTORY_ROUTING_GATE_BUSY_MESSAGE,
+  DIRECTORY_ROUTING_GATE_UNAVAILABLE_CODE,
+  DIRECTORY_ROUTING_GATE_UNAVAILABLE_MESSAGE,
+  DirectoryRoutingGateBusyError,
+  DirectoryRoutingGateUnavailableError,
+} from '../directory/pull-source-write-gate'
 import { classifyDirectoryFailureText, type FixedSentenceErrorClass } from '../directory/directory-failure-text'
 import { isDingTalkOutcomeUnknown } from '../integrations/dingtalk/client'
 import { DingTalkConfigValidationError } from '../integrations/dingtalk/config-validation-error'
@@ -129,6 +142,36 @@ function sendIfLoginAliasConflict(res: Response, error: unknown): boolean {
   if (!(error instanceof LoginAliasClaimError) || error.code !== 'ALIAS_CONFLICT') return false
   jsonError(res, 409, 'LOGIN_ALIAS_CONFLICT', error.message)
   return true
+}
+
+/**
+ * A refusal of the pull-source write gate, decided by the error's TYPE: no policy while the organisation
+ * would hold a further source is 409; a gate transaction that lost a lock race or ran out of time, and a
+ * source count that could not be read, are retryable 503s. Every body is the gate's fixed sentence. A
+ * refusal writes one values-free log line (the code, the operator, the integration when there is one) and
+ * no audit row. Returns false for any other error, with nothing sent.
+ */
+export function sendIfPullSourceGateRefusal(
+  res: Response,
+  error: unknown,
+  context: { actorId: string; integrationId?: string },
+): boolean {
+  if (error instanceof DirectoryRoutingPolicyRequiredError) {
+    logger.warn('Directory source write refused: a routing policy is required', { code: DIRECTORY_ROUTING_POLICY_REQUIRED_CODE, ...context })
+    jsonError(res, 409, DIRECTORY_ROUTING_POLICY_REQUIRED_CODE, DIRECTORY_ROUTING_POLICY_REQUIRED_MESSAGE)
+    return true
+  }
+  if (error instanceof DirectoryRoutingGateBusyError) {
+    logger.warn('Directory source check busy', { code: DIRECTORY_ROUTING_GATE_BUSY_CODE, sqlState: error.sqlState, ...context })
+    jsonError(res, 503, DIRECTORY_ROUTING_GATE_BUSY_CODE, DIRECTORY_ROUTING_GATE_BUSY_MESSAGE)
+    return true
+  }
+  if (error instanceof DirectoryRoutingGateUnavailableError) {
+    logger.warn('Directory source check unavailable', { code: DIRECTORY_ROUTING_GATE_UNAVAILABLE_CODE, ...context })
+    jsonError(res, 503, DIRECTORY_ROUTING_GATE_UNAVAILABLE_CODE, DIRECTORY_ROUTING_GATE_UNAVAILABLE_MESSAGE)
+    return true
+  }
+  return false
 }
 
 /**
@@ -519,10 +562,11 @@ export function adminDirectoryRouter(): Router {
     }
 
     try {
-      const integration = await createDirectoryIntegration(req.body as Record<string, unknown> as never)
+      const integration = await createDirectoryIntegration(req.body as Record<string, unknown> as never, { actorId: adminUserId })
       await refreshDirectoryIntegrationSchedule(integration.id)
       jsonOk(res, { integration })
     } catch (error) {
+      if (sendIfPullSourceGateRefusal(res, error, { actorId: adminUserId })) return
       // The corp allowlist refusing the submitted corpId is a policy verdict on the caller's input, typed by
       // its own class: it keeps the 400 (and its sentence) it always had.
       if (error instanceof DingTalkCorpNotAllowedError) {
@@ -602,7 +646,7 @@ export function adminDirectoryRouter(): Router {
     }
 
     try {
-      const integration = await updateDirectoryIntegration(req.params.integrationId, req.body as Record<string, unknown> as never)
+      const integration = await updateDirectoryIntegration(req.params.integrationId, req.body as Record<string, unknown> as never, { actorId: adminUserId })
       if (!integration) {
         jsonError(res, 404, 'DIRECTORY_NOT_FOUND', 'Directory integration not found')
         return
@@ -610,6 +654,7 @@ export function adminDirectoryRouter(): Router {
       await refreshDirectoryIntegrationSchedule(integration.id)
       jsonOk(res, { integration })
     } catch (error) {
+      if (sendIfPullSourceGateRefusal(res, error, { actorId: adminUserId, integrationId: req.params.integrationId })) return
       // R-41: the class's own developer-authored sentence (its one thrower interpolates only the path's
       // integration id), never a caught text read generically.
       if (error instanceof DirectoryTenantChangeBlockedError) {

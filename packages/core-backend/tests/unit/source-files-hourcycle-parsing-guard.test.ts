@@ -221,6 +221,13 @@ const KNOWN_SITES: KnownSite[] = [
     kind: 'parsing',
   },
   {
+    // notifications/quiet-hours.ts `localMinutes()` — formatToParts, hour/minute parts read as
+    // numbers; `hourCycle: 'h23'` with a `% 24` fold. PARSING and compliant.
+    file: 'packages/core-backend/src/notifications/quiet-hours.ts',
+    lineText: "formatter = new Intl.DateTimeFormat('en-US', { timeZone, hourCycle: 'h23', hour: '2-digit', minute: '2-digit' })",
+    kind: 'parsing',
+  },
+  {
     // AttendanceNotificationDeliveryWorker.ts `isAttendanceNotificationQuietHours()` —
     // formatToParts, hour/minute parts read directly as HH:MM comparison inputs.
     file: 'packages/core-backend/src/services/AttendanceNotificationDeliveryWorker.ts',
@@ -332,6 +339,20 @@ const KNOWN_SITES: KnownSite[] = [
     // used only to force the RangeError on an unknown zone. No hour option at all.
     file: 'packages/core-backend/src/multitable/automation-timezone.ts',
     lineText: "new Intl.DateTimeFormat('en-US', { timeZone: timeZone.trim() }).format(0)",
+    kind: 'display',
+  },
+  {
+    // yida-issue-confirm-writeback.cjs `isValidIanaTimeZone()` (slice Y9a) — the plugin mirror of the
+    // automation-timezone.ts probe above: `.format(0)` discarded, RangeError on an unknown zone. No hour option.
+    file: 'plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs',
+    lineText: "new Intl.DateTimeFormat('en-US', { timeZone: timeZone.trim() }).format(0)",
+    kind: 'display',
+  },
+  {
+    // yida-issue-confirm-writeback.cjs `issueConfirmBusinessDay()` (slice Y9a) — the en-CA date-key idiom:
+    // formatToParts, year/month/day only, interpolated into the floating YYYY-MM-DD issue-confirm date. No hour.
+    file: 'plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs',
+    lineText: "const parts = new Intl.DateTimeFormat('en-CA', {",
     kind: 'display',
   },
   {
@@ -758,7 +779,9 @@ describe('repo guard: h24-midnight hourCycle/hour12 parsing hazard (issue #4922)
     // 31 = 29 + two hour-free attendance timezone validity probes.
     // 37 = 31 + three hour-free multi-timezone date keys and three validity probes.
     // 38 = 37 + the daily scheduler's hour-free year/month/day key.
-    expect(KNOWN_SITES.length).toBe(38)
+    // 41 = 38 + the quiet-hours parsing formatter (hourCycle 'h23') + the YiDa issue-confirm write-back (slice Y9a):
+    // one zone-validity probe and one hour-free date key.
+    expect(KNOWN_SITES.length).toBe(41)
   })
 
   it('KNOWN_SITES covers exactly the real Intl.DateTimeFormat sites in the domain (set equality via coverageDiff — a new site reds this until classified)', () => {

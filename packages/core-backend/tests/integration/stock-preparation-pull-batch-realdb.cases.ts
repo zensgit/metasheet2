@@ -29,6 +29,10 @@
  *   BI-R16  (ruling C7) abort of a first install on real rows: no plan label and no live batch => pending with the
  *           lock cleared; a plan label on the sheet => the lock stays; the CHECK itself refuses an `installing` row
  *           that loses its lock.
+ *   BI-R17  (BI-7; ruling C8) the settings routes' audit adapter over the REAL audit store: a tenant write and a
+ *           per-sheet edit commit with exactly one `project_fields_update` row (tenant: project_id NULL; sheet:
+ *           project_id = the project number, never in the flat detail); an append the store's values gate or PG's
+ *           action CHECK refuses rolls the setting back with it.
  * Values-free: every id is synthetic and per-run; the project numbers are the synthetic S-01 / P-07.
  */
 import { createRequire } from 'module'
@@ -185,6 +189,9 @@ export function defineStockPreparationPullBatchRealDbCases(): void {
       }
       await q(`DELETE FROM ${PULL_BATCH_TABLES.settings} WHERE tenant_id LIKE $1`, [`${TENANT}%`])
       if (lockScopes.length > 0) await q(`DELETE FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = ANY($1::text[])`, [lockScopes])
+      // BI-R17's audit rows (the immutability trigger may refuse the delete on a hardened database: tolerated, as the
+      // other stock-prep real-DB cases do — the rows are per-run synthetic tenants).
+      await q('DELETE FROM integration_stock_prep_audit WHERE tenant_id LIKE $1', [`${TENANT}%`]).catch(() => {})
     })
 
     test('BI-R0 migration 105: four tables, INTEGER counters, every closed CHECK refuses an out-of-vocabulary token (23514), the lock CHECK, the partial unique indexes (23505)', async () => {
@@ -442,6 +449,68 @@ export function defineStockPreparationPullBatchRealDbCases(): void {
       const guarded = sheetOf('r16_check')
       await seedSheet(guarded, { status: 'installing', lockedAt: new Date().toISOString(), plan })
       await expectSqlState(q(`UPDATE ${PULL_BATCH_TABLES.sheet} SET settings_locked_at = NULL WHERE sheet_id = $1`, [guarded]), '23514', C('sheet_lock_check'))
+    })
+
+    test('BI-R17 (BI-7; ruling C8) a setting and its audit row commit or roll back together on real PG: the tenant write and the per-sheet edit through the settings routes\' adapter; a refused append (store gate or PG CHECK) leaves neither', async () => {
+      const auditLib = require(path.join(PLUGIN_LIB, 'stock-preparation-audit-store.cjs')) as any
+      const settingsLib = require(path.join(PLUGIN_LIB, 'stock-preparation-pull-batch-settings.cjs')) as any
+      const db = hostLikeDb()
+      const store = storeOn(db)
+      const audit = auditLib.createStockPreparationAuditStore({ db })
+      const tenantId = `${TENANT}_r17`
+      const auditOf = async (tenant: string) => (await q(
+        'SELECT project_id, action, subject_id, mode, actor, detail FROM integration_stock_prep_audit WHERE tenant_id = $1 ORDER BY created_at, id',
+        [tenant],
+      )).rows
+      // The real action CHECK accepts 088's action (the routes' vocabulary probe asks exactly this).
+      expect((await audit.supportsAction('project_fields_update', { tenantId })).supported).toBe(true)
+
+      // The tenant write: the settings row and ONE audit row, committed together; project_id NULL; the flat detail.
+      const tenantAdapter = settingsLib.pullBatchSettingsAuditWithin({ audit, tenantId, actor: 'u_bi7_r17' })
+      const written = await store.writeTenantSettings({ tenantId, expectedVersion: 0, patch: { labelFormat: 'ordinal' }, auditWithin: tenantAdapter })
+      expect(written).toMatchObject({ source: 'tenant', version: 1 })
+      expect(tenantAdapter.appended).toBe(true)
+      expect(await auditOf(tenantId)).toEqual([{
+        project_id: null, action: 'project_fields_update', subject_id: null, mode: 'pull_batch_settings_tenant_updated', actor: 'u_bi7_r17',
+        detail: { labelFormatBefore: 'ordinal_date', labelFormatAfter: 'ordinal', version: 1 },
+      }])
+
+      // A refused append — the audit store's values gate (a detail value that is not a token) — rolls the write back.
+      const gateRefused = async (trx: any, entry: any) => audit.appendWithin(trx, {
+        tenantId, projectId: null, action: 'project_fields_update', subjectId: null, mode: entry.mode, actor: 'u_bi7_r17',
+        detail: { ...entry.detail, placementAfter: 'not a token' },
+      })
+      await expect(store.writeTenantSettings({ tenantId, expectedVersion: 1, patch: { placement: 'right' }, auditWithin: gateRefused }))
+        .rejects.toMatchObject({ code: 'AUDIT_DETAIL_INVALID' })
+      // …and one the DATABASE refuses (the action CHECK, 23514) rolls it back too (a 503 store failure).
+      const pgRefused = async (trx: any) => {
+        await trx.insertOne('integration_stock_prep_audit', { id: `bi7_r17_${TOKEN}`, tenant_id: tenantId, action: 'not_an_audit_action', detail: {} })
+      }
+      await expect(store.writeTenantSettings({ tenantId, expectedVersion: 1, patch: { placement: 'right' }, auditWithin: pgRefused }))
+        .rejects.toMatchObject({ code: PULL_BATCH_ERROR_CODES.STORE_FAILED, details: { sqlState: '23514' } })
+      const settingsRow = (await q(`SELECT band_placement, version FROM ${PULL_BATCH_TABLES.settings} WHERE tenant_id = $1`, [tenantId])).rows[0]
+      expect(settingsRow).toEqual({ band_placement: 'left', version: 1 })
+      expect((await auditOf(tenantId)).length).toBe(1)
+
+      // The per-sheet edit: project_id = the project number (ruling C12), subject_id = the sheet, the flat detail with no
+      // project number in it; the sheet row and the audit row committed together.
+      const sheetId = sheetOf('r17_sheet')
+      await seedSheet(sheetId)
+      const sheetAdapter = settingsLib.pullBatchSettingsAuditWithin({ audit, tenantId: TENANT, actor: 'u_bi7_r17', projectNo: 'P-07' })
+      const edited = await store.setSheetSettings({ tenantId: TENANT, sheetId, projectNo: 'P-07', expectedVersion: 0, patch: { firstPullBatchRule: 'predecessor_suffix' }, auditWithin: sheetAdapter })
+      expect(edited).toMatchObject({ captured: { firstPullBatchRule: 'predecessor_suffix' }, version: 1 })
+      const sheetAudit = (await auditOf(TENANT)).filter((row: any) => row.subject_id === sheetId)
+      expect(sheetAudit).toEqual([{
+        project_id: 'P-07', action: 'project_fields_update', subject_id: sheetId, mode: 'pull_batch_settings_sheet_updated', actor: 'u_bi7_r17',
+        detail: { firstPullBatchRuleBefore: 'material', firstPullBatchRuleAfter: 'predecessor_suffix', version: 1 },
+      }])
+      expect(JSON.stringify(sheetAudit[0].detail)).not.toContain('P-07')
+      // A refused append on the per-sheet edit leaves the captured row as it was.
+      await expect(store.setSheetSettings({ tenantId: TENANT, sheetId, projectNo: 'P-07', expectedVersion: 1, patch: { labelFormat: 'ordinal' }, auditWithin: pgRefused }))
+        .rejects.toMatchObject({ code: PULL_BATCH_ERROR_CODES.STORE_FAILED })
+      const sheetRow = (await q(`SELECT label_format, version FROM ${PULL_BATCH_TABLES.sheet} WHERE sheet_id = $1`, [sheetId])).rows[0]
+      expect(sheetRow).toEqual({ label_format: 'ordinal_date', version: 1 })
+      expect((await auditOf(TENANT)).filter((row: any) => row.subject_id === sheetId).length).toBe(1)
     })
   })
 }

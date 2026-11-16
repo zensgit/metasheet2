@@ -86,6 +86,9 @@ async function main() {
   const publicKeys = Object.keys(db).sort()
   const expected = [
     'ALLOWED_PREFIX', 'countRows', 'deleteRows', 'insertMany', 'insertOne',
+    // insertOneIfAbsent: the same sanctioned extension form as upsertOne (INSERT … ON CONFLICT (cols)
+    // DO NOTHING), for append-only evidence keyed by a natural id (yida-issue-confirm-writeback.cjs).
+    'insertOneIfAbsent',
     'select', 'selectOne',
     // selectOneForKeyShare: the writer's half of the external-system delete lock protocol
     // (external-system-pointer-lock.cjs). Same whitelist, same parameterization as
@@ -219,6 +222,34 @@ async function main() {
     await db6c.upsertOne('integration_pipelines', { id: 'x' }, { conflictColumns: ['id'] })
   } catch (e) { upsertNoSetErr = e }
   assert.ok(upsertNoSetErr && /no updatable column/.test(upsertNoSetErr.message))
+
+  // insertOneIfAbsent: single-statement INSERT ... ON CONFLICT (key) DO NOTHING, parameterized.
+  const mockDb6d = mockDatabase()
+  const db6d = createDb({ database: mockDb6d })
+  await db6d.insertOneIfAbsent(
+    'integration_yida_issue_confirm_writeback',
+    { ledger_id: 'l1', tenant_id: 't1', outcome: 'written' },
+    { conflictColumns: ['ledger_id'] },
+  )
+  assert.equal(mockDb6d.calls[0].sql,
+    'INSERT INTO "integration_yida_issue_confirm_writeback" ("ledger_id", "tenant_id", "outcome") VALUES ($1, $2, $3)'
+    + ' ON CONFLICT ("ledger_id") DO NOTHING RETURNING *')
+  assert.deepEqual(mockDb6d.calls[0].params, ['l1', 't1', 'written'])
+  for (const badOptions of [undefined, {}, { conflictColumns: [] }, { conflictColumns: 'ledger_id' }]) {
+    let ifAbsentErr = null
+    try { await db6d.insertOneIfAbsent('integration_pipelines', { id: 'x' }, badOptions) } catch (e) { ifAbsentErr = e }
+    assert.ok(ifAbsentErr && /conflictColumns/.test(ifAbsentErr.message), 'unkeyed DO NOTHING refused')
+  }
+  for (const [table, row, conflictColumns] of [
+    ['users', { id: 'x' }, ['id']],
+    ['integration_pipelines', { 'id"; DROP TABLE users; --': 'x' }, ['id']],
+    ['integration_pipelines', { id: 'x' }, ['id"; DROP TABLE users; --']],
+  ]) {
+    let scopeErr = null
+    try { await db6d.insertOneIfAbsent(table, row, { conflictColumns }) } catch (e) { scopeErr = e }
+    assert.ok(scopeErr instanceof ScopeViolationError, 'table / column / conflict-column whitelist applies')
+  }
+  assert.equal(mockDb6d.calls.length, 1, 'refused calls reach no SQL')
 
   // insertMany with consistent keys
   const mockDb7 = mockDatabase()

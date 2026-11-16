@@ -377,3 +377,90 @@ describe('AutomationExecutionsView — DingTalk person-message step errors never
     useLocale().setLocale('en')
   })
 })
+
+// R-69 1b-iii (I4 verifier F1): the admin runs page renders a run_integration_job step exactly as the rule's run log
+// does — outcome/reason sentences and one line per project unit. The step output JSON (each unit's scopeKey carries
+// the tenant id) and the English executor error line are never rendered, and the snapshot pane shows the action's
+// server-stamped binding (creator principal id + tenant id) as a fixed marker.
+describe('AutomationExecutionsView — run_integration_job steps render values-free', () => {
+  const TENANT_SENTINEL = 'tenant-sentinel-zz'
+  const PRINCIPAL_SENTINEL = 'principal-sentinel-yy'
+  const RUN_ID_SENTINEL = 'run-id-sentinel-ww'
+  function unitOutput(projectNo: string, outcome: string, reason: string, extra: Record<string, unknown> = {}) {
+    return { projectNo, scopeKey: `stock_prep_pull:${TENANT_SENTINEL}:${projectNo}`, outcome, reason, confirmed: outcome === 'succeeded', durationMs: 5, ...extra }
+  }
+  const RIJ_OUTPUT = {
+    outcome: 'outcome_unknown',
+    reason: 'timeout_unsettled',
+    units: [
+      unitOutput('P-1', 'succeeded', 'ready', { summary: { status: 'succeeded', runId: RUN_ID_SENTINEL, counts: { read: 12 } } }),
+      unitOutput('P-2', 'outcome_unknown', 'timeout_unsettled', { cause: 'timeout' }),
+    ],
+    durationMs: 9,
+  }
+  const RIJ_SNAPSHOT = {
+    id: 'rule-1',
+    name: 'Nightly pull',
+    actions: [
+      { type: 'send_notification', config: { message: 'kept-as-is' } },
+      { type: 'run_integration_job', config: { job: { kind: 'stock_prep_pull', projectNos: ['P-1', 'P-2'], applyMode: 'dry_run_only' }, timeoutMs: 1800000, binding: { principalId: PRINCIPAL_SENTINEL, tenantId: TENANT_SENTINEL } } },
+    ],
+  }
+  function rijDetail(ruleSnapshot: unknown): AutomationRunView {
+    return {
+      ...RUN_DETAIL,
+      id: 'axe_1',
+      status: 'failed',
+      statusLegacy: 'failed',
+      ruleSnapshot,
+      steps: [
+        { id: 'axe_1:job:0', executionId: 'axe_1', stepKey: '0', status: 'resolved', upstreamJobId: null, result: { notified: 1 } },
+        { id: 'axe_1:job:1', executionId: 'axe_1', stepKey: '1', status: 'failed', upstreamJobId: 'axe_1:job:0', error: 'run_integration_job outcome_unknown (timeout_unsettled)', result: RIJ_OUTPUT },
+      ],
+    }
+  }
+  async function expandRij(ruleSnapshot: unknown) {
+    const client = makeClient({ getAutomationRun: vi.fn().mockResolvedValue(rijDetail(ruleSnapshot)) })
+    mounted = mount(client)
+    await settle()
+    ;(mounted.container.querySelector('[data-run-id="axe_1"]') as HTMLElement).click()
+    await settle()
+    return mounted.container
+  }
+
+  it('step: sentences and per-project lines only — no output JSON, no scopeKey, no runId, no English error line', async () => {
+    const c = await expandRij(RIJ_SNAPSHOT)
+    const steps = [...c.querySelectorAll('.automation-runs__step')]
+    expect(steps).toHaveLength(2)
+    const rij = steps[1]
+    expect(rij.querySelector('[data-field="step-reason"]')?.textContent?.trim()).toBe('Outcome unknown (timed out and not yet settled)')
+    expect([...rij.querySelectorAll('[data-field="step-unit"]')].map((el) => el.textContent?.trim())).toEqual([
+      'P-1: Succeeded (dry run) (dry run ready) · read 12',
+      'P-2: Outcome unknown (timed out and not yet settled)',
+    ])
+    expect(rij.querySelector('[data-field="step-output"]')).toBeNull()
+    expect(rij.querySelector('[data-field="step-error"]')).toBeNull()
+    const stepText = rij.textContent ?? ''
+    for (const value of [TENANT_SENTINEL, 'scopeKey', RUN_ID_SENTINEL, 'run_integration_job outcome_unknown']) expect(stepText).not.toContain(value)
+    // Positive control: the other action's step still renders its output as before.
+    expect(steps[0].querySelector('[data-field="step-output"]')?.textContent ?? '').toContain('notified')
+  })
+
+  it('snapshot pane: the binding is a fixed marker; the rest of the snapshot is unchanged', async () => {
+    const c = await expandRij(RIJ_SNAPSHOT)
+    const snapshotText = c.querySelector('[data-field="rule-snapshot"]')?.textContent ?? ''
+    expect(snapshotText).toContain('[server-stamped]')
+    expect(snapshotText).toContain('kept-as-is')
+    expect(snapshotText).toContain('dry_run_only')
+    expect(c.textContent ?? '').not.toContain(TENANT_SENTINEL)
+    expect(c.textContent ?? '').not.toContain(PRINCIPAL_SENTINEL)
+  })
+
+  it('fail-closed floor: without a usable rule snapshot, a result carrying units still never renders as JSON', async () => {
+    const c = await expandRij(null)
+    const rij = [...c.querySelectorAll('.automation-runs__step')][1]
+    expect(rij.querySelector('[data-field="step-output"]')).toBeNull()
+    expect(rij.querySelector('[data-field="step-reason"]')?.textContent?.trim()).toBe('Outcome unknown (timed out and not yet settled)')
+    expect(c.textContent ?? '').not.toContain(TENANT_SENTINEL)
+  })
+})

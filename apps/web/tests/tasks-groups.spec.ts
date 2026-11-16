@@ -925,6 +925,30 @@ describe('/tasks — the assigned view\'s states (design §2.4)', () => {
     expect(reads(USER_GROUPS) + reads(USER_PLACEMENTS)).toBe(0)
   })
 
+  it.each(['assigned', 'following'] as const)('%s: a list read that stopped short of its total says how many tasks it shows of how many; a complete read says nothing', async (view) => {
+    const items = [...assigned]
+    h_.tasksReply.mockImplementation(() => jsonResponse(200, { items, total: items.length + 150 }))
+    const el = await mountAt('/tasks')
+    if (view !== 'assigned') await click(el, `tasks-view-switch-${view}`)
+    expect(must(el, 'tasks-list-truncated').textContent).toBe(`共 ${items.length + 150} 条任务，只显示最近更新的 ${items.length} 条；可按标题搜索查找其余任务`)
+    h_.tasksReply.mockImplementation(() => jsonResponse(200, { items, total: items.length }))
+    await click(el, view === 'assigned' ? 'tasks-view-switch-following' : 'tasks-view-switch-assigned')
+    expect(shown(el, 'tasks-list-truncated')).toBeNull()
+  })
+
+  it('the board\'s refresh re-reads the list in place: the sentence follows the new total', async () => {
+    const items = [...assigned]
+    h_.tasksReply.mockImplementation(() => jsonResponse(200, { items, total: items.length + 150 }))
+    const el = await mountAt('/tasks')
+    expect(must(el, 'tasks-list-truncated').textContent).toContain(`共 ${items.length + 150} 条任务`)
+    h_.tasksReply.mockImplementation(() => jsonResponse(200, { items, total: items.length + 40 }))
+    await click(el, 'tasks-groups-refresh')
+    expect(must(el, 'tasks-list-truncated').textContent).toContain(`共 ${items.length + 40} 条任务`)
+    h_.tasksReply.mockImplementation(() => jsonResponse(200, { items, total: items.length }))
+    await click(el, 'tasks-groups-refresh')
+    expect(shown(el, 'tasks-list-truncated')).toBeNull()
+  })
+
   it('another view: the plain list, and no group read for it', async () => {
     const el = await mountAt('/tasks')
     expect(reads(USER_GROUPS)).toBe(1)

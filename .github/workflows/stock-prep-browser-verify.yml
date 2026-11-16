@@ -59,7 +59,7 @@ concurrency:
 jobs:
   browser-verify:
     name: Stock-prep browser verify (chromium)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # pinned: Playwright 1.57 cannot install deps on ubuntu-26.04 (2026-11-16); unpin after a Playwright bump
     timeout-minutes: 20
     steps:
       - name: Checkout repository
@@ -99,6 +99,7 @@ jobs:
                 apps/web/src/components/layout/PageHeader.vue|\
                 apps/web/src/components/status/EmptyState.vue|\
                 apps/web/src/composables/useAuth.ts|\
+                apps/web/src/composables/adminAccessCapabilities.ts|\
                 apps/web/src/composables/useLocale.ts|\
                 apps/web/src/composables/useMobileViewport.ts|\
                 apps/web/src/composables/authPrincipal.ts|\
@@ -126,6 +127,7 @@ jobs:
                 plugins/plugin-integration-core/lib/stock-preparation-yida-allocation.mjs|\
                 plugins/plugin-integration-core/lib/yida-rule-template.mjs|\
                 plugins/plugin-integration-core/lib/yida-static-plan.mjs|\
+                plugins/plugin-integration-core/lib/yida-material-code.mjs|\
                 scripts/ops/stock-prep-browser-ci-wiring.test.mjs|\
                 .github/workflows/stock-prep-browser-verify.yml)
                   relevant=true

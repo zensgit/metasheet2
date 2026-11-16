@@ -157,10 +157,22 @@ function refreshNextStep(input: OperatorNextStepInput, canPull: boolean): Operat
   if (status === 'executing') {
     return sentenceOnly('本项目正在写入,正式导出暂停到写入结束;稍后刷新本页。', 'This project is being written; the formal export is paused until it ends. Refresh shortly.')
   }
+  // S6-3 (step-6 design §5.4, R-91): the recovery card is a section of 「拉取待确认」, so a puller gets the action (the
+  // PULL tier recovers with its own account, G1); the floor keeps the sentence that names the 拉取人员 (R-11).
   if (status === 'failed_pending_recovery') {
+    if (puller) {
+      return {
+        key: 'refresh',
+        zh: '本项目上次写入没有正常结束:请到「拉取待确认」核对上次写入并结束这次执行;正式导出暂停到那时。',
+        en: 'This project’s last write did not finish cleanly: check the last write on “Pull holds” and close the execution; the formal export is paused until then.',
+        actionZh: '去核对',
+        actionEn: 'Check it',
+        action: 'go-refresh-queue',
+      }
+    }
     return sentenceOnly(
-      '本项目上次写入没有正常结束,在等恢复;正式导出已暂停。请联系平台管理员按手册恢复。',
-      'This project’s last write did not finish cleanly and awaits recovery; the formal export is paused. Ask the platform admin to recover it per the runbook.',
+      '本项目上次写入未完成,等待拉取人员核对;正式导出已暂停。请联系拉取人员。',
+      'This project’s last write did not finish and awaits the puller’s check; the formal export is paused. Please contact a pull operator (拉取人员).',
     )
   }
   // PR-9 (R-77 ⑥): the review is a section of 「拉取待确认」, so a puller gets the action; the floor keeps the sentence.

@@ -25,7 +25,7 @@
 //   SC-G6 every construction of a generic writer in lib/ and index.cjs is one of the wired sites above (a new
 //         construction must be wired and added here); `SAFE_WRITE_ERROR_CODES` keeps the refusal codes
 //         diagnosable (behavioural: `valuesFreeErrorCode`).
-//   SC-G7 `CONTINUATION_SUPPORT_VERSION` is still 0 (R-57 ⑦: the last PR of the D-22 set flips it, not PR-6).
+//   SC-G7 `CONTINUATION_SUPPORT_VERSION` is 1 since S6-9, the last PR of the D-22 set (R-57 ⑦: PR-6 left it 0).
 //
 // The scanner strips comments and string bodies before matching (offsets preserved), so prose never satisfies a
 // scan; string literals (surface tokens) are read from the RAW text at code offsets.
@@ -299,9 +299,9 @@ test('SC-G6 every generic-writer construction in lib/ and index.cjs is a wired s
   assert.equal(__internals.valuesFreeErrorCode({ code: 'SOMETHING_ELSE' }), 'WRITE_FAILED', 'control')
 })
 
-test('SC-G7 CONTINUATION_SUPPORT_VERSION is still 0 (the last PR of the D-22 set flips it, not PR-6)', () => {
+test('SC-G7 CONTINUATION_SUPPORT_VERSION is 1 (S6-9, the last PR of the D-22 set, flipped it; PR-6 left it 0)', () => {
   const support = require(path.join(LIB, 'stock-preparation-continuation-support.cjs'))
-  assert.equal(support.CONTINUATION_SUPPORT_VERSION, 0)
+  assert.equal(support.CONTINUATION_SUPPORT_VERSION, 1)
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-generic-writer-scan.test.cjs', tests)

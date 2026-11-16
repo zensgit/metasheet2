@@ -2,7 +2,7 @@
 // renders, and deciding which of the home empty states (§4.3) applies. Pure, so every branch is
 // a unit test rather than something only visible by mounting the component.
 import type { StockPreparationOperatorProject } from './confirmationQueue'
-import { stockPrepPosture, type StockPrepPosture, type StockPrepPostureKey } from './projectPosture'
+import { stockPrepPosture, type StockPrepPosture, type StockPrepPostureInput, type StockPrepPostureKey } from './projectPosture'
 import type { StockPrepRecentProjectEntry } from './operatorHomeMemory'
 
 export type StockPrepHomeCardSource = 'directory' | 'memory'
@@ -44,16 +44,35 @@ function registryCountOf(value: unknown): number | null {
  * pre-S3 merge (this browser's memory, else 「看不到进度」) rather than guess. `archived` and a live
  * pending count decide on their own; a known missing-parts count > 0 does too.
  */
+/**
+ * Pre-pilot fix batch 8(c) (register R-91): the registry row's server-derived refresh state, as the posture inputs the
+ * shared `stockPrepPosture` already ranks (after the two count badges, before 「可以导出」 / 「还没拉过」 — the server's
+ * `projectOverviewPosture` order). `unsettled` is a complete-but-never-settled state; any other non-null token IS the
+ * status. `undefined` = the row does not say (absent key) — the caller then keeps its pre-8(c) behaviour.
+ */
+function registryRefreshInputOf(project: StockPreparationOperatorProject): Pick<StockPrepPostureInput, 'refreshStatus' | 'refreshSettled' | 'refreshPendingConfirmCount'> | undefined {
+  if (!Object.prototype.hasOwnProperty.call(project, 'refreshBlocked')) return undefined
+  const token = project.refreshBlocked
+  const holds = registryCountOf(project.openRefreshHoldCount) ?? 0
+  if (token === null) return {}
+  if (typeof token !== 'string' || token === '') return { refreshStatus: 'unknown', refreshPendingConfirmCount: holds }
+  if (token === 'unsettled') return { refreshStatus: 'complete', refreshSettled: false, refreshPendingConfirmCount: holds }
+  return { refreshStatus: token, refreshPendingConfirmCount: holds }
+}
+
 function registryPosture(project: StockPreparationOperatorProject, pending: number): StockPrepPosture | null {
   if (typeof project.archived !== 'boolean') return null
   const missing = registryCountOf(project.missingComponentsCount)
   const pulled = registryCountOf(project.pulledRowCount)
-  if (project.archived !== true && pending <= 0 && !(missing !== null && missing > 0) && pulled === null) return null
+  const refresh = registryRefreshInputOf(project)
+  const blocked = refresh !== undefined && typeof refresh.refreshStatus === 'string'
+  if (project.archived !== true && pending <= 0 && !(missing !== null && missing > 0) && pulled === null && !blocked) return null
   return stockPrepPosture({
     archived: project.archived === true,
     pendingDecisionCount: pending,
     missingComponentsCount: missing ?? 0,
     pulledRowCount: pulled ?? 0,
+    ...(refresh ?? {}),
   })
 }
 
@@ -177,7 +196,10 @@ export function buildOperatorHomeCards(
     // unfinished (`blocked_pull_state`), that outranks a registry-derived 「可以导出」. Dormant for every
     // not-governed project (memory never holds the key for one). Never the other way: a remembered 「可以导出」 does
     // not override a registry 「刷新未完成」 (the registry never produces it).
-    const foldBlocked = registry !== null && registry.key === 'ready' && memoryKey === 'blocked_pull_state'
+    // 8(c): a registry row that CARRIES the server's refresh state (the `refreshBlocked` key) speaks for itself — the
+    // live server answer outranks this browser's memory in both directions; the fold stays for a row that does not say.
+    const serverSaysRefresh = Object.prototype.hasOwnProperty.call(project, 'refreshBlocked')
+    const foldBlocked = !serverSaysRefresh && registry !== null && registry.key === 'ready' && memoryKey === 'blocked_pull_state'
     const fromRegistry = foldBlocked ? null : registry
     cards.push({
       projectNo: no,

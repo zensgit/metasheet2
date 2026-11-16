@@ -51,6 +51,8 @@ const { withoutReadPhaseClock } = require(path.join(__dirname, 'support', 'dry-r
 const dryRunJobs = require(path.join(LIB, 'stock-preparation-dry-run-jobs.cjs'))
 const { STOCK_PREP_OPERATE, STOCK_PREP_PULL, STOCK_PREP_READ } = require(path.join(LIB, 'stock-preparation-workbench-access.cjs'))
 const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
+// R-69 1b-i: the dry-run handler delegates to the request-free governed entry; J-03 reads both.
+const { governedEntrySourceFor } = require(path.join(__dirname, 'support', 'governed-entry-source.cjs'))
 
 const TENANT = 'tenant-r67-dry-run-job'
 const OTHER_TENANT = 'tenant-r67-dry-run-foreign'
@@ -348,11 +350,13 @@ test('J-03 the guard sequence, enumerated from the source, is the same list on b
     }
     return found.sort((x, y) => x[0] - y[0]).map(([, guard]) => guard)
   }
-  const dryRun = bodyOf('tableActionDryRun')
+  // R-69 1b-i: the handler builds the principal context and calls `governedStockPrepPull`, which holds
+  // the guard chain verbatim — so the chain is read from the handler AND the entry it delegates to.
+  const dryRun = bodyOf('tableActionDryRun') + governedEntrySourceFor(code, 'tableActionDryRun')
   const start = bodyOf('tableActionDryRunJobStart')
 
   // The synchronous lane: every guard before `runDryRun()` is awaited.
-  const syncSequence = sequence(dryRun, 'return sendOk(res, await runDryRun())')
+  const syncSequence = sequence(dryRun, 'return { data: await runDryRun(), background: false }')
   // The job lane: the enqueue handler's own guards (there must be none) + the dry-run handler's up to
   // the launch.
   const ownGuards = GUARDS.filter((guard) => start.includes(guard))

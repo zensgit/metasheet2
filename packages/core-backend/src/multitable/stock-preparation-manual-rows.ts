@@ -165,7 +165,7 @@ export function carryManualRowPolicy(storedProperty: unknown, nextProperty: Reco
 //
 // LOGICAL ids of the frozen main template (plugins/plugin-integration-core/lib/stock-preparation-templates.cjs). The
 // physical id of each on a project sheet is DERIVED by the host (provisioning.ts getObjectFieldId) from the sheet's
-// registry row. The census test requires the plugin template and pins that every one of its 33 columns sits in
+// registry row. The census test requires the plugin template and pins that every one of its 35 columns sits in
 // exactly one class below.
 
 /** 人工可填 (6): the only locked columns the manual-row routes may write (the lock exemption). */
@@ -183,10 +183,16 @@ export const MANUAL_ROW_PROGRESS_FIELD_IDS = Object.freeze([
   'stockPreparationStatus', 'notes', 'procurementReply', 'warehouseConfirmation',
   'procurementDone', 'procurementReplyDate', 'warehouseDone', 'actualArrivalDate',
 ] as const)
-/** 身份与 RUN (9): left EMPTY on a manual row — never copied, never written by a manual-row route. */
+/**
+ * 身份、RUN 与机器列 (11): left EMPTY on a manual row — never copied, never written by a manual-row route. The last two
+ * are the R-71 ⑦.4 PR-4 machine columns: 发料确认日期 (`issueConfirmDate`, written only by the YiDa issue-confirm
+ * write-back) and 项目规格型号 (`projectSpecModel`, empty until its source is decided). Copying either onto a new row
+ * would put a value on it that no machine path wrote.
+ */
 export const MANUAL_ROW_IDENTITY_RUN_FIELD_IDS = Object.freeze([
   'componentSourceId', 'parentSourceId', 'path', 'depth', 'sourceVersion',
   'lastPlmRefreshRunId', 'lastPlmRefreshAt', 'lastPlmRefreshDecision', 'lastPlmConflictSummary',
+  'issueConfirmDate', 'projectSpecModel',
 ] as const)
 /** 盖章 (3): written by the server only (项目号 from the plugin registry, the key, 有效 = true). */
 export const MANUAL_ROW_STAMP_FIELD_IDS = Object.freeze(['projectNo', 'idempotencyKey', 'active'] as const)

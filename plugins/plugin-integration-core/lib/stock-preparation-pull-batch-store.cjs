@@ -119,8 +119,17 @@ const PULL_BATCH_STORE_AUDIT = Object.freeze({
     tenantSettingsUpdated: 'pull_batch_settings_tenant_updated',
     sheetSettingsUpdated: 'pull_batch_settings_sheet_updated',
     installAborted: 'pull_batch_install_aborted',
+    // BI-2 (P2-12): the install's Txn A and Txn B, and a new sheet born ready, all under `project_target_create`.
+    installStarted: 'pull_batch_install_started',
+    installed: 'pull_batch_installed',
+    bornReady: 'pull_batch_born_ready',
   }),
 })
+
+// The install's persisted-plan digest (sha256 hex) and the history modes the install records (migration 105 CHECKs).
+const INSTALL_PLAN_DIGEST_PATTERN = /^[0-9a-f]{64}$/
+const INSTALL_HISTORY_MODES = Object.freeze(['inferred', 'unknown'])
+const INSTALL_EXPECTABLE_STATUSES = Object.freeze(['pending', 'born_empty', 'backfilled'])
 
 const RECOVERY_RESULTS = Object.freeze(['landed', 'mixed', 'nothing_landed', 'unknown'])
 const RECOVERY_OUTCOME_BY_RESULT = Object.freeze({
@@ -244,6 +253,10 @@ function installInProgress() {
   return pullBatchError(409, PULL_BATCH_ERROR_CODES.INSTALL_IN_PROGRESS, 'the batch history of this sheet is being installed; pull again after it finishes', { partial: false })
 }
 
+function planChanged(reason) {
+  return pullBatchError(409, PULL_BATCH_ERROR_CODES.PLAN_CHANGED, 'the persisted pull-batch plan moved since it was previewed; preview again', { reason, partial: false })
+}
+
 // A typed refusal (this module's, the pure module's, or the holder assert's: anything carrying an HTTP status and a
 // closed code) passes through; a unique violation is the arbitration of last resort (409); anything else is 503.
 function isTypedRefusal(error) {
@@ -268,6 +281,13 @@ function normalizeScope(input = {}) {
 function normalizeTenant(input = {}) {
   if (!isPlainObject(input) || !nonBlankString(input.tenantId)) throw inputInvalid('tenantId')
   return input.tenantId.trim()
+}
+
+// An applied placement / landing: null / undefined => NULL; otherwise a value of the closed vocabulary (else 500).
+function appliedSettingOf(value, key) {
+  if (value === undefined || value === null) return null
+  if (!PULL_BATCH_SETTING_VALUES[key].includes(value)) throw inputInvalid(key === 'placement' ? 'bandPlacement' : 'landingMode')
+  return value
 }
 
 function sheetWhere(scope) {
@@ -1018,6 +1038,10 @@ function createStockPreparationPullBatchStore({ db, idGenerator, now } = {}) {
     for (const key of PULL_BATCH_SHEET_SETTING_KEYS) {
       if (!PULL_BATCH_SETTING_VALUES[key].includes(settings[key])) throw inputInvalid(`settings.${key}`)
     }
+    // BI-2: a sheet born ready records the placement / landing its birth APPLIED (optional; absent => NULL, every
+    // existing caller byte-identical).
+    const bandPlacement = appliedSettingOf(input.bandPlacement, 'placement')
+    const landingMode = appliedSettingOf(input.landingMode, 'landing')
     const atIso = nowDate().toISOString()
     const born = input.historyStatus === 'born_empty'
     const row = {
@@ -1029,8 +1053,8 @@ function createStockPreparationPullBatchStore({ db, idGenerator, now } = {}) {
       label_locale: input.labelLocale,
       first_pull_batch_rule: settings.firstPullBatchRule,
       label_format: settings.labelFormat,
-      band_placement: null,
-      landing_mode: null,
+      band_placement: bandPlacement,
+      landing_mode: landingMode,
       settings_locked_at: null,
       history_mode: born ? 'inferred' : null,
       history_batch_count: born ? 0 : null,
@@ -1116,6 +1140,344 @@ function createStockPreparationPullBatchStore({ db, idGenerator, now } = {}) {
     }
   }
 
+  // ── the per-sheet install (BI-2; design §8.2, §9) ─────────────────────────────────────────────────────────
+  // Five transactions, each with the holder assert FIRST (main) and its audit row inside (ruling C8, P2-12). The plan
+  // they persist is the pure module's install envelope; the store never re-plans, it only CASes digests.
+
+  function normalizeCapture(capture) {
+    if (!isPlainObject(capture)) throw inputInvalid('capture')
+    for (const key of PULL_BATCH_SHEET_SETTING_KEYS) {
+      if (!PULL_BATCH_SETTING_VALUES[key].includes(capture[key])) throw inputInvalid(`capture.${key}`)
+    }
+    return Object.freeze({ firstPullBatchRule: capture.firstPullBatchRule, labelFormat: capture.labelFormat })
+  }
+
+  function assertPlanDigest(value, field = 'planDigest') {
+    if (typeof value !== 'string' || !INSTALL_PLAN_DIGEST_PATTERN.test(value)) throw inputInvalid(field)
+    return value
+  }
+
+  function assertHistoryMode(value) {
+    if (!INSTALL_HISTORY_MODES.includes(value)) throw inputInvalid('historyMode')
+    return value
+  }
+
+  function auditDetailOf(detail, version) {
+    return { ...(isPlainObject(detail) ? detail : {}), version }
+  }
+
+  /**
+   * A NEW project sheet born ready (design §9; P2-7), one transaction: the `_sheet` row FOR UPDATE; present => no
+   * write, no audit (`{ created: false, historyStatus }`); absent => the capture primitive as `born_empty` with the
+   * placement / landing the birth applied, and the audit row `pull_batch_born_ready`. A concurrent insert (23505) =>
+   * `{ created: false, reason: 'race' }`.
+   */
+  async function bornReady(input = {}) {
+    const scope = normalizeScope(input)
+    const capture = normalizeCapture(input.capture)
+    try {
+      return await db.transaction(async (rawTrx) => {
+        const trx = requireTrx(rawTrx)
+        const present = assertRowInScope(await trx.selectOneForUpdate(PULL_BATCH_TABLES.sheet, sheetWhere(scope)), scope)
+        if (present) return Object.freeze({ created: false, historyStatus: present.history_status, reason: 'present' })
+        const sheet = await createSheetRowWithin(trx, {
+          ...scope,
+          historyStatus: 'born_empty',
+          labelLocale: input.labelLocale,
+          settings: capture,
+          bandPlacement: input.bandPlacement,
+          landingMode: input.landingMode,
+          resolvedBy: input.resolvedBy,
+        })
+        await runAudit(input.auditWithin, trx, {
+          mode: PULL_BATCH_STORE_AUDIT.modes.bornReady,
+          subjectId: scope.sheetId,
+          projectNo: scope.projectNo,
+          detail: auditDetailOf(input.auditDetail, sheet.version),
+        })
+        return Object.freeze({ created: true, historyStatus: 'born_empty', reason: null })
+      })
+    } catch (error) {
+      if (error && (error.code === '23505' || (error.details && error.details.sqlState === '23505'))) {
+        return Object.freeze({ created: false, historyStatus: null, reason: 'race' })
+      }
+      throw translate(error, 'born_ready')
+    }
+  }
+
+  /**
+   * Txn A of an install (design §8.2 I3): PERSIST THE PLAN before the first cell write. One transaction: holder FIRST;
+   * the `_sheet` row FOR UPDATE must match `expect` ({ historyStatus: null (absent) | pending | born_empty |
+   * backfilled, version }) else 409 CONFLICT `install_moved`.
+   *   absent  => the tenant default read WITHIN must still be the captured rule / format (else 409 PLAN_CHANGED
+   *              `settings_changed`); the row is inserted directly as `installing`.
+   *   present => its captured rule / format / locale must equal the plan's (PLAN_CHANGED `settings_changed`); an
+   *              applied placement / landing that differs is 409 CONFIG_LOCKED { locked } (the pure lock helper); CAS
+   *              on { id, version }.
+   * Writes `installing`, the envelope (+ historyMode; a resolved row's status as `previousHistoryStatus`, for abort), its
+   * digest, the applied placement / landing, `settings_locked_at = COALESCE(lock, now)`, approval / installed. The
+   * `history_mode` COLUMN is untouched (P2-18). Audit `pull_batch_install_started`.
+   */
+  async function beginInstall(input = {}) {
+    const scope = normalizeScope(input)
+    const expect = isPlainObject(input.expect) ? input.expect : null
+    if (!expect || !(expect.historyStatus === null || INSTALL_EXPECTABLE_STATUSES.includes(expect.historyStatus))) throw inputInvalid('expect')
+    if (expect.historyStatus !== null && !(Number.isSafeInteger(expect.version) && expect.version >= 0)) throw inputInvalid('expect')
+    if (!isPlainObject(input.plan)) throw inputInvalid('plan')
+    const planDigest = assertPlanDigest(input.planDigest)
+    if (input.plan.digest !== planDigest) throw inputInvalid('planDigest')
+    if (!PULL_BATCH_LOCALES.includes(input.labelLocale)) throw inputInvalid('labelLocale')
+    const capture = normalizeCapture(input.capture)
+    const bandPlacement = appliedSettingOf(input.bandPlacement, 'placement')
+    const landingMode = appliedSettingOf(input.landingMode, 'landing')
+    if (bandPlacement === null || landingMode === null) throw inputInvalid(bandPlacement === null ? 'bandPlacement' : 'landingMode')
+    const historyMode = assertHistoryMode(input.historyMode)
+    if (!nonBlankString(input.approvalRef)) throw inputInvalid('approvalRef')
+    try {
+      return await db.transaction(async (rawTrx) => {
+        const trx = requireTrx(rawTrx)
+        await runHolder(input.holderWithin, trx)
+        const atIso = nowDate().toISOString()
+        const sheet = assertRowInScope(await trx.selectOneForUpdate(PULL_BATCH_TABLES.sheet, sheetWhere(scope)), scope)
+        if (expect.historyStatus === null ? Boolean(sheet) : (!sheet || sheet.history_status !== expect.historyStatus || intOrNull(sheet.version) !== expect.version)) {
+          throw conflict('install_moved')
+        }
+        // A resumed aborted plan is installing again: its `aborted` flag never survives into the new run.
+        const plan = { ...input.plan, historyMode }
+        delete plan.aborted
+        const common = {
+          history_status: 'installing',
+          history_plan: plan,
+          history_plan_digest: planDigest,
+          band_placement: bandPlacement,
+          landing_mode: landingMode,
+          approval_ref: input.approvalRef.trim(),
+          installed_at: atIso,
+          installed_by: nonBlankString(input.installedBy) ? input.installedBy.trim() : null,
+          updated_at: atIso,
+        }
+        let written
+        if (!sheet) {
+          const tenant = await readTenantSettingsWithin(trx, { tenantId: scope.tenantId })
+          if (tenant.settings.firstPullBatchRule !== capture.firstPullBatchRule || tenant.settings.labelFormat !== capture.labelFormat) throw planChanged('settings_changed')
+          delete plan.previousHistoryStatus
+          written = rowsOf(await trx.insertOne(PULL_BATCH_TABLES.sheet, {
+            id: newId('sheet'),
+            tenant_id: scope.tenantId,
+            sheet_id: scope.sheetId,
+            project_no: scope.projectNo,
+            label_locale: input.labelLocale,
+            first_pull_batch_rule: capture.firstPullBatchRule,
+            label_format: capture.labelFormat,
+            settings_locked_at: atIso,
+            history_mode: null,
+            history_batch_count: null,
+            resolved_at: null,
+            resolved_by: null,
+            version: 1,
+            created_at: atIso,
+            ...common,
+          }))
+        } else {
+          if (sheet.first_pull_batch_rule !== capture.firstPullBatchRule || sheet.label_format !== capture.labelFormat || sheet.label_locale !== input.labelLocale) {
+            throw planChanged('settings_changed')
+          }
+          const applied = {}
+          if (isSet(sheet.band_placement)) applied.placement = sheet.band_placement
+          if (isSet(sheet.landing_mode)) applied.landing = sheet.landing_mode
+          const refused = refusedPullBatchConfigEdits({ captured: applied, edit: { placement: bandPlacement, landing: landingMode }, state: lockStateOfRow(sheet) })
+          if (refused.length > 0) {
+            throw pullBatchError(409, PULL_BATCH_ERROR_CODES.CONFIG_LOCKED, 'the placement or landing of this sheet was already applied; it cannot change', { locked: Array.from(refused) })
+          }
+          if (isSet(sheet.resolved_at)) plan.previousHistoryStatus = sheet.history_status
+          else delete plan.previousHistoryStatus
+          const version = intOrNull(sheet.version) || 0
+          written = rowsOf(await trx.updateRow(PULL_BATCH_TABLES.sheet, {
+            ...common,
+            settings_locked_at: isSet(sheet.settings_locked_at) ? sheet.settings_locked_at : atIso,
+            version: version + 1,
+          }, { id: sheet.id, version }))
+          if (written.length !== 1) throw conflict('install_moved')
+        }
+        const row = written[0]
+        await runAudit(input.auditWithin, trx, {
+          mode: PULL_BATCH_STORE_AUDIT.modes.installStarted,
+          subjectId: scope.sheetId,
+          projectNo: scope.projectNo,
+          detail: auditDetailOf(input.auditDetail, intOrNull(row.version)),
+        })
+        return rowToSheet(row)
+      })
+    } catch (error) {
+      throw translate(error, 'begin_install')
+    }
+  }
+
+  // The `installing` row of a re-run, FOR UPDATE, with its persisted digest checked.
+  async function lockInstallingRow(trx, scope, digest) {
+    const sheet = assertRowInScope(await trx.selectOneForUpdate(PULL_BATCH_TABLES.sheet, sheetWhere(scope)), scope)
+    if (!sheet) throw notReady('sheet_absent')
+    if (sheet.history_status !== 'installing') throw conflict('not_installing')
+    if (sheet.history_plan_digest !== digest) throw planChanged('persisted_plan_differs')
+    return sheet
+  }
+
+  /**
+   * A re-run of an `installing` sheet (design §8.2 I3, last bullet): nothing is recomputed. Holder FIRST; the row must
+   * be `installing` with the persisted digest (409 PLAN_CHANGED `persisted_plan_differs`) and the run's history mode
+   * (`history_mode_changed`: another mode would write other labels over the fixed points). Records the approvalRef.
+   */
+  async function continueInstall(input = {}) {
+    const scope = normalizeScope(input)
+    const planDigest = assertPlanDigest(input.planDigest)
+    const historyMode = assertHistoryMode(input.historyMode)
+    if (!nonBlankString(input.approvalRef)) throw inputInvalid('approvalRef')
+    try {
+      return await db.transaction(async (rawTrx) => {
+        const trx = requireTrx(rawTrx)
+        await runHolder(input.holderWithin, trx)
+        const sheet = await lockInstallingRow(trx, scope, planDigest)
+        const plan = jsonOrNull(sheet.history_plan)
+        if (!isPlainObject(plan) || plan.historyMode !== historyMode) throw planChanged('history_mode_changed')
+        const version = intOrNull(sheet.version) || 0
+        const written = rowsOf(await trx.updateRow(PULL_BATCH_TABLES.sheet, { approval_ref: input.approvalRef.trim(), version: version + 1, updated_at: nowDate().toISOString() }, { id: sheet.id, version }))
+        if (written.length !== 1) throw conflict('install_moved')
+        return rowToSheet(written[0])
+      })
+    } catch (error) {
+      throw translate(error, 'continue_install')
+    }
+  }
+
+  /**
+   * The extension of an `installing` sheet's plan (design §8.2 I5; P2-10): CAS `fromDigest` against the persisted digest,
+   * then replace the plan and its digest (the run facts — historyMode, previousHistoryStatus — are carried over). The run's
+   * history mode must be the persisted one (P2-18, as continueInstall: `history_mode_changed`), checked before the write.
+   */
+  async function extendInstall(input = {}) {
+    const scope = normalizeScope(input)
+    const fromDigest = assertPlanDigest(input.fromDigest, 'fromDigest')
+    const planDigest = assertPlanDigest(input.planDigest)
+    const historyMode = assertHistoryMode(input.historyMode)
+    if (!isPlainObject(input.plan) || input.plan.digest !== planDigest) throw inputInvalid('plan')
+    if (!nonBlankString(input.approvalRef)) throw inputInvalid('approvalRef')
+    try {
+      return await db.transaction(async (rawTrx) => {
+        const trx = requireTrx(rawTrx)
+        await runHolder(input.holderWithin, trx)
+        const sheet = await lockInstallingRow(trx, scope, fromDigest)
+        const persisted = jsonOrNull(sheet.history_plan)
+        if (!isPlainObject(persisted)) throw planChanged('persisted_plan_differs')
+        if (persisted.historyMode !== historyMode) throw planChanged('history_mode_changed')
+        const plan = { ...input.plan, historyMode: persisted.historyMode }
+        delete plan.aborted
+        if (persisted.previousHistoryStatus !== undefined) plan.previousHistoryStatus = persisted.previousHistoryStatus
+        else delete plan.previousHistoryStatus
+        const version = intOrNull(sheet.version) || 0
+        const written = rowsOf(await trx.updateRow(PULL_BATCH_TABLES.sheet, {
+          history_plan: plan,
+          history_plan_digest: planDigest,
+          approval_ref: input.approvalRef.trim(),
+          version: version + 1,
+          updated_at: nowDate().toISOString(),
+        }, { id: sheet.id, version }))
+        if (written.length !== 1) throw conflict('install_moved')
+        return rowToSheet(written[0])
+      })
+    } catch (error) {
+      throw translate(error, 'extend_install')
+    }
+  }
+
+  /**
+   * Txn B (design §8.2 I6): RESOLVE. Holder FIRST; the row `installing` with the persisted digest and the run's mode;
+   * per inferred batch: a non-void row with that number and the same label + origin => kept (an idempotent re-run), a
+   * different one => 409 CONFLICT `inferred_batch_mismatch`, none => inserted closed / backfill_inferred. The row moves
+   * to `nextStatus` with history_mode (a gap pass resolves `unknown` when the sheet's column or the run is unknown),
+   * history_batch_count and resolved_*. Audit `pull_batch_installed`.
+   */
+  async function resolveInstall(input = {}) {
+    const scope = normalizeScope(input)
+    const planDigest = assertPlanDigest(input.planDigest)
+    const historyMode = assertHistoryMode(input.historyMode)
+    if (!PULL_BATCH_RESOLVED_HISTORY_STATUSES.includes(input.nextStatus)) throw inputInvalid('nextStatus')
+    if (!Number.isSafeInteger(input.historyBatchCount) || input.historyBatchCount < 0) throw inputInvalid('historyBatchCount')
+    const inferred = Array.isArray(input.inferredBatches) ? input.inferredBatches : null
+    if (!inferred) throw inputInvalid('inferredBatches')
+    for (const batch of inferred) {
+      if (!isPlainObject(batch) || !Number.isSafeInteger(batch.batchNo) || batch.batchNo < 1 || !nonBlankString(batch.label)
+        || !['plan_time', 'created_at'].includes(batch.evidence) || isoOrNull(batch.openedAt) === null || isoOrNull(batch.closedAt) === null
+        || typeof batch.displayDay !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(batch.displayDay)) {
+        throw inputInvalid('inferredBatches')
+      }
+    }
+    try {
+      return await db.transaction(async (rawTrx) => {
+        const trx = requireTrx(rawTrx)
+        await runHolder(input.holderWithin, trx)
+        const atIso = nowDate().toISOString()
+        const sheet = await lockInstallingRow(trx, scope, planDigest)
+        const plan = jsonOrNull(sheet.history_plan)
+        if (!isPlainObject(plan) || plan.historyMode !== historyMode) throw planChanged('history_mode_changed')
+        let insertedBatches = 0
+        let keptBatches = 0
+        for (const batch of inferred) {
+          const existing = rowsOf(await trx.select(PULL_BATCH_TABLES.batch, { where: { ...sheetWhere(scope), batch_no: batch.batchNo }, orderBy: ['id', 'ASC'], limit: 10 }))
+            .filter((row) => row.status !== 'void')
+          for (const row of existing) assertRowInScope(row, scope)
+          if (existing.length > 0) {
+            if (existing.length === 1 && existing[0].origin === 'backfill_inferred' && existing[0].label === batch.label) {
+              keptBatches += 1
+              continue
+            }
+            throw conflict('inferred_batch_mismatch')
+          }
+          await trx.insertOne(PULL_BATCH_TABLES.batch, {
+            id: newId('batch'),
+            tenant_id: scope.tenantId,
+            sheet_id: scope.sheetId,
+            project_no: scope.projectNo,
+            batch_no: batch.batchNo,
+            origin: 'backfill_inferred',
+            status: 'closed',
+            label: batch.label,
+            display_day: batch.displayDay,
+            source_digest: null,
+            evidence: batch.evidence,
+            opened_at: isoOrNull(batch.openedAt),
+            closed_at: isoOrNull(batch.closedAt),
+            closed_reason: 'backfill',
+            created_at: atIso,
+            updated_at: atIso,
+          })
+          insertedBatches += 1
+        }
+        const gapPass = isSet(sheet.resolved_at)
+        const columnMode = gapPass && (sheet.history_mode === 'unknown' || historyMode === 'unknown') ? 'unknown' : historyMode
+        const version = intOrNull(sheet.version) || 0
+        const written = rowsOf(await trx.updateRow(PULL_BATCH_TABLES.sheet, {
+          history_status: input.nextStatus,
+          history_mode: columnMode,
+          history_batch_count: input.historyBatchCount,
+          resolved_at: atIso,
+          resolved_by: nonBlankString(input.resolvedBy) ? input.resolvedBy.trim() : null,
+          version: version + 1,
+          updated_at: atIso,
+        }, { id: sheet.id, version }))
+        if (written.length !== 1) throw conflict('install_moved')
+        await runAudit(input.auditWithin, trx, {
+          mode: PULL_BATCH_STORE_AUDIT.modes.installed,
+          subjectId: scope.sheetId,
+          projectNo: scope.projectNo,
+          detail: auditDetailOf(input.auditDetail, version + 1),
+        })
+        return Object.freeze({ sheet: rowToSheet(written[0]), insertedBatches, keptBatches })
+      })
+    } catch (error) {
+      throw translate(error, 'resolve_install')
+    }
+  }
+
   return Object.freeze({
     probeReadable,
     readSheetState,
@@ -1131,6 +1493,11 @@ function createStockPreparationPullBatchStore({ db, idGenerator, now } = {}) {
     listSheetSettings,
     createSheetRowWithin,
     abortInstall,
+    bornReady,
+    beginInstall,
+    continueInstall,
+    extendInstall,
+    resolveInstall,
   })
 }
 
