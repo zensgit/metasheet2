@@ -1,5 +1,8 @@
-// Local YiDa form planning only. No imports, transport, clock, persistence, or sender.
+// Local YiDa form planning only. No transport, clock, persistence, or sender. The one import is the
+// pure, import-free material-code leaf (pinned by __tests__/yida-static-plan.test.cjs).
 // Target IDs and target field names are fictional/local metadata, not verified remote schema.
+import { generateYidaMaterialCode, yidaMaterialCodeUuidV5 } from './yida-material-code.mjs'
+
 const MAX_TEXT_BYTES = 128 * 1024
 const MAX_ROWS = 100
 const MAX_ROW_FIELDS = 64
@@ -244,7 +247,8 @@ function validateProtocolConfig(root) {
 //   direct   - the one entry that binds a row column to a target (a column has at most one);
 //   copy     - the value of a direct entry's column, written to a second target;
 //   constant - a fixed value, checked against its own control when the config is validated;
-//   concat   - parts in listed order (columns and literals) joined by one separator.
+//   concat   - parts in listed order (columns and literals) joined by one separator;
+//   generated - a template of closed parts (literal / field / hash / preset), see below.
 // The business key and emptyKeyFields name direct TARGETS, so each key part is bound to its
 // primary entry by name; a derived target can never enter the key, and fieldMap order cannot
 // change which entry a key part reads. Rows are evaluated and payloads built in field-catalog
@@ -254,11 +258,38 @@ const TRANSFORM_ENTRY_KEYS = new Map([
   ['copy', ['transform', 'copyOf', 'target', 'type', 'required']],
   ['constant', ['transform', 'value', 'target', 'type', 'required']],
   ['concat', ['transform', 'parts', 'separator', 'blank', 'target', 'type', 'required']],
+  ['generated', ['transform', 'template', 'target', 'type', 'required']],
 ])
 const CONCAT_BLANK_RULES = new Set(['skip', 'refuse'])
 const MAX_CONCAT_PARTS = 8
 const MAX_LITERAL_LENGTH = 128
 const MAX_SEPARATOR_LENGTH = 16
+
+// generated (R-71 ⑦.4 PR-2, owner addendum 2026-11-06 decision 1): a value composed after the
+// project split from closed parts, each with an exact key list:
+//   { literal }                          - plain text, 1..128 characters, no control characters;
+//   { field: <direct target> }           - that column: text verbatim, a number as String(n);
+//   { hash: [<direct targets>], form }   - UUIDv5 of the listed columns, upper case, 'uuid-36' or 'uuid-32';
+//   { preset: 'material-code-v1', rowIdOf, projectOf } - the frozen WLBH- material code, byte for byte.
+// Rule G1: exactly one identity part, a hash over every business-key target or the preset (whose
+// projectOf is a key target), so one code always means one key tuple (hash) or one creation identity
+// (preset); literal and field parts are decoration. A blank part is always refused; inside a hash a
+// blank emptyKeyFields member counts as ''. Hash members and preset inputs are string-typed direct
+// targets read verbatim. The value is evaluated per planned row, so split rows get their own codes,
+// and two rows of one batch with one value are both refused (DUPLICATE_GENERATED_VALUE).
+// FROZEN: the namespace, label, version and forms are part of every code; a change is a new version.
+const MAX_TEMPLATE_PARTS = 8
+const MAX_HASH_MEMBERS = 16
+const HASH_FORMS = new Set(['uuid-36', 'uuid-32'])
+const GENERATED_PRESET = 'material-code-v1'
+// A random v4 UUID chosen once for this hash; not a secret. It keeps these codes apart from WLBH codes.
+const GENERATED_HASH_NAMESPACE_V1 = 'de2dfbd7-8b3f-41a4-9322-8487ec85637f'
+const GENERATED_HASH_LABEL = 'metasheet.stock-prep.yida-generated-hash'
+const GENERATED_HASH_VERSION = 'v1'
+const LONE_SURROGATE = /\p{Cs}/u
+const encoder = new TextEncoder()
+
+const hasPart = (part, key) => Object.prototype.hasOwnProperty.call(part, key)
 
 function exactKeys(descriptors, keys) {
   return Object.keys(descriptors).length === keys.length
@@ -281,6 +312,54 @@ function concatParts(value) {
     } else return null
   }
   return parts.some((part) => Object.prototype.hasOwnProperty.call(part, 'source')) ? parts : null
+}
+
+// Shape only; which targets the parts name, and G1, are checked once the whole map is known.
+function generatedTemplate(value) {
+  const rawParts = dataArray(value, MAX_TEMPLATE_PARTS)
+  if (!rawParts || rawParts.length < 1) return null
+  const parts = []
+  for (const rawPart of rawParts) {
+    const part = dataObject(rawPart)
+    if (part && exactKeys(part, ['literal']) && plainText(part.literal.value, MAX_LITERAL_LENGTH)) {
+      parts.push({ literal: part.literal.value })
+    } else if (part && exactKeys(part, ['field']) && validIdentifier(part.field.value)) {
+      parts.push({ field: part.field.value })
+    } else if (part && exactKeys(part, ['hash', 'form']) && HASH_FORMS.has(part.form.value)) {
+      const members = dataArray(part.hash.value, MAX_HASH_MEMBERS)
+      if (!members || members.length < 1 || new Set(members).size !== members.length
+        || !members.every((member) => validIdentifier(member))) return null
+      parts.push({ hash: [...members], form: part.form.value })
+    } else if (part && exactKeys(part, ['preset', 'rowIdOf', 'projectOf']) && part.preset.value === GENERATED_PRESET
+      && validIdentifier(part.rowIdOf.value) && validIdentifier(part.projectOf.value)) {
+      parts.push({ preset: GENERATED_PRESET, rowIdOf: part.rowIdOf.value, projectOf: part.projectOf.value })
+    } else return null
+  }
+  return parts.some((part) => !hasPart(part, 'literal')) ? parts : null
+}
+
+// The direct targets a generated template reads, in part order (duplicates kept).
+function generatedInputs(entry) {
+  return entry.template.flatMap((part) => hasPart(part, 'field') ? [part.field]
+    : hasPart(part, 'hash') ? part.hash : hasPart(part, 'preset') ? [part.rowIdOf, part.projectOf] : [])
+}
+
+// Every part names a direct primary (hash members and preset inputs a string one), and G1 holds.
+function generatedTemplateValid(entry, primaries, businessKey) {
+  const stringPrimary = (target) => primaries.get(target)?.type === 'string'
+  let identities = 0
+  for (const part of entry.template) {
+    if (hasPart(part, 'field') && !primaries.has(part.field)) return false
+    if (hasPart(part, 'hash')) {
+      identities += 1
+      if (!part.hash.every(stringPrimary) || !businessKey.every((key) => part.hash.includes(key))) return false
+    }
+    if (hasPart(part, 'preset')) {
+      identities += 1
+      if (!stringPrimary(part.rowIdOf) || !stringPrimary(part.projectOf) || !businessKey.includes(part.projectOf)) return false
+    }
+  }
+  return identities === 1
 }
 
 function transformEntry(value, catalog) {
@@ -308,6 +387,10 @@ function transformEntry(value, catalog) {
     if (type === 'number' ? !validProtocolNumber(constant) : !plainText(constant, MAX_VALUE_LENGTH)) return null
     if (options && options.indexOf(constant) < 0) return null
     return { transform, value: constant, target, type, required }
+  }
+  if (transform === 'generated') {
+    const template = generatedTemplate(fields.template.value)
+    return control.control === 'text' && template ? { transform, template, target, type, required } : null
   }
   const parts = concatParts(fields.parts.value)
   const separator = fields.separator.value
@@ -352,8 +435,9 @@ function validateTransformConfig(root) {
 
   const primaries = new Map(map.filter((entry) => entry.transform === 'direct').map((entry) => [entry.target, entry]))
   const rawKeys = dataArray(root.businessKey?.value, 8)
-  if (!rawKeys || rawKeys.length < 1 || new Set(rawKeys).size !== rawKeys.length
-    || rawKeys.some((key) => !validIdentifier(key) || !primaries.has(key))) {
+  const keysValid = !(!rawKeys || rawKeys.length < 1 || new Set(rawKeys).size !== rawKeys.length
+    || rawKeys.some((key) => !validIdentifier(key) || !primaries.has(key)))
+  if (!keysValid) {
     issues.push(configIssue('CONFIG_KEY_INVALID', 'businessKey'))
   }
   const rawEmptyKeys = dataArray(root.emptyKeyFields?.value, 8)
@@ -361,6 +445,11 @@ function validateTransformConfig(root) {
     || rawEmptyKeys.some((key) => !rawKeys?.includes(key) || primaries.get(key)?.type !== 'string'
       || primaries.get(key).required || catalog.find((item) => item.id === key)?.required)) {
     issues.push(configIssue('CONFIG_EMPTY_KEY_FIELDS_INVALID', 'emptyKeyFields'))
+  }
+  // generated needs the whole map and a valid key list: part targets and rule G1 (see above).
+  if (rawMap && map.length === rawMap.length && keysValid && map.some((entry) => entry.transform === 'generated'
+    && !generatedTemplateValid(entry, primaries, rawKeys))) {
+    issues.push(configIssue('CONFIG_FIELD_MAP_INVALID', 'fieldMap'))
   }
   if (issues.length > 0) return { valid: false, issues }
   return { valid: true, normalized: {
@@ -376,6 +465,49 @@ export function validateYidaStaticConfig(input) {
   const root = dataObject(input)
   if (root?.version?.value === 3) return validateTransformConfig(root)
   return root?.version?.value === 2 ? validateProtocolConfig(root) : validateV1Config(input)
+}
+
+// R-71 ⑦.3: the closed v3 transform names, and for each one the row columns it reads. This is the
+// ONE answer to "which columns does a v3 mapping read": the send path projects a selected row onto
+// it (so unmapped source columns never enter a grant, a snapshot or the budget), and the owner panel
+// lists it. A copy reads its direct primary's column, which that direct entry already declares.
+// Adding a transform to TRANSFORM_ENTRY_KEYS without a reader here makes every v3 config refused
+// below, and the transform-name tripwire test fails.
+export const YIDA_TRANSFORM_NAMES = Object.freeze([...TRANSFORM_ENTRY_KEYS.keys()])
+const TRANSFORM_SOURCE_COLUMNS = new Map([
+  ['direct', (entry) => [entry.source]],
+  ['copy', () => []],
+  ['constant', () => []],
+  ['concat', (entry) => entry.parts.filter((part) => Object.prototype.hasOwnProperty.call(part, 'source'))
+    .map((part) => part.source)],
+  ['generated', (entry, config) => generatedTemplateDependencies(entry, config)],
+])
+
+// R-71 ⑦.4: the row columns one generated entry of a valid v3 config reads: its field parts, hash
+// members and preset inputs, each resolved through its direct target to that entry's source column.
+// Sorted, de-duplicated, frozen. The entry must be the config's own generated entry for its target.
+export function generatedTemplateDependencies(entry, config) {
+  const validation = validateYidaStaticConfig(config)
+  if (!validation.valid || validation.normalized.version !== 3) throw new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID')
+  const normalized = validation.normalized
+  const parsed = transformEntry(entry, normalized.fieldCatalog)
+  const own = parsed?.transform === 'generated'
+    ? normalized.fieldMap.find((item) => item.target === parsed.target) : undefined
+  if (!own || JSON.stringify(own) !== JSON.stringify(parsed)) throw new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID')
+  const columns = new Set(generatedInputs(own).map((target) => primaryEntry(normalized, target).source))
+  return Object.freeze([...columns].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0)))
+}
+
+export function yidaTransformSourceColumns(input) {
+  const validation = validateYidaStaticConfig(input)
+  if (!validation.valid || validation.normalized.version !== 3) throw new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID')
+  const columns = new Set()
+  for (const entry of validation.normalized.fieldMap) {
+    const reader = TRANSFORM_SOURCE_COLUMNS.get(entry.transform)
+    if (!reader) throw new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID')
+    for (const column of reader(entry, validation.normalized)) columns.add(column)
+  }
+  return Object.freeze([...columns].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0)))
 }
 
 function sanitizeRows(input) {
@@ -574,17 +706,76 @@ function concatValue(entry, row) {
   return value.length > MAX_VALUE_LENGTH ? { code: 'FIELD_VALUE_TOO_LONG' } : { value }
 }
 
+// Identity text (hash members, preset inputs) is used verbatim: no trim, no normalization. Text a
+// UTF-8 name cannot carry exactly (a lone surrogate) or that reads as another value (padding,
+// control characters) is refused instead.
+function identityText(value) {
+  return typeof value === 'string' && value.trim() === value && !CONTROL.test(value) && !LONE_SURROGATE.test(value)
+}
+
+// Parts in listed order, no implicit separator. Every input is read from the row through its direct
+// target (never from the payload), so catalog order cannot change a value. A blank required key part
+// is already KEY_MISSING, so a template reading one adds no issue of its own.
+function generatedValue(config, entry, row) {
+  const read = (target) => ownValue(row, primaryEntry(config, target).source)
+  const keyTargets = new Set(config.businessKey)
+  if (generatedInputs(entry).some((target) => keyTargets.has(target) && keyMissing(config, row, target))) {
+    return { keyMissing: true }
+  }
+  const emptyKeys = new Set(config.emptyKeyFields)
+  const pieces = []
+  for (const part of entry.template) {
+    if (hasPart(part, 'literal')) { pieces.push(part.literal); continue }
+    if (hasPart(part, 'field')) {
+      const raw = read(part.field)
+      if (missing(raw)) return { code: 'FIELD_PART_MISSING' }
+      if (typeof raw === 'string') pieces.push(raw)
+      else if (typeof raw === 'number') pieces.push(String(raw))
+      else return { code: 'FIELD_TYPE' }
+      continue
+    }
+    if (hasPart(part, 'hash')) {
+      const values = []
+      for (const target of part.hash) {
+        const raw = read(target)
+        if (emptyKeys.has(target) && (raw === undefined || raw === null || raw === '')) { values.push(''); continue }
+        if (missing(raw)) return { code: 'FIELD_PART_MISSING' }
+        if (!identityText(raw)) return { code: 'FIELD_TYPE' }
+        values.push(raw)
+      }
+      const name = encoder.encode(JSON.stringify([GENERATED_HASH_LABEL, GENERATED_HASH_VERSION, ...values]))
+      const uuid = yidaMaterialCodeUuidV5(GENERATED_HASH_NAMESPACE_V1, name).toUpperCase()
+      pieces.push(part.form === 'uuid-32' ? uuid.replaceAll('-', '') : uuid)
+      continue
+    }
+    const keyValue = read(part.rowIdOf)
+    const projectNo = read(part.projectOf)
+    if (missing(keyValue) || missing(projectNo)) return { code: 'FIELD_PART_MISSING' }
+    if (!identityText(keyValue) || !identityText(projectNo)) return { code: 'FIELD_TYPE' }
+    try {
+      pieces.push(generateYidaMaterialCode({ keyValue, projectNo }))
+    } catch (error) {
+      if (error?.name === 'YidaMaterialCodeError') return { code: 'FIELD_TYPE' }
+      throw error
+    }
+  }
+  const value = pieces.join('')
+  return value.length > MAX_VALUE_LENGTH ? { code: 'FIELD_VALUE_TOO_LONG' } : { value }
+}
+
 function transformValue(config, entry, row) {
   if (entry.transform === 'direct') return { value: ownValue(row, entry.source) }
   if (entry.transform === 'copy') return { value: ownValue(row, primaryEntry(config, entry.copyOf).source) }
   if (entry.transform === 'constant') return { value: entry.value }
+  if (entry.transform === 'generated') return generatedValue(config, entry, row)
   return concatValue(entry, row)
 }
 
-function planTransformFields(config, row, index, issues, payload) {
+function planTransformFields(config, row, index, issues, payload, generated) {
   const keyTargets = new Set(config.businessKey)
   for (const entry of catalogOrderedEntries(config)) {
     const result = transformValue(config, entry, row)
+    if (result.keyMissing) continue
     if (result.code) {
       issues.push(transformIssue(config, index, result.code, [entry]))
       continue
@@ -611,6 +802,7 @@ function planTransformFields(config, row, index, issues, payload) {
       continue
     }
     payload[entry.target] = value
+    if (entry.transform === 'generated') generated.push([entry, value])
   }
 }
 
@@ -681,6 +873,7 @@ export function buildYidaStaticPlan(input) {
   const inputRows = sanitizeRows(top.rows.value)
   const plannedRows = []
   const keyGroups = new Map()
+  const generatedGroups = new Map()
   const keyFields = new Set(config.businessKey)
   for (let index = 0; index < inputRows.length; index += 1) {
     const row = inputRows[index]
@@ -699,8 +892,16 @@ export function buildYidaStaticPlan(input) {
       keyGroups.set(key, group)
     }
     const payload = {}
-    if (config.version === 3) planTransformFields(config, row, index, issues, payload)
-    else for (const entry of config.fieldMap) {
+    if (config.version === 3) {
+      const generated = []
+      planTransformFields(config, row, index, issues, payload, generated)
+      for (const [entry, value] of generated) {
+        const groupKey = JSON.stringify([entry.target, value])
+        const group = generatedGroups.get(groupKey) || { entry, indexes: [] }
+        group.indexes.push(index)
+        generatedGroups.set(groupKey, group)
+      }
+    } else for (const entry of config.fieldMap) {
       const value = ownValue(row, entry.source)
       if (missing(value)) {
         if (entry.required && !keyFields.has(entry.source)) issues.push(rowIssue(index, 'FIELD_REQUIRED', [entry]))
@@ -747,6 +948,18 @@ export function buildYidaStaticPlan(input) {
     for (const index of group) {
       const planned = plannedRows[index]
       planned.issues.push(rowIssue(index, 'DUPLICATE_LOCAL_KEY'))
+      planned.status = 'invalid'
+      delete planned.payload
+      delete planned.instanceId
+    }
+  }
+  // Like the key groups (every row that produced the value, whatever its other issues): one
+  // generated value on two rows of one batch refuses both, so a draft never sends one code twice.
+  for (const { entry, indexes } of generatedGroups.values()) {
+    if (indexes.length < 2) continue
+    for (const index of indexes) {
+      const planned = plannedRows[index]
+      planned.issues.push(transformIssue(config, index, 'DUPLICATE_GENERATED_VALUE', [entry]))
       planned.status = 'invalid'
       delete planned.payload
       delete planned.instanceId
@@ -860,7 +1073,7 @@ export function createYidaTransformExample() {
       text('materialTypeText'),
       { id: 'processRule', control: 'select', required: true, options: ['SYN-RULE-A', 'SYN-RULE-B'] },
       { id: 'allowNegativeStock', control: 'radio', required: true, options: ['SYN-YES', 'SYN-NO'] },
-      text('defaultText'), text('sourceLineId', true),
+      text('defaultText'), text('sourceLineId', true), text('materialCodeText'),
     ],
     fieldMap: [
       direct('projectNo', 'project', true),
@@ -880,6 +1093,9 @@ export function createYidaTransformExample() {
       { transform: 'constant', value: 'SYN-NO', target: 'allowNegativeStock', type: 'string', required: true },
       { transform: 'constant', value: 'SYN-DEFAULT', target: 'defaultText', type: 'string', required: false },
       direct('idempotencyKey', 'sourceLineId', true),
+      // R-71 ②: the default material template, one preset part. Never on a target named materialCode.
+      { transform: 'generated', template: [{ preset: 'material-code-v1', rowIdOf: 'sourceLineId', projectOf: 'project' }],
+        target: 'materialCodeText', type: 'string', required: true },
     ],
   }
   const rows = [

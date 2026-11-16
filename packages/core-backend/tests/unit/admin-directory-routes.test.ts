@@ -1295,7 +1295,7 @@ describe('adminDirectoryRouter', () => {
     })
 
     expect(response.statusCode).toBe(200)
-    expect(directoryMocks.createDirectoryIntegration).toHaveBeenCalledWith(payload)
+    expect(directoryMocks.createDirectoryIntegration).toHaveBeenCalledWith(payload, { actorId: 'admin-1' })
     expect(schedulerMocks.refreshDirectoryIntegrationSchedule).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001')
   })
 
@@ -1321,7 +1321,7 @@ describe('adminDirectoryRouter', () => {
     })
 
     expect(response.statusCode).toBe(200)
-    expect(directoryMocks.updateDirectoryIntegration).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001', payload)
+    expect(directoryMocks.updateDirectoryIntegration).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001', payload, { actorId: 'admin-1' })
     expect(schedulerMocks.refreshDirectoryIntegrationSchedule).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001')
   })
 
@@ -1518,7 +1518,7 @@ describe('adminDirectoryRouter', () => {
       })
 
       expect(response.statusCode).toBe(200)
-      expect(directoryMocks.createDirectoryIntegration).toHaveBeenCalledWith(payload)
+      expect(directoryMocks.createDirectoryIntegration).toHaveBeenCalledWith(payload, { actorId: 'admin-1' })
     })
 
     it.each([
@@ -1538,7 +1538,7 @@ describe('adminDirectoryRouter', () => {
       })
 
       expect(response.statusCode).toBe(200)
-      expect(directoryMocks.createDirectoryIntegration).toHaveBeenCalledWith(payload)
+      expect(directoryMocks.createDirectoryIntegration).toHaveBeenCalledWith(payload, { actorId: 'admin-1' })
     })
 
     it('allows an empty schedule_cron on update (= clears the schedule)', async () => {
@@ -1552,7 +1552,7 @@ describe('adminDirectoryRouter', () => {
       })
 
       expect(response.statusCode).toBe(200)
-      expect(directoryMocks.updateDirectoryIntegration).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001', payload)
+      expect(directoryMocks.updateDirectoryIntegration).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001', payload, { actorId: 'admin-1' })
     })
   })
 
@@ -1621,7 +1621,7 @@ describe('adminDirectoryRouter', () => {
       })
 
       expect(response.statusCode).toBe(200)
-      expect(directoryMocks.createDirectoryIntegration).toHaveBeenCalledWith(payload)
+      expect(directoryMocks.createDirectoryIntegration).toHaveBeenCalledWith(payload, { actorId: 'admin-1' })
     })
 
     it.each([
@@ -1643,7 +1643,7 @@ describe('adminDirectoryRouter', () => {
       })
 
       expect(response.statusCode).toBe(200)
-      expect(directoryMocks.createDirectoryIntegration).toHaveBeenCalledWith(payload)
+      expect(directoryMocks.createDirectoryIntegration).toHaveBeenCalledWith(payload, { actorId: 'admin-1' })
     })
 
     it('allows an empty scheduleTimezone on update (= clears to the default)', async () => {
@@ -1657,7 +1657,7 @@ describe('adminDirectoryRouter', () => {
       })
 
       expect(response.statusCode).toBe(200)
-      expect(directoryMocks.updateDirectoryIntegration).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001', payload)
+      expect(directoryMocks.updateDirectoryIntegration).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001', payload, { actorId: 'admin-1' })
     })
   })
 

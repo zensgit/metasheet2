@@ -118,9 +118,79 @@ function expectError(compile, ErrorClass, candidate, code) {
   })
 }
 
-test('exports only the compiler and fixed draft error class', async () => {
+test('exports the two persisted-path compilers and the fixed draft error class', async () => {
   const exported = await modulePromise
-  assert.deepEqual(Object.keys(exported).sort(), ['YidaDraftPlanError', 'compileYidaDraft'])
+  assert.deepEqual(Object.keys(exported).sort(), ['YidaDraftPlanError', 'compileYidaDraft', 'compileYidaSendDraft'])
+})
+
+// R-71 ⑦.3 (B2): literal v2 goldens, computed by the base compiler before this change. A stored v2
+// draft, an L4-sealed plan digest and a ledger plan revision must keep exactly these bytes, through
+// the initialization entry and the send entry alike.
+const V2_GOLDEN = {
+  protocol: {
+    planDigest: 'abab832e3a8c42adecb79e244901400f47b61b712fa922f2a863688366e07fcd',
+    keyDefinitionDigest: '45e2fcf5e9ea73a18f75319b2b43632c9969de643802220439deed1924aa9495',
+    locatorDigest: 'bb9d4879e19db998bf1aa865102470bb3fea7c2a149d4bdb888e653bd52569e2',
+    rowSpecs: [
+      { index: 0, businessKeyDigest: 'fa3228a6f42b2725a14ba1a4bd9d0665eb43a302a901bfb92a8277cecc362b49', payloadDigest: '3f7f9a196dd22e9b37bfee43e2623457c6c8843b13441253c339527f3a8b2166' },
+      { index: 1, businessKeyDigest: 'efedaff7d65b4b06eea4b7bffaea130d78518f9f9ee79ca24fc8e12ad5acdd4d', payloadDigest: '65c04d05883a4b6ab242f36692d518aef408f684b8afd2464cfcc44b814c1088' },
+    ],
+  },
+  material: {
+    planDigest: 'fb883eb7830903d243dc5acf7df5593a0d66970aa4defdf86d808b78c6969066',
+    keyDefinitionDigest: 'd320bf2a69eeff33b75ad11af51a50f8000d62d2dc0965bf16d35ef283a96f26',
+    locatorDigest: '9c954dc26211cd6de7190ceda515a56d5aec59c331f01c607acb44db29a98369',
+    rowSpecs: [
+      { index: 0, businessKeyDigest: 'e54631415663b1a44ee2acd473a1b24fe78c780e8581b1bfea8a44a20e838426', payloadDigest: 'ba606ceb515d63688d80487191c33d0c78d9fd8d5fe2f7802e50d2c9de0e790f' },
+      { index: 1, businessKeyDigest: '0ad6b53932125831250141dbf6debc370c3c7077c5235d13f249c7160a87a851', payloadDigest: '1b39c25b35a44b77d99796e6ed6349285c11e079384b9317ee2215c4cdb8c370' },
+      { index: 2, businessKeyDigest: '3f080ebf507efc660d81ad362812f435e15abe3c6b3c72996a6d37472f8e1c39', payloadDigest: '7ae7514e45e6bbcd55b0999a612ceb9aa4c39c7e82a55ee98f272acd41c258f8' },
+      { index: 3, businessKeyDigest: '4f9077c90291a153831ff2d29f9494592627110371c99821696a4cb85d564523', payloadDigest: '37a0e09828a5a901e5caf3f09b84faf478b2e513f0a7eb4787c1352c7c0ec416' },
+    ],
+  },
+}
+async function goldenInputs() {
+  const { createYidaProtocolExample, createYidaTransformExample } = await plannerPromise
+  const template = JSON.parse(require('node:fs').readFileSync(path.join(__dirname,
+    '../../../docs/development/takeover-beiliao-20260821/yida-legacy-templates/material.json'), 'utf8'))
+  const example = createYidaProtocolExample()
+  return {
+    protocol: { config: example.config, rowsText: example.text, allocation: { mode: 'original' } },
+    material: { config: { ...template.rules, target: { appType: 'synthetic_golden_app', formUuid: 'synthetic_golden_form' } },
+      rowsText: createYidaTransformExample().text, allocation: { ...template.allocation, projects: ['DEMO-P1', 'DEMO-P2'] } },
+  }
+}
+
+test('R-71 ⑦.3 B2: v2 literal goldens (protocol example, shipped material template) are byte-identical through both entries', async () => {
+  const { compileYidaDraft, compileYidaSendDraft } = await modulePromise
+  const inputs = await goldenInputs()
+  for (const [name, golden] of Object.entries(V2_GOLDEN)) {
+    for (const compile of [compileYidaDraft, compileYidaSendDraft]) {
+      const result = compile(inputs[name])
+      assert.deepEqual({ planDigest: result.planDigest, keyDefinitionDigest: result.keyDefinitionDigest,
+        locatorDigest: result.locatorDigest, rowSpecs: result.rowSpecs }, golden, name)
+    }
+  }
+})
+
+test('R-71 ⑦.3 B2: a v3 plan digest is the v2 formula plus exactly one mapping: 3 marker; key definition and rows stay shared', async () => {
+  const { compileYidaDraft, compileYidaSendDraft } = await modulePromise
+  const lifted = config({ version: 3, businessKey: ['project', 'line', 'parent'], emptyKeyFields: ['parent'],
+    fieldMap: config().fieldMap.map((entry) => ({ transform: 'direct', ...entry })) })
+  for (const settings of [{ mode: 'original' }, allocation()]) {
+    const v2 = compileYidaSendDraft(input([row(), row('LINE-2', 4)], config(), settings))
+    const v3 = compileYidaSendDraft(input([row(), row('LINE-2', 4)], lifted, settings))
+    const rows = v3.rowSpecs.map(({ businessKeyDigest, payloadDigest }) => ({ businessKeyDigest, payloadDigest }))
+      .sort((left, right) => compareCodePoints(left.businessKeyDigest, right.businessKeyDigest))
+    const formula = (marker) => digest({ version: 1, kind: 'yida-local-plan', locator: v3.locator,
+      keyDefinition: v3.keyDefinition, intent: 'create', ...marker, rows })
+    assert.equal(v3.planDigest, formula({ mapping: 3 }))
+    assert.equal(v2.planDigest, formula({}))
+    assert.notEqual(v3.planDigest, v2.planDigest)
+    assert.equal(v3.keyDefinitionDigest, v2.keyDefinitionDigest)
+    assert.deepEqual(v3.rowSpecs, v2.rowSpecs)
+    // The initialization entry still refuses v3 (decision E1).
+    expectError(compileYidaDraft, (await modulePromise).YidaDraftPlanError, input([row()], lifted, settings), 'YIDA_DRAFT_CONFIG')
+  }
 })
 
 test('original draft contains the real full plan, exact normalized source and independently computed digests', async () => {

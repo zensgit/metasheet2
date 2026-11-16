@@ -459,6 +459,33 @@ export default defineConfig({
       // approval-routing-prerequisite-ci-wiring.test.mjs).
       'tests/integration/approval-routing-policy-required.db.test.ts',
       'tests/integration/approval-routing-policy-required.api.test.ts',
+      // Authorization-input contract entry points against real PostgreSQL: world-lock compatibility,
+      // READ COMMITTED pin, token rejection, timeout restoration, terminated backend, no convoy, and
+      // the role-row-first order of a role delete against a membership write. DATABASE_URL-gated;
+      // excluded here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the
+      // approval real-DB step in plugin-tests.yml (both points asserted by
+      // tests/unit/authorization-input-lock.test.ts, the position by
+      // plugin-tests-parallel-contract.test.mjs).
+      'tests/integration/authorization-input-serialization.db.test.ts',
+      // Database-side census of the classifier input tables (triggers, rules, function bodies,
+      // users-locking functions, cascading foreign keys, the default expressions of the three
+      // users columns the classifier reads, views and materialized views over an input table, the
+      // list of foreign keys whose child is an input table, and tables that inherit from an input
+      // table or are a partition of one) against the migrated schema.
+      // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it, and wired as a
+      // WHOLE FILE into the approval real-DB step in plugin-tests.yml (both points asserted by
+      // tests/unit/authorization-input-lock.test.ts, the position by
+      // plugin-tests-parallel-contract.test.mjs).
+      'tests/integration/authorization-input-census.db.test.ts',
+      // Pull-source write gate against real PostgreSQL: the organisation lock, the gate transaction's
+      // isolation level and bounded waits, the two-connection interleaves of create / activate /
+      // policy clear, the policy-clear rule, the audit rows and the expected-state compare, all with
+      // a repeatable-read-DEFAULT service pool (the file amends DATABASE_URL before the pool is
+      // built). DATABASE_URL-gated with the EXPECT_DB sentinel; excluded here so the no-DB job cannot
+      // skip-green it, and wired as a WHOLE FILE into the approval real-DB step in plugin-tests.yml
+      // (pinned by plugin-tests-parallel-contract.test.mjs and
+      // approval-routing-prerequisite-ci-wiring.test.mjs).
+      'tests/integration/directory-pull-source-gate.db.test.ts',
       // D21 authorization version protocol (slice Y5a): the trigger coverage matrix (raw SQL + FK
       // cascade writers), the two-connection barrier cases and the holder-vs-writer deadlock
       // mapping need real PostgreSQL. DATABASE_URL-gated; excluded here so the no-DB job cannot

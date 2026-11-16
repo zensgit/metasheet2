@@ -106,7 +106,8 @@ purpose=`approval_routing` 的解析顺序：
   （Q5 裁决：preview 为纯 GET，**不审计**——as-built handler 即如此。）
 - `PATCH /api/admin/directory/routing-policy/:purpose`：唯一写点。admin-only；values-free 审计
   `directory.routing_policy.set`（resourceId=`${orgId}:${purpose}`，meta 只含 orgId/purpose/
-  integrationId —— 不回显 config）。
+  integrationId，以及操作者 id `actorId` 与前一个 canonical `previousCanonicalIntegrationId`
+  —— 不回显 config；清除的审计 `directory.routing_policy.clear` 同样带这两项）。
 
 ### 锁 4 — 测试/mutation 义务（真库）
 
