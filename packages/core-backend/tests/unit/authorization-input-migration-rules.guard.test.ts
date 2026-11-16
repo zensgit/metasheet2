@@ -264,6 +264,23 @@ describe('writes judged by table, form and operand', () => {
     expect(blankSqlComments("SELECT '--x', 1 -- tail\n/* a /* b */ c */ FROM t")).toBe("SELECT '--x', 1        \n                  FROM t")
   })
 
+  it('a `--` comment ends where PostgreSQL ends it, at a lone carriage return as at a line feed: what follows is judged', () => {
+    expect(blankSqlComments('SELECT 1 -- a\r, 2 -- b\r\n, 3 -- c\n, 4 -- d')).toBe('SELECT 1     \r, 2     \r\n, 3     \n, 4     ')
+    expect(blankSqlComments('/* a\r */ SELECT 1')).toBe('         SELECT 1')
+    const hidden = 'ALTER TABLE public.users DISABLE TRIGGER ALL'
+    const problem = 'unreadable ALTER TABLE: DISABLE TRIGGER is not on the list of safe sub-actions'
+    // As a plain string literal, as a template with an escaped carriage return, and as `.sql` text.
+    expect(check(unlocked(`SELECT 1 --\r; ${hidden}`)).problems).toEqual([problem])
+    expect(check(up('await sql`SELECT 1 --\\r; ' + hidden + '`.execute(db)')).problems).toEqual([problem])
+    expect(check(`SELECT 1 --\r; ${hidden};\n`, NEW_SQL).problems).toEqual([problem])
+    // Inside a block body, and as the head of a statement after a line comment.
+    expect(check(unlocked('DO $$ BEGIN --\rDROP TRIGGER trg_users_recovery_authority_lock_update ON public.users;\nNULL; END $$')).problems).toEqual(['unreadable DROP TRIGGER: statement kind is not on the safe list'])
+    expect(check(unlocked('SELECT 1 --\r; CREATE TRIGGER t BEFORE UPDATE ON public.users FOR EACH ROW EXECUTE FUNCTION public.f()')).problems).toEqual(['unreadable CREATE TRIGGER: defines an object over an input table'])
+    // A carriage return that ends a line of a CRLF text changes nothing.
+    expect(check(unlocked(`SELECT 1; -- note\r\n${hidden}`)).problems).toEqual([problem])
+    expect(check(unlocked(`SELECT 1; -- ${hidden}\r\nSELECT 2`)).problems).toEqual([])
+  })
+
   it('the same rules read a `.sql` migration by its statements', () => {
     expect(check(`${COMPLIANT_LOCK_BLOCK};\nINSERT INTO user_permissions (user_id, permission_code) VALUES ('u', 'docs:read');`, NEW_SQL).problems).toEqual([])
     expect(check(`${COMPLIANT_LOCK_BLOCK};\nINSERT INTO user_permissions (user_id, permission_code) VALUES ('u', 'users:write');`, NEW_SQL).problems).toEqual(['grants class-raising code users:write'])
@@ -555,6 +572,37 @@ describe('the pinned trigger statements of the D21 migration (owner ruling 2026-
       ['ALTER TRIGGER trg_user_roles_zz_authz_subject_version ON public.user_roles RENAME TO trg_user_roles_aa', 'unreadable ALTER: statement kind is not on the safe list'],
     ]
     for (const [statement, problem] of cases) expect(d21([...LAYOUT, q(statement)]), statement).toEqual([problem])
+  })
+
+  // PostgreSQL ends a `--` comment at a lone carriage return; what follows it runs. Each text below
+  // reads as the pinned statement only to a judge that ends the comment at the line feed.
+  const crHidden: Array<[string, number, string]> = [
+    ['a WHEN clause', USER_ROLES_CREATE, USER_ROLES_CREATE_TEXT.replace('FOR EACH ROW', 'FOR EACH ROW --\rWHEN (false)\n')],
+    ['UPDATE OF a column', USERS_UPDATE_CREATE, `CREATE TRIGGER trg_users_zz_authz_subject_version_update BEFORE UPDATE --\rOF last_login_at\nON public.users FOR EACH ROW EXECUTE FUNCTION ${SUBJECT_BUMP}('id', 'role,is_active,activation_status,permissions,is_admin')`],
+    ['another function', USER_ROLES_CREATE, USER_ROLES_CREATE_TEXT.replace(`EXECUTE FUNCTION ${SUBJECT_BUMP}('user_id')`, `EXECUTE FUNCTION --\rpublic.other_fn() /*\n${SUBJECT_BUMP}('user_id') -- */`)],
+    ['another table', USER_ROLES_CREATE, `CREATE TRIGGER trg_user_roles_zz_authz_subject_version --\rAFTER INSERT ON public.role_permissions FOR EACH STATEMENT EXECUTE FUNCTION public.other_fn() /*\nBEFORE INSERT OR UPDATE OR DELETE ON public.user_roles FOR EACH ROW EXECUTE FUNCTION ${SUBJECT_BUMP}('user_id') -- */`],
+  ]
+  for (const [name, index, text] of crHidden) {
+    it(`RED 1/2 — a pinned name with ${name} hidden from a line-feed reader after \`--\` and a carriage return is refused, as a string or as a template`, () => {
+      expect(d21(replaced(index, q(text)))).toEqual(TEN)
+      expect(d21(replaced(index, 'await sql`' + text.replace(/\r/g, '\\r').replace(/\n/g, '\\n') + '`.execute(db)'))).toEqual(TEN)
+      expect(d21([...LAYOUT, q(text)])).toEqual([CREATE_PROBLEM])
+    })
+  }
+
+  it('RED 6/8 — a statement hidden after `--` and a carriage return inside a pinned block or after a pinned create is judged, and the ten stay set aside', () => {
+    const disable = 'ALTER TABLE public.users DISABLE TRIGGER ALL'
+    const afterDrop = q(`DO $$ BEGIN IF to_regclass('public.user_roles') IS NOT NULL THEN ${USER_ROLES_DROP_TEXT}; --\r${disable};\nEND IF; END $$`)
+    expect(d21(replaced(USER_ROLES_DROP, afterDrop))).toEqual(['unreadable ALTER TABLE: DISABLE TRIGGER is not on the list of safe sub-actions'])
+    const recoveryDrop = q(`DO $$ BEGIN IF to_regclass('public.user_roles') IS NOT NULL THEN ${USER_ROLES_DROP_TEXT}; --\rDROP TRIGGER trg_users_recovery_authority_lock_update ON public.users;\nEND IF; END $$`)
+    expect(d21(replaced(USER_ROLES_DROP, recoveryDrop))).toEqual([DROP_PROBLEM])
+    expect(d21(replaced(USER_ROLES_CREATE, q(`${USER_ROLES_CREATE_TEXT} --\r; ${disable}`)))).toEqual(['unreadable ALTER TABLE: DISABLE TRIGGER is not on the list of safe sub-actions'])
+  })
+
+  it('GREEN — the ten written with CRLF line ends and a line comment on every line are still the ten', () => {
+    const crlf = LAYOUT.map((block) => block.replace(/\n/g, ' -- c\\r\\n'))
+    expect(crlf.every((block) => !block.includes('\n') && block.includes('\\r\\n'))).toBe(true)
+    expect(d21(crlf)).toEqual([])
   })
 
   it('the set-aside reads every condition of a judgment: a pinned judgment that differs in any one of them leaves nothing set aside', () => {
