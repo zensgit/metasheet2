@@ -540,6 +540,33 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
     expect([lateHttp.token, lateHttp.form]).toEqual([0, 0])
   })
 
+  it('gate 1: an abort while the admission COMMIT reply is held is not consulted by the port; the runner refuses before any IO and the attempt stays consumed', async () => {
+    // gateCommit holds the reply AFTER PostgreSQL has committed the admission, so the abort lands past the durable
+    // point. From there the port no longer reads the signal; it hands it to the runner, which refuses an aborted run
+    // before its first write or fetch, and the port seals that as UNAVAILABLE. A port that consulted the signal again
+    // right after admission would answer CANCELLED instead (same ledger and HTTP outcome; only the sealed code moves).
+    const f = await fixture(), fake = http(), gate = first.gateCommit('admission')
+    const controller = new AbortController()
+    let result: Submit | undefined
+    const pending = outcome(first.port(fake).submit(f.request, { signal: controller.signal }).then(value => { result = value }))
+    try {
+      await reached(gate)
+      expect((await tableRows(ADMISSION)).length).toBe(1)
+      controller.abort()
+    } finally { gate.release() }
+    expect(await pending).toEqual({ ok: false, code: 'YIDA_OWNER_SEND_UNAVAILABLE' })
+    expect(result).toBeUndefined()
+    expect([fake.token, fake.form]).toEqual([0, 0])
+    expect((await evidence()).counts).toEqual([1, 0, 1, 2, 1, 1])
+    expect((await tableRows(LEDGER)).map(row => row.status)).toEqual(['prepared'])
+    expect((await tableRows(LEDGER_AUDIT)).map(row => row.event)).toEqual(['prepare'])
+    const before = await evidence(), replayHttp = http(), replay = await second.port(replayHttp).submit(f.request)
+    expect([replay.reused, replay.approval.remainingAttempts, replay.status, replay.externalWriteAttempted])
+      .toEqual([true, 0, 'prepared', false])
+    expect([replayHttp.token, replayHttp.form, fake.token, fake.form]).toEqual([0, 0, 0, 0])
+    expect(await evidence()).toEqual(before)
+  })
+
   it.each(['admission', 'claim'] as const)('lost real %s COMMIT reply yields no resumed permit or second token/send', async stage => {
     const f = await fixture(), fake = http(); first.loseCommit(stage)
     await rejected(first.port(fake).submit(f.request))
