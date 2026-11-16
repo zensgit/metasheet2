@@ -757,7 +757,7 @@ describe('the pinned trigger statements of the D21 migration (owner ruling 2026-
 describe('the reviewed content of the D21 migration: the digest gate (owner ruling 2026-11-16 「按建议，A」)', () => {
   // What the gate guarantees: the ten pinned statements are set aside only in the reviewed D21 file,
   // byte-identical modulo CRLF; any other content, at the pinned path or at any other, gives the ten
-  // problems, as on main. What it does not: the judge reads literals, not what runs, so a runner
+  // problems, as with no pinned set. What it does not: the judge reads literals, not what runs, so a runner
   // wrapped or replaced from another module (the D21 helpers imported into another migration) and
   // computed SQL there stay outside what a single-file literal judge can see, as for every migration.
   const D21 = D21_AUTHORIZATION_VERSION_MIGRATION
@@ -842,11 +842,16 @@ describe('the reviewed content of the D21 migration: the digest gate (owner ruli
     ['a line feed replaced by a lone carriage return', () => once(REAL_LF, `${AFTER_IMPORT}\n/**\n * `, `${AFTER_IMPORT}\n/**\r * `)],
     ['a lone carriage return inserted inside a line', () => once(REAL_LF, 'Drops the thirteen triggers', 'Drops the\r thirteen triggers')],
     ['a byte order mark before the first line', () => `﻿${REAL_LF}`],
+    // Carriage returns the CRLF fold must not absorb: only a CR directly before an LF is folded.
+    ['a CR CR LF line end', () => once(REAL_LF, `${AFTER_IMPORT}\n/**\n * `, `${AFTER_IMPORT}\r\r\n/**\n * `)],
+    ['an LF CR line end', () => once(REAL_LF, `${AFTER_IMPORT}\n/**\n * `, `${AFTER_IMPORT}\n\r/**\n * `)],
+    ['a trailing lone carriage return', () => `${REAL_LF}\r`],
     // The reviewed content at any other path.
     ['the reviewed file as a new migration', () => REAL_LF, NEW_TS],
     ['the reviewed file back-dated', () => REAL_LF, `${MIG}/zzzz20200101000000_add_authorization_version_rows.ts`],
     ['the reviewed file in the other stream', () => REAL_LF, D21.replace('src/db/migrations', 'migrations')],
     ['the reviewed file with another extension', () => REAL_LF, D21.replace(/\.ts$/, '.js')],
+    ['the reviewed file at the pinned path in another letter case', () => REAL_LF, D21.replace('_add_authorization_version_rows', '_Add_authorization_version_rows')],
   ]
   for (const [name, make, file = D21] of changedContent) {
     it(`RED — ${name}: not the reviewed content at the pinned path, so the ten problems are given exactly as with no pinned set`, () => {

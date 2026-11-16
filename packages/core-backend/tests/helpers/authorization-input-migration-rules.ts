@@ -23,7 +23,9 @@
  * aside only in the reviewed D21 file, at its exact path and byte-identical to the reviewed content
  * modulo CRLF (the sha256 of the source with every CRLF turned into LF equals
  * `D21_AUTHORIZATION_VERSION_MIGRATION_SHA256`; a lone carriage return is a byte of its own). Any
- * other content, at that path or at any other, has the ten judged as on main: ten problems. The
+ * other content, at that path or at any other, has the ten judged as with no pinned set: ten problems
+ * (as on main, apart from the `--` comment that this branch ends at a lone carriage return, as
+ * PostgreSQL does). The
  * conditions read before the digest was added still hold on top of it: the ten are set aside
  * together or not at all, each found exactly once with exactly its pinned verdict, as written where
  * it is pinned to stand (a CREATE at the top of an SQL text, a DROP as the piece of a `DO` body that
@@ -45,7 +47,8 @@
  * digest re-pinned; that is a change of the AIS contract and is reviewed as one.
  *
  * A function body is not part of the pin: the trigger function is judged by the rules for every
- * function definition, and the database census pins what the triggers run.
+ * function definition, and the database census of the Y5a branch pins what the triggers run (the
+ * two land together; without that census this file's triggers are refused, so it fails closed).
  */
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
