@@ -30,6 +30,7 @@
         data-testid="delegation-confirmation-typed"
         type="text"
         aria-label="输入取消平台管理员以确认撤销"
+        :disabled="phase !== 'review'"
       />
     </label>
     <div class="delegation-confirmation__actions">
@@ -37,9 +38,10 @@
         class="delegation-confirmation__button"
         type="button"
         data-testid="delegation-confirmation-cancel"
-        @click="emit('cancel')"
+        :disabled="phase === 'pending'"
+        @click="cancel"
       >
-        取消
+        {{ phase === 'completed' ? '关闭' : '取消' }}
       </button>
       <button
         class="delegation-confirmation__button"
@@ -62,7 +64,7 @@ import {
   type DelegationConfirmation,
 } from './delegationConfirmation'
 
-const props = defineProps<{ confirmation: DelegationConfirmation }>()
+const props = defineProps<{ confirmation: DelegationConfirmation; phase: 'review' | 'pending' | 'completed' }>()
 const emit = defineEmits<{ confirm: [typedText: string]; cancel: [] }>()
 const typedText = ref('')
 const dialogRef = ref<HTMLElement | null>(null)
@@ -71,6 +73,13 @@ let previousFocus: HTMLElement | null = null
 watch(() => props.confirmation.token, () => {
   typedText.value = ''
 })
+
+watch(() => props.phase, (phase) => {
+  if (phase === 'pending') dialogRef.value?.focus()
+  if (phase === 'completed') {
+    dialogRef.value?.querySelector<HTMLElement>('[data-testid="delegation-confirmation-cancel"]')?.focus()
+  }
+}, { flush: 'post' })
 
 const title = computed(() => {
   if (props.confirmation.kind === 'grant') return '确认分配角色'
@@ -96,7 +105,7 @@ const effect = computed(() => {
 })
 
 const confirmDisabled = computed(() => (
-  requiresAdminPhrase.value && typedText.value.trim() !== PLATFORM_ADMIN_REVOKE_PHRASE
+  props.phase !== 'review' || (requiresAdminPhrase.value && typedText.value.trim() !== PLATFORM_ADMIN_REVOKE_PHRASE)
 ))
 
 function focusableNodes(): HTMLElement[] {
@@ -106,15 +115,23 @@ function focusableNodes(): HTMLElement[] {
     .filter((node) => !node.hasAttribute('disabled') && node.tabIndex !== -1)
 }
 
+function cancel(): void {
+  if (props.phase !== 'pending') emit('cancel')
+}
+
 function onDocumentKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape') {
     event.preventDefault()
-    emit('cancel')
+    cancel()
     return
   }
   if (event.key !== 'Tab') return
   const nodes = focusableNodes()
-  if (nodes.length === 0) return
+  if (nodes.length === 0) {
+    event.preventDefault()
+    dialogRef.value?.focus()
+    return
+  }
   const first = nodes[0]
   const last = nodes[nodes.length - 1]
   const active = document.activeElement
