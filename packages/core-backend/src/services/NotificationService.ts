@@ -3,6 +3,7 @@
  * 支持多渠道通知发送，模板管理，订阅管理
  */
 
+import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'eventemitter3'
 import nodemailer from 'nodemailer'
 import type {
@@ -35,6 +36,20 @@ import {
   type EmailTransportEnv,
   type EmailTransportReadinessReport,
 } from './email-transport-readiness'
+import {
+  NOTIFICATION_NO_CHANNEL_RECIPIENTS_REASON,
+  NOTIFICATION_RECIPIENTS_NOT_ALLOWED_REASON,
+  NOTIFICATION_RECIPIENTS_NOT_BOUND_REASON,
+  NOTIFICATION_TRANSPORT_DISABLED_REASON,
+  NOTIFICATION_TRANSPORT_NOT_CONFIGURED_REASON,
+  NOTIFICATION_TRANSPORT_SIMULATED_REASON,
+} from './notification-delivery-outcome'
+import type {
+  FeishuCapabilityDecision,
+  FeishuSendEndpoint,
+  FeishuSendInput,
+  FeishuSendOutcome,
+} from './feishu-message-sender'
 
 /**
  * Email notification payload
@@ -82,15 +97,6 @@ interface WebhookPayload {
   content: string
   data?: unknown
   metadata?: Record<string, unknown>
-}
-
-/**
- * Feishu message payload
- */
-interface FeishuMessagePayload {
-  title: string
-  content: string
-  data?: unknown
 }
 
 function resolvePositiveInt(value: unknown, fallback: number, min = 1, max = Number.MAX_SAFE_INTEGER): number {
@@ -208,20 +214,77 @@ export class EmailNotificationChannel implements NotificationChannel {
     this.smtpTransportFactory = resolveEmailSmtpTransportFactory(config)
   }
 
+  /**
+   * Result contract (see `NotificationResult`): `sent` only after the SMTP transport accepted every
+   * email-type recipient (at least one); `simulated` in mock mode (no transport call); `cancelled` when
+   * nothing is attempted (no email-type recipient, or transport disabled); `failed` for configuration
+   * failures and transport errors, with `acceptedCount` naming how many recipients were accepted first.
+   */
   async sender(notification: Notification, recipients: NotificationRecipient[]): Promise<NotificationResult> {
     const id = `email_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`
+    const emailRecipients = recipients.filter(r => r.type === 'email')
+    const recipientCount = emailRecipients.length
 
+    if (recipientCount === 0) {
+      return {
+        id,
+        status: 'cancelled',
+        metadata: {
+          channel: 'email',
+          reason: NOTIFICATION_NO_CHANNEL_RECIPIENTS_REASON,
+          recipientCount: 0,
+        },
+      }
+    }
+
+    const mode = this.readiness.mode
+    if (mode === 'mock') {
+      // Development simulation: no transport is touched, and the result says so.
+      this.logger.info('Mock email transport simulated the notification; no email was sent', {
+        channel: 'email',
+        transport: 'mock',
+        recipientCount,
+      })
+      return {
+        id,
+        status: 'simulated',
+        metadata: {
+          channel: 'email',
+          transport: 'mock',
+          reason: NOTIFICATION_TRANSPORT_SIMULATED_REASON,
+          recipientCount,
+        },
+      }
+    }
+    if (mode === 'disabled') {
+      return {
+        id,
+        status: 'cancelled',
+        metadata: {
+          channel: 'email',
+          transport: 'disabled',
+          reason: NOTIFICATION_TRANSPORT_DISABLED_REASON,
+          recipientCount,
+        },
+      }
+    }
+
+    let acceptedCount = 0
     try {
-      // 这里应该集成实际的邮件服务(如 SendGrid, SES, SMTP)
-      const emailRecipients = recipients.filter(r => r.type === 'email')
-
+      if (mode === 'unsupported') {
+        throw new Error(`Email transport configuration is unsupported: ${this.readiness.messages.join(' ')}`)
+      }
+      if (!this.readiness.ok) {
+        throw new Error(`SMTP email transport blocked: ${this.readiness.messages.join(' ')}`)
+      }
       for (const recipient of emailRecipients) {
-        await this.sendEmail({
+        await this.sendSmtpEmail({
           to: recipient.id,
           subject: notification.subject,
           content: notification.content,
           metadata: notification.metadata
         })
+        acceptedCount += 1
       }
 
       return {
@@ -230,7 +293,9 @@ export class EmailNotificationChannel implements NotificationChannel {
         sentAt: new Date(),
         metadata: {
           channel: 'email',
-          recipientCount: emailRecipients.length
+          transport: 'smtp',
+          recipientCount,
+          acceptedCount,
         }
       }
     } catch (error) {
@@ -244,32 +309,12 @@ export class EmailNotificationChannel implements NotificationChannel {
         status: 'failed',
         failedReason,
         metadata: {
-          channel: 'email'
+          channel: 'email',
+          recipientCount,
+          acceptedCount,
         }
       }
     }
-  }
-
-  private async sendEmail(params: EmailPayload): Promise<void> {
-    if (this.readiness.mode === 'smtp') {
-      if (!this.readiness.ok) {
-        throw new Error(`SMTP email transport blocked: ${this.readiness.messages.join(' ')}`)
-      }
-      await this.sendSmtpEmail(params)
-      return
-    }
-    if (this.readiness.mode === 'unsupported') {
-      throw new Error(`Email transport configuration is unsupported: ${this.readiness.messages.join(' ')}`)
-    }
-
-    this.logger.info('Mock email channel accepted notification', {
-      channel: 'email',
-      transport: 'mock',
-      metadata: params.metadata,
-    })
-
-    // 模拟异步发送
-    await new Promise(resolve => setTimeout(resolve, 100))
   }
 
   private async sendSmtpEmail(params: EmailPayload): Promise<void> {
@@ -346,9 +391,20 @@ export class WebhookNotificationChannel implements NotificationChannel {
   async sender(notification: Notification, recipients: NotificationRecipient[]): Promise<NotificationResult> {
     const id = `webhook_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`
 
-    try {
-      const webhookRecipients = recipients.filter(r => r.type === 'webhook')
+    const webhookRecipients = recipients.filter(r => r.type === 'webhook')
+    if (webhookRecipients.length === 0) {
+      return {
+        id,
+        status: 'cancelled',
+        metadata: {
+          channel: 'webhook',
+          reason: NOTIFICATION_NO_CHANNEL_RECIPIENTS_REASON,
+          recipientCount: 0,
+        },
+      }
+    }
 
+    try {
       for (const recipient of webhookRecipients) {
         await this.sendWebhook(recipient.id, {
           subject: notification.subject,
@@ -470,63 +526,261 @@ export class DingTalkNotificationChannel implements NotificationChannel {
   }
 }
 
+/** What the channel needs to know about a notification topic: only topics in the closed set are known. */
+export interface FeishuChannelTopic {
+  /** True once the topic's business path is wired to routing and carries its own business authorisation. */
+  integrated: boolean
+}
+
+export type FeishuChannelEndpointResult =
+  | {
+      kind: 'found'
+      connectionId: string
+      endpoint: FeishuSendEndpoint
+    }
+  | { kind: 'none' }
+
+/**
+ * The collaborators of the real path of {@link FeishuNotificationChannel}. The names are provisional
+ * until the routing allow-set and endpoint resolver exist; the semantics are fixed:
+ *  - the allow-set decides, for an organisation, a topic and local user ids, which users may be sent to;
+ *  - the endpoint resolver returns the stored endpoint of a LOCAL user id, never a Feishu identifier that
+ *    the notification carried.
+ */
+export interface FeishuChannelDeps {
+  /** The raw value of the delivery switch. */
+  deliveryFlag(): string | undefined
+  /** The topic from the closed topic set, or null when the topic is not in it. */
+  resolveTopic(topic: string): FeishuChannelTopic | null | Promise<FeishuChannelTopic | null>
+  resolveAllowSet(input: { orgId: string; topic: string; userIds: readonly string[] }): Promise<ReadonlySet<string>>
+  resolveEndpoint(input: { orgId: string; userId: string }): Promise<FeishuChannelEndpointResult>
+  resolveCapability(connectionId: string): Promise<FeishuCapabilityDecision>
+  sender: { sendFeishuText(input: FeishuSendInput): Promise<FeishuSendOutcome> }
+  sleep?(ms: number): Promise<void>
+  newDedupeKey?(): string
+}
+
+/** Minimum gap between two sends on one connection. */
+export const FEISHU_CHANNEL_MIN_SEND_INTERVAL_MS = 200
+
+/** What became of one addressed user: not allowed, without an endpoint, or the outcome of the send core. */
+type FeishuRecipientState =
+  | { kind: 'not_allowed' }
+  | { kind: 'not_bound' }
+  | { kind: 'outcome'; outcome: FeishuSendOutcome }
+
+function errorLabel(error: unknown): string {
+  return error instanceof Error ? error.name : 'non-error'
+}
+
 /**
  * 飞书通知渠道
+ *
+ * Constructed with `{}` and no collaborators it has no sender: it reports `failed` with a stable reason,
+ * makes no call and no wait. Constructed with collaborators it sends text to LOCAL users:
+ *  - a recipient of type `user` carries a local user id; no Feishu identifier supplied by a caller (in the
+ *    notification metadata or anywhere else) is read;
+ *  - a recipient is sent to only when the topic is in the closed set and integrated, the organisation is
+ *    known, the allow-set names the user and the user has a stored endpoint;
+ *  - `sent` means the provider accepted EVERY addressed recipient; a recipient that was not allowed, had
+ *    no endpoint, was refused, or whose result is unknown is not accepted, so the result is `failed`;
+ *  - an unknown outcome is never repeated and never redirected: no stored second endpoint is ever used;
+ *  - a lookup that fails (topic, allow-set, endpoint, capability, connection) sends nothing and is
+ *    reported as `cancelled`, the same retryable class for every one of them;
+ *  - `metadata.topic` and `metadata.orgId` are ASSERTIONS of the caller: the channel cannot authenticate
+ *    them. Whoever registers the channel, or calls it, must supply both from trusted context (never from
+ *    a request, a payload or any value a user controls); the allow-set checks the policy and the user's
+ *    selection, not the caller's authority to name a topic or an organisation;
+ *  - there is no ledger here: a caller that retries after `failed` must treat it as an unknown outcome
+ *    and must never resend automatically; event-level idempotence belongs to the caller's intent ledger
+ *    (a two-phase record written before the send), and the request key de-duplicates only within a call.
  */
 export class FeishuNotificationChannel implements NotificationChannel {
   name = 'feishu'
   type = 'feishu' as const
   config: NotificationChannelConfig
   private logger: Logger
+  private deps: FeishuChannelDeps | undefined
 
-  constructor(config: NotificationChannelConfig) {
+  constructor(config: NotificationChannelConfig, deps?: FeishuChannelDeps) {
     this.config = config
+    this.deps = deps ?? undefined
     this.logger = new Logger('FeishuChannel')
   }
 
   async sender(notification: Notification, recipients: NotificationRecipient[]): Promise<NotificationResult> {
+    if (this.deps !== undefined) return this.sendWithDeps(this.deps, notification, recipients)
+
     const id = `feishu_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`
+    const userRecipients = recipients.filter(r => r.type === 'user')
 
-    try {
-      // 集成飞书 API
-      const userRecipients = recipients.filter(r => r.type === 'user')
+    this.logger.warn('Feishu notification channel has no sender configured; nothing was sent', {
+      channel: 'feishu',
+      recipientCount: userRecipients.length,
+    })
 
-      for (const recipient of userRecipients) {
-        await this.sendFeishuMessage(recipient.id, {
-          title: notification.subject,
-          content: notification.content,
-          data: notification.data
-        })
-      }
-
-      return {
-        id,
-        status: 'sent',
-        sentAt: new Date(),
-        metadata: {
-          channel: 'feishu',
-          recipientCount: userRecipients.length
-        }
-      }
-    } catch (error) {
-      this.logger.error('Failed to send feishu notification', error as Error)
-      return {
-        id,
-        status: 'failed',
-        failedReason: (error as Error).message,
-        metadata: {
-          channel: 'feishu'
-        }
-      }
+    return {
+      id,
+      status: 'failed',
+      failedReason: 'feishu transport is not configured',
+      metadata: {
+        channel: 'feishu',
+        reason: NOTIFICATION_TRANSPORT_NOT_CONFIGURED_REASON,
+        recipientCount: userRecipients.length,
+      },
     }
   }
 
-  private async sendFeishuMessage(userId: string, _message: FeishuMessagePayload): Promise<void> {
-    // 实际飞书消息发送实现
-    this.logger.info(`Sending feishu message to user ${userId}`)
+  private cancelled(id: string, reason: string, recipientCount: number): NotificationResult {
+    this.logger.info('Feishu notification cancelled', { channel: 'feishu', reason, recipientCount })
+    return { id, status: 'cancelled', metadata: { channel: 'feishu', reason, recipientCount } }
+  }
 
-    // 模拟异步发送
-    await new Promise(resolve => setTimeout(resolve, 150))
+  private async sendWithDeps(
+    deps: FeishuChannelDeps,
+    notification: Notification,
+    recipients: NotificationRecipient[],
+  ): Promise<NotificationResult> {
+    const id = `feishu_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`
+    const userIds = [...new Set(recipients.filter(r => r.type === 'user').map(r => r.id))]
+    const recipientCount = userIds.length
+    if (recipientCount === 0) return this.cancelled(id, NOTIFICATION_NO_CHANNEL_RECIPIENTS_REASON, 0)
+
+    let flag: string | undefined
+    try {
+      flag = deps.deliveryFlag()
+    } catch {
+      flag = undefined
+    }
+    if (flag !== 'true') return this.cancelled(id, NOTIFICATION_TRANSPORT_DISABLED_REASON, recipientCount)
+
+    const metadata = notification.metadata ?? {}
+    const topic = typeof metadata.topic === 'string' && metadata.topic.length > 0 ? metadata.topic : null
+    let topicInfo: FeishuChannelTopic | null = null
+    if (topic !== null) {
+      try {
+        topicInfo = await deps.resolveTopic(topic)
+      } catch (error) {
+        this.logger.warn(`Feishu topic lookup failed (${errorLabel(error)})`)
+      }
+    }
+    if (topic === null || topicInfo === null || topicInfo.integrated !== true) {
+      return this.cancelled(id, NOTIFICATION_RECIPIENTS_NOT_ALLOWED_REASON, recipientCount)
+    }
+
+    const orgId = typeof metadata.orgId === 'string' && metadata.orgId.length > 0 ? metadata.orgId : null
+    if (orgId === null) return this.cancelled(id, NOTIFICATION_RECIPIENTS_NOT_BOUND_REASON, recipientCount)
+
+    let allowed: ReadonlySet<string> = new Set()
+    try {
+      allowed = await deps.resolveAllowSet({ orgId, topic, userIds })
+    } catch (error) {
+      this.logger.warn(`Feishu allow-set lookup failed (${errorLabel(error)})`)
+    }
+    const allowedUserIds = userIds.filter(userId => allowed.has(userId))
+    if (allowedUserIds.length === 0) return this.cancelled(id, NOTIFICATION_RECIPIENTS_NOT_ALLOWED_REASON, recipientCount)
+
+    const dedupeKey =
+      typeof notification.id === 'string' && notification.id.length > 0
+        ? notification.id
+        : (deps.newDedupeKey?.() || randomUUID())
+    const text = [notification.subject, notification.content]
+      .filter((part): part is string => typeof part === 'string' && part.trim().length > 0)
+      .join('\n')
+    const sleep = deps.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)))
+    const capabilities = new Map<string, FeishuCapabilityDecision>()
+    const sentOn = new Set<string>()
+    const states: FeishuRecipientState[] = userIds.filter(userId => !allowed.has(userId)).map(() => ({ kind: 'not_allowed' }))
+
+    for (const userId of allowedUserIds) {
+      let found: FeishuChannelEndpointResult = { kind: 'none' }
+      try {
+        found = await deps.resolveEndpoint({ orgId, userId })
+      } catch (error) {
+        this.logger.warn(`Feishu endpoint lookup failed (${errorLabel(error)})`)
+      }
+      if (found.kind !== 'found') {
+        states.push({ kind: 'not_bound' })
+        continue
+      }
+
+      let decision = capabilities.get(found.connectionId)
+      if (decision === undefined) {
+        try {
+          decision = await deps.resolveCapability(found.connectionId)
+        } catch (error) {
+          this.logger.warn(`Feishu capability lookup failed (${errorLabel(error)})`)
+          decision = { effective: false, reason: 'read_failed' }
+        }
+        capabilities.set(found.connectionId, decision)
+      }
+
+      // The endpoint term of the request key: local user, then the evidence the resolver names, then the open id.
+      const endpoint: FeishuSendEndpoint = { ...found.endpoint, evidence: [userId, ...(found.endpoint.evidence ?? [])] }
+      if (sentOn.has(found.connectionId)) await sleep(FEISHU_CHANNEL_MIN_SEND_INTERVAL_MS)
+      let outcome: FeishuSendOutcome
+      try {
+        outcome = await deps.sender.sendFeishuText({
+          connectionId: found.connectionId,
+          endpoint,
+          text,
+          dedupeKey,
+          capabilityDecision: decision,
+        })
+      } catch (error) {
+        // The sender does not throw; if one does, the message may have been written.
+        this.logger.warn(`Feishu sender failed unexpectedly (${errorLabel(error)})`)
+        outcome = { kind: 'unknown', reason: 'network_error' }
+      }
+      if (outcome.kind !== 'not_attempted') sentOn.add(found.connectionId)
+      states.push({ kind: 'outcome', outcome })
+    }
+
+    return this.aggregate(id, recipientCount, states)
+  }
+
+  private aggregate(id: string, recipientCount: number, states: FeishuRecipientState[]): NotificationResult {
+    const outcomes = states.flatMap(state => (state.kind === 'outcome' ? [state.outcome] : []))
+    const acceptedCount = outcomes.filter(outcome => outcome.kind === 'accepted').length
+    const unknownCount = outcomes.filter(outcome => outcome.kind === 'unknown').length
+    const requestedCount = outcomes.filter(outcome => outcome.kind !== 'not_attempted').length
+    this.logger.info('Feishu notification finished', { channel: 'feishu', recipientCount, acceptedCount, unknownCount })
+
+    if (requestedCount === 0) {
+      const notAttemptedReasons = new Set<string>(
+        outcomes.flatMap(outcome => (outcome.kind === 'not_attempted' ? [outcome.reason] : [])),
+      )
+      const hasAny = (...reasons: string[]): boolean => reasons.some(reason => notAttemptedReasons.has(reason))
+      if (hasAny('not_configured', 'empty_message', 'aborted')) {
+        return {
+          id,
+          status: 'failed',
+          failedReason: 'feishu send was not attempted for every recipient',
+          metadata: { channel: 'feishu', recipientCount, acceptedCount, unknownCount, sendOutcome: 'rejected' },
+        }
+      }
+      if (hasAny('flag_off', 'capability_off', 'connection_unavailable')) return this.cancelled(id, NOTIFICATION_TRANSPORT_DISABLED_REASON, recipientCount)
+      return this.cancelled(id, NOTIFICATION_RECIPIENTS_NOT_BOUND_REASON, recipientCount)
+    }
+
+    if (acceptedCount === recipientCount) {
+      return { id, status: 'sent', sentAt: new Date(), metadata: { channel: 'feishu', recipientCount, acceptedCount } }
+    }
+    return {
+      id,
+      status: 'failed',
+      failedReason:
+        unknownCount > 0
+          ? 'feishu did not confirm the send for at least one recipient'
+          : 'feishu send was not accepted for every recipient',
+      metadata: {
+        channel: 'feishu',
+        recipientCount,
+        acceptedCount,
+        unknownCount,
+        sendOutcome: unknownCount > 0 ? 'unknown' : 'rejected',
+      },
+    }
   }
 }
 

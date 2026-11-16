@@ -5,6 +5,7 @@ import { notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
 import { EXPLICIT_SESSION_ORG_KEY } from '../src/utils/explicitSessionOrg'
 import { createYidaOwnerClient, type YidaOwnerApproval, type YidaOwnerDraftInput } from '../src/services/integration/yidaOwner'
 import * as yidaSendBudget from '../src/services/integration/yidaSendBudget'
+import { createYidaTransformExample, yidaTransformSourceColumns } from '../../../plugins/plugin-integration-core/lib/yida-static-plan.mjs'
 
 // Gate 4: the plugin module is the single definition; the web bundle only carries a constants mirror.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -787,5 +788,54 @@ describe('StockPreparationYidaOwnerSendPanel multi-target controls (Y2)', () => 
     await click('save')
     expect(q('error').textContent).toBe('YIDA_SHEET_SOURCE_DENIED')
     expect(absent('draft')).toBe(true)
+  })
+})
+
+// R-71 ⑦.3: a v3 draft goes to the server exactly as previewed; a draft-time 422 LIMIT is shown with its
+// hint and leaves no draft; the sheet column mapping lists every column the v3 mapping reads.
+describe('StockPreparationYidaOwnerSendPanel v3 drafts (R-71 ⑦.3)', () => {
+  let app: VueApp<Element> | null = null
+  let root: HTMLDivElement | null = null
+  const fetchSpy = vi.fn()
+  const transform = (): YidaOwnerDraftInput => {
+    const example = createYidaTransformExample()
+    return { config: example.config, rowsText: example.text, allocation: { ...example.allocation, projects: ['DEMO-P1'] } }
+  }
+  function mount(multiTarget: boolean) {
+    root = document.createElement('div'); document.body.appendChild(root)
+    app = createApp({ render: () => h(StockPreparationYidaOwnerSendPanel, { draftInput: transform(), multiTarget }) })
+    app.mount(root)
+  }
+  beforeEach(() => { localStorage.setItem('auth_token', token); fetchSpy.mockReset(); vi.stubGlobal('fetch', fetchSpy) })
+  afterEach(() => { app?.unmount(); root?.remove(); app = null; root = null; vi.unstubAllGlobals(); vi.restoreAllMocks() })
+  async function flush(): Promise<void> { for (let i = 0; i < 16; i++) await Promise.resolve(); await nextTick() }
+  function q<T extends HTMLElement = HTMLElement>(id: string): T { const node = root?.querySelector<T>(`[data-testid="sp-yida-owner-${id}"]`); if (!node) throw new Error(`missing ${id}`); return node }
+  function absent(id: string) { return root?.querySelector(`[data-testid="sp-yida-owner-${id}"]`) === null }
+
+  it('saves the v3 draft input verbatim and shows a draft-time 422 LIMIT with its hint and no draft', async () => {
+    mount(false)
+    expect(absent('input-required')).toBe(true)
+    fetchSpy.mockResolvedValueOnce(error('YIDA_SEND_APPROVAL_LIMIT', 422))
+    q<HTMLButtonElement>('save').click(); await flush()
+    expect(fetchSpy.mock.calls[0][0]).toBe('/api/integration/yida-owner-send/drafts')
+    expect(JSON.parse(fetchSpy.mock.calls[0][1].body as string)).toEqual(transform())
+    expect(q('error').textContent).toBe('YIDA_SEND_APPROVAL_LIMIT')
+    expect(q('limit').textContent).toContain('没有保存、授权或发送任何内容')
+    expect(absent('draft')).toBe(true)
+    fetchSpy.mockResolvedValueOnce(json(serverDraft(), 201))
+    q<HTMLButtonElement>('save').click(); await flush()
+    expect(JSON.parse(fetchSpy.mock.calls[1][1].body as string)).toEqual(transform())
+    expect(absent('limit')).toBe(true)
+    expect(q('draft').textContent).toContain('目标仍未核验')
+  })
+
+  it('the sheet column mapping of a v3 draft lists every column the mapping reads, concat-only ones included', async () => {
+    mount(true)
+    q<HTMLInputElement>('source-sheet').click(); await flush()
+    const listed = Array.from(root!.querySelectorAll('[data-testid^="sp-yida-owner-column-"]'))
+      .map(node => node.getAttribute('data-testid')!.slice('sp-yida-owner-column-'.length))
+    expect(listed).toEqual([...yidaTransformSourceColumns(transform().config)])
+    expect(listed).toEqual(expect.arrayContaining(['ext_blankLength', 'ext_blankWidth', 'ext_blankThickness']))
+    expect(fetchSpy).not.toHaveBeenCalled()
   })
 })

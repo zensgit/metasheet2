@@ -6,6 +6,7 @@ import {
   updateDirectoryIntegration,
   updateDirectoryIntegrationIdentity,
 } from '../../src/directory/directory-sync'
+import { readDirectoryIdentityStatus, readDirectoryIntegrationAppKey } from '../../src/directory/integration-identity'
 
 const { queryMock } = vi.hoisted(() => ({ queryMock: vi.fn() }))
 vi.mock('../../src/db/pg', () => ({ query: queryMock }))
@@ -123,5 +124,47 @@ describe('directory identity metadata', () => {
     queryMock.mockImplementation(async (sql: string, params: unknown[]) => ({ rows: [sql.includes('UPDATE') ? row(JSON.parse(String(params[4]))) : row({ identityVerification: verification })] }))
     const result = await updateDirectoryIntegration('synthetic-integration', { ...input, ...change })
     expect(result?.config.identityStatus).toBe(expected)
+  })
+})
+
+describe('identity status of one integration row', () => {
+  const stored = (config: Record<string, unknown>) => ({ ...input, corpName: identity.corpName, appName: identity.appName, ...config })
+  const cases: Array<[string, unknown]> = [
+    ['no confirmation', stored({})],
+    ['confirmed for its own enterprise', stored({ identityVerification: verification })],
+    ['confirmed for another enterprise', stored({ identityVerification: { ...verification, appCorpId: 'other-synthetic-corp' } })],
+    ['confirmation for another application key', stored({ identityVerification: { ...verification, appKey: 'changed-app' } })],
+    ['confirmation for another enterprise id', stored({ identityVerification: { ...verification, corpId: 'changed-corp' } })],
+    ['confirmation with an older enterprise name', stored({ identityVerification: { ...verification, corpName: '旧企业' } })],
+    ['confirmation with an older application name', stored({ identityVerification: { ...verification, appName: '旧应用' } })],
+    ['confirmation from another source', stored({ identityVerification: { ...verification, source: 'provider_api' } })],
+    ['confirmation with an unreadable time', stored({ identityVerification: { ...verification, checkedAt: 'invalid' } })],
+    ['confirmation without an administrator', stored({ identityVerification: { ...verification, checkedBy: '' } })],
+    ['application key stored with surrounding spaces', stored({ appKey: ` ${input.appKey} `, identityVerification: verification })],
+    ['names stored as empty text', { ...input, corpName: '', appName: '', identityVerification: { ...verification, corpName: null, appName: null } }],
+    ['configuration stored as JSON text', JSON.stringify(stored({ identityVerification: verification }))],
+    ['configuration stored as unreadable text', '{not json'],
+    ['no configuration', null],
+  ]
+
+  it.each(cases)('answers what the integration summary answers: %s', async (_label, config) => {
+    queryMock.mockResolvedValue({ rows: [{ ...row(), config }] })
+    const [summary] = await listDirectoryIntegrations()
+
+    expect(readDirectoryIdentityStatus({ corpId: input.corpId, config })).toBe(summary.config.identityStatus)
+  })
+
+  it('covers all three statuses', () => {
+    const statuses = cases.map(([, config]) => readDirectoryIdentityStatus({ corpId: input.corpId, config }))
+    expect([...new Set(statuses)].sort()).toEqual(['mismatch', 'unverified', 'verified'])
+    expect(statuses.slice(0, 3)).toEqual(['unverified', 'verified', 'mismatch'])
+  })
+
+  it('reads the application key trimmed, and empty when there is none', () => {
+    expect(readDirectoryIntegrationAppKey({ appKey: ' key ' })).toBe('key')
+    expect(readDirectoryIntegrationAppKey(JSON.stringify({ appKey: 'key' }))).toBe('key')
+    expect(readDirectoryIntegrationAppKey({})).toBe('')
+    expect(readDirectoryIntegrationAppKey(null)).toBe('')
+    expect(readDirectoryIntegrationAppKey('{not json')).toBe('')
   })
 })

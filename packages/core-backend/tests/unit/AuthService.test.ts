@@ -678,6 +678,69 @@ describe('AuthService.verifyToken', () => {
     expect(sessionMocks.isUserSessionActive).toHaveBeenCalledWith('prod-admin', 'prod-session')
   })
 
+  // Session verification accepts only session tokens: a claim set with a payload `type` claim is not one.
+  it.each([
+    ['a string type with userId', { type: 'invite', userId: 'u-typed', email: 'typed@x', iat: 1, exp: 9_999_999_999 }],
+    ['another string type with id', { type: 'restore-preview', id: 'u-typed', iat: 1, exp: 9_999_999_999 }],
+    ['a type naming a session with sub', { type: 'session', sub: 'u-typed', sid: 'sid-1', iat: 1, exp: 9_999_999_999 }],
+    ['a numeric type', { type: 7, userId: 'u-typed', iat: 1, exp: 9_999_999_999 }],
+    ['a null type', { type: null, userId: 'u-typed', iat: 1, exp: 9_999_999_999 }],
+    ['an empty-string type', { type: '', userId: 'u-typed', iat: 1, exp: 9_999_999_999 }],
+  ])('verifyToken returns null for a claim set that carries a payload type claim (%s), before any lookup', async (_label, payload) => {
+    jwtMocks.verify.mockReturnValue(payload)
+    poolMocks.query.mockResolvedValue({ rows: [platformAuthUserRow({ id: 'u-typed' })] })
+
+    expect(await new AuthService().verifyToken('typed-token')).toBeNull()
+
+    expect(poolMocks.query).not.toHaveBeenCalled()
+    expect(sessionMocks.isUserSessionRevoked).not.toHaveBeenCalled()
+    expect(sessionMocks.isUserSessionActive).not.toHaveBeenCalled()
+  })
+
+  it('verifyToken gives a typed claim set and a token that fails verification the same answer', async () => {
+    jwtMocks.verify.mockReturnValueOnce({ type: 'invite', userId: 'u-typed', iat: 1, exp: 9_999_999_999 })
+    const typed = await new AuthService().verifyToken('typed-token')
+    jwtMocks.verify.mockImplementationOnce(() => { throw new Error('invalid signature') })
+    const invalid = await new AuthService().verifyToken('invalid-token')
+
+    expect(typed).toBeNull()
+    expect(invalid).toBeNull()
+    expect(poolMocks.query).not.toHaveBeenCalled()
+  })
+
+  it('verifyToken returns null for a typed claim set even when token claims are trusted', async () => {
+    process.env.RBAC_TOKEN_TRUST = 'true'
+    jwtMocks.verify.mockReturnValue({
+      type: 'invite',
+      id: 'dev-admin',
+      roles: ['admin'],
+      perms: ['multitable:read'],
+      iat: 1,
+      exp: 9_999_999_999,
+    })
+
+    expect(await new AuthService().verifyToken('typed-trusted-token')).toBeNull()
+    expect(poolMocks.query).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['sign-in token with a session id', { userId: 'u-shape', email: 'shape@x', role: 'user', tenantId: 'org-1', sid: 'sid-1', iat: 1, exp: 9_999_999_999 }],
+    ['token without a session id', { userId: 'u-shape', email: 'shape@x', role: 'user', iat: 1, exp: 9_999_999_999 }],
+    ['id, roles, perms and a session id', { id: 'u-shape', roles: ['user'], perms: ['spreadsheet:read'], sid: 'sid-1', iat: 1, exp: 9_999_999_999 }],
+    ['id, roles and perms', { id: 'u-shape', roles: ['user'], perms: ['spreadsheet:read'], iat: 1, exp: 9_999_999_999 }],
+    ['sub, name, roles and permissions', { sub: 'u-shape', name: 'Shape', roles: ['user'], permissions: ['spreadsheet:read'], iat: 1, exp: 9_999_999_999 }],
+    ['id, email and role', { id: 'u-shape', email: 'shape@x', role: 'user', iat: 1, exp: 9_999_999_999 }],
+  ])('verifyToken still accepts a session claim set without a type claim (%s)', async (_label, payload) => {
+    jwtMocks.verify.mockReturnValue(payload)
+    stubPoolForAuthReads({ userRow: platformAuthUserRow({ id: 'u-shape', email: 'shape@x' }) })
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read', 'attendance:write'])
+
+    const user = await new AuthService().verifyToken('session-token')
+
+    expect(user?.id).toBe('u-shape')
+  })
+
   it('fails fast in production when JWT_SECRET is weak', () => {
     process.env.NODE_ENV = 'production'
     secretManagerMocks.get.mockReturnValueOnce('test')
@@ -733,6 +796,94 @@ describe('AuthService.refreshToken', () => {
     expect(refreshed).toBe('new-token')
     expect(jwtMocks.sign).toHaveBeenCalledTimes(1)
     expect(jwtMocks.sign.mock.calls[0]?.[0]).toMatchObject({ userId: 'u4' })
+  })
+
+  function refreshableUserRow(id: string) {
+    return platformAuthUserRow({ id, email: `${id}@x`, access_generation: 3 })
+  }
+
+  it('refreshToken issues a token and records its session for a session claim set without a session id', async () => {
+    jwtMocks.verify.mockImplementation((token: string) => (
+      token === 'old-token'
+        ? { userId: 'u-refresh', email: 'u-refresh@x', role: 'user', iat: 1, exp: 2 }
+        : { userId: 'u-refresh', sid: 'minted', iat: 10, exp: 9_999_999_999 }
+    ))
+    stubPoolForAuthReads({ userRow: refreshableUserRow('u-refresh') })
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read', 'attendance:write'])
+    jwtMocks.sign.mockReturnValue('new-token')
+    sessionMocks.createUserSession.mockResolvedValue({ id: 'minted' })
+
+    expect(await new AuthService().refreshToken('old-token')).toBe('new-token')
+
+    expect(jwtMocks.sign).toHaveBeenCalledTimes(1)
+    expect(jwtMocks.sign.mock.calls[0]?.[0]).not.toHaveProperty('type')
+    expect(sessionMocks.createUserSession).toHaveBeenCalledTimes(1)
+    expect(sessionMocks.createUserSession.mock.calls[0]?.[0]).toBe('u-refresh')
+  })
+
+  it.each([
+    ['a string type', { type: 'invite', userId: 'u-refresh', email: 'u-refresh@x', iat: 1, exp: 2 }],
+    ['a non-string type', { type: 7, id: 'u-refresh', iat: 1, exp: 2 }],
+    ['a type naming a session', { type: 'session', sub: 'u-refresh', sid: 'sid-1', iat: 1, exp: 2 }],
+  ])('refreshToken returns null and records no session for a claim set that carries a payload type claim (%s)', async (_label, payload) => {
+    jwtMocks.verify.mockImplementation((token: string) => (
+      token === 'old-token' ? payload : { userId: 'u-refresh', sid: 'minted', iat: 10, exp: 9_999_999_999 }
+    ))
+    stubPoolForAuthReads({ userRow: refreshableUserRow('u-refresh') })
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read', 'attendance:write'])
+    jwtMocks.sign.mockReturnValue('new-token')
+    sessionMocks.createUserSession.mockResolvedValue({ id: 'minted' })
+
+    expect(await new AuthService().refreshToken('old-token')).toBeNull()
+
+    expect(jwtMocks.sign).not.toHaveBeenCalled()
+    expect(sessionMocks.createUserSession).not.toHaveBeenCalled()
+    expect(sessionMocks.isUserSessionActive).not.toHaveBeenCalled()
+    expect(poolMocks.query).not.toHaveBeenCalled()
+  })
+
+  it('refreshToken gives a typed claim set and a token that fails verification the same answer', async () => {
+    jwtMocks.verify.mockReturnValueOnce({ type: 'invite', userId: 'u-refresh', iat: 1, exp: 2 })
+    const typed = await new AuthService().refreshToken('typed-token')
+    jwtMocks.verify.mockImplementationOnce(() => { throw new Error('invalid signature') })
+    const invalid = await new AuthService().refreshToken('invalid-token')
+
+    expect(typed).toBeNull()
+    expect(invalid).toBeNull()
+    expect(sessionMocks.createUserSession).not.toHaveBeenCalled()
+  })
+})
+
+describe('AuthService.readTokenPayload', () => {
+  beforeEach(() => {
+    jwtMocks.verify.mockReset()
+    secretManagerMocks.get.mockReset()
+    secretManagerMocks.get.mockReturnValue('unit-test-secret-abcdefghijklmnopqrstuvwxyz123456')
+  })
+
+  it('readTokenPayload returns the claims of a session claim set', () => {
+    const claims = { userId: 'u-read', email: 'read@x', role: 'user', sid: 'sid-1', iat: 1, exp: 9_999_999_999 }
+    jwtMocks.verify.mockReturnValue(claims)
+
+    expect(new AuthService().readTokenPayload('session-token')).toEqual(claims)
+  })
+
+  it.each([
+    ['a string type', { type: 'invite', userId: 'u-read', sid: 'sid-1', iat: 1, exp: 9_999_999_999 }],
+    ['a non-string type', { type: false, id: 'u-read', sid: 'sid-1', iat: 1, exp: 9_999_999_999 }],
+  ])('readTokenPayload returns null for a claim set that carries a payload type claim (%s)', (_label, payload) => {
+    jwtMocks.verify.mockReturnValue(payload)
+
+    expect(new AuthService().readTokenPayload('typed-token')).toBeNull()
+    expect(new AuthService().readTokenPayload('typed-token', { ignoreExpiration: true })).toBeNull()
+  })
+
+  it('readTokenPayload returns null for a token that fails verification', () => {
+    jwtMocks.verify.mockImplementation(() => { throw new Error('invalid signature') })
+
+    expect(new AuthService().readTokenPayload('invalid-token')).toBeNull()
   })
 })
 

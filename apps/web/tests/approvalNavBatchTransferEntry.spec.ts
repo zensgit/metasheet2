@@ -13,9 +13,9 @@ import { appRoutes } from '../src/router/appRoutes'
 // queue, which the page then described as empty.
 //
 // The gate is now CONJUNCTIVE, and these tests pin both halves:
-//   * the token gate still decides whether the shell issues the capability read at all (an ordinary
-//     user's shell must not make an admin-shaped request), and
-//   * the SERVER's own answer decides whether the entry renders.
+//   * live platform-admin authority decides whether the shell mounts the entry at all, and
+//   * the SERVER's approval-administrator answer decides whether the entry renders.
+// A token role, wildcard, or admin:all claim does not mount it. Unknown capability denies.
 // Any answer other than `granted` — including "could not determine" — hides the entry.
 
 const capabilitySpy = vi.fn()
@@ -116,6 +116,16 @@ describe('批量转交 nav entry gate', () => {
   })
 
   async function mountApp(): Promise<HTMLElement> {
+    const capabilities = await import('../src/composables/adminAccessCapabilities')
+    if (mocks.isAdmin) {
+      capabilities.publishAdminAccessCapabilities({
+        isPlatformAdmin: true,
+        canManageScope: false,
+        delegableNamespaces: [],
+      })
+    } else {
+      capabilities.resetAdminAccessCapabilities()
+    }
     const { default: App } = await import('../src/App.vue')
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -233,11 +243,10 @@ describe('批量转交 nav entry gate', () => {
     notifyAuthPrincipalChange()
     await flushUi()
 
-    expect(capabilitySpy).toHaveBeenCalledTimes(2)
     expect(entryOf(root)).toBeNull()
-    // The re-read narrows THIS entry and nothing else in the nav.
+    // Identity change drops the live platform-admin grant, so the admin block closes.
     const hrefs = Array.from(root.querySelectorAll('a')).map((a) => a.getAttribute('href'))
-    expect(hrefs).toContain('/approvals/metrics')
+    expect(hrefs).not.toContain('/approvals/metrics')
   })
 
   it('RE-RENDERS when the new principal is one the server confirms (positive control)', async () => {
@@ -251,8 +260,12 @@ describe('批量转交 nav entry gate', () => {
     capabilitySpy.mockResolvedValue('granted')
     notifyAuthPrincipalChange()
     await flushUi()
+    expect(entryOf(root)).toBeNull()
 
-    expect(capabilitySpy).toHaveBeenCalledTimes(2)
+    const { publishAdminAccessCapabilities } = await import('../src/composables/adminAccessCapabilities')
+    publishAdminAccessCapabilities({ isPlatformAdmin: true, canManageScope: false, delegableNamespaces: [] })
+    await flushUi()
+
     expect(entryOf(root)).toBeTruthy()
   })
 
@@ -312,8 +325,7 @@ describe('批量转交 nav entry gate', () => {
   it('the route it points at is still the requiresAdmin one (the token gate is NOT removed)', () => {
     const route = appRoutes.find((r) => r.path === '/approvals/batch-transfer')
     expect(route?.meta?.requiresAuth).toBe(true)
-    // Conjunctive, not replaced: the server capability narrows the entry; the existing
-    // token-derived route guard still keeps a non-admin off the route entirely.
+    // The route stays requiresAdmin. The guard answers from the live capability read.
     expect(route?.meta?.requiresAdmin).toBe(true)
   })
 })

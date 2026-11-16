@@ -24,6 +24,7 @@
       </section>
       <label><input :checked="acknowledged" type="checkbox" data-testid="sp-yida-init-ack" @change="setAcknowledgement">我已人工审核目标与执行身份，确认永久单槽仅归服务器指定 owner；此操作不发送。</label>
       <button type="button" data-testid="sp-yida-init-submit" :disabled="!mayInitialize" @click="initialize">仅初始化本地材料、草稿和人工目标</button>
+      <p v-if="transformDraft" data-testid="sp-yida-init-v3-blocked">派生映射 v3 草稿不能用于本地初始化：初始化只接受协议 v2 合同。v3 草稿只能发往已用 v2 七键布局初始化的目标（键定义须完全相同），请在单行 CREATE 确认里保存。</p>
     </fieldset>
     <!-- After initialization the button stays visible but greyed: the server answers 409 there by design. -->
     <section v-else class="sp-yida-initialization__connection" data-testid="sp-yida-init-connection">
@@ -123,8 +124,10 @@ watch(locked, value => emit('locked-change', value), { immediate: true, flush: '
 watch(() => state.value?.sendEnabled === true, value => emit('send-enabled-change', value), { immediate: true, flush: 'sync' })
 // Y2: same rule for the multi-target switch (target picker and sheet source in the owner panel).
 watch(() => state.value?.multiTargetEnabled === true, value => emit('multi-target-change', value), { immediate: true, flush: 'sync' })
+// R-71 ⑦.3 decision E1: initialization stays v2-only; a v3 draft never reaches the initialization POST.
+const transformDraft = computed(() => (props.draftInput?.config as { version?: unknown } | undefined)?.version === 3)
 const mayInitialize = computed(() => !busy.value && !invalidated.value && !uncertain.value && state.value?.status === 'ready'
-  && !!props.draftInput && acknowledged.value && materialFields.every(field => material[field].trim().length > 0)
+  && !!props.draftInput && !transformDraft.value && acknowledged.value && materialFields.every(field => material[field].trim().length > 0)
   && reviewRef.value.length > 0 && organizationId.value.length > 0 && blockedFields.value.length === 0
   && (!testedPairMismatch.value || overrideTested.value))
 const mayTestConnection = computed(() => !busy.value && !invalidated.value && !uncertain.value && state.value?.status === 'ready'
@@ -233,7 +236,7 @@ async function testConnection(): Promise<void> {
   } finally { if (active === generation) busy.value = false }
 }
 async function initialize(): Promise<void> {
-  if (!mayInitialize.value || !props.draftInput || !commandId.value) return
+  if (!mayInitialize.value || !props.draftInput || transformDraft.value || !commandId.value) return
   const active = generation
   busy.value = true; uncertain.value = true; errorCode.value = ''; probeErrorCode.value = ''
   try {

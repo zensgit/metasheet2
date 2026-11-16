@@ -5,6 +5,7 @@
 > **谁动开关**：`INTEGRATION_YIDA_OWNER_SEND_ENABLED` **只由 owner 或现场操作员在本裁定之后于现场设置**。Claude 不设置、不建议代为设置、不远程操作这个开关。S4 把它改回 `=false`，**不删这一行**。
 > **目标是测试表单（owner 2026-11-04 追加裁定「首发先用测试表单」，记入 R-70 ④）**：这一条发送的目标是客户提供或新建的宜搭**测试**应用 / 表单（生产表单的副本），**不是生产表单**；发送的行只用合成数据。测试表单的 appType / formUuid 与凭据只在现场录入，任何文档与回报都不写这些值。发往生产表单只在第一个项目切换上线时，另行由 owner 批准。
 > **后果（写明）**：目标在 L4 初始化时封存；R-50 ①（每个部署一个目标）不变，所以测试表单占用 1 号槽。以后要发往生产表单，需要对 R-50 ① 另行裁定并打开 `INTEGRATION_YIDA_MULTI_TARGET_ENABLED`（生产表单作为 2 号槽，#6718），或者一条今天不存在的重新初始化路径。推荐 2 号槽路线，测试表单留作以后的演练。
+> **凭据谁录入（门 5，2026-11-06 补写）**：测试应用的凭据由锚点账号的持有人（anchor owner）本人在 222 **服务器本机**的浏览器里，经 localhost 地址打开宜搭初始化页（L3 测试连接、L4 一次性初始化）亲自录入。**任何人都不把凭据交给开发者**：不经聊天、邮件、工单、PR、截图或远程桌面转交，开发者也不代为录入、不索取。文档与回报只写「已录入 / 未录入」，不写任何凭据值或标识符。
 > **开关当天另批**：本裁定只为**一条测试表单发送**清掉十道门槛；S1 打开开关仍要 owner 当天单独批准（R-50）。
 > **范围**：只有这一条单行 CREATE。常规使用之前，门 1、4、6、10 的代码修复必须各自作为单独批准的 PR 先合入（R-70 ①）；本手册不授权第二条发送。
 > **values-free**：回报只写 True/False、毫秒数、状态类别、面板上显示的错误码；不抄授权号、草稿号、rowKey、业务键、appType/formUuid 或任何字段内容。
@@ -17,7 +18,7 @@
 | 2 `prepared` 行的审计路径 / DBA 手册 | 由 DBA 手册关门：`runbook-yida-prepared-ledger-cancel-20261104.md` | S3 第 15 步 |
 | 3 凭据已验证 | L3 得 `ok` + L4 成功 + L4 之前全库备份与 `docker\app.env` 副本在手 | S0 第 1 步 |
 | 4 预算在准入之前检查 | owner 接受 | S2 第 9 步（选短行） |
-| 5 密钥只经 HTTPS 或 localhost | L3/L4 在服务器本机浏览器经 localhost 完成 | S0 第 1 步 |
+| 5 密钥只经 HTTPS 或 localhost | L3/L4 由锚点账号的持有人在 222 服务器本机浏览器经 localhost 打开初始化页、亲自录入凭据完成；凭据不交给开发者 | S0 第 1 步 |
 | 6 收到的 2xx 绝不丢弃 | owner 接受，以操作纪律 + 宜搭人工核对兜底；代码关门（R-71 ⑦.1，PR-A `fix/yida-send-gate1-gate6-20261104`，合入并上机后生效）：状态行到达之后的中止 / 超时 / 开关翻转不再丢弃回执，2xx 但正文不可用落台账 reason `receipt_unparsed`（仍是 `outcome_unknown`、不自动重发） | S2 第 10–12 步、S3 第 14 步 |
 | 7 `ENCRYPTION_KEY` 轮换方案 | owner 接受（两项加密值在部署生命期内不变） | S0 第 1 步（备份） |
 | 8 PBKDF2 实测 | 发送前在客户机上用合成字串实测 | S0 第 4 步 |
@@ -32,6 +33,7 @@
    - L4 之前的全库备份与 `docker\app.env` 副本在手、放在一起（门 3、门 7 的恢复点；清单第 3.1 版「开工前」C 段）。
    - L3、L4 是在**服务器本机**的浏览器里经 localhost 地址打开面板完成的（门 5）。不是：停，报 owner。
    - **目标是测试表单**：L4 时录入并封存的 appType / formUuid 是与 owner 约定的那张**测试**表单，不是生产表单。由 owner 用自己持有的值对照 L4 当时的录入核对，只报 `testFormTarget=True/False`，不抄标识符。`False` 或 owner 无法确认：停，不开开关（这时 1 号槽已封存为非测试目标，报 owner 另裁）。L4 还没做：L4 必须录入测试表单的标识符与凭据。初始化之后「手动 GET」不显示 appType / formUuid，所以发送前的最终核对在 S2 第 9 步的服务端预览上再做一次。
+   - **L4 草稿的键布局（R-71 ⑦.3 决策 A）**：1 号槽的 L4 草稿必须用 v2 物料模板（`docs/development/takeover-beiliao-20260821/yida-legacy-templates/material.json`）的七键布局与可空键：项目号、图号、名称、规格、材质、版本、父组件图号，其中规格（`componentSpec`）与父组件图号（`parentComponentCode`）为可空键；七个键目标对到测试副本的真实字段 id。owner 只报 `materialKeyLayout=True/False`，不抄字段 id。`False`：停，不开开关，报 owner。原因：1 号槽在 L4 时永久封存键定义，以后只收键定义完全相同的草稿；布局不对，这个槽永远收不下 v3 物料草稿。v2 物料模板与 v3 物料夹具的键定义相同，由 `plugins/plugin-integration-core/__tests__/yida-mapping-v3-parity.test.cjs` 钉住。L4 还没做：L4 必须按这个布局起草。
    - 清单第 3.1 版「L4 之后」第 1–8 条已做完：测试连接开关已改为 `INTEGRATION_YIDA_CONNECTION_TEST_ENABLED=false` 并按「重启后端的方法」重启；那段核对输出全部符合。
 2. **门 9（开关打开前）**：锚点账号退出后重新登录，Ctrl+F5，在项目备料页宜搭区点「手动 GET 本地初始化状态」（`apps/web/src/components/integration/stockPreparation/StockPreparationYidaInitializationPanel.vue:6`）：应显示「本地配置已初始化；…」（同文件 `:34`），行数等于 L4 时的行数。此时**不应**出现「打开单行 CREATE 确认（服务器已开通）」按钮（`StockPreparationYidaPreviewPanel.vue:107`；它只在 GET 回复的 `sendEnabled` 位为 true 时出现：`packages/core-backend/src/routes/integration-yida-owner.ts:213-220`、`:317-326`）。
 3. **L4 预检**：在部署根目录 `node scripts\ops\integration-yida-l4-preflight.mjs`，最后一行必须是 `L4_PREFLIGHT=PASS`（`scripts/ops/integration-yida-l4-preflight.mjs:589`）。**必须在 S1 之前跑**：开关这一行一旦进入运行中的后端环境，不论值是什么，脚本都按设计答 `sendSwitchInRunningBackend=True` 并 `L4_PREFLIGHT=STOP sendSwitchInRunningBackend`（`:571-572`）。
@@ -113,7 +115,7 @@
 
 ## 停止条件汇总
 
-- S0 第 1 步任何一条前置不满足（含 `testFormTarget=False`）、L4 预检不是 `PASS`、T ≥ 300 ms（owner 未另定）、owner 当天没有单独批准开开关 → 不开开关。
+- S0 第 1 步任何一条前置不满足（含 `testFormTarget=False`、`materialKeyLayout=False`）、L4 预检不是 `PASS`、T ≥ 300 ms（owner 未另定）、owner 当天没有单独批准开开关 → 不开开关。
 - S2 第 9 步 `previewIsTestForm=False` → 不批准，按 S4 关回，报 owner。
 - 第 7 步核对有一条对不上、第 8 步没有发送入口、第 9 步出现任何错误码（尤其 `YIDA_OWNER_HTTP_DENIED` / `YIDA_SEND_APPROVAL_NOT_FOUND`）→ 按 S4 关回，报 owner。
 - 提交之后无论结果如何 → 不再提交、不再批准同一行；按 S3 核对、按 S4 关回。

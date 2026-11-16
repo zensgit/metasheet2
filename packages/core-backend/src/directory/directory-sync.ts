@@ -1,5 +1,4 @@
-import { DirectoryUserPaginationError, getNextDirectoryUserCursor } from './directory-user-pagination'
-import { hasDirectoryDepartmentCycle } from './directory-department-cycle'
+import { DirectoryUserPaginationError } from './directory-user-pagination'
 import { readDirectoryIdentityVerification, type DirectoryIdentityVerification } from './integration-identity'
 import * as bcrypt from 'bcryptjs'
 import * as crypto from 'crypto'
@@ -10,11 +9,6 @@ import { LoginNameRuleError, assertLoginName } from '../auth/login-name-rule'
 import { validatePassword } from '../auth/password-policy'
 import { PasswordPolicyError } from '../auth/password-policy-error'
 import { Logger } from '../core/logger'
-import {
-  DingTalkIncompleteResponseError,
-  observeDingTalkTransportRetries,
-  type DingTalkTransportRetryEvent,
-} from '../integrations/dingtalk/transport'
 import { query, transaction } from '../db/pg'
 import { RecoveryConflictError, translateRecoveryConflict } from '../db/recovery-conflict'
 import { sweepStaleDepartmentBindings } from './department-binding-reconciliation'
@@ -25,24 +19,27 @@ import {
   type DirectoryAccountGrantOpenIdSource,
 } from './dingtalk-grant-open-id'
 import {
-  fetchDingTalkAppAccessToken,
-  getDingTalkDepartmentDetail,
-  getDingTalkUserDetail,
-  listDingTalkDepartments,
-  listDingTalkDepartmentUsers,
-  type DingTalkDepartment,
-  type DingTalkDirectoryUser,
-} from '../integrations/dingtalk/client'
+  DIRECTORY_DEFAULT_PAGE_SIZE as DEFAULT_PAGE_SIZE,
+  type DirectoryDepartmentRecord,
+  type DirectoryIntegrationDiagnosticSummary,
+  type DirectoryMemberRecord,
+} from './directory-adapter'
+import { resolveDirectoryAdapter } from './directory-adapter-registry'
+import './adapters'
+import {
+  PullSourceGateRowMovedError,
+  runGatedPullSourceWrite,
+  type PullSourceGateClient,
+  type PullSourceWriteContext,
+} from './pull-source-write-gate'
 import {
   capturePriorDeptManagers,
-  enrichDepartmentsWithManagers,
   mergeDeptManagerIntoRaw,
   resolveManagerListForDept,
 } from './department-manager-enrichment'
 import {
   createDirectorySyncApiCallCounters,
   summarizeDirectorySyncApiCalls,
-  type DirectorySyncApiCallCounters,
 } from './directory-sync-api-telemetry'
 import {
   DIRECTORY_LINK_NOT_ADMIN_UNBOUND_SQL,
@@ -73,6 +70,7 @@ import { classifyDirectoryFailureText, type FixedSentenceErrorClass } from './di
 import { resolveDirectoryScheduleTimezone } from './directory-sync-timezone'
 import { acquireSourceSyncFreezeLock } from './source-sync-freeze-lock'
 import { applyDirectoryDeprovisionCandidate } from './deprovision-ledger'
+import { noProspectiveDeactivation, orgVouchExists } from './departure-vouching'
 import {
   DIRECTORY_DEPROVISION_POLICIES,
   resolveDirectoryDeprovisionPolicy,
@@ -94,8 +92,9 @@ import {
 const logger = new Logger('DirectorySync')
 const DEFAULT_ORG_ID = 'default'
 const DEFAULT_PROVIDER = 'dingtalk'
+// The connection test has no integration row to read a provider from.
+const DIRECTORY_TEST_PROVIDER = DEFAULT_PROVIDER
 const DEFAULT_ROOT_DEPARTMENT_ID = '1'
-const DEFAULT_PAGE_SIZE = 50
 const DEFAULT_ADMISSION_MODE = 'manual_only'
 const DEFAULT_MEMBER_GROUP_SYNC_MODE = 'disabled'
 const DINGTALK_OPEN_ID_REQUIRED_FOR_GRANT_ERROR =
@@ -105,7 +104,7 @@ type JsonRecord = Record<string, unknown>
 export type DirectoryAdmissionMode = 'manual_only' | 'auto_for_scoped_departments'
 export type DirectoryMemberGroupSyncMode = 'disabled' | 'sync_scoped_departments'
 
-type DirectoryIntegrationConfig = {
+export type DirectoryIntegrationConfig = {
   corpName: string | null
   appName: string | null
   appKey: string
@@ -434,7 +433,7 @@ export type DirectoryIntegrationTestInput = DirectoryIntegrationInput & {
   integrationId?: string
 }
 
-type NormalizedDirectoryIntegrationInput = Omit<
+export type NormalizedDirectoryIntegrationInput = Omit<
   DirectoryIntegrationInput,
   | 'name'
   | 'corpName'
@@ -493,11 +492,19 @@ export type DirectoryIntegrationTestResult = {
   warnings: string[]
 }
 
-export type DirectoryIntegrationDiagnosticSummary = {
-  code: string
-  title: string
-  nextAction: string
-}
+export type { DirectoryIntegrationDiagnosticSummary, DirectoryRootDepartmentDiagnosticSample } from './directory-adapter'
+
+/**
+ * @deprecated Provider pull code lives in `./adapters/dingtalk-directory-adapter`; these names
+ * remain exported from here for existing callers.
+ */
+export {
+  buildDirectoryIntegrationDiagnosticSummary,
+  buildDirectoryIntegrationTestWarnings,
+  fetchAllDepartments,
+  fetchAllUsers,
+  sampleRootDepartmentDiagnostics,
+} from './adapters/dingtalk-directory-adapter'
 
 export type DirectorySyncRunSummary = {
   id: string
@@ -889,7 +896,7 @@ function normalizeMemberGroupDefaultNamespaces(value: unknown, fallback: string[
 export function isDirectoryUserWithinAdmissionScope(
   userDepartmentIds: string[],
   allowedDepartmentIds: string[],
-  departments: Map<string, Pick<DingTalkDepartment, 'id' | 'parentId'>>,
+  departments: Map<string, Pick<DirectoryDepartmentRecord, 'id' | 'parentId'>>,
 ): boolean {
   if (allowedDepartmentIds.length === 0 || userDepartmentIds.length === 0) return false
   const allowed = new Set(allowedDepartmentIds.map((value) => normalizeText(value)).filter(Boolean))
@@ -914,7 +921,7 @@ export function evaluateDirectoryAutoAdmissionEligibility(options: {
   admissionDepartmentIds: string[]
   excludeDepartmentIds: string[]
   userDepartmentIds: string[]
-  departments: Map<string, Pick<DingTalkDepartment, 'id' | 'parentId'>>
+  departments: Map<string, Pick<DirectoryDepartmentRecord, 'id' | 'parentId'>>
   email: string | null
 }): DirectoryAutoAdmissionEligibility {
   if (options.admissionMode !== 'auto_for_scoped_departments') {
@@ -1660,17 +1667,8 @@ export async function applyDirectoryDeprovisionPolicies(
         AND l.local_user_id IS NOT NULL
       WHERE a.id = ANY($1::uuid[])
         AND a.is_active = FALSE
-        AND NOT EXISTS (
-          SELECT 1
-            FROM directory_account_links sibling_link
-            JOIN directory_accounts sibling ON sibling.id = sibling_link.directory_account_id
-            JOIN directory_integrations sibling_integration ON sibling_integration.id = sibling.integration_id
-           WHERE sibling_link.local_user_id = l.local_user_id
-             AND sibling_link.link_status = 'linked'
-             AND sibling.is_active = true
-             AND sibling_integration.org_id = $2::text
-        )`,
-    [options.deactivatedAccountIds, orgId],
+        AND NOT ${orgVouchExists({ user: 'l.local_user_id', prospectiveParam: 3, orgParam: 2 })}`,
+    [options.deactivatedAccountIds, orgId, noProspectiveDeactivation()],
   )
 
   // One decision per PERSON, not per account: a user reached through two departed accounts
@@ -1718,6 +1716,9 @@ export async function applyDirectoryDeprovisionPolicies(
   const orderedCandidates = [...byUser.entries()].sort(([leftUserId], [rightUserId]) =>
     leftUserId.localeCompare(rightUserId),
   )
+  // One scope per run: the ledger's effects-column probe is cached on it, so a run with several
+  // candidates probes once; a pooled client is never the cache key.
+  const ledgerScope = {}
   for (const [localUserId, { directoryAccountId, policy }] of orderedCandidates) {
     if (policy === 'manual_review') {
       outcome.manualReviewCount += 1
@@ -1744,6 +1745,7 @@ export async function applyDirectoryDeprovisionPolicies(
       triggeredBy: options.triggeredBy,
       policy,
       write: options.enabled,
+      ledgerScope,
     })
     if (result.skipReason) {
       // Per-candidate race (user vanished / source unbound mid-run): skip THIS person, never
@@ -1823,7 +1825,7 @@ export function buildDirectoryProjectedMemberGroupPlans(options: {
   integrationName: string
   memberGroupSyncMode: DirectoryMemberGroupSyncMode
   memberGroupDepartmentIds: string[]
-  departments: Map<string, Pick<DingTalkDepartment, 'id' | 'parentId' | 'name'>>
+  departments: Map<string, Pick<DirectoryDepartmentRecord, 'id' | 'parentId' | 'name'>>
   departmentPathMap: Map<string, string>
   userDepartmentIdsByExternalUserId: Map<string, string[]>
   linkedUserIdByExternalUserId: Map<string, string>
@@ -2545,13 +2547,85 @@ export async function listDirectoryIntegrations(orgId = DEFAULT_ORG_ID): Promise
   return result.rows.map(summarizeIntegration)
 }
 
-export async function createDirectoryIntegration(input: DirectoryIntegrationInput): Promise<DirectoryIntegrationSummary> {
+/** Who asked for a write to an integration row. Read only for the audit row of a gated source addition. */
+export interface DirectoryIntegrationWriteOptions {
+  actorId?: string
+}
+
+/** The context of a write to an integration row that does not go through the pull-source gate. */
+const UNGATED_INTEGRATION_WRITE: PullSourceWriteContext = { gated: false, lockedStatus: null, joined: false }
+
+/**
+ * Audit row for a pull source that joined an organisation through the gate (a created active row, or a
+ * row set active). Written after the gate transaction has committed, so a refused or rolled-back write
+ * leaves none. Values-free: the integration id, organisation, provider and operator only.
+ */
+async function emitPullSourceJoinAudit(
+  event: 'create' | 'activate',
+  integration: DirectoryIntegrationSummary,
+  actorId: string | undefined,
+): Promise<void> {
+  try {
+    const { auditLog } = await import('../audit/audit')
+    await auditLog({
+      actorId,
+      actorType: actorId ? 'user' : 'system',
+      action: event === 'create' ? 'directory.integration.pull_source_create' : 'directory.integration.pull_source_activate',
+      resourceType: 'directory-integration',
+      resourceId: integration.id,
+      // The audit writer keeps only a numeric operator id in its own column; `meta.actorId` carries any id.
+      meta: { orgId: integration.orgId, provider: integration.provider, actorId: actorId ?? null },
+    })
+  } catch (error) {
+    // The write is already committed; a failure to load the audit module must not fail the caller.
+    logger.warn(`Failed to write the pull source audit row: ${readErrorMessage(error, 'unknown error')}`, {
+      integrationId: integration.id,
+    })
+  }
+}
+
+export async function createDirectoryIntegration(
+  input: DirectoryIntegrationInput,
+  options: DirectoryIntegrationWriteOptions = {},
+): Promise<DirectoryIntegrationSummary> {
   const normalized = normalizeIntegrationInput(input)
   await assertDirectoryProjectedGovernanceConfigValid({
     memberGroupDefaultRoleIds: normalized.memberGroupDefaultRoleIds,
     memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
   })
-  const result = await query<DirectoryIntegrationRow>(
+  // The parameters are computed here, before the statement is handed to the gate: the function the
+  // gate runs is the one statement and nothing else.
+  const insertParams: unknown[] = [
+    DEFAULT_ORG_ID,
+    DEFAULT_PROVIDER,
+    normalized.name,
+    normalized.status,
+    normalized.corpId,
+    JSON.stringify({
+      corpName: normalized.corpName,
+      appName: normalized.appName,
+      appKey: normalized.appKey,
+      appSecret: normalizeStoredSecretValue(normalized.appSecret),
+      workNotificationAgentId: normalized.workNotificationAgentId
+        ? normalizeStoredSecretValue(normalized.workNotificationAgentId)
+        : null,
+      rootDepartmentId: normalized.rootDepartmentId,
+      baseUrl: normalized.baseUrl ?? null,
+      pageSize: normalized.pageSize,
+      admissionMode: normalized.admissionMode,
+      admissionDepartmentIds: normalized.admissionDepartmentIds,
+      excludeDepartmentIds: normalized.excludeDepartmentIds,
+      memberGroupSyncMode: normalized.memberGroupSyncMode,
+      memberGroupDepartmentIds: normalized.memberGroupDepartmentIds,
+      memberGroupDefaultRoleIds: normalized.memberGroupDefaultRoleIds,
+      memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
+    }),
+    Boolean(normalized.syncEnabled),
+    normalized.scheduleCron,
+    normalized.scheduleTimezone,
+    normalized.defaultDeprovisionPolicy,
+  ]
+  const insert = (client: PullSourceGateClient) => client.query(
     `INSERT INTO directory_integrations (
        org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
        default_deprovision_policy, created_at, updated_at
@@ -2559,41 +2633,25 @@ export async function createDirectoryIntegration(input: DirectoryIntegrationInpu
      VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, NOW(), NOW())
      RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
                default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`,
-    [
-      DEFAULT_ORG_ID,
-      DEFAULT_PROVIDER,
-      normalized.name,
-      normalized.status,
-      normalized.corpId,
-      JSON.stringify({
-        corpName: normalized.corpName,
-        appName: normalized.appName,
-        appKey: normalized.appKey,
-        appSecret: normalizeStoredSecretValue(normalized.appSecret),
-        workNotificationAgentId: normalized.workNotificationAgentId
-          ? normalizeStoredSecretValue(normalized.workNotificationAgentId)
-          : null,
-        rootDepartmentId: normalized.rootDepartmentId,
-        baseUrl: normalized.baseUrl ?? null,
-        pageSize: normalized.pageSize,
-        admissionMode: normalized.admissionMode,
-        admissionDepartmentIds: normalized.admissionDepartmentIds,
-        excludeDepartmentIds: normalized.excludeDepartmentIds,
-        memberGroupSyncMode: normalized.memberGroupSyncMode,
-        memberGroupDepartmentIds: normalized.memberGroupDepartmentIds,
-        memberGroupDefaultRoleIds: normalized.memberGroupDefaultRoleIds,
-        memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
-      }),
-      Boolean(normalized.syncEnabled),
-      normalized.scheduleCron,
-      normalized.scheduleTimezone,
-      normalized.defaultDeprovisionPolicy,
-    ],
+    insertParams,
+  )
+  // A row created active adds a pull source: it goes through the gate, which runs the statement on the
+  // pool exactly as before while the switch is off. A row created in any other status adds none and stays
+  // the one statement it was.
+  const outcome = await (
+    normalized.status === 'active'
+      ? runGatedPullSourceWrite(
+        { orgId: DEFAULT_ORG_ID, provider: DEFAULT_PROVIDER, corpId: normalized.corpId, enforce: 'flagged' },
+        insert,
+      )
+      : insert({ query }).then((result) => ({ result, ...UNGATED_INTEGRATION_WRITE }))
   ).catch((error: unknown) => {
     throw uniqueViolationAsConflict(error)
   })
 
-  return summarizeIntegration(result.rows[0])
+  const integration = summarizeIntegration(outcome.result.rows[0] as unknown as DirectoryIntegrationRow)
+  if (outcome.gated && outcome.joined) await emitPullSourceJoinAudit('create', integration, options.actorId)
+  return integration
 }
 
 /**
@@ -2867,6 +2925,7 @@ export class DirectoryConflictError extends Error {
 export async function updateDirectoryIntegration(
   integrationId: string,
   input: DirectoryIntegrationInput,
+  options: DirectoryIntegrationWriteOptions = {},
 ): Promise<DirectoryIntegrationSummary | null> {
   const current = await getIntegrationRow(integrationId)
   if (!current) return null
@@ -2932,8 +2991,60 @@ export async function updateDirectoryIntegration(
   const scheduleTimezone = input.scheduleTimezone !== undefined
     ? normalizeOptionalText(input.scheduleTimezone)
     : current.schedule_timezone
-  const result = await query<DirectoryIntegrationRow>(
-    `UPDATE directory_integrations
+  const updateParams: unknown[] = [
+    integrationId,
+    normalized.name,
+    normalized.status,
+    normalized.corpId,
+    JSON.stringify({
+      corpName: normalized.corpName,
+      appName: normalized.appName,
+      identityVerification,
+      appKey: normalized.appKey,
+      appSecret: normalizeStoredSecretValue(normalized.appSecret),
+      workNotificationAgentId: normalized.workNotificationAgentId
+        ? normalizeStoredSecretValue(normalized.workNotificationAgentId)
+        : null,
+      rootDepartmentId: normalized.rootDepartmentId,
+      baseUrl: normalized.baseUrl ?? null,
+      pageSize: normalized.pageSize,
+      admissionMode: normalized.admissionMode,
+      admissionDepartmentIds: normalized.admissionDepartmentIds,
+      excludeDepartmentIds: normalized.excludeDepartmentIds,
+      memberGroupSyncMode: normalized.memberGroupSyncMode,
+      memberGroupDepartmentIds: normalized.memberGroupDepartmentIds,
+      memberGroupDefaultRoleIds: normalized.memberGroupDefaultRoleIds,
+      memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
+      approvalCardLinkSecret: carriedApprovalCardLinkSecret,
+      approvalCardPublicAppUrl: carriedApprovalCardPublicAppUrl,
+      todoOperatorUnionId: carriedTodoOperatorUnionId,
+    }),
+    Boolean(normalized.syncEnabled),
+    normalized.scheduleCron,
+    scheduleTimezone,
+    normalized.defaultDeprovisionPolicy,
+    current.config === null ? null : JSON.stringify(rawCurrentConfig),
+    current.corp_id,
+  ]
+  // One statement, in two complete texts. Inside a gate transaction it applies only while the row still
+  // carries the status that was read under its lock, the one the gate decided from; that status is the
+  // twelfth parameter. Outside one it is the statement it was.
+  const update = (client: PullSourceGateClient, context: PullSourceWriteContext) => client.query(
+    context.gated
+      ? `UPDATE directory_integrations
+     SET name = $2,
+         status = $3,
+         corp_id = $4,
+         config = $5::jsonb,
+         sync_enabled = $6,
+         schedule_cron = $7,
+         schedule_timezone = $8,
+         default_deprovision_policy = $9,
+         updated_at = NOW()
+     WHERE id = $1 AND config IS NOT DISTINCT FROM $10::jsonb AND corp_id = $11 AND status = $12
+     RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
+               default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`
+      : `UPDATE directory_integrations
      SET name = $2,
          status = $3,
          corp_id = $4,
@@ -2946,47 +3057,38 @@ export async function updateDirectoryIntegration(
      WHERE id = $1 AND config IS NOT DISTINCT FROM $10::jsonb AND corp_id = $11
      RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
                default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`,
-    [
-      integrationId,
-      normalized.name,
-      normalized.status,
-      normalized.corpId,
-      JSON.stringify({
-        corpName: normalized.corpName,
-        appName: normalized.appName,
-        identityVerification,
-        appKey: normalized.appKey,
-        appSecret: normalizeStoredSecretValue(normalized.appSecret),
-        workNotificationAgentId: normalized.workNotificationAgentId
-          ? normalizeStoredSecretValue(normalized.workNotificationAgentId)
-          : null,
-        rootDepartmentId: normalized.rootDepartmentId,
-        baseUrl: normalized.baseUrl ?? null,
-        pageSize: normalized.pageSize,
-        admissionMode: normalized.admissionMode,
-        admissionDepartmentIds: normalized.admissionDepartmentIds,
-        excludeDepartmentIds: normalized.excludeDepartmentIds,
-        memberGroupSyncMode: normalized.memberGroupSyncMode,
-        memberGroupDepartmentIds: normalized.memberGroupDepartmentIds,
-        memberGroupDefaultRoleIds: normalized.memberGroupDefaultRoleIds,
-        memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,
-        approvalCardLinkSecret: carriedApprovalCardLinkSecret,
-        approvalCardPublicAppUrl: carriedApprovalCardPublicAppUrl,
-        todoOperatorUnionId: carriedTodoOperatorUnionId,
-      }),
-      Boolean(normalized.syncEnabled),
-      normalized.scheduleCron,
-      scheduleTimezone,
-      normalized.defaultDeprovisionPolicy,
-      current.config === null ? null : JSON.stringify(rawCurrentConfig),
-      current.corp_id,
-    ],
+    context.gated ? [...updateParams, context.lockedStatus] : updateParams,
+  )
+  // A save whose resulting status is active may add a pull source: it goes through the gate, which runs
+  // the statement on the pool exactly as before while the switch is off. Inside the gate the row is locked
+  // first, and whether the save turns a non-active row active is decided from the status read under that
+  // lock, never from the read at the top of this function. A save to any other status adds no source and
+  // stays the one statement it was.
+  const outcome = await (
+    normalized.status === 'active'
+      ? runGatedPullSourceWrite(
+        { orgId: current.org_id, provider: current.provider, corpId: normalized.corpId, enforce: 'flagged' },
+        update,
+        {
+          lockRowId: integrationId,
+          joins: (lockedStatus) => lockedStatus !== null && lockedStatus !== 'active',
+        },
+      )
+      : update({ query }, UNGATED_INTEGRATION_WRITE).then((result) => ({ result, ...UNGATED_INTEGRATION_WRITE }))
   ).catch((error: unknown) => {
+    // The gate read the row, under its lock, in another organisation than the one read above: the
+    // configuration changed under this save, the same conflict as a save that matches no row.
+    if (error instanceof PullSourceGateRowMovedError) {
+      throw new DirectoryConflictError('Directory configuration changed; reload before saving')
+    }
     throw uniqueViolationAsConflict(error)
   })
 
-  if (!result.rows[0]) throw new DirectoryConflictError('Directory configuration changed; reload before saving')
-  return summarizeIntegration(result.rows[0])
+  const row = outcome.result.rows[0] as unknown as DirectoryIntegrationRow | undefined
+  if (!row) throw new DirectoryConflictError('Directory configuration changed; reload before saving')
+  const integration = summarizeIntegration(row)
+  if (outcome.gated && outcome.joined) await emitPullSourceJoinAudit('activate', integration, options.actorId)
+  return integration
 }
 
 /** Metadata-only save: cannot change credentials, schedules, synchronization or access. */
@@ -3055,288 +3157,21 @@ async function resolveDirectoryTestCurrentConfig(input: DirectoryIntegrationTest
   return parseIntegrationConfig(current)
 }
 
-export function buildDirectoryIntegrationTestWarnings(result: {
-  rootDepartmentId: string
-  departmentSampleCount: number
-  rootDepartmentDirectUserCount: number
-  rootDepartmentDirectUserHasMore: boolean
-  rootDepartmentDirectUserCountWithAccessLimit: number
-  rootDepartmentDirectUserHasMoreWithAccessLimit: boolean
-}): string[] {
-  const warnings: string[] = []
-  const hasNoChildDepartments = result.departmentSampleCount === 0
-  const hasSuspiciouslySparseRootMembers =
-    result.rootDepartmentDirectUserCount <= 1 && !result.rootDepartmentDirectUserHasMore
-
-  if (hasNoChildDepartments) {
-    warnings.push(`根部门 ${result.rootDepartmentId} 未返回任何子部门。`)
-  }
-
-  if (hasNoChildDepartments && hasSuspiciouslySparseRootMembers) {
-    warnings.push(
-      `根部门 ${result.rootDepartmentId} 当前仅返回 ${result.rootDepartmentDirectUserCount} 个直属成员；如果钉钉企业通讯录里实际成员更多，通常是应用通讯录接口范围未覆盖，或根部门 ID 配置不正确。`,
-    )
-  }
-
-  if (
-    hasNoChildDepartments
-    && hasSuspiciouslySparseRootMembers
-    && result.rootDepartmentDirectUserCountWithAccessLimit === result.rootDepartmentDirectUserCount
-    && result.rootDepartmentDirectUserHasMoreWithAccessLimit === result.rootDepartmentDirectUserHasMore
-  ) {
-    warnings.push('开启“包含访问受限成员”后返回结果没有变化，说明当前问题不是受限成员过滤导致的。')
-  }
-
-  return warnings
-}
-
-export function buildDirectoryIntegrationDiagnosticSummary(result: {
-  departmentSampleCount: number
-  rootDepartmentDirectUserCount: number
-  rootDepartmentDirectUserHasMore: boolean
-}): DirectoryIntegrationDiagnosticSummary {
-  const hasNoChildDepartments = result.departmentSampleCount === 0
-  const hasSuspiciouslySparseRootMembers =
-    result.rootDepartmentDirectUserCount <= 1 && !result.rootDepartmentDirectUserHasMore
-
-  if (hasNoChildDepartments && hasSuspiciouslySparseRootMembers) {
-    return {
-      code: 'scope_or_root_misconfigured',
-      title: '通讯录范围或根部门疑似配置不当',
-      nextAction: '请检查应用「通讯录管理」权限范围是否覆盖全员，并确认根部门 ID 是否正确。',
-    }
-  }
-
-  if (hasNoChildDepartments) {
-    return {
-      code: 'no_child_departments',
-      title: '根部门未返回子部门',
-      nextAction: '如企业通讯录确有部门层级，请检查应用通讯录可见范围配置。',
-    }
-  }
-
-  return {
-    code: 'healthy',
-    title: '通讯录连通正常',
-    nextAction: '通讯录范围正常，可执行目录同步。',
-  }
-}
-
-export type DirectoryRootDepartmentDiagnosticSample = {
-  rootDepartmentChildCount: number
-  rootDepartmentDirectUserCount: number
-  rootDepartmentDirectUserHasMore: boolean
-  rootDepartmentDirectUserCountWithAccessLimit: number
-  rootDepartmentDirectUserHasMoreWithAccessLimit: boolean
-  sampledRootDepartmentUsers: Array<{ userId: string; name: string }>
-  sampledRootDepartmentUsersWithAccessLimit: Array<{ userId: string; name: string }>
-  summary: DirectoryIntegrationDiagnosticSummary
-  warnings: string[]
-}
-
-export async function sampleRootDepartmentDiagnostics(
-  config: DirectoryIntegrationConfig,
-): Promise<DirectoryRootDepartmentDiagnosticSample> {
-  const accessToken = await fetchDingTalkAppAccessToken({
-    appKey: config.appKey,
-    appSecret: config.appSecret,
-    baseUrl: config.baseUrl,
-  })
-  const departments = await listDingTalkDepartments(accessToken, config.rootDepartmentId, {
-    baseUrl: config.baseUrl,
-  })
-  const rootUsers = await listDingTalkDepartmentUsers(
-    accessToken,
-    config.rootDepartmentId,
-    0,
-    Math.min(config.pageSize ?? DEFAULT_PAGE_SIZE, 100),
-    { baseUrl: config.baseUrl },
-  )
-  const rootUsersWithAccessLimit = await listDingTalkDepartmentUsers(
-    accessToken,
-    config.rootDepartmentId,
-    0,
-    Math.min(config.pageSize ?? DEFAULT_PAGE_SIZE, 100),
-    { baseUrl: config.baseUrl, containAccessLimit: true },
-  )
-
-  const rootDepartmentChildCount = departments.length
-  const rootDepartmentDirectUserCount = rootUsers.users.length
-  const rootDepartmentDirectUserHasMore = rootUsers.hasMore
-  const rootDepartmentDirectUserCountWithAccessLimit = rootUsersWithAccessLimit.users.length
-  const rootDepartmentDirectUserHasMoreWithAccessLimit = rootUsersWithAccessLimit.hasMore
-
-  const warnings = buildDirectoryIntegrationTestWarnings({
-    rootDepartmentId: config.rootDepartmentId,
-    departmentSampleCount: rootDepartmentChildCount,
-    rootDepartmentDirectUserCount,
-    rootDepartmentDirectUserHasMore,
-    rootDepartmentDirectUserCountWithAccessLimit,
-    rootDepartmentDirectUserHasMoreWithAccessLimit,
-  })
-  const summary = buildDirectoryIntegrationDiagnosticSummary({
-    departmentSampleCount: rootDepartmentChildCount,
-    rootDepartmentDirectUserCount,
-    rootDepartmentDirectUserHasMore,
-  })
-
-  return {
-    rootDepartmentChildCount,
-    rootDepartmentDirectUserCount,
-    rootDepartmentDirectUserHasMore,
-    rootDepartmentDirectUserCountWithAccessLimit,
-    rootDepartmentDirectUserHasMoreWithAccessLimit,
-    sampledRootDepartmentUsers: rootUsers.users.slice(0, 10).map((user) => ({ userId: user.userId, name: user.name })),
-    sampledRootDepartmentUsersWithAccessLimit: rootUsersWithAccessLimit.users
-      .slice(0, 10)
-      .map((user) => ({ userId: user.userId, name: user.name })),
-    summary,
-    warnings,
-  }
-}
-
 export async function testDirectoryIntegration(input: DirectoryIntegrationTestInput): Promise<DirectoryIntegrationTestResult> {
   const current = await resolveDirectoryTestCurrentConfig(input)
   const normalized = normalizeIntegrationInput(input, current)
-  const accessToken = await fetchDingTalkAppAccessToken({
-    appKey: normalized.appKey,
-    appSecret: normalized.appSecret,
-    baseUrl: normalized.baseUrl ?? undefined,
-  })
-
-  const departments = await listDingTalkDepartments(
-    accessToken,
-    normalized.rootDepartmentId,
-    { baseUrl: normalized.baseUrl ?? undefined },
-  )
-  const firstDepartmentId = departments[0]?.id ?? normalized.rootDepartmentId
-  const { users } = await listDingTalkDepartmentUsers(
-    accessToken,
-    firstDepartmentId,
-    0,
-    Math.min(normalized.pageSize ?? DEFAULT_PAGE_SIZE, 5),
-    { baseUrl: normalized.baseUrl ?? undefined },
-  )
-  const rootUsers = await listDingTalkDepartmentUsers(
-    accessToken,
-    normalized.rootDepartmentId,
-    0,
-    Math.min(normalized.pageSize ?? DEFAULT_PAGE_SIZE, 100),
-    { baseUrl: normalized.baseUrl ?? undefined },
-  )
-  const rootUsersWithAccessLimit = await listDingTalkDepartmentUsers(
-    accessToken,
-    normalized.rootDepartmentId,
-    0,
-    Math.min(normalized.pageSize ?? DEFAULT_PAGE_SIZE, 100),
-    {
-      baseUrl: normalized.baseUrl ?? undefined,
-      containAccessLimit: true,
-    },
-  )
-
-  const diagnostics = {
-    rootDepartmentChildCount: departments.length,
-    rootDepartmentDirectUserCount: rootUsers.users.length,
-    rootDepartmentDirectUserHasMore: rootUsers.hasMore,
-    rootDepartmentDirectUserCountWithAccessLimit: rootUsersWithAccessLimit.users.length,
-    rootDepartmentDirectUserHasMoreWithAccessLimit: rootUsersWithAccessLimit.hasMore,
-    sampledRootDepartmentUsers: rootUsers.users.slice(0, 10).map((user) => ({ userId: user.userId, name: user.name })),
-    sampledRootDepartmentUsersWithAccessLimit: rootUsersWithAccessLimit.users.slice(0, 10).map((user) => ({ userId: user.userId, name: user.name })),
+  const adapter = resolveDirectoryAdapter(DIRECTORY_TEST_PROVIDER)
+  if (!adapter.probeConnection) {
+    throw new DirectoryValidationError('Directory provider does not support connection tests')
   }
+  const probe = await adapter.probeConnection(normalized)
 
   return {
     corpId: normalized.corpId,
     rootDepartmentId: normalized.rootDepartmentId,
     appKey: normalized.appKey,
-    departmentSampleCount: departments.length,
-    sampledDepartments: departments.slice(0, 5).map((department) => ({ id: department.id, name: department.name })),
-    userSampleCount: users.length,
-    sampledUsers: users.slice(0, 5).map((user) => ({ userId: user.userId, name: user.name })),
-    diagnostics,
-    summary: buildDirectoryIntegrationDiagnosticSummary({
-      departmentSampleCount: departments.length,
-      rootDepartmentDirectUserCount: diagnostics.rootDepartmentDirectUserCount,
-      rootDepartmentDirectUserHasMore: diagnostics.rootDepartmentDirectUserHasMore,
-    }),
-    warnings: buildDirectoryIntegrationTestWarnings({
-      rootDepartmentId: normalized.rootDepartmentId,
-      departmentSampleCount: departments.length,
-      rootDepartmentDirectUserCount: diagnostics.rootDepartmentDirectUserCount,
-      rootDepartmentDirectUserHasMore: diagnostics.rootDepartmentDirectUserHasMore,
-      rootDepartmentDirectUserCountWithAccessLimit: diagnostics.rootDepartmentDirectUserCountWithAccessLimit,
-      rootDepartmentDirectUserHasMoreWithAccessLimit: diagnostics.rootDepartmentDirectUserHasMoreWithAccessLimit,
-    }),
+    ...probe,
   }
-}
-
-export async function fetchAllDepartments(
-  config: DirectoryIntegrationConfig,
-  integrationName: string,
-  // §7.7 telemetry: increment per external directory-pull call so the N+1 is ops-visible on
-  // the run record. Optional — the preview path (no run row) omits it.
-  apiCalls?: DirectorySyncApiCallCounters,
-): Promise<Map<string, DingTalkDepartment>> {
-  const accessToken = await fetchDingTalkAppAccessToken({
-    appKey: config.appKey,
-    appSecret: config.appSecret,
-    baseUrl: config.baseUrl,
-  })
-  const departments = new Map<string, DingTalkDepartment>()
-  // The seeded synthetic root is not a returned wire id until a list row replaces it.
-  const returnedWireDepartmentIds = new Set<string>()
-  departments.set(config.rootDepartmentId, {
-    id: config.rootDepartmentId,
-    parentId: null,
-    name: integrationName,
-    order: 0,
-    source: { syntheticRoot: true },
-  })
-
-  const queue = [config.rootDepartmentId]
-  while (queue.length > 0) {
-    const current = queue.shift()
-    if (!current) continue
-    if (apiCalls) apiCalls.departmentListCalls += 1
-    const children = await listDingTalkDepartments(accessToken, current, { baseUrl: config.baseUrl })
-    for (const child of children) {
-      const existing = departments.get(child.id)
-      if (
-        existing
-        && returnedWireDepartmentIds.has(child.id)
-        && existing.parentId !== child.parentId
-      ) {
-        throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk departments', {})
-      }
-      departments.set(child.id, existing ? { ...existing, ...child } : child)
-      returnedWireDepartmentIds.add(child.id)
-      if (!existing) queue.push(child.id)
-    }
-  }
-
-  if (hasDirectoryDepartmentCycle(departments)) {
-    throw new DingTalkIncompleteResponseError('Failed to read complete DingTalk departments', {})
-  }
-
-  // dept-head plumbing: enrich each department with its manager user ids from the
-  // department-detail API (listsub does not return them). Best-effort + sequential
-  // (concurrency=1; explicit min-interval throttle deferred — no real rate limiter
-  // yet): a per-dept failure leaves managerUserIds undefined so the upsert carries
-  // the prior dept_manager_userid_list forward instead of wiping it.
-  await enrichDepartmentsWithManagers(
-    departments.values(),
-    (deptId) => {
-      if (apiCalls) apiCalls.departmentDetailCalls += 1
-      return getDingTalkDepartmentDetail(accessToken, deptId, { baseUrl: config.baseUrl })
-    },
-    () => logger.warn('DingTalk department detail unavailable; carrying prior manager list forward'),
-  )
-
-  return departments
-}
-
-function mergeDepartmentIds(primary: string[], secondary: string[]): string[] {
-  return Array.from(new Set([...primary, ...secondary].filter(Boolean)))
 }
 
 /**
@@ -3364,7 +3199,7 @@ export function createDirectoryPullRetryCounters(): DirectoryPullRetryCounters {
 /** Bucket one transport retry event by its `reason` (the string the transport's warn line carries). */
 export function recordDirectoryPullRetry(
   counters: DirectoryPullRetryCounters,
-  event: Pick<DingTalkTransportRetryEvent, 'reason'>,
+  event: { reason: string },
 ): void {
   counters.total += 1
   if (event.reason.startsWith('flow_control_errcode_')) {
@@ -3395,66 +3230,7 @@ export function summarizeDirectoryPullRetries(counters: DirectoryPullRetryCounte
   }
 }
 
-export async function fetchAllUsers(
-  config: DirectoryIntegrationConfig,
-  departmentMap: Map<string, DingTalkDepartment>,
-  // §7.7 telemetry: `userDetailCalls` is THE N+1 metric — one `user/get` per unique user.
-  // Optional — the preview path (no run row) omits it.
-  apiCalls?: DirectorySyncApiCallCounters,
-): Promise<Map<string, DingTalkDirectoryUser>> {
-  const accessToken = await fetchDingTalkAppAccessToken({
-    appKey: config.appKey,
-    appSecret: config.appSecret,
-    baseUrl: config.baseUrl,
-  })
-  const users = new Map<string, DingTalkDirectoryUser>()
-  const pageSize = config.pageSize ?? DEFAULT_PAGE_SIZE
-
-  for (const departmentId of departmentMap.keys()) {
-    let cursor = 0
-    const seenCursors = new Set<number>([cursor])
-    let hasMore = true
-    while (hasMore) {
-      if (apiCalls) apiCalls.userListPageCalls += 1
-      const response = await listDingTalkDepartmentUsers(
-        accessToken,
-        departmentId,
-        cursor,
-        pageSize,
-        { baseUrl: config.baseUrl },
-      )
-      const nextCursor = getNextDirectoryUserCursor(response, seenCursors)
-      for (const summary of response.users) {
-        const existing = users.get(summary.userId)
-        if (!existing) {
-          // The N+1: a per-user detail fetch, issued once per UNIQUE user (this branch only
-          // runs on first sight — a user in two departments is fetched once).
-          if (apiCalls) apiCalls.userDetailCalls += 1
-          const detail = await getDingTalkUserDetail(accessToken, summary.userId, { baseUrl: config.baseUrl })
-          users.set(summary.userId, {
-            ...detail,
-            departmentIds: mergeDepartmentIds(detail.departmentIds, summary.departmentIds),
-          })
-          continue
-        }
-        users.set(summary.userId, {
-          ...existing,
-          departmentIds: mergeDepartmentIds(existing.departmentIds, summary.departmentIds),
-        })
-      }
-      if (nextCursor === null) {
-        hasMore = false
-      } else {
-        cursor = nextCursor
-        seenCursors.add(cursor)
-      }
-    }
-  }
-
-  return users
-}
-
-function buildDepartmentPathMap(departments: Map<string, DingTalkDepartment>): Map<string, string> {
+function buildDepartmentPathMap(departments: Map<string, DirectoryDepartmentRecord>): Map<string, string> {
   const cache = new Map<string, string>()
 
   const walk = (departmentId: string): string => {
@@ -3623,7 +3399,8 @@ async function lockDirectorySyncAccessGraphUsers(
   client: AccessGraphTransactionClient,
   options: {
     integrationId: string
-    users: DingTalkDirectoryUser[]
+    provider: string
+    users: DirectoryMemberRecord[]
   },
 ): Promise<{
   lockedUserIds: Set<string>
@@ -3632,6 +3409,10 @@ async function lockDirectorySyncAccessGraphUsers(
   openRehireAccountIds: Set<string>
   priorAccessByExternalUserId: Map<string, DirectorySyncPriorAccessRow>
 }> {
+  // A missing provider would bind NULL to the identity arm below and silently match nothing.
+  if (!normalizeText(options.provider)) {
+    throw new Error('lockDirectorySyncAccessGraphUsers requires a provider')
+  }
   const externalKeys = Array.from(new Set(
     options.users
       .map((user) => normalizeText(user.unionId || user.openId || user.userId))
@@ -3711,7 +3492,7 @@ async function lockDirectorySyncAccessGraphUsers(
       WHERE candidate.local_user_id IS NOT NULL`,
     [
       options.integrationId,
-      DEFAULT_PROVIDER,
+      options.provider,
       externalKeys,
       unionIds,
       openIds,
@@ -3775,10 +3556,15 @@ async function lockDirectorySyncAccessGraphUsers(
 
 async function loadMatchMaps(
   accounts: DirectoryAccountRow[],
+  provider: string,
   identityClient?: {
     query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }>
   },
 ) {
+  // `WHERE provider = $1` with a NULL parameter matches nothing, so an empty provider must fail loudly.
+  if (!normalizeText(provider)) {
+    throw new Error('loadMatchMaps requires a provider')
+  }
   const externalKeys = Array.from(new Set(accounts.map((account) => account.external_key).filter(Boolean)))
   const unionIds = Array.from(new Set(
     accounts
@@ -3812,7 +3598,7 @@ async function loadMatchMaps(
              OR provider_union_id = ANY($3::text[])
              OR provider_open_id = ANY($4::text[])
            )`,
-        [DEFAULT_PROVIDER, externalKeys, unionIds, openIds],
+        [provider, externalKeys, unionIds, openIds],
       )
       : query<ExternalIdentityRow>(
         `SELECT external_key, provider_union_id, provider_open_id, corp_id, local_user_id
@@ -3823,7 +3609,7 @@ async function loadMatchMaps(
              OR provider_union_id = ANY($3::text[])
              OR provider_open_id = ANY($4::text[])
            )`,
-        [DEFAULT_PROVIDER, externalKeys, unionIds, openIds],
+        [provider, externalKeys, unionIds, openIds],
       )
     : Promise.resolve({ rows: [] })
 
@@ -4262,6 +4048,7 @@ export async function syncDirectoryIntegration(
   const integrationId = integration.id
 
   const config = parseIntegrationConfig(integration)
+  const adapter = resolveDirectoryAdapter(integration.provider)
   const directoryDeprovisionEnabled = isDirectoryDeprovisionEnabled()
   let directoryApplyCommitted = false
   // T2 (§12.2): cheap freeze gate BEFORE the lease claim — a freeze already active at entry
@@ -4319,14 +4106,14 @@ export async function syncDirectoryIntegration(
   // The transport retry observer is scoped to the same two calls (token refreshes inside them
   // are observed too, although the call counters exclude the token fetch).
   const pullRetryCounters = createDirectoryPullRetryCounters()
-  const observePullRetry = (event: DingTalkTransportRetryEvent) => recordDirectoryPullRetry(pullRetryCounters, event)
+  const observePullRetry = (event: { reason: string }) => recordDirectoryPullRetry(pullRetryCounters, event)
   let fetchDurationMs = 0
 
   try {
     const fetchDepartmentsStartedAtMs = Date.now()
-    const departments = await observeDingTalkTransportRetries(
+    const departments = await adapter.observeRetries(
       observePullRetry,
-      () => fetchAllDepartments(config, integration.name, apiCallCounters),
+      () => adapter.fetchDepartments(config, integration.name, { apiCalls: apiCallCounters }),
     )
     fetchDurationMs += Date.now() - fetchDepartmentsStartedAtMs
     const departmentPathMap = buildDepartmentPathMap(departments)
@@ -4335,16 +4122,16 @@ export async function syncDirectoryIntegration(
     // (managerUserIds left undefined) carries the prior value forward instead of wiping it.
     const priorDeptManagers = await capturePriorDeptManagers(integrationId, query)
     const fetchUsersStartedAtMs = Date.now()
-    const users = await observeDingTalkTransportRetries(
+    const users = await adapter.observeRetries(
       observePullRetry,
-      () => fetchAllUsers(config, departments, apiCallCounters),
+      () => adapter.fetchMembers(config, departments, { apiCalls: apiCallCounters }),
     )
     fetchDurationMs += Date.now() - fetchUsersStartedAtMs
 
     let directoryDiagnosticStats: JsonRecord = {}
-    if (triggerSource === 'manual') {
+    if (triggerSource === 'manual' && adapter.sampleDiagnostics) {
       try {
-        const diagnosticSample = await sampleRootDepartmentDiagnostics(config)
+        const diagnosticSample = await adapter.sampleDiagnostics(config)
         directoryDiagnosticStats = {
           rootDepartmentChildCount: diagnosticSample.rootDepartmentChildCount,
           rootDepartmentDirectUserCount: diagnosticSample.rootDepartmentDirectUserCount,
@@ -4402,6 +4189,7 @@ export async function syncDirectoryIntegration(
       await assertDirectorySyncNotFrozenByTransfer(integrationId, client as FreezeCheckClient)
       const syncAccess = await lockDirectorySyncAccessGraphUsers(client, {
         integrationId,
+        provider: integration.provider,
         users: Array.from(users.values()),
       })
       const priorAccessByAccountId = new Map(
@@ -4446,7 +4234,7 @@ export async function syncDirectoryIntegration(
            RETURNING (xmax = 0) AS created`,
           [
             integrationId,
-            DEFAULT_PROVIDER,
+            integration.provider,
             department.id,
             department.parentId,
             department.name,
@@ -4474,7 +4262,7 @@ export async function syncDirectoryIntegration(
           DIRECTORY_ACCOUNT_UPSERT_SQL,
           [
             integrationId,
-            DEFAULT_PROVIDER,
+            integration.provider,
             integration.corp_id,
             user.userId,
             normalizeOptionalText(user.unionId),
@@ -4610,6 +4398,7 @@ export async function syncDirectoryIntegration(
         ambiguousMobileKeys,
       } = await loadMatchMaps(
         Array.from(accountIdMap.values()),
+        integration.provider,
         client,
       )
 
@@ -4751,7 +4540,7 @@ export async function syncDirectoryIntegration(
                 const admissionAccount: DirectoryBindingTargetAccountRow = {
                   id: account.id,
                   integration_id: integrationId,
-                  provider: DEFAULT_PROVIDER,
+                  provider: integration.provider,
                   corp_id: account.corp_id,
                   external_user_id: account.external_user_id,
                   union_id: account.union_id,
@@ -5467,8 +5256,9 @@ export async function previewDirectorySyncIntegration(integrationId: string): Pr
   if (activeRunId) throw new DirectorySyncInProgressError(activeRunId)
 
   const config = parseIntegrationConfig(integration)
-  const departments = await fetchAllDepartments(config, integration.name)
-  const users = await fetchAllUsers(config, departments)
+  const adapter = resolveDirectoryAdapter(integration.provider)
+  const departments = await adapter.fetchDepartments(config, integration.name)
+  const users = await adapter.fetchMembers(config, departments)
 
   const existingResult = await query<ExistingAccountPreviewRow>(
     `SELECT a.external_user_id,
@@ -5505,7 +5295,7 @@ export async function previewDirectorySyncIntegration(integrationId: string): Pr
     // so this is a type-shape fill, not a semantic claim about persisted account state.
     is_active: true,
   }))
-  const identityMatchMaps = await loadMatchMaps(pulledAccountsForMatching)
+  const identityMatchMaps = await loadMatchMaps(pulledAccountsForMatching, integration.provider)
 
   const sampledNewAccounts: DirectorySyncPreview['sampledNewAccounts'] = []
   let wouldCreateAccounts = 0
@@ -6381,17 +6171,8 @@ export async function deactivateUserOrgMembershipIfNoOtherActiveBinding(
      WHERE user_id = $1::text
        AND org_id = $2::text
        AND is_active = TRUE
-       AND NOT EXISTS (
-         SELECT 1
-         FROM directory_account_links l
-         JOIN directory_accounts a ON a.id = l.directory_account_id
-         JOIN directory_integrations i ON i.id = a.integration_id
-         WHERE l.local_user_id = $1::text
-           AND l.link_status = 'linked'
-           AND a.is_active = TRUE
-           AND i.org_id = $2::text
-       )`,
-    [options.userId, options.orgId],
+       AND NOT ${orgVouchExists({ user: '$1::text', prospectiveParam: 3, orgParam: 2 })}`,
+    [options.userId, options.orgId, noProspectiveDeactivation()],
   )
 }
 
@@ -6912,6 +6693,7 @@ export const __directorySyncInternalsForTests = {
   assertDirectoryAccountCanEnableDingTalkGrant,
   createDirectoryAdmittedUserInTransaction,
   doesExternalIdentityMatchAccount,
+  loadMatchMaps,
   lockDirectorySyncAccessGraphUsers,
 }
 

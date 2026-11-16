@@ -18,8 +18,13 @@
 // surface that is absent, a read that degrades to "computed" instead of "from the database" all read
 // as NOT ok. Nothing here writes.
 //
-// THE LIST (PILOT_READINESS_VERSION 2 — version 1 was the first fifteen; the pre-enable hardening of step-4
-// design §23.4 F-3 / F-5 added the three marked ★, which only ever refuse more):
+// THE LIST (PILOT_READINESS_VERSION 7 — version 1 was the first fifteen; the pre-enable hardening of step-4
+// design §23.4 F-3 / F-5 added the three marked ★; 批次标识 BI-1b (design §8.7, S6 C-9; register R-65) added the six
+// marked ◆ in version 3; batch-refresh step 6a-2 (S6-2, step-6 design §8 as rebaselined B-8; register R-91) added the
+// two marked ▲ in version 4; batch-refresh step 6d-1b (S6-5, rebaseline B-8: ONLY the remnant check) added the one
+// marked ● in version 5; the owner ruling of 2026-11-11 (register R-91, option A) added the one marked ■ in version 6;
+// batch-refresh S6-5b (register R-91; coordinator ruling: S6-5b takes v7, S6-7 the next free version) added the one marked
+// ◇ in version 7 — each only ever refuses more):
 //   registry_row_active            the registry row exists, is active and names this sheet / objectId
 //   sheet_present                  the host finds the sheet for (staging project, objectId) and it IS this sheet
 //   target_fields_present          every template column resolves on the sheet, from the database (not computed)
@@ -56,7 +61,48 @@
 //                                  continuation is confirmed would leave it evidence_incomplete with no confirm)
 //   no_generic_writer_names_sheet  no external-system object config and no pipeline's erp-feedback option
 //                                  names this sheet or objectId (and both registries answered) ← step 4 PR-6
-//   continuation_support_version   the plugin build recognises continuations    ← flipped by the LAST PR of the
+// ◆ pull_batch_enabled             the pull-batch switch is on for this request
+// ◆ pull_batch_columns_present     both band columns (首次批次 / 本次拉取) resolve on THIS sheet from the database
+// ◆ pull_batch_columns_locked      both carry the band marker and humanWriteLock 'plm_system'
+// ◆ pull_batch_columns_visible     LIVE: both plugin views exist and neither hides a band column (by its view hidden
+//                                  list, physical or logical id, or by the field property's hidden rule)
+// ◆ pull_batch_ledger_readable     the pull-batch ledger answers for this sheet (migration 105)
+// ◆ pull_batch_history_resolved    the sheet's batch history is resolved (born_empty / backfilled) and no gap row
+//                                  exists. The six read ONE status (deps.readPullBatchStatus), once per evaluation.
+// ▲ change_plan_store_readable     the step-5 change-plan table (migration 104) is readable
+// ▲ execution_recovery_ready       the plan's 「恢复入口」: the step-6 intent journal (migration 106) is readable, the
+//                                  sheet write lock knows the `recovery_verify` purpose, the wired refresh store can read,
+//                                  close and list executions for recovery, and — while the pull-batch switch is on —
+//                                  批次标识's ledger offers its link read and its close hook (readBatchLink / batchWithin)
+// ● no_unacknowledged_inactive_root_remnant  the project's doubled-sheet "item-10" remnants (design §6.1 D2: a component
+//                                  with an INACTIVE root row, no active root row and an active nested copy — the census
+//                                  module's own definition, over the SAME project read as O-6) minus those with an ACTIVE
+//                                  `remnant_acknowledged` row in the component ruling ledger (migration 107) must be
+//                                  empty. The ledger is read on EVERY evaluation (a missing table / unwired store is
+//                                  ok:false, never "nothing acknowledged"). `dropped_head_included` exempts nothing
+//                                  until S6-7. It does not read the source: the first governed computation is the
+//                                  authoritative observation of the order head, and it fails closed (design §6.3)
+// ■ tenant_claim_required          the staged tenant-claim door is ON for this request: the ONE reader
+//                                  (http-routes.cjs stockPreparationTenantClaimRequired, MULTITABLE_STOCK_PREP_TENANT_
+//                                  CLAIM_REQUIRED exactly 'true' after trim / case fold) answered true and the route
+//                                  handed that boolean in as `deps.tenantClaimRequired`; this module never reads the
+//                                  environment. Owner ruling 2026-11-11 (R-91, option A): while the door is off,
+//                                  requireTableActionAccess's legacy integration:* branch lets a tenantless platform
+//                                  admin name a tenant and preview AND apply into it, so the door being on is a
+//                                  PILOT-ENABLE PRECONDITION. It gates the enable only: after an enable nothing refuses
+//                                  at run time (only the pilot GET re-lists this id), so removing the flag afterwards
+//                                  reopens that path on the pilot sheet (the runbook forbids it). The legacy branch and
+//                                  every non-pilot project are unchanged.
+// ◇ no_open_sheet_repair_run       no doubled-sheet repair run (S6-6, migration 108) of this SHEET is still `running`:
+//                                  the sheet-repair ledger's own reader (listRunsOf — its open-run read is sheet-wide,
+//                                  every project, and it throws on any failure) answered `openRun: false`. Unwired store,
+//                                  missing method, a throw (108 absent) or any other answer is ok:false. Read whatever
+//                                  the repair switch says: a run opened while the switch was on stays open after it is
+//                                  turned off. Why it refuses: once the project is governed, retire / restore refuse
+//                                  `project_governed` and the verified close refuses a run whose rows are not all in
+//                                  their target state, so such a run has no tool path left (the enable must not create
+//                                  that dead end). The enable route re-reads it under its lease (as F-3 does)
+//   continuation_support_version  the plugin build recognises continuations    ← flipped by the LAST PR of the
 //                                  D-22 set (PR-3a, PR-3b, PR-4, PR-5, PR-6, PR-8, step 6); still 0 after PR-3b
 // ---------------------------------------------------------------------------------------------------
 
@@ -76,10 +122,17 @@ const {
 // pull suspension, the large-lane refusal — plus PR-4, PR-5, PR-6, PR-8 and step 6) flips it to REQUIRED,
 // never ahead. PR-3a and PR-3b leave it 0, so readiness still refuses every enable by construction (D-22).
 const continuationSupport = require('./stock-preparation-continuation-support.cjs')
+// 批次标识 BI-1b: the six v3 facts, off ONE status read per evaluation.
+const { PULL_BATCH_READINESS_CHECK_IDS, pullBatchReadinessChecks } = require('./stock-preparation-pull-batch-status.cjs')
 // O-6: the continuation core's own "active" / "root" predicates (see no_two_copy_component above).
 const { __internals: { isActiveRow, isRootRow } } = require('./stock-preparation-continuation-pairing.cjs')
+// Step 6a-2 (readiness v4): the lock's closed purpose list (the recovery lease must be a known purpose).
+const { PROJECT_WRITE_PURPOSES } = require('./stock-preparation-project-write-lock.cjs')
+// Step 6d-1b (readiness v5): the census module's D2 handles and the ONE exemption rule the census routes share.
+const { censusOfRows } = require('./stock-preparation-sheet-census.cjs')
+const { unacknowledgedRemnantHandles } = require('./stock-preparation-remnant-acknowledgement.cjs')
 
-const PILOT_READINESS_VERSION = 2
+const PILOT_READINESS_VERSION = 7
 const REQUIRED_CONTINUATION_SUPPORT_VERSION = 1
 
 // The step-4 stores whose readability readiness probes (step-4 design §4.1 / §4.2). PR-2 names them;
@@ -88,6 +141,12 @@ const STEP4_STORE_TABLES = Object.freeze({
   continuation: 'integration_stock_prep_continuation',
   refreshState: 'integration_stock_prep_refresh_state',
 })
+// Step 6a-2 (readiness v4): the change-plan ledger (migration 104) and the execution intent journal (migration 106).
+const STEP6_RECOVERY_TABLES = Object.freeze({
+  changePlan: 'integration_stock_prep_change_plan',
+  intent: 'integration_stock_prep_refresh_execution_intent',
+})
+const RECOVERY_STORE_METHODS = Object.freeze(['readExecutionForRecovery', 'closeExecution', 'listExecutions'])
 
 // Server config (NOT an env flag): `stockPreparationPilot.specReadPlanSlot` with the exact literal
 // 'not_applicable' declares that this deployment's source has no 规格 column to read. Anything else
@@ -117,6 +176,17 @@ const PILOT_READINESS_CHECK_IDS = Object.freeze([
   'spec_read_plan_slot',
   'pack_columns_installed',
   'no_generic_writer_names_sheet',
+  // 批次标识 BI-1b (P-8): immediately before the D-22 marker, which stays last.
+  ...PULL_BATCH_READINESS_CHECK_IDS,
+  // Step 6a-2 (v4, rebaseline B-8): inserted before the D-22 marker as BI did.
+  'change_plan_store_readable',
+  'execution_recovery_ready',
+  // Step 6d-1b (v5, rebaseline B-8): inserted before the D-22 marker as BI did.
+  'no_unacknowledged_inactive_root_remnant',
+  // Owner ruling 2026-11-11 (v6, R-91 option A): inserted before the D-22 marker as BI did.
+  'tenant_claim_required',
+  // Batch-refresh S6-5b (v7, R-91): inserted before the D-22 marker as BI did.
+  'no_open_sheet_repair_run',
   'continuation_support_version',
 ])
 
@@ -220,6 +290,18 @@ async function readPackColumnFacts({ action, packInstallStore, provisioning, ten
   return { declared, ledgerFieldIds: new Set(ledger.fieldIds), ledgerPackCount: ledger.packIds.length, live }
 }
 
+/**
+ * S6-5b (readiness v7): true only when the sheet-repair ledger's own reader positively answers that no repair run of
+ * this sheet is open. Throws through on a store failure (the caller reads a throw as not ok). Shared by the readiness
+ * check and the enable route's re-read under its lease.
+ */
+async function readNoOpenSheetRepairRun({ sheetRepairStore, tenantId, sheetId, projectNo } = {}) {
+  if (!nonEmptyString(tenantId) || !nonEmptyString(sheetId) || !nonEmptyString(projectNo)) return false
+  if (!sheetRepairStore || typeof sheetRepairStore.listRunsOf !== 'function') return false
+  const runs = await sheetRepairStore.listRunsOf({ tenantId, sheetId, projectNo })
+  return isPlainObject(runs) && runs.openRun === false
+}
+
 // Each check: (deps) => boolean | Promise<boolean>. A throw is `ok: false`.
 const CHECKS = Object.freeze({
   registry_row_active(deps) {
@@ -269,9 +351,7 @@ const CHECKS = Object.freeze({
     return true
   },
   async no_two_copy_component(deps) {
-    // The project-scoped read the planner itself plans from (same page bounds; past them it throws ⇒ false).
-    if (typeof deps.readExistingStockPreparationRows !== 'function' || !deps.recordsApi || !deps.target || !nonEmptyString(deps.projectNo)) return false
-    const rows = await deps.readExistingStockPreparationRows(deps.recordsApi, deps.target, deps.projectNo)
+    const rows = await deps.projectRowsOnce()
     if (!Array.isArray(rows)) return false
     return countTwoCopyComponents(rows) === 0
   },
@@ -337,6 +417,48 @@ const CHECKS = Object.freeze({
     if (!targets || targets.complete !== true) return false
     return !targets.sheetIds.has(deps.sheetId) && !targets.objectIds.has(deps.objectId)
   },
+  ...Object.fromEntries(PULL_BATCH_READINESS_CHECK_IDS.map((id) => [id, async (deps) => {
+    if (typeof deps.pullBatchStatusOnce !== 'function') return false
+    return pullBatchReadinessChecks(await deps.pullBatchStatusOnce())[id] === true
+  }])),
+  async change_plan_store_readable(deps) {
+    if (typeof deps.probeTableReadable !== 'function') return false
+    const probe = await deps.probeTableReadable(STEP6_RECOVERY_TABLES.changePlan)
+    return Boolean(probe && probe.readable === true)
+  },
+  async execution_recovery_ready(deps) {
+    if (typeof deps.probeTableReadable !== 'function') return false
+    const probe = await deps.probeTableReadable(STEP6_RECOVERY_TABLES.intent)
+    if (!probe || probe.readable !== true) return false
+    if (!PROJECT_WRITE_PURPOSES.includes('recovery_verify')) return false
+    const store = deps.recoveryStore
+    if (!store || !RECOVERY_STORE_METHODS.every((method) => typeof store[method] === 'function')) return false
+    if (deps.pullBatchEnabled === true) {
+      const ledger = deps.pullBatchStore
+      if (!ledger || typeof ledger.readBatchLink !== 'function' || typeof ledger.batchWithin !== 'function') return false
+    }
+    return true
+  },
+  async no_unacknowledged_inactive_root_remnant(deps) {
+    if (!nonEmptyString(deps.tenantId) || !nonEmptyString(deps.projectNo) || !nonEmptyString(deps.sheetId)) return false
+    const rows = await deps.projectRowsOnce()
+    if (!Array.isArray(rows)) return false
+    const handles = censusOfRows(rows, { tenantId: deps.tenantId, projectNo: deps.projectNo }).private.inactiveRootRemnantComponentHandles
+    if (!Array.isArray(handles)) return false
+    // EVERY evaluation reads the ledger, remnants or not: positive evidence that migration 107 is there.
+    const store = deps.componentRulingStore
+    if (!store || typeof store.listActiveRulings !== 'function') return false
+    const rulings = await store.listActiveRulings({ tenantId: deps.tenantId, sheetId: deps.sheetId, projectNo: deps.projectNo })
+    if (!Array.isArray(rulings)) return false
+    return unacknowledgedRemnantHandles(handles, rulings).length === 0
+  },
+  tenant_claim_required(deps) {
+    // Positive evidence only: the route's own reader answered exactly true. Absent, a function, a string — all false.
+    return deps.tenantClaimRequired === true
+  },
+  async no_open_sheet_repair_run(deps) {
+    return (await readNoOpenSheetRepairRun(deps)) === true
+  },
   continuation_support_version() {
     const version = continuationSupport.CONTINUATION_SUPPORT_VERSION
     return Number.isInteger(version) && version >= REQUIRED_CONTINUATION_SUPPORT_VERSION
@@ -348,14 +470,47 @@ const CHECKS = Object.freeze({
  *   row, sheetId, objectId, projectId, projectNo, tenantId, action, target, recordsApi, provisioning,
  *   assertTargetSheetHoldsNoForeignActiveRows, readExistingStockPreparationRows, lock, writeScope,
  *   countOpenLargeJobs, probeTableReadable, specReadPlanSlotDeclaration, packInstallStore,
- *   customerPackDeclaration, collectGenericWriterTargets
+ *   customerPackDeclaration, collectGenericWriterTargets, readPullBatchStatus, pullBatchBand,
+ *   recoveryStore, pullBatchEnabled, pullBatchStore (step 6a-2), componentRulingStore (step 6d-1b),
+ *   tenantClaimRequired (v6: the boolean answer of http-routes' stockPreparationTenantClaimRequired, read per request),
+ *   sheetRepairStore (v7: the sheet-repair ledger, migration 108)
  */
 async function evaluatePilotReadiness(deps = {}) {
   const checks = []
+  // 批次标识 BI-1b: ONE pull-batch status per evaluation (memoized; a throw is `ok: false` for each of the six).
+  let pullBatchStatus = null
+  // Step 6d-1b: ONE project-scoped read per evaluation, shared by O-6 and the v5 remnant check (the planner's own read:
+  // same page bounds, past them it throws ⇒ both false).
+  let projectRows = null
+  const evaluationDeps = {
+    ...deps,
+    projectRowsOnce: () => {
+      if (!projectRows) {
+        projectRows = Promise.resolve().then(() => {
+          if (typeof deps.readExistingStockPreparationRows !== 'function' || !deps.recordsApi || !deps.target || !nonEmptyString(deps.projectNo)) {
+            throw new Error('project rows read not wired')
+          }
+          // 批次标识 BI-1b (design §4.4): the server-held band, so a band-bearing sheet reads exactly like a band-less one.
+          return deps.readExistingStockPreparationRows(deps.recordsApi, deps.target, deps.projectNo, ...(deps.pullBatchBand ? [{ pullBatchBand: deps.pullBatchBand }] : []))
+        })
+        // The shared promise is awaited inside each check's try; this keeps an early rejection from being unhandled.
+        projectRows.catch(() => {})
+      }
+      return projectRows
+    },
+    pullBatchStatusOnce: () => {
+      if (!pullBatchStatus) {
+        pullBatchStatus = typeof deps.readPullBatchStatus === 'function'
+          ? Promise.resolve().then(() => deps.readPullBatchStatus())
+          : Promise.reject(new Error('pull-batch status not wired'))
+      }
+      return pullBatchStatus
+    },
+  }
   for (const id of PILOT_READINESS_CHECK_IDS) {
     let ok = false
     try {
-      ok = (await CHECKS[id](deps)) === true
+      ok = (await CHECKS[id](evaluationDeps)) === true
     } catch (error) {
       ok = false
     }
@@ -377,8 +532,10 @@ module.exports = {
   SPEC_READ_PLAN_SLOT_NOT_APPLICABLE,
   CUSTOMER_PACK_NOT_APPLICABLE,
   STEP4_STORE_TABLES,
+  STEP6_RECOVERY_TABLES,
   collectGenericWriterTargets,
   evaluatePilotReadiness,
+  readNoOpenSheetRepairRun,
   __internals: {
     countTwoCopyComponents,
     readPackColumnFacts,

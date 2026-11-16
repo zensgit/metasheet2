@@ -141,7 +141,9 @@ test.describe('Multitable automation send_email smoke', () => {
 
     // Real event chain: creating a record fires record.created → automation
     // executor enqueues → NotificationService.send → EmailNotificationChannel
-    // mock returns { status: 'sent' }. We do NOT call the /test endpoint.
+    // in mock mode returns { status: 'simulated' } (no transport call), which
+    // the executor records as a SKIPPED step / execution — never success.
+    // We do NOT call the /test endpoint.
     const created = await createRecord(client, sheet.id, {
       [title.id]: 'Smoke send_email task',
       [owner.id]: 'Alice',
@@ -150,13 +152,15 @@ test.describe('Multitable automation send_email smoke', () => {
 
     const execution = await pollForFirstExecution(request, token, sheet.id, rule!.id)
 
-    expect(execution.status).toBe('success')
+    expect(execution.status).toBe('skipped')
     expect(Array.isArray(execution.steps)).toBe(true)
     const step = execution.steps?.[0]
     expect(step?.actionType).toBe('send_email')
-    expect(step?.status).toBe('success')
+    expect(step?.status).toBe('skipped')
     expect(step?.output?.recipientCount).toBe(recipients.length)
-    expect(step?.output?.notificationStatus).toBe('sent')
+    expect(step?.output?.notificationStatus).toBe('simulated')
+    expect(step?.output?.outcome).toBe('not_sent')
+    expect(step?.output?.reason).toBe('email_transport_simulated')
   })
 
   test('rejects send_email rule create when recipients is missing (VALIDATION_ERROR)', async ({ request }) => {
