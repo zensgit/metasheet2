@@ -146,3 +146,43 @@ test('template envelope: v1/v2 rules stay formatVersion 1; v3 rules need formatV
     assert.throws(() => parseYidaRuleTemplate(withNumber.replace('"value": 0.25', `"value": ${spelling}`)), code('TEXT'), spelling)
   }
 })
+
+// R-71 ⑦.3 decision A (PR-0): slot 1 seals its key definition at L4 for good, and a draft
+// is accepted only for a target whose sealed key definition is identical. The runbook makes
+// the slot-1 L4 draft use the v2 material template's seven-key layout; this pins that the
+// v2 material template and the v3 material fixture define the same key, so that slot can
+// later take v3 material drafts.
+const V2_MATERIAL = path.join(__dirname, '..', '..', '..', 'docs', 'development', 'takeover-beiliao-20260821',
+  'yida-legacy-templates', 'material.json')
+const SEVEN_KEY_TARGETS = ['project', 'drawingNo', 'partName', 'specification', 'materialGrade', 'versionNo', 'parentDrawingNo']
+const NULLABLE_KEY_TARGETS = ['specification', 'parentDrawingNo']
+
+test('the v2 material template and the v3 material fixture define the same seven-key business key', async () => {
+  const { createYidaTransformExample } = await plannerPromise
+  const { parseYidaRuleTemplate } = await templatePromise
+  const { compileYidaDraft, compileYidaLocalDraft } = await draftPromise
+  const v2 = parseYidaRuleTemplate(fs.readFileSync(V2_MATERIAL, 'utf8')).rules
+  const v3 = parseYidaRuleTemplate(readFixture()).rules
+  assert.equal(v2.version, 2)
+  assert.equal(v3.version, 3)
+  // v2 binds the key to sources; resolve each through its fieldMap entry to the target it writes.
+  const targetOf = (source) => {
+    const entries = v2.fieldMap.filter((entry) => entry.source === source)
+    assert.equal(entries.length, 1, source)
+    return entries[0].target
+  }
+  assert.deepEqual(v2.businessKey.map(targetOf), SEVEN_KEY_TARGETS)
+  assert.deepEqual(v3.businessKey, SEVEN_KEY_TARGETS)
+  assert.deepEqual(v2.emptyKeyFields.map(targetOf), NULLABLE_KEY_TARGETS)
+  assert.deepEqual(v3.emptyKeyFields, NULLABLE_KEY_TARGETS)
+  // The sealed slot compares the key definition digest; both must compile to the same one.
+  const example = createYidaTransformExample()
+  const input = (rules) => ({ config: { ...rules, target: TARGET }, rowsText: example.text, allocation: { mode: 'original' } })
+  const before = compileYidaDraft(input(v2))
+  const after = compileYidaLocalDraft(input(v3))
+  assert.deepEqual(after.keyDefinition, before.keyDefinition)
+  assert.equal(after.keyDefinitionDigest, before.keyDefinitionDigest)
+  assert.deepEqual(after.keyDefinition.fields.filter((field) => field.empty).map((field) => field.target).sort(),
+    [...NULLABLE_KEY_TARGETS].sort())
+  assert.deepEqual(after.rowSpecs.map((spec) => spec.businessKeyDigest), before.rowSpecs.map((spec) => spec.businessKeyDigest))
+})
