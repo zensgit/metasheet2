@@ -8,18 +8,24 @@
  * expressions; no view or materialized view is defined over an input table; the foreign keys whose
  * child is an input table are a pinned list, each with its update action, delete action and
  * deferrability; no table inherits from an input table or is a partition of one, so a read of an
- * input table returns its own rows only; and each of the five subject-version triggers runs the
- * pinned function, is enabled in the ordinary `O` posture, and that function's body (carriage
- * returns removed) has a pinned sha256, so an edit of the body that names no input table is still
- * seen. Matching and hashing are done in TypeScript on catalog text; the database only returns
- * names, definitions, function bodies, default expressions and constraint attributes.
+ * input table returns its own rows only; and each of the five subject-version triggers keeps its
+ * pinned definition as the catalog stores it (timing, events and row level from `tgtype`, the
+ * arguments from `tgargs`, the `UPDATE OF` column list, the `WHEN` clause, constraint-trigger
+ * deferral and transition tables), runs the pinned function, is enabled in the ordinary `O`
+ * posture, and that function's body (carriage returns removed) has a pinned sha256, so an edit of
+ * the body that names no input table is still seen, and so is a trigger dropped and re-created
+ * under its own name on the same function with another definition. Matching and hashing are done
+ * in TypeScript on catalog text; the database only returns names, definitions, function bodies,
+ * default expressions, trigger and constraint attributes.
  *
  * Each assertion has a positive control created inside a transaction that is rolled back, and the
  * function-body assertion has negative controls for a trigger function that only takes a lease and
  * one that only touches `updated_at`. The foreign-key list has a second control: an existing
  * constraint rebuilt under the same name and columns with another update action. The
- * subject-version pin has a negative control: the same body re-created with CRLF line ends keeps
- * the pinned digest.
+ * subject-version pin has controls for a trigger rebuilt under its own name on the same function
+ * with other events, an extra argument, AFTER timing, statement level, an `UPDATE OF` list, a
+ * `WHEN` clause, as a deferred constraint trigger and with a new or an old transition table; and a
+ * negative control: the same body re-created with CRLF line ends keeps the pinned digest.
  */
 import { createHash } from 'node:crypto'
 import { Pool as PgPool } from 'pg'
@@ -38,16 +44,28 @@ const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const INPUT_TABLES: readonly string[] = PRIVILEGE_GRANT_SOURCE_TABLES
 
 /**
- * The five D21 subject-version triggers (`zzzz20261106110500_add_authorization_version_rows`) on
- * input tables, as (table, trigger) pairs. Assertion 10 pins their function, enabled state and the
- * function's body digest.
+ * `pg_trigger.tgtype` bits (PostgreSQL `catalog/pg_trigger.h`): ROW 1, BEFORE 2, INSERT 4, DELETE 8,
+ * UPDATE 16, TRUNCATE 32, INSTEAD 64. AFTER is BEFORE and INSTEAD both clear; statement level is ROW
+ * clear.
  */
-const SUBJECT_VERSION_TRIGGERS: ReadonlyArray<readonly [string, string]> = [
-  ['user_namespace_admissions', 'trg_user_namespace_admissions_zz_authz_subject_version'],
-  ['user_permissions', 'trg_user_permissions_zz_authz_subject_version'],
-  ['user_roles', 'trg_user_roles_zz_authz_subject_version'],
-  ['users', 'trg_users_zz_authz_subject_version_lifecycle'],
-  ['users', 'trg_users_zz_authz_subject_version_update'],
+const TG_ROW_BEFORE_INSERT_UPDATE_DELETE = 1 + 2 + 4 + 8 + 16 // 31
+const TG_ROW_BEFORE_INSERT_DELETE = 1 + 2 + 4 + 8 // 15
+const TG_ROW_BEFORE_UPDATE = 1 + 2 + 16 // 19
+
+/**
+ * The five D21 subject-version triggers (`zzzz20261106110500_add_authorization_version_rows`) on
+ * input tables, each with the definition its `CREATE TRIGGER` gives it: the raw `tgtype` and the
+ * argument list. The values are written out here and not read from the protocol module, so the pin
+ * does not move with the code it guards. Assertion 10 pins these, the parts of the definition that
+ * are empty for all five (see `SUBJECT_VERSION_TRIGGER_EMPTY_PARTS`), their function, enabled state
+ * and the function's body digest.
+ */
+const SUBJECT_VERSION_TRIGGERS: ReadonlyArray<Readonly<{ table: string; trigger: string; type: number; args: readonly string[] }>> = [
+  { table: 'user_namespace_admissions', trigger: 'trg_user_namespace_admissions_zz_authz_subject_version', type: TG_ROW_BEFORE_INSERT_UPDATE_DELETE, args: ['user_id'] },
+  { table: 'user_permissions', trigger: 'trg_user_permissions_zz_authz_subject_version', type: TG_ROW_BEFORE_INSERT_UPDATE_DELETE, args: ['user_id'] },
+  { table: 'user_roles', trigger: 'trg_user_roles_zz_authz_subject_version', type: TG_ROW_BEFORE_INSERT_UPDATE_DELETE, args: ['user_id'] },
+  { table: 'users', trigger: 'trg_users_zz_authz_subject_version_lifecycle', type: TG_ROW_BEFORE_INSERT_DELETE, args: ['id'] },
+  { table: 'users', trigger: 'trg_users_zz_authz_subject_version_update', type: TG_ROW_BEFORE_UPDATE, args: ['id', 'role,is_active,activation_status,permissions,is_admin'] },
 ]
 
 /** (table, trigger) pairs expected on the input tables: the five recovery-lease triggers, then the five subject-version triggers. */
@@ -57,8 +75,15 @@ const EXPECTED_TRIGGERS: ReadonlyArray<readonly [string, string]> = [
   ['user_roles', 'trg_user_roles_recovery_authority_lock'],
   ['user_permissions', 'trg_user_permissions_recovery_authority_lock'],
   ['role_permissions', 'trg_role_permissions_recovery_authority_lock'],
-  ...SUBJECT_VERSION_TRIGGERS,
+  ...SUBJECT_VERSION_TRIGGERS.map(({ table, trigger }) => [table, trigger] as const),
 ]
+
+/**
+ * The parts of a subject-version trigger's definition that are empty for all five: no `UPDATE OF`
+ * column list (the watched columns are an argument, see the migration's docblock), no `WHEN` clause,
+ * not a constraint trigger, not deferrable, no transition tables.
+ */
+const SUBJECT_VERSION_TRIGGER_EMPTY_PARTS = { updateOf: [] as string[], when: null, constraint: false, deferrable: false, initiallyDeferred: false, oldTable: null, newTable: null } as const
 
 /** The function every subject-version trigger runs, as `schema.name`, resolved through the trigger's own function oid. */
 const SUBJECT_VERSION_FUNCTION = 'public.metasheet_authz_bump_subject_authorization_version'
@@ -296,16 +321,52 @@ function bodyDigest(body: string): string {
   return createHash('sha256').update(body.replace(/\r/g, ''), 'utf8').digest('hex')
 }
 
-type TriggerPin = Readonly<{ function: string; enabled: string; bodySha256: string }>
+type TriggerPin = Readonly<{
+  /** Raw `tgtype`: timing, events and row or statement level. */
+  type: number
+  /** `tgargs` split at its NUL terminators, in order. */
+  args: readonly string[]
+  /** Column names of `tgattr` (`UPDATE OF`), in the stored order. */
+  updateOf: readonly string[]
+  /** `tgqual` as text (the stored `WHEN` expression tree), or null. */
+  when: string | null
+  /** `tgconstraint` is set: a `CREATE CONSTRAINT TRIGGER`. */
+  constraint: boolean
+  deferrable: boolean
+  initiallyDeferred: boolean
+  /** Transition-table names (`REFERENCING OLD/NEW TABLE`), or null. */
+  oldTable: string | null
+  newTable: string | null
+  function: string
+  enabled: string
+  bodySha256: string
+}>
+
+/** The arguments stored in `tgargs`: each argument is followed by one NUL byte. */
+function triggerArgs(raw: unknown): string[] {
+  const text = Buffer.isBuffer(raw) ? raw.toString('utf8') : String(raw ?? '')
+  const parts = text.split('\0')
+  // The text after the last terminator is empty; anything else there is kept and so differs from the pin.
+  if (parts[parts.length - 1] === '') parts.pop()
+  return parts
+}
 
 /**
- * For each pinned subject-version pair, in order: the function the trigger runs (through its own
- * `tgfoid`, as `schema.name`), its `tgenabled` code and the digest of that function's body; or
- * `missing` when no such trigger is on that table.
+ * For each pinned subject-version trigger, in order: its definition read from the raw `pg_trigger`
+ * fields, the function it runs (through its own `tgfoid`, as `schema.name`), its `tgenabled` code
+ * and the digest of that function's body; or `missing` when no such trigger is on that table.
  */
 async function subjectVersionTriggerPins(run: Runner): Promise<Array<readonly [string, string, TriggerPin | 'missing']>> {
   const result = await run(
     `SELECT c.relname AS table_name, t.tgname AS trigger_name, t.tgenabled AS enabled,
+            t.tgtype::int AS type, t.tgargs AS args,
+            ARRAY(SELECT a.attname::text
+                    FROM unnest(t.tgattr::int2[]) WITH ORDINALITY AS u(attnum, ord)
+                    LEFT JOIN pg_attribute a ON a.attrelid = t.tgrelid AND a.attnum = u.attnum
+                   ORDER BY u.ord) AS update_of,
+            t.tgqual::text AS when_tree, t.tgconstraint <> 0 AS is_constraint,
+            t.tgdeferrable AS deferrable, t.tginitdeferred AS initially_deferred,
+            t.tgoldtable::text AS old_table, t.tgnewtable::text AS new_table,
             fn.nspname AS function_schema, p.proname AS function_name, p.prosrc AS body
        FROM pg_trigger t
        JOIN pg_class c ON c.oid = t.tgrelid
@@ -315,17 +376,31 @@ async function subjectVersionTriggerPins(run: Runner): Promise<Array<readonly [s
       WHERE NOT t.tgisinternal AND n.nspname = 'public' AND c.relname = ANY($1::text[])`,
     [INPUT_TABLES],
   )
-  return SUBJECT_VERSION_TRIGGERS.map(([table, trigger]) => {
+  return SUBJECT_VERSION_TRIGGERS.map(({ table, trigger }) => {
     const row = result.rows.find((candidate) => String(candidate.table_name) === table && String(candidate.trigger_name) === trigger)
     if (!row) return [table, trigger, 'missing'] as const
-    return [table, trigger, { function: `${row.function_schema}.${row.function_name}`, enabled: String(row.enabled), bodySha256: bodyDigest(String(row.body ?? '')) }] as const
+    const pin: TriggerPin = {
+      type: Number(row.type),
+      args: triggerArgs(row.args),
+      updateOf: (row.update_of as Array<string | null>).map((column) => String(column)),
+      when: row.when_tree === null ? null : String(row.when_tree),
+      constraint: row.is_constraint === true,
+      deferrable: row.deferrable === true,
+      initiallyDeferred: row.initially_deferred === true,
+      oldTable: row.old_table === null ? null : String(row.old_table),
+      newTable: row.new_table === null ? null : String(row.new_table),
+      function: `${row.function_schema}.${row.function_name}`,
+      enabled: String(row.enabled),
+      bodySha256: bodyDigest(String(row.body ?? '')),
+    }
+    return [table, trigger, pin] as const
   })
 }
 
-const PINNED_SUBJECT_VERSION_TRIGGERS: Array<readonly [string, string, TriggerPin | 'missing']> = SUBJECT_VERSION_TRIGGERS.map(([table, trigger]) => [
+const PINNED_SUBJECT_VERSION_TRIGGERS: Array<readonly [string, string, TriggerPin | 'missing']> = SUBJECT_VERSION_TRIGGERS.map(({ table, trigger, type, args }) => [
   table,
   trigger,
-  { function: SUBJECT_VERSION_FUNCTION, enabled: 'O', bodySha256: SUBJECT_VERSION_FUNCTION_BODY_SHA256 },
+  { type, args, ...SUBJECT_VERSION_TRIGGER_EMPTY_PARTS, function: SUBJECT_VERSION_FUNCTION, enabled: 'O', bodySha256: SUBJECT_VERSION_FUNCTION_BODY_SHA256 },
 ] as const)
 
 describeIfDatabase('authorization-input census (real PostgreSQL)', () => {
@@ -415,7 +490,7 @@ describeIfDatabase('authorization-input census (real PostgreSQL)', () => {
     expect(await childrenOfInputs(run)).toEqual([...EXPECTED_CHILDREN_OF_INPUTS])
   })
 
-  it('10. each subject-version trigger runs the pinned function, is enabled (O), and that function body (CR removed) has the pinned sha256', async () => {
+  it('10. each subject-version trigger has its pinned definition (tgtype, arguments, no UPDATE OF list, no WHEN, not a constraint trigger, no transition tables), runs the pinned function, is enabled (O), and that function body (CR removed) has the pinned sha256', async () => {
     expect(await subjectVersionTriggerPins(run)).toEqual(PINNED_SUBJECT_VERSION_TRIGGERS)
   })
 
@@ -601,6 +676,33 @@ describeIfDatabase('authorization-input census (real PostgreSQL)', () => {
         await client.query('DROP TRIGGER trg_user_permissions_zz_authz_subject_version ON public.user_permissions')
         expect(await subjectVersionTriggerPins(runner)).toEqual(pinnedWith('trg_user_permissions_zz_authz_subject_version', 'missing'))
       })
+      expect(await subjectVersionTriggerPins(run)).toEqual(PINNED_SUBJECT_VERSION_TRIGGERS)
+    })
+
+    it('a subject-version trigger rebuilt under its own name on the same function with another definition is detected by assertion 10 only: the trigger set, function, enabled state and body digest are unchanged', async () => {
+      const fn = SUBJECT_VERSION_FUNCTION
+      const watched = "'id', 'role,is_active,activation_status,permissions,is_admin'"
+      const rebuilds: ReadonlyArray<readonly [label: string, table: string, trigger: string, create: string, change: Partial<TriggerPin>]> = [
+        ['events', 'user_roles', 'trg_user_roles_zz_authz_subject_version', `CREATE TRIGGER trg_user_roles_zz_authz_subject_version BEFORE INSERT OR DELETE ON public.user_roles FOR EACH ROW EXECUTE FUNCTION ${fn}('user_id')`, { type: TG_ROW_BEFORE_INSERT_DELETE }],
+        ['extra argument', 'user_roles', 'trg_user_roles_zz_authz_subject_version', `CREATE TRIGGER trg_user_roles_zz_authz_subject_version BEFORE INSERT OR UPDATE OR DELETE ON public.user_roles FOR EACH ROW EXECUTE FUNCTION ${fn}('user_id', 'x')`, { args: ['user_id', 'x'] }],
+        ['AFTER', 'user_roles', 'trg_user_roles_zz_authz_subject_version', `CREATE TRIGGER trg_user_roles_zz_authz_subject_version AFTER INSERT OR UPDATE OR DELETE ON public.user_roles FOR EACH ROW EXECUTE FUNCTION ${fn}('user_id')`, { type: TG_ROW_BEFORE_INSERT_UPDATE_DELETE - 2 }],
+        ['statement level', 'user_roles', 'trg_user_roles_zz_authz_subject_version', `CREATE TRIGGER trg_user_roles_zz_authz_subject_version BEFORE INSERT OR UPDATE OR DELETE ON public.user_roles FOR EACH STATEMENT EXECUTE FUNCTION ${fn}('user_id')`, { type: TG_ROW_BEFORE_INSERT_UPDATE_DELETE - 1 }],
+        ['UPDATE OF', 'users', 'trg_users_zz_authz_subject_version_update', `CREATE TRIGGER trg_users_zz_authz_subject_version_update BEFORE UPDATE OF role ON public.users FOR EACH ROW EXECUTE FUNCTION ${fn}(${watched})`, { updateOf: ['role'] }],
+        ['WHEN', 'users', 'trg_users_zz_authz_subject_version_update', `CREATE TRIGGER trg_users_zz_authz_subject_version_update BEFORE UPDATE ON public.users FOR EACH ROW WHEN (OLD.role IS DISTINCT FROM NEW.role) EXECUTE FUNCTION ${fn}(${watched})`, { when: expect.any(String) as unknown as string }],
+        ['deferred constraint trigger', 'user_permissions', 'trg_user_permissions_zz_authz_subject_version', `CREATE CONSTRAINT TRIGGER trg_user_permissions_zz_authz_subject_version AFTER INSERT OR UPDATE OR DELETE ON public.user_permissions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION ${fn}('user_id')`, { type: TG_ROW_BEFORE_INSERT_UPDATE_DELETE - 2, constraint: true, deferrable: true, initiallyDeferred: true }],
+        ['transition table', 'user_namespace_admissions', 'trg_user_namespace_admissions_zz_authz_subject_version', `CREATE TRIGGER trg_user_namespace_admissions_zz_authz_subject_version AFTER INSERT ON public.user_namespace_admissions REFERENCING NEW TABLE AS ais1_census_new FOR EACH ROW EXECUTE FUNCTION ${fn}('user_id')`, { type: 1 + 4, newTable: 'ais1_census_new' }],
+        ['old transition table', 'user_roles', 'trg_user_roles_zz_authz_subject_version', `CREATE TRIGGER trg_user_roles_zz_authz_subject_version AFTER DELETE ON public.user_roles REFERENCING OLD TABLE AS ais1_census_old FOR EACH ROW EXECUTE FUNCTION ${fn}('user_id')`, { type: 1 + 8, oldTable: 'ais1_census_old' }],
+      ]
+      for (const [label, table, trigger, create, change] of rebuilds) {
+        await inRolledBackTransaction(async (client, runner) => {
+          await client.query(`DROP TRIGGER ${trigger} ON public.${table}`)
+          await client.query(create)
+          expect((await triggersOnInputs(runner)).map((t) => [t.table, t.trigger] as const).sort(byPair), label).toEqual([...EXPECTED_TRIGGERS].sort(byPair))
+          const pins = await subjectVersionTriggerPins(runner)
+          expect(pins, label).toEqual(pinnedWith(trigger, change))
+          expect(pins, label).not.toEqual(PINNED_SUBJECT_VERSION_TRIGGERS)
+        })
+      }
       expect(await subjectVersionTriggerPins(run)).toEqual(PINNED_SUBJECT_VERSION_TRIGGERS)
     })
 
