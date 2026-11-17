@@ -81,7 +81,7 @@ const LIB = path.join(__dirname, '..', 'lib')
 const R = require(path.join(LIB, 'stock-preparation-sheet-repair.cjs'))
 const { createStockPreparationSheetRepairStore } = require(path.join(LIB, 'stock-preparation-sheet-repair-store.cjs'))
 const lockLib = require(path.join(LIB, 'stock-preparation-project-write-lock.cjs'))
-const { HUMAN_PRESERVED_FIELD_IDS } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
+const { HUMAN_PRESERVED_FIELD_IDS, MACHINE_WRITEBACK_FIELD_IDS } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
 const { __internals: auditInternals } = require(path.join(LIB, 'stock-preparation-audit-store.cjs'))
 const { assertHostFencedWriteSupported } = require(path.join(LIB, 'stock-preparation-apply-writer.cjs'))
 const { CHANGE_PLAN_UPDATE_TYPE, EXISTING_ROW_RECORD_REF } = require(path.join(LIB, 'stock-preparation-conflict-planner.cjs'))
@@ -2135,6 +2135,7 @@ test('FR-01 the fills report: the K2 class of every pair, per-column states, unp
     shape: 'two_copy',
     counts: { nestedCopies: 1, pairs: 4, pairsWithFills: 4, k2Carryable: 1, reenterExtHuman: 1, reenterConflict: 1, nothingToCarry: 1, unpairedOldRows: 1, unpairedOldRowsWithFills: 1 },
     problems: ['path_only_old'],
+    machineWriteback: { onActiveOldRows: 0, onInactiveOldRows: 0 },
   }])
   const detail = R.buildFillsReport({ scope: SCOPE, rows: sheet.rows, humanFieldIds: HUMAN_PRESERVED_FIELD_IDS, extHumanFieldIds: [EXT], componentHandle: HANDLE })
   assert.deepEqual([detail.found, detail.shape, detail.nextCursor, detail.pairs.length], [true, 'two_copy', null, 4])
@@ -2170,6 +2171,109 @@ test('FR-01 the fills report: the K2 class of every pair, per-column states, unp
   assert.deepEqual([read.humanColumns, read.counts.reenterExtHuman], [{ template: HUMAN_PRESERVED_FIELD_IDS.length, pack: 1 }, 1])
   assert.deepEqual(audits.map((entry) => [entry.mode, entry.detail.operation, entry.detail.listing, entry.detail.pairs, entry.detail.pairsWithFills, entry.detail.pageSize]), [['sheet_fills_report_read', 'sheet_fills_report', false, 4, 4, 4]])
   await rejects(R.readFillsReport({ scope: SCOPE, template: { fields: [] }, readRows: async () => sheet.rows, auditRead: async () => { throw Object.assign(new Error('audit down'), { status: 503, code: 'AUDIT_STORE_FAILED' }) } }, {}), { status: 503, code: 'AUDIT_STORE_FAILED' })
+})
+
+// ── FR-02 ────────────────────────────────────────────────────────────────────────────────────────────────
+
+test('FR-02 (owner ruling 2026-11-17) the fills report counts filled machine write-back cells on the old subtree — active and inactive apart, counts only, never in a pair, a class or a human count', async () => {
+  const DATE = '2026-11-29'
+  const MACHINE = MACHINE_WRITEBACK_FIELD_IDS[0]
+  const cells = {
+    // old root: a human fill the copy lacks, no date
+    rec_old_1: { notes: 'SENTINEL-OLD-NOTE' },
+    // the copy root holds a date: a copy row is never counted
+    rec_copy_1: { [MACHINE]: DATE },
+    // old C-1: a human conflict AND a date
+    rec_old_2: { notes: 'SENTINEL-A', [MACHINE]: DATE },
+    rec_copy_2: { notes: 'SENTINEL-B' },
+    // old G-1: the date is its ONLY filled cell (the copy has none)
+    rec_old_4: { [MACHINE]: DATE },
+  }
+  // A copy keeps the row's record ref (an own Symbol key); only the machine cells go.
+  const strip = (row) => {
+    const out = { ...row }
+    for (const fieldId of MACHINE_WRITEBACK_FIELD_IDS) delete out[fieldId]
+    return out
+  }
+  const dated = () => {
+    const sheet = kit.doubledSheet({ mutate: (spec) => ({ ...spec, cells: cells[spec.id] || {} }) })
+    // An inactive old row (a child that left the BOM long ago) whose only filled cell is a date: where a
+    // `written_inactive` write-back lands.
+    sheet.rows.push(kit.sheetRow({ tokens: [kit.OLD_ROOT, 'X-9'], id: 'rec_old_orphan', active: false, decision: 'inactive', summary: '{"type":"missing_from_plm"}', cells: { [MACHINE]: DATE } }))
+    return sheet
+  }
+  const sheet = dated()
+  const plain = sheet.rows.map(strip)
+  const summary = R.buildFillsReport({ scope: SCOPE, rows: sheet.rows, humanFieldIds: HUMAN_PRESERVED_FIELD_IDS })
+  const plainSummary = R.buildFillsReport({ scope: SCOPE, rows: plain, humanFieldIds: HUMAN_PRESERVED_FIELD_IDS })
+  assert.deepEqual(summary.components, [{
+    componentHandle: HANDLE,
+    shape: 'two_copy',
+    counts: { nestedCopies: 1, pairs: 4, pairsWithFills: 2, k2Carryable: 1, reenterExtHuman: 0, reenterConflict: 1, nothingToCarry: 2, unpairedOldRows: 1, unpairedOldRowsWithFills: 0 },
+    problems: ['path_only_old'],
+    machineWriteback: { onActiveOldRows: 2, onInactiveOldRows: 1 },
+  }])
+  // Every human count, class and problem is what the same rows without a date give: the date is seen nowhere else.
+  assert.deepEqual(summary.components[0].counts, plainSummary.components[0].counts)
+  assert.deepEqual(plainSummary.components[0].machineWriteback, { onActiveOldRows: 0, onInactiveOldRows: 0 })
+  assert.deepEqual([summary.componentHandle, summary.total, summary.humanColumns], [plainSummary.componentHandle, plainSummary.total, plainSummary.humanColumns])
+  const detail = R.buildFillsReport({ scope: SCOPE, rows: sheet.rows, componentHandle: HANDLE })
+  const plainDetail = R.buildFillsReport({ scope: SCOPE, rows: plain, componentHandle: HANDLE })
+  assert.deepEqual(Object.keys(detail), ['componentHandle', 'found', 'shape', 'humanColumns', 'counts', 'problems', 'pairs', 'nextCursor', 'machineWriteback'])
+  assert.deepEqual(detail.machineWriteback, { onActiveOldRows: 2, onInactiveOldRows: 1 })
+  assert.deepEqual([detail.counts, detail.pairs, detail.nextCursor], [plainDetail.counts, plainDetail.pairs, plainDetail.nextCursor])
+  // The date-only pair is not a pair with fills (its class stays nothing_to_carry, counted above); no pair names the column.
+  assert.deepEqual(detail.pairs.map((pair) => pair.oldRecordId), ['rec_old_1', 'rec_old_2'])
+  for (const pair of detail.pairs) assert.equal(Object.keys(pair.fields).some((fieldId) => MACHINE_WRITEBACK_FIELD_IDS.includes(fieldId)), false)
+  // The found: false answer is unchanged.
+  assert.deepEqual(R.buildFillsReport({ scope: SCOPE, rows: sheet.rows, componentHandle: 'f'.repeat(24) }), { componentHandle: 'f'.repeat(24), found: false, humanColumns: { template: HUMAN_PRESERVED_FIELD_IDS.length, pack: 0 } })
+  // D2 (the old subtree already inactive): the date sits on the retired side.
+  const remnant = kit.doubledSheet({ mutate: (spec) => (spec.role === 'old' ? { ...spec, active: false, decision: 'inactive', summary: '{"type":"missing_from_plm"}', cells: spec.id === 'rec_old_2' ? { [MACHINE]: DATE } : {} } : spec) })
+  const d2 = R.buildFillsReport({ scope: SCOPE, rows: remnant.rows })
+  assert.deepEqual([d2.components[0].shape, d2.components[0].machineWriteback, d2.components[0].counts.pairsWithFills], ['inactive_root_remnant', { onActiveOldRows: 0, onInactiveOldRows: 1 }, 0])
+  // An ambiguous old root: nothing is counted; the problem says why.
+  const twoRoots = dated()
+  twoRoots.rows.push(kit.sheetRow({ tokens: [kit.OLD_ROOT], id: 'rec_old_twin', cells: { [MACHINE]: DATE } }))
+  const ambiguous = R.buildFillsReport({ scope: SCOPE, rows: twoRoots.rows })
+  assert.deepEqual([ambiguous.components[0].machineWriteback, ambiguous.components[0].problems.includes('old_root_ambiguous')], [{ onActiveOldRows: 0, onInactiveOldRows: 0 }, true])
+  // A blank (whitespace-only / null) cell is not a date.
+  const blanks = kit.doubledSheet({ mutate: (spec) => ({ ...spec, cells: spec.id === 'rec_old_2' ? { [MACHINE]: '  ' } : (spec.id === 'rec_old_3' ? { [MACHINE]: null } : {}) }) })
+  assert.deepEqual(R.buildFillsReport({ scope: SCOPE, rows: blanks.rows }).components[0].machineWriteback, { onActiveOldRows: 0, onInactiveOldRows: 0 })
+  // Drift guard: the default IS the template's machine list, every id of it counts, and none of it is human.
+  assert.equal(MACHINE_WRITEBACK_FIELD_IDS.some((fieldId) => HUMAN_PRESERVED_FIELD_IDS.includes(fieldId)), false)
+  assert.deepEqual(R.buildFillsReport({ scope: SCOPE, rows: sheet.rows, machineFieldIds: MACHINE_WRITEBACK_FIELD_IDS }), summary)
+  for (const fieldId of MACHINE_WRITEBACK_FIELD_IDS) {
+    const one = kit.doubledSheet({ mutate: (spec) => ({ ...spec, cells: spec.id === 'rec_old_3' ? { [fieldId]: DATE } : {} }) })
+    assert.deepEqual(R.buildFillsReport({ scope: SCOPE, rows: one.rows }).components[0].machineWriteback, { onActiveOldRows: 1, onInactiveOldRows: 0 }, fieldId)
+  }
+  assert.deepEqual(R.buildFillsReport({ scope: SCOPE, rows: sheet.rows, machineFieldIds: [] }).components[0].machineWriteback, { onActiveOldRows: 0, onInactiveOldRows: 0 })
+  // A human (or pack) id passed as a machine id is dropped: it stays a human column and is never counted twice.
+  const EXT = 'ext_shopNote'
+  const overlap = R.buildFillsReport({ scope: SCOPE, rows: sheet.rows, extHumanFieldIds: [EXT], machineFieldIds: ['notes', EXT, ' ', MACHINE, MACHINE] })
+  assert.deepEqual(overlap.components[0].machineWriteback, { onActiveOldRows: 2, onInactiveOldRows: 1 })
+  // Values-free: the date is in no answer and no audit row; the audit carries the one count.
+  for (const text of [JSON.stringify(summary), JSON.stringify(detail), JSON.stringify(d2), JSON.stringify(ambiguous)]) {
+    assert.equal(text.includes(DATE), false, 'no date value')
+    assert.equal(text.includes('SENTINEL'), false, 'no cell value')
+    assert.equal(text.includes(MACHINE), false, 'no machine column id')
+  }
+  const audits = []
+  const deps = {
+    scope: SCOPE,
+    template: { fields: HUMAN_PRESERVED_FIELD_IDS.map((id) => ({ id, ownership: 'human_preserved' })) },
+    readRows: async () => sheet.rows,
+    auditRead: async (entry) => { auditInternals.assertValuesFreeDetail(entry.detail); audits.push(entry) },
+  }
+  const readListing = await R.readFillsReport(deps, {})
+  const readDetail = await R.readFillsReport(deps, { componentHandle: HANDLE })
+  const readMissing = await R.readFillsReport(deps, { componentHandle: 'f'.repeat(24) })
+  assert.deepEqual([readListing.components[0].machineWriteback, readDetail.machineWriteback, readMissing.machineWriteback], [{ onActiveOldRows: 2, onInactiveOldRows: 1 }, { onActiveOldRows: 2, onInactiveOldRows: 1 }, undefined])
+  assert.deepEqual(audits.map((entry) => [entry.detail.listing, entry.detail.machineWritebackCells]), [[true, 3], [false, 3], [false, 0]])
+  assert.equal(JSON.stringify(audits).includes(DATE), false, 'no date in an audit row')
+  // A listing over a sheet with no date counts 0.
+  audits.length = 0
+  await R.readFillsReport({ ...deps, readRows: async () => plain }, {})
+  assert.deepEqual(audits.map((entry) => entry.detail.machineWritebackCells), [0])
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-sheet-repair.test.cjs', tests)
