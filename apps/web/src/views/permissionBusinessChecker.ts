@@ -1,3 +1,6 @@
+import type { RouteLocationRaw } from 'vue-router'
+import { AppRouteNames } from '../router/types'
+
 export const BUSINESS_CHECK_ENDPOINT = '/api/permissions/v2/business-check'
 
 export const RESOURCE_ID_FIELDS = ['baseId', 'sheetId', 'viewId', 'recordId', 'fieldId'] as const
@@ -126,6 +129,26 @@ export function normalizeResourceId(value: string): string | null {
   if (trimmed.length < 1 || trimmed.length > 128) return null
   if (!RESOURCE_ID_PATTERN.test(trimmed)) return null
   return trimmed
+}
+
+// Named multitable route. The signed-in session follows the route guard.
+// The checked member and role are not part of this location.
+export function businessCheckMultitableLocation(resourceIds: ResourceIdInput): RouteLocationRaw | null {
+  const sheetId = normalizeResourceId(resourceIds.sheetId ?? '')
+  const viewId = normalizeResourceId(resourceIds.viewId ?? '')
+  if (!sheetId || !viewId) return null
+  const query: Record<string, string> = {}
+  const baseId = normalizeResourceId(resourceIds.baseId ?? '')
+  const recordId = normalizeResourceId(resourceIds.recordId ?? '')
+  const fieldId = normalizeResourceId(resourceIds.fieldId ?? '')
+  if (baseId) query.baseId = baseId
+  if (recordId) query.recordId = recordId
+  if (fieldId) query.fieldId = fieldId
+  return {
+    name: AppRouteNames.MULTITABLE,
+    params: { sheetId, viewId },
+    query,
+  }
 }
 
 export function businessCheckConditionKey(policyId: string, resourceIds: ResourceIdInput): string {

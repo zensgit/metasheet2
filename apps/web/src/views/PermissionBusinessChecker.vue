@@ -60,6 +60,14 @@
       </label>
       <p v-if="resourceIssue" class="permission-business__issue" data-testid="permission-business-id-issue">{{ resourceIssue }}</p>
     </div>
+    <RouterLink
+      v-if="router && multitableLocation"
+      class="permission-business__link"
+      data-testid="permission-business-multitable-link"
+      :to="multitableLocation"
+    >
+      在多维表打开
+    </RouterLink>
     <p
       v-if="view.phase !== 'idle'"
       data-testid="permission-business-result"
@@ -74,7 +82,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, inject, onUnmounted, reactive, ref, watch } from 'vue'
+import { RouterLink, routerKey } from 'vue-router'
 import { apiFetch } from '../utils/api'
 import {
   BUSINESS_CHECK_ENDPOINT,
@@ -82,6 +91,7 @@ import {
   RESOURCE_FIELD_LABELS,
   buildBusinessCheckRequest,
   businessCheckConditionKey,
+  businessCheckMultitableLocation,
   businessCheckStillCurrent,
   businessCheckTransportView,
   findBusinessCheckPolicy,
@@ -95,6 +105,7 @@ import {
 } from './permissionBusinessChecker'
 
 const props = defineProps<{ userId: string }>()
+const router = inject(routerKey, null)
 
 const policyId = ref('')
 const view = ref<BusinessCheckView>(idleBusinessCheckView())
@@ -125,6 +136,7 @@ const idInput = computed<ResourceIdInput>(() => ({
   fieldId: resourceIds.fieldId,
 }))
 const canSubmit = computed(() => buildBusinessCheckRequest(props.userId, policyId.value, idInput.value) !== null)
+const multitableLocation = computed(() => businessCheckMultitableLocation(idInput.value))
 const resourceIssue = computed(() => {
   const policy = selectedPolicy.value
   if (!policy || policy.kind !== 'resource') return ''
@@ -286,6 +298,12 @@ async function runBusinessCheck(): Promise<void> {
 .permission-business__hint,
 .permission-business__issue {
   color: #64748b;
+}
+
+.permission-business__link {
+  color: #1d4ed8;
+  font-weight: 600;
+  width: fit-content;
 }
 
 .permission-business__issue {
