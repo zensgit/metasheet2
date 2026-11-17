@@ -325,6 +325,7 @@ on:
       - 'packages/core-backend/tests/unit/yida-initialization-http-boundary.test.ts'
       - 'packages/core-backend/tests/unit/yida-initialization-runtime.test.ts'
       - 'packages/core-backend/tests/unit/yida-issue-confirm-writeback-migration.test.ts'
+      - 'packages/core-backend/tests/unit/yida-issue-confirm-writeback-wiring.test.ts'
       - 'packages/core-backend/tests/unit/yida-owner-http-approval-status.test.ts'
       - 'packages/core-backend/tests/unit/yida-owner-request-logging.test.ts'
       - 'packages/core-backend/tests/unit/yida-owner-runtime.test.ts'
