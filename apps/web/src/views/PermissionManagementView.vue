@@ -1563,7 +1563,7 @@ async function presentRecoveredOperation(): Promise<void> {
     return
   }
   const operationId = authorizationOperation.clientOperationId.value
-  if (operationId && recoveredOperationId.value === operationId) return
+  if (!operationId || recoveredOperationId.value === operationId) return
   recoveredOperationId.value = operationId
   recoveredOperationNote.value = describeUnconfirmedPermissionWrite(userId).message
   await finishCommitted(request, userAccessReadGeneration.value)
