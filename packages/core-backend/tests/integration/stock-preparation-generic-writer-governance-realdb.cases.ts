@@ -483,7 +483,7 @@ export function defineStockPreparationGenericWriterGovernanceRealDbCases(): void
     // the stand-in write-back is the same SDK patch the write-back makes, and the race is a real commit between the
     // writer's read and its update. The unregistered twin (same template, free key, no registry row) shows today's
     // behaviour is unchanged for every other target: the configured column is written, no fence.
-    test('S6-09 (D2) registered, NOT governed sheet: pipeline upsert / C6 updateRows / ERP feedback never write the machine column and a racing write-back is a retryable VERSION conflict; an unregistered twin keeps today\'s behaviour', async () => {
+    test('S6-GW-09 (D2) registered, NOT governed sheet: pipeline upsert / C6 updateRows / ERP feedback never write the machine column; a racing write-back is a retryable VERSION conflict at the pipeline upsert and at C6, and the ERP feedback leg succeeds after one retry; an unregistered twin keeps today\'s behaviour', async () => {
       const MACHINE = 'issueConfirmDate'
       const SEEDED = '2026-11-01'
       const RACED = '2026-11-02'
@@ -573,7 +573,7 @@ export function defineStockPreparationGenericWriterGovernanceRealDbCases(): void
         raced: `${fbRaced.ok}:${fbRaced.patched}:${fbRaced.conflicted}:${fbRaced.reason}:${fbRaced.retryable}`,
         afterRace: { date: afterFbRace!.date, material: afterFbRace!.material },
       }
-      console.log(`[S6-09] ${JSON.stringify(observed)}`)
+      console.log(`[S6-GW-09] ${JSON.stringify(observed)}`)
       expect(observed).toEqual({
         registered: {
           seeded: ['created'],
@@ -603,7 +603,7 @@ export function defineStockPreparationGenericWriterGovernanceRealDbCases(): void
           result: 'true:1:0',
           after: { date: SEEDED, material: 'M-D2-FB' },
           // Round 2 (F2): one racing write-back => the row is re-read by key and the stripped patch re-sent with the
-          // fresh version (a write-back racing EVERY attempt is S6-10's leg): written, the raced date stands.
+          // fresh version (a write-back racing EVERY attempt is S6-GW-10's leg): written, the raced date stands.
           raced: 'true:1:undefined:undefined:undefined',
           afterRace: { date: RACED, material: 'M-D2-FB-RACE' },
         },
@@ -619,7 +619,7 @@ export function defineStockPreparationGenericWriterGovernanceRealDbCases(): void
     //   F1 creates never plant a machine value (pipeline upsert, C6 insertRows, ERP feedback);
     //   F2 an ERP feedback row whose version moves on EVERY attempt is conflicted after three fenced attempts;
     //   F3 a C6 machine-only difference plans skip on every dry-run, and the apply writes nothing.
-    test('S6-10 (D2 round 2) the machine column on a registered sheet: sheet-bound strip set (alias / raw physical id / namespace key without projectId / registry of another tenant), refused when unresolvable, creates stripped, ERP bounded retry, no C6 churn', async () => {
+    test('S6-GW-10 (D2 round 2) the machine column on a registered sheet: sheet-bound strip set (alias / raw physical id / namespace key without projectId / registry of another tenant), refused when unresolvable, creates stripped, ERP bounded retry, no C6 churn', async () => {
       const MACHINE = 'issueConfirmDate'
       const SEEDED = '2026-11-01'
       const reg = await stack('s10', { pilot: false })
@@ -749,7 +749,7 @@ export function defineStockPreparationGenericWriterGovernanceRealDbCases(): void
         date: churnAfter.date,
       }
 
-      console.log(`[S6-10] ${JSON.stringify(observed)}`)
+      console.log(`[S6-GW-10] ${JSON.stringify(observed)}`)
       const kept = (material: string) => ({ ok: true, date: SEEDED, material })
       expect(observed).toEqual({
         aliasUpsert: kept('M-A1'),
