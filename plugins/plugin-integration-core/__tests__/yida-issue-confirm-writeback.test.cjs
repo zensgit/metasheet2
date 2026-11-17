@@ -257,6 +257,9 @@ function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
         if (openFailure) throw openFailure
         const rows = world.sheets.get(project.sheetId) || []
         return {
+          // The adapter's copy of the host surface's flag (yida-issue-confirm-writeback-ports.mjs); the core refuses an
+          // api without it. world.unfenced drops it for the refusal case.
+          ...(world.unfenced === undefined ? { supportsWriteFence: true } : world.unfenced),
           async queryRecords({ filters, limit, offset }) {
             calls.query += 1
             world.events.push('query')
@@ -1231,6 +1234,32 @@ test('the trace race, order (non-written outcomes): while A\'s trace INSERT of p
       for (const record of world.sheets.get(SHEET)) assert.equal(record.data.issueConfirmDate, null, label)
     }
   }
+})
+
+// Stock-prep B3: the core's own write-fence check, after sheets.open and before the records read.
+test('a records api that does not declare the host write fence is refused before the records read: retryable, no query, no patch, no trace; declared, the next run writes', async () => {
+  for (const unfenced of [{}, { supportsWriteFence: false }, { supportsWriteFence: 'true' }, { supportsWriteFence: 1 }]) {
+    const label = JSON.stringify(unfenced)
+    const { world, row } = sentWorld()
+    world.unfenced = unfenced
+    const result = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+    assert.deepEqual(result.results, [{ ledgerId: row.id, kind: 'retryable', code: 'YIDA_ISSUE_CONFIRM_WRITE_FENCE_UNAVAILABLE' }], label)
+    assert.deepEqual(sheetReadsAndWrites(world.calls), { open: 1, query: 0, patch: 0, authority: 1, acquire: 1 }, label)
+    assert.deepEqual(world.trace, [], label)
+    assert.equal(world.leases.size, 0, label)
+    assert.equal(world.cell(), null, label)
+    // The same row once the api declares it: written once.
+    world.unfenced = undefined
+    assert.deepEqual((await world.executor().run({ tenantId: TENANT, ownerId: OWNER })).results.map((entry) => entry.outcome), ['written'], label)
+    assert.equal(world.calls.patch.length, 1, label)
+  }
+  // An open() that answers nothing at all is refused the same way.
+  const { world, row } = sentWorld()
+  const deps = world.deps()
+  deps.sheets = { async open() { return null } }
+  assert.deepEqual((await createIssueConfirmWritebackExecutor(deps).run({ tenantId: TENANT, ownerId: OWNER })).results,
+    [{ ledgerId: row.id, kind: 'retryable', code: 'YIDA_ISSUE_CONFIRM_WRITE_FENCE_UNAVAILABLE' }])
+  assert.deepEqual(world.trace, [])
 })
 
 test('a traced row whose trace the re-check cannot read is retryable: no patch, no trace', async () => {

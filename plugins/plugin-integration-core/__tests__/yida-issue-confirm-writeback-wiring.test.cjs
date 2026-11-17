@@ -16,6 +16,7 @@ const { pathToFileURL } = require('node:url')
 
 const writeback = require('../lib/yida-issue-confirm-writeback.cjs')
 const writeLockModule = require('../lib/stock-preparation-project-write-lock.cjs')
+const { deriveProjectSheetObjectId } = require('../lib/stock-preparation-project-targets.cjs')
 const native = new Function('url', 'return import(url)')
 const LIB = path.resolve(__dirname, '../lib')
 const portsPromise = native(pathToFileURL(path.join(LIB, 'yida-issue-confirm-writeback-ports.mjs')).href)
@@ -297,6 +298,15 @@ test('sheets port refuses a records surface without the host write fence, and bi
     (error) => error.code === 'YIDA_ISSUE_CONFIRM_UNAVAILABLE')
   await assert.rejects(createIssueConfirmSheets({ multitable: () => null }).open({ tenantId: TENANT, project }),
     (error) => error.code === 'YIDA_ISSUE_CONFIRM_UNAVAILABLE')
+  // Stock-prep B3: a fenced host surface opens to a frozen scoped api that carries the flag on (the core checks it again
+  // before its records read, and refuses an api without it).
+  const provisioning = { async resolveFieldIds({ fieldIds }) { return Object.fromEntries(fieldIds.map((id) => [id, `fld_${id}`])) } }
+  const projectSheet = { sheetId: SHEET, objectId: deriveProjectSheetObjectId(TENANT, PROJECT) }
+  const opened = await createIssueConfirmSheets({ multitable: () => ({ records: { ...records, supportsWriteFence: true }, provisioning }) })
+    .open({ tenantId: TENANT, project: projectSheet })
+  assert.deepEqual(Object.keys(opened).sort(), ['patchRecord', 'queryRecords', 'supportsWriteFence'])
+  assert.equal(opened.supportsWriteFence, true)
+  assert.equal(Object.isFrozen(opened), true)
 })
 
 test('capability: enabled() is the core exact-literal predicate; create() binds the authenticated scope and refuses a missing re-check', async () => {
@@ -451,6 +461,7 @@ async function sweepWorld({ rows, ackless = [], stuck = [], traced = [], env = O
     projectRegistry: { async resolve() { return { sheetId: SHEET, objectId: 'obj-syn-w', status: 'active' } } },
     sheets: { async open() {
       return {
+        supportsWriteFence: true,
         async queryRecords({ filters }) {
           return [...records.values()].filter((record) => record.data.idempotencyKey === filters.idempotencyKey)
             .map((record) => ({ id: record.id, version: record.version, data: { ...record.data } }))
@@ -724,6 +735,7 @@ function hostFaithfulWorld({ withVersion }) {
     projectRegistry: { async resolve() { return { sheetId: SHEET, objectId: 'obj-syn-w', status: 'active' } } },
     sheets: { async open() {
       return {
+        supportsWriteFence: true,
         async queryRecords({ filters }) {
           return rows.filter((row) => row.data.idempotencyKey === filters.idempotencyKey)
             .map((row) => (withVersion ? { id: row.id, version: row.version, data: { ...row.data } } : { id: row.id, data: { ...row.data } }))

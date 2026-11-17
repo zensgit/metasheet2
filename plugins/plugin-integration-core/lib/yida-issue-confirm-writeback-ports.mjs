@@ -20,7 +20,8 @@
 //      yida-issue-confirm-writeback-authority.ts), never built here.
 //   3. Host write fence: the patch carries guard.hostWriteFence() ({ lock, scopeKey, leaseId, fencingEpoch,
 //      generationToken }, the allow-listed shape of packages/core-backend/src/multitable/plugin-write-fence.ts);
-//      a records surface that does not declare supportsWriteFence is refused before any read (retryable).
+//      a records surface that does not declare supportsWriteFence is refused before any read (retryable); the flag is
+//      copied onto the scoped api, and the core checks it again before its records read.
 //   4./5. Not wiring: an unbound generated row stays the compiler's refusal (no new code); the panel DTO is unchanged.
 //
 // THE TWO SWITCHES are read only by the core's own exact-literal predicates (issueConfirmWritebackEnabled /
@@ -225,7 +226,9 @@ export function createIssueConfirmSheets({ multitable }) {
     }
     const scoped = await createTargetScopedRecordsApi(records, { sheetId: project.sheetId, objectId: project.objectId },
       { provisioning, projectId: `${tenantId}:integration-core` })
+    // The flag travels with the scoped api: the core checks it again before its records read.
     return Object.freeze({
+      supportsWriteFence: true,
       queryRecords: (input) => scoped.queryRecords(input),
       patchRecord: (input) => scoped.patchRecord(input),
     })

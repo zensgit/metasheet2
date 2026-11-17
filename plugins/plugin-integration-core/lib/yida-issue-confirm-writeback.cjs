@@ -553,7 +553,11 @@ function requireFunction(holder, name, label) {
  *   projectRegistry.resolve({ tenantId, projectNo }) → null (no registration) | { sheetId, objectId, status };
  *       THROWS on any failure; never called while the project-sheets switch is off (D14)
  *   sheets.open({ tenantId, project }) → a records api bound to that one sheet:
- *       { queryRecords({ filters, limit, offset }), patchRecord({ recordId, changes, expectedVersion, writeFence }) }
+ *       { supportsWriteFence: true, queryRecords({ filters, limit, offset }),
+ *         patchRecord({ recordId, changes, expectedVersion, writeFence }) }
+ *       The api must DECLARE the host write fence (supportsWriteFence === true, copied from the host surface by the
+ *       adapter): one that does not is refused with YIDA_ISSUE_CONFIRM_WRITE_FENCE_UNAVAILABLE before any read
+ *       (retryable), so the patch can never run unfenced.
  *   authority.recheck({ tenantId, ownerId, sheetId, objectId }) → true | false (live, under the lease)
  *   writeLock — createStockPreparationProjectWriteLock(): scopeKeyFor, withProjectWriteLease (never a
  *       generation bump: register R-96, Plan A)
@@ -623,6 +627,11 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
       if (inner.kind === 'record') return writeTrace(ledger, inner, timeZone)
       if (inner.kind !== 'need') return inner
       const records = await sheets.open({ tenantId: scope.tenantId, project })
+      // The host write fence, checked here as well as in the adapter: an api that does not declare it is refused before
+      // the records read (retryable, no trace), so the only patch can never run unfenced.
+      if (!records || records.supportsWriteFence !== true) {
+        fail('YIDA_ISSUE_CONFIRM_WRITE_FENCE_UNAVAILABLE', 'the records api does not declare the host write fence')
+      }
       const rows = await records.queryRecords({ filters: { [ISSUE_CONFIRM_KEY_FIELD_ID]: inner.idempotencyKey }, limit: 2, offset: 0 })
       facts.records = rows
       inner = decideIssueConfirmWriteback(facts)
