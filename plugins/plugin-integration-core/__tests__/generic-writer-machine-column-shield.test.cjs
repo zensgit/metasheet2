@@ -13,9 +13,9 @@
 //   (b) the machine column is stripped from the UPDATE payload (the logical id, the configured / provisioned physical id);
 //   (a) the update carries `expectedVersion` (the version read), and a version conflict is a RETRYABLE row failure.
 //
-//   M-01..M-03  pipeline upsert   (lib/adapters/metasheet-multitable-target-adapter.cjs, writeOne update branch)
-//   C-01..C-03  C6 updateRows     (same file) + the C6 row-error vocabulary (lib/external-write-dry-run.cjs)
-//   E-01..E-03  ERP feedback      (lib/erp-feedback.cjs, updateRecords) + writeBack's reason token
+//   M-01..M-04  pipeline upsert   (lib/adapters/metasheet-multitable-target-adapter.cjs, writeOne update branch)
+//   C-01..C-04  C6 updateRows     (same file) + the C6 row-error vocabulary (lib/external-write-dry-run.cjs)
+//   E-01..E-04  ERP feedback      (lib/erp-feedback.cjs, updateRecords) + writeBack's reason token
 // Values-free: every id below is synthetic.
 
 const assert = require('node:assert/strict')
@@ -196,6 +196,19 @@ test('M-03 REGRESSION pipeline upsert on a NON-stock-prep target (registry absen
   }
 })
 
+test('M-04 pipeline upsert, REGISTERED sheet: a row whose only update is the machine column (beside its key) is SKIPPED — no patch, no version bump; a key-only row WITHOUT a machine column still patches as before', async () => {
+  const { records, calls, store } = createRecords({ rows: [seededRow()] })
+  const adapter = createMetaSheetMultitableTargetAdapter({ system: freeKeySystem(), context: { api: { multitable: { records } }, logger: QUIET }, governedSheetProbe: probeAnswering(REGISTERED) })
+  const result = await adapter.upsert({ object: 'main', records: [{ idempotencyKey: 'idem-1', [MACHINE]: '' }] })
+  assert.deepEqual({ written: result.written, skipped: result.skipped, failed: result.failed }, { written: 0, skipped: 1, failed: 0 })
+  assert.deepEqual(result.results.map((entry) => `${entry.status}:${entry.reason}`), ['skipped:machine_writeback_columns_only'])
+  assert.equal(patchesOf(calls).length, 0, 'no patch')
+  assert.equal(store[0].version, 3, 'no version bump')
+  const keyOnly = await adapter.upsert({ object: 'main', records: [{ idempotencyKey: 'idem-1' }] })
+  assert.equal(keyOnly.written, 1, 'a key-only row with nothing stripped is not reinterpreted')
+  assert.equal(patchesOf(calls).length, 1)
+})
+
 // ── C6 updateRows ─────────────────────────────────────────────────────────────────────────────────
 
 test('C-01 C6 updateRows on a REGISTERED sheet: the machine column is not written, the other fields are, and the patch carries the version read', async () => {
@@ -238,6 +251,15 @@ test('C-03 REGRESSION C6 updateRows on a NON-stock-prep target: byte-identical p
     assert.deepEqual(Object.keys(patch).sort(), ['changes', 'recordId', 'sheetId'])
     assert.deepEqual(patch.changes, { [PHYS.idempotencyKey]: 'idem-1', [PHYS.material]: 'M-C6', [PHYS[MACHINE]]: '' })
   }
+})
+
+test('C-04 C6 updateRows, REGISTERED sheet: a row whose only update is the machine column (beside its key) sends no patch', async () => {
+  const { records, calls, store } = createRecords({ rows: [seededRow()] })
+  const source = createMetaSheetMultitableWriteSource({ system: freeKeySystem(), context: { api: { multitable: { records } }, logger: QUIET }, governedSheetProbe: probeAnswering(REGISTERED) })
+  const out = await source.updateRows('mt', 'main', [{ idempotencyKey: 'idem-1', [MACHINE]: '' }], { keyFields: ['idempotencyKey'] })
+  assert.equal(out.rowCount, 0)
+  assert.equal(patchesOf(calls).length, 0)
+  assert.equal(store[0].version, 3)
 })
 
 // ── ERP feedback ──────────────────────────────────────────────────────────────────────────────────
@@ -299,6 +321,15 @@ test('E-03 REGRESSION ERP feedback on a NON-stock-prep target (registry absent, 
     assert.deepEqual(Object.keys(patch).sort(), ['changes', 'recordId', 'sheetId'])
     assert.deepEqual(patch.changes, { [feedbackPhysical(objectId, MACHINE)]: 'synced', [feedbackPhysical(objectId, 'material')]: 'M-FB' })
   }
+})
+
+test('E-04 ERP feedback on a stock-prep target: an update whose only field is the machine column sends no patch (and counts nothing)', async () => {
+  const { context, calls, store } = feedbackContext({ objectId: NAMESPACE_OBJECT })
+  const writer = createMultitableFeedbackWriter({ context, governedSheetProbe: probeAnswering(NOT_REGISTERED) })
+  const result = await writer.updateRecords({ tenantId: TENANT, projectId: PROJECT_ID, objectId: NAMESPACE_OBJECT, keyField: 'idempotencyKey', updates: [{ key: 'idem-fb', fields: { [MACHINE]: 'synced' } }] })
+  assert.deepEqual(result, { ok: true, sheetId: SHEET, objectId: NAMESPACE_OBJECT, patched: 0, created: 0, written: 0 })
+  assert.equal(patchesOf(calls).length, 0)
+  assert.equal(store[0].version, 5)
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('generic-writer-machine-column-shield.test.cjs', tests)

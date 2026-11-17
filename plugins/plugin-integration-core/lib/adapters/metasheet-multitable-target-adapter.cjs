@@ -101,11 +101,13 @@ function omitMachineColumns(changes, keys) {
 /**
  * THE fenced update of a stock-prep target: strip, then patch with the version read. An unreadable version, or the
  * host's VERSION_CONFLICT, is the retryable conflict (fail closed: never an unfenced patch). Returns null when the
- * payload is empty after the strip (the caller skips the row: an empty patch would still bump the version).
+ * strip leaves nothing to write but the lookup key (`keyFields`, physical): the caller skips the row, because a
+ * key-only patch is a no-op that would still bump the version (and push the write-back into a retry).
  */
-async function patchMachineColumnTarget({ recordsApi, objectConfig, existing, changes, machineKeys }) {
+async function patchMachineColumnTarget({ recordsApi, objectConfig, existing, changes, machineKeys, keyFields = [] }) {
   const shielded = omitMachineColumns(changes, machineKeys)
-  if (Object.keys(shielded.data).length === 0) return null
+  const remaining = Object.keys(shielded.data)
+  if (remaining.length === 0 || (shielded.stripped > 0 && remaining.every((field) => keyFields.includes(field)))) return null
   const expectedVersion = existing.version
   if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) throw new MultitableVersionConflictError(objectConfig.objectId)
   try {
@@ -464,7 +466,7 @@ async function writeOne({ recordsApi, objectConfig, request, record, index, logi
     const existing = await findExistingRecord(recordsApi, objectConfig, data, physicalKeyFields)
     if (existing && existing.id && machineKeys) {
       // D2: a stock-prep target — machine columns stripped, the version read fences the update.
-      const fenced = await patchMachineColumnTarget({ recordsApi, objectConfig, existing, changes: writeData, machineKeys })
+      const fenced = await patchMachineColumnTarget({ recordsApi, objectConfig, existing, changes: writeData, machineKeys, keyFields: physicalKeyFields })
       if (!fenced) return { index, status: 'skipped', key, reason: 'machine_writeback_columns_only' }
       return {
         index,
@@ -938,7 +940,7 @@ function createMetaSheetMultitableWriteSource({ system, context, governedSheetPr
         if (machineKeys) {
           // D2: a stock-prep target — machine columns stripped, the version read fences the update; a conflict
           // throws the closed retryable code, which the C6 row loop dead-letters under that code.
-          const fenced = await patchMachineColumnTarget({ recordsApi, objectConfig, existing, changes, machineKeys })
+          const fenced = await patchMachineColumnTarget({ recordsApi, objectConfig, existing, changes, machineKeys, keyFields: physicalKeyFields })
           if (!fenced) continue
           rowCount += 1
           continue

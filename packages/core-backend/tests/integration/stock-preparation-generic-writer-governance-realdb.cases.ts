@@ -538,6 +538,11 @@ export function defineStockPreparationGenericWriterGovernanceRealDbCases(): void
         const raced = await adapterLib.createMetaSheetMultitableTargetAdapter({ system: sys, context: racing(s, ids, rec.idempotencyKey), governedSheetProbe: s.probe })
           .upsert({ object: 'main', records: [{ ...rec, material: 'M-D2-RACE' }] })
         const afterRace = await rowOf(s, ids, rec.idempotencyKey)
+        await writeback(s, ids, row0!.id, SEEDED)
+        // (a) the same race through the C6 write-source's updateRows.
+        const c6Raced = await settle(adapterLib.createMetaSheetMultitableWriteSource({ system: sys, context: racing(s, ids, rec.idempotencyKey), governedSheetProbe: s.probe })
+          .updateRows('mt', 'main', [{ ...rec, material: 'M-D2-C6-RACE' }], { keyFields: ['idempotencyKey'] }))
+        const afterC6Race = await rowOf(s, ids, rec.idempotencyKey)
         observed[label] = {
           seeded: seeded.results.map((entry: any) => entry.status),
           upsert: { statuses: upsert.results.map((entry: any) => entry.status), failed: upsert.failed },
@@ -546,6 +551,8 @@ export function defineStockPreparationGenericWriterGovernanceRealDbCases(): void
           afterC6: { date: afterC6!.date, material: afterC6!.material },
           raced: { written: raced.written, failed: raced.failed, codes: raced.errors.map((entry: any) => `${entry.code}:${entry.retryable === true}`) },
           afterRace: { date: afterRace!.date, material: afterRace!.material },
+          c6Raced: c6Raced.ok ? `rows:${(c6Raced.value as any).rowCount}` : `${c6Raced.error.code}:${c6Raced.error.retryable === true}`,
+          afterC6Race: { date: afterC6Race!.date, material: afterC6Race!.material },
         }
       }
 
@@ -576,6 +583,8 @@ export function defineStockPreparationGenericWriterGovernanceRealDbCases(): void
           afterC6: { date: SEEDED, material: 'M-D2-C6' },
           raced: { written: 0, failed: 1, codes: ['METASHEET_MULTITABLE_VERSION_CONFLICT:true'] },
           afterRace: { date: RACED, material: 'M-D2-C6' },
+          c6Raced: 'METASHEET_MULTITABLE_VERSION_CONFLICT:true',
+          afterC6Race: { date: RACED, material: 'M-D2-C6' },
         },
         // Today's behaviour on an unregistered sheet: the configured column is written; the race is last-writer-wins
         // (the date the racing write-back committed stays only because this payload does not name it).
@@ -587,6 +596,8 @@ export function defineStockPreparationGenericWriterGovernanceRealDbCases(): void
           afterC6: { date: null, material: 'M-D2-C6' },
           raced: { written: 1, failed: 0, codes: [] },
           afterRace: { date: RACED, material: 'M-D2-RACE' },
+          c6Raced: 'rows:1',
+          afterC6Race: { date: RACED, material: 'M-D2-C6-RACE' },
         },
         feedback: {
           result: 'true:1:0',
