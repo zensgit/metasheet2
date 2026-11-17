@@ -100,7 +100,7 @@
  * 4. routes/admin-users.ts (#6163). It serves /api/admin/users and its siblings but is mounted at the
  *    root (index.ts `this.app.use(adminUsersRouter())`), so the discovery in layer 3 never reaches it.
  *    It is scanned on its own at the foot of this file with the same scanner: the only sinks that may
- *    send text taken from an error are seven allowlisted by route and error code (text this code base
+ *    send text taken from an error are eight allowlisted by route and error code (text this code base
  *    writes itself), every sendAdminUsersServerFailure call must pass a literal sentence, and a
  *    memory-level self-proof rewrites every helper call site into seven echo shapes.
  *
@@ -1832,7 +1832,7 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
 // on /admin/users. Every 500 branch of the file now answers through sendAdminUsersServerFailure with a
 // fixed sentence; this block keeps it that way with the same scanner, plus two rules of its own:
 //   - EXACT allowlist, by route and error code (never by line number): the only sinks of the file
-//     that may send text taken from an error are the seven listed below, each of which sends text this
+//     that may send text taken from an error are the eight listed below, each of which sends text this
 //     code base wrote itself. A new echo anywhere in the file, or an allowlisted site that disappears,
 //     turns the guard red;
 //   - every sendAdminUsersServerFailure call passes a LITERAL sentence (a string literal, or a
@@ -1842,6 +1842,11 @@ const ADMIN_USERS = 'admin-users.ts'
 const ADMIN_USERS_FAILURE_HELPER = 'sendAdminUsersServerFailure'
 
 const ADMIN_USERS_SELF_WRITTEN_ERROR_TEXT: ReadonlyArray<{ route: string; code: string; reason: string }> = [
+  {
+    route: 'function adminUsersRouter',
+    code: 'error.code',
+    reason: 'authorization operation helper maps only explicitly typed command errors; untyped failures get fixed 503 sentences',
+  },
   {
     route: 'POST /api/admin/users',
     code: 'AttendanceShiftReferenceUnavailableError.code',
@@ -2034,10 +2039,109 @@ describe('structural guard: routes/admin-users.ts (mounted at the root, outside 
     for (const entry of ADMIN_USERS_SELF_WRITTEN_ERROR_TEXT) expect(entry.reason.length).toBeGreaterThan(20)
   })
 
-  it('the only sinks that send text taken from an error are exactly the seven allowlisted ones (by route and error code)', () => {
+  it('the only sinks that send text taken from an error are exactly the eight allowlisted ones (by route and error code)', () => {
     expect(adminUsersOffenderKeys(readRoute(ADMIN_USERS)).sort()).toEqual(
       ADMIN_USERS_SELF_WRITTEN_ERROR_TEXT.map(allowlistKey).sort(),
     )
+  })
+
+  it('the command error echo stays behind the exact typed-error gate', () => {
+    const source = readRoute(ADMIN_USERS)
+    const gate = 'error instanceof AuthorizationOperationError || error instanceof AuthorizationOperationInvalid || error instanceof OperationAdmissionConflict || error instanceof AuthorizationOperationFenceUnavailable || error instanceof AuthorizationInputContractError'
+    const response = 'return jsonError(res, error.status, error.code, error.message)'
+    expect(source.match(new RegExp(gate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))).toHaveLength(1)
+    expect(source).toContain(`if (${gate}) {\n      ${response}\n    }`)
+    const mutation = source.replace(`if (${gate})`, 'if (true)')
+    expect(mutation).not.toContain(`if (${gate}) {\n      ${response}\n    }`)
+  })
+
+  it('command error construction uses only fixed messages and closed call sites', () => {
+    const root = path.resolve(__dirname, '../../src')
+    const files: Array<{ path: string; text: string }> = []
+    const walk = (dir: string): void => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const file = path.join(dir, entry.name)
+        if (entry.isDirectory()) walk(file)
+        else if (/\.[cm]?[jt]s$/.test(entry.name)) files.push({ path: path.relative(root, file).replace(/\\/g, '/'), text: fs.readFileSync(file, 'utf8') })
+      }
+    }
+    walk(root)
+    const classes = new Set(['AuthorizationOperationError', 'AuthorizationOperationInvalid', 'OperationAdmissionConflict', 'AuthorizationOperationFenceUnavailable', 'AuthorizationInputContractError'])
+    const constructions = (sources: typeof files): string[] => sources.flatMap((file) => {
+      if (![...classes].some((name) => file.text.includes(name))) return []
+      const sf = ts.createSourceFile(file.path, file.text, ts.ScriptTarget.Latest, true)
+      const found: string[] = []
+      const visit = (node: ts.Node): void => {
+        if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && classes.has(node.expression.text)) found.push(`${file.path}: ${node.getText(sf)}`)
+        ts.forEachChild(node, visit)
+      }
+      visit(sf)
+      return found
+    }).sort()
+    const expected = [
+      "admin/authorization-operation-fence.ts: new AuthorizationOperationFenceUnavailable()",
+      "admin/authorization-operation-fence.ts: new AuthorizationOperationFenceUnavailable()",
+      "admin/authorization-operation-fence.ts: new AuthorizationOperationFenceUnavailable()",
+      "admin/authorization-operation-service.ts: new AuthorizationOperationError(status, code)",
+      "admin/authorization-operation-service.ts: new AuthorizationOperationError(503, commit ? 'AUTHORIZATION_OPERATION_OUTCOME_UNKNOWN' : 'AUTHORIZATION_OPERATION_UNAVAILABLE')",
+      "admin/authorization-operation-service.ts: new AuthorizationOperationError(503, 'AUTHORIZATION_OPERATION_UNAVAILABLE')",
+      "admin/authorization-operation-service.ts: new AuthorizationOperationError(503, 'AUTHORIZATION_OPERATION_UNAVAILABLE')",
+      "admin/authorization-operation-snapshot.ts: new OperationAdmissionConflict()",
+      "admin/authorization-operation-validation.ts: new AuthorizationOperationInvalid()",
+      "admin/authorization-operation-validation.ts: new AuthorizationOperationInvalid('AUTHORIZATION_OPERATION_TOO_LARGE')",
+      "admin/authorization-operation-validation.ts: new AuthorizationOperationInvalid('REASON_REQUIRED')",
+      "rbac/authorization-input-lock.ts: new AuthorizationInputContractError(code, { status, retryable: false, reason, message: CONTRACT_MESSAGES[code] })",
+    ].sort()
+    expect(constructions(files)).toEqual(expected)
+    const subclasses = files.flatMap((file) => {
+      if (![...classes].some((name) => file.text.includes(name))) return []
+      const sf = ts.createSourceFile(file.path, file.text, ts.ScriptTarget.Latest, true)
+      const found: string[] = []
+      const visit = (node: ts.Node): void => {
+        if (ts.isClassDeclaration(node) && node.name) for (const clause of node.heritageClauses ?? []) {
+          if (clause.token === ts.SyntaxKind.ExtendsKeyword) for (const base of clause.types) {
+            if (ts.isIdentifier(base.expression) && classes.has(base.expression.text)) found.push(`${file.path}: ${node.name.text} extends ${base.expression.text}`)
+          }
+        }
+        ts.forEachChild(node, visit)
+      }
+      visit(sf)
+      return found
+    }).sort()
+    expect(subclasses).toEqual([
+      'rbac/authorization-input-brand.ts: AuthorizationInputTokenRejectedError extends AuthorizationInputContractError',
+      'rbac/authorization-input-lock.ts: AuthorizationInputBusyError extends AuthorizationInputContractError',
+    ])
+    expect(constructions([...files, { path: 'admin/injected.ts', text: "new AuthorizationOperationError(500, 'X', secret)" }])).not.toEqual(expected)
+    const source = (name: string) => files.find((file) => file.path === name)!.text
+    const service = source('admin/authorization-operation-service.ts')
+    expect(service).toContain("constructor(readonly status: number, readonly code: string, message = 'Authorization operation refused') { super(message) }")
+    const serviceAst = ts.createSourceFile('service.ts', service, ts.ScriptTarget.Latest, true)
+    const fixed = (expression: ts.Expression): boolean => ts.isStringLiteral(expression) || ts.isNumericLiteral(expression) || (ts.isConditionalExpression(expression) && fixed(expression.whenTrue) && fixed(expression.whenFalse))
+    const unsafeDeny: string[] = []
+    const checkDeny = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'deny' && (node.arguments.length !== 2 || !node.arguments.every(fixed))) unsafeDeny.push(node.getText(serviceAst))
+      ts.forEachChild(node, checkDeny)
+    }
+    checkDeny(serviceAst)
+    expect(unsafeDeny).toEqual([])
+    expect(source('admin/authorization-operation-validation.ts')).toContain("constructor(code = 'INVALID_AUTHORIZATION_OPERATION') { super('Invalid authorization operation'); this.code = code }")
+    expect(source('admin/authorization-operation-snapshot.ts')).toContain("constructor() { super('Conflicting admission changes') }")
+    expect(source('admin/authorization-operation-fence.ts')).toContain("constructor() { super('Authorization operation input fence is unavailable') }")
+    const lock = source('rbac/authorization-input-lock.ts')
+    expect(lock).toContain("message: AUTHORIZATION_INPUT_BUSY_MESSAGE")
+    expect(lock).toContain("AUTHORIZATION_INPUT_BUSY_MESSAGE = 'Authorization inputs are busy; retry this change.'")
+    const lockAst = ts.createSourceFile('lock.ts', lock, ts.ScriptTarget.Latest, true)
+    let messageMap: ts.ObjectLiteralExpression | undefined
+    const findMap = (node: ts.Node): void => {
+      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === 'CONTRACT_MESSAGES' && node.initializer && ts.isCallExpression(node.initializer) && ts.isObjectLiteralExpression(node.initializer.arguments[0])) messageMap = node.initializer.arguments[0]
+      ts.forEachChild(node, findMap)
+    }
+    findMap(lockAst)
+    expect(messageMap?.properties.length).toBeGreaterThan(0)
+    expect(messageMap?.properties.every((property) => ts.isPropertyAssignment(property) && ts.isStringLiteral(property.initializer))).toBe(true)
+    expect(source('rbac/authorization-input-brand.ts')).toContain("AUTHORIZATION_INPUT_TOKEN_REJECTED_MESSAGE = 'Authorization input transaction token is not acceptable'")
+    expect(source('rbac/authorization-input-brand.ts')).toContain("super('AUTHORIZATION_INPUT_TOKEN_REJECTED', { status: 500, retryable: false, reason, message: AUTHORIZATION_INPUT_TOKEN_REJECTED_MESSAGE })")
   })
 
   it('every sendAdminUsersServerFailure call passes a literal sentence', () => {
