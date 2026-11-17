@@ -1875,8 +1875,7 @@ function stockPreparationErpAutoPersistEnabled() {
 // have everyone sign in again so their tokens carry the claim, and only then set this. Rolling back
 // is NOT deleting the line: pm2 keeps a removed key in the running process. Set the line to `=false`,
 // restart with scripts/ops/attendance-onprem-start-pm2.ps1, check the key in `pm2 env`, and only then
-// delete the line (a list or path key is emptied as KEY=" ", never KEY=, which PS 5.1 treats as a
-// deleted line). Nothing persists. The steps, and the rule that this switch stays on while any 备料
+// delete the line. Nothing persists. The steps, and the rule that this switch stays on while any 备料
 // pilot is enabled, are in customer-delivery-guide-20260904.md §5-5.
 //
 // ONE EXCEPTION TO "OFF CHANGES NOTHING", NAMED HERE SO NOBODY HAS TO DISCOVER IT. The PR that added
@@ -2051,8 +2050,11 @@ function readMvpPersistSourceContentDigest(body) {
 // its dry run, and the dry-run `revision` hashes the target sheet as it stands plus the plan computed
 // against it. The review executed two consequences:
 //   * one human edit (备注 and the other columns people own) moved both ids. The mint now hashes the
-//     sheet WITHOUT those columns (`archiveRevision`, stock-preparation-table-actions.cjs). For a sheet
-//     nobody has typed into that is byte-identical to the old revision, so this re-keys nothing kept.
+//     sheet WITHOUT those columns (`archiveRevision`, stock-preparation-table-actions.cjs), and since #6925
+//     also without the machine write-back column(s) (MACHINE_WRITEBACK_FIELD_IDS). For a sheet nobody has
+//     typed into and nothing has written back to, that is byte-identical to the old revision, so this
+//     re-keys nothing kept; a sheet that already holds a written-back date re-keys once, at the install
+//     that brings #6925.
 //   * under the creation-hour rule the batch id (the newest material's creation hour) never moves with
 //     the sheet, so ANY sheet-side difference that still reaches the mint — a sync that rewrote cells
 //     (a partial write completed later, a hand edit of a PLM cell put back), or a batch kept before
