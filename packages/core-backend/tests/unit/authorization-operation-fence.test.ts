@@ -7,10 +7,14 @@ describe('authorization operation schema profile', () => {
       AUTHORIZATION_OPERATION_SCHEMA_PROFILE,
       '873d5e65b39fe4692b720895cb2f3d2ceb213cd1a73184d92acc74947d1be163',
       'df64c6b5d2f1d1441bd5ce0fde9c63979123af3009cea573753b3b016f3f0925',
+      '26982cd64f430ab92142f4557497c3f2a5e58ab0444bebd573b92a278c177cb5',
+      'f4f65fa365644d6395ed89b2f02642182cc2aac99cd9604884c58bee3a4ea6b3',
+      '9e59b11c720f84d15ead013b4e0b84858b43fe357c766883b126c2a62b03840c',
     ]) {
       expect(isSupportedAuthorizationOperationSchema({ ordinary: true, digest })).toBe(true)
       expect(isSupportedAuthorizationOperationSchema({ ordinary: false, digest })).toBe(false)
     }
+    expect(isSupportedAuthorizationOperationSchema({ ordinary: false, digest: '20f8e9ab60e9a48287fd6c6034629bc0c2f1cf2eb4de7dd2059ec1c7e94ae534' })).toBe(false)
     expect(isSupportedAuthorizationOperationSchema({ ordinary:true, digest:'unknown' })).toBe(false)
   })
   it('locks the closed table set, qualified and without waiting', () => {

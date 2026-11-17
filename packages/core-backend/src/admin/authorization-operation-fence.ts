@@ -15,10 +15,19 @@ export const AUTHORIZATION_OPERATION_FENCE_TABLES = Object.freeze([
 /** Exact profiles measured with the role provenance migration applied. */
 // UTF-8 C with the verified Windows checkout function body bytes.
 export const AUTHORIZATION_OPERATION_SCHEMA_PROFILE = 'e3ad72e0abf9065af9282389c809ad91a48bd0c9bda0ffa44742b57a838bd81c'
-// UTF-8 C with LF bodies, measured on both clean and in-place Windows upgrades.
-const C_LOCALE_LF_SCHEMA_PROFILE = 'df64c6b5d2f1d1441bd5ce0fde9c63979123af3009cea573753b3b016f3f0925'
-// The previously supported en_US.utf8/2.41 PostgreSQL upgrade fixture.
-const EN_US_SCHEMA_PROFILE = '873d5e65b39fe4692b720895cb2f3d2ceb213cd1a73184d92acc74947d1be163'
+const SUPPORTED_SCHEMA_PROFILES = new Set([
+  AUTHORIZATION_OPERATION_SCHEMA_PROFILE,
+  // PostgreSQL 14, UTF-8 C with LF bodies and trusted public schema CREATE grants.
+  '26982cd64f430ab92142f4557497c3f2a5e58ab0444bebd573b92a278c177cb5',
+  // PostgreSQL 15, UTF-8 C with LF bodies.
+  'f4f65fa365644d6395ed89b2f02642182cc2aac99cd9604884c58bee3a4ea6b3',
+  // PostgreSQL 16, UTF-8 C with LF bodies on clean and in-place Windows upgrades.
+  'df64c6b5d2f1d1441bd5ce0fde9c63979123af3009cea573753b3b016f3f0925',
+  // PostgreSQL 16, en_US.utf8/2.41 on the upgrade fixture.
+  '873d5e65b39fe4692b720895cb2f3d2ceb213cd1a73184d92acc74947d1be163',
+  // PostgreSQL 17, UTF-8 C with LF bodies.
+  '9e59b11c720f84d15ead013b4e0b84858b43fe357c766883b126c2a62b03840c',
+])
 export class AuthorizationOperationFenceUnavailable extends Error {
   readonly status = 503
   readonly code = 'AUTHORIZATION_OPERATION_FENCE_UNAVAILABLE'
@@ -86,7 +95,9 @@ export const AUTHORIZATION_OPERATION_SCHEMA_QUERIES = [
 
 /** Compute only structural metadata. Never reads customer rows or emits SQL values. */
 export async function inspectAuthorizationOperationSchema(query: AuthorizationInputQueryable['query']): Promise<{ digest: string; tableCount: number; ordinary: boolean }> {
-  const version = await query(`SELECT pg_catalog.current_setting('server_version_num')::int / 10000 AS version, pg_catalog.current_schema() AS schema, d.datcollate,d.datctype,d.datlocprovider,d.datcollversion,
+  const version = await query(`SELECT pg_catalog.current_setting('server_version_num')::int / 10000 AS version, pg_catalog.current_schema() AS schema, d.datcollate,d.datctype,
+    pg_catalog.to_jsonb(d)->>'datlocprovider' AS datlocprovider,
+    pg_catalog.to_jsonb(d)->>'datcollversion' AS datcollversion,
     NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(COALESCE(n.nspacl,pg_catalog.acldefault('n',n.nspowner))) a
       WHERE a.privilege_type='CREATE' AND a.grantee<>n.nspowner AND a.grantee<>d.datdba) AS schema_create_trusted
     FROM pg_catalog.pg_database d JOIN pg_catalog.pg_namespace n ON n.nspname='public' WHERE d.datname=pg_catalog.current_database()`)
@@ -101,11 +112,7 @@ export async function inspectAuthorizationOperationSchema(query: AuthorizationIn
 }
 
 export function isSupportedAuthorizationOperationSchema(result: { digest: string; ordinary: boolean }): boolean {
-  return result.ordinary && (
-    result.digest === AUTHORIZATION_OPERATION_SCHEMA_PROFILE
-    || result.digest === C_LOCALE_LF_SCHEMA_PROFILE
-    || result.digest === EN_US_SCHEMA_PROFILE
-  )
+  return result.ordinary && SUPPORTED_SCHEMA_PROFILES.has(result.digest)
 }
 export async function assertAuthorizationOperationSchema(query: AuthorizationInputQueryable['query']): Promise<void> {
   const result = await inspectAuthorizationOperationSchema(query)

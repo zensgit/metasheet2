@@ -61,9 +61,13 @@ jobs:
   authorization-operation:
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres-major: ['14', '15', '16', '17']
     services:
       postgres:
-        image: postgres:16
+        image: postgres:${{ matrix.postgres-major }}
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: synthetic_ci_only
@@ -78,6 +82,7 @@ jobs:
           --health-retries 20
     env:
       PERMISSION_COMMAND_PG_BASE_URL: postgresql://postgres:synthetic_ci_only@127.0.0.1:5432/postgres
+      PERMISSION_COMMAND_PG_MAJOR: ${{ matrix.postgres-major }}
       DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED: 'false'
       RBAC_BYPASS: 'false'
       RBAC_TOKEN_TRUST: 'false'

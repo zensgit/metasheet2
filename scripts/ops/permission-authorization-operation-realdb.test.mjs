@@ -26,10 +26,16 @@ test('conditional run must pass exactly its selected test and must not silently 
   for(const tests of [[{title:'wanted',status:'skipped'}],[{title:'wanted',status:'skipped'},{title:'other',status:'passed'}],[{title:'wanted',status:'passed'},{title:'other',status:'passed'}],[{title:'wrong',status:'passed'}]]) { const bad=report();bad.testResults[0].assertionResults=tests;assert.throws(()=>validateReport(bad,[spec],'wanted')) }
 })
 
-test('requires a fresh PostgreSQL 16 UTF8 C cluster',()=>{
+test('requires a fresh UTF8 C cluster of the explicitly verified PostgreSQL major',()=>{
   const valid={version:160016,datcollate:'C',datctype:'C',encoding:'UTF8'}
   validateDatabaseInfo(valid,[])
   for(const changed of [{version:150000},{version:170000},{datcollate:'en_US.UTF-8'},{datctype:'C.UTF-8'},{encoding:'LATIN1'}]) assert.throws(()=>validateDatabaseInfo({...valid,...changed},[]))
+  for (const major of [14, 15, 16, 17]) {
+    validateEnvironment({...env, PERMISSION_COMMAND_PG_MAJOR: String(major)})
+    validateDatabaseInfo({...valid, version: major * 10000 + 12}, [], major)
+    assert.throws(()=>validateDatabaseInfo({...valid, version: (major + 1) * 10000}, [], major))
+  }
+  for (const version of ['13', '18', '016', '']) assert.throws(()=>validateEnvironment({...env, PERMISSION_COMMAND_PG_MAJOR: version}))
   assert.throws(()=>validateDatabaseInfo(valid,[{datname:'permission_command_test'}]))
 })
 

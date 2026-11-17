@@ -47,13 +47,17 @@ const unsafe = ['PERMISSION_COMMAND_TEST_UNFENCED_FIXTURE','PERMISSION_COMMAND_T
 export function validateEnvironment(env) {
   for (const key of ['DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED','RBAC_BYPASS','RBAC_TOKEN_TRUST']) if (env[key] !== 'false') throw new Error(`${key} must be exactly false`)
   for (const key of unsafe) if (env[key] !== undefined) throw new Error(`${key} must be absent from the parent environment`)
+  if (env.PERMISSION_COMMAND_PG_MAJOR !== undefined && !['14', '15', '16', '17'].includes(env.PERMISSION_COMMAND_PG_MAJOR)) throw new Error('PERMISSION_COMMAND_PG_MAJOR must name a verified PostgreSQL version')
   let u
   try { u = new URL(env.PERMISSION_COMMAND_PG_BASE_URL) } catch { throw new Error('PERMISSION_COMMAND_PG_BASE_URL is required and must be valid') }
   if (!['postgres:', 'postgresql:'].includes(u.protocol) || !['127.0.0.1','[::1]'].includes(u.hostname) || u.pathname !== '/postgres' || !u.port || u.search || u.hash) throw new Error('PostgreSQL base URL must name a loopback /postgres service with an explicit port and no options')
   return u
 }
-export function validateDatabaseInfo(row, existing) {
-  if (!(row?.version>=160000 && row.version<170000 && row.datcollate==='C' && row.datctype==='C' && row.encoding==='UTF8')) throw new Error('Expected PostgreSQL 16 with C collation/ctype and UTF8')
+export function validateDatabaseInfo(row, existing, major = 16) {
+  if (![14, 15, 16, 17].includes(major) || Math.floor(row?.version / 10000) !== major
+    || row.datcollate !== 'C' || row.datctype !== 'C' || row.encoding !== 'UTF8') {
+    throw new Error(`Expected PostgreSQL ${major} with C collation/ctype and UTF8`)
+  }
   if (existing.length) throw new Error('Dedicated fixture database already exists; start a fresh synthetic PostgreSQL service')
 }
 export function validateReport(report, expected, selectedTitle) {
@@ -116,6 +120,7 @@ async function runTests(dir, env, id, expected, variant) {
 }
 export async function main(env=process.env) {
   const base=validateEnvironment(env)
+  const major = Number(env.PERMISSION_COMMAND_PG_MAJOR ?? '16')
   const require=createRequire(path.join(backend,'package.json'))
   const {Client}=require('pg')
   const client=new Client({connectionString:base.toString(),connectionTimeoutMillis:3000})
@@ -124,10 +129,19 @@ export async function main(env=process.env) {
     const info=await client.query(`SELECT current_setting('server_version_num')::int AS version, d.datcollate, d.datctype, pg_encoding_to_char(d.encoding) AS encoding FROM pg_database d WHERE d.datname=current_database()`)
     const row=info.rows[0]
     const existing=await client.query("SELECT datname FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres'")
-    validateDatabaseInfo(row,existing.rows)
+    validateDatabaseInfo(row,existing.rows,major)
     for(const name of names) await client.query(`CREATE DATABASE "${name}" TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'`)
   } finally { await client.end() }
   const urls=names.map(name=>{const u=new URL(base);u.pathname=`/${name}`;return u.toString()})
+  if (major === 14) {
+    // Match the profile with trusted CREATE grants on the four newly created CI databases.
+    for (const connectionString of urls) {
+      const fixture = new Client({ connectionString, connectionTimeoutMillis: 3000 })
+      await fixture.connect()
+      try { await fixture.query('REVOKE CREATE ON SCHEMA public FROM PUBLIC') }
+      finally { await fixture.end() }
+    }
+  }
   const clean={...env, DATABASE_URL:urls[1], PERMISSION_COMMAND_FENCE_DATABASE_URL:urls[0],PERMISSION_COMMAND_TEST_DATABASE_URL:urls[1],PERMISSION_COMMAND_COMPAT_DATABASE_URL:urls[2],PERMISSION_ADMISSION_LIST_DATABASE_URL:urls[3],VITEST_MAX_THREADS:'3'}
   for (const url of urls) run('pnpm',['--filter','@metasheet/core-backend','db:migrate'],{...clean,DATABASE_URL:url})
   const temp=path.join(root,'tmp','permission-authorization-operation-ci')
