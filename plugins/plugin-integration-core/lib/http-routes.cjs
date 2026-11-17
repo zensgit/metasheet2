@@ -337,8 +337,9 @@ const ROUTES = [
   //                                          of a run left open is in its target state and finishes that run. Every
   //                                          real run is owner gate ② per sheet.
   //   GET  target/sheet-repair/fills-report  which old row / copy pairs carry human fills and what the K2 carry could
-  //                                          do with each — values-free, audited before the answer.
-  //   GET  target/sheet-repair/runs          the values-free run list (the run ids a restore names).
+  //                                          do with each, and how many machine write-back cells the old subtree
+  //                                          holds — values-free, audited before the answer.
+  //   GET  target/sheet-repair/runs         the values-free run list (the run ids a restore names).
   ['POST', '/api/integration/stock-preparation/projects/:projectNo/target/sheet-repair', 'stockPreparationProjectSheetRepair'],
   ['GET', '/api/integration/stock-preparation/projects/:projectNo/target/sheet-repair/fills-report', 'stockPreparationProjectSheetRepairFillsReport'],
   ['GET', '/api/integration/stock-preparation/projects/:projectNo/target/sheet-repair/runs', 'stockPreparationProjectSheetRepairRuns'],
