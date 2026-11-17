@@ -21,16 +21,17 @@
       </div>
     </header>
 
-    <p v-if="status" class="delegation-page__status" :class="{ 'delegation-page__status--error': statusTone === 'error' }">
-      {{ status }}
-    </p>
-
     <DelegationConfirmationPanel
       v-if="pendingConfirmation"
       :confirmation="pendingConfirmation"
+      :phase="confirmationPhase"
       @confirm="void submitDelegationConfirmation($event)"
-      @cancel="pendingConfirmation = null"
+      @cancel="cancelDelegationConfirmation()"
     />
+
+    <p v-if="status" class="delegation-page__status" :class="{ 'delegation-page__status--error': statusTone === 'error' }">
+      {{ status }}
+    </p>
 
     <section class="delegation-page__panel">
       <div class="delegation-page__chips">
@@ -707,6 +708,13 @@ const includeChildren = ref(true)
 const templateIncludeChildren = ref(true)
 const exactDepartmentBlocked = ref(false)
 const pendingConfirmation = ref<DelegationConfirmation | null>(null)
+const confirmationSubmission = ref<{ token: number, phase: 'pending' | 'completed' } | null>(null)
+const confirmationPhase = computed(() => (
+  confirmationSubmission.value && pendingConfirmation.value
+  && confirmationSubmission.value.token === pendingConfirmation.value.token
+    ? confirmationSubmission.value.phase
+    : 'review'
+))
 const departments = ref<DepartmentCatalogItem[]>([])
 const templates = ref<ScopeTemplateSummary[]>([])
 const memberGroups = ref<MemberGroupSummary[]>([])
@@ -767,12 +775,12 @@ watch(selectedUserId, (userId) => {
 
 watch(selectedRoleId, (roleId) => {
   const pending = pendingConfirmation.value
-  if (pending?.kind === 'grant' && pending.roleId !== roleId) pendingConfirmation.value = null
+  if (confirmationPhase.value === 'review' && pending?.kind === 'grant' && pending.roleId !== roleId) pendingConfirmation.value = null
 })
 
 watch(selectedRevokeRoleId, (roleId) => {
   const pending = pendingConfirmation.value
-  if (pending?.kind === 'revoke' && pending.roleId !== roleId) pendingConfirmation.value = null
+  if (confirmationPhase.value === 'review' && pending?.kind === 'revoke' && pending.roleId !== roleId) pendingConfirmation.value = null
 })
 
 function setStatus(message: string, tone: 'info' | 'error' = 'info') {
@@ -1351,7 +1359,9 @@ type OwnedSelection = { applied: boolean, generation: number | null }
 async function selectUser(userId: string): Promise<OwnedSelection> {
   if (listedCandidateDisabled(userId)) return { applied: false, generation: null }
   const generation = ++delegationAccessGeneration
-  pendingConfirmation.value = null
+  if (confirmationPhase.value === 'review' || pendingConfirmation.value?.targetUserId !== userId) {
+    pendingConfirmation.value = null
+  }
   selectedAccess.value = null
   selectedScopeConfig.value = null
   selectedRoleId.value = ''
@@ -1563,9 +1573,13 @@ function openAdmissionConfirmation(admission: NamespaceAdmission): void {
   })
 }
 
+function cancelDelegationConfirmation(): void {
+  if (confirmationPhase.value !== 'pending') pendingConfirmation.value = null
+}
+
 async function submitDelegationConfirmation(typedText: string): Promise<void> {
   const confirmation = pendingConfirmation.value
-  if (!confirmation) return
+  if (!confirmation || confirmationPhase.value !== 'review') return
   if (
     confirmation.kind === 'revoke'
     && confirmation.roleId === PLATFORM_ADMIN_ROLE_ID
@@ -1586,14 +1600,22 @@ async function submitDelegationConfirmation(typedText: string): Promise<void> {
     pendingConfirmation.value = null
     return
   }
-  pendingConfirmation.value = null
-  if (confirmation.kind === 'admission-enable') {
-    const admission = selectedAccess.value?.namespaceAdmissions.find((item) => item.namespace === confirmation.namespace)
-    if (!admission || !namespaceIsManaged(admission.namespace)) return
-    await updateNamespaceAdmission(admission, true)
-    return
+  const admission = confirmation.kind === 'admission-enable'
+    ? selectedAccess.value?.namespaceAdmissions.find((item) => item.namespace === confirmation.namespace)
+    : undefined
+  if (confirmation.kind === 'admission-enable' && (!admission || !namespaceIsManaged(admission.namespace))) return
+  confirmationSubmission.value = { token: confirmation.token, phase: 'pending' }
+  try {
+    if (admission) {
+      await updateNamespaceAdmission(admission, true)
+    } else {
+      await updateRole(confirmation.kind === 'grant' ? 'assign' : 'unassign', confirmation)
+    }
+  } finally {
+    if (confirmationSubmission.value?.token === confirmation.token) {
+      confirmationSubmission.value = { token: confirmation.token, phase: 'completed' }
+    }
   }
-  await updateRole(confirmation.kind === 'grant' ? 'assign' : 'unassign', confirmation)
 }
 
 async function updateRole(action: 'assign' | 'unassign', confirmation?: DelegationConfirmation | null): Promise<void> {

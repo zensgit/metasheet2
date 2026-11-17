@@ -1,0 +1,57 @@
+{
+  "baseCommit": "4a44bee478cc6f5080e264a58dbaa21ea57ba8c3",
+  "sourceSha256": {
+    "RoleDelegationView.vue": "977b30e67c9e0e665a50469ce01d4672e420c8bfc1009d15c25768fdbb668a11",
+    "DelegationConfirmationPanel.vue": "59f50b6694b34cb42b30e457f0a8dcc0855d4e387c0e044a3fb42f4c1c9d4b04",
+    "roleDelegationView.spec.ts": "234b285d465b4b1893702c4903c17caf934cd0162bcc7cc7c4ce72ab1c8a7bba"
+  },
+  "scopeFlag": false,
+  "productionDeployed": false,
+  "validation": {
+    "viewTests": 47,
+    "newRegressionCases": 5,
+    "existingTestsPreserved": 42,
+    "targetedEslint": "PASS",
+    "vueTsc": "PASS",
+    "validateAll": "PASS",
+    "viteProductionBuild": "PASS",
+    "sealedPackageProvenance": {
+      "result": "PASS",
+      "platform": "WSL Ubuntu-24.04",
+      "node": "20.20.2",
+      "nativeWindowsBashCase": "Path/environment limitation (exit 127); full test passed in Linux"
+    }
+  },
+  "browser": {
+    "api": "mocked synthetic fixtures",
+    "actualVueComponents": true,
+    "physicalSameCoordinateClicks": true,
+    "cases": [
+      "grant/slow",
+      "grant/fast",
+      "grant/failure",
+      "revoke/slow",
+      "revoke/fast",
+      "revoke/failure",
+      "revoke/long-error-success",
+      "admission/slow",
+      "admission/fast",
+      "admission/failure",
+      "admission/fallback"
+    ],
+    "completedStateExplicitlyAwaited": true,
+    "requestTargetsPathsMethodsBodiesAsserted": true,
+    "externalRequests": 0,
+    "unexpectedRuntimeErrors": 0,
+    "negativeControl": "Original component selects a different synthetic member in grant/admission scenarios; the same coordinates remain on the patched confirmation surface.",
+    "reportSha256": "84a2f7a86e0da42cda6354e31abda69b796cc502a7b9c0ff5f5f51573d0934a7",
+    "baselineReportSha256": "7f9f458df33844d7516a537fbaf82d01dae022c090b3ca8764ef91234fb1b4fd"
+  },
+  "screenshot": "completed-confirmation.png",
+  "limitations": [
+    "Browser coordinate harness is a local synthetic API test, not a live backend or permanent CI job.",
+    "The five new component regression cases are in the existing always-on web CI suite."
+  ],
+  "independentReview": "No blocking findings in final source and evidence.",
+  "sourceByteConvention": "Exact Git blob bytes (LF), hashed without normalization"
+}
