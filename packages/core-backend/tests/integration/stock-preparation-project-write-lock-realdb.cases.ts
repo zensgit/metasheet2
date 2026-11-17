@@ -68,6 +68,11 @@
  *       mark, one audit row; export-xlsx (xlsx + csv) 403 MULTITABLE_GRID_EXPORT_CLOSED (U09 with #6507); the re-POST.
  *   D21 (PR B, L02) a job approved before the enablement is refused inside the real lease with the pilot code, never
  *       PLAN_SUPERSEDED (the control run without the check proves the order); the job stays queued, zero meta_records writes.
+ *   D22 (owner ruling 2026-11-17 「按建议」) the machine write-back date follows the re-keyed row through the REAL host:
+ *       (a) the carry under the real lease writes the predecessor's `issueConfirmDate` into the blank successor cell
+ *       beside the note (read back equal, version + 1); a replay is a no-op; (b) a successor already holding another
+ *       date keeps it while the note is carried; (c) after a carry, a date written straight onto the predecessor (the
+ *       late write-back's stand-in) is carried by a replay alone: only the date moves, version + 1.
  *   H-01 (pre-enable hardening F-3) no_open_large_job against a REAL paused checkpoint job in plugin_kv: counted on its
  *       own sheet only, the readiness check fails; run to its end the job is terminal and the check passes.
  *   H-02 (pre-enable hardening F-4c) the pilot mark and its audit row in ONE real transaction: a crash before or after
@@ -1400,18 +1405,19 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         requiresConfirm: true, carry: true,
       }
     }
-    async function seedCarryPair(sb: any, projectNo: string) {
+    // D22: `extra.source` / `extra.target` add LOGICAL cells to the predecessor / successor (the machine write-back date).
+    async function seedCarryPair(sb: any, projectNo: string, extra: { source?: Record<string, unknown>; target?: Record<string, unknown> } = {}) {
       const physical = (logical: string) => (sb.target.fieldIdMap && sb.target.fieldIdMap[logical]) || logical
       const toPhysical = (data: Record<string, unknown>) => Object.fromEntries(Object.entries(data).map(([key, value]) => [physical(key), value]))
       const { oldKey, newKey } = carryKeys(projectNo)
       const records = sb.multitable.records as any
-      await records.createRecord({ sheetId: sb.sheetId, data: toPhysical({ projectNo, idempotencyKey: oldKey, componentSourceId: CARRY_COMPONENT, path: JSON.stringify(['OLD', CARRY_COMPONENT]), active: false, notes: 'synthetic note' }) })
-      const target = await records.createRecord({ sheetId: sb.sheetId, data: toPhysical({ projectNo, idempotencyKey: newKey, componentSourceId: CARRY_COMPONENT, path: JSON.stringify(['NEW', CARRY_COMPONENT]), active: true }) })
+      const source = await records.createRecord({ sheetId: sb.sheetId, data: toPhysical({ projectNo, idempotencyKey: oldKey, componentSourceId: CARRY_COMPONENT, path: JSON.stringify(['OLD', CARRY_COMPONENT]), active: false, notes: 'synthetic note', ...(extra.source || {}) }) })
+      const target = await records.createRecord({ sheetId: sb.sheetId, data: toPhysical({ projectNo, idempotencyKey: newKey, componentSourceId: CARRY_COMPONENT, path: JSON.stringify(['NEW', CARRY_COMPONENT]), active: true, ...(extra.target || {}) }) })
       const readTarget = async () => {
-        const row = (await q('SELECT version, data->>$2 AS notes FROM meta_records WHERE id = $1', [target.id, physical('notes')])).rows[0]
-        return { version: Number(row.version), notes: row.notes as string | null }
+        const row = (await q('SELECT version, data->>$2 AS notes, data->>$3 AS issue_confirm_date FROM meta_records WHERE id = $1', [target.id, physical('notes'), physical('issueConfirmDate')])).rows[0]
+        return { version: Number(row.version), notes: row.notes as string | null, issueConfirmDate: row.issue_confirm_date as string | null }
       }
-      return { physical, targetId: target.id as string, targetVersion: Number(target.version), readTarget }
+      return { physical, sourceId: source.id as string, targetId: target.id as string, targetVersion: Number(target.version), readTarget }
     }
     // A records surface that holds the carry's ONE patch at the gate (after the executor's pre-write CAS, before the
     // host is asked), the D8 technique on the patch side.
@@ -1556,6 +1562,74 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         expect((await pair.readTarget()).notes, 'the apply never touches the human cell').toBe('synthetic note')
         const row = (await q(`SELECT lease_id FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [sb.key])).rows[0]
         expect(row.lease_id).toBeNull()
+      } finally {
+        await dropSheet(sb.sheetId)
+      }
+    }, 60000)
+
+    test('D22 (owner ruling 2026-11-17) the machine write-back date follows the re-keyed row through the REAL host: carried into a blank successor cell (read back equal, version + 1), kept when the successor holds another date, and carried alone by a replay after a late write onto the predecessor', async () => {
+      const sb = await sandboxSheet('d22')
+      const SYN_DATE = '2031-04-17'
+      const SYN_DATE_OTHER = '2031-05-23'
+      try {
+        const lock = createStockPreparationProjectWriteLock({ db: dbOn(clientA) })
+        const records = sb.multitable.records as any
+        const physicalDate = (sb.target.fieldIdMap && sb.target.fieldIdMap.issueConfirmDate) || 'issueConfirmDate'
+        const field = (await q('SELECT type FROM meta_fields WHERE sheet_id = $1 AND id = $2', [sb.sheetId, physicalDate])).rows[0]
+        expect(field && field.type, 'calibration: the sandbox sheet carries the date-typed machine column').toBe('date')
+        // (a) predecessor: note + date; successor blank.
+        {
+          const projectNo = 'SYN-SWL-D22A'
+          const pair = await seedCarryPair(sb, projectNo, { source: { issueConfirmDate: SYN_DATE } })
+          expect((await pair.readTarget()).issueConfirmDate, 'calibration: the successor date is blank').toBeNull()
+          const result: any = await carryUnder(lock, sb.key, records, sb.target, projectNo, 'swl-d22-a')
+          expect(result.mode).toBe('carried')
+          expect(result.carriedFields).toEqual(['notes'])
+          expect(result.machineCarriedFields).toEqual(['issueConfirmDate'])
+          const after = await pair.readTarget()
+          expect(after.issueConfirmDate, 'the date round-trips through the real host').toBe(SYN_DATE)
+          expect(after.notes).toBe('synthetic note')
+          expect(after.version, 'one patch').toBe(pair.targetVersion + 1)
+          const replay: any = await carryUnder(lock, sb.key, records, sb.target, projectNo, 'swl-d22-a2')
+          expect(replay.mode, 'the read-back date compares equal').toBe('skipped_already_carried')
+          expect(replay.machineAlreadySetFields).toEqual(['issueConfirmDate'])
+          expect((await pair.readTarget()).version).toBe(pair.targetVersion + 1)
+          expect(JSON.stringify([result, replay]).includes(SYN_DATE), 'values-free').toBe(false)
+        }
+        // (b) the successor already holds a different date: kept; the note is still carried.
+        {
+          const projectNo = 'SYN-SWL-D22B'
+          const pair = await seedCarryPair(sb, projectNo, { source: { issueConfirmDate: SYN_DATE }, target: { issueConfirmDate: SYN_DATE_OTHER } })
+          const result: any = await carryUnder(lock, sb.key, records, sb.target, projectNo, 'swl-d22-b')
+          expect(result.mode).toBe('carried')
+          expect(result.machineKeptExistingFields).toEqual(['issueConfirmDate'])
+          expect(result.machineCode).toBe('CONFIRM_CARRY_MACHINE_KEPT_EXISTING')
+          const after = await pair.readTarget()
+          expect(after.issueConfirmDate, 'never overwritten').toBe(SYN_DATE_OTHER)
+          expect(after.notes).toBe('synthetic note')
+          expect(after.version).toBe(pair.targetVersion + 1)
+        }
+        // (c) carry first (no date anywhere), then the date lands on the predecessor; a replay carries only the date.
+        {
+          const projectNo = 'SYN-SWL-D22C'
+          const pair = await seedCarryPair(sb, projectNo)
+          const first: any = await carryUnder(lock, sb.key, records, sb.target, projectNo, 'swl-d22-c1')
+          expect(first.mode).toBe('carried')
+          expect(first.machineCarriedFields).toEqual([])
+          const afterFirst = await pair.readTarget()
+          expect(afterFirst.issueConfirmDate).toBeNull()
+          await records.patchRecord({ sheetId: sb.sheetId, recordId: pair.sourceId, changes: { [physicalDate]: SYN_DATE } })
+          const replay: any = await carryUnder(lock, sb.key, records, sb.target, projectNo, 'swl-d22-c2')
+          expect(replay.mode).toBe('carried')
+          expect(replay.carriedFields).toEqual([])
+          expect(replay.machineCarriedFields).toEqual(['issueConfirmDate'])
+          const afterReplay = await pair.readTarget()
+          expect(afterReplay.issueConfirmDate).toBe(SYN_DATE)
+          expect(afterReplay.notes).toBe('synthetic note')
+          expect(afterReplay.version, 'only the date moved, in one patch').toBe(afterFirst.version + 1)
+        }
+        const row = (await q(`SELECT lease_id FROM ${PROJECT_WRITE_LOCK_TABLE} WHERE scope_key = $1`, [sb.key])).rows[0]
+        expect(row.lease_id, 'every lease released').toBeNull()
       } finally {
         await dropSheet(sb.sheetId)
       }

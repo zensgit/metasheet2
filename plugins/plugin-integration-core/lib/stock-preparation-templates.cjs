@@ -145,9 +145,11 @@ const HUMAN_PRESERVED_FIELD_IDS = Object.freeze([
 
 // MACHINE WRITE-BACK COLUMNS (R-71 ⑦.4 PR-4, plan D4). A column listed here is plm_system-owned -- so the
 // project sheet's human write lock covers it automatically (stock-preparation-project-targets.cjs derives
-// the lock set from ownership) and a person can never edit it -- but it is written by ONE machine path
-// that is NOT the PLM refresh: today 发料确认日期 (`issueConfirmDate`), which the separate YiDa issue-confirm
-// write-back (PR-5, not in this module) fills once a form is acknowledged.
+// the lock set from ownership) and a person can never edit it -- but it is written by ONE originating
+// machine path that is NOT the PLM refresh: today 发料确认日期 (`issueConfirmDate`), which the separate YiDa
+// issue-confirm write-back (PR-5, not in this module) fills once a form is acknowledged. The K2 carry
+// confirm (stock-preparation-confirm-writes.cjs) only COPIES an existing value onto the re-keyed successor
+// row, into an empty cell (owner ruling 2026-11-17); it never originates or overwrites one.
 //
 // Every PLM refresh therefore treats these ids as OUTSIDE its writable band:
 //   * the conflict planner drops them from the plm_system refresh band (beside RUN_FIELD_IDS) and THROWS
@@ -873,8 +875,9 @@ const STOCK_PREPARATION_MAIN_TABLE_TEMPLATE = Object.freeze(normalizeStockPrepar
     // TARGET_SCHEMA_INCOMPLETE; nothing is written and running the repair clears it.
     //
     // 发料确认日期. plm_system so a person can never edit it (the lock set is derived from ownership), and
-    // listed in MACHINE_WRITEBACK_FIELD_IDS above so a PLM refresh never writes it either: its only writer
-    // is the YiDa issue-confirm write-back (PR-5). The id is not `materialCode` or anything else a pack
+    // listed in MACHINE_WRITEBACK_FIELD_IDS above so a PLM refresh never writes it either: its only
+    // originating writer is the YiDa issue-confirm write-back (PR-5); the carry confirm copies an existing
+    // value onto the re-keyed successor (empty cell only). The id is not `materialCode` or anything else a pack
     // `ext_` column already ends with (stock-preparation-extension-namespace.cjs refuses such a pair).
     field('issueConfirmDate', 'Issue Confirm Date', 'date', 'plm_system', { labelZh: '发料确认日期' }),
     // 项目规格型号. An EMPTY column for now: which PLM attribute it denormalizes is field question F1, still

@@ -299,6 +299,7 @@ Get-FileHash -Algorithm SHA256 -LiteralPath '<试拉脚本路径>'
 2. **普查（O6-3，读客户数据）**，见 §5。看这张表有没有双份（D1：`twoCopyComponents`）或第 10 项那种残留（D2：`inactiveRootRemnantComponents`）。
 3. **只有普查不干净时：**
    - 问客户（经 owner 转达；开发机从不直接联系客户）：Q1「这个部件现在还单独下单吗」，Q3「现在大家填的是哪一份」。
+   - 转达 Q3 时，补填报告里这个部件的 `machineWriteback` 两个计数只要有一个不是 0，就一并说明：旧子树上已经写入了发料确认日期（只说格数，不说日期），停用后这些日期留在旧行上（§6.1）。
    - D2 残留：**只有在 owner 转达了客户对 Q1 的回答（不再单独下单）之后**，才记残留确认（O6-5，§5.3）。
    - D1 双份：走修复窗口（O6-6，§6）。retire 之后这个部件变成 D2 残留，还要按上一条在客户回答 Q1 之后记确认。
 4. **看就绪。** `GET /api/integration/stock-preparation/projects/<项目号>/target/pilot`，`stock-prep:admin`（`http-routes.cjs:257`、`:12278-12279`）。回答是 `{ version, ready, checks: [{ id, ok }], failing: [id] }`（`stock-preparation-pilot-readiness.cjs:13`、`:491-497`），外加 `may.enable`。现在 `readiness.version` 是 **7**（`:135`，S6-5b），共 **29** 项（`:161-191`，S6-5b）：版本 3 加了批次标识六项，版本 4 加了 `change_plan_store_readable`、`execution_recovery_ready`，版本 5 加了 `no_unacknowledged_inactive_root_remnant`，版本 6 加了 `tenant_claim_required`（R-91 ㉘：租户声明开关打开才通过，§1.6），版本 7 加了 `no_open_sheet_repair_run`（这张表有未结束的修复运行就不通过，§0、§6.5），最后一项永远是 `continuation_support_version`。**装的包带 S6-9 时它通过**：`failing` 为空（`ready: true`）才说明这张表已经准备好。**装的包不带 S6-9 时（R 线），`failing` 里至少有 `continuation_support_version`**，这张表在这个包上启用不了。`failing` 里有 `tenant_claim_required`：开关没开（或没有生效），先做 §1.6，别的项不用查。`failing` 里有 `no_open_sheet_repair_run`：先按 §6.2 第 5 条查这张表的运行，按 §6.5 把它关掉；查出来是 0 而它仍不通过，是台账读不出（108、授权，§1.4），不是「没有运行」。`failing` 里有 `target_fields_present` 或 `plm_column_lock`（#6778，`stock-preparation-pilot-readiness.cjs:319-330`）：这张表还没补那两个模板列，第 0 步漏了，按 §1.4a 第 4 步补列（另批）后再看。switch-on 手册附录 B.1 写的「版本 2、18 项」已过时，按本节读。
@@ -403,7 +404,7 @@ Remove-Variable token
 
 - 三条路由都只认 `stock-prep:admin`（`http-routes.cjs:325-343`、`:12735-12768`）：
   - `POST …/projects/<项目号>/target/sheet-repair`：预览、执行和续关。请求体是封闭的 `{ mode, recipe, confirmProjectNo, componentHandle?, runId?, planDigest?, approvalRef? }`，多一个键就 400（`stock-preparation-sheet-repair.cjs:99`、`:398`）。`mode` 是 `preview` 或 `execute`。`recipe` 是 `retire_superseded_root_subtree`（停用旧根子树）、`restore_retired_rows`（按一次 retire 运行的备份恢复）或 `verify_and_close_run`（核对并关闭一次停住的运行），见 `:88-95`。
-  - `GET …/target/sheet-repair/fills-report`：哪些旧行和副本行填了人工格、两边是否相同。只有句柄、布尔和计数，给客户回答 Q3 用。
+  - `GET …/target/sheet-repair/fills-report`：哪些旧行和副本行填了人工格、两边是否相同。只有句柄、布尔和计数，给客户回答 Q3 用。另给旧子树上已写入的发料确认日期格数（`machineWriteback`：`onActiveOldRows` 将被停用的有效旧行 / `onInactiveOldRows` 已停用旧行），只有计数，不出日期，也不进任何一对的人工格比较（`stock-preparation-sheet-repair.cjs` 的 `fillsOfComponent`）。
   - `GET …/target/sheet-repair/runs`：这张表最近 50 次运行（更多时回答带 `truncated: true`），无值，不含备份（`stock-preparation-sheet-repair-store.cjs:75`、`:287-292`）。restore 和续关要用的运行 id 从这里取。
 - 开关 `MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED` 只认精确的 `true`：不去空格，也不认大写（`stock-preparation-sheet-repair.cjs:83-85`）。它或项目表开关不是 `true` 时，三条路由（预览、补填报告、运行列表都算）一律 404、零 IO（`http-routes.cjs:6854-6859`）。所以给客户准备 Q3 的补填报告，也要先开开关。
 - **开关按部署生效。** 开着时，这个部署上**每一个**项目的表都能被修复。窗口开始时在 `app.env` 里加这一行、重启；窗口结束时关掉它、重启（关法见下一条）。**重启只用 `scripts/ops/attendance-onprem-start-pm2.ps1 -RootDir <安装根目录>`**（R-91 [52] 的 R-P2-1；Windows 账号与 `PM2_HOME` 同 §1.4a 第 3 步），不跑交付说明 §7.1 里裸的 `pm2 restart --update-env`。

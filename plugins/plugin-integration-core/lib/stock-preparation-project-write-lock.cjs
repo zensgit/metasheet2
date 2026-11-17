@@ -65,7 +65,9 @@
 //
 // THE CARRY-CONFIRM WRITE (batch-refresh phase 2 step 4, PR-0; plan §5.1 / G5): the one other machine
 // write of the canonical sheet — stock-preparation-confirm-writes.cjs applyCarryViaConfirm, which copies
-// an inactive predecessor's HUMAN cells onto its re-keyed row — runs under this lease too (purpose
+// an inactive predecessor's HUMAN cells onto its re-keyed row, and in the same patch the machine write-back
+// date into an empty successor cell (owner ruling 2026-11-17; the YiDa write-back stays its only originating
+// writer and takes this same per-sheet lease) — runs under this lease too (purpose
 // `carry_confirm`: acquired by the route before the ledger pre-flight, released after the patch), its
 // one patch is host-fenced (I5) and version-conditional, and after release the route bumps the
 // generation with reason `carry_confirm` so a token minted before the carry is superseded (the
