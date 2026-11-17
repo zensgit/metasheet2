@@ -419,8 +419,9 @@ async function sweepWorld({ rows, ackless = [], stuck = [], traced = [], env = O
   const records = new Map(rows.map((row) => [`rec-${row.id}`, { id: `rec-${row.id}`, version: 3,
     data: { idempotencyKey: row.id, projectNo: PROJECT, issueConfirmDate: null } }]))
   const patches = []
+  const runEnv = { ...env, INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS: targets.join(',') }
   const executor = writeback.createIssueConfirmWritebackExecutor({
-    env: { ...env, INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS: targets.join(',') },
+    env: runEnv,
     runId: () => 'run-syn-sweep',
     ledgerReader: createIssueConfirmLedgerReader({ db }),
     rowSource: { async read({ ledger: row }) {
@@ -470,8 +471,9 @@ async function sweepWorld({ rows, ackless = [], stuck = [], traced = [], env = O
     throw new Error('SWEEP_DID_NOT_TERMINATE')
   }
   const ledgerCalls = () => db.calls.filter((call) => call[0] === 'selectUnmatched')
-  return { tables, db, records, patches, run, sweepAll, ledgerCalls }
+  return { tables, db, records, patches, run, sweepAll, ledgerCalls, env: runEnv }
 }
+const setOf = (targetRefs) => writeback.issueConfirmSweepTargetSetDigest(targetRefs)
 const stamp = (index, micro = 0) => `2026-03-01T00:${String(Math.floor(index / 60)).padStart(2, '0')}:${String(index % 60).padStart(2, '0')}.${String(micro).padStart(6, '0')}Z`
 const idsOf = (page) => page.results.map((entry) => entry.ledgerId)
 
@@ -567,6 +569,55 @@ test('sweep, per-target guard: a first target holding more than `limit` costs ON
   // Exactly `limit` in the LAST listed target: the sweep is exhausted, next is null.
   const last = await sweepWorld({ rows: exact, ackless: exact.map((row) => row.id) })
   assert.equal((await last.run({})).next, null)
+  // Exhaustion, the converse (option 1): exactly `limit` at the end of a NON-last target whose later targets are empty
+  // gives a cursor (one ledger statement), then ONE empty page with next null (one statement per remaining target).
+  const THIRD = '4f4e4d4c-4b4a-4948-8746-454443424140'
+  const boundary = await sweepWorld({ rows: exact, targets: [TARGET, OTHER_TARGET, THIRD], ackless: exact.map((row) => row.id) })
+  const filled = await boundary.run({})
+  assert.deepEqual([filled.results.length, typeof filled.next], [100, 'string'])
+  assert.deepEqual(boundary.ledgerCalls().map((call) => call[2].target_ref), [TARGET])
+  boundary.db.calls.length = 0
+  const tail = await boundary.run({ after: filled.next })
+  assert.deepEqual(tail, { enabled: true, results: [], next: null })
+  assert.deepEqual(boundary.ledgerCalls().map((call) => call[2].target_ref), [TARGET, OTHER_TARGET, THIRD])
+})
+
+test('sweep, exhaustion: next null means no candidate remains — at every limit, the pages up to the first null hold every candidate of every listed target', async () => {
+  const targets = [TARGET, OTHER_TARGET, '4f4e4d4c-4b4a-4948-8746-454443424140', '5f5e5d5c-5b5a-4958-8756-555453525150']
+  // Target sizes 4, 0, 3, 0 (empty targets in the middle and at the end), so pages fill at every kind of boundary.
+  const rows = [
+    ...Array.from({ length: 4 }, (_, index) => ledger({ id: `x0-${index}`, target_ref: targets[0], created_at: stamp(index) })),
+    ...Array.from({ length: 3 }, (_, index) => ledger({ id: `x2-${index}`, target_ref: targets[2], created_at: stamp(index) })),
+  ]
+  const expected = rows.map((row) => row.id)
+  for (const limit of [1, 2, 3, 4, 5, 7, 8]) {
+    const world = await sweepWorld({ rows, targets, ackless: expected })
+    const pages = await world.sweepAll(limit)
+    assert.deepEqual(pages.flatMap(idsOf), expected, `limit ${limit}`)
+    // Only the last page answers null; at most that one page is empty (the exact fill at a non-last target).
+    assert.deepEqual(pages.map((page) => page.next === null), pages.map((_, index) => index === pages.length - 1), `limit ${limit}`)
+    assert.ok(pages.slice(0, -1).every((page) => page.results.length === limit), `limit ${limit}: every page before the last is full`)
+  }
+})
+
+test('sweep, target-set stability: a cursor issued under another listed set (added, removed — another or its own target — or reordered) is STALE before any read; a fresh sweep then answers every row once', async () => {
+  const THIRD = '4f4e4d4c-4b4a-4948-8746-454443424140'
+  const rows = [ledger({ id: 'a-1', created_at: stamp(1) }), ledger({ id: 'a-2', created_at: stamp(2) }),
+    ledger({ id: 'b-1', target_ref: OTHER_TARGET, created_at: stamp(1) }), ledger({ id: 'c-1', target_ref: THIRD, created_at: stamp(1) })]
+  for (const [name, changed] of [
+    ['added', [TARGET, OTHER_TARGET, THIRD]], ['removed (another target)', [TARGET]], ['removed (its own target)', [OTHER_TARGET]],
+    ['reordered', [OTHER_TARGET, TARGET]],
+  ]) {
+    const world = await sweepWorld({ rows, targets: [TARGET, OTHER_TARGET], ackless: rows.map((row) => row.id) })
+    const first = await world.run({ limit: 1 })
+    assert.deepEqual(idsOf(first), ['a-1'], name)
+    world.env.INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS = changed.join(',')
+    world.db.calls.length = 0
+    assert.deepEqual(await world.run({ limit: 1, after: first.next }), { enabled: true, results: [], refused: 'STALE' }, name)
+    assert.deepEqual(world.db.calls, [], `${name}: nothing is read`)
+    const expected = changed.flatMap((targetRef) => rows.filter((row) => row.target_ref === targetRef).map((row) => row.id))
+    assert.deepEqual((await world.sweepAll(1)).flatMap(idsOf), expected, name)
+  }
 })
 
 test('sweep, forged cursors: a listed-target cursor only moves the start (scope stays the owner\'s); an unlisted target, a foreign key or an unknown version is refused before any read', async () => {
@@ -575,20 +626,23 @@ test('sweep, forged cursors: a listed-target cursor only moves the start (scope 
   const unlistedRow = ledger({ id: 'unlisted-1', target_ref: OTHER_TARGET, created_at: stamp(0) })
   const world = await sweepWorld({ rows: [...mine, ...foreign, unlistedRow], ackless: [...mine, ...foreign, unlistedRow].map((row) => row.id) })
   const cursor = (shape) => Buffer.from(JSON.stringify(shape), 'utf8').toString('base64url')
+  const s = setOf([TARGET])
   // Another owner's (created_at, id), on a listed target: the page is still only this owner's rows after that point.
-  const shifted = await world.run({ after: cursor({ v: 1, t: TARGET, c: stamp(2), i: 'theirs-1' }) })
+  const shifted = await world.run({ after: cursor({ v: 2, s, t: TARGET, c: stamp(2), i: 'theirs-1' }) })
   assert.deepEqual([idsOf(shifted), shifted.next], [['mine-2'], null])
   assert.deepEqual(world.ledgerCalls().map((call) => call[2]), [{ tenant_id: TENANT, workspace_id: null, owner_id: OWNER, target_ref: TARGET, status: 'acknowledged', intent: 'create' }])
   world.db.calls.length = 0
   for (const forged of [
-    cursor({ v: 1, t: OTHER_TARGET, c: stamp(0), i: 'unlisted-1' }), // a target that is not listed
-    cursor({ v: 1, t: TARGET, c: stamp(0), i: 'mine-1', o: 'owner-syn-x' }), // a scope key
-    cursor({ v: 2, t: TARGET, c: stamp(0), i: 'mine-1' }), // an unknown version
-    cursor({ v: 1, t: TARGET, c: '2026-03-01T00:00:00.000Z', i: 'mine-1' }), // a millisecond time
+    cursor({ v: 2, s, t: OTHER_TARGET, c: stamp(0), i: 'unlisted-1' }), // a target that is not listed (with the current set's digest)
+    cursor({ v: 2, s, t: TARGET, c: stamp(0), i: 'mine-1', o: 'owner-syn-x' }), // a scope key
+    cursor({ v: 3, s, t: TARGET, c: stamp(0), i: 'mine-1' }), // an unknown version
+    cursor({ v: 1, t: TARGET, c: stamp(0), i: 'mine-1' }), // the v1 shape (no target set digest)
+    cursor({ v: 2, s, t: TARGET, c: '2026-03-01T00:00:00.000Z', i: 'mine-1' }), // a millisecond time
+    cursor({ v: 2, s, t: TARGET, c: '0000-01-01T00:00:00.000000Z', i: 'mine-1' }), // year 0000 (PostgreSQL has none)
   ]) {
     assert.deepEqual(await world.run({ after: forged }), { enabled: true, results: [], refused: 'AFTER' })
   }
-  assert.deepEqual(await world.run({ ledgerIds: ['mine-1'], after: cursor({ v: 1, t: TARGET, c: stamp(0), i: 'mine-1' }) }), { enabled: true, results: [], refused: 'AFTER' })
+  assert.deepEqual(await world.run({ ledgerIds: ['mine-1'], after: cursor({ v: 2, s, t: TARGET, c: stamp(0), i: 'mine-1' }) }), { enabled: true, results: [], refused: 'AFTER' })
   assert.deepEqual(world.db.calls, [])
 })
 
@@ -673,7 +727,8 @@ function hostFaithfulWorld({ withVersion }) {
       },
       async bumpGeneration() {},
     },
-    traceStore: writeback.createIssueConfirmTraceStore({ db: { async insertOneIfAbsent(_table, row) { trace.push(row); return [row] } } }),
+    traceStore: writeback.createIssueConfirmTraceStore({ db: { async insertOneIfAbsent(_table, row) { trace.push(row); return [row] },
+      async selectOne(_table, where) { return trace.find((row) => row.ledger_id === where.ledger_id) || null } } }),
   }
   return { rows, patches, trace, executor: writeback.createIssueConfirmWritebackExecutor(deps) }
 }

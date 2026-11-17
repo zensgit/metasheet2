@@ -46,11 +46,13 @@
 //   project_absent, archived → project_archived, registered sheet ≠ bound sheet → sheet_mismatch) →
 //   UNDER THE SHEET WRITE LEASE (purpose issue_confirm_writeback): live authority re-check (revoked →
 //   permission_revoked) → the row by idempotencyKey, limit 2 (0 → row_absent, 2 → duplicate_key, its
-//   projectNo ≠ the payload's → project_mismatch) → the cell: empty → ONE version-conditional, host-fenced
-//   patch of `issueConfirmDate` only (written); equal → already_set; any other value → kept_existing (D8:
-//   the first confirmation wins, never overwritten) → release → generation bump (reason
-//   issue_confirm_writeback, best effort, only after a write) → trace INSERT … ON CONFLICT (ledger_id)
-//   DO NOTHING.
+//   projectNo ≠ the payload's → project_mismatch) → the cell: empty → THE TRACE RE-CHECK (a trace row for
+//   this ledger row exists by now → skip `already_traced`: no patch, no trace) → ONE version-conditional,
+//   host-fenced patch of `issueConfirmDate` only (written); equal → already_set; any other value →
+//   kept_existing (D8: the first confirmation wins, never overwritten) → the trace INSERT … ON CONFLICT
+//   (ledger_id) DO NOTHING, STILL UNDER THE LEASE → release → generation bump (reason
+//   issue_confirm_writeback, best effort, only after a write). An outcome decided before the lease
+//   (source_unbound, payload_unmapped, project_absent, project_archived, sheet_mismatch) is traced without one.
 //
 // THE SWEEP (owner recovery entry, batch mode = no ledgerIds). One batch run is ONE PAGE of a sweep: start
 // without `after`, then pass each answer's `next` back as `after` until `next` is null. Page order is fixed:
@@ -59,7 +61,9 @@
 // or skipped (no trace) is BEHIND the cursor: it is decided again only by a later sweep that starts from the
 // beginning, so a stuck front (rows that stay retryable or acknowledgement_missing) never stops a sweep from
 // reaching the rows behind it, in its own target or in later ones. The cursor is described at
-// encodeIssueConfirmSweepCursor below; it only moves the start point, never the scope.
+// encodeIssueConfirmSweepCursor below; it only moves the start point, never the scope. It carries a digest of the
+// ORDERED listed target set it was issued under: once that set changes (a target added, removed or reordered), the
+// cursor is STALE (the host's 409) and the caller restarts the sweep without `after`.
 //
 // RETRYABLE = NO TRACE (§7.3). Lease busy / lost / superseded, a host refusal of the fence, a version
 // conflict, a host or store failure while gathering facts (ANY port that throws: row source, project
@@ -67,9 +71,18 @@
 // turned off mid-run: the row is reported `retryable` with a fixed code and nothing is recorded; the next
 // recovery run decides it again.
 // A failure of the TRACE INSERT itself is not swallowed: it fails the run (fail closed — evidence that
-// could not be written is never reported as written). A crash between the patch and the trace converges
-// on the next run: the cell now holds the date → already_set; two concurrent runs that both decided the
-// same row converge on the primary key: the second INSERT does nothing and that run completes normally.
+// could not be written is never reported as written).
+// THE TRACE UNDER THE LEASE (Y9 r3, the trace race). The trace INSERT runs before the lease is released, and
+// the trace is read once more right before the patch. A run that read the row as untraced before another run
+// traced it, and that leases after that run released, therefore finds the trace and patches nothing
+// (already_traced) — also when the cell was emptied in between. A crash between the patch and the trace
+// INSERT (two statements, both under the lease) leaves the date in the cell and no trace: the next run that
+// holds the lease finds no trace, reads the date → already_set, one trace, no second patch (if the process
+// died, its lease stays held until it expires or is taken over: a retry before that is
+// STOCK_PREP_PROJECT_WRITE_LOCKED). Two runs that both decided the same row without a patch converge on the
+// primary key: the second INSERT does nothing and that run completes normally (recorded: false). Not
+// serialized by the lease: an outcome traced BEFORE the lease (above) by one run can land between another
+// run's re-check and its patch; a trace that exists when a run re-checks under the lease is final.
 //
 // SWITCHES (exact literal 'true' only, read on EVERY call, default OFF; registered in
 // scripts/ops/global-history-flag-manifest.mjs):
@@ -97,11 +110,15 @@ const ISSUE_CONFIRM_PROJECT_FIELD_ID = 'projectNo'
 const ISSUE_CONFIRM_WRITEBACK_LOCK_PURPOSE = 'issue_confirm_writeback'
 const ISSUE_CONFIRM_WRITEBACK_GENERATION_REASON = 'issue_confirm_writeback'
 const ISSUE_CONFIRM_WRITEBACK_MAX_BATCH = 100
-// The sweep cursor (see encodeIssueConfirmSweepCursor): its fixed version, its text bound, and the closed refusal a
-// run answers for an `after` it cannot accept (the host maps it to its fixed INPUT code, HTTP 400).
-const ISSUE_CONFIRM_SWEEP_CURSOR_VERSION = 1
+// The sweep cursor (see encodeIssueConfirmSweepCursor): its fixed version, its text bound, and the two closed refusals a
+// run answers for an `after` it cannot accept: AFTER (malformed, tampered, or an unlisted target — the host maps it to
+// its fixed INPUT code, HTTP 400) and STALE (the listed target set changed since the cursor was issued — the host maps
+// it to ISSUE_CONFIRM_SWEEP_STALE_CODE, HTTP 409: restart the sweep without `after`).
+const ISSUE_CONFIRM_SWEEP_CURSOR_VERSION = 2
 const ISSUE_CONFIRM_SWEEP_CURSOR_MAX_LENGTH = 2048
 const ISSUE_CONFIRM_SWEEP_REFUSED = 'AFTER'
+const ISSUE_CONFIRM_SWEEP_STALE = 'STALE'
+const ISSUE_CONFIRM_SWEEP_STALE_CODE = 'YIDA_ISSUE_CONFIRM_CURSOR_STALE'
 
 // Terminal outcomes: each is recorded once per ledger row. The migration's CHECK lists exactly these.
 const ISSUE_CONFIRM_WRITEBACK_OUTCOMES = Object.freeze([
@@ -122,8 +139,10 @@ const ISSUE_CONFIRM_WRITEBACK_OUTCOMES = Object.freeze([
 const ISSUE_CONFIRM_DATED_OUTCOMES = Object.freeze(['written', 'already_set'])
 // Not selected (no trace, no further read): the first three selector conditions, a missing ack audit and
 // (D14) the per-project sheets switch being off.
+// `already_traced`: the trace re-check under the lease, right before the patch, found a trace row for this ledger row
+// (another run traced it after this run read the row): no patch, no trace.
 const ISSUE_CONFIRM_SKIP_REASONS = Object.freeze([
-  'not_acknowledged', 'not_create', 'target_not_listed', 'acknowledgement_missing', 'project_sheets_disabled',
+  'not_acknowledged', 'not_create', 'target_not_listed', 'acknowledgement_missing', 'project_sheets_disabled', 'already_traced',
 ])
 // The per-project sheets switch (D14). The same literal as stock-preparation-project-targets.cjs
 // PROJECT_SHEETS_ENABLED_ENV (pinned by the unit suite; not required here so the module stays IO-free).
@@ -136,7 +155,8 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 const CODE_RE = /^[A-Z][A-Z0-9_]{0,95}$/
 const ID_RE = /^[^\u0000-\u001f\u007f]{1,128}$/u
 const CURSOR_TEXT_RE = /^[A-Za-z0-9_-]{1,2048}$/
-const CURSOR_KEYS = Object.freeze(['v', 't', 'c', 'i'])
+const CURSOR_KEYS = Object.freeze(['v', 's', 't', 'c', 'i'])
+const SWEEP_SET_RE = /^[0-9a-f]{32}$/
 // The database's exact created_at as fixed UTC text with microseconds (db.cjs selectUnmatched keyset_at).
 const SWEEP_AT_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T([01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{6}Z$/
 
@@ -217,32 +237,62 @@ function resolveIssueConfirmBusinessTimeZone(env = process.env) {
 // ── the sweep cursor ───────────────────────────────────────────────────────────────────────────────
 //
 // `next` / `after` is the base64url text (no padding) of the UTF-8 JSON of the fixed shape
-//   {"v":1,"t":<target_ref>,"c":<created_at>,"i":<ledger id>}
-// of a page's LAST row: t its listed target (a target_ref UUID), c its created_at as the database's exact UTC
-// microsecond text (a JS Date keeps milliseconds only, so a Date round trip would repeat or skip rows of one
-// millisecond), i its ledger id (the tie-break of equal created_at). The ledger id is TEXT (migration 090); the
-// cursor admits exactly the opaque id rule this module applies to every ledger row (opaqueId).
-// Decoding is strict and fails closed (null): base64url only, at most 2048 characters, the canonical text
-// (re-encoding the decoded shape must give the same text, so no padding, whitespace, key order or escape variant
-// passes), exactly the keys v, t, c, i in that order, v = 1, t one of the CURRENTLY listed targets, c the fixed text
-// of a real instant, i an opaque id. The decoded cursor carries no scope: tenant, owner and workspace are the
-// authenticated owner's, the target list is the switch's; a forged cursor can only move the start point inside them.
+//   {"v":2,"s":<target set digest>,"t":<target_ref>,"c":<created_at>,"i":<ledger id>}
+// of a page's LAST row: s the digest of the ORDERED listed target set the page was read under
+// (issueConfirmSweepTargetSetDigest), t its listed target (a target_ref UUID), c its created_at as the database's exact
+// UTC microsecond text (a JS Date keeps milliseconds only, so a Date round trip would repeat or skip rows of one
+// millisecond), i its ledger id (the tie-break of equal created_at). The ledger id is TEXT (migration 090); the cursor
+// admits exactly the opaque id rule this module applies to every ledger row (opaqueId).
+// Decoding is strict and fails closed. Refused (null → AFTER, the host's 400): anything but base64url of at most 2048
+// characters, a text that is not the canonical one (re-encoding the decoded shape must give the same text, so no
+// padding, whitespace, key order or escape variant passes), any key set but exactly v, s, t, c, i in that order, v ≠ 2
+// (the v1 shape, which carried no s, is refused), s not 32 lowercase hex digits, t not a target_ref UUID, c not the
+// fixed text of a real instant PostgreSQL accepts (year 0001..9999), i not an opaque id. Then, in this order: s ≠ the
+// digest of the CURRENT list → STALE (the target set changed since the cursor was issued; the host's 409, restart
+// without `after`) — this is also the answer when the cursor's own target was removed from the list; t not in the
+// current list → null (AFTER): with the current set's digest, a cursor naming an unlisted target is tampered. The digest
+// is not a secret (anyone who knows the list can compute it): it detects a changed set, it authenticates nothing. The
+// decoded cursor carries no scope: tenant, owner and workspace are the authenticated owner's, the target list is the
+// switch's; a well-formed cursor on a listed target only moves the start point inside them.
+// Year 0000 passes a JS Date round trip, but PostgreSQL's timestamptz has no year 0 (22008): it is refused here, so
+// such a cursor is the closed 400 before any write-back read, never a database error.
 function sweepAt(value) {
-  if (typeof value !== 'string' || !SWEEP_AT_RE.test(value)) return false
+  if (typeof value !== 'string' || !SWEEP_AT_RE.test(value) || value.startsWith('0000-')) return false
   const instant = new Date(`${value.slice(0, 23)}Z`)
   return Number.isFinite(instant.getTime()) && instant.toISOString().slice(0, 23) === value.slice(0, 23)
 }
 
-function encodeIssueConfirmSweepCursor(position) {
-  if (!isPlainObject(position) || typeof position.targetRef !== 'string' || !UUID_RE.test(position.targetRef)
-    || !sweepAt(position.at) || !opaqueId(position.id)) return null
-  const json = JSON.stringify({ v: ISSUE_CONFIRM_SWEEP_CURSOR_VERSION, t: position.targetRef, c: position.at, i: position.id })
+// sha256 over the listed target_refs in their LISTED order (one per line, after a fixed label), first 32 hex digits.
+// Any change of the set (an added, removed or reordered target) changes it; null for anything but a list of UUIDs.
+function issueConfirmSweepTargetSetDigest(targetRefs) {
+  if (!Array.isArray(targetRefs) || !targetRefs.every((ref) => typeof ref === 'string' && UUID_RE.test(ref))) return null
+  return crypto.createHash('sha256').update(`yida-issue-confirm-sweep-targets\n${targetRefs.join('\n')}`, 'utf8')
+    .digest('hex').slice(0, 32)
+}
+
+function sweepCursorText(set, position) {
+  if (typeof set !== 'string' || !SWEEP_SET_RE.test(set) || !isPlainObject(position) || typeof position.targetRef !== 'string'
+    || !UUID_RE.test(position.targetRef) || !sweepAt(position.at) || !opaqueId(position.id)) return null
+  const json = JSON.stringify({ v: ISSUE_CONFIRM_SWEEP_CURSOR_VERSION, s: set, t: position.targetRef, c: position.at, i: position.id })
   const text = Buffer.from(json, 'utf8').toString('base64url')
   return text.length <= ISSUE_CONFIRM_SWEEP_CURSOR_MAX_LENGTH ? text : null
 }
 
+// The cursor of `position` under the listed `targetRefs` (its target must be one of them); null when it cannot be encoded.
+function encodeIssueConfirmSweepCursor(position, targetRefs) {
+  const set = issueConfirmSweepTargetSetDigest(targetRefs)
+  if (!set || !isPlainObject(position) || !targetRefs.includes(position.targetRef)) return null
+  return sweepCursorText(set, position)
+}
+
+// The answer for a well-formed cursor issued under another target set (the frozen marker, never a position).
+const ISSUE_CONFIRM_SWEEP_CURSOR_STALE = Object.freeze({ stale: true })
+
+// → the frozen position { targetRef, at, id } | ISSUE_CONFIRM_SWEEP_CURSOR_STALE | null (refused).
 function decodeIssueConfirmSweepCursor(text, targetRefs) {
-  if (typeof text !== 'string' || !CURSOR_TEXT_RE.test(text) || !Array.isArray(targetRefs)) return null
+  if (typeof text !== 'string' || !CURSOR_TEXT_RE.test(text)) return null
+  const current = issueConfirmSweepTargetSetDigest(targetRefs)
+  if (!current) return null
   let shape
   try {
     shape = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.from(text, 'base64url')))
@@ -253,10 +303,14 @@ function decodeIssueConfirmSweepCursor(text, targetRefs) {
   const keys = Object.keys(shape)
   if (keys.length !== CURSOR_KEYS.length || keys.some((key, index) => key !== CURSOR_KEYS[index])) return null
   if (shape.v !== ISSUE_CONFIRM_SWEEP_CURSOR_VERSION) return null
-  if (typeof shape.t !== 'string' || !UUID_RE.test(shape.t) || !targetRefs.includes(shape.t)) return null
+  if (typeof shape.s !== 'string' || !SWEEP_SET_RE.test(shape.s)) return null
+  if (typeof shape.t !== 'string' || !UUID_RE.test(shape.t)) return null
   if (!sweepAt(shape.c) || !opaqueId(shape.i)) return null
   const position = Object.freeze({ targetRef: shape.t, at: shape.c, id: shape.i })
-  return encodeIssueConfirmSweepCursor(position) === text ? position : null
+  // Canonical against the cursor's OWN digest first, so a stale cursor is told apart from a tampered one.
+  if (sweepCursorText(shape.s, position) !== text) return null
+  if (shape.s !== current) return ISSUE_CONFIRM_SWEEP_CURSOR_STALE
+  return targetRefs.includes(shape.t) ? position : null
 }
 
 function instantOf(value) {
@@ -428,17 +482,23 @@ function issueConfirmTraceRow({ ledger, outcome, sheetId, date, timeZone }) {
   }
 }
 
-// INSERT … ON CONFLICT (ledger_id) DO NOTHING through the scoped plugin db (lib/db.cjs insertOneIfAbsent).
+// record: INSERT … ON CONFLICT (ledger_id) DO NOTHING through the scoped plugin db (lib/db.cjs insertOneIfAbsent).
 // The primary key keeps one row per ledger row; DO NOTHING lets the loser of a race (or a retry whose
 // first INSERT did commit) complete normally instead of failing with 23505.
+// traced: the re-check under the lease, right before the patch (db.selectOne on the primary key) → true | false.
 function createIssueConfirmTraceStore({ db } = {}) {
-  if (!db || typeof db.insertOneIfAbsent !== 'function') fail('YIDA_ISSUE_CONFIRM_UNAVAILABLE', 'trace store needs db.insertOneIfAbsent')
+  if (!db || typeof db.insertOneIfAbsent !== 'function' || typeof db.selectOne !== 'function') {
+    fail('YIDA_ISSUE_CONFIRM_UNAVAILABLE', 'trace store needs db.insertOneIfAbsent and db.selectOne')
+  }
   async function record(row) {
     const result = await db.insertOneIfAbsent(ISSUE_CONFIRM_TRACE_TABLE, row, { conflictColumns: ['ledger_id'] })
     const rows = Array.isArray(result) ? result : (result && Array.isArray(result.rows) ? result.rows : [])
     return { recorded: rows.length === 1 }
   }
-  return Object.freeze({ record })
+  async function traced(ledgerId) {
+    return Boolean(await db.selectOne(ISSUE_CONFIRM_TRACE_TABLE, { ledger_id: ledgerId }))
+  }
+  return Object.freeze({ record, traced })
 }
 
 // ── executor ───────────────────────────────────────────────────────────────────────────────────────
@@ -466,6 +526,11 @@ function retryableCode(error) {
 
 // Thrown out of the lease callback when the switch is found off right before the patch.
 const SWITCH_OFF = Object.freeze({ code: 'SWITCH_OFF' })
+// Wraps a failure of the trace INSERT (now under the lease, inside decideRow): the run rethrows the original error,
+// so a trace that could not be written still fails the run closed and is never turned into a retryable row.
+class TraceWriteFailed {
+  constructor(error) { this.error = error }
+}
 
 function requireFunction(holder, name, label) {
   if (!holder || typeof holder[name] !== 'function') fail('YIDA_ISSUE_CONFIRM_UNAVAILABLE', `${label}.${name} is required`)
@@ -487,7 +552,7 @@ function requireFunction(holder, name, label) {
  *       { queryRecords({ filters, limit, offset }), patchRecord({ recordId, changes, expectedVersion, writeFence }) }
  *   authority.recheck({ tenantId, ownerId, sheetId, objectId }) → true | false (live, under the lease)
  *   writeLock — createStockPreparationProjectWriteLock(): scopeKeyFor, withProjectWriteLease, bumpGeneration
- *   traceStore — createIssueConfirmTraceStore({ db })
+ *   traceStore — createIssueConfirmTraceStore({ db }): record(row) → { recorded }, traced(ledgerId) → true | false
  *   env (default process.env), runId (default crypto.randomUUID), logger (optional, values-free)
  */
 function createIssueConfirmWritebackExecutor(deps = {}) {
@@ -504,6 +569,7 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
   requireFunction(writeLock, 'withProjectWriteLease', 'writeLock')
   requireFunction(writeLock, 'bumpGeneration', 'writeLock')
   requireFunction(traceStore, 'record', 'traceStore')
+  requireFunction(traceStore, 'traced', 'traceStore')
 
   async function bumpAfterWrite(scopeKey, tenantId) {
     try {
@@ -520,8 +586,21 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
     }
   }
 
-  // Decide one row. Returns { kind: 'skip' | 'record' | 'retryable' | 'stopped', ... }. Facts are gathered
-  // only when the pure decision asks for them; the lease is held only around authority, records and patch.
+  // The trace row of one terminal decision. Any failure (the row's own validation or the INSERT) is TraceWriteFailed,
+  // which the run rethrows: fail closed.
+  async function writeTrace(ledger, decision, timeZone) {
+    try {
+      const row = issueConfirmTraceRow({ ledger, outcome: decision.outcome, sheetId: decision.sheetId, date: decision.date, timeZone })
+      const { recorded } = await traceStore.record(row)
+      return { kind: 'traced', outcome: decision.outcome, recorded, date: row.written_date }
+    } catch (error) {
+      throw new TraceWriteFailed(error)
+    }
+  }
+
+  // Decide one row. Returns { kind: 'skip' | 'traced', ... } or throws (retryable / SWITCH_OFF / TraceWriteFailed).
+  // Facts are gathered only when the pure decision asks for them; the lease is held around authority, records, the
+  // trace re-check, the patch and the trace INSERT of every outcome decided under it.
   async function decideRow(scope, ledger, targetRefs, timeZone) {
     const facts = { ledger, targetRefs, timeZone, projectSheetsEnabled: issueConfirmProjectSheetsEnabled(env) }
     let decision = decideIssueConfirmWriteback(facts)
@@ -533,52 +612,66 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
       facts.project = await projectRegistry.resolve({ tenantId: scope.tenantId, projectNo: decision.projectNo })
       decision = decideIssueConfirmWriteback(facts)
     }
+    // Decided before the lease: a skip, or an outcome traced without one (no sheet is touched).
+    if (decision.kind === 'record') return writeTrace(ledger, decision, timeZone)
     if (decision.kind !== 'need') return decision
     if (decision.need !== 'authority') fail('YIDA_ISSUE_CONFIRM_STATE', 'unexpected decision step')
 
     const project = facts.project
     const scopeKey = writeLock.scopeKeyFor(project.sheetId)
     let wrote = false
-    const leased = await writeLock.withProjectWriteLease(scopeKey, {
-      purpose: ISSUE_CONFIRM_WRITEBACK_LOCK_PURPOSE,
-      runId: runId(),
-      tenantId: scope.tenantId,
-    }, async (guard) => {
-      const allowed = await authority.recheck({
-        tenantId: scope.tenantId, ownerId: scope.ownerId, sheetId: project.sheetId, objectId: project.objectId,
-      })
-      if (allowed !== true && allowed !== false) fail('YIDA_ISSUE_CONFIRM_AUTHORITY_UNAVAILABLE', 'authority re-check did not answer')
-      facts.authority = allowed
-      let inner = decideIssueConfirmWriteback(facts)
-      if (inner.kind !== 'need') return inner
-      const records = await sheets.open({ tenantId: scope.tenantId, project })
-      const rows = await records.queryRecords({ filters: { [ISSUE_CONFIRM_KEY_FIELD_ID]: inner.idempotencyKey }, limit: 2, offset: 0 })
-      facts.records = rows
-      inner = decideIssueConfirmWriteback(facts)
-      if (inner.kind !== 'patch') return inner
-      // The switch is read once more right before the only write (a switch turned off mid-run stops here).
-      if (!issueConfirmWritebackEnabled(env)) throw SWITCH_OFF
-      // D14 once more as well: the project-sheets switch turned off mid-row → skip and count, no patch.
-      if (!issueConfirmProjectSheetsEnabled(env)) return { kind: 'skip', reason: 'project_sheets_disabled' }
-      await guard.beforeWrite({ operation: 'patchRecord', subject: 'issue_confirm_writeback' })
-      try {
-        await guard.withHostWrite(() => records.patchRecord({
-          recordId: inner.recordId,
-          changes: inner.changes,
-          expectedVersion: inner.expectedVersion,
-          writeFence: guard.hostWriteFence(),
-        }))
-      } catch (error) {
-        if (error && typeof error.code === 'string' && error.code.startsWith('PLUGIN_WRITE_FENCE_')) {
-          throw await guard.hostFenceRefused(error)
+    try {
+      return await writeLock.withProjectWriteLease(scopeKey, {
+        purpose: ISSUE_CONFIRM_WRITEBACK_LOCK_PURPOSE,
+        runId: runId(),
+        tenantId: scope.tenantId,
+      }, async (guard) => {
+        const allowed = await authority.recheck({
+          tenantId: scope.tenantId, ownerId: scope.ownerId, sheetId: project.sheetId, objectId: project.objectId,
+        })
+        if (allowed !== true && allowed !== false) fail('YIDA_ISSUE_CONFIRM_AUTHORITY_UNAVAILABLE', 'authority re-check did not answer')
+        facts.authority = allowed
+        let inner = decideIssueConfirmWriteback(facts)
+        // Every outcome decided under the lease is traced before the lease is released.
+        if (inner.kind === 'record') return writeTrace(ledger, inner, timeZone)
+        if (inner.kind !== 'need') return inner
+        const records = await sheets.open({ tenantId: scope.tenantId, project })
+        const rows = await records.queryRecords({ filters: { [ISSUE_CONFIRM_KEY_FIELD_ID]: inner.idempotencyKey }, limit: 2, offset: 0 })
+        facts.records = rows
+        inner = decideIssueConfirmWriteback(facts)
+        if (inner.kind === 'record') return writeTrace(ledger, inner, timeZone)
+        if (inner.kind !== 'patch') return inner
+        // The switch is read once more right before the only write (a switch turned off mid-run stops here).
+        if (!issueConfirmWritebackEnabled(env)) throw SWITCH_OFF
+        // D14 once more as well: the project-sheets switch turned off mid-row → skip and count, no patch.
+        if (!issueConfirmProjectSheetsEnabled(env)) return { kind: 'skip', reason: 'project_sheets_disabled' }
+        // THE TRACE RE-CHECK, right before the only write: a run that read this row as untraced before another run
+        // traced it (and leased after that run released) finds the trace here and patches nothing.
+        const already = await traceStore.traced(ledger.id)
+        if (already !== true && already !== false) fail('YIDA_ISSUE_CONFIRM_UNAVAILABLE', 'trace re-check did not answer')
+        if (already) return { kind: 'skip', reason: 'already_traced' }
+        await guard.beforeWrite({ operation: 'patchRecord', subject: 'issue_confirm_writeback' })
+        try {
+          await guard.withHostWrite(() => records.patchRecord({
+            recordId: inner.recordId,
+            changes: inner.changes,
+            expectedVersion: inner.expectedVersion,
+            writeFence: guard.hostWriteFence(),
+          }))
+        } catch (error) {
+          if (error && typeof error.code === 'string' && error.code.startsWith('PLUGIN_WRITE_FENCE_')) {
+            throw await guard.hostFenceRefused(error)
+          }
+          throw error
         }
-        throw error
-      }
-      wrote = true
-      return { kind: 'record', outcome: 'written', sheetId: inner.sheetId, date: inner.date }
-    })
-    if (wrote) await bumpAfterWrite(scopeKey, scope.tenantId)
-    return leased
+        wrote = true
+        // The trace of the write, before the lease is released (a failure here still fails the run closed).
+        return writeTrace(ledger, { outcome: 'written', sheetId: inner.sheetId, date: inner.date }, timeZone)
+      })
+    } finally {
+      // The write landed: the generation moves after release even when the trace or the release then failed.
+      if (wrote) await bumpAfterWrite(scopeKey, scope.tenantId)
+    }
   }
 
   async function run(input = {}) {
@@ -603,14 +696,18 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
     }
     // `after` (a sweep cursor) is batch mode only: together with ledgerIds it is refused, like any cursor this run
     // cannot accept. The refusal is a closed answer, not a throw, because only this module reads the target list a
-    // cursor is checked against; the host turns it into its fixed INPUT code (HTTP 400). Nothing is read before it.
-    const refused = () => ({ enabled: true, results: [], refused: ISSUE_CONFIRM_SWEEP_REFUSED })
+    // cursor is checked against; the host turns AFTER into its fixed INPUT code (HTTP 400) and STALE into
+    // YIDA_ISSUE_CONFIRM_CURSOR_STALE (HTTP 409). The write-back ports read nothing before it (the host's live-owner
+    // proof has already run).
+    const refused = (reason = ISSUE_CONFIRM_SWEEP_REFUSED) => ({ enabled: true, results: [], refused: reason })
     if (input.after !== undefined && ledgerIds) return refused()
     const targetRefs = parseIssueConfirmTargetRefs(env)
     let after = null
     if (input.after !== undefined) {
-      after = decodeIssueConfirmSweepCursor(input.after, targetRefs)
-      if (!after) return refused()
+      const decoded = decodeIssueConfirmSweepCursor(input.after, targetRefs)
+      if (decoded === ISSUE_CONFIRM_SWEEP_CURSOR_STALE) return refused(ISSUE_CONFIRM_SWEEP_STALE)
+      if (!decoded) return refused()
+      after = decoded
     }
     // An empty list selects nothing: zero reads, zero writes (attack point 9). A sweep over nothing is exhausted.
     if (targetRefs.length === 0) return ledgerIds ? { enabled: true, results: [] } : { enabled: true, results: [], next: null }
@@ -636,7 +733,7 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
           || page.next.targetRef !== last.targetRef || !targetRefs.includes(page.next.targetRef)) {
           fail('YIDA_ISSUE_CONFIRM_LEDGER_INVALID', 'ledger reader returned a cursor that is not its last row')
         }
-        next = encodeIssueConfirmSweepCursor(page.next)
+        next = encodeIssueConfirmSweepCursor(page.next, targetRefs)
         if (!next) fail('YIDA_ISSUE_CONFIRM_LEDGER_INVALID', 'ledger reader returned a cursor of the wrong shape')
       }
     }
@@ -666,6 +763,8 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
       try {
         decision = await decideRow(scope, ledger, targetRefs, timeZone)
       } catch (error) {
+        // The trace could not be written: not a retryable row — the run fails closed with the original error.
+        if (error instanceof TraceWriteFailed) throw error.error
         if (error === SWITCH_OFF) {
           stopped = 'SWITCH_OFF'
           results.push({ ledgerId: ledger.id, kind: 'retryable', code: stopped })
@@ -678,16 +777,13 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
         results.push({ ledgerId: ledger.id, kind: 'skip', reason: decision.reason })
         continue
       }
-      if (decision.kind !== 'record') fail('YIDA_ISSUE_CONFIRM_STATE', 'unexpected decision')
-      // The trace. Not caught: a trace that cannot be written fails the run (fail closed).
-      const row = issueConfirmTraceRow({ ledger, outcome: decision.outcome, sheetId: decision.sheetId, date: decision.date, timeZone })
-      const { recorded } = await traceStore.record(row)
+      if (decision.kind !== 'traced') fail('YIDA_ISSUE_CONFIRM_STATE', 'unexpected decision')
       results.push({
         ledgerId: ledger.id,
         kind: 'outcome',
         outcome: decision.outcome,
-        recorded,
-        ...(row.written_date ? { date: row.written_date, timeZone } : {}),
+        recorded: decision.recorded,
+        ...(decision.date ? { date: decision.date, timeZone } : {}),
       })
     }
     // Batch mode answers the sweep's `next` (null = exhausted); the named mode is not a sweep and answers none.
@@ -711,8 +807,11 @@ module.exports = {
   ISSUE_CONFIRM_WRITEBACK_MAX_BATCH,
   ISSUE_CONFIRM_WRITEBACK_OUTCOMES,
   ISSUE_CONFIRM_SWEEP_CURSOR_MAX_LENGTH,
+  ISSUE_CONFIRM_SWEEP_CURSOR_STALE,
   ISSUE_CONFIRM_SWEEP_CURSOR_VERSION,
   ISSUE_CONFIRM_SWEEP_REFUSED,
+  ISSUE_CONFIRM_SWEEP_STALE,
+  ISSUE_CONFIRM_SWEEP_STALE_CODE,
   PROJECT_SHEETS_ENABLED_ENV,
   ROW_SOURCE_UNAVAILABLE_CODE,
   YidaIssueConfirmWritebackError,
@@ -725,6 +824,7 @@ module.exports = {
   extractIssueConfirmRowKey,
   issueConfirmBusinessDay,
   issueConfirmProjectSheetsEnabled,
+  issueConfirmSweepTargetSetDigest,
   issueConfirmTraceRow,
   issueConfirmWritebackEnabled,
   parseIssueConfirmTargetRefs,

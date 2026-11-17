@@ -57,8 +57,11 @@ export type YidaOwnerPreviewInput = Readonly<{ operationId: string; rowKey: stri
 export type YidaOwnerApproveInput = YidaOwnerPreviewInput & Readonly<{ confirmationId: string; ttlMs?: number }>
 export type YidaOwnerGrantInput = Readonly<{ grantId: string }>
 export type YidaOwnerSubmitInput = YidaOwnerGrantInput & Readonly<{ submissionId: string }>
-type Code = 'INPUT' | 'DISABLED' | 'INACTIVE' | 'UNAVAILABLE' | 'CANCELLED'
-const CODES = new Set<unknown>(['INPUT', 'DISABLED', 'INACTIVE', 'UNAVAILABLE', 'CANCELLED'])
+// CURSOR_STALE (Y9 sweep): the owner recovery entry's cursor was issued under another listed target set. It is the one
+// code whose wire text is not YIDA_OWNER_RUNTIME_*: it is the plugin core's fixed YIDA_ISSUE_CONFIRM_CURSOR_STALE (409).
+type Code = 'INPUT' | 'DISABLED' | 'INACTIVE' | 'UNAVAILABLE' | 'CANCELLED' | 'CURSOR_STALE'
+const CODES = new Set<unknown>(['INPUT', 'DISABLED', 'INACTIVE', 'UNAVAILABLE', 'CANCELLED', 'CURSOR_STALE'])
+const codeText = (code: Code) => code === 'CURSOR_STALE' ? 'YIDA_ISSUE_CONFIRM_CURSOR_STALE' : `YIDA_OWNER_RUNTIME_${code}`
 const ownErrors = new WeakMap<object, Code>()
 const MAX_RUNS = 32
 const TARGET_REF = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
@@ -86,8 +89,10 @@ const DAY = /^\d{4}-\d{2}-\d{2}$/
 // Y9 sweep cursor text (yida-issue-confirm-writeback.cjs encodeIssueConfirmSweepCursor): base64url, at most 2048 characters.
 // The host checks only this alphabet and bound; its shape, version and target are the core's to judge.
 const SWEEP_CURSOR = /^[A-Za-z0-9_-]{1,2048}$/
-// The core's closed answer for a cursor it cannot accept (refused before any read): the host's INPUT code.
+// The core's closed answers for a cursor it cannot accept (the write-back ports read nothing; the live-owner proof has
+// already run): AFTER is the host's INPUT code (400), STALE (another listed target set) is CURSOR_STALE (409).
 const SWEEP_REFUSED = 'AFTER'
+const SWEEP_STALE = 'STALE'
 // Y9 (D5 a): the only text a failed post-ACK write-back run ever logs.
 export const YIDA_ISSUE_CONFIRM_HOOK_FAILED = 'YIDA_ISSUE_CONFIRM_WRITEBACK_AFTER_ACK_FAILED'
 
@@ -95,7 +100,7 @@ export class YidaOwnerRuntimeError extends Error {
   readonly code: string
   constructor(code: unknown) {
     const fixed = (CODES.has(code) ? code : 'UNAVAILABLE') as Code
-    super(`YIDA_OWNER_RUNTIME_${fixed}`)
+    super(codeText(fixed))
     this.name = 'YidaOwnerRuntimeError'
     this.code = this.message
     ownErrors.set(this, fixed)
@@ -103,7 +108,7 @@ export class YidaOwnerRuntimeError extends Error {
 }
 export function yidaOwnerRuntimeErrorCode(error: unknown): string | undefined {
   const code = ownErrors.get(error as object)
-  return code === undefined ? yidaSendApprovalErrorCode(error) : `YIDA_OWNER_RUNTIME_${code}`
+  return code === undefined ? yidaSendApprovalErrorCode(error) : codeText(code)
 }
 function fail(code: Code): never { throw new YidaOwnerRuntimeError(code) }
 function closeError(error: unknown): never {
@@ -200,11 +205,11 @@ function acknowledgedLedgerId(view: Readonly<Row>): string | undefined {
 function writebackView(value: unknown): Readonly<Row> {
   const raw = record(value, ['enabled', 'results', 'stopped', 'next', 'refused'], ['enabled', 'results'])
   if (Object.hasOwn(raw, 'refused')) {
-    // Exactly the closed refusal ({ enabled: true, results: [], refused: 'AFTER' }) is the caller's INPUT; anything else
-    // carrying the key is not a run answer at all.
-    if (raw.refused !== SWEEP_REFUSED || raw.enabled !== true || !Array.isArray(raw.results) || raw.results.length !== 0
-      || Object.keys(raw).length !== 3) fail('UNAVAILABLE')
-    fail('INPUT')
+    // Exactly the closed refusal ({ enabled: true, results: [], refused: 'AFTER' | 'STALE' }) is the caller's INPUT or
+    // CURSOR_STALE; anything else carrying the key is not a run answer at all.
+    if ((raw.refused !== SWEEP_REFUSED && raw.refused !== SWEEP_STALE) || raw.enabled !== true || !Array.isArray(raw.results)
+      || raw.results.length !== 0 || Object.keys(raw).length !== 3) fail('UNAVAILABLE')
+    fail(raw.refused === SWEEP_STALE ? 'CURSOR_STALE' : 'INPUT')
   }
   if (typeof raw.enabled !== 'boolean' || !Array.isArray(raw.results) || raw.results.length > WRITEBACK_MAX_BATCH
     || (raw.enabled === false && raw.results.length !== 0)
@@ -575,7 +580,8 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
     },
     // The owner recovery entry (D5 b / D9): one bounded, idempotent write-back run for THIS owner's acknowledged
     // issue-confirm CREATEs — named ledger rows, or one page of a sweep (start without `after`, then pass each answer's
-    // `next` back as `after` until it is null; a cursor the core refuses is INPUT). It never needs the send switch, never
+    // `next` back as `after` until it is null; a cursor the core refuses is INPUT, one issued under another listed target
+    // set is CURSOR_STALE: restart without `after`). It never needs the send switch, never
     // builds a send port, a runner, a transport or a token client, and writes no ledger, audit, grant or admission:
     // the only rows it can add are trace rows, the only cell it can change is issueConfirmDate.
     issueConfirmWriteback(context: YidaOwnerActor, supplied: YidaOwnerIssueConfirmWritebackInput) {

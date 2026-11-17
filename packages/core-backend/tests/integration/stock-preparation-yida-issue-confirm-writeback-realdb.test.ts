@@ -741,7 +741,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     await owner.query(`INSERT INTO ${ident(LEDGER)} (id, tenant_id, workspace_id, operation_id, row_key, owner_id, target_ref,
       target_revision, plan_revision, payload_digest, business_key_digest, credential_ref, credential_generation, intent, status,
       claim_token, claim_actor_id, ack_status_code, ack_instance_id, source_record_digest, created_at)
-      SELECT $1 || lpad(i::text, 3, '0'), $2, NULL, 'synthetic-stuck-op-' || i, 'row-' || i, $3, $4, 'synthetic-rev', 'synthetic-plan',
+      SELECT $1 || lpad(i::text, 3, '0'), $2, NULL, 'synthetic-stuck-op-' || $1 || i, 'row-' || i, $3, $4, 'synthetic-rev', 'synthetic-plan',
         repeat('a', 64), md5($1 || i::text) || md5('k' || $1 || i::text), 'synthetic-credential', 1, 'create', 'acknowledged',
         repeat('c', 64), $3, 201, 'synthetic-instance-' || i, repeat('d', 64),
         timestamptz '2026-03-01T00:00:00Z' + (i * interval '1 second')
@@ -784,11 +784,19 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     expect([again.results.map(entry => entry.ledgerId), again.next]).toEqual([front, null])
     // Through the real runtime a cursor the core refuses is INPUT (the route's 400), before the plugin reads anything.
     const decoded = JSON.parse(Buffer.from(String(first.next), 'base64url').toString('utf8')) as Row
-    expect(Object.keys(decoded)).toEqual(['v', 't', 'c', 'i'])
-    expect([decoded.v, decoded.t, decoded.i]).toEqual([1, world!.targetRef, 'syn-stuck-099'])
+    expect(Object.keys(decoded)).toEqual(['v', 's', 't', 'c', 'i'])
+    expect([decoded.v, decoded.t, decoded.i]).toEqual([2, world!.targetRef, 'syn-stuck-099'])
+    expect(decoded.s).toMatch(/^[0-9a-f]{32}$/)
     expect(decoded.c).toBe('2026-03-01T00:01:39.000000Z')
+    // Year 0000 (refuter finding [0]): a JS Date round trip accepts it, PostgreSQL's timestamptz does not (22008). It is
+    // the closed INPUT refusal (the route's 400) with ZERO write-back statements, never a database error (503).
     wbStatements.length = 0
-    for (const after of [cursorText({ ...decoded, v: 2 }), cursorText({ ...decoded, t: randomUUID() }), cursorText({ ...decoded, o: 'synthetic-other' }),
+    for (const c of ['0000-01-01T00:00:00.000000Z', '0000-12-31T23:59:59.999999Z']) {
+      await expect(world!.runtime.issueConfirmWriteback(actor, { after: cursorText({ ...decoded, c }) })).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
+    }
+    expect(wbStatements).toEqual([])
+    for (const after of [cursorText({ ...decoded, v: 3 }), cursorText({ v: 1, t: decoded.t, c: decoded.c, i: decoded.i }),
+      cursorText({ ...decoded, t: randomUUID() }), cursorText({ ...decoded, o: 'synthetic-other' }),
       String(first.next).slice(0, -2), `${String(first.next)}A`]) {
       await expect(world!.runtime.issueConfirmWriteback(actor, { after })).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
     }
@@ -814,6 +822,109 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     const after = await cell()
     expect([after.version, after.date]).toEqual([before.version, null])
     expect(await tableRows(TRACE)).toHaveLength(1)
+  })
+
+  // The trace race (Y9 r3, refuter finding [1]): a run that read the row as untraced before another run traced it.
+  it.each([['limit path', 'limit'], ['ledgerIds path', 'named']])('the trace race on real PostgreSQL (%s): B read the row before A traced it; A writes and traces; the cell is emptied; B leases after A released — the re-check under the lease stops B, no second patch', async (_name, mode) => {
+    await compose({ crashHookOnce: true })
+    const before = await cell()
+    const { grant, result } = await sendOne(boundInput(0))
+    const ledgerId = String(grant.ledgerId ?? result.delivery!.id)
+    expect(await tableRows(TRACE)).toEqual([])
+    const input = mode === 'limit' ? {} : { ledgerIds: [ledgerId] }
+    // Run B is parked at its first sheet-lease statement, after it read the row as untraced ...
+    const parked = { ...latch(), pattern: new RegExp(`\\b${LOCK}\\b`) }
+    gateOnce = parked
+    const second = world!.runtime.issueConfirmWriteback(actor, input)
+    await waitFor(parked)
+    // ... while run A decides the same row completely: patch, trace, release.
+    expect(outcomeOf(await world!.runtime.issueConfirmWriteback(actor, input))).toEqual(['written'])
+    const written = await cell()
+    expect([written.date, written.version]).toEqual([businessDay(await ackAt(ledgerId)), before.version + 1])
+    // The cell is emptied without a version bump (an unversioned plugin patch; privileged fixture edit).
+    await owner.query('UPDATE public.meta_records SET data = data - $1::text WHERE id = $2', [fld().issueConfirmDate, recordId(0)])
+    parked.release()
+    const secondRun = await second
+    expect(patches).toHaveLength(1)
+    expect(secondRun.results).toEqual([{ ledgerId, kind: 'skip', reason: 'already_traced' }])
+    const after = await cell()
+    expect([after.date, after.version]).toEqual([null, before.version + 1])
+    expect((await tableRows(TRACE)).map(row => [row.ledger_id, row.outcome])).toEqual([[ledgerId, 'written']])
+    expect([world!.fake.token, world!.fake.form]).toEqual([1, 1])
+  })
+
+  it('trace before release on real PostgreSQL: while A\'s trace INSERT is in flight A still holds the sheet lease — a run that read the row then is STOCK_PREP_PROJECT_WRITE_LOCKED and patches nothing, even with the cell emptied', async () => {
+    await compose({ crashHookOnce: true })
+    const before = await cell()
+    const { grant, result } = await sendOne(boundInput(0))
+    const ledgerId = String(grant.ledgerId ?? result.delivery!.id)
+    // Run A is parked at its trace INSERT, after its patch committed.
+    const parked = { ...latch(), pattern: new RegExp(`^INSERT INTO "${TRACE}"`) }
+    gateOnce = parked
+    const first = world!.runtime.issueConfirmWriteback(actor, {})
+    await waitFor(parked)
+    expect(patches).toHaveLength(1)
+    expect((await tableRows(LOCK)).map(row => row.lease_id !== null && row.lease_id !== undefined)).toEqual([true])
+    await owner.query('UPDATE public.meta_records SET data = data - $1::text WHERE id = $2', [fld().issueConfirmDate, recordId(0)])
+    // Run B reads the row as untraced (A's trace is not written yet) and meets A's live lease.
+    const busy = await world!.runtime.issueConfirmWriteback(actor, {})
+    expect(patches).toHaveLength(1)
+    expect(busy.results).toEqual([{ ledgerId, kind: 'retryable', code: 'STOCK_PREP_PROJECT_WRITE_LOCKED' }])
+    parked.release()
+    expect(outcomeOf(await first)).toEqual(['written'])
+    expect((await tableRows(TRACE)).map(row => [row.ledger_id, row.outcome])).toEqual([[ledgerId, 'written']])
+    expect((await tableRows(LOCK)).map(row => row.lease_id ?? null)).toEqual([null])
+    // Traced now: the next run selects nothing, and the emptied cell stays empty.
+    expect((await world!.runtime.issueConfirmWriteback(actor, {})).results).toEqual([])
+    expect(patches).toHaveLength(1)
+    const after = await cell()
+    expect([after.date, after.version]).toEqual([null, before.version + 1])
+  })
+
+  it('target-set stability on real PostgreSQL: a cursor issued under another listed set (added, removed — another or its own target — reordered) is YIDA_ISSUE_CONFIRM_CURSOR_STALE with zero write-back statements; a fresh sweep then answers every row once', async () => {
+    await compose()
+    await draft(boundInput(1))
+    const t1 = world!.targetRef, t2 = randomUUID(), t3 = randomUUID()
+    const seeded = (prefix: string, count: number) => Array.from({ length: count }, (_, i) => `${prefix}${String(i).padStart(3, '0')}`)
+    await seedStuck('syn-st-a-', 3, t1)
+    await seedStuck('syn-st-b-', 2, t2)
+    await seedStuck('syn-st-c-', 2, t3)
+    const of: Record<string, string[]> = { [t1]: seeded('syn-st-a-', 3), [t2]: seeded('syn-st-b-', 2), [t3]: seeded('syn-st-c-', 2) }
+    async function sweepIds() {
+      const seen: string[] = []
+      let after: string | undefined
+      for (let guard = 0; guard < 50; guard++) {
+        const page = await world!.runtime.issueConfirmWriteback(actor, { limit: 2, ...(after === undefined ? {} : { after }) })
+        seen.push(...page.results.map(entry => String(entry.ledgerId)))
+        if (page.next === null) return seen
+        after = String(page.next)
+      }
+      throw new Error('SYNTHETIC_SWEEP_DID_NOT_TERMINATE')
+    }
+    for (const [name, changed] of [['added', [t1, t2, t3]], ['removed (another target)', [t1]], ['removed (its own target)', [t2]],
+      ['reordered', [t2, t1]]] as Array<[string, string[]]>) {
+      world!.env.INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS = [t1, t2].join(',')
+      const first = await world!.runtime.issueConfirmWriteback(actor, { limit: 2 })
+      expect(first.results.map(entry => entry.ledgerId), name).toEqual(of[t1].slice(0, 2))
+      expect(typeof first.next).toBe('string')
+      world!.env.INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS = changed.join(',')
+      wbStatements.length = 0
+      await expect(world!.runtime.issueConfirmWriteback(actor, { limit: 2, after: first.next })).rejects
+        .toMatchObject({ code: 'YIDA_ISSUE_CONFIRM_CURSOR_STALE' })
+      expect(wbStatements, name).toEqual([])
+      expect(await sweepIds(), name).toEqual(changed.flatMap(targetRef => of[targetRef]))
+    }
+    // The control: the set unchanged, the cursor goes on (and a forged cursor with the current digest on an unlisted
+    // target is the 400, not the 409).
+    world!.env.INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS = [t1, t2].join(',')
+    const first = await world!.runtime.issueConfirmWriteback(actor, { limit: 2 })
+    const rest = await world!.runtime.issueConfirmWriteback(actor, { limit: 2, after: first.next })
+    expect(rest.results.map(entry => entry.ledgerId)).toEqual([of[t1][2], of[t2][0]])
+    const decoded = JSON.parse(Buffer.from(String(first.next), 'base64url').toString('utf8')) as Row
+    await expect(world!.runtime.issueConfirmWriteback(actor, { after: cursorText({ ...decoded, t: t3 }) })).rejects
+      .toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
+    expect(await tableRows(TRACE)).toEqual([])
+    expect(patches).toEqual([])
   })
 
   // The recovery scan's progress on real PostgreSQL (Codex, Y9 review): traced and unbound rows are excluded by the
@@ -938,12 +1049,39 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
       const second = await sweepOf([SCAN_TARGET, OTHER_SCAN_TARGET], 100, first.next)
       expect([second.rows.map(row => row.id), second.next]).toEqual([ids('syn-pu-', 0, 2), null])
       expect(wbStatements.filter(sql => sql.includes(`"${LEDGER}"`))).toHaveLength(2)
+      // Exhaustion, the converse (option 1): exactly `limit` at the end of a NON-last target whose later targets are empty
+      // gives a cursor after ONE statement, then one empty page with next null (one statement per remaining target).
+      const empties = [SCAN_TARGET, 'synthetic-scan-target-empty-1', 'synthetic-scan-target-empty-2']
+      wbStatements.length = 0
+      const filled = await sweepOf(empties, 100)
+      expect([filled.rows.length, filled.next?.id]).toEqual([100, 'syn-pt-00099'])
+      expect(wbStatements.filter(sql => sql.includes(`"${LEDGER}"`))).toHaveLength(1)
+      wbStatements.length = 0
+      const tail = await sweepOf(empties, 100, filled.next)
+      expect([tail.rows, tail.next]).toEqual([[], null])
+      expect(wbStatements.filter(sql => sql.includes(`"${LEDGER}"`))).toHaveLength(3)
       // More than `limit` in the first target: still one statement (the look-ahead row says the target goes on).
       await seedLedger('syn-pt-x-', 1, { from: 4000 })
       wbStatements.length = 0
       const over = await sweepOf([SCAN_TARGET, OTHER_SCAN_TARGET], 100)
       expect(over.rows).toHaveLength(100)
       expect(wbStatements.filter(sql => sql.includes(`"${LEDGER}"`))).toHaveLength(1)
+    })
+
+    it('exhaustion on PostgreSQL: next null means no candidate remains — at every limit the pages up to the first null hold every candidate, every page before it is full', async () => {
+      await seedLedger('syn-ex-a-', 4)
+      await seedLedger('syn-ex-c-', 3, { target: OTHER_SCAN_TARGET })
+      // Target sizes 4, 0, 3, 0: pages fill at every kind of boundary, empty targets in the middle and at the end.
+      const targets = [SCAN_TARGET, 'synthetic-scan-target-empty-1', OTHER_SCAN_TARGET, 'synthetic-scan-target-empty-2']
+      const truth = (await owner.query(`SELECT id FROM ${ident(LEDGER)} WHERE id LIKE 'syn-ex-%'
+        ORDER BY CASE target_ref WHEN $1 THEN 0 ELSE 1 END, created_at, id`, [SCAN_TARGET])).rows.map(row => String(row.id))
+      expect(truth).toEqual([...ids('syn-ex-a-', 0, 4), ...ids('syn-ex-c-', 0, 3)])
+      for (const limit of [1, 2, 3, 4, 5, 7, 8]) {
+        const pages = await follow(targets, limit)
+        expect(pages.flatMap(page => page.rows.map(row => row.id)), `limit ${limit}`).toEqual(truth)
+        expect(pages.map(page => page.next === null), `limit ${limit}`).toEqual(pages.map((_, index) => index === pages.length - 1))
+        expect(pages.slice(0, -1).every(page => page.rows.length === limit), `limit ${limit}`).toBe(true)
+      }
     })
   })
 })

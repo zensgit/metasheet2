@@ -17,7 +17,8 @@ import { issueConfirmRoleGrantSatisfied, yidaIssueConfirmLiveRecheck } from '../
 const actor = Object.freeze({ actorId: 'synthetic-wb-owner', tenantId: 'synthetic-wb-tenant', workspaceId: null })
 const LEDGER = '55555555-5555-4555-8555-555555555555'
 // A sweep cursor as the host sees it: opaque base64url text (the plugin core decodes and judges it).
-const CURSOR = Buffer.from(JSON.stringify({ v: 1, t: '66666666-6666-4666-8666-666666666666', c: '2026-03-01T00:00:00.000001Z', i: LEDGER }), 'utf8').toString('base64url')
+const CURSOR = Buffer.from(JSON.stringify({ v: 2, s: '0123456789abcdef0123456789abcdef', t: '66666666-6666-4666-8666-666666666666',
+  c: '2026-03-01T00:00:00.000001Z', i: LEDGER }), 'utf8').toString('base64url')
 
 async function dispatch(body: unknown, owner: Partial<YidaOwnerHttpPort>, options: { url?: string; headers?: Record<string, string> } = {}) {
   const req = Object.assign(new EventEmitter(), { method: 'POST', url: options.url ?? '/issue-confirm-writeback',
@@ -103,7 +104,7 @@ describe('POST /issue-confirm-writeback (route)', () => {
     }
     for (const bad of [
       { enabled: true, results: [], next: 7 }, { enabled: true, results: [], next: 'not a cursor' }, { enabled: true, results: [], next: 'A'.repeat(2049) },
-      { enabled: true, results: [], refused: 'AFTER' },
+      { enabled: true, results: [], refused: 'AFTER' }, { enabled: true, results: [], refused: 'STALE' },
       { ...good, extra: 1 },
       { enabled: true, results: [{ ...good.results[0], projectNo: 'DEMO-P1' }] },
       { enabled: true, results: [{ ledgerId: LEDGER, kind: 'retryable', code: 'lowercase message' }] },
@@ -119,6 +120,17 @@ describe('POST /issue-confirm-writeback (route)', () => {
     const port: Partial<YidaOwnerHttpPort> = { issueConfirmWritebackEnabled: () => true,
       async issueConfirmWriteback() { throw new YidaOwnerRuntimeError('INPUT') } }
     expect(await dispatch({ after: CURSOR }, port)).toEqual({ status: 400, result: { ok: false, error: { code: 'YIDA_OWNER_RUNTIME_INPUT' } } })
+  })
+  it('a cursor issued under another listed target set reaches the caller as YIDA_ISSUE_CONFIRM_CURSOR_STALE: a 409 (restart without after), nothing echoed', async () => {
+    const stale = new YidaOwnerRuntimeError('CURSOR_STALE')
+    expect([stale.code, stale.message]).toEqual(['YIDA_ISSUE_CONFIRM_CURSOR_STALE', 'YIDA_ISSUE_CONFIRM_CURSOR_STALE'])
+    const port: Partial<YidaOwnerHttpPort> = { issueConfirmWritebackEnabled: () => true,
+      async issueConfirmWriteback() { throw stale } }
+    expect(await dispatch({ after: CURSOR }, port)).toEqual({ status: 409, result: { ok: false, error: { code: 'YIDA_ISSUE_CONFIRM_CURSOR_STALE' } } })
+    // A foreign error that merely carries that text is not the runtime's own: the generic 503.
+    const forged: Partial<YidaOwnerHttpPort> = { issueConfirmWritebackEnabled: () => true,
+      async issueConfirmWriteback() { throw Object.assign(new Error('YIDA_ISSUE_CONFIRM_CURSOR_STALE'), { code: 'YIDA_ISSUE_CONFIRM_CURSOR_STALE' }) } }
+    expect(await dispatch({ after: CURSOR }, forged)).toEqual({ status: 503, result: { ok: false, error: { code: 'YIDA_OWNER_HTTP_UNAVAILABLE' } } })
   })
 })
 

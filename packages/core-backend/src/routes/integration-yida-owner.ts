@@ -40,6 +40,8 @@ const statuses: Readonly<Record<string, number>> = Object.freeze({
   UNAUTHORIZED: 401, YIDA_OWNER_HTTP_INPUT: 400, YIDA_OWNER_HTTP_DENIED: 403, YIDA_OWNER_HTTP_UNAVAILABLE: 503,
   YIDA_OWNER_RUNTIME_INPUT: 400, YIDA_OWNER_RUNTIME_DISABLED: 403, YIDA_OWNER_RUNTIME_INACTIVE: 503,
   YIDA_OWNER_RUNTIME_UNAVAILABLE: 503, YIDA_OWNER_RUNTIME_CANCELLED: 409,
+  // Y9 sweep: the cursor was issued under another listed target set — restart the sweep without `after`.
+  YIDA_ISSUE_CONFIRM_CURSOR_STALE: 409,
   YIDA_SEND_APPROVAL_INPUT: 400, YIDA_SEND_APPROVAL_NOT_FOUND: 404, YIDA_SEND_APPROVAL_CONFLICT: 409,
   YIDA_SEND_APPROVAL_EXPIRED: 409, YIDA_SEND_APPROVAL_REVOKED: 409,
   YIDA_SEND_APPROVAL_CANCELLED: 409, YIDA_SEND_APPROVAL_UNAVAILABLE: 503,
@@ -473,7 +475,9 @@ export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initia
   // owner's ledger rows), optional `limit` (1..100) and, without ledgerIds only, optional `after` (the previous
   // answer's `next`: a batch run is one page of a sweep — start without `after`, follow `next` until it is null) — and
   // one bounded, idempotent run; the runtime proves the live owner first and every row is re-checked under its sheet
-  // lease. A cursor the core cannot accept is a 400 like any other bad input. Never the send switch, never a send.
+  // lease. A tampered cursor, or one that names an unlisted target, gets 400; a stale target set gets 409
+  // (YIDA_ISSUE_CONFIRM_CURSOR_STALE: restart without `after`); a well-formed cursor on a listed target only moves the
+  // start. Never the send switch, never a send.
   const issueConfirmWritebackEnabled = () => { try { return port.issueConfirmWritebackEnabled?.() === true } catch { return false } }
   const whenIssueConfirmWriteback = (handler: RequestHandler): RequestHandler => (req, res, next) => {
     if (!issueConfirmWritebackEnabled()) { next(); return }

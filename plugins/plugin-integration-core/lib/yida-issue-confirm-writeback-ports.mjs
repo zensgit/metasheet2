@@ -53,9 +53,11 @@ export const ISSUE_CONFIRM_LEDGER_AUDIT_TABLE = 'integration_yida_delivery_audit
 // Database work per statement still grows with the target's ledger and trace history (no index serves this order).
 //
 // A FUTURE DURABLE "DEFERRED" MARKER (a row known retryable, to be left out or ordered last) must be its own table with
-// its own validated db method and its own pluginDb provenance re-pin — never a row of the trace table: every trace row is
-// final for both the anti-join here and the named path's probe, and the trace table is append-only (migration
-// zzzz20261106093100).
+// its own validated db method and its own pluginDb provenance re-pin — never a row of the trace table: the anti-join here,
+// the named path's probe and the core's re-check under the sheet lease (right before the patch) all treat a trace row as
+// final, and the trace table is append-only (migration zzzz20261106093100). What "final" covers: a trace that exists when
+// a run reads the row, or when it re-checks under the lease, stops that run from patching; the core header says which
+// interleaving the lease does not serialize (an outcome traced before any lease).
 const TRACE_ANTI_JOIN = Object.freeze({ table: ISSUE_CONFIRM_TRACE_TABLE, on: Object.freeze({ ledger_id: 'id' }) })
 const LEDGER_KEYSET = Object.freeze({ at: 'created_at', id: 'id' })
 const ID_RE = /^[^\u0000-\u001f\u007f]{1,128}$/u
@@ -264,7 +266,9 @@ export function createIssueConfirmWritebackCapability(options = {}) {
       authority: Object.freeze({ recheck: (scope) => recheck(Object.freeze({ ...scope })) }),
     })
     // The scope is the host's authenticated owner, never the caller's: a run names only ledger ids, a limit and (batch
-    // mode) the sweep cursor `after`, which the core decodes against the listed targets and which moves only the start.
+    // mode) the sweep cursor `after`, which the core decodes against the listed targets: a tampered cursor, or one that
+    // names an unlisted target, is refused (400); one issued under another target set is STALE (409); a well-formed
+    // cursor on a listed target only moves the start.
     async function run(request = {}) {
       const ledgerIds = request.ledgerIds
       const limit = request.limit
