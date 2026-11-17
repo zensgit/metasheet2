@@ -476,5 +476,125 @@ export function defineStockPreparationGenericWriterGovernanceRealDbCases(): void
       console.log(`[S6-07] ${JSON.stringify(observed)}`)
       expect(observed).toEqual({ written: 1, refused: `409:${CODES.REFUSED}:pilot:true`, mainUnchanged: true })
     }, 300000)
+
+    // D2 (R-96 switch-on precondition): a REGISTERED, NOT governed project sheet stays writable by the generic writers
+    // (GV-1), so on such a sheet they strip the machine write-back column and fence each update with the version they
+    // read. Everything is real: the host SDK's patchRecord (expectedVersion → `AND version = $4` / VERSION_CONFLICT),
+    // the stand-in write-back is the same SDK patch the write-back makes, and the race is a real commit between the
+    // writer's read and its update. The unregistered twin (same template, free key, no registry row) shows today's
+    // behaviour is unchanged for every other target: the configured column is written, no fence.
+    test('S6-09 (D2) registered, NOT governed sheet: pipeline upsert / C6 updateRows / ERP feedback never write the machine column and a racing write-back is a retryable VERSION conflict; an unregistered twin keeps today\'s behaviour', async () => {
+      const MACHINE = 'issueConfirmDate'
+      const SEEDED = '2026-11-01'
+      const RACED = '2026-11-02'
+      const registered = await stack('s09', { pilot: false })
+      const twin = await stack('s09t', { register: false })
+      const physical = async (s: any) => s.multitable.provisioning.resolveFieldIds({ projectId: s.projectId, objectId: s.objectId, fieldIds: [MACHINE, 'material', 'idempotencyKey'] }) as Promise<Record<string, string>>
+      // The free-key config of stack() plus the machine column, as an operator could configure it.
+      const withMachine = (s: any, ids: Record<string, string>) => {
+        const main = s.system.config.objects.main
+        return { ...s.system, config: { objects: { main: { ...main, fieldIdMap: { ...main.fieldIdMap, [MACHINE]: ids[MACHINE] }, fields: [...main.fields, { name: MACHINE }] } } } }
+      }
+      const rowOf = async (s: any, ids: Record<string, string>, key: string) => {
+        const row = (await q('SELECT id, version, data FROM meta_records WHERE sheet_id = $1', [s.sheetId])).rows.find((entry: any) => entry.data && entry.data[ids.idempotencyKey] === key)
+        return row ? { id: row.id as string, version: Number(row.version), date: row.data[ids[MACHINE]] ?? null, material: row.data[ids.material] ?? null } : null
+      }
+      // The write-back stand-in: the plugin SDK patch of the machine column alone.
+      const writeback = async (s: any, ids: Record<string, string>, recordId: string, date: string) => s.multitable.records.patchRecord({ sheetId: s.sheetId, recordId, changes: { [ids[MACHINE]]: date } })
+      // A records API whose FIRST query commits a real write-back right after it reads (between the writer's read and
+      // its update); every other method is the real SDK's.
+      const racing = (s: any, ids: Record<string, string>, key: string) => {
+        let armed = true
+        const records = Object.create(s.multitable.records)
+        records.queryRecords = async (input: any) => {
+          const out = await s.multitable.records.queryRecords(input)
+          if (armed) {
+            armed = false
+            const row = await rowOf(s, ids, key)
+            if (row) await writeback(s, ids, row.id, RACED)
+          }
+          return out
+        }
+        return { api: { multitable: { provisioning: s.multitable.provisioning, records } } }
+      }
+
+      const observed: Record<string, unknown> = {}
+      for (const [label, s] of [['registered', registered], ['twin', twin]] as Array<[string, any]>) {
+        const ids = await physical(s)
+        const sys = withMachine(s, ids)
+        const rec = s.record('d2')
+        const seeded = await s.adapter(s.probe, sys).upsert({ object: 'main', records: [rec] })
+        const row0 = await rowOf(s, ids, rec.idempotencyKey)
+        await writeback(s, ids, row0!.id, SEEDED)
+        // (b) the direct overwrite: the configured payload names the machine column.
+        const upsert = await s.adapter(s.probe, sys).upsert({ object: 'main', records: [{ ...rec, material: 'M-D2-UPSERT', [MACHINE]: null }] })
+        const afterUpsert = await rowOf(s, ids, rec.idempotencyKey)
+        await writeback(s, ids, row0!.id, SEEDED)
+        const c6 = await adapterLib.createMetaSheetMultitableWriteSource({ system: sys, context: { api: { multitable: s.multitable } }, governedSheetProbe: s.probe })
+          .updateRows('mt', 'main', [{ ...rec, material: 'M-D2-C6', [MACHINE]: null }], { keyFields: ['idempotencyKey'] })
+        const afterC6 = await rowOf(s, ids, rec.idempotencyKey)
+        await writeback(s, ids, row0!.id, SEEDED)
+        // (a) the race: a write-back commits between the writer's read and its update.
+        const raced = await adapterLib.createMetaSheetMultitableTargetAdapter({ system: sys, context: racing(s, ids, rec.idempotencyKey), governedSheetProbe: s.probe })
+          .upsert({ object: 'main', records: [{ ...rec, material: 'M-D2-RACE' }] })
+        const afterRace = await rowOf(s, ids, rec.idempotencyKey)
+        observed[label] = {
+          seeded: seeded.results.map((entry: any) => entry.status),
+          upsert: { statuses: upsert.results.map((entry: any) => entry.status), failed: upsert.failed },
+          afterUpsert: { date: afterUpsert!.date, material: afterUpsert!.material },
+          c6RowCount: c6.rowCount,
+          afterC6: { date: afterC6!.date, material: afterC6!.material },
+          raced: { written: raced.written, failed: raced.failed, codes: raced.errors.map((entry: any) => `${entry.code}:${entry.retryable === true}`) },
+          afterRace: { date: afterRace!.date, material: afterRace!.material },
+        }
+      }
+
+      // ERP feedback (real provisioning; the project sheet's namespace object): strip + fence, then the race.
+      const ids = await physical(registered)
+      const fbKey = registered.record('d2').idempotencyKey
+      const fbRow = await rowOf(registered, ids, fbKey)
+      await writeback(registered, ids, fbRow!.id, SEEDED)
+      const feedbackInput = { tenantId: registered.tenantId, projectId: registered.projectId, objectId: registered.objectId, keyField: 'idempotencyKey', updates: [{ key: fbKey, fields: { [MACHINE]: null, material: 'M-D2-FB' } }] }
+      const feedback = await createMultitableFeedbackWriter({ context: { api: { multitable: registered.multitable } }, governedSheetProbe: registered.probe }).updateRecords(feedbackInput)
+      const afterFeedback = await rowOf(registered, ids, fbKey)
+      const fbRaced = await createMultitableFeedbackWriter({ context: racing(registered, ids, fbKey), governedSheetProbe: registered.probe })
+        .updateRecords({ ...feedbackInput, updates: [{ key: fbKey, fields: { material: 'M-D2-FB-RACE' } }] })
+      const afterFbRace = await rowOf(registered, ids, fbKey)
+      observed.feedback = {
+        result: `${feedback.ok}:${feedback.patched}:${feedback.created}`,
+        after: { date: afterFeedback!.date, material: afterFeedback!.material },
+        raced: `${fbRaced.ok}:${fbRaced.patched}:${fbRaced.conflicted}:${fbRaced.reason}:${fbRaced.retryable}`,
+        afterRace: { date: afterFbRace!.date, material: afterFbRace!.material },
+      }
+      console.log(`[S6-09] ${JSON.stringify(observed)}`)
+      expect(observed).toEqual({
+        registered: {
+          seeded: ['created'],
+          upsert: { statuses: ['updated'], failed: 0 },
+          afterUpsert: { date: SEEDED, material: 'M-D2-UPSERT' },
+          c6RowCount: 1,
+          afterC6: { date: SEEDED, material: 'M-D2-C6' },
+          raced: { written: 0, failed: 1, codes: ['METASHEET_MULTITABLE_VERSION_CONFLICT:true'] },
+          afterRace: { date: RACED, material: 'M-D2-C6' },
+        },
+        // Today's behaviour on an unregistered sheet: the configured column is written; the race is last-writer-wins
+        // (the date the racing write-back committed stays only because this payload does not name it).
+        twin: {
+          seeded: ['created'],
+          upsert: { statuses: ['updated'], failed: 0 },
+          afterUpsert: { date: null, material: 'M-D2-UPSERT' },
+          c6RowCount: 1,
+          afterC6: { date: null, material: 'M-D2-C6' },
+          raced: { written: 1, failed: 0, codes: [] },
+          afterRace: { date: RACED, material: 'M-D2-RACE' },
+        },
+        feedback: {
+          result: 'true:1:0',
+          after: { date: SEEDED, material: 'M-D2-FB' },
+          raced: 'false:0:1:ERP_FEEDBACK_VERSION_CONFLICT:true',
+          afterRace: { date: RACED, material: 'M-D2-FB' },
+        },
+      })
+    }, 300000)
   })
 }

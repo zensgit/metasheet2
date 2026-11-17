@@ -56,6 +56,9 @@ const SAFE_WRITE_ERROR_CODES = new Set([
   // write-source built without its probe, is a TARGET fact, not an opaque WRITE_FAILED.
   'METASHEET_MULTITABLE_STOCK_PREP_GOVERNED_SHEET',
   'STOCK_PREP_GOVERNED_SHEET_PROBE_UNWIRED',
+  // D2 (R-96 switch-on precondition): the write-source's fenced update of a stock-prep target found the row moved
+  // between its read and its write — a RETRYABLE row fact (the row was not written), not an opaque WRITE_FAILED.
+  'METASHEET_MULTITABLE_VERSION_CONFLICT',
   'DATA_SOURCE_BRIDGE_CONFIG_ERROR',
   'DATA_SOURCE_GENERIC_QUERY_DISABLED_REQUIRED',
   'DATA_SOURCE_NOT_C6_WRITE_TARGET',

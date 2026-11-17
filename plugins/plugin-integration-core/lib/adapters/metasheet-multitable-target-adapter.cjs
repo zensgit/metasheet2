@@ -26,10 +26,101 @@ const {
   GOVERNED_SHEET_WRITE_SURFACES,
   StockPreparationGovernedSheetWriteError,
   assertProbeWiredFor,
+  isStockPreparationNamespaceObjectId,
   refuseIfGoverned,
 } = require('../stock-preparation-governed-sheet-probe.cjs')
+const { MACHINE_WRITEBACK_FIELD_IDS } = require('../stock-preparation-templates.cjs')
 
 const INTERNAL_FIELD_PREFIX = '_integration_'
+
+// D2 (switch-on precondition for the YiDa issue-confirm write-back, register R-96). A REGISTERED stock-prep project
+// sheet that is not GOVERNED stays writable by the generic writers (GV-1, stock-preparation-refresh-governance.cjs),
+// and its machine write-back columns (MACHINE_WRITEBACK_FIELD_IDS, today `issueConfirmDate`) have exactly one writer:
+// the write-back. On a STOCK-PREP TARGET — an object key in the stock-prep namespace, or a sheet the governed-sheet
+// probe reports as registered (`registry.present`, the answer already cached by the pre-write assertion) — an UPDATE
+// from this file therefore
+//   (b) strips the machine columns from its payload (the logical id, the configured physical id, and the provisioned
+//       physical id when the object carries a projectId), and
+//   (a) carries `expectedVersion` (the version it read), so the host's whole-object UPDATE cannot put back a row read
+//       before a concurrent write-back committed; a conflict is a RETRYABLE row failure with the closed code below.
+// Every other target is byte-identical to before (no strip, no `expectedVersion` key). Creates are unchanged: a new
+// row cannot erase a date.
+const METASHEET_MULTITABLE_VERSION_CONFLICT = 'METASHEET_MULTITABLE_VERSION_CONFLICT'
+// The host's plugin-SDK conflict (core-backend multitable/record-errors.ts MultitableRecordVersionConflictError.code).
+const HOST_RECORD_VERSION_CONFLICT_CODE = 'VERSION_CONFLICT'
+
+class MultitableVersionConflictError extends Error {
+  constructor(objectId) {
+    super(`${METASHEET_MULTITABLE_VERSION_CONFLICT}: the target row changed between the read and the write; nothing was written for this row and it can be retried`)
+    this.name = 'MultitableVersionConflictError'
+    this.code = METASHEET_MULTITABLE_VERSION_CONFLICT
+    this.retryable = true
+    this.details = { ...(typeof objectId === 'string' && objectId ? { object: objectId } : {}), retryable: true }
+  }
+}
+
+function isHostVersionConflict(error) {
+  return Boolean(error && error.code === HOST_RECORD_VERSION_CONFLICT_CODE)
+}
+
+/** Is this object a stock-prep target (namespace key, or a sheet the cached probe answer says is registered)? */
+function isStockPreparationMachineColumnTarget(objectConfig, governedSheetCache) {
+  if (isStockPreparationNamespaceObjectId(objectConfig.objectId)) return true
+  const answer = governedSheetCache.get(objectConfig.objectId)
+  return Boolean(answer && answer.registry && answer.registry.present === true)
+}
+
+/** The payload keys that name a machine write-back column on this object: logical ids + every physical id known. */
+async function machineColumnKeysFor(context, objectConfig, logicalToPhysical) {
+  const keys = new Set(MACHINE_WRITEBACK_FIELD_IDS)
+  for (const fieldId of MACHINE_WRITEBACK_FIELD_IDS) {
+    if (typeof logicalToPhysical[fieldId] === 'string' && logicalToPhysical[fieldId]) keys.add(logicalToPhysical[fieldId])
+  }
+  // The provisioned physical id, even when the object's field list does not name the column (a raw physical key).
+  const provisioned = await resolveProvisionedFieldIdMap(context, {
+    ...objectConfig,
+    fields: MACHINE_WRITEBACK_FIELD_IDS.map((name) => ({ name })),
+    keyFields: [],
+  })
+  for (const physical of Object.values(provisioned || {})) {
+    if (typeof physical === 'string' && physical) keys.add(physical)
+  }
+  return keys
+}
+
+function omitMachineColumns(changes, keys) {
+  const data = {}
+  let stripped = 0
+  for (const [field, value] of Object.entries(changes)) {
+    if (keys.has(field)) stripped += 1
+    else data[field] = value
+  }
+  return { data, stripped }
+}
+
+/**
+ * THE fenced update of a stock-prep target: strip, then patch with the version read. An unreadable version, or the
+ * host's VERSION_CONFLICT, is the retryable conflict (fail closed: never an unfenced patch). Returns null when the
+ * payload is empty after the strip (the caller skips the row: an empty patch would still bump the version).
+ */
+async function patchMachineColumnTarget({ recordsApi, objectConfig, existing, changes, machineKeys }) {
+  const shielded = omitMachineColumns(changes, machineKeys)
+  if (Object.keys(shielded.data).length === 0) return null
+  const expectedVersion = existing.version
+  if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) throw new MultitableVersionConflictError(objectConfig.objectId)
+  try {
+    const updated = await recordsApi.patchRecord({
+      sheetId: objectConfig.sheetId,
+      recordId: existing.id,
+      changes: shielded.data,
+      expectedVersion,
+    })
+    return { updated, stripped: shielded.stripped }
+  } catch (error) {
+    if (isHostVersionConflict(error)) throw new MultitableVersionConflictError(objectConfig.objectId)
+    throw error
+  }
+}
 
 // S3 fix round 2 (F3; register R-37): the typed refusal of a write to a READ-ONLY SYSTEM SHEET (today: the
 // stock-preparation project overview, written only by its own plugin port). DEFENSE IN DEPTH: the host's
@@ -344,7 +435,7 @@ async function findExistingRecord(recordsApi, objectConfig, data, keyFields) {
   return Array.isArray(records) && records.length > 0 ? records[0] : null
 }
 
-async function writeOne({ recordsApi, objectConfig, request, record, index, logicalToPhysical, shield }) {
+async function writeOne({ recordsApi, objectConfig, request, record, index, logicalToPhysical, shield, machineKeys = null }) {
   const logicalData = projectRecordForWrite(record, objectConfig)
   const keyFields = resolvedKeyFields(request, objectConfig)
   const mode = objectConfig.mode === 'append' || keyFields.length === 0 ? 'append' : 'upsert'
@@ -371,6 +462,20 @@ async function writeOne({ recordsApi, objectConfig, request, record, index, logi
       })
     }
     const existing = await findExistingRecord(recordsApi, objectConfig, data, physicalKeyFields)
+    if (existing && existing.id && machineKeys) {
+      // D2: a stock-prep target — machine columns stripped, the version read fences the update.
+      const fenced = await patchMachineColumnTarget({ recordsApi, objectConfig, existing, changes: writeData, machineKeys })
+      if (!fenced) return { index, status: 'skipped', key, reason: 'machine_writeback_columns_only' }
+      return {
+        index,
+        status: 'updated',
+        key,
+        externalId: fenced.updated.id,
+        recordId: fenced.updated.id,
+        version: fenced.updated.version,
+        ...(fenced.stripped > 0 ? { machineColumnsStripped: fenced.stripped } : {}),
+      }
+    }
     if (existing && existing.id) {
       const updated = await recordsApi.patchRecord({
         sheetId: objectConfig.sheetId,
@@ -421,6 +526,17 @@ function createMetaSheetMultitableTargetAdapter({ system, context, governedSheet
     }
     fieldMapCache.set(objectConfig.objectId, resolved)
     return resolved
+  }
+
+  // D2: the machine-column keys of a stock-prep target (null for every other target). Read AFTER the pre-write
+  // assertion, so the probe answer it consults is the one that assertion cached.
+  const machineKeysCache = new Map()
+  async function machineKeysForObject(objectConfig, logicalToPhysical) {
+    if (!isStockPreparationMachineColumnTarget(objectConfig, caches.governedSheet)) return null
+    if (!machineKeysCache.has(objectConfig.objectId)) {
+      machineKeysCache.set(objectConfig.objectId, await machineColumnKeysFor(context, objectConfig, logicalToPhysical))
+    }
+    return machineKeysCache.get(objectConfig.objectId)
   }
 
   return {
@@ -557,6 +673,7 @@ function createMetaSheetMultitableTargetAdapter({ system, context, governedSheet
         candidateWriteFields(request.records, objectConfig),
       )
       ownershipGuard.assertKeyFieldsWritable(shield, objectConfig.objectId, resolvedKeyFields(request, objectConfig))
+      const machineKeys = await machineKeysForObject(objectConfig, logicalToPhysical)
       const results = []
       const errors = []
       let skipped = 0
@@ -571,15 +688,22 @@ function createMetaSheetMultitableTargetAdapter({ system, context, governedSheet
             index,
             logicalToPhysical,
             shield,
+            machineKeys,
           })
           if (outcome.status === 'skipped') skipped += 1
           results.push(outcome)
         } catch (error) {
+          // D2: a version conflict on a stock-prep target is its own closed, RETRYABLE code (the runner dead-letters
+          // the row under it; a replay re-reads the row).
+          const conflict = error instanceof MultitableVersionConflictError
           errors.push({
             index,
-            code: error && error.name === 'AdapterValidationError'
-              ? 'METASHEET_MULTITABLE_VALIDATION_FAILED'
-              : 'METASHEET_MULTITABLE_WRITE_FAILED',
+            code: conflict
+              ? METASHEET_MULTITABLE_VERSION_CONFLICT
+              : error && error.name === 'AdapterValidationError'
+                ? 'METASHEET_MULTITABLE_VALIDATION_FAILED'
+                : 'METASHEET_MULTITABLE_WRITE_FAILED',
+            ...(conflict ? { retryable: true } : {}),
             message: error && error.message ? error.message : String(error),
             record: projectRecordForWrite(request.records[index], objectConfig),
           })
@@ -701,6 +825,16 @@ function createMetaSheetMultitableWriteSource({ system, context, governedSheetPr
     return resolved
   }
 
+  // D2: as the target adapter — the machine-column keys of a stock-prep target, null for every other target.
+  const machineKeysCache = new Map()
+  async function machineKeysForObject(objectConfig, logicalToPhysical) {
+    if (!isStockPreparationMachineColumnTarget(objectConfig, caches.governedSheet)) return null
+    if (!machineKeysCache.has(objectConfig.objectId)) {
+      machineKeysCache.set(objectConfig.objectId, await machineColumnKeysFor(context, objectConfig, logicalToPhysical))
+    }
+    return machineKeysCache.get(objectConfig.objectId)
+  }
+
   return {
     async test() {
       const recordsApi = context && context.api && context.api.multitable && context.api.multitable.records
@@ -782,6 +916,7 @@ function createMetaSheetMultitableWriteSource({ system, context, governedSheetPr
       const keyFields = writeSourceKeyFields(policy, objectConfig)
       const shield = await ownershipGuard.forObject(objectConfig, candidateWriteFields(rows, objectConfig))
       ownershipGuard.assertKeyFieldsWritable(shield, objectConfig.objectId, keyFields)
+      const machineKeys = await machineKeysForObject(objectConfig, logicalToPhysical)
       let rowCount = 0
       for (const row of rows) {
         const logicalRow = projectRecordForWrite(row, objectConfig)
@@ -800,6 +935,14 @@ function createMetaSheetMultitableWriteSource({ system, context, governedSheetPr
         const changes = projected.stripped > 0
           ? mapRecordFieldsForWrite(projected.data, logicalToPhysical)
           : physicalRow
+        if (machineKeys) {
+          // D2: a stock-prep target — machine columns stripped, the version read fences the update; a conflict
+          // throws the closed retryable code, which the C6 row loop dead-letters under that code.
+          const fenced = await patchMachineColumnTarget({ recordsApi, objectConfig, existing, changes, machineKeys })
+          if (!fenced) continue
+          rowCount += 1
+          continue
+        }
         await recordsApi.patchRecord({ sheetId: objectConfig.sheetId, recordId: existing.id, changes })
         rowCount += 1
       }
@@ -883,6 +1026,9 @@ module.exports = {
   // S3 fix round 2 (F3): the read-only system-sheet refusal, catchable by type / code.
   MultitableSystemSheetWriteError,
   METASHEET_MULTITABLE_SYSTEM_SHEET_READ_ONLY,
+  // D2: the retryable version conflict of a stock-prep target's fenced update, catchable by type / code.
+  MultitableVersionConflictError,
+  METASHEET_MULTITABLE_VERSION_CONFLICT,
   // Batch-refresh step 4 PR-6: the governed-sheet refusal (409) and the not-wired refusal (501), catchable by type /
   // code, and the closed list of seams that raise them.
   StockPreparationGovernedSheetWriteError,
@@ -902,5 +1048,8 @@ module.exports = {
     resolveProvisionedFieldIdMap,
     resolvedKeyFields,
     writeSourceKeyFields,
+    isStockPreparationMachineColumnTarget,
+    machineColumnKeysFor,
+    omitMachineColumns,
   },
 }

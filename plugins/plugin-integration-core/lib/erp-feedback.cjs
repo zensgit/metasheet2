@@ -13,7 +13,17 @@ const {
   GOVERNED_SHEET_WRITE_CODES,
   StockPreparationGovernedSheetWriteError,
   assertProbeWiredFor,
+  isStockPreparationNamespaceObjectId,
 } = require('./stock-preparation-governed-sheet-probe.cjs')
+const { MACHINE_WRITEBACK_FIELD_IDS } = require('./stock-preparation-templates.cjs')
+
+// D2 (switch-on precondition for the YiDa issue-confirm write-back, register R-96): on a STOCK-PREP TARGET (a
+// provisioning object id in the stock-prep namespace, or a sheet the governed-sheet probe reports as registered) the
+// feedback UPDATE strips the machine write-back columns (MACHINE_WRITEBACK_FIELD_IDS) and carries `expectedVersion`
+// (the version read); a version conflict leaves that row unwritten and is reported by this closed, retryable reason.
+// Every other target is byte-identical to before. Creates are unchanged (a new row cannot erase a date).
+const ERP_FEEDBACK_VERSION_CONFLICT = 'ERP_FEEDBACK_VERSION_CONFLICT'
+const HOST_RECORD_VERSION_CONFLICT_CODE = 'VERSION_CONFLICT'
 
 const DEFAULT_FIELD_MAP = Object.freeze({
   status: 'erpSyncStatus',
@@ -366,10 +376,27 @@ async function findRecordByKey(recordsApi, sheetId, physicalKeyField, key) {
 // request-supplied. Built WITHOUT a probe: an object id in the stock-prep namespace is refused 501 (the not-wired
 // backstop), every other object writes exactly as before. No resolved sheet: nothing can be governed and the host
 // refuses a write to no sheet on its own, so the probe is not asked (byte-identical to before PR-6).
+// Returns the probe's answer for a sheet that is not governed (null when no probe was asked) — D2 reads its
+// `registry.present` to recognise a registered stock-prep project sheet.
 async function assertFeedbackSheetWritable({ governedSheetProbe, sheetId, tenantId, objectId }) {
-  if (!assertProbeWiredFor({ governedSheetProbe, surface: 'erp_feedback', objectId })) return
-  if (sheetId === undefined || sheetId === null || sheetId === '') return
-  await governedSheetProbe.assertSheetWritable({ sheetId: String(sheetId), tenantId, surface: 'erp_feedback', objectId })
+  if (!assertProbeWiredFor({ governedSheetProbe, surface: 'erp_feedback', objectId })) return null
+  if (sheetId === undefined || sheetId === null || sheetId === '') return null
+  const answer = await governedSheetProbe.assertSheetWritable({ sheetId: String(sheetId), tenantId, surface: 'erp_feedback', objectId })
+  return answer === undefined ? null : answer
+}
+
+// D2: a stock-prep target = a namespace object id, or a sheet the probe answered as registered.
+function isStockPreparationMachineColumnTarget(objectId, answer) {
+  if (isStockPreparationNamespaceObjectId(objectId)) return true
+  return Boolean(answer && answer.registry && answer.registry.present === true)
+}
+
+function omitKeys(data, keys) {
+  const out = {}
+  for (const [field, value] of Object.entries(data)) {
+    if (!keys.has(field)) out[field] = value
+  }
+  return out
 }
 
 // The feedback result's reason for a governance refusal (409 governed / 501 not wired) or a governance read that
@@ -412,14 +439,21 @@ function createMultitableFeedbackWriter({ context, governedSheetProbe } = {}) {
 
       const sheetId = await resolveObjectSheetId(provisioning, projectId, objectId)
       // PR-6: a governed stock-prep sheet is refused before the field resolve and before any records IO.
-      await assertFeedbackSheetWritable({ governedSheetProbe, sheetId, tenantId: normalizeString(input.tenantId), objectId })
+      const governance = await assertFeedbackSheetWritable({ governedSheetProbe, sheetId, tenantId: normalizeString(input.tenantId), objectId })
+      const machineTarget = isStockPreparationMachineColumnTarget(objectId, governance)
       const fieldIds = Array.from(new Set([
         keyField,
         ...updates.flatMap((update) => Object.keys(update.fields || {})),
+        ...(machineTarget ? MACHINE_WRITEBACK_FIELD_IDS : []),
       ]))
       const fieldIdMap = await resolveFields(provisioning, projectId, objectId, fieldIds)
+      // D2: the payload keys that name a machine column here (logical ids and their resolved physical ids).
+      const machineKeys = machineTarget
+        ? new Set([...MACHINE_WRITEBACK_FIELD_IDS, ...MACHINE_WRITEBACK_FIELD_IDS.map((fieldId) => fieldIdMap[fieldId]).filter(Boolean)])
+        : null
       let patched = 0
       let created = 0
+      let conflicted = 0
 
       for (const update of updates) {
         const key = normalizeString(update.key)
@@ -427,6 +461,24 @@ function createMultitableFeedbackWriter({ context, governedSheetProbe } = {}) {
         const physicalKeyField = fieldIdMap[keyField] || keyField
         const physicalChanges = toPhysicalData(update.fields || {}, fieldIdMap)
         const existing = await findRecordByKey(recordsApi, sheetId, physicalKeyField, key)
+        if (existing && existing.id && machineKeys) {
+          const changes = omitKeys(physicalChanges, machineKeys)
+          if (Object.keys(changes).length === 0) continue
+          const expectedVersion = existing.version
+          if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
+            conflicted += 1
+            continue
+          }
+          try {
+            await recordsApi.patchRecord({ sheetId, recordId: existing.id, changes, expectedVersion })
+          } catch (error) {
+            if (!(error && error.code === HOST_RECORD_VERSION_CONFLICT_CODE)) throw error
+            conflicted += 1
+            continue
+          }
+          patched += 1
+          continue
+        }
         if (existing && existing.id) {
           await recordsApi.patchRecord({
             sheetId,
@@ -447,12 +499,14 @@ function createMultitableFeedbackWriter({ context, governedSheetProbe } = {}) {
       }
 
       return {
-        ok: true,
+        ok: conflicted === 0,
         sheetId,
         objectId,
         patched,
         created,
         written: patched + created,
+        // D2: rows left unwritten by a version conflict (a stock-prep target only); absent when there were none.
+        ...(conflicted > 0 ? { conflicted, reason: ERP_FEEDBACK_VERSION_CONFLICT, retryable: true } : {}),
       }
     },
   }
@@ -524,6 +578,23 @@ function createErpFeedbackWriter({ stagingWriter, context, logger, clock, govern
           source: item.source,
         })),
       })
+      // D2: a version conflict left rows unwritten — reported by its own retryable reason (the next run re-feeds).
+      if (result && Number.isInteger(result.conflicted) && result.conflicted > 0) {
+        if (failOnError) {
+          throw new ErpFeedbackError(`${ERP_FEEDBACK_VERSION_CONFLICT}: ${result.conflicted} feedback row(s) changed between the read and the write and were not written; retry`, { reason: ERP_FEEDBACK_VERSION_CONFLICT, conflicted: result.conflicted, retryable: true })
+        }
+        return {
+          ok: false,
+          skipped: false,
+          reason: ERP_FEEDBACK_VERSION_CONFLICT,
+          retryable: true,
+          projectId,
+          objectId,
+          keyField,
+          items,
+          result,
+        }
+      }
       return {
         ok: true,
         skipped: false,
@@ -565,6 +636,7 @@ module.exports = {
   DEFAULT_FIELD_MAP,
   DEFAULT_OBJECT_BY_TARGET,
   ErpFeedbackError,
+  ERP_FEEDBACK_VERSION_CONFLICT,
   createErpFeedbackWriter,
   createMultitableFeedbackWriter,
   normalizeFeedbackItems,
