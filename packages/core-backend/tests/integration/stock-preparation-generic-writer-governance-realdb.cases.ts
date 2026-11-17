@@ -668,11 +668,13 @@ export function defineStockPreparationGenericWriterGovernanceRealDbCases(): void
       const fbNewKey = reg.record('d2r2-new-fb').idempotencyKey
       await createMultitableFeedbackWriter({ context: { api: { multitable: reg.multitable } }, governedSheetProbe: reg.probe })
         .updateRecords({ tenantId: reg.tenantId, projectId: reg.projectId, objectId: reg.objectId, keyField: 'idempotencyKey', updates: [{ key: fbNewKey, fields: { [MACHINE]: '2026-12-04', material: 'M-FB-NEW' } }] })
+      // The created row's date (null = no value), or 'absent' when no row was created.
+      const dateOf = async (key: string) => { const row = await rowBy(reg, ids, key); return row ? row.date : 'absent' }
       observed.creates = {
-        upsert: (await rowBy(reg, ids, created.idempotencyKey))?.date ?? 'absent',
-        upsertRaw: (await rowBy(reg, ids, reg.record('d2r2-new-raw').idempotencyKey))?.date ?? 'absent',
-        c6: (await rowBy(reg, ids, reg.record('d2r2-new-c6').idempotencyKey))?.date ?? 'absent',
-        erp: (await rowBy(reg, ids, fbNewKey))?.date ?? 'absent',
+        upsert: await dateOf(created.idempotencyKey),
+        upsertRaw: await dateOf(reg.record('d2r2-new-raw').idempotencyKey),
+        c6: await dateOf(reg.record('d2r2-new-c6').idempotencyKey),
+        erp: await dateOf(fbNewKey),
         erpMaterial: (await rowBy(reg, ids, fbNewKey))?.material ?? 'absent',
       }
 
