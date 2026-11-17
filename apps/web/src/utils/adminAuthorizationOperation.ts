@@ -33,7 +33,7 @@ export type AdminAuthorizationEffectiveSource =
 
 export interface AdminAuthorizationEffectivePermission {
   code: string
-  sources: AdminAuthorizationEffectiveSource[]
+  sources: readonly AdminAuthorizationEffectiveSource[]
   effective: boolean
 }
 
@@ -59,13 +59,13 @@ export interface AdminAuthorizationScopeCleanup {
 }
 
 export interface AdminAuthorizationImpact {
-  sourceChanges: AdminAuthorizationSourceChange[]
-  admissionChanges: AdminAuthorizationImpactAdmissionChange[]
-  scopeCleanup: AdminAuthorizationScopeCleanup[]
-  effectiveBefore: AdminAuthorizationEffectivePermission[]
-  effectiveAfter: AdminAuthorizationEffectivePermission[]
-  retainedOtherGrants: AdminAuthorizationEffectivePermission[]
-  warnings: string[]
+  sourceChanges: readonly AdminAuthorizationSourceChange[]
+  admissionChanges: readonly AdminAuthorizationImpactAdmissionChange[]
+  scopeCleanup: readonly AdminAuthorizationScopeCleanup[]
+  effectiveBefore: readonly AdminAuthorizationEffectivePermission[]
+  effectiveAfter: readonly AdminAuthorizationEffectivePermission[]
+  retainedOtherGrants: readonly AdminAuthorizationEffectivePermission[]
+  warnings: readonly string[]
 }
 
 export interface AdminAuthorizationRoleAction {
