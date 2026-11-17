@@ -815,6 +815,49 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     expect([world!.fake.token, world!.fake.form]).toEqual([1, 1])
   })
 
+  // Stock-prep round-3 condition (4)(1): main's lease purposes Y9 had never run against. Another stock-prep writer holds
+  // the sheet's lease through the REAL write-lock acquire for its own purpose (no precondition: acquire takes the
+  // purpose, a run id and the tenant); the post-ACK write-back meets it: retryable WRITE_LOCKED, nothing written, no
+  // trace, DEFERRED once (never UNWRITTEN); after the holder released, a recovery sweep writes the date once.
+  it.each([['pull_batch_install'], ['recovery_verify'], ['sheet_repair']])('contention on real PostgreSQL with the %s lease: the post-ACK write-back is WRITE_LOCKED, writes nothing and logs DEFERRED once; after release a recovery sweep writes the date once', async (purpose) => {
+    await compose()
+    const before = await cell()
+    const lock = createWriteLock({ db: createDb({ database: pluginDatabase }) }) as {
+      scopeKeyFor(sheetId: string): string
+      withProjectWriteLease(scopeKey: string, options: Row, fn: () => Promise<unknown>): Promise<unknown>
+    }
+    let sent: Awaited<ReturnType<typeof sendOne>> | undefined
+    let held: Row[] = []
+    await lock.withProjectWriteLease(lock.scopeKeyFor(sheetId()), { purpose, runId: randomUUID(), tenantId: TENANT }, async () => {
+      held = await tableRows(LOCK)
+      sent = await sendOne(boundInput(0))
+      await warned()
+    })
+    // The holder really held the sheet's lease for its own purpose while the post-ACK run ran.
+    expect(held.map(row => [row.lease_purpose, row.lease_id !== null && row.lease_id !== undefined])).toEqual([[purpose, true]])
+    const ledgerId = String(sent!.grant.ledgerId ?? sent!.result.delivery!.id)
+    expect([sent!.result.status, sent!.result.reused]).toEqual(['acknowledged', false])
+    const answers = await Promise.all(world!.runs)
+    expect(answers.map(answer => answer.results.map(entry => [entry.ledgerId, entry.kind, entry.code]))).toEqual([[[ledgerId, 'retryable', 'STOCK_PREP_PROJECT_WRITE_LOCKED']]])
+    expect(world!.warnings).toEqual([DEFERRED])
+    expect(patches).toEqual([])
+    expect(await tableRows(TRACE)).toEqual([])
+    expect([(await cell()).date, (await cell()).version]).toEqual([null, before.version])
+    // Released: the recovery sweep (no ledgerIds, no after) writes the date once; the next sweep has nothing to do.
+    const swept = await world!.runtime.issueConfirmWriteback(actor, {})
+    expect([outcomeOf(swept), swept.next]).toEqual([['written'], null])
+    const after = await cell()
+    expect([after.date, after.version]).toEqual([businessDay(await ackAt(ledgerId)), before.version + 1])
+    expect(after.data[fld().warehouseConfirmation]).toBe(HUMAN_NOTE)
+    expect(patches).toHaveLength(1)
+    expect((await tableRows(TRACE)).map(row => [row.ledger_id, row.outcome])).toEqual([[ledgerId, 'written']])
+    expect(await world!.runtime.issueConfirmWriteback(actor, {})).toEqual({ enabled: true, results: [], next: null })
+    expect(patches).toHaveLength(1)
+    expect(world!.warnings).toEqual([DEFERRED])
+    expect((await tableRows(LOCK)).map(row => row.lease_id ?? null)).toEqual([null])
+    expect([world!.fake.token, world!.fake.form]).toEqual([1, 1])
+  })
+
   it('D5 a on real PostgreSQL: the send answers while its post-ACK write-back is parked; stop() waits for that in-flight run within the barrier; the stopped run writes nothing and recovery fills the date once', async () => {
     await compose()
     // Park the post-ACK run at its first sheet-lease statement (the send itself never touches the lease table).
