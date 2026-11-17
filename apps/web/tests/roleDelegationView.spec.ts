@@ -263,6 +263,35 @@ describe('RoleDelegationView', () => {
     window.history.replaceState({}, '', '/')
   })
 
+  function listedMemberButton(label: string): HTMLButtonElement | null {
+    const button = Array.from(container!.querySelectorAll('button.delegation-page__user')).find((node) => (
+      node instanceof HTMLButtonElement && (node.textContent || '').includes(label)
+    ))
+    return button instanceof HTMLButtonElement ? button : null
+  }
+
+  async function selectListedMember(label: string): Promise<void> {
+    await waitForCondition(() => {
+      const button = listedMemberButton(label)
+      return Boolean(button && !button.disabled)
+    })
+    listedMemberButton(label)?.click()
+  }
+
+  async function waitForMemberListSettled(callsBefore = 0): Promise<void> {
+    await waitForCondition(() => {
+      const requested = callLog.slice(callsBefore).some((url) => {
+        try {
+          return new URL(url, 'http://localhost').pathname === '/api/admin/role-delegation/users'
+        } catch {
+          return false
+        }
+      })
+      const loading = Array.from(container!.querySelectorAll('button')).some((button) => button.textContent?.includes('加载中'))
+      return requested && !loading
+    })
+  }
+
   async function mountView(): Promise<void> {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', {
@@ -270,7 +299,8 @@ describe('RoleDelegationView', () => {
       template: '<a><slot /></a>',
     })
     app.mount(container!)
-    await waitForCondition(() => callLog.includes('/api/admin/role-delegation/users/user-1/scopes'))
+    await selectListedMember('alpha@example.com')
+    await waitForCondition(() => Boolean(container?.querySelector('[data-testid="scope-include-children"]')))
   }
 
   it('clears stale selected member group after searching to an empty result set', async () => {
@@ -371,6 +401,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => Boolean(container?.querySelector('select[data-testid="delegation-revoke-role"] option[value="plugin_elearning_viewer"]')))
 
     const optionValues = (testId: string) => Array.from(
@@ -678,6 +709,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => (container?.querySelector('.delegation-page__panel--detail h2')?.textContent || '').includes('Alpha'))
     await waitForCondition(() => callLog.some((url) => url.includes('/users/user-1/scopes')))
     await flushUi()
@@ -780,6 +812,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => Boolean(container?.querySelector('[data-testid="delegation-assign-role"]')))
     const assignSelect = container!.querySelector('[data-testid="delegation-assign-role"]') as HTMLSelectElement
     assignSelect.value = 'crm_admin'
@@ -871,6 +904,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => callLog.some((url) => url.includes('/users/user-1/access')))
     await flushUi()
     const detail = container!.querySelector('.delegation-page__panel--detail')
@@ -955,6 +989,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => callLog.some((url) => url.includes('/users/user-1/scopes')))
     await flushUi()
     expect(container?.querySelector('.delegation-page__panel--detail h2')?.textContent).toContain('Alpha')
@@ -1029,6 +1064,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => Boolean(container?.querySelector('[data-testid="delegation-assign-role"] option[value="crm_admin"]')))
     const assignSelect = container!.querySelector('[data-testid="delegation-assign-role"]') as HTMLSelectElement
     assignSelect.value = 'crm_admin'
@@ -1090,7 +1126,7 @@ describe('RoleDelegationView', () => {
   }
 
   async function openLifecycleConfirmation(kind: 'grant' | 'revoke' | 'admission'): Promise<void> {
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => Boolean(container?.querySelector('[data-testid="delegation-assign-role"]')))
     if (kind === 'admission') {
       findButtonByText(container!, '开通插件使用').click()
@@ -1237,6 +1273,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => Boolean(container?.querySelector('[data-testid="delegation-assign-role"]')))
     const assignSelect = container!.querySelector('[data-testid="delegation-assign-role"]') as HTMLSelectElement
     assignSelect.value = 'crm_admin'
@@ -1366,7 +1403,12 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
-    await waitForCondition(() => choiceLabels().includes('仅本部门') && choiceLabels().includes('未返回是否包含下级'))
+    await selectListedMember('alpha@example.com')
+    await waitForCondition(() => (
+      Boolean(container?.querySelector('[data-testid="scope-include-children-value"]'))
+      && choiceLabels().includes('仅本部门')
+      && choiceLabels().includes('未返回是否包含下级')
+    ))
     expect(container?.querySelector('[data-testid="scope-include-children-value"]')?.textContent).toContain('包含下级部门')
     const scopeBox = container!.querySelector('[data-testid="scope-include-children"]') as HTMLInputElement
     scopeBox.checked = false
@@ -1438,6 +1480,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => Boolean(container?.querySelector('[data-testid="delegation-disabled-reason-user-9"]')))
     const disabled = container!.querySelector('[data-testid="delegation-user-disabled"]') as HTMLButtonElement
     expect(disabled.disabled).toBe(true)
@@ -1525,6 +1568,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => container!.querySelectorAll('[data-testid="admission-namespace-locked"]').length === 1)
     const enableButtons = Array.from(container!.querySelectorAll('button')).filter((button) => button.textContent?.includes('开通插件使用'))
     expect(enableButtons[0]?.disabled).toBe(true)
@@ -1581,6 +1625,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => (container?.querySelector('.delegation-page__panel--detail h2')?.textContent || '').includes('Alpha'))
     const searchInput = container!.querySelector('input[placeholder="搜索邮箱、姓名或用户 ID"]') as HTMLInputElement
     searchInput.value = 'stale'
@@ -1594,6 +1639,10 @@ describe('RoleDelegationView', () => {
     const searchAgain = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('查询') || button.textContent?.includes('加载中'))
     if (!(searchAgain instanceof HTMLButtonElement)) throw new Error('Search button missing')
     searchAgain.click()
+    await waitForCondition(() => callLog.some((url) => url.includes('q=fresh')) && (container?.textContent || '').includes('请选择一个成员'))
+    expect(container?.querySelector('.delegation-page__panel--detail h2')).toBeNull()
+    expect(callLog.some((url) => url.includes('/users/user-2/access'))).toBe(false)
+    await selectListedMember('bravo@example.com')
     await waitForCondition(() => (container?.querySelector('.delegation-page__panel--detail h2')?.textContent || '').includes('Bravo'))
     const alphaReads = callLog.filter((url) => url.includes('/users/user-1/access')).length
     releaseStale?.()
@@ -1669,6 +1718,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => (container?.textContent || '').includes('保留部门'))
     const revokeSelect = container!.querySelector('[data-testid="delegation-revoke-role"]') as HTMLSelectElement
     revokeSelect.value = 'platform_admin'
@@ -1741,6 +1791,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => (container?.textContent || '').includes('旧部门'))
     const assignSelect = container!.querySelector('[data-testid="delegation-assign-role"]') as HTMLSelectElement
     assignSelect.value = 'crm_admin'
@@ -1795,6 +1846,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => Boolean(container?.querySelector('[data-testid="delegation-revoke-role"] option[value="admin"]')))
     const revokeSelect = container!.querySelector('[data-testid="delegation-revoke-role"]') as HTMLSelectElement
     revokeSelect.value = 'admin'
@@ -1858,6 +1910,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => Boolean(container?.querySelector('[data-testid="delegation-revoke-role"] option[value="empty_role"]')))
     const revokeSelect = container!.querySelector('[data-testid="delegation-revoke-role"]') as HTMLSelectElement
     revokeSelect.value = 'empty_role'
@@ -1928,6 +1981,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => Boolean(container?.querySelector('[data-testid="scope-include-children"]')))
     const scopeBox = container!.querySelector('[data-testid="scope-include-children"]') as HTMLInputElement
     scopeBox.checked = false
@@ -1974,6 +2028,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => Boolean(container?.querySelector('[data-testid="admission-namespace-locked"]')))
     const enable = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('开通插件使用'))
     expect((enable as HTMLButtonElement).disabled).toBe(true)
@@ -2064,10 +2119,15 @@ describe('RoleDelegationView', () => {
     button.click()
   }
 
-  function mountDelegation(): void {
+  async function mountDelegation(): Promise<void> {
+    const callsBefore = callLog.length
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    if (new URL(window.location.href).searchParams.get('userId')?.trim()) return
+    await waitForMemberListSettled(callsBefore)
+    const alpha = listedMemberButton('alpha@example.com')
+    if (alpha && !alpha.disabled) alpha.click()
   }
 
   function statusText(): string {
@@ -2132,7 +2192,7 @@ describe('RoleDelegationView', () => {
       }
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => (container?.textContent || '').includes('可选部门'))
     const namespaceSelect = Array.from(container!.querySelectorAll('select')).find((select) => select.textContent?.includes('attendance')) as HTMLSelectElement
     namespaceSelect.value = 'crm'
@@ -2198,7 +2258,7 @@ describe('RoleDelegationView', () => {
       }
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => Boolean(container?.querySelector('[data-testid="delegation-assign-role"]')))
     const assignSelect = container!.querySelector('[data-testid="delegation-assign-role"]') as HTMLSelectElement
     assignSelect.value = 'crm_admin'
@@ -2279,7 +2339,7 @@ describe('RoleDelegationView', () => {
       }
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => (container?.textContent || '').includes('插件使用已开通'))
     findButtonByText(container!, '关闭插件使用').click()
     try {
@@ -2365,7 +2425,7 @@ describe('RoleDelegationView', () => {
       }
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => (container?.textContent || '').includes('旧部门'))
     const assignSelect = container!.querySelector('[data-testid="delegation-assign-role"]') as HTMLSelectElement
     assignSelect.value = 'crm_admin'
@@ -2428,7 +2488,7 @@ describe('RoleDelegationView', () => {
       }
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => (container?.textContent || '').includes('插件使用未开通'))
     findButtonByText(container!, '开通插件使用').click()
     await flushUi()
@@ -2472,7 +2532,7 @@ describe('RoleDelegationView', () => {
       }
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => (container?.textContent || '').includes('插件使用未开通'))
     const readsBefore = accessReads
     findButtonByText(container!, '开通插件使用').click()
@@ -2563,7 +2623,7 @@ describe('RoleDelegationView', () => {
       }
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => (container?.textContent || '').includes('保留部门'))
     const departmentSelect = Array.from(container!.querySelectorAll('select')).find((select) => select.textContent?.includes('可选部门')) as HTMLSelectElement
     departmentSelect.value = 'dept-1'
@@ -2663,7 +2723,7 @@ describe('RoleDelegationView', () => {
       }
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => (container?.textContent || '').includes('原部门'))
     const searchInput = container!.querySelector('input[placeholder="搜索邮箱、姓名或用户 ID"]') as HTMLInputElement
     searchInput.value = 'bravo'
@@ -2766,7 +2826,7 @@ describe('RoleDelegationView', () => {
     })
     if (app) app.unmount()
     container?.replaceChildren()
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => Boolean(container?.querySelector('[data-testid="scope-include-children"]')))
   }
 
@@ -2833,7 +2893,7 @@ describe('RoleDelegationView', () => {
       }
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => choiceLabels().includes('仅本部门'))
     expect(choiceLabels()).toEqual(expect.arrayContaining(['仅本部门', '包含下级部门', '未返回是否包含下级']))
     expect(container?.querySelector('[data-testid="scope-include-children"]')).toBeNull()
@@ -2945,7 +3005,7 @@ describe('RoleDelegationView', () => {
       }
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => choiceLabels().includes('仅本部门') && choiceLabels().includes('未返回是否包含下级'))
     const scopeBox = container!.querySelector('[data-testid="scope-include-children"]') as HTMLInputElement
     expect(scopeBox.checked).toBe(true)
@@ -3074,7 +3134,7 @@ describe('RoleDelegationView', () => {
       }
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => Boolean(container?.querySelector('[data-testid="scope-include-children"]')))
     selectControl('crm').value = 'crm'
     selectControl('crm').dispatchEvent(new Event('change'))
@@ -3156,7 +3216,7 @@ describe('RoleDelegationView', () => {
       }
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => choiceLabels().includes('仅本部门') && Boolean(container?.querySelector('[data-testid="scope-include-children"]')))
     selectControl('crm').value = 'crm'
     selectControl('crm').dispatchEvent(new Event('change'))
@@ -3196,5 +3256,235 @@ describe('RoleDelegationView', () => {
     expect(posts[1]).toEqual({ namespace: 'crm', directoryDepartmentId: 'dept-1', includeChildren: true })
     await waitForCondition(() => statusText().includes('插件管理员部门范围已添加'))
     expect(choiceLabels()).toContain('仅本部门')
+  })
+
+  function detailHeading(): string {
+    return container?.querySelector('.delegation-page__panel--detail h2')?.textContent || ''
+  }
+
+  function mountPlain(): void {
+    app = createApp(RoleDelegationView)
+    app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
+    app.mount(container!)
+  }
+
+  function accessPayload(id: string, name: string, email: string) {
+    return {
+      actorId: 'admin-1',
+      isPlatformAdmin: false,
+      delegableNamespaces: ['crm'],
+      roleCatalog: [],
+      user: { id, email, name, role: 'user', is_active: true },
+      roles: [],
+      memberGroups: [],
+      delegableRoles: [],
+      namespaceAdmissions: [],
+    }
+  }
+
+  it('does not select the first member when the management scope page opens', async () => {
+    apiFetchMock.mockImplementation(async (input: unknown) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            items: [
+              { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+              { id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true },
+            ],
+          },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') return createJsonResponse({ ok: true, data: accessPayload('user-1', 'Alpha', 'alpha@example.com') })
+      if (pathname === '/api/admin/role-delegation/users/user-2/access') return createJsonResponse({ ok: true, data: accessPayload('user-2', 'Bravo', 'bravo@example.com') })
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    mountPlain()
+    await waitForMemberListSettled()
+    expect(container?.querySelector('.delegation-page__user--active')).toBeNull()
+    expect(container?.querySelector('.delegation-page__panel--detail')?.textContent).toContain('请选择一个成员')
+    expect(callLog.some((url) => url.includes('/access') || url.includes('/scopes'))).toBe(false)
+    expect(apiFetchMock.mock.calls.some(([, init]) => init?.method === 'POST' || init?.method === 'PATCH')).toBe(false)
+    await selectListedMember('bravo@example.com')
+    await waitForCondition(() => detailHeading().includes('Bravo'))
+    expect(callLog.some((url) => url.includes('/users/user-2/access'))).toBe(true)
+    expect(callLog.some((url) => url.includes('/users/user-1/access'))).toBe(false)
+    expect(container?.querySelector('.delegation-page__user--active')?.textContent).toContain('Bravo')
+  })
+
+  it('clears the current member when a search page hides them and does not select the next member', async () => {
+    apiFetchMock.mockImplementation(async (input: unknown) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const url = new URL(rawUrl, 'http://localhost')
+      if (url.pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (url.pathname === '/api/admin/role-delegation/users') {
+        const items = url.searchParams.get('q') === 'bravo'
+          ? [{ id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true }]
+          : [
+            { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+            { id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true },
+          ]
+        return createJsonResponse({ ok: true, data: { items } })
+      }
+      if (url.pathname === '/api/admin/role-delegation/users/user-1/access') return createJsonResponse({ ok: true, data: accessPayload('user-1', 'Alpha', 'alpha@example.com') })
+      if (url.pathname === '/api/admin/role-delegation/users/user-2/access') return createJsonResponse({ ok: true, data: accessPayload('user-2', 'Bravo', 'bravo@example.com') })
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    mountPlain()
+    await selectListedMember('alpha@example.com')
+    await waitForCondition(() => detailHeading().includes('Alpha'))
+    const searchInput = container!.querySelector('input[placeholder="搜索邮箱、姓名或用户 ID"]') as HTMLInputElement
+    searchInput.value = 'bravo'
+    searchInput.dispatchEvent(new Event('input'))
+    await flushUi()
+    findButtonByText(container!, '查询').click()
+    await waitForMemberListSettled()
+    await waitForCondition(() => callLog.some((url) => url.includes('q=bravo')) && (container?.textContent || '').includes('请选择一个成员'))
+    expect(detailHeading()).toBe('')
+    expect(container?.querySelector('.delegation-page__user--active')).toBeNull()
+    expect(listedMemberButton('bravo@example.com')).toBeTruthy()
+    expect(callLog.some((url) => url.includes('/users/user-2/access'))).toBe(false)
+    expect(apiFetchMock.mock.calls.some(([, init]) => init?.method === 'POST' || init?.method === 'PATCH')).toBe(false)
+  })
+
+  it('does not let a late user list replace a newer explicit member', async () => {
+    let releaseLate: (() => void) | undefined
+    const lateGate = new Promise<void>((resolve) => { releaseLate = resolve })
+    apiFetchMock.mockImplementation(async (input: unknown) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const url = new URL(rawUrl, 'http://localhost')
+      if (url.pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (url.pathname === '/api/admin/role-delegation/users') {
+        if (url.searchParams.get('q') === 'late') {
+          await lateGate
+          return createJsonResponse({
+            ok: true,
+            data: { items: [{ id: 'user-3', email: 'charlie@example.com', name: 'Charlie', role: 'user', is_active: true }] },
+          })
+        }
+        return createJsonResponse({
+          ok: true,
+          data: {
+            items: [
+              { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+              { id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true },
+              { id: 'user-3', email: 'charlie@example.com', name: 'Charlie', role: 'user', is_active: true },
+            ],
+          },
+        })
+      }
+      if (url.pathname === '/api/admin/role-delegation/users/user-1/access') return createJsonResponse({ ok: true, data: accessPayload('user-1', 'Alpha', 'alpha@example.com') })
+      if (url.pathname === '/api/admin/role-delegation/users/user-2/access') return createJsonResponse({ ok: true, data: accessPayload('user-2', 'Bravo', 'bravo@example.com') })
+      if (url.pathname === '/api/admin/role-delegation/users/user-3/access') return createJsonResponse({ ok: true, data: accessPayload('user-3', 'Charlie', 'charlie@example.com') })
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    mountPlain()
+    await selectListedMember('bravo@example.com')
+    await waitForCondition(() => detailHeading().includes('Bravo'))
+    const searchInput = container!.querySelector('input[placeholder="搜索邮箱、姓名或用户 ID"]') as HTMLInputElement
+    searchInput.value = 'late'
+    searchInput.dispatchEvent(new Event('input'))
+    await flushUi()
+    findButtonByText(container!, '查询').click()
+    await waitForCondition(() => callLog.some((url) => url.includes('q=late')))
+    await selectListedMember('alpha@example.com')
+    await waitForCondition(() => detailHeading().includes('Alpha'))
+    const alphaReads = callLog.filter((url) => url.includes('/users/user-1/access')).length
+    const charlieReads = callLog.filter((url) => url.includes('/users/user-3/access')).length
+    try {
+      releaseLate?.()
+      await flushUi(8)
+      expect(detailHeading()).toContain('Alpha')
+      expect(detailHeading()).not.toContain('Charlie')
+      expect(container?.textContent).not.toContain('请选择一个成员')
+      expect(callLog.filter((url) => url.includes('/users/user-1/access')).length).toBe(alphaReads)
+      expect(callLog.filter((url) => url.includes('/users/user-3/access')).length).toBe(charlieReads)
+      expect(apiFetchMock.mock.calls.some(([, init]) => init?.method === 'POST' || init?.method === 'PATCH')).toBe(false)
+    } finally {
+      releaseLate?.()
+      await flushUi(4)
+    }
+  })
+
+  it('opens the member named by the userId query and does not select the first listed member', async () => {
+    window.history.replaceState({}, '', '/admin/role-delegation?userId=user-2&source=members#scope')
+    apiFetchMock.mockImplementation(async (input: unknown) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            items: [
+              { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+              { id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true },
+            ],
+          },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') return createJsonResponse({ ok: true, data: accessPayload('user-1', 'Alpha', 'alpha@example.com') })
+      if (pathname === '/api/admin/role-delegation/users/user-2/access') return createJsonResponse({ ok: true, data: accessPayload('user-2', 'Bravo', 'bravo@example.com') })
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    mountPlain()
+    await waitForCondition(() => detailHeading().includes('Bravo'))
+    expect(callLog.some((url) => url.includes('/users/user-1/access'))).toBe(false)
+    expect(callLog.filter((url) => url.includes('/users/user-2/access'))).toHaveLength(1)
+    expect(container?.querySelector('.delegation-page__user--active')?.textContent).toContain('Bravo')
+    expect(container?.querySelector('.delegation-page__panel--detail')?.textContent).not.toContain('请选择一个成员')
+    expect(window.location.search).toContain('userId=user-2')
+    expect(apiFetchMock.mock.calls.some(([, init]) => init?.method === 'POST' || init?.method === 'PATCH')).toBe(false)
+  })
+
+  it('keeps an explicitly selected member when a refresh still lists that member', async () => {
+    apiFetchMock.mockImplementation(async (input: unknown) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            items: [
+              { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+              { id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true },
+            ],
+          },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') return createJsonResponse({ ok: true, data: accessPayload('user-1', 'Alpha', 'alpha@example.com') })
+      if (pathname === '/api/admin/role-delegation/users/user-2/access') return createJsonResponse({ ok: true, data: accessPayload('user-2', 'Bravo', 'bravo@example.com') })
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    mountPlain()
+    await selectListedMember('alpha@example.com')
+    await waitForCondition(() => detailHeading().includes('Alpha'))
+    const alphaReads = callLog.filter((url) => url.includes('/users/user-1/access')).length
+    findButtonByText(container!, '查询').click()
+    await waitForCondition(() => callLog.filter((url) => url.includes('/api/admin/role-delegation/users')).length >= 2)
+    await waitForMemberListSettled()
+    expect(detailHeading()).toContain('Alpha')
+    expect(container?.querySelector('.delegation-page__user--active')?.textContent).toContain('Alpha')
+    expect(callLog.filter((url) => url.includes('/users/user-1/access')).length).toBe(alphaReads)
+    expect(callLog.some((url) => url.includes('/users/user-2/access'))).toBe(false)
   })
 })
