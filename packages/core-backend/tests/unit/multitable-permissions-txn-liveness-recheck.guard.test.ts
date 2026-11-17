@@ -149,6 +149,13 @@ const SHEET_ROW_LOCK_CENSUS = new Map<string, string>([
     + 'Two call sites, same statement. Not a permission write.',
   ],
   [
+    'integration/automation-synthetic-preview.ts :: SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL FOR SHARE',
+    'C1/S2 synthetic integration preview admission (L2) — FOR SHARE (a read-side pin) on the rule\'s sheet, taken in '
+    + 'each checkpoint transaction after the rule row and before the actor authority rows; liveness is read IN the '
+    + 'locking statement (`deleted_at IS NULL`, no row → NOT_FOUND). It writes no permission, record or sheet row; '
+    + 'not a permission write.',
+  ],
+  [
     'multitable/exact-anchor-recovery-execute.ts :: SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) ORDER BY id FOR NO KEY UPDATE NOWAIT',
     'exact-anchor recovery apply — pins every AUTHORITY sheet for a RECORD recovery, sorted and NOWAIT '
     + '(it refuses rather than queues). Multi-sheet, so the single-id helper cannot express it; not a '

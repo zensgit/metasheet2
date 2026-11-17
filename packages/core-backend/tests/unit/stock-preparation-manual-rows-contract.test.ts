@@ -9,7 +9,7 @@
  *   K-03 the delete exemption E, stated per row (an explicit column, not derived), and M ⊂ E;
  *   K-04 the pinned details: a whitespace-only creator is no creator, keys are compared raw (never trimmed), a blank or
  *        whitespace-only record id is never manual;
- *   K-05 the 33 template columns, each in exactly ONE class of the host's whitelist (the ADR §3.3 table), with the
+ *   K-05 the 35 template columns (33 + the two R-71 7.4 PR-4 machine columns), each in exactly ONE class of the host's whitelist (the ADR §3.3 table), with the
  *        classes' ownership and required-ness as the plugin template declares them;
  *   K-06 the plugin registry read is a FIXED statement over columns migration 087 created (parsed from the migration);
  *   K-07 the failure direction is decided by SQLSTATE alone (42P01 = not registered; anything else = unreadable);
@@ -162,17 +162,21 @@ describe('K-05 the template census (ADR §3.3)', () => {
   const classes = host.MANUAL_ROW_TEMPLATE_CLASSES
   const classOf = (id: string) => (Object.entries(classes) as Array<[string, readonly string[]]>).filter(([, ids]) => ids.includes(id)).map(([cls]) => cls)
 
-  it('33 columns, each in exactly one class; no class names a column the template lacks', () => {
-    expect(fields).toHaveLength(33)
+  it('35 columns, each in exactly one class; no class names a column the template lacks', () => {
+    expect(fields).toHaveLength(35)
     for (const field of fields) expect(classOf(field.id), field.id).toHaveLength(1)
     const all = Object.values(classes).flat()
     expect(new Set(all).size).toBe(all.length)
     expect([...all].sort()).toEqual(fields.map((f) => f.id).sort())
   })
-  it('the class sizes are the ADR\'s 6 / 2 / 5 / 8 / 9 / 3', () => {
+  it('the class sizes are the ADR\'s 6 / 2 / 5 / 8 / 9 / 3, identity / RUN grown by the two PR-4 machine columns to 11', () => {
     expect(Object.fromEntries(Object.entries(classes).map(([cls, ids]) => [cls, ids.length]))).toEqual({
-      fillable: 6, lineage: 2, plan: 5, progress: 8, identity_run: 9, stamp: 3,
+      fillable: 6, lineage: 2, plan: 5, progress: 8, identity_run: 11, stamp: 3,
     })
+  })
+  it('R-71 7.4 PR-4: the machine write-back column and the empty spec column sit in identity / RUN (never written by a manual-row route)', () => {
+    for (const id of ['issueConfirmDate', 'projectSpecModel']) expect(classes.identity_run, id).toContain(id)
+    for (const id of templates.MACHINE_WRITEBACK_FIELD_IDS as readonly string[]) expect(classes.identity_run, id).toContain(id)
   })
   it('ownership: 备料计划 and 进度与回复 are the template\'s human columns; every other class is plm_system', () => {
     const human = new Set(fields.filter((f) => f.ownership === 'human_preserved').map((f) => f.id))
@@ -349,6 +353,7 @@ describe('K-09 the derived physical ids are provisioning\'s', () => {
     }
     expect(derived.key).toBe(derived.byLogical.idempotencyKey)
     expect(derived.fillable).toEqual(host.MANUAL_ROW_FILLABLE_FIELD_IDS.map((id) => derived.byLogical[id]))
-    expect(derived.neverWritten.size).toBe(2 + 9 + 3)
+    // lineage 2 + identity / RUN 11 (9 + the two R-71 7.4 PR-4 machine columns) + stamps 3
+    expect(derived.neverWritten.size).toBe(2 + 11 + 3)
   })
 })

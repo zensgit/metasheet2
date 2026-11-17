@@ -40,7 +40,7 @@ on:
 jobs:
   browser-verify:
     name: Approval browser verify (chromium)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # pinned: Playwright 1.57 cannot install deps on ubuntu-26.04 (2026-11-16); unpin after a Playwright bump
     timeout-minutes: 20
     steps:
       - name: Checkout repository
@@ -74,6 +74,7 @@ jobs:
                 apps/web/src/views/approval*|\
                 apps/web/src/types/approval.ts|\
                 apps/web/src/composables/useAuth.ts|\
+                apps/web/src/composables/adminAccessCapabilities.ts|\
                 apps/web/src/composables/useMobileViewport.ts|\
                 apps/web/src/stores/featureFlags.ts|\
                 apps/web/src/router/appRoutes.ts|\

@@ -221,20 +221,18 @@ describe('App guest bootstrap', () => {
     expect(mocks.clearStoredAuthState).toHaveBeenCalledTimes(1)
     expect(fetchLog.filter((call) => call.url.includes('/api/auth/logout')).map((call) => call.authToken))
       .toEqual([null])
-    // EXHAUSTIVE: every other request this shell issues, named. P1b round 2 added one — the
-    // DB-backed approval-administrator capability read, issued once per page load and only for
-    // a principal the token gate already admits (`user_roles: ["admin"]` here), because the
-    // 批量转交 nav entry must not be shown off a predicate the approval list scope does not use.
+    // EXHAUSTIVE: every other request this shell issues, named.
     // B-2 (todo-center-design-lock v2.14 §4) added `GET /api/todo/count`: `ApprovalTodoBadge`
     // reads the todo-center aggregate on mount (`todo/api.ts` has no dev/test mock, so it fires
     // for real here). Task-feature M2's `GET /api/tasks/pending-count` (the tasks nav badge) is
     // ABSENT here on purpose: this mock store reports every product feature off, and with the tasks
     // feature off (TASKS_ENABLED not exactly 'true' on the server) the shell must not render the
-    // tasks entry or poll its badge — even for this administrator. Order follows App.vue's
-    // template: the approvals span, then the admin-only 批量转交 entry.
-    // A stray request added later still reddens this line.
+    // tasks entry or poll its badge — even for this administrator.
+    // The admin 批量转交 entry is also absent: this mount does not run the router capability
+    // refresh, and a token role is not platform-admin authority, so the shell does not issue
+    // GET /api/approvals/admin/capability. A stray request added later still reddens this line.
     expect(fetchLog.map((call) => new URL(call.url).pathname))
-      .toEqual(['/api/todo/count', '/api/approvals/admin/capability', '/api/auth/logout'])
+      .toEqual(['/api/todo/count', '/api/auth/logout'])
     for (const key of [
       'auth_token',
       'jwt',

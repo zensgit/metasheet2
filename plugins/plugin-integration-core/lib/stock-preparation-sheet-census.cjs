@@ -27,6 +27,12 @@
 //                      (the pairing module's keyOf).
 //   creator(row)       row[EXISTING_ROW_CREATED_BY] is a string with non-empty trim() (GOV-05; the
 //                      reader sets it only for a non-blank meta_records.created_by).
+//   key columns        projectNo, idempotencyKey, componentSourceId, parentSourceId, active (SHEET_CENSUS_KEY_FIELD_IDS;
+//                      the pack's `required` list, pinned by SC-02). Every definition above reads one of them: a sheet
+//                      that lost one would still be counted (a missing parentSourceId reads every row as a root, a
+//                      missing active reads every row as active), so a census over it is NOT an answer. The pack prints
+//                      such a sheet `status=incomplete reason=field_missing`; the routes refuse the same way
+//                      (S6-5b, `censusKeyFieldVerdict` over the host's DATABASE-backed field existence read).
 //   manual rows        rows whose key starts with manual: are outside the census — the reader removes
 //                      them (ADR adr-stock-prep-manual-rows-20261030 §5.1), so they never reach `rows`
 //                      here. The pack applies the reader's RAW prefix rule itself: a JSON string key
@@ -64,6 +70,8 @@ const { EXISTING_ROW_CREATED_BY } = require(path.join(__dirname, 'stock-preparat
 const { HUMAN_PRESERVED_FIELD_IDS } = require(path.join(__dirname, 'stock-preparation-templates.cjs'))
 
 const SHEET_CENSUS_SCHEME = 'stock-preparation/sheet-census/v1'
+// The columns every census definition reads (the pack's `required` array, in its order; SC-02 pins the two equal).
+const SHEET_CENSUS_KEY_FIELD_IDS = Object.freeze(['projectNo', 'idempotencyKey', 'componentSourceId', 'parentSourceId', 'active'])
 const COMPONENT_HANDLE_LENGTH = 24
 
 // The public count keys, in output order. The pack prints exactly these (snake_case) per sheet.
@@ -191,6 +199,22 @@ function censusOfRows(rows, options = {}) {
   return { scheme: SHEET_CENSUS_SCHEME, ...counts, private: { inactiveRootRemnantComponentHandles: handles } }
 }
 
+/**
+ * S6-5b: whether the census key columns are on the sheet, from a field-existence answer
+ * (`{ resolved, fieldExistenceMode }`, target-provisioning resolveFieldExistence). Only a `db` answer is evidence:
+ *   { provable: false, missing: null }  not a db answer (computed ids never omit a field) or no map — absence can be
+ *                                       neither proved nor disproved
+ *   { provable: true, missing: n }      n = how many key columns the database does not list (0 = all present)
+ * Values-free: a boolean and an integer, never a field id.
+ */
+function censusKeyFieldVerdict(existence) {
+  if (!isPlainObject(existence) || existence.fieldExistenceMode !== 'db' || !isPlainObject(existence.resolved)) {
+    return Object.freeze({ provable: false, missing: null })
+  }
+  const missing = SHEET_CENSUS_KEY_FIELD_IDS.filter((fieldId) => !nonBlankString(existence.resolved[fieldId])).length
+  return Object.freeze({ provable: true, missing })
+}
+
 /** The values-free projection: the scheme and the integers, nothing under `private`. */
 function publicCensusOf(census) {
   if (!isPlainObject(census)) throw new StockPreparationSheetCensusError('census must be an object', { field: 'census' })
@@ -207,7 +231,9 @@ function publicCensusOf(census) {
 module.exports = {
   SHEET_CENSUS_SCHEME,
   SHEET_CENSUS_COUNT_KEYS,
+  SHEET_CENSUS_KEY_FIELD_IDS,
   StockPreparationSheetCensusError,
+  censusKeyFieldVerdict,
   censusOfRows,
   publicCensusOf,
   __internals: {

@@ -41,6 +41,8 @@ import {
   ApprovalProductService,
   applyTemplateVisibilityFilter,
   resolveApprovalListPaging,
+  routingPolicyRequiredLogLine,
+  routingPolicyServiceError,
   type ApprovalTemplateVisibilityActor,
 } from '../services/ApprovalProductService'
 import { isApprovalAdministrator } from '../services/approval-admin-capability'
@@ -99,7 +101,7 @@ import {
   resolveDirectoryUsersByIds,
   listApprovalDepartments,
 } from '../services/approval-directory'
-import { resolveApprovalRequesterOrgRelations } from '../services/ApprovalDirectoryOrg'
+import { ApprovalRoutingPolicyError, resolveApprovalRequesterOrgRelations } from '../services/ApprovalDirectoryOrg'
 import {
   archiveApprovalTemplateGroup,
   beginApprovalTemplateGroupTxn,
@@ -2470,9 +2472,21 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const rawLimit = req.query.limit
       const limit = rawLimit === undefined ? 20 : Number.parseInt(rawLimit as string, 10)
       const actorId = resolveApprovalActorId(req)
-      const relations = await resolveApprovalRequesterOrgRelations(actorId, query, {
-        includeDepartmentFieldContext: true,
-      })
+      let relations: Awaited<ReturnType<typeof resolveApprovalRequesterOrgRelations>>
+      try {
+        relations = await resolveApprovalRequesterOrgRelations(actorId, query, {
+          includeDepartmentFieldContext: true,
+        })
+      } catch (error) {
+        // Only the missing-policy refusal gets its own answer here: 422 with the fixed sentence,
+        // so the selector tells the user what the create call would. Every other failure of the
+        // read, the two policy faults included, keeps the route's existing response.
+        if (error instanceof ApprovalRoutingPolicyError && error.reason === 'policy_required') {
+          logger.warn(routingPolicyRequiredLogLine(error))
+          throw routingPolicyServiceError(error, 'department_field')
+        }
+        throw error
+      }
       if (!relations.canonicalIntegrationId) {
         throw new ServiceError(
           'Approval department directory is unavailable',

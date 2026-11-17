@@ -75,20 +75,38 @@
             <span>{{ selectedPermissions.length }} 项</span>
           </div>
           <div v-if="permissions.length === 0" class="admin-page__empty">暂无权限目录</div>
-          <div v-else class="admin-page__checkbox-grid">
-            <label v-for="permission in permissions" :key="permission.code" class="admin-page__checkbox">
-              <input
-                :checked="selectedPermissions.includes(permission.code)"
-                type="checkbox"
-                :disabled="controlsLocked"
-                @change="togglePermission(permission.code, ($event.target as HTMLInputElement).checked)"
-              >
-              <div>
-                <strong>{{ permission.code }}</strong>
-                <p>{{ presentPermission(permission).name }}</p>
-                <small>{{ presentPermission(permission).description || '无描述' }}</small>
+          <div v-else class="admin-page__permission-groups">
+            <section
+              v-for="group in permissionGroups"
+              :key="group.key"
+              class="admin-page__permission-group"
+              :data-permission-group="group.key"
+            >
+              <h4>
+                {{ group.label }}
+                <small v-if="group.label !== group.key" class="admin-page__technical-code">{{ group.key }}</small>
+              </h4>
+              <div class="admin-page__checkbox-grid">
+                <label
+                  v-for="permission in group.items"
+                  :key="permission.code"
+                  class="admin-page__checkbox"
+                  :data-permission-code="permission.code"
+                >
+                  <input
+                    :checked="selectedPermissions.includes(permission.code)"
+                    type="checkbox"
+                    :disabled="controlsLocked"
+                    @change="togglePermission(permission.code, ($event.target as HTMLInputElement).checked)"
+                  >
+                  <div>
+                    <strong>{{ permissionPresentation(permission).name }}</strong>
+                    <small v-if="permissionPresentation(permission).showTechnicalCode" class="admin-page__technical-code">{{ permission.code }}</small>
+                    <p>{{ permissionPresentation(permission).description || '无描述' }}</p>
+                  </div>
+                </label>
               </div>
-            </label>
+            </section>
           </div>
         </section>
 
@@ -98,14 +116,27 @@
             <span v-if="isEditing">成员数：{{ selectedRole?.memberCount ?? 0 }}</span>
           </div>
           <div class="admin-page__chips">
-            <span v-for="permission in selectedPermissions" :key="permission" class="admin-page__chip">
-              {{ permission }}
+            <span v-for="permission in selectedPermissionChips" :key="permission.code" class="admin-page__chip">
+              {{ permission.name }}
+              <small v-if="permission.showTechnicalCode">{{ permission.code }}</small>
             </span>
             <span v-if="selectedPermissions.length === 0" class="admin-page__empty">尚未选择权限</span>
           </div>
         </section>
 
-        <RoleMembersPanel v-if="isEditing" :role-id="selectedRoleId" />
+        <RoleMembersPanel
+          v-if="isEditing"
+          :role-id="selectedRoleId"
+          :role-name="membershipRoleName"
+          :permission-codes="membershipPermissionCodes"
+          :expected-updated-at="membershipExpectedUpdatedAt"
+          :namespaces-by-role-id="membershipNamespaces"
+          :mutations-disabled="isDirty"
+          :actions-locked="controlsLocked"
+          :focus-user-id="focusedMemberId"
+          @roster-total="onRosterTotal"
+          @membership-adjusted="onMembershipAdjusted"
+        />
 
         <footer class="admin-page__footer">
           <button class="admin-page__button" type="button" :disabled="controlsLocked || !canSave" @click="void saveRole()">
@@ -131,7 +162,7 @@
 
 <script setup lang="ts">
 import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
-import { matchedRouteKey, onBeforeRouteLeave } from 'vue-router'
+import { matchedRouteKey, onBeforeRouteLeave, routeLocationKey } from 'vue-router'
 import { apiFetch } from '../utils/api'
 import { presentPermission, presentRoleTitle, roleNameForSave } from './builtinCatalogPresentation'
 import RoleMembersPanel from './RoleMembersPanel.vue'
@@ -147,12 +178,32 @@ type RoleCatalogItem = {
    * answered 409 instead of silently resurrecting the revoked codes.
    */
   updatedAt?: string | null
+  /**
+   * Namespace list from GET /api/admin/roles. Absent or non-array is unknown:
+   * it must not be treated as an empty list that promises no admission change.
+   */
+  admissionNamespaces?: unknown
 }
 
 type PermissionCatalogItem = {
   code: string
   name: string
   description: string | null
+  category?: unknown
+  resource?: unknown
+}
+
+type PermissionPresentation = {
+  code: string
+  name: string
+  description: string | null
+  showTechnicalCode: boolean
+}
+
+type PermissionGroup = {
+  key: string
+  label: string
+  items: PermissionCatalogItem[]
 }
 
 type LoadedRoleBaseline = {
@@ -219,6 +270,157 @@ const isDirty = computed(() => draftDiffersFromLoadedRole() || conflictDraft.val
 const controlsLocked = computed(() => leavePromptOpen.value || busy.value || transitionActive.value)
 const authoritativePermissionLabel = computed(() => formatPermissionList(loadedBaseline.value?.permissions || []))
 const conflictPermissionLabel = computed(() => formatPermissionList(conflictDraft.value?.permissions || []))
+
+const PERMISSION_GROUP_LABELS: Record<string, string> = {
+  '*': '全部',
+  admin: '平台管理',
+  permissions: '权限',
+  roles: '角色',
+  attendance: '考勤',
+  spreadsheet: '电子表格',
+  spreadsheets: '电子表格',
+  comments: '评论',
+  multitable: '多维表',
+  elearning: '在线学习',
+  'stock-prep': '备料',
+  tasks: '任务',
+  approvals: '审批',
+  'approval-templates': '审批模板',
+  demo: '演示',
+  test: '测试',
+  '其他': '其他',
+}
+
+function permissionGroupKey(permission: PermissionCatalogItem): string {
+  if (typeof permission.category === 'string' && permission.category.trim()) return permission.category.trim()
+  if (typeof permission.resource === 'string' && permission.resource.trim()) return permission.resource.trim()
+  const colon = permission.code.indexOf(':')
+  if (colon > 0) return permission.code.slice(0, colon)
+  return '其他'
+}
+
+function permissionPresentation(permission: PermissionCatalogItem): PermissionPresentation {
+  const shown = presentPermission(permission)
+  const name = shown.name.trim() || permission.code
+  return {
+    code: permission.code,
+    name,
+    description: shown.description,
+    showTechnicalCode: name !== permission.code,
+  }
+}
+
+function presentPermissionCode(code: string): PermissionPresentation {
+  const catalogItem = permissions.value.find((item) => item.code === code)
+  if (catalogItem) return permissionPresentation(catalogItem)
+  const shown = presentPermission({ code, name: '', description: null })
+  const name = shown.name.trim() || code
+  return {
+    code,
+    name,
+    description: shown.description,
+    showTechnicalCode: name !== code,
+  }
+}
+
+const permissionGroups = computed<PermissionGroup[]>(() => {
+  const groups = new Map<string, PermissionCatalogItem[]>()
+  for (const permission of permissions.value) {
+    const key = permissionGroupKey(permission)
+    const items = groups.get(key)
+    if (items) items.push(permission)
+    else groups.set(key, [permission])
+  }
+  return Array.from(groups.entries())
+    .map(([key, items]) => ({
+      key,
+      label: PERMISSION_GROUP_LABELS[key] ?? key,
+      items: [...items].sort((left, right) => {
+        const nameOrder = permissionPresentation(left).name.localeCompare(permissionPresentation(right).name, 'zh-CN')
+        if (nameOrder !== 0) return nameOrder
+        return left.code.localeCompare(right.code)
+      }),
+    }))
+    .sort((left, right) => left.label.localeCompare(right.label, 'zh-CN') || left.key.localeCompare(right.key))
+})
+
+const selectedPermissionChips = computed(() => selectedPermissions.value.map((code) => presentPermissionCode(code)))
+
+function optionalUpdatedAt(value: string | null | undefined): string | null {
+  return typeof value === 'string' && value ? value : null
+}
+
+const membershipRoleName = computed(() => (
+  selectedRole.value ? presentRoleTitle(selectedRole.value) : draftRoleName.value
+))
+const membershipPermissionCodes = computed(() => {
+  if (loadedBaseline.value?.id === selectedRoleId.value) return loadedBaseline.value.permissions
+  return selectedRole.value?.permissions ?? []
+})
+const membershipExpectedUpdatedAt = computed(() => {
+  if (loadedBaseline.value?.id === selectedRoleId.value) return optionalUpdatedAt(loadedBaseline.value.updatedAt)
+  return optionalUpdatedAt(selectedRole.value?.updatedAt)
+})
+const membershipNamespaces = computed(() => {
+  const map: Record<string, unknown> = {}
+  for (const role of roles.value) {
+    if (Object.prototype.hasOwnProperty.call(role, 'admissionNamespaces')) {
+      map[role.id] = role.admissionNamespaces
+    }
+  }
+  return map
+})
+
+// Direct createApp mounts have no router. A defaulted inject reads the deep link without warning.
+const route = inject(routeLocationKey, null)
+const catalogReady = ref(false)
+let routeRoleGeneration = 0
+
+function queryValue(key: string): string | null {
+  if (!route || !Object.prototype.hasOwnProperty.call(route.query, key)) return null
+  const raw = route.query[key]
+  const value = Array.isArray(raw) ? raw[0] : raw
+  if (typeof value !== 'string') return ''
+  return value.trim()
+}
+
+const requestedRoleId = computed(() => queryValue('roleId'))
+const requestedUserId = computed(() => queryValue('userId'))
+const focusedMemberId = computed(() => {
+  const roleId = requestedRoleId.value
+  const userId = requestedUserId.value
+  if (!roleId || !userId || roleId !== selectedRoleId.value) return ''
+  return userId
+})
+
+function replaceMemberCount(roleId: string, memberCount: number): void {
+  if (!roleId || !Number.isInteger(memberCount) || memberCount < 0) return
+  roles.value = roles.value.map((role) => (role.id === roleId ? { ...role, memberCount } : role))
+}
+
+function onRosterTotal(payload: { roleId: string; total: number }): void {
+  replaceMemberCount(payload.roleId, payload.total)
+}
+
+function onMembershipAdjusted(payload: { roleId: string; delta: number }): void {
+  const role = roles.value.find((item) => item.id === payload.roleId)
+  if (!role || !Number.isInteger(payload.delta)) return
+  replaceMemberCount(payload.roleId, Math.max(0, role.memberCount + payload.delta))
+}
+
+async function applyRouteRole(): Promise<void> {
+  const generation = ++routeRoleGeneration
+  const roleId = requestedRoleId.value
+  if (roleId === null || roleId === '') return
+  const role = roles.value.find((item) => item.id === roleId) || null
+  if (generation !== routeRoleGeneration) return
+  if (!role) {
+    setStatus(`没有打开角色 ${roleId}，也没有改成目录中的其他角色。`, 'error')
+    return
+  }
+  if (selectedRoleId.value === role.id) return
+  await selectRole(role)
+}
 
 /**
  * Server refusal codes this page words itself (the server message is English). zh is shown; en is kept
@@ -608,6 +810,13 @@ watch(isDirty, (dirty) => {
 
 onMounted(async () => {
   await loadCatalog()
+  catalogReady.value = true
+  await applyRouteRole()
+})
+
+watch(requestedRoleId, () => {
+  if (!catalogReady.value) return
+  void applyRouteRole()
 })
 
 onUnmounted(() => {
@@ -705,6 +914,30 @@ if (matchedRoute?.value) {
   gap: 12px;
 }
 
+.admin-page__permission-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.admin-page__permission-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.admin-page__permission-group h4 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.admin-page__technical-code {
+  display: block;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 400;
+}
+
 .admin-page__checkbox-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -733,12 +966,20 @@ if (matchedRoute?.value) {
 }
 
 .admin-page__chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
   border-radius: 999px;
   background: #eff6ff;
   color: #1d4ed8;
   padding: 6px 10px;
   font-size: 12px;
   font-weight: 600;
+}
+
+.admin-page__chip small {
+  color: #64748b;
+  font-weight: 400;
 }
 
 .admin-page__button {

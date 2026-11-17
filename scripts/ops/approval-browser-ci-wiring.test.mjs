@@ -171,6 +171,7 @@ test('approval workflow creates a stable PR and merge-queue context with a real 
     'apps/web/src/views/approval*',
     'apps/web/src/types/approval.ts',
     'apps/web/src/composables/useAuth.ts',
+    'apps/web/src/composables/adminAccessCapabilities.ts',
     'apps/web/src/composables/useMobileViewport.ts',
     'apps/web/src/stores/featureFlags.ts',
     'apps/web/src/router/appRoutes.ts',

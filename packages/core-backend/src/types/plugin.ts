@@ -402,6 +402,16 @@ export interface MultitableRepairTransactionSurface {
     objectId: string
     fields: MultitableProvisioningFieldDescriptor[]
   }): Promise<{ addedFieldIds: string[]; skippedExistingFieldIds: string[] }>
+  /**
+   * Y7 review MEDIUM-2: the largest field `order` over EVERY field row of the object's sheet (null when it has
+   * none), read inside this transaction after the canonical writer fence — so an additive repair can append its
+   * columns after every existing one. Values-free (one integer). OPTIONAL: a plugin newer than its host must
+   * detect it, never assume it.
+   */
+  readObjectMaxFieldOrder?(input: {
+    projectId: string
+    objectId: string
+  }): Promise<number | null>
 }
 
 /** The per-entity outcome vocabulary of `relabelObjectDisplayNames` (values-free by construction). */
@@ -1471,6 +1481,26 @@ export interface PluginServices {
         nonCountingWindows: Array<{ startMinuteOfDay: number; endMinuteOfDay: number; daysOfWeek?: number[] }>
       } | null>
     }): (() => void)
+  }
+  /**
+   * R-69 1b-ii — plugin→host registration of the IntegrationRunPort (core/integration-run-port.ts), the
+   * same direction and shape as `workdayCalendar`: plugin-integration-core registers at activation the port
+   * through which the core `run_integration_job` automation action runs a dry-run job via the plugin's
+   * governed entries. Exposed to plugin-integration-core ONLY; `register` returns the unbind. R-69 is OPEN:
+   * the action is dry-run only and default OFF.
+   */
+  integrationRun?: {
+    register(port: import('../core/integration-run-port').IntegrationRunPort): (() => void)
+  }
+  /**
+   * R-69 1c — host→plugin PUBLISH port for the `integration.run_finished` summary (core/integration-run-events.ts):
+   * plugin-integration-core publishes one values-free summary after its pipeline runner's `finishRun` for runs
+   * triggered by api / manual / replay. Closed key set (an extra key is refused), the run's tenant BESIDE the
+   * event as `route.tenantId`, never inside it; `triggeredBy: 'automation'` is refused (the core action layer
+   * owns those). Never throws. Exposed to plugin-integration-core ONLY. Dry-run only, default OFF, R-69 OPEN.
+   */
+  integrationRunEvents?: {
+    publish(summary: unknown, route: unknown): Promise<import('../core/integration-run-events').IntegrationRunPublishResult>
   }
   /**
    * S7-1..S7-4 — host→plugin, narrow, org-scoped resolver PORT for the attendance dynamic
@@ -2707,8 +2737,10 @@ export interface Notification {
  *                    It is provider acceptance, NOT proof of delivery or of being read.
  *   - `simulated`  — a development simulation handled the message; NO transport call was made. Never a
  *                    business success.
- *   - `cancelled`  — no attempt was made: no recipient of the channel's type, the transport is disabled, or
- *                    every recipient was filtered by preference. `metadata.reason` names which.
+ *   - `cancelled`  — no attempt was made: no recipient of the channel's type, the transport is disabled,
+ *                    every recipient was filtered by preference, a channel that addresses recipients through
+ *                    a bound endpoint had no usable endpoint for any of them, or its allow-set was empty
+ *                    (`recipients_not_bound`, `recipients_not_allowed`). `metadata.reason` names which.
  *   - `failed`     — configuration failure, transport error, or a channel with no sender configured.
  *                    `failedReason` is redacted text; `metadata.acceptedCount` (when present) counts the
  *                    recipients accepted before the failure.

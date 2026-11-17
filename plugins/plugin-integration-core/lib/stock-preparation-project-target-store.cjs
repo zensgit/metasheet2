@@ -726,6 +726,21 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
   }
 
   /**
+   * Pre-pilot fix batch 8(c) (register R-91): the pilot state of EVERY registry row of one tenant (active and archived),
+   * in one read — the operator directory's governed-candidate index. Same projection as getPilotState (a database
+   * without migration 101 reads every row as not pilot); a failed read throws (the caller's unreadable).
+   */
+  async function listPilotStates(input = {}) {
+    const tenantId = requiredString(input.tenantId, 'tenantId')
+    const rows = allRows(await db.select(PROJECT_TARGET_TABLE, {
+      where: { tenant_id: tenantId },
+      orderBy: ['created_at', 'ASC'],
+      limit: 1000,
+    }))
+    return rows.map(rowToPilotState)
+  }
+
+  /**
    * MARK ONE PROJECT PILOT — set-once. Same discipline as a lifecycle transition: one transaction, the
    * SAME per-tenant advisory lock `create` / `archive` / `restore` take, the row FOR UPDATE, then the
    * preconditions — an absent row is ABSENT, an ARCHIVED row is 409 STOCK_PREPARATION_PROJECT_ARCHIVED
@@ -800,7 +815,7 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
 
   return {
     get, list, count, create, archive, restore, withActiveRowLocked, updateProjectFields, getProjectFields, listProjectFields, recordPullOutcome, recordCounts, tryWithOverviewLock,
-    getPilotState, getPilotStateBySheetId, markPilotEnabled, probeTableReadable,
+    getPilotState, getPilotStateBySheetId, listPilotStates, markPilotEnabled, probeTableReadable,
   }
 }
 

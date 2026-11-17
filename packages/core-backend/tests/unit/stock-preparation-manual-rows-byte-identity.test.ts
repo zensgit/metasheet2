@@ -18,7 +18,7 @@
  * Each over GET /context, GET /view and GET /records/:id (a PLM-keyed row and a keyless row), for an admin, a writer and
  * a reader. Each answer is reduced to canonical JSON (object keys sorted) and compared, as its sha256, with
  * tests/fixtures/stock-preparation-manual-rows-byte-identity.json (one hash per entry; the full answers run to ~1 MB
- * because every sheet carries the 33-column template, so the fixture holds their hashes — same strictness).
+ * because every sheet carries the 35-column template, so the fixture holds their hashes — same strictness).
  *
  * PROVENANCE. The full answers were captured on the base this branch starts from (origin/main ccfe1432a, B1 merged), in
  * this worktree BEFORE any src change, with this file as the only addition (it imports nothing the PR adds):
@@ -26,6 +26,12 @@
  * (that capture's sha256: b4341418f812b1d0a4bdc388aa9f124cd6dcbec69b081655f322d2dd417f1c94). The fixture is
  * sha256(JSON.stringify(entry)) of each captured entry. The PR head must reproduce every hash. A capture now writes the
  * hash map to <path> and the full canonical answers to <path>.full.json (to diff a failure against).
+ *
+ * RE-CAPTURED (R-71 7.4 PR-4): the template gained two columns (`issueConfirmDate`, `projectSpecModel`), so every
+ * one of the 45 answers — each lists the sheet's fields — moved. Captured both ways on the PR-4 branch: with the two
+ * `field(...)` lines removed from the plugin template the capture equals the previous fixture byte-for-byte; with
+ * them, the full answers differ from that capture ONLY by the 10 new physical field entries (2 columns x 5 sheets) in
+ * `fields` / `fieldPermissions` — removing those entries leaves the two captures identical.
  *
  * Mock pool, no DB, the real univer-meta router behind one pinned listener (`request(app)` is banned in tests/unit,
  * #4154). Every value is synthetic.

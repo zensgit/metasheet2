@@ -204,7 +204,6 @@ describe('tasks top-bar entry follows the tasks session feature (real shell, rea
     // a stray request added later (by the badge or anything mounted with it) reddens this line.
     expect(fetchLog.map((url) => new URL(url, 'http://localhost').pathname)).toEqual([
       '/api/todo/count',
-      '/api/approvals/admin/capability',
       '/api/auth/me',
       '/api/tasks/pending-count',
     ])

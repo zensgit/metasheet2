@@ -30,6 +30,18 @@ import type {
   StockPrepChangePlanPage,
   StockPrepChangeReviewResult,
 } from './refreshChangePlan'
+// S6-3: the recovery card's three calls (type-only — refreshRecovery.ts never imports this module at runtime).
+import type {
+  StockPrepCloseUnverifiedCloseBody,
+  StockPrepCloseUnverifiedInspectBody,
+  StockPrepRecoverCloseBody,
+  StockPrepRecoverVerifyBody,
+  StockPrepRecoveryCalls,
+  StockPrepRecoveryCloseAnswer,
+  StockPrepRecoveryInspectAnswer,
+  StockPrepRecoveryVerifyAnswer,
+  StockPrepRefreshExecutionList,
+} from './refreshRecovery'
 
 const BASE = '/api/integration/stock-preparation/projects'
 
@@ -210,7 +222,12 @@ export type StockPrepRefreshEndOutcome = 'release_to_normal_refresh' | 'escalate
  * `readChangePlan` (GET change-plans/current), `confirmChangePlan` (POST change-plans/confirm) and
  * `completeChangeReview` (POST change-reviews/complete).
  */
-export interface StockPrepRefreshQueueApi extends StockPrepChangePlanCalls {
+/**
+ * S6-3 (R-91): plus the recovery card's three calls (refreshRecovery.ts): `listExecutions` (GET refresh/executions),
+ * `recoverExecution` (POST …/recover: verify / close) and `closeExecutionUnverified` (POST …/close-unverified: inspect /
+ * close, ADMIN).
+ */
+export interface StockPrepRefreshQueueApi extends StockPrepChangePlanCalls, StockPrepRecoveryCalls {
   listHolds(projectNo: string, query?: StockPrepRefreshHoldsQuery): Promise<StockPrepRefreshHoldPage>
   readEvidence(projectNo: string, holdId: string): Promise<unknown>
   readContinuation(projectNo: string, continuationId: string): Promise<StockPrepRefreshContinuationDetail>
@@ -305,6 +322,18 @@ export function createStockPrepRefreshQueueApi(scope: IntegrationScope = {}): St
     },
     async completeChangeReview(projectNo, body): Promise<StockPrepChangeReviewResult> {
       return postJson(`${projectPath(projectNo)}/change-reviews/complete`, withTenant(scope, { ...body }))
+    },
+    // S6-3 (refreshRecovery.ts header): `limit` is NEVER sent (the server default, 20); the cursor is the server's own.
+    async listExecutions(projectNo, query = {}): Promise<StockPrepRefreshExecutionList> {
+      const suffix = querySuffix({ tenantId: tenantOf(scope), cursor: query.cursor ?? null })
+      const response = await apiFetch(`${projectPath(projectNo)}/executions${suffix}`)
+      return parseStockPreparationConfirmResponse<StockPrepRefreshExecutionList>(response)
+    },
+    async recoverExecution(projectNo, executionId, body: StockPrepRecoverVerifyBody | StockPrepRecoverCloseBody): Promise<StockPrepRecoveryVerifyAnswer | StockPrepRecoveryCloseAnswer> {
+      return postJson(`${projectPath(projectNo)}/executions/${encodeURIComponent(executionId)}/recover`, withTenant(scope, { ...body }))
+    },
+    async closeExecutionUnverified(projectNo, executionId, body: StockPrepCloseUnverifiedInspectBody | StockPrepCloseUnverifiedCloseBody): Promise<StockPrepRecoveryInspectAnswer | StockPrepRecoveryCloseAnswer> {
+      return postJson(`${projectPath(projectNo)}/executions/${encodeURIComponent(executionId)}/close-unverified`, withTenant(scope, { ...body }))
     },
   }
 }
