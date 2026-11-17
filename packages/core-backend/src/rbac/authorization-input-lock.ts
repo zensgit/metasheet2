@@ -43,7 +43,9 @@
  * Neither entry point sets the idle-in-transaction session timeout, and no contract statement
  * carries a client-side query timeout. This module never imports the privilege classifier.
  */
+import { sql, type Transaction } from 'kysely'
 import type { PoolClient } from 'pg'
+import { acquireAuthorizationOperationFence } from '../admin/authorization-operation-fence'
 import { lockUsersForAccessGraphWrite } from '../directory/access-graph-mutex'
 import type { LockedAccessGraphUser } from '../directory/access-graph-mutex'
 import { isInsidePullSourceGate } from '../directory/pull-source-gate-context'
@@ -58,6 +60,8 @@ import { isClassRaisingPermissionCode, isClassRaisingRoleId } from './authorizat
 /** Ranks of every lock a contract transaction may take, strictly increasing in acquisition order. */
 export const AUTHORIZATION_INPUT_LOCK_RANKS = Object.freeze({
   R0_WORLD: 0,
+  R0O_OPERATION: 5,
+  R0F_OPERATION_TABLES: 7,
   R1_PLATFORM_ADMIN_INVARIANT: 10,
   R2_IDENTITY_MAINTENANCE: 20,
   R2F_SOURCE_SYNC_FREEZE: 25,
@@ -73,6 +77,8 @@ export type AuthorizationInputLockRank = keyof typeof AUTHORIZATION_INPUT_LOCK_R
 
 export const AUTHORIZATION_INPUT_LOCK_RANK_ORDER: readonly AuthorizationInputLockRank[] = Object.freeze([
   'R0_WORLD',
+  'R0O_OPERATION',
+  'R0F_OPERATION_TABLES',
   'R1_PLATFORM_ADMIN_INVARIANT',
   'R2_IDENTITY_MAINTENANCE',
   'R2F_SOURCE_SYNC_FREEZE',
@@ -99,20 +105,29 @@ export const AUTHORIZATION_INPUT_STATEMENTS = Object.freeze({
   worldShared: 'SELECT pg_advisory_xact_lock_shared(20261106, 1)',
   worldSharedTry: 'SELECT pg_try_advisory_xact_lock_shared(20261106, 1) AS acquired',
   worldExclusiveTry: 'SELECT pg_try_advisory_xact_lock(20261106, 1) AS acquired',
+  operationTry: "SELECT pg_try_advisory_xact_lock(hashtextextended('authorization-operation:' || $1, 0)) AS acquired",
   platformAdminInvariant: "SELECT pg_advisory_xact_lock(hashtextextended('user-recycle:platform-admin', 0))",
+  platformAdminInvariantTry: "SELECT pg_try_advisory_xact_lock(hashtextextended('user-recycle:platform-admin', 0)) AS acquired",
   namespaceAdmission: 'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+  namespaceAdmissionTry: 'SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0)) AS acquired',
   roleRow: 'SELECT id::text AS id FROM roles WHERE id = $1::text FOR UPDATE',
   roleRowShared: 'SELECT id::text AS id FROM roles WHERE id = $1::text FOR SHARE',
+  roleRowSharedNowait: 'SELECT id::text AS id FROM roles WHERE id = $1::text FOR SHARE NOWAIT',
   rolePermissionCodes: 'SELECT role_id::text AS role_id, permission_code FROM role_permissions WHERE role_id = ANY($1::text[])',
 } as const)
 
 /** Transaction-local timeouts that wrap the lock statements only; the caller's values are restored afterwards. */
 export const AUTHORIZATION_INPUT_LOCK_TIMEOUT_MS = 5000
 export const AUTHORIZATION_INPUT_STATEMENT_TIMEOUT_MS = 10000
+/** Client wait deadline and per-statement budgets; PostgreSQL COMMIT can outlive the client. */
+export const AUTHORIZATION_OPERATION_DEADLINE_MS = 5000
+export const AUTHORIZATION_OPERATION_STATEMENT_TIMEOUT_MS = 2500
+export const AUTHORIZATION_OPERATION_LOCK_TIMEOUT_MS = 500
 
 /* ───────────────────────────── intents ───────────────────────────── */
 
 export const AUTHORIZATION_INPUT_INTENTS = [
+  'AUTHORIZATION_OPERATION',
   'GRANT_ROLE',
   'REVOKE_ROLE',
   'GRANT_DIRECT',
@@ -150,6 +165,7 @@ const rule = (overrides: Partial<AuthorizationInputIntentRule> = {}): Authorizat
 
 /** The closed intent catalogue. */
 export const AUTHORIZATION_INPUT_INTENT_CATALOG: Readonly<Record<AuthorizationInputIntent, AuthorizationInputIntentRule>> = Object.freeze({
+  AUTHORIZATION_OPERATION: rule({ platformAdminInvariant: true }),
   GRANT_ROLE: rule(),
   REVOKE_ROLE: rule(),
   GRANT_DIRECT: rule(),
@@ -197,6 +213,8 @@ export type AuthorizationInputWitness = Readonly<{
 
 export type AuthorizationInputPlan = Readonly<{
   intent: AuthorizationInputIntent
+  /** Composite identity for a command receipt, required only for AUTHORIZATION_OPERATION. */
+  operation?: Readonly<{ actorId: string; clientOperationId: string }>
   /** Users whose rows the entry locks (R5), in code-unit order. */
   userIds?: readonly string[]
   /**
@@ -379,6 +397,9 @@ export type AuthorizationInputEntryOptions = Readonly<{
   maintenance?: Partial<AuthorizationInputExclusiveBudget>
   sleep?: (ms: number) => Promise<void>
   random?: () => number
+  /** Operation-only deadline, including caller-side planning. */
+  deadlineAt?: number
+  signal?: AbortSignal
   /** Runs after the locks are held and before `work`; a hook for deterministic tests. */
   afterAcquire?: (tx: AuthorizationInputTx) => Promise<void>
 }>
@@ -411,7 +432,7 @@ function normalizeIds(values: readonly string[] | undefined, what: string): stri
 /** Intents that lock the role rows they name for update: they write role content. */
 const ROLE_ROW_UPDATE_INTENTS: ReadonlySet<AuthorizationInputIntent> = new Set(['EDIT_ROLE_CONTENT', 'DELETE_ROLE', 'MAINTENANCE'])
 /** Intents that lock the role rows they name in share mode: they write a membership of the role. */
-const ROLE_ROW_SHARE_INTENTS: ReadonlySet<AuthorizationInputIntent> = new Set(['GRANT_ROLE', 'REVOKE_ROLE', 'SET_ADMIN_PROFILE', 'BIRTH', 'PROJECTION_GRANT'])
+const ROLE_ROW_SHARE_INTENTS: ReadonlySet<AuthorizationInputIntent> = new Set(['AUTHORIZATION_OPERATION', 'GRANT_ROLE', 'REVOKE_ROLE', 'SET_ADMIN_PROFILE', 'BIRTH', 'PROJECTION_GRANT'])
 /** Content intents: a shared-start plan names no users or admissions; `work` adds the locks it needs through `tx.acquire`. */
 const CONTENT_INTENTS: ReadonlySet<AuthorizationInputIntent> = new Set(['EDIT_ROLE_CONTENT', 'DELETE_ROLE'])
 /** The reserved platform administrator role, compared by exact equality. */
@@ -420,6 +441,7 @@ const PLATFORM_ADMIN_ROLE_ID = 'admin'
 type NormalizedPlan = Readonly<{
   plan: AuthorizationInputPlan
   ruleOf: AuthorizationInputIntentRule
+  operation: Readonly<{ actorId: string; clientOperationId: string }> | undefined
   /** R5 set: the plan's targets merged with its witnesses. */
   userIds: readonly string[]
   roleIds: readonly string[]
@@ -438,7 +460,7 @@ function mergeIds(a: readonly string[], b: readonly string[]): string[] {
 }
 
 /** The shapes are closed: a key the contract does not define names no lock, so it is refused, never ignored. */
-const PLAN_KEYS: ReadonlySet<string> = new Set(['intent', 'userIds', 'roleIds', 'admissionUserIds', 'witness', 'platformAdminInvariant', 'world', 'sharedAcquire', 'caller'])
+const PLAN_KEYS: ReadonlySet<string> = new Set(['intent', 'operation', 'userIds', 'roleIds', 'admissionUserIds', 'witness', 'platformAdminInvariant', 'world', 'sharedAcquire', 'caller'])
 const WITNESS_KEYS: ReadonlySet<string> = new Set(['userIds', 'admissionUserIds'])
 const ACQUIRE_REQUEST_KEYS: ReadonlySet<string> = new Set(['admissionUserIds', 'userIds'])
 
@@ -465,11 +487,27 @@ function normalizePlan(plan: AuthorizationInputPlan, entry: 'self' | 'takeover')
   if (entry === 'self' && plan.caller !== undefined) throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'caller_on_self_built')
   if (plan.world !== undefined && plan.world !== 'shared' && plan.world !== 'exclusive') throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'world_unknown')
   if (plan.sharedAcquire !== undefined && plan.sharedAcquire !== 'wait' && plan.sharedAcquire !== 'try') throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'shared_acquire_unknown')
+  if (plan.intent === 'AUTHORIZATION_OPERATION' && plan.sharedAcquire === 'wait') throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'operation_wait_forbidden')
   const startWorld: AuthorizationInputWorldMode = ruleOf.world === 'exclusive' ? 'exclusive' : plan.world ?? 'shared'
   if (startWorld === 'exclusive' && !(ruleOf.world === 'exclusive' || ruleOf.upgradeable)) throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'exclusive_not_permitted')
   if (startWorld === 'exclusive' && entry === 'takeover') throw contractError('AUTHORIZATION_INPUT_UPGRADE_IN_TAKEOVER', 'exclusive_start')
   const userIds = normalizeIds(plan.userIds, 'user_ids')
   const roleIds = normalizeIds(plan.roleIds, 'role_ids')
+  let operation: NormalizedPlan['operation']
+  if (plan.intent === 'AUTHORIZATION_OPERATION') {
+    const op = plan.operation
+    if (typeof op !== 'object' || op === null) throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'operation_missing')
+    refuseUnknownKeys(op, new Set(['actorId', 'clientOperationId']), 'operation_unknown_key')
+    const actor = normalizeIds([op.actorId], 'operation_actor')[0]
+    const clientOperationId = op.clientOperationId
+    if (typeof clientOperationId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(clientOperationId)) throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'operation_id_invalid')
+    if (!mergeIds(userIds, witnessUserIds).includes(actor) || !mergeIds(normalizeIds(plan.admissionUserIds, 'admission_user_ids'), witnessAdmissionUserIds).includes(actor)) {
+      throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'operation_actor_not_locked')
+    }
+    operation = Object.freeze({ actorId: actor, clientOperationId })
+  } else if (plan.operation !== undefined) {
+    throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'operation_outside_intent')
+  }
   const admissionUserIds = normalizeIds(plan.admissionUserIds, 'admission_user_ids')
   // A birth names existing users only as witnesses: a top-level id could be mistaken for a write target.
   if (ruleOf.birth && userIds.length > 0) throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'birth_locks_users')
@@ -483,8 +521,9 @@ function normalizePlan(plan: AuthorizationInputPlan, entry: 'self' | 'takeover')
   }
   if (plan.intent === 'DELETE_ROLE' && roleIds.includes(PLATFORM_ADMIN_ROLE_ID)) throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'delete_role_platform_admin')
   return Object.freeze({
-    plan,
+    plan: Object.freeze({ ...plan, operation }),
     ruleOf,
+    operation,
     userIds: mergeIds(userIds, witnessUserIds),
     roleIds,
     admissionUserIds: mergeIds(admissionUserIds, witnessAdmissionUserIds),
@@ -493,7 +532,7 @@ function normalizePlan(plan: AuthorizationInputPlan, entry: 'self' | 'takeover')
     roleRowMode,
     platformAdminInvariant: ruleOf.platformAdminInvariant || plan.platformAdminInvariant === true,
     startWorld,
-    sharedAcquire: plan.sharedAcquire ?? 'wait',
+    sharedAcquire: plan.intent === 'AUTHORIZATION_OPERATION' ? 'try' : plan.sharedAcquire ?? 'wait',
   })
 }
 
@@ -534,11 +573,11 @@ type AcquiredLocks = Readonly<{
 }>
 
 /** Sets the transaction-local lock and statement timeouts and returns the function that restores the caller's values. */
-async function openTimeoutWindow(query: AuthorizationInputQueryable['query']): Promise<() => Promise<unknown>> {
+async function openTimeoutWindow(query: AuthorizationInputQueryable['query'], operation = false): Promise<() => Promise<unknown>> {
   const saved = await query(AUTHORIZATION_INPUT_STATEMENTS.readTimeouts)
   const savedLock = String(saved.rows[0]?.lock_timeout ?? '0')
   const savedStatement = String(saved.rows[0]?.statement_timeout ?? '0')
-  await query(AUTHORIZATION_INPUT_STATEMENTS.setTimeouts, [String(AUTHORIZATION_INPUT_LOCK_TIMEOUT_MS), String(AUTHORIZATION_INPUT_STATEMENT_TIMEOUT_MS)])
+  await query(AUTHORIZATION_INPUT_STATEMENTS.setTimeouts, [String(operation ? AUTHORIZATION_OPERATION_LOCK_TIMEOUT_MS : AUTHORIZATION_INPUT_LOCK_TIMEOUT_MS), String(operation ? AUTHORIZATION_OPERATION_STATEMENT_TIMEOUT_MS : AUTHORIZATION_INPUT_STATEMENT_TIMEOUT_MS)])
   return () => query(AUTHORIZATION_INPUT_STATEMENTS.setTimeouts, [savedLock, savedStatement])
 }
 
@@ -555,12 +594,12 @@ async function openTimeoutWindow(query: AuthorizationInputQueryable['query']): P
  */
 async function acquireLocks(client: AuthorizationInputQueryable, normalized: NormalizedPlan, world: AuthorizationInputWorldMode, options: AuthorizationInputEntryOptions | undefined): Promise<AcquiredLocks> {
   const query = (sql: string, params?: unknown[]) => client.query(sql, params)
-  const restore = await openTimeoutWindow(query)
+  const restore = await openTimeoutWindow(query, normalized.plan.intent === 'AUTHORIZATION_OPERATION')
 
   if (world === 'exclusive') {
     await acquireExclusive(query, budgetFor(normalized.plan.intent, options), options)
   } else if (normalized.sharedAcquire === 'try') {
-    const result = await query(AUTHORIZATION_INPUT_STATEMENTS.worldSharedTry)
+    const result = await query(normalized.plan.intent === 'AUTHORIZATION_OPERATION' ? AUTHORIZATION_INPUT_STATEMENTS.worldSharedTry.replace('SELECT pg_', 'SELECT pg_catalog.pg_') : AUTHORIZATION_INPUT_STATEMENTS.worldSharedTry)
     if (result.rows[0]?.acquired !== true) {
       await restore()
       throw new AuthorizationInputBusyError('lock_timeout')
@@ -568,9 +607,21 @@ async function acquireLocks(client: AuthorizationInputQueryable, normalized: Nor
   } else {
     await query(AUTHORIZATION_INPUT_STATEMENTS.worldShared)
   }
-  if (normalized.platformAdminInvariant) await query(AUTHORIZATION_INPUT_STATEMENTS.platformAdminInvariant)
+  const operation = normalized.plan.intent === 'AUTHORIZATION_OPERATION'
+  if (operation) {
+    const op = normalized.operation!
+    const result = await query(AUTHORIZATION_INPUT_STATEMENTS.operationTry.replace('SELECT pg_', 'SELECT pg_catalog.pg_').replace('hashtextextended(', 'pg_catalog.hashtextextended('), [JSON.stringify([op.actorId, op.clientOperationId])])
+    if (result.rows[0]?.acquired !== true) throw new AuthorizationInputBusyError('lock_timeout')
+    await acquireAuthorizationOperationFence(query)
+  }
+  if (normalized.platformAdminInvariant) {
+    if (operation) {
+      const result = await query(AUTHORIZATION_INPUT_STATEMENTS.platformAdminInvariantTry)
+      if (result.rows[0]?.acquired !== true) throw new AuthorizationInputBusyError('lock_timeout')
+    } else await query(AUTHORIZATION_INPUT_STATEMENTS.platformAdminInvariant)
+  }
   const roleRows = new Map<string, AuthorizationInputRoleRowState>()
-  const roleRowStatement = normalized.roleRowMode === 'update' ? AUTHORIZATION_INPUT_STATEMENTS.roleRow : AUTHORIZATION_INPUT_STATEMENTS.roleRowShared
+  const roleRowStatement = normalized.roleRowMode === 'update' ? AUTHORIZATION_INPUT_STATEMENTS.roleRow : operation ? AUTHORIZATION_INPUT_STATEMENTS.roleRowSharedNowait : AUTHORIZATION_INPUT_STATEMENTS.roleRowShared
   for (const roleId of normalized.roleIds) {
     const row = await query(roleRowStatement, [roleId])
     roleRows.set(roleId, row.rows.length === 0 ? 'missing' : 'held')
@@ -581,8 +632,11 @@ async function acquireLocks(client: AuthorizationInputQueryable, normalized: Nor
     await restore()
     throw new AuthorizationInputUpgradeRequired('role_row_missing')
   }
-  for (const userId of normalized.admissionUserIds) await query(AUTHORIZATION_INPUT_STATEMENTS.namespaceAdmission, [`namespace-admission:${userId}`])
-  const locked = normalized.userIds.length > 0 ? await lockUsersForAccessGraphWrite(client, [...normalized.userIds]) : new Map<string, LockedAccessGraphUser>()
+  for (const userId of normalized.admissionUserIds) {
+    const result = await query(operation ? AUTHORIZATION_INPUT_STATEMENTS.namespaceAdmissionTry : AUTHORIZATION_INPUT_STATEMENTS.namespaceAdmission, [`namespace-admission:${userId}`])
+    if (operation && result.rows[0]?.acquired !== true) throw new AuthorizationInputBusyError('lock_timeout')
+  }
+  const locked = normalized.userIds.length > 0 ? await lockUsersForAccessGraphWrite(client, [...normalized.userIds], { nowait: operation }) : new Map<string, LockedAccessGraphUser>()
   await restore()
   return Object.freeze({ locked, roleRows, admissionHeld: new Set(normalized.admissionUserIds) })
 }
@@ -743,6 +797,9 @@ async function runSelfBuilt<T>(normalized: NormalizedPlan, world: AuthorizationI
   let heardBeforeReturn = false
   let workReturned = false
   let raw: PoolClient | undefined
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined
+  let deadlineExpired = false
+  let abortListener: (() => void) | undefined
   const onError = () => {
     heardAny = true
   }
@@ -750,12 +807,26 @@ async function runSelfBuilt<T>(normalized: NormalizedPlan, world: AuthorizationI
     return await transaction(async (client) => {
       raw = client.__rawClient
       if (raw && typeof raw.on === 'function') raw.on('error', onError)
+      if (normalized.plan.intent === 'AUTHORIZATION_OPERATION') {
+        const stream = (raw as (PoolClient & { connection?: { stream?: { destroy(): void } } }) | undefined)?.connection?.stream
+        if (!stream && options?.transaction === undefined) throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'operation_connection_unavailable')
+        const deadlineAt = options?.deadlineAt ?? Date.now() + AUTHORIZATION_OPERATION_DEADLINE_MS
+        if (!Number.isFinite(deadlineAt)) throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'operation_deadline_invalid')
+        abortListener = () => { deadlineExpired = true; stream?.destroy() }
+        if (options?.signal?.aborted || deadlineAt <= Date.now()) throw new AuthorizationInputBusyError('statement_timeout')
+        options?.signal?.addEventListener('abort', abortListener, { once: true })
+        deadlineTimer = setTimeout(abortListener, Math.min(AUTHORIZATION_OPERATION_DEADLINE_MS, deadlineAt - Date.now()))
+      }
       await client.query(AUTHORIZATION_INPUT_STATEMENTS.setTransaction)
+      if (normalized.plan.intent === 'AUTHORIZATION_OPERATION') {
+        await client.query(AUTHORIZATION_INPUT_STATEMENTS.setTimeouts, [String(AUTHORIZATION_OPERATION_LOCK_TIMEOUT_MS), String(AUTHORIZATION_OPERATION_STATEMENT_TIMEOUT_MS)])
+      }
       const locks = await acquireLocks(client, normalized, world, options)
       const minted = mintTx(client, raw ? [raw] : [], normalized, world, locks)
       try {
         if (options?.afterAcquire) await options.afterAcquire(minted.tx)
         const value = await work(minted.tx)
+        if (deadlineExpired) throw new AuthorizationInputBusyError('statement_timeout')
         heardBeforeReturn = heardAny
         workReturned = true
         return value
@@ -767,6 +838,8 @@ async function runSelfBuilt<T>(normalized: NormalizedPlan, world: AuthorizationI
     if (workReturned && !heardBeforeReturn) throw error
     throw asBusyOrSame(error, heardAny)
   } finally {
+    if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
+    if (abortListener) options?.signal?.removeEventListener('abort', abortListener)
     if (raw && typeof raw.removeListener === 'function') raw.removeListener('error', onError)
   }
 }
@@ -833,6 +906,38 @@ export async function enterAuthorizationInputTransaction<T>(client: Authorizatio
   } finally {
     minted.close()
   }
+}
+
+/* ───────────────────────────── schema-maintenance entry ───────────────────────────── */
+
+/** Only the core migration provider may enter with a Kysely-owned transaction. */
+export const AUTHORIZATION_SCHEMA_MUTATION_CALLERS = Object.freeze({
+  core_migration_provider: 'packages/core-backend/src/db/migration-provider.ts',
+} as const)
+
+/**
+ * Join an already-open Kysely transaction and take the same exclusive R0 as input
+ * maintenance, without waiting. The caller owns COMMIT/ROLLBACK; no schema work
+ * runs unless the transaction marker, caller, and try-lock all succeed.
+ */
+export async function runAuthorizationSchemaMutation<DB, T>(
+  tx: Transaction<DB>,
+  work: (tx: Transaction<DB>) => Promise<T>,
+  options: Readonly<{ caller: keyof typeof AUTHORIZATION_SCHEMA_MUTATION_CALLERS }>,
+): Promise<T> {
+  refuseInsidePullSourceGate()
+  if (!tx || tx.isTransaction !== true || typeof work !== 'function') throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'schema_transaction_required')
+  if (!options || typeof options !== 'object') throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'schema_caller_missing')
+  refuseUnknownKeys(options, new Set(['caller']), 'schema_caller_unknown_key')
+  if (options.caller !== 'core_migration_provider') throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'schema_caller_not_registered')
+  let acquired: unknown
+  try {
+    acquired = (await sql.raw<{ acquired: boolean }>(AUTHORIZATION_INPUT_STATEMENTS.worldExclusiveTry.replace('SELECT pg_', 'SELECT pg_catalog.pg_')).execute(tx)).rows[0]?.acquired
+  } catch (error) {
+    throw asBusyOrSame(error, false)
+  }
+  if (acquired !== true) throw new AuthorizationInputBusyError('lock_timeout')
+  return work(tx)
 }
 
 /* ───────────────────────────── reads under the world lock ───────────────────────────── */

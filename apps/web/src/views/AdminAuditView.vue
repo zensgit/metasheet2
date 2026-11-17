@@ -91,6 +91,8 @@
       </article>
     </section>
 
+    <AuthorizationAuditFeed />
+
     <div class="admin-audit__layout admin-audit__layout--single">
       <section class="admin-audit__panel">
         <div class="admin-audit__panel-head">
@@ -165,6 +167,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { apiFetch } from '../utils/api'
+import AuthorizationAuditFeed from '../components/AuthorizationAuditFeed.vue'
 
 type AdminAuditLogItem = {
   id: string
