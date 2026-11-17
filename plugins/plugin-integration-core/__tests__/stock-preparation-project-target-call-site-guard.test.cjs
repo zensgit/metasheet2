@@ -53,6 +53,8 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
+// R-69 1b-i: a delegating route handler's chain lives in the governed entry it calls; see the module.
+const { governedEntrySourceFor } = require('./support/governed-entry-source.cjs')
 
 const LIB = path.join(__dirname, '..', 'lib')
 // Comments stripped BEFORE scanning so prose can neither satisfy nor trip a check.
@@ -183,7 +185,8 @@ check('C-04 every ADR write route runs the resolved-target tenant wall after its
     const start = CODE.indexOf(`    async ${handler}(req, res) {`)
     assert.notEqual(start, -1, `${handler} exists`)
     const end = CODE.indexOf('\n    },', start)
-    const body = CODE.slice(start, end)
+    // R-69 1b-i: `tableActionDryRun` is read with the governed entry it delegates to.
+    const body = CODE.slice(start, end) + governedEntrySourceFor(CODE, handler)
     const lookupAt = body.indexOf('getTableAction(')
     const wallAt = body.indexOf('assertResolvedProjectTargetTenancy(')
     assert.notEqual(lookupAt, -1, `${handler}: has a lookup`)

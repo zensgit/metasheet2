@@ -1,13 +1,15 @@
 /**
  * Pull-source rule leaf module (src/directory/pull-source-rule.ts).
  *
- * Pins the invariants of the module itself; nothing in the application calls it yet, so there is no
- * behaviour to compare against. No database: statements go through an injected fake `query`.
+ * Pins the invariants of the module itself: what its fragments, statements, helpers and error types
+ * are. What its callers do with them is pinned next to each caller. No database: statements go through
+ * an injected fake `query`.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import ts from 'typescript'
 import { afterEach, describe, expect, it } from 'vitest'
+import { APPROVAL_ROUTING_PULL_TYPE_ROWS_SQL, NON_ACTIVE_PULL_SOURCE_LINKED_ACCOUNT_COUNT_SQL } from '../../src/directory/approval-routing-status'
 import * as leafModule from '../../src/directory/pull-source-rule'
 import {
   APPROVAL_ROUTING_POLICY_EXISTS_SQL,
@@ -28,11 +30,14 @@ import {
   directoryOrgLockKey,
   directoryOrgLockSql,
   isApprovalRoutingPolicyRequired,
+  nonActivePullTypePredicateSql,
+  pullTypePredicateSql,
   isApprovalRoutingRequirePolicyEnabled,
   pullSourceKeySql,
   pullSourcePredicateSql,
   type PullSourceRuleQuery,
 } from '../../src/directory/pull-source-rule'
+import { COUNT_OTHER_ACTIVE_PULL_SOURCES_SQL, countOtherActivePullSources } from '../../src/directory/pull-source-rule'
 
 const SRC_ROOT = join(__dirname, '../../src')
 const LEAF_PATH = join(SRC_ROOT, 'directory/pull-source-rule.ts')
@@ -147,6 +152,63 @@ describe('pull-source predicate', () => {
     expect(APPROVAL_ROUTING_POLICY_EXISTS_SQL).toBe(
       "SELECT 1 AS present FROM org_directory_routing_policy WHERE org_id = $1 AND purpose = 'approval_routing'",
     )
+  })
+})
+
+describe('pull-type fragments', () => {
+  it('the pull-type fragment is the provider condition alone', () => {
+    expect(pullTypePredicateSql('i')).toBe("(i.provider <> 'local')")
+    expect(pullTypePredicateSql()).toBe("(i.provider <> 'local')")
+    expect(pullTypePredicateSql('ri')).toBe("(ri.provider <> 'local')")
+  })
+
+  it('the non-active pull-type fragment is the complement of active within pull type', () => {
+    expect(nonActivePullTypePredicateSql('i')).toBe("(i.provider <> 'local' AND i.status <> 'active')")
+    expect(nonActivePullTypePredicateSql()).toBe("(i.provider <> 'local' AND i.status <> 'active')")
+    expect(nonActivePullTypePredicateSql('ri')).toBe("(ri.provider <> 'local' AND ri.status <> 'active')")
+    // Parenthesised, so a caller can negate or combine either fragment without changing its meaning.
+    expect(`NOT ${nonActivePullTypePredicateSql()}`).toBe("NOT (i.provider <> 'local' AND i.status <> 'active')")
+  })
+
+  it('all three fragments are assembled around one pull-type condition written once', () => {
+    const code = leafSource.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    expect(code.split("provider <> 'local'")).toHaveLength(2)
+    expect(code.split("status <> 'active'")).toHaveLength(2)
+    expect(code.split("status = 'active'")).toHaveLength(2)
+    expect(code.split('pullTypeConditionSql(a)')).toHaveLength(4)
+    for (const alias of ['i', 'x']) {
+      const pullType = pullTypePredicateSql(alias).slice(1, -1)
+      expect(pullSourcePredicateSql(alias)).toBe(`(${pullType} AND ${alias}.status = 'active')`)
+      expect(nonActivePullTypePredicateSql(alias)).toBe(`(${pullType} AND ${alias}.status <> 'active')`)
+    }
+  })
+
+  it('reject an alias that is not a plain identifier', () => {
+    for (const alias of ['', 'a.b', "i; DROP TABLE x", 'I', '1a', 'a b']) {
+      expect(() => pullTypePredicateSql(alias), alias).toThrow(TypeError)
+      expect(() => nonActivePullTypePredicateSql(alias), alias).toThrow(TypeError)
+    }
+  })
+
+  it('the count of linked accounts under non-active pull sources takes its condition from the fragment', () => {
+    const carrier = readFileSync(join(SRC_ROOT, 'directory/approval-routing-status.ts'), 'utf8')
+    expect(carrier).toMatch(/import \{[^}]*\bnonActivePullTypePredicateSql\b[^}]*\} from '\.\/pull-source-rule'/)
+    expect(carrier).not.toMatch(/provider\s*<>\s*'local'/)
+    expect(carrier).not.toMatch(/status\s*<>\s*'active'/)
+    expect(carrier).toContain("WHERE i.org_id = $1 AND ${nonActivePullTypePredicateSql('i')}`")
+    expect(NON_ACTIVE_PULL_SOURCE_LINKED_ACCOUNT_COUNT_SQL).toBe(
+      `SELECT count(DISTINCT a.id)::int AS linked_account_count
+     FROM directory_integrations i
+     JOIN directory_accounts a ON a.integration_id = i.id AND a.is_active = true
+     JOIN directory_account_links dal ON dal.directory_account_id = a.id AND dal.link_status = 'linked'
+    WHERE i.org_id = $1 AND (i.provider <> 'local' AND i.status <> 'active')`,
+    )
+    expect(APPROVAL_ROUTING_PULL_TYPE_ROWS_SQL).toContain("WHERE i.org_id = $1 AND (i.provider <> 'local')")
+    // The key naming the count appears in source only where the count is produced.
+    const carriers = walkTs(SRC_ROOT)
+      .filter((file) => readFileSync(file, 'utf8').includes('nonActivePullSourceLinkedAccountCount'))
+      .map((file) => file.slice(SRC_ROOT.length + 1))
+    expect(carriers).toEqual(['directory/approval-routing-status.ts'])
   })
 })
 
@@ -367,5 +429,124 @@ describe('flag manifest registration', () => {
     const switches = [...tokens].filter((token) => token.endsWith('_ENABLED')).sort()
     expect(switches).toEqual(['APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED'])
     expect([...tokens].some((token) => !token.endsWith('_ENABLED'))).toBe(true)
+  })
+})
+
+describe('countOtherActivePullSources', () => {
+  function fakeOtherCount(rows: Array<Record<string, unknown>>) {
+    const calls: Array<{ sql: string; params: unknown[] | undefined }> = []
+    const query: PullSourceRuleQuery = async (sql, params) => {
+      calls.push({ sql, params })
+      if (sql === COUNT_OTHER_ACTIVE_PULL_SOURCES_SQL) return { rows }
+      throw new Error(`unexpected statement: ${sql}`)
+    }
+    return { query, calls }
+  }
+
+  it('is the active-source count with the one external source left out', () => {
+    expect(COUNT_OTHER_ACTIVE_PULL_SOURCES_SQL).toBe(
+      'SELECT count(DISTINCT (i.provider, i.corp_id))::int AS other_source_count FROM directory_integrations i ' +
+        "WHERE i.org_id = $1 AND (i.provider <> 'local' AND i.status = 'active') " +
+        'AND NOT (i.provider = $2 AND i.corp_id = $3)',
+    )
+    // Assembled from the module's own fragments, and identical to the plain count up to the exclusion.
+    expect(COUNT_OTHER_ACTIVE_PULL_SOURCES_SQL).toContain(`count(DISTINCT ${PULL_SOURCE_KEY_SQL})`)
+    expect(COUNT_OTHER_ACTIVE_PULL_SOURCES_SQL).toContain(`i.org_id = $1 AND ${PULL_SOURCE_PREDICATE_SQL} AND NOT (`)
+    expect(
+      COUNT_OTHER_ACTIVE_PULL_SOURCES_SQL
+        .replace(' AND NOT (i.provider = $2 AND i.corp_id = $3)', '')
+        .replace('other_source_count', 'pull_source_count'),
+    ).toBe(COUNT_ACTIVE_PULL_SOURCES_SQL)
+    expect(COUNT_OTHER_ACTIVE_PULL_SOURCES_SQL).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE|ALTER|DROP)\b/i)
+    expect(COUNT_OTHER_ACTIVE_PULL_SOURCES_SQL).not.toContain('sync_enabled')
+    // Every placeholder is bound and there is no fourth.
+    expect([...COUNT_OTHER_ACTIVE_PULL_SOURCES_SQL.matchAll(/\$(\d+)/g)].map((m) => m[1]).sort()).toEqual(['1', '2', '3'])
+    const code = leafSource.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    expect(code).toContain('`FROM directory_integrations i WHERE i.org_id = $1 AND ${PULL_SOURCE_PREDICATE_SQL} `')
+  })
+
+  it('binds the organisation, provider and corp id in that order and returns the count', async () => {
+    const { query, calls } = fakeOtherCount([{ other_source_count: 2 }])
+    await expect(countOtherActivePullSources(query, 'org-1', 'dingtalk', 'corp-9')).resolves.toBe(2)
+    expect(calls).toEqual([{ sql: COUNT_OTHER_ACTIVE_PULL_SOURCES_SQL, params: ['org-1', 'dingtalk', 'corp-9'] }])
+    await expect(countOtherActivePullSources(fakeOtherCount([{ other_source_count: 0 }]).query, 'o', 'p', 'c')).resolves.toBe(0)
+    await expect(countOtherActivePullSources(fakeOtherCount([{ other_source_count: '3' }]).query, 'o', 'p', 'c')).resolves.toBe(3)
+  })
+
+  it('an unreadable count raises the same error as the plain count, never zero', async () => {
+    const unreadable: Array<Array<Record<string, unknown>>> = [
+      [],
+      [{}],
+      [{ other_source_count: null }],
+      [{ other_source_count: 'two' }],
+      [{ other_source_count: 1.5 }],
+      [{ other_source_count: -1 }],
+      [{ pull_source_count: 1 }],
+    ]
+    for (const rows of unreadable) {
+      const failure = await countOtherActivePullSources(fakeOtherCount(rows).query, 'org-secret-1', 'dingtalk', 'corp-9').then(
+        () => null,
+        (error: unknown) => error,
+      )
+      expect(failure, JSON.stringify(rows)).toBeInstanceOf(PullSourceCountUnavailableError)
+      expect(failure).not.toBeInstanceOf(ApprovalRoutingPolicyError)
+      expect((failure as PullSourceCountUnavailableError).message).toBe(PULL_SOURCE_COUNT_UNAVAILABLE_MESSAGE)
+      expect((failure as PullSourceCountUnavailableError).orgId).toBe('org-secret-1')
+    }
+    const plain = await countActivePullSources(fakeQuery(undefined, 0).query, 'org-secret-1').then(() => null, (error: unknown) => error)
+    expect(plain).toBeInstanceOf(PullSourceCountUnavailableError)
+    // One reader decides what an unreadable count is, for both counts.
+    const code = leafSource.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    expect(code.split('new PullSourceCountUnavailableError(')).toHaveLength(2)
+    expect(code.split('readSourceCount(')).toHaveLength(4)
+  })
+})
+
+describe('the write gate takes the organisation lock from this module', () => {
+  const gateSource = readFileSync(join(SRC_ROOT, 'directory/pull-source-write-gate.ts'), 'utf8')
+  const gateCode = gateSource.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+
+  it('imports the lock statement builder and writes no lock key or advisory-lock call of its own', () => {
+    expect(gateSource).toMatch(/import \{[^}]*\bdirectoryOrgLockSql\b[^}]*\} from '\.\/pull-source-rule'/)
+    expect(gateCode.split('directoryOrgLockSql(')).toHaveLength(2)
+    expect(gateCode).toContain("await client.query(directoryOrgLockSql('$1'), [orgId])")
+    expect(gateSource).not.toContain(DIRECTORY_ORG_LOCK_KEY_PREFIX)
+    expect(gateSource).not.toMatch(/pull-sources/)
+    expect(gateCode).not.toMatch(/pg_(try_)?advisory/i)
+    expect(gateCode).not.toMatch(/hashtext/i)
+  })
+
+  it('depends on the rule module, the database module and the gate marker module only', () => {
+    const imported = ts.preProcessFile(gateSource, true, true).importedFiles.map((file) => file.fileName).sort()
+    expect(imported).toEqual(['../db/pg', './pull-source-gate-context', './pull-source-rule'])
+  })
+
+  it('takes its counts and its policy probe from this module', () => {
+    expect(gateSource).toMatch(/import \{[^}]*\bcountOtherActivePullSources\b[^}]*\} from '\.\/pull-source-rule'/)
+    expect(gateSource).toMatch(/import \{[^}]*\bcountActivePullSources\b[^}]*\} from '\.\/pull-source-rule'/)
+    expect(gateSource).toMatch(/import \{[^}]*\bAPPROVAL_ROUTING_POLICY_EXISTS_SQL\b[^}]*\} from '\.\/pull-source-rule'/)
+    expect(gateSource).toMatch(/import \{[^}]*\bPULL_SOURCE_THRESHOLD\b[^}]*\} from '\.\/pull-source-rule'/)
+    expect(gateCode).not.toMatch(/count\s*\(/i)
+  })
+
+  it('names the two tables in three statements of its own and nowhere else: the row lock, the policy row lock and the policy delete', () => {
+    const source = ts.createSourceFile('gate.ts', gateSource, ts.ScriptTarget.Latest, true)
+    const statements: string[] = []
+    const visit = (node: ts.Node): void => {
+      if ((ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isTemplateExpression(node))
+        && PULL_SOURCE_RULE_TABLES.some((table) => node.getText(source).includes(table))) {
+        statements.push(node.getText(source).slice(1, -1).trim().split(/\s+/).join(' '))
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(source)
+    expect(statements).toEqual([
+      'SELECT org_id, status FROM directory_integrations WHERE id = $1 AND provider = $2 FOR UPDATE',
+      'SELECT canonical_integration_id::text AS canonical_integration_id FROM org_directory_routing_policy WHERE org_id = $1 AND purpose = $2 FOR UPDATE',
+      'DELETE FROM org_directory_routing_policy WHERE org_id = $1 AND purpose = $2',
+    ])
+    // Outside those literals the code does not spell either table.
+    const withoutLiterals = gateCode.replace(/`[^`]*`/g, '``')
+    expect(withoutLiterals).not.toMatch(/directory_integrations|org_directory_routing_policy/)
   })
 })

@@ -212,6 +212,18 @@ export interface StockPreparationOperatorProject {
   archived?: boolean | null
   pulledRowCount?: number | null
   missingComponentsCount?: number | null
+  /**
+   * Pre-pilot fix batch 8(c) (register R-91) — PRESENT ONLY on a registry row of a server whose refresh governance is
+   * wired. `refreshBlocked` is the CLOSED token of the project's unfinished / unreadable refresh state (the server's
+   * `refreshBlockedToken`: pending_confirmation, confirmed_pending_execution, executing, failed_pending_recovery,
+   * executed_pending_settlement, change_pending_review, unreadable, unsettled, unknown), or `null` when the formal
+   * export would not refuse on the state (not governed, or complete and settled). `openRefreshHoldCount` /
+   * `pendingReviewCount`: the open holds and the written plans awaiting review (`null` = could not be read).
+   * Absent = the server did not say (an older backend, or governance unwired) — never read as "not blocked".
+   */
+  refreshBlocked?: string | null
+  openRefreshHoldCount?: number | null
+  pendingReviewCount?: number | null
 }
 
 /**

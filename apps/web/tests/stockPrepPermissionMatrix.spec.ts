@@ -357,6 +357,13 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
   'stock-prep-refresh-change-plan',
   'stock-prep-refresh-change-plan-confirm',
   'stock-prep-refresh-change-review-complete',
+  // 备料分批拉取第一期 step 6a-3 (S6-3, R-91): the executions read, the verify-and-close and the admin's runbook close live on
+  // the recovery card of 「拉取待确认」 (StockPreparationRefreshRecoveryCard.vue), rendered only while the project is
+  // 失败待恢复 — never on this view. Their alignment, both directions, per actor, through the real shell, is asserted where
+  // they live: apps/web/tests/StockPreparationRefreshRecovery.spec.ts (RC-ALIGN).
+  'stock-prep-refresh-executions',
+  'stock-prep-refresh-recover',
+  'stock-prep-refresh-close-unverified',
 ])
 
   /** The control testids actually present in the DOM, restricted to the manifest's control set. */

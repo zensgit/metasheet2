@@ -162,7 +162,8 @@ owner-approved window — at the preview or at the apply), review_pending (a wri
 ready-but-not-applied, or — with
 per-project sheets enabled on the server — project_sheet_absent (no 拉取人员 has created that
 project's sheet yet; this script NEVER creates one) or project_sheet_archived. A governed project
-whose earlier write did not finish (recovery_pending) IS a failure.
+whose earlier write did not finish (recovery_pending) IS a failure: a 拉取人员 recovers it on the 拉取待确认 page's
+recovery card (核对上次写入 / 结束这次执行) — this script never recovers.
 
 The account behind MS_TOKEN must be allowed to PULL: since S0 (stock-prep:pull) the floor tier
 (read+operate) is refused dry-run and apply, so use a 拉取人员 account (pull+operate+read), a
@@ -644,8 +645,11 @@ export async function pullOneProject({ apiBase, token, tenantId, projectNo, appl
   // Batch-refresh step 4 PR-3a follow-up: a GOVERNED project with an earlier execution that did not finish cleanly
   // previews `recovery_pending` (no token). A FAILURE by name (exit non-zero), never a quiet skip — nothing applies to
   // this project until that execution is recovered — with the code a reader can look up instead of "unexpected".
+  // Batch-refresh step 6a-3 (S6-3, register R-91; F-14): the note names WHERE it is recovered — the recovery card of the
+  // 拉取待确认 page, by a 拉取人员 with their own account (G1: the scheduled pull never recovers); the runbook only when the
+  // check cannot prove what landed. Only the note moved: the action, the code and `failed` are unchanged.
   if (data.status === 'recovery_pending') {
-    return { ...record, action: 'error', error: 'STOCK_PREP_REFRESH_RECOVERY_PENDING', note: 'an earlier execution of this project did not finish cleanly; it must be recovered (step 6, or the owner runbook until step 6 exists) before any pull applies — nothing was applied', failed: true, durationMs: Date.now() - startedAt }
+    return { ...record, action: 'error', error: 'STOCK_PREP_REFRESH_RECOVERY_PENDING', note: 'an earlier execution of this project did not finish cleanly; it must be recovered before any pull applies — a puller checks the last write and closes the execution on the recovery card of the 拉取待确认 page (核对上次写入 / 结束这次执行), or the platform admin follows the runbook when the check cannot prove what landed; this script never recovers — nothing was applied', failed: true, durationMs: Date.now() - startedAt }
   }
   // Batch-refresh step 5 PR-9 (register R-77 ⑧): a GOVERNED project with a WRITTEN content change awaiting its review
   // (变更复核, by a 拉取人员 on the 「拉取待确认」 page) previews `review_pending` (no token). Human work, not a fault: the

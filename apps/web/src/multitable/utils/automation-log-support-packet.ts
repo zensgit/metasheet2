@@ -6,6 +6,15 @@ import {
   summarizeStepOutput,
 } from './automation-log-redact'
 import { automationStepErrorText } from './meta-automation-labels'
+import { RUN_INTEGRATION_JOB_ACTION_TYPE, runIntegrationJobStepView } from '../runIntegrationJobAuthoring'
+
+/** English, values-free: the step sentence plus one "project: outcome (reason)" part per unit. */
+function runIntegrationJobStepSummaryLine(output: unknown): string {
+  const view = runIntegrationJobStepView(output, false)
+  if (!view) return ''
+  const units = view.units.map((unit) => `${unit.projectNo ? `${unit.projectNo}: ` : ''}${unit.text}${unit.counts ? ` · ${unit.counts}` : ''}`)
+  return [view.text, ...units].join(' | ')
+}
 
 export interface AutomationStepSupportPacket {
   index: number
@@ -61,7 +70,11 @@ export function buildAutomationLogSupportPacket(
         actionType: step.actionType,
         status: step.status,
         durationMs: step.durationMs,
-        outputSummary: summarizeStepOutput(step.output) || undefined,
+        // R-69 1b-iii: run_integration_job's output carries per-unit scopeKeys (tenant id) — the packet gets the
+        // same values-free sentence as the run log, never the raw output.
+        outputSummary: (step.actionType === RUN_INTEGRATION_JOB_ACTION_TYPE
+          ? runIntegrationJobStepSummaryLine(step.output)
+          : summarizeStepOutput(step.output)) || undefined,
         errorSummary: summarizeStepError(automationStepErrorText(step.error, step.output, false)) || undefined,
       })),
     },

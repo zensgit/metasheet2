@@ -38,6 +38,7 @@ export const ACT = 'recovery-conflict-activate-mapping.test.ts'
 export const UNIVER = 'recovery-conflict-surfaces-routes-univer-meta.test.ts'
 export const AUTHSVC = 'AuthService.test.ts'
 export const STOCKPREP_MEMBERS = 'stock-preparation-members.test.ts'
+export const LEGACY_REVOKE = 'legacy-permission-revoke.test.ts'
 
 /**
  * The census table. The first 11 rows are the O2-S2 taskbook's enumerated write
@@ -107,6 +108,9 @@ export const WIRING_CENSUS: readonly WiringRequirement[] = [
         { site: 'permissions:grant', testFile: RBAC },
         { site: 'permissions:revoke', testFile: RBAC },
         { site: 'permissions:template-apply', testFile: RBAC },
+        // POST /api/permissions/legacy/revoke writes users.permissions on the users
+        // recovery-authority table, not user_permissions. Distinct write, own call site.
+        { site: 'permissions:legacy-revoke', testFile: LEGACY_REVOKE },
       ],
     }],
   },

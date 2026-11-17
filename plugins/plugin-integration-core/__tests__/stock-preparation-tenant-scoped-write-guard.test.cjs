@@ -26,6 +26,8 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
+// R-69 1b-i: a delegating route handler's chain lives in the governed entry it calls; see the module.
+const { governedEntrySourceFor } = require('./support/governed-entry-source.cjs')
 
 const ROUTES_SRC = fs.readFileSync(
   path.join(__dirname, '..', 'lib', 'http-routes.cjs'),
@@ -54,11 +56,14 @@ function handlerBody(src, name) {
   assert.notEqual(start, -1, `handler ${name} not found in http-routes.cjs`)
   const end = src.indexOf('\n    },', start)
   assert.notEqual(end, -1, `handler ${name} has no closing brace`)
+  // R-69 1b-i: a handler that delegates to a request-free governed entry is read together with that
+  // entry (its chain moved there verbatim); '' for every other handler.
+  const governed = governedEntrySourceFor(src, name)
   // Strip line comments so a security guard reasons about CODE, not prose: a comment that NAMES the
   // forbidden pattern (e.g. explaining why resolveTenantId is unsafe) must not trip an absence check,
   // and a comment must never satisfy a presence check either. (No handler body here has `//` outside a
   // comment.)
-  return src.slice(start, end).replace(/\/\/[^\n]*/g, '')
+  return (src.slice(start, end) + governed).replace(/\/\/[^\n]*/g, '')
 }
 
 let passed = 0
@@ -405,6 +410,16 @@ const PINNED_VALUE_BEARING_READ_HANDLERS = [
   // sheet). It derives its staging project in its deps helper (`pullBatchInstallDepsFor`, from the scope's tenant with no
   // request projectId), not inline, so it is not in the inline-staging set below.
   'stockPreparationProjectPullBatchInstall',
+  // Batch-refresh step 6d-1b (S6-5; register R-91). The two CENSUS reads answer the caller's OWN tenant's registry rows and
+  // project sheets (counts; the project form also the PRIVATE component handles, admin), and the acknowledgement / revoke
+  // are WRITES to that tenant's component ruling ledger — keyed by the tenant this scope proves: a header-fillable tenant
+  // here would read another tenant's sheets or acknowledge a remnant on its project. They derive the staging project in
+  // the shared census helpers (`readStockPreparationCensusRows` / `readStockPreparationCensusHumanFieldIds`, from the
+  // scope's tenant with no request projectId), not inline, so none is in the inline-staging set below.
+  'stockPreparationSheetCensusList',
+  'stockPreparationProjectSheetCensusGet',
+  'stockPreparationProjectRemnantAcknowledge',
+  'stockPreparationProjectRemnantAcknowledgementRevoke',
   'stockPreparationProjectOverviewRefresh',
   'stockPreparationProjectOverviewEnsure',
   // S5b (R-39) 「成员与权限」. Adding project sheets to a custom role is a WRITE (a G1 grant per sheet) and

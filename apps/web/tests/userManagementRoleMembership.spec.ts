@@ -223,9 +223,38 @@ describe('UserManagementView role membership', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(UserManagementView)
-    app.component('RouterLink', { props: ['to'], template: '<a><slot /></a>' })
+    app.component('RouterLink', {
+      props: { to: { type: [String, Object], default: '' } },
+      template: '<a><slot /></a>',
+    })
     app.mount(container)
     return container
+  }
+
+  async function openListedUser(root: HTMLElement, name: string): Promise<void> {
+    await waitForCondition(() => {
+      const row = Array.from(root.querySelectorAll('.user-admin__user')).find((item) => item.textContent?.includes(name))
+      return row?.querySelector('button.user-admin__user-body') instanceof HTMLButtonElement
+    })
+    const row = Array.from(root.querySelectorAll('.user-admin__user')).find((item) => item.textContent?.includes(name))
+    const button = row?.querySelector('button.user-admin__user-body')
+    if (!(button instanceof HTMLButtonElement)) throw new Error(`user row missing: ${name}`)
+    button.click()
+    await waitForCondition(() => (root.querySelector('[data-testid="selected-user-heading"]')?.textContent || '').includes(name))
+  }
+
+  async function confirmAuthorization(root: HTMLElement, phrase?: string): Promise<void> {
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="admin-authorization-confirm"]')))
+    if (phrase) {
+      const input = root.querySelector('[data-testid="admin-authorization-phrase"]')
+      if (!(input instanceof HTMLInputElement)) throw new Error('authorization phrase input missing')
+      input.value = phrase
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushUi()
+    }
+    const confirm = root.querySelector('[data-testid="admin-authorization-confirm"]') as HTMLButtonElement | null
+    if (!confirm || confirm.disabled) throw new Error('authorization confirm is not ready')
+    confirm.click()
   }
 
   function createRoleApi(options: {
@@ -279,7 +308,9 @@ describe('UserManagementView role membership', () => {
         })
       }
       if (pathname === '/api/admin/users') return jsonOk({ items: users })
-      if (pathname === '/api/admin/access-presets') return jsonOk({ items: [] })
+      if (pathname === '/api/admin/access-presets') {
+        return jsonOk({ items: [], capabilities: { explicitNamespaceAdmission: true } })
+      }
       if (pathname.startsWith('/api/admin/invites')) return jsonOk({ items: [] })
       if (pathname === '/api/attendance/groups' || pathname === '/api/attendance/shifts') return jsonOk({ items: [] })
       if (pathname === '/api/auth/session-orgs') {
@@ -414,6 +445,7 @@ describe('UserManagementView role membership', () => {
   it('shows selected-role membership and refuses to call leftover revoke a success', async () => {
     createRoleApi({ leaveMembershipOnUnassign: true })
     const root = mountView()
+    await openListedUser(root, 'Alpha')
     await waitForCondition(() => Boolean(root.querySelector('[data-testid="user-role-select"]')))
 
     const select = root.querySelector('[data-testid="user-role-select"]') as HTMLSelectElement
@@ -425,6 +457,7 @@ describe('UserManagementView role membership', () => {
 
     const unassign = root.querySelector('[data-testid="unassign-role-button"]') as HTMLButtonElement
     unassign.click()
+    await confirmAuthorization(root)
     await waitForCondition(() => Boolean(root.querySelector('[data-testid="role-action-feedback"]')?.textContent?.includes('仍持有角色')))
 
     const feedback = root.querySelector('[data-testid="role-action-feedback"]')
@@ -438,6 +471,7 @@ describe('UserManagementView role membership', () => {
     const delayUnassign = new Promise<void>((resolve) => { release = resolve })
     const api = createRoleApi({ delayUnassign })
     const root = mountView()
+    await openListedUser(root, 'Alpha')
     await waitForCondition(() => Boolean(root.querySelector('[data-testid="user-role-select"]')))
 
     const select = root.querySelector('[data-testid="user-role-select"]') as HTMLSelectElement
@@ -445,6 +479,7 @@ describe('UserManagementView role membership', () => {
     select.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi()
     ;(root.querySelector('[data-testid="unassign-role-button"]') as HTMLButtonElement).click()
+    await confirmAuthorization(root)
     await flushUi(4)
 
     const otherUser = Array.from(root.querySelectorAll('button')).find((button) => button.textContent?.includes('Bravo'))
@@ -467,6 +502,7 @@ describe('UserManagementView role membership', () => {
       initialMembership: { 'user-1': ['admin'], 'user-2': [] },
     })
     const root = mountView()
+    await openListedUser(root, 'Alpha')
     await waitForCondition(() => {
       const button = root.querySelector('[data-testid="revoke-platform-admin-button"]') as HTMLButtonElement | null
       return Boolean(button && !button.disabled)
@@ -474,6 +510,7 @@ describe('UserManagementView role membership', () => {
 
     expect(root.querySelector('[data-testid="platform-admin-chip"]')?.textContent).toContain('已开通平台管理员')
     ;(root.querySelector('[data-testid="revoke-platform-admin-button"]') as HTMLButtonElement).click()
+    await confirmAuthorization(root, '取消平台管理员')
     await waitForCondition(() => Boolean(root.querySelector('[data-testid="role-action-feedback"]')?.textContent?.includes('仍持有角色 admin')))
 
     const feedback = root.querySelector('[data-testid="role-action-feedback"]')
@@ -490,12 +527,14 @@ describe('UserManagementView role membership', () => {
       initialMembership: { 'user-1': ['admin'], 'user-2': [] },
     })
     const root = mountView()
+    await openListedUser(root, 'Alpha')
     await waitForCondition(() => {
       const button = root.querySelector('[data-testid="revoke-platform-admin-button"]') as HTMLButtonElement | null
       return Boolean(button && !button.disabled)
     })
 
     ;(root.querySelector('[data-testid="revoke-platform-admin-button"]') as HTMLButtonElement).click()
+    await confirmAuthorization(root, '取消平台管理员')
     await flushUi(4)
 
     const otherUser = Array.from(root.querySelectorAll('button')).find((button) => button.textContent?.includes('Bravo'))
@@ -515,8 +554,9 @@ describe('UserManagementView role membership', () => {
   })
 
   function clickNamedUser(root: HTMLElement, name: string): void {
-    const button = Array.from(root.querySelectorAll('button')).find((item) => item.textContent?.includes(name))
-    button?.click()
+    const row = Array.from(root.querySelectorAll('.user-admin__user')).find((item) => item.textContent?.includes(name))
+    const button = row?.querySelector('button.user-admin__user-body')
+    if (button instanceof HTMLButtonElement) button.click()
   }
 
   it('drops a stale access snapshot across a delayed selection and A to B to A', async () => {
@@ -525,6 +565,8 @@ describe('UserManagementView role membership', () => {
       initialMembership: { 'user-1': ['admin'], 'user-2': [] },
     })
     const root = mountView()
+    await waitForCondition(() => root.textContent?.includes('Alpha') ?? false)
+    clickNamedUser(root, 'Alpha')
     await waitForCondition(() => api.pendingAccess.length >= 1)
     api.membership.set('user-1', [])
     clickNamedUser(root, 'Bravo')
@@ -560,6 +602,7 @@ describe('UserManagementView role membership', () => {
       initialMembership: { 'user-1': ['crm_admin'], 'user-2': [] },
     })
     const failedRoot = mountView()
+    await openListedUser(failedRoot, 'Alpha')
     await waitForCondition(() => (failedRoot.querySelector('[data-testid="selected-role-membership"]')?.textContent || '').includes('请选择角色'))
     const select = failedRoot.querySelector('[data-testid="user-role-select"]') as HTMLSelectElement
     select.value = 'crm_admin'
@@ -580,12 +623,14 @@ describe('UserManagementView role membership', () => {
 
     createRoleApi({ roleWriteData: {} })
     const malformedRoot = mountView()
+    await openListedUser(malformedRoot, 'Alpha')
     await waitForCondition(() => Boolean(malformedRoot.querySelector('[data-testid="user-role-select"]')))
     const roleSelect = malformedRoot.querySelector('[data-testid="user-role-select"]') as HTMLSelectElement
     roleSelect.value = 'crm_admin'
     roleSelect.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi()
     ;(malformedRoot.querySelector('[data-testid="unassign-role-button"]') as HTMLButtonElement).click()
+    await confirmAuthorization(malformedRoot)
     await waitForCondition(() => Boolean(malformedRoot.querySelector('[data-testid="user-access-unread"]')))
     const feedback = malformedRoot.querySelector('.user-admin__status')
     expect(feedback?.textContent).toContain('不完整或主体不一致')
@@ -601,12 +646,14 @@ describe('UserManagementView role membership', () => {
   it('does not apply an older role write over a newer A to B to A access read', async () => {
     const api = createRoleApi({ holdRoleWrite: true })
     const root = mountView()
+    await openListedUser(root, 'Alpha')
     await waitForCondition(() => Boolean(root.querySelector('[data-testid="user-role-select"]')))
     const select = root.querySelector('[data-testid="user-role-select"]') as HTMLSelectElement
     select.value = 'crm_admin'
     select.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi()
     ;(root.querySelector('[data-testid="unassign-role-button"]') as HTMLButtonElement).click()
+    await confirmAuthorization(root)
     await waitForCondition(() => api.pendingWrites.length === 1)
 
     clickNamedUser(root, 'Bravo')
@@ -627,6 +674,7 @@ describe('UserManagementView role membership', () => {
   it('marks the current role snapshot unread when the role write is rejected', async () => {
     createRoleApi({ failRoleWrite: true })
     const root = mountView()
+    await openListedUser(root, 'Alpha')
     await waitForCondition(() => Boolean(root.querySelector('[data-testid="user-role-select"]')))
     const select = root.querySelector('[data-testid="user-role-select"]') as HTMLSelectElement
     select.value = 'crm_admin'
@@ -634,6 +682,7 @@ describe('UserManagementView role membership', () => {
     await flushUi()
     expect(root.querySelector('[data-testid="selected-role-membership"]')?.textContent).toContain('已是角色 crm_admin 的成员')
     ;(root.querySelector('[data-testid="unassign-role-button"]') as HTMLButtonElement).click()
+    await confirmAuthorization(root)
     await waitForCondition(() => Boolean(root.querySelector('[data-testid="user-access-unread"]')))
     expect(root.querySelector('.user-admin__status')?.textContent).toContain('保存角色失败')
     expect(root.textContent).not.toContain('已是角色 crm_admin 的成员')

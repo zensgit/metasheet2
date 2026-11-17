@@ -143,6 +143,7 @@ import {
   extractApprovalConditionFormulaFieldIds,
 } from './ApprovalConditionFormula'
 import { resolveApprovalRequesterOrgRelations, ApprovalRoutingPolicyError, MAX_MANAGER_CHAIN_LEVELS, type ApprovalRequesterOrgRelations } from './ApprovalDirectoryOrg'
+import { APPROVAL_ROUTING_POLICY_REQUIRED_CODE, POLICY_REQUIRED_MESSAGE } from '../directory/pull-source-rule'
 import {
   ApprovalDepartmentUnavailableError,
   canonicalizeApprovalDepartmentFormData,
@@ -251,6 +252,53 @@ import { Logger } from '../core/logger'
 import { eventBus } from '../integration/events/event-bus'
 
 const metricsLogger = new Logger('ApprovalMetricsHook')
+
+/** The call sites that turn a routing-policy configuration error into an HTTP error. */
+export type RoutingPolicyErrorContext =
+  | 'form_contact'
+  | 'department_field'
+  | 'org_assignee_source'
+  | 'requester_department'
+  | 'requester_title'
+
+export const APPROVAL_ROUTING_POLICY_MISCONFIGURED_CODE = 'APPROVAL_ROUTING_POLICY_MISCONFIGURED' as const
+
+/** The sentence each call site answers with when the routing policy itself is broken. */
+const ROUTING_POLICY_MISCONFIGURED_MESSAGES: Readonly<Record<RoutingPolicyErrorContext, string>> = Object.freeze({
+  form_contact: 'The directory routing policy governing a form-chosen contact is misconfigured, so approver resolution cannot run. Contact an administrator.',
+  department_field: 'Approval department directory is unavailable',
+  org_assignee_source: 'The directory routing policy for this organization is misconfigured, so approver resolution cannot run. Contact an administrator.',
+  requester_department: 'The directory routing policy for this organization is misconfigured, so the requester department cannot be resolved. Contact an administrator.',
+  requester_title: 'The directory routing policy for this organization is misconfigured, so the requester title cannot be resolved. Contact an administrator.',
+})
+
+/**
+ * The one mapping from a routing-policy configuration error to its HTTP error. Every reason is a
+ * persistent configuration fault, so every answer is a 422 and none is retryable:
+ *   - `policy_required` (the organization has several active directory sources and no approval
+ *     routing policy) answers `APPROVAL_ROUTING_POLICY_REQUIRED` with one fixed sentence at every
+ *     call site; the sentence names no organization, count, integration or user;
+ *   - the two policy faults (`canonical_unavailable`, `multi_org_ambiguous`) answer
+ *     `APPROVAL_ROUTING_POLICY_MISCONFIGURED` with the sentence of the call site.
+ * The mapping only picks the code and sentence; whether a call site fails at all is decided there.
+ */
+export function routingPolicyServiceError(
+  error: ApprovalRoutingPolicyError,
+  context: RoutingPolicyErrorContext,
+): ServiceError {
+  if (error.reason === 'policy_required') {
+    return new ServiceError(POLICY_REQUIRED_MESSAGE, 422, APPROVAL_ROUTING_POLICY_REQUIRED_CODE)
+  }
+  return new ServiceError(ROUTING_POLICY_MISCONFIGURED_MESSAGES[context], 422, APPROVAL_ROUTING_POLICY_MISCONFIGURED_CODE)
+}
+
+/**
+ * Server log line for a `policy_required` refusal. The organization and the source count travel in
+ * the typed properties of the error and are written here only; no response body carries them.
+ */
+export function routingPolicyRequiredLogLine(error: ApprovalRoutingPolicyError): string {
+  return `Approval routing requires a policy: org=${error.orgId ?? 'unknown'} activePullSources=${error.sourceCount ?? 'unknown'}`
+}
 const nodeTimeoutLogger = new Logger('ApprovalNodeTimeout')
 const approvalProductLogger = new Logger('ApprovalProductService')
 
@@ -7751,11 +7799,8 @@ export class ApprovalProductService {
           }`,
         )
         if (error instanceof ApprovalRoutingPolicyError) {
-          throw new ServiceError(
-            'The directory routing policy governing a form-chosen contact is misconfigured, so approver resolution cannot run. Contact an administrator.',
-            422,
-            'APPROVAL_ROUTING_POLICY_MISCONFIGURED',
-          )
+          if (error.reason === 'policy_required') metricsLogger.warn(routingPolicyRequiredLogLine(error))
+          throw routingPolicyServiceError(error, 'form_contact')
         }
         throw new ServiceError(
           'Could not resolve the organization relations of a form-chosen contact required by this approval template. Please retry.',
@@ -8224,7 +8269,10 @@ export class ApprovalProductService {
     // distinct, actionable code. Same guard POSITIONS as before (fires only when the graph actually
     // routes on the attribute) — the blast radius of a broken policy stays scoped to templates that
     // consume org data, exactly like today's transient-failure semantics.
-    let orgPolicyMisconfigured = false
+    // The caught error is kept (not only the fact that there was one) so each guard below answers
+    // with the code of its reason: a broken policy and a missing policy are both persistent
+    // configuration faults, but they are different faults with different remedies.
+    let orgPolicyError: ApprovalRoutingPolicyError | null = null
     try {
       orgRelations = await resolveApprovalRequesterOrgRelations(effectiveRequester.userId, pool.query.bind(pool), {
         includeManagerChain: needsManagerChain,
@@ -8233,22 +8281,22 @@ export class ApprovalProductService {
       })
     } catch (error) {
       orgReadFailed = true
-      orgPolicyMisconfigured = error instanceof ApprovalRoutingPolicyError
+      orgPolicyError = error instanceof ApprovalRoutingPolicyError ? error : null
       metricsLogger.warn(
         `Failed to resolve requester org relations for ${effectiveRequester.userId}: ${
           error instanceof Error ? error.message : 'unknown error'
         }`,
       )
+      if (orgPolicyError?.reason === 'policy_required') metricsLogger.warn(routingPolicyRequiredLogLine(orgPolicyError))
     }
 
     if (needsDepartmentDirectory) {
+      if (orgPolicyError) throw routingPolicyServiceError(orgPolicyError, 'department_field')
       if (orgReadFailed) {
         throw new ServiceError(
           'Approval department directory is unavailable',
-          orgPolicyMisconfigured ? 422 : 503,
-          orgPolicyMisconfigured
-            ? 'APPROVAL_ROUTING_POLICY_MISCONFIGURED'
-            : 'APPROVAL_DEPARTMENT_DIRECTORY_UNRESOLVED',
+          503,
+          'APPROVAL_DEPARTMENT_DIRECTORY_UNRESOLVED',
         )
       }
       const integrationId = orgRelations.canonicalIntegrationId
@@ -8322,13 +8370,7 @@ export class ApprovalProductService {
     // (retryable). Genuine absence (read succeeded, requester has no manager) is untouched and
     // still follows `emptyAssigneePolicy` — that is the pre-existing, deliberate semantic.
     if (orgReadFailed && runtimeGraphUsesOrgAssigneeSource(runtimeGraph)) {
-      if (orgPolicyMisconfigured) {
-        throw new ServiceError(
-          'The directory routing policy for this organization is misconfigured, so approver resolution cannot run. Contact an administrator.',
-          422,
-          'APPROVAL_ROUTING_POLICY_MISCONFIGURED',
-        )
-      }
+      if (orgPolicyError) throw routingPolicyServiceError(orgPolicyError, 'org_assignee_source')
       throw new ServiceError(
         'Could not resolve the requester organization relations required by this approval template. Please retry.',
         503,
@@ -8337,14 +8379,8 @@ export class ApprovalProductService {
     }
 
     if (!orgRelations.primaryDepartmentName && runtimeGraphUsesRequesterAttribute(runtimeGraph, 'department')) {
-      if (orgPolicyMisconfigured) {
-        // persistent CONFIG error — retrying never fixes a broken routing policy
-        throw new ServiceError(
-          'The directory routing policy for this organization is misconfigured, so the requester department cannot be resolved. Contact an administrator.',
-          422,
-          'APPROVAL_ROUTING_POLICY_MISCONFIGURED',
-        )
-      }
+      // persistent CONFIG error — retrying never fixes a broken or missing routing policy
+      if (orgPolicyError) throw routingPolicyServiceError(orgPolicyError, 'requester_department')
       if (orgReadFailed) {
         throw new ServiceError(
           'Could not resolve the requester department required by this approval template. Please retry.',
@@ -8364,13 +8400,7 @@ export class ApprovalProductService {
     // applies: a directory read that THREW -> 503 (retryable); a read that SUCCEEDED but left title unset
     // -> 422 (genuine row-level absence). Only fires when the graph actually routes on requester.title.
     if (!orgRelations.primaryTitle && runtimeGraphUsesRequesterAttribute(runtimeGraph, 'title')) {
-      if (orgPolicyMisconfigured) {
-        throw new ServiceError(
-          'The directory routing policy for this organization is misconfigured, so the requester title cannot be resolved. Contact an administrator.',
-          422,
-          'APPROVAL_ROUTING_POLICY_MISCONFIGURED',
-        )
-      }
+      if (orgPolicyError) throw routingPolicyServiceError(orgPolicyError, 'requester_title')
       if (orgReadFailed) {
         throw new ServiceError(
           'Could not resolve the requester title required by this approval template. Please retry.',

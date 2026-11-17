@@ -1319,6 +1319,9 @@ test('PB-P2 WIRED (BI-1b): exactly these runtime files name stock-preparation-pu
     'index.cjs',
     'lib/http-routes.cjs',
     'lib/stock-preparation-apply-writer.cjs',
+    // Batch-refresh step 6a-2 (S6-2, R-91): the recovery assessment reads the reader's 本次拉取 Symbol (the PURE module's
+    // EXISTING_ROW_PULL_BATCH) to count the rows a run provably created into its batch — never the store.
+    'lib/stock-preparation-execution-recovery.cjs',
     'lib/stock-preparation-large-bom-jobs.cjs',
     'lib/stock-preparation-pilot-readiness.cjs',
     // BI-2 (R-65): the per-sheet install library (portable; it reaches the ledger only through its injected deps).

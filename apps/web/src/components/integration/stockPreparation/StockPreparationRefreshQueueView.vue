@@ -43,9 +43,10 @@
       </p>
 
       <!-- THE THREE RENDERINGS (plan §8) — never one for another. PR-9 (R-77 ①): plus `review_pending` — no hold, but a
-           written content change awaits its review (the review section renders below), never 「无待处理」. -->
+           written content change awaits its review (the review section renders below), never 「无待处理」. S6-3 (R-91):
+           plus `recovery_pending` — no hold, but the last write did not finish (the recovery card renders below). -->
       <p
-        v-if="rendering === 'not_governed' || rendering === 'unreadable' || rendering === 'none_pending' || rendering === 'review_pending'"
+        v-if="rendering === 'not_governed' || rendering === 'unreadable' || rendering === 'none_pending' || rendering === 'review_pending' || rendering === 'recovery_pending'"
         class="sp-refresh__state"
         data-testid="stock-prep-refresh-state"
       >
@@ -57,6 +58,18 @@
       <p v-if="governed === 'protected' && rendering === 'holds'" class="sp-refresh__note" data-testid="stock-prep-refresh-asymmetry">
         {{ bi(asymmetry.zh, asymmetry.en) }}
       </p>
+
+      <!-- S6-3 (step-6 design §5.4; register R-91): the RECOVERY CARD — only while this page's own summary says 失败待恢复
+           (dormancy: the audited executions list is never read otherwise). Above the holds: nothing on this project can
+           be written, confirmed or ended until the unfinished execution is closed. -->
+      <StockPreparationRefreshRecoveryCard
+        v-if="recoveryShown"
+        :project-no="openedProjectNo"
+        :api="api"
+        :generation="recoveryGeneration"
+        @closed="onRecoveryClosed"
+        @reread="onRecoveryReread"
+      />
 
       <template v-if="rendering === 'holds'">
         <p class="sp-refresh__note" data-testid="stock-prep-refresh-receipt-note">{{ bi(receiptNote.zh, receiptNote.en) }}</p>
@@ -289,6 +302,8 @@
       <div v-if="previewAgain" class="sp-refresh__preview-again" data-testid="stock-prep-refresh-preview-again" :data-preview-again="previewAgain" role="status">
         <p>{{ bi(previewAgainCopy.zh, previewAgainCopy.en) }}</p>
         <p v-if="previewAgain === 'confirmed' || previewAgain === 'plan_confirmed'" class="sp-refresh__hint" data-testid="stock-prep-refresh-rekey-note">{{ bi(rekeyNote.zh, rekeyNote.en) }}</p>
+        <!-- S6-3 (RC-W5): the close stands; the post-release generation bump did not land (T6-8). -->
+        <p v-if="previewAgain === 'recovered' && recoveredBumped === false" class="sp-refresh__hint" data-testid="stock-prep-refresh-recovery-not-bumped">{{ bi(recoveryNotBumped.zh, recoveryNotBumped.en) }}</p>
         <button
           type="button"
           class="sp-refresh__button sp-refresh__button--primary"
@@ -307,6 +322,7 @@
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import StockPreparationRefreshChangePlan from './StockPreparationRefreshChangePlan.vue'
+import StockPreparationRefreshRecoveryCard from './StockPreparationRefreshRecoveryCard.vue'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import { StockPreparationConfirmApiError } from '../../../services/integration/stockPreparation/confirmApi'
 import {
@@ -322,6 +338,8 @@ import {
   STOCK_PREP_REFRESH_FIELD_PLAIN,
   STOCK_PREP_REFRESH_OBSERVATION_ROLE_PLAIN,
   STOCK_PREP_REFRESH_PLAN_CONFIRMED_NEXT,
+  STOCK_PREP_REFRESH_RECOVERED_NEXT,
+  STOCK_PREP_RECOVERY_GENERATION_NOT_BUMPED,
   STOCK_PREP_REFRESH_REVIEWED_NEXT,
   STOCK_PREP_REFRESH_CONTINUATION_STATUS_PLAIN,
   STOCK_PREP_REFRESH_HISTORY_PLAIN,
@@ -358,6 +376,7 @@ import {
 } from '../../../services/integration/stockPreparation/refreshQueue'
 import { parseStockPrepRefreshStanza, type StockPrepRefreshStanza } from '../../../services/integration/stockPreparation/refreshState'
 import { stockPrepRefreshIsContentClassHold } from '../../../services/integration/stockPreparation/refreshChangePlan'
+import { stockPrepRecoveryCardShown } from '../../../services/integration/stockPreparation/refreshRecovery'
 import { stockPrepProjectNumbersMatch } from '../../../services/integration/stockPreparation/projectTarget'
 import { copyTextToClipboard } from '../../../views/plm/plmClipboard'
 
@@ -384,7 +403,7 @@ function bi(zh: string, en: string): string {
   return locale.value === 'zh-CN' ? zh : en
 }
 
-type Rendering = 'no_project' | 'loading' | 'not_governed' | 'unreadable' | 'none_pending' | 'review_pending' | 'holds' | 'refused' | 'not_registered' | 'failed'
+type Rendering = 'no_project' | 'loading' | 'not_governed' | 'unreadable' | 'none_pending' | 'review_pending' | 'recovery_pending' | 'holds' | 'refused' | 'not_registered' | 'failed'
 
 const openedProjectNo = computed<string>(() => (props.projectNo ?? '').trim())
 const busy = ref(false)
@@ -397,7 +416,11 @@ const errorCode = ref<string | null>(null)
 const errorReason = ref<string | null>(null)
 const errorStatus = ref<number>(0)
 const notice = ref<StockPrepPlainText | null>(null)
-const previewAgain = ref<'confirmed' | 'ended' | 'plan_confirmed' | 'reviewed' | null>(null)
+const previewAgain = ref<'confirmed' | 'ended' | 'plan_confirmed' | 'reviewed' | 'recovered' | null>(null)
+/** S6-3: after a recovery close, whether the post-release generation bump landed (values-free boolean; RC-W5). */
+const recoveredBumped = ref<boolean | null>(null)
+/** S6-3: bumped on every holds re-read — the recovery card reads its executions again. */
+const recoveryGeneration = ref(0)
 /** PR-9: the holds page's `holdSetFingerprint` (values-free digest) — the change plan's advisory cross-check. */
 const holdsPageFingerprint = ref<string | null>(null)
 /** PR-9: bumped on every holds re-read — the change-plan section re-reads and drops its local choices. */
@@ -414,6 +437,7 @@ let generation = 0
 const api = computed<StockPrepRefreshQueueApi>(() => props.api ?? createStockPrepRefreshQueueApi(props.scope))
 
 const asymmetry = STOCK_PREP_REFRESH_NON_PILOT_ASYMMETRY
+const recoveryNotBumped = STOCK_PREP_RECOVERY_GENERATION_NOT_BUMPED
 const receiptNote = STOCK_PREP_REFRESH_RECEIPT_NOTE
 const rekeyNote = STOCK_PREP_REFRESH_LEDGER_REKEY_NOTE
 const previewAgainText = STOCK_PREP_REFRESH_PREVIEW_AGAIN
@@ -433,11 +457,16 @@ const rendering = computed<Rendering>(() => {
   if (!current || current.readable !== true || current.status === 'unreadable') return 'unreadable'
   if (current.status === 'not_governed') return 'not_governed'
   if (holds.value.length > 0) return 'holds'
+  // S6-3 (R-91): no hold, but the last write did not finish — its own rendering (the card below), never 「无待处理」.
+  if (current.status === 'failed_pending_recovery') return 'recovery_pending'
   // PR-9 (R-77 ①): no hold, but a written change awaits its review — its own rendering, never 「无待处理」.
   const reviews = current.counts?.pendingReviews
   if ((typeof reviews === 'number' && reviews > 0) || current.status === 'change_pending_review') return 'review_pending'
   return 'none_pending'
 })
+
+/** S6-3 (step-6 design §5.4): the recovery card, only while this page's own summary says 失败待恢复 (dormancy, RC-W1). */
+const recoveryShown = computed<boolean>(() => Boolean(openedProjectNo.value) && loaded.value && stockPrepRecoveryCardShown(summary.value))
 
 /**
  * PR-9 (R-77 ⑪): read the change plan only for a GOVERNED, readable project that has something for it — a loaded
@@ -537,6 +566,8 @@ async function reload(options: { keepNotice?: boolean } = {}): Promise<void> {
     applyPage(page, 'replace')
     // PR-9: the change-plan section reads again on the same receipt (and drops its local choices).
     changePlanGeneration.value += 1
+    // S6-3: the recovery card reads its executions again (and drops its reports: a new verify).
+    recoveryGeneration.value += 1
   } catch (error) {
     if (ticket !== generation) return
     loaded.value = false
@@ -710,8 +741,9 @@ async function end(hold: StockPrepRefreshHold): Promise<void> {
 }
 
 /** E-4: every decision answers `nextStep: 'preview_again'` — re-read the holds and say a preview must follow. */
-async function afterDecision(kind: 'confirmed' | 'ended' | 'plan_confirmed' | 'reviewed', _result: { nextStep?: string } | null): Promise<void> {
+async function afterDecision(kind: 'confirmed' | 'ended' | 'plan_confirmed' | 'reviewed' | 'recovered', _result: { nextStep?: string } | null): Promise<void> {
   previewAgain.value = kind
+  if (kind !== 'recovered') recoveredBumped.value = null
   await reload({ keepNotice: true })
 }
 
@@ -719,8 +751,22 @@ async function afterDecision(kind: 'confirmed' | 'ended' | 'plan_confirmed' | 'r
 const previewAgainCopy = computed<StockPrepPlainText>(() => {
   if (previewAgain.value === 'plan_confirmed') return STOCK_PREP_REFRESH_PLAN_CONFIRMED_NEXT
   if (previewAgain.value === 'reviewed') return STOCK_PREP_REFRESH_REVIEWED_NEXT
+  if (previewAgain.value === 'recovered') return STOCK_PREP_REFRESH_RECOVERED_NEXT
   return previewAgainText
 })
+
+// ── S6-3: the recovery card's events (values-free) ───────────────────────────────────────────────
+
+/** A close landed (design §5.4 「请重新预览」): re-read the page and say a preview must follow. */
+async function onRecoveryClosed(outcome: { result: string; generationBumped: boolean }): Promise<void> {
+  recoveredBumped.value = outcome && outcome.generationBumped === true
+  await afterDecision('recovered', null)
+}
+
+/** The execution is gone or already finished: the page's summary is read again (the card follows the summary). */
+async function onRecoveryReread(): Promise<void> {
+  await reload({ keepNotice: true })
+}
 
 // ── PR-9: the change-plan section's events (values-free) ─────────────────────────────────────────
 
@@ -918,6 +964,7 @@ watch(openedProjectNo, () => {
   errorCode.value = null
   notice.value = null
   previewAgain.value = null
+  recoveredBumped.value = null
   void reload()
 }, { immediate: true })
 

@@ -126,13 +126,21 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
   // can never leave the run (or the next reset) waiting.
   let formHold: { enter(): void; open: Promise<void> } | undefined
   const formReleases: Array<() => void> = []
-  // Every call on the sheet read path (access, fields, view, records, record permissions) counts.
+  // Every call on the sheet read path (access, fields, view, records, record permissions, project registry) counts.
   let sheetReads = 0
-  // fld_line carries the stock-preparation key marker; it only matters on a registered sheet (unbound reads ignore it).
-  const sheetFields = [{ id: 'fld_project', type: 'string' },
-    { id: 'fld_line', type: 'string', property: { stockPreparation: { key: true } } }, { id: 'fld_parent', type: 'string' },
-    { id: 'fld_qty', type: 'number' }, { id: 'fld_desc', type: 'string' }]
+  // Source binding (design baseline v2.3 §7.2): the project the registry names for the synthetic sheet, or null
+  // (the default: an unregistered sheet, so every sheet read stays unbound exactly as before). fld_line carries the
+  // template's key marker; the reader consults it only for a registered sheet.
+  let projectSheet: { projectNo: string } | null = null
+  const sheetFields = [{ id: 'fld_project', type: 'string' }, { id: 'fld_line', type: 'string', property: { stockPreparation: { key: true } } },
+    { id: 'fld_parent', type: 'string' }, { id: 'fld_qty', type: 'number' }, { id: 'fld_desc', type: 'string' }]
   const sheetSource = {
+    // One registry lookup, counted like every other sheet read: setProjectSheet (persists until reset) wins, else the
+    // current sheet state's `registeredProject` (slice YE; reset by every setSheet), else unregistered.
+    async resolveProjectSheet() {
+      sheetReads++
+      return projectSheet ?? (sheet.registeredProject === undefined ? null : { projectNo: sheet.registeredProject })
+    },
     async resolveAccess() {
       sheetReads++
       return { userId: principals.owner, isAdminRole: false, canRead: true, canExport: true, live: true, bounded: false,
@@ -145,8 +153,6 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
     async readableRecordIds(_sheet: string, _user: string, _admin: boolean, ids: readonly string[]) { sheetReads++; return new Set(ids) },
     filter: { parse: () => null, prune: () => null, leaves: () => [], evaluate: () => true, leafMatches: () => true,
       effectiveType: (field: { type: string }) => field.type },
-    // Not counted in sheetReads: it is the host's registry lookup (087), not a read of the sheet itself.
-    async resolveProjectSheet() { return sheet.registeredProject === undefined ? null : { projectNo: sheet.registeredProject } },
   }
   let credentialRef = '', credentialGeneration = 0, seedDraft: Draft
   const load = (relative: string) => importNative(pathToFileURL(path.join(root, relative)).href)
@@ -372,7 +378,8 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
     const current = await hostPool.query('SELECT current_schema() AS schema')
     if (current.rows[0]?.schema !== schema) throw new Error('SYNTHETIC_NATIVE_AUTH_POOL_SCHEMA_REQUIRED')
   } catch (error) { await cleanup(); throw error }
-  const ddl = ['090_create_integration_yida_delivery_ledger.sql', '091_create_integration_yida_create_fence.sql',
+  // 087 (project-sheet registry): a bound admission re-reads it inside the admission transaction.
+  const ddl = ['087_create_integration_stock_prep_project_target.sql', '090_create_integration_yida_delivery_ledger.sql', '091_create_integration_yida_create_fence.sql',
     '092_create_integration_yida_credential_materials.sql', '093_create_integration_yida_draft_plans.sql',
     '094_create_integration_yida_approved_target.sql', '095_create_integration_yida_send_approvals.sql',
     ...(options.initialization ? ['096_create_integration_yida_initialization.sql'] : [])]
@@ -395,6 +402,7 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
       return { reached, release }
     },
     setSheet(patch: Partial<SheetState>) { sheet = { ...defaultSheet(), ...patch } },
+    setProjectSheet(value: { projectNo: string } | null) { projectSheet = value },
     get sheetReads() { return sheetReads },
     get tokenCommitted() { return tokenCommitted }, get validRequests() { return validRequests },
     get seedDraft() { return seedDraft }, get runtime() { return runtime! },
@@ -481,7 +489,7 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
       if (current.rows[0]?.schema !== schema) throw new Error('SYNTHETIC_NATIVE_AUTH_POOL_SCHEMA_REQUIRED')
       tokenPayloads.length = 0; formPayloads.length = 0; sql.length = 0
       enablement = 'false'; tokenCommitted = false; validRequests = true; formOutcome = 'ack'
-      multiTargetEnablement = 'false'; unboundTestTargetRefs = undefined; sheet = defaultSheet(); sheetReads = 0
+      multiTargetEnablement = 'false'; unboundTestTargetRefs = undefined; sheet = defaultSheet(); sheetReads = 0; projectSheet = null
       disconnectAtToken = false; inflight = undefined; closedResponses = 0; lastSubmission = Promise.resolve()
       reauthorization = REAUTHORIZED; reauthorizations = 0
       await startRuntime()

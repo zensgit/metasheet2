@@ -51,17 +51,22 @@ const test = (name, fn) => tests.push([name, fn])
 // Captured on a CLEAN origin/main (4c78e75a0, lib untouched) with the same synthetic fixture and the
 // same calls, before any line of this change existed. Asserted as literals: a generation (or anything
 // else of this change) leaking into a revision, a digest or the evidence turns these red.
+// RECAPTURED, R-71 ⑦.4 PR-4: ONLY the three evidence hashes (`dryRunEvidenceHash`, `applyEvidenceHash`,
+// `secondDryRunEvidenceHash`) — the evidence carries the template's field list, which gained `issueConfirmDate`
+// and `projectSpecModel`. With the two `field(...)` lines removed on the PR-4 branch every literal reproduced;
+// both revisions, the token subset, the source-content revision / digest, the archive revision and the written
+// rows did not move.
 const GOLDEN = Object.freeze({
   dryRunRevision: '3585797fa18bb8817ba3079f4936c61393f2b0d8a62ab87d34bd24430e32aa7d',
-  dryRunEvidenceHash: '6e3067bf1f2973a51d77d227767913778040ed07b7e150e271bc94b665ffefd1',
+  dryRunEvidenceHash: '5b954e0b548c425a10f49e60553b602688fdc683016868c1aa54cceda04986a4',
   dryRunResponseKeys: ['action', 'boundedPreview', 'canApply', 'counts', 'dryRunToken', 'evidence', 'largeBom', 'plmReadPhase', 'revision', 'status'],
   tokenRecordKeys: ['actionId', 'conflictPolicyReview', 'createdAt', 'expiresAt', 'parametersHash', 'revision'],
   tokenComparedHash: 'a6670f18d015b7f0f7eb1bfbba63fe17b7bc012dc596f653efbb7949c1f3748b',
   applySourceContentRevision: '3cbd8b9d7ac44bb4e3098e68a0910acec01ab1101c5d69869535031acc5c8096',
   applySourceContentDigest: '0926db3aef05c123f3606f6a5a4d3385',
-  applyEvidenceHash: 'aa43c4633296745f4974ca6dff8d8a9a52728077cda0ba25560fa3ef49fa71a2',
+  applyEvidenceHash: '78a8e3f097bf1d335473c5de3a576b57c73b3e01e467208d1d0aec058a9bbe0a',
   secondDryRunRevision: '602bc968860dfe321b22af2bd4f5631fdb91f00e214413d4c4d04bcfa9acfd91',
-  secondDryRunEvidenceHash: '0cf2cfdc5e9d55ababdca2574aad6c4da4077d1bc420b990c2bee2c075bac5be',
+  secondDryRunEvidenceHash: 'abc2434c92ac03e799f599d0cb44da7d23611067edddd0531efe10fc7f05adfe',
   archiveRevision: '602bc968860dfe321b22af2bd4f5631fdb91f00e214413d4c4d04bcfa9acfd91',
 })
 

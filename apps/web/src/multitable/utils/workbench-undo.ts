@@ -25,14 +25,15 @@
  *   what undo took back.
  * - A text-entry control never hands the chord on: with no step of its own left, the chord does
  *   nothing. The grid's undo / redo (which replays a recorded cell edit to the server) runs only from a
- *   non-text target inside the workbench (the grid, a button, a date input, a select…), or from the page
+ *   non-text target inside the workbench (the grid, a button, a date input, a select…; not one of the
+ *   drawer's tab panels itself: `isGridTarget`, the workbench's `isWorkbenchGridTarget`), or from the page
  *   itself (nothing focused, e.g. after Enter committed the title) when the last press or focus was on a
  *   grid surface (`isGridSurface`; the workbench's is `isWorkbenchGridSurface`: the grid itself and its
  *   cells, and the drawer's title and fields, whose edits are cell patches). A button, link or file input
- *   there (Send, Resolve, Delete selected, an upload), the grid's footer and bars, the drawer's comments,
- *   history, approval, task or attachments panels, a rename in the rail or a manager, a picker, or a press
- *   in a dialog does not make the page itself the grid's. Outside the workbench (a teleported dialog or
- *   popover, the app shell) nothing runs.
+ *   there, or anything inside one (a section toggle, a comment anchor, an upload), the grid's footer and
+ *   bars (Delete selected), the drawer's comments (Send, Resolve), history, approval, task or attachments
+ *   panels, a rename in the rail or a manager, a picker, or a press in a dialog does not make the page
+ *   itself the grid's. Outside the workbench (a teleported dialog or popover, the app shell) nothing runs.
  * - The history belongs to the control's own edits only. Content no recorded edit produced (a re-render
  *   after grid undo, a suggestion picked into the box, a revert, a rejected commit snapping back) is a
  *   rewrite: the history is dropped. `reset` drops every history: the workbench calls it when the drawer
@@ -40,7 +41,8 @@
  *   view changes.
  * - A saved commit ends the history (`beginCommit` from the workbench's drawer commit, settled once the
  *   server accepted it): only edits made since stay undoable, back to the committed content, also when
- *   the control was undone (and redone) while the patch was in flight, or redone after it was accepted.
+ *   the control was undone (and redone) while the patch was in flight, or redone after it was accepted,
+ *   with or without a key that changed nothing (Backspace at the start) in between.
  *   A DOM `change` is not a commit: most boxes' `change` saves nothing.
  * - During an input-method composition the chord does nothing. A number box holding a draft it cannot
  *   report (`validity.badInput`: "-", "1." read as "") does nothing on the chord and takes no snapshot
@@ -86,10 +88,19 @@ export function drawerCommitContainers(fieldId: string, primaryFieldId: string |
  *  drawer the title and the fields panel (not the grid's footer or bars, nor the drawer's comments,
  *  history, approval, task or attachments panels). */
 const CELL_EDIT_SURFACES = '.meta-grid__cell, .meta-record-drawer__titleblock, .meta-record-drawer__fields'
-/** Controls on those parts whose action is not a cell patch (Send, Resolve, Delete selected, a section
- *  toggle…), or not yet one (a file input: its patch comes once the upload ends). One that disables or
- *  removes itself when pressed leaves focus on the page itself. */
+/** Controls on those parts whose action is not a cell patch (a section toggle, a comment anchor, a link…),
+ *  or not yet one (a file input: its patch comes once the upload ends). One that disables or removes itself
+ *  when pressed leaves focus on the page itself. */
 const NOT_CELL_EDITS = 'button, [role="button"], [role="menuitem"], a[href], input[type="file"]'
+
+/** The workbench's `isGridTarget`: a chord with the focus on a non-text target inside the workbench is the
+ *  grid's, except on one of the drawer's tab panels itself. The drawer gives the focus to its open tab when
+ *  the field that had it is gone on the next record, and Safari leaves it on the panel after a press on a
+ *  button in it (Send, Resolve…): the grid's last step can then be a record no longer shown. A control
+ *  inside the panel is decided as before. */
+export function isWorkbenchGridTarget(node: Node): boolean {
+  return !(node instanceof Element && node.matches('[role="tabpanel"]') && !!node.closest('.meta-record-drawer'))
+}
 
 /** The workbench's `isGridSurface`: whether, after a press or focus on `node`, a chord on the page itself
  *  is the grid's. */
@@ -226,6 +237,11 @@ function chordLetter(event: KeyboardEvent): string {
   return code ? code[1].toLowerCase() : key
 }
 
+/** Drop the steps on top of `stack` that would change nothing (their content is the control's `content`). */
+function dropNoOpSteps(stack: Snapshot[], content: string): void {
+  while (stack.length > 0 && stack[stack.length - 1].content === content) stack.pop()
+}
+
 function pushCapped(stack: Snapshot[], snapshot: Snapshot): void {
   stack.push(snapshot)
   if (stack.length > MAX_STEPS) stack.splice(0, stack.length - MAX_STEPS)
@@ -241,6 +257,9 @@ export interface WorkbenchUndoOptions {
   /** Whether `node` is on a surface whose edits are the grid's undo history (`isWorkbenchGridSurface`):
    *  only after a press or focus there is a chord on the page itself the grid's. */
   isGridSurface?: (node: Node) => boolean
+  /** Whether a chord with the focus on `node`, a non-text target inside the workbench, is the grid's
+   *  (`isWorkbenchGridTarget`); when not, it does nothing. */
+  isGridTarget?: (node: Node) => boolean
 }
 
 export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
@@ -248,6 +267,7 @@ export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
   const now = options.now ?? (() => Date.now())
   const isInsideWorkbench = options.isInsideWorkbench ?? (() => true)
   const isGridSurface = options.isGridSurface ?? (() => true)
+  const isGridTarget = options.isGridTarget ?? (() => true)
   const histories = new WeakMap<HTMLElement, History>()
   let generation = 0
   /** Set while a restore runs, so the recorder does not take its own edit as one. */
@@ -336,6 +356,11 @@ export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
     while (undo && from.length > 0 && (from[from.length - 1].content === content || from[from.length - 1].seq <= history.floor)) from.pop()
     const snapshot = from.pop()
     if (!snapshot) return false
+    // A redo puts the current content back under the redone step's own number: the steps on top that would
+    // change nothing (taken since the undo, by a `beforeinput` no edit followed) go first. Their numbers are
+    // newer, so left in place they would sit under the redone step, and the commit floor counts on the
+    // stack being in step order.
+    if (!undo) dropNoOpSteps(history.undo, content)
     pushCapped(undo ? history.redo : history.undo, snapshotOf(host, snapshot.seq))
     restore(host, history, snapshot)
     return true
@@ -361,7 +386,7 @@ export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
         return 'swallow'
       }
       const target = event.target as Node | null
-      const grids = isPageItself(target) ? lastPressOnGrid : !!target && isInsideWorkbench(target)
+      const grids = isPageItself(target) ? lastPressOnGrid : !!target && isInsideWorkbench(target) && isGridTarget(target)
       if (!grids) return 'swallow'
       return undo ? 'grid-undo' : 'grid-redo'
     },
@@ -454,8 +479,12 @@ export function createWorkbenchUndo(options: WorkbenchUndoOptions = {}) {
           const host = textEntryHost(el)
           const history = host ? live(host) : undefined
           if (!host || !history || marks.has(host)) continue
-          // The highest step number, not the top one's: a `beforeinput` no edit followed, between an undo
-          // and a redo, leaves a newer number under the redone step.
+          // Steps on top that would change nothing (a `beforeinput` no edit followed, after an undo) go first:
+          // their newer numbers would put the mark above a step a redo in flight brings back, and that redo
+          // would then not be undoable back to the committed content.
+          dropNoOpSteps(history.undo, contentOf(host))
+          // The highest step number, not the top one's (the order is kept by `step` and the line above;
+          // this does not depend on it).
           marks.set(host, { history, mark: history.undo.reduce((top, snapshot) => Math.max(top, snapshot.seq), 0) })
           // Typing after the commit is a step of its own, back to the committed content.
           history.lastKind = ''

@@ -843,9 +843,21 @@ function sameContent(before, after) {
 
 /**
  * The band columns, in ONE host repair transaction (design §8.2 I2, §9 step 2): the sheet must exist; the known columns'
- * content is read before; the missing band ids are created at the placement's order (`right` = after the last KNOWN
- * column: template ∪ declared ext ∪ band, P2-19 / critic C7); a concurrently created id is 409; both ids must then
- * resolve to the derived physical ids; no existing column may change (else the transaction rolls back).
+ * content is read before; the missing band ids are created at the placement's order; a concurrently created id is 409;
+ * both ids must then resolve to the derived physical ids; no existing column may change (else the transaction rolls
+ * back).
+ *
+ * `right` = AFTER THE LAST COLUMN OF THE SHEET (R-65 / R-89, Y7 close-out): the order is the largest `order` over EVERY
+ * field row of the sheet — template, declared ext, band, a person-added column with a random id, a column a concurrent
+ * repair just added — read by the repair transaction's `readObjectMaxFieldOrder`, which takes the canonical per-sheet
+ * writer fence FIRST and then runs one SELECT MAX("order"). The read is the FIRST step after the sheet check, so with the
+ * fence on the resolve, the before-snapshot, the write and the verify all run after a concurrent field writer (a Y7
+ * `addMissingColumns` repair, POST /fields) has committed, or that writer waits for this transaction: the band never
+ * shares an order with the repaired columns. (Y7's own repair reads its before-snapshot ahead of the max; taking the
+ * fence first here is deliberate.) A max over the KNOWN ids only (the earlier P2-19 rule) let a person-added column
+ * with a higher order sort after a "right" band, and let a concurrent repair land on the band's orders.
+ * `left` keeps −2 / −1; the read still runs (it takes the fence) and is required for both placements: a repair
+ * transaction without it is refused 503 PROVISIONING_UNAVAILABLE before any write, as Y7's repair is.
  */
 async function ensureBandColumns({ deps, keys, placement, locale }) {
   const { provisioning, projectId, target, band } = deps
@@ -855,12 +867,15 @@ async function ensureBandColumns({ deps, keys, placement, locale }) {
   return provisioning.runObjectFieldsRepairTransaction(async (tx) => {
     const sheet = await tx.findObjectSheet({ projectId, objectId: target.objectId })
     if (!sheet) throw conflict('sheet_absent')
+    if (typeof tx.readObjectMaxFieldOrder !== 'function') throw provisioningUnavailable(['runObjectFieldsRepairTransaction.readObjectMaxFieldOrder'])
+    const sheetMaxOrder = await tx.readObjectMaxFieldOrder({ projectId, objectId: target.objectId })
+    if (sheetMaxOrder !== null && !Number.isSafeInteger(sheetMaxOrder)) {
+      throw typedError(500, ERR.STAMP_INVALID, 'the sheet\'s largest field order could not be read as an integer; nothing was written', { field: 'maxFieldOrder' })
+    }
     const resolved = await tx.resolveExistingObjectFieldIds({ projectId, objectId: target.objectId, fieldIds: known })
     const existing = Object.keys(isPlainObject(resolved) ? resolved : {}).filter((id) => known.includes(id))
     const before = existing.length > 0 ? await tx.readObjectFieldsContent({ projectId, objectId: target.objectId, fieldIds: existing }) : {}
-    let maxOrder = -1
-    for (const content of Object.values(before || {})) if (content && Number.isFinite(content.order) && content.order > maxOrder) maxOrder = content.order
-    const descriptors = deps.bandDescriptors({ locale, placement, maxExistingOrder: Math.trunc(maxOrder) })
+    const descriptors = deps.bandDescriptors({ locale, placement, maxExistingOrder: sheetMaxOrder === null ? -1 : sheetMaxOrder })
       .filter((descriptor) => keys.some((key) => PULL_BATCH_BAND_FIELD_IDS[key] === descriptor.id))
     const write = await tx.ensureMissingObjectFields({ projectId, objectId: target.objectId, fields: descriptors })
     if (write && Array.isArray(write.skippedExistingFieldIds) && write.skippedExistingFieldIds.length > 0) throw conflict('band_appeared_concurrently')
@@ -1264,6 +1279,8 @@ async function bornReadyBestEffort(deps) {
       await ensureBandColumns({ deps, keys: BAND_KEYS.slice(), placement: settings.placement, locale })
     } catch (error) {
       if (errorCodeOf(error) === ERR.CONFLICT) return { installed: false, landingPromoted, reason: 'band_unverified' }
+      // The repair transaction lacks readObjectMaxFieldOrder (R-89): refused inside the transaction before any write.
+      if (errorCodeOf(error) === PROVISIONING_UNAVAILABLE_CODE) return { installed: false, landingPromoted, reason: 'provisioning_unavailable' }
       throw error
     }
     let landingMode = null

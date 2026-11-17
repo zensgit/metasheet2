@@ -534,4 +534,83 @@ describe('plugin runtime config resolution', () => {
     })
   })
 
+  // Pre-pilot fix batch 8(f) (batch-refresh pre-flip, register R-91): the pilot declarations' deploy file.
+  describe('stock preparation pilot declarations', () => {
+    const ENV_KEY = 'INTEGRATION_CORE_STOCK_PREPARATION_PILOT_PATH'
+    let tmpDir: string
+
+    beforeEach(() => {
+      tmpDir = mkdtempSync(join(tmpdir(), 'stock-prep-pilot-'))
+    })
+    afterEach(() => {
+      rmSync(tmpDir, { recursive: true, force: true })
+    })
+
+    function writePilotFile(contents: string): string {
+      const file = join(tmpDir, 'pilot.json')
+      writeFileSync(file, contents, 'utf8')
+      return file
+    }
+
+    const DECLARED = { specReadPlanSlot: 'not_applicable', customerPack: 'not_applicable' }
+
+    it('omits the key entirely when unset — both readiness declarations stay null, the behaviour of today', () => {
+      const config = resolvePluginRuntimeConfig('plugin-integration-core', {})
+      expect('stockPreparationPilot' in config).toBe(false)
+      const blank = resolvePluginRuntimeConfig('plugin-integration-core', { [ENV_KEY]: '   ' })
+      expect('stockPreparationPilot' in blank).toBe(false)
+    })
+
+    it('reads the declarations off the named file, under the key the plugin reads', () => {
+      const file = writePilotFile(JSON.stringify(DECLARED))
+      const config = resolvePluginRuntimeConfig('plugin-integration-core', { [ENV_KEY]: file })
+      expect(config.stockPreparationPilot).toEqual(DECLARED)
+    })
+
+    it('fails closed — and LOUDLY — when the path is unreadable, rather than reading as "nothing declared"', () => {
+      expect(() => resolvePluginRuntimeConfig('plugin-integration-core', {
+        [ENV_KEY]: join(tmpDir, 'does-not-exist.json'),
+      })).toThrow(`${ENV_KEY} points at a file that could not be read`)
+    })
+
+    it('never echoes the configured path in the error (values-free: paths are deployment topology)', () => {
+      const secretish = join(tmpDir, 'absent-host-specific-name.json')
+      try {
+        resolvePluginRuntimeConfig('plugin-integration-core', { [ENV_KEY]: secretish })
+        throw new Error('expected a throw')
+      } catch (error) {
+        expect((error as Error).message).not.toContain(secretish)
+        expect((error as Error).message).toContain(ENV_KEY)
+      }
+    })
+
+    it('fails closed on malformed JSON and on a file that is not a JSON object, naming the shape this key wants', () => {
+      expect(() => resolvePluginRuntimeConfig('plugin-integration-core', { [ENV_KEY]: writePilotFile('{not-json') }))
+        .toThrow(`${ENV_KEY} must point at a file containing valid JSON`)
+      expect(() => resolvePluginRuntimeConfig('plugin-integration-core', { [ENV_KEY]: writePilotFile(JSON.stringify(['not_applicable'])) }))
+        .toThrow(`${ENV_KEY} must point at a JSON object with the pilot declarations (specReadPlanSlot, customerPack)`)
+    })
+
+    it('is inert for any other plugin', () => {
+      const file = writePilotFile(JSON.stringify(DECLARED))
+      expect(resolvePluginRuntimeConfig('plugin-after-sales', { [ENV_KEY]: file })).toEqual({})
+    })
+
+    // The host is a READER: the exact-literal check ('not_applicable' only) is the plugin's, so a value the plugin
+    // would ignore is carried as written, never "corrected" into a declaration here.
+    it('does not second-guess the declarations; the plugin owns the exact-literal check', () => {
+      const file = writePilotFile(JSON.stringify({ specReadPlanSlot: 'NOT_APPLICABLE', customerPack: true }))
+      const config = resolvePluginRuntimeConfig('plugin-integration-core', { [ENV_KEY]: file })
+      expect(config.stockPreparationPilot).toEqual({ specReadPlanSlot: 'NOT_APPLICABLE', customerPack: true })
+    })
+
+    it('leaves the rest of the resolved config untouched', () => {
+      const file = writePilotFile(JSON.stringify(DECLARED))
+      const without = resolvePluginRuntimeConfig('plugin-integration-core', {})
+      const with_ = resolvePluginRuntimeConfig('plugin-integration-core', { [ENV_KEY]: file })
+      const { stockPreparationPilot: _configured, ...rest } = with_
+      expect(rest).toEqual(without)
+    })
+  })
+
 })

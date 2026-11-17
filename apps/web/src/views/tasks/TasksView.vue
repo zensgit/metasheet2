@@ -645,6 +645,12 @@
                  ([fe-33]). A row of an "all" mode task offers its complete / reopen on the task
                  detail instead: a list row carries no assignee state, and in that mode a click
                  can succeed and change nothing (the detail turns such a click off and says why). -->
+            <!-- The read returns the latest-updated page only: say so when it stopped short of its total. -->
+            <p
+              v-if="listResult.kind === 'ok' && listResult.truncated && listResult.total !== null"
+              class="tasks-view__message"
+              data-testid="tasks-list-truncated"
+            >{{ fmt.listTruncated(listResult.items.length, listResult.total) }}</p>
             <TaskPersonalGroups
               v-if="listResult.kind === 'ok' && currentView === 'assigned'"
               :items="listResult.items"
@@ -892,7 +898,7 @@ type ListRenderState =
   // `truncated`: the read stopped short of its `total` (G2-core: handed to the assigned view's
   // board, which under a status filter can no longer tell a row cut off by the page from a row the
   // filter leaves out).
-  | { kind: 'ok'; items: TaskListItem[]; truncated: boolean }
+  | { kind: 'ok'; items: TaskListItem[]; truncated: boolean; total: number | null }
   | { kind: 'empty' }
   // `invalidSearch`: the server refused the search text (only text the box cannot rule out itself,
   // such as a paste that normalizes to more than the limit), so the viewer can act on it unlike a
@@ -1189,7 +1195,7 @@ async function loadList(): Promise<void> {
     listResult.value =
       result.items.length === 0
         ? { kind: 'empty' }
-        : { kind: 'ok', items: result.items, truncated: result.total !== undefined && result.items.length < result.total }
+        : { kind: 'ok', items: result.items, truncated: result.total !== undefined && result.items.length < result.total, total: result.total ?? null }
     return
   }
   if (result.kind === 'org_missing') {
@@ -1215,7 +1221,7 @@ async function reloadListQuietly(): Promise<void> {
     listResult.value =
       result.items.length === 0
         ? { kind: 'empty' }
-        : { kind: 'ok', items: result.items, truncated: result.total !== undefined && result.items.length < result.total }
+        : { kind: 'ok', items: result.items, truncated: result.total !== undefined && result.items.length < result.total, total: result.total ?? null }
     return
   }
   if (result.kind === 'org_missing') {
