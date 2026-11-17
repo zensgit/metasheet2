@@ -1048,6 +1048,155 @@ describe('RoleDelegationView', () => {
     expect(posts[0]?.body).toEqual({ roleId: 'crm_admin', expectedUpdatedAt: 'stamp-1' })
   })
 
+  function setupConfirmationLifecycle(options: { delayed?: boolean, failFirst?: boolean, admissionFallback?: boolean } = {}) {
+    const catalog = [{ id: 'crm_admin', name: 'CRM 管理员', permissions: ['crm:read'], updatedAt: 'stamp-1' }]
+    const posts: Array<{ path: string, body: unknown }> = []
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let roles = ['crm_admin']
+    let admissionEnabled = false
+    const access = () => ({
+      actorId: 'delegate-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], manageableNamespaces: ['crm'], roleCatalog: catalog,
+      user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+      roles, memberGroups: [], delegableRoles: roles,
+      namespaceAdmissions: [{ namespace: 'crm', enabled: admissionEnabled, effective: admissionEnabled, hasRole: true, updatedAt: 'stamp' }],
+    })
+    apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string, body?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'delegate-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], roleCatalog: catalog, scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({ ok: true, data: { items: [{ id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true }] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') return createJsonResponse({ ok: true, data: access() })
+      if (init?.method === 'POST' || init?.method === 'PATCH') {
+        posts.push({ path: pathname, body: JSON.parse(String(init.body)) })
+        if (options.delayed) await gate
+        if (options.failFirst && posts.length === 1) return createJsonResponse({ ok: false, error: { message: '保存失败' } }, 500)
+        if (pathname.endsWith('/roles/assign')) roles = ['crm_admin']
+        else if (pathname.endsWith('/roles/unassign')) roles = []
+        else if (pathname.endsWith('/namespaces/crm/admission')) {
+          admissionEnabled = true
+          return createJsonResponse({ ok: true, data: options.admissionFallback ? {} : { namespaceAdmissions: access().namespaceAdmissions } })
+        } else throw new Error(`Unexpected write: ${rawUrl}`)
+        return createJsonResponse({ ok: true, data: access() })
+      }
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    return { posts, release: () => release?.() }
+  }
+
+  async function openLifecycleConfirmation(kind: 'grant' | 'revoke' | 'admission'): Promise<void> {
+    mountDelegation()
+    await waitForCondition(() => Boolean(container?.querySelector('[data-testid="delegation-assign-role"]')))
+    if (kind === 'admission') {
+      findButtonByText(container!, '开通插件使用').click()
+    } else {
+      const select = container!.querySelector(`[data-testid="delegation-${kind === 'grant' ? 'assign' : 'revoke'}-role"]`) as HTMLSelectElement
+      select.value = 'crm_admin'
+      select.dispatchEvent(new Event('change'))
+      await flushUi()
+      findButtonByText(container!, kind === 'grant' ? '分配角色' : '撤销角色').click()
+    }
+    await flushUi()
+  }
+
+  it('keeps the same confirmation in place and latches duplicate events while a role write is pending', async () => {
+    const { posts, release } = setupConfirmationLifecycle({ delayed: true })
+    await openLifecycleConfirmation('grant')
+    const panel = container!.querySelector('[data-testid="delegation-confirmation"]')
+    const confirm = container!.querySelector('[data-testid="delegation-confirmation-confirm"]') as HTMLButtonElement
+    const cancel = container!.querySelector('[data-testid="delegation-confirmation-cancel"]') as HTMLButtonElement
+    try {
+      confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi()
+      expect(posts).toEqual([{ path: '/api/admin/role-delegation/users/user-1/roles/assign', body: { roleId: 'crm_admin', expectedUpdatedAt: 'stamp-1' } }])
+      expect(container!.querySelector('[data-testid="delegation-confirmation"]')).toBe(panel)
+      expect(container!.querySelector('[data-testid="delegation-confirmation-confirm"]')).toBe(confirm)
+      expect(confirm.disabled).toBe(true)
+      expect(cancel.disabled).toBe(true)
+      expect(document.activeElement).toBe(panel)
+      for (const shiftKey of [false, true]) {
+        const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true, shiftKey })
+        document.dispatchEvent(tab)
+        expect(tab.defaultPrevented).toBe(true)
+        expect(document.activeElement).toBe(panel)
+      }
+      cancel.click()
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      await flushUi()
+      expect(container!.querySelector('[data-testid="delegation-confirmation"]')).toBe(panel)
+      release()
+      await waitForCondition(() => statusText().includes('角色已分配'))
+      expect(container!.querySelector('[data-testid="delegation-confirmation"]')).toBe(panel)
+      expect(container!.querySelector('[data-testid="delegation-confirmation-confirm"]')).toBe(confirm)
+      expect(confirm.disabled).toBe(true)
+      expect(document.activeElement).toBe(cancel)
+      confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi()
+      expect(posts).toHaveLength(1)
+    } finally {
+      release()
+      await flushUi()
+    }
+  })
+
+  it.each([
+    ['grant', '角色已分配', '/roles/assign'],
+    ['revoke', '角色已撤销', '/roles/unassign'],
+    ['admission', '已开通 crm 插件使用', '/namespaces/crm/admission'],
+  ] as const)('retains the completed %s confirmation until explicitly closed', async (kind, message, suffix) => {
+    const { posts } = setupConfirmationLifecycle({ admissionFallback: true })
+    await openLifecycleConfirmation(kind)
+    const panel = container!.querySelector('[data-testid="delegation-confirmation"]')
+    const confirm = container!.querySelector('[data-testid="delegation-confirmation-confirm"]') as HTMLButtonElement
+    confirm.click()
+    await waitForCondition(() => statusText().includes(message))
+    expect(posts).toHaveLength(1)
+    expect(posts[0]?.path).toBe(`/api/admin/role-delegation/users/user-1${suffix}`)
+    expect(posts[0]?.body).toEqual(kind === 'grant' ? { roleId: 'crm_admin', expectedUpdatedAt: 'stamp-1' } : kind === 'revoke' ? { roleId: 'crm_admin' } : { enabled: true })
+    expect(container!.querySelector('[data-testid="delegation-confirmation"]')).toBe(panel)
+    expect(container!.querySelector('[data-testid="delegation-confirmation-confirm"]')).toBe(confirm)
+    expect(confirm.disabled).toBe(true)
+    confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(posts).toHaveLength(1)
+    const close = container!.querySelector('[data-testid="delegation-confirmation-cancel"]') as HTMLButtonElement
+    expect(close.disabled).toBe(false)
+    expect(close.textContent).toContain('关闭')
+    close.click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="delegation-confirmation"]')).toBeNull()
+    if (kind === 'admission') expect(callLog.filter((url) => url.endsWith('/user-1/access')).length).toBeGreaterThan(1)
+  })
+
+  it('retains a failed confirmation until closed and requires a fresh confirmation to retry', async () => {
+    const { posts } = setupConfirmationLifecycle({ failFirst: true })
+    await openLifecycleConfirmation('grant')
+    const panel = container!.querySelector('[data-testid="delegation-confirmation"]')
+    const confirm = container!.querySelector('[data-testid="delegation-confirmation-confirm"]') as HTMLButtonElement
+    confirm.click()
+    await waitForCondition(() => statusText().includes('保存失败'))
+    expect(container!.querySelector('[data-testid="delegation-confirmation"]')).toBe(panel)
+    expect(confirm.disabled).toBe(true)
+    confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(posts).toHaveLength(1)
+    ;(container!.querySelector('[data-testid="delegation-confirmation-cancel"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="delegation-confirmation"]')).toBeNull()
+    findButtonByText(container!, '分配角色').click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="delegation-confirmation-confirm"]') as HTMLButtonElement).click()
+    await waitForCondition(() => statusText().includes('角色已分配'))
+    expect(posts).toHaveLength(2)
+    expect(posts[1]).toEqual(posts[0])
+  })
+
   it('cancels confirmation without posting and drops it when the member changes', async () => {
     const catalog = [{ id: 'crm_admin', name: 'CRM 管理员', permissions: ['crm:read'], namespace: 'crm', expectedUpdatedAt: 'stamp-1' }]
     const accessFor = (id: string, name: string, email: string) => ({
