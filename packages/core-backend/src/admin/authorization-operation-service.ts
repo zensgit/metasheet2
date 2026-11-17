@@ -186,7 +186,7 @@ async function commitAuthorizationOperationWithinDeadline(actorId: string, input
         if (isRoleAction(request.action)) {
           const { roleId, kind } = request.action
           if (kind === 'role.revoke' && roleId === 'admin' && await isLastSignInPlatformAdmin(tx, request.targetUserId)) return deny(409, 'LAST_PLATFORM_ADMIN')
-          if (kind === 'role.assign') await assignUserRoles({ userIds: [request.targetUserId], roleId, scope: access.kind==='platform' ? {kind:'platform-admin'} : {kind:'namespaces',namespaces:access.roleNamespace ? [access.roleNamespace] : []}, executor: tx })
+          if (kind === 'role.assign') await assignUserRoles({ userIds: [request.targetUserId], roleId, assignmentSource: 'manual', scope: access.kind==='platform' ? {kind:'platform-admin'} : {kind:'namespaces',namespaces:access.roleNamespace ? [access.roleNamespace] : []}, executor: tx })
           else {
             await unassignUserRoles({ userIds: [request.targetUserId], roleId, scope: access.kind==='platform' ? {kind:'platform-admin'} : {kind:'namespaces',namespaces:access.roleNamespace ? [access.roleNamespace] : []}, executor: tx })
             await disableNamespaceAdmissionsWithoutRoles({ userId: request.targetUserId, namespaces: await listRoleNamespaces(roleId, tx.query), actorId, source: 'role_unassigned', revokedRoleId: roleId }, tx.query)

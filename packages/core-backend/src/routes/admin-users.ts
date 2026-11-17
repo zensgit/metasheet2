@@ -1032,19 +1032,31 @@ function parseExplicitAdmissionNamespaces(value: unknown): string[] | AdmissionN
   return namespaces.sort()
 }
 
+type RoleAssignmentView = { roleId: string; source: 'manual' | 'creation' | 'unknown' }
+async function fetchUserRoleAssignments(userId: string): Promise<RoleAssignmentView[]> {
+  const result = await query<{ role_id: string; assignment_source: string | null }>(
+    'SELECT role_id, assignment_source FROM user_roles WHERE user_id = $1 ORDER BY role_id ASC', [userId],
+  )
+  return result.rows.filter(row => typeof row.role_id === 'string' && row.role_id.length > 0).map(row => ({
+    roleId: row.role_id,
+    source: row.assignment_source === 'manual' || row.assignment_source === 'creation' ? row.assignment_source : 'unknown',
+  }))
+}
+
 async function fetchUserAccessSnapshot(userId: string) {
   const profile = await fetchUserProfile(userId)
   if (!profile) return null
 
-  const [roles, permissions, isAdmin] = await Promise.all([
-    fetchUserRoleIds(userId),
+  const [roleAssignments, permissions, isAdmin] = await Promise.all([
+    fetchUserRoleAssignments(userId),
     listUserPermissions(userId),
     isRbacAdmin(userId),
   ])
 
   return {
     user: profile,
-    roles,
+    roles: roleAssignments.map(assignment => assignment.roleId),
+    roleAssignments,
     permissions,
     isAdmin,
   }
@@ -4339,6 +4351,7 @@ export function adminUsersRouter(): Router {
         roleCatalog,
         user: snapshot.user,
         roles: snapshot.roles,
+        roleAssignments: delegation.isPlatformAdmin ? snapshot.roleAssignments : snapshot.roleAssignments.filter(assignment => revocable.some(role => role.id === assignment.roleId)),
         memberGroups,
         namespaceAdmissions,
         // Both arms are cut to the revocable catalog. For a platform admin that catalog is every
@@ -4565,7 +4578,7 @@ export function adminUsersRouter(): Router {
             activeScope = { kind: 'namespaces', namespaces }
           }
           if (action === 'assign') {
-            const assigned = await assignUserRoles({ userIds: [userId], roleId, scope: activeScope, executor: client })
+            const assigned = await assignUserRoles({ userIds: [userId], roleId, assignmentSource: 'manual', scope: activeScope, executor: client })
             if (roleId === PLATFORM_ADMIN_ROLE_ID) await syncLegacyAdminProfile(userId, true, runQuery)
             return assigned
           }
@@ -5414,6 +5427,7 @@ export function adminUsersRouter(): Router {
           await assignUserRoles({
             userIds: [userId],
             roleId,
+            assignmentSource: 'creation',
             // This route is behind `ensurePlatformAdmin`; creating administrators is one of
             // the things it exists to do, so the scope is unbounded — and stated, not implied.
             scope: { kind: 'platform-admin' },
@@ -6174,6 +6188,7 @@ export function adminUsersRouter(): Router {
         const assigned = await assignUserRoles({
           userIds: [userId],
           roleId,
+          assignmentSource: 'manual',
           scope: { kind: 'platform-admin' },
           executor: client,
         })
