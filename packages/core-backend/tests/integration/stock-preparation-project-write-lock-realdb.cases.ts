@@ -8025,7 +8025,7 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
             })
           }, 300000)
 
-          test('S8-04b (A12 / F15, human) a person\'s cell committed by another session INSIDE the host\'s patch (SHARE lock on meta_records, pg_blocking_pids): one conflict, one retry with the fresh version, the person\'s value kept, the plan written', async () => {
+          test('S8-04b (A12 / F15, human) a person\'s cell committed by another session INSIDE the host\'s patch (EXCLUSIVE lock on meta_records, pg_blocking_pids): one conflict, one retry with the fresh version, the person\'s value kept, the plan written', async () => {
             const { st, confirmed } = await s8Confirmed('s8_04b')
             const replan = await st.dryRun()
             const partA0 = await rowOf(st, 'PART-A')

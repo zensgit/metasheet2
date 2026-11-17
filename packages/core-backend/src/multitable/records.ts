@@ -661,9 +661,9 @@ export async function patchRecord(
   // Platform 1b: `existing` is now read `FOR UPDATE` in this transaction, so the row lock is held from
   // the read and this UPDATE is no longer the first lock. A concurrent DELETE or version bump now
   // resolves at the locked read (NotFound / VERSION_CONFLICT above). This branch is kept as a
-  // defensive fail-closed backstop (e.g. a caller whose `query` is not transactional). The
-  // concurrent-delete golden in the real-DB suite still proves the outcome under genuine two-connection
-  // lock contention.
+  // defensive fail-closed backstop (e.g. a caller whose `query` is not transactional). Since 1b the
+  // real-DB concurrent-delete golden resolves at the locked read, not here; this branch itself is pinned
+  // only by the fake-DB unit test (multitable-records-getrecord-sheet-liveness.test.ts, "platform 1b backstop").
   if ((updated.rows as unknown[]).length === 0) {
     if (input.expectedVersion !== undefined) {
       throw new MultitableRecordVersionConflictError()

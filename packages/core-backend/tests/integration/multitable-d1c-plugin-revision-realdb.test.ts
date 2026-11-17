@@ -609,7 +609,7 @@ describeIfDatabase('D-1c slice ② — plugin-SDK createRecord/patchRecord write
     // revision. The zero-row UPDATE branch (the P1 fix) stays as a defensive backstop. The outcome this
     // golden pins is unchanged: NotFound and no spurious `update` revision for a now-nonexistent record
     // (the masked `?? existing.version + 1` fallback would have written one).
-    test('CONCURRENT-DELETE golden (P1 fix): a DELETE that commits WHILE patchRecord is blocked on the row lock throws NotFound and writes NO spurious revision', async () => {
+    test('CONCURRENT-DELETE golden (P1 fix; since platform 1b the wait is at the locked read): a DELETE that commits WHILE patchRecord is blocked on the row lock throws NotFound and writes NO spurious revision', async () => {
       const created = await sdk.createRecord({ sheetId: SHEET_RACE, data: { [FLD_RACE_TITLE]: 'race-v1' } })
       expect(created.version).toBe(1)
 
@@ -638,14 +638,14 @@ describeIfDatabase('D-1c slice ② — plugin-SDK createRecord/patchRecord write
         // Barrier: block until B is deterministically confirmed parked behind A's lock on THIS record.
         await waitUntilBlockedOnRecordLock(holderPid, '%meta_records%')
 
-        // A commits ⇒ the row is truly gone ⇒ B's UPDATE unblocks and sees ZERO matching rows.
+        // A commits ⇒ the row is truly gone ⇒ B's locked read (platform 1b: SELECT … FOR UPDATE) unblocks and finds no row.
         await holder.query('COMMIT')
         await patchPromise
       } finally {
         // If the barrier above ever throws (timeout), COMMIT is never reached — releasing the raw
         // connection here WITHOUT first ending its open transaction would return it to the pool
         // `idle in transaction`, still holding the DELETE's row lock, and leave the fire-and-forget
-        // `patchPromise` blocked forever (its UPDATE never unblocks). That would poison every OTHER
+        // `patchPromise` blocked forever (its locked read never unblocks). That would poison every OTHER
         // `describeIfDatabase` file sharing this one Postgres in the same `plugin-tests.yml` run — a
         // barrier timeout in THIS test must never cascade into unrelated suites as flake. ROLLBACK is a
         // safe no-op after a successful COMMIT (nothing left to roll back) and a real safety net
