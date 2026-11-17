@@ -16,17 +16,17 @@
 ## 打开之后
 
 - **ACK 后运行**：回写在发送**返回结果之后**单独运行（D5 a）：发送结果不等它、也不反映它的结果。服务器日志只会因为它出现三条固定码（`AFTER_ACK_FAILED`、`DEFERRED`、`UNWRITTEN`），每条的含义和 owner 该做什么见下文「告警说明」。ACK 后运行对这一行只跑一次，不重试；**全树没有界面按钮或定时任务会调用补写入口**，要由 owner 手动发起（是否定期补跑见下文）。
-- **补写入口**：`POST /api/integration/yida-owner-send/issue-confirm-writeback`（`packages/core-backend/src/routes/integration-yida-owner.ts:554`），写入的是确认审计那一天的本地日期，不是补写当天。补写入口自己的调用方看得到每一行的结果，所以它不记上面两条日志。
+- **补写入口**：`POST /api/integration/yida-owner-send/issue-confirm-writeback`（`packages/core-backend/src/routes/integration-yida-owner.ts:554`），写入的是确认审计那一天的本地日期，不是补写当天。补写入口自己的调用方看得到每一行的结果，所以它不记下文「告警说明」里的三条日志。
 - **扫一遍**：补写入口不带 `ledgerIds` 时，一次请求是「扫一遍」中的一页（至多 100 行）。
-  - 一遍 = 第一次不带 `after`，之后把回答里的 `next` 原样作为 `after` 传回，直到 `next` 为 null 才算扫完（`next` 为 null 必定已没有剩下的候选行；最后一页可能为空）。
-  - 一直 retryable 或缺确认审计（`acknowledgement_missing`）的行不留痕，在这一遍里留在游标后面、不挡后面的行；它们只在之后的某一遍从头（不带 `after`）开始时才再试一次。
+  - 一遍 = 第一次不带 `after`，之后把回答里的 `next` 原样作为 `after` 传回，直到 `next` 为 null 才算扫完（`next` 为 null 即这一遍已走完：游标之后没有本遍尚未取到的候选行，本遍报 retryable 或 `acknowledgement_missing` 的行仍未留痕；最后一页可能为空）。
+  - 一直 retryable 或缺确认审计（`acknowledgement_missing`）的行不留痕，在这一遍里留在游标后面、不挡后面的行；它们在之后的某一遍从头（不带 `after`）开始时再试一次，或由 owner 按 `ledgerIds` 指名再试。
   - 一遍不是快照：游标走过之后才确认的行，要到下一遍从头开始才取到。
   - 定期补跑以「一遍」为单位；是否定期补跑、由谁跑、多久一次是 owner 事项（O 层②）。
   - （不含扫描修复的版本上，补写入口每个目标只取得到最早 2000 条已确认 CREATE 以内的行，不是完整补救；#6812 含扫描修复。）
-- **游标的拒绝**（被拒时回写端口什么都不读，主机的 owner 在线核验已先跑过）：
-  - 篡改的游标、或带当前清单摘要却指向不在清单里的目标的游标，得 400（`YIDA_OWNER_RUNTIME_INPUT`；与 `ledgerIds` 同传、字符或长度不对，在路由就得 `YIDA_OWNER_HTTP_INPUT`）。
+- **游标的拒绝**（被拒时回写端口什么都不读；核心层的拒绝在主机 owner 在线核验之后，路由与运行时入参层的拒绝在核验之前）：
+  - 形状不对的游标（非规范编码、键或键序不对、版本不是 2（含 v1）、摘要格式不对、时间不对（含年份 0000）、id 不对）、或带当前清单摘要却指向不在清单里的目标的游标，得 400（`YIDA_OWNER_RUNTIME_INPUT`；与 `ledgerIds` 同传、字符或长度不对，在路由就得 `YIDA_OWNER_HTTP_INPUT`）。
   - 目标清单变了（增、删或调换顺序）之后，旧游标得 409 `YIDA_ISSUE_CONFIRM_CURSOR_STALE`（`packages/core-backend/src/routes/integration-yida-owner.ts:53`），意思是目标集合变了，要不带 `after` 从头重扫。自己的目标被移出清单的游标也属于清单变了，得 409，不是 400。
-  - 格式正确、目标在当前清单里的游标只移动起点。
+  - 摘要格式正确却不是当前清单摘要的游标一律得 409；规范编码、摘要为当前清单、目标在清单里的游标，即使时间或 id 改过也只移动起点（范围始终取自已认证的 owner 与开关，工作区固定为空）。
 - **两次运行重叠**（例如 ACK 后运行与补写入口同时处理同一行；`plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs:79-94`）：
   - 在租约内判定的结果，留痕在释放租约之前写入；补丁之前在租约内按 ledger_id 再查一次留痕（`:652-654`）。
   - 读行之后才被另一次运行留痕、而本次运行在租约内判定要补丁的行，在补丁前复查时被拦下（跳过 `already_traced`，不补丁、不留痕）；判定为其它结果时照常返回该结果（recorded 为 false）。
@@ -39,8 +39,8 @@ ACK 后运行只会写下面三条固定码（`packages/core-backend/src/integra
 
 | 日志行 | 含义 | owner 怎么做 |
 |---|---|---|
-| `YIDA_ISSUE_CONFIRM_WRITEBACK_AFTER_ACK_FAILED` | 这次运行失败，或被关停（stop）打断。日期没写，也没留痕。有这一条时，同一次运行不再写另外两条。 | 等后端恢复正常后，做一遍补写（见上文「扫一遍」）；或用 `ledgerIds` 指名这一行再试。 |
-| `YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED` | 运行正常结束，但有一行是可重试（retryable）的。例如：表写租约正被别的写入方占着（`STOCK_PREP_PROJECT_WRITE_LOCKED`，任何用途：小通道、大任务分块、批次安装 `pull_batch_install`、恢复核对 `recovery_verify`、表修复 `sheet_repair` 等）；主机写栅拒绝；主机读写失败；运行中途回写开关被关（`SWITCH_OFF`，这一行也算可重试，同样记这一条）。日期没写，也没留痕，补写时会再判定。 | 等占着租约的写入方结束，然后做一遍补写；或用 `ledgerIds` 指名这一行再试。一遍里仍然 retryable 的行，只在之后的某一遍从头开始时再试。 |
+| `YIDA_ISSUE_CONFIRM_WRITEBACK_AFTER_ACK_FAILED` | 这次运行失败，或被关停（stop）打断。通常日期没写、也没留痕；但补丁已落地而留痕写入失败、或运行做完之后才被关停时，单元格里可能已有日期（见上文「两次运行重叠」），补写时再判定（有日期则记 `already_set`）。有这一条时，同一次运行不再写另外两条。 | 等后端恢复正常后，做一遍补写（见上文「扫一遍」）；或用 `ledgerIds` 指名这一行再试。 |
+| `YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED` | 运行正常结束，但有一行是可重试（retryable）的。例如：表写租约正被别的写入方占着（`STOCK_PREP_PROJECT_WRITE_LOCKED`，任何用途：小通道、大任务分块、批次安装 `pull_batch_install`、恢复核对 `recovery_verify`、表修复 `sheet_repair` 等）；主机写栅拒绝；主机读写失败；运行中途回写开关被关（`SWITCH_OFF`，这一行也算可重试，同样记这一条）。这一行没有留痕；通常日期也没写，但补丁已落地却没收到确认时（补丁调用报错）单元格里可能已有日期。补写时再判定：有日期则记 `already_set`，不会再补。 | 等占着租约的写入方结束，然后做一遍补写；或用 `ledgerIds` 指名这一行再试。一遍里仍然 retryable 的行，只在之后的某一遍从头开始时再试。 |
 | `YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN <结果码>=<条数> …` | 运行正常结束，有一行得到了不写日期的终态结果（见下文「终态结果」）。这一行已经留痕，**之后任何一遍补写都不会再选它**，日期会一直空着。多个结果码按核心词表的顺序列出，例如 `YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN row_absent=1`。 | 按结果码查原因（下表）。补写救不回这一行：留痕表只追加，不能改删。条件消除之后要不要、怎样补这一列，是 owner 的事项（登记册 R-96 ⑦）。 |
 
 - `DEFERRED` 和 `UNWRITTEN` 可以出现在同一次运行里，`DEFERRED` 在前；每条每次运行至多一次。ACK 后运行只指名一行，所以实际上一次运行只会有其中一条。
