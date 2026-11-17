@@ -70,14 +70,16 @@
     </div>
     <div class="sp-yida-preview__allocation">
       <h4>项目数量分配（本地候选）</h4>
-      <p>不从看板、范围或斜杠语法推断项目。整数模式必须整除；小数模式至多六位且不舍入。单位可否拆分、余数归属和旧复合键仍需生产政策批准。</p>
+      <p>不从看板、范围或斜杠语法推断项目。整数模式必须整除；小数模式至多六位且默认不舍入（可选沿用旧系统的 1 位小数取整，会改变总量）。单位可否拆分、余数归属和旧复合键仍需生产政策批准。</p>
       <p>项目字段由明确项目列表覆盖，原值可缺省；其它映射字段仍须满足校验。项目列表不接受空行或制表符。</p>
       <label>模式<select v-model="allocationMode" data-testid="sp-yida-allocation-mode"><option value="original">原已整理逐表单（默认）</option><option value="equal_integer">整数精确均分</option><option value="equal_decimal_exact">小数精确均分（最多 6 位，不舍入）</option></select></label>
       <div v-if="allocationMode !== 'original'" class="sp-yida-preview__allocation-fields" data-testid="sp-yida-allocation-fields">
         <label>明确项目列表（一行一个完整项目号）<textarea v-model="allocationProjectsText" data-testid="sp-yida-allocation-projects" rows="4" spellcheck="false" placeholder="SYN-PROJECT-01&#10;SYN-PROJECT-02"></textarea></label>
         <label>源项目字段<select v-model="allocationProjectField" data-testid="sp-yida-allocation-project-field"><option value="">请选择</option><option v-for="source in mappedSources" :key="source" :value="source">{{ source }}</option></select></label>
         <label>源数量字段<select v-model="allocationQuantityField" data-testid="sp-yida-allocation-quantity-field"><option value="">请选择</option><option v-for="source in mappedSources" :key="source" :value="source">{{ source }}</option></select></label>
+        <label v-if="allocationMode === 'equal_decimal_exact'">数量取整<select v-model="allocationRounding" data-testid="sp-yida-allocation-rounding"><option value="exact">精确均分，除不尽拒绝（默认）</option><option value="legacy-1dp">沿用旧系统：每份四舍五入保留 1 位小数</option></select></label>
       </div>
+      <p v-if="allocationMode === 'equal_decimal_exact' && allocationRounding === 'legacy-1dp'" class="sp-yida-preview__error" data-testid="sp-yida-allocation-rounding-warning">注意：沿用旧系统的取整会改变总量。每个项目的数量四舍五入到 1 位小数，各项目之和可能不等于原数量，差额见下方分配结果。是否采用由 owner 决定。</p>
       <p v-if="allocationMode !== 'original' && intent === 'update'" class="sp-yida-preview__error" data-testid="sp-yida-allocation-update-blocked">禁止更新扇出：项目分配只能计划创建，不能将一个 update instanceId 扇出到多个项目。</p>
     </div>
     <section class="sp-yida-preview__rule-template" data-testid="sp-yida-rule-template">
@@ -162,6 +164,8 @@ const businessKeyOrder = ref<string[]>([])
 const emptyKeyOrder = ref<string[]>([])
 const rowsText = ref('')
 const allocationMode = ref<AllocationMode>('original')
+// Q4 (owner 2026-11-07, R-88): 'exact' is today's rule and is never sent; 'legacy-1dp' only with the decimal mode.
+const allocationRounding = ref<'exact' | 'legacy-1dp'>('exact')
 const allocationProjectsText = ref('')
 const allocationProjectField = ref('')
 const allocationQuantityField = ref('')
@@ -212,7 +216,7 @@ function clearResults(): void {
   plan.value = null; allocationPreview.value = null; errorCode.value = ''; configIssues.value = []
 }
 function invalidateOutputs(): void { clearResults(); ruleExportText.value = ''; ruleImportNotice.value = '' }
-watch([previewMode, fieldCatalog, appType, formUuid, intent, instanceIdField, fieldMap, businessKeyOrder, emptyKeyOrder, rowsText, allocationMode, allocationProjectsText, allocationProjectField, allocationQuantityField, ruleImportText], invalidateOutputs, { deep: true, flush: 'sync' })
+watch([previewMode, fieldCatalog, appType, formUuid, intent, instanceIdField, fieldMap, businessKeyOrder, emptyKeyOrder, rowsText, allocationMode, allocationRounding, allocationProjectsText, allocationProjectField, allocationQuantityField, ruleImportText], invalidateOutputs, { deep: true, flush: 'sync' })
 function loadExample(kind: 'primary' | 'renamed'): void {
   applyExample(createYidaStaticExample(kind))
 }
@@ -236,7 +240,7 @@ function applyExample(example: YidaStaticExample | YidaProtocolExample | YidaTra
   fieldCatalog.splice(0, fieldCatalog.length, ...catalogEditorEntries(config, 'lines'))
   businessKeyOrder.value = [...config.businessKey]; emptyKeyOrder.value = config.version !== 1 ? [...config.emptyKeyFields] : []
   const roles = allocationDefaults(config)
-  rowsText.value = example.text; allocationMode.value = 'original'; allocationProjectsText.value = 'SYN-PROJECT-01\nSYN-PROJECT-02'; allocationProjectField.value = roles.projectField; allocationQuantityField.value = roles.quantityField; invalidateOutputs()
+  rowsText.value = example.text; allocationMode.value = 'original'; allocationRounding.value = 'exact'; allocationProjectsText.value = 'SYN-PROJECT-01\nSYN-PROJECT-02'; allocationProjectField.value = roles.projectField; allocationQuantityField.value = roles.quantityField; invalidateOutputs()
 }
 function mapEditorEntries(config: YidaRuleTemplateRules): FieldMapEntry[] {
   // v3 keys name direct targets, so each checkbox is bound to its own row, never "first row with that source".
@@ -316,7 +320,7 @@ function exportRuleTemplate(): void {
   invalidateOutputs()
   try {
     const allocation: YidaRuleTemplateAllocation = allocationMode.value === 'original' ? { mode: 'original' }
-      : { mode: allocationMode.value, projectField: allocationProjectField.value, quantityField: allocationQuantityField.value }
+      : { mode: allocationMode.value, projectField: allocationProjectField.value, quantityField: allocationQuantityField.value, ...roundingSetting() }
     if (previewMode.value === 'transforms') {
       // The exporter normalizes v3 rules itself; only the target is left out.
       const { target: _target, ...transformRules } = currentTransformConfig()
@@ -346,11 +350,14 @@ function importRuleTemplate(): void {
     allocationMode.value = allocation.mode
     allocationProjectField.value = allocation.mode === 'original' ? '' : allocation.projectField
     allocationQuantityField.value = allocation.mode === 'original' ? '' : allocation.quantityField
+    allocationRounding.value = allocation.mode !== 'original' && allocation.quantityRounding === 'legacy-1dp' ? 'legacy-1dp' : 'exact'
     appType.value = ''; formUuid.value = ''; rowsText.value = ''; allocationProjectsText.value = ''
     ruleImportNotice.value = '仅本地规则，目标和数据待填写；未保存到服务器，未发布或授权。'
   } catch (error) { errorCode.value = error instanceof YidaRuleTemplateError ? error.code : 'YIDA_RULE_TEMPLATE_INPUT' }
 }
-function allocationSettings(): { mode: Exclude<AllocationMode, 'original'>; projects: string[]; projectField: string; quantityField: string } { return { mode: allocationMode.value as Exclude<AllocationMode, 'original'>, projects: allocationProjectsText.value.split(/\r?\n/), projectField: allocationProjectField.value, quantityField: allocationQuantityField.value } }
+// Only the non-default rounding is sent, and only with the decimal mode: an exact split stays byte-identical to today.
+function roundingSetting(): { quantityRounding?: 'legacy-1dp' } { return allocationMode.value === 'equal_decimal_exact' && allocationRounding.value === 'legacy-1dp' ? { quantityRounding: 'legacy-1dp' } : {} }
+function allocationSettings(): { mode: Exclude<AllocationMode, 'original'>; projects: string[]; projectField: string; quantityField: string; quantityRounding?: 'legacy-1dp' } { return { mode: allocationMode.value as Exclude<AllocationMode, 'original'>, projects: allocationProjectsText.value.split(/\r?\n/), projectField: allocationProjectField.value, quantityField: allocationQuantityField.value, ...roundingSetting() } }
 function capturePersistentInput(config: YidaStaticConfig): void {
   const current = plan.value
   // R-71 ⑦.3: a clean v2 or v3 create preview. Initialization still takes v2 only (its panel says why);

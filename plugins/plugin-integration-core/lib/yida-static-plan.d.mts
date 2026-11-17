@@ -34,6 +34,8 @@ export interface YidaProtocolBaseConfig {
   fieldMap: YidaStaticFieldMapEntry[]
   fieldCatalog: YidaProtocolCatalogEntry[]
 }
+/** D2 (R-88), a material-code-v1 preset option: 'uuid-36' (default): WLBH- + hyphenated UUIDv5, 41 characters; 'uuid-32': the UUID's hyphens removed, 37. */
+export type YidaMaterialCodeForm = 'uuid-36' | 'uuid-32'
 export type YidaProtocolConfig =
   | (YidaProtocolBaseConfig & { intent: 'create'; instanceIdField?: never })
   | (YidaProtocolBaseConfig & { intent: 'update'; instanceIdField: string })
@@ -45,7 +47,7 @@ export type YidaGeneratedTemplatePart =
   /** 1..16 string-typed direct targets covering every business-key target (rule G1); hashed as (target, value) pairs sorted by target, so the listed order is not part of the code. */
   | { hash: string[]; form: 'uuid-36' | 'uuid-32' }
   /** The frozen material-code-v1 generator; projectOf is a business-key target. */
-  | { preset: 'material-code-v1'; rowIdOf: string; projectOf: string }
+  | { preset: 'material-code-v1'; rowIdOf: string; projectOf: string; /** D2: this part's option only (no config-level form); absent = 'uuid-36'; normalized to absent unless 'uuid-32'; part of the sealed generated layout. */ form?: YidaMaterialCodeForm }
 /** v3: one direct entry per source column; copy/constant/concat/generated are derived and never key parts. */
 export type YidaTransformFieldMapEntry =
   | { transform: 'direct'; source: string; target: string; type: 'string' | 'number'; required: boolean }
