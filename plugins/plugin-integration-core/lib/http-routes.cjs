@@ -1873,7 +1873,11 @@ function stockPreparationErpAutoPersistEnabled() {
 // docs/development/takeover-beiliao-20260821/customer-delivery-guide-20260904.md §5-5: fill `user_orgs`
 // so every account has exactly one active row, re-issue tokens (`--tenant-id` for the ops runner),
 // have everyone sign in again so their tokens carry the claim, and only then set this. Rolling back
-// is deleting the line and restarting; nothing persists.
+// is NOT deleting the line: pm2 keeps a removed key in the running process. Set the line to `=false`,
+// restart with scripts/ops/attendance-onprem-start-pm2.ps1, check the key in `pm2 env`, and only then
+// delete the line (a list or path key is emptied as KEY=" ", never KEY=, which PS 5.1 treats as a
+// deleted line). Nothing persists. The steps, and the rule that this switch stays on while any 备料
+// pilot is enabled, are in customer-delivery-guide-20260904.md §5-5.
 //
 // ONE EXCEPTION TO "OFF CHANGES NOTHING", NAMED HERE SO NOBODY HAS TO DISCOVER IT. The PR that added
 // this flag also moved `stockPreparationConfirmationDecisionsConfirm` from `resolveAuthUserTenantId`
@@ -9637,8 +9641,11 @@ function requireStockPreparationAudit() {
       const stableScope = `${tenantId}\n${action.actionId}\n${prepared.parameters.projectNo}`
       const projectId = `stockprep_${crypto.createHash('sha256').update(stableScope).digest('hex').slice(0, 32)}`
       // #6475 round 2: the ARCHIVE revision — the dry-run revision with the columns people own taken
-      // out of the sheet it hashes (see prepareStockPreparationMvpSnapshot). Unchanged for a sheet
-      // nobody has typed into, so no batch already kept is re-keyed.
+      // out of the sheet it hashes (see prepareStockPreparationMvpSnapshot). Since #6925 it also drops
+      // the machine write-back column(s) (MACHINE_WRITEBACK_FIELD_IDS, today `issueConfirmDate`;
+      // withoutPeopleOwnedColumns in stock-preparation-table-actions.cjs), so a YiDa issue-confirm date
+      // never mints a new batch. Unchanged for a sheet nobody has typed into and nothing has written
+      // back to, so no batch kept from such a sheet is re-keyed.
       const batchScope = `${stableScope}\n${prepared.archiveRevision}`
       const batchDigest = crypto.createHash('sha256').update(batchScope).digest('hex').slice(0, 32)
       // 备料 BATCH IDENTITY. The owner's rule is that the material CREATION HOUR separates a
