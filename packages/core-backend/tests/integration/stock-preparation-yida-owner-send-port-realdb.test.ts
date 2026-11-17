@@ -73,7 +73,8 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
   let schema = '', ddl = ''
   let createDb: (options: { database: Database }) => unknown
   let createAuthority: (options: { database: { transaction<T>(callback: (trx: Queryable) => Promise<T>): Promise<T> }
-    security: HostSecurity; context: { actorId: string; tenantId: string; workspaceId: null }; primitives: unknown; sheetSource?: true }) => Authority
+    security: HostSecurity; context: { actorId: string; tenantId: string; workspaceId: null }; primitives: unknown; sheetSource?: true
+    reauthorizeSourceBinding?: (...args: never[]) => Promise<unknown> }) => Authority
   let createPrimitives: (options: { security: HostSecurity; context: Context }) => unknown
   let createPort: (options: { db: unknown; context: Row; authority: Authority; fetch: FetchDouble['fetch']
     readEnablement?: () => unknown; timeoutMs?: number }) => Port
@@ -194,9 +195,10 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
   }
   // Gate 4: `budget` overrides only the send-budget verdict (null = the real primitive verdict).
   // `overrides` (slice YE): replaces named primitives of the real set (only the verdict seams the test names).
-  // `switches` (D17 b): the authority's own construction bits (sheetSource only), as the owner runtime hands them over.
+  // `switches` (D17 b): the authority's own construction bits (sheetSource), as the owner runtime hands them over, plus
+  // (YD × YE stack merge) a synthetic D21 re-authorizer so a bound slot-1 row can be approved and seal the layout.
   async function session(scope = context(), budget?: { within: boolean | null; calls: number }, overrides: Row = {},
-    switches: { sheetSource?: true } = {}): Promise<Session> {
+    switches: { sheetSource?: true; reauthorizeSourceBinding?: (...args: never[]) => Promise<unknown> } = {}): Promise<Session> {
     const client = await pool.connect()
     await client.query(`SET search_path TO ${ident(schema)}`)
     await client.query("SET statement_timeout='10s'")
@@ -922,6 +924,58 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
     // The same slot as the unbound initialization draft, and still never a targetRef without multi-target.
     expect(drafted.targetRef).toBe((await tableRows('integration_yida_draft_targets'))[0].target_ref)
     await rejected(switched.authority.prepareDraft({ ...bound, targetRef: drafted.targetRef }), 'YIDA_SEND_APPROVAL_INPUT')
+  })
+  // YD × YE (stack merge, 2026-11-16): the D17 b sheet-source path (slot 1, no targetRef) is where YD's single-target binding
+  // meets YE's two draft-time checks. Switch off, the closed key set refuses the binding first (INPUT, never a SOURCE_* code);
+  // switch on, the real compiler's source kinds are their fixed codes with nothing written, the valid preset drafts bound in
+  // either D2 form while slot 1 is unsealed, and once an approval sealed slot 1 the other D2 form is refused already at draft
+  // creation (GENERATED_LAYOUT_CONFLICT) while a declared uuid-36 is the default layout byte for byte (the same draft, reused).
+  it('YD × YE: on the D17 b sheet-source path the real source verdict answers its fixed SOURCE_* codes (switch off: INPUT first); after a seal the other D2 form is refused at draft creation', async () => {
+    await slot()
+    const value = input(), v2 = value.config as Row & { fieldCatalog: Row[]; fieldMap: Row[] }
+    const preset = (patch: Row = {}) => ({ preset: 'material-code-v1', rowIdOf: 'line', projectOf: 'project', ...patch })
+    const generated = (template: Row[]): Input => ({ ...value, config: { ...v2, version: 3, businessKey: ['project', 'line', 'parent'],
+      emptyKeyFields: ['parent'], fieldCatalog: [...v2.fieldCatalog, { id: 'code', control: 'text', required: false }],
+      fieldMap: [...v2.fieldMap.map(entry => ({ transform: 'direct', ...entry })),
+        { transform: 'generated', template, target: 'code', type: 'string', required: false }] } })
+    const bound = (template: Row[], projectNo = 'DEMO-P1') => ({ ...generated(template), sourceBinding: { sheetId: 'synthetic-sheet', keyFieldId: 'fld_line',
+      fieldBindings: { projectNo: 'fld_project', lineId: 'fld_line', parentCode: 'fld_parent', quantity: 'fld_qty', description: 'fld_description' },
+      records: [{ recordId: 'synthetic-record-1', keyValue: 'LINE-1', projectNo }] } })
+    const switched = await session(context(), undefined, {}, { sheetSource: true,
+      reauthorizeSourceBinding: async () => Object.freeze({ authorized: true }) })
+    const before = await draftCounts()
+    await rejected(first.authority.prepareDraft(bound([preset({ rowIdOf: 'description' })])), 'YIDA_SEND_APPROVAL_INPUT')
+    await rejected(switched.authority.prepareDraft(generated([preset()])), 'YIDA_SEND_APPROVAL_SOURCE_UNBOUND')
+    await rejected(switched.authority.prepareDraft(bound([preset()], 'DEMO-P2')), 'YIDA_SEND_APPROVAL_SOURCE_PROJECT_MISMATCH')
+    await rejected(switched.authority.prepareDraft(bound([preset({ rowIdOf: 'description' })])), 'YIDA_SEND_APPROVAL_SOURCE_KEY_FIELD_MISMATCH')
+    await rejected(switched.authority.prepareDraft(bound([preset({ rowIdOf: 'description', form: 'uuid-32' })])), 'YIDA_SEND_APPROVAL_SOURCE_KEY_FIELD_MISMATCH')
+    expect(await draftCounts()).toEqual(before)
+    const drafts: Array<Readonly<Row>> = []
+    for (const form of ['default', 'uuid-32']) {
+      const drafted = await switched.authority.prepareDraft(bound([form === 'default' ? preset() : preset({ form })]))
+      expect(drafted.reused).toBe(false)
+      const members = (await tableRows('integration_yida_draft_rows')).filter(row => row.operation_id === drafted.operationId)
+      expect(members).toHaveLength(1)
+      expect(/^[0-9a-f]{64}$/.test(String(members[0].source_record_digest)) && /^[0-9a-f]{64}$/.test(String(members[0].creation_identity_digest))).toBe(true)
+      drafts.push(drafted)
+    }
+    expect(await tableRows('integration_yida_generated_layout')).toEqual([])
+    // The first approval of the default-form draft seals slot 1's generated layout.
+    const sealing = drafts[0], rows = sealing.rows as Array<{ rowKey: string }>
+    await switched.authority.approvals.approve({ operationId: sealing.operationId, rowKey: rows[0].rowKey, confirmationId: 'synthetic-yd-ye-seal' })
+    const seal = await tableRows('integration_yida_generated_layout')
+    expect(seal).toHaveLength(1)
+    const sealed = await draftCounts()
+    // The uuid-32 form (and a draft without a generated entry) is now refused at draft creation, even though the uuid-32
+    // draft already exists: the refusal precedes the draft writer's reuse.
+    await rejected(switched.authority.prepareDraft(bound([preset({ form: 'uuid-32' })])), 'YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT')
+    await rejected(switched.authority.prepareDraft(value), 'YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT')
+    expect(await draftCounts()).toEqual(sealed)
+    expect(await tableRows('integration_yida_generated_layout')).toEqual(seal)
+    // A declared uuid-36 is the absent option: the sealed layout, the same draft.
+    const declared = await switched.authority.prepareDraft(bound([preset({ form: 'uuid-36' })]))
+    expect([declared.reused, declared.operationId]).toEqual([true, sealing.operationId])
+    expect(await draftCounts()).toEqual(sealed)
   })
 
   // R-71 ⑦.5 RC14 (plan §3.7 layer 2): a legacy record registered by the cut-over reconciliation occupies the

@@ -1128,3 +1128,47 @@ test('YE checkGeneratedLayoutInTransaction: read-only (no FOR UPDATE, no INSERT)
   await rejected(f.port.checkGeneratedLayoutInTransaction(f.trx, bound))
   f.faults.query = null
 })
+
+// ---- YD × YE (stack merge, 2026-11-16): YD's configurable defaults through YE's two draft-time verdicts ----
+test('YD × YE: Q4 legacy-1dp is a valid source; an illegal rounding stays the closed UNAVAILABLE (never a SOURCE_* verdict)', async () => {
+  const d = await fixture('equal_decimal_exact'), i = await fixture('equal_integer')
+  const rounding = (f, quantityRounding) => ({ ...f.source, allocation: { ...f.source.allocation, quantityRounding } })
+  for (const value of ['exact', 'legacy-1dp']) {
+    assert.deepEqual(d.port.validateDraftSource(rounding(d, value)), { valid: true })
+    assert.deepEqual(d.port.validateDraftSource(v3Source(rounding(d, value))), { valid: true })
+  }
+  // A bound generated split with the legacy rounding: valid too (the project of a split row holds by construction).
+  const { bound } = generatedSource(d)
+  assert.deepEqual(d.port.validateDraftSource({ ...bound, allocation: { ...bound.allocation, quantityRounding: 'legacy-1dp' } }), { valid: true })
+  const before = d.calls.length + i.calls.length
+  assert.throws(() => i.port.validateDraftSource(rounding(i, 'legacy-1dp')), { code: 'YIDA_SEND_AUTHORITY_UNAVAILABLE' })
+  assert.throws(() => d.port.validateDraftSource(rounding(d, 'legacy-2dp')), { code: 'YIDA_SEND_AUTHORITY_UNAVAILABLE' })
+  assert.throws(() => d.port.validateDraftSource({ ...d.source, allocation: { mode: 'original', quantityRounding: 'exact' } }), { code: 'YIDA_SEND_AUTHORITY_UNAVAILABLE' })
+  assert.equal(d.calls.length + i.calls.length, before)
+})
+
+test('YD × YE: the D2 preset form under the draft-time checks — uuid-32 is a valid source and never skips the structural rule; a target sealed in one form refuses the other at draft creation, a declared uuid-36 is the default seal', async () => {
+  const presetForm = (form, rowIdOf = 'componentCode') => [{ literal: 'SYN-' },
+    { preset: 'material-code-v1', rowIdOf, projectOf: 'project', ...(form === 'default' ? {} : { form }) }]
+  for (const sealedForm of ['default', 'uuid-32']) {
+    const f = await fixture(), [, , planner] = await modules
+    const { bound } = generatedSource(f)
+    const draft = (form, salt = 0, rowIdOf) => firstRow(withTemplate(bound, presetForm(form, rowIdOf), salt))
+    for (const form of ['default', 'uuid-36', 'uuid-32']) assert.deepEqual(f.port.validateDraftSource(draft(form)), { valid: true })
+    assert.deepEqual(f.port.validateDraftSource(draft('uuid-32', 0, 'componentName')), { valid: false, code: 'SOURCE_KEY_FIELD_MISMATCH' })
+    // Unsealed: every form is admissible at draft creation.
+    for (const form of ['default', 'uuid-36', 'uuid-32']) {
+      assert.deepEqual(await f.port.checkGeneratedLayoutInTransaction(f.trx, draft(form, 1)), { admissible: true, sealed: false })
+    }
+    const selected = await generatedSelection(f, draft(sealedForm, 2))
+    assert.deepEqual(await f.port.sealGeneratedLayoutInTransaction(f.trx, selected, { event: 'approve' }), { admissible: true, sealed: true })
+    assert.equal(f.state[LAYOUT][0].layout_digest, oracleLayoutDigest(planner, draft(sealedForm).config))
+    const same = sealedForm === 'default' ? ['default', 'uuid-36'] : ['uuid-32']
+    const other = sealedForm === 'default' ? ['uuid-32'] : ['default', 'uuid-36']
+    for (const form of same) assert.deepEqual(await f.port.checkGeneratedLayoutInTransaction(f.trx, draft(form, 3)), { admissible: true, sealed: false })
+    for (const form of other) {
+      assert.deepEqual(await f.port.checkGeneratedLayoutInTransaction(f.trx, draft(form, 4)), { admissible: false, code: 'GENERATED_LAYOUT_CONFLICT' })
+    }
+    assert.equal(f.state[LAYOUT].length, 1)
+  }
+})
