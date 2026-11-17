@@ -48,11 +48,11 @@
 //       stock-preparation-table-actions.cjs:1394-1410@59876b3d6): the FIRST candidate tried below. If that pair does
 //       not derive the sheet, the write-back's ids are not on the sheet and it writes nothing. While the switch is off,
 //       an env explicit `target.fieldIdMap` may name another column on an adopted sheet, but the write-back is idle.
-//   Every cited line holds the same text at 6d2681703 (#6925) and 59876b3d6. Of the main files cited, five changed
-//   in between (#6928, #6931, #6927, #6929, #6926): http-routes.cjs (cites shifted),
-//   stock-preparation-table-actions.cjs (resolveTargetFieldIds unchanged, still :1394), stock-preparation-templates.cjs,
-//   the switch-on runbook (one line, :555, outside the cited precheck and INSERT) and the pilot runbook (the UPDATE
-//   moved from :312 to :313).
+//   Between 6d2681703 (#6925) and 59876b3d6 (#6928, #6931, #6927, #6929, #6926), four of the files cited here
+//   changed: http-routes.cjs (the cites shifted, their text did not), stock-preparation-table-actions.cjs
+//   (resolveTargetFieldIds :1394-1410 unchanged), the switch-on runbook (one line inside the cited appendix range
+//   :473-623 changed, :555, precheck ④, outside precheck ③ and the INSERT) and the pilot runbook (the UPDATE moved
+//   from :312 to :313). Every other line of every cited range has the same text at both revisions.
 //
 // DEPENDENCY: (2) cites the unmerged 5522ba301; re-check it when Y9 lands.
 // ASSUMPTION: a machine column's field id is the host's derivation. The REST field-create route accepts a
