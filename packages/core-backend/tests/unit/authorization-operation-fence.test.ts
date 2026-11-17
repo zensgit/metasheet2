@@ -3,8 +3,14 @@ import { AUTHORIZATION_OPERATION_FENCE_LOCK_SQL, AUTHORIZATION_OPERATION_FENCE_T
 
 describe('authorization operation schema profile', () => {
   it('requires the exact known digest and ordinary tables', () => {
-    expect(isSupportedAuthorizationOperationSchema({ ordinary:true, digest:AUTHORIZATION_OPERATION_SCHEMA_PROFILE })).toBe(true)
-    expect(isSupportedAuthorizationOperationSchema({ ordinary:false, digest:AUTHORIZATION_OPERATION_SCHEMA_PROFILE })).toBe(false)
+    for (const digest of [
+      AUTHORIZATION_OPERATION_SCHEMA_PROFILE,
+      '94de1430caedfb986f98cea97e6231e78a0395a38264b923fb397c558a366587',
+      '85b365bcf6a9ddaee891ede0c3f8eead2c66d52cf28f314ae35d4a4279513fe0',
+    ]) {
+      expect(isSupportedAuthorizationOperationSchema({ ordinary: true, digest })).toBe(true)
+      expect(isSupportedAuthorizationOperationSchema({ ordinary: false, digest })).toBe(false)
+    }
     expect(isSupportedAuthorizationOperationSchema({ ordinary:true, digest:'unknown' })).toBe(false)
   })
   it('locks the closed table set, qualified and without waiting', () => {

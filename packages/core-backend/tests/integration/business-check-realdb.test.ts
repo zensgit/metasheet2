@@ -257,9 +257,6 @@ function get(user: string, path: string) { return request(app).get(path).set('Au
     const { MetaSheetServer } = await import('../../src/index')
     const server = new MetaSheetServer({ port: 0, pluginDirs: [], manageProcessSignals: false })
     const globalApp = (server as unknown as { app: express.Express }).app
-    globalApp.post('/api/admin/authorization-operations', (_req, res) => res.json({ ok: true }))
-    globalApp.post('/api/admin/authorization-operations/preview', (_req, res) => res.json({ ok: true }))
-    globalApp.get('/api/admin/authorization-operations/:id', (_req, res) => res.json({ ok: true }))
     await db.query("DELETE FROM user_roles WHERE user_id='admitted'")
     await db.query("DELETE FROM role_permissions WHERE role_id='attendance_employee'")
     await db.query("DELETE FROM user_namespace_admissions WHERE user_id='admitted'")
@@ -288,14 +285,21 @@ function get(user: string, path: string) { return request(app).get(path).set('Au
         expect(admitted.body.result).toBe('allow')
         expect((await request(globalApp).post('/api/admin/authorization-operations/preview').set('Authorization', `Bearer ${tokens.revoked}`).send({})).status).toBe(401)
         for (const path of ['/api/admin/authorization-operations', '/api/admin/authorization-operations/preview']) {
-          expect((await request(globalApp).post(path).set('Authorization', `Bearer ${tokens.sheetreader}`).send({})).status).toBe(200)
+          const response = await request(globalApp).post(path).set('Authorization', `Bearer ${tokens.sheetreader}`).send({})
+          expect(response.status).toBe(400)
+          expect(response.body.error.code).toBe('INVALID_AUTHORIZATION_OPERATION')
         }
         const receipt = '/api/admin/authorization-operations/12345678-1234-1234-1234-123456789abc'
-        expect((await request(globalApp).get(receipt).set('Authorization', `Bearer ${tokens.sheetreader}`)).status).toBe(200)
-        expect((await request(globalApp).head(receipt).set('Authorization', `Bearer ${tokens.sheetreader}`)).status).toBe(200)
+        // The real command service rejects this isolated non-public schema at its fence.
+        const receiptResponse = await request(globalApp).get(receipt).set('Authorization', `Bearer ${tokens.sheetreader}`)
+        expect(receiptResponse.status).toBe(503)
+        expect(receiptResponse.body.error.code).toBe('AUTHORIZATION_OPERATION_FENCE_UNAVAILABLE')
+        expect((await request(globalApp).head(receipt).set('Authorization', `Bearer ${tokens.sheetreader}`)).status).toBe(503)
         const encodedReceipt = '/API/ADMIN/AUTHORIZATION-OPERATIONS/%312345678-1234-1234-1234-123456789abc/'
-        expect((await request(globalApp).get(encodedReceipt).set('Authorization', `Bearer ${tokens.sheetreader}`)).status).toBe(200)
-        expect((await request(globalApp).head(encodedReceipt).set('Authorization', `Bearer ${tokens.sheetreader}`)).status).toBe(200)
+        const encodedResponse = await request(globalApp).get(encodedReceipt).set('Authorization', `Bearer ${tokens.sheetreader}`)
+        expect(encodedResponse.status).toBe(503)
+        expect(encodedResponse.body.error.code).toBe('AUTHORIZATION_OPERATION_FENCE_UNAVAILABLE')
+        expect((await request(globalApp).head(encodedReceipt).set('Authorization', `Bearer ${tokens.sheetreader}`)).status).toBe(503)
         for (const optedOut of ['optout', 'unassigned']) {
           const approval = await request(globalApp).post('/api/permissions/v2/business-check').set('Authorization', `Bearer ${tokens[optedOut]}`).send(single)
           expect(approval.body.result).toBe('allow')

@@ -16,6 +16,8 @@ export const AUTHORIZATION_OPERATION_FENCE_TABLES = Object.freeze([
 export const AUTHORIZATION_OPERATION_SCHEMA_PROFILE = 'b850b051f29d065931847acc2c96cc7e6023b065b038732ace5f205d141e4a36'
 // Reproduced on Windows PG 16.16 and Linux PG 16.15 with UTF-8 and locale C.
 const C_LOCALE_SCHEMA_PROFILE = '94de1430caedfb986f98cea97e6231e78a0395a38264b923fb397c558a366587'
+// Same migrated catalog with the reviewed LF function bodies from the Windows upgrade fixture.
+const C_LOCALE_LF_SCHEMA_PROFILE = '85b365bcf6a9ddaee891ede0c3f8eead2c66d52cf28f314ae35d4a4279513fe0'
 export class AuthorizationOperationFenceUnavailable extends Error {
   readonly status = 503
   readonly code = 'AUTHORIZATION_OPERATION_FENCE_UNAVAILABLE'
@@ -98,7 +100,7 @@ export async function inspectAuthorizationOperationSchema(query: AuthorizationIn
 }
 
 export function isSupportedAuthorizationOperationSchema(result: { digest: string; ordinary: boolean }): boolean {
-  return result.ordinary && (result.digest === AUTHORIZATION_OPERATION_SCHEMA_PROFILE || result.digest === C_LOCALE_SCHEMA_PROFILE)
+  return result.ordinary && (result.digest === AUTHORIZATION_OPERATION_SCHEMA_PROFILE || result.digest === C_LOCALE_SCHEMA_PROFILE || result.digest === C_LOCALE_LF_SCHEMA_PROFILE)
 }
 export async function assertAuthorizationOperationSchema(query: AuthorizationInputQueryable['query']): Promise<void> {
   const result = await inspectAuthorizationOperationSchema(query)
