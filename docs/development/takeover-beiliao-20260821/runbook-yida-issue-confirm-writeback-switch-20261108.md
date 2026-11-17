@@ -7,7 +7,7 @@
 ## 打开开关之前
 
 1. **先给 owner 授予经角色的操作档位，再打开开关（不可颠倒）。** 回写在租约内对每一行重新核对 owner 的权限（D13 a）：只认**经角色授予**的 `stock-prep:admin`，或同时经角色授予 `stock-prep:operate` 与 `stock-prep:read`（`packages/core-backend/src/integration/yida-issue-confirm-writeback-authority.ts:51-54`）。直接写进 `user_permissions` 的授权、`role:admin`、`integration:admin` 都不算。
-   **后果（写明）：开关打开而 owner 没有这一档位时，每一条已确认（acknowledged）的发送都会得到一条永久的 `permission_revoked` 留痕**（`plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs:441`），留痕表只追加、不能改删。之后的运行读行时这一行已有留痕，就不再选它，所以这些行的日期一般不会再被回写；唯一的例外是下文「两次运行重叠」里写明的残余情形（至多一次首次补丁）。ACK 后运行遇到这种情形时，服务器日志记一条 `YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN permission_revoked=1`（见下文「告警说明」），但已留痕的行不会因此再写。所以必须先授予档位、确认生效，再打开开关。
+   **后果（写明）：开关打开而 owner 没有这一档位时，每一条已确认（acknowledged）的发送都会得到一条永久的 `permission_revoked` 留痕**（`plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs:463`），留痕表只追加、不能改删。之后的运行读行时这一行已有留痕，就不再选它，所以这些行的日期一般不会再被回写；唯一的例外是下文「两次运行重叠」里写明的残余情形（至多一次首次补丁）。ACK 后运行遇到这种情形时，服务器日志记一条 `YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN permission_revoked=1`（见下文「告警说明」），但已留痕的行不会因此再写。所以必须先授予档位、确认生效，再打开开关。
 2. **目标清单**：`INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS` 只列发料确认表对应的宜搭目标；空或格式不对 = 不回写任何行（不是报错）。
 3. **项目备料表开关**：`MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED` 也须为 `true`，否则每行只得到跳过 `project_sheets_disabled`，不写、不留痕、不告警，该开关打开后再次判定（`plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs:32-35`）。
 4. **只认原文 `true`**：小写、不加引号、不加空格；`TRUE`、`1`、` true` 都算关。
@@ -15,8 +15,9 @@
 
 ## 打开之后
 
-- **ACK 后运行**：回写在发送**返回结果之后**单独运行（D5 a）：发送结果不等它、也不反映它的结果。服务器日志只会因为它出现三条固定码（`AFTER_ACK_FAILED`、`DEFERRED`、`UNWRITTEN`），每条的含义和 owner 该做什么见下文「告警说明」。ACK 后运行对这一行只跑一次，不重试；**全树没有界面按钮或定时任务会调用补写入口**，要由 owner 手动发起（是否定期补跑见下文）。
-- **补写入口**：`POST /api/integration/yida-owner-send/issue-confirm-writeback`（`packages/core-backend/src/routes/integration-yida-owner.ts:554`），写入的是确认审计那一天的本地日期，不是补写当天。补写入口自己的调用方看得到每一行的结果，所以它不记下文「告警说明」里的三条日志。
+- **ACK 后运行**：回写在发送**返回结果之后**单独运行（D5 a）：发送结果不等它、也不反映它的结果。服务器日志只会因为它出现四条固定码（`AFTER_ACK_FAILED`、`DEFERRED`、`UNWRITTEN`、`WRITTEN_INACTIVE`），每条的含义和 owner 该做什么见下文「告警说明」。ACK 后运行对这一行只跑一次，不重试；**全树没有界面按钮或定时任务会调用补写入口**，要由 owner 手动发起（是否定期补跑见下文）。
+- **补写入口**：`POST /api/integration/yida-owner-send/issue-confirm-writeback`（`packages/core-backend/src/routes/integration-yida-owner.ts:575`），写入的是确认审计那一天的本地日期，不是补写当天。补写入口自己的调用方看得到每一行的结果，所以它不记下文「告警说明」里的四条日志。
+- **运行报告**（D3-1）：补写入口每次回答（回写开关开着时）都带 `report`：`counts` 固定四个计数 `written_inactive`、`row_absent`、`duplicate_key`、`kept_existing`（为 0 也列出），`writtenInactive` 列出这一页每个 `written_inactive` 行的台账 id 和那条作废行的记录 id（`recordId`，不透明 id，不含任何业务值）。报告由宿主按这一页的结果行重算（`packages/core-backend/src/integration/yida-owner-runtime.ts:134-141`，路由再核一次 `packages/core-backend/src/routes/integration-yida-owner.ts:322-333`），只统计这一页；一遍的总数要把各页相加。ACK 后运行的结果也带同一份报告，但它只进服务器日志的计数（见「告警说明」），记录 id 不进日志。
 - **扫一遍**：补写入口不带 `ledgerIds` 时，一次请求是「扫一遍」中的一页（至多 100 行）。
   - 一遍 = 第一次不带 `after`，之后把回答里的 `next` 原样作为 `after` 传回，直到 `next` 为 null 才算扫完（`next` 为 null 即这一遍已走完：游标之后没有本遍尚未取到的候选行，本遍报 retryable 或 `acknowledgement_missing` 的行仍未留痕；最后一页可能为空）。
   - 一直 retryable 或缺确认审计（`acknowledgement_missing`）的行不留痕，在这一遍里留在游标后面、不挡后面的行；它们在之后的某一遍从头（不带 `after`）开始时再试一次，或由 owner 按 `ledgerIds` 指名再试。
@@ -27,28 +28,41 @@
   - 形状不对的游标（非规范编码、键或键序不对、版本不是 2（含 v1）、摘要格式不对、时间不对（含年份 0000）、id 不对）、或带当前清单摘要却指向不在清单里的目标的游标，得 400（`YIDA_OWNER_RUNTIME_INPUT`；与 `ledgerIds` 同传、字符或长度不对，在路由就得 `YIDA_OWNER_HTTP_INPUT`）。
   - 目标清单变了（增、删或调换顺序）之后，旧游标得 409 `YIDA_ISSUE_CONFIRM_CURSOR_STALE`（`packages/core-backend/src/routes/integration-yida-owner.ts:53`），意思是目标集合变了，要不带 `after` 从头重扫。自己的目标被移出清单的游标也属于清单变了，得 409，不是 400。
   - 摘要格式正确却不是当前清单摘要的游标一律得 409；规范编码、摘要为当前清单、目标在清单里的游标，即使时间或 id 改过也只移动起点（范围始终取自已认证的 owner 与开关，工作区固定为空）。
-- **两次运行重叠**（例如 ACK 后运行与补写入口同时处理同一行；`plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs:79-94`）：
-  - 在租约内判定的结果，留痕在释放租约之前写入；补丁之前在租约内按 ledger_id 再查一次留痕（`:652-654`）。
+- **两次运行重叠**（例如 ACK 后运行与补写入口同时处理同一行；`plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs:80-95`）：
+  - 在租约内判定的结果，留痕在释放租约之前写入；补丁之前在租约内按 ledger_id 再查一次留痕（`:679-681`）。
   - 读行之后才被另一次运行留痕、而本次运行在租约内判定要补丁的行，在补丁前复查时被拦下（跳过 `already_traced`，不补丁、不留痕）；判定为其它结果时照常返回该结果（recorded 为 false）。
   - 不受租约串行化的残余：不受当前所持租约覆盖的留痕写入（租约之前判定的结果，或租约已被接管的持有者写入的留痕）可能落在另一次运行的租约内复查与它自己的留痕写入之间；那一行得一次首次补丁，留痕却是先到的那个结果。详见核心头注。
   - 补丁成功而留痕写入失败时，这次运行整体失败（不报 written）；下一次持租约的运行看到单元格已有日期，记 `already_set`。进程在补丁和留痕之间被杀时，它的租约要等过期或被接管才释放，此前的补写都是可重试的 `STOCK_PREP_PROJECT_WRITE_LOCKED`。
 
+## 写到了作废行（`written_inactive`，owner 裁定 D3-1）
+
+owner 2026-11-17 裁定（登记册 R-96 ⑦ D3-1）：回写按业务键找到的那一行如果是**作废行**（`active` 为布尔 `false`：BOM 换键或表修复退役后留在原键下的前任行，新行换了键；填报视图按 `active` 过滤，看不到它），**仍然写入日期**，规则不变（D8：只写空单元格），留痕结果记 `written_inactive`（`plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs:161`、判定 `:494`、留痕 `:698-700`）。按键查行从不按 `active` 过滤（`:668`）：后继行换了键，过滤只会把这种情形变成无声的 `row_absent`。把日期挪到后继行是备料线 carry 的事，回写不做。
+
+- 只有「写入」会是 `written_inactive`：作废行单元格里已经是这一天，记 `already_set`；已有别的值，记 `kept_existing`，与有效行相同。补丁成功而留痕写入失败的作废行，下一次运行记的是 `already_set`，不再是 `written_inactive`，日志里也就没有这一条；要找它只能读表。
+- **carry 只由管理员发起**：`carryPolicy` 是表动作的部署配置项（`plugins/plugin-integration-core/lib/stock-preparation-table-actions.cjs:536`），全树除测试外没有任何地方配置它；没配就不做 carry（`plugins/plugin-integration-core/lib/stock-preparation-conflict-planner.cjs:1767`），配了也只是提出建议，要经管理员确认才写入。
+- **只有日期的前任行永远不会被 carry**：carry 只搬人工字段（发料确认日期是机器列，不在人工字段里），前任行没有任何人工字段值时得 `no_human_context`，什么都不搬（`plugins/plugin-integration-core/lib/stock-preparation-carry-policy.cjs:294`）。
+- **carry 已确认之后才到的 ACK 需要人工补**：carry 确认在前、发送的确认（ACK）在后时，日期写到作废的前任行（`written_inactive`），之后不会再有 carry 把它带到后继行；要人工把这一天补到后继行（「人工重放」）。
+- **日期挪走之后，前任行的留痕仍是 `written_inactive`**：留痕表只追加、不改；以后谁把日期挪到了后继行，留痕都不会变。判断日期现在在哪，**读表，不读留痕**。
+- **回写会移动 `confirmationInputRevision`**：回写改了本项目的一行，人工确认待办的输入修订值就变了（`plugins/plugin-integration-core/lib/stock-preparation-table-actions.cjs:2617`），待确认的候选项会换新 id（`plugins/plugin-integration-core/lib/stock-preparation-confirmation-decisions.cjs:677-690`）。这和改一次「备注」的效果一样，不是新问题。
+- **先 carry、后继行再收到自己的 ACK**：carry 把日期带到后继行之后，后继行自己的发送确认到来时单元格已有值，回写按 D8 不覆盖，记 `kept_existing`（同一天则记 `already_set`）。这一情形 owner 还没裁（登记册 R-96 ⑦）：A 维持 D8「不覆盖」；B 在运行报告里计 `kept_existing` 的条数；C 覆盖。推荐 A+B。**本版按 A 处理，并已在运行报告里给出 B 的计数**（见上文「运行报告」）；C 没有实现。
+
 ## 告警说明（ACK 后运行的日志行）
 
-ACK 后运行只会写下面三条固定码（`packages/core-backend/src/integration/yida-owner-runtime.ts:103`、`:109`、`:117`；判定在 `:478-489`）。日志行不含任何编号、项目号、业务键或字段内容；`UNWRITTEN` 只多带结果码与条数。补写入口（`POST /issue-confirm-writeback`）自己的调用方看得到每一行的结果，所以它不写这三条日志。
+ACK 后运行只会写下面四条固定码（`packages/core-backend/src/integration/yida-owner-runtime.ts:103`、`:109`、`:117`、`:130`；判定在 `:508-522`）。日志行不含任何编号、项目号、业务键或字段内容；`UNWRITTEN` 只多带结果码与条数，`WRITTEN_INACTIVE` 只多带条数。补写入口（`POST /issue-confirm-writeback`）自己的调用方看得到每一行的结果和运行报告，所以它不写这四条日志。
 
 | 日志行 | 含义 | owner 怎么做 |
 |---|---|---|
 | `YIDA_ISSUE_CONFIRM_WRITEBACK_AFTER_ACK_FAILED` | 这次运行失败，或被关停（stop）打断。通常日期没写、也没留痕；但补丁已落地而留痕写入失败、或运行做完之后才被关停时，单元格里可能已有日期（见上文「两次运行重叠」），补写时再判定（有日期则记 `already_set`）。有这一条时，同一次运行不再写另外两条。 | 等后端恢复正常后，做一遍补写（见上文「扫一遍」）；或用 `ledgerIds` 指名这一行再试。 |
 | `YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED` | 运行正常结束，但有一行是可重试（retryable）的。例如：表写租约正被别的写入方占着（`STOCK_PREP_PROJECT_WRITE_LOCKED`，任何用途：小通道、大任务分块、批次安装 `pull_batch_install`、恢复核对 `recovery_verify`、表修复 `sheet_repair` 等）；主机写栅拒绝；主机读写失败；运行中途回写开关被关（`SWITCH_OFF`，这一行也算可重试，同样记这一条）。这一行没有留痕；通常日期也没写，但补丁已落地却没收到确认时（补丁调用报错）单元格里可能已有日期。补写时再判定：有日期则记 `already_set`，不会再补。 | 等占着租约的写入方结束，然后做一遍补写；或用 `ledgerIds` 指名这一行再试。一遍里仍然 retryable 的行，只在之后的某一遍从头开始时再试。 |
 | `YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN <结果码>=<条数> …` | 运行正常结束，有一行得到了不写日期的终态结果（见下文「终态结果」）。这一行已经留痕，**之后任何一遍补写都不会再选它**，日期会一直空着。多个结果码按核心词表的顺序列出，例如 `YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN row_absent=1`。 | 按结果码查原因（下表）。补写救不回这一行：留痕表只追加，不能改删。条件消除之后要不要、怎样补这一列，是 owner 的事项（登记册 R-96 ⑦）。 |
+| `YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE count=<条数>` | 运行正常结束，有一行得到 `written_inactive`：**日期已经写了**，但写在按业务键找到的作废行（前任行）上，客户的填报视图看不到（见上文「写到了作废行」）。这一行已留痕，之后的补写不会再选它。只带条数，不带记录号；它不是 `UNWRITTEN`（日期写了）。 | 读表确认日期在哪一行：若备料线的 carry 之后会把它带到后继行，则无需动作；carry 已确认在前、或前任行只有日期（不会被 carry）时，由 owner 人工把这一天补到后继行。日志不带台账 id 和记录号，留痕表也不存记录号：要找这一行，在留痕表里查 `outcome = written_inactive` 的行（得台账 id、`sheet_id` 和日期），再在那张表里按业务键找 `active` 为 false 的行。ACK 后运行回答里的记录号不落地保存（已知局限，登记册 R-96 待办）。 |
 
-- `DEFERRED` 和 `UNWRITTEN` 可以出现在同一次运行里，`DEFERRED` 在前；每条每次运行至多一次。ACK 后运行只指名一行，所以实际上一次运行只会有其中一条。
+- `DEFERRED`、`UNWRITTEN`、`WRITTEN_INACTIVE` 可以出现在同一次运行里，按这个顺序；每条每次运行至多一次。ACK 后运行只指名一行，所以实际上一次运行只会有其中一条。
 - 跳过不记日志：项目备料表开关关着（`project_sheets_disabled`，D14）、`already_traced`、缺确认审计（`acknowledgement_missing`）。写入（`written`）、单元格已是这一天（`already_set`）、单元格已有别的值（`kept_existing`，D8：先到的确认为准、不覆盖）也不记日志。
 
-**终态结果**（核心的 12 个留痕结果，`plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs:134-147`）。每个结果每行只记一次，都是终态：
+**终态结果**（核心的 13 个留痕结果，`plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs:145-162`；第 13 个 `written_inactive` 由迁移 `zzzz20261117090000` 加进留痕表的检查约束）。每个结果每行只记一次，都是终态：
 
-- 写了或不用写，不记 `UNWRITTEN`：`written`、`already_set`、`kept_existing`。
+- 写了或不用写，不记 `UNWRITTEN`：`written`、`already_set`、`kept_existing`、`written_inactive`（写到了作废行，记 `WRITTEN_INACTIVE`，见上表）。
 - 不写日期、记 `UNWRITTEN` 的九个结果（运行时的封闭列表，`yida-owner-runtime.ts:121-122`）：
   - `row_absent`：项目备料表里没有这个业务键的行。
   - `duplicate_key`：同一业务键有两行或以上。
