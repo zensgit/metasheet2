@@ -17,6 +17,8 @@ export const baseline = Object.freeze([
   { file: 'authorization-operation-migration.db.test.ts', min: 2, required: ['rolls the receipt back when mandatory audit insertion fails'], skipped: [] },
   { file: 'authorization-operation-migration-provider.db.test.ts', min: 1, required: ['refuses migration and ledger writes while an authorization reader holds the world lock'], skipped: [] },
   { file: 'authorization-operation-schema-gate.db.test.ts', min: 2, required: ['holds R0 exclusive through the transaction and releases it on rollback'], skipped: [] },
+  { file: 'authorization-operation-role-provenance.db.test.ts', min: 8, required: ['records command role assignment as manual and does not relabel an existing role', 'does not expose provenance of roles outside a delegate revocable catalog'], skipped: [] },
+  { file: 'authorization-operation-provenance-migration.db.test.ts', min: 1, required: ['leaves old records unknown, constrains new values and refuses lossy down'], skipped: ['holds a table lock through the down evidence check and excludes a concurrent insert'] },
   { file: 'authorization-operation-audit-feed.db.test.ts', min: 4, required: ['lists both sources once, with stable pagination, text actor and matching CSV filters', 'denies delegated actor both global surfaces'], skipped: [] },
 ])
 export const unitBaseline = Object.freeze([
@@ -37,9 +39,10 @@ export const variants = Object.freeze([
   { id:'exception-audit',file:exception,title:'rolls back a direct write and receipt after post-fence audit failure',env:{PERMISSION_COMMAND_TEST_FAULT:'audit'} },
   { id:'exception-integrity',file:exception,title:'rejects a post-write legacy non-string mutation and rolls back',env:{PERMISSION_COMMAND_TEST_FAULT:'legacy_corrupt'} },
   { id:'planning-deadline',file:full,title:'bounds slow pre-planning reads and never starts a late write',env:{PERMISSION_COMMAND_TEST_SLOW_PLAN:'1'} },
+  { id:'provenance-down-lock',file:'authorization-operation-provenance-migration.db.test.ts',title:'holds a table lock through the down evidence check and excludes a concurrent insert',config:'vitest.role-provenance.config.ts',env:{PERMISSION_PROVENANCE_TEST_LOCK_RACE:'1'} },
   { id:'late-commit',file:full,title:'returns unknown while COMMIT is pending, then GET observes the late receipt and released locks',env:{PERMISSION_COMMAND_TEST_DELAY_COMMIT:'1'} },
 ])
-const unsafe = ['PERMISSION_COMMAND_TEST_UNFENCED_FIXTURE','PERMISSION_COMMAND_TEST_MUTATION','PERMISSION_COMMAND_TEST_FAULT','PERMISSION_COMMAND_TEST_DELAY_COMMIT','PERMISSION_COMMAND_TEST_SLOW_PLAN','MIGRATION_EXCLUDE','MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL']
+const unsafe = ['PERMISSION_COMMAND_TEST_UNFENCED_FIXTURE','PERMISSION_COMMAND_TEST_MUTATION','PERMISSION_COMMAND_TEST_FAULT','PERMISSION_COMMAND_TEST_DELAY_COMMIT','PERMISSION_COMMAND_TEST_SLOW_PLAN','PERMISSION_PROVENANCE_MUTANT','PERMISSION_PROVENANCE_TEST_LOCK_RACE','MIGRATION_EXCLUDE','MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL']
 export function validateEnvironment(env) {
   for (const key of ['DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED','RBAC_BYPASS','RBAC_TOKEN_TRUST']) if (env[key] !== 'false') throw new Error(`${key} must be exactly false`)
   for (const key of unsafe) if (env[key] !== undefined) throw new Error(`${key} must be absent from the parent environment`)
@@ -91,7 +94,7 @@ function run(command,args,env,cwd=root) {
 async function runTests(dir, env, id, expected, variant) {
   const report=path.join(dir,`${id}.json`)
   const files=expected.map(item=>`${prefix}${item.file}`)
-  const args=['exec','vitest','run','--config','vitest.authorization-operation-realdb.config.ts',...files,'--reporter=json','--outputFile',report]
+  const args=['exec','vitest','run','--config',variant?.config ?? 'vitest.authorization-operation-realdb.config.ts',...files,'--reporter=json','--outputFile',report]
   if(variant) args.push('-t',variant.title)
   try {
     run('pnpm', args, { ...env, ...variant?.env }, backend)
