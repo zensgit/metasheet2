@@ -84,7 +84,8 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
   // ... and the subset issued by the write-back's own ports (its plugin db and the records surface it is handed).
   const wbStatements: string[] = []
   let failOnce: { pattern: RegExp; error: Error } | undefined
-  let gateOnce: (Gate & { pattern: RegExp }) | undefined
+  // A gate with `tag: 'wb'` parks only a statement of the write-back's own ports (never the send's).
+  let gateOnce: (Gate & { pattern: RegExp; tag?: 'wb' }) | undefined
   const parkedGates: Gate[] = []
   const actor: Actor = Object.freeze({ actorId: OWNER, tenantId: TENANT, workspaceId: null })
   const ident = (value: string) => {
@@ -119,7 +120,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
   async function run(client: PoolClient, sql: string, params?: unknown[], tag?: 'wb') {
     statements.push(sql)
     if (tag === 'wb') wbStatements.push(sql)
-    if (gateOnce && gateOnce.pattern.test(sql)) { const held = gateOnce; gateOnce = undefined; parkedGates.push(held); held.enter(); await held.open }
+    if (gateOnce && gateOnce.pattern.test(sql) && (gateOnce.tag === undefined || gateOnce.tag === tag)) { const held = gateOnce; gateOnce = undefined; parkedGates.push(held); held.enter(); await held.open }
     if (failOnce && failOnce.pattern.test(sql)) { const failure = failOnce; failOnce = undefined; throw failure.error }
     return client.query(sql, params)
   }
@@ -340,6 +341,9 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
   // normally with a retryable row. A code arrives after the host run retired, so a test that expects one waits for it.
   const HOOK_FAILED = 'YIDA_ISSUE_CONFIRM_WRITEBACK_AFTER_ACK_FAILED'
   const DEFERRED = 'YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED'
+  // ... and (stock-prep ruling on post-ACK terminal non-write outcomes) a run that finished normally with an outcome that
+  // never writes the date: the fixed code plus `outcome=count` pairs.
+  const UNWRITTEN = 'YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN'
   async function warned(count = 1) {
     const deadline = Date.now() + 4000
     while (world!.warnings.length < count) {
@@ -676,6 +680,9 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     expect((await tableRows(TRACE)).map(row => [row.ledger_id, row.outcome])).toEqual([[ledgerId, 'permission_revoked']])
     expect(patches).toEqual([])
     expect((await cell()).date).toBe(null)
+    // The recovery entry's caller sees the terminal outcome: it is never the UNWRITTEN log line (the one code is the
+    // crashed post-ACK run's).
+    expect(world!.warnings).toEqual([HOOK_FAILED])
   })
 
   it('retryable (B.4): while another holder (purpose small_apply) holds the sheet write lease, the write-back is retryable STOCK_PREP_PROJECT_WRITE_LOCKED — no patch, NO trace row; after release a retry writes the date once', async () => {
@@ -752,6 +759,60 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     expect(await tableRows(TRACE)).toEqual([])
     expect(patches).toEqual([])
     expect((await cell()).date).toBe(null)
+  })
+
+  // Stock-prep ruling (post-ACK terminal non-write outcomes): the post-ACK run that finished with an outcome that never
+  // writes the date logs YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN plus `outcome=count` once — the row is traced, so no
+  // sweep lists it again; the recovery entry (its caller sees the rows) logs nothing. The send itself reads the project
+  // registry, so a registry fact is changed while the post-ACK run is parked at its own first registry statement (after
+  // the send settled); the owner's role grant (decided under the lease) is removed before the send.
+  it.each([
+    ['project_archived', 'before the lease'],
+    ['project_absent', 'before the lease'],
+    ['sheet_mismatch', 'before the lease'],
+    ['permission_revoked', 'under the lease'],
+  ])('UNWRITTEN on real PostgreSQL (%s, decided %s): the post-ACK run traces the outcome, patches nothing and logs YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN with its count once; a later sweep lists nothing and logs nothing', async (outcome) => {
+    await compose()
+    const before = await cell()
+    const registryFact = outcome !== 'permission_revoked'
+    if (!registryFact) await owner.query(`DELETE FROM role_permissions WHERE permission_code = 'stock-prep:operate'`)
+    const parked = { ...latch(), pattern: new RegExp(`\\b${REGISTRY}\\b`), tag: 'wb' as const }
+    if (registryFact) gateOnce = parked
+    const started = world!.runs.length
+    const { grant, result } = await sendOne(boundInput(0), 'synthetic-submission', { settle: false })
+    expect([result.status, result.reused]).toEqual(['acknowledged', false])
+    if (registryFact) {
+      await waitFor(parked)
+      if (outcome === 'project_archived') {
+        await owner.query(`UPDATE ${ident(REGISTRY)} SET status = 'archived', archived_at = now() WHERE tenant_id = $1 AND project_no = $2`, [TENANT, PROJECT])
+      } else if (outcome === 'project_absent') {
+        await owner.query(`DELETE FROM ${ident(REGISTRY)} WHERE tenant_id = $1 AND project_no = $2`, [TENANT, PROJECT])
+      } else {
+        await owner.query(`UPDATE ${ident(REGISTRY)} SET sheet_id = $1 WHERE tenant_id = $2 AND project_no = $3`, [`${schema}_moved`, TENANT, PROJECT])
+      }
+      parked.release()
+    }
+    await settleAfterAck(started)
+    const ledgerId = String(grant.ledgerId ?? result.delivery!.id)
+    const answers = await Promise.all(world!.runs)
+    expect(answers.map(answer => outcomeOf(answer))).toEqual([[outcome]])
+    await warned()
+    // Exactly one line: the fixed code and the outcome's count; no ledger id, project number, key or value.
+    expect(world!.warnings).toEqual([`${UNWRITTEN} ${outcome}=1`])
+    for (const value of [ledgerId, PROJECT, ...LINES, HUMAN_NOTE]) expect(world!.warnings[0].includes(value)).toBe(false)
+    expect((await tableRows(TRACE)).map(row => [row.ledger_id, row.outcome])).toEqual([[ledgerId, outcome]])
+    expect(patches).toEqual([])
+    expect([(await cell()).date, (await cell()).version]).toEqual([null, before.version])
+    // Before the lease: no lock row was ever made. Under it: the lease was taken and released (no bump, R-96).
+    const lock = await tableRows(LOCK)
+    if (outcome === 'permission_revoked') expect(lock.map(row => [row.lease_id ?? null, row.generation_reason])).toEqual([[null, null]])
+    else expect(lock).toEqual([])
+    // Final: a sweep (and the row named) lists nothing for it again, and the recovery entry logs nothing.
+    expect(await world!.runtime.issueConfirmWriteback(actor, {})).toEqual({ enabled: true, results: [], next: null })
+    expect((await world!.runtime.issueConfirmWriteback(actor, { ledgerIds: [ledgerId] })).results).toEqual([])
+    expect(world!.warnings).toEqual([`${UNWRITTEN} ${outcome}=1`])
+    expect((await cell()).date).toBe(null)
+    expect([world!.fake.token, world!.fake.form]).toEqual([1, 1])
   })
 
   it('D5 a on real PostgreSQL: the send answers while its post-ACK write-back is parked; stop() waits for that in-flight run within the barrier; the stopped run writes nothing and recovery fills the date once', async () => {

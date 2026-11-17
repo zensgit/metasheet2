@@ -332,6 +332,59 @@ describe('owner runtime: the post-ACK write-back is a tracked run AFTER submit r
   })
   // Stock-prep condition C2: a post-ACK run that FINISHED normally with a retryable row logs one fixed values-free code, once.
   const DEFERRED = 'YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED'
+  // Stock-prep ruling (post-ACK terminal non-write outcomes): a run that FINISHED normally with such an outcome logs the
+  // fixed code plus `outcome=count` pairs in the core's vocabulary order, once per run.
+  const UNWRITTEN = 'YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN'
+  const TERMINAL_NON_WRITE = ['row_absent', 'duplicate_key', 'project_absent', 'project_archived', 'project_mismatch',
+    'payload_unmapped', 'sheet_mismatch', 'permission_revoked', 'source_unbound'] as const
+  const terminal = (outcome: string, ledgerId = LEDGER) => ({ ledgerId, kind: 'outcome', outcome, recorded: true })
+  const OTHER = (n: number) => `${n}${n}${n}${n}${n}${n}${n}${n}-${n}${n}${n}${n}-4${n}${n}${n}-8${n}${n}${n}-${n}${n}${n}${n}${n}${n}${n}${n}${n}${n}${n}${n}`
+  it.each([
+    ...TERMINAL_NON_WRITE.map(outcome => [`outcome ${outcome}`, { enabled: true, results: [terminal(outcome)] }, [`${UNWRITTEN} ${outcome}=1`]] as const),
+    // Several rows (a fake answer: the real post-ACK run names one ledger row): counts per outcome, vocabulary order
+    // (not answer order), written / already_set / kept_existing / skips not counted, one line for the run.
+    ['mixed terminal outcomes', { enabled: true, results: [terminal('source_unbound', OTHER(1)), terminal('row_absent', OTHER(2)),
+      { ledgerId: OTHER(3), kind: 'outcome', outcome: 'written', recorded: true, date: '2026-03-01', timeZone: 'Asia/Shanghai' },
+      terminal('row_absent', OTHER(4)), { ledgerId: OTHER(5), kind: 'outcome', outcome: 'kept_existing', recorded: false },
+      { ledgerId: OTHER(6), kind: 'skip', reason: 'already_traced' }, terminal('sheet_mismatch', OTHER(7))] },
+    [`${UNWRITTEN} row_absent=2 sheet_mismatch=1 source_unbound=1`]],
+    // DEFERRED and UNWRITTEN from one run: both, each once, DEFERRED first.
+    ['a retryable row and a terminal non-write outcome', { enabled: true, results: [terminal('project_archived', OTHER(1)),
+      { ledgerId: OTHER(2), kind: 'retryable', code: 'STOCK_PREP_PROJECT_WRITE_LOCKED' },
+      { ledgerId: OTHER(3), kind: 'retryable', code: 'YIDA_ISSUE_CONFIRM_RECORDS_INVALID' }, terminal('project_archived', OTHER(4))] },
+    [DEFERRED, `${UNWRITTEN} project_archived=2`]],
+    // A recorded:false answer (another run traced first) still names the outcome this run decided.
+    ['a terminal outcome another run traced first (recorded false)', { enabled: true, results: [{ ...terminal('duplicate_key'), recorded: false }] },
+      [`${UNWRITTEN} duplicate_key=1`]],
+  ] as Array<readonly [string, unknown, readonly string[]]>)('UNWRITTEN signal, %s', async (_name, answer, expected) => {
+    const f = hookFixture({ run: async () => answer })
+    await f.runtime.createPluginCapability().activate(f.binding as never)
+    expect((await Promise.race([f.send(), pause(1000)]) as { status: string }).status).toBe('acknowledged')
+    await until(() => f.calls.runs.length === 1)
+    await until(() => f.calls.warnings.length >= expected.length)
+    await pause(30)
+    // Once per run, values-free: the fixed codes and outcome=count only (no ledger id, no value).
+    expect(f.calls.warnings).toEqual([...expected])
+    for (const text of f.calls.warnings) expect(text.includes(LEDGER) || /\d{4}-\d{2}-\d{2}/.test(text)).toBe(false)
+    await f.runtime.stop()
+    expect(f.calls.warnings).toEqual([...expected])
+  })
+  it('UNWRITTEN signal: a terminal outcome from a run that stop() cancelled is the failure code alone, never UNWRITTEN as well', async () => {
+    const gate = deferred()
+    const f = hookFixture({ run: async () => {
+      await gate.promise
+      return { enabled: true, results: [terminal('row_absent')] }
+    } })
+    await f.runtime.createPluginCapability().activate(f.binding as never)
+    await f.send()
+    await until(() => f.calls.runs.length === 1)
+    const stopping = f.runtime.stop()
+    gate.release()
+    await stopping
+    await until(() => f.calls.warnings.length > 0)
+    await pause(30)
+    expect(f.calls.warnings).toEqual(['YIDA_ISSUE_CONFIRM_WRITEBACK_AFTER_ACK_FAILED'])
+  })
   it.each([
     ['retryable: the sheet lease is held (WRITE_LOCKED)', { enabled: true, results: [{ ledgerId: LEDGER, kind: 'retryable', code: 'STOCK_PREP_PROJECT_WRITE_LOCKED' }] }, [DEFERRED]],
     ['retryable: the write-back switch turned off mid-run', { enabled: true, results: [{ ledgerId: LEDGER, kind: 'retryable', code: 'SWITCH_OFF' }], stopped: 'SWITCH_OFF' }, [DEFERRED]],
@@ -339,7 +392,9 @@ describe('owner runtime: the post-ACK write-back is a tracked run AFTER submit r
     ['skip already_traced', { enabled: true, results: [{ ledgerId: LEDGER, kind: 'skip', reason: 'already_traced' }] }, []],
     ['skip acknowledgement_missing', { enabled: true, results: [{ ledgerId: LEDGER, kind: 'skip', reason: 'acknowledgement_missing' }] }, []],
     ['outcome written', { enabled: true, results: [{ ledgerId: LEDGER, kind: 'outcome', outcome: 'written', recorded: true, date: '2026-03-01', timeZone: 'Asia/Shanghai' }] }, []],
-    ['outcome permission_revoked (non-retryable)', { enabled: true, results: [{ ledgerId: LEDGER, kind: 'outcome', outcome: 'permission_revoked', recorded: true }] }, []],
+    ['outcome permission_revoked (terminal, non-write: UNWRITTEN, never DEFERRED)', { enabled: true, results: [{ ledgerId: LEDGER, kind: 'outcome', outcome: 'permission_revoked', recorded: true }] }, [`${UNWRITTEN} permission_revoked=1`]],
+    ['outcome already_set (the date is there)', { enabled: true, results: [{ ledgerId: LEDGER, kind: 'outcome', outcome: 'already_set', recorded: true, date: '2026-03-01', timeZone: 'Asia/Shanghai' }] }, []],
+    ['outcome kept_existing (D8: another value stays)', { enabled: true, results: [{ ledgerId: LEDGER, kind: 'outcome', outcome: 'kept_existing', recorded: true }] }, []],
     ['an empty answer (not selected)', { enabled: true, results: [] }, []],
     ['the write-back switch off (enabled false)', { enabled: false, results: [] }, []],
   ])('C2 signal, %s', async (_name, answer, expected) => {

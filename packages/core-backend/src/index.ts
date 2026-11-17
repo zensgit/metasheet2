@@ -603,8 +603,9 @@ export function resolveRecoveryArchiveMainPoolRuntime(): RecoveryArchiveApplicat
   })
 }
 
-// Y9 (D5 a, C2): the owner runtime reports a post-ACK write-back run that failed, or that finished with a retryable row
-// (YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED), as one fixed code. Written outside the request,
+// Y9 (D5 a, C2, UNWRITTEN): the owner runtime reports a post-ACK write-back run that failed, that finished with a
+// retryable row (YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED), or that finished with a terminal non-write outcome
+// (YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN plus outcome=count pairs), as fixed values-free text. Written outside the request,
 // log and trace contexts the detached run inherited (the owner HTTP observation surface would rewrite the text).
 let yidaOwnerRuntimeLogger: Logger | undefined
 function yidaOwnerRuntimeWarn(code: string): void {

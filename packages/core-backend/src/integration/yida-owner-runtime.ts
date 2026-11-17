@@ -107,6 +107,27 @@ export const YIDA_ISSUE_CONFIRM_HOOK_FAILED = 'YIDA_ISSUE_CONFIRM_WRITEBACK_AFTE
 // skip (project_sheets_disabled while the project-sheets switch is off, D14), a traced outcome, an empty answer or a
 // run that failed (HOOK_FAILED) never logs it; the recovery entry never logs it either (its caller sees the rows).
 export const YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED = 'YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED'
+// Y9 (stock-prep ruling on post-ACK terminal non-write outcomes): the only text a post-ACK write-back run logs when it
+// FINISHED normally and its answer holds a terminal outcome that leaves the date unwritten for good. Such a row is traced,
+// so no later sweep lists it again. Once per run: the fixed code, then `outcome=count` for each such outcome in the
+// order below (e.g. `YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN row_absent=1`); no id or value. Only names from this closed
+// list are ever rendered, never a plugin-supplied string. A skip, written / already_set / kept_existing, a retryable row
+// (that one is DEFERRED), an empty answer or a failed run (HOOK_FAILED) never logs it; the recovery entry never logs
+// it either (its caller sees the rows). DEFERRED and UNWRITTEN can both come from one run, DEFERRED first.
+export const YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN = 'YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN'
+// The write-back core's closed outcome vocabulary (yida-issue-confirm-writeback.cjs ISSUE_CONFIRM_WRITEBACK_OUTCOMES, in
+// its order) minus written, already_set and kept_existing: every terminal outcome that never writes the date. Pinned
+// equal to the core's list by the owner runtime unit test.
+const WRITEBACK_UNWRITTEN_OUTCOMES = Object.freeze(['row_absent', 'duplicate_key', 'project_absent', 'project_archived',
+  'project_mismatch', 'payload_unmapped', 'sheet_mismatch', 'permission_revoked', 'source_unbound'])
+function unwrittenText(results: ReadonlyArray<Readonly<Row>>): string | undefined {
+  const counts: string[] = []
+  for (const outcome of WRITEBACK_UNWRITTEN_OUTCOMES) {
+    const count = results.filter(row => row.kind === 'outcome' && row.outcome === outcome).length
+    if (count > 0) counts.push(`${outcome}=${count}`)
+  }
+  return counts.length === 0 ? undefined : `${YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN} ${counts.join(' ')}`
+}
 
 export class YidaOwnerRuntimeError extends Error {
   readonly code: string
@@ -442,9 +463,10 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
   // neither the send switch nor the send authority: like the recovery entry it creates the plugin's bound write-back with
   // the host live re-check on ITS OWN run database (so a stop() checkpoint cancels it and drain waits for it), and the
   // plugin core reads INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED first. Its outcome is the module's trace / no-trace;
-  // it reaches no one but the server log, as one fixed values-free code: a rejection is HOOK_FAILED; a run that finished
+  // it reaches no one but the server log, as fixed values-free codes: a rejection is HOOK_FAILED; a run that finished
   // normally (past its exit checkpoint) with a retryable row is WRITEBACK_DEFERRED (C2), so a date left to the recovery
-  // entry is never silent.
+  // entry is never silent; a run that finished normally with a terminal non-write outcome is WRITEBACK_UNWRITTEN plus
+  // the outcome codes and counts, so a date that no run will ever write is never silent either.
   function issueConfirmAfterAcknowledged(owner: YidaOwnerActor, ledgerId: string): void {
     const pending = execute(owner, {}, false, async (_authority, state, fixed, _checkpoint, _signal, _tracked, database) => {
       if (!state.createIssueConfirmWriteback) return undefined
@@ -456,9 +478,14 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
     Promise.prototype.then.call(pending, (view: Readonly<Row> | undefined) => {
       // The view is writebackView's frozen projection (or undefined without the capability): its results are closed rows.
       // Nothing here may reject (the derived promise is never observed).
-      let deferred = false
-      try { deferred = view !== undefined && (view.results as ReadonlyArray<Readonly<Row>>).some(row => row.kind === 'retryable') } catch { deferred = false }
+      let deferred = false, unwritten: string | undefined
+      try {
+        const results = view === undefined ? [] : view.results as ReadonlyArray<Readonly<Row>>
+        deferred = results.some(row => row.kind === 'retryable')
+        unwritten = unwrittenText(results)
+      } catch { deferred = false; unwritten = undefined }
       if (deferred) warn(YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED)
+      if (unwritten !== undefined) warn(unwritten)
     }, () => warn(YIDA_ISSUE_CONFIRM_HOOK_FAILED))
   }
   function input<T>(capture: () => T, invoke: (captured: T) => Promise<unknown>): Promise<unknown> {

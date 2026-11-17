@@ -236,6 +236,59 @@ async function writebackDeferredSignal(source = originalSource) {
   }
 }
 
+// Y9 (stock-prep ruling on post-ACK terminal non-write outcomes): a post-ACK run that finished with such an outcome logs
+// YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN plus `outcome=count` pairs (the core's vocabulary order) once; written /
+// already_set / kept_existing, a skip or an unknown outcome string log nothing; with a retryable row as well, DEFERRED
+// comes first. The recovery entry never logs it (its caller sees the rows).
+const UNWRITTEN = 'YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN'
+async function postAckWarnings(source: string, answer: () => Promise<unknown>, name: string, expected: readonly string[]) {
+  const ledgerId = delivered.delivery.id
+  const warnings: string[] = []
+  const f = fixture({ source, warn: code => { warnings.push(code) } })
+  const run = vi.fn(answer)
+  await f.runtime.createPluginCapability().activate({ ...f.binding, createIssueConfirmWriteback: vi.fn(() => Object.freeze({ run })),
+    issueConfirmWritebackEnabled: () => true } as unknown as YidaOwnerRuntimeBinding)
+  try {
+    await expect(f.runtime.submit(actor, submission), name).resolves.toMatchObject({ status: 'acknowledged' })
+    const deadline = Date.now() + 2000
+    while (run.mock.calls.length === 0 || warnings.length < expected.length) {
+      if (Date.now() > deadline) break
+      await new Promise(resolve => setTimeout(resolve, 5))
+    }
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(run.mock.calls, name).toEqual([[{ ledgerIds: [ledgerId] }]])
+    expect(warnings, name).toEqual(expected)
+  } finally { await f.runtime.stop() }
+}
+async function writebackUnwrittenSignal(source = originalSource) {
+  const ledgerId = delivered.delivery.id
+  const row = (outcome: string, id = ledgerId) => ({ ledgerId: id, kind: 'outcome', outcome, recorded: true })
+  const other = (n: number) => `synthetic-ledger-${n}`
+  for (const [name, results, expected] of [
+    ['row_absent', [row('row_absent')], [`${UNWRITTEN} row_absent=1`]],
+    ['already_set', [{ ...row('already_set'), date: '2026-03-02', timeZone: 'Asia/Shanghai' }], []],
+    ['kept_existing', [row('kept_existing')], []],
+    ['an outcome outside the vocabulary is never echoed', [row('synthetic_unknown')], []],
+    ['mixed, with a retryable row', [row('source_unbound', other(1)), { ledgerId: other(2), kind: 'retryable', code: 'STOCK_PREP_PROJECT_WRITE_LOCKED' },
+      row('project_archived', other(3)), { ...row('written', other(4)), date: '2026-03-02', timeZone: 'Asia/Shanghai' }, row('project_archived', other(5))],
+    ['YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED', `${UNWRITTEN} project_archived=2 source_unbound=1`]],
+  ] as const) {
+    await postAckWarnings(source, async () => Object.freeze({ enabled: true, results }), name, expected)
+  }
+  // The recovery entry (owner proof passing): the same answer reaches its caller, and nothing is logged.
+  const warnings: string[] = []
+  const f = fixture({ source, warn: code => { warnings.push(code) } })
+  const run = vi.fn(async () => Object.freeze({ enabled: true, results: [row('row_absent')], next: null }))
+  await f.runtime.createPluginCapability().activate({ ...f.binding, createIssueConfirmWriteback: vi.fn(() => Object.freeze({ run })),
+    issueConfirmWritebackEnabled: () => true } as unknown as YidaOwnerRuntimeBinding)
+  try {
+    const answer = await f.runtime.issueConfirmWriteback(actor, {})
+    expect((answer as { results: unknown[] }).results).toEqual([row('row_absent')])
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(warnings, 'recovery entry').toEqual([])
+  } finally { await f.runtime.stop() }
+}
+
 const networkSpies: ReturnType<typeof vi.spyOn>[] = []
 beforeAll(() => {
   for (const [module, methods] of [
@@ -701,6 +754,29 @@ describe('Yida owner runtime control paths (NOT positive authority proof)', () =
     await writebackDeferredSignal()
   })
 
+  it('Y9 UNWRITTEN: a post-ACK run that finished with a terminal non-write outcome logs YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN with outcome=count pairs once (DEFERRED first when a row is retryable too); the recovery entry logs nothing', async () => {
+    await writebackUnwrittenSignal()
+  })
+
+  it('Y9 UNWRITTEN: the counted outcomes are exactly the write-back core\'s closed vocabulary minus written, already_set and kept_existing, in its order', async () => {
+    const core = nativeRequire(fileURLToPath(new URL('../../../../plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs', import.meta.url))) as
+      { ISSUE_CONFIRM_WRITEBACK_OUTCOMES: readonly string[] }
+    expect(core.ISSUE_CONFIRM_WRITEBACK_OUTCOMES).toHaveLength(12)
+    const nonWrite = core.ISSUE_CONFIRM_WRITEBACK_OUTCOMES.filter(outcome => !['written', 'already_set', 'kept_existing'].includes(outcome))
+    expect(nonWrite).toEqual(['row_absent', 'duplicate_key', 'project_absent', 'project_archived', 'project_mismatch',
+      'payload_unmapped', 'sheet_mismatch', 'permission_revoked', 'source_unbound'])
+    for (const outcome of core.ISSUE_CONFIRM_WRITEBACK_OUTCOMES) {
+      const dated = ['written', 'already_set'].includes(outcome) ? { date: '2026-03-02', timeZone: 'Asia/Shanghai' } : {}
+      await postAckWarnings(originalSource, async () => Object.freeze({ enabled: true,
+        results: [{ ledgerId: delivered.delivery.id, kind: 'outcome', outcome, recorded: true, ...dated }] }), outcome,
+      nonWrite.includes(outcome) ? [`${UNWRITTEN} ${outcome}=1`] : [])
+    }
+    // All nine in one (fake, multi-row) answer: one line, the core's order.
+    await postAckWarnings(originalSource, async () => Object.freeze({ enabled: true,
+      results: [...nonWrite].reverse().map((outcome, index) => ({ ledgerId: `synthetic-ledger-${index}`, kind: 'outcome', outcome, recorded: true })) }),
+    'all nine', [`${UNWRITTEN} ${nonWrite.map(outcome => `${outcome}=1`).join(' ')}`])
+  })
+
   it('projects a closed submit view and rejects execution authority/material additions', async () => {
     for (const key of ['permit', 'handle', 'credential', 'material', 'token', 'config']) {
       const f = await active({ result: { ...delivered, [key]: 'synthetic-private' } })
@@ -1082,6 +1158,22 @@ describe('in-memory guard mutation probes (no repository writes)', () => {
         test: source => writebackDeferredSignal(source) },
       { name: 'writeback/deferred-wire-text', from: "export const YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED = 'YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED'",
         to: "export const YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED = 'YIDA_ISSUE_CONFIRM_WRITEBACK_RETRYABLE'", test: source => writebackDeferredSignal(source) },
+      // Y9 UNWRITTEN (stock-prep ruling on post-ACK terminal non-write outcomes): logged, terminal non-write outcomes
+      // only, once per run, with its counts, after DEFERRED, its fixed text, its closed list.
+      { name: 'writeback/unwritten-logged', from: 'if (unwritten !== undefined) warn(unwritten)', to: '',
+        test: source => writebackUnwrittenSignal(source) },
+      { name: 'writeback/unwritten-terminal-only', from: "row.kind === 'outcome' && row.outcome === outcome", to: "row.kind === 'outcome'",
+        test: source => writebackUnwrittenSignal(source) },
+      { name: 'writeback/unwritten-once-per-run', from: 'if (unwritten !== undefined) warn(unwritten)',
+        to: 'if (unwritten !== undefined) { for (const _row of view?.results as unknown[]) warn(unwritten) }', test: source => writebackUnwrittenSignal(source) },
+      { name: 'writeback/unwritten-counts', from: 'counts.push(`${outcome}=${count}`)', to: 'counts.push(outcome)',
+        test: source => writebackUnwrittenSignal(source) },
+      { name: 'writeback/unwritten-after-deferred', from: 'if (deferred) warn(YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED)\n      if (unwritten !== undefined) warn(unwritten)',
+        to: 'if (unwritten !== undefined) warn(unwritten)\n      if (deferred) warn(YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED)', test: source => writebackUnwrittenSignal(source) },
+      { name: 'writeback/unwritten-closed-list', from: "'sheet_mismatch', 'permission_revoked', 'source_unbound'])",
+        to: "'sheet_mismatch', 'permission_revoked'])", test: source => writebackUnwrittenSignal(source) },
+      { name: 'writeback/unwritten-wire-text', from: "export const YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN = 'YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN'",
+        to: "export const YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN = 'YIDA_ISSUE_CONFIRM_WRITEBACK_FINAL'", test: source => writebackUnwrittenSignal(source) },
       { name: 'errors/own-runtime-brand', from: 'if (own) fail(own)', to: '', test: async source => {
         const f = await active({ source, enablement: 'false' })
         try { await expect(f.runtime.preview(actor, selected)).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_DISABLED' }) }
