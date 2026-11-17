@@ -63,6 +63,14 @@ GET/replay 的授权依据已存 receipt 的实际 target、action 与 namespace
 
 ## 入口接线与兼容策略
 
+### 事务输入保护和数据库支持
+
+旧目录与角色写入口并未全部获取 R0 应用锁。新命令在 R0 和 actor＋UUID 后，按固定顺序对实际授权、范围、审计和回执依赖的 21 张表获取 `EXCLUSIVE MODE NOWAIT`，再取管理员不变量、角色、准入和用户锁。该模式允许普通读取，先到的旧 DML 或 `FOR SHARE` 使新命令报告忙，新命令先持锁时旧写入在释放后继续。角色和用户行锁使用 NOWAIT，advisory 锁使用 TRY。提交在 READ COMMITTED 中取得锁后重读，预览使用只读 REPEATABLE READ。具体表闭包、依赖和受支持的结构由实现的 schema profile 校验，缺表或未知约束、索引、函数、规则、触发器、分区等拒绝执行。
+
+正式迁移提供方在 Kysely 原事务内先取 R0 独占锁，避免替换函数体绕过表锁。部署数据库结构仍需遵循受控迁移入口，应用进程不依赖运行中任意 DBA DDL 保持安全。原生 Windows PG16.16 与 Linux PG16.15 的 UTF‑8、C locale 完整迁移得到同一 profile。特定 Linux en_US.utf8 profile 也有独立证据。其他数据库结构由验证后补录。升级场景须按最终安装包验证实际迁移和兼容性。
+
+服务的请求处理预算限制调用方等待，普通业务 SQL 有事务内限时。PostgreSQL COMMIT 可能在响应连接断开后继续，后续查询回执可观察待确认转已提交。此协议不承诺数据库回滚时间或表锁寿命硬上界。执行期间不等待用户点击或外部服务。
+
 功能 PR 必须列出并逐项覆盖：`UserManagementView.vue:4496`、`RoleMembersPanel.vue:415`、`RoleDelegationView.vue:1632`、`PermissionManagementView.vue:905,1003`；备料成员 `services/integration/stockPreparation/members.ts:246`，考勤 `AttendanceView.vue:22517` 和 `attendance/useAttendanceAdminProvisioning.ts:495`，以及服务端 `permissions.ts:136,217,293,455`、`admin-users.ts:4474,6168,6251`、`attendance-admin.ts:1272,1352,1485,1551`。还需盘点 `server.js:296,313` 静态旧实现、脚本和所有 API 消费者，以及创建用户、目录同步、admission 单独接口等邻接写者；它们不因 UI 改线而自动受新命令保障。
 
 兼容期旧路由保持请求/响应与各自授权策略，适配到同一事务执行核心及同等级锁、实际效果、强制 TEXT actor 审计；旧例外请求没 reason 记录 `reason_origin=legacy_unprovided`、reason NULL，不要求旧静态 JS 增加字段；显式提供的 reason 做同样边界校验并标 `provided`。若无法为某旧路径做到同样事务/鉴权，必须在交付清单明确未覆盖并阻断该路径的上线宣称，不能仅隐藏按钮。旧路由没有客户端 key/preview 的协议语义，不虚称具有安全重放或 server-preview；新例外 API reason 必填不等于全系统 mandatory reason。批量考勤不在单目标契约内，须保留独立原子批量，不以多次单目标提交冒充。
