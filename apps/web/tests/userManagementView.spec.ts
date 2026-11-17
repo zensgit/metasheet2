@@ -8,10 +8,14 @@ import { useLocale } from '../src/composables/useLocale'
 import { describeCreateUserError } from '../src/utils/createUserValidationCopy'
 
 const apiFetchMock = vi.fn()
+const authState = vi.hoisted(() => ({ adminId: 'admin-actor' }))
+const AUTHORIZATION_PENDING_KEY = 'metasheet.adminAuthorizationOperation.pending.v1'
 
 vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
     hasAdminAccess: () => true,
+    getCurrentUser: () => (authState.adminId ? { id: authState.adminId } : null),
+    getCurrentUserId: async () => authState.adminId || null,
   }),
 }))
 
@@ -33,6 +37,101 @@ async function waitForCondition(predicate: () => boolean, attempts = 40): Promis
     await new Promise((resolve) => setTimeout(resolve, 0))
   }
   throw new Error('Condition not reached in time')
+}
+
+function clearAuthorizationRecovery(): void {
+  sessionStorage.removeItem(AUTHORIZATION_PENDING_KEY)
+}
+
+function authorizationImpact(admissionChanges: unknown[] = []) {
+  const impactAdmissions = admissionChanges.flatMap((change) => {
+    if (!change || typeof change !== 'object') return []
+    const row = change as Record<string, unknown>
+    if (typeof row.namespace !== 'string' || row.namespace.trim().length === 0) return []
+    if (typeof row.after === 'boolean' && (row.cause === 'explicit' || row.cause === 'role_revoke')) {
+      return [{
+        namespace: row.namespace,
+        before: row.before === null || typeof row.before === 'boolean' ? row.before : null,
+        after: row.after,
+        cause: row.cause,
+      }]
+    }
+    if (typeof row.enabled !== 'boolean') return []
+    return [{
+      namespace: row.namespace,
+      before: null,
+      after: row.enabled,
+      cause: 'explicit' as const,
+    }]
+  })
+  return {
+    sourceChanges: [],
+    admissionChanges: impactAdmissions,
+    scopeCleanup: [],
+    effectiveBefore: [],
+    effectiveAfter: [],
+    retainedOtherGrants: [],
+    warnings: [],
+  }
+}
+
+function readAuthorizationBody(init?: RequestInit): Record<string, unknown> {
+  if (typeof init?.body !== 'string' || init.body.length === 0) return {}
+  return JSON.parse(init.body) as Record<string, unknown>
+}
+
+function authorizationPreviewResponse(init?: RequestInit) {
+  const parsed = readAuthorizationBody(init)
+  const admissionChanges = Array.isArray(parsed.admissionChanges) ? parsed.admissionChanges : []
+  return createJsonResponse({
+    expectedVersion: 'member-version-1',
+    impact: authorizationImpact(admissionChanges),
+  })
+}
+
+function applyCommittedAdmission(state: UserFixture[], parsed: Record<string, unknown>): void {
+  const action = parsed.action
+  if (!action || typeof action !== 'object' || (action as { kind?: unknown }).kind !== 'admission.set') return
+  const targetUserId = typeof parsed.targetUserId === 'string' ? parsed.targetUserId : ''
+  const user = state.find((item) => item.id === targetUserId)
+  if (!user || !Array.isArray(parsed.admissionChanges)) return
+  for (const change of parsed.admissionChanges) {
+    if (!change || typeof change !== 'object') continue
+    const namespace = typeof (change as { namespace?: unknown }).namespace === 'string'
+      ? (change as { namespace: string }).namespace
+      : ''
+    if (!namespace) continue
+    const enabled = (change as { enabled?: unknown }).enabled === true
+    const existing = user.namespaceAdmissions.find((item) => item.namespace === namespace)
+    if (existing) {
+      existing.enabled = enabled
+      existing.effective = enabled && existing.hasRole
+      existing.updatedAt = '2026-04-10T00:00:00.000Z'
+    } else {
+      user.namespaceAdmissions = [
+        ...user.namespaceAdmissions,
+        { namespace, enabled, effective: enabled, hasRole: true, updatedAt: '2026-04-10T00:00:00.000Z' },
+      ]
+    }
+  }
+}
+
+function authorizationCommitResponse(init?: RequestInit, state?: UserFixture[]) {
+  const parsed = readAuthorizationBody(init)
+  if (state) applyCommittedAdmission(state, parsed)
+  const clientOperationId = typeof parsed.clientOperationId === 'string'
+    ? parsed.clientOperationId
+    : '11111111-1111-4111-8111-111111111111'
+  return createJsonResponse({
+    status: 'committed',
+    clientOperationId,
+    receipt: {
+      targetUserId: parsed.targetUserId,
+      action: parsed.action,
+      impact: authorizationImpact(Array.isArray(parsed.admissionChanges) ? parsed.admissionChanges : []),
+      resultVersion: 'member-version-2',
+    },
+  })
 }
 
 function createJsonResponse(payload: unknown, status = 200) {
@@ -95,9 +194,12 @@ async function confirmAdminAuthorization(container: HTMLElement, phrase?: string
     input.dispatchEvent(new Event('input', { bubbles: true }))
     await flushUi()
   }
+  await waitForCondition(() => {
+    const button = container.querySelector('[data-testid="admin-authorization-confirm"]')
+    return button instanceof HTMLButtonElement && !button.disabled
+  })
   const confirm = container.querySelector('[data-testid="admin-authorization-confirm"]')
   if (!(confirm instanceof HTMLButtonElement)) throw new Error('authorization confirm missing')
-  if (confirm.disabled) throw new Error('authorization confirm is disabled')
   confirm.click()
 }
 
@@ -861,6 +963,14 @@ function createApiImplementation(
       })
     }
 
+    const authorizationMethod = (init?.method || 'GET').toUpperCase()
+    if (pathname === '/api/admin/authorization-operations/preview' && authorizationMethod === 'POST') {
+      return authorizationPreviewResponse(init)
+    }
+    if (pathname === '/api/admin/authorization-operations' && authorizationMethod === 'POST') {
+      return authorizationCommitResponse(init, state)
+    }
+
     throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
   }
 }
@@ -878,6 +988,8 @@ describe('UserManagementView', () => {
   let createdBlobParts: string[] = []
 
   beforeEach(() => {
+    clearAuthorizationRecovery()
+    authState.adminId = 'admin-actor'
     apiFetchMock.mockReset()
     callLog = []
     apiFetchMock.mockImplementation(createApiImplementation(callLog))
@@ -903,6 +1015,7 @@ describe('UserManagementView', () => {
   })
 
   afterEach(() => {
+    clearAuthorizationRecovery()
     useLocale().setLocale('en')
     if (app) app.unmount()
     if (container) container.remove()
@@ -4026,7 +4139,7 @@ describe('UserManagementView', () => {
     apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
       const method = (init?.method || 'GET').toUpperCase()
       const pathname = new URL(String(input), 'http://localhost').pathname
-      if (method === 'PATCH' && /\/namespaces\/[^/]+\/admission$/.test(pathname)) {
+      if (method === 'POST' && pathname === '/api/admin/authorization-operations') {
         await new Promise<void>((resolve) => {
           releasePatch = resolve
         })
@@ -4504,7 +4617,7 @@ describe('UserManagementView', () => {
           },
         })
       }
-      if (method === 'POST' && /\/roles\/assign$/.test(url.pathname)) {
+      if (method === 'POST' && url.pathname === '/api/admin/authorization-operations') {
         catalogChanged = true
         return createJsonResponse({ ok: false, error: { code: 'ROLE_MODIFIED', message: 'Role catalog version mismatch' } }, 409)
       }
@@ -4738,7 +4851,13 @@ describe('UserManagementView authorization handlers', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
 
+  beforeEach(() => {
+    clearAuthorizationRecovery()
+    authState.adminId = 'admin-actor'
+  })
+
   afterEach(() => {
+    clearAuthorizationRecovery()
     app?.unmount()
     container?.remove()
     app = null
@@ -4869,6 +4988,15 @@ describe('UserManagementView authorization handlers', () => {
             isAdmin: false,
           },
         })
+      }
+      if (url.pathname === '/api/admin/authorization-operations/preview' && method === 'POST') {
+        return authorizationPreviewResponse(init)
+      }
+      if (url.pathname === '/api/admin/authorization-operations' && method === 'POST') {
+        if (handlers.roleWrite) {
+          return createJsonResponse({ ok: false, error: handlers.roleWrite.error || { message: 'conflict' } }, handlers.roleWrite.status)
+        }
+        return authorizationCommitResponse(init)
       }
       const roleMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)\/roles\/(assign|unassign)$/)
       if (roleMatch && method === 'POST') {
@@ -5020,8 +5148,10 @@ describe('UserManagementView authorization handlers', () => {
           data: { items: [{ id: 'user-1', name: 'Alpha', email: 'alpha@example.com', role: 'user', is_active: true, is_admin: false }], total: 1 },
         })
       }
-      const roleMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)\/roles\/assign$/)
-      if (roleMatch && method === 'POST') {
+      if (url.pathname === '/api/admin/authorization-operations/preview' && method === 'POST') {
+        return authorizationPreviewResponse(init)
+      }
+      if (url.pathname === '/api/admin/authorization-operations' && method === 'POST') {
         return createJsonResponse({ ok: false, error: { code: 'ROLE_MODIFIED', message: 'Role catalog version mismatch' } }, 409)
       }
       const accessMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)\/access$/)
@@ -5072,8 +5202,12 @@ describe('UserManagementView authorization handlers', () => {
     expect(root.textContent).not.toContain('已分配角色')
     expect(root.textContent).not.toContain('Role catalog version mismatch')
     expect(root.querySelector('[data-testid="user-access-unread"]')).toBeTruthy()
-    const assign = postCalls().find((call) => call.url.includes('/roles/assign'))
-    expect(assign?.body).toEqual({ roleId: 'crm_admin', expectedUpdatedAt: '2026-11-01T00:00:00.000Z' })
+    const commits = postCalls().filter((call) => call.url === '/api/admin/authorization-operations')
+    expect(commits).toHaveLength(1)
+    expect(commits[0]?.body.action).toEqual({ kind: 'role.assign', roleId: 'crm_admin' })
+    expect(commits[0]?.body.admissionChanges).toEqual([])
+    expect(commits[0]?.body.expectedVersion).toBe('member-version-1')
+    expect(postCalls().some((call) => call.url.includes('/roles/assign'))).toBe(false)
   })
 
   it('drops a pending role confirmation when the user changes and refuses the last platform admin in Chinese', async () => {
@@ -5120,7 +5254,10 @@ describe('UserManagementView authorization handlers', () => {
           },
         })
       }
-      if (url.pathname.endsWith('/roles/unassign') && method === 'POST') {
+      if (url.pathname === '/api/admin/authorization-operations/preview' && method === 'POST') {
+        return authorizationPreviewResponse(init)
+      }
+      if (url.pathname === '/api/admin/authorization-operations' && method === 'POST') {
         return createJsonResponse({ ok: false, error: { code: 'LAST_PLATFORM_ADMIN', message: 'Cannot remove the last platform administrator' } }, 409)
       }
       const side = adminSideResponse(url.pathname)
@@ -5176,9 +5313,12 @@ describe('UserManagementView authorization handlers', () => {
     const confirm = root.querySelector('[data-testid="admin-authorization-confirm"]') as HTMLButtonElement
     expect(confirm.disabled).toBe(true)
     expect(postCalls().some((call) => call.url.includes('/roles/unassign'))).toBe(false)
+    expect(postCalls().some((call) => call.url === '/api/admin/authorization-operations')).toBe(false)
     await confirmAdminAuthorization(root, '取消平台管理员')
-    await waitForCondition(() => postCalls().some((call) => call.url.includes('/roles/unassign')))
-    expect(postCalls().find((call) => call.url.includes('/roles/unassign'))?.body).toEqual({ roleId: 'admin' })
+    await waitForCondition(() => postCalls().some((call) => call.url === '/api/admin/authorization-operations'))
+    expect(postCalls().filter((call) => call.url === '/api/admin/authorization-operations')).toHaveLength(1)
+    expect(postCalls().find((call) => call.url === '/api/admin/authorization-operations')?.body.action).toEqual({ kind: 'role.revoke', roleId: 'admin' })
+    expect(postCalls().some((call) => call.url.includes('/roles/unassign'))).toBe(false)
   })
 
   it('does not present a malformed catalog permission list as an empty inherited list', async () => {
@@ -5206,8 +5346,10 @@ describe('UserManagementView authorization handlers', () => {
     expect(inherited?.textContent).not.toContain('无')
     expect(inherited?.textContent).not.toContain('crm:read')
     await confirmAdminAuthorization(root, '取消平台管理员')
-    await waitForCondition(() => postCalls().some((call) => call.url.includes('/roles/unassign')))
-    expect(postCalls().find((call) => call.url.includes('/roles/unassign'))?.body).toEqual({ roleId: 'admin' })
+    await waitForCondition(() => postCalls().some((call) => call.url === '/api/admin/authorization-operations'))
+    expect(postCalls().filter((call) => call.url === '/api/admin/authorization-operations')).toHaveLength(1)
+    expect(postCalls().find((call) => call.url === '/api/admin/authorization-operations')?.body.action).toEqual({ kind: 'role.revoke', roleId: 'admin' })
+    expect(postCalls().some((call) => call.url.includes('/roles/unassign'))).toBe(false)
   })
 
   function batchCreatePosts(): Array<{ url: string; body: Record<string, unknown> }> {
@@ -5481,7 +5623,8 @@ describe('UserManagementView authorization handlers', () => {
     await confirmAdminAuthorization(root)
     await waitForCondition(() => root.querySelector('[data-testid="batch-create-preview"]') === null)
     expect(batchCreatePosts()).toEqual([])
-    expect(postCalls().some((call) => call.url.includes('/roles/assign'))).toBe(true)
+    expect(postCalls().some((call) => call.url === '/api/admin/authorization-operations' && (call.body.action as { kind?: string } | undefined)?.kind === 'role.assign')).toBe(true)
+    expect(postCalls().some((call) => call.url.includes('/roles/assign'))).toBe(false)
   })
 
   it('sends no batch create when the server has no explicit admission capability', async () => {

@@ -1,12 +1,15 @@
+/* eslint-disable vue/one-component-per-file -- Tests mount isolated apps with local component stubs. */
 import { afterEach, describe, expect, it } from 'vitest'
 import { createApp, nextTick } from 'vue'
 import AdminAuthorizationConfirmDialog from '../src/views/AdminAuthorizationConfirmDialog.vue'
 import {
   PLATFORM_ADMIN_AUTHORITY_NOTE,
   admissionChangesForRevoke,
+  buildAdmissionDisableAuthorization,
   buildAdmissionEnableAuthorization,
   buildCreateUserAuthorization,
   buildRoleMembershipAuthorization,
+  describeServerAuthorizationImpact,
   catalogPermissionCodesForRoles,
   readAdmissionNamespaceFact,
   readAdmissionNamespaceList,
@@ -517,5 +520,118 @@ describe('admin authorization confirmation', () => {
       expect(host.querySelector('[data-testid="admin-authorization-dialog"]')).toBeNull()
       expect(document.activeElement).toBe(opener)
     })
+
+    it('keeps the legacy dialog free of read-again and close controls', async () => {
+      await mountDialog(true)
+      expect(host?.querySelector('[data-testid="admin-authorization-read-again"]')).toBeNull()
+      expect(host?.querySelector('[data-testid="admin-authorization-close"]')).toBeNull()
+      expect(host?.querySelector('[data-testid="admin-authorization-server-impact"]')).toBeNull()
+    })
+
+    it('blocks Escape and cancel while a submission is pending and keeps confirm disabled', async () => {
+      opener = document.createElement('button')
+      document.body.appendChild(opener)
+      host = document.createElement('div')
+      document.body.appendChild(host)
+      let cancelled = false
+      const app = createApp(AdminAuthorizationConfirmDialog, {
+        draft: draft(true),
+        phrase: '',
+        busy: false,
+        phase: 'pending',
+        allowReadAgain: true,
+        onCancel: () => {
+          cancelled = true
+        },
+        onConfirm: () => undefined,
+        'onUpdate:phrase': () => undefined,
+      })
+      app.mount(host)
+      try {
+        await flush()
+        const confirm = host.querySelector('[data-testid="admin-authorization-confirm"]') as HTMLButtonElement
+        const cancel = host.querySelector('[data-testid="admin-authorization-cancel"]') as HTMLButtonElement
+        const readAgain = host.querySelector('[data-testid="admin-authorization-read-again"]') as HTMLButtonElement
+        expect(confirm.disabled).toBe(true)
+        expect(cancel.disabled).toBe(true)
+        expect(readAgain.disabled).toBe(false)
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+        expect(cancelled).toBe(false)
+        expect(host.querySelector('[data-testid="admin-authorization-dialog"]')).toBeTruthy()
+      } finally {
+        app.unmount()
+      }
+    })
+
+    it('focuses Close after completion and keeps Tab inside the panel', async () => {
+      opener = document.createElement('button')
+      document.body.appendChild(opener)
+      opener.focus()
+      host = document.createElement('div')
+      document.body.appendChild(host)
+      const app = createApp(AdminAuthorizationConfirmDialog, {
+        draft: draft(true),
+        phrase: '',
+        busy: false,
+        phase: 'committed',
+        outcomeText: '角色已分配，准入未开',
+        allowReadAgain: true,
+        onCancel: () => undefined,
+        onConfirm: () => undefined,
+        'onUpdate:phrase': () => undefined,
+      })
+      app.mount(host)
+      try {
+        await flush()
+        const close = host.querySelector('[data-testid="admin-authorization-close"]') as HTMLButtonElement
+        const confirm = host.querySelector('[data-testid="admin-authorization-confirm"]') as HTMLButtonElement
+        expect(confirm.disabled).toBe(true)
+        expect(document.activeElement).toBe(close)
+        expect(host.querySelector('[data-testid="admin-authorization-outcome"]')?.textContent).toContain('角色已分配，准入未开')
+        close.focus()
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }))
+        expect(host.querySelector('[data-testid="admin-authorization-dialog"]')?.contains(document.activeElement)).toBe(true)
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+        expect(host.querySelector('[data-testid="admin-authorization-dialog"]')).toBeTruthy()
+      } finally {
+        app.unmount()
+      }
+    })
+  })
+
+  it('describes a server impact without turning derived rows into explicit opens', () => {
+    const summary = describeServerAuthorizationImpact({
+      sourceChanges: [{ roleId: 'crm_admin' }],
+      admissionChanges: [
+        { namespace: 'crm', enabled: true },
+        { namespace: 'attendance', enabled: false, derived: true },
+      ],
+      scopeCleanup: [{ namespace: 'legacy' }],
+      effectiveBefore: [],
+      effectiveAfter: [{ code: 'crm:read', sources: [{ kind: 'role', id: 'finance_admin' }] }],
+      retainedOtherGrants: ['admin'],
+      warnings: [],
+    })
+    expect(summary?.roleSources).toEqual(['finance_admin', 'crm_admin'])
+    expect(summary?.explicitAdmissions).toEqual(['开通 crm'])
+    expect(summary?.derivedAdmissions).toEqual(['关闭 attendance'])
+    expect(summary?.scopeCleanupCount).toBe(1)
+    expect(summary?.retainedSources).toEqual(['admin'])
+  })
+
+  it('builds a disable-admission draft that only closes the named plugin', () => {
+    const draft = buildAdmissionDisableAuthorization({
+      userId: 'user-1',
+      userName: 'Alpha',
+      namespace: 'crm',
+      roleIds: ['crm_admin'],
+      catalogPermissionsByRoleId: { crm_admin: ['crm:read'] },
+      dropdownRoleId: 'crm_admin',
+    })
+    expect(draft.kind).toBe('disable-admission')
+    expect(draft.admissionChanges).toEqual([{ namespace: 'crm', effect: 'disable' }])
+    expect(draft.notes.join('\n')).toContain('只关闭「crm」的插件使用。')
+    expect(draft.notes.join('\n')).toContain('不分配角色，也不写入直接权限。')
+    expect(draft.requiresTypedPhrase).toBeNull()
   })
 })

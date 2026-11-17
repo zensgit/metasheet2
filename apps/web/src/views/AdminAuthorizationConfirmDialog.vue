@@ -32,7 +32,15 @@
           平台管理员拥有平台管理权限。权限码列表即使为空，也不表示没有管理权限。
         </p>
       </div>
-      <div data-testid="admin-authorization-admissions">
+      <div v-if="serverImpact" data-testid="admin-authorization-server-impact">
+        <strong>服务器预览</strong>
+        <p data-testid="admin-authorization-role-sources">角色来源：{{ joined(serverImpact.roleSources) }}</p>
+        <p data-testid="admin-authorization-explicit-admissions">显式准入：{{ joined(serverImpact.explicitAdmissions) }}</p>
+        <p data-testid="admin-authorization-derived-admissions">派生准入：{{ joined(serverImpact.derivedAdmissions) }}</p>
+        <p data-testid="admin-authorization-scope-cleanup">范围清理：{{ serverImpact.scopeCleanupCount }}</p>
+        <p data-testid="admin-authorization-retained-sources">其他仍保留来源：{{ joined(serverImpact.retainedSources) }}</p>
+      </div>
+      <div v-else data-testid="admin-authorization-admissions">
         <strong>准入变化</strong>
         <p v-if="!draft.admissionKnown" data-testid="admin-authorization-admissions-unknown">
           目前看不出这次会不会改变插件使用。
@@ -47,13 +55,14 @@
       <ul class="admin-authorization__notes">
         <li v-for="note in draft.notes" :key="note">{{ note }}</li>
       </ul>
+      <p v-if="outcomeText" data-testid="admin-authorization-outcome">{{ outcomeText }}</p>
       <label v-if="draft.requiresTypedPhrase" class="admin-authorization__phrase">
         <span>请输入「{{ draft.requiresTypedPhrase }}」以确认</span>
         <input
           data-testid="admin-authorization-phrase"
           type="text"
           :value="phrase"
-          :disabled="busy"
+          :disabled="phraseLocked"
           @input="onPhraseInput"
         />
       </label>
@@ -68,10 +77,31 @@
           确认执行
         </button>
         <button
+          v-if="showReadAgain"
+          class="admin-authorization__cancel"
+          type="button"
+          data-testid="admin-authorization-read-again"
+          :disabled="!allowReadAgain"
+          @click="emit('readAgain')"
+        >
+          重新读取
+        </button>
+        <button
+          v-if="showClose"
+          ref="closeButton"
+          class="admin-authorization__cancel"
+          type="button"
+          data-testid="admin-authorization-close"
+          :disabled="closeDisabled"
+          @click="emit('close')"
+        >
+          关闭
+        </button>
+        <button
           class="admin-authorization__cancel"
           type="button"
           data-testid="admin-authorization-cancel"
-          :disabled="busy"
+          :disabled="cancelDisabled"
           @click="emit('cancel')"
         >
           取消
@@ -82,32 +112,102 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, onUpdated, ref, watch } from 'vue'
+import type { AdminAuthorizationOperationPhase } from '../composables/useAdminAuthorizationOperation'
 import {
   describeAdmissionChange,
+  describeServerAuthorizationImpact,
   type AdminAuthorizationDraft,
+  type ReadableAuthorizationImpact,
 } from './AdminAuthorizationConfirm'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   draft: AdminAuthorizationDraft
   phrase: string
   busy: boolean
-}>()
+  phase?: AdminAuthorizationOperationPhase | null
+  impact?: ReadableAuthorizationImpact | null
+  outcomeText?: string
+  allowReadAgain?: boolean
+}>(), {
+  phase: null,
+  impact: null,
+  outcomeText: '',
+  allowReadAgain: true,
+})
 
 const emit = defineEmits<{
   confirm: []
   cancel: []
+  close: []
+  readAgain: []
   'update:phrase': [value: string]
 }>()
 
 const dialogRoot = ref<HTMLElement | null>(null)
+const closeButton = ref<HTMLButtonElement | null>(null)
 let restoreFocus: HTMLElement | null = null
 
+const lockedPhases = new Set<AdminAuthorizationOperationPhase>([
+  'committing',
+  'pending',
+  'committed',
+  'verified',
+  'unverified_no_read',
+])
+
+const terminalPhases = new Set<AdminAuthorizationOperationPhase>(['forbidden', 'validation_failed'])
+
+const completed = computed(() => (
+  props.phase === 'committed' || props.phase === 'verified' || props.phase === 'unverified_no_read'
+))
+
+const serverImpact = computed(() => (
+  props.phase == null ? null : describeServerAuthorizationImpact(props.impact)
+))
+
 const confirmDisabled = computed(() => {
-  if (props.busy) return true
+  if (props.phase == null) {
+    if (props.busy) return true
+    if (!props.draft.requiresTypedPhrase) return false
+    return props.phrase !== props.draft.requiresTypedPhrase
+  }
+  if (props.busy || props.phase !== 'awaiting_confirmation') return true
   if (!props.draft.requiresTypedPhrase) return false
   return props.phrase !== props.draft.requiresTypedPhrase
 })
+
+const cancelDisabled = computed(() => {
+  if (props.phase == null) return props.busy
+  if (props.busy) return true
+  return lockedPhases.has(props.phase) || terminalPhases.has(props.phase) || completed.value
+})
+
+const phraseLocked = computed(() => {
+  if (props.busy) return true
+  return props.phase != null && props.phase !== 'awaiting_confirmation'
+})
+
+const showReadAgain = computed(() => (
+  props.phase === 'pending' || props.phase === 'unverified_no_read' || props.phase === 'committed'
+))
+
+const showClose = computed(() => {
+  if (props.phase == null) return false
+  return lockedPhases.has(props.phase) || terminalPhases.has(props.phase)
+})
+
+const closeDisabled = computed(() => props.phase === 'committing' || props.busy)
+
+const escapeLocked = computed(() => {
+  if (props.phase == null) return props.busy
+  if (props.busy) return true
+  return lockedPhases.has(props.phase) || terminalPhases.has(props.phase)
+})
+
+function joined(values: readonly string[]): string {
+  return values.length > 0 ? values.join('、') : '无'
+}
 
 function onPhraseInput(event: Event): void {
   const target = event.target
@@ -126,7 +226,12 @@ function focusableElements(): HTMLElement[] {
 
 function onDialogKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape') {
-    if (props.busy) return
+    if (escapeLocked.value) {
+      event.preventDefault()
+      event.stopPropagation()
+      return
+    }
+    if (props.phase == null && props.busy) return
     event.preventDefault()
     event.stopPropagation()
     emit('cancel')
@@ -155,11 +260,35 @@ function onDialogKeydown(event: KeyboardEvent): void {
   }
 }
 
+function focusCloseNow(): void {
+  if (!completed.value || closeDisabled.value) return
+  const button = closeButton.value
+  if (!button || document.activeElement === button) return
+  const active = document.activeElement
+  const root = dialogRoot.value
+  const inside = Boolean(root && active && root.contains(active))
+  const disabledControl = active instanceof HTMLButtonElement && active.disabled
+  // A later render can drop the focused control. Focus then lands on the dialog root.
+  if (active === root || !inside || disabledControl) button.focus()
+}
+
+watch(() => [props.phase, props.outcomeText, props.busy] as const, () => {
+  focusCloseNow()
+}, { flush: 'post' })
+
 onMounted(() => {
   const active = document.activeElement
   restoreFocus = active instanceof HTMLElement ? active : null
   document.addEventListener('keydown', onDialogKeydown)
+  if (completed.value) {
+    focusCloseNow()
+    return
+  }
   dialogRoot.value?.focus()
+})
+
+onUpdated(() => {
+  focusCloseNow()
 })
 
 onUnmounted(() => {
