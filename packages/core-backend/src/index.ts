@@ -603,10 +603,10 @@ export function resolveRecoveryArchiveMainPoolRuntime(): RecoveryArchiveApplicat
   })
 }
 
-// Y9 (D5 a, C2, UNWRITTEN): the owner runtime reports a post-ACK write-back run that failed, that finished with a
-// retryable row (YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED), or that finished with a terminal non-write outcome
-// (YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN plus outcome=count pairs), as fixed values-free text. Written outside the request,
-// log and trace contexts the detached run inherited (the owner HTTP observation surface would rewrite the text).
+// Y9 (D5 a, C2, UNWRITTEN, D3-1): the owner runtime reports a post-ACK write-back run that failed, that finished with a
+// retryable row (YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED), with a terminal non-write outcome (YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN
+// plus outcome=count pairs) or with a written_inactive row (YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE count=<n>), as fixed
+// values-free text, written outside the request, log and trace contexts the detached run inherited (the HTTP surface would rewrite it).
 let yidaOwnerRuntimeLogger: Logger | undefined
 function yidaOwnerRuntimeWarn(code: string): void {
   const write = () => (yidaOwnerRuntimeLogger ??= new Logger('YidaOwnerRuntime')).warn(code)

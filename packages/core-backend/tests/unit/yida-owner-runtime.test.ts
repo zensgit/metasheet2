@@ -314,6 +314,8 @@ async function writebackWrittenInactiveSignal(source = originalSource) {
   const other = (n: number) => `synthetic-ledger-${n}`
   for (const [name, results, expected] of [
     ['written_inactive', [inactive()], [`${WRITTEN_INACTIVE} count=1`]],
+    // The count ignores recorded (R-96 ③): the date was patched in THIS run even when another run's trace won the row.
+    ['written_inactive recorded false (another run traced first)', [{ ...inactive(), recorded: false }], [`${WRITTEN_INACTIVE} count=1`]],
     ['written', [{ ledgerId, kind: 'outcome', outcome: 'written', recorded: true, ...ISSUE_DAY }], []],
     ['skip project_sheets_disabled (D14)', [{ ledgerId, kind: 'skip', reason: 'project_sheets_disabled' }], []],
     ['row_absent is UNWRITTEN, never WRITTEN_INACTIVE', [{ ledgerId, kind: 'outcome', outcome: 'row_absent', recorded: true }], [`${UNWRITTEN} row_absent=1`]],
