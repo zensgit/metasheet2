@@ -16,6 +16,8 @@ import { revokeLegacyUserPermission } from '../admin/legacy-permission-revoke'
 import { getPermissionTemplate, listPermissionTemplates } from '../auth/permission-templates'
 import { userHasPermission, listUserPermissions, inspectUserPermissionGrants, isAdmin, invalidateUserPerms } from '../rbac/service'
 import { isDatabaseSchemaError } from '../utils/database-errors'
+import { businessCheck } from '../rbac/business-check'
+import { readOnlyAuthorizationJwtAuth } from '../auth/jwt-middleware'
 
 const logger = new Logger('PermissionsRouter')
 
@@ -90,7 +92,7 @@ export function permissionsRouter(): Router {
     }
   })
 
-  // Check permission
+  // RBAC service preflight; this does not represent a business route guard.
   r.post('/api/permissions/check', authenticate, async (req: Request, res: Response) => {
     try {
       const { permission, userId: targetUserId } = req.body
@@ -131,6 +133,9 @@ export function permissionsRouter(): Router {
       res.status(500).json({ error: 'Failed to check permission' })
     }
   })
+
+  // Business guard snapshot; resource and target adapters may report unknown.
+  r.post('/api/permissions/v2/business-check', readOnlyAuthorizationJwtAuth, businessCheck)
 
   // Grant permission (admin only)
   r.post('/api/permissions/grant', authenticate, async (req: Request, res: Response) => {
