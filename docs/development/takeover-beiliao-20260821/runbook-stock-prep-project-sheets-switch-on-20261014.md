@@ -552,7 +552,7 @@ $line = (Select-String -LiteralPath $envFile -Pattern '^\s*STOCK_PREP_SANDBOX_TA
 @($line.Substring($line.IndexOf('=') + 1).Trim().Trim('"').Trim("'").Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -eq '<旧表 objectId>' }).Count
 ```
 
-④ 现算的字段 id 在这张表上都存在（模板 35 列 + 客户包的 `ext_` 列。2026-11-06 修订：R-71 ⑦.4 PR-4 在模板末尾加了 `issueConfirmDate`、`projectSpecModel` 两列，此前为 33 列；两列的升级顺序见附录 C；任何一列对不上，dry-run 会被字段存在探针挡下，`stock-preparation-table-actions.cjs:807`，调用 `:2432`、`:3268`）：
+④ 现算的字段 id 在这张表上都存在（模板 35 列 + 客户包的 `ext_` 列。2026-11-06 修订：R-71 ⑦.4 PR-4 在模板末尾加了 `issueConfirmDate`、`projectSpecModel` 两列，此前为 33 列；两列的升级顺序见附录 C；任何一列对不上，dry-run 会被字段存在探针挡下，`stock-preparation-table-actions.cjs:822`，调用 `:2463`、`:3319`）：
 
 ```
 WITH o AS (
