@@ -7577,8 +7577,8 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
         //   S8-04a (C03 / A12, M2) the controlled update: a person's note between the confirm and the write re-keys nothing;
         //         only the plan's fields + RUN change, the note and the keys untouched, the revisions name exactly those
         //         fields; the plan written by a bound execution.
-        //   S8-04b (A12 / F15, human) a person's cell committed by another session INSIDE the host's patch (SHARE lock on
-        //         meta_records, pg_blocking_pids): one conflict, one retry, the person's value kept.
+        //   S8-04b (A12 / F15, human) a person's cell committed by another session INSIDE the host's patch (a table lock on
+        //         meta_records — EXCLUSIVE since platform 1b, see insideHostWrite — pg_blocking_pids): one conflict, one retry, the person's value kept.
         //   S8-04c (machine) a plugin-owned cell the same way: 409 CHANGE_PLAN_STALE machine_columns_moved. RE-PINNED by
         //         step 6a-1 (S6-1, R-91; T6-4) — the stop wrote and attempted nothing (0 / 0), so the execution SELF-VERIFIES
         //         (verified_closed / nothing_landed / self_verified, a settlement subject) and the plan STAYS confirmed: the
@@ -7779,13 +7779,18 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
               },
             })
           }
-          // Freeze every meta_records INSERT / UPDATE behind a SHARE lock held by clientX (reads still pass), run `write`,
+          // Freeze every meta_records INSERT / UPDATE and every locking read (SELECT ... FOR UPDATE) behind an EXCLUSIVE
+          // table lock held by clientX (plain reads still pass), run `write`,
           // wait until the host backend waits on clientX (pg_locks + pg_blocking_pids), run `inside` on clientX, COMMIT.
+          // Platform 1b (owner ruling 2026-11-17): the host patchRecord now reads its row FOR UPDATE (ROW SHARE on the
+          // table). A SHARE table lock admitted that read but not the UPDATE, so the host held the row while `inside`
+          // wrote it — a deadlock the harness itself built. EXCLUSIVE stops the host at its first locking statement
+          // instead (the UPDATE before 1b, the locked read after it), so `inside` still commits before the host sees the row.
           async function insideHostWrite(write: () => Promise<any>, inside: (client: PoolClient) => Promise<void>) {
             const pidX = Number((await clientX.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
             await clientX.query('BEGIN')
             try {
-              await clientX.query('LOCK TABLE meta_records IN SHARE MODE')
+              await clientX.query('LOCK TABLE meta_records IN EXCLUSIVE MODE')
               let finished = false
               const running = settle(write()).then((outcome) => { finished = true; return outcome })
               let hostPid = 0

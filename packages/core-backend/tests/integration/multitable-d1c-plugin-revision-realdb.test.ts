@@ -33,6 +33,13 @@
  * (never a sleep heuristic — per this line's TOCTOU doctrine: sequential reasoning about a race proves
  * nothing, only a constructed race does).
  *
+ * PLATFORM 1b (owner ruling 「批平台 1b」, 2026-11-17): `patchRecord` now reads the row `FOR UPDATE` in
+ * the same transaction as its UPDATE, so the row lock is held from the read. The race goldens below wait
+ * on any blocked `meta_records` statement (the locked read now, the UPDATE before 1b); their outcomes are
+ * unchanged, and the zero-row branch above stays as a defensive backstop. The LOST-WRITE goldens pin
+ * what 1b adds: a key another writer commits while the patch is in flight is kept, not overwritten by a
+ * stale JavaScript merge.
+ *
  * OUT OF SCOPE for this slice (do not read anything below as covering these):
  *   - A3/A4 automation update/create (`automation-executor.ts`) — slice ③, a SEPARATE PR.
  *   - A7 approval `resultWriteback` — slice ④, a SEPARATE PR, `source='approval'`.
@@ -219,8 +226,9 @@ async function dropTrigger(name: string, table: string): Promise<void> {
 
 /**
  * Block until a backend is GENUINELY waiting on the `meta_records` row lock held by THIS test's holder
- * connection — the deterministic proof (never a sleep heuristic) that `patchRecord`'s UPDATE is truly
- * parked behind the holder's uncommitted DELETE, not merely "probably done by now". Correlated to the
+ * connection — the deterministic proof (never a sleep heuristic) that `patchRecord` (its `FOR UPDATE`
+ * read since platform 1b, its UPDATE before) is truly parked behind the holder's uncommitted write, not
+ * merely "probably done by now". Correlated to the
  * holder's OWN backend pid via `pg_blocking_pids(pid)` — the same technique as
  * `multitable-d2-sidedoor-delete-recoverability-realdb.test.ts`'s `waitUntilBlockedOnRecordLock` and
  * `approval-card-delivery-wrapper.db.test.ts`'s `waitUntilBlockedOnInstanceLock` — so an unrelated
@@ -247,7 +255,7 @@ async function waitUntilBlockedOnRecordLock(
     await new Promise((resolve) => setTimeout(resolve, 25))
   }
   throw new Error(
-    `patchRecord's UPDATE never blocked on the meta_records row lock HELD BY THIS TEST (pid ${blockerPid}) — interleaving did not occur`,
+    `patchRecord never blocked on the meta_records row lock HELD BY THIS TEST (pid ${blockerPid}) — interleaving did not occur`,
   )
 }
 
@@ -545,7 +553,7 @@ describeIfDatabase('D-1c slice ② — plugin-SDK createRecord/patchRecord write
       expect(await revisionsOf(ghost)).toHaveLength(0)
     })
 
-    test('CAS golden: a concurrent version bump between inspect and UPDATE rejects with a typed values-free conflict and writes no revision', async () => {
+    test('CAS golden: a concurrent version bump that commits while patchRecord is blocked on the row lock rejects with a typed values-free conflict and writes no revision', async () => {
       const created = await sdk.createRecord({ sheetId: SHEET_RACE, data: { [FLD_RACE_TITLE]: 'cas-v1' } })
       const rawPool = poolManager.get().getInternalPool()
       const holder = await rawPool.connect()
@@ -571,7 +579,7 @@ describeIfDatabase('D-1c slice ② — plugin-SDK createRecord/patchRecord write
           },
         )
 
-        await waitUntilBlockedOnRecordLock(holderPid, '%UPDATE meta_records%')
+        await waitUntilBlockedOnRecordLock(holderPid, '%meta_records%')
         await holder.query('COMMIT')
         await patchPromise
       } finally {
@@ -593,16 +601,15 @@ describeIfDatabase('D-1c slice ② — plugin-SDK createRecord/patchRecord write
     // ── THE P1 FIX GOLDEN ────────────────────────────────────────────────────────────────────────────
     // GENUINE two-connection lock race (never a sleep heuristic): Connection A (this test's "holder")
     // opens its own dedicated raw client, BEGINs, and DELETEs the record — an uncommitted, row-locking
-    // delete. Connection B is the REAL `sdk.patchRecord(...)` call: its plain `getRecord`/
-    // `guardRecordNotLockedForPlugin` reads succeed immediately (readers never block on an uncommitted
-    // writer under MVCC), but its `UPDATE` — the FIRST point in `patchRecord` that actually needs the row
-    // lock — blocks behind the holder's uncommitted DELETE. Only once `waitUntilBlockedOnRecordLock`
-    // deterministically confirms B is genuinely parked behind A's lock does A COMMIT. B's UPDATE then
-    // resumes under READ COMMITTED semantics, discovers the row was concurrently deleted, and affects
-    // ZERO rows — exactly the condition the P1 fix guards. Before the fix, the masked
-    // `?? existing.version + 1` fallback would have silently synthesized a version and gone on to write a
-    // spurious `update` revision for a now-nonexistent record.
-    test('CONCURRENT-DELETE golden (P1 fix): a DELETE that commits WHILE patchRecord is blocked on the row lock produces a zero-row UPDATE — the fix throws NotFound and writes NO spurious revision', async () => {
+    // delete. Connection B is the REAL `sdk.patchRecord(...)` call. Since platform 1b its row read is
+    // `SELECT ... FOR UPDATE` (before 1b it was a plain SELECT and the UPDATE was the first lock), so B
+    // blocks at that read behind the holder's uncommitted DELETE. Only once `waitUntilBlockedOnRecordLock`
+    // deterministically confirms B is genuinely parked behind A's lock does A COMMIT. B's locked read then
+    // resumes under READ COMMITTED semantics, finds the row gone and throws NotFound before any UPDATE or
+    // revision. The zero-row UPDATE branch (the P1 fix) stays as a defensive backstop. The outcome this
+    // golden pins is unchanged: NotFound and no spurious `update` revision for a now-nonexistent record
+    // (the masked `?? existing.version + 1` fallback would have written one).
+    test('CONCURRENT-DELETE golden (P1 fix): a DELETE that commits WHILE patchRecord is blocked on the row lock throws NotFound and writes NO spurious revision', async () => {
       const created = await sdk.createRecord({ sheetId: SHEET_RACE, data: { [FLD_RACE_TITLE]: 'race-v1' } })
       expect(created.version).toBe(1)
 
@@ -629,7 +636,7 @@ describeIfDatabase('D-1c slice ② — plugin-SDK createRecord/patchRecord write
           )
 
         // Barrier: block until B is deterministically confirmed parked behind A's lock on THIS record.
-        await waitUntilBlockedOnRecordLock(holderPid, '%UPDATE meta_records%')
+        await waitUntilBlockedOnRecordLock(holderPid, '%meta_records%')
 
         // A commits ⇒ the row is truly gone ⇒ B's UPDATE unblocks and sees ZERO matching rows.
         await holder.query('COMMIT')
@@ -659,6 +666,82 @@ describeIfDatabase('D-1c slice ② — plugin-SDK createRecord/patchRecord write
       // proxy), so there is no live row left to compare a "did it change" assertion against.
       expect(await recordRow(created.id)).toBeUndefined()
     }, 15000)
+
+    // ── PLATFORM 1b — LOST-WRITE golden (scenario A) ───────────────────────────────────────────────────
+    // Owner ruling 「批平台 1b」 (2026-11-17). A concurrent writer commits a key (NOTES) between the plugin
+    // patch's row read and its UPDATE. Before 1b the read was a plain SELECT: it saw the pre-commit row,
+    // the merge `{...existing.data, ...patch}` happened in JavaScript, and the whole-object UPDATE (blocked
+    // behind the holder, then resumed) wrote that stale merge back — NOTES was silently lost. With 1b the
+    // read takes `FOR UPDATE`, so the patch waits at the read, sees the committed NOTES, and keeps it.
+    // The barrier matches any `meta_records` statement blocked behind THIS holder (`pg_blocking_pids`):
+    // the UPDATE before the fix, the locked SELECT after it. Run with the canonical writer fence OFF
+    // (production default) and ON.
+    for (const fenceOn of [false, true]) {
+      test(`LOST-WRITE golden (platform 1b, fence ${fenceOn ? 'on' : 'off'}): a key committed by a concurrent writer while an unversioned plugin patch is in flight is kept`, async () => {
+        const priorFence = process.env.MULTITABLE_ENABLE_WRITER_FENCE
+        if (fenceOn) process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+        else delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+        try {
+          const created = await sdk.createRecord({ sheetId: SHEET_MAIN, data: { [FLD_TITLE]: 'lost-write-v1' } })
+          expect(created.version).toBe(1)
+
+          const rawPool = poolManager.get().getInternalPool()
+          const holder = await rawPool.connect()
+          let patched: { version: number; data: Record<string, unknown> } | undefined
+          let patchRejection: unknown
+          try {
+            await holder.query('BEGIN')
+            await holder.query(
+              `UPDATE meta_records SET data = data || $1::jsonb, version = version + 1
+                WHERE id = $2 AND sheet_id = $3`,
+              [JSON.stringify({ [FLD_NOTES]: 'concurrent-B' }), created.id, SHEET_MAIN],
+            )
+            const holderPid = Number((await holder.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+
+            const patchPromise = sdk
+              .patchRecord({
+                sheetId: SHEET_MAIN,
+                recordId: created.id,
+                changes: { [FLD_TITLE]: 'plugin-A' },
+              })
+              .then(
+                (result) => {
+                  patched = result
+                  return undefined
+                },
+                (error: unknown) => {
+                  patchRejection = error
+                  return undefined
+                },
+              )
+
+            await waitUntilBlockedOnRecordLock(holderPid, '%meta_records%')
+            await holder.query('COMMIT')
+            await patchPromise
+          } finally {
+            await holder.query('ROLLBACK').catch(() => {})
+            holder.release()
+          }
+
+          expect(patchRejection).toBeUndefined()
+          // THE discriminating assertion: the concurrent writer's NOTES survives the plugin patch.
+          expect(await recordRow(created.id)).toMatchObject({
+            version: 3,
+            data: { [FLD_TITLE]: 'plugin-A', [FLD_NOTES]: 'concurrent-B' },
+          })
+          expect(patched).toMatchObject({
+            version: 3,
+            data: { [FLD_TITLE]: 'plugin-A', [FLD_NOTES]: 'concurrent-B' },
+          })
+          const updateRev = (await revisionsOf(created.id)).find((r) => r.action === 'update')!
+          expect(updateRev).toMatchObject({ source: 'plugin', version: 3, changed_field_ids: [FLD_TITLE] })
+          expect(updateRev.snapshot).toMatchObject({ [FLD_TITLE]: 'plugin-A', [FLD_NOTES]: 'concurrent-B' })
+        } finally {
+          if (priorFence === undefined) delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+          else process.env.MULTITABLE_ENABLE_WRITER_FENCE = priorFence
+        }
+      }, 15000)
+    }
   })
 
   // ── Docket #51 — create-path auto-number snapshot pin ─────────────────────────────────────────────────
