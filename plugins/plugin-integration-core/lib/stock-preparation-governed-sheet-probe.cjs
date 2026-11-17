@@ -50,8 +50,9 @@
 // configured OBJECT KEY and booleans — never a sheet id, a project number, a tenant or a hold value.
 //
 // Hermetic: no env flag, no write, no host records IO — plugin-SQL reads only (per probe: one registry SELECT by
-// sheet and four COUNTs; two registry SELECTs when the binding is read as well). It does NOT require the continuation store module (the stores are injected), so the generic writers that
-// require this file do not pull the planner into their load graph.
+// sheet and four COUNTs; two registry SELECTs when the binding is read as well). It does NOT require the
+// continuation store module (the stores are injected), so the generic writers that require this file do not pull the
+// planner into their load graph.
 // ---------------------------------------------------------------------------------------------------
 
 const { isStockPreparationNamespaceObjectId } = require('./stock-preparation-own-base.cjs')
