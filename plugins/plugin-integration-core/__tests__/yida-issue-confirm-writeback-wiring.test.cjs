@@ -330,6 +330,27 @@ test('capability: enabled() is the core exact-literal predicate; create() binds 
   assert.deepEqual(result, { enabled: false, results: [] })
 })
 
+test('Plan A full form: the capability is built, and create() builds its executor, with a sheet write lock that has no bumpGeneration', async () => {
+  const { createIssueConfirmWritebackCapability } = await portsPromise
+  // R-96 Plan A: the write-back never bumps the generation, so the ports neither require nor hand on bumpGeneration and
+  // the core does not require it. The executor is built per run in create(): both halves must accept a lease-only lock.
+  const leaseOnly = { scopeKeyFor: writeLockModule.sheetWriteScopeKey, async withProjectWriteLease() { throw new Error('NO') } }
+  const db = memoryDb({})
+  const capability = createIssueConfirmWritebackCapability({ db, security: { async encrypt() {}, async decrypt() {} },
+    projectTargetStore: { async get() { return null } }, projectWriteLock: leaseOnly, multitable: () => null, env: { ...ON } })
+  const bound = capability.create({ context: { tenantId: TENANT, ownerId: OWNER }, recheck: async () => true })
+  assert.deepEqual(Object.keys(bound), ['run'])
+  // The executor answers (a cursor it cannot accept is refused before any read) — it was built.
+  assert.deepEqual(await bound.run({ after: 'not-a-cursor' }), { enabled: true, results: [], refused: 'AFTER' })
+  assert.deepEqual(db.calls, [])
+  // The lease itself stays required.
+  for (const lock of [{ scopeKeyFor: leaseOnly.scopeKeyFor }, { withProjectWriteLease: leaseOnly.withProjectWriteLease }]) {
+    assert.throws(() => createIssueConfirmWritebackCapability({ db, security: { async encrypt() {}, async decrypt() {} },
+      projectTargetStore: { async get() { return null } }, projectWriteLock: lock, multitable: () => null, env: { ...ON } }),
+    (error) => error.code === 'YIDA_ISSUE_CONFIRM_UNAVAILABLE')
+  }
+})
+
 test('import closure: the write-back ports reach no runner, form transport, token client or token exchange (a write-back can never cause a form submission)', () => {
   const forbidden = ['yida-delivery-runner', 'yida-form-transport', 'yida-token-client', 'yida-token-exchange', 'yida-owner-send-port']
   const seen = new Set()

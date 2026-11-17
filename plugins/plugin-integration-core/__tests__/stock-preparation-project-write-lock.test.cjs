@@ -532,13 +532,13 @@ test('L11 constants and vocabularies are pinned', () => {
   // 批次标识 BI-2 (R-65): the per-sheet pull-batch install holds the lease (purpose) and bumps after its release (reason).
   // Batch-refresh step 6a-2 (R-91): the recovery verify-and-close holds the lease (purpose) and bumps after a close (reason).
   // Batch-refresh step 6d-2a (R-91): the doubled-sheet repair holds the lease (purpose) and bumps after its release (reason).
-  // YiDa issue-confirm write-back (slice Y9a): holds the lease around its one patch and bumps after it.
+  // YiDa issue-confirm write-back (slice Y9a): holds the lease around its one patch (purpose only; R-96 Plan A, no bump).
   assert.deepEqual(PROJECT_WRITE_PURPOSES, ['small_apply', 'large_apply_chunk', 'carry_confirm', 'pilot_enable', 'pull_batch_install', 'recovery_verify', 'sheet_repair', 'issue_confirm_writeback'])
   // Batch-refresh step 4 PR-4: the continuation confirm / re-confirm and end bump INSIDE their transaction
   // (bumpGenerationWithin) — reasons only, never a purpose (a decision never holds the lease).
   // Batch-refresh step 5 PR-8: the change-plan confirm bumps INSIDE its transaction the same way (a reason, never a purpose).
   // 批次标识 BI-2 (R-65): the install's post-release bump.
-  assert.deepEqual(PROJECT_WRITE_GENERATION_REASONS, ['small_preview', 'large_approval', 'carry_confirm', 'pilot_enable', 'continuation_confirm', 'continuation_end', 'change_plan_confirm', 'pull_batch_install', 'recovery_closed', 'sheet_repair', 'issue_confirm_writeback'])
+  assert.deepEqual(PROJECT_WRITE_GENERATION_REASONS, ['small_preview', 'large_approval', 'carry_confirm', 'pilot_enable', 'continuation_confirm', 'continuation_end', 'change_plan_confirm', 'pull_batch_install', 'recovery_closed', 'sheet_repair'])
   assert.deepEqual(PROJECT_WRITE_ERROR_CODES, {
     WRITE_LOCKED: 'STOCK_PREP_PROJECT_WRITE_LOCKED',
     PLAN_SUPERSEDED: 'STOCK_PREP_PROJECT_PLAN_SUPERSEDED',

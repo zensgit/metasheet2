@@ -50,9 +50,13 @@
 //   this ledger row exists by now → skip `already_traced`: no patch, no trace) → ONE version-conditional,
 //   host-fenced patch of `issueConfirmDate` only (written); equal → already_set; any other value →
 //   kept_existing (D8: the first confirmation wins, never overwritten) → the trace INSERT … ON CONFLICT
-//   (ledger_id) DO NOTHING, STILL UNDER THE LEASE → release → generation bump (reason
-//   issue_confirm_writeback, best effort, only after a write). An outcome decided before the lease
+//   (ledger_id) DO NOTHING, STILL UNDER THE LEASE → release. An outcome decided before the lease
 //   (source_unbound, payload_unmapped, project_absent, project_archived, sheet_mismatch) is traced without one.
+//   NO GENERATION BUMP (register R-96, Plan A): the lease is the guard. A row that finds the sheet's lease
+//   held is refused STOCK_PREP_PROJECT_WRITE_LOCKED: contention, nothing written, no trace, decided again by
+//   a later run. A token minted before the write is already refused without a bump (small lane: the
+//   existing-row revision; expansions and the export gate: the acquire epoch), and a bump would orphan an
+//   approved large job (PLAN_SUPERSEDED).
 //
 // THE SWEEP (owner recovery entry, batch mode = no ledgerIds). One batch run is ONE PAGE of a sweep: start
 // without `after`, then pass each answer's `next` back as `after` until `next` is null. Page order is fixed:
@@ -106,9 +110,9 @@ const ISSUE_CONFIRM_TRACE_TABLE = 'integration_yida_issue_confirm_writeback'
 const ISSUE_CONFIRM_DATE_FIELD_ID = 'issueConfirmDate'
 const ISSUE_CONFIRM_KEY_FIELD_ID = 'idempotencyKey'
 const ISSUE_CONFIRM_PROJECT_FIELD_ID = 'projectNo'
-// The sheet write lease purpose and the post-write generation reason (stock-preparation-project-write-lock.cjs).
+// The sheet write lease purpose (stock-preparation-project-write-lock.cjs). No generation reason: the
+// write-back never bumps the generation (register R-96, Plan A).
 const ISSUE_CONFIRM_WRITEBACK_LOCK_PURPOSE = 'issue_confirm_writeback'
-const ISSUE_CONFIRM_WRITEBACK_GENERATION_REASON = 'issue_confirm_writeback'
 const ISSUE_CONFIRM_WRITEBACK_MAX_BATCH = 100
 // The sweep cursor (see encodeIssueConfirmSweepCursor): its fixed version, its text bound, and the two closed refusals a
 // run answers for an `after` it cannot accept: AFTER (malformed, tampered, or an unlisted target — the host maps it to
@@ -551,12 +555,13 @@ function requireFunction(holder, name, label) {
  *   sheets.open({ tenantId, project }) → a records api bound to that one sheet:
  *       { queryRecords({ filters, limit, offset }), patchRecord({ recordId, changes, expectedVersion, writeFence }) }
  *   authority.recheck({ tenantId, ownerId, sheetId, objectId }) → true | false (live, under the lease)
- *   writeLock — createStockPreparationProjectWriteLock(): scopeKeyFor, withProjectWriteLease, bumpGeneration
+ *   writeLock — createStockPreparationProjectWriteLock(): scopeKeyFor, withProjectWriteLease (never a
+ *       generation bump: register R-96, Plan A)
  *   traceStore — createIssueConfirmTraceStore({ db }): record(row) → { recorded }, traced(ledgerId) → true | false
- *   env (default process.env), runId (default crypto.randomUUID), logger (optional, values-free)
+ *   env (default process.env), runId (default crypto.randomUUID)
  */
 function createIssueConfirmWritebackExecutor(deps = {}) {
-  const { ledgerReader, rowSource, projectRegistry, sheets, authority, writeLock, traceStore, logger } = deps
+  const { ledgerReader, rowSource, projectRegistry, sheets, authority, writeLock, traceStore } = deps
   const env = deps.env || process.env
   const runId = typeof deps.runId === 'function' ? deps.runId : () => crypto.randomUUID()
   requireFunction(ledgerReader, 'list', 'ledgerReader')
@@ -567,24 +572,8 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
   requireFunction(authority, 'recheck', 'authority')
   requireFunction(writeLock, 'scopeKeyFor', 'writeLock')
   requireFunction(writeLock, 'withProjectWriteLease', 'writeLock')
-  requireFunction(writeLock, 'bumpGeneration', 'writeLock')
   requireFunction(traceStore, 'record', 'traceStore')
   requireFunction(traceStore, 'traced', 'traceStore')
-
-  async function bumpAfterWrite(scopeKey, tenantId) {
-    try {
-      await writeLock.bumpGeneration(scopeKey, { reason: ISSUE_CONFIRM_WRITEBACK_GENERATION_REASON, tenantId })
-      return true
-    } catch (error) {
-      // The write already landed; a refused bump never masks it (the carry-confirm precedent).
-      if (logger && typeof logger.warn === 'function') {
-        logger.warn('[plugin-integration-core] yida issue-confirm write-back: generation bump after release was refused', {
-          code: retryableCode(error),
-        })
-      }
-      return false
-    }
-  }
 
   // The trace row of one terminal decision. Any failure (the row's own validation or the INSERT) is TraceWriteFailed,
   // which the run rethrows: fail closed.
@@ -619,59 +608,52 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
 
     const project = facts.project
     const scopeKey = writeLock.scopeKeyFor(project.sheetId)
-    let wrote = false
-    try {
-      return await writeLock.withProjectWriteLease(scopeKey, {
-        purpose: ISSUE_CONFIRM_WRITEBACK_LOCK_PURPOSE,
-        runId: runId(),
-        tenantId: scope.tenantId,
-      }, async (guard) => {
-        const allowed = await authority.recheck({
-          tenantId: scope.tenantId, ownerId: scope.ownerId, sheetId: project.sheetId, objectId: project.objectId,
-        })
-        if (allowed !== true && allowed !== false) fail('YIDA_ISSUE_CONFIRM_AUTHORITY_UNAVAILABLE', 'authority re-check did not answer')
-        facts.authority = allowed
-        let inner = decideIssueConfirmWriteback(facts)
-        // Every outcome decided under the lease is traced before the lease is released.
-        if (inner.kind === 'record') return writeTrace(ledger, inner, timeZone)
-        if (inner.kind !== 'need') return inner
-        const records = await sheets.open({ tenantId: scope.tenantId, project })
-        const rows = await records.queryRecords({ filters: { [ISSUE_CONFIRM_KEY_FIELD_ID]: inner.idempotencyKey }, limit: 2, offset: 0 })
-        facts.records = rows
-        inner = decideIssueConfirmWriteback(facts)
-        if (inner.kind === 'record') return writeTrace(ledger, inner, timeZone)
-        if (inner.kind !== 'patch') return inner
-        // The switch is read once more right before the only write (a switch turned off mid-run stops here).
-        if (!issueConfirmWritebackEnabled(env)) throw SWITCH_OFF
-        // D14 once more as well: the project-sheets switch turned off mid-row → skip and count, no patch.
-        if (!issueConfirmProjectSheetsEnabled(env)) return { kind: 'skip', reason: 'project_sheets_disabled' }
-        // THE TRACE RE-CHECK, right before the only write: a run that read this row as untraced before another run
-        // traced it (and leased after that run released) finds the trace here and patches nothing.
-        const already = await traceStore.traced(ledger.id)
-        if (already !== true && already !== false) fail('YIDA_ISSUE_CONFIRM_UNAVAILABLE', 'trace re-check did not answer')
-        if (already) return { kind: 'skip', reason: 'already_traced' }
-        await guard.beforeWrite({ operation: 'patchRecord', subject: 'issue_confirm_writeback' })
-        try {
-          await guard.withHostWrite(() => records.patchRecord({
-            recordId: inner.recordId,
-            changes: inner.changes,
-            expectedVersion: inner.expectedVersion,
-            writeFence: guard.hostWriteFence(),
-          }))
-        } catch (error) {
-          if (error && typeof error.code === 'string' && error.code.startsWith('PLUGIN_WRITE_FENCE_')) {
-            throw await guard.hostFenceRefused(error)
-          }
-          throw error
-        }
-        wrote = true
-        // The trace of the write, before the lease is released (a failure here still fails the run closed).
-        return writeTrace(ledger, { outcome: 'written', sheetId: inner.sheetId, date: inner.date }, timeZone)
+    return writeLock.withProjectWriteLease(scopeKey, {
+      purpose: ISSUE_CONFIRM_WRITEBACK_LOCK_PURPOSE,
+      runId: runId(),
+      tenantId: scope.tenantId,
+    }, async (guard) => {
+      const allowed = await authority.recheck({
+        tenantId: scope.tenantId, ownerId: scope.ownerId, sheetId: project.sheetId, objectId: project.objectId,
       })
-    } finally {
-      // The write landed: the generation moves after release even when the trace or the release then failed.
-      if (wrote) await bumpAfterWrite(scopeKey, scope.tenantId)
-    }
+      if (allowed !== true && allowed !== false) fail('YIDA_ISSUE_CONFIRM_AUTHORITY_UNAVAILABLE', 'authority re-check did not answer')
+      facts.authority = allowed
+      let inner = decideIssueConfirmWriteback(facts)
+      // Every outcome decided under the lease is traced before the lease is released.
+      if (inner.kind === 'record') return writeTrace(ledger, inner, timeZone)
+      if (inner.kind !== 'need') return inner
+      const records = await sheets.open({ tenantId: scope.tenantId, project })
+      const rows = await records.queryRecords({ filters: { [ISSUE_CONFIRM_KEY_FIELD_ID]: inner.idempotencyKey }, limit: 2, offset: 0 })
+      facts.records = rows
+      inner = decideIssueConfirmWriteback(facts)
+      if (inner.kind === 'record') return writeTrace(ledger, inner, timeZone)
+      if (inner.kind !== 'patch') return inner
+      // The switch is read once more right before the only write (a switch turned off mid-run stops here).
+      if (!issueConfirmWritebackEnabled(env)) throw SWITCH_OFF
+      // D14 once more as well: the project-sheets switch turned off mid-row → skip and count, no patch.
+      if (!issueConfirmProjectSheetsEnabled(env)) return { kind: 'skip', reason: 'project_sheets_disabled' }
+      // THE TRACE RE-CHECK, right before the only write: a run that read this row as untraced before another run
+      // traced it (and leased after that run released) finds the trace here and patches nothing.
+      const already = await traceStore.traced(ledger.id)
+      if (already !== true && already !== false) fail('YIDA_ISSUE_CONFIRM_UNAVAILABLE', 'trace re-check did not answer')
+      if (already) return { kind: 'skip', reason: 'already_traced' }
+      await guard.beforeWrite({ operation: 'patchRecord', subject: 'issue_confirm_writeback' })
+      try {
+        await guard.withHostWrite(() => records.patchRecord({
+          recordId: inner.recordId,
+          changes: inner.changes,
+          expectedVersion: inner.expectedVersion,
+          writeFence: guard.hostWriteFence(),
+        }))
+      } catch (error) {
+        if (error && typeof error.code === 'string' && error.code.startsWith('PLUGIN_WRITE_FENCE_')) {
+          throw await guard.hostFenceRefused(error)
+        }
+        throw error
+      }
+      // The trace of the write, before the lease is released (a failure here still fails the run closed).
+      return writeTrace(ledger, { outcome: 'written', sheetId: inner.sheetId, date: inner.date }, timeZone)
+    })
   }
 
   async function run(input = {}) {
@@ -802,7 +784,6 @@ module.exports = {
   ISSUE_CONFIRM_TARGET_REFS_ENV,
   ISSUE_CONFIRM_TRACE_TABLE,
   ISSUE_CONFIRM_WRITEBACK_ENABLED_ENV,
-  ISSUE_CONFIRM_WRITEBACK_GENERATION_REASON,
   ISSUE_CONFIRM_WRITEBACK_LOCK_PURPOSE,
   ISSUE_CONFIRM_WRITEBACK_MAX_BATCH,
   ISSUE_CONFIRM_WRITEBACK_OUTCOMES,

@@ -87,7 +87,7 @@ function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
   const calls = { ledgerList: 0, rowRead: 0, registry: 0, open: 0, query: 0, patch: [], beforeWrite: [], authority: 0, acquire: [], bump: [], trace: 0 }
   const world = { calls, env, authorityAllowed, formPosts: 0, tokenRequests: 0 }
   // The order of the module's steps around the lease (Y9 r3): acquire, authority, query, traceProbe, beforeWrite, patch,
-  // traceInsert (with whether the lease was held), release, bump.
+  // traceInsert (with whether the lease was held), release; `bump` only if a generation bump ever ran (R-96 Plan A: never).
   world.events = []
   // One-shot port failures: rowRead, registry, open, query, authority.
   world.failures = { rowRead: null, registry: null, open: null, query: null, authority: null }
@@ -337,11 +337,11 @@ test('the outcome vocabulary is exactly the twelve baseline values', () => {
   assert.equal(writeback.ISSUE_CONFIRM_WRITEBACK_MAX_BATCH, 100)
 })
 
-test('the lease purpose and the generation reason are in the write lock vocabularies', () => {
+test('the lease purpose is in the write lock vocabulary; there is no generation reason (Plan A, no bump)', () => {
   assert.equal(writeback.ISSUE_CONFIRM_WRITEBACK_LOCK_PURPOSE, 'issue_confirm_writeback')
-  assert.equal(writeback.ISSUE_CONFIRM_WRITEBACK_GENERATION_REASON, 'issue_confirm_writeback')
   assert.ok(writeLockModule.PROJECT_WRITE_PURPOSES.includes(writeback.ISSUE_CONFIRM_WRITEBACK_LOCK_PURPOSE))
-  assert.ok(writeLockModule.PROJECT_WRITE_GENERATION_REASONS.includes(writeback.ISSUE_CONFIRM_WRITEBACK_GENERATION_REASON))
+  assert.equal(Object.hasOwn(writeback, 'ISSUE_CONFIRM_WRITEBACK_GENERATION_REASON'), false)
+  assert.equal(writeLockModule.PROJECT_WRITE_GENERATION_REASONS.includes('issue_confirm_writeback'), false)
 })
 
 test('the module never reaches a runner, a form transport, a token client or a ledger writer (import scan)', () => {
@@ -537,7 +537,7 @@ test('switch turned off after the records read and before the patch: no patch, n
 
 // ── the decision table, through the executor ─────────────────────────────────────────────────────
 
-test('written: one version-conditional, fenced patch of issueConfirmDate only, under the lease, then a bump and one trace row', async () => {
+test('written: one version-conditional, fenced patch of issueConfirmDate only, under the lease, no generation bump and one trace row', async () => {
   const { world, row } = sentWorld()
   const before = world.snapshot()
   const result = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
@@ -552,11 +552,13 @@ test('written: one version-conditional, fenced patch of issueConfirmDate only, u
   // The lease's pre-write holder check runs exactly once, before the only patch.
   assert.deepEqual(world.calls.beforeWrite, [{ operation: 'patchRecord', subject: 'issue_confirm_writeback', patchesBefore: 0 }])
   assert.deepEqual(world.calls.acquire, [{ scopeKey: writeLockModule.sheetWriteScopeKey(SHEET), purpose: 'issue_confirm_writeback', runId: 'run-syn', tenantId: TENANT }])
-  assert.deepEqual(world.calls.bump, [{ scopeKey: writeLockModule.sheetWriteScopeKey(SHEET), reason: 'issue_confirm_writeback', tenantId: TENANT }])
+  // R-96 Plan A: the lease is the guard; the write-back never bumps the generation (the fake lock still
+  // records bumpGeneration, so a bump would show here).
+  assert.deepEqual(world.calls.bump, [])
   assert.deepEqual(world.trace, [{ ledger_id: row.id, tenant_id: TENANT, owner_id: OWNER, target_ref: TARGET, sheet_id: SHEET, outcome: 'written', written_date: ACK_DAY, time_zone: 'Asia/Shanghai' }])
   // Y9 r3 (the trace race): the trace is read again under the lease right before the patch, and the trace INSERT runs
-  // while the lease is still held, before its release; the generation bump follows the release.
-  assert.deepEqual(world.events, ['acquire', 'authority', 'query', 'traceProbe', 'beforeWrite', 'patch', ['traceInsert', true], 'release', 'bump'])
+  // while the lease is still held, before its release; nothing follows the release (no generation bump).
+  assert.deepEqual(world.events, ['acquire', 'authority', 'query', 'traceProbe', 'beforeWrite', 'patch', ['traceInsert', true], 'release'])
   assert.deepEqual(world.snapshot(), before, 'ledger and audits untouched')
   // Values-free: no project number, key or human value in the result or the trace.
   for (const text of [JSON.stringify(result), JSON.stringify(world.trace)]) {
@@ -962,6 +964,17 @@ test('input bounds: tenant and owner required, limit and ledgerIds bounded to 10
   assert.throws(() => createIssueConfirmWritebackExecutor({ ...deps, traceStore: { async record() { return { recorded: true } } } }), { code: 'YIDA_ISSUE_CONFIRM_UNAVAILABLE' })
 })
 
+test('Plan A full form: the executor is built, and writes, with a write lock that has no bumpGeneration', async () => {
+  const { world } = sentWorld()
+  const deps = world.deps()
+  const { bumpGeneration, ...leaseOnly } = deps.writeLock
+  assert.equal(typeof bumpGeneration, 'function')
+  const result = await createIssueConfirmWritebackExecutor({ ...deps, writeLock: leaseOnly }).run({ tenantId: TENANT, ownerId: OWNER })
+  assert.deepEqual(result.results.map((entry) => [entry.kind, entry.outcome]), [['outcome', 'written']])
+  assert.equal(world.calls.patch.length, 1)
+  assert.deepEqual(world.calls.bump, [])
+})
+
 test('the pure decision asks for facts in order and never patches before the authority and records are known', () => {
   const facts = { ledger: ACKED, targetRefs: [TARGET], timeZone: 'Asia/Shanghai' }
   assert.deepEqual(decideIssueConfirmWriteback(facts), { kind: 'need', need: 'rowValues' })
@@ -1072,8 +1085,8 @@ test('date committed, confirmation lost: a retry neither changes the date nor wr
     assert.equal(world.cell(), ACK_DAY)
     assert.equal(world.version(), 4)
     assert.equal(world.calls.patch.length, 1)
-    // The write landed: the generation moved after release although the run failed on its trace.
-    assert.equal(world.calls.bump.length, 1)
+    // R-96 Plan A: no generation bump, also when the run failed on its trace after the write landed.
+    assert.deepEqual(world.calls.bump, [])
     assert.deepEqual(world.snapshot(), before)
     assert.equal(world.formPosts, 1)
   }
@@ -1147,7 +1160,7 @@ test('the trace race: B read the row before A traced it; A decides it; B leases 
       assert.equal(world.calls.patch.length, patchesOfA, `${label}: B never patches`)
       assert.deepEqual(b.results, [{ ledgerId: row.id, kind: 'skip', reason: 'already_traced' }], label)
       assert.deepEqual(world.trace.map((entry) => entry.outcome), [outcome], label)
-      assert.equal(world.calls.bump.length, patchesOfA, label)
+      assert.deepEqual(world.calls.bump, [], label)
       assert.equal(world.leases.size, 0, label)
       for (const record of world.sheets.get(SHEET)) assert.equal(record.data.issueConfirmDate, null, label)
     }

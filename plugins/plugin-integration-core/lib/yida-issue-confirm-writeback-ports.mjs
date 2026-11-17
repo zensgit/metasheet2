@@ -238,19 +238,21 @@ export function createIssueConfirmSheets({ multitable }) {
  * the host's live re-check to a fresh executor; `enabled()` is the core's exact-literal switch predicate.
  */
 export function createIssueConfirmWritebackCapability(options = {}) {
-  const { db, security, projectTargetStore, projectWriteLock, multitable, logger } = options
+  const { db, security, projectTargetStore, projectWriteLock, multitable } = options
   const env = options.env || process.env
   const ledgerReader = createIssueConfirmLedgerReader({ db })
   const rowSource = createIssueConfirmRowSource({ db, security })
   const projectRegistry = createIssueConfirmProjectRegistry({ projectTargetStore })
   const sheets = createIssueConfirmSheets({ multitable })
   const traceStore = createIssueConfirmTraceStore({ db })
-  if (!plainFunction(projectWriteLock, 'withProjectWriteLease') || !plainFunction(projectWriteLock, 'bumpGeneration')
-    || !plainFunction(projectWriteLock, 'scopeKeyFor')) throw unavailable('the sheet write lock is required')
+  // The lease only (register R-96, Plan A): the write-back never bumps the generation, so bumpGeneration is neither
+  // required nor handed on (the executor is built per run, below: a lock without it must build).
+  if (!plainFunction(projectWriteLock, 'withProjectWriteLease') || !plainFunction(projectWriteLock, 'scopeKeyFor')) {
+    throw unavailable('the sheet write lock is required')
+  }
   const writeLock = Object.freeze({
     scopeKeyFor: (sheetId) => projectWriteLock.scopeKeyFor(sheetId),
     withProjectWriteLease: (scopeKey, lease, fn) => projectWriteLock.withProjectWriteLease(scopeKey, lease, fn),
-    bumpGeneration: (scopeKey, bump) => projectWriteLock.bumpGeneration(scopeKey, bump),
   })
   function enabled() { return issueConfirmWritebackEnabled(env) }
   function create(input) {
@@ -260,7 +262,7 @@ export function createIssueConfirmWritebackCapability(options = {}) {
     const ownerId = opaque(context && context.ownerId)
     if (!tenantId || !ownerId || typeof recheck !== 'function' || types.isProxy(recheck)) throw unavailable('create needs { context, recheck }')
     const executor = createIssueConfirmWritebackExecutor({
-      env, logger, ledgerReader, rowSource, projectRegistry, sheets, writeLock, traceStore,
+      env, ledgerReader, rowSource, projectRegistry, sheets, writeLock, traceStore,
       // The host's live re-check (owner live integration admin, role-granted stock-prep code, sheet read) — the
       // executor calls it under the sheet write lease, right before the records read and the patch.
       authority: Object.freeze({ recheck: (scope) => recheck(Object.freeze({ ...scope })) }),
