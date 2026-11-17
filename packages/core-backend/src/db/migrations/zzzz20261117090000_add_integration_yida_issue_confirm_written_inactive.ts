@@ -21,7 +21,8 @@ import {
  * statement, so up() is replayable and the table never runs without either check. The table stays append-only.
  *
  * down() REFUSES while a `written_inactive` row exists (append-only evidence: the narrower checks could not be added
- * back over it); with none it restores the baseline checks exactly as zzzz20261106093100 wrote them.
+ * back over it); with none it restores the baseline checks exactly as zzzz20261106093100 wrote them. Static statements
+ * only, never a dynamic EXECUTE, so the authorization-input migration judge can read every one of them.
  */
 
 export const YIDA_ISSUE_CONFIRM_WRITTEN_INACTIVE_OUTCOME = 'written_inactive'
@@ -54,7 +55,7 @@ BEGIN
     IF EXISTS (SELECT 1 FROM integration_yida_issue_confirm_writeback WHERE outcome = '${YIDA_ISSUE_CONFIRM_WRITTEN_INACTIVE_OUTCOME}') THEN
       RAISE EXCEPTION '${YIDA_ISSUE_CONFIRM_WRITTEN_INACTIVE_DOWN_REFUSED_CODE}' USING ERRCODE = '55000';
     END IF;
-    EXECUTE $yida_issue_confirm_written_inactive_checks$${checksSql(BASELINE_OUTCOMES, BASELINE_DATED_OUTCOMES)}$yida_issue_confirm_written_inactive_checks$;
+    ${checksSql(BASELINE_OUTCOMES, BASELINE_DATED_OUTCOMES).trim()}
   END IF;
 END;
 $yida_issue_confirm_written_inactive_down$;

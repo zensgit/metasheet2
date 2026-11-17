@@ -350,7 +350,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
   const WRITTEN_INACTIVE = 'YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE'
   // The run report every enabled answer of the recovery entry carries (D3-1): all four counts, zeros too.
   const EMPTY_REPORT = Object.freeze({ counts: { written_inactive: 0, row_absent: 0, duplicate_key: 0, kept_existing: 0 }, writtenInactive: [] })
-  let writtenInactiveDown = ''
+  let writtenInactiveDown = '', writtenInactiveUp = ''
   async function warned(count = 1) {
     const deadline = Date.now() + 4000
     while (world!.warnings.length < count) {
@@ -396,6 +396,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
       // Owner ruling D3-1: the outcome CHECK widened to written_inactive, exactly as that migration's up() executes.
       + '\n' + await migrationSql('zzzz20261117090000_add_integration_yida_issue_confirm_written_inactive', 'YIDA_ISSUE_CONFIRM_WRITTEN_INACTIVE_UP_SQL')
     writtenInactiveDown = await migrationSql('zzzz20261117090000_add_integration_yida_issue_confirm_written_inactive', 'YIDA_ISSUE_CONFIRM_WRITTEN_INACTIVE_DOWN_SQL')
+    writtenInactiveUp = await migrationSql('zzzz20261117090000_add_integration_yida_issue_confirm_written_inactive', 'YIDA_ISSUE_CONFIRM_WRITTEN_INACTIVE_UP_SQL')
     savedEnv = envKeys.map(key => [key, process.env[key]])
     process.env.NODE_ENV = 'production'
     process.env.ENCRYPTION_KEY = randomBytes(32).toString('hex')
@@ -869,6 +870,16 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     if (active) {
       await new Promise(resolve => setTimeout(resolve, 50))
       expect(world!.warnings).toEqual([])
+      // With no written_inactive trace the migration's down() restores the baseline outcome check, and up() widens it again
+      // (replayed twice), on this private schema's trace table.
+      const outcomeCheck = async () => String((await owner.query(`SELECT pg_get_constraintdef(c.oid) AS def FROM pg_constraint c
+        WHERE c.conrelid = '${ident(schema)}.${ident(TRACE)}'::regclass AND c.conname = 'integration_yida_issue_confirm_writeback_outcome_check'`)).rows[0].def)
+      expect(await outcomeCheck()).toContain("'written_inactive'")
+      await owner.query(writtenInactiveDown)
+      expect(await outcomeCheck()).not.toContain('written_inactive')
+      await owner.query(writtenInactiveUp)
+      await owner.query(writtenInactiveUp)
+      expect(await outcomeCheck()).toContain("'written_inactive'")
     } else {
       await warned()
       // Exactly one line: the fixed code and the count; no ledger id, record id, project number, key or value.
