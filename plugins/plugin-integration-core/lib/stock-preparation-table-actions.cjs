@@ -1898,8 +1898,9 @@ const STOCK_PREPARATION_MVP_SYNC_PARITY_MISMATCH_CODE = 'STOCK_PREPARATION_MVP_S
 // `ext_` column outside the action's declared extension band (the only `ext_` columns a sync writes:
 // `assertExtFieldMappingAgreesWithAction` refuses a mapping that writes an undeclared one).
 // It also loses the machine write-back column(s) (MACHINE_WRITEBACK_FIELD_IDS, today `issueConfirmDate`): the
-// sync never writes them (the planner and the apply writer refuse to), their one writer is the YiDa
-// issue-confirm write-back (lib/yida-issue-confirm-writeback.cjs), and that date is not batch content — left
+// sync never writes them (the planner and the apply writer refuse to), their only originating writer is the
+// YiDa issue-confirm write-back (lib/yida-issue-confirm-writeback.cjs; the carry confirm only copies an existing
+// value onto the re-keyed successor row), and that date is not batch content — left
 // in, one write-back moved the run id and, under the default rule, minted a second batch of identical lines.
 // The key is dropped whenever present: a row never written back has no such key (no sync or host write
 // path creates it), so absent, null, '' and a date all hash alike and no kept batch is re-keyed.
