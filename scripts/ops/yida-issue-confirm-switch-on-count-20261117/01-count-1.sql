@@ -30,7 +30,9 @@
 --        bindRow (keys sorted, JSON.stringify escaping; PostgreSQL to_json
 --        escapes text the same way, and a key value holds no control character).
 --        The trace stores no record id (migration zzzz20261106093100), so this
---        digest is the only per-row link SQL can recompute;
+--        digest is the only per-row link SQL can recompute; and a cell whose
+--        key is held by more than one record on its sheet is never explained
+--        (one trace cannot tell which of them it wrote);
 --   NOR (ii) a carry from a predecessor row whose cell is explained by (i).
 --        NOT JOINABLE: no table records which predecessor a carry copied from.
 --        Lines below are in plugins/plugin-integration-core/lib at final main
@@ -147,22 +149,31 @@ fid AS (
          'fld_' || left(encode(digest(convert_to(reg.staging_project || ':' || reg.object_id || ':idempotencyKey', 'UTF8'), 'sha1'), 'hex'), 24) AS f_key
     FROM reg
 ),
--- count1-nonempty:begin (D8: absent, JSON null and '' are empty; every other value is not)
-cells AS (
-  SELECT f.tenant_id, f.project_no, f.sheet_id, m.id AS record_id,
-         m.data -> f.f_date AS date_cell,
-         m.data -> f.f_key AS key_cell
+-- Every record of every registered sheet, with the number of records on that sheet holding the same key cell. The
+-- trace stores no record id, so one trace can only vouch for a key held by exactly ONE record (a copied row, e.g. a
+-- right-click duplicate, carries the key and the date too; the write-back itself answers duplicate_key there).
+recs AS (
+  SELECT f.tenant_id, f.project_no, f.sheet_id, f.f_date, f.f_key, m.id AS record_id, m.data,
+         count(*) OVER (PARTITION BY f.sheet_id, m.data -> f.f_key) AS key_holders
     FROM fid f
     JOIN meta_records m ON m.sheet_id = f.sheet_id
-   WHERE m.data ? f.f_date
-     AND jsonb_typeof(m.data -> f.f_date) <> 'null'
-     AND (m.data -> f.f_date) <> '""'::jsonb
+),
+-- count1-nonempty:begin (D8: absent, JSON null and '' are empty; every other value is not)
+cells AS (
+  SELECT r.tenant_id, r.project_no, r.sheet_id, r.record_id, r.key_holders,
+         r.data -> r.f_date AS date_cell,
+         r.data -> r.f_key AS key_cell
+    FROM recs r
+   WHERE r.data ? r.f_date
+     AND jsonb_typeof(r.data -> r.f_date) <> 'null'
+     AND (r.data -> r.f_date) <> '""'::jsonb
 ),
 -- count1-nonempty:end
 judged AS (
   SELECT c.*,
          -- count1-dated-trace:begin
-         EXISTS (
+         c.key_holders = 1
+         AND EXISTS (
            SELECT 1
              FROM integration_yida_issue_confirm_writeback t
              JOIN integration_yida_delivery_ledger l ON l.id = t.ledger_id AND l.tenant_id = t.tenant_id
