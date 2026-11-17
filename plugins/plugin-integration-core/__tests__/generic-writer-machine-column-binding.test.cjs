@@ -7,13 +7,14 @@
 // raw physical id, still erased the write-back's date (refuter finding 1). Round 2 reads the set from THE SHEET: the
 // registry row's binding (lib/generic-writer-machine-columns.cjs), accepted only when the pair provably names the sheet.
 //
-//   B-01..B-08  F0: the strip set comes from the sheet's binding (aliases, raw physical ids, namespace keys without a
+//   B-01..B-09  F0: the strip set comes from the sheet's binding (aliases, raw physical ids, namespace keys without a
 //               projectId, a registry row of another tenant), the binding is the one table-actions and the write-back
-//               bind through, and a registered sheet whose machine columns cannot be resolved is refused before IO.
+//               bind through, a registered sheet whose machine columns cannot be resolved is refused before IO, a
+//               machine column as the lookup key is refused, and the probe's additive binding read (B-09).
 //   K-01..K-04  F1: creates on a stock-prep target never carry a machine column (pipeline upsert, C6 insertRows, ERP).
 //   R-01..R-04  F2: ERP feedback re-reads by key and re-sends the stripped patch with the fresh version (3 attempts).
-//   D-01..D-03  F3: the C6 value diff ignores the machine columns on a stock-prep target (no churn), and a machine-only
-//               update is not reported as written.
+//   D-01..D-04  F3: the C6 value diff ignores the machine columns on a stock-prep target (no churn), a machine-only
+//               update is not reported as written, and test() on any other target makes no new call (D-04).
 //   U-01        F5: an unreadable version is its own, NOT retryable code.
 // Every test drives the PUBLIC factories only (adapter, write-source, feedback writers, the C6 planner), so each one
 // fails on its own against a lib without the fix. Values-free: every id below is synthetic.
@@ -468,6 +469,22 @@ test('D-02 REGRESSION C6 on a NON-stock-prep target: a difference in the machine
   const world = createRecords({ rows: [seededRow()] })
   const plan = await c6.dryRunExternalWrite(c6Input({ system: aliasSystem(), records: world.records, probe: probeOf(NOT_REGISTERED), sourceRows: [{ k: 'idem-1', m: 'M-OLD', d: '2026-12-31' }] }))
   assert.deepEqual({ update: plan.counts.update, skip: plan.counts.skip }, { update: 1, skip: 0 })
+})
+
+test('D-04 REGRESSION C6 test() on a NON-stock-prep target makes no provisioning call (its call trace is unchanged); on a registered sheet it resolves the binding there', async () => {
+  const withProject = systemWith('main', { fieldIdMap: { idempotencyKey: PHYS.idempotencyKey, material: PHYS.material } }, { projectId: PROJECT_ID })
+  const plain = hostProvisioning()
+  const world = createRecords({ rows: [seededRow()] })
+  const source = createMetaSheetMultitableWriteSource({ system: withProject, context: contextOf(world.records, plain), governedSheetProbe: probeOf(NOT_REGISTERED) })
+  const out = await source.test()
+  assert.equal(out.success, true)
+  assert.deepEqual(plain.calls, [], 'no provisioning call for a non-target object')
+  const registered = hostProvisioning()
+  const regProbe = probeOf()
+  const regSource = createMetaSheetMultitableWriteSource({ system: withProject, context: contextOf(world.records, registered), governedSheetProbe: regProbe })
+  await regSource.test()
+  assert.ok(regProbe.calls.some(([name]) => name === 'registryBindingBySheet'), 'the registered sheet resolves its binding in test()')
+  assert.deepEqual(world.calls, [], 'test() makes no records IO')
 })
 
 test('D-03 C6 apply: an update the write-source skips as machine-only is counted SKIP with writePerformed:false, never written', async () => {

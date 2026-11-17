@@ -889,7 +889,10 @@ function createMetaSheetMultitableWriteSource({ system, context, governedSheetPr
           await assertSheetNotGoverned({ governance, objectConfig, cache: caches.governedSheet, surface: 'c6_target_test' })
           // D2 round 2: a stock-prep object resolves its machine columns HERE, so an unresolvable registered sheet is
           // refused as one typed error before any row, and the planner can leave them out of its value diff (F3).
-          await machineKeys.forObject(objectConfig, await fieldMapForObject(objectConfig), objectConfig.keyFields)
+          // Every other object makes no call here at all (its test() call trace is byte-identical to before).
+          if (isStockPreparationMachineColumnTarget(objectConfig, caches.governedSheet)) {
+            await machineKeys.forObject(objectConfig, await fieldMapForObject(objectConfig), objectConfig.keyFields)
+          }
         }
       }
       return {

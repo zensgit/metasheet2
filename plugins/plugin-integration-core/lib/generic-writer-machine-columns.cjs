@@ -11,18 +11,23 @@
 // SHEET, never from the writer's own config (round 2, refuter finding 1: a config without a projectId, or one that
 // names the column by another logical name, used to slip past a config-derived set).
 //
-// THE SHEET'S BINDING. A registered sheet is one the project-sheet route provisioned: `provisionProjectSheet` under the
-// tenant's staging project `${tenantId}:integration-core` (lib/http-routes.cjs:12129 `targetProjectId`, :1854-1857) and
-// the derived project objectId, then `store.create({ tenantId, sheetId, objectId })` from that same result
-// (http-routes.cjs:12249-12262). The registry never names any other sheet (stock-preparation-project-target-store.cjs
-// header, "NO `origin` COLUMN (Q3)"). The host derives the sheet id AND every field id of that sheet from the one pair
-// (packages/core-backend/src/multitable/provisioning.ts:215-225 getObjectSheetId / getObjectFieldId; ensureObject
-// :1107-1133; the additive repair ensureMissingObjectFields :925-934). The two readers of a registered sheet bind
-// through that pair too: table-actions' project overlay (stock-preparation-project-targets.cjs:171-188
-// buildProjectTargetBinding, applied by stock-preparation-table-actions.cjs createStockPreparationTableActionRegistry)
-// and the write-back's sheet port (createTargetScopedRecordsApi -> resolveTargetFieldIds with
-// `${tenantId}:integration-core`). An explicit operator `target.fieldIdMap` (assertTargetFieldMapCompleteness) belongs
-// to the env deployment target, which is never registered.
+// THE SHEET'S BINDING (line numbers at ba385e10a; these files are unchanged at 6d2681703). A registry row is inserted
+// only by the store's `create` (stock-preparation-project-target-store.cjs:426-431, the only writer of `sheet_id` /
+// `object_id`), and its only production caller is the project-sheet route (lib/http-routes.cjs:12259). That route
+// provisions under the tenant's staging project `${tenantId}:integration-core` (:12129 `targetProjectId`, :1854-1857)
+// and the derived project objectId (provisionProjectSheet -> ensureStockPreparationCanonicalTarget -> ensureObject with
+// the template's objectId as the descriptor id, stock-preparation-target-provisioning.cjs:873-877), then registers that
+// same result (:12249-12262). The registry never names any other sheet (the store's header, "NO `origin` COLUMN
+// (Q3)"). The host derives the sheet id AND every field id of that sheet from the one pair
+// (packages/core-backend/src/multitable/provisioning.ts:215-225 getObjectSheetId / getObjectFieldId; findObjectSheet
+// :417-423; ensureObject :1107-1133; the additive repair ensureMissingObjectFields :925-934). The two readers of a
+// registered sheet bind through that pair too: table-actions' project overlay (stock-preparation-project-targets.cjs
+// :171-188 buildProjectTargetBinding, applied by stock-preparation-table-actions.cjs
+// createStockPreparationTableActionRegistry) and the write-back's sheet port (branch
+// feat/yida-issue-confirm-writeback-wiring-20261106, yida-issue-confirm-writeback-ports.mjs createIssueConfirmSheets:
+// createTargetScopedRecordsApi -> resolveTargetFieldIds with `${tenantId}:integration-core`). An explicit operator
+// `target.fieldIdMap` (assertTargetFieldMapCompleteness) belongs to the env deployment target, which is never
+// registered. The sheet check below does not rely on any of this: it accepts a pair only when it derives THIS sheet.
 //
 // So the machine columns' physical ids are `resolveFieldIds({ projectId: <pair>, objectId: <registry objectId> })`,
 // and the pair is ACCEPTED ONLY WHEN IT PROVABLY NAMES THIS SHEET: `getObjectSheetId(pair) === sheetId`. The registry
