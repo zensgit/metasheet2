@@ -568,6 +568,13 @@ function cleanupNamespace(item: unknown): string | null {
   return item.namespace.trim() || null
 }
 
+export const AUTHORIZATION_FOREIGN_RECEIPT_MESSAGE = '这次回执不是成员页的角色或准入变更。当前的角色和准入读取不能确认回执里的来源是否仍在。请回到权限来源与例外查看。'
+
+/** Member live reads only know roles and namespace admissions. */
+export function memberPageCanVerifyAction(action: AdminAuthorizationAction): boolean {
+  return action.kind === 'role.assign' || action.kind === 'role.revoke' || action.kind === 'admission.set'
+}
+
 /** Fail closed. A cleanup item without a namespace is not treated as already clean. */
 export function authorizationLiveReadAgrees(input: {
   action: AdminAuthorizationAction
@@ -575,6 +582,7 @@ export function authorizationLiveReadAgrees(input: {
   admissions: ReadonlyArray<{ namespace: string; enabled: boolean }>
   impact: ReadableAuthorizationImpact
 }): boolean {
+  if (!memberPageCanVerifyAction(input.action)) return false
   if (input.action.kind === 'role.assign' && !input.roles.includes(input.action.roleId)) return false
   if (input.action.kind === 'role.revoke' && input.roles.includes(input.action.roleId)) return false
   const facts = readServerAdmissionFacts(input.impact.admissionChanges)
@@ -613,6 +621,7 @@ export function describeVerifiedAuthorization(input: {
   impact: ReadableAuthorizationImpact
   requestedAdmissionChanges?: ReadonlyArray<{ namespace: string; enabled: boolean }> | null
 }): string {
+  if (!memberPageCanVerifyAction(input.action)) return AUTHORIZATION_FOREIGN_RECEIPT_MESSAGE
   if (input.action.kind === 'role.assign') {
     const changes = explicitAdmissionChanges(input.impact, input.requestedAdmissionChanges)
     if (!changes) return '角色已分配。所勾选的插件准入还不能从回执里核对。这不是全部权限已经生效。'
@@ -624,12 +633,8 @@ export function describeVerifiedAuthorization(input: {
   if (input.action.kind === 'role.revoke') {
     const retained = input.impact.retainedOtherGrants.map(retainedLabel).filter((label): label is string => Boolean(label))
     const uniqueRetained = uniqueStrings(retained)
-    if (input.impact.retainedOtherGrants.length > 0) {
-      return uniqueRetained.length > 0
-        ? `角色已从该成员移除。其他来源仍保留：${uniqueRetained.join('、')}。`
-        : '角色已从该成员移除。其他来源仍保留。'
-    }
-    return '角色已从该成员移除。'
+    if (uniqueRetained.length === 0) return '角色已从该成员移除。'
+    return `角色已从该成员移除。提交时回执记录其他来源：${uniqueRetained.join('、')}。当前的角色和准入读取不能确认这些来源是否仍在。`
   }
   const changes = explicitAdmissionChanges(input.impact, input.requestedAdmissionChanges) ?? []
   const enabled = changes.filter((change) => change.enabled)

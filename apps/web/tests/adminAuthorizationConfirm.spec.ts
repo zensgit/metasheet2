@@ -9,7 +9,10 @@ import {
   buildAdmissionEnableAuthorization,
   buildCreateUserAuthorization,
   buildRoleMembershipAuthorization,
+  AUTHORIZATION_FOREIGN_RECEIPT_MESSAGE,
+  authorizationLiveReadAgrees,
   describeServerAuthorizationImpact,
+  describeVerifiedAuthorization,
   catalogPermissionCodesForRoles,
   readAdmissionNamespaceFact,
   readAdmissionNamespaceList,
@@ -633,5 +636,40 @@ describe('admin authorization confirmation', () => {
     expect(draft.notes.join('\n')).toContain('只关闭「crm」的插件使用。')
     expect(draft.notes.join('\n')).toContain('不分配角色，也不写入直接权限。')
     expect(draft.requiresTypedPhrase).toBeNull()
+  })
+
+  it('rejects direct, legacy, and template receipts before a member live read can pass', () => {
+    const impact = {
+      sourceChanges: [],
+      admissionChanges: [],
+      scopeCleanup: [],
+      effectiveBefore: [],
+      effectiveAfter: [],
+      retainedOtherGrants: [{ code: 'sheet:write', sources: [{ kind: 'direct' as const, id: null }], effective: true }],
+      warnings: [],
+    }
+    const actions = [
+      { kind: 'direct.grant' as const, code: 'sheet:write' },
+      { kind: 'direct.revoke' as const, code: 'sheet:write' },
+      { kind: 'legacy.revoke' as const, code: 'sheet:write' },
+      { kind: 'template.apply' as const, templateId: 'template-1' },
+    ]
+    for (const action of actions) {
+      expect(authorizationLiveReadAgrees({ action, roles: ['admin'], admissions: [], impact })).toBe(false)
+      expect(describeVerifiedAuthorization({ action, impact })).toBe(AUTHORIZATION_FOREIGN_RECEIPT_MESSAGE)
+    }
+    expect(authorizationLiveReadAgrees({
+      action: { kind: 'role.assign', roleId: 'crm_admin' },
+      roles: ['crm_admin'],
+      admissions: [],
+      impact: { ...impact, retainedOtherGrants: [] },
+    })).toBe(true)
+    const revoked = describeVerifiedAuthorization({
+      action: { kind: 'role.revoke', roleId: 'finance_admin' },
+      impact,
+    })
+    expect(revoked).toContain('提交时回执记录其他来源：sheet:write')
+    expect(revoked).toContain('不能确认这些来源是否仍在')
+    expect(revoked).not.toContain('当前仍保留')
   })
 })

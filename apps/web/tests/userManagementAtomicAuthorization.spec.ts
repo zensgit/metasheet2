@@ -31,7 +31,7 @@ let rolesByUser: Record<string, string[]> = {}
 let admissionsByUser: Record<string, AdmissionRow[]> = {}
 let commitMode: 'ok' | 'conflict' | 'last-admin' | 'throw' | 'malformed' | 'hold' = 'ok'
 let previewMode: 'ok' | 'missing' | 'unavailable' = 'ok'
-let lookupMode: 'committed' | 'unknown' = 'unknown'
+let lookupMode: 'committed' | 'unknown' | 'direct' = 'unknown'
 let releaseCommit: (() => void) | null = null
 let applyRoleOnCommit = true
 let retainedGrants: unknown[] = []
@@ -172,6 +172,18 @@ function installApi(): void {
     if (operationMatch && method === 'GET') {
       const clientOperationId = decodeURIComponent(operationMatch[1] ?? '')
       if (lookupMode === 'unknown') return jsonResponse({ status: 'unknown_or_pending', clientOperationId })
+      if (lookupMode === 'direct') {
+        return jsonResponse({
+          status: 'committed',
+          clientOperationId,
+          receipt: {
+            targetUserId: 'user-1',
+            action: { kind: 'direct.grant', code: 'sheet:write' },
+            impact: emptyImpact([]),
+            resultVersion: 'member-version-2',
+          },
+        })
+      }
       return jsonResponse({
         status: 'committed',
         clientOperationId,
@@ -271,7 +283,7 @@ async function mountView(): Promise<{ app: App<Element>; root: HTMLDivElement }>
   const root = document.createElement('div')
   document.body.appendChild(root)
   const app = createApp(UserManagementView)
-  app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
+  app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a :href="typeof to === \'string\' ? to : \'\'"><slot /></a>' })
   app.mount(root)
   await flushUi(20)
   return { app, root }
@@ -378,7 +390,7 @@ describe('member page atomic authorization', () => {
     expect(root!.textContent).toContain('只关闭「crm」的插件使用。')
   })
 
-  it('re-previews once after a version conflict and does not send a second commit', async () => {
+  it('keeps a rejected 409 behind Close until a fresh preview can submit', async () => {
     commitMode = 'conflict'
     ;({ app, root } = await mountView())
     await openUser(root!, 'Alpha')
@@ -387,11 +399,36 @@ describe('member page atomic authorization', () => {
     const confirm = await confirmWhenReady(root!)
     const previewsBefore = previews().length
     confirm.click()
+    confirm.click()
     await waitFor(() => root!.textContent?.includes('角色目录已变化，本次未写入。请刷新角色后再确认。') === true)
-    await waitFor(() => previews().length > previewsBefore)
     expect(commits()).toHaveLength(1)
+    expect(previews()).toHaveLength(previewsBefore)
     expect(oldWrites()).toEqual([])
-    expect(root!.textContent).not.toContain('已分配角色')
+    const confirmAfter = root!.querySelector('[data-testid="admin-authorization-confirm"]') as HTMLButtonElement
+    const close = root!.querySelector('[data-testid="admin-authorization-close"]') as HTMLButtonElement
+    expect(confirmAfter.disabled).toBe(true)
+    expect(close.disabled).toBe(false)
+    confirmAfter.click()
+    await flushUi()
+    expect(commits()).toHaveLength(1)
+    expect(previews()).toHaveLength(previewsBefore)
+    expect((root!.querySelector('[data-testid="assign-role-button"]') as HTMLButtonElement).disabled).toBe(true)
+    close.click()
+    await flushUi()
+    expect(root!.querySelector('[data-testid="admin-authorization-dialog"]')).toBeNull()
+
+    commitMode = 'ok'
+    ;(root!.querySelector('[data-testid="assign-role-button"]') as HTMLButtonElement).click()
+    const again = await confirmWhenReady(root!)
+    again.click()
+    await waitFor(() => root!.textContent?.includes('角色已分配，准入未开') === true)
+    expect(commits()).toHaveLength(2)
+    expect(commits()[0]?.body?.clientOperationId).not.toBe(commits()[1]?.body?.clientOperationId)
+    expect(previews().length).toBeGreaterThan(previewsBefore)
+    const settledConfirm = root!.querySelector('[data-testid="admin-authorization-confirm"]') as HTMLButtonElement
+    expect(settledConfirm.disabled).toBe(true)
+    expect(root!.querySelector('[data-testid="admin-authorization-dialog"]')).toBeTruthy()
+    expect(oldWrites()).toEqual([])
   })
 
   it('keeps a lost commit pending and recovers with GET only', async () => {
@@ -514,12 +551,37 @@ describe('member page atomic authorization', () => {
     await flushUi()
 
     retainedGrants = ['admin']
-    rolesByUser['user-1'] = ['finance_admin', 'admin']
+    rolesByUser['user-1'] = ['finance_admin']
     await chooseRole(root!, 'finance_admin')
     ;(root!.querySelector('[data-testid="unassign-role-button"]') as HTMLButtonElement).click()
     ;(await confirmWhenReady(root!)).click()
-    await waitFor(() => root!.textContent?.includes('其他来源仍保留：admin') === true)
+    await waitFor(() => root!.textContent?.includes('提交时回执记录其他来源：admin') === true)
+    expect(root!.textContent).toContain('当前的角色和准入读取不能确认这些来源是否仍在')
+    expect(root!.textContent).not.toContain('当前仍保留')
+    expect(root!.textContent).not.toContain('其他来源仍保留')
     expect(root!.textContent).not.toContain('访问已撤销')
+    expect(rolesByUser['user-1']).not.toContain('admin')
+    expect(oldWrites()).toEqual([])
+  })
+
+  it('does not verify or clear a restored direct grant for the same member', async () => {
+    const operationId = '22222222-2222-4222-8222-222222222222'
+    lookupMode = 'direct'
+    sessionStorage.setItem(PENDING_KEY, JSON.stringify({
+      formatVersion: 1,
+      entries: [{ principalId: 'admin-actor', targetId: 'user-1', clientOperationId: operationId }],
+    }))
+    ;({ app, root } = await mountView())
+    await openUser(root!, 'Alpha')
+    await waitFor(() => Boolean(root!.querySelector('[data-testid="authorization-foreign-receipt"]')))
+    const link = root!.querySelector('[data-testid="authorization-foreign-receipt-link"]')
+    expect(link?.textContent).toContain('权限来源与例外')
+    expect(link?.getAttribute('href')).toBe('/admin/permissions?userId=user-1')
+    expect(root!.textContent).not.toContain('当前仍保留')
+    expect(root!.textContent).not.toContain('权限已全部生效')
+    expect(root!.textContent).not.toContain('角色已分配，准入未开')
+    expect(sessionStorage.getItem(PENDING_KEY)).toContain(operationId)
+    expect(commits()).toEqual([])
     expect(oldWrites()).toEqual([])
   })
 

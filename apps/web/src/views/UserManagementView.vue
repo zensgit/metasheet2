@@ -24,6 +24,11 @@
     <p v-if="status" class="user-admin__status" :class="{ 'user-admin__status--error': statusTone === 'error' }">
       {{ status }}
     </p>
+    <p v-if="foreignAuthorizationReceipt" class="user-admin__status user-admin__status--error" data-testid="authorization-foreign-receipt">
+      这次回执不是成员页的角色或准入变更。当前的角色和准入读取不能确认回执里的来源是否仍在。请回到
+      <router-link data-testid="authorization-foreign-receipt-link" :to="permissionSourceLocation">权限来源与例外</router-link>
+      查看。
+    </p>
     <section
       v-if="hasDirectorySyncNavigation"
       class="user-admin__status user-admin__source-banner"
@@ -1464,9 +1469,11 @@ import {
   PLATFORM_ADMIN_AUTHORITY_NOTE,
   PLATFORM_ADMIN_REMOVAL_PHRASE,
   ROLE_VERSION_MISMATCH_MESSAGE,
+  AUTHORIZATION_FOREIGN_RECEIPT_MESSAGE,
   adminAuthorizationStillCurrent,
   admissionChangesForRevoke,
   authorizationLiveReadAgrees,
+  memberPageCanVerifyAction,
   describeAdmissionChange,
   describeVerifiedAuthorization,
   buildAdmissionDisableAuthorization,
@@ -1964,6 +1971,7 @@ const authorizationDetached = ref(false)
 const authorizationOutcomeText = ref('')
 const roleAssignAdmissionNamespaces = ref<string[]>([])
 const suppressRecovery = ref(false)
+const foreignAuthorizationReceipt = ref(false)
 const submittedRequest = ref<AdminAuthorizationRequest | null>(null)
 let authorizationFaultCode = ''
 let authorizationVerifying = false
@@ -4679,6 +4687,12 @@ async function finishCommittedAuthorization(): Promise<void> {
     authorizationVerifying = false
   }
   if (authorizationDetached.value) return
+  const settledReceipt = authorizationOperation.receipt.value
+  if (settledReceipt && !memberPageCanVerifyAction(settledReceipt.action)) {
+    foreignAuthorizationReceipt.value = true
+    publishAuthorizationMessage(AUTHORIZATION_FOREIGN_RECEIPT_MESSAGE, 'error')
+    return
+  }
   if (authorizationOperation.verified.value) {
     const receipt = authorizationOperation.receipt.value
     const message = receipt
@@ -4698,6 +4712,31 @@ async function finishCommittedAuthorization(): Promise<void> {
   publishAuthorizationMessage(AUTHORIZATION_NOT_CHECKED_MESSAGE, 'error')
 }
 
+async function refreshRejectedAuthorizationReads(userId: string): Promise<void> {
+  const generation = userAccessReadGeneration.value
+  try {
+    const response = await apiFetch('/api/admin/roles')
+    const payload = await readJson(response)
+    if (response.ok && payload.ok === true && !authorizationDetached.value && selectedUserId.value === userId) {
+      const data = payload.data as { items?: RoleCatalogItem[] } | undefined
+      roleCatalog.value = Array.isArray(data?.items) ? data.items : []
+    }
+  } catch {
+    // A failed catalog read must not replace the rejected outcome.
+  }
+  if (authorizationDetached.value || selectedUserId.value !== userId) return
+  try {
+    const snapshot = await fetchUserAccessOrThrow(userId)
+    if (authorizationDetached.value || selectedUserId.value !== userId) return
+    if (userAccessReadGeneration.value !== generation) return
+    if (!userAccessSnapshotMatches(snapshot, userId)) return
+    access.value = snapshot
+    syncProfileDraftFromAccess()
+  } catch {
+    // Keep the snapshot already on screen. The rejected outcome stays frozen.
+  }
+}
+
 async function settleAfterConfirm(): Promise<void> {
   if (authorizationDetached.value) return
   const phase = authorizationOperation.phase.value
@@ -4707,13 +4746,11 @@ async function settleAfterConfirm(): Promise<void> {
       publishAuthorizationMessage(LAST_PLATFORM_ADMIN_MESSAGE, 'error')
       return
     }
-    access.value = null
+    // The panel stays held. A rejected 409 does not open a new clickable preview.
     publishAuthorizationMessage(ROLE_VERSION_MISMATCH_MESSAGE, 'error')
-    await loadRoles()
-    const request = submittedRequest.value
-    if (authorizationDetached.value || !request || request.targetUserId !== selectedUserId.value) return
-    await authorizationOperation.preview(request)
-    await authorizationOperation.whenSettled()
+    const userId = selectedUserId.value
+    if (userId) await refreshRejectedAuthorizationReads(userId)
+    if (!authorizationDetached.value) publishAuthorizationMessage(ROLE_VERSION_MISMATCH_MESSAGE, 'error')
     return
   }
   if (phase === 'forbidden') {
@@ -4801,6 +4838,7 @@ function presentRecoveredAuthorization(): void {
   const phase = authorizationOperation.phase.value
   if (phase !== 'pending' && phase !== 'committed' && phase !== 'unverified_no_read') return
   const receipt = authorizationOperation.receipt.value
+  foreignAuthorizationReceipt.value = Boolean(receipt && !memberPageCanVerifyAction(receipt.action))
   const targetId = receipt?.targetUserId || selectedUserId.value
   if (!targetId || targetId !== selectedUserId.value) return
   const draft = buildRecoveredAuthorizationDraft({
@@ -5714,6 +5752,11 @@ watch(selectedUserId, (userId, previous) => {
 
 watch(() => authorizationOperation.phase.value, () => {
   presentRecoveredAuthorization()
+})
+
+watch(() => authorizationOperation.receipt.value, (receipt) => {
+  if (!receipt || selectedUserId.value !== receipt.targetUserId) return
+  if (!memberPageCanVerifyAction(receipt.action)) foreignAuthorizationReceipt.value = true
 })
 
 watch(

@@ -5201,7 +5201,11 @@ describe('UserManagementView authorization handlers', () => {
     await waitForCondition(() => root.textContent?.includes('角色目录已变化，本次未写入。请刷新角色后再确认。') ?? false)
     expect(root.textContent).not.toContain('已分配角色')
     expect(root.textContent).not.toContain('Role catalog version mismatch')
-    expect(root.querySelector('[data-testid="user-access-unread"]')).toBeTruthy()
+    const rejectedClose = root.querySelector('[data-testid="admin-authorization-close"]') as HTMLButtonElement | null
+    const rejectedConfirm = root.querySelector('[data-testid="admin-authorization-confirm"]') as HTMLButtonElement | null
+    expect(rejectedClose && !rejectedClose.disabled).toBe(true)
+    expect(rejectedConfirm?.disabled).toBe(true)
+    expect(root.querySelector('[data-testid="user-access-unread"]')).toBeNull()
     const commits = postCalls().filter((call) => call.url === '/api/admin/authorization-operations')
     expect(commits).toHaveLength(1)
     expect(commits[0]?.body.action).toEqual({ kind: 'role.assign', roleId: 'crm_admin' })

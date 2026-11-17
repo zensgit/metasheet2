@@ -38,7 +38,9 @@
         <p data-testid="admin-authorization-explicit-admissions">显式准入：{{ joined(serverImpact.explicitAdmissions) }}</p>
         <p data-testid="admin-authorization-derived-admissions">派生准入：{{ joined(serverImpact.derivedAdmissions) }}</p>
         <p data-testid="admin-authorization-scope-cleanup">范围清理：{{ serverImpact.scopeCleanupCount }}</p>
-        <p data-testid="admin-authorization-retained-sources">其他仍保留来源：{{ joined(serverImpact.retainedSources) }}</p>
+        <p data-testid="admin-authorization-retained-sources">
+          提交时回执记录的其他来源：{{ joined(serverImpact.retainedSources) }}<template v-if="serverImpact.retainedSources.length > 0">。当前的角色和准入读取不能确认这些来源是否仍在。</template>
+        </p>
       </div>
       <div v-else data-testid="admin-authorization-admissions">
         <strong>准入变化</strong>
