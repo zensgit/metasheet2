@@ -31,7 +31,13 @@
 // WORKING sheet — via a scoped API pinned to the BOUND table action's own `target`, the same
 // `{ sheetId, fieldIdMap }` the apply writer writes through. It patches ONLY human-preserved fields whose
 // target cells are blank, copying them from an INACTIVE predecessor row the human confirmed — the
-// K2-style server-signed carry the carry-policy module was built for. carriedBy is the route-derived
+// K2-style server-signed carry the carry-policy module was built for. In the SAME patch it also copies
+// the machine write-back column(s) (MACHINE_WRITEBACK_FIELD_IDS, today `issueConfirmDate`) onto the
+// re-keyed successor when its cell is empty (owner ruling 2026-11-17 「按建议」: the date follows the
+// row). The YiDa write-back stays the only ORIGINATING writer of that column; this carry only copies a
+// value that is already on the predecessor, by the write-back's own D8 cell rule (empty -> written,
+// equal -> already set, any other value -> kept, never an overwrite and never a refusal), and a person
+// can still never name the column in a decision. carriedBy is the route-derived
 // operator identity and carriedAt is stamped HERE; neither is ever body- or decision-sourced. It
 // never overwrites a non-blank cell, never creates or deactivates a row, and never goes anywhere
 // near the plan apply path (which refuses carry decisions outright as unsupported).
@@ -41,6 +47,7 @@ const crypto = require('node:crypto')
 
 const {
   HUMAN_PRESERVED_FIELD_IDS,
+  MACHINE_WRITEBACK_FIELD_IDS,
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
   STOCK_PREPARATION_MVP_REQUIRED_OBJECT_IDS,
@@ -812,7 +819,9 @@ const CANONICAL_KEY_FIELD = CANONICAL_TEMPLATE.keyFields[0] // 'idempotencyKey'
 // are plm_system columns, so an explicit target map is REQUIRED to bind them
 // (assertTargetFieldMapCompleteness covers exactly the plm_system band plus declared extension ids)
 // — an unbound one means the deployment's config is broken, and a broken scope is a refusal, never
-// a best effort.
+// a best effort. The machine write-back column(s) (MACHINE_WRITEBACK_FIELD_IDS) are bound the same way
+// and refused the same way: they are plm_system too, so the same completeness gate already requires
+// them, and an unbound one would otherwise make the machine leg below read a blank and skip silently.
 const CARRY_SCOPE_FIELD_IDS = Object.freeze([CANONICAL_KEY_FIELD, 'active', 'componentSourceId', 'projectNo'])
 
 // The FULL closed key set of a carry decision — exactly what the carry module's builder emits.
@@ -905,15 +914,16 @@ function carryFieldIdMapHasExplicitBindings(fieldIdMap) {
   return Object.keys(fieldIdMap).length > 0
 }
 
-// Resolve EVERY logical id this carry will touch — the four scope columns plus exactly the fields
-// this decision carries — against the bound target. Unlike the export (a projection, where an
+// Resolve EVERY logical id this carry will touch — the four scope columns, the machine write-back
+// column(s), plus exactly the fields this decision carries — against the bound target. Unlike the
+// export (a projection, where an
 // unbound DISPLAY column is legitimately an empty cell) a carry WRITES, so there is no best effort
 // here: an unresolved id is a refusal, and both refusals name field NAMES only.
 //
 // The two refusals are deliberately different facts:
-//   * a SCOPE column (plm_system) is required by the deploy-time completeness gate
-//     (assertTargetFieldMapCompleteness), so an unbound one means the config is broken in a way that
-//     gate should already have caught -> 500;
+//   * a SCOPE column or a MACHINE write-back column (both plm_system) is required by the deploy-time
+//     completeness gate (assertTargetFieldMapCompleteness), so an unbound one means the config is
+//     broken in a way that gate should already have caught -> 500;
 //   * a CARRIED human column is NOT required by that gate, and deliberately still is not. The gate
 //     is shared by fifteen route handlers, and apply / dry-run / mvp-persist / reconcile / the
 //     large-BOM jobs / the export never touch a human column — requiring one there would refuse a
@@ -940,6 +950,7 @@ function resolveCarryFieldBindings(target, carryFields) {
     else unresolved.push(fieldId)
   }
   for (const fieldId of CARRY_SCOPE_FIELD_IDS) bind(fieldId, missingFields)
+  for (const fieldId of MACHINE_WRITEBACK_FIELD_IDS) bind(fieldId, missingFields)
   for (const fieldId of carryFields) bind(fieldId, unboundCarryFields)
   if (missingFields.length > 0) {
     throw new StockPreparationConfirmWriteError(
@@ -1162,6 +1173,37 @@ async function applyCarryViaConfirm(input = {}) {
     throw new StockPreparationConfirmWriteError(409, 'CONFIRM_CARRY_TARGET_ALREADY_SET', 'a carry target human field already holds a different value; carry never overwrites', { fields: conflictedFields })
   }
 
+  // The machine leg (owner ruling 2026-11-17 「按建议」): the machine write-back date follows the re-keyed
+  // row. AFTER every refusal above, so a refused carry still writes nothing at all. The cell tests are the
+  // write-back's own D8 rule, verbatim (yida-issue-confirm-writeback.cjs decideIssueConfirmCell — not
+  // imported; the parity is pinned by a test): only an absent / null / '' successor cell is written, the
+  // same value is already set, ANY other value is kept. Never an overwrite and never a 409: a successor that
+  // holds a different date (a later form for the new key was written back there) keeps it.
+  const machineCarriedFields = []
+  const machineAlreadySetFields = []
+  const machineKeptExistingFields = []
+  for (const field of MACHINE_WRITEBACK_FIELD_IDS) {
+    const sourceValue = sourceData[field]
+    if (sourceValue === undefined || sourceValue === null || sourceValue === '') continue // nothing to follow
+    const targetValue = targetData[field]
+    if (targetValue === undefined || targetValue === null || targetValue === '') {
+      changes[field] = sourceValue
+      machineCarriedFields.push(field)
+      continue
+    }
+    if (targetValue === sourceValue) {
+      machineAlreadySetFields.push(field)
+      continue
+    }
+    machineKeptExistingFields.push(field)
+  }
+  const machineResult = {
+    machineCarriedFields: machineCarriedFields.slice(),
+    machineAlreadySetFields: machineAlreadySetFields.slice(),
+    machineKeptExistingFields: machineKeptExistingFields.slice(),
+    ...(machineKeptExistingFields.length > 0 ? { machineCode: 'CONFIRM_CARRY_MACHINE_KEPT_EXISTING' } : {}),
+  }
+
   // Step 5 stamps — module-side, NEVER decision/body-sourced (the allowlist above refused those).
   const carriedAt = new Date().toISOString()
   const evidenceBase = {
@@ -1171,12 +1213,20 @@ async function applyCarryViaConfirm(input = {}) {
     target: { objectId: target.objectId, keyField: CANONICAL_KEY_FIELD },
     carriedFields: carriedFields.slice(),
     alreadyCarriedFields: alreadyCarriedFields.slice(),
+    // Machine write-back column(s): counts only.
+    machine: {
+      carried: machineCarriedFields.length,
+      alreadySet: machineAlreadySetFields.length,
+      keptExisting: machineKeptExistingFields.length,
+    },
     carriedByPresent: true,
     carriedAtPresent: true,
     valuesFree: true,
   }
-  if (carriedFields.length === 0) {
-    // Step 6: full replay (every field already carried with the same content) — no-op, no patch.
+  if (carriedFields.length === 0 && machineCarriedFields.length === 0) {
+    // Step 6: full replay (every field already carried with the same content, and no machine cell to
+    // fill) — no-op, no patch. A replay whose human fields are equal but whose predecessor's machine date
+    // is still missing on the successor carries just that date (mode 'carried' below).
     return {
       persisted: false,
       mode: 'skipped_already_carried',
@@ -1186,6 +1236,7 @@ async function applyCarryViaConfirm(input = {}) {
       carriedAt,
       carriedFields: [],
       alreadyCarriedFields: alreadyCarriedFields.slice(),
+      ...machineResult,
       evidence: { ...evidenceBase, mode: 'skipped_already_carried' },
     }
   }
@@ -1219,7 +1270,7 @@ async function applyCarryViaConfirm(input = {}) {
         409,
         'CONFIRM_CARRY_TARGET_VERSION_CONFLICT',
         'the carry target row changed while this carry was being decided; re-read and confirm again',
-        { fields: carriedFields.slice() },
+        { fields: carriedFields.concat(machineCarriedFields) },
       )
     }
     throw error
@@ -1233,6 +1284,7 @@ async function applyCarryViaConfirm(input = {}) {
     carriedAt,
     carriedFields: carriedFields.slice(),
     alreadyCarriedFields: alreadyCarriedFields.slice(),
+    ...machineResult,
     evidence: { ...evidenceBase, mode: 'carried' },
   }
 }
