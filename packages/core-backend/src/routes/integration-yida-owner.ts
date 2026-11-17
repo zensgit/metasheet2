@@ -542,9 +542,10 @@ export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initia
   // owner's ledger rows), optional `limit` (1..100) and, without ledgerIds only, optional `after` (the previous
   // answer's `next`: a batch run is one page of a sweep — start without `after`, follow `next` until it is null) — and
   // one bounded, idempotent run; the runtime proves the live owner first and every row is re-checked under its sheet
-  // lease. A tampered cursor, or one that names an unlisted target, gets 400; a stale target set gets 409
-  // (YIDA_ISSUE_CONFIRM_CURSOR_STALE: restart without `after`); a well-formed cursor on a listed target only moves the
-  // start. Never the send switch, never a send.
+  // lease. A tampered cursor, or one that carries the CURRENT target set's digest but names an unlisted target, gets
+  // 400; a cursor issued under another target set gets 409 (YIDA_ISSUE_CONFIRM_CURSOR_STALE: restart without `after`) —
+  // that includes a cursor whose own target was removed from the list (the list changed); a well-formed cursor on a
+  // listed target only moves the start. Never the send switch, never a send.
   const issueConfirmWritebackEnabled = () => { try { return port.issueConfirmWritebackEnabled?.() === true } catch { return false } }
   const whenIssueConfirmWriteback = (handler: RequestHandler): RequestHandler => (req, res, next) => {
     if (!issueConfirmWritebackEnabled()) { next(); return }

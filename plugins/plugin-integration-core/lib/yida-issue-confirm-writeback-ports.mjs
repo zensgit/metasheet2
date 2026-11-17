@@ -58,7 +58,9 @@ export const ISSUE_CONFIRM_LEDGER_AUDIT_TABLE = 'integration_yida_delivery_audit
 // the named path's probe and the core's re-check under the sheet lease (right before the patch) all treat a trace row as
 // final, and the trace table is append-only (migration zzzz20261106093100). What "final" covers: a trace that exists when
 // a run reads the row, or when it re-checks under the lease, stops that run from patching; the core header says which
-// interleaving the lease does not serialize (an outcome traced before any lease).
+// interleaving the lease does not serialize (a trace INSERT that no currently held lease covers — an outcome decided
+// before the lease, or one inserted by a holder whose lease was taken over — landing between another run's re-check
+// and that run's own trace INSERT).
 const TRACE_ANTI_JOIN = Object.freeze({ table: ISSUE_CONFIRM_TRACE_TABLE, on: Object.freeze({ ledger_id: 'id' }) })
 const LEDGER_KEYSET = Object.freeze({ at: 'created_at', id: 'id' })
 const ID_RE = /^[^\u0000-\u001f\u007f]{1,128}$/u
@@ -272,8 +274,9 @@ export function createIssueConfirmWritebackCapability(options = {}) {
     })
     // The scope is the host's authenticated owner, never the caller's: a run names only ledger ids, a limit and (batch
     // mode) the sweep cursor `after`, which the core decodes against the listed targets: a tampered cursor, or one that
-    // names an unlisted target, is refused (400); one issued under another target set is STALE (409); a well-formed
-    // cursor on a listed target only moves the start.
+    // carries the current set's digest but names an unlisted target, is refused (400); one issued under another target
+    // set is STALE (409), including one whose own target was removed from the list; a well-formed cursor on a listed
+    // target only moves the start.
     async function run(request = {}) {
       const ledgerIds = request.ledgerIds
       const limit = request.limit

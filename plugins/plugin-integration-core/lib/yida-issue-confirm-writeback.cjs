@@ -78,15 +78,20 @@
 // could not be written is never reported as written).
 // THE TRACE UNDER THE LEASE (Y9 r3, the trace race). The trace INSERT runs before the lease is released, and
 // the trace is read once more right before the patch. A run that read the row as untraced before another run
-// traced it, and that leases after that run released, therefore finds the trace and patches nothing
-// (already_traced) — also when the cell was emptied in between. A crash between the patch and the trace
+// traced it, that leases after that run released and that decides under its lease to patch, therefore finds the
+// trace and patches nothing (already_traced) — also when the cell was emptied in between; a run that decides any
+// other outcome under its lease returns that outcome as usual (its trace INSERT does nothing: recorded false). A crash between the patch and the trace
 // INSERT (two statements, both under the lease) leaves the date in the cell and no trace: the next run that
 // holds the lease finds no trace, reads the date → already_set, one trace, no second patch (if the process
 // died, its lease stays held until it expires or is taken over: a retry before that is
 // STOCK_PREP_PROJECT_WRITE_LOCKED). Two runs that both decided the same row without a patch converge on the
 // primary key: the second INSERT does nothing and that run completes normally (recorded: false). Not
-// serialized by the lease: an outcome traced BEFORE the lease (above) by one run can land between another
-// run's re-check and its patch; a trace that exists when a run re-checks under the lease is final.
+// serialized by the lease: a trace INSERT that no currently held lease covers — an outcome decided BEFORE the
+// lease (above), or one inserted by a holder whose lease was taken over (it decided under its lease, then stalled
+// past the lease TTL plus the takeover grace; nothing re-asserts the lease before that INSERT) — can land between
+// another run's re-check and that other run's own trace INSERT: that run patches once (a first patch; no emptied
+// cell is needed) and the row ends traced with the earlier outcome (that run answers written, recorded false). A
+// trace that exists when a run re-checks under the lease is final for that run.
 //
 // SWITCHES (exact literal 'true' only, read on EVERY call, default OFF; registered in
 // scripts/ops/global-history-flag-manifest.mjs):
@@ -115,8 +120,9 @@ const ISSUE_CONFIRM_PROJECT_FIELD_ID = 'projectNo'
 const ISSUE_CONFIRM_WRITEBACK_LOCK_PURPOSE = 'issue_confirm_writeback'
 const ISSUE_CONFIRM_WRITEBACK_MAX_BATCH = 100
 // The sweep cursor (see encodeIssueConfirmSweepCursor): its fixed version, its text bound, and the two closed refusals a
-// run answers for an `after` it cannot accept: AFTER (malformed, tampered, or an unlisted target — the host maps it to
-// its fixed INPUT code, HTTP 400) and STALE (the listed target set changed since the cursor was issued — the host maps
+// run answers for an `after` it cannot accept: AFTER (malformed, tampered, or an unlisted target under the CURRENT set's
+// digest — the host maps it to its fixed INPUT code, HTTP 400) and STALE (the listed target set changed since the
+// cursor was issued, including the removal of the cursor's own target — the host maps
 // it to its own fixed wire code YIDA_ISSUE_CONFIRM_CURSOR_STALE, HTTP 409: restart the sweep without `after`; the host
 // never imports this module, so that text lives in the host alone, pinned by its owner runtime unit test).
 const ISSUE_CONFIRM_SWEEP_CURSOR_VERSION = 2
