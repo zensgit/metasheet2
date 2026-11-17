@@ -23,13 +23,18 @@
  *
  * VALUES-FREE: every log line carries closed-set labels (`refusalClass`, `failureClass`, `hostFamily`) and
  * identifiers only, and every thrown message is a closed-set token, because the bus persists the thrown
- * message (delivery log + dead letter) and folds it into its own error log. The transport error is never
- * rethrown, wrapped or attached as a `cause`.
+ * message (the `event_deliveries` error column, and the best-effort dead-letter insert) and folds it into
+ * its own error log. The transport error is never rethrown, wrapped or attached as a `cause`.
  *
  * WHY THROW: the bus ignores the handler's return value and records a delivery as successful unless the
- * handler throws (`EventBusService.processEvent`). A refusal or a transport failure therefore throws so it
- * is recorded as a failed delivery and a dead letter; both bus call sites catch (`processEvent`,
- * `handleLocalEvent`). A non-2xx answer keeps today's `false` return — that bookkeeping is unchanged here.
+ * handler throws (`EventBusService.processEvent`). A refusal or a transport failure therefore throws, and
+ * on the `processEvent` path it is recorded as a failed delivery: an `event_deliveries` row with
+ * `success = false` and the subscription's failure counter. The local-listener call site
+ * (`handleLocalEvent`, non-wildcard patterns) catches and only logs; it books nothing. The dead-letter
+ * insert (`addToDeadLetter`) is best-effort: it swallows its own error and targets the legacy
+ * `event_dead_letters` table, which only the legacy SQL migrations create, so on a database built by the
+ * default migration set no dead letter is written. A non-2xx answer keeps today's `false` return — that
+ * bookkeeping is unchanged here.
  */
 import { Logger } from './logger'
 import { checkWebhookTargetUrl, checkWebhookTargetUrlShape, type SsrfLookupFn } from '../multitable/webhook-ssrf-guard'
