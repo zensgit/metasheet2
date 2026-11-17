@@ -39,6 +39,13 @@
  *   S6-08 (R-66, owner 2026-10-28) a PLM row the generic adapter wrote on a provisioned sheet: the REAL plugin-scoped
  *         records.deleteRecord and the REAL unscoped host SDK answer 409 RECORD_DELETE_REFUSED_PLM_ROW, the row
  *         stays; a keyless row on the same sheet deletes (control).
+ *   S6-GW-09 (D2, integration line; R-96 switch-on precondition) a registered, NOT governed sheet: the pipeline
+ *         upsert, C6 updateRows and ERP feedback never write the machine write-back column (`issueConfirmDate`); a
+ *         racing write-back is a retryable VERSION conflict at the upsert and at C6, and the ERP feedback leg succeeds
+ *         after one retry; an unregistered twin keeps today's behaviour.
+ *   S6-GW-10 (D2 round 2) the machine column on a registered sheet: the strip set is read from the sheet's binding
+ *         (alias, raw physical id, namespace key without projectId, another tenant's registry row); refused when it
+ *         cannot be resolved; creates stripped; ERP feedback's bounded retry; no C6 churn.
  * Values-free: every id is synthetic and per-run.
  */
 import { createRequire } from 'module'
