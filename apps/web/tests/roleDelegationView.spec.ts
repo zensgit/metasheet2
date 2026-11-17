@@ -1,5 +1,7 @@
 /* eslint-disable vue/one-component-per-file -- Tests mount isolated apps with local component stubs. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+const authState = vi.hoisted(() => ({ userId: 'admin-1' }))
 import { createApp, h, nextTick, type App } from 'vue'
 import RoleDelegationView from '../src/views/RoleDelegationView.vue'
 import {
@@ -11,7 +13,7 @@ import {
 
 vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
-    getCurrentUser: () => ({ id: 'admin-1' }),
+    getCurrentUser: () => ({ id: authState.userId }),
   }),
 }))
 
@@ -309,6 +311,7 @@ describe('RoleDelegationView', () => {
   let callLog: string[] = []
 
   beforeEach(() => {
+    authState.userId = 'admin-1'
     window.history.replaceState({}, '', '/')
     sessionStorage.removeItem(ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY)
     apiFetchMock.mockReset()
@@ -3885,6 +3888,157 @@ describe('RoleDelegationView', () => {
     await waitForCondition(() => lookups.length === 2)
     expect(posts).toHaveLength(0)
     expect(statusText()).toContain('不能确认这个回执')
+  })
+
+  it('verifies a recovered role receipt from the access read and then accepts a separate preview', async () => {
+    const operationId = '22222222-2222-4222-8222-222222222222'
+    sessionStorage.setItem(ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY, JSON.stringify({
+      formatVersion: 1,
+      entries: [{ principalId: 'admin-1', targetId: 'user-1', clientOperationId: operationId }],
+    }))
+    const catalog = [{ id: 'crm_admin', name: 'CRM 管理员', permissions: ['crm:read'], updatedAt: 'stamp-1' }]
+    const recoveredImpact = blankImpact({
+      sourceChanges: [{ source: 'role', id: 'crm_admin', operation: 'assign', changed: true }],
+      admissionChanges: [{ namespace: 'crm', before: false, after: true, cause: 'explicit' }],
+      scopeCleanup: [{ namespace: 'crm', kind: 'department', id: 'dept-1' }],
+      retainedOtherGrants: [{ code: 'sheet:read', sources: [{ kind: 'legacy', id: null }], effective: true }],
+    })
+    let revoked = false
+    const lookups: string[] = []
+    const commits: Array<{ clientOperationId?: string, action?: { kind?: string, roleId?: string } }> = []
+    apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string; body?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], roleCatalog: catalog, scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({ ok: true, data: { items: [{ id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true }] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: 'admin-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], manageableNamespaces: ['crm'], roleCatalog: catalog,
+            user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+            roles: revoked ? [] : ['crm_admin'],
+            memberGroups: [],
+            delegableRoles: revoked ? [] : ['crm_admin'],
+            namespaceAdmissions: [{ namespace: 'crm', enabled: true, effective: !revoked, hasRole: !revoked, updatedAt: 'stamp' }],
+          },
+        })
+      }
+      if (pathname === `${ADMIN_AUTHORIZATION_OPERATIONS_PATH}/${operationId}` && init?.method !== 'POST') {
+        lookups.push(pathname)
+        return createJsonResponse({
+          status: 'committed',
+          clientOperationId: operationId,
+          receipt: {
+            targetUserId: 'user-1',
+            action: { kind: 'role.assign', roleId: 'crm_admin' },
+            impact: recoveredImpact,
+            resultVersion: 'result-1',
+          },
+        })
+      }
+      if (isAuthorizationPreview(pathname) && init?.method === 'POST') return authorizationPreviewResponse()
+      if (isAuthorizationCommit(pathname) && init?.method === 'POST') {
+        const body = readAuthorizationBody(init.body)
+        commits.push(body)
+        if (body.action.kind === 'role.revoke') revoked = true
+        return authorizationCommitResponse(init.body)
+      }
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    await mountDelegation()
+    await waitForCondition(() => statusText().includes('角色已分配') && statusText().includes('提交时回执记录范围清理'))
+    expect(statusText()).toContain('提交时回执记录其他来源')
+    expect(statusText()).toContain('sheet:read')
+    expect(statusText()).not.toContain('范围读取确认')
+    expect(commits).toHaveLength(0)
+    expect(lookups).toEqual([`${ADMIN_AUTHORIZATION_OPERATIONS_PATH}/${operationId}`])
+    expect(sessionStorage.getItem(ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY) || '').not.toContain(operationId)
+    const revokeSelect = container!.querySelector('[data-testid="delegation-revoke-role"]') as HTMLSelectElement
+    revokeSelect.value = 'crm_admin'
+    revokeSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    findButtonByText(container!, '撤销角色').click()
+    await flushUi()
+    const confirm = container!.querySelector('[data-testid="delegation-confirmation-confirm"]') as HTMLButtonElement
+    await waitForCondition(() => confirm.disabled === false)
+    confirm.click()
+    await waitForCondition(() => commits.length === 1 && statusText().includes('角色已从该成员移除'))
+    expect(commits[0]?.action).toEqual({ kind: 'role.revoke', roleId: 'crm_admin' })
+    expect(commits[0]?.clientOperationId).not.toBe(operationId)
+    expect(lookups).toHaveLength(1)
+  })
+
+  it('does not apply a deferred access read after the actor changes and the target stays', async () => {
+    const operationId = '33333333-3333-4333-8333-333333333333'
+    sessionStorage.setItem(ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY, JSON.stringify({
+      formatVersion: 1,
+      entries: [{ principalId: 'admin-1', targetId: 'user-1', clientOperationId: operationId }],
+    }))
+    let accessReads = 0
+    let releaseLate: (() => void) | undefined
+    const lateGate = new Promise<void>((resolve) => { releaseLate = resolve })
+    apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({ ok: true, data: { items: [{ id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true }] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        accessReads += 1
+        if (accessReads > 1) await lateGate
+        const late = accessReads > 1
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: late ? 'admin-2' : 'admin-1',
+            isPlatformAdmin: false,
+            delegableNamespaces: ['crm'],
+            roleCatalog: late ? [{ id: 'crm_admin', name: 'CRM 管理员', permissions: ['crm:read'] }] : [],
+            user: { id: 'user-1', email: 'alpha@example.com', name: late ? 'Late Reader' : 'Alpha', role: 'user', is_active: true },
+            roles: late ? ['crm_admin'] : [],
+            memberGroups: [],
+            delegableRoles: late ? ['crm_admin'] : [],
+            namespaceAdmissions: [{ namespace: 'crm', enabled: late, effective: late, hasRole: late, updatedAt: 'stamp' }],
+          },
+        })
+      }
+      if (pathname === `${ADMIN_AUTHORIZATION_OPERATIONS_PATH}/${operationId}` && init?.method !== 'POST') {
+        return createJsonResponse({
+          status: 'committed',
+          clientOperationId: operationId,
+          receipt: {
+            targetUserId: 'user-1',
+            action: { kind: 'role.assign', roleId: 'crm_admin' },
+            impact: blankImpact(),
+            resultVersion: 'result-1',
+          },
+        })
+      }
+      if (init?.method === 'POST' || init?.method === 'PATCH') throw new Error(`unexpected write ${rawUrl}`)
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    await mountDelegation()
+    await waitForCondition(() => accessReads > 1)
+    expect(container?.textContent).toContain('Alpha')
+    authState.userId = 'admin-2'
+    releaseLate?.()
+    await flushUi()
+    expect(container?.textContent).toContain('Alpha')
+    expect(container?.textContent).not.toContain('Late Reader')
+    expect(statusText()).not.toContain('角色已分配')
+    expect(statusText()).not.toContain('还没有核对成功')
+    expect(sessionStorage.getItem(ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY) || '').toContain(operationId)
+    expect(callLog.filter((url) => url.includes('/scopes'))).toHaveLength(0)
   })
 
   it('opens the member named by the userId query and does not select the first listed member', async () => {
