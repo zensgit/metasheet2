@@ -1281,6 +1281,8 @@ async function updateTemplateMemberGroup(action: 'assign' | 'unassign', groupId?
 async function loadUsers(options?: { reselectPinned?: boolean }): Promise<void> {
   const reselectPinned = options?.reselectPinned !== false
   const requestGeneration = ++usersRequestGeneration
+  const selectionGenerationAtStart = delegationAccessGeneration
+  const selectedUserIdAtStart = selectedUserId.value
   loading.value = true
   try {
     const params = new URLSearchParams()
@@ -1305,6 +1307,8 @@ async function loadUsers(options?: { reselectPinned?: boolean }): Promise<void> 
     const data = payload.data as { items?: unknown[] } | undefined
     const items = Array.isArray(data?.items) ? data.items : []
     users.value = items.map((item) => normalizeUserCandidate(item)).filter((item): item is UserCandidate => item !== null)
+    // A choice made while this list was in flight stays. This response must not clear it or select someone else.
+    if (delegationAccessGeneration !== selectionGenerationAtStart || selectedUserId.value !== selectedUserIdAtStart) return
     if (reselectPinned && pinnedUserPending) {
       const pinned = initialPinnedUserId
       pinnedUserPending = false
@@ -1335,12 +1339,6 @@ async function loadUsers(options?: { reselectPinned?: boolean }): Promise<void> 
     }
     if (selectedUserId.value && !selectedRow) {
       clearUnpinnedSelection()
-    } else if (selectedUserId.value && selectedRow) {
-      return
-    }
-    if (!selectedUserId.value) {
-      const firstSelectable = users.value.find((user) => user.selectable !== false)
-      if (firstSelectable) await selectUser(firstSelectable.id)
     }
   } catch (error) {
     if (requestGeneration !== usersRequestGeneration) return
