@@ -17,7 +17,8 @@
 //                                    Any row not in its target state refuses with counts; restoring the run stays the
 //                                    other way out.
 // and one read: the FILLS REPORT (which old row ↔ copy pairs carry human fills, and what the K2 carry could do with
-// each), values-free.
+// each; and how many machine write-back cells — the YiDa issue-confirm date — the old subtree holds, as counts only),
+// values-free.
 //
 // THIS FILE DECIDES; THE ROUTES WIRE. Everything host-, lock-, ledger-, source- and audit-specific is INJECTED (`deps`,
 // built per request by lib/http-routes.cjs): the pure analysis below never reads the environment except through the one
@@ -55,8 +56,8 @@
 //
 // VALUES. Answers, errors and audit details carry handles (record ids, run ids, the census's private component
 // handle), closed tokens, digests, integers and booleans — never a project number, a key, a part id, a path or a cell
-// a person typed. The fills report says WHETHER a human cell is filled and whether two cells are equal, never what
-// they hold. THE LEDGER'S BACKUP is the one place where cells are stored AS READ from the sheet: the three RUN stamp
+// a person typed. The fills report says WHETHER a human cell is filled and whether two cells are equal, and HOW MANY
+// machine write-back cells are filled, never what they hold. THE LEDGER'S BACKUP is the one place where cells are stored AS READ from the sheet: the three RUN stamp
 // cells of every planned row (a restore puts them back byte-identically), in a table no route answers. A row is
 // planned — and so backed up — only when each of those cells is, byte for byte, of a form one of this plugin's OWN
 // WRITERS produces (`stampCellsOf` below spells the forms out); any other cell refuses the retire and nothing of it is
@@ -73,7 +74,7 @@ const {
   __internals: { canonicalJson, isActiveRow, isRootRow },
 } = require('./stock-preparation-continuation-pairing.cjs')
 const { CHANGE_PLAN_UPDATE_TYPE, DECISIONS, derivePackAwarePlmWritableFields } = require('./stock-preparation-conflict-planner.cjs')
-const { HUMAN_PRESERVED_FIELD_IDS, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require('./stock-preparation-templates.cjs')
+const { HUMAN_PRESERVED_FIELD_IDS, MACHINE_WRITEBACK_FIELD_IDS, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require('./stock-preparation-templates.cjs')
 const { TENANT_EXTENSION_FIELD_ID_PREFIX, __internals: { SUFFIX_SHAPE_PATTERN: EXTENSION_SUFFIX_SHAPE_PATTERN } } = require('./stock-preparation-extension-namespace.cjs')
 const { __internals: { componentHandle: censusComponentHandle, isBlankCell } } = require('./stock-preparation-sheet-census.cjs')
 
@@ -1028,9 +1029,14 @@ function fillClassOf({ oldRow, copyRow, humanFieldIds, extHumanFieldIds }) {
 }
 
 function fillsOfComponent(context, entry) {
-  const { scope, rows, humanFieldIds, extHumanFieldIds } = context
+  const { scope, rows, humanFieldIds, extHumanFieldIds, machineFieldIds } = context
   const handle = censusComponentHandle(scope.tenantId, scope.projectNo, entry.component)
   const counts = { nestedCopies: entry.occurrences.length, pairs: 0, pairsWithFills: 0, k2Carryable: 0, reenterExtHuman: 0, reenterConflict: 0, nothingToCarry: 0, unpairedOldRows: 0, unpairedOldRowsWithFills: 0 }
+  // Filled machine write-back CELLS on the old subtree (owner ruling 2026-11-17), apart from `counts` so no human count,
+  // class or pair moves: on its ACTIVE rows (on a `two_copy` component exactly the rows a retire would write) and on its
+  // INACTIVE rows (already retired, swept as missing from PLM, a D2 remnant — where a `written_inactive` date lands).
+  // Copy rows are never counted. An ambiguous or unreadable old root counts nothing (`problems` says why).
+  const machineWriteback = { onActiveOldRows: 0, onInactiveOldRows: 0 }
   const problems = new Set()
   const pairs = []
   const root = entry.roots.length === 1 ? entry.roots[0] : null
@@ -1040,6 +1046,11 @@ function fillsOfComponent(context, entry) {
   if (rootTokens) {
     const allFieldIds = humanFieldIds.concat(extHumanFieldIds)
     const oldRows = rows.filter((row) => isPlainObject(row) && keyOf(row) !== null && underTokens(row, rootTokens))
+    for (const row of oldRows) {
+      for (const fieldId of machineFieldIds) {
+        if (!isBlankCell(row[fieldId])) machineWriteback[isActiveRow(row) ? 'onActiveOldRows' : 'onInactiveOldRows'] += 1
+      }
+    }
     const pairedOld = new Set()
     entry.occurrences.forEach((occurrence, copyOrdinal) => {
       const tokens = pathTokensOf(occurrence)
@@ -1079,27 +1090,31 @@ function fillsOfComponent(context, entry) {
       if (allFieldIds.some((fieldId) => !isBlankCell(row[fieldId]))) counts.unpairedOldRowsWithFills += 1
     }
   }
-  return { componentHandle: handle, shape: entry.shape, counts, problems: Array.from(problems).sort(compareStrings), pairs }
+  return { componentHandle: handle, shape: entry.shape, counts, problems: Array.from(problems).sort(compareStrings), pairs, machineWriteback }
 }
 
 /**
  * The fills report of a project's rows. Without `componentHandle`: one summary per doubled component (counts by K2
  * class, the pairing problems as closed tokens). With it: that component's pairs that carry a human fill on either
  * side, paged (`cursor` an offset, `limit` ≤ 200) — per pair the two record-id handles, the K2 class and, per filled
- * human column, whether each side is filled and how the two compare. Never a cell value.
+ * human column, whether each side is filled and how the two compare. Both answers also count the filled machine
+ * write-back cells (`machineFieldIds`, default the template's MACHINE_WRITEBACK_FIELD_IDS) on the old subtree's active
+ * and inactive rows (`machineWriteback`) — counts only, never in a pair, a class or a human count. Never a cell value.
  */
-function buildFillsReport({ scope, rows, humanFieldIds, extHumanFieldIds = [], componentHandle = null, cursor = 0, limit = SHEET_REPAIR_FILLS_DEFAULT_LIMIT } = {}) {
+function buildFillsReport({ scope, rows, humanFieldIds, extHumanFieldIds = [], machineFieldIds = MACHINE_WRITEBACK_FIELD_IDS, componentHandle = null, cursor = 0, limit = SHEET_REPAIR_FILLS_DEFAULT_LIMIT } = {}) {
   const normalized = normalizeScope(scope)
   if (!Array.isArray(rows)) throw unavailable('rows')
   const human = Array.isArray(humanFieldIds) && humanFieldIds.every(nonBlankString) ? Array.from(new Set(humanFieldIds)) : HUMAN_PRESERVED_FIELD_IDS.slice()
   const ext = Array.isArray(extHumanFieldIds) ? Array.from(new Set(extHumanFieldIds.filter((fieldId) => nonBlankString(fieldId) && !human.includes(fieldId)))) : []
-  const context = { scope: normalized, rows, humanFieldIds: human, extHumanFieldIds: ext }
+  // A human or pack id is never a machine id here: it stays in the human band and is never counted twice.
+  const machine = Array.isArray(machineFieldIds) ? Array.from(new Set(machineFieldIds.filter((fieldId) => nonBlankString(fieldId) && !human.includes(fieldId) && !ext.includes(fieldId)))) : []
+  const context = { scope: normalized, rows, humanFieldIds: human, extHumanFieldIds: ext, machineFieldIds: machine }
   const components = doubledComponentsOf(rows)
   const humanColumns = { template: human.length, pack: ext.length }
   if (componentHandle === null) {
     const listed = components.slice(0, SHEET_REPAIR_MAX_LISTED_COMPONENTS).map((entry) => {
       const fills = fillsOfComponent(context, entry)
-      return { componentHandle: fills.componentHandle, shape: fills.shape, counts: fills.counts, problems: fills.problems }
+      return { componentHandle: fills.componentHandle, shape: fills.shape, counts: fills.counts, problems: fills.problems, machineWriteback: fills.machineWriteback }
     })
     return { componentHandle: null, total: components.length, humanColumns, components: listed }
   }
@@ -1117,6 +1132,7 @@ function buildFillsReport({ scope, rows, humanFieldIds, extHumanFieldIds = [], c
     problems: fills.problems,
     pairs: page,
     nextCursor: next < fills.pairs.length ? String(next) : null,
+    machineWriteback: fills.machineWriteback,
   }
 }
 
@@ -1546,9 +1562,10 @@ async function readFillsReport(deps, query) {
   // installed properties declare human (absent => the template's alone).
   const band = derivePackAwarePlmWritableFields({ templateFields: deps.template, installedFieldProperties: deps.installedFieldProperties })
   const report = buildFillsReport({ scope: deps.scope, rows, humanFieldIds: HUMAN_PRESERVED_FIELD_IDS, extHumanFieldIds: band.packHumanPreservedFieldIds, componentHandle: request.componentHandle, cursor: request.cursor, limit: request.limit })
+  const machineCells = (counts) => counts.onActiveOldRows + counts.onInactiveOldRows
   const summary = report.componentHandle === null
-    ? { components: report.total, pairs: report.components.reduce((sum, entry) => sum + entry.counts.pairs, 0), pairsWithFills: report.components.reduce((sum, entry) => sum + entry.counts.pairsWithFills, 0) }
-    : { components: report.found ? 1 : 0, pairs: report.found ? report.counts.pairs : 0, pairsWithFills: report.found ? report.counts.pairsWithFills : 0 }
+    ? { components: report.total, pairs: report.components.reduce((sum, entry) => sum + entry.counts.pairs, 0), pairsWithFills: report.components.reduce((sum, entry) => sum + entry.counts.pairsWithFills, 0), machineWritebackCells: report.components.reduce((sum, entry) => sum + machineCells(entry.machineWriteback), 0) }
+    : { components: report.found ? 1 : 0, pairs: report.found ? report.counts.pairs : 0, pairsWithFills: report.found ? report.counts.pairsWithFills : 0, machineWritebackCells: report.found ? machineCells(report.machineWriteback) : 0 }
   await deps.auditRead({
     mode: SHEET_REPAIR_AUDIT.modes.fillsReportRead,
     detail: { operation: 'sheet_fills_report', listing: report.componentHandle === null, pageSize: Array.isArray(report.pairs) ? report.pairs.length : 0, rowCount: rows.length, ...summary },
