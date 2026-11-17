@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { Kysely, Migrator, PostgresDialect } from 'kysely'
 import { Pool } from 'pg'
 import * as path from 'path'
@@ -12,6 +12,24 @@ type TestServer = {
   stop?: () => Promise<void>
   getAddress: () => { port?: number } | null
 }
+
+/*
+ * Webhook delivery from POST /api/events/subscribe goes through the S0-a egress guard (2026-11-17): https
+ * only, no internal name or IP literal (a values-free 400 at subscribe), resolve-and-refuse plus the pinned
+ * https transport on every delivery. So the receiver can no longer be a loopback http listener. The server
+ * here mounts `eventsRouter()` with no seams, exactly as production does; the pinned transport module is
+ * replaced by a recorder (no socket), and the target is a public https IP literal (the guard never resolves
+ * a literal, so no DNS either).
+ */
+const pinnedSends = vi.hoisted(() => [] as Array<{ url: string; pin: string; family: number; body: string }>)
+vi.mock('../../src/multitable/webhook-pinned-fetch', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  pinnedHttpsFetch: async (url: string, pin: string, family: number, init: { body?: string }) => {
+    pinnedSends.push({ url, pin, family, body: String(init?.body ?? '') })
+    return { status: 200, ok: true }
+  },
+}))
+const PUBLIC_WEBHOOK_ADDR = '93.184.216.34'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const migrationLoaders = import.meta.glob('../../src/db/migrations/*.ts')
@@ -117,12 +135,13 @@ async function migrateTestDb(testDb: Kysely<Database>, schemaName: string): Prom
   }
 }
 
-async function waitForReceivedBodies(receivedBodies: string[]): Promise<void> {
+async function waitForPinnedSend(): Promise<void> {
   const deadline = Date.now() + 5000
-  while (receivedBodies.length === 0 && Date.now() < deadline) {
+  while (pinnedSends.length === 0 && Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, 50))
   }
-  expect(receivedBodies.length).toBe(1)
+  // At least one: a non-wildcard pattern is delivered by both bus call sites (processEvent and the local listener).
+  expect(pinnedSends.length).toBeGreaterThanOrEqual(1)
 }
 
 const describeWithDb = dbUrl ? describe : describe.skip
@@ -205,41 +224,31 @@ describeWithDb('Event bus API integration', () => {
       'Content-Type': 'application/json',
     }
 
-    const receivedBodies: string[] = []
-    const webhookServer = http.createServer((req, res) => {
-      let body = ''
-      req.on('data', chunk => {
-        body += chunk
-      })
-      req.on('end', () => {
-        receivedBodies.push(body)
-        res.statusCode = 200
-        res.end('ok')
-      })
-    })
-
-    const webhookPort: number = await new Promise((resolve, reject) => {
-      webhookServer.once('error', reject)
-      webhookServer.listen(0, '127.0.0.1', () => {
-        const address = webhookServer.address()
-        if (!address || typeof address === 'string') {
-          reject(new Error('failed to bind webhook server'))
-          return
-        }
-        resolve(address.port)
-      })
-    })
-
+    pinnedSends.length = 0
     let subscriptionId = ''
 
     try {
+      // The pre-guard receiver shape (a loopback http listener) is refused at subscribe, values-free.
+      const loopbackRes = await requestJson(`${baseUrl}/api/events/subscribe`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          subscriberId: 'integration-webhook-loopback',
+          eventPattern: 'integration.event',
+          webhookUrl: 'http://127.0.0.1:8900/hook',
+        }),
+      })
+      expect(loopbackRes.status).toBe(400)
+      expect(loopbackRes.body).toEqual({ ok: false, error: { code: 'WEBHOOK_TARGET_REJECTED', refusalClass: 'loopback' } })
+      expect(loopbackRes.raw).not.toContain('127.0.0.1')
+
       const subscribeRes = await requestJson(`${baseUrl}/api/events/subscribe`, {
         method: 'POST',
         headers: authHeaders,
         body: JSON.stringify({
           subscriberId: 'integration-webhook',
           eventPattern: 'integration.event',
-          webhookUrl: `http://127.0.0.1:${webhookPort}/hook`,
+          webhookUrl: `https://${PUBLIC_WEBHOOK_ADDR}/hook`,
         }),
       })
       expect(subscribeRes.status).toBe(200)
@@ -260,7 +269,12 @@ describeWithDb('Event bus API integration', () => {
       const eventId = (emitRes.body as { data?: { eventId?: string } } | undefined)?.data?.eventId || ''
       expect(eventId).toBeTruthy()
 
-      await waitForReceivedBodies(receivedBodies)
+      await waitForPinnedSend()
+      // Delivered through the pinned transport to the approved address, with the event as the body.
+      expect(pinnedSends[0].url).toBe(`https://${PUBLIC_WEBHOOK_ADDR}/hook`)
+      expect(pinnedSends[0].pin).toBe(PUBLIC_WEBHOOK_ADDR)
+      expect(pinnedSends[0].family).toBe(4)
+      expect(JSON.parse(pinnedSends[0].body)).toMatchObject({ event_id: eventId, event_name: 'integration.event' })
 
       const listRes = await requestJson(`${baseUrl}/api/events?limit=10`, {
         headers: authHeaders,
@@ -293,7 +307,6 @@ describeWithDb('Event bus API integration', () => {
           },
         })
       }
-      await new Promise(resolve => webhookServer.close(resolve))
     }
   })
 })
