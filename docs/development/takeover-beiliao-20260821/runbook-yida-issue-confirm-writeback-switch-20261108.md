@@ -2,23 +2,26 @@
 
 > **用途**：设计基线 v2.3 §7.3（D5 / D9 / D13 a）的「发料确认日期回写」在 #6812 接线后由开关 `INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED` 控制，默认关闭。本页只列打开这个开关之前必须核对的几条，以及打开之后的运行与告警说明；**打开开关会写客户生产备料表的「发料确认日期」列，属 O 层，由 owner 单独批准并亲自操作**。Claude 不设置、不建议代为设置、不远程操作这个开关。
 > **values-free**：回报只写 True/False、行数与面板上显示的结果类别 / 错误码；不抄项目号、业务键、记录号或任何字段内容。
-> **行号**：本页的 `path:line` 都按 #6812 分支上最后一次改代码的提交 `b0fd874d2` 核对（之后的提交只改本页与登记册）；合并前按当时的目标 commit 重新核对。
+> **行号**：本页不带提交号的 `path:line` 都按 #6812 分支的提交 `b0fd874d2` 核对；带 `@<提交>` 的按该提交核对。`b0fd874d2` 之后改代码的提交（第 2f 步：一条单测、`index.ts` 的一段注释、integration-guard 名单各加一行、新增计数 SQL）都不动本页不带提交号引用的那些行；合并前按当时的目标 commit 重新核对。
 
 ## 打开开关之前
 
 1. **先给 owner 授予经角色的操作档位，再打开开关（不可颠倒）。** 回写在租约内对每一行重新核对 owner 的权限（D13 a）：只认**经角色授予**的 `stock-prep:admin`，或同时经角色授予 `stock-prep:operate` 与 `stock-prep:read`（`packages/core-backend/src/integration/yida-issue-confirm-writeback-authority.ts:51-54`）。直接写进 `user_permissions` 的授权、`role:admin`、`integration:admin` 都不算。
    **后果（写明）：开关打开而 owner 没有这一档位时，每一条已确认（acknowledged）的发送都会得到一条永久的 `permission_revoked` 留痕**（`plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs:463`），留痕表只追加、不能改删。之后的运行读行时这一行已有留痕，就不再选它，所以这些行的日期一般不会再被回写；唯一的例外是下文「两次运行重叠」里写明的残余情形（至多一次首次补丁）。ACK 后运行自己留痕了这种结果时，服务器日志记一条 `YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN permission_revoked=1`（见下文「告警说明」），但已留痕的行不会因此再写。所以必须先授予档位、确认生效，再打开开关。
-2. **目标清单只列正式的发料确认目标，永远不列测试副本。** `INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS` 只列正式发料确认表对应的宜搭目标；槽位 1（发料测试副本），以及 `INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS` 里的任何目标，都不能列进来（`scripts/ops/global-history-flag-manifest.mjs:114`）。原因：发往列进清单的测试副本的一次已绑定发送，会先把生产表这一行的「发料确认日期」写上；之后正式发送的确认到来时单元格已有值，按 D8 不覆盖（记 `kept_existing`），测试那一天就一直留在生产表上。正式目标只收已绑定来源的行（D20：`packages/core-backend/src/integration/yida-send-approval-service.ts:339-346`，审批时在 `:595`、准入时在 `:660` 检查），所以清单只列正式目标时，回写永远遇不到 `source_unbound`（见下文「告警说明」）。清单为空或格式不对 = 不回写任何行（不是报错）。
+2. **目标清单只列正式的发料确认目标，永远不列测试副本。** `INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS` 只列正式发料确认表对应的宜搭目标；槽位 1（发料测试副本），以及 `INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS` 里的任何目标，都不能列进来（`scripts/ops/global-history-flag-manifest.mjs:114`）。原因：发往列进清单的测试副本的一次已绑定发送，会先把生产表这一行的「发料确认日期」写上；之后正式发送的确认到来时单元格已有值，按 D8 不覆盖（记 `kept_existing`），测试那一天就一直留在生产表上。正式目标只收已绑定来源的行（D20：`packages/core-backend/src/integration/yida-send-approval-service.ts:339-346`，审批时在 `:595`、准入时在 `:660` 检查），所以清单只列正式目标时，回写永远遇不到 `source_unbound`（见下文「告警说明」）。清单逐项解析：格式不对的一项被忽略，其余合格的目标照样回写；只有清单为空、或每一项都格式不对时，才不回写任何行（不是报错）（`plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs:236-240`）。
 3. **项目备料表开关**：`MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED` 也须为 `true`，否则每行只得到跳过 `project_sheets_disabled`，不写、不留痕、不告警，该开关打开后再次判定（`plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs:32-35`）。
 4. **只认原文 `true`**：小写、不加引号、不加空格；`TRUE`、`1`、` true` 都算关。
 5. **开着存档持久化的部署：所装版本必须已含 #6925（`6d2681703`）。** 凡开着 `MULTITABLE_STOCK_PREP_TABLE_ACTION_MVP_PERSIST_ENABLED` 的部署，所装版本必须已含 #6925：存档修订不计回写写入的机器列，只改 buildArchiveRevision，不改 buildRevision（`plugins/plugin-integration-core/lib/stock-preparation-table-actions.cjs:1917`、`:1924`）。D1 已随 #6925 合入（本分支已合入含它的 main）。没有它，写入日期会改变存档修订，进而产生一个新批次。这一项、打开开关、填目标清单、是否定期补跑都是 owner 逐项先批后动的 O 层②事项。
 6. **迁移 `zzzz20261117090000` 已执行**：`kysely_migration` 里有这一行，并且留痕表的结果约束 `integration_yida_issue_confirm_writeback_outcome_check` 列有 `written_inactive`（`packages/core-backend/src/db/migrations/zzzz20261117090000_add_integration_yida_issue_confirm_written_inactive.ts:38-42`）。缺这一迁移时，作废行上的日期照样写进去，但留痕 INSERT 被约束拒绝，运行只记 `AFTER_ACK_FAILED`；之后的补写看到单元格已有日期，记 `already_set`，`written_inactive` 的信号就无声丢了。
 7. **通用写入方不会擦掉日期（登记册 R-96 ⑦，备料线 2026-11-17 裁定：两条都要）**：
    - 所装版本必须已含 D2（集成线「通用写入方剥离机器列」切片，写本页时未入 main）与 #6925；
-   - 并且紧接着打开开关之前，跑两项只读、values-free 的计数，**两项都必须为 0**：(1) 登记过的项目表上非空 `issueConfirmDate` 单元格的个数（回写还没开，这一列应当全空）；(2) 项目登记表里 `sheet_id` 与按租户和对象派生的 sheet id 不一致的行数（或站点探针的 `sheet_id_mismatch` 为 0，`scripts/ops/stock-prep-pull-batch-site-probe-20261107/01-site-probe.sql:279`）。任一不为 0 就停，不打开开关。
-   - **谁跑、何时跑**：这两项计数读客户现场库，是 owner 先批、再执行的只读步骤（O 层①）；由 owner 本人或 owner 指定的现场操作人在现场跑，Claude 不跑、不远程操作（与本页开头的开关说明一致）。时间是**紧接着打开开关之前**；回报只写两个数字。任一不为 0 就停：不打开开关，把两个数字交回备料线与集成线。
+   - 并且紧接着**每一次**打开开关之前（第一次打开，以及关回之后的每一次重新打开），跑两项只读、values-free 的计数，**两项都必须为 0**，任一不为 0 就停，不打开开关：
+     - (1) 登记过的项目表上**解释不了**的非空 `issueConfirmDate` 单元格数（备料线 2026-11-17 裁定的定义）：非空按 D8 判断（缺失、null、空串为空），并且既不能由 (i) 这一行的带日期留痕解释（结果为 `written`、`already_set` 或 `written_inactive`，同一租户、同一张表，留痕日期就是单元格里的日期），也不能由 (ii) 从一条已由 (i) 解释的前任行经 carry 带过来解释。用只读 SQL `scripts/ops/yida-issue-confirm-switch-on-count-20261117/01-count-1.sql` 跑（文件头写明了做法和运行方式），读它的最后一行 `PROBE_RESULT … status=complete count1=<n>`，`count1` 就是这一项；没有这一行，或者是 `status=incomplete`，都**不算 0**。第一次打开时还没有任何留痕，这一项就等于原来的「非空单元格个数」。
+     - (ii) 在 SQL 里接不上：#6928 的 carry 只在后继行的补丁里复制日期，确认账本只存后继行的键（前任行的键只折进 `inputFingerprint` 的哈希），账本收尾是可选的，审计只记计数（逐条出处见 SQL 文件头）。所以这条 SQL 不会自动放行 carry 带过来的日期，它们照样计入。carry 搬过日期之后再打开开关时 `count1` 不为 0 是预料之中的：照样停下，不打开开关，交 owner 复核。
+     - (2) 项目登记表里 `sheet_id` 与按租户和对象派生的 sheet id 不一致的行数（或站点探针的 `sheet_id_mismatch` 为 0，`scripts/ops/stock-prep-pull-batch-site-probe-20261107/01-site-probe.sql:279`）。
+   - **谁跑、何时跑**：这两项计数读客户现场库，是 owner 先批、再执行的只读步骤（O 层①）；由 owner 本人或 owner 指定的现场操作人在现场跑，Claude 不跑、不远程操作（与本页开头的开关说明一致）。时间是**紧接着每一次打开开关之前**；回报只写两个数字。任一不为 0 就停：不打开开关，把两个数字交回备料线与集成线。
    - 本条取代 D1–D3 复核终裁 §7.3 的二选一（「普查为 0，否则先装剥离」）：现在 D2 装上与两项计数为 0 **都要**。D2 装上之后，通用写入方配置的普查只作参考，不再是前置条件。
-8. **有效列只有布尔值**：备料线 census 的 `nonBooleanActiveCells` 为 0（`plugins/plugin-integration-core/lib/stock-preparation-sheet-census.cjs:176`），或由备料线先修好这些行。原因见下文「写到了作废行」：有效列不是布尔值的行在填报视图里看不到，回写却按有效行处理、记 `written`、不记日志。
+8. **有效列只有布尔值**：登记过的项目表上 `active` 不是布尔值的行数为 0，`active` 为 null 或缺失的行**也算在内**；或由备料线先修好这些行。备料线 census 的 `nonBooleanActiveCells`（`plugins/plugin-integration-core/lib/stock-preparation-sheet-census.cjs:175-176`）只数存在、不为 null、又不是布尔值的单元格，不数 null 和缺失，所以它为 0 并不证明有效列只有布尔值。原因见下文「写到了作废行」：`active` 不是布尔 `false` 的行都按有效行回写；其中不是布尔 `true` 的（null、缺失或别的值）在填报视图里看不到，回写却记 `written`、不记日志。
 9. **要让 carry 搬日期，所装版本须含 #6928（`88f7e47c5`）**：没有它，`written_inactive` 的日期在产品里没有任何办法挪到后继行（见下文「写到了作废行」）。
 
 ## 打开之后
@@ -48,7 +51,7 @@
 owner 2026-11-17 裁定（登记册 R-96 ⑦ D3-1）：回写按业务键找到的那一行如果是**作废行**（`active` 为布尔 `false`：BOM 换键或表修复退役后留在原键下的前任行，新行换了键；填报视图按 `active` 过滤，看不到它），**仍然写入日期**，规则不变（D8：只写空单元格），留痕结果记 `written_inactive`（`plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs:161`、判定 `:494`、留痕 `:699-701`）。按键查行从不按 `active` 过滤（`:669`）：后继行换了键，过滤只会把这种情形变成无声的 `row_absent`。把日期挪到后继行是备料线 carry 的事，回写不做。
 
 - 只有「写入」会是 `written_inactive`：作废行单元格里已经是这一天，记 `already_set`；已有别的值，记 `kept_existing`，与有效行相同。补丁成功而留痕写入失败的作废行，下一次运行记的是 `already_set`，不再是 `written_inactive`，日志里也就没有这一条；要找它只能读表。
-- **有效列不是布尔值的行**：只认布尔 `false` 为作废（备料线 census 同规则）；有效列是别的值（census 的 `nonBooleanActiveCells`）的行，填报视图同样看不到（视图只显示 `active` 为 true 的行，`plugins/plugin-integration-core/lib/stock-preparation-target-provisioning.cjs:632`），回写却按有效行处理：记 `written`，不记任何日志。所以打开开关之前这个计数要为 0（「打开开关之前」第 8 条）。
+- **有效列不是布尔值的行**：只认布尔 `false` 为作废（备料线 census 同规则）；`active` 为 null、缺失或别的值的行，填报视图同样看不到（视图只显示 `active` 为 true 的行，`plugins/plugin-integration-core/lib/stock-preparation-target-provisioning.cjs:632`），回写却按有效行处理：记 `written`，不记任何日志。census 的 `nonBooleanActiveCells` 不数 null 和缺失的单元格。所以打开开关之前，这类行（null 与缺失也算）要为 0（「打开开关之前」第 8 条）。
 - **谁能把日期挪到后继行**：只有管理员发起的 carry 确认，并且所装版本含 #6928（`88f7e47c5`，已在 main 上，本分支已合入）。carry 确认在同一个补丁里把前任行的日期复制到后继行**为空**的单元格；后继行已是这一天记已设，已有别的日期就保留，从不覆盖、也不因此拒绝（`plugins/plugin-integration-core/lib/stock-preparation-confirm-writes.cjs:1176-1205`）。
 - **carry 只由管理员发起**：`carryPolicy` 是表动作的部署配置项（`plugins/plugin-integration-core/lib/stock-preparation-table-actions.cjs:536`），全树除测试外没有任何地方配置它；没配就不做 carry 规划（`plugins/plugin-integration-core/lib/stock-preparation-conflict-planner.cjs:1767`），配了也只是提出建议，要经管理员确认才写入。规划只在新增后继行时看前任行（`:1767-1777`）。
 - **只有日期的前任行永远不会被 carry**：carry 决定里的 `carryFields` 必须是非空的人工字段子集（`stock-preparation-confirm-writes.cjs:875-877`），发料确认日期是机器列，不在其中；规划时前任行只有日期，只报告 `machine_context_only`，不提出建议（`plugins/plugin-integration-core/lib/stock-preparation-carry-policy.cjs:302`、`:434`）。换键之后才到的 ACK 写日期时，前任行在新增后继行那一刻还没有日期，连这条报告都不会有。
@@ -100,15 +103,20 @@ ACK 后运行只会写下面四条固定码（`packages/core-backend/src/integra
 
 ## 不在回写范围内
 
-- **备料线开关手册附录「备选：一次性 SQL 认领」登记的旧沙箱表**（`docs/development/takeover-beiliao-20260821/runbook-stock-prep-project-sheets-switch-on-20261014.md`；对象 id 不是 `plm_stock_preparation_sandbox_p_…` 形式的表）：回写对它们取不到字段映射，每一行都得 500 `TABLE_ACTION_FIELD_IDS_UNRESOLVED`（`plugins/plugin-integration-core/lib/stock-preparation-table-actions.cjs:1394-1404`），所以这类表上不会有回写写入的日期。它们不在回写的服务范围内；要不要纳入是另一项裁定。
+- **备料线开关手册附录「备选：一次性 SQL 认领」登记的旧沙箱表**（`docs/development/takeover-beiliao-20260821/runbook-stock-prep-project-sheets-switch-on-20261014.md`；对象 id 不是 `plm_stock_preparation_sandbox_p_…` 形式的表）：回写对它们取不到字段映射（`plugins/plugin-integration-core/lib/stock-preparation-table-actions.cjs:1394-1404`），核心把这个错误码按可重试处理（`plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs:554-560`）：每一行都得可重试的 `TABLE_ACTION_FIELD_IDS_UNRESOLVED`，从不留痕；每次 ACK 之后都记一条 `DEFERRED`（它的处理「等占着租约的写入方结束」对这种行不适用），任何一遍补写都修不好它。所以这类表上不会有回写写入的日期。它们不在回写的服务范围内；要不要纳入是另一项裁定。
 
 ## 关回
 
-- 把开关改回 `false` 并重启后端；已写入的日期与留痕保持不变。
+按 main 的开关关闭规则（#6929：`plugins/plugin-integration-core/lib/http-routes.cjs:1878-1881@59876b3d6`、`scripts/ops/global-history-flag-manifest.mjs:958@59876b3d6`；步骤见 `customer-delivery-guide-20260904.md` §5-5）：
+
+- **不要直接删掉开关这一行**：pm2 会在运行中的进程里保留已删除的键，开关仍然开着。把这一行改成 `INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED=false`，用 `scripts/ops/attendance-onprem-start-pm2.ps1` 重启，在 `pm2 env` 里核对这个键已是 `false`，并核对一个可观察的效果：补写入口的回答是 `enabled: false`、`results` 为空、不带 `report`（`plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs:707`）。都成立之后，才可以删掉这一行。
+- **要清空目标清单**，写成 `INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS=" "`（引号里一个空格；解析器把它当作空清单，`plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs:236`），不要写成空的 `INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS=`：PS 5.1 把空的 `KEY=` 当作删掉了这一行，pm2 会继续用旧清单。同样用启动脚本重启，并在 `pm2 env` 里核对。
+- 已写入的日期与留痕保持不变。之后再打开开关，按「打开开关之前」第 7 条重新跑两项计数（每一次打开都跑）。
 
 ## 回滚到 R85（`220bd80ab`）
 
-- **回滚必须用 `-RunMigrations 0`**（不跑 migrate，也不跑 down）。库历史里有旧包没有的迁移时，旧包的 migrate 报 `corrupted migrations: previously executed migration … is missing`、exit 1：集成线 2026-11-17 的 D21 本地验收实测过（库里有 Y5a 的 D21 `zzzz20261106110500`，不含它的代码跑 migrate 即如此）。推断（同一检查，未对 R85 实测）：本 PR 的两个迁移 `zzzz20261106093100` 与 `zzzz20261117090000` 都不在 R85 里，R85 开着迁移安装同样会在迁移这一步失败。
+- **回滚必须用 `-RunMigrations 0`**（不跑 migrate，也不跑 down）。库历史里有旧包没有的迁移时，旧包的 migrate 报 `corrupted migrations: previously executed migration … is missing`、exit 1：集成线 2026-11-17 的 D21 本地验收实测过（库里有 Y5a 的 D21 `zzzz20261106110500`，不含它的代码跑 migrate 即如此）。推断（同一检查，未对 R85 实测）：Y9 线的两个迁移（`zzzz20261106093100` 已在 main 上，`zzzz20261117090000` 由本 PR 加入）都不在 R85 里，R85 开着迁移安装同样会在迁移这一步失败。
 - 回滚到 R85 后，`written_inactive` 留痕行原样保留。R85 **因不存在而关闭**，**不是**返回 UNAVAILABLE：R85 没有任何代码读这张留痕表（留痕表的迁移也不在 R85 里）；回写也未接线：插件绑定只有两个成员（`plugins/plugin-integration-core/lib/yida-owner-runtime-factory.mjs:92@220bd80ab`），路由没有这条路径，请求走通用 404 `NOT_FOUND`（`packages/core-backend/src/routes/integration-yida-owner.ts:431@220bd80ab`）。所以不会据此发送或判定任何东西（逐项核对记录在集成线证据 rollback-fail-closed.md，只读 `220bd80ab` 的树）。
-- 回滚前用只读计数记下 `outcome = 'written_inactive'` 的行数。这些日期仍在作废行上，R85 不会移动它们（R85 既没有 #6928 的 carry，也没有 #6925）。
+- **R85 没有 #6925**：R85 的存档修订不去掉机器列（`plugins/plugin-integration-core/lib/stock-preparation-table-actions.cjs:1895-1916@220bd80ab`；本分支去掉了，`:1917`）。所以回滚到 R85 之后，凡开着 `MULTITABLE_STOCK_PREP_TABLE_ACTION_MVP_PERSIST_ENABLED` 的部署，每张已经有回写日期（`written` 或 `written_inactive`）的表，在 R85 下一次存档时批次会重新取键一次（与「打开开关之前」第 5 条同一机制）。这是推断，没有实测。
+- 回滚前用只读计数记下 `outcome IN ('written', 'written_inactive')` 的行数（按结果分别记），以及这些行按 `sheet_id` 去重后的表数，即会重新取键的表数（只记数字）。`written_inactive` 的日期仍在作废行上，R85 不会移动它们（R85 既没有 #6928 的 carry，也没有 #6925）。
 - 跑 down 的回滚会被拒：存在 `written_inactive` 行时，迁移 `zzzz20261117090000` 的 down() 先以 55000 `YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE_ROWS_PRESENT` 拒绝，什么都不改（`packages/core-backend/src/db/migrations/zzzz20261117090000_add_integration_yida_issue_confirm_written_inactive.ts:31`、`:56`）。
