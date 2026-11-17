@@ -336,6 +336,19 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     } catch (error) { await owner.query('ROLLBACK'); throw error }
   }
   const outcomeOf = (result: Result) => result.results.map(entry => entry.kind === 'outcome' ? entry.outcome : `${entry.kind}:${entry.reason ?? entry.code}`)
+  // The host's two fixed post-ACK log codes (yida-owner-runtime.ts): a failed run, and (stock-prep C2) a run that finished
+  // normally with a retryable row. A code arrives after the host run retired, so a test that expects one waits for it.
+  const HOOK_FAILED = 'YIDA_ISSUE_CONFIRM_WRITEBACK_AFTER_ACK_FAILED'
+  const DEFERRED = 'YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED'
+  async function warned(count = 1) {
+    const deadline = Date.now() + 4000
+    while (world!.warnings.length < count) {
+      if (Date.now() > deadline) throw new Error('SYNTHETIC_WARNING_NEVER_LOGGED')
+      await new Promise(resolve => setTimeout(resolve, 5))
+    }
+    // Long enough for a second code of the same run to show up if one were ever logged.
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
 
   beforeAll(async () => {
     const lib = path.join(root, 'plugins/plugin-integration-core/lib')
@@ -449,6 +462,9 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     // values-free trace: no project number, key or human value.
     const text = JSON.stringify(trace)
     for (const value of [PROJECT, ...LINES, HUMAN_NOTE]) expect(text.includes(value)).toBe(false)
+    // A written row logs nothing (C2: only a retryable row is DEFERRED; only a failed run is HOOK_FAILED).
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(world!.warnings).toEqual([])
   })
 
   it('ack persisted, crash before write-back: recovery fills only the local date; ledger, audits and the single form submission are untouched', async () => {
@@ -457,7 +473,8 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     const { grant, result, request } = await sendOne(boundInput(0))
     // The hook's executor threw: the send's answer is still the acknowledged one; the host logged one fixed code.
     expect([result.status, result.reused, result.durable]).toEqual(['acknowledged', false, true])
-    expect(world!.warnings).toEqual(['YIDA_ISSUE_CONFIRM_WRITEBACK_AFTER_ACK_FAILED'])
+    await warned()
+    expect(world!.warnings).toEqual([HOOK_FAILED])
     const ledgerId = String(grant.ledgerId ?? result.delivery!.id)
     expect((await ledgerRow(ledgerId)).status).toBe('acknowledged')
     expect(await auditsOf(ledgerId)).toEqual(['acknowledgement', 'claim', 'prepare'])
@@ -646,6 +663,8 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
       expect(await world!.runtime.issueConfirmWriteback(actor, {})).toEqual({ enabled: true, results: [], next: null })
     }
     expect(await tableRows(TRACE)).toEqual([])
+    // Nothing was retryable: no C2 signal (and the run did not fail).
+    expect(world!.warnings).toEqual([])
   })
 
   it('D13 live re-check: an owner who lost the role-granted stock-prep code is recorded permission_revoked and nothing is patched', async () => {
@@ -675,6 +694,9 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     expect(busy!.results.map(entry => [entry.ledgerId, entry.kind, entry.code])).toEqual([[ledgerId, 'retryable', 'STOCK_PREP_PROJECT_WRITE_LOCKED']])
     expect(patches).toEqual([])
     expect(await tableRows(TRACE)).toEqual([])
+    // The recovery entry's caller sees its rows: a retryable row there is never the C2 log line (the one code is the
+    // crashed post-ACK run's).
+    expect(world!.warnings).toEqual([HOOK_FAILED])
     expect([(await cell()).date, (await cell()).version]).toEqual([null, before.version])
     // The holder released: a retry writes the date once, with one written trace; a further retry has nothing to do.
     expect(outcomeOf(await world!.runtime.issueConfirmWriteback(actor, {}))).toEqual(['written'])
@@ -686,6 +708,50 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     expect((await world!.runtime.issueConfirmWriteback(actor, {})).results).toEqual([])
     expect(patches).toHaveLength(1)
     expect([world!.fake.token, world!.fake.form]).toEqual([1, 1])
+  })
+
+  it('C2 on real PostgreSQL: a post-ACK run that meets the held sheet lease is retryable WRITE_LOCKED and logs YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED once — no patch, no trace; the recovery entry then writes the date and logs nothing more', async () => {
+    await compose()
+    const before = await cell()
+    const lock = createWriteLock({ db: createDb({ database: pluginDatabase }) }) as {
+      scopeKeyFor(sheetId: string): string
+      withProjectWriteLease(scopeKey: string, options: Row, fn: () => Promise<unknown>): Promise<unknown>
+    }
+    let sent: Awaited<ReturnType<typeof sendOne>> | undefined
+    // Another holder (purpose small_apply) holds the sheet's lease while the send is acknowledged and its post-ACK run
+    // settles; the send itself never touches the lease table.
+    await lock.withProjectWriteLease(lock.scopeKeyFor(sheetId()), { purpose: 'small_apply', runId: randomUUID(), tenantId: TENANT }, async () => {
+      sent = await sendOne(boundInput(0))
+      await warned()
+    })
+    const ledgerId = String(sent!.grant.ledgerId ?? sent!.result.delivery!.id)
+    expect([sent!.result.status, sent!.result.reused]).toEqual(['acknowledged', false])
+    const answers = await Promise.all(world!.runs)
+    expect(answers.map(answer => answer.results.map(entry => [entry.ledgerId, entry.kind, entry.code]))).toEqual([[[ledgerId, 'retryable', 'STOCK_PREP_PROJECT_WRITE_LOCKED']]])
+    // Exactly one fixed code: no id, no value, no count.
+    expect(world!.warnings).toEqual([DEFERRED])
+    expect(patches).toEqual([])
+    expect(await tableRows(TRACE)).toEqual([])
+    expect([(await cell()).date, (await cell()).version]).toEqual([null, before.version])
+    // The holder released: the recovery entry writes the date once; it logs nothing (its caller sees the rows).
+    expect(outcomeOf(await world!.runtime.issueConfirmWriteback(actor, {}))).toEqual(['written'])
+    expect((await cell()).date).toBe(businessDay(await ackAt(ledgerId)))
+    expect((await tableRows(TRACE)).map(row => [row.ledger_id, row.outcome])).toEqual([[ledgerId, 'written']])
+    expect(world!.warnings).toEqual([DEFERRED])
+    expect([world!.fake.token, world!.fake.form]).toEqual([1, 1])
+  })
+
+  it('C2 on real PostgreSQL, D14: with the project-sheets switch off the post-ACK run only skips project_sheets_disabled — no log line, no trace, no patch', async () => {
+    await compose({ env: { MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED: 'false' } })
+    const { result } = await sendOne(boundInput(0))
+    expect([result.status, result.reused]).toEqual(['acknowledged', false])
+    const answers = await Promise.all(world!.runs)
+    expect(answers.map(answer => outcomeOf(answer))).toEqual([['skip:project_sheets_disabled']])
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(world!.warnings).toEqual([])
+    expect(await tableRows(TRACE)).toEqual([])
+    expect(patches).toEqual([])
+    expect((await cell()).date).toBe(null)
   })
 
   it('D5 a on real PostgreSQL: the send answers while its post-ACK write-back is parked; stop() waits for that in-flight run within the barrier; the stopped run writes nothing and recovery fills the date once', async () => {
@@ -707,7 +773,10 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     await stopping
     expect(stopped).toBe(true)
     await Promise.allSettled(world!.runs)
-    // Cancelled by the stop barrier: no patch, no trace (retryable inserts none), the lease is free again.
+    // Cancelled by the stop barrier: no patch, no trace (retryable inserts none), the lease is free again. The run did
+    // not finish normally, so its one log line is the failure code, never DEFERRED.
+    await warned()
+    expect(world!.warnings).toEqual([HOOK_FAILED])
     expect(patches).toEqual([])
     expect(await tableRows(TRACE)).toEqual([])
     expect((await cell()).date).toBe(null)

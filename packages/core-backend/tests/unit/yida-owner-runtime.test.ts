@@ -69,8 +69,8 @@ function loadRuntime(factory: Factory, source = originalSource, ownCoreErrors = 
       yidaSendApprovalErrorCode: (error: unknown) => ownCoreErrors.get(error as object),
     }
     // Y9: the host live re-check of the issue-confirm write-back. The control path never reaches it: only the cursor
-    // refusal mapping below binds the write-back capability, and its run answers without calling the re-check; it
-    // refuses if anything ever calls it.
+    // refusal mapping and the C2 log-code helper below bind the write-back capability, and their runs answer without
+    // calling the re-check; it refuses if anything ever calls it.
     if (specifier === './yida-issue-confirm-writeback-authority') return {
       yidaIssueConfirmLiveRecheck: async () => { throw new Error('UNIT_RECHECK_MUST_NOT_RUN') },
     }
@@ -87,6 +87,8 @@ function fixture(options: {
   readSheetSource?: () => unknown
   // D21 (slice Y5): the host's in-transaction re-authorizer; handed to the runtime only when the option is present.
   reauthorizeSourceBinding?: unknown
+  // Y9: the post-ACK log sink; handed to the runtime only when present.
+  warn?: (code: string) => void
 } = {}) {
   const authority = fakeAuthority()
   const coreFactory = vi.fn(options.factory ?? (() => authority))
@@ -100,7 +102,8 @@ function fixture(options: {
     ...(options.readMultiTarget ? { readMultiTargetEnablement: options.readMultiTarget } : {}),
     ...(options.readSheetSource ? { readSheetSourceEnablement: options.readSheetSource } : {}),
     ...(Object.hasOwn(options, 'reauthorizeSourceBinding')
-      ? { reauthorizeSourceBinding: options.reauthorizeSourceBinding as YidaOwnerRuntimeDependencies['reauthorizeSourceBinding'] } : {}) })
+      ? { reauthorizeSourceBinding: options.reauthorizeSourceBinding as YidaOwnerRuntimeDependencies['reauthorizeSourceBinding'] } : {}),
+    ...(options.warn ? { warn: options.warn } : {}) })
   const submit = vi.fn(async () => options.result ?? delivered)
   const createPrimitives = vi.fn(() => Object.freeze({}))
   const createSendPort = vi.fn(() => Object.freeze({ submit, inspect: vi.fn() }))
@@ -197,6 +200,38 @@ async function writebackCursorRefusals(source = originalSource) {
       expect(f.authority.proveDraftTarget, refused).toHaveBeenCalledWith({})
       expect(run, refused).toHaveBeenCalledTimes(1)
       expect(run.mock.calls[0][0], refused).toEqual({ after: SWEEP_CURSOR_FIXTURE })
+    } finally { await f.runtime.stop() }
+  }
+}
+
+// Y9 (stock-prep C2): the post-ACK run's log codes, as the runtime maps the write-back answer of an acknowledged send.
+// A run that finished with a retryable row logs YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED once; a skip or a traced outcome
+// logs nothing; a rejected run logs the failure code alone.
+async function writebackDeferredSignal(source = originalSource) {
+  const ledgerId = delivered.delivery.id
+  for (const [name, answer, expected] of [
+    ['retryable', async () => Object.freeze({ enabled: true, results: [{ ledgerId, kind: 'retryable', code: 'STOCK_PREP_PROJECT_WRITE_LOCKED' }] }),
+      ['YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED']],
+    ['skip project_sheets_disabled', async () => Object.freeze({ enabled: true, results: [{ ledgerId, kind: 'skip', reason: 'project_sheets_disabled' }] }), []],
+    ['outcome written', async () => Object.freeze({ enabled: true, results: [{ ledgerId, kind: 'outcome', outcome: 'written', recorded: true }] }), []],
+    ['rejected', async () => { throw new Error('SYNTHETIC_WRITEBACK_REJECTED') }, ['YIDA_ISSUE_CONFIRM_WRITEBACK_AFTER_ACK_FAILED']],
+  ] as const) {
+    const warnings: string[] = []
+    const f = fixture({ source, warn: code => { warnings.push(code) } })
+    const run = vi.fn(answer)
+    const createIssueConfirmWriteback = vi.fn(() => Object.freeze({ run }))
+    await f.runtime.createPluginCapability().activate({ ...f.binding, createIssueConfirmWriteback,
+      issueConfirmWritebackEnabled: () => true } as unknown as YidaOwnerRuntimeBinding)
+    try {
+      await expect(f.runtime.submit(actor, submission), name).resolves.toMatchObject({ status: 'acknowledged' })
+      const deadline = Date.now() + 2000
+      while (run.mock.calls.length === 0 || (expected.length > 0 && warnings.length === 0)) {
+        if (Date.now() > deadline) break
+        await new Promise(resolve => setTimeout(resolve, 5))
+      }
+      await new Promise(resolve => setTimeout(resolve, 20))
+      expect(run.mock.calls, name).toEqual([[{ ledgerIds: [ledgerId] }]])
+      expect(warnings, name).toEqual(expected)
     } finally { await f.runtime.stop() }
   }
 }
@@ -662,6 +697,10 @@ describe('Yida owner runtime control paths (NOT positive authority proof)', () =
     await writebackCursorRefusals()
   })
 
+  it('Y9 C2: a post-ACK run that finished with a retryable row logs YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED once; a skip or a written outcome logs nothing; a rejected run logs the failure code alone', async () => {
+    await writebackDeferredSignal()
+  })
+
   it('projects a closed submit view and rejects execution authority/material additions', async () => {
     for (const key of ['permit', 'handle', 'credential', 'material', 'token', 'config']) {
       const f = await active({ result: { ...delivered, [key]: 'synthetic-private' } })
@@ -1036,6 +1075,13 @@ describe('in-memory guard mutation probes (no repository writes)', () => {
         test: source => writebackCursorRefusals(source) },
       { name: 'writeback/stale-wire-text', from: "code === 'CURSOR_STALE' ? 'YIDA_ISSUE_CONFIRM_CURSOR_STALE' : `YIDA_OWNER_RUNTIME_${code}`",
         to: '`YIDA_OWNER_RUNTIME_${code}`', test: source => writebackCursorRefusals(source) },
+      // Y9 C2 (stock-prep hard condition): the DEFERRED log line — never dropped, only for a retryable row, its fixed text.
+      { name: 'writeback/deferred-logged', from: 'if (deferred) warn(YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED)', to: '',
+        test: source => writebackDeferredSignal(source) },
+      { name: 'writeback/deferred-retryable-only', from: ".some(row => row.kind === 'retryable')", to: '.some(() => true)',
+        test: source => writebackDeferredSignal(source) },
+      { name: 'writeback/deferred-wire-text', from: "export const YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED = 'YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED'",
+        to: "export const YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED = 'YIDA_ISSUE_CONFIRM_WRITEBACK_RETRYABLE'", test: source => writebackDeferredSignal(source) },
       { name: 'errors/own-runtime-brand', from: 'if (own) fail(own)', to: '', test: async source => {
         const f = await active({ source, enablement: 'false' })
         try { await expect(f.runtime.preview(actor, selected)).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_DISABLED' }) }

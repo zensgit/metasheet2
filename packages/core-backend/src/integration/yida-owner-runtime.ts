@@ -49,8 +49,10 @@ export type YidaOwnerRuntimeDependencies = {
   // Y9 (design baseline v2.3 §7.3, D13 a): the write-back's live re-check, run on the run-scoped database. Defaults to the
   // real host check (yida-issue-confirm-writeback-authority.ts); a unit suite may substitute it. Never a request input.
   issueConfirmRecheck?: YidaIssueConfirmRecheck
-  // Y9: where a failed post-ACK write-back run is reported — one fixed, values-free code, never an id or a message.
-  // index.ts hands the server log (outside any request context); absent = silent. A throwing sink is ignored.
+  // Y9: where the post-ACK write-back run reports — one fixed, values-free code per run, never an id, a count or a
+  // message: YIDA_ISSUE_CONFIRM_HOOK_FAILED (the run failed) or YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED (it finished
+  // normally with a retryable row). index.ts hands the server log (outside any request context); absent = silent. A
+  // throwing sink is ignored.
   warn?: (code: string) => void
 }
 // `after` (batch mode only, never with ledgerIds): the previous page's `next`, an opaque sweep cursor the plugin core decodes.
@@ -99,6 +101,12 @@ const SWEEP_REFUSED = 'AFTER'
 const SWEEP_STALE = 'STALE'
 // Y9 (D5 a): the only text a failed post-ACK write-back run ever logs.
 export const YIDA_ISSUE_CONFIRM_HOOK_FAILED = 'YIDA_ISSUE_CONFIRM_WRITEBACK_AFTER_ACK_FAILED'
+// Y9 (stock-prep condition C2): the only text a post-ACK write-back run logs when it FINISHED normally and its answer
+// holds a retryable row (lease busy, fence refused, a host failure, the switch turned off mid-run): the date was not
+// written and nothing was traced, so only the owner recovery entry fills it. Once per run; no id, value or count. A
+// skip (project_sheets_disabled while the project-sheets switch is off, D14), a traced outcome, an empty answer or a
+// run that failed (HOOK_FAILED) never logs it; the recovery entry never logs it either (its caller sees the rows).
+export const YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED = 'YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED'
 
 export class YidaOwnerRuntimeError extends Error {
   readonly code: string
@@ -434,7 +442,9 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
   // neither the send switch nor the send authority: like the recovery entry it creates the plugin's bound write-back with
   // the host live re-check on ITS OWN run database (so a stop() checkpoint cancels it and drain waits for it), and the
   // plugin core reads INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED first. Its outcome is the module's trace / no-trace;
-  // a rejection is logged as one fixed values-free code and never reaches anyone.
+  // it reaches no one but the server log, as one fixed values-free code: a rejection is HOOK_FAILED; a run that finished
+  // normally (past its exit checkpoint) with a retryable row is WRITEBACK_DEFERRED (C2), so a date left to the recovery
+  // entry is never silent.
   function issueConfirmAfterAcknowledged(owner: YidaOwnerActor, ledgerId: string): void {
     const pending = execute(owner, {}, false, async (_authority, state, fixed, _checkpoint, _signal, _tracked, database) => {
       if (!state.createIssueConfirmWriteback) return undefined
@@ -443,7 +453,13 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
       if (typeof writeback.run !== 'function' || types.isProxy(writeback.run)) fail('UNAVAILABLE')
       return writebackView(await (writeback.run as (input: unknown) => Promise<unknown>)({ ledgerIds: [ledgerId] }))
     })
-    Promise.prototype.then.call(pending, undefined, () => warn(YIDA_ISSUE_CONFIRM_HOOK_FAILED))
+    Promise.prototype.then.call(pending, (view: Readonly<Row> | undefined) => {
+      // The view is writebackView's frozen projection (or undefined without the capability): its results are closed rows.
+      // Nothing here may reject (the derived promise is never observed).
+      let deferred = false
+      try { deferred = view !== undefined && (view.results as ReadonlyArray<Readonly<Row>>).some(row => row.kind === 'retryable') } catch { deferred = false }
+      if (deferred) warn(YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED)
+    }, () => warn(YIDA_ISSUE_CONFIRM_HOOK_FAILED))
   }
   function input<T>(capture: () => T, invoke: (captured: T) => Promise<unknown>): Promise<unknown> {
     try { return invoke(capture()) }

@@ -4,7 +4,8 @@
 //   - the owner runtime: the write-back binding members come together or not at all, the enabled bit, DISABLED before
 //     any proof, the live proof BEFORE the capability is even created, the closed run input, the send port's original
 //     closed options from every binding, and the post-ACK write-back as a tracked run of its own AFTER submit returned
-//     (D5 a; result first, a failing or hanging hook never changes or delays the result, stop() drains it);
+//     (D5 a; result first, a failing or hanging hook never changes or delays the result, stop() drains it), and its
+//     two fixed log codes (a failed run; C2: a run that finished with a retryable row, never a skip or a traced outcome);
 //   - the D13 a role rule (pure) and the re-check's refusal of a foreign scope before any transaction.
 // The real-PG proofs are tests/integration/stock-preparation-yida-issue-confirm-writeback-realdb.test.ts.
 import { EventEmitter } from 'node:events'
@@ -328,6 +329,46 @@ describe('owner runtime: the post-ACK write-back is a tracked run AFTER submit r
       expect(f.calls.warnings).toEqual(['YIDA_ISSUE_CONFIRM_WRITEBACK_AFTER_ACK_FAILED'])
       await f.runtime.stop()
     }
+  })
+  // Stock-prep condition C2: a post-ACK run that FINISHED normally with a retryable row logs one fixed values-free code, once.
+  const DEFERRED = 'YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED'
+  it.each([
+    ['retryable: the sheet lease is held (WRITE_LOCKED)', { enabled: true, results: [{ ledgerId: LEDGER, kind: 'retryable', code: 'STOCK_PREP_PROJECT_WRITE_LOCKED' }] }, [DEFERRED]],
+    ['retryable: the write-back switch turned off mid-run', { enabled: true, results: [{ ledgerId: LEDGER, kind: 'retryable', code: 'SWITCH_OFF' }], stopped: 'SWITCH_OFF' }, [DEFERRED]],
+    ['skip project_sheets_disabled (D14: the project-sheets switch is off)', { enabled: true, results: [{ ledgerId: LEDGER, kind: 'skip', reason: 'project_sheets_disabled' }] }, []],
+    ['skip already_traced', { enabled: true, results: [{ ledgerId: LEDGER, kind: 'skip', reason: 'already_traced' }] }, []],
+    ['skip acknowledgement_missing', { enabled: true, results: [{ ledgerId: LEDGER, kind: 'skip', reason: 'acknowledgement_missing' }] }, []],
+    ['outcome written', { enabled: true, results: [{ ledgerId: LEDGER, kind: 'outcome', outcome: 'written', recorded: true, date: '2026-03-01', timeZone: 'Asia/Shanghai' }] }, []],
+    ['outcome permission_revoked (non-retryable)', { enabled: true, results: [{ ledgerId: LEDGER, kind: 'outcome', outcome: 'permission_revoked', recorded: true }] }, []],
+    ['an empty answer (not selected)', { enabled: true, results: [] }, []],
+    ['the write-back switch off (enabled false)', { enabled: false, results: [] }, []],
+  ])('C2 signal, %s', async (_name, answer, expected) => {
+    const f = hookFixture({ run: async () => answer })
+    await f.runtime.createPluginCapability().activate(f.binding as never)
+    expect((await Promise.race([f.send(), pause(1000)]) as { status: string }).status).toBe('acknowledged')
+    await until(() => f.calls.runs.length === 1)
+    if (expected.length > 0) await until(() => f.calls.warnings.length > 0)
+    await pause(30)
+    // Exactly once, the fixed code alone: no id, no value, no count.
+    expect(f.calls.warnings).toEqual(expected)
+    await f.runtime.stop()
+    expect(f.calls.warnings).toEqual(expected)
+  })
+  it('C2 signal: a retryable answer from a run that stop() cancelled is the failure code alone, never DEFERRED as well', async () => {
+    const gate = deferred()
+    const f = hookFixture({ run: async () => {
+      await gate.promise
+      return { enabled: true, results: [{ ledgerId: LEDGER, kind: 'retryable', code: 'STOCK_PREP_PROJECT_WRITE_LOCKED' }] }
+    } })
+    await f.runtime.createPluginCapability().activate(f.binding as never)
+    await f.send()
+    await until(() => f.calls.runs.length === 1)
+    const stopping = f.runtime.stop()
+    gate.release()
+    await stopping
+    await until(() => f.calls.warnings.length > 0)
+    await pause(30)
+    expect(f.calls.warnings).toEqual(['YIDA_ISSUE_CONFIRM_WRITEBACK_AFTER_ACK_FAILED'])
   })
   it('scheduled on either settlement, independent of the send switch: OFF after the receipt rejects the send, the run still runs once', async () => {
     // T-level default (Y9 r2 L-e): the acknowledgement is durable even when the send run's exit refuses to expose it.
