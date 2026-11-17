@@ -16,14 +16,30 @@ const {
   isStockPreparationNamespaceObjectId,
 } = require('./stock-preparation-governed-sheet-probe.cjs')
 const { MACHINE_WRITEBACK_FIELD_IDS } = require('./stock-preparation-templates.cjs')
+const {
+  MACHINE_COLUMN_WRITE_CODES,
+  assertNoMachineKeyField,
+  fenceVersionOf,
+  isHostVersionConflict,
+  machineColumnKeySet,
+  omitMachineColumns,
+  resolveRegisteredSheetMachineColumns,
+} = require('./generic-writer-machine-columns.cjs')
 
 // D2 (switch-on precondition for the YiDa issue-confirm write-back, register R-96): on a STOCK-PREP TARGET (a
 // provisioning object id in the stock-prep namespace, or a sheet the governed-sheet probe reports as registered) the
-// feedback UPDATE strips the machine write-back columns (MACHINE_WRITEBACK_FIELD_IDS) and carries `expectedVersion`
-// (the version read); a version conflict leaves that row unwritten and is reported by this closed, retryable reason.
-// Every other target is byte-identical to before. Creates are unchanged (a new row cannot erase a date).
+// feedback writer never sends a machine write-back column (MACHINE_WRITEBACK_FIELD_IDS) — not on an update, not on a
+// create (round 2, F1) — and the strip set includes the physical ids the REGISTERED sheet binds (round 2, F0;
+// lib/generic-writer-machine-columns.cjs; an unresolvable binding refuses the write by its own reason). Each update
+// carries `expectedVersion` (the version read). On the host's VERSION_CONFLICT the row is re-read by key and the
+// stripped patch re-sent with the fresh version, at most FEEDBACK_FENCED_ATTEMPTS times in all (round 2, F2: an
+// incremental pipeline advances its watermark past this run, so no later run is guaranteed to feed the row again);
+// a row still conflicted after that is reported by the closed, retryable reason below. A row read without a usable
+// version is its own, NOT retryable reason (round 2, F5). Every other target is byte-identical to before.
 const ERP_FEEDBACK_VERSION_CONFLICT = 'ERP_FEEDBACK_VERSION_CONFLICT'
-const HOST_RECORD_VERSION_CONFLICT_CODE = 'VERSION_CONFLICT'
+const ERP_FEEDBACK_VERSION_UNREADABLE = 'ERP_FEEDBACK_VERSION_UNREADABLE'
+const ERP_FEEDBACK_MACHINE_COLUMNS_UNRESOLVED = 'ERP_FEEDBACK_MACHINE_COLUMNS_UNRESOLVED'
+const FEEDBACK_FENCED_ATTEMPTS = 3
 
 const DEFAULT_FIELD_MAP = Object.freeze({
   status: 'erpSyncStatus',
@@ -391,12 +407,27 @@ function isStockPreparationMachineColumnTarget(objectId, answer) {
   return Boolean(answer && answer.registry && answer.registry.present === true)
 }
 
-function omitKeys(data, keys) {
-  const out = {}
-  for (const [field, value] of Object.entries(data)) {
-    if (!keys.has(field)) out[field] = value
+/**
+ * D2 round 2 (F2): the fenced update of one feedback row with a BOUNDED re-read. Sends the stripped patch with the
+ * version read; on the host's VERSION_CONFLICT re-reads the row by its key and re-sends the SAME stripped patch with
+ * the fresh version — safe, because the patch never carries a machine column — at most FEEDBACK_FENCED_ATTEMPTS times
+ * in all. Answers 'patched' | 'conflicted' (still moving, or gone on the re-read: never created) | 'unreadable'.
+ */
+async function patchFeedbackRowFenced({ recordsApi, sheetId, physicalKeyField, key, existing, changes }) {
+  let current = existing
+  for (let attempt = 1; ; attempt += 1) {
+    const expectedVersion = fenceVersionOf(current)
+    if (expectedVersion === null) return 'unreadable'
+    try {
+      await recordsApi.patchRecord({ sheetId, recordId: current.id, changes, expectedVersion })
+      return 'patched'
+    } catch (error) {
+      if (!isHostVersionConflict(error)) throw error
+      if (attempt >= FEEDBACK_FENCED_ATTEMPTS) return 'conflicted'
+    }
+    current = await findRecordByKey(recordsApi, sheetId, physicalKeyField, key)
+    if (!current || !current.id) return 'conflicted'
   }
-  return out
 }
 
 // The feedback result's reason for a governance refusal (409 governed / 501 not wired) or a governance read that
@@ -408,6 +439,16 @@ function governanceFeedbackReasonOf(error) {
     return { reason: 'ERP_FEEDBACK_GOVERNED_SHEET_REFUSED', code: error.code }
   }
   return { reason: 'ERP_FEEDBACK_GOVERNANCE_UNREADABLE', code: error.code }
+}
+
+// D2 round 2 (F0): a stock-prep target whose machine columns could not be resolved, or whose lookup key IS one —
+// refused before any records IO; reported by its own reason and the closed code.
+function machineColumnFeedbackReasonOf(error) {
+  if (!error || error.name !== 'GenericWriterMachineColumnError' || typeof error.code !== 'string') return null
+  if (error.code === MACHINE_COLUMN_WRITE_CODES.UNRESOLVED || error.code === MACHINE_COLUMN_WRITE_CODES.KEY_REFUSED) {
+    return { reason: ERP_FEEDBACK_MACHINE_COLUMNS_UNRESOLVED, code: error.code }
+  }
+  return null
 }
 
 function createMultitableFeedbackWriter({ context, governedSheetProbe } = {}) {
@@ -447,13 +488,28 @@ function createMultitableFeedbackWriter({ context, governedSheetProbe } = {}) {
         ...(machineTarget ? MACHINE_WRITEBACK_FIELD_IDS : []),
       ]))
       const fieldIdMap = await resolveFields(provisioning, projectId, objectId, fieldIds)
-      // D2: the payload keys that name a machine column here (logical ids and their resolved physical ids).
-      const machineKeys = machineTarget
-        ? new Set([...MACHINE_WRITEBACK_FIELD_IDS, ...MACHINE_WRITEBACK_FIELD_IDS.map((fieldId) => fieldIdMap[fieldId]).filter(Boolean)])
-        : null
+      // D2: the payload keys that name a machine column here — logical ids, their resolved physical ids, and (round 2,
+      // F0) on a REGISTERED sheet the physical ids its registry binding resolves to (refused when it cannot be).
+      let machineKeys = null
+      if (machineTarget) {
+        const physicalIds = MACHINE_WRITEBACK_FIELD_IDS.map((fieldId) => fieldIdMap[fieldId]).filter(Boolean)
+        if (governance && governance.registry && governance.registry.present === true) {
+          physicalIds.push(...await resolveRegisteredSheetMachineColumns({
+            governedSheetProbe,
+            provisioning,
+            sheetId: String(sheetId),
+            objectId,
+            candidateTenantIds: [normalizeString(input.tenantId)],
+            candidateProjectIds: [projectId],
+          }))
+        }
+        machineKeys = machineColumnKeySet({ physicalIds, logicalToPhysical: fieldIdMap })
+        assertNoMachineKeyField(machineKeys, [keyField], fieldIdMap, objectId)
+      }
       let patched = 0
       let created = 0
       let conflicted = 0
+      let unreadable = 0
 
       for (const update of updates) {
         const key = normalizeString(update.key)
@@ -462,21 +518,12 @@ function createMultitableFeedbackWriter({ context, governedSheetProbe } = {}) {
         const physicalChanges = toPhysicalData(update.fields || {}, fieldIdMap)
         const existing = await findRecordByKey(recordsApi, sheetId, physicalKeyField, key)
         if (existing && existing.id && machineKeys) {
-          const changes = omitKeys(physicalChanges, machineKeys)
+          const changes = omitMachineColumns(physicalChanges, machineKeys).data
           if (Object.keys(changes).length === 0) continue
-          const expectedVersion = existing.version
-          if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
-            conflicted += 1
-            continue
-          }
-          try {
-            await recordsApi.patchRecord({ sheetId, recordId: existing.id, changes, expectedVersion })
-          } catch (error) {
-            if (!(error && error.code === HOST_RECORD_VERSION_CONFLICT_CODE)) throw error
-            conflicted += 1
-            continue
-          }
-          patched += 1
+          const outcome = await patchFeedbackRowFenced({ recordsApi, sheetId, physicalKeyField, key, existing, changes })
+          if (outcome === 'patched') patched += 1
+          else if (outcome === 'unreadable') unreadable += 1
+          else conflicted += 1
           continue
         }
         if (existing && existing.id) {
@@ -491,7 +538,8 @@ function createMultitableFeedbackWriter({ context, governedSheetProbe } = {}) {
             sheetId,
             data: {
               [physicalKeyField]: key,
-              ...physicalChanges,
+              // D2 round 2 (F1): a create on a stock-prep target carries no machine column.
+              ...(machineKeys ? omitMachineColumns(physicalChanges, machineKeys).data : physicalChanges),
             },
           })
           created += 1
@@ -499,14 +547,19 @@ function createMultitableFeedbackWriter({ context, governedSheetProbe } = {}) {
       }
 
       return {
-        ok: conflicted === 0,
+        ok: conflicted === 0 && unreadable === 0,
         sheetId,
         objectId,
         patched,
         created,
         written: patched + created,
-        // D2: rows left unwritten by a version conflict (a stock-prep target only); absent when there were none.
-        ...(conflicted > 0 ? { conflicted, reason: ERP_FEEDBACK_VERSION_CONFLICT, retryable: true } : {}),
+        // D2: rows left unwritten (a stock-prep target only); absent when there were none. An unreadable version is
+        // not retryable and outranks a conflict as the reason (round 2, F5).
+        ...(conflicted > 0 ? { conflicted } : {}),
+        ...(unreadable > 0 ? { unreadable } : {}),
+        ...(unreadable > 0
+          ? { reason: ERP_FEEDBACK_VERSION_UNREADABLE, retryable: false }
+          : conflicted > 0 ? { reason: ERP_FEEDBACK_VERSION_CONFLICT, retryable: true } : {}),
       }
     },
   }
@@ -578,16 +631,22 @@ function createErpFeedbackWriter({ stagingWriter, context, logger, clock, govern
           source: item.source,
         })),
       })
-      // D2: a version conflict left rows unwritten — reported by its own retryable reason (the next run re-feeds).
-      if (result && Number.isInteger(result.conflicted) && result.conflicted > 0) {
+      // D2: rows left unwritten — a version still moving after the bounded re-read (retryable), or a version that
+      // could not be read (not retryable). The runner keeps ok / reason only: an incremental run that advances its
+      // watermark will NOT feed these rows again by itself (round 2, F2), so the reason is what an operator sees.
+      const unreadableRows = result && Number.isInteger(result.unreadable) ? result.unreadable : 0
+      const conflictedRows = result && Number.isInteger(result.conflicted) ? result.conflicted : 0
+      if (unreadableRows > 0 || conflictedRows > 0) {
+        const reason = unreadableRows > 0 ? ERP_FEEDBACK_VERSION_UNREADABLE : ERP_FEEDBACK_VERSION_CONFLICT
+        const retryable = unreadableRows === 0
         if (failOnError) {
-          throw new ErpFeedbackError(`${ERP_FEEDBACK_VERSION_CONFLICT}: ${result.conflicted} feedback row(s) changed between the read and the write and were not written; retry`, { reason: ERP_FEEDBACK_VERSION_CONFLICT, conflicted: result.conflicted, retryable: true })
+          throw new ErpFeedbackError(`${reason}: ${unreadableRows + conflictedRows} feedback row(s) were not written (${conflictedRows} still changing after ${FEEDBACK_FENCED_ATTEMPTS} fenced attempts, ${unreadableRows} read without a usable version)`, { reason, conflicted: conflictedRows, unreadable: unreadableRows, retryable })
         }
         return {
           ok: false,
           skipped: false,
-          reason: ERP_FEEDBACK_VERSION_CONFLICT,
-          retryable: true,
+          reason,
+          retryable,
           projectId,
           objectId,
           keyField,
@@ -611,7 +670,7 @@ function createErpFeedbackWriter({ stagingWriter, context, logger, clock, govern
       if (failOnError) throw error
       // PR-6: a governance refusal / unreadable governance is reported by its own reason token and code (the
       // runner's run details carry `reason`); nothing was written. Every other failure is reported as before.
-      const governance = governanceFeedbackReasonOf(error)
+      const governance = governanceFeedbackReasonOf(error) || machineColumnFeedbackReasonOf(error)
       return {
         ok: false,
         skipped: false,
@@ -637,6 +696,9 @@ module.exports = {
   DEFAULT_OBJECT_BY_TARGET,
   ErpFeedbackError,
   ERP_FEEDBACK_VERSION_CONFLICT,
+  ERP_FEEDBACK_VERSION_UNREADABLE,
+  ERP_FEEDBACK_MACHINE_COLUMNS_UNRESOLVED,
+  FEEDBACK_FENCED_ATTEMPTS,
   createErpFeedbackWriter,
   createMultitableFeedbackWriter,
   normalizeFeedbackItems,

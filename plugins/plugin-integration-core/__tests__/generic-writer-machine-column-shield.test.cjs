@@ -50,19 +50,35 @@ const NOT_REGISTERED = Object.freeze({ ok: true, governed: false, reason: null, 
 // The physical ids of the free-key config (the S6 reviewer config shape: object key `main`, a fieldIdMap, no projectId).
 const PHYS = Object.freeze({ idempotencyKey: 'fld_d2w_key', material: 'fld_d2w_mat', [MACHINE]: 'fld_d2w_icd' })
 
-function probeAnswering(answer) {
+// Round 2 (F0): a registered sheet's machine columns are read from ITS binding — the registry row (tenant, objectId),
+// accepted when the host derives this sheet's id from (`${tenant}:integration-core`, objectId). The free-key sheet of
+// this file is registered under (TENANT, NAMESPACE_OBJECT); the ERP sheet under (TENANT, 'staging_main').
+const REGISTRY_OBJECT_BY_SHEET = Object.freeze({ [SHEET]: NAMESPACE_OBJECT })
+const REGISTERED_PROVISIONING = Object.freeze({
+  getObjectSheetId(projectId, objectId) { return projectId === PROJECT_ID && objectId === NAMESPACE_OBJECT ? SHEET : `sheet_${objectId}` },
+  async resolveFieldIds(input) {
+    return Object.fromEntries(input.fieldIds.map((id) => [id, input.projectId === PROJECT_ID && input.objectId === NAMESPACE_OBJECT && PHYS[id] ? PHYS[id] : `fld_${input.objectId}_${id}`]))
+  },
+})
+
+function probeAnswering(answer, bindingObjectId = null) {
   const calls = []
   return {
     calls,
     async probe(input) { calls.push(['probe', { ...input }]); return answer },
     async assertSheetWritable(input) { calls.push(['assertSheetWritable', { ...input }]); return answer },
+    async registryBindingBySheet(input) {
+      calls.push(['registryBindingBySheet', { ...input }])
+      const objectId = bindingObjectId || REGISTRY_OBJECT_BY_SHEET[input.sheetId]
+      return answer.registry && answer.registry.present === true && objectId ? { tenantId: TENANT, objectId } : null
+    },
   }
 }
 
 // A records API that behaves like the host's plugin SDK on the points that matter here: query returns
 // { id, version, data }; patch honours `expectedVersion` (VERSION_CONFLICT, the host's code) and merges `changes`.
 // `between` runs right before a patch is applied: a concurrent writer that commits between the read and the update.
-function createRecords({ rows = [], between = null } = {}) {
+function createRecords({ rows = [], between = null, persistent = false } = {}) {
   const store = rows.map((row) => ({ ...row, data: { ...row.data } }))
   const calls = []
   let hook = between
@@ -84,7 +100,7 @@ function createRecords({ rows = [], between = null } = {}) {
       calls.push(['patchRecord', JSON.parse(JSON.stringify(input))])
       const row = store.find((item) => item.id === input.recordId && item.sheetId === input.sheetId)
       if (!row) throw new Error('record not found')
-      if (hook) { const run = hook; hook = null; run(row) }
+      if (hook) { const run = hook; if (!persistent) hook = null; run(row) }
       if (input.expectedVersion !== undefined && row.version !== input.expectedVersion) {
         const conflict = new Error('Record version conflict')
         conflict.name = 'MultitableRecordVersionConflictError'
@@ -129,7 +145,7 @@ const patchesOf = (calls) => calls.filter(([name]) => name === 'patchRecord').ma
 
 test('M-01 pipeline upsert on a REGISTERED (not governed) sheet, free key `main`: the machine column is not written (logical + physical), the other fields are, and the patch carries the version read', async () => {
   const { records, calls, store } = createRecords({ rows: [seededRow()] })
-  const adapter = createMetaSheetMultitableTargetAdapter({ system: freeKeySystem(), context: { api: { multitable: { records } }, logger: QUIET }, governedSheetProbe: probeAnswering(REGISTERED) })
+  const adapter = createMetaSheetMultitableTargetAdapter({ system: freeKeySystem(), context: { api: { multitable: { records, provisioning: REGISTERED_PROVISIONING } }, logger: QUIET }, governedSheetProbe: probeAnswering(REGISTERED) })
   const result = await adapter.upsert({ object: 'main', records: [{ idempotencyKey: 'idem-1', material: 'M-NEW', [MACHINE]: '' }] })
   assert.equal(result.written, 1)
   assert.equal(result.failed, 0)
@@ -162,9 +178,9 @@ test('M-01b a stock-prep NAMESPACE object key with a projectId: the PROVISIONED 
   assert.equal(store[0].data[physicalMachine], SEEDED_DATE)
 })
 
-test('M-02 pipeline upsert, REGISTERED sheet: a version change between the read and the update is a RETRYABLE row failure (closed code), never a silent overwrite; an unreadable version fails the row the same way', async () => {
+test('M-02 pipeline upsert, REGISTERED sheet: a version change between the read and the update is a RETRYABLE row failure (closed code), never a silent overwrite; an unreadable version fails the row by its own, not retryable code', async () => {
   const { records, store } = createRecords({ rows: [seededRow()], between: raceWriteback })
-  const adapter = createMetaSheetMultitableTargetAdapter({ system: freeKeySystem(), context: { api: { multitable: { records } }, logger: QUIET }, governedSheetProbe: probeAnswering(REGISTERED) })
+  const adapter = createMetaSheetMultitableTargetAdapter({ system: freeKeySystem(), context: { api: { multitable: { records, provisioning: REGISTERED_PROVISIONING } }, logger: QUIET }, governedSheetProbe: probeAnswering(REGISTERED) })
   const result = await adapter.upsert({ object: 'main', records: [{ idempotencyKey: 'idem-1', material: 'M-NEW' }] })
   assert.deepEqual({ written: result.written, failed: result.failed, statuses: result.results.map((entry) => entry.status) }, { written: 0, failed: 1, statuses: [] })
   assert.equal(result.errors[0].code, CONFLICT_CODE)
@@ -174,10 +190,12 @@ test('M-02 pipeline upsert, REGISTERED sheet: a version change between the read 
   assert.equal(store[0].data[PHYS.material], 'M-OLD', 'nothing of the row was written')
 
   const versionless = createRecords({ rows: [{ ...seededRow(), version: undefined }] })
-  const adapter2 = createMetaSheetMultitableTargetAdapter({ system: freeKeySystem(), context: { api: { multitable: { records: versionless.records } }, logger: QUIET }, governedSheetProbe: probeAnswering(REGISTERED) })
+  const adapter2 = createMetaSheetMultitableTargetAdapter({ system: freeKeySystem(), context: { api: { multitable: { records: versionless.records, provisioning: REGISTERED_PROVISIONING } }, logger: QUIET }, governedSheetProbe: probeAnswering(REGISTERED) })
   const result2 = await adapter2.upsert({ object: 'main', records: [{ idempotencyKey: 'idem-1', material: 'M-NEW' }] })
   assert.equal(result2.failed, 1)
-  assert.equal(result2.errors[0].code, CONFLICT_CODE)
+  // Round 2 (F5): an unreadable version is its own, NOT retryable code (a retry reads the same row).
+  assert.equal(result2.errors[0].code, 'METASHEET_MULTITABLE_VERSION_UNREADABLE')
+  assert.notEqual(result2.errors[0].retryable, true)
   assert.equal(patchesOf(versionless.calls).length, 0, 'no patch without a version to fence it')
 })
 
@@ -198,7 +216,7 @@ test('M-03 REGRESSION pipeline upsert on a NON-stock-prep target (registry absen
 
 test('M-04 pipeline upsert, REGISTERED sheet: a row whose only update is the machine column (beside its key) is SKIPPED — no patch, no version bump; a key-only row WITHOUT a machine column still patches as before', async () => {
   const { records, calls, store } = createRecords({ rows: [seededRow()] })
-  const adapter = createMetaSheetMultitableTargetAdapter({ system: freeKeySystem(), context: { api: { multitable: { records } }, logger: QUIET }, governedSheetProbe: probeAnswering(REGISTERED) })
+  const adapter = createMetaSheetMultitableTargetAdapter({ system: freeKeySystem(), context: { api: { multitable: { records, provisioning: REGISTERED_PROVISIONING } }, logger: QUIET }, governedSheetProbe: probeAnswering(REGISTERED) })
   const result = await adapter.upsert({ object: 'main', records: [{ idempotencyKey: 'idem-1', [MACHINE]: '' }] })
   assert.deepEqual({ written: result.written, skipped: result.skipped, failed: result.failed }, { written: 0, skipped: 1, failed: 0 })
   assert.deepEqual(result.results.map((entry) => `${entry.status}:${entry.reason}`), ['skipped:machine_writeback_columns_only'])
@@ -213,7 +231,7 @@ test('M-04 pipeline upsert, REGISTERED sheet: a row whose only update is the mac
 
 test('C-01 C6 updateRows on a REGISTERED sheet: the machine column is not written, the other fields are, and the patch carries the version read', async () => {
   const { records, calls, store } = createRecords({ rows: [seededRow()] })
-  const source = createMetaSheetMultitableWriteSource({ system: freeKeySystem(), context: { api: { multitable: { records } }, logger: QUIET }, governedSheetProbe: probeAnswering(REGISTERED) })
+  const source = createMetaSheetMultitableWriteSource({ system: freeKeySystem(), context: { api: { multitable: { records, provisioning: REGISTERED_PROVISIONING } }, logger: QUIET }, governedSheetProbe: probeAnswering(REGISTERED) })
   const out = await source.updateRows('mt', 'main', [{ idempotencyKey: 'idem-1', material: 'M-C6', [MACHINE]: '' }], { keyFields: ['idempotencyKey'] })
   assert.equal(out.rowCount, 1)
   const [patch] = patchesOf(calls)
@@ -226,7 +244,7 @@ test('C-01 C6 updateRows on a REGISTERED sheet: the machine column is not writte
 
 test('C-02 C6 updateRows on a REGISTERED sheet: a racing version change throws the closed, retryable conflict code, and the C6 row loop keeps that code (not WRITE_FAILED)', async () => {
   const { records, store } = createRecords({ rows: [seededRow()], between: raceWriteback })
-  const source = createMetaSheetMultitableWriteSource({ system: freeKeySystem(), context: { api: { multitable: { records } }, logger: QUIET }, governedSheetProbe: probeAnswering(REGISTERED) })
+  const source = createMetaSheetMultitableWriteSource({ system: freeKeySystem(), context: { api: { multitable: { records, provisioning: REGISTERED_PROVISIONING } }, logger: QUIET }, governedSheetProbe: probeAnswering(REGISTERED) })
   let caught = null
   try {
     await source.updateRows('mt', 'main', [{ idempotencyKey: 'idem-1', material: 'M-C6' }], { keyFields: ['idempotencyKey'] })
@@ -255,7 +273,7 @@ test('C-03 REGRESSION C6 updateRows on a NON-stock-prep target: byte-identical p
 
 test('C-04 C6 updateRows, REGISTERED sheet: a row whose only update is the machine column (beside its key) sends no patch', async () => {
   const { records, calls, store } = createRecords({ rows: [seededRow()] })
-  const source = createMetaSheetMultitableWriteSource({ system: freeKeySystem(), context: { api: { multitable: { records } }, logger: QUIET }, governedSheetProbe: probeAnswering(REGISTERED) })
+  const source = createMetaSheetMultitableWriteSource({ system: freeKeySystem(), context: { api: { multitable: { records, provisioning: REGISTERED_PROVISIONING } }, logger: QUIET }, governedSheetProbe: probeAnswering(REGISTERED) })
   const out = await source.updateRows('mt', 'main', [{ idempotencyKey: 'idem-1', [MACHINE]: '' }], { keyFields: ['idempotencyKey'] })
   assert.equal(out.rowCount, 0)
   assert.equal(patchesOf(calls).length, 0)
@@ -266,11 +284,13 @@ test('C-04 C6 updateRows, REGISTERED sheet: a row whose only update is the machi
 
 const feedbackPhysical = (objectId, fieldId) => `fld_${objectId}_${fieldId}`
 
-function feedbackContext({ objectId, between = null, version = 5 }) {
+function feedbackContext({ objectId, between = null, version = 5, persistent = false }) {
   const row = { id: 'rec_fb', sheetId: SHEET, version, data: { [feedbackPhysical(objectId, 'idempotencyKey')]: 'idem-fb', [feedbackPhysical(objectId, MACHINE)]: SEEDED_DATE, [feedbackPhysical(objectId, 'material')]: 'M-OLD' } }
-  const { records, calls, store } = createRecords({ rows: [row], between: between && ((target) => { target.data = { ...target.data, [feedbackPhysical(objectId, MACHINE)]: RACED_DATE }; target.version += 1 }) })
+  const { records, calls, store } = createRecords({ rows: [row], between: between && ((target) => { target.data = { ...target.data, [feedbackPhysical(objectId, MACHINE)]: RACED_DATE }; target.version += 1 }), persistent })
   const provisioning = {
     async findObjectSheet() { return { id: SHEET } },
+    // Round 2 (F0): the registered sheet derives from (PROJECT_ID, objectId).
+    getObjectSheetId(projectId, sheetObjectId) { return projectId === PROJECT_ID && sheetObjectId === objectId ? SHEET : `sheet_${sheetObjectId}` },
     async resolveFieldIds(input) { return Object.fromEntries(input.fieldIds.map((id) => [id, feedbackPhysical(input.objectId, id)])) },
   }
   return { context: { api: { multitable: { records, provisioning } } }, calls, store }
@@ -283,7 +303,7 @@ const feedbackUpdate = { key: 'idem-fb', fields: { [MACHINE]: 'synced', material
 test('E-01 ERP feedback updateRecords on a stock-prep NAMESPACE object (and on any REGISTERED sheet): the machine column is not written, the other fields are, and the patch carries the version read', async () => {
   for (const [objectId, answer] of [[NAMESPACE_OBJECT, NOT_REGISTERED], ['staging_main', REGISTERED]]) {
     const { context, calls, store } = feedbackContext({ objectId })
-    const writer = createMultitableFeedbackWriter({ context, governedSheetProbe: probeAnswering(answer) })
+    const writer = createMultitableFeedbackWriter({ context, governedSheetProbe: probeAnswering(answer, objectId) })
     const result = await writer.updateRecords({ tenantId: TENANT, projectId: PROJECT_ID, objectId, keyField: 'idempotencyKey', updates: [feedbackUpdate] })
     assert.equal(result.patched, 1, objectId)
     const [patch] = patchesOf(calls)
@@ -294,8 +314,8 @@ test('E-01 ERP feedback updateRecords on a stock-prep NAMESPACE object (and on a
   }
 })
 
-test('E-02 ERP feedback on a stock-prep target: a racing version change is a retryable row failure — the row is not written, writeBack reports ERP_FEEDBACK_VERSION_CONFLICT (ok:false, retryable)', async () => {
-  const { context, store } = feedbackContext({ objectId: NAMESPACE_OBJECT, between: true })
+test('E-02 ERP feedback on a stock-prep target: a version change racing EVERY attempt (round 2 F2: three fenced attempts) is a retryable row failure — the row is not written, writeBack reports ERP_FEEDBACK_VERSION_CONFLICT (ok:false, retryable)', async () => {
+  const { context, store } = feedbackContext({ objectId: NAMESPACE_OBJECT, between: true, persistent: true })
   const feedback = createErpFeedbackWriter({ context, clock: () => '2026-11-17T00:00:00.000Z', governedSheetProbe: probeAnswering(NOT_REGISTERED) })
   const out = await feedback.writeBack({
     tenantId: TENANT, runId: 'run_d2w', workspaceId: null,

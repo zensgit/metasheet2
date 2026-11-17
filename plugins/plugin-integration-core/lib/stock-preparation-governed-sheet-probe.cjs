@@ -252,7 +252,32 @@ function createStockPreparationGovernedSheetProbe({ continuationStore = null, pr
     return answer
   }
 
-  return Object.freeze({ probe, assertSheetWritable })
+  /**
+   * D2 round 2 (register R-96; ADDITIVE — the verdict answer above is unchanged): THE REGISTRY ROW'S BINDING of a
+   * sheet, `{ tenantId, objectId }` (frozen), or null when no row is registered on it. The generic writers read a
+   * registered sheet's machine write-back columns from this binding (lib/generic-writer-machine-columns.cjs), never
+   * from their own config. A separate read, not a field of the answer: the answer stays values-free and pinned
+   * (P-01 / P-02); the binding is handed to the writer in-process and never put in an error, a result or a log.
+   * Throws 422 (blank sheet id), 501 (no registry read wired), 503 (the read failed, or a row without its handles).
+   */
+  async function registryBindingBySheet(input = {}) {
+    const sheetId = isPlainObject(input) && nonBlankString(input.sheetId) ? input.sheetId.trim() : null
+    if (!sheetId) throw inputInvalid('sheetId')
+    if (!projectTargetStore || typeof projectTargetStore.getPilotStateBySheetId !== 'function') throw unavailable('registry_pilot_reads')
+    let registry
+    try {
+      registry = await projectTargetStore.getPilotStateBySheetId({ sheetId })
+    } catch (error) {
+      throw storeFailed('registry', 'binding_by_sheet', error)
+    }
+    if (registry === null || registry === undefined) return null
+    if (!isPlainObject(registry) || !nonBlankString(registry.tenantId) || !nonBlankString(registry.objectId)) {
+      throw storeFailed('registry', 'binding_by_sheet', null)
+    }
+    return Object.freeze({ tenantId: registry.tenantId, objectId: registry.objectId })
+  }
+
+  return Object.freeze({ probe, assertSheetWritable, registryBindingBySheet })
 }
 
 /**

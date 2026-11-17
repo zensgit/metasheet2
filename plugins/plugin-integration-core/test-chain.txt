@@ -129,6 +129,7 @@ node __tests__/metasheet-multitable-governed-sheet.test.cjs
 node __tests__/erp-feedback-governed-sheet.test.cjs
 node __tests__/pipeline-runner-governed-sheet.test.cjs
 node __tests__/generic-writer-machine-column-shield.test.cjs
+node __tests__/generic-writer-machine-column-binding.test.cjs
 node __tests__/stock-preparation-generic-writer-scan.test.cjs
 node __tests__/stock-preparation-existing-row-record-ref.test.cjs
 node __tests__/stock-preparation-foreign-existing-rows-readside.test.cjs

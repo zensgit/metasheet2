@@ -602,9 +602,170 @@ export function defineStockPreparationGenericWriterGovernanceRealDbCases(): void
         feedback: {
           result: 'true:1:0',
           after: { date: SEEDED, material: 'M-D2-FB' },
-          raced: 'false:0:1:ERP_FEEDBACK_VERSION_CONFLICT:true',
-          afterRace: { date: RACED, material: 'M-D2-FB' },
+          // Round 2 (F2): one racing write-back => the row is re-read by key and the stripped patch re-sent with the
+          // fresh version (a write-back racing EVERY attempt is S6-10's leg): written, the raced date stands.
+          raced: 'true:1:undefined:undefined:undefined',
+          afterRace: { date: RACED, material: 'M-D2-FB-RACE' },
         },
+      })
+    }, 300000)
+
+    // D2 round 2 (R-96 switch-on precondition), on the REAL host SDK and the REAL probe/registry:
+    //   F0 the strip set comes from the SHEET'S binding — a config without a projectId that names the machine column by
+    //      another logical name (alias) or by its raw physical id, with a free key or a stock-prep namespace key, never
+    //      erases the date (pipeline upsert and C6 updateRows); a registry row of ANOTHER tenant on a sheet this tenant
+    //      provisioned (bound != the registry tenant's derivation) still strips the column the sheet really has; a
+    //      registry row whose pair does not derive the sheet is REFUSED by the closed code before any write;
+    //   F1 creates never plant a machine value (pipeline upsert, C6 insertRows, ERP feedback);
+    //   F2 an ERP feedback row whose version moves on EVERY attempt is conflicted after three fenced attempts;
+    //   F3 a C6 machine-only difference plans skip on every dry-run, and the apply writes nothing.
+    test('S6-10 (D2 round 2) the machine column on a registered sheet: sheet-bound strip set (alias / raw physical id / namespace key without projectId / registry of another tenant), refused when unresolvable, creates stripped, ERP bounded retry, no C6 churn', async () => {
+      const MACHINE = 'issueConfirmDate'
+      const SEEDED = '2026-11-01'
+      const reg = await stack('s10', { pilot: false })
+      const foreign = await stack('s10b', { pilot: false, registryTenant: tenantFor('s10b_other') })
+      const loose = await stack('s10m', { register: false })
+      const ids10 = async (s: any) => s.multitable.provisioning.resolveFieldIds({ projectId: s.projectId, objectId: s.objectId, fieldIds: [MACHINE, 'material', 'idempotencyKey'] }) as Promise<Record<string, string>>
+      const rowBy = async (s: any, ids: Record<string, string>, key: string) => {
+        const row = (await q('SELECT id, version, data FROM meta_records WHERE sheet_id = $1', [s.sheetId])).rows.find((entry: any) => entry.data && entry.data[ids.idempotencyKey] === key)
+        return row ? { id: row.id as string, version: Number(row.version), date: row.data[ids[MACHINE]] ?? null, material: row.data[ids.material] ?? null } : null
+      }
+      const stamp = async (s: any, ids: Record<string, string>, recordId: string, date: string) => s.multitable.records.patchRecord({ sheetId: s.sheetId, recordId, changes: { [ids[MACHINE]]: date } })
+      const mainOf = (s: any) => s.system.config.objects.main
+      // Free key `main`, NO projectId: the machine column under ANOTHER logical name.
+      const aliasSys = (s: any, ids: Record<string, string>) => ({ ...s.system, config: { objects: { main: { ...mainOf(s), fieldIdMap: { ...mainOf(s).fieldIdMap, confirmDate: ids[MACHINE] }, fields: [...mainOf(s).fields, { name: 'confirmDate' }] } } } })
+      // Free key `main`, NO projectId, no field list: the machine column by its RAW physical id.
+      const rawSys = (s: any) => ({ ...s.system, config: { objects: { main: { sheetId: s.sheetId, keyFields: ['idempotencyKey'], mode: 'upsert', fieldIdMap: mainOf(s).fieldIdMap } } } })
+      // The stock-prep NAMESPACE object key (the sheet's own objectId), NO projectId, raw id or alias.
+      const nsSys = (s: any, ids: Record<string, string>) => ({ ...s.system, config: { objects: { [s.objectId]: { sheetId: s.sheetId, keyFields: ['idempotencyKey'], mode: 'upsert', fieldIdMap: { ...mainOf(s).fieldIdMap, confirmDate: ids[MACHINE] } } } } })
+      const upsertWith = (s: any, sys: any, object: string, records: any[], probe: any = s.probe) => adapterLib.createMetaSheetMultitableTargetAdapter({ system: sys, context: { api: { multitable: s.multitable } }, governedSheetProbe: probe }).upsert({ object, records })
+
+      const observed: Record<string, unknown> = {}
+      const ids = await ids10(reg)
+      const rec = reg.record('d2r2')
+      await upsertWith(reg, reg.system, 'main', [rec])
+      const row0 = (await rowBy(reg, ids, rec.idempotencyKey))!
+      const legs: Array<[string, () => Promise<any>]> = [
+        ['aliasUpsert', () => upsertWith(reg, aliasSys(reg, ids), 'main', [{ ...rec, material: 'M-A1', confirmDate: null }])],
+        ['rawUpsert', () => upsertWith(reg, rawSys(reg), 'main', [{ ...rec, material: 'M-A2', [ids[MACHINE]]: null }])],
+        ['nsRawUpsert', () => upsertWith(reg, nsSys(reg, ids), reg.objectId, [{ ...rec, material: 'M-A3', [ids[MACHINE]]: null }])],
+        ['nsAliasUpsert', () => upsertWith(reg, nsSys(reg, ids), reg.objectId, [{ ...rec, material: 'M-A4', confirmDate: null }])],
+        ['aliasC6', () => adapterLib.createMetaSheetMultitableWriteSource({ system: aliasSys(reg, ids), context: { api: { multitable: reg.multitable } }, governedSheetProbe: reg.probe }).updateRows('mt', 'main', [{ ...rec, material: 'M-C1', confirmDate: null }], { keyFields: ['idempotencyKey'] })],
+      ]
+      for (const [label, run] of legs) {
+        await stamp(reg, ids, row0.id, SEEDED)
+        const outcome = await settle(run())
+        const after = (await rowBy(reg, ids, rec.idempotencyKey))!
+        observed[label] = { ok: outcome.ok, date: after.date, material: after.material }
+      }
+
+      // F1: creates on the registered sheet carry no machine value (upsert create, C6 insertRows, ERP feedback create).
+      const created = reg.record('d2r2-new')
+      await upsertWith(reg, aliasSys(reg, ids), 'main', [{ ...created, confirmDate: '2026-12-01' }])
+      await upsertWith(reg, rawSys(reg), 'main', [{ ...reg.record('d2r2-new-raw'), [ids[MACHINE]]: '2026-12-02' }])
+      await adapterLib.createMetaSheetMultitableWriteSource({ system: aliasSys(reg, ids), context: { api: { multitable: reg.multitable } }, governedSheetProbe: reg.probe })
+        .insertRows('mt', 'main', [{ ...reg.record('d2r2-new-c6'), confirmDate: '2026-12-03' }], { keyFields: ['idempotencyKey'] })
+      const fbNewKey = reg.record('d2r2-new-fb').idempotencyKey
+      await createMultitableFeedbackWriter({ context: { api: { multitable: reg.multitable } }, governedSheetProbe: reg.probe })
+        .updateRecords({ tenantId: reg.tenantId, projectId: reg.projectId, objectId: reg.objectId, keyField: 'idempotencyKey', updates: [{ key: fbNewKey, fields: { [MACHINE]: '2026-12-04', material: 'M-FB-NEW' } }] })
+      observed.creates = {
+        upsert: (await rowBy(reg, ids, created.idempotencyKey))?.date ?? 'absent',
+        upsertRaw: (await rowBy(reg, ids, reg.record('d2r2-new-raw').idempotencyKey))?.date ?? 'absent',
+        c6: (await rowBy(reg, ids, reg.record('d2r2-new-c6').idempotencyKey))?.date ?? 'absent',
+        erp: (await rowBy(reg, ids, fbNewKey))?.date ?? 'absent',
+        erpMaterial: (await rowBy(reg, ids, fbNewKey))?.material ?? 'absent',
+      }
+
+      // F0, bound != derived: the registry row names ANOTHER tenant; the sheet was provisioned under this one.
+      const fids = await ids10(foreign)
+      const frec = foreign.record('d2r2')
+      await upsertWith(foreign, foreign.system, 'main', [frec])
+      const frow = (await rowBy(foreign, fids, frec.idempotencyKey))!
+      await stamp(foreign, fids, frow.id, SEEDED)
+      const foreignOut = await settle(upsertWith(foreign, rawSys(foreign), 'main', [{ ...frec, material: 'M-F1', [fids[MACHINE]]: null }]))
+      const fafter = (await rowBy(foreign, fids, frec.idempotencyKey))!
+      observed.foreignRegistry = { ok: foreignOut.ok, date: fafter.date, material: fafter.material }
+
+      // F0, fail closed: a registry row whose (tenant, objectId) does not derive the sheet => refused before any write.
+      const lids = await ids10(loose)
+      const lrec = loose.record('d2r2')
+      await upsertWith(loose, loose.system, 'main', [lrec])
+      const lrow = (await rowBy(loose, lids, lrec.idempotencyKey))!
+      await stamp(loose, lids, lrow.id, SEEDED)
+      const strayObject: string = ownBaseLib.deriveStockPreparationProjectSheetObjectId(loose.tenantId, `${loose.projectNo}-stray`)
+      await loose.registry.create({ tenantId: loose.tenantId, projectNo: loose.projectNo, sheetId: loose.sheetId, objectId: strayObject, createdBy: 'syn' })
+      const before = await sheetState(loose.sheetId)
+      const refused = await settle(upsertWith(loose, rawSys(loose), 'main', [{ ...lrec, material: 'M-M1', [lids[MACHINE]]: null }]))
+      const refusedC6 = await settle(adapterLib.createMetaSheetMultitableWriteSource({ system: rawSys(loose), context: { api: { multitable: loose.multitable } }, governedSheetProbe: loose.probe }).test())
+      const lafter = (await rowBy(loose, lids, lrec.idempotencyKey))!
+      observed.mismatch = {
+        upsert: refused.ok ? 'written' : `${refused.error.status}:${refused.error.code}:${refused.error.details && refused.error.details.reason}`,
+        c6Test: refusedC6.ok ? 'passed' : `${refusedC6.error.code}:${refusedC6.error.details && refusedC6.error.details.reason}`,
+        date: lafter.date,
+        material: lafter.material,
+        sheetUnchanged: JSON.stringify(await sheetState(loose.sheetId)) === JSON.stringify(before),
+      }
+
+      // F2: a write-back racing EVERY ERP feedback attempt => three fenced attempts, then conflicted (nothing written).
+      await stamp(reg, ids, row0.id, SEEDED)
+      let attempts = 0
+      const stormy = Object.create(reg.multitable.records)
+      stormy.patchRecord = async (input: any) => {
+        attempts += 1
+        await stamp(reg, ids, row0.id, `2026-11-${String(10 + attempts).padStart(2, '0')}`)
+        return reg.multitable.records.patchRecord(input)
+      }
+      const fbStorm = await createMultitableFeedbackWriter({ context: { api: { multitable: { provisioning: reg.multitable.provisioning, records: stormy } } }, governedSheetProbe: reg.probe })
+        .updateRecords({ tenantId: reg.tenantId, projectId: reg.projectId, objectId: reg.objectId, keyField: 'idempotencyKey', updates: [{ key: rec.idempotencyKey, fields: { material: 'M-FB-STORM' } }] })
+      const stormAfter = (await rowBy(reg, ids, rec.idempotencyKey))!
+      observed.erpStorm = { result: `${fbStorm.ok}:${fbStorm.patched}:${fbStorm.conflicted}:${fbStorm.reason}:${fbStorm.retryable}`, attempts, materialKept: stormAfter.material !== 'M-FB-STORM' }
+
+      // F3: a C6 machine-only difference (the column mapped through an alias) plans skip, twice; the apply writes nothing.
+      await stamp(reg, ids, row0.id, SEEDED)
+      const current = (await rowBy(reg, ids, rec.idempotencyKey))!
+      const churnInput = () => ({
+        ...c6Input(reg, reg.probe),
+        pipeline: { ...c6Input(reg, reg.probe).pipeline, fieldMappings: [
+          { sourceField: 'k', targetField: 'idempotencyKey', validation: [{ type: 'required' }] },
+          { sourceField: 'm', targetField: 'material' },
+          { sourceField: 'd', targetField: 'confirmDate' },
+        ] },
+        targetSystem: { id: reg.system.id, kind: 'metasheet:multitable', config: { dataSourceId: 'mt_s6', object: 'main', keyFields: ['idempotencyKey'], writableFields: ['material', 'confirmDate'] } },
+        sourceAdapter: { async read() { return { records: [{ k: rec.idempotencyKey, m: current.material, d: '2026-12-31' }], done: true, nextCursor: null } } },
+        dataSourceWrites: adapterLib.createMetaSheetMultitableWriteSource({ system: aliasSys(reg, ids), context: { api: { multitable: reg.multitable } }, governedSheetProbe: reg.probe }),
+      })
+      const dry1 = await dryRunExternalWrite(churnInput())
+      const dry2 = await dryRunExternalWrite(churnInput())
+      const applied = await applyExternalWrite({ ...churnInput(), dryRunToken: dry2.dryRunToken, applyUser: 'owner_s6', runId: `run_s6_10_${TOKEN}` })
+      if (dry1.dryRunToken) await q('DELETE FROM plugin_kv WHERE plugin = $1 AND key = $2', ['plugin-integration-core', `${TOKEN_PREFIX}${dry1.dryRunToken}`])
+      const churnAfter = (await rowBy(reg, ids, rec.idempotencyKey))!
+      observed.c6Churn = {
+        dry1: `${dry1.counts.update}:${dry1.counts.skip}`,
+        dry2: `${dry2.counts.update}:${dry2.counts.skip}`,
+        apply: `${applied.counts.written}:${applied.counts.update}:${applied.counts.skip}`,
+        versionDelta: churnAfter.version - current.version,
+        date: churnAfter.date,
+      }
+
+      console.log(`[S6-10] ${JSON.stringify(observed)}`)
+      const kept = (material: string) => ({ ok: true, date: SEEDED, material })
+      expect(observed).toEqual({
+        aliasUpsert: kept('M-A1'),
+        rawUpsert: kept('M-A2'),
+        nsRawUpsert: kept('M-A3'),
+        nsAliasUpsert: kept('M-A4'),
+        aliasC6: kept('M-C1'),
+        creates: { upsert: null, upsertRaw: null, c6: null, erp: null, erpMaterial: 'M-FB-NEW' },
+        foreignRegistry: kept('M-F1'),
+        mismatch: {
+          upsert: '409:METASHEET_MULTITABLE_MACHINE_COLUMNS_UNRESOLVED:sheet_binding_mismatch',
+          c6Test: 'METASHEET_MULTITABLE_MACHINE_COLUMNS_UNRESOLVED:sheet_binding_mismatch',
+          date: SEEDED,
+          material: lrec.material,
+          sheetUnchanged: true,
+        },
+        erpStorm: { result: 'false:0:1:ERP_FEEDBACK_VERSION_CONFLICT:true', attempts: 3, materialKept: true },
+        c6Churn: { dry1: '0:1', dry2: '0:1', apply: '0:0:1', versionDelta: 0, date: SEEDED },
       })
     }, 300000)
   })
