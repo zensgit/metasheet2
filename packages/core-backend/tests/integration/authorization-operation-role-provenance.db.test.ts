@@ -128,5 +128,17 @@ suite('role assignment provenance with actual PostgreSQL and HTTP',()=>{
     const result=await request(app).post(path).auth(token,{type:'bearer'}).send({...payload,expectedVersion:p.body.expectedVersion,clientOperationId:randomUUID()})
     expect(result.status,JSON.stringify(result.body)).toBe(200)
     expect((await db.query('SELECT assignment_source FROM user_roles WHERE user_id=$1 AND role_id=$2',[target,role])).rows[0].assignment_source).toBe('manual')
+
+    await db.query("UPDATE user_roles SET assignment_source='creation' WHERE user_id=$1 AND role_id=$2",[target,role])
+    const repeatedPreview=await request(app).post(`${path}/preview`).auth(token,{type:'bearer'}).send(payload)
+    expect(repeatedPreview.status,JSON.stringify(repeatedPreview.body)).toBe(200)
+    const repeated=await request(app).post(path).auth(token,{type:'bearer'}).send({
+      ...payload,
+      expectedVersion:repeatedPreview.body.expectedVersion,
+      clientOperationId:randomUUID(),
+    })
+    expect(repeated.status,JSON.stringify(repeated.body)).toBe(200)
+    expect(repeated.body.receipt.impact.sourceChanges).toEqual([{source:'role',id:role,operation:'assign',changed:false}])
+    expect((await db.query('SELECT assignment_source FROM user_roles WHERE user_id=$1 AND role_id=$2',[target,role])).rows[0].assignment_source).toBe('creation')
   })
 })
