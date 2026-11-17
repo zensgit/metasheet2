@@ -381,7 +381,7 @@
 import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
 import { routeLocationKey } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
-import { useAdminAuthorizationOperation } from '../composables/useAdminAuthorizationOperation'
+import { useAdminAuthorizationOperation, type AdminAuthorizationOperationPhase } from '../composables/useAdminAuthorizationOperation'
 import { apiFetch } from '../utils/api'
 import {
   type AdminAuthorizationAction,
@@ -780,12 +780,16 @@ async function reloadSelectedUserAccess(): Promise<void> {
   }
 }
 
+function authorizationReadbackStillOpen(phase: AdminAuthorizationOperationPhase): boolean {
+  return phase === 'pending' || phase === 'unverified_no_read' || phase === 'committed'
+}
+
 async function refreshUnconfirmedReadback(): Promise<void> {
   invalidatePermissionChecker()
   const userId = unconfirmedReadbackUserId.value
   if (!userId || userId !== selectedUserId.value) return
   const phase = authorizationOperation.phase.value
-  if (phase === 'pending' || phase === 'unverified_no_read' || phase === 'committed') {
+  if (authorizationReadbackStillOpen(phase)) {
     await authorizationOperation.lookup()
     await authorizationOperation.whenSettled()
     const request = submittedRequest.value
@@ -794,7 +798,18 @@ async function refreshUnconfirmedReadback(): Promise<void> {
       && request.targetUserId === userId
       && authorizationOperation.phase.value === 'committed'
     ) {
-      await finishCommitted(request, userAccessReadGeneration.value)
+      const generation = userAccessReadGeneration.value
+      const principalId = currentPrincipalId()
+      await finishCommitted(request, generation)
+      if (
+        authorizationOperation.verified.value
+        && principalId !== ''
+        && userAccessReadGeneration.value === generation
+        && selectedUserId.value === userId
+        && currentPrincipalId() === principalId
+      ) {
+        unconfirmedReadbackUserId.value = ''
+      }
       return
     }
   }
@@ -806,7 +821,11 @@ async function refreshUnconfirmedReadback(): Promise<void> {
     if (!accessReadStillCurrent(generation, userAccessReadGeneration.value, userId, selectedUserId.value)) return
     if (unconfirmedReadbackUserId.value !== userId) return
     selectedUserAccess.value = inspection.subjectMatched ? inspection : unreadUserPermissionInspection(userId)
-    if (inspection.subjectMatched && !inspection.degraded) unconfirmedReadbackUserId.value = ''
+    if (
+      inspection.subjectMatched
+      && !inspection.degraded
+      && !authorizationReadbackStillOpen(authorizationOperation.phase.value)
+    ) unconfirmedReadbackUserId.value = ''
   } catch (error) {
     if (!accessReadStillCurrent(generation, userAccessReadGeneration.value, userId, selectedUserId.value)) return
     if (unconfirmedReadbackUserId.value !== userId) return

@@ -1890,6 +1890,59 @@ describe('PermissionManagementView grant readback', () => {
     expect(timedOut.calls.filter((call) => call.startsWith('POST'))).toEqual(grantPosts)
   })
 
+  it('first GET unknown + healthy snapshot + second GET committed', async () => {
+    const api = createPermissionApi({ settleOnLookup: true })
+    const original = apiFetchMock.getMockImplementation()
+    if (!original) throw new Error('missing fetch mock')
+    let operationGets = 0
+    const operationIds: string[] = []
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = String(input)
+      const method = (init?.method || 'GET').toUpperCase()
+      if (method === 'GET' && url.includes('/api/admin/authorization-operations/')) {
+        const clientOperationId = decodeURIComponent(new URL(url, 'http://localhost').pathname.split('/').pop() || '')
+        operationIds.push(clientOperationId)
+        operationGets += 1
+        if (operationGets === 1) {
+          return createJsonResponse({ status: 'unknown_or_pending', clientOperationId })
+        }
+      }
+      return original(input, init)
+    })
+    const root = mountView()
+    await chooseListedUser(root, 'Alpha')
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-select"]')))
+    await selectPermission(root, 'crm:read')
+    ;(root.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).click()
+    await confirmPermissionMutation(root)
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-unconfirmed-refresh"]')))
+    const posts = api.calls.filter((call) => call.startsWith('POST'))
+    expect(posts.filter((call) => call === 'POST /api/admin/authorization-operations')).toHaveLength(1)
+    expect(api.calls.some((call) => call === 'POST /api/permissions/grant')).toBe(false)
+
+    ;(root.querySelector('[data-testid="permission-unconfirmed-refresh"]') as HTMLButtonElement).click()
+    await waitForCondition(() => operationGets === 1)
+    await flushUi()
+    expect(root.querySelector('[data-testid="permission-unconfirmed-refresh"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="permission-direct-section"]')?.textContent || '').not.toContain('crm:read')
+    expect(root.textContent).not.toContain('已写入')
+    expect(api.state['user-1'].direct).not.toContain('crm:read')
+    expect(api.calls.filter((call) => call.startsWith('POST'))).toEqual(posts)
+
+    ;(root.querySelector('[data-testid="permission-unconfirmed-refresh"]') as HTMLButtonElement).click()
+    await waitForCondition(() => (root.querySelector('[data-testid="permission-direct-section"]')?.textContent || '').includes('crm:read'))
+    const feedback = root.querySelector('[data-testid="permission-action-feedback"]')?.textContent || ''
+    expect(feedback).toContain('直接授予')
+    expect(feedback).toContain('crm:read')
+    expect(operationGets).toBe(2)
+    expect(operationIds).toEqual([operationIds[0], operationIds[0]])
+    expect(root.querySelector('[data-testid="permission-unconfirmed-refresh"]')).toBeNull()
+    expect(api.state['user-1'].direct).toEqual(['crm:read'])
+    expect(api.calls.filter((call) => call === 'POST /api/admin/authorization-operations')).toHaveLength(1)
+    expect(api.calls.some((call) => call === 'POST /api/permissions/grant')).toBe(false)
+    expect(api.calls.filter((call) => call.startsWith('POST'))).toEqual(posts)
+  })
+
   it('does not warn when the permission page is mounted without a router', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
