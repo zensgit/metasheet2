@@ -62,6 +62,21 @@ function memoryDb(tables) {
       }
       return rows.slice(offset, offset + limit).map((row) => ({ ...row }))
     },
+    // createDb.selectUnmatched, faithfully: equality / IS NULL where, every notNull column present, no row of
+    // `unmatched.table` whose columns equal this row's (the NOT EXISTS anti-join) — ALL before orderBy, offset and limit.
+    async selectUnmatched(table, { where, notNull = [], unmatched, orderBy, limit = 1000, offset = 0 } = {}) {
+      calls.push(['selectUnmatched', table, where, notNull, unmatched, limit, offset])
+      const others = tables[unmatched.table] || []
+      const pairs = Object.entries(unmatched.on)
+      let rows = (tables[table] || []).filter((row) => match(row, where)
+        && notNull.every((column) => row[column] !== null && row[column] !== undefined)
+        && !others.some((other) => pairs.every(([innerColumn, outerColumn]) => other[innerColumn] === row[outerColumn])))
+      if (orderBy) {
+        const [column, dir] = orderBy
+        rows = [...rows].sort((a, b) => (a[column] < b[column] ? -1 : a[column] > b[column] ? 1 : 0) * (dir === 'DESC' ? -1 : 1))
+      }
+      return rows.slice(offset, offset + limit).map((row) => ({ ...row }))
+    },
     async selectOne(table, where) {
       calls.push(['selectOne', table, where])
       const row = (tables[table] || []).find((entry) => match(entry, where))
@@ -113,11 +128,16 @@ test('ledger reader (batch): only this tenant + owner, acknowledged CREATEs of a
   assert.deepEqual(listed.map((row) => row.id), ['ledger-good'])
   assert.equal(listed[0].acknowledgedAt, ACK_AT)
   assert.deepEqual([listed[0].operationId, listed[0].rowKey, listed[0].sourceRecordDigest], ['op-syn', 'row-syn', DIGEST])
-  // The batch asks the ledger by (tenant, workspace NULL, owner, target, acknowledged, create) — never another scope.
-  const pages = db.calls.filter((call) => call[0] === 'select')
+  // The batch asks the ledger by (tenant, workspace NULL, owner, target, acknowledged, create) — never another scope —
+  // with the bound digest and the "not traced" anti-join IN THE QUERY (so neither unbound nor traced rows take a slot).
+  const pages = db.calls.filter((call) => call[0] === 'selectUnmatched')
   assert.ok(pages.length >= 1)
+  assert.deepEqual(db.calls.filter((call) => call[0] === 'select'), [])
   for (const call of pages) {
+    assert.equal(call[1], 'integration_yida_delivery_ledger')
     assert.deepEqual(call[2], { tenant_id: TENANT, workspace_id: null, owner_id: OWNER, target_ref: TARGET, status: 'acknowledged', intent: 'create' })
+    assert.deepEqual(call[3], ['source_record_digest'])
+    assert.deepEqual(call[4], { table: 'integration_yida_issue_confirm_writeback', on: { ledger_id: 'id' } })
   }
   // An empty target list reads nothing.
   db.calls.length = 0
@@ -146,21 +166,98 @@ test('ledger reader (named): the named rows of THIS scope only, untraced, any st
   assert.equal((await reader.list({ tenantId: TENANT, ownerId: OWNER, targetRefs: [TARGET], ledgerIds: ['l-ack', 'l-unknown'], limit: 1 })).length, 1)
 })
 
-test('ledger reader (batch) is bounded: pages of 200, at most 2000 rows scanned per listed target', async () => {
-  const { createIssueConfirmLedgerReader, ISSUE_CONFIRM_LEDGER_SCAN_CAP } = await portsPromise
-  assert.equal(ISSUE_CONFIRM_LEDGER_SCAN_CAP, 2000)
+// The recovery scan's progress (Codex, Y9 review): the old batch read the oldest 2000 rows of a target from offset 0 on
+// EVERY run and only then dropped traced / unbound ones, so once those 2000 were traced (or unbound) no later pending
+// row was ever returned. The filter is now in the query: only candidates take a slot, and one run reaches the next one.
+const TRACE_TABLE = 'integration_yida_issue_confirm_writeback'
+function history(count, patch = () => ({})) {
   const rows = []
-  for (let index = 0; index < 2500; index += 1) {
-    rows.push(ledger({ id: `l-${String(index).padStart(5, '0')}`, created_at: `2026-03-01T00:00:${String(index).padStart(5, '0')}`,
-      source_record_digest: index < 2400 ? null : DIGEST }))
+  for (let index = 0; index < count; index += 1) {
+    rows.push(ledger({ id: `l-${String(index).padStart(5, '0')}`, created_at: `2026-03-01T00:00:00.${String(index).padStart(5, '0')}Z`, ...patch(index) }))
   }
-  const db = memoryDb({ integration_yida_delivery_ledger: rows, integration_yida_delivery_audit: [], integration_yida_issue_confirm_writeback: [] })
+  return rows
+}
+const tracedOf = (rows) => rows.map((row) => ({ ledger_id: row.id, tenant_id: row.tenant_id, owner_id: row.owner_id, target_ref: row.target_ref }))
+
+test('ledger reader (batch) makes progress: 2001 ACK rows, the oldest 2000 traced — ONE run returns the last row, every run', async () => {
+  const { createIssueConfirmLedgerReader } = await portsPromise
+  const rows = history(2001)
+  const db = memoryDb({ integration_yida_delivery_ledger: rows, integration_yida_delivery_audit: [],
+    [TRACE_TABLE]: tracedOf(rows.slice(0, 2000)) })
+  const reader = createIssueConfirmLedgerReader({ db })
+  for (let run = 0; run < 3; run += 1) {
+    const listed = await reader.list({ tenantId: TENANT, ownerId: OWNER, targetRefs: [TARGET], ledgerIds: null, limit: 100 })
+    assert.deepEqual(listed.map((row) => row.id), ['l-02000'], `run ${run}`)
+  }
+  // Bounded per run by `limit`, never by the history: no per-row trace probe, one ledger query per target.
+  db.calls.length = 0
+  await reader.list({ tenantId: TENANT, ownerId: OWNER, targetRefs: [TARGET], ledgerIds: null, limit: 100 })
+  assert.deepEqual(db.calls.filter((call) => call[1] === TRACE_TABLE), [])
+  assert.deepEqual(db.calls.filter((call) => call[0] === 'selectUnmatched').map((call) => [call[5], call[6]]), [[100, 0]])
+})
+
+test('ledger reader (batch) makes progress: 2000 unbound ACK rows then ONE bound row — the bound row is returned', async () => {
+  const { createIssueConfirmLedgerReader } = await portsPromise
+  const rows = history(2001, (index) => (index < 2000 ? { source_record_digest: null } : {}))
+  const db = memoryDb({ integration_yida_delivery_ledger: rows, integration_yida_delivery_audit: [], [TRACE_TABLE]: [] })
   const listed = await createIssueConfirmLedgerReader({ db }).list({ tenantId: TENANT, ownerId: OWNER, targetRefs: [TARGET], ledgerIds: null, limit: 100 })
-  // Every scanned row was unbound: nothing returned, and the scan stopped at the cap (never the whole history).
-  assert.deepEqual(listed, [])
-  const pages = db.calls.filter((call) => call[0] === 'select')
-  assert.equal(pages.reduce((sum, call) => sum + call[3], 0), ISSUE_CONFIRM_LEDGER_SCAN_CAP)
-  assert.ok(pages.every((call) => call[3] <= 200))
+  assert.deepEqual(listed.map((row) => [row.id, row.sourceRecordDigest]), [['l-02000', DIGEST]])
+})
+
+test('ledger reader (batch) keeps the order and the limit across a mix: listed targets in turn, oldest first, at most `limit`', async () => {
+  const { createIssueConfirmLedgerReader } = await portsPromise
+  const old = history(2400, (index) => (index % 7 === 3 ? { source_record_digest: null } : {}))
+  const tracedRows = old.filter((row) => row.source_record_digest !== null).slice(0, 1990)
+  const at = (seconds) => `2026-03-02T00:00:${String(seconds).padStart(2, '0')}.000Z`
+  const rows = [
+    ...old,
+    // Newer rows of the first target, inserted out of order; a foreign scope and a non-candidate in between.
+    ledger({ id: 'a-3', created_at: at(30) }), ledger({ id: 'a-1', created_at: at(10) }),
+    ledger({ id: 'a-x-unbound', created_at: at(15), source_record_digest: null }),
+    ledger({ id: 'a-x-unknown', created_at: at(16), status: 'outcome_unknown' }),
+    ledger({ id: 'a-x-owner', created_at: at(17), owner_id: 'owner-syn-x' }),
+    ledger({ id: 'a-2', created_at: at(20) }),
+    // The second listed target.
+    ledger({ id: 'b-2', target_ref: OTHER_TARGET, created_at: at(5) }), ledger({ id: 'b-1', target_ref: OTHER_TARGET, created_at: at(1) }),
+  ]
+  const db = memoryDb({ integration_yida_delivery_ledger: rows, integration_yida_delivery_audit: [], [TRACE_TABLE]: tracedOf(tracedRows) })
+  const reader = createIssueConfirmLedgerReader({ db })
+  const pendingOld = old.filter((row) => row.source_record_digest !== null).slice(1990).map((row) => row.id)
+  // 2400 rows, 343 unbound (index % 7 === 3), the oldest 1990 bound ones traced: 67 pending.
+  assert.equal(pendingOld.length, 2400 - 343 - 1990)
+  const all = await reader.list({ tenantId: TENANT, ownerId: OWNER, targetRefs: [TARGET, OTHER_TARGET], ledgerIds: null, limit: 100 })
+  assert.deepEqual(all.map((row) => row.id), [...pendingOld, 'a-1', 'a-2', 'a-3', 'b-1', 'b-2'])
+  // limit cuts inside the first target, then exactly at the boundary, then inside the second; the second target is
+  // asked only for what the first left over.
+  const cut = pendingOld.length + 2
+  assert.deepEqual((await reader.list({ tenantId: TENANT, ownerId: OWNER, targetRefs: [TARGET, OTHER_TARGET], ledgerIds: null, limit: cut }))
+    .map((row) => row.id), [...pendingOld, 'a-1', 'a-2'])
+  db.calls.length = 0
+  assert.deepEqual((await reader.list({ tenantId: TENANT, ownerId: OWNER, targetRefs: [TARGET, OTHER_TARGET], ledgerIds: null, limit: cut + 2 }))
+    .map((row) => row.id), [...pendingOld, 'a-1', 'a-2', 'a-3', 'b-1'])
+  assert.deepEqual(db.calls.filter((call) => call[0] === 'selectUnmatched').map((call) => [call[2].target_ref, call[5]]),
+    [[TARGET, cut + 2], [OTHER_TARGET, 1]])
+  assert.deepEqual((await reader.list({ tenantId: TENANT, ownerId: OWNER, targetRefs: [OTHER_TARGET, TARGET], ledgerIds: null, limit: 3 }))
+    .map((row) => row.id), ['b-1', 'b-2', pendingOld[0]])
+})
+
+test('ledger reader (named) is unchanged by the progress fix: a named row past 2000 traced ones is read directly; a named traced row is omitted', async () => {
+  const { createIssueConfirmLedgerReader } = await portsPromise
+  const rows = history(2001)
+  const db = memoryDb({ integration_yida_delivery_ledger: rows, integration_yida_delivery_audit: [],
+    [TRACE_TABLE]: tracedOf(rows.slice(0, 2000)) })
+  const listed = await createIssueConfirmLedgerReader({ db }).list({ tenantId: TENANT, ownerId: OWNER, targetRefs: [TARGET],
+    ledgerIds: ['l-02000', 'l-00000', 'l-01999'], limit: 100 })
+  assert.deepEqual(listed.map((row) => row.id), ['l-02000'])
+  // The named path is per id: selectOne on the ledger by (id + scope), then the trace probe — never a ledger page.
+  assert.deepEqual(db.calls.filter((call) => call[0] === 'select' || call[0] === 'selectUnmatched'), [])
+  assert.deepEqual(db.calls.filter((call) => call[1] === 'integration_yida_delivery_ledger').map((call) => call[2]), [
+    { id: 'l-02000', tenant_id: TENANT, workspace_id: null, owner_id: OWNER },
+    { id: 'l-00000', tenant_id: TENANT, workspace_id: null, owner_id: OWNER },
+    { id: 'l-01999', tenant_id: TENANT, workspace_id: null, owner_id: OWNER },
+  ])
+  assert.deepEqual(db.calls.filter((call) => call[1] === TRACE_TABLE).map((call) => call[2]),
+    [{ ledger_id: 'l-02000' }, { ledger_id: 'l-00000' }, { ledger_id: 'l-01999' }])
 })
 
 test('sheets port refuses a records surface without the host write fence, and binds the scoped api to the ONE registered sheet', async () => {

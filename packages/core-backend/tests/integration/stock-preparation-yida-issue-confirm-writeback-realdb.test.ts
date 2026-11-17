@@ -579,7 +579,8 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     wbStatements.length = 0
     const batch = await world!.runtime.issueConfirmWriteback(actor, {})
     expect(batch).toEqual({ enabled: true, results: [] })
-    // No row source, registry, lease, trace or sheet read for it: the write-back read the ledger page and nothing else.
+    // No row source, registry, lease, trace or sheet read for it: the write-back read the ledger page (the trace table
+    // only inside that query's NOT EXISTS) and nothing else.
     expect(wbStatements.length > 0 && wbStatements.every(sql => /^SELECT \* FROM "integration_yida_delivery_ledger" WHERE/.test(sql))).toBe(true)
     wbStatements.length = 0
     expect(await tableRows(TRACE)).toEqual([])
@@ -731,5 +732,74 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
       expect([failure?.code, failure?.message]).toEqual(['55000', 'YIDA_ISSUE_CONFIRM_WRITEBACK_IMMUTABLE'])
     }
     expect(await tableRows(TRACE)).toEqual(before)
+  })
+
+  // The recovery scan's progress on real PostgreSQL (Codex, Y9 review): traced and unbound rows are excluded by the
+  // ledger query itself (createDb.selectUnmatched — IS NOT NULL + NOT EXISTS on the trace table, before ORDER BY /
+  // LIMIT), so however many of them a target holds, the next pending row is in the very next batch.
+  describe('ledger reader progress (SQL judged by PostgreSQL)', () => {
+    const SCAN_TARGET = 'synthetic-scan-target', OTHER_SCAN_TARGET = 'synthetic-scan-target-b'
+    // `count` acknowledged CREATE rows in ONE statement, one second apart from `from`. NULL digest (unbound): every row
+    // when unboundModulo < 0, the rows with i % unboundModulo = 3 when it is > 0, none when it is 0.
+    async function seedLedger(prefix: string, count: number, options: { target?: string; from?: number; unboundModulo?: number } = {}) {
+      await owner.query(`INSERT INTO ${ident(LEDGER)} (id, tenant_id, workspace_id, operation_id, row_key, owner_id, target_ref,
+        target_revision, plan_revision, payload_digest, business_key_digest, credential_ref, credential_generation, intent, status,
+        claim_token, claim_actor_id, ack_status_code, ack_instance_id, source_record_digest, created_at)
+        SELECT $1 || lpad(i::text, 5, '0'), $2, NULL, 'synthetic-scan-op-' || $1, 'row-' || i, $3, $4, 'synthetic-rev', 'synthetic-plan',
+          repeat('a', 64), md5($1 || i::text) || md5('k' || $1 || i::text), 'synthetic-credential', 1, 'create', 'acknowledged',
+          repeat('c', 64), $3, 201, 'synthetic-instance-' || i,
+          CASE WHEN $5::int < 0 OR ($5::int > 0 AND i % $5::int = 3) THEN NULL ELSE repeat('d', 64) END,
+          timestamptz '2026-03-01T00:00:00Z' + (($6::int + i) * interval '1 second')
+        FROM generate_series(0, $7::int - 1) AS i`,
+      [prefix, TENANT, OWNER, options.target ?? SCAN_TARGET, options.unboundModulo ?? 0, options.from ?? 0, count])
+    }
+    // Trace rows (non-dated outcome) for the given ledger ids, exactly the columns the write-back records.
+    async function seedTrace(ids: string[]) {
+      await owner.query(`INSERT INTO ${ident(TRACE)} (ledger_id, tenant_id, owner_id, target_ref, sheet_id, outcome)
+        SELECT l.id, l.tenant_id, l.owner_id, l.target_ref, NULL, 'project_absent' FROM ${ident(LEDGER)} l WHERE l.id = ANY($1::text[])`, [ids])
+    }
+    const ids = (prefix: string, from: number, to: number) => Array.from({ length: to - from }, (_, i) => `${prefix}${String(from + i).padStart(5, '0')}`)
+    let createReader: (options: Row) => { list(input: Row): Promise<Array<{ id: string; sourceRecordDigest: string | null }>> }
+    beforeAll(async () => {
+      createReader = (await importNative(pathToFileURL(path.join(root, 'plugins/plugin-integration-core/lib/yida-issue-confirm-writeback-ports.mjs')).href))
+        .createIssueConfirmLedgerReader
+    })
+    const batch = (targetRefs: string[], limit = 100) => createReader({ db: createDb({ database: pluginDatabaseOf('wb') }) })
+      .list({ tenantId: TENANT, ownerId: OWNER, targetRefs, ledgerIds: null, limit })
+
+    it('2001 acknowledged rows, the oldest 2000 traced: every run returns the last one, in ONE anti-join ledger query', async () => {
+      await seedLedger('syn-scan-', 2001)
+      await seedTrace(ids('syn-scan-', 0, 2000))
+      for (let run = 0; run < 3; run++) {
+        wbStatements.length = 0
+        expect((await batch([SCAN_TARGET])).map(row => row.id)).toEqual(['syn-scan-02000'])
+        expect(wbStatements.filter(sql => sql.includes(`"${LEDGER}"`))).toHaveLength(1)
+        expect(wbStatements[0]).toMatch(/^SELECT \* FROM "integration_yida_delivery_ledger" WHERE .* AND "source_record_digest" IS NOT NULL AND NOT EXISTS \(SELECT 1 FROM "integration_yida_issue_confirm_writeback" WHERE "integration_yida_issue_confirm_writeback"\."ledger_id" = "integration_yida_delivery_ledger"\."id"\) ORDER BY "created_at" ASC LIMIT 100 OFFSET 0$/)
+      }
+      // Named, the same row is read directly (the ledgerIds path is unchanged); a named traced row is omitted.
+      const named = await createReader({ db: createDb({ database: pluginDatabaseOf('wb') }) }).list({ tenantId: TENANT, ownerId: OWNER,
+        targetRefs: [SCAN_TARGET], ledgerIds: ['syn-scan-00000', 'syn-scan-02000'], limit: 100 })
+      expect(named.map(row => row.id)).toEqual(['syn-scan-02000'])
+    })
+
+    it('2000 unbound acknowledged rows then ONE bound row: the bound row is returned', async () => {
+      await seedLedger('syn-unb-', 2000, { unboundModulo: -1 })
+      expect(Number((await owner.query(`SELECT count(*) AS n FROM ${ident(LEDGER)} WHERE source_record_digest IS NULL`)).rows[0].n)).toBe(2000)
+      await seedLedger('syn-bnd-', 1, { from: 5000 })
+      expect((await batch([SCAN_TARGET])).map(row => [row.id, row.sourceRecordDigest])).toEqual([['syn-bnd-00000', 'd'.repeat(64)]])
+    })
+
+    it('order and limit hold across a mix on PostgreSQL: listed targets in turn, oldest first, at most `limit`', async () => {
+      await seedLedger('syn-mix-', 2400, { unboundModulo: 7 })
+      const bound = (await owner.query(`SELECT id FROM ${ident(LEDGER)} WHERE id LIKE 'syn-mix-%' AND source_record_digest IS NOT NULL
+        ORDER BY created_at`)).rows.map(row => String(row.id))
+      expect(bound).toHaveLength(2400 - 343)
+      await seedTrace(bound.slice(0, 1990))
+      await seedLedger('syn-mxb-', 3, { target: OTHER_SCAN_TARGET, from: 9000 })
+      const pending = bound.slice(1990)
+      expect((await batch([SCAN_TARGET, OTHER_SCAN_TARGET])).map(row => row.id)).toEqual([...pending, ...ids('syn-mxb-', 0, 3)])
+      expect((await batch([SCAN_TARGET, OTHER_SCAN_TARGET], pending.length + 1)).map(row => row.id)).toEqual([...pending, 'syn-mxb-00000'])
+      expect((await batch([OTHER_SCAN_TARGET, SCAN_TARGET], 4)).map(row => row.id)).toEqual([...ids('syn-mxb-', 0, 3), pending[0]])
+    })
   })
 })

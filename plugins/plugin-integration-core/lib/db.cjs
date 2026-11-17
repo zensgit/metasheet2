@@ -219,6 +219,60 @@ function createDb({ database, logger } = {}) {
     return database.query(sql, whereClause.params.concat(rangeClause.params))
   }
 
+  /**
+   * `select` whose filter also carries IS NOT NULL columns and ONE anti-join, evaluated BEFORE ORDER BY / LIMIT /
+   * OFFSET, so rows the caller would only discard never take a slot of a bounded page:
+   *
+   *   SELECT * FROM "<table>" WHERE <where> AND "<c>" IS NOT NULL …
+   *     AND NOT EXISTS (SELECT 1 FROM "<other>" WHERE "<other>"."<innerCol>" = "<table>"."<outerCol>" AND …)
+   *     ORDER BY "<col>" ASC|DESC LIMIT n OFFSET m
+   *
+   * `unmatched` = { table: <other integration_* table, not `table` itself>, on: { <innerCol>: <outerCol>, … } }
+   * (1..4 column pairs). First caller: the YiDa issue-confirm recovery scan (yida-issue-confirm-writeback-ports.mjs),
+   * which must not count already-traced or unbound ledger rows against its batch.
+   *
+   * Added under the module header's extension clause ("added here as a new validated method"): both tables pass
+   * assertTable, every column (where, notNull, both sides of every pair, orderBy) passes assertColumn, every value is
+   * a parameter (the anti-join and IS NOT NULL carry none). Both sides of a pair are table-qualified, so a column
+   * name present in both tables can never bind to the wrong one. Root surface only (not on the transaction handle).
+   */
+  async function selectUnmatched(table, { where, notNull, unmatched, orderBy, limit = 1000, offset = 0 } = {}) {
+    const tableIdent = quoteIdent(assertTable(table))
+    if (!isPlainObject(unmatched)) {
+      throw new ScopeViolationError('plugin-integration-core: selectUnmatched needs an unmatched { table, on } clause', { table })
+    }
+    const otherIdent = quoteIdent(assertTable(unmatched.table))
+    if (unmatched.table === table) {
+      throw new ScopeViolationError('plugin-integration-core: selectUnmatched cannot anti-join a table with itself', { table })
+    }
+    const pairs = isPlainObject(unmatched.on) ? Object.keys(unmatched.on) : []
+    if (pairs.length < 1 || pairs.length > 4) {
+      throw new ScopeViolationError('plugin-integration-core: selectUnmatched needs 1..4 join column pairs', { table })
+    }
+    const joinSql = pairs.map((innerCol) => {
+      const outerCol = unmatched.on[innerCol]
+      return `${otherIdent}.${quoteIdent(assertColumn(innerCol))} = ${tableIdent}.${quoteIdent(assertColumn(outerCol))}`
+    }).join(' AND ')
+    if (notNull !== undefined && !Array.isArray(notNull)) {
+      throw new ScopeViolationError('plugin-integration-core: selectUnmatched notNull must be an array of columns', { table })
+    }
+    const notNullSql = (notNull || []).map((col) => `${quoteIdent(assertColumn(col))} IS NOT NULL`)
+    const whereClause = buildWhereClause(where, 1)
+    const filters = []
+    if (whereClause.sql) filters.push(whereClause.sql.slice(' WHERE '.length))
+    filters.push(...notNullSql)
+    filters.push(`NOT EXISTS (SELECT 1 FROM ${otherIdent} WHERE ${joinSql})`)
+    let orderSql = ''
+    if (orderBy) {
+      const [col, dir] = Array.isArray(orderBy) ? orderBy : [orderBy, 'ASC']
+      orderSql = ` ORDER BY ${quoteIdent(assertColumn(col))} ${dir === 'DESC' ? 'DESC' : 'ASC'}`
+    }
+    const lim = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 10000) : 1000
+    const off = Number.isInteger(offset) && offset >= 0 ? offset : 0
+    const sql = `SELECT * FROM ${tableIdent} WHERE ${filters.join(' AND ')}${orderSql} LIMIT ${lim} OFFSET ${off}`
+    return database.query(sql, whereClause.params)
+  }
+
   async function selectOne(table, where) {
     if (!where || typeof where !== 'object') {
       throw new Error('selectOne: where clause is required')
@@ -583,6 +637,7 @@ function createDb({ database, logger } = {}) {
     selectOne,
     selectOneForUpdate,
     selectOneForKeyShare,
+    selectUnmatched,
     insertOne,
     insertOneIfAbsent,
     upsertOne,

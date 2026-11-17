@@ -40,10 +40,15 @@ const { createTargetScopedRecordsApi } = tableActionsModule
 
 export const ISSUE_CONFIRM_LEDGER_TABLE = 'integration_yida_delivery_ledger'
 export const ISSUE_CONFIRM_LEDGER_AUDIT_TABLE = 'integration_yida_delivery_audit'
-// The bounded batch: at most this many ledger rows of ONE listed target are scanned per run (pages of PAGE), so a run
-// over a long history stays bounded; rows beyond it are reached by a later run (or named by ledgerIds).
-export const ISSUE_CONFIRM_LEDGER_SCAN_CAP = 2000
-const PAGE = 200
+// The bounded batch: per run, ONE ledger query per listed target, asking only for what is still missing of `limit`
+// (≤ ISSUE_CONFIRM_WRITEBACK_MAX_BATCH = 100). Traced rows (the NOT EXISTS anti-join on the trace table) and unbound
+// rows (source_record_digest IS NOT NULL) are excluded IN THE QUERY, before ORDER BY / LIMIT, so they never take a slot:
+// however long the traced or unbound history of a target grows, the next run starts at its oldest untraced bound row.
+// (The earlier form read the oldest 2000 rows from offset 0 on every run and dropped traced / unbound ones only after
+// reading, so once those 2000 were traced or unbound no later row was ever reached.) What still holds a slot is an
+// untraced bound row that stays retryable — a retryable decision records no trace by design (B.4); naming later rows
+// by ledgerIds reaches them regardless.
+const TRACE_ANTI_JOIN = Object.freeze({ table: ISSUE_CONFIRM_TRACE_TABLE, on: Object.freeze({ ledger_id: 'id' }) })
 const ID_RE = /^[^\u0000-\u001f\u007f]{1,128}$/u
 
 function unavailable(message) {
@@ -65,12 +70,15 @@ function iso(value) {
  *   ledgerIds given → those rows (any state: the decision skips what is not selected and records source_unbound for
  *                     a named unbound row); at most `limit`.
  *   otherwise       → per listed target, oldest first: acknowledged CREATE rows with a bound source_record_digest
- *                     (an unbound row is never in the batch, SR5), at most `limit`, at most SCAN_CAP scanned.
+ *                     (an unbound row is never in the batch, SR5) and no traced row — both excluded in the ledger
+ *                     query itself (db.selectUnmatched), so neither takes a slot — at most `limit` in all.
  * `acknowledgedAt` is the created_at of the row's ONE `acknowledgement` AUDIT row (the database clock), read only
  * for a row the first three selector conditions admit; never the ledger's updated_at, never "now".
  */
 export function createIssueConfirmLedgerReader({ db }) {
-  if (!plainFunction(db, 'select') || !plainFunction(db, 'selectOne')) throw unavailable('ledger reader needs db.select/selectOne')
+  if (!plainFunction(db, 'selectUnmatched') || !plainFunction(db, 'selectOne')) {
+    throw unavailable('ledger reader needs db.selectUnmatched/selectOne')
+  }
   async function traced(ledgerId) {
     return Boolean(await db.selectOne(ISSUE_CONFIRM_TRACE_TABLE, { ledger_id: ledgerId }))
   }
@@ -100,22 +108,19 @@ export function createIssueConfirmLedgerReader({ db }) {
       return out
     }
     for (const targetRef of targetRefs) {
-      let offset = 0
-      while (out.length < limit && offset < ISSUE_CONFIRM_LEDGER_SCAN_CAP) {
-        const page = rowsOf(await db.select(ISSUE_CONFIRM_LEDGER_TABLE, {
-          where: { ...scope, target_ref: targetRef, status: 'acknowledged', intent: 'create' },
-          orderBy: ['created_at', 'ASC'], limit: Math.min(PAGE, ISSUE_CONFIRM_LEDGER_SCAN_CAP - offset), offset,
-        }))
-        offset += page.length
-        for (const row of page) {
-          if (out.length >= limit) break
-          if (row.source_record_digest === null || row.source_record_digest === undefined) continue
-          if (await traced(row.id)) continue
-          out.push(await project(row, targetRefs))
-        }
-        if (page.length < PAGE) break
-      }
       if (out.length >= limit) break
+      // Candidates only (see TRACE_ANTI_JOIN above): bound, untraced, oldest first, at most what is still missing.
+      const page = rowsOf(await db.selectUnmatched(ISSUE_CONFIRM_LEDGER_TABLE, {
+        where: { ...scope, target_ref: targetRef, status: 'acknowledged', intent: 'create' },
+        notNull: ['source_record_digest'], unmatched: TRACE_ANTI_JOIN,
+        orderBy: ['created_at', 'ASC'], limit: limit - out.length, offset: 0,
+      }))
+      for (const row of page) {
+        if (out.length >= limit) break
+        // Belt and braces: the query already excludes an unbound row; one that slipped through is still never batched.
+        if (row.source_record_digest === null || row.source_record_digest === undefined) continue
+        out.push(await project(row, targetRefs))
+      }
     }
     return out
   }
