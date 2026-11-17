@@ -23,6 +23,14 @@ import {
   getWorkdayCalendarRegistry,
   type WorkdayCalendarPort,
 } from './core/workday-calendar-port'
+// R-69 1b-ii: the plugin → host IntegrationRunPort registry (owner-tracked in its module, no server field).
+import {
+  registerIntegrationRunPort,
+  unregisterIntegrationRunPortOwnedBy,
+  type IntegrationRunPort,
+} from './core/integration-run-port'
+// R-69 1c: the integration.run_finished publish port and sink registry (module-level, no server field).
+import { publishIntegrationRunFinished, registerIntegrationRunFinishedSink } from './core/integration-run-events'
 import type {
   CoreAPI,
   UserInfo,
@@ -346,7 +354,7 @@ import { spreadsheetsRouter } from './routes/spreadsheets'
 import { spreadsheetPermissionsRouter } from './routes/spreadsheet-permissions'
 import { eventsRouter } from './routes/events'
 import { commentsRouter } from './routes/comments'
-import { dataSourcesRouter, getDataSourceManager } from './routes/data-sources'
+import { dataSourcesRouter, getDataSourceManager, initializeDataSourceManager } from './routes/data-sources'
 import {
   createDataSourcePluginFacade,
   createDataSourceSealedSnapshotConnectionFacade,
@@ -414,6 +422,8 @@ import { adminDirectoryLocalRouter } from './routes/admin-directory-local'
 import { adminDirectoryDepartmentBindingsRouter } from './routes/admin-directory-department-bindings'
 import { adminDirectoryRoutingPolicyRouter } from './routes/admin-directory-routing-policy'
 import { adminDirectoryCapabilitiesRouter } from './routes/admin-directory-capabilities'
+import { meNotificationEndpointsRouter } from './routes/me-notification-endpoints'
+import { meNotificationPreferencesRouter } from './routes/me-notification-preferences'
 import { adminDirectoryOrgTransfersRouter } from './routes/admin-directory-org-transfers'
 import { startDirectorySyncScheduler, stopDirectorySyncScheduler } from './directory/directory-sync-scheduler'
 import { canaryRoutes } from './routes/canary-routes'
@@ -476,6 +486,7 @@ import { createYidaOwnerRuntime, type YidaOwnerRuntimeDependencies } from './int
 import type { TransactionalQueryable } from './multitable/pg-transaction-guard'
 import { createYidaInitializationRuntime } from './integration/yida-initialization-runtime'
 import { createYidaConnectionTestRuntime } from './integration/yida-connection-test-runtime'
+import { createYidaReconciliationRuntime } from './integration/yida-reconciliation-runtime'
 import { createYidaSheetSourceHostDependencies } from './integration/yida-sheet-source-host'
 import { createYidaSourceBindingReauthorizer } from './integration/yida-source-reauthorization-host'
 import { isYidaOwnerHttpObservationPath } from './integration/yida-owner-http-observation'
@@ -671,6 +682,8 @@ export class MetaSheetServer {
     readEnablement: () => process.env.INTEGRATION_YIDA_OWNER_SEND_ENABLED,
     // Y2 multi-target + sheet source: its own default-OFF switch (exact 'true'), never the send switch.
     readMultiTargetEnablement: () => process.env.INTEGRATION_YIDA_MULTI_TARGET_ENABLED,
+    // D17 b (R-88): the sheet/view source on slot 1 without multi-target; its own default-OFF switch (exact 'true').
+    readSheetSourceEnablement: () => process.env.INTEGRATION_YIDA_SHEET_SOURCE_ENABLED,
     // D20 (design baseline v2.3): the exact list of target refs that may still take unbound rows besides slot 1.
     // Default empty: every target other than slot 1 requires a source binding.
     readUnboundTestTargetRefs: () => process.env.INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS,
@@ -693,6 +706,14 @@ export class MetaSheetServer {
     database: { transaction: yidaOwnerTransaction },
     fetch: globalThis.fetch.bind(globalThis),
     readEnablement: () => process.env.INTEGRATION_YIDA_CONNECTION_TEST_ENABLED,
+  })
+  // R-71 ⑦.5 cut-over reconciliation: read-only paginated search + local insert-only evidence. Its own
+  // default-OFF switch (exact 'true'), never the send switch; anchor owner + live admin re-proved per call.
+  private yidaReconciliationRuntime = createYidaReconciliationRuntime({
+    database: { transaction: yidaOwnerTransaction },
+    fetch: globalThis.fetch.bind(globalThis),
+    readEnablement: () => process.env.INTEGRATION_YIDA_RECONCILE_READ_ENABLED,
+    readMultiTargetEnablement: () => process.env.INTEGRATION_YIDA_MULTI_TARGET_ENABLED,
   })
   // Optional bypass/degraded-mode flags for local debug
   private disableWorkflow = process.env.DISABLE_WORKFLOW === 'true'
@@ -1842,6 +1863,11 @@ export class MetaSheetServer {
       getWorkdayCalendarRegistry().unregister()
       this.workdayCalendarProviderOwner = null
     }
+    // R-69 1b-ii: unbind this plugin's IntegrationRunPort (owner-scoped: a non-owner is a no-op) so the
+    // run_integration_job action fails closed again instead of calling into an unloaded plugin.
+    if (unregisterIntegrationRunPortOwnedBy(pluginName)) {
+      this.logger.info(`IntegrationRunPort unbound (plugin ${pluginName})`)
+    }
 
     const namespaces = this.pluginCommunicationNamespacesByPlugin.get(pluginName)
     if (namespaces) {
@@ -2209,7 +2235,7 @@ export class MetaSheetServer {
     // in the startup sequence than route mounting happens.
     this.app.use('/api/multitable', createAutomationRoutes(() => this.automationService))
     this.app.use(YIDA_OWNER_HTTP_PREFIX, createIntegrationYidaOwnerRouter(this.yidaOwnerRuntime, this.yidaInitializationRuntime,
-      this.yidaConnectionTestRuntime, createYidaSheetSourceHostDependencies()))
+      this.yidaConnectionTestRuntime, createYidaSheetSourceHostDependencies(), this.yidaReconciliationRuntime))
     this.app.use(YIDA_OWNER_HTTP_PREFIX, yidaOwnerParseErrorHandler)
     // AI routes — internal/not-in-OpenAPI, per-route guards; platform JWT
     // comes from the global /api/** middleware above:
@@ -2303,6 +2329,9 @@ export class MetaSheetServer {
     this.app.use('/api/admin/directory/department-bindings', adminDirectoryDepartmentBindingsRouter())
     this.app.use('/api/admin/directory/routing-policy', adminDirectoryRoutingPolicyRouter())
     this.app.use('/api/admin/directory/integration-capabilities', adminDirectoryCapabilitiesRouter())
+    // User notification endpoints and preferences: the caller's own rows; answers 404 while the switch is off.
+    this.app.use(meNotificationEndpointsRouter())
+    this.app.use(meNotificationPreferencesRouter())
 
     // Canary routing (behind ENABLE_CANARY_ROUTING feature flag)
     const canaryEnabled = process.env.ENABLE_CANARY_ROUTING === 'true'
@@ -3702,6 +3731,29 @@ export class MetaSheetServer {
         yidaConnectionTestRuntime: manifest.name === 'plugin-integration-core'
           ? this.yidaConnectionTestRuntime.createPluginCapability()
           : undefined,
+        yidaReconciliationRuntime: manifest.name === 'plugin-integration-core'
+          ? this.yidaReconciliationRuntime.createPluginCapability()
+          : undefined,
+        // R-69 1b-ii: the IntegrationRunPort registration (plugin → host, like workdayCalendar), for
+        // plugin-integration-core ONLY. Owner-tracked inside core/integration-run-port.ts (no server field);
+        // unbound again in cleanupPluginRuntimeRegistrations. The core run_integration_job action fails closed
+        // (`port_inactive`) while nothing is bound. Dry-run only; R-69 is OPEN.
+        integrationRun: manifest.name === 'plugin-integration-core'
+          ? {
+              register: (port: IntegrationRunPort) => {
+                const unbind = registerIntegrationRunPort(pluginName, port)
+                this.logger.info(`IntegrationRunPort bound by plugin: ${pluginName}`)
+                return unbind
+              },
+            }
+          : undefined,
+        // R-69 1c: the integration.run_finished PUBLISH port (plugin → host), for plugin-integration-core ONLY.
+        // Closed key-set validation, the switch and the sink live in core/integration-run-events.ts (no server
+        // field); origin 'plugin' may never publish a `triggeredBy: 'automation'` summary (the action layer owns
+        // those). Never throws: the plugin's run result is never changed by its summary.
+        integrationRunEvents: manifest.name === 'plugin-integration-core'
+          ? { publish: (summary: unknown, route: unknown) => publishIntegrationRunFinished(summary, route, 'plugin') }
+          : undefined,
         security: this.pluginRuntimeSecurityService,
       } as unknown as import('./types/plugin').PluginServices,
       storage,
@@ -3741,7 +3793,8 @@ export class MetaSheetServer {
       const yidaDrain = this.yidaOwnerRuntime.deactivate()
       const initializationDrain = this.yidaInitializationRuntime.deactivate()
       const connectionTestDrain = this.yidaConnectionTestRuntime.deactivate()
-      const drains = await Promise.allSettled([yidaDrain, initializationDrain, connectionTestDrain])
+      const reconciliationDrain = this.yidaReconciliationRuntime.deactivate()
+      const drains = await Promise.allSettled([yidaDrain, initializationDrain, connectionTestDrain, reconciliationDrain])
       if (drains.some(result => result.status === 'rejected')) throw new Error('INTEGRATION_RUNTIME_DRAIN_UNAVAILABLE')
     }
     this.cleanupPluginRuntimeRegistrations(name)
@@ -3760,7 +3813,8 @@ export class MetaSheetServer {
         const yidaDrain = this.yidaOwnerRuntime.deactivate()
         const initializationDrain = this.yidaInitializationRuntime.deactivate()
         const connectionTestDrain = this.yidaConnectionTestRuntime.deactivate()
-        const drains = await Promise.allSettled([yidaDrain, initializationDrain, connectionTestDrain])
+        const reconciliationDrain = this.yidaReconciliationRuntime.deactivate()
+        const drains = await Promise.allSettled([yidaDrain, initializationDrain, connectionTestDrain, reconciliationDrain])
         if (drains.some(result => result.status === 'rejected')) throw new Error('INTEGRATION_RUNTIME_DRAIN_UNAVAILABLE')
       }
       const message = error instanceof Error ? error.message : String(error)
@@ -3784,7 +3838,8 @@ export class MetaSheetServer {
       const yidaDrain = this.yidaOwnerRuntime.deactivate()
       const initializationDrain = this.yidaInitializationRuntime.deactivate()
       const connectionTestDrain = this.yidaConnectionTestRuntime.deactivate()
-      const drains = await Promise.allSettled([yidaDrain, initializationDrain, connectionTestDrain])
+      const reconciliationDrain = this.yidaReconciliationRuntime.deactivate()
+      const drains = await Promise.allSettled([yidaDrain, initializationDrain, connectionTestDrain, reconciliationDrain])
       if (drains.some(result => result.status === 'rejected')) throw new Error('INTEGRATION_RUNTIME_DRAIN_UNAVAILABLE')
     }
     const loaded = this.pluginLoader.get(name)
@@ -3922,12 +3977,27 @@ export class MetaSheetServer {
     return task
   }
 
+  /**
+   * R-69 1b-ii (design baseline v2.3 §10.2.3 step 9 / T12): the run_integration_job continuations that outlive
+   * their step — a port call still running after a `timeout_unsettled` early return, its heartbeat and its
+   * eventual fenced Tx B — are drained on the FINAL shutdown barrier (SHUTDOWN_TIMEOUT; on timeout stop()
+   * rejects, the pool is left open and stopForSignal exits 1 — #6747's verified fact), never on the earlier
+   * producer barrier and never as a background task outside stopOnce. Resolves at once (and creates no timer)
+   * when there is no automation service or it predates this drain (test doubles).
+   */
+  private drainIntegrationJobsForShutdown(): Promise<void> {
+    const service = this.automationService as { drainIntegrationJobs?: () => Promise<void> } | undefined
+    if (!service || typeof service.drainIntegrationJobs !== 'function') return Promise.resolve()
+    return service.drainIntegrationJobs()
+  }
+
   private async stopOnce(signal: string): Promise<void> {
     // Latch/abort synchronously, then await below before DB teardown. PluginLoader
     // unloadAll does not await its hooks and is not an adequate draining barrier.
     const yidaOwnerDrain = this.observeShutdownTask(this.yidaOwnerRuntime.stop())
     const yidaInitializationDrain = this.observeShutdownTask(this.yidaInitializationRuntime.stop())
     const yidaConnectionTestDrain = this.observeShutdownTask(this.yidaConnectionTestRuntime.stop())
+    const yidaReconciliationDrain = this.observeShutdownTask(this.yidaReconciliationRuntime.stop())
     this.logger.info(`Received ${signal}, shutting down gracefully...`)
 
     // Close every approval-completion producer admission synchronously. Their drains run while the
@@ -4015,7 +4085,9 @@ export class MetaSheetServer {
       this.logger.warn('APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED')
     }
 
-    const shutdownTasks: Promise<void>[] = [yidaOwnerDrain, yidaInitializationDrain, yidaConnectionTestDrain]
+    const shutdownTasks: Promise<void>[] = [yidaOwnerDrain, yidaInitializationDrain, yidaConnectionTestDrain, yidaReconciliationDrain]
+    // R-69 1b-ii: integration-job continuations (port call, heartbeat, Tx B) ride the FINAL barrier (T12).
+    shutdownTasks.push(this.observeShutdownTask(this.drainIntegrationJobsForShutdown()))
 
     // 0. Stop background tasks
     shutdownTasks.push(Promise.resolve().then(() => {
@@ -4383,6 +4455,11 @@ export class MetaSheetServer {
       this.automationService = pendingAutomationService
       this.automationServiceReady = true
       setAutomationServiceInstance(pendingAutomationService)
+      // R-69 1c: bind the integration.run_finished sink (module-level registry in core/integration-run-events.ts,
+      // no server field). Until this line a publish answers SINK_INACTIVE and nothing fires. Dry-run only, default
+      // OFF (INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED), R-69 OPEN.
+      const runFinishedService = pendingAutomationService
+      registerIntegrationRunFinishedSink('automation-service', (event, route) => runFinishedService.handleIntegrationRunFinished(event, route))
       this.logger.info('AutomationService initialized')
     } catch (e) {
       // Roll back the half-built instance. It was never published (no field, no singleton, routes see
@@ -4511,7 +4588,9 @@ export class MetaSheetServer {
     // Bind external data-source manager to DB and load persisted sources (A0)
     try {
       const { db: kyselyDbDataSources } = await import('./db/db')
-      const { initializeDataSourceManager } = await import('./routes/data-sources')
+      // initializeDataSourceManager comes from the STATIC data-sources import above, never a dynamic one:
+      // under tsx a dynamic import loads a second module instance, so the DB would bind to a manager
+      // the routes and plugin facades never use (guard: tests/unit/data-source-manager-single-instance.test.ts).
       await initializeDataSourceManager(kyselyDbDataSources)
       this.logger.info('DataSourceManager persistence initialized')
     } catch (e) {

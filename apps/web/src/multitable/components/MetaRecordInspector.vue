@@ -299,7 +299,7 @@
           ref="titleInputRef"
           class="meta-record-drawer__title-input"
           type="text"
-          :value="primaryFieldTextValue"
+          v-field-value="[primaryFieldTextValue, record?.id]"
           :aria-label="l('record.titleFieldAria')"
           @change="onTitleChange"
           @keydown.enter="onTitleEnter"
@@ -438,7 +438,7 @@
           :mention-suggestions="mentionSuggestions"
           :mention-search="mentionSearch"
           :field-errors="fieldErrors"
-          @patch="(fieldId, value) => emit('patch', fieldId, value)"
+          @patch="relayPatch"
           @ai-preview="(field) => emit('ai-preview', field)"
           @ai-run="(field) => emit('ai-run', field)"
           @comment-field="(field) => emit('comment-field', field)"
@@ -558,7 +558,7 @@
           :attachment-summaries-by-field="attachmentSummariesByField"
           :upload-fn="uploadFn"
           :delete-attachment-fn="deleteAttachmentFn"
-          @patch="(fieldId, value) => emit('patch', fieldId, value)"
+          @patch="relayPatch"
         />
       </div>
     </div>
@@ -639,6 +639,7 @@ import type {
   MetaAttachment,
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadFn,
+  MetaDrawerPatchArgs,
   MetaCommentMentionSearch,
   MetaCommentMentionSuggestion,
   MultitableComment,
@@ -692,6 +693,7 @@ import { workbenchLabel } from '../utils/workbench-labels'
 import { manualRowLabel } from '../utils/manual-row-labels'
 import { bomRelationsLabel, type BomRelationKind } from '../utils/bom-relations'
 import { isImeKeyEvent } from '../utils/ime-keys'
+import { revertFieldValue, vFieldValue } from '../utils/field-value-directive'
 import type { AiShortcutState } from '../composables/useAiShortcut'
 import {
   canEditField,
@@ -872,7 +874,10 @@ const emit = defineEmits<{
    *  only — the clipboard write + copied/failed live-region text are PR-B1 (see the button's own
    *  template comment); WB has no listener for it yet. */
   (e: 'copy-link'): void
-  (e: 'patch', fieldId: string, value: unknown): void
+  /** `recordId` (and `removed`): the record an attachment write was made on, from the panels (it can end after the
+   *  drawer moved to another record; see MetaRecordFieldsPanel.vue). Absent for every other edit: those are the
+   *  shown record's. */
+  (e: 'patch', ...args: MetaDrawerPatchArgs): void
   (e: 'toggle-lock', payload: { recordId: string; locked: boolean }): void
   (e: 'toggle-comments'): void
   (e: 'comment-field', field: MetaField): void
@@ -1189,6 +1194,8 @@ function onInspectorKeydown(event: KeyboardEvent) {
   // is what an input method composes with, and no letter shortcut here checks for that).
   const mod = event.metaKey || event.ctrlKey
   if (mod && event.shiftKey && (event.code === 'Comma' || event.code === 'Period')) {
+    // Not while an input method composes: moving on would commit the unconverted text.
+    if (isImeKeyEvent(event)) return
     event.preventDefault()
     if (event.code === 'Comma') navigatePrev()
     else navigateNext()
@@ -1674,6 +1681,11 @@ const dispatchPersonFields = computed<DispatchPersonField[]>(() => {
     .map((field) => ({ id: field.id, name: field.name, ids: personValueAssigneeIds(record.data[field.id]) }))
 })
 
+/** A panel's patch, passed on with exactly the arguments it came with. */
+function relayPatch(...args: MetaDrawerPatchArgs) {
+  emit('patch', ...args)
+}
+
 function onTitleChange(event: Event) {
   const field = primaryField.value
   if (!field) return
@@ -1697,8 +1709,7 @@ function onTitleEscape(event: KeyboardEvent) {
   // also reaching `onInspectorKeydown` as a close (its own Escape branch returns early on
   // `event.defaultPrevented`), so a title-edit Escape never closes the whole panel.
   event.preventDefault()
-  const input = event.target as HTMLInputElement
-  input.value = primaryFieldTextValue.value
+  revertFieldValue(event.target as HTMLInputElement)
 }
 
 function navigatePrev() {

@@ -563,7 +563,7 @@ databaseSuite('SA05 immutable local-unverified drafts — real PG, compiler and 
     for (const operationId of [one.operationId, two.operationId]) expect((await second.store.replay({ operationId })).replayVerified).toBe(true)
     // SR5 at the draft store: the same rows pasted (unbound) with the generated entry are refused, nothing written.
     const before = await evidence()
-    await rejected(first.store.createDraft(a.unbound), 'YIDA_DRAFT_PLAN')
+    await rejected(first.store.createDraft(a.unbound), 'YIDA_DRAFT_SOURCE_UNBOUND')
     expect(await evidence()).toEqual(before)
     const persisted = JSON.stringify([await tableRows(TARGETS), await tableRows(OPERATIONS), await tableRows(ROWS), await tableRows(AUDIT)])
     for (const value of ['WLBH-', ...codes, 'SYN-LINE-1', 'sheet_registered']) expect(persisted.includes(value)).toBe(false)

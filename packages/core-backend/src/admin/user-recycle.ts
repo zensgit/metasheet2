@@ -121,17 +121,28 @@ export function acceptsRecycleRescrubConfirm(value: unknown): boolean {
   return typeof value === 'string' && (USER_RECYCLE_RESCRUB_CONFIRM_TEXTS as readonly string[]).includes(value)
 }
 
-const PLATFORM_ADMIN_PREDICATE = `(
-  COALESCE(u.is_admin, FALSE) IS TRUE
-  OR u.role = 'admin'
-  OR EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_id = u.id AND ur.role_id = 'admin')
-)`
-
-const SIGN_IN_PLATFORM_ADMIN_PREDICATE = `
+// Identity the current authentication gate accepts for the account being changed.
+// AuthService promotes an RBAC admin membership over the raw users.role, including
+// role 'disabled', before the gate. is_admin alone is not read. activation_status
+// must be exactly 'activated'. NULL role is not 'disabled'. This does not change AuthService.
+const ACCEPTED_PLATFORM_ADMIN_PREDICATE = `
   COALESCE(u.is_active, FALSE) IS TRUE
+  AND u.activation_status = 'activated'
   AND u.deleted_at IS NULL
   AND u.purged_at IS NULL
-  AND ${PLATFORM_ADMIN_PREDICATE}
+  AND (
+    u.role = 'admin'
+    OR EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_id = u.id AND ur.role_id = 'admin')
+  )
+`
+
+// Spare backups that may remain after this account is demoted. A raw role of
+// 'disabled' does not count here, even with an RBAC admin membership. That same
+// identity is accepted for SELF (ACCEPTED_PLATFORM_ADMIN_PREDICATE) because
+// authentication already resolves it to admin.
+const SIGN_IN_PLATFORM_ADMIN_PREDICATE = `
+  ${ACCEPTED_PLATFORM_ADMIN_PREDICATE}
+  AND u.role IS DISTINCT FROM 'disabled'
 `
 
 export const LIVE_PLATFORM_ADMIN_COUNT_SQL = `
@@ -150,10 +161,14 @@ export async function lockPlatformAdminInvariant(client: RecycleClient): Promise
   await client.query(PLATFORM_ADMIN_ADVISORY_LOCK_SQL)
 }
 
-/** True when this user can currently sign in as a platform admin and nobody else can. */
+/**
+ * True when this user is an accepted platform admin and no backup-eligible admin remains.
+ * Self uses the identity authentication accepts, including a raw disabled role with an
+ * RBAC admin membership. Other rows use the stricter backup predicate.
+ */
 export async function isLastSignInPlatformAdmin(client: RecycleClient, userId: string): Promise<boolean> {
   const self = await client.query(
-    `SELECT (${SIGN_IN_PLATFORM_ADMIN_PREDICATE}) AS is_sign_in_admin
+    `SELECT (${ACCEPTED_PLATFORM_ADMIN_PREDICATE}) AS is_sign_in_admin
      FROM users u
      WHERE u.id = $1`,
     [userId],

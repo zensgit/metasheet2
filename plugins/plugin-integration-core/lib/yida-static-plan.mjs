@@ -1,7 +1,7 @@
 // Local YiDa form planning only. No transport, clock, persistence, or sender. The one import is the
 // pure, import-free material-code leaf (pinned by __tests__/yida-static-plan.test.cjs).
 // Target IDs and target field names are fictional/local metadata, not verified remote schema.
-import { generateYidaMaterialCode, yidaMaterialCodeUuidV5 } from './yida-material-code.mjs'
+import { YIDA_MATERIAL_CODE_PREFIX, generateYidaMaterialCode, yidaMaterialCodeUuidV5 } from './yida-material-code.mjs'
 
 const MAX_TEXT_BYTES = 128 * 1024
 const MAX_ROWS = 100
@@ -342,9 +342,20 @@ function generatedTemplate(value) {
       if (!members || members.length < 1 || new Set(members).size !== members.length
         || !members.every((member) => validIdentifier(member))) return null
       parts.push({ hash: [...members], form: part.form.value })
-    } else if (part && exactKeys(part, ['preset', 'rowIdOf', 'projectOf']) && part.preset.value === GENERATED_PRESET
+    } else if (part && (exactKeys(part, ['preset', 'rowIdOf', 'projectOf'])
+        || (exactKeys(part, ['preset', 'rowIdOf', 'projectOf', 'form']) && HASH_FORMS.has(part.form.value)))
+      && part.preset.value === GENERATED_PRESET
       && validIdentifier(part.rowIdOf.value) && validIdentifier(part.projectOf.value)) {
-      parts.push({ preset: GENERATED_PRESET, rowIdOf: part.rowIdOf.value, projectOf: part.projectOf.value })
+      // D2 (owner 2026-11-07, R-88: an open question gets a configurable default): the preset's optional `form` is
+      // 'uuid-36' (default: Y2's 41-character WLBH- code, byte for byte) or 'uuid-32' (the same code with the UUID's
+      // four hyphens removed after the WLBH- prefix, 37 characters). It is an option of THIS part only: there is no
+      // config-level form, and the v2 initialization (no generated entry) has none. Only 'uuid-32' is kept on the
+      // normalized part, so a declared default is the absent option byte for byte (plan, digests and the generated-
+      // layout signature). The send authority seals the target's generated layout, which copies preset parts whole
+      // (yidaGeneratedLayout below), so a later draft with another form on a sealed target is refused there
+      // (YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT): one target keeps one form.
+      parts.push({ preset: GENERATED_PRESET, rowIdOf: part.rowIdOf.value, projectOf: part.projectOf.value,
+        ...(hasPart(part, 'form') && part.form.value === 'uuid-32' ? { form: 'uuid-32' } : {}) })
     } else return null
   }
   return parts.some((part) => !hasPart(part, 'literal')) ? parts : null
@@ -820,7 +831,10 @@ function generatedValue(config, entry, row) {
     if (missing(keyValue) || missing(projectNo)) return { code: 'FIELD_PART_MISSING' }
     if (!identityText(keyValue) || !identityText(projectNo)) return { code: 'FIELD_TYPE' }
     try {
-      pieces.push(generateYidaMaterialCode({ keyValue, projectNo }))
+      const code = generateYidaMaterialCode({ keyValue, projectNo })
+      // D2 'uuid-32' (this preset part's option): strip the UUID's hyphens only; the WLBH- prefix and Y2's bytes stay.
+      pieces.push(part.form === 'uuid-32'
+        ? YIDA_MATERIAL_CODE_PREFIX + code.slice(YIDA_MATERIAL_CODE_PREFIX.length).replaceAll('-', '') : code)
     } catch (error) {
       if (error?.name === 'YidaMaterialCodeError') return { code: 'FIELD_TYPE' }
       throw error
@@ -875,6 +889,15 @@ function planTransformFields(config, row, index, issues, payload, generated) {
 
 const byFirstElement = (left, right) => (left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0)
 
+/**
+ * The ONE v2/v3 business-key string ('yida-protocol-v2' label, pairs sorted by target name). `pairs` are
+ * `[target, typeof value, value]` with the empty-key fold already applied. Shared by the planner (both
+ * versions) and the ⑦.5 cut-over reconciliation, so a remote record's digest is the send path's digest.
+ */
+export function yidaProtocolBusinessKey(locator, pairs) {
+  return JSON.stringify(['yida-protocol-v2', locator.appType, locator.formUuid, [...pairs].sort(byFirstElement)])
+}
+
 // Same key algorithm and label as v2, so a v2 layout restated as v3 keeps every row identity
 // already reserved by the delivery fence. Only the binding differs: by primary target name.
 function transformBusinessKey(config, row) {
@@ -884,8 +907,7 @@ function transformBusinessKey(config, row) {
     const value = emptyKeys.has(target) && (raw === undefined || raw === null || raw === '') ? '' : raw
     return [target, typeof value, value]
   })
-  pairs.sort(byFirstElement)
-  return JSON.stringify(['yida-protocol-v2', config.target.appType, config.target.formUuid, pairs])
+  return yidaProtocolBusinessKey(config.target, pairs)
 }
 
 function localBusinessKey(config, row) {
@@ -897,8 +919,8 @@ function localBusinessKey(config, row) {
       const raw = ownValue(row, source)
       const value = emptyKeys.has(source) && (raw === undefined || raw === null || raw === '') ? '' : raw
       return [target, typeof value, value]
-    }).sort((left, right) => left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0)
-    return JSON.stringify(['yida-protocol-v2', config.target.appType, config.target.formUuid, pairs])
+    })
+    return yidaProtocolBusinessKey(config.target, pairs)
   }
   const pairs = [...config.businessKey].sort().map((key) => [key, typeof ownValue(row, key), ownValue(row, key)])
   return JSON.stringify([config.target.appType, config.target.formUuid, pairs])

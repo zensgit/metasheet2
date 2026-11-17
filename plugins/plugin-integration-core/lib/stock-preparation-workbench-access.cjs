@@ -401,6 +401,43 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
     path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch/settings',
     control: 'stock-prep-project-pull-batch-settings-set',
   }),
+  Object.freeze({
+    // 批次标识 BI-2 (design §8.1; register R-65) — THE PER-SHEET INSTALL (dry_run / install / abort). ADMIN: an install is an
+    // owner-gated production write (gate ② per sheet). `control: null` is deliberate: there is no web install control
+    // (design §7.2) — installs run through this route or the ops script, whose default is a dry-run.
+    capability: 'projectTarget.pullBatchInstall',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/pull-batch',
+    control: null,
+  }),
+  // 备料分批拉取第一期 step 6d-2a (S6-6; step-6 design §6.6; register R-91) — THE DOUBLED-SHEET REPAIR of one project sheet:
+  // the preview / execute route (retire a superseded root subtree, restore a retire run), the values-free fills report
+  // and the run list. All ADMIN: a real run is an owner-gated production write (gate ② per sheet — the repair switch, the
+  // typed project, the echoed preview digest, an approvalRef and a one-shot claim). All three answer 404 with zero IO
+  // while MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED or the project-sheets switch is off. `control: null` is
+  // deliberate: there is no web control for a repair — it runs through these routes under the owner's runbook.
+  Object.freeze({
+    capability: 'projectTarget.sheetRepair',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/sheet-repair',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'projectTarget.sheetRepairFillsReport',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/sheet-repair/fills-report',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'projectTarget.sheetRepairRuns',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/sheet-repair/runs',
+    control: null,
+  }),
   // 备料分批拉取第一期 step 4 PR-4 (design §13; register R-59) — THE PULLER'S CONFIRMATION SURFACE over a
   // governed project: the private hold page, the evidence behind a hold, a relationship's detail, and the
   // three decisions (confirm / 「暂不处理」 / end). All six are the PULL tier (D-14: the puller confirms;
@@ -477,6 +514,63 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
     method: 'POST',
     path: '/api/integration/stock-preparation/projects/:projectNo/refresh/change-reviews/complete',
     control: 'stock-prep-refresh-change-review-complete',
+  }),
+  // 备料分批拉取第一期 step 6a-2 (S6-2; step-6 design §3.5, §3.8, §5.1; register R-91) — THE RECOVERY of an unfinished
+  // execution: the values-free executions list and the verify-and-close (PULL tier: the puller recovers with their own
+  // account, G1), and the runbook escape close-unverified (ADMIN tier, owner runbook). Step 6a-3 (S6-3) assigned the
+  // control ids: they live on 「拉取待确认」's recovery card (StockPreparationRefreshRecoveryCard.vue).
+  Object.freeze({
+    capability: 'refresh.executions',
+    code: STOCK_PREP_PULL,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/executions',
+    control: 'stock-prep-refresh-executions',
+  }),
+  Object.freeze({
+    capability: 'refresh.recover',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/executions/:executionId/recover',
+    control: 'stock-prep-refresh-recover',
+  }),
+  Object.freeze({
+    capability: 'refresh.closeUnverified',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/refresh/executions/:executionId/close-unverified',
+    control: 'stock-prep-refresh-close-unverified',
+  }),
+  // 备料分批拉取第一期 step 6d-1b (S6-5; step-6 design §6.5; register R-91) — THE DOUBLED-SHEET CENSUS and THE REMNANT
+  // ACKNOWLEDGEMENT, all ADMIN: the census answers objectId and (the project form) the PRIVATE component handles, and an
+  // acknowledgement exempts a remnant from readiness v5 — recorded on site only on the customer's Q1 answer relayed by
+  // the owner. `control: null` is deliberate: S6-5 ships no web page (the runbook drives these routes).
+  Object.freeze({
+    capability: 'projectTarget.census',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/project-targets/census',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'projectTarget.censusRead',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/census',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'projectTarget.remnantAcknowledge',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/remnant-acknowledgements',
+    control: null,
+  }),
+  Object.freeze({
+    capability: 'projectTarget.remnantRevoke',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/remnant-acknowledgements/:acknowledgementId/revoke',
+    control: null,
   }),
   Object.freeze({
     capability: 'confirmationQueue.ensure',

@@ -441,7 +441,10 @@ async function markProjectSheetPlmSystemColumns({ provisioning, projectId, objec
  *
  * `add: false` (the default) READS ONLY and reports `{ missingFieldIds, alreadyPresent, refusedFieldIds }`;
  * `add: true` is the field-creating write (additive, atomic, frozen template only — see
- * `reconcileFrozenTemplateColumnsOnObject`). The same project-sheet namespace guard as the PLM lock refuses
+ * `reconcileFrozenTemplateColumnsOnObject`). Y7 review MEDIUM-1: this wrapper — and only this one — asks the
+ * helper to INSERT every missing `plm_system` column already carrying `humanWriteLock: 'plm_system'`, so the
+ * lock lands in the same statement that creates the column; the later `markProjectSheetPlmSystemColumns` then
+ * finds it already marked (read-before-write) and does not patch it again. The same project-sheet namespace guard as the PLM lock refuses
  * the overview, the deployment's env object and anything outside the stock-prep sandbox namespace BEFORE
  * any IO. A host failure that is not already a typed provisioning refusal is ONE typed code,
  * `STOCK_PREPARATION_PROJECT_TARGET_COLUMNS_REPAIR_FAILED`, naming the object only.
@@ -451,7 +454,7 @@ async function reconcileProjectSheetTemplateColumns({ provisioning, projectId, o
     throw new StockPreparationProjectTargetError(500, 'STOCK_PREPARATION_PROJECT_TARGET_COLUMNS_OBJECT_REFUSED', 'only a project\'s registered stock-preparation sheet can be given the template\'s missing columns here', { objectIdShape: 'not_project_sheet' })
   }
   try {
-    return await reconcileFrozenTemplateColumnsOnObject({ provisioning, projectId, objectId, expectedSheetId: sheetId, apply: add === true })
+    return await reconcileFrozenTemplateColumnsOnObject({ provisioning, projectId, objectId, expectedSheetId: sheetId, apply: add === true, lockPlmSystemColumns: true })
   } catch (error) {
     if (error instanceof StockPreparationTargetProvisioningError) throw error
     const wrapped = new StockPreparationProjectTargetError(
@@ -820,6 +823,8 @@ module.exports = {
   reconcileProjectSheetTemplateColumns,
   markProjectSheetPlmSystemColumns,
   readProjectSheetPlmSystemColumnLock,
+  // 批次标识 BI-2 (R-65): the install route refuses any object but a project sheet before any IO (the same predicate).
+  isPlmLockTargetObjectId,
   PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS,
   HUMAN_WRITE_LOCK_PROPERTY_KEY,
   HUMAN_WRITE_LOCK_PLM_SYSTEM,

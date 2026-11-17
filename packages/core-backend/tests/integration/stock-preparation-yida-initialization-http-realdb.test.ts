@@ -397,4 +397,116 @@ databaseSuite('YiDa initialization HTTP — empty slot, real JWT/live ACL, actua
     expect(f.sheetReads).toBeGreaterThan(0)
     await noExternalWrite()
   })
+
+  it('D16 at the HTTP level: a re-created record of an identity already created on this target is refused at approval with 409 YIDA_SEND_APPROVAL_IDENTITY_RESERVED, before a grant', async () => {
+    const first = await initialized()
+    f.setMultiTarget('true'); f.setEnablement('true')
+    // A registered project sheet (the 087 registry row the bound admission re-reads, plus the reader's resolver) whose
+    // key column is fld_line: the server-side sheet read now yields a source binding.
+    f.setProjectSheet({ projectNo: 'SYN-P1' })
+    await f.sqlAdmin(`INSERT INTO integration_stock_prep_project_target (id, tenant_id, project_no, sheet_id, object_id, status)
+      VALUES ('synthetic-registry-p1', $1, 'SYN-P1', 'sheet_synthetic', 'synthetic_object_p1', 'active')`, [tenant])
+    const config = draftInput().config, allocation = { mode: 'original' }
+    const made = body(await f.http('POST', '/drafts', { config, allocation, source: sheetSource, targetRef: first }), 201)
+    const rowKey = (made.rows as Data[])[0].rowKey
+    const grant = body(await f.http('POST', '/approvals', approval(made.operationId, rowKey, { targetRef: first })), 201)
+    const sent = body(await f.http('POST', '/submissions', { grantId: grant.grantId, submissionId: randomUUID() }), 200)
+    expect(sent.status).toBe('acknowledged')
+    const ledger = await f.rows('integration_yida_delivery_ledger')
+    expect(ledger.map(row => [row.target_ref, row.intent, row.status])).toEqual([[first, 'create', 'acknowledged']])
+    expect(String(ledger[0].creation_identity_digest)).toMatch(/^[0-9a-f]{64}$/u)
+    // The same key cell and project come back as ANOTHER record (re-created, description changed): a new draft with a new
+    // source record, but the same logical creation identity on the same target.
+    f.setSheet({ records: [{ id: 'rec_synthetic_recreated', data: { fld_project: 'SYN-P1', fld_line: 'SYN-L1', fld_qty: 6,
+      fld_desc: 'synthetic re-created HTTP part' } }] })
+    const again = body(await f.http('POST', '/drafts', { config, allocation, source: sheetSource, targetRef: first }), 201)
+    expect(again.operationId).not.toBe(made.operationId)
+    const members = await f.rows('integration_yida_draft_rows')
+    const recreated = members.find(row => row.operation_id === again.operationId)!
+    expect(recreated.creation_identity_digest).toBe(ledger[0].creation_identity_digest)
+    expect(recreated.source_record_digest).not.toBe(ledger[0].source_record_digest)
+    const grants = await f.rows('integration_yida_send_approvals'), proof = await f.proof()
+    denied(await f.http('POST', '/approvals', approval(again.operationId, (again.rows as Data[])[0].rowKey, { targetRef: first })),
+      409, 'YIDA_SEND_APPROVAL_IDENTITY_RESERVED')
+    expect(await f.rows('integration_yida_send_approvals')).toEqual(grants)
+    expect(await f.proof()).toEqual(proof)
+    expect([f.tokenPayloads.length, f.formPayloads.length]).toEqual([1, 1])
+  })
+
+  // ---- Slice YE (external review recommendation 2, 2026-11-08): fixed, non-retryable codes at POST /drafts ----
+  // A v3 layout of the slot-1 key definition (project, line, parent) with one generated `code` target. The synthetic sheet
+  // is registered (fixture `registeredProject`) so the sheet read is BOUND: key column fld_line (alias lineId), project SYN-P1.
+  function generatedConfig(template: Data[]) {
+    const v2 = draftInput().config as Data & { fieldMap: Data[]; fieldCatalog: Data[] }
+    return { ...v2, version: 3, businessKey: ['project', 'line', 'parent'], emptyKeyFields: ['parent'],
+      fieldCatalog: [...v2.fieldCatalog, { id: 'code', control: 'text', required: false }],
+      fieldMap: [...v2.fieldMap.map(entry => ({ transform: 'direct', ...entry })),
+        { transform: 'generated', template, target: 'code', type: 'string', required: false }] }
+  }
+  const preset = (rowIdOf = 'line') => ({ preset: 'material-code-v1', rowIdOf, projectOf: 'project' })
+  const sheetRecord = (id: string, line: string, project = 'SYN-P1') =>
+    ({ id, data: { fld_project: project, fld_line: line, fld_qty: 6, fld_desc: 'synthetic HTTP part' } })
+  const pastedRows = JSON.stringify([{ projectNo: 'SYN-P1', lineId: 'SYN-L1', quantity: 6, description: 'synthetic HTTP part' }])
+
+  it('YE: each deterministic source-validation refusal of POST /drafts is its own fixed 422 (never the retryable 503) and writes nothing; the valid bound draft is written', async () => {
+    const first = await initialized()
+    f.setMultiTarget('true'); f.setEnablement('true')
+    const allocation = { mode: 'original' }, before = await f.initializationProof()
+    // SOURCE_UNBOUND: a generated entry on pasted rows, and on a sheet that is not a registered project sheet.
+    denied(await f.http('POST', '/drafts', { config: generatedConfig([preset()]), allocation, rowsText: pastedRows, targetRef: first }),
+      422, 'YIDA_SEND_APPROVAL_SOURCE_UNBOUND')
+    denied(await f.http('POST', '/drafts', { config: generatedConfig([preset()]), allocation, source: sheetSource, targetRef: first }),
+      422, 'YIDA_SEND_APPROVAL_SOURCE_UNBOUND')
+    // SOURCE_PROJECT_MISMATCH: the registered sheet's project is SYN-P1, the row's project cell says SYN-P2.
+    f.setSheet({ registeredProject: 'SYN-P1', records: [sheetRecord('rec_synthetic_1', 'SYN-L1', 'SYN-P2')] })
+    denied(await f.http('POST', '/drafts', { config: generatedConfig([preset()]), allocation, source: sheetSource, targetRef: first }),
+      422, 'YIDA_SEND_APPROVAL_SOURCE_PROJECT_MISMATCH')
+    // SOURCE_KEY_FIELD_MISMATCH: the preset's row id names the description column, not the bound key column (fld_line).
+    f.setSheet({ registeredProject: 'SYN-P1', records: [sheetRecord('rec_synthetic_1', 'SYN-L1')] })
+    denied(await f.http('POST', '/drafts', { config: generatedConfig([preset('description')]), allocation, source: sheetSource, targetRef: first }),
+      422, 'YIDA_SEND_APPROVAL_SOURCE_KEY_FIELD_MISMATCH')
+    // (SOURCE_KEY_MISMATCH has no HTTP-reachable input: the binding parser and the structural rule refuse first; its
+    // status is pinned in tests/unit/yida-owner-http-approval-status.test.ts and its verdict seam in the service test.)
+    expect(await f.initializationProof()).toEqual(before)
+    // Control: the same registered sheet under the valid template drafts, BOUND (both row digests present).
+    const made = body(await f.http('POST', '/drafts', { config: generatedConfig([preset()]), allocation, source: sheetSource, targetRef: first }), 201)
+    const members = (await f.rows('integration_yida_draft_rows')).filter(row => row.operation_id === made.operationId)
+    expect(members.length).toBe(1)
+    expect(members.every(row => typeof row.source_record_digest === 'string' && typeof row.creation_identity_digest === 'string')).toBe(true)
+    await noExternalWrite()
+  })
+
+  it('YE (Y6 P1 addendum): once an approval sealed the target\'s generated layout, POST /drafts with another layout — or with none — is refused at draft creation with 409 GENERATED_LAYOUT_CONFLICT and writes nothing; the sealed layout still drafts', async () => {
+    const first = await initialized()
+    f.setMultiTarget('true'); f.setEnablement('true')
+    const allocation = { mode: 'original' }, sealedConfig = generatedConfig([preset()])
+    f.setSheet({ registeredProject: 'SYN-P1', records: [sheetRecord('rec_synthetic_1', 'SYN-L1')] })
+    // Before any seal a plain draft is written as before (an unsealed target takes any layout at draft time).
+    body(await f.http('POST', '/drafts', { config: draftInput().config, allocation, rowsText: pastedRows, targetRef: first }), 201)
+    const draft = body(await f.http('POST', '/drafts', { config: sealedConfig, allocation, source: sheetSource, targetRef: first }), 201)
+    const rowKey = (draft.rows as Data[])[0].rowKey
+    body(await f.http('POST', '/preview', { operationId: draft.operationId, rowKey, targetRef: first }), 200)
+    body(await f.http('POST', '/approvals', approval(draft.operationId, rowKey, { targetRef: first })), 201)
+    const seal = await f.rows('integration_yida_generated_layout')
+    expect(seal.length).toBe(1)
+    const before = await f.initializationProof()
+    for (const config of [generatedConfig([{ literal: 'SYN-' }, preset()]), generatedConfig([{ hash: ['project', 'line', 'parent'], form: 'uuid-36' }])]) {
+      denied(await f.http('POST', '/drafts', { config, allocation, source: sheetSource, targetRef: first }), 409, 'YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT')
+    }
+    // No generated entry on the sealed target: the null signature never matches a seal (as at approval), even for a
+    // draft that already exists (the refusal precedes the draft writer's reuse).
+    denied(await f.http('POST', '/drafts', { config: draftInput().config, allocation, rowsText: pastedRows, targetRef: first }),
+      409, 'YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT')
+    expect(await f.initializationProof()).toEqual(before)
+    expect(await f.rows('integration_yida_generated_layout')).toEqual(seal)
+    // The sealed layout keeps drafting: another record of the same registered sheet under the same template.
+    f.setSheet({ registeredProject: 'SYN-P1', records: [sheetRecord('rec_synthetic_2', 'SYN-L2')] })
+    const next = body(await f.http('POST', '/drafts', { config: sealedConfig, allocation, source: sheetSource, targetRef: first }), 201)
+    expect(next.operationId).not.toBe(draft.operationId)
+    expect(await f.rows('integration_yida_generated_layout')).toEqual(seal)
+    // One grant (the sealing approval), no admission, no ledger row, no token or form call.
+    const counts = (await f.proof()).counts
+    expect([counts[0], counts[2], counts[4]]).toEqual([1, 0, 0])
+    expect([f.tokenPayloads.length, f.formPayloads.length]).toEqual([0, 0])
+  })
 })

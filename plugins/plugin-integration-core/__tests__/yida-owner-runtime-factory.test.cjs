@@ -13,7 +13,7 @@ const native = new Function('url', 'return import(url)')
 const modulePath = path.resolve(__dirname, '../lib/yida-owner-runtime-factory.mjs')
 const modulePromise = native(pathToFileURL(modulePath).href)
 const scope = () => ({ actorId: 'control-owner', tenantId: 'control-tenant', workspaceId: null })
-const primitiveKeys = ['resolveSelectionInTransaction', 'executionPayloadDigest', 'sendBudget', 'draftSendBudget', 'sealGeneratedLayoutInTransaction',
+const primitiveKeys = ['resolveSelectionInTransaction', 'executionPayloadDigest', 'sendBudget', 'draftSendBudget', 'validateDraftSource', 'checkGeneratedLayoutInTransaction', 'sealGeneratedLayoutInTransaction',
   'prepareInTransaction', 'loadExecutionMaterialInTransaction', 'previewInTransaction', 'prepareDraftInTransaction']
 
 function dependencies() {

@@ -15,7 +15,12 @@
  *   K — the holder-vs-multi-row-writer cycle (writer holds the subject row exclusively and then wants
  *       the sheet row the holder shares) ends in 40P01 mapped to the typed CONFLICT, never a pass;
  *   P — posture: all 13 triggers present and enabled; the migration's down() removes them and up() is
- *       idempotent (run last; restored in finally).
+ *       idempotent. P-02 runs the drop and both reinstalls inside ONE transaction that it rolls back,
+ *       so it commits nothing: the protocol objects other files see (the AIS census pins the subject
+ *       function and its five triggers) are the migrated ones whatever order vitest runs the files
+ *       in, and a committed drift of them is never healed from the D21 source here. P-02 asserts
+ *       that itself: the oids and bodies of the two functions, the 13 triggers and the two version
+ *       tables are the same after the case as before it.
  *
  * Waits are bounded by wall time and observed through pg_stat_activity / pg_blocking_pids — no sleeps
  * stand in for a lock. CI: DATABASE_URL-gated; excluded from the no-DB default vitest config (so a
@@ -24,7 +29,7 @@
  * cases (the #6792 follow-up) are registered at the end: authz-version-field-row-order-realdb.cases.ts.
  */
 import { randomUUID } from 'node:crypto'
-import { Kysely, PostgresDialect } from 'kysely'
+import { CompiledQuery, Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import {
@@ -445,22 +450,72 @@ describeIfDatabase.sequential('D21 authorization version protocol (real PostgreS
   })
 
   describe('P — migration down / up', () => {
-    it('P-02 down() removes every trigger, function and table; up() reinstalls them and is idempotent (posture green again)', async () => {
+    /**
+     * The committed protocol objects, by oid and body: the two functions, the 13 triggers (with the
+     * function each runs and its enabled state) and the two version tables. A drop and reinstall that
+     * commits gives every one of them a new oid.
+     */
+    const committedProtocolObjects = async (): Promise<string[]> => {
+      const { rows } = await q(
+        `SELECT 'function ' || p.proname || ' ' || p.oid::text || ' ' || md5(p.prosrc) AS line
+           FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+          WHERE n.nspname = 'public' AND p.proname LIKE 'metasheet_authz_bump_%'
+         UNION ALL
+         SELECT 'trigger ' || c.relname || '.' || t.tgname || ' ' || t.oid::text || ' ' || t.tgfoid::text || ' ' || t.tgenabled
+           FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+          WHERE NOT t.tgisinternal AND t.tgname = ANY($1::text[])
+         UNION ALL
+         SELECT 'table ' || name || ' ' || COALESCE(to_regclass('public.' || name)::oid::text, 'missing')
+           FROM unnest($2::text[]) AS tables(name)
+         ORDER BY 1`,
+        [AUTHORIZATION_VERSION_TRIGGERS.map((entry) => entry.trigger), [SHEET_PERMISSION_VERSIONS_TABLE, SUBJECT_AUTHORIZATION_VERSIONS_TABLE]],
+      )
+      return rows.map((row) => String(row.line))
+    }
+
+    it('P-02 down() removes every trigger, function and table; up() reinstalls them and is idempotent (posture green again) — all inside one transaction that is rolled back, so the committed protocol objects are untouched', async () => {
+      const before = await committedProtocolObjects()
+      expect(before.filter((line) => line.startsWith('trigger '))).toHaveLength(AUTHORIZATION_VERSION_TRIGGERS.length)
+      expect(before.filter((line) => line.startsWith('function '))).toHaveLength(2)
+      expect(before.filter((line) => line.startsWith('table ') && line.endsWith(' missing'))).toEqual([])
       const db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
+      const rolledBack = new Error('P-02 rolls its transaction back')
       try {
-        await dropAuthorizationVersionProtocol(db)
-        const posture = await verifyAuthorizationVersionTriggerPosture(pool)
-        expect(posture.ok).toBe(false)
-        expect(posture.ok === false ? posture.missing : []).toHaveLength(AUTHORIZATION_VERSION_TRIGGERS.length)
-        expect((await q(`SELECT count(*)::int AS n FROM pg_proc WHERE proname LIKE 'metasheet_authz_bump_%'`)).rows[0].n).toBe(0)
-        expect((await q(`SELECT to_regclass($1) AS t`, [SHEET_PERMISSION_VERSIONS_TABLE])).rows[0].t).toBeNull()
-        await beginHolder()
-        await expect(admission()).rejects.toMatchObject({ code: 'AUTHZ_VERSION_PROTOCOL_UNAVAILABLE' })
-        await holder.query('ROLLBACK')
-      } finally {
-        await installAuthorizationVersionProtocol(db)
-        await installAuthorizationVersionProtocol(db)
+        // One connection, READ COMMITTED (the admission helper requires it). The drop holds ACCESS
+        // EXCLUSIVE locks on the protocol tables until the rollback, so every read below goes through
+        // this transaction; a pool read of those tables would wait on it.
+        await db.transaction().execute(async (trx) => {
+          const tx = async (text: string, params: unknown[] = []) => trx.executeQuery<Record<string, unknown>>(CompiledQuery.raw(text, params))
+          await tx("SET LOCAL lock_timeout = '10s'")
+          await tx("SET LOCAL statement_timeout = '20s'")
+          await dropAuthorizationVersionProtocol(trx)
+          const posture = await verifyAuthorizationVersionTriggerPosture(tx)
+          expect(posture.ok).toBe(false)
+          expect(posture.ok === false ? posture.missing : []).toHaveLength(AUTHORIZATION_VERSION_TRIGGERS.length)
+          expect((await tx(`SELECT count(*)::int AS n FROM pg_proc WHERE proname LIKE 'metasheet_authz_bump_%'`)).rows[0].n).toBe(0)
+          expect((await tx(`SELECT to_regclass($1) AS t`, [SHEET_PERMISSION_VERSIONS_TABLE])).rows[0].t).toBeNull()
+          await tx('SAVEPOINT p02_admission')
+          await expect(lockAuthorizationVersionsForAdmission(tx, { sheetIds: [SHEET], actorId: ACTOR, tenantId: TENANT, recordId: RECORD }))
+            .rejects.toMatchObject({ code: 'AUTHZ_VERSION_PROTOCOL_UNAVAILABLE' })
+          await tx('ROLLBACK TO SAVEPOINT p02_admission')
+          await installAuthorizationVersionProtocol(trx)
+          await installAuthorizationVersionProtocol(trx)
+          expect(await verifyAuthorizationVersionTriggerPosture(tx)).toEqual({ ok: true, triggers: 13 })
+          const version = async () => {
+            const { rows } = await tx(`SELECT version::text AS version FROM ${SHEET_PERMISSION_VERSIONS_TABLE} WHERE sheet_id = $1`, [SHEET])
+            return rows[0] ? Number(rows[0].version) : 0
+          }
+          const start = await version()
+          await tx(`INSERT INTO spreadsheet_permissions (sheet_id, user_id, subject_type, subject_id, perm_code) VALUES ($1, $2, 'user', $2, 'read')`, [SHEET, ACTOR])
+          expect((await version()) - start).toBe(1)
+          throw rolledBack
+        })
+      } catch (error) {
+        if (error !== rolledBack) throw error
       }
+      // Nothing of the case is committed: same objects (same oids, same bodies), the posture is green
+      // and the installed triggers still bump.
+      expect(await committedProtocolObjects()).toEqual(before)
       expect(await verifyAuthorizationVersionTriggerPosture(pool)).toEqual({ ok: true, triggers: 13 })
       expect(await sheetDelta(`INSERT INTO spreadsheet_permissions (sheet_id, user_id, subject_type, subject_id, perm_code) VALUES ($1, $2, 'user', $2, 'read')`, [SHEET, ACTOR])).toBe(1)
       await q(`DELETE FROM spreadsheet_permissions WHERE sheet_id = $1`, [SHEET])

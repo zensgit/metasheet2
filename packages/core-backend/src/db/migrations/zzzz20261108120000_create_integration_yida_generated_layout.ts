@@ -46,6 +46,9 @@ import { sql, type Kysely } from 'kysely'
  * down() REFUSES (fixed code, ERRCODE 55000) while any row exists: a sealed layout is the evidence that every
  * GENERATED code sent under that target from the seal onward was minted under it. With no rows it drops the table and
  * the guard function.
+ *
+ * AIS. Every statement is static SQL (no EXECUTE) so the authorization-input migration judge reads it; the two
+ * triggers are over this non-input table.
  */
 
 export const YIDA_GENERATED_LAYOUT_TABLE = 'integration_yida_generated_layout'
@@ -91,7 +94,9 @@ DECLARE
   present boolean := false;
 BEGIN
   IF to_regclass('${YIDA_GENERATED_LAYOUT_TABLE}') IS NOT NULL THEN
-    EXECUTE 'SELECT EXISTS (SELECT 1 FROM ${YIDA_GENERATED_LAYOUT_TABLE})' INTO present;
+    -- Static, not EXECUTE (the authorization-input migration judge reads every statement): PL/pgSQL plans this
+    -- SELECT only when the branch runs, i.e. only once to_regclass has found the table.
+    SELECT EXISTS (SELECT 1 FROM integration_yida_generated_layout) INTO present;
   END IF;
   IF present THEN
     RAISE EXCEPTION '${YIDA_GENERATED_LAYOUT_DOWN_REFUSED_CODE}' USING ERRCODE = '55000';

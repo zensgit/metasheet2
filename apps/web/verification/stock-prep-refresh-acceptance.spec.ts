@@ -139,6 +139,58 @@ test.describe('备料分批拉取 step 4 PR-7 —— 拉取待确认', () => {
     expectNoUnmockedRoutes(log)
   })
 
+  // 备料分批拉取第一期 step 6a-3 (S6-3, R-91) —— 「拉取待确认」's recovery card in the real browser.
+  test('RA-07 拉取人员:失败待恢复 —— 输入项目号才可核对;核对后才可结束;结束要求重新试算(批次开关关着:没有批次行)', async ({ page }) => {
+    const log = await openStockPrepHarness(page, { actor: 'puller', scenario: 'governedRecovery', tab: 'refresh-queue', projectNo: SYN_PROJECT_A })
+    const queue = page.locator('[data-testid="stock-prep-refresh-queue"]')
+    await expect(queue).toHaveAttribute('data-refresh-rendering', 'recovery_pending')
+    const card = page.locator('[data-testid="stock-prep-refresh-recovery"]')
+    await expect(card).toContainText('上次写入未完成')
+    const execution = card.locator('[data-testid="stock-prep-refresh-recovery-execution"]')
+    await expect(execution).toHaveCount(1)
+    await expect(execution.locator('[data-testid="stock-prep-refresh-recover"]')).toBeDisabled()
+    await expect(execution.locator('[data-testid="stock-prep-refresh-recovery-close"]')).toBeDisabled()
+    // A puller never sees the admin's runbook close.
+    await expect(card.locator('[data-testid="stock-prep-refresh-close-unverified"]')).toHaveCount(0)
+    await execution.locator('[data-testid="stock-prep-refresh-recovery-typed-project-no"]').fill(SYN_PROJECT_A)
+    await execution.locator('[data-testid="stock-prep-refresh-recover"]').click()
+    await expect(execution.locator('[data-testid="stock-prep-refresh-recovery-report"]')).toHaveAttribute('data-result', 'mixed')
+    await expect(execution.locator('[data-testid="stock-prep-refresh-recovery-counts"]')).toContainText('计划写 3 行')
+    await expect(execution.locator('[data-testid="stock-prep-refresh-recovery-pending-entry"]')).toHaveCount(2)
+    // N-SWITCH: the switch is off in this world — no batch line anywhere.
+    await expect(card.locator('[data-testid="stock-prep-refresh-recovery-execution-batch"]')).toHaveCount(0)
+    await expect(card.locator('[data-testid="stock-prep-refresh-recovery-report-batch"]')).toHaveCount(0)
+    await expect(execution.locator('[data-testid="stock-prep-refresh-recovery-close"]')).toBeEnabled()
+    await execution.locator('[data-testid="stock-prep-refresh-recovery-close"]').click()
+    await expect(page.locator('[data-testid="stock-prep-refresh-preview-again"]')).toHaveAttribute('data-preview-again', 'recovered')
+    await expect(page.locator('[data-testid="stock-prep-refresh-preview-again"]')).toContainText('请重新试算')
+    await expect(card).toHaveCount(0)
+    expect(log.count('POST', '/recover')).toBe(2)
+    for (const call of log.calls.filter((entry) => entry.path.includes('/refresh/'))) {
+      expect(call.search, call.url).not.toContain('workspaceId')
+      expect(call.search, call.url).not.toContain('limit=')
+    }
+    expectNoUnmockedRoutes(log)
+  })
+
+  test('RA-08 失败待恢复:拉取人员的横幅带入口;一线只看见「等待拉取人员核对」,不读执行记录', async ({ page }) => {
+    let log = await openStockPrepHarness(page, { actor: 'puller', scenario: 'governedRecovery', projectNo: SYN_PROJECT_A })
+    const banner = page.locator('[data-testid="stock-prep-project-board-refresh-banner"]')
+    await expect(banner).toHaveAttribute('data-refresh-status', 'failed_pending_recovery')
+    await expect(banner).toContainText('等待拉取人员核对')
+    await page.locator('[data-testid="stock-prep-project-board-refresh-open-queue"]').click()
+    await expect(page.locator('[data-testid="stock-prep-panel"]')).toHaveAttribute('data-active', 'refresh-queue')
+    await expect(page.locator('[data-testid="stock-prep-refresh-recovery"]')).toBeVisible()
+    expectNoUnmockedRoutes(log)
+
+    log = await openStockPrepHarness(page, { actor: 'operator', scenario: 'governedRecovery', projectNo: SYN_PROJECT_A })
+    await expect(page.locator('[data-testid="stock-prep-project-board-refresh-banner"]')).toContainText('等待拉取人员核对')
+    await expect(page.locator('[data-testid="stock-prep-project-board-refresh-open-queue"]')).toHaveCount(0)
+    await expect(page.locator('[data-testid="stock-prep-tab-refresh-queue"]')).toHaveCount(0)
+    expect(log.calls.some((call) => call.path.includes('/refresh/executions'))).toBe(false)
+    expectNoUnmockedRoutes(log)
+  })
+
   test('RA-03 不受分批拉取管辖的项目:没有横幅、没有核对,rail 上也没有计数(休眠)', async ({ page }) => {
     const log = await openStockPrepHarness(page, { actor: 'puller', scenario: 'ready', projectNo: SYN_PROJECT_A })
     await expect(page.locator('[data-testid="stock-prep-project-board-title"]')).toBeVisible()
@@ -150,6 +202,8 @@ test.describe('备料分批拉取 step 4 PR-7 —— 拉取待确认', () => {
     await expect(page.locator('[data-testid="stock-prep-refresh-queue"]')).toHaveAttribute('data-refresh-rendering', 'not_governed')
     // PR-9 dormancy tripwire: a not-governed project never reads the change plan.
     expect(log.calls.some((call) => call.path.includes('/change-plans/') || call.path.includes('/change-reviews/'))).toBe(false)
+    // S6-3 dormancy tripwire: a not-governed project never reads the (audited) executions list.
+    expect(log.calls.some((call) => call.path.includes('/refresh/executions'))).toBe(false)
     expectNoUnmockedRoutes(log)
   })
 })

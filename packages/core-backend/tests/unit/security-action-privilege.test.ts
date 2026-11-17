@@ -24,6 +24,7 @@ import { isAdminLevelPermissionCode } from '../../src/rbac/role-assignment'
 import { inspectUserPermissionGrants, isAdmin, listUserPermissions } from '../../src/rbac/service'
 import { APPROVAL_ADMIN_CAPABILITY_PREDICATE } from '../../src/services/approval-admin-capability'
 import {
+  DEPARTMENT_SCOPE_PROJECTION,
   LEGACY_KEY_EXISTENCE_PREDICATE,
   legacyKeyExistencePredicateIsPinned,
   privilegeFixture,
@@ -76,6 +77,11 @@ async function reasonsOf(overrides: Partial<PrivilegeRow>): Promise<readonly Hig
   return (await classifyRow(overrides)).reasons
 }
 
+/** Allowlists are posix. path.relative on Windows returns backslashes. */
+function posixImportEdges(edges: ReadonlyArray<ImportEdge>): ImportEdge[] {
+  return edges.map(([file, specifier]) => [file.replaceAll('\\', '/'), specifier])
+}
+
 function count(haystack: string, needle: string): number {
   return haystack.split(needle).length - 1
 }
@@ -104,6 +110,7 @@ describe('privilege inputs read', () => {
     expect(count(sql, 'WHERE u.id = $1::text')).toBe(1)
     expect(count(sql, '(SELECT jsonb_agg(')).toBe(6)
     expect(count(sql, '$1')).toBe(7)
+    expect(sql).toMatch(DEPARTMENT_SCOPE_PROJECTION)
   })
 
   it('reads only the two delegated role administration scope tables as scope sources', async () => {
@@ -209,8 +216,15 @@ describe('privilege inputs read', () => {
     ['pairs not an array', { role_permission_pairs: 'r:c' }],
     ['admission enabled not boolean', { admissions: [['attendance', 'true']] }],
     ['admission namespace not string', { admissions: [[1, true]] }],
-    ['department scope with a non-string', { department_scopes: [['attendance', 1]] }],
+    ['department scope with a non-string', { department_scopes: [['attendance', 1, true]] }],
     ['department scope with one element', { department_scopes: [['attendance']] }],
+    ['department scope missing includeChildren', { department_scopes: [['attendance', 'department-1']] }],
+    ['department scope includeChildren null', { department_scopes: [['attendance', 'department-1', null]] }],
+    ['department scope includeChildren string false', { department_scopes: [['attendance', 'department-1', 'false']] }],
+    ['department scope includeChildren string true', { department_scopes: [['attendance', 'department-1', 'true']] }],
+    ['department scope includeChildren number 0', { department_scopes: [['attendance', 'department-1', 0]] }],
+    ['department scope includeChildren number 1', { department_scopes: [['attendance', 'department-1', 1]] }],
+    ['department scope with an extra element', { department_scopes: [['attendance', 'department-1', false, 'extra']] }],
     ['member group scope with a non-string', { member_group_scopes: [[null, 'g']] }],
     ['legacy value is a JSON object', { legacy_permissions: { 'users:write': true } }],
     ['legacy value is a JSON string', { legacy_permissions: 'admin:all' }],
@@ -308,7 +322,7 @@ describe('privilege inputs read', () => {
       direct_codes: ['z:read', 'A:read', 'a:read'],
       role_permission_pairs: [['r2', 'x:read'], ['r1', 'y:read'], ['r1', 'x:read']],
       admissions: [['b', true], ['a', false], ['a', true]],
-      department_scopes: [['x', 'd2'], ['x', 'd1']],
+      department_scopes: [['x', 'd2', true], ['x', 'd1', false], ['x', 'd1', true]],
       member_group_scopes: [['y', 'g2'], ['x', 'g9']],
     })
     expect(Object.isFrozen(inputs)).toBe(true)
@@ -318,7 +332,7 @@ describe('privilege inputs read', () => {
     expect(inputs.directCodes).toEqual(['A:read', 'a:read', 'z:read'])
     expect(inputs.rolePermissions).toEqual([['r1', 'x:read'], ['r1', 'y:read'], ['r2', 'x:read']])
     expect(inputs.admissions).toEqual([['a', false], ['a', true], ['b', true]])
-    expect(inputs.delegatedDepartmentScopes).toEqual([['x', 'd1'], ['x', 'd2']])
+    expect(inputs.delegatedDepartmentScopes).toEqual([['x', 'd1', false], ['x', 'd1', true], ['x', 'd2', true]])
     expect(inputs.delegatedMemberGroupScopes).toEqual([['x', 'g9'], ['y', 'g2']])
     expect(inputs.userId).toBe(SUBJECT)
   })
@@ -373,7 +387,8 @@ describe('privilege classification', () => {
     ['delegated_admin_role', 'the stock-prep_admin role', { role_ids: ['stock-prep_admin'] }],
     ['delegated_admin_role', 'a delegated admin role in mixed case', { role_ids: ['Attendance_Admin'] }],
     ['delegated_admin_role', 'a delegated admin role with surrounding whitespace', { role_ids: [' x_admin '] }],
-    ['delegated_admin_scope', 'one department scope row', { department_scopes: [['attendance', 'department-1']] }],
+    ['delegated_admin_scope', 'one department scope that includes descendants', { department_scopes: [['attendance', 'department-1', true]] }],
+    ['delegated_admin_scope', 'one exact department scope', { department_scopes: [['attendance', 'department-1', false]] }],
     ['delegated_admin_scope', 'one member group scope row', { member_group_scopes: [['attendance', 'group-1']] }],
     ...(['*:*', '*', 'admin', 'admin:all', 'Attendance:Admin', 'attendance : admin', 'x:*', 'x:y:*', '*:read', ' admin :read']
       .flatMap((code) => codeSources(code).map(([label, overrides]) => ['admin_level_code', label, overrides] as const))),
@@ -395,7 +410,7 @@ describe('privilege classification', () => {
       is_admin: true,
       role: 'admin',
       role_ids: ['admin', 'attendance_admin'],
-      department_scopes: [['attendance', 'department-1']],
+      department_scopes: [['attendance', 'department-1', true]],
       direct_codes: ['*:*'],
       legacy_permissions: ['users:write'],
     })).toEqual({ privilegeClass: 'high', reasons: [...HIGH_PRIVILEGE_REASONS] })
@@ -410,9 +425,13 @@ describe('privilege classification', () => {
   it('classifies as high at least every literal the web administrator test accepts', async () => {
     const source = readFileSync(path.join(ROOT, 'apps', 'web', 'src', 'composables', 'useAuth.ts'), 'utf8')
     expect(count(source, 'const isAdmin =')).toBe(1)
-    const expression = source.split('const isAdmin =')[1].split('\n\n')[0]
+    // Stop at the blank line or the return that closes the snapshot marker.
+    // The marker is the admin role, *:*, and admin:all. users:write, roles:write,
+    // and permissions:write stay ordinary codes there and are still high in the
+    // elevation-shape case below.
+    const expression = source.split('const isAdmin =')[1].split(/\n\s*\n/)[0].split(/\n\s*return\b/)[0]
     const literals = [...expression.matchAll(/'([^']+)'/g)].map((match) => match[1])
-    expect([...literals].sort()).toEqual(['*:*', 'admin', 'admin:all', 'permissions:write', 'roles:write', 'users:write'])
+    expect([...literals].sort()).toEqual(['*:*', 'admin', 'admin:all'])
     for (const literal of literals) {
       const classification = literal === 'admin' ? await classifyRow({ role_ids: [literal] }) : await classifyRow({ direct_codes: [literal] })
       expect(classification.privilegeClass).toBe('high')
@@ -443,7 +462,13 @@ describe('privilege classification', () => {
     await isAdmin(SUBJECT, runQuery as never)
     const tables = new Set(statements.flatMap((sql) => [...sql.matchAll(/\b(?:FROM|JOIN)\s+([a-z_]+)/g)].map((match) => match[1])))
     expect(tables.size).toBeGreaterThanOrEqual(4)
-    for (const table of tables) expect(PRIVILEGE_GRANT_SOURCE_TABLES).toContain(table)
+    // inspectUserPermissionGrants joins roles for r.name only. Classification
+    // reads role_id from user_roles and does not read that display name.
+    const displayOnlyTables = new Set(['roles'])
+    for (const table of tables) {
+      if (displayOnlyTables.has(table)) continue
+      expect(PRIVILEGE_GRANT_SOURCE_TABLES).toContain(table)
+    }
   })
 
   it('imports only the transaction guard, the two predicates and the policy types, and never a cache, request or environment', () => {
@@ -469,14 +494,20 @@ describe('privilege witness', () => {
     role_permission_pairs: [['b', 'approvals:read']],
     legacy_permissions: ['spreadsheet:read'],
     admissions: [['attendance', true]],
-    department_scopes: [['attendance', 'department-1']],
+    department_scopes: [['attendance', 'department-1', true]],
     member_group_scopes: [['attendance', 'group-1']],
   }
 
   it('is a domain-separated sha256 pinned for a fixed fixture', async () => {
     const witness = computePrivilegeWitness(await readInputs(pinnedRow))
     expect(witness).toMatch(/^[0-9a-f]{64}$/)
-    expect(witness).toBe('4ecf13878fb89bb8e5cbc506d7567995256169e3c33fbc62df342c23e9ba0c2f')
+    // Inputs, after code-unit sort: isAdmin false, role 'user', roleIds ['B','a','b'],
+    // directCodes ['tasks:write'], rolePermissions [['b','approvals:read']],
+    // legacyPermissions ['spreadsheet:read'], admissions [['attendance', true]],
+    // delegatedDepartmentScopes [['attendance','department-1', true]],
+    // delegatedMemberGroupScopes [['attendance','group-1']].
+    // Domain metasheet:security-action:privilege:v2|. The boolean is inside the canonical JSON.
+    expect(witness).toBe('3afa149f203a4a348f40845d0a1a0276aefa64eb9ce624c5f5739039517ff9e6')
   })
 
   it('does not depend on the order rows arrive in and is deterministic', async () => {
@@ -498,7 +529,8 @@ describe('privilege witness', () => {
     ['a code moves between two held roles', { role_permission_pairs: [['a', 'approvals:read']] }],
     ['the legacy array is reordered', { legacy_permissions: ['spreadsheet:read', 'x'] }],
     ['an admission flips', { admissions: [['attendance', false]] }],
-    ['a department scope is replaced by another', { department_scopes: [['attendance', 'department-2']] }],
+    ['a department scope is replaced by another', { department_scopes: [['attendance', 'department-2', true]] }],
+    ['include_children flips from true to false on the same department', { department_scopes: [['attendance', 'department-1', false]] }],
     ['a member group scope is replaced by another', { member_group_scopes: [['attendance', 'group-2']] }],
   ] satisfies Array<[string, Partial<PrivilegeRow>]>)('changes when %s', async (_label, change) => {
     const base = computePrivilegeWitness(await readInputs(pinnedRow))
@@ -531,7 +563,40 @@ describe('privilege witness', () => {
     const witness = computePrivilegeWitness(inputs)
     expect(witness).not.toBe(bare)
     expect(witness).toBe(domained)
-    expect(PRIVILEGE_WITNESS_DOMAIN).toBe('metasheet:security-action:privilege:v1|')
+    expect(PRIVILEGE_WITNESS_DOMAIN).toBe('metasheet:security-action:privilege:v2|')
+    const v1 = createHash('sha256').update('metasheet:security-action:privilege:v1|' + JSON.stringify({
+      admissions: inputs.admissions, delegatedDepartmentScopes: inputs.delegatedDepartmentScopes,
+      delegatedMemberGroupScopes: inputs.delegatedMemberGroupScopes, directCodes: inputs.directCodes, isAdmin: inputs.isAdmin,
+      legacyPermissions: inputs.legacyPermissions, role: inputs.role, roleIds: inputs.roleIds, rolePermissions: inputs.rolePermissions,
+    })).digest('hex')
+    expect(witness).not.toBe(v1)
+  })
+
+  it('changes when include_children flips either way and the class stays high', async () => {
+    const base = { department_scopes: [['attendance', 'department-1', false]] } as Partial<PrivilegeRow>
+    const widened = { department_scopes: [['attendance', 'department-1', true]] } as Partial<PrivilegeRow>
+    const exact = await classifyRow(base)
+    const descendants = await classifyRow(widened)
+    expect(exact).toEqual({ privilegeClass: 'high', reasons: ['delegated_admin_scope'] })
+    expect(descendants).toEqual(exact)
+    const witnessExact = computePrivilegeWitness(await readInputs(base))
+    const witnessDescendants = computePrivilegeWitness(await readInputs(widened))
+    expect(witnessExact).not.toBe(witnessDescendants)
+    expect(computePrivilegeWitness(await readInputs(base))).toBe(witnessExact)
+  })
+
+  it('does not let a mocked includeChildren triple stand in for a statement that omits the column', async () => {
+    const row = privilegeRow({ department_scopes: [['attendance', 'department-1', true]] })
+    const positive = privilegeHarness(privilegeFixture({ rows: [row] }))
+    const negative = privilegeHarness(privilegeFixture({ rows: [row] }))
+    const stripped: Queryable = {
+      async query(sql, params) {
+        return negative.executor.query(sql.replace(/,\s*s\.include_children\b/g, ''), params)
+      },
+    }
+    await expectUnavailable(readPrivilegeInputs(stripped, SUBJECT), 'input_malformed')
+    const kept = await readPrivilegeInputs(positive.executor, SUBJECT)
+    expect(kept.delegatedDepartmentScopes).toEqual([['attendance', 'department-1', true]])
   })
 
   it('refuses inputs whose legacy value cannot be canonically encoded', () => {
@@ -574,7 +639,7 @@ describe('wiring', () => {
   })
 
   it('is imported, together with the policy module, by exactly the allowlisted files: the classifier and the action proof service', () => {
-    const edges = collectImportEdges(SRC, /security-action-privilege|external-login-assurance/, (file) => readFileSync(file, 'utf8'))
+    const edges = posixImportEdges(collectImportEdges(SRC, /security-action-privilege|external-login-assurance/, (file) => readFileSync(file, 'utf8')))
     expect(importEdgeViolations(edges, POLICY_MODULE_IMPORT_ALLOWLIST)).toEqual([])
     for (const file of listSourceFiles(SRC)) {
       const source = readFileSync(file, 'utf8')
@@ -623,7 +688,7 @@ describe('wiring', () => {
         'unrelated.ts': "const name = 'other'\nexport const load = () => require(name)\n",
       }
       for (const [file, text] of Object.entries(files)) writeFileSync(path.join(root, file), text)
-      const edges = collectImportEdges(root, /watched-module/, (file) => readFileSync(file, 'utf8'))
+      const edges = posixImportEdges(collectImportEdges(root, /watched-module/, (file) => readFileSync(file, 'utf8')))
       expect(importEdgeViolations(edges, [['auth/allowed.ts', './watched-module']])).toEqual([
         `unexpected: auth/template.ts -> ./watched-module`,
         `unexpected: computed.ts -> ${NON_LITERAL_SPECIFIER}`,
@@ -632,7 +697,7 @@ describe('wiring', () => {
         'unexpected: tool.cjs -> ./auth/watched-module',
         'unexpected: tool.mjs -> ./auth/watched-module',
       ])
-      expect(listSourceFiles(root).map((file) => path.relative(root, file)).sort()).toEqual(['auth/allowed.ts', 'auth/template.ts', 'computed.ts', 'legacy.js', 'tool.cjs', 'tool.mjs', 'unrelated.ts'])
+      expect(listSourceFiles(root).map((file) => path.relative(root, file).replaceAll('\\', '/')).sort()).toEqual(['auth/allowed.ts', 'auth/template.ts', 'computed.ts', 'legacy.js', 'tool.cjs', 'tool.mjs', 'unrelated.ts'])
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

@@ -292,6 +292,32 @@ describe('StockPreparationYidaPreviewPanel', () => {
     expectNoIo()
   })
 
+  // Q4 (owner 2026-11-07, R-88): the legacy one-decimal rounding is an explicit, decimal-mode-only choice whose copy says it
+  // changes totals; the default stays exact and is never sent as a key.
+  it('Q4: the decimal mode offers legacy one-decimal rounding with a changes-totals warning; exact stays the default', async () => {
+    await example('primary')
+    const input = rows(); input[0].quantity = 1; edit('sp-yida-rows', JSON.stringify(input))
+    await setAllocation('equal_integer', 'SYN-PROJECT-01\nSYN-PROJECT-02\nSYN-PROJECT-03')
+    expect(root?.querySelector('[data-testid="sp-yida-allocation-rounding"]')).toBeNull()
+    edit('sp-yida-allocation-mode', 'equal_decimal_exact'); await flush()
+    expect(q<HTMLSelectElement>('sp-yida-allocation-rounding').value).toBe('exact')
+    expect(root?.querySelector('[data-testid="sp-yida-allocation-rounding-warning"]')).toBeNull()
+    await preview()
+    expect(q('sp-yida-allocation-issues').textContent).toContain('QUANTITY_NOT_DIVISIBLE')
+    edit('sp-yida-allocation-rounding', 'legacy-1dp'); await flush()
+    expect(q('sp-yida-allocation-rounding-warning').textContent).toContain('会改变总量')
+    await preview()
+    expect(q('sp-yida-allocation-analysis-0').textContent).toContain('每项目 0.3')
+    expect(q('sp-yida-allocation-analysis-0').textContent).toContain('分配合计 0.9')
+    expect(q('sp-yida-allocation-analysis-0').textContent).toContain('差额 -0.1')
+    expect(payloads().slice(0, 3).map((payload) => payload.qty)).toEqual([0.3, 0.3, 0.3])
+    // The exported rule carries the choice; exact is never written as a key.
+    expect(JSON.parse(await exportRules()).allocation.quantityRounding).toBe('legacy-1dp')
+    edit('sp-yida-allocation-rounding', 'exact'); await flush()
+    expect(Object.prototype.hasOwnProperty.call(JSON.parse(await exportRules()).allocation, 'quantityRounding')).toBe(false)
+    expectNoIo()
+  })
+
   it('shows integer non-divisibility and duplicate project rejection', async () => {
     await example('primary')
     const input = rows(); input[0].quantity = 5; edit('sp-yida-rows', JSON.stringify(input)); await setAllocation('equal_integer'); await preview()

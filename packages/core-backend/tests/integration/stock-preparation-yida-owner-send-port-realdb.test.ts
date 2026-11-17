@@ -73,7 +73,8 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
   let schema = '', ddl = ''
   let createDb: (options: { database: Database }) => unknown
   let createAuthority: (options: { database: { transaction<T>(callback: (trx: Queryable) => Promise<T>): Promise<T> }
-    security: HostSecurity; context: { actorId: string; tenantId: string; workspaceId: null }; primitives: unknown }) => Authority
+    security: HostSecurity; context: { actorId: string; tenantId: string; workspaceId: null }; primitives: unknown; sheetSource?: true
+    reauthorizeSourceBinding?: (...args: never[]) => Promise<unknown> }) => Authority
   let createPrimitives: (options: { security: HostSecurity; context: Context }) => unknown
   let createPort: (options: { db: unknown; context: Row; authority: Authority; fetch: FetchDouble['fetch']
     readEnablement?: () => unknown; timeoutMs?: number }) => Port
@@ -193,7 +194,11 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
     doubles.push(value); return value
   }
   // Gate 4: `budget` overrides only the send-budget verdict (null = the real primitive verdict).
-  async function session(scope = context(), budget?: { within: boolean | null; calls: number }): Promise<Session> {
+  // `overrides` (slice YE): replaces named primitives of the real set (only the verdict seams the test names).
+  // `switches` (D17 b): the authority's own construction bits (sheetSource), as the owner runtime hands them over, plus
+  // (YD × YE stack merge) a synthetic D21 re-authorizer so a bound slot-1 row can be approved and seal the layout.
+  async function session(scope = context(), budget?: { within: boolean | null; calls: number }, overrides: Row = {},
+    switches: { sheetSource?: true; reauthorizeSourceBinding?: (...args: never[]) => Promise<unknown> } = {}): Promise<Session> {
     const client = await pool.connect()
     await client.query(`SET search_path TO ${ident(schema)}`)
     await client.query("SET statement_timeout='10s'")
@@ -230,13 +235,13 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
       transaction: callback => database.transaction(trx => callback({ query: async (sql, params) => (await trx.query(sql, params)).rows })) }
     const db = createDb({ database: pluginDatabase }), config = { db, security, context: scope }
     const real = createPrimitives({ security, context: scope }) as Record<string, unknown> & { sendBudget(selection: unknown, grant: unknown): unknown }
-    const primitives = budget ? { ...real, sendBudget(selection: unknown, grant: unknown) {
+    const primitives = { ...(budget ? { ...real, sendBudget(selection: unknown, grant: unknown) {
       budget.calls++
       const verdict = real.sendBudget(selection, grant)
       return budget.within === null ? verdict : Object.freeze({ withinBudget: budget.within })
-    } } : real
+    } } : real), ...overrides }
     const authority = createAuthority({ database, security, context: { actorId: scope.ownerId, tenantId: scope.tenantId, workspaceId: null },
-      primitives })
+      primitives, ...switches })
     const value: Session = { client, pid, db, authority, statements, draft: createDraft(config), target: createTarget(config),
       material: createMaterial(config), ledger: createLedger({ db }),
       port(fake, enablement = () => 'true', timeoutMs = 10000) {
@@ -552,6 +557,33 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
     const third = await session(), lateHttp = http(), late = await third.port(lateHttp).submit(f.request)
     expect(late.reused && late.approval.remainingAttempts === 0).toBe(true)
     expect([lateHttp.token, lateHttp.form]).toEqual([0, 0])
+  })
+
+  it('gate 1: an abort while the admission COMMIT reply is held is not consulted by the port; the runner refuses before any IO and the attempt stays consumed', async () => {
+    // gateCommit holds the reply AFTER PostgreSQL has committed the admission, so the abort lands past the durable
+    // point. From there the port no longer reads the signal; it hands it to the runner, which refuses an aborted run
+    // before its first write or fetch, and the port seals that as UNAVAILABLE. A port that consulted the signal again
+    // right after admission would answer CANCELLED instead (same ledger and HTTP outcome; only the sealed code moves).
+    const f = await fixture(), fake = http(), gate = first.gateCommit('admission')
+    const controller = new AbortController()
+    let result: Submit | undefined
+    const pending = outcome(first.port(fake).submit(f.request, { signal: controller.signal }).then(value => { result = value }))
+    try {
+      await reached(gate)
+      expect((await tableRows(ADMISSION)).length).toBe(1)
+      controller.abort()
+    } finally { gate.release() }
+    expect(await pending).toEqual({ ok: false, code: 'YIDA_OWNER_SEND_UNAVAILABLE' })
+    expect(result).toBeUndefined()
+    expect([fake.token, fake.form]).toEqual([0, 0])
+    expect((await evidence()).counts).toEqual([1, 0, 1, 2, 1, 1])
+    expect((await tableRows(LEDGER)).map(row => row.status)).toEqual(['prepared'])
+    expect((await tableRows(LEDGER_AUDIT)).map(row => row.event)).toEqual(['prepare'])
+    const before = await evidence(), replayHttp = http(), replay = await second.port(replayHttp).submit(f.request)
+    expect([replay.reused, replay.approval.remainingAttempts, replay.status, replay.externalWriteAttempted])
+      .toEqual([true, 0, 'prepared', false])
+    expect([replayHttp.token, replayHttp.form, fake.token, fake.form]).toEqual([0, 0, 0, 0])
+    expect(await evidence()).toEqual(before)
   })
 
   it.each(['admission', 'claim'] as const)('lost real %s COMMIT reply yields no resumed permit or second token/send', async stage => {
@@ -870,5 +902,194 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
     const within = await first.authority.prepareDraft(liftV3(input(), constants(2)))
     expect(within.reused).toBe(false)
     expect(await draftCounts()).toEqual([before[0], before[1] + 1, before[2] + 1, before[3] + 1])
+  })
+  // D17 b (owner 2026-11-07, R-88): INTEGRATION_YIDA_SHEET_SOURCE_ENABLED. Without multi-target, the run's authority takes the
+  // host's sheet-source binding only when the runtime told it the switch is on (sheetSource: true); the bound draft lands on
+  // slot 1 with both binding digests. Off (today's coupling, D17 a) the same input is refused at the closed key set.
+  it('D17 b: the single-target authority drafts a bound slot-1 draft only with the sheet-source bit; without it the binding key is refused', async () => {
+    await slot()
+    const value = input()
+    const bound = { ...value, sourceBinding: { sheetId: 'synthetic-sheet', keyFieldId: 'fld_line',
+      fieldBindings: { projectNo: 'fld_project', lineId: 'fld_line', parentCode: 'fld_parent', quantity: 'fld_qty', description: 'fld_description' },
+      records: [{ recordId: 'synthetic-record-1', keyValue: 'LINE-1', projectNo: 'DEMO-P1' }] } }
+    const before = await draftCounts()
+    await rejected(first.authority.prepareDraft(bound), 'YIDA_SEND_APPROVAL_INPUT')
+    expect(await draftCounts()).toEqual(before)
+    const switched = await session(context(), undefined, {}, { sheetSource: true })
+    const drafted = await switched.authority.prepareDraft(bound)
+    expect(drafted.reused).toBe(false)
+    const members = (await tableRows('integration_yida_draft_rows')).filter(row => row.operation_id === drafted.operationId)
+    expect(members).toHaveLength(1)
+    expect(/^[0-9a-f]{64}$/.test(String(members[0].source_record_digest)) && /^[0-9a-f]{64}$/.test(String(members[0].creation_identity_digest))).toBe(true)
+    // The same slot as the unbound initialization draft, and still never a targetRef without multi-target.
+    expect(drafted.targetRef).toBe((await tableRows('integration_yida_draft_targets'))[0].target_ref)
+    await rejected(switched.authority.prepareDraft({ ...bound, targetRef: drafted.targetRef }), 'YIDA_SEND_APPROVAL_INPUT')
+  })
+  // YD × YE (stack merge, 2026-11-16): the D17 b sheet-source path (slot 1, no targetRef) is where YD's single-target binding
+  // meets YE's two draft-time checks. Switch off, the closed key set refuses the binding first (INPUT, never a SOURCE_* code);
+  // switch on, the real compiler's source kinds are their fixed codes with nothing written, the valid preset drafts bound in
+  // either D2 form while slot 1 is unsealed, and once an approval sealed slot 1 the other D2 form is refused already at draft
+  // creation (GENERATED_LAYOUT_CONFLICT) while a declared uuid-36 is the default layout byte for byte (the same draft, reused).
+  it('YD × YE: on the D17 b sheet-source path the real source verdict answers its fixed SOURCE_* codes (switch off: INPUT first); after a seal the other D2 form is refused at draft creation', async () => {
+    await slot()
+    const value = input(), v2 = value.config as Row & { fieldCatalog: Row[]; fieldMap: Row[] }
+    const preset = (patch: Row = {}) => ({ preset: 'material-code-v1', rowIdOf: 'line', projectOf: 'project', ...patch })
+    const generated = (template: Row[]): Input => ({ ...value, config: { ...v2, version: 3, businessKey: ['project', 'line', 'parent'],
+      emptyKeyFields: ['parent'], fieldCatalog: [...v2.fieldCatalog, { id: 'code', control: 'text', required: false }],
+      fieldMap: [...v2.fieldMap.map(entry => ({ transform: 'direct', ...entry })),
+        { transform: 'generated', template, target: 'code', type: 'string', required: false }] } })
+    const bound = (template: Row[], projectNo = 'DEMO-P1') => ({ ...generated(template), sourceBinding: { sheetId: 'synthetic-sheet', keyFieldId: 'fld_line',
+      fieldBindings: { projectNo: 'fld_project', lineId: 'fld_line', parentCode: 'fld_parent', quantity: 'fld_qty', description: 'fld_description' },
+      records: [{ recordId: 'synthetic-record-1', keyValue: 'LINE-1', projectNo }] } })
+    const switched = await session(context(), undefined, {}, { sheetSource: true,
+      reauthorizeSourceBinding: async () => Object.freeze({ authorized: true }) })
+    const before = await draftCounts()
+    await rejected(first.authority.prepareDraft(bound([preset({ rowIdOf: 'description' })])), 'YIDA_SEND_APPROVAL_INPUT')
+    await rejected(switched.authority.prepareDraft(generated([preset()])), 'YIDA_SEND_APPROVAL_SOURCE_UNBOUND')
+    await rejected(switched.authority.prepareDraft(bound([preset()], 'DEMO-P2')), 'YIDA_SEND_APPROVAL_SOURCE_PROJECT_MISMATCH')
+    await rejected(switched.authority.prepareDraft(bound([preset({ rowIdOf: 'description' })])), 'YIDA_SEND_APPROVAL_SOURCE_KEY_FIELD_MISMATCH')
+    await rejected(switched.authority.prepareDraft(bound([preset({ rowIdOf: 'description', form: 'uuid-32' })])), 'YIDA_SEND_APPROVAL_SOURCE_KEY_FIELD_MISMATCH')
+    expect(await draftCounts()).toEqual(before)
+    const drafts: Array<Readonly<Row>> = []
+    for (const form of ['default', 'uuid-32']) {
+      const drafted = await switched.authority.prepareDraft(bound([form === 'default' ? preset() : preset({ form })]))
+      expect(drafted.reused).toBe(false)
+      const members = (await tableRows('integration_yida_draft_rows')).filter(row => row.operation_id === drafted.operationId)
+      expect(members).toHaveLength(1)
+      expect(/^[0-9a-f]{64}$/.test(String(members[0].source_record_digest)) && /^[0-9a-f]{64}$/.test(String(members[0].creation_identity_digest))).toBe(true)
+      drafts.push(drafted)
+    }
+    expect(await tableRows('integration_yida_generated_layout')).toEqual([])
+    // The first approval of the default-form draft seals slot 1's generated layout.
+    const sealing = drafts[0], rows = sealing.rows as Array<{ rowKey: string }>
+    await switched.authority.approvals.approve({ operationId: sealing.operationId, rowKey: rows[0].rowKey, confirmationId: 'synthetic-yd-ye-seal' })
+    const seal = await tableRows('integration_yida_generated_layout')
+    expect(seal).toHaveLength(1)
+    const sealed = await draftCounts()
+    // The uuid-32 form (and a draft without a generated entry) is now refused at draft creation, even though the uuid-32
+    // draft already exists: the refusal precedes the draft writer's reuse.
+    await rejected(switched.authority.prepareDraft(bound([preset({ form: 'uuid-32' })])), 'YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT')
+    await rejected(switched.authority.prepareDraft(value), 'YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT')
+    expect(await draftCounts()).toEqual(sealed)
+    expect(await tableRows('integration_yida_generated_layout')).toEqual(seal)
+    // A declared uuid-36 is the absent option: the sealed layout, the same draft.
+    const declared = await switched.authority.prepareDraft(bound([preset({ form: 'uuid-36' })]))
+    expect([declared.reused, declared.operationId]).toEqual([true, sealing.operationId])
+    expect(await draftCounts()).toEqual(sealed)
+  })
+
+  // R-71 ⑦.5 RC14 (plan §3.7 layer 2): a legacy record registered by the cut-over reconciliation occupies the
+  // 091 create fence for its seven keys, so the full owner send stack never creates it again. The legacy record
+  // carries the empty-allowed key (parentCode) as null, the planner folds it to '': the digests must still meet.
+  it('R-71 ⑦.5 RC14: a reconciled legacy record blocks the same seven keys at admission with zero form POST; another key still sends', async () => {
+    const lib = path.join(root, 'plugins/plugin-integration-core/lib')
+    const planner = await importNative(pathToFileURL(path.join(lib, 'yida-static-plan.mjs')).href) as {
+      createYidaProtocolExample(): { config: Row; text: string } }
+    const { createYidaReconciliationPort } = await importNative(pathToFileURL(path.join(lib, 'yida-reconciliation-port.mjs')).href) as {
+      createYidaReconciliationPort(options: Row): { step(input: Row): Promise<Row & { counts: Row }> } }
+    const receipt = (await import(pathToFileURL(path.join(root,
+      'packages/core-backend/src/db/migrations/zzzz20261105033000_add_integration_yida_delivery_audit_receipt_unparsed.ts')).href)) as
+      { YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_UP_SQL: string }
+    const reconcile = (await import(pathToFileURL(path.join(root,
+      'packages/core-backend/src/db/migrations/zzzz20261106110700_add_integration_yida_delivery_reconciled_existing.ts')).href)) as
+      { YIDA_RECONCILED_EXISTING_UP_SQL: string }
+    // Deployment order: 033000 (reason CHECK) and 110300 (in ddl) before 110700.
+    await owner.query(receipt.YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_UP_SQL)
+    await owner.query(reconcile.YIDA_RECONCILED_EXISTING_UP_SQL)
+    const example = planner.createYidaProtocolExample()
+    const sevenKey: Input = { config: { ...example.config, target: { appType: 'synthetic_owner_app', formUuid: 'synthetic_owner_form' } },
+      rowsText: example.text, allocation: { mode: 'original' } }
+    const keyTargets = ['project', 'componentCode', 'componentName', 'specification', 'material', 'version', 'parentCode']
+    const draft = await slot(sevenKey)
+    const planned = compile(sevenKey).plan.rows
+    // The legacy record: row 0's form body with the empty-allowed key as null (the planner itself sends '').
+    const legacy = { ...planned[0].payload, parentCode: null }
+    const calls = { token: 0, search: 0, form: 0, other: 0 }
+    const fetchDouble = async (url: string, init: RequestInit) => {
+      // Fixed synthetic implementation; never calls global fetch or opens a socket.
+      if (init.method !== 'POST') { calls.other++; throw new Error('SYNTHETIC_UNEXPECTED_METHOD') }
+      const pathname = new URL(url).pathname
+      if (pathname === '/v1.0/oauth2/accessToken') {
+        calls.token++
+        return new Response(JSON.stringify({ accessToken: 'synthetic-token', expireIn: 3600 }), { status: 200 })
+      }
+      if (pathname === '/v1.0/yida/forms/instances/advances/query') {
+        calls.search++
+        const body = JSON.parse(String(init.body)) as Row
+        expect([body.appType, body.formUuid, body.pageNumber]).toEqual(['synthetic_owner_app', 'synthetic_owner_form', 1])
+        return new Response(JSON.stringify({ pageNumber: 1, totalCount: 1,
+          data: [{ formInstanceId: 'FINST-synthetic-legacy-1', formUuid: 'synthetic_owner_form', formData: legacy }] }), { status: 200 })
+      }
+      if (pathname === '/v1.0/yida/forms/instances') {
+        calls.form++
+        return new Response(JSON.stringify({ result: 'synthetic-instance' }), { status: 201 })
+      }
+      calls.other++; throw new Error('SYNTHETIC_UNEXPECTED_FETCH')
+    }
+    const reconciler = createYidaReconciliationPort({ db: first.db, security,
+      context: { tenantId: 'synthetic-tenant', workspaceId: null, ownerId: 'synthetic-owner', actorId: 'synthetic-owner' },
+      fetch: fetchDouble, readEnablement: () => 'true', readProjectSheetsEnablement: () => undefined, timeoutMs: 10000, sleep: async () => {} })
+    const run = await reconciler.step({ commandId: randomUUID(), mode: 'register', projectNo: 'DEMO-P1', projectKeyTarget: 'project',
+      expectedKeyTargets: keyTargets })
+    expect([run.status, run.counts.registered, run.counts.key_unmatchable, run.lastErrorCode]).toEqual(['completed', 1, 0, null])
+    expect(calls).toEqual({ token: 1, search: 1, form: 0, other: 0 })
+    const ledgerRows = async () => (await owner.query(`SELECT status, intent, observed_instance_id, ack_instance_id, source_record_digest,
+      creation_identity_digest, business_key_digest FROM ${ident(LEDGER)} ORDER BY status`)).rows as Row[]
+    const [reconciled] = await ledgerRows()
+    expect([reconciled.status, reconciled.intent, reconciled.observed_instance_id, reconciled.ack_instance_id,
+      reconciled.source_record_digest, reconciled.creation_identity_digest])
+      .toEqual(['reconciled_existing', 'create', 'FINST-synthetic-legacy-1', null, null, null])
+    const members = (await owner.query('SELECT business_key_digest FROM integration_yida_draft_rows WHERE operation_id = $1 ORDER BY ordinal',
+      [draft.operationId])).rows as Row[]
+    expect(members[0].business_key_digest === reconciled.business_key_digest).toBe(true)
+    expect(members[1].business_key_digest === reconciled.business_key_digest).toBe(false)
+    // The same seven keys: drafted, approved, then refused at admission. No token, no form POST, no ledger row.
+    const grant = await first.authority.approvals.approve({ operationId: draft.operationId, rowKey: draft.rows[0].rowKey,
+      confirmationId: 'synthetic-confirmation' })
+    const request = { grantId: grant.grantId, submissionId: 'synthetic-submission' }
+    const before = await evidence()
+    await rejected(first.authority.admitForExecution(request), 'YIDA_SEND_APPROVAL_UNAVAILABLE')
+    await rejected(first.port({ fetch: fetchDouble } as FetchDouble).submit(request))
+    expect(calls).toEqual({ token: 1, search: 1, form: 0, other: 0 })
+    expect(await evidence()).toEqual(before)
+    expect((await ledgerRows()).map(row => row.status)).toEqual(['reconciled_existing'])
+    const audit = async (event: string) => Number((await owner.query(
+      `SELECT count(*)::int AS n FROM ${ident(LEDGER_AUDIT)} WHERE event = $1`, [event])).rows[0].n)
+    expect([await audit('reconcile'), await audit('prepare'), await audit('acknowledgement')]).toEqual([1, 0, 0])
+    const view = await first.port({ fetch: fetchDouble } as FetchDouble).inspect({ grantId: grant.grantId })
+    expect([view.delivery, view.approval.status, view.approval.remainingAttempts]).toEqual([null, 'approved', 1])
+    // Another business key (row 1, parentCode set) is not over-blocked: it sends once.
+    const other = await first.authority.approvals.approve({ operationId: draft.operationId, rowKey: draft.rows[1].rowKey,
+      confirmationId: 'synthetic-confirmation-other' })
+    const sent = await first.port({ fetch: fetchDouble } as FetchDouble).submit({ grantId: other.grantId, submissionId: 'synthetic-submission-other' })
+    expect([sent.status, sent.reused, sent.externalWriteAttempted]).toEqual(['acknowledged', false, true])
+    expect(calls).toEqual({ token: 2, search: 1, form: 1, other: 0 })
+    expect((await ledgerRows()).map(row => row.status)).toEqual(['acknowledged', 'reconciled_existing'])
+  })
+
+  // Slice YE (external review recommendation 2, 2026-11-08): the host's draft source-verdict seam on the actual authority.
+  // The real compiler reaches three of the four kinds (the HTTP real-DB cases in the initialization HTTP file); this pins
+  // the mapping of all four — SOURCE_KEY_MISMATCH included, which no public input reaches — and the verdict's strictness.
+  it('YE: each frozen { valid: false, code } source verdict is that fixed YIDA_SEND_APPROVAL_SOURCE_* code, a malformed verdict is UNAVAILABLE, nothing is written', async () => {
+    await slot()
+    let verdict: unknown = Object.freeze({ valid: true })
+    const probe = await session(context(), undefined, { validateDraftSource: () => verdict })
+    const before = await draftCounts()
+    for (const code of ['SOURCE_UNBOUND', 'SOURCE_PROJECT_MISMATCH', 'SOURCE_KEY_MISMATCH', 'SOURCE_KEY_FIELD_MISMATCH']) {
+      verdict = Object.freeze({ valid: false, code })
+      await rejected(probe.authority.prepareDraft(liftV3(input())), `YIDA_SEND_APPROVAL_${code}`)
+    }
+    for (const malformed of [{ valid: false, code: 'SOURCE_UNBOUND' }, Object.freeze({ valid: false, code: 'PLAN' }),
+      Object.freeze({ valid: false, code: 'GENERATED_LAYOUT_CONFLICT' }), Object.freeze({ valid: false }),
+      Object.freeze({ valid: true, code: 'SOURCE_UNBOUND' }), Object.freeze({ valid: 'true' }), Object.freeze({ valid: false, code: 'SOURCE_UNBOUND', extra: 1 }),
+      Promise.resolve(Object.freeze({ valid: true })), new Proxy(Object.freeze({ valid: true }), {}), null]) {
+      verdict = malformed
+      await rejected(probe.authority.prepareDraft(liftV3(input())), 'YIDA_SEND_APPROVAL_UNAVAILABLE')
+    }
+    expect(await draftCounts()).toEqual(before)
+    // Control: a valid verdict lets the same draft through, and the real verdict of a v3 draft without a generated entry is valid.
+    verdict = Object.freeze({ valid: true })
+    expect((await probe.authority.prepareDraft(liftV3(input()))).reused).toBe(false)
+    expect((await first.authority.prepareDraft(liftV3(input()))).reused).toBe(true)
   })
 })

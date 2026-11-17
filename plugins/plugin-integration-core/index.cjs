@@ -31,6 +31,8 @@ const { createStockPreparationContinuationStore } = require('./lib/stock-prepara
 const { createStockPreparationRefreshGovernance } = require('./lib/stock-preparation-refresh-governance.cjs')
 const { createStockPreparationGovernedSheetProbe } = require('./lib/stock-preparation-governed-sheet-probe.cjs')
 const { createStockPreparationPullBatchStore } = require('./lib/stock-preparation-pull-batch-store.cjs')
+const { createStockPreparationComponentRulingStore } = require('./lib/stock-preparation-component-ruling-store.cjs')
+const { createStockPreparationSheetRepairStore } = require('./lib/stock-preparation-sheet-repair-store.cjs')
 const { createB2aOperationClaim } = require('./lib/b2a-trial-registry.cjs')
 const {
   createStockPreparationPackInstallStore,
@@ -100,6 +102,8 @@ let stockPreparationContinuationStore = null
 let stockPreparationRefreshGovernance = null
 let stockPreparationGovernedSheetProbe = null
 let stockPreparationPullBatchStore = null
+let stockPreparationComponentRulingStore = null
+let stockPreparationSheetRepairStore = null
 let b2aOperationClaim = null
 let readSourceCompositionConfigStore = null
 let bridgeAgentChecklistStore = null
@@ -117,6 +121,10 @@ let stockPreparationRuntimeDatabase = null
 let stopYidaOwnerRuntime = null
 let stopYidaInitializationRuntime = null
 let stopYidaConnectionTestRuntime = null
+let stopYidaReconciliationRuntime = null
+// R-69 1b-ii: the unbind of the IntegrationRunPort registered with the host (null when the host did not offer
+// the capability — only plugin-integration-core receives it — or before activate).
+let unbindIntegrationRunPort = null
 
 function buildCapabilityStatus() {
   return {
@@ -395,6 +403,14 @@ module.exports = {
     // 批次标识 BI-1b (migration 105; register R-65): the pull-batch ledger (首次批次 / 本次拉取). The routes hand it to a
     // lane only while the pull-batch switch is exactly 'true' (read per request); off, nothing ever touches it.
     stockPreparationPullBatchStore = createStockPreparationPullBatchStore({ db })
+    // Batch-refresh step 6d-1b (migration 107; register R-91): the component ruling ledger — the admin's recorded
+    // acknowledgement that a doubled-sheet remnant is no longer separately ordered. The census / acknowledgement routes
+    // and readiness v5's remnant check read it; absent (no SQL db) the acknowledgement routes answer 501 by name.
+    stockPreparationComponentRulingStore = createStockPreparationComponentRulingStore({ db })
+    // Batch-refresh step 6d-2a (migration 108; register R-91): the doubled-sheet repair ledger — run rows with their
+    // backup and the one-shot claims. The repair routes reach it only while the repair switch is exactly 'true' (read per
+    // request); pilot readiness v7 (S6-5b, no_open_sheet_repair_run) READS its open runs whatever the switch says.
+    stockPreparationSheetRepairStore = createStockPreparationSheetRepairStore({ db })
     // HG v1.2 PR-C: DB-enforced one-shot source-read operation claim (migration 078). Built here so
     // the B2a guard's `sourceReadOperationLimit: 1` is a PRIMARY KEY, not a read-then-write over the
     // plugin kv store — whose `set` is an unconditional upsert and cannot decide a race between two
@@ -466,6 +482,16 @@ module.exports = {
       // Assigned earlier in this same activation, before this call. Null on a DORMANT deployment,
       // where the runner's fence returns before it is ever read.
       b2aOperationClaim,
+      // R-69 1c: one integration.run_finished summary per api / manual / replay run, after finishRun, through the
+      // host's publish port (offered to this plugin only; absent on an older host ⇒ nothing is published).
+      // INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED (exact 'true') is read before anything is built. R-69 is OPEN.
+      notifyRunFinished: require('./lib/integration-run-events.cjs').createRunFinishedNotifier({
+        publish: context.services && context.services.integrationRunEvents
+          && typeof context.services.integrationRunEvents.publish === 'function'
+          ? (summary, route) => context.services.integrationRunEvents.publish(summary, route)
+          : null,
+        logger,
+      }),
     })
 
     try {
@@ -517,7 +543,7 @@ module.exports = {
       res.json(buildHealthPayload())
     })
     registeredRoutes.push('GET /api/integration/health')
-    registeredRoutes.push(...registerIntegrationRoutes({
+    const integrationRoutes = registerIntegrationRoutes({
       context,
       logger,
       services: {
@@ -589,6 +615,8 @@ module.exports = {
         stockPreparationRefreshGovernance,
         stockPreparationGovernedSheetProbe,
         stockPreparationPullBatchStore,
+        stockPreparationComponentRulingStore,
+        stockPreparationSheetRepairStore,
         b2aOperationClaim,
         readSourceCompositionConfigStore,
         bridgeAgentChecklistStore,
@@ -602,10 +630,24 @@ module.exports = {
           ? { stockPreparationSqlServerRuntime }
           : {}),
       },
-    }))
+    })
+    registeredRoutes.push(...integrationRoutes)
 
     // --- Cross-plugin communication --------------------------------------
     context.communication.register(COMMUNICATION_NAMESPACE, buildCommunicationApi())
+
+    // --- R-69 1b-ii: IntegrationRunPort (plugin → host) --------------------
+    // The core `run_integration_job` action reaches the SAME governed entries the HTTP handlers run
+    // (runGovernedStockPrepPull / runGovernedPipeline) through this port — never through
+    // buildCommunicationApi(), never by HTTP, never with a runAs or write-lifecycle marker of its own. Only the
+    // host offers `services.integrationRun`, and only to this plugin. Dry-run only; R-69 is OPEN.
+    const integrationRun = context.services && context.services.integrationRun
+    if (integrationRun && typeof integrationRun.register === 'function' && integrationRoutes.governedEntries) {
+      const { createIntegrationRunPort } = require('./lib/integration-run-port.cjs')
+      unbindIntegrationRunPort = integrationRun.register(createIntegrationRunPort({
+        governedEntries: integrationRoutes.governedEntries,
+      }))
+    }
 
     logger.info(`[${PLUGIN_ID}] activated (${PLUGIN_PHASE}). routes=${registeredRoutes.length}`)
     // Only the host receives these actual factories. Never publish them, their
@@ -681,14 +723,50 @@ module.exports = {
         if (typeof logger.warn === 'function') logger.warn(`[${PLUGIN_ID}] YIDA_CONNECTION_TEST_RUNTIME_INACTIVE`)
       }
     }
+    // R-71 ⑦.5 cut-over reconciliation (read-only paginated search + local insert-only evidence). Fails SOFT like
+    // the connection test: a missing or refused binding leaves only this capability inactive.
+    const yidaReconciliationRuntime = context.services && context.services.yidaReconciliationRuntime
+    if (yidaReconciliationRuntime !== undefined) {
+      try {
+        const security = context.services && context.services.security
+        if (!yidaReconciliationRuntime || typeof yidaReconciliationRuntime.activate !== 'function'
+          || !security || typeof security.encrypt !== 'function' || typeof security.decrypt !== 'function') {
+          throw new Error('YIDA_RECONCILIATION_RUNTIME_UNAVAILABLE')
+        }
+        const { createYidaReconciliationBinding } = await import('./lib/yida-reconciliation-binding.mjs')
+        const handle = await yidaReconciliationRuntime.activate(createYidaReconciliationBinding({ db, security: Object.freeze({
+          encrypt: security.encrypt.bind(security), decrypt: security.decrypt.bind(security),
+        }) }))
+        if (!handle || typeof handle.stop !== 'function') throw new Error('YIDA_RECONCILIATION_RUNTIME_UNAVAILABLE')
+        stopYidaReconciliationRuntime = handle.stop.bind(handle)
+      } catch {
+        if (typeof logger.warn === 'function') logger.warn(`[${PLUGIN_ID}] YIDA_RECONCILIATION_RUNTIME_INACTIVE`)
+      }
+    }
   },
 
   async deactivate() {
     if (!activeContext) return
     const logger = activeContext.logger || console
+    // R-69 1b-ii: unbind the IntegrationRunPort first, so no new job is admitted into a plugin that is
+    // going away (the host also unbinds by owner on deactivate / reload / activation failure).
+    if (unbindIntegrationRunPort) {
+      const unbind = unbindIntegrationRunPort
+      unbindIntegrationRunPort = null
+      try { unbind() } catch { /* the host's owner-scoped cleanup is the backstop */ }
+    }
     // Latch the private runtimes before the legacy read drain's first await. A stopped
     // owner request retains actual pending work, so observe its rejection now
     // but await the original drain before any plugin DB is closed below.
+    let yidaReconciliationDrain, reconciliationStopFailed = false
+    if (stopYidaReconciliationRuntime) {
+      const stop = stopYidaReconciliationRuntime
+      stopYidaReconciliationRuntime = null
+      try {
+        yidaReconciliationDrain = stop()
+        void yidaReconciliationDrain.catch(() => {})
+      } catch { reconciliationStopFailed = true }
+    }
     let yidaConnectionTestDrain, connectionTestStopFailed = false
     if (stopYidaConnectionTestRuntime) {
       const stop = stopYidaConnectionTestRuntime
@@ -727,6 +805,10 @@ module.exports = {
     if (yidaConnectionTestDrain) {
       try { await yidaConnectionTestDrain } catch { throw new Error('YIDA_CONNECTION_TEST_RUNTIME_STOP_UNAVAILABLE') }
     }
+    if (reconciliationStopFailed) throw new Error('YIDA_RECONCILIATION_RUNTIME_STOP_UNAVAILABLE')
+    if (yidaReconciliationDrain) {
+      try { await yidaReconciliationDrain } catch { throw new Error('YIDA_RECONCILIATION_RUNTIME_STOP_UNAVAILABLE') }
+    }
     if (stockPreparationRuntimeDatabase) {
       try {
         await stockPreparationRuntimeDatabase.close()
@@ -758,6 +840,8 @@ module.exports = {
     stagingInstaller = null
     stockPreparationGovernedSheetProbe = null
     stockPreparationPullBatchStore = null
+    stockPreparationComponentRulingStore = null
+    stockPreparationSheetRepairStore = null
     stockPreparationSqlServerRuntime = null
     stockPreparationRuntimeDatabase = null
     activeContext = null

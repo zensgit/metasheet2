@@ -80,9 +80,12 @@ node __tests__/stock-preparation-project-target-archive.test.cjs
 node __tests__/stock-preparation-project-overview.test.cjs
 node __tests__/stock-preparation-project-sheet-contract-options.test.cjs
 node __tests__/stock-preparation-project-sheet-plm-column-lock.test.cjs
-node __tests__/stock-preparation-sheet-census.test.cjs
 node __tests__/stock-preparation-project-sheet-repair-columns.test.cjs
 node __tests__/stock-preparation-template-issue-confirm-spec-columns.test.cjs
+node __tests__/stock-preparation-sheet-census.test.cjs
+node __tests__/stock-preparation-component-ruling-store.test.cjs
+node __tests__/stock-preparation-remnant-acknowledgement.test.cjs
+node __tests__/stock-preparation-sheet-census-routes.test.cjs
 node __tests__/stock-preparation-pull-batch-site-probe.test.cjs
 node __tests__/stock-preparation-route-values-free.test.cjs
 node __tests__/stock-preparation-audit-store.test.cjs
@@ -101,6 +104,12 @@ node __tests__/stock-preparation-continuation-planner.test.cjs
 node __tests__/stock-preparation-refresh-state.test.cjs
 node __tests__/stock-preparation-continuation-store.test.cjs
 node __tests__/stock-preparation-change-plan-store.test.cjs
+node __tests__/stock-preparation-execution-intent.test.cjs
+node __tests__/stock-preparation-execution-recovery.test.cjs
+node __tests__/stock-preparation-execution-recovery-routes.test.cjs
+node __tests__/stock-preparation-sheet-repair.test.cjs
+node __tests__/stock-preparation-sheet-repair-store.test.cjs
+node __tests__/stock-preparation-sheet-repair-routes.test.cjs
 node __tests__/stock-preparation-change-plan-planner.test.cjs
 node __tests__/stock-preparation-change-plan-lanes.test.cjs
 node __tests__/stock-preparation-refresh-governance.test.cjs
@@ -163,6 +172,8 @@ node __tests__/stock-preparation-pull-batch-lanes.test.cjs
 node __tests__/stock-preparation-pull-batch-status.test.cjs
 node __tests__/stock-preparation-pull-batch-reader-scan.test.cjs
 node __tests__/stock-preparation-pull-batch-hash-neutrality.test.cjs
+node __tests__/stock-preparation-pull-batch-install.test.cjs
+node __tests__/stock-preparation-pull-batch-install-routes.test.cjs
 node __tests__/stock-preparation-carry-plan-wiring.test.cjs
 node __tests__/stock-preparation-carry-ledger.test.cjs
 node __tests__/stock-preparation-carry-confirm.test.cjs
@@ -202,6 +213,9 @@ node __tests__/transform-validator.test.cjs
 node __tests__/runner-support.test.cjs
 node __tests__/payload-redaction.test.cjs
 node __tests__/pipeline-runner.test.cjs
+node __tests__/governed-entry-abort-checkpoints.test.cjs
+node __tests__/integration-run-port.test.cjs
+node __tests__/integration-run-finished-publish.test.cjs
 node __tests__/df-n2-2c-provenance-read.test.cjs
 node __tests__/http-routes.test.cjs
 node __tests__/integration-hub-overview.test.cjs
@@ -328,6 +342,10 @@ node __tests__/yida-material-code.test.cjs
 node __tests__/yida-owner-runtime-factory.test.cjs
 node __tests__/yida-owner-send-port.test.cjs
 node __tests__/yida-readback-observation.test.cjs
+node __tests__/yida-reconciliation-binding.test.cjs
+node __tests__/yida-reconciliation-plan.test.cjs
+node __tests__/yida-reconciliation-port.test.cjs
+node __tests__/yida-reconciliation-store.test.cjs
 node __tests__/yida-rule-template.test.cjs
 node __tests__/yida-send-authority-primitives.test.cjs
 node __tests__/yida-send-budget.test.cjs

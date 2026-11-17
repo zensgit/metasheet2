@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick } from 'vue'
+import { createApp, h, nextTick, ref } from 'vue'
 import MetaCellRenderer from '../src/multitable/components/cells/MetaCellRenderer.vue'
 import MetaCellEditor from '../src/multitable/components/cells/MetaCellEditor.vue'
 import MetaRichLongTextEditor from '../src/multitable/components/cells/MetaRichLongTextEditor.vue'
@@ -239,6 +239,209 @@ describe('MetaRichLongTextEditor — commit semantics (drawer PATCH-on-blur, no 
     await nextTick()
     expect(changeSpy).toHaveBeenCalledTimes(1)
     expect(changeSpy.mock.calls[0]?.[0]).toContain('<b>typing</b>')
+    app.unmount()
+    container.remove()
+  })
+
+  it('a blur that changed nothing commits nothing (focus only passing through), and still updates the model', async () => {
+    const changeSpy = vi.fn()
+    const updateSpy = vi.fn()
+    const { container, app } = mountEditor({ modelValue: '<b>saved</b>', 'onUpdate:modelValue': updateSpy, onChange: changeSpy })
+    await nextTick()
+    const editable = container.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    editable.dispatchEvent(new Event('focus'))
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    await nextTick()
+    expect(changeSpy).not.toHaveBeenCalled()
+    expect(updateSpy).toHaveBeenLastCalledWith('<b>saved</b>')
+    // An edit, then a blur: committed as before.
+    editable.dispatchEvent(new Event('focus'))
+    editable.innerHTML = '<b>saved</b> more'
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    await nextTick()
+    expect(changeSpy.mock.calls).toEqual([['<b>saved</b> more']])
+    app.unmount()
+    container.remove()
+  })
+
+  it('a value the editor reads back in another form (a non-breaking space) is no change: passing through commits nothing', async () => {
+    const changeSpy = vi.fn()
+    const { container, app } = mountEditor({ modelValue: 'a\u00a0b', onChange: changeSpy })
+    await nextTick()
+    const editable = container.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    editable.dispatchEvent(new Event('focus'))
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    await nextTick()
+    expect(changeSpy).not.toHaveBeenCalled()
+    app.unmount()
+    container.remove()
+  })
+
+  it('an edit undone before the model caught up is committed too (the blur compares with the content at focus, not the model)', async () => {
+    const changeSpy = vi.fn()
+    // The host has not applied the first commit yet: the model stays at 'rich'.
+    const { container, app } = mountEditor({ modelValue: 'rich', onChange: changeSpy })
+    await nextTick()
+    const editable = container.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    editable.dispatchEvent(new Event('focus'))
+    editable.innerHTML = 'rich X'
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    editable.dispatchEvent(new Event('focus'))
+    editable.innerHTML = 'rich'
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    await nextTick()
+    expect(changeSpy.mock.calls).toEqual([['rich X'], ['rich']])
+    app.unmount()
+    container.remove()
+  })
+
+  it('Cmd/Ctrl+Enter, then a blur with no further edit, commits once', async () => {
+    const changeSpy = vi.fn()
+    const { container, app } = mountEditor({ modelValue: 'rich', onChange: changeSpy })
+    await nextTick()
+    const editable = container.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    editable.dispatchEvent(new Event('focus'))
+    editable.innerHTML = 'rich X'
+    editable.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, bubbles: true }))
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    await nextTick()
+    expect(changeSpy.mock.calls).toEqual([['rich X']])
+    app.unmount()
+    container.remove()
+  })
+
+  it('shows the value again when its sync key changes, also when the value is the same (the drawer moving to another record)', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const syncKey = ref('rec_A')
+    const app = createApp({ render: () => h(MetaRichLongTextEditor, { modelValue: 'same', syncKey: syncKey.value }) })
+    app.mount(container)
+    await nextTick()
+    const editable = container.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    editable.dispatchEvent(new Event('focus'))
+    editable.innerHTML = 'same typed on A'
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    syncKey.value = 'rec_B'
+    await nextTick()
+    expect(editable.innerHTML).toBe('same')
+    app.unmount()
+    container.remove()
+  })
+
+  it('an @-mention chip stays atomic when the value is drawn (the caret cannot land in it), and the committed value does not carry that', async () => {
+    const changeSpy = vi.fn()
+    const { container, app } = mountEditor({ modelValue: '<p>hi <span data-mention-id="u_1">@Ann</span></p>', onChange: changeSpy })
+    await nextTick()
+    const editable = container.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    expect(editable.querySelector('span[data-mention-id="u_1"]')!.getAttribute('contenteditable')).toBe('false')
+    editable.dispatchEvent(new Event('focus'))
+    editable.querySelector('p')!.append(' there')
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    await nextTick()
+    expect(changeSpy).toHaveBeenCalledTimes(1)
+    expect(changeSpy.mock.calls[0][0]).toContain('data-mention-id="u_1"')
+    expect(changeSpy.mock.calls[0][0]).not.toContain('contenteditable')
+    app.unmount()
+    container.remove()
+  })
+
+  function mountReactiveEditor(model: string, key = 'rec_A') {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const modelValue = ref(model)
+    const syncKey = ref(key)
+    const changeSpy = vi.fn()
+    const app = createApp({ render: () => h(MetaRichLongTextEditor, { modelValue: modelValue.value, syncKey: syncKey.value, onChange: changeSpy }) })
+    app.mount(container)
+    const editable = container.querySelector('[data-test="rich-longtext-editor"]') as HTMLElement
+    return { container, app, modelValue, syncKey, changeSpy, editable }
+  }
+
+  it('a blur that commits nothing shows the value that came while the editor was focused', async () => {
+    const { container, app, modelValue, changeSpy, editable } = mountReactiveEditor('rich')
+    await nextTick()
+    editable.dispatchEvent(new Event('focus'))
+    modelValue.value = 'newer from elsewhere'
+    await nextTick()
+    expect(editable.innerHTML).toBe('rich')
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    await nextTick()
+    expect(changeSpy).not.toHaveBeenCalled()
+    expect(editable.innerHTML).toBe('newer from elsewhere')
+    app.unmount()
+    container.remove()
+  })
+
+  it('a blur that commits nothing keeps the editor\'s own commit shown while the model still lags behind it', async () => {
+    const { container, app, changeSpy, editable } = mountReactiveEditor('rich')
+    await nextTick()
+    editable.dispatchEvent(new Event('focus'))
+    editable.innerHTML = 'rich X'
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    // Back in the editor before the host took the commit; out again with no edit.
+    editable.dispatchEvent(new Event('focus'))
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    await nextTick()
+    expect(changeSpy.mock.calls).toEqual([['rich X']])
+    expect(editable.innerHTML).toBe('rich X')
+    app.unmount()
+    container.remove()
+  })
+
+  it('a value that came while focused, then an edit committed: going back in and out again keeps the commit shown (the model lags behind it)', async () => {
+    const { container, app, modelValue, changeSpy, editable } = mountReactiveEditor('rich')
+    await nextTick()
+    // a value from elsewhere while focused, shown on the unchanged blur
+    editable.dispatchEvent(new Event('focus'))
+    modelValue.value = 'from elsewhere'
+    await nextTick()
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    await nextTick()
+    expect(editable.innerHTML).toBe('from elsewhere')
+    // another one while focused, then an edit committed over it
+    editable.dispatchEvent(new Event('focus'))
+    modelValue.value = 'newer from elsewhere'
+    await nextTick()
+    editable.innerHTML = 'from elsewhere X'
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    // back in and out with no edit before the host took the commit
+    editable.dispatchEvent(new Event('focus'))
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    await nextTick()
+    expect(changeSpy.mock.calls).toEqual([['from elsewhere X']])
+    expect(editable.innerHTML).toBe('from elsewhere X')
+    app.unmount()
+    container.remove()
+  })
+
+  it('a value that came while focused, then Cmd/Ctrl+Enter: the blur after it keeps the commit shown (the model lags behind it)', async () => {
+    const { container, app, modelValue, changeSpy, editable } = mountReactiveEditor('rich')
+    await nextTick()
+    editable.dispatchEvent(new Event('focus'))
+    modelValue.value = 'from elsewhere'
+    await nextTick()
+    editable.innerHTML = 'rich X'
+    editable.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, bubbles: true }))
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    await nextTick()
+    expect(changeSpy.mock.calls).toEqual([['rich X']])
+    expect(editable.innerHTML).toBe('rich X')
+    app.unmount()
+    container.remove()
+  })
+
+  it('a move to another record while the editor is focused (no edit) shows that record\'s value on the blur, and commits nothing', async () => {
+    const { container, app, modelValue, syncKey, changeSpy, editable } = mountReactiveEditor('value of A')
+    await nextTick()
+    editable.dispatchEvent(new Event('focus'))
+    modelValue.value = 'value of B'
+    syncKey.value = 'rec_B'
+    await nextTick()
+    expect(editable.innerHTML).toBe('value of A')
+    editable.dispatchEvent(new Event('blur', { bubbles: true }))
+    await nextTick()
+    expect(changeSpy).not.toHaveBeenCalled()
+    expect(editable.innerHTML).toBe('value of B')
     app.unmount()
     container.remove()
   })

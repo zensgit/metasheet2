@@ -5,7 +5,15 @@
         <router-link :to="brandHomePath" class="brand-text brand-link" data-testid="nav-brand-link">{{ brandText }}</router-link>
       </div>
       <div class="nav-links">
-        <router-link v-if="attendanceFocused" to="/attendance" class="nav-link">{{ navLabels.attendance }}</router-link>
+        <template v-if="attendanceFocused">
+          <router-link to="/attendance" class="nav-link">{{ navLabels.attendance }}</router-link>
+          <router-link
+            v-if="canManageFocusedScope"
+            to="/admin/role-delegation"
+            class="nav-link"
+            data-testid="nav-focused-management-scope"
+          >{{ navLabels.managementScope }}</router-link>
+        </template>
 
         <template v-else>
           <template v-if="plmWorkbenchFocused">
@@ -35,6 +43,12 @@
                  existing "badge is a sibling of the link, never a child of it" contract the P1b
                  comment above and approvalNavTodoBadge.spec.ts already pin. -->
             <router-link v-if="canUseApprovals" to="/todo" class="nav-link" data-testid="nav-todo-center">{{ navLabels.todoCenter }}</router-link>
+            <router-link
+              v-if="canManageFocusedScope"
+              to="/admin/role-delegation"
+              class="nav-link"
+              data-testid="nav-focused-management-scope"
+            >{{ navLabels.managementScope }}</router-link>
           </template>
           <template v-else>
             <router-link v-if="hasFeature('attendance')" to="/attendance" class="nav-link">{{ navLabels.attendance }}</router-link>
@@ -70,27 +84,25 @@
               {{ item.label }}
             </router-link>
             <span
-              v-if="canManageUsers"
+              v-if="showOrganizationNav"
               class="nav-org"
               data-testid="nav-org-permissions"
               role="group"
               :aria-label="navLabels.organizationPermissions"
             >
               <span class="nav-org__label">{{ navLabels.organizationPermissions }}</span>
-              <router-link to="/admin/users" class="nav-link">{{ navLabels.membersAuthorization }}</router-link>
-              <router-link to="/admin/roles" class="nav-link">{{ navLabels.roles }}</router-link>
-              <router-link to="/admin/role-delegation" class="nav-link">{{ navLabels.managementScope }}</router-link>
-              <router-link to="/admin/permissions" class="nav-link">{{ navLabels.permissionSources }}</router-link>
+              <router-link v-if="canManageUsers" to="/admin/users" class="nav-link">{{ navLabels.membersAuthorization }}</router-link>
+              <router-link v-if="canManageUsers" to="/admin/roles" class="nav-link">{{ navLabels.roles }}</router-link>
+              <router-link v-if="canManageScopeEntry" to="/admin/role-delegation" class="nav-link">{{ navLabels.managementScope }}</router-link>
+              <router-link v-if="canManagePermissionSources" to="/admin/permissions" class="nav-link">{{ navLabels.permissionSources }}</router-link>
             </span>
             <router-link v-if="canManageUsers" to="/admin/audit" class="nav-link">{{ navLabels.adminAudit }}</router-link>
             <router-link v-if="canManageUsers" to="/admin/automation-executions" class="nav-link">{{ navLabels.automationRuns }}</router-link>
             <router-link v-if="canManageUsers" to="/approvals/metrics" class="nav-link">{{ navLabels.approvalMetrics }}</router-link>
             <!-- P1b slice 3 / round-2 item 1: the admin 批量转交 page. The gate is CONJUNCTIVE —
-                 `canManageUsers` (token-derived, the same gate its sibling admin entries use, and
-                 what keeps an ordinary user's shell from issuing the read at all) AND the SERVER's
-                 own DB-backed approval-administrator capability, which the entry component
-                 resolves. The two predicates genuinely differ; the list scope binds the second, so
-                 the second is what decides whether this page can show another approver's queue. -->
+                 `canManageUsers` (live /api/admin/access-capabilities isPlatformAdmin; unknown,
+                 error, and identity change deny) AND the SERVER's own DB-backed
+                 approval-administrator capability, which the entry component resolves. -->
             <ShellChromeBoundary v-if="canManageUsers && !isPublicRoute">
               <ApprovalBatchTransferNavEntry :label="navLabels.approvalBatchTransfer" />
             </ShellChromeBoundary>
@@ -151,6 +163,7 @@
 <script setup lang="ts">
 import { computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { adminAccessCapabilitiesState, reconcileAdminAccessCapabilities } from './composables/adminAccessCapabilities'
 import { useAuth } from './composables/useAuth'
 import { useLocale } from './composables/useLocale'
 import { usePlugins } from './composables/usePlugins'
@@ -188,7 +201,24 @@ const plmWorkbenchFocused = computed(() => isPlmWorkbenchFocused())
 const isAdmin = computed(() => hasFeature('attendanceAdmin'))
 const canManageUsers = computed(() => {
   void route.fullPath
-  return getAccessSnapshot().isAdmin
+  reconcileAdminAccessCapabilities()
+  return adminAccessCapabilitiesState.loaded === true && adminAccessCapabilitiesState.isPlatformAdmin === true
+})
+const canManageScopeEntry = computed(() => {
+  void route.fullPath
+  reconcileAdminAccessCapabilities()
+  return adminAccessCapabilitiesState.loaded === true && adminAccessCapabilitiesState.canManageScope === true
+})
+const canManagePermissionSources = computed(() => {
+  void route.fullPath
+  reconcileAdminAccessCapabilities()
+  return adminAccessCapabilitiesState.loaded === true && adminAccessCapabilitiesState.canManagePermissions === true
+})
+const showOrganizationNav = computed(() => canManageUsers.value || canManageScopeEntry.value || canManagePermissionSources.value)
+const canManageFocusedScope = computed(() => {
+  void route.fullPath
+  reconcileAdminAccessCapabilities()
+  return adminAccessCapabilitiesState.loaded && adminAccessCapabilitiesState.canManageScope === true
 })
 const canUseIntegration = computed(() => {
   void route.fullPath

@@ -389,7 +389,7 @@ describe('R8 quiet-hours × the FULL channel roster (DingTalk + WeCom S4 + email
     const weComSendTextMessage = vi.fn(async () => ({ errcode: 0, errmsg: 'ok', invalidUserIds: [], raw: {} }))
     const weComSendTextCardMessage = vi.fn(async () => ({ errcode: 0, errmsg: 'ok', invalidUserIds: [], raw: {} }))
     const weComChannel = new WeComAttendanceDeliveryChannel({
-      query: vi.fn(async () => ({ rows: [{ integration_id: 'we-integ-1', external_user_id: 'we-user-1' }] })) as never,
+      query: vi.fn(async () => ({ rows: [{ integration_id: 'we-integ-1', external_user_id: 'we-user-1', corp_id: WECOM_CONFIG.corpId }] })) as never,
       readConfig: async () => WECOM_CONFIG,
       fetchAccessToken: async () => 'we-access-token',
       sendTextMessage: weComSendTextMessage,

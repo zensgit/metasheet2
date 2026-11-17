@@ -920,36 +920,124 @@ CREATE TABLE ${MSSQL_TABLE} (
   return { rows, projectId: rows[0].projectId, snapshotBatchId: rows[0].snapshotBatchId, oversizedPayloadTextLength }
 }
 
-// `tenantId` is optional (requestJson's own default TENANT_ID applies when omitted) — the ONE existing
-// call site (attemptS6ARealRun's) is unaffected; the scale legs pass their own.
+// A refusal's `error.code` as a closed token for a check detail. The product's codes are upper-snake
+// enum literals; anything else (absent, prose, a value) is reported as a fixed placeholder, never echoed.
+function closedErrorCode(body) {
+  const code = body && body.error && body.error.code
+  return typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,95}$/.test(code) ? code : '<none>'
+}
+
+// The canonical core Connection the S6-A binding references (id derived from the binding's own id).
+function s6aConnectionIdFor(systemId) {
+  return `${systemId}-connection`
+}
+
+// Two writes since #5452 ("unify SQL connection bindings"): a new data-source:sql-readonly binding must
+// name a canonical core Connection by `connectionId` (external-systems.cjs requestedConnectionId), and
+// inline credentials on the binding are refused (CONNECTION_BINDING_CREDENTIALS_FORBIDDEN). At run time
+// the sealed runtime resolves {connection, credentials} through that Connection
+// (connection-resolver.cjs resolveSealedSqlServer -> the core facade resolveSqlServerConnection), which
+// requires a read-only `sqlserver` source owned by the run's user.
+//
+//   1. POST /api/data-sources — a read-only `sqlserver` Connection carrying the SELECT-only reader login
+//      prepareSqlServerRelation() created. The dev token's user becomes its owner and its JWT tenant
+//      claim its tenant, which is the same user and tenant the flag-ON run later uses. `connection`
+//      carries exactly the fields the sealed projection accepts (database, encrypt, port, server,
+//      trustServerCertificate), with the SAME values the provisioning spec below uses inline, so the
+//      runtime-derived systemContentKey matches the provisioned one. instanceName is omitted: the
+//      projection refuses a non-null one and defaults it to null.
+//   2. POST /api/integration/external-systems — the binding, with `connectionId` and NO credentials
+//      and no connection config: the Connection owns all of it.
+//
+// `tenantId` is optional (requestJson's own default TENANT_ID applies when omitted): the primary arm
+// omits it, the scale legs pass their own (their token carries the same tenant claim).
+// Returns the binding write's { status, ok, body } plus the Connection write's outcome and both codes.
 async function registerExternalSystem(token, systemId, tenantId) {
-  const body = {
-    id: systemId,
-    name: 'e2e-func-s6a-source',
-    kind: 'data-source:sql-readonly',
-    role: 'source',
-    status: 'active',
-    config: {
-      sealedSnapshotSqlServer: {
+  const connectionId = s6aConnectionIdFor(systemId)
+  const connection = await requestJson('/api/data-sources', {
+    method: 'POST',
+    token,
+    tenantId,
+    accept: [201],
+    body: {
+      id: connectionId,
+      name: 'e2e-func-s6a-connection',
+      type: 'sqlserver',
+      connection: {
         database: MSSQL_DATABASE,
         encrypt: true,
-        instanceName: null,
         port: MSSQL_PORT,
         server: MSSQL_HOST,
         trustServerCertificate: true,
       },
-    },
-    credentials: {
-      sealedSnapshotSqlServer: {
+      options: { readOnly: true },
+      credentials: {
+        username: MSSQL_READER_LOGIN,
         password: MSSQL_READER_PASSWORD,
-        user: MSSQL_READER_LOGIN,
       },
     },
+  })
+  const connectionResult = {
+    connectionId,
+    connectionStatus: connection.status,
+    connectionOk: connection.ok,
+    connectionCode: closedErrorCode(connection.body),
+    connectionHasCredentials: connection.body?.data?.hasCredentials === true,
+  }
+  if (!connection.ok) {
+    return { status: connection.status, ok: false, body: null, code: '<not-run>', ...connectionResult }
+  }
+  // Observed, not inferred: is the Connection a LIVE row in data_sources? The binding's connection_id
+  // FK points at data_sources(live_id), and the flag-ON restart reloads Connections from this table, so
+  // a 201 that left no row here is a Connection that exists only in the serving process's memory. Read
+  // over the application pool (DATABASE_URL), as a count only. Values-free: one boolean.
+  try {
+    connectionResult.connectionPersisted = await withApplicationPool(async (pool) => {
+      const res = await pool.query('SELECT count(*)::int AS n FROM data_sources WHERE live_id = $1', [connectionId])
+      return res.rows[0] && res.rows[0].n === 1
+    })
+  } catch {
+    connectionResult.connectionPersisted = 'unknown'
   }
   const res = await requestJson('/api/integration/external-systems', {
-    method: 'POST', token, body, accept: [200, 201], tenantId,
+    method: 'POST',
+    token,
+    tenantId,
+    accept: [200, 201],
+    body: {
+      id: systemId,
+      name: 'e2e-func-s6a-source',
+      kind: 'data-source:sql-readonly',
+      role: 'source',
+      status: 'active',
+      connectionId,
+      config: {},
+    },
   })
-  return res
+  return { ...res, code: closedErrorCode(res.body), ...connectionResult }
+}
+
+// The credential diagnostic after #5452. Credentials now live on the canonical Connection, never on the
+// binding row, so "the runtime will have credentials" means all three of: the Connection reported
+// hasCredentials=true when it was created, the binding names exactly that Connection, and the binding
+// row itself carries none (a binding with its own ciphertext is the split secret store #5452 removed).
+// Booleans only: hasCredentials and connectionId are the ordinary public projections, never content.
+function s6aCredentialsOnConnection(registered, fetchedBinding) {
+  const data = fetchedBinding && fetchedBinding.body && fetchedBinding.body.data
+  return registered.connectionHasCredentials === true
+    && Boolean(data)
+    && data.connectionId === registered.connectionId
+    && data.hasCredentials === false
+}
+
+// After the flag-ON restart: the Connection reloaded from the database and is readable by the run's
+// user (GET /api/data-sources/:id is owner-scoped). A boolean, so a later CONNECTION_* refusal from the
+// run can be split from "the Connection did not survive the restart".
+async function s6aConnectionReadable(token, systemId, tenantId) {
+  const res = await requestJson(`/api/data-sources/${encodeURIComponent(s6aConnectionIdFor(systemId))}`, {
+    token, tenantId, accept: [200],
+  })
+  return res.ok && res.body?.data?.hasCredentials === true
 }
 
 async function runProvisioningScript(env) {
@@ -1593,8 +1681,10 @@ async function attemptS6ARealRun() {
     return
   }
 
-  // 2. real external system record (must exist BEFORE the runtime attempts a run; visible via the
-  // ordinary external-systems HTTP surface, credentials plaintext only inside this request body).
+  // 2. real canonical Connection + external system binding (both must exist BEFORE the runtime attempts
+  // a run; visible via the ordinary /api/data-sources and external-systems HTTP surfaces). Since #5452
+  // the reader credentials travel in plaintext only inside the Connection create body, and the binding
+  // names that Connection by connectionId with no credentials of its own — see registerExternalSystem().
   //
   // RD-E2E finding: this step calls the HTTP API, which needs a server actually listening — this file
   // previously had NO startServer() call here at all. That was masked for a long time by the
@@ -1611,17 +1701,21 @@ async function attemptS6ARealRun() {
     try {
       const baseToken = await getDevToken()
       const registered = await registerExternalSystem(baseToken, systemId)
-      registeredOk = must('S6-A: external system registered', registered.ok, `http=${registered.status}`)
+      S.s6aConnectionRegistered = registered.connectionOk ? 'PASS' : 'FAIL'
+      S.s6aConnectionPersisted = String(registered.connectionPersisted ?? 'NOT_RUN')
+      registeredOk = must('S6-A: external system registered', registered.ok,
+        `connectionHttp=${registered.connectionStatus} connectionCode=${registered.connectionCode} `
+        + `connectionPersisted=${S.s6aConnectionPersisted} http=${registered.status} code=${registered.code}`)
       // Diagnostic (Step 1 discipline applied to this next layer, not a guess): the run-time re-resolves
-      // this SAME external system from the DB (externalSystemRegistry.getExternalSystemForAdapter), and
-      // its credential lookup returns `undefined` — silently dropping the `credentials` property entirely
-      // — if the stored ciphertext is missing or empty. `hasCredentials` is a boolean already exposed by
-      // the ordinary GET route (rowToPublicExternalSystem) — never the credential content itself — so
-      // this is safe to read directly into the values-free evidence.
+      // this SAME binding from the DB (externalSystemRegistry.getExternalSystemForSealedSnapshot) and,
+      // since #5452, takes its credentials from the canonical Connection it names, never from the row.
+      // s6aExternalSystemHasCredentials therefore now reads "the credentials are where the runtime
+      // looks for them" — see s6aCredentialsOnConnection(). Every input is a boolean or the id this
+      // harness minted, read off the ordinary public projections, never credential content.
       if (registeredOk) {
         const fetched = await requestJson(`/api/integration/external-systems/${encodeURIComponent(systemId)}`,
           { token: baseToken, accept: [200] })
-        S.s6aExternalSystemHasCredentials = String(fetched.body?.data?.hasCredentials === true)
+        S.s6aExternalSystemHasCredentials = String(s6aCredentialsOnConnection(registered, fetched))
       }
     } finally {
       await stopServer()
@@ -1648,7 +1742,9 @@ async function attemptS6ARealRun() {
   await assertS6AObservabilityQueriesResolve()
 
   // 3. provisioning spec (inline external-system connection material — no DB registry lookup at
-  // provisioning time; the runtime independently re-resolves the SAME record at run time).
+  // provisioning time; the runtime independently re-resolves the SAME binding at run time, and since
+  // #5452 takes its connection material from the canonical Connection registered in step 2, so the
+  // inline values here must stay equal to that Connection's, or the derived anchors will not match).
   // bindingExpiresAt and signerExpiresAt share ONE `nowMs` snapshot: normalizeAuthorityInput
   // (sealed-export-lifecycle-provisioning.cjs) also fail-closes if bindingExpiresAt > signerExpiresAt,
   // and two separate Date.now() calls truncated to seconds could straddle a second boundary and make
@@ -1822,6 +1918,11 @@ async function attemptS6ARealRun() {
       S.s6aFlagOnLogHasEaddrinuse = String(logText.includes('EADDRINUSE'))
       return
     }
+
+    // #5452: the run takes its credentials from the canonical Connection registered before the
+    // restart. Record, as one boolean, whether that Connection reloaded and is readable by this user,
+    // so a CONNECTION_* refusal from the run below can be told apart from a Connection that is gone.
+    S.s6aConnectionReadableAfterRestart = String(await s6aConnectionReadable(token, systemId))
 
     // mvp/ensure is idempotent per tenant/workspace — defensive re-provisioning of the underlying
     // multitable object/field templates the persist step needs (the existing-chain phase already ran
@@ -2087,11 +2188,15 @@ async function setupS6AScaleBinding({ label, salt, rowCount, oversizedLastRow, a
       const chainWarmupOk = await runExistingChainWarmup(baseToken, label)
       S[`s6a${label === 'midtier' ? 'MidTier' : 'Rejection'}ExistingChainWarmup`] = chainWarmupOk ? 'PASS' : 'FAIL'
       const registered = await registerExternalSystem(baseToken, systemId, tenantId)
-      registeredOk = must(`${label}: external system registered`, registered.ok, `http=${registered.status}`)
+      registeredOk = must(`${label}: external system registered`, registered.ok,
+        `connectionHttp=${registered.connectionStatus} connectionCode=${registered.connectionCode} `
+        + `connectionPersisted=${String(registered.connectionPersisted ?? 'NOT_RUN')} `
+        + `http=${registered.status} code=${registered.code}`)
       if (registeredOk) {
         const fetched = await requestJson(`/api/integration/external-systems/${encodeURIComponent(systemId)}`,
           { token: baseToken, accept: [200], tenantId })
-        hasCredentials = String(fetched.body?.data?.hasCredentials === true)
+        // Same post-#5452 meaning as the primary arm's s6aExternalSystemHasCredentials.
+        hasCredentials = String(s6aCredentialsOnConnection(registered, fetched))
       }
     } finally {
       await stopServer()
