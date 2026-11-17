@@ -447,6 +447,12 @@ describe('PermissionManagementView grant readback', () => {
     checkBody?: Record<string, unknown>
     checkDegraded?: boolean
     checkAllowed?: boolean
+    businessChecks?: Array<{
+      status?: number
+      body?: unknown
+      wait?: Promise<void>
+      throwError?: boolean
+    }>
   } = {}) {
     const state: Record<string, {
       direct: string[]
@@ -470,6 +476,8 @@ describe('PermissionManagementView grant readback', () => {
     const legacyState: Record<string, string[]> = {}
     for (const [userId, codes] of Object.entries(options.legacyByUser ?? {})) legacyState[userId] = [...codes]
     const checkSignals: AbortSignal[] = []
+    const businessQueue = [...(options.businessChecks ?? [])]
+    const businessRawBodies: string[] = []
 
     const userPayload = (userId: string) => {
       const grants = state[userId]
@@ -699,6 +707,18 @@ describe('PermissionManagementView grant readback', () => {
         })
       }
 
+      if (pathname === '/api/permissions/v2/business-check' && method === 'POST') {
+        const raw = typeof init?.body === 'string' ? init.body : ''
+        businessRawBodies.push(raw)
+        const body = raw ? JSON.parse(raw) as Record<string, unknown> : {}
+        bodies.push(body)
+        const scripted = businessQueue.shift()
+        if (scripted?.wait) await scripted.wait
+        if (scripted?.throwError) throw new Error('business check down')
+        if (!scripted) return createJsonResponse({}, 500)
+        return createJsonResponse(scripted.body ?? {}, scripted.status ?? 200)
+      }
+
       if (pathname === '/api/permissions/legacy/revoke' && method === 'POST') {
         const body = typeof init?.body === 'string' ? JSON.parse(init.body) as { userId?: string; permission?: string } : {}
         bodies.push(body)
@@ -731,6 +751,7 @@ describe('PermissionManagementView grant readback', () => {
       stats,
       pendingAccess,
       checkSignals,
+      businessRawBodies,
       releaseOldestAccess() {
         pendingAccess.shift()?.release()
       },
@@ -2377,6 +2398,350 @@ describe('PermissionManagementView grant readback', () => {
     expect(note).not.toContain('数据表编号')
     expect(note).not.toContain('全局对象')
     expect(link.getAttribute('href')).not.toMatch(/sheet|tableId|recordId/i)
+  })
+
+  function businessPayload(
+    policyId: string,
+    result: 'allow' | 'deny' | 'unknown',
+    layer: 'business_guard' | 'resource_visibility' | 'resource_context' = 'business_guard',
+  ) {
+    return {
+      policyId,
+      result,
+      layers: [{ layer, result }],
+      evaluatedAt: '2026-11-17T00:00:00.000Z',
+      semantics: 'guard_snapshot',
+    }
+  }
+
+  async function openBusinessCheck(root: HTMLElement): Promise<void> {
+    await chooseListedUser(root, 'Alpha')
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-check-mode-business"]')))
+    ;(root.querySelector('[data-testid="permission-check-mode-business"]') as HTMLButtonElement).click()
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-business-policy"]')))
+  }
+
+  async function chooseBusinessPolicy(root: HTMLElement, policyId: string): Promise<void> {
+    const select = root.querySelector('[data-testid="permission-business-policy"]') as HTMLSelectElement
+    select.value = policyId
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+  }
+
+  async function fillBusinessField(root: HTMLElement, field: string, value: string): Promise<void> {
+    const input = root.querySelector(`[data-testid="permission-business-${field}"]`) as HTMLInputElement
+    input.value = value
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+  }
+
+  it('names the permission-code precheck and does not call the business check before a choice', async () => {
+    const api = createPermissionApi()
+    const root = mountView()
+    await chooseListedUser(root, 'Alpha')
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-checker-run"]')))
+    expect(root.querySelector('#permission-checker-title')?.textContent).toBe('权限码预检')
+    expect(root.querySelector('[data-testid="permission-code-precheck-note"]')?.textContent).toContain('没有业务上下文')
+    expect(root.querySelector('[data-testid="permission-checker-scope"]')?.textContent).toContain('这一项权限码')
+    expect(root.querySelector('[data-testid="permission-business-checker"]')).toBeNull()
+    expect(api.calls.some((call) => call === 'POST /api/permissions/v2/business-check')).toBe(false)
+    expect(api.calls.some((call) => call === 'POST /api/permissions/check')).toBe(false)
+  })
+
+  it('posts the registered business and resource bodies for the selected member', async () => {
+    const resourceIds = {
+      baseId: ' base_1 ',
+      sheetId: 'sheet.1',
+      viewId: 'view:1',
+      recordId: 'record-1',
+      fieldId: 'field_1',
+    }
+    const cases: Array<{ policyId: string; fields: string[]; body: Record<string, unknown>; text: string }> = [
+      {
+        policyId: 'attendance.decision-trace',
+        fields: [],
+        text: '不保证业务动作成功',
+        body: {
+          subject: { kind: 'target', userId: 'user-1' },
+          policyId: 'attendance.decision-trace',
+          mode: 'single',
+          permissions: ['attendance:read'],
+        },
+      },
+      {
+        policyId: 'approval-templates.list',
+        fields: [],
+        text: '不保证业务动作成功',
+        body: {
+          subject: { kind: 'target', userId: 'user-1' },
+          policyId: 'approval-templates.list',
+          mode: 'single',
+          permissions: ['approvals:read'],
+        },
+      },
+      {
+        policyId: 'approval-templates.directory.roles',
+        fields: [],
+        text: '不保证业务动作成功',
+        body: {
+          subject: { kind: 'target', userId: 'user-1' },
+          policyId: 'approval-templates.directory.roles',
+          mode: 'any',
+          permissions: ['approval-templates:manage', 'approvals:admin-templates'],
+        },
+      },
+      {
+        policyId: 'multitable.context.sheet',
+        fields: ['baseId', 'sheetId'],
+        text: '通过此权限检查',
+        body: {
+          subject: { kind: 'target', userId: 'user-1' },
+          policyId: 'multitable.context.sheet',
+          resource: { kind: 'sheet', baseId: 'base_1', sheetId: 'sheet.1' },
+        },
+      },
+      {
+        policyId: 'multitable.context.view-access',
+        fields: ['baseId', 'sheetId', 'viewId'],
+        text: '上下文返回的配置能力',
+        body: {
+          subject: { kind: 'target', userId: 'user-1' },
+          policyId: 'multitable.context.view-access',
+          resource: { kind: 'sheet', baseId: 'base_1', sheetId: 'sheet.1', viewId: 'view:1' },
+        },
+      },
+      {
+        policyId: 'multitable.record.read',
+        fields: ['baseId', 'sheetId', 'recordId'],
+        text: '通过此权限检查',
+        body: {
+          subject: { kind: 'target', userId: 'user-1' },
+          policyId: 'multitable.record.read',
+          resource: { kind: 'sheet', baseId: 'base_1', sheetId: 'sheet.1', recordId: 'record-1' },
+        },
+      },
+      {
+        policyId: 'multitable.record.field-read',
+        fields: ['baseId', 'sheetId', 'recordId', 'fieldId'],
+        text: '通过此权限检查',
+        body: {
+          subject: { kind: 'target', userId: 'user-1' },
+          policyId: 'multitable.record.field-read',
+          resource: { kind: 'sheet', baseId: 'base_1', sheetId: 'sheet.1', recordId: 'record-1', fieldId: 'field_1' },
+        },
+      },
+    ]
+    const api = createPermissionApi({
+      businessChecks: cases.map((entry) => ({ body: businessPayload(entry.policyId, 'allow', entry.policyId.startsWith('multitable.') ? 'resource_visibility' : 'business_guard') })),
+    })
+    const root = mountView()
+    await openBusinessCheck(root)
+    for (const entry of cases) {
+      await chooseBusinessPolicy(root, entry.policyId)
+      for (const field of entry.fields) {
+        await fillBusinessField(root, field, resourceIds[field as keyof typeof resourceIds])
+      }
+      const before = api.businessRawBodies.length
+      ;(root.querySelector('[data-testid="permission-business-run"]') as HTMLButtonElement).click()
+      await waitForCondition(() => api.businessRawBodies.length === before + 1 && root.querySelector('[data-testid="permission-business-result"]')?.getAttribute('data-phase') === 'allow')
+      const raw = api.businessRawBodies.at(-1) || ''
+      const parsed = JSON.parse(raw) as Record<string, unknown>
+      expect(parsed).toEqual(entry.body)
+      expect(Object.keys(parsed)).toEqual(Object.keys(entry.body))
+      if ('resource' in entry.body) {
+        expect(Object.keys(parsed.resource as object)).toEqual(Object.keys(entry.body.resource as object))
+        expect(parsed).not.toHaveProperty('mode')
+        expect(parsed).not.toHaveProperty('permissions')
+      } else {
+        expect(Object.keys(parsed.subject as object)).toEqual(['kind', 'userId'])
+        expect((parsed.permissions as string[])).toEqual((entry.body.permissions as string[]))
+      }
+      const detail = root.querySelector('[data-testid="permission-business-result"]')?.textContent || ''
+      expect(detail).toContain('通过此权限检查')
+      expect(detail).toContain(entry.text)
+      if (!entry.policyId.startsWith('multitable.')) expect(detail).toContain('不保证业务动作成功')
+    }
+    expect(api.calls.filter((call) => call === 'POST /api/permissions/check')).toEqual([])
+    expect(root.querySelector('[data-testid="permission-business-checker"]')?.querySelector('a')).toBeNull()
+  })
+
+  it('keeps an unknown, missing, forbidden, unavailable, or malformed business check from the old precheck', async () => {
+    const cases: Array<{ status: number; body: unknown; phase: string; text: string }> = [
+      { status: 200, body: businessPayload('attendance.decision-trace', 'unknown'), phase: 'unknown', text: '无法判定' },
+      { status: 404, body: businessPayload('attendance.decision-trace', 'allow'), phase: 'missing', text: '没有' },
+      { status: 403, body: businessPayload('attendance.decision-trace', 'allow'), phase: 'forbidden', text: '没有权限' },
+      { status: 503, body: { result: 'allow', allowed: true }, phase: 'unavailable', text: '暂时不可用' },
+      { status: 200, body: { policyId: 'attendance.decision-trace', result: 'allow', allowed: true, permissions: ['attendance:read'] }, phase: 'error', text: '无法核对' },
+    ]
+    for (const entry of cases) {
+      const api = createPermissionApi({ businessChecks: [{ status: entry.status, body: entry.body }] })
+      const root = mountView()
+      await openBusinessCheck(root)
+      await chooseBusinessPolicy(root, 'attendance.decision-trace')
+      ;(root.querySelector('[data-testid="permission-business-run"]') as HTMLButtonElement).click()
+      await waitForCondition(() => root.querySelector('[data-testid="permission-business-result"]')?.getAttribute('data-phase') === entry.phase)
+      const detail = root.querySelector('[data-testid="permission-business-result"]')?.textContent || ''
+      expect(detail).toContain(entry.text)
+      expect(detail).toContain('本次没有结论')
+      expect(detail).not.toContain('通过此权限检查')
+      expect(detail).not.toContain('允许')
+      expect(api.calls.filter((call) => call === 'POST /api/permissions/check')).toEqual([])
+      expect(api.calls.filter((call) => call === 'POST /api/permissions/v2/business-check')).toEqual(['POST /api/permissions/v2/business-check'])
+      app?.unmount()
+      container?.remove()
+      app = null
+      container = null
+      apiFetchMock.mockReset()
+    }
+  })
+
+  it('still runs the permission-code precheck after a business check cannot decide', async () => {
+    const api = createPermissionApi({
+      checkAllowed: true,
+      businessChecks: [{ body: businessPayload('approval-templates.list', 'unknown') }],
+    })
+    const root = mountView()
+    await openBusinessCheck(root)
+    await chooseBusinessPolicy(root, 'approval-templates.list')
+    ;(root.querySelector('[data-testid="permission-business-run"]') as HTMLButtonElement).click()
+    await waitForCondition(() => root.querySelector('[data-testid="permission-business-result"]')?.getAttribute('data-phase') === 'unknown')
+    expect(api.calls.filter((call) => call === 'POST /api/permissions/check')).toEqual([])
+    ;(root.querySelector('[data-testid="permission-check-mode-code"]') as HTMLButtonElement).click()
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-checker-run"]')))
+    await runChecker(root, 'crm:read')
+    await waitForCondition(() => checkerResult(root)?.getAttribute('data-phase') === 'allowed')
+    expect(api.bodies.at(-1)).toEqual({ userId: 'user-1', permission: 'crm:read' })
+    expect(api.calls.filter((call) => call === 'POST /api/permissions/check')).toEqual(['POST /api/permissions/check'])
+    expect(api.calls.filter((call) => call === 'POST /api/permissions/v2/business-check')).toEqual(['POST /api/permissions/v2/business-check'])
+  })
+
+  it('drops a late business result when the selected member changes', async () => {
+    let releaseCheck: (() => void) | undefined
+    const wait = new Promise<void>((resolve) => { releaseCheck = resolve })
+    const api = createPermissionApi({
+      businessChecks: [{ wait, body: businessPayload('attendance.decision-trace', 'allow') }],
+    })
+    const root = mountView()
+    await openBusinessCheck(root)
+    await chooseBusinessPolicy(root, 'attendance.decision-trace')
+    ;(root.querySelector('[data-testid="permission-business-run"]') as HTMLButtonElement).click()
+    await waitForCondition(() => root.querySelector('[data-testid="permission-business-result"]')?.getAttribute('data-phase') === 'pending')
+    clickNamedUser(root, 'Bravo')
+    await waitForCondition(() => (root.querySelector('[data-testid="permission-direct-section"]')?.textContent || '').includes('workflow:read'))
+    expect(root.querySelector('[data-testid="permission-business-result"]')).toBeNull()
+    releaseCheck?.()
+    await flushUi(8)
+    expect(root.querySelector('[data-testid="permission-business-result"]')).toBeNull()
+    expect(root.querySelector('[data-testid="permission-business-checker"]')?.textContent || '').not.toContain('通过此权限检查')
+    expect(api.calls.filter((call) => call === 'POST /api/permissions/v2/business-check')).toEqual(['POST /api/permissions/v2/business-check'])
+    expect(api.calls.filter((call) => call === 'POST /api/permissions/check')).toEqual([])
+  })
+
+  it('drops a late business result when the resource id changes', async () => {
+    let releaseCheck: (() => void) | undefined
+    const wait = new Promise<void>((resolve) => { releaseCheck = resolve })
+    const api = createPermissionApi({
+      businessChecks: [{ wait, body: businessPayload('multitable.context.sheet', 'allow', 'resource_visibility') }],
+    })
+    const root = mountView()
+    await openBusinessCheck(root)
+    await chooseBusinessPolicy(root, 'multitable.context.sheet')
+    await fillBusinessField(root, 'baseId', 'base_1')
+    await fillBusinessField(root, 'sheetId', 'sheet.1')
+    ;(root.querySelector('[data-testid="permission-business-run"]') as HTMLButtonElement).click()
+    await waitForCondition(() => root.querySelector('[data-testid="permission-business-result"]')?.getAttribute('data-phase') === 'pending')
+    await fillBusinessField(root, 'sheetId', 'sheet-2')
+    expect(root.querySelector('[data-testid="permission-business-result"]')).toBeNull()
+    releaseCheck?.()
+    await flushUi(8)
+    expect(root.querySelector('[data-testid="permission-business-result"]')).toBeNull()
+    expect(root.querySelector('[data-testid="permission-business-checker"]')?.textContent || '').not.toContain('通过此权限检查')
+    expect(api.businessRawBodies).toHaveLength(1)
+    expect(JSON.parse(api.businessRawBodies[0])).toEqual({
+      subject: { kind: 'target', userId: 'user-1' },
+      policyId: 'multitable.context.sheet',
+      resource: { kind: 'sheet', baseId: 'base_1', sheetId: 'sheet.1' },
+    })
+    expect(api.calls.filter((call) => call === 'POST /api/permissions/check')).toEqual([])
+  })
+
+  it('drops the first business result when the same check is retried', async () => {
+    let releaseFirst: (() => void) | undefined
+    let releaseSecond: (() => void) | undefined
+    const first = new Promise<void>((resolve) => { releaseFirst = resolve })
+    const second = new Promise<void>((resolve) => { releaseSecond = resolve })
+    const api = createPermissionApi({
+      businessChecks: [
+        { wait: first, body: businessPayload('attendance.decision-trace', 'allow') },
+        { wait: second, body: businessPayload('attendance.decision-trace', 'deny') },
+      ],
+    })
+    const root = mountView()
+    await openBusinessCheck(root)
+    await chooseBusinessPolicy(root, 'attendance.decision-trace')
+    const button = root.querySelector('[data-testid="permission-business-run"]') as HTMLButtonElement
+    button.click()
+    await waitForCondition(() => root.querySelector('[data-testid="permission-business-result"]')?.getAttribute('data-phase') === 'pending')
+    button.click()
+    await waitForCondition(() => api.businessRawBodies.length === 2)
+    releaseFirst?.()
+    await flushUi(8)
+    expect(root.querySelector('[data-testid="permission-business-result"]')?.textContent || '').not.toContain('通过此权限检查')
+    releaseSecond?.()
+    await waitForCondition(() => root.querySelector('[data-testid="permission-business-result"]')?.getAttribute('data-phase') === 'deny')
+    const detail = root.querySelector('[data-testid="permission-business-result"]')?.textContent || ''
+    expect(detail).toContain('没有通过')
+    expect(detail).not.toContain('通过此权限检查')
+    expect(api.calls.filter((call) => call === 'POST /api/permissions/check')).toEqual([])
+  })
+
+  it('does not submit a resource check until every required id is usable', async () => {
+    const api = createPermissionApi()
+    const root = mountView()
+    await openBusinessCheck(root)
+    await chooseBusinessPolicy(root, 'multitable.record.read')
+    const button = root.querySelector('[data-testid="permission-business-run"]') as HTMLButtonElement
+    expect(button.disabled).toBe(true)
+    expect(root.querySelector('[data-testid="permission-business-id-issue"]')?.textContent).toContain('全部标识')
+    button.click()
+    await flushUi()
+    await fillBusinessField(root, 'baseId', 'base_1')
+    await fillBusinessField(root, 'sheetId', '   ')
+    expect(button.disabled).toBe(true)
+    button.click()
+    await flushUi()
+    await fillBusinessField(root, 'sheetId', 'sheet/1')
+    await fillBusinessField(root, 'recordId', 'record-1')
+    expect(button.disabled).toBe(true)
+    const issue = root.querySelector('[data-testid="permission-business-id-issue"]')?.textContent || ''
+    expect(issue).toContain('不符合格式')
+    expect(issue).not.toContain('sheet/1')
+    expect(root.querySelector('[data-testid="permission-business-checker"]')?.innerHTML || '').not.toMatch(/href=/i)
+    button.click()
+    await flushUi()
+    expect(api.calls.filter((call) => call === 'POST /api/permissions/v2/business-check')).toEqual([])
+    expect(root.querySelector('[data-testid="permission-business-note"]')).toBeNull()
+    await chooseBusinessPolicy(root, 'multitable.context.view-access')
+    expect(root.querySelector('[data-testid="permission-business-note"]')?.textContent).toContain('上下文返回的配置能力')
+    expect(root.querySelector('[data-testid="permission-business-recordId"]')).toBeNull()
+  })
+
+  it('reports a thrown business check as no conclusion and does not call the old precheck', async () => {
+    const api = createPermissionApi({
+      businessChecks: [{ throwError: true }],
+    })
+    const root = mountView()
+    await openBusinessCheck(root)
+    await chooseBusinessPolicy(root, 'attendance.decision-trace')
+    ;(root.querySelector('[data-testid="permission-business-run"]') as HTMLButtonElement).click()
+    await waitForCondition(() => root.querySelector('[data-testid="permission-business-result"]')?.getAttribute('data-phase') === 'error')
+    const detail = root.querySelector('[data-testid="permission-business-result"]')?.textContent || ''
+    expect(detail).toContain('检查失败')
+    expect(detail).toContain('本次没有结论')
+    expect(detail).not.toContain('通过此权限检查')
+    expect(detail).not.toContain('允许')
+    expect(api.calls.filter((call) => call === 'POST /api/permissions/check')).toEqual([])
+    expect(api.calls.filter((call) => call === 'POST /api/permissions/v2/business-check')).toEqual(['POST /api/permissions/v2/business-check'])
   })
 
   it('wires this spec into the required web lane', () => {
