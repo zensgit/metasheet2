@@ -3026,33 +3026,44 @@ const drawerDeleteAttachmentFn: MetaAttachmentDeleteFn = (attachmentId: string, 
 
 async function deleteAttachment(attachmentId: string, context?: MetaAttachmentUploadContext) {
   await workbench.client.deleteAttachment(attachmentId)
+  // From the answer until the copy has taken the removal, a save made on the copy waits for it
+  // (`waitForRemovalsTakingCopy`); released in every case, so a save never waits on a removal that is over.
+  const removedFrom = context?.recordId
+  let copyTaken: () => void = () => {}
+  const takingCopy = new Promise<void>((resolve) => { copyTaken = resolve })
+  if (removedFrom) removalsTakingCopy.set(removedFrom, takingCopy)
   // The page's rows are reloaded at once: a save made meanwhile goes from the row the delete left.
   const reload = Promise.resolve(grid.loadViewData(grid.page.value.offset))
   reload.catch(() => undefined)
-  // The record's drawer saves still out when the delete is answered (also those made after it was sent) went at the
-  // version before it: the copy takes them (at their answers) before it takes the delete, which then moves it one
-  // version on from theirs.
-  await Promise.allSettled(context?.recordId ? drawerSavesOutOf(context.recordId) : [])
-  // The deep-linked copy (the reload refreshes the page's rows only) takes the delete as the server does for an
-  // attachment bound to that record (the id out of its list, version + 1), also when the drawer has moved on: a
-  // later patch of that record starts from it.
-  const linked = deepLinkedRecord.value
-  if (context?.recordId && context.fieldId && linked?.id === context.recordId) {
-    const updatedIds = (linked.data[context.fieldId] as unknown[] | undefined)
-      ?.map(String)
-      .filter((id) => id !== attachmentId) ?? []
-    deepLinkedRecord.value = {
-      ...linked,
-      version: linked.version + 1,
-      data: {
-        ...linked.data,
-        [context.fieldId]: updatedIds,
-      },
+  try {
+    // The record's drawer saves still out when the delete is answered (also those made after it was sent) went at the
+    // version before it: the copy takes them (at their answers) before it takes the delete, which then moves it one
+    // version on from theirs.
+    await Promise.allSettled(removedFrom ? drawerSavesOutOf(removedFrom) : [])
+    // The deep-linked copy (the reload refreshes the page's rows only) takes the delete as the server does for an
+    // attachment bound to that record (the id out of its list, version + 1), also when the drawer has moved on: a
+    // later patch of that record starts from it.
+    const linked = deepLinkedRecord.value
+    if (removedFrom && context?.fieldId && linked?.id === removedFrom) {
+      const updatedIds = (linked.data[context.fieldId] as unknown[] | undefined)
+        ?.map(String)
+        .filter((id) => id !== attachmentId) ?? []
+      deepLinkedRecord.value = {
+        ...linked,
+        version: linked.version + 1,
+        data: {
+          ...linked.data,
+          [context.fieldId]: updatedIds,
+        },
+      }
+      deepLinkedRecordAttachmentSummaries.value = {
+        ...deepLinkedRecordAttachmentSummaries.value,
+        [context.fieldId]: (deepLinkedRecordAttachmentSummaries.value[context.fieldId] ?? []).filter((item) => item.id !== attachmentId),
+      }
     }
-    deepLinkedRecordAttachmentSummaries.value = {
-      ...deepLinkedRecordAttachmentSummaries.value,
-      [context.fieldId]: (deepLinkedRecordAttachmentSummaries.value[context.fieldId] ?? []).filter((item) => item.id !== attachmentId),
-    }
+  } finally {
+    if (removedFrom && removalsTakingCopy.get(removedFrom) === takingCopy) removalsTakingCopy.delete(removedFrom)
+    copyTaken()
   }
   await reload
 }
@@ -3803,6 +3814,28 @@ const manualDrawerWriteTails = new Map<string, Promise<void>>()
 // for them, so that it reads the copy they moved on; so does an attachment delete's update of the copy.
 const drawerSavesOut = new Map<string, Set<Promise<unknown>>>()
 
+// An attachment removal of a record, from its answer until the drawer's copy has taken it (`deleteAttachment`). A save
+// made on the copy in that time (in the drawer, a picker, a form's submit) waits for it, then goes from the copy the
+// removal moved on: sent at once it would go at the version before the removal, and the removal would reject it.
+const removalsTakingCopy = new Map<string, Promise<void>>()
+// The saves waiting that way: not yet a cell write, so the leave prompts count them here.
+const savesHeldBehindRemoval = ref(0)
+
+async function waitForRemovalsTakingCopy(recordId: string): Promise<void> {
+  let removal = removalsTakingCopy.get(recordId)
+  if (!removal) return
+  savesHeldBehindRemoval.value += 1
+  try {
+    // A removal of the record answered while this one was taking the copy is waited for too.
+    while (removal) {
+      await removal
+      removal = removalsTakingCopy.get(recordId)
+    }
+  } finally {
+    savesHeldBehindRemoval.value -= 1
+  }
+}
+
 function drawerSavesOutOf(recordId: string): Array<Promise<unknown>> {
   return [...(drawerSavesOut.get(recordId) ?? [])]
 }
@@ -3859,6 +3892,11 @@ async function runManualDrawerPatch(recordId: string, fieldId: string, value: un
 }
 
 async function commitDrawerPatch(record: MetaRecord, fieldId: string, value: unknown, onCommitted?: () => void) {
+  if (record === deepLinkedRecord.value && removalsTakingCopy.has(record.id)) {
+    await waitForRemovalsTakingCopy(record.id)
+    // The copy the removal moved on (the drawer may have moved meanwhile: then what holds the record now).
+    record = copyFirstRecordById(record.id) ?? record
+  }
   const patchOwner = {}
   // The owners and the field alerts are the shown record's (keyed by field): a patch for a record the drawer no
   // longer shows (an attachment write that ended after a switch) takes neither, so it is never the latest.
@@ -3970,6 +4008,8 @@ async function onFormSubmit(data: Record<string, unknown>) {
       formSuccessMessage.value = null
       formErrorMessage.value = null
       formFieldErrors.value = {}
+      const submitted = selectedRecordResolved.value
+      if (submitted && submitted === deepLinkedRecord.value) await waitForRemovalsTakingCopy(submitted.id)
       const result = await workbench.client.submitForm(viewId, {
         recordId: selectedRecordResolved.value?.id,
         expectedVersion: selectedRecordResolved.value?.version,
@@ -4099,6 +4139,7 @@ async function onLinkPickerConfirm(payload: { recordIds: string[]; summaries: Li
   const recordId = linkPickerRecordId.value
   if (!ensureCanEditRecord(recordId)) return
   const fieldId = linkPickerField.value.id
+  if (deepLinkedRecord.value?.id === recordId && !grid.rows.value.some((r) => r.id === recordId)) await waitForRemovalsTakingCopy(recordId)
   const previousSummaries = selectedRecordLinkSummaries.value[fieldId] ?? grid.linkSummaries.value[recordId]?.[fieldId]
   const row = grid.rows.value.find((r) => r.id === recordId)
   if (row) {
@@ -4172,6 +4213,7 @@ async function onPersonPickerConfirm(payload: { userIds: string[]; summaries: Pe
   const recordId = personPickerRecordId.value
   if (!ensureCanEditRecord(recordId)) return
   const fieldId = personPickerField.value.id
+  if (deepLinkedRecord.value?.id === recordId && !grid.rows.value.some((r) => r.id === recordId)) await waitForRemovalsTakingCopy(recordId)
   const row = grid.rows.value.find((r) => r.id === recordId)
   if (row) {
     // This save's own result (see `onLinkPickerConfirm`).
@@ -5026,7 +5068,7 @@ function discardWorkbenchDraftsForExternalContextChange() {
 // may lose them. Asked by the leave-page prompts only, and not part of `hasBlockingUnloadState`, which also defers an
 // external context sync. A grid without the count reads as none.
 function pendingCellWrites(): number {
-  return grid.pendingCellWriteCount?.value ?? 0
+  return (grid.pendingCellWriteCount?.value ?? 0) + savesHeldBehindRemoval.value
 }
 
 function confirmPageLeave() {

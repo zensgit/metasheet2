@@ -634,6 +634,8 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
       'close', 'toggle-comments', 'comment-field', 'navigate', 'delete', 'patch',
       'comment-submit', 'comment-reply', 'comment-cancel-reply', 'update:comment-draft',
       'comment-edit', 'comment-cancel-edit',
+      // The drawer's link and person fields open their pickers (the real inspector's field editors).
+      'open-link-picker', 'open-person-picker',
       // Record inspector v3 (2026-09-05, PR-B1 §1.3 "Copy link"): the real inspector's copy-link icon
       // emits `copy-link`; the workbench owns the clipboard write (`onCopyRecordLink`). The
       // `data-copy-link` button below is this stub's stand-in for that icon.
@@ -803,6 +805,22 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
             onClick: () => this.$emit('patch', 'fld_status', 'Patched status'),
           },
           'patch-record-status',
+        ),
+        h(
+          'button',
+          {
+            'data-drawer-open-link-picker': 'fld_parts',
+            onClick: () => this.$emit('open-link-picker', { id: 'fld_parts', name: 'Parts', type: 'link' }),
+          },
+          'drawer-open-link-picker',
+        ),
+        h(
+          'button',
+          {
+            'data-drawer-open-person-picker': 'fld_owner',
+            onClick: () => this.$emit('open-person-picker', { id: 'fld_owner', name: 'Owner', type: 'person' }),
+          },
+          'drawer-open-person-picker',
         ),
         // An attachment write names the record it was made on (the third argument): it can end after the
         // drawer moved to another record. One button per named record.
@@ -6446,6 +6464,176 @@ describe('MultitableWorkbench view wiring', () => {
       expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
       expect(gridMock.patchCell).toHaveBeenCalledWith('rec_remote', 'fld_files', ['att_2'], 5, COPY_SAVE)
       expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+    })
+
+    // An attachment removal on a copy waits, from its answer, for the drawer's saves of that record still out before
+    // the copy takes it (version + 1). A save made on the copy in that time waits for that too, then goes at the version
+    // the removal moved the copy to: sent at once it would go at the version before the removal, which rejects it.
+    describe('saves made on the copy while an attachment removal of it waits', () => {
+      async function openRemote(files: string[] = ['att_1', 'att_2']) {
+        workbenchMock.client.getRecord.mockResolvedValueOnce({
+          record: { id: 'rec_remote', version: 4, data: { fld_title: 'Remote', fld_status: 'open', fld_files: files } },
+          commentsScope: { containerType: 'meta_sheet', containerId: 'sheet_orders', targetType: 'meta_record', targetId: 'rec_remote' },
+          linkSummaries: {},
+          attachmentSummaries: { fld_files: files.map((id) => ({ id, filename: `${id}.txt` })) },
+        })
+        const hostState = mountWorkbench({ recordId: 'rec_remote' })
+        await flushUi(8)
+        expect(container!.querySelector('[data-record-drawer="rec_remote"]')).toBeTruthy()
+        return hostState
+      }
+      // The grid's answers are given by the test, one per save, in order.
+      function heldSaves() {
+        const answers: Array<(failure: unknown) => void> = []
+        const calls: Array<[string, string, number]> = []
+        gridMock.patchCell.mockImplementation(async (recordId: string, fieldId: string, _value: unknown, version: number, options?: { onCommitted?: (v: number) => void }) => {
+          calls.push([recordId, fieldId, version])
+          const failure = await new Promise((resolve) => { answers.push(resolve) })
+          gridMock.error.value = null
+          if (!failure) options?.onCommitted?.(version + 1)
+          return failure
+        })
+        return { answers, calls }
+      }
+      function heldDeletes() {
+        const answers: Array<() => void> = []
+        workbenchMock.client.deleteAttachment = vi.fn((attachmentId: string) => new Promise((resolve) => { answers.push(() => resolve({ deleted: attachmentId })) }))
+        return answers
+      }
+      // The copy's list of the field, set as the record's own answer would hold it.
+      function deepLinkedFilesAre(value: unknown) {
+        inspectorStubSeen.record!.data.fld_files = value
+      }
+      const removeFromRemote = (attachmentId: string) => inspectorStubSeen.deleteAttachmentFn!(attachmentId, { recordId: 'rec_remote', fieldId: 'fld_files' })
+      // A save of the copy made after the remove was clicked goes at the version before the removal: the removal, stored
+      // first, rejects it.
+      const REJECTED_BY_THE_REMOVAL = { recordId: 'rec_remote', fieldId: 'fld_title', message: 'Changed elsewhere', code: 'VERSION_CONFLICT', status: 409 }
+      const click = async (selector: string) => {
+        container!.querySelector<HTMLButtonElement>(selector)!.click()
+        await flushUi()
+      }
+
+      it('a drawer save made while the removal waits for an earlier save waits too, and goes at the version the removal moved the copy to; the leave prompts count it meanwhile', async () => {
+        await openRemote()
+        const deletes = heldDeletes()
+        const saves = heldSaves()
+        const removal = removeFromRemote('att_1')
+        await flushUi()
+        await click('[data-patch-record="fld_title"]') // after the remove was clicked: at 4
+        deletes[0]() // the delete is stored first, and answered
+        await flushUi()
+        await click('[data-patch-record="fld_status"]') // while the removal waits for the title save
+        expect(saves.calls).toEqual([['rec_remote', 'fld_title', 4]])
+        expect(fireBeforeUnload().defaultPrevented).toBe(true)
+        saves.answers[0](REJECTED_BY_THE_REMOVAL)
+        await flushUi(4)
+        expect(saves.calls).toEqual([['rec_remote', 'fld_title', 4], ['rec_remote', 'fld_status', 5]])
+        saves.answers[1](null)
+        await removal
+        await flushUi()
+        expect(fireBeforeUnload().defaultPrevented).toBe(false)
+      })
+
+      it('a link picker save on the copy made while the removal waits goes at the version the removal moved the copy to', async () => {
+        await openRemote()
+        const deletes = heldDeletes()
+        const saves = heldSaves()
+        workbenchMock.client.patchRecords.mockResolvedValue({ updated: [{ recordId: 'rec_remote', version: 6 }] })
+        const removal = removeFromRemote('att_1')
+        await flushUi()
+        await click('[data-patch-record="fld_title"]')
+        deletes[0]()
+        await flushUi()
+        await click('[data-drawer-open-link-picker="fld_parts"]')
+        await click('[data-link-picker-confirm="true"]')
+        expect(workbenchMock.client.patchRecords).not.toHaveBeenCalled()
+        saves.answers[0](REJECTED_BY_THE_REMOVAL)
+        await removal
+        await flushUi(4)
+        expect(workbenchMock.client.patchRecords).toHaveBeenCalledTimes(1)
+        expect(workbenchMock.client.patchRecords.mock.calls[0][0].changes).toEqual([
+          { recordId: 'rec_remote', fieldId: 'fld_parts', value: ['rec_part_1'], expectedVersion: 5 },
+        ])
+      })
+
+      it('a person picker save on the copy made while the removal waits goes at the version the removal moved the copy to', async () => {
+        await openRemote()
+        const deletes = heldDeletes()
+        const saves = heldSaves()
+        workbenchMock.client.patchRecords.mockResolvedValue({ updated: [{ recordId: 'rec_remote', version: 6 }] })
+        const removal = removeFromRemote('att_1')
+        await flushUi()
+        await click('[data-patch-record="fld_title"]')
+        deletes[0]()
+        await flushUi()
+        await click('[data-drawer-open-person-picker="fld_owner"]')
+        await click('[data-person-picker-confirm="true"]')
+        expect(workbenchMock.client.patchRecords).not.toHaveBeenCalled()
+        saves.answers[0](REJECTED_BY_THE_REMOVAL)
+        await removal
+        await flushUi(4)
+        expect(workbenchMock.client.patchRecords).toHaveBeenCalledTimes(1)
+        expect(workbenchMock.client.patchRecords.mock.calls[0][0].changes).toEqual([
+          { recordId: 'rec_remote', fieldId: 'fld_owner', value: ['user_jamie'], expectedVersion: 5 },
+        ])
+      })
+
+      it('a form\'s submit made while a removal of its record waits for an earlier save waits too, and goes at the version the removal moved the record to', async () => {
+        workbenchMock.views.value = [{ id: 'view_form', sheetId: 'sheet_orders', name: 'Form', type: 'form' }]
+        workbenchMock.activeViewId.value = 'view_form'
+        workbenchMock.client.loadFormContext.mockResolvedValue({
+          fields: [{ id: 'fld_title', name: 'Title', type: 'text' }],
+          record: { id: 'rec_1', version: 9, data: { fld_title: 'Form record', fld_files: ['att_1', 'att_2'] } },
+          rowActions: { canEdit: true, canDelete: true, canComment: true },
+        })
+        workbenchMock.client.submitForm.mockResolvedValue({ mode: 'update', record: { id: 'rec_1', version: 11, data: { fld_title: 'Form record' } }, attachmentSummaries: {} })
+        mountWorkbench({ viewId: 'view_form', recordId: 'rec_1' })
+        await flushUi(8)
+        const deletes = heldDeletes()
+        const saves = heldSaves()
+        const removal = inspectorStubSeen.deleteAttachmentFn!('att_1', { recordId: 'rec_1', fieldId: 'fld_files' })
+        await flushUi()
+        await click('[data-patch-record="fld_title"]')
+        expect(saves.calls).toEqual([['rec_1', 'fld_title', 9]])
+        deletes[0]()
+        await flushUi()
+        await click('[data-form-submit="true"]')
+        expect(workbenchMock.client.submitForm).not.toHaveBeenCalled()
+        saves.answers[0]({ ...REJECTED_BY_THE_REMOVAL, recordId: 'rec_1' })
+        await removal
+        await flushUi(4)
+        expect(workbenchMock.client.submitForm).toHaveBeenCalledWith('view_form', expect.objectContaining({ recordId: 'rec_1', expectedVersion: 10 }))
+      })
+
+      it('a save made while no removal of the copy waits goes at once (control)', async () => {
+        await openRemote()
+        const saves = heldSaves()
+        await click('[data-patch-record="fld_title"]')
+        expect(saves.calls).toEqual([['rec_remote', 'fld_title', 4]])
+        saves.answers[0](null)
+        await flushUi()
+      })
+
+      it('a removal whose update of the copy fails still lets the saves held behind it go', async () => {
+        // A list the copy cannot read as one: the copy's update throws (the removal's caller gets the error).
+        await openRemote()
+        deepLinkedFilesAre('att_1')
+        const deletes = heldDeletes()
+        const saves = heldSaves()
+        const removal = removeFromRemote('att_1').catch((error: unknown) => error)
+        await flushUi()
+        await click('[data-patch-record="fld_title"]')
+        deletes[0]()
+        await flushUi()
+        await click('[data-patch-record="fld_status"]')
+        expect(saves.calls).toHaveLength(1)
+        saves.answers[0](REJECTED_BY_THE_REMOVAL)
+        expect(await removal).toBeInstanceOf(Error)
+        await flushUi(4)
+        expect(saves.calls).toEqual([['rec_remote', 'fld_title', 4], ['rec_remote', 'fld_status', 4]])
+        saves.answers[1](null)
+        await flushUi()
+      })
     })
 
     // Deep link to rec_remote (not in the page, version 4), then move the drawer to the page record rec_2.
