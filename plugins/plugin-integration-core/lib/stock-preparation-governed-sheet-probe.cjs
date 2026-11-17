@@ -16,6 +16,13 @@
 // AFTER enablement was never seen (F-6). This module answers, per sheet, whether that sheet is governed, and each
 // seam refuses a governed sheet BEFORE any records IO.
 //
+// A SECOND, VALUES-BEARING REGISTRY READ (D2, register R-96): `registryBindingBySheet` returns the registry row's
+// `{ tenantId, objectId }` for a sheet. Like the verdict's registry read it has NO tenant filter (the store's
+// getPilotStateBySheetId reads by sheet only); unlike the verdict it carries values, so it has exactly ONE consumer:
+// resolveRegisteredSheetMachineColumns in lib/generic-writer-machine-columns.cjs, which derives the machine write-back
+// columns from the binding in-process and never returns, logs or puts it in an error. The single call site is pinned
+// by B-10 in __tests__/generic-writer-machine-column-binding.test.cjs; a second consumer must be argued there.
+//
 // GOVERNED (the consult's predicate, read BY SHEET — a generic writer holds a sheet id and nothing else):
 //   the registry row registered on this sheet carries the pilot stamp (PR B, migration 101)       -> 'pilot'
 //   OR any continuation row on this sheet, of ANY status (an ended relationship still governs)    -> 'continuation'
@@ -42,8 +49,8 @@
 // VALUES-FREE. Errors carry closed tokens (surface, reason, store, operation, a five-character SQLSTATE class), the
 // configured OBJECT KEY and booleans — never a sheet id, a project number, a tenant or a hold value.
 //
-// Hermetic: no env flag, no write, no host records IO — plugin-SQL reads only (one registry SELECT by sheet, four
-// COUNTs). It does NOT require the continuation store module (the stores are injected), so the generic writers that
+// Hermetic: no env flag, no write, no host records IO — plugin-SQL reads only (per probe: one registry SELECT by
+// sheet and four COUNTs; two registry SELECTs when the binding is read as well). It does NOT require the continuation store module (the stores are injected), so the generic writers that
 // require this file do not pull the planner into their load graph.
 // ---------------------------------------------------------------------------------------------------
 
@@ -297,6 +304,10 @@ function refuseIfGoverned({ answer, surface, objectId }) {
  * Is a probe wired at this seam? `true` when one was injected (it must expose `probe` and `assertSheetWritable`;
  * a malformed one is 501 by name, never a TypeError and never a silent pass); `false` when none was and the object
  * is outside the stock-prep namespace (legacy behaviour); the 501 not-wired refusal when none was and it is inside.
+ * D2: this check tests `probe` and `assertSheetWritable` only. A probe WITHOUT `registryBindingBySheet` (one built
+ * before D2, or a stand-in) passes it, and on a registered sheet the machine-column resolver
+ * (lib/generic-writer-machine-columns.cjs resolveRegisteredSheetMachineColumns) then refuses with 501
+ * METASHEET_MULTITABLE_MACHINE_COLUMNS_UNRESOLVED, reason registry_binding_read_absent; nothing is written.
  */
 function assertProbeWiredFor({ governedSheetProbe, surface, objectId }) {
   assertSurface(surface)

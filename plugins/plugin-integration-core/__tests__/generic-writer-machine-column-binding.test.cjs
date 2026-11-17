@@ -11,6 +11,7 @@
 //               projectId, a registry row of another tenant), the binding is the one table-actions and the write-back
 //               bind through, a registered sheet whose machine columns cannot be resolved is refused before IO, a
 //               machine column as the lookup key is refused, and the probe's additive binding read (B-09).
+//   B-10        round 3: a source scan pins that binding read (values-bearing, no tenant filter) to ONE call site.
 //   K-01..K-04  F1: creates on a stock-prep target never carry a machine column (pipeline upsert, C6 insertRows, ERP).
 //   R-01..R-04  F2: ERP feedback re-reads by key and re-sends the stripped patch with the fresh version (3 attempts).
 //   D-01..D-04  F3: the C6 value diff ignores the machine columns on a stock-prep target (no churn), a machine-only
@@ -319,6 +320,55 @@ test('B-09 the probe\'s ADDITIVE binding read over the REAL registry store: the 
   caught = null
   try { await probe.registryBindingBySheet({ sheetId: '  ' }) } catch (error) { caught = error }
   assert.equal(caught && caught.status, 422)
+})
+
+// B-10 (D2 round 3, stock-prep verdict X4): the probe's binding read is VALUES-BEARING and has NO tenant filter (the
+// store reads by sheet only), so it may have exactly one consumer. A source scan of lib/ (recursive) plus index.cjs,
+// comments stripped first so prose can neither satisfy nor trip it.
+const B10_PLUGIN_DIR = path.join(__dirname, '..')
+const b10StripComments = (source) => source.replace(/\r\n/g, '\n').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
+function b10SourceFiles() {
+  const out = []
+  const walk = (dir) => {
+    for (const entry of require('node:fs').readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) walk(full)
+      else if (/\.(cjs|mjs|js|mts|ts)$/.test(entry.name)) out.push(full)
+    }
+  }
+  walk(LIB)
+  out.push(path.join(B10_PLUGIN_DIR, 'index.cjs'))
+  return out
+}
+
+test('B-10 the probe\'s values-bearing, tenant-unscoped binding read has EXACTLY ONE call in lib/ + index.cjs — in resolveRegisteredSheetMachineColumns of generic-writer-machine-columns.cjs; the identifier appears in no other file (no alias, no destructure, no bracket access)', () => {
+  const fs = require('node:fs')
+  const calls = []
+  const mentions = new Map()
+  for (const file of b10SourceFiles()) {
+    const code = b10StripComments(fs.readFileSync(file, 'utf8'))
+    const rel = path.relative(B10_PLUGIN_DIR, file).split(path.sep).join('/')
+    const count = (code.match(/registryBindingBySheet/g) || []).length
+    if (count > 0) mentions.set(rel, count)
+    const callPattern = /registryBindingBySheet\s*\(/g
+    let match = callPattern.exec(code)
+    while (match) {
+      // The probe's own declaration is not a call.
+      if (!/function\s+$/.test(code.slice(Math.max(0, match.index - 16), match.index))) calls.push({ rel, index: match.index, code })
+      match = callPattern.exec(code)
+    }
+  }
+  assert.deepEqual([...mentions.keys()].sort(), ['lib/generic-writer-machine-columns.cjs', 'lib/stock-preparation-governed-sheet-probe.cjs'], 'the binding read is named only by the probe (its definition) and its one consumer')
+  // The probe: the declaration and the frozen export. The consumer: the `typeof` wiring check and the call.
+  assert.equal(mentions.get('lib/stock-preparation-governed-sheet-probe.cjs'), 2, 'the probe names it at its declaration and its export only')
+  assert.equal(mentions.get('lib/generic-writer-machine-columns.cjs'), 2, 'the consumer names it at its typeof check and its one call only')
+  assert.deepEqual(calls.map(({ rel }) => rel), ['lib/generic-writer-machine-columns.cjs'], 'exactly one call')
+  const [{ index, code }] = calls
+  const start = code.indexOf('async function resolveRegisteredSheetMachineColumns(')
+  assert.ok(start >= 0, 'the consumer function exists (a rename must not turn this scan into a no-op)')
+  const end = code.indexOf('\n}\n', start)
+  assert.ok(index > start && index < end, 'the one call sits inside resolveRegisteredSheetMachineColumns')
+  assert.match(code.slice(index - 40, index), /await governedSheetProbe\.$/, 'the call is the awaited member call on the injected probe')
 })
 
 // ── F1: creates ──────────────────────────────────────────────────────────────────────────────────
