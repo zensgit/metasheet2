@@ -6,28 +6,29 @@
 // write-source in lib/adapters/metasheet-multitable-target-adapter.cjs, the ERP feedback writer in lib/erp-feedback.cjs).
 //
 // A machine write-back column (MACHINE_WRITEBACK_FIELD_IDS, today `issueConfirmDate`) of a REGISTERED stock-prep
-// project sheet has exactly one writer: the write-back. A generic writer may not name it — not by its logical id, not
+// project sheet is filled by the write-back, the only date-producing writer (#6928's carry-confirm only copies an
+// existing value into an empty successor cell). A generic writer may not name it — not by its logical id, not
 // by its raw physical id, and not through a `fieldIdMap` alias. So the set a generic writer strips is read from THE
 // SHEET, never from the writer's own config (round 2, refuter finding 1: a config without a projectId, or one that
 // names the column by another logical name, used to slip past a config-derived set).
 //
-// THE SHEET'S BINDING (round 3). `@6d2681703` = main at 6d2681703 (#6925); `@5522ba301` = the Y9 write-back branch
-// feat/yida-issue-confirm-writeback-wiring-20261106, NOT merged.
+// THE SHEET'S BINDING (round 3; cites refreshed in round 4). `@59876b3d6` = main at 59876b3d6 (#6926); `@5522ba301` =
+// the Y9 write-back branch feat/yida-issue-confirm-writeback-wiring-20261106, NOT merged.
 //
 // WHO WRITES A REGISTRY ROW (integration_stock_prep_project_target: tenant_id, sheet_id, object_id). Two writers:
-//   - CODE: only the store's `create` inserts a row (stock-preparation-project-target-store.cjs:426-431@6d2681703); no
+//   - CODE: only the store's `create` inserts a row (stock-preparation-project-target-store.cjs:426-431@59876b3d6); no
 //     store update sets tenant_id / sheet_id / object_id and the store has no delete. Its only production caller is
-//     the project-sheet route (http-routes.cjs:12259@6d2681703), which provisions under `${tenantId}:integration-core`
-//     (:12129, :1854-1857) with the template objectId as the descriptor id (stock-preparation-target-provisioning.cjs
+//     the project-sheet route (http-routes.cjs:12274@59876b3d6), which provisions under `${tenantId}:integration-core`
+//     (:12144, :1856-1859) with the template objectId as the descriptor id (stock-preparation-target-provisioning.cjs
 //     :873-877) and registers that result.
 //   - NOT CODE: the switch-on runbook's Appendix A, a one-time owner-run SQL INSERT that adopts an existing sheet
 //     (docs/development/takeover-beiliao-20260821/runbook-stock-prep-project-sheets-switch-on-20261014.md:473-623,
-//     the INSERT at :598-606@6d2681703). Its precheck ③ (:538-553) requires `sheet_id_is_derived` (:544) and it takes
+//     the INSERT at :598-606@59876b3d6). Its precheck ③ (:538-553) requires `sheet_id_is_derived` (:544) and it takes
 //     the tenant from the object registry's staging project, so an adopted row also derives its sheet. On this site
-//     the owner chose D15 = 是: the old sheet was NOT adopted (g1-switch-on-record-20261016.md:8, :13@6d2681703).
-//   A grep of lib/, index.cjs, packages/core-backend/src, docs/ and scripts/ at 6d2681703 for SQL writes to the table
+//     the owner chose D15 = 是: the old sheet was NOT adopted (g1-switch-on-record-20261016.md:8, :13@59876b3d6).
+//   A grep of lib/, index.cjs, packages/core-backend/src, docs/ and scripts/ at 59876b3d6 for SQL writes to the table
 //   finds only that INSERT and the pilot runbook's UPDATE of the three pilot columns
-//   (runbook-stock-prep-batch-refresh-pilot-20261111.md:312). A literal grep cannot see a write built from the table
+//   (runbook-stock-prep-batch-refresh-pilot-20261111.md:313). A literal grep cannot see a write built from the table
 //   constant; test files insert rows of their own.
 //
 // CORRECTNESS DOES NOT REST ON THERE BEING ONE WRITER. It rests on two things:
@@ -37,21 +38,25 @@
 //       stableMetaId / getObjectSheetId / getObjectFieldId; findObjectSheet :417-423; ensureObject :1107-1133;
 //       ensureMissingObjectFields :925-934). A pair that names another sheet is never used; with none, the write is
 //       refused (FAIL CLOSED below).
-//   (2) THE SWITCH COUPLING with the write-back, the column's only machine writer. The write-back skips every row
+//   (2) THE SWITCH COUPLING with the write-back, the column's only date-producing writer (#6928's carry-confirm only
+//       copies an existing value into an empty successor cell). The write-back skips every row
 //       while MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED is not exactly 'true' (yida-issue-confirm-writeback.cjs:647
 //       @5522ba301). While it is on, table-actions binds a registered sheet through the derived overlay
 //       (stock-preparation-project-targets.cjs:218-220, :171-188 buildProjectTargetBinding), and the write-back's sheet
 //       port binds the registry row's tenant + ':integration-core' and its objectId (yida-issue-confirm-writeback-
 //       ports.mjs createIssueConfirmSheets -> createTargetScopedRecordsApi -> resolveTargetFieldIds,
-//       stock-preparation-table-actions.cjs:1394-1410@6d2681703): the FIRST candidate tried below. If that pair does
+//       stock-preparation-table-actions.cjs:1394-1410@59876b3d6): the FIRST candidate tried below. If that pair does
 //       not derive the sheet, the write-back's ids are not on the sheet and it writes nothing. While the switch is off,
 //       an env explicit `target.fieldIdMap` may name another column on an adopted sheet, but the write-back is idle.
-//   Of the files cited, only stock-preparation-table-actions.cjs changed in #6925; the cited function
-//   resolveTargetFieldIds is unchanged (it moved from :1392 to :1394).
+//   Every cited line holds the same text at 6d2681703 (#6925) and 59876b3d6. Of the main files cited, five changed
+//   in between (#6928, #6931, #6927, #6929, #6926): http-routes.cjs (cites shifted),
+//   stock-preparation-table-actions.cjs (resolveTargetFieldIds unchanged, still :1394), stock-preparation-templates.cjs,
+//   the switch-on runbook (one line, :555, outside the cited precheck and INSERT) and the pilot runbook (the UPDATE
+//   moved from :312 to :313).
 //
 // DEPENDENCY: (2) cites the unmerged 5522ba301; re-check it when Y9 lands.
 // ASSUMPTION: a machine column's field id is the host's derivation. The REST field-create route accepts a
-// caller-chosen id (packages/core-backend/src/routes/univer-meta.ts:14399@6d2681703, `parsed.data.id ?? buildId(...)`);
+// caller-chosen id (packages/core-backend/src/routes/univer-meta.ts:14399@59876b3d6, `parsed.data.id ?? buildId(...)`);
 // a counterexample needs a registry row that does not derive its sheet, a field created by hand under the exact
 // derived id on that sheet, and another candidate pair that derives the sheet.
 //

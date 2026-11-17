@@ -46,8 +46,9 @@ const INTERNAL_FIELD_PREFIX = '_integration_'
 
 // D2 (switch-on precondition for the YiDa issue-confirm write-back, register R-96). A REGISTERED stock-prep project
 // sheet that is not GOVERNED stays writable by the generic writers (GV-1, stock-preparation-refresh-governance.cjs),
-// and its machine write-back columns (MACHINE_WRITEBACK_FIELD_IDS, today `issueConfirmDate`) have exactly one writer:
-// the write-back. On a STOCK-PREP TARGET — an object key in the stock-prep namespace, or a sheet the governed-sheet
+// and its machine write-back columns (MACHINE_WRITEBACK_FIELD_IDS, today `issueConfirmDate`) are filled by the
+// write-back, the only date-producing writer (#6928's carry-confirm only copies an existing value into an empty
+// successor cell). On a STOCK-PREP TARGET — an object key in the stock-prep namespace, or a sheet the governed-sheet
 // probe reports as registered (`registry.present`, the answer already cached by the pre-write assertion) — this file
 //   (b) strips the machine columns from EVERY payload it sends, update and create alike (round 2, F1: a planted value
 //       on a create would be kept forever by the write-back's D8 rule). The strip set is read from THE SHEET (round
