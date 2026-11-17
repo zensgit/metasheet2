@@ -33,17 +33,33 @@ import tableActionsModule from './stock-preparation-table-actions.cjs'
 import { createInternalYidaDraftTransactionReader } from './yida-draft-plan-store.mjs'
 
 const {
-  ISSUE_CONFIRM_TRACE_TABLE, YidaIssueConfirmWritebackError,
+  ISSUE_CONFIRM_TRACE_TABLE, ISSUE_CONFIRM_WRITEBACK_MAX_BATCH, YidaIssueConfirmWritebackError,
   createIssueConfirmTraceStore, createIssueConfirmWritebackExecutor, issueConfirmWritebackEnabled,
 } = writebackModule
 const { createTargetScopedRecordsApi } = tableActionsModule
 
 export const ISSUE_CONFIRM_LEDGER_TABLE = 'integration_yida_delivery_ledger'
 export const ISSUE_CONFIRM_LEDGER_AUDIT_TABLE = 'integration_yida_delivery_audit'
-// The bounded batch: at most this many ledger rows of ONE listed target are scanned per run (pages of PAGE), so a run
-// over a long history stays bounded; rows beyond it are reached by a later run (or named by ledgerIds).
-export const ISSUE_CONFIRM_LEDGER_SCAN_CAP = 2000
-const PAGE = 200
+// THE SWEEP PAGE (batch mode; the sweep itself is described in the core header). Bounded rows and statements; one pass
+// over ledger and trace per target: per listed target, from the cursor's target onward in the listed order, ONE ledger
+// statement (db.selectUnmatched with the keyset), asking for what is still missing of `limit` (1..100,
+// ISSUE_CONFIRM_WRITEBACK_MAX_BATCH) plus ONE look-ahead row, then one acknowledgement-audit read per admitted row.
+// Traced rows (the NOT EXISTS anti-join on the trace table) and unbound rows (source_record_digest IS NOT NULL) are
+// excluded IN THE QUERY, before ORDER BY / LIMIT, so they never take a slot. Inside a target the page is keyset-ordered
+// on (created_at, id) and starts strictly after the cursor's (created_at, id) — compared in SQL against the exact
+// microsecond value the database itself rendered (keyset_at), never a JS Date — so equal timestamps are neither
+// repeated nor skipped, and a row that stays untraced (retryable, or skipped as acknowledgement_missing) is behind the
+// cursor: it no longer holds a slot of the pages after it; the next sweep from the start decides it again.
+// Database work per statement still grows with the target's ledger and trace history (no index serves this order).
+//
+// A FUTURE DURABLE "DEFERRED" MARKER (a row known retryable, to be left out or ordered last) must be its own table with
+// its own validated db method and its own pluginDb provenance re-pin — never a row of the trace table: the anti-join here,
+// the named path's probe and the core's re-check under the sheet lease (right before the patch) all treat a trace row as
+// final, and the trace table is append-only (migration zzzz20261106093100). What "final" covers: a trace that exists when
+// a run reads the row, or when it re-checks under the lease, stops that run from patching; the core header says which
+// interleaving the lease does not serialize (an outcome traced before any lease).
+const TRACE_ANTI_JOIN = Object.freeze({ table: ISSUE_CONFIRM_TRACE_TABLE, on: Object.freeze({ ledger_id: 'id' }) })
+const LEDGER_KEYSET = Object.freeze({ at: 'created_at', id: 'id' })
 const ID_RE = /^[^\u0000-\u001f\u007f]{1,128}$/u
 
 function unavailable(message) {
@@ -54,6 +70,11 @@ function opaque(value) { return typeof value === 'string' && value === value.tri
 function plainFunction(holder, name) {
   return Boolean(holder) && typeof holder[name] === 'function' && !types.isProxy(holder[name])
 }
+// The reader's own bound, whatever the caller: an integer 1..100, or the fixed UNAVAILABLE refusal (fail closed).
+function boundedLimit(limit) {
+  if (!Number.isInteger(limit) || limit < 1 || limit > ISSUE_CONFIRM_WRITEBACK_MAX_BATCH) throw unavailable('limit must be an integer 1..100')
+  return limit
+}
 function iso(value) {
   if (value instanceof Date && Number.isFinite(value.getTime())) return value.toISOString()
   if (typeof value === 'string' && Number.isFinite(new Date(value).getTime())) return new Date(value).toISOString()
@@ -62,15 +83,22 @@ function iso(value) {
 
 /**
  * The ledger reader (§2.2 step 1): rows of exactly this (tenant, owner, workspace NULL), none already traced.
- *   ledgerIds given → those rows (any state: the decision skips what is not selected and records source_unbound for
- *                     a named unbound row); at most `limit`.
- *   otherwise       → per listed target, oldest first: acknowledged CREATE rows with a bound source_record_digest
- *                     (an unbound row is never in the batch, SR5), at most `limit`, at most SCAN_CAP scanned.
+ *   list({ ledgerIds })  → those rows (any state: the decision skips what is not selected and records source_unbound
+ *                          for a named unbound row); at most `limit`.
+ *   sweep({ after })     → one sweep page: per listed target in the listed order (from the cursor's target on),
+ *                          (created_at, id) ascending and strictly after the cursor: acknowledged CREATE rows with a
+ *                          bound source_record_digest (an unbound row is never in the batch, SR5) and no traced row —
+ *                          both excluded in the ledger query itself (db.selectUnmatched), so neither takes a slot — at
+ *                          most `limit` in all; next = { targetRef, at, id } of the last row when the page is full and
+ *                          the sweep may go on (the look-ahead row of its target exists, or later targets remain),
+ *                          null when the sweep is exhausted.
  * `acknowledgedAt` is the created_at of the row's ONE `acknowledgement` AUDIT row (the database clock), read only
  * for a row the first three selector conditions admit; never the ledger's updated_at, never "now".
  */
 export function createIssueConfirmLedgerReader({ db }) {
-  if (!plainFunction(db, 'select') || !plainFunction(db, 'selectOne')) throw unavailable('ledger reader needs db.select/selectOne')
+  if (!plainFunction(db, 'selectUnmatched') || !plainFunction(db, 'selectOne')) {
+    throw unavailable('ledger reader needs db.selectUnmatched/selectOne')
+  }
   async function traced(ledgerId) {
     return Boolean(await db.selectOne(ISSUE_CONFIRM_TRACE_TABLE, { ledger_id: ledgerId }))
   }
@@ -88,38 +116,60 @@ export function createIssueConfirmLedgerReader({ db }) {
     })
   }
   async function list({ tenantId, ownerId, targetRefs, ledgerIds, limit }) {
+    const bound = boundedLimit(limit)
+    if (!Array.isArray(ledgerIds)) throw unavailable('list reads named ledger rows; a batch is a sweep page')
     const scope = { tenant_id: tenantId, workspace_id: null, owner_id: ownerId }
     const out = []
-    if (ledgerIds) {
-      for (const id of ledgerIds) {
-        if (out.length >= limit) break
-        const row = await db.selectOne(ISSUE_CONFIRM_LEDGER_TABLE, { id, ...scope })
-        if (!row || await traced(row.id)) continue
-        out.push(await project(row, targetRefs))
-      }
-      return out
-    }
-    for (const targetRef of targetRefs) {
-      let offset = 0
-      while (out.length < limit && offset < ISSUE_CONFIRM_LEDGER_SCAN_CAP) {
-        const page = rowsOf(await db.select(ISSUE_CONFIRM_LEDGER_TABLE, {
-          where: { ...scope, target_ref: targetRef, status: 'acknowledged', intent: 'create' },
-          orderBy: ['created_at', 'ASC'], limit: Math.min(PAGE, ISSUE_CONFIRM_LEDGER_SCAN_CAP - offset), offset,
-        }))
-        offset += page.length
-        for (const row of page) {
-          if (out.length >= limit) break
-          if (row.source_record_digest === null || row.source_record_digest === undefined) continue
-          if (await traced(row.id)) continue
-          out.push(await project(row, targetRefs))
-        }
-        if (page.length < PAGE) break
-      }
-      if (out.length >= limit) break
+    for (const id of ledgerIds) {
+      if (out.length >= bound) break
+      const row = await db.selectOne(ISSUE_CONFIRM_LEDGER_TABLE, { id, ...scope })
+      if (!row || await traced(row.id)) continue
+      out.push(await project(row, targetRefs))
     }
     return out
   }
-  return Object.freeze({ list })
+  async function sweep({ tenantId, ownerId, targetRefs, after, limit }) {
+    const bound = boundedLimit(limit)
+    if (!Array.isArray(targetRefs)) throw unavailable('sweep needs the listed targets')
+    let start = 0
+    if (after !== null && after !== undefined) {
+      if (!after || typeof after !== 'object' || typeof after.at !== 'string' || typeof after.id !== 'string') {
+        throw unavailable('sweep cursor of the wrong shape')
+      }
+      // The cursor only says where to start: its target must be one of the LISTED ones (the scope never comes from it).
+      start = targetRefs.indexOf(after.targetRef)
+      if (start < 0) throw unavailable('sweep cursor names a target that is not listed')
+    }
+    const scope = { tenant_id: tenantId, workspace_id: null, owner_id: ownerId }
+    const rows = []
+    let last = null
+    for (let position = start; position < targetRefs.length; position += 1) {
+      const targetRef = targetRefs[position]
+      const missing = bound - rows.length
+      // Candidates only (see TRACE_ANTI_JOIN above): bound, untraced, (created_at, id) ascending, strictly after the
+      // cursor on the cursor's own target, at most what is still missing plus the one look-ahead row.
+      const keyset = position === start && after ? { ...LEDGER_KEYSET, after: { at: after.at, id: after.id } } : { ...LEDGER_KEYSET }
+      const page = rowsOf(await db.selectUnmatched(ISSUE_CONFIRM_LEDGER_TABLE, {
+        where: { ...scope, target_ref: targetRef, status: 'acknowledged', intent: 'create' },
+        notNull: ['source_record_digest'], unmatched: TRACE_ANTI_JOIN, keyset, limit: missing + 1,
+      }))
+      if (page.length > missing + 1) throw unavailable('the ledger page exceeded its bound')
+      for (const row of page.slice(0, missing)) {
+        // The query excludes an unbound row; one that came back anyway means the query is not what this reader asked.
+        if (row.source_record_digest === null || row.source_record_digest === undefined) throw unavailable('the ledger page returned an unbound row')
+        if (typeof row.keyset_at !== 'string') throw unavailable('the ledger page carries no keyset value')
+        rows.push(await project(row, targetRefs))
+        last = Object.freeze({ targetRef, at: row.keyset_at, id: row.id })
+      }
+      // The look-ahead row exists: this target goes on after the last row.
+      if (page.length > missing) return Object.freeze({ rows, next: last })
+      // Full exactly where this target ends: a cursor while later targets remain (no look-ahead into them, so a page
+      // costs one ledger statement per target), none after the last target.
+      if (rows.length === bound) return Object.freeze({ rows, next: position < targetRefs.length - 1 ? last : null })
+    }
+    return Object.freeze({ rows, next: null })
+  }
+  return Object.freeze({ list, sweep })
 }
 
 /**
@@ -215,11 +265,16 @@ export function createIssueConfirmWritebackCapability(options = {}) {
       // executor calls it under the sheet write lease, right before the records read and the patch.
       authority: Object.freeze({ recheck: (scope) => recheck(Object.freeze({ ...scope })) }),
     })
-    // The scope is the host's authenticated owner, never the caller's: a run names only ledger ids and a limit.
+    // The scope is the host's authenticated owner, never the caller's: a run names only ledger ids, a limit and (batch
+    // mode) the sweep cursor `after`, which the core decodes against the listed targets: a tampered cursor, or one that
+    // names an unlisted target, is refused (400); one issued under another target set is STALE (409); a well-formed
+    // cursor on a listed target only moves the start.
     async function run(request = {}) {
       const ledgerIds = request.ledgerIds
       const limit = request.limit
-      return executor.run({ tenantId, ownerId, ...(ledgerIds === undefined ? {} : { ledgerIds }), ...(limit === undefined ? {} : { limit }) })
+      const after = request.after
+      return executor.run({ tenantId, ownerId, ...(ledgerIds === undefined ? {} : { ledgerIds }),
+        ...(limit === undefined ? {} : { limit }), ...(after === undefined ? {} : { after }) })
     }
     return Object.freeze({ run })
   }

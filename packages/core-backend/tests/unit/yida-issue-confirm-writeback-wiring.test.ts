@@ -11,11 +11,14 @@ import { EventEmitter } from 'node:events'
 import type { Request, Response } from 'express'
 import { describe, expect, it } from 'vitest'
 import { createIntegrationYidaOwnerRouter, yidaOwnerNoStoreMiddleware, type YidaOwnerHttpPort } from '../../src/routes/integration-yida-owner'
-import { createYidaOwnerRuntime } from '../../src/integration/yida-owner-runtime'
+import { createYidaOwnerRuntime, YidaOwnerRuntimeError } from '../../src/integration/yida-owner-runtime'
 import { issueConfirmRoleGrantSatisfied, yidaIssueConfirmLiveRecheck } from '../../src/integration/yida-issue-confirm-writeback-authority'
 
 const actor = Object.freeze({ actorId: 'synthetic-wb-owner', tenantId: 'synthetic-wb-tenant', workspaceId: null })
 const LEDGER = '55555555-5555-4555-8555-555555555555'
+// A sweep cursor as the host sees it: opaque base64url text (the plugin core decodes and judges it).
+const CURSOR = Buffer.from(JSON.stringify({ v: 2, s: '0123456789abcdef0123456789abcdef', t: '66666666-6666-4666-8666-666666666666',
+  c: '2026-03-01T00:00:00.000001Z', i: LEDGER }), 'utf8').toString('base64url')
 
 async function dispatch(body: unknown, owner: Partial<YidaOwnerHttpPort>, options: { url?: string; headers?: Record<string, string> } = {}) {
   const req = Object.assign(new EventEmitter(), { method: 'POST', url: options.url ?? '/issue-confirm-writeback',
@@ -57,19 +60,25 @@ describe('POST /issue-confirm-writeback (route)', () => {
     expect((await dispatch({}, port)).status).toBe(404)
     expect(calls).toEqual([])
   })
-  it('ON: the closed body reaches the runtime as the authenticated owner, with only ledgerIds / limit', async () => {
+  it('ON: the closed body reaches the runtime as the authenticated owner, with only ledgerIds / limit / after', async () => {
     const { port, calls } = owner(() => true)
     expect(await dispatch({}, port)).toEqual({ status: 200, result: { ok: true, data: { enabled: true, results: [] } } })
     expect((await dispatch({ limit: 5 }, port)).status).toBe(200)
     expect((await dispatch({ ledgerIds: [LEDGER] }, port)).status).toBe(200)
+    expect((await dispatch({ after: CURSOR, limit: 7 }, port)).status).toBe(200)
     expect((await dispatch(undefined, port)).status).toBe(400)
-    expect(calls).toEqual([{ who: actor, input: {} }, { who: actor, input: { limit: 5 } }, { who: actor, input: { ledgerIds: [LEDGER] } }])
+    expect(calls).toEqual([{ who: actor, input: {} }, { who: actor, input: { limit: 5 } }, { who: actor, input: { ledgerIds: [LEDGER] } },
+      { who: actor, input: { limit: 7, after: CURSOR } }])
   })
   it.each([
     ['an extra key', { limit: 1, tenantId: 'x' }], ['limit 0', { limit: 0 }], ['limit 101', { limit: 101 }], ['limit as text', { limit: '5' }],
     ['empty ledgerIds', { ledgerIds: [] }], ['duplicate ledgerIds', { ledgerIds: [LEDGER, LEDGER] }], ['non-string id', { ledgerIds: [1] }],
     ['101 ledgerIds', { ledgerIds: Array.from({ length: 101 }, (_, index) => `ledger-${index}`) }], ['padded id', { ledgerIds: [' x'] }],
     ['an owner key', { ownerId: 'synthetic-other' }],
+    // The sweep cursor: batch mode only (never with ledgerIds), base64url text of at most 2048 characters.
+    ['after with ledgerIds', { ledgerIds: [LEDGER], after: CURSOR }], ['after not a string', { after: 7 }], ['after null', { after: null }],
+    ['empty after', { after: '' }], ['after with padding', { after: `${CURSOR}=` }], ['after with a slash', { after: 'ab/cd' }],
+    ['after padded', { after: ` ${CURSOR}` }], ['after too long', { after: 'A'.repeat(2049) }], ['after as an object', { after: { v: 1 } }],
   ])('ON: %s is a 400 and the port is never called', async (_name, body) => {
     const { port, calls } = owner(() => true)
     expect(await dispatch(body, port)).toEqual({ status: 400, result: { ok: false, error: { code: 'YIDA_OWNER_HTTP_INPUT' } } })
@@ -88,7 +97,14 @@ describe('POST /issue-confirm-writeback (route)', () => {
       { ledgerId: 'l-4', kind: 'outcome', outcome: 'row_absent', recorded: false },
     ], stopped: 'SWITCH_OFF' }
     expect((await dispatch({}, owner(() => true, good).port)).result).toEqual({ ok: true, data: good })
+    // A sweep page carries `next` (the opaque cursor, or null once the sweep is exhausted) through unchanged.
+    for (const next of [CURSOR, null]) {
+      const page = { enabled: true, results: [], next }
+      expect((await dispatch({}, owner(() => true, page).port)).result).toEqual({ ok: true, data: page })
+    }
     for (const bad of [
+      { enabled: true, results: [], next: 7 }, { enabled: true, results: [], next: 'not a cursor' }, { enabled: true, results: [], next: 'A'.repeat(2049) },
+      { enabled: true, results: [], refused: 'AFTER' }, { enabled: true, results: [], refused: 'STALE' },
       { ...good, extra: 1 },
       { enabled: true, results: [{ ...good.results[0], projectNo: 'DEMO-P1' }] },
       { enabled: true, results: [{ ledgerId: LEDGER, kind: 'retryable', code: 'lowercase message' }] },
@@ -99,6 +115,22 @@ describe('POST /issue-confirm-writeback (route)', () => {
       expect(reply).toEqual({ status: 503, result: { ok: false, error: { code: 'YIDA_OWNER_HTTP_UNAVAILABLE' } } })
       expect(JSON.stringify(reply).includes('DEMO-P1')).toBe(false)
     }
+  })
+  it('a cursor the core refuses reaches the caller as the runtime INPUT code: a 400, nothing echoed', async () => {
+    const port: Partial<YidaOwnerHttpPort> = { issueConfirmWritebackEnabled: () => true,
+      async issueConfirmWriteback() { throw new YidaOwnerRuntimeError('INPUT') } }
+    expect(await dispatch({ after: CURSOR }, port)).toEqual({ status: 400, result: { ok: false, error: { code: 'YIDA_OWNER_RUNTIME_INPUT' } } })
+  })
+  it('a cursor issued under another listed target set reaches the caller as YIDA_ISSUE_CONFIRM_CURSOR_STALE: a 409 (restart without after), nothing echoed', async () => {
+    const stale = new YidaOwnerRuntimeError('CURSOR_STALE')
+    expect([stale.code, stale.message]).toEqual(['YIDA_ISSUE_CONFIRM_CURSOR_STALE', 'YIDA_ISSUE_CONFIRM_CURSOR_STALE'])
+    const port: Partial<YidaOwnerHttpPort> = { issueConfirmWritebackEnabled: () => true,
+      async issueConfirmWriteback() { throw stale } }
+    expect(await dispatch({ after: CURSOR }, port)).toEqual({ status: 409, result: { ok: false, error: { code: 'YIDA_ISSUE_CONFIRM_CURSOR_STALE' } } })
+    // A foreign error that merely carries that text is not the runtime's own: the generic 503.
+    const forged: Partial<YidaOwnerHttpPort> = { issueConfirmWritebackEnabled: () => true,
+      async issueConfirmWriteback() { throw Object.assign(new Error('YIDA_ISSUE_CONFIRM_CURSOR_STALE'), { code: 'YIDA_ISSUE_CONFIRM_CURSOR_STALE' }) } }
+    expect(await dispatch({ after: CURSOR }, forged)).toEqual({ status: 503, result: { ok: false, error: { code: 'YIDA_OWNER_HTTP_UNAVAILABLE' } } })
   })
 })
 
@@ -175,6 +207,8 @@ describe('owner runtime: the write-back members', () => {
   it.each([
     ['extra key', { limit: 1, ownerId: 'x' }], ['limit 0', { limit: 0 }], ['limit 101', { limit: 101 }], ['empty ids', { ledgerIds: [] }],
     ['duplicate ids', { ledgerIds: ['a', 'a'] }], ['padded id', { ledgerIds: [' a'] }], ['not an object', 'x'],
+    ['after with ledgerIds', { ledgerIds: ['a'], after: CURSOR }], ['after not a string', { after: 1 }], ['after with padding', { after: `${CURSOR}=` }],
+    ['after too long', { after: 'A'.repeat(2049) }],
   ])('run input %s is INPUT before anything runs', async (_name, input) => {
     const f = runtimeFixture()
     await f.runtime.createPluginCapability().activate({ ...f.base, ...f.writeback } as never)

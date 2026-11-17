@@ -49,6 +49,8 @@ const statuses: Readonly<Record<string, number>> = Object.freeze({
   UNAUTHORIZED: 401, YIDA_OWNER_HTTP_INPUT: 400, YIDA_OWNER_HTTP_DENIED: 403, YIDA_OWNER_HTTP_UNAVAILABLE: 503,
   YIDA_OWNER_RUNTIME_INPUT: 400, YIDA_OWNER_RUNTIME_DISABLED: 403, YIDA_OWNER_RUNTIME_INACTIVE: 503,
   YIDA_OWNER_RUNTIME_UNAVAILABLE: 503, YIDA_OWNER_RUNTIME_CANCELLED: 409,
+  // Y9 sweep: the cursor was issued under another listed target set — restart the sweep without `after`.
+  YIDA_ISSUE_CONFIRM_CURSOR_STALE: 409,
   YIDA_SEND_APPROVAL_INPUT: 400, YIDA_SEND_APPROVAL_NOT_FOUND: 404, YIDA_SEND_APPROVAL_CONFLICT: 409,
   YIDA_SEND_APPROVAL_EXPIRED: 409, YIDA_SEND_APPROVAL_REVOKED: 409,
   YIDA_SEND_APPROVAL_CANCELLED: 409, YIDA_SEND_APPROVAL_UNAVAILABLE: 503,
@@ -313,11 +315,15 @@ function writebackResult(value: unknown) {
   return { ledgerId, kind: 'outcome', outcome: done.outcome, recorded: done.recorded,
     ...(dated ? { date: done.date, timeZone: done.timeZone } : {}) }
 }
+// Y9 sweep cursor: base64url text, at most 2048 characters (the core decodes and judges it; the route bounds it).
+const writebackCursor = /^[A-Za-z0-9_-]{1,2048}$/u
 function writebackRun(value: unknown) {
-  const row = record(value, ['enabled', 'results'], ['stopped'])
+  const row = record(value, ['enabled', 'results'], ['stopped', 'next'])
   if (typeof row.enabled !== 'boolean' || !Array.isArray(row.results) || row.results.length > 100
-    || (Object.hasOwn(row, 'stopped') && row.stopped !== 'SWITCH_OFF')) fail()
-  return { enabled: row.enabled, results: row.results.map(writebackResult), ...(Object.hasOwn(row, 'stopped') ? { stopped: 'SWITCH_OFF' } : {}) }
+    || (Object.hasOwn(row, 'stopped') && row.stopped !== 'SWITCH_OFF')
+    || (Object.hasOwn(row, 'next') && row.next !== null && (typeof row.next !== 'string' || !writebackCursor.test(row.next)))) fail()
+  return { enabled: row.enabled, results: row.results.map(writebackResult), ...(Object.hasOwn(row, 'next') ? { next: row.next } : {}),
+    ...(Object.hasOwn(row, 'stopped') ? { stopped: 'SWITCH_OFF' } : {}) }
 }
 const reconcileCountKeys = ['scanned', 'registered', 'would_register', 'already_reconciled', 'duplicate_remote',
   'own_acknowledged', 'duplicate_with_own', 'own_in_flight', 'observed_for_unknown', 'own_not_sent', 'project_mismatch',
@@ -533,15 +539,19 @@ export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initia
   // YiDa 发料确认日期回写 owner recovery entry (design baseline v2.3 §7.3, D5 b / D9; slice Y9). While the write-back
   // switch is OFF (exact 'true' only, read by the plugin core's own predicate through the runtime) the path falls
   // through to the same generic 404 as any unknown path. ON: a closed body — optional `ledgerIds` (1..100 of this
-  // owner's ledger rows) and optional `limit` (1..100) — and one bounded, idempotent run; the runtime proves the
-  // live owner first and every row is re-checked under its sheet lease. Never the send switch, never a send.
+  // owner's ledger rows), optional `limit` (1..100) and, without ledgerIds only, optional `after` (the previous
+  // answer's `next`: a batch run is one page of a sweep — start without `after`, follow `next` until it is null) — and
+  // one bounded, idempotent run; the runtime proves the live owner first and every row is re-checked under its sheet
+  // lease. A tampered cursor, or one that names an unlisted target, gets 400; a stale target set gets 409
+  // (YIDA_ISSUE_CONFIRM_CURSOR_STALE: restart without `after`); a well-formed cursor on a listed target only moves the
+  // start. Never the send switch, never a send.
   const issueConfirmWritebackEnabled = () => { try { return port.issueConfirmWritebackEnabled?.() === true } catch { return false } }
   const whenIssueConfirmWriteback = (handler: RequestHandler): RequestHandler => (req, res, next) => {
     if (!issueConfirmWritebackEnabled()) { next(); return }
     return handler(req, res, next)
   }
   router.post('/issue-confirm-writeback', whenIssueConfirmWriteback(route(200, async (request, owner) => {
-      const input = record(request.body, [], ['ledgerIds', 'limit'])
+      const input = record(request.body, [], ['ledgerIds', 'limit', 'after'])
       let ledgerIds: string[] | undefined
       if (Object.hasOwn(input, 'ledgerIds')) {
         if (!Array.isArray(input.ledgerIds) || types.isProxy(input.ledgerIds) || input.ledgerIds.length < 1 || input.ledgerIds.length > 100) fail()
@@ -549,8 +559,15 @@ export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initia
         if (new Set(ledgerIds).size !== ledgerIds.length) fail()
       }
       const limit = Object.hasOwn(input, 'limit') ? integer(input.limit, 1, 100) : undefined
+      let after: string | undefined
+      if (Object.hasOwn(input, 'after')) {
+        // Batch mode only: a cursor together with named rows is refused, never one of them ignored.
+        if (typeof input.after !== 'string' || !writebackCursor.test(input.after) || ledgerIds) fail()
+        after = input.after
+      }
       if (!port.issueConfirmWriteback) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
-      const result = await port.issueConfirmWriteback(owner, { ...(ledgerIds ? { ledgerIds } : {}), ...(limit === undefined ? {} : { limit }) })
+      const result = await port.issueConfirmWriteback(owner, { ...(ledgerIds ? { ledgerIds } : {}), ...(limit === undefined ? {} : { limit }),
+        ...(after === undefined ? {} : { after }) })
       return dto(() => writebackRun(result))
   })))
   // Owner-run token-only connection test before initialization. The runtime authorizes; the route
