@@ -10,7 +10,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 const url = process.env.PERMISSION_COMMAND_FENCE_DATABASE_URL
 if (url) {
   const parsed = new URL(url)
-  if (!['127.0.0.1','localhost','[::1]'].includes(parsed.hostname) || parsed.pathname !== '/permission_command_fence_test') throw new Error('isolated migrated loopback fixture required')
+  if (!['127.0.0.1','localhost','[::1]'].includes(parsed.hostname) || !['/permission_command_fence_test','/permission_command_upgrade_test'].includes(parsed.pathname)) throw new Error('isolated migrated loopback fixture required')
 }
 const suite = url ? describe : describe.skip
 suite('real authorization operation on the migrated synthetic schema', () => {

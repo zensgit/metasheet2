@@ -194,6 +194,20 @@ suite('authorization operation table fence on a migrated synthetic database', ()
       finally { await other.query('ROLLBACK') }
     } finally { await other.query('DROP FUNCTION public.permission_command_unknown_function()') }
   })
+  it('rejects a changed body on a known public function', async () => {
+    await other.query('BEGIN')
+    try {
+      await other.query(`CREATE OR REPLACE FUNCTION public.update_updated_at() RETURNS trigger
+        LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END; $$`)
+      await expect(assertAuthorizationOperationReadReady(
+        (sql, params) => other.query(sql, params),
+        AUTHORIZATION_INPUT_STATEMENTS.worldSharedTry,
+      )).rejects.toMatchObject({ code: 'AUTHORIZATION_OPERATION_FENCE_UNAVAILABLE' })
+    } finally {
+      await other.query('ROLLBACK')
+    }
+  })
+
   it('keeps pg_temp behind public for read-only readiness too', async () => {
     await other.query('CREATE TEMP TABLE users(id text PRIMARY KEY,name text)')
     await other.query("INSERT INTO pg_temp.users VALUES ($1,'shadow')",[actor])

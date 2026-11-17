@@ -9,7 +9,7 @@ const backend = path.join(root, 'packages/core-backend')
 const names = ['permission_command_fence_test', 'permission_command_test', 'permission_command_compat_test']
 const prefix = 'tests/integration/'
 export const baseline = Object.freeze([
-  { file: 'authorization-operation-fence.db.test.ts', min: 25, required: ['holds every attested table in EXCLUSIVE mode and leaves work timeouts active', 'returns retryable busy without waiting when an old writer holds a table'], skipped: [] },
+  { file: 'authorization-operation-fence.db.test.ts', min: 26, required: ['rejects a changed body on a known public function', 'holds every attested table in EXCLUSIVE mode and leaves work timeouts active', 'returns retryable busy without waiting when an old writer holds a table'], skipped: [] },
   { file: 'authorization-operation-fullschema.db.test.ts', min: 14, required: ['previews, commits and replays using the real fence and current migrated schema', 'keeps real host HEAD, encoded receipt and ordinary-actor 403 paths read-only across the auth chain'], skipped: ['bounds slow pre-planning reads and never starts a late write', 'returns unknown while COMMIT is pending, then GET observes the late receipt and released locks', 'rolls back injected post-fence write failure on the same client'] },
   { file: 'authorization-operation-delegated.db.test.ts', min: 12, required: ['does not disclose whole-profile warnings to a delegated actor', 'does not union an A audience with a B admission and rejects platform or delegated admin roles', 'rechecks current audience for stored receipt reads and replay'], skipped: [] },
   { file: 'authorization-operation-exception.db.test.ts', min: 8, required: ['requires live RBAC admin before disclosing target existence', 'requires reason for grant and template and rejects a stale template before any writes', 'hides compatibility receipts and does not let a colliding key create a new receipt'], skipped: ['rejects a post-write legacy non-string mutation and rolls back', 'rolls back a direct write and receipt after post-fence audit failure'] },
@@ -93,7 +93,20 @@ async function runTests(dir, env, id, expected, variant) {
   const files=expected.map(item=>`${prefix}${item.file}`)
   const args=['exec','vitest','run','--config','vitest.authorization-operation-realdb.config.ts',...files,'--reporter=json','--outputFile',report]
   if(variant) args.push('-t',variant.title)
-  run('pnpm',args,{...env,...variant?.env},backend)
+  try {
+    run('pnpm', args, { ...env, ...variant?.env }, backend)
+  } catch (error) {
+    // Report only known fixture names and counts. Assertion messages can contain connection data.
+    const failedReport = await readFile(report, 'utf8').then(JSON.parse).catch(() => null)
+    for (const item of expected) {
+      const suite = failedReport?.testResults?.find(result => String(result.name).replaceAll('\\', '/').endsWith(`/tests/integration/${item.file}`))
+      if (!suite || suite.status !== 'passed') {
+        const count = suite?.assertionResults?.filter(test => test.status === 'failed').length ?? 0
+        process.stderr.write(`authorization operation ${id}: ${item.file}: ${count} failed assertions\n`)
+      }
+    }
+    throw error
+  }
   validateReport(JSON.parse(await readFile(report,'utf8')),expected,variant?.title)
   process.stdout.write(`validated ${id}\n`)
 }
