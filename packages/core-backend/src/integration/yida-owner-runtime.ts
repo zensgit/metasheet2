@@ -49,7 +49,8 @@ export type YidaOwnerRuntimeDependencies = {
   // index.ts hands the server log (outside any request context); absent = silent. A throwing sink is ignored.
   warn?: (code: string) => void
 }
-export type YidaOwnerIssueConfirmWritebackInput = Readonly<{ ledgerIds?: readonly string[]; limit?: number }>
+// `after` (batch mode only, never with ledgerIds): the previous page's `next`, an opaque sweep cursor the plugin core decodes.
+export type YidaOwnerIssueConfirmWritebackInput = Readonly<{ ledgerIds?: readonly string[]; limit?: number; after?: string }>
 export type YidaOwnerPrepareDraftInput = Readonly<{ config: unknown; rowsText: string; allocation?: unknown; targetRef?: string; sourceBinding?: unknown }>
 export type YidaOwnerProveDraftOwnerInput = Readonly<{ targetRef?: string }>
 export type YidaOwnerPreviewInput = Readonly<{ operationId: string; rowKey: string; targetRef?: string }>
@@ -82,6 +83,11 @@ const WRITEBACK_RESULT_KINDS = new Set(['skip', 'retryable', 'outcome'])
 const WRITEBACK_MAX_BATCH = 100
 const CODE = /^[A-Z][A-Z0-9_]{0,95}$/
 const DAY = /^\d{4}-\d{2}-\d{2}$/
+// Y9 sweep cursor text (yida-issue-confirm-writeback.cjs encodeIssueConfirmSweepCursor): base64url, at most 2048 characters.
+// The host checks only this alphabet and bound; its shape, version and target are the core's to judge.
+const SWEEP_CURSOR = /^[A-Za-z0-9_-]{1,2048}$/
+// The core's closed answer for a cursor it cannot accept (refused before any read): the host's INPUT code.
+const SWEEP_REFUSED = 'AFTER'
 // Y9 (D5 a): the only text a failed post-ACK write-back run ever logs.
 export const YIDA_ISSUE_CONFIRM_HOOK_FAILED = 'YIDA_ISSUE_CONFIRM_WRITEBACK_AFTER_ACK_FAILED'
 
@@ -192,10 +198,19 @@ function acknowledgedLedgerId(view: Readonly<Row>): string | undefined {
 // Y9: the write-back run's values-free projection — ledger ids, closed kinds, fixed codes / reasons / outcomes, the
 // written day and its zone. Anything else (a project number, a key, a message) cannot cross this boundary.
 function writebackView(value: unknown): Readonly<Row> {
-  const raw = record(value, ['enabled', 'results', 'stopped'], ['enabled', 'results'])
+  const raw = record(value, ['enabled', 'results', 'stopped', 'next', 'refused'], ['enabled', 'results'])
+  if (Object.hasOwn(raw, 'refused')) {
+    // Exactly the closed refusal ({ enabled: true, results: [], refused: 'AFTER' }) is the caller's INPUT; anything else
+    // carrying the key is not a run answer at all.
+    if (raw.refused !== SWEEP_REFUSED || raw.enabled !== true || !Array.isArray(raw.results) || raw.results.length !== 0
+      || Object.keys(raw).length !== 3) fail('UNAVAILABLE')
+    fail('INPUT')
+  }
   if (typeof raw.enabled !== 'boolean' || !Array.isArray(raw.results) || raw.results.length > WRITEBACK_MAX_BATCH
     || (raw.enabled === false && raw.results.length !== 0)
-    || (Object.hasOwn(raw, 'stopped') && raw.stopped !== 'SWITCH_OFF')) fail('UNAVAILABLE')
+    || (Object.hasOwn(raw, 'stopped') && raw.stopped !== 'SWITCH_OFF')
+    || (Object.hasOwn(raw, 'next') && (raw.enabled !== true
+      || (raw.next !== null && (typeof raw.next !== 'string' || !SWEEP_CURSOR.test(raw.next)))))) fail('UNAVAILABLE')
   const results = raw.results.map(item => {
     const kind = record(item, ['ledgerId', 'kind', 'reason', 'code', 'outcome', 'recorded', 'date', 'timeZone'], ['ledgerId', 'kind'])
     if (!WRITEBACK_RESULT_KINDS.has(kind.kind as string)) fail('UNAVAILABLE')
@@ -219,10 +234,11 @@ function writebackView(value: unknown): Readonly<Row> {
       ...(dated ? { date: row.date, timeZone: row.timeZone } : {}) })
   })
   return Object.freeze({ enabled: raw.enabled, results: Object.freeze(results),
+    ...(Object.hasOwn(raw, 'next') ? { next: raw.next } : {}),
     ...(Object.hasOwn(raw, 'stopped') ? { stopped: 'SWITCH_OFF' } : {}) })
 }
 function writebackInput(value: unknown): Readonly<Row> {
-  const parsed = record(value, ['ledgerIds', 'limit'], [])
+  const parsed = record(value, ['ledgerIds', 'limit', 'after'], [])
   const result: Row = {}
   if (Object.hasOwn(parsed, 'ledgerIds')) {
     const ids = parsed.ledgerIds
@@ -234,6 +250,11 @@ function writebackInput(value: unknown): Readonly<Row> {
   if (Object.hasOwn(parsed, 'limit')) {
     if (!Number.isSafeInteger(parsed.limit) || Number(parsed.limit) < 1 || Number(parsed.limit) > WRITEBACK_MAX_BATCH) fail('INPUT')
     result.limit = parsed.limit
+  }
+  if (Object.hasOwn(parsed, 'after')) {
+    // The sweep cursor is batch mode only: never together with named rows.
+    if (typeof parsed.after !== 'string' || !SWEEP_CURSOR.test(parsed.after) || Object.hasOwn(result, 'ledgerIds')) fail('INPUT')
+    result.after = parsed.after
   }
   return Object.freeze(result)
 }
@@ -553,7 +574,8 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
       try { return state.issueConfirmWritebackEnabled() === true } catch { return false }
     },
     // The owner recovery entry (D5 b / D9): one bounded, idempotent write-back run for THIS owner's acknowledged
-    // issue-confirm CREATEs — named ledger rows or the next untraced batch. It never needs the send switch, never
+    // issue-confirm CREATEs — named ledger rows, or one page of a sweep (start without `after`, then pass each answer's
+    // `next` back as `after` until it is null; a cursor the core refuses is INPUT). It never needs the send switch, never
     // builds a send port, a runner, a transport or a token client, and writes no ledger, audit, grant or admission:
     // the only rows it can add are trace rows, the only cell it can change is issueConfirmDate.
     issueConfirmWriteback(context: YidaOwnerActor, supplied: YidaOwnerIssueConfirmWritebackInput) {

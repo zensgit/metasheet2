@@ -218,6 +218,56 @@ async function main() {
   }
   assert.deepEqual(mockDb5u3.calls, [], 'a refused selectUnmatched issues no statement')
 
+  // --- 5c. selectUnmatched keyset: ORDER BY (at, id), the exact UTC microsecond text of `at` as keyset_at, and with
+  // `after` the row comparison (at, id) > ($n::timestamptz, $m) — the tie-break on id, both values parameters.
+  const KEYSET_SQL_HEAD = 'SELECT *, to_char("integration_yida_delivery_ledger"."created_at" AT TIME ZONE \'UTC\','
+    + ' \'YYYY-MM-DD"T"HH24:MI:SS.US"Z"\') AS "keyset_at" FROM "integration_yida_delivery_ledger" WHERE "tenant_id" = $1'
+    + ' AND "source_record_digest" IS NOT NULL'
+    + ' AND NOT EXISTS (SELECT 1 FROM "integration_yida_issue_confirm_writeback" WHERE'
+    + ' "integration_yida_issue_confirm_writeback"."ledger_id" = "integration_yida_delivery_ledger"."id")'
+  const KEYSET_SQL_ORDER = ' ORDER BY "integration_yida_delivery_ledger"."created_at" ASC, "integration_yida_delivery_ledger"."id" ASC'
+  const keysetBase = {
+    where: { tenant_id: 't1' }, notNull: ['source_record_digest'],
+    unmatched: { table: 'integration_yida_issue_confirm_writeback', on: { ledger_id: 'id' } },
+  }
+  const mockDb5k = mockDatabase()
+  const db5k = createDb({ database: mockDb5k })
+  await db5k.selectUnmatched('integration_yida_delivery_ledger', { ...keysetBase, keyset: { at: 'created_at', id: 'id' }, limit: 101 })
+  assert.equal(mockDb5k.calls[0].sql, KEYSET_SQL_HEAD + KEYSET_SQL_ORDER + ' LIMIT 101 OFFSET 0')
+  assert.deepEqual(mockDb5k.calls[0].params, ['t1'])
+  await db5k.selectUnmatched('integration_yida_delivery_ledger', { ...keysetBase,
+    keyset: { at: 'created_at', id: 'id', after: { at: '2026-03-01T00:00:00.000001Z', id: 'l-1' } }, limit: 3 })
+  assert.equal(mockDb5k.calls[1].sql, KEYSET_SQL_HEAD
+    + ' AND ("integration_yida_delivery_ledger"."created_at", "integration_yida_delivery_ledger"."id") > ($2::timestamptz, $3)'
+    + KEYSET_SQL_ORDER + ' LIMIT 3 OFFSET 0')
+  assert.deepEqual(mockDb5k.calls[1].params, ['t1', '2026-03-01T00:00:00.000001Z', 'l-1'])
+  // Refusals: a keyset orders by itself, its two columns pass the whitelist and differ, `after` is exactly { at, id }
+  // with `at` the fixed UTC microsecond text of a real instant — nothing reaches SQL.
+  const keyed = (keyset, extra = {}) => ['integration_yida_delivery_ledger', { ...keysetBase, keyset, ...extra }]
+  const goodAfter = { at: '2026-03-01T00:00:00.000001Z', id: 'l-1' }
+  const refusedKeyset = [
+    keyed(null), keyed('created_at'), keyed({ at: 'created_at', id: 'id', extra: 1 }),
+    keyed({ at: 'created_at', id: 'id' }, { orderBy: ['created_at', 'ASC'] }), keyed({ at: 'created_at', id: 'id' }, { offset: 5 }),
+    keyed({ at: 'created_at; --', id: 'id' }), keyed({ at: 'created_at', id: 'id"; DROP TABLE users; --' }), keyed({ at: 'id', id: 'id' }),
+    keyed({ at: 'created_at', id: 'id', after: null }), keyed({ at: 'created_at', id: 'id', after: { at: goodAfter.at } }),
+    keyed({ at: 'created_at', id: 'id', after: { ...goodAfter, tenant_id: 't2' } }),
+    keyed({ at: 'created_at', id: 'id', after: { ...goodAfter, at: '2026-03-01T00:00:00.000Z' } }),
+    keyed({ at: 'created_at', id: 'id', after: { ...goodAfter, at: '2026-03-01T00:00:00.000001+08:00' } }),
+    keyed({ at: 'created_at', id: 'id', after: { ...goodAfter, at: '2026-02-30T00:00:00.000001Z' } }),
+    keyed({ at: 'created_at', id: 'id', after: { ...goodAfter, at: "2026-03-01T00:00:00.000001Z'; --" } }),
+    keyed({ at: 'created_at', id: 'id', after: { ...goodAfter, at: new Date('2026-03-01T00:00:00Z') } }),
+    keyed({ at: 'created_at', id: 'id', after: { ...goodAfter, id: '' } }), keyed({ at: 'created_at', id: 'id', after: { ...goodAfter, id: 7 } }),
+    keyed({ at: 'created_at', id: 'id', after: { ...goodAfter, id: 'a\u0000b' } }),
+  ]
+  const mockDb5k2 = mockDatabase()
+  const db5k2 = createDb({ database: mockDb5k2 })
+  for (const [table, options] of refusedKeyset) {
+    let refusal = null
+    try { await db5k2.selectUnmatched(table, options) } catch (error) { refusal = error }
+    assert.ok(refusal instanceof ScopeViolationError, `selectUnmatched keyset refuses ${JSON.stringify(options.keyset)} ${JSON.stringify(options.orderBy || options.offset || '')}`)
+  }
+  assert.deepEqual(mockDb5k2.calls, [], 'a refused keyset issues no statement')
+
   // insertOne
   const mockDb6 = mockDatabase()
   const db6 = createDb({ database: mockDb6 })

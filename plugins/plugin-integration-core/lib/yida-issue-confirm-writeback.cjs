@@ -52,6 +52,15 @@
 //   issue_confirm_writeback, best effort, only after a write) → trace INSERT … ON CONFLICT (ledger_id)
 //   DO NOTHING.
 //
+// THE SWEEP (owner recovery entry, batch mode = no ledgerIds). One batch run is ONE PAGE of a sweep: start
+// without `after`, then pass each answer's `next` back as `after` until `next` is null. Page order is fixed:
+// the listed targets in their listed order, inside a target (created_at, id) ascending, candidates only (the
+// four selector conditions and "not traced" are in the ledger query itself). A row a page reported retryable
+// or skipped (no trace) is BEHIND the cursor: it is decided again only by a later sweep that starts from the
+// beginning, so a stuck front (rows that stay retryable or acknowledgement_missing) never stops a sweep from
+// reaching the rows behind it, in its own target or in later ones. The cursor is described at
+// encodeIssueConfirmSweepCursor below; it only moves the start point, never the scope.
+//
 // RETRYABLE = NO TRACE (§7.3). Lease busy / lost / superseded, a host refusal of the fence, a version
 // conflict, a host or store failure while gathering facts (ANY port that throws: row source, project
 // registry, authority, sheet open / query / patch), a bound row whose row values come back null, the switch
@@ -88,6 +97,11 @@ const ISSUE_CONFIRM_PROJECT_FIELD_ID = 'projectNo'
 const ISSUE_CONFIRM_WRITEBACK_LOCK_PURPOSE = 'issue_confirm_writeback'
 const ISSUE_CONFIRM_WRITEBACK_GENERATION_REASON = 'issue_confirm_writeback'
 const ISSUE_CONFIRM_WRITEBACK_MAX_BATCH = 100
+// The sweep cursor (see encodeIssueConfirmSweepCursor): its fixed version, its text bound, and the closed refusal a
+// run answers for an `after` it cannot accept (the host maps it to its fixed INPUT code, HTTP 400).
+const ISSUE_CONFIRM_SWEEP_CURSOR_VERSION = 1
+const ISSUE_CONFIRM_SWEEP_CURSOR_MAX_LENGTH = 2048
+const ISSUE_CONFIRM_SWEEP_REFUSED = 'AFTER'
 
 // Terminal outcomes: each is recorded once per ledger row. The migration's CHECK lists exactly these.
 const ISSUE_CONFIRM_WRITEBACK_OUTCOMES = Object.freeze([
@@ -121,6 +135,10 @@ const DIGEST_RE = /^[0-9a-f]{64}$/
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 const CODE_RE = /^[A-Z][A-Z0-9_]{0,95}$/
 const ID_RE = /^[^\u0000-\u001f\u007f]{1,128}$/u
+const CURSOR_TEXT_RE = /^[A-Za-z0-9_-]{1,2048}$/
+const CURSOR_KEYS = Object.freeze(['v', 't', 'c', 'i'])
+// The database's exact created_at as fixed UTC text with microseconds (db.cjs selectUnmatched keyset_at).
+const SWEEP_AT_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T([01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{6}Z$/
 
 class YidaIssueConfirmWritebackError extends Error {
   constructor(code, message) {
@@ -194,6 +212,51 @@ function resolveIssueConfirmBusinessTimeZone(env = process.env) {
   if (!trimmed) return DEFAULT_BUSINESS_TIMEZONE
   if (isValidIanaTimeZone(trimmed)) return trimmed
   return DEFAULT_BUSINESS_TIMEZONE
+}
+
+// ── the sweep cursor ───────────────────────────────────────────────────────────────────────────────
+//
+// `next` / `after` is the base64url text (no padding) of the UTF-8 JSON of the fixed shape
+//   {"v":1,"t":<target_ref>,"c":<created_at>,"i":<ledger id>}
+// of a page's LAST row: t its listed target (a target_ref UUID), c its created_at as the database's exact UTC
+// microsecond text (a JS Date keeps milliseconds only, so a Date round trip would repeat or skip rows of one
+// millisecond), i its ledger id (the tie-break of equal created_at). The ledger id is TEXT (migration 090); the
+// cursor admits exactly the opaque id rule this module applies to every ledger row (opaqueId).
+// Decoding is strict and fails closed (null): base64url only, at most 2048 characters, the canonical text
+// (re-encoding the decoded shape must give the same text, so no padding, whitespace, key order or escape variant
+// passes), exactly the keys v, t, c, i in that order, v = 1, t one of the CURRENTLY listed targets, c the fixed text
+// of a real instant, i an opaque id. The decoded cursor carries no scope: tenant, owner and workspace are the
+// authenticated owner's, the target list is the switch's; a forged cursor can only move the start point inside them.
+function sweepAt(value) {
+  if (typeof value !== 'string' || !SWEEP_AT_RE.test(value)) return false
+  const instant = new Date(`${value.slice(0, 23)}Z`)
+  return Number.isFinite(instant.getTime()) && instant.toISOString().slice(0, 23) === value.slice(0, 23)
+}
+
+function encodeIssueConfirmSweepCursor(position) {
+  if (!isPlainObject(position) || typeof position.targetRef !== 'string' || !UUID_RE.test(position.targetRef)
+    || !sweepAt(position.at) || !opaqueId(position.id)) return null
+  const json = JSON.stringify({ v: ISSUE_CONFIRM_SWEEP_CURSOR_VERSION, t: position.targetRef, c: position.at, i: position.id })
+  const text = Buffer.from(json, 'utf8').toString('base64url')
+  return text.length <= ISSUE_CONFIRM_SWEEP_CURSOR_MAX_LENGTH ? text : null
+}
+
+function decodeIssueConfirmSweepCursor(text, targetRefs) {
+  if (typeof text !== 'string' || !CURSOR_TEXT_RE.test(text) || !Array.isArray(targetRefs)) return null
+  let shape
+  try {
+    shape = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.from(text, 'base64url')))
+  } catch {
+    return null
+  }
+  if (!isPlainObject(shape)) return null
+  const keys = Object.keys(shape)
+  if (keys.length !== CURSOR_KEYS.length || keys.some((key, index) => key !== CURSOR_KEYS[index])) return null
+  if (shape.v !== ISSUE_CONFIRM_SWEEP_CURSOR_VERSION) return null
+  if (typeof shape.t !== 'string' || !UUID_RE.test(shape.t) || !targetRefs.includes(shape.t)) return null
+  if (!sweepAt(shape.c) || !opaqueId(shape.i)) return null
+  const position = Object.freeze({ targetRef: shape.t, at: shape.c, id: shape.i })
+  return encodeIssueConfirmSweepCursor(position) === text ? position : null
 }
 
 function instantOf(value) {
@@ -410,8 +473,12 @@ function requireFunction(holder, name, label) {
 
 /**
  * Dependencies (all injected; this module does no IO of its own):
- *   ledgerReader.list({ tenantId, ownerId, targetRefs, ledgerIds, limit }) → ledger rows of exactly this
+ *   ledgerReader.list({ tenantId, ownerId, targetRefs, ledgerIds, limit }) → the NAMED ledger rows of exactly this
  *       tenant + owner (see decideIssueConfirmWriteback), at most `limit`, none already traced.
+ *   ledgerReader.sweep({ tenantId, ownerId, targetRefs, after, limit }) → { rows, next }: one sweep page (batch mode):
+ *       at most `limit` candidate rows of this tenant + owner strictly after `after` ({ targetRef, at, id } | null) in
+ *       the sweep order; next = { targetRef, at, id } of the LAST row when the page is full and the sweep may go on,
+ *       null when it is exhausted.
  *   rowSource.read({ tenantId, ownerId, ledger }) → { boundSheetId, config, payload }; THROWS on any
  *       failure (a null answer is retryable too, never a trace)
  *   projectRegistry.resolve({ tenantId, projectNo }) → null (no registration) | { sheetId, objectId, status };
@@ -428,6 +495,7 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
   const env = deps.env || process.env
   const runId = typeof deps.runId === 'function' ? deps.runId : () => crypto.randomUUID()
   requireFunction(ledgerReader, 'list', 'ledgerReader')
+  requireFunction(ledgerReader, 'sweep', 'ledgerReader')
   requireFunction(rowSource, 'read', 'rowSource')
   requireFunction(projectRegistry, 'resolve', 'projectRegistry')
   requireFunction(sheets, 'open', 'sheets')
@@ -533,14 +601,45 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
       }
       limit = input.limit
     }
+    // `after` (a sweep cursor) is batch mode only: together with ledgerIds it is refused, like any cursor this run
+    // cannot accept. The refusal is a closed answer, not a throw, because only this module reads the target list a
+    // cursor is checked against; the host turns it into its fixed INPUT code (HTTP 400). Nothing is read before it.
+    const refused = () => ({ enabled: true, results: [], refused: ISSUE_CONFIRM_SWEEP_REFUSED })
+    if (input.after !== undefined && ledgerIds) return refused()
     const targetRefs = parseIssueConfirmTargetRefs(env)
-    // An empty list selects nothing: zero reads, zero writes (attack point 9).
-    if (targetRefs.length === 0) return { enabled: true, results: [] }
+    let after = null
+    if (input.after !== undefined) {
+      after = decodeIssueConfirmSweepCursor(input.after, targetRefs)
+      if (!after) return refused()
+    }
+    // An empty list selects nothing: zero reads, zero writes (attack point 9). A sweep over nothing is exhausted.
+    if (targetRefs.length === 0) return ledgerIds ? { enabled: true, results: [] } : { enabled: true, results: [], next: null }
     const timeZone = resolveIssueConfirmBusinessTimeZone(env)
     const scope = Object.freeze({ tenantId, ownerId })
 
-    const ledgerRows = await ledgerReader.list({ tenantId, ownerId, targetRefs, ledgerIds, limit })
-    if (!Array.isArray(ledgerRows)) fail('YIDA_ISSUE_CONFIRM_LEDGER_INVALID', 'ledger reader did not return an array')
+    let ledgerRows
+    let next = null
+    if (ledgerIds) {
+      ledgerRows = await ledgerReader.list({ tenantId, ownerId, targetRefs, ledgerIds, limit })
+      if (!Array.isArray(ledgerRows)) fail('YIDA_ISSUE_CONFIRM_LEDGER_INVALID', 'ledger reader did not return an array')
+    } else {
+      const page = await ledgerReader.sweep({ tenantId, ownerId, targetRefs, after, limit })
+      if (!isPlainObject(page) || !Array.isArray(page.rows) || page.next === undefined) {
+        fail('YIDA_ISSUE_CONFIRM_LEDGER_INVALID', 'ledger reader did not return a sweep page')
+      }
+      ledgerRows = page.rows
+      if (page.next !== null) {
+        // Progress, checked here and not trusted: a cursor only on a full page, and it names that page's last row on a
+        // listed target, so following it can never answer the same page again.
+        const last = ledgerRows[ledgerRows.length - 1]
+        if (ledgerRows.length !== limit || !isPlainObject(page.next) || !isPlainObject(last) || page.next.id !== last.id
+          || page.next.targetRef !== last.targetRef || !targetRefs.includes(page.next.targetRef)) {
+          fail('YIDA_ISSUE_CONFIRM_LEDGER_INVALID', 'ledger reader returned a cursor that is not its last row')
+        }
+        next = encodeIssueConfirmSweepCursor(page.next)
+        if (!next) fail('YIDA_ISSUE_CONFIRM_LEDGER_INVALID', 'ledger reader returned a cursor of the wrong shape')
+      }
+    }
     if (ledgerRows.length > limit) fail('YIDA_ISSUE_CONFIRM_LEDGER_INVALID', 'ledger reader exceeded the bound')
     // Server-side scope only (§2.2 step 1): one row of another tenant or owner fails the WHOLE run closed,
     // before anything of the batch is read or written.
@@ -591,7 +690,8 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
         ...(row.written_date ? { date: row.written_date, timeZone } : {}),
       })
     }
-    return { enabled: true, results, ...(stopped ? { stopped } : {}) }
+    // Batch mode answers the sweep's `next` (null = exhausted); the named mode is not a sweep and answers none.
+    return { enabled: true, results, ...(ledgerIds ? {} : { next }), ...(stopped ? { stopped } : {}) }
   }
 
   return Object.freeze({ run })
@@ -610,12 +710,17 @@ module.exports = {
   ISSUE_CONFIRM_WRITEBACK_LOCK_PURPOSE,
   ISSUE_CONFIRM_WRITEBACK_MAX_BATCH,
   ISSUE_CONFIRM_WRITEBACK_OUTCOMES,
+  ISSUE_CONFIRM_SWEEP_CURSOR_MAX_LENGTH,
+  ISSUE_CONFIRM_SWEEP_CURSOR_VERSION,
+  ISSUE_CONFIRM_SWEEP_REFUSED,
   PROJECT_SHEETS_ENABLED_ENV,
   ROW_SOURCE_UNAVAILABLE_CODE,
   YidaIssueConfirmWritebackError,
   createIssueConfirmTraceStore,
   createIssueConfirmWritebackExecutor,
   decideIssueConfirmCell,
+  decodeIssueConfirmSweepCursor,
+  encodeIssueConfirmSweepCursor,
   decideIssueConfirmWriteback,
   extractIssueConfirmRowKey,
   issueConfirmBusinessDay,

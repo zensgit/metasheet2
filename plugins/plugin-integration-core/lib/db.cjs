@@ -90,6 +90,16 @@ function quoteIdent(name) {
   return `"${name}"`
 }
 
+// selectUnmatched keyset: the fixed UTC microsecond text its to_char renders (and the only `after.at` it accepts).
+const KEYSET_KEYS = Object.freeze(['at', 'id', 'after'])
+const KEYSET_AT_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T([01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{6}Z$/
+function isKeysetAt(value) {
+  if (typeof value !== 'string' || !KEYSET_AT_RE.test(value)) return false
+  const instant = new Date(`${value.slice(0, 23)}Z`)
+  // A real calendar instant (no 02-30): the millisecond prefix must survive a round trip unchanged.
+  return Number.isFinite(instant.getTime()) && instant.toISOString().slice(0, 23) === value.slice(0, 23)
+}
+
 function isPlainObject(value) {
   return Boolean(
     value
@@ -235,8 +245,16 @@ function createDb({ database, logger } = {}) {
    * assertTable, every column (where, notNull, both sides of every pair, orderBy) passes assertColumn, every value is
    * a parameter (the anti-join and IS NOT NULL carry none). Both sides of a pair are table-qualified, so a column
    * name present in both tables can never bind to the wrong one. Root surface only (not on the transaction handle).
+   *
+   * `keyset` (optional) = { at: <timestamptz column>, id: <tie-break column>, after?: { at, id } } turns the page into a
+   * keyset page: ORDER BY "<at>" ASC, "<id>" ASC (orderBy and a non-zero offset are refused with it), every row carries
+   * `keyset_at` -- the EXACT database value of "<at>" as fixed UTC text with microseconds,
+   * to_char("<at>" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'), never a JS Date (which keeps milliseconds
+   * only) -- and, with `after`, the filter also holds ("<at>", "<id>") > ($n::timestamptz, $m): a row comparison, so
+   * rows of an equal timestamp are ordered and resumed by the id, neither repeated nor skipped. after.at must be that
+   * same fixed text (ISO 8601 with "Z", read the same under every DateStyle / TimeZone); both values are parameters.
    */
-  async function selectUnmatched(table, { where, notNull, unmatched, orderBy, limit = 1000, offset = 0 } = {}) {
+  async function selectUnmatched(table, { where, notNull, unmatched, orderBy, limit = 1000, offset = 0, keyset } = {}) {
     const tableIdent = quoteIdent(assertTable(table))
     if (!isPlainObject(unmatched)) {
       throw new ScopeViolationError('plugin-integration-core: selectUnmatched needs an unmatched { table, on } clause', { table })
@@ -262,15 +280,40 @@ function createDb({ database, logger } = {}) {
     if (whereClause.sql) filters.push(whereClause.sql.slice(' WHERE '.length))
     filters.push(...notNullSql)
     filters.push(`NOT EXISTS (SELECT 1 FROM ${otherIdent} WHERE ${joinSql})`)
+    const params = [...whereClause.params]
+    let selectSql = '*'
     let orderSql = ''
-    if (orderBy) {
+    if (keyset !== undefined) {
+      if (!isPlainObject(keyset) || Object.keys(keyset).some((key) => !KEYSET_KEYS.includes(key))) {
+        throw new ScopeViolationError('plugin-integration-core: selectUnmatched keyset must be { at, id, after? }', { table })
+      }
+      if (orderBy !== undefined || offset !== 0) {
+        throw new ScopeViolationError('plugin-integration-core: selectUnmatched keyset orders by itself (no orderBy, no offset)', { table })
+      }
+      const atIdent = `${tableIdent}.${quoteIdent(assertColumn(keyset.at))}`
+      const idIdent = `${tableIdent}.${quoteIdent(assertColumn(keyset.id))}`
+      if (keyset.at === keyset.id) {
+        throw new ScopeViolationError('plugin-integration-core: selectUnmatched keyset needs two distinct columns', { table })
+      }
+      if (keyset.after !== undefined) {
+        const after = keyset.after
+        if (!isPlainObject(after) || Object.keys(after).length !== 2 || !isKeysetAt(after.at)
+          || typeof after.id !== 'string' || after.id.length < 1 || after.id.length > 512 || after.id.includes('\u0000')) {
+          throw new ScopeViolationError('plugin-integration-core: selectUnmatched keyset.after must be { at, id } of the fixed shape', { table })
+        }
+        params.push(after.at, after.id)
+        filters.push(`(${atIdent}, ${idIdent}) > ($${params.length - 1}::timestamptz, $${params.length})`)
+      }
+      selectSql = `*, to_char(${atIdent} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "keyset_at"`
+      orderSql = ` ORDER BY ${atIdent} ASC, ${idIdent} ASC`
+    } else if (orderBy) {
       const [col, dir] = Array.isArray(orderBy) ? orderBy : [orderBy, 'ASC']
       orderSql = ` ORDER BY ${quoteIdent(assertColumn(col))} ${dir === 'DESC' ? 'DESC' : 'ASC'}`
     }
     const lim = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 10000) : 1000
     const off = Number.isInteger(offset) && offset >= 0 ? offset : 0
-    const sql = `SELECT * FROM ${tableIdent} WHERE ${filters.join(' AND ')}${orderSql} LIMIT ${lim} OFFSET ${off}`
-    return database.query(sql, whereClause.params)
+    const sql = `SELECT ${selectSql} FROM ${tableIdent} WHERE ${filters.join(' AND ')}${orderSql} LIMIT ${lim} OFFSET ${off}`
+    return database.query(sql, params)
   }
 
   async function selectOne(table, where) {

@@ -80,6 +80,10 @@ function takeFailure(world, name) {
 // ── the world of doubles ─────────────────────────────────────────────────────────────────────────
 
 function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
+  const withAck = (rows) => rows.map((row) => {
+    const ack = world.audits.find((audit) => audit.ledgerId === row.id && audit.event === 'acknowledgement')
+    return { ...row, acknowledgedAt: ack ? ack.createdAt : null }
+  })
   const calls = { ledgerList: 0, rowRead: 0, registry: 0, open: 0, query: 0, patch: [], beforeWrite: [], authority: 0, acquire: [], bump: [], trace: 0 }
   const world = { calls, env, authorityAllowed, formPosts: 0, tokenRequests: 0 }
   // One-shot port failures: rowRead, registry, open, query, authority.
@@ -186,18 +190,27 @@ function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
     ledgerReader: {
       async list({ tenantId, ownerId, targetRefs, ledgerIds, limit }) {
         calls.ledgerList += 1
-        // What the Y9 SQL reader does: this tenant + owner, untraced, and either the named rows or the
-        // bounded selector (acknowledged, create, listed target, bound).
-        const rows = world.ledger
+        // What the Y9 SQL reader does for named rows: this tenant + owner, untraced, the named ones.
+        assert.ok(Array.isArray(ledgerIds), 'list is the named path only')
+        return withAck(world.ledger
           .filter((row) => row.tenantId === tenantId && row.ownerId === ownerId)
           .filter((row) => !world.trace.some((entry) => entry.ledger_id === row.id))
-          .filter((row) => ledgerIds ? ledgerIds.includes(row.id)
-            : row.status === 'acknowledged' && row.intent === 'create' && targetRefs.includes(row.targetRef) && row.sourceRecordDigest !== null)
-          .slice(0, limit)
-        return rows.map((row) => {
-          const ack = world.audits.find((audit) => audit.ledgerId === row.id && audit.event === 'acknowledgement')
-          return { ...row, acknowledgedAt: ack ? ack.createdAt : null }
-        })
+          .filter((row) => ledgerIds.includes(row.id))
+          .slice(0, limit))
+      },
+      async sweep({ tenantId, ownerId, targetRefs, after, limit }) {
+        calls.ledgerList += 1
+        // One sweep page: the bounded selector (acknowledged, create, listed target, bound, untraced), the listed
+        // targets in turn, ledger order inside a target, strictly after the cursor's row.
+        const candidates = targetRefs.flatMap((targetRef) => world.ledger
+          .filter((row) => row.tenantId === tenantId && row.ownerId === ownerId && row.targetRef === targetRef)
+          .filter((row) => !world.trace.some((entry) => entry.ledger_id === row.id))
+          .filter((row) => row.status === 'acknowledged' && row.intent === 'create' && row.sourceRecordDigest !== null))
+        const start = after ? world.ledger.findIndex((row) => row.id === after.id) : -1
+        const rest = after ? candidates.filter((row) => world.ledger.indexOf(row) > start) : candidates
+        const rows = withAck(rest.slice(0, limit))
+        const last = rows[rows.length - 1]
+        return { rows, next: rest.length > limit ? { targetRef: last.targetRef, at: SWEEP_AT, id: last.id } : null }
       },
     },
     rowSource: {
@@ -274,6 +287,8 @@ function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
   world.snapshot = () => JSON.parse(JSON.stringify({ ledger: world.ledger, audits: world.audits }))
   return world
 }
+
+const SWEEP_AT = '2026-03-01T00:00:00.000000Z'
 
 function sentWorld(options) {
   const world = createWorld(options)
@@ -416,7 +431,7 @@ test('selector condition 3: a target outside the list (a test copy) is not selec
   assert.deepEqual(sheetReadsAndWrites(world.calls), { open: 0, query: 0, patch: 0, authority: 0, acquire: 0 })
 
   const empty = sentWorld({ env: onEnv({ INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS: '' }) })
-  assert.deepEqual(await empty.world.executor().run({ tenantId: TENANT, ownerId: OWNER }), { enabled: true, results: [] })
+  assert.deepEqual(await empty.world.executor().run({ tenantId: TENANT, ownerId: OWNER }), { enabled: true, results: [], next: null })
   assert.equal(empty.world.calls.ledgerList, 0)
   assert.equal(empty.world.trace.length, 0)
   assert.equal(empty.world.cell(), null)
@@ -503,7 +518,7 @@ test('written: one version-conditional, fenced patch of issueConfirmDate only, u
   const { world, row } = sentWorld()
   const before = world.snapshot()
   const result = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
-  assert.deepEqual(result, { enabled: true, results: [{ ledgerId: row.id, kind: 'outcome', outcome: 'written', recorded: true, date: ACK_DAY, timeZone: 'Asia/Shanghai' }] })
+  assert.deepEqual(result, { enabled: true, results: [{ ledgerId: row.id, kind: 'outcome', outcome: 'written', recorded: true, date: ACK_DAY, timeZone: 'Asia/Shanghai' }], next: null })
   assert.equal(world.cell(), ACK_DAY)
   assert.equal(world.sheets.get(SHEET)[0].data.warehouseConfirmation, 'human note')
   assert.equal(world.calls.patch.length, 1)
@@ -684,7 +699,7 @@ test('D14: the project-sheets switch off skips the row and counts it (no registr
     else env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED = value
     const { world, row } = sentWorld({ env })
     const off = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
-    assert.deepEqual(off, { enabled: true, results: [{ ledgerId: row.id, kind: 'skip', reason: 'project_sheets_disabled' }] }, JSON.stringify(value))
+    assert.deepEqual(off, { enabled: true, results: [{ ledgerId: row.id, kind: 'skip', reason: 'project_sheets_disabled' }], next: null }, JSON.stringify(value))
     assert.equal(world.calls.registry, 0)
     assert.deepEqual(sheetReadsAndWrites(world.calls), { open: 0, query: 0, patch: 0, authority: 0, acquire: 0 })
     assert.equal(world.trace.length, 0)
@@ -714,11 +729,118 @@ test('a ledger reader that returns a row outside the caller scope fails the run 
   const other = world.addLedger({ tenantId: 'tenant-syn-b' })
   world.send(other)
   const deps = world.deps()
-  const original = deps.ledgerReader.list
-  deps.ledgerReader.list = async (input) => [...await original(input), { ...other, acknowledgedAt: ACK_AT }]
+  const original = deps.ledgerReader.sweep
+  deps.ledgerReader.sweep = async (input) => ({ rows: [...(await original(input)).rows, { ...other, acknowledgedAt: ACK_AT }], next: null })
   await assert.rejects(() => createIssueConfirmWritebackExecutor(deps).run({ tenantId: TENANT, ownerId: OWNER }), { code: 'YIDA_ISSUE_CONFIRM_LEDGER_INVALID' })
   assert.equal(world.calls.patch.length, 0)
   assert.equal(world.trace.length, 0)
+})
+
+// ── the sweep cursor (owner recovery entry, batch mode) ─────────────────────────────────────────────
+const { decodeIssueConfirmSweepCursor: decodeCursor, encodeIssueConfirmSweepCursor: encodeCursor } = writeback
+const AT_US = '2026-03-01T00:00:00.000001Z'
+const cursorOf = (shape) => Buffer.from(JSON.stringify(shape), 'utf8').toString('base64url')
+
+test('sweep cursor: the fixed versioned shape round-trips; it carries only target, exact created_at text and id', () => {
+  const position = { targetRef: TARGET, at: AT_US, id: 'l-1' }
+  const text = encodeCursor(position)
+  assert.match(text, /^[A-Za-z0-9_-]+$/)
+  assert.equal(text, cursorOf({ v: 1, t: TARGET, c: AT_US, i: 'l-1' }))
+  assert.deepEqual(decodeCursor(text, [TEST_COPY_TARGET, TARGET]), position)
+  assert.ok(Object.isFrozen(decodeCursor(text, [TARGET])))
+  // The microseconds survive (a Date round trip would not), and an opaque non-UUID ledger id is admitted (TEXT key).
+  assert.equal(decodeCursor(encodeCursor({ ...position, at: '2026-12-31T23:59:59.999999Z' }), [TARGET]).at, '2026-12-31T23:59:59.999999Z')
+  assert.equal(writeback.ISSUE_CONFIRM_SWEEP_CURSOR_VERSION, 1)
+  // What it cannot encode, it does not (the executor fails closed then).
+  for (const bad of [null, { ...position, targetRef: 'not-a-uuid' }, { ...position, at: '2026-03-01T00:00:00.000Z' }, { ...position, at: new Date(0) },
+    { ...position, id: ' l-1' }, { ...position, id: 'a\u0001b' }, { ...position, id: '' }]) {
+    assert.equal(encodeCursor(bad), null, JSON.stringify(bad))
+  }
+})
+
+test('sweep cursor: every tampered, forged or foreign cursor is refused (null) — wrong shape, version, target, time, id, encoding', () => {
+  const good = { v: 1, t: TARGET, c: AT_US, i: 'l-1' }
+  const text = cursorOf(good)
+  const flipped = text.slice(0, 10) + (text[10] === 'A' ? 'B' : 'A') + text.slice(11)
+  const refused = [
+    ['not a string', 42], ['empty', ''], ['padding', `${text}=`], ['standard base64', text.replace(/-/g, '+').replace(/_/g, '/') + '+/'],
+    ['whitespace', ` ${text}`], ['too long', 'A'.repeat(2049)], ['one character flipped', flipped],
+    ['not JSON', Buffer.from('not json').toString('base64url')], ['an array', cursorOf([1, TARGET, AT_US, 'l-1'])],
+    ['unknown version', cursorOf({ ...good, v: 2 })], ['version as text', cursorOf({ ...good, v: '1' })],
+    ['missing key', cursorOf({ v: 1, t: TARGET, c: AT_US })], ['extra scope key', cursorOf({ ...good, o: 'owner-syn-b' })],
+    ['tenant key', cursorOf({ ...good, tenant: 'tenant-syn-b' })], ['key order', cursorOf({ t: TARGET, v: 1, c: AT_US, i: 'l-1' })],
+    ['unlisted target', cursorOf({ ...good, t: TEST_COPY_TARGET })], ['target not a uuid', cursorOf({ ...good, t: 'target-syn' })],
+    ['uppercase target', cursorOf({ ...good, t: TARGET.toUpperCase() })],
+    ['milliseconds only', cursorOf({ ...good, c: '2026-03-01T00:00:00.000Z' })], ['offset instead of Z', cursorOf({ ...good, c: '2026-03-01T08:00:00.000001+08:00' })],
+    ['impossible day', cursorOf({ ...good, c: '2026-02-30T00:00:00.000001Z' })], ['time as number', cursorOf({ ...good, c: 1772323200000 })],
+    ['empty id', cursorOf({ ...good, i: '' })], ['padded id', cursorOf({ ...good, i: ' l-1' })], ['control id', cursorOf({ ...good, i: 'l\u0000' })],
+    ['id too long', cursorOf({ ...good, i: 'x'.repeat(129) })], ['id as number', cursorOf({ ...good, i: 7 })],
+    ['escaped variant', Buffer.from(JSON.stringify(good).replace('l-1', 'l\\u002d1'), 'utf8').toString('base64url')],
+    ['invalid utf-8', Buffer.from([0x7b, 0xff, 0x7d]).toString('base64url')],
+  ]
+  for (const [name, value] of refused) assert.equal(decodeCursor(value, [TARGET]), null, name)
+  // The same good text is refused once its target is no longer listed (the switch's list, not the cursor, is scope).
+  assert.equal(decodeCursor(text, []), null)
+  assert.equal(decodeCursor(text, [TEST_COPY_TARGET]), null)
+  assert.deepEqual(decodeCursor(text, [TARGET]), { targetRef: TARGET, at: AT_US, id: 'l-1' })
+})
+
+test('run: a cursor it cannot accept, or a cursor together with ledgerIds, is the closed refusal — before ANY read', async () => {
+  const { world, row } = sentWorld()
+  const executor = world.executor()
+  const good = cursorOf({ v: 1, t: TARGET, c: AT_US, i: row.id })
+  const refusal = { enabled: true, results: [], refused: 'AFTER' }
+  for (const after of [cursorOf({ v: 2, t: TARGET, c: AT_US, i: row.id }), cursorOf({ v: 1, t: TEST_COPY_TARGET, c: AT_US, i: row.id }),
+    `${good}=`, 'not!base64', 7, null, '']) {
+    assert.deepEqual(await executor.run({ tenantId: TENANT, ownerId: OWNER, after }), refusal, JSON.stringify(after))
+  }
+  assert.deepEqual(await executor.run({ tenantId: TENANT, ownerId: OWNER, ledgerIds: [row.id], after: good }), refusal)
+  assert.equal(world.calls.ledgerList + world.calls.rowRead + world.calls.registry, 0)
+  assert.equal(world.calls.patch.length, 0)
+  // Empty target list: no cursor can name a listed target.
+  const empty = sentWorld({ env: onEnv({ INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS: '' }) })
+  assert.deepEqual(await empty.world.executor().run({ tenantId: TENANT, ownerId: OWNER, after: good }), refusal)
+  assert.equal(empty.world.calls.ledgerList, 0)
+  // OFF still answers before anything (the switch first, even before the cursor).
+  const off = sentWorld({ env: {} })
+  assert.deepEqual(await off.world.executor().run({ tenantId: TENANT, ownerId: OWNER, after: 'x' }), { enabled: false, results: [] })
+  // A valid cursor reaches the reader as the decoded position; the named mode answers no `next`.
+  const seen = []
+  const deps = world.deps()
+  const original = deps.ledgerReader.sweep
+  deps.ledgerReader.sweep = async (input) => { seen.push(input.after); return original(input) }
+  const followed = await createIssueConfirmWritebackExecutor(deps).run({ tenantId: TENANT, ownerId: OWNER, after: good })
+  assert.deepEqual(seen, [{ targetRef: TARGET, at: AT_US, id: row.id }])
+  assert.equal(followed.next, null)
+  assert.equal(Object.hasOwn(await world.executor().run({ tenantId: TENANT, ownerId: OWNER, ledgerIds: [row.id] }), 'next'), false)
+})
+
+test('run: `next` is checked, never trusted — only on a full page, naming its last row on a listed target', async () => {
+  const world = createWorld()
+  const rows = [world.addLedger(), world.addLedger()]
+  for (const row of rows) world.send(row)
+  const bad = [
+    ['next on a short page', (page) => ({ rows: page.rows.slice(0, 1), next: { targetRef: TARGET, at: AT_US, id: page.rows[0].id } })],
+    ['next naming another row', (page) => ({ rows: page.rows, next: { targetRef: TARGET, at: AT_US, id: page.rows[0].id } })],
+    ['next on an unlisted target', (page) => ({ rows: page.rows, next: { targetRef: TEST_COPY_TARGET, at: AT_US, id: page.rows[1].id } })],
+    ['next with a millisecond time', (page) => ({ rows: page.rows, next: { targetRef: TARGET, at: '2026-03-01T00:00:00.000Z', id: page.rows[1].id } })],
+    ['no next key', (page) => ({ rows: page.rows })], ['an array', (page) => page.rows],
+  ]
+  for (const [name, shape] of bad) {
+    const deps = world.deps()
+    const original = deps.ledgerReader.sweep
+    deps.ledgerReader.sweep = async (input) => shape(await original(input))
+    await assert.rejects(() => createIssueConfirmWritebackExecutor(deps).run({ tenantId: TENANT, ownerId: OWNER, limit: 2 }),
+      { code: 'YIDA_ISSUE_CONFIRM_LEDGER_INVALID' }, name)
+  }
+  assert.equal(world.calls.patch.length, 0)
+  assert.equal(world.trace.length, 0)
+  // The control: a full page whose next is its last row is answered as the opaque cursor.
+  const deps = world.deps()
+  const original = deps.ledgerReader.sweep
+  deps.ledgerReader.sweep = async (input) => { const page = await original(input); return { rows: page.rows, next: { targetRef: TARGET, at: AT_US, id: page.rows[1].id } } }
+  const result = await createIssueConfirmWritebackExecutor(deps).run({ tenantId: TENANT, ownerId: OWNER, limit: 2 })
+  assert.equal(result.next, cursorOf({ v: 1, t: TARGET, c: AT_US, i: rows[1].id }))
 })
 
 test('input bounds: tenant and owner required, limit and ledgerIds bounded to 100', async () => {

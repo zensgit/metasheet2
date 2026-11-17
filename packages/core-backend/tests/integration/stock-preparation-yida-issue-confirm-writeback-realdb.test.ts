@@ -35,7 +35,7 @@ const PAST_ACK = '2026-03-01T16:30:00.000Z', PAST_DAY = '2026-03-02'
 type Row = Record<string, unknown>
 type HostSecurity = { encrypt(value: string): Promise<string>; decrypt(value: string): Promise<string> }
 type Actor = { actorId: string; tenantId: string; workspaceId: null }
-type Result = { enabled: boolean; results: Row[]; stopped?: string }
+type Result = { enabled: boolean; results: Row[]; next?: string | null; stopped?: string }
 type Runtime = {
   createPluginCapability(): { activate(binding: unknown): Promise<{ stop(): Promise<void> }> }
   approve(actor: Actor, input: unknown): Promise<Row & { grantId: string; ledgerId: string | null }>
@@ -578,10 +578,10 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     }
     wbStatements.length = 0
     const batch = await world!.runtime.issueConfirmWriteback(actor, {})
-    expect(batch).toEqual({ enabled: true, results: [] })
+    expect(batch).toEqual({ enabled: true, results: [], next: null })
     // No row source, registry, lease, trace or sheet read for it: the write-back read the ledger page (the trace table
     // only inside that query's NOT EXISTS) and nothing else.
-    expect(wbStatements.length > 0 && wbStatements.every(sql => /^SELECT \* FROM "integration_yida_delivery_ledger" WHERE/.test(sql))).toBe(true)
+    expect(wbStatements.length > 0 && wbStatements.every(sql => /^SELECT \*, to_char\("integration_yida_delivery_ledger"\."created_at" AT TIME ZONE 'UTC', '[^']*'\) AS "keyset_at" FROM "integration_yida_delivery_ledger" WHERE/.test(sql))).toBe(true)
     wbStatements.length = 0
     expect(await tableRows(TRACE)).toEqual([])
     // Named explicitly, the first three conditions skip (no trace); a NULL digest is the terminal source_unbound.
@@ -610,8 +610,8 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
       VALUES ($1, $2, NULL, 'synthetic-reconciled-op', 'synthetic-reconciled-row', $3, $4, 'synthetic-target-revision', 'synthetic-plan-revision',
       $5, $6, 'synthetic-credential', 1, 'create', 'reconciled_existing')`, [id, TENANT, OWNER, world!.targetRef, 'e'.repeat(64), 'f'.repeat(64)])
     wbStatements.length = 0
-    expect(await world!.runtime.issueConfirmWriteback(actor, {})).toEqual({ enabled: true, results: [] })
-    expect(wbStatements.every(sql => /^SELECT \* FROM "integration_yida_delivery_ledger" WHERE/.test(sql))).toBe(true)
+    expect(await world!.runtime.issueConfirmWriteback(actor, {})).toEqual({ enabled: true, results: [], next: null })
+    expect(wbStatements.every(sql => /^SELECT \*, to_char\("integration_yida_delivery_ledger"\."created_at" AT TIME ZONE 'UTC', '[^']*'\) AS "keyset_at" FROM "integration_yida_delivery_ledger" WHERE/.test(sql))).toBe(true)
     wbStatements.length = 0
     expect(outcomeOf(await world!.runtime.issueConfirmWriteback(actor, { ledgerIds: [id] }))).toEqual(['skip:not_acknowledged'])
     expect(wbStatements.some(sql => sql.includes(OP) || sql.includes(REGISTRY) || sql.includes(LOCK) || sql.includes('meta_records')
@@ -641,7 +641,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     if (switchOff) {
       await expect(world!.runtime.issueConfirmWriteback(actor, {})).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_DISABLED' })
     } else {
-      expect(await world!.runtime.issueConfirmWriteback(actor, {})).toEqual({ enabled: true, results: [] })
+      expect(await world!.runtime.issueConfirmWriteback(actor, {})).toEqual({ enabled: true, results: [], next: null })
     }
     expect(await tableRows(TRACE)).toEqual([])
   })
@@ -734,6 +734,88 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     expect(await tableRows(TRACE)).toEqual(before)
   })
 
+  // The sweep (owner recovery entry, batch mode) end to end on real PostgreSQL: rows that never get a trace (row values
+  // unreadable → retryable; no acknowledgement audit → acknowledgement_missing) no longer hold the batch forever: one
+  // page reports them, its `next` starts the following page right after them, and the pending row behind is written.
+  async function seedStuck(prefix: string, count: number, targetRef: string) {
+    await owner.query(`INSERT INTO ${ident(LEDGER)} (id, tenant_id, workspace_id, operation_id, row_key, owner_id, target_ref,
+      target_revision, plan_revision, payload_digest, business_key_digest, credential_ref, credential_generation, intent, status,
+      claim_token, claim_actor_id, ack_status_code, ack_instance_id, source_record_digest, created_at)
+      SELECT $1 || lpad(i::text, 3, '0'), $2, NULL, 'synthetic-stuck-op-' || i, 'row-' || i, $3, $4, 'synthetic-rev', 'synthetic-plan',
+        repeat('a', 64), md5($1 || i::text) || md5('k' || $1 || i::text), 'synthetic-credential', 1, 'create', 'acknowledged',
+        repeat('c', 64), $3, 201, 'synthetic-instance-' || i, repeat('d', 64),
+        timestamptz '2026-03-01T00:00:00Z' + (i * interval '1 second')
+      FROM generate_series(0, $5::int - 1) AS i`, [prefix, TENANT, OWNER, targetRef, count])
+    // The even rows have their acknowledgement audit (so the row source is asked, and finds no draft: retryable); the odd
+    // rows have none (skip acknowledgement_missing). Neither outcome records a trace.
+    await owner.query(`INSERT INTO ${ident(LEDGER_AUDIT)} (id, ledger_id, event, status)
+      SELECT 'syn-stuck-audit-' || l.id, l.id, 'acknowledgement', 'acknowledged' FROM ${ident(LEDGER)} l
+      WHERE l.id LIKE $1 || '%' AND right(l.id, 1) IN ('0', '2', '4', '6', '8')`, [prefix])
+  }
+  const cursorText = (shape: Row) => Buffer.from(JSON.stringify(shape), 'utf8').toString('base64url')
+
+  it('the sweep gets past a stuck front on real PostgreSQL: 100 rows that stay retryable or acknowledgement_missing, the pending row behind them is written by following next', async () => {
+    await compose({ crashHookOnce: true })
+    const { grant, result } = await sendOne(boundInput(0))
+    const ledgerId = String(grant.ledgerId ?? result.delivery!.id)
+    expect(await tableRows(TRACE)).toEqual([])
+    await seedStuck('syn-stuck-', 100, world!.targetRef)
+    const front = Array.from({ length: 100 }, (_, i) => `syn-stuck-${String(i).padStart(3, '0')}`)
+    // Without the cursor, every page is the same stuck front (nothing of it is traced) and the pending row is not reached.
+    for (let again = 0; again < 2; again++) {
+      const page = await world!.runtime.issueConfirmWriteback(actor, {})
+      expect(page.results.map(entry => entry.ledgerId)).toEqual(front)
+      expect(page.results.filter(entry => entry.kind === 'retryable')).toHaveLength(50)
+      expect(page.results.filter(entry => entry.kind === 'skip' && entry.reason === 'acknowledgement_missing')).toHaveLength(50)
+      expect(typeof page.next).toBe('string')
+    }
+    expect(patches).toEqual([])
+    expect(await tableRows(TRACE)).toEqual([])
+    // Following next: the very next page writes it, and the sweep is exhausted.
+    const first = await world!.runtime.issueConfirmWriteback(actor, {})
+    const second = await world!.runtime.issueConfirmWriteback(actor, { after: first.next })
+    expect(second.results.map(entry => [entry.ledgerId, entry.outcome])).toEqual([[ledgerId, 'written']])
+    expect(second.next).toBeNull()
+    expect((await cell()).date).toBe(businessDay(await ackAt(ledgerId)))
+    expect((await tableRows(TRACE)).map(row => [row.ledger_id, row.outcome])).toEqual([[ledgerId, 'written']])
+    // A retryable row gets another try only on a LATER sweep from the start: the same front, and (the written row now
+    // traced, exactly `limit` candidates left in the one listed target) that sweep is exhausted on its first page.
+    const again = await world!.runtime.issueConfirmWriteback(actor, {})
+    expect([again.results.map(entry => entry.ledgerId), again.next]).toEqual([front, null])
+    // Through the real runtime a cursor the core refuses is INPUT (the route's 400), before the plugin reads anything.
+    const decoded = JSON.parse(Buffer.from(String(first.next), 'base64url').toString('utf8')) as Row
+    expect(Object.keys(decoded)).toEqual(['v', 't', 'c', 'i'])
+    expect([decoded.v, decoded.t, decoded.i]).toEqual([1, world!.targetRef, 'syn-stuck-099'])
+    expect(decoded.c).toBe('2026-03-01T00:01:39.000000Z')
+    wbStatements.length = 0
+    for (const after of [cursorText({ ...decoded, v: 2 }), cursorText({ ...decoded, t: randomUUID() }), cursorText({ ...decoded, o: 'synthetic-other' }),
+      String(first.next).slice(0, -2), `${String(first.next)}A`]) {
+      await expect(world!.runtime.issueConfirmWriteback(actor, { after })).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
+    }
+    await expect(world!.runtime.issueConfirmWriteback(actor, { ledgerIds: [ledgerId], after: String(first.next) }))
+      .rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
+    expect(wbStatements).toEqual([])
+  })
+
+  it('a traced row is never re-patched on real PostgreSQL, limit path and ledgerIds path: its cell emptied again, zero patches, version unchanged', async () => {
+    await compose()
+    const { grant, result } = await sendOne(boundInput(0))
+    const ledgerId = String(grant.ledgerId ?? result.delivery!.id)
+    expect((await tableRows(TRACE)).map(row => [row.ledger_id, row.outcome])).toEqual([[ledgerId, 'written']])
+    // Only the trace now stands between the row and a patch: the date is removed again (privileged fixture edit).
+    await owner.query('UPDATE public.meta_records SET data = data - $1::text WHERE id = $2', [fld().issueConfirmDate, recordId(0)])
+    const before = await cell()
+    expect(before.date).toBe(null)
+    patches.length = 0
+    expect(await world!.runtime.issueConfirmWriteback(actor, {})).toEqual({ enabled: true, results: [], next: null })
+    expect(await world!.runtime.issueConfirmWriteback(actor, { limit: 1 })).toEqual({ enabled: true, results: [], next: null })
+    expect(await world!.runtime.issueConfirmWriteback(actor, { ledgerIds: [ledgerId] })).toEqual({ enabled: true, results: [] })
+    expect(patches).toEqual([])
+    const after = await cell()
+    expect([after.version, after.date]).toEqual([before.version, null])
+    expect(await tableRows(TRACE)).toHaveLength(1)
+  })
+
   // The recovery scan's progress on real PostgreSQL (Codex, Y9 review): traced and unbound rows are excluded by the
   // ledger query itself (createDb.selectUnmatched — IS NOT NULL + NOT EXISTS on the trace table, before ORDER BY /
   // LIMIT), so however many of them a target holds, the next pending row is in the very next batch.
@@ -759,13 +841,15 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
         SELECT l.id, l.tenant_id, l.owner_id, l.target_ref, NULL, 'project_absent' FROM ${ident(LEDGER)} l WHERE l.id = ANY($1::text[])`, [ids])
     }
     const ids = (prefix: string, from: number, to: number) => Array.from({ length: to - from }, (_, i) => `${prefix}${String(from + i).padStart(5, '0')}`)
-    let createReader: (options: Row) => { list(input: Row): Promise<Array<{ id: string; sourceRecordDigest: string | null }>> }
+    type SweepRow = { id: string; sourceRecordDigest: string | null }
+    let createReader: (options: Row) => { list(input: Row): Promise<SweepRow[]>
+      sweep(input: Row): Promise<{ rows: SweepRow[]; next: { targetRef: string; at: string; id: string } | null }> }
     beforeAll(async () => {
       createReader = (await importNative(pathToFileURL(path.join(root, 'plugins/plugin-integration-core/lib/yida-issue-confirm-writeback-ports.mjs')).href))
         .createIssueConfirmLedgerReader
     })
-    const batch = (targetRefs: string[], limit = 100) => createReader({ db: createDb({ database: pluginDatabaseOf('wb') }) })
-      .list({ tenantId: TENANT, ownerId: OWNER, targetRefs, ledgerIds: null, limit })
+    const batch = async (targetRefs: string[], limit = 100) => (await createReader({ db: createDb({ database: pluginDatabaseOf('wb') }) })
+      .sweep({ tenantId: TENANT, ownerId: OWNER, targetRefs, after: null, limit })).rows
 
     it('2001 acknowledged rows, the oldest 2000 traced: every run returns the last one, in ONE anti-join ledger query', async () => {
       await seedLedger('syn-scan-', 2001)
@@ -774,7 +858,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
         wbStatements.length = 0
         expect((await batch([SCAN_TARGET])).map(row => row.id)).toEqual(['syn-scan-02000'])
         expect(wbStatements.filter(sql => sql.includes(`"${LEDGER}"`))).toHaveLength(1)
-        expect(wbStatements[0]).toMatch(/^SELECT \* FROM "integration_yida_delivery_ledger" WHERE .* AND "source_record_digest" IS NOT NULL AND NOT EXISTS \(SELECT 1 FROM "integration_yida_issue_confirm_writeback" WHERE "integration_yida_issue_confirm_writeback"\."ledger_id" = "integration_yida_delivery_ledger"\."id"\) ORDER BY "created_at" ASC LIMIT 100 OFFSET 0$/)
+        expect(wbStatements[0]).toMatch(/^SELECT \*, to_char\("integration_yida_delivery_ledger"\."created_at" AT TIME ZONE 'UTC', '[^']*'\) AS "keyset_at" FROM "integration_yida_delivery_ledger" WHERE .* AND "source_record_digest" IS NOT NULL AND NOT EXISTS \(SELECT 1 FROM "integration_yida_issue_confirm_writeback" WHERE "integration_yida_issue_confirm_writeback"\."ledger_id" = "integration_yida_delivery_ledger"\."id"\) ORDER BY "integration_yida_delivery_ledger"\."created_at" ASC, "integration_yida_delivery_ledger"\."id" ASC LIMIT 101 OFFSET 0$/)
       }
       // Named, the same row is read directly (the ledgerIds path is unchanged); a named traced row is omitted.
       const named = await createReader({ db: createDb({ database: pluginDatabaseOf('wb') }) }).list({ tenantId: TENANT, ownerId: OWNER,
@@ -800,6 +884,66 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
       expect((await batch([SCAN_TARGET, OTHER_SCAN_TARGET])).map(row => row.id)).toEqual([...pending, ...ids('syn-mxb-', 0, 3)])
       expect((await batch([SCAN_TARGET, OTHER_SCAN_TARGET], pending.length + 1)).map(row => row.id)).toEqual([...pending, 'syn-mxb-00000'])
       expect((await batch([OTHER_SCAN_TARGET, SCAN_TARGET], 4)).map(row => row.id)).toEqual([...ids('syn-mxb-', 0, 3), pending[0]])
+    })
+
+    // Follow `next` from the start until it is null (guarded); the pages in order.
+    const sweepOf = (targetRefs: string[], limit: number, after: Row | null = null) => createReader({ db: createDb({ database: pluginDatabaseOf('wb') }) })
+      .sweep({ tenantId: TENANT, ownerId: OWNER, targetRefs, after, limit })
+    async function follow(targetRefs: string[], limit: number) {
+      const pages: Array<Awaited<ReturnType<typeof sweepOf>>> = []
+      let after: Row | null = null
+      for (let guard = 0; guard < 200; guard++) {
+        const page = await sweepOf(targetRefs, limit, after)
+        pages.push(page)
+        if (page.next === null) return pages
+        after = page.next
+      }
+      throw new Error('SYNTHETIC_SWEEP_DID_NOT_TERMINATE')
+    }
+
+    it('sub-millisecond and equal created_at on PostgreSQL: following next pages every row exactly once, in the database\'s (created_at, id) order', async () => {
+      // 12 rows inside ONE millisecond: 4 instants one microsecond apart, 3 ids on each (ties), ids inserted out of order.
+      await owner.query(`INSERT INTO ${ident(LEDGER)} (id, tenant_id, workspace_id, operation_id, row_key, owner_id, target_ref,
+        target_revision, plan_revision, payload_digest, business_key_digest, credential_ref, credential_generation, intent, status,
+        claim_token, claim_actor_id, ack_status_code, ack_instance_id, source_record_digest, created_at)
+        SELECT 'syn-us-' || lpad(((i * 7) % 12)::text, 2, '0'), $1, NULL, 'synthetic-us-op', 'row-' || i, $2, $3, 'synthetic-rev', 'synthetic-plan',
+          repeat('a', 64), md5('us' || i::text) || md5('kus' || i::text), 'synthetic-credential', 1, 'create', 'acknowledged',
+          repeat('c', 64), $2, 201, 'synthetic-instance-' || i, repeat('d', 64),
+          timestamptz '2026-03-01T00:00:00.123Z' + ((i % 4) * interval '1 microsecond')
+        FROM generate_series(0, 11) AS i`, [TENANT, OWNER, SCAN_TARGET])
+      const truth = (await owner.query(`SELECT id, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at
+        FROM ${ident(LEDGER)} WHERE id LIKE 'syn-us-%' ORDER BY created_at, id`)).rows.map(row => [String(row.id), String(row.at)])
+      expect(new Set(truth.map(([, at]) => at))).toEqual(new Set(['2026-03-01T00:00:00.123000Z', '2026-03-01T00:00:00.123001Z',
+        '2026-03-01T00:00:00.123002Z', '2026-03-01T00:00:00.123003Z']))
+      for (const limit of [1, 2, 5, 12]) {
+        const pages = await follow([SCAN_TARGET], limit)
+        expect(pages.flatMap(page => page.rows.map(row => row.id)), `limit ${limit}`).toEqual(truth.map(([id]) => id))
+        // Each cursor is its page's last row with the database's exact microsecond text.
+        for (const page of pages.filter(entry => entry.next !== null)) {
+          const last = page.rows[page.rows.length - 1].id
+          expect([page.next!.id, page.next!.at]).toEqual(truth.find(([id]) => id === last))
+        }
+      }
+    })
+
+    it('per-target guard on PostgreSQL: a first target holding exactly `limit` costs ONE ledger statement; its cursor then moves on to the next target', async () => {
+      await seedLedger('syn-pt-', 100)
+      await seedLedger('syn-pu-', 2, { target: OTHER_SCAN_TARGET, from: 50 })
+      wbStatements.length = 0
+      const first = await sweepOf([SCAN_TARGET, OTHER_SCAN_TARGET], 100)
+      expect(first.rows.map(row => row.id)).toEqual(ids('syn-pt-', 0, 100))
+      expect(wbStatements.filter(sql => sql.includes(`"${LEDGER}"`))).toHaveLength(1)
+      expect([first.next?.targetRef, first.next?.id]).toEqual([SCAN_TARGET, 'syn-pt-00099'])
+      wbStatements.length = 0
+      const second = await sweepOf([SCAN_TARGET, OTHER_SCAN_TARGET], 100, first.next)
+      expect([second.rows.map(row => row.id), second.next]).toEqual([ids('syn-pu-', 0, 2), null])
+      expect(wbStatements.filter(sql => sql.includes(`"${LEDGER}"`))).toHaveLength(2)
+      // More than `limit` in the first target: still one statement (the look-ahead row says the target goes on).
+      await seedLedger('syn-pt-x-', 1, { from: 4000 })
+      wbStatements.length = 0
+      const over = await sweepOf([SCAN_TARGET, OTHER_SCAN_TARGET], 100)
+      expect(over.rows).toHaveLength(100)
+      expect(wbStatements.filter(sql => sql.includes(`"${LEDGER}"`))).toHaveLength(1)
     })
   })
 })

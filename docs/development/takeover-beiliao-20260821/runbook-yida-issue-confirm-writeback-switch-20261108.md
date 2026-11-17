@@ -6,7 +6,7 @@
 ## 打开开关之前
 
 1. **先给 owner 授予经角色的操作档位，再打开开关（不可颠倒）。** 回写在租约内对每一行重新核对 owner 的权限（D13 a）：只认**经角色授予**的 `stock-prep:admin`，或同时经角色授予 `stock-prep:operate` 与 `stock-prep:read`（`packages/core-backend/src/integration/yida-issue-confirm-writeback-authority.ts:51-54`）。直接写进 `user_permissions` 的授权、`role:admin`、`integration:admin` 都不算。
-   **后果（写明）：开关打开而 owner 没有这一档位时，每一条已确认（acknowledged）的发送都会得到一条永久的 `permission_revoked` 留痕**（`plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs:314`），留痕表只追加、不能改删，这些行的日期以后再也不会被回写。所以必须先授予档位、确认生效，再打开开关。
+   **后果（写明）：开关打开而 owner 没有这一档位时，每一条已确认（acknowledged）的发送都会得到一条永久的 `permission_revoked` 留痕**（`plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs:377`），留痕表只追加、不能改删，这些行的日期以后再也不会被回写。所以必须先授予档位、确认生效，再打开开关。
 2. **目标清单**：`INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS` 只列发料确认表对应的宜搭目标；空或格式不对 = 不回写任何行（不是报错）。
 3. **项目备料表开关**：`MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED` 也须为 `true`，否则每行只得到跳过 `project_sheets_disabled`，不写、不留痕，该开关打开后再次判定（`plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs:32-35`）。
 4. **只认原文 `true`**：小写、不加引号、不加空格；`TRUE`、`1`、` true` 都算关。
@@ -14,5 +14,6 @@
 ## 打开之后
 
 - 回写在发送**返回结果之后**单独运行（D5 a）：发送结果不等它、也不反映它的结果；它失败或被关停打断时，发送结果不变，服务器日志只留一条固定码 `YIDA_ISSUE_CONFIRM_WRITEBACK_AFTER_ACK_FAILED`（不含任何编号或内容）；可重试的行不留痕，由下面的补写入口补上。
-- 漏掉的日期由 owner 的补写入口补上：`POST /api/integration/yida-owner-send/issue-confirm-writeback`（`packages/core-backend/src/routes/integration-yida-owner.ts:476`），写入的是确认审计那一天的本地日期，不是补写当天。
+- 漏掉的日期由 owner 的补写入口补上：`POST /api/integration/yida-owner-send/issue-confirm-writeback`（`packages/core-backend/src/routes/integration-yida-owner.ts:482`），写入的是确认审计那一天的本地日期，不是补写当天。
+- 补写入口不带 `ledgerIds` 时，一次请求是「扫一遍」中的一页（至多 100 行）：第一次不带 `after`，之后把回答里的 `next` 原样作为 `after` 传回，直到 `next` 为 null 才算扫完一遍（`next` 为 null 必定已扫完；最后一页可能为空）。一直 retryable 或缺确认审计（`acknowledgement_missing`）的行不留痕，在这一遍里留在游标后面、不挡后面的行，只在下一遍从头开始时再试。游标只移动起点：格式不对、版本未知、目标不在当前清单里、与 `ledgerIds` 同传，都得 400（`YIDA_OWNER_RUNTIME_INPUT` 或 `YIDA_OWNER_HTTP_INPUT`），什么都不读。定期补跑以「一遍」为单位；是否定期补跑、由谁跑、多久一次是 owner 事项（O 层②）。
 - 关回：把开关改回 `false` 并重启后端；已写入的日期与留痕保持不变。
