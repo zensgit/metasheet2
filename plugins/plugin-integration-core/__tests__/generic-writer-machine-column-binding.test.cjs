@@ -324,25 +324,43 @@ test('B-09 the probe\'s ADDITIVE binding read over the REAL registry store: the 
 
 // B-10 (D2 round 3, stock-prep verdict X4): the probe's binding read is VALUES-BEARING and has NO tenant filter (the
 // store reads by sheet only), so it may have exactly one consumer. A source scan of lib/ (recursive) plus index.cjs,
-// comments stripped first so prose can neither satisfy nor trip it.
+// comments stripped first so a comment alone cannot satisfy the call checks. The regex stripper is not a tokenizer: a
+// '/*' inside prose or a string can hide the code after it (round-3 refuter finding 1). So (round 4) the scan ALSO
+// reads the RAW text of every file under lib/ (any extension) plus index.cjs: the files that name the identifier at
+// all, comments included, must be a subset of the probe, its one consumer and the store (whose comment names it). The
+// raw check pins the FILE SET only; the call count inside those three files rests on the stripped checks.
 const B10_PLUGIN_DIR = path.join(__dirname, '..')
+const B10_RAW_ALLOWED = Object.freeze([
+  'lib/generic-writer-machine-columns.cjs',
+  'lib/stock-preparation-governed-sheet-probe.cjs',
+  'lib/stock-preparation-project-target-store.cjs',
+])
 const b10StripComments = (source) => source.replace(/\r\n/g, '\n').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
-function b10SourceFiles() {
+function b10Walk(filter) {
   const out = []
   const walk = (dir) => {
     for (const entry of require('node:fs').readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, entry.name)
       if (entry.isDirectory()) walk(full)
-      else if (/\.(cjs|mjs|js|mts|ts)$/.test(entry.name)) out.push(full)
+      else if (filter(entry.name)) out.push(full)
     }
   }
   walk(LIB)
   out.push(path.join(B10_PLUGIN_DIR, 'index.cjs'))
   return out
 }
+const b10SourceFiles = () => b10Walk((name) => /\.(cjs|mjs|js|mts|ts)$/.test(name))
+const b10AllFiles = () => b10Walk(() => true)
 
-test('B-10 the probe\'s values-bearing, tenant-unscoped binding read has EXACTLY ONE call in lib/ + index.cjs — in resolveRegisteredSheetMachineColumns of generic-writer-machine-columns.cjs; the identifier appears in no other file (no alias, no destructure, no bracket access)', () => {
+test('B-10 the probe\'s values-bearing, tenant-unscoped binding read has EXACTLY ONE call in lib/ + index.cjs — in resolveRegisteredSheetMachineColumns of generic-writer-machine-columns.cjs; the identifier appears in no other file (no alias, no destructure, no literal bracket access; raw text too)', () => {
   const fs = require('node:fs')
+  // RAW (round 4, refuter finding 1): no comment stripping, every file type — a '/*' in prose cannot hide a mention.
+  const rawNaming = b10AllFiles()
+    .filter((file) => fs.readFileSync(file, 'utf8').includes('registryBindingBySheet'))
+    .map((file) => path.relative(B10_PLUGIN_DIR, file).split(path.sep).join('/'))
+    .sort()
+  const outsideAllowed = rawNaming.filter((rel) => !B10_RAW_ALLOWED.includes(rel))
+  assert.deepEqual(outsideAllowed, [], 'raw text: only the probe, its one consumer and the store name the binding read')
   const calls = []
   const mentions = new Map()
   for (const file of b10SourceFiles()) {
