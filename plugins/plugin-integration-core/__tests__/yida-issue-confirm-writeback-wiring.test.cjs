@@ -309,6 +309,81 @@ test('sheets port refuses a records surface without the host write fence, and bi
   assert.equal(Object.isFrozen(opened), true)
 })
 
+// D2 refuter round 2, finding 2 (handed to Y9): the D2 generic-writer strip is right only while the write-back binds THE
+// REGISTRY ROW's pair — its sheetId and objectId, with projectId `${tenantId}:integration-core` of the tenant the row was
+// resolved by. Pinned through the REAL registry and sheets ports inside the real executor: the registry row's objectId is
+// a valid project-sheet id deliberately NOT derived from the payload's project, so a port that re-derived it (or used
+// another tenant) would bind a different pair. (The full D2 alias pin — a stamped date surviving alias / raw / C6 writes —
+// lands with whichever of D2 and Y9 merges second.)
+test('binding pair: the sheets port binds the registry row\'s sheetId and objectId with `${tenantId}:integration-core` of the tenant the row was resolved by, for each tenant', async () => {
+  const { createIssueConfirmProjectRegistry, createIssueConfirmSheets } = await portsPromise
+  const OTHER_TENANT = 'tenant-syn-w2'
+  const registry = {
+    [TENANT]: { sheetId: 'sheet_syn_pair_a', objectId: deriveProjectSheetObjectId(TENANT, 'SYN-NOT-THE-PAYLOAD-A'), status: 'active' },
+    [OTHER_TENANT]: { sheetId: 'sheet_syn_pair_b', objectId: deriveProjectSheetObjectId(OTHER_TENANT, 'SYN-NOT-THE-PAYLOAD-B'), status: 'active' },
+  }
+  for (const tenantId of [TENANT, OTHER_TENANT]) {
+    const row = registry[tenantId]
+    assert.notEqual(row.objectId, deriveProjectSheetObjectId(tenantId, PROJECT))
+    const calls = { store: [], resolve: [], records: [] }
+    const projectTargetStore = { async get(input) {
+      calls.store.push({ ...input })
+      const found = registry[input.tenantId]
+      return found ? { id: `reg-${input.tenantId}`, tenantId: input.tenantId, projectNo: input.projectNo, ...found } : null
+    } }
+    const provisioning = { async resolveFieldIds({ projectId, objectId, fieldIds }) {
+      calls.resolve.push({ projectId, objectId })
+      return Object.fromEntries(fieldIds.map((id) => [id, `fld_${id}`]))
+    } }
+    const stored = { id: 'rec-pair', version: 2, data: { fld_idempotencyKey: KEY, fld_projectNo: PROJECT, fld_issueConfirmDate: null } }
+    const records = {
+      supportsWriteFence: true,
+      async queryRecords({ sheetId, filters }) {
+        calls.records.push(['query', sheetId, Object.keys(filters || {})])
+        return filters && filters.fld_idempotencyKey === KEY ? [{ ...stored, data: { ...stored.data } }] : []
+      },
+      async createRecord() { throw new Error('NO_CREATE') },
+      async patchRecord({ sheetId, recordId, changes, expectedVersion }) {
+        calls.records.push(['patch', sheetId, recordId, changes, expectedVersion])
+        Object.assign(stored.data, changes); stored.version += 1
+        return { id: recordId, version: stored.version, data: { ...stored.data } }
+      },
+    }
+    const ledger = { id: `ledger-pair-${tenantId}`, tenantId, ownerId: OWNER, targetRef: TARGET, status: 'acknowledged', intent: 'create',
+      sourceRecordDigest: DIGEST, acknowledgedAt: ACK_AT }
+    const trace = []
+    const executor = writeback.createIssueConfirmWritebackExecutor({
+      env: { ...ON },
+      runId: () => 'run-syn-pair',
+      ledgerReader: { async list() { return [ledger] }, async sweep() { return { rows: [ledger], next: null } } },
+      rowSource: { async read() { return { boundSheetId: row.sheetId, config: CONFIG, payload: { sourceLineId: KEY, project: PROJECT } } } },
+      projectRegistry: createIssueConfirmProjectRegistry({ projectTargetStore }),
+      sheets: createIssueConfirmSheets({ multitable: () => ({ records, provisioning }) }),
+      authority: { async recheck() { return true } },
+      writeLock: {
+        scopeKeyFor: writeLockModule.sheetWriteScopeKey,
+        async withProjectWriteLease(scopeKey, _options, fn) {
+          return fn({ async beforeWrite() {}, hostWriteFence() { return { lock: 'integration_stock_prep_project_write_lock', scopeKey, leaseId: 'l', fencingEpoch: 1, generationToken: 'g' } },
+            async withHostWrite(write) { return write() }, async hostFenceRefused(error) { return error } })
+        },
+      },
+      traceStore: writeback.createIssueConfirmTraceStore({ db: { async insertOneIfAbsent(_table, entry) { trace.push(entry); return [entry] },
+        async selectOne(_table, where) { return trace.find((entry) => entry.ledger_id === where.ledger_id) || null } } }),
+    })
+    const result = await executor.run({ tenantId, ownerId: OWNER, ledgerIds: [ledger.id] })
+    assert.deepEqual(result.results.map((entry) => [entry.outcome, entry.date]), [['written', ACK_DAY]], tenantId)
+    // The registry row was resolved for THIS tenant; the field ids were resolved for THIS tenant's integration-core
+    // project and the registry row's objectId; every records call named the registry row's sheet.
+    assert.deepEqual(calls.store, [{ tenantId, projectNo: PROJECT }], tenantId)
+    assert.deepEqual(calls.resolve, [{ projectId: `${tenantId}:integration-core`, objectId: row.objectId }], tenantId)
+    assert.deepEqual(calls.records, [
+      ['query', row.sheetId, ['fld_idempotencyKey']],
+      ['patch', row.sheetId, 'rec-pair', { fld_issueConfirmDate: ACK_DAY }, 2],
+    ], tenantId)
+    assert.deepEqual(trace.map((entry) => [entry.tenant_id, entry.sheet_id, entry.outcome]), [[tenantId, row.sheetId, 'written']], tenantId)
+  }
+})
+
 test('capability: enabled() is the core exact-literal predicate; create() binds the authenticated scope and refuses a missing re-check', async () => {
   const { createIssueConfirmWritebackCapability } = await portsPromise
   const lock = { scopeKeyFor: writeLockModule.sheetWriteScopeKey, async withProjectWriteLease() { throw new Error('NO') }, async bumpGeneration() {} }
