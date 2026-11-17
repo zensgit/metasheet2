@@ -441,9 +441,11 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     const trace = await tableRows(TRACE)
     expect(trace.map(row => [row.ledger_id, row.outcome, row.sheet_id, row.time_zone])).toEqual([[ledgerId, 'written', sheetId(), 'Asia/Shanghai']])
     expect(await auditsOf(ledgerId)).toEqual(['acknowledgement', 'claim', 'prepare'])
-    // The lease was released and the generation moved (reason issue_confirm_writeback) after the write.
+    // The lease was released and the generation never moved (register R-96, Plan A: no bump after the write). The lock
+    // row is the one the write-back's own acquire created (there is no pre-write snapshot to compare with), so a bump of
+    // any reason would leave generation_reason / generation_bumped_at set.
     const lock = (await tableRows(LOCK))[0]
-    expect([lock.lease_id ?? null, lock.generation_reason]).toEqual([null, 'issue_confirm_writeback'])
+    expect([lock.lease_id ?? null, lock.generation_reason, lock.generation_bumped_at]).toEqual([null, null, null])
     // values-free trace: no project number, key or human value.
     const text = JSON.stringify(trace)
     for (const value of [PROJECT, ...LINES, HUMAN_NOTE]) expect(text.includes(value)).toBe(false)
