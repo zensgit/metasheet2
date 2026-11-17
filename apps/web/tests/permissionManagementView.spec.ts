@@ -418,8 +418,18 @@ describe('PermissionManagementView grant readback', () => {
     delete (globalThis as { __permissionPrincipalId?: string }).__permissionPrincipalId
   })
 
-  function mountView(): HTMLDivElement {
+  function mountView(pending?: { targetId: string; clientOperationId: string; principalId?: string }): HTMLDivElement {
     sessionStorage.removeItem('metasheet.adminAuthorizationOperation.pending.v1')
+    if (pending) {
+      sessionStorage.setItem('metasheet.adminAuthorizationOperation.pending.v1', JSON.stringify({
+        formatVersion: 1,
+        entries: [{
+          principalId: pending.principalId ?? 'principal-1',
+          targetId: pending.targetId,
+          clientOperationId: pending.clientOperationId,
+        }],
+      }))
+    }
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(PermissionManagementView)
@@ -447,6 +457,7 @@ describe('PermissionManagementView grant readback', () => {
     skipTemplateDirectWrite?: boolean
     delayTemplateApply?: Promise<void>
     throwOnGrant?: boolean
+    grantStatus?: number
     legacyByUser?: Record<string, string[]>
     templateRoleId?: string | null
     inheritedRolesByUser?: Record<string, unknown>
@@ -456,6 +467,9 @@ describe('PermissionManagementView grant readback', () => {
     throwOnLegacyRevoke?: boolean
     settleOnLookup?: boolean
     unknownImpact?: boolean
+    directByUser?: Record<string, string[]>
+    templateSourceChanged?: boolean
+    seededReceipts?: Record<string, Record<string, unknown>>
     delayCheck?: Promise<void>
     checkStatus?: number
     checkBody?: Record<string, unknown>
@@ -491,6 +505,18 @@ describe('PermissionManagementView grant readback', () => {
     const deferredCommits = new Map<string, Record<string, unknown>>()
     const legacyState: Record<string, string[]> = {}
     for (const [userId, codes] of Object.entries(options.legacyByUser ?? {})) legacyState[userId] = [...codes]
+    for (const [userId, codes] of Object.entries(options.directByUser ?? {})) {
+      const grants = state[userId]
+      if (!grants) continue
+      grants.direct = [...codes]
+      for (const permission of codes) {
+        if (permission.startsWith('crm:')) {
+          if (!grants.blocked.includes(permission)) grants.blocked.push(permission)
+        } else if (!grants.effective.includes(permission)) {
+          grants.effective.push(permission)
+        }
+      }
+    }
     const checkSignals: AbortSignal[] = []
     const businessQueue = [...(options.businessChecks ?? [])]
     const businessRawBodies: string[] = []
@@ -588,12 +614,15 @@ describe('PermissionManagementView grant readback', () => {
         const codes = action.kind === 'template.apply'
           ? (options.templatePermissions ?? ['workflow:read'])
           : [String(action.code || '')]
+        const assignChanged = action.kind === 'template.apply' && options.templateSourceChanged === false
+          ? false
+          : changed
         return {
           sourceChanges: codes.filter((code) => code.length > 0).map((code) => ({
             source,
             id: code,
             operation,
-            changed,
+            changed: assignChanged,
           })),
           admissionChanges: [],
           scopeCleanup: [],
@@ -670,6 +699,8 @@ describe('PermissionManagementView grant readback', () => {
       }
       if (method === 'GET' && pathname.startsWith('/api/admin/authorization-operations/')) {
         const clientOperationId = decodeURIComponent(pathname.slice('/api/admin/authorization-operations/'.length))
+        const seeded = options.seededReceipts?.[clientOperationId]
+        if (seeded) return createJsonResponse(seeded)
         const deferred = deferredCommits.get(clientOperationId)
         if (deferred && options.settleOnLookup) {
           mutateAction(deferred)
@@ -692,6 +723,9 @@ describe('PermissionManagementView grant readback', () => {
         }
         if (action.kind === 'direct.grant' && options.throwOnGrant) throw new Error('timeout')
         if (action.kind === 'direct.grant' && options.delayGrant) await options.delayGrant
+        if (action.kind === 'direct.grant' && options.grantStatus) {
+          return createJsonResponse({ error: 'Permission rejected' }, options.grantStatus)
+        }
         if (action.kind === 'template.apply' && options.delayTemplateApply) await options.delayTemplateApply
         if (action.kind === 'legacy.revoke' && options.throwOnLegacyRevoke) throw new Error('network down')
         if (action.kind === 'legacy.revoke' && options.legacyRevokeStatus) {
@@ -1784,10 +1818,17 @@ describe('PermissionManagementView grant readback', () => {
     templateSelect.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi()
     release?.()
-    await waitForCondition(() => (root.querySelector('.permission-admin__status')?.textContent || '').includes('未覆盖当前选中用户 user-2'))
+    await waitForCondition(() => (root.querySelector('.permission-admin__status')?.textContent || '').includes('写入结果未确认'))
     const status = root.querySelector('.permission-admin__status')?.textContent || ''
-    expect(status).toContain('现场模板')
+    expect(status).toContain('未覆盖当前选中用户 user-2')
+    expect(status).not.toContain('现场模板')
     expect(status).not.toContain('其他模板')
+    expect(status).not.toContain('已把模板')
+    const submittedTemplate = api.bodies.find((body) => (
+      typeof body.clientOperationId === 'string'
+      && (body.action as { kind?: string } | undefined)?.kind === 'template.apply'
+    )) as { clientOperationId?: string }
+    expect(sessionStorage.getItem('metasheet.adminAuthorizationOperation.pending.v1') || '').toContain(submittedTemplate?.clientOperationId || 'missing-operation')
     expect(root.querySelector('[data-testid="permission-inherited-section"]')?.textContent || '').not.toContain('crm:admin')
     expect(api.calls.filter((call) => call === 'POST /api/admin/authorization-operations')).toHaveLength(1)
     expect(api.calls.some((call) => call === 'POST /api/admin/permission-templates/apply')).toBe(false)
@@ -2550,7 +2591,37 @@ describe('PermissionManagementView grant readback', () => {
     expect(dropped.calls.filter((call) => call.startsWith('POST'))).toEqual(droppedPosts)
   })
 
-  it('previews four authorization actions once, clips the reason, and confirms without the old endpoints', async () => {
+  it('rejects a late permission for the previous member without a success or a cleared marker', async () => {
+    let releaseGrant: (() => void) | undefined
+    const delayGrant = new Promise<void>((resolve) => { releaseGrant = resolve })
+    const api = createPermissionApi({ delayGrant, grantStatus: 409 })
+    const root = mountView()
+    await chooseListedUser(root, 'Alpha')
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-select"]')))
+    await selectPermission(root, 'crm:read')
+    ;(root.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).click()
+    await confirmPermissionMutation(root)
+    await waitForCondition(() => api.calls.includes('POST /api/admin/authorization-operations'))
+    const submitted = api.bodies.find((body) => typeof body.clientOperationId === 'string') as { clientOperationId?: string; reason?: string }
+    clickNamedUser(root, 'Bravo')
+    await waitForCondition(() => (root.querySelector('[data-testid="permission-direct-section"]')?.textContent || '').includes('workflow:read'))
+    releaseGrant?.()
+    await waitForCondition(() => (root.querySelector('[data-testid="permission-action-feedback"]')?.textContent || '').includes('写入结果未确认'))
+    const feedback = root.querySelector('[data-testid="permission-action-feedback"]')?.textContent || ''
+    expect(feedback).toContain('未覆盖当前选中用户 user-2')
+    expect(feedback).not.toContain('已写入')
+    expect(feedback).not.toContain('已完成')
+    expect(feedback).not.toContain('直接授予 crm:read')
+    expect(root.querySelector('[data-testid="permission-direct-section"]')?.textContent || '').not.toContain('crm:read')
+    expect(api.state['user-1'].direct).not.toContain('crm:read')
+    expect(api.state['user-2'].direct).not.toContain('crm:read')
+    expect(sessionStorage.getItem('metasheet.adminAuthorizationOperation.pending.v1') || '').toContain(submitted?.clientOperationId || 'missing-operation')
+    expect(sessionStorage.getItem('metasheet.adminAuthorizationOperation.pending.v1') || '').not.toContain(submitted?.reason || '核对授权')
+    expect(api.calls.filter((call) => call === 'POST /api/admin/authorization-operations')).toHaveLength(1)
+    expect(api.calls.some((call) => call === 'POST /api/permissions/grant')).toBe(false)
+  })
+
+  it('previews four authorization actions once, rejects an overlong reason, and confirms without the old endpoints', async () => {
     let releaseGrant: (() => void) | undefined
     const delayGrant = new Promise<void>((resolve) => { releaseGrant = resolve })
     const api = createPermissionApi({ withTemplate: true, legacyByUser: { 'user-1': ['crm:read'] }, delayGrant })
@@ -2569,21 +2640,34 @@ describe('PermissionManagementView grant readback', () => {
     expect(api.calls.some((call) => call.startsWith('POST'))).toBe(false)
 
     const emoji = '\u{1F600}'
-    reason.value = `  ${'秘'}${emoji.repeat(300)}`
+    const overlongReason = `${'超'}${emoji.repeat(255)}`
+    reason.value = `  ${overlongReason}`
     reason.dispatchEvent(new Event('input', { bubbles: true }))
     await flushUi()
     expect(root.querySelector('[data-testid="permission-operation-reason-label"]')?.textContent || '').toContain('255')
     ;(root.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="permission-mutation-dialog"]')).toBeNull()
+    expect(root.textContent).toContain('原因超过 255 个字符，没有提交预览。')
+    expect(api.calls.some((call) => call.startsWith('POST'))).toBe(false)
+    expect(sessionStorage.getItem('metasheet.adminAuthorizationOperation.pending.v1') || '').not.toContain('超')
+
+    const acceptedReason = `${'秘'}${emoji.repeat(254)}`
+    expect(Array.from(acceptedReason)).toHaveLength(255)
+    expect(acceptedReason).not.toHaveLength(255)
+    reason.value = `  ${acceptedReason}`
+    reason.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(root.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).click()
     await confirmPermissionMutation(root)
     await waitForCondition(() => api.calls.includes('POST /api/admin/authorization-operations'))
     const grantBody = api.bodies.at(-1) as { reason?: string; action?: { kind?: string } }
-    const clippedReason = `${'秘'}${emoji.repeat(254)}`
     expect(grantBody.action?.kind).toBe('direct.grant')
-    expect(grantBody.reason).toBe(clippedReason)
+    expect(grantBody.reason).toBe(acceptedReason)
     expect(Array.from(grantBody.reason ?? '')).toHaveLength(255)
-    expect(grantBody.reason?.startsWith('秘')).toBe(true)
     const stored = sessionStorage.getItem('metasheet.adminAuthorizationOperation.pending.v1') || ''
     expect(stored).not.toContain('秘')
+    expect(stored).not.toContain('超')
     expect(stored).not.toContain(grantBody.reason || 'missing-reason')
     releaseGrant?.()
     await waitForCondition(() => (root.querySelector('[data-testid="permission-action-feedback"]')?.textContent || '').includes('已写入'))
@@ -2698,6 +2782,125 @@ describe('PermissionManagementView grant readback', () => {
     confirm.click()
     await waitForCondition(() => (root.querySelector('[data-testid="permission-action-feedback"]')?.textContent || '').includes('crm:read'))
     expect(api.calls.filter((call) => call === 'POST /api/admin/authorization-operations')).toHaveLength(1)
+  })
+
+  it('verifies an already held template no-op and lets the next action preview', async () => {
+    const api = createPermissionApi({
+      withTemplate: true,
+      templatePermissions: ['workflow:read'],
+      templateSourceChanged: false,
+      directByUser: { 'user-1': ['workflow:read'] },
+    })
+    const root = mountView()
+    await chooseListedUser(root, 'Alpha')
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="apply-permission-template-button"]')))
+    const templateSelect = Array.from(root.querySelectorAll('select')).find((select) => select.innerHTML.includes('现场模板')) as HTMLSelectElement
+    templateSelect.value = 'tpl-1'
+    templateSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    ;(root.querySelector('[data-testid="apply-permission-template-button"]') as HTMLButtonElement).click()
+    await confirmPermissionMutation(root)
+    await waitForCondition(() => (root.querySelector('.permission-admin__status')?.textContent || '').includes('现场模板'))
+    const commit = api.bodies.find((body) => (
+      typeof body.clientOperationId === 'string' && (body.action as { kind?: string }).kind === 'template.apply'
+    )) as { clientOperationId?: string; reason?: string }
+    expect(commit?.reason).toBe('核对授权')
+    const stored = sessionStorage.getItem('metasheet.adminAuthorizationOperation.pending.v1') || ''
+    expect(stored).not.toContain(commit?.clientOperationId || 'missing-operation')
+    expect(stored).not.toContain('核对授权')
+    expect(api.calls.filter((call) => call === 'POST /api/admin/authorization-operations')).toHaveLength(1)
+    const previews = api.calls.filter((call) => call === 'POST /api/admin/authorization-operations/preview')
+    await selectPermission(root, 'crm:read')
+    ;(root.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).click()
+    await waitForCondition(() => api.calls.filter((call) => call === 'POST /api/admin/authorization-operations/preview').length === previews.length + 1)
+    expect(api.calls.filter((call) => call === 'POST /api/admin/authorization-operations')).toHaveLength(1)
+    expect(api.calls.some((call) => (
+      call === 'POST /api/permissions/grant'
+      || call === 'POST /api/admin/permission-templates/apply'
+    ))).toBe(false)
+  })
+
+  it('recovers a preseeded template receipt with GET only and leaves a role receipt held', async () => {
+    const templateOperationId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const emptyImpact = {
+      admissionChanges: [],
+      scopeCleanup: [],
+      effectiveBefore: [],
+      effectiveAfter: [],
+      retainedOtherGrants: [],
+      warnings: [],
+    }
+    const templateApi = createPermissionApi({
+      withTemplate: true,
+      templatePermissions: ['workflow:read'],
+      directByUser: { 'user-1': ['workflow:read'] },
+      seededReceipts: {
+        [templateOperationId]: {
+          status: 'committed',
+          clientOperationId: templateOperationId,
+          receipt: {
+            targetUserId: 'user-1',
+            action: { kind: 'template.apply', templateId: 'tpl-1' },
+            impact: {
+              ...emptyImpact,
+              sourceChanges: [{ source: 'direct', id: 'workflow:read', operation: 'assign', changed: false }],
+            },
+            resultVersion: 'perm-result-1',
+          },
+        },
+      },
+    })
+    const templateRoot = mountView({ targetId: 'user-1', clientOperationId: templateOperationId })
+    await chooseListedUser(templateRoot, 'Alpha')
+    await waitForCondition(() => templateApi.calls.includes(`GET /api/admin/authorization-operations/${templateOperationId}`))
+    await waitForCondition(() => (templateRoot.querySelector('.permission-admin__status')?.textContent || '').includes('现场模板'))
+    expect(templateApi.calls.filter((call) => call.startsWith('POST'))).toEqual([])
+    const templateStored = sessionStorage.getItem('metasheet.adminAuthorizationOperation.pending.v1') || ''
+    expect(templateStored).not.toContain(templateOperationId)
+    expect(templateStored).not.toContain('reason')
+    expect(templateRoot.querySelector('[data-testid="permission-operation-recovery"]')).toBeNull()
+    app?.unmount()
+    container?.remove()
+    app = null
+    container = null
+    apiFetchMock.mockReset()
+
+    const roleOperationId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+    const roleApi = createPermissionApi({
+      seededReceipts: {
+        [roleOperationId]: {
+          status: 'committed',
+          clientOperationId: roleOperationId,
+          receipt: {
+            targetUserId: 'user-1',
+            action: { kind: 'role.assign', roleId: 'role-1' },
+            impact: {
+              ...emptyImpact,
+              sourceChanges: [{ source: 'role', id: 'role-1', operation: 'assign', changed: true }],
+            },
+            resultVersion: 'perm-result-1',
+          },
+        },
+      },
+    })
+    const roleRoot = mountView({ targetId: 'user-1', clientOperationId: roleOperationId })
+    await chooseListedUser(roleRoot, 'Alpha')
+    await waitForCondition(() => (roleRoot.querySelector('[data-testid="permission-operation-recovery-status"]')?.textContent || '').includes('角色或准入'))
+    expect(roleApi.calls.filter((call) => call.startsWith('POST'))).toEqual([])
+    expect(roleApi.calls).toContain(`GET /api/admin/authorization-operations/${roleOperationId}`)
+    expect(sessionStorage.getItem('metasheet.adminAuthorizationOperation.pending.v1') || '').toContain(roleOperationId)
+    await waitForCondition(() => Boolean(roleRoot.querySelector('[data-testid="permission-select"]')))
+    await selectPermission(roleRoot, 'crm:read')
+    const postsBefore = roleApi.calls.filter((call) => call.startsWith('POST'))
+    ;(roleRoot.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(roleApi.calls.filter((call) => call.startsWith('POST'))).toEqual(postsBefore)
+    expect(sessionStorage.getItem('metasheet.adminAuthorizationOperation.pending.v1') || '').toContain(roleOperationId)
+    ;(roleRoot.querySelector('[data-testid="permission-operation-recovery-reread"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(roleApi.calls.filter((call) => call === `GET /api/admin/authorization-operations/${roleOperationId}`).length).toBeGreaterThan(1)
+    expect(roleApi.calls.filter((call) => call.startsWith('POST'))).toEqual([])
+    expect(sessionStorage.getItem('metasheet.adminAuthorizationOperation.pending.v1') || '').toContain(roleOperationId)
   })
 
   it('drops the checker result after a mutation, a refresh, and unmount', async () => {

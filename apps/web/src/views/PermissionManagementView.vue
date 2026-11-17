@@ -37,6 +37,18 @@
     >
       只读重新读取
     </button>
+    <div v-if="recoveredOperationVisible" data-testid="permission-operation-recovery">
+      <p data-testid="permission-operation-recovery-status">{{ recoveredOperationNote }}</p>
+      <button
+        class="permission-admin__button permission-admin__button--secondary"
+        type="button"
+        data-testid="permission-operation-recovery-reread"
+        :disabled="busy || confirmBusy"
+        @click="void rereadRecoveredOperation()"
+      >
+        只读重新读取
+      </button>
+    </div>
 
     <div class="permission-admin__layout">
       <aside class="permission-admin__panel permission-admin__panel--users">
@@ -304,7 +316,7 @@
               </div>
               <p class="permission-admin__hint">授予和回收使用上方权限码预检里选中的权限码。移除直接授权不会去掉角色继承。</p>
               <label class="permission-admin__hint" data-testid="permission-operation-reason-label">
-                原因（添加直接授权和按模板写入必填，最多 255 个字符）
+                原因（添加直接授权和按模板写入必填，最多 255 个字符，超出不会提交）
                 <textarea
                   v-model="operationReason"
                   data-testid="permission-operation-reason"
@@ -375,6 +387,7 @@ import {
   type AdminAuthorizationAction,
   type AdminAuthorizationEffectiveSource,
   type AdminAuthorizationImpact,
+  type AdminAuthorizationReceipt,
   type AdminAuthorizationRequest,
   type AdminAuthorizationTransportRequest,
   type AdminAuthorizationTransportResponse,
@@ -479,6 +492,8 @@ const operationSummaryText = ref('')
 const confirmBusy = ref(false)
 const frozenRequest = ref<AdminAuthorizationRequest | null>(null)
 const submittedRequest = ref<AdminAuthorizationRequest | null>(null)
+const recoveredOperationNote = ref('')
+const recoveredOperationId = ref('')
 const REASON_LIMIT = 255
 let operationEpoch = 0
 let confirmLatch = false
@@ -561,6 +576,15 @@ async function verifyAuthorizationLive(): Promise<boolean> {
     const inspection = await loadUserAccess(targetId)
     if (currentPrincipalId() !== principalId) return false
     if (!accessReadStillCurrent(generation, userAccessReadGeneration.value, targetId, selectedUserId.value)) return false
+    const remembered = submittedRequest.value
+    if (
+      remembered
+      && remembered.targetUserId === receipt.targetUserId
+      && !sameExceptionAction(remembered.action, receipt.action)
+    ) {
+      liveInspection = inspection
+      return false
+    }
     liveInspection = inspection
     return permissionSourceAgrees(receipt.action, receipt.impact, inspection)
   } catch {
@@ -582,6 +606,11 @@ const confirmCopy = computed(() => {
     title: operationDialogTitle(frozenRequest.value),
     summary: operationSummaryText.value,
   }
+})
+const recoveredOperationVisible = computed(() => {
+  if (!recoveredOperationNote.value || !selectedUserId.value) return false
+  const phase = authorizationOperation.phase.value
+  return phase === 'pending' || phase === 'committed' || phase === 'unverified_no_read'
 })
 const operationReady = computed(() => (
   operationDialogOpen.value
@@ -933,8 +962,13 @@ function applyPermissionReadback(
   }
 }
 
-function clipReason(value: string): string {
-  return Array.from(value.trim()).slice(0, REASON_LIMIT).join('')
+function preparedReason(): { reason?: string } | { error: string } {
+  const points = Array.from(operationReason.value.trim())
+  if (points.length > REASON_LIMIT) {
+    return { error: '原因超过 255 个字符，没有提交预览。' }
+  }
+  const reason = points.join('')
+  return reason ? { reason } : {}
 }
 
 function requestFingerprint(request: AdminAuthorizationRequest | null): string {
@@ -1038,7 +1072,7 @@ function permissionSourceAgrees(
   if (action.kind === 'template.apply') {
     if (roleChanged || admissionChanged) return false
     const codes = impact.sourceChanges
-      .filter((change) => change.source === 'direct' && change.operation === 'assign' && change.changed)
+      .filter((change) => change.source === 'direct' && change.operation === 'assign')
       .map((change) => change.id)
     return codes.length > 0 && codes.every((code) => inspection.direct.includes(code))
   }
@@ -1051,6 +1085,42 @@ function permissionSourceAgrees(
     return !inspection.legacy.includes(action.code)
   }
   return false
+}
+
+function sameExceptionAction(expected: AdminAuthorizationAction, actual: AdminAuthorizationAction): boolean {
+  if (expected.kind === 'template.apply' || actual.kind === 'template.apply') {
+    return expected.kind === 'template.apply'
+      && actual.kind === 'template.apply'
+      && expected.templateId === actual.templateId
+  }
+  if (expected.kind === 'direct.grant' || expected.kind === 'direct.revoke' || expected.kind === 'legacy.revoke') {
+    return actual.kind === expected.kind && actual.code === expected.code
+  }
+  return false
+}
+
+function requestFromReceipt(receipt: AdminAuthorizationReceipt): AdminAuthorizationRequest | null {
+  const action = receipt.action
+  if (action.kind === 'direct.grant' || action.kind === 'direct.revoke' || action.kind === 'legacy.revoke') {
+    return {
+      targetUserId: receipt.targetUserId,
+      action: { kind: action.kind, code: action.code },
+      admissionChanges: [],
+    }
+  }
+  if (action.kind === 'template.apply') {
+    return {
+      targetUserId: receipt.targetUserId,
+      action: { kind: 'template.apply', templateId: action.templateId },
+      admissionChanges: [],
+    }
+  }
+  return null
+}
+
+function supportedRecoveryReceipt(receipt: AdminAuthorizationReceipt | null): AdminAuthorizationRequest | null {
+  if (!receipt || receipt.targetUserId !== selectedUserId.value) return null
+  return requestFromReceipt(receipt)
 }
 
 function staticConfirmSummary(request: AdminAuthorizationRequest): string {
@@ -1087,15 +1157,23 @@ function staticConfirmSummary(request: AdminAuthorizationRequest): string {
 }
 
 function buildOperationRequest(action: AdminAuthorizationAction, targetUserId: string): AdminAuthorizationRequest | null {
-  const reason = clipReason(operationReason.value)
+  const prepared = preparedReason()
+  if ('error' in prepared) return null
   const needsReason = action.kind === 'direct.grant' || action.kind === 'template.apply'
-  if (needsReason && !reason) return null
+  if (needsReason && !prepared.reason) return null
   return {
     targetUserId,
     action,
     admissionChanges: [],
-    ...(reason ? { reason } : {}),
+    ...(prepared.reason ? { reason: prepared.reason } : {}),
   }
+}
+
+function rejectOverlongReason(): boolean {
+  const prepared = preparedReason()
+  if (!('error' in prepared)) return false
+  setStatus(prepared.error, 'error')
+  return true
 }
 
 function beginOperation(request: AdminAuthorizationRequest): void {
@@ -1159,6 +1237,7 @@ function cancelOperationDialog(): void {
 
 function openDirectConfirm(action: 'grant' | 'revoke'): void {
   if (busy.value || !selectedUserId.value || !selectedPermissionCode.value || !grantView.value.actionsEnabled) return
+  if (rejectOverlongReason()) return
   const kind = action === 'grant' ? 'direct.grant' : 'direct.revoke'
   const request = buildOperationRequest(
     { kind, code: selectedPermissionCode.value },
@@ -1174,6 +1253,7 @@ function openDirectConfirm(action: 'grant' | 'revoke'): void {
 function openTemplateConfirm(): void {
   const template = selectedTemplate.value
   if (busy.value || !selectedUserId.value || !template || !grantView.value.actionsEnabled) return
+  if (rejectOverlongReason()) return
   const request = buildOperationRequest(
     { kind: 'template.apply', templateId: template.id },
     selectedUserId.value,
@@ -1187,6 +1267,7 @@ function openTemplateConfirm(): void {
 
 function openLegacyConfirm(permission: string): void {
   if (busy.value || !selectedUserId.value || !permission || !grantView.value.actionsEnabled) return
+  if (rejectOverlongReason()) return
   const request = buildOperationRequest(
     { kind: 'legacy.revoke', code: permission },
     selectedUserId.value,
@@ -1329,7 +1410,27 @@ function showPendingResult(request: AdminAuthorizationRequest, generation: numbe
   showFeedback(outcome.message, 'error', request.action.kind === 'template.apply')
 }
 
+function committedReceiptMatches(request: AdminAuthorizationRequest): boolean {
+  const phase = authorizationOperation.phase.value
+  if (phase !== 'committed' && phase !== 'verified') return false
+  const receipt = authorizationOperation.receipt.value
+  if (!receipt || receipt.targetUserId !== request.targetUserId) return false
+  return sameExceptionAction(request.action, receipt.action)
+}
+
+function showDetachedUnknown(request: AdminAuthorizationRequest): void {
+  const outcome = describeUnconfirmedPermissionWrite(request.targetUserId)
+  const message = selectedUserId.value !== request.targetUserId
+    ? `${outcome.message} 未覆盖当前选中用户 ${selectedUserId.value} 的状态`
+    : outcome.message
+  showFeedback(message, 'error', request.action.kind === 'template.apply')
+}
+
 async function reportDetached(request: AdminAuthorizationRequest, generation: number): Promise<void> {
+  if (!committedReceiptMatches(request)) {
+    showDetachedUnknown(request)
+    return
+  }
   const detachedAction = request.action
   if (detachedAction.kind === 'template.apply') {
     try {
@@ -1399,9 +1500,10 @@ async function finishCommitted(request: AdminAuthorizationRequest, generation: n
   const committedAction = request.action
   if (committedAction.kind === 'template.apply') {
     const template = permissionTemplates.value.find((item) => item.id === committedAction.templateId)
+    const provenCodes = impactPermissionCodes(request)
     const outcome = describePermissionTemplateApply({
       templateName: template?.name || committedAction.templateId,
-      requestedPermissions: template ? [...template.permissions] : impactPermissionCodes(request),
+      requestedPermissions: provenCodes.length > 0 ? provenCodes : (template ? [...template.permissions] : []),
       inspection,
     })
     const stillCurrent = accessReadStillCurrent(generation, userAccessReadGeneration.value, request.targetUserId, selectedUserId.value)
@@ -1442,6 +1544,48 @@ async function finishCommitted(request: AdminAuthorizationRequest, generation: n
     showFeedback(outcome.message, outcome.tone, false)
     applyPermissionReadback(generation, request.targetUserId, inspection, outcome.applyInspection)
   }
+}
+
+async function presentRecoveredOperation(): Promise<void> {
+  if (submittedRequest.value || confirmLatch || confirmBusy.value || operationDialogOpen.value) return
+  const userId = selectedUserId.value
+  const phase = authorizationOperation.phase.value
+  if (!userId || (phase !== 'pending' && phase !== 'committed' && phase !== 'unverified_no_read')) return
+  const receipt = authorizationOperation.receipt.value
+  if (receipt && receipt.targetUserId !== userId) return
+  if (phase === 'pending' || phase === 'unverified_no_read' || !receipt) {
+    recoveredOperationNote.value = describeUnconfirmedPermissionWrite(userId).message
+    return
+  }
+  const request = supportedRecoveryReceipt(receipt)
+  if (!request) {
+    recoveredOperationNote.value = '这次回执是角色或准入变更。权限来源页不能用当前读取确认它，也不会清除这条未完成记录。'
+    return
+  }
+  const operationId = authorizationOperation.clientOperationId.value
+  if (operationId && recoveredOperationId.value === operationId) return
+  recoveredOperationId.value = operationId
+  recoveredOperationNote.value = describeUnconfirmedPermissionWrite(userId).message
+  await finishCommitted(request, userAccessReadGeneration.value)
+  if (selectedUserId.value !== userId) return
+  if (authorizationOperation.phase.value === 'verified') {
+    recoveredOperationNote.value = ''
+    return
+  }
+  recoveredOperationNote.value = status.value || describeUnconfirmedPermissionWrite(userId).message
+}
+
+async function rereadRecoveredOperation(): Promise<void> {
+  if (confirmLatch || confirmBusy.value) return
+  const userId = selectedUserId.value
+  if (!userId) return
+  recoveredOperationId.value = ''
+  const phase = authorizationOperation.phase.value
+  if (phase === 'pending' || phase === 'unverified_no_read' || phase === 'committed') {
+    await authorizationOperation.lookup()
+    await authorizationOperation.whenSettled()
+  }
+  await presentRecoveredOperation()
 }
 
 function impactPermissionCodes(request: AdminAuthorizationRequest): string[] {
@@ -1587,6 +1731,17 @@ watch([selectedUserId, selectedPermissionCode, selectedTemplateId, operationReas
   frozenRequest.value = null
   busy.value = false
 })
+
+watch(
+  () => [
+    selectedUserId.value,
+    authorizationOperation.phase.value,
+    authorizationOperation.clientOperationId.value,
+  ] as const,
+  () => {
+    void presentRecoveredOperation()
+  },
+)
 
 watch(templateModeFilter, () => {
   void loadPermissions().catch((error) => {
