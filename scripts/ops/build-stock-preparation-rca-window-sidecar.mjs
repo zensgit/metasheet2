@@ -9,10 +9,12 @@ import { fileURLToPath } from 'node:url'
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const FROZEN_RUNTIME_SHA = 'd87e086fd1218b4cfb150177d43f2c52904b1d6d'
 // R5 (route-coverage 22/33 -> 33/33) re-pinned the extended smoke's digest below; the other two
-// frozen helpers are untouched by R5 and keep their prior digests.
+// frozen helpers are untouched by R5 and keep their prior digests. The 2026-11 E2E harness refresh
+// re-pinned BOTH smoke digests (MVP option fixture now covers the #5394 catalog; the extended smoke
+// asserts the #5459 sandbox targetBinding echo separately from its leak scan); pm2-sample is untouched.
 const FROZEN_HELPERS = Object.freeze({
-  'stock-preparation-prep-line-extended-smoke.mjs': '96fcf2b4df530ddfeac08b6caed476341d6e6f4779cc3c6de6a92ac47b1097a7',
-  'stock-preparation-mvp-postdeploy-smoke.mjs': 'e5265a2a8052ddc34866438a1ee3356b5d2aa1a106c8199f5e2fbbe4f2614df4',
+  'stock-preparation-prep-line-extended-smoke.mjs': '24c147bc262dfbac73433826197036db3312e9ebf962307b8dea292bf0fa4aa2',
+  'stock-preparation-mvp-postdeploy-smoke.mjs': '0e08de24b12142805b0527b5fff093a37a92f6fa79ba91ad5674f39a18239afd',
   'stock-preparation-rca-window-pm2-sample.mjs': '09cc76024bd98fd4ce86cfa834eea3b94680482d0d0970600da008a19a6731ec',
 })
 const FILES = Object.freeze([

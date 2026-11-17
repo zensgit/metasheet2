@@ -21,7 +21,7 @@ import {
 } from '../../src/attendance/coordination/settlement-coordination-key'
 import {
   ADVISORY_TWO_INT4_CENSUS_V1,
-  censusHaystack,
+  censusEntryOwns,
   scanTwoInt4AdvisorySites,
   type AdvisoryTwoInt4CensusEntryV1,
 } from '../helpers/settlement-coordination-advisory-census'
@@ -153,21 +153,33 @@ describe('settlement coordination key space — guard ④ population (closed wor
     expect(scan.sites.filter((site) => site.file === 'packages/core-backend/src/audit/AuditRepository.ts')).toHaveLength(3)
     expect(scan.sites.length).toBeGreaterThanOrEqual(45)
 
-    const matchesOf = (entry: AdvisoryTwoInt4CensusEntryV1) =>
-      scan.sites.filter((site) => site.file === entry.file && site.key1 === entry.key1 && censusHaystack(entry, site).includes(entry.window))
+    const matchesOf = (entry: AdvisoryTwoInt4CensusEntryV1) => scan.sites.filter((site) => censusEntryOwns(entry, site))
     const unclassified: string[] = []
     for (const site of scan.sites) {
-      const owners = ADVISORY_TWO_INT4_CENSUS_V1.filter(
-        (entry) => entry.file === site.file && entry.key1 === site.key1 && censusHaystack(entry, site).includes(entry.window),
-      )
+      const owners = ADVISORY_TWO_INT4_CENSUS_V1.filter((entry) => censusEntryOwns(entry, site))
       if (owners.length !== 1) unclassified.push(`${site.file}:${site.line} key1=${site.key1} matches ${owners.length} census entries`)
     }
     expect(unclassified).toEqual([])
     const miscounted = ADVISORY_TWO_INT4_CENSUS_V1
       .map((entry) => ({ entry, found: matchesOf(entry).length }))
-      .filter(({ entry, found }) => found !== (entry.count ?? 1))
+      .filter(({ entry, found }) => entry.count !== 'any' && found !== (entry.count ?? 1))
       .map(({ entry, found }) => `${entry.file} key1=${entry.key1} window=${JSON.stringify(entry.window)}: expected ${entry.count ?? 1}, found ${found}`)
     expect(miscounted).toEqual([])
+    // A prefix entry names a directory, a non-empty window and a key1 expression: it never classifies a site by file alone.
+    for (const entry of ADVISORY_TWO_INT4_CENSUS_V1.filter((e) => e.fileMatch === 'prefix')) {
+      expect(entry.file.endsWith('/')).toBe(true)
+      expect(entry.window.length).toBeGreaterThan(0)
+      expect(entry.window).toContain(entry.key1)
+    }
+  })
+
+  it('POSITIVE CONTROL — a prefix entry owns a site under its directory with its key1 and window, and nothing else', () => {
+    const prefix = ADVISORY_TWO_INT4_CENSUS_V1.find((e) => e.fileMatch === 'prefix')!
+    const site = (file: string, key1: string, code: string) => ({ file, line: 1, fn: 'pg_try_advisory_xact_lock', key1, key2: '1', window: code, code })
+    expect(censusEntryOwns(prefix, site(`${prefix.file}zzzz20261107000000_x.ts`, prefix.key1, prefix.window))).toBe(true)
+    expect(censusEntryOwns(prefix, site(`${prefix.file}zzzz20261107000000_x.ts`, prefix.key1, 'pg_advisory_xact_lock(20261106, 1)'))).toBe(false)
+    expect(censusEntryOwns(prefix, site(`${prefix.file}zzzz20261107000000_x.ts`, '20261107', prefix.window))).toBe(false)
+    expect(censusEntryOwns(prefix, site('packages/core-backend/src/rbac/x.ts', prefix.key1, prefix.window))).toBe(false)
   })
 
   it('constant census entries name registry entries and are still tied to the code that binds key1', () => {
@@ -179,10 +191,10 @@ describe('settlement coordination key space — guard ④ population (closed wor
       }
       if (!entry.registry || entry.registry.length === 0) problems.push(`${entry.file}: ${entry.kind} entry names no registry entry`)
       for (const name of entry.registry ?? []) if (!REGISTRY_BY_NAME.has(name)) problems.push(`${entry.file}: unknown registry entry ${name}`)
-      const text = readSource(entry.file)
+      const text = entry.fileMatch === 'prefix' ? '' : readSource(entry.file)
       // A bound literal must sit in the code (comments removed) of every site the entry matches; a
       // helper's literals are checked at its call sites below instead.
-      const sites = scan.sites.filter((site) => site.file === entry.file && site.key1 === entry.key1 && censusHaystack(entry, site).includes(entry.window))
+      const sites = scan.sites.filter((site) => censusEntryOwns(entry, site))
       for (const literal of entry.boundLiterals ?? []) {
         if (!entry.helper && !sites.every((site) => site.code.includes(`'${literal}'`))) {
           problems.push(`${entry.file}: bound literal '${literal}' is not in the code of every matched site`)

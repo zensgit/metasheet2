@@ -184,26 +184,26 @@ git merge-base --is-ancestor <5402 头提交> origin/main # NO
 
      两者是**互相独立的字段**。于是"objectId 换成沙箱、sheetId 留着正式表那个"的组合会让沙箱门放行,然后**把行写进正式主表**——挂着沙箱的名,干着正式表的事,正好是 D1=B 要避免的那件事。
 
-     **正确做法**:调 ensure 建表(或确认表已在)、写好所有权登记行;它返回的 `data.targetBinding` **只有 33 个 TEMPLATE 字段**(20 个 `plm_system` + 13 个人工列),**不含 customer pack 的 `ext_` 列**——**不能把它整段贴进 action 配置去替换原有的 `fieldIdMap`**,那会让 `ext_` 列(领料节点/备料日期/毛坯尺寸等)静默变成无法解析。若这次窗口没装 customer pack,ensure 的输出就是完整的,可以直接贴;**若装了 pack,必须合并**再贴。
+     **正确做法**:调 ensure 建表(或确认表已在)、写好所有权登记行;它返回的 `data.targetBinding` **只有 TEMPLATE 字段**(带 #6778 的包起是 35 个:22 个 `plm_system` + 13 个人工列;更早的包是 33 个:20 + 13),**不含 customer pack 的 `ext_` 列**——**不能把它整段贴进 action 配置去替换原有的 `fieldIdMap`**,那会让 `ext_` 列(领料节点/备料日期/毛坯尺寸等)静默变成无法解析。若这次窗口没装 customer pack,ensure 的输出就是完整的,可以直接贴;**若装了 pack,必须合并**再贴。
 
      ```
      POST /api/integration/stock-preparation/sandbox-target/ensure
      { "objectId": "<本窗口沙箱 objectId>", "label": "<表名>" }
      ```
-     响应里的 `data.targetBinding` 形如 `{ sheetId, objectId, keyField, fieldIdMap }`。**合并口径**:`sheetId`/`objectId`/`keyField` 与 33 列 `fieldIdMap` 一律用这次 ensure 的输出(objectId 一变,`fld_+sha1(projectId:objectId:fieldId)` 全变,旧的 33 列条目不能沿用);但**同一 sheet/objectId 下旧配置里的 `ext_*` 条目物理列 id 依然有效**,必须把它们并进新的 `fieldIdMap`,不能丢。合并后贴:
+     响应里的 `data.targetBinding` 形如 `{ sheetId, objectId, keyField, fieldIdMap }`。**合并口径**:`sheetId`/`objectId`/`keyField` 与模板列(#6778 起 35 列,之前 33 列)的 `fieldIdMap` 一律用这次 ensure 的输出(objectId 一变,`fld_+sha1(projectId:objectId:fieldId)` 全变,旧的模板列条目不能沿用);但**同一 sheet/objectId 下旧配置里的 `ext_*` 条目物理列 id 依然有效**,必须把它们并进新的 `fieldIdMap`,不能丢。合并后贴:
      ```json
      { "plm.stock-preparation.pull-bom.v1": { "target": "<合并后的 targetBinding,而非 ensure 原始输出>" } }
      ```
-     **推荐做法是不要手工做 JSON 合并**:装了 pack 时,ensure 建完表之后,用 `scripts/ops/stock-preparation-derive-target-binding.mjs` 带上 `--pack <packFile>`(见下面的离线段落)离线算出**已经合并好**的 `{ target, extensionFieldIds }`——**把这两半都贴进 action 配置,不能只贴 `target`**:`target` 贴到 `target` 键,`extensionFieldIds` 贴到与 `target` 同级的 `extensionFieldIds` 键。脚本自己的注释把这两半叫作"the two halves an action config needs"(`stock-preparation-derive-target-binding.mjs:50-51`)不是修辞——`action.extensionFieldIds` 是这份配置的 DURABLE 半边,完整性门(`assertTargetFieldMapCompleteness`,`stock-preparation-table-actions.cjs:529-532`)按它(而不是 `fieldIdMap` 的键)算"哪些 ext 列是必须绑的",只贴 `target` 而不换这个键,会让它继续读旧配置里的旧值(或空数组);旧值缺列时该门读不到新列就静默放过、留到 apply 时才在 `assertExtFieldMappingAgreesWithAction`(`:564-580`)撞上 422 `TARGET_SCHEMA_INCOMPLETE`。若这次要用的 `ext_` 列集合与旧配置一致,直接用脚本这次输出的 `extensionFieldIds` **整体替换**旧配置里的那个键即可,不要把两次输出的 `extensionFieldIds` 再手工拼接。这份输出的 `fieldIdMap` 是脚本按同一套哈希公式重算的 33 + pack 的 `ext_` 列全集,不是"ensure 输出 + 手工拼接",不会漏列也不会贴错物理列 id。
+     **推荐做法是不要手工做 JSON 合并**:装了 pack 时,ensure 建完表之后,用 `scripts/ops/stock-preparation-derive-target-binding.mjs` 带上 `--pack <packFile>`(见下面的离线段落)离线算出**已经合并好**的 `{ target, extensionFieldIds }`——**把这两半都贴进 action 配置,不能只贴 `target`**:`target` 贴到 `target` 键,`extensionFieldIds` 贴到与 `target` 同级的 `extensionFieldIds` 键。脚本自己的注释把这两半叫作"the two halves an action config needs"(`stock-preparation-derive-target-binding.mjs:50-51`)不是修辞——`action.extensionFieldIds` 是这份配置的 DURABLE 半边,完整性门(`assertTargetFieldMapCompleteness`,`stock-preparation-table-actions.cjs:529-532`)按它(而不是 `fieldIdMap` 的键)算"哪些 ext 列是必须绑的",只贴 `target` 而不换这个键,会让它继续读旧配置里的旧值(或空数组);旧值缺列时该门读不到新列就静默放过、留到 apply 时才在 `assertExtFieldMappingAgreesWithAction`(`:564-580`)撞上 422 `TARGET_SCHEMA_INCOMPLETE`。若这次要用的 `ext_` 列集合与旧配置一致,直接用脚本这次输出的 `extensionFieldIds` **整体替换**旧配置里的那个键即可,不要把两次输出的 `extensionFieldIds` 再手工拼接。这份输出的 `fieldIdMap` 是脚本按同一套哈希公式重算的模板列(#6778 起 35,之前 33)+ pack 的 `ext_` 列全集,不是"ensure 输出 + 手工拼接",不会漏列也不会贴错物理列 id。
 
      三件事都必须来自这次(合并后的)输出,不能手改:
      - `sheetId` —— apply 写哪张表、导出读哪张表都只看它;
-     - `fieldIdMap` —— 必须是完整的一整份(33 个 TEMPLATE 列 + 已装 pack 的全部 `ext_` 列;含 13 个人工列),少一列结转会在部署期被 `STOCK_PREP_CARRY_TARGET_HUMAN_FIELDS_UNBOUND` 拦下。
+     - `fieldIdMap` —— 必须是完整的一整份(全部 TEMPLATE 列:#6778 起 35 个,之前 33 个;+ 已装 pack 的全部 `ext_` 列;含 13 个人工列),少一列结转会在部署期被 `STOCK_PREP_CARRY_TARGET_HUMAN_FIELDS_UNBOUND` 拦下。
      - `extensionFieldIds`(与 `target` 同级、单独一个键)—— 完整性门与运行期一致性门(见上一段)都只认它,不认 `fieldIdMap` 里出现过哪些 ext 键。
 
      > **2026-09-10 订正**:上面这段此前只教"把 `target` 整段贴进 action 配置",漏了 `--action-fragment` 输出的另一半 `extensionFieldIds`——已按脚本自述与 `assertExtFieldMappingAgreesWithAction`/`assertTargetFieldMapCompleteness` 的实际校验补全。
 
-     （离线场景:没法调接口时,`node scripts/ops/stock-preparation-derive-target-binding.mjs --tenant-id <tenantId> --object-id <objectId> [--pack <packFile> --pack-id <id>] --action-fragment` 能算出**同样**的绑定;带上 `--pack` 时输出已经是与 customer pack 的 `ext_` 列合并好的完整映射,不带 `--pack` 只算 33 列 TEMPLATE 部分。但它只算不建——**之后仍要调一次上面的 ensure**,否则表和所有权登记行不存在,结转会被 `CONFIRM_CARRY_TARGET_TENANT_MISMATCH` 拒,按项目导出物料也会被 `PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH` 拒。)
+     （离线场景:没法调接口时,`node scripts/ops/stock-preparation-derive-target-binding.mjs --tenant-id <tenantId> --object-id <objectId> [--pack <packFile> --pack-id <id>] --action-fragment` 能算出**同样**的绑定;带上 `--pack` 时输出已经是与 customer pack 的 `ext_` 列合并好的完整映射,不带 `--pack` 只算 TEMPLATE 部分(#6778 起 35 列,之前 33 列)。但它只算不建——**之后仍要调一次上面的 ensure**,否则表和所有权登记行不存在,结转会被 `CONFIRM_CARRY_TARGET_TENANT_MISMATCH` 拒,按项目导出物料也会被 `PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH` 拒。)(**2026-11-13 订正**:#6778 把主模板从 33 列加到 35 列,多的两个都是 `plm_system` 列;本节这几处的列数按此改写。上面 r7 实际执行记录里的 33 和 33 + 21 = 54 是当天的事实,不改。)
 
      > **2026-09-10 订正**:本节此前写的是"调 ensure,把它返回的 `targetBinding` 整段贴进 action 配置,一条路,别的都别走",与文末 r7 实际执行记录第 8 条(:110 附近)矛盾且会丢客户 pack 的 21 个 `ext_` 列——已按第 8 条的合并口径改写为上面这版,并补充指向 `stock-preparation-derive-target-binding.mjs --pack` 这个可以直接产出合并结果的脚本,避免手工 JSON 拼接出错。依据:该脚本已支持 `--pack`/`--pack-id`(`scripts/ops/stock-preparation-derive-target-binding.mjs`),以及本文件 :110 的 r7 实际记录(33+21=54)。
 
@@ -242,7 +242,7 @@ git merge-base --is-ancestor <5402 头提交> origin/main # NO
      ```
 - **`tenantId` 为什么是必填的**:钉钉目的地 id 是部署级配置,宿主发送时只能证明「这个目的地是管理员管的」,证明不了「它属于正在被播报的那个租户」。而一个在两个组织里都活跃的账号,其 token 不带租户声明(`resolveSessionTenantId` 对 0 个或 2 个以上组织的账号都不发声明),于是 `x-tenant-id` 请求头就能选择用哪个租户身份推进 —— 若链路不声明自己属于谁,另一个租户的项目号就会被播报进这个群。填了之后，不属于该租户的推进一律返回 **501 `STOCK_PREPARATION_HANDOFF_NOT_CONFIGURED`** —— 故意与「这个部署根本没配接力」逐字节相同，不让外租户从报错里知道「这里有一条链，只是不是你的」；状态读返回 200 `configured:false`；真正的原因只写进服务端日志。两者都不写库、不发消息。多租户部署目前只能服务一条链（按租户分链是后续工作）。
 - 验证:重启后用任意一个已有项目号请求 `GET /api/integration/stock-preparation/handoff?projectNo=<项目号>`,应当返回 `configured:true` 且 `stepCount` 等于你配的步数;若返回 500 `STOCK_PREPARATION_HANDOFF_CONFIG_INVALID`,报错体里的 `details.field` 就是写错的那个键(例如缺 `tenantId`)。
-- 失败处理:本功能与本窗口的主线(拉取 → 确认 → 沙箱 apply)**无依赖**。配不对就把 `INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH` 从 `app.env` 里拿掉重启,回到「没有这个功能」的状态,不要占用窗口时间排查。
+- 失败处理:本功能与本窗口的主线(拉取 → 确认 → 沙箱 apply)**无依赖**。配不对就先把 `INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH` 改成 `INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH=" "`(英文双引号包一个空格;去空格后为空就当没配,`packages/core-backend/src/plugin-runtime-config.ts:72`),用 `attendance-onprem-start-pm2.ps1` 重启,用配置时那个绑定本租户的令牌确认上面那条 GET 返回 `configured:false`,再删掉这一行,回到「没有这个功能」的状态,不要占用窗口时间排查。只删行、或只写 `KEY=` 再重启都不行:删掉的键会留在运行中的进程里(交付说明 `customer-delivery-guide-20260904.md:717` 的实测),而 PS 5.1 下空值等于删行(交付说明回退一节有说明)。重启后键还是旧值就停下报 owner。
 
 ---
 
@@ -974,5 +974,5 @@ schtasks /Create ^
 
 **升级后(不论是否顺带开 flag)按此顺序再跑两个脚本,不要跳步**:先 `claim-flag-probe.cjs`(单次探测,判定 flag 是否真的生效:无声明令牌应 403,带声明令牌应 200),确认 flag 状态符合预期后,再跑 `w4-regression-222.ps1` 做管理员链 + 操作员链的全量回归,并与升级前保存的基线日志逐行 diff(去掉时间戳/UUID/时间字段后应为空)——2026-09-06 在 222 上就是按这个顺序验证的(先探针后回归),不要反过来,回归脚本跑得慢,先用探针快速判定 flag 本身对不对,能省一次无谓的完整回归。
 
-**回滚**(任何一条不过就回滚,不要就地调):删掉 env 里那一行 → `pm2 restart metasheet-backend --update-env`。
+**回滚**(任何一条不过就回滚,不要就地调):**不要只删 env 里那一行再裸跑 `pm2 restart metasheet-backend --update-env`**——它不重读 env 文件,也不会把删掉的变量从运行中的进程里清掉(`customer-delivery-guide-20260904.md` §7.1 memo 开关那一段记的实测),开关可能仍然开着。按这个顺序做:①把这一行改成 `MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED=false`(读取方去空格、不分大小写后只认 `true`,`plugins/plugin-integration-core/lib/http-routes.cjs:1887`,基线 89617a418;`false` 就是关);②重启:用 `scripts/ops/attendance-onprem-start-pm2.ps1 -RootDir <安装根目录>`,或交付说明 §7.1 那种先把 env 文件装进当前 PowerShell、再 `pm2 restart metasheet-backend --update-env` 的写法;③核两条:`pm2 env 0` 里这个键是 `false`;上表 A 那个**没有**租户声明的旧令牌不再得到 403 `OPERATOR_SCOPE_TENANT_REQUIRED`;④两条都对了再删这一行。
 没有迁移、没有落库状态,回滚即刻恢复关闭前的行为。

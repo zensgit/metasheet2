@@ -15,6 +15,9 @@
 //          refused; absent / archived answer ready:false; OFF ⇒ FLAT answer, switchOn:false, no ledger read; ON ⇒ the
 //          status; no `fld_` and no pullBatch key in any answer; the handler is registered values-free
 //   SR-02  the board: OFF ⇒ exactly the frozen keys (no pullBatch); ON ⇒ the stanza; a ledger failure is fail-soft
+//   SR-03  the tenancy wall (finding N13): a registry row of the caller's tenant whose sheet belongs to ANOTHER tenant's
+//          staging project is refused 409 TABLE_ACTION_TARGET_TENANT_MISMATCH — switch on AND off — with zero ledger
+//          statements, zero records reads and no band read; the caller's own sheet still answers 200
 //
 // Every value is synthetic.
 
@@ -65,14 +68,14 @@ function provisioningFake({ fields = ['pullBatch', 'firstPullBatch'], property =
   return p
 }
 
-function ledgerFake({ status = 'born_empty', fail = false, batches = [] } = {}) {
+function ledgerFake({ status = 'born_empty', fail = false, batches = [], rule = 'material' } = {}) {
   const calls = []
   return {
     calls,
     async readSheetState(input) {
       calls.push(['readSheetState', input])
       if (fail) throw Object.assign(new Error('relation missing'), { code: '42P01' })
-      return { sheet: status === null ? null : { historyStatus: status, historyMode: 'inferred', historyBatchCount: 0, firstPullBatchRule: 'material', labelFormat: 'ordinal_date', labelLocale: 'zh-CN', bandPlacement: 'left' }, batches }
+      return { sheet: status === null ? null : { historyStatus: status, historyMode: 'inferred', historyBatchCount: 0, firstPullBatchRule: rule, labelFormat: 'ordinal_date', labelLocale: 'zh-CN', bandPlacement: 'left' }, batches }
     },
   }
 }
@@ -208,7 +211,7 @@ test('SS-06 readiness v3: six booleans off one status; the OFF status (zero IO) 
 
 test('SS-07 the board stanza: ready, each pause, fail-soft (never throws)', async () => {
   const ready = await SS.readPullBatchBoardStanza(deps({ store: ledgerFake({ batches: [{ batchNo: 1, status: 'closed', label: '第1批（2026-11-08）' }, { batchNo: 2, status: 'void', label: '第2批（2026-11-08）' }] }) }))
-  assert.deepEqual({ ...ready, latest: { ...ready.latest } }, { enabled: true, ready: true, latest: { label: '第1批（2026-11-08）', batchNo: 1 }, batchCount: 1, paused: null })
+  assert.deepEqual({ ...ready, latest: { ...ready.latest } }, { enabled: true, ready: true, latest: { label: '第1批（2026-11-08）', batchNo: 1 }, batchCount: 1, paused: null, firstPullBatchRule: 'material' })
   for (const [paused, patch] of [
     ['not_installed', { provisioning: provisioningFake({ fields: [] }) }],
     ['columns_unproven', { provisioning: provisioningFake({ computed: true }) }],
@@ -228,6 +231,15 @@ test('SS-07 the board stanza: ready, each pause, fail-soft (never throws)', asyn
   assert.equal(gap.gapRows, 2)
   const noTarget = await SS.readPullBatchBoardStanza({ ...deps(), target: null })
   assert.equal(noTarget.paused, 'not_installed')
+  assert.equal('firstPullBatchRule' in noTarget, false, 'an early return carries no rule')
+  // 批次标识 BI-3 S-1: the captured rule rides the stanza as one closed token; no _sheet row (captured null) => no key.
+  const ruleF = await SS.readPullBatchBoardStanza(deps({ store: ledgerFake({ rule: 'predecessor_suffix' }) }))
+  assert.deepEqual({ ...ruleF }, { enabled: true, ready: true, latest: null, batchCount: 0, paused: null, firstPullBatchRule: 'predecessor_suffix' })
+  const noSheetRow = await SS.readPullBatchBoardStanza(deps({ store: ledgerFake({ status: null }) }))
+  assert.deepEqual({ ...noSheetRow }, { enabled: true, ready: false, latest: null, batchCount: 0, paused: 'history_pending' })
+  for (const patch of [{ provisioning: provisioningFake({ computed: true }) }, { provisioning: provisioningFake({ fields: [] }) }, { store: ledgerFake({ fail: true }) }]) {
+    assert.equal('firstPullBatchRule' in (await SS.readPullBatchBoardStanza(deps(patch))), false, 'band probe / fail-soft shapes carry no rule')
+  }
 })
 
 // ── the route ──────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -334,12 +346,50 @@ test('SR-02 the board: OFF answers exactly the frozen keys (no pullBatch); ON ad
     const res = await withSwitch('true', () => getBoard(on))
     assert.equal(res.statusCode, 200, JSON.stringify(res.body))
     assert.deepEqual(Object.keys(res.body.data).sort(), [...STOCK_PREPARATION_PROJECT_BOARD_KEYS, ...STOCK_PREPARATION_PROJECT_BOARD_OPTIONAL_KEYS].sort())
-    assert.deepEqual(res.body.data.pullBatch, { enabled: true, ready: true, latest: null, batchCount: 0, paused: null })
+    assert.deepEqual(res.body.data.pullBatch, { enabled: true, ready: true, latest: null, batchCount: 0, paused: null, firstPullBatchRule: 'material' })
     on.db.faults.selectOne = () => Object.assign(new Error('down'), { code: '08006' })
     const soft = await withSwitch('true', () => getBoard(on))
     assert.equal(soft.statusCode, 200, 'the board never fails for the stanza')
     assert.deepEqual(soft.body.data.pullBatch, { enabled: true, ready: false, latest: null, batchCount: null, paused: 'ledger_unreadable' })
   } finally { on.restore() }
+})
+
+test('SR-03 the tenancy wall: a project the registry resolves onto another tenant\'s sheet is refused 409 before any ledger or records read', async () => {
+  const OTHER = 'tenant-syn-pbs-other'
+  for (const switchValue of ['true', undefined]) {
+    const h = mount()
+    try {
+      // The OTHER tenant's sheet, provisioned in ITS staging project; then the caller's registry row is pointed at it
+      // (sheet and object both the other tenant's), so neither ownership nor the derived-id fallback attributes it here.
+      const foreign = h.seedRegistryRow(PROJECT, { tenant: OTHER })
+      const registry = h.registryRows()
+      const planted = registry.find((r) => r.tenant_id === OTHER && r.project_no === PROJECT)
+      planted.tenant_id = TENANT
+      assert.notEqual(foreign.objectId, h.projectObjectId(PROJECT), 'the planted object is not the caller\'s derived one')
+      h.db.log.length = 0
+      h.records.calls.length = 0
+      h.provisioning.calls.length = 0
+      const res = await withSwitch(switchValue, () => getStatus(h))
+      assert.equal(res.statusCode, 409, `switch ${switchValue}: ${JSON.stringify(res.body)}`)
+      assert.equal(res.body.error.code, 'TABLE_ACTION_TARGET_TENANT_MISMATCH')
+      assert.deepEqual({ ...res.body.error.details }, { objectId: foreign.objectId })
+      assert.ok(h.provisioning.calls.some((c) => c[0] === 'isSheetOwnedByProject' && c[1] === foreign.sheetId && c[2] === h.staging), 'the wall ran on the resolved sheet against the caller\'s staging project')
+      assert.deepEqual(h.db.log, [], 'zero pull-batch ledger statements')
+      assert.deepEqual(h.records.calls, [], 'zero records reads')
+      assert.deepEqual(h.auditAppends, [], 'no audit append (plain or in-transaction)')
+      // The overlay's own field binding, then the wall — and nothing after it (no band, view or layout read).
+      assert.deepEqual(h.provisioning.calls.map((c) => c[0]), ['resolveFieldIds', 'isSheetOwnedByProject'], 'the wall is the last host call')
+      assert.equal(JSON.stringify(res.body).includes(OTHER), false, 'values-free: no tenant named')
+      assert.equal(JSON.stringify(res.body).includes(foreign.sheetId), false, 'values-free: no sheet id named')
+    } finally { h.restore() }
+  }
+  // Control: the caller's OWN registered sheet passes the same wall.
+  const own = mount()
+  try {
+    seedReady(own)
+    const res = await withSwitch('true', () => getStatus(own))
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+  } finally { own.restore() }
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-pull-batch-status.test.cjs', tests)

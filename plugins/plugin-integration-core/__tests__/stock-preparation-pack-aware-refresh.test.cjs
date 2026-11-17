@@ -49,6 +49,7 @@ const {
 
 const {
   HUMAN_PRESERVED_FIELD_IDS,
+  MACHINE_WRITEBACK_FIELD_IDS,
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
 } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
 
@@ -101,8 +102,15 @@ const PLANNED_AT = '2026-01-02T03:04:05.000Z'
  * plmSystemFields band are UNCHANGED: the contract this pin defends — "no pack fields =>
  * zero behaviour change" — still holds. The larger protected set is the intended effect of
  * the template growth, not a behaviour change in the planner.
+ *
+ * RE-PINNED (R-71 ⑦.4 PR-4, was 10bb6cbb…88ec71f8): the canonical template gained two plm_system columns,
+ * `issueConfirmDate` (a machine write-back column, MACHINE_WRITEBACK_FIELD_IDS — outside the refresh band)
+ * and `projectSpecModel` (an empty column, inside it). Falsified the same way: the plan computed on the PR-4
+ * branch with the two `field(...)` lines removed reproduces 10bb6cbb…88ec71f8 byte-for-byte, and the plan WITH
+ * them differs from it in exactly one leaf — `summary.plmSystemFields` gained `projectSpecModel` at its end.
+ * No decision, count, patch, row, human field or ext_ column moved, and `issueConfirmDate` appears nowhere.
  */
-const CONTROL_PLAN_SHA256 = '10bb6cbbf386775d798921947a5d225731bb7c43f2063ee1420822cf88ec71f8'
+const CONTROL_PLAN_SHA256 = '4c4eafc72a9b51ac250946ffbba9ed814b4624cc6ceb709c9354601a90ffd6e9'
 
 function expandedRows() {
   return [
@@ -335,9 +343,16 @@ function controlIsByteIdentical() {
     TEMPLATE_FIELDS
       .filter((field) => field.ownership === 'plm_system')
       .map((field) => field.id)
-      .filter((id) => !id.startsWith('lastPlm')),
+      .filter((id) => !id.startsWith('lastPlm'))
+      // R-71 ⑦.4 PR-4: a machine write-back column is plm_system but never the refresh's to write.
+      .filter((id) => !MACHINE_WRITEBACK_FIELD_IDS.includes(id)),
     'the template band keeps template order',
   )
+  assert.ok(MACHINE_WRITEBACK_FIELD_IDS.length > 0, 'the machine write-back list is not vacuous')
+  for (const fieldId of MACHINE_WRITEBACK_FIELD_IDS) {
+    assert.equal(derived.plmWritableFieldIds.includes(fieldId), false, `${fieldId} is outside the refresh band`)
+    assert.equal(legacy.summary.plmSystemFields.includes(fieldId), false, `${fieldId} is not reported as refreshed`)
+  }
 
   // And a sheet carrying ONLY the canonical columns must land in exactly the same
   // place — the pack-aware path engaged, nothing added.

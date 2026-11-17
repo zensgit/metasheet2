@@ -25,6 +25,10 @@ import { defineStockPreparationPullBatchRealDbCases } from './stock-preparation-
 import { defineStockPreparationPullBatchSiteProbeRealDbCases } from './stock-preparation-pull-batch-site-probe-realdb.cases'
 import { defineMultitablePluginViewLandingRealDbCases } from './multitable-plugin-view-landing-realdb.cases'
 import { defineStockPreparationPullBatchBandRealDbCases } from './stock-preparation-pull-batch-band-realdb.cases'
+import { defineStockPreparationExecutionIntentRealDbCases } from './stock-preparation-execution-intent-realdb.cases'
+import { defineStockPreparationExecutionRecoveryRealDbCases } from './stock-preparation-execution-recovery-realdb.cases'
+import { defineStockPreparationComponentRulingRealDbCases } from './stock-preparation-component-ruling-realdb.cases'
+import { defineStockPreparationSheetRepairRealDbCases } from './stock-preparation-sheet-repair-realdb.cases'
 
 const require = createRequire(import.meta.url)
 const {
@@ -522,3 +526,11 @@ defineStockPreparationPullBatchSiteProbeRealDbCases()
 defineMultitablePluginViewLandingRealDbCases()
 // 批次标识 BI-5b (R-65): manual rows on a sheet carrying the pull-batch band get 人工补充 in both band cells; the marker cannot be forged or dropped (real PG, BIM-RD-*).
 defineStockPreparationPullBatchBandRealDbCases()
+// Batch-refresh step 6a-1 (S6-1, R-91): migration 106, the intent journal's begin atomicity, the self-verifying finish and the settlement-subject window on real PG (S9R-106/01/02/03/30).
+defineStockPreparationExecutionIntentRealDbCases()
+// Batch-refresh step 6a-2 (S6-2, R-91): the recovery close under the lease on real PG — plan cells, 批次标识's close hook, lease lost, 55P03 by step, and the U07 stop conditions incl. a transparent close over an unsettled subject (S9R-CL1/15/BI-01/26/U07, RC-07r).
+defineStockPreparationExecutionRecoveryRealDbCases()
+// Batch-refresh step 6d-1b (S6-5, R-91): migration 107 fresh and at 106 with data, the ruling store with its audit row on one transaction, and the census / remnant acknowledgement over a real item-10 sheet with readiness v5 (S9D-107/107b/CR/01r).
+defineStockPreparationComponentRulingRealDbCases()
+// Batch-refresh step 6d-2a (S6-6, R-91): migration 108 and the doubled-sheet repair on real PG — the boolean retire, the byte-identical restore, the digest, one writer per sheet (a pull / a recovery / an install), takeover and zombie, the one-shot claim on real row locks (S9D-108/11..18).
+defineStockPreparationSheetRepairRealDbCases()

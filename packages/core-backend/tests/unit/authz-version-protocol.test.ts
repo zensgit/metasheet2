@@ -24,16 +24,18 @@ import yaml from 'js-yaml'
 import ts from 'typescript'
 import { RECOVERY_AUTHORITY_TRIGGERS } from '../../src/db/migrations/zzzz20260721121000_add_recovery_authority_locks'
 import {
-  AUTHORIZATION_VERSION_COVERED_TABLES,
-  AUTHORIZATION_VERSION_TRIGGERS,
-  META_SHEETS_AUTHORITY_COLUMNS,
-  SHEET_PERMISSION_VERSIONS_TABLE,
-  SUBJECT_AUTHORIZATION_VERSIONS_TABLE,
-  USERS_AUTHORITY_COLUMNS,
   down as migrationDown,
   up as migrationUp,
 } from '../../src/db/migrations/zzzz20261106110500_add_authorization_version_rows'
 import {
+  AUTHORIZATION_VERSION_COVERED_TABLES,
+  AUTHORIZATION_VERSION_TRIGGERS,
+  AUTHZ_SHEET_VERSION_BUMP_FUNCTION,
+  AUTHZ_SUBJECT_VERSION_BUMP_FUNCTION,
+  META_SHEETS_AUTHORITY_COLUMNS,
+  SHEET_PERMISSION_VERSIONS_TABLE,
+  SUBJECT_AUTHORIZATION_VERSIONS_TABLE,
+  USERS_AUTHORITY_COLUMNS,
   ADMISSION_LOCK_ORDER,
   AUTHORIZATION_PROTOCOL_GAPS,
   AUTHORIZATION_VERSION_CONFLICT_SQLSTATES,
@@ -177,12 +179,15 @@ describe('T — the trigger set', () => {
     const fields = AUTHORIZATION_VERSION_TRIGGERS.filter((entry) => entry.table === 'meta_fields')
     expect(fields).toHaveLength(1)
     expect(fields[0]!.events).toBe('BEFORE UPDATE (bump when the hidden/visible derivation of property changes)')
-    const migration = readFileSync(path.join(SRC, 'db', 'migrations', `${MIGRATION}.ts`), 'utf8')
-    const ddl = migration.slice(migration.indexOf('export async function installAuthorizationVersionProtocol'))
+    const migration = readFileSync(path.join(SRC, 'db', 'migrations', `${MIGRATION}.ts`), 'utf8').replace(/\r\n/g, '\n')
+    const ddlStart = migration.indexOf('async function createAuthorizationVersionTriggers')
+    expect(ddlStart).toBeGreaterThan(0)
+    const ddl = migration.slice(ddlStart)
     expect(ddl).not.toMatch(/UPDATE OF /)
     expect(ddl).not.toMatch(/\bWHEN \(/)
-    expect(ddl).toMatch(/BEFORE UPDATE ON public\.meta_sheets[\s\S]*?\('id', \$\{sql\.lit\(META_SHEETS_AUTHORITY_COLUMNS\.join\(','\)\)\}\)/)
-    expect(ddl).toMatch(/BEFORE UPDATE ON public\.users[\s\S]*?\('id', \$\{sql\.lit\(USERS_AUTHORITY_COLUMNS\.join\(','\)\)\}\)/)
+    // The watched columns are written literally in the trigger argument, equal to the metadata lists.
+    expect(ddl).toContain(`BEFORE UPDATE ON public.meta_sheets\n      FOR EACH ROW\n      EXECUTE FUNCTION public.${AUTHZ_SHEET_VERSION_BUMP_FUNCTION}('id', '${META_SHEETS_AUTHORITY_COLUMNS.join(',')}')`)
+    expect(ddl).toContain(`BEFORE UPDATE ON public.users\n      FOR EACH ROW\n      EXECUTE FUNCTION public.${AUTHZ_SUBJECT_VERSION_BUMP_FUNCTION}('id', '${USERS_AUTHORITY_COLUMNS.join(',')}')`)
     expect(ddl).toMatch(/BEFORE UPDATE ON public\.meta_fields[\s\S]*?\('sheet_id', 'field-visibility'\)/)
   })
 
@@ -200,7 +205,8 @@ describe('T — the trigger set', () => {
     expect(typeof migrationDown).toBe('function')
     const source = readFileSync(path.join(SRC, 'db', 'migrations', `${MIGRATION}.ts`), 'utf8')
     expect(source).toContain('SET search_path = pg_catalog, public')
-    expect(source).toContain(`INSERT INTO public.\${sql.raw(identifier(table))} AS v`)
+    expect(source).toContain(`INSERT INTO public.${SHEET_PERMISSION_VERSIONS_TABLE} AS v (sheet_id, version, updated_at)`)
+    expect(source).toContain(`INSERT INTO public.${SUBJECT_AUTHORIZATION_VERSIONS_TABLE} AS v (subject_id, version, updated_at)`)
     expect(source).toContain('DROP TRIGGER IF EXISTS')
     expect(source).toContain('CREATE OR REPLACE FUNCTION public.')
     expect(source).toContain('CREATE TABLE IF NOT EXISTS public.')
@@ -213,7 +219,156 @@ describe('T — the trigger set', () => {
     expect(source).not.toMatch(/ENABLE ALWAYS TRIGGER/)
     expect(source).not.toMatch(/DISABLE TRIGGER/)
   })
+
+  it('T-05 the migration is complete literal statements (no substitution, no EXECUTE, imports only kysely), and its DDL equals the trigger metadata statement by statement', () => {
+    const source = readFileSync(path.join(SRC, 'db', 'migrations', `${MIGRATION}.ts`), 'utf8').replace(/\r\n/g, '\n')
+    expect(migrationLiteralProblems(source)).toEqual([])
+    expect(migrationParityProblems(source)).toEqual([])
+  })
+
+  it('T-05 POSITIVE CONTROL — a substituted or EXECUTEd statement, an import of the metadata, a renamed / missing / extra trigger, a changed watched list or key, a drifted drop, a function body that drifts or writes elsewhere, and a down that misses an object are problems', () => {
+    const source = readFileSync(path.join(SRC, 'db', 'migrations', `${MIGRATION}.ts`), 'utf8').replace(/\r\n/g, '\n')
+    const once = (from: string, to: string) => {
+      expect(source.split(from).length - 1, from).toBeGreaterThanOrEqual(1)
+      return source.replace(from, to)
+    }
+    const literal = (mutant: string) => expect(migrationLiteralProblems(mutant).length, 'literal').toBeGreaterThan(0)
+    const parity = (mutant: string) => expect(migrationParityProblems(mutant).length, 'parity').toBeGreaterThan(0)
+    literal(once('CREATE TRIGGER trg_users_zz_authz_subject_version_lifecycle', 'CREATE TRIGGER ${"trg_users_zz_authz_subject_version_lifecycle"}'))
+    literal(once('ON public.user_roles\n', 'ON public.${sql.raw(\'user_roles\')}\n'))
+    literal(once('        DROP TRIGGER IF EXISTS trg_users_zz_authz_subject_version_update ON public.users;', "        EXECUTE 'DROP TRIGGER IF EXISTS trg_users_zz_authz_subject_version_update ON public.users';"))
+    literal(once("import { sql, type Kysely } from 'kysely'\n", "import { sql, type Kysely } from 'kysely'\nimport { AUTHORIZATION_VERSION_TRIGGERS } from '../../multitable/authz-version-protocol'\n"))
+    parity(once('CREATE TRIGGER trg_user_permissions_zz_authz_subject_version\n', 'CREATE TRIGGER trg_user_permissions_zz_authz_subject_version_x\n'))
+    parity(once("'role,is_active,activation_status,permissions,is_admin'", "'role,is_active,activation_status,is_admin'"))
+    parity(once("metasheet_authz_bump_subject_authorization_version('user_id')\n  `.execute(db)\n  await sql`\n    CREATE TRIGGER trg_platform_member_group_members", "metasheet_authz_bump_subject_authorization_version('id')\n  `.execute(db)\n  await sql`\n    CREATE TRIGGER trg_platform_member_group_members"))
+    parity(once('BEFORE INSERT OR DELETE ON public.users', 'BEFORE INSERT OR UPDATE OR DELETE ON public.users'))
+    parity(once('DROP TRIGGER IF EXISTS trg_user_namespace_admissions_zz_authz_subject_version ON public.user_namespace_admissions;', 'DROP TRIGGER IF EXISTS trg_user_namespace_admissions_zz_authz_subject_version ON public.user_orgs;'))
+    parity(once("IF to_regclass('public.users') IS NOT NULL THEN\n        DROP TRIGGER IF EXISTS trg_users_zz_authz_subject_version_lifecycle", "IF to_regclass('public.user_roles') IS NOT NULL THEN\n        DROP TRIGGER IF EXISTS trg_users_zz_authz_subject_version_lifecycle"))
+    // An extra trigger on an input table (a fourteenth CREATE TRIGGER statement).
+    parity(once('async function createAuthorizationVersionTriggers(db: Kysely<unknown>): Promise<void> {\n', 'async function createAuthorizationVersionTriggers(db: Kysely<unknown>): Promise<void> {\n  await sql`\n    CREATE TRIGGER trg_users_zz_authz_extra\n      BEFORE UPDATE ON public.users\n      FOR EACH ROW EXECUTE FUNCTION public.metasheet_authz_bump_subject_authorization_version(\'id\')\n  `.execute(db)\n'))
+    // A body drift in one of the two written-out functions, and a body that writes another table.
+    parity(once("        INSERT INTO public.subject_authorization_versions AS v (subject_id, version, updated_at)\n        VALUES (key_value, 1, now())", "        INSERT INTO public.subject_authorization_versions AS v (subject_id, version, updated_at)\n        VALUES (key_value, 2, now())"))
+    parity(once('      IF TG_OP = \'DELETE\' THEN RETURN OLD; END IF;\n      RETURN NEW;\n    END;\n    $$\n  `.execute(db)\n}\n\nasync function createSubjectBumpFunction', '      UPDATE public.users SET role = role WHERE false;\n      IF TG_OP = \'DELETE\' THEN RETURN OLD; END IF;\n      RETURN NEW;\n    END;\n    $$\n  `.execute(db)\n}\n\nasync function createSubjectBumpFunction'))
+    parity(once('  await sql`DROP TABLE IF EXISTS public.subject_authorization_versions`.execute(db)\n', ''))
+    parity(once('  await sql`DROP FUNCTION IF EXISTS public.metasheet_authz_bump_sheet_permission_version()`.execute(db)\n', ''))
+  })
 })
+
+/* ───────────── T-05: literal-statement and metadata-parity reading of the migration ───────────── */
+
+/**
+ * Problems with the migration's literal form: every `sql` template is a no-substitution template,
+ * `sql.raw` / `sql.lit` / `sql.ref` / `EXECUTE '…'` / `EXECUTE format` never appear, and the only
+ * import is kysely (the migration reads no metadata module).
+ */
+function migrationLiteralProblems(source: string): string[] {
+  const problems: string[] = []
+  const tree = ts.createSourceFile('m.ts', source, ts.ScriptTarget.Latest, true)
+  const visit = (node: ts.Node) => {
+    if (ts.isTaggedTemplateExpression(node) && node.tag.getText(tree) === 'sql' && !ts.isNoSubstitutionTemplateLiteral(node.template)) {
+      problems.push(`substituted sql template at offset ${node.getStart(tree)}`)
+    }
+    if (ts.isPropertyAccessExpression(node) && node.expression.getText(tree) === 'sql') problems.push(`sql.${node.name.text}`)
+    ts.forEachChild(node, visit)
+  }
+  visit(tree)
+  for (const statement of tree.statements) {
+    if (ts.isImportDeclaration(statement) && (statement.moduleSpecifier as ts.StringLiteral).text !== 'kysely') problems.push(`imports ${(statement.moduleSpecifier as ts.StringLiteral).text}`)
+  }
+  if (/\bEXECUTE\s+(?:'|format\b|\$)/i.test(source)) problems.push('dynamic EXECUTE')
+  return problems
+}
+
+type DdlTrigger = { trigger: string; events: string; table: string; fn: string; args: string[] }
+
+/** The SQL text of every `sql` tagged template of the migration, in source order. */
+function migrationSqlTexts(source: string): string[] {
+  const tree = ts.createSourceFile('m.ts', source, ts.ScriptTarget.Latest, true)
+  const texts: string[] = []
+  const visit = (node: ts.Node) => {
+    if (ts.isTaggedTemplateExpression(node) && node.tag.getText(tree) === 'sql') {
+      texts.push(ts.isNoSubstitutionTemplateLiteral(node.template) ? node.template.text : node.template.getText(tree))
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(tree)
+  return texts
+}
+
+/**
+ * Problems with the parity of the literal DDL and the protocol metadata: the CREATE TRIGGER
+ * statements (name, events, table, function, arguments, in order), the tolerant DROP TRIGGER blocks
+ * (guarded table = dropped table, in order), the two written-out bump functions (each writes only
+ * its version table, and the two bodies are the same text up to the table and key), and down()
+ * dropping both functions and both tables.
+ */
+function migrationParityProblems(source: string): string[] {
+  const problems: string[] = []
+  const texts = migrationSqlTexts(source)
+  const all = texts.join('\n;\n')
+  const created: DdlTrigger[] = []
+  for (const match of all.matchAll(/CREATE\s+TRIGGER\s+(\w+)\s+(BEFORE\s+[A-Z ]+?)\s+ON\s+public\.(\w+)\s+FOR\s+EACH\s+ROW\s+EXECUTE\s+FUNCTION\s+public\.(\w+)\(([^)]*)\)/g)) {
+    created.push({
+      trigger: match[1],
+      events: match[2].replace(/\s+/g, ' '),
+      table: match[3],
+      fn: match[4],
+      args: [...match[5].matchAll(/'([^']*)'/g)].map((arg) => arg[1]),
+    })
+  }
+  if ((all.match(/CREATE\s+TRIGGER\b/g) ?? []).length !== created.length) problems.push('a CREATE TRIGGER statement is not in the read shape')
+  const watchedOf = (entry: (typeof AUTHORIZATION_VERSION_TRIGGERS)[number]): string[] => {
+    if (entry.trigger === 'trg_users_zz_authz_subject_version_update') return [USERS_AUTHORITY_COLUMNS.join(',')]
+    if (entry.trigger === 'trg_meta_sheets_zz_authz_sheet_version_update') return [META_SHEETS_AUTHORITY_COLUMNS.join(',')]
+    if (entry.trigger === 'trg_meta_fields_zz_authz_sheet_version_visibility') return ['field-visibility']
+    return []
+  }
+  const expected: DdlTrigger[] = AUTHORIZATION_VERSION_TRIGGERS.map((entry) => ({
+    trigger: entry.trigger,
+    events: entry.events.replace(/ \(.*\)$/, ''),
+    table: entry.table,
+    fn: entry.fn,
+    args: [entry.keyColumn, ...watchedOf(entry)],
+  }))
+  if (JSON.stringify(created) !== JSON.stringify(expected)) problems.push(`CREATE TRIGGER statements differ from the metadata: ${JSON.stringify(created)}`)
+
+  const dropped: Array<{ guarded: string; trigger: string; table: string }> = []
+  for (const match of all.matchAll(/DO \$\$ BEGIN\s+IF to_regclass\('public\.(\w+)'\) IS NOT NULL THEN\s+DROP TRIGGER IF EXISTS (\w+) ON public\.(\w+);\s+END IF;\s+END \$\$/g)) {
+    dropped.push({ guarded: match[1], trigger: match[2], table: match[3] })
+  }
+  if ((all.match(/DROP\s+TRIGGER\b/g) ?? []).length !== dropped.length) problems.push('a DROP TRIGGER statement is not in the tolerant block shape')
+  const expectedDrops = AUTHORIZATION_VERSION_TRIGGERS.map((entry) => ({ guarded: entry.table, trigger: entry.trigger, table: entry.table }))
+  if (JSON.stringify(dropped) !== JSON.stringify(expectedDrops)) problems.push(`DROP TRIGGER blocks differ from the metadata: ${JSON.stringify(dropped)}`)
+
+  const bodies = new Map<string, string>()
+  for (const match of all.matchAll(/CREATE OR REPLACE FUNCTION public\.(\w+)\(\)[\s\S]*?AS \$\$([\s\S]*?)\$\$/g)) bodies.set(match[1], match[2])
+  const layers = [
+    [AUTHZ_SHEET_VERSION_BUMP_FUNCTION, SHEET_PERMISSION_VERSIONS_TABLE, 'sheet_id'],
+    [AUTHZ_SUBJECT_VERSION_BUMP_FUNCTION, SUBJECT_AUTHORIZATION_VERSIONS_TABLE, 'subject_id'],
+  ] as const
+  if (bodies.size !== layers.length) problems.push(`expected ${layers.length} functions, found ${[...bodies.keys()].join(', ')}`)
+  const normalized: string[] = []
+  for (const [fn, table, key] of layers) {
+    const body = bodies.get(fn)
+    if (body === undefined) {
+      problems.push(`${fn}: not defined`)
+      continue
+    }
+    const targets = [...body.matchAll(/\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?|MERGE\s+INTO)\s+(?:ONLY\s+)?([\w.]+)/gi)].map((target) => target[1])
+    // `DO UPDATE` of the upsert is its conflict action, not a second target.
+    const written = targets.filter((target) => target.toUpperCase() !== 'SET')
+    if (JSON.stringify(written) !== JSON.stringify([`public.${table}`])) problems.push(`${fn}: writes ${written.join(', ')}`)
+    normalized.push(body.split(`public.${table}`).join('<table>').split(key).join('<key>'))
+  }
+  if (normalized.length === 2 && normalized[0] !== normalized[1]) problems.push('the two bump function bodies differ beyond their table and key')
+
+  for (const [fn, table] of layers) {
+    if (!all.includes(`DROP FUNCTION IF EXISTS public.${fn}()`)) problems.push(`down does not drop ${fn}`)
+    if (!all.includes(`DROP TABLE IF EXISTS public.${table}`)) problems.push(`down does not drop ${table}`)
+    if (!all.includes(`CREATE TABLE IF NOT EXISTS public.${table} (`)) problems.push(`up does not create ${table}`)
+  }
+  return problems
+}
 
 describe('B — the explicit bump helpers', () => {
   it('B-01 canonical order: trimmed, blanks dropped, de-duplicated, byte-ascending', () => {
@@ -477,10 +632,29 @@ describe('W — writers bump FIRST', () => {
     const permissions = readFileSync(path.join(SRC, 'routes', 'permissions.ts'), 'utf8')
     expect(permissions.match(/await transaction\(async \(client\) => \{\s*await bumpSubjectAuthorizationVersions\(client, \[userId\]\)/g)).toHaveLength(3)
     expect(permissions).not.toMatch(/pool\.query\(\s*[`']\s*(INSERT INTO|DELETE FROM) user_permissions/)
+    // #6833 moved the member-group route and syncLegacyAdminProfile into transactions behind the
+    // access-graph mutex (lockSharedAccessSubjects: namespace-admission advisory → subject version
+    // rows, sorted → users FOR UPDATE; W-01), so the bump comes first by construction there.
     const adminUsers = readFileSync(path.join(SRC, 'routes', 'admin-users.ts'), 'utf8')
-    expect(adminUsers).toMatch(/await transaction\(async \(client\) => \{\s*await bumpSubjectAuthorizationVersions\(client, \[userId\]\)\s*if \(action === 'assign'\)/)
-    expect(adminUsers).not.toMatch(/await query\(\s*`INSERT INTO platform_member_group_members/)
-    expect(adminUsers).toMatch(/async function syncLegacyAdminProfile[\s\S]*?await transaction\(async \(client\) => \{\s*await bumpSubjectAuthorizationVersions\(client, \[userId\]\)/)
+    expect(adminUsers).toMatch(/await transaction\(async \(client\) => \{\s*const subjects = await lockSharedAccessSubjects\(client, \[userId, adminUserId\]\)\s*requireWritableTarget\(subjects, userId\)\s*await assertPlatformActorAuthority\(client, subjects\.get\(adminUserId\)\)\s*if \(action === 'assign'\) \{\s*await client\.query\(\s*`INSERT INTO platform_member_group_members/)
+    expect(adminUsers).not.toMatch(/await query\(\s*`(INSERT INTO|DELETE FROM) platform_member_group_members/)
+    const syncLegacy = /async function syncLegacyAdminProfile\([\s\S]*?\n\}/.exec(adminUsers)?.[0] ?? ''
+    expect(syncLegacy).toMatch(/await runQuery\(\s*`UPDATE users/)
+    expect(syncLegacy).not.toMatch(/\bawait (query|transaction|pool\.)/)
+    const syncCalls = Array.from(adminUsers.matchAll(/await syncLegacyAdminProfile\(userId, (?:true|false), /g)).map((match) => match.index!)
+    expect(syncCalls).toHaveLength(4)
+    for (const at of syncCalls) {
+      const txnAt = adminUsers.lastIndexOf('await transaction(async (client) => {', at)
+      const mutexAt = adminUsers.lastIndexOf('await lockSharedAccessSubjects(client, ', at)
+      expect(txnAt).toBeGreaterThan(0)
+      expect(mutexAt).toBeGreaterThan(txnAt)
+    }
+    // #6872's legacy users.permissions revoke: the mutex before the users UPDATE, in the route's transaction.
+    const legacy = readFileSync(path.join(SRC, 'admin', 'legacy-permission-revoke.ts'), 'utf8')
+    const legacyMutexAt = legacy.indexOf('await lockSharedAccessSubjects(client, [actorId, userId])')
+    expect(legacyMutexAt).toBeGreaterThan(0)
+    expect(legacy.indexOf('`UPDATE users')).toBeGreaterThan(legacyMutexAt)
+    expect(permissions).toMatch(/await transaction\(async \(client\) => revokeLegacyUserPermission\(client, /)
   })
 
   it('W-03 sheet layer: every route bumps AFTER its meta_sheets row lock and BEFORE any exclusive record lock — the record-permission routes between record-link phases 1–4 (shared) and phase 5, the grant / configuration routes right after assertSheetLiveForUpdate', () => {
@@ -533,7 +707,11 @@ describe('W — writers bump FIRST', () => {
 
   it('W-06 setUserNamespaceAdmission bumps after the advisory and before the upsert; the two user_orgs helpers bump before their first statement', () => {
     const admission = readFileSync(path.join(SRC, 'rbac', 'namespace-admission.ts'), 'utf8')
-    expect(admission).toMatch(/await lockNamespaceAdmissionWrites\(client, userId\)\s*(?:\/\/[^\n]*\n\s*)*await bumpSubjectAuthorizationVersions\(client, \[userId\]\)\s*await client\.query\(\s*`INSERT INTO user_namespace_admissions/)
+    // #6833: the advisory for every subject (sorted), then the access-graph mutex (subject version
+    // rows first, W-01), then the upsert through writeUserNamespaceAdmission on the same client.
+    expect(admission).toMatch(/for \(const subjectId of subjectIds\) await lockNamespaceAdmissionWrites\(client, subjectId\)\s*await lockVisibleUsersForAccessGraphWrite\(client, subjectIds\)\s*await writeUserNamespaceAdmission\(options, client\)/)
+    const mutex = readFileSync(path.join(SRC, 'directory', 'access-graph-mutex.ts'), 'utf8')
+    expect(mutex).toMatch(/export async function lockVisibleUsersForAccessGraphWrite\([^)]*\)[^{]*\{\s*const locked = await lockUsersForAccessGraphWrite\(client, userIds\)/)
     const sync = readFileSync(path.join(SRC, 'directory', 'directory-sync.ts'), 'utf8')
     for (const helper of ['upsertActiveUserOrgMembership', 'deactivateUserOrgMembershipIfNoOtherActiveBinding']) {
       const start = sync.indexOf(`export async function ${helper}(`)
@@ -544,6 +722,22 @@ describe('W — writers bump FIRST', () => {
       expect(bumpAt).toBeGreaterThan(0)
       expect(firstQueryAt).toBeGreaterThan(bumpAt)
     }
+  })
+
+  it('W-07 role delete: the members\' subject bump sits after the namespace-admission locks (#6827) and before the role row DELETE (the cascade)', () => {
+    const roles = readFileSync(path.join(SRC, 'routes', 'roles.ts'), 'utf8')
+    const start = roles.indexOf("r.delete('/api/roles/:id'")
+    const roleDelete = "await client.query('DELETE FROM roles WHERE id=$1', [id])"
+    const end = roles.indexOf(roleDelete, start)
+    expect(start).toBeGreaterThan(0)
+    expect(end).toBeGreaterThan(start)
+    const body = roles.slice(start, end + roleDelete.length)
+    const bumpAt = body.indexOf('await bumpSubjectAuthorizationVersions(client, memberIds)')
+    const lockAt = body.lastIndexOf('await lockNamespaceAdmissionWrites(client, memberId)')
+    expect(lockAt).toBeGreaterThan(0)
+    expect(bumpAt).toBeGreaterThan(lockAt)
+    expect(body.indexOf(roleDelete)).toBeGreaterThan(bumpAt)
+    expect(body.match(/bumpSubjectAuthorizationVersions\(/g)).toHaveLength(1)
   })
 })
 

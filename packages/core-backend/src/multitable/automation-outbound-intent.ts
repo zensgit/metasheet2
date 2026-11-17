@@ -365,6 +365,64 @@ export async function recordOutboundOutcome(
 }
 
 /**
+ * R-69 1b-ii (baseline §10.2.3 "3 小时与 1 小时的对齐") — RENEW the attempt's lease, fenced by its token. The
+ * `run_integration_job` action's heartbeat calls this on the SAME transaction that just locked and renewed the
+ * job-lease row (automation-job-lease.ts `renewJobAndIntentLeases`), so a live job's intent lease keeps moving
+ * and a same-identity replay never flips a running attempt to outcome_unknown. Each renewal is clamped like the
+ * claim (`OUTBOUND_LEASE_MAX_MS` unchanged — the 55 min job cap + grace never reaches it). 0 rows (`renewed:false`)
+ * = the row is no longer this attempt's `pending` (expired-and-flipped, terminalized, or a different token).
+ * Class-B sends do not call this; their single lease per attempt is unchanged.
+ */
+export async function renewOutboundLease(
+  query: OutboundQueryFn,
+  id: OutboundIntentIdentity,
+  attemptToken: string,
+  leaseMs: number,
+): Promise<{ renewed: boolean }> {
+  assertIdentity(id, 'renewOutboundLease')
+  if (typeof attemptToken !== 'string' || !NON_BLANK.test(attemptToken)) {
+    throw new RangeError('renewOutboundLease: attemptToken must be the non-blank token the claim issued')
+  }
+  const renewed = await query(
+    `UPDATE meta_automation_outbound_intent
+        SET lease_expires_at = now() + ($5::int * interval '1 millisecond'), updated_at = now()
+      WHERE kind = $1 AND root_execution_id = $2 AND action_key = $3 AND target_key = $4
+        AND status = 'pending' AND attempt_token = $6`,
+    [id.kind, id.rootExecutionId, id.actionKey, id.targetKey ?? WHOLE_ACTION_TARGET_KEY, clampLeaseMs(leaseMs), attemptToken],
+  )
+  return { renewed: rowCountOf(renewed) === 1 }
+}
+
+/** Thrown by {@link recordOutboundOutcomeFenced} on 0 rows so the ENCLOSING transaction rolls back (I-6). */
+export class OutboundOutcomeUnconfirmedError extends Error {
+  readonly code = 'OUTBOUND_OUTCOME_UNCONFIRMED'
+  constructor() {
+    super('outbound outcome write not confirmed by this attempt (0 rows)')
+    this.name = 'OutboundOutcomeUnconfirmedError'
+  }
+}
+
+/**
+ * R-69 1b-ii (I-6) — Tx B of the `run_integration_job` action: the SAME token-fenced UPDATE as
+ * {@link recordOutboundOutcome}, run on the CALLER'S TRANSACTION QUERY after the job-lease row was locked FOR
+ * UPDATE and verified (automation-job-lease.ts `finalizeJobWithFencedOutcome` — lease row first, then this row,
+ * then the fence-CAS release, then commit). The difference from the class-B path is the failure mode: 0 rows
+ * THROWS ({@link OutboundOutcomeUnconfirmedError}) instead of returning `confirmed:false`, so the enclosing
+ * transaction rolls back as a whole and nothing of Tx B lands — the caller then reports `confirmed:false`.
+ * `recordOutboundOutcome` and every class-B call site are untouched.
+ */
+export async function recordOutboundOutcomeFenced(
+  transactionQuery: OutboundQueryFn,
+  id: OutboundIntentIdentity,
+  outcome: OutboundOutcome,
+  lastError: string | null | undefined,
+  attemptToken: string,
+): Promise<void> {
+  const { confirmed } = await recordOutboundOutcome(transactionQuery, id, outcome, lastError, attemptToken)
+  if (!confirmed) throw new OutboundOutcomeUnconfirmedError()
+}
+
+/**
  * The single attempt's transport result, in a values-free shape so classification is unit-testable without
  * a live socket:
  *   - `response`      — fetch RESOLVED with a Response; only the HTTP status matters (never the body).

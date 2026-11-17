@@ -131,6 +131,7 @@ describe('permissions routes', () => {
     rbacMocks.inspectUserPermissionGrants.mockResolvedValue({
       direct: [],
       inherited: [],
+      inheritedRoles: [],
       legacy: [],
       effective: [],
       blockedByNamespaceAdmission: [],
@@ -243,6 +244,7 @@ describe('permissions routes', () => {
     rbacMocks.inspectUserPermissionGrants.mockResolvedValue({
       direct: ['crm:read', 'workflow:read'],
       inherited: ['crm:write'],
+      inheritedRoles: [],
       legacy: [],
       effective: ['workflow:read'],
       blockedByNamespaceAdmission: ['crm:read', 'crm:write'],
@@ -259,6 +261,7 @@ describe('permissions routes', () => {
       isAdmin: false,
       direct: ['crm:read', 'workflow:read'],
       inherited: ['crm:write'],
+      inheritedRoles: [],
       legacy: [],
       effective: ['workflow:read'],
       blockedByNamespaceAdmission: ['crm:read', 'crm:write'],
@@ -279,6 +282,7 @@ describe('permissions routes', () => {
     rbacMocks.inspectUserPermissionGrants.mockResolvedValue({
       direct: [],
       inherited: [],
+      inheritedRoles: [],
       legacy: [],
       effective: [],
       blockedByNamespaceAdmission: [],
@@ -295,6 +299,7 @@ describe('permissions routes', () => {
       isAdmin: false,
       direct: [],
       inherited: [],
+      inheritedRoles: [],
       legacy: [],
       effective: [],
       blockedByNamespaceAdmission: [],
@@ -310,6 +315,7 @@ describe('permissions routes', () => {
     rbacMocks.inspectUserPermissionGrants.mockResolvedValue({
       direct: [],
       inherited: [],
+      inheritedRoles: [],
       legacy: [],
       effective: [],
       blockedByNamespaceAdmission: [],
@@ -329,6 +335,7 @@ describe('permissions routes', () => {
       unavailable: true,
       direct: [],
       inherited: [],
+      inheritedRoles: [],
       legacy: [],
       effective: [],
       blockedByNamespaceAdmission: [],

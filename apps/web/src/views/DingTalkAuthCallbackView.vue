@@ -22,7 +22,7 @@ import { useLocale } from '../composables/useLocale'
 import { useFeatureFlags } from '../stores/featureFlags'
 import { normalizePostLoginRedirect } from '../utils/authRedirect'
 import { apiFetch } from '../utils/api'
-import { readErrorMessage } from '../utils/error'
+import { describeDingTalkCallbackFailure, dingTalkCallbackFallback } from '../utils/dingtalkLoginErrors'
 
 interface AuthUserPayload {
   role?: unknown
@@ -55,8 +55,6 @@ const text = computed(() => {
       backToLogin: '返回登录',
       missingCode: '缺少授权码参数',
       missingToken: '登录成功但未获取到令牌',
-      failed: '钉钉登录失败，请稍后重试。',
-      bindFailed: '钉钉绑定失败，请稍后重试。',
     }
   }
   return {
@@ -64,8 +62,6 @@ const text = computed(() => {
     backToLogin: 'Back to Sign In',
     missingCode: 'Missing authorization code',
     missingToken: 'Sign-in succeeded but no token was returned',
-    failed: 'DingTalk sign-in failed. Please try again.',
-    bindFailed: 'DingTalk bind failed. Please try again.',
   }
 })
 
@@ -150,12 +146,10 @@ async function handleCallback(): Promise<void> {
     const payload = await response.json().catch(() => null)
 
     if (!response.ok || !payload?.success) {
+      // Failure responses carry no mode (no `data`), so one fixed sentence per stable code covers
+      // sign-in, binding and activation alike; the raw `error` text is never shown.
       loading.value = false
-      const mode = payload?.data?.mode
-      errorMessage.value = readErrorMessage(
-        payload,
-        mode === 'bind' ? text.value.bindFailed : text.value.failed,
-      )
+      errorMessage.value = describeDingTalkCallbackFailure(payload, isZh.value)
       return
     }
 
@@ -202,9 +196,11 @@ async function handleCallback(): Promise<void> {
       normalizePostLoginRedirect(payload?.data?.redirectPath) ||
       normalizePostLoginRedirect(route.query.redirect)
     await router.replace(redirectPath || fallbackPath)
-  } catch (error) {
+  } catch {
+    // Network failures and unexpected exceptions (including after the token was set) show the fixed
+    // fallback, never the exception text.
     loading.value = false
-    errorMessage.value = readErrorMessage(error, text.value.failed)
+    errorMessage.value = dingTalkCallbackFallback(isZh.value)
   }
 }
 

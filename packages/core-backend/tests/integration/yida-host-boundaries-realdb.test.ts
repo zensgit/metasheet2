@@ -1,6 +1,8 @@
 // #6315 host boundaries through the ACTUAL MetaSheetServer, not a hand-built runtime:
 //   T1 createPluginContext hands the YiDa owner/initialization capabilities to plugin-integration-core only;
 //   T2 the host readEnablement wiring opens the owner runtime for INTEGRATION_YIDA_OWNER_SEND_ENABLED === 'true' only;
+//   T4 the R-71 ⑦.5 reconciliation routes are the generic 404 unless INTEGRATION_YIDA_RECONCILE_READ_ENABLED === 'true',
+//      and then reach the host reconciliation runtime;
 //   T3 stopOnce keeps the main pool open until an in-flight owner run has drained (initialization runtime:
 //      yida-host-initialization-barrier-realdb.test.ts, a second boot because stop() ends the module pool).
 // Real JWT login, real plugin activation, fully migrated PostgreSQL. The host's YiDa egress (the fetch
@@ -44,6 +46,8 @@ databaseSuite('YiDa host boundaries — actual MetaSheetServer, owner runtime', 
     expect(observed?.securityType).toBe('object')
     expect(observed?.owner).toBeUndefined()
     expect(observed?.init).toBeUndefined()
+    expect(observed?.probe).toBeUndefined()
+    expect(observed?.reconcile).toBeUndefined()
   })
 
   it('T2 enablement: only the exact string true opens the owner runtime, over real JWT HTTP', async () => {
@@ -68,6 +72,39 @@ databaseSuite('YiDa host boundaries — actual MetaSheetServer, owner runtime', 
       refusal(admitted, 503, 'YIDA_SEND_APPROVAL_UNAVAILABLE')
     } finally {
       delete process.env.INTEGRATION_YIDA_OWNER_SEND_ENABLED
+    }
+    expect(await h.yidaTableCounts()).toEqual(before)
+    expect(h.fetchCalls()).toBe(0)
+  })
+
+  // R-71 ⑦.5 (plan RC17, verifier F1): the reconciliation routes through the ACTUAL server wiring (src/index.ts hands
+  // the reconciliation runtime to the owner router and its capability to plugin-integration-core). OFF = the generic
+  // 404 of an unknown path for all three paths; exact 'true' = the runtime answers (its own YIDA_RECONCILE_* code), which
+  // proves the route reaches the runtime and the core plugin's capability is active (else 503 INACTIVE). Nothing is
+  // written and the host's YiDa egress is never called: every request is refused at authorization.
+  it('T4 reconciliation: only the exact string true opens the routes, and they reach the host runtime, over real JWT HTTP', async () => {
+    const runId = randomUUID()
+    const calls = (token: string) => [
+      h.http('POST', '/api/integration/yida-owner-send/reconciliations', token, { commandId: randomUUID(), mode: 'count',
+        projectNo: 'DEMO-P1', projectKeyTarget: 'project', expectedKeyTargets: ['project'] }),
+      h.http('POST', '/api/integration/yida-owner-send/reconciliations/abandon', token, {}),
+      h.http('GET', `/api/integration/yida-owner-send/reconciliations/${runId}`, token),
+    ]
+    const before = await h.yidaTableCounts()
+    expect(Object.keys(before)).toEqual(expect.arrayContaining(['integration_yida_reconciliation_runs', 'integration_yida_delivery_ledger']))
+    try {
+      for (const value of [undefined, 'false', 'TRUE', '1', ' true', 'true ']) {
+        if (value === undefined) delete process.env.INTEGRATION_YIDA_RECONCILE_READ_ENABLED
+        else process.env.INTEGRATION_YIDA_RECONCILE_READ_ENABLED = value
+        for (const result of await Promise.all(calls(h.admin.token))) refusal(result, 404, 'NOT_FOUND')
+      }
+      process.env.INTEGRATION_YIDA_RECONCILE_READ_ENABLED = 'true'
+      // The reader fails the live integration-admin check; the admin passes it but is not the anchor owner.
+      for (const token of [h.reader.token, h.admin.token]) {
+        for (const result of await Promise.all(calls(token))) refusal(result, 403, 'YIDA_RECONCILE_DENIED')
+      }
+    } finally {
+      delete process.env.INTEGRATION_YIDA_RECONCILE_READ_ENABLED
     }
     expect(await h.yidaTableCounts()).toEqual(before)
     expect(h.fetchCalls()).toBe(0)

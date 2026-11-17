@@ -406,6 +406,33 @@ test('EV-9 a malformed map is refused before any IO', async () => {
   }
 })
 
+// Pre-pilot fix batch 8(e) (R-91; PR-8 body residual "rows under a duplicated idempotency key get no expectedRecords
+// entry and keep the F15 lost-update window"). The composition, pinned: `expectedRecordsOf` skips a key whose existing
+// group is not exactly one row, AND the writer refuses that key `duplicate_target_key` before any patch — on the
+// per-key lookup and on the batched (W9) prefetch alike. So no UPDATE / INACTIVE of a duplicated key is ever sent
+// WITHOUT a version predicate: nothing of it is sent at all, and a person's edit on either twin cannot be overwritten.
+test('EV-12 (8e) a duplicated idempotency key gets no expectedRecords entry AND no host patch: expectedRecordsOf skips it, the writer refuses it duplicate_target_key before any write (scalar lookup and batched prefetch), the twins keep a person\'s concurrent edit; a single-row key beside it is fenced as usual', async () => {
+  const { EXISTING_ROW_RECORD_REF } = require(path.join(LIB, 'stock-preparation-conflict-planner.cjs'))
+  const { expectedRecordsOf } = require(path.join(LIB, 'stock-preparation-table-actions.cjs')).__internals
+  const seed = [seedRow('A', 'rec_a1'), seedRow('A', 'rec_a2'), seedRow('B', 'rec_b')]
+  const existingRows = seed.map((record) => Object.assign(clone(record.data), { [EXISTING_ROW_RECORD_REF]: Object.freeze({ id: record.id, version: record.version }) }))
+  const plan = [updateDecision('A', { material: 'M-2' }), inactiveDecision('A'), updateDecision('B', { material: 'M-3' })]
+  const expected = expectedRecordsOf({ existingRows, plan: { decisions: plan } })
+  assert.deepEqual([...expected.keys()], [keyOf('B')], 'only the single-row key has an entry')
+  for (const batchCapable of [false, true]) {
+    const host = createHost(seed, { batchCapable })
+    host.hooks.beforeHostRead = async (recordId) => { if (recordId === 'rec_b') commit(host, 'rec_a1', { notes: 'a person typed this' }) }
+    const result = await apply(host, plan, { expectedRecords: expected })
+    const patches = patchesOf(host)
+    assert.deepEqual(patches.map((input) => input.recordId), ['rec_b'], `${batchCapable ? 'batched' : 'scalar'}: no patch for either twin`)
+    assert.equal(patches[0].expectedVersion, 3, 'the single-row key is fenced')
+    assert.deepEqual(result.errors.map((error) => error.code), ['duplicate_target_key', 'duplicate_target_key'])
+    assert.equal(host.rows.find((row) => row.id === 'rec_a1').data.notes, 'a person typed this', 'the person\'s edit on a twin survives')
+    assert.equal(host.rows.find((row) => row.id === 'rec_a1').data.material, 'M-1')
+    assert.equal(host.rows.find((row) => row.id === 'rec_a2').data.active, true)
+  }
+})
+
 test('EV-10 the large chunk hands the writer no expectedRecords (its host calls stay byte-identical; D-2 correction)', () => {
   const source = fs.readFileSync(path.join(LIB, 'stock-preparation-large-bom-jobs.cjs'), 'utf8')
   assert.equal(source.includes('expectedRecords'), false)

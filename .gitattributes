@@ -151,3 +151,8 @@ apps/web/scripts/run-required-web-tests.sh text eol=lf merge=union
 # "no duplicate tokens" shape assertion already hard-fails on independently — so in practice this
 # manifest-side duplicate rarely arrives alone.)
 apps/web/scripts/run-required-web-tests.tokens text eol=lf merge=union
+
+# Y1 dispatching recovery runbook: the operator copies these two psql scripts and compares their
+# SHA-256 with the values the runbook prints (section 6). Those are of the LF bytes, so every
+# checkout, including a core.autocrlf=true one, must hand out the LF bytes.
+docs/development/takeover-beiliao-20260821/runbook-yida-dispatching-recovery-20261106-*.sql text eol=lf

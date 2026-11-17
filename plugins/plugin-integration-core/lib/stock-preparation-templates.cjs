@@ -143,6 +143,28 @@ const HUMAN_PRESERVED_FIELD_IDS = Object.freeze([
   'actualArrivalDate',
 ])
 
+// MACHINE WRITE-BACK COLUMNS (R-71 ⑦.4 PR-4, plan D4). A column listed here is plm_system-owned -- so the
+// project sheet's human write lock covers it automatically (stock-preparation-project-targets.cjs derives
+// the lock set from ownership) and a person can never edit it -- but it is written by ONE machine path
+// that is NOT the PLM refresh: today 发料确认日期 (`issueConfirmDate`), which the separate YiDa issue-confirm
+// write-back (PR-5, not in this module) fills once a form is acknowledged.
+//
+// Every PLM refresh therefore treats these ids as OUTSIDE its writable band:
+//   * the conflict planner drops them from the plm_system refresh band (beside RUN_FIELD_IDS) and THROWS
+//     if one ever appears in an add record / update patch / change-plan patch / inactive patch;
+//   * the apply writer refuses them on the same four payloads, and because its PR-8 one-re-read band is
+//     derived from the planner's writable band, a write-back landing between plan and apply is "a column
+//     the plugin does not write moved" (send the patch once more), never `machine_columns_moved`.
+//
+// It is NOT the human whitelist: growing HUMAN_PRESERVED_FIELD_IDS is an independent design gate and would
+// make the column human-editable, which is the opposite of what a machine-recorded date means. It is not a
+// third ownership either (that would move the ownership enum, the repair ownership check and pack
+// classification). Frozen; every id is asserted below to be a non-key, non-required plm_system column of
+// the frozen main template.
+const MACHINE_WRITEBACK_FIELD_IDS = Object.freeze([
+  'issueConfirmDate',
+])
+
 const FEASIBILITY_FORBIDDEN_MECHANISMS = Object.freeze([
   'raw_sql',
   'recursive_cte',
@@ -843,8 +865,50 @@ const STOCK_PREPARATION_MAIN_TABLE_TEMPLATE = Object.freeze(normalizeStockPrepar
     // 实际到货日期 -- what actually arrived and when, deliberately NOT a second
     // demand date. `demandDate` (需求日期) stays production-owned above.
     field('actualArrivalDate', 'Actual Arrival Date', 'date', 'human_preserved', { labelZh: '实际到货日期' }),
+
+    // ------------------------------------------------------------------
+    // R-71 ⑦.4 PR-4 -- two columns, appended in ONE template change so an existing project sheet needs
+    // exactly one repair (PR-3: the project-sheet repair route adds missing template columns and locks
+    // them). Until that repair has run on a sheet, its pull stops with a recoverable 422
+    // TARGET_SCHEMA_INCOMPLETE; nothing is written and running the repair clears it.
+    //
+    // 发料确认日期. plm_system so a person can never edit it (the lock set is derived from ownership), and
+    // listed in MACHINE_WRITEBACK_FIELD_IDS above so a PLM refresh never writes it either: its only writer
+    // is the YiDa issue-confirm write-back (PR-5). The id is not `materialCode` or anything else a pack
+    // `ext_` column already ends with (stock-preparation-extension-namespace.cjs refuses such a pair).
+    field('issueConfirmDate', 'Issue Confirm Date', 'date', 'plm_system', { labelZh: '发料确认日期' }),
+    // 项目规格型号. An EMPTY column for now: which PLM attribute it denormalizes is field question F1, still
+    // open, so nothing in the read plan or the planner produces a `projectSpecModel` key -- the column
+    // stays empty (a pull never invents a source column). Filling it is a later slice (PR-6).
+    field('projectSpecModel', 'Project Spec Model', 'string', 'plm_system', { labelZh: '项目规格型号' }),
   ],
 }))
+
+// MACHINE_WRITEBACK_FIELD_IDS checked against the frozen template at load, not trusted: each id must be a
+// plm_system column (so the human lock covers it), never the key or a REQUIRED_SYSTEM_FIELDS member (a
+// refresh must be able to build a whole row without it), and never on the human whitelist.
+function assertMachineWritebackContract({
+  template = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+  machineWritebackFieldIds = MACHINE_WRITEBACK_FIELD_IDS,
+} = {}) {
+  const byId = new Map((template.fields || []).map((entry) => [entry.id, entry]))
+  for (const fieldId of machineWritebackFieldIds) {
+    const entry = byId.get(fieldId)
+    if (!entry) {
+      throw new StockPreparationTemplateError(`machine write-back field is not a template column: ${fieldId}`)
+    }
+    if (entry.ownership !== 'plm_system') {
+      throw new StockPreparationTemplateError(`machine write-back field must be plm_system: ${fieldId}`)
+    }
+    if (entry.key === true || (template.keyFields || []).includes(fieldId) || entry.required === true
+      || REQUIRED_SYSTEM_FIELDS.includes(fieldId) || HUMAN_PRESERVED_FIELD_IDS.includes(fieldId)) {
+      throw new StockPreparationTemplateError(`machine write-back field must be an optional non-key column: ${fieldId}`)
+    }
+  }
+  return true
+}
+
+assertMachineWritebackContract()
 
 // ---------------------------------------------------------------------------
 // 备料填写视图 — THE FILL VIEW's CONTRACT (ids only, never values).
@@ -1470,6 +1534,8 @@ module.exports = {
   STOCK_PREPARATION_FIELD_OWNERSHIPS,
   REQUIRED_SYSTEM_FIELDS,
   HUMAN_PRESERVED_FIELD_IDS,
+  MACHINE_WRITEBACK_FIELD_IDS,
+  assertMachineWritebackContract,
   FEASIBILITY_FORBIDDEN_MECHANISMS,
   TEMPLATE_LABEL_LOCALE_ENV,
   TEMPLATE_LABEL_LOCALES,

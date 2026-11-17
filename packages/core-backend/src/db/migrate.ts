@@ -158,7 +158,10 @@ Notes:
   zzzz20261108120000_create_integration_yida_generated_layout.ts refuses
   while integration_yida_generated_layout holds any row (a sealed
   generated-code layout is evidence for every GENERATED code sent under
-  that target from the seal onward).`)
+  that target from the seal onward), and
+  zzzz20261111093417_create_user_notification_endpoints_preferences.ts
+  refuses while user_notification_endpoints or
+  user_notification_preferences holds any row.`)
 }
 
 async function main(): Promise<void> {

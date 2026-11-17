@@ -184,12 +184,23 @@ const REFRESH_BLOCKED_TEXT = Object.freeze({
   unknown: Object.freeze({ zh: () => '刷新未完成', en: () => 'Refresh unfinished', tone: 'warning' }),
 })
 
-function refreshBlockedPosture(input) {
+/**
+ * Pre-pilot fix batch 8(c) (register R-91): the BLOCKED TOKEN alone — the closed key of REFRESH_BLOCKED_TEXT the posture
+ * would render, or null when the formal export would not refuse on the state (not governed, or complete AND settled).
+ * Values-free by construction (a closed vocabulary); the operator directory carries it per row so the home cards and
+ * 项目查询 cannot say 「可以导出」 where the export gate refuses.
+ */
+function refreshBlockedToken(input) {
   const status = input.refreshStatus
   if (status === undefined || status === null) return null
   if (status === 'not_governed') return null
   if (status === 'complete' && input.refreshSettled === true) return null
-  const token = status === 'complete' ? 'unsettled' : (Object.prototype.hasOwnProperty.call(REFRESH_BLOCKED_TEXT, status) ? status : 'unknown')
+  return status === 'complete' ? 'unsettled' : (Object.prototype.hasOwnProperty.call(REFRESH_BLOCKED_TEXT, status) ? status : 'unknown')
+}
+
+function refreshBlockedPosture(input) {
+  const token = refreshBlockedToken(input)
+  if (token === null) return null
   const text = REFRESH_BLOCKED_TEXT[token]
   const n = nonNegativeInt(input.refreshPendingConfirmCount)
   return { key: REFRESH_POSTURE_KEY, zh: text.zh(n), en: text.en(n), tone: text.tone }
@@ -1300,6 +1311,11 @@ module.exports = {
   // S3 follow-ups 2, fix round 1: the refresh route's answer to a click while this process's refresh is still running.
   projectOverviewBusyError: overviewBusyError,
   projectOverviewPosture,
+  // Pre-pilot fix batch 8(c): the directory's per-row refresh facts reuse the overview's own derivation.
+  refreshBlockedToken,
+  refreshPostureInputOf,
+  readRefreshStateForOverview,
+  REFRESH_BLOCKED_TOKENS: Object.freeze(Object.keys(REFRESH_BLOCKED_TEXT)),
   projectOverviewPullOutcomeText,
   buildProjectOverviewDeepLink,
   buildProjectOverviewDescriptor,
