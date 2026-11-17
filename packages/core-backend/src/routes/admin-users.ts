@@ -4689,6 +4689,23 @@ export function adminUsersRouter(): Router {
       const sort = String(req.query.sort || '').trim()
       const dir = String(req.query.dir || '').trim()
       const includeMeta = String(req.query.meta || '').trim() === '1'
+      const includeAdmissionSummary = req.query.includeAdmissionSummary === '1'
+      const namespaceInput = req.query.admissionNamespace
+      const statusInput = req.query.admissionStatus
+      const hasAdmissionFilter = namespaceInput !== undefined || statusInput !== undefined
+      let admissionNamespace = ''
+      let admissionStatus: 'enabled' | 'disabled' | null = null
+      if (hasAdmissionFilter) {
+        if (typeof namespaceInput !== 'string' || typeof statusInput !== 'string') {
+          return jsonError(res, 400, 'ADMISSION_FILTER_INVALID', 'admissionNamespace and admissionStatus are required together')
+        }
+        admissionNamespace = normalizeNamespace(namespaceInput)
+        if (admissionNamespace.length > 255 || !isNamespaceAdmissionControlledResource(admissionNamespace) || (statusInput !== 'enabled' && statusInput !== 'disabled')) {
+          return jsonError(res, 400, 'ADMISSION_FILTER_INVALID', 'Invalid admission filter')
+        }
+        admissionStatus = statusInput
+      }
+      const admissionPredicate = (parameterIndex: number) => `${admissionStatus === 'disabled' ? 'NOT ' : ''}EXISTS (SELECT 1 FROM user_namespace_admissions admission WHERE admission.user_id = users.id AND admission.namespace = $${parameterIndex} AND admission.enabled IS TRUE)`
       const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>, {
         defaultPage: 1,
         defaultPageSize: 20,
@@ -4710,6 +4727,10 @@ export function adminUsersRouter(): Router {
       if (accountStatus === 'inactive') clauses.push('is_active IS NOT TRUE')
       const listFilterSql = adminUserListFilterSql(listFilter)
       if (listFilterSql) clauses.push(listFilterSql)
+      if (admissionStatus) {
+        params.push(admissionNamespace)
+        clauses.push(admissionPredicate(params.length))
+      }
       const where = `WHERE ${clauses.join(' AND ')}`
       const countSql = `SELECT COUNT(*)::int AS c FROM users ${where}`
       const limitIndex = params.length + 1
@@ -4734,8 +4755,8 @@ export function adminUsersRouter(): Router {
         const pinned = await query<AdminUserProfile & { roleIds?: string[] | null }>(
           `SELECT ${ADMIN_USER_LIST_SELECT}
            FROM users
-           WHERE id = $1 AND deleted_at IS NULL`,
-          [pinUserId],
+           WHERE id = $1 AND deleted_at IS NULL${admissionStatus ? ` AND ${admissionPredicate(2)}` : ''}`,
+          admissionStatus ? [pinUserId, admissionNamespace] : [pinUserId],
         )
         if (pinned.rows[0]) {
           items.unshift(pinned.rows[0])
@@ -4746,6 +4767,24 @@ export function adminUsersRouter(): Router {
       }
 
       const userSignals = await fetchAdminUserListSignals(items.map((row) => row.id))
+      const admissionSummary = new Map<string, { enabledAdmissionNamespaces: string[]; lastAdmissionChangedAt: string | null }>()
+      if (includeAdmissionSummary && items.length > 0) {
+        const summary = await query<{ user_id: string; enabled_namespaces: string[]; last_changed_at: Date | string | null }>(
+          `SELECT user_id,
+                  COALESCE(array_agg(namespace ORDER BY namespace) FILTER (WHERE enabled IS TRUE), ARRAY[]::text[]) AS enabled_namespaces,
+                  MAX(updated_at) AS last_changed_at
+             FROM user_namespace_admissions
+            WHERE user_id = ANY($1::text[])
+            GROUP BY user_id`,
+          [items.map((row) => row.id)],
+        )
+        for (const row of summary.rows) {
+          admissionSummary.set(row.user_id, {
+            enabledAdmissionNamespaces: row.enabled_namespaces,
+            lastAdmissionChangedAt: row.last_changed_at === null ? null : new Date(row.last_changed_at).toISOString(),
+          })
+        }
+      }
       const listMeta = includeMeta ? await fetchAdminUserListMeta(q) : null
 
       return jsonOk(res, {
@@ -4757,6 +4796,7 @@ export function adminUsersRouter(): Router {
           return {
             ...row,
             roleIds,
+            ...(includeAdmissionSummary ? (admissionSummary.get(row.id) ?? { enabledAdmissionNamespaces: [], lastAdmissionChangedAt: null }) : {}),
             dingtalkLoginEnabled: signals?.dingtalkLoginEnabled ?? false,
             dingtalkGrantUpdatedAt: signals?.dingtalkGrantUpdatedAt ?? null,
             dingtalkGrantUpdatedBy: signals?.dingtalkGrantUpdatedBy ?? null,
@@ -4774,6 +4814,7 @@ export function adminUsersRouter(): Router {
         total,
         ...(listMeta ?? {}),
         query: q,
+        appliedAdmissionFilter: admissionStatus ? { namespace: admissionNamespace, status: admissionStatus } : null,
         pinUserId: pinUserId || '',
         pinUserIncluded: pinUserId ? pinnedUserIncluded : null,
         actorId: adminUserId,

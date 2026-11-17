@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const backend = path.join(root, 'packages/core-backend')
-const names = ['permission_command_fence_test', 'permission_command_test', 'permission_command_compat_test']
+const names = ['permission_command_fence_test', 'permission_command_test', 'permission_command_compat_test', 'permission_command_list_test']
 const prefix = 'tests/integration/'
 export const baseline = Object.freeze([
   { file: 'authorization-operation-fence.db.test.ts', min: 26, required: ['rejects a changed body on a known public function', 'holds every attested table in EXCLUSIVE mode and leaves work timeouts active', 'returns retryable busy without waiting when an old writer holds a table'], skipped: [] },
@@ -19,6 +19,7 @@ export const baseline = Object.freeze([
   { file: 'authorization-operation-schema-gate.db.test.ts', min: 2, required: ['holds R0 exclusive through the transaction and releases it on rollback'], skipped: [] },
   { file: 'authorization-operation-role-provenance.db.test.ts', min: 8, required: ['records command role assignment as manual and does not relabel an existing role', 'does not expose provenance of roles outside a delegate revocable catalog'], skipped: [] },
   { file: 'authorization-operation-provenance-migration.db.test.ts', min: 1, required: ['leaves old records unknown, constrains new values and refuses lossy down'], skipped: ['holds a table lock through the down evidence check and excludes a concurrent insert'] },
+  { file: 'authorization-operation-admission-list.db.test.ts', min: 5, required: ['combines namespace filter with search, account status and pagination beyond 20', 'summarizes only requested page IDs and makes no permission writes'], skipped: [] },
   { file: 'authorization-operation-audit-feed.db.test.ts', min: 4, required: ['lists both sources once, with stable pagination, text actor and matching CSV filters', 'denies delegated actor both global surfaces'], skipped: [] },
 ])
 export const unitBaseline = Object.freeze([
@@ -127,7 +128,7 @@ export async function main(env=process.env) {
     for(const name of names) await client.query(`CREATE DATABASE "${name}" TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'`)
   } finally { await client.end() }
   const urls=names.map(name=>{const u=new URL(base);u.pathname=`/${name}`;return u.toString()})
-  const clean={...env, DATABASE_URL:urls[1], PERMISSION_COMMAND_FENCE_DATABASE_URL:urls[0],PERMISSION_COMMAND_TEST_DATABASE_URL:urls[1],PERMISSION_COMMAND_COMPAT_DATABASE_URL:urls[2],VITEST_MAX_THREADS:'3'}
+  const clean={...env, DATABASE_URL:urls[1], PERMISSION_COMMAND_FENCE_DATABASE_URL:urls[0],PERMISSION_COMMAND_TEST_DATABASE_URL:urls[1],PERMISSION_COMMAND_COMPAT_DATABASE_URL:urls[2],PERMISSION_ADMISSION_LIST_DATABASE_URL:urls[3],VITEST_MAX_THREADS:'3'}
   for (const url of urls) run('pnpm',['--filter','@metasheet/core-backend','db:migrate'],{...clean,DATABASE_URL:url})
   const temp=path.join(root,'tmp','permission-authorization-operation-ci')
   await mkdir(temp,{recursive:true})

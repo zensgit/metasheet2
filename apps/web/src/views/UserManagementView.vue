@@ -515,6 +515,11 @@
             <option value="inactive">停用</option>
           </select>
         </div>
+        <MemberAdmissionListFilter
+          v-model:namespace="admissionFilterNamespace"
+          v-model:status="admissionFilterStatus"
+          :namespaces="namespaceOptions"
+        />
         <div class="user-admin__filters" role="group" aria-label="成员治理筛选">
           <button
             v-for="option in userFilterOptions"
@@ -760,6 +765,7 @@
           <label class="user-admin__user-select">
             <input
               :checked="selectedUserIdSet.has(user.id)"
+              :disabled="loading && admissionFilterStatus !== ''"
               type="checkbox"
               :aria-label="`选择 ${user.name || formatManagedUserLabel(user)}`"
               @change="void handleUserSelectionChange(user.id, $event)"
@@ -774,7 +780,15 @@
                 <span>{{ formatManagedUserIdentifier(user) }}</span>
               </span>
             </span>
-            <span class="user-admin__meta">{{ user.role }}</span>
+            <span class="user-admin__meta">
+              {{ user.roleIds?.length ? user.roleIds.map(roleIdTitle).join('、') : user.role }}
+              <small v-if="user.enabledAdmissionNamespaces" class="user-admin__hint" data-testid="member-list-admission-summary">
+                插件准入：{{ user.enabledAdmissionNamespaces.join('、') || '未开通' }}
+              </small>
+              <small v-if="user.lastAdmissionChangedAt" class="user-admin__hint">
+                准入更新：{{ formatDate(user.lastAdmissionChangedAt) }}
+              </small>
+            </span>
             <span class="user-admin__row-badges">
               <span class="user-admin__row-badge" :class="{ 'user-admin__row-badge--success': user.is_active, 'user-admin__row-badge--danger': !user.is_active }">
                 {{ user.is_active ? '账号启用' : '账号停用' }}
@@ -1428,6 +1442,7 @@
 </template>
 
 <script setup lang="ts">
+import MemberAdmissionListFilter from '../components/MemberAdmissionListFilter.vue'
 import {
   buildImportTemplateCsv,
   buildUpdateExportCsv,
@@ -1529,6 +1544,8 @@ type ManagedUser = {
   dingtalkCorpId?: string | null
   lastDirectorySyncAt?: string | null
   businessRoleCount?: number
+  enabledAdmissionNamespaces?: string[]
+  lastAdmissionChangedAt?: string | null
 }
 
 type RoleCatalogItem = {
@@ -1921,6 +1938,8 @@ const inviteStatusFilter = ref<'pending' | 'all'>('pending')
 const detailOpen = ref(false)
 const rowMenuUserId = ref('')
 const roleFilter = ref('')
+const admissionFilterNamespace = ref('')
+const admissionFilterStatus = ref<'' | 'enabled' | 'disabled'>('')
 const accountStatusFilter = ref<'' | 'active' | 'inactive'>('')
 const sortKey = ref<'' | 'name' | 'role' | 'status' | 'lastLogin'>('')
 const sortDir = ref<'asc' | 'desc'>('asc')
@@ -2893,11 +2912,16 @@ function clearSelectionForCriteriaChange(): void {
 
 async function selectVisibleUsers(): Promise<void> {
   const version = selectionFilterVersion
-  const pageAlreadyComplete = userTotal.value > 0 && users.value.length >= userTotal.value
-  const collected = pageAlreadyComplete ? displayedUsers.value : await collectFilteredUsers(version)
-  if (version !== selectionFilterVersion) return
-  rememberUsers(collected)
-  selectedUserIds.value = collected.map((user) => user.id)
+  try {
+    const pageAlreadyComplete = userTotal.value > 0 && users.value.length >= userTotal.value
+    const collected = pageAlreadyComplete ? displayedUsers.value : await collectFilteredUsers(version)
+    if (version !== selectionFilterVersion) return
+    rememberUsers(collected)
+    selectedUserIds.value = collected.map((user) => user.id)
+  } catch (error) {
+    if (version !== selectionFilterVersion) return
+    setStatus(error instanceof Error ? error.message : '加载筛选成员失败', 'error')
+  }
 }
 
 function toggleUserSelection(userId: string, checked: boolean): void {
@@ -3246,6 +3270,10 @@ function normalizeManagedUser(item: ManagedUser): ManagedUser {
     dingtalkCorpId: item.dingtalkCorpId ?? null,
     lastDirectorySyncAt: item.lastDirectorySyncAt ?? null,
     businessRoleCount: item.businessRoleCount ?? 0,
+    enabledAdmissionNamespaces: Array.isArray(item.enabledAdmissionNamespaces)
+      ? item.enabledAdmissionNamespaces.filter((namespace) => typeof namespace === 'string' && namespace.trim() !== '')
+      : undefined,
+    lastAdmissionChangedAt: typeof item.lastAdmissionChangedAt === 'string' ? item.lastAdmissionChangedAt : null,
   }
 }
 
@@ -3258,7 +3286,14 @@ function buildUserListParams(pageNumber: number, size: number, withMeta: boolean
   params.set('q', search.value)
   params.set('page', String(pageNumber))
   params.set('pageSize', String(size))
-  if (withMeta) params.set('meta', '1')
+  if (withMeta) {
+    params.set('meta', '1')
+    params.set('includeAdmissionSummary', '1')
+  }
+  if (admissionFilterNamespace.value && admissionFilterStatus.value) {
+    params.set('admissionNamespace', admissionFilterNamespace.value)
+    params.set('admissionStatus', admissionFilterStatus.value)
+  }
   if (roleFilter.value) params.set('role', roleFilter.value)
   if (accountStatusFilter.value) params.set('accountStatus', accountStatusFilter.value)
   if (userListFilter.value !== 'all') params.set('listFilter', userListFilter.value)
@@ -3269,6 +3304,16 @@ function buildUserListParams(pageNumber: number, size: number, withMeta: boolean
   const pinUserId = userNavigation.value.userId.trim()
   if (pinUserId) params.set('userId', pinUserId)
   return params
+}
+
+function assertAppliedAdmissionFilter(params: URLSearchParams, value: unknown): void {
+  const namespace = params.get('admissionNamespace')
+  if (!namespace) return
+  const status = params.get('admissionStatus')
+  const filter = value as { namespace?: unknown; status?: unknown } | null | undefined
+  if (filter?.namespace !== namespace || filter.status !== status) {
+    throw new Error('服务器未确认插件准入筛选，请清除筛选或更新服务后重试。')
+  }
 }
 
 function readUserListSummary(value: unknown): typeof serverSummary.value {
@@ -3319,7 +3364,9 @@ async function fetchUserListPage(pageNumber: number, size: number, withMeta: boo
     total?: number
     roleOptions?: unknown
     summary?: unknown
+    appliedAdmissionFilter?: unknown
   } | undefined
+  assertAppliedAdmissionFilter(params, data?.appliedAdmissionFilter)
   const items = Array.isArray(data?.items) ? data.items.map((item) => normalizeManagedUser(item)) : []
   return {
     items,
@@ -3368,7 +3415,9 @@ async function loadUsers(): Promise<void> {
       total?: number
       roleOptions?: unknown
       summary?: unknown
+      appliedAdmissionFilter?: unknown
     } | undefined
+    assertAppliedAdmissionFilter(params, data?.appliedAdmissionFilter)
     const items = Array.isArray(data?.items) ? data.items.map((item) => normalizeManagedUser(item)) : []
     users.value = items
     userTotal.value = typeof data?.total === 'number' ? data.total : items.length
@@ -3402,6 +3451,12 @@ async function loadUsers(): Promise<void> {
     }
   } catch (error) {
     if (generation !== userListGeneration) return
+    if (admissionFilterNamespace.value && admissionFilterStatus.value) {
+      users.value = []
+      userTotal.value = 0
+      clearSelectionForCriteriaChange()
+      clearStaleUserSelection()
+    }
     setStatus(error instanceof Error ? error.message : '加载用户失败', 'error')
   } finally {
     if (generation === userListGeneration) loading.value = false
@@ -5675,7 +5730,7 @@ watch(search, () => {
   if (page.value !== 1) page.value = 1
 })
 
-watch([userListFilter, roleFilter, accountStatusFilter], () => {
+watch([userListFilter, roleFilter, accountStatusFilter, admissionFilterNamespace, admissionFilterStatus], () => {
   clearSelectionForCriteriaChange()
   if (page.value !== 1) page.value = 1
   else void loadUsers()

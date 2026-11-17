@@ -3652,6 +3652,52 @@ describe('UserManagementView', () => {
     expect(names).toEqual(['Delta', 'Charlie', 'Bravo', 'Alpha'])
   })
 
+  it('checks the server admission filter for both the visible page and bulk selection', async () => {
+    const base = createApiImplementation(callLog)
+    let echoVisibleFilter = true
+    let filterRequests = 0
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const response = await base(input, init)
+      const url = new URL(String(input), 'http://localhost')
+      if (url.pathname !== '/api/admin/users' || url.searchParams.get('admissionStatus') !== 'enabled') return response
+      expect(url.searchParams.get('admissionNamespace')).toBe('crm')
+      filterRequests += 1
+      const payload = await response.json()
+      if (url.searchParams.get('meta') !== '1' || !echoVisibleFilter) return createJsonResponse(payload)
+      expect(url.searchParams.get('includeAdmissionSummary')).toBe('1')
+      payload.data = {
+        ...payload.data,
+        total: 30,
+        appliedAdmissionFilter: { namespace: 'crm', status: 'enabled' },
+        items: [{ ...payload.data.items[0], enabledAdmissionNamespaces: ['crm'] }],
+      }
+      return createJsonResponse(payload)
+    })
+    app = createApp(UserManagementView)
+    registerRouterLink(app, true)
+    app.mount(container!)
+    await flushUi(20)
+    const namespace = container!.querySelector<HTMLSelectElement>('[data-testid="member-admission-namespace"]')
+    const status = container!.querySelector<HTMLSelectElement>('[data-testid="member-admission-status"]')
+    if (!namespace || !status) throw new Error('Admission filters not found')
+    await setSelectValue(namespace, 'crm')
+    await setSelectValue(status, 'enabled')
+    await waitForCondition(() => container!.querySelector('[data-testid="member-list-admission-summary"]') !== null)
+    expect(container!.querySelector('[data-testid="member-list-admission-summary"]')?.textContent).toContain('crm')
+    expect(container!.querySelectorAll('.user-admin__user')).toHaveLength(1)
+
+    findButtonByText(container!, '选择当前筛选结果').click()
+    await waitForCondition(() => (container!.textContent || '').includes('服务器未确认插件准入筛选'))
+    expect(filterRequests).toBeGreaterThanOrEqual(2)
+    expect(container!.querySelector<HTMLInputElement>('.user-admin__user input[type="checkbox"]')?.checked).toBe(false)
+    expect(apiFetchMock.mock.calls.some((args) => ((args[1] as RequestInit | undefined)?.method || 'GET') !== 'GET')).toBe(false)
+
+    echoVisibleFilter = false
+    findButtonByText(container!, '查询').click()
+    await waitForCondition(() => container!.querySelectorAll('.user-admin__user').length === 0)
+    expect(container!.querySelector('.user-admin__bulkbar')).toBeNull()
+  })
+
   it('shows the recycle bin and restores a deleted account', async () => {
     useLocale().setLocale('zh-CN')
     app = createApp(UserManagementView)
