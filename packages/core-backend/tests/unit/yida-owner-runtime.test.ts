@@ -68,8 +68,9 @@ function loadRuntime(factory: Factory, source = originalSource, ownCoreErrors = 
       createInternalYidaSendExecutionAuthority: factory,
       yidaSendApprovalErrorCode: (error: unknown) => ownCoreErrors.get(error as object),
     }
-    // Y9: the host live re-check of the issue-confirm write-back. The control path never reaches it (no binding here
-    // carries the write-back capability); it refuses if anything ever calls it.
+    // Y9: the host live re-check of the issue-confirm write-back. The control path never reaches it: only the cursor
+    // refusal mapping below binds the write-back capability, and its run answers without calling the re-check; it
+    // refuses if anything ever calls it.
     if (specifier === './yida-issue-confirm-writeback-authority') return {
       yidaIssueConfirmLiveRecheck: async () => { throw new Error('UNIT_RECHECK_MUST_NOT_RUN') },
     }
@@ -174,6 +175,31 @@ async function sheetSourceKeepsSlotOne(source = originalSource) {
   } finally { await f.runtime.stop() }
 }
 const TARGET_REF_FIXTURE = '00000000-0000-4000-8000-0000000000aa'
+// Y9 sweep (round-3 refuter F3): the runtime's own mapping of the core's closed cursor refusal, with the owner proof
+// passing (this harness substitutes the core authority, so proveDraftTarget resolves). A capability that answers
+// { enabled: true, results: [], refused: 'STALE' } is the runtime's own error with the wire code
+// YIDA_ISSUE_CONFIRM_CURSOR_STALE (the plugin core's fixed text; the host never imports the plugin, so the literal is
+// pinned here), 'AFTER' is YIDA_OWNER_RUNTIME_INPUT, and any other refusal is UNAVAILABLE. Each after the live proof,
+// with the run called exactly once.
+const SWEEP_CURSOR_FIXTURE = 'c3ludGhldGljLXN3ZWVwLWN1cnNvcg'
+async function writebackCursorRefusals(source = originalSource) {
+  for (const [refused, code] of [['STALE', 'YIDA_ISSUE_CONFIRM_CURSOR_STALE'], ['AFTER', 'YIDA_OWNER_RUNTIME_INPUT'],
+    ['OTHER', 'YIDA_OWNER_RUNTIME_UNAVAILABLE']] as const) {
+    const f = fixture({ source })
+    const run = vi.fn(async () => Object.freeze({ enabled: true, results: [], refused }))
+    const createIssueConfirmWriteback = vi.fn(() => Object.freeze({ run }))
+    await f.runtime.createPluginCapability().activate({ ...f.binding, createIssueConfirmWriteback,
+      issueConfirmWritebackEnabled: () => true } as unknown as YidaOwnerRuntimeBinding)
+    try {
+      const error = await f.runtime.issueConfirmWriteback(actor, { after: SWEEP_CURSOR_FIXTURE }).then(() => undefined, (caught: unknown) => caught)
+      expect(error, refused).toBeInstanceOf(f.module.YidaOwnerRuntimeError)
+      expect([(error as { code?: unknown }).code, (error as Error).message], refused).toEqual([code, code])
+      expect(f.authority.proveDraftTarget, refused).toHaveBeenCalledWith({})
+      expect(run, refused).toHaveBeenCalledTimes(1)
+      expect(run.mock.calls[0][0], refused).toEqual({ after: SWEEP_CURSOR_FIXTURE })
+    } finally { await f.runtime.stop() }
+  }
+}
 
 const networkSpies: ReturnType<typeof vi.spyOn>[] = []
 beforeAll(() => {
@@ -632,6 +658,10 @@ describe('Yida owner runtime control paths (NOT positive authority proof)', () =
     } finally { await multi.runtime.stop() }
   })
 
+  it('Y9 sweep: a cursor refusal of the write-back core is mapped by the runtime itself — STALE is YIDA_ISSUE_CONFIRM_CURSOR_STALE, AFTER is INPUT, anything else UNAVAILABLE (owner proof passing)', async () => {
+    await writebackCursorRefusals()
+  })
+
   it('projects a closed submit view and rejects execution authority/material additions', async () => {
     for (const key of ['permit', 'handle', 'credential', 'material', 'token', 'config']) {
       const f = await active({ result: { ...delivered, [key]: 'synthetic-private' } })
@@ -999,6 +1029,13 @@ describe('in-memory guard mutation probes (no repository writes)', () => {
       { name: 'prove/target-needs-multi-target', from: "if (Object.hasOwn(parsed, 'targetRef') && !multiTargetOn()) fail('INPUT')\n        return Object.hasOwn(parsed, 'targetRef') ? { targetRef: id(parsed.targetRef) } : {}",
         to: "return Object.hasOwn(parsed, 'targetRef') ? { targetRef: id(parsed.targetRef) } : {}",
         test: source => sheetSourceKeepsSlotOne(source) },
+      // Y9 sweep (round-3 refuter F3): the two runtime mutants that left the host unit files green, and the wire text.
+      { name: 'writeback/stale-is-cursor-stale', from: "fail(raw.refused === SWEEP_STALE ? 'CURSOR_STALE' : 'INPUT')", to: "fail('INPUT')",
+        test: source => writebackCursorRefusals(source) },
+      { name: 'writeback/stale-recognised', from: '(raw.refused !== SWEEP_REFUSED && raw.refused !== SWEEP_STALE)', to: 'raw.refused !== SWEEP_REFUSED',
+        test: source => writebackCursorRefusals(source) },
+      { name: 'writeback/stale-wire-text', from: "code === 'CURSOR_STALE' ? 'YIDA_ISSUE_CONFIRM_CURSOR_STALE' : `YIDA_OWNER_RUNTIME_${code}`",
+        to: '`YIDA_OWNER_RUNTIME_${code}`', test: source => writebackCursorRefusals(source) },
       { name: 'errors/own-runtime-brand', from: 'if (own) fail(own)', to: '', test: async source => {
         const f = await active({ source, enablement: 'false' })
         try { await expect(f.runtime.preview(actor, selected)).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_DISABLED' }) }

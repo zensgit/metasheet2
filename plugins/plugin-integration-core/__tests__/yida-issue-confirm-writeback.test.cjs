@@ -1179,6 +1179,47 @@ test('the trace race, order: while A\'s trace INSERT is in flight its lease is s
   }
 })
 
+// Round-3 refuter F2: the same order pin for outcomes that are NOT `written`. Both under-lease decision points trace
+// before the release: the authority step (permission_revoked) and the records step (row_absent). While A is parked at
+// that trace INSERT the fact flips (permission granted again / the record created), so a run that leased then would
+// patch: the lease A still holds is what stops it.
+test('the trace race, order (non-written outcomes): while A\'s trace INSERT of permission_revoked or row_absent is in flight its lease is still held — a run that read the row then is WRITE_LOCKED and patches nothing, though the fact has flipped', async () => {
+  const cases = [
+    ['permission_revoked', (world) => { world.authorityAllowed = false }, (world) => { world.authorityAllowed = true }],
+    ['row_absent', (world) => { world.sheets.set(SHEET, []) }, (world) => {
+      world.sheets.get(SHEET).push({ id: 'rec_syn_late', version: 1, data: { idempotencyKey: KEY, projectNo: PROJECT, issueConfirmDate: null } })
+    }],
+  ]
+  for (const [outcome, arrange, flip] of cases) {
+    for (const mode of ['limit', 'ledgerIds']) {
+      const { world, row } = sentWorld()
+      arrange(world)
+      const label = `${outcome} (${mode})`
+      const input = mode === 'limit' ? { tenantId: TENANT, ownerId: OWNER } : { tenantId: TENANT, ownerId: OWNER, ledgerIds: [row.id] }
+      let releaseA
+      let arrived = false
+      world.traceGate = () => new Promise((resolve) => { arrived = true; releaseA = resolve })
+      const a = world.executor().run(input)
+      while (!arrived) await new Promise((resolve) => setImmediate(resolve))
+      world.traceGate = null
+      assert.equal(world.leases.size, 1, `${label}: A holds its lease at its trace INSERT`)
+      // The fact flips while A is parked: a run that held the lease now would patch.
+      flip(world)
+      const b = await world.executor().run(input)
+      assert.equal(world.calls.patch.length, 0, `${label}: B never patches`)
+      assert.deepEqual(b.results, [{ ledgerId: row.id, kind: 'retryable', code: 'STOCK_PREP_PROJECT_WRITE_LOCKED' }], label)
+      releaseA()
+      assert.deepEqual((await a).results, [{ ledgerId: row.id, kind: 'outcome', outcome, recorded: true }], label)
+      assert.deepEqual(world.trace.map((entry) => entry.outcome), [outcome], label)
+      assert.equal(world.leases.size, 0, label)
+      // Traced now: the next run selects nothing, and nothing is ever patched.
+      assert.equal((await world.executor().run(input)).results.length, 0, label)
+      assert.equal(world.calls.patch.length, 0, label)
+      for (const record of world.sheets.get(SHEET)) assert.equal(record.data.issueConfirmDate, null, label)
+    }
+  }
+})
+
 test('a traced row whose trace the re-check cannot read is retryable: no patch, no trace', async () => {
   const { world, row } = sentWorld()
   const deps = world.deps()

@@ -881,6 +881,49 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     expect([after.date, after.version]).toEqual([null, before.version + 1])
   })
 
+  // Round-3 refuter F2: the same pin for outcomes that are NOT `written`, at both under-lease decision points — the
+  // authority step (permission_revoked) and the records step (already_set). While A is parked at that trace INSERT the
+  // fact flips (the permission granted again / the cell emptied), so a run that held the lease then would patch.
+  it.each([['permission_revoked'], ['already_set']])('trace before release on real PostgreSQL (%s): while A\'s trace INSERT of a non-written outcome is in flight A still holds the sheet lease — a run that read the row then is STOCK_PREP_PROJECT_WRITE_LOCKED and patches nothing, though the fact has flipped', async (outcome) => {
+    await compose({ crashHookOnce: true })
+    const { grant, result } = await sendOne(boundInput(0))
+    const ledgerId = String(grant.ledgerId ?? result.delivery!.id)
+    if (outcome === 'permission_revoked') {
+      await owner.query(`DELETE FROM role_permissions WHERE permission_code = 'stock-prep:operate'`)
+    } else {
+      // The acknowledgement day is already in the cell (privileged fixture edit): A decides already_set, no patch.
+      await owner.query('UPDATE public.meta_records SET data = jsonb_set(data, ARRAY[$1::text], to_jsonb($2::text)) WHERE id = $3',
+        [fld().issueConfirmDate, businessDay(await ackAt(ledgerId)), recordId(0)])
+    }
+    const before = await cell()
+    // Run A is parked at its trace INSERT, decided under its lease.
+    const parked = { ...latch(), pattern: new RegExp(`^INSERT INTO "${TRACE}"`) }
+    gateOnce = parked
+    const first = world!.runtime.issueConfirmWriteback(actor, {})
+    await waitFor(parked)
+    expect((await tableRows(LOCK)).map(row => row.lease_id !== null && row.lease_id !== undefined)).toEqual([true])
+    // The fact flips while A is parked.
+    if (outcome === 'permission_revoked') {
+      await owner.query(`INSERT INTO role_permissions VALUES ('integration_admin','stock-prep:operate')`)
+    } else {
+      await owner.query('UPDATE public.meta_records SET data = data - $1::text WHERE id = $2', [fld().issueConfirmDate, recordId(0)])
+    }
+    // Run B reads the row as untraced (A's trace is not written yet) and meets A's live lease.
+    const busy = await world!.runtime.issueConfirmWriteback(actor, {})
+    expect(busy.results).toEqual([{ ledgerId, kind: 'retryable', code: 'STOCK_PREP_PROJECT_WRITE_LOCKED' }])
+    expect(patches).toEqual([])
+    parked.release()
+    expect(outcomeOf(await first)).toEqual([outcome])
+    expect((await tableRows(TRACE)).map(row => [row.ledger_id, row.outcome])).toEqual([[ledgerId, outcome]])
+    expect((await tableRows(LOCK)).map(row => row.lease_id ?? null)).toEqual([null])
+    // Traced now: the next run selects nothing, and the row is never patched.
+    expect((await world!.runtime.issueConfirmWriteback(actor, {})).results).toEqual([])
+    expect(patches).toEqual([])
+    const after = await cell()
+    expect([after.date, after.version]).toEqual([null, before.version])
+    expect([world!.fake.token, world!.fake.form]).toEqual([1, 1])
+  })
+
   it('target-set stability on real PostgreSQL: a cursor issued under another listed set (added, removed — another or its own target — reordered) is YIDA_ISSUE_CONFIRM_CURSOR_STALE with zero write-back statements; a fresh sweep then answers every row once', async () => {
     await compose()
     await draft(boundInput(1))

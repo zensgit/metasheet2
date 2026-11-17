@@ -113,12 +113,12 @@ const ISSUE_CONFIRM_WRITEBACK_MAX_BATCH = 100
 // The sweep cursor (see encodeIssueConfirmSweepCursor): its fixed version, its text bound, and the two closed refusals a
 // run answers for an `after` it cannot accept: AFTER (malformed, tampered, or an unlisted target — the host maps it to
 // its fixed INPUT code, HTTP 400) and STALE (the listed target set changed since the cursor was issued — the host maps
-// it to ISSUE_CONFIRM_SWEEP_STALE_CODE, HTTP 409: restart the sweep without `after`).
+// it to its own fixed wire code YIDA_ISSUE_CONFIRM_CURSOR_STALE, HTTP 409: restart the sweep without `after`; the host
+// never imports this module, so that text lives in the host alone, pinned by its owner runtime unit test).
 const ISSUE_CONFIRM_SWEEP_CURSOR_VERSION = 2
 const ISSUE_CONFIRM_SWEEP_CURSOR_MAX_LENGTH = 2048
 const ISSUE_CONFIRM_SWEEP_REFUSED = 'AFTER'
 const ISSUE_CONFIRM_SWEEP_STALE = 'STALE'
-const ISSUE_CONFIRM_SWEEP_STALE_CODE = 'YIDA_ISSUE_CONFIRM_CURSOR_STALE'
 
 // Terminal outcomes: each is recorded once per ledger row. The migration's CHECK lists exactly these.
 const ISSUE_CONFIRM_WRITEBACK_OUTCOMES = Object.freeze([
@@ -811,7 +811,6 @@ module.exports = {
   ISSUE_CONFIRM_SWEEP_CURSOR_VERSION,
   ISSUE_CONFIRM_SWEEP_REFUSED,
   ISSUE_CONFIRM_SWEEP_STALE,
-  ISSUE_CONFIRM_SWEEP_STALE_CODE,
   PROJECT_SHEETS_ENABLED_ENV,
   ROW_SOURCE_UNAVAILABLE_CODE,
   YidaIssueConfirmWritebackError,
