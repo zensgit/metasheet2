@@ -97,7 +97,8 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
   const objectId = () => deriveObjectId(TENANT, PROJECT)
   const sheetId = () => `${schema}_sheet`
   const recordId = (index: number) => `${schema}_rec_${index}`
-  const FIELD_IDS = ['idempotencyKey', 'projectNo', 'issueConfirmDate', 'warehouseConfirmation']
+  // `active`: the stock-prep template's lifecycle column (boolean; false = an inactive row, owner ruling D3-1).
+  const FIELD_IDS = ['idempotencyKey', 'projectNo', 'issueConfirmDate', 'warehouseConfirmation', 'active']
   const fld = () => resolveFieldIds(`${TENANT}:integration-core`, objectId(), FIELD_IDS)
   const tableRows = async (table: string) => (await owner.query(`SELECT * FROM ${ident(table)} ORDER BY 1`)).rows as Row[]
   async function evidence() {
@@ -241,7 +242,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     const f = fld()
     await owner.query('INSERT INTO public.meta_sheets (id, name) VALUES ($1, $2)', [sheetId(), 'synthetic issue-confirm project sheet'])
     const columns: Array<[string, string, Row]> = [['idempotencyKey', 'text', { stockPreparation: { key: true } }], ['projectNo', 'text', {}],
-      ['issueConfirmDate', 'date', {}], ['warehouseConfirmation', 'text', {}]]
+      ['issueConfirmDate', 'date', {}], ['warehouseConfirmation', 'text', {}], ['active', 'boolean', {}]]
     for (const [order, [logical, type, property]] of columns.entries()) {
       await owner.query('INSERT INTO public.meta_fields (id, sheet_id, name, type, "order", property) VALUES ($1, $2, $3, $4, $5, $6::jsonb)',
         [f[logical], sheetId(), logical, type, order, JSON.stringify(property)])
@@ -344,6 +345,12 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
   // ... and (stock-prep ruling on post-ACK terminal non-write outcomes) a run that finished normally with an outcome that
   // never writes the date: the fixed code plus `outcome=count` pairs.
   const UNWRITTEN = 'YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN'
+  // ... and (owner ruling D3-1, register R-96 ⑦) a run that finished normally with a written_inactive row: the fixed code
+  // and its count only.
+  const WRITTEN_INACTIVE = 'YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE'
+  // The run report every enabled answer of the recovery entry carries (D3-1): all four counts, zeros too.
+  const EMPTY_REPORT = Object.freeze({ counts: { written_inactive: 0, row_absent: 0, duplicate_key: 0, kept_existing: 0 }, writtenInactive: [] })
+  let writtenInactiveDown = ''
   async function warned(count = 1) {
     const deadline = Date.now() + 4000
     while (world!.warnings.length < count) {
@@ -386,6 +393,9 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
       + '\n' + readFileSync(path.join(migrations, '100_create_integration_stock_prep_project_write_lock.sql'), 'utf8')
       // Slice Y9a's trace table exactly as its up() executes.
       + '\n' + await migrationSql('zzzz20261106093100_create_integration_yida_issue_confirm_writeback', 'YIDA_ISSUE_CONFIRM_WRITEBACK_UP_SQL')
+      // Owner ruling D3-1: the outcome CHECK widened to written_inactive, exactly as that migration's up() executes.
+      + '\n' + await migrationSql('zzzz20261117090000_add_integration_yida_issue_confirm_written_inactive', 'YIDA_ISSUE_CONFIRM_WRITTEN_INACTIVE_UP_SQL')
+    writtenInactiveDown = await migrationSql('zzzz20261117090000_add_integration_yida_issue_confirm_written_inactive', 'YIDA_ISSUE_CONFIRM_WRITTEN_INACTIVE_DOWN_SQL')
     savedEnv = envKeys.map(key => [key, process.env[key]])
     process.env.NODE_ENV = 'production'
     process.env.ENCRYPTION_KEY = randomBytes(32).toString('hex')
@@ -601,7 +611,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     }
     wbStatements.length = 0
     const batch = await world!.runtime.issueConfirmWriteback(actor, {})
-    expect(batch).toEqual({ enabled: true, results: [], next: null })
+    expect(batch).toEqual({ enabled: true, results: [], next: null, report: EMPTY_REPORT })
     // No row source, registry, lease, trace or sheet read for it: the write-back read the ledger page (the trace table
     // only inside that query's NOT EXISTS) and nothing else.
     expect(wbStatements.length > 0 && wbStatements.every(sql => /^SELECT \*, to_char\("integration_yida_delivery_ledger"\."created_at" AT TIME ZONE 'UTC', '[^']*'\) AS "keyset_at" FROM "integration_yida_delivery_ledger" WHERE/.test(sql))).toBe(true)
@@ -633,7 +643,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
       VALUES ($1, $2, NULL, 'synthetic-reconciled-op', 'synthetic-reconciled-row', $3, $4, 'synthetic-target-revision', 'synthetic-plan-revision',
       $5, $6, 'synthetic-credential', 1, 'create', 'reconciled_existing')`, [id, TENANT, OWNER, world!.targetRef, 'e'.repeat(64), 'f'.repeat(64)])
     wbStatements.length = 0
-    expect(await world!.runtime.issueConfirmWriteback(actor, {})).toEqual({ enabled: true, results: [], next: null })
+    expect(await world!.runtime.issueConfirmWriteback(actor, {})).toEqual({ enabled: true, results: [], next: null, report: EMPTY_REPORT })
     expect(wbStatements.every(sql => /^SELECT \*, to_char\("integration_yida_delivery_ledger"\."created_at" AT TIME ZONE 'UTC', '[^']*'\) AS "keyset_at" FROM "integration_yida_delivery_ledger" WHERE/.test(sql))).toBe(true)
     wbStatements.length = 0
     expect(outcomeOf(await world!.runtime.issueConfirmWriteback(actor, { ledgerIds: [id] }))).toEqual(['skip:not_acknowledged'])
@@ -664,7 +674,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     if (switchOff) {
       await expect(world!.runtime.issueConfirmWriteback(actor, {})).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_DISABLED' })
     } else {
-      expect(await world!.runtime.issueConfirmWriteback(actor, {})).toEqual({ enabled: true, results: [], next: null })
+      expect(await world!.runtime.issueConfirmWriteback(actor, {})).toEqual({ enabled: true, results: [], next: null, report: EMPTY_REPORT })
     }
     expect(await tableRows(TRACE)).toEqual([])
     // Nothing was retryable: no C2 signal (and the run did not fail).
@@ -808,10 +818,68 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     if (outcome === 'permission_revoked') expect(lock.map(row => [row.lease_id ?? null, row.generation_reason])).toEqual([[null, null]])
     else expect(lock).toEqual([])
     // Final: a sweep (and the row named) lists nothing for it again, and the recovery entry logs nothing.
-    expect(await world!.runtime.issueConfirmWriteback(actor, {})).toEqual({ enabled: true, results: [], next: null })
+    expect(await world!.runtime.issueConfirmWriteback(actor, {})).toEqual({ enabled: true, results: [], next: null, report: EMPTY_REPORT })
     expect((await world!.runtime.issueConfirmWriteback(actor, { ledgerIds: [ledgerId] })).results).toEqual([])
     expect(world!.warnings).toEqual([`${UNWRITTEN} ${outcome}=1`])
     expect((await cell()).date).toBe(null)
+    expect([world!.fake.token, world!.fake.form]).toEqual([1, 1])
+  })
+
+  // Owner ruling D3-1 (register R-96 ⑦, 2026-11-17): the sheet is re-keyed after the send — the bound row keeps its key
+  // and is marked INACTIVE (`active: false`, the boolean, as a refresh or a sheet-repair retire writes it) and a successor
+  // under a NEW key is added — while the post-ACK run is parked at its own first registry statement. The run finds the
+  // predecessor by the ledger row's key (the records read never filters on active), writes the date there under the
+  // same empty-cell rule, traces written_inactive and logs YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE count=1 once; the
+  // successor is untouched. Control: the same re-key with the bound row left ACTIVE is written and logs nothing.
+  it.each([
+    ['inactive', false],
+    ['active', true],
+  ])('D3-1 on real PostgreSQL (bound row %s after a re-key): the post-ACK run writes the date onto the row its key finds; an inactive row is traced written_inactive with WRITTEN_INACTIVE logged once, an active one written with nothing logged', async (_name, active) => {
+    await compose()
+    const f = fld()
+    const before = await cell()
+    const parked = { ...latch(), pattern: new RegExp(`\\b${REGISTRY}\\b`), tag: 'wb' as const }
+    gateOnce = parked
+    const started = world!.runs.length
+    const { grant, result } = await sendOne(boundInput(0), 'synthetic-submission', { settle: false })
+    expect([result.status, result.reused]).toEqual(['acknowledged', false])
+    await waitFor(parked)
+    const successor = `${schema}_rec_successor`
+    await owner.query('UPDATE public.meta_records SET data = data || $2::jsonb, version = version + 1 WHERE id = $1',
+      [recordId(0), JSON.stringify({ [f.active]: active })])
+    await owner.query('INSERT INTO public.meta_records (id, sheet_id, data) VALUES ($1, $2, $3::jsonb)', [successor, sheetId(),
+      JSON.stringify({ [f.idempotencyKey]: `${LINES[0]}-R1`, [f.projectNo]: PROJECT, [f.active]: true })])
+    parked.release()
+    await settleAfterAck(started)
+    const ledgerId = String(grant.ledgerId ?? result.delivery!.id)
+    const day = businessDay(await ackAt(ledgerId))
+    const answers = await Promise.all(world!.runs)
+    const outcome = active ? 'written' : 'written_inactive'
+    expect(answers.map(answer => answer.results)).toEqual([[{ ledgerId, kind: 'outcome', outcome, recorded: true, date: day,
+      timeZone: 'Asia/Shanghai', ...(active ? {} : { recordId: recordId(0) }) }]])
+    // The predecessor row got the date (one fenced, version-conditional patch); its lifecycle cell and the human column are
+    // unchanged; the successor (another key) is untouched.
+    const after = await cell(0)
+    expect([after.date, after.data[f.active], after.data[f.warehouseConfirmation], after.version]).toEqual([day, active, HUMAN_NOTE, before.version + 2])
+    expect(patches).toEqual([{ recordId: recordId(0), expectedVersion: before.version + 1, fenced: true }])
+    const next = (await owner.query('SELECT data FROM public.meta_records WHERE id = $1', [successor])).rows[0].data as Row
+    expect(next[f.issueConfirmDate] ?? null).toBe(null)
+    expect((await tableRows(TRACE)).map(row => [row.ledger_id, row.outcome, row.sheet_id, row.time_zone, row.written_date !== null]))
+      .toEqual([[ledgerId, outcome, sheetId(), 'Asia/Shanghai', true]])
+    if (active) {
+      await new Promise(resolve => setTimeout(resolve, 50))
+      expect(world!.warnings).toEqual([])
+    } else {
+      await warned()
+      // Exactly one line: the fixed code and the count; no ledger id, record id, project number, key or value.
+      expect(world!.warnings).toEqual([`${WRITTEN_INACTIVE} count=1`])
+      for (const value of [ledgerId, recordId(0), PROJECT, ...LINES, HUMAN_NOTE]) expect(world!.warnings[0].includes(value)).toBe(false)
+      // The migration's down() refuses while a written_inactive trace exists (append-only evidence), before any change.
+      await expect(owner.query(writtenInactiveDown)).rejects.toMatchObject({ code: '55000', message: 'YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE_ROWS_PRESENT' })
+    }
+    // Traced: a later sweep lists nothing for it and logs nothing; the recovery entry's report is all zeros.
+    expect(await world!.runtime.issueConfirmWriteback(actor, {})).toEqual({ enabled: true, results: [], next: null, report: EMPTY_REPORT })
+    expect(world!.warnings).toEqual(active ? [] : [`${WRITTEN_INACTIVE} count=1`])
     expect([world!.fake.token, world!.fake.form]).toEqual([1, 1])
   })
 
@@ -851,7 +919,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     expect(after.data[fld().warehouseConfirmation]).toBe(HUMAN_NOTE)
     expect(patches).toHaveLength(1)
     expect((await tableRows(TRACE)).map(row => [row.ledger_id, row.outcome])).toEqual([[ledgerId, 'written']])
-    expect(await world!.runtime.issueConfirmWriteback(actor, {})).toEqual({ enabled: true, results: [], next: null })
+    expect(await world!.runtime.issueConfirmWriteback(actor, {})).toEqual({ enabled: true, results: [], next: null, report: EMPTY_REPORT })
     expect(patches).toHaveLength(1)
     expect(world!.warnings).toEqual([DEFERRED])
     expect((await tableRows(LOCK)).map(row => row.lease_id ?? null)).toEqual([null])
@@ -990,9 +1058,9 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     const before = await cell()
     expect(before.date).toBe(null)
     patches.length = 0
-    expect(await world!.runtime.issueConfirmWriteback(actor, {})).toEqual({ enabled: true, results: [], next: null })
-    expect(await world!.runtime.issueConfirmWriteback(actor, { limit: 1 })).toEqual({ enabled: true, results: [], next: null })
-    expect(await world!.runtime.issueConfirmWriteback(actor, { ledgerIds: [ledgerId] })).toEqual({ enabled: true, results: [] })
+    expect(await world!.runtime.issueConfirmWriteback(actor, {})).toEqual({ enabled: true, results: [], next: null, report: EMPTY_REPORT })
+    expect(await world!.runtime.issueConfirmWriteback(actor, { limit: 1 })).toEqual({ enabled: true, results: [], next: null, report: EMPTY_REPORT })
+    expect(await world!.runtime.issueConfirmWriteback(actor, { ledgerIds: [ledgerId] })).toEqual({ enabled: true, results: [], report: EMPTY_REPORT })
     expect(patches).toEqual([])
     const after = await cell()
     expect([after.version, after.date]).toEqual([before.version, null])

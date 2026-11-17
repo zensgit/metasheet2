@@ -289,6 +289,83 @@ async function writebackUnwrittenSignal(source = originalSource) {
   } finally { await f.runtime.stop() }
 }
 
+// Y9 D3-1 (owner ruling, register R-96 ⑦, 2026-11-17): a post-ACK run that finished with a written_inactive row (the
+// date written onto the inactive row its key found) logs YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE count=<n> once —
+// its own line, never folded into UNWRITTEN, after DEFERRED / UNWRITTEN; a written row or a D14 skip logs nothing; the
+// recovery entry logs nothing (its caller sees the rows and the report).
+const WRITTEN_INACTIVE = 'YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE'
+const ISSUE_DAY = Object.freeze({ date: '2026-03-02', timeZone: 'Asia/Shanghai' })
+async function writebackWrittenInactiveSignal(source = originalSource) {
+  const ledgerId = delivered.delivery.id
+  const inactive = (id = ledgerId, recordId = 'synthetic-record-predecessor') =>
+    ({ ledgerId: id, kind: 'outcome', outcome: 'written_inactive', recorded: true, ...ISSUE_DAY, recordId })
+  const other = (n: number) => `synthetic-ledger-${n}`
+  for (const [name, results, expected] of [
+    ['written_inactive', [inactive()], [`${WRITTEN_INACTIVE} count=1`]],
+    ['written', [{ ledgerId, kind: 'outcome', outcome: 'written', recorded: true, ...ISSUE_DAY }], []],
+    ['skip project_sheets_disabled (D14)', [{ ledgerId, kind: 'skip', reason: 'project_sheets_disabled' }], []],
+    ['row_absent is UNWRITTEN, never WRITTEN_INACTIVE', [{ ledgerId, kind: 'outcome', outcome: 'row_absent', recorded: true }], [`${UNWRITTEN} row_absent=1`]],
+    ['mixed: retryable, row_absent and two written_inactive', [inactive(other(1), 'synthetic-record-1'),
+      { ledgerId: other(2), kind: 'retryable', code: 'STOCK_PREP_PROJECT_WRITE_LOCKED' },
+      { ledgerId: other(3), kind: 'outcome', outcome: 'row_absent', recorded: true }, inactive(other(4), 'synthetic-record-4')],
+    ['YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED', `${UNWRITTEN} row_absent=1`, `${WRITTEN_INACTIVE} count=2`]],
+  ] as const) {
+    await postAckWarnings(source, async () => Object.freeze({ enabled: true, results }), name, expected)
+  }
+  // The recovery entry (owner proof passing): the answer and its report reach the caller, and nothing is logged.
+  const warnings: string[] = []
+  const f = fixture({ source, warn: code => { warnings.push(code) } })
+  const run = vi.fn(async () => Object.freeze({ enabled: true, results: [inactive()], next: null }))
+  await f.runtime.createPluginCapability().activate({ ...f.binding, createIssueConfirmWriteback: vi.fn(() => Object.freeze({ run })),
+    issueConfirmWritebackEnabled: () => true } as unknown as YidaOwnerRuntimeBinding)
+  try {
+    const answer = await f.runtime.issueConfirmWriteback(actor, {}) as { results: unknown[]; report: unknown }
+    expect(answer.results).toEqual([inactive()])
+    expect(answer.report).toEqual({ counts: { written_inactive: 1, row_absent: 0, duplicate_key: 0, kept_existing: 0 },
+      writtenInactive: [{ ledgerId, recordId: 'synthetic-record-predecessor' }] })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(warnings, 'recovery entry').toEqual([])
+  } finally { await f.runtime.stop() }
+}
+// Y9 D3-1: the run report on the runtime's view (the recovery entry's answer and the post-ACK result): derived from the
+// closed rows, every key present (zeros too), the written_inactive rows listed with their record ids; a record id is
+// admitted on a dated written_inactive row only.
+async function writebackRunReport(source = originalSource) {
+  const answerOf = async (answer: unknown) => {
+    const f = fixture({ source })
+    const run = vi.fn(async () => answer)
+    await f.runtime.createPluginCapability().activate({ ...f.binding, createIssueConfirmWriteback: vi.fn(() => Object.freeze({ run })),
+      issueConfirmWritebackEnabled: () => true } as unknown as YidaOwnerRuntimeBinding)
+    try { return await f.runtime.issueConfirmWriteback(actor, {}).then(value => ({ value }), (error: unknown) => ({ error })) }
+    finally { await f.runtime.stop() }
+  }
+  const results = [
+    { ledgerId: 'synthetic-ledger-1', kind: 'outcome', outcome: 'written_inactive', recorded: true, ...ISSUE_DAY, recordId: 'synthetic-record-1' },
+    { ledgerId: 'synthetic-ledger-2', kind: 'outcome', outcome: 'kept_existing', recorded: true },
+    { ledgerId: 'synthetic-ledger-3', kind: 'outcome', outcome: 'duplicate_key', recorded: false },
+    { ledgerId: 'synthetic-ledger-4', kind: 'outcome', outcome: 'row_absent', recorded: true },
+    { ledgerId: 'synthetic-ledger-5', kind: 'outcome', outcome: 'row_absent', recorded: true },
+    { ledgerId: 'synthetic-ledger-6', kind: 'outcome', outcome: 'written', recorded: true, ...ISSUE_DAY },
+    { ledgerId: 'synthetic-ledger-7', kind: 'skip', reason: 'project_sheets_disabled' },
+  ]
+  expect(await answerOf(Object.freeze({ enabled: true, results, next: null }))).toEqual({ value: { enabled: true, results, next: null,
+    report: { counts: { written_inactive: 1, row_absent: 2, duplicate_key: 1, kept_existing: 1 },
+      writtenInactive: [{ ledgerId: 'synthetic-ledger-1', recordId: 'synthetic-record-1' }] } } })
+  expect(await answerOf(Object.freeze({ enabled: true, results: [] }))).toEqual({ value: { enabled: true, results: [],
+    report: { counts: { written_inactive: 0, row_absent: 0, duplicate_key: 0, kept_existing: 0 }, writtenInactive: [] } } })
+  for (const [name, row] of [
+    ['a record id on a written row', { ...results[5], recordId: 'synthetic-record-6' }],
+    ['a record id on an undated row', { ...results[1], recordId: 'synthetic-record-2' }],
+    ['written_inactive without its record id', { ledgerId: 'synthetic-ledger-1', kind: 'outcome', outcome: 'written_inactive', recorded: true, ...ISSUE_DAY }],
+    ['written_inactive without its date', { ledgerId: 'synthetic-ledger-1', kind: 'outcome', outcome: 'written_inactive', recorded: true, recordId: 'synthetic-record-1' }],
+    ['written_inactive with a padded record id', { ...results[0], recordId: ' synthetic-record-1' }],
+  ] as const) {
+    const answer = await answerOf(Object.freeze({ enabled: true, results: [row] }))
+    expect(answer, name).toHaveProperty('error')
+    expect(['YIDA_OWNER_RUNTIME_INPUT', 'YIDA_OWNER_RUNTIME_UNAVAILABLE'], name).toContain((answer as { error: { code?: unknown } }).error.code)
+  }
+}
+
 const networkSpies: ReturnType<typeof vi.spyOn>[] = []
 beforeAll(() => {
   for (const [module, methods] of [
@@ -758,23 +835,32 @@ describe('Yida owner runtime control paths (NOT positive authority proof)', () =
     await writebackUnwrittenSignal()
   })
 
-  it('Y9 UNWRITTEN: the counted outcomes are exactly the write-back core\'s closed vocabulary minus written, already_set and kept_existing, in its order', async () => {
+  it('Y9 UNWRITTEN: the counted outcomes are exactly the write-back core\'s closed vocabulary minus written, already_set, kept_existing and (D3-1) written_inactive, in its order', async () => {
     const core = nativeRequire(fileURLToPath(new URL('../../../../plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs', import.meta.url))) as
-      { ISSUE_CONFIRM_WRITEBACK_OUTCOMES: readonly string[] }
-    expect(core.ISSUE_CONFIRM_WRITEBACK_OUTCOMES).toHaveLength(12)
-    const nonWrite = core.ISSUE_CONFIRM_WRITEBACK_OUTCOMES.filter(outcome => !['written', 'already_set', 'kept_existing'].includes(outcome))
+      { ISSUE_CONFIRM_WRITEBACK_OUTCOMES: readonly string[]; ISSUE_CONFIRM_DATED_OUTCOMES: readonly string[] }
+    expect(core.ISSUE_CONFIRM_WRITEBACK_OUTCOMES).toHaveLength(13)
+    const nonWrite = core.ISSUE_CONFIRM_WRITEBACK_OUTCOMES.filter(outcome => !['written', 'already_set', 'kept_existing', 'written_inactive'].includes(outcome))
     expect(nonWrite).toEqual(['row_absent', 'duplicate_key', 'project_absent', 'project_archived', 'project_mismatch',
       'payload_unmapped', 'sheet_mismatch', 'permission_revoked', 'source_unbound'])
     for (const outcome of core.ISSUE_CONFIRM_WRITEBACK_OUTCOMES) {
-      const dated = ['written', 'already_set'].includes(outcome) ? { date: '2026-03-02', timeZone: 'Asia/Shanghai' } : {}
+      const dated = core.ISSUE_CONFIRM_DATED_OUTCOMES.includes(outcome) ? { date: '2026-03-02', timeZone: 'Asia/Shanghai' } : {}
+      const handle = outcome === 'written_inactive' ? { recordId: 'synthetic-record-predecessor' } : {}
       await postAckWarnings(originalSource, async () => Object.freeze({ enabled: true,
-        results: [{ ledgerId: delivered.delivery.id, kind: 'outcome', outcome, recorded: true, ...dated }] }), outcome,
-      nonWrite.includes(outcome) ? [`${UNWRITTEN} ${outcome}=1`] : [])
+        results: [{ ledgerId: delivered.delivery.id, kind: 'outcome', outcome, recorded: true, ...dated, ...handle }] }), outcome,
+      nonWrite.includes(outcome) ? [`${UNWRITTEN} ${outcome}=1`] : outcome === 'written_inactive' ? [`${WRITTEN_INACTIVE} count=1`] : [])
     }
     // All nine in one (fake, multi-row) answer: one line, the core's order.
     await postAckWarnings(originalSource, async () => Object.freeze({ enabled: true,
       results: [...nonWrite].reverse().map((outcome, index) => ({ ledgerId: `synthetic-ledger-${index}`, kind: 'outcome', outcome, recorded: true })) }),
     'all nine', [`${UNWRITTEN} ${nonWrite.map(outcome => `${outcome}=1`).join(' ')}`])
+  })
+
+  it('Y9 D3-1 WRITTEN_INACTIVE: a post-ACK run that finished with a written_inactive row logs YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE count=<n> once, its own line after DEFERRED and UNWRITTEN; written, a D14 skip and the recovery entry log nothing', async () => {
+    await writebackWrittenInactiveSignal()
+  })
+
+  it('Y9 D3-1 report: the runtime\'s view carries the run report (counts of written_inactive, row_absent, duplicate_key, kept_existing; the written_inactive rows with their record ids) and admits a record id on a dated written_inactive row only', async () => {
+    await writebackRunReport()
   })
 
   it('projects a closed submit view and rejects execution authority/material additions', async () => {
@@ -1174,6 +1260,30 @@ describe('in-memory guard mutation probes (no repository writes)', () => {
         to: "'sheet_mismatch', 'permission_revoked'])", test: source => writebackUnwrittenSignal(source) },
       { name: 'writeback/unwritten-wire-text', from: "export const YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN = 'YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN'",
         to: "export const YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN = 'YIDA_ISSUE_CONFIRM_WRITEBACK_FINAL'", test: source => writebackUnwrittenSignal(source) },
+      // Y9 D3-1 (owner ruling, R-96 ⑦): the WRITTEN_INACTIVE line — logged, its own code (never folded into UNWRITTEN),
+      // count only, post-ACK only, its fixed text; the run report — derived counts, the record handle, the closed row shape.
+      { name: 'writeback/written-inactive-logged', from: 'if (writtenInactive !== undefined) warn(writtenInactive)', to: '',
+        test: source => writebackWrittenInactiveSignal(source) },
+      { name: 'writeback/written-inactive-not-unwritten', from: "'sheet_mismatch', 'permission_revoked', 'source_unbound'])",
+        to: "'sheet_mismatch', 'permission_revoked', 'source_unbound', 'written_inactive'])", test: source => writebackWrittenInactiveSignal(source) },
+      { name: 'writeback/written-inactive-count', from: '`${YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE} count=${inactiveCount}`',
+        to: 'YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE', test: source => writebackWrittenInactiveSignal(source) },
+      { name: 'writeback/written-inactive-once-per-run', from: 'if (writtenInactive !== undefined) warn(writtenInactive)',
+        to: 'if (writtenInactive !== undefined) { for (const _row of view?.results as unknown[]) warn(writtenInactive) }',
+        test: source => writebackWrittenInactiveSignal(source) },
+      { name: 'writeback/written-inactive-post-ack-only', from: 'return writebackView(await (writeback.run as (input: unknown) => Promise<unknown>)(parsed))',
+        to: '{ const seen = writebackView(await (writeback.run as (input: unknown) => Promise<unknown>)(parsed)); const line = writtenInactiveText(seen.results as ReadonlyArray<Readonly<Row>>); if (line !== undefined) warn(line); return seen }',
+        test: source => writebackWrittenInactiveSignal(source) },
+      { name: 'writeback/written-inactive-wire-text', from: "export const YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE = 'YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE'",
+        to: "export const YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE = 'YIDA_ISSUE_CONFIRM_WRITEBACK_INACTIVE_ROW'", test: source => writebackWrittenInactiveSignal(source) },
+      { name: 'writeback/report-counts-derived', from: 'for (const name of WRITEBACK_REPORT_COUNTED) counts[name] = outcomeRows(results, name).length',
+        to: 'for (const name of WRITEBACK_REPORT_COUNTED) counts[name] = 0', test: source => writebackRunReport(source) },
+      { name: 'writeback/report-record-handle', from: 'Object.freeze({ ledgerId: entry.ledgerId, recordId: entry.recordId })',
+        to: 'Object.freeze({ ledgerId: entry.ledgerId })', test: source => writebackRunReport(source) },
+      { name: 'writeback/report-on-enabled-answers', from: '...(raw.enabled === true ? { report: writebackReport(results) } : {}),', to: '',
+        test: source => writebackRunReport(source) },
+      { name: 'writeback/record-id-written-inactive-only', from: "...(inactive ? ['recordId'] : [])]", to: "'recordId']",
+        test: source => writebackRunReport(source) },
       { name: 'errors/own-runtime-brand', from: 'if (own) fail(own)', to: '', test: async source => {
         const f = await active({ source, enablement: 'false' })
         try { await expect(f.runtime.preview(actor, selected)).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_DISABLED' }) }

@@ -48,7 +48,8 @@
 //   permission_revoked) → the row by idempotencyKey, limit 2 (0 → row_absent, 2 → duplicate_key, its
 //   projectNo ≠ the payload's → project_mismatch) → the cell: empty → THE TRACE RE-CHECK (a trace row for
 //   this ledger row exists by now → skip `already_traced`: no patch, no trace) → ONE version-conditional,
-//   host-fenced patch of `issueConfirmDate` only (written); equal → already_set; any other value →
+//   host-fenced patch of `issueConfirmDate` only (written; written_inactive when that row is INACTIVE, see D3-1 below);
+//   equal → already_set; any other value →
 //   kept_existing (D8: the first confirmation wins, never overwritten) → the trace INSERT … ON CONFLICT
 //   (ledger_id) DO NOTHING, STILL UNDER THE LEASE → release. An outcome decided before the lease
 //   (source_unbound, payload_unmapped, project_absent, project_archived, sheet_mismatch) is traced without one.
@@ -92,6 +93,16 @@
 // another run's re-check and that other run's own trace INSERT: that run patches once (a first patch; no emptied
 // cell is needed) and the row ends traced with the earlier outcome (that run answers written, recorded false). A
 // trace that exists when a run re-checks under the lease is final for that run.
+//
+// D3-1 (owner ruling, register R-96 ⑦, 2026-11-17: 「按建议」 relayed by the stock-prep line, owner 「agree」). The row the
+// idempotencyKey finds may be INACTIVE (`active === false`: a BOM re-key or a sheet-repair retire left the predecessor
+// in place under the old key and added a successor under a NEW key). The write-back still writes the date there under
+// the same D8 rule (empty cell only) and traces `written_inactive` — a written date the fill view does not show. The
+// records read never filters on `active` (the successor has another key: a filter would make this a silent
+// row_absent). Moving the date to the successor is the stock-prep carry's job, never this module's. The run's answer
+// carries the inactive row's record id (`recordId`, an opaque id) on a written_inactive row; the trace does not. Only a
+// patch can be written_inactive: an inactive row whose cell already holds the date is already_set, any other value
+// kept_existing, as for an active row.
 //
 // SWITCHES (exact literal 'true' only, read on EVERY call, default OFF; registered in
 // scripts/ops/global-history-flag-manifest.mjs):
@@ -144,9 +155,20 @@ const ISSUE_CONFIRM_WRITEBACK_OUTCOMES = Object.freeze([
   'sheet_mismatch',
   'permission_revoked',
   'source_unbound',
+  // Owner ruling D3-1 (register R-96 ⑦, 2026-11-17): the date was written (same D8 rule: empty cell only) onto the row
+  // the idempotencyKey found, and that row is INACTIVE (`active === false`: a re-keyed or retired predecessor the fill
+  // view hides). Appended last (migration zzzz20261117090000 widens the CHECK).
+  'written_inactive',
 ])
 // The outcomes whose trace carries the date (and its zone); every other outcome carries neither.
-const ISSUE_CONFIRM_DATED_OUTCOMES = Object.freeze(['written', 'already_set'])
+const ISSUE_CONFIRM_DATED_OUTCOMES = Object.freeze(['written', 'already_set', 'written_inactive'])
+// The project-sheet row's lifecycle column (stock-preparation-templates.cjs: field `active`, boolean; a refresh marks a
+// row inactive instead of deleting it). Only the BOOLEAN false is inactive — the stock-prep census rule
+// (stock-preparation-sheet-census.cjs); absent, null, true or any other value is active. The same literal as the
+// templates' STOCK_PREPARATION_FILL_VIEW_ACTIVE_FILTER_FIELD_ID (pinned by the unit suite; not required here so the
+// module stays IO-free). It is READ only: the records read never filters on it — a re-keyed successor carries another
+// key, so an `active: true` filter would turn this case into a silent row_absent.
+const ISSUE_CONFIRM_ACTIVE_FIELD_ID = 'active'
 // Not selected (no trace, no further read): the first three selector conditions, a missing ack audit and
 // (D14) the per-project sheets switch being off.
 // `already_traced`: the trace re-check under the lease, right before the patch, found a trace row for this ledger row
@@ -468,6 +490,8 @@ function decideIssueConfirmWriteback(facts) {
       expectedVersion: record.version,
       changes: Object.freeze({ [ISSUE_CONFIRM_DATE_FIELD_ID]: date }),
       date,
+      // D3-1: the same patch either way; the outcome it is traced under is written_inactive for an inactive row.
+      inactive: record.data[ISSUE_CONFIRM_ACTIVE_FIELD_ID] === false,
     }
   }
   return { kind: 'record', outcome: cell, sheetId, date }
@@ -591,7 +615,10 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
     try {
       const row = issueConfirmTraceRow({ ledger, outcome: decision.outcome, sheetId: decision.sheetId, date: decision.date, timeZone })
       const { recorded } = await traceStore.record(row)
-      return { kind: 'traced', outcome: decision.outcome, recorded, date: row.written_date }
+      // written_inactive carries the handle of the inactive row it wrote (its record id, an opaque id) to the run's
+      // answer only; the trace keeps its values-free columns.
+      return { kind: 'traced', outcome: decision.outcome, recorded, date: row.written_date,
+        ...(decision.outcome === 'written_inactive' ? { recordId: decision.recordId } : {}) }
     } catch (error) {
       throw new TraceWriteFailed(error)
     }
@@ -666,8 +693,11 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
         }
         throw error
       }
-      // The trace of the write, before the lease is released (a failure here still fails the run closed).
-      return writeTrace(ledger, { outcome: 'written', sheetId: inner.sheetId, date: inner.date }, timeZone)
+      // The trace of the write, before the lease is released (a failure here still fails the run closed). D3-1: the row
+      // the key found is inactive → written_inactive, with the record's handle for the run's answer.
+      return writeTrace(ledger, inner.inactive
+        ? { outcome: 'written_inactive', sheetId: inner.sheetId, date: inner.date, recordId: inner.recordId }
+        : { outcome: 'written', sheetId: inner.sheetId, date: inner.date }, timeZone)
     })
   }
 
@@ -781,6 +811,7 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
         outcome: decision.outcome,
         recorded: decision.recorded,
         ...(decision.date ? { date: decision.date, timeZone } : {}),
+        ...(decision.outcome === 'written_inactive' ? { recordId: decision.recordId } : {}),
       })
     }
     // Batch mode answers the sweep's `next` (null = exhausted); the named mode is not a sweep and answers none.
@@ -794,6 +825,7 @@ module.exports = {
   BUSINESS_TIMEZONE_ENV_KEY,
   DEFAULT_BUSINESS_TIMEZONE,
   ISSUE_CONFIRM_DATED_OUTCOMES,
+  ISSUE_CONFIRM_ACTIVE_FIELD_ID,
   ISSUE_CONFIRM_DATE_FIELD_ID,
   ISSUE_CONFIRM_SKIP_REASONS,
   ISSUE_CONFIRM_TARGET_REFS_ENV,

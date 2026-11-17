@@ -329,11 +329,16 @@ function sheetReadsAndWrites(calls) {
 
 // ── constants and pure helpers ───────────────────────────────────────────────────────────────────
 
-test('the outcome vocabulary is exactly the twelve baseline values', () => {
+test('the outcome vocabulary is the twelve baseline values plus written_inactive (owner ruling D3-1), appended last', () => {
   assert.deepEqual(ISSUE_CONFIRM_WRITEBACK_OUTCOMES, [
     'written', 'already_set', 'kept_existing', 'row_absent', 'duplicate_key', 'project_absent',
     'project_archived', 'project_mismatch', 'payload_unmapped', 'sheet_mismatch', 'permission_revoked', 'source_unbound',
+    'written_inactive',
   ])
+  assert.deepEqual(writeback.ISSUE_CONFIRM_DATED_OUTCOMES, ['written', 'already_set', 'written_inactive'])
+  assert.ok(Object.isFrozen(writeback.ISSUE_CONFIRM_DATED_OUTCOMES))
+  // Not a skip reason: written_inactive is a traced terminal outcome, never a no-trace skip.
+  assert.ok(!writeback.ISSUE_CONFIRM_SKIP_REASONS.includes('written_inactive'))
   assert.ok(Object.isFrozen(ISSUE_CONFIRM_WRITEBACK_OUTCOMES))
   assert.equal(writeback.ISSUE_CONFIRM_TRACE_TABLE, 'integration_yida_issue_confirm_writeback')
   assert.equal(writeback.ISSUE_CONFIRM_DATE_FIELD_ID, 'issueConfirmDate')
@@ -574,6 +579,95 @@ test('the business zone comes from MULTITABLE_BUSINESS_TIMEZONE', async () => {
   await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
   assert.equal(world.cell(), '2026-03-01')
   assert.equal(world.trace[0].time_zone, 'America/Los_Angeles')
+})
+
+// ── D3-1: the row the key finds is INACTIVE (owner ruling, register R-96 ⑦, 2026-11-17) ────────────────────────────
+
+test('D3-1: the inactive-row column is the stock-prep template\'s lifecycle field, read as the boolean false only', () => {
+  const templates = require('../lib/stock-preparation-templates.cjs')
+  assert.equal(writeback.ISSUE_CONFIRM_ACTIVE_FIELD_ID, 'active')
+  assert.equal(writeback.ISSUE_CONFIRM_ACTIVE_FIELD_ID, templates.STOCK_PREPARATION_FILL_VIEW_ACTIVE_FILTER_FIELD_ID)
+  const field = templates.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.find((entry) => entry.id === writeback.ISSUE_CONFIRM_ACTIVE_FIELD_ID)
+  assert.ok(field, 'the main template has the active column')
+  assert.equal(field.type, 'boolean')
+})
+
+test('D3-1 written_inactive: an INACTIVE row (active === false) with an empty cell gets the date — the same one fenced, version-conditional patch — and is traced written_inactive with its date; the answer carries the row\'s record id', async () => {
+  const { world, row } = sentWorld()
+  world.sheets.get(SHEET)[0].data.active = false
+  const result = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+  assert.deepEqual(result, { enabled: true, results: [{ ledgerId: row.id, kind: 'outcome', outcome: 'written_inactive', recorded: true,
+    date: ACK_DAY, timeZone: 'Asia/Shanghai', recordId: 'rec_syn_1' }], next: null })
+  assert.equal(world.cell(), ACK_DAY)
+  assert.equal(world.calls.patch.length, 1)
+  assert.deepEqual(world.calls.patch[0].changes, { issueConfirmDate: ACK_DAY })
+  assert.equal(world.calls.patch[0].expectedVersion, 3)
+  assert.equal(world.calls.patch[0].recordId, 'rec_syn_1')
+  // The lifecycle cell is never written: only the date moved.
+  assert.equal(world.sheets.get(SHEET)[0].data.active, false)
+  assert.deepEqual(world.trace, [{ ledger_id: row.id, tenant_id: TENANT, owner_id: OWNER, target_ref: TARGET, sheet_id: SHEET,
+    outcome: 'written_inactive', written_date: ACK_DAY, time_zone: 'Asia/Shanghai' }])
+  // The same steps under the lease as written: re-check, fence, patch, trace, release.
+  assert.deepEqual(world.events, ['acquire', 'authority', 'query', 'traceProbe', 'beforeWrite', 'patch', ['traceInsert', true], 'release'])
+  assert.equal(world.calls.bump.length, 0)
+  // Values-free: the record id is an opaque id; no key, project number or human value.
+  const text = JSON.stringify(result)
+  for (const value of [KEY, PROJECT, 'human note']) assert.equal(text.includes(value), false, value)
+})
+
+test('D3-1: the records read never filters on active — the re-keyed successor (another key) is not found by the ledger row\'s key, the inactive predecessor is', async () => {
+  const { world, row } = sentWorld()
+  const rows = world.sheets.get(SHEET)
+  rows[0].data.active = false
+  rows.push({ id: 'rec_syn_successor', version: 1, data: { idempotencyKey: 'syn-line-key-0001-r1', projectNo: PROJECT, issueConfirmDate: null, active: true } })
+  const result = await world.executor().run({ tenantId: TENANT, ownerId: OWNER, ledgerIds: [row.id] })
+  assert.deepEqual(result.results.map((entry) => [entry.outcome, entry.recordId]), [['written_inactive', 'rec_syn_1']])
+  assert.equal(rows[0].data.issueConfirmDate, ACK_DAY)
+  assert.equal(rows[1].data.issueConfirmDate, null)
+  assert.equal(world.calls.query, 1)
+})
+
+test('D3-1: only the boolean false is inactive — absent, null, true and the string "false" are active rows: written, no record id', async () => {
+  for (const value of [undefined, null, true, 'false', 0]) {
+    const { world, row } = sentWorld()
+    if (value !== undefined) world.sheets.get(SHEET)[0].data.active = value
+    const result = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+    assert.deepEqual(result.results, [{ ledgerId: row.id, kind: 'outcome', outcome: 'written', recorded: true, date: ACK_DAY, timeZone: 'Asia/Shanghai' }], String(value))
+    assert.equal(world.trace[0].outcome, 'written', String(value))
+  }
+})
+
+test('D3-1: the D8 rule is unchanged on an inactive row — the date already there is already_set, any other value kept_existing, no patch, no record id', async () => {
+  assert.equal(writeback.decideIssueConfirmCell(undefined, ACK_DAY), 'patch')
+  assert.equal(writeback.decideIssueConfirmCell(null, ACK_DAY), 'patch')
+  assert.equal(writeback.decideIssueConfirmCell('', ACK_DAY), 'patch')
+  assert.equal(writeback.decideIssueConfirmCell(ACK_DAY, ACK_DAY), 'already_set')
+  assert.equal(writeback.decideIssueConfirmCell('2026-02-27', ACK_DAY), 'kept_existing')
+  for (const [cell, outcome] of [[ACK_DAY, 'already_set'], ['2026-02-27', 'kept_existing']]) {
+    const { world, row } = sentWorld()
+    world.sheets.get(SHEET)[0].data.active = false
+    world.sheets.get(SHEET)[0].data.issueConfirmDate = cell
+    const result = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+    assert.equal(result.results[0].outcome, outcome, cell)
+    assert.equal(Object.hasOwn(result.results[0], 'recordId'), false, cell)
+    assert.equal(world.calls.patch.length, 0)
+    assert.equal(world.cell(), cell)
+    assert.deepEqual(world.trace.map((entry) => [entry.ledger_id, entry.outcome]), [[row.id, outcome]])
+  }
+})
+
+test('D3-1: a version conflict on the inactive row is retryable (no trace); the retry writes it written_inactive once', async () => {
+  const { world, row } = sentWorld()
+  world.sheets.get(SHEET)[0].data.active = false
+  const conflict = new Error('version conflict')
+  conflict.code = 'VERSION_CONFLICT'
+  world.patchFailure = conflict
+  const first = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+  assert.deepEqual(first.results, [{ ledgerId: row.id, kind: 'retryable', code: 'VERSION_CONFLICT' }])
+  assert.equal(world.trace.length, 0)
+  const second = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+  assert.deepEqual(second.results.map((entry) => [entry.outcome, entry.recordId]), [['written_inactive', 'rec_syn_1']])
+  assert.deepEqual(world.trace.map((entry) => entry.outcome), ['written_inactive'])
 })
 
 test('already_set and kept_existing never patch (D8: the first confirmation wins)', async () => {

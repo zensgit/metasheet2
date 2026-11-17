@@ -294,7 +294,7 @@ function initialization(value: unknown, sendEnabled: boolean, connectionTestEnab
 // YiDa 发料确认日期回写 recovery reply (slice Y9): ledger ids, closed kinds and fixed codes, the written day and zone.
 const writebackKinds = ['skip', 'retryable', 'outcome']
 function writebackResult(value: unknown) {
-  const row = record(value, ['ledgerId', 'kind'], ['reason', 'code', 'outcome', 'recorded', 'date', 'timeZone'])
+  const row = record(value, ['ledgerId', 'kind'], ['reason', 'code', 'outcome', 'recorded', 'date', 'timeZone', 'recordId'])
   if (typeof row.kind !== 'string' || !writebackKinds.includes(row.kind)) fail()
   const ledgerId = literalId(row.ledgerId)
   if (row.kind === 'skip') {
@@ -308,21 +308,42 @@ function writebackResult(value: unknown) {
     return { ledgerId, kind: 'retryable', code: retry.code }
   }
   const dated = Object.hasOwn(row, 'date')
-  const done = record(value, dated ? ['ledgerId', 'kind', 'outcome', 'recorded', 'date', 'timeZone'] : ['ledgerId', 'kind', 'outcome', 'recorded'])
+  // D3-1 (register R-96 ⑦): a written_inactive row is dated and carries the inactive row's record id (an opaque id);
+  // no other row carries one.
+  const inactive = row.outcome === 'written_inactive'
+  const done = record(value, dated ? ['ledgerId', 'kind', 'outcome', 'recorded', 'date', 'timeZone', ...(inactive ? ['recordId'] : [])]
+    : ['ledgerId', 'kind', 'outcome', 'recorded'])
   if (typeof done.outcome !== 'string' || !/^[a-z_]{1,64}$/u.test(done.outcome) || typeof done.recorded !== 'boolean'
     || (dated && (typeof done.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/u.test(done.date) || typeof done.timeZone !== 'string'
-      || !done.timeZone || done.timeZone.length > 64))) fail()
+      || !done.timeZone || done.timeZone.length > 64)) || (inactive && !dated)) fail()
   return { ledgerId, kind: 'outcome', outcome: done.outcome, recorded: done.recorded,
-    ...(dated ? { date: done.date, timeZone: done.timeZone } : {}) }
+    ...(dated ? { date: done.date, timeZone: done.timeZone } : {}), ...(inactive ? { recordId: literalId(done.recordId) } : {}) }
+}
+// D3-1 run report: the counts of written_inactive, row_absent, duplicate_key and kept_existing (every key, zero included)
+// and the written_inactive rows with their record ids — recomputed here from the closed result rows. The runtime's own
+// report, when present, must equal it; the DTO carries the recomputed one on every enabled answer.
+const writebackReportCounted = ['written_inactive', 'row_absent', 'duplicate_key', 'kept_existing']
+function writebackReport(results: Array<Record<string, unknown>>) {
+  const outcomes = results.filter(result => result.kind === 'outcome')
+  return {
+    counts: Object.fromEntries(writebackReportCounted.map(outcome => [outcome, outcomes.filter(result => result.outcome === outcome).length])),
+    writtenInactive: outcomes.filter(result => result.outcome === 'written_inactive')
+      .map(result => ({ ledgerId: result.ledgerId, recordId: result.recordId })),
+  }
 }
 // Y9 sweep cursor: base64url text, at most 2048 characters (the core decodes and judges it; the route bounds it).
 const writebackCursor = /^[A-Za-z0-9_-]{1,2048}$/u
 function writebackRun(value: unknown) {
-  const row = record(value, ['enabled', 'results'], ['stopped', 'next'])
+  const row = record(value, ['enabled', 'results'], ['stopped', 'next', 'report'])
   if (typeof row.enabled !== 'boolean' || !Array.isArray(row.results) || row.results.length > 100
     || (Object.hasOwn(row, 'stopped') && row.stopped !== 'SWITCH_OFF')
-    || (Object.hasOwn(row, 'next') && row.next !== null && (typeof row.next !== 'string' || !writebackCursor.test(row.next)))) fail()
-  return { enabled: row.enabled, results: row.results.map(writebackResult), ...(Object.hasOwn(row, 'next') ? { next: row.next } : {}),
+    || (Object.hasOwn(row, 'next') && row.next !== null && (typeof row.next !== 'string' || !writebackCursor.test(row.next)))
+    || (Object.hasOwn(row, 'report') && row.enabled !== true)) fail()
+  const results = row.results.map(writebackResult)
+  const report = row.enabled === true ? writebackReport(results) : undefined
+  // A runtime report that is not exactly the one its own rows give is not an answer at all.
+  if (Object.hasOwn(row, 'report') && JSON.stringify(row.report) !== JSON.stringify(report)) fail()
+  return { enabled: row.enabled, results, ...(report ? { report } : {}), ...(Object.hasOwn(row, 'next') ? { next: row.next } : {}),
     ...(Object.hasOwn(row, 'stopped') ? { stopped: 'SWITCH_OFF' } : {}) }
 }
 const reconcileCountKeys = ['scanned', 'registered', 'would_register', 'already_reconciled', 'duplicate_remote',

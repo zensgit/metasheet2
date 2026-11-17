@@ -120,6 +120,29 @@ export const YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN = 'YIDA_ISSUE_CONFIRM_WRITEB
 // equal to the core's list by the owner runtime unit test.
 const WRITEBACK_UNWRITTEN_OUTCOMES = Object.freeze(['row_absent', 'duplicate_key', 'project_absent', 'project_archived',
   'project_mismatch', 'payload_unmapped', 'sheet_mismatch', 'permission_revoked', 'source_unbound'])
+// Y9 D3-1 (owner ruling, register R-96 ⑦, 2026-11-17): the only text a post-ACK write-back run logs when it FINISHED
+// normally and its answer holds a `written_inactive` row — the date WAS written, onto the inactive row (a re-keyed or
+// retired predecessor) its key found, so the customer's fill view does not show it; the stock-prep carry moves it. Once
+// per run: the fixed code and `count=<n>` only; no id, value or outcome name. Its own line, never folded into
+// UNWRITTEN (the date is written) and logged after DEFERRED / UNWRITTEN. A skip (D14 project_sheets_disabled
+// included), any other outcome, an empty answer or a failed run (HOOK_FAILED) never logs it; the recovery entry never
+// logs it either (its caller sees the rows and the report).
+export const YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE = 'YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE'
+const WRITTEN_INACTIVE = 'written_inactive'
+// The run report's counted outcomes (D3-1 review: a written trace is not a date the customer sees): derived HERE from the
+// closed result rows, never taken from the plugin. Every key is always present, zero included.
+const WRITEBACK_REPORT_COUNTED = Object.freeze([WRITTEN_INACTIVE, 'row_absent', 'duplicate_key', 'kept_existing'])
+const outcomeRows = (results: ReadonlyArray<Readonly<Row>>, name: string) => results.filter(entry => entry.kind === 'outcome' && entry.outcome === name)
+function writebackReport(results: ReadonlyArray<Readonly<Row>>): Readonly<Row> {
+  const counts: Row = {}
+  for (const name of WRITEBACK_REPORT_COUNTED) counts[name] = outcomeRows(results, name).length
+  const writtenInactive = outcomeRows(results, WRITTEN_INACTIVE).map(entry => Object.freeze({ ledgerId: entry.ledgerId, recordId: entry.recordId }))
+  return Object.freeze({ counts: Object.freeze(counts), writtenInactive: Object.freeze(writtenInactive) })
+}
+function writtenInactiveText(results: ReadonlyArray<Readonly<Row>>): string | undefined {
+  const inactiveCount = outcomeRows(results, WRITTEN_INACTIVE).length
+  return inactiveCount === 0 ? undefined : `${YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE} count=${inactiveCount}`
+}
 function unwrittenText(results: ReadonlyArray<Readonly<Row>>): string | undefined {
   const counts: string[] = []
   for (const outcome of WRITEBACK_UNWRITTEN_OUTCOMES) {
@@ -234,7 +257,9 @@ function acknowledgedLedgerId(view: Readonly<Row>): string | undefined {
   return delivery.id
 }
 // Y9: the write-back run's values-free projection — ledger ids, closed kinds, fixed codes / reasons / outcomes, the
-// written day and its zone. Anything else (a project number, a key, a message) cannot cross this boundary.
+// written day and its zone, and (D3-1) the record id of an inactive row a written_inactive row wrote. Anything else (a
+// project number, a key, a message) cannot cross this boundary. An enabled answer gains the run report (writebackReport),
+// derived here from the closed rows.
 function writebackView(value: unknown): Readonly<Row> {
   const raw = record(value, ['enabled', 'results', 'stopped', 'next', 'refused'], ['enabled', 'results'])
   if (Object.hasOwn(raw, 'refused')) {
@@ -250,7 +275,7 @@ function writebackView(value: unknown): Readonly<Row> {
     || (Object.hasOwn(raw, 'next') && (raw.enabled !== true
       || (raw.next !== null && (typeof raw.next !== 'string' || !SWEEP_CURSOR.test(raw.next)))))) fail('UNAVAILABLE')
   const results = raw.results.map(item => {
-    const kind = record(item, ['ledgerId', 'kind', 'reason', 'code', 'outcome', 'recorded', 'date', 'timeZone'], ['ledgerId', 'kind'])
+    const kind = record(item, ['ledgerId', 'kind', 'reason', 'code', 'outcome', 'recorded', 'date', 'timeZone', 'recordId'], ['ledgerId', 'kind'])
     if (!WRITEBACK_RESULT_KINDS.has(kind.kind as string)) fail('UNAVAILABLE')
     const ledgerId = id(kind.ledgerId)
     if (kind.kind === 'skip') {
@@ -264,14 +289,18 @@ function writebackView(value: unknown): Readonly<Row> {
       return Object.freeze({ ledgerId, kind: 'retryable', code: row.code })
     }
     const dated = Object.hasOwn(item as object, 'date')
-    const row = record(item, dated ? ['ledgerId', 'kind', 'outcome', 'recorded', 'date', 'timeZone'] : ['ledgerId', 'kind', 'outcome', 'recorded'])
+    // D3-1: a written_inactive row is dated and carries the inactive row's record id; no other row carries one.
+    const inactive = kind.outcome === WRITTEN_INACTIVE
+    const row = record(item, dated ? ['ledgerId', 'kind', 'outcome', 'recorded', 'date', 'timeZone', ...(inactive ? ['recordId'] : [])]
+      : ['ledgerId', 'kind', 'outcome', 'recorded'])
     if (typeof row.outcome !== 'string' || !/^[a-z_]{1,64}$/.test(row.outcome) || typeof row.recorded !== 'boolean'
       || (dated && (typeof row.date !== 'string' || !DAY.test(row.date) || typeof row.timeZone !== 'string' || !row.timeZone
-        || row.timeZone.length > 64))) fail('UNAVAILABLE')
+        || row.timeZone.length > 64)) || (inactive && !dated)) fail('UNAVAILABLE')
     return Object.freeze({ ledgerId, kind: 'outcome', outcome: row.outcome, recorded: row.recorded,
-      ...(dated ? { date: row.date, timeZone: row.timeZone } : {}) })
+      ...(dated ? { date: row.date, timeZone: row.timeZone } : {}), ...(inactive ? { recordId: id(row.recordId) } : {}) })
   })
   return Object.freeze({ enabled: raw.enabled, results: Object.freeze(results),
+    ...(raw.enabled === true ? { report: writebackReport(results) } : {}),
     ...(Object.hasOwn(raw, 'next') ? { next: raw.next } : {}),
     ...(Object.hasOwn(raw, 'stopped') ? { stopped: 'SWITCH_OFF' } : {}) })
 }
@@ -466,7 +495,9 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
   // it reaches no one but the server log, as fixed values-free codes: a rejection is HOOK_FAILED; a run that finished
   // normally (past its exit checkpoint) with a retryable row is WRITEBACK_DEFERRED (C2), so a date left to the recovery
   // entry is never silent; a run that finished normally with a terminal non-write outcome is WRITEBACK_UNWRITTEN plus
-  // the outcome codes and counts, so a date that no run will ever write is never silent either.
+  // the outcome codes and counts, so a date that no run will ever write is never silent either; a run that finished
+  // normally with a written_inactive row is WRITEBACK_WRITTEN_INACTIVE plus its count (D3-1), so a date written where the
+  // fill view does not show it is never silent.
   function issueConfirmAfterAcknowledged(owner: YidaOwnerActor, ledgerId: string): void {
     const pending = execute(owner, {}, false, async (_authority, state, fixed, _checkpoint, _signal, _tracked, database) => {
       if (!state.createIssueConfirmWriteback) return undefined
@@ -478,14 +509,16 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
     Promise.prototype.then.call(pending, (view: Readonly<Row> | undefined) => {
       // The view is writebackView's frozen projection (or undefined without the capability): its results are closed rows.
       // Nothing here may reject (the derived promise is never observed).
-      let deferred = false, unwritten: string | undefined
+      let deferred = false, unwritten: string | undefined, writtenInactive: string | undefined
       try {
         const results = view === undefined ? [] : view.results as ReadonlyArray<Readonly<Row>>
         deferred = results.some(row => row.kind === 'retryable')
         unwritten = unwrittenText(results)
-      } catch { deferred = false; unwritten = undefined }
+        writtenInactive = writtenInactiveText(results)
+      } catch { deferred = false; unwritten = undefined; writtenInactive = undefined }
       if (deferred) warn(YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED)
       if (unwritten !== undefined) warn(unwritten)
+      if (writtenInactive !== undefined) warn(writtenInactive)
     }, () => warn(YIDA_ISSUE_CONFIRM_HOOK_FAILED))
   }
   function input<T>(capture: () => T, invoke: (captured: T) => Promise<unknown>): Promise<unknown> {

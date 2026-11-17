@@ -63,7 +63,7 @@ describe('POST /issue-confirm-writeback (route)', () => {
   })
   it('ON: the closed body reaches the runtime as the authenticated owner, with only ledgerIds / limit / after', async () => {
     const { port, calls } = owner(() => true)
-    expect(await dispatch({}, port)).toEqual({ status: 200, result: { ok: true, data: { enabled: true, results: [] } } })
+    expect(await dispatch({}, port)).toEqual({ status: 200, result: { ok: true, data: { enabled: true, results: [], report: { counts: { written_inactive: 0, row_absent: 0, duplicate_key: 0, kept_existing: 0 }, writtenInactive: [] } } } })
     expect((await dispatch({ limit: 5 }, port)).status).toBe(200)
     expect((await dispatch({ ledgerIds: [LEDGER] }, port)).status).toBe(200)
     expect((await dispatch({ after: CURSOR, limit: 7 }, port)).status).toBe(200)
@@ -97,12 +97,16 @@ describe('POST /issue-confirm-writeback (route)', () => {
       { ledgerId: 'l-3', kind: 'retryable', code: 'STOCK_PREP_PROJECT_WRITE_LOCKED' },
       { ledgerId: 'l-4', kind: 'outcome', outcome: 'row_absent', recorded: false },
     ], stopped: 'SWITCH_OFF' }
-    expect((await dispatch({}, owner(() => true, good).port)).result).toEqual({ ok: true, data: good })
+    // D3-1: every enabled reply carries the run report, recomputed by the route from the closed rows (every key, zeros too).
+    const goodReport = { counts: { written_inactive: 0, row_absent: 1, duplicate_key: 0, kept_existing: 0 }, writtenInactive: [] }
+    expect((await dispatch({}, owner(() => true, good).port)).result).toEqual({ ok: true, data: { ...good, report: goodReport } })
     // A sweep page carries `next` (the opaque cursor, or null once the sweep is exhausted) through unchanged.
     for (const next of [CURSOR, null]) {
       const page = { enabled: true, results: [], next }
-      expect((await dispatch({}, owner(() => true, page).port)).result).toEqual({ ok: true, data: page })
+      expect((await dispatch({}, owner(() => true, page).port)).result).toEqual({ ok: true, data: { ...page, report: { counts: { written_inactive: 0, row_absent: 0, duplicate_key: 0, kept_existing: 0 }, writtenInactive: [] } } })
     }
+    // An answer of a switched-off core (enabled false) carries no report.
+    expect((await dispatch({}, owner(() => true, { enabled: false, results: [] }).port)).result).toEqual({ ok: true, data: { enabled: false, results: [] } })
     for (const bad of [
       { enabled: true, results: [], next: 7 }, { enabled: true, results: [], next: 'not a cursor' }, { enabled: true, results: [], next: 'A'.repeat(2049) },
       { enabled: true, results: [], refused: 'AFTER' }, { enabled: true, results: [], refused: 'STALE' },
@@ -111,10 +115,35 @@ describe('POST /issue-confirm-writeback (route)', () => {
       { enabled: true, results: [{ ledgerId: LEDGER, kind: 'retryable', code: 'lowercase message' }] },
       { enabled: true, results: [{ ledgerId: LEDGER, kind: 'outcome', outcome: 'written', recorded: true, date: 'today', timeZone: 'Asia/Shanghai' }] },
       { enabled: true, results: [], stopped: 'OTHER' },
+      // D3-1: a record id only on a dated written_inactive row; a runtime report that is not the rows' own; a report while off.
+      { enabled: true, results: [{ ...good.results[0], recordId: 'rec-1' }] },
+      { enabled: true, results: [{ ledgerId: LEDGER, kind: 'outcome', outcome: 'written_inactive', recorded: true, date: '2026-03-02', timeZone: 'Asia/Shanghai' }] },
+      { enabled: true, results: [{ ledgerId: LEDGER, kind: 'outcome', outcome: 'written_inactive', recorded: true, recordId: 'rec-1' }] },
+      { enabled: true, results: [{ ledgerId: LEDGER, kind: 'outcome', outcome: 'kept_existing', recorded: true, recordId: 'rec-1' }] },
+      { enabled: true, results: [], report: { counts: { written_inactive: 1, row_absent: 0, duplicate_key: 0, kept_existing: 0 }, writtenInactive: [] } },
+      { enabled: true, results: [], report: { counts: {}, writtenInactive: [] } },
+      { enabled: false, results: [], report: { counts: { written_inactive: 0, row_absent: 0, duplicate_key: 0, kept_existing: 0 }, writtenInactive: [] } },
     ]) {
       const reply = await dispatch({}, owner(() => true, bad).port)
       expect(reply).toEqual({ status: 503, result: { ok: false, error: { code: 'YIDA_OWNER_HTTP_UNAVAILABLE' } } })
       expect(JSON.stringify(reply).includes('DEMO-P1')).toBe(false)
+    }
+  })
+  it('D3-1: a written_inactive row reaches the caller with its record id, and the run report counts written_inactive, row_absent, duplicate_key and kept_existing and lists the written_inactive rows', async () => {
+    const day = { date: '2026-03-02', timeZone: 'Asia/Shanghai' }
+    const results = [
+      { ledgerId: LEDGER, kind: 'outcome', outcome: 'written_inactive', recorded: true, ...day, recordId: 'rec-predecessor-1' },
+      { ledgerId: 'l-2', kind: 'outcome', outcome: 'written', recorded: true, ...day },
+      { ledgerId: 'l-3', kind: 'outcome', outcome: 'duplicate_key', recorded: true },
+      { ledgerId: 'l-4', kind: 'outcome', outcome: 'kept_existing', recorded: false },
+      { ledgerId: 'l-5', kind: 'outcome', outcome: 'written_inactive', recorded: false, ...day, recordId: 'rec-predecessor-5' },
+      { ledgerId: 'l-6', kind: 'skip', reason: 'project_sheets_disabled' },
+    ]
+    const report = { counts: { written_inactive: 2, row_absent: 0, duplicate_key: 1, kept_existing: 1 },
+      writtenInactive: [{ ledgerId: LEDGER, recordId: 'rec-predecessor-1' }, { ledgerId: 'l-5', recordId: 'rec-predecessor-5' }] }
+    // Without the runtime's report (recomputed) and with an equal one (checked, then recomputed): the same reply.
+    for (const answer of [{ enabled: true, results, next: null }, { enabled: true, results, report, next: null }]) {
+      expect((await dispatch({}, owner(() => true, answer).port)).result).toEqual({ ok: true, data: { enabled: true, results, report, next: null } })
     }
   })
   it('a cursor the core refuses reaches the caller as the runtime INPUT code: a 400, nothing echoed', async () => {
