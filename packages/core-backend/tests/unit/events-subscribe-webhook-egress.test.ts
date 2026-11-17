@@ -41,7 +41,18 @@ interface Mounted {
   logCalls: unknown[][]
 }
 
-async function mount(deps: Record<string, unknown> | undefined, opts: { mockPinnedModule?: ReturnType<typeof vi.fn> } = {}): Promise<Mounted> {
+interface MountOpts {
+  /** Replaces `pinnedHttpsFetch` in its module (the transport the handler uses when no seam is injected). */
+  mockPinnedModule?: ReturnType<typeof vi.fn>
+  /**
+   * Replaces `lookup` in `node:dns/promises`, the module the S0-a guard's DEFAULT resolver calls. With
+   * this, a zero-seam mount (`eventsRouter()` exactly as `index.ts` mounts it) still makes no real DNS
+   * lookup: the system resolver it reaches is this mock.
+   */
+  mockDnsLookup?: ReturnType<typeof vi.fn>
+}
+
+async function mount(deps: Record<string, unknown> | undefined, opts: MountOpts = {}): Promise<Mounted> {
   vi.resetModules()
   const handlers: CapturedHandler[] = []
   const subscribeOptions: unknown[] = []
@@ -66,6 +77,13 @@ async function mount(deps: Record<string, unknown> | undefined, opts: { mockPinn
       ...(await importOriginal<Record<string, unknown>>()),
       pinnedHttpsFetch: replacement,
     }))
+  }
+  if (opts.mockDnsLookup) {
+    const lookup = opts.mockDnsLookup
+    vi.doMock('node:dns/promises', async (importOriginal) => {
+      const actual = await importOriginal<Record<string, unknown>>()
+      return { ...actual, lookup, default: { ...((actual.default as Record<string, unknown>) ?? {}), lookup } }
+    })
   }
 
   // Tripwire: the platform fetch must never carry a subscription delivery (it re-resolves and follows).
@@ -126,6 +144,9 @@ describe('POST /api/events/subscribe — S0-a egress guard', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
+    // `vi.doMock` registrations survive `resetModules`; drop the optional ones so no case inherits them.
+    vi.doUnmock('../../src/multitable/webhook-pinned-fetch')
+    vi.doUnmock('node:dns/promises')
     vi.resetModules()
   })
 
@@ -150,8 +171,8 @@ describe('POST /api/events/subscribe — S0-a egress guard', () => {
         const m = await mount({ ssrfLookupFn: lookup, pinnedSendFn: send })
         const res = await request(pinned.url()).post('/api/events/subscribe').send(subscribeBody(url))
         expect(res.status).toBe(400)
-        expect(res.body.ok).toBe(false)
-        expect(res.body.error).toEqual({ code: 'WEBHOOK_TARGET_REJECTED', refusalClass })
+        // Whole body: nothing beyond the closed-set token may ride along (a raw-URL echo included).
+        expect(res.body).toEqual({ ok: false, error: { code: 'WEBHOOK_TARGET_REJECTED', refusalClass } })
         expect(res.text).not.toContain(new URL(url).hostname.replace(/^\[|\]$/g, ''))
         expect(m.subscribe).not.toHaveBeenCalled()
         expect(lookup).not.toHaveBeenCalled()
@@ -165,7 +186,7 @@ describe('POST /api/events/subscribe — S0-a egress guard', () => {
       const m = await mount({ ssrfLookupFn: lookupReturning([{ address: PUBLIC_A, family: 4 }]), pinnedSendFn: send })
       const res = await request(pinned.url()).post('/api/events/subscribe').send(subscribeBody(USERINFO_URL))
       expect(res.status).toBe(400)
-      expect(res.body.error).toEqual({ code: 'VALIDATION_ERROR', reason: 'url-credentials-not-allowed' })
+      expect(res.body).toEqual({ ok: false, error: { code: 'VALIDATION_ERROR', reason: 'url-credentials-not-allowed' } })
       expect(res.text).not.toContain(SECRET_MARK)
       expect(m.subscribe).not.toHaveBeenCalled()
       expect(serializedLogs(m)).not.toContain(SECRET_MARK)
@@ -263,8 +284,10 @@ describe('POST /api/events/subscribe — S0-a egress guard', () => {
       expect(m.fetchSpy).not.toHaveBeenCalled()
     })
 
-    for (const status of [301, 302, 307, 308]) {
-      it(`a ${status} is refused, never followed: exactly one send, Location never read`, async () => {
+    // Every 3xx, not only the four that re-send a body: 300/303/304 are refused on the status alone too.
+    const REDIRECT_QUERY_MARK = 'QmarkR3d1r'
+    for (const status of [300, 301, 302, 303, 304, 307, 308]) {
+      it(`a ${status} is refused, never followed: exactly one send, Location never read, no target in the logs`, async () => {
         let headersRead = 0
         const response = {
           status,
@@ -276,12 +299,17 @@ describe('POST /api/events/subscribe — S0-a egress guard', () => {
         }
         const send = vi.fn(async () => response)
         const m = await mount({ ssrfLookupFn: lookupReturning([{ address: PUBLIC_A, family: 4 }]), pinnedSendFn: send })
-        const handler = await subscribeOk(m, PUBLIC_NAME_URL)
+        // The subscribed URL carries a query marker: a subscribed URL may carry a token in its query.
+        const handler = await subscribeOk(m, `${PUBLIC_NAME_URL}?sig=${REDIRECT_QUERY_MARK}`)
         await expect(handler(EVENT, {})).rejects.toThrow(/^WEBHOOK_TARGET_REJECTED:redirect-not-allowed$/)
         expect(send).toHaveBeenCalledTimes(1)
         expect(headersRead).toBe(0)
         expect(m.fetchSpy).not.toHaveBeenCalled()
-        expect(serializedLogs(m)).not.toContain('other.example.test')
+        const logs = serializedLogs(m)
+        expect(logs).toContain('redirect-not-allowed')
+        expect(logs).not.toContain('other.example.test')
+        expect(logs).not.toContain('hooks.example.test')
+        expect(logs).not.toContain(REDIRECT_QUERY_MARK)
       })
     }
 
@@ -327,7 +355,7 @@ describe('POST /api/events/subscribe — S0-a egress guard', () => {
     })
   })
 
-  it('production default (no deps): delivery goes through pinnedHttpsFetch, never the platform fetch', async () => {
+  it('default transport (only the resolver injected): delivery goes through pinnedHttpsFetch, never the platform fetch', async () => {
     const pinnedModuleSend = vi.fn(async () => ({ status: 204, ok: true }))
     const lookup = lookupReturning([{ address: PUBLIC_A, family: 4 }])
     // Only the resolver is injected; the transport is the module default (mocked here, so no socket).
@@ -337,5 +365,66 @@ describe('POST /api/events/subscribe — S0-a egress guard', () => {
     expect(pinnedModuleSend).toHaveBeenCalledTimes(1)
     expect((pinnedModuleSend.mock.calls[0] as unknown[])[1]).toBe(PUBLIC_A)
     expect(m.fetchSpy).not.toHaveBeenCalled()
+  })
+  // Zero seams: the router mounted EXACTLY as production mounts it (`index.ts`: `eventsRouter()`, no deps).
+  // Every case above injects at least a resolver, so without these a handler or route that applies the guard
+  // only when a seam is injected would stay green. No real DNS: `node:dns/promises` (what the guard's default
+  // resolver calls) is module-mocked; no socket: the pinned transport module is mocked.
+  describe('zero seams: eventsRouter() exactly as production mounts it', () => {
+    const literalRefused: Array<[string, string, string]> = [
+      ['loopback literal', 'https://127.0.0.1/in', 'loopback'],
+      ['loopback over http', 'http://127.0.0.1:8900/in', 'loopback'],
+      ['private literal', 'https://10.1.2.3/in', 'private'],
+      ['link-local / metadata literal', 'https://169.254.169.254/latest/meta-data', 'link-local'],
+      ['IPv6 loopback literal', 'https://[::1]/in', 'loopback'],
+      ['IPv4-mapped IPv6 loopback', 'https://[::ffff:127.0.0.1]/in', 'loopback'],
+      ['http public literal', `http://${PUBLIC_A}/in`, 'scheme-not-allowed'],
+      ['http public name', 'http://hooks.example.test/in', 'scheme-not-allowed'],
+    ]
+    for (const [label, url, refusalClass] of literalRefused) {
+      it(`refuses ${label} with the closed-set 400 and never reaches eventBus.subscribe`, async () => {
+        const dns = vi.fn(async () => [{ address: PUBLIC_A, family: 4 }])
+        const pinnedModuleSend = okSend()
+        const m = await mount(undefined, { mockDnsLookup: dns, mockPinnedModule: pinnedModuleSend })
+        const res = await request(pinned.url()).post('/api/events/subscribe').send(subscribeBody(url))
+        expect(res.status).toBe(400)
+        expect(res.body).toEqual({ ok: false, error: { code: 'WEBHOOK_TARGET_REJECTED', refusalClass } })
+        expect(m.subscribe).not.toHaveBeenCalled()
+        expect(dns).not.toHaveBeenCalled()
+        expect(pinnedModuleSend).not.toHaveBeenCalled()
+        expect(m.fetchSpy).not.toHaveBeenCalled()
+      })
+    }
+
+    it('asks the system resolver once and refuses an internal answer: nothing is sent', async () => {
+      const dns = vi.fn(async () => [{ address: PUBLIC_A, family: 4 }, { address: '10.0.0.5', family: 4 }])
+      const pinnedModuleSend = okSend()
+      const m = await mount(undefined, { mockDnsLookup: dns, mockPinnedModule: pinnedModuleSend })
+      const handler = await subscribeOk(m, PUBLIC_NAME_URL)
+      expect(dns).not.toHaveBeenCalled() // subscribe is shape-only
+      await expect(handler(EVENT, {})).rejects.toThrow(/^WEBHOOK_TARGET_REJECTED:dns-resolved-internal$/)
+      expect(dns).toHaveBeenCalledTimes(1)
+      expect(dns).toHaveBeenCalledWith('hooks.example.test', { all: true })
+      expect(pinnedModuleSend).not.toHaveBeenCalled()
+      expect(m.fetchSpy).not.toHaveBeenCalled()
+    })
+
+    it('asks the system resolver once and hands its public answer to the pinned transport as the pin', async () => {
+      const dns = vi.fn(async () => [{ address: PUBLIC_A, family: 4 }])
+      const pinnedModuleSend = okSend(204)
+      const m = await mount(undefined, { mockDnsLookup: dns, mockPinnedModule: pinnedModuleSend })
+      const handler = await subscribeOk(m, PUBLIC_NAME_URL)
+      await expect(handler(EVENT, {})).resolves.toBe(true)
+      expect(dns).toHaveBeenCalledTimes(1)
+      expect(dns).toHaveBeenCalledWith('hooks.example.test', { all: true })
+      expect(pinnedModuleSend).toHaveBeenCalledTimes(1)
+      const [url, pin, family, sendOpts] = pinnedModuleSend.mock.calls[0] as unknown as [string, string, number, Record<string, unknown>]
+      expect(url).toBe(PUBLIC_NAME_URL)
+      expect(pin).toBe(PUBLIC_A)
+      expect(family).toBe(4)
+      expect(sendOpts.body).toBe(JSON.stringify(EVENT))
+      expect(sendOpts.timeoutMs).toBe(5000)
+      expect(m.fetchSpy).not.toHaveBeenCalled()
+    })
   })
 })
