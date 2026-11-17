@@ -321,8 +321,21 @@ function writebackResult(value: unknown) {
 }
 // D3-1 run report: the counts of written_inactive, row_absent, duplicate_key and kept_existing (every key, zero included)
 // and the written_inactive rows with their record ids — recomputed here from the closed result rows. The runtime's own
-// report, when present, must equal it; the DTO carries the recomputed one on every enabled answer.
+// report, when present, must equal it as DATA (sameWritebackReport: closed keys, per-key counts, element-wise handles —
+// never key order or serialization, so a runtime that lists the counted outcomes in another order still answers); the
+// DTO carries the recomputed one on every enabled answer.
 const writebackReportCounted = ['written_inactive', 'row_absent', 'duplicate_key', 'kept_existing']
+function sameWritebackReport(value: unknown, expected: ReturnType<typeof writebackReport>): boolean {
+  const report = record(value, ['counts', 'writtenInactive'])
+  const counts = record(report.counts, writebackReportCounted)
+  if (writebackReportCounted.some(outcome => counts[outcome] !== expected.counts[outcome])) return false
+  const handles = report.writtenInactive
+  if (!Array.isArray(handles) || types.isProxy(handles) || handles.length !== expected.writtenInactive.length) return false
+  return handles.every((handle: unknown, index: number) => {
+    const entry = record(handle, ['ledgerId', 'recordId'])
+    return entry.ledgerId === expected.writtenInactive[index].ledgerId && entry.recordId === expected.writtenInactive[index].recordId
+  })
+}
 function writebackReport(results: Array<Record<string, unknown>>) {
   const outcomes = results.filter(result => result.kind === 'outcome')
   return {
@@ -341,8 +354,8 @@ function writebackRun(value: unknown) {
     || (Object.hasOwn(row, 'report') && row.enabled !== true)) fail()
   const results = row.results.map(writebackResult)
   const report = row.enabled === true ? writebackReport(results) : undefined
-  // A runtime report that is not exactly the one its own rows give is not an answer at all.
-  if (Object.hasOwn(row, 'report') && JSON.stringify(row.report) !== JSON.stringify(report)) fail()
+  // A runtime report that is not the one its own rows give is not an answer at all (compared as data, never by key order).
+  if (Object.hasOwn(row, 'report') && (report === undefined || !sameWritebackReport(row.report, report))) fail()
   return { enabled: row.enabled, results, ...(report ? { report } : {}), ...(Object.hasOwn(row, 'next') ? { next: row.next } : {}),
     ...(Object.hasOwn(row, 'stopped') ? { stopped: 'SWITCH_OFF' } : {}) }
 }

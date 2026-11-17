@@ -49,10 +49,11 @@ export type YidaOwnerRuntimeDependencies = {
   // Y9 (design baseline v2.3 §7.3, D13 a): the write-back's live re-check, run on the run-scoped database. Defaults to the
   // real host check (yida-issue-confirm-writeback-authority.ts); a unit suite may substitute it. Never a request input.
   issueConfirmRecheck?: YidaIssueConfirmRecheck
-  // Y9: where the post-ACK write-back run reports — one fixed, values-free code per run, never an id, a count or a
-  // message: YIDA_ISSUE_CONFIRM_HOOK_FAILED (the run failed) or YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED (it finished
-  // normally with a retryable row). index.ts hands the server log (outside any request context); absent = silent. A
-  // throwing sink is ignored.
+  // Y9: where the post-ACK write-back run reports — fixed, values-free lines, never an id, a value or a message: either
+  // YIDA_ISSUE_CONFIRM_HOOK_FAILED alone (the run failed), or, for a run that finished normally, at most one each of
+  // YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED (a retryable row; the code alone), YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN
+  // (`outcome=count` pairs from its closed list) and YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE (`count=<n>`), in that
+  // order. index.ts hands the server log (outside any request context); absent = silent. A throwing sink is ignored.
   warn?: (code: string) => void
 }
 // `after` (batch mode only, never with ledgerIds): the previous page's `next`, an opaque sweep cursor the plugin core decodes.
@@ -107,17 +108,24 @@ export const YIDA_ISSUE_CONFIRM_HOOK_FAILED = 'YIDA_ISSUE_CONFIRM_WRITEBACK_AFTE
 // skip (project_sheets_disabled while the project-sheets switch is off, D14), a traced outcome, an empty answer or a
 // run that failed (HOOK_FAILED) never logs it; the recovery entry never logs it either (its caller sees the rows).
 export const YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED = 'YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED'
-// Y9 (stock-prep ruling on post-ACK terminal non-write outcomes): the only text a post-ACK write-back run logs when it
-// FINISHED normally and its answer holds a terminal outcome that leaves the date unwritten for good. Such a row is traced,
-// so no later sweep lists it again. Once per run: the fixed code, then `outcome=count` for each such outcome in the
-// order below (e.g. `YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN row_absent=1`); no id or value. Only names from this closed
-// list are ever rendered, never a plugin-supplied string. A skip, written / already_set / kept_existing, a retryable row
-// (that one is DEFERRED), an empty answer or a failed run (HOOK_FAILED) never logs it; the recovery entry never logs
+// Y9 (stock-prep rulings on post-ACK terminal non-write outcomes, 2026-11-17): the only text a post-ACK write-back run
+// logs when it FINISHED normally and its answer holds a terminal outcome that never writes the date, traced by THIS run
+// (`recorded: true`). Such a row is traced, so no later sweep lists it again and its date usually stays empty. Two
+// exceptions (register R-96): another run that read the row before this trace may still patch it once (R-96 ④(9),
+// residual 1); and a row this run decided but did not trace (`recorded: false`: another run traced it first, perhaps
+// as `written`) is not counted at all. `source_unbound` stays in the list as a misconfiguration alarm: on a formal
+// target every send is bound (D20), so it appears only when a target that takes unbound rows (slot 1, or one in
+// INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS) is in the write-back list — take that target out of the list. Once per run:
+// the fixed code, then `outcome=count` for each such outcome in the order below (e.g.
+// `YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN row_absent=1`); no id or value. Only names from this closed list are ever
+// rendered, never a plugin-supplied string. A skip, written / already_set / kept_existing / written_inactive, a retryable
+// row (that one is DEFERRED), an empty answer or a failed run (HOOK_FAILED) never logs it; the recovery entry never logs
 // it either (its caller sees the rows). DEFERRED and UNWRITTEN can both come from one run, DEFERRED first.
 export const YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN = 'YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN'
 // The write-back core's closed outcome vocabulary (yida-issue-confirm-writeback.cjs ISSUE_CONFIRM_WRITEBACK_OUTCOMES, in
-// its order) minus written, already_set and kept_existing: every terminal outcome that never writes the date. Pinned
-// equal to the core's list by the owner runtime unit test.
+// its order) minus the four that write or keep a date (written, already_set, kept_existing, written_inactive): every
+// terminal outcome that never writes the date (nine). Pinned equal to the core's list minus those four by the owner
+// runtime unit test.
 const WRITEBACK_UNWRITTEN_OUTCOMES = Object.freeze(['row_absent', 'duplicate_key', 'project_absent', 'project_archived',
   'project_mismatch', 'payload_unmapped', 'sheet_mismatch', 'permission_revoked', 'source_unbound'])
 // Y9 D3-1 (owner ruling, register R-96 ⑦, 2026-11-17): the only text a post-ACK write-back run logs when it FINISHED
@@ -146,7 +154,8 @@ function writtenInactiveText(results: ReadonlyArray<Readonly<Row>>): string | un
 function unwrittenText(results: ReadonlyArray<Readonly<Row>>): string | undefined {
   const counts: string[] = []
   for (const outcome of WRITEBACK_UNWRITTEN_OUTCOMES) {
-    const count = results.filter(row => row.kind === 'outcome' && row.outcome === outcome).length
+    // Counted only when THIS run traced it: a row another run traced first may hold any outcome, `written` included.
+    const count = results.filter(row => row.kind === 'outcome' && row.outcome === outcome && row.recorded === true).length
     if (count > 0) counts.push(`${outcome}=${count}`)
   }
   return counts.length === 0 ? undefined : `${YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN} ${counts.join(' ')}`
@@ -494,8 +503,9 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
   // plugin core reads INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED first. Its outcome is the module's trace / no-trace;
   // it reaches no one but the server log, as fixed values-free codes: a rejection is HOOK_FAILED; a run that finished
   // normally (past its exit checkpoint) with a retryable row is WRITEBACK_DEFERRED (C2), so a date left to the recovery
-  // entry is never silent; a run that finished normally with a terminal non-write outcome is WRITEBACK_UNWRITTEN plus
-  // the outcome codes and counts, so a date that no run will ever write is never silent either; a run that finished
+  // entry is never silent; a run that finished normally with a terminal non-write outcome it traced itself is
+  // WRITEBACK_UNWRITTEN plus the outcome codes and counts, so a date that usually stays empty (the two exceptions are at
+  // YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN above) is never silent either; a run that finished
   // normally with a written_inactive row is WRITEBACK_WRITTEN_INACTIVE plus its count (D3-1), so a date written where the
   // fill view does not show it is never silent.
   function issueConfirmAfterAcknowledged(owner: YidaOwnerActor, ledgerId: string): void {

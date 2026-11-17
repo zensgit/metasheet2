@@ -142,8 +142,32 @@ describe('POST /issue-confirm-writeback (route)', () => {
     const report = { counts: { written_inactive: 2, row_absent: 0, duplicate_key: 1, kept_existing: 1 },
       writtenInactive: [{ ledgerId: LEDGER, recordId: 'rec-predecessor-1' }, { ledgerId: 'l-5', recordId: 'rec-predecessor-5' }] }
     // Without the runtime's report (recomputed) and with an equal one (checked, then recomputed): the same reply.
-    for (const answer of [{ enabled: true, results, next: null }, { enabled: true, results, report, next: null }]) {
-      expect((await dispatch({}, owner(() => true, answer).port)).result).toEqual({ ok: true, data: { enabled: true, results, report, next: null } })
+    // Phase-2d refuter [1]: the check compares data, never key order — the runtime's counts in another key order (and the
+    // report's own two keys swapped) are the same report, and the reply carries the route's own order.
+    const reordered = { writtenInactive: report.writtenInactive.map(({ ledgerId, recordId }) => ({ recordId, ledgerId })),
+      counts: { kept_existing: 1, duplicate_key: 1, row_absent: 0, written_inactive: 2 } }
+    for (const answer of [{ enabled: true, results, next: null }, { enabled: true, results, report, next: null },
+      { enabled: true, results, report: reordered, next: null }]) {
+      const reply = await dispatch({}, owner(() => true, answer).port)
+      expect(reply).toEqual({ status: 200, result: { ok: true, data: { enabled: true, results, report, next: null } } })
+      expect(Object.keys((reply.result as { data: { report: { counts: object } } }).data.report.counts))
+        .toEqual(['written_inactive', 'row_absent', 'duplicate_key', 'kept_existing'])
+    }
+    // ... but it is still the rows' own report: a count off by one, a missing or extra key, a swapped or missing handle,
+    // or a handle with an extra key is a 503.
+    for (const bad of [
+      { ...report, counts: { ...report.counts, kept_existing: 2 } },
+      { ...report, counts: { written_inactive: 2, row_absent: 0, duplicate_key: 1 } },
+      { ...report, counts: { ...report.counts, written: 1 } },
+      { ...report, writtenInactive: [...report.writtenInactive].reverse() },
+      { ...report, writtenInactive: report.writtenInactive.slice(1) },
+      { ...report, writtenInactive: report.writtenInactive.map(handle => ({ ...handle, recordId: 'rec-other' })) },
+      { ...report, writtenInactive: report.writtenInactive.map(handle => ({ ...handle, projectNo: 'DEMO-P1' })) },
+      { counts: report.counts },
+      { ...report, extra: 1 },
+    ]) {
+      const reply = await dispatch({}, owner(() => true, { enabled: true, results, report: bad, next: null }).port)
+      expect(reply).toEqual({ status: 503, result: { ok: false, error: { code: 'YIDA_OWNER_HTTP_UNAVAILABLE' } } })
     }
   })
   it('a cursor the core refuses reaches the caller as the runtime INPUT code: a 400, nothing echoed', async () => {
@@ -382,9 +406,13 @@ describe('owner runtime: the post-ACK write-back is a tracked run AFTER submit r
       { ledgerId: OTHER(2), kind: 'retryable', code: 'STOCK_PREP_PROJECT_WRITE_LOCKED' },
       { ledgerId: OTHER(3), kind: 'retryable', code: 'YIDA_ISSUE_CONFIRM_RECORDS_INVALID' }, terminal('project_archived', OTHER(4))] },
     [DEFERRED, `${UNWRITTEN} project_archived=2`]],
-    // A recorded:false answer (another run traced first) still names the outcome this run decided.
+    // Stock-prep ruling 2026-11-17: only rows THIS run traced (recorded true) are counted. A recorded:false answer (another
+    // run traced the row first, perhaps as `written`) logs nothing; in a mixed run only the recorded rows are counted.
     ['a terminal outcome another run traced first (recorded false)', { enabled: true, results: [{ ...terminal('duplicate_key'), recorded: false }] },
-      [`${UNWRITTEN} duplicate_key=1`]],
+      []],
+    ['recorded and unrecorded terminal outcomes in one run', { enabled: true, results: [{ ...terminal('row_absent', OTHER(1)), recorded: false },
+      terminal('row_absent', OTHER(2)), { ...terminal('project_archived', OTHER(3)), recorded: false }] },
+      [`${UNWRITTEN} row_absent=1`]],
   ] as Array<readonly [string, unknown, readonly string[]]>)('UNWRITTEN signal, %s', async (_name, answer, expected) => {
     const f = hookFixture({ run: async () => answer })
     await f.runtime.createPluginCapability().activate(f.binding as never)

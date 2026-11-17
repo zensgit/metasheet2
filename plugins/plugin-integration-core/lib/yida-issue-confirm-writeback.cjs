@@ -499,7 +499,8 @@ function decideIssueConfirmWriteback(facts) {
 
 // ── trace store ────────────────────────────────────────────────────────────────────────────────────
 
-// The trace row (values-free): ids, the outcome, and the date + zone for written / already_set only.
+// The trace row (values-free): ids, the outcome, and the date + zone for the dated outcomes only (written, already_set,
+// written_inactive: ISSUE_CONFIRM_DATED_OUTCOMES).
 function issueConfirmTraceRow({ ledger, outcome, sheetId, date, timeZone }) {
   if (!ISSUE_CONFIRM_WRITEBACK_OUTCOMES.includes(outcome)) fail('YIDA_ISSUE_CONFIRM_INPUT', 'unknown outcome')
   const dated = ISSUE_CONFIRM_DATED_OUTCOMES.includes(outcome)
