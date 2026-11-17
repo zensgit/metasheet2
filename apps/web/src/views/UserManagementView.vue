@@ -909,8 +909,8 @@
             <h3>角色</h3>
             <p class="user-admin__hint">已分配的角色显示在这里。</p>
             <div class="user-admin__chips">
-              <span v-for="role in access.roles" :key="role" class="user-admin__chip">
-                {{ roleIdTitle(role) }}
+              <span v-for="role in access.roles" :key="role" class="user-admin__chip" data-testid="assigned-role">
+                {{ roleIdTitle(role) }} · {{ roleAssignmentLabel(role) }}
               </span>
               <span v-if="access.roles.length === 0" class="user-admin__empty">未分配角色</span>
             </div>
@@ -1497,6 +1497,7 @@ type RoleCatalogItem = {
 type UserAccess = {
   user: ManagedUser
   roles: string[]
+  roleAssignments?: unknown
   permissions: string[]
   isAdmin: boolean
 }
@@ -1946,6 +1947,18 @@ const managementScopeLocation = computed(() => {
 
 function roleTitleFromCatalog(role: { id: string; name: string }): string {
   return presentRoleTitle(role)
+}
+
+function roleAssignmentLabel(roleId: string): string {
+  const assignments = access.value?.roleAssignments
+  if (!Array.isArray(assignments)) return '来源未记录'
+  const records = assignments.filter((entry) => (
+    entry !== null && typeof entry === 'object' && entry.roleId === roleId
+  ))
+  if (records.length !== 1) return '来源未记录'
+  if (records[0].source === 'manual') return '手动分配'
+  if (records[0].source === 'creation') return '创建时联动'
+  return '来源未记录'
 }
 
 function roleIdTitle(roleId: string): string {

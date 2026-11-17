@@ -4858,7 +4858,13 @@ describe('UserManagementView authorization handlers', () => {
           ok: true,
           data: {
             user,
-            roles: userId === 'user-1' ? ['crm_admin'] : [],
+            roles: userId === 'user-1' ? ['crm_admin', 'attendance_employee', 'approval_viewer', 'legacy_role'] : [],
+            roleAssignments: [
+              { roleId: 'crm_admin', source: 'manual' },
+              { roleId: 'attendance_employee', source: 'creation' },
+              { roleId: 'approval_viewer', source: 'unknown' },
+              { roleId: 'unlisted_role', source: 'manual' },
+            ],
             permissions: userId === 'user-1' ? ['crm:read'] : [],
             isAdmin: false,
           },
@@ -4911,6 +4917,13 @@ describe('UserManagementView authorization handlers', () => {
     await openListedUser(root, 'Alpha')
     expect(root.querySelector('[data-testid="effective-access-title"]')?.textContent).toBe('生效权限')
     expect(root.querySelector('[data-testid="effective-access-note"]')?.textContent).toContain('服务端控制')
+    const assigned = Array.from(root.querySelectorAll('[data-testid="assigned-role"]'), node => node.textContent?.trim())
+    expect(assigned).toEqual([
+      expect.stringContaining('手动分配'),
+      expect.stringContaining('创建时联动'),
+      expect.stringContaining('来源未记录'),
+      expect.stringContaining('来源未记录'),
+    ])
     expect(root.textContent).toContain('不是最终业务访问结论')
 
     window.history.replaceState({}, '', '/admin/users')
