@@ -1,3 +1,11 @@
+import { queryAdminAuditFeed } from '../admin/authorization-operation-audit-feed'
+import { isUserWithinDelegatedScope } from '../admin/authorization-operation-audience'
+import { readOnlyAuthorizationJwtAuth } from '../auth/jwt-middleware'
+import { OperationAdmissionConflict } from '../admin/authorization-operation-snapshot'
+import { AuthorizationOperationFenceUnavailable } from '../admin/authorization-operation-fence'
+import { commitAuthorizationOperation, getAuthorizationOperation, previewAuthorizationOperation, AuthorizationOperationError } from '../admin/authorization-operation-service'
+import { AuthorizationOperationInvalid, parseAuthorizationOperation, parseClientOperationId } from '../admin/authorization-operation-validation'
+import { AuthorizationInputContractError } from '../rbac/authorization-input-brand'
 import type { Request, Response } from 'express'
 import { Router } from 'express'
 import * as bcrypt from 'bcryptjs'
@@ -274,7 +282,7 @@ type AdminRoleCatalogRow = {
 }
 
 type AdminAuditLogRow = {
-  id: number
+  id: number | null
   created_at: string
   event_type: string
   event_category: string
@@ -282,6 +290,9 @@ type AdminAuditLogRow = {
   action: string
   resource_type: string | null
   resource_id: string | null
+  actor_id: string | null
+  source: string
+  source_id: string
   user_id: number | null
   user_name: string | null
   user_email: string | null
@@ -2425,69 +2436,6 @@ async function fetchScopedDelegationUsers(adminUserId: string, namespaces: strin
   }
 }
 
-async function isUserWithinDelegatedScope(
-  adminUserId: string,
-  namespaces: string[],
-  userId: string,
-  runQuery: AccessGraphTransactionClient['query'] = query,
-): Promise<boolean> {
-  if (namespaces.length === 0) return false
-
-  const result = await runQuery(
-    `WITH RECURSIVE seed_departments AS (
-        SELECT d.id,
-               d.integration_id,
-               d.external_department_id,
-               bool_or(COALESCE(s.include_children, TRUE)) AS include_children
-        FROM delegated_role_admin_scopes s
-        JOIN directory_departments d ON d.id = s.directory_department_id
-        WHERE s.admin_user_id = $1
-          AND s.namespace = ANY($2::text[])
-          AND d.is_active = true
-        GROUP BY d.id, d.integration_id, d.external_department_id
-      ),
-      allowed_departments AS (
-        SELECT id, integration_id, external_department_id, include_children
-        FROM seed_departments
-        UNION
-        SELECT child.id, child.integration_id, child.external_department_id, TRUE AS include_children
-        FROM directory_departments child
-        JOIN allowed_departments parent
-         ON child.integration_id = parent.integration_id
-         AND child.external_parent_department_id = parent.external_department_id
-        WHERE parent.include_children IS TRUE
-          AND child.is_active = true
-      ),
-      allowed_groups AS (
-        SELECT DISTINCT gscope.group_id
-        FROM delegated_role_admin_member_groups gscope
-        WHERE gscope.admin_user_id = $1
-          AND gscope.namespace = ANY($2::text[])
-      )
-      SELECT EXISTS (
-        SELECT 1
-        FROM directory_account_links l
-        JOIN directory_accounts a
-          ON a.id = l.directory_account_id
-         AND a.is_active = true
-        JOIN directory_account_departments ad
-          ON ad.directory_account_id = a.id
-        JOIN allowed_departments scoped
-          ON scoped.id = ad.directory_department_id
-        WHERE l.local_user_id = $3
-          AND l.link_status = 'linked'
-        UNION
-        SELECT 1
-        FROM platform_member_group_members gm
-        JOIN allowed_groups scoped_groups
-          ON scoped_groups.group_id = gm.group_id
-        WHERE gm.user_id = $3
-      ) AS allowed`,
-    [adminUserId, namespaces, userId],
-  )
-
-  return result.rows[0]?.allowed === true
-}
 
 function deriveVisibleDelegatedMemberGroupIds(groupAssignments: Array<{ groupId: string }>): string[] {
   return Array.from(new Set(groupAssignments.map((assignment) => assignment.groupId).filter(Boolean))).sort()
@@ -2506,7 +2454,7 @@ async function resolveManageableNamespaces(
   if (delegableNamespaces.length <= 1) return [...delegableNamespaces]
   const manageable: string[] = []
   for (const namespace of delegableNamespaces) {
-    if (await isUserWithinDelegatedScope(actorId, [namespace], userId)) manageable.push(namespace)
+    if (await isUserWithinDelegatedScope(actorId, [namespace], userId, query)) manageable.push(namespace)
   }
   return manageable
 }
@@ -3319,6 +3267,32 @@ async function auditActivateSuccess(
 export function adminUsersRouter(): Router {
   const r = Router()
   registerAdminUserRecycleRoutes(r)
+
+  const authorizationOperationFailure = (res: Response, error: unknown, commit: boolean) => {
+    if (error instanceof AuthorizationOperationError || error instanceof AuthorizationOperationInvalid || error instanceof OperationAdmissionConflict || error instanceof AuthorizationOperationFenceUnavailable || error instanceof AuthorizationInputContractError) {
+      return jsonError(res, error.status, error.code, error.message)
+    }
+    if (error instanceof PlatformActorAuthorityLost) return jsonError(res, 403, 'FORBIDDEN', 'Admin access required')
+    return jsonError(res, 503, commit ? 'AUTHORIZATION_OPERATION_OUTCOME_UNKNOWN' : 'AUTHORIZATION_OPERATION_UNAVAILABLE', commit ? 'Operation outcome is unknown; query its receipt.' : 'Authorization operation is unavailable.')
+  }
+  r.post('/api/admin/authorization-operations/preview', readOnlyAuthorizationJwtAuth, async (req: Request, res: Response) => {
+    const actorId = getRequestUserId(req)
+    if (!actorId) return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+    try { return res.json(await previewAuthorizationOperation(actorId, parseAuthorizationOperation(req.body, false))) }
+    catch (error) { return authorizationOperationFailure(res, error, false) }
+  })
+  r.post('/api/admin/authorization-operations', readOnlyAuthorizationJwtAuth, async (req: Request, res: Response) => {
+    const actorId = getRequestUserId(req)
+    if (!actorId) return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+    try { return res.json(await commitAuthorizationOperation(actorId, parseAuthorizationOperation(req.body, true), syncLegacyAdminProfile)) }
+    catch (error) { return authorizationOperationFailure(res, error, true) }
+  })
+  r.get('/api/admin/authorization-operations/:clientOperationId', readOnlyAuthorizationJwtAuth, async (req: Request, res: Response) => {
+    const actorId = getRequestUserId(req)
+    if (!actorId) return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+    try { return res.json(await getAuthorizationOperation(actorId, parseClientOperationId(req.params.clientOperationId))) }
+    catch (error) { return authorizationOperationFailure(res, error, false) }
+  })
 
   r.post('/api/admin/users/batch/create', authenticate, async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
@@ -4334,7 +4308,7 @@ export function adminUsersRouter(): Router {
         return jsonError(res, 403, 'ROLE_DELEGATION_SCOPE_REQUIRED', 'No delegated department or member-group scope is configured for your plugin admin role')
       }
       if (!delegation.isPlatformAdmin) {
-        const allowed = await isUserWithinDelegatedScope(delegation.actorId, delegation.delegableNamespaces, userId)
+        const allowed = await isUserWithinDelegatedScope(delegation.actorId, delegation.delegableNamespaces, userId, query)
         if (!allowed) {
           return jsonError(res, 403, 'ROLE_DELEGATION_USER_OUT_OF_SCOPE', 'User is outside your delegated department or member-group scope')
         }
@@ -4409,7 +4383,7 @@ export function adminUsersRouter(): Router {
         return jsonError(res, 403, 'ROLE_DELEGATION_SCOPE_REQUIRED', 'No delegated department or member-group scope is configured for your plugin admin role')
       }
       if (!delegation.isPlatformAdmin) {
-        const allowed = await isUserWithinDelegatedScope(delegation.actorId, [namespace], userId)
+        const allowed = await isUserWithinDelegatedScope(delegation.actorId, [namespace], userId, query)
         if (!allowed) {
           return jsonError(res, 403, 'ROLE_DELEGATION_USER_OUT_OF_SCOPE', 'User is outside your delegated department or member-group scope')
         }
@@ -4531,7 +4505,7 @@ export function adminUsersRouter(): Router {
       }
       if (!delegation.isPlatformAdmin) {
         const scopedNamespaces = deriveMatchingNamespacesForRole(roleId, delegation.delegableNamespaces)
-        const allowed = await isUserWithinDelegatedScope(delegation.actorId, scopedNamespaces, userId)
+        const allowed = await isUserWithinDelegatedScope(delegation.actorId, scopedNamespaces, userId, query)
         if (!allowed) {
           return jsonError(res, 403, 'ROLE_DELEGATION_USER_OUT_OF_SCOPE', 'User is outside your delegated department or member-group scope')
         }
@@ -6578,7 +6552,7 @@ export function adminUsersRouter(): Router {
       })
 
       const values: unknown[] = [resourceType ? [resourceType] : [...ADMIN_AUDIT_RESOURCE_TYPES]]
-      const where = ['resource_type = ANY($1::text[])']
+      const where = [resourceType ? 'resource_type = ANY($1::text[])' : "(resource_type = ANY($1::text[]) OR resource_type = 'legacy-permission')"]
 
       if (action) {
         values.push(action)
@@ -6592,7 +6566,8 @@ export function adminUsersRouter(): Router {
             OR COALESCE(action, '') ILIKE $${values.length}
             OR COALESCE(action_details::text, '') ILIKE $${values.length}
             OR COALESCE(user_email, '') ILIKE $${values.length}
-            OR COALESCE(user_name, '') ILIKE $${values.length})`,
+            OR COALESCE(user_name, '') ILIKE $${values.length}
+            OR COALESCE(actor_id, '') ILIKE $${values.length})`,
         )
       }
 
@@ -6607,15 +6582,15 @@ export function adminUsersRouter(): Router {
       }
 
       const whereSql = `WHERE ${where.join(' AND ')}`
-      const countResult = await query<{ c: number }>(
+      const countResult = await queryAdminAuditFeed<{ c: number }>(
         `SELECT COUNT(*)::int AS c
-         FROM audit_logs
+         FROM $AUDIT_FEED
          ${whereSql}`,
         values,
       )
 
       values.push(pageSize, offset)
-      const itemsResult = await query<AdminAuditLogRow>(
+      const itemsResult = await queryAdminAuditFeed<AdminAuditLogRow>(
         `SELECT
             id,
             created_at,
@@ -6629,10 +6604,10 @@ export function adminUsersRouter(): Router {
             user_name,
             user_email,
             action_details,
-            error_code
-         FROM audit_logs
+            error_code, actor_id, source, source_id
+         FROM $AUDIT_FEED
          ${whereSql}
-         ORDER BY created_at DESC
+         ORDER BY created_at DESC, source DESC, source_id DESC
          LIMIT $${values.length - 1} OFFSET $${values.length}`,
         values,
       )
@@ -6668,7 +6643,7 @@ export function adminUsersRouter(): Router {
       const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 5000) : 1000
 
       const values: unknown[] = [resourceType ? [resourceType] : [...ADMIN_AUDIT_RESOURCE_TYPES]]
-      const where = ['resource_type = ANY($1::text[])']
+      const where = [resourceType ? 'resource_type = ANY($1::text[])' : "(resource_type = ANY($1::text[]) OR resource_type = 'legacy-permission')"]
 
       if (action) {
         values.push(action)
@@ -6682,7 +6657,8 @@ export function adminUsersRouter(): Router {
             OR COALESCE(action, '') ILIKE $${values.length}
             OR COALESCE(action_details::text, '') ILIKE $${values.length}
             OR COALESCE(user_email, '') ILIKE $${values.length}
-            OR COALESCE(user_name, '') ILIKE $${values.length})`,
+            OR COALESCE(user_name, '') ILIKE $${values.length}
+            OR COALESCE(actor_id, '') ILIKE $${values.length})`,
         )
       }
 
@@ -6697,7 +6673,7 @@ export function adminUsersRouter(): Router {
       }
 
       values.push(limit)
-      const rows = await query<AdminAuditLogRow>(
+      const rows = await queryAdminAuditFeed<AdminAuditLogRow>(
         `SELECT
             id,
             created_at,
@@ -6711,10 +6687,10 @@ export function adminUsersRouter(): Router {
             user_name,
             user_email,
             action_details,
-            error_code
-         FROM audit_logs
+            error_code, actor_id, source, source_id
+         FROM $AUDIT_FEED
          WHERE ${where.join(' AND ')}
-         ORDER BY created_at DESC
+         ORDER BY created_at DESC, source DESC, source_id DESC
          LIMIT $${values.length}`,
         values,
       )
@@ -6722,11 +6698,11 @@ export function adminUsersRouter(): Router {
       const filename = `iam-admin-audit-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`
       res.setHeader('Content-Type', 'text/csv; charset=utf-8')
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
-      res.write('id,created_at,resource_type,resource_id,action,event_type,event_severity,user_email,user_name,error_code,action_details\n')
+      res.write('id,created_at,resource_type,resource_id,action,event_type,event_severity,user_email,user_name,actor_id,source,source_id,error_code,action_details\n')
 
       for (const item of rows.rows) {
         const line = [
-          item.id,
+          item.id ?? '',
           item.created_at,
           item.resource_type || '',
           item.resource_id || '',
@@ -6735,6 +6711,9 @@ export function adminUsersRouter(): Router {
           item.event_severity,
           item.user_email || '',
           item.user_name || '',
+          item.actor_id || '',
+          item.source || '',
+          item.source_id || '',
           item.error_code || '',
           JSON.stringify(item.action_details || {}),
         ].map((value) => {

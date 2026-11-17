@@ -82,6 +82,15 @@ export async function revokeLegacyUserPermission(
     requireLiveRbacAdmin: true,
   })
 
+  return revokeLockedLegacyUserPermission(client, { actorId, userId, permission })
+}
+
+/** Caller already holds the actor and target locks and has checked authority. */
+export async function revokeLockedLegacyUserPermission(
+  client: AccessGraphTransactionClient,
+  options: { actorId: string; userId: string; permission: string; expected?: { value: unknown } },
+): Promise<LegacyPermissionRevokeResult> {
+  const { actorId, userId, permission, expected } = options
   const inspected = await client.query(
     `SELECT pg_typeof(permissions)::text AS permissions_type,
             to_jsonb(permissions) AS permissions
@@ -95,6 +104,9 @@ export async function revokeLegacyUserPermission(
   if (columnType !== 'jsonb' && columnType !== 'text[]') {
     throw new Error('unsupported users.permissions type')
   }
+  if (expected && JSON.stringify(row.permissions) !== JSON.stringify(expected.value)) {
+    throw new Error('AUTHORIZATION_EXCEPTION_STALE')
+  }
   const removed = removeMatchingLegacyPermission(row.permissions, permission)
   if (!removed.changed || !Array.isArray(removed.next)) return { changed: false }
 
@@ -105,8 +117,9 @@ export async function revokeLegacyUserPermission(
           SET permissions = $2::jsonb
         WHERE id = $1
           AND pg_typeof(permissions)::text = 'jsonb'
+          AND to_jsonb(permissions) IS NOT DISTINCT FROM $3::jsonb
         RETURNING id`,
-      [userId, JSON.stringify(removed.next)],
+      [userId, JSON.stringify(removed.next), JSON.stringify(row.permissions)],
     ) as PermissionWriteResult
   } else {
     if (removed.next.some((item) => item !== null && typeof item !== 'string')) {
@@ -117,11 +130,15 @@ export async function revokeLegacyUserPermission(
           SET permissions = $2::text[]
         WHERE id = $1
           AND pg_typeof(permissions)::text = 'text[]'
+          AND to_jsonb(permissions) IS NOT DISTINCT FROM $3::jsonb
         RETURNING id`,
-      [userId, removed.next],
+      [userId, removed.next, JSON.stringify(row.permissions)],
     ) as PermissionWriteResult
   }
-  if (!acknowledgedLegacyWrite(updated, userId)) return { changed: false }
+  if (!acknowledgedLegacyWrite(updated, userId)) {
+    if (expected) throw new Error('AUTHORIZATION_EXCEPTION_WRITE_NOT_ACKNOWLEDGED')
+    return { changed: false }
+  }
 
   await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
     userIds: [userId],

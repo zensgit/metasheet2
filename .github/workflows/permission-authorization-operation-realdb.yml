@@ -1,0 +1,97 @@
+name: Permission authorization operation real DB
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'packages/core-backend/src/admin/**'
+      - 'packages/core-backend/src/auth/**'
+      - 'packages/core-backend/src/db/**'
+      - 'packages/core-backend/src/directory/**'
+      - 'packages/core-backend/src/rbac/**'
+      - 'packages/core-backend/src/routes/admin-users.ts'
+      - 'packages/core-backend/src/routes/permissions.ts'
+      - 'packages/core-backend/src/index.ts'
+      - 'packages/core-backend/src/integration/db/**'
+      - 'packages/core-backend/tests/unit/authorization-input-*.test.ts'
+      - 'packages/core-backend/tests/unit/authorization-schema-mutation.test.ts'
+      - 'packages/core-backend/tests/unit/role-assignment-boundary.test.ts'
+      - 'packages/core-backend/package.json'
+      - 'pnpm-workspace.yaml'
+      - 'package.json'
+      - 'packages/core-backend/tests/integration/authorization-operation-*.db.test.ts'
+      - 'packages/core-backend/tests/unit/authorization-operation-*.test.ts'
+      - 'packages/core-backend/tests/helpers/authorization-operation-*'
+      - 'packages/core-backend/vitest.authorization-operation-realdb.config.ts'
+      - 'scripts/ops/permission-authorization-operation-realdb*'
+      - '.github/workflows/permission-authorization-operation-realdb.yml'
+      - 'pnpm-lock.yaml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/core-backend/src/admin/**'
+      - 'packages/core-backend/src/auth/**'
+      - 'packages/core-backend/src/db/**'
+      - 'packages/core-backend/src/directory/**'
+      - 'packages/core-backend/src/rbac/**'
+      - 'packages/core-backend/src/routes/admin-users.ts'
+      - 'packages/core-backend/src/routes/permissions.ts'
+      - 'packages/core-backend/src/index.ts'
+      - 'packages/core-backend/src/integration/db/**'
+      - 'packages/core-backend/tests/unit/authorization-input-*.test.ts'
+      - 'packages/core-backend/tests/unit/authorization-schema-mutation.test.ts'
+      - 'packages/core-backend/tests/unit/role-assignment-boundary.test.ts'
+      - 'packages/core-backend/package.json'
+      - 'pnpm-workspace.yaml'
+      - 'package.json'
+      - 'packages/core-backend/tests/integration/authorization-operation-*.db.test.ts'
+      - 'packages/core-backend/tests/unit/authorization-operation-*.test.ts'
+      - 'packages/core-backend/tests/helpers/authorization-operation-*'
+      - 'packages/core-backend/vitest.authorization-operation-realdb.config.ts'
+      - 'scripts/ops/permission-authorization-operation-realdb*'
+      - '.github/workflows/permission-authorization-operation-realdb.yml'
+      - 'pnpm-lock.yaml'
+
+permissions:
+  contents: read
+
+jobs:
+  authorization-operation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: synthetic_ci_only
+          POSTGRES_DB: postgres
+          POSTGRES_INITDB_ARGS: '--locale=C --encoding=UTF8'
+        ports:
+          - '127.0.0.1:5432:5432'
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      PERMISSION_COMMAND_PG_BASE_URL: postgresql://postgres:synthetic_ci_only@127.0.0.1:5432/postgres
+      DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED: 'false'
+      RBAC_BYPASS: 'false'
+      RBAC_TOKEN_TRUST: 'false'
+      VITEST_MAX_THREADS: '3'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Test the anti-skip and fixture guards
+        run: node --test scripts/ops/permission-authorization-operation-realdb.test.mjs
+      - name: Migrate isolated databases and run fenced acceptance
+        run: node scripts/ops/permission-authorization-operation-realdb.mjs
