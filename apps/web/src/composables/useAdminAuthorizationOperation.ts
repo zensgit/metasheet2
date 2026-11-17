@@ -12,6 +12,7 @@ import {
   readAdminAuthorizationPreview,
   readAdminAuthorizationRequest,
   serializeAdminAuthorizationPendingFile,
+  type AdminAuthorizationAction,
   type AdminAuthorizationImpact,
   type AdminAuthorizationPendingEntry,
   type AdminAuthorizationPendingFile,
@@ -103,6 +104,7 @@ export function useAdminAuthorizationOperation(deps: AdminAuthorizationOperation
   let confirmLocked = false
   let heldId: string | null = null
   let openPreview: OpenPreview | null = null
+  let expectedAction: AdminAuthorizationAction | null = null
   let storageUntrusted = false
   let tail: Promise<void> = Promise.resolve()
 
@@ -121,6 +123,7 @@ export function useAdminAuthorizationOperation(deps: AdminAuthorizationOperation
     impact.value = null
     receipt.value = null
     openPreview = null
+    expectedAction = null
     heldId = null
   }
 
@@ -243,24 +246,57 @@ export function useAdminAuthorizationOperation(deps: AdminAuthorizationOperation
       || current === 'unverified_no_read'
   }
 
+  function currentPhase(): AdminAuthorizationOperationPhase {
+    return phase.value
+  }
+
   function previewResponseCurrent(epoch: number): boolean {
     if (epoch !== previewEpoch || heldId || confirmLocked || storageUntrusted) return false
     return phase.value !== 'verified' && !blocksNewOperation()
   }
 
+  function clearUnconfirmedPreview(): void {
+    openPreview = null
+    impact.value = null
+    expectedVersion.value = null
+  }
+
+  function actionsMatch(expected: AdminAuthorizationAction, actual: AdminAuthorizationAction): boolean {
+    if (expected.kind === 'role.assign' || expected.kind === 'role.revoke') {
+      return (actual.kind === 'role.assign' || actual.kind === 'role.revoke')
+        && actual.kind === expected.kind
+        && actual.roleId === expected.roleId
+    }
+    if (expected.kind === 'direct.grant' || expected.kind === 'direct.revoke' || expected.kind === 'legacy.revoke') {
+      return (actual.kind === 'direct.grant' || actual.kind === 'direct.revoke' || actual.kind === 'legacy.revoke')
+        && actual.kind === expected.kind
+        && actual.code === expected.code
+    }
+    if (expected.kind === 'template.apply') {
+      return actual.kind === 'template.apply' && actual.templateId === expected.templateId
+    }
+    return actual.kind === 'admission.set'
+  }
+
   function showReceipt(parsed: Extract<ReturnType<typeof readAdminAuthorizationLookup>, { status: 'committed' }>): void {
+    const entry = { principalId: boundPrincipal, targetId: boundTarget, clientOperationId: parsed.clientOperationId }
     if (parsed.receipt.targetUserId !== boundTarget) {
       receipt.value = null
       verified.value = false
-      hold({ principalId: boundPrincipal, targetId: boundTarget, clientOperationId: parsed.clientOperationId }, 'pending')
+      hold(entry, 'pending')
+      return
+    }
+    // A reload has no local action. The server receipt is already bound to the signed principal and target.
+    if (expectedAction && !actionsMatch(expectedAction, parsed.receipt.action)) {
+      if (phase.value === 'committed' || phase.value === 'verified') return
+      receipt.value = null
+      verified.value = false
+      hold(entry, 'pending')
       return
     }
     receipt.value = parsed.receipt
     impact.value = parsed.receipt.impact
-    hold(
-      { principalId: boundPrincipal, targetId: boundTarget, clientOperationId: parsed.clientOperationId },
-      'committed',
-    )
+    hold(entry, 'committed')
   }
 
   function enterPending(id: string | null): void {
@@ -362,7 +398,7 @@ export function useAdminAuthorizationOperation(deps: AdminAuthorizationOperation
       }
       showReceipt(parsed)
     } catch {
-      if (!still(ticket, principalId, targetId)) return
+      if (!still(ticket, principalId, targetId) || heldId !== id) return
       if (phase.value !== 'committed') enterPending(id)
     }
   }
@@ -371,7 +407,11 @@ export function useAdminAuthorizationOperation(deps: AdminAuthorizationOperation
     rebind()
     if (confirmLocked || heldId || storageUntrusted || blocksNewOperation()) return
     const parsed = readAdminAuthorizationRequest(request)
-    if (!parsed || !idsReady() || parsed.targetUserId !== boundTarget) {
+    const requestRejected = !parsed || !idsReady() || parsed.targetUserId !== boundTarget
+    // An invalid preview must retire the previous epoch before any stale response is applied.
+    const epoch = ++previewEpoch
+    clearUnconfirmedPreview()
+    if (requestRejected || !parsed) {
       phase.value = 'validation_failed'
       detail.value = 'needs_repreview'
       verified.value = false
@@ -380,11 +420,9 @@ export function useAdminAuthorizationOperation(deps: AdminAuthorizationOperation
     const ticket = generation
     const principalId = boundPrincipal
     const targetId = boundTarget
-    const epoch = ++previewEpoch
     phase.value = 'previewing'
     detail.value = 'none'
     verified.value = false
-    openPreview = null
     try {
       const response = await deps.transport({
         path: ADMIN_AUTHORIZATION_PREVIEW_PATH,
@@ -394,11 +432,13 @@ export function useAdminAuthorizationOperation(deps: AdminAuthorizationOperation
       })
       if (!still(ticket, principalId, targetId) || !previewResponseCurrent(epoch)) return
       if (response.status === 400 || response.status === 409) {
+        clearUnconfirmedPreview()
         phase.value = 'validation_failed'
         detail.value = 'needs_repreview'
         return
       }
       if (response.status === 403) {
+        clearUnconfirmedPreview()
         phase.value = 'forbidden'
         detail.value = 'no_access'
         return
@@ -407,6 +447,7 @@ export function useAdminAuthorizationOperation(deps: AdminAuthorizationOperation
         ? readAdminAuthorizationPreview(response.body)
         : null
       if (!body) {
+        clearUnconfirmedPreview()
         phase.value = 'idle'
         detail.value = 'preview_failed'
         return
@@ -414,6 +455,7 @@ export function useAdminAuthorizationOperation(deps: AdminAuthorizationOperation
       acceptPreview(parsed, body)
     } catch {
       if (!still(ticket, principalId, targetId) || !previewResponseCurrent(epoch)) return
+      clearUnconfirmedPreview()
       phase.value = 'idle'
       detail.value = 'preview_failed'
     }
@@ -434,7 +476,7 @@ export function useAdminAuthorizationOperation(deps: AdminAuthorizationOperation
     // Same-instance synchronous latch. A held id, including one just read back
     // from storage, must not be replaced by another POST.
     if (confirmLocked) return
-    if (openPreview === null || storageUntrusted || !idsReady()) return
+    if (phase.value !== 'awaiting_confirmation' || openPreview === null || storageUntrusted || !idsReady()) return
     if (heldId) return
     const previewing = openPreview
     confirmLocked = true
@@ -481,6 +523,7 @@ export function useAdminAuthorizationOperation(deps: AdminAuthorizationOperation
       postedId = id
       heldId = id
       clientOperationId.value = id
+      expectedAction = previewing.request.action
       phase.value = 'committing'
       detail.value = 'pending'
       verified.value = false
@@ -491,11 +534,11 @@ export function useAdminAuthorizationOperation(deps: AdminAuthorizationOperation
         signal,
       })
       if (!still(ticket, principalId, targetId)) return
-      if (phase.value === 'committed' || phase.value === 'verified') return
+      if (currentPhase() === 'committed' || currentPhase() === 'verified') return
       applyCommit(response, id)
     } catch {
       if (!still(ticket, principalId, targetId)) return
-      if (phase.value === 'committed' || phase.value === 'verified') return
+      if (currentPhase() === 'committed' || currentPhase() === 'verified') return
       if (postedId) enterPending(postedId)
     } finally {
       if (ticket === generation) confirmLocked = false

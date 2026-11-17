@@ -9,6 +9,7 @@ import {
   readAdminAuthorizationImpact,
   readAdminAuthorizationReceipt,
   readAdminAuthorizationRequest,
+  type AdminAuthorizationAction,
   type AdminAuthorizationEffectivePermission,
   type AdminAuthorizationImpact,
   type AdminAuthorizationRequest,
@@ -94,7 +95,10 @@ function previewResponse(): AdminAuthorizationTransportResponse {
   return { status: 200, body: { expectedVersion: 'version-1', impact: impact() } }
 }
 
-function committedBody(id = OPERATION_ID): AdminAuthorizationTransportResponse {
+function committedBody(
+  id = OPERATION_ID,
+  action: AdminAuthorizationAction = { kind: 'role.assign', roleId: 'role-1' },
+): AdminAuthorizationTransportResponse {
   return {
     status: 200,
     body: {
@@ -102,7 +106,7 @@ function committedBody(id = OPERATION_ID): AdminAuthorizationTransportResponse {
       clientOperationId: id,
       receipt: {
         targetUserId: TARGET,
-        action: { kind: 'role.assign', roleId: 'role-1' },
+        action,
         impact: impact(),
         resultVersion: 'version-2',
       },
@@ -619,7 +623,7 @@ describe('admin authorization operation recovery', () => {
         if (request.path === ADMIN_AUTHORIZATION_PREVIEW_PATH) {
           return roleIdOf(request) === 'role-b' ? later.promise : earlier.promise
         }
-        return committedBody()
+        return committedBody(OPERATION_ID, { kind: 'role.assign', roleId: 'role-b' })
       },
     })
     const pendingEarlier = harness.operation.preview(operationRequest('role-a'))
@@ -660,7 +664,7 @@ describe('admin authorization operation recovery', () => {
           return roleIdOf(request) === 'role-b' ? later.promise : earlier.promise
         }
         if (request.method === 'POST') return lostCommit.promise
-        return committedBody()
+        return committedBody(OPERATION_ID, { kind: 'role.assign', roleId: 'role-b' })
       },
     })
     const pendingEarlier = harness.operation.preview(operationRequest('role-a'))
@@ -802,6 +806,218 @@ describe('admin authorization operation recovery', () => {
   })
 })
 
+describe('admin authorization receipt binding', () => {
+  function storedPending(id = OPERATION_ID) {
+    return {
+      formatVersion: 1,
+      entries: [{ principalId: PRINCIPAL, targetId: TARGET, clientOperationId: id }],
+    }
+  }
+
+  it('keeps a mismatched commit receipt pending until a matching GET', async () => {
+    let lookups = 0
+    const harness = createHarness({
+      handler: (request) => {
+        if (request.path === ADMIN_AUTHORIZATION_PREVIEW_PATH) return previewResponse()
+        if (request.method === 'POST') return committedBody(OPERATION_ID, { kind: 'role.assign', roleId: 'role-other' })
+        lookups += 1
+        if (lookups === 1) return committedBody(OPERATION_ID, { kind: 'direct.grant', code: 'sheet:write' })
+        if (lookups === 2) return committedBody()
+        return committedBody(OPERATION_ID, { kind: 'role.revoke', roleId: 'role-1' })
+      },
+    })
+    await previewed(harness)
+    await harness.operation.confirm()
+    expect(harness.operation.phase.value).toBe('pending')
+    expect(harness.operation.detail.value).toBe('pending')
+    expect(harness.operation.verified.value).toBe(false)
+    expect(harness.operation.receipt.value).toBeNull()
+    expect(harness.posts()).toHaveLength(1)
+    expect(JSON.parse(harness.storage.getItem(ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY) ?? '{}')).toEqual(storedPending())
+    const raw = harness.storage.getItem(ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY) ?? ''
+    expect(raw).not.toContain('cover the desk')
+    expect(raw).not.toContain('role-1')
+    expect(raw).not.toContain('role-other')
+    await harness.operation.confirm()
+    expect(harness.posts()).toHaveLength(1)
+    await harness.operation.lookup()
+    expect(harness.gets()).toHaveLength(1)
+    expect(harness.operation.phase.value).toBe('pending')
+    expect(harness.operation.receipt.value).toBeNull()
+    await harness.operation.lookup()
+    expect(harness.operation.phase.value).toBe('committed')
+    expect(harness.operation.detail.value).toBe('receipt_only')
+    expect(harness.operation.verified.value).toBe(false)
+    expect(harness.operation.receipt.value?.action).toEqual({ kind: 'role.assign', roleId: 'role-1' })
+    expect(harness.posts()).toHaveLength(1)
+    await harness.operation.lookup()
+    expect(harness.operation.phase.value).toBe('committed')
+    expect(harness.operation.receipt.value?.action).toEqual({ kind: 'role.assign', roleId: 'role-1' })
+    expect(JSON.parse(harness.storage.getItem(ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY) ?? '{}')).toEqual(storedPending())
+  })
+
+  it('matches code and template id, and accepts a reloaded receipt without a local action', async () => {
+    const template = createHarness({
+      handler: (request) => {
+        if (request.path === ADMIN_AUTHORIZATION_PREVIEW_PATH) return previewResponse()
+        if (request.method === 'POST') {
+          return committedBody(OPERATION_ID, { kind: 'template.apply', templateId: 'template-2' })
+        }
+        return committedBody(OPERATION_ID, { kind: 'template.apply', templateId: 'template-1' })
+      },
+    })
+    await template.operation.preview({
+      targetUserId: TARGET,
+      action: { kind: 'template.apply', templateId: 'template-1' },
+      admissionChanges: [],
+    })
+    await template.operation.confirm()
+    expect(template.operation.phase.value).toBe('pending')
+    expect(template.operation.receipt.value).toBeNull()
+    expect(JSON.parse(template.storage.getItem(ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY) ?? '{}')).toEqual(storedPending())
+    await template.operation.lookup()
+    expect(template.operation.phase.value).toBe('committed')
+    expect(template.operation.verified.value).toBe(false)
+    expect(template.operation.receipt.value?.action).toEqual({ kind: 'template.apply', templateId: 'template-1' })
+    expect(template.posts()).toHaveLength(1)
+
+    const coded = createHarness({
+      handler: (request) => {
+        if (request.path === ADMIN_AUTHORIZATION_PREVIEW_PATH) return previewResponse()
+        return committedBody(OPERATION_ID, { kind: 'direct.revoke', code: 'sheet:write' })
+      },
+    })
+    await coded.operation.preview({
+      targetUserId: TARGET,
+      action: { kind: 'direct.grant', code: 'sheet:write' },
+      admissionChanges: [],
+    })
+    await coded.operation.confirm()
+    expect(coded.operation.phase.value).toBe('pending')
+    expect(coded.operation.receipt.value).toBeNull()
+    expect(coded.posts()).toHaveLength(1)
+
+    const admission = createHarness({
+      handler: (request) => {
+        if (request.path === ADMIN_AUTHORIZATION_PREVIEW_PATH) return previewResponse()
+        return committedBody(OPERATION_ID, { kind: 'admission.set' })
+      },
+    })
+    await admission.operation.preview({
+      targetUserId: TARGET,
+      action: { kind: 'admission.set' },
+      admissionChanges: [{ namespace: 'attendance', enabled: false }],
+    })
+    await admission.operation.confirm()
+    expect(admission.operation.phase.value).toBe('committed')
+    expect(admission.operation.receipt.value?.action).toEqual({ kind: 'admission.set' })
+    expect(JSON.parse(admission.storage.getItem(ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY) ?? '{}')).toEqual(storedPending())
+
+    const storage = memoryStorage()
+    storage.setItem(ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY, JSON.stringify(storedPending()))
+    const reloaded = createHarness({
+      storage,
+      handler: (request) => {
+        if (request.method !== 'GET') throw new Error(`unexpected ${request.method}`)
+        return committedBody(OPERATION_ID, { kind: 'legacy.revoke', code: 'sheet:read' })
+      },
+    })
+    await reloaded.operation.whenSettled()
+    expect(reloaded.posts()).toHaveLength(0)
+    expect(reloaded.gets()).toHaveLength(1)
+    expect(reloaded.operation.phase.value).toBe('committed')
+    expect(reloaded.operation.detail.value).toBe('receipt_only')
+    expect(reloaded.operation.verified.value).toBe(false)
+    expect(reloaded.operation.receipt.value?.action).toEqual({ kind: 'legacy.revoke', code: 'sheet:read' })
+    expect(JSON.parse(storage.getItem(ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY) ?? '{}')).toEqual(storedPending())
+  })
+})
+
+describe('admin authorization operation races', () => {
+  it('does not commit or adopt stale preview A after invalid preview B', async () => {
+    const previewA = deferred<AdminAuthorizationTransportResponse>()
+    const harness = createHarness({
+      handler: (request) => {
+        if (request.path === ADMIN_AUTHORIZATION_PREVIEW_PATH) {
+          if (roleIdOf(request) === 'role-a') return previewA.promise
+          return previewResponse()
+        }
+        return committedBody()
+      },
+    })
+    const pendingA = harness.operation.preview(operationRequest('role-a'))
+    await harness.operation.preview({
+      targetUserId: 'other-target',
+      action: { kind: 'role.assign', roleId: 'role-b' },
+      admissionChanges: [],
+    })
+    expect(harness.operation.phase.value).toBe('validation_failed')
+    expect(harness.operation.detail.value).toBe('needs_repreview')
+    expect(harness.operation.impact.value).toBeNull()
+    expect(harness.operation.expectedVersion.value).toBeNull()
+    previewA.resolve(previewFor('role-a', 'version-a'))
+    await pendingA
+    expect(harness.operation.phase.value).toBe('validation_failed')
+    expect(harness.operation.impact.value).toBeNull()
+    expect(harness.operation.expectedVersion.value).toBeNull()
+    await harness.operation.confirm()
+    expect(harness.posts()).toHaveLength(0)
+
+    await harness.operation.preview(operationRequest('role-kept'))
+    expect(harness.operation.phase.value).toBe('awaiting_confirmation')
+    expect(harness.operation.expectedVersion.value).toBe('version-1')
+    await harness.operation.preview({
+      targetUserId: 'other-target',
+      action: { kind: 'role.assign', roleId: 'role-b' },
+      admissionChanges: [],
+    })
+    expect(harness.operation.phase.value).toBe('validation_failed')
+    expect(harness.operation.impact.value).toBeNull()
+    expect(harness.operation.expectedVersion.value).toBeNull()
+    await harness.operation.confirm()
+    expect(harness.posts()).toHaveLength(0)
+    expect(harness.operation.phase.value).toBe('validation_failed')
+  })
+
+  it('does not revive pending when a lookup rejects after verify', async () => {
+    const lookupGate = deferred<AdminAuthorizationTransportResponse>()
+    const harness = createHarness({
+      verifyLive: async () => true,
+      handler: (request) => {
+        if (request.path === ADMIN_AUTHORIZATION_PREVIEW_PATH) return previewResponse()
+        if (request.method === 'POST') return committedBody()
+        return lookupGate.promise
+      },
+    })
+    await previewed(harness)
+    await harness.operation.confirm()
+    expect(harness.operation.phase.value).toBe('committed')
+    const pendingLookup = harness.operation.lookup()
+    expect(harness.gets()).toHaveLength(1)
+    await harness.operation.verify()
+    expect(harness.operation.phase.value).toBe('verified')
+    expect(harness.operation.detail.value).toBe('verified')
+    expect(harness.operation.verified.value).toBe(true)
+    expect(JSON.parse(harness.storage.getItem(ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY) ?? '{}')).toEqual({
+      formatVersion: 1,
+      entries: [],
+    })
+    lookupGate.reject(new Error('late lookup'))
+    await pendingLookup
+    expect(harness.operation.phase.value).toBe('verified')
+    expect(harness.operation.detail.value).toBe('verified')
+    expect(harness.operation.verified.value).toBe(true)
+    expect(harness.operation.receipt.value).not.toBeNull()
+    await harness.operation.lookup()
+    expect(harness.gets()).toHaveLength(1)
+    expect(harness.posts()).toHaveLength(1)
+    expect(JSON.parse(harness.storage.getItem(ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY) ?? '{}')).toEqual({
+      formatVersion: 1,
+      entries: [],
+    })
+  })
+})
+
 describe('admin authorization operation dto', () => {
   it('keeps a false effective flag and accepts direct and legacy sources', async () => {
     const after = [
@@ -831,7 +1047,13 @@ describe('admin authorization operation dto', () => {
         }
       },
     })
-    await previewed(harness)
+    await harness.operation.preview({
+      targetUserId: TARGET,
+      action: { kind: 'direct.grant', code: 'sheet:write' },
+      admissionChanges: [{ namespace: 'attendance', enabled: true }],
+      reason: 'cover the desk',
+    })
+    expect(harness.operation.phase.value).toBe('awaiting_confirmation')
     expect(harness.operation.impact.value?.effectiveBefore).toEqual(impact().effectiveBefore)
     expect(harness.operation.impact.value?.effectiveAfter).toEqual(after)
     expect(harness.operation.impact.value?.retainedOtherGrants).toEqual(impact().retainedOtherGrants)
@@ -872,7 +1094,7 @@ describe('admin authorization operation dto', () => {
             clientOperationId: OPERATION_ID,
             receipt: {
               targetUserId: TARGET,
-              action: { kind: 'legacy.revoke', code: 'sheet:read' },
+              action: { kind: 'role.assign', roleId: 'role-1' },
               impact: {
                 ...impact(),
                 effectiveAfter: [
