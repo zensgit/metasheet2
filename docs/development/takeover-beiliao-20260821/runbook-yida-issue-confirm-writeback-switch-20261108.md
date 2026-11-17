@@ -16,7 +16,8 @@
 7. **通用写入方不会擦掉日期（登记册 R-96 ⑦，备料线 2026-11-17 裁定：两条都要）**：
    - 所装版本必须已含 D2（集成线「通用写入方剥离机器列」切片，写本页时未入 main）与 #6925；
    - 并且紧接着打开开关之前，跑两项只读、values-free 的计数，**两项都必须为 0**：(1) 登记过的项目表上非空 `issueConfirmDate` 单元格的个数（回写还没开，这一列应当全空）；(2) 项目登记表里 `sheet_id` 与按租户和对象派生的 sheet id 不一致的行数（或站点探针的 `sheet_id_mismatch` 为 0，`scripts/ops/stock-prep-pull-batch-site-probe-20261107/01-site-probe.sql:279`）。任一不为 0 就停，不打开开关。
-   - 由谁跑、何时跑是 owner 先批的只读步骤。D2 装上之后，通用写入方配置的普查只作参考，不再是前置条件。
+   - **谁跑、何时跑**：这两项计数读客户现场库，是 owner 先批、再执行的只读步骤（O 层①）；由 owner 本人或 owner 指定的现场操作人在现场跑，Claude 不跑、不远程操作（与本页开头的开关说明一致）。时间是**紧接着打开开关之前**；回报只写两个数字。任一不为 0 就停：不打开开关，把两个数字交回备料线与集成线。
+   - 本条取代 D1–D3 复核终裁 §7.3 的二选一（「普查为 0，否则先装剥离」）：现在 D2 装上与两项计数为 0 **都要**。D2 装上之后，通用写入方配置的普查只作参考，不再是前置条件。
 8. **有效列只有布尔值**：备料线 census 的 `nonBooleanActiveCells` 为 0（`plugins/plugin-integration-core/lib/stock-preparation-sheet-census.cjs:176`），或由备料线先修好这些行。原因见下文「写到了作废行」：有效列不是布尔值的行在填报视图里看不到，回写却按有效行处理、记 `written`、不记日志。
 9. **要让 carry 搬日期，所装版本须含 #6928（`88f7e47c5`）**：没有它，`written_inactive` 的日期在产品里没有任何办法挪到后继行（见下文「写到了作废行」）。
 
@@ -107,6 +108,7 @@ ACK 后运行只会写下面四条固定码（`packages/core-backend/src/integra
 
 ## 回滚到 R85（`220bd80ab`）
 
-- 回滚到 R85（`-RunMigrations 0`，不跑 down）后，`written_inactive` 留痕行原样保留。R85 没有任何代码读这张留痕表；回写也未接线：插件绑定只有两个成员，路由没有这条路径，请求走通用 404。所以不会据此发送或判定任何东西。这属于「因不存在而关闭」，**不是**返回 UNAVAILABLE（核对记录：`E:/Projects/_program-evidence/ipaas-yida-20261106/par-20261116/y9-realign/phase2/e/rollback-fail-closed.md`）。
+- **回滚必须用 `-RunMigrations 0`**（不跑 migrate，也不跑 down）。库历史里有旧包没有的迁移时，旧包的 migrate 报 `corrupted migrations: previously executed migration … is missing`、exit 1：集成线 2026-11-17 的 D21 本地验收实测过（库里有 Y5a 的 D21 `zzzz20261106110500`，不含它的代码跑 migrate 即如此）。推断（同一检查，未对 R85 实测）：本 PR 的两个迁移 `zzzz20261106093100` 与 `zzzz20261117090000` 都不在 R85 里，R85 开着迁移安装同样会在迁移这一步失败。
+- 回滚到 R85 后，`written_inactive` 留痕行原样保留。R85 **因不存在而关闭**，**不是**返回 UNAVAILABLE：R85 没有任何代码读这张留痕表（留痕表的迁移也不在 R85 里）；回写也未接线：插件绑定只有两个成员（`plugins/plugin-integration-core/lib/yida-owner-runtime-factory.mjs:92@220bd80ab`），路由没有这条路径，请求走通用 404 `NOT_FOUND`（`packages/core-backend/src/routes/integration-yida-owner.ts:431@220bd80ab`）。所以不会据此发送或判定任何东西（逐项核对记录在集成线证据 rollback-fail-closed.md，只读 `220bd80ab` 的树）。
 - 回滚前用只读计数记下 `outcome = 'written_inactive'` 的行数。这些日期仍在作废行上，R85 不会移动它们（R85 既没有 #6928 的 carry，也没有 #6925）。
 - 跑 down 的回滚会被拒：存在 `written_inactive` 行时，迁移 `zzzz20261117090000` 的 down() 先以 55000 `YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE_ROWS_PRESENT` 拒绝，什么都不改（`packages/core-backend/src/db/migrations/zzzz20261117090000_add_integration_yida_issue_confirm_written_inactive.ts:31`、`:56`）。
