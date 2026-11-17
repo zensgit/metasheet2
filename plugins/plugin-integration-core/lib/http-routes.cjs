@@ -172,7 +172,8 @@ const ROUTES = [
   ['POST', '/api/integration/stock-preparation/unit-conversions/retire', 'stockPreparationUnitConversionRetire'],
   // W4b (execution-plan general-prep-execution-plan-20260722.md:125): the K2 carry confirm — the
   // human confirms a CARRY_VIA_CONFIRM proposal and the server carries the inactive predecessor's
-  // human fields onto the re-keyed row (applyCarryViaConfirm: admin-gated, closed body allowlist,
+  // human fields onto the re-keyed row — and, in the same patch, the machine write-back date into an
+  // empty successor cell (owner ruling 2026-11-17) (applyCarryViaConfirm: admin-gated, closed body allowlist,
   // server-stamped carriedBy/carriedAt, no-overwrite, values-free audit). Optionally closes the
   // matching carry ledger row (decisionId + inputFingerprint together).
   ['POST', '/api/integration/stock-preparation/carry/confirm', 'stockPreparationCarryConfirm'],
@@ -336,8 +337,9 @@ const ROUTES = [
   //                                          of a run left open is in its target state and finishes that run. Every
   //                                          real run is owner gate ② per sheet.
   //   GET  target/sheet-repair/fills-report  which old row / copy pairs carry human fills and what the K2 carry could
-  //                                          do with each — values-free, audited before the answer.
-  //   GET  target/sheet-repair/runs          the values-free run list (the run ids a restore names).
+  //                                          do with each, and how many machine write-back cells the old subtree
+  //                                          holds — values-free, audited before the answer.
+  //   GET  target/sheet-repair/runs         the values-free run list (the run ids a restore names).
   ['POST', '/api/integration/stock-preparation/projects/:projectNo/target/sheet-repair', 'stockPreparationProjectSheetRepair'],
   ['GET', '/api/integration/stock-preparation/projects/:projectNo/target/sheet-repair/fills-report', 'stockPreparationProjectSheetRepairFillsReport'],
   ['GET', '/api/integration/stock-preparation/projects/:projectNo/target/sheet-repair/runs', 'stockPreparationProjectSheetRepairRuns'],
@@ -11652,7 +11654,8 @@ function requireStockPreparationAudit() {
     // W4b (execution-plan W4a/W4b; adjudication Layer 3): the K2 carry confirm — mirror of
     // stockPreparationMaterialMappingConfirm. The human confirms a CARRY_VIA_CONFIRM proposal;
     // the carry EXECUTOR (confirm-writes.applyCarryViaConfirm) copies the inactive predecessor's
-    // human fields onto the re-keyed row IN THE BOUND TARGET TABLE (see the target resolution in
+    // human fields — and the machine write-back date, into an empty successor cell only (owner ruling
+    // 2026-11-17 「按建议」) — onto the re-keyed row IN THE BOUND TARGET TABLE (see the target resolution in
     // the handler): admin-gated, closed body allowlist (the body can carry NO stamp and NO table —
     // carriedBy is the route identity, carriedAt is module-stamped, the sheet is the bound action's),
     // no-overwrite, values-free audit. When the body names the matching carry LEDGER row
@@ -11865,6 +11868,9 @@ function requireStockPreparationAudit() {
           persisted: result.persisted,
           carriedFieldCount: result.carriedFields.length,
           alreadyCarriedFieldCount: result.alreadyCarriedFields.length,
+          // The machine write-back column(s) the carry copied / kept (counts only, values-free).
+          machineCarriedFieldCount: result.machineCarriedFields.length,
+          machineKeptExistingCount: result.machineKeptExistingFields.length,
           ...(ledger ? { ledgerConfirmed: ledger.ok === true } : {}),
           // PR-0: whether the post-release generation bump landed (a written carry only; boolean).
           ...(result.persisted === true ? { generationBumped } : {}),
