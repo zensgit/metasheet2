@@ -826,6 +826,39 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     expect([world!.fake.token, world!.fake.form]).toEqual([1, 1])
   })
 
+  // Stock-prep ruling 2026-11-17 (UNWRITTEN counts only rows THIS run traced; the phase-2c refuter's T2): the post-ACK run
+  // P is parked at its own first registry statement; meanwhile the owner recovery entry R writes the date and traces
+  // `written`; then the project is archived. P resumes, decides project_archived, and cannot trace it (R's trace stands:
+  // recorded false). P logs nothing: the date is on the sheet and the stored trace says written.
+  it('UNWRITTEN on real PostgreSQL, recorded false: a post-ACK run that decides project_archived after a recovery run already wrote and traced the row logs nothing — the cell holds the date, the stored trace stays written', async () => {
+    await compose()
+    const before = await cell()
+    const parked = { ...latch(), pattern: new RegExp(`\\b${REGISTRY}\\b`), tag: 'wb' as const }
+    gateOnce = parked
+    const started = world!.runs.length
+    const { grant, result } = await sendOne(boundInput(0), 'synthetic-submission', { settle: false })
+    expect([result.status, result.reused]).toEqual(['acknowledged', false])
+    await waitFor(parked)
+    const ledgerId = String(grant.ledgerId ?? result.delivery!.id)
+    const day = businessDay(await ackAt(ledgerId))
+    // R (the gate is spent): the date is written and traced written by the recovery entry.
+    const recovered = await world!.runtime.issueConfirmWriteback(actor, { ledgerIds: [ledgerId] })
+    expect(recovered.results).toEqual([{ ledgerId, kind: 'outcome', outcome: 'written', recorded: true, date: day, timeZone: 'Asia/Shanghai' }])
+    await owner.query(`UPDATE ${ident(REGISTRY)} SET status = 'archived', archived_at = now() WHERE tenant_id = $1 AND project_no = $2`, [TENANT, PROJECT])
+    parked.release()
+    await settleAfterAck(started)
+    // P's answer (the first run): project_archived, NOT traced by P.
+    const answers = await Promise.all(world!.runs)
+    expect(answers[0].results).toEqual([{ ledgerId, kind: 'outcome', outcome: 'project_archived', recorded: false }])
+    // Long enough for a line of P's to show up if one were ever logged (warned() waits 50 ms after a line too).
+    await new Promise(resolve => setTimeout(resolve, 100))
+    expect(world!.warnings).toEqual([])
+    expect((await tableRows(TRACE)).map(row => [row.ledger_id, row.outcome])).toEqual([[ledgerId, 'written']])
+    expect([(await cell()).date, (await cell()).version]).toEqual([day, before.version + 1])
+    expect(patches).toEqual([{ recordId: recordId(0), expectedVersion: before.version, fenced: true }])
+    expect([world!.fake.token, world!.fake.form]).toEqual([1, 1])
+  })
+
   // Owner ruling D3-1 (register R-96 ⑦, 2026-11-17): the sheet is re-keyed after the send — the bound row keeps its key
   // and is marked INACTIVE (`active: false`, the boolean, as a refresh or a sheet-repair retire writes it) and a successor
   // under a NEW key is added — while the post-ACK run is parked at its own first registry statement. The run finds the

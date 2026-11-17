@@ -1155,6 +1155,47 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     expect(new Set(ledgerRows.map(row => row.target_ref))).toEqual(new Set([slot2.targetRef, f.targetRef]))
   })
 
+  // Y9 (stock-prep ruling 2026-11-17: UNWRITTEN keeps source_unbound as a misconfiguration alarm; conditions b and c). On a
+  // FORMAL target — the only kind the issue-confirm write-back may list — the D20 fence (assertBindingRequired, at approval
+  // and again at admission) keeps every send bound: a pasted (unbound) draft never gets a grant, so it never has a ledger
+  // row the write-back could read; the bound send's acknowledged ledger row carries its source digest, so the write-back's
+  // selector (the only place source_unbound is decided) selects it. source_unbound can therefore appear only when a target
+  // that takes unbound rows (slot 1, or one in INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS) is in the write-back list.
+  it('Y9 / D20: on a formal listed target the write-back never meets source_unbound — the pasted draft is refused at approval (no grant, no ledger row); the bound send is acknowledged with its digest and the write-back selector selects it', async () => {
+    await owner.query(multiTargetUp)
+    await registerProject()
+    await fixture()
+    const writeback = requireCjs(path.join(root, 'plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs')) as
+      { selectIssueConfirmCandidate(ledger: Row, targetRefs: string[]): Row }
+    // Slot 2 (the formal form), registered from a pasted draft; the write-back lists slot 2 alone.
+    const { draft: pasted, slot2 } = await addFormalTarget(formalInput())
+    const listed = [slot2.targetRef]
+    const multi = await session(context(), { multiTarget: true })
+    const before = await evidence()
+    await rejected(multi.service.approve({ operationId: pasted.operationId, rowKey: pasted.rows[0].rowKey,
+      confirmationId: 'synthetic-slot2-confirmation', targetRef: slot2.targetRef }), 'CONFLICT')
+    expect(await evidence()).toEqual(before)
+    // The bound draft of the same form: granted, admitted and acknowledged on slot 2.
+    const bound = await first.draft.createDraft(boundInput(formalInput()))
+    const request = { operationId: bound.operationId, rowKey: bound.rows[0].rowKey, confirmationId: 'synthetic-bound-confirmation' }
+    const granted = await multi.service.approve({ ...request, targetRef: slot2.targetRef })
+    const admitted = await multi.service.admit({ grantId: granted.grantId, submissionId: 'synthetic-bound-submission' })
+    await acknowledge({ draft: bound, request } as unknown as Fixture, admitted)
+    // The ledger of slot 2 holds the bound row only; the pasted draft has no ledger row on any target.
+    const ledgerRows = await tableRows(LEDGER)
+    expect(ledgerRows.filter(row => row.operation_id === pasted.operationId)).toEqual([])
+    const onFormal = ledgerRows.filter(row => row.target_ref === slot2.targetRef)
+    expect(onFormal.map(row => [row.id, row.status, row.intent])).toEqual([[admitted.ledgerId, 'acknowledged', 'create']])
+    expect(/^[0-9a-f]{64}$/.test(String(onFormal[0].source_record_digest))).toBe(true)
+    // The write-back's own selector on that row, as its ledger reader projects it: selected — never source_unbound.
+    const ack = (await tableRows(LEDGER_AUDIT)).find(row => row.ledger_id === admitted.ledgerId && row.event === 'acknowledgement')!
+    const projected = { id: onFormal[0].id, status: onFormal[0].status, intent: onFormal[0].intent, targetRef: onFormal[0].target_ref,
+      sourceRecordDigest: onFormal[0].source_record_digest ?? null, acknowledgedAt: (ack.created_at as Date).toISOString() }
+    expect(writeback.selectIssueConfirmCandidate(projected, listed)).toEqual({ selected: true })
+    // Control: the selector answers source_unbound for exactly that row with its digest removed — the case the fence excludes.
+    expect(writeback.selectIssueConfirmCandidate({ ...projected, sourceRecordDigest: null }, listed)).toEqual({ selected: false, outcome: 'source_unbound' })
+  })
+
   // ---- D21 in-transaction re-authorization (design baseline v2.3 §7.2 「进授权」 and 「分界是准入提交」; slice Y5) ----
   // The service's own transaction re-runs the four source checks on its own `trx` from the rows the protocol locked
   // there (never a request or the RBAC cache). No send port exists in this file: a refused approval or admission means
