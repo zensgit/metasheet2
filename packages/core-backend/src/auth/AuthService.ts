@@ -530,7 +530,7 @@ export class AuthService {
               permissions: registrationPermissions,
             })
             if (created && selfServiceRoleIds.length > 0) {
-              await this.insertUserRolesOnce(client, userId, selfServiceRoleIds)
+              await this.insertUserRolesOnce(client, userId, selfServiceRoleIds, 'creation')
             }
             return created
           })
@@ -911,6 +911,7 @@ export class AuthService {
     client: AliasQueryClient,
     userId: string,
     roleIds: readonly string[],
+    assignmentSource?: 'creation',
   ): Promise<number> {
     let inserted = 0
     for (const roleId of roleIds) {
@@ -920,6 +921,7 @@ export class AuthService {
         userIds: [userId],
         roleId,
         scope: { kind: 'fixed', roleIds: SELF_SERVICE_ASSIGNABLE_ROLE_IDS },
+        assignmentSource,
         executor: client,
       })
       inserted += membership.rowCount

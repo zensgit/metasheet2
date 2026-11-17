@@ -101,6 +101,15 @@ describe('historical migration files', () => {
   })
 })
 
+describe('role provenance down migration lock', () => {
+  it('accepts only the exact fixed membership table access-exclusive lock', () => {
+    expect(check(locked('LOCK TABLE user_roles IN ACCESS EXCLUSIVE MODE')).problems).toEqual([])
+    expect(check(locked('LOCK TABLE user_roles IN SHARE MODE')).problems).toContain('unreadable LOCK: statement kind is not on the safe list')
+    expect(check(locked('LOCK TABLE users IN ACCESS EXCLUSIVE MODE')).problems).toContain('unreadable LOCK: statement kind is not on the safe list')
+    expect(check(locked('LOCK TABLE user_roles, users IN ACCESS EXCLUSIVE MODE')).problems).toContain('unreadable LOCK: statement kind is not on the safe list')
+  })
+})
+
 describe('writes judged by table, form and operand', () => {
   const raising: Array<[string, string, string]> = [
     ['a raising code in a VALUES tuple', locked(`${INSERT_RP} VALUES ('viewer', 'users:write')`), 'grants class-raising code users:write'],

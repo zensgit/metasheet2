@@ -5,8 +5,8 @@ describe('authorization operation schema profile', () => {
   it('requires the exact known digest and ordinary tables', () => {
     for (const digest of [
       AUTHORIZATION_OPERATION_SCHEMA_PROFILE,
-      '94de1430caedfb986f98cea97e6231e78a0395a38264b923fb397c558a366587',
-      '85b365bcf6a9ddaee891ede0c3f8eead2c66d52cf28f314ae35d4a4279513fe0',
+      '873d5e65b39fe4692b720895cb2f3d2ceb213cd1a73184d92acc74947d1be163',
+      'df64c6b5d2f1d1441bd5ce0fde9c63979123af3009cea573753b3b016f3f0925',
     ]) {
       expect(isSupportedAuthorizationOperationSchema({ ordinary: true, digest })).toBe(true)
       expect(isSupportedAuthorizationOperationSchema({ ordinary: false, digest })).toBe(false)
