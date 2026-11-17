@@ -588,6 +588,9 @@ test('already_set and kept_existing never patch (D8: the first confirmation wins
     assert.equal(world.trace.length, 1)
     assert.equal(world.trace[0].ledger_id, row.id)
     assert.equal(world.trace[0].written_date, outcome === 'already_set' ? ACK_DAY : null)
+    // Round-3 refuter F2 (stock-prep verdict G9): both are decided under the lease, after the records read, so their
+    // trace INSERT runs while the lease is still held, before its release; no re-check (that guards the patch only).
+    assert.deepEqual(world.events, ['acquire', 'authority', 'query', ['traceInsert', true], 'release'], cell)
   }
 })
 
