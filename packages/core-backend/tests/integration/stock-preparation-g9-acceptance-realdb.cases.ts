@@ -47,7 +47,9 @@
  *            G9-PE below (flag off ⇒ the enable refused with exactly that id). It gates the enable only.
  *   G9-S9X-01 (C-8, RD G2) the MVP archive identity — the default snapshotBatchId and syncRunId, both derived from
  *            buildArchiveRevision — is unchanged across the 批次标识 install + history backfill of an unchanged GOVERNED
- *            sheet, with the switch ON and OFF: the archive after the install keeps the batch already archived.
+ *            sheet, with the switch ON and OFF: the archive after the install keeps the batch already archived. Then the
+ *            YiDa issue-confirm write-back's column (issueConfirmDate, absent from every row before it) is filled through
+ *            the REAL host patchRecord: the archive after it still keeps the same batch under the same ids (R-96 ⑦).
  *   G9-U07   the rollback drill's CI half (design §7.5 + B-22): artifacts produced through the REAL routes (an unfinished
  *            execution; a puller close not yet settled; a change plan left confirmed; a recovery-written plan) make the
  *            stop-condition queries non-zero — the 106 one is PARSED OUT OF THE MIGRATION 106 HEADER, never copied —
@@ -1666,7 +1668,7 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
     }, 900000)
 
     // ── G9-S9X-01: the MVP archive identity across the 批次标识 install + backfill ──────────────────────────────────────
-    g9Case('G9-S9X-01', '(C-8, RD G2, E10 clause 3) on an unchanged GOVERNED pilot sheet: the archive before the 批次标识 install, then the REAL install with its history backfill, then the archive again with the switch ON and OFF — the same default snapshotBatchId and syncRunId (both from buildArchiveRevision): the archive replays the kept batch, never a second one', async () => {
+    g9Case('G9-S9X-01', '(C-8, RD G2, E10 clause 3) on an unchanged GOVERNED pilot sheet: the archive before the 批次标识 install, then the REAL install with its history backfill, then the archive again with the switch ON and OFF — the same default snapshotBatchId and syncRunId (both from buildArchiveRevision): the archive replays the kept batch, never a second one; and again after the issue-confirm write-back fills its machine column', async () => {
       const ledgerStore = pullBatchStoreLib.createStockPreparationPullBatchStore({ db: createDb({ database: createProductionPluginContext().api.database }) })
       const st = await s3aStack('g9_s9x', { pilot: true, serviceExtras: { stockPreparationPullBatchStore: ledgerStore } })
       tenants.push(st.tenantId)
@@ -1705,6 +1707,21 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
       const idsOn = await persisted()
       const afterOff = await archive(false)
       const idsOff = await persisted()
+      // D1 (R-96 ⑦): the YiDa issue-confirm write-back fills the ONE machine write-back column (issueConfirmDate) on a
+      // kept row through the REAL host patchRecord. Before it no row's meta_records.data holds that key (no sync and no
+      // host write path creates it), and the archive revision drops it, so the archive after it is still the kept
+      // batch under the same ids — never a second batch of the same lines.
+      const confirmField = st.multitable.provisioning.getFieldId(st.projectId, st.objectId, 'issueConfirmDate')
+      const confirmFieldDeclared = Number((await q('SELECT count(*)::int AS n FROM meta_fields WHERE sheet_id = $1 AND id = $2', [st.sheetId, confirmField])).rows[0].n)
+      const keyField = st.multitable.provisioning.getFieldId(st.projectId, st.objectId, 'idempotencyKey')
+      const mainRows = async () => (await q('SELECT id, data FROM meta_records WHERE sheet_id = $1 ORDER BY id', [st.sheetId])).rows
+      const beforeWriteBack = await mainRows()
+      const keyedBeforeWriteBack = beforeWriteBack.filter((row: any) => row.data && Object.prototype.hasOwnProperty.call(row.data, confirmField)).length
+      const writtenBack = beforeWriteBack.find((row: any) => row.data && typeof row.data[keyField] === 'string' && row.data[keyField].length > 0)
+      await st.multitable.records.patchRecord({ sheetId: st.sheetId, recordId: writtenBack.id, changes: { [confirmField]: '2026-11-17' } })
+      const writtenValue = ((await mainRows()).find((row: any) => row.id === writtenBack.id) || { data: {} }).data[confirmField]
+      const afterWriteBack = await archive(false)
+      const idsWriteBack = await persisted()
       const observed = {
         first,
         install: [installed.resolved, installed.historyStatus, sheet.history_status, Number(sheet.history_batch_count) >= 1],
@@ -1713,6 +1730,9 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         idsPresent: Object.values(idsBefore).some((ids) => ids.length > 0),
         sameIdsSwitchOn: sameJson(idsOn, idsBefore),
         sameIdsSwitchOff: sameJson(idsOff, idsBefore),
+        writeBack: [confirmFieldDeclared, beforeWriteBack.length > 0, keyedBeforeWriteBack, typeof writtenValue === 'string' && writtenValue.length > 0],
+        afterWriteBack,
+        sameIdsWriteBack: sameJson(idsWriteBack, idsBefore),
       }
       expect(observed).toEqual({
         first: [201, 'created', null],
@@ -1722,6 +1742,9 @@ export function defineStockPreparationG9AcceptanceRealDbCases(kit: Record<string
         idsPresent: true,
         sameIdsSwitchOn: true,
         sameIdsSwitchOff: true,
+        writeBack: [1, true, 0, true],
+        afterWriteBack: [200, 'skipped_existing', null],
+        sameIdsWriteBack: true,
       })
       g9Pass('G9-S9X-01', observed)
     })

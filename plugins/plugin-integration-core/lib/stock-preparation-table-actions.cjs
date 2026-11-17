@@ -78,6 +78,8 @@ const {
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
   // 批次标识 (BI-1a, R-65; design Q-BI-13): the two band ids join the `ext_` collision catalog (only there).
   STOCK_PREPARATION_PULL_BATCH_FIELD_IDS,
+  // The machine write-back column(s) (today `issueConfirmDate`): out of the ARCHIVE revision only (withoutPeopleOwnedColumns).
+  MACHINE_WRITEBACK_FIELD_IDS,
   normalizeStockPreparationTemplate,
 } = require('./stock-preparation-templates.cjs')
 // Batch-refresh step 4 PR-3a: the lane helpers (the consult, the planner input, the one reconcile, the apply's
@@ -1895,15 +1897,23 @@ const STOCK_PREPARATION_MVP_SYNC_PARITY_MISMATCH_CODE = 'STOCK_PREPARATION_MVP_S
 // existing row loses the columns PEOPLE own — the template's human_preserved columns, and every tenant
 // `ext_` column outside the action's declared extension band (the only `ext_` columns a sync writes:
 // `assertExtFieldMappingAgreesWithAction` refuses a mapping that writes an undeclared one).
+// It also loses the machine write-back column(s) (MACHINE_WRITEBACK_FIELD_IDS, today `issueConfirmDate`): the
+// sync never writes them (the planner and the apply writer refuse to), their one writer is the YiDa
+// issue-confirm write-back (lib/yida-issue-confirm-writeback.cjs), and that date is not batch content — left
+// in, one write-back moved the run id and, under the default rule, minted a second batch of identical lines.
+// The key is dropped whenever present: a row never written back has no such key (no sync or host write
+// path creates it), so absent, null, '' and a date all hash alike and no kept batch is re-keyed.
 // Everything the sync itself wrote stays, the refresh stamps included, so a sync that really rewrote
 // the sheet still mints a new run (a BOM that changed and changed back still gets its own batch under
 // the default rule, as before). For rows that carry no such column it is byte-identical to `revision`,
-// so a batch kept from an untouched sheet keeps its id. Not used for tokens or the ledger.
+// so a batch kept from an untouched sheet keeps its id. Not used for tokens or the ledger: `revision`
+// (buildRevision) keeps every column, so a dry-run token minted before a write-back still mismatches after it.
 function withoutPeopleOwnedColumns(row, humanFieldIds, declaredExtensionFieldIds) {
   if (!isPlainObject(row)) return row
   const out = {}
   for (const [key, value] of Object.entries(row)) {
     if (humanFieldIds.has(key)) continue
+    if (MACHINE_WRITEBACK_FIELD_IDS.includes(key)) continue
     if (isTenantExtensionField(key) && !declaredExtensionFieldIds.has(key)) continue
     out[key] = value
   }
