@@ -87,8 +87,33 @@
 
           <section class="permission-admin__section" data-testid="permission-checker" aria-labelledby="permission-checker-title">
             <div class="permission-admin__section-head">
-              <h3 id="permission-checker-title">权限检查器</h3>
+              <h3 id="permission-checker-title">{{ permissionCheckMode === 'business' ? '业务检查' : '权限码预检' }}</h3>
             </div>
+            <div class="permission-admin__role-actions" role="group" aria-label="检查方式">
+              <button
+                class="permission-admin__button"
+                :class="{ 'permission-admin__button--secondary': permissionCheckMode !== 'business' }"
+                type="button"
+                data-testid="permission-check-mode-business"
+                :aria-pressed="permissionCheckMode === 'business'"
+                @click="permissionCheckMode = 'business'"
+              >
+                业务检查
+              </button>
+              <button
+                class="permission-admin__button"
+                :class="{ 'permission-admin__button--secondary': permissionCheckMode !== 'code' }"
+                type="button"
+                data-testid="permission-check-mode-code"
+                :aria-pressed="permissionCheckMode === 'code'"
+                @click="permissionCheckMode = 'code'"
+              >
+                权限码预检
+              </button>
+            </div>
+            <PermissionBusinessChecker v-if="permissionCheckMode === 'business'" :user-id="selectedUserId" />
+            <template v-if="permissionCheckMode === 'code'">
+            <p class="permission-admin__hint" data-testid="permission-code-precheck-note">权限码预检没有业务上下文，不能当作业务动作是否可做的结论。</p>
             <p class="permission-admin__hint" data-testid="permission-checker-scope">{{ permissionCheckerScopeNote }}</p>
             <div class="permission-admin__role-actions">
               <select
@@ -122,6 +147,7 @@
             >
               {{ permissionCheckerView.detail }}
             </p>
+            </template>
           </section>
 
           <section class="permission-admin__section" data-testid="permission-direct-section">
@@ -276,7 +302,7 @@
                   </button>
                 </div>
               </div>
-              <p class="permission-admin__hint">授予和回收使用上方权限检查器里选中的权限码。移除直接授权不会去掉角色继承。</p>
+              <p class="permission-admin__hint">授予和回收使用上方权限码预检里选中的权限码。移除直接授权不会去掉角色继承。</p>
               <p v-if="selectedPermissionHint" data-testid="selected-permission-hint" class="permission-admin__hint">{{ selectedPermissionHint }}</p>
               <p
                 v-if="permissionActionFeedback"
@@ -361,6 +387,7 @@ import {
   readPermissionExceptionLegacyRevokeAcknowledgement,
   type PermissionExceptionConfirmRequest,
 } from './permissionExceptionSources'
+import PermissionBusinessChecker from './PermissionBusinessChecker.vue'
 import {
   PERMISSION_CHECKER_SCOPE_NOTE,
   idlePermissionCheckerView,
@@ -422,6 +449,7 @@ const selectedUserAccess = ref<UserPermissionState | null>(null)
 const permissionActionFeedback = ref<{ tone: 'info' | 'error'; message: string } | null>(null)
 const unconfirmedReadbackUserId = ref('')
 const permissionCheckerView = ref<PermissionCheckerView>(idlePermissionCheckerView())
+const permissionCheckMode = ref<'business' | 'code'>('code')
 const permissionCheckerScopeNote = PERMISSION_CHECKER_SCOPE_NOTE
 const permissionExceptionObjectNote = PERMISSION_EXCEPTION_OBJECT_NOTE
 const permissionExceptionMultitableHref = PERMISSION_EXCEPTION_MULTITABLE_HREF
