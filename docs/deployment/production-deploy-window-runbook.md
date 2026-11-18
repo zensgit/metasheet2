@@ -159,9 +159,12 @@ never any other backend).
   limits (restarting the old version can take up to about 30 minutes: host check,
   `docker start`, the old-version checks). Judge the window by `state`, the `rc` file and
   the `window.pid` process: while the process runs, the window is still inside its
-  limits; once it is gone, follow "the window has ended" under Outcomes. Never send KILL: the window then ends
-  without its exit branch, `state` stays unfinished, no `rc` file is written and
-  production stays in whatever phase it was.
+  limits; once it is gone, follow "the window has ended" under Outcomes. Never send KILL:
+  the window then ends without its exit branch, `state` stays unfinished, no `rc` file is
+  written and production stays in whatever phase it was. A KILL, an out-of-memory kill or
+  a host reboot leaves no `raw_rc=` line in `window.log` (and no `rc` file); then judge
+  only by `state`, the lock and the `window.pid` process, and follow "A window that died
+  without its exit branch" under "Never, after 73, 74, 76, 255 or a missing rc".
 - After a window stopped with TERM, and once it has ended, list its migrate one-off:
   `docker ps -a --filter name=metasheet-window-migrate-`. A TERM between the one-off's
   create and its start leaves a container of this run in state `created` that never ran;
