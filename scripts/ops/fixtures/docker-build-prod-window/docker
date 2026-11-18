@@ -209,6 +209,8 @@ do_inspect() {
       if [[ "${H_MOUNTS_FAIL:-0}" == "1" && "$(get "$name" image_id)" == sha256:old* ]]; then echo "Error: harness inspect failure" >&2; exit 1; fi
       # The compose file mounts the attendance-import volume into every backend container.
       if [[ "$name" == "metasheet-backend" ]]; then echo /app/uploads/attendance-import; fi
+      # H_FILE_MOUNT=<path>: one more mount, of a single file, in every backend container.
+      if [[ "$name" == "metasheet-backend" && -n "${H_FILE_MOUNT:-}" ]]; then echo "${H_FILE_MOUNT}"; fi
       echo
       ;;
     '{{range .Mounts}}'*) get "$name" volume; echo ;;
@@ -587,6 +589,12 @@ exec_backend() {
         if [[ -d "${fs}${p}" ]]; then echo "$p"; fi
       done
       ;;
+    test)
+      # test -d <path> in the backend's filesystem; H_MOUNT_TEST_RC=N: the check itself fails.
+      [[ "${2:-}" == "-d" && $# -eq 3 ]] || unmodeled exec metasheet-backend "$@"
+      if [[ -n "${H_MOUNT_TEST_RC:-}" ]]; then exit "${H_MOUNT_TEST_RC}"; fi
+      if [[ -d "${fs}${3}" ]]; then exit 0; else exit 1; fi
+      ;;
     find)
       shift
       while (( $# )) && [[ "$1" != -* ]]; do paths+=("$1"); shift; done
@@ -688,6 +696,9 @@ do_stop() {
   if [[ -n "${!var:-}" ]]; then exit "${!var}"; fi
   if ! has "$name"; then echo "Error: No such container: ${name}" >&2; exit 1; fi
   put "$name" running false
+  # H_APPDATA_SHRINK=1: a local file of the backend is deleted between the preflight probe and
+  # the copy-out (at the web stop).
+  if [[ "$name" == "metasheet-web" && "${H_APPDATA_SHRINK:-0}" == "1" ]]; then rm -f "${C}/metasheet-backend/fs/app/data/attachments/a.txt"; fi
   if [[ "$name" == "metasheet-backend" && "${H_ABORT_ON:-}" == "backend-stop" ]]; then
     : > "${H_HOST_HOME}/metasheet2-deploy-window/abort"
   fi

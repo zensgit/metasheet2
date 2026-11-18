@@ -909,6 +909,7 @@ describe('production deploy window: remote_deploy step run against test doubles'
     ['the deploy directory is missing (the home listing stays on the host)', { listingMarker: true }, { DEPLOY_PATH: 'missing-deploy-dir' },
       { extra: ['harness-listing-marker.txt'], controls: [['deploy-path.ls', 'harness-listing-marker.txt']] }],
     ['the running backend\'s mounts cannot be read (app data present)', { appdata: true, attVolume: true }, { H_MOUNTS_FAIL: '1' }],
+    ['the directory check of a mount below an app-data path does not answer', { appdata: true, attVolume: true }, { H_MOUNT_TEST_RC: '124' }],
     ['crontab -l does not answer within its limit', {}, { H_CRONTAB_RC: '124' }],
     ['df does not answer within its limit', {}, { H_DF_RC: '124' }],
     ['two filesystems: not enough free space on the Docker root', {}, { H_DF_TWO_FS: '1', H_DF_ROOT_FREE_KB: '4321987' },
@@ -941,6 +942,10 @@ describe('production deploy window: remote_deploy step run against test doubles'
       if (env.H_DF_TWO_FS) assert.match(r.windowLog, env.H_DF_ROOT_FREE_KB ? /not enough free space on the Docker root/ : /not enough free space for the run directory/)
       if (env.H_DF_RC) assert.match(r.windowLog, /disk gate pre-pull: df did not return integer free space/)
       if (env.H_CRONTAB_RC) assert.match(r.windowLog, /crontab -l did not answer within 10 s/)
+      if (env.H_MOUNT_TEST_RC) {
+        assert.match(r.windowLog, /app data probe: could not check whether a mount below an app-data path is a directory/)
+        assert.ok(!any(r, isPull), 'refused before the pull')
+      }
       if (env.H_MOUNTS_FAIL) {
         assert.match(r.windowLog, /app data probe: could not read the backend's mounts/)
         assert.ok(!any(r, isPull), 'refused before the pull')
@@ -1407,12 +1412,43 @@ describe('production deploy window: remote_deploy step run against test doubles'
     assert.match(detail, /^appdata read_back files=5 bytes=30$/m, 'and read back from the created backend')
   })
 
+  scenario('app data with a file mounted below an app-data path -> that file stays in the archive (no exclude for it), done-new', async (t) => {
+    const world = makeWorld(t, { appdata: true, attVolume: true })
+    writeFileSync(path.join(world.ds, 'ctr/metasheet-backend/fs/app/uploads/harness-mounted.cfg'), 'cfg1\n')
+    const r = await runWindow(t, world, { env: { H_FILE_MOUNT: '/app/uploads/harness-mounted.cfg' } })
+    checkHappy(r, { appdata: true })
+    assert.match(r.docker.find(isTarOut).args, / --anchored --no-wildcards --exclude=app\/uploads\/attendance-import -cf - /, 'only the directory mount is excluded')
+    assert.ok(any(r, (call) => call.args === 'exec metasheet-backend test -d /app/uploads/harness-mounted.cfg'), 'the mount was checked')
+    const listing = readFileSync(path.join(r.runDir, 'appdata.list'), 'utf8')
+    assert.ok(listing.includes('app/uploads/harness-mounted.cfg'), 'the mounted file is archived')
+    assert.doesNotMatch(listing, MOUNT_MEMBER, 'the directory mount point is not')
+    const detail = readFileSync(path.join(r.runDir, 'window-detail.log'), 'utf8')
+    assert.match(detail, /^appdata excluded_mount_points=1$/m)
+    assert.match(detail, /^appdata mount_kept_in_archive=\/app\/uploads\/harness-mounted\.cfg \(not a directory\)$/m)
+    assert.match(detail, /^appdata copy files=4 bytes=25$/m)
+    assert.match(detail, /^appdata read_back files=4 bytes=25$/m)
+    assert.doesNotMatch(r.deployLog, /harness-mounted/, 'mount paths stay on the host')
+  })
+
+  scenario('app data: a local file is deleted between the probe and the stop -> a host-only warning, done-new', async (t) => {
+    const world = makeWorld(t, { appdata: true })
+    const r = await runWindow(t, world, { env: { H_APPDATA_SHRINK: '1' } })
+    checkHappy(r, { appdata: true })
+    const detail = readFileSync(path.join(r.runDir, 'window-detail.log'), 'utf8')
+    assert.match(detail, /^appdata copy archive_files=1 preflight_files=2$/m)
+    assert.match(detail, /^appdata warning: the archive has fewer regular files than the preflight probe counted$/m)
+    assert.doesNotMatch(r.deployLog, /fewer regular files|preflight_files/, 'the warning stays on the host')
+  })
+
   scenario('app data without a mount point below its paths -> no exclude', async (t) => {
     const world = makeWorld(t, { appdata: true })
     const r = await runWindow(t, world)
     checkHappy(r, { appdata: true })
     assert.match(r.docker.find(isTarOut).args, / --anchored --no-wildcards -cf - app\/data\/attachments$/)
-    assert.match(readFileSync(path.join(r.runDir, 'window-detail.log'), 'utf8'), /^appdata excluded_mount_points=0$/m)
+    const detail = readFileSync(path.join(r.runDir, 'window-detail.log'), 'utf8')
+    assert.match(detail, /^appdata excluded_mount_points=0$/m)
+    assert.match(detail, /^appdata copy archive_files=2 preflight_files=2$/m, 'control: equal counts')
+    assert.doesNotMatch(detail, /appdata warning/, 'control: no warning when nothing changed')
   })
 
   scenario('app data present with the attendance-import volume, the read-back misses a file outside it -> 73: never started', async (t) => {
@@ -1626,6 +1662,7 @@ describe('production deploy window: remote_deploy step run against test doubles'
     const tries = r.calls.filter((call) => call.kind === 'curl' && call.index > start && /\/health$/.test(call.args))
     assert.equal(tries.length, 60, 'the health wait made all 60 tries')
     for (const call of tries) assert.equal(call.meta.max_time, '10', 'each try is limited by the wrapper')
+    assert.match(r.windowLog, /^\[deploy-window\]\[error\] new backend \/health did not answer$/m, 'the health wait itself fails the window')
     assert.ok(first(r, (call) => isStop('metasheet-backend')(call) && /^new-backend-/.test(call.meta.target), start) >= 0, 'the unverified new backend is stopped')
     assert.ok(!any(r, isUpWeb), 'web never upped')
   })
@@ -2042,6 +2079,23 @@ describe('production deploy window: remote_deploy step run against test doubles'
     const tarOut = plain.filter((line) => /docker exec metasheet-backend tar /.test(line))
     assert.equal(tarOut.length, 1)
     assert.match(tarOut[0], / tar -C \/ --one-file-system --anchored --no-wildcards \$\{appdata_excl\[@\]\+"\$\{appdata_excl\[@\]\}"\} -cf - /, 'exact excludes, before the member names')
+    // fds 7 and 8: saved once at the start, restored once in the exit branch, used nowhere else.
+    assert.deepEqual(code.filter((line) => /(^|[^0-9])[78]>|>&[78]\b|<&[78]\b/.test(line)).map((line) => line.trim()),
+      ['exec 1>&7 2>&8 || true', 'exec 7>&1 8>&2'], 'fds 7 and 8 appear only in the restore and the save line')
+    // The app.env rewrite: both inputs are assignments on the python3 command itself, read only
+    // inside its Python block.
+    const rewrite = '  APP_ENV_JWT_SECRET="${DEPLOY_JWT_SECRET:-}" APP_ENV_DATABASE_URL="${database_url}" python3 - "${ENV_FILE_PATH}" "${DEPLOY_BCRYPT_SALT_ROUNDS:-12}" "${ENABLE_YJS_COLLAB:-false}" <<\'PY\''
+    assert.equal(text.split('\n').filter((line) => line === rewrite).length, 1, 'the app.env rewrite line')
+    for (const name of ['APP_ENV_JWT_SECRET', 'APP_ENV_DATABASE_URL']) {
+      assert.deepEqual(text.split('\n').filter((line) => line.includes(name) && line !== rewrite).map((line) => line.trim()),
+        [`${name === 'APP_ENV_JWT_SECRET' ? 'deploy_jwt_secret' : 'database_url'} = os.environ.get("${name}", "")${name === 'APP_ENV_JWT_SECRET' ? '.strip()' : ''}`], `${name} only in the rewrite line and its Python block`)
+    }
+    // `unbounded`: only the watchdog passes it.
+    assert.deepEqual(code.filter((line) => /\bunbounded\b/.test(line)).map((line) => line.trim()),
+      ['if [[ "${2:-}" == "unbounded" ]]; then', 'free="$(min_free_kb unbounded || true)"'], 'unbounded is passed in one place')
+    // The new backend's health wait: 60 tries, 2 s apart, and a failure of its own.
+    assert.deepEqual(plain.filter((line) => /fetch_json_with_retry_file "backend health"/.test(line)).map((line) => line.trim()),
+      ['fetch_json_with_retry_file "backend health" "${DEPLOY_BACKEND_HEALTH_URL}" 60 2 "${RUN_DIR}/new-backend-health.json" || fail MESSAGE'], 'the health wait call')
     const hostCheckCalls = plain.filter((line) => /"\$check" "\$phase"/.test(line))
     assert.equal(hostCheckCalls.length, 1)
     assert.match(hostCheckCalls[0], /^\s*timeout 400 "\$check" "\$phase" /, 'the host check is bounded by timeout 400')

@@ -301,7 +301,7 @@ jobs:
         id: remote_deploy
         if: ${{ steps.sync_deploy.outputs.sync_rc == '0' }}
         continue-on-error: true
-        # The window's own time limits add up to about 290 minutes on its longest path with the
+        # The window's own time limits add up to about 293 minutes on its longest path with the
         # default tunables, one host check per phase, three app-data paths and every bounded step
         # at its limit; the runbook says what a runner timeout means.
         timeout-minutes: 300
@@ -1020,7 +1020,7 @@ jobs:
             trap '' TERM
             # A TERM that arrives while a function or group writes a host file leaves that
             # redirection in place: the exit branch writes to the window's own log again.
-            exec 1>&7 2>&8
+            exec 1>&7 2>&8 || true
             if [[ "$w_in_exit" == "1" ]]; then
               return 0
             fi
@@ -1564,7 +1564,9 @@ jobs:
           # mount point as one empty directory entry; the copy-out leaves exactly that member out
           # (anchored, no wildcards, the name as tar spells it with -C /), so the copy-in never
           # writes a directory entry onto the new backend's volume root. Nothing below a mount
-          # point is in the archive anyway.
+          # point is in the archive anyway. Only a mount point that is a directory in the running
+          # backend is left out: tar --one-file-system still archives a mounted regular file, and
+          # the copy-in writes it back through the same mount of the new backend.
           appdata_excl=()
           if (( ${#appdata_paths[@]} > 0 )); then
             timeout 30 docker inspect -f '{{range .Mounts}}{{println .Destination}}{{end}}' metasheet-backend >"${RUN_DIR}/appdata.oldmounts" 2>>"${RUN_DIR}/docker.err" \
@@ -1573,7 +1575,13 @@ jobs:
               mnt="${mnt%/}"
               for apath in "${appdata_paths[@]}"; do
                 if [[ -n "$mnt" && "$mnt" == "$apath"/* ]]; then
-                  appdata_excl+=("--exclude=${mnt#/}")
+                  mnt_rc=0
+                  timeout 30 docker exec metasheet-backend test -d "$mnt" 2>>"${RUN_DIR}/docker.err" || mnt_rc=$?
+                  case "$mnt_rc" in
+                    0) appdata_excl+=("--exclude=${mnt#/}") ;;
+                    1) hlog "appdata mount_kept_in_archive=${mnt} (not a directory)" ;;
+                    *) fail "app data probe: could not check whether a mount below an app-data path is a directory" ;;
+                  esac
                   break
                 fi
               done
@@ -1794,6 +1802,11 @@ jobs:
             appdata_sha256="$(sha256_file "${RUN_DIR}/appdata.tar")"
             w_appdata_copied=1
             hlog "appdata copy files=${w_appdata_tar_files} bytes=${w_appdata_tar_bytes}"
+            # Files may change between the preflight probe and the stop: noted on the host only.
+            hlog "appdata copy archive_files=${w_appdata_tar_files} preflight_files=${w_appdata_files}"
+            if (( w_appdata_tar_files < w_appdata_files )); then
+              hlog "appdata warning: the archive has fewer regular files than the preflight probe counted"
+            fi
             wlog "appdata copy=ok sha256=${appdata_sha256} file=appdata.tar"
           fi
           timeout 90 docker stop -t 60 metasheet-backend >/dev/null 2>>"${RUN_DIR}/docker.err" || fail "docker stop metasheet-backend failed"
