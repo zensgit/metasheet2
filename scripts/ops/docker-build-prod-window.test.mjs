@@ -4,8 +4,8 @@
 // with bash 5 against PATH test doubles (scripts/ops/fixtures/docker-build-prod-window/): `ssh`
 // runs the remote side locally with HOME at a temp "host" directory, `docker` is a
 // scenario-driven double with an ordered call log, and curl, git, crontab, loginctl, busctl,
-// date, sleep, df and tar are doubles too; python3 is real and edits temp copies of app.env and
-// .env. No container, network, host or registry is touched.
+// date, sleep, df and tar are doubles too; python3 is a logging wrapper around the real python3,
+// which edits temp copies of app.env and .env. No container, network, host or registry is touched.
 //
 // Expected exit codes, call orders and effects come from the deploy window design (phases 0-5,
 // the ledger branch and the exit-code table), not from the workflow text: a disagreement fails
@@ -74,13 +74,13 @@ const BASH = findBash5()
 // is a failure, not a silent skip.
 const SKIP = BASH || process.platform === 'linux' ? false : 'no bash with BASH_VERSINFO[0] >= 4 found (set HARNESS_BASH)'
 const which = (name) => spawnSync('/bin/sh', ['-c', `command -v ${name}`], { encoding: 'utf8' }).stdout.trim()
-const REAL = { flock: which('flock'), setsid: which('setsid'), timeout: which('timeout'), tar: which('tar') }
+const REAL = { flock: which('flock'), setsid: which('setsid'), timeout: which('timeout'), tar: which('tar'), python3: which('python3') }
 const TAR_IS_GNU = /GNU tar/.test(spawnSync(REAL.tar || 'tar', ['--version'], { encoding: 'utf8' }).stdout ?? '')
 const STANDINS = ['flock', 'setsid', 'timeout'].filter((name) => !REAL[name])
 const REDUCED = STANDINS.length > 0
   ? ` [reduced fidelity: ${STANDINS.join('/')} stand-ins, not the real binaries]`
   : ''
-const STUBS = ['docker', 'docker-compose', 'ssh', 'curl', 'git', 'crontab', 'loginctl', 'busctl', 'date', 'sleep', 'df', 'tar']
+const STUBS = ['docker', 'docker-compose', 'ssh', 'curl', 'git', 'crontab', 'loginctl', 'busctl', 'date', 'sleep', 'df', 'tar', 'python3']
 
 // ---------- processes ----------
 function run(cmd, args, options) {
@@ -423,6 +423,7 @@ function windowEnv(world, options) {
     H_EPOCH: String(QUIET_EPOCH),
     H_REAL_TAR: REAL.tar,
     H_TAR_IS_GNU: TAR_IS_GNU ? '1' : '0',
+    H_REAL_PYTHON3: REAL.python3,
     H_IMAGE_MIGRATIONS: IMAGE_MIGRATIONS.join(','),
     H_CRONTAB_FILE: path.join(world.root, 'crontab'),
     ...options.env,
@@ -542,6 +543,12 @@ function assertCommon(r, rc, { runnerRc = rc } = {}) {
     ['ssh argv', r.calls.filter((call) => call.kind === 'ssh').map((call) => call.args).join('\n')]]) {
     assert.ok(!text.includes(FAKE_SECRET), `the fake DEPLOY_JWT_SECRET value must not appear in ${label}`)
   }
+  // The app.env rewrite reads its inputs from the environment; checked on each recorded python3
+  // invocation.
+  for (const call of r.calls.filter((entry) => entry.kind === 'python3')) {
+    assert.ok(!call.args.includes(FAKE_SECRET), `the app.env rewrite reads its inputs from the environment: ${call.args.slice(0, 120)}`)
+    assert.ok(!call.args.includes('harness-db-pass') && !call.args.includes('postgres://'), `the app.env rewrite reads its inputs from the environment: ${call.args.slice(0, 120)}`)
+  }
   assert.ok(!(readIf(path.join(r.world.root, 'github_output')) ?? '').includes(FAKE_SECRET))
   // postgres and redis are never stopped, started, removed or (re)created; nothing is pruned.
   for (const call of r.docker) {
@@ -605,6 +612,10 @@ function checkHappy(r, { appdata }) {
   assert.equal(dotEnvTag(r), SHA_NEW)
   assert.doesNotMatch(r.appEnv, /MIGRATION_EXCLUDE|MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL|ALLOW_DB_RESET/)
   assert.match(r.appEnv, new RegExp(`^JWT_SECRET=${FAKE_SECRET}$`, 'm'), 'the secret reached the window through its environment')
+  // Control for the python3 check in assertCommon: the rewrite ran once through the double and
+  // wrote both values (DB_SSL=false for the local postgres URL, and JWT_SECRET).
+  assert.equal(r.calls.filter((call) => call.kind === 'python3' && /^- docker\/app\.env 12 false$/.test(call.args)).length, 1, 'the app.env rewrite ran once through the python3 double')
+  assert.match(r.appEnv, /^DB_SSL=false$/m, 'the rewrite read the database URL')
   const ledger = readFileSync(path.join(r.world.ds, 'ledger'), 'utf8').split('\n').filter(Boolean)
   assert.deepEqual(ledger, [...BASE_MIGRATIONS, ...INPLAY])
   assert.deepEqual(r.hostChecks, ['pre-stop', 'post-backend'])
