@@ -225,19 +225,21 @@ suite('delegated scope activation on the real PostgreSQL management routes', () 
     const pid = (await holder.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
     let pending: Promise<request.Response> | undefined
     try {
-      await holder.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`namespace-admission:${delegate}`])
+      await holder.query('SELECT id FROM roles WHERE id=$1 FOR UPDATE', [memberRole])
       pending = changeRole('assign', member, memberRole, delegateToken).then((response) => response)
       const deadline = Date.now() + 5000
       let blocked = false
       while (!blocked && Date.now() < deadline) {
         const waiting = await db.query(`SELECT EXISTS (
           SELECT 1 FROM pg_stat_activity
-          WHERE wait_event='advisory' AND $1=ANY(pg_blocking_pids(pid))
+          WHERE wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid))
+            AND query LIKE '%FROM roles%' AND query LIKE '%FOR SHARE%'
         ) AS blocked`, [pid])
         blocked = waiting.rows[0].blocked === true
         if (!blocked) await new Promise((resolve) => setTimeout(resolve, 20))
       }
       expect(blocked).toBe(true)
+      await holder.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`namespace-admission:${delegate}`])
       await holder.query(`INSERT INTO delegated_role_admin_activation(admin_user_id,namespace,enabled,revision)
         VALUES ($1,$2,false,$3)`, [delegate, namespace, randomUUID()])
       await holder.query('COMMIT')
