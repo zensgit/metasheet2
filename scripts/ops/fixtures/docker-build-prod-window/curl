@@ -2,14 +2,33 @@
 # Test double for `curl`: answers from the docker double's container state, never the network.
 set -u
 C="${H_DS:?}/ctr"
+# The call log's meta column records the limits curl would apply (the last --connect-timeout and
+# --max-time win, as in curl), so the harness sees a curl without a limit.
 url=""
-for a in "$@"; do
-  case "$a" in
-    -*|[0-9]*) ;;
-    *) url="$a" ;;
+connect="none"
+maxtime="none"
+while (( $# )); do
+  case "$1" in
+    --connect-timeout) connect="${2:-}"; shift 2 ;;
+    --max-time|-m) maxtime="${2:-}"; shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
   esac
 done
-printf 'curl\t-\t-\t-\t%s\n' "$url" >> "${H_CALLS}"
+printf 'curl\t-\t-\tconnect_timeout=%s max_time=%s\t%s\n' "$connect" "$maxtime" "$url" >> "${H_CALLS}"
+# H_CURL_HANG=new-health: the new backend accepts /health and never answers; curl gives up after
+# its --max-time (on the scaled clock of the sleep double) with exit 28. Without a limit, or with
+# one above 60 s, the call would hang: logged as unmodelled.
+if [[ "${H_CURL_HANG:-}" == "new-health" && "$url" == */health && -d "${H_DS}/ctr/metasheet-backend" \
+  && "$(cat "${H_DS}/ctr/metasheet-backend/image_id")" == sha256:new* && "$(cat "${H_DS}/ctr/metasheet-backend/running")" == "true" ]]; then
+  if [[ ! "$maxtime" =~ ^[0-9]+$ ]] || (( maxtime > 60 )); then
+    printf 'UNMODELED\t-\t-\t-\tcurl without a bounded --max-time against a peer that never answers: %s\n' "$url" >> "${H_CALLS}"
+    exit 99
+  fi
+  sleep "$maxtime"
+  echo "curl: (28) Operation timed out after ${maxtime}000 milliseconds with 0 bytes received" >&2
+  exit 28
+fi
 running() { [[ -d "${C}/$1" && "$(cat "${C}/$1/running")" == "true" ]]; }
 rev_of() {
   local id k

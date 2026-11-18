@@ -79,7 +79,12 @@ next_seq() {
   printf '%s' "$n"
 }
 
-ledger_count() { awk 'NF { n++ } END { printf "%d\n", n }' "${DS}/ledger"; }
+# H_LEDGER_COUNT_POSTCOMMIT=N: once the post-commit list has run, the ledger count reads N (a
+# value no real ledger of the scenario has), while the names and the list itself stay right.
+ledger_count() {
+  if [[ -n "${H_LEDGER_COUNT_POSTCOMMIT:-}" && -e "${DS}/postlist_done" ]]; then echo "${H_LEDGER_COUNT_POSTCOMMIT}"; return 0; fi
+  awk 'NF { n++ } END { printf "%d\n", n }' "${DS}/ledger"
+}
 image_migrations() { tr ',' '\n' <<< "${H_IMAGE_MIGRATIONS}" | awk 'NF'; }
 pending_list() {
   local n
@@ -123,7 +128,9 @@ psql_answer() {
     *pg_terminate_backend*) unmodeled psql "$sql" ;;
     *pg_database_size*) echo "${H_DB_BYTES:-1048576}" ;;
     *approval_template_group_backfill*)
-      if [[ "${H_EXCLUDED_TABLES:-0}" == "1" ]]; then echo 3; return 0; fi
+      # H_EXCLUDED_TABLES_COUNT: a count no real check can return (there are three tables), so a
+      # count that reaches a public text is seen.
+      if [[ "${H_EXCLUDED_TABLES:-0}" == "1" ]]; then echo "${H_EXCLUDED_TABLES_COUNT:-3}"; return 0; fi
       if grep -qxF -- "zzzz20260919090000_create_approval_template_group_backfill_batches" "${DS}/ledger"; then echo 3; else echo 0; fi
       ;;
     *kysely_migration*)
@@ -134,7 +141,15 @@ psql_answer() {
       fi
       case "$sql" in
         *"count(*)"*) ledger_count ;;
-        *"SELECT name"*) sort "${DS}/ledger" ;;
+        *"SELECT name"*)
+          # H_TERM_ON_LEDGER_NAMES=1: TERM to the window while it reads the names into a host file
+          # (the first names read, before anything is stopped).
+          if [[ "${H_TERM_ON_LEDGER_NAMES:-0}" == "1" && ! -e "${DS}/term_sent" ]]; then
+            : > "${DS}/term_sent"
+            kill -TERM "$(cat "${H_RUN_DIR}/window.pid")"
+          fi
+          sort "${DS}/ledger"
+          ;;
         *) unmodeled psql "$sql" ;;
       esac
       ;;
@@ -277,12 +292,18 @@ run_list() {
     if [[ "${H_WEB_RUNNING_AFTER_COMMIT:-0}" == "1" ]]; then put metasheet-web running true; fi
     if [[ "${H_WEB_GONE_AFTER_COMMIT:-0}" == "1" ]]; then rm -rf "${C:?}/metasheet-web"; fi
     if [[ "${H_TERM_ON_POSTLIST:-0}" == "1" ]]; then kill -TERM "$(cat "${H_RUN_DIR}/window.pid")"; fi
+    : > "${DS}/postlist_done"
   fi
   pend="$(pending_list)"
   if [[ "$name" == *postlist* && -n "${H_POSTLIST_EXTRA:-}" ]]; then
     pend="${pend:+${pend}$'\n'}${H_POSTLIST_EXTRA}"
     # H_POSTLIST_ONLY_EXTRA=1: the extra name is listed instead of the excluded one (same count).
     if [[ "${H_POSTLIST_ONLY_EXTRA:-0}" == "1" ]]; then pend="${H_POSTLIST_EXTRA}"; fi
+  fi
+  # H_POSTLIST_EXTRA_COUNT=N: N more pending names after the commit (a Pending count far from the
+  # excluded count, and one no other value of the scenario has).
+  if [[ "$name" == *postlist* && -n "${H_POSTLIST_EXTRA_COUNT:-}" ]]; then
+    pend="${pend:+${pend}$'\n'}$(awk -v n="${H_POSTLIST_EXTRA_COUNT}" 'BEGIN { for (i = 1; i <= n; i++) printf "zzzz20261202120000_harness_pending_%d\n", i }')"
   fi
   count=0
   if [[ -n "$pend" ]]; then count="$(awk 'NF { n++ } END { printf "%d", n }' <<< "$pend")"; fi
@@ -291,9 +312,7 @@ run_list() {
   if [[ -n "$pend" ]]; then
     echo
     echo "Pending migrations (in load order):"
-    while IFS= read -r n; do
-      if [[ -n "$n" ]]; then echo "  - ${n}"; fi
-    done <<< "$pend"
+    awk 'NF { print "  - " $0 }' <<< "$pend"
   else
     echo
     echo "No pending migrations - schema is up to date."
@@ -586,10 +605,24 @@ exec_backend() {
       ;;
     tar)
       shift
+      # GNU tar options of the copy-out: -C / (the double archives from the container fs),
+      # --one-file-system, -cf -, and exact excludes: --exclude=NAME is modelled only after
+      # --anchored and --no-wildcards (GNU's defaults are unanchored wildcard patterns).
+      local anchored=0 nowild=0 excl=()
       while (( $# )); do
         case "$1" in
           -C) shift 2 ;;
-          -*) shift ;;
+          --anchored) anchored=1; shift ;;
+          --no-wildcards) nowild=1; shift ;;
+          --exclude=*)
+            if [[ "$anchored$nowild" != "11" ]]; then unmodeled exec metasheet-backend tar "$1" without --anchored --no-wildcards before it; fi
+            excl+=("${1#--exclude=}")
+            shift
+            ;;
+          --exclude) unmodeled exec metasheet-backend tar --exclude with a separate argument ;;
+          --one-file-system|-cf) shift ;;
+          -) shift ;;
+          -*) unmodeled exec metasheet-backend tar "$1" ;;
           *) rels+=("$1"); shift ;;
         esac
       done
@@ -601,7 +634,25 @@ exec_backend() {
       fi
       # H_TAR_OUT_GARBAGE=1: the copy-out exits 0 but its output is no tar archive.
       if [[ "${H_TAR_OUT_GARBAGE:-0}" == "1" ]]; then printf 'harness: not a tar archive\n'; exit 0; fi
-      (cd "$fs" && COPYFILE_DISABLE=1 "${H_REAL_TAR}" -cf - "${rels[@]}")
+      if [[ "${H_TAR_IS_GNU:-1}" == "1" ]]; then
+        # GNU tar (Linux CI): the window's own options, so GNU's matching decides.
+        (cd "$fs" && "${H_REAL_TAR}" --anchored --no-wildcards "${excl[@]/#/--exclude=}" -cf - "${rels[@]}")
+      else
+        # bsdtar: archive everything, then drop each member whose name is NAME or starts with
+        # NAME/ (GNU's anchored, no-wildcards match of an exclude with its default leading-dir rule).
+        (cd "$fs" && COPYFILE_DISABLE=1 "${H_REAL_TAR}" -cf - "${rels[@]}") | "${H_REAL_PYTHON3:-python3}" -c '
+import sys, tarfile
+names = sys.argv[1:]
+src = tarfile.open(fileobj=sys.stdin.buffer, mode="r|")
+dst = tarfile.open(fileobj=sys.stdout.buffer, mode="w|", format=tarfile.GNU_FORMAT)
+for m in src:
+    n = m.name.rstrip("/")
+    if any(n == x or n.startswith(x + "/") for x in names):
+        continue
+    dst.addfile(m, src.extractfile(m) if m.isreg() else None)
+dst.close()
+' "${excl[@]}"
+      fi
       ;;
     *) unmodeled exec metasheet-backend "$@" ;;
   esac
@@ -698,7 +749,9 @@ do_cp() {
   p="${2#*:}"
   if ! has "$target"; then echo "Error: No such container: ${target}" >&2; exit 1; fi
   mkdir -p "${C}/${target}/fs${p}"
-  "${H_REAL_TAR}" -xf - -C "${C}/${target}/fs${p}"
+  # The copy-in input is kept (cp-in.tar) so the harness can list what was written.
+  cat > "${DS}/cp-in.tar"
+  "${H_REAL_TAR}" -xf "${DS}/cp-in.tar" -C "${C}/${target}/fs${p}"
   # H_CP_IN_SHORT=1: one copied file is missing in the container after the copy-in.
   if [[ "${H_CP_IN_SHORT:-0}" == "1" ]]; then rm -f "${C}/${target}/fs/app/data/attachments/a.txt"; fi
 }

@@ -355,7 +355,21 @@ function makeWorld(t, options = {}) {
     // read-back filter that skipped the whole uploads path would miss it.
     writeFileSync(path.join(ds, 'ctr/metasheet-backend/fs/app/uploads/generic-upload.bin'), 'gen\n')
   }
+  if (options.lookalikes) {
+    // Directories whose names an unanchored or prefix pattern for the mount point would also
+    // match; each holds a file of the backend's own layer that must be copied and counted.
+    const up = path.join(ds, 'ctr/metasheet-backend/fs/app/uploads')
+    mkdirSync(path.join(up, 'attendance-import-old'), { recursive: true })
+    writeFileSync(path.join(up, 'attendance-import-old/keep.csv'), 'old1\n')
+    mkdirSync(path.join(up, 'sub/app/uploads/attendance-import'), { recursive: true })
+    writeFileSync(path.join(up, 'sub/app/uploads/attendance-import/keep.txt'), 'nest\n')
+  }
   if (options.extraNames) writeFileSync(path.join(ds, 'extra_names'), options.extraNames.join('\n') + '\n')
+  // A file name a directory listing of the deploy directory or the host home would print.
+  if (options.listingMarker) {
+    writeFileSync(path.join(repo, 'harness-listing-marker.txt'), '')
+    writeFileSync(path.join(hostHome, 'harness-listing-marker.txt'), '')
+  }
   writeFileSync(path.join(ds, 'ledger'), [...BASE_MIGRATIONS, ...(options.ledgerExtra ?? [])].join('\n') + '\n')
   if (options.crontab) writeFileSync(path.join(root, 'crontab'), options.crontab)
   if (options.state !== undefined) writeFileSync(path.join(windowHome, 'state'), options.state)
@@ -515,7 +529,7 @@ const isUpNoStartBackend = (call) => isUp(call) && / up --no-start --no-deps --f
 const isUpWeb = (call) => isUp(call) && / up -d --no-deps --force-recreate web$/.test(call.args)
 const isDump = (call) => /^exec metasheet-postgres sh -c exec pg_dump -Fc /.test(call.args)
 const isRestoreRead = (call) => /^exec -i metasheet-postgres pg_restore -f \/dev\/null$/.test(call.args)
-const isTarOut = (call) => /^exec metasheet-backend tar -C \/ --one-file-system -cf - /.test(call.args)
+const isTarOut = (call) => /^exec metasheet-backend tar -C \/ --one-file-system --anchored --no-wildcards (--exclude=\S+ )*-cf - /.test(call.args)
 const isCpIn = (call) => call.args === 'cp - metasheet-backend:/'
 const isReadBack = (call) => /^cp metasheet-backend:\/app\/\S+ -$/.test(call.args)
 const isPgIsready = (call) => /^exec metasheet-postgres sh -c exec pg_isready /.test(call.args)
@@ -542,6 +556,11 @@ function assertCommon(r, rc, { runnerRc = rc } = {}) {
     ['deploy.log', r.deployLog], ['step stdout', r.result.stdout], ['step stderr', r.result.stderr],
     ['ssh argv', r.calls.filter((call) => call.kind === 'ssh').map((call) => call.args).join('\n')]]) {
     assert.ok(!text.includes(FAKE_SECRET), `the fake DEPLOY_JWT_SECRET value must not appear in ${label}`)
+  }
+  // Every curl of the window has a connect limit of 5 s and a total limit of at most 10 s.
+  for (const call of r.calls.filter((entry) => entry.kind === 'curl')) {
+    assert.equal(call.meta.connect_timeout, '5', `curl ${call.args}: --connect-timeout 5`)
+    assert.ok(/^\d+$/.test(call.meta.max_time) && Number(call.meta.max_time) <= 10, `curl ${call.args}: --max-time ${call.meta.max_time} (at most 10)`)
   }
   // The app.env rewrite reads its inputs from the environment; checked on each recorded python3
   // invocation.
@@ -824,6 +843,8 @@ describe('production deploy window: remote_deploy step run against test doubles'
     const r = await runWindow(t, world, { env: { H_DB_BYTES: DB_BYTES, H_DUMP_MODE: 'slow', H_GIT_DIRTY: '1' } })
     checkHappy(r, { appdata: true })
     assert.ok(r.calls.some((call) => call.kind === 'git' && /^stash push /.test(call.args)), 'the dirty deploy checkout was stashed')
+    assert.doesNotMatch(r.deployLog, /stash/, 'whether the checkout was stashed stays on the host')
+    assert.match(readFileSync(path.join(r.runDir, 'window-detail.log'), 'utf8'), /^git_sync stash=/m, 'control: the detail log has the stash line')
     const { summary } = await checkPublicOutputs(world, r)
     // The slow dump outlasts a heartbeat interval: its progress line carries no size.
     assert.match(r.deployLog, /^\[deploy-window\] heartbeat phase=backup elapsed_s=\d+$/m)
@@ -880,6 +901,19 @@ describe('production deploy window: remote_deploy step run against test doubles'
     ['young queued import job', {}, { H_IMPORT_BUSY: '1' }],
     ['host file drift from the dispatched commit', {}, { H_GIT_DRIFT: '1' }],
     ['the deploy checkout\'s git fetch fails', {}, { H_GIT_FETCH_RC: '128' }, { controls: [['git-sync.out', `${SHA_OLD_SHORT}..aaaaaaa`]] }],
+    ['the deploy checkout\'s git stash fails', {}, { H_GIT_DIRTY: '1', H_GIT_RC_STASH: '1' }, { controls: [['git-sync.out', `stash: packages/`]] }],
+    ['the deploy checkout\'s git checkout fails', {}, { H_GIT_RC_CHECKOUT: '1' }, { controls: [['git-sync.out', `Already on 'main' (was ${SHA_OLD_SHORT})`]] }],
+    ['the deploy checkout\'s git merge fails', {}, { H_GIT_RC_MERGE: '1' }, { controls: [['git-sync.out', `Updating ${SHA_OLD_SHORT}..aaaaaaa`]] }],
+    ['the deploy directory is not a git work tree (its listing stays on the host)', { listingMarker: true }, { H_GIT_NOT_REPO: '1' },
+      { extra: ['harness-listing-marker.txt'], controls: [['deploy-path.ls', 'harness-listing-marker.txt']] }],
+    ['the deploy directory is missing (the home listing stays on the host)', { listingMarker: true }, { DEPLOY_PATH: 'missing-deploy-dir' },
+      { extra: ['harness-listing-marker.txt'], controls: [['deploy-path.ls', 'harness-listing-marker.txt']] }],
+    ['crontab -l does not answer within its limit', {}, { H_CRONTAB_RC: '124' }],
+    ['df does not answer within its limit', {}, { H_DF_RC: '124' }],
+    ['two filesystems: not enough free space on the Docker root', {}, { H_DF_TWO_FS: '1', H_DF_ROOT_FREE_KB: '4321987' },
+      { extra: ['4321987', '5242880'], controls: [['window-detail.log', 'filesystems=2 docker_root_free_kb=4321987 docker_root_need_kb=5242880']] }],
+    ['two filesystems: not enough free space for the run directory', {}, { H_DF_TWO_FS: '1', H_DF_FREE_KB: '1987654' },
+      { extra: ['1987654', '2097152'], controls: [['window-detail.log', 'run_dir_free_kb=1987654 run_dir_need_kb=2097152']] }],
     ['host re-validation: restore_proof unselected on a deploy', {}, { RESTORE_PROOF: 'unselected' }],
     ['host re-validation: pre_commit_abort unselected on a deploy', {}, { PRE_COMMIT_ABORT: 'unselected' }],
     ['host re-validation: drill_fail_stage=smoke', {}, { DRILL_FAIL_STAGE: 'smoke' }],
@@ -902,11 +936,20 @@ describe('production deploy window: remote_deploy step run against test doubles'
         assert.match(r.windowLog, /abort file present at start/)
         assert.ok(!any(r, isPull), 'refused before the pull')
       }
-      if (env.H_DF_FREE_KB) assert.ok(!any(r, isPull), 'refused before the pull')
-      if (env.H_GIT_FETCH_RC) {
-        assert.match(r.deployLog, /^\[deploy-window\]\[error\] git_sync=fail step=fetch \(output in the run directory on the host\)$/m)
+      if (env.H_DF_FREE_KB || env.H_DF_TWO_FS || env.H_DF_RC) assert.ok(!any(r, isPull), 'refused before the pull')
+      if (env.H_DF_TWO_FS) assert.match(r.windowLog, env.H_DF_ROOT_FREE_KB ? /not enough free space on the Docker root/ : /not enough free space for the run directory/)
+      if (env.H_DF_RC) assert.match(r.windowLog, /disk gate pre-pull: df did not return integer free space/)
+      if (env.H_CRONTAB_RC) assert.match(r.windowLog, /crontab -l did not answer within 10 s/)
+      if (env.H_GIT_NOT_REPO) assert.match(r.windowLog, /the deploy directory is not a git work tree; refusing/)
+      if (env.DEPLOY_PATH) assert.match(r.windowLog, /DEPLOY_PATH missing: missing-deploy-dir/)
+      // A failing sync step ends the sync there, with a fixed line; its output stays on the host.
+      const failedStep = env.H_GIT_FETCH_RC ? 'fetch' : env.H_GIT_RC_STASH ? 'stash' : env.H_GIT_RC_CHECKOUT ? 'checkout' : env.H_GIT_RC_MERGE ? 'merge' : null
+      if (failedStep) {
+        assert.match(r.deployLog, new RegExp(`^\\[deploy-window\\]\\[error\\] git_sync=fail step=${failedStep} \\(output in the run directory on the host\\)$`, 'm'))
         assert.doesNotMatch(r.deployLog, /git_sync=ok/)
-        assert.ok(!r.calls.some((call) => call.kind === 'git' && /^(checkout|merge) /.test(call.args)), 'nothing after the failed fetch')
+        const later = { fetch: /^(stash|checkout|merge) /, stash: /^(checkout|merge) /, checkout: /^merge /, merge: /^$/ }[failedStep]
+        assert.ok(!r.calls.some((call) => call.kind === 'git' && later.test(call.args)), `nothing after the failed ${failedStep}`)
+        assert.ok(r.calls.some((call) => call.kind === 'git' && call.args.startsWith(failedStep === 'stash' ? 'stash push ' : failedStep)), `the ${failedStep} ran`)
         assert.ok(!any(r, isPull), 'refused before the pull')
       }
     })
@@ -1331,6 +1374,42 @@ describe('production deploy window: remote_deploy step run against test doubles'
     assert.match(detail, /^appdata read_back files=3 bytes=20$/m, 'the read-back counts the upload beside the volume, not the volume')
   })
 
+  // The copy-out runs tar -C / --one-file-system: the attendance-import volume's mount point would
+  // be one empty directory entry, and the copy-in would write it onto the new backend's volume root.
+  const MOUNT_MEMBER = /(^|\s)app\/uploads\/attendance-import\/?$/m
+  const tarNames = (args) => spawnSync(REAL.tar, ['-tf', ...args], { encoding: 'utf8' }).stdout
+  scenario('app data present with the attendance-import mount point -> neither the copy-out nor the copy-in input has that entry; look-alike paths are kept', async (t) => {
+    const world = makeWorld(t, { appdata: true, attVolume: true, lookalikes: true })
+    // Control: a plain tar of the same paths, as tar -C / names them, holds the mount point.
+    const fs = path.join(world.ds, 'ctr/metasheet-backend/fs')
+    const control = spawnSync('/bin/sh', ['-c', `cd "$1" && "$2" -cf - app/uploads | "$2" -tf -`, 'sh', fs, REAL.tar], { encoding: 'utf8' }).stdout
+    assert.match(control, MOUNT_MEMBER, 'control: tar of the uploads path lists the mount point')
+    const r = await runWindow(t, world)
+    checkHappy(r, { appdata: true })
+    const tarOut = r.docker.find(isTarOut)
+    assert.match(tarOut.args, / --anchored --no-wildcards --exclude=app\/uploads\/attendance-import -cf - /, 'one exact exclude, the name as tar spells it with -C /')
+    const listing = readFileSync(path.join(r.runDir, 'appdata.list'), 'utf8')
+    const copyIn = tarNames([path.join(world.ds, 'cp-in.tar')])
+    for (const [label, text] of [['the copy-out listing', listing], ['the copy-in input', copyIn]]) {
+      assert.doesNotMatch(text, MOUNT_MEMBER, `${label} has no entry for the mount point`)
+      for (const kept of ['app/uploads/generic-upload.bin', 'app/uploads/attendance-import-old/keep.csv', 'app/uploads/sub/app/uploads/attendance-import/keep.txt']) {
+        assert.ok(text.includes(kept), `${label} keeps ${kept}`)
+      }
+    }
+    const detail = readFileSync(path.join(r.runDir, 'window-detail.log'), 'utf8')
+    assert.match(detail, /^appdata excluded_mount_points=1$/m)
+    assert.match(detail, /^appdata copy files=5 bytes=30$/m, 'the look-alike files are copied')
+    assert.match(detail, /^appdata read_back files=5 bytes=30$/m, 'and read back from the created backend')
+  })
+
+  scenario('app data without a mount point below its paths -> no exclude', async (t) => {
+    const world = makeWorld(t, { appdata: true })
+    const r = await runWindow(t, world)
+    checkHappy(r, { appdata: true })
+    assert.match(r.docker.find(isTarOut).args, / --anchored --no-wildcards -cf - app\/data\/attachments$/)
+    assert.match(readFileSync(path.join(r.runDir, 'window-detail.log'), 'utf8'), /^appdata excluded_mount_points=0$/m)
+  })
+
   scenario('app data present with the attendance-import volume, the read-back misses a file outside it -> 73: never started', async (t) => {
     const world = makeWorld(t, { appdata: true, attVolume: true })
     const r = await runWindow(t, world, { env: { H_CP_IN_SHORT: '1' } })
@@ -1494,11 +1573,14 @@ describe('production deploy window: remote_deploy step run against test doubles'
     const kill = firstIndex(r, (call) => call.args === `kill metasheet-window-migrate-${r.runId}-1`, latest)
     assert.ok(kill > latest, 'the one-off is killed')
     assert.match(r.windowLog, /migrate resolve result=committed/)
+    assert.match(r.deployLog, /^\[deploy-window\] ledger=committed$/m, 'the exit branch names the ledger row it read')
+    const summary = await runSummary(world, { deployLog: r.deployLog, deployRc: r.out.deploy_rc })
+    assert.match(summary, /^- `ledger=committed`$/m)
     assert.ok(!any(r, (call) => /^start /.test(call.args)), 'the old version is never started on the migrated schema')
     assert.ok(!any(r, isUp))
   })
 
-  for (const [label, migrate, rcLine] of [['migrate rc 1', 'fail-committed', /resolve result=unreadable/], ['migrate rc 0', 'ok', /migrate exited 0 but the ledger is not L0 \+ n/]]) {
+  for (const [label, migrate, rcLine] of [['migrate rc 1', 'fail-committed', /resolve result=unreadable/], ['migrate rc 0', 'ok', /migrate exited 0 but the ledger cannot be read/]]) {
     scenario(`${label}, then the ledger cannot be read -> 74: nothing started, env_written old, the outcome warns`, async (t) => {
       const world = makeWorld(t)
       const r = await runWindow(t, world, { env: { H_MIGRATE: migrate, H_PSQL_FAIL_AFTER_MIGRATE: '1' } })
@@ -1507,6 +1589,7 @@ describe('production deploy window: remote_deploy step run against test doubles'
       assert.equal(r.state.phase, 'needs-owner')
       assert.equal(r.state.env_written, 'old')
       assert.match(r.windowLog, rcLine)
+      assert.doesNotMatch(r.deployLog, /\[deploy-window\] ledger=/, 'no ledger= line: the ledger was not read')
       const ledger = readFileSync(path.join(world.ds, 'ledger'), 'utf8').split('\n').filter(Boolean)
       assert.deepEqual(ledger, [...BASE_MIGRATIONS, ...INPLAY], 'the batch did commit')
       assert.ok(!any(r, (call) => /^start /.test(call.args)), 'an unreadable ledger is never treated as rolled back')
@@ -1517,6 +1600,48 @@ describe('production deploy window: remote_deploy step run against test doubles'
       assert.match(summary, ENV_WARNING)
     })
   }
+
+  scenario('TERM while the ledger names are read into a host file -> 70: the exit branch writes to window.log, not to that file', async (t) => {
+    const world = makeWorld(t)
+    const r = await runWindow(t, world, { env: { H_TERM_ON_LEDGER_NAMES: '1' } })
+    checkRefused(r)
+    assert.match(r.windowLog, /^\[deploy-window\] raw_rc=143$/m)
+    assert.match(r.windowLog, /^\[deploy-window\] outcome=refused-unchanged rc=70 raw_rc=143$/m)
+    assert.match(r.deployLog, /^\[deploy-window\] outcome=refused-unchanged rc=70 raw_rc=143$/m, 'the outcome reaches the public log')
+    const names = readFileSync(path.join(r.runDir, 'ledger-before.txt'), 'utf8')
+    assert.doesNotMatch(names, /deploy-window/, 'the names file holds only the names')
+    assert.ok(names.includes(BASE_MIGRATIONS[0]), 'control: the names were read')
+  })
+
+  scenario('the new backend accepts /health and never answers -> every try ends at curl\'s own limit; 73 after 60 tries', async (t) => {
+    const world = makeWorld(t)
+    const r = await runWindow(t, world, { env: { H_CURL_HANG: 'new-health' } })
+    assertCommon(r, 73)
+    const start = firstIndex(r, isStart('metasheet-backend'))
+    const tries = r.calls.filter((call) => call.kind === 'curl' && call.index > start && /\/health$/.test(call.args))
+    assert.equal(tries.length, 60, 'the health wait made all 60 tries')
+    for (const call of tries) assert.equal(call.meta.max_time, '10', 'each try is limited by the wrapper')
+    assert.ok(first(r, (call) => isStop('metasheet-backend')(call) && /^new-backend-/.test(call.meta.target), start) >= 0, 'the unverified new backend is stopped')
+    assert.ok(!any(r, isUpWeb), 'web never upped')
+  })
+
+  scenario('post-commit Pending far from the excluded count -> 74: the count stays on the host', async (t) => {
+    const world = makeWorld(t)
+    const r = await runWindow(t, world, { env: { H_POSTLIST_EXTRA_COUNT: '24682' } })
+    assertCommon(r, 74)
+    assert.match(r.windowLog, /post-commit Pending is not the excluded count/)
+    await checkPublicText(world, r, { status: true, extra: ['24683', '24682'], controls: [['window-detail.log', 'post-commit list applied=14 pending=24683 ']] })
+    assert.ok(!any(r, (call) => /^start /.test(call.args)))
+  })
+
+  scenario('post-commit list matches but the ledger count does not -> 74: the counts stay on the host', async (t) => {
+    const world = makeWorld(t)
+    const r = await runWindow(t, world, { env: { H_LEDGER_COUNT_POSTCOMMIT: '58231' } })
+    assertCommon(r, 74)
+    assert.match(r.windowLog, /post-commit Applied or the ledger count differs from L0 \+ n/)
+    await checkPublicText(world, r, { status: true, extra: ['58231'], controls: [['window-detail.log', 'post-commit list applied=14 pending=1 ledger=58231']] })
+    assert.ok(!any(r, (call) => /^start /.test(call.args)))
+  })
 
   scenario('abort file created while migrating is ignored -> done-new', async (t) => {
     const world = makeWorld(t)
@@ -1538,7 +1663,8 @@ describe('production deploy window: remote_deploy step run against test doubles'
     ['postgres data mount is not the project volume', { containers: { 'metasheet-postgres': { volume: 'other_metasheet-postgres-data' } } }, {}],
     ['running backend /health commit differs from its image revision', {}, { H_OLD_HEALTH_WRONG: '1' }],
     ['excluded migration already in the ledger (stale exclusion)', {}, { H_LEDGER_EXTRA: EXCLUDED }, { controls: [['window-detail.log', `exclusion_proof applied_already=${EXCLUDED}`]] }],
-    ['excluded tables already exist', {}, { H_EXCLUDED_TABLES: '1' }, { controls: [['window-detail.log', 'exclusion_proof excluded_tables_present=']] }],
+    ['excluded tables already exist', {}, { H_EXCLUDED_TABLES: '1', H_EXCLUDED_TABLES_COUNT: '73915' },
+      { extra: ['73915'], controls: [['window-detail.log', 'exclusion_proof excluded_tables_present=73915']] }],
   ]) {
     scenario(`2 refusal before any stop: ${label} -> 70`, async (t) => {
       const world = makeWorld(t, worldOptions)
@@ -1877,7 +2003,7 @@ describe('production deploy window: remote_deploy step run against test doubles'
     }
     // curl and the git network call are bounded too: a wrapper gives every curl a connect and a
     // total time limit (defined before the first curl), and the sync's fetch runs under timeout.
-    const wrapper = code.findIndex((line) => /^curl\(\) \{ command curl --connect-timeout \d+ --max-time \d+ "\$@"; \}$/.test(line))
+    const wrapper = code.findIndex((line) => /^curl\(\) \{ command curl --connect-timeout 5 --max-time 10 "\$@"; \}$/.test(line))
     assert.ok(wrapper >= 0, 'the window defines a bounded curl wrapper')
     assert.ok(code.findIndex((line) => /(^|[^-\w])curl /.test(line) && !/^curl\(\)/.test(line)) > wrapper, 'the wrapper comes before the first curl call')
     const fetches = plain.filter((line) => /\bgit fetch\b/.test(line))
@@ -1888,6 +2014,16 @@ describe('production deploy window: remote_deploy step run against test doubles'
       assert.equal(lines.length, 1, sub)
       assert.match(lines[0], />>"\$\{git_sync_out\}" 2>&1 /, `${sub}: output stays on the host`)
     }
+    // df and crontab -l: every call is bounded except the background disk watchdog's df, and the
+    // copy-out tar leaves mount points out by exact name only.
+    const dfLines = plain.filter((line) => /(^|[\s(])df -Pk /.test(line) && !/DEPLOY_REPO_PATH/.test(line))
+    assert.deepEqual(dfLines.map((line) => line.trim()), ['df -Pk "$1" 2>/dev/null', 'timeout 10 df -Pk "$1" 2>/dev/null'], 'the window has one bounded and one unbounded df')
+    assert.deepEqual(plain.filter((line) => /min_free_kb unbounded/.test(line)).map((line) => line.trim()), ['free="$(min_free_kb unbounded || true)"'], 'only the watchdog uses the unbounded df')
+    const crontabLines = plain.filter((line) => /\bcrontab -l\b/.test(line))
+    assert.deepEqual(crontabLines.map((line) => line.trim()), ['cron_text="$(timeout 10 crontab -l 2>/dev/null)" || cron_rc=$?'], 'crontab -l is bounded')
+    const tarOut = plain.filter((line) => /docker exec metasheet-backend tar /.test(line))
+    assert.equal(tarOut.length, 1)
+    assert.match(tarOut[0], / tar -C \/ --one-file-system --anchored --no-wildcards \$\{appdata_excl\[@\]\+"\$\{appdata_excl\[@\]\}"\} -cf - /, 'exact excludes, before the member names')
     const hostCheckCalls = plain.filter((line) => /"\$check" "\$phase"/.test(line))
     assert.equal(hostCheckCalls.length, 1)
     assert.match(hostCheckCalls[0], /^\s*timeout 400 "\$check" "\$phase" /, 'the host check is bounded by timeout 400')

@@ -641,14 +641,26 @@ jobs:
             done
           }
 
-          fs_free_kb() { df -Pk "$1" 2>/dev/null | awk 'NR == 2 { print $4 }'; }
-          fs_mount() { df -Pk "$1" 2>/dev/null | awk 'NR == 2 { print $6 }'; }
+          # df -Pk of one path. The disk gates and the after-backup check bound it with timeout 10:
+          # no answer reads as no value, and each of them then fails closed (a disk gate refuses
+          # with 70; the after-backup check takes the pre-commit abort branch). The disk watchdog
+          # (min_free_kb unbounded) runs in the background and ignores an unreadable df, so a
+          # limit there would not fail closed; its df stays unbounded and stop_helpers ends it.
+          fs_df() {
+            if [[ "${2:-}" == "unbounded" ]]; then
+              df -Pk "$1" 2>/dev/null
+            else
+              timeout 10 df -Pk "$1" 2>/dev/null
+            fi
+          }
+          fs_free_kb() { fs_df "$1" "${2:-}" | awk 'NR == 2 { print $4 }'; }
+          fs_mount() { fs_df "$1" | awk 'NR == 2 { print $6 }'; }
           min_free_kb() {
             local a b
-            a="$(fs_free_kb "$RUN_DIR" || true)"
+            a="$(fs_free_kb "$RUN_DIR" "${1:-}" || true)"
             b="$a"
             if [[ -n "$w_docker_root" ]]; then
-              b="$(fs_free_kb "$w_docker_root" || true)"
+              b="$(fs_free_kb "$w_docker_root" "${1:-}" || true)"
             fi
             if [[ ! "$a" =~ ^[0-9]+$ || ! "$b" =~ ^[0-9]+$ ]]; then
               return 0
@@ -684,7 +696,7 @@ jobs:
           disk_watchdog() {
             local pid="$1" file="$2" free
             while kill -0 "$pid" 2>/dev/null; do
-              free="$(min_free_kb || true)"
+              free="$(min_free_kb unbounded || true)"
               if [[ "$free" =~ ^[0-9]+$ ]] && (( free < DEPLOY_WINDOW_RESERVE_KB )); then
                 : > "${RUN_DIR}/watchdog.fired"
                 kill "$pid" 2>/dev/null || true
@@ -850,7 +862,8 @@ jobs:
             fi
             w_resolve_result="$result"
             wlog "migrate resolve result=${w_resolve_result}"
-            # The ledger was read: rolled-back or neither row (committed is logged by the caller).
+            # The ledger was read: rolled-back or neither row (committed is logged by the caller:
+            # the main path's MIGRATE COMMITTED line, or the exit branch).
             case "$w_resolve_result" in
               rolled-back) wlog "ledger=rolled-back" ;;
               other) wlog "ledger=other" ;;
@@ -985,6 +998,9 @@ jobs:
           on_exit() {
             local raw=$? final
             trap '' TERM
+            # A TERM that arrives while a function or group writes a host file leaves that
+            # redirection in place: the exit branch writes to the window's own log again.
+            exec 1>&7 2>&8
             if [[ "$w_in_exit" == "1" ]]; then
               return 0
             fi
@@ -1024,6 +1040,7 @@ jobs:
                       restart_old
                       ;;
                     committed)
+                      wlog "ledger=committed"
                       ensure_env_new
                       terminal needs-owner 74
                       ;;
@@ -1061,6 +1078,8 @@ jobs:
             printf '%s\n' "$final" > "${RUN_DIR}/rc.tmp" && mv -f "${RUN_DIR}/rc.tmp" "${RUN_DIR}/rc"
             exit "$final"
           }
+          # The window's own stdout and stderr (window.log), restored by on_exit.
+          exec 7>&1 8>&2
           trap on_exit EXIT
           trap on_term TERM
 
@@ -1168,7 +1187,10 @@ jobs:
             wlog "logind=absent (loginctl not installed); proceeding"
           fi
           if command -v crontab >/dev/null 2>&1; then
-            cron_text="$(crontab -l 2>/dev/null || true)"
+            # No crontab (rc 1) reads as an empty one; no answer within 10 s refuses.
+            cron_rc=0
+            cron_text="$(timeout 10 crontab -l 2>/dev/null)" || cron_rc=$?
+            [[ "$cron_rc" != "124" ]] || fail "crontab -l did not answer within 10 s"
             cron_gc="$(printf '%s\n' "$cron_text" | grep -vE '^[[:space:]]*#' | grep -cE 'docker-gc|system prune' || true)"
             wlog "crontab docker_gc_entries=${cron_gc:-0}"
             if [[ "${cron_gc:-0}" != "0" ]]; then
@@ -1215,7 +1237,7 @@ jobs:
             '  echo "[deploy][error] DEPLOY_PATH missing: ${DEPLOY_PATH} (resolved: ${DEPLOY_REPO_PATH})" >&2'
             '  echo "[deploy][error] pwd=$(pwd)" >&2'
             '  echo "[deploy][error] home=${HOME}" >&2'
-            '  ls -la "${HOME}" >&2 || true'
+            '  ls -la "${HOME}" >"${RUN_DIR}/deploy-path.ls" 2>&1 || true'
             '  exit 1'
             'fi'
             'cd "$DEPLOY_REPO_PATH"'
@@ -1230,7 +1252,7 @@ jobs:
             '  echo "[deploy] git sync=enabled"'
             '  timeout 300 git fetch origin main >>"${git_sync_out}" 2>&1 || fail "git_sync=fail step=fetch (output in the run directory on the host)"'
             '  if ! git diff --quiet -- docker-compose.app.yml docker/nginx.conf scripts/ops/attendance-preflight.sh; then'
-            '    echo "[deploy] stashing pre-synced host files before git sync"'
+            '    hlog "git_sync stash=pre-synced host files differ from the checkout"'
             '    git stash push -m "deploy-host-presync-files" -- docker-compose.app.yml docker/nginx.conf scripts/ops/attendance-preflight.sh >>"${git_sync_out}" 2>&1 || fail "git_sync=fail step=stash (output in the run directory on the host)"'
             '  fi'
             '  git checkout main >>"${git_sync_out}" 2>&1 || fail "git_sync=fail step=checkout (output in the run directory on the host)"'
@@ -1239,7 +1261,7 @@ jobs:
             'else'
             '  echo "[deploy][warn] DEPLOY_PATH is not a git repo: ${DEPLOY_PATH} (resolved: ${DEPLOY_REPO_PATH}); continuing with synced files"'
             '  echo "[deploy][warn] pwd=$(pwd)"'
-            '  ls -la || true'
+            '  ls -la >"${RUN_DIR}/deploy-path.ls" 2>&1 || true'
             'fi'
             'unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1'
             'if docker compose version >/dev/null 2>&1; then'
@@ -1517,6 +1539,27 @@ jobs:
           while IFS= read -r candidate; do
             if [[ -n "$candidate" ]]; then appdata_paths+=("$candidate"); fi
           done < "${RUN_DIR}/appdata.paths"
+          # Mount points of the running backend strictly below an app-data path (the
+          # attendance-import volume under the uploads path). tar --one-file-system records such a
+          # mount point as one empty directory entry; the copy-out leaves exactly that member out
+          # (anchored, no wildcards, the name as tar spells it with -C /), so the copy-in never
+          # writes a directory entry onto the new backend's volume root. Nothing below a mount
+          # point is in the archive anyway.
+          appdata_excl=()
+          if (( ${#appdata_paths[@]} > 0 )); then
+            timeout 30 docker inspect -f '{{range .Mounts}}{{println .Destination}}{{end}}' metasheet-backend >"${RUN_DIR}/appdata.oldmounts" 2>>"${RUN_DIR}/docker.err" \
+              || fail "app data probe: could not read the backend's mounts"
+            while IFS= read -r mnt; do
+              mnt="${mnt%/}"
+              for apath in "${appdata_paths[@]}"; do
+                if [[ -n "$mnt" && "$mnt" == "$apath"/* ]]; then
+                  appdata_excl+=("--exclude=${mnt#/}")
+                  break
+                fi
+              done
+            done < "${RUN_DIR}/appdata.oldmounts"
+          fi
+          hlog "appdata excluded_mount_points=${#appdata_excl[@]}"
           # appdata_measure: "<files> <bytes>" of regular files under the paths, on the backend's own filesystem.
           appdata_measure() {
             if (( ${#appdata_paths[@]} == 0 )); then
@@ -1715,7 +1758,7 @@ jobs:
             for candidate in "${appdata_paths[@]}"; do
               appdata_rel+=("${candidate#/}")
             done
-            timeout 600 docker exec metasheet-backend tar -C / --one-file-system -cf - "${appdata_rel[@]}" >"${RUN_DIR}/appdata.tar" 2>>"${RUN_DIR}/appdata.err" 9>&- &
+            timeout 600 docker exec metasheet-backend tar -C / --one-file-system --anchored --no-wildcards ${appdata_excl[@]+"${appdata_excl[@]}"} -cf - "${appdata_rel[@]}" >"${RUN_DIR}/appdata.tar" 2>>"${RUN_DIR}/appdata.err" 9>&- &
             w_job_pid=$!
             watch_job appdata-copy "${RUN_DIR}/appdata.tar"
             # An unverified archive of this run is never left behind (it is not the app data).
@@ -1852,6 +1895,11 @@ jobs:
           if [[ "$w_migrate_rc" == "0" ]]; then
             w_resolve_result="$(classify_ledger)"
             if [[ "$w_resolve_result" == "unchanged" ]]; then w_resolve_result="committed"; fi
+            if [[ "$w_resolve_result" == "unreadable" ]]; then
+              # No ledger= line: the ledger was not read (as in resolve_migrate).
+              w_resolve_result="other"
+              fail "migrate exited 0 but the ledger cannot be read"
+            fi
             if [[ "$w_resolve_result" != "committed" ]]; then
               w_resolve_result="other"
               wlog "ledger=other"
