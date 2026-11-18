@@ -96,6 +96,11 @@ The status step prints only these `state` keys: `phase`, `rc`, `raw_rc`, `env_wr
   the created backend streams that volume too (`docker cp` of the uploads path cannot leave
   it out; it is not counted), within 600 s per app-data path. A volume too large to stream
   in that time ends the window 73 with the new backend never started.
+- A mount of the running backend strictly below an app-data path that is not a directory,
+  or that cannot be checked, refuses with 70 before anything is stopped. Then read the
+  running backend's mounts
+  (`docker inspect -f '{{range .Mounts}}{{println .Destination}}{{end}}' metasheet-backend`)
+  and resolve that mount before dispatching again.
 - A deploy is always a fresh dispatch. "Re-run failed jobs" on a deploy run skips the
   build job's input validation (the probe-silence check included) and runs the window
   again with the first attempt's inputs; never use it for the deploy job.
@@ -180,9 +185,10 @@ never any other backend).
 - The dispatcher stays on call until the window's final `outcome=` line, or, after a
   runner timeout, 255 or 76, until the host `state` shows a terminal phase.
 - The `remote_deploy` step is limited to 300 minutes and the `deploy` job to 345. The
-  window's own time limits add up to about 293 minutes on its longest path (a migration
+  window's own time limits add up to about 292 minutes on its longest path (a migration
   that exits non-zero while the ledger reads committed) with the default tunables, one
-  host check per phase, three app-data paths and every limited step at its limit; raised
+  host check per phase, three app-data paths, one mount below them and every limited
+  step at its limit (each further mount below an app-data path adds one 10 s check); raised
   tunables or more host checks can exceed the step limit. A runner timeout
   ends only the log follower: the window finishes its branch on the host, and the
   read-only status step (or `state` on the host) shows where it ended.
