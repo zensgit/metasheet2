@@ -4110,4 +4110,822 @@ describe('RoleDelegationView', () => {
     expect(callLog.filter((url) => url.includes('/users/user-1/access')).length).toBe(alphaReads)
     expect(callLog.some((url) => url.includes('/users/user-2/access'))).toBe(false)
   })
+
+  type ActivationRow = { namespace: string, enabled: boolean, hasConfiguredScope: boolean, version: string }
+
+  function activationScopeData(input: {
+    userId?: string
+    email?: string
+    name?: string
+    adminNamespaces?: string[]
+    scopeAssignments?: unknown[]
+    scopeActivations?: ActivationRow[] | null
+    includeActivationField?: boolean
+  }) {
+    const userId = input.userId || 'user-1'
+    const data: Record<string, unknown> = {
+      actorId: 'admin-1',
+      user: {
+        id: userId,
+        email: input.email || 'alpha@example.com',
+        name: input.name || 'Alpha',
+        role: 'user',
+        is_active: true,
+      },
+      adminNamespaces: input.adminNamespaces || ['crm'],
+      scopeAssignments: input.scopeAssignments || [],
+      groupAssignments: [],
+    }
+    if (input.includeActivationField !== false && input.scopeActivations !== undefined) {
+      data.scopeActivations = input.scopeActivations
+    }
+    return data
+  }
+
+  function scopeGetCount(userId = 'user-1'): number {
+    return callLog.filter((url) => {
+      try {
+        return new URL(url, 'http://localhost').pathname === `/api/admin/role-delegation/users/${userId}/scopes`
+      } catch {
+        return false
+      }
+    }).length
+  }
+
+  function activationPostCount(): number {
+    return callLog.filter((url) => url.includes('/scopes/activation')).length
+  }
+
+  async function mountActivationMember(options: {
+    activations?: ActivationRow[]
+    includeActivationField?: boolean
+    adminNamespaces?: string[]
+    scopeAssignments?: unknown[]
+    users?: Array<Record<string, unknown>>
+    onActivation?: (body: Record<string, unknown>) => Promise<unknown> | unknown
+    onApply?: (body: Record<string, unknown>) => Record<string, unknown>
+  } = {}): Promise<void> {
+    const activations = options.activations === undefined
+      ? [{ namespace: 'crm', enabled: false, hasConfiguredScope: true, version: 'v1' }]
+      : options.activations
+    const adminNamespaces = options.adminNamespaces || ['crm']
+    const users = options.users || [{
+      id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true,
+    }]
+    apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string; body?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: 'admin-1',
+            isPlatformAdmin: true,
+            delegableNamespaces: [],
+            exactDepartmentScopeAvailable: true,
+            roleCatalog: [],
+            scopeAssignments: [],
+            groupAssignments: [],
+          },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/departments') return createJsonResponse({ ok: true, data: { items: [] } })
+      if (pathname === '/api/admin/role-delegation/member-groups') return createJsonResponse({ ok: true, data: { items: [] } })
+      if (pathname === '/api/admin/role-delegation/scope-templates') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            items: [{
+              id: 'template-1', name: '华东销售', description: '华东销售模板', createdBy: 'admin-1', updatedBy: 'admin-1',
+              createdAt: '2026-04-09T00:00:00.000Z', updatedAt: '2026-04-09T00:00:00.000Z', departmentCount: 0, memberGroupCount: 0,
+            }],
+          },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/scope-templates/template-1') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            item: {
+              id: 'template-1', name: '华东销售', description: '华东销售模板', departmentCount: 0, memberGroupCount: 0,
+              departments: [], memberGroups: [],
+            },
+          },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users') return createJsonResponse({ ok: true, data: { items: users } })
+      if (pathname === '/api/admin/role-delegation/users/user-1/access' || pathname === '/api/admin/role-delegation/users/user-2/access') {
+        const userId = pathname.includes('user-2') ? 'user-2' : 'user-1'
+        const listed = users.find((user) => user.id === userId) || users[0]
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: 'admin-1',
+            isPlatformAdmin: true,
+            delegableNamespaces: [],
+            roleCatalog: [],
+            user: {
+              id: userId,
+              email: listed?.email || 'alpha@example.com',
+              name: listed?.name || 'Alpha',
+              role: 'user',
+              is_active: true,
+            },
+            roles: ['crm_admin'],
+            memberGroups: [],
+            delegableRoles: ['crm_admin'],
+            namespaceAdmissions: [{
+              namespace: 'crm', enabled: true, effective: true, hasRole: true, updatedAt: '2026-04-10T00:00:00.000Z',
+            }],
+          },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/scope-templates/apply' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body || '{}')) as Record<string, unknown>
+        const data = options.onApply ? options.onApply(body) : activationScopeData({
+          scopeAssignments: [{
+            id: 'scope-from-template', namespace: 'crm', directoryDepartmentId: 'dept-1', integrationId: 'ding',
+            integrationName: '目录', provider: 'dingtalk', corpId: null, externalDepartmentId: 'ext-1',
+            departmentName: '模板部门', departmentFullPath: '模板部门', departmentActive: true, includeChildren: true,
+          }],
+          includeActivationField: false,
+        })
+        return createJsonResponse({ ok: true, data })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/scopes/activation' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body || '{}')) as Record<string, unknown>
+        if (options.onActivation) return options.onActivation(body)
+        return createJsonResponse({
+          ok: true,
+          data: { actorId: 'admin-1', userId: 'user-1', namespace: body.namespace, enabled: body.enabled },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/scopes' || pathname === '/api/admin/role-delegation/users/user-2/scopes') {
+        const userId = pathname.includes('user-2') ? 'user-2' : 'user-1'
+        return createJsonResponse({
+          ok: true,
+          data: activationScopeData({
+            userId,
+            email: userId === 'user-2' ? 'bravo@example.com' : 'alpha@example.com',
+            name: userId === 'user-2' ? 'Bravo' : 'Alpha',
+            adminNamespaces,
+            scopeAssignments: options.scopeAssignments,
+            scopeActivations: userId === 'user-2'
+              ? [{ namespace: 'crm', enabled: false, hasConfiguredScope: true, version: 'other-v1' }]
+              : activations,
+            includeActivationField: options.includeActivationField,
+          }),
+        })
+      }
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    if (app) {
+      app.unmount()
+      app = null
+    }
+    app = createApp(RoleDelegationView)
+    app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
+    app.mount(container!)
+    await selectListedMember('alpha@example.com')
+    await waitForCondition(() => Boolean(container?.querySelector('[data-testid="scope-include-children"]')))
+  }
+
+  it('does not open activation from the previous principal scope data', async () => {
+    await mountActivationMember({
+      activations: [{ namespace: 'crm', enabled: false, hasConfiguredScope: true, version: 'v1' }],
+    })
+    const enable = container!.querySelector<HTMLButtonElement>('[data-testid="scope-activation-enable"]')
+    expect(enable).toBeTruthy()
+    authState.userId = 'admin-2'
+    try {
+      enable!.click()
+      await flushUi()
+      expect(container?.querySelector('[data-testid="scope-activation-confirm"]')).toBeNull()
+      expect(activationPostCount()).toBe(0)
+    } finally {
+      authState.userId = 'admin-1'
+    }
+  })
+
+  it('shows only an explicit activation for the selected namespace and hides it for an old server', async () => {
+    await mountView()
+    expect(container?.querySelector('[data-testid="scope-activation"]')).toBeNull()
+    expect(container?.querySelector('[data-testid="scope-include-children"]')).toBeTruthy()
+    expect(activationPostCount()).toBe(0)
+
+    await mountActivationMember({
+      activations: [
+        { namespace: 'other', enabled: true, hasConfiguredScope: true, version: 'ignored' },
+        { namespace: 'crm', enabled: false, hasConfiguredScope: true, version: 'v1' },
+      ],
+      scopeAssignments: [{
+        id: 'scope-1', namespace: 'crm', directoryDepartmentId: 'dept-1', integrationId: 'ding', integrationName: '目录',
+        provider: 'dingtalk', corpId: null, externalDepartmentId: 'ext-1', departmentName: '财务部', departmentFullPath: '财务部',
+        departmentActive: true, includeChildren: true,
+      }],
+    })
+    const activation = container!.querySelector('[data-testid="scope-activation"]')
+    expect(activation?.textContent).toContain('可以保存范围，但不能委派')
+    expect(activation?.textContent).not.toContain('委派已启用')
+    expect(container?.querySelector('[data-testid="scope-activation-enable"]')).toBeTruthy()
+    expect(container?.querySelector('[data-testid="scope-activation-stop"]')).toBeNull()
+    expect(container?.textContent).toContain('插件使用已开通')
+    expect(container?.textContent).toContain('crm_admin')
+
+    const enable = container!.querySelector('[data-testid="scope-activation-enable"]') as HTMLButtonElement
+    enable.focus()
+    enable.click()
+    await flushUi()
+    const dialog = container!.querySelector('[data-testid="scope-activation-confirm"]')
+    expect(dialog?.textContent).toContain('不会修改角色、插件使用准入或已保存的范围')
+    expect(document.activeElement).toBe(container!.querySelector('[data-testid="scope-activation-confirm-cancel"]'))
+    ;(container!.querySelector('[data-testid="scope-activation-confirm-cancel"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container?.querySelector('[data-testid="scope-activation-confirm"]')).toBeNull()
+    expect(document.activeElement).toBe(enable)
+    expect(activationPostCount()).toBe(0)
+
+    await mountActivationMember({
+      activations: [
+        { namespace: 'crm', enabled: false, hasConfiguredScope: true, version: 'v1' },
+        { namespace: 'crm', enabled: true, hasConfiguredScope: true, version: 'v2' },
+      ],
+    })
+    expect(container?.querySelector('[data-testid="scope-activation-unavailable"]')?.textContent).toContain('没有唯一的启停状态')
+    expect(container?.querySelector('[data-testid="scope-activation-enable"]')).toBeNull()
+    expect(container?.querySelector('[data-testid="scope-activation-stop"]')).toBeNull()
+
+    await mountActivationMember({
+      activations: [
+        { namespace: 'crm', enabled: 'yes', hasConfiguredScope: true, version: 'bad' } as unknown as ActivationRow,
+        { namespace: 'crm', enabled: false, hasConfiguredScope: true, version: 'v1' },
+      ],
+    })
+    expect(container?.querySelector('[data-testid="scope-activation-unavailable"]')?.textContent).toContain('没有唯一的启停状态')
+    expect(container?.querySelector('[data-testid="scope-activation-enable"]')).toBeNull()
+    expect(container?.querySelector('[data-testid="scope-activation-stop"]')).toBeNull()
+  })
+
+  it('does not offer enable when the explicit activation has no configured scope', async () => {
+    await mountActivationMember({
+      activations: [{ namespace: 'crm', enabled: false, hasConfiguredScope: false, version: 'v1' }],
+      scopeAssignments: [{
+        id: 'scope-1', namespace: 'crm', directoryDepartmentId: 'dept-1', integrationId: 'ding', integrationName: '目录',
+        provider: 'dingtalk', corpId: null, externalDepartmentId: 'ext-1', departmentName: '财务部', departmentFullPath: '财务部',
+        departmentActive: true, includeChildren: true,
+      }],
+    })
+    expect(container?.querySelector('[data-testid="scope-activation"]')?.textContent).toContain('可以保存范围，但不能委派')
+    expect(container?.querySelector('[data-testid="scope-activation-empty-scope"]')?.textContent).toContain('不会自动启用委派')
+    expect(container?.querySelector('[data-testid="scope-activation-enable"]')).toBeNull()
+    expect(container?.querySelector('[data-testid="scope-activation-stop"]')).toBeNull()
+    expect(container?.textContent).toContain('财务部')
+    expect(container?.textContent).toContain('插件使用已开通')
+    expect(container?.textContent).toContain('crm_admin')
+    expect(activationPostCount()).toBe(0)
+  })
+
+  it('posts one activation and reads the same namespace back once before announcing success', async () => {
+    let releasePost: ((value: ReturnType<typeof createJsonResponse>) => void) | null = null
+    const bodies: Record<string, unknown>[] = []
+    let enabled = false
+    let version = 'v1'
+    await mountActivationMember({
+      onActivation: (body) => {
+        bodies.push(body)
+        return new Promise((resolve) => {
+          releasePost = resolve
+        })
+      },
+    })
+    apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string; body?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/users/user-1/scopes/activation' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body || '{}')) as Record<string, unknown>
+        bodies.push(body)
+        return new Promise((resolve) => {
+          releasePost = resolve
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/scopes') {
+        return createJsonResponse({
+          ok: true,
+          data: activationScopeData({
+            scopeActivations: [{ namespace: 'crm', enabled, hasConfiguredScope: true, version }],
+          }),
+        })
+      }
+      throw new Error(`Unexpected follow-up call: ${rawUrl}`)
+    })
+    const getsBefore = scopeGetCount()
+    const accessBefore = callLog.filter((url) => url.includes('/users/user-1/access')).length
+    ;(container!.querySelector('[data-testid="scope-activation-enable"]') as HTMLButtonElement).click()
+    await flushUi()
+    const confirm = container!.querySelector('[data-testid="scope-activation-confirm-submit"]') as HTMLButtonElement
+    confirm.click()
+    confirm.click()
+    await waitForCondition(() => bodies.length === 1)
+    expect(bodies).toEqual([{ namespace: 'crm', enabled: true, expectedVersion: 'v1' }])
+    expect(scopeGetCount()).toBe(getsBefore)
+    expect(container?.textContent).not.toContain('此命名空间的委派已启用。')
+    enabled = true
+    version = 'v2'
+    releasePost?.(createJsonResponse({
+      ok: true,
+      data: { actorId: 'admin-1', userId: 'user-1', namespace: 'crm', enabled: true },
+    }))
+    await waitForCondition(() => (container?.querySelector('.delegation-page__status')?.textContent || '').includes('此命名空间的委派已启用。'))
+    expect(scopeGetCount()).toBe(getsBefore + 1)
+    expect(bodies).toHaveLength(1)
+    expect(activationPostCount()).toBe(1)
+    expect(callLog.filter((url) => url.includes('/users/user-1/access')).length).toBe(accessBefore)
+    expect(container?.querySelector('[data-testid="scope-activation-state"]')?.textContent).toContain('此命名空间的委派已启用。')
+    expect(container?.querySelector('[data-testid="scope-activation-stop"]')).toBeTruthy()
+    expect(container?.querySelector('[data-testid="scope-activation-enable"]')).toBeNull()
+    expect(container?.textContent).toContain('插件使用已开通')
+    expect(container?.textContent).toContain('crm_admin')
+  })
+
+  it('does not treat a mismatched or late activation response as success', async () => {
+    const bodies: Record<string, unknown>[] = []
+    let releasePost: ((value: ReturnType<typeof createJsonResponse>) => void) | null = null
+    await mountActivationMember({
+      onActivation: (body) => {
+        bodies.push(body)
+        return createJsonResponse({
+          ok: true,
+          data: { actorId: 'someone-else', userId: 'user-1', namespace: 'crm', enabled: true },
+        })
+      },
+    })
+    const getsBefore = scopeGetCount()
+    ;(container!.querySelector('[data-testid="scope-activation-enable"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="scope-activation-confirm-submit"]') as HTMLButtonElement).click()
+    await waitForCondition(() => Boolean(container?.querySelector('[data-testid="scope-activation-pending"]')))
+    expect(container?.querySelector('.delegation-page__status--error')?.textContent).toContain('尚未核对')
+    expect(container?.textContent).not.toContain('此命名空间的委派已启用。')
+    expect(container?.querySelector('[data-testid="scope-activation"]')).toBeTruthy()
+    expect(container?.querySelector('[data-testid="scope-activation-state"]')?.textContent).toContain('已停止')
+    expect(scopeGetCount()).toBe(getsBefore)
+    expect(bodies).toHaveLength(1)
+
+    let gate: Promise<unknown> = Promise.resolve()
+    await mountActivationMember({
+      activations: [{ namespace: 'crm', enabled: false, hasConfiguredScope: true, version: 'v1' }],
+      users: [
+        { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+        { id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true },
+      ],
+      onActivation: (body) => {
+        bodies.push(body)
+        gate = new Promise((resolve) => {
+          releasePost = resolve
+        })
+        return gate
+      },
+    })
+    ;(container!.querySelector('[data-testid="scope-activation-enable"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="scope-activation-confirm-submit"]') as HTMLButtonElement).click()
+    await waitForCondition(() => bodies.length === 2)
+    authState.userId = 'admin-2'
+    releasePost?.(createJsonResponse({
+      ok: true,
+      data: { actorId: 'admin-1', userId: 'user-1', namespace: 'crm', enabled: true },
+    }))
+    await flushUi(12)
+    expect(container?.querySelector('[data-testid="scope-activation-pending"]')).toBeNull()
+    expect(container?.querySelector('.delegation-page__status')?.textContent || '').not.toContain('此命名空间的委派已启用。')
+    expect(container?.querySelector('[data-testid="scope-activation-state"]')?.textContent).toContain('已停止')
+
+    authState.userId = 'admin-1'
+    gate = Promise.resolve()
+    await mountActivationMember({
+      adminNamespaces: ['crm', 'attendance'],
+      activations: [
+        { namespace: 'crm', enabled: false, hasConfiguredScope: true, version: 'v1' },
+        { namespace: 'attendance', enabled: true, hasConfiguredScope: true, version: 'att-v1' },
+      ],
+      onActivation: (body) => {
+        bodies.push(body)
+        gate = new Promise((resolve) => {
+          releasePost = resolve
+        })
+        return gate
+      },
+    })
+    ;(container!.querySelector('[data-testid="scope-activation-enable"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="scope-activation-confirm-submit"]') as HTMLButtonElement).click()
+    await waitForCondition(() => bodies.length === 3)
+    const namespaceSelect = Array.from(container!.querySelectorAll('select')).find((select) => (
+      Array.from(select.options).some((option) => option.value === 'attendance')
+    )) as HTMLSelectElement
+    namespaceSelect.value = 'attendance'
+    namespaceSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    releasePost?.(createJsonResponse({
+      ok: true,
+      data: { actorId: 'admin-1', userId: 'user-1', namespace: 'crm', enabled: true },
+    }))
+    await flushUi(12)
+    expect(container?.querySelector('.delegation-page__status')?.textContent || '').not.toContain('此命名空间的委派已启用。')
+    expect(container?.querySelector('[data-testid="scope-activation-pending"]')).toBeNull()
+    expect(container?.querySelector('[data-testid="scope-activation-state"]')?.textContent).toContain('已启用')
+    expect(container?.querySelector('[data-testid="scope-activation-namespace"]')?.textContent).toContain('attendance')
+    expect(bodies.filter((body) => body.namespace === 'attendance')).toHaveLength(0)
+  })
+
+  it('shows a definite 409 or 403 and recovers a lost activation only with a read-only refresh', async () => {
+    const posted: Record<string, unknown>[] = []
+    let mode: 'conflict' | 'forbidden' | 'lost' | 'readback' = 'conflict'
+    await mountActivationMember({
+      onActivation: (body) => {
+        posted.push(body)
+        if (mode === 'conflict') return createJsonResponse({ ok: false, error: { message: '版本已变化' } }, 409)
+        if (mode === 'forbidden') return createJsonResponse({ ok: false, error: { message: '无权修改委派启停' } }, 403)
+        throw new Error('socket closed')
+      },
+    })
+    const openAndConfirm = async (): Promise<void> => {
+      ;(container!.querySelector('[data-testid="scope-activation-enable"]') as HTMLButtonElement).click()
+      await flushUi()
+      ;(container!.querySelector('[data-testid="scope-activation-confirm-submit"]') as HTMLButtonElement).click()
+    }
+    const getsBefore = scopeGetCount()
+    await openAndConfirm()
+    await waitForCondition(() => (container?.textContent || '').includes('版本已变化'))
+    expect(container?.querySelector('.delegation-page__status--error')?.textContent).toContain('版本已变化')
+    expect(container?.querySelector('[data-testid="scope-activation-pending"]')).toBeNull()
+    expect(scopeGetCount()).toBe(getsBefore)
+    expect(posted).toHaveLength(1)
+
+    mode = 'forbidden'
+    await openAndConfirm()
+    await waitForCondition(() => (container?.textContent || '').includes('无权修改委派启停'))
+    expect(container?.querySelector('[data-testid="scope-activation-pending"]')).toBeNull()
+    expect(posted).toHaveLength(2)
+    expect(scopeGetCount()).toBe(getsBefore)
+
+    mode = 'lost'
+    await openAndConfirm()
+    await waitForCondition(() => Boolean(container?.querySelector('[data-testid="scope-activation-pending"]')))
+    expect(container?.querySelector('[data-testid="scope-activation-pending"]')?.textContent).toContain('不会自动重新提交')
+    expect(posted).toHaveLength(3)
+    expect(scopeGetCount()).toBe(getsBefore)
+    expect(container?.textContent).not.toContain('此命名空间的委派已启用。')
+
+    mode = 'readback'
+    apiFetchMock.mockImplementation(async (input: unknown) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname.includes('/scopes/activation')) throw new Error('activation replayed')
+      if (pathname === '/api/admin/role-delegation/users/user-1/scopes') {
+        return createJsonResponse({
+          ok: true,
+          data: activationScopeData({
+            scopeActivations: [{ namespace: 'crm', enabled: true, hasConfiguredScope: true, version: 'v2' }],
+          }),
+        })
+      }
+      throw new Error(`Unexpected refresh call: ${rawUrl}`)
+    })
+    ;(container!.querySelector('[data-testid="scope-activation-reread"]') as HTMLButtonElement).click()
+    await waitForCondition(() => (container?.querySelector('.delegation-page__status')?.textContent || '').includes('此命名空间的委派已启用。'))
+    expect(container?.querySelector('[data-testid="scope-activation-pending"]')).toBeNull()
+    expect(posted).toHaveLength(3)
+    expect(scopeGetCount()).toBe(getsBefore + 1)
+    expect(container?.querySelector('[data-testid="scope-activation-state"]')?.textContent).toContain('此命名空间的委派已启用。')
+    expect(container?.textContent).toContain('crm_admin')
+    expect(container?.textContent).toContain('插件使用已开通')
+  })
+
+  it('refreshes a known activation after a template apply and keeps the fresh version', async () => {
+    const applyBodies: Record<string, unknown>[] = []
+    const activationBodies: Record<string, unknown>[] = []
+    const templateDepartment = {
+      id: 'scope-from-template', namespace: 'crm', directoryDepartmentId: 'dept-1', integrationId: 'ding',
+      integrationName: '目录', provider: 'dingtalk', corpId: null, externalDepartmentId: 'ext-1',
+      departmentName: '模板部门', departmentFullPath: '模板部门', departmentActive: true, includeChildren: true,
+    }
+    const liveActivations: ActivationRow[] = [
+      { namespace: 'crm', enabled: false, hasConfiguredScope: false, version: 'v1' },
+    ]
+    const liveAssignments: unknown[] = []
+    await mountActivationMember({
+      activations: liveActivations,
+      scopeAssignments: liveAssignments,
+      onApply: (body) => {
+        applyBodies.push(body)
+        liveActivations.splice(0, 1, { namespace: 'crm', enabled: false, hasConfiguredScope: true, version: 'v2' })
+        liveAssignments.splice(0, liveAssignments.length, templateDepartment)
+        return activationScopeData({
+          includeActivationField: false,
+          scopeAssignments: [templateDepartment],
+        })
+      },
+      onActivation: (body) => {
+        activationBodies.push(body)
+        return createJsonResponse({ ok: false, error: { message: '版本已变化' } }, 409)
+      },
+    })
+    const templateSelect = Array.from(container!.querySelectorAll('select')).find((select) => select.textContent?.includes('华东销售')) as HTMLSelectElement
+    templateSelect.value = 'template-1'
+    templateSelect.dispatchEvent(new Event('change'))
+    await waitForCondition(() => callLog.some((url) => url.includes('/scope-templates/template-1')))
+    const getsBefore = scopeGetCount()
+    findButtonByText(container!, '覆盖应用到当前命名空间').click()
+    await waitForCondition(() => (container?.textContent || '').includes('范围模板已覆盖应用'))
+    expect(applyBodies).toEqual([{ namespace: 'crm', templateId: 'template-1', mode: 'replace' }])
+    expect(activationPostCount()).toBe(0)
+    expect(scopeGetCount()).toBe(getsBefore + 1)
+    expect(container?.querySelector('[data-testid="scope-activation"]')).toBeTruthy()
+    expect(container?.querySelector('[data-testid="scope-activation-state"]')?.textContent).toContain('已停止')
+    expect(container?.querySelector('[data-testid="scope-activation-state"]')?.textContent).toContain('可以保存范围，但不能委派')
+    expect(container?.querySelector('[data-testid="scope-activation-empty-scope"]')).toBeNull()
+    expect(container?.querySelector('[data-testid="scope-activation-enable"]')).toBeTruthy()
+    expect(container?.textContent).toContain('模板部门')
+    expect(container?.textContent).toContain('crm_admin')
+    expect(container?.querySelector('[data-testid="exact-department-unavailable"]')).toBeNull()
+    await confirmEnable()
+    await waitForCondition(() => activationBodies.length === 1)
+    expect(activationBodies).toEqual([{ namespace: 'crm', enabled: true, expectedVersion: 'v2' }])
+    expect(activationPostCount()).toBe(1)
+    expect(container?.querySelector('[data-testid="scope-activation-pending"]')).toBeNull()
+  })
+
+  const keptDepartment = {
+    id: 'scope-1', namespace: 'crm', directoryDepartmentId: 'dept-1', integrationId: 'ding', integrationName: '目录',
+    provider: 'dingtalk', corpId: null, externalDepartmentId: 'ext-1', departmentName: '财务部', departmentFullPath: '财务部',
+    departmentActive: true, includeChildren: true,
+  }
+
+  async function confirmEnable(): Promise<void> {
+    ;(container!.querySelector('[data-testid="scope-activation-enable"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="scope-activation-confirm-submit"]') as HTMLButtonElement).click()
+  }
+
+  it('keeps the same activation attempt pending until a later read shows the commit', async () => {
+    const posted: Record<string, unknown>[] = []
+    let scopeReads = 0
+    await mountActivationMember({
+      onActivation: (body) => {
+        posted.push(body)
+        return createJsonResponse({
+          ok: true,
+          data: { actorId: 'admin-1', userId: 'user-1', namespace: 'crm', enabled: true },
+        })
+      },
+    })
+    apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string; body?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/users/user-1/scopes/activation' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body || '{}')) as Record<string, unknown>
+        posted.push(body)
+        return createJsonResponse({
+          ok: true,
+          data: { actorId: 'admin-1', userId: 'user-1', namespace: body.namespace, enabled: body.enabled },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/scopes') {
+        scopeReads += 1
+        const committed = scopeReads >= 2
+        return createJsonResponse({
+          ok: true,
+          data: activationScopeData({
+            scopeActivations: [{
+              namespace: 'crm',
+              enabled: committed,
+              hasConfiguredScope: true,
+              version: committed ? 'v2' : 'v1',
+            }],
+          }),
+        })
+      }
+      throw new Error(`Unexpected activation read: ${rawUrl}`)
+    })
+    const getsBefore = scopeGetCount()
+    await confirmEnable()
+    await waitForCondition(() => Boolean(container?.querySelector('[data-testid="scope-activation-pending"]')))
+    expect(posted).toEqual([{ namespace: 'crm', enabled: true, expectedVersion: 'v1' }])
+    expect(scopeReads).toBe(1)
+    expect(scopeGetCount()).toBe(getsBefore + 1)
+    expect(container?.querySelector('[data-testid="scope-activation-pending"]')?.textContent).toContain('不会自动重新提交')
+    expect(container?.querySelector('.delegation-page__status')?.textContent || '').not.toContain('此命名空间的委派已启用。')
+    expect(container?.querySelector('[data-testid="scope-activation-state"]')?.textContent).toContain('已停止')
+    expect(container?.querySelector('[data-testid="scope-activation-enable"]')).toBeNull()
+    expect(container?.querySelector('[data-testid="scope-activation-stop"]')).toBeNull()
+    ;(container!.querySelector('[data-testid="scope-activation-reread"]') as HTMLButtonElement).click()
+    await waitForCondition(() => (container?.querySelector('.delegation-page__status')?.textContent || '').includes('此命名空间的委派已启用。'))
+    expect(scopeReads).toBe(2)
+    expect(scopeGetCount()).toBe(getsBefore + 2)
+    expect(posted).toHaveLength(1)
+    expect(activationPostCount()).toBe(1)
+    expect(container?.querySelector('[data-testid="scope-activation-pending"]')).toBeNull()
+    expect(container?.querySelector('[data-testid="scope-activation-state"]')?.textContent).toContain('此命名空间的委派已启用。')
+  })
+
+  it('keeps an HTTP 500 commit pending and confirms it with one explicit reread', async () => {
+    const posted: Record<string, unknown>[] = []
+    await mountActivationMember({
+      scopeAssignments: [keptDepartment],
+      onActivation: (body) => {
+        posted.push(body)
+        return createJsonResponse({ ok: false, error: { message: '上游失败' } }, 500)
+      },
+    })
+    const getsBefore = scopeGetCount()
+    await confirmEnable()
+    await waitForCondition(() => Boolean(container?.querySelector('[data-testid="scope-activation-pending"]')))
+    expect(container?.querySelector('[data-testid="scope-activation-pending"]')?.textContent).toContain('尚未核对')
+    expect(container?.querySelector('.delegation-page__status')?.textContent || '').not.toContain('上游失败')
+    expect(container?.textContent).not.toContain('此命名空间的委派已启用。')
+    expect(container?.querySelector('[data-testid="scope-activation-state"]')?.textContent).toContain('已停止')
+    expect(container?.textContent).toContain('财务部')
+    expect(scopeGetCount()).toBe(getsBefore)
+    expect(posted).toHaveLength(1)
+
+    let releaseRead: ((value: ReturnType<typeof createJsonResponse>) => void) | null = null
+    let scopeReads = 0
+    apiFetchMock.mockImplementation(async (input: unknown) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname.includes('/scopes/activation')) throw new Error('activation replayed')
+      if (pathname === '/api/admin/role-delegation/users/user-1/scopes') {
+        scopeReads += 1
+        return new Promise((resolve) => {
+          releaseRead = resolve
+        })
+      }
+      throw new Error(`Unexpected refresh call: ${rawUrl}`)
+    })
+    const reread = container!.querySelector('[data-testid="scope-activation-reread"]') as HTMLButtonElement
+    reread.click()
+    reread.click()
+    await waitForCondition(() => scopeReads === 1)
+    await flushUi()
+    expect(scopeReads).toBe(1)
+    expect(scopeGetCount()).toBe(getsBefore + 1)
+    expect(container?.querySelector('[data-testid="scope-activation-pending"]')).toBeTruthy()
+    expect(container?.textContent).toContain('财务部')
+    releaseRead?.(createJsonResponse({
+      ok: true,
+      data: activationScopeData({
+        scopeAssignments: [keptDepartment],
+        scopeActivations: [{ namespace: 'crm', enabled: true, hasConfiguredScope: true, version: 'v2' }],
+      }),
+    }))
+    await waitForCondition(() => (container?.querySelector('.delegation-page__status')?.textContent || '').includes('此命名空间的委派已启用。'))
+    expect(scopeReads).toBe(1)
+    expect(posted).toHaveLength(1)
+    expect(activationPostCount()).toBe(1)
+    expect(container?.querySelector('[data-testid="scope-activation-pending"]')).toBeNull()
+    expect(container?.querySelector('[data-testid="scope-activation-state"]')?.textContent).toContain('此命名空间的委派已启用。')
+    expect(container?.textContent).toContain('财务部')
+  })
+
+  it('does not replace config when the confirming read has another actor or a malformed scope document', async () => {
+    const replacedDepartment = { ...keptDepartment, id: 'scope-replaced', departmentName: '被替换部门', departmentFullPath: '被替换部门' }
+    const posted: Record<string, unknown>[] = []
+    let readMode: 'actor' | 'namespaces' | 'assignments' = 'actor'
+    await mountActivationMember({
+      scopeAssignments: [keptDepartment],
+      onActivation: (body) => {
+        posted.push(body)
+        return createJsonResponse({
+          ok: true,
+          data: { actorId: 'admin-1', userId: 'user-1', namespace: 'crm', enabled: true },
+        })
+      },
+    })
+    apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string; body?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/users/user-1/scopes/activation' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body || '{}')) as Record<string, unknown>
+        posted.push(body)
+        return createJsonResponse({
+          ok: true,
+          data: { actorId: 'admin-1', userId: 'user-1', namespace: body.namespace, enabled: body.enabled },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/scopes') {
+        const data = activationScopeData({
+          scopeAssignments: [replacedDepartment],
+          scopeActivations: [{ namespace: 'crm', enabled: true, hasConfiguredScope: true, version: 'v2' }],
+        })
+        if (readMode === 'actor') data.actorId = 'someone-else'
+        if (readMode === 'namespaces') data.adminNamespaces = 'crm'
+        if (readMode === 'assignments') data.scopeAssignments = [null]
+        return createJsonResponse({ ok: true, data })
+      }
+      throw new Error(`Unexpected follow-up call: ${rawUrl}`)
+    })
+    const getsBefore = scopeGetCount()
+    await confirmEnable()
+    await waitForCondition(() => Boolean(container?.querySelector('[data-testid="scope-activation-pending"]')))
+    expect(container?.querySelector('.delegation-page__status')?.textContent || '').not.toContain('此命名空间的委派已启用。')
+    expect(container?.querySelector('[data-testid="scope-activation-state"]')?.textContent).toContain('已停止')
+    expect(container?.textContent).toContain('财务部')
+    expect(container?.textContent).not.toContain('被替换部门')
+    expect(scopeGetCount()).toBe(getsBefore + 1)
+    expect(posted).toHaveLength(1)
+    expect(container?.querySelector('[data-testid="scope-activation-enable"]')).toBeNull()
+
+    readMode = 'namespaces'
+    ;(container!.querySelector('[data-testid="scope-activation-reread"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(container?.querySelector('[data-testid="scope-activation-pending"]')).toBeTruthy()
+    expect(container?.querySelector('[data-testid="scope-activation-state"]')?.textContent).toContain('已停止')
+    expect(container?.textContent).toContain('财务部')
+    expect(container?.textContent).not.toContain('被替换部门')
+    expect(scopeGetCount()).toBe(getsBefore + 2)
+    expect(posted).toHaveLength(1)
+
+    readMode = 'assignments'
+    ;(container!.querySelector('[data-testid="scope-activation-reread"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(container?.querySelector('[data-testid="scope-activation-pending"]')).toBeTruthy()
+    expect(container?.textContent).toContain('财务部')
+    expect(container?.textContent).not.toContain('被替换部门')
+    expect(scopeGetCount()).toBe(getsBefore + 3)
+    expect(activationPostCount()).toBe(1)
+  })
+
+  it('rejects an explicit 400 and leaves a successful status without the success contract pending', async () => {
+    let mode: 'bad-request' | 'missing-contract' = 'bad-request'
+    const posted: Record<string, unknown>[] = []
+    await mountActivationMember({
+      onActivation: (body) => {
+        posted.push(body)
+        if (mode === 'bad-request') return createJsonResponse({ ok: false, error: { message: '请求无效' } }, 400)
+        return createJsonResponse({ ok: true })
+      },
+    })
+    const getsBefore = scopeGetCount()
+    await confirmEnable()
+    await waitForCondition(() => (container?.textContent || '').includes('请求无效'))
+    expect(container?.querySelector('[data-testid="scope-activation-pending"]')).toBeNull()
+    expect(scopeGetCount()).toBe(getsBefore)
+    expect(posted).toHaveLength(1)
+
+    mode = 'missing-contract'
+    await confirmEnable()
+    await waitForCondition(() => Boolean(container?.querySelector('[data-testid="scope-activation-pending"]')))
+    expect(container?.querySelector('[data-testid="scope-activation-pending"]')?.textContent).toContain('不会自动重新提交')
+    expect(container?.textContent).not.toContain('此命名空间的委派已启用。')
+    expect(scopeGetCount()).toBe(getsBefore)
+    expect(posted).toHaveLength(2)
+
+    await mountActivationMember({
+      onActivation: (body) => {
+        posted.push(body)
+        return { ok: true, status: 200, json: async () => { throw new Error('bad json') } }
+      },
+    })
+    const getsAfterRemount = scopeGetCount()
+    await confirmEnable()
+    await waitForCondition(() => Boolean(container?.querySelector('[data-testid="scope-activation-pending"]')))
+    expect(scopeGetCount()).toBe(getsAfterRemount)
+    expect(container?.querySelector('[data-testid="scope-activation-state"]')?.textContent).toContain('已停止')
+    expect(posted.at(-1)).toEqual({ namespace: 'crm', enabled: true, expectedVersion: 'v1' })
+  })
+
+  it('does not open activation while a scope request is in flight', async () => {
+    let releaseDepartments: ((value: ReturnType<typeof createJsonResponse>) => void) | null = null
+    await mountActivationMember()
+    apiFetchMock.mockImplementation(async (input: unknown) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/departments') {
+        return new Promise((resolve) => {
+          releaseDepartments = resolve
+        })
+      }
+      throw new Error(`Unexpected department call: ${rawUrl}`)
+    })
+    const postsBefore = activationPostCount()
+    findButtonByText(container!, '查询部门').click()
+    await flushUi()
+    const enable = container!.querySelector('[data-testid="scope-activation-enable"]') as HTMLButtonElement
+    expect(enable.disabled).toBe(true)
+    enable.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+    expect(container?.querySelector('[data-testid="scope-activation-confirm"]')).toBeNull()
+    expect(activationPostCount()).toBe(postsBefore)
+    releaseDepartments?.(createJsonResponse({ ok: true, data: { items: [] } }))
+    await waitForCondition(() => enable.disabled === false)
+    expect(container?.querySelector('[data-testid="scope-activation-confirm"]')).toBeNull()
+  })
 })
