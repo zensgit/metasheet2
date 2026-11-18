@@ -1,3 +1,5 @@
+import { attendanceOwnedNativeQueryProbeV1 } from '../helpers/attendance-owned-native-query-probe'
+import { AttendanceManagedPgPool } from '../../src/attendance/attendance-owning-session'
 /**
  * W4C-0 (#4556) Stage C — registry service claim/seal/replay/congruence against
  * real Postgres (lock sections 4.1/7.1/7.1a/8.1/8.2; amendment 1.3).
@@ -26,7 +28,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import crypto from 'node:crypto'
-import { Pool, type PoolClient } from 'pg'
+import type { PoolClient } from 'pg'
 import {
   acquireAttendanceCalculationRolloutLock,
   acquireAttendanceResultOperationLocks,
@@ -138,7 +140,7 @@ function importBatchEnvelope(orgId: string, batchCommandId: string, fingerprints
 }
 
 describeIfDatabase('W4C-0 Stage C — operation registry service (real DB)', () => {
-  const pool = new Pool({ connectionString: dbUrl })
+  const pool = new AttendanceManagedPgPool({ connectionString: dbUrl })
   let priorEnv: string | undefined
 
   beforeAll(async () => {
@@ -306,10 +308,11 @@ describeIfDatabase('W4C-0 Stage C — operation registry service (real DB)', () 
         throw error
       }
       const statements: string[] = []
-      const observed = { query: async (statement: string, params?: readonly unknown[]) => {
-        statements.push(statement)
-        return trx(client).query(statement, params)
-      } }
+      const nativeProbe = attendanceOwnedNativeQueryProbeV1(pool, client, ({ text, next }) => {
+        statements.push(text)
+        return next()
+      })
+      const observed = trx(client)
       await client.query('BEGIN')
       try {
         const result = await attendanceResultOperationPreflightV1(observed, auth, envelope.registryInput,
@@ -394,7 +397,7 @@ describeIfDatabase('W4C-0 Stage C — operation registry service (real DB)', () 
         },
       }
       const boundary = createAttendanceRecordOperationBoundaryV1({
-        acquireConnection: async () => ({ client: observed, release() {} }),
+        acquireConnection: async () => ({ client: nativeProbe.session, release() {} }),
         adapters: { manual_edit: adapter, recompute: adapter, ops_retirement: adapter },
       })
       statements.length = 0
@@ -410,7 +413,7 @@ describeIfDatabase('W4C-0 Stage C — operation registry service (real DB)', () 
         prepareIdentity: async () => ({ ...prepared, attendanceCleaningReplay: undefined }),
       }
       const ordinaryBoundary = createAttendanceRecordOperationBoundaryV1({
-        acquireConnection: async () => ({ client: observed, release() {} }),
+        acquireConnection: async () => ({ client: nativeProbe.session, release() {} }),
         adapters: { manual_edit: ordinaryAdapter, recompute: adapter, ops_retirement: adapter },
       })
       statements.length = 0
@@ -425,7 +428,7 @@ describeIfDatabase('W4C-0 Stage C — operation registry service (real DB)', () 
         prepare: async () => ({ ...prepared, attendanceCleaningReplay: undefined }),
       }
       const driftBoundary = createAttendanceRecordOperationBoundaryV1({
-        acquireConnection: async () => ({ client: observed, release() {} }),
+        acquireConnection: async () => ({ client: nativeProbe.session, release() {} }),
         adapters: { manual_edit: driftAdapter, recompute: adapter, ops_retirement: adapter },
       })
       const driftOperationId = crypto.randomUUID()
@@ -438,16 +441,17 @@ describeIfDatabase('W4C-0 Stage C — operation registry service (real DB)', () 
       const uncertainBoundary = createAttendanceRecordOperationBoundaryV1({
         acquireConnection: async () => {
           const owned = await pool.connect()
+          const probe = attendanceOwnedNativeQueryProbeV1(pool, owned, async ({ text: statement, next }) => {
+            const result = await next()
+            if (statement.startsWith('SELECT pg_advisory_unlock') && !unlockFault) {
+              unlockFault = true
+              throw new Error('SYNTHETIC_UNLOCK_RESPONSE_LOST')
+            }
+            return result
+          })
           return {
-            client: { query: async (statement, params) => {
-              const result = await owned.query(statement, params ? [...params] : [])
-              if (statement.startsWith('SELECT pg_advisory_unlock') && !unlockFault) {
-                unlockFault = true
-                throw new Error('SYNTHETIC_UNLOCK_RESPONSE_LOST')
-              }
-              return result
-            } },
-            release: (error?: Error) => { releasedError = error; owned.release(error) },
+            client: probe.session,
+            release: (error?: Error) => { releasedError = error; probe.restore(); owned.release(error) },
           }
         },
         adapters: { manual_edit: { ...adapter,

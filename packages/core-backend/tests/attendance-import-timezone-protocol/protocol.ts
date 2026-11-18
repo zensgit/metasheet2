@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
+import { AttendanceManagedPgPool, attendanceOwningSessionForClientV1 } from '../../src/attendance/attendance-owning-session'
 import type { QueryConfig } from 'pg'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { migrate } from './fixture'
@@ -36,7 +37,7 @@ beforeAll(async () => {
   expect(process.env.RBAC_BYPASS).not.toBe('true')
   vi.stubGlobal('fetch', providerIO)
   await admin.query(`CREATE DATABASE ${database}`)
-  pool = new Pool(connection(database))
+  pool = new AttendanceManagedPgPool(connection(database))
   await migrate(pool)
   await pool.query("INSERT INTO users(id,name) VALUES ($1,'synthetic user')", [OWNER])
   await pool.query('INSERT INTO user_orgs(user_id,org_id) VALUES ($1,$2)', [OWNER, ORG])
@@ -84,7 +85,7 @@ beforeAll(async () => {
         commits++
         const host = createAttendanceSyncImportHostV1({ acquireConnection: async () => {
           const client = await pool.connect()
-          return { client, release: (error?: Error) => client.release(error) }
+          return { client: attendanceOwningSessionForClientV1(client), release: (error?: Error) => client.release(error) }
         } })
         return host.commitSyncImportPlanV1(input)
       },

@@ -19,7 +19,9 @@
  * only ever calls `transitionAttendanceCalculationRolloutV1`.
  */
 import { readFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
+import type { AttendanceOwningSessionV1 } from '../../packages/core-backend/src/attendance/attendance-owning-session'
 
 import {
   ATTENDANCE_W4C5_EXIT_ARGS_INVALID_V1,
@@ -35,42 +37,36 @@ import {
   validateAttendanceW4C5ManifestV1,
 } from './attendance-w4c5-rollout-transition-lib'
 
-// Dynamic import + unwrap: see attendance-w4c5-rollout-transition-lib.ts's header comment for
-// why a static import of a core-backend value crossing the scripts/ops (type:module) ->
-// core-backend (no "type" field) boundary silently collapses named exports onto `.default`.
-// This is the SAME shape `attendance-legacy-membership-overlap-audit.ts` already uses.
-const connectionPoolNamespace = await import(
-  '../../packages/core-backend/src/integration/db/connection-pool'
-)
-const rolloutControlNamespace = await import(
-  '../../packages/core-backend/src/attendance/w4c3a-rollout-control'
-)
-
-const connectionPoolModule =
-  'poolManager' in connectionPoolNamespace
-    ? connectionPoolNamespace
-    : (connectionPoolNamespace as unknown as { default: typeof connectionPoolNamespace }).default
-const rolloutControlModule =
-  'transitionAttendanceCalculationRolloutV1' in rolloutControlNamespace
-    ? rolloutControlNamespace
-    : (rolloutControlNamespace as unknown as { default: typeof rolloutControlNamespace }).default
+// Use one CJS loader graph for the pool, issuer and owning boundary. Mixing
+// tsx ESM/CJS instances duplicates their private capability registries even
+// when a checkout's public shape matches; never bridge that with a trust stamp.
+const requireAttendanceRuntime = createRequire(import.meta.url)
+const connectionPoolModule = requireAttendanceRuntime(
+  '../../packages/core-backend/src/integration/db/connection-pool',
+) as typeof import('../../packages/core-backend/src/integration/db/connection-pool')
+const rolloutControlModule = requireAttendanceRuntime(
+  '../../packages/core-backend/src/attendance/w4c3a-rollout-control',
+) as typeof import('../../packages/core-backend/src/attendance/w4c3a-rollout-control')
+const { attendanceOwningSessionForClientV1 } = requireAttendanceRuntime(
+  '../../packages/core-backend/src/attendance/attendance-owning-session',
+) as typeof import('../../packages/core-backend/src/attendance/attendance-owning-session')
 
 const { poolManager } = connectionPoolModule as { poolManager: { get(name?: string): { getInternalPool(): { connect(): Promise<PgClientLike> } }; close(): Promise<void> } }
 const { planAttendanceCalculationRolloutTransitionV1, transitionAttendanceCalculationRolloutV1 } =
   rolloutControlModule as {
     planAttendanceCalculationRolloutTransitionV1: (
-      client: { query: PgClientLike['query'] },
+      client: AttendanceOwningSessionV1,
       input: { orgId: string; targetState: string },
     ) => Promise<AttendanceRolloutTransitionPlan>
     transitionAttendanceCalculationRolloutV1: (
-      client: { query: PgClientLike['query'] },
+      client: AttendanceOwningSessionV1,
       input: Record<string, unknown>,
     ) => Promise<{ orgId: string; state: string; batchId: string | null }>
   }
 
 interface PgClientLike {
   query(text: string, values?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }>
-  release(): void
+  release(error?: Error): void
 }
 
 type AttendanceRolloutTransitionPlan = Record<string, unknown> & {
@@ -78,8 +74,8 @@ type AttendanceRolloutTransitionPlan = Record<string, unknown> & {
   predicates: readonly unknown[]
 }
 
-function clientAdapter(client: PgClientLike): { query: PgClientLike['query'] } {
-  return { query: (text, values) => client.query(text, values) }
+function clientAdapter(client: PgClientLike): AttendanceOwningSessionV1 {
+  return attendanceOwningSessionForClientV1(client)
 }
 
 async function readManifest(manifestPath: string): Promise<unknown> {

@@ -3,6 +3,7 @@ import { createRequire } from 'node:module'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
+import { AttendanceManagedPgPool, attendanceOwningSessionForClientV1 } from '../../src/attendance/attendance-owning-session'
 import { up as w4c0Up } from '../../src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage'
 import { up as w4c3aUp } from '../../src/db/migrations/zzzz20260730120000_w4c3a_durable_legacy_execution_plan'
 import { up as memberSourcesUp } from '../../src/db/migrations/zzzz20261013090000_attendance_roster_member_source_ordinals'
@@ -709,7 +710,7 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
     await adminPool.query(`CREATE DATABASE ${scratchName}`)
     const scratchUrl = new URL(dbUrl as string)
     scratchUrl.pathname = `/${scratchName}`
-    pool = new Pool({ connectionString: scratchUrl.toString() })
+    pool = new AttendanceManagedPgPool({ connectionString: scratchUrl.toString() })
     migrationPool = new Pool({ connectionString: scratchUrl.toString() })
     db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: migrationPool }) })
     await createBase(pool)
@@ -2807,7 +2808,7 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
     const processor = createAttendanceLegacyPlanProcessorV1({
       acquireConnection: async () => {
         const client = await pool.connect()
-        return { client, release: () => client.release() }
+        return { client: attendanceOwningSessionForClientV1(client), release: () => client.release() }
       },
     })
     await expect(processor.processLegacyImportPlanV1(created.jobId)).resolves.toEqual({

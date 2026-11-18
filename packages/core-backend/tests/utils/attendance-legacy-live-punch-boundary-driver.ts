@@ -1,6 +1,6 @@
+import { attendanceOwningSessionForClientV1 } from '../../src/attendance/attendance-owning-session'
 import { createRequire } from 'node:module'
 import type { Pool } from 'pg'
-import type { AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-identity'
 import {
   createAttendanceLiveScheduledBoundaryV1,
   computeAttendanceOuterSourceDefinitionFingerprintV1,
@@ -48,7 +48,7 @@ export function createLegacyLivePunchBoundaryDriver(pool: Pool) {
   const boundary = createAttendanceLiveScheduledBoundaryV1({
     acquireConnection: async () => {
       const client = await pool.connect()
-      return { client: client as unknown as AttendanceW4TransactionClientV1, release: () => client.release() }
+      return { client: attendanceOwningSessionForClientV1(client), release: () => client.release() }
     },
     legacyAdapters: {
       applyLivePunchLegacy: (trx, args) => adapters.applyLivePunchProjectionLegacyV1(trx, args, applyAttendanceInOutMergePolicyPureV1),

@@ -35,7 +35,10 @@ import {
  * and exempts no file. Within that grammar, every DB-seam argument is
  * `resolved` (a literal), `passthrough` (a named adapter's own formal
  * parameter, forwarded, with a non-empty and fully-classified caller set), or
- * a finding. Opaque higher-order returns, arbitrary identity functions, and
+ * a finding. Proven pinned-pg protocol notifications have their own non-SQL
+ * bucket; their declarations are still swept. The exact native Reflect.apply
+ * transport classifies its SQL-bearing argument array, never its state/receiver.
+ * Opaque higher-order returns, arbitrary identity functions, and
  * object-spread propagation are not claimed as covered.
  *
  * Scope, stated narrowly rather than inflated: this is a static leg over
@@ -685,5 +688,230 @@ describe('W6-R1 static leg — no file is exempt as a file (composition/provenan
     const literalThroughAlias = "async function h() { const q = query; await q('INSERT INTO attendance_groups (org_id) VALUES ($1)') }"
     expect(classifyIn(literalThroughAlias, 'literal via alias').findings.length).toBe(1)
     expect(RAW_SQL_DML.some((pattern) => pattern.test(literalThroughAlias))).toBe(true)
+  })
+})
+
+describe('W6-R1 native pg transport — binding provenance and actual SQL carrier', () => {
+  const ROUTE_FILE = AGGREGATE_ROUTE_ENTRY_FILE
+  const PG_IMPORT = "import { Client as NativeClient } from 'pg';"
+  const SEND = 'function nativeSend(args, state) { return Reflect.apply(NativeClient.prototype.query, state.client, args) }'
+  const READY = `const hooks = NativeClient.prototype;
+    class Managed extends NativeClient {
+      _handleReadyForQuery(message) { hooks._handleReadyForQuery.call(this, message) }
+    }`
+
+  function classifyNative(text: string): ReturnType<typeof collectQuerySqlArguments> {
+    return collectQuerySqlArguments(syntheticClosure(ROUTE_FILE, 'native probe', text), repoRoot)
+  }
+
+  it('the real transport names submit and traces args, never state.client, to formal zero', () => {
+    const entries = sqlArguments.passthrough.filter(entry =>
+      entry.snippet === 'Reflect.apply(Client.prototype.query, state.client, args)')
+    expect(entries.map(({ adapterName, paramIndex, provenanceLeaf }) => ({ adapterName, paramIndex, provenanceLeaf })))
+      .toEqual([{ adapterName: 'submit', paramIndex: 0, provenanceLeaf: 'args' }])
+  })
+
+  it('a named native SQL carrier has a nonempty fully classified caller set', () => {
+    const text = `${PG_IMPORT} ${SEND}
+      function forward(sql, state) { return nativeSend([sql], state) }
+      function root(state) { return forward('SELECT 1', state) }`
+    const probe = syntheticClosure(ROUTE_FILE, 'native carrier', text)
+    const result = collectQuerySqlArguments(probe, repoRoot)
+    expect(result.findings).toEqual([])
+    expect(result.resolved).toEqual([])
+    expect(result.protocolCallbacks).toEqual([])
+    expect(result.passthrough.map(({ adapterName, paramIndex, provenanceLeaf }) => ({ adapterName, paramIndex, provenanceLeaf })))
+      .toEqual([
+        { adapterName: 'nativeSend', paramIndex: 0, provenanceLeaf: 'args' },
+        { adapterName: 'forward', paramIndex: 0, provenanceLeaf: 'sql' },
+      ])
+    expect(checkPassThroughCallers(probe, repoRoot, result)).toEqual([
+      { adapterName: 'nativeSend', paramIndex: 0, callerCount: 1, unclassifiedCallers: [] },
+      { adapterName: 'forward', paramIndex: 0, callerCount: 1, unclassifiedCallers: [] },
+    ])
+  })
+
+  it('a native carrier still refuses zero callers and caller-authored composed SQL', () => {
+    const orphan = syntheticClosure(ROUTE_FILE, 'native orphan', `${PG_IMPORT} ${SEND}`)
+    const orphanArgs = collectQuerySqlArguments(orphan, repoRoot)
+    expect(orphanArgs.passthrough).toHaveLength(1)
+    expect(checkPassThroughCallers(orphan, repoRoot, orphanArgs)).toEqual([{
+      adapterName: 'nativeSend', paramIndex: 0, callerCount: 0, unclassifiedCallers: [],
+    }])
+    const dirty = syntheticClosure(ROUTE_FILE, 'native dirty caller', `${PG_IMPORT} ${SEND}
+      function forward(sql, state) { return nativeSend(['UPD' + sql], state) }`)
+    const dirtyArgs = collectQuerySqlArguments(dirty, repoRoot)
+    const reports = checkPassThroughCallers(dirty, repoRoot, dirtyArgs)
+    expect(reports).toHaveLength(1)
+    expect(reports[0].callerCount).toBe(1)
+    expect(reports[0].unclassifiedCallers).toHaveLength(1)
+    expect(reports[0].unclassifiedCallers[0].reason).toContain('string-composed SQL')
+  })
+
+  const REFUSED_TRANSPORTS: Array<[string, string]> = [
+    ['unknown target', `${PG_IMPORT} ${SEND.replace('NativeClient.prototype.query', 'unknownTarget')}`],
+    ['dynamic target', `${PG_IMPORT} ${SEND.replace('NativeClient.prototype.query', 'Reflect.get(state.client, key)')}`],
+    ['application listener', 'function notify(args, state) { return Reflect.apply(listener, state.client, args) }'],
+    ['counterfeit Client', SEND.replace('NativeClient.prototype.query', 'Client.prototype.query')],
+    ['wrong package', `${PG_IMPORT.replace("'pg'", "'not-pg'")} ${SEND}`],
+    ['type-only import', `${PG_IMPORT.replace('import {', 'import type {')} ${SEND}`],
+    ['shadowed Client', `${PG_IMPORT} ${SEND.replace('return Reflect.apply', 'const NativeClient = fake; return Reflect.apply')}`],
+    ['shadowed Reflect', `${PG_IMPORT} ${SEND.replace('return Reflect.apply', 'const Reflect = fake; return Reflect.apply')}`],
+    ['reassigned prototype method', `${PG_IMPORT} NativeClient.prototype.query = injected; ${SEND}`],
+    ['mutation through a prototype alias', `${PG_IMPORT} const proto = NativeClient.prototype; proto.query = injected; ${SEND}`],
+    ['mutable prototype alias', `${PG_IMPORT} let proto = NativeClient.prototype; ${SEND}`],
+    ['Reflect.set mutation', `${PG_IMPORT} Reflect.set(NativeClient.prototype, 'query', injected); ${SEND}`],
+    ['deleted method', `${PG_IMPORT} delete NativeClient.prototype.query; ${SEND}`],
+    ['reassigned Reflect.apply', `${PG_IMPORT} Reflect.apply = injected; ${SEND}`],
+    ['non-first SQL carrier', `${PG_IMPORT} ${SEND.replace('nativeSend(args, state)', 'nativeSend(state, args)')}`],
+    ['wrong receiver', `${PG_IMPORT} ${SEND.replace('state.client', 'other.client')}`],
+    ['composed carrier', `${PG_IMPORT} ${SEND.replace('state.client, args)', "state.client, ['UPD' + args[0]])")}`],
+    ['mutated carrier', `${PG_IMPORT} ${SEND.replace('return Reflect.apply', 'args[0] = buildSql(); return Reflect.apply')}`],
+    ['carrier alias escape', `${PG_IMPORT} ${SEND.replace('return Reflect.apply', 'const copied = args; return Reflect.apply')}`],
+    ['anonymous carrier', `${PG_IMPORT} const handlers = [(args, state) => Reflect.apply(NativeClient.prototype.query, state.client, args)]`],
+    ['apply alias', `${PG_IMPORT} const invoke = Reflect.apply; ${SEND.replace('Reflect.apply(', 'invoke(')}`],
+    ['counterfeit Reflect via alias', `${PG_IMPORT} const Reflect = fake; const invoke = Reflect.apply; ${SEND.replace('Reflect.apply(', 'invoke(')}`],
+    ['aliased Reflect receiver', `${PG_IMPORT} const reflection = Reflect; ${SEND.replace('Reflect.apply(', 'reflection.apply(')}`],
+    ['computed Reflect method', `${PG_IMPORT} ${SEND.replace('Reflect.apply(', 'Reflect[key](')}`],
+    ['alias past depth budget', `${PG_IMPORT} const a = Reflect.apply; const b = a; const c = b; const d = c; const e = d; ${SEND.replace('Reflect.apply(', 'e(')}`],
+  ]
+
+  it.each(REFUSED_TRANSPORTS)('refuses native transport: %s', (_label, text) => {
+    const result = classifyNative(text)
+    expect(result.findings.length).toBeGreaterThan(0)
+    expect(result.passthrough).toEqual([])
+    expect(result.resolved).toEqual([])
+    expect(result.protocolCallbacks).toEqual([])
+  })
+
+  it('records the real native protocol notification separately from SQL', () => {
+    expect(sqlArguments.protocolCallbacks.map(({ target, snippet }) => ({ target, snippet }))).toEqual([{
+      target: 'pg.Client.prototype._handleReadyForQuery',
+      snippet: 'clientHooks._handleReadyForQuery.call(this, message)',
+    }])
+    const result = classifyNative(`${PG_IMPORT} ${READY}`)
+    expect(result.findings).toEqual([])
+    expect(result.resolved).toEqual([])
+    expect(result.passthrough).toEqual([])
+    expect(result.protocolCallbacks.map(({ target }) => target)).toEqual(['pg.Client.prototype._handleReadyForQuery'])
+  })
+
+  const REFUSED_PROTOCOLS: Array<[string, string]> = [
+    ['same name on an arbitrary object', `const hooks = fake; class Managed { _handleReadyForQuery(message) { hooks._handleReadyForQuery.call(this, message) } }`],
+    ['counterfeit Client', READY],
+    ['wrong package', `${PG_IMPORT.replace("'pg'", "'not-pg'")} ${READY}`],
+    ['shadowed package binding', `${PG_IMPORT} ${READY.replace('hooks._handleReadyForQuery.call', 'const NativeClient = fake; hooks._handleReadyForQuery.call')}`],
+    ['shadowed hooks', `${PG_IMPORT} ${READY.replace('hooks._handleReadyForQuery.call', 'const hooks = fake; hooks._handleReadyForQuery.call')}`],
+    ['reassigned callback', `${PG_IMPORT} ${READY} hooks._handleReadyForQuery = injected;`],
+    ['reassigned prototype alias', `${PG_IMPORT} ${READY} hooks = fake;`],
+    ['mutation through another alias', `${PG_IMPORT} ${READY} const alias = hooks; alias._handleReadyForQuery = injected;`],
+    ['opaque mutator', `${PG_IMPORT} ${READY} mutate(hooks);`],
+    ['different receiver', `${PG_IMPORT} ${READY.replace('.call(this, message)', '.call(other, message)')}`],
+    ['different payload', `${PG_IMPORT} ${READY.replace('.call(this, message)', '.call(this, makeMessage())')}`],
+    ['extra arguments', `${PG_IMPORT} ${READY.replace('.call(this, message)', '.call(this, message, extra)')}`],
+    ['apply spelling', `${PG_IMPORT} ${READY.replace('.call(this, message)', '.apply(this, [message])')}`],
+    ['Reflect.apply spelling', `${PG_IMPORT} ${READY.replace('hooks._handleReadyForQuery.call(this, message)', 'Reflect.apply(hooks._handleReadyForQuery, this, [message])')}`],
+  ]
+
+  it.each(REFUSED_PROTOCOLS)('refuses unproven protocol callback: %s', (_label, text) => {
+    const result = classifyNative(text)
+    expect(result.findings.length).toBeGreaterThan(0)
+    expect(result.protocolCallbacks).toEqual([])
+  })
+
+  it('still walks SQL authored inside the proven protocol callback declaration', () => {
+    const literal = `${PG_IMPORT} ${READY.replace('hooks._handleReadyForQuery.call', "query('UPDATE attendance_groups SET is_active = false'); hooks._handleReadyForQuery.call")}`
+    const result = classifyNative(literal)
+    expect(result.protocolCallbacks).toHaveLength(1)
+    expect(result.resolved.map(({ sql }) => sql)).toEqual(['UPDATE attendance_groups SET is_active = false'])
+    expect(RAW_SQL_DML.some(pattern => pattern.test(literal))).toBe(true)
+    const composed = classifyNative(`${PG_IMPORT} ${READY.replace('hooks._handleReadyForQuery.call', "query('UPD' + message.status); hooks._handleReadyForQuery.call")}`)
+    expect(composed.protocolCallbacks).toHaveLength(1)
+    expect(composed.findings).toHaveLength(1)
+    expect(composed.findings[0].reason).toContain('string-composed SQL')
+  })
+})
+
+
+describe('W6-R1 native pg regression candidates', () => {
+  const PG_IMPORT = "import { Client as NativeClient } from 'pg';"
+  const SEND = 'function nativeSend(args, state) { return Reflect.apply(NativeClient.prototype.query, state.client, args) }'
+
+  it.each([
+    ['array values', 'function forward(values, state) { return nativeSend([unknownSql, values], state) }'],
+    ['config values', 'function forward(values, state) { return nativeSend([{ text: unknownSql, values }], state) }'],
+    ['callback', 'function forward(callback, state) { return nativeSend([unknownSql, [], callback], state) }'],
+  ])('SQL carrier first-item provenance cannot come from %s', (_label, caller) => {
+    const probe = syntheticClosure(AGGREGATE_ROUTE_ENTRY_FILE, 'SQL carrier regression', `${PG_IMPORT} ${SEND} ${caller}`)
+    const result = collectQuerySqlArguments(probe, repoRoot)
+    expect(result.findings).toHaveLength(1)
+    expect(result.findings[0].reason).toContain('no formal-parameter provenance')
+    expect(result.findings[0].snippet).toContain('nativeSend(')
+    expect(result.passthrough).toHaveLength(1)
+    const reports = checkPassThroughCallers(probe, repoRoot, result)
+    expect(reports).toHaveLength(1)
+    expect(reports[0].adapterName).toBe('nativeSend')
+    expect(reports[0].callerCount).toBe(1)
+    expect(reports[0].unclassifiedCallers).toHaveLength(1)
+  })
+
+  it.each([
+    ['array', 'const box = [NativeClient.prototype]; box[0].query = injected;'],
+    ['shorthand object', 'const bag = { NativeClient }; bag.NativeClient.prototype.query = injected;'],
+  ])('protected native binding cannot escape through a %s container', (_label, escape) => {
+    const probe = syntheticClosure(AGGREGATE_ROUTE_ENTRY_FILE, 'native container regression', `${PG_IMPORT} ${escape} ${SEND}`)
+    const result = collectQuerySqlArguments(probe, repoRoot)
+    expect(result.findings).toHaveLength(1)
+    expect(result.passthrough).toEqual([])
+    expect(result.protocolCallbacks).toEqual([])
+  })
+})
+
+
+describe('W6-R1 bounded facade and forwarding regression controls', () => {
+  const driverFile = 'packages/core-backend/src/attendance/attendance-owning-session.ts'
+  const driverText = readFileSync(join(repoRoot, driverFile), 'utf8')
+  function classify(text: string): ReturnType<typeof collectQuerySqlArguments> {
+    return collectQuerySqlArguments(syntheticClosure(AGGREGATE_ROUTE_ENTRY_FILE, 'driver shape probe', text), repoRoot)
+  }
+  it('the actual facade proves query dispatch and exactly three non-SQL Reflect roles', () => {
+    const result = classify(driverText)
+    expect(result.findings).toEqual([])
+    expect(result.nonSqlReflectCalls.map(x => x.role).sort()).toEqual([
+      'event-notification', 'event-registration', 'public-method',
+    ])
+    expect(result.passthrough.some(x => x.adapterName === 'query' && x.carrier === 'input')).toBe(true)
+    expect(result.passthrough.some(x => x.adapterName === 'method')).toBe(false)
+  })
+  it.each([
+    ['wrong query key', "if (key === 'query')", "if (key === 'custom')"],
+    ['cache alias escape', 'const methods = new Map<PropertyKey, unknown>()', 'const methods = new Map<PropertyKey, unknown>(); leak(methods)'],
+    ['query added to public methods', "'escapeIdentifier', 'escapeLiteral',", "'query', 'escapeIdentifier', 'escapeLiteral',"],
+    ['changed notification target', 'Reflect.apply(listener, facade, args.map', 'Reflect.apply(unknownTarget, facade, args.map'],
+    ['returned method reassignment', 'methods.set(key, method)', 'method = opaqueMethod; methods.set(key, method)'],
+    ['mutated public allowlist', 'const publicProperties = new Set(', "publicMethods.add('query'); const publicProperties = new Set("],
+  ])('refuses a broken facade shape: %s', (_name, anchor, replacement) => {
+    expect(driverText.split(anchor)).toHaveLength(2)
+    const result = classify(driverText.replace(anchor, replacement))
+    if (_name === 'wrong query key') {
+      const probe = syntheticClosure(AGGREGATE_ROUTE_ENTRY_FILE, 'wrong query property', driverText.replace(anchor, replacement))
+      expect(checkPassThroughCallers(probe, repoRoot, result)).toContainEqual({
+        adapterName: 'method', paramIndex: 0, callerCount: 0, unclassifiedCallers: [],
+      })
+    } else expect(result.findings.length).toBeGreaterThan(0)
+  })
+  it('rejects custom submit even when config.text is a harmless literal', () => {
+    const text = "import { Client as NativeClient } from 'pg'; function nativeSend(args, state) { return Reflect.apply(NativeClient.prototype.query, state.client, args) } function forward(state) { return nativeSend([{ text: 'SELECT 1', submit: opaqueSubmit }], state) }"
+    const result = classify(text)
+    expect(result.findings).toHaveLength(1)
+    expect(result.findings[0].reason).toContain('custom submit')
+  })
+  it.each([
+    ['argument array', 'function forward(args, state) { args[0] = unknownSql; return nativeSend(args, state) }'],
+    ['config text', 'function forward(config, state) { config.text = unknownSql; return nativeSend([config], state) }'],
+  ])('refuses in-place forwarding mutation: %s', (_name, caller) => {
+    const text = "import { Client as NativeClient } from 'pg'; function nativeSend(args, state) { return Reflect.apply(NativeClient.prototype.query, state.client, args) } " + caller
+    const result = classify(text)
+    expect(result.findings.some(x => x.reason.includes('forwarding formal is written'))).toBe(true)
   })
 })

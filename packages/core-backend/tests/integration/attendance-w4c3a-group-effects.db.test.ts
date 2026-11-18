@@ -13,7 +13,6 @@ import {
 } from '../../src/attendance/w4c3a-legacy-plan-batch-effects'
 import type { VerifiedAttendanceLegacyPlanV1 } from '../../src/attendance/w4c3a-legacy-plan-worker'
 import type { AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-identity'
-import { createAttendanceLegacyPlanCommitConnectionV1 } from '../../src/attendance/w4c3a-legacy-plan-commit-connection'
 
 const dbUrl =
   process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
@@ -21,7 +20,10 @@ const describeIfDatabase = dbUrl ? describe : describe.skip
 const run = crypto.randomUUID().replace(/-/g, '').slice(0, 12)
 
 function trx(client: PoolClient): AttendanceW4TransactionClientV1 {
-  return createAttendanceLegacyPlanCommitConnectionV1(client)
+  return {
+    query: (text, values) =>
+      client.query(text, values as unknown[]) as unknown as Promise<{ rows: Array<Record<string, unknown>> }>,
+  }
 }
 
 function plan(

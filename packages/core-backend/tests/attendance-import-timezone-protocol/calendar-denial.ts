@@ -3,6 +3,7 @@ import net from 'node:net'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
+import { AttendanceManagedPgPool, attendanceOwningSessionForClientV1 } from '../../src/attendance/attendance-owning-session'
 import type { PoolClient, QueryConfig } from 'pg'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { migrate } from './fixture'
@@ -76,7 +77,7 @@ beforeAll(async () => {
   phase('create_database_start')
   await admin.query(`CREATE DATABASE ${database}`)
   phase('create_database_complete')
-  pool = new Pool(connection(database))
+  pool = new AttendanceManagedPgPool(connection(database))
   phase('migrations_start')
   await migrate(pool)
   phase('migrations_complete')
@@ -127,7 +128,7 @@ beforeAll(async () => {
         commits++
         const host = createAttendanceSyncImportHostV1({ acquireConnection: async () => {
           const client = await pool.connect()
-          return { client, release: (error?: Error) => client.release(error) }
+          return { client: attendanceOwningSessionForClientV1(client), release: (error?: Error) => client.release(error) }
         } })
         return host.commitSyncImportPlanV1(input)
       },

@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  createAttendanceOwningSessionUnitFixture,
+  disposeAttendanceOwningSessionUnitFixtures,
+} from '../../../tests/helpers/attendance-owning-session-unit-fixture'
 import type { AttendanceW4TransactionClientV1 } from '../w4c0-identity'
 import {
   AttendanceW4RequestBoundaryError,
@@ -17,6 +21,7 @@ interface CapturedCall {
   params: unknown[]
 }
 
+// Query script only; each owning acquisition below gets a real managed checkout.
 function fakeClient(rolloutState: 'shadow' | 'suspended' | null): AttendanceW4TransactionClientV1 & {
   calls: CapturedCall[]
 } {
@@ -25,12 +30,6 @@ function fakeClient(rolloutState: 'shadow' | 'suspended' | null): AttendanceW4Tr
     calls,
     async query(sqlText: string, params: unknown[] = []) {
       calls.push({ sqlText, params })
-      // This is a freshly-acquired (idle) connection — the SAME affirmative-proof contract the
-      // real driver gives `assertConnectionIsIdleV1`'s own `SAVEPOINT w4c5_idle_probe`
-      // (SQLSTATE 25P01, no active transaction).
-      if (sqlText === 'SAVEPOINT w4c5_idle_probe') {
-        throw Object.assign(new Error('no_active_sql_transaction'), { code: '25P01' })
-      }
       if (sqlText.includes('FROM users WHERE id = $1')) return { rows: [{ ok: 1 }] }
       if (sqlText.includes('FROM user_orgs WHERE user_id = $1')) return { rows: [{ ok: 1 }] }
       if (sqlText.startsWith('SELECT state, scope FROM attendance_calculation_rollout_state')) {
@@ -102,19 +101,41 @@ function adapters(
 
 const priorAllowlist = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
 
+afterEach(disposeAttendanceOwningSessionUnitFixtures)
+
 afterEach(() => {
   if (priorAllowlist === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
   else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = priorAllowlist
 })
 
 describe('W4C-3b request operation boundary', () => {
+  it.each(['T', 'E', '?'] as const)('refuses protocol %s before SQL or adapter callbacks, without discarding the caller', async initialStatus => {
+    const query = vi.fn(async () => { throw Object.freeze(new Error('query must not run')) })
+    const release = vi.fn()
+    const events: string[] = []
+    const boundary = createAttendanceRequestOperationBoundaryV1({
+      acquireConnection: () => createAttendanceOwningSessionUnitFixture(query, { initialStatus, onRelease: release }),
+      adapters: adapters(events),
+    })
+    await expect(boundary.execute({
+      kind: 'request_create',
+      operationId: OPERATION_ID,
+      correlationId: 'request-create:nonidle',
+      routeVariant: 'generic',
+      routeInput: { requestType: 'leave' },
+    })).rejects.toMatchObject({ code: 'W4C0_CONNECTION_NOT_IDLE' })
+    expect(query).not.toHaveBeenCalled()
+    expect(events).toEqual([])
+    expect(release.mock.calls).toEqual([[undefined]])
+  })
+
   it('keeps null-ID legacy execution ahead of the new liveness recheck', async () => {
     delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
     const events: string[] = []
     const acceptedWritePostures: Array<'legacy_projection_only' | 'shadow' | 'authoritative' | null> = []
     const client = fakeClient(null)
     const boundary = createAttendanceRequestOperationBoundaryV1({
-      acquireConnection: async () => ({ client, release: vi.fn() }),
+      acquireConnection: () => createAttendanceOwningSessionUnitFixture(client.query.bind(client), { onRelease: vi.fn() }),
       adapters: adapters(events, acceptedWritePostures),
     })
 
@@ -138,7 +159,7 @@ describe('W4C-3b request operation boundary', () => {
     const events: string[] = []
     const client = fakeClient(null)
     const boundary = createAttendanceRequestOperationBoundaryV1({
-      acquireConnection: async () => ({ client, release: vi.fn() }),
+      acquireConnection: () => createAttendanceOwningSessionUnitFixture(client.query.bind(client), { onRelease: vi.fn() }),
       adapters: adapters(events),
     })
 
@@ -185,7 +206,7 @@ describe('W4C-3b request operation boundary', () => {
     const client = fakeClient('suspended')
     const release = vi.fn()
     const boundary = createAttendanceRequestOperationBoundaryV1({
-      acquireConnection: async () => ({ client, release }),
+      acquireConnection: () => createAttendanceOwningSessionUnitFixture(client.query.bind(client), { onRelease: release }),
       adapters: adapters(events),
     })
 
@@ -212,7 +233,7 @@ describe('W4C-3b request operation boundary', () => {
     const client = fakeClient('shadow')
     const release = vi.fn()
     const boundary = createAttendanceRequestOperationBoundaryV1({
-      acquireConnection: async () => ({ client, release }),
+      acquireConnection: () => createAttendanceOwningSessionUnitFixture(client.query.bind(client), { onRelease: release }),
       adapters: adapters(events, acceptedWritePostures),
     })
 
@@ -261,7 +282,7 @@ describe('W4C-3b request operation boundary', () => {
     }
 
     const boundary = createAttendanceRequestOperationBoundaryV1({
-      acquireConnection: async () => ({ client, release: vi.fn() }),
+      acquireConnection: () => createAttendanceOwningSessionUnitFixture(client.query.bind(client), { onRelease: vi.fn() }),
       adapters: adapters([], [], routeVariants),
     })
 

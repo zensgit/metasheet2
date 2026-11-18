@@ -1,3 +1,4 @@
+import type { AttendanceOwningSessionV1 } from './attendance-owning-session'
 import {
   createAuthorizedAttendanceWriteContextV1,
   type AttendanceActorPostureV1,
@@ -11,7 +12,6 @@ import {
   createVerifiedAttendanceOrgIdentityV1,
   resolveSegmentCalculationPosture,
   type AttendanceAcceptedWritePostureV1,
-  type AttendanceW4TransactionClientV1,
 } from './w4c0-identity'
 import {
   W4_MAX_BATCH_ITEMS,
@@ -36,7 +36,7 @@ import {
 } from './w4c3a-legacy-plan-enqueue'
 
 export type AttendanceLegacyPlanReservationHostConnectionV1 =
-  AttendanceW4TransactionClientV1
+  AttendanceOwningSessionV1
 
 export type AttendanceLegacyPlanReservationHostDepsV1 = Readonly<{
   acquireConnection(): Promise<{
@@ -128,13 +128,12 @@ export function createAttendanceLegacyPlanReservationHostV1(
     async reserveLegacyImportPlanV1(input) {
       validateHostInputBeforeConnection(input)
       const acquired = await deps.acquireConnection()
-      // Freshly-acquired, idle-on-entry connection — NOT a transaction handle yet (the wrapper
-      // below opens the transaction on it after `assertConnectionIsIdleV1` certifies idle).
+      // The runner admits and leases this owning handle before opening its transaction.
       const connection = acquired.client
       let discard: Error | undefined
       try {
-        return await runAttendanceResultOperationTransactionV1(connection, async () => {
-        const posture = await resolveSegmentCalculationPosture(connection, input.orgId)
+        return await runAttendanceResultOperationTransactionV1(connection, async (trx) => {
+        const posture = await resolveSegmentCalculationPosture(trx, input.orgId)
         const org = createVerifiedAttendanceOrgIdentityV1({
           orgKey: input.orgId,
           posture,
@@ -225,7 +224,7 @@ export function createAttendanceLegacyPlanReservationHostV1(
             : []
 
         return reserveAttendanceLegacyImportPlanJobV1(
-          connection,
+          trx,
           authorization,
           {
             batchIdentity,

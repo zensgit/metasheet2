@@ -32,6 +32,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import crypto from 'node:crypto'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
+import { AttendanceManagedPgPool, attendanceOwningSessionForClientV1, withAttendanceExclusiveIdleSessionV1 } from '../../src/attendance/attendance-owning-session'
 
 import { up as w4c0Up } from '../../src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage'
 import { up as w4c2Up } from '../../src/db/migrations/zzzz20260727100000_w4c2_scheduled_run_identity_and_outbox_union'
@@ -122,10 +123,10 @@ async function caught(run: () => Promise<unknown>): Promise<unknown> {
 
 const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 50))
 
-const ORDINARY_TAIL = ['idle-probe:error', 'BEGIN:ok', 'set_config(statement_timeout):ok', 'set_config(lock_timeout):ok', 'body:faulted', 'ROLLBACK:ok']
-const DESTROY_TAIL = ['idle-probe:error', 'BEGIN:ok', 'set_config(statement_timeout):ok', 'set_config(lock_timeout):ok', 'body:faulted', 'ROLLBACK:faulted']
+const ORDINARY_TAIL = ['BEGIN:ok', 'set_config(statement_timeout):ok', 'set_config(lock_timeout):ok', 'body:faulted', 'ROLLBACK:ok']
+const DESTROY_TAIL = ['BEGIN:ok', 'set_config(statement_timeout):ok', 'set_config(lock_timeout):ok', 'body:faulted', 'ROLLBACK:faulted']
 /** A non-40001 / 40P01 COMMIT failure: marked, one cleanup ROLLBACK, no further attempt. */
-const COMMIT_FAILED_CONTROL = ['idle-probe:error', 'BEGIN:ok', 'COMMIT:faulted', 'ROLLBACK:ok']
+const COMMIT_FAILED_CONTROL = ['BEGIN:ok', 'COMMIT:faulted', 'ROLLBACK:ok']
 
 describeIfDatabase('attendance W4 connection release — destroy on the uncertainty mark (real database)', () => {
   const scratchName = `ms2_p11a05_${RUN}`
@@ -145,7 +146,7 @@ describeIfDatabase('attendance W4 connection release — destroy on the uncertai
     const url = new URL(dbUrl as string)
     url.pathname = `/${scratchName}`
     scratchUrl = url.toString()
-    observer = new Pool({ connectionString: scratchUrl, max: 3 })
+    observer = new AttendanceManagedPgPool({ connectionString: scratchUrl, max: 3 })
     // House rule: a real-DB suite proves it is on its own disposable database before it writes anything.
     const onDatabase = await observer.query('SELECT current_database() AS db')
     expect((onDatabase.rows[0] as { db: string }).db).toBe(scratchName)
@@ -243,7 +244,7 @@ describeIfDatabase('attendance W4 connection release — destroy on the uncertai
   async function observerTxn<T>(fn: (trx: AttendanceW4TransactionClientV1) => Promise<T>): Promise<T> {
     const client: PoolClient = await observer.connect()
     try {
-      return await runAttendanceResultOperationTransactionV1(client as unknown as AttendanceW4TransactionClientV1, fn)
+      return await runAttendanceResultOperationTransactionV1(attendanceOwningSessionForClientV1(client), fn)
     } finally {
       client.release()
     }
@@ -838,7 +839,7 @@ describeIfDatabase('attendance W4 connection release — destroy on the uncertai
           expect(probe.pendingFaults()).toEqual([])
           expect(probe.borrows).toHaveLength(2)
           const [scan, candidate] = probe.borrows as [AttendanceW4ReleaseProbeBorrow, AttendanceW4ReleaseProbeBorrow]
-          expect(probe.controlShape(scan)).toEqual(['idle-probe:error', 'BEGIN:ok', 'COMMIT:ok'])
+          expect(probe.controlShape(scan)).toEqual(['BEGIN:ok', 'COMMIT:ok'])
           expect(scan.releaseCalls).toStrictEqual([undefined])
           expect(scan.releaseEvents).toStrictEqual([undefined])
           expect(scan.removed).toBe(false)
@@ -869,7 +870,7 @@ describeIfDatabase('attendance W4 connection release — destroy on the uncertai
           expect(probe.pendingFaults()).toEqual([])
           expect(probe.borrows).toHaveLength(2)
           const [scan, candidate] = probe.borrows as [AttendanceW4ReleaseProbeBorrow, AttendanceW4ReleaseProbeBorrow]
-          expect(probe.controlShape(scan)).toEqual(['idle-probe:error', 'BEGIN:ok', 'COMMIT:ok'])
+          expect(probe.controlShape(scan)).toEqual(['BEGIN:ok', 'COMMIT:ok'])
           expect(scan.releaseCalls).toStrictEqual([undefined])
           expect(scan.releaseEvents).toStrictEqual([undefined])
           expect(candidate.pid).toBe(scan.pid)
@@ -908,7 +909,7 @@ describeIfDatabase('attendance W4 connection release — destroy on the uncertai
         expect(outcome).toEqual({ kind: 'abandoned', runId, completedUserCount: 0 })
         expect(probe.borrows).toHaveLength(1)
         const borrow = probe.borrows[0]!
-        expect(probe.controlShape(borrow)).toEqual(['idle-probe:error', 'BEGIN:ok', 'COMMIT:ok'])
+        expect(probe.controlShape(borrow)).toEqual(['BEGIN:ok', 'COMMIT:ok'])
         await expectReturned(probe, borrow)
       })
       expect(await runState(runId)).toBe('abandoned')
@@ -923,7 +924,7 @@ describeIfDatabase('attendance W4 connection release — destroy on the uncertai
         expect(isAttendanceW4ConnectionUncertainV1(error)).toBe(false)
         expect(probe.borrows).toHaveLength(1)
         const borrow = probe.borrows[0]!
-        expect(probe.controlShape(borrow)).toEqual(['idle-probe:error', 'BEGIN:ok', 'ROLLBACK:ok'])
+        expect(probe.controlShape(borrow)).toEqual(['BEGIN:ok', 'ROLLBACK:ok'])
         await expectReturned(probe, borrow)
       })
     })
@@ -940,7 +941,7 @@ describeIfDatabase('attendance W4 connection release — destroy on the uncertai
         expect(probe.pendingFaults()).toEqual([])
         expect(probe.borrows).toHaveLength(1)
         const borrow = probe.borrows[0]!
-        expect(probe.controlShape(borrow)).toEqual(['idle-probe:error', 'BEGIN:ok', 'ROLLBACK:faulted'])
+        expect(probe.controlShape(borrow)).toEqual(['BEGIN:ok', 'ROLLBACK:faulted'])
         await expectDestroyed(probe, borrow, error)
       })
     })
@@ -959,7 +960,7 @@ describeIfDatabase('attendance W4 connection release — destroy on the uncertai
           expect(probe.pendingFaults()).toEqual([])
           expect(probe.borrows).toHaveLength(1)
           const borrow = probe.borrows[0]!
-          expect(probe.controlShape(borrow)).toEqual(['idle-probe:error', 'BEGIN:ok', 'COMMIT:faulted', 'ROLLBACK:ok'])
+          expect(probe.controlShape(borrow)).toEqual(['BEGIN:ok', 'COMMIT:faulted', 'ROLLBACK:ok'])
           await expectDestroyed(probe, borrow, commitError)
         })
         expect(await runState(runId)).toBe('running')
@@ -983,7 +984,6 @@ describeIfDatabase('attendance W4 connection release — destroy on the uncertai
           expect(probe.borrows).toHaveLength(1)
           const borrow = probe.borrows[0]!
           expect(probe.controlShape(borrow)).toEqual([
-            'idle-probe:error',
             'BEGIN:ok',
             'COMMIT:faulted',
             'ROLLBACK:ok',
@@ -1041,13 +1041,13 @@ describeIfDatabase('attendance W4 connection release — destroy on the uncertai
             const rollbackError = probe.loseNextRollbackResult()
             const client = (await probe.pool().connect()) as PoolClient
             const error = await caught(() =>
-              closeLegacyRollbackWindowV1(client as unknown as AttendanceW4TransactionClientV1, closeInput(`close-d1-${code}`)),
+              closeLegacyRollbackWindowV1(attendanceOwningSessionForClientV1(client), closeInput(`close-d1-${code}`)),
             )
 
             expect(probe.borrows).toHaveLength(1)
             const borrow = probe.borrows[0]!
             // Exactly one attempt: one BEGIN, the ROLLBACK executed on the server with its reply lost.
-            expect(probe.controlShape(borrow)).toEqual(['idle-probe:error', 'BEGIN:ok', 'ROLLBACK:lost'])
+            expect(probe.controlShape(borrow)).toEqual(['BEGIN:ok', 'ROLLBACK:lost'])
             expect(calls).toEqual(['close'])
             expect(error).toBe(hookError)
             expect(error).not.toBe(rollbackError)
@@ -1060,8 +1060,10 @@ describeIfDatabase('attendance W4 connection release — destroy on the uncertai
 
             // The server ended the transaction: the connection is idle and the next Gate E passes on it.
             expect(await serverTransactionState(borrow.pid)).toEqual([{ state: 'idle', no_transaction: true }])
-            await expect(assertConnectionIsIdleV1(client as unknown as AttendanceW4TransactionClientV1)).resolves.toBeUndefined()
-            expect(probe.controlShape(borrow)).toEqual(['idle-probe:error', 'BEGIN:ok', 'ROLLBACK:lost', 'idle-probe:error'])
+            await expect(withAttendanceExclusiveIdleSessionV1(
+              attendanceOwningSessionForClientV1(client), lease => assertConnectionIsIdleV1(lease),
+            )).resolves.toBeUndefined()
+            expect(probe.controlShape(borrow)).toEqual(['BEGIN:ok', 'ROLLBACK:lost'])
 
             // Even so the caller's discard value is the error, and the release destroys the connection.
             expect(attendanceW4ConnectionDiscardV1(error)).toBe(error)
@@ -1088,7 +1090,7 @@ describeIfDatabase('attendance W4 connection release — destroy on the uncertai
           probe.failNextRollback()
           const client = (await probe.pool().connect()) as PoolClient
           const error = await caught(() =>
-            closeLegacyRollbackWindowV1(client as unknown as AttendanceW4TransactionClientV1, closeInput('close-d1-never-sent')),
+            closeLegacyRollbackWindowV1(attendanceOwningSessionForClientV1(client), closeInput('close-d1-never-sent')),
           )
 
           expect(error).toBe(hookError)
@@ -1098,7 +1100,7 @@ describeIfDatabase('attendance W4 connection release — destroy on the uncertai
           expect(probe.pendingFaults()).toEqual([])
           expect(probe.borrows).toHaveLength(1)
           const borrow = probe.borrows[0]!
-          expect(probe.controlShape(borrow)).toEqual(['idle-probe:error', 'BEGIN:ok', 'ROLLBACK:faulted'])
+          expect(probe.controlShape(borrow)).toEqual(['BEGIN:ok', 'ROLLBACK:faulted'])
           expect(await serverTransactionState(borrow.pid)).toEqual([{ state: 'idle in transaction', no_transaction: false }])
           // The release is the caller's job; the error carries what it needs to destroy the connection.
           client.release(attendanceW4ConnectionDiscardV1(error))
@@ -1121,7 +1123,7 @@ describeIfDatabase('attendance W4 connection release — destroy on the uncertai
         try {
           const client = (await probe.pool().connect()) as PoolClient
           const error = await caught(() =>
-            closeLegacyRollbackWindowV1(client as unknown as AttendanceW4TransactionClientV1, closeInput('close-d2')),
+            closeLegacyRollbackWindowV1(attendanceOwningSessionForClientV1(client), closeInput('close-d2')),
           )
 
           expect(error).toBe(second)
@@ -1130,10 +1132,10 @@ describeIfDatabase('attendance W4 connection release — destroy on the uncertai
           expect(calls).toEqual(['close', 'close'])
           expect(probe.borrows).toHaveLength(1)
           const borrow = probe.borrows[0]!
-          // Each runControlTransaction attempt is a fresh runner call, so the idle probe runs again.
+          // Each runControlTransaction attempt is a fresh owning runner call; admission emits no SQL.
           expect(probe.controlShape(borrow)).toEqual([
-            'idle-probe:error', 'BEGIN:ok', 'ROLLBACK:ok',
-            'idle-probe:error', 'BEGIN:ok', 'ROLLBACK:ok',
+            'BEGIN:ok', 'ROLLBACK:ok',
+            'BEGIN:ok', 'ROLLBACK:ok',
           ])
           expect(attendanceW4ConnectionDiscardV1(error)).toBeUndefined()
           client.release(attendanceW4ConnectionDiscardV1(error))
@@ -1160,7 +1162,7 @@ describeIfDatabase('attendance W4 connection release — destroy on the uncertai
         const bodyError = probe.failNextBodyStatement({ code: '40001' })
         probe.failNextRollback()
         const client = (await probe.pool().connect()) as PoolClient
-        const error = await caught(() => runAttendanceResultOperationTransactionV1(client as unknown as AttendanceW4TransactionClientV1, body))
+        const error = await caught(() => runAttendanceResultOperationTransactionV1(attendanceOwningSessionForClientV1(client), body))
 
         expect(error).toBe(bodyError)
         expect((error as { code?: unknown }).code).toBe('40001')
@@ -1179,7 +1181,7 @@ describeIfDatabase('attendance W4 connection release — destroy on the uncertai
       await withProbe(async (probe) => {
         const bodyError = probe.failNextBodyStatement({ code: '40001' })
         const client = (await probe.pool().connect()) as PoolClient
-        const result = await runAttendanceResultOperationTransactionV1(client as unknown as AttendanceW4TransactionClientV1, body)
+        const result = await runAttendanceResultOperationTransactionV1(attendanceOwningSessionForClientV1(client), body)
 
         expect(result).toBe('p11a05-done')
         expect((bodyError as { code?: unknown }).code).toBe('40001')

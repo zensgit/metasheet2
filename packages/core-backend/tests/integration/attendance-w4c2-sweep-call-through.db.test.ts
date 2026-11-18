@@ -68,6 +68,7 @@ import net from 'node:net'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Pool } from 'pg'
+import { AttendanceManagedPgPool, attendanceOwningSessionForClientV1 } from '../../src/attendance/attendance-owning-session'
 import type { MetaSheetServer } from '../../src/index'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
@@ -225,7 +226,7 @@ describeIfDatabase('W4C-2 #4770 recovery-sweep call-through (real server, real p
     const client = await pool.connect()
     try {
       const created = await withAllowlist([orgId], () =>
-        runAttendanceResultOperationTransactionV1(client as any, (trx) =>
+        runAttendanceResultOperationTransactionV1(attendanceOwningSessionForClientV1(client), (trx) =>
           createOrResumeAttendanceScheduledRunV1(
             trx,
             { orgId, initiator: 'cron', workDate },
@@ -309,7 +310,7 @@ describeIfDatabase('W4C-2 #4770 recovery-sweep call-through (real server, real p
     const address = server.getAddress()
     if (!address || typeof address === 'string') throw new Error('attendance server did not expose a TCP address')
     baseUrl = `http://127.0.0.1:${address.port}`
-    pool = new Pool({ connectionString: scratchConnectionString })
+    pool = new AttendanceManagedPgPool({ connectionString: scratchConnectionString })
 
     // Door 1 setup: `attendanceW4SegmentCalculation` is LEAST-PRIVILEGE gated in
     // `packages/core-backend/src/index.ts` (`manifest.name === 'plugin-attendance' ? {...} :

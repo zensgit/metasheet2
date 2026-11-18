@@ -8,7 +8,11 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  createAttendanceOwningSessionUnitFixture,
+  disposeAttendanceOwningSessionUnitFixtures,
+} from '../../../tests/helpers/attendance-owning-session-unit-fixture'
 import {
   applyAttendanceLegacyGroupEffectsV1,
 } from '../w4c3a-legacy-plan-group-effects'
@@ -31,6 +35,8 @@ import {
   prepareAttendanceImportTimezoneSourceV1,
   registerAttendanceRequestTimezoneSourceGuardV1,
 } from '../attendance-business-trip-locks'
+
+afterEach(disposeAttendanceOwningSessionUnitFixtures)
 
 const ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -177,40 +183,32 @@ describe('blueprint mutations — real production surfaces', () => {
     const queries: unknown[][] = []
     const release = vi.fn()
     const processor = createAttendanceLegacyPlanProcessorV1({
-      acquireConnection: async () => ({
-        client: {
-          query: async (sql: string, params?: unknown[]) => {
-            queries.push([sql, ...(params ?? [])])
-            // This is a freshly-acquired (idle) connection — the SAME affirmative-proof
-            // contract the real driver gives `assertConnectionIsIdleV1`'s own
-            // `SAVEPOINT w4c5_idle_probe` (SQLSTATE 25P01, no active transaction).
-            if (sql === 'SAVEPOINT w4c5_idle_probe') {
-              throw Object.assign(new Error('no_active_sql_transaction'), { code: '25P01' })
+      acquireConnection: async () => createAttendanceOwningSessionUnitFixture(
+        async (sql: string, params?: unknown[]) => {
+          queries.push([sql, ...(params ?? [])])
+          if (
+            String(sql).includes('FROM attendance_import_jobs') &&
+            String(sql).includes('id = $1') &&
+            !String(sql).includes('org_id = $2')
+          ) {
+            // Candidate row supplies org A.
+            return {
+              rows: [
+                {
+                  id: '10000000-0000-4000-8000-000000000001',
+                  org_id: '20000000-0000-4000-8000-000000000001',
+                },
+              ],
             }
-            if (
-              String(sql).includes('FROM attendance_import_jobs') &&
-              String(sql).includes('id = $1') &&
-              !String(sql).includes('org_id = $2')
-            ) {
-              // Candidate row supplies org A.
-              return {
-                rows: [
-                  {
-                    id: '10000000-0000-4000-8000-000000000001',
-                    org_id: '20000000-0000-4000-8000-000000000001',
-                  },
-                ],
-              }
-            }
-            // Subsequent org-scoped reads must bind org A (not a closed-over constant).
-            if (String(sql).includes('org_id = $2')) {
-              expect(params?.[1]).toBe('20000000-0000-4000-8000-000000000001')
-            }
-            return { rows: [] }
-          },
+          }
+          // Subsequent org-scoped reads must bind org A (not a closed-over constant).
+          if (String(sql).includes('org_id = $2')) {
+            expect(params?.[1]).toBe('20000000-0000-4000-8000-000000000001')
+          }
+          return { rows: [] }
         },
-        release,
-      }),
+        { onRelease: release },
+      ),
     })
     // API surface is jobId-only — cannot pass orgId.
     await expect(

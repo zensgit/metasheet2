@@ -1,3 +1,4 @@
+import type { AttendanceOwningSessionV1 } from './attendance-owning-session'
 import { acquireBusinessTripRequestPrefixV1 } from './attendance-business-trip-locks'
 /**
  * W4C-3b P13: canonical request-operation owner for create/edit/decision/cancel.
@@ -290,7 +291,7 @@ export type AttendanceRequestOperationAdaptersV1 = Readonly<{
 }>
 
 export interface AttendanceRequestOperationBoundaryConnectionV1 {
-  readonly client: AttendanceW4TransactionClientV1
+  readonly client: AttendanceOwningSessionV1
   /** pg's `release(err?)`: a truthy error destroys the connection instead of returning it. */
   release(error?: Error): void
 }

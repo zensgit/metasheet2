@@ -1,3 +1,4 @@
+import { attendanceOwnedNativeQueryProbeV1 } from '../helpers/attendance-owned-native-query-probe'
 /**
  * W4C-2 Gate D3 (#4556 / #4844) — real-Postgres proof of the AUTHORITATIVE `scheduled` writer in
  * `src/attendance/w4c2-live-scheduled-boundary.ts`.
@@ -31,6 +32,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import crypto from 'node:crypto'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool } from 'pg'
+import { AttendanceManagedPgPool } from '../../src/attendance/attendance-owning-session'
 import { up } from '../../src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage'
 import type { AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-identity'
 import {
@@ -82,7 +84,7 @@ type Fault = {
 }
 
 describeIfDatabase('W4C-2 Gate D3 — authoritative scheduled writer (real DB)', () => {
-  const pool = new Pool({ connectionString: dbUrl })
+  const pool = new AttendanceManagedPgPool({ connectionString: dbUrl })
   let migrationDb: Kysely<unknown> | undefined
   let adapters: ScheduledAdapters
   let priorAllowlistEnv: string | undefined
@@ -204,16 +206,11 @@ describeIfDatabase('W4C-2 Gate D3 — authoritative scheduled writer (real DB)',
     const boundary = createAttendanceLiveScheduledBoundaryV1({
       acquireConnection: async () => {
         const client = await pool.connect()
-        const wrapped = {
-          query: (sqlText: string, params?: unknown[]) => {
-            spies.statements.push(sqlText.trim().split('\n')[0].trim())
-            return (client as unknown as { query: (s: string, p?: unknown[]) => Promise<unknown> }).query(
-              sqlText,
-              params,
-            )
-          },
-        } as unknown as AttendanceW4TransactionClientV1
-        return { client: wrapped, release: () => client.release() }
+        const probe = attendanceOwnedNativeQueryProbeV1(pool, client, ({ text, next }) => {
+          spies.statements.push(text.trim().split('\n')[0].trim())
+          return next()
+        })
+        return { client: probe.session, release: () => { probe.restore(); client.release() } }
       },
       legacyAdapters,
     })
@@ -1346,11 +1343,8 @@ describeIfDatabase('W4C-2 Gate D3 — authoritative scheduled writer (real DB)',
     await boundary.executeScheduledRun(scheduledInput(orgId, userIds))
     // SCOPED BY NAME to D3's OWN savepoint, for two separately-measured reasons.
     //
-    // (1) A bare `^SAVEPOINT ` count would be wrong, not merely noisy: `assertConnectionIsIdleV1`
-    //     issues `SAVEPOINT w4c5_idle_probe` on every connection acquisition and deliberately does
-    //     NOT release it on the path it expects (the probe is meant to FAIL on an idle connection),
-    //     so an unscoped balance assertion is unsatisfiable by construction and would have to be
-    //     weakened until it proved nothing.
+    // Native owning admission issues no SQL. This balance assertion retains
+    // its existing business-savepoint scope for the distinct core behavior below.
     //
     // (2) The CORE's own savepoint (`attendance_w4_auth_calc_op`) is deliberately NOT asserted
     //     here, and including it would be a latent FALSE pin. Its catch path rethrows anything that

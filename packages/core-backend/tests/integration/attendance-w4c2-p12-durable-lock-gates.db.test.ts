@@ -45,6 +45,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import crypto from 'node:crypto'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
+import { AttendanceManagedPgPool, attendanceOwningSessionForClientV1 } from '../../src/attendance/attendance-owning-session'
 import { up as w4c0Up } from '../../src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage'
 import { up as w4c2Up } from '../../src/db/migrations/zzzz20260727100000_w4c2_scheduled_run_identity_and_outbox_union'
 import {
@@ -158,7 +159,7 @@ describeIfDatabase('W4C-2 P1-2 — durable delivery / lock-order / atomicity gat
     await adminPool.query(`CREATE DATABASE ${scratchName}`)
     const scratchUrl = new URL(dbUrl as string)
     scratchUrl.pathname = `/${scratchName}`
-    pool = new Pool({ connectionString: scratchUrl.toString() })
+    pool = new AttendanceManagedPgPool({ connectionString: scratchUrl.toString() })
     kyselyPool = new Pool({ connectionString: scratchUrl.toString() })
     scratchDb = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: kyselyPool }) })
 
@@ -248,7 +249,7 @@ describeIfDatabase('W4C-2 P1-2 — durable delivery / lock-order / atomicity gat
   async function withTxn<T>(fn: (trx: AttendanceW4TransactionClientV1) => Promise<T>): Promise<T> {
     const c: PoolClient = await pool.connect()
     try {
-      return await runAttendanceResultOperationTransactionV1(c as unknown as AttendanceW4TransactionClientV1, fn)
+      return await runAttendanceResultOperationTransactionV1(attendanceOwningSessionForClientV1(c), fn)
     } finally {
       c.release()
     }
@@ -323,7 +324,7 @@ describeIfDatabase('W4C-2 P1-2 — durable delivery / lock-order / atomicity gat
     const deliveries: AttendanceOutboxDeliveryV1[] = []
     const c: PoolClient = await pool.connect()
     try {
-      await dispatchAttendanceResultEventOutboxV1(c as unknown as AttendanceW4TransactionClientV1, {
+      await dispatchAttendanceResultEventOutboxV1(attendanceOwningSessionForClientV1(c), {
         emit: (delivery) => {
           deliveries.push(delivery)
         },

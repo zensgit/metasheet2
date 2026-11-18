@@ -19,12 +19,14 @@
  * unchanged-by-this-amendment operation. Precisely: this module is the only rollout-state DML
  * path, and the only place either rollout table may ever be written from.
  */
+import { withAttendanceExclusiveIdleSessionV1, type AttendanceOwningSessionV1, type AttendanceSessionLeaseV1 } from './attendance-owning-session'
 import {
   acquireAttendanceCalculationRolloutLock,
   acquireAttendanceCalculationRolloutLockSessionExclusiveV1,
   acquireAttendanceCalculationTargetLocks,
   acquireAttendanceResultOperationLocks,
   assertConnectionIsIdleV1,
+  AttendanceW4IdentityError,
   createVerifiedAttendanceCalculationTargetIdentityV1,
   isAttendanceCalculationOrgAllowlistedV1,
   parseCanonicalAttendanceRolloutOrgKeyV1,
@@ -1379,27 +1381,33 @@ async function buildAttendanceRolloutTransitionPlanV1(
  * `BEGIN`" — nothing between the idle check and `BEGIN` issues any query — not "first".
  */
 export async function planAttendanceCalculationRolloutTransitionV1(
-  connection: AttendanceW4TransactionClientV1,
+  connection: AttendanceOwningSessionV1 | AttendanceSessionLeaseV1,
   rawInput: AttendanceRolloutTransitionPlanInputV1,
 ): Promise<AttendanceRolloutTransitionPlanV1> {
   if (typeof rawInput !== 'object' || rawInput === null) fail('W4C3A_ROLLOUT_CONTROL_INPUT_INVALID')
   const orgId = String(parseCanonicalAttendanceRolloutOrgKeyV1(rawInput.orgId))
   const targetState = requireRolloutState(rawInput.targetState, 'W4C3A_ROLLOUT_CONTROL_INPUT_INVALID')
-  await assertConnectionIsIdleV1(connection)
-  await connection.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
-  try {
-    await connection.query("SELECT set_config('statement_timeout', $1, true)", [
-      String(W4_TRANSACTION_STATEMENT_TIMEOUT_MS),
-    ])
-    return await buildAttendanceRolloutTransitionPlanV1(connection, orgId, targetState)
-  } finally {
-    // Unconditional ROLLBACK — never COMMIT — on every path, success or failure. This is what
-    // turns "this function does not issue INSERT/UPDATE/DELETE" from a claim about the code
-    // above into a mechanically enforced invariant about what the database ever durably
-    // observes, even against a future edit inside `buildAttendanceRolloutTransitionPlanV1`
-    // that accidentally added a write.
-    await connection.query('ROLLBACK').catch(() => undefined)
-  }
+  return withAttendanceExclusiveIdleSessionV1(
+    connection,
+    async (lease) => {
+      await assertConnectionIsIdleV1(lease)
+      await lease.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      try {
+        await lease.query("SELECT set_config('statement_timeout', $1, true)", [
+          String(W4_TRANSACTION_STATEMENT_TIMEOUT_MS),
+        ])
+        return await buildAttendanceRolloutTransitionPlanV1(lease, orgId, targetState)
+      } finally {
+        // Unconditional ROLLBACK — never COMMIT — on every path, success or failure. This is what
+        // turns "this function does not issue INSERT/UPDATE/DELETE" from a claim about the code
+        // above into a mechanically enforced invariant about what the database ever durably
+        // observes, even against a future edit inside `buildAttendanceRolloutTransitionPlanV1`
+        // that accidentally added a write.
+        await lease.query('ROLLBACK').catch(() => undefined)
+      }
+    },
+    () => new AttendanceW4IdentityError('W4C0_CONNECTION_NOT_IDLE'),
+  )
 }
 
 function isRetryableControlPrecondition(error: unknown): boolean {
@@ -1427,24 +1435,30 @@ function isRetryableControlPrecondition(error: unknown): boolean {
  * other transient SQLSTATE 40001/40P01-adjacent precondition race, never for DML.
  */
 async function runControlTransaction<T>(
-  connection: AttendanceW4TransactionClientV1,
+  connection: AttendanceOwningSessionV1 | AttendanceSessionLeaseV1,
   body: (trx: AttendanceW4TransactionClientV1) => Promise<T>,
 ): Promise<T> {
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      return await runAttendanceResultOperationTransactionV1(connection, body)
-    } catch (error) {
-      // Settlement coordination (r6.1 §1.1 P1-1): once the runner reports the connection's state as
-      // unknown, nothing runs on it again — not even the one control-precondition retry.
-      if (isAttendanceW4ConnectionUncertainV1(error)) throw error
-      if (attempt === 0 && isRetryableControlPrecondition(error)) continue
-      throw error
-    }
-  }
+  return withAttendanceExclusiveIdleSessionV1(
+    connection,
+    async (lease) => {
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          return await runAttendanceResultOperationTransactionV1(lease, body)
+        } catch (error) {
+          // Settlement coordination (r6.1 §1.1 P1-1): once the runner reports the connection's state as
+          // unknown, nothing runs on it again — not even the one control-precondition retry.
+          if (isAttendanceW4ConnectionUncertainV1(error)) throw error
+          if (attempt === 0 && isRetryableControlPrecondition(error)) continue
+          throw error
+        }
+      }
+    },
+    () => new AttendanceW4IdentityError('W4C0_CONNECTION_NOT_IDLE'),
+  )
 }
 
 export async function closeLegacyRollbackWindowV1(
-  connection: AttendanceW4TransactionClientV1,
+  connection: AttendanceOwningSessionV1 | AttendanceSessionLeaseV1,
   rawInput: CloseLegacyRollbackWindowInputV1,
 ): Promise<AttendanceW4C3aRolloutControlResultV1> {
   const input = normalizeCloseInput(rawInput)
@@ -1480,7 +1494,7 @@ export async function closeLegacyRollbackWindowV1(
 }
 
 export async function transitionAttendanceCalculationRolloutV1(
-  connection: AttendanceW4TransactionClientV1,
+  connection: AttendanceOwningSessionV1 | AttendanceSessionLeaseV1,
   rawInput: TransitionAttendanceCalculationRolloutInputV1,
 ): Promise<AttendanceW4C3aRolloutControlResultV1> {
   const input = normalizeTransitionInput(rawInput)
@@ -1495,186 +1509,192 @@ export async function transitionAttendanceCalculationRolloutV1(
   // transaction — is what makes every section 3 predicate below actually re-evaluate a snapshot
   // that postdates the wait. W4C-5 NEW-B hardening (PR #4773 gate, 20260805): that idle
   // precondition is no longer a comment-only claim — `acquireAttendanceCalculationRolloutLockSessionExclusiveV1`
-  // now proves it (a `SAVEPOINT` probe, `assertConnectionIsIdleV1` in w4c0-identity.ts — renamed
+  // now proves it through the managed exclusive lease (`assertConnectionIsIdleV1` in w4c0-identity.ts — renamed
   // P2-2, PR #4839 gate, 20260809, since it was generalized to a second caller) as its own first
   // statement and fails closed with `W4C0_CONNECTION_NOT_IDLE` rather than silently running
   // inside the caller's pre-fixed snapshot.
-  await acquireAttendanceCalculationRolloutLockSessionExclusiveV1(connection, orgKey)
-  try {
-    // Inside the try (not before it): a throwing test hook must still release the lock via the
-    // `finally` below, not leak it.
-    await afterExclusiveRolloutLockForTests?.('transition')
-    return await runControlTransaction(connection, async (trx) => {
-      // Section 3 predicate 1: exact named org (`scope='synthetic_staging'` is enforced by the
-      // durable CHECK constraint on every row this boundary can ever write). P3-2 (PR #4773
-      // exact-head independent gate, 20260805): this boundary itself only ever writes the
-      // hardcoded literal 'synthetic_staging' (see `lockRolloutStateForBootstrapOrRead`'s
-      // bootstrap INSERT below) — it never reads or application-validates `scope` the way the
-      // canonical posture resolver does (`w4c0-identity.ts`, `fail('W4C0_ROLLOUT_SCOPE_INVALID')`).
-      // That is asymmetric, not currently unsafe: a future widening of the DDL CHECK constraint
-      // (`chk_acrs_scope`) would silently remove the ONLY thing standing between this write path
-      // and a non-synthetic-staging row, since there is no independent application-level check
-      // here to catch it. Flagged, not fixed here — adding a check against the current hardcoded
-      // literal would be tautological; a real fix needs `scope` to become a live input this
-      // boundary actually validates, which is a larger change than this amendment's scope.
-      const orgAllowlisted = isAttendanceCalculationOrgAllowlistedV1(input.orgId)
-      if (!orgAllowlisted) fail('W4C3A_ROLLOUT_CONTROL_ORG_NOT_ALLOWLISTED')
+  return withAttendanceExclusiveIdleSessionV1(
+    connection,
+    async (lease) => {
+      await acquireAttendanceCalculationRolloutLockSessionExclusiveV1(lease, orgKey)
+      try {
+        // Inside the try (not before it): a throwing test hook must still release the lock via the
+        // `finally` below, not leak it.
+        await afterExclusiveRolloutLockForTests?.('transition')
+        return await runControlTransaction(lease, async (trx) => {
+          // Section 3 predicate 1: exact named org (`scope='synthetic_staging'` is enforced by the
+          // durable CHECK constraint on every row this boundary can ever write). P3-2 (PR #4773
+          // exact-head independent gate, 20260805): this boundary itself only ever writes the
+          // hardcoded literal 'synthetic_staging' (see `lockRolloutStateForBootstrapOrRead`'s
+          // bootstrap INSERT below) — it never reads or application-validates `scope` the way the
+          // canonical posture resolver does (`w4c0-identity.ts`, `fail('W4C0_ROLLOUT_SCOPE_INVALID')`).
+          // That is asymmetric, not currently unsafe: a future widening of the DDL CHECK constraint
+          // (`chk_acrs_scope`) would silently remove the ONLY thing standing between this write path
+          // and a non-synthetic-staging row, since there is no independent application-level check
+          // here to catch it. Flagged, not fixed here — adding a check against the current hardcoded
+          // literal would be tautological; a real fix needs `scope` to become a live input this
+          // boundary actually validates, which is a larger change than this amendment's scope.
+          const orgAllowlisted = isAttendanceCalculationOrgAllowlistedV1(input.orgId)
+          if (!orgAllowlisted) fail('W4C3A_ROLLOUT_CONTROL_ORG_NOT_ALLOWLISTED')
 
-      const persisted = await lockRolloutStateForBootstrapOrRead(
-        trx,
-        input.orgId,
-        input.actorId,
-        input.engineVersion,
-        input.expectedState,
-        input.targetState,
-        orgAllowlisted,
-      )
+          const persisted = await lockRolloutStateForBootstrapOrRead(
+            trx,
+            input.orgId,
+            input.actorId,
+            input.engineVersion,
+            input.expectedState,
+            input.targetState,
+            orgAllowlisted,
+          )
 
-      // Section 2.4 / completion gate 4: a stale caller belief about current state/version is
-      // rejected under lock, with zero rollout DML, even though the input-time matrix check
-      // already passed against the CLAIMED pair.
-      if (persisted.state !== input.expectedState || persisted.version !== input.expectedVersion) {
-        fail('W4C3A_ROLLOUT_CONTROL_STALE_EXPECTED_STATE')
-      }
-      const currentState = persisted.state
-      // Re-derive from the authoritative post-lock state. NIT-1 (PR #4773 exact-head independent
-      // gate, 20260805): once the staleness check above has passed, `currentState` is provably
-      // identical to `input.expectedState` (the pair already matrix-validated at input time in
-      // `normalizeTransitionInput`), so this second `findLegalTransition` call is unreachable
-      // dead code on any live path today — mutating it away leaves every test green. It is kept
-      // deliberately as defense-in-depth against a future refactor that decouples `currentState`
-      // from the staleness check above (e.g. reordering, or a new code path that reaches here
-      // without going through `lockRolloutStateForBootstrapOrRead`'s exact-match guard) — never
-      // trusts the caller's claim alone, only currently redundant with it.
-      const legal = findLegalTransition(currentState, input.targetState)
-      if (!legal) fail('W4C3A_ROLLOUT_CONTROL_ILLEGAL_TRANSITION')
+          // Section 2.4 / completion gate 4: a stale caller belief about current state/version is
+          // rejected under lock, with zero rollout DML, even though the input-time matrix check
+          // already passed against the CLAIMED pair.
+          if (persisted.state !== input.expectedState || persisted.version !== input.expectedVersion) {
+            fail('W4C3A_ROLLOUT_CONTROL_STALE_EXPECTED_STATE')
+          }
+          const currentState = persisted.state
+          // Re-derive from the authoritative post-lock state. NIT-1 (PR #4773 exact-head independent
+          // gate, 20260805): once the staleness check above has passed, `currentState` is provably
+          // identical to `input.expectedState` (the pair already matrix-validated at input time in
+          // `normalizeTransitionInput`), so this second `findLegalTransition` call is unreachable
+          // dead code on any live path today — mutating it away leaves every test green. It is kept
+          // deliberately as defense-in-depth against a future refactor that decouples `currentState`
+          // from the staleness check above (e.g. reordering, or a new code path that reaches here
+          // without going through `lockRolloutStateForBootstrapOrRead`'s exact-match guard) — never
+          // trusts the caller's claim alone, only currently redundant with it.
+          const legal = findLegalTransition(currentState, input.targetState)
+          if (!legal) fail('W4C3A_ROLLOUT_CONTROL_ILLEGAL_TRANSITION')
 
-      const batchIds = await allOrgBatchIds(trx, input.orgId)
-      await lockControlDomain(trx, input.orgId, batchIds)
-      for (const batchId of batchIds) {
-        const state = await loadBatchReferenceState(trx, input.orgId, batchId)
-        if (!state.closed && !state.hasFrozenPreimage) fail('W4C3A_ROLLOUT_CONTROL_UNCLOSED_BATCH')
-      }
+          const batchIds = await allOrgBatchIds(trx, input.orgId)
+          await lockControlDomain(trx, input.orgId, batchIds)
+          for (const batchId of batchIds) {
+            const state = await loadBatchReferenceState(trx, input.orgId, batchId)
+            if (!state.closed && !state.hasFrozenPreimage) fail('W4C3A_ROLLOUT_CONTROL_UNCLOSED_BATCH')
+          }
 
-      const retryableJobMismatches = await countRetryableJobPostureMismatches(
-        trx,
-        input.orgId,
-        legal.comparisonWritePosture,
-      )
-      if (retryableJobMismatches > 0) fail('W4C3A_ROLLOUT_CONTROL_RETRYABLE_JOB_POSTURE_MISMATCH')
+          const retryableJobMismatches = await countRetryableJobPostureMismatches(
+            trx,
+            input.orgId,
+            legal.comparisonWritePosture,
+          )
+          if (retryableJobMismatches > 0) fail('W4C3A_ROLLOUT_CONTROL_RETRYABLE_JOB_POSTURE_MISMATCH')
 
-      // Resume only (suspended -> authoritative), section 3 bullet 9 (P2-4, PR #4773 gate):
-      // "preserved authoritative jobs remain retryable WITHOUT operation rows."
-      let retryableJobsWithOperationRows = 0
-      if (isResumePair(currentState, input.targetState)) {
-        retryableJobsWithOperationRows = await countRetryableJobsWithOperationRows(trx, input.orgId)
-        if (retryableJobsWithOperationRows > 0) fail('W4C3A_ROLLOUT_CONTROL_RETRYABLE_JOB_HAS_OPERATION_ROWS')
-      }
+          // Resume only (suspended -> authoritative), section 3 bullet 9 (P2-4, PR #4773 gate):
+          // "preserved authoritative jobs remain retryable WITHOUT operation rows."
+          let retryableJobsWithOperationRows = 0
+          if (isResumePair(currentState, input.targetState)) {
+            retryableJobsWithOperationRows = await countRetryableJobsWithOperationRows(trx, input.orgId)
+            if (retryableJobsWithOperationRows > 0) fail('W4C3A_ROLLOUT_CONTROL_RETRYABLE_JOB_HAS_OPERATION_ROWS')
+          }
 
-      let nonterminalLegacyJobs = 0
-      if (CALCULATION_ENTRY_TARGETS.has(input.targetState)) {
-        nonterminalLegacyJobs = await countNonterminalNullVersionLegacyJobs(trx, input.orgId)
-        if (nonterminalLegacyJobs > 0) fail('W4C3A_ROLLOUT_CONTROL_LEGACY_JOB_ACTIVE')
-      }
+          let nonterminalLegacyJobs = 0
+          if (CALCULATION_ENTRY_TARGETS.has(input.targetState)) {
+            nonterminalLegacyJobs = await countNonterminalNullVersionLegacyJobs(trx, input.orgId)
+            if (nonterminalLegacyJobs > 0) fail('W4C3A_ROLLOUT_CONTROL_LEGACY_JOB_ACTIVE')
+          }
 
-      let incompleteOperations = 0
-      let unresolvedReviews = 0
-      let defectiveRequestSnapshots = 0
-      let defectiveRequestSnapshotsByCell: AttendanceRequestSnapshotDefectCountsV1 =
-        emptyAttendanceRequestSnapshotDefectCounts()
-      if (ELIGIBILITY_AUTHORITY_TARGETS.has(input.targetState)) {
-        incompleteOperations = await countIncompleteOperations(trx, input.orgId)
-        if (incompleteOperations > 0) fail('W4C3A_ROLLOUT_CONTROL_INCOMPLETE_OPERATION')
-        unresolvedReviews = await countUnresolvedIngressReviews(trx, input.orgId)
-        if (unresolvedReviews > 0) fail('W4C3A_ROLLOUT_CONTROL_UNRESOLVED_REVIEW')
-        const snapshotDefects = await classifyAttendanceRequestSnapshotDefectsV1(trx, input.orgId)
-        defectiveRequestSnapshots = snapshotDefects.totalDefectiveRequests
-        defectiveRequestSnapshotsByCell = snapshotDefects.byCell
-        if (defectiveRequestSnapshots > 0) fail('W4C3A_ROLLOUT_CONTROL_REQUEST_SNAPSHOT_DEFECTIVE')
-      }
+          let incompleteOperations = 0
+          let unresolvedReviews = 0
+          let defectiveRequestSnapshots = 0
+          let defectiveRequestSnapshotsByCell: AttendanceRequestSnapshotDefectCountsV1 =
+            emptyAttendanceRequestSnapshotDefectCounts()
+          if (ELIGIBILITY_AUTHORITY_TARGETS.has(input.targetState)) {
+            incompleteOperations = await countIncompleteOperations(trx, input.orgId)
+            if (incompleteOperations > 0) fail('W4C3A_ROLLOUT_CONTROL_INCOMPLETE_OPERATION')
+            unresolvedReviews = await countUnresolvedIngressReviews(trx, input.orgId)
+            if (unresolvedReviews > 0) fail('W4C3A_ROLLOUT_CONTROL_UNRESOLVED_REVIEW')
+            const snapshotDefects = await classifyAttendanceRequestSnapshotDefectsV1(trx, input.orgId)
+            defectiveRequestSnapshots = snapshotDefects.totalDefectiveRequests
+            defectiveRequestSnapshotsByCell = snapshotDefects.byCell
+            if (defectiveRequestSnapshots > 0) fail('W4C3A_ROLLOUT_CONTROL_REQUEST_SNAPSHOT_DEFECTIVE')
+          }
 
-      // Gate D (owner completion gate, PR #4839, 20260810): a promotion INTO 'authoritative' —
-      // covers BOTH legal rows that target it, promotion (:92) and resume (:95), via this single
-      // `targetState` condition — is refused while either W4C-2 authoritative-mode entrypoint
-      // (`live_punch`, `scheduled`) remains undelivered
-      // (`packages/core-backend/src/attendance/w4c2-authoritative-delivery.ts`). Deliberately
-      // NOT keyed on `legal.comparisonWritePosture === 'authoritative'`: that posture is ALSO
-      // true for the `authoritative -> suspended` de-escalation row (:94), and keying on it
-      // would block the only escape hatch out of a stuck `authoritative` org. Placed as the LAST
-      // precondition, after every section-3 predicate above and strictly before the event INSERT
-      // below: existing pinned refusal codes for an authoritative target
-      // (RETRYABLE_JOB_HAS_OPERATION_ROWS, INCOMPLETE_OPERATION) fire first, unaffected by this
-      // addition. Values-free: the thrown code names no org, no entrypoint, no count. Zero
-      // writes: this throw happens inside the same transaction as every predicate above it and
-      // before the transaction's only two DML statements (the event INSERT immediately below,
-      // the state UPDATE after it) — a throw here is caught by `runControlTransaction` /
-      // `runAttendanceResultOperationTransactionV1`, which rolls the whole transaction back, the
-      // same mechanism every other precondition failure in this function already relies on.
-      if (
-        input.targetState === 'authoritative' &&
-        attendanceW4C2UndeliveredAuthoritativeEntrypointCountV1() > 0
-      ) {
-        fail('W4C3A_ROLLOUT_CONTROL_AUTHORITATIVE_ENTRYPOINT_NOT_DELIVERED')
-      }
+          // Gate D (owner completion gate, PR #4839, 20260810): a promotion INTO 'authoritative' —
+          // covers BOTH legal rows that target it, promotion (:92) and resume (:95), via this single
+          // `targetState` condition — is refused while either W4C-2 authoritative-mode entrypoint
+          // (`live_punch`, `scheduled`) remains undelivered
+          // (`packages/core-backend/src/attendance/w4c2-authoritative-delivery.ts`). Deliberately
+          // NOT keyed on `legal.comparisonWritePosture === 'authoritative'`: that posture is ALSO
+          // true for the `authoritative -> suspended` de-escalation row (:94), and keying on it
+          // would block the only escape hatch out of a stuck `authoritative` org. Placed as the LAST
+          // precondition, after every section-3 predicate above and strictly before the event INSERT
+          // below: existing pinned refusal codes for an authoritative target
+          // (RETRYABLE_JOB_HAS_OPERATION_ROWS, INCOMPLETE_OPERATION) fire first, unaffected by this
+          // addition. Values-free: the thrown code names no org, no entrypoint, no count. Zero
+          // writes: this throw happens inside the same transaction as every predicate above it and
+          // before the transaction's only two DML statements (the event INSERT immediately below,
+          // the state UPDATE after it) — a throw here is caught by `runControlTransaction` /
+          // `runAttendanceResultOperationTransactionV1`, which rolls the whole transaction back, the
+          // same mechanism every other precondition failure in this function already relies on.
+          if (
+            input.targetState === 'authoritative' &&
+            attendanceW4C2UndeliveredAuthoritativeEntrypointCountV1() > 0
+          ) {
+            fail('W4C3A_ROLLOUT_CONTROL_AUTHORITATIVE_ENTRYPOINT_NOT_DELIVERED')
+          }
 
-      // Section 2.8 literal order: the event insert is attempted FIRST; the rollout-state UPDATE
-      // happens only after it succeeds. Both share one transaction, so either order is atomic —
-      // a failure at any point rolls back both — but this ordering also lets a same-transaction
-      // failure-injection hook independently exercise each of gate 7's two clauses.
-      await beforeEventInsertForTests?.()
-      await trx.query(
-        `INSERT INTO attendance_calculation_rollout_events
+          // Section 2.8 literal order: the event insert is attempted FIRST; the rollout-state UPDATE
+          // happens only after it succeeds. Both share one transaction, so either order is atomic —
+          // a failure at any point rolls back both — but this ordering also lets a same-transaction
+          // failure-injection hook independently exercise each of gate 7's two clauses.
+          await beforeEventInsertForTests?.()
+          await trx.query(
+            `INSERT INTO attendance_calculation_rollout_events
          (org_id, prior_state, new_state, reason_code, engine_version, actor_id, evidence)
          VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
-        [
-          input.orgId,
-          currentState,
-          input.targetState,
-          input.reasonCode,
-          input.engineVersion,
-          input.actorId,
-          JSON.stringify({
-            schemaVersion: 1,
-            manifestSha256: input.evidenceManifestSha256,
-            correlationId: input.correlationId,
-            comparisonWritePosture: legal.comparisonWritePosture,
-            preconditionCounts: {
-              retryableJobPostureMismatches: retryableJobMismatches,
-              retryableJobsWithOperationRows,
-              nonterminalLegacyJobs,
-              incompleteOperations,
-              unresolvedReviews,
-              defectiveRequestSnapshots,
-              defectiveRequestSnapshotsByCell,
-            },
-            references: input.evidenceReferences,
-          }),
-        ],
-      )
-      await beforeStateUpdateForTests?.()
-      await trx.query(
-        `UPDATE attendance_calculation_rollout_state
+            [
+              input.orgId,
+              currentState,
+              input.targetState,
+              input.reasonCode,
+              input.engineVersion,
+              input.actorId,
+              JSON.stringify({
+                schemaVersion: 1,
+                manifestSha256: input.evidenceManifestSha256,
+                correlationId: input.correlationId,
+                comparisonWritePosture: legal.comparisonWritePosture,
+                preconditionCounts: {
+                  retryableJobPostureMismatches: retryableJobMismatches,
+                  retryableJobsWithOperationRows,
+                  nonterminalLegacyJobs,
+                  incompleteOperations,
+                  unresolvedReviews,
+                  defectiveRequestSnapshots,
+                  defectiveRequestSnapshotsByCell,
+                },
+                references: input.evidenceReferences,
+              }),
+            ],
+          )
+          await beforeStateUpdateForTests?.()
+          await trx.query(
+            `UPDATE attendance_calculation_rollout_state
             SET state = $2, prior_state = state, engine_version = $3, reason_code = $4,
                 actor_id = $5, changed_at = now(), version = version + 1
           WHERE org_id = $1`,
-        [input.orgId, input.targetState, input.engineVersion, input.reasonCode, input.actorId],
-      )
-      return Object.freeze({ orgId: input.orgId, state: input.targetState, batchId: null })
-    })
-  } finally {
-    // Released unconditionally, including on the input-validation/staleness/predicate-failure
-    // paths above (all of which throw): a normal success or precondition rejection must never
-    // leave the session holding this lock for the next checkout of this pooled connection.
-    //
-    // The `.catch(() => undefined)` is deliberate, not sloppy: a `finally` block that itself
-    // throws REPLACES whatever the `try` block returned or threw — so an unguarded release
-    // failure here (e.g. a dropped connection) would turn an already-COMMITTED transition into
-    // a thrown exception, or replace a typed `W4C3A_ROLLOUT_CONTROL_*` predicate rejection with
-    // an opaque connection error. Both are strictly worse than a lock outliving this call by one
-    // dropped-connection's remaining lifetime — and PostgreSQL still releases every session-level
-    // advisory lock automatically once the server observes that connection close (see
-    // `acquireAttendanceCalculationRolloutLockSessionExclusiveV1`'s doc comment), so nothing here
-    // is a permanent leak even when the release call itself fails.
-    await releaseAttendanceCalculationRolloutLockSessionExclusiveV1(connection, orgKey).catch(() => undefined)
-  }
+            [input.orgId, input.targetState, input.engineVersion, input.reasonCode, input.actorId],
+          )
+          return Object.freeze({ orgId: input.orgId, state: input.targetState, batchId: null })
+        })
+      } finally {
+        // Released unconditionally, including on the input-validation/staleness/predicate-failure
+        // paths above (all of which throw): a normal success or precondition rejection must never
+        // leave the session holding this lock for the next checkout of this pooled connection.
+        //
+        // The `.catch(() => undefined)` is deliberate, not sloppy: a `finally` block that itself
+        // throws REPLACES whatever the `try` block returned or threw — so an unguarded release
+        // failure here (e.g. a dropped connection) would turn an already-COMMITTED transition into
+        // a thrown exception, or replace a typed `W4C3A_ROLLOUT_CONTROL_*` predicate rejection with
+        // an opaque connection error. Both are strictly worse than a lock outliving this call by one
+        // dropped-connection's remaining lifetime — and PostgreSQL still releases every session-level
+        // advisory lock automatically once the server observes that connection close (see
+        // `acquireAttendanceCalculationRolloutLockSessionExclusiveV1`'s doc comment), so nothing here
+        // is a permanent leak even when the release call itself fails.
+        await releaseAttendanceCalculationRolloutLockSessionExclusiveV1(lease, orgKey).catch(() => undefined)
+      }
+    },
+    () => new AttendanceW4IdentityError('W4C0_CONNECTION_NOT_IDLE'),
+  )
 }

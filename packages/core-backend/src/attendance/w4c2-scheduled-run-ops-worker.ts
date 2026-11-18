@@ -27,8 +27,7 @@
  * `abandoned` transition." That is the OTHER half of this file, `abandonScheduledRunOnceV1`,
  * which is the wedge's actual exit — not the sweep.
  */
-import type { Pool, PoolClient } from 'pg'
-import type { AttendanceW4TransactionClientV1 } from './w4c0-identity'
+import { attendanceOwningSessionForClientV1, type AttendanceManagedPgPool } from './attendance-owning-session'
 import { attendanceW4ConnectionDiscardV1, runAttendanceResultOperationTransactionV1 } from './w4c0-operation-registry'
 import { createAuthorizedAttendanceWriteContextV1 } from './w4c0-authorization'
 import {
@@ -226,14 +225,14 @@ export interface AttendanceScheduledRunSweepOptionsV1 {
  * hard failure. `errored > 0` additionally logs at `warn`.
  */
 export async function sweepAttendanceScheduledRunsOnceV1(
-  pool: Pick<Pool, 'connect'>,
+  pool: Pick<AttendanceManagedPgPool, 'connect'>,
   options: AttendanceScheduledRunSweepOptionsV1,
 ): Promise<AttendanceScheduledRunSweepTickResultV1> {
   const limit =
     Number.isInteger(options.limit) && (options.limit as number) > 0 ? (options.limit as number) : SWEEP_DEFAULT_LIMIT
   const logger = options.logger ?? noopSweepTickLogger
 
-  const scanClient = (await pool.connect()) as unknown as PoolClient
+  const scanClient = await pool.connect()
   let scanDiscard: Error | undefined
   let candidates: readonly { orgId: string; initiator: string; workDate: string; runId: string }[]
   let backlogRemaining: number
@@ -242,7 +241,7 @@ export async function sweepAttendanceScheduledRunsOnceV1(
   try {
     ;({ candidates, backlogRemaining, neverAttemptedRunning, oldestRunningAttemptAgeSeconds } =
       await runAttendanceResultOperationTransactionV1(
-        scanClient as unknown as AttendanceW4TransactionClientV1,
+        attendanceOwningSessionForClientV1(scanClient),
         async (trx) => {
           // Scan (and its own durable-rotation write-back) FIRST, then read the post-scan
           // snapshot below — ordering is load-bearing, see `neverAttemptedRunning`'s doc comment
@@ -283,12 +282,12 @@ export async function sweepAttendanceScheduledRunsOnceV1(
   let skipped = 0
   let errored = 0
   for (const candidate of candidates) {
-    const client = (await pool.connect()) as unknown as PoolClient
+    const client = await pool.connect()
     let outcome: Awaited<ReturnType<typeof sweepAttendanceScheduledRunCandidateV1>> | null = null
     let discard: Error | undefined
     try {
       outcome = await runAttendanceResultOperationTransactionV1(
-        client as unknown as AttendanceW4TransactionClientV1,
+        attendanceOwningSessionForClientV1(client),
         (trx) => sweepAttendanceScheduledRunCandidateV1(trx, candidate as AttendanceScheduledRunSweepCandidateV1),
       )
     } catch (error) {
@@ -357,7 +356,7 @@ export interface AttendanceScheduledRunAdminAbandonInputV1 {
  * cross-org capability).
  */
 export async function abandonScheduledRunOnceV1(
-  pool: Pick<Pool, 'connect'>,
+  pool: Pick<AttendanceManagedPgPool, 'connect'>,
   input: AttendanceScheduledRunAdminAbandonInputV1,
 ): Promise<AttendanceScheduledRunAbandonOutcomeV1> {
   const callerIdentity = createAuthorizedAttendanceWriteContextV1({
@@ -369,11 +368,11 @@ export async function abandonScheduledRunOnceV1(
     capability: 'retirement',
     sourceRef: 'ref:w4c2-scheduled-run-admin-abandon',
   })
-  const client = (await pool.connect()) as unknown as PoolClient
+  const client = await pool.connect()
   let discard: Error | undefined
   try {
     return await runAttendanceResultOperationTransactionV1(
-      client as unknown as AttendanceW4TransactionClientV1,
+      attendanceOwningSessionForClientV1(client),
       (trx) =>
         abandonAttendanceScheduledRunV1(trx, callerIdentity, { orgId: input.orgId, runId: input.runId }, input.reasonCode),
     )

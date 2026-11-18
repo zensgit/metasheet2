@@ -1,3 +1,4 @@
+import { AttendanceManagedPgPool } from '../../src/attendance/attendance-owning-session'
 import { requestOnlinePunchFixture, executeHistoricalPunchFixture } from '../utils/attendance-online-punch-fixture'
 /**
  * W4C-2 (#4556 lock §12.3) — three-posture matrix for legacy-only business time,
@@ -54,7 +55,7 @@ import * as path from 'path'
 import net from 'net'
 import http from 'http'
 import { createHash, randomUUID } from 'crypto'
-import { Pool } from 'pg'
+import type { Pool } from 'pg'
 import { assertLegacyPunchResponseGoldenShapeV1 } from '../utils/attendance-w4c2-golden-response'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
@@ -229,7 +230,7 @@ describeDb('W4C-2 posture matrix + V2 freeze + env-gated outbox drain (real DB, 
     const address = server.getAddress()
     if (!address || typeof address === 'string') throw new Error('server did not expose a TCP address')
     baseUrl = `http://127.0.0.1:${address.port}`
-    pool = new Pool({ connectionString: dbUrl })
+    pool = new AttendanceManagedPgPool({ connectionString: dbUrl })
 
     await insertRolloutRow(legacyOrg, 'legacy')
     await insertRolloutRow(shadowOrg, 'shadow')

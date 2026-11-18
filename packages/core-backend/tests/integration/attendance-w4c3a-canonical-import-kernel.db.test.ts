@@ -1,8 +1,10 @@
+import { attendanceOwnedNativeQueryProbeV1, attendanceNativeClientForCheckoutV1 } from '../helpers/attendance-owned-native-query-probe'
 import crypto from 'node:crypto'
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Client, Pool, type PoolClient } from 'pg'
+import { AttendanceManagedPgPool, withAttendanceExclusiveIdleSessionV1, type AttendanceSessionLeaseV1 } from '../../src/attendance/attendance-owning-session'
 
 import {
   claimAttendanceCanonicalImportRegistryV1,
@@ -621,12 +623,15 @@ describeIfDatabase('W4C-3a canonical import kernel (real PostgreSQL)', () => {
     url.pathname = `/${scratchName}`
     for (const adapted of [false, true]) {
       const options = { connectionString: url.toString(), query_timeout: 40 }
-      const client = new Client(options)
-      await client.connect()
-      try {
+      const owningPool = adapted ? new AttendanceManagedPgPool(options) : undefined
+      const rawClient = adapted ? undefined : new Client(options)
+      const checkout = owningPool ? await owningPool.connect() : undefined
+      const client = checkout ?? rawClient!
+      await rawClient?.connect()
+      const exercise = async (connection: PoolClient | AttendanceSessionLeaseV1) => {
         const setup = (text: string) => {
           const config = { text, query_timeout: 1000 }
-          return client.query<Record<string, unknown>>(config)
+          return connection.query(config)
         }
         await setup('BEGIN')
         await setup('CREATE TEMP TABLE delayed_plan_commit (n integer)')
@@ -638,16 +643,31 @@ describeIfDatabase('W4C-3a canonical import kernel (real PostgreSQL)', () => {
           FOR EACH ROW EXECUTE FUNCTION pg_temp.delay_plan_commit()`)
         await setup('INSERT INTO delayed_plan_commit VALUES (1)')
         if (adapted) {
-          await createAttendanceLegacyPlanCommitConnectionV1(client).query('COMMIT')
+          await connection.query('COMMIT')
           // Only COMMIT is measured against the 40 ms read timer; the read-back has the fixture budget.
           expect((await setup('SELECT n FROM delayed_plan_commit')).rows).toEqual([{ n: 1 }])
         } else {
-          await expect(client.query('COMMIT')).rejects.toThrow('Query read timeout')
+          await expect(connection.query('COMMIT')).rejects.toThrow('Query read timeout')
+        }
+      }
+      try {
+        if (checkout) {
+          await withAttendanceExclusiveIdleSessionV1(
+            createAttendanceLegacyPlanCommitConnectionV1(checkout),
+            exercise,
+          )
+        } else {
+          await exercise(client)
         }
       } finally {
         // A read timeout has an ambiguous commit outcome: never reuse that
         // connection in this control. All objects belong to its temp schema.
-        await client.end()
+        if (checkout) {
+          checkout.release(true)
+          await owningPool?.end()
+        } else {
+          await rawClient?.end()
+        }
       }
     }
   })
@@ -655,10 +675,11 @@ describeIfDatabase('W4C-3a canonical import kernel (real PostgreSQL)', () => {
   it('preserves the transaction bound through deferred COMMIT with pool-shaped startup timers', async () => {
     const url = new URL(dbUrl as string)
     url.pathname = `/${scratchName}`
-    const client = new Client({
+    const owningPool = new AttendanceManagedPgPool({
       connectionString: url.toString(), query_timeout: 40, statement_timeout: 40,
     })
-    await client.connect()
+    const client = await owningPool.connect()
+    let restoreNative: (() => void) | undefined
     try {
       const setup = (text: string) => client.query({ text, query_timeout: 1000 })
       // Fixture DDL is outside the measured transaction and its short timers.
@@ -671,29 +692,40 @@ describeIfDatabase('W4C-3a canonical import kernel (real PostgreSQL)', () => {
         AFTER INSERT ON pool_delayed_commit DEFERRABLE INITIALLY DEFERRED
         FOR EACH ROW EXECUTE FUNCTION pg_temp.pool_delay_commit()`)
       await setup("SET statement_timeout = '40ms'")
-      // Only COMMIT is measured against the pool-shaped 40 ms read timer, and only the adapter may
-      // lift it, so COMMIT reaches the client exactly as the adapter sends it. Every other statement
-      // (the runner's idle probe, BEGIN and set_config, this case's reads and INSERT) gets the
-      // fixture budget: a stall on a statement the case does not measure must not fail it.
-      const budgeted = {
-        query: (text: unknown, values?: unknown[]) => (typeof text === 'string' && text !== 'COMMIT'
-          ? client.query({ text, values, query_timeout: 1000 })
-          : client.query(text as string, values)),
-      } as unknown as Pick<PoolClient, 'query'>
-      const connection = createAttendanceLegacyPlanCommitConnectionV1(budgeted)
+      // Preserve the fixture's 1000 ms read budget below the real lease.
+      // COMMIT retains the adapter's native config and existing transaction bound.
+      const nativeCalls: Array<{ text: string; queryTimeout: unknown }> = []
+      const nativePid = attendanceNativeClientForCheckoutV1(owningPool, client).processID
+      const probe = attendanceOwnedNativeQueryProbeV1(owningPool, client, (call) => {
+        const first = call.args[0]
+        const config: { text: string; query_timeout?: number } = typeof first === 'string' ? { text: first }
+          : first as { text: string; query_timeout?: number }
+        const forwarded = call.text === 'COMMIT' ? config : { ...config, query_timeout: 1000 }
+        nativeCalls.push({ text: call.text, queryTimeout: forwarded.query_timeout })
+        return call.text === 'COMMIT' ? call.next()
+          : call.next(forwarded, ...call.args.slice(1))
+      })
+      restoreNative = probe.restore
+      const connection = createAttendanceLegacyPlanCommitConnectionV1(client)
       await runAttendanceResultOperationTransactionV1(connection, async (transaction) => {
-        expect(transaction).toBe(connection)
+        expect((await transaction.query('SELECT pg_backend_pid() AS pid')).rows).toEqual([{ pid: nativePid }])
         expect((await transaction.query(
           "SELECT setting FROM pg_settings WHERE name = 'statement_timeout'",
         )).rows).toEqual([{ setting: '180000' }])
         await transaction.query('INSERT INTO pool_delayed_commit VALUES (1)')
       })
+      expect(nativeCalls.filter(call => call.text === 'COMMIT')).toEqual([
+        { text: 'COMMIT', queryTimeout: 180000 },
+      ])
+      expect(nativeCalls.filter(call => call.text !== 'COMMIT').every(call => call.queryTimeout === 1000)).toBe(true)
       expect((await setup('SELECT n FROM pool_delayed_commit')).rows).toEqual([{ n: 1 }])
       expect((await setup(
         "SELECT setting FROM pg_settings WHERE name = 'statement_timeout'",
       )).rows).toEqual([{ setting: '40' }])
     } finally {
-      await client.end()
+      restoreNative?.()
+      client.release(true)
+      await owningPool.end()
     }
   })
 

@@ -1,3 +1,4 @@
+import { attendanceOwnedNativeQueryProbeV1 } from '../helpers/attendance-owned-native-query-probe'
 /**
  * Core-only W4C-3a rollout-control proof.
  *
@@ -13,6 +14,7 @@ import crypto from 'node:crypto'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
+import { AttendanceManagedPgPool, attendanceOwningSessionForClientV1 } from '../../src/attendance/attendance-owning-session'
 import { up as w4c0Up } from '../../src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage'
 import {
   __setW4C3aRolloutControlAfterExclusiveLockForTests,
@@ -484,7 +486,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
     await adminPool.query(`CREATE DATABASE ${scratchName}`)
     const scratchUrl = new URL(dbUrl as string)
     scratchUrl.pathname = `/${scratchName}`
-    pool = new Pool({ connectionString: scratchUrl.toString() })
+    pool = new AttendanceManagedPgPool({ connectionString: scratchUrl.toString() })
     await createBase(pool)
     // Kysely owns the supplied pool on destroy; the test retains that pool for
     // the two live contender connections below and closes it in afterAll.
@@ -510,7 +512,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
     const client = await pool.connect()
     try {
       await expect(
-        transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+        transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
           orgId, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
           evidenceManifestSha256: hex64('unclosed-batch'), evidenceReferences: baseRefs('unclosed'),
@@ -607,7 +609,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
 
     const client = await pool.connect()
     try {
-      await expect(closeLegacyRollbackWindowV1(transactionClient(client), {
+      await expect(closeLegacyRollbackWindowV1(attendanceOwningSessionForClientV1(client), {
         orgId: integrationOrgId,
         batchId: integrationBatchId,
         actorId,
@@ -638,13 +640,13 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
     const closeClient = await pool.connect()
     const transitionClient = await pool.connect()
     try {
-      const close = closeLegacyRollbackWindowV1(transactionClient(closeClient), {
+      const close = closeLegacyRollbackWindowV1(attendanceOwningSessionForClientV1(closeClient), {
         orgId, batchId, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
         reasonCode: 'legacy_rollback_window_closed',
       })
       await entered.promise
       let transitionSettled = false
-      const transition = transitionAttendanceCalculationRolloutV1(transactionClient(transitionClient), {
+      const transition = transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(transitionClient), {
         orgId, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
         targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
         evidenceManifestSha256: hex64('serialize-close-then-transition'), evidenceReferences: baseRefs('sct'),
@@ -685,7 +687,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
     const transitionClient = await pool.connect()
     const closeClient = await pool.connect()
     try {
-      const transition = transitionAttendanceCalculationRolloutV1(transactionClient(transitionClient), {
+      const transition = transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(transitionClient), {
         orgId, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
         targetState: 'eligible', expectedState: 'shadow', expectedVersion: 2,
         evidenceManifestSha256: hex64('serialize-transition-before-close'), evidenceReferences: baseRefs('stbc'),
@@ -693,7 +695,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       })
       await entered.promise
       let closeSettled = false
-      const duplicateClose = closeLegacyRollbackWindowV1(transactionClient(closeClient), {
+      const duplicateClose = closeLegacyRollbackWindowV1(attendanceOwningSessionForClientV1(closeClient), {
         orgId, batchId, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
         reasonCode: 'legacy_rollback_window_closed',
       }).finally(() => { closeSettled = true })
@@ -731,7 +733,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
         expect(illegalPairs.length).toBe(25 - LEGAL_PAIRS.length)
         for (const [from, to] of illegalPairs) {
           await expect(
-            transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+            transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
               orgId: crypto.randomUUID(), actorId, correlationId: crypto.randomUUID(),
               engineVersion: 'w4c3a-control-test', targetState: to, expectedState: from, expectedVersion: 1,
               evidenceManifestSha256: hex64(`matrix-${from}-${to}`), evidenceReferences: baseRefs(`matrix-${from}-${to}`),
@@ -754,7 +756,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
         expectedVersion: number,
         refs = baseRefs(`${walkOrg}-${expectedVersion}`),
       ) =>
-        transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+        transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
           orgId: walkOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: target, expectedState, expectedVersion,
           evidenceManifestSha256: hex64(`walk-${walkOrg}-${expectedVersion}`), evidenceReferences: refs,
@@ -798,7 +800,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       const client = await pool.connect()
       try {
         await expect(
-          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: strangerOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
             evidenceManifestSha256: hex64('stranger'), evidenceReferences: baseRefs('stranger'),
@@ -820,7 +822,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       const client = await pool.connect()
       try {
         await expect(
-          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: freshOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'eligible', expectedState: 'shadow', expectedVersion: 1,
             evidenceManifestSha256: hex64('fresh-non-bootstrap'), evidenceReferences: baseRefs('fnb'),
@@ -844,7 +846,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       // Bring the org to shadow/version=2 BEFORE the race (sequential setup, not part of the race).
       const setupClient = await pool.connect()
       try {
-        await transitionAttendanceCalculationRolloutV1(transactionClient(setupClient), {
+        await transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(setupClient), {
           orgId: raceOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
           evidenceManifestSha256: hex64('race-setup'), evidenceReferences: baseRefs('race-setup'),
@@ -872,7 +874,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       const staleClient = await pool.connect()
       try {
         // Connection B (winner) races in FIRST, pauses right after the exclusive lock.
-        const winner = transitionAttendanceCalculationRolloutV1(transactionClient(winnerClient), {
+        const winner = transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(winnerClient), {
           orgId: raceOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: 'eligible', expectedState: 'shadow', expectedVersion: 2,
           evidenceManifestSha256: hex64('race-winner'), evidenceReferences: baseRefs('race-winner'),
@@ -883,7 +885,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
         // Connection A (stale) attempts its OWN transition using the preflight snapshot. It must
         // genuinely block on the SAME exclusive advisory lock B is holding — not settle early.
         let staleSettled = false
-        const stale = transitionAttendanceCalculationRolloutV1(transactionClient(staleClient), {
+        const stale = transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(staleClient), {
           orgId: raceOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: 'legacy', expectedState: preflight.rows[0].state, expectedVersion: preflight.rows[0].version,
           evidenceManifestSha256: hex64('race-stale'), evidenceReferences: baseRefs('race-stale'),
@@ -929,7 +931,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       allow(roundTripOrg)
       const client = await pool.connect()
       try {
-        await transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+        await transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
           orgId: roundTripOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
           evidenceManifestSha256: hex64('round-trip-1'), evidenceReferences: baseRefs('round-trip-1'),
@@ -942,13 +944,13 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
         )
         expect(preflight.rows[0]).toMatchObject({ state: 'shadow', version: 2 })
 
-        await transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+        await transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
           orgId: roundTripOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: 'eligible', expectedState: 'shadow', expectedVersion: 2,
           evidenceManifestSha256: hex64('round-trip-2'), evidenceReferences: baseRefs('round-trip-2'),
           reasonCode: 'rollout_transition',
         })
-        await transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+        await transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
           orgId: roundTripOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: 'shadow', expectedState: 'eligible', expectedVersion: 3,
           evidenceManifestSha256: hex64('round-trip-3'), evidenceReferences: baseRefs('round-trip-3'),
@@ -962,7 +964,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
         )).resolves.toMatchObject({ rows: [{ state: 'shadow', version: 4 }] })
 
         await expect(
-          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: roundTripOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'legacy', expectedState: preflight.rows[0].state, expectedVersion: preflight.rows[0].version,
             evidenceManifestSha256: hex64('round-trip-stale'), evidenceReferences: baseRefs('round-trip-stale'),
@@ -993,7 +995,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       const client = await pool.connect()
       try {
         await expect(
-          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: jobOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
             evidenceManifestSha256: hex64('job-mismatch'), evidenceReferences: baseRefs('job-mismatch'),
@@ -1043,7 +1045,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       const transitionClient = await pool.connect()
       const writerClient = await pool.connect()
       try {
-        const transition = transitionAttendanceCalculationRolloutV1(transactionClient(transitionClient), {
+        const transition = transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(transitionClient), {
           orgId: raceOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
           evidenceManifestSha256: hex64('job-writer-race'), evidenceReferences: baseRefs('job-writer-race'),
@@ -1097,7 +1099,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
         )
 
         let transitionSettled = false
-        const transition = transitionAttendanceCalculationRolloutV1(transactionClient(transitionClient), {
+        const transition = transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(transitionClient), {
           orgId: raceOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
           evidenceManifestSha256: hex64('race-a-transition'), evidenceReferences: baseRefs('race-a-transition'),
@@ -1129,7 +1131,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       allow(raceOrg)
       const setupClient = await pool.connect()
       try {
-        await transitionAttendanceCalculationRolloutV1(transactionClient(setupClient), {
+        await transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(setupClient), {
           orgId: raceOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
           evidenceManifestSha256: hex64('race-c-setup'), evidenceReferences: baseRefs('race-c-setup'),
@@ -1150,7 +1152,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
         )
 
         let transitionSettled = false
-        const transition = transitionAttendanceCalculationRolloutV1(transactionClient(transitionClient), {
+        const transition = transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(transitionClient), {
           orgId: raceOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: 'eligible', expectedState: 'shadow', expectedVersion: 2,
           evidenceManifestSha256: hex64('race-c-transition'), evidenceReferences: baseRefs('race-c-transition'),
@@ -1182,7 +1184,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       allow(raceOrg)
       const setupClient = await pool.connect()
       try {
-        await transitionAttendanceCalculationRolloutV1(transactionClient(setupClient), {
+        await transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(setupClient), {
           orgId: raceOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
           evidenceManifestSha256: hex64('race-d-setup'), evidenceReferences: baseRefs('race-d-setup'),
@@ -1203,7 +1205,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
         )
 
         let transitionSettled = false
-        const transition = transitionAttendanceCalculationRolloutV1(transactionClient(transitionClient), {
+        const transition = transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(transitionClient), {
           orgId: raceOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: 'eligible', expectedState: 'shadow', expectedVersion: 2,
           evidenceManifestSha256: hex64('race-d-transition'), evidenceReferences: baseRefs('race-d-transition'),
@@ -1242,7 +1244,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       allow(raceOrg)
       const setupClient = await pool.connect()
       try {
-        await transitionAttendanceCalculationRolloutV1(transactionClient(setupClient), {
+        await transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(setupClient), {
           orgId: raceOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
           evidenceManifestSha256: hex64('race-e-setup'), evidenceReferences: baseRefs('race-e-setup'),
@@ -1263,7 +1265,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
         )
 
         let transitionSettled = false
-        const transition = transitionAttendanceCalculationRolloutV1(transactionClient(transitionClient), {
+        const transition = transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(transitionClient), {
           orgId: raceOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: 'eligible', expectedState: 'shadow', expectedVersion: 2,
           evidenceManifestSha256: hex64('race-e-transition'), evidenceReferences: baseRefs('race-e-transition'),
@@ -1314,7 +1316,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
         await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
         await client.query('SELECT 1') // fixes the SERIALIZABLE snapshot; no write yet, no xid assigned
         await expect(
-          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: idleOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
             evidenceManifestSha256: hex64('new-b-not-idle'), evidenceReferences: baseRefs('new-b-not-idle'),
@@ -1327,7 +1329,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
           [idleOrg],
         )).resolves.toMatchObject({ rows: [{ n: 0 }] })
         // The caller's own pre-opened transaction is still open and usable afterward — the
-        // probe's `ROLLBACK TO SAVEPOINT` cleanup must not have touched it.
+        // native admission must not have issued any transaction-control SQL.
         await expect(client.query('SELECT 1 AS still_alive')).resolves.toMatchObject({
           rows: [{ still_alive: 1 }],
         })
@@ -1343,7 +1345,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       const client = await pool.connect()
       try {
         await expect(
-          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: idleOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
             evidenceManifestSha256: hex64('new-b-idle-control'), evidenceReferences: baseRefs('new-b-idle-control'),
@@ -1373,7 +1375,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       const client = await pool.connect()
       try {
         await expect(
-          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: hygieneOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
             evidenceManifestSha256: hex64('hygiene-success'), evidenceReferences: baseRefs('hygiene-success'),
@@ -1395,7 +1397,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       const client = await pool.connect()
       try {
         await expect(
-          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: hygieneOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
             evidenceManifestSha256: hex64('hygiene-reject'), evidenceReferences: baseRefs('hygiene-reject'),
@@ -1420,7 +1422,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       const client = await pool.connect()
       try {
         await expect(
-          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: hygieneOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'authoritative', expectedState: 'legacy', expectedVersion: 1, // not in LEGAL_TRANSITIONS
             evidenceManifestSha256: hex64('hygiene-illegal'), evidenceReferences: baseRefs('hygiene-illegal'),
@@ -1444,7 +1446,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       const client = await pool.connect()
       try {
         await expect(
-          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: legacyJobOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
             evidenceManifestSha256: hex64('legacy-job'), evidenceReferences: baseRefs('legacy-job'),
@@ -1468,14 +1470,14 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       await insertIncompleteV1Job(opOrg, 'running')
       const client = await pool.connect()
       try {
-        await transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+        await transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
           orgId: opOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
           evidenceManifestSha256: hex64('op-setup'), evidenceReferences: baseRefs('op-setup'),
           reasonCode: 'rollout_transition',
         })
         await expect(
-          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: opOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'eligible', expectedState: 'shadow', expectedVersion: 2,
             evidenceManifestSha256: hex64('op-blocked'), evidenceReferences: baseRefs('op-blocked'),
@@ -1517,7 +1519,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       seed: string,
       refs = baseRefs(seed),
     ) {
-      return transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+      return transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
         orgId: org, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
         targetState: target, expectedState, expectedVersion,
         evidenceManifestSha256: hex64(seed), evidenceReferences: refs,
@@ -1557,7 +1559,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
         await suspend(client, resumeOrg)
 
         await expect(
-          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: resumeOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'authoritative', expectedState: 'suspended', expectedVersion: 5,
             evidenceManifestSha256: hex64('resume-op-rows-blocked'),
@@ -1601,7 +1603,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
         await suspend(client, resumeOrg)
 
         await expect(
-          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: resumeOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'authoritative', expectedState: 'suspended', expectedVersion: 5,
             evidenceManifestSha256: hex64('resume-op-rows-allowed'),
@@ -1622,14 +1624,14 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       await insertUnresolvedReview(reviewOrg)
       const client = await pool.connect()
       try {
-        await transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+        await transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
           orgId: reviewOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
           evidenceManifestSha256: hex64('review-setup'), evidenceReferences: baseRefs('review-setup'),
           reasonCode: 'rollout_transition',
         })
         await expect(
-          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: reviewOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'eligible', expectedState: 'shadow', expectedVersion: 2,
             evidenceManifestSha256: hex64('review-blocked'), evidenceReferences: baseRefs('review-blocked'),
@@ -1653,14 +1655,14 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       await insertPendingRequest(reqOrg, 'missing_snapshot')
       const client = await pool.connect()
       try {
-        await transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+        await transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
           orgId: reqOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
           evidenceManifestSha256: hex64('req-missing-setup'), evidenceReferences: baseRefs('req-missing-setup'),
           reasonCode: 'rollout_transition',
         })
         await expect(
-          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: reqOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'eligible', expectedState: 'shadow', expectedVersion: 2,
             evidenceManifestSha256: hex64('req-missing-blocked'), evidenceReferences: baseRefs('req-missing-blocked'),
@@ -1686,14 +1688,14 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       try {
         const report = await readAttendanceRequestSnapshotDefectReportV1(transactionClient(client), reqOrg)
         expectSingleCellDefect(report.byCell, 'pendingUnsupported')
-        await transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+        await transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
           orgId: reqOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
           evidenceManifestSha256: hex64('req-unsupported-setup'), evidenceReferences: baseRefs('req-unsupported-setup'),
           reasonCode: 'rollout_transition',
         })
         await expect(
-          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: reqOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'eligible', expectedState: 'shadow', expectedVersion: 2,
             evidenceManifestSha256: hex64('req-unsupported-blocked'), evidenceReferences: baseRefs('req-unsupported-blocked'),
@@ -1742,14 +1744,14 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
         await insertRequestSnapshotFixture(org, testCase.bucket, testCase.kind)
         const client = await pool.connect()
         try {
-          await transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          await transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: org, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
             evidenceManifestSha256: hex64(`${testCase.cell}-setup`), evidenceReferences: baseRefs(`${testCase.cell}-setup`),
             reasonCode: 'rollout_transition',
           })
           await expect(
-            transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+            transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
               orgId: org, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
               targetState: 'eligible', expectedState: 'shadow', expectedVersion: 2,
               evidenceManifestSha256: hex64(`${testCase.cell}-blocked`), evidenceReferences: baseRefs(`${testCase.cell}-blocked`),
@@ -1797,13 +1799,13 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       try {
         const report = await readAttendanceRequestSnapshotDefectReportV1(transactionClient(client), org)
         expect(report).toEqual({ totalDefectiveRequests: 0, byCell: emptyDefectCounts() })
-        await transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+        await transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
           orgId: org, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
           evidenceManifestSha256: hex64('healthy-reversible-setup'), evidenceReferences: baseRefs('healthy-reversible-setup'),
           reasonCode: 'rollout_transition',
         })
-        await expect(transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+        await expect(transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
           orgId: org, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: 'eligible', expectedState: 'shadow', expectedVersion: 2,
           evidenceManifestSha256: hex64('healthy-reversible-ok'), evidenceReferences: baseRefs('healthy-reversible-ok'),
@@ -1858,7 +1860,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
         allow(raceOrg)
         const setupClient = await pool.connect()
         try {
-          await transitionAttendanceCalculationRolloutV1(transactionClient(setupClient), {
+          await transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(setupClient), {
             orgId: raceOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
             evidenceManifestSha256: hex64(`${raceCase.cell}-race-setup`), evidenceReferences: baseRefs(`${raceCase.cell}-race-setup`),
@@ -1879,7 +1881,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
           )
 
           let transitionSettled = false
-          const transition = transitionAttendanceCalculationRolloutV1(transactionClient(transitionClient), {
+          const transition = transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(transitionClient), {
             orgId: raceOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'eligible', expectedState: 'shadow', expectedVersion: 2,
             evidenceManifestSha256: hex64(`${raceCase.cell}-race-transition`), evidenceReferences: baseRefs(`${raceCase.cell}-race-transition`),
@@ -1997,14 +1999,14 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       await insertForgedPayloadStaleFixture(org, 'pending')
       const client = await pool.connect()
       try {
-        await transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+        await transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
           orgId: org, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
           evidenceManifestSha256: hex64('forged-fingerprint-setup'), evidenceReferences: baseRefs('forged-fingerprint-setup'),
           reasonCode: 'rollout_transition',
         })
         await expect(
-          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: org, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'eligible', expectedState: 'shadow', expectedVersion: 2,
             evidenceManifestSha256: hex64('forged-fingerprint-blocked'), evidenceReferences: baseRefs('forged-fingerprint-blocked'),
@@ -2025,7 +2027,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       allow(raceOrg)
       const setupClient = await pool.connect()
       try {
-        await transitionAttendanceCalculationRolloutV1(transactionClient(setupClient), {
+        await transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(setupClient), {
           orgId: raceOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
           evidenceManifestSha256: hex64('forged-race-setup'), evidenceReferences: baseRefs('forged-race-setup'),
@@ -2046,7 +2048,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
         )
 
         let transitionSettled = false
-        const transition = transitionAttendanceCalculationRolloutV1(transactionClient(transitionClient), {
+        const transition = transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(transitionClient), {
           orgId: raceOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: 'eligible', expectedState: 'shadow', expectedVersion: 2,
           evidenceManifestSha256: hex64('forged-race-transition'), evidenceReferences: baseRefs('forged-race-transition'),
@@ -2120,7 +2122,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       const client = await pool.connect()
       try {
         await expect(
-          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: evOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
             evidenceManifestSha256: 'not-a-real-hash', evidenceReferences: baseRefs('bad-hash'),
@@ -2142,7 +2144,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       const client = await pool.connect()
       try {
         await expect(
-          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: evOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
             evidenceManifestSha256: hex64('extra-key'),
@@ -2161,7 +2163,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       const client = await pool.connect()
       try {
         await expect(
-          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: evOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'authoritative', expectedState: 'suspended', expectedVersion: 1,
             evidenceManifestSha256: hex64('resume-missing-refs'), evidenceReferences: baseRefs('resume-missing-refs'),
@@ -2180,7 +2182,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       try {
         const poisoned = { ...baseRefs('poison'), imageSha: '{"secret":"leak"}' } as unknown as EvidenceReferencesV1
         await expect(
-          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: evOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
             evidenceManifestSha256: hex64('poison'), evidenceReferences: poisoned,
@@ -2198,7 +2200,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       const correlationId = crypto.randomUUID()
       const client = await pool.connect()
       try {
-        await transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+        await transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
           orgId: evOrg, actorId, correlationId, engineVersion: 'w4c3a-control-test',
           targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
           evidenceManifestSha256: hex64('event-shape'), evidenceReferences: baseRefs('event-shape'),
@@ -2244,7 +2246,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       const client = await pool.connect()
       try {
         await expect(
-          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: atomicOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
             evidenceManifestSha256: hex64('atomic'), evidenceReferences: baseRefs('atomic'),
@@ -2274,7 +2276,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       const client = await pool.connect()
       try {
         await expect(
-          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: atomicOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'shadow', expectedState: 'legacy', expectedVersion: 1,
             evidenceManifestSha256: hex64('atomic-2'), evidenceReferences: baseRefs('atomic-2'),
@@ -2311,18 +2313,11 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       return WRITE_STATEMENT_PATTERN.test(text)
     }
 
-    function recordingTransactionClient(
-      client: PoolClient,
-      statements: string[],
-    ): AttendanceW4TransactionClientV1 {
-      return {
-        query: (text, values) => {
-          statements.push(text.trim())
-          return client.query(text, values as unknown[]) as unknown as Promise<{
-            rows: Array<Record<string, unknown>>
-          }>
-        },
-      }
+    function recordingTransactionClient(client: PoolClient, statements: string[]) {
+      return attendanceOwnedNativeQueryProbeV1(pool, client, ({ text, next }) => {
+        statements.push(text.trim())
+        return next()
+      }).session
     }
 
     afterEach(() => {
@@ -2338,7 +2333,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       seed: string,
       refs = baseRefs(seed),
     ) {
-      return transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+      return transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
         orgId: org, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
         targetState: target, expectedState, expectedVersion,
         evidenceManifestSha256: hex64(seed), evidenceReferences: refs,
@@ -2511,7 +2506,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
       try {
         await advanceToEligible(client, shippedOrg)
         // (a) the shipped default PROMOTES rather than refusing.
-        await transitionAttendanceCalculationRolloutV1(client as unknown as AttendanceW4TransactionClientV1, {
+        await transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
           orgId: shippedOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
           targetState: 'authoritative', expectedState: 'eligible', expectedVersion: 3,
           evidenceManifestSha256: hex64(`${shippedOrg}-d3-exit`), evidenceReferences: baseRefs(`${shippedOrg}-d3-exit`),
@@ -2530,7 +2525,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
         __setAttendanceW4C2AuthoritativeDeliveryOverrideForTests({ live_punch: true, scheduled: false })
         expect(attendanceW4C2UndeliveredAuthoritativeEntrypointCountV1()).toBe(1)
         await expect(
-          transitionAttendanceCalculationRolloutV1(client as unknown as AttendanceW4TransactionClientV1, {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: controlOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'authoritative', expectedState: 'eligible', expectedVersion: 3,
             evidenceManifestSha256: hex64(`${controlOrg}-d3-exit-ctl`), evidenceReferences: baseRefs(`${controlOrg}-d3-exit-ctl`),
@@ -2558,7 +2553,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
           [promoOrg],
         )
         await expect(
-          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: promoOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'authoritative', expectedState: 'eligible', expectedVersion: 3,
             evidenceManifestSha256: hex64(`${promoOrg}-promo-ok`), evidenceReferences: baseRefs(`${promoOrg}-promo-ok`),
@@ -2585,7 +2580,7 @@ describeIfDatabase('W4C-3a core-only rollout control (real PostgreSQL)', () => {
           [resumeOrg],
         )
         await expect(
-          transitionAttendanceCalculationRolloutV1(transactionClient(client), {
+          transitionAttendanceCalculationRolloutV1(attendanceOwningSessionForClientV1(client), {
             orgId: resumeOrg, actorId, correlationId: crypto.randomUUID(), engineVersion: 'w4c3a-control-test',
             targetState: 'authoritative', expectedState: 'suspended', expectedVersion: 5,
             evidenceManifestSha256: hex64(`${resumeOrg}-resume-ok`), evidenceReferences: resumeRefs(`${resumeOrg}-resume-ok`),

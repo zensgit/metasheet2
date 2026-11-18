@@ -26,6 +26,7 @@ import * as path from 'path'
 import { createRequire } from 'module'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
+import { AttendanceManagedPgPool, attendanceOwningSessionForClientV1 } from '../../src/attendance/attendance-owning-session'
 import type { MetaSheetServer } from '../../src/index'
 import { up } from '../../src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage'
 import type { AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-identity'
@@ -73,7 +74,7 @@ type LivePunchAdapters = {
 }
 
 describeIfDatabase('W4C-2 Gate D2 — authoritative live_punch writer (real DB)', () => {
-  const pool = new Pool({ connectionString: dbUrl })
+  const pool = new AttendanceManagedPgPool({ connectionString: dbUrl })
   let migrationDb: Kysely<unknown> | undefined
   let adapters: LivePunchAdapters
   let priorAllowlistEnv: string | undefined
@@ -142,7 +143,7 @@ describeIfDatabase('W4C-2 Gate D2 — authoritative live_punch writer (real DB)'
     const boundary = createAttendanceLiveScheduledBoundaryV1({
       acquireConnection: async () => {
         const client = await pool.connect()
-        return { client: client as unknown as AttendanceW4TransactionClientV1, release: () => client.release() }
+        return { client: attendanceOwningSessionForClientV1(client), release: () => client.release() }
       },
       legacyAdapters: {
         applyLivePunchLegacy: (trx, args) => {

@@ -44,6 +44,7 @@
 import { randomUUID } from 'node:crypto'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
+import { AttendanceManagedPgPool, attendanceOwningSessionForClientV1 } from '../../src/attendance/attendance-owning-session'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import {
@@ -413,7 +414,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
     for (const [expectedState, targetState] of ladder) {
       await withClient(async (client) => {
         await transitionAttendanceW7ContextSourceV1(
-          asTrx(client),
+          attendanceOwningSessionForClientV1(client),
           input(orgId, { expectedState, targetState, expectedVersion: version }),
         )
       })
@@ -530,7 +531,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
     await adminPool.query(`CREATE DATABASE ${scratchName}`)
     const scratchUrl = new URL(dbUrl)
     scratchUrl.pathname = `/${scratchName}`
-    pool = new Pool({ connectionString: scratchUrl.toString(), max: 12 })
+    pool = new AttendanceManagedPgPool({ connectionString: scratchUrl.toString(), max: 12 })
 
     await createBase(pool)
     // Kysely owns a pool on destroy, so it gets its own; `pool` is retained for
@@ -949,7 +950,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       const before = await stateRow(orgId)
       await withClient(async (client) => {
         await expect(
-          transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId)),
+          transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId)),
         ).rejects.toMatchObject({ code: 'W7_CONTEXT_SOURCE_TRANSITION_ORG_NOT_ALLOWLISTED' })
       })
       expect(await stateRow(orgId)).toEqual(before)
@@ -958,7 +959,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       // POSITIVE CONTROL: the SAME org, allowlisted exactly, transitions.
       process.env[ATTENDANCE_W7_CONTEXT_SOURCE_ALLOWLIST_ENV] = orgId
       await withClient(async (client) => {
-        await transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId))
+        await transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId))
       })
       expect(await stateRow(orgId)).toEqual({ state: 'group_shadow', priorState: 'off', version: 2 })
       expect(await eventCount(orgId)).toBe(1)
@@ -973,7 +974,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       await withClient(async (client) => {
         await expect(
           transitionAttendanceW7ContextSourceV1(
-            asTrx(client),
+            attendanceOwningSessionForClientV1(client),
             input(orgId, { expectedState: 'group_shadow', targetState: 'group_eligible' }),
           ),
         ).rejects.toMatchObject({ code: 'W7_CONTEXT_SOURCE_TRANSITION_STALE_EXPECTED_STATE' })
@@ -984,7 +985,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       // Conjunct 2: right expectedState, wrong expectedVersion.
       await withClient(async (client) => {
         await expect(
-          transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId, { expectedVersion: 7 })),
+          transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId, { expectedVersion: 7 })),
         ).rejects.toMatchObject({ code: 'W7_CONTEXT_SOURCE_TRANSITION_STALE_EXPECTED_STATE' })
       })
       expect(await stateRow(orgId)).toEqual(before)
@@ -992,7 +993,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
 
       // POSITIVE CONTROL: both correct.
       await withClient(async (client) => {
-        await transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId))
+        await transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId))
       })
       expect((await stateRow(orgId))?.state).toBe('group_shadow')
     })
@@ -1020,7 +1021,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       await withClient(async (client) => {
         await expect(
           transitionAttendanceW7ContextSourceV1(
-            asTrx(client),
+            attendanceOwningSessionForClientV1(client),
             input(orgA, { expectedState: 'group_shadow', targetState: 'group_eligible' }),
           ),
         ).rejects.toMatchObject({ code: 'W7_CONTEXT_SOURCE_TRANSITION_STATE_MISSING' })
@@ -1035,7 +1036,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       process.env[W4_ENV] = orgB
       await withClient(async (client) => {
         await expect(
-          transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgB)),
+          transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgB)),
         ).rejects.toMatchObject({ code: 'W7_CONTEXT_SOURCE_TRANSITION_ORG_NOT_ALLOWLISTED' })
       })
       expect(await stateRow(orgB)).toBe(null)
@@ -1044,7 +1045,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       // AND advanced in one call, with the event recorded.
       process.env[ATTENDANCE_W7_CONTEXT_SOURCE_ALLOWLIST_ENV] = orgB
       await withClient(async (client) => {
-        await transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgB))
+        await transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgB))
       })
       expect(await stateRow(orgB)).toEqual({ state: 'group_shadow', priorState: 'off', version: 2 })
       expect(await eventCount(orgB)).toBe(1)
@@ -1060,7 +1061,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       // the honest assertion inverts: the gate no longer blocks here.
       const orgId = await preparedOrg()
       await withClient(async (client) => {
-        await transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId))
+        await transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId))
       })
       expect(await stateRow(orgId)).toEqual({ state: 'group_shadow', priorState: 'off', version: 2 })
       expect(await eventCount(orgId)).toBe(1)
@@ -1076,7 +1077,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       __setAttendanceW7ContextSourceStateProducerDeliveryOverrideForTests({ group_shadow: false })
       await withClient(async (client) => {
         await expect(
-          transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId)),
+          transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId)),
         ).rejects.toMatchObject({
           code: 'W7_CONTEXT_SOURCE_TRANSITION_STATE_PRODUCER_NOT_DELIVERED',
         })
@@ -1092,7 +1093,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
         group_eligible: true,
       })
       await withClient(async (client) => {
-        await transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId))
+        await transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId))
       })
       // RE-DERIVED at the post-W7-2 merge. These criteria used to FAIL with
       // `count: null` because no producer existed. W7-2 shipped
@@ -1102,7 +1103,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       // the criteria PASS and the promotion proceeds.
       await withClient(async (client) => {
         await transitionAttendanceW7ContextSourceV1(
-          asTrx(client),
+          attendanceOwningSessionForClientV1(client),
           input(orgId, {
             expectedState: 'group_shadow',
             targetState: 'group_eligible',
@@ -1136,12 +1137,12 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
         W7_OFF_ROSTER_DIFF: true,
       })
       await withClient(async (client) => {
-        await transitionAttendanceW7ContextSourceV1(asTrx(client), input(withdrawn))
+        await transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(withdrawn))
       })
       await withClient(async (client) => {
         await expect(
           transitionAttendanceW7ContextSourceV1(
-            asTrx(client),
+            attendanceOwningSessionForClientV1(client),
             input(withdrawn, {
               expectedState: 'group_shadow',
               targetState: 'group_eligible',
@@ -1159,14 +1160,14 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       const orgId = await preparedOrg()
       __setAttendanceW7ContextSourceStateProducerDeliveryOverrideForTests({ group_shadow: true })
       await withClient(async (client) => {
-        await transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId))
+        await transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId))
       })
       // Producer declaration back to SHIPPED (undelivered) — the rollback must
       // still work, which is the whole point of not gating the exits.
       __setAttendanceW7ContextSourceStateProducerDeliveryOverrideForTests(null)
       await withClient(async (client) => {
         await transitionAttendanceW7ContextSourceV1(
-          asTrx(client),
+          attendanceOwningSessionForClientV1(client),
           input(orgId, { expectedState: 'group_shadow', targetState: 'off', expectedVersion: 2 }),
         )
       })
@@ -1190,7 +1191,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       // No W4 rollout row at all -> the W4 posture resolves `legacy`.
       await withClient(async (client) => {
         await expect(
-          transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId)),
+          transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId)),
         ).rejects.toMatchObject({ code: 'W7_CONTEXT_SOURCE_TRANSITION_W4_POSTURE_INCOHERENT' })
       })
       expect(await eventCount(orgId)).toBe(0)
@@ -1201,14 +1202,14 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       await seedCoherentW4Posture(orgId)
       await withClient(async (client) => {
         await expect(
-          transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId)),
+          transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId)),
         ).rejects.toMatchObject({ code: 'W7_CONTEXT_SOURCE_TRANSITION_W4_POSTURE_INCOHERENT' })
       })
 
       // POSITIVE CONTROL: row + W4 allowlist -> coherent -> the transition runs.
       process.env[W4_ENV] = orgId
       await withClient(async (client) => {
-        await transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId))
+        await transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId))
       })
       expect((await stateRow(orgId))?.state).toBe('group_shadow')
     })
@@ -1217,13 +1218,13 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       const orgId = await preparedOrg()
       __setAttendanceW7ContextSourceStateProducerDeliveryOverrideForTests({ group_shadow: true })
       await withClient(async (client) => {
-        await transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId))
+        await transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId))
       })
       // Take the W4 posture away entirely, then roll back: it must succeed.
       delete process.env[W4_ENV]
       await withClient(async (client) => {
         await transitionAttendanceW7ContextSourceV1(
-          asTrx(client),
+          attendanceOwningSessionForClientV1(client),
           input(orgId, { expectedState: 'group_shadow', targetState: 'off', expectedVersion: 2 }),
         )
       })
@@ -1243,7 +1244,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       })
       await withClient(async (client) => {
         await expect(
-          transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId)),
+          transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId)),
         ).rejects.toThrow(/W7_TEST_ABORT_AFTER_EVENT_INSERT/)
       })
       expect(await eventCount(orgId), 'the event survived a rolled-back transition').toBe(0)
@@ -1256,7 +1257,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       })
       await withClient(async (client) => {
         await expect(
-          transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId)),
+          transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId)),
         ).rejects.toThrow(/W7_TEST_ABORT_BEFORE_EVENT_INSERT/)
       })
       expect(await eventCount(orgId)).toBe(0)
@@ -1265,7 +1266,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       // POSITIVE CONTROL: with no seam, both rows land.
       __setW7ContextSourceTransitionBeforeEventInsertForTests(null)
       await withClient(async (client) => {
-        await transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId))
+        await transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId))
       })
       expect(await eventCount(orgId)).toBe(1)
       expect((await stateRow(orgId))?.state).toBe('group_shadow')
@@ -1276,7 +1277,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       __setAttendanceW7ContextSourceStateProducerDeliveryOverrideForTests({ group_shadow: true })
       const correlationId = randomUUID()
       await withClient(async (client) => {
-        await transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId, { correlationId }))
+        await transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId, { correlationId }))
       })
       const result = await pool.query(
         `SELECT prior_state, new_state, reason_code, engine_version, actor_id, evidence
@@ -1354,7 +1355,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       for (const [expectedState, targetState] of ladder) {
         await withClient(async (client) => {
           await transitionAttendanceW7ContextSourceV1(
-            asTrx(client),
+            attendanceOwningSessionForClientV1(client),
             input(orgId, {
               expectedState,
               targetState,
@@ -1375,7 +1376,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       await withClient(async (client) => {
         await expect(
           transitionAttendanceW7ContextSourceV1(
-            asTrx(client),
+            attendanceOwningSessionForClientV1(client),
             input(orgId, {
               expectedState: 'suspended',
               targetState: 'group_authoritative',
@@ -1390,7 +1391,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       // ...and with the widened set succeeds, storing all five keys verbatim.
       await withClient(async (client) => {
         await transitionAttendanceW7ContextSourceV1(
-          asTrx(client),
+          attendanceOwningSessionForClientV1(client),
           input(orgId, {
             expectedState: 'suspended',
             targetState: 'group_authoritative',
@@ -1418,7 +1419,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
         await client.query('BEGIN')
         try {
           await expect(
-            transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId)),
+            transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId)),
           ).rejects.toMatchObject({ code: 'W4C0_CONNECTION_NOT_IDLE' })
         } finally {
           await client.query('ROLLBACK')
@@ -1447,7 +1448,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
         observedWhileHeld = await heldByAnySession()
       })
       await withClient(async (client) => {
-        await transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId))
+        await transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId))
       })
       expect(observedWhileHeld, 'the advisory lock was not held inside the boundary').toBe(1)
       expect(await heldByAnySession(), 'the advisory lock leaked after SUCCESS').toBe(0)
@@ -1455,7 +1456,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       // ...and after a THROWING path (a refusal), the lock is still released.
       await withClient(async (client) => {
         await expect(
-          transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId)),
+          transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId)),
         ).rejects.toMatchObject({ code: 'W7_CONTEXT_SOURCE_TRANSITION_STALE_EXPECTED_STATE' })
       })
       expect(await heldByAnySession(), 'the advisory lock leaked after a REFUSAL').toBe(0)
@@ -1467,7 +1468,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       })
       await withClient(async (client) => {
         await expect(
-          transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId)),
+          transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId)),
         ).rejects.toThrow(/W7_TEST_ABORT_AFTER_LOCK/)
       })
       expect(await heldByAnySession(), 'the advisory lock leaked after a throwing seam').toBe(0)
@@ -1499,9 +1500,9 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       const clientA = await pool.connect()
       const clientB = await pool.connect()
       try {
-        const runA = transitionAttendanceW7ContextSourceV1(asTrx(clientA), input(orgId))
+        const runA = transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(clientA), input(orgId))
         await firstIsInside
-        const runB = transitionAttendanceW7ContextSourceV1(asTrx(clientB), input(orgId))
+        const runB = transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(clientB), input(orgId))
         // Give B a real chance to reach the advisory-lock wait before A commits.
         await new Promise((resolve) => setTimeout(resolve, 250))
         ;(releaseFirst as unknown as () => void)()
@@ -1548,7 +1549,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       })
       try {
         await withClient(async (client) => {
-          const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
+          const plan = await planAttendanceW7ContextSourceTransitionV1(attendanceOwningSessionForClientV1(client), {
             orgId,
             targetState: 'group_shadow',
           })
@@ -1583,7 +1584,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       const eventsBefore = await eventCount(orgId)
 
       await withClient(async (client) => {
-        const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
+        const plan = await planAttendanceW7ContextSourceTransitionV1(attendanceOwningSessionForClientV1(client), {
           orgId,
           targetState: 'group_shadow',
         })
@@ -1602,7 +1603,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       // equality above is not comparing two constants.
       __setAttendanceW7ContextSourceStateProducerDeliveryOverrideForTests({ group_shadow: true })
       await withClient(async (client) => {
-        await transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId))
+        await transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId))
       })
       const moved = await pool.query(`SELECT xmin::text AS xmin FROM ${STATE_TABLE} WHERE org_id = $1`, [
         orgId,
@@ -1615,7 +1616,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       createdOrgs.push(orgId)
       process.env[ATTENDANCE_W7_CONTEXT_SOURCE_ALLOWLIST_ENV] = orgId
       await withClient(async (client) => {
-        const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
+        const plan = await planAttendanceW7ContextSourceTransitionV1(attendanceOwningSessionForClientV1(client), {
           orgId,
           targetState: 'group_shadow',
         })
@@ -1630,7 +1631,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       const orgId = await preparedOrg()
       await withClient(async (client) => {
         for (const targetState of ATTENDANCE_W7_CONTEXT_SOURCE_POSTURE_STATES_V1) {
-          const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
+          const plan = await planAttendanceW7ContextSourceTransitionV1(attendanceOwningSessionForClientV1(client), {
             orgId,
             targetState,
           })
@@ -1654,13 +1655,13 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
         W7_OFF_ROSTER_DIFF: true,
       })
       await withClient(async (client) => {
-        await transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId))
+        await transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId))
       })
 
       // POSITIVE CONTROL first: with nothing seeded, BOTH quiescence predicates
       // pass with count 0 and the plan is not blocked on either.
       await withClient(async (client) => {
-        const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
+        const plan = await planAttendanceW7ContextSourceTransitionV1(attendanceOwningSessionForClientV1(client), {
           orgId,
           targetState: 'group_eligible',
           // Supplying the window lets the plan evaluate the two compare
@@ -1688,7 +1689,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       for (let seeded = 1; seeded <= 3; seeded += 1) {
         await seedPendingRequestWithoutSnapshot(orgId)
         await withClient(async (client) => {
-          const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
+          const plan = await planAttendanceW7ContextSourceTransitionV1(attendanceOwningSessionForClientV1(client), {
             orgId,
             targetState: 'group_eligible',
             compareWindowFrom: COMPARE_WINDOW.from,
@@ -1706,7 +1707,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       await withClient(async (client) => {
         await expect(
           transitionAttendanceW7ContextSourceV1(
-            asTrx(client),
+            attendanceOwningSessionForClientV1(client),
             input(orgId, {
               expectedState: 'group_shadow',
               targetState: 'group_eligible',
@@ -1743,12 +1744,12 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
         W7_OFF_ROSTER_DIFF: true,
       })
       await withClient(async (client) => {
-        await transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId))
+        await transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId))
       })
 
       // A CLEAN preflight...
       await withClient(async (client) => {
-        const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
+        const plan = await planAttendanceW7ContextSourceTransitionV1(attendanceOwningSessionForClientV1(client), {
           orgId,
           targetState: 'group_eligible',
           // Supplying the window lets the plan evaluate the two compare
@@ -1765,7 +1766,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       await withClient(async (client) => {
         await expect(
           transitionAttendanceW7ContextSourceV1(
-            asTrx(client),
+            attendanceOwningSessionForClientV1(client),
             input(orgId, {
               expectedState: 'group_shadow',
               targetState: 'group_eligible',
@@ -1810,7 +1811,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
 
         const client = await pool.connect()
         try {
-          const run = transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId)).then(
+          const run = transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId)).then(
             (result) => {
               settled = true
               return result
@@ -1925,7 +1926,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       process.env[ATTENDANCE_W7_CONTEXT_SOURCE_ALLOWLIST_ENV] = randomUUID()
 
       await withClient(async (client) => {
-        const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
+        const plan = await planAttendanceW7ContextSourceTransitionV1(attendanceOwningSessionForClientV1(client), {
           orgId,
           targetState: 'group_eligible',
           // Supplying the window lets the plan evaluate the two compare
@@ -1979,7 +1980,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       process.env[ATTENDANCE_W7_CONTEXT_SOURCE_ALLOWLIST_ENV] = orgId
       process.env[W4_ENV] = orgId
       await withClient(async (client) => {
-        const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
+        const plan = await planAttendanceW7ContextSourceTransitionV1(attendanceOwningSessionForClientV1(client), {
           orgId,
           targetState: 'group_eligible',
           // Supplying the window lets the plan evaluate the two compare
@@ -2019,7 +2020,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       await advanceToGroupAuthoritative(orgId) // leaves the delivery overrides SET
       await withClient(async (client) => {
         await transitionAttendanceW7ContextSourceV1(
-          asTrx(client),
+          attendanceOwningSessionForClientV1(client),
           input(orgId, {
             expectedState: 'group_authoritative',
             targetState: 'suspended',
@@ -2030,7 +2031,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       expect((await stateRow(orgId))?.state, 'the org must be parked at suspended').toBe('suspended')
 
       await withClient(async (client) => {
-        const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
+        const plan = await planAttendanceW7ContextSourceTransitionV1(attendanceOwningSessionForClientV1(client), {
           orgId,
           targetState: 'group_authoritative',
         })
@@ -2071,7 +2072,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       await advanceToGroupAuthoritative(orgId)
       await withClient(async (client) => {
         await transitionAttendanceW7ContextSourceV1(
-          asTrx(client),
+          attendanceOwningSessionForClientV1(client),
           input(orgId, {
             expectedState: 'group_authoritative',
             targetState: 'suspended',
@@ -2080,7 +2081,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
         )
       })
       await withClient(async (client) => {
-        const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
+        const plan = await planAttendanceW7ContextSourceTransitionV1(attendanceOwningSessionForClientV1(client), {
           orgId,
           targetState: 'group_authoritative',
         })
@@ -2095,7 +2096,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       // about the plan's missing manifest, not about a permanently dead entry.
       await withClient(async (client) => {
         await transitionAttendanceW7ContextSourceV1(
-          asTrx(client),
+          attendanceOwningSessionForClientV1(client),
           input(orgId, {
             expectedState: 'suspended',
             targetState: 'group_authoritative',
@@ -2128,7 +2129,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
         W7_OFF_ROSTER_DIFF: true,
       })
       await withClient(async (client) => {
-        await transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId))
+        await transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId))
       })
       return orgId
     }
@@ -2137,7 +2138,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       return withClient(async (client) => {
         try {
           await transitionAttendanceW7ContextSourceV1(
-            asTrx(client),
+            attendanceOwningSessionForClientV1(client),
             input(orgId, {
               expectedState: 'group_shadow',
               targetState: 'group_eligible',
@@ -2169,7 +2170,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
 
       // ...and the plan reports the real COUNT, not a boolean.
       await withClient(async (client) => {
-        const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
+        const plan = await planAttendanceW7ContextSourceTransitionV1(attendanceOwningSessionForClientV1(client), {
           orgId: blocked,
           targetState: 'group_eligible',
           compareWindowFrom: COMPARE_WINDOW.from,
@@ -2194,7 +2195,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       expect((await stateRow(blocked))?.state).toBe('group_shadow')
 
       await withClient(async (client) => {
-        const plan = await planAttendanceW7ContextSourceTransitionV1(asTrx(client), {
+        const plan = await planAttendanceW7ContextSourceTransitionV1(attendanceOwningSessionForClientV1(client), {
           orgId: blocked,
           targetState: 'group_eligible',
           compareWindowFrom: COMPARE_WINDOW.from,
@@ -2218,7 +2219,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       // POSITIVE CONTROL: quiesced org suspends.
       await withClient(async (client) => {
         await transitionAttendanceW7ContextSourceV1(
-          asTrx(client),
+          attendanceOwningSessionForClientV1(client),
           input(clean, {
             expectedState: 'group_authoritative',
             targetState: 'suspended',
@@ -2236,7 +2237,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       const code = await withClient(async (client) => {
         try {
           await transitionAttendanceW7ContextSourceV1(
-            asTrx(client),
+            attendanceOwningSessionForClientV1(client),
             input(busy, {
               expectedState: 'group_authoritative',
               targetState: 'suspended',
@@ -2266,7 +2267,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
         W7_OFF_ROSTER_DIFF: true,
       })
       await withClient(async (client) => {
-        await transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId))
+        await transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId))
       })
 
       // Withdraw ONE probe's delivery at a time and assert the survivor's own
@@ -2309,7 +2310,7 @@ describeIfDatabase('W7-3 context-source transition boundary (real PG, dedicated 
       const orgId = await preparedOrg()
       __setAttendanceW7ContextSourceStateProducerDeliveryOverrideForTests({ group_shadow: true })
       await withClient(async (client) => {
-        await transitionAttendanceW7ContextSourceV1(asTrx(client), input(orgId))
+        await transitionAttendanceW7ContextSourceV1(attendanceOwningSessionForClientV1(client), input(orgId))
       })
       expect((await stateRow(orgId))?.state).toBe('group_shadow')
 
