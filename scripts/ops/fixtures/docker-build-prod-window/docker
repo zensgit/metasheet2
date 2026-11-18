@@ -590,9 +590,11 @@ exec_backend() {
       done
       ;;
     test)
-      # test -d <path> in the backend's filesystem; H_MOUNT_TEST_RC=N: the check itself fails.
+      # test -d <path> in the backend's filesystem; H_MOUNT_TEST_RC=N: the check (or docker exec) exits N.
       [[ "${2:-}" == "-d" && $# -eq 3 ]] || unmodeled exec metasheet-backend "$@"
       if [[ -n "${H_MOUNT_TEST_RC:-}" ]]; then exit "${H_MOUNT_TEST_RC}"; fi
+      # H_MOUNT_TEST_HANG=1: the check never answers (only the window's timeout ends it).
+      if [[ "${H_MOUNT_TEST_HANG:-0}" == "1" ]]; then exec /bin/sleep 600; fi
       if [[ -d "${fs}${3}" ]]; then exit 0; else exit 1; fi
       ;;
     find)
