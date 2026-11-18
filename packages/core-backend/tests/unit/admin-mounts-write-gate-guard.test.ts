@@ -466,7 +466,7 @@ function parseGate(gate: string): { file: string; branches: string[][] } | null 
 }
 
 // ---------------------------------------------------------------------------
-// 登记表（78 条）——`reg` = 注册文件，`gate` = 注册文件 + 门函数名链；均由「fixture 自检」对源码自证
+// 登记表（79 条）——`reg` = 注册文件，`gate` = 注册文件 + 门函数名链；均由「fixture 自检」对源码自证
 // ---------------------------------------------------------------------------
 
 interface WriteRouteEntry {
@@ -498,11 +498,12 @@ const REGISTRY: readonly WriteRouteEntry[] = [
   { mount: 'admin-users', method: 'post', path: '/api/admin/users/recycle/restore', reg: 'routes/admin-user-recycle.ts', gate: 'routes/admin-user-recycle.ts ensureRecycleAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/users/recycle/purge', reg: 'routes/admin-user-recycle.ts', gate: 'routes/admin-user-recycle.ts ensureRecycleAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/users/recycle/rescrub', reg: 'routes/admin-user-recycle.ts', gate: 'routes/admin-user-recycle.ts ensureRecycleAdmin', family: P },
-  // --- routes/admin-users.ts（27 条；门为处理器第一条语句） ---
+  // --- routes/admin-users.ts（28 条；门为处理器第一条语句） ---
   { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/member-groups', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/scope-templates', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/scope-templates/:templateId/departments/:action(assign|unassign)', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/scope-templates/:templateId/member-groups/:action(assign|unassign)', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/users/:userId/scopes/activation', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/users/:userId/scopes/:action(assign|unassign)', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/users/:userId/scope-groups/:action(assign|unassign)', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/users/:userId/member-groups/:action(assign|unassign)', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
@@ -860,12 +861,12 @@ describe('/api/admin 挂载点写路由守卫 — fixture 自检', () => {
     }
   })
 
-  it('登记表条数与分族口径固定：78 条 / 2 条委派例外 / 4 条中间件门 / 1 条事务门 / 2 条操作门', () => {
-    expect(REGISTRY).toHaveLength(78)
+  it('登记表条数与分族口径固定：79 条 / 2 条委派例外 / 4 条中间件门 / 1 条事务门 / 2 条操作门', () => {
+    expect(REGISTRY).toHaveLength(79)
     expect(REGISTRY.filter((e) => e.family === 'delegation')).toHaveLength(2)
     expect(REGISTRY.filter((e) => e.family === 'middleware')).toHaveLength(4)
     expect(REGISTRY.filter((e) => e.family === 'inline')).toHaveLength(1)
-    expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(69)
+    expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(70)
     expect(REGISTRY.filter((e) => e.family === 'operation')).toHaveLength(2)
     // 每条都必须带来源：reg = 该挂载点的注册文件；gate 可解析，且每条分支链的最后一环是本族的门函数
     for (const entry of REGISTRY) {
