@@ -1386,8 +1386,6 @@ describe('production deploy window: remote_deploy step run against test doubles'
     assert.match(control, MOUNT_MEMBER, 'control: tar of the uploads path lists the mount point')
     const r = await runWindow(t, world)
     checkHappy(r, { appdata: true })
-    const tarOut = r.docker.find(isTarOut)
-    assert.match(tarOut.args, / --anchored --no-wildcards --exclude=app\/uploads\/attendance-import -cf - /, 'one exact exclude, the name as tar spells it with -C /')
     const listing = readFileSync(path.join(r.runDir, 'appdata.list'), 'utf8')
     const copyIn = tarNames([path.join(world.ds, 'cp-in.tar')])
     for (const [label, text] of [['the copy-out listing', listing], ['the copy-in input', copyIn]]) {
@@ -1396,6 +1394,8 @@ describe('production deploy window: remote_deploy step run against test doubles'
         assert.ok(text.includes(kept), `${label} keeps ${kept}`)
       }
     }
+    const tarOut = r.docker.find(isTarOut)
+    assert.match(tarOut.args, / --anchored --no-wildcards --exclude=app\/uploads\/attendance-import -cf - /, 'one exact exclude, the name as tar spells it with -C /')
     const detail = readFileSync(path.join(r.runDir, 'window-detail.log'), 'utf8')
     assert.match(detail, /^appdata excluded_mount_points=1$/m)
     assert.match(detail, /^appdata copy files=5 bytes=30$/m, 'the look-alike files are copied')
