@@ -16,6 +16,8 @@ import { isAdmin } from '../../src/rbac/service'
 import { usePinnedServer } from '../utils/pinned-server'
 
 vi.mock('../../src/rbac/service', () => ({
+  userHasPermission: vi.fn(() => { throw new Error('unexpected permission lookup') }),
+  listUserPermissions: vi.fn(() => { throw new Error('unexpected permission listing') }),
   isAdmin: vi.fn().mockResolvedValue(true),
 }))
 

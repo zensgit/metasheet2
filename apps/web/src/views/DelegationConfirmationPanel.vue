@@ -22,6 +22,13 @@
         平台管理员是一项特殊权限，权限码列表不能代表它的全部权限。
       </p>
     </template>
+    <div v-if="impactSummary" data-testid="delegation-preview-impact">
+      <p data-testid="delegation-preview-roles">明确角色：{{ impactSummary.roles }}</p>
+      <p data-testid="delegation-preview-explicit-admissions">显式准入：{{ impactSummary.explicitAdmissions }}</p>
+      <p data-testid="delegation-preview-derived-admissions">派生准入：{{ impactSummary.derivedAdmissions }}</p>
+      <p data-testid="delegation-preview-scope-cleanup">范围清理：{{ impactSummary.scopeCleanup }}</p>
+      <p data-testid="delegation-preview-retained">保留来源：{{ impactSummary.retained }}</p>
+    </div>
     <p data-testid="delegation-confirmation-effect">{{ effect }}</p>
     <label v-if="requiresAdminPhrase" class="delegation-confirmation__typed">
       输入“取消平台管理员”以确认撤销
@@ -44,6 +51,15 @@
         {{ phase === 'completed' ? '关闭' : '取消' }}
       </button>
       <button
+        v-if="readAgain"
+        class="delegation-confirmation__button"
+        type="button"
+        data-testid="delegation-confirmation-read-again"
+        @click="emit('readAgain')"
+      >
+        重新读取
+      </button>
+      <button
         class="delegation-confirmation__button"
         type="button"
         data-testid="delegation-confirmation-confirm"
@@ -58,14 +74,27 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import type { AdminAuthorizationImpact } from '../utils/adminAuthorizationOperation'
 import {
   PLATFORM_ADMIN_REVOKE_PHRASE,
   PLATFORM_ADMIN_ROLE_ID,
   type DelegationConfirmation,
 } from './delegationConfirmation'
 
-const props = defineProps<{ confirmation: DelegationConfirmation; phase: 'review' | 'pending' | 'completed' }>()
-const emit = defineEmits<{ confirm: [typedText: string]; cancel: [] }>()
+const props = withDefaults(defineProps<{
+  confirmation: DelegationConfirmation
+  phase: 'review' | 'pending' | 'completed'
+  impact?: AdminAuthorizationImpact | null
+  confirmReady?: boolean
+  admissionEnabled?: boolean | null
+  readAgain?: boolean
+}>(), {
+  impact: null,
+  confirmReady: true,
+  admissionEnabled: null,
+  readAgain: false,
+})
+const emit = defineEmits<{ confirm: [typedText: string]; cancel: []; readAgain: [] }>()
 const typedText = ref('')
 const dialogRef = ref<HTMLElement | null>(null)
 let previousFocus: HTMLElement | null = null
@@ -81,10 +110,45 @@ watch(() => props.phase, (phase) => {
   }
 }, { flush: 'post' })
 
+const closingAdmission = computed(() => (
+  props.confirmation.kind === 'admission-enable' && props.admissionEnabled === false
+))
+
 const title = computed(() => {
   if (props.confirmation.kind === 'grant') return '确认分配角色'
   if (props.confirmation.kind === 'revoke') return '确认撤销角色'
+  if (closingAdmission.value) return '确认关闭插件使用'
   return '确认开通插件使用'
+})
+
+function joined(values: string[]): string {
+  return values.length > 0 ? values.join('、') : '无'
+}
+
+const impactSummary = computed(() => {
+  const impact = props.impact
+  if (!impact) return null
+  const roles = impact.sourceChanges
+    .filter((change) => change.source === 'role')
+    .map((change) => `${change.operation === 'assign' ? '分配' : '撤销'} ${change.id}`)
+  const explicitAdmissions = impact.admissionChanges
+    .filter((change) => change.cause === 'explicit')
+    .map((change) => `${change.after ? '开通' : '关闭'} ${change.namespace}`)
+  const derivedAdmissions = impact.admissionChanges
+    .filter((change) => change.cause === 'role_revoke')
+    .map((change) => `${change.after ? '开通' : '关闭'} ${change.namespace}`)
+  const scopeCleanup = impact.scopeCleanup.map((item) => `${item.namespace} ${item.kind} ${item.id}`)
+  const retained = impact.retainedOtherGrants.map((grant) => {
+    const sources = grant.sources.map((source) => source.kind === 'role' ? source.id : source.kind)
+    return sources.length > 0 ? `${grant.code}（${sources.join('、')}）` : grant.code
+  })
+  return {
+    roles: joined(roles),
+    explicitAdmissions: joined(explicitAdmissions),
+    derivedAdmissions: joined(derivedAdmissions),
+    scopeCleanup: joined(scopeCleanup),
+    retained: joined(retained),
+  }
 })
 
 const requiresAdminPhrase = computed(() => (
@@ -98,6 +162,9 @@ const effect = computed(() => {
   if (props.confirmation.kind === 'revoke') {
     return '撤销后，该成员失去此角色。这可能同时关闭该角色带来的命名空间准入。目录权限码和单独授予的直接权限码来源不同，撤销角色不会改写直接权限码。'
   }
+  if (closingAdmission.value) {
+    return '将为该成员关闭此命名空间的插件使用准入。关闭前已向服务器预览，确认后才提交。'
+  }
   if (props.confirmation.kind === 'admission-enable') {
     return '将为该成员开通此命名空间的插件使用准入。开通后，角色和准入同时满足时插件才可用。'
   }
@@ -105,7 +172,9 @@ const effect = computed(() => {
 })
 
 const confirmDisabled = computed(() => (
-  props.phase !== 'review' || (requiresAdminPhrase.value && typedText.value.trim() !== PLATFORM_ADMIN_REVOKE_PHRASE)
+  props.phase !== 'review'
+  || props.confirmReady === false
+  || (requiresAdminPhrase.value && typedText.value.trim() !== PLATFORM_ADMIN_REVOKE_PHRASE)
 ))
 
 function focusableNodes(): HTMLElement[] {

@@ -1,0 +1,96 @@
+{
+  "boundary": "Actual PermissionBusinessChecker.vue and permissionBusinessChecker.ts mounted with synthetic selected-user wrapper; mocked API, no backend or full PermissionManagementView",
+  "hashes": {
+    "PermissionBusinessChecker.vue": "6340c66ea3e3bb42f9c093675d2c43b71cd4accaa9f6f3177fbf80c45cbf26aa",
+    "permissionBusinessChecker.ts": "54b340a6c5fc28a231d022cbdb8008a4aecde88e85a8ac3c7b1b1e469939a252"
+  },
+  "requests": [
+    {
+      "path": "/api/permissions/v2/business-check",
+      "method": "POST",
+      "body": {
+        "subject": {
+          "kind": "target",
+          "userId": "A"
+        },
+        "policyId": "attendance.decision-trace",
+        "mode": "single",
+        "permissions": [
+          "attendance:read"
+        ]
+      }
+    },
+    {
+      "path": "/api/permissions/v2/business-check",
+      "method": "POST",
+      "body": {
+        "subject": {
+          "kind": "target",
+          "userId": "A"
+        },
+        "policyId": "multitable.context.sheet",
+        "resource": {
+          "kind": "sheet",
+          "baseId": "base-a",
+          "sheetId": "sheet-a"
+        }
+      }
+    },
+    {
+      "path": "/api/permissions/v2/business-check",
+      "method": "POST",
+      "body": {
+        "subject": {
+          "kind": "target",
+          "userId": "A"
+        },
+        "policyId": "attendance.decision-trace",
+        "mode": "single",
+        "permissions": [
+          "attendance:read"
+        ]
+      }
+    },
+    {
+      "path": "/api/permissions/v2/business-check",
+      "method": "POST",
+      "body": {
+        "subject": {
+          "kind": "target",
+          "userId": "B"
+        },
+        "policyId": "multitable.context.sheet",
+        "resource": {
+          "kind": "sheet",
+          "baseId": "base-a",
+          "sheetId": "sheet-a"
+        }
+      }
+    }
+  ],
+  "result": [
+    {
+      "case": "business allow",
+      "phase": "allow",
+      "detail": "「考勤判定追踪」通过此权限检查。这不保证业务动作成功。"
+    },
+    {
+      "case": "context unknown",
+      "phase": "unknown",
+      "detail": "「表可见性和读取」无法判定，本次没有结论。"
+    },
+    {
+      "case": "late member response",
+      "selected": "Synthetic B",
+      "resultCount": 0
+    },
+    {
+      "case": "late resource response",
+      "resultCount": 0,
+      "sheet": "sheet-b"
+    }
+  ],
+  "external": 0,
+  "errors": 0,
+  "ok": true
+}

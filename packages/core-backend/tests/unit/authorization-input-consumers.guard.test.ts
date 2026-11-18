@@ -34,6 +34,12 @@ const PROOF_MODULE = `${SRC}/auth/security-action-proof.ts`
 const CALL_SITE_KEYS: readonly string[] = [
   `${PROOF_MODULE}|consume|assessSecurityActionPrivilege`,
   `${PROOF_MODULE}|readIssueInputs|assessSecurityActionPrivilege`,
+  `${SRC}/admin/authorization-operation-service.ts|callback:consistentRead|evaluateAuthorizationOperationAccess`,
+  `${SRC}/admin/authorization-operation-service.ts|callback:consistentRead|evaluateAuthorizationOperationAccess`,
+  `${SRC}/admin/authorization-operation-service.ts|callback:consistentRead|evaluateAuthorizationOperationAccess`,
+  `${SRC}/admin/authorization-operation-service.ts|callback:consistentRead|readActorOnly`,
+  `${SRC}/admin/authorization-operation-service.ts|callback:withAuthorizationInputTransaction|evaluateAuthorizationOperationAccess`,
+  `${SRC}/admin/authorization-operation-service.ts|callback:withAuthorizationInputTransaction|evaluateAuthorizationOperationAccess`,
 ]
 /** Decision points not yet inside a contract transaction. An item leaves this list only by becoming a locked decision; none may be added. */
 const PENDING_CONSUMER_KEYS: readonly string[] = [`${PROOF_MODULE}|consume|assessSecurityActionPrivilege`]
@@ -138,6 +144,12 @@ describe('consumer registry', () => {
     expect(registryProblems(sites, AUTHORIZATION_INPUT_CONSUMERS, read)).toEqual([])
     const keys = sites.map((site) => `${site.file}|${enclosingFunctionAt(site.file, read(site.file), site.position)?.name ?? '<module>'}|${site.call}`).sort()
     expect(keys).toEqual([...CALL_SITE_KEYS].sort())
+  })
+
+  it('the authorization command write decision is registered as locked', () => {
+    expect(AUTHORIZATION_INPUT_CONSUMERS.find(entry => entry.id === 'K-05')).toMatchObject({
+      symbol: 'callback:withAuthorizationInputTransaction', call: 'evaluateAuthorizationOperationAccess', count: 2, mode: 'LOCKED_DECISION',
+    })
   })
 
   it('the decision points still outside a contract transaction are the pinned set, each names its slice, and the pending flag follows them', () => {

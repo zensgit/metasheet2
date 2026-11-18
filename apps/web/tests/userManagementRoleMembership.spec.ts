@@ -1,15 +1,19 @@
 import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import UserManagementView from '../src/views/UserManagementView.vue'
 import { describeRoleMembershipWrite, roleWriteOutcomeFromPayload, selectedRoleMembershipHint } from '../src/views/adminUserRoleAction'
 
 const apiFetchMock = vi.fn()
+const authState = vi.hoisted(() => ({ adminId: 'admin-1' }))
+const PENDING_KEY = 'metasheet.adminAuthorizationOperation.pending.v1'
 
 vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
     hasAdminAccess: () => true,
+    getCurrentUser: () => (authState.adminId ? { id: authState.adminId } : null),
+    getCurrentUserId: async () => authState.adminId || null,
   }),
 }))
 
@@ -211,7 +215,13 @@ describe('UserManagementView role membership', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
 
+  beforeEach(() => {
+    authState.adminId = 'admin-1'
+    sessionStorage.removeItem(PENDING_KEY)
+  })
+
   afterEach(() => {
+    sessionStorage.removeItem(PENDING_KEY)
     if (app) app.unmount()
     if (container) container.remove()
     app = null
@@ -252,9 +262,54 @@ describe('UserManagementView role membership', () => {
       input.dispatchEvent(new Event('input', { bubbles: true }))
       await flushUi()
     }
-    const confirm = root.querySelector('[data-testid="admin-authorization-confirm"]') as HTMLButtonElement | null
-    if (!confirm || confirm.disabled) throw new Error('authorization confirm is not ready')
-    confirm.click()
+    await waitForCondition(() => {
+      const button = root.querySelector('[data-testid="admin-authorization-confirm"]')
+      return button instanceof HTMLButtonElement && !button.disabled
+    })
+    ;(root.querySelector('[data-testid="admin-authorization-confirm"]') as HTMLButtonElement).click()
+  }
+
+  function authorizationImpact(roleId: string, operation: 'assign' | 'revoke', changed: boolean) {
+    return {
+      sourceChanges: roleId
+        ? [{ source: 'role' as const, id: roleId, operation, changed }]
+        : [],
+      admissionChanges: [],
+      scopeCleanup: [],
+      effectiveBefore: [],
+      effectiveAfter: [],
+      retainedOtherGrants: [],
+      warnings: [],
+    }
+  }
+
+  function dingtalkAccessBody() {
+    return {
+      provider: 'dingtalk',
+      requireGrant: false,
+      server: {
+        configured: false,
+        available: false,
+        corpId: null,
+        allowedCorpIds: [],
+        requireGrant: false,
+        autoLinkEmail: false,
+        autoProvision: false,
+        unavailableReason: null,
+      },
+      grant: { exists: false, enabled: false, grantedBy: null, createdAt: null, updatedAt: null },
+      identity: {
+        exists: false,
+        corpId: null,
+        unionId: null,
+        openId: null,
+        hasUnionId: false,
+        hasOpenId: false,
+        lastLoginAt: null,
+        createdAt: null,
+        updatedAt: null,
+      },
+    }
   }
 
   function createRoleApi(options: {
@@ -263,9 +318,9 @@ describe('UserManagementView role membership', () => {
     initialMembership?: Record<string, string[]>
     holdAccess?: boolean
     holdRoleWrite?: boolean
-    failRoleWrite?: boolean
+    failCommit?: 'conflict' | 'forbidden' | null
+    malformedLiveRead?: boolean
     failAccessUserIds?: string[]
-    roleWriteData?: unknown
   } = {}) {
     const membership = new Map<string, string[]>(Object.entries({
       'user-1': ['crm_admin'],
@@ -276,10 +331,12 @@ describe('UserManagementView role membership', () => {
       { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true, is_admin: false },
       { id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true, is_admin: false },
     ]
-    const calls: string[] = []
+    const calls: Array<{ method: string; pathname: string; body: Record<string, unknown> | null }> = []
     const pendingAccess: Array<{ userId: string; release: () => void }> = []
     const pendingWrites: Array<{ release: () => void }> = []
+    const returnedAccessSubjects: string[] = []
     const progress = { roleWritesSettled: 0 }
+    let corruptNextAccess = false
 
     const accessPayload = (userId: string) => {
       const user = users.find((item) => item.id === userId) || users[0]
@@ -297,13 +354,17 @@ describe('UserManagementView role membership', () => {
       const url = new URL(rawUrl, 'http://localhost')
       const pathname = url.pathname
       const method = (init?.method || 'GET').toUpperCase()
-      calls.push(`${method} ${pathname}`)
+      const parsedBody = typeof init?.body === 'string' && init.body.length > 0
+        ? JSON.parse(init.body) as Record<string, unknown>
+        : null
+      calls.push({ method, pathname, body: parsedBody })
 
       if (pathname === '/api/admin/roles') {
         return jsonOk({
           items: [
-            { id: 'crm_admin', name: 'CRM 管理员', memberCount: membership.get('user-1')?.includes('crm_admin') ? 1 : 0, permissions: ['crm:admin'] },
-            { id: 'finance_admin', name: '财务管理员', memberCount: 0, permissions: ['finance:admin'] },
+            { id: 'crm_admin', name: 'CRM 管理员', memberCount: membership.get('user-1')?.includes('crm_admin') ? 1 : 0, permissions: ['crm:admin'], admissionNamespaces: [] },
+            { id: 'finance_admin', name: '财务管理员', memberCount: 0, permissions: ['finance:admin'], admissionNamespaces: [] },
+            { id: 'admin', name: '平台管理员', memberCount: membership.get('user-1')?.includes('admin') ? 1 : 0, permissions: [], admissionNamespaces: [] },
           ],
         })
       }
@@ -329,6 +390,17 @@ describe('UserManagementView role membership', () => {
         if (options.failAccessUserIds?.includes(userId)) {
           return createJsonResponse({ ok: false, error: { message: '加载用户权限失败' } }, 500)
         }
+        if (corruptNextAccess) {
+          corruptNextAccess = false
+          returnedAccessSubjects.push('user-2')
+          return jsonOk({
+            user: { id: 'user-2', name: 'Bravo', role: 'user', is_active: true, is_admin: false },
+            roles: [],
+            permissions: [],
+            isAdmin: false,
+          })
+        }
+        returnedAccessSubjects.push(userId)
         return jsonOk(body)
       }
 
@@ -336,98 +408,97 @@ describe('UserManagementView role membership', () => {
       if (sideMatch) {
         const kind = sideMatch[2]
         if (kind === 'sessions') return jsonOk({ items: [] })
-        if (kind === 'dingtalk-access') {
-          return jsonOk({
-            provider: 'dingtalk',
-            grant: { exists: false, enabled: false, grantedBy: null, createdAt: null, updatedAt: null },
-            identity: { exists: false, corpId: null, unionId: null, openId: null, hasUnionId: false, hasOpenId: false, lastLoginAt: null, createdAt: null, updatedAt: null },
-          })
-        }
+        if (kind === 'dingtalk-access') return jsonOk(dingtalkAccessBody())
+        const admittedUserId = decodeURIComponent(sideMatch[1])
         return jsonOk({
-          userId: decodeURIComponent(sideMatch[1]),
+          userId: admittedUserId,
           accountEnabled: true,
-          platformAdminEnabled: false,
+          platformAdminEnabled: (membership.get(admittedUserId) || []).includes('admin'),
           attendanceAdminEnabled: false,
-          businessRoleIds: membership.get(decodeURIComponent(sideMatch[1])) || [],
+          businessRoleIds: membership.get(admittedUserId) || [],
           directoryMemberships: [],
-          dingtalk: { grant: { enabled: false } },
+          dingtalk: dingtalkAccessBody(),
           namespaceAdmissions: [],
+          organizations: null,
         })
       }
 
-      const roleMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/roles\/(assign|unassign)$/)
-      if (roleMatch && method === 'POST') {
-        const userId = decodeURIComponent(roleMatch[1])
-        const action = roleMatch[2] as 'assign' | 'unassign'
-        const body = typeof init?.body === 'string' ? JSON.parse(init.body) as { roleId?: string } : {}
-        const roleId = String(body.roleId || '')
-        if (options.failRoleWrite) {
-          return createJsonResponse({ ok: false, error: { message: '保存角色失败' } }, 500)
+      const actionRecord = parsedBody?.action
+      const action = actionRecord && typeof actionRecord === 'object'
+        ? actionRecord as { kind?: string; roleId?: string }
+        : undefined
+      const roleId = typeof action?.roleId === 'string' ? action.roleId : ''
+      const operation = action?.kind === 'role.assign' ? 'assign' : 'revoke'
+      if (pathname === '/api/admin/authorization-operations/preview' && method === 'POST') {
+        return createJsonResponse({
+          expectedVersion: 'member-version-1',
+          impact: authorizationImpact(roleId, operation, !options.leaveMembershipOnUnassign),
+        })
+      }
+      if (pathname === '/api/admin/authorization-operations' && method === 'POST') {
+        const userId = typeof parsedBody?.targetUserId === 'string' ? parsedBody.targetUserId : ''
+        if (options.failCommit === 'forbidden') {
+          return createJsonResponse({ ok: false, error: { code: 'FORBIDDEN' } }, 403)
+        }
+        if (options.failCommit === 'conflict') {
+          return createJsonResponse({ ok: false, error: { code: 'ROLE_MODIFIED' } }, 409)
         }
         if (options.holdRoleWrite) {
-          const frozenRoles = [...(membership.get(userId) || [])]
-          const user = users.find((item) => item.id === userId) || users[0]
-          const frozen = {
-            user,
-            roles: frozenRoles,
-            permissions: frozenRoles.includes('crm_admin') ? ['crm:admin'] : [],
-            isAdmin: false,
-            changedRoleId: roleId,
-            actorId: 'admin-1',
-            roleHeld: frozenRoles.includes(roleId),
-            membershipChanged: false,
-          }
           await new Promise<void>((resolve) => {
             pendingWrites.push({ release: resolve })
           })
-          progress.roleWritesSettled += 1
-          return jsonOk(frozen)
         }
-        if (options.roleWriteData !== undefined) return jsonOk(options.roleWriteData)
-        if (action === 'unassign' && options.delayUnassign) await options.delayUnassign
+        if (options.delayUnassign) await options.delayUnassign
         const current = membership.get(userId) || []
-        if (action === 'assign') {
-          const changed = !current.includes(roleId)
-          const next = changed ? [...current, roleId] : current
-          membership.set(userId, next)
-          return jsonOk({
-            ...accessPayload(userId),
-            changedRoleId: roleId,
-            actorId: 'admin-1',
-            roleHeld: true,
-            membershipChanged: changed,
-          })
+        const changed = options.leaveMembershipOnUnassign
+          ? false
+          : operation === 'assign'
+            ? !current.includes(roleId)
+            : current.includes(roleId)
+        if (!options.leaveMembershipOnUnassign && operation === 'assign' && changed) {
+          membership.set(userId, [...current, roleId])
         }
-        if (options.leaveMembershipOnUnassign) {
-          return jsonOk({
-            ...accessPayload(userId),
-            changedRoleId: roleId,
-            actorId: 'admin-1',
-            roleHeld: current.includes(roleId),
-            membershipChanged: false,
-          })
+        if (!options.leaveMembershipOnUnassign && operation === 'revoke' && changed) {
+          membership.set(userId, current.filter((id) => id !== roleId))
         }
-        const changed = current.includes(roleId)
-        membership.set(userId, current.filter((id) => id !== roleId))
-        const snapshot = accessPayload(userId)
-        return jsonOk({
-          ...snapshot,
-          changedRoleId: roleId,
-          actorId: 'admin-1',
-          roleHeld: snapshot.roles.includes(roleId),
-          membershipChanged: changed,
+        if (options.malformedLiveRead) corruptNextAccess = true
+        progress.roleWritesSettled += 1
+        const clientOperationId = typeof parsedBody?.clientOperationId === 'string'
+          ? parsedBody.clientOperationId
+          : '11111111-1111-4111-8111-111111111111'
+        return createJsonResponse({
+          status: 'committed',
+          clientOperationId,
+          receipt: {
+            targetUserId: userId,
+            action: action?.kind === 'role.assign'
+              ? { kind: 'role.assign', roleId }
+              : { kind: 'role.revoke', roleId },
+            impact: authorizationImpact(roleId, operation, changed),
+            resultVersion: 'member-version-2',
+          },
         })
+      }
+
+      if (method === 'GET' && pathname.startsWith('/api/admin/authorization-operations/')) {
+        return createJsonResponse({ ok: false, error: { code: 'NOT_FOUND' } }, 404)
       }
 
       throw new Error(`Unhandled apiFetch call: ${method} ${rawUrl}`)
     })
+
+    const authorizationPosts = (pathname: string) => calls.filter((call) => call.method === 'POST' && call.pathname === pathname)
 
     return {
       membership,
       calls,
       pendingAccess,
       pendingWrites,
+      returnedAccessSubjects,
       progress,
+      previews: () => authorizationPosts('/api/admin/authorization-operations/preview'),
+      commits: () => authorizationPosts('/api/admin/authorization-operations'),
+      oldWrites: () => calls.filter((call) => call.pathname.includes('/roles/assign') || call.pathname.includes('/roles/unassign')),
       releaseOldestAccess() {
         pendingAccess.shift()?.release()
       },
@@ -442,8 +513,49 @@ describe('UserManagementView role membership', () => {
     return heading?.parentElement?.textContent || ''
   }
 
+  function expectOneRoleCommand(
+    api: ReturnType<typeof createRoleApi>,
+    roleId: string,
+  ): void {
+    expect(api.oldWrites()).toEqual([])
+    expect(api.previews()).toHaveLength(1)
+    expect(api.commits()).toHaveLength(1)
+    const preview = api.previews()[0]?.body
+    const commit = api.commits()[0]?.body
+    expect(preview?.clientOperationId).toBeUndefined()
+    expect(preview?.expectedVersion).toBeUndefined()
+    expect(preview?.targetUserId).toBe('user-1')
+    expect(preview?.action).toEqual({ kind: 'role.revoke', roleId })
+    expect(preview?.admissionChanges).toEqual([])
+    expect(commit?.targetUserId).toBe('user-1')
+    expect(commit?.action).toEqual({ kind: 'role.revoke', roleId })
+    expect(commit?.admissionChanges).toEqual([])
+    expect(commit?.expectedVersion).toBe('member-version-1')
+    expect(typeof commit?.clientOperationId).toBe('string')
+    expect(api.calls.findIndex((call) => call.pathname.endsWith('/preview'))).toBeLessThan(
+      api.calls.findIndex((call) => call.method === 'POST' && call.pathname === '/api/admin/authorization-operations'),
+    )
+  }
+
+  async function expectCheckedFailure(root: HTMLElement, message: string): Promise<void> {
+    await waitForCondition(() => {
+      const feedback = root.querySelector('[data-testid="role-action-feedback"]')?.textContent || ''
+      const close = root.querySelector('[data-testid="admin-authorization-close"]')
+      return feedback.includes(message) && close instanceof HTMLButtonElement && !close.disabled
+    })
+    const feedback = root.querySelector('[data-testid="role-action-feedback"]')
+    expect(feedback?.className).toContain('user-admin__status--error')
+    expect(feedback?.textContent).toContain(message)
+    expect(feedback?.textContent).not.toContain('已撤销角色')
+    expect(feedback?.textContent).not.toContain('当前未持有')
+    expect(feedback?.textContent).not.toContain('已关闭')
+    const confirm = root.querySelector('[data-testid="admin-authorization-confirm"]') as HTMLButtonElement
+    expect(confirm.disabled).toBe(true)
+    expect(root.querySelector('[data-testid="admin-authorization-dialog"]')).toBeTruthy()
+  }
+
   it('shows selected-role membership and refuses to call leftover revoke a success', async () => {
-    createRoleApi({ leaveMembershipOnUnassign: true })
+    const api = createRoleApi({ leaveMembershipOnUnassign: true })
     const root = mountView()
     await openListedUser(root, 'Alpha')
     await waitForCondition(() => Boolean(root.querySelector('[data-testid="user-role-select"]')))
@@ -457,13 +569,20 @@ describe('UserManagementView role membership', () => {
 
     const unassign = root.querySelector('[data-testid="unassign-role-button"]') as HTMLButtonElement
     unassign.click()
+    await waitForCondition(() => (root.querySelector('[data-testid="admin-authorization-role-sources"]')?.textContent || '').includes('crm_admin'))
+    expect(api.previews()).toHaveLength(1)
+    expect(api.commits()).toEqual([])
+    expect(api.membership.get('user-1')).toEqual(['crm_admin'])
     await confirmAuthorization(root)
-    await waitForCondition(() => Boolean(root.querySelector('[data-testid="role-action-feedback"]')?.textContent?.includes('仍持有角色')))
+    await expectCheckedFailure(root, '还没有核对成功')
 
-    const feedback = root.querySelector('[data-testid="role-action-feedback"]')
-    expect(feedback?.className).toContain('user-admin__status--error')
-    expect(feedback?.textContent).toContain('操作者 admin-1')
-    expect(root.textContent).toContain('crm_admin')
+    expect(document.activeElement).toBe(root.querySelector('[data-testid="admin-authorization-close"]'))
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }))
+    expect(root.querySelector('[data-testid="admin-authorization-dialog"]')?.contains(document.activeElement)).toBe(true)
+    expectOneRoleCommand(api, 'crm_admin')
+    expect(api.membership.get('user-1')).toEqual(['crm_admin'])
+    expect(root.querySelector('[data-testid="selected-role-membership"]')?.textContent).toContain('已是角色 crm_admin 的成员')
+    expect(root.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Alpha')
   })
 
   it('clears membership after a persisted unassign and keeps an in-flight result on the initiating user', async () => {
@@ -480,24 +599,31 @@ describe('UserManagementView role membership', () => {
     await flushUi()
     ;(root.querySelector('[data-testid="unassign-role-button"]') as HTMLButtonElement).click()
     await confirmAuthorization(root)
-    await flushUi(4)
+    await waitForCondition(() => api.previews().length === 1 && api.commits().length === 1 && api.progress.roleWritesSettled === 0)
+    expect(api.membership.get('user-1')).toEqual(['crm_admin'])
 
     const otherUser = Array.from(root.querySelectorAll('button')).find((button) => button.textContent?.includes('Bravo'))
     expect(otherUser).toBeTruthy()
     otherUser?.click()
-    await waitForCondition(() => (root.querySelector('[data-testid="selected-role-membership"]')?.textContent || '').includes('请选择角色'))
+    await waitForCondition(() => (root.textContent || '').includes('确认对象已变化，这次结果不会写入当前成员。'))
 
     release?.()
-    await waitForCondition(() => Boolean(root.querySelector('[data-testid="role-action-feedback"]')?.textContent?.includes('user-1')))
+    await waitForCondition(() => api.progress.roleWritesSettled === 1 && api.commits().length === 1)
+    await flushUi()
 
-    expect(root.querySelector('[data-testid="role-action-feedback"]')?.textContent).toContain('未覆盖当前选中用户 user-2')
+    expect(root.querySelector('[data-testid="admin-authorization-outcome"]')?.textContent).toContain('确认对象已变化，这次结果不会写入当前成员。')
+    expect(root.textContent).not.toContain('角色已从该成员移除')
+    expect(root.textContent).not.toContain('已撤销角色')
+    expect(root.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Bravo')
     expect(api.membership.get('user-1')).toEqual([])
     expect(api.membership.get('user-2')).toEqual([])
     expect(root.querySelector('[data-testid="selected-role-membership"]')?.textContent).not.toContain('已是角色 crm_admin 的成员')
+    expect(root.querySelector('[data-testid="admin-authorization-dialog"]')).toBeTruthy()
+    expectOneRoleCommand(api, 'crm_admin')
   })
 
   it('refuses leftover platform-admin shortcut disable without a persisted membership drop', async () => {
-    createRoleApi({
+    const api = createRoleApi({
       leaveMembershipOnUnassign: true,
       initialMembership: { 'user-1': ['admin'], 'user-2': [] },
     })
@@ -511,12 +637,11 @@ describe('UserManagementView role membership', () => {
     expect(root.querySelector('[data-testid="platform-admin-chip"]')?.textContent).toContain('已开通平台管理员')
     ;(root.querySelector('[data-testid="revoke-platform-admin-button"]') as HTMLButtonElement).click()
     await confirmAuthorization(root, '取消平台管理员')
-    await waitForCondition(() => Boolean(root.querySelector('[data-testid="role-action-feedback"]')?.textContent?.includes('仍持有角色 admin')))
+    await expectCheckedFailure(root, '还没有核对成功')
 
-    const feedback = root.querySelector('[data-testid="role-action-feedback"]')
-    expect(feedback?.className).toContain('user-admin__status--error')
-    expect(feedback?.textContent).not.toContain('已关闭')
     expect(root.querySelector('[data-testid="platform-admin-chip"]')?.textContent).toContain('已开通平台管理员')
+    expect(api.membership.get('user-1')).toEqual(['admin'])
+    expectOneRoleCommand(api, 'admin')
   })
 
   it('keeps an in-flight platform-admin shortcut result on the initiating user', async () => {
@@ -535,7 +660,7 @@ describe('UserManagementView role membership', () => {
 
     ;(root.querySelector('[data-testid="revoke-platform-admin-button"]') as HTMLButtonElement).click()
     await confirmAuthorization(root, '取消平台管理员')
-    await flushUi(4)
+    await waitForCondition(() => api.previews().length === 1 && api.commits().length === 1 && api.progress.roleWritesSettled === 0)
 
     const otherUser = Array.from(root.querySelectorAll('button')).find((button) => button.textContent?.includes('Bravo'))
     expect(otherUser).toBeTruthy()
@@ -543,14 +668,18 @@ describe('UserManagementView role membership', () => {
     await waitForCondition(() => (root.querySelector('[data-testid="selected-user-heading"]')?.textContent || '').includes('Bravo'))
 
     release?.()
-    await waitForCondition(() => Boolean(root.querySelector('[data-testid="role-action-feedback"]')?.textContent?.includes('user-1')))
+    await waitForCondition(() => api.progress.roleWritesSettled === 1)
+    await flushUi()
 
-    expect(root.querySelector('[data-testid="role-action-feedback"]')?.textContent).toContain('未覆盖当前选中用户 user-2')
+    expect(root.querySelector('[data-testid="admin-authorization-outcome"]')?.textContent).toContain('确认对象已变化，这次结果不会写入当前成员。')
+    expect(root.textContent).not.toContain('已关闭')
     expect(root.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Bravo')
     expect(root.querySelector('[data-testid="selected-user-heading"]')?.textContent).not.toContain('Alpha')
     expect(root.querySelector('[data-testid="platform-admin-chip"]')?.textContent).toContain('未开通平台管理员')
     expect(api.membership.get('user-1')).toEqual([])
     expect(api.membership.get('user-2')).toEqual([])
+    expect(root.querySelector('[data-testid="admin-authorization-dialog"]')).toBeTruthy()
+    expectOneRoleCommand(api, 'admin')
   })
 
   function clickNamedUser(root: HTMLElement, name: string): void {
@@ -594,6 +723,9 @@ describe('UserManagementView role membership', () => {
     await waitForCondition(() => (root.querySelector('[data-testid="selected-user-heading"]')?.textContent || '').includes('Alpha'))
     expect(root.querySelector('[data-testid="platform-admin-chip"]')?.textContent).toContain('未开通平台管理员')
     expect(root.querySelector('[data-testid="selected-user-heading"]')?.textContent).not.toContain('Bravo')
+    expect(api.previews()).toEqual([])
+    expect(api.commits()).toEqual([])
+    expect(api.oldWrites()).toEqual([])
   })
 
   it('clears the previous user when the next selection read fails and ignores a malformed role readback', async () => {
@@ -621,7 +753,7 @@ describe('UserManagementView role membership', () => {
     container = null
     apiFetchMock.mockReset()
 
-    createRoleApi({ roleWriteData: {} })
+    const malformed = createRoleApi({ malformedLiveRead: true })
     const malformedRoot = mountView()
     await openListedUser(malformedRoot, 'Alpha')
     await waitForCondition(() => Boolean(malformedRoot.querySelector('[data-testid="user-role-select"]')))
@@ -631,16 +763,13 @@ describe('UserManagementView role membership', () => {
     await flushUi()
     ;(malformedRoot.querySelector('[data-testid="unassign-role-button"]') as HTMLButtonElement).click()
     await confirmAuthorization(malformedRoot)
-    await waitForCondition(() => Boolean(malformedRoot.querySelector('[data-testid="user-access-unread"]')))
-    const feedback = malformedRoot.querySelector('.user-admin__status')
-    expect(feedback?.textContent).toContain('不完整或主体不一致')
-    expect(feedback?.textContent).not.toContain('当前未持有')
-    expect(feedback?.textContent).not.toContain('已撤销角色')
-    expect(malformedRoot.querySelector('[data-testid="selected-role-membership"]')).toBeNull()
-    expect(malformedRoot.textContent).not.toContain('已是角色 crm_admin 的成员')
-    expect(malformedRoot.querySelector('[data-testid="unassign-role-button"]')).toBeNull()
-    expect(malformedRoot.querySelector('[data-testid="revoke-platform-admin-button"]')).toBeNull()
-    expect(malformedRoot.querySelector('[data-testid="selected-user-heading"]')).toBeNull()
+    await expectCheckedFailure(malformedRoot, '还没有核对成功')
+    expect(malformed.returnedAccessSubjects).toContain('user-2')
+    expect(malformedRoot.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Alpha')
+    expect(malformedRoot.querySelector('[data-testid="selected-role-membership"]')?.textContent).toContain('已是角色 crm_admin 的成员')
+    expect(malformedRoot.querySelector('[data-testid="user-access-unread"]')).toBeNull()
+    expect(roleSectionText(malformedRoot)).toContain('CRM 管理员')
+    expectOneRoleCommand(malformed, 'crm_admin')
   })
 
   it('does not apply an older role write over a newer A to B to A access read', async () => {
@@ -669,10 +798,14 @@ describe('UserManagementView role membership', () => {
     expect(root.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Alpha')
     expect(roleSectionText(root)).toContain('未分配角色')
     expect(roleSectionText(root)).not.toContain('crm_admin')
+    expect(roleSectionText(root)).not.toContain('CRM 管理员')
+    expect(root.querySelector('[data-testid="admin-authorization-outcome"]')?.textContent).toContain('确认对象已变化，这次结果不会写入当前成员。')
+    expect(root.textContent).not.toContain('角色已从该成员移除')
+    expectOneRoleCommand(api, 'crm_admin')
   })
 
-  it('marks the current role snapshot unread when the role write is rejected', async () => {
-    createRoleApi({ failRoleWrite: true })
+  it('keeps the current member visible when the role command is rejected', async () => {
+    const conflict = createRoleApi({ failCommit: 'conflict' })
     const root = mountView()
     await openListedUser(root, 'Alpha')
     await waitForCondition(() => Boolean(root.querySelector('[data-testid="user-role-select"]')))
@@ -683,11 +816,51 @@ describe('UserManagementView role membership', () => {
     expect(root.querySelector('[data-testid="selected-role-membership"]')?.textContent).toContain('已是角色 crm_admin 的成员')
     ;(root.querySelector('[data-testid="unassign-role-button"]') as HTMLButtonElement).click()
     await confirmAuthorization(root)
-    await waitForCondition(() => Boolean(root.querySelector('[data-testid="user-access-unread"]')))
-    expect(root.querySelector('.user-admin__status')?.textContent).toContain('保存角色失败')
-    expect(root.textContent).not.toContain('已是角色 crm_admin 的成员')
-    expect(root.querySelector('[data-testid="assign-role-button"]')).toBeNull()
-    expect(root.querySelector('[data-testid="revoke-platform-admin-button"]')).toBeNull()
+    await waitForCondition(() => {
+      const close = root.querySelector('[data-testid="admin-authorization-close"]')
+      const feedback = root.querySelector('[data-testid="role-action-feedback"]')?.textContent || ''
+      return close instanceof HTMLButtonElement && !close.disabled && feedback.includes('角色目录已变化，本次未写入。请刷新角色后再确认。')
+    })
+    await flushUi()
+    expect(root.querySelector('[data-testid="role-action-feedback"]')?.textContent).toContain('角色目录已变化，本次未写入。请刷新角色后再确认。')
+    expect(root.textContent).not.toContain('已撤销角色')
+    expect((root.querySelector('[data-testid="admin-authorization-confirm"]') as HTMLButtonElement).disabled).toBe(true)
+    expect(root.querySelector('[data-testid="user-access-unread"]')).toBeNull()
+    expect(root.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Alpha')
+    expect(root.querySelector('[data-testid="selected-role-membership"]')?.textContent).toContain('已是角色 crm_admin 的成员')
+    expect(conflict.membership.get('user-1')).toEqual(['crm_admin'])
+    expectOneRoleCommand(conflict, 'crm_admin')
+    expect(conflict.previews()).toHaveLength(1)
+
+    app?.unmount()
+    container?.remove()
+    app = null
+    container = null
+    apiFetchMock.mockReset()
+
+    const forbidden = createRoleApi({ failCommit: 'forbidden' })
+    const forbiddenRoot = mountView()
+    await openListedUser(forbiddenRoot, 'Alpha')
+    await waitForCondition(() => Boolean(forbiddenRoot.querySelector('[data-testid="user-role-select"]')))
+    const forbiddenSelect = forbiddenRoot.querySelector('[data-testid="user-role-select"]') as HTMLSelectElement
+    forbiddenSelect.value = 'crm_admin'
+    forbiddenSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    ;(forbiddenRoot.querySelector('[data-testid="unassign-role-button"]') as HTMLButtonElement).click()
+    await confirmAuthorization(forbiddenRoot)
+    await waitForCondition(() => {
+      const close = forbiddenRoot.querySelector('[data-testid="admin-authorization-close"]')
+      const feedback = forbiddenRoot.querySelector('[data-testid="role-action-feedback"]')?.textContent || ''
+      return close instanceof HTMLButtonElement && !close.disabled && feedback.includes('没有执行这次授权的权限。本次没有提交。')
+    })
+    expect(forbiddenRoot.textContent).not.toContain('已撤销角色')
+    expect(forbiddenRoot.querySelector('[data-testid="user-access-unread"]')).toBeNull()
+    expect(forbiddenRoot.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Alpha')
+    expect(forbiddenRoot.querySelector('[data-testid="selected-role-membership"]')?.textContent).toContain('已是角色 crm_admin 的成员')
+    expect((forbiddenRoot.querySelector('[data-testid="admin-authorization-confirm"]') as HTMLButtonElement).disabled).toBe(true)
+    expect(forbidden.membership.get('user-1')).toEqual(['crm_admin'])
+    expect(forbidden.oldWrites()).toEqual([])
+    expectOneRoleCommand(forbidden, 'crm_admin')
   })
 
   it('wires this spec into the required web lane and the approval domain guard', () => {

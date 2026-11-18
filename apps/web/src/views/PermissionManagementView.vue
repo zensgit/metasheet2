@@ -37,6 +37,18 @@
     >
       只读重新读取
     </button>
+    <div v-if="recoveredOperationVisible" data-testid="permission-operation-recovery">
+      <p data-testid="permission-operation-recovery-status">{{ recoveredOperationNote }}</p>
+      <button
+        class="permission-admin__button permission-admin__button--secondary"
+        type="button"
+        data-testid="permission-operation-recovery-reread"
+        :disabled="busy || confirmBusy"
+        @click="void rereadRecoveredOperation()"
+      >
+        只读重新读取
+      </button>
+    </div>
 
     <div class="permission-admin__layout">
       <aside class="permission-admin__panel permission-admin__panel--users">
@@ -87,8 +99,33 @@
 
           <section class="permission-admin__section" data-testid="permission-checker" aria-labelledby="permission-checker-title">
             <div class="permission-admin__section-head">
-              <h3 id="permission-checker-title">权限检查器</h3>
+              <h3 id="permission-checker-title">{{ permissionCheckMode === 'business' ? '业务检查' : '权限码预检' }}</h3>
             </div>
+            <div class="permission-admin__role-actions" role="group" aria-label="检查方式">
+              <button
+                class="permission-admin__button"
+                :class="{ 'permission-admin__button--secondary': permissionCheckMode !== 'business' }"
+                type="button"
+                data-testid="permission-check-mode-business"
+                :aria-pressed="permissionCheckMode === 'business'"
+                @click="permissionCheckMode = 'business'"
+              >
+                业务检查
+              </button>
+              <button
+                class="permission-admin__button"
+                :class="{ 'permission-admin__button--secondary': permissionCheckMode !== 'code' }"
+                type="button"
+                data-testid="permission-check-mode-code"
+                :aria-pressed="permissionCheckMode === 'code'"
+                @click="permissionCheckMode = 'code'"
+              >
+                权限码预检
+              </button>
+            </div>
+            <PermissionBusinessChecker v-if="permissionCheckMode === 'business'" :user-id="selectedUserId" />
+            <template v-if="permissionCheckMode === 'code'">
+            <p class="permission-admin__hint" data-testid="permission-code-precheck-note">权限码预检没有业务上下文，不能当作业务动作是否可做的结论。</p>
             <p class="permission-admin__hint" data-testid="permission-checker-scope">{{ permissionCheckerScopeNote }}</p>
             <div class="permission-admin__role-actions">
               <select
@@ -122,6 +159,7 @@
             >
               {{ permissionCheckerView.detail }}
             </p>
+            </template>
           </section>
 
           <section class="permission-admin__section" data-testid="permission-direct-section">
@@ -276,7 +314,15 @@
                   </button>
                 </div>
               </div>
-              <p class="permission-admin__hint">授予和回收使用上方权限检查器里选中的权限码。移除直接授权不会去掉角色继承。</p>
+              <p class="permission-admin__hint">授予和回收使用上方权限码预检里选中的权限码。移除直接授权不会去掉角色继承。</p>
+              <label class="permission-admin__hint" data-testid="permission-operation-reason-label">
+                原因（添加直接授权和按模板写入必填，最多 255 个字符，超出不会提交）
+                <textarea
+                  v-model="operationReason"
+                  data-testid="permission-operation-reason"
+                  rows="2"
+                ></textarea>
+              </label>
               <p v-if="selectedPermissionHint" data-testid="selected-permission-hint" class="permission-admin__hint">{{ selectedPermissionHint }}</p>
               <p
                 v-if="permissionActionFeedback"
@@ -320,20 +366,32 @@
       </section>
     </div>
     <PermissionExceptionConfirm
-      v-if="pendingConfirm && confirmCopy"
+      v-if="operationDialogOpen && confirmCopy"
       :title="confirmCopy.title"
       :summary="confirmCopy.summary"
-      :busy="busy"
+      :busy="confirmBusy"
       @confirm="void confirmPendingMutation()"
-      @cancel="pendingConfirm = null"
+      @cancel="cancelOperationDialog()"
     />
+    <span v-if="operationReady" data-testid="permission-operation-ready" hidden></span>
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
 import { routeLocationKey } from 'vue-router'
+import { useAuth } from '../composables/useAuth'
+import { useAdminAuthorizationOperation, type AdminAuthorizationOperationPhase } from '../composables/useAdminAuthorizationOperation'
 import { apiFetch } from '../utils/api'
+import {
+  type AdminAuthorizationAction,
+  type AdminAuthorizationEffectiveSource,
+  type AdminAuthorizationImpact,
+  type AdminAuthorizationReceipt,
+  type AdminAuthorizationRequest,
+  type AdminAuthorizationTransportRequest,
+  type AdminAuthorizationTransportResponse,
+} from '../utils/adminAuthorizationOperation'
 import {
   accessReadStillCurrent,
   describePermissionInspectionView,
@@ -359,8 +417,8 @@ import {
   describePermissionExceptionInheritedSources,
   describePermissionExceptionLegacyRevoke,
   readPermissionExceptionLegacyRevokeAcknowledgement,
-  type PermissionExceptionConfirmRequest,
 } from './permissionExceptionSources'
+import PermissionBusinessChecker from './PermissionBusinessChecker.vue'
 import {
   PERMISSION_CHECKER_SCOPE_NOTE,
   idlePermissionCheckerView,
@@ -422,12 +480,29 @@ const selectedUserAccess = ref<UserPermissionState | null>(null)
 const permissionActionFeedback = ref<{ tone: 'info' | 'error'; message: string } | null>(null)
 const unconfirmedReadbackUserId = ref('')
 const permissionCheckerView = ref<PermissionCheckerView>(idlePermissionCheckerView())
+const permissionCheckMode = ref<'business' | 'code'>('code')
 const permissionCheckerScopeNote = PERMISSION_CHECKER_SCOPE_NOTE
 const permissionExceptionObjectNote = PERMISSION_EXCEPTION_OBJECT_NOTE
 const permissionExceptionMultitableHref = PERMISSION_EXCEPTION_MULTITABLE_HREF
 const permissionExceptionRolesHref = PERMISSION_EXCEPTION_ROLES_HREF
 const permissionExceptionUsersHref = PERMISSION_EXCEPTION_USERS_HREF
-const pendingConfirm = ref<PermissionExceptionConfirmRequest | null>(null)
+const operationReason = ref('')
+const operationDialogOpen = ref(false)
+const operationSummaryText = ref('')
+const confirmBusy = ref(false)
+const frozenRequest = ref<AdminAuthorizationRequest | null>(null)
+const submittedRequest = ref<AdminAuthorizationRequest | null>(null)
+const recoveredOperationNote = ref('')
+const recoveredOperationId = ref('')
+const REASON_LIMIT = 255
+let operationEpoch = 0
+let confirmLatch = false
+let previewAbort: AbortController | null = null
+let liveInspection: UserPermissionInspection | null = null
+let liveReadFailed = false
+let lastTransportStatus = 0
+let lastTransportBody: Record<string, unknown> | null = null
+let lastTransportThrew = false
 let permissionCheckerGeneration = 0
 let permissionCheckerAbort: AbortController | null = null
 // Direct createApp mounts have no router. A defaulted inject reads the deep link without warning.
@@ -453,7 +528,96 @@ const inheritedSourceView = computed(() => describePermissionExceptionInheritedS
   readable: !grantView.value.unread,
   inheritedRoles: selectedUserAccess.value?.inheritedRoles ?? null,
 }))
-const confirmCopy = computed(() => pendingConfirm.value ? describePermissionExceptionConfirm(pendingConfirm.value) : null)
+const auth = useAuth()
+
+function currentPrincipalId(): string {
+  const reader = auth.getCurrentUser
+  if (typeof reader !== 'function') return ''
+  const user = reader()
+  if (!user || typeof user !== 'object') return ''
+  const id = (user as { id?: unknown }).id
+  return typeof id === 'string' ? id.trim() : ''
+}
+
+async function authorizationTransport(
+  request: AdminAuthorizationTransportRequest,
+): Promise<AdminAuthorizationTransportResponse> {
+  lastTransportThrew = false
+  lastTransportStatus = 0
+  lastTransportBody = null
+  try {
+    const response = await apiFetch(request.path, {
+      method: request.method,
+      body: request.body === undefined ? undefined : JSON.stringify(request.body),
+      signal: request.signal,
+    })
+    const payload = await readJson(response)
+    if (request.signal?.aborted) {
+      throw new DOMException('Aborted', 'AbortError')
+    }
+    lastTransportStatus = response.status
+    lastTransportBody = payload
+    return { status: response.status, body: payload }
+  } catch (error) {
+    lastTransportThrew = true
+    throw error
+  }
+}
+
+async function verifyAuthorizationLive(): Promise<boolean> {
+  liveInspection = null
+  liveReadFailed = false
+  const receipt = authorizationOperation.receipt.value
+  const principalId = currentPrincipalId()
+  if (!receipt || !principalId || selectedUserId.value !== receipt.targetUserId) return false
+  const generation = userAccessReadGeneration.value
+  const targetId = receipt.targetUserId
+  try {
+    const inspection = await loadUserAccess(targetId)
+    if (currentPrincipalId() !== principalId) return false
+    if (!accessReadStillCurrent(generation, userAccessReadGeneration.value, targetId, selectedUserId.value)) return false
+    const remembered = submittedRequest.value
+    if (
+      remembered
+      && remembered.targetUserId === receipt.targetUserId
+      && !sameExceptionAction(remembered.action, receipt.action)
+    ) {
+      liveInspection = inspection
+      return false
+    }
+    liveInspection = inspection
+    return permissionSourceAgrees(receipt.action, receipt.impact, inspection)
+  } catch {
+    liveReadFailed = true
+    return false
+  }
+}
+
+const authorizationOperation = useAdminAuthorizationOperation({
+  transport: authorizationTransport,
+  getPrincipalId: () => currentPrincipalId(),
+  getTargetId: () => selectedUserId.value.trim(),
+  verifyLive: () => verifyAuthorizationLive(),
+})
+
+const confirmCopy = computed(() => {
+  if (!operationDialogOpen.value || !frozenRequest.value) return null
+  return {
+    title: operationDialogTitle(frozenRequest.value),
+    summary: operationSummaryText.value,
+  }
+})
+const recoveredOperationVisible = computed(() => {
+  if (!recoveredOperationNote.value || !selectedUserId.value) return false
+  const phase = authorizationOperation.phase.value
+  return phase === 'pending' || phase === 'committed' || phase === 'unverified_no_read'
+})
+const operationReady = computed(() => (
+  operationDialogOpen.value
+  && authorizationOperation.phase.value === 'awaiting_confirmation'
+  && frozenRequest.value !== null
+  && requestFingerprint(frozenRequest.value) === requestFingerprint(liveOperationRequest())
+))
 const assignedPermissions = computed(() => {
   if (!grantView.value.showEffectiveChips) return []
   return selectedUserAccess.value?.effective || []
@@ -616,10 +780,39 @@ async function reloadSelectedUserAccess(): Promise<void> {
   }
 }
 
+function authorizationReadbackStillOpen(phase: AdminAuthorizationOperationPhase): boolean {
+  return phase === 'pending' || phase === 'unverified_no_read' || phase === 'committed'
+}
+
 async function refreshUnconfirmedReadback(): Promise<void> {
   invalidatePermissionChecker()
   const userId = unconfirmedReadbackUserId.value
   if (!userId || userId !== selectedUserId.value) return
+  const phase = authorizationOperation.phase.value
+  if (authorizationReadbackStillOpen(phase)) {
+    await authorizationOperation.lookup()
+    await authorizationOperation.whenSettled()
+    const request = submittedRequest.value
+    if (
+      request
+      && request.targetUserId === userId
+      && authorizationOperation.phase.value === 'committed'
+    ) {
+      const generation = userAccessReadGeneration.value
+      const principalId = currentPrincipalId()
+      await finishCommitted(request, generation)
+      if (
+        authorizationOperation.verified.value
+        && principalId !== ''
+        && userAccessReadGeneration.value === generation
+        && selectedUserId.value === userId
+        && currentPrincipalId() === principalId
+      ) {
+        unconfirmedReadbackUserId.value = ''
+      }
+      return
+    }
+  }
   const generation = nextAccessReadGeneration(userAccessReadGeneration.value)
   userAccessReadGeneration.value = generation
   selectedUserAccess.value = null
@@ -628,7 +821,11 @@ async function refreshUnconfirmedReadback(): Promise<void> {
     if (!accessReadStillCurrent(generation, userAccessReadGeneration.value, userId, selectedUserId.value)) return
     if (unconfirmedReadbackUserId.value !== userId) return
     selectedUserAccess.value = inspection.subjectMatched ? inspection : unreadUserPermissionInspection(userId)
-    if (inspection.subjectMatched && !inspection.degraded) unconfirmedReadbackUserId.value = ''
+    if (
+      inspection.subjectMatched
+      && !inspection.degraded
+      && !authorizationReadbackStillOpen(authorizationOperation.phase.value)
+    ) unconfirmedReadbackUserId.value = ''
   } catch (error) {
     if (!accessReadStillCurrent(generation, userAccessReadGeneration.value, userId, selectedUserId.value)) return
     if (unconfirmedReadbackUserId.value !== userId) return
@@ -784,317 +981,695 @@ function applyPermissionReadback(
   }
 }
 
-async function mutatePermission(
-  action: 'grant' | 'revoke',
-  frozen: { userId: string; permission: string },
-): Promise<void> {
-  const requestedUserId = frozen.userId
-  const requestedPermission = frozen.permission
-  if (!requestedUserId || !requestedPermission) return
-  invalidatePermissionChecker()
-  const generation = userAccessReadGeneration.value
+function preparedReason(): { reason?: string } | { error: string } {
+  const points = Array.from(operationReason.value.trim())
+  if (points.length > REASON_LIMIT) {
+    return { error: '原因超过 255 个字符，没有提交预览。' }
+  }
+  const reason = points.join('')
+  return reason ? { reason } : {}
+}
 
-  busy.value = true
-  if (unconfirmedReadbackUserId.value === requestedUserId) unconfirmedReadbackUserId.value = ''
-  let acknowledged = false
-  let writeObserved = false
-  try {
-    const response = await apiFetch(`/api/permissions/${action}`, {
-      method: 'POST',
-      body: JSON.stringify({
-        userId: requestedUserId,
-        permission: requestedPermission,
-      }),
-    })
-    writeObserved = true
-    const payload = await readJson(response)
-    if (!response.ok) {
-      const outcome = describePermissionWrite({
-        action,
-        requestedUserId,
-        selectedUserId: selectedUserId.value,
-        permission: requestedPermission,
-        ok: false,
-        httpStatus: response.status,
-        errorMessage: String(payload.error || `${action} permission failed`),
-        inspection: selectedUserAccess.value,
-      })
-      permissionActionFeedback.value = { tone: outcome.tone, message: outcome.message }
-      setStatus(outcome.message, 'error')
-      return
-    }
+function requestFingerprint(request: AdminAuthorizationRequest | null): string {
+  if (!request) return ''
+  return JSON.stringify(request)
+}
 
-    const acknowledgement = readPermissionWriteAcknowledgement(payload, requestedUserId, requestedPermission)
-    if (!acknowledgement.accepted) {
-      if (accessReadStillCurrent(generation, userAccessReadGeneration.value, requestedUserId, selectedUserId.value)) {
-        selectedUserAccess.value = unreadUserPermissionInspection(requestedUserId)
-      }
-      const outcome = describePermissionWrite({
-        action,
-        requestedUserId,
-        selectedUserId: selectedUserId.value,
-        permission: requestedPermission,
-        ok: true,
-        writeAcknowledged: false,
-        errorMessage: acknowledgement.message,
-      })
-      permissionActionFeedback.value = { tone: outcome.tone, message: outcome.message }
-      setStatus(outcome.message, 'error')
-      return
-    }
+function liveOperationRequest(): AdminAuthorizationRequest | null {
+  const frozen = frozenRequest.value
+  if (!frozen || selectedUserId.value !== frozen.targetUserId) return null
+  const action = frozen.action
+  if ((action.kind === 'direct.grant' || action.kind === 'direct.revoke') && selectedPermissionCode.value !== action.code) {
+    return null
+  }
+  if (action.kind === 'template.apply' && selectedTemplateId.value !== action.templateId) return null
+  return buildOperationRequest(action, frozen.targetUserId)
+}
 
-    acknowledged = true
-    const inspection = await loadUserAccess(requestedUserId)
-    const outcome = describePermissionWrite({
-      action,
-      requestedUserId,
-      selectedUserId: selectedUserId.value,
-      permission: requestedPermission,
-      ok: true,
-      writeAcknowledged: true,
-      inspection,
-    })
-    permissionActionFeedback.value = { tone: outcome.tone, message: outcome.message }
-    setStatus(outcome.message, outcome.tone)
-    applyPermissionReadback(generation, requestedUserId, inspection, outcome.applyInspection)
-  } catch (error) {
-    const stillCurrent = selectedUserId.value === requestedUserId && userAccessReadGeneration.value === generation
-    if (!writeObserved || acknowledged) {
-      unconfirmedReadbackUserId.value = requestedUserId
-      if (stillCurrent) selectedUserAccess.value = unreadUserPermissionInspection(requestedUserId)
-      const outcome = describeUnconfirmedPermissionWrite(requestedUserId)
-      permissionActionFeedback.value = { tone: outcome.tone, message: outcome.message }
-      setStatus(outcome.message, 'error')
-      return
+function operationDialogTitle(request: AdminAuthorizationRequest): string {
+  if (request.action.kind === 'direct.grant') return '确认添加直接授权'
+  if (request.action.kind === 'direct.revoke') return '确认移除直接授权'
+  if (request.action.kind === 'template.apply') return '确认按模板写入直接授权'
+  if (request.action.kind === 'legacy.revoke') return '确认清除历史授权'
+  return '确认授权操作'
+}
+
+function sourceKindLabel(source: AdminAuthorizationEffectiveSource): string {
+  if (source.kind === 'direct') return '直接授权'
+  if (source.kind === 'legacy') return '历史授权'
+  if (source.kind === 'role') return `角色 ${source.id}`
+  return '来源不明'
+}
+
+function describeImpactLines(impact: AdminAuthorizationImpact): string {
+  const lines: string[] = []
+  if (impact.sourceChanges.length === 0) {
+    lines.push('来源不明，不能判断这次会改哪些权限。')
+  }
+  for (const change of impact.sourceChanges) {
+    const name = change.source === 'role' ? '角色' : change.source === 'direct' ? '直接授权' : '历史授权'
+    if (!change.changed) {
+      lines.push(`${name} ${change.id} 没有变化。`)
+      continue
     }
-    const outcome = describePermissionWrite({
-      action,
-      requestedUserId,
-      selectedUserId: selectedUserId.value,
-      permission: requestedPermission,
-      ok: false,
-      errorMessage: error instanceof Error ? error.message : '权限操作失败',
-      inspection: selectedUserAccess.value,
-    })
-    permissionActionFeedback.value = { tone: outcome.tone, message: outcome.message }
-    setStatus(outcome.message, 'error')
-  } finally {
-    busy.value = false
+    lines.push(change.operation === 'assign'
+      ? `将添加${name} ${change.id}。`
+      : `将去掉${name} ${change.id}。`)
+  }
+  for (const item of impact.retainedOtherGrants) {
+    const kinds = item.sources.map((source) => sourceKindLabel(source))
+    lines.push(kinds.length > 0
+      ? `仍保留 ${item.code}，来源：${kinds.join('、')}。`
+      : `仍保留 ${item.code}，来源不明。`)
+  }
+  const seen = new Set<string>()
+  for (const item of [...impact.effectiveBefore, ...impact.effectiveAfter]) {
+    if (item.sources.length > 0 || seen.has(item.code)) continue
+    seen.add(item.code)
+    lines.push(`${item.code} 来源不明。`)
+  }
+  for (const change of impact.admissionChanges) {
+    lines.push(`插件准入 ${change.namespace} 将变为 ${change.after ? '开通' : '关闭'}。`)
+  }
+  for (const warning of impact.warnings) {
+    if (warning.trim()) lines.push(warning.trim())
+  }
+  return lines.join('')
+}
+
+function summaryWithImpact(staticSummary: string, request: AdminAuthorizationRequest, impact: AdminAuthorizationImpact): string {
+  const roleChanged = impact.sourceChanges.some((change) => change.source === 'role' && change.changed)
+  const admissionChanged = impact.admissionChanges.length > 0
+  let summary = staticSummary
+  if (roleChanged || admissionChanged) {
+    summary = summary.split('角色不会改变，插件准入不会改变。').join('')
+    summary = summary.split('角色不会改变，插件准入不会改变').join('')
+    summary = summary.split('角色不会改变').join('')
+    summary = summary.split('准入不会改变').join('')
+  }
+  if (!roleChanged && !admissionChanged) {
+    if (request.action.kind === 'template.apply') {
+      summary += '角色不会改变，插件准入不会改变。参考角色（不会分配）。'
+    } else if (!summary.includes('角色不会改变')) {
+      summary += '角色不会改变，插件准入不会改变。'
+    }
+  }
+  if (request.action.kind === 'legacy.revoke' && !summary.includes('不是整项权限的总撤销')) {
+    summary += '这不是整项权限的总撤销。'
+  }
+  return `${summary}${describeImpactLines(impact)}`
+}
+
+function permissionSourceAgrees(
+  action: AdminAuthorizationAction,
+  impact: AdminAuthorizationImpact,
+  inspection: UserPermissionInspection,
+): boolean {
+  if (!inspection.subjectMatched || inspection.degraded || !inspection.sourceKnown) return false
+  const roleChanged = impact.sourceChanges.some((change) => change.source === 'role' && change.changed)
+  const admissionChanged = impact.admissionChanges.length > 0
+  if (action.kind === 'template.apply') {
+    if (roleChanged || admissionChanged) return false
+    const codes = impact.sourceChanges
+      .filter((change) => change.source === 'direct' && change.operation === 'assign')
+      .map((change) => change.id)
+    return codes.length > 0 && codes.every((code) => inspection.direct.includes(code))
+  }
+  if (roleChanged || admissionChanged) return false
+  if (action.kind === 'direct.grant') return inspection.direct.includes(action.code)
+  if (action.kind === 'direct.revoke') return !inspection.direct.includes(action.code)
+  if (action.kind === 'legacy.revoke') {
+    const directChanged = impact.sourceChanges.some((change) => change.source === 'direct' && change.changed)
+    if (directChanged) return false
+    return !inspection.legacy.includes(action.code)
+  }
+  return false
+}
+
+function sameExceptionAction(expected: AdminAuthorizationAction, actual: AdminAuthorizationAction): boolean {
+  if (expected.kind === 'template.apply' || actual.kind === 'template.apply') {
+    return expected.kind === 'template.apply'
+      && actual.kind === 'template.apply'
+      && expected.templateId === actual.templateId
+  }
+  if (expected.kind === 'direct.grant' || expected.kind === 'direct.revoke' || expected.kind === 'legacy.revoke') {
+    return actual.kind === expected.kind && actual.code === expected.code
+  }
+  return false
+}
+
+function requestFromReceipt(receipt: AdminAuthorizationReceipt): AdminAuthorizationRequest | null {
+  const action = receipt.action
+  if (action.kind === 'direct.grant' || action.kind === 'direct.revoke' || action.kind === 'legacy.revoke') {
+    return {
+      targetUserId: receipt.targetUserId,
+      action: { kind: action.kind, code: action.code },
+      admissionChanges: [],
+    }
+  }
+  if (action.kind === 'template.apply') {
+    return {
+      targetUserId: receipt.targetUserId,
+      action: { kind: 'template.apply', templateId: action.templateId },
+      admissionChanges: [],
+    }
+  }
+  return null
+}
+
+function supportedRecoveryReceipt(receipt: AdminAuthorizationReceipt | null): AdminAuthorizationRequest | null {
+  if (!receipt || receipt.targetUserId !== selectedUserId.value) return null
+  return requestFromReceipt(receipt)
+}
+
+function staticConfirmSummary(request: AdminAuthorizationRequest): string {
+  const label = selectedUserLabel()
+  if (request.action.kind === 'direct.grant' || request.action.kind === 'direct.revoke') {
+    return describePermissionExceptionConfirm({
+      kind: request.action.kind === 'direct.grant' ? 'grant' : 'revoke',
+      userId: request.targetUserId,
+      userLabel: label,
+      permission: request.action.code,
+    }).summary
+  }
+  if (request.action.kind === 'template.apply') {
+    const templateId = request.action.templateId
+    const template = permissionTemplates.value.find((item) => item.id === templateId)
+    return describePermissionExceptionConfirm({
+      kind: 'template',
+      userId: request.targetUserId,
+      userLabel: label,
+      templateId: request.action.templateId,
+      templateName: template?.name || request.action.templateId,
+      permissions: template ? [...template.permissions] : [],
+    }).summary
+  }
+  if (request.action.kind === 'legacy.revoke') {
+    return describePermissionExceptionConfirm({
+      kind: 'legacy',
+      userId: request.targetUserId,
+      userLabel: label,
+      permission: request.action.code,
+    }).summary
+  }
+  return '来源不明，不能判断这次会改哪些权限。'
+}
+
+function buildOperationRequest(action: AdminAuthorizationAction, targetUserId: string): AdminAuthorizationRequest | null {
+  const prepared = preparedReason()
+  if ('error' in prepared) return null
+  const needsReason = action.kind === 'direct.grant' || action.kind === 'template.apply'
+  if (needsReason && !prepared.reason) return null
+  return {
+    targetUserId,
+    action,
+    admissionChanges: [],
+    ...(prepared.reason ? { reason: prepared.reason } : {}),
   }
 }
 
-async function applyPermissionTemplate(frozen: {
-  userId: string
-  templateId: string
-  templateName: string
-  permissions: string[]
-}): Promise<void> {
-  const requestedUserId = frozen.userId
-  const requestedTemplateId = frozen.templateId
-  const templateName = frozen.templateName
-  const requestedPermissions = [...frozen.permissions]
-  if (!requestedUserId || !requestedTemplateId) return
-  invalidatePermissionChecker()
-  const generation = userAccessReadGeneration.value
+function rejectOverlongReason(): boolean {
+  const prepared = preparedReason()
+  if (!('error' in prepared)) return false
+  setStatus(prepared.error, 'error')
+  return true
+}
 
+function beginOperation(request: AdminAuthorizationRequest): void {
+  if (busy.value || confirmLatch || confirmBusy.value || operationDialogOpen.value) return
+  if (!currentPrincipalId()) {
+    setStatus('当前操作者身份未读取，没有提交。', 'error')
+    return
+  }
+  operationEpoch += 1
+  const epoch = operationEpoch
+  frozenRequest.value = request
+  operationSummaryText.value = staticConfirmSummary(request)
+  operationDialogOpen.value = true
+  previewAbort?.abort()
+  const abort = new AbortController()
+  previewAbort = abort
   busy.value = true
-  if (unconfirmedReadbackUserId.value === requestedUserId) unconfirmedReadbackUserId.value = ''
-  let writeObserved = false
-  let submitted = false
+  void runPreview(request, epoch, abort.signal)
+}
+
+async function runPreview(request: AdminAuthorizationRequest, epoch: number, signal: AbortSignal): Promise<void> {
   try {
-    const response = await apiFetch('/api/admin/permission-templates/apply', {
-      method: 'POST',
-      body: JSON.stringify({
-        userId: requestedUserId,
-        templateId: requestedTemplateId,
-      }),
-    })
-    writeObserved = true
-    const payload = await readJson(response)
-    if (!response.ok) {
-      throw new Error(String(payload.error || '应用权限模板失败'))
-    }
-
-    const acknowledgement = readPermissionTemplateApplyAcknowledgement(payload, requestedUserId, requestedTemplateId)
-    if (!acknowledgement.accepted) {
-      if (accessReadStillCurrent(generation, userAccessReadGeneration.value, requestedUserId, selectedUserId.value)) {
-        selectedUserAccess.value = unreadUserPermissionInspection(requestedUserId)
-        setStatus(acknowledgement.message, 'error')
-      }
+    authorizationOperation.syncContext()
+    await authorizationOperation.preview(request, signal)
+    await authorizationOperation.whenSettled()
+    if (epoch !== operationEpoch || signal.aborted) return
+    if (selectedUserId.value !== request.targetUserId || currentPrincipalId() === '') return
+    if (authorizationOperation.phase.value !== 'awaiting_confirmation') {
+      const outcome = previewFailureMessage(request)
+      permissionActionFeedback.value = { tone: 'error', message: outcome }
+      setStatus(outcome, 'error')
+      operationDialogOpen.value = false
+      frozenRequest.value = null
       return
     }
-
-    submitted = true
-    const inspection = await loadUserAccess(requestedUserId)
-    const outcome = describePermissionTemplateApply({ templateName, requestedPermissions, inspection })
-    const stillCurrent = accessReadStillCurrent(generation, userAccessReadGeneration.value, requestedUserId, selectedUserId.value)
-    if (!stillCurrent) {
-      if (selectedUserId.value !== requestedUserId) {
-        setStatus(`${outcome.message} 未覆盖当前选中用户 ${selectedUserId.value} 的状态`, outcome.tone)
-      }
-      return
-    }
-    selectedUserAccess.value = inspection
-    setStatus(outcome.message, outcome.tone)
-  } catch (error) {
-    const stillCurrent = accessReadStillCurrent(generation, userAccessReadGeneration.value, requestedUserId, selectedUserId.value)
-    if (!writeObserved || submitted) {
-      unconfirmedReadbackUserId.value = requestedUserId
-      if (stillCurrent) {
-        selectedUserAccess.value = unreadUserPermissionInspection(requestedUserId)
-      }
-      if (stillCurrent || selectedUserId.value !== requestedUserId) {
-        const outcome = describeUnconfirmedPermissionWrite(requestedUserId)
-        setStatus(outcome.message, 'error')
-      }
-      return
-    }
-    if (stillCurrent) {
-      setStatus(error instanceof Error ? error.message : '应用权限模板失败', 'error')
+    const impact = authorizationOperation.impact.value
+    if (impact && frozenRequest.value && requestFingerprint(frozenRequest.value) === requestFingerprint(request)) {
+      operationSummaryText.value = summaryWithImpact(staticConfirmSummary(request), request, impact)
     }
   } finally {
-    busy.value = false
+    if (!confirmBusy.value && (epoch === operationEpoch || !operationDialogOpen.value)) busy.value = false
   }
+}
+
+function previewFailureMessage(request: AdminAuthorizationRequest): string {
+  if (authorizationOperation.detail.value === 'no_access' || authorizationOperation.phase.value === 'forbidden') {
+    return `没有预览用户 ${request.targetUserId} 的这次授权。`
+  }
+  return `没有得到用户 ${request.targetUserId} 的授权预览，还不能确认。`
+}
+
+function cancelOperationDialog(): void {
+  if (confirmLatch || confirmBusy.value) return
+  operationEpoch += 1
+  previewAbort?.abort()
+  previewAbort = null
+  operationDialogOpen.value = false
+  frozenRequest.value = null
+  busy.value = false
 }
 
 function openDirectConfirm(action: 'grant' | 'revoke'): void {
   if (busy.value || !selectedUserId.value || !selectedPermissionCode.value || !grantView.value.actionsEnabled) return
-  pendingConfirm.value = {
-    kind: action,
-    userId: selectedUserId.value,
-    userLabel: selectedUserLabel(),
-    permission: selectedPermissionCode.value,
+  if (rejectOverlongReason()) return
+  const kind = action === 'grant' ? 'direct.grant' : 'direct.revoke'
+  const request = buildOperationRequest(
+    { kind, code: selectedPermissionCode.value },
+    selectedUserId.value,
+  )
+  if (!request) {
+    setStatus('添加直接授权和按模板写入需要填写原因。', 'error')
+    return
   }
+  beginOperation(request)
 }
 
 function openTemplateConfirm(): void {
   const template = selectedTemplate.value
   if (busy.value || !selectedUserId.value || !template || !grantView.value.actionsEnabled) return
-  pendingConfirm.value = {
-    kind: 'template',
-    userId: selectedUserId.value,
-    userLabel: selectedUserLabel(),
-    templateId: template.id,
-    templateName: template.name,
-    permissions: [...template.permissions],
+  if (rejectOverlongReason()) return
+  const request = buildOperationRequest(
+    { kind: 'template.apply', templateId: template.id },
+    selectedUserId.value,
+  )
+  if (!request) {
+    setStatus('添加直接授权和按模板写入需要填写原因。', 'error')
+    return
   }
+  beginOperation(request)
 }
 
 function openLegacyConfirm(permission: string): void {
   if (busy.value || !selectedUserId.value || !permission || !grantView.value.actionsEnabled) return
-  pendingConfirm.value = {
-    kind: 'legacy',
-    userId: selectedUserId.value,
-    userLabel: selectedUserLabel(),
-    permission,
-  }
+  if (rejectOverlongReason()) return
+  const request = buildOperationRequest(
+    { kind: 'legacy.revoke', code: permission },
+    selectedUserId.value,
+  )
+  if (!request) return
+  beginOperation(request)
 }
 
-async function clearLegacyPermission(frozen: { userId: string; permission: string }): Promise<void> {
-  const requestedUserId = frozen.userId
-  const requestedPermission = frozen.permission
-  if (!requestedUserId || !requestedPermission) return
-  invalidatePermissionChecker()
-  const generation = userAccessReadGeneration.value
-  busy.value = true
-  if (unconfirmedReadbackUserId.value === requestedUserId) unconfirmedReadbackUserId.value = ''
-  let acknowledged = false
-  try {
-    const response = await apiFetch('/api/permissions/legacy/revoke', {
-      method: 'POST',
-      body: JSON.stringify({ userId: requestedUserId, permission: requestedPermission }),
+function markUnread(userId: string, generation: number): void {
+  if (!accessReadStillCurrent(generation, userAccessReadGeneration.value, userId, selectedUserId.value)) return
+  selectedUserAccess.value = unreadUserPermissionInspection(userId)
+}
+
+function showFeedback(message: string, tone: 'info' | 'error', template: boolean): void {
+  if (template) permissionActionFeedback.value = null
+  else permissionActionFeedback.value = { tone, message }
+  setStatus(message, tone)
+}
+
+function actionCode(action: AdminAuthorizationAction): string {
+  if (action.kind === 'direct.grant' || action.kind === 'direct.revoke' || action.kind === 'legacy.revoke') return action.code
+  return ''
+}
+
+function rejectedAcknowledgementMessage(request: AdminAuthorizationRequest): string | null {
+  const payload = lastTransportBody
+  if (!payload) return null
+  if (request.action.kind === 'template.apply') {
+    const acknowledgement = readPermissionTemplateApplyAcknowledgement(payload, request.targetUserId, request.action.templateId)
+    if (acknowledgement.accepted) return null
+    return acknowledgement.message
+  }
+  if (request.action.kind === 'legacy.revoke') {
+    const acknowledgement = readPermissionExceptionLegacyRevokeAcknowledgement(payload, request.targetUserId, request.action.code)
+    if (acknowledgement.accepted) return null
+    return acknowledgement.message
+  }
+  if (request.action.kind === 'direct.grant' || request.action.kind === 'direct.revoke') {
+    const acknowledgement = readPermissionWriteAcknowledgement(payload, request.targetUserId, request.action.code)
+    if (acknowledgement.accepted) return null
+    return acknowledgement.message
+  }
+  return null
+}
+
+function showTransportFailure(request: AdminAuthorizationRequest, generation: number): void {
+  const status = lastTransportThrew ? undefined : lastTransportStatus
+  const errorMessage = typeof lastTransportBody?.error === 'string' ? lastTransportBody.error : undefined
+  if (request.action.kind === 'legacy.revoke') {
+    const outcome = describePermissionExceptionLegacyRevoke({
+      requestedUserId: request.targetUserId,
+      selectedUserId: selectedUserId.value,
+      permission: request.action.code,
+      ok: false,
+      httpStatus: status,
+      errorMessage,
     })
-    const payload = await readJson(response)
-    if (!response.ok) {
+    if (outcome.offerReadOnlyReread) {
+      unconfirmedReadbackUserId.value = request.targetUserId
+      markUnread(request.targetUserId, generation)
+    }
+    showFeedback(outcome.message, 'error', false)
+    return
+  }
+  if (request.action.kind === 'direct.grant' || request.action.kind === 'direct.revoke') {
+    const outcome = describePermissionWrite({
+      action: request.action.kind === 'direct.grant' ? 'grant' : 'revoke',
+      requestedUserId: request.targetUserId,
+      selectedUserId: selectedUserId.value,
+      permission: request.action.code,
+      ok: false,
+      httpStatus: status,
+      errorMessage: errorMessage || '权限操作失败',
+      inspection: selectedUserAccess.value,
+    })
+    showFeedback(outcome.message, 'error', false)
+    return
+  }
+  showFeedback(errorMessage || '应用权限模板失败', 'error', true)
+}
+
+function showPendingResult(request: AdminAuthorizationRequest, generation: number): void {
+  const unknown = lastTransportThrew || lastTransportStatus === 0 || lastTransportStatus >= 500
+  if (unknown) {
+    if (request.action.kind === 'legacy.revoke') {
       const outcome = describePermissionExceptionLegacyRevoke({
-        requestedUserId,
+        requestedUserId: request.targetUserId,
         selectedUserId: selectedUserId.value,
-        permission: requestedPermission,
+        permission: request.action.code,
         ok: false,
-        httpStatus: response.status,
-        errorMessage: typeof payload.error === 'string' ? payload.error : '清除历史授权失败',
+        httpStatus: lastTransportThrew ? undefined : lastTransportStatus,
       })
       if (outcome.offerReadOnlyReread) {
-        unconfirmedReadbackUserId.value = requestedUserId
-        if (accessReadStillCurrent(generation, userAccessReadGeneration.value, requestedUserId, selectedUserId.value)) {
-          selectedUserAccess.value = unreadUserPermissionInspection(requestedUserId)
-        }
+        unconfirmedReadbackUserId.value = request.targetUserId
+        markUnread(request.targetUserId, generation)
       }
-      permissionActionFeedback.value = { tone: outcome.tone, message: outcome.message }
-      setStatus(outcome.message, 'error')
+      showFeedback(outcome.message, 'error', false)
       return
     }
-    const acknowledgement = readPermissionExceptionLegacyRevokeAcknowledgement(payload, requestedUserId, requestedPermission)
-    if (!acknowledgement.accepted) {
-      if (accessReadStillCurrent(generation, userAccessReadGeneration.value, requestedUserId, selectedUserId.value)) {
-        selectedUserAccess.value = unreadUserPermissionInspection(requestedUserId)
-      }
+    unconfirmedReadbackUserId.value = request.targetUserId
+    markUnread(request.targetUserId, generation)
+    const outcome = describeUnconfirmedPermissionWrite(request.targetUserId)
+    showFeedback(outcome.message, 'error', request.action.kind === 'template.apply')
+    return
+  }
+  const rejected = rejectedAcknowledgementMessage(request)
+  if (rejected) {
+    markUnread(request.targetUserId, generation)
+    if (request.action.kind === 'legacy.revoke') {
       const outcome = describePermissionExceptionLegacyRevoke({
-        requestedUserId,
+        requestedUserId: request.targetUserId,
         selectedUserId: selectedUserId.value,
-        permission: requestedPermission,
+        permission: request.action.code,
         ok: true,
         writeAcknowledged: false,
-        errorMessage: acknowledgement.message,
+        errorMessage: rejected,
       })
-      permissionActionFeedback.value = { tone: outcome.tone, message: outcome.message }
-      setStatus(outcome.message, 'error')
+      showFeedback(outcome.message, outcome.tone, false)
       return
     }
-    acknowledged = true
-    const inspection = await loadUserAccess(requestedUserId)
-    const outcome = describePermissionExceptionLegacyRevoke({
-      requestedUserId,
+    if (request.action.kind === 'direct.grant' || request.action.kind === 'direct.revoke') {
+      const outcome = describePermissionWrite({
+        action: request.action.kind === 'direct.grant' ? 'grant' : 'revoke',
+        requestedUserId: request.targetUserId,
+        selectedUserId: selectedUserId.value,
+        permission: actionCode(request.action),
+        ok: true,
+        writeAcknowledged: false,
+        errorMessage: rejected,
+      })
+      showFeedback(outcome.message, outcome.tone, false)
+      return
+    }
+    showFeedback(rejected, 'error', true)
+    return
+  }
+  unconfirmedReadbackUserId.value = request.targetUserId
+  markUnread(request.targetUserId, generation)
+  const outcome = describeUnconfirmedPermissionWrite(request.targetUserId)
+  showFeedback(outcome.message, 'error', request.action.kind === 'template.apply')
+}
+
+function committedReceiptMatches(request: AdminAuthorizationRequest): boolean {
+  const phase = authorizationOperation.phase.value
+  if (phase !== 'committed' && phase !== 'verified') return false
+  const receipt = authorizationOperation.receipt.value
+  if (!receipt || receipt.targetUserId !== request.targetUserId) return false
+  return sameExceptionAction(request.action, receipt.action)
+}
+
+function showDetachedUnknown(request: AdminAuthorizationRequest): void {
+  const outcome = describeUnconfirmedPermissionWrite(request.targetUserId)
+  const message = selectedUserId.value !== request.targetUserId
+    ? `${outcome.message} 未覆盖当前选中用户 ${selectedUserId.value} 的状态`
+    : outcome.message
+  showFeedback(message, 'error', request.action.kind === 'template.apply')
+}
+
+async function reportDetached(request: AdminAuthorizationRequest, generation: number): Promise<void> {
+  if (!committedReceiptMatches(request)) {
+    showDetachedUnknown(request)
+    return
+  }
+  const detachedAction = request.action
+  if (detachedAction.kind === 'template.apply') {
+    try {
+      const template = permissionTemplates.value.find((item) => item.id === detachedAction.templateId)
+      const inspection = await loadUserAccess(request.targetUserId)
+      if (userAccessReadGeneration.value !== generation && selectedUserId.value === request.targetUserId) return
+      const outcome = describePermissionTemplateApply({
+        templateName: template?.name || detachedAction.templateId,
+        requestedPermissions: template ? [...template.permissions] : [],
+        inspection,
+      })
+      if (selectedUserId.value !== request.targetUserId) {
+        setStatus(`${outcome.message} 未覆盖当前选中用户 ${selectedUserId.value} 的状态`, outcome.tone)
+      }
+    } catch {
+      const outcome = describeUnconfirmedPermissionWrite(request.targetUserId)
+      setStatus(outcome.message, 'error')
+    }
+    return
+  }
+  if (request.action.kind !== 'direct.grant' && request.action.kind !== 'direct.revoke' && request.action.kind !== 'legacy.revoke') return
+  try {
+    const inspection = await loadUserAccess(request.targetUserId)
+    if (request.action.kind === 'legacy.revoke') {
+      const outcome = describePermissionExceptionLegacyRevoke({
+        requestedUserId: request.targetUserId,
+        selectedUserId: selectedUserId.value,
+        permission: request.action.code,
+        ok: true,
+        writeAcknowledged: true,
+        inspection,
+      })
+      showFeedback(outcome.message, outcome.tone, false)
+      return
+    }
+    const outcome = describePermissionWrite({
+      action: request.action.kind === 'direct.grant' ? 'grant' : 'revoke',
+      requestedUserId: request.targetUserId,
       selectedUserId: selectedUserId.value,
-      permission: requestedPermission,
+      permission: request.action.code,
       ok: true,
       writeAcknowledged: true,
       inspection,
     })
-    permissionActionFeedback.value = { tone: outcome.tone, message: outcome.message }
-    setStatus(outcome.message, outcome.tone)
-    applyPermissionReadback(generation, requestedUserId, inspection, outcome.applyInspection)
-  } catch (_error) {
-    const stillCurrent = selectedUserId.value === requestedUserId && userAccessReadGeneration.value === generation
-    if (acknowledged) {
-      unconfirmedReadbackUserId.value = requestedUserId
-      if (stillCurrent) selectedUserAccess.value = unreadUserPermissionInspection(requestedUserId)
-      const outcome = describeUnconfirmedPermissionWrite(requestedUserId)
-      permissionActionFeedback.value = { tone: outcome.tone, message: outcome.message }
-      setStatus(outcome.message, 'error')
+    showFeedback(outcome.message, outcome.tone, false)
+  } catch {
+    const outcome = describeUnconfirmedPermissionWrite(request.targetUserId)
+    showFeedback(outcome.message, 'error', false)
+  }
+}
+
+async function finishCommitted(request: AdminAuthorizationRequest, generation: number): Promise<void> {
+  await authorizationOperation.verify()
+  await authorizationOperation.whenSettled()
+  if (selectedUserId.value !== request.targetUserId) {
+    await reportDetached(request, generation)
+    return
+  }
+  if (liveReadFailed || !liveInspection) {
+    unconfirmedReadbackUserId.value = request.targetUserId
+    markUnread(request.targetUserId, generation)
+    const outcome = describeUnconfirmedPermissionWrite(request.targetUserId)
+    showFeedback(outcome.message, 'error', request.action.kind === 'template.apply')
+    return
+  }
+  const inspection = liveInspection
+  const committedAction = request.action
+  if (committedAction.kind === 'template.apply') {
+    const template = permissionTemplates.value.find((item) => item.id === committedAction.templateId)
+    const provenCodes = impactPermissionCodes(request)
+    const outcome = describePermissionTemplateApply({
+      templateName: template?.name || committedAction.templateId,
+      requestedPermissions: provenCodes.length > 0 ? provenCodes : (template ? [...template.permissions] : []),
+      inspection,
+    })
+    const stillCurrent = accessReadStillCurrent(generation, userAccessReadGeneration.value, request.targetUserId, selectedUserId.value)
+    if (!stillCurrent) {
+      if (selectedUserId.value !== request.targetUserId) {
+        setStatus(`${outcome.message} 未覆盖当前选中用户 ${selectedUserId.value} 的状态`, outcome.tone)
+      }
       return
     }
+    selectedUserAccess.value = inspection
+    permissionActionFeedback.value = null
+    setStatus(outcome.message, outcome.tone)
+    return
+  }
+  if (request.action.kind === 'legacy.revoke') {
     const outcome = describePermissionExceptionLegacyRevoke({
-      requestedUserId,
+      requestedUserId: request.targetUserId,
       selectedUserId: selectedUserId.value,
-      permission: requestedPermission,
-      ok: false,
+      permission: request.action.code,
+      ok: true,
+      writeAcknowledged: true,
+      inspection,
     })
-    if (outcome.offerReadOnlyReread) {
-      unconfirmedReadbackUserId.value = requestedUserId
-      if (stillCurrent) selectedUserAccess.value = unreadUserPermissionInspection(requestedUserId)
-    }
-    permissionActionFeedback.value = { tone: outcome.tone, message: outcome.message }
-    setStatus(outcome.message, 'error')
-  } finally {
-    busy.value = false
+    showFeedback(outcome.message, outcome.tone, false)
+    applyPermissionReadback(generation, request.targetUserId, inspection, outcome.applyInspection)
+    return
+  }
+  if (request.action.kind === 'direct.grant' || request.action.kind === 'direct.revoke') {
+    const outcome = describePermissionWrite({
+      action: request.action.kind === 'direct.grant' ? 'grant' : 'revoke',
+      requestedUserId: request.targetUserId,
+      selectedUserId: selectedUserId.value,
+      permission: request.action.code,
+      ok: true,
+      writeAcknowledged: true,
+      inspection,
+    })
+    showFeedback(outcome.message, outcome.tone, false)
+    applyPermissionReadback(generation, request.targetUserId, inspection, outcome.applyInspection)
+  }
+}
+
+async function presentRecoveredOperation(): Promise<void> {
+  if (submittedRequest.value || confirmLatch || confirmBusy.value || operationDialogOpen.value) return
+  const userId = selectedUserId.value
+  const phase = authorizationOperation.phase.value
+  if (!userId || (phase !== 'pending' && phase !== 'committed' && phase !== 'unverified_no_read')) return
+  const receipt = authorizationOperation.receipt.value
+  if (receipt && receipt.targetUserId !== userId) return
+  if (phase === 'pending' || phase === 'unverified_no_read' || !receipt) {
+    recoveredOperationNote.value = describeUnconfirmedPermissionWrite(userId).message
+    return
+  }
+  const request = supportedRecoveryReceipt(receipt)
+  if (!request) {
+    recoveredOperationNote.value = '这次回执是角色或准入变更。权限来源页不能用当前读取确认它，也不会清除这条未完成记录。'
+    return
+  }
+  const operationId = authorizationOperation.clientOperationId.value
+  if (!operationId || recoveredOperationId.value === operationId) return
+  recoveredOperationId.value = operationId
+  recoveredOperationNote.value = describeUnconfirmedPermissionWrite(userId).message
+  await finishCommitted(request, userAccessReadGeneration.value)
+  if (selectedUserId.value !== userId) return
+  if (authorizationOperation.phase.value === 'verified') {
+    recoveredOperationNote.value = ''
+    return
+  }
+  recoveredOperationNote.value = status.value || describeUnconfirmedPermissionWrite(userId).message
+}
+
+async function rereadRecoveredOperation(): Promise<void> {
+  if (confirmLatch || confirmBusy.value) return
+  const userId = selectedUserId.value
+  if (!userId) return
+  recoveredOperationId.value = ''
+  const phase = authorizationOperation.phase.value
+  if (phase === 'pending' || phase === 'unverified_no_read' || phase === 'committed') {
+    await authorizationOperation.lookup()
+    await authorizationOperation.whenSettled()
+  }
+  await presentRecoveredOperation()
+}
+
+function impactPermissionCodes(request: AdminAuthorizationRequest): string[] {
+  const impact = authorizationOperation.impact.value
+  if (!impact || request.action.kind !== 'template.apply') return []
+  return impact.sourceChanges
+    .filter((change) => change.source === 'direct' && change.operation === 'assign')
+    .map((change) => change.id)
+}
+
+async function settleOperation(request: AdminAuthorizationRequest, generation: number): Promise<void> {
+  if (selectedUserId.value !== request.targetUserId || currentPrincipalId() === '') {
+    await reportDetached(request, generation)
+    return
+  }
+  const phase = authorizationOperation.phase.value
+  if (phase === 'validation_failed' || phase === 'forbidden') {
+    showTransportFailure(request, generation)
+    return
+  }
+  if (phase === 'pending' || phase === 'unverified_no_read') {
+    showPendingResult(request, generation)
+    return
+  }
+  if (phase === 'committed' || phase === 'verified') {
+    await finishCommitted(request, generation)
   }
 }
 
 async function confirmPendingMutation(): Promise<void> {
-  const pending = pendingConfirm.value
-  if (!pending || busy.value) return
-  pendingConfirm.value = null
+  if (confirmLatch || confirmBusy.value) return
+  const request = frozenRequest.value
+  if (!request || !operationReady.value) return
+  if (authorizationOperation.phase.value !== 'awaiting_confirmation') return
+  if (selectedUserId.value !== request.targetUserId) return
+  const principalId = currentPrincipalId()
+  if (!principalId) return
+  confirmLatch = true
+  confirmBusy.value = true
+  busy.value = true
+  const generation = userAccessReadGeneration.value
+  submittedRequest.value = request
   invalidatePermissionChecker()
-  if (pending.kind === 'grant' || pending.kind === 'revoke') {
-    await mutatePermission(pending.kind, { userId: pending.userId, permission: pending.permission })
-    return
+  if (unconfirmedReadbackUserId.value === request.targetUserId) unconfirmedReadbackUserId.value = ''
+  try {
+    await authorizationOperation.confirm()
+    await authorizationOperation.whenSettled()
+    if (
+      userAccessReadGeneration.value !== generation
+      || currentPrincipalId() !== principalId
+    ) {
+      if (selectedUserId.value !== request.targetUserId || currentPrincipalId() !== principalId) {
+        await reportDetached(request, generation)
+      }
+      return
+    }
+    await settleOperation(request, generation)
+  } finally {
+    confirmLatch = false
+    confirmBusy.value = false
+    busy.value = false
+    operationDialogOpen.value = false
+    frozenRequest.value = null
+    operationEpoch += 1
   }
-  if (pending.kind === 'template') {
-    await applyPermissionTemplate(pending)
-    return
-  }
-  await clearLegacyPermission({ userId: pending.userId, permission: pending.permission })
 }
 
 function invalidatePermissionChecker(): void {
@@ -1165,6 +1740,27 @@ onUnmounted(() => {
 watch([selectedUserId, selectedPermissionCode], () => {
   invalidatePermissionChecker()
 })
+
+watch([selectedUserId, selectedPermissionCode, selectedTemplateId, operationReason], () => {
+  authorizationOperation.syncContext()
+  if (confirmLatch || confirmBusy.value || !operationDialogOpen.value) return
+  operationEpoch += 1
+  previewAbort?.abort()
+  operationDialogOpen.value = false
+  frozenRequest.value = null
+  busy.value = false
+})
+
+watch(
+  () => [
+    selectedUserId.value,
+    authorizationOperation.phase.value,
+    authorizationOperation.clientOperationId.value,
+  ] as const,
+  () => {
+    void presentRecoveredOperation()
+  },
+)
 
 watch(templateModeFilter, () => {
   void loadPermissions().catch((error) => {

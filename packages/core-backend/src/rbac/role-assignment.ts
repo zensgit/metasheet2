@@ -561,9 +561,12 @@ async function assertDelegatedRoleCodesAssignable(
   if (refusal) throw new RoleAssignmentForbiddenError(roleId, scope, refusal.reason)
 }
 
+export type RoleAssignmentSource = 'manual' | 'creation'
+
 export async function assignUserRoles(options: {
   userIds: readonly string[]
   roleId: string
+  assignmentSource?: RoleAssignmentSource
   scope: RoleAssignmentScope
   executor?: RoleAssignmentExecutor
 }): Promise<RoleAssignmentResult> {
@@ -575,11 +578,11 @@ export async function assignUserRoles(options: {
   const executor = executorOf(options.executor)
   await assertDelegatedRoleCodesAssignable(executor, roleId, options.scope, 'assign')
   const result = await executor.query(
-    `INSERT INTO user_roles (user_id, role_id)
-     SELECT unnest($1::text[]), $2
+    `INSERT INTO user_roles (user_id, role_id, assignment_source)
+     SELECT unnest($1::text[]), $2, $3::text
      ON CONFLICT DO NOTHING
      RETURNING user_id`,
-    [userIds, roleId],
+    [userIds, roleId, options.assignmentSource ?? null],
   )
   const affectedUserIds = readAffectedUserIds(result.rows)
   // A FRESH appointment to a namespace's main-admin role starts with no audience. Only users

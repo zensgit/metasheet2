@@ -1066,6 +1066,10 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
   const hidden = nestedInputWrite(tokens)
   if (hidden !== null) return push(head, 'unreadable', hidden, { inputWrite: headWritesInput() })
   // 5. By the kind of the outermost statement.
+  // The provenance down migration must exclude concurrent membership inserts before testing
+  // whether dropping the column loses evidence. This exact fixed lock is read-only; all other
+  // LOCK forms still fall through to unreadable.
+  if (head === 'LOCK' && tokens.length === 7 && isKeyword(tokens[1], 'TABLE') && isKeyword(tokens[2], 'USER_ROLES') && isKeyword(tokens[3], 'IN') && isKeyword(tokens[4], 'ACCESS') && isKeyword(tokens[5], 'EXCLUSIVE') && isKeyword(tokens[6], 'MODE')) return push('LOCK TABLE', 'safe', '')
   if (READ_KINDS.includes(head)) {
     // `SELECT … INTO <table>` creates the table it names, so the name must be read, at every INTO
     // of the statement. A word spelled like a write verb before an INTO does not make it the INTO
