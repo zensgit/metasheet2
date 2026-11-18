@@ -48,6 +48,12 @@ case "$url" in
     ;;
   */health)
     running metasheet-backend || exit 7
+    # H_TERM_ON_HEALTH_TRY=N: TERM to the window during the new backend's Nth /health try.
+    if [[ -n "${H_TERM_ON_HEALTH_TRY:-}" && "$(cat "${C}/metasheet-backend/image_id")" == sha256:new* ]]; then
+      tries=$(( $(cat "${H_DS}/new_health_tries" 2>/dev/null || echo 0) + 1 ))
+      printf '%s' "$tries" > "${H_DS}/new_health_tries"
+      if (( tries == H_TERM_ON_HEALTH_TRY )); then kill -TERM "$(cat "${H_RUN_DIR}/window.pid")"; fi
+    fi
     commit="$(rev_of metasheet-backend)"
     if [[ "${H_NEW_HEALTH_FAIL:-0}" == "1" && "$(cat "${C}/metasheet-backend/image_id")" == sha256:new* ]]; then exit 22; fi
     if [[ "${H_OLD_RESTART_WRONG:-0}" == "1" && -e "${C}/metasheet-backend/restarted" ]]; then commit="$(printf 'e%.0s' {1..40})"; fi

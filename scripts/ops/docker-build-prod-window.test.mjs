@@ -1630,6 +1630,19 @@ describe('production deploy window: remote_deploy step run against test doubles'
     assert.ok(!any(r, isUpWeb), 'web never upped')
   })
 
+  scenario('TERM during the new backend\'s health wait (every try fails fast) -> 73 after the current try, not after the whole wait', async (t) => {
+    const world = makeWorld(t)
+    const r = await runWindow(t, world, { env: { H_NEW_HEALTH_FAIL: '1', H_TERM_ON_HEALTH_TRY: '3' } })
+    assertCommon(r, 73)
+    assert.match(r.windowLog, /^\[deploy-window\] raw_rc=143$/m)
+    const start = firstIndex(r, isStart('metasheet-backend'))
+    const tries = r.calls.filter((call) => call.kind === 'curl' && call.index > start && /\/health$/.test(call.args))
+    assert.equal(tries.length, 3, 'the exit branch ran right after the try the TERM arrived in (3 of 60 tries)')
+    assert.equal((r.windowLog.match(/waiting for backend health at /g) ?? []).length, 2, 'the trap runs as soon as the third try returns, before its waiting line')
+    assert.ok(first(r, (call) => isStop('metasheet-backend')(call) && /^new-backend-/.test(call.meta.target), start) >= 0, 'the unverified new backend is stopped')
+    assert.ok(!any(r, isUpWeb), 'web never upped')
+  })
+
   scenario('post-commit Pending far from the excluded count -> 74: the count stays on the host', async (t) => {
     const world = makeWorld(t)
     const r = await runWindow(t, world, { env: { H_POSTLIST_EXTRA_COUNT: '24682' } })

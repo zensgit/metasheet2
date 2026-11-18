@@ -573,6 +573,26 @@ jobs:
             echo "[deploy-version][error] ${label} check timed out at ${url}" >&2
             return 1
           }
+          # The same tries, messages and limits, with the body written to a file: every try runs
+          # in the window's own shell, not inside one command substitution, so a TERM acts after
+          # the current try (one curl of at most 10 s, or the pause), not after the whole loop.
+          fetch_json_with_retry_file() {
+            local label="$1"
+            local url="$2"
+            local attempts="$3"
+            local delay_seconds="$4"
+            local out="$5"
+            local i
+            for ((i = 1; i <= attempts; i += 1)); do
+              if curl -fsS "${url}" >"${out}" 2>/dev/null; then
+                return 0
+              fi
+              echo "[deploy-version] waiting for ${label} at ${url} (attempt ${i}/${attempts})" >&2
+              sleep "${delay_seconds}"
+            done
+            echo "[deploy-version][error] ${label} check timed out at ${url}" >&2
+            return 1
+          }
 
           # json_commit backend|web: reads a /health or /build-info.json body on stdin, prints its commit.
           json_commit() {
@@ -1970,7 +1990,8 @@ jobs:
           fi
           backend_start_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           timeout 60 docker start metasheet-backend >/dev/null 2>>"${RUN_DIR}/docker.err" || fail "docker start of the new backend failed"
-          new_backend_json="$(fetch_json_with_retry "backend health" "${DEPLOY_BACKEND_HEALTH_URL}" 60 2)" || fail "new backend /health did not answer"
+          fetch_json_with_retry_file "backend health" "${DEPLOY_BACKEND_HEALTH_URL}" 60 2 "${RUN_DIR}/new-backend-health.json" || fail "new backend /health did not answer"
+          new_backend_json="$(cat "${RUN_DIR}/new-backend-health.json")"
           [[ "$(printf '%s' "$new_backend_json" | json_commit backend || true)" == "$DEPLOY_IMAGE_TAG" ]] || fail "new backend /health build.commit is not the dispatched commit"
           plugins_ok=0
           for _ in $(seq 1 20); do
