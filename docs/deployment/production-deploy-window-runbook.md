@@ -15,7 +15,7 @@ All host paths below are relative to the deploy user's home directory (`$HOME`).
 | `$HOME/metasheet2-deploy-window/state` | the window's state (`phase=`, `env_written=`, `backend_verified=`, `web_verified=`, `rc=` ...). Only the lock holder writes it |
 | `$HOME/metasheet2-deploy-window/abort` | created by the operator to abort a window before the migration (see below) |
 | `$HOME/metasheet2-deploy-window/host-checks/` | owner-installed host checks: every executable here runs with one argument, the phase (`pre-stop`, `pre-restart-old`, `post-backend`); all must exit 0 and at least `DEPLOY_WINDOW_MIN_HOST_CHECKS` must be present (see "Host checks") |
-| `$HOME/metasheet2-deploy-window/runs/<run_id>-<attempt>/` | one directory per dispatch (mode 700): `window.log` (the same lines as the public run log), `window-detail.log` (host-only details, see "Public log and host details"), `rc`, the env snapshots, the dump `db.dump`, `meta.txt`, `globals.sql`, `shim-candidates.txt`, `RESTORE-README.txt`, `appdata.tar` when the backend held local files, `git-sync.out` (the output of the deploy checkout's git sync), and raw tool outputs. Host only; never uploaded |
+| `$HOME/metasheet2-deploy-window/runs/<run_id>-<attempt>/` | one directory per dispatch (mode 700): `window.log` (the same lines as the public run log), `window-detail.log` (host-only details, see "Public log and host details"), `rc`, the env snapshots, the dump `db.dump`, `meta.txt`, `globals.sql`, `shim-candidates.txt`, `RESTORE-README.txt`, `appdata.tar` when the backend held local files, `git-sync.out` (the output of the deploy checkout's git sync), `deploy-path.ls` (a listing, written only when the deploy directory is missing or not a git work tree), and raw tool outputs. Host only; never uploaded |
 
 The env snapshots and `globals.sql` hold secrets and password hashes. Keep the run
 directories on the host and prune old dumps by hand; the workflow never deletes a
@@ -34,13 +34,15 @@ the deploy. These details stay on the host, in the run directory's `window-detai
   `running_backend_commit=match`, `old_images recorded=ok`, `old version restarted revision=match`);
 - the in-play migration names, the exclusion-proof details and every ledger count
   (public: `pending_set=match|mismatch`, `exclusion_proof=ok|fail`,
-  `ledger=committed|rolled-back|other`, `MIGRATE COMMITTED ledger=committed`);
+  `ledger=committed|rolled-back|other` after each ledger read, none when the ledger could
+  not be read, `MIGRATE COMMITTED ledger=committed`);
 - the per-migration result lines of `migrate.js` (public: `migrate rc=<n> sqlstate=<code|none>`);
 - database, dump, app-data and free-space sizes (public: `disk_gate=ok|fail`,
   `backup ok sha256=<hash>`, `appdata copy=ok sha256=<hash>`, `appdata read_back=match|mismatch`);
 - the output of the deploy checkout's git sync (fetch, stash, checkout, merge), which names
   commits and changed files, in `git-sync.out` (public: `git_sync=ok`, or
-  `git_sync=fail step=<step>`).
+  `git_sync=fail step=<step>`); whether the synced host files had to be stashed first is a
+  `git_sync stash=` line of `window-detail.log`.
 
 The host file sync step before the window still prints the deploy path's free space
 (`[host-sync] disk_available_kb=`), as the workflow did before this window.
@@ -117,7 +119,9 @@ never any other backend).
 
 - Cancelling the GitHub run, or losing the runner's ssh session, does **not** stop the
   window: it runs detached on the host and finishes its own branch. The run only follows
-  its log.
+  its log. After the ssh session ends, the host side of that log follower may keep running
+  until the window ends; it only reads `window.log` and removes its own `.follow.chunk`
+  file in the run directory. Nothing to do.
 - To abort before the migration, create the abort file:
   `touch "$HOME/metasheet2-deploy-window/abort"`. Before the stop the window refuses
   (70); after the stop it restarts the old version per `pre_commit_abort` (71 or 72).
@@ -144,20 +148,26 @@ never any other backend).
   `docker image inspect` digest reads after the pull and the `docker compose` /
   `docker-compose` version probes of the prologue; every curl (5 s to connect, 10 s per
   request unless the step sets less); the deploy checkout's `git fetch` (300 s); each host
-  check (400 s). The longest single limit is 600 s (copying the app data into the new
-  backend, or reading one app-data path back from it). Steps without a limit: local file
-  work (`git checkout` / `git merge` in the deploy directory, the env-file writes, listing
-  and hashing the run directory's files), `df`, `crontab -l` and
-  `scripts/ops/attendance-preflight.sh`. The exit branch starts with a `raw_rc=` line in
+  check (400 s); `df` in the disk gates and in the free-space check after the backup, and
+  `crontab -l` (10 s each). The longest single limit is 600 s (copying the app data into
+  the new backend, or reading one app-data path back from it). Steps without a limit:
+  local file work (`git checkout` / `git merge` in the deploy directory, the env-file
+  writes, listing and hashing the run directory's files) and
+  `scripts/ops/attendance-preflight.sh`; the disk watchdog's `df` runs in the background
+  and does not delay a TERM. The exit branch starts with a `raw_rc=` line in
   `window.log`; from then on the window ignores further TERM signals and ends by the same
   limits (restarting the old version can take up to about 30 minutes: host check,
-  `docker start`, the old-version checks). The `raw_rc=` line can be missing: a TERM that
-  arrives while the window writes a host file sends the exit branch's lines into that
-  file. So judge by `state`, the `rc` file and the `window.pid` process, not by the log
-  line: while the process runs, the window is still inside its limits; once it is gone,
-  follow "the window has ended" under Outcomes. Never send KILL: the window then ends
+  `docker start`, the old-version checks). Judge the window by `state`, the `rc` file and
+  the `window.pid` process: while the process runs, the window is still inside its
+  limits; once it is gone, follow "the window has ended" under Outcomes. Never send KILL: the window then ends
   without its exit branch, `state` stays unfinished, no `rc` file is written and
   production stays in whatever phase it was.
+- After a window stopped with TERM, and once it has ended, list its migrate one-off:
+  `docker ps -a --filter name=metasheet-window-migrate-`. A TERM between the one-off's
+  create and its start leaves a container of this run in state `created` that never ran;
+  remove that one by its exact name
+  (`docker rm metasheet-window-migrate-<run_id>-<attempt>`). Leave a one-off in any other
+  state to the owner.
 - Users see connection refused on the public port from the web stop to the web start
   (stop, drain, dump, dump verification, migration, backend start). There is no
   maintenance page; open tabs must be refreshed afterwards.
