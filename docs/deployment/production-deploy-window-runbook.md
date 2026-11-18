@@ -34,8 +34,10 @@ the deploy. These details stay on the host, in the run directory's `window-detai
   `running_backend_commit=match`, `old_images recorded=ok`, `old version restarted revision=match`);
 - the in-play migration names, the exclusion-proof details and every ledger count
   (public: `pending_set=match|mismatch`, `exclusion_proof=ok|fail`,
-  `ledger=committed|rolled-back|other` after each ledger read, none when the ledger could
-  not be read, `MIGRATE COMMITTED ledger=committed`);
+  `ledger=committed|rolled-back|other` after the ledger read that decides the migration's
+  outcome, `MIGRATE COMMITTED ledger=committed`; no `ledger=` word when the ledger could not
+  be read, nor for the exit branch's read in phase `committed`, which comes after the
+  `MIGRATE COMMITTED` line);
 - the per-migration result lines of `migrate.js` (public: `migrate rc=<n> sqlstate=<code|none>`);
 - database, dump, app-data and free-space sizes (public: `disk_gate=ok|fail`,
   `backup ok sha256=<hash>`, `appdata copy=ok sha256=<hash>`, `appdata read_back=match|mismatch`);
@@ -178,7 +180,7 @@ never any other backend).
 - The dispatcher stays on call until the window's final `outcome=` line, or, after a
   runner timeout, 255 or 76, until the host `state` shows a terminal phase.
 - The `remote_deploy` step is limited to 300 minutes and the `deploy` job to 345. The
-  window's own time limits add up to about 290 minutes on its longest path (a migration
+  window's own time limits add up to about 293 minutes on its longest path (a migration
   that exits non-zero while the ledger reads committed) with the default tunables, one
   host check per phase, three app-data paths and every limited step at its limit; raised
   tunables or more host checks can exceed the step limit. A runner timeout
