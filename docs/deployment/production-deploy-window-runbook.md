@@ -140,10 +140,11 @@ never any other backend).
   for a background job (the pull, the app-data copy-out, the dump and its two reads, the
   migration), the TERM acts at once: the job is stopped (the migration one-off is killed
   and the ledger decides). Otherwise it acts once the current foreground step returns.
-  Two foreground steps are whole loops that return only at their end: the new backend's
-  health wait (up to 12 minutes: 60 tries of up to 10 s plus a 2 s pause) and the
-  read-back of the app data after the commit (up to 30 s plus 600 s per app-data path).
-  A TERM during either acts when the loop ends.
+  During the new backend's health wait (60 tries) a TERM acts after the current try,
+  about 12 s at most (one request of up to 10 s, or the 2 s pause). Two foreground steps
+  return only at their end: the read-back of the app data after the commit (up to 30 s
+  plus 600 s per app-data path) and each of the two reads of the final version check
+  (up to 15 tries of up to 12 s); a TERM during one of them acts when it ends.
   Steps with a time limit: every docker and compose call except the two
   `docker image inspect` digest reads after the pull and the `docker compose` /
   `docker-compose` version probes of the prologue; every curl (5 s to connect, 10 s per
