@@ -1,7 +1,21 @@
 /* eslint-disable vue/one-component-per-file -- Tests mount isolated apps with local component stubs. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+const authState = vi.hoisted(() => ({ userId: 'admin-1' }))
 import { createApp, h, nextTick, type App } from 'vue'
 import RoleDelegationView from '../src/views/RoleDelegationView.vue'
+import {
+  ADMIN_AUTHORIZATION_OPERATIONS_PATH,
+  ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY,
+  ADMIN_AUTHORIZATION_PREVIEW_PATH,
+  type AdminAuthorizationImpact,
+} from '../src/utils/adminAuthorizationOperation'
+
+vi.mock('../src/composables/useAuth', () => ({
+  useAuth: () => ({
+    getCurrentUser: () => ({ id: authState.userId }),
+  }),
+}))
 
 const apiFetchMock = vi.fn()
 
@@ -33,6 +47,61 @@ function createJsonResponse(payload: unknown, status = 200) {
   }
 }
 
+function blankImpact(partial: Partial<AdminAuthorizationImpact> = {}): AdminAuthorizationImpact {
+  return {
+    sourceChanges: [],
+    admissionChanges: [],
+    scopeCleanup: [],
+    effectiveBefore: [],
+    effectiveAfter: [],
+    retainedOtherGrants: [],
+    warnings: [],
+    ...partial,
+  }
+}
+
+function authorizationPreviewResponse(impact: AdminAuthorizationImpact = blankImpact()) {
+  return createJsonResponse({ expectedVersion: 'version-1', impact })
+}
+
+function readAuthorizationBody(body: string | undefined): {
+  targetUserId: string
+  action: { kind: string; roleId?: string }
+  admissionChanges: Array<{ namespace: string; enabled: boolean }>
+  clientOperationId: string
+  expectedVersion?: string
+} {
+  return JSON.parse(String(body)) as {
+    targetUserId: string
+    action: { kind: string; roleId?: string }
+    admissionChanges: Array<{ namespace: string; enabled: boolean }>
+    clientOperationId: string
+    expectedVersion?: string
+  }
+}
+
+function authorizationCommitResponse(body: string | undefined, impact: AdminAuthorizationImpact = blankImpact()) {
+  const request = readAuthorizationBody(body)
+  return createJsonResponse({
+    status: 'committed',
+    clientOperationId: request.clientOperationId,
+    receipt: {
+      targetUserId: request.targetUserId,
+      action: request.action,
+      impact,
+      resultVersion: 'result-1',
+    },
+  })
+}
+
+function isAuthorizationPreview(pathname: string): boolean {
+  return pathname === ADMIN_AUTHORIZATION_PREVIEW_PATH
+}
+
+function isAuthorizationCommit(pathname: string): boolean {
+  return pathname === ADMIN_AUTHORIZATION_OPERATIONS_PATH
+}
+
 function findButtonByText(container: HTMLElement, text: string): HTMLButtonElement {
   const button = Array.from(container.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes(text))
   if (!(button instanceof HTMLButtonElement)) {
@@ -42,7 +111,8 @@ function findButtonByText(container: HTMLElement, text: string): HTMLButtonEleme
 }
 
 function createApiImplementation(callLog: string[]) {
-  return async (input: unknown) => {
+  let crmAdmissionEnabled = false
+  return async (input: unknown, init?: { method?: string; body?: string }) => {
     const rawUrl = String(input)
     callLog.push(rawUrl)
     const url = new URL(rawUrl, 'http://localhost')
@@ -191,31 +261,25 @@ function createApiImplementation(callLog: string[]) {
           namespaceAdmissions: [
             {
               namespace: 'crm',
-              enabled: false,
-              effective: false,
+              enabled: crmAdmissionEnabled,
+              effective: crmAdmissionEnabled,
               hasRole: true,
-              updatedAt: '2026-04-09T00:00:00.000Z',
+              updatedAt: crmAdmissionEnabled ? '2026-04-10T00:00:00.000Z' : '2026-04-09T00:00:00.000Z',
             },
           ],
         },
       })
     }
 
-    if (pathname === '/api/admin/role-delegation/users/user-1/namespaces/crm/admission') {
-      return createJsonResponse({
-        ok: true,
-        data: {
-          namespaceAdmissions: [
-            {
-              namespace: 'crm',
-              enabled: true,
-              effective: true,
-              hasRole: true,
-              updatedAt: '2026-04-10T00:00:00.000Z',
-            },
-          ],
-        },
-      })
+    if (isAuthorizationPreview(pathname) && init?.method === 'POST') {
+      return authorizationPreviewResponse()
+    }
+
+    if (isAuthorizationCommit(pathname) && init?.method === 'POST') {
+      const request = readAuthorizationBody(init.body)
+      const change = request.admissionChanges[0]
+      if (request.action.kind === 'admission.set' && change) crmAdmissionEnabled = change.enabled
+      return authorizationCommitResponse(init.body)
     }
 
     if (pathname === '/api/admin/role-delegation/users/user-1/scopes') {
@@ -247,7 +311,9 @@ describe('RoleDelegationView', () => {
   let callLog: string[] = []
 
   beforeEach(() => {
+    authState.userId = 'admin-1'
     window.history.replaceState({}, '', '/')
+    sessionStorage.removeItem(ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY)
     apiFetchMock.mockReset()
     callLog = []
     apiFetchMock.mockImplementation(createApiImplementation(callLog))
@@ -263,6 +329,35 @@ describe('RoleDelegationView', () => {
     window.history.replaceState({}, '', '/')
   })
 
+  function listedMemberButton(label: string): HTMLButtonElement | null {
+    const button = Array.from(container!.querySelectorAll('button.delegation-page__user')).find((node) => (
+      node instanceof HTMLButtonElement && (node.textContent || '').includes(label)
+    ))
+    return button instanceof HTMLButtonElement ? button : null
+  }
+
+  async function selectListedMember(label: string): Promise<void> {
+    await waitForCondition(() => {
+      const button = listedMemberButton(label)
+      return Boolean(button && !button.disabled)
+    })
+    listedMemberButton(label)?.click()
+  }
+
+  async function waitForMemberListSettled(callsBefore = 0): Promise<void> {
+    await waitForCondition(() => {
+      const requested = callLog.slice(callsBefore).some((url) => {
+        try {
+          return new URL(url, 'http://localhost').pathname === '/api/admin/role-delegation/users'
+        } catch {
+          return false
+        }
+      })
+      const loading = Array.from(container!.querySelectorAll('button')).some((button) => button.textContent?.includes('加载中'))
+      return requested && !loading
+    })
+  }
+
   async function mountView(): Promise<void> {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', {
@@ -270,7 +365,8 @@ describe('RoleDelegationView', () => {
       template: '<a><slot /></a>',
     })
     app.mount(container!)
-    await waitForCondition(() => callLog.includes('/api/admin/role-delegation/users/user-1/scopes'))
+    await selectListedMember('alpha@example.com')
+    await waitForCondition(() => Boolean(container?.querySelector('[data-testid="scope-include-children"]')))
   }
 
   it('clears stale selected member group after searching to an empty result set', async () => {
@@ -360,10 +456,11 @@ describe('RoleDelegationView', () => {
       if (pathname === '/api/admin/role-delegation/users/user-1/access') {
         return createJsonResponse({ ok: true, data: access })
       }
-      if (pathname === '/api/admin/role-delegation/users/user-1/roles/unassign' && init?.method === 'POST') {
+      if (isAuthorizationPreview(pathname) && init?.method === 'POST') return authorizationPreviewResponse()
+      if (isAuthorizationCommit(pathname) && init?.method === 'POST') {
         posts.push({ path: pathname, body: JSON.parse(String(init.body)) })
         access = delegateAccess(['attendance_employee'])
-        return createJsonResponse({ ok: true, data: access })
+        return authorizationCommitResponse(init.body)
       }
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
@@ -371,6 +468,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => Boolean(container?.querySelector('select[data-testid="delegation-revoke-role"] option[value="plugin_elearning_viewer"]')))
 
     const optionValues = (testId: string) => Array.from(
@@ -409,16 +507,22 @@ describe('RoleDelegationView', () => {
     expect(container?.textContent).not.toContain('如果该角色包含平台管理员')
     expect(container?.textContent).not.toContain('冻结')
     const confirm = container!.querySelector('[data-testid="delegation-confirmation-confirm"]') as HTMLButtonElement
-    expect(confirm.disabled).toBe(false)
+    await waitForCondition(() => confirm.disabled === false)
     confirm.click()
     await waitForCondition(() => posts.length === 1)
-    expect(posts[0]).toEqual({ path: '/api/admin/role-delegation/users/user-1/roles/unassign', body: { roleId: 'plugin_elearning_viewer' } })
+    expect(posts[0]?.path).toBe(ADMIN_AUTHORIZATION_OPERATIONS_PATH)
+    expect(posts[0]?.body).toMatchObject({
+      targetUserId: 'user-1',
+      action: { kind: 'role.revoke', roleId: 'plugin_elearning_viewer' },
+      admissionChanges: [],
+      expectedVersion: 'version-1',
+    })
     await waitForCondition(() => !optionValues('delegation-revoke-role').includes('plugin_elearning_viewer'))
     await flushUi()
     expect(revokeSelect.value).toBe('')
     // The revoked pick is cleared, not merely hidden: the button cannot re-send it.
     expect(revokeButton.disabled).toBe(true)
-    expect(container?.textContent).toContain('角色已撤销')
+    expect(container?.textContent).toContain('角色已从该成员移除')
   })
 
   it('shows namespace admission controls for delegated members and can toggle plugin usage', async () => {
@@ -431,12 +535,12 @@ describe('RoleDelegationView', () => {
     findButtonByText(container!, '开通插件使用').click()
     await flushUi()
     const confirmAdmission = container!.querySelector('[data-testid="delegation-confirmation-confirm"]') as HTMLButtonElement
-    expect(confirmAdmission.disabled).toBe(false)
+    await waitForCondition(() => confirmAdmission.disabled === false)
     confirmAdmission.click()
-    await waitForCondition(() => callLog.some((url) => url.includes('/api/admin/role-delegation/users/user-1/namespaces/crm/admission')))
+    await waitForCondition(() => (container?.textContent || '').includes('已开通 crm 插件使用'))
 
-    expect(container?.textContent).toContain('已开通 crm 插件使用')
     expect(container?.textContent).toContain('当前实际可用')
+    expect(callLog.some((url) => url.includes(ADMIN_AUTHORIZATION_OPERATIONS_PATH) && !url.includes('/preview'))).toBe(true)
   })
 
   it('explains management scope without treating plugin admission as a delegate prerequisite', async () => {
@@ -678,6 +782,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => (container?.querySelector('.delegation-page__panel--detail h2')?.textContent || '').includes('Alpha'))
     await waitForCondition(() => callLog.some((url) => url.includes('/users/user-1/scopes')))
     await flushUi()
@@ -780,6 +885,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => Boolean(container?.querySelector('[data-testid="delegation-assign-role"]')))
     const assignSelect = container!.querySelector('[data-testid="delegation-assign-role"]') as HTMLSelectElement
     assignSelect.value = 'crm_admin'
@@ -871,6 +977,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => callLog.some((url) => url.includes('/users/user-1/access')))
     await flushUi()
     const detail = container!.querySelector('.delegation-page__panel--detail')
@@ -955,6 +1062,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => callLog.some((url) => url.includes('/users/user-1/scopes')))
     await flushUi()
     expect(container?.querySelector('.delegation-page__panel--detail h2')?.textContent).toContain('Alpha')
@@ -1000,35 +1108,34 @@ describe('RoleDelegationView', () => {
         return createJsonResponse({ ok: true, data: { items: [{ id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true }] } })
       }
       if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        const assigned = posts.length > 0
         return createJsonResponse({
           ok: true,
           data: {
             actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: ['crm'], roleCatalog: catalog,
             scopeAssignments: [], groupAssignments: [],
             user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
-            roles: [], memberGroups: [], delegableRoles: [], namespaceAdmissions: [],
+            roles: assigned ? ['crm_admin'] : [], memberGroups: [], delegableRoles: assigned ? ['crm_admin'] : [], namespaceAdmissions: [],
           },
         })
       }
       if (pathname === '/api/admin/role-delegation/users/user-1/scopes') {
         return createJsonResponse({ ok: true, data: { actorId: 'admin-1', user: { id: 'user-1' }, adminNamespaces: ['crm'], scopeAssignments: [], groupAssignments: [] } })
       }
-      if (pathname === '/api/admin/role-delegation/users/user-1/roles/assign' && init?.method === 'POST') {
-        posts.push({ path: pathname, body: JSON.parse(String(init.body)) })
-        return createJsonResponse({
-          ok: true,
-          data: {
-            actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: ['crm'], roleCatalog: catalog,
-            user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
-            roles: ['crm_admin'], memberGroups: [], delegableRoles: ['crm_admin'], namespaceAdmissions: [],
-          },
-        })
+      if (isAuthorizationPreview(pathname) && init?.method === 'POST') return authorizationPreviewResponse()
+      if (isAuthorizationCommit(pathname) && init?.method === 'POST') {
+        const request = readAuthorizationBody(init.body)
+        expect(request).not.toHaveProperty('expectedUpdatedAt')
+        expect(JSON.stringify(request)).not.toContain('do-not-send')
+        posts.push({ path: pathname, body: request })
+        return authorizationCommitResponse(init.body)
       }
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => Boolean(container?.querySelector('[data-testid="delegation-assign-role"] option[value="crm_admin"]')))
     const assignSelect = container!.querySelector('[data-testid="delegation-assign-role"]') as HTMLSelectElement
     assignSelect.value = 'crm_admin'
@@ -1043,9 +1150,17 @@ describe('RoleDelegationView', () => {
     expect(container?.textContent).toContain('不会写入直接权限码')
     expect(container?.textContent).not.toContain('推断')
     expect(callLog.some((url) => url.includes('/roles/assign'))).toBe(false)
-    ;(container!.querySelector('[data-testid="delegation-confirmation-confirm"]') as HTMLButtonElement).click()
+    const confirm = container!.querySelector('[data-testid="delegation-confirmation-confirm"]') as HTMLButtonElement
+    await waitForCondition(() => confirm.disabled === false)
+    confirm.click()
     await waitForCondition(() => posts.length === 1)
-    expect(posts[0]?.body).toEqual({ roleId: 'crm_admin', expectedUpdatedAt: 'stamp-1' })
+    expect(posts[0]?.body).toMatchObject({
+      targetUserId: 'user-1',
+      action: { kind: 'role.assign', roleId: 'crm_admin' },
+      admissionChanges: [],
+      expectedVersion: 'version-1',
+    })
+    expect(posts[0]?.body).not.toMatchObject({ expectedUpdatedAt: 'stamp-1' })
   })
 
   function setupConfirmationLifecycle(options: { delayed?: boolean, failFirst?: boolean, admissionFallback?: boolean } = {}) {
@@ -1072,17 +1187,17 @@ describe('RoleDelegationView', () => {
         return createJsonResponse({ ok: true, data: { items: [{ id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true }] } })
       }
       if (pathname === '/api/admin/role-delegation/users/user-1/access') return createJsonResponse({ ok: true, data: access() })
-      if (init?.method === 'POST' || init?.method === 'PATCH') {
-        posts.push({ path: pathname, body: JSON.parse(String(init.body)) })
+      if (isAuthorizationPreview(pathname) && init?.method === 'POST') return authorizationPreviewResponse()
+      if (isAuthorizationCommit(pathname) && init?.method === 'POST') {
+        const request = readAuthorizationBody(init.body)
+        posts.push({ path: pathname, body: request })
         if (options.delayed) await gate
-        if (options.failFirst && posts.length === 1) return createJsonResponse({ ok: false, error: { message: '保存失败' } }, 500)
-        if (pathname.endsWith('/roles/assign')) roles = ['crm_admin']
-        else if (pathname.endsWith('/roles/unassign')) roles = []
-        else if (pathname.endsWith('/namespaces/crm/admission')) {
-          admissionEnabled = true
-          return createJsonResponse({ ok: true, data: options.admissionFallback ? {} : { namespaceAdmissions: access().namespaceAdmissions } })
-        } else throw new Error(`Unexpected write: ${rawUrl}`)
-        return createJsonResponse({ ok: true, data: access() })
+        if (options.failFirst && posts.length === 1) return createJsonResponse({ ok: false, error: { message: '保存失败' } }, 409)
+        if (request.action.kind === 'role.assign') roles = ['crm_admin']
+        else if (request.action.kind === 'role.revoke') roles = []
+        else if (request.action.kind === 'admission.set') admissionEnabled = request.admissionChanges[0]?.enabled === true
+        else throw new Error(`Unexpected write: ${rawUrl}`)
+        return authorizationCommitResponse(init.body)
       }
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
@@ -1090,7 +1205,7 @@ describe('RoleDelegationView', () => {
   }
 
   async function openLifecycleConfirmation(kind: 'grant' | 'revoke' | 'admission'): Promise<void> {
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => Boolean(container?.querySelector('[data-testid="delegation-assign-role"]')))
     if (kind === 'admission') {
       findButtonByText(container!, '开通插件使用').click()
@@ -1114,7 +1229,14 @@ describe('RoleDelegationView', () => {
       confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
       confirm.dispatchEvent(new MouseEvent('click', { bubbles: true }))
       await flushUi()
-      expect(posts).toEqual([{ path: '/api/admin/role-delegation/users/user-1/roles/assign', body: { roleId: 'crm_admin', expectedUpdatedAt: 'stamp-1' } }])
+      expect(posts).toHaveLength(1)
+      expect(posts[0]?.path).toBe(ADMIN_AUTHORIZATION_OPERATIONS_PATH)
+      expect(posts[0]?.body).toMatchObject({
+        targetUserId: 'user-1',
+        action: { kind: 'role.assign', roleId: 'crm_admin' },
+        admissionChanges: [],
+        expectedVersion: 'version-1',
+      })
       expect(container!.querySelector('[data-testid="delegation-confirmation"]')).toBe(panel)
       expect(container!.querySelector('[data-testid="delegation-confirmation-confirm"]')).toBe(confirm)
       expect(confirm.disabled).toBe(true)
@@ -1146,10 +1268,10 @@ describe('RoleDelegationView', () => {
   })
 
   it.each([
-    ['grant', '角色已分配', '/roles/assign'],
-    ['revoke', '角色已撤销', '/roles/unassign'],
-    ['admission', '已开通 crm 插件使用', '/namespaces/crm/admission'],
-  ] as const)('retains the completed %s confirmation until explicitly closed', async (kind, message, suffix) => {
+    ['grant', '角色已分配', 'role.assign'],
+    ['revoke', '角色已从该成员移除', 'role.revoke'],
+    ['admission', '已开通 crm 插件使用', 'admission.set'],
+  ] as const)('retains the completed %s confirmation until explicitly closed', async (kind, message, actionKind) => {
     const { posts } = setupConfirmationLifecycle({ admissionFallback: true })
     await openLifecycleConfirmation(kind)
     const panel = container!.querySelector('[data-testid="delegation-confirmation"]')
@@ -1157,8 +1279,10 @@ describe('RoleDelegationView', () => {
     confirm.click()
     await waitForCondition(() => statusText().includes(message))
     expect(posts).toHaveLength(1)
-    expect(posts[0]?.path).toBe(`/api/admin/role-delegation/users/user-1${suffix}`)
-    expect(posts[0]?.body).toEqual(kind === 'grant' ? { roleId: 'crm_admin', expectedUpdatedAt: 'stamp-1' } : kind === 'revoke' ? { roleId: 'crm_admin' } : { enabled: true })
+    expect(posts[0]?.path).toBe(ADMIN_AUTHORIZATION_OPERATIONS_PATH)
+    expect(posts[0]?.body).toMatchObject(kind === 'admission'
+      ? { action: { kind: actionKind }, admissionChanges: [{ namespace: 'crm', enabled: true }] }
+      : { action: { kind: actionKind, roleId: 'crm_admin' }, admissionChanges: [] })
     expect(container!.querySelector('[data-testid="delegation-confirmation"]')).toBe(panel)
     expect(container!.querySelector('[data-testid="delegation-confirmation-confirm"]')).toBe(confirm)
     expect(confirm.disabled).toBe(true)
@@ -1194,7 +1318,12 @@ describe('RoleDelegationView', () => {
     ;(container!.querySelector('[data-testid="delegation-confirmation-confirm"]') as HTMLButtonElement).click()
     await waitForCondition(() => statusText().includes('角色已分配'))
     expect(posts).toHaveLength(2)
-    expect(posts[1]).toEqual(posts[0])
+    expect(posts[1]?.body).toMatchObject({
+      targetUserId: 'user-1',
+      action: { kind: 'role.assign', roleId: 'crm_admin' },
+      admissionChanges: [],
+    })
+    expect(posts[1]?.body.clientOperationId).not.toBe(posts[0]?.body.clientOperationId)
   })
 
   it('cancels confirmation without posting and drops it when the member changes', async () => {
@@ -1231,12 +1360,14 @@ describe('RoleDelegationView', () => {
         const id = pathname.includes('user-2') ? 'user-2' : 'user-1'
         return createJsonResponse({ ok: true, data: { actorId: 'admin-1', user: { id }, adminNamespaces: ['crm'], scopeAssignments: [], groupAssignments: [] } })
       }
+      if (isAuthorizationPreview(pathname) && init?.method === 'POST') return authorizationPreviewResponse()
       if (init?.method === 'POST') throw new Error(`unexpected post ${rawUrl}`)
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => Boolean(container?.querySelector('[data-testid="delegation-assign-role"]')))
     const assignSelect = container!.querySelector('[data-testid="delegation-assign-role"]') as HTMLSelectElement
     assignSelect.value = 'crm_admin'
@@ -1366,7 +1497,12 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
-    await waitForCondition(() => choiceLabels().includes('仅本部门') && choiceLabels().includes('未返回是否包含下级'))
+    await selectListedMember('alpha@example.com')
+    await waitForCondition(() => (
+      Boolean(container?.querySelector('[data-testid="scope-include-children-value"]'))
+      && choiceLabels().includes('仅本部门')
+      && choiceLabels().includes('未返回是否包含下级')
+    ))
     expect(container?.querySelector('[data-testid="scope-include-children-value"]')?.textContent).toContain('包含下级部门')
     const scopeBox = container!.querySelector('[data-testid="scope-include-children"]') as HTMLInputElement
     scopeBox.checked = false
@@ -1438,6 +1574,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => Boolean(container?.querySelector('[data-testid="delegation-disabled-reason-user-9"]')))
     const disabled = container!.querySelector('[data-testid="delegation-user-disabled"]') as HTMLButtonElement
     expect(disabled.disabled).toBe(true)
@@ -1519,12 +1656,14 @@ describe('RoleDelegationView', () => {
           },
         })
       }
+      if (isAuthorizationPreview(pathname) && init?.method === 'POST') return authorizationPreviewResponse()
       if (init?.method === 'POST' || init?.method === 'PATCH') throw new Error(`unexpected write ${rawUrl}`)
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => container!.querySelectorAll('[data-testid="admission-namespace-locked"]').length === 1)
     const enableButtons = Array.from(container!.querySelectorAll('button')).filter((button) => button.textContent?.includes('开通插件使用'))
     expect(enableButtons[0]?.disabled).toBe(true)
@@ -1581,6 +1720,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => (container?.querySelector('.delegation-page__panel--detail h2')?.textContent || '').includes('Alpha'))
     const searchInput = container!.querySelector('input[placeholder="搜索邮箱、姓名或用户 ID"]') as HTMLInputElement
     searchInput.value = 'stale'
@@ -1594,6 +1734,10 @@ describe('RoleDelegationView', () => {
     const searchAgain = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('查询') || button.textContent?.includes('加载中'))
     if (!(searchAgain instanceof HTMLButtonElement)) throw new Error('Search button missing')
     searchAgain.click()
+    await waitForCondition(() => callLog.some((url) => url.includes('q=fresh')) && (container?.textContent || '').includes('请选择一个成员'))
+    expect(container?.querySelector('.delegation-page__panel--detail h2')).toBeNull()
+    expect(callLog.some((url) => url.includes('/users/user-2/access'))).toBe(false)
+    await selectListedMember('bravo@example.com')
     await waitForCondition(() => (container?.querySelector('.delegation-page__panel--detail h2')?.textContent || '').includes('Bravo'))
     const alphaReads = callLog.filter((url) => url.includes('/users/user-1/access')).length
     releaseStale?.()
@@ -1662,13 +1806,17 @@ describe('RoleDelegationView', () => {
           },
         })
       }
-      if (pathname.endsWith('/roles/unassign')) return createJsonResponse({ ok: false, error: { message: '不能撤销最后的平台管理员' } }, 409)
+      if (isAuthorizationPreview(pathname) && init?.method === 'POST') return authorizationPreviewResponse()
+      if (isAuthorizationCommit(pathname) && init?.method === 'POST') {
+        return createJsonResponse({ ok: false, error: { message: '不能撤销最后的平台管理员' } }, 409)
+      }
       if (init?.method) return createJsonResponse({ ok: false }, 500)
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => (container?.textContent || '').includes('保留部门'))
     const revokeSelect = container!.querySelector('[data-testid="delegation-revoke-role"]') as HTMLSelectElement
     revokeSelect.value = 'platform_admin'
@@ -1677,7 +1825,9 @@ describe('RoleDelegationView', () => {
     findButtonByText(container!, '撤销角色').click()
     await flushUi()
     expect(container?.querySelector('[data-testid="delegation-confirmation-typed"]')).toBeNull()
-    ;(container!.querySelector('[data-testid="delegation-confirmation-confirm"]') as HTMLButtonElement).click()
+    const confirmForbidden = container!.querySelector('[data-testid="delegation-confirmation-confirm"]') as HTMLButtonElement
+    await waitForCondition(() => confirmForbidden.disabled === false)
+    confirmForbidden.click()
     await waitForCondition(() => (container?.textContent || '').includes('不能撤销最后的平台管理员'))
     expect(container?.textContent).toContain('保留部门')
     expect(container?.textContent).not.toContain('该成员尚未配置任何插件管理员范围')
@@ -1687,6 +1837,7 @@ describe('RoleDelegationView', () => {
   it('drops stale departments when a role write cannot reload scope', async () => {
     const catalog = [{ id: 'crm_admin', name: 'CRM 管理员', permissions: ['crm:read'], namespace: 'crm' }]
     let scopeReads = 0
+    let assigned = false
     apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string; body?: string }) => {
       const rawUrl = String(input)
       callLog.push(rawUrl)
@@ -1706,7 +1857,10 @@ describe('RoleDelegationView', () => {
           data: {
             actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: ['crm'], roleCatalog: catalog,
             user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
-            roles: [], memberGroups: [], delegableRoles: [], namespaceAdmissions: [],
+            roles: assigned ? ['crm_admin'] : [],
+            memberGroups: [],
+            delegableRoles: assigned ? ['crm_admin'] : [],
+            namespaceAdmissions: [],
           },
         })
       }
@@ -1726,21 +1880,17 @@ describe('RoleDelegationView', () => {
           },
         })
       }
-      if (pathname.endsWith('/roles/assign') && init?.method === 'POST') {
-        return createJsonResponse({
-          ok: true,
-          data: {
-            actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: ['crm'], roleCatalog: catalog,
-            user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
-            roles: ['crm_admin'], memberGroups: [], delegableRoles: ['crm_admin'], namespaceAdmissions: [],
-          },
-        })
+      if (isAuthorizationPreview(pathname) && init?.method === 'POST') return authorizationPreviewResponse()
+      if (isAuthorizationCommit(pathname) && init?.method === 'POST') {
+        assigned = true
+        return authorizationCommitResponse(init.body)
       }
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => (container?.textContent || '').includes('旧部门'))
     const assignSelect = container!.querySelector('[data-testid="delegation-assign-role"]') as HTMLSelectElement
     assignSelect.value = 'crm_admin'
@@ -1774,18 +1924,21 @@ describe('RoleDelegationView', () => {
       if (pathname === '/api/admin/role-delegation/users/user-1/scopes') {
         return createJsonResponse({ ok: true, data: { actorId: 'admin-1', user: { id: 'user-1' }, adminNamespaces: [], scopeAssignments: [], groupAssignments: [] } })
       }
-      if (pathname === '/api/admin/role-delegation/users/user-1/access' || pathname.endsWith('/roles/unassign')) {
-        if (pathname.endsWith('/roles/unassign') && init?.method === 'POST') {
-          posts.push({ path: pathname, body: JSON.parse(String(init.body)) })
-        }
+      if (isAuthorizationPreview(pathname) && init?.method === 'POST') return authorizationPreviewResponse()
+      if (isAuthorizationCommit(pathname) && init?.method === 'POST') {
+        posts.push({ path: pathname, body: JSON.parse(String(init.body)) })
+        return authorizationCommitResponse(init.body)
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        const revoked = posts.length > 0
         return createJsonResponse({
           ok: true,
           data: {
             actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: [], roleCatalog: catalog,
             user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
-            roles: pathname.endsWith('/roles/unassign') ? [] : ['admin'],
+            roles: revoked ? [] : ['admin'],
             memberGroups: [],
-            delegableRoles: pathname.endsWith('/roles/unassign') ? [] : ['admin'],
+            delegableRoles: revoked ? [] : ['admin'],
             namespaceAdmissions: [],
           },
         })
@@ -1795,6 +1948,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => Boolean(container?.querySelector('[data-testid="delegation-revoke-role"] option[value="admin"]')))
     const revokeSelect = container!.querySelector('[data-testid="delegation-revoke-role"]') as HTMLSelectElement
     revokeSelect.value = 'admin'
@@ -1827,7 +1981,11 @@ describe('RoleDelegationView', () => {
     expect(confirm.disabled).toBe(false)
     confirm.click()
     await waitForCondition(() => posts.length === 1)
-    expect(posts[0]?.body).toEqual({ roleId: 'admin' })
+    expect(posts[0]?.body).toMatchObject({
+      targetUserId: 'user-1',
+      action: { kind: 'role.revoke', roleId: 'admin' },
+      admissionChanges: [],
+    })
   })
 
   it('shows a known-empty catalog separately from a role the catalog does not list', async () => {
@@ -1858,6 +2016,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => Boolean(container?.querySelector('[data-testid="delegation-revoke-role"] option[value="empty_role"]')))
     const revokeSelect = container!.querySelector('[data-testid="delegation-revoke-role"]') as HTMLSelectElement
     revokeSelect.value = 'empty_role'
@@ -1928,6 +2087,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => Boolean(container?.querySelector('[data-testid="scope-include-children"]')))
     const scopeBox = container!.querySelector('[data-testid="scope-include-children"]') as HTMLInputElement
     scopeBox.checked = false
@@ -1974,6 +2134,7 @@ describe('RoleDelegationView', () => {
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    await selectListedMember('alpha@example.com')
     await waitForCondition(() => Boolean(container?.querySelector('[data-testid="admission-namespace-locked"]')))
     const enable = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('开通插件使用'))
     expect((enable as HTMLButtonElement).disabled).toBe(true)
@@ -2064,10 +2225,15 @@ describe('RoleDelegationView', () => {
     button.click()
   }
 
-  function mountDelegation(): void {
+  async function mountDelegation(): Promise<void> {
+    const callsBefore = callLog.length
     app = createApp(RoleDelegationView)
     app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
     app.mount(container!)
+    if (new URL(window.location.href).searchParams.get('userId')?.trim()) return
+    await waitForMemberListSettled(callsBefore)
+    const alpha = listedMemberButton('alpha@example.com')
+    if (alpha && !alpha.disabled) alpha.click()
   }
 
   function statusText(): string {
@@ -2132,7 +2298,7 @@ describe('RoleDelegationView', () => {
       }
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => (container?.textContent || '').includes('可选部门'))
     const namespaceSelect = Array.from(container!.querySelectorAll('select')).find((select) => select.textContent?.includes('attendance')) as HTMLSelectElement
     namespaceSelect.value = 'crm'
@@ -2191,14 +2357,15 @@ describe('RoleDelegationView', () => {
       if (pathname === '/api/admin/role-delegation/users/user-2/access') {
         return createJsonResponse({ ok: true, data: accessFor('user-2', 'Bravo', ['bravo_role']) })
       }
-      if (pathname.endsWith('/roles/assign') && init?.method === 'POST') {
+      if (isAuthorizationPreview(pathname) && init?.method === 'POST') return authorizationPreviewResponse()
+      if (isAuthorizationCommit(pathname) && init?.method === 'POST') {
         await roleGate
         roleSettled = true
-        return createJsonResponse({ ok: true, data: accessFor('user-1', 'Alpha Stale', ['stale_role']) })
+        return authorizationCommitResponse(init.body)
       }
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => Boolean(container?.querySelector('[data-testid="delegation-assign-role"]')))
     const assignSelect = container!.querySelector('[data-testid="delegation-assign-role"]') as HTMLSelectElement
     assignSelect.value = 'crm_admin'
@@ -2206,9 +2373,11 @@ describe('RoleDelegationView', () => {
     await flushUi()
     findButtonByText(container!, '分配角色').click()
     await flushUi()
-    ;(container!.querySelector('[data-testid="delegation-confirmation-confirm"]') as HTMLButtonElement).click()
+    const confirm = container!.querySelector('[data-testid="delegation-confirmation-confirm"]') as HTMLButtonElement
+    await waitForCondition(() => confirm.disabled === false)
+    confirm.click()
     try {
-      await waitForCondition(() => callLog.some((url) => url.includes('/roles/assign')))
+      await waitForCondition(() => callLog.some((url) => url === ADMIN_AUTHORIZATION_OPERATIONS_PATH || url.endsWith('/api/admin/authorization-operations')))
       clickListedUser('bravo@example.com')
       await waitForCondition(() => (container?.querySelector('.delegation-page__panel--detail h2')?.textContent || '').includes('Bravo'))
       clickListedUser('alpha@example.com')
@@ -2266,24 +2435,23 @@ describe('RoleDelegationView', () => {
       if (pathname === '/api/admin/role-delegation/users/user-2/access') {
         return createJsonResponse({ ok: true, data: accessFor('user-2', 'Bravo', 'bravo-stamp') })
       }
-      if (pathname.endsWith('/namespaces/crm/admission') && init?.method === 'PATCH') {
+      if (isAuthorizationPreview(pathname) && init?.method === 'POST') return authorizationPreviewResponse()
+      if (isAuthorizationCommit(pathname) && init?.method === 'POST') {
         await admissionGate
         admissionSettled = true
-        return createJsonResponse({
-          ok: true,
-          data: {
-            user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha Stale', role: 'user', is_active: true },
-            namespaceAdmissions: [admission(false, 'stale-stamp')],
-          },
-        })
+        return authorizationCommitResponse(init?.body)
       }
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => (container?.textContent || '').includes('插件使用已开通'))
     findButtonByText(container!, '关闭插件使用').click()
+    await flushUi()
+    const confirmClose = container!.querySelector('[data-testid="delegation-confirmation-confirm"]') as HTMLButtonElement
+    await waitForCondition(() => confirmClose.disabled === false)
+    confirmClose.click()
     try {
-      await waitForCondition(() => callLog.some((url) => url.includes('/namespaces/crm/admission')))
+      await waitForCondition(() => callLog.some((url) => url.includes('/api/admin/authorization-operations') && !url.includes('/preview')))
       clickListedUser('bravo@example.com')
       await waitForCondition(() => (container?.querySelector('.delegation-page__panel--detail h2')?.textContent || '').includes('Bravo'))
       clickListedUser('alpha@example.com')
@@ -2308,6 +2476,7 @@ describe('RoleDelegationView', () => {
     const scopeGate = new Promise<void>((resolve) => { releaseScope = resolve })
     let scopeSettled = false
     let user1ScopeReads = 0
+    let assignedRole = false
     const catalog = [{ id: 'crm_admin', name: 'CRM 管理员', permissions: ['crm:read'], updatedAt: 'stamp-1' }]
     const accessFor = (id: string, name: string, roles: string[]) => ({
       actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: ['crm'], roleCatalog: catalog,
@@ -2348,7 +2517,9 @@ describe('RoleDelegationView', () => {
           },
         })
       }
-      if (pathname === '/api/admin/role-delegation/users/user-1/access') return createJsonResponse({ ok: true, data: accessFor('user-1', 'Alpha', []) })
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        return createJsonResponse({ ok: true, data: accessFor('user-1', 'Alpha', assignedRole ? ['crm_admin'] : []) })
+      }
       if (pathname === '/api/admin/role-delegation/users/user-2/access') return createJsonResponse({ ok: true, data: accessFor('user-2', 'Bravo', ['bravo_role']) })
       if (pathname === '/api/admin/role-delegation/users/user-1/scopes') {
         user1ScopeReads += 1
@@ -2360,12 +2531,14 @@ describe('RoleDelegationView', () => {
         return createJsonResponse(scopeFor('user-1', '旧部门'))
       }
       if (pathname === '/api/admin/role-delegation/users/user-2/scopes') return createJsonResponse(scopeFor('user-2', 'Bravo范围'))
-      if (pathname.endsWith('/roles/assign') && init?.method === 'POST') {
-        return createJsonResponse({ ok: true, data: accessFor('user-1', 'Alpha Stale', ['stale_role']) })
+      if (isAuthorizationPreview(pathname) && init?.method === 'POST') return authorizationPreviewResponse()
+      if (isAuthorizationCommit(pathname) && init?.method === 'POST') {
+        assignedRole = true
+        return authorizationCommitResponse(init.body)
       }
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => (container?.textContent || '').includes('旧部门'))
     const assignSelect = container!.querySelector('[data-testid="delegation-assign-role"]') as HTMLSelectElement
     assignSelect.value = 'crm_admin'
@@ -2415,25 +2588,16 @@ describe('RoleDelegationView', () => {
           },
         })
       }
-      if (pathname.endsWith('/namespaces/crm/admission') && init?.method === 'PATCH') {
-        return createJsonResponse({
-          ok: true,
-          data: {
-            user: { id: 'user-1', email: 'alpha@example.com', name: '被覆盖', role: 'user', is_active: true },
-            roles: ['should-not-appear'],
-            delegableRoles: ['should-not-appear'],
-            namespaceAdmissions: [{ namespace: 'crm', enabled: false, effective: false, hasRole: true, updatedAt: 'mismatch-stamp' }],
-          },
-        })
-      }
+      if (isAuthorizationPreview(pathname) && init?.method === 'POST') return authorizationPreviewResponse()
+      if (isAuthorizationCommit(pathname) && init?.method === 'POST') return authorizationCommitResponse(init.body)
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => (container?.textContent || '').includes('插件使用未开通'))
     findButtonByText(container!, '开通插件使用').click()
     await flushUi()
     ;(container!.querySelector('[data-testid="delegation-confirmation-confirm"]') as HTMLButtonElement).click()
-    await waitForCondition(() => statusText().includes('保存插件使用准入失败'))
+    await waitForCondition(() => statusText().includes('还没有核对成功'))
     expect(container?.querySelector('.delegation-page__panel--detail h2')?.textContent).toContain('Alpha')
     expect(container?.textContent).toContain('插件使用未开通')
     expect(container?.textContent).toContain('initial-stamp')
@@ -2467,18 +2631,17 @@ describe('RoleDelegationView', () => {
           },
         })
       }
-      if (pathname.endsWith('/namespaces/crm/admission') && init?.method === 'PATCH') {
-        return createJsonResponse({ ok: true, data: { user: { id: 'user-1' } } })
-      }
+      if (isAuthorizationPreview(pathname) && init?.method === 'POST') return authorizationPreviewResponse()
+      if (isAuthorizationCommit(pathname) && init?.method === 'POST') return authorizationCommitResponse(init.body)
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => (container?.textContent || '').includes('插件使用未开通'))
     const readsBefore = accessReads
     findButtonByText(container!, '开通插件使用').click()
     await flushUi()
     ;(container!.querySelector('[data-testid="delegation-confirmation-confirm"]') as HTMLButtonElement).click()
-    await waitForCondition(() => accessReads > readsBefore && statusText().includes('保存插件使用准入失败'))
+    await waitForCondition(() => accessReads > readsBefore && statusText().includes('还没有核对成功'))
     expect(container?.textContent).toContain('插件使用未开通')
     expect(statusText()).not.toContain('已开通 crm 插件使用')
   })
@@ -2563,7 +2726,7 @@ describe('RoleDelegationView', () => {
       }
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => (container?.textContent || '').includes('保留部门'))
     const departmentSelect = Array.from(container!.querySelectorAll('select')).find((select) => select.textContent?.includes('可选部门')) as HTMLSelectElement
     departmentSelect.value = 'dept-1'
@@ -2663,7 +2826,7 @@ describe('RoleDelegationView', () => {
       }
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => (container?.textContent || '').includes('原部门'))
     const searchInput = container!.querySelector('input[placeholder="搜索邮箱、姓名或用户 ID"]') as HTMLInputElement
     searchInput.value = 'bravo'
@@ -2766,7 +2929,7 @@ describe('RoleDelegationView', () => {
     })
     if (app) app.unmount()
     container?.replaceChildren()
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => Boolean(container?.querySelector('[data-testid="scope-include-children"]')))
   }
 
@@ -2833,7 +2996,7 @@ describe('RoleDelegationView', () => {
       }
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => choiceLabels().includes('仅本部门'))
     expect(choiceLabels()).toEqual(expect.arrayContaining(['仅本部门', '包含下级部门', '未返回是否包含下级']))
     expect(container?.querySelector('[data-testid="scope-include-children"]')).toBeNull()
@@ -2945,7 +3108,7 @@ describe('RoleDelegationView', () => {
       }
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => choiceLabels().includes('仅本部门') && choiceLabels().includes('未返回是否包含下级'))
     const scopeBox = container!.querySelector('[data-testid="scope-include-children"]') as HTMLInputElement
     expect(scopeBox.checked).toBe(true)
@@ -3074,7 +3237,7 @@ describe('RoleDelegationView', () => {
       }
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => Boolean(container?.querySelector('[data-testid="scope-include-children"]')))
     selectControl('crm').value = 'crm'
     selectControl('crm').dispatchEvent(new Event('change'))
@@ -3156,7 +3319,7 @@ describe('RoleDelegationView', () => {
       }
       throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
     })
-    mountDelegation()
+    await mountDelegation()
     await waitForCondition(() => choiceLabels().includes('仅本部门') && Boolean(container?.querySelector('[data-testid="scope-include-children"]')))
     selectControl('crm').value = 'crm'
     selectControl('crm').dispatchEvent(new Event('change'))
@@ -3196,5 +3359,755 @@ describe('RoleDelegationView', () => {
     expect(posts[1]).toEqual({ namespace: 'crm', directoryDepartmentId: 'dept-1', includeChildren: true })
     await waitForCondition(() => statusText().includes('插件管理员部门范围已添加'))
     expect(choiceLabels()).toContain('仅本部门')
+  })
+
+  function detailHeading(): string {
+    return container?.querySelector('.delegation-page__panel--detail h2')?.textContent || ''
+  }
+
+  function mountPlain(): void {
+    app = createApp(RoleDelegationView)
+    app.component('RouterLink', { props: { to: { type: [String, Object], default: '' } }, template: '<a><slot /></a>' })
+    app.mount(container!)
+  }
+
+  function accessPayload(id: string, name: string, email: string) {
+    return {
+      actorId: 'admin-1',
+      isPlatformAdmin: false,
+      delegableNamespaces: ['crm'],
+      roleCatalog: [],
+      user: { id, email, name, role: 'user', is_active: true },
+      roles: [],
+      memberGroups: [],
+      delegableRoles: [],
+      namespaceAdmissions: [],
+    }
+  }
+
+  it('does not select the first member when the management scope page opens', async () => {
+    apiFetchMock.mockImplementation(async (input: unknown) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            items: [
+              { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+              { id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true },
+            ],
+          },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') return createJsonResponse({ ok: true, data: accessPayload('user-1', 'Alpha', 'alpha@example.com') })
+      if (pathname === '/api/admin/role-delegation/users/user-2/access') return createJsonResponse({ ok: true, data: accessPayload('user-2', 'Bravo', 'bravo@example.com') })
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    mountPlain()
+    await waitForMemberListSettled()
+    expect(container?.querySelector('.delegation-page__user--active')).toBeNull()
+    expect(container?.querySelector('.delegation-page__panel--detail')?.textContent).toContain('请选择一个成员')
+    expect(callLog.some((url) => url.includes('/access') || url.includes('/scopes'))).toBe(false)
+    expect(apiFetchMock.mock.calls.some(([, init]) => init?.method === 'POST' || init?.method === 'PATCH')).toBe(false)
+    await selectListedMember('bravo@example.com')
+    await waitForCondition(() => detailHeading().includes('Bravo'))
+    expect(callLog.some((url) => url.includes('/users/user-2/access'))).toBe(true)
+    expect(callLog.some((url) => url.includes('/users/user-1/access'))).toBe(false)
+    expect(container?.querySelector('.delegation-page__user--active')?.textContent).toContain('Bravo')
+  })
+
+  it('clears the current member when a search page hides them and does not select the next member', async () => {
+    apiFetchMock.mockImplementation(async (input: unknown) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const url = new URL(rawUrl, 'http://localhost')
+      if (url.pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (url.pathname === '/api/admin/role-delegation/users') {
+        const items = url.searchParams.get('q') === 'bravo'
+          ? [{ id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true }]
+          : [
+            { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+            { id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true },
+          ]
+        return createJsonResponse({ ok: true, data: { items } })
+      }
+      if (url.pathname === '/api/admin/role-delegation/users/user-1/access') return createJsonResponse({ ok: true, data: accessPayload('user-1', 'Alpha', 'alpha@example.com') })
+      if (url.pathname === '/api/admin/role-delegation/users/user-2/access') return createJsonResponse({ ok: true, data: accessPayload('user-2', 'Bravo', 'bravo@example.com') })
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    mountPlain()
+    await selectListedMember('alpha@example.com')
+    await waitForCondition(() => detailHeading().includes('Alpha'))
+    const searchInput = container!.querySelector('input[placeholder="搜索邮箱、姓名或用户 ID"]') as HTMLInputElement
+    searchInput.value = 'bravo'
+    searchInput.dispatchEvent(new Event('input'))
+    await flushUi()
+    findButtonByText(container!, '查询').click()
+    await waitForMemberListSettled()
+    await waitForCondition(() => callLog.some((url) => url.includes('q=bravo')) && (container?.textContent || '').includes('请选择一个成员'))
+    expect(detailHeading()).toBe('')
+    expect(container?.querySelector('.delegation-page__user--active')).toBeNull()
+    expect(listedMemberButton('bravo@example.com')).toBeTruthy()
+    expect(callLog.some((url) => url.includes('/users/user-2/access'))).toBe(false)
+    expect(apiFetchMock.mock.calls.some(([, init]) => init?.method === 'POST' || init?.method === 'PATCH')).toBe(false)
+  })
+
+  it('does not let a late user list replace a newer explicit member', async () => {
+    let releaseLate: (() => void) | undefined
+    const lateGate = new Promise<void>((resolve) => { releaseLate = resolve })
+    apiFetchMock.mockImplementation(async (input: unknown) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const url = new URL(rawUrl, 'http://localhost')
+      if (url.pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (url.pathname === '/api/admin/role-delegation/users') {
+        if (url.searchParams.get('q') === 'late') {
+          await lateGate
+          return createJsonResponse({
+            ok: true,
+            data: { items: [{ id: 'user-3', email: 'charlie@example.com', name: 'Charlie', role: 'user', is_active: true }] },
+          })
+        }
+        return createJsonResponse({
+          ok: true,
+          data: {
+            items: [
+              { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+              { id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true },
+              { id: 'user-3', email: 'charlie@example.com', name: 'Charlie', role: 'user', is_active: true },
+            ],
+          },
+        })
+      }
+      if (url.pathname === '/api/admin/role-delegation/users/user-1/access') return createJsonResponse({ ok: true, data: accessPayload('user-1', 'Alpha', 'alpha@example.com') })
+      if (url.pathname === '/api/admin/role-delegation/users/user-2/access') return createJsonResponse({ ok: true, data: accessPayload('user-2', 'Bravo', 'bravo@example.com') })
+      if (url.pathname === '/api/admin/role-delegation/users/user-3/access') return createJsonResponse({ ok: true, data: accessPayload('user-3', 'Charlie', 'charlie@example.com') })
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    mountPlain()
+    await selectListedMember('bravo@example.com')
+    await waitForCondition(() => detailHeading().includes('Bravo'))
+    const searchInput = container!.querySelector('input[placeholder="搜索邮箱、姓名或用户 ID"]') as HTMLInputElement
+    searchInput.value = 'late'
+    searchInput.dispatchEvent(new Event('input'))
+    await flushUi()
+    findButtonByText(container!, '查询').click()
+    await waitForCondition(() => callLog.some((url) => url.includes('q=late')))
+    await selectListedMember('alpha@example.com')
+    await waitForCondition(() => detailHeading().includes('Alpha'))
+    const alphaReads = callLog.filter((url) => url.includes('/users/user-1/access')).length
+    const charlieReads = callLog.filter((url) => url.includes('/users/user-3/access')).length
+    try {
+      releaseLate?.()
+      await flushUi(8)
+      expect(detailHeading()).toContain('Alpha')
+      expect(detailHeading()).not.toContain('Charlie')
+      expect(container?.textContent).not.toContain('请选择一个成员')
+      expect(callLog.filter((url) => url.includes('/users/user-1/access')).length).toBe(alphaReads)
+      expect(callLog.filter((url) => url.includes('/users/user-3/access')).length).toBe(charlieReads)
+      expect(apiFetchMock.mock.calls.some(([, init]) => init?.method === 'POST' || init?.method === 'PATCH')).toBe(false)
+    } finally {
+      releaseLate?.()
+      await flushUi(4)
+    }
+  })
+
+  it('previews, posts once, and reads back each delegation action without moving the admission switch early', async () => {
+    const catalog = [{ id: 'crm_admin', name: 'CRM 管理员', permissions: ['crm:read'], updatedAt: 'stamp-1' }]
+    const commits: Array<ReturnType<typeof readAuthorizationBody>> = []
+    const lookups: string[] = []
+    let releaseRead: (() => void) | undefined
+    let readGate = Promise.resolve()
+    let holdAccess = false
+    let roles: string[] = []
+    let admissionEnabled = false
+    const impact = blankImpact({
+      sourceChanges: [{ source: 'role', id: 'crm_admin', operation: 'assign', changed: true }],
+      admissionChanges: [
+        { namespace: 'crm', before: false, after: true, cause: 'explicit' },
+        { namespace: 'attendance', before: true, after: false, cause: 'role_revoke' },
+      ],
+      scopeCleanup: [{ namespace: 'crm', kind: 'department', id: 'dept-1' }],
+      retainedOtherGrants: [{ code: 'sheet:read', sources: [{ kind: 'legacy', id: null }], effective: true }],
+    })
+    const access = () => ({
+      actorId: 'delegate-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], manageableNamespaces: ['crm'], roleCatalog: catalog,
+      user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+      roles, memberGroups: [], delegableRoles: roles,
+      namespaceAdmissions: [{ namespace: 'crm', enabled: admissionEnabled, effective: admissionEnabled, hasRole: roles.includes('crm_admin'), updatedAt: 'stamp' }],
+    })
+    apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string; body?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'delegate-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], roleCatalog: catalog, scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({ ok: true, data: { items: [{ id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true }] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        if (holdAccess) await readGate
+        return createJsonResponse({ ok: true, data: access() })
+      }
+      if (isAuthorizationPreview(pathname)) return authorizationPreviewResponse(impact)
+      if (isAuthorizationCommit(pathname)) {
+        commits.push(readAuthorizationBody(init?.body))
+        const request = commits[commits.length - 1]
+        if (request?.action.kind === 'role.assign') roles = ['crm_admin']
+        if (request?.action.kind === 'role.revoke') roles = []
+        if (request?.action.kind === 'admission.set') admissionEnabled = request.admissionChanges[0]?.enabled === true
+        // The preview above is display-only. The receipt must agree with the access read.
+        return authorizationCommitResponse(init?.body)
+      }
+      if (pathname.startsWith(`${ADMIN_AUTHORIZATION_OPERATIONS_PATH}/`)) {
+        lookups.push(pathname)
+        return createJsonResponse({ status: 'unknown_or_pending', clientOperationId: pathname.split('/').pop() })
+      }
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    await mountDelegation()
+    await waitForCondition(() => (container?.textContent || '').includes('插件使用未开通'))
+    const run = async (open: () => void, action: Record<string, unknown>, admission: Array<{ namespace: string; enabled: boolean }>) => {
+      const switchBefore = admissionEnabled ? '插件使用已开通' : '插件使用未开通'
+      const outcome = action.kind === 'role.revoke'
+        ? '角色已从该成员移除'
+        : action.kind === 'role.assign'
+          ? '角色已分配'
+          : admission[0]?.enabled ? '已开通 crm 插件使用' : '已关闭 crm 插件使用'
+      open()
+      await flushUi()
+      expect(container?.querySelector('[data-testid="delegation-preview-roles"]')?.textContent).toContain('分配 crm_admin')
+      expect(container?.querySelector('[data-testid="delegation-preview-explicit-admissions"]')?.textContent).toContain('开通 crm')
+      expect(container?.querySelector('[data-testid="delegation-preview-derived-admissions"]')?.textContent).toContain('关闭 attendance')
+      expect(container?.querySelector('[data-testid="delegation-preview-scope-cleanup"]')?.textContent).toContain('crm department dept-1')
+      expect(container?.querySelector('[data-testid="delegation-preview-retained"]')?.textContent).toContain('sheet:read')
+      const confirm = container!.querySelector('[data-testid="delegation-confirmation-confirm"]') as HTMLButtonElement
+      await waitForCondition(() => confirm.disabled === false)
+      const commitsBefore = commits.length
+      holdAccess = true
+      readGate = new Promise<void>((resolve) => { releaseRead = resolve })
+      confirm.click()
+      await flushUi()
+      expect(commits).toHaveLength(commitsBefore + 1)
+      expect(container?.textContent).toContain(switchBefore)
+      expect(container?.textContent).not.toContain(outcome)
+      holdAccess = false
+      releaseRead?.()
+      const switchAfter = admissionEnabled ? '插件使用已开通' : '插件使用未开通'
+      await waitForCondition(() => {
+        const text = container?.textContent || ''
+        return text.includes(outcome) && text.includes(switchAfter)
+      })
+      expect(commits[commits.length - 1]).toMatchObject({ action, admissionChanges: admission, expectedVersion: 'version-1' })
+      expect(callLog.filter((url) => url.includes('/roles/') || url.includes('/namespaces/'))).toHaveLength(0)
+      ;(container!.querySelector('[data-testid="delegation-confirmation-cancel"]') as HTMLButtonElement).click()
+      await flushUi()
+    }
+    const assignSelect = container!.querySelector('[data-testid="delegation-assign-role"]') as HTMLSelectElement
+    assignSelect.value = 'crm_admin'
+    assignSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    await run(
+      () => findButtonByText(container!, '分配角色').click(),
+      { kind: 'role.assign', roleId: 'crm_admin' },
+      [],
+    )
+    const revokeSelect = container!.querySelector('[data-testid="delegation-revoke-role"]') as HTMLSelectElement
+    revokeSelect.value = 'crm_admin'
+    revokeSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    await run(
+      () => findButtonByText(container!, '撤销角色').click(),
+      { kind: 'role.revoke', roleId: 'crm_admin' },
+      [],
+    )
+    await run(
+      () => findButtonByText(container!, '开通插件使用').click(),
+      { kind: 'admission.set' },
+      [{ namespace: 'crm', enabled: true }],
+    )
+    await run(
+      () => findButtonByText(container!, '关闭插件使用').click(),
+      { kind: 'admission.set' },
+      [{ namespace: 'crm', enabled: false }],
+    )
+    expect(commits).toHaveLength(4)
+    expect(lookups).toHaveLength(0)
+  })
+
+  it('recovers an unknown receipt with GET and does not post the command again', async () => {
+    const catalog = [{ id: 'crm_admin', name: 'CRM 管理员', permissions: ['crm:read'], updatedAt: 'stamp-1' }]
+    const posts: string[] = []
+    const lookups: string[] = []
+    apiFetchMock.mockImplementation(async (input: unknown, _init?: { method?: string; body?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'delegate-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], roleCatalog: catalog, scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({ ok: true, data: { items: [{ id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true }] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: 'delegate-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], manageableNamespaces: ['crm'], roleCatalog: catalog,
+            user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+            roles: [], memberGroups: [], delegableRoles: [], namespaceAdmissions: [],
+          },
+        })
+      }
+      if (isAuthorizationPreview(pathname)) return authorizationPreviewResponse()
+      if (isAuthorizationCommit(pathname)) {
+        posts.push(pathname)
+        return createJsonResponse({ ok: false, error: { message: 'lost' } }, 500)
+      }
+      if (pathname.startsWith(`${ADMIN_AUTHORIZATION_OPERATIONS_PATH}/`)) {
+        lookups.push(pathname)
+        const id = pathname.split('/').pop()
+        return createJsonResponse({ status: 'unknown_or_pending', clientOperationId: id })
+      }
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    await mountDelegation()
+    await waitForCondition(() => Boolean(container?.querySelector('[data-testid="delegation-assign-role"]')))
+    const assignSelect = container!.querySelector('[data-testid="delegation-assign-role"]') as HTMLSelectElement
+    assignSelect.value = 'crm_admin'
+    assignSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    findButtonByText(container!, '分配角色').click()
+    await flushUi()
+    const confirm = container!.querySelector('[data-testid="delegation-confirmation-confirm"]') as HTMLButtonElement
+    await waitForCondition(() => confirm.disabled === false)
+    confirm.click()
+    await waitForCondition(() => lookups.length === 1 && statusText().includes('不要再次提交'))
+    expect(posts).toHaveLength(1)
+    confirm.click()
+    await flushUi()
+    expect(posts).toHaveLength(1)
+    const readAgain = container!.querySelector('[data-testid="delegation-confirmation-read-again"]') as HTMLButtonElement
+    readAgain.click()
+    await waitForCondition(() => lookups.length === 2)
+    expect(posts).toHaveLength(1)
+    expect(callLog.some((url) => url.includes('/roles/assign'))).toBe(false)
+  })
+
+  it('keeps plugin admission when a revoke receipt only cleans scope, and labels that cleanup as receipt-time', async () => {
+    const catalog = [{ id: 'crm_admin', name: 'CRM 管理员', permissions: ['crm:read'], updatedAt: 'stamp-1' }]
+    const impact = blankImpact({
+      sourceChanges: [{ source: 'role', id: 'crm_admin', operation: 'revoke', changed: true }],
+      scopeCleanup: [{ namespace: 'crm', kind: 'department', id: 'dept-1' }],
+      retainedOtherGrants: [{ code: 'sheet:read', sources: [{ kind: 'legacy', id: null }], effective: true }],
+    })
+    let roles = ['crm_admin']
+    const posts: string[] = []
+    apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string; body?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'delegate-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], roleCatalog: catalog, scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({ ok: true, data: { items: [{ id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true }] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: 'delegate-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], manageableNamespaces: ['crm'], roleCatalog: catalog,
+            user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+            roles, memberGroups: [], delegableRoles: roles,
+            namespaceAdmissions: [{ namespace: 'crm', enabled: true, effective: true, hasRole: roles.includes('crm_admin'), updatedAt: 'stamp' }],
+          },
+        })
+      }
+      if (isAuthorizationPreview(pathname)) return authorizationPreviewResponse(impact)
+      if (isAuthorizationCommit(pathname)) {
+        posts.push(pathname)
+        roles = []
+        return authorizationCommitResponse(init?.body, impact)
+      }
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    await mountDelegation()
+    await waitForCondition(() => (container?.textContent || '').includes('插件使用已开通'))
+    const revokeSelect = container!.querySelector('[data-testid="delegation-revoke-role"]') as HTMLSelectElement
+    revokeSelect.value = 'crm_admin'
+    revokeSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    findButtonByText(container!, '撤销角色').click()
+    await flushUi()
+    expect(container?.querySelector('[data-testid="delegation-preview-scope-cleanup"]')?.textContent).toContain('crm department dept-1')
+    expect(container?.querySelector('[data-testid="delegation-preview-retained"]')?.textContent).toContain('sheet:read')
+    const confirm = container!.querySelector('[data-testid="delegation-confirmation-confirm"]') as HTMLButtonElement
+    await waitForCondition(() => confirm.disabled === false)
+    confirm.click()
+    await waitForCondition(() => statusText().includes('角色已从该成员移除'))
+    expect(posts).toHaveLength(1)
+    expect(statusText()).toContain('提交时回执记录范围清理：crm department dept-1')
+    expect(statusText()).toContain('提交时回执记录其他来源')
+    expect(statusText()).toContain('sheet:read')
+    expect(statusText()).not.toContain('范围读取确认')
+    expect(container?.textContent).toContain('插件使用已开通')
+  })
+
+  it('says scope cleanup is gone only after the scope endpoint no longer lists those ids', async () => {
+    const catalog = [{ id: 'crm_admin', name: 'CRM 管理员', permissions: ['crm:read'], updatedAt: 'stamp-1' }]
+    const impact = blankImpact({
+      scopeCleanup: [{ namespace: 'crm', kind: 'department', id: 'dept-1' }],
+    })
+    let roles = ['crm_admin']
+    apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string; body?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: ['crm'], roleCatalog: catalog, scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/departments' || pathname === '/api/admin/role-delegation/member-groups' || pathname === '/api/admin/role-delegation/scope-templates') {
+        return createJsonResponse({ ok: true, data: { items: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({ ok: true, data: { items: [{ id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true }] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: ['crm'], manageableNamespaces: ['crm'], roleCatalog: catalog,
+            user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+            roles, memberGroups: [], delegableRoles: roles,
+            namespaceAdmissions: [{ namespace: 'crm', enabled: true, effective: false, hasRole: roles.includes('crm_admin'), updatedAt: 'stamp' }],
+          },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/scopes') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: 'admin-1',
+            user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+            adminNamespaces: ['crm'],
+            scopeAssignments: roles.length > 0
+              ? [{ id: 'scope-1', namespace: 'crm', directoryDepartmentId: 'dept-1', integrationId: 'ding', integrationName: '目录', provider: 'dingtalk', corpId: null, externalDepartmentId: 'ext-1', departmentName: '旧部门', departmentFullPath: null, departmentActive: true }]
+              : [],
+            groupAssignments: [],
+          },
+        })
+      }
+      if (isAuthorizationPreview(pathname)) return authorizationPreviewResponse(impact)
+      if (isAuthorizationCommit(pathname)) {
+        roles = []
+        return authorizationCommitResponse(init?.body, impact)
+      }
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    await mountDelegation()
+    await waitForCondition(() => Boolean(container?.querySelector('[data-testid="delegation-revoke-role"]')))
+    const revokeSelect = container!.querySelector('[data-testid="delegation-revoke-role"]') as HTMLSelectElement
+    revokeSelect.value = 'crm_admin'
+    revokeSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    findButtonByText(container!, '撤销角色').click()
+    await flushUi()
+    const confirm = container!.querySelector('[data-testid="delegation-confirmation-confirm"]') as HTMLButtonElement
+    await waitForCondition(() => confirm.disabled === false)
+    confirm.click()
+    await waitForCondition(() => statusText().includes('范围读取确认这些项已不在：crm department dept-1'))
+    expect(statusText()).toContain('角色已从该成员移除')
+    expect(statusText()).not.toContain('提交时回执记录范围清理')
+    expect(callLog.filter((url) => url.includes('/users/user-1/scopes')).length).toBeGreaterThan(1)
+  })
+
+  it('does not verify or replay a restored direct grant receipt', async () => {
+    const operationId = '11111111-1111-4111-8111-111111111111'
+    sessionStorage.setItem(ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY, JSON.stringify({
+      formatVersion: 1,
+      entries: [{ principalId: 'admin-1', targetId: 'user-1', clientOperationId: operationId }],
+    }))
+    const lookups: string[] = []
+    const posts: string[] = []
+    apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({ ok: true, data: { items: [{ id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true }] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: 'admin-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], roleCatalog: [],
+            user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+            roles: [], memberGroups: [], delegableRoles: [], namespaceAdmissions: [],
+          },
+        })
+      }
+      if (pathname === `${ADMIN_AUTHORIZATION_OPERATIONS_PATH}/${operationId}` && init?.method !== 'POST') {
+        lookups.push(pathname)
+        return createJsonResponse({
+          status: 'committed',
+          clientOperationId: operationId,
+          receipt: {
+            targetUserId: 'user-1',
+            action: { kind: 'direct.grant', code: 'sheet:write' },
+            impact: blankImpact(),
+            resultVersion: 'result-1',
+          },
+        })
+      }
+      if (init?.method === 'POST' || init?.method === 'PATCH') {
+        posts.push(pathname)
+        throw new Error(`unexpected write ${rawUrl}`)
+      }
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    await mountDelegation()
+    await waitForCondition(() => statusText().includes('直接授权 sheet:write') && statusText().includes('不要再次提交'))
+    expect(posts).toHaveLength(0)
+    expect(lookups).toHaveLength(1)
+    expect(container?.querySelector('[data-testid="delegation-confirmation"]')).toBeNull()
+    ;(container!.querySelector('[data-testid="delegation-restored-read-again"]') as HTMLButtonElement).click()
+    await waitForCondition(() => lookups.length === 2)
+    expect(posts).toHaveLength(0)
+    expect(statusText()).toContain('不能确认这个回执')
+  })
+
+  it('verifies a recovered role receipt from the access read and then accepts a separate preview', async () => {
+    const operationId = '22222222-2222-4222-8222-222222222222'
+    sessionStorage.setItem(ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY, JSON.stringify({
+      formatVersion: 1,
+      entries: [{ principalId: 'admin-1', targetId: 'user-1', clientOperationId: operationId }],
+    }))
+    const catalog = [{ id: 'crm_admin', name: 'CRM 管理员', permissions: ['crm:read'], updatedAt: 'stamp-1' }]
+    const recoveredImpact = blankImpact({
+      sourceChanges: [{ source: 'role', id: 'crm_admin', operation: 'assign', changed: true }],
+      admissionChanges: [{ namespace: 'crm', before: false, after: true, cause: 'explicit' }],
+      scopeCleanup: [{ namespace: 'crm', kind: 'department', id: 'dept-1' }],
+      retainedOtherGrants: [{ code: 'sheet:read', sources: [{ kind: 'legacy', id: null }], effective: true }],
+    })
+    let revoked = false
+    const lookups: string[] = []
+    const commits: Array<{ clientOperationId?: string, action?: { kind?: string, roleId?: string } }> = []
+    apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string; body?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], roleCatalog: catalog, scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({ ok: true, data: { items: [{ id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true }] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: 'admin-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], manageableNamespaces: ['crm'], roleCatalog: catalog,
+            user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+            roles: revoked ? [] : ['crm_admin'],
+            memberGroups: [],
+            delegableRoles: revoked ? [] : ['crm_admin'],
+            namespaceAdmissions: [{ namespace: 'crm', enabled: true, effective: !revoked, hasRole: !revoked, updatedAt: 'stamp' }],
+          },
+        })
+      }
+      if (pathname === `${ADMIN_AUTHORIZATION_OPERATIONS_PATH}/${operationId}` && init?.method !== 'POST') {
+        lookups.push(pathname)
+        return createJsonResponse({
+          status: 'committed',
+          clientOperationId: operationId,
+          receipt: {
+            targetUserId: 'user-1',
+            action: { kind: 'role.assign', roleId: 'crm_admin' },
+            impact: recoveredImpact,
+            resultVersion: 'result-1',
+          },
+        })
+      }
+      if (isAuthorizationPreview(pathname) && init?.method === 'POST') return authorizationPreviewResponse()
+      if (isAuthorizationCommit(pathname) && init?.method === 'POST') {
+        const body = readAuthorizationBody(init.body)
+        commits.push(body)
+        if (body.action.kind === 'role.revoke') revoked = true
+        return authorizationCommitResponse(init.body)
+      }
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    await mountDelegation()
+    await waitForCondition(() => statusText().includes('角色已分配') && statusText().includes('提交时回执记录范围清理'))
+    expect(statusText()).toContain('提交时回执记录其他来源')
+    expect(statusText()).toContain('sheet:read')
+    expect(statusText()).not.toContain('范围读取确认')
+    expect(commits).toHaveLength(0)
+    expect(lookups).toEqual([`${ADMIN_AUTHORIZATION_OPERATIONS_PATH}/${operationId}`])
+    expect(sessionStorage.getItem(ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY) || '').not.toContain(operationId)
+    const revokeSelect = container!.querySelector('[data-testid="delegation-revoke-role"]') as HTMLSelectElement
+    revokeSelect.value = 'crm_admin'
+    revokeSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    findButtonByText(container!, '撤销角色').click()
+    await flushUi()
+    const confirm = container!.querySelector('[data-testid="delegation-confirmation-confirm"]') as HTMLButtonElement
+    await waitForCondition(() => confirm.disabled === false)
+    confirm.click()
+    await waitForCondition(() => commits.length === 1 && statusText().includes('角色已从该成员移除'))
+    expect(commits[0]?.action).toEqual({ kind: 'role.revoke', roleId: 'crm_admin' })
+    expect(commits[0]?.clientOperationId).not.toBe(operationId)
+    expect(lookups).toHaveLength(1)
+  })
+
+  it('does not apply a deferred access read after the actor changes and the target stays', async () => {
+    const operationId = '33333333-3333-4333-8333-333333333333'
+    sessionStorage.setItem(ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY, JSON.stringify({
+      formatVersion: 1,
+      entries: [{ principalId: 'admin-1', targetId: 'user-1', clientOperationId: operationId }],
+    }))
+    let accessReads = 0
+    let releaseLate: (() => void) | undefined
+    const lateGate = new Promise<void>((resolve) => { releaseLate = resolve })
+    apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({ ok: true, data: { items: [{ id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true }] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        accessReads += 1
+        if (accessReads > 1) await lateGate
+        const late = accessReads > 1
+        return createJsonResponse({
+          ok: true,
+          data: {
+            actorId: late ? 'admin-2' : 'admin-1',
+            isPlatformAdmin: false,
+            delegableNamespaces: ['crm'],
+            roleCatalog: late ? [{ id: 'crm_admin', name: 'CRM 管理员', permissions: ['crm:read'] }] : [],
+            user: { id: 'user-1', email: 'alpha@example.com', name: late ? 'Late Reader' : 'Alpha', role: 'user', is_active: true },
+            roles: late ? ['crm_admin'] : [],
+            memberGroups: [],
+            delegableRoles: late ? ['crm_admin'] : [],
+            namespaceAdmissions: [{ namespace: 'crm', enabled: late, effective: late, hasRole: late, updatedAt: 'stamp' }],
+          },
+        })
+      }
+      if (pathname === `${ADMIN_AUTHORIZATION_OPERATIONS_PATH}/${operationId}` && init?.method !== 'POST') {
+        return createJsonResponse({
+          status: 'committed',
+          clientOperationId: operationId,
+          receipt: {
+            targetUserId: 'user-1',
+            action: { kind: 'role.assign', roleId: 'crm_admin' },
+            impact: blankImpact(),
+            resultVersion: 'result-1',
+          },
+        })
+      }
+      if (init?.method === 'POST' || init?.method === 'PATCH') throw new Error(`unexpected write ${rawUrl}`)
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    await mountDelegation()
+    await waitForCondition(() => accessReads > 1)
+    expect(container?.textContent).toContain('Alpha')
+    authState.userId = 'admin-2'
+    releaseLate?.()
+    await flushUi()
+    expect(container?.textContent).toContain('Alpha')
+    expect(container?.textContent).not.toContain('Late Reader')
+    expect(statusText()).not.toContain('角色已分配')
+    expect(statusText()).not.toContain('还没有核对成功')
+    expect(sessionStorage.getItem(ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY) || '').toContain(operationId)
+    expect(callLog.filter((url) => url.includes('/scopes'))).toHaveLength(0)
+  })
+
+  it('opens the member named by the userId query and does not select the first listed member', async () => {
+    window.history.replaceState({}, '', '/admin/role-delegation?userId=user-2&source=members#scope')
+    apiFetchMock.mockImplementation(async (input: unknown) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            items: [
+              { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+              { id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true },
+            ],
+          },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') return createJsonResponse({ ok: true, data: accessPayload('user-1', 'Alpha', 'alpha@example.com') })
+      if (pathname === '/api/admin/role-delegation/users/user-2/access') return createJsonResponse({ ok: true, data: accessPayload('user-2', 'Bravo', 'bravo@example.com') })
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    mountPlain()
+    await waitForCondition(() => detailHeading().includes('Bravo'))
+    expect(callLog.some((url) => url.includes('/users/user-1/access'))).toBe(false)
+    expect(callLog.filter((url) => url.includes('/users/user-2/access'))).toHaveLength(1)
+    expect(container?.querySelector('.delegation-page__user--active')?.textContent).toContain('Bravo')
+    expect(container?.querySelector('.delegation-page__panel--detail')?.textContent).not.toContain('请选择一个成员')
+    expect(window.location.search).toContain('userId=user-2')
+    expect(apiFetchMock.mock.calls.some(([, init]) => init?.method === 'POST' || init?.method === 'PATCH')).toBe(false)
+  })
+
+  it('keeps an explicitly selected member when a refresh still lists that member', async () => {
+    apiFetchMock.mockImplementation(async (input: unknown) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            items: [
+              { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+              { id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true },
+            ],
+          },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') return createJsonResponse({ ok: true, data: accessPayload('user-1', 'Alpha', 'alpha@example.com') })
+      if (pathname === '/api/admin/role-delegation/users/user-2/access') return createJsonResponse({ ok: true, data: accessPayload('user-2', 'Bravo', 'bravo@example.com') })
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    mountPlain()
+    await selectListedMember('alpha@example.com')
+    await waitForCondition(() => detailHeading().includes('Alpha'))
+    const alphaReads = callLog.filter((url) => url.includes('/users/user-1/access')).length
+    findButtonByText(container!, '查询').click()
+    await waitForCondition(() => callLog.filter((url) => url.includes('/api/admin/role-delegation/users')).length >= 2)
+    await waitForMemberListSettled()
+    expect(detailHeading()).toContain('Alpha')
+    expect(container?.querySelector('.delegation-page__user--active')?.textContent).toContain('Alpha')
+    expect(callLog.filter((url) => url.includes('/users/user-1/access')).length).toBe(alphaReads)
+    expect(callLog.some((url) => url.includes('/users/user-2/access'))).toBe(false)
   })
 })

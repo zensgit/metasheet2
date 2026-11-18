@@ -25,13 +25,27 @@
       v-if="pendingConfirmation"
       :confirmation="pendingConfirmation"
       :phase="confirmationPhase"
+      :impact="confirmationImpact"
+      :confirm-ready="confirmationConfirmReady"
+      :admission-enabled="pendingAdmissionEnabled"
+      :read-again="confirmationReadAgain"
       @confirm="void submitDelegationConfirmation($event)"
       @cancel="cancelDelegationConfirmation()"
+      @read-again="void rereadDelegationAuthorization()"
     />
 
     <p v-if="status" class="delegation-page__status" :class="{ 'delegation-page__status--error': statusTone === 'error' }">
       {{ status }}
     </p>
+    <button
+      v-if="restoredReadAgain && !pendingConfirmation"
+      class="delegation-page__button"
+      type="button"
+      data-testid="delegation-restored-read-again"
+      @click="void rereadRestoredAuthorization()"
+    >
+      重新读取
+    </button>
 
     <section class="delegation-page__panel">
       <div class="delegation-page__chips">
@@ -149,7 +163,7 @@
                   <button class="delegation-page__button" type="button" :disabled="busy || !memberWritesReady || admission.enabled || !namespaceIsManaged(admission.namespace)" @click="openAdmissionConfirmation(admission)">
                     开通插件使用
                   </button>
-                  <button class="delegation-page__button delegation-page__button--secondary" type="button" :disabled="busy || !memberWritesReady || !admission.enabled || !namespaceIsManaged(admission.namespace)" @click="void updateNamespaceAdmission(admission, false)">
+                  <button class="delegation-page__button delegation-page__button--secondary" type="button" :disabled="busy || !memberWritesReady || !admission.enabled || !namespaceIsManaged(admission.namespace)" @click="openAdmissionConfirmation(admission, false)">
                     关闭插件使用
                   </button>
                 </div>
@@ -525,8 +539,29 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import { useAdminAuthorizationOperation } from '../composables/useAdminAuthorizationOperation'
+import { useAuth } from '../composables/useAuth'
 import { apiFetch } from '../utils/api'
+import type {
+  AdminAuthorizationAction,
+  AdminAuthorizationImpact,
+  AdminAuthorizationReceipt,
+  AdminAuthorizationRequest,
+  AdminAuthorizationScopeCleanup,
+  AdminAuthorizationTransportRequest,
+  AdminAuthorizationTransportResponse,
+} from '../utils/adminAuthorizationOperation'
 import DelegationConfirmationPanel from './DelegationConfirmationPanel.vue'
+import {
+  AUTHORIZATION_FORBIDDEN_MESSAGE,
+  AUTHORIZATION_NOT_CHECKED_MESSAGE,
+  AUTHORIZATION_PENDING_MESSAGE,
+  AUTHORIZATION_PREVIEW_FAILED_MESSAGE,
+  AUTHORIZATION_PRINCIPAL_MISSING_MESSAGE,
+  LAST_PLATFORM_ADMIN_MESSAGE,
+  ROLE_VERSION_MISMATCH_MESSAGE,
+  describeVerifiedAuthorization,
+} from './AdminAuthorizationConfirm'
 import {
   delegationConfirmationStillValid,
   openDelegationConfirmation,
@@ -708,17 +743,69 @@ const includeChildren = ref(true)
 const templateIncludeChildren = ref(true)
 const exactDepartmentBlocked = ref(false)
 const pendingConfirmation = ref<DelegationConfirmation | null>(null)
+const pendingAdmissionEnabled = ref<boolean | null>(null)
 const confirmationSubmission = ref<{ token: number, phase: 'pending' | 'completed' } | null>(null)
+const confirmationReadAgain = ref(false)
+const restoredReadAgain = ref(false)
+const submittedAuthorization = ref<AdminAuthorizationRequest | null>(null)
+let authorizationFaultCode = ''
+let authorizationFaultMessage = ''
 const confirmationPhase = computed(() => (
   confirmationSubmission.value && pendingConfirmation.value
   && confirmationSubmission.value.token === pendingConfirmation.value.token
     ? confirmationSubmission.value.phase
     : 'review'
 ))
+const auth = useAuth()
 const departments = ref<DepartmentCatalogItem[]>([])
 const templates = ref<ScopeTemplateSummary[]>([])
 const memberGroups = ref<MemberGroupSummary[]>([])
 const selectedUserId = ref('')
+
+function currentPrincipalId(): string {
+  const reader = auth.getCurrentUser
+  if (typeof reader !== 'function') return ''
+  const user = reader()
+  if (!user || typeof user !== 'object') return ''
+  const id = (user as { id?: unknown }).id
+  return typeof id === 'string' ? id.trim() : ''
+}
+
+async function authorizationTransport(
+  request: AdminAuthorizationTransportRequest,
+): Promise<AdminAuthorizationTransportResponse> {
+  const response = await apiFetch(request.path, {
+    method: request.method,
+    body: request.body === undefined ? undefined : JSON.stringify(request.body),
+    signal: request.signal,
+  })
+  const body = await readJson(response)
+  if (request.method === 'POST' && response.status >= 400) {
+    authorizationFaultCode = readErrorCode(body)
+    authorizationFaultMessage = readErrorMessage(body)
+  }
+  return { status: response.status, body }
+}
+
+const authorizationOperation = useAdminAuthorizationOperation({
+  transport: authorizationTransport,
+  getPrincipalId: () => currentPrincipalId(),
+  getTargetId: () => selectedUserId.value.trim(),
+  verifyLive: () => verifyDelegationAuthorization(),
+})
+
+function currentAuthorizationPhase() {
+  return authorizationOperation.phase.value
+}
+const confirmationImpact = computed<AdminAuthorizationImpact | null>(() => (
+  pendingConfirmation.value ? authorizationOperation.impact.value : null
+))
+const confirmationConfirmReady = computed(() => (
+  confirmationPhase.value === 'review'
+  && authorizationOperation.phase.value === 'awaiting_confirmation'
+  && pendingConfirmation.value?.targetUserId === selectedUserId.value
+))
+
 const selectedRoleId = ref('')
 const selectedRevokeRoleId = ref('')
 const selectedScopeNamespace = ref('')
@@ -770,7 +857,44 @@ const exactDepartmentApplyBlocked = computed(() => (
 
 watch(selectedUserId, (userId) => {
   const pending = pendingConfirmation.value
-  if (pending && pending.targetUserId !== userId) pendingConfirmation.value = null
+  if (pending && pending.targetUserId !== userId && confirmationPhase.value !== 'pending') {
+    pendingConfirmation.value = null
+    confirmationReadAgain.value = false
+  }
+  authorizationOperation.syncContext()
+})
+
+watch(() => authorizationOperation.phase.value, () => {
+  if (confirmationSubmission.value || pendingConfirmation.value || busy.value) return
+  const phase = currentAuthorizationPhase()
+  if (phase !== 'pending' && phase !== 'unverified_no_read' && phase !== 'committed') return
+  if (!authorizationOperation.clientOperationId.value) return
+  if (phase === 'committed' && authorizationOperation.verified.value) return
+  const receipt = authorizationOperation.receipt.value
+  if (receipt && receipt.targetUserId !== selectedUserId.value) return
+  if (phase === 'committed' && receipt) {
+    void publishVerifiedDelegation(delegationAccessGeneration, receipt.targetUserId)
+    return
+  }
+  restoredReadAgain.value = true
+  setStatus(AUTHORIZATION_PENDING_MESSAGE, 'error')
+})
+
+watch(delegationPermissionFingerprint, (next, previous) => {
+  if (!previous || next === previous) return
+  const pending = pendingConfirmation.value
+  if (!pending || confirmationPhase.value !== 'review') return
+  if (!next.startsWith(`${pending.targetUserId}|`)) {
+    pendingConfirmation.value = null
+    return
+  }
+  const request = requestForConfirmation(pending)
+  if (!request) {
+    pendingConfirmation.value = null
+    return
+  }
+  submittedAuthorization.value = request
+  void previewDelegationRequest(request)
 })
 
 watch(selectedRoleId, (roleId) => {
@@ -947,28 +1071,6 @@ function assignmentEchoesIncludeChildren(
   return match?.includeChildren === requested
 }
 
-function readNamespaceAdmissionList(value: unknown): NamespaceAdmission[] | null {
-  if (!Array.isArray(value)) return null
-  return value.map((item) => {
-    const record = item as Record<string, unknown>
-    return {
-      namespace: typeof record.namespace === 'string' ? record.namespace : '',
-      enabled: record.enabled === true,
-      effective: typeof record.effective === 'boolean' ? record.effective : record.enabled === true && record.hasRole === true,
-      hasRole: record.hasRole === true || record.has_role === true,
-      updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : typeof record.updated_at === 'string' ? record.updated_at : null,
-    }
-  }).filter((item) => item.namespace)
-}
-
-function admissionRecordTargetsUser(data: unknown, userId: string): boolean {
-  if (!data || typeof data !== 'object') return false
-  if (!('user' in data)) return true
-  const user = (data as { user?: unknown }).user
-  if (!user || typeof user !== 'object') return false
-  return (user as { id?: unknown }).id === userId
-}
-
 function targetLabelFor(user: ManagedUser): string {
   return user.name || user.email || user.id
 }
@@ -1002,6 +1104,40 @@ function roleTitle(role: { id: string; name: string }): string {
 
 function delegationReadStillCurrent(generation: number, userId: string): boolean {
   return generation === delegationAccessGeneration && selectedUserId.value === userId
+}
+
+function sameDelegationActor(actorId: string, generation: number, targetUserId: string): boolean {
+  return actorId.length > 0
+    && currentPrincipalId() === actorId
+    && delegationReadStillCurrent(generation, targetUserId)
+}
+
+function delegationPermissionFingerprint(): string {
+  const access = selectedAccess.value
+  if (!access) return ''
+  const roles = [...access.roles].sort().join(',')
+  const admissions = access.namespaceAdmissions
+    .map((item) => `${item.namespace}:${item.enabled ? '1' : '0'}`)
+    .join(',')
+  return `${access.user.id}|${roles}|${admissions}`
+}
+
+function readErrorCode(payload: Record<string, unknown>): string {
+  const error = payload.error
+  if (error && typeof error === 'object' && !Array.isArray(error)) {
+    const code = (error as Record<string, unknown>).code
+    if (typeof code === 'string') return code
+  }
+  return typeof payload.code === 'string' ? payload.code : ''
+}
+
+function readErrorMessage(payload: Record<string, unknown>): string {
+  const error = payload.error
+  if (error && typeof error === 'object' && !Array.isArray(error)) {
+    const message = (error as Record<string, unknown>).message
+    if (typeof message === 'string' && message.trim()) return message
+  }
+  return ''
 }
 
 function readSubjectMatches(payload: Record<string, unknown>, userId: string): boolean {
@@ -1281,6 +1417,8 @@ async function updateTemplateMemberGroup(action: 'assign' | 'unassign', groupId?
 async function loadUsers(options?: { reselectPinned?: boolean }): Promise<void> {
   const reselectPinned = options?.reselectPinned !== false
   const requestGeneration = ++usersRequestGeneration
+  const selectionGenerationAtStart = delegationAccessGeneration
+  const selectedUserIdAtStart = selectedUserId.value
   loading.value = true
   try {
     const params = new URLSearchParams()
@@ -1305,6 +1443,8 @@ async function loadUsers(options?: { reselectPinned?: boolean }): Promise<void> 
     const data = payload.data as { items?: unknown[] } | undefined
     const items = Array.isArray(data?.items) ? data.items : []
     users.value = items.map((item) => normalizeUserCandidate(item)).filter((item): item is UserCandidate => item !== null)
+    // A choice made while this list was in flight stays. This response must not clear it or select someone else.
+    if (delegationAccessGeneration !== selectionGenerationAtStart || selectedUserId.value !== selectedUserIdAtStart) return
     if (reselectPinned && pinnedUserPending) {
       const pinned = initialPinnedUserId
       pinnedUserPending = false
@@ -1335,12 +1475,6 @@ async function loadUsers(options?: { reselectPinned?: boolean }): Promise<void> 
     }
     if (selectedUserId.value && !selectedRow) {
       clearUnpinnedSelection()
-    } else if (selectedUserId.value && selectedRow) {
-      return
-    }
-    if (!selectedUserId.value) {
-      const firstSelectable = users.value.find((user) => user.selectable !== false)
-      if (firstSelectable) await selectUser(firstSelectable.id)
     }
   } catch (error) {
     if (requestGeneration !== usersRequestGeneration) return
@@ -1404,7 +1538,7 @@ async function selectUser(userId: string): Promise<OwnedSelection> {
     if (summary.value?.isPlatformAdmin) {
       const scopeResult = await loadScopeConfig(userId)
       if (!delegationReadStillCurrent(generation, userId)) return { applied: false, generation }
-      return { applied: scopeResult === 'ok', generation }
+      return { applied: scopeResult.status === 'ok', generation }
     }
     if (!delegationReadStillCurrent(generation, userId)) return { applied: false, generation }
     selectedScopeConfig.value = null
@@ -1418,89 +1552,335 @@ async function selectUser(userId: string): Promise<OwnedSelection> {
   }
 }
 
-async function updateNamespaceAdmission(admission: NamespaceAdmission, enabled: boolean): Promise<void> {
-  const targetUserId = selectedUserId.value
-  const generation = delegationAccessGeneration
-  if (!targetUserId || !memberWritesReady.value) return
-  const successMessage = enabled ? `已开通 ${admission.namespace} 插件使用` : `已关闭 ${admission.namespace} 插件使用`
-  busy.value = true
-  try {
-    const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(targetUserId)}/namespaces/${encodeURIComponent(admission.namespace)}/admission`, {
-      method: 'PATCH',
-      body: JSON.stringify({ enabled }),
-    })
-    const payload = await readJson(response)
-    if (!delegationReadStillCurrent(generation, targetUserId)) return
-    if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存插件使用准入失败'))
+function requestForConfirmation(confirmation: DelegationConfirmation): AdminAuthorizationRequest | null {
+  if (!confirmation.targetUserId) return null
+  if ((confirmation.kind === 'grant' || confirmation.kind === 'revoke') && confirmation.roleId) {
+    return {
+      targetUserId: confirmation.targetUserId,
+      action: {
+        kind: confirmation.kind === 'grant' ? 'role.assign' : 'role.revoke',
+        roleId: confirmation.roleId,
+      },
+      admissionChanges: [],
     }
-    if (!admissionRecordTargetsUser(payload.data, targetUserId) || selectedAccess.value?.user.id !== targetUserId) {
-      setStatus('保存插件使用准入失败', 'error')
-      return
+  }
+  if (confirmation.kind === 'admission-enable' && confirmation.namespace && pendingAdmissionEnabled.value !== null) {
+    return {
+      targetUserId: confirmation.targetUserId,
+      action: { kind: 'admission.set' },
+      admissionChanges: [{ namespace: confirmation.namespace, enabled: pendingAdmissionEnabled.value }],
     }
+  }
+  return null
+}
 
-    const data = payload.data as Record<string, unknown>
-    if ('namespaceAdmissions' in data) {
-      const admissions = readNamespaceAdmissionList(data.namespaceAdmissions)
-      const echoed = admissions?.find((item) => item.namespace === admission.namespace)
-      if (!admissions || !echoed || echoed.enabled !== enabled) {
-        setStatus('保存插件使用准入失败', 'error')
-        return
-      }
-      const currentAccess = selectedAccess.value
-      if (!delegationReadStillCurrent(generation, targetUserId) || !currentAccess) return
-      selectedAccess.value = {
-        ...currentAccess,
-        namespaceAdmissions: admissions,
-      }
-      setStatus(successMessage)
-      return
-    }
+function delegationCanVerifyAction(action: AdminAuthorizationAction): boolean {
+  return action.kind === 'role.assign' || action.kind === 'role.revoke' || action.kind === 'admission.set'
+}
 
-    if (!delegationReadStillCurrent(generation, targetUserId)) return
-    const refreshed = await selectUser(targetUserId)
-    if (!refreshed.applied || selectedUserId.value !== targetUserId || selectedAccess.value?.user.id !== targetUserId) return
-    const echoed = selectedAccess.value.namespaceAdmissions?.find((item) => item.namespace === admission.namespace)
-    if (!echoed || echoed.enabled !== enabled) {
-      setStatus('保存插件使用准入失败', 'error')
-      return
-    }
-    setStatus(successMessage)
-  } catch (error) {
-    if (!delegationReadStillCurrent(generation, targetUserId)) return
-    setStatus(error instanceof Error ? error.message : '保存插件使用准入失败', 'error')
-  } finally {
-    busy.value = false
+function delegationActionLabel(action: AdminAuthorizationAction): string {
+  switch (action.kind) {
+    case 'role.assign':
+      return `分配角色 ${action.roleId}`
+    case 'role.revoke':
+      return `撤销角色 ${action.roleId}`
+    case 'admission.set':
+      return '设置插件使用准入'
+    case 'direct.grant':
+      return `直接授权 ${action.code}`
+    case 'direct.revoke':
+      return `撤销直接授权 ${action.code}`
+    case 'legacy.revoke':
+      return `撤销历史来源 ${action.code}`
+    case 'template.apply':
+      return `应用范围模板 ${action.templateId}`
   }
 }
 
-async function loadScopeConfig(userId: string): Promise<'ok' | 'denied' | 'stale' | 'mismatch'> {
-  if (!summary.value?.isPlatformAdmin) return 'ok'
+function delegationLiveAgrees(
+  access: DelegatedUserAccess,
+  request: AdminAuthorizationRequest,
+  impact: AdminAuthorizationImpact,
+): boolean {
+  if (!delegationCanVerifyAction(request.action)) return false
+  if (access.user.id !== request.targetUserId) return false
+  if (request.action.kind === 'role.assign' && !access.roles.includes(request.action.roleId)) return false
+  if (request.action.kind === 'role.revoke' && access.roles.includes(request.action.roleId)) return false
+  for (const change of request.admissionChanges) {
+    const row = access.namespaceAdmissions.find((item) => item.namespace === change.namespace)
+    if (!row || row.enabled !== change.enabled) return false
+  }
+  for (const change of impact.admissionChanges) {
+    const row = access.namespaceAdmissions.find((item) => item.namespace === change.namespace)
+    if (!row) {
+      if (change.after) return false
+      continue
+    }
+    if (row.enabled !== change.after) return false
+  }
+  return true
+}
+
+function scopeCleanupProvenAbsent(items: readonly AdminAuthorizationScopeCleanup[]): boolean {
+  const scope = selectedScopeConfig.value
+  if (!scope || scope.user.id !== selectedUserId.value || items.length === 0) return false
+  return items.every((item) => {
+    const id = item.id.trim()
+    if (!id) return false
+    if (item.kind === 'department') {
+      return !scope.scopeAssignments.some((row) => (
+        row.namespace === item.namespace && (row.id === id || row.directoryDepartmentId === id)
+      ))
+    }
+    return !scope.groupAssignments.some((row) => (
+      row.namespace === item.namespace && (row.id === id || row.groupId === id)
+    ))
+  })
+}
+
+function scopeCleanupNote(impact: AdminAuthorizationImpact, scopeChecked: boolean): string {
+  if (impact.scopeCleanup.length === 0) return ''
+  const labels = impact.scopeCleanup.map((item) => `${item.namespace} ${item.kind} ${item.id}`)
+  if (scopeChecked && scopeCleanupProvenAbsent(impact.scopeCleanup)) {
+    return `范围读取确认这些项已不在：${labels.join('、')}。`
+  }
+  return `提交时回执记录范围清理：${labels.join('、')}。当前的角色和准入读取不能确认这些范围是否已移除。`
+}
+
+function retainedReceiptNote(impact: AdminAuthorizationImpact, alreadySaid: string): string {
+  if (alreadySaid.includes('提交时回执记录其他来源')) return ''
+  const labels = impact.retainedOtherGrants.map((grant) => grant.code.trim()).filter((code) => code.length > 0)
+  if (labels.length === 0) return ''
+  return `提交时回执记录其他来源：${labels.join('、')}。当前的角色和准入读取不能确认这些来源是否仍在。`
+}
+
+function delegationVerifiedStatus(
+  receipt: AdminAuthorizationReceipt,
+  request: AdminAuthorizationRequest,
+  scopeChecked: boolean,
+): string {
+  const base = describeVerifiedAuthorization({
+    action: receipt.action,
+    impact: receipt.impact,
+    requestedAdmissionChanges: request.admissionChanges,
+  })
+  return `${base}${retainedReceiptNote(receipt.impact, base)}${scopeCleanupNote(receipt.impact, scopeChecked)}`
+}
+
+function explicitImpactAdmissions(impact: AdminAuthorizationImpact): Array<{ namespace: string, enabled: boolean }> {
+  return impact.admissionChanges
+    .filter((change) => change.cause === 'explicit')
+    .map((change) => ({ namespace: change.namespace, enabled: change.after }))
+}
+
+function requestForReceiptReadback(receipt: AdminAuthorizationReceipt): AdminAuthorizationRequest | null {
+  if (!delegationCanVerifyAction(receipt.action)) return null
+  if (receipt.action.kind === 'admission.set') {
+    const admissionChanges = explicitImpactAdmissions(receipt.impact)
+    if (admissionChanges.length === 0) return null
+    return { targetUserId: receipt.targetUserId, action: receipt.action, admissionChanges }
+  }
+  if (receipt.action.kind === 'role.assign' || receipt.action.kind === 'role.revoke') {
+    return {
+      targetUserId: receipt.targetUserId,
+      action: receipt.action,
+      admissionChanges: explicitImpactAdmissions(receipt.impact),
+    }
+  }
+  return null
+}
+
+async function readDelegationAccess(userId: string): Promise<DelegatedUserAccess | null> {
+  const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(userId)}/access`)
+  const payload = await readJson(response)
+  if (!response.ok || payload.ok !== true || !readSubjectMatches(payload, userId)) return null
+  return payload.data as DelegatedUserAccess
+}
+
+async function verifyDelegationAuthorization(): Promise<boolean> {
+  const receipt = authorizationOperation.receipt.value
+  if (!receipt || !delegationCanVerifyAction(receipt.action)) return false
+  const submitted = submittedAuthorization.value
+  let request: AdminAuthorizationRequest | null
+  if (submitted) {
+    if (submitted.targetUserId !== receipt.targetUserId) return false
+    if (!delegationCanVerifyAction(submitted.action) || submitted.action.kind !== receipt.action.kind) return false
+    if (
+      (receipt.action.kind === 'role.assign' || receipt.action.kind === 'role.revoke')
+      && (submitted.action.kind === 'role.assign' || submitted.action.kind === 'role.revoke')
+      && receipt.action.roleId !== submitted.action.roleId
+    ) return false
+    request = submitted
+  } else {
+    request = requestForReceiptReadback(receipt)
+  }
+  if (!request) return false
+  const actorId = currentPrincipalId()
+  const generation = delegationAccessGeneration
+  const targetUserId = receipt.targetUserId
+  if (!sameDelegationActor(actorId, generation, targetUserId)) return false
+  let access: DelegatedUserAccess | null
+  try {
+    access = await readDelegationAccess(targetUserId)
+  } catch {
+    return false
+  }
+  if (!access || !delegationLiveAgrees(access, request, receipt.impact)) return false
+  if (!sameDelegationActor(actorId, generation, targetUserId)) return false
+  selectedAccess.value = access
+  if (!access.delegableRoles.includes(selectedRevokeRoleId.value)) selectedRevokeRoleId.value = ''
+  return true
+}
+
+async function previewDelegationRequest(request: AdminAuthorizationRequest): Promise<void> {
+  if (!currentPrincipalId()) {
+    setStatus(AUTHORIZATION_PRINCIPAL_MISSING_MESSAGE, 'error')
+    return
+  }
+  authorizationFaultCode = ''
+  authorizationFaultMessage = ''
+  await authorizationOperation.preview(request)
+  await authorizationOperation.whenSettled()
+  if (!pendingConfirmation.value || confirmationPhase.value !== 'review') return
+  if (selectedUserId.value !== request.targetUserId) return
+  const phase = authorizationOperation.phase.value
+  if (phase === 'awaiting_confirmation' || phase === 'previewing') return
+  if (phase === 'forbidden') {
+    setStatus(AUTHORIZATION_FORBIDDEN_MESSAGE, 'error')
+    return
+  }
+  if (authorizationFaultCode === 'LAST_PLATFORM_ADMIN') {
+    setStatus(LAST_PLATFORM_ADMIN_MESSAGE, 'error')
+    return
+  }
+  if (authorizationFaultMessage) {
+    setStatus(authorizationFaultMessage, 'error')
+    return
+  }
+  setStatus(AUTHORIZATION_PREVIEW_FAILED_MESSAGE, 'error')
+}
+
+function beginDelegationPreview(confirmation: DelegationConfirmation): void {
+  const request = requestForConfirmation(confirmation)
+  if (!request) return
+  submittedAuthorization.value = request
+  confirmationReadAgain.value = false
+  void previewDelegationRequest(request)
+}
+
+async function publishVerifiedDelegation(generation: number, targetUserId: string): Promise<void> {
+  const actorId = currentPrincipalId()
+  const initialReceipt = authorizationOperation.receipt.value
+  if (
+    initialReceipt
+    && initialReceipt.targetUserId === targetUserId
+    && !delegationCanVerifyAction(initialReceipt.action)
+  ) {
+    if (!sameDelegationActor(actorId, generation, targetUserId)) return
+    confirmationReadAgain.value = false
+    restoredReadAgain.value = true
+    setStatus(`回执是${delegationActionLabel(initialReceipt.action)}。本页只重新读取角色和插件使用准入，不能确认这个回执。请不要再次提交。`, 'error')
+    return
+  }
+  await authorizationOperation.verify()
+  await authorizationOperation.whenSettled()
+  if (!sameDelegationActor(actorId, generation, targetUserId)) return
+  const receipt = authorizationOperation.receipt.value
+  const request = submittedAuthorization.value
+  const statusRequest = request && request.targetUserId === targetUserId
+    ? request
+    : receipt && receipt.targetUserId === targetUserId
+      ? requestForReceiptReadback(receipt)
+      : null
+  if (!authorizationOperation.verified.value || !receipt || receipt.targetUserId !== targetUserId || !statusRequest) {
+    if (!sameDelegationActor(actorId, generation, targetUserId)) return
+    confirmationReadAgain.value = currentAuthorizationPhase() === 'committed'
+    restoredReadAgain.value = confirmationReadAgain.value && !pendingConfirmation.value
+    setStatus(AUTHORIZATION_NOT_CHECKED_MESSAGE, 'error')
+    return
+  }
+  let scopeChecked = false
+  if (
+    request
+    && request.targetUserId === targetUserId
+    && summary.value?.isPlatformAdmin
+    && (request.action.kind === 'role.assign' || request.action.kind === 'role.revoke')
+  ) {
+    selectedScopeConfig.value = null
+    try {
+      const scopeResult = await loadScopeConfig(targetUserId)
+      if (!delegationReadStillCurrent(generation, targetUserId) || scopeResult.status !== 'ok') return
+      scopeChecked = scopeResult.scope?.user.id === targetUserId
+    } catch (scopeError) {
+      if (!delegationReadStillCurrent(generation, targetUserId)) return
+      selectedScopeConfig.value = null
+      setStatus(scopeError instanceof Error ? scopeError.message : '加载管理员范围失败', 'error')
+      return
+    }
+  }
+  if (!sameDelegationActor(actorId, generation, targetUserId)) return
+  restoredReadAgain.value = false
+  setStatus(delegationVerifiedStatus(receipt, statusRequest, scopeChecked))
+}
+
+async function settleDelegationAuthorization(generation: number, targetUserId: string): Promise<void> {
+  if (!delegationReadStillCurrent(generation, targetUserId)) return
+  const phase = authorizationOperation.phase.value
+  if (phase === 'validation_failed') {
+    if (authorizationFaultCode === 'LAST_PLATFORM_ADMIN') setStatus(LAST_PLATFORM_ADMIN_MESSAGE, 'error')
+    else setStatus(authorizationFaultMessage || ROLE_VERSION_MISMATCH_MESSAGE, 'error')
+    return
+  }
+  if (phase === 'forbidden') {
+    setStatus(authorizationFaultMessage || AUTHORIZATION_FORBIDDEN_MESSAGE, 'error')
+    return
+  }
+  if (phase === 'pending' || phase === 'unverified_no_read') {
+    await authorizationOperation.lookup()
+    await authorizationOperation.whenSettled()
+    if (!delegationReadStillCurrent(generation, targetUserId)) return
+    if (currentAuthorizationPhase() === 'committed') {
+      await publishVerifiedDelegation(generation, targetUserId)
+      return
+    }
+    confirmationReadAgain.value = true
+    setStatus(AUTHORIZATION_PENDING_MESSAGE, 'error')
+    return
+  }
+  if (phase === 'committed') await publishVerifiedDelegation(generation, targetUserId)
+}
+
+async function loadScopeConfig(userId: string): Promise<
+  | { status: 'ok', scope: DelegatedAdminScopeConfig | null }
+  | { status: 'denied' | 'stale' | 'mismatch' }
+> {
+  if (!summary.value?.isPlatformAdmin) return { status: 'ok', scope: null }
   const generation = delegationAccessGeneration
 
   const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(userId)}/scopes`)
   const payload = await readJson(response)
-  if (!delegationReadStillCurrent(generation, userId)) return 'stale'
+  if (!delegationReadStillCurrent(generation, userId)) return { status: 'stale' }
   if (response.status === 403) {
     selectedScopeConfig.value = null
     setStatus('无权查看该成员的管理范围', 'error')
-    return 'denied'
+    return { status: 'denied' }
   }
   if (!response.ok || payload.ok !== true) {
     throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载管理员范围失败'))
   }
-  if (!delegationReadStillCurrent(generation, userId)) return 'stale'
+  if (!delegationReadStillCurrent(generation, userId)) return { status: 'stale' }
   if (!readSubjectMatches(payload, userId)) {
     selectedScopeConfig.value = null
     setStatus('加载管理员范围失败', 'error')
-    return 'mismatch'
+    return { status: 'mismatch' }
   }
 
-  selectedScopeConfig.value = payload.data as DelegatedAdminScopeConfig
-  if (!selectedScopeConfig.value.adminNamespaces.includes(selectedScopeNamespace.value)) {
-    selectedScopeNamespace.value = selectedScopeConfig.value.adminNamespaces[0] || ''
+  const scope = payload.data as DelegatedAdminScopeConfig
+  selectedScopeConfig.value = scope
+  if (!scope.adminNamespaces.includes(selectedScopeNamespace.value)) {
+    selectedScopeNamespace.value = scope.adminNamespaces[0] || ''
   }
-  return 'ok'
+  return { status: 'ok', scope }
 }
 
 /** A revocable role id, named from the assignable catalog when it is there (it may not be). */
@@ -1509,18 +1889,35 @@ function revocableRoleLabel(roleId: string): string {
   return role ? `${roleTitle(role)} (${role.id})` : roleId
 }
 
+function sameOpenConfirmation(kind: DelegationConfirmation['kind'], roleId: string | null, namespace: string | null, enabled: boolean | null): boolean {
+  const pending = pendingConfirmation.value
+  if (!pending || confirmationPhase.value !== 'review') return false
+  return pending.kind === kind
+    && pending.roleId === roleId
+    && pending.namespace === namespace
+    && pendingAdmissionEnabled.value === enabled
+    && pending.targetUserId === selectedUserId.value
+}
+
 function openGrantConfirmation(): void {
   const targetUserId = selectedUserId.value
   const roleId = selectedRoleId.value
   const access = selectedAccess.value
+  if (confirmationPhase.value === 'pending' || busy.value) return
   if (!targetUserId || !roleId || !memberWritesReady.value || !access || access.user.id !== targetUserId) return
+  if (!currentPrincipalId()) {
+    setStatus(AUTHORIZATION_PRINCIPAL_MISSING_MESSAGE, 'error')
+    return
+  }
   if (!roleActionAllowed(roleId, 'assign')) return
   const role = access.roleCatalog.find((candidate) => candidate.id === roleId)
   if (!role) {
     setStatus('角色目录中没有该角色，不能分配', 'error')
     return
   }
+  if (sameOpenConfirmation('grant', role.id, null, null)) return
   const listing = permissionListingFor(role)
+  pendingAdmissionEnabled.value = null
   pendingConfirmation.value = openDelegationConfirmation({
     kind: 'grant',
     targetUserId,
@@ -1532,16 +1929,24 @@ function openGrantConfirmation(): void {
     namespace: null,
     expectedUpdatedAt: readCatalogExpectedUpdatedAt(role),
   })
+  beginDelegationPreview(pendingConfirmation.value)
 }
 
 function openRevokeConfirmation(): void {
   const targetUserId = selectedUserId.value
   const roleId = selectedRevokeRoleId.value
   const access = selectedAccess.value
+  if (confirmationPhase.value === 'pending' || busy.value) return
   if (!targetUserId || !roleId || !memberWritesReady.value || !access || access.user.id !== targetUserId) return
+  if (!currentPrincipalId()) {
+    setStatus(AUTHORIZATION_PRINCIPAL_MISSING_MESSAGE, 'error')
+    return
+  }
   if (!roleActionAllowed(roleId, 'unassign')) return
+  if (sameOpenConfirmation('revoke', roleId, null, null)) return
   const role = access.roleCatalog.find((candidate) => candidate.id === roleId)
   const listing = permissionListingFor(role)
+  pendingAdmissionEnabled.value = null
   pendingConfirmation.value = openDelegationConfirmation({
     kind: 'revoke',
     targetUserId,
@@ -1553,13 +1958,21 @@ function openRevokeConfirmation(): void {
     namespace: null,
     expectedUpdatedAt: null,
   })
+  beginDelegationPreview(pendingConfirmation.value)
 }
 
-function openAdmissionConfirmation(admission: NamespaceAdmission): void {
+function openAdmissionConfirmation(admission: NamespaceAdmission, enabled = true): void {
   const targetUserId = selectedUserId.value
   const access = selectedAccess.value
+  if (confirmationPhase.value === 'pending' || busy.value) return
   if (!targetUserId || !memberWritesReady.value || !access || access.user.id !== targetUserId) return
-  if (!namespaceIsManaged(admission.namespace) || admission.enabled) return
+  if (!currentPrincipalId()) {
+    setStatus(AUTHORIZATION_PRINCIPAL_MISSING_MESSAGE, 'error')
+    return
+  }
+  if (!namespaceIsManaged(admission.namespace) || admission.enabled === enabled) return
+  if (sameOpenConfirmation('admission-enable', null, admission.namespace, enabled)) return
+  pendingAdmissionEnabled.value = enabled
   pendingConfirmation.value = openDelegationConfirmation({
     kind: 'admission-enable',
     targetUserId,
@@ -1571,15 +1984,59 @@ function openAdmissionConfirmation(admission: NamespaceAdmission): void {
     namespace: admission.namespace,
     expectedUpdatedAt: null,
   })
+  beginDelegationPreview(pendingConfirmation.value)
 }
 
 function cancelDelegationConfirmation(): void {
-  if (confirmationPhase.value !== 'pending') pendingConfirmation.value = null
+  if (confirmationPhase.value === 'pending') return
+  pendingConfirmation.value = null
+  confirmationReadAgain.value = false
+  confirmationSubmission.value = null
+}
+
+async function rereadRestoredAuthorization(): Promise<void> {
+  if (busy.value || pendingConfirmation.value) return
+  const generation = delegationAccessGeneration
+  const targetUserId = selectedUserId.value
+  if (!targetUserId) return
+  await authorizationOperation.lookup()
+  await authorizationOperation.whenSettled()
+  if (!delegationReadStillCurrent(generation, targetUserId)) return
+  if (currentAuthorizationPhase() === 'committed') {
+    await publishVerifiedDelegation(generation, targetUserId)
+    return
+  }
+  restoredReadAgain.value = true
+  setStatus(AUTHORIZATION_PENDING_MESSAGE, 'error')
+}
+
+async function rereadDelegationAuthorization(): Promise<void> {
+  const confirmation = pendingConfirmation.value
+  if (!confirmation || confirmationPhase.value !== 'pending' || !confirmationReadAgain.value) return
+  const generation = delegationAccessGeneration
+  const targetUserId = confirmation.targetUserId
+  if (selectedUserId.value !== targetUserId) return
+  if (currentAuthorizationPhase() !== 'committed') {
+    await authorizationOperation.lookup()
+    await authorizationOperation.whenSettled()
+    if (!delegationReadStillCurrent(generation, targetUserId)) return
+  }
+  if (currentAuthorizationPhase() === 'committed') {
+    await publishVerifiedDelegation(generation, targetUserId)
+    if (confirmationSubmission.value?.token === confirmation.token && authorizationOperation.verified.value) {
+      confirmationReadAgain.value = false
+      confirmationSubmission.value = { token: confirmation.token, phase: 'completed' }
+    }
+    return
+  }
+  confirmationReadAgain.value = true
+  setStatus(AUTHORIZATION_PENDING_MESSAGE, 'error')
 }
 
 async function submitDelegationConfirmation(typedText: string): Promise<void> {
   const confirmation = pendingConfirmation.value
   if (!confirmation || confirmationPhase.value !== 'review') return
+  if (currentAuthorizationPhase() !== 'awaiting_confirmation') return
   if (
     confirmation.kind === 'revoke'
     && confirmation.roleId === PLATFORM_ADMIN_ROLE_ID
@@ -1590,8 +2047,13 @@ async function submitDelegationConfirmation(typedText: string): Promise<void> {
     : confirmation.kind === 'revoke'
       ? selectedRevokeRoleId.value
       : null
+  const admission = confirmation.kind === 'admission-enable'
+    ? selectedAccess.value?.namespaceAdmissions.find((item) => item.namespace === confirmation.namespace)
+    : undefined
   const admissionStillPresent = confirmation.kind === 'admission-enable'
-    && selectedAccess.value?.namespaceAdmissions?.some((item) => item.namespace === confirmation.namespace) === true
+    && admission !== undefined
+    && namespaceIsManaged(admission.namespace)
+    && admission.enabled !== pendingAdmissionEnabled.value
   if (!delegationConfirmationStillValid(confirmation, {
     targetUserId: selectedUserId.value,
     roleId: currentRoleId,
@@ -1600,74 +2062,35 @@ async function submitDelegationConfirmation(typedText: string): Promise<void> {
     pendingConfirmation.value = null
     return
   }
-  const admission = confirmation.kind === 'admission-enable'
-    ? selectedAccess.value?.namespaceAdmissions.find((item) => item.namespace === confirmation.namespace)
-    : undefined
-  if (confirmation.kind === 'admission-enable' && (!admission || !namespaceIsManaged(admission.namespace))) return
-  confirmationSubmission.value = { token: confirmation.token, phase: 'pending' }
-  try {
-    if (admission) {
-      await updateNamespaceAdmission(admission, true)
-    } else {
-      await updateRole(confirmation.kind === 'grant' ? 'assign' : 'unassign', confirmation)
-    }
-  } finally {
-    if (confirmationSubmission.value?.token === confirmation.token) {
-      confirmationSubmission.value = { token: confirmation.token, phase: 'completed' }
-    }
+  if (confirmation.kind === 'admission-enable' && !admissionStillPresent) return
+  const request = requestForConfirmation(confirmation)
+  if (!request || request.targetUserId !== selectedUserId.value) {
+    pendingConfirmation.value = null
+    return
   }
-}
-
-async function updateRole(action: 'assign' | 'unassign', confirmation?: DelegationConfirmation | null): Promise<void> {
-  // Assign picks from the assignable catalog, revoke from the server's revocable list.
-  const roleId = confirmation?.roleId || (action === 'assign' ? selectedRoleId.value : selectedRevokeRoleId.value)
-  const targetUserId = selectedUserId.value
   const generation = delegationAccessGeneration
-  if (!targetUserId || !roleId || !memberWritesReady.value) return
-  if (!roleActionAllowed(roleId, action)) return
-  const body: { roleId: string; expectedUpdatedAt?: string } = { roleId }
-  if (action === 'assign' && confirmation?.expectedUpdatedAt) body.expectedUpdatedAt = confirmation.expectedUpdatedAt
+  const targetUserId = confirmation.targetUserId
+  confirmationSubmission.value = { token: confirmation.token, phase: 'pending' }
+  confirmationReadAgain.value = false
+  submittedAuthorization.value = request
+  authorizationFaultCode = ''
+  authorizationFaultMessage = ''
   busy.value = true
   try {
-    const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(targetUserId)}/roles/${action}`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    })
-    const payload = await readJson(response)
+    await authorizationOperation.confirm()
+    await authorizationOperation.whenSettled()
     if (!delegationReadStillCurrent(generation, targetUserId)) return
-    if (response.status === 409 || !response.ok || payload.ok !== true) {
-      // Last-admin and stale catalog version stay refusals. Do not post another body.
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存委派角色失败'))
-    }
-    if (!readSubjectMatches(payload, targetUserId)) {
-      setStatus('保存委派角色失败', 'error')
-      return
-    }
-
-    selectedAccess.value = payload.data as DelegatedUserAccess
-    if (!selectedAccess.value.delegableRoles.includes(selectedRevokeRoleId.value)) {
-      selectedRevokeRoleId.value = ''
-    }
-    if (summary.value?.isPlatformAdmin) {
-      selectedScopeConfig.value = null
-      try {
-        const scopeResult = await loadScopeConfig(targetUserId)
-        // A scope reload that lost the member generation is not a successful role write.
-        if (!delegationReadStillCurrent(generation, targetUserId) || scopeResult !== 'ok') return
-      } catch (scopeError) {
-        if (!delegationReadStillCurrent(generation, targetUserId)) return
-        selectedScopeConfig.value = null
-        setStatus(scopeError instanceof Error ? scopeError.message : '加载管理员范围失败', 'error')
-        return
-      }
-    }
-    if (!delegationReadStillCurrent(generation, targetUserId)) return
-    setStatus(action === 'assign' ? '角色已分配' : '角色已撤销')
-  } catch (error) {
-    if (!delegationReadStillCurrent(generation, targetUserId)) return
-    setStatus(error instanceof Error ? error.message : '保存委派角色失败', 'error')
+    await settleDelegationAuthorization(generation, targetUserId)
   } finally {
     busy.value = false
+    if (confirmationSubmission.value?.token === confirmation.token) {
+      const phase = currentAuthorizationPhase()
+      const unresolved = phase === 'pending'
+        || phase === 'committing'
+        || phase === 'unverified_no_read'
+        || (phase === 'committed' && !authorizationOperation.verified.value)
+      confirmationSubmission.value = { token: confirmation.token, phase: unresolved ? 'pending' : 'completed' }
+    }
   }
 }
 

@@ -20,6 +20,15 @@ vi.mock('../src/utils/api', () => ({
   apiFetch: (...args: unknown[]) => apiFetchMock(...args),
 }))
 
+vi.mock('../src/composables/useAuth', () => ({
+  useAuth: () => ({
+    getCurrentUser: () => {
+      const holder = globalThis as { __permissionPrincipalId?: string }
+      return { id: holder.__permissionPrincipalId ?? 'principal-1' }
+    },
+  }),
+}))
+
 async function flushUi(cycles = 8): Promise<void> {
   for (let index = 0; index < cycles; index += 1) {
     await Promise.resolve()
@@ -405,9 +414,22 @@ describe('PermissionManagementView grant readback', () => {
     app = null
     container = null
     apiFetchMock.mockReset()
+    sessionStorage.removeItem('metasheet.adminAuthorizationOperation.pending.v1')
+    delete (globalThis as { __permissionPrincipalId?: string }).__permissionPrincipalId
   })
 
-  function mountView(): HTMLDivElement {
+  function mountView(pending?: { targetId: string; clientOperationId: string; principalId?: string }): HTMLDivElement {
+    sessionStorage.removeItem('metasheet.adminAuthorizationOperation.pending.v1')
+    if (pending) {
+      sessionStorage.setItem('metasheet.adminAuthorizationOperation.pending.v1', JSON.stringify({
+        formatVersion: 1,
+        entries: [{
+          principalId: pending.principalId ?? 'principal-1',
+          targetId: pending.targetId,
+          clientOperationId: pending.clientOperationId,
+        }],
+      }))
+    }
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(PermissionManagementView)
@@ -435,6 +457,7 @@ describe('PermissionManagementView grant readback', () => {
     skipTemplateDirectWrite?: boolean
     delayTemplateApply?: Promise<void>
     throwOnGrant?: boolean
+    grantStatus?: number
     legacyByUser?: Record<string, string[]>
     templateRoleId?: string | null
     inheritedRolesByUser?: Record<string, unknown>
@@ -442,11 +465,22 @@ describe('PermissionManagementView grant readback', () => {
     legacyRevokeBody?: Record<string, unknown>
     legacyRevokeAck?: 'missing-changed'
     throwOnLegacyRevoke?: boolean
+    settleOnLookup?: boolean
+    unknownImpact?: boolean
+    directByUser?: Record<string, string[]>
+    templateSourceChanged?: boolean
+    seededReceipts?: Record<string, Record<string, unknown>>
     delayCheck?: Promise<void>
     checkStatus?: number
     checkBody?: Record<string, unknown>
     checkDegraded?: boolean
     checkAllowed?: boolean
+    businessChecks?: Array<{
+      status?: number
+      body?: unknown
+      wait?: Promise<void>
+      throwError?: boolean
+    }>
   } = {}) {
     const state: Record<string, {
       direct: string[]
@@ -467,9 +501,25 @@ describe('PermissionManagementView grant readback', () => {
     let invalidJsonNextAccess = false
     let wrongSubjectNextAccess = false
     let legacyEffectiveNextAccess = false
+    const operationReceipts = new Map<string, Record<string, unknown>>()
+    const deferredCommits = new Map<string, Record<string, unknown>>()
     const legacyState: Record<string, string[]> = {}
     for (const [userId, codes] of Object.entries(options.legacyByUser ?? {})) legacyState[userId] = [...codes]
+    for (const [userId, codes] of Object.entries(options.directByUser ?? {})) {
+      const grants = state[userId]
+      if (!grants) continue
+      grants.direct = [...codes]
+      for (const permission of codes) {
+        if (permission.startsWith('crm:')) {
+          if (!grants.blocked.includes(permission)) grants.blocked.push(permission)
+        } else if (!grants.effective.includes(permission)) {
+          grants.effective.push(permission)
+        }
+      }
+    }
     const checkSignals: AbortSignal[] = []
+    const businessQueue = [...(options.businessChecks ?? [])]
+    const businessRawBodies: string[] = []
 
     const userPayload = (userId: string) => {
       const grants = state[userId]
@@ -542,6 +592,176 @@ describe('PermissionManagementView grant readback', () => {
             roleId: null,
           }],
         })
+      }
+      const impactFor = (action: { kind?: string; code?: string; templateId?: string }, changed: boolean) => {
+        if (options.unknownImpact) {
+          return {
+            sourceChanges: [],
+            admissionChanges: [],
+            scopeCleanup: [],
+            effectiveBefore: [],
+            effectiveAfter: [{ code: 'crm:read', sources: [], effective: true }],
+            retainedOtherGrants: [{ code: 'crm:read', sources: [], effective: true }],
+            warnings: [],
+          }
+        }
+        const source = action.kind === 'legacy.revoke'
+          ? 'legacy'
+          : action.kind === 'template.apply'
+            ? 'direct'
+            : 'direct'
+        const operation = action.kind === 'direct.grant' || action.kind === 'template.apply' ? 'assign' : 'revoke'
+        const codes = action.kind === 'template.apply'
+          ? (options.templatePermissions ?? ['workflow:read'])
+          : [String(action.code || '')]
+        const assignChanged = action.kind === 'template.apply' && options.templateSourceChanged === false
+          ? false
+          : changed
+        return {
+          sourceChanges: codes.filter((code) => code.length > 0).map((code) => ({
+            source,
+            id: code,
+            operation,
+            changed: assignChanged,
+          })),
+          admissionChanges: [],
+          scopeCleanup: [],
+          effectiveBefore: [],
+          effectiveAfter: [],
+          retainedOtherGrants: [],
+          warnings: [],
+        }
+      }
+      const rememberReceipt = (body: Record<string, unknown>, impact: Record<string, unknown>) => {
+        const action = body.action as { kind?: string }
+        const receipt = {
+          status: 'committed',
+          clientOperationId: body.clientOperationId,
+          receipt: {
+            targetUserId: body.targetUserId,
+            action,
+            impact,
+            resultVersion: 'perm-result-1',
+          },
+        }
+        operationReceipts.set(String(body.clientOperationId), receipt)
+        return receipt
+      }
+      const armReadback = () => {
+        if (options.degradeReadbackAfterWrite) degradeNextAccess = true
+        if (options.failReadbackAfterWrite) failNextAccess = true
+        if (options.invalidJsonReadbackAfterWrite) invalidJsonNextAccess = true
+        if (options.wrongSubjectReadbackAfterWrite) wrongSubjectNextAccess = true
+        if (options.legacyEffectiveReadbackAfterWrite) legacyEffectiveNextAccess = true
+      }
+      const mutateAction = (body: Record<string, unknown>) => {
+        const action = body.action as { kind?: string; code?: string; templateId?: string }
+        const userId = String(body.targetUserId || '')
+        if (action.kind === 'direct.grant' || action.kind === 'direct.revoke') {
+          const permission = String(action.code || '')
+          const grants = state[userId]
+          if (!grants) return
+          if (action.kind === 'direct.revoke') {
+            grants.direct = grants.direct.filter((code) => code !== permission)
+            grants.blocked = grants.blocked.filter((code) => code !== permission)
+            grants.effective = grants.effective.filter((code) => code !== permission)
+            return
+          }
+          if (!grants.direct.includes(permission)) grants.direct.push(permission)
+          if (permission.startsWith('crm:')) {
+            grants.blocked = Array.from(new Set([...grants.blocked, permission]))
+            grants.effective = grants.effective.filter((code) => code !== permission)
+          } else if (!grants.effective.includes(permission)) {
+            grants.effective.push(permission)
+          }
+          return
+        }
+        if (action.kind === 'template.apply' && !options.skipTemplateDirectWrite) {
+          const grants = state[userId]
+          const templatePermissions = options.templatePermissions ?? ['workflow:read']
+          if (!grants) return
+          for (const permission of templatePermissions) {
+            if (!grants.direct.includes(permission)) grants.direct.push(permission)
+            if (permission.startsWith('crm:')) {
+              if (!grants.blocked.includes(permission)) grants.blocked.push(permission)
+              grants.effective = grants.effective.filter((code) => code !== permission)
+            } else if (!grants.effective.includes(permission)) {
+              grants.effective.push(permission)
+            }
+          }
+          return
+        }
+        if (action.kind === 'legacy.revoke') {
+          const permission = String(action.code || '')
+          const list = legacyState[userId] ?? []
+          legacyState[userId] = list.filter((code) => code !== permission)
+        }
+      }
+      if (method === 'GET' && pathname.startsWith('/api/admin/authorization-operations/')) {
+        const clientOperationId = decodeURIComponent(pathname.slice('/api/admin/authorization-operations/'.length))
+        const seeded = options.seededReceipts?.[clientOperationId]
+        if (seeded) return createJsonResponse(seeded)
+        const deferred = deferredCommits.get(clientOperationId)
+        if (deferred && options.settleOnLookup) {
+          mutateAction(deferred)
+          armReadback()
+          deferredCommits.delete(clientOperationId)
+          return createJsonResponse(rememberReceipt(deferred, impactFor(deferred.action as { kind?: string; code?: string; templateId?: string }, true)))
+        }
+        const saved = operationReceipts.get(clientOperationId)
+        if (!saved) return createJsonResponse({ status: 'unknown_or_pending', clientOperationId })
+        return createJsonResponse(saved)
+      }
+      if ((pathname === '/api/admin/authorization-operations/preview' || pathname === '/api/admin/authorization-operations') && method === 'POST') {
+        const body = typeof init?.body === 'string' ? JSON.parse(init.body) as Record<string, unknown> : {}
+        bodies.push(body)
+        const action = (body.action ?? {}) as { kind?: string; code?: string; templateId?: string }
+        const userId = String(body.targetUserId || '')
+        const committing = pathname === '/api/admin/authorization-operations'
+        if (!committing) {
+          return createJsonResponse({ expectedVersion: 'perm-preview-1', impact: impactFor(action, true) })
+        }
+        if (action.kind === 'direct.grant' && options.throwOnGrant) throw new Error('timeout')
+        if (action.kind === 'direct.grant' && options.delayGrant) await options.delayGrant
+        if (action.kind === 'direct.grant' && options.grantStatus) {
+          return createJsonResponse({ error: 'Permission rejected' }, options.grantStatus)
+        }
+        if (action.kind === 'template.apply' && options.delayTemplateApply) await options.delayTemplateApply
+        if (action.kind === 'legacy.revoke' && options.throwOnLegacyRevoke) throw new Error('network down')
+        if (action.kind === 'legacy.revoke' && options.legacyRevokeStatus) {
+          return createJsonResponse(options.legacyRevokeBody ?? { error: 'Legacy permission conflict' }, options.legacyRevokeStatus)
+        }
+        if (action.kind === 'direct.revoke') {
+          const grants = state[userId]
+          const permission = String(action.code || '')
+          if (!grants?.direct.includes(permission)) {
+            return createJsonResponse({ error: 'Permission not found for user' }, 409)
+          }
+        }
+        if ((action.kind === 'direct.grant' || action.kind === 'direct.revoke') && options.degradedAck) {
+          mutateAction(body)
+          return createJsonResponse({ success: true, degraded: true, userId, permission: action.code })
+        }
+        if (action.kind === 'template.apply' && options.templateAck === 'ok-false') return createJsonResponse({ ok: false })
+        if (action.kind === 'template.apply' && options.templateAck === 'degraded') return createJsonResponse({ ok: true, degraded: true })
+        if (action.kind === 'template.apply' && options.templateAck === 'invalid-json') {
+          return { ok: true, status: 200, json: async () => { throw new Error('bad json') } }
+        }
+        if (action.kind === 'legacy.revoke' && options.legacyRevokeAck === 'missing-changed') {
+          return createJsonResponse({ success: true, userId, permission: action.code })
+        }
+        if (action.kind === 'legacy.revoke') {
+          const list = legacyState[userId] ?? []
+          if (!list.includes(String(action.code || ''))) return createJsonResponse({ error: 'Legacy permission not found' }, 409)
+        }
+        if (committing && options.settleOnLookup) {
+          deferredCommits.set(String(body.clientOperationId), body)
+          return createJsonResponse({ error: 'not ready' }, 500)
+        }
+        const impact = impactFor(action, true)
+        mutateAction(body)
+        armReadback()
+        return createJsonResponse(rememberReceipt(body, impact))
       }
       if (pathname === '/api/admin/permission-templates/apply' && method === 'POST') {
         const body = typeof init?.body === 'string' ? JSON.parse(init.body) as { userId?: string; templateId?: string } : {}
@@ -699,6 +919,18 @@ describe('PermissionManagementView grant readback', () => {
         })
       }
 
+      if (pathname === '/api/permissions/v2/business-check' && method === 'POST') {
+        const raw = typeof init?.body === 'string' ? init.body : ''
+        businessRawBodies.push(raw)
+        const body = raw ? JSON.parse(raw) as Record<string, unknown> : {}
+        bodies.push(body)
+        const scripted = businessQueue.shift()
+        if (scripted?.wait) await scripted.wait
+        if (scripted?.throwError) throw new Error('business check down')
+        if (!scripted) return createJsonResponse({}, 500)
+        return createJsonResponse(scripted.body ?? {}, scripted.status ?? 200)
+      }
+
       if (pathname === '/api/permissions/legacy/revoke' && method === 'POST') {
         const body = typeof init?.body === 'string' ? JSON.parse(init.body) as { userId?: string; permission?: string } : {}
         bodies.push(body)
@@ -731,6 +963,7 @@ describe('PermissionManagementView grant readback', () => {
       stats,
       pendingAccess,
       checkSignals,
+      businessRawBodies,
       releaseOldestAccess() {
         pendingAccess.shift()?.release()
       },
@@ -860,10 +1093,16 @@ describe('PermissionManagementView grant readback', () => {
     await waitForCondition(() => Array.from(root.querySelectorAll('.permission-admin__user strong')).some((node) => (node.textContent || '').includes(name)))
     clickNamedUser(root, name)
     await flushUi()
+    const reason = root.querySelector('[data-testid="permission-operation-reason"]') as HTMLTextAreaElement | null
+    if (reason && reason.value.trim() === '') {
+      reason.value = '核对授权'
+      reason.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushUi()
+    }
   }
 
   async function confirmPermissionMutation(root: ParentNode): Promise<void> {
-    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-mutation-confirm"]')))
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-operation-ready"]')))
     ;(root.querySelector('[data-testid="permission-mutation-confirm"]') as HTMLButtonElement).click()
     await flushUi(2)
   }
@@ -1044,7 +1283,8 @@ describe('PermissionManagementView grant readback', () => {
       expect(root.querySelector('[data-testid="apply-permission-template-button"]')).toBeTruthy()
       await applyNamedTemplate(root)
       await waitForCondition(() => (root.querySelector('.permission-admin__status')?.textContent || '').trim() === statusText)
-      expect(api.calls.filter((call) => call === 'POST /api/admin/permission-templates/apply')).toEqual(['POST /api/admin/permission-templates/apply'])
+      expect(api.calls.filter((call) => call === 'POST /api/admin/authorization-operations')).toEqual(['POST /api/admin/authorization-operations'])
+      expect(api.calls.some((call) => call === 'POST /api/admin/permission-templates/apply')).toBe(false)
       expect(api.calls.filter((call) => call === 'GET /api/permissions/user/user-1').length).toBe(getsBefore + 1)
       expect(api.calls.filter((call) => call === 'GET /api/permissions/user/user-2')).toEqual([])
       expect(api.calls.some((call) => call === 'POST /api/permissions/grant' || call === 'POST /api/permissions/revoke')).toBe(false)
@@ -1142,7 +1382,7 @@ describe('PermissionManagementView grant readback', () => {
     await selectPermission(root, 'crm:read')
     ;(root.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).click()
     await confirmPermissionMutation(root)
-    await waitForCondition(() => api.calls.some((call) => call.includes('POST /api/permissions/grant')))
+    await waitForCondition(() => api.calls.some((call) => call === 'POST /api/admin/authorization-operations'))
 
     clickNamedUser(root, 'Bravo')
     await waitForCondition(() => (root.querySelector('[data-testid="permission-direct-section"]')?.textContent || '').includes('workflow:read'))
@@ -1255,7 +1495,8 @@ describe('PermissionManagementView grant readback', () => {
       expect(root.querySelector('[data-testid="permission-inspection-unavailable"]')).toBeTruthy()
       expect(root.querySelector('[data-testid="permission-inherited-section"]')?.textContent || '').not.toContain('crm:admin')
       expect((root.querySelector('[data-testid="apply-permission-template-button"]') as HTMLButtonElement).disabled).toBe(true)
-      expect(api.calls.some((call) => call.includes('/api/admin/permission-templates/apply'))).toBe(true)
+      expect(api.calls.some((call) => call === 'POST /api/admin/authorization-operations')).toBe(true)
+      expect(api.calls.some((call) => call.includes('/api/admin/permission-templates/apply'))).toBe(false)
       expect(api.stats.userAccessReads).toBe(readsBeforeApply)
       app?.unmount()
       container?.remove()
@@ -1542,7 +1783,8 @@ describe('PermissionManagementView grant readback', () => {
     expect(status).not.toContain('已确认模板')
     expect(status).not.toContain('角色与插件准入未改变')
     expect(root.querySelector('[data-testid="permission-direct-section"]')?.textContent).toContain('暂无直接授予')
-    expect(api.calls.filter((call) => call === 'POST /api/admin/permission-templates/apply')).toHaveLength(1)
+    expect(api.calls.filter((call) => call === 'POST /api/admin/authorization-operations')).toHaveLength(1)
+    expect(api.calls.some((call) => call === 'POST /api/admin/permission-templates/apply')).toBe(false)
   })
 
   it('treats admission-blocked direct grants as a saved direct source without proving the plugin is usable', async () => {
@@ -1568,7 +1810,7 @@ describe('PermissionManagementView grant readback', () => {
     await chooseListedUser(root, 'Alpha')
     await waitForCondition(() => (root.querySelector('[data-testid="permission-inherited-section"]')?.textContent || '').includes('crm:admin'))
     await applyNamedTemplate(root)
-    await waitForCondition(() => api.calls.includes('POST /api/admin/permission-templates/apply'))
+    await waitForCondition(() => api.calls.includes('POST /api/admin/authorization-operations'))
     clickNamedUser(root, 'Bravo')
     await waitForCondition(() => (root.querySelector('[data-testid="permission-direct-section"]')?.textContent || '').includes('workflow:read'))
     const templateSelect = Array.from(root.querySelectorAll('select')).find((select) => select.innerHTML.includes('其他模板')) as HTMLSelectElement
@@ -1576,13 +1818,25 @@ describe('PermissionManagementView grant readback', () => {
     templateSelect.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi()
     release?.()
-    await waitForCondition(() => (root.querySelector('.permission-admin__status')?.textContent || '').includes('未覆盖当前选中用户 user-2'))
+    await waitForCondition(() => (root.querySelector('.permission-admin__status')?.textContent || '').includes('写入结果未确认'))
     const status = root.querySelector('.permission-admin__status')?.textContent || ''
-    expect(status).toContain('现场模板')
+    expect(status).toContain('未覆盖当前选中用户 user-2')
+    expect(status).not.toContain('现场模板')
     expect(status).not.toContain('其他模板')
+    expect(status).not.toContain('已把模板')
+    const submittedTemplate = api.bodies.find((body) => (
+      typeof body.clientOperationId === 'string'
+      && (body.action as { kind?: string } | undefined)?.kind === 'template.apply'
+    )) as { clientOperationId?: string }
+    expect(sessionStorage.getItem('metasheet.adminAuthorizationOperation.pending.v1') || '').toContain(submittedTemplate?.clientOperationId || 'missing-operation')
     expect(root.querySelector('[data-testid="permission-inherited-section"]')?.textContent || '').not.toContain('crm:admin')
-    expect(api.calls.filter((call) => call === 'POST /api/admin/permission-templates/apply')).toHaveLength(1)
-    expect(api.bodies.at(-1)).toMatchObject({ userId: 'user-1', templateId: 'tpl-1' })
+    expect(api.calls.filter((call) => call === 'POST /api/admin/authorization-operations')).toHaveLength(1)
+    expect(api.calls.some((call) => call === 'POST /api/admin/permission-templates/apply')).toBe(false)
+    expect(api.bodies.at(-1)).toMatchObject({
+      targetUserId: 'user-1',
+      action: { kind: 'template.apply', templateId: 'tpl-1' },
+      admissionChanges: [],
+    })
   })
 
   it('offers a read-only refresh after an unconfirmed write and does not replay POST', async () => {
@@ -1625,11 +1879,68 @@ describe('PermissionManagementView grant readback', () => {
     await confirmPermissionMutation(timedRoot)
     await waitForCondition(() => Boolean(timedRoot.querySelector('[data-testid="permission-unconfirmed-refresh"]')))
     const grantPosts = timedOut.calls.filter((call) => call.startsWith('POST'))
-    expect(grantPosts).toEqual(['POST /api/permissions/grant'])
+    expect(grantPosts).toEqual([
+      'POST /api/admin/authorization-operations/preview',
+      'POST /api/admin/authorization-operations',
+    ])
+    expect(timedOut.calls.some((call) => call === 'POST /api/permissions/grant')).toBe(false)
     const grantReadsBefore = timedOut.calls.filter((call) => call === 'GET /api/permissions/user/user-1').length
     ;(timedRoot.querySelector('[data-testid="permission-unconfirmed-refresh"]') as HTMLButtonElement).click()
     await waitForCondition(() => timedOut.calls.filter((call) => call === 'GET /api/permissions/user/user-1').length > grantReadsBefore)
     expect(timedOut.calls.filter((call) => call.startsWith('POST'))).toEqual(grantPosts)
+  })
+
+  it('first GET unknown + healthy snapshot + second GET committed', async () => {
+    const api = createPermissionApi({ settleOnLookup: true })
+    const original = apiFetchMock.getMockImplementation()
+    if (!original) throw new Error('missing fetch mock')
+    let operationGets = 0
+    const operationIds: string[] = []
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = String(input)
+      const method = (init?.method || 'GET').toUpperCase()
+      if (method === 'GET' && url.includes('/api/admin/authorization-operations/')) {
+        const clientOperationId = decodeURIComponent(new URL(url, 'http://localhost').pathname.split('/').pop() || '')
+        operationIds.push(clientOperationId)
+        operationGets += 1
+        if (operationGets === 1) {
+          return createJsonResponse({ status: 'unknown_or_pending', clientOperationId })
+        }
+      }
+      return original(input, init)
+    })
+    const root = mountView()
+    await chooseListedUser(root, 'Alpha')
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-select"]')))
+    await selectPermission(root, 'crm:read')
+    ;(root.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).click()
+    await confirmPermissionMutation(root)
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-unconfirmed-refresh"]')))
+    const posts = api.calls.filter((call) => call.startsWith('POST'))
+    expect(posts.filter((call) => call === 'POST /api/admin/authorization-operations')).toHaveLength(1)
+    expect(api.calls.some((call) => call === 'POST /api/permissions/grant')).toBe(false)
+
+    ;(root.querySelector('[data-testid="permission-unconfirmed-refresh"]') as HTMLButtonElement).click()
+    await waitForCondition(() => operationGets === 1)
+    await flushUi()
+    expect(root.querySelector('[data-testid="permission-unconfirmed-refresh"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="permission-direct-section"]')?.textContent || '').not.toContain('crm:read')
+    expect(root.textContent).not.toContain('已写入')
+    expect(api.state['user-1'].direct).not.toContain('crm:read')
+    expect(api.calls.filter((call) => call.startsWith('POST'))).toEqual(posts)
+
+    ;(root.querySelector('[data-testid="permission-unconfirmed-refresh"]') as HTMLButtonElement).click()
+    await waitForCondition(() => (root.querySelector('[data-testid="permission-direct-section"]')?.textContent || '').includes('crm:read'))
+    const feedback = root.querySelector('[data-testid="permission-action-feedback"]')?.textContent || ''
+    expect(feedback).toContain('直接授予')
+    expect(feedback).toContain('crm:read')
+    expect(operationGets).toBe(2)
+    expect(operationIds).toEqual([operationIds[0], operationIds[0]])
+    expect(root.querySelector('[data-testid="permission-unconfirmed-refresh"]')).toBeNull()
+    expect(api.state['user-1'].direct).toEqual(['crm:read'])
+    expect(api.calls.filter((call) => call === 'POST /api/admin/authorization-operations')).toHaveLength(1)
+    expect(api.calls.some((call) => call === 'POST /api/permissions/grant')).toBe(false)
+    expect(api.calls.filter((call) => call.startsWith('POST'))).toEqual(posts)
   })
 
   it('does not warn when the permission page is mounted without a router', async () => {
@@ -2088,15 +2399,16 @@ describe('PermissionManagementView grant readback', () => {
     expect(summary).toContain('准入不会改变')
     ;(root.querySelector('[data-testid="permission-mutation-cancel"]') as HTMLButtonElement).click()
     await flushUi()
-    expect(api.calls.some((call) => call.startsWith('POST'))).toBe(false)
+    expect(api.calls.filter((call) => call === 'POST /api/admin/authorization-operations')).toEqual([])
+    expect(api.calls.some((call) => call === 'POST /api/permissions/grant' || call === 'POST /api/permissions/revoke')).toBe(false)
     expect(root.querySelector('[data-testid="permission-mutation-dialog"]')).toBeNull()
 
     ;(root.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).click()
     clickNamedUser(root, 'Bravo')
     await waitForCondition(() => (root.querySelector('[data-testid="permission-direct-section"]')?.textContent || '').includes('workflow:read'))
-    await confirmPermissionMutation(root)
-    await waitForCondition(() => api.calls.some((call) => call === 'POST /api/permissions/grant'))
-    expect(api.bodies.at(-1)).toEqual({ userId: 'user-1', permission: 'crm:read' })
+    expect(root.querySelector('[data-testid="permission-operation-ready"]')).toBeNull()
+    expect(api.calls.filter((call) => call === 'POST /api/admin/authorization-operations')).toEqual([])
+    expect(api.state['user-1'].direct).not.toContain('crm:read')
     expect(root.querySelector('[data-testid="permission-direct-section"]')?.textContent || '').not.toContain('crm:read')
 
     const templateSelect = Array.from(root.querySelectorAll('select')).find((select) => select.innerHTML.includes('现场模板')) as HTMLSelectElement
@@ -2113,8 +2425,8 @@ describe('PermissionManagementView grant readback', () => {
     templateSelect.value = 'tpl-2'
     templateSelect.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi()
-    ;(root.querySelector('[data-testid="permission-mutation-cancel"]') as HTMLButtonElement).click()
-    await flushUi()
+    expect(root.querySelector('[data-testid="permission-operation-ready"]')).toBeNull()
+    expect(api.calls.filter((call) => call === 'POST /api/admin/authorization-operations')).toEqual([])
     expect(api.calls.some((call) => call === 'POST /api/admin/permission-templates/apply')).toBe(false)
   })
 
@@ -2147,7 +2459,8 @@ describe('PermissionManagementView grant readback', () => {
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     await flushUi()
     expect(root.querySelector('[data-testid="permission-mutation-dialog"]')).toBeNull()
-    expect(api.calls.some((call) => call.startsWith('POST'))).toBe(false)
+    expect(api.calls.filter((call) => call === 'POST /api/admin/authorization-operations')).toEqual([])
+    expect(api.calls.some((call) => call === 'POST /api/permissions/grant')).toBe(false)
     expect(document.activeElement).toBe(grant)
   })
 
@@ -2219,7 +2532,11 @@ describe('PermissionManagementView grant readback', () => {
     expect(feedback).not.toContain('已彻底撤销')
     expect(feedback).not.toContain('users.permissions')
     expect(feedback).not.toContain('changed:true')
-    expect(api.bodies.at(-1)).toEqual({ userId: 'user-1', permission: 'crm:read' })
+    expect(api.bodies.at(-1)).toMatchObject({
+      targetUserId: 'user-1',
+      action: { kind: 'legacy.revoke', code: 'crm:read' },
+      admissionChanges: [],
+    })
     expect(api.calls.some((call) => call.includes('/api/admin/users') && call.startsWith('POST'))).toBe(false)
     expect(root.querySelector('[data-testid="permission-legacy-section"]')?.textContent || '').not.toContain('crm:read')
     expect(root.querySelector('[data-testid="permission-direct-section"]')?.textContent).toContain('crm:read')
@@ -2254,7 +2571,8 @@ describe('PermissionManagementView grant readback', () => {
     await waitForCondition(() => (failedRoot.querySelector('[data-testid="permission-action-feedback"]')?.textContent || '').includes('409'))
     expect(failedRoot.querySelector('[data-testid="permission-action-feedback"]')?.textContent).toContain('没有清除')
     expect(failedRoot.querySelector('[data-testid="permission-legacy-section"]')?.textContent).toContain('crm:read')
-    expect(failed.calls.filter((call) => call === 'POST /api/permissions/legacy/revoke')).toEqual(['POST /api/permissions/legacy/revoke'])
+    expect(failed.calls.filter((call) => call === 'POST /api/admin/authorization-operations')).toEqual(['POST /api/admin/authorization-operations'])
+    expect(failed.calls.some((call) => call === 'POST /api/permissions/legacy/revoke')).toBe(false)
     app?.unmount()
     container?.remove()
     app = null
@@ -2291,7 +2609,11 @@ describe('PermissionManagementView grant readback', () => {
     expect(serverRoot.querySelector('[data-testid="permission-legacy-section"]')?.textContent).toContain('未读')
     expect(serverRoot.querySelector('[data-testid="permission-unconfirmed-refresh"]')).not.toBeNull()
     const serverPosts = serverError.calls.filter((call) => call.startsWith('POST'))
-    expect(serverPosts).toEqual(['POST /api/permissions/legacy/revoke'])
+    expect(serverPosts).toEqual([
+      'POST /api/admin/authorization-operations/preview',
+      'POST /api/admin/authorization-operations',
+    ])
+    expect(serverError.calls.some((call) => call === 'POST /api/permissions/legacy/revoke')).toBe(false)
     ;(serverRoot.querySelector('[data-testid="permission-unconfirmed-refresh"]') as HTMLButtonElement).click()
     await flushUi()
     expect(serverError.calls.filter((call) => call.startsWith('POST'))).toEqual(serverPosts)
@@ -2312,10 +2634,326 @@ describe('PermissionManagementView grant readback', () => {
     expect(droppedRoot.querySelector('[data-testid="permission-action-feedback"]')?.textContent || '').not.toContain('没有清除')
     expect(droppedRoot.querySelector('[data-testid="permission-unconfirmed-refresh"]')).not.toBeNull()
     const droppedPosts = dropped.calls.filter((call) => call.startsWith('POST'))
-    expect(droppedPosts).toEqual(['POST /api/permissions/legacy/revoke'])
+    expect(droppedPosts).toEqual([
+      'POST /api/admin/authorization-operations/preview',
+      'POST /api/admin/authorization-operations',
+    ])
+    expect(dropped.calls.some((call) => call === 'POST /api/permissions/legacy/revoke')).toBe(false)
     ;(droppedRoot.querySelector('[data-testid="permission-unconfirmed-refresh"]') as HTMLButtonElement).click()
     await flushUi()
     expect(dropped.calls.filter((call) => call.startsWith('POST'))).toEqual(droppedPosts)
+  })
+
+  it('rejects a late permission for the previous member without a success or a cleared marker', async () => {
+    let releaseGrant: (() => void) | undefined
+    const delayGrant = new Promise<void>((resolve) => { releaseGrant = resolve })
+    const api = createPermissionApi({ delayGrant, grantStatus: 409 })
+    const root = mountView()
+    await chooseListedUser(root, 'Alpha')
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-select"]')))
+    await selectPermission(root, 'crm:read')
+    ;(root.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).click()
+    await confirmPermissionMutation(root)
+    await waitForCondition(() => api.calls.includes('POST /api/admin/authorization-operations'))
+    const submitted = api.bodies.find((body) => typeof body.clientOperationId === 'string') as { clientOperationId?: string; reason?: string }
+    clickNamedUser(root, 'Bravo')
+    await waitForCondition(() => (root.querySelector('[data-testid="permission-direct-section"]')?.textContent || '').includes('workflow:read'))
+    releaseGrant?.()
+    await waitForCondition(() => (root.querySelector('[data-testid="permission-action-feedback"]')?.textContent || '').includes('写入结果未确认'))
+    const feedback = root.querySelector('[data-testid="permission-action-feedback"]')?.textContent || ''
+    expect(feedback).toContain('未覆盖当前选中用户 user-2')
+    expect(feedback).not.toContain('已写入')
+    expect(feedback).not.toContain('已完成')
+    expect(feedback).not.toContain('直接授予 crm:read')
+    expect(root.querySelector('[data-testid="permission-direct-section"]')?.textContent || '').not.toContain('crm:read')
+    expect(api.state['user-1'].direct).not.toContain('crm:read')
+    expect(api.state['user-2'].direct).not.toContain('crm:read')
+    expect(sessionStorage.getItem('metasheet.adminAuthorizationOperation.pending.v1') || '').toContain(submitted?.clientOperationId || 'missing-operation')
+    expect(sessionStorage.getItem('metasheet.adminAuthorizationOperation.pending.v1') || '').not.toContain(submitted?.reason || '核对授权')
+    expect(api.calls.filter((call) => call === 'POST /api/admin/authorization-operations')).toHaveLength(1)
+    expect(api.calls.some((call) => call === 'POST /api/permissions/grant')).toBe(false)
+  })
+
+  it('previews four authorization actions once, rejects an overlong reason, and confirms without the old endpoints', async () => {
+    let releaseGrant: (() => void) | undefined
+    const delayGrant = new Promise<void>((resolve) => { releaseGrant = resolve })
+    const api = createPermissionApi({ withTemplate: true, legacyByUser: { 'user-1': ['crm:read'] }, delayGrant })
+    const root = mountView()
+    await chooseListedUser(root, 'Alpha')
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-select"]')))
+    const reason = root.querySelector('[data-testid="permission-operation-reason"]') as HTMLTextAreaElement
+    reason.value = ''
+    reason.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    await selectPermission(root, 'crm:read')
+    ;(root.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="permission-mutation-dialog"]')).toBeNull()
+    expect(root.textContent).toContain('需要填写原因')
+    expect(api.calls.some((call) => call.startsWith('POST'))).toBe(false)
+
+    const emoji = '\u{1F600}'
+    const overlongReason = `${'超'}${emoji.repeat(255)}`
+    reason.value = `  ${overlongReason}`
+    reason.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    expect(root.querySelector('[data-testid="permission-operation-reason-label"]')?.textContent || '').toContain('255')
+    ;(root.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="permission-mutation-dialog"]')).toBeNull()
+    expect(root.textContent).toContain('原因超过 255 个字符，没有提交预览。')
+    expect(api.calls.some((call) => call.startsWith('POST'))).toBe(false)
+    expect(sessionStorage.getItem('metasheet.adminAuthorizationOperation.pending.v1') || '').not.toContain('超')
+
+    const acceptedReason = `${'秘'}${emoji.repeat(254)}`
+    expect(Array.from(acceptedReason)).toHaveLength(255)
+    expect(acceptedReason).not.toHaveLength(255)
+    reason.value = `  ${acceptedReason}`
+    reason.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(root.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).click()
+    await confirmPermissionMutation(root)
+    await waitForCondition(() => api.calls.includes('POST /api/admin/authorization-operations'))
+    const grantBody = api.bodies.at(-1) as { reason?: string; action?: { kind?: string } }
+    expect(grantBody.action?.kind).toBe('direct.grant')
+    expect(grantBody.reason).toBe(acceptedReason)
+    expect(Array.from(grantBody.reason ?? '')).toHaveLength(255)
+    const stored = sessionStorage.getItem('metasheet.adminAuthorizationOperation.pending.v1') || ''
+    expect(stored).not.toContain('秘')
+    expect(stored).not.toContain('超')
+    expect(stored).not.toContain(grantBody.reason || 'missing-reason')
+    releaseGrant?.()
+    await waitForCondition(() => (root.querySelector('[data-testid="permission-action-feedback"]')?.textContent || '').includes('已写入'))
+    expect(api.calls.filter((call) => call === 'POST /api/admin/authorization-operations')).toHaveLength(1)
+    expect(api.calls.some((call) => (
+      call === 'POST /api/permissions/grant'
+      || call === 'POST /api/permissions/revoke'
+      || call === 'POST /api/permissions/legacy/revoke'
+      || call === 'POST /api/admin/permission-templates/apply'
+    ))).toBe(false)
+
+    reason.value = ''
+    reason.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(root.querySelector('[data-testid="revoke-permission-button"]') as HTMLButtonElement).click()
+    await confirmPermissionMutation(root)
+    await waitForCondition(() => (root.querySelector('[data-testid="permission-action-feedback"]')?.textContent || '').includes('已回收'))
+    expect(api.bodies.filter((body) => (
+      typeof body.clientOperationId === 'string'
+      && (body.action as { kind?: string } | undefined)?.kind === 'direct.revoke'
+    ))).toHaveLength(1)
+
+    ;(root.querySelector('[data-testid="permission-legacy-clear-crm:read"]') as HTMLButtonElement).click()
+    await confirmPermissionMutation(root)
+    await waitForCondition(() => (root.querySelector('[data-testid="permission-action-feedback"]')?.textContent || '').includes('历史授权'))
+    expect(api.bodies.filter((body) => (
+      typeof body.clientOperationId === 'string'
+      && (body.action as { kind?: string } | undefined)?.kind === 'legacy.revoke'
+    ))).toHaveLength(1)
+
+    const templateSelect = Array.from(root.querySelectorAll('select')).find((select) => select.innerHTML.includes('现场模板')) as HTMLSelectElement
+    templateSelect.value = 'tpl-1'
+    templateSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    reason.value = '模板原因'
+    reason.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(root.querySelector('[data-testid="apply-permission-template-button"]') as HTMLButtonElement).click()
+    await waitForCondition(() => (root.querySelector('[data-testid="permission-mutation-summary"]')?.textContent || '').includes('参考角色（不会分配）'))
+    expect(root.querySelector('[data-testid="permission-mutation-summary"]')?.textContent).toContain('角色不会改变')
+    expect(root.querySelector('[data-testid="permission-mutation-summary"]')?.textContent).not.toContain('已撤销权限')
+    await confirmPermissionMutation(root)
+    await waitForCondition(() => (root.querySelector('.permission-admin__status')?.textContent || '').includes('现场模板'))
+    expect(api.bodies.filter((body) => (
+      typeof body.clientOperationId === 'string'
+      && (body.action as { kind?: string } | undefined)?.kind === 'template.apply'
+    ))).toHaveLength(1)
+    expect(api.calls.filter((call) => call === 'POST /api/admin/authorization-operations')).toHaveLength(4)
+  })
+
+  it('keeps a late preview off the next member and rereads a pending operation with GET', async () => {
+    let releasePreview: (() => void) | undefined
+    const holdPreview = new Promise<void>((resolve) => { releasePreview = resolve })
+    const late = createPermissionApi()
+    const original = apiFetchMock.getMockImplementation()
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/authorization-operations/preview')) await holdPreview
+      if (!original) throw new Error('missing fetch mock')
+      return original(input, init)
+    })
+    const lateRoot = mountView()
+    await chooseListedUser(lateRoot, 'Alpha')
+    await waitForCondition(() => Boolean(lateRoot.querySelector('[data-testid="permission-select"]')))
+    await selectPermission(lateRoot, 'crm:read')
+    ;(lateRoot.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).click()
+    await waitForCondition(() => Boolean(lateRoot.querySelector('[data-testid="permission-mutation-dialog"]')))
+    clickNamedUser(lateRoot, 'Bravo')
+    await waitForCondition(() => (lateRoot.querySelector('[data-testid="permission-direct-section"]')?.textContent || '').includes('workflow:read'))
+    releasePreview?.()
+    await flushUi(6)
+    expect(lateRoot.querySelector('[data-testid="permission-operation-ready"]')).toBeNull()
+    expect(lateRoot.querySelector('[data-testid="permission-direct-section"]')?.textContent || '').not.toContain('crm:read')
+    expect(late.calls.filter((call) => call === 'POST /api/admin/authorization-operations')).toEqual([])
+    app?.unmount()
+    container?.remove()
+    app = null
+    container = null
+    apiFetchMock.mockReset()
+
+    const pending = createPermissionApi({ settleOnLookup: true })
+    const pendingRoot = mountView()
+    await chooseListedUser(pendingRoot, 'Alpha')
+    await waitForCondition(() => Boolean(pendingRoot.querySelector('[data-testid="permission-select"]')))
+    await selectPermission(pendingRoot, 'crm:read')
+    ;(pendingRoot.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).click()
+    await confirmPermissionMutation(pendingRoot)
+    await waitForCondition(() => Boolean(pendingRoot.querySelector('[data-testid="permission-unconfirmed-refresh"]')))
+    const posts = pending.calls.filter((call) => call.startsWith('POST'))
+    expect(posts.filter((call) => call === 'POST /api/admin/authorization-operations')).toHaveLength(1)
+    ;(pendingRoot.querySelector('[data-testid="permission-unconfirmed-refresh"]') as HTMLButtonElement).click()
+    await waitForCondition(() => pending.calls.some((call) => call.startsWith('GET /api/admin/authorization-operations/')))
+    await waitForCondition(() => (pendingRoot.querySelector('[data-testid="permission-action-feedback"]')?.textContent || '').includes('直接授予'))
+    expect(pending.calls.filter((call) => call.startsWith('POST'))).toEqual(posts)
+    expect(pending.state['user-1'].direct).toContain('crm:read')
+  })
+
+  it('shows an unknown source from the preview and ignores a second confirm click', async () => {
+    const api = createPermissionApi({ unknownImpact: true })
+    const root = mountView()
+    await chooseListedUser(root, 'Alpha')
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-select"]')))
+    await selectPermission(root, 'crm:read')
+    ;(root.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).click()
+    await waitForCondition(() => (root.querySelector('[data-testid="permission-mutation-summary"]')?.textContent || '').includes('来源不明'))
+    const summary = root.querySelector('[data-testid="permission-mutation-summary"]')?.textContent || ''
+    expect(summary).toContain('仍保留')
+    expect(summary).not.toContain('已撤销权限')
+    const confirm = root.querySelector('[data-testid="permission-mutation-confirm"]') as HTMLButtonElement
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-operation-ready"]')))
+    confirm.click()
+    confirm.click()
+    await waitForCondition(() => (root.querySelector('[data-testid="permission-action-feedback"]')?.textContent || '').includes('crm:read'))
+    expect(api.calls.filter((call) => call === 'POST /api/admin/authorization-operations')).toHaveLength(1)
+  })
+
+  it('verifies an already held template no-op and lets the next action preview', async () => {
+    const api = createPermissionApi({
+      withTemplate: true,
+      templatePermissions: ['workflow:read'],
+      templateSourceChanged: false,
+      directByUser: { 'user-1': ['workflow:read'] },
+    })
+    const root = mountView()
+    await chooseListedUser(root, 'Alpha')
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="apply-permission-template-button"]')))
+    const templateSelect = Array.from(root.querySelectorAll('select')).find((select) => select.innerHTML.includes('现场模板')) as HTMLSelectElement
+    templateSelect.value = 'tpl-1'
+    templateSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    ;(root.querySelector('[data-testid="apply-permission-template-button"]') as HTMLButtonElement).click()
+    await confirmPermissionMutation(root)
+    await waitForCondition(() => (root.querySelector('.permission-admin__status')?.textContent || '').includes('现场模板'))
+    const commit = api.bodies.find((body) => (
+      typeof body.clientOperationId === 'string' && (body.action as { kind?: string }).kind === 'template.apply'
+    )) as { clientOperationId?: string; reason?: string }
+    expect(commit?.reason).toBe('核对授权')
+    const stored = sessionStorage.getItem('metasheet.adminAuthorizationOperation.pending.v1') || ''
+    expect(stored).not.toContain(commit?.clientOperationId || 'missing-operation')
+    expect(stored).not.toContain('核对授权')
+    expect(api.calls.filter((call) => call === 'POST /api/admin/authorization-operations')).toHaveLength(1)
+    const previews = api.calls.filter((call) => call === 'POST /api/admin/authorization-operations/preview')
+    await selectPermission(root, 'crm:read')
+    ;(root.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).click()
+    await waitForCondition(() => api.calls.filter((call) => call === 'POST /api/admin/authorization-operations/preview').length === previews.length + 1)
+    expect(api.calls.filter((call) => call === 'POST /api/admin/authorization-operations')).toHaveLength(1)
+    expect(api.calls.some((call) => (
+      call === 'POST /api/permissions/grant'
+      || call === 'POST /api/admin/permission-templates/apply'
+    ))).toBe(false)
+  })
+
+  it('recovers a preseeded template receipt with GET only and leaves a role receipt held', async () => {
+    const templateOperationId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const emptyImpact = {
+      admissionChanges: [],
+      scopeCleanup: [],
+      effectiveBefore: [],
+      effectiveAfter: [],
+      retainedOtherGrants: [],
+      warnings: [],
+    }
+    const templateApi = createPermissionApi({
+      withTemplate: true,
+      templatePermissions: ['workflow:read'],
+      directByUser: { 'user-1': ['workflow:read'] },
+      seededReceipts: {
+        [templateOperationId]: {
+          status: 'committed',
+          clientOperationId: templateOperationId,
+          receipt: {
+            targetUserId: 'user-1',
+            action: { kind: 'template.apply', templateId: 'tpl-1' },
+            impact: {
+              ...emptyImpact,
+              sourceChanges: [{ source: 'direct', id: 'workflow:read', operation: 'assign', changed: false }],
+            },
+            resultVersion: 'perm-result-1',
+          },
+        },
+      },
+    })
+    const templateRoot = mountView({ targetId: 'user-1', clientOperationId: templateOperationId })
+    await chooseListedUser(templateRoot, 'Alpha')
+    await waitForCondition(() => templateApi.calls.includes(`GET /api/admin/authorization-operations/${templateOperationId}`))
+    await waitForCondition(() => (templateRoot.querySelector('.permission-admin__status')?.textContent || '').includes('现场模板'))
+    expect(templateApi.calls.filter((call) => call.startsWith('POST'))).toEqual([])
+    const templateStored = sessionStorage.getItem('metasheet.adminAuthorizationOperation.pending.v1') || ''
+    expect(templateStored).not.toContain(templateOperationId)
+    expect(templateStored).not.toContain('reason')
+    expect(templateRoot.querySelector('[data-testid="permission-operation-recovery"]')).toBeNull()
+    app?.unmount()
+    container?.remove()
+    app = null
+    container = null
+    apiFetchMock.mockReset()
+
+    const roleOperationId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+    const roleApi = createPermissionApi({
+      seededReceipts: {
+        [roleOperationId]: {
+          status: 'committed',
+          clientOperationId: roleOperationId,
+          receipt: {
+            targetUserId: 'user-1',
+            action: { kind: 'role.assign', roleId: 'role-1' },
+            impact: {
+              ...emptyImpact,
+              sourceChanges: [{ source: 'role', id: 'role-1', operation: 'assign', changed: true }],
+            },
+            resultVersion: 'perm-result-1',
+          },
+        },
+      },
+    })
+    const roleRoot = mountView({ targetId: 'user-1', clientOperationId: roleOperationId })
+    await chooseListedUser(roleRoot, 'Alpha')
+    await waitForCondition(() => (roleRoot.querySelector('[data-testid="permission-operation-recovery-status"]')?.textContent || '').includes('角色或准入'))
+    expect(roleApi.calls.filter((call) => call.startsWith('POST'))).toEqual([])
+    expect(roleApi.calls).toContain(`GET /api/admin/authorization-operations/${roleOperationId}`)
+    expect(sessionStorage.getItem('metasheet.adminAuthorizationOperation.pending.v1') || '').toContain(roleOperationId)
+    await waitForCondition(() => Boolean(roleRoot.querySelector('[data-testid="permission-select"]')))
+    await selectPermission(roleRoot, 'crm:read')
+    const postsBefore = roleApi.calls.filter((call) => call.startsWith('POST'))
+    ;(roleRoot.querySelector('[data-testid="grant-permission-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(roleApi.calls.filter((call) => call.startsWith('POST'))).toEqual(postsBefore)
+    expect(sessionStorage.getItem('metasheet.adminAuthorizationOperation.pending.v1') || '').toContain(roleOperationId)
+    ;(roleRoot.querySelector('[data-testid="permission-operation-recovery-reread"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(roleApi.calls.filter((call) => call === `GET /api/admin/authorization-operations/${roleOperationId}`).length).toBeGreaterThan(1)
+    expect(roleApi.calls.filter((call) => call.startsWith('POST'))).toEqual([])
+    expect(sessionStorage.getItem('metasheet.adminAuthorizationOperation.pending.v1') || '').toContain(roleOperationId)
   })
 
   it('drops the checker result after a mutation, a refresh, and unmount', async () => {
@@ -2377,6 +3015,350 @@ describe('PermissionManagementView grant readback', () => {
     expect(note).not.toContain('数据表编号')
     expect(note).not.toContain('全局对象')
     expect(link.getAttribute('href')).not.toMatch(/sheet|tableId|recordId/i)
+  })
+
+  function businessPayload(
+    policyId: string,
+    result: 'allow' | 'deny' | 'unknown',
+    layer: 'business_guard' | 'resource_visibility' | 'resource_context' = 'business_guard',
+  ) {
+    return {
+      policyId,
+      result,
+      layers: [{ layer, result }],
+      evaluatedAt: '2026-11-17T00:00:00.000Z',
+      semantics: 'guard_snapshot',
+    }
+  }
+
+  async function openBusinessCheck(root: HTMLElement): Promise<void> {
+    await chooseListedUser(root, 'Alpha')
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-check-mode-business"]')))
+    ;(root.querySelector('[data-testid="permission-check-mode-business"]') as HTMLButtonElement).click()
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-business-policy"]')))
+  }
+
+  async function chooseBusinessPolicy(root: HTMLElement, policyId: string): Promise<void> {
+    const select = root.querySelector('[data-testid="permission-business-policy"]') as HTMLSelectElement
+    select.value = policyId
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+  }
+
+  async function fillBusinessField(root: HTMLElement, field: string, value: string): Promise<void> {
+    const input = root.querySelector(`[data-testid="permission-business-${field}"]`) as HTMLInputElement
+    input.value = value
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+  }
+
+  it('names the permission-code precheck and does not call the business check before a choice', async () => {
+    const api = createPermissionApi()
+    const root = mountView()
+    await chooseListedUser(root, 'Alpha')
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-checker-run"]')))
+    expect(root.querySelector('#permission-checker-title')?.textContent).toBe('权限码预检')
+    expect(root.querySelector('[data-testid="permission-code-precheck-note"]')?.textContent).toContain('没有业务上下文')
+    expect(root.querySelector('[data-testid="permission-checker-scope"]')?.textContent).toContain('这一项权限码')
+    expect(root.querySelector('[data-testid="permission-business-checker"]')).toBeNull()
+    expect(api.calls.some((call) => call === 'POST /api/permissions/v2/business-check')).toBe(false)
+    expect(api.calls.some((call) => call === 'POST /api/permissions/check')).toBe(false)
+  })
+
+  it('posts the registered business and resource bodies for the selected member', async () => {
+    const resourceIds = {
+      baseId: ' base_1 ',
+      sheetId: 'sheet.1',
+      viewId: 'view:1',
+      recordId: 'record-1',
+      fieldId: 'field_1',
+    }
+    const cases: Array<{ policyId: string; fields: string[]; body: Record<string, unknown>; text: string }> = [
+      {
+        policyId: 'attendance.decision-trace',
+        fields: [],
+        text: '不保证业务动作成功',
+        body: {
+          subject: { kind: 'target', userId: 'user-1' },
+          policyId: 'attendance.decision-trace',
+          mode: 'single',
+          permissions: ['attendance:read'],
+        },
+      },
+      {
+        policyId: 'approval-templates.list',
+        fields: [],
+        text: '不保证业务动作成功',
+        body: {
+          subject: { kind: 'target', userId: 'user-1' },
+          policyId: 'approval-templates.list',
+          mode: 'single',
+          permissions: ['approvals:read'],
+        },
+      },
+      {
+        policyId: 'approval-templates.directory.roles',
+        fields: [],
+        text: '不保证业务动作成功',
+        body: {
+          subject: { kind: 'target', userId: 'user-1' },
+          policyId: 'approval-templates.directory.roles',
+          mode: 'any',
+          permissions: ['approval-templates:manage', 'approvals:admin-templates'],
+        },
+      },
+      {
+        policyId: 'multitable.context.sheet',
+        fields: ['baseId', 'sheetId'],
+        text: '通过此权限检查',
+        body: {
+          subject: { kind: 'target', userId: 'user-1' },
+          policyId: 'multitable.context.sheet',
+          resource: { kind: 'sheet', baseId: 'base_1', sheetId: 'sheet.1' },
+        },
+      },
+      {
+        policyId: 'multitable.context.view-access',
+        fields: ['baseId', 'sheetId', 'viewId'],
+        text: '上下文返回的配置能力',
+        body: {
+          subject: { kind: 'target', userId: 'user-1' },
+          policyId: 'multitable.context.view-access',
+          resource: { kind: 'sheet', baseId: 'base_1', sheetId: 'sheet.1', viewId: 'view:1' },
+        },
+      },
+      {
+        policyId: 'multitable.record.read',
+        fields: ['baseId', 'sheetId', 'recordId'],
+        text: '通过此权限检查',
+        body: {
+          subject: { kind: 'target', userId: 'user-1' },
+          policyId: 'multitable.record.read',
+          resource: { kind: 'sheet', baseId: 'base_1', sheetId: 'sheet.1', recordId: 'record-1' },
+        },
+      },
+      {
+        policyId: 'multitable.record.field-read',
+        fields: ['baseId', 'sheetId', 'recordId', 'fieldId'],
+        text: '通过此权限检查',
+        body: {
+          subject: { kind: 'target', userId: 'user-1' },
+          policyId: 'multitable.record.field-read',
+          resource: { kind: 'sheet', baseId: 'base_1', sheetId: 'sheet.1', recordId: 'record-1', fieldId: 'field_1' },
+        },
+      },
+    ]
+    const api = createPermissionApi({
+      businessChecks: cases.map((entry) => ({ body: businessPayload(entry.policyId, 'allow', entry.policyId.startsWith('multitable.') ? 'resource_visibility' : 'business_guard') })),
+    })
+    const root = mountView()
+    await openBusinessCheck(root)
+    for (const entry of cases) {
+      await chooseBusinessPolicy(root, entry.policyId)
+      for (const field of entry.fields) {
+        await fillBusinessField(root, field, resourceIds[field as keyof typeof resourceIds])
+      }
+      const before = api.businessRawBodies.length
+      ;(root.querySelector('[data-testid="permission-business-run"]') as HTMLButtonElement).click()
+      await waitForCondition(() => api.businessRawBodies.length === before + 1 && root.querySelector('[data-testid="permission-business-result"]')?.getAttribute('data-phase') === 'allow')
+      const raw = api.businessRawBodies.at(-1) || ''
+      const parsed = JSON.parse(raw) as Record<string, unknown>
+      expect(parsed).toEqual(entry.body)
+      expect(Object.keys(parsed)).toEqual(Object.keys(entry.body))
+      if ('resource' in entry.body) {
+        expect(Object.keys(parsed.resource as object)).toEqual(Object.keys(entry.body.resource as object))
+        expect(parsed).not.toHaveProperty('mode')
+        expect(parsed).not.toHaveProperty('permissions')
+      } else {
+        expect(Object.keys(parsed.subject as object)).toEqual(['kind', 'userId'])
+        expect((parsed.permissions as string[])).toEqual((entry.body.permissions as string[]))
+      }
+      const detail = root.querySelector('[data-testid="permission-business-result"]')?.textContent || ''
+      expect(detail).toContain('通过此权限检查')
+      expect(detail).toContain(entry.text)
+      if (!entry.policyId.startsWith('multitable.')) expect(detail).toContain('不保证业务动作成功')
+    }
+    expect(api.calls.filter((call) => call === 'POST /api/permissions/check')).toEqual([])
+    expect(root.querySelector('[data-testid="permission-business-checker"]')?.querySelector('a')).toBeNull()
+  })
+
+  it('keeps an unknown, missing, forbidden, unavailable, or malformed business check from the old precheck', async () => {
+    const cases: Array<{ status: number; body: unknown; phase: string; text: string }> = [
+      { status: 200, body: businessPayload('attendance.decision-trace', 'unknown'), phase: 'unknown', text: '无法判定' },
+      { status: 404, body: businessPayload('attendance.decision-trace', 'allow'), phase: 'missing', text: '没有' },
+      { status: 403, body: businessPayload('attendance.decision-trace', 'allow'), phase: 'forbidden', text: '没有权限' },
+      { status: 503, body: { result: 'allow', allowed: true }, phase: 'unavailable', text: '暂时不可用' },
+      { status: 200, body: { policyId: 'attendance.decision-trace', result: 'allow', allowed: true, permissions: ['attendance:read'] }, phase: 'error', text: '无法核对' },
+    ]
+    for (const entry of cases) {
+      const api = createPermissionApi({ businessChecks: [{ status: entry.status, body: entry.body }] })
+      const root = mountView()
+      await openBusinessCheck(root)
+      await chooseBusinessPolicy(root, 'attendance.decision-trace')
+      ;(root.querySelector('[data-testid="permission-business-run"]') as HTMLButtonElement).click()
+      await waitForCondition(() => root.querySelector('[data-testid="permission-business-result"]')?.getAttribute('data-phase') === entry.phase)
+      const detail = root.querySelector('[data-testid="permission-business-result"]')?.textContent || ''
+      expect(detail).toContain(entry.text)
+      expect(detail).toContain('本次没有结论')
+      expect(detail).not.toContain('通过此权限检查')
+      expect(detail).not.toContain('允许')
+      expect(api.calls.filter((call) => call === 'POST /api/permissions/check')).toEqual([])
+      expect(api.calls.filter((call) => call === 'POST /api/permissions/v2/business-check')).toEqual(['POST /api/permissions/v2/business-check'])
+      app?.unmount()
+      container?.remove()
+      app = null
+      container = null
+      apiFetchMock.mockReset()
+    }
+  })
+
+  it('still runs the permission-code precheck after a business check cannot decide', async () => {
+    const api = createPermissionApi({
+      checkAllowed: true,
+      businessChecks: [{ body: businessPayload('approval-templates.list', 'unknown') }],
+    })
+    const root = mountView()
+    await openBusinessCheck(root)
+    await chooseBusinessPolicy(root, 'approval-templates.list')
+    ;(root.querySelector('[data-testid="permission-business-run"]') as HTMLButtonElement).click()
+    await waitForCondition(() => root.querySelector('[data-testid="permission-business-result"]')?.getAttribute('data-phase') === 'unknown')
+    expect(api.calls.filter((call) => call === 'POST /api/permissions/check')).toEqual([])
+    ;(root.querySelector('[data-testid="permission-check-mode-code"]') as HTMLButtonElement).click()
+    await waitForCondition(() => Boolean(root.querySelector('[data-testid="permission-checker-run"]')))
+    await runChecker(root, 'crm:read')
+    await waitForCondition(() => checkerResult(root)?.getAttribute('data-phase') === 'allowed')
+    expect(api.bodies.at(-1)).toEqual({ userId: 'user-1', permission: 'crm:read' })
+    expect(api.calls.filter((call) => call === 'POST /api/permissions/check')).toEqual(['POST /api/permissions/check'])
+    expect(api.calls.filter((call) => call === 'POST /api/permissions/v2/business-check')).toEqual(['POST /api/permissions/v2/business-check'])
+  })
+
+  it('drops a late business result when the selected member changes', async () => {
+    let releaseCheck: (() => void) | undefined
+    const wait = new Promise<void>((resolve) => { releaseCheck = resolve })
+    const api = createPermissionApi({
+      businessChecks: [{ wait, body: businessPayload('attendance.decision-trace', 'allow') }],
+    })
+    const root = mountView()
+    await openBusinessCheck(root)
+    await chooseBusinessPolicy(root, 'attendance.decision-trace')
+    ;(root.querySelector('[data-testid="permission-business-run"]') as HTMLButtonElement).click()
+    await waitForCondition(() => root.querySelector('[data-testid="permission-business-result"]')?.getAttribute('data-phase') === 'pending')
+    clickNamedUser(root, 'Bravo')
+    await waitForCondition(() => (root.querySelector('[data-testid="permission-direct-section"]')?.textContent || '').includes('workflow:read'))
+    expect(root.querySelector('[data-testid="permission-business-result"]')).toBeNull()
+    releaseCheck?.()
+    await flushUi(8)
+    expect(root.querySelector('[data-testid="permission-business-result"]')).toBeNull()
+    expect(root.querySelector('[data-testid="permission-business-checker"]')?.textContent || '').not.toContain('通过此权限检查')
+    expect(api.calls.filter((call) => call === 'POST /api/permissions/v2/business-check')).toEqual(['POST /api/permissions/v2/business-check'])
+    expect(api.calls.filter((call) => call === 'POST /api/permissions/check')).toEqual([])
+  })
+
+  it('drops a late business result when the resource id changes', async () => {
+    let releaseCheck: (() => void) | undefined
+    const wait = new Promise<void>((resolve) => { releaseCheck = resolve })
+    const api = createPermissionApi({
+      businessChecks: [{ wait, body: businessPayload('multitable.context.sheet', 'allow', 'resource_visibility') }],
+    })
+    const root = mountView()
+    await openBusinessCheck(root)
+    await chooseBusinessPolicy(root, 'multitable.context.sheet')
+    await fillBusinessField(root, 'baseId', 'base_1')
+    await fillBusinessField(root, 'sheetId', 'sheet.1')
+    ;(root.querySelector('[data-testid="permission-business-run"]') as HTMLButtonElement).click()
+    await waitForCondition(() => root.querySelector('[data-testid="permission-business-result"]')?.getAttribute('data-phase') === 'pending')
+    await fillBusinessField(root, 'sheetId', 'sheet-2')
+    expect(root.querySelector('[data-testid="permission-business-result"]')).toBeNull()
+    releaseCheck?.()
+    await flushUi(8)
+    expect(root.querySelector('[data-testid="permission-business-result"]')).toBeNull()
+    expect(root.querySelector('[data-testid="permission-business-checker"]')?.textContent || '').not.toContain('通过此权限检查')
+    expect(api.businessRawBodies).toHaveLength(1)
+    expect(JSON.parse(api.businessRawBodies[0])).toEqual({
+      subject: { kind: 'target', userId: 'user-1' },
+      policyId: 'multitable.context.sheet',
+      resource: { kind: 'sheet', baseId: 'base_1', sheetId: 'sheet.1' },
+    })
+    expect(api.calls.filter((call) => call === 'POST /api/permissions/check')).toEqual([])
+  })
+
+  it('drops the first business result when the same check is retried', async () => {
+    let releaseFirst: (() => void) | undefined
+    let releaseSecond: (() => void) | undefined
+    const first = new Promise<void>((resolve) => { releaseFirst = resolve })
+    const second = new Promise<void>((resolve) => { releaseSecond = resolve })
+    const api = createPermissionApi({
+      businessChecks: [
+        { wait: first, body: businessPayload('attendance.decision-trace', 'allow') },
+        { wait: second, body: businessPayload('attendance.decision-trace', 'deny') },
+      ],
+    })
+    const root = mountView()
+    await openBusinessCheck(root)
+    await chooseBusinessPolicy(root, 'attendance.decision-trace')
+    const button = root.querySelector('[data-testid="permission-business-run"]') as HTMLButtonElement
+    button.click()
+    await waitForCondition(() => root.querySelector('[data-testid="permission-business-result"]')?.getAttribute('data-phase') === 'pending')
+    button.click()
+    await waitForCondition(() => api.businessRawBodies.length === 2)
+    releaseFirst?.()
+    await flushUi(8)
+    expect(root.querySelector('[data-testid="permission-business-result"]')?.textContent || '').not.toContain('通过此权限检查')
+    releaseSecond?.()
+    await waitForCondition(() => root.querySelector('[data-testid="permission-business-result"]')?.getAttribute('data-phase') === 'deny')
+    const detail = root.querySelector('[data-testid="permission-business-result"]')?.textContent || ''
+    expect(detail).toContain('没有通过')
+    expect(detail).not.toContain('通过此权限检查')
+    expect(api.calls.filter((call) => call === 'POST /api/permissions/check')).toEqual([])
+  })
+
+  it('does not submit a resource check until every required id is usable', async () => {
+    const api = createPermissionApi()
+    const root = mountView()
+    await openBusinessCheck(root)
+    await chooseBusinessPolicy(root, 'multitable.record.read')
+    const button = root.querySelector('[data-testid="permission-business-run"]') as HTMLButtonElement
+    expect(button.disabled).toBe(true)
+    expect(root.querySelector('[data-testid="permission-business-id-issue"]')?.textContent).toContain('全部标识')
+    button.click()
+    await flushUi()
+    await fillBusinessField(root, 'baseId', 'base_1')
+    await fillBusinessField(root, 'sheetId', '   ')
+    expect(button.disabled).toBe(true)
+    button.click()
+    await flushUi()
+    await fillBusinessField(root, 'sheetId', 'sheet/1')
+    await fillBusinessField(root, 'recordId', 'record-1')
+    expect(button.disabled).toBe(true)
+    const issue = root.querySelector('[data-testid="permission-business-id-issue"]')?.textContent || ''
+    expect(issue).toContain('不符合格式')
+    expect(issue).not.toContain('sheet/1')
+    expect(root.querySelector('[data-testid="permission-business-checker"]')?.innerHTML || '').not.toMatch(/href=/i)
+    button.click()
+    await flushUi()
+    expect(api.calls.filter((call) => call === 'POST /api/permissions/v2/business-check')).toEqual([])
+    expect(root.querySelector('[data-testid="permission-business-note"]')).toBeNull()
+    await chooseBusinessPolicy(root, 'multitable.context.view-access')
+    expect(root.querySelector('[data-testid="permission-business-note"]')?.textContent).toContain('上下文返回的配置能力')
+    expect(root.querySelector('[data-testid="permission-business-recordId"]')).toBeNull()
+  })
+
+  it('reports a thrown business check as no conclusion and does not call the old precheck', async () => {
+    const api = createPermissionApi({
+      businessChecks: [{ throwError: true }],
+    })
+    const root = mountView()
+    await openBusinessCheck(root)
+    await chooseBusinessPolicy(root, 'attendance.decision-trace')
+    ;(root.querySelector('[data-testid="permission-business-run"]') as HTMLButtonElement).click()
+    await waitForCondition(() => root.querySelector('[data-testid="permission-business-result"]')?.getAttribute('data-phase') === 'error')
+    const detail = root.querySelector('[data-testid="permission-business-result"]')?.textContent || ''
+    expect(detail).toContain('检查失败')
+    expect(detail).toContain('本次没有结论')
+    expect(detail).not.toContain('通过此权限检查')
+    expect(detail).not.toContain('允许')
+    expect(api.calls.filter((call) => call === 'POST /api/permissions/check')).toEqual([])
+    expect(api.calls.filter((call) => call === 'POST /api/permissions/v2/business-check')).toEqual(['POST /api/permissions/v2/business-check'])
   })
 
   it('wires this spec into the required web lane', () => {

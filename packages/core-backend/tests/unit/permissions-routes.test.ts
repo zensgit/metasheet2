@@ -19,9 +19,7 @@ const rbacMocks = vi.hoisted(() => ({
   invalidateUserPerms: vi.fn(),
 }))
 
-const auditMocks = vi.hoisted(() => ({
-  auditLog: vi.fn(),
-}))
+const exceptionMocks = vi.hoisted(() => ({ write: vi.fn() }))
 
 vi.mock('../../src/middleware/auth', () => ({
   authenticate: (req: Request, _res: Response, next: (error?: unknown) => void) => {
@@ -44,8 +42,9 @@ vi.mock('../../src/rbac/service', () => ({
   invalidateUserPerms: rbacMocks.invalidateUserPerms,
 }))
 
-vi.mock('../../src/audit/audit', () => ({
-  auditLog: auditMocks.auditLog,
+vi.mock('../../src/admin/authorization-exception-compat', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/admin/authorization-exception-compat')>()),
+  writeLegacyAuthorizationException: exceptionMocks.write,
 }))
 
 import { permissionsRouter } from '../../src/routes/permissions'
@@ -134,52 +133,43 @@ describe('permissions routes', () => {
     })
     rbacMocks.userHasPermission.mockReset()
     rbacMocks.invalidateUserPerms.mockReset()
-    auditMocks.auditLog.mockReset()
-    auditMocks.auditLog.mockResolvedValue(undefined)
+    exceptionMocks.write.mockReset()
+    exceptionMocks.write.mockResolvedValue({ changed: true, profile: { permissions: ['attendance:read', 'attendance:write'], isAdmin: false } })
   })
 
-  it('grants direct permissions and writes an audit entry', async () => {
-    rbacMocks.isAdmin.mockResolvedValue(true)
-    poolMocks.query
-      .mockResolvedValueOnce({ rows: [{ code: 'attendance:approve' }] })
-      .mockResolvedValueOnce({ rowCount: 1, rows: [] })
-
+  it('sends a direct grant and trimmed reason to the transactional writer', async () => {
     const response = await invokeRoute('post', '/api/permissions/grant', {
-      body: {
-        userId: 'user-1',
-        permission: 'attendance:approve',
-      },
+      body: { userId: 'user-1', permission: 'attendance:approve', reason: '  approved  ' },
     })
-
     expect(response.statusCode).toBe(200)
-    expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledWith('user-1')
-    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
-      action: 'grant',
-      resourceType: 'permission',
-      resourceId: 'user-1:attendance:approve',
-    }))
-    expect(poolMocks.query.mock.calls.map((call) => String(call[0])).join('\n'))
-      .not.toMatch(/user_namespace_admissions/)
+    expect(response.body).toEqual({ success: true, userId: 'user-1', permission: 'attendance:approve' })
+    expect(exceptionMocks.write).toHaveBeenCalledOnce()
+    expect(exceptionMocks.write).toHaveBeenCalledWith({
+      actorId: 'admin-1', userId: 'user-1', action: { kind: 'direct.grant', code: 'attendance:approve' }, reason: 'approved',
+    })
+    expect(poolMocks.query).not.toHaveBeenCalled()
   })
 
-  it('revokes direct permissions and writes an audit entry', async () => {
-    rbacMocks.isAdmin.mockResolvedValue(true)
-    poolMocks.query.mockResolvedValueOnce({ rowCount: 1, rows: [] })
+  it('sends direct and legacy revocations to the transactional writer and preserves not-found responses', async () => {
+    for (const [path, kind] of [['/api/permissions/revoke', 'direct.revoke'], ['/api/permissions/legacy/revoke', 'legacy.revoke']] as const) {
+      exceptionMocks.write.mockClear()
+      const response = await invokeRoute('post', path, { body: { userId: 'user-1', permission: 'attendance:approve' } })
+      expect(response.statusCode).toBe(200)
+      expect(response.body).toEqual({ success: true, userId: 'user-1', permission: 'attendance:approve', ...(kind === 'legacy.revoke' ? { changed: true } : {}) })
+      expect(exceptionMocks.write).toHaveBeenCalledOnce()
+      expect(exceptionMocks.write).toHaveBeenCalledWith({ actorId: 'admin-1', userId: 'user-1', action: { kind, code: 'attendance:approve' }, reason: undefined })
+      exceptionMocks.write.mockResolvedValueOnce({ changed: false, profile: null })
+      const missing = await invokeRoute('post', path, { body: { userId: 'user-1', permission: 'attendance:approve' } })
+      expect(missing.statusCode).toBe(404)
+      expect(missing.body).toEqual({ error: kind === 'legacy.revoke' ? 'Legacy permission not found for user' : 'Permission not found for user' })
+    }
+  })
 
-    const response = await invokeRoute('post', '/api/permissions/revoke', {
-      body: {
-        userId: 'user-1',
-        permission: 'attendance:approve',
-      },
-    })
-
-    expect(response.statusCode).toBe(200)
-    expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledWith('user-1')
-    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
-      action: 'revoke',
-      resourceType: 'permission',
-      resourceId: 'user-1:attendance:approve',
-    }))
+  it('rejects malformed reason before entering the transactional writer', async () => {
+    const response = await invokeRoute('post', '/api/permissions/grant', { body: { userId: 'user-1', permission: 'attendance:read', reason: '   ' } })
+    expect(response.statusCode).toBe(400)
+    expect(response.body).toEqual({ error: 'Reason must contain 1 to 255 characters', code: 'INVALID_REASON' })
+    expect(exceptionMocks.write).not.toHaveBeenCalled()
   })
 
   it('lists permission templates filtered by mode', async () => {
@@ -196,29 +186,17 @@ describe('permissions routes', () => {
     expect(payload.data.every((item: Record<string, unknown>) => item.productMode === 'attendance')).toBe(true)
   })
 
-  it('applies permission template to a user and audits the action', async () => {
-    rbacMocks.isAdmin
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(false)
-    rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read', 'attendance:write'])
-    poolMocks.query.mockResolvedValueOnce({ rowCount: 2, rows: [] })
-
+  it('applies a template through the writer and returns its transaction-bound profile', async () => {
     const response = await invokeRoute('post', '/api/admin/permission-templates/apply', {
-      body: {
-        userId: 'user-1',
-        templateId: 'attendance-employee',
-      },
+      body: { userId: 'user-1', templateId: 'attendance-employee', reason: '  rollout  ' },
     })
-
     expect(response.statusCode).toBe(200)
-    expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledWith('user-1')
-    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
-      action: 'grant',
-      resourceType: 'permission-template',
-      resourceId: 'user-1:attendance-employee',
-    }))
-    expect((response.body as Record<string, any>).template.id).toBe('attendance-employee')
-    expect((response.body as Record<string, any>).permissions).toEqual(['attendance:read', 'attendance:write'])
+    const payload = response.body as { template: { id: string; permissions: string[] }; permissions: string[]; isAdmin: boolean }
+    expect(payload.template.id).toBe('attendance-employee')
+    expect(payload.permissions).toEqual(['attendance:read', 'attendance:write'])
+    expect(payload.isAdmin).toBe(false)
+    expect(exceptionMocks.write).toHaveBeenCalledOnce()
+    expect(exceptionMocks.write).toHaveBeenCalledWith({ actorId: 'admin-1', userId: 'user-1', action: { kind: 'template.apply', templateId: 'attendance-employee', codes: payload.template.permissions }, reason: 'rollout' })
   })
 
   it('lets a platform admin GET another user by userId and returns persisted vs effective breakdown', async () => {
@@ -375,28 +353,10 @@ describe('permissions routes', () => {
     expect(rbacMocks.inspectUserPermissionGrants).not.toHaveBeenCalled()
   })
 
-  it('grants a namespaced code into user_permissions only and never writes namespace admissions', async () => {
-    rbacMocks.isAdmin.mockResolvedValue(true)
-    poolMocks.query
-      .mockResolvedValueOnce({ rows: [{ code: 'crm:read' }] })
-      .mockResolvedValueOnce({ rowCount: 1, rows: [] })
-
-    const response = await invokeRoute('post', '/api/permissions/grant', {
-      body: {
-        userId: 'user-1',
-        permission: 'crm:read',
-      },
-    })
-
+  it('sends a namespaced direct grant without admission changes', async () => {
+    const response = await invokeRoute('post', '/api/permissions/grant', { body: { userId: 'user-1', permission: 'crm:read' } })
     expect(response.statusCode).toBe(200)
-    expect(response.body).toEqual({
-      success: true,
-      userId: 'user-1',
-      permission: 'crm:read',
-    })
-    const sql = poolMocks.query.mock.calls.map((call) => String(call[0]))
-    expect(sql.some((statement) => statement.includes('INSERT INTO user_permissions'))).toBe(true)
-    expect(sql.join('\n')).not.toMatch(/user_namespace_admissions/)
-    expect(sql.join('\n')).not.toMatch(/\bUPDATE\b/i)
+    expect(exceptionMocks.write).toHaveBeenCalledOnce()
+    expect(exceptionMocks.write).toHaveBeenCalledWith({ actorId: 'admin-1', userId: 'user-1', action: { kind: 'direct.grant', code: 'crm:read' }, reason: undefined })
   })
 })
