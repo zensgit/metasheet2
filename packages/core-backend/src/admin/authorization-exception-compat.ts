@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { withAuthorizationInputTransaction } from '../rbac/authorization-input-lock'
 import { invalidateUserPerms, listUserPermissions } from '../rbac/service'
 import { hasLiveRbacAdmin } from '../rbac/strict-principal'
-import { writeAuthorizationException, type AuthorizationExceptionAction } from './authorization-exception-write'
+import { AuthorizationExceptionWriteError, writeAuthorizationException, type AuthorizationExceptionAction } from './authorization-exception-write'
 
 export class LegacyExceptionReasonInvalid extends Error {}
 
@@ -26,23 +26,24 @@ export async function writeLegacyAuthorizationException(input: {
   reason?: string
 }) {
   const { actorId, userId, reason } = input
-  const action = input.action
+  if (!actorId || !userId || actorId !== actorId.trim() || userId !== userId.trim()) throw new AuthorizationExceptionWriteError('INVALID_INPUT')
+  const action = input.action.kind === 'template.apply'
+    ? Object.freeze({ ...input.action, codes: Object.freeze([...input.action.codes]) })
+    : Object.freeze({ ...input.action })
   const revoking = action.kind === 'direct.revoke' || action.kind === 'legacy.revoke'
-  const result = await withAuthorizationInputTransaction({
-    intent: revoking ? 'REVOKE_DIRECT' : 'GRANT_DIRECT',
-    userIds: [userId],
-    admissionUserIds: [userId],
-    witness: { userIds: [actorId], admissionUserIds: [actorId] },
-  }, async (tx) => {
-    const client = { query: tx.query }
-    const witness = action.kind === 'legacy.revoke'
-      ? { expectedLegacy: { value: (await tx.query('SELECT to_jsonb(permissions) AS permissions FROM users WHERE id = $1', [userId])).rows[0]?.permissions } }
-      : { expectedDirectCodes: (await tx.query('SELECT permission_code FROM user_permissions WHERE user_id = $1 ORDER BY permission_code LIMIT 1001', [userId])).rows.map(row => String(row.permission_code)) }
-    const { changedCodes } = await writeAuthorizationException(client, {
-      actorId, userId, actor: tx.locked.get(actorId), target: tx.locked.get(userId),
-      action: action.kind === 'template.apply' ? { kind: 'template.grant', codes: action.codes } : action,
-      ...witness,
-    })
+  const subjects = Object.freeze([...new Set([actorId, userId])].sort())
+  const plan = Object.freeze({
+    intent: revoking ? 'REVOKE_DIRECT' as const : 'GRANT_DIRECT' as const,
+    roleIds: Object.freeze([] as string[]),
+    userIds: subjects,
+    admissionUserIds: subjects,
+    witness: Object.freeze({ userIds: subjects, admissionUserIds: subjects }),
+  })
+  const result = await withAuthorizationInputTransaction(plan, async (tx) => {
+    const { changedCodes } = await writeAuthorizationException(tx, Object.freeze({
+      actorId, userId, plan,
+      action: action.kind === 'template.apply' ? { kind: 'template.grant' as const, codes: action.codes } : action,
+    }))
     const profile = action.kind === 'template.apply' ? {
       permissions: await listUserPermissions(userId, tx.query),
       isAdmin: await hasLiveRbacAdmin(tx.query, userId),
