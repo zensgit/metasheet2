@@ -499,16 +499,22 @@ export async function inspectPermissionCodesByNamespaceAdmission(
   }
 }
 
+type NamespaceAdmissionLockExecutor = { query: (sql: string, params?: unknown[]) => Promise<unknown> }
+
+function namespaceAdmissionLockKey(userId: string): string {
+  return `namespace-admission:${userId}`
+}
+
 /** Serialize bootstrap and admission/revocation writes even when no admission row exists.
  * The caller MUST hold one transaction through the protected read and all dependent writes.
  */
-export async function lockNamespaceAdmissionWrites(
-  executor: { query: (sql: string, params?: unknown[]) => Promise<unknown> },
-  userId: string,
-): Promise<void> {
-  await executor.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
-    `namespace-admission:${userId}`,
-  ])
+export async function lockNamespaceAdmissionWrites(executor: NamespaceAdmissionLockExecutor, userId: string): Promise<void> {
+  await executor.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [namespaceAdmissionLockKey(userId)])
+}
+
+/** Hold the input stable while a transaction writes other resources based on this user's authority. */
+export async function lockNamespaceAdmissionReads(executor: NamespaceAdmissionLockExecutor, userId: string): Promise<void> {
+  await executor.query('SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))', [namespaceAdmissionLockKey(userId)])
 }
 
 /**

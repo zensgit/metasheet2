@@ -8,10 +8,21 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const backend = path.join(root, 'packages/core-backend')
 const names = ['permission_command_fence_test', 'permission_command_test', 'permission_command_compat_test', 'permission_command_list_test']
 const prefix = 'tests/integration/'
+const delegated = 'authorization-operation-delegated.db.test.ts'
+const storedPause = 'honors a stored pause on preview, commit, replay, and receipt reads with the original token'
+const resumedPreview = 'refuses a stale preview after pausing and re-enabling the same audience'
 export const baseline = Object.freeze([
   { file: 'authorization-operation-fence.db.test.ts', min: 26, required: ['rejects a changed body on a known public function', 'holds every attested table in EXCLUSIVE mode and leaves work timeouts active', 'returns retryable busy without waiting when an old writer holds a table'], skipped: [] },
   { file: 'authorization-operation-fullschema.db.test.ts', min: 14, required: ['previews, commits and replays using the real fence and current migrated schema', 'keeps real host HEAD, encoded receipt and ordinary-actor 403 paths read-only across the auth chain'], skipped: ['bounds slow pre-planning reads and never starts a late write', 'returns unknown while COMMIT is pending, then GET observes the late receipt and released locks', 'rolls back injected post-fence write failure on the same client'] },
-  { file: 'authorization-operation-delegated.db.test.ts', min: 12, required: ['does not disclose whole-profile warnings to a delegated actor', 'does not union an A audience with a B admission and rejects platform or delegated admin roles', 'rechecks current audience for stored receipt reads and replay'], skipped: [] },
+  { file: delegated, min: 14, required: ['does not disclose whole-profile warnings to a delegated actor', 'does not union an A audience with a B admission and rejects platform or delegated admin roles', 'rechecks current audience for stored receipt reads and replay', storedPause, resumedPreview], skipped: [] },
+  { file: 'authorization-operation-activation.db.test.ts', min: 6, required: [
+    'saves a group while stopped and requires explicit activation before delegation',
+    'honors a stored stop with the rollout disabled and preserves role admission and scope',
+    'clears the dormant audience on revocation and keeps a fresh appointment stopped',
+    'does not apply an old version after a pause and resume',
+    'rolls back the activation when mandatory audit insertion fails',
+    'rechecks the stopped actor inside a queued legacy role write',
+  ], skipped: [] },
   { file: 'authorization-operation-exception.db.test.ts', min: 8, required: ['requires live RBAC admin before disclosing target existence', 'requires reason for grant and template and rejects a stale template before any writes', 'hides compatibility receipts and does not let a colliding key create a new receipt'], skipped: ['rejects a post-write legacy non-string mutation and rolls back', 'rolls back a direct write and receipt after post-fence audit failure'] },
   { file: 'authorization-operation-exception-compat.db.test.ts', min: 5, required: ['checks live RBAC authority for every compatibility entry and conceals target existence', 'rolls back template codes and receipt on a mandatory audit error'], skipped: [] },
   { file: 'authorization-operation-migration.db.test.ts', min: 2, required: ['rolls the receipt back when mandatory audit insertion fails'], skipped: [] },
@@ -27,7 +38,7 @@ export const unitBaseline = Object.freeze([
   {directory:'unit',file:'authorization-input-consumers.guard.test.ts',min:7,required:['the authorization command write decision is registered as locked'],skipped:[]},
   {directory:'unit',file:'authorization-operation-validation.test.ts',min:27,required:['normalizes only reason and sorts explicitly chosen admissions'],skipped:[]},
   {directory:'unit',file:'authorization-operation-fence.test.ts',min:3,required:['locks the closed table set, qualified and without waiting'],skipped:[]},
-  {directory:'unit',file:'authorization-operation-snapshot.test.ts',min:1,required:['binds the acting principal, complete input, policy classification, feature value and source rows'],skipped:[]},
+  {directory:'unit',file:'authorization-operation-snapshot.test.ts',min:4,required:['binds the acting principal, complete input, policy classification, feature value and source rows','invalidates a preview after a disable and re-enable even if the original configured range is unchanged'],skipped:[]},
   {directory:'unit',file:'authorization-schema-mutation.test.ts',min:4,required:['keeps every production schema-gate call inside the registered provider'],skipped:[]},
   {directory:'unit',file:'role-assignment-boundary.test.ts',min:46,required:['every scoped preset declares the capability it grants through roleId + permissions'],skipped:[]},
 ])
@@ -42,6 +53,9 @@ export const variants = Object.freeze([
   { id:'planning-deadline',file:full,title:'bounds slow pre-planning reads and never starts a late write',env:{PERMISSION_COMMAND_TEST_SLOW_PLAN:'1'} },
   { id:'provenance-down-lock',file:'authorization-operation-provenance-migration.db.test.ts',title:'holds a table lock through the down evidence check and excludes a concurrent insert',config:'vitest.role-provenance.config.ts',env:{PERMISSION_PROVENANCE_TEST_LOCK_RACE:'1'} },
   { id:'late-commit',file:full,title:'returns unknown while COMMIT is pending, then GET observes the late receipt and released locks',env:{PERMISSION_COMMAND_TEST_DELAY_COMMIT:'1'} },
+  { id:'activation-filter-removed',file:delegated,title:storedPause,failure:'expected 200 to be 403',env:{PERMISSION_COMMAND_TEST_MUTATION:'delegated_activation_filter'} },
+  { id:'activation-receipt-gate-removed',file:delegated,title:storedPause,failure:'expected 200 to be 403',env:{PERMISSION_COMMAND_TEST_MUTATION:'delegated_activation_lookup'} },
+  { id:'activation-witness-revision-removed',file:delegated,title:resumedPreview,failure:'expected 200 to be 409',env:{PERMISSION_COMMAND_TEST_MUTATION:'delegated_activation_revision'} },
 ])
 const unsafe = ['PERMISSION_COMMAND_TEST_UNFENCED_FIXTURE','PERMISSION_COMMAND_TEST_MUTATION','PERMISSION_COMMAND_TEST_FAULT','PERMISSION_COMMAND_TEST_DELAY_COMMIT','PERMISSION_COMMAND_TEST_SLOW_PLAN','PERMISSION_PROVENANCE_MUTANT','PERMISSION_PROVENANCE_TEST_LOCK_RACE','MIGRATION_EXCLUDE','MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL']
 export function validateEnvironment(env) {
@@ -81,6 +95,24 @@ export function validateReport(report, expected, selectedTitle) {
   }
   if (results.length !== expected.length) throw new Error(`Unexpected test file count: ${results.length}`)
 }
+
+/** A surviving mutant, skipped assertion, or unrelated failure is not mutation evidence. */
+export function validateMutationReport(report, variant) {
+  const results = report?.testResults
+  if (report?.success !== false || !Array.isArray(results) || results.length !== 1
+      || !String(results[0].name).replaceAll('\\', '/').endsWith(`/${prefix}${variant.file}`)) {
+    throw new Error(`Mutation did not execute the expected suite: ${variant.id}`)
+  }
+  const tests = results[0].assertionResults
+  if (!Array.isArray(tests)) throw new Error(`Mutation assertion report missing: ${variant.id}`)
+  const chosen = tests.filter(test => test.title === variant.title)
+  if (chosen.length !== 1 || chosen[0].status !== 'failed'
+      || tests.some(test => test !== chosen[0] && test.status !== 'skipped')
+      || !Array.isArray(chosen[0].failureMessages)
+      || !chosen[0].failureMessages.some(message => String(message).includes(variant.failure))) {
+    throw new Error(`Mutation did not fail at the exact authorization assertion: ${variant.id}`)
+  }
+}
 export function validateDeadlineReport(unit) {
   const files=unit?.testResults
   if (!unit?.success || !Array.isArray(files) || files.length!==1 || !String(files[0].name).replaceAll('\\','/').endsWith('/tests/unit/authorization-operation-deadline.test.ts')) throw new Error('Deadline unit report missing')
@@ -106,6 +138,11 @@ async function runTests(dir, env, id, expected, variant) {
   } catch (error) {
     // Report only known fixture names and counts. Assertion messages can contain connection data.
     const failedReport = await readFile(report, 'utf8').then(JSON.parse).catch(() => null)
+    if (variant?.failure) {
+      validateMutationReport(failedReport, variant)
+      process.stdout.write(`refuted ${id}\n`)
+      return
+    }
     for (const item of expected) {
       const suite = failedReport?.testResults?.find(result => String(result.name).replaceAll('\\', '/').endsWith(`/tests/integration/${item.file}`))
       if (!suite || suite.status !== 'passed') {
@@ -115,6 +152,7 @@ async function runTests(dir, env, id, expected, variant) {
     }
     throw error
   }
+  if (variant?.failure) throw new Error(`Authorization mutation survived: ${variant.id}`)
   validateReport(JSON.parse(await readFile(report,'utf8')),expected,variant?.title)
   process.stdout.write(`validated ${id}\n`)
 }
@@ -142,7 +180,7 @@ export async function main(env=process.env) {
       finally { await fixture.end() }
     }
   }
-  const clean={...env, DATABASE_URL:urls[1], PERMISSION_COMMAND_FENCE_DATABASE_URL:urls[0],PERMISSION_COMMAND_TEST_DATABASE_URL:urls[1],PERMISSION_COMMAND_COMPAT_DATABASE_URL:urls[2],PERMISSION_ADMISSION_LIST_DATABASE_URL:urls[3],VITEST_MAX_THREADS:'3'}
+  const clean={...env, DATABASE_URL:urls[1], PERMISSION_COMMAND_FENCE_DATABASE_URL:urls[0],PERMISSION_COMMAND_TEST_DATABASE_URL:urls[1],PERMISSION_COMMAND_COMPAT_DATABASE_URL:urls[2],PERMISSION_ADMISSION_LIST_DATABASE_URL:urls[3],VITEST_MAX_THREADS:'3',DELEGATED_SCOPE_ACTIVATION_ENABLED:'false'}
   for (const url of urls) run('pnpm',['--filter','@metasheet/core-backend','db:migrate'],{...clean,DATABASE_URL:url})
   const temp=path.join(root,'tmp','permission-authorization-operation-ci')
   await mkdir(temp,{recursive:true})

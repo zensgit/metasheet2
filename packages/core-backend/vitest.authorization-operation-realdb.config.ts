@@ -32,6 +32,16 @@ export default defineConfig({
         if (!source.includes(anchor)) throw new Error('fixture mutation anchor missing')
         return source.replace(anchor, 'SELECT id::text AS id, NULL AS row_version, updated_at::text AS updated_at FROM roles')
       }
+      if (file.endsWith('/src/admin/authorization-operation-snapshot.ts') && process.env.PERMISSION_COMMAND_TEST_MUTATION === 'delegated_activation_filter') {
+        const anchor = 'excludeDisabledDelegationNamespaces(heldNamespaces, delegationActivations.filter(row => row.admin_user_id === actorId))'
+        if (!source.includes(anchor)) throw new Error('delegation activation filter mutation anchor missing')
+        return source.replace(anchor, 'heldNamespaces')
+      }
+      if (file.endsWith('/src/admin/authorization-operation-snapshot.ts') && process.env.PERMISSION_COMMAND_TEST_MUTATION === 'delegated_activation_revision') {
+        const anchor = 'SELECT admin_user_id, namespace, enabled, revision::text AS revision FROM delegated_role_admin_activation'
+        if (!source.includes(anchor)) throw new Error('delegation activation revision mutation anchor missing')
+        return source.replace(anchor, 'SELECT admin_user_id, namespace, enabled, NULL AS revision FROM delegated_role_admin_activation')
+      }
       if (!file.endsWith('/src/admin/authorization-operation-service.ts')) return null
       let transformed = source
       const mutation=process.env.PERMISSION_COMMAND_TEST_MUTATION
@@ -45,6 +55,7 @@ export default defineConfig({
         delegated_implicit: ['const access=evaluateAuthorizationOperationAccess(snapshot,actorId,input,impact)','const access=evaluateAuthorizationOperationAccess(snapshot,actorId,input,explicitImpact(input))'],
         delegated_receipt: ['const access=evaluateAuthorizationOperationAccess(snapshot,actorId,row.action,row.receipt.impact)',"const access={kind:'platform' as const}"],
         delegated_replay: ['const access=evaluateAuthorizationOperationAccess(snapshot,actorId,checked,impact)',"const access=stored ? {kind:'platform' as const} : evaluateAuthorizationOperationAccess(snapshot,actorId,checked,impact)"],
+        delegated_activation_lookup: ['(await filterEnabledDelegationNamespaces(run, actorId, namespaces)).length', 'namespaces.length'],
         exception_rbac: ["if (isExceptionAction(input.action) && !roles.some(row=>row.role_id==='admin'))",'if (false)'],
         exception_self: ["input.action.kind === 'direct.grant' || input.action.kind === 'template.apply' || ",''],
         exception_catalog: ["if ((input.action.kind==='template.apply' || input.action.kind==='direct.grant') && canonicalOperationValue(snapshot.permissionCatalog.map(row=>row.code))!==canonicalOperationValue(snapshot.requestedCodes))",'if (false)'],

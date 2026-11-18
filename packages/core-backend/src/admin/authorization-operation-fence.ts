@@ -4,7 +4,7 @@ import type { AuthorizationInputQueryable } from '../rbac/authorization-input-br
 /** Closure of command inputs, its writes, and the vetted trigger/FK dependencies. */
 export const AUTHORIZATION_OPERATION_FENCE_TABLES = Object.freeze([
   'authorization_operation_audit', 'authorization_operation_receipts',
-  'delegated_role_admin_member_groups', 'delegated_role_admin_scopes',
+  'delegated_role_admin_activation', 'delegated_role_admin_member_groups', 'delegated_role_admin_scopes',
   'directory_account_departments', 'directory_account_links', 'directory_accounts',
   'directory_departments', 'directory_deprovision_effects', 'directory_deprovision_events',
   'directory_integrations', 'directory_sync_runs', 'permissions', 'platform_member_group_members',
@@ -12,21 +12,21 @@ export const AUTHORIZATION_OPERATION_FENCE_TABLES = Object.freeze([
   'user_permissions', 'user_roles', 'users',
 ] as const)
 
-/** Exact profiles measured with the role provenance migration applied. */
+/** Exact profiles measured with the delegation activation migration applied. */
 // UTF-8 C with the verified Windows checkout function body bytes.
-export const AUTHORIZATION_OPERATION_SCHEMA_PROFILE = 'e3ad72e0abf9065af9282389c809ad91a48bd0c9bda0ffa44742b57a838bd81c'
+export const AUTHORIZATION_OPERATION_SCHEMA_PROFILE = 'eb063ac64c15cc8072093aa37ae546509eebdd3d0d8ee46233096869ab19e0fe'
 const SUPPORTED_SCHEMA_PROFILES = new Set([
   AUTHORIZATION_OPERATION_SCHEMA_PROFILE,
   // PostgreSQL 14, UTF-8 C with LF bodies and trusted public schema CREATE grants.
-  '26982cd64f430ab92142f4557497c3f2a5e58ab0444bebd573b92a278c177cb5',
+  '19ef5b595d055ebd269bf58a4b8cd4312d95d022f4a2dcb9285c55d82346607d',
   // PostgreSQL 15, UTF-8 C with LF bodies.
-  'f4f65fa365644d6395ed89b2f02642182cc2aac99cd9604884c58bee3a4ea6b3',
+  'f29f6b75a23223a5784ea86ad9dac74deeb02ffbe17e89af3dff87ce799f7f02',
   // PostgreSQL 16, UTF-8 C with LF bodies on clean and in-place Windows upgrades.
-  'df64c6b5d2f1d1441bd5ce0fde9c63979123af3009cea573753b3b016f3f0925',
-  // PostgreSQL 16, en_US.utf8/2.41 on the upgrade fixture.
-  '873d5e65b39fe4692b720895cb2f3d2ceb213cd1a73184d92acc74947d1be163',
+  '619f688920f9dfd66bd7a4bb3b4fd093251878409c82e66ef0f56b45c2420740',
+  // PostgreSQL 16, en_US.utf8/2.41 with LF bodies.
+  '1f2b2c96c6854cc87d374bf136f43f1b441a8dc8ed563cdd25a8a8fd0175adb1',
   // PostgreSQL 17, UTF-8 C with LF bodies.
-  '9e59b11c720f84d15ead013b4e0b84858b43fe357c766883b126c2a62b03840c',
+  '052c717a45feea6acd4cf5f2711917f4b1e59eef8d1c31aa3bb82c6c1a3e037f',
 ])
 export class AuthorizationOperationFenceUnavailable extends Error {
   readonly status = 503

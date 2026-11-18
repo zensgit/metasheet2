@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { validateEnvironment, validateDatabaseInfo, validateReport, validateDeadlineReport } from './permission-authorization-operation-realdb.mjs'
+import { validateEnvironment, validateDatabaseInfo, validateReport, validateDeadlineReport, validateMutationReport } from './permission-authorization-operation-realdb.mjs'
 const env={PERMISSION_COMMAND_PG_BASE_URL:'postgres://synthetic:synthetic@127.0.0.1:11111/postgres',DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED:'false',RBAC_BYPASS:'false',RBAC_TOKEN_TRUST:'false'}
 const spec={file:'proof.db.test.ts',min:1,required:['real proof'],skipped:['conditional proof']}
 const report=()=>({success:true,testResults:[{name:'/workspace/packages/core-backend/tests/integration/proof.db.test.ts',assertionResults:[{title:'real proof',status:'passed'},{title:'conditional proof',status:'skipped'}]}]})
@@ -24,6 +24,26 @@ test('conditional run must pass exactly its selected test and must not silently 
   const r=report();r.testResults[0].assertionResults=[{title:'wanted',status:'passed'},{title:'other',status:'skipped'}]
   validateReport(r,[spec],'wanted')
   for(const tests of [[{title:'wanted',status:'skipped'}],[{title:'wanted',status:'skipped'},{title:'other',status:'passed'}],[{title:'wanted',status:'passed'},{title:'other',status:'passed'}],[{title:'wrong',status:'passed'}]]) { const bad=report();bad.testResults[0].assertionResults=tests;assert.throws(()=>validateReport(bad,[spec],'wanted')) }
+})
+
+test('authorization mutants must fail only at the selected HTTP assertion', () => {
+  const variant = { id: 'activation-filter-removed', file: spec.file, title: 'specific denial', failure: 'expected 200 to be 403' }
+  const failed = report()
+  failed.success = false
+  failed.testResults[0].assertionResults[0] = { title: variant.title, status: 'failed', failureMessages: ['AssertionError: expected 200 to be 403'] }
+  validateMutationReport(failed, variant)
+  for (const change of [
+    result => { result.success = true },
+    result => { result.testResults = [] },
+    result => { result.testResults[0].assertionResults[0].status = 'skipped' },
+    result => { result.testResults[0].assertionResults[0].title = 'unrelated denial' },
+    result => { result.testResults[0].assertionResults[0].failureMessages = ['Error: connection unavailable'] },
+    result => { result.testResults[0].assertionResults[1].status = 'failed' },
+  ]) {
+    const changed = structuredClone(failed)
+    change(changed)
+    assert.throws(() => validateMutationReport(changed, variant))
+  }
 })
 
 test('requires a fresh UTF8 C cluster of the explicitly verified PostgreSQL major',()=>{

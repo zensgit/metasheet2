@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { getPermissionTemplate } from '../auth/permission-templates'
 import { isRoleAction } from './authorization-operation-contract'
+import { excludeDisabledDelegationNamespaces, isDelegatedScopeActivationEnabled } from './delegated-scope-activation'
 import { removeMatchingLegacyPermission } from './legacy-permission-revoke'
 import { isUserWithinDelegatedScope } from './authorization-operation-audience'
 import { deriveDelegatedAdminNamespace, deriveGrantNamespaces, derivePermissionNamespace, roleIdMatchesNamespace } from '../rbac/namespace-admission'
@@ -27,6 +28,8 @@ export type OperationSnapshot = {
   admissions: Row[]
   departmentScopes: Row[]
   groupScopes: Row[]
+  delegationActivations: Row[]
+  delegationActivationEnabled: boolean
   delegatedWitness: { namespaces: string[]; audience: Array<{ namespace: string; allowed: boolean }>; scopes: Row[]; groups: Row[]; departments: Row[]; targetLinks: Row[]; targetGroups: Row[] } | null
   exactDepartment: string | null
   policy: { roleNamespaces: Array<{ roleId: string; namespaces: string[] }>; codeNamespaces: Array<{ code: string; namespace: string | null }> }
@@ -56,6 +59,7 @@ export async function readOperationSnapshot(query: OperationQuery, actorId: stri
   const admissions = await bounded(query, 'SELECT namespace, enabled, source, granted_by::text AS granted_by, updated_by::text AS updated_by, updated_at::text AS updated_at FROM user_namespace_admissions WHERE user_id::text = $1 ORDER BY namespace LIMIT 1001', [input.targetUserId])
   const departmentScopes = await bounded(query, 'SELECT id::text AS id, namespace, directory_department_id::text AS directory_department_id, include_children FROM delegated_role_admin_scopes WHERE admin_user_id::text = $1 ORDER BY namespace, id::text LIMIT 1001', [input.targetUserId])
   const groupScopes = await bounded(query, 'SELECT id::text AS id, namespace, group_id::text AS group_id FROM delegated_role_admin_member_groups WHERE admin_user_id::text = $1 ORDER BY namespace, id::text LIMIT 1001', [input.targetUserId])
+  const delegationActivations = await bounded(query, 'SELECT admin_user_id, namespace, enabled, revision::text AS revision FROM delegated_role_admin_activation WHERE admin_user_id = ANY($1::text[]) ORDER BY admin_user_id, namespace LIMIT 1001', [subjectIds])
   const target = users.find(row => row.id === input.targetUserId) ?? null
   const policyCodes = [...new Set([...rolePermissions.map(row => String(row.permission_code ?? '')), ...direct.map(row => String(row.permission_code ?? '')), ...(Array.isArray(target?.permissions) ? target.permissions.filter((item): item is string => typeof item === 'string') : [])].filter(Boolean))].sort()
   const policy = {
@@ -66,7 +70,8 @@ export async function readOperationSnapshot(query: OperationQuery, actorId: stri
   const actorRoles=memberships.filter(row=>row.user_id===actorId).map(row=>String(row.role_id))
   let delegatedWitness: OperationSnapshot['delegatedWitness']=null
   if (actor && actor.role !== 'admin' && !actorRoles.includes('admin')) {
-    const namespaces=[...new Set(actorRoles.map(deriveDelegatedAdminNamespace).filter((value): value is string=>Boolean(value)))].sort()
+    const heldNamespaces = [...new Set(actorRoles.map(deriveDelegatedAdminNamespace).filter((value): value is string => Boolean(value)))].sort()
+    const namespaces = excludeDisabledDelegationNamespaces(heldNamespaces, delegationActivations.filter(row => row.admin_user_id === actorId))
     const scopes=await bounded(query,'SELECT id::text AS id, namespace, directory_department_id::text AS directory_department_id, include_children FROM delegated_role_admin_scopes WHERE admin_user_id::text=$1 ORDER BY id::text LIMIT 1001',[actorId])
     const groups=await bounded(query,'SELECT id::text AS id, namespace, group_id::text AS group_id FROM delegated_role_admin_member_groups WHERE admin_user_id::text=$1 ORDER BY id::text LIMIT 1001',[actorId])
     const departments=await bounded(query, `WITH RECURSIVE relevant AS (
@@ -84,7 +89,21 @@ export async function readOperationSnapshot(query: OperationQuery, actorId: stri
     for (const namespace of namespaces) audience.push({namespace,allowed:await isUserWithinDelegatedScope(actorId,[namespace],input.targetUserId,query)})
     delegatedWitness={namespaces,audience,scopes,groups,departments,targetLinks,targetGroups}
   }
-  return { actor, target, memberships, roles, rolePermissions, requestedCodes, permissionCatalog, template, direct, admissions, departmentScopes, groupScopes, delegatedWitness, exactDepartment: process.env.DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED ?? null, policy }
+  return { actor, target, memberships, roles, rolePermissions, requestedCodes, permissionCatalog, template, direct, admissions, departmentScopes, groupScopes, delegationActivations, delegationActivationEnabled: isDelegatedScopeActivationEnabled(), delegatedWitness, exactDepartment: process.env.DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED ?? null, policy }
+}
+
+function changingDelegationNamespace(roles: ReadonlySet<string>, action: AuthorizationOperationRequest['action']): string | null {
+  if (!isRoleAction(action) || roles.has(action.roleId) === (action.kind === 'role.assign')) return null
+  const namespace = deriveDelegatedAdminNamespace(action.roleId)
+  return namespace && ![...roles].some(id => id !== action.roleId && deriveDelegatedAdminNamespace(id) === namespace) ? namespace : null
+}
+
+/** A managed lifetime stays disabled after its role ends, including with rollout switched off. */
+export function expectedDelegationActivationReset(input: AuthorizationOperationRequest, snapshot: OperationSnapshot): string | null {
+  const roles = new Set(snapshot.memberships.filter(row => row.user_id === input.targetUserId).map(row => String(row.role_id)))
+  const namespace = changingDelegationNamespace(roles, input.action)
+  if (namespace && (snapshot.delegationActivationEnabled || snapshot.delegationActivations.some(row => row.admin_user_id === input.targetUserId && row.namespace === namespace))) return namespace
+  return null
 }
 
 /** Stable serialization sorts object keys as well as query result sets. */
@@ -141,8 +160,8 @@ export function calculateOperationImpact(input: AuthorizationOperationRequest, s
     const held = beforeRoles.has(roleId)
     if (kind === 'role.assign') afterRoles.add(roleId); else afterRoles.delete(roleId)
     sourceChanges.push({ source: 'role', id: roleId, operation: kind === 'role.assign' ? 'assign' : 'revoke', changed: kind === 'role.assign' ? !held : held })
-    const namespace = deriveDelegatedAdminNamespace(roleId)
-    if (namespace && held !== afterRoles.has(roleId) && ![...afterRoles].some(id => id !== roleId && deriveDelegatedAdminNamespace(id) === namespace)) {
+    const namespace = changingDelegationNamespace(beforeRoles, input.action)
+    if (namespace) {
       for (const row of snapshot.departmentScopes.filter(row => row.namespace === namespace)) scopeCleanup.push({ namespace, kind: 'department', id: String(row.id) })
       for (const row of snapshot.groupScopes.filter(row => row.namespace === namespace)) scopeCleanup.push({ namespace, kind: 'member_group', id: String(row.id) })
     }

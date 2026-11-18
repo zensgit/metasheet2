@@ -1164,6 +1164,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
       "Default OFF. Only the byte-exact env string 'true' enables persisting an exact department scope (includeChildren false); no trim and no case folding. Unset, '', false, 0, TRUE, True, ' true', 'true ', ' true ', 1, yes and on stay OFF. Gates three write sinks before any scope or template mutation: template department assign, direct delegated-admin scope assign, and template apply in both merge and replace. A refusal is HTTP 403 DELEGATED_SCOPE_EXACT_DEPARTMENT_DISABLED with no audit and no permission invalidation, and replace does not delete first. Readers are not gated. Rollback: turning the flag off does not rewrite a stored false and does not change reader semantics; explicit true and unassign remain available; an omitted includeChildren on an existing false is preserved; a new omitted assign still defaults to true. Enabling a deployed process is a separate owner decision.",
     source: 'packages/core-backend/src/admin/delegated-scope-rollout.ts#isDelegatedScopeExactDepartmentEnabled',
   },
+  {
+    key: 'DELEGATED_SCOPE_ACTIVATION_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "Default OFF; only exact literal 'true' exposes explicit delegation lifecycle writes and makes a new scope configuration inactive until enabled. Upgrade or drain every previous permission reader and writer before enabling. Turning OFF prevents new activation changes and still enforces all stored stops. A stopped subject's range remains editable. This switch is independent of DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED.",
+    source: 'packages/core-backend/src/admin/delegated-scope-activation.ts#isDelegatedScopeActivationEnabled',
+  },
 ])
 
 /** Flat lookup by key, built once. */

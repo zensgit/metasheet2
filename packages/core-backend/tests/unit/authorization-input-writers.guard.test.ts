@@ -136,7 +136,7 @@ describe('domain floor', () => {
   it('the scanned table set is the classifier\'s table constant plus the four cascade parents', () => {
     expect([...INPUT_TABLES]).toEqual([...PRIVILEGE_GRANT_SOURCE_TABLES])
     expect([...CASCADE_PARENT_TABLES].sort()).toEqual(['directory_departments', 'permissions', 'platform_member_groups', 'roles'])
-    expect(SCANNED_TABLES.size).toBe(11)
+    expect(SCANNED_TABLES.size).toBe(12)
   })
 })
 

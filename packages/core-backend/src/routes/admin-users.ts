@@ -1,5 +1,14 @@
 import { queryAdminAuditFeed } from '../admin/authorization-operation-audit-feed'
 import { isUserWithinDelegatedScope } from '../admin/authorization-operation-audience'
+import {
+  assertConfiguredActiveDelegation,
+  DelegationActivationConflict,
+  filterEnabledDelegationNamespaces,
+  initializeDelegationActivation,
+  isDelegatedScopeActivationEnabled,
+  readDelegationActivations,
+  writeDelegationActivation,
+} from '../admin/delegated-scope-activation'
 import { readOnlyAuthorizationJwtAuth } from '../auth/jwt-middleware'
 import { OperationAdmissionConflict } from '../admin/authorization-operation-snapshot'
 import { AuthorizationOperationFenceUnavailable } from '../admin/authorization-operation-fence'
@@ -913,7 +922,9 @@ async function recheckDelegatedAuthority(
   })) {
     throw new DelegationAuthorityRefusal('ROLE_DELEGATION_FORBIDDEN')
   }
-  const namespaces = deriveDelegableNamespaces(await fetchUserRoleIds(actorId, client as unknown as RoleIdExecutor))
+  const namespaces = await filterEnabledDelegationNamespaces(
+    client.query, actorId, deriveDelegableNamespaces(await fetchUserRoleIds(actorId, client as RoleIdExecutor)),
+  )
   const matching = requestedNamespaces.filter((namespace) => namespaces.includes(namespace))
   if (matching.length === 0) throw new DelegationAuthorityRefusal('ROLE_DELEGATION_FORBIDDEN')
   const audience = await client.query(
@@ -2741,14 +2752,15 @@ async function ensureRoleDelegationAdmin(req: Request, res: Response): Promise<{
   // This pre-check runs BEFORE the handler's own try/catch and Express 4 does not await handlers: a rejected
   // role read here used to leave the request unanswered (no 5xx, the client waits for its own timeout).
   // Answer the fixed 500 through the same helper as every other 500 of this file; the error text goes to the log.
-  let roleIds: string[]
+  let delegableNamespaces: string[]
   try {
-    roleIds = await fetchUserRoleIds(actorId)
+    delegableNamespaces = await filterEnabledDelegationNamespaces(
+      query, actorId, deriveDelegableNamespaces(await fetchUserRoleIds(actorId)),
+    )
   } catch (error) {
     sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_CHECK_FAILED', 'Failed to verify delegated role-admin access', error)
     return null as never
   }
-  const delegableNamespaces = deriveDelegableNamespaces(roleIds)
   if (delegableNamespaces.length === 0) {
     jsonError(res, 403, 'FORBIDDEN', 'Delegated role-admin access required')
     return null as never
@@ -3355,7 +3367,9 @@ export function adminUsersRouter(): Router {
       const roleIds = await fetchUserRoleIds(userId)
       const isRbacPlatformAdmin = roleIds.includes(PLATFORM_ADMIN_ROLE_ID)
       const isPlatformAdmin = account.role === PLATFORM_ADMIN_ROLE_ID || isRbacPlatformAdmin
-      const delegableNamespaces = isPlatformAdmin ? [] : deriveDelegableNamespaces(roleIds)
+      const delegableNamespaces = isPlatformAdmin
+        ? []
+        : await filterEnabledDelegationNamespaces(query, userId, deriveDelegableNamespaces(roleIds))
       return jsonOk(res, {
         isPlatformAdmin,
         canManageScope: isPlatformAdmin || delegableNamespaces.length > 0,
@@ -3791,9 +3805,71 @@ export function adminUsersRouter(): Router {
         adminNamespaces,
         scopeAssignments: scopeAssignments.filter((scope) => adminNamespaces.includes(scope.namespace)),
         groupAssignments: groupAssignments.filter((assignment) => adminNamespaces.includes(assignment.namespace)),
+        ...(isDelegatedScopeActivationEnabled()
+          ? { scopeActivations: await readDelegationActivations(query, adminUserId, userId, adminNamespaces) }
+          : {}),
       })
     } catch (error) {
       return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_READ_FAILED', 'Failed to load delegated admin scopes', error)
+    }
+  })
+
+  r.post('/api/admin/role-delegation/users/:userId/scopes/activation', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    if (!isDelegatedScopeActivationEnabled()) {
+      return jsonError(res, 403, 'ROLE_DELEGATION_ACTIVATION_DISABLED', 'Delegation activation changes are unavailable')
+    }
+
+    const userId = String(req.params.userId || '').trim()
+    const namespace = typeof req.body?.namespace === 'string' ? req.body.namespace.trim() : ''
+    const enabled: unknown = req.body?.enabled
+    const expectedVersion: unknown = req.body?.expectedVersion
+    if (!userId || !namespace || typeof enabled !== 'boolean' ||
+        typeof expectedVersion !== 'string' || !/^v1:[0-9a-f]{64}$/.test(expectedVersion)) {
+      return jsonError(res, 400, 'ROLE_DELEGATION_ACTIVATION_INVALID', 'Namespace, boolean enabled and scope version are required')
+    }
+
+    try {
+      const updated = await transaction(async (client) => {
+        const subjects = await lockSharedAccessSubjects(client, [userId, adminUserId])
+        requireWritableTarget(subjects, userId)
+        await assertPlatformActorAuthority(client, subjects.get(adminUserId))
+        const namespaces = deriveDelegableNamespaces(await fetchUserRoleIds(userId, client))
+        if (!namespaces.includes(namespace)) return false
+        const [current] = await readDelegationActivations(client.query, adminUserId, userId, [namespace])
+        if (!current || current.version !== expectedVersion) {
+          throw new DelegationActivationConflict('ROLE_DELEGATION_ACTIVATION_CONFLICT')
+        }
+        if (enabled && !current.hasConfiguredScope) {
+          throw new DelegationActivationConflict('ROLE_DELEGATION_ACTIVATION_SCOPE_REQUIRED')
+        }
+        await writeDelegationActivation(client.query, userId, namespace, enabled)
+        const audit = await client.query(
+          `INSERT INTO audit_logs (
+             event_type, event_category, event_severity, resource_type, resource_id, action, action_details
+           ) VALUES (
+             'UPDATE', 'SECURITY', 'INFO', 'delegated-admin-activation', $1, $2,
+             jsonb_build_object('userId', $3::text, 'namespace', $4::text, 'adminUserId', $5::text, 'enabled', $6::boolean)
+           ) RETURNING id`,
+          [`${userId}:${namespace}`, enabled ? 'enable' : 'disable', userId, namespace, adminUserId, enabled],
+        )
+        if (audit.rows.length !== 1) throw new Error('DELEGATED_SCOPE_ACTIVATION_AUDIT_NOT_CONFIRMED')
+        return true
+      })
+      if (!updated) {
+        return jsonError(res, 409, 'ROLE_DELEGATION_NAMESPACE_NOT_HELD', 'Selected user does not hold that delegated admin namespace')
+      }
+      return jsonOk(res, { actorId: adminUserId, userId, namespace, enabled })
+    } catch (error) {
+      if (error instanceof DelegationActivationConflict) return jsonError(res, 409, error.code, error.message)
+      if (error instanceof PlatformActorAuthorityLost) return jsonError(res, 403, error.code, error.message)
+      if (error instanceof AccessGraphUserUnavailableError) {
+        return error.code === 'NOT_FOUND'
+          ? jsonError(res, 404, 'NOT_FOUND', 'User not found')
+          : jsonError(res, 409, 'USER_IN_RECYCLE_BIN', '账号在回收站中，请先恢复后再修改权限')
+      }
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_ACTIVATION_FAILED', 'Failed to update delegated admin activation', error)
     }
   })
 
@@ -3856,6 +3932,7 @@ export function adminUsersRouter(): Router {
             exactDepartmentEnabled: isDelegatedScopeExactDepartmentEnabled(),
           })
           if (decision.outcome === 'refuse') return { refused: 'exact' as const, adminNamespaces }
+          await initializeDelegationActivation(client.query, userId, namespace)
           await client.query(
             `INSERT INTO delegated_role_admin_scopes (
                admin_user_id, namespace, directory_department_id, include_children, created_by, created_at, updated_at
@@ -3870,6 +3947,8 @@ export function adminUsersRouter(): Router {
           )
           return { refused: false as const, adminNamespaces, persisted: decision.includeChildren }
         }
+        const active = adminNamespaces.includes(namespace)
+          && await initializeDelegationActivation(client.query, userId, namespace)
         await client.query(
           `DELETE FROM delegated_role_admin_scopes
            WHERE admin_user_id = $1
@@ -3877,6 +3956,7 @@ export function adminUsersRouter(): Router {
              AND directory_department_id = $3`,
           [userId, namespace, directoryDepartmentId],
         )
+        await assertConfiguredActiveDelegation(client.query, userId, namespace, active)
         return { refused: false as const, adminNamespaces, persisted: stored }
       })
       if (locked.refused === 'namespace') {
@@ -3911,6 +3991,7 @@ export function adminUsersRouter(): Router {
         groupAssignments,
       })
     } catch (error) {
+      if (error instanceof DelegationActivationConflict) return jsonError(res, 409, error.code, error.message)
       return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_UPDATE_FAILED', 'Failed to update delegated admin scope', error)
     }
   })
@@ -3949,6 +4030,8 @@ export function adminUsersRouter(): Router {
         if (action === 'assign' && !adminNamespaces.includes(namespace)) {
           return { refused: true as const, adminNamespaces }
         }
+        const active = adminNamespaces.includes(namespace)
+          && await initializeDelegationActivation(client.query, userId, namespace)
         if (action === 'assign') {
           await client.query(
             `INSERT INTO delegated_role_admin_member_groups (
@@ -3969,6 +4052,7 @@ export function adminUsersRouter(): Router {
                AND group_id = $3`,
             [userId, namespace, groupId],
           )
+          await assertConfiguredActiveDelegation(client.query, userId, namespace, active)
         }
         return { refused: false as const, adminNamespaces }
       })
@@ -4003,6 +4087,7 @@ export function adminUsersRouter(): Router {
         groupAssignments,
       })
     } catch (error) {
+      if (error instanceof DelegationActivationConflict) return jsonError(res, 409, error.code, error.message)
       return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_GROUP_SCOPE_UPDATE_FAILED', 'Failed to update delegated admin member-group scope', error)
     }
   })
@@ -4125,6 +4210,7 @@ export function adminUsersRouter(): Router {
         ) {
           return { refused: 'exact' as const, adminNamespaces }
         }
+        const active = await initializeDelegationActivation(client.query, userId, namespace)
         if (mode === 'replace') {
           await client.query(
             `DELETE FROM delegated_role_admin_scopes
@@ -4166,6 +4252,7 @@ export function adminUsersRouter(): Router {
             [userId, namespace, group.id, adminUserId],
           )
         }
+        await assertConfiguredActiveDelegation(client.query, userId, namespace, active)
         return { refused: false as const, adminNamespaces, departments, memberGroups }
       })
       if (locked.refused === 'namespace') {
@@ -4213,6 +4300,7 @@ export function adminUsersRouter(): Router {
         groupAssignments: groupAssignments.filter((assignment) => adminNamespaces.includes(assignment.namespace)),
       })
     } catch (error) {
+      if (error instanceof DelegationActivationConflict) return jsonError(res, 409, error.code, error.message)
       return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_TEMPLATE_APPLY_FAILED', 'Failed to apply scope template', error)
     }
   })
