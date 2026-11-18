@@ -9,7 +9,8 @@ import { assignUserRoles, unassignUserRoles, isRoleAssignable, reviewDelegatedRo
 import { deriveDelegatedAdminNamespace, derivePermissionNamespace, roleIdMatchesNamespace } from '../rbac/namespace-admission'
 import { disableNamespaceAdmissionsWithoutRoles, listRoleNamespaces, writeUserNamespaceAdmission } from '../rbac/namespace-admission'
 import { invalidateUserPerms } from '../rbac/service'
-import { calculateOperationImpact, canonicalOperationValue, operationDigest, operationVersion, readOperationSnapshot } from './authorization-operation-snapshot'
+import { filterEnabledDelegationNamespaces } from './delegated-scope-activation'
+import { calculateOperationImpact, canonicalOperationValue, expectedDelegationActivationReset, operationDigest, operationVersion, readOperationSnapshot } from './authorization-operation-snapshot'
 import type { OperationQuery, OperationSnapshot } from './authorization-operation-snapshot'
 import type { AuthorizationOperationCommitRequest, AuthorizationOperationLookup, AuthorizationOperationPreview, AuthorizationOperationReceipt, AuthorizationOperationRequest } from './authorization-operation-contract'
 
@@ -89,7 +90,9 @@ async function readActorOnly(run: OperationQuery, actorId: string): Promise<void
   const roles = await run('SELECT role_id FROM user_roles WHERE user_id::text = $1', [actorId])
   const actor=users.rows[0]
   assertActiveActor(actor)
-  if (actor.role !== 'admin' && !roles.rows.some(row=>row.role_id==='admin' || deriveDelegatedAdminNamespace(String(row.role_id)))) return deny(403,'FORBIDDEN')
+  if (actor.role === 'admin' || roles.rows.some(row => row.role_id === 'admin')) return
+  const namespaces = roles.rows.map(row => deriveDelegatedAdminNamespace(String(row.role_id))).filter((value): value is string => value !== null)
+  if ((await filterEnabledDelegationNamespaces(run, actorId, namespaces)).length === 0) return deny(403, 'FORBIDDEN')
 }
 async function readReceipt(run: OperationQuery, actorId: string, id: string): Promise<ReceiptRow | null> {
   const rows = await run("SELECT target_user_id, action, request_digest, receipt FROM authorization_operation_receipts WHERE actor_id = $1 AND client_operation_id = $2::uuid AND request_digest <> 'legacy'", [actorId, id])
@@ -215,6 +218,14 @@ async function commitAuthorizationOperationWithinDeadline(actorId: string, input
         const expectedDepartments = snapshot.departmentScopes.filter(row => !impact.scopeCleanup.some(removed => removed.kind === 'department' && removed.id === String(row.id)))
         const expectedGroups = snapshot.groupScopes.filter(row => !impact.scopeCleanup.some(removed => removed.kind === 'member_group' && removed.id === String(row.id)))
         if (canonicalOperationValue(expectedDepartments) !== canonicalOperationValue(after.departmentScopes) || canonicalOperationValue(expectedGroups) !== canonicalOperationValue(after.groupScopes)) return deny(409, 'AUTHORIZATION_INPUT_INCOMPLETE')
+        const resetNamespace = expectedDelegationActivationReset(request, snapshot)
+        const isResetRow = (row: Record<string, unknown>) => row.admin_user_id === request.targetUserId && row.namespace === resetNamespace
+        if (canonicalOperationValue(snapshot.delegationActivations.filter(row => !isResetRow(row))) !== canonicalOperationValue(after.delegationActivations.filter(row => !isResetRow(row)))) return deny(409, 'AUTHORIZATION_INPUT_INCOMPLETE')
+        if (resetNamespace) {
+          const current = after.delegationActivations.find(isResetRow)
+          const previous = snapshot.delegationActivations.find(isResetRow)
+          if (!current || current.enabled !== false || typeof current.revision !== 'string' || current.revision === previous?.revision) return deny(409, 'AUTHORIZATION_INPUT_INCOMPLETE')
+        }
         if (isRoleAction(request.action) && request.action.roleId === 'admin') {
           const enabled = request.action.kind === 'role.assign'
           if (after.target?.is_admin !== enabled || (enabled && after.target?.role !== 'admin') || (!enabled && after.target?.role === 'admin')) return deny(409, 'AUTHORIZATION_INPUT_INCOMPLETE')

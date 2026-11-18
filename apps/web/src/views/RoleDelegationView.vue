@@ -34,6 +34,43 @@
       @read-again="void rereadDelegationAuthorization()"
     />
 
+    <section
+      v-if="activationConfirming"
+      ref="activationDialogRef"
+      class="scope-activation-confirm"
+      data-testid="scope-activation-confirm"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="scope-activation-confirm-title"
+      tabindex="-1"
+      @keydown="onActivationDialogKey"
+    >
+      <h3 id="scope-activation-confirm-title">{{ activationConfirming.enabled ? '确认启用委派' : '确认停止委派' }}</h3>
+      <p>{{ selectedAccess?.user.name || selectedAccess?.user.email || activationConfirming.userId }}</p>
+      <p>{{ activationConfirming.namespace }}</p>
+      <p data-testid="scope-activation-confirm-effect">{{ activationConfirming.enabled ? activationEnableEffect : activationStopEffect }}</p>
+      <div class="delegation-page__role-actions">
+        <button
+          class="delegation-page__button delegation-page__button--secondary"
+          type="button"
+          data-testid="scope-activation-confirm-cancel"
+          :disabled="activationWriting"
+          @click="dismissActivationConfirmation()"
+        >
+          取消
+        </button>
+        <button
+          class="delegation-page__button"
+          type="button"
+          data-testid="scope-activation-confirm-submit"
+          :disabled="activationWriting"
+          @click="void submitScopeActivation()"
+        >
+          {{ activationWriting ? '提交中...' : (activationConfirming.enabled ? '确认启用' : '确认停止') }}
+        </button>
+      </div>
+    </section>
+
     <p v-if="status" class="delegation-page__status" :class="{ 'delegation-page__status--error': statusTone === 'error' }">
       {{ status }}
     </p>
@@ -330,6 +367,48 @@
                   查询部门
                 </button>
               </div>
+              <div v-if="scopeActivationFieldPresent" data-testid="scope-activation">
+                <p class="delegation-page__hint">命名空间委派启停</p>
+                <p data-testid="scope-activation-namespace">{{ selectedScopeNamespace || '未选择命名空间' }}</p>
+                <p v-if="!readyScopeActivation" data-testid="scope-activation-unavailable">当前命名空间没有唯一的启停状态，不能启用或停止。</p>
+                <template v-else>
+                  <p data-testid="scope-activation-state">{{ activationStateText }}</p>
+                  <p v-if="readyScopeActivation && readyScopeActivation.hasConfiguredScope !== true" data-testid="scope-activation-empty-scope">还没有可启用的范围。保存范围或套用模板不会自动启用委派。</p>
+                  <div class="delegation-page__role-actions">
+                    <button
+                      v-if="canEnableScopeActivation"
+                      class="delegation-page__button"
+                      type="button"
+                      data-testid="scope-activation-enable"
+                      :disabled="scopeBusy || activationWriting || !memberWritesReady"
+                      @click="openScopeActivation(true)"
+                    >
+                      启用委派
+                    </button>
+                    <button
+                      v-if="canStopScopeActivation"
+                      class="delegation-page__button delegation-page__button--danger"
+                      type="button"
+                      data-testid="scope-activation-stop"
+                      :disabled="scopeBusy || activationWriting || !memberWritesReady"
+                      @click="openScopeActivation(false)"
+                    >
+                      停止委派
+                    </button>
+                  </div>
+                </template>
+              </div>
+              <p v-if="activationPendingAttempt" data-testid="scope-activation-pending">{{ activationPendingMessage }}</p>
+              <button
+                v-if="activationPendingAttempt"
+                class="delegation-page__button delegation-page__button--secondary"
+                type="button"
+                data-testid="scope-activation-reread"
+                :disabled="scopeBusy || activationWriting"
+                @click="void rereadScopeActivation()"
+              >
+                只读刷新委派启停
+              </button>
               <div class="delegation-page__role-actions">
                 <select v-model="selectedDepartmentId" class="delegation-page__input">
                   <option value="">请选择部门</option>
@@ -538,7 +617,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useAdminAuthorizationOperation } from '../composables/useAdminAuthorizationOperation'
 import { useAuth } from '../composables/useAuth'
 import { apiFetch } from '../utils/api'
@@ -699,12 +778,30 @@ type NamespaceAdmission = {
   updatedAt: string | null
 }
 
+type ScopeActivation = {
+  namespace: string
+  enabled: boolean
+  hasConfiguredScope: boolean
+  version: string
+}
+
+type ScopeActivationAttempt = {
+  actorId: string
+  userId: string
+  namespace: string
+  enabled: boolean
+  expectedVersion: string
+  accessGeneration: number
+  namespaceGeneration: number
+}
+
 type DelegatedAdminScopeConfig = {
   actorId: string
   user: ManagedUser
   adminNamespaces: string[]
   scopeAssignments: ScopeAssignment[]
   groupAssignments: GroupAssignment[]
+  scopeActivations?: unknown
 }
 
 type ScopeTemplateSummary = {
@@ -818,6 +915,13 @@ const selectedMemberGroupId = ref('')
 const summary = ref<DelegationSummary | null>(null)
 const selectedAccess = ref<DelegatedUserAccess | null>(null)
 const selectedScopeConfig = ref<DelegatedAdminScopeConfig | null>(null)
+const activationConfirming = ref<ScopeActivationAttempt | null>(null)
+const activationPendingAttempt = ref<ScopeActivationAttempt | null>(null)
+const activationWriting = ref(false)
+const activationDialogRef = ref<HTMLElement | null>(null)
+let activationFlight: ScopeActivationAttempt | null = null
+let activationReturnFocus: HTMLElement | null = null
+let activationReadSerial = 0
 const selectedTemplate = ref<ScopeTemplateDetail | null>(null)
 const selectedMemberGroup = ref<MemberGroupDetail | null>(null)
 
@@ -841,6 +945,9 @@ const selectedUserDisabled = computed(() => {
 const EXACT_DEPARTMENT_DISABLED_CODE = 'DELEGATED_SCOPE_EXACT_DEPARTMENT_DISABLED'
 const exactDepartmentUnavailableText = '当前不能新建仅本部门的范围。新的部门范围需要包含下级部门。已经保存的仅本部门仍会按原样显示，可以改为包含下级，也可以移除。'
 const exactDepartmentApplyUnavailableText = '这个模板含有仅本部门的范围，当前不能覆盖应用。已经保存的仅本部门仍会按原样显示，可以改为包含下级，也可以从模板中移除。'
+const activationEnableEffect = '启用后，该成员可以在此命名空间内按已保存的范围委派。启用不会修改角色、插件使用准入或已保存的范围。'
+const activationStopEffect = '停止后仍可以保存范围，但不能委派。角色、插件使用准入和已保存的范围都保持不变。'
+const activationPendingMessage = '委派启停已提交，但结果尚未核对。请只读刷新当前成员的这一命名空间，不会自动重新提交。'
 
 const exactDepartmentWritesEnabled = computed(() => (
   summary.value?.exactDepartmentScopeAvailable === true && exactDepartmentBlocked.value === false
@@ -862,6 +969,14 @@ watch(selectedUserId, (userId) => {
     confirmationReadAgain.value = false
   }
   authorizationOperation.syncContext()
+  activationPendingAttempt.value = null
+  dismissActivationConfirmation()
+})
+
+watch(selectedScopeNamespace, () => {
+  scopeNamespaceGeneration += 1
+  activationPendingAttempt.value = null
+  dismissActivationConfirmation()
 })
 
 watch(() => authorizationOperation.phase.value, () => {
@@ -918,6 +1033,7 @@ function readLocationUserId(): string {
 }
 
 let delegationAccessGeneration = 0
+let scopeNamespaceGeneration = 0
 let usersRequestGeneration = 0
 let summaryRequestGeneration = 0
 const initialPinnedUserId = readLocationUserId()
@@ -1876,11 +1992,275 @@ async function loadScopeConfig(userId: string): Promise<
   }
 
   const scope = payload.data as DelegatedAdminScopeConfig
+  rememberScopeConfig(scope)
+  return { status: 'ok', scope }
+}
+
+function rememberScopeConfig(scope: DelegatedAdminScopeConfig): void {
   selectedScopeConfig.value = scope
   if (!scope.adminNamespaces.includes(selectedScopeNamespace.value)) {
     selectedScopeNamespace.value = scope.adminNamespaces[0] || ''
   }
-  return { status: 'ok', scope }
+}
+
+function scopeConfigKeepingActivation(
+  incoming: DelegatedAdminScopeConfig,
+  previous: DelegatedAdminScopeConfig | null,
+): DelegatedAdminScopeConfig {
+  if (!incoming || typeof incoming !== 'object') return incoming
+  if (Object.prototype.hasOwnProperty.call(incoming, 'scopeActivations')) return incoming
+  if (!previous || previous.user?.id !== incoming.user?.id) return incoming
+  if (!Object.prototype.hasOwnProperty.call(previous, 'scopeActivations')) return incoming
+  return { ...incoming, scopeActivations: previous.scopeActivations }
+}
+
+function scopeActivationFieldPresentFor(scope: DelegatedAdminScopeConfig | null): boolean {
+  return !!scope && Object.prototype.hasOwnProperty.call(scope, 'scopeActivations')
+}
+
+function readyActivation(scope: DelegatedAdminScopeConfig | null, namespace: string): ScopeActivation | null {
+  if (!scope || !namespace || !Array.isArray(scope.adminNamespaces) || !scope.adminNamespaces.includes(namespace)) return null
+  if (!Array.isArray(scope.scopeActivations)) return null
+  const claimed = scope.scopeActivations.filter((item) => (
+    !!item && typeof item === 'object' && !Array.isArray(item)
+    && (item as { namespace?: unknown }).namespace === namespace
+  ))
+  if (claimed.length !== 1) return null
+  const row = claimed[0] as Record<string, unknown>
+  if (typeof row.enabled !== 'boolean' || typeof row.hasConfiguredScope !== 'boolean') return null
+  if (typeof row.version !== 'string' || row.version.trim() === '') return null
+  return { namespace, enabled: row.enabled, hasConfiguredScope: row.hasConfiguredScope, version: row.version }
+}
+
+const scopeActivationFieldPresent = computed(() => scopeActivationFieldPresentFor(selectedScopeConfig.value))
+const readyScopeActivation = computed(() => selectedScopeConfig.value?.actorId === currentPrincipalId()
+  ? readyActivation(selectedScopeConfig.value, selectedScopeNamespace.value)
+  : null)
+function activationCopy(enabled: boolean): string {
+  return enabled
+    ? '此命名空间的委派已启用。'
+    : '此命名空间的委派已停止。可以保存范围，但不能委派。'
+}
+const activationStateText = computed(() => activationCopy(readyScopeActivation.value?.enabled === true))
+const canEnableScopeActivation = computed(() => {
+  const entry = readyScopeActivation.value
+  return !!entry && entry.enabled === false && entry.hasConfiguredScope === true && !activationPendingAttempt.value
+})
+const canStopScopeActivation = computed(() => (
+  readyScopeActivation.value?.enabled === true && !activationPendingAttempt.value
+))
+
+function activationAttemptCurrent(attempt: ScopeActivationAttempt): boolean {
+  return attempt.actorId.length > 0
+    && currentPrincipalId() === attempt.actorId
+    && delegationReadStillCurrent(attempt.accessGeneration, attempt.userId)
+    && selectedScopeNamespace.value === attempt.namespace
+    && scopeNamespaceGeneration === attempt.namespaceGeneration
+}
+
+function onActivationDialogKey(event: KeyboardEvent): void {
+  if (event.key !== 'Escape' || activationWriting.value) return
+  event.preventDefault()
+  dismissActivationConfirmation()
+}
+
+function bindActivationDialogFocus(): void {
+  activationReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  void nextTick(() => {
+    activationDialogRef.value?.querySelector<HTMLElement>('[data-testid="scope-activation-confirm-cancel"]')?.focus()
+  })
+}
+
+function dismissActivationConfirmation(): void {
+  const hadDialog = activationConfirming.value !== null
+  activationConfirming.value = null
+  const back = activationReturnFocus
+  activationReturnFocus = null
+  if (hadDialog) back?.focus()
+}
+
+function markActivationPending(attempt: ScopeActivationAttempt): void {
+  if (!activationAttemptCurrent(attempt)) return
+  activationPendingAttempt.value = attempt
+  setStatus(activationPendingMessage, 'error')
+}
+
+function activationEchoMatches(payload: Record<string, unknown>, attempt: ScopeActivationAttempt): boolean {
+  const data = payload.data
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false
+  const row = data as Record<string, unknown>
+  return row.actorId === attempt.actorId
+    && row.userId === attempt.userId
+    && row.namespace === attempt.namespace
+    && row.enabled === attempt.enabled
+}
+
+function usableActivationScope(payload: Record<string, unknown>, attempt: ScopeActivationAttempt): DelegatedAdminScopeConfig | null {
+  if (payload.ok !== true) return null
+  const data = payload.data
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null
+  const row = data as Record<string, unknown>
+  const user = row.user
+  if (row.actorId !== attempt.actorId) return null
+  if (!user || typeof user !== 'object' || (user as { id?: unknown }).id !== attempt.userId) return null
+  if (!Array.isArray(row.adminNamespaces) || row.adminNamespaces.some((item) => typeof item !== 'string')) return null
+  if (!row.adminNamespaces.includes(attempt.namespace)) return null
+  const assignmentsUsable = (value: unknown): boolean => (
+    Array.isArray(value) && value.every((item) => !!item && typeof item === 'object' && !Array.isArray(item))
+  )
+  if (!assignmentsUsable(row.scopeAssignments) || !assignmentsUsable(row.groupAssignments)) return null
+  return row as DelegatedAdminScopeConfig
+}
+
+async function fetchActivationScope(
+  attempt: ScopeActivationAttempt,
+  serial: number,
+): Promise<DelegatedAdminScopeConfig | null | 'stale'> {
+  const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(attempt.userId)}/scopes`)
+  if (serial !== activationReadSerial) return 'stale'
+  const payload = await readJson(response)
+  if (serial !== activationReadSerial || !activationAttemptCurrent(attempt)) return 'stale'
+  if (!response.ok) return null
+  return usableActivationScope(payload, attempt)
+}
+
+function applyActivationScope(attempt: ScopeActivationAttempt, scope: DelegatedAdminScopeConfig): 'success' | 'pending' | 'different' | 'drop' {
+  if (!activationAttemptCurrent(attempt)) return 'drop'
+  rememberScopeConfig(scope)
+  if (!activationAttemptCurrent(attempt)) return 'drop'
+  const entry = readyActivation(selectedScopeConfig.value, attempt.namespace)
+  if (entry?.enabled === attempt.enabled) return 'success'
+  // The same expectedVersion means this write can still commit after the read.
+  if (entry?.version === attempt.expectedVersion) return 'pending'
+  return 'different'
+}
+
+function openScopeActivation(enabled: boolean): void {
+  if (scopeBusy.value || activationPendingAttempt.value || activationFlight || activationWriting.value || activationConfirming.value) return
+  const entry = readyScopeActivation.value
+  const actorId = currentPrincipalId()
+  const userId = selectedUserId.value
+  if (!entry || !actorId || selectedScopeConfig.value?.actorId !== actorId || !summary.value?.isPlatformAdmin || !memberWritesReady.value) return
+  if (entry.namespace !== selectedScopeNamespace.value || entry.enabled === enabled) return
+  if (enabled && entry.hasConfiguredScope !== true) return
+  activationConfirming.value = {
+    actorId,
+    userId,
+    namespace: entry.namespace,
+    enabled,
+    expectedVersion: entry.version,
+    accessGeneration: delegationAccessGeneration,
+    namespaceGeneration: scopeNamespaceGeneration,
+  }
+  bindActivationDialogFocus()
+}
+
+async function submitScopeActivation(): Promise<void> {
+  if (scopeBusy.value || activationPendingAttempt.value || activationFlight || activationWriting.value) return
+  const attempt = activationConfirming.value
+  if (!attempt || !activationAttemptCurrent(attempt) || selectedScopeConfig.value?.actorId !== attempt.actorId) {
+    dismissActivationConfirmation()
+    return
+  }
+  const entry = readyActivation(selectedScopeConfig.value, attempt.namespace)
+  if (!entry || entry.version !== attempt.expectedVersion || entry.enabled === attempt.enabled) {
+    dismissActivationConfirmation()
+    return
+  }
+  if (attempt.enabled && entry.hasConfiguredScope !== true) {
+    dismissActivationConfirmation()
+    return
+  }
+  activationFlight = attempt
+  activationWriting.value = true
+  const serial = ++activationReadSerial
+  let outcome: 'success' | 'pending' | 'different' | 'error' | 'drop' = 'drop'
+  let errorMessage = ''
+  try {
+    const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(attempt.userId)}/scopes/activation`, {
+      method: 'POST',
+      body: JSON.stringify({
+        namespace: attempt.namespace,
+        enabled: attempt.enabled,
+        expectedVersion: attempt.expectedVersion,
+      }),
+    })
+    const payload = await readJson(response)
+    if (serial !== activationReadSerial || !activationAttemptCurrent(attempt)) {
+      outcome = 'drop'
+    } else if (response.status >= 400 && response.status < 500) {
+      outcome = 'error'
+      errorMessage = readErrorMessage(payload) || '保存委派启停失败'
+    } else if (!response.ok || payload.ok !== true || !activationEchoMatches(payload, attempt)) {
+      outcome = 'pending'
+    } else {
+      const read = await fetchActivationScope(attempt, serial)
+      if (read === 'stale' || !activationAttemptCurrent(attempt)) outcome = 'drop'
+      else if (!read) outcome = 'pending'
+      else outcome = applyActivationScope(attempt, read)
+    }
+  } catch {
+    outcome = serial === activationReadSerial && activationAttemptCurrent(attempt) ? 'pending' : 'drop'
+  } finally {
+    if (serial === activationReadSerial) {
+      activationFlight = null
+      activationWriting.value = false
+    }
+    dismissActivationConfirmation()
+  }
+  if (serial !== activationReadSerial || !activationAttemptCurrent(attempt)) return
+  if (outcome === 'error') {
+    activationPendingAttempt.value = null
+    setStatus(errorMessage, 'error')
+    return
+  }
+  if (outcome === 'pending') {
+    markActivationPending(attempt)
+    return
+  }
+  if (outcome === 'different') {
+    activationPendingAttempt.value = null
+    setStatus('已重新读取。当前命名空间的委派启停尚未确认与提交一致。', 'error')
+    return
+  }
+  if (outcome === 'success') {
+    activationPendingAttempt.value = null
+    setStatus(activationCopy(attempt.enabled))
+  }
+}
+
+async function rereadScopeActivation(): Promise<void> {
+  if (scopeBusy.value || activationFlight || activationWriting.value) return
+  const attempt = activationPendingAttempt.value
+  if (!attempt || !activationAttemptCurrent(attempt)) {
+    activationPendingAttempt.value = null
+    return
+  }
+  const serial = ++activationReadSerial
+  activationWriting.value = true
+  try {
+    const read = await fetchActivationScope(attempt, serial)
+    if (read === 'stale' || serial !== activationReadSerial || !activationAttemptCurrent(attempt)) return
+    if (!read) {
+      setStatus(activationPendingMessage, 'error')
+      return
+    }
+    const outcome = applyActivationScope(attempt, read)
+    if (serial !== activationReadSerial || !activationAttemptCurrent(attempt)) return
+    if (outcome === 'drop' || outcome === 'pending') {
+      if (outcome === 'pending') setStatus(activationPendingMessage, 'error')
+      return
+    }
+    activationPendingAttempt.value = null
+    setStatus(outcome === 'success'
+      ? activationCopy(attempt.enabled)
+      : '已重新读取。当前命名空间的委派启停尚未确认与提交一致。', outcome === 'success' ? 'info' : 'error')
+  } catch {
+    if (serial !== activationReadSerial || !activationAttemptCurrent(attempt)) return
+    setStatus(activationPendingMessage, 'error')
+  } finally {
+    if (serial === activationReadSerial) activationWriting.value = false
+  }
 }
 
 /** A revocable role id, named from the assignable catalog when it is there (it may not be). */
@@ -2176,7 +2556,7 @@ async function updateScope(action: 'assign' | 'unassign', scope?: ScopeAssignmen
       return
     }
 
-    selectedScopeConfig.value = payload.data as DelegatedAdminScopeConfig
+    selectedScopeConfig.value = scopeConfigKeepingActivation(payload.data as DelegatedAdminScopeConfig, selectedScopeConfig.value)
     if (action === 'assign') selectedDepartmentId.value = ''
     await refreshAfterScopeWrite(
       targetUserId,
@@ -2214,7 +2594,7 @@ async function updateScopeGroup(action: 'assign' | 'unassign', assignment?: Grou
       setStatus('保存成员集范围失败', 'error')
       return
     }
-    selectedScopeConfig.value = payload.data as DelegatedAdminScopeConfig
+    selectedScopeConfig.value = scopeConfigKeepingActivation(payload.data as DelegatedAdminScopeConfig, selectedScopeConfig.value)
     if (action === 'assign') selectedAudienceGroupId.value = ''
     await refreshAfterScopeWrite(
       targetUserId,
@@ -2271,6 +2651,7 @@ async function updateUserMemberGroup(action: 'assign' | 'unassign', userIdOverri
 
 async function applyTemplate(): Promise<void> {
   const targetUserId = selectedUserId.value
+  const generation = delegationAccessGeneration
   if (!summary.value?.isPlatformAdmin || !targetUserId || !memberWritesReady.value || !selectedScopeNamespace.value || !selectedTemplateId.value) return
   if (!exactDepartmentWritesEnabled.value && templateContainsExactDepartment(selectedTemplate.value)) {
     setStatus(exactDepartmentApplyUnavailableText, 'error')
@@ -2291,18 +2672,25 @@ async function applyTemplate(): Promise<void> {
       noteExactDepartmentDisabledByServer()
       throw new Error(exactDepartmentApplyUnavailableText)
     }
+    if (!delegationReadStillCurrent(generation, targetUserId)) return
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '应用范围模板失败'))
     }
-    if (selectedUserId.value !== targetUserId || !readSubjectMatches(payload, targetUserId)) {
+    if (!readSubjectMatches(payload, targetUserId)) {
       setStatus('应用范围模板失败', 'error')
       return
     }
 
-    selectedScopeConfig.value = payload.data as DelegatedAdminScopeConfig
+    const merged = scopeConfigKeepingActivation(payload.data as DelegatedAdminScopeConfig, selectedScopeConfig.value)
+    selectedScopeConfig.value = merged
+    if (scopeActivationFieldPresentFor(merged)) {
+      await refreshAfterScopeWrite(targetUserId, '范围模板已覆盖应用到该插件管理员命名空间', generation)
+      return
+    }
     setStatus('范围模板已覆盖应用到该插件管理员命名空间')
     await loadSummary()
   } catch (error) {
+    if (!delegationReadStillCurrent(generation, targetUserId)) return
     setStatus(error instanceof Error ? error.message : '应用范围模板失败', 'error')
   } finally {
     scopeBusy.value = false
@@ -2513,6 +2901,15 @@ onMounted(async () => {
 .delegation-page__status--error {
   background: #fef2f2;
   color: #dc2626;
+}
+
+.scope-activation-confirm {
+  display: grid;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid #f59e0b;
+  border-radius: 12px;
+  background: #fffbeb;
 }
 
 .delegation-page__chip {

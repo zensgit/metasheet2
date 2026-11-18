@@ -15,6 +15,12 @@ suite('delegated authorization operation on migrated schema and real fence',()=>
   const input={targetUserId:target,action:{kind:'role.assign',roleId:role},admissionChanges:[{namespace:alpha,enabled:true}]}
   const preview=(body:unknown=input)=>request(app).post(`${path}/preview`).auth(token,{type:'bearer'}).send(body)
   const commit=(body:Record<string,unknown>,version:string,id:string)=>request(app).post(path).auth(token,{type:'bearer'}).send({...body,expectedVersion:version,clientOperationId:id})
+  const lookup = (id: string) => request(app).get(`${path}/${id}`).auth(token, { type: 'bearer' })
+  const setActivation = (namespace: string, enabled: boolean) => db.query(
+    `INSERT INTO delegated_role_admin_activation (admin_user_id, namespace, enabled, revision) VALUES ($1, $2, $3, $4)
+     ON CONFLICT (admin_user_id, namespace) DO UPDATE SET enabled = EXCLUDED.enabled, revision = EXCLUDED.revision`,
+    [actor, namespace, enabled, randomUUID()],
+  )
   beforeAll(async()=>{
     db=new Client({connectionString:url});await db.connect()
     await db.query("INSERT INTO users(id,email,name,password_hash,role,is_admin) VALUES ($1,$2,'delegate','synthetic','user',false),($3,$4,'target','synthetic','user',false)",[actor,`${actor}@example.test`,target,`${target}@example.test`])
@@ -31,6 +37,7 @@ suite('delegated authorization operation on migrated schema and real fence',()=>
   },60000)
   beforeEach(async()=>{
     await db.query('DELETE FROM authorization_operation_audit WHERE actor_id=$1',[actor]);await db.query('DELETE FROM authorization_operation_receipts WHERE actor_id=$1',[actor])
+    await db.query('DELETE FROM delegated_role_admin_activation WHERE admin_user_id=$1', [actor])
     await db.query('DELETE FROM user_namespace_admissions WHERE user_id=$1',[target]);await db.query('DELETE FROM user_roles WHERE user_id=ANY($1::text[])',[[actor,target]])
     await db.query('DELETE FROM delegated_role_admin_member_groups WHERE admin_user_id=$1',[actor]);await db.query('DELETE FROM platform_member_group_members WHERE user_id=$1',[target])
     await db.query('DELETE FROM user_permissions WHERE user_id=$1',[target])
@@ -190,5 +197,43 @@ suite('delegated authorization operation on migrated schema and real fence',()=>
     await db.query('DELETE FROM platform_member_group_members WHERE group_id=$1 AND user_id=$2',[groupA,target])
     expect((await request(app).get(`${path}/${id}`).auth(token,{type:'bearer'})).status).toBe(403)
     expect((await commit(input,p.body.expectedVersion,id)).status).toBe(403)
+  })
+
+  it('honors a stored pause on preview, commit, replay, and receipt reads with the original token', async () => {
+    await db.query('INSERT INTO platform_member_group_members(group_id,user_id) VALUES ($1,$2)', [groupB, target])
+    const p = await preview()
+    expect(p.status, JSON.stringify(p.body)).toBe(200)
+    const id = randomUUID()
+    expect((await commit(input, p.body.expectedVersion, id)).status).toBe(200)
+
+    await setActivation(alpha, false)
+    expect((await preview()).status).toBe(403)
+    expect((await commit(input, p.body.expectedVersion, randomUUID())).status).toBe(403)
+    expect((await commit(input, p.body.expectedVersion, id)).status).toBe(403)
+    expect((await lookup(id)).status).toBe(403)
+    expect((await db.query('SELECT count(*)::int AS count FROM authorization_operation_audit WHERE actor_id=$1', [actor])).rows[0].count).toBe(1)
+
+    const otherNamespace = { targetUserId: target, action: { kind: 'admission.set' }, admissionChanges: [{ namespace: beta, enabled: true }] }
+    const otherPreview = await preview(otherNamespace)
+    expect(otherPreview.status, JSON.stringify(otherPreview.body)).toBe(200)
+    expect((await commit(otherNamespace, otherPreview.body.expectedVersion, randomUUID())).status).toBe(200)
+
+    await setActivation(beta, false)
+    expect((await lookup(randomUUID())).status).toBe(403)
+  })
+
+  it('refuses a stale preview after pausing and re-enabling the same audience', async () => {
+    await setActivation(alpha, true)
+    const before = await preview()
+    expect(before.status, JSON.stringify(before.body)).toBe(200)
+    await setActivation(alpha, false)
+    await setActivation(alpha, true)
+    const id = randomUUID()
+    const stale = await commit(input, before.body.expectedVersion, id)
+    expect(stale.status).toBe(409)
+    expect(stale.body.error.code).toBe('STALE_PREVIEW')
+    const fresh = await preview()
+    expect(fresh.status, JSON.stringify(fresh.body)).toBe(200)
+    expect((await commit(input, fresh.body.expectedVersion, id)).status).toBe(200)
   })
 })

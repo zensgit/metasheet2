@@ -34,12 +34,14 @@ beforeAll(async () => {
       password_hash text, must_change_password boolean DEFAULT false, local_password_set boolean DEFAULT true,
       created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now());
     CREATE TABLE roles (id text PRIMARY KEY, name text, updated_at timestamptz DEFAULT now());
-    CREATE TABLE user_roles (user_id text, role_id text, PRIMARY KEY(user_id, role_id));
+    CREATE TABLE permissions (code text PRIMARY KEY, name text);
+    CREATE TABLE user_roles (user_id text, role_id text, assignment_source text, PRIMARY KEY(user_id, role_id));
     CREATE TABLE role_permissions (role_id text, permission_code text, PRIMARY KEY(role_id, permission_code));
     CREATE TABLE user_permissions (user_id text, permission_code text, PRIMARY KEY(user_id, permission_code));
     CREATE TABLE user_namespace_admissions (user_id text, namespace text, enabled boolean, source text, granted_by text, updated_by text, created_at timestamptz, updated_at timestamptz, PRIMARY KEY(user_id, namespace));
     CREATE TABLE delegated_role_admin_scopes (id text PRIMARY KEY, admin_user_id text, namespace text, directory_department_id text, include_children boolean);
     CREATE TABLE delegated_role_admin_member_groups (id text PRIMARY KEY, admin_user_id text, namespace text, group_id text);
+    CREATE TABLE delegated_role_admin_activation (admin_user_id text, namespace text, enabled boolean NOT NULL, revision uuid NOT NULL, PRIMARY KEY(admin_user_id, namespace));
     CREATE TABLE user_session_revocations (user_id text PRIMARY KEY, revoked_after timestamptz, updated_at timestamptz, updated_by text, reason text);
     CREATE TABLE user_sessions (id text, user_id text, revoked_at timestamptz);
     CREATE TABLE authorization_operation_receipts (actor_id text NOT NULL, client_operation_id uuid NOT NULL, request_digest text NOT NULL, expected_version text NOT NULL, target_user_id text NOT NULL, action jsonb NOT NULL, receipt jsonb NOT NULL, created_at timestamptz DEFAULT now(), PRIMARY KEY(actor_id, client_operation_id));
@@ -68,7 +70,7 @@ afterAll(async () => {
   await control.end()
 })
 beforeEach(async () => {
-  await control.query('TRUNCATE authorization_operation_audit, authorization_operation_receipts, user_namespace_admissions, user_permissions, user_roles, delegated_role_admin_scopes, delegated_role_admin_member_groups, user_session_revocations, users')
+  await control.query('TRUNCATE authorization_operation_audit, authorization_operation_receipts, user_namespace_admissions, user_permissions, user_roles, delegated_role_admin_scopes, delegated_role_admin_member_groups, delegated_role_admin_activation, user_session_revocations, users')
   await control.query(`INSERT INTO users (id,name,email,role,is_admin) VALUES ($1,'operator','operator@example.test','admin',true), ($2,'target','target@example.test','user',false), ($3,'other','other@example.test','admin',true)`, [actor,target,other])
   await control.query("INSERT INTO user_roles VALUES ($1,'admin'),($2,'admin')", [actor,other])
 })
@@ -227,6 +229,9 @@ describe('authorization operation real HTTP and synthetic PostgreSQL', () => {
     await control.query("INSERT INTO user_roles VALUES ($1,'attendance_admin')", [target])
     await control.query("INSERT INTO delegated_role_admin_scopes VALUES ('department-1',$1,'attendance','dept-1',true)", [target])
     await control.query("INSERT INTO delegated_role_admin_member_groups VALUES ('group-1',$1,'attendance','group-x')", [target])
+    const priorRevision = randomUUID()
+    const otherRevision = randomUUID()
+    await control.query("INSERT INTO delegated_role_admin_activation VALUES ($1,'attendance',true,$2),($1,'other',true,$3)", [target, priorRevision, otherRevision])
     const body = { targetUserId: target, action: { kind: 'role.revoke', roleId: 'attendance_admin' }, admissionChanges: [] }
     try {
       const pre = await preview(body); expect(pre.status, JSON.stringify(pre.body)).toBe(200)
@@ -234,7 +239,81 @@ describe('authorization operation real HTTP and synthetic PostgreSQL', () => {
       const done = await commit(pre.body.expectedVersion, randomUUID(), body); expect(done.status, JSON.stringify(done.body)).toBe(200)
       expect((await control.query('SELECT count(*)::int AS n FROM delegated_role_admin_scopes')).rows[0].n).toBe(0)
       expect((await control.query('SELECT count(*)::int AS n FROM delegated_role_admin_member_groups')).rows[0].n).toBe(0)
+
+      const readActivation = () => control.query('SELECT namespace, enabled, revision FROM delegated_role_admin_activation WHERE admin_user_id=$1 ORDER BY namespace', [target])
+      const [disabled, unrelated] = (await readActivation()).rows
+      expect(disabled).toMatchObject({ namespace: 'attendance', enabled: false })
+      expect(disabled.revision).not.toBe(priorRevision)
+      expect(unrelated).toEqual({ namespace: 'other', enabled: true, revision: otherRevision })
+
+      const assign = { ...body, action: { kind: 'role.assign', roleId: 'attendance_admin' } }
+      const newAppointment = await preview(assign)
+      expect(newAppointment.status, JSON.stringify(newAppointment.body)).toBe(200)
+      expect((await commit(newAppointment.body.expectedVersion, randomUUID(), assign)).status).toBe(200)
+      const [reappointed] = (await readActivation()).rows
+      expect(reappointed).toMatchObject({ namespace: 'attendance', enabled: false })
+      expect(reappointed.revision).not.toBe(disabled.revision)
+
+      const repeatAppointment = await preview(assign)
+      expect(repeatAppointment.status).toBe(200)
+      expect((await commit(repeatAppointment.body.expectedVersion, randomUUID(), assign)).status).toBe(200)
+      expect((await readActivation()).rows).toEqual([reappointed, unrelated])
     } finally { await control.query("DELETE FROM role_permissions WHERE role_id='attendance_admin'; DELETE FROM roles WHERE id='attendance_admin'") }
+  })
+
+  it('rolls back a revoke if the database does not store the disabled activation', async () => {
+    await control.query("INSERT INTO roles(id,name) VALUES ('attendance_admin','administrator')")
+    await control.query("INSERT INTO user_roles VALUES ($1,'attendance_admin')", [target])
+    const revision = randomUUID()
+    await control.query("INSERT INTO delegated_role_admin_activation VALUES ($1,'attendance',true,$2)", [target, revision])
+    const body = { targetUserId: target, action: { kind: 'role.revoke', roleId: 'attendance_admin' }, admissionChanges: [] }
+    try {
+      const pre = await preview(body)
+      expect(pre.status, JSON.stringify(pre.body)).toBe(200)
+      await control.query(`CREATE FUNCTION keep_activation_enabled() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN NEW.enabled := TRUE; RETURN NEW; END $$;
+        CREATE TRIGGER keep_activation_enabled BEFORE UPDATE ON delegated_role_admin_activation
+          FOR EACH ROW EXECUTE FUNCTION keep_activation_enabled()`)
+      const done = await commit(pre.body.expectedVersion, randomUUID(), body)
+      expect(done.status, JSON.stringify(done.body)).toBe(409)
+      expect(done.body.error.code).toBe('AUTHORIZATION_INPUT_INCOMPLETE')
+      expect((await control.query('SELECT role_id FROM user_roles WHERE user_id=$1', [target])).rows).toEqual([{ role_id: 'attendance_admin' }])
+      expect((await control.query('SELECT enabled, revision FROM delegated_role_admin_activation WHERE admin_user_id=$1', [target])).rows).toEqual([{ enabled: true, revision }])
+      expect((await control.query('SELECT count(*)::int AS n FROM authorization_operation_audit')).rows[0].n).toBe(0)
+    } finally {
+      await control.query('DROP TRIGGER IF EXISTS keep_activation_enabled ON delegated_role_admin_activation; DROP FUNCTION IF EXISTS keep_activation_enabled()')
+      await control.query("DELETE FROM roles WHERE id='attendance_admin'")
+    }
+  })
+
+  it('preserves delegation when appointing a canonical role alongside a historical role for the same namespace', async () => {
+    const { assignUserRoles } = await import('../../src/rbac/role-assignment')
+    await control.query("INSERT INTO roles(id,name) VALUES ('attendance_admin','administrator'),('attendance_admin ','historical administrator')")
+    await control.query("INSERT INTO user_roles VALUES ($1,'attendance_admin ')", [target])
+    await control.query("INSERT INTO delegated_role_admin_member_groups VALUES ('group-1',$1,'attendance','group-x')", [target])
+    const revision = randomUUID()
+    await control.query("INSERT INTO delegated_role_admin_activation VALUES ($1,'attendance',true,$2)", [target, revision])
+    try {
+      await control.query('BEGIN')
+      try {
+        // The command plan refuses historical noncanonical role ids. Exercise the shared
+        // writer directly, as the existing platform member-role route does.
+        const result = await assignUserRoles({
+          userIds: [target], roleId: 'attendance_admin', scope: { kind: 'platform-admin' },
+          executor: { query: (sql, params) => control.query(sql, params) },
+        })
+        expect(result.affectedUserIds).toEqual([target])
+        expect(result.delegatedAdminScopeCleanup).toEqual([])
+        await control.query('COMMIT')
+      } catch (error) {
+        await control.query('ROLLBACK')
+        throw error
+      }
+      expect((await control.query('SELECT enabled, revision FROM delegated_role_admin_activation WHERE admin_user_id=$1', [target])).rows).toEqual([{ enabled: true, revision }])
+      expect((await control.query('SELECT id FROM delegated_role_admin_member_groups WHERE admin_user_id=$1', [target])).rows).toEqual([{ id: 'group-1' }])
+    } finally {
+      await control.query("DELETE FROM roles WHERE id IN ('attendance_admin', 'attendance_admin ')")
+    }
   })
   it('serializes concurrent same-key requests and keeps receipts actor-bound', async () => {
     const pre = await preview(); const id = randomUUID()

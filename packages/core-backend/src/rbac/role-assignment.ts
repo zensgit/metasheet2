@@ -60,6 +60,7 @@
  */
 import type { Response } from 'express'
 import { Logger } from '../core/logger'
+import { isDelegatedScopeActivationEnabled } from '../admin/delegated-scope-activation'
 import { query as poolQuery } from '../db/pg'
 import { jsonError } from '../util/response'
 import {
@@ -442,14 +443,32 @@ async function clearDelegatedAdminScopesWhereNamespaceLost(
   )
   const stillDelegated = new Set<string>()
   for (const row of held.rows as Array<Record<string, unknown>>) {
-    const heldRoleId = normalizeRoleId(row?.role_id)
-    if (!heldRoleId || heldRoleId === options.ignoreRoleId) continue
+    const heldRoleId = row.role_id
+    // The newly written row has this exact id. A historical padded id can still
+    // derive the namespace and belongs to a different membership.
+    if (typeof heldRoleId !== 'string' || heldRoleId === options.ignoreRoleId) continue
     if (deriveDelegatedAdminNamespace(heldRoleId) === namespace) {
       stillDelegated.add(normalizeRoleId(row?.user_id))
     }
   }
   const lostUserIds = userIds.filter((userId) => !stillDelegated.has(userId))
   if (lostUserIds.length === 0) return []
+
+  // Reset the lifetime together with the audience. Disabling rollout only stops
+  // creating new state for legacy subjects. Previously managed subjects stay
+  // disabled after a genuine revoke or fresh appointment, even in that mode.
+  await executor.query(
+    `INSERT INTO delegated_role_admin_activation (admin_user_id, namespace, enabled, revision)
+     SELECT subject.user_id, $2, FALSE, pg_catalog.gen_random_uuid()
+     FROM unnest($1::text[]) AS subject(user_id)
+     WHERE $3::boolean OR EXISTS (
+       SELECT 1 FROM delegated_role_admin_activation previous
+       WHERE previous.admin_user_id = subject.user_id AND previous.namespace = $2
+     )
+     ON CONFLICT (admin_user_id, namespace)
+     DO UPDATE SET enabled = FALSE, revision = EXCLUDED.revision`,
+    [lostUserIds, namespace, isDelegatedScopeActivationEnabled()],
+  )
 
   const scopes = await executor.query(
     `DELETE FROM delegated_role_admin_scopes
