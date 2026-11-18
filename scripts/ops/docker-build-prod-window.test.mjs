@@ -908,6 +908,7 @@ describe('production deploy window: remote_deploy step run against test doubles'
       { extra: ['harness-listing-marker.txt'], controls: [['deploy-path.ls', 'harness-listing-marker.txt']] }],
     ['the deploy directory is missing (the home listing stays on the host)', { listingMarker: true }, { DEPLOY_PATH: 'missing-deploy-dir' },
       { extra: ['harness-listing-marker.txt'], controls: [['deploy-path.ls', 'harness-listing-marker.txt']] }],
+    ['the running backend\'s mounts cannot be read (app data present)', { appdata: true, attVolume: true }, { H_MOUNTS_FAIL: '1' }],
     ['crontab -l does not answer within its limit', {}, { H_CRONTAB_RC: '124' }],
     ['df does not answer within its limit', {}, { H_DF_RC: '124' }],
     ['two filesystems: not enough free space on the Docker root', {}, { H_DF_TWO_FS: '1', H_DF_ROOT_FREE_KB: '4321987' },
@@ -940,6 +941,10 @@ describe('production deploy window: remote_deploy step run against test doubles'
       if (env.H_DF_TWO_FS) assert.match(r.windowLog, env.H_DF_ROOT_FREE_KB ? /not enough free space on the Docker root/ : /not enough free space for the run directory/)
       if (env.H_DF_RC) assert.match(r.windowLog, /disk gate pre-pull: df did not return integer free space/)
       if (env.H_CRONTAB_RC) assert.match(r.windowLog, /crontab -l did not answer within 10 s/)
+      if (env.H_MOUNTS_FAIL) {
+        assert.match(r.windowLog, /app data probe: could not read the backend's mounts/)
+        assert.ok(!any(r, isPull), 'refused before the pull')
+      }
       if (env.H_GIT_NOT_REPO) assert.match(r.windowLog, /the deploy directory is not a git work tree; refusing/)
       if (env.DEPLOY_PATH) assert.match(r.windowLog, /DEPLOY_PATH missing: missing-deploy-dir/)
       // A failing sync step ends the sync there, with a fixed line; its output stays on the host.

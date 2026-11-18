@@ -205,6 +205,8 @@ do_inspect() {
     '{{if .State.Health}}'*) get "$name" health; echo ;;
     '{{index .Config.Labels "'*) local k="${fmt#*\"}"; k="${k%%\"*}"; get "$name" "label.${k}"; echo ;;
     '{{range .Mounts}}{{println .Destination}}{{end}}')
+      # H_MOUNTS_FAIL=1: the old backend's mounts cannot be read (the created one's still can).
+      if [[ "${H_MOUNTS_FAIL:-0}" == "1" && "$(get "$name" image_id)" == sha256:old* ]]; then echo "Error: harness inspect failure" >&2; exit 1; fi
       # The compose file mounts the attendance-import volume into every backend container.
       if [[ "$name" == "metasheet-backend" ]]; then echo /app/uploads/attendance-import; fi
       echo
