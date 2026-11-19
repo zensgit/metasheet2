@@ -31,8 +31,9 @@
  *            the pull and out of the settlement digest (父组件图号 / 父组件名称 are denormalized PLM columns the planner
  *            compares and the digest includes). On a settled PILOT project a person adds a manual row under a PLM
  *            assembly and then moves it to a new parent, both through the HOST's manual-row routes (the real univer-meta
- *            router): the next preview is `ready` and does not touch the row (version and cells byte-identical), and the
- *            formal export stays 200 — never 409 SHEET_CHANGED_SINCE_SETTLEMENT — printing the parent the person set.
+ *            router): the next preview is `ready` and does not touch the row (version and cells byte-identical); the
+ *            pull is then EXECUTED (the apply, inside its real write lease) and still leaves the row byte-identical; and
+ *            the formal export stays 200 — never 409 SHEET_CHANGED_SINCE_SETTLEMENT — printing the parent the person set.
  * Values-free: every id is synthetic and per-run.
  */
 import { createRequire } from 'module'
@@ -432,7 +433,7 @@ export function defineStockPreparationManualRowsRealDbCases(): void {
       expect(errorOf(refused).code).toBe(SHEET_CHANGED)
     }, 300000)
 
-    test("MR-RD-04 (ADR §12.4 ③) a manual row's parent, set and then changed through the HOST routes after the settlement: the pull leaves the row alone and the formal export stays 200", async () => {
+    test("MR-RD-04 (ADR §12.4 ③) a manual row's parent, set and then changed through the HOST routes after the settlement: the pull — previewed, then EXECUTED — leaves the row alone and the formal export stays 200", async () => {
       const st = await stack('parent', { pilot: true })
       const first = await st.dryRun()
       expect(first.statusCode, JSON.stringify(first.body)).toBe(200)
@@ -495,13 +496,32 @@ export function defineStockPreparationManualRowsRealDbCases(): void {
       expect(preview.body.data.manualSupplement).toMatchObject({ rowCount: 1, unboundKeyCount: 0 })
       expect(await st.recordState(manualId)).toEqual(afterEdit)
 
-      // …and the formal export is still delivered: the settlement digest never saw the pair change.
+      // …and it is EXECUTED (ADR §12.4 ③ 「执行拉取」): the apply takes the sheet's write lease and recomputes the plan
+      // inside it, from the same reader. It finds the two PLM rows unchanged and writes nothing; the manual row is set
+      // aside there too — the same version, the same cells, the same creator after the pull has run.
+      const pulled = await st.apply(preview.body.data.dryRunToken)
+      expect(pulled.statusCode, JSON.stringify(pulled.body)).toBe(200)
+      expect(pulled.body.data.status).toBe('succeeded')
+      expect(pulled.body.data.apply.counts).toEqual({ created: 0, updated: 0, inactive: 0, skipped: 2, held: 0, failed: 0 })
+      expect(pulled.body.data.manualSupplement).toMatchObject({ rowCount: 1, unboundKeyCount: 0 })
+      expect(await st.recordState(manualId)).toEqual(afterEdit)
+      // That apply really ran in the write lane: its reminder was persisted INSIDE its own lease (read through the real lock).
+      expect(st.reminderWrites.at(-1)).toEqual({ mode: 'apply', leaseHeld: true, leasePurpose: 'small_apply' })
+
+      // …and the formal export is still delivered after the executed pull: the settlement digest never saw the pair
+      // change, and the pull did not move it either.
       const afterPull = await st.exportLines()
       expect(afterPull.statusCode, JSON.stringify(errorOf(afterPull))).toBe(200)
       expect(manualLine(afterPull)).toEqual({ parent: 'MRB1-NEW-PARENT', source: '人工补充' })
       // The PLM rows were not touched by any of it (version and cells as they were at the settlement).
       expect(await st.plmRecordIds()).toEqual(plmIds)
       expect(await Promise.all(plmIds.map((id) => st.recordState(id)))).toEqual(plmBefore)
+      // A further preview finds nothing to do, still sets the row aside, and the export answers 200 once more.
+      const next = await st.dryRun()
+      expect(next.body.data.status, JSON.stringify(next.body)).toBe('ready')
+      expect(next.body.data.counts).toEqual({ add: 0, update: 0, skip: 2, inactive: 0, manual_confirm: 0 })
+      expect(await st.recordState(manualId)).toEqual(afterEdit)
+      expect((await st.exportLines()).statusCode).toBe(200)
     }, 300000)
   })
 }
