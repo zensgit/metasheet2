@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { SUBJECT_AUTHORIZATION_VERSIONS_BUMP_SQL } from '../../src/multitable/authz-version-protocol'
 import { Pool as PgPool } from 'pg'
 import type { PoolClient } from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -245,6 +246,18 @@ function rootPid() {
   const pid = state.pids[0]
   if (!pid) throw new Error('ROOT_PID_MISSING')
   return pid
+}
+/**
+ * D21 (Y5a): a revoker's uncommitted DELETE on user_roles / platform_member_group_members took the
+ * subject's version row through its BEFORE trigger, and the command's access-graph mutex bumps the
+ * sorted subjects' version rows first, so the command queues there — before any child or membership
+ * share — and reads the committed state after the revoker commits.
+ */
+function expectQueuedOnSubjectVersions(waiting: string, subjects: readonly string[]) {
+  expect(waiting).toContain('INSERT INTO subject_authorization_versions')
+  const statement = waitingStatement()
+  expect(statement.sql).toBe(SUBJECT_AUTHORIZATION_VERSIONS_BUMP_SQL.replace(/\s+/g, ' ').trim())
+  expect(statement.params).toEqual([[...subjects].sort()])
 }
 function waitingStatement() {
   const live = state.live
@@ -687,13 +700,8 @@ describeWithDatabase('role delegation namespace admission on the real pool; regi
     try {
       await until(() => Boolean(state.pids[0]), 'ROOT_CALLBACK_NOT_STARTED')
       const waiting = await blockedQuery(rootPid(), holder.pid)
-      const statement = waitingStatement()
       expect(holder.pid).toBeGreaterThan(0)
-      expect(waiting).toContain('FOR SHARE')
-      expect(waiting).toContain('user_roles')
-      expect(waiting).toContain("role_id = 'admin'")
-      expect(statement.sql).toMatch(ADMIN_SHARE)
-      expect(statement.params).toEqual([fixture.actorId])
+      expectQueuedOnSubjectVersions(waiting, [fixture.actorId, fixture.targetId])
       expect(state.live?.sql.some(sql => ADMISSION_INSERT.test(sql))).toBe(false)
       expect(state.events).not.toContain('BUSINESS_COMMIT')
       expect(await storedAdmissions([fixture.targetId])).toEqual([])
@@ -975,14 +983,8 @@ describeWithDatabase('role delegation namespace admission on the real pool; regi
     try {
       await until(() => Boolean(state.pids[0]), 'ROOT_CALLBACK_NOT_STARTED')
       const waiting = await blockedQuery(rootPid(), holder.pid)
-      const statement = waitingStatement()
       expect(holder.pid).toBeGreaterThan(0)
-      expect(waiting).toContain('FOR SHARE')
-      expect(waiting).toContain('user_roles')
-      expect(waiting).toContain('ANY($2::text[])')
-      expect(waiting).not.toContain("role_id = 'admin'")
-      expect(statement.sql).toMatch(DERIVING_SHARE)
-      expect(statement.params).toEqual([fixture.actorId, [fixture.roleId]])
+      expectQueuedOnSubjectVersions(waiting, [fixture.actorId, fixture.targetId])
       expect(state.live?.sql.some(sql => ADMISSION_INSERT.test(sql))).toBe(false)
       expect(state.events).not.toContain('BUSINESS_COMMIT')
       expect(await storedAdmissions([fixture.targetId])).toEqual([])
@@ -1632,12 +1634,8 @@ describeWithDatabase('role delegation namespace admission on the real pool; regi
     try {
       await until(() => Boolean(state.pids[0]), 'ROOT_CALLBACK_NOT_STARTED')
       const waiting = await blockedQuery(rootPid(), holder.pid)
-      const statement = waitingStatement()
       expect(holder.pid).toBeGreaterThan(0)
-      expect(waiting).toContain('FOR SHARE')
-      expect(waiting).toContain('platform_member_group_members')
-      expect(statement.sql).toMatch(MEMBERSHIP_SHARE)
-      expect(statement.params).toEqual([groupId, fixture.targetId])
+      expectQueuedOnSubjectVersions(waiting, [fixture.actorId, fixture.targetId])
       expect(state.events).not.toContain('BUSINESS_COMMIT')
       expect(await storedAdmissions([fixture.targetId])).toEqual([])
       await holder.client.query('COMMIT')
@@ -1652,7 +1650,9 @@ describeWithDatabase('role delegation namespace admission on the real pool; regi
       expect(result.value.statusCode).toBe(403)
       expect(result.value.body).toEqual(outOfScopeBody())
     }
-    expect(counts).toEqual([0])
+    // D21 (Y5a): the admission queued on the target's version row until the delete committed, so its
+    // inventory no longer holds the membership and no membership share is taken.
+    expect(counts).toEqual([])
     expect(state.traces).toHaveLength(1)
     expect(state.traces[0]?.committed).toBe(false)
     expect(state.traces[0]?.sql.some(sql => ADMISSION_INSERT.test(sql))).toBe(false)
@@ -1778,7 +1778,13 @@ describeWithDatabase('role delegation namespace admission on the real pool; regi
     }
   }
 
-  test('two-group projection cycle records whichever backend PostgreSQL selects as the 40P01 victim', async () => {
+  test('two-group projection deletes serialize on the target subject version row (D21): no 40P01, and the admission reads the committed removal', async () => {
+    // Before D21 the holder's two membership deletes (high group, then low group) and the admission's
+    // two membership shares (low, then high) formed a 40P01 cycle. D21 makes both sides take the
+    // target's subject version row first: the holder's first DELETE takes it through its trigger, the
+    // admission's mutex bump queues behind it, and the holder's second DELETE re-bumps a row it
+    // already holds, so it never waits and no cycle forms. The admission then reads the committed
+    // state: neither membership is left, so the target is out of scope.
     const fixture = await delegatedPair()
     const firstGroupId = await insertGroup()
     const secondGroupId = await insertGroup()
@@ -1792,71 +1798,41 @@ describeWithDatabase('role delegation namespace admission on the real pool; regi
     const lowGroupId = ordered[0] ?? ''
     const highGroupId = ordered[1] ?? ''
     const holder = await control()
-    let released = false
-    const releaseHolder = async () => {
-      if (released) return
-      released = true
+    await holder.client.query(PROJECTION_MEMBER_DELETE_SQL, [highGroupId, [fixture.targetId]])
+    const pending = outcome(invoke(fixture.actorId, fixture.targetId, fixture.namespace, true, 'delegated'))
+    let committed = false
+    let result: Awaited<typeof pending> | undefined
+    try {
+      await until(() => Boolean(state.pids[0]), 'ROOT_CALLBACK_NOT_STARTED')
+      const waiting = await blockedQuery(rootPid(), holder.pid)
+      expect(holder.pid).toBeGreaterThan(0)
+      expectQueuedOnSubjectVersions(waiting, [fixture.actorId, fixture.targetId])
+      await holder.client.query(PROJECTION_MEMBER_DELETE_SQL, [lowGroupId, [fixture.targetId]])
+      expect(state.events).not.toContain('BUSINESS_COMMIT')
+      expect(await storedAdmissions([fixture.targetId])).toEqual([])
+      await holder.client.query('COMMIT')
+      committed = true
+    } finally {
+      if (!committed) await holder.client.query('ROLLBACK').catch(() => undefined)
+      result = await pending
       await holder.close()
     }
-    try {
-      await holder.client.query(PROJECTION_MEMBER_DELETE_SQL, [highGroupId, [fixture.targetId]])
-      const { result, closed } = await settleCycle(
-        holder.pid,
-        () => invoke(fixture.actorId, fixture.targetId, fixture.namespace, true, 'delegated'),
-        () => holder.client.query(PROJECTION_MEMBER_DELETE_SQL, [lowGroupId, [fixture.targetId]]),
-        observed => {
-          expect(observed.pid).toBe(rootPid())
-          expect(observed.query).toContain('FOR SHARE')
-          expect(observed.query).toContain('platform_member_group_members')
-          const statement = waitingStatement()
-          expect(statement.sql).toMatch(MEMBERSHIP_SHARE)
-          expect(statement.params).toEqual([highGroupId, fixture.targetId])
-          expect(statementParams(state.live, DEPARTMENT_SHARE)).toEqual([])
-        },
-        releaseHolder,
-      )
-      const writerVictim = closed.ok === false && sqlState(closed.error) === '40P01' && result.ok === true
-      const admissionVictim = closed.ok === true && result.ok === true && result.value.statusCode === 409 && state.sqlStates.includes('40P01')
-      expect([writerVictim, admissionVictim].filter(Boolean)).toHaveLength(1)
-      expect(state.sqlStates).not.toContain('55P03')
-      expect(state.traces).toHaveLength(1)
-      if (admissionVictim && result.ok) {
-        expect(result.value.body).toEqual(busyBody())
-        expect(state.traces[0]?.committed).toBe(false)
-        expect(state.traces[0]?.sql.some(sql => ADMISSION_INSERT.test(sql))).toBe(false)
-        expectNoEffects()
-        expect(await storedAdmissions([fixture.targetId])).toEqual([])
-        await holder.client.query('COMMIT')
-        expect((await observer.query(
-          'SELECT count(*)::int AS memberships FROM platform_member_group_members WHERE user_id = $1 AND group_id = ANY($2::uuid[])',
-          [fixture.targetId, [lowGroupId, highGroupId]],
-        )).rows).toEqual([{ memberships: 0 }])
-      }
-      if (writerVictim && result.ok) {
-        expect(state.sqlStates).not.toContain('40P01')
-        await holder.client.query('ROLLBACK')
-        expect(result.value.statusCode).toBe(200)
-        const root = expectCommittedRoot()
-        expectRootOrder(root, [fixture.roleId], subjectsOf(fixture.actorId, fixture.targetId))
-        expect(statementParams(root, MEMBERSHIP_SHARE)).toEqual([[lowGroupId, fixture.targetId], [highGroupId, fixture.targetId]])
-        expect(statementParams(root, DEPARTMENT_SHARE)).toEqual([])
-        const groupReads = root.sql.flatMap((sql, index) => sql.startsWith('SELECT DISTINCT gscope.group_id') && !sql.includes(') AS allowed') ? [index] : [])
-        const allowed = root.sql.flatMap((sql, index) => sql.includes(') AS allowed') ? [index] : [])
-        const inserted = root.sql.findIndex(sql => ADMISSION_INSERT.test(sql))
-        expect(groupReads).toHaveLength(2)
-        expect(groupReads[1] ?? -1).toBeGreaterThan(matches(root, MEMBERSHIP_SHARE).at(-1) ?? -1)
-        expect(allowed[1] ?? -1).toBeGreaterThan(groupReads[1] ?? -1)
-        expect(inserted).toBeGreaterThan(allowed[1] ?? -1)
-        await expectPersisted(fixture.targetId, fixture.namespace, fixture.actorId, 'delegated_admin')
-        expect((await observer.query(
-          'SELECT count(*)::int AS memberships FROM platform_member_group_members WHERE user_id = $1 AND group_id = ANY($2::uuid[])',
-          [fixture.targetId, [lowGroupId, highGroupId]],
-        )).rows).toEqual([{ memberships: 2 }])
-        expectGrantAudit(fixture.actorId, fixture.targetId, fixture.namespace, true, [fixture.namespace])
-      }
-    } finally {
-      await releaseHolder()
+    expect(state.sqlStates).not.toContain('40P01')
+    expect(state.sqlStates).not.toContain('55P03')
+    expect(result?.ok).toBe(true)
+    if (result?.ok) {
+      expect(result.value.statusCode).toBe(403)
+      expect(result.value.body).toEqual(outOfScopeBody())
     }
+    expect(state.traces).toHaveLength(1)
+    expect(state.traces[0]?.committed).toBe(false)
+    expect(state.traces[0]?.sql.some(sql => ADMISSION_INSERT.test(sql))).toBe(false)
+    expectNoEffects()
+    expect(await storedAdmissions([fixture.targetId])).toEqual([])
+    expect((await observer.query(
+      'SELECT count(*)::int AS memberships FROM platform_member_group_members WHERE user_id = $1 AND group_id = ANY($2::uuid[])',
+      [fixture.targetId, [lowGroupId, highGroupId]],
+    )).rows).toEqual([{ memberships: 0 }])
   })
 
   test('two-department projection cycle records whichever backend PostgreSQL selects as the 40P01 victim', async () => {

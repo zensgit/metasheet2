@@ -172,6 +172,8 @@ async function withFixture(kind: ColumnKind, run: (fixture: Fixture) => Promise<
     await service.query(`SET lock_timeout = '0'`)
     await service.query(`SET statement_timeout = '0'`)
     await service.query(usersDdl(kind))
+    // D21 (Y5a): the access-graph mutex bumps the subjects' version rows before the users rows.
+    await service.query('CREATE TABLE subject_authorization_versions (LIKE public.subject_authorization_versions INCLUDING ALL)')
     await service.query(rolesDdl)
     await service.query(effectsDdl)
     await service.query(eventsDdl)
