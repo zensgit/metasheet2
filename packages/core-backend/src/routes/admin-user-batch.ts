@@ -373,6 +373,7 @@ async function createOne(adminUserId: string, row: PlannedCreateRow): Promise<Ba
         await assignUserRoles({
           userIds: [userId],
           roleId: row.roleId,
+          assignmentSource: 'creation',
           scope: { kind: 'platform-admin' },
           executor: client,
         })
@@ -467,6 +468,7 @@ async function applyUpdate(adminUserId: string, row: PlannedUpdate): Promise<Bat
         await assignUserRoles({
           userIds: [row.userId],
           roleId,
+          assignmentSource: 'manual',
           scope: { kind: 'platform-admin' },
           executor: client,
         })

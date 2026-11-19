@@ -31,6 +31,8 @@ export default defineConfig({
     exclude: [
       'tests/integration/admin-user-batch-review.db.test.ts',
       'tests/integration/admin-user-recycle-review.db.test.ts',
+      // This suite has a dedicated isolated-PG runner with trust-on/off sentinels.
+      'tests/integration/business-check-realdb.test.ts',
       '**/node_modules/**',
       '**/dist/**',
       // Integration tests requiring a live DB or pluginDirs PluginLoader API:

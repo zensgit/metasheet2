@@ -46,9 +46,9 @@ function repoPluginNames(): string[] {
 }
 
 describe('YiDa host capability injection scoping', () => {
-  it('injects all three YiDa capabilities into plugin-integration-core', () => {
+  it('injects all four YiDa capabilities into plugin-integration-core', () => {
     const services = servicesFor('plugin-integration-core')
-    for (const key of ['yidaOwnerRuntime', 'yidaInitializationRuntime', 'yidaConnectionTestRuntime']) {
+    for (const key of ['yidaOwnerRuntime', 'yidaInitializationRuntime', 'yidaConnectionTestRuntime', 'yidaReconciliationRuntime']) {
       const capability = services[key] as { activate?: unknown } | undefined
       expect(capability, key).toBeDefined()
       expect(typeof capability?.activate, key).toBe('function')
@@ -63,16 +63,17 @@ describe('YiDa host capability injection scoping', () => {
     'plugin-integration-core ',
     'plugin-integration',
     'plugin-some-other',
-  ])('withholds all three YiDa capabilities from %j', name => {
+  ])('withholds all four YiDa capabilities from %j', name => {
     const services = servicesFor(name)
     // Positive control: the same context builder did produce the shared services.
     expect(typeof services.security).toBe('object')
     expect(services.yidaOwnerRuntime).toBeUndefined()
     expect(services.yidaInitializationRuntime).toBeUndefined()
     expect(services.yidaConnectionTestRuntime).toBeUndefined()
+    expect(services.yidaReconciliationRuntime).toBeUndefined()
   })
 
-  it('withholds all three YiDa capabilities from every other plugin the repo ships', () => {
+  it('withholds all four YiDa capabilities from every other plugin the repo ships', () => {
     const names = repoPluginNames()
     // Not vacuous: the scan found the core plugin and at least one real other plugin.
     expect(names).toContain('plugin-integration-core')
@@ -81,7 +82,7 @@ describe('YiDa host capability injection scoping', () => {
       const services = servicesFor(name)
       expect(typeof services.security, name).toBe('object')
       return services.yidaOwnerRuntime !== undefined || services.yidaInitializationRuntime !== undefined
-        || services.yidaConnectionTestRuntime !== undefined
+        || services.yidaConnectionTestRuntime !== undefined || services.yidaReconciliationRuntime !== undefined
     })
     expect(holders).toEqual(['plugin-integration-core'])
   })

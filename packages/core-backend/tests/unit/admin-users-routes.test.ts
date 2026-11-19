@@ -278,6 +278,19 @@ function lockedUserResult(id: string, role = 'user') {
   }] }
 }
 
+// The migrated schema has no activation row for an existing delegated administrator.
+function noStoredDelegationActivation(userId: string, namespace: string | string[]) {
+  return async (sql: string, params: unknown[]) => {
+    const statement = sql.replace(/\s+/g, ' ')
+    const query = Array.isArray(namespace)
+      ? 'SELECT namespace, enabled FROM delegated_role_admin_activation WHERE admin_user_id = $1 AND namespace = ANY($2::text[])'
+      : 'SELECT enabled FROM delegated_role_admin_activation WHERE admin_user_id=$1 AND namespace=$2'
+    expect(statement).toBe(query)
+    expect(params).toEqual([userId, namespace])
+    return { rows: [] }
+  }
+}
+
 function expectScopeWriteSerialized(userId: string, writeSqlIncludes: string): void {
   expect(namespaceAdmissionMocks.lockNamespaceAdmissionWrites).toHaveBeenCalledWith(expect.anything(), userId)
   const roleReads = pgMocks.query.mock.calls
@@ -1540,6 +1553,7 @@ describe('admin-users routes', () => {
       .mockResolvedValueOnce({
         rows: [{ role_id: 'crm_admin' }, { role_id: 'attendance_employee' }],
       })
+      .mockImplementationOnce(noStoredDelegationActivation('crm-admin-1', ['crm']))
       .mockResolvedValueOnce({
         rows: [{
           id: 'crm_admin',
@@ -1649,6 +1663,7 @@ describe('admin-users routes', () => {
       .mockResolvedValueOnce({
         rows: [{ role_id: 'crm_admin' }],
       })
+      .mockImplementationOnce(noStoredDelegationActivation('crm-admin-1', ['crm']))
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [{
@@ -1880,6 +1895,7 @@ describe('admin-users routes', () => {
       .mockResolvedValueOnce({
         rows: [{ role_id: 'crm_admin' }],
       })
+      .mockImplementationOnce(noStoredDelegationActivation('crm-admin-1', ['crm']))
       .mockResolvedValueOnce({
         rows: [{
           id: 'user-1',
@@ -1917,6 +1933,7 @@ describe('admin-users routes', () => {
       .mockResolvedValueOnce(lockedUserResult('crm-admin-1', 'user'))
       .mockResolvedValueOnce(lockedUserResult('user-1', 'user'))
       .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
+      .mockImplementationOnce(noStoredDelegationActivation('crm-admin-1', ['crm']))
       .mockResolvedValueOnce({ rows: [{ configured: true }] })
       .mockResolvedValueOnce({ rows: [{ allowed: true }] })
 
@@ -1945,6 +1962,7 @@ describe('admin-users routes', () => {
       .mockResolvedValueOnce({
         rows: [{ role_id: 'crm_admin' }],
       })
+      .mockImplementationOnce(noStoredDelegationActivation('crm-admin-1', ['crm']))
       .mockResolvedValueOnce({
         rows: [{
           id: 'user-1',
@@ -1979,6 +1997,7 @@ describe('admin-users routes', () => {
       .mockResolvedValueOnce({
         rows: [{ role_id: 'crm_admin' }, { role_id: 'qa_admin' }],
       })
+      .mockImplementationOnce(noStoredDelegationActivation('plugin-admin-1', ['crm', 'qa']))
       .mockResolvedValueOnce({
         rows: [{
           id: 'user-1',
@@ -2012,6 +2031,7 @@ describe('admin-users routes', () => {
           department_is_active: true,
         }],
       })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ allowed: false }] })
 
     const response = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/roles/:action(assign|unassign)', {
@@ -2036,6 +2056,7 @@ describe('admin-users routes', () => {
       .mockResolvedValueOnce({
         rows: [{ role_id: 'crm_admin' }],
       })
+      .mockImplementationOnce(noStoredDelegationActivation('crm-admin-1', ['crm']))
       .mockResolvedValueOnce({
         rows: [{
           id: 'user-1',
@@ -2076,6 +2097,7 @@ describe('admin-users routes', () => {
       .mockResolvedValueOnce(lockedUserResult('crm-admin-1', 'user'))
       .mockResolvedValueOnce(lockedUserResult('user-1', 'user'))
       .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
+      .mockImplementationOnce(noStoredDelegationActivation('crm-admin-1', ['crm']))
       .mockResolvedValueOnce({ rows: [{ configured: true }] })
       .mockResolvedValueOnce({ rows: [{ allowed: true }] })
       .mockResolvedValueOnce({ rows: [{ permission_code: 'crm:read' }, { permission_code: 'crm:write' }] })
@@ -2149,6 +2171,7 @@ describe('admin-users routes', () => {
       .mockResolvedValueOnce({
         rows: [{ role_id: 'crm_admin' }],
       })
+      .mockImplementationOnce(noStoredDelegationActivation('crm-admin-1', ['crm']))
       .mockResolvedValueOnce({
         rows: [{
           id: 'user-1',
@@ -2184,6 +2207,7 @@ describe('admin-users routes', () => {
       .mockResolvedValueOnce(lockedUserResult('crm-admin-1', 'user'))
       .mockResolvedValueOnce(lockedUserResult('user-1', 'user'))
       .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
+      .mockImplementationOnce(noStoredDelegationActivation('crm-admin-1', ['crm']))
       .mockResolvedValueOnce({ rows: [{ configured: true }] })
       .mockResolvedValueOnce({ rows: [{ allowed: true }] })
       .mockResolvedValueOnce({ rows: [{ permission_code: 'crm:read' }] })
@@ -2288,6 +2312,7 @@ describe('admin-users routes', () => {
       .mockResolvedValueOnce({
         rows: [{ role_id: 'crm_admin' }],
       })
+      .mockImplementationOnce(noStoredDelegationActivation('crm-admin-1', ['crm']))
       .mockResolvedValueOnce({ rows: [] })
 
     const response = await invokeRoute('get', '/api/admin/role-delegation/users/:userId/access', {
@@ -2378,6 +2403,7 @@ describe('admin-users routes', () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
       .mockResolvedValueOnce({ rows: [] })
+      .mockImplementationOnce(noStoredDelegationActivation('user-2', 'crm'))
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [{
@@ -2634,6 +2660,7 @@ describe('admin-users routes', () => {
       .mockResolvedValueOnce(lockedUserResult('user-2', 'user'))
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ role_id: 'crm_admin' }] })
+      .mockImplementationOnce(noStoredDelegationActivation('user-2', 'crm'))
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
@@ -2716,6 +2743,8 @@ describe('admin-users routes', () => {
           member_count: 2,
         }],
       })
+      .mockImplementationOnce(noStoredDelegationActivation('user-2', 'crm'))
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
@@ -2859,6 +2888,8 @@ describe('admin-users routes', () => {
           department_is_active: true,
         }],
       })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockImplementationOnce(noStoredDelegationActivation('user-2', 'crm'))
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
@@ -3368,8 +3399,11 @@ describe('admin-users routes', () => {
   it('delegated assign returns ROLE_MODIFIED without a refusal audit', async () => {
     state.authUser = { id: 'crm-admin-1', role: 'user' }
     rbacMocks.isAdmin.mockResolvedValue(false)
-    pgMocks.query.mockImplementation(async (sql: string) => {
+    pgMocks.query.mockImplementation(async (sql: string, params: unknown[]) => {
       const statement = String(sql)
+      if (statement.startsWith('SELECT namespace, enabled')) {
+        return noStoredDelegationActivation('crm-admin-1', ['crm'])(statement, params)
+      }
       if (statement.includes('WITH RECURSIVE')) return { rows: [{ allowed: true }] }
       if (statement.includes('delegated_role_admin_member_groups')) return { rows: [] }
       if (statement.includes('delegated_role_admin_scopes')) return { rows: [{ id: 'scope-1' }] }

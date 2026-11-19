@@ -133,7 +133,7 @@ const pgMocks = vi.hoisted(() => {
       }))
       return { rows, rowCount: rows.length }
     }
-    if (/^SELECT role_id FROM user_roles WHERE user_id = \$1/i.test(s)) {
+    if (/^SELECT role_id(?:, assignment_source)? FROM user_roles WHERE user_id = \$1/i.test(s)) {
       const rows = Array.from(rolesOf(String(params[0]))).sort().map((role_id) => ({ role_id }))
       return { rows, rowCount: rows.length }
     }

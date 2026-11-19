@@ -87,7 +87,7 @@ const fakeDb = vi.hoisted(() => {
     if (text.startsWith('SELECT enabled, source FROM user_namespace_admissions WHERE user_id = $1 AND namespace = $2')) {
       return 'attendance-admission'
     }
-    if (text.startsWith('INSERT INTO user_roles (user_id, role_id)') && text.includes('ON CONFLICT DO NOTHING RETURNING user_id')) {
+    if (text.startsWith('INSERT INTO user_roles (user_id, role_id, assignment_source)') && text.includes('ON CONFLICT DO NOTHING RETURNING user_id')) {
       return 'role-insert'
     }
     // D21 (Y5a): the subject authorization version bump assignUserRoles issues right before the insert.
@@ -159,7 +159,7 @@ const fakeDb = vi.hoisted(() => {
         // A protocol upsert: it locks the version row and returns nothing the caller reads.
         return result([])
       case 'role-insert': {
-        // `INSERT ... SELECT unnest($1::text[]), $2 ON CONFLICT DO NOTHING RETURNING user_id`: only rows that
+        // `INSERT ... SELECT unnest($1::text[]), $2, $3::text ON CONFLICT DO NOTHING RETURNING user_id`: only rows that
         // were actually inserted come back, and the driver's rowCount counts exactly those.
         const roleId = String(params[1])
         const userIds = Array.isArray(params[0]) ? params[0].map(String) : []

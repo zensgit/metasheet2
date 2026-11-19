@@ -60,6 +60,7 @@
  */
 import type { Response } from 'express'
 import { Logger } from '../core/logger'
+import { isDelegatedScopeActivationEnabled } from '../admin/delegated-scope-activation'
 import { query as poolQuery } from '../db/pg'
 import { bumpSubjectAuthorizationVersions } from '../multitable/authz-version-protocol'
 import { jsonError } from '../util/response'
@@ -443,14 +444,32 @@ async function clearDelegatedAdminScopesWhereNamespaceLost(
   )
   const stillDelegated = new Set<string>()
   for (const row of held.rows as Array<Record<string, unknown>>) {
-    const heldRoleId = normalizeRoleId(row?.role_id)
-    if (!heldRoleId || heldRoleId === options.ignoreRoleId) continue
+    const heldRoleId = row.role_id
+    // The newly written row has this exact id. A historical padded id can still
+    // derive the namespace and belongs to a different membership.
+    if (typeof heldRoleId !== 'string' || heldRoleId === options.ignoreRoleId) continue
     if (deriveDelegatedAdminNamespace(heldRoleId) === namespace) {
       stillDelegated.add(normalizeRoleId(row?.user_id))
     }
   }
   const lostUserIds = userIds.filter((userId) => !stillDelegated.has(userId))
   if (lostUserIds.length === 0) return []
+
+  // Reset the lifetime together with the audience. Disabling rollout only stops
+  // creating new state for legacy subjects. Previously managed subjects stay
+  // disabled after a genuine revoke or fresh appointment, even in that mode.
+  await executor.query(
+    `INSERT INTO delegated_role_admin_activation (admin_user_id, namespace, enabled, revision)
+     SELECT subject.user_id, $2, FALSE, pg_catalog.gen_random_uuid()
+     FROM unnest($1::text[]) AS subject(user_id)
+     WHERE $3::boolean OR EXISTS (
+       SELECT 1 FROM delegated_role_admin_activation previous
+       WHERE previous.admin_user_id = subject.user_id AND previous.namespace = $2
+     )
+     ON CONFLICT (admin_user_id, namespace)
+     DO UPDATE SET enabled = FALSE, revision = EXCLUDED.revision`,
+    [lostUserIds, namespace, isDelegatedScopeActivationEnabled()],
+  )
 
   const scopes = await executor.query(
     `DELETE FROM delegated_role_admin_scopes
@@ -562,9 +581,12 @@ async function assertDelegatedRoleCodesAssignable(
   if (refusal) throw new RoleAssignmentForbiddenError(roleId, scope, refusal.reason)
 }
 
+export type RoleAssignmentSource = 'manual' | 'creation'
+
 export async function assignUserRoles(options: {
   userIds: readonly string[]
   roleId: string
+  assignmentSource?: RoleAssignmentSource
   scope: RoleAssignmentScope
   executor?: RoleAssignmentExecutor
 }): Promise<RoleAssignmentResult> {
@@ -581,11 +603,11 @@ export async function assignUserRoles(options: {
   // unassigns members — bumping before the role lock would put two admin routes in a cycle.
   await bumpSubjectAuthorizationVersions(executor, userIds)
   const result = await executor.query(
-    `INSERT INTO user_roles (user_id, role_id)
-     SELECT unnest($1::text[]), $2
+    `INSERT INTO user_roles (user_id, role_id, assignment_source)
+     SELECT unnest($1::text[]), $2, $3::text
      ON CONFLICT DO NOTHING
      RETURNING user_id`,
-    [userIds, roleId],
+    [userIds, roleId, options.assignmentSource ?? null],
   )
   const affectedUserIds = readAffectedUserIds(result.rows)
   // A FRESH appointment to a namespace's main-admin role starts with no audience. Only users

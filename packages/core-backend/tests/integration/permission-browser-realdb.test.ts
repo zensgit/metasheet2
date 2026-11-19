@@ -6,6 +6,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { expect as expectUi, type Locator, type Page } from '@playwright/test'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import type { AuthorizationOperationImpact, AuthorizationOperationRequest } from '../../src/admin/authorization-operation-contract'
 import { restorePermissionBrowserEnv } from '../utils/permission-browser-setup'
 import {
   createPermissionBrowserFixture,
@@ -18,6 +19,10 @@ import {
 
 const repoRoot = path.resolve(__dirname, '..', '..', '..', '..')
 const evidenceDir = path.join(repoRoot, 'artifacts', 'permission-browser-grok')
+const operationPath = '/api/admin/authorization-operations'
+const operationWrite: PermissionBrowserMutation = {
+  context: 'admin', method: 'POST', pathname: operationPath, status: 200,
+}
 
 if (process.env.RBAC_BYPASS !== 'false' || process.env.RBAC_TOKEN_TRUST !== 'false') {
   throw new Error('permission browser suite requires RBAC_BYPASS=false and RBAC_TOKEN_TRUST=false')
@@ -84,24 +89,19 @@ async function expectCardAgrees(
 }
 
 async function expectRoleFeedback(page: Page, roleId: string, held: boolean): Promise<void> {
-  const feedback = page.getByTestId('role-action-feedback')
-  if (held) {
-    await expectUi(feedback).toContainText(`已分配角色 ${roleId}`)
-    await expectUi(page.getByTestId('selected-role-membership')).toContainText(`当前用户已是角色 ${roleId} 的成员`)
-  } else {
-    await expectUi(feedback).toContainText(`已撤销角色 ${roleId}`)
-    await expectUi(page.getByTestId('selected-role-membership')).toContainText(`当前用户不是角色 ${roleId} 的成员`)
-  }
+  await expectUi(page.getByTestId('selected-role-membership'))
+    .toContainText(`当前用户${held ? '已是' : '不是'}角色 ${roleId} 的成员`)
 }
 
 type AuthorizationPreview = {
-  targetUserId: string
+  request: AuthorizationOperationRequest
   targetName: string
   roleId: string
   roleTitle: string | null
   inheritedCodes: readonly string[]
-  admissionEffect: string
-  notes: readonly string[]
+  admission: { enabled: boolean; derived: boolean } | null
+  scopeCleanupCount: number
+  verifiedMessage: string
 }
 
 async function expectPendingAuthorization(page: Page, preview: AuthorizationPreview): Promise<void> {
@@ -110,7 +110,7 @@ async function expectPendingAuthorization(page: Page, preview: AuthorizationPrev
   const target = dialog.getByTestId('admin-authorization-target')
   await expectUi(target).toContainText('对象：')
   await expectUi(target).toContainText(preview.targetName)
-  await expectUi(target).toContainText(preview.targetUserId)
+  await expectUi(target).toContainText(preview.request.targetUserId)
   const role = dialog.getByTestId('admin-authorization-role')
   await expectUi(role).toContainText('角色：')
   await expectUi(role).toContainText(preview.roleId)
@@ -122,34 +122,92 @@ async function expectPendingAuthorization(page: Page, preview: AuthorizationPrev
     await expectUi(inherited).toContainText(code)
   }
   await expectUi(dialog.getByTestId('admin-authorization-direct-permissions')).toContainText('无')
-  await expectUi(dialog.getByTestId('admin-authorization-admissions')).toContainText(preview.admissionEffect)
-  for (const note of preview.notes) {
-    await expectUi(dialog).toContainText(note)
-  }
+  await expectUi(dialog.getByTestId('admin-authorization-server-impact')).toBeVisible()
+  const admissionLabel = preview.admission ? `${preview.admission.enabled ? '开通' : '关闭'} stock-prep` : '无'
+  await expectUi(dialog.getByTestId('admin-authorization-explicit-admissions'))
+    .toHaveText(`显式准入：${preview.admission && !preview.admission.derived ? admissionLabel : '无'}`)
+  await expectUi(dialog.getByTestId('admin-authorization-derived-admissions'))
+    .toHaveText(`派生准入：${preview.admission?.derived ? admissionLabel : '无'}`)
+  await expectUi(dialog.getByTestId('admin-authorization-scope-cleanup')).toHaveText(`范围清理：${preview.scopeCleanupCount}`)
   await expectUi(dialog.getByTestId('admin-authorization-confirm')).toBeEnabled()
 }
 
+function waitForApi(page: Page, method: 'GET' | 'POST', pathname: string) {
+  return page.waitForResponse(response => (
+    new URL(response.url()).pathname === pathname && response.request().method() === method
+  ), { timeout: 15000 })
+}
+
 async function confirmPendingAuthorization(
+  fx: PermissionBrowserFixture,
   page: Page,
-  source: { mutations: () => PermissionBrowserMutation[] },
   preview: AuthorizationPreview,
-  reopen: () => Promise<void>,
-  baseline: number,
-  cancelFirst = false,
+  control: Locator,
+  cancelFirst: boolean,
 ): Promise<void> {
-  await expectPendingAuthorization(page, preview)
-  expect(source.mutations().length).toBe(baseline)
+  const baseline = fx.mutations().length
+  const initialAudits = await fx.operationAudits()
+  const open = async (): Promise<{ expectedVersion: string; impact: AuthorizationOperationImpact }> => {
+    const [response] = await Promise.all([
+      waitForApi(page, 'POST', `${operationPath}/preview`),
+      control.click(),
+    ])
+    expect(response.status()).toBe(200)
+    expect(response.request().postDataJSON()).toEqual(preview.request)
+    const body = await response.json()
+    expect(body.expectedVersion).toMatch(/^\S+$/)
+    const admission = preview.admission
+    expect(body.impact.admissionChanges).toMatchObject(admission ? [{
+      namespace: 'stock-prep',
+      after: admission.enabled,
+      cause: admission.derived ? 'role_revoke' : 'explicit',
+    }] : [])
+    expect(body.impact.scopeCleanup).toHaveLength(preview.scopeCleanupCount)
+    await expectPendingAuthorization(page, preview)
+    expect(fx.mutations()).toHaveLength(baseline)
+    expect(await fx.operationAudits()).toEqual(initialAudits)
+    return body
+  }
+
+  let reviewed = await open()
   if (cancelFirst) {
     await page.getByTestId('admin-authorization-cancel').click()
     await expectUi(page.getByTestId('admin-authorization-dialog')).toHaveCount(0)
-    expect(source.mutations().length).toBe(baseline)
-    await reopen()
-    await expectPendingAuthorization(page, preview)
-    expect(source.mutations().length).toBe(baseline)
+    expect(fx.mutations()).toHaveLength(baseline)
+    expect(await fx.operationAudits()).toEqual(initialAudits)
+    reviewed = await open()
   }
-  await expectUi(page.getByTestId('admin-authorization-confirm')).toBeEnabled()
-  await page.getByTestId('admin-authorization-confirm').click()
+
+  const userPath = `/api/admin/users/${preview.request.targetUserId}`
+  const [commit, access, admission] = await Promise.all([
+    waitForApi(page, 'POST', operationPath),
+    waitForApi(page, 'GET', `${userPath}/access`),
+    waitForApi(page, 'GET', `${userPath}/member-admission`),
+    page.getByTestId('admin-authorization-confirm').click(),
+  ])
+  expect(commit.status()).toBe(200)
+  expect(access.status()).toBe(200)
+  expect(admission.status()).toBe(200)
+  const body = await commit.json()
+  expect(body).toMatchObject({
+    status: 'committed',
+    clientOperationId: expect.any(String),
+    receipt: { targetUserId: preview.request.targetUserId, action: preview.request.action, impact: reviewed.impact },
+  })
+  expect(commit.request().postDataJSON()).toEqual({
+    ...preview.request,
+    expectedVersion: reviewed.expectedVersion,
+    clientOperationId: body.clientOperationId,
+  })
+  expect(await fx.readOperation(body.clientOperationId)).toEqual(body)
+  const audits = await fx.operationAudits()
+  expect(audits.size).toBe(initialAudits.size + 1)
+  expect(audits.get(body.clientOperationId)).toEqual({ impact: reviewed.impact, reasonOrigin: 'not_required' })
+  expect(fx.mutations().slice(baseline)).toEqual([operationWrite])
+  await expectUi(page.getByTestId('admin-authorization-outcome')).toHaveText(preview.verifiedMessage)
+  await page.getByTestId('admin-authorization-close').click()
   await expectUi(page.getByTestId('admin-authorization-dialog')).toHaveCount(0)
+  await expectUi(page.getByTestId('role-action-feedback')).toHaveText(preview.verifiedMessage)
 }
 
 async function selectedMemberName(page: Page): Promise<string> {
@@ -169,69 +227,50 @@ async function selectedRoleTitle(page: Page, roleId: string): Promise<string> {
 
 async function confirmRoleMembership(
   page: Page,
-  source: { mutations: () => PermissionBrowserMutation[] },
+  fx: PermissionBrowserFixture,
   action: 'assign' | 'unassign',
   userId: string,
   roleId: string,
   inheritedCodes: readonly string[],
   cancelFirst = false,
+  scopeCleanupCount = 0,
 ): Promise<void> {
   const targetName = await selectedMemberName(page)
   const roleTitle = await selectedRoleTitle(page, roleId)
   const buttonId = action === 'assign' ? 'assign-role-button' : 'unassign-role-button'
-  const open = async () => {
-    await page.getByTestId(buttonId).click()
-  }
-  const baseline = source.mutations().length
-  await open()
-  await confirmPendingAuthorization(page, source, {
-    targetUserId: userId,
+  await confirmPendingAuthorization(fx, page, {
+    request: { targetUserId: userId, action: { kind: action === 'assign' ? 'role.assign' : 'role.revoke', roleId }, admissionChanges: [] },
     targetName,
     roleId,
     roleTitle,
     inheritedCodes,
-    admissionEffect: action === 'assign'
-      ? '不会改变插件使用。'
-      : '如果没有其他角色仍覆盖该范围，可能会关闭插件使用：stock-prep',
-    notes: action === 'assign'
-      ? [
-        '只把该用户加入这个角色的成员，不写入直接权限，也不开通插件使用。',
-        '下列权限码是这个角色会继承的权限。',
-      ]
-      : [
-        '只移除这个角色的成员关系，不改直接权限。',
-        '如果该用户不再持有这些范围的其他角色，可能会关闭对应的插件使用。',
-      ],
-  }, open, baseline, cancelFirst)
+    admission: action === 'assign' ? null : { enabled: false, derived: true },
+    scopeCleanupCount,
+    verifiedMessage: action === 'assign' ? '角色已分配，准入未开' : '角色已从该成员移除。',
+  }, page.getByTestId(buttonId), cancelFirst)
 }
 
-async function confirmAdmissionEnable(
+async function confirmAdmission(
   page: Page,
-  source: { mutations: () => PermissionBrowserMutation[] },
+  fx: PermissionBrowserFixture,
   userId: string,
   roleId: string,
   inheritedCodes: readonly string[],
+  enabled: boolean,
   cancelFirst = false,
 ): Promise<void> {
   const targetName = await selectedMemberName(page)
-  const open = async () => {
-    await stockPrepCard(page).getByRole('button', { name: '开通插件使用', exact: true }).click()
-  }
-  const baseline = source.mutations().length
-  await open()
-  await confirmPendingAuthorization(page, source, {
-    targetUserId: userId,
+  const label = enabled ? '开通' : '关闭'
+  await confirmPendingAuthorization(fx, page, {
+    request: { targetUserId: userId, action: { kind: 'admission.set' }, admissionChanges: [{ namespace: 'stock-prep', enabled }] },
     targetName,
     roleId,
     roleTitle: null,
     inheritedCodes,
-    admissionEffect: '将开通插件使用：stock-prep',
-    notes: [
-      '只开通「stock-prep」的插件使用。',
-      '不分配角色，也不写入直接权限。',
-      '下列权限码来自这些角色在角色目录中的清单。',
-    ],
-  }, open, baseline, cancelFirst)
+    admission: { enabled, derived: false },
+    scopeCleanupCount: 0,
+    verifiedMessage: `已${label} stock-prep 插件使用`,
+  }, stockPrepCard(page).getByRole('button', { name: `${label}插件使用`, exact: true }), cancelFirst)
 }
 
 function expectDenied(preflight: SubjectPreflightReading): void {
@@ -269,9 +308,6 @@ describe('permission browser real database', () => {
     if (!fx) throw new Error('fixture missing')
     const page = fx.adminPage
     const statuses: number[] = []
-    const assignPath = `/api/admin/users/${fx.subjectId}/roles/assign`
-    const unassignPath = `/api/admin/users/${fx.subjectId}/roles/unassign`
-    const admissionPath = `/api/admin/users/${fx.subjectId}/namespaces/stock-prep/admission`
     await expectUi(page.getByTestId('permission-browser-harness-label')).toHaveText('隔离的真实 Vue 权限页骨架，不是完整登录或工作台。')
     await expectUi(fx.subjectPage.getByTestId('permission-browser-harness-label')).toHaveText('隔离的真实 Vue 权限页骨架，不是完整登录或工作台。')
 
@@ -292,8 +328,7 @@ describe('permission browser real database', () => {
     await expectCardAgrees(page, read)
     await expectUi(page.getByTestId('member-authorization-outline')).toContainText('不是最终业务访问结论')
 
-    await confirmAdmissionEnable(page, fx, fx.subjectId, fx.roleId, ['stock-prep:read'], true)
-    await expectUi(page.getByText('已开通 stock-prep 插件使用')).toBeVisible()
+    await confirmAdmission(page, fx, fx.subjectId, fx.roleId, ['stock-prep:read'], true, true)
     writes = fx.mutations().length
     await refreshAdmission(page)
     expect(fx.mutations().length).toBe(writes)
@@ -327,14 +362,12 @@ describe('permission browser real database', () => {
     expect(read.permissions).not.toContain('stock-prep:read')
     await expectCardAgrees(page, read)
 
-    await confirmAdmissionEnable(page, fx, fx.subjectId, fx.roleId, ['stock-prep:read'])
-    await expectUi(page.getByText('已开通 stock-prep 插件使用')).toBeVisible()
+    await confirmAdmission(page, fx, fx.subjectId, fx.roleId, ['stock-prep:read'], true)
     preflight = await fx.readSubjectPreflight()
     expectBaselineReady(preflight)
     statuses.push(preflight.status)
 
-    await stockPrepCard(page).getByRole('button', { name: '关闭插件使用', exact: true }).click()
-    await expectUi(page.getByText('已关闭 stock-prep 插件使用')).toBeVisible()
+    await confirmAdmission(page, fx, fx.subjectId, fx.roleId, ['stock-prep:read'], false)
     preflight = await fx.readSubjectPreflight()
     expectDenied(preflight)
     statuses.push(preflight.status)
@@ -351,15 +384,7 @@ describe('permission browser real database', () => {
     expect(rereadAgain).toEqual(read)
     await expectCardAgrees(page, rereadAgain)
 
-    const expectedMutations: PermissionBrowserMutation[] = [
-      { context: 'admin', method: 'POST', pathname: assignPath, status: 200 },
-      { context: 'admin', method: 'PATCH', pathname: admissionPath, status: 200 },
-      { context: 'admin', method: 'POST', pathname: unassignPath, status: 200 },
-      { context: 'admin', method: 'POST', pathname: assignPath, status: 200 },
-      { context: 'admin', method: 'PATCH', pathname: admissionPath, status: 200 },
-      { context: 'admin', method: 'PATCH', pathname: admissionPath, status: 200 },
-    ]
-    expect(fx.mutations()).toEqual(expectedMutations)
+    expect(fx.mutations()).toEqual(Array.from({ length: 6 }, () => operationWrite))
     expect(statuses).toEqual([403, 200, 200, 403, 403, 200, 403])
     expect(await fx.subjectTokenUnchanged()).toBe(true)
     expect(fx.violations).toEqual([])
@@ -376,16 +401,7 @@ describe('permission browser real database', () => {
       roleHeldAfterAdmissionDisable: rereadAgain.roles.includes(fx.roleId),
       admission: rereadAgain.admission,
       permissions: rereadAgain.permissions,
-      mutations: expectedMutations.map((item) => ({
-        context: item.context,
-        method: item.method,
-        action: item.pathname.endsWith('/assign')
-          ? 'assign'
-          : item.pathname.endsWith('/unassign')
-            ? 'unassign'
-            : 'admission',
-        status: item.status,
-      })),
+      auditedOperations: ['role.assign', 'admission.enable', 'role.revoke', 'role.assign', 'admission.enable', 'admission.disable'],
       repeatRereadDidNotReplayMutation: true,
     }, null, 2))
   })
@@ -395,9 +411,6 @@ describe('permission browser real database', () => {
     try {
       const page = scopeFx.adminPage
       const adminRoleId = 'stock-prep_admin'
-      const assignPath = `/api/admin/users/${scopeFx.subjectId}/roles/assign`
-      const unassignPath = `/api/admin/users/${scopeFx.subjectId}/roles/unassign`
-      const admissionPath = `/api/admin/users/${scopeFx.subjectId}/namespaces/stock-prep/admission`
       const memberGroupPath = `/api/admin/role-delegation/users/${scopeFx.targetId}/member-groups/assign`
       const scopeGroupPath = `/api/admin/role-delegation/users/${scopeFx.subjectId}/scope-groups/assign`
       const delegatedPath = `/api/admin/role-delegation/users/${scopeFx.targetId}/roles/assign`
@@ -410,8 +423,7 @@ describe('permission browser real database', () => {
       let writes = scopeFx.mutations().length
       await refreshAdmission(page)
       expect(scopeFx.mutations().length).toBe(writes)
-      await confirmAdmissionEnable(page, scopeFx, scopeFx.subjectId, adminRoleId, ['stock-prep:admin'])
-      await expectUi(page.getByText('已开通 stock-prep 插件使用')).toBeVisible()
+      await confirmAdmission(page, scopeFx, scopeFx.subjectId, adminRoleId, ['stock-prep:admin'], true)
 
       await scopeFx.openDelegation(scopeFx.targetId)
       await expectUi(page.getByText('平台管理员模式')).toBeVisible()
@@ -445,7 +457,7 @@ describe('permission browser real database', () => {
 
       await scopeFx.openUserAdmin()
       await openPinnedMember(page, scopeFx.subjectEmail, adminRoleId)
-      await confirmRoleMembership(page, scopeFx, 'unassign', scopeFx.subjectId, adminRoleId, ['stock-prep:admin'])
+      await confirmRoleMembership(page, scopeFx, 'unassign', scopeFx.subjectId, adminRoleId, ['stock-prep:admin'], false, 1)
       await expectRoleFeedback(page, adminRoleId, false)
       await page.getByTestId('user-role-select').selectOption(adminRoleId)
       await confirmRoleMembership(page, scopeFx, 'assign', scopeFx.subjectId, adminRoleId, ['stock-prep:admin'])
@@ -453,8 +465,7 @@ describe('permission browser real database', () => {
       writes = scopeFx.mutations().length
       await refreshAdmission(page)
       expect(scopeFx.mutations().length).toBe(writes)
-      await confirmAdmissionEnable(page, scopeFx, scopeFx.subjectId, adminRoleId, ['stock-prep:admin'])
-      await expectUi(page.getByText('已开通 stock-prep 插件使用')).toBeVisible()
+      await confirmAdmission(page, scopeFx, scopeFx.subjectId, adminRoleId, ['stock-prep:admin'], true)
 
       const denied = await scopeFx.readSubjectDelegation()
       expect(denied).toEqual({ status: 403, code: 'ROLE_DELEGATION_SCOPE_REQUIRED' })
@@ -474,14 +485,14 @@ describe('permission browser real database', () => {
       expect(scopeFx.mutations().length).toBe(writes)
 
       expect(scopeFx.mutations()).toEqual([
-        { context: 'admin', method: 'POST', pathname: assignPath, status: 200 },
-        { context: 'admin', method: 'PATCH', pathname: admissionPath, status: 200 },
+        operationWrite,
+        operationWrite,
         { context: 'admin', method: 'POST', pathname: memberGroupPath, status: 200 },
         { context: 'admin', method: 'POST', pathname: scopeGroupPath, status: 200 },
         { context: 'subject', method: 'POST', pathname: delegatedPath, status: 200 },
-        { context: 'admin', method: 'POST', pathname: unassignPath, status: 200 },
-        { context: 'admin', method: 'POST', pathname: assignPath, status: 200 },
-        { context: 'admin', method: 'PATCH', pathname: admissionPath, status: 200 },
+        operationWrite,
+        operationWrite,
+        operationWrite,
         { context: 'subject', method: 'POST', pathname: delegatedPath, status: 403 },
       ])
       expect(await scopeFx.subjectTokenUnchanged()).toBe(true)
@@ -503,14 +514,14 @@ describe('permission browser real database', () => {
         subjectTokenUnchanged: true,
         repeatScopeReadDidNotReplayMutation: true,
         mutations: [
-          'assign',
-          'admission',
+          'role.assign',
+          'admission.enable',
           'member-group',
           'scope-group',
           'delegated-assign',
-          'unassign',
-          'assign',
-          'admission',
+          'role.revoke',
+          'role.assign',
+          'admission.enable',
           'delegated-assign',
         ],
       }, null, 2))

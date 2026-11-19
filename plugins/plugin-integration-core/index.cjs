@@ -121,6 +121,7 @@ let stockPreparationRuntimeDatabase = null
 let stopYidaOwnerRuntime = null
 let stopYidaInitializationRuntime = null
 let stopYidaConnectionTestRuntime = null
+let stopYidaReconciliationRuntime = null
 // R-69 1b-ii: the unbind of the IntegrationRunPort registered with the host (null when the host did not offer
 // the capability — only plugin-integration-core receives it — or before activate).
 let unbindIntegrationRunPort = null
@@ -700,6 +701,26 @@ module.exports = {
         if (typeof logger.warn === 'function') logger.warn(`[${PLUGIN_ID}] YIDA_CONNECTION_TEST_RUNTIME_INACTIVE`)
       }
     }
+    // R-71 ⑦.5 cut-over reconciliation (read-only paginated search + local insert-only evidence). Fails SOFT like
+    // the connection test: a missing or refused binding leaves only this capability inactive.
+    const yidaReconciliationRuntime = context.services && context.services.yidaReconciliationRuntime
+    if (yidaReconciliationRuntime !== undefined) {
+      try {
+        const security = context.services && context.services.security
+        if (!yidaReconciliationRuntime || typeof yidaReconciliationRuntime.activate !== 'function'
+          || !security || typeof security.encrypt !== 'function' || typeof security.decrypt !== 'function') {
+          throw new Error('YIDA_RECONCILIATION_RUNTIME_UNAVAILABLE')
+        }
+        const { createYidaReconciliationBinding } = await import('./lib/yida-reconciliation-binding.mjs')
+        const handle = await yidaReconciliationRuntime.activate(createYidaReconciliationBinding({ db, security: Object.freeze({
+          encrypt: security.encrypt.bind(security), decrypt: security.decrypt.bind(security),
+        }) }))
+        if (!handle || typeof handle.stop !== 'function') throw new Error('YIDA_RECONCILIATION_RUNTIME_UNAVAILABLE')
+        stopYidaReconciliationRuntime = handle.stop.bind(handle)
+      } catch {
+        if (typeof logger.warn === 'function') logger.warn(`[${PLUGIN_ID}] YIDA_RECONCILIATION_RUNTIME_INACTIVE`)
+      }
+    }
   },
 
   async deactivate() {
@@ -715,6 +736,15 @@ module.exports = {
     // Latch the private runtimes before the legacy read drain's first await. A stopped
     // owner request retains actual pending work, so observe its rejection now
     // but await the original drain before any plugin DB is closed below.
+    let yidaReconciliationDrain, reconciliationStopFailed = false
+    if (stopYidaReconciliationRuntime) {
+      const stop = stopYidaReconciliationRuntime
+      stopYidaReconciliationRuntime = null
+      try {
+        yidaReconciliationDrain = stop()
+        void yidaReconciliationDrain.catch(() => {})
+      } catch { reconciliationStopFailed = true }
+    }
     let yidaConnectionTestDrain, connectionTestStopFailed = false
     if (stopYidaConnectionTestRuntime) {
       const stop = stopYidaConnectionTestRuntime
@@ -752,6 +782,10 @@ module.exports = {
     if (connectionTestStopFailed) throw new Error('YIDA_CONNECTION_TEST_RUNTIME_STOP_UNAVAILABLE')
     if (yidaConnectionTestDrain) {
       try { await yidaConnectionTestDrain } catch { throw new Error('YIDA_CONNECTION_TEST_RUNTIME_STOP_UNAVAILABLE') }
+    }
+    if (reconciliationStopFailed) throw new Error('YIDA_RECONCILIATION_RUNTIME_STOP_UNAVAILABLE')
+    if (yidaReconciliationDrain) {
+      try { await yidaReconciliationDrain } catch { throw new Error('YIDA_RECONCILIATION_RUNTIME_STOP_UNAVAILABLE') }
     }
     if (stockPreparationRuntimeDatabase) {
       try {

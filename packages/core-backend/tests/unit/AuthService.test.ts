@@ -458,7 +458,7 @@ describe('AuthService.verifyToken', () => {
     expect(poolMocks.query).toHaveBeenNthCalledWith(
       5,
       expect.stringContaining('INSERT INTO user_roles'),
-      [['u5'], 'attendance_employee'],
+      [['u5'], 'attendance_employee', null],
     )
     expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledWith('u5')
     expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledTimes(1)
@@ -585,7 +585,7 @@ describe('AuthService.verifyToken', () => {
 
       expect(user?.permissions).toEqual(['stock-prep:admin', 'attendance:read', 'attendance:write'])
       expect(tracked.admissionParams).toEqual([['u-steady', 'attendance']])
-      expect(tracked.roleInsertParams).toEqual([[['u-steady'], 'attendance_employee']])
+      expect(tracked.roleInsertParams).toEqual([[['u-steady'], 'attendance_employee', null]])
       expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
     } finally {
       if (previousMode === undefined) delete process.env.PRODUCT_MODE
@@ -1215,7 +1215,7 @@ describe('AuthService.login', () => {
 
       expect(result?.user.permissions).toEqual(expect.arrayContaining(['attendance:read', 'attendance:write']))
       expect(tracked.admissionParams).toEqual([['user-login-eligible', 'attendance']])
-      expect(tracked.roleInsertParams).toEqual([[['user-login-eligible'], 'attendance_employee']])
+      expect(tracked.roleInsertParams).toEqual([[['user-login-eligible'], 'attendance_employee', null]])
       expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledWith('user-login-eligible')
       expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledTimes(1)
       // Same commit-boundary witness on the fresh-login path.
@@ -1258,7 +1258,7 @@ describe('AuthService.login', () => {
 
       expect(result?.user.permissions).toEqual(expect.arrayContaining(['attendance:read', 'attendance:write']))
       expect(tracked.admissionParams).toEqual([['user-login-steady', 'attendance']])
-      expect(tracked.roleInsertParams).toEqual([[['user-login-steady'], 'attendance_employee']])
+      expect(tracked.roleInsertParams).toEqual([[['user-login-steady'], 'attendance_employee', null]])
       expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
     } finally {
       if (previousMode === undefined) delete process.env.PRODUCT_MODE

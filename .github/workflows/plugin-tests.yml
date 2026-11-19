@@ -1463,6 +1463,21 @@ jobs:
       fail-fast: false
       matrix:
         node-version: [20.x]
+    services:
+      permission-browser-postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: synthetic_ci_only
+          POSTGRES_DB: permission_boundaries_synthetic
+          POSTGRES_INITDB_ARGS: '--locale=C --encoding=UTF8'
+        ports:
+          - '127.0.0.1:5433:5432'
+        options: >-
+          --health-cmd "pg_isready -U postgres -d permission_boundaries_synthetic"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -1740,18 +1755,21 @@ jobs:
         id: permission-browser-realdb
         if: matrix.node-version == '20.x'
         env:
-          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          DATABASE_URL: postgresql://postgres:synthetic_ci_only@127.0.0.1:5433/permission_boundaries_synthetic
           EXPECT_DB: '1'
           RBAC_BYPASS: 'false'
           RBAC_TOKEN_TRUST: 'false'
+          DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED: 'false'
           PRODUCT_MODE: plm-workbench
         run: |
           : "${DATABASE_URL:?DATABASE_URL is required for permission browser real-DB gate}"
+          env -u MIGRATION_EXCLUDE -u MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL pnpm --filter @metasheet/core-backend db:migrate
           mkdir -p artifacts/permission-browser-ci
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.permission-browser.config.ts run \
             tests/integration/permission-browser-realdb.test.ts \
             --reporter=verbose --reporter=json --outputFile.json=../../artifacts/permission-browser-ci/vitest.json
           node scripts/ops/vitest-zero-skip.mjs artifacts/permission-browser-ci/vitest.json 1
+          node -e 'if (require("./artifacts/permission-browser-ci/vitest.json").numPassedTests !== 2) throw new Error("Expected two permission browser cases")'
 
       - name: Install hash-pinned Chromium candidate for owner YiDa acceptance
         id: stock-preparation-pinned-browser-install

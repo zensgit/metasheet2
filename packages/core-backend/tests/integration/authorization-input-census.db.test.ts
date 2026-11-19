@@ -136,6 +136,7 @@ const fk = (constraint: string, child: string, parent: string, onDelete: string)
  * `a` no action, `c` cascade, `n` set null. None has an update action and none is deferrable.
  */
 const EXPECTED_INPUT_FOREIGN_KEYS: readonly InputForeignKey[] = [
+  fk('delegated_role_admin_activation_admin_user_id_fkey', 'delegated_role_admin_activation', 'users', 'c'),
   fk('delegated_role_admin_member_groups_admin_user_id_fkey', 'delegated_role_admin_member_groups', 'users', 'c'),
   fk('delegated_role_admin_member_groups_created_by_fkey', 'delegated_role_admin_member_groups', 'users', 'n'),
   fk('delegated_role_admin_member_groups_group_id_fkey', 'delegated_role_admin_member_groups', 'platform_member_groups', 'c'),

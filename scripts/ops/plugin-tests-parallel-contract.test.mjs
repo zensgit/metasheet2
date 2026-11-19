@@ -76,18 +76,37 @@ const permissionLifecycleStep = {
   ].join('\n'),
 }
 
+const permissionBrowserDatabase = {
+  image: 'postgres:16',
+  env: {
+    POSTGRES_USER: 'postgres',
+    POSTGRES_PASSWORD: 'synthetic_ci_only',
+    POSTGRES_DB: 'permission_boundaries_synthetic',
+    POSTGRES_INITDB_ARGS: '--locale=C --encoding=UTF8',
+  },
+  ports: ['127.0.0.1:5433:5432'],
+  options: '--health-cmd "pg_isready -U postgres -d permission_boundaries_synthetic" --health-interval 5s --health-timeout 5s --health-retries 20',
+}
+const permissionBrowserMigration = 'env -u MIGRATION_EXCLUDE -u MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL pnpm --filter @metasheet/core-backend db:migrate'
+const permissionBrowserCaseCount = 'node -e \'if (require("./artifacts/permission-browser-ci/vitest.json").numPassedTests !== 2) throw new Error("Expected two permission browser cases")\''
 const permissionBrowserStep = {
   name: 'Run permission browser real-DB gate',
   id: 'permission-browser-realdb',
   if: "matrix.node-version == '20.x'",
-  env: { ...permissionLifecycleStep.env },
+  env: {
+    ...permissionLifecycleStep.env,
+    DATABASE_URL: 'postgresql://postgres:synthetic_ci_only@127.0.0.1:5433/permission_boundaries_synthetic',
+    DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED: 'false',
+  },
   run: [
     ': "${DATABASE_URL:?DATABASE_URL is required for permission browser real-DB gate}"',
+    permissionBrowserMigration,
     'mkdir -p artifacts/permission-browser-ci',
     'pnpm --filter @metasheet/core-backend exec vitest --config vitest.permission-browser.config.ts run \\',
     '  tests/integration/permission-browser-realdb.test.ts \\',
     '  --reporter=verbose --reporter=json --outputFile.json=../../artifacts/permission-browser-ci/vitest.json',
     'node scripts/ops/vitest-zero-skip.mjs artifacts/permission-browser-ci/vitest.json 1',
+    permissionBrowserCaseCount,
     '',
   ].join('\n'),
 }
@@ -136,7 +155,12 @@ function assertParallelWorkflow(doc) {
     assert.deepEqual(Object.keys(job).sort(), [
       'runs-on', 'timeout-minutes', 'strategy', 'steps',
       ...(['contracts', 'permissions'].includes(suite) ? [] : ['needs']),
-    ].sort(), 'No inherited env/defaults/services/outputs may change test execution')
+      ...(suite === 'runtime-db' ? ['services'] : []),
+    ].sort(), 'Only the permission browser gate adds a job service')
+    if (suite === 'runtime-db') {
+      assert.deepEqual(job.services, { 'permission-browser-postgres': permissionBrowserDatabase },
+        'Keep the permission browser PostgreSQL 16 service isolated on its dedicated loopback port')
+    }
     const originals = baseline.steps.filter(step => step.jobs.includes(suite))
     const actual = structuredClone(job.steps)
     if (suite === 'contracts') {
@@ -360,6 +384,7 @@ test('each database suite owns a fresh runner/database and migration ordering', 
 })
 
 test('removed/filtered/reordered steps, disabled suites and a weakened aggregate are rejected', () => {
+  const browserGate = doc => doc.jobs['runtime-db'].steps.find(step => step.id === permissionBrowserStep.id)
   const mutations = [
     ...[permissionLifecycleStep, permissionBrowserStep].flatMap(gate => [
       doc => { const steps = doc.jobs['runtime-db'].steps; steps.splice(steps.findIndex(step => step.id === gate.id), 1) },
@@ -367,6 +392,12 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
       doc => { doc.jobs['runtime-db'].steps.find(step => step.id === gate.id)['continue-on-error'] = true },
       doc => { const step = doc.jobs['runtime-db'].steps.find(step => step.id === gate.id); step.run = step.run.replace(/node scripts\/ops\/vitest-zero-skip[^\n]+\n/, '') },
     ]),
+    doc => { delete doc.jobs['runtime-db'].services },
+    doc => { doc.jobs['runtime-db'].services['permission-browser-postgres'].env.POSTGRES_INITDB_ARGS = '--locale=C.UTF-8' },
+    doc => { browserGate(doc).env.DATABASE_URL = permissionLifecycleStep.env.DATABASE_URL },
+    doc => { browserGate(doc).env.DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED = 'true' },
+    doc => { browserGate(doc).run = browserGate(doc).run.replace(`${permissionBrowserMigration}\n`, '') },
+    doc => { browserGate(doc).run = browserGate(doc).run.replace(`${permissionBrowserCaseCount}\n`, '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-controlled-handover.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['runtime-db'].steps.find(step => step.id === lockProtocolStepId); assert.ok(step.run.includes(lockProtocolZeroSkipLine)); step.run = step.run.replace(lockProtocolZeroSkipLine, '') },
     doc => { const step = doc.jobs['runtime-db'].steps.find(step => step.id === lockProtocolStepId); assert.ok(step.run.endsWith(lockProtocolZeroSkipLine)); step.run = `${step.run.slice(0, -1)} || true\n` },
@@ -485,6 +516,7 @@ test('Node-only wiring guards require exact gate headers without Python or npm d
     workflow.replace('  contracts:\n', '  contracts:\n    continue-on-error: true\n'),
     workflow.replace('        node-version: [20.x]', '        node-version: [18.x]'),
     workflow.replace('    needs: [contracts, permissions]', '    needs: [permissions]'),
+    workflow.replace("          - '127.0.0.1:5433:5432'", "          - '0.0.0.0:5433:5432'"),
   ]) {
     assert.notEqual(candidate, workflow)
     assert.throws(() => requiredSuiteJobBody(candidate, 'contracts'))

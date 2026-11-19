@@ -585,7 +585,7 @@ test('leave cancel-round launch flag: registered against the plugin reader, exac
   for (const value of [undefined, '', 'false']) assert.equal(isActivated(spec, value), false)
 })
 
-// Exact-department rollout. `_ENABLED` keeps the refusal code
+// Delegation rollouts. `_ENABLED` keeps the refusal code
 // DELEGATED_SCOPE_EXACT_DEPARTMENT_DISABLED and the include_children migration
 // constants out of the flag population.
 function delegatedScopeTokensInSource() {
@@ -596,12 +596,32 @@ function delegatedScopeFlagsInSource() {
   return delegatedScopeTokensInSource().filter((t) => t.endsWith('_ENABLED')).sort()
 }
 
-test('delegated scope flags: the read-site scan finds the registered key and filters the refusal code', () => {
-  assert.deepEqual(delegatedScopeFlagsInSource(), ['DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED'])
+test('delegated scope flags: the read-site scan finds both registered keys and excludes refusal codes', () => {
+  assert.deepEqual(delegatedScopeFlagsInSource(), ['DELEGATED_SCOPE_ACTIVATION_ENABLED', 'DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED'])
   const all = delegatedScopeTokensInSource()
   assert.ok(all.includes('DELEGATED_SCOPE_EXACT_DEPARTMENT_DISABLED'), 'the refusal code shares the prefix and must be scanned')
   assert.ok(all.some((t) => !t.endsWith('_ENABLED')), 'the suffix filter is what excludes non-flags')
   assert.ok(delegatedScopeFlagsInSource().every((t) => GLOBAL_HISTORY_FLAG_KEYS.includes(t)))
+})
+
+
+test('DELEGATED_SCOPE_ACTIVATION_ENABLED: exact true and independent from department precision', () => {
+  const key = 'DELEGATED_SCOPE_ACTIVATION_ENABLED'
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY[key]
+  assert.equal(spec.source, 'packages/core-backend/src/admin/delegated-scope-activation.ts#isDelegatedScopeActivationEnabled')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  const source = readRepoSource(spec.source.split('#')[0])
+  assert.match(source, /return process\.env\.DELEGATED_SCOPE_ACTIVATION_ENABLED === 'true'/)
+  assert.match(spec.purpose, /still enforces all stored stops/)
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of [undefined, '', 'false', 'TRUE', ' true', 'true ', '1', 'yes']) {
+    assert.equal(isActivated(spec, value), false)
+  }
 })
 
 test('DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED: exact true, danger high, independent, predicate compares the literal', () => {
@@ -1025,6 +1045,30 @@ test('stock-prep project-sheet G1 grant role list (R-35): a list, danger high, s
     spec.source,
     'plugins/plugin-integration-core/lib/stock-preparation-project-targets.cjs#resolveProjectSheetGrantRoleIds',
   )
+})
+
+// R-71 ⑦.5 cut-over reconciliation: its own default-OFF switch, danger high, exact literal only, independent of
+// the send switch, every cited file real and the host reading exactly this env name.
+test('INTEGRATION_YIDA_RECONCILE_READ_ENABLED manifest entry: exact true, danger high, independent of the send switch, sources exist', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.INTEGRATION_YIDA_RECONCILE_READ_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.ok(spec.purpose.includes('Does not read, imply or require INTEGRATION_YIDA_OWNER_SEND_ENABLED'))
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+  for (const cited of spec.source.split('; ').map((entry) => entry.split('#')[0])) {
+    assert.ok(readFileSync(path.join(root, cited), 'utf8').length > 0, cited)
+  }
+  const host = readFileSync(path.join(root, 'packages/core-backend/src/index.ts'), 'utf8')
+  assert.ok(host.includes('readEnablement: () => process.env.INTEGRATION_YIDA_RECONCILE_READ_ENABLED,'))
+  const runtime = readFileSync(path.join(root, 'packages/core-backend/src/integration/yida-reconciliation-runtime.ts'), 'utf8')
+  assert.equal(runtime.includes('INTEGRATION_YIDA_OWNER_SEND_ENABLED'), false)
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of ['TRUE', ' true', 'true ', '1', 'yes', '', undefined]) assert.equal(isActivated(spec, value), false)
 })
 
 test('YiDa unbound test-target list (design baseline v2.3 D20): a list, danger high, no dependsOn, every cited file real and naming the exact-list reader', () => {

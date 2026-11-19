@@ -324,6 +324,25 @@ async function main() {
     assert.equal(plan.summary.carry.noCarryByReason.no_human_context, 1)
   })
 
+  await run('machine_context_only: single inactive predecessor holding ONLY the machine write-back date => plain ADD, plan still valid, zero holds, counted machine_context_only, no date in the ADD', () => {
+    const newAdd = row({ componentSourceId: 'PART-Q', pathTokens: ['NEW', 'PART-Q'] })
+    const predecessor = row({ componentSourceId: 'PART-Q', pathTokens: ['OLD', 'PART-Q'], active: false, issueConfirmDate: '2031-04-17' })
+    const plan = planStockPreparationConflicts({
+      expandedRows: [newAdd],
+      existingRows: [predecessor],
+      carryPolicy: { carryKey: 'component_source_id' },
+    })
+    assert.equal(plan.valid, true)
+    assert.equal(plan.counts[DECISIONS.MANUAL_CONFIRM], 0)
+    assert.equal(plan.summary.carry.counts.noCarry, 1)
+    assert.equal(plan.summary.carry.noCarryByReason.machine_context_only, 1)
+    assert.equal(plan.summary.carry.noCarryByReason.no_human_context, undefined)
+    const added = plan.decisions.filter((decision) => decision.decision === DECISIONS.ADD)
+    assert.equal(added.length, 1)
+    assert.equal(Object.prototype.hasOwnProperty.call(added[0].record, 'issueConfirmDate'), false, 'the ADD never writes the machine column')
+    assert.equal(JSON.stringify(summarizeConflictPlanForEvidence(plan)).includes('2031-04-17'), false, 'values-free')
+  })
+
   await run('default carryKey (idempotency_key) opt-in => every ADD is an explicit NO_CARRY, zero holds, plan decisions unchanged', () => {
     const input = { ...representativePlanInput(), carryPolicy: {} }
     const plan = planStockPreparationConflicts(input)

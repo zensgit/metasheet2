@@ -47,6 +47,7 @@ function normalizeUserIds(userIds: string[]): string[] {
 export async function lockUsersForAccessGraphWrite(
   client: AccessGraphTransactionClient,
   userIds: string[],
+  options: Readonly<{ nowait?: boolean }> = {},
 ): Promise<Map<string, LockedAccessGraphUser>> {
   const normalizedUserIds = normalizeUserIds(userIds)
   const lockedUsers = new Map<string, LockedAccessGraphUser>()
@@ -69,7 +70,7 @@ export async function lockUsersForAccessGraphWrite(
               (to_jsonb(users) ->> 'purged_at') AS purged_at
          FROM users
         WHERE id = $1::text
-        FOR UPDATE`,
+        FOR UPDATE${options.nowait === true ? ' NOWAIT' : ''}`,
       [userId],
     )
     const row = result.rows[0]
