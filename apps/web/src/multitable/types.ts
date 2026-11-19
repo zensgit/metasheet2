@@ -366,6 +366,31 @@ export interface MetaManualRowsContextBlock {
   requiredFieldIds: string[]
   /** The 新增人工补充行 dialog's columns in its order (名称, 总用量, 图号, 规格, 材料, 用量, 备注 — the present ones). */
   dialogFieldIds?: string[]
+  /**
+   * ADR §12.6: the physical ids of 父组件图号 / 父组件名称 — sent ONLY when the manual-row routes accept the pair on this
+   * sheet AND this actor may write both columns (rule P7). Never part of `editableFieldIds`: the two cells are never
+   * edited one at a time; they change together through the dialog / the drawer's 「修改父组件」.
+   */
+  parentFieldIds?: MetaManualRowParentFieldIds
+}
+
+export interface MetaManualRowParentFieldIds {
+  code: string
+  name: string
+}
+
+/** ADR §12.6: one entry of GET /sheets/:sheetId/manual-rows/parent-options (values exactly as stored, never trimmed). */
+export interface MetaManualRowParentOption {
+  code: string
+  name: string | null
+  /** 'parent' = a 父组件 already used on some row (with `childCount`); 'component' = a row's own 图号 + 名称. */
+  kind: 'parent' | 'component'
+  childCount?: number
+}
+
+export interface MetaManualRowParentOptionsPage {
+  items: MetaManualRowParentOption[]
+  truncated: boolean
 }
 
 /**
@@ -388,6 +413,8 @@ export interface MetaManualRowsBlock {
   editableFieldIds: string[]
   requiredFieldIds: string[]
   dialogFieldIds: string[]
+  /** Present only when /context sent a well-formed pair (ADR §12.6); absent ⇒ no parent picker anywhere. */
+  parentFieldIds?: MetaManualRowParentFieldIds
 }
 
 export interface MetaScopedPermissions {
