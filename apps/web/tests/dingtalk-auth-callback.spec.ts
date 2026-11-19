@@ -272,7 +272,6 @@ describe('DingTalkAuthCallbackView', () => {
         'auto_provision_corp_required',
         'auto_provision_email_conflict',
         'bind_user_mismatch',
-        'directory_managed_conflict',
         'directory_managed_identity',
         'grant_disabled',
         'grant_required',
@@ -282,6 +281,7 @@ describe('DingTalkAuthCallbackView', () => {
         'identity_mismatch',
         'local_user_disabled',
         'repair_identity_mismatch',
+        'self_service_disabled',
         'strict_connection',
         'strict_connection_ambiguous',
         'unlinked_enabled_local_user',
@@ -290,6 +290,8 @@ describe('DingTalkAuthCallbackView', () => {
     })
 
     it.each([
+      ['self_service_disabled', 403, true, '当前未开放自行绑定或解绑钉钉账号。请联系管理员核实可用办理方式。'],
+      ['self_service_disabled', 403, false, 'Self-service DingTalk binding and unbinding are unavailable. Ask an administrator about the available options.'],
       ['unlinked_enabled_local_user', 403, true, '该钉钉账号尚未关联可登录的本地账号。请联系管理员核验身份并完成关联。'],
       ['unlinked_local_user', 403, true, '该钉钉账号尚未关联本地账号。请联系管理员核验身份并完成关联。'],
       ['local_user_disabled', 403, true, '关联的本地账号当前不能登录（可能已停用或已删除）。请联系管理员核查账号状态。'],
@@ -328,6 +330,7 @@ describe('DingTalkAuthCallbackView', () => {
 
     it.each([
       ['an unknown code', { success: false, code: 'policy_denied_unlisted', error: PRIVATE_MARKER }],
+      ['a retired self-binding code from an older backend', { success: false, code: 'directory_managed_conflict', error: PRIVATE_MARKER }],
       ['a code with different case', { success: false, code: 'GRANT_REQUIRED', error: PRIVATE_MARKER }],
       ['a missing code (older backend)', { success: false, error: `DingTalk account ${PRIVATE_EMAIL} is not linked to a local user` }],
       ['a numeric code', { success: false, code: 403, error: PRIVATE_MARKER }],
@@ -413,11 +416,15 @@ describe('DingTalkAuthCallbackView', () => {
       expectNoRawText()
     })
 
-    it('a failed bind keeps the existing session untouched', async () => {
+    it.each([
+      [true, '发起绑定的账号与当前登录的账号不一致。当前未开放自行绑定，请联系管理员核实可用办理方式。'],
+      [false, 'The account that started the binding is not the account currently signed in. Self-service binding is unavailable; ask an administrator about the available options.'],
+    ])('a failed bind keeps the existing session untouched and gives actionable guidance (zh=%s)', async (isZh, expected) => {
+      localeMocks.isZh = isZh
       getTokenMock.mockReturnValue('existing-token')
       failWith({ success: false, error: 'DingTalk bind session does not match the current user', code: 'bind_user_mismatch' })
       await mountCallback()
-      expect(errorText()).toBe('发起绑定的账号与当前登录的账号不一致。请用发起绑定的账号登录后重新绑定。')
+      expect(errorText()).toBe(expected)
       expectNoSessionAndNoNavigation()
     })
   })

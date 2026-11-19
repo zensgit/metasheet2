@@ -91,13 +91,13 @@ const GUIDANCE_BY_CODE: Readonly<Record<string, Guidance>> = Object.freeze(Objec
     '该账号的钉钉身份由目录同步管理。请联系管理员处理。',
     'This account\'s DingTalk identity is managed by directory sync. Ask an administrator to handle it.',
   ],
-  directory_managed_conflict: [
-    '当前账号的钉钉身份由目录同步管理，不能自行绑定。请联系管理员处理。',
-    'The current account\'s DingTalk identity is managed by directory sync and cannot be bound here. Ask an administrator to handle it.',
-  ],
   bind_user_mismatch: [
-    '发起绑定的账号与当前登录的账号不一致。请用发起绑定的账号登录后重新绑定。',
-    'The account that started the binding is not the account currently signed in. Sign in with that account and start the binding again.',
+    '发起绑定的账号与当前登录的账号不一致。当前未开放自行绑定，请联系管理员核实可用办理方式。',
+    'The account that started the binding is not the account currently signed in. Self-service binding is unavailable; ask an administrator about the available options.',
+  ],
+  self_service_disabled: [
+    '当前未开放自行绑定或解绑钉钉账号。请联系管理员核实可用办理方式。',
+    'Self-service DingTalk binding and unbinding are unavailable. Ask an administrator about the available options.',
   ],
   auto_provision_email_conflict: [
     '无法自动开通账号：已有使用相同邮箱的本地账号。请联系管理员核验并完成关联。',
