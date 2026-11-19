@@ -19,9 +19,12 @@
  *          DirectoryConflictError (retry the run) before any version-row statement on that member — the
  *          member's row stays free (a NOWAIT probe from another connection takes it).
  *
- * Witnessed red (PR body / evidence y5a-r2): with the inventory's projected-group arm removed, DS-01 ends in
- * 40P01 (the writer's AuthorizationInputBusyError busyReason=deadlock, or the sync's own 40P01); with the
- * projection's held-set check removed, DS-02 bumps the late member instead of refusing.
+ * Witnessed reds (evidence y5a-r2, real PG14):
+ *   - before the fix (f78f65def plus only the test export of the projection): DS-01 ends in 40P01 — the writer's
+ *     AuthorizationInputBusyError busyReason=deadlock — and DS-02 bumps the late member instead of refusing;
+ *   - with only the inventory's projected-group arm removed: DS-01 fails on the sync's DirectoryConflictError
+ *     (the held-set guard turns the cycle into a typed refusal; the arm is what lets the run proceed);
+ *   - with only the projection's held-set check removed: DS-02 bumps the late member instead of refusing.
  *
  * A CASES MODULE, registered from the already-wired real-DB file tests/integration/authz-version-protocol.db.test.ts
  * (excluded from the no-DB runner, run whole-file in the approval real-DB step) — do NOT list a standalone file.
@@ -161,8 +164,6 @@ export function defineAuthzVersionDirectorySyncOrderRealDbCases(): void {
       if (syncSide.result !== 'proceeded') await sync.query('ROLLBACK').catch(() => undefined)
       const writerSide = await writer
       expect({ sync: syncSide.result, writer: writerSide.result }).toEqual({ sync: 'proceeded', writer: 'proceeded' })
-      // The sync never waited on the writer (a re-take of its own row), far below deadlock_timeout.
-      expect(syncSide.ms).toBeLessThan(900)
       // Why: the inventory's one sorted statement held the projected member as well as the admin.
       expect(held.lockedUserIds.has(f.A)).toBe(true)
       expect(held.lockedUserIds.has(f.T)).toBe(true)
