@@ -251,18 +251,33 @@ function ConvertTo-ComparablePath {
   }
 }
 
+function Invoke-Pm2Inspection {
+  param(
+    [string]$Pm2Command,
+    [string[]]$Arguments
+  )
+
+  $command = Get-Command -Name $Pm2Command -ErrorAction Stop
+  # Windows PowerShell 5.1 turns redirected native stderr into NativeCommandError.
+  # Inspection may report an absent app this way. Keep its exit code for the caller.
+  $ErrorActionPreference = 'Continue'
+  $output = & $command @Arguments 2>$null
+  $exitCode = $LASTEXITCODE
+  return [pscustomobject]@{ ExitCode = $exitCode; Output = $output }
+}
+
 function Get-Pm2AppProcess {
   param(
     [string]$Pm2Command,
     [string]$AppName
   )
 
-  $jsonLines = & $Pm2Command jlist 2>$null
-  if ($LASTEXITCODE -ne 0) {
+  $inspection = Invoke-Pm2Inspection -Pm2Command $Pm2Command -Arguments @('jlist')
+  if ($inspection.ExitCode -ne 0) {
     return $null
   }
 
-  $json = ($jsonLines | Out-String).Trim()
+  $json = ($inspection.Output | Out-String).Trim()
   if ([string]::IsNullOrWhiteSpace($json)) {
     return $null
   }
@@ -390,8 +405,8 @@ if ($null -ne $existingApp) {
   }
 }
 else {
-  & $pm2Command describe $Pm2AppName *> $null
-  if ($LASTEXITCODE -ne 0) {
+  $inspection = Invoke-Pm2Inspection -Pm2Command $pm2Command -Arguments @('describe', $Pm2AppName)
+  if ($inspection.ExitCode -ne 0) {
     Start-Pm2App -Pm2Command $pm2Command -ConfigPath $ecosystemConfig -AppName $Pm2AppName -EnvName $Pm2Env
   }
   else {
