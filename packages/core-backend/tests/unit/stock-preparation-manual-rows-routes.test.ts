@@ -8,12 +8,16 @@
  *       states, the stamps, the lock exemption for the six fillable columns ONLY, the closed-code refusal of the
  *       server-written columns, the per-subject field gate, the required rewrite, conditions 3 / 4 / 6 re-checked
  *       INSIDE the create transaction, session-only, and the extension token (refused unless minted; never a capability).
- *   Y   POST /records/:recordId/manual-copy — the whitelist: the six + 备料计划 copied, the lineage pair (OQ5), 进度与回复,
- *       identity / RUN and the stamps never; read AND write required per column; fresh stamps; same gates.
- *   E   PATCH /records/:recordId/manual-fields — only the six, only on a row satisfying M, 名称 / 总用量 not clearable,
- *       per-subject gate, archived / switch-off / deployment-switch-off do not stop it, M re-checked in the transaction;
- *       /patch and PATCH /records keep refusing the six on the same row.
+ *   Y   POST /records/:recordId/manual-copy — the whitelist: the six + 备料计划 copied, 进度与回复, identity / RUN and the
+ *       stamps never; read AND write required per column; fresh stamps; same gates.
+ *   E   PATCH /records/:recordId/manual-fields — only the eight the route accepts, only on a row satisfying M, 名称 / 总用量
+ *       not clearable, per-subject gate, archived / switch-off / deployment-switch-off do not stop it, M re-checked in the
+ *       transaction; /patch and PATCH /records keep refusing the six on the same row.
  *   X   GET /context — the block's state per condition, and who gets it.
+ *
+ * ADR §12 (2026-11-19) made 父组件图号 / 父组件名称 writable on these routes, as a pair. This file keeps the B2 cases and
+ * states what changed for them (C-03, Y-01, Y-08, E-02, X-01); the pair's own rules, the parent picker's two reads and
+ * /context `parentFieldIds` are in stock-preparation-manual-rows-parent-routes.test.ts.
  *
  * Mock pool, no DB; one pinned listener (`request(app)` is banned in tests/unit, #4154). Every value is synthetic.
  */
@@ -199,8 +203,7 @@ describe('C — 新增: POST /sheets/:sheetId/manual-rows', () => {
     ['PLM 物料ID (identity)', 'componentSourceId'],
     ['BOM 路径 (identity)', 'path'],
     ['RUN', 'lastPlmRefreshRunId'],
-    ['父组件图号 (lineage)', 'parentComponentCode'],
-    ['父组件名称 (lineage)', 'parentComponentName'],
+    // 父组件图号 / 父组件名称 left this list with ADR §12: they are writable here as a pair (the parent-routes suite).
   ])('C-03 a submitted %s column answers 403 FIELD_READONLY_PLM_SYSTEM with the id, nothing written', async (_label, logical) => {
     const fieldId = ph(S.PREG, logical)
     const res = await createRow(S.PREG, minimal(S.PREG, { [fieldId]: logical === 'active' ? false : 'SYN-FORGED' }))
@@ -485,13 +488,15 @@ describe('Y — 复制为新行: POST /records/:recordId/manual-copy', () => {
     actualArrivalDate: '2026-11-02',
   }
   const COPIED = ['componentCode', 'componentName', 'componentSpec', 'material', 'rawQuantity', 'totalQuantity', 'materialType', 'blankType', 'demandDate', 'leadTimeDays', 'makeOrBuy']
+  // ADR §12.5 (OQ-P1, revising OQ5): the parent pair is carried as a pair where it CAN be (Y-01), and neither column
+  // otherwise (Y-08; every other case is in the parent-routes suite).
+  const PARENT_PAIR = ['parentComponentCode', 'parentComponentName']
   const NOT_COPIED = [
-    'parentComponentCode', 'parentComponentName',
     'stockPreparationStatus', 'notes', 'procurementReply', 'warehouseConfirmation', 'procurementDone', 'procurementReplyDate', 'warehouseDone', 'actualArrivalDate',
     'componentSourceId', 'parentSourceId', 'path', 'depth', 'sourceVersion', 'lastPlmRefreshRunId', 'lastPlmRefreshAt', 'lastPlmRefreshDecision', 'lastPlmConflictSummary',
   ]
 
-  it('Y-01 a PLM row copied: the six + 备料计划 copied; the lineage pair (OQ5), 进度与回复, identity / RUN never; fresh stamps; the source untouched', async () => {
+  it('Y-01 a PLM row copied: the six + 备料计划 copied, and (ADR §12.5) its parent pair as a pair; 进度与回复, identity / RUN never; fresh stamps; the source untouched', async () => {
     const source = fake.addRecord(S.PREG, 'rec_mrb2_copy_source', SOURCE_CELLS, null)
     const sourceBefore = structuredClone(source)
     const res = await copyRow(source.id)
@@ -499,7 +504,7 @@ describe('Y — 复制为新行: POST /records/:recordId/manual-copy', () => {
     const id = res.body.data.record.id as string
     expect(id).not.toBe(source.id)
     const copy = fake.records.get(id)!
-    for (const logical of COPIED) expect(copy.data[ph(S.PREG, logical)], logical).toEqual(SOURCE_CELLS[logical])
+    for (const logical of [...COPIED, ...PARENT_PAIR]) expect(copy.data[ph(S.PREG, logical)], logical).toEqual(SOURCE_CELLS[logical])
     for (const logical of NOT_COPIED) expect(ph(S.PREG, logical) in copy.data, logical).toBe(false)
     expect(copy.data[ph(S.PREG, 'idempotencyKey')]).toBe(`manual:v1:${id}`)
     expect(copy.data[ph(S.PREG, 'projectNo')]).toBe(MR_PROJECT_NO)
@@ -576,16 +581,18 @@ describe('Y — 复制为新行: POST /records/:recordId/manual-copy', () => {
     expect(recordsOf(S.PREG).map((r) => r.id)).toEqual([source.id])
   })
 
-  it('Y-08 the WHITELIST itself keeps the lineage pair, identity / RUN and 进度与回复 out — on a sheet where only the three stamped columns are locked, so no lock does it', async () => {
-    // On a fully locked sheet the copy's per-column WRITE check already drops every locked column but the six (their lock
-    // is lifted), which would hide a whitelist fault; here the lineage / identity / RUN columns are writable for people.
+  it('Y-08 the WHITELIST itself keeps identity / RUN and 进度与回复 out — on a sheet where only the three stamped columns are locked, so no lock does it; and the parent pair, UNLOCKED there, is not carried (ADR §12.3)', async () => {
+    // On a fully locked sheet the copy's per-column WRITE check already drops every locked column but the eight exempt
+    // ones (their lock is lifted), which would hide a whitelist fault; here the identity / RUN columns are writable for
+    // people. The parent pair carries no lock on this sheet, so the manual-row routes do not write it at all: the copy
+    // still succeeds and carries neither column.
     const sheet = fake.addSheet('THREELOCKS_COPY', { objectId: P(42), locked: ['idempotencyKey', 'projectNo', 'active'] })
     const source = fake.addRecord(sheet, 'rec_mrb2_copy_unlocked', SOURCE_CELLS, null)
     const res = await copyRow(source.id)
     expect(res.status, JSON.stringify(res.body)).toBe(200)
     const copy = fake.records.get(res.body.data.record.id)!
     for (const logical of COPIED) expect(copy.data[ph(sheet, logical)], logical).toEqual(SOURCE_CELLS[logical])
-    for (const logical of NOT_COPIED) expect(ph(sheet, logical) in copy.data, logical).toBe(false)
+    for (const logical of [...NOT_COPIED, ...PARENT_PAIR]) expect(ph(sheet, logical) in copy.data, logical).toBe(false)
     expect(copy.data[ph(sheet, 'idempotencyKey')]).toBe(`manual:v1:${res.body.data.record.id}`)
   })
 
@@ -622,14 +629,18 @@ describe('E — 修改: PATCH /records/:recordId/manual-fields', () => {
     ['the key', 'idempotencyKey'],
     ['项目号', 'projectNo'],
     ['an identity column', 'componentSourceId'],
-    ['the lineage pair', 'parentComponentCode'],
-  ])('E-02 %s is outside the six: 400 STOCK_PREP_MANUAL_FIELDS_NOT_FILLABLE naming it, nothing written', async (_label, logical) => {
+    ['a RUN column', 'lastPlmRefreshRunId'],
+    ['有效', 'active'],
+    // The parent pair left this list with ADR §12: the route accepts it (as a pair; the parent-routes suite).
+  ])('E-02 %s is outside the eight the route accepts: 400 STOCK_PREP_MANUAL_FIELDS_NOT_FILLABLE naming it, nothing written', async (_label, logical) => {
     const row = manualRow(S.PREG, `rec_mrb2_edit_outside_${logical}`)
     const before = structuredClone(row)
     const res = await editRow(row.id, { [ph(S.PREG, 'componentName')]: 'X', [ph(S.PREG, logical)]: 'SYN' })
     expect(res.status).toBe(400)
     expect(res.body.error.code).toBe('STOCK_PREP_MANUAL_FIELDS_NOT_FILLABLE')
     expect(res.body.error.fieldIds).toEqual([ph(S.PREG, logical)])
+    // The closed message names what the route accepts — the six and the pair — and no value.
+    expect(res.body.error.message).toBe('这个入口只修改人工补充行的图号、名称、规格、材料、用量、总用量，以及父组件图号和父组件名称（这两列要一起提交）；其他列请照常编辑。')
     expect(fake.records.get(row.id)).toEqual(before)
   })
 
@@ -751,14 +762,22 @@ describe('X — GET /context: capabilities.stockPreparationManualRows', () => {
     return res.body.data.capabilities.stockPreparationManualRows
   }
 
-  it('X-01 allowed on a P_reg sheet: the six fillable ids (template order), the create\'s required ids (名称, 总用量) and (B3) the dialog\'s columns', async () => {
-    expect(await block(S.PREG)).toEqual({
+  it('X-01 allowed on a P_reg sheet: the six fillable ids (template order), the create\'s required ids (名称, 总用量), (B3) the dialog\'s columns and (ADR §12.6) the parent pair\'s ids — which stay out of editableFieldIds', async () => {
+    const got = await block(S.PREG)
+    expect(got).toEqual({
       state: 'allowed',
       editableFieldIds: ['componentCode', 'componentName', 'componentSpec', 'material', 'rawQuantity', 'totalQuantity'].map((l) => ph(S.PREG, l)),
       requiredFieldIds: [ph(S.PREG, 'componentName'), ph(S.PREG, 'totalQuantity')],
       // ADR §8 B3.3: 名称*、总用量*、图号、规格、材质、用量、备注.
       dialogFieldIds: ['componentName', 'totalQuantity', 'componentCode', 'componentSpec', 'material', 'rawQuantity', 'notes'].map((l) => ph(S.PREG, l)),
+      parentFieldIds: { code: ph(S.PREG, 'parentComponentCode'), name: ph(S.PREG, 'parentComponentName') },
     })
+    // The key order of the block: the new key is appended, the four B2 / B3 keys keep their places.
+    expect(Object.keys(got)).toEqual(['state', 'editableFieldIds', 'requiredFieldIds', 'dialogFieldIds', 'parentFieldIds'])
+    for (const id of Object.values(got.parentFieldIds as Record<string, string>)) {
+      expect(got.editableFieldIds).not.toContain(id)
+      expect(got.dialogFieldIds).not.toContain(id)
+    }
   })
 
   it.each([

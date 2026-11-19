@@ -11,6 +11,13 @@
  * plugin registry read (with a chosen SQLSTATE), and a hook that changes a sheet the moment the create / patch
  * transaction re-reads it (to prove the in-transaction re-checks).
  *
+ * ADR §12 (slice P1): it also holds the row policy — a sheet's row-level read flag and per-user `'none'`
+ * record_permissions (`recordDenies`) — and answers the two FIXED parent-picker statements
+ * (multitable/stock-preparation-manual-row-parent-options.ts) by evaluating them in JS over its records, from the very
+ * parameter list the route sent (`evaluateParentOptionsStatement` / `evaluateParentDependentsStatement` below: a null
+ * column id reads nothing, the denied ids are excluded before anything is grouped or counted). The statements' own SQL
+ * is proven on real Postgres by the registered real-DB cases; here the route's gates, read sets and parameters are.
+ *
  * Every value is synthetic.
  */
 import { createRequire } from 'node:module'
@@ -18,6 +25,7 @@ import { createRequire } from 'node:module'
 import { vi } from 'vitest'
 
 import { getObjectFieldId, getObjectSheetId } from '../../src/multitable/provisioning'
+import { MANUAL_ROW_PARENT_DEPENDENTS_SQL, MANUAL_ROW_PARENT_OPTIONS_SQL } from '../../src/multitable/stock-preparation-manual-row-parent-options'
 
 const requireCjs = createRequire(import.meta.url)
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -68,6 +76,8 @@ export type FakeSheet = {
   /** The plugin registry (087) row; null = none. */
   target: FakeTarget | null
   fields: FakeFieldRow[]
+  /** `meta_sheets.row_level_read_permissions_enabled` (default off: a `'none'` record_permission is then inert). */
+  rowLevelReadDeny?: boolean
 }
 
 export type SheetOptions = {
@@ -131,17 +141,123 @@ function buildFields(sheetId: string, projectId: string, objectId: string, optio
 const collapse = (sql: string) => sql.replace(/\s+/g, ' ').trim()
 const asIds = (value: unknown): string[] => (Array.isArray(value) ? value.map(String) : typeof value === 'string' ? [value] : [])
 
+// ── the two fixed parent-picker statements, evaluated over the fake's records ──────────────────────────────
+//
+// Each function reads ONLY what the statement's parameters let the real statement read, in the statement's own order
+// of operations: a column whose id parameter is null is never looked at; the denied record ids and the active filter
+// cut the rows before anything is grouped, counted or capped.
+
+const PARENT_OPTIONS_STATEMENT = collapse(MANUAL_ROW_PARENT_OPTIONS_SQL)
+const PARENT_DEPENDENTS_STATEMENT = collapse(MANUAL_ROW_PARENT_DEPENDENTS_SQL)
+
+/** BTRIM(text, chars): strips any of `chars` from both ends. */
+function sqlBtrim(value: string, chars: string): string {
+  let start = 0
+  let end = value.length
+  while (start < end && chars.includes(value[start]!)) start += 1
+  while (end > start && chars.includes(value[end - 1]!)) end -= 1
+  return value.slice(start, end)
+}
+
+/** `data -> $n` as text when the JSON value is a string; NULL for a null column id or any other JSON type. */
+function jsonStringCell(data: Record<string, unknown>, columnId: unknown): string | null {
+  if (typeof columnId !== 'string') return null
+  const value = data[columnId]
+  return typeof value === 'string' ? value : null
+}
+
+/** `data ->> $n`: the cell as text (a JSON string unquoted, a number / boolean as its text); NULL when absent or null. */
+function jsonTextCell(data: Record<string, unknown>, columnId: unknown): string | null {
+  if (typeof columnId !== 'string') return null
+  const value = data[columnId]
+  if (value === null || value === undefined) return null
+  return typeof value === 'string' ? value : typeof value === 'object' ? JSON.stringify(value) : String(value)
+}
+
+/** ORDER BY … COLLATE "C": byte order of the UTF-8 text. */
+function compareC(a: string, b: string): number {
+  return Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'))
+}
+
+export function evaluateParentOptionsStatement(
+  records: Iterable<Pick<FakeRecord, 'id' | 'sheet_id' | 'data'>>,
+  params: unknown[],
+): Array<{ code: string; name: string | null; kind: 'parent' | 'component'; child_count: number | null }> {
+  const [sheetId, codeId, nameId, parentCodeId, parentNameId, activeId, denied, trimChars, search, cap] = params
+  const deniedIds = new Set(asIds(denied))
+  const chars = String(trimChars)
+  const nonBlank = (value: string | null): value is string => value !== null && sqlBtrim(value, chars) !== ''
+  const texts = [...records]
+    .filter((record) => record.sheet_id === sheetId
+      && (activeId === null || jsonTextCell(record.data, activeId) === 'true')
+      && !deniedIds.has(record.id))
+    .map((record) => ({
+      code: jsonStringCell(record.data, codeId),
+      name: jsonStringCell(record.data, nameId),
+      parentCode: jsonStringCell(record.data, parentCodeId),
+      parentName: jsonStringCell(record.data, parentNameId),
+    }))
+  const parents = new Map<string, { code: string; name: string | null; child_count: number }>()
+  for (const row of texts) {
+    if (!nonBlank(row.parentCode)) continue
+    const name = nonBlank(row.parentName) ? row.parentName : null
+    const key = JSON.stringify([row.parentCode, name])
+    const entry = parents.get(key) ?? { code: row.parentCode, name, child_count: 0 }
+    entry.child_count += 1
+    parents.set(key, entry)
+  }
+  const parentCodes = new Set([...parents.values()].map((entry) => entry.code))
+  const components = new Map<string, { code: string; name: string | null }>()
+  for (const row of texts) {
+    if (!nonBlank(row.code) || parentCodes.has(row.code)) continue
+    const name = nonBlank(row.name) ? row.name : null
+    components.set(JSON.stringify([row.code, name]), { code: row.code, name })
+  }
+  const items = [
+    ...[...parents.values()].map((entry) => ({ ...entry, kind: 'parent' as const })),
+    ...[...components.values()].map((entry) => ({ ...entry, kind: 'component' as const, child_count: null })),
+  ]
+  const needle = String(search)
+  return items
+    .filter((item) => needle === '' || item.code.toLowerCase().includes(needle) || (item.name ?? '').toLowerCase().includes(needle))
+    .sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'parent' ? -1 : 1)
+      || compareC(a.code, b.code)
+      || (a.name === b.name ? 0 : a.name === null ? -1 : b.name === null ? 1 : compareC(a.name, b.name)))
+    .slice(0, Number(cap))
+}
+
+export function evaluateParentDependentsStatement(
+  records: Iterable<Pick<FakeRecord, 'id' | 'sheet_id' | 'data' | 'created_by'>>,
+  params: unknown[],
+): number {
+  const [sheetId, recordId, parentCodeId, ownCode, keyId, keyPrefix, trimChars, denied] = params
+  const deniedIds = new Set(asIds(denied))
+  const chars = String(trimChars)
+  const wanted = sqlBtrim(String(ownCode), chars)
+  return [...records].filter((record) => {
+    if (record.sheet_id !== sheetId || record.id === recordId || deniedIds.has(record.id)) return false
+    const parentCode = jsonTextCell(record.data, parentCodeId)
+    if (parentCode === null || sqlBtrim(parentCode, chars) !== wanted) return false
+    if (jsonTextCell(record.data, keyId) !== `${String(keyPrefix)}${record.id}`) return false
+    return typeof record.created_by === 'string' && sqlBtrim(record.created_by, chars) !== ''
+  }).length
+}
+
 export function createManualRowsFakePool() {
   const sheets = new Map<string, FakeSheet>()
   const records = new Map<string, FakeRecord>()
   const trash = new Map<string, FakeTrash>()
   const fieldPermissions: Array<{ sheetId: string; fieldId: string; userId: string; visible: boolean; readOnly: boolean }> = []
+  /** `record_permissions` rows with access_level 'none' (a read deny, live only where the sheet's flag is on). */
+  const recordDenies: Array<{ sheetId: string; recordId: string; userId: string }> = []
   const sqlLog: Array<{ sql: string; params: unknown[] }> = []
   const failures: { hostRegistry: { code?: string; message: string } | null; target: { code?: string; message: string } | null } = { hostRegistry: null, target: null }
   /** Called when a create / patch transaction re-reads the sheet's fields: lets a case change the sheet in between. */
   let onTransactionFieldRead: ((sheet: FakeSheet) => void) | null = null
   /** Called when the edit recheck locks the record FOR UPDATE. */
   let onRecordLockForUpdate: ((record: FakeRecord) => void) | null = null
+  /** One-shot: the rows the candidate statement answers with INSTEAD of its evaluation (to prove the route's own mask). */
+  let parentOptionsRowsOverride: unknown[] | null = null
   let trashSeq = 0
 
   function addSheet(key: string, options: SheetOptions): FakeSheet {
@@ -209,6 +325,32 @@ export function createManualRowsFakePool() {
         object_id: t.objectId === undefined ? s.objectId : t.objectId,
         tenant_id: t.tenantId === undefined ? MR_TENANT_ID : t.tenantId,
       }])
+    }
+
+    // ── the two fixed parent-picker statements (before every generic `meta_records` matcher below) ──
+    if (q === PARENT_OPTIONS_STATEMENT) {
+      if (parentOptionsRowsOverride) {
+        const override = parentOptionsRowsOverride
+        parentOptionsRowsOverride = null
+        return rows(override)
+      }
+      return rows(evaluateParentOptionsStatement(records.values(), params))
+    }
+    if (q === PARENT_DEPENDENTS_STATEMENT) return rows([{ dependents: evaluateParentDependentsStatement(records.values(), params) }])
+
+    // ── the row policy: the sheet's read-deny flag and the actor's 'none' record_permissions ──
+    if (q.startsWith('SELECT row_level_read_permissions_enabled AS enabled, base_id FROM meta_sheets WHERE id = $1')) {
+      const s = sheets.get(p(0))
+      return rows(s ? [{ enabled: s.rowLevelReadDeny === true, base_id: MR_BASE_ID }] : [])
+    }
+    if (q.startsWith('SELECT 1 FROM record_permissions WHERE sheet_id = $1')) {
+      return rows(recordDenies.some((deny) => deny.sheetId === p(0)) ? [{ '?column?': 1 }] : [])
+    }
+    if (q.includes('FROM record_permissions rp')) {
+      // Both shapes key on ($1 user, $2 sheet) and optionally narrow to `rp.record_id = ANY($3)`.
+      const wanted = /rp\.record_id = ANY\(\$3/.test(q) ? new Set(asIds(params[2])) : null
+      const hits = recordDenies.filter((deny) => deny.userId === p(0) && deny.sheetId === p(1) && (wanted === null || wanted.has(deny.recordId)))
+      return rows(hits.map((deny) => ({ record_id: deny.recordId, access_level: 'none' })))
     }
 
     // ── sheets / bases / views ──
@@ -377,6 +519,7 @@ export function createManualRowsFakePool() {
     records,
     trash,
     fieldPermissions,
+    recordDenies,
     sqlLog,
     failures,
     addSheet,
@@ -384,17 +527,20 @@ export function createManualRowsFakePool() {
     phys,
     setOnTransactionFieldRead(hook: ((sheet: FakeSheet) => void) | null) { onTransactionFieldRead = hook },
     setOnRecordLockForUpdate(hook: ((record: FakeRecord) => void) | null) { onRecordLockForUpdate = hook },
+    overrideParentOptionsRows(rowsToReturn: unknown[] | null) { parentOptionsRowsOverride = rowsToReturn },
     statements(pattern: RegExp) { return sqlLog.filter((entry) => pattern.test(entry.sql)) },
     reset() {
       sheets.clear()
       records.clear()
       trash.clear()
       fieldPermissions.length = 0
+      recordDenies.length = 0
       sqlLog.length = 0
       failures.hostRegistry = null
       failures.target = null
       onTransactionFieldRead = null
       onRecordLockForUpdate = null
+      parentOptionsRowsOverride = null
     },
   }
 }
