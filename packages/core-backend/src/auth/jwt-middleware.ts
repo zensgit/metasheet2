@@ -3,6 +3,8 @@ import { extractTenantFromHeaders } from '../db/sharding/tenant-context'
 import { metrics } from '../metrics/metrics'
 import { apiPathEquals, isGateException } from './api-path-policy'
 import { authService } from './AuthService'
+import { pool } from '../db/pg'
+import { validateStrictSession } from '../rbac/strict-principal'
 
 const PASSWORD_CHANGE_WHITELIST = [
   '/api/auth/me',
@@ -63,12 +65,14 @@ function resolveBearerToken(req: Request): string | undefined {
   return auth.startsWith('Bearer ') ? auth.slice(7) : undefined
 }
 
-async function hydrateAuthenticatedUser(req: Request, token: string): Promise<
+async function hydrateAuthenticatedUser(req: Request, token: string, readOnlyPermissionCheck = false): Promise<
   | { ok: true }
   | { ok: false; statusCode: number; body: { ok: false; error: { code: string; message: string } }; metricReason?: string }
 > {
   try {
-    const user = await authService.verifyToken(token)
+    const user = readOnlyPermissionCheck
+      ? await authService.verifyToken(token, { readOnlyPermissionCheck: true })
+      : await authService.verifyToken(token)
     if (!user) {
       return {
         ok: false,
@@ -111,6 +115,9 @@ async function hydrateAuthenticatedUser(req: Request, token: string): Promise<
     req.user = user as Express.Request['user']
     return { ok: true }
   } catch (err: unknown) {
+    if (readOnlyPermissionCheck) {
+      return { ok: false, statusCode: 503, body: { ok: false, error: { code: 'AUTH_UNAVAILABLE', message: 'Authentication unavailable' } } }
+    }
     const errorMessage = err instanceof Error && err.name === 'TokenExpiredError' ? 'expired_token' : 'invalid_token'
     return {
       ok: false,
@@ -165,4 +172,56 @@ export async function jwtAuthMiddleware(req: Request, res: Response, next: NextF
     return res.status(result.statusCode).json(result.body)
   }
   return next()
+}
+
+/** Exact checker route that uses the no-bootstrap authentication profile. */
+export function isReadOnlyPermissionCheckRequest(method: string, path: string): boolean {
+  return method.toUpperCase() === 'POST' && apiPathEquals(path, '/api/permissions/v2/business-check')
+}
+
+/** Same JWT context as the normal gate, without development fallback or attendance bootstrap writes. */
+export async function readOnlyAuthorizationJwtAuth(req: Request, res: Response, next: NextFunction) {
+  const token = resolveBearerToken(req)
+  if (!token) {
+    metrics.jwtAuthFail.inc({ reason: 'missing_token' })
+    metrics.authFailures.inc()
+    return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Missing Bearer token' } })
+  }
+  const result = await hydrateAuthenticatedUser(req, token, true)
+  if (isHydrateFailure(result)) {
+    if (result.metricReason) {
+      metrics.jwtAuthFail.inc({ reason: result.metricReason })
+      metrics.authFailures.inc()
+    }
+    return res.status(result.statusCode).json(result.body)
+  }
+  const userId = req.user?.id?.toString()
+  if (!userId || !pool) return res.status(503).json({ ok: false, error: { code: 'AUTH_UNAVAILABLE', message: 'Authentication unavailable' } })
+  try {
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
+      await client.query("SET LOCAL statement_timeout = '2000ms'")
+      const valid = await validateStrictSession((sql, params) => client.query(sql, params), token, userId)
+      await client.query('COMMIT')
+      if (!valid) return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Invalid token' } })
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined)
+      throw error
+    } finally {
+      client.release()
+    }
+  } catch {
+    return res.status(503).json({ ok: false, error: { code: 'AUTH_UNAVAILABLE', message: 'Authentication unavailable' } })
+  }
+  return next()
+}
+
+/** Selects authentication mode only; every selected path still requires a valid JWT and live session. */
+export function isReadOnlyAuthorizationRequest(method: string, path: string): boolean {
+  if (isReadOnlyPermissionCheckRequest(method, path)) return true
+  const verb = method.toUpperCase()
+  if (verb === 'POST' && (apiPathEquals(path, '/api/admin/authorization-operations')
+    || apiPathEquals(path, '/api/admin/authorization-operations/preview'))) return true
+  return (verb === 'GET' || verb === 'HEAD') && /^\/api\/admin\/authorization-operations\/[^/]+\/?$/i.test(path)
 }

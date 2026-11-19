@@ -19,6 +19,14 @@ import { expandYidaProjectAllocationRows } from './stock-preparation-yida-alloca
 const CONTEXT = ['tenantId', 'workspaceId', 'ownerId']
 const PREPARE = [...CONTEXT, 'operationId', 'rowKey', 'targetRef', 'targetRevision', 'planRevision',
   'payloadDigest', 'businessKeyDigest', 'credentialRef', 'credentialGeneration', 'intent']
+// Source binding (design baseline v2.3 §7.2): a bound selection names its two digests and its per-row
+// binding; the host hands all three to the admission together. Absent = the original unbound shape.
+const BINDING = ['sourceRecordDigest', 'creationIdentityDigest', 'sourceBinding']
+const ROW_BINDING = ['sheetId', 'recordId', 'keyFieldId', 'keyValue', 'projectNo', 'fieldBindings', 'fieldDependencies']
+const DRAFT_INPUT = ['config', 'rowsText', 'allocation']
+// The project-sheet registry (migration 087): one active row per (tenant, project number) names the sheet.
+const PROJECT_REGISTRY = 'integration_stock_prep_project_target'
+const DIGEST_RE = /^[0-9a-f]{64}$/
 const ERROR_CODES = new Set(['INPUT', 'UNAVAILABLE', 'NOT_FOUND', 'CONFLICT'])
 const ownErrors = new WeakMap()
 const { stableCanonicalStringify, deepCloneFrozenCanonical } = canonical
@@ -69,6 +77,13 @@ const same = (left, right) => stableCanonicalStringify(left) === stableCanonical
 // Absent, every primitive keeps the original closed input and the permanent slot-1 read unchanged.
 const hasTarget = input => Boolean(input) && typeof input === 'object' && !types.isProxy(input)
   && Object.hasOwn(input, 'targetRef')
+const hasKey = (input, key) => Boolean(input) && typeof input === 'object' && !types.isProxy(input) && Object.hasOwn(input, key)
+// A draft input is the closed triple, plus the host's optional sourceBinding (never a request-body field).
+const draftKeys = input => (hasKey(input, 'sourceBinding') ? [...DRAFT_INPUT, 'sourceBinding'] : DRAFT_INPUT)
+function digest(value) {
+  if (typeof value !== 'string' || !DIGEST_RE.test(value)) fail('INPUT')
+  return value
+}
 function targeted(input, keys) {
   if (hasTarget(input)) {
     const parsed = record(input, [...keys, 'targetRef'])
@@ -139,6 +154,7 @@ function projectTransformRows(compiled) {
 const WORST_OPAQUE = '\u0001'.repeat(128)
 const WORST_EXPIRES_AT = Number.MAX_SAFE_INTEGER
 const WORST_GENERATION = 2147483647
+const WORST_DIGEST = 'f'.repeat(64)
 
 function createPrimitives(options) {
   const parsed = record(options, ['security', 'context'])
@@ -156,7 +172,7 @@ function createPrimitives(options) {
     try {
       const db = crud(trx)
       const { parsed: source, targetRef } = hasTarget(input)
-        ? targeted(input, ['config', 'rowsText', 'allocation']) : { parsed: input, targetRef: undefined }
+        ? targeted(input, draftKeys(input)) : { parsed: input, targetRef: undefined }
       // The permanent slot (or, multi-target ON, the named owned target), current
       // authenticated 090, and original 091 all pass before a candidate may reach
       // the existing local draft writer.
@@ -191,6 +207,9 @@ function createPrimitives(options) {
       const { sourceRows, verified } = reconstructRows(compiled)
       const planned = verified.rows[member.ordinal]
       if (!planned || createHash('sha256').update(planned.localBusinessKey).digest('hex') !== member.business_key_digest) fail('UNAVAILABLE')
+      // The draft reader already compared the durable binding digests with the recompiled row spec; the
+      // selection carries the recompiled values (null for an unbound row) and the per-row binding.
+      const spec = compiled.rowSpecs[member.ordinal]
       const data = deepCloneFrozenCanonical({ ...planned.protocolPreview.data,
         formDataJson: stableCanonicalStringify(planned.payload) })
       const selection = deepCloneFrozenCanonical({ ...fixed, operationId: selected.operation.operation_id,
@@ -198,6 +217,8 @@ function createPrimitives(options) {
         planRevision: compiled.planDigest, credentialRef: approved.target.credential_ref,
         credentialGeneration: approved.target.credential_generation, businessKeyDigest: member.business_key_digest,
         rowPayloadDigest: member.payload_digest, planDigest: compiled.planDigest,
+        sourceRecordDigest: spec.sourceRecordDigest ?? null, creationIdentityDigest: spec.creationIdentityDigest ?? null,
+        sourceBinding: spec.sourceBinding ?? null,
         config: compiled.source.config, selectedRow: sourceRows[member.ordinal], source: compiled.source, plan: compiled.plan })
       selections.set(selection, data)
       return selection
@@ -231,7 +252,8 @@ function createPrimitives(options) {
         actorId: grant.actorId, operationId: selection.operationId, rowKey: selection.rowKey, grantRef: grant.grantRef,
         expiresAt: grant.expiresAt, targetRef: selection.targetRef, targetRevision: selection.targetRevision,
         planRevision: selection.planRevision, credentialRef: selection.credentialRef,
-        credentialGeneration: selection.credentialGeneration, config: selection.config, row: selection.selectedRow }
+        credentialGeneration: selection.credentialGeneration, config: selection.config, row: selection.selectedRow,
+        sourceRecordDigest: selection.sourceRecordDigest, creationIdentityDigest: selection.creationIdentityDigest }
       const verdict = sendBudgetModule.assessYidaSendBudget({ snapshot, data })
       return Object.freeze({ withinBudget: verdict.withinBudget === true })
     } catch (error) { closed(error) }
@@ -244,28 +266,50 @@ function createPrimitives(options) {
   // v2 is unchanged: { withinBudget: true } without assessing (its payload is bounded by its rows).
   function draftSendBudget(input) {
     try {
-      const source = record(input, ['config', 'rowsText', 'allocation'])
+      const source = record(input, draftKeys(input))
       const compiled = compileYidaSendDraft(source)
       if (compiled.source.config.version !== 3) return Object.freeze({ withinBudget: true })
       // create only: reconstructRows refuses any other intent (CONFLICT), as prepareDraft does.
       const { sourceRows, verified } = reconstructRows(compiled)
       const within = verified.rows.every((planned, index) => {
+        // The two binding digests at their worst case (a 64-hex string dominates null).
         const snapshot = { tenantId: fixed.tenantId, workspaceId: fixed.workspaceId, ownerId: fixed.ownerId,
           actorId: fixed.ownerId, operationId: WORST_OPAQUE, rowKey: WORST_OPAQUE, grantRef: WORST_OPAQUE,
           expiresAt: WORST_EXPIRES_AT, targetRef: WORST_OPAQUE, targetRevision: 'evidence-1',
           planRevision: compiled.planDigest, credentialRef: WORST_OPAQUE,
-          credentialGeneration: WORST_GENERATION, config: compiled.source.config, row: sourceRows[index] }
+          credentialGeneration: WORST_GENERATION, config: compiled.source.config, row: sourceRows[index],
+          sourceRecordDigest: WORST_DIGEST, creationIdentityDigest: WORST_DIGEST }
         const data = { ...planned.protocolPreview.data, formDataJson: stableCanonicalStringify(planned.payload) }
         return sendBudgetModule.assessYidaSendBudget({ snapshot, data }).withinBudget === true
       })
       return Object.freeze({ withinBudget: within })
     } catch (error) { closed(error) }
   }
+  // Admission of a bound row (design baseline v2.3 §7.2): the project-sheet registry must still name the
+  // bound sheet for the row's project, active, inside the SAME admission transaction; the two digests then
+  // enter the ledger row, where the identity fence (D16) is the final guarantee. The three binding keys come
+  // together or not at all; absent, the admission is the original unbound shape.
   async function prepareInTransaction(trx, input) {
     try {
-      const requested = record(input, PREPARE)
+      const bound = BINDING.some(key => hasKey(input, key))
+      const requested = record(input, bound ? [...PREPARE, ...BINDING] : PREPARE)
       if (!CONTEXT.every(key => requested[key] === fixed[key]) || requested.intent !== 'create') fail('CONFLICT')
-      const prepared = await delivery.prepareYidaDeliveryInTransaction(crud(trx), requested)
+      const db = crud(trx)
+      const prepareInput = {}
+      for (const key of PREPARE) Object.defineProperty(prepareInput, key, { value: requested[key], enumerable: true })
+      if (bound) {
+        const unbound = requested.sourceRecordDigest === null && requested.creationIdentityDigest === null && requested.sourceBinding === null
+        if (!unbound) {
+          digest(requested.sourceRecordDigest); digest(requested.creationIdentityDigest)
+          const binding = record(requested.sourceBinding, ROW_BINDING)
+          opaque(binding.sheetId); opaque(binding.projectNo)
+          const registered = await db.selectOne(PROJECT_REGISTRY, { tenant_id: fixed.tenantId, project_no: binding.projectNo })
+          if (!registered || registered.status !== 'active' || registered.sheet_id !== binding.sheetId) fail('CONFLICT')
+          Object.defineProperty(prepareInput, 'sourceRecordDigest', { value: requested.sourceRecordDigest, enumerable: true })
+          Object.defineProperty(prepareInput, 'creationIdentityDigest', { value: requested.creationIdentityDigest, enumerable: true })
+        }
+      }
+      const prepared = await delivery.prepareYidaDeliveryInTransaction(db, prepareInput)
       return Object.freeze({ record: Object.freeze(prepared.record), reused: prepared.reused })
     } catch (error) { closed(error) }
   }

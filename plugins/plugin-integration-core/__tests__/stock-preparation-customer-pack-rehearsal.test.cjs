@@ -601,7 +601,8 @@ function plmWritableFieldIds(fields) {
     const meta = row.property && row.property.stockPreparation
     if (!meta) continue
     // R-71 ⑦.4 PR-4: a machine write-back column is plm_system (so no person may edit it) but a refresh
-    // never writes it either — its only writer is the YiDa issue-confirm write-back.
+    // never writes it either — its only originating writer is the YiDa issue-confirm write-back (the carry
+    // confirm only copies an existing value onto a re-keyed successor row).
     if (MACHINE_WRITEBACK_FIELD_IDS.includes(row.logicalId)) continue
     if (meta.ownership !== 'human_preserved' && !meta.preserveOnRefresh) writable.push(row.logicalId)
   }

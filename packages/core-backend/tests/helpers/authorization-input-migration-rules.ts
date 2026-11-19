@@ -17,7 +17,14 @@
  * parent however it is spelled. Nothing else about the statement is set aside, and a substituted
  * SET clause of a `users` UPDATE is never exempt.
  *
- * One more set-aside exists, and only one: the pinned statements of the D21 authorization-version
+ * Two more set-asides exist, and only two. The first came with main (#6934): in the delegation
+ * activation schema migration (`DELEGATION_ACTIVATION_SCHEMA_MIGRATION`, at its exact path and with
+ * the CRLF-folded sha256 `DELEGATION_ACTIVATION_SCHEMA_SHA256`), a judgment that is not an input
+ * write and whose problem is one of `REVIEWED_ACTIVATION_DDL` (its CREATE TABLE, LOCK and DROP TABLE)
+ * is set aside; any other content at that path is a problem of its own. It is independent of the
+ * second and is not part of `AUTHORIZATION_INPUT_PINNED_STATEMENT_SETS`.
+ *
+ * The second: the pinned statements of the D21 authorization-version
  * migration (owner ruling 2026-11-16 「按建议，A」). What it guarantees: the five CREATE TRIGGER
  * statements and the five tolerant DROP TRIGGER statements on input tables written below are set
  * aside only in the reviewed D21 file, at its exact path and byte-identical to the reviewed content
@@ -65,6 +72,14 @@ import { commentStrippedText, INPUT_TABLES, literalSqlTexts, literalTexts, scanS
 import type { LiteralWrite } from './authorization-input-scan'
 
 export const COMPLIANT_LOCK_BLOCK = `DO $$ DECLARE attempt int := 0; BEGIN LOOP EXIT WHEN ${AUTHORIZATION_INPUT_MIGRATION_LOCK_FORM}; attempt := attempt + 1; IF attempt >= 25 THEN RAISE EXCEPTION USING ERRCODE = '55P03'; END IF; PERFORM pg_sleep(0.2); END LOOP; END $$`
+
+export const DELEGATION_ACTIVATION_SCHEMA_MIGRATION = 'packages/core-backend/src/db/migrations/zzzz20261118103000_create_delegated_role_admin_activation.ts'
+const DELEGATION_ACTIVATION_SCHEMA_SHA256 = '306b0d906d6e3710ff4b628543b2793690028f2829005803c6ac54407646354a'
+const REVIEWED_ACTIVATION_DDL = new Set([
+  'unreadable CREATE TABLE: creates an input table',
+  'unreadable LOCK: statement kind is not on the safe list',
+  'unreadable DROP TABLE: drops an input table',
+])
 
 /* ───────────────────────────── historical migration files ───────────────────────────── */
 
@@ -328,6 +343,12 @@ export function checkNewMigration(
   pinnedSets: readonly PinnedStatementSet[] = AUTHORIZATION_INPUT_PINNED_STATEMENT_SETS,
 ): MigrationCheck {
   const problems: string[] = []
+  // This migration creates an empty input table. Its down path takes an exclusive lock
+  // and refuses to drop a populated table. Pin that control flow as well as the SQL.
+  // Future migrations and all input write and closure checks keep the normal rules.
+  const isActivationSchema = file === DELEGATION_ACTIVATION_SCHEMA_MIGRATION
+  const reviewedActivationDdl = isActivationSchema && createHash('sha256').update(source.replace(/\r\n/g, '\n')).digest('hex') === DELEGATION_ACTIVATION_SCHEMA_SHA256
+  if (isActivationSchema && !reviewedActivationDdl) problems.push('delegation activation schema differs from reviewed migration')
   const isSource = SOURCE_EXTENSIONS.has(path.extname(file))
   const result = isSource ? scanSource(file, source) : scanText(file, source)
   const inputWrites = result.writes.filter((write) => (INPUT_TABLES as readonly string[]).includes(write.table))
@@ -345,7 +366,8 @@ export function checkNewMigration(
   const exempt = exemptDynamicForms(file, judged.dynamic, exemptions)
   const isExempt = (judgment: MigrationJudgment) => judgment.dynamic !== undefined && judgment.dynamic.length > 0 && judgment.dynamic.every((form) => exempt.has(form))
   const pinned = pinnedStatementsSetAside(file, source, judged.judgments, pinnedSets)
-  const enforced = judged.judgments.filter((judgment) => judgment.verdict !== 'safe' && (isNew || judgment.inputWrite) && !isExempt(judgment) && !pinned.has(judgment))
+  const enforced = judged.judgments.filter((judgment) => judgment.verdict !== 'safe' && (isNew || judgment.inputWrite) && !isExempt(judgment) && !pinned.has(judgment)
+    && !(reviewedActivationDdl && !judgment.inputWrite && REVIEWED_ACTIVATION_DDL.has(problemOf(judgment))))
   for (const judgment of enforced) problems.push(problemOf(judgment))
   problems.push(...closureProblems(result.writes, judged.writes))
   return Object.freeze({

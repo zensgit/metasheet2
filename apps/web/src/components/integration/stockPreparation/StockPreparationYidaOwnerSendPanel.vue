@@ -30,6 +30,7 @@
     <button type="button" data-testid="sp-yida-owner-save" :disabled="!draftInput || busy || !!draft || locked || disabled" @click="saveDraft">保存服务端草稿（不发送）</button>
     <p v-if="errorCode" role="alert" data-testid="sp-yida-owner-error">{{ errorCode }}</p>
     <p v-if="errorCode === 'YIDA_SEND_APPROVAL_LIMIT'" data-testid="sp-yida-owner-limit">内容超过单次发送的大小上限（派生映射 v3 的常量与复制也计入）；这次请求没有保存、授权或发送任何内容。请减少字段或缩短常量后重新预演。</p>
+    <p v-if="errorCode === 'YIDA_SEND_APPROVAL_IDENTITY_RESERVED'" data-testid="sp-yida-owner-identity-reserved">此物料行在该目标已经创建过，不再新建；请到宜搭核对。</p>
     <p v-if="disabled" data-testid="sp-yida-owner-disabled">服务端发送开关关闭；未取得新的发送授权。已有授权仅可手动查看或撤销。</p>
 
     <section v-if="draft" data-testid="sp-yida-owner-draft">

@@ -65,7 +65,9 @@
 //
 // THE CARRY-CONFIRM WRITE (batch-refresh phase 2 step 4, PR-0; plan §5.1 / G5): the one other machine
 // write of the canonical sheet — stock-preparation-confirm-writes.cjs applyCarryViaConfirm, which copies
-// an inactive predecessor's HUMAN cells onto its re-keyed row — runs under this lease too (purpose
+// an inactive predecessor's HUMAN cells onto its re-keyed row, and in the same patch the machine write-back
+// date into an empty successor cell (owner ruling 2026-11-17; the YiDa write-back stays its only originating
+// writer and takes this same per-sheet lease) — runs under this lease too (purpose
 // `carry_confirm`: acquired by the route before the ledger pre-flight, released after the patch), its
 // one patch is host-fenced (I5) and version-conditional, and after release the route bumps the
 // generation with reason `carry_confirm` so a token minted before the carry is superseded (the
@@ -167,8 +169,12 @@ const PROJECT_WRITE_BUMP_BACKOFF_MS = 10
 //     whenever it ATTEMPTED a host write, so every token / approved job planned before a repair that may have written is
 //     superseded. Its continuation `verify_and_close_run` (no host write: it verifies and finishes a run left open) takes
 //     the same lease and bumps after a close. Appended after the recovery's entries (rebaseline B-18).
-const PROJECT_WRITE_PURPOSES = Object.freeze(['small_apply', 'large_apply_chunk', 'carry_confirm', 'pilot_enable', 'pull_batch_install', 'recovery_verify', 'sheet_repair'])
-const PROJECT_WRITE_GENERATION_REASONS = Object.freeze(['small_preview', 'large_approval', 'carry_confirm', 'pilot_enable', 'continuation_confirm', 'continuation_end', 'change_plan_confirm', 'pull_batch_install', 'recovery_closed', 'sheet_repair'])
+//   * `issue_confirm_writeback` (both lists; YiDa 发料确认日期回写, design baseline v2.3 §7.3, slice Y9a): the
+//     write-back holds the lease (purpose) around its one version-conditional, host-fenced patch of the
+//     machine column `issueConfirmDate`, and after release bumps the generation (reason) when it wrote — the
+//     carry-confirm shape (yida-issue-confirm-writeback.cjs). Not wired to a route yet (slice Y9).
+const PROJECT_WRITE_PURPOSES = Object.freeze(['small_apply', 'large_apply_chunk', 'carry_confirm', 'pilot_enable', 'pull_batch_install', 'recovery_verify', 'sheet_repair', 'issue_confirm_writeback'])
+const PROJECT_WRITE_GENERATION_REASONS = Object.freeze(['small_preview', 'large_approval', 'carry_confirm', 'pilot_enable', 'continuation_confirm', 'continuation_end', 'change_plan_confirm', 'pull_batch_install', 'recovery_closed', 'sheet_repair', 'issue_confirm_writeback'])
 
 const PROJECT_WRITE_ERROR_CODES = Object.freeze({
   WRITE_LOCKED: 'STOCK_PREP_PROJECT_WRITE_LOCKED',

@@ -260,6 +260,18 @@ function scanTokenSites(files: Map<string, string>): TokenScan {
             key: callName === 'decode' ? '' : (call.arguments[1]?.getText() ?? ''),
             payload: callName === 'sign' ? resolvePayload(call.arguments[0], enclosing.scope) : null,
           })
+        } else if (
+          file === 'auth/AuthService.ts'
+          && enclosingName(parent).name === 'verifyToken'
+          && ts.isMethodDeclaration(enclosingName(parent).scope!)
+          && ts.isClassDeclaration(enclosingName(parent).scope!.parent)
+          && (enclosingName(parent).scope!.parent as ts.ClassDeclaration).name?.text === 'AuthService'
+          && ts.isPropertyAccessExpression(parent) && parent.expression === node
+          && parent.name.text === 'JsonWebTokenError'
+          && ts.isBinaryExpression(parent.parent) && parent.parent.right === parent
+          && parent.parent.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword
+        ) {
+          // Error classification only; this neither verifies nor reads a token.
         } else if (ts.isPropertyAccessExpression(parent) && parent.name === node) {
           // A property that happens to share the binding's name.
         } else {
@@ -451,6 +463,15 @@ describe('token site check: each departure is reported', () => {
 
   it('a tree that holds reports nothing', () => {
     expect(tokenSiteOffenders(scanTokenSites(new Map(Object.entries(HOLDS))))).toEqual([])
+  })
+
+  it('classifies only the session verification error test, not a reusable token-library binding', () => {
+    const valid = { 'auth/AuthService.ts': (text: string) => text.replace('private verifySessionTokenPayload', 'verifyToken(error: unknown) { return error instanceof jwt.JsonWebTokenError }\n private verifySessionTokenPayload') }
+    expect(offendersWith(valid)).toEqual([])
+    expect(offendersWith({ 'auth/AuthService.ts': (text: string) => text.replace('private verifySessionTokenPayload', 'verifyToken() { return jwt.JsonWebTokenError }\n private verifySessionTokenPayload') }).join('\n')).toMatch(/uses the jsonwebtoken binding other than as/)
+    expect(offendersWith({ 'auth/AuthService.ts': (text: string) => text.replace('private verifySessionTokenPayload', 'other(error: unknown) { return error instanceof jwt.JsonWebTokenError }\n private verifySessionTokenPayload') }).join('\n')).toMatch(/uses the jsonwebtoken binding other than as/)
+    expect(offendersWith({ 'auth/AuthService.ts': (text: string) => text.replace('private verifySessionTokenPayload', 'verifyToken() { return jwt.JsonWebTokenError() }\n private verifySessionTokenPayload') }).join('\n')).toMatch(/uses the jsonwebtoken binding other than as/)
+    expect(offendersWith({ 'auth/AuthService.ts': (text: string) => `${text}\nclass Other { verifyToken(error: unknown) { return error instanceof jwt.JsonWebTokenError } }` }).join('\n')).toMatch(/uses the jsonwebtoken binding other than as/)
   })
 
   it.each<[string, Record<string, string | ((text: string) => string)>, RegExp]>([

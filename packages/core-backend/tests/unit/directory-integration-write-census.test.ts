@@ -35,7 +35,6 @@
  *    lock name is not bound to another name inside the module that defines it either.
  */
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
 
 import ts from 'typescript'
@@ -517,7 +516,9 @@ describe('census of statements that write directory_integrations', () => {
       'notes/readme.md',
       'data/rows.json',
     ]
-    const root = mkdtempSync(join(tmpdir(), 'write-census-walk-'))
+    const tempRoot = join(SRC_ROOT, '../../../tmp')
+    mkdirSync(tempRoot, { recursive: true })
+    const root = mkdtempSync(join(tempRoot, 'write-census-walk-'))
     try {
       for (const path of [...read, ...leftOut]) {
         mkdirSync(dirname(join(root, path)), { recursive: true })
@@ -554,9 +555,35 @@ describe('census of statements that write directory_integrations', () => {
       if (file.text.includes(TABLE)) visit(source)
       return bare
     }).map((file) => file.path).sort()
-    // Read-only catalogues: the rule module's table list, the authorization-input writer registry's
-    // list of tables a script can reach, and the encrypted-store probe's store labels.
-    expect(carriers).toEqual(['directory/pull-source-rule.ts', 'rbac/authorization-input-writers.ts', 'security/encrypted-store-probe.ts'])
+    // The fence uses this table name only to build its qualified LOCK and schema inspection inputs.
+    expect(carriers).toEqual(['admin/authorization-operation-fence.ts', 'directory/pull-source-rule.ts', 'rbac/authorization-input-writers.ts', 'security/encrypted-store-probe.ts'])
+    const fence = SOURCE.find((file) => file.path === 'admin/authorization-operation-fence.ts')!
+    expect(fence.text).toContain("`LOCK TABLE ${TABLES.map(name => `\"public\".\"${name}\"`).join(', ')} IN EXCLUSIVE MODE NOWAIT`")
+    const tableUses = (files: SourceFile[]): string[] => files.flatMap((file) => {
+      const sf = ts.createSourceFile(file.path, file.text, ts.ScriptTarget.Latest, true)
+      const uses: string[] = []
+      const visit = (node: ts.Node): void => {
+        if (ts.isIdentifier(node) && node.text === 'AUTHORIZATION_OPERATION_FENCE_TABLES') {
+          if (!(ts.isVariableDeclaration(node.parent) && node.parent.name === node)) uses.push(`${file.path}: ${node.parent.getText(sf)}`)
+        }
+        if (file.path === fence.path && ts.isIdentifier(node) && node.text === 'TABLES') uses.push(`${file.path}: ${node.parent.getText(sf)}`)
+        ts.forEachChild(node, visit)
+      }
+      visit(sf)
+      return uses
+    }).sort()
+    const expectedUses = [
+      'admin/authorization-operation-fence.ts: ...AUTHORIZATION_OPERATION_FENCE_TABLES',
+      'admin/authorization-operation-fence.ts: TABLES = [...AUTHORIZATION_OPERATION_FENCE_TABLES]',
+      'admin/authorization-operation-fence.ts: TABLES.length',
+      'admin/authorization-operation-fence.ts: TABLES.map',
+      'admin/authorization-operation-fence.ts: [TABLES]',
+    ].sort()
+    expect(tableUses(SOURCE)).toEqual(expectedUses)
+    const carrierMutation = [{ ...fence, text: fence.text + '\nconst unsafe = AUTHORIZATION_OPERATION_FENCE_TABLES[0]' }]
+    expect(tableUses(carrierMutation)).not.toEqual(expectedUses)
+    expect(population([fence])).toEqual([])
+    expect(population([{ ...fence, text: fence.text + '\nconst injected = `UPDATE directory_integrations SET status = $1`' }]).map((w) => w.kind)).toEqual(['update-source-columns'])
   })
 })
 

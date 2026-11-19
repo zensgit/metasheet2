@@ -44,7 +44,13 @@
 //                            propose nothing). Still safe: no ADD, no overwrite.
 //   (A single match whose source row carries NO human-field values has nothing to
 //    reattach and collapses to NO_CARRY:no_human_context — value-presence driven,
-//    orthogonal to both axes.)
+//    orthogonal to both axes. When such a source holds ONLY a machine write-back
+//    value (MACHINE_WRITEBACK_FIELD_IDS, today `issueConfirmDate`) the reason is
+//    NO_CARRY:machine_context_only instead — REPORTED, never proposed: a proposal is a
+//    manual_confirm hold, which would turn a ready pull into a blocked one for a
+//    hold nobody can settle in the web UI. The date itself follows the row only
+//    through a K2 carry confirm (stock-preparation-confirm-writes.cjs), per the owner
+//    ruling of 2026-11-17.)
 //
 // ── PRECONDITION on prevBatchRows ──
 // A carry SOURCE is a prior-batch row with active === false. The caller passes
@@ -62,6 +68,7 @@
 
 const {
   HUMAN_PRESERVED_FIELD_IDS,
+  MACHINE_WRITEBACK_FIELD_IDS,
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   normalizeStockPreparationTemplate,
 } = require('./stock-preparation-templates.cjs')
@@ -92,6 +99,7 @@ const CARRY_NO_CARRY_REASONS = Object.freeze([
   'same_key_update_preserve',
   'no_source_match',
   'no_human_context',
+  'machine_context_only',
 ])
 
 const CARRY_CONFLICT_TYPES = Object.freeze([
@@ -276,7 +284,7 @@ function presentHumanFields(row, humanFields) {
 // PURE branch selector — the load-bearing semantic. Returns a decision TYPE plus
 // a reason; planCarry maps this to a concrete decision object. Exposed so the
 // mutation battery can pin every branch directly.
-function classifyCarry({ carryKey, manualRowReattach, matchCount, hasHumanContext }) {
+function classifyCarry({ carryKey, manualRowReattach, matchCount, hasHumanContext, hasMachineContext = false }) {
   if (carryKey === 'idempotency_key') {
     return { decision: CARRY_DECISIONS.NO_CARRY, reason: 'same_key_update_preserve' }
   }
@@ -291,7 +299,7 @@ function classifyCarry({ carryKey, manualRowReattach, matchCount, hasHumanContex
   // exactly one match
   if (manualRowReattach === 'propose_confirm') {
     if (!hasHumanContext) {
-      return { decision: CARRY_DECISIONS.NO_CARRY, reason: 'no_human_context' }
+      return { decision: CARRY_DECISIONS.NO_CARRY, reason: hasMachineContext ? 'machine_context_only' : 'no_human_context' }
     }
     return { decision: CARRY_DECISIONS.CARRY_VIA_CONFIRM }
   }
@@ -422,6 +430,8 @@ function planCarry(prevBatchRows, newAddRow, carryPolicy, options = {}) {
   const single = matchCount === 1 && !conflicted ? matches[0] : null
   const carryFields = single ? presentHumanFields(single, humanFields) : []
   const hasHumanContext = carryFields.length > 0
+  // Report-only (owner ruling 2026-11-17): a single source holding only a machine write-back value.
+  const hasMachineContext = single ? MACHINE_WRITEBACK_FIELD_IDS.some((field) => !isBlank(single[field])) : false
 
   const classified = conflicted
     ? { decision: CARRY_DECISIONS.MANUAL_CONFIRM, conflictType: 'carry_conflicting_source_content' }
@@ -430,6 +440,7 @@ function planCarry(prevBatchRows, newAddRow, carryPolicy, options = {}) {
         manualRowReattach: policy.manualRowReattach,
         matchCount,
         hasHumanContext,
+        hasMachineContext,
       })
 
   let decision

@@ -237,6 +237,9 @@ async function yidaWriterFixtures(): Promise<Record<string, string>> {
       credentialRef: credential.credentialRef, credentialGeneration: credential.credentialGeneration,
       businessKeyDigest: compiled.rowSpecs[0].businessKeyDigest, rowPayloadDigest: compiled.rowSpecs[0].payloadDigest,
       config: example.config, selectedRow: JSON.parse(example.text)[0], source: compiled.source, plan: compiled.plan,
+      // Pasted rows carry no source binding (design baseline v2.3 §7.2): the selection names the three binding
+      // members as null, exactly as the private primitive does for an unbound row.
+      sourceRecordDigest: null, creationIdentityDigest: null, sourceBinding: null,
     })
     const instant = 1_700_000_000_000
     // Memory answers to the actual service's SQL shapes; they do not establish live host authority.

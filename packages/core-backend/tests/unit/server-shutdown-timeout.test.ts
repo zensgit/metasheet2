@@ -6,10 +6,10 @@ import { MetaSheetServer } from '../../src/index'
 // R-71 ⑦.2 gate 10: the final shutdown barrier's SHUTDOWN_TIMEOUT branch (MetaSheetServer.stopOnce).
 // A YiDa drain that never settles must hold the database pool open: the bounded 10 s wait rejects with
 // the values-free code SHUTDOWN_TIMEOUT and pool.end() is never reached, even if the drain settles later.
-// No HTTP and no change to src/index.ts: the three private YiDa runtimes are replaced through a type
+// No HTTP and no change to src/index.ts: the four private YiDa runtimes are replaced through a type
 // assertion, the same technique as approval-completion-shutdown-lifecycle.test.ts.
 
-const RUNTIMES = ['yidaOwnerRuntime', 'yidaInitializationRuntime', 'yidaConnectionTestRuntime'] as const
+const RUNTIMES = ['yidaOwnerRuntime', 'yidaInitializationRuntime', 'yidaConnectionTestRuntime', 'yidaReconciliationRuntime'] as const
 type RuntimeField = (typeof RUNTIMES)[number]
 type Drain = () => Promise<void>
 type ShutdownHost = Record<RuntimeField, { stop(): Promise<void> }> & {

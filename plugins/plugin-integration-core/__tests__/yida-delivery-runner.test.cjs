@@ -157,10 +157,13 @@ test('actual create composition binds the ledger digest to exactly the submitted
   assert.equal(body.formDataJson, stableCanonicalStringify(planned.rows[0].payload))
   assert.equal(body.systemToken, h.snapshot.systemToken)
   assert.equal(body.userId, h.snapshot.userId)
-  assert.equal(h.db.rows()[0].payload_digest, hash(stableCanonicalStringify({ version: 1,
+  // Execution digest version 2 (design baseline v2.3 §7.2): an unbound snapshot carries both binding digests as null.
+  assert.equal(h.db.rows()[0].payload_digest, hash(stableCanonicalStringify({ version: 2,
     grantRef: h.snapshot.grantRef, expiresAt: h.snapshot.expiresAt, actorId: h.snapshot.actorId,
     targetRef: h.snapshot.targetRef, targetRevision: h.snapshot.targetRevision, planRevision: h.snapshot.planRevision,
-    intent: 'create', data, formUuid: h.snapshot.config.target.formUuid })))
+    intent: 'create', data, formUuid: h.snapshot.config.target.formUuid,
+    sourceRecordDigest: null, creationIdentityDigest: null })))
+  assert.deepEqual([h.db.rows()[0].source_record_digest, h.db.rows()[0].creation_identity_digest], [null, null])
   assert.equal(h.db.rows()[0].business_key_digest, hash(planned.rows[0].localBusinessKey))
   assert.deepEqual(h.db.rows(AUDIT).map((row) => row.event), ['prepare', 'claim', 'acknowledgement'])
 })
@@ -549,4 +552,33 @@ test('R-71 ⑦.3: a v3 snapshot that loses its concat-only columns after the tok
   await rejects(h.runner.run(request()), 'CHANGED')
   assert.equal(h.db.rows()[0].status, 'prepared')
   assert.equal(h.businessFetches.length, 0)
+})
+
+// ---- Source binding (design baseline v2.3 §7.2): the two row digests travel from the snapshot into the ledger ----
+test('a bound snapshot carries both digests into the ledger row and the version-2 execution digest; a half binding is SNAPSHOT_INVALID', async (t) => {
+  const h = await harness(t)
+  h.snapshot.sourceRecordDigest = 'c'.repeat(64)
+  h.snapshot.creationIdentityDigest = 'd'.repeat(64)
+  const result = await h.runner.run(request())
+  safeResult(result, 'acknowledged', true)
+  const row = h.db.rows()[0]
+  assert.equal(row.source_record_digest, 'c'.repeat(64))
+  assert.equal(row.creation_identity_digest, 'd'.repeat(64))
+  const [, options] = h.businessFetches[0]
+  const body = JSON.parse(options.body)
+  const data = { appType: body.appType, formUuid: body.formUuid, formDataJson: body.formDataJson }
+  assert.equal(row.payload_digest, hash(stableCanonicalStringify({ version: 2,
+    grantRef: h.snapshot.grantRef, expiresAt: h.snapshot.expiresAt, actorId: h.snapshot.actorId,
+    targetRef: h.snapshot.targetRef, targetRevision: h.snapshot.targetRevision, planRevision: h.snapshot.planRevision,
+    intent: 'create', data, formUuid: h.snapshot.config.target.formUuid,
+    sourceRecordDigest: 'c'.repeat(64), creationIdentityDigest: 'd'.repeat(64) })))
+  for (const patch of [{ creationIdentityDigest: null }, { sourceRecordDigest: 'C'.repeat(64) }, { creationIdentityDigest: 'd'.repeat(63) }]) {
+    const broken = await harness(t)
+    broken.snapshot.sourceRecordDigest = 'c'.repeat(64)
+    broken.snapshot.creationIdentityDigest = 'd'.repeat(64)
+    Object.assign(broken.snapshot, patch)
+    await rejects(broken.runner.run(request()), 'SNAPSHOT')
+    assert.equal(broken.db.rows().length, 0)
+    assert.equal(broken.tokenFetches.length + broken.businessFetches.length, 0)
+  }
 })

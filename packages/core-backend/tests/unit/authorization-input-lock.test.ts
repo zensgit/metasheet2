@@ -16,7 +16,11 @@ import { EventEmitter } from 'node:events'
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import ts from 'typescript'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+
+vi.mock('../../src/admin/authorization-operation-fence', () => ({
+  acquireAuthorizationOperationFence: async (query: (sql: string) => Promise<unknown>) => { await query('SELECT authorization_operation_fence_test') },
+}))
 import { ADVISORY_FIXED_KEY1_REGISTRY } from '../../src/attendance/coordination/settlement-coordination-key'
 import { isInsidePullSourceGate, runInsidePullSourceGate } from '../../src/directory/pull-source-gate-context'
 import { isRecoveryAuthorityBusyError, RECOVERY_AUTHORITY_BUSY_MARKER } from '../../src/multitable/recovery-authorization-stability'
@@ -36,6 +40,8 @@ import {
   AUTHORIZATION_INPUT_MAINTENANCE_BUDGET,
   AUTHORIZATION_INPUT_MAX_CONCURRENT_EXCLUSIVE,
   AUTHORIZATION_INPUT_STATEMENT_TIMEOUT_MS,
+  AUTHORIZATION_OPERATION_LOCK_TIMEOUT_MS,
+  AUTHORIZATION_OPERATION_STATEMENT_TIMEOUT_MS,
   AUTHORIZATION_INPUT_STATEMENTS,
   AUTHORIZATION_INPUT_TAKEOVER_CALLERS,
   AUTHORIZATION_INPUT_WORLD_LOCK_KEY1,
@@ -71,6 +77,7 @@ type Recorded = { sql: string; params?: unknown[]; extra: number; listeners: num
 type FakeOptions = {
   tryExclusive?: boolean[]
   trySharedAcquired?: boolean
+  failedOperationTry?: 'operation' | 'platform' | 'admission'
   roleRows?: ReadonlySet<string>
   /** When given, only these user rows exist. */
   userRows?: ReadonlySet<string>
@@ -97,8 +104,11 @@ function makeFake(options: FakeOptions = {}) {
     if (sql === AUTHORIZATION_INPUT_STATEMENTS.readTimeouts) return [options.savedTimeouts ?? { lock_timeout: '0', statement_timeout: '0' }]
     if (sql === AUTHORIZATION_INPUT_STATEMENTS.isolationProbe) return [{ isolation: options.isolation ?? 'read committed' }]
     if (sql === AUTHORIZATION_INPUT_STATEMENTS.worldExclusiveTry) return [{ acquired: tryExclusive.length > 0 ? tryExclusive.shift() : true }]
-    if (sql === AUTHORIZATION_INPUT_STATEMENTS.worldSharedTry) return [{ acquired: options.trySharedAcquired ?? true }]
-    if (sql === AUTHORIZATION_INPUT_STATEMENTS.roleRow || sql === AUTHORIZATION_INPUT_STATEMENTS.roleRowShared) return options.roleRows && !options.roleRows.has(String(params?.[0])) ? [] : [{ id: params?.[0] }]
+    if (sql === AUTHORIZATION_INPUT_STATEMENTS.worldSharedTry || sql === AUTHORIZATION_INPUT_STATEMENTS.worldSharedTry.replace('SELECT pg_', 'SELECT pg_catalog.pg_')) return [{ acquired: options.trySharedAcquired ?? true }]
+    if (sql === AUTHORIZATION_INPUT_STATEMENTS.operationTry.replace('SELECT pg_', 'SELECT pg_catalog.pg_').replace('hashtextextended(', 'pg_catalog.hashtextextended(')) return [{ acquired: options.failedOperationTry !== 'operation' }]
+    if (sql === AUTHORIZATION_INPUT_STATEMENTS.platformAdminInvariantTry) return [{ acquired: options.failedOperationTry !== 'platform' }]
+    if (sql === AUTHORIZATION_INPUT_STATEMENTS.namespaceAdmissionTry) return [{ acquired: options.failedOperationTry !== 'admission' }]
+    if (sql === AUTHORIZATION_INPUT_STATEMENTS.roleRow || sql === AUTHORIZATION_INPUT_STATEMENTS.roleRowShared || sql === AUTHORIZATION_INPUT_STATEMENTS.roleRowSharedNowait) return options.roleRows && !options.roleRows.has(String(params?.[0])) ? [] : [{ id: params?.[0] }]
     if (sql === AUTHORIZATION_INPUT_STATEMENTS.rolePermissionCodes) return options.rolePermissionRows ?? []
     if (/FROM users\s+WHERE id = \$1::text\s+FOR UPDATE/.test(sql) && options.userRows && !options.userRows.has(String(params?.[0]))) return []
     if (/FROM users\s+WHERE id = \$1::text\s+FOR UPDATE/.test(sql)) return [{ id: params?.[0], name: null, email: null, username: null, mobile: null, activation_status: null, role: 'user', is_active: true, access_generation: 0, deleted_at: null, purged_at: null }]
@@ -134,10 +144,12 @@ function makeFake(options: FakeOptions = {}) {
 }
 
 function rankOf(sql: string): number | null {
-  if (sql === AUTHORIZATION_INPUT_STATEMENTS.worldShared || sql === AUTHORIZATION_INPUT_STATEMENTS.worldSharedTry || sql === AUTHORIZATION_INPUT_STATEMENTS.worldExclusiveTry) return AUTHORIZATION_INPUT_LOCK_RANKS.R0_WORLD
-  if (sql === AUTHORIZATION_INPUT_STATEMENTS.platformAdminInvariant) return AUTHORIZATION_INPUT_LOCK_RANKS.R1_PLATFORM_ADMIN_INVARIANT
-  if (sql === AUTHORIZATION_INPUT_STATEMENTS.namespaceAdmission) return AUTHORIZATION_INPUT_LOCK_RANKS.R3_NAMESPACE_ADMISSION
-  if (sql === AUTHORIZATION_INPUT_STATEMENTS.roleRow || sql === AUTHORIZATION_INPUT_STATEMENTS.roleRowShared) return AUTHORIZATION_INPUT_LOCK_RANKS.R2R_ROLE_ROW
+  if (sql === AUTHORIZATION_INPUT_STATEMENTS.worldShared || sql === AUTHORIZATION_INPUT_STATEMENTS.worldSharedTry || sql === AUTHORIZATION_INPUT_STATEMENTS.worldSharedTry.replace('SELECT pg_', 'SELECT pg_catalog.pg_') || sql === AUTHORIZATION_INPUT_STATEMENTS.worldExclusiveTry) return AUTHORIZATION_INPUT_LOCK_RANKS.R0_WORLD
+  if (sql === 'SELECT authorization_operation_fence_test') return AUTHORIZATION_INPUT_LOCK_RANKS.R0F_OPERATION_TABLES
+  if (sql === AUTHORIZATION_INPUT_STATEMENTS.operationTry.replace('SELECT pg_', 'SELECT pg_catalog.pg_').replace('hashtextextended(', 'pg_catalog.hashtextextended(')) return AUTHORIZATION_INPUT_LOCK_RANKS.R0O_OPERATION
+  if (sql === AUTHORIZATION_INPUT_STATEMENTS.platformAdminInvariant || sql === AUTHORIZATION_INPUT_STATEMENTS.platformAdminInvariantTry) return AUTHORIZATION_INPUT_LOCK_RANKS.R1_PLATFORM_ADMIN_INVARIANT
+  if (sql === AUTHORIZATION_INPUT_STATEMENTS.namespaceAdmission || sql === AUTHORIZATION_INPUT_STATEMENTS.namespaceAdmissionTry) return AUTHORIZATION_INPUT_LOCK_RANKS.R3_NAMESPACE_ADMISSION
+  if (sql === AUTHORIZATION_INPUT_STATEMENTS.roleRow || sql === AUTHORIZATION_INPUT_STATEMENTS.roleRowShared || sql === AUTHORIZATION_INPUT_STATEMENTS.roleRowSharedNowait) return AUTHORIZATION_INPUT_LOCK_RANKS.R2R_ROLE_ROW
   if (/FROM users\s+WHERE id = \$1::text\s+FOR UPDATE/.test(sql)) return AUTHORIZATION_INPUT_LOCK_RANKS.R5_USER_ROW
   return null
 }
@@ -156,7 +168,7 @@ async function rejection(promise: Promise<unknown>): Promise<unknown> {
 }
 
 const ROLE_ROW_UPDATE_INTENTS: readonly AuthorizationInputIntent[] = ['EDIT_ROLE_CONTENT', 'DELETE_ROLE', 'MAINTENANCE']
-const ROLE_ROW_SHARE_INTENTS: readonly AuthorizationInputIntent[] = ['GRANT_ROLE', 'REVOKE_ROLE', 'SET_ADMIN_PROFILE', 'BIRTH', 'PROJECTION_GRANT']
+const ROLE_ROW_SHARE_INTENTS: readonly AuthorizationInputIntent[] = ['AUTHORIZATION_OPERATION', 'GRANT_ROLE', 'REVOKE_ROLE', 'SET_ADMIN_PROFILE', 'BIRTH', 'PROJECTION_GRANT']
 const R = AUTHORIZATION_INPUT_LOCK_RANKS
 const S = AUTHORIZATION_INPUT_STATEMENTS
 const lockRanks = (sqls: readonly string[]) => sqls.map(rankOf).filter((rank): rank is number => rank !== null)
@@ -164,6 +176,7 @@ const run = (plan: AuthorizationInputPlan, work: (tx: AuthorizationInputTx) => P
   withAuthorizationInputTransaction(plan, work, { transaction: fake.runner, sleep: async () => undefined })
 
 const REPRESENTATIVE_PLANS: Record<AuthorizationInputIntent, AuthorizationInputPlan> = {
+  AUTHORIZATION_OPERATION: { intent: 'AUTHORIZATION_OPERATION', operation: { actorId: 'actor', clientOperationId: '00000000-0000-4000-8000-000000000001' }, userIds: ['actor'], admissionUserIds: ['actor'], roleIds: ['r1'] },
   GRANT_ROLE: { intent: 'GRANT_ROLE', userIds: ['u2', 'u1', 'U9'], admissionUserIds: ['u2', 'u1'], roleIds: ['r2', 'r1'] },
   REVOKE_ROLE: { intent: 'REVOKE_ROLE', admissionUserIds: ['u1'], platformAdminInvariant: true, roleIds: ['admin'] },
   GRANT_DIRECT: { intent: 'GRANT_DIRECT', userIds: ['u1'] },
@@ -192,6 +205,8 @@ describe('lock order constants', () => {
   it('role rows have one rank, after the source freeze locks and before the admission locks and the user rows', () => {
     expect(AUTHORIZATION_INPUT_LOCK_RANK_ORDER).toEqual([
       'R0_WORLD',
+      'R0O_OPERATION',
+      'R0F_OPERATION_TABLES',
       'R1_PLATFORM_ADMIN_INVARIANT',
       'R2_IDENTITY_MAINTENANCE',
       'R2F_SOURCE_SYNC_FREEZE',
@@ -207,6 +222,9 @@ describe('lock order constants', () => {
     expect(R.R3_NAMESPACE_ADMISSION).toBeLessThan(R.R5_USER_ROW)
     expect(S.roleRow).toBe('SELECT id::text AS id FROM roles WHERE id = $1::text FOR UPDATE')
     expect(S.roleRowShared).toBe('SELECT id::text AS id FROM roles WHERE id = $1::text FOR SHARE')
+    expect(S.roleRowSharedNowait).toBe('SELECT id::text AS id FROM roles WHERE id = $1::text FOR SHARE NOWAIT')
+    expect(AUTHORIZATION_OPERATION_LOCK_TIMEOUT_MS).toBe(500)
+    expect(AUTHORIZATION_OPERATION_STATEMENT_TIMEOUT_MS).toBe(2500)
   })
 
   it('the intent catalogue is closed and the takeover closures exclude role content writes', () => {
@@ -227,7 +245,7 @@ describe('lock order constants', () => {
     const changed = 'the intent catalogue changed: add back the case that marks DELETE_ROLE upgradeable and expects no upgrade at the entry for its missing row, and the mutation that decides the missing-row upgrade by the upgradeable flag'
     const intentsWhere = (predicate: (intent: AuthorizationInputIntent) => boolean) => AUTHORIZATION_INPUT_INTENTS.filter(predicate)
     expect(intentsWhere((intent) => AUTHORIZATION_INPUT_INTENT_CATALOG[intent].upgradeable), changed).toEqual(['EDIT_ROLE_CONTENT'])
-    expect(intentsWhere((intent) => AUTHORIZATION_INPUT_INTENT_CATALOG[intent].platformAdminInvariant), changed).toEqual([])
+    expect(intentsWhere((intent) => AUTHORIZATION_INPUT_INTENT_CATALOG[intent].platformAdminInvariant), changed).toEqual(['AUTHORIZATION_OPERATION'])
     expect(intentsWhere((intent) => AUTHORIZATION_INPUT_INTENT_CATALOG[intent].world === 'exclusive'), changed).toEqual(['MAINTENANCE'])
     expect(intentsWhere((intent) => AUTHORIZATION_INPUT_INTENT_CATALOG[intent].birth), changed).toEqual(['BIRTH', 'PROJECTION_GRANT'])
   })
@@ -251,7 +269,7 @@ describe('self-built entry: statement order per intent', () => {
       const ranks = sqls.map(rankOf).filter((rank): rank is number => rank !== null)
       expect(ranks[0]).toBe(AUTHORIZATION_INPUT_LOCK_RANKS.R0_WORLD)
       for (let i = 1; i < ranks.length; i += 1) expect(ranks[i]).toBeGreaterThanOrEqual(ranks[i - 1])
-      const expectedWorld = AUTHORIZATION_INPUT_INTENT_CATALOG[intent].world === 'exclusive' ? AUTHORIZATION_INPUT_STATEMENTS.worldExclusiveTry : AUTHORIZATION_INPUT_STATEMENTS.worldShared
+      const expectedWorld = intent === 'AUTHORIZATION_OPERATION' ? S.worldSharedTry.replace('SELECT pg_', 'SELECT pg_catalog.pg_') : AUTHORIZATION_INPUT_INTENT_CATALOG[intent].world === 'exclusive' ? AUTHORIZATION_INPUT_STATEMENTS.worldExclusiveTry : AUTHORIZATION_INPUT_STATEMENTS.worldShared
       expect(sqls.filter((sql) => rankOf(sql) === 0)).toEqual([expectedWorld])
       // Ids per rank are issued in code-unit order, de-duplicated.
       const byRank = (rank: number) => fake.statements.filter((s) => rankOf(s.sql) === rank).map((s) => String(s.params?.[0]))
@@ -260,20 +278,26 @@ describe('self-built entry: statement order per intent', () => {
       expect(byRank(AUTHORIZATION_INPUT_LOCK_RANKS.R2R_ROLE_ROW)).toEqual(sorted(plan.roleIds))
       // Role rows are locked for update by the intents that write role content and in share mode by the others.
       const roleStatements = [...new Set(sqls.filter((sql) => rankOf(sql) === AUTHORIZATION_INPUT_LOCK_RANKS.R2R_ROLE_ROW))]
-      if ((plan.roleIds ?? []).length > 0) expect(roleStatements).toEqual([ROLE_ROW_UPDATE_INTENTS.includes(intent) ? S.roleRow : S.roleRowShared])
+      if ((plan.roleIds ?? []).length > 0) expect(roleStatements).toEqual([ROLE_ROW_UPDATE_INTENTS.includes(intent) ? S.roleRow : intent === 'AUTHORIZATION_OPERATION' ? S.roleRowSharedNowait : S.roleRowShared])
       expect(byRank(AUTHORIZATION_INPUT_LOCK_RANKS.R3_NAMESPACE_ADMISSION)).toEqual(sorted(plan.admissionUserIds).map((id) => `namespace-admission:${id}`))
-      const r1 = sqls.filter((sql) => sql === AUTHORIZATION_INPUT_STATEMENTS.platformAdminInvariant).length
+      const r1 = sqls.filter((sql) => sql === AUTHORIZATION_INPUT_STATEMENTS.platformAdminInvariant || sql === AUTHORIZATION_INPUT_STATEMENTS.platformAdminInvariantTry).length
       expect(r1).toBe(AUTHORIZATION_INPUT_INTENT_CATALOG[intent].platformAdminInvariant || plan.platformAdminInvariant ? 1 : 0)
       // Timeouts: read, set, locks, restore — and nothing of the work inside the window.
       const setIndexes = fake.statements.map((s, i) => (s.sql === AUTHORIZATION_INPUT_STATEMENTS.setTimeouts ? i : -1)).filter((i) => i >= 0)
-      expect(setIndexes).toHaveLength(2)
-      expect(fake.statements[setIndexes[0] - 1].sql).toBe(AUTHORIZATION_INPUT_STATEMENTS.readTimeouts)
-      expect(fake.statements[setIndexes[0]].params).toEqual([String(AUTHORIZATION_INPUT_LOCK_TIMEOUT_MS), String(AUTHORIZATION_INPUT_STATEMENT_TIMEOUT_MS)])
-      expect(fake.statements[setIndexes[1]].params).toEqual(['0', '0'])
+      const operation = intent === 'AUTHORIZATION_OPERATION'
+      expect(setIndexes).toHaveLength(operation ? 3 : 2)
+      const windowStart = setIndexes[operation ? 1 : 0]
+      const windowEnd = setIndexes[operation ? 2 : 1]
+      if (operation) expect(fake.statements[setIndexes[0]].params).toEqual([String(AUTHORIZATION_OPERATION_LOCK_TIMEOUT_MS), String(AUTHORIZATION_OPERATION_STATEMENT_TIMEOUT_MS)])
+      expect(fake.statements[windowStart - 1].sql).toBe(AUTHORIZATION_INPUT_STATEMENTS.readTimeouts)
+      expect(fake.statements[windowStart].params).toEqual(operation
+        ? [String(AUTHORIZATION_OPERATION_LOCK_TIMEOUT_MS), String(AUTHORIZATION_OPERATION_STATEMENT_TIMEOUT_MS)]
+        : [String(AUTHORIZATION_INPUT_LOCK_TIMEOUT_MS), String(AUTHORIZATION_INPUT_STATEMENT_TIMEOUT_MS)])
+      expect(fake.statements[windowEnd].params).toEqual(['0', '0'])
       const lockIndexes = fake.statements.map((s, i) => (rankOf(s.sql) !== null ? i : -1)).filter((i) => i >= 0)
-      expect(Math.min(...lockIndexes)).toBeGreaterThan(setIndexes[0])
-      expect(Math.max(...lockIndexes)).toBeLessThan(setIndexes[1])
-      expect(workStatementIndex).toBeGreaterThan(setIndexes[1])
+      expect(Math.min(...lockIndexes)).toBeGreaterThan(windowStart)
+      expect(Math.max(...lockIndexes)).toBeLessThan(windowEnd)
+      expect(workStatementIndex).toBeGreaterThan(windowEnd)
       // No contract statement carries extra query options, and none mentions the idle timeout.
       for (const s of fake.statements) {
         expect(s.extra).toBe(0)
@@ -699,13 +723,13 @@ describe('missing role rows', () => {
     for (const intent of ROLE_ROW_SHARE_INTENTS) {
       const fake = makeFake({ roleRows: new Set(['r1']) })
       let calls = 0
-      const seen = await run({ intent, roleIds: ['r9', 'r1'] }, async (tx) => {
+      const seen = await run({ ...REPRESENTATIVE_PLANS[intent], intent, roleIds: ['r9', 'r1'] }, async (tx) => {
         calls += 1
         return { world: tx.world, rows: [...tx.roleRows], missing: [...tx.missingRoleIds] }
       }, fake)
       expect(calls, intent).toBe(1)
       expect(seen, intent).toEqual({ world: 'shared', rows: [['r1', 'held'], ['r9', 'missing']], missing: ['r9'] })
-      expect(fake.sqls().filter((sql) => rankOf(sql) === R.R2R_ROLE_ROW), intent).toEqual([S.roleRowShared, S.roleRowShared])
+      expect(fake.sqls().filter((sql) => rankOf(sql) === R.R2R_ROLE_ROW), intent).toEqual(intent === 'AUTHORIZATION_OPERATION' ? [S.roleRowSharedNowait, S.roleRowSharedNowait] : [S.roleRowShared, S.roleRowShared])
       expect(fake.sqls(), intent).not.toContain(S.worldExclusiveTry)
       expect(fake.sqls(), intent).not.toContain('ROLLBACK')
     }
@@ -1403,18 +1427,20 @@ describe('statement text and the world-lock key', () => {
     expect(AUTHORIZATION_INPUT_WORLD_LOCK_KEY2).toBe(1)
   })
 
-  it('the lock module imports the brand, the predicates, the user mutex, the pull-source gate marker, the pool and the recovery discriminator, and never the classifier', () => {
+  it('the lock module imports the brand, the predicates, the user mutex, the pull-source gate marker, the pool the recovery discriminator and Kysely, and never the classifier', () => {
     const source = readFileSync(LOCK_MODULE, 'utf8')
     const file = ts.createSourceFile('m.ts', source, ts.ScriptTarget.Latest, true)
     const specifiers = file.statements.flatMap((statement) =>
       ts.isImportDeclaration(statement) && ts.isStringLiteral(statement.moduleSpecifier) ? [statement.moduleSpecifier.text] : [])
     expect([...new Set(specifiers)].sort()).toEqual([
+      '../admin/authorization-operation-fence',
       '../directory/access-graph-mutex',
       '../directory/pull-source-gate-context',
       '../integration/db/connection-pool',
       '../multitable/recovery-authorization-stability',
       './authorization-input-brand',
       './authorization-input-classes',
+      'kysely',
       'pg',
     ])
     expect(source).not.toMatch(/security-action-privilege|external-login-assurance/)
@@ -1434,4 +1460,83 @@ describe('real-database files are wired', () => {
       expect(run.split(`${spec} \\\n`).length - 1).toBe(1)
     })
   }
+})
+
+describe('authorization operation lock domain', () => {
+  const plan: AuthorizationInputPlan = {
+    intent: 'AUTHORIZATION_OPERATION',
+    operation: { actorId: 'actor', clientOperationId: '00000000-0000-4000-8000-000000000001' },
+    userIds: ['actor', 'target'], admissionUserIds: ['actor', 'target'], roleIds: ['r'],
+  }
+
+  it('takes the actor and UUID operation lock before R1 and all subjects', async () => {
+    const fake = makeFake()
+    await run(plan, async () => undefined, fake)
+    const locks = fake.statements.filter((statement) => rankOf(statement.sql) !== null)
+    expect(locks.map((statement) => rankOf(statement.sql))).toEqual([R.R0_WORLD, R.R0O_OPERATION, R.R0F_OPERATION_TABLES, R.R1_PLATFORM_ADMIN_INVARIANT, R.R2R_ROLE_ROW, R.R3_NAMESPACE_ADMISSION, R.R3_NAMESPACE_ADMISSION, R.R5_USER_ROW, R.R5_USER_ROW])
+    expect(locks[1].params).toEqual([JSON.stringify(['actor', '00000000-0000-4000-8000-000000000001'])])
+    expect(locks[0].sql).toBe(S.worldSharedTry.replace('SELECT pg_', 'SELECT pg_catalog.pg_'))
+    expect(locks[3].sql).toBe(S.platformAdminInvariantTry)
+    expect(locks[4].sql).toBe(S.roleRowSharedNowait)
+    expect(locks[5].sql).toBe(S.namespaceAdmissionTry)
+    expect(locks[6].sql).toBe(S.namespaceAdmissionTry)
+    expect(locks[7].sql).toMatch(/FOR UPDATE NOWAIT$/)
+    expect(locks[8].sql).toMatch(/FOR UPDATE NOWAIT$/)
+  })
+
+  it.each(['operation', 'platform', 'admission'] as const)('refuses immediately when the %s try-lock fails', async failedOperationTry => {
+    const fake = makeFake({ failedOperationTry })
+    let worked = false
+    await expect(run(plan, async () => { worked = true }, fake)).rejects.toMatchObject({ code:'AUTHORIZATION_INPUT_BUSY' })
+    expect(worked).toBe(false)
+    expect(fake.sqls()).toContain('ROLLBACK')
+  })
+  it('refuses an already-aborted or expired operation before any SQL', async () => {
+    for (const options of [(() => { const controller = new AbortController(); controller.abort(); return { signal: controller.signal } })(), { deadlineAt: Date.now() - 1 }]) {
+      const fake = makeFake()
+      await expect(withAuthorizationInputTransaction(plan, async () => undefined, { transaction: fake.runner, ...options })).rejects.toMatchObject({ code: 'AUTHORIZATION_INPUT_BUSY' })
+      expect(fake.sqls()).toEqual(['BEGIN', 'ROLLBACK', 'release'])
+    }
+  })
+  it('aborts operation work when the caller deadline fires', async () => {
+    const fake = makeFake(), controller = new AbortController()
+    await expect(withAuthorizationInputTransaction(plan, async () => { controller.abort() }, { transaction: fake.runner, signal: controller.signal })).rejects.toMatchObject({ code: 'AUTHORIZATION_INPUT_BUSY' })
+    expect(fake.sqls()).toContain('ROLLBACK')
+  })
+
+  it('retains the validated operation identity while waiting for the world lock', async () => {
+    const fake = makeFake()
+    const operation = { actorId: 'actor', clientOperationId: '00000000-0000-4000-8000-000000000001' }
+    const mutablePlan = { ...plan, operation }
+    const original = fake.client.query
+    fake.client.query = async (sql, params) => {
+      if (sql === S.worldSharedTry.replace('SELECT pg_', 'SELECT pg_catalog.pg_')) {
+        operation.actorId = 'other'
+        mutablePlan.intent = 'GRANT_ROLE'
+      }
+      return original(sql, params)
+    }
+    await run(mutablePlan, async () => undefined, fake)
+    expect(fake.statements.find((statement) => statement.sql === S.operationTry.replace('SELECT pg_', 'SELECT pg_catalog.pg_').replace('hashtextextended(', 'pg_catalog.hashtextextended('))?.params)
+      .toEqual([JSON.stringify(['actor', '00000000-0000-4000-8000-000000000001'])])
+  })
+
+  it('rejects missing or malformed operation keys and unlocked actor before any SQL', async () => {
+    const invalid: AuthorizationInputPlan[] = [
+      { ...plan, operation: undefined },
+      { ...plan, operation: { actorId: 'actor', clientOperationId: 'bad' } },
+      { ...plan, operation: { actorId: 'actor', clientOperationId: { toString: () => '00000000-0000-4000-8000-000000000001' } as never } },
+      { ...plan, sharedAcquire: 'wait' },
+      { ...plan, userIds: ['target'] },
+      { ...plan, admissionUserIds: ['target'] },
+      { ...plan, operation: { actorId: ' actor ', clientOperationId: '00000000-0000-4000-8000-000000000001' } },
+      { ...plan, operation: { ...plan.operation!, extra: true } as never },
+      { intent: 'GRANT_ROLE', operation: plan.operation },
+    ]
+    for (const bad of invalid) {
+      const fake = makeFake()
+      await expect(run(bad, async () => undefined, fake)).rejects.toMatchObject({ code: 'AUTHORIZATION_INPUT_PLAN_INVALID' })
+      expect(fake.statements).toEqual([])
+    }
+  })
 })

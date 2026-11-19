@@ -11,6 +11,7 @@ import { readFileSync } from 'node:fs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { Pool, type PoolClient } from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { runYidaInitializationBootstrapCli } from '../../scripts/bootstrap-yida-initialization-owner'
@@ -279,7 +280,11 @@ describeDatabase('Automation live actor authority: real locked evidence', () => 
     await admin.query(['090_create_integration_yida_delivery_ledger.sql', '091_create_integration_yida_create_fence.sql',
       '092_create_integration_yida_credential_materials.sql', '093_create_integration_yida_draft_plans.sql',
       '094_create_integration_yida_approved_target.sql', '095_create_integration_yida_send_approvals.sql',
-      '096_create_integration_yida_initialization.sql'].map(name => readFileSync(path.join(root, 'packages/core-backend/migrations', name), 'utf8')).join('\n'))
+      '096_create_integration_yida_initialization.sql'].map(name => readFileSync(path.join(root, 'packages/core-backend/migrations', name), 'utf8')).join('\n')
+      // Source binding (design baseline v2.3 §7.2): migration zzzz20261106110300 exactly as its up() executes.
+      + '\n' + ((await import(pathToFileURL(path.join(root,
+        'packages/core-backend/src/db/migrations/zzzz20261106110300_add_integration_yida_source_binding.ts')).href)) as
+        { YIDA_SOURCE_BINDING_UP_SQL: string }).YIDA_SOURCE_BINDING_UP_SQL)
     const anchors = async () => (await admin.query('SELECT owner_id, tenant_id FROM integration_yida_initialization_anchor')).rows
     const saved = process.env.DATABASE_URL
     let directory = ''

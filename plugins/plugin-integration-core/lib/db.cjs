@@ -350,6 +350,38 @@ function createDb({ database, logger } = {}) {
     return database.query(sql, values)
   }
 
+  /**
+   * Single-statement INSERT … ON CONFLICT (cols) DO NOTHING: insert-once on a UNIQUE / PRIMARY key.
+   *
+   * Added under the module header's extension clause ("added here as a new validated method"), the
+   * same way as upsertOne: table, row columns and conflict columns pass the identifier whitelist and
+   * every value is parameterized. Returns the inserted row (RETURNING *), or NO row when the key was
+   * already taken — the caller reads `rows.length`.
+   *
+   * Why not upsertOne: an append-only evidence table refuses UPDATE in a trigger, so DO UPDATE would
+   * fail; and catching 23505 after a bare insertOne aborts an enclosing transaction. The first caller is
+   * the YiDa issue-confirm write-back trace (yida-issue-confirm-writeback.cjs, one row per ledger row):
+   * the loser of a race, or a retry whose first INSERT did commit, completes normally.
+   */
+  async function insertOneIfAbsent(table, row, { conflictColumns } = {}) {
+    const tableIdent = quoteIdent(assertTable(table))
+    if (!row || typeof row !== 'object' || Array.isArray(row)) {
+      throw new Error('insertOneIfAbsent: row must be a plain object')
+    }
+    if (!Array.isArray(conflictColumns) || conflictColumns.length === 0) {
+      throw new Error('insertOneIfAbsent: conflictColumns must be a non-empty array (refusing an unkeyed DO NOTHING)')
+    }
+    const cols = Object.keys(row)
+    if (cols.length === 0) throw new Error('insertOneIfAbsent: row must have at least one column')
+    const conflictIdents = conflictColumns.map((c) => quoteIdent(assertColumn(c)))
+    const colIdents = cols.map((c) => quoteIdent(assertColumn(c))).join(', ')
+    const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ')
+    const values = cols.map((c) => prepareParamValue(row[c]))
+    const sql = `INSERT INTO ${tableIdent} (${colIdents}) VALUES (${placeholders})`
+      + ` ON CONFLICT (${conflictIdents.join(', ')}) DO NOTHING RETURNING *`
+    return database.query(sql, values)
+  }
+
   async function insertMany(table, rows) {
     if (!Array.isArray(rows)) throw new Error('insertMany: rows must be an array')
     if (rows.length === 0) return []
@@ -552,6 +584,7 @@ function createDb({ database, logger } = {}) {
     selectOneForUpdate,
     selectOneForKeyShare,
     insertOne,
+    insertOneIfAbsent,
     upsertOne,
     insertMany,
     updateRow,

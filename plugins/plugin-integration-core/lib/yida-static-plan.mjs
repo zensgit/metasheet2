@@ -474,14 +474,41 @@ export function validateYidaStaticConfig(input) {
 // Adding a transform to TRANSFORM_ENTRY_KEYS without a reader here makes every v3 config refused
 // below, and the transform-name tripwire test fails.
 export const YIDA_TRANSFORM_NAMES = Object.freeze([...TRANSFORM_ENTRY_KEYS.keys()])
-const TRANSFORM_SOURCE_COLUMNS = new Map([
+// Per transform kind, the row columns ONE entry's value depends on (design baseline v2.3 §7.2 and the
+// 2026-11-06 addendum: shared by the v3 row projection (⑦.3), the per-row `fieldDependencies` of a source
+// binding (Y4) and the admission re-authorization (Y5)). A copy depends on its direct primary's column, so
+// it needs the normalized config; a generated entry resolves its field parts, hash members and preset inputs
+// through their direct targets, so it needs the config too (R-71 ⑦.4, Y6). The other kinds read only the entry.
+const TRANSFORM_DEPENDENCIES = new Map([
   ['direct', (entry) => [entry.source]],
-  ['copy', () => []],
+  ['copy', (entry, config) => [primaryEntry(config, entry.copyOf).source]],
   ['constant', () => []],
   ['concat', (entry) => entry.parts.filter((part) => Object.prototype.hasOwnProperty.call(part, 'source'))
     .map((part) => part.source)],
-  ['generated', (entry, config) => generatedTemplateDependencies(entry, config)],
+  ['generated', generatedTemplateDependencies],
 ])
+const byCodePoint = (left, right) => (left < right ? -1 : left > right ? 1 : 0)
+
+/**
+ * The source columns one normalized field-map entry reads, sorted and de-duplicated (frozen). A v2 (or v1)
+ * entry has no `transform` and binds exactly its `source`. `config` is the normalized config the entry
+ * belongs to; only `copy` consults it. An entry of an unknown transform throws YIDA_STATIC_CONFIG_INVALID.
+ */
+export function transformDependencies(entry, config) {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID')
+  if (!Object.prototype.hasOwnProperty.call(entry, 'transform')) {
+    if (typeof entry.source !== 'string' || !validIdentifier(entry.source)) throw new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID')
+    return Object.freeze([entry.source])
+  }
+  const reader = TRANSFORM_DEPENDENCIES.get(entry.transform)
+  if (!reader) throw new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID')
+  if (entry.transform === 'copy' && (!config || !Array.isArray(config.fieldMap) || !primaryEntry(config, entry.copyOf))) {
+    throw new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID')
+  }
+  const columns = reader(entry, config)
+  if (columns.some((column) => typeof column !== 'string' || !validIdentifier(column))) throw new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID')
+  return Object.freeze([...new Set(columns)].sort(byCodePoint))
+}
 
 // R-71 ⑦.4: the row columns one generated entry of a valid v3 config reads: its field parts, hash
 // members and preset inputs, each resolved through its direct target to that entry's source column.
@@ -503,11 +530,10 @@ export function yidaTransformSourceColumns(input) {
   if (!validation.valid || validation.normalized.version !== 3) throw new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID')
   const columns = new Set()
   for (const entry of validation.normalized.fieldMap) {
-    const reader = TRANSFORM_SOURCE_COLUMNS.get(entry.transform)
-    if (!reader) throw new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID')
-    for (const column of reader(entry, validation.normalized)) columns.add(column)
+    if (!TRANSFORM_DEPENDENCIES.has(entry.transform)) throw new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID')
+    for (const column of transformDependencies(entry, validation.normalized)) columns.add(column)
   }
-  return Object.freeze([...columns].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0)))
+  return Object.freeze([...columns].sort(byCodePoint))
 }
 
 function sanitizeRows(input) {
@@ -808,6 +834,15 @@ function planTransformFields(config, row, index, issues, payload, generated) {
 
 const byFirstElement = (left, right) => (left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0)
 
+/**
+ * The ONE v2/v3 business-key string ('yida-protocol-v2' label, pairs sorted by target name). `pairs` are
+ * `[target, typeof value, value]` with the empty-key fold already applied. Shared by the planner (both
+ * versions) and the ⑦.5 cut-over reconciliation, so a remote record's digest is the send path's digest.
+ */
+export function yidaProtocolBusinessKey(locator, pairs) {
+  return JSON.stringify(['yida-protocol-v2', locator.appType, locator.formUuid, [...pairs].sort(byFirstElement)])
+}
+
 // Same key algorithm and label as v2, so a v2 layout restated as v3 keeps every row identity
 // already reserved by the delivery fence. Only the binding differs: by primary target name.
 function transformBusinessKey(config, row) {
@@ -817,8 +852,7 @@ function transformBusinessKey(config, row) {
     const value = emptyKeys.has(target) && (raw === undefined || raw === null || raw === '') ? '' : raw
     return [target, typeof value, value]
   })
-  pairs.sort(byFirstElement)
-  return JSON.stringify(['yida-protocol-v2', config.target.appType, config.target.formUuid, pairs])
+  return yidaProtocolBusinessKey(config.target, pairs)
 }
 
 function localBusinessKey(config, row) {
@@ -830,8 +864,8 @@ function localBusinessKey(config, row) {
       const raw = ownValue(row, source)
       const value = emptyKeys.has(source) && (raw === undefined || raw === null || raw === '') ? '' : raw
       return [target, typeof value, value]
-    }).sort((left, right) => left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0)
-    return JSON.stringify(['yida-protocol-v2', config.target.appType, config.target.formUuid, pairs])
+    })
+    return yidaProtocolBusinessKey(config.target, pairs)
   }
   const pairs = [...config.businessKey].sort().map((key) => [key, typeof ownValue(row, key), ownValue(row, key)])
   return JSON.stringify([config.target.appType, config.target.formUuid, pairs])

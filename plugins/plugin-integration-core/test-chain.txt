@@ -334,12 +334,17 @@ node __tests__/yida-draft-plan.test.cjs
 node __tests__/yida-form-readback.test.cjs
 node __tests__/yida-form-transport.test.cjs
 node __tests__/yida-initialization-producer.test.cjs
+node __tests__/yida-issue-confirm-writeback.test.cjs
 node __tests__/yida-mapping-v3-parity.test.cjs
 node __tests__/yida-mapping-v3.test.cjs
 node __tests__/yida-material-code.test.cjs
 node __tests__/yida-owner-runtime-factory.test.cjs
 node __tests__/yida-owner-send-port.test.cjs
 node __tests__/yida-readback-observation.test.cjs
+node __tests__/yida-reconciliation-binding.test.cjs
+node __tests__/yida-reconciliation-plan.test.cjs
+node __tests__/yida-reconciliation-port.test.cjs
+node __tests__/yida-reconciliation-store.test.cjs
 node __tests__/yida-rule-template.test.cjs
 node __tests__/yida-send-authority-primitives.test.cjs
 node __tests__/yida-send-budget.test.cjs

@@ -180,7 +180,11 @@ describe('default attendance bootstrap/revocation atomicity (real PostgreSQL)', 
       CREATE TABLE user_orgs (user_id text, org_id text, is_active boolean);
       CREATE TABLE roles (id text PRIMARY KEY);
       CREATE TABLE role_permissions (role_id text, permission_code text);
-      CREATE TABLE user_roles (user_id text REFERENCES users(id), role_id text REFERENCES roles(id), PRIMARY KEY (user_id, role_id));
+      CREATE TABLE user_roles (
+        user_id text REFERENCES users(id), role_id text REFERENCES roles(id),
+        assignment_source text CHECK (assignment_source IN ('manual', 'creation')),
+        PRIMARY KEY (user_id, role_id)
+      );
       CREATE TABLE user_permissions (user_id text, permission_code text, PRIMARY KEY (user_id, permission_code));
       CREATE TABLE user_namespace_admissions (
         user_id text REFERENCES users(id), namespace text, enabled boolean NOT NULL,
@@ -251,7 +255,7 @@ describe('default attendance bootstrap/revocation atomicity (real PostgreSQL)', 
   })
 
   it('persists an absent-row revoke through token verification and fresh password login', async () => {
-    await pool.query('INSERT INTO user_roles VALUES ($1, $2)', [userId, 'attendance_employee'])
+    await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [userId, 'attendance_employee'])
     expect(await persistedState()).toEqual({ roles: ['attendance_employee'], admission: [] })
     expect(await revoke()).toEqual(['attendance'])
     expect(await persistedState()).toEqual(revokedState)
@@ -266,8 +270,8 @@ describe('default attendance bootstrap/revocation atomicity (real PostgreSQL)', 
     expect(await persistedState()).toEqual({ roles: ['attendance_employee'], admission: [] })
     const registered = await auth.register('registration@r2r3.invalid', password, 'Synthetic registration')
     expect(registered).not.toBeNull()
-    const roles = await pool.query('SELECT role_id FROM user_roles WHERE user_id = $1', [registered?.id])
-    expect(roles.rows).toEqual([{ role_id: 'attendance_employee' }])
+    const roles = await pool.query('SELECT role_id, assignment_source FROM user_roles WHERE user_id = $1', [registered?.id])
+    expect(roles.rows).toEqual([{ role_id: 'attendance_employee', assignment_source: 'creation' }])
   })
 
   it('a steady-state user keeps the merged codes on every authentication but invalidates only on the first insert', async () => {
@@ -372,7 +376,7 @@ describe('default attendance bootstrap/revocation atomicity (real PostgreSQL)', 
   })
 
   it('rolls back the membership DELETE if the revoke witness cannot persist', async () => {
-    await pool.query('INSERT INTO user_roles VALUES ($1, $2)', [userId, 'attendance_employee'])
+    await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [userId, 'attendance_employee'])
     await pool.query("ALTER TABLE user_namespace_admissions ADD CONSTRAINT reject_witness CHECK (source <> 'role_unassigned')")
     try {
       await expect(revoke()).rejects.toMatchObject({ code: '23514' })
@@ -383,7 +387,7 @@ describe('default attendance bootstrap/revocation atomicity (real PostgreSQL)', 
   })
 
   it('preserves another role and its admission, direct grants and legacy values while recording opt-out', async () => {
-    await pool.query('INSERT INTO user_roles VALUES ($1, $2), ($1, $3)', [userId, 'attendance_employee', 'attendance_reader'])
+    await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2), ($1, $3)', [userId, 'attendance_employee', 'attendance_reader'])
     await pool.query("INSERT INTO user_namespace_admissions (user_id, namespace, enabled, source) VALUES ($1, 'attendance', true, 'platform_admin')", [userId])
     await pool.query("INSERT INTO user_permissions VALUES ($1, 'attendance:write')", [userId])
     await pool.query(`UPDATE users SET permissions = '["attendance:read", "workflow:read"]' WHERE id = $1`, [userId])

@@ -3,7 +3,7 @@
 // Only the YiDa fetch responses are synthesized. No customer/remote HTTP.
 import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
-import { createYidaOwnerHttpRealdbFixture, draftInput, otherTenant, principals, syntheticMaterial, tenant,
+import { createYidaOwnerHttpRealdbFixture, draftInput, otherTenant, principals, sheetColumns, syntheticMaterial, tenant,
   type Data, type Draft, type Input, type YidaOwnerHttpRealdbFixture } from '../utils/stock-preparation-yida-owner-http-fixture'
 
 it('sentinel: real owner HTTP proof requires EXPECT_DB=1 and a dedicated DATABASE_URL', () => {
@@ -129,6 +129,29 @@ databaseSuite('SA05 owner HTTP — actual JWT, native authority and private Post
       ['/approvals', { operationId: fixture.draft.operationId, rowKey: fixture.draft.rows[0].rowKey, confirmationId: randomUUID(), acknowledgeOnce: true }],
       ['/submissions', fixture.request]] as const) denial(await f.http('POST', route, body), 403, 'YIDA_OWNER_RUNTIME_DISABLED')
     expect(f.sql).toEqual([]); noFetch(); expect(await f.proof()).toEqual(before)
+  })
+  it('the omitted multi-target reader defaults OFF at the HTTP boundary: targetRef and sheet bodies are 400, /targets is the generic 404, before owner SQL', async () => {
+    // This fixture passes NO readMultiTargetEnablement, so the owner runtime's own default ('false') is the only
+    // switch; the send switch is ON. The targetRef is a real UUID (the seeded slot-1 target), so the route's id()
+    // check cannot refuse it on its own: only the OFF branch's closed bodies can.
+    f.setEnablement('true')
+    const draft = await prepare(), targetRef = String((await f.rows('integration_yida_approved_target'))[0].target_ref)
+    const selected = { operationId: draft.operationId, rowKey: draft.rows[0].rowKey }
+    const before = await f.proof(); f.sql.length = 0
+    denial(await f.http('POST', '/drafts', { ...draftInput(), targetRef }), 400, 'YIDA_OWNER_HTTP_INPUT')
+    // The sheet/view source is the only body that can produce a source binding; while OFF it never reaches a read.
+    denial(await f.http('POST', '/drafts', { config: draftInput().config, allocation: { mode: 'original' },
+      source: { kind: 'sheet', sheetId: 'sheet_synthetic', columns: sheetColumns } }), 400, 'YIDA_OWNER_HTTP_INPUT')
+    // A client-sent sourceBinding is refused by the closed body in BOTH switch states (it is not a switch witness).
+    denial(await f.http('POST', '/drafts', { ...draftInput(), sourceBinding: { sheetId: 'sheet_synthetic' } }), 400, 'YIDA_OWNER_HTTP_INPUT')
+    denial(await f.http('GET', '/targets'), 404, 'NOT_FOUND')
+    denial(await f.http('POST', '/targets', {}), 404, 'NOT_FOUND')
+    denial(await f.http('POST', '/preview', { ...selected, targetRef }), 400, 'YIDA_OWNER_HTTP_INPUT')
+    denial(await f.http('POST', '/approvals', { ...selected, confirmationId: randomUUID(), acknowledgeOnce: true, targetRef }),
+      400, 'YIDA_OWNER_HTTP_INPUT')
+    expect(f.sql).toEqual([]); noFetch(); expect(await f.proof()).toEqual(before)
+    // Checked last, so a red above is the HTTP boundary's own answer, not this direct runtime read.
+    expect(f.runtime.multiTargetEnabled()).toBe(false)
   })
 
   it('missing or malformed JWT denies before owner SQL and material', async () => {
@@ -321,5 +344,34 @@ databaseSuite('SA05 owner HTTP — actual JWT, native authority and private Post
     await f.runtime.stop()
     denial(await f.http('POST', '/drafts', draftInput()), 503, 'YIDA_OWNER_RUNTIME_INACTIVE')
     expect(f.sql).toEqual([]); noFetch(); expect(await f.proof()).toEqual(before)
+  })
+
+  it('SR5 (draft level): a pasted rowsText draft is unbound end to end; its draft rows, grant and ledger row carry NULL binding digests', async () => {
+    const fixture = await confirmed()
+    const members = await f.rows('integration_yida_draft_rows')
+    expect(members.length).toBeGreaterThan(0)
+    expect(members.every(row => row.source_record_digest === null && row.creation_identity_digest === null)).toBe(true)
+    const grant = (await f.rows('integration_yida_send_approvals')).find(row => row.grant_id === fixture.grant.grantId)!
+    expect([grant.source_record_digest, grant.creation_identity_digest]).toEqual([null, null])
+    const sent = bodyData(await f.http('POST', '/submissions', fixture.request), 200)
+    expect(sent).toMatchObject({ status: 'acknowledged', reused: false, externalWriteAttempted: true })
+    const ledger = (await f.rows('integration_yida_delivery_ledger'))[0]
+    expect([ledger.source_record_digest, ledger.creation_identity_digest, ledger.status]).toEqual([null, null, 'acknowledged'])
+    expect([f.tokenPayloads.length, f.formPayloads.length]).toEqual([1, 1])
+    // The identity fence has no row to cover: a second unbound draft of the same line with a corrected description is a
+    // second reservation on the test copy (CF1 residue), while the same seven keys are still fenced.
+    const input = draftInput(); const rows = JSON.parse(input.rowsText) as Data[]
+    rows[0].description = 'synthetic corrected HTTP part'; input.rowsText = JSON.stringify(rows)
+    const second = await prepare(input)
+    expect(second.operationId).not.toBe(fixture.draft.operationId)
+    await preview(second)
+    const grant2 = await approve(second)
+    expect(grant2.status).toBe('approved')
+    const sameKeys = await prepare({ ...draftInput(), rowsText: JSON.stringify([{ ...(JSON.parse(draftInput().rowsText) as Data[])[0], quantity: 7 }]) })
+    await preview(sameKeys)
+    const grant3 = await approve(sameKeys)
+    denial(await f.http('POST', '/submissions', { grantId: grant3.grantId, submissionId: randomUUID() }), 503, 'YIDA_OWNER_RUNTIME_UNAVAILABLE')
+    expect((await f.rows('integration_yida_delivery_ledger')).length).toBe(1)
+    expect([f.tokenPayloads.length, f.formPayloads.length]).toEqual([1, 1])
   })
 })

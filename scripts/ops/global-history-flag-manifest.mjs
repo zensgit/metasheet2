@@ -81,6 +81,52 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/index.ts#yidaOwnerRuntime+yidaInitializationRuntime; packages/core-backend/src/integration/yida-send-approval-service.ts; packages/core-backend/src/integration/yida-sheet-source.ts; packages/core-backend/src/routes/integration-yida-owner.ts',
   },
   {
+    key: 'INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "YiDa 发料确认日期回写 (design baseline v2.3 §7.3, frozen ⑦.4 plan §2.2, slice Y9a). Default OFF; exact literal 'true' only (no trim, no case folding), read on EVERY call before any dependency is touched. On: after a YiDa issue-confirm CREATE is acknowledged (2xx + instance id; never outcome_unknown, prepared, dispatching or not_sent), the write-back fills the registered project sheet's machine column issueConfirmDate with the acknowledgement audit's calendar day in MULTITABLE_BUSINESS_TIMEZONE, only for rows whose target_ref is listed in INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS and whose source_record_digest is bound; an existing date is never overwritten; decision D14: it writes only registered project sheets and also reads MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED (exact 'true', per row and again right before the patch) — off, every selected row is skipped and counted as project_sheets_disabled with no registry read and no trace row, so it is decided again once that switch is on (not modeled as dependsOn: the project-sheets switch is the 備料 line's own, and this skip is the D14 behaviour, not a requires rule); one version-conditional, host-fenced patch under the sheet write lease (purpose issue_confirm_writeback); one append-only trace row per ledger row (migration zzzz20261106093100). It never constructs a runner, transport or token client, so it can never cause a second form submission. WRITES THE CUSTOMER'S PRODUCTION SHEET: an O-level owner decision. Turning it on on a deployed machine, filling the target list and running the backfill are each separately approved. Not wired to any route in this slice (the send-port hook and the owner recovery entry are slice Y9).",
+    source: 'plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs#issueConfirmWritebackEnabled',
+  },
+  {
+    key: 'INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS',
+    type: 'list',
+    activationValue:
+      'comma-separated issue-confirm target_ref UUIDs (trimmed, exact lowercase match, de-duplicated); UNSET/EMPTY => nothing is selected (zero reads, zero writes)',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "YiDa 发料确认日期回写 target list (decision D7, slice Y9a): the formal issue-confirm targets whose acknowledged CREATEs may write the local issueConfirmDate. A test copy is never listed, so its confirmations never reach a production row. Only read while INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED is on, but NOT modeled as dependsOn: isActivated() is false for every non-boolean spec, so a requires rule keyed off this list would never fire. Danger=high: listing a target authorises machine writes to the customer's production sheets (O-level, owner-approved per target).",
+    source: 'plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs#parseIssueConfirmTargetRefs',
+  },
+  {
+    key: 'INTEGRATION_YIDA_RECONCILE_READ_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      'R-71 ⑦.5 cut-over reconciliation (design baseline v2.3 §8). Default OFF; byte-exact true enables only the owner-run, per-project, read-only paginated SEARCH of one approved YiDa target (fixed POST /v1.0/yida/forms/instances/advances/query, with the sealed credential material of that target) and local insert-only evidence: a legacy record already in the form is registered in the delivery ledger as reconciled_existing (it occupies the seven-key create fence, so the send path never creates it again), with a reconcile(legacy_readback) audit and its own run/page/observation tables. Zero YiDa writes: the reconciliation port has no form transport. Not a grant: anchor owner + live integration admin are re-proved on every call; while OFF both /reconciliations routes answer the generic 404 and the switch is read again before every page. Does not read, imply or require INTEGRATION_YIDA_OWNER_SEND_ENABLED, so it runs while sending stays off. Turning it on means sealed customer credentials and project numbers leave the box on the owner click: enabling it on a deployed machine and each per-project run (count first, then register) are separate owner decisions (R-71, AGENTS.md owner-only steps).',
+    source: 'packages/core-backend/src/index.ts#yidaReconciliationRuntime; packages/core-backend/src/integration/yida-reconciliation-runtime.ts; plugins/plugin-integration-core/lib/yida-reconciliation-port.mjs',
+  },
+  {
+    key: 'INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS',
+    type: 'list',
+    activationValue:
+      'comma-separated YiDa target refs (UUIDs, byte-exact, no trim); UNSET/EMPTY/malformed ⇒ no listed target, only slot 1 takes unbound rows',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      'D20 of the YiDa standardization design baseline v2.3 (§3.3, §7.2; R-71 decision 1): a FORMAL YiDa target takes only rows that carry a server-read source binding (sheet, record, key column, key value, project, field map; their two digests travel with the draft row, the grant and the ledger row, and the creation-identity fence keys on one of them). Slot 1 is the material TEST copy and may still take unbound pasted rows, fenced by the seven-key reservation alone; this list names the OTHER test-copy targets (slots 2..16) allowed the same. Every target not slot 1 and not listed refuses an unbound row at approval and at admission (409 CONFLICT, no grant, no ledger row, no send). Read per run by the owner runtime; a malformed value is the empty list, so a typo can only make formal targets stricter. Danger=high because a listed target ref admits rows that no identity fence covers: listing a production form is exactly what D20 forbids. Values-free: refusals never echo the list or the target.',
+    source: 'packages/core-backend/src/index.ts#yidaOwnerRuntime; packages/core-backend/src/integration/yida-owner-runtime.ts#unboundTestTargetRefs; packages/core-backend/src/integration/yida-send-approval-service.ts#assertBindingRequired',
+  },
+  {
     key: 'MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA',
     type: 'boolean',
     activationValue: 'true',
@@ -909,7 +955,7 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     conflictsWith: [],
     danger: 'high',
     purpose:
-      "W4 tenant-claim hard door of the integration plugin (registered 2026-11-11 under register R-91; it predates this registry). Default OFF; the ONE reader is plugins/plugin-integration-core/lib/http-routes.cjs#stockPreparationTenantClaimRequired (trimmed, case-folded 'true'), asked per request. OFF: byte-for-byte today's behaviour except the unconditional F3 fix on the confirmation-decisions confirm route (see the reader's comment) — including requireTableActionAccess's legacy integration:* branch, which lets a tenantless platform admin name a tenant (query / params tenantId) and preview AND apply a stock-prep pull into it. ON: assertVerifiedTenantClaim refuses every request whose tenant does not come from the verified token claim — 403 OPERATOR_SCOPE_TENANT_REQUIRED for a claimless token (a tenantless platform admin included, on every carrier), and the contradiction / mismatch refusals — on the three shared entries (the table-action legacy branch, resolveTenantId, resolveAuthUserTenantId) plus the source-preflight route, i.e. the WHOLE integration plugin surface, not only stock-prep. Owner ruling 2026-11-11 (R-91, option A): this flag being on is a PILOT-ENABLE PRECONDITION — pilot readiness v6's check tenant_claim_required (plugins/plugin-integration-core/lib/stock-preparation-pilot-readiness.cjs) passes only while the reader answers true, so no batch-refresh pilot can be enabled while it is off. It gates the enable only: after an enable nothing refuses at run time (only the pilot GET re-lists the id), so removing the flag while a pilot is enabled reopens the legacy path on that pilot sheet (the pilot runbook's stop condition forbids it). Danger=high: turning it on refuses every claimless caller at once — the order is customer-delivery-guide-20260904.md §5-5 (user_orgs, re-issued tenant-bound tokens incl. the daily scheduled pull's, everyone signs in again, then the env line); flipping it on a customer host is a separate owner gate at install time. Rollback = delete the line and restart; nothing persists.",
+      "W4 tenant-claim hard door of the integration plugin (registered 2026-11-11 under register R-91; it predates this registry). Default OFF; the ONE reader is plugins/plugin-integration-core/lib/http-routes.cjs#stockPreparationTenantClaimRequired (trimmed, case-folded 'true'), asked per request. OFF: byte-for-byte today's behaviour except the unconditional F3 fix on the confirmation-decisions confirm route (see the reader's comment) — including requireTableActionAccess's legacy integration:* branch, which lets a tenantless platform admin name a tenant (query / params tenantId) and preview AND apply a stock-prep pull into it. ON: assertVerifiedTenantClaim refuses every request whose tenant does not come from the verified token claim — 403 OPERATOR_SCOPE_TENANT_REQUIRED for a claimless token (a tenantless platform admin included, on every carrier), and the contradiction / mismatch refusals — on the three shared entries (the table-action legacy branch, resolveTenantId, resolveAuthUserTenantId) plus the source-preflight route, i.e. the WHOLE integration plugin surface, not only stock-prep. Owner ruling 2026-11-11 (R-91, option A): this flag being on is a PILOT-ENABLE PRECONDITION — pilot readiness v6's check tenant_claim_required (plugins/plugin-integration-core/lib/stock-preparation-pilot-readiness.cjs) passes only while the reader answers true, so no batch-refresh pilot can be enabled while it is off. It gates the enable only: after an enable nothing refuses at run time (only the pilot GET re-lists the id), so removing the flag while a pilot is enabled reopens the legacy path on that pilot sheet (the pilot runbook's stop condition forbids it). Danger=high: turning it on refuses every claimless caller at once — the order is customer-delivery-guide-20260904.md §5-5 (user_orgs, re-issued tenant-bound tokens incl. the daily scheduled pull's, everyone signs in again, then the env line); flipping it on a customer host is a separate owner gate at install time. Rollback is not deleting the line (pm2 keeps a removed key in the running process): set it to =false, restart with scripts/ops/attendance-onprem-start-pm2.ps1, check the key in pm2 env, then delete the line (a list or path key is emptied as a double-quoted single space, never a bare KEY=, which PS 5.1 treats as a deleted line); nothing persists. Steps: customer-delivery-guide-20260904.md §5-5.",
     source: 'plugins/plugin-integration-core/lib/http-routes.cjs#stockPreparationTenantClaimRequired',
   },
   {
@@ -1117,6 +1163,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     purpose:
       "Default OFF. Only the byte-exact env string 'true' enables persisting an exact department scope (includeChildren false); no trim and no case folding. Unset, '', false, 0, TRUE, True, ' true', 'true ', ' true ', 1, yes and on stay OFF. Gates three write sinks before any scope or template mutation: template department assign, direct delegated-admin scope assign, and template apply in both merge and replace. A refusal is HTTP 403 DELEGATED_SCOPE_EXACT_DEPARTMENT_DISABLED with no audit and no permission invalidation, and replace does not delete first. Readers are not gated. Rollback: turning the flag off does not rewrite a stored false and does not change reader semantics; explicit true and unassign remain available; an omitted includeChildren on an existing false is preserved; a new omitted assign still defaults to true. Enabling a deployed process is a separate owner decision.",
     source: 'packages/core-backend/src/admin/delegated-scope-rollout.ts#isDelegatedScopeExactDepartmentEnabled',
+  },
+  {
+    key: 'DELEGATED_SCOPE_ACTIVATION_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "Default OFF; only exact literal 'true' exposes explicit delegation lifecycle writes and makes a new scope configuration inactive until enabled. Upgrade or drain every previous permission reader and writer before enabling. Turning OFF prevents new activation changes and still enforces all stored stops. A stopped subject's range remains editable. This switch is independent of DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED.",
+    source: 'packages/core-backend/src/admin/delegated-scope-activation.ts#isDelegatedScopeActivationEnabled',
   },
 ])
 
