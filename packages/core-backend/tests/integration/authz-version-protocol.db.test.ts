@@ -397,6 +397,33 @@ describeIfDatabase.sequential('D21 authorization version protocol (real PostgreS
       expect(await subjectVersion(ACTOR)).toBe(locked.subjectVersion.version + 2)
       await q(`UPDATE users SET is_active = TRUE WHERE id = $1`, [ACTOR])
     })
+
+    it('B-06 (#6924) the mutex under nowait — the authorization-operation intent — answers 55P03 at once on a held subject row, takes no users row and bumps nothing; the holder is unaffected', async () => {
+      await beginHolder()
+      const locked = await admission()
+      await writer.query('BEGIN')
+      // A generous lock_timeout: a pass below must come from NOWAIT, not from a short timeout.
+      await writer.query(`SET LOCAL lock_timeout = '5s'`)
+      const started = Date.now()
+      const failure = await lockUsersForAccessGraphWrite(writer, [ACTOR], { nowait: true }).then(() => null, (error: unknown) => error)
+      const waitedMs = Date.now() - started
+      expect((failure as { code?: unknown } | null)?.code).toBe('55P03')
+      expect(waitedMs).toBeLessThan(2500)
+      await writer.query('ROLLBACK')
+      const { rows } = await inspector.query(
+        `SELECT count(*)::int AS n FROM pg_locks l JOIN pg_class c ON c.oid = l.relation
+          WHERE l.pid = $1::int AND c.relname = 'users' AND l.mode = 'RowShareLock'`,
+        [await pidOf(holder)],
+      )
+      expect(rows[0].n).toBeGreaterThan(0)
+      await holder.query('COMMIT')
+      expect(await subjectVersion(ACTOR)).toBe(locked.subjectVersion.version)
+      // Once the holder has committed, the same nowait call takes the row (B-05 shows that without
+      // nowait the call queues behind a holder instead).
+      await writer.query('BEGIN')
+      expect((await lockUsersForAccessGraphWrite(writer, [ACTOR], { nowait: true })).get(ACTOR)?.id).toBe(ACTOR)
+      await writer.query('ROLLBACK')
+    })
   })
 
   describe('K — the holder-vs-multi-row-writer cycle', () => {

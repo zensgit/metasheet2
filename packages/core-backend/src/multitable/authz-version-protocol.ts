@@ -256,6 +256,12 @@ ON CONFLICT (subject_id) DO UPDATE
   SET version = v.version + 1,
       updated_at = now()`
 
+/** The no-wait pre-lock of {@link bumpSubjectAuthorizationVersions} `{ nowait: true }`: existing rows, ascending. */
+export const SUBJECT_AUTHORIZATION_VERSIONS_NOWAIT_SQL = `SELECT subject_id FROM ${SUBJECT_AUTHORIZATION_VERSIONS_TABLE}
+ WHERE subject_id = ANY($1::text[])
+ ORDER BY subject_id
+   FOR UPDATE NOWAIT`
+
 const SHEET_VERSION_ENSURE_SQL = `INSERT INTO ${SHEET_PERMISSION_VERSIONS_TABLE} (sheet_id) VALUES ($1) ON CONFLICT (sheet_id) DO NOTHING`
 const SHEET_VERSION_SHARE_SQL = `SELECT sheet_id, version::text AS version FROM ${SHEET_PERMISSION_VERSIONS_TABLE} WHERE sheet_id = $1 FOR SHARE`
 const SUBJECT_VERSION_ENSURE_SQL = `INSERT INTO ${SUBJECT_AUTHORIZATION_VERSIONS_TABLE} (subject_id) VALUES ($1) ON CONFLICT (subject_id) DO NOTHING`
@@ -414,10 +420,18 @@ export async function bumpSheetPermissionVersionBehindSheetRow(
 export async function bumpSubjectAuthorizationVersions(
   queryable: AuthorizationVersionQueryable,
   userIds: readonly string[],
+  options: Readonly<{ nowait?: boolean }> = {},
 ): Promise<string[]> {
   const ids = canonicalAuthorizationIds(userIds)
   if (ids.length === 0) return ids
-  await queryFnOf(queryable)(SUBJECT_AUTHORIZATION_VERSIONS_BUMP_SQL, [ids])
+  const query = queryFnOf(queryable)
+  // `nowait` (the access-graph mutex under the authorization-operation intent, whose every other
+  // lock is a try / NOWAIT): take the rows that already exist without waiting, so a holder's
+  // FOR SHARE answers 55P03 at once instead of the operation queueing on it while it holds the
+  // operation fence's table locks. For a row that does not exist yet the upsert can still wait, on
+  // a concurrent uncommitted insert of the same key only, bounded by the caller's lock_timeout.
+  if (options.nowait === true) await query(SUBJECT_AUTHORIZATION_VERSIONS_NOWAIT_SQL, [ids])
+  await query(SUBJECT_AUTHORIZATION_VERSIONS_BUMP_SQL, [ids])
   return ids
 }
 

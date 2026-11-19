@@ -52,8 +52,9 @@ export async function lockUsersForAccessGraphWrite(
   const normalizedUserIds = normalizeUserIds(userIds)
   const lockedUsers = new Map<string, LockedAccessGraphUser>()
 
-  // D21: subject version rows first (sorted, one statement), then the users rows.
-  await bumpSubjectAuthorizationVersions(client, normalizedUserIds)
+  // D21: subject version rows first (sorted, one statement), then the users rows. Under `nowait`
+  // the bump takes the existing version rows without waiting too, like the users rows below.
+  await bumpSubjectAuthorizationVersions(client, normalizedUserIds, { nowait: options.nowait === true })
 
   for (const userId of normalizedUserIds) {
     const result = await client.query(

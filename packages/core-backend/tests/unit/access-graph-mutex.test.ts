@@ -68,6 +68,43 @@ describe('access-graph mutex protocol', () => {
     expect(statements).toEqual([])
   })
 
+  it('D21 x #6924: under nowait the existing subject version rows are taken FOR UPDATE NOWAIT before the bump, and the users rows NOWAIT; without it, no pre-lock', async () => {
+    const statements: Array<{ sql: string; params: unknown[] }> = []
+    const client = {
+      query: vi.fn(async (sql: string, params: unknown[] = []) => {
+        statements.push({ sql, params })
+        return { rows: [] }
+      }),
+    }
+    await lockUsersForAccessGraphWrite(client, ['user-b', 'user-a'], { nowait: true })
+    expect(statements[0].sql).toMatch(/FROM subject_authorization_versions[\s\S]*FOR UPDATE NOWAIT/)
+    expect(statements[0].params).toEqual([['user-a', 'user-b']])
+    expect(statements[1].sql).toMatch(/INSERT INTO subject_authorization_versions/)
+    expect(statements[1].params).toEqual([['user-a', 'user-b']])
+    expect(statements.slice(2).map((call) => call.params[0])).toEqual(['user-a', 'user-b'])
+    expect(statements.slice(2).every((call) => /FROM users[\s\S]*FOR UPDATE NOWAIT/.test(call.sql))).toBe(true)
+
+    statements.length = 0
+    await lockUsersForAccessGraphWrite(client, ['user-b', 'user-a'])
+    expect(statements.some((call) => /NOWAIT/.test(call.sql))).toBe(false)
+    expect(statements[0].sql).toMatch(/INSERT INTO subject_authorization_versions/)
+    expect(statements).toHaveLength(3)
+  })
+
+  it('D21 x #6924: a held subject version row under nowait fails with the 55P03 of the pre-lock, before any users row or bump', async () => {
+    const statements: string[] = []
+    const held = Object.assign(new Error('could not obtain lock on row in relation'), { code: '55P03' })
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        statements.push(sql)
+        if (/FOR UPDATE NOWAIT/.test(sql) && /subject_authorization_versions/.test(sql)) throw held
+        return { rows: [] }
+      }),
+    }
+    await expect(lockUsersForAccessGraphWrite(client, ['user-a'], { nowait: true })).rejects.toBe(held)
+    expect(statements).toHaveLength(1)
+  })
+
   it('reads the role column with the locked row so writers can apply the shared authentication gate', async () => {
     const client = {
       query: vi.fn(async (sql: string, params: unknown[] = []) => ({

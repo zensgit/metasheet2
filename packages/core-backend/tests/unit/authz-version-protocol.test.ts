@@ -612,7 +612,7 @@ describe('L — the admission lock helper', () => {
 describe('W — writers bump FIRST', () => {
   it('W-01 the access-graph mutex bumps the subject version rows (sorted, one statement) BEFORE the first users FOR UPDATE', () => {
     const source = readFileSync(path.join(SRC, 'directory', 'access-graph-mutex.ts'), 'utf8')
-    const bumpAt = source.indexOf('await bumpSubjectAuthorizationVersions(client, normalizedUserIds)')
+    const bumpAt = source.indexOf('await bumpSubjectAuthorizationVersions(client, normalizedUserIds, { nowait: options.nowait === true })')
     // The statement text (the template literal's lock clause, #6924 added its NOWAIT switch), not
     // the docblock that explains it.
     const lockAt = source.indexOf("FOR UPDATE${options.nowait === true ? ' NOWAIT' : ''}`,")
