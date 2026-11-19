@@ -9,7 +9,12 @@
  * G12 container-layer row/byte caps. Each guarantee-type block has a witnessed-red mutant (see PR body).
  */
 import { describe, expect, it } from 'vitest'
-import { isRunValueStoreError } from '../../src/multitable/automation-run-values'
+import {
+  RUN_VALUE_MAX_STRING_LENGTH,
+  RUN_VALUE_STORE_MAX_ROWS,
+  isRunValueStoreError,
+  projectRow,
+} from '../../src/multitable/automation-run-values'
 import * as stepOutputs from '../../src/multitable/automation-step-outputs'
 import {
   EXECUTION_STEP_OUTPUTS_MAX_BYTES,
@@ -390,6 +395,17 @@ describe('3 ★ G9 container layer', () => {
       expect(code(() => fresh().publish('read', rows))).toBe('RUN_VALUE_INPUT')
     }
   })
+
+  it('projectRow returns a frozen row and refuses a wrong key name even when the key count matches', () => {
+    const row = projectRow({ id: 'x', qty: 1 }, ['id', 'qty'])
+    expect(row).toEqual({ id: 'x', qty: 1 })
+    expect(Object.isFrozen(row)).toBe(true)
+    expect(code(() => projectRow({ id: 'x', extra: 1 }, ['id', 'qty']))).toBe('RUN_VALUE_INPUT')
+    const store = createRunValueStoreFromRule(scopeA, basePlan())
+    const before = store.counts()
+    expect(code(() => store.publish('read', [{ id: 'x', extra: 1 }]))).toBe('RUN_VALUE_INPUT')
+    expect(store.counts()).toEqual(before)
+  })
 })
 
 // ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -430,6 +446,8 @@ describe('4 ★ G10 in-memory half: isolation and dispose', () => {
     expect(code(() => store.resolveScalar(read, 'not a reference', 1, scopeA))).toBe('RUN_VALUE_DISPOSED')
     expect(code(() => store.resolveRows(read, { fromStep: 'read' }, 1, scopeA))).toBe('RUN_VALUE_DISPOSED')
     expect(code(() => store.publish('lookup', [{ code: 'c', name: 'n' }]))).toBe('RUN_VALUE_DISPOSED')
+    expect(code(() => store.resolveRows(read, 'not a reference' as never, 1, scopeA))).toBe('RUN_VALUE_DISPOSED')
+    expect(code(() => store.publish('nope', 'rows'))).toBe('RUN_VALUE_DISPOSED')
   })
 
   it('the success path disposes and unregisters', async () => {
@@ -533,6 +551,9 @@ describe('5 ★ G12 container layer: rows, bytes, execution total, step-key coun
     expect(EXECUTION_STEP_OUTPUTS_MAX_BYTES).toBe(4 * 1024 * 1024)
     expect(STEP_KEY_MAX_PER_RULE).toBe(8)
     expect(STEP_BUSINESS_KEY_MAX_LENGTH).toBe(128)
+    // the underlying store's own hard limits (既有, re-exported read-only for the rule-derived path)
+    expect(RUN_VALUE_STORE_MAX_ROWS).toBe(10_000)
+    expect(RUN_VALUE_MAX_STRING_LENGTH).toBe(1024 * 1024)
   })
 
   it('99 and 100 rows publish; 101 rows fail and publish nothing', () => {
@@ -599,7 +620,7 @@ describe('5 ★ G12 container layer: rows, bytes, execution total, step-key coun
     try { result = code(() => store.publish('wide', rows)) } finally { JSON.stringify = original }
     expect(result).toBe('RUN_VALUE_OUTPUT_TOO_LARGE')
     // the first 1 MiB cell alone already crosses the 1 MiB cap: nothing after it is serialized (never 6, never 600)
-    expect(calls).toBeLessThanOrEqual(1)
+    expect(calls).toBe(1)
     expect(store.counts()).toEqual({ outputs: 0, rows: 0, bytes: 0 })
   })
 
