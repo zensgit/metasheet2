@@ -297,22 +297,21 @@ export function manualRowParentPairProblem(input: { hasCode: boolean; hasName: b
 }
 
 /**
- * What a 图号 cell COMPARES as for P5: its text without the surrounding whitespace, or null when there is nothing to
- * compare. A number or boolean a raw client stored in the text column compares as its String() form, which is what
- * the grid groups it under. Never used to rewrite a stored value.
+ * What a 图号 cell COMPARES as for P5: a string without its surrounding whitespace, a finite number as its decimal
+ * text (a raw client can store one in the text column; the grid groups it under that text), anything else nothing —
+ * null when there is nothing to compare. The same reading of a cell as the plugin's same-material reminder
+ * (stock-preparation-manual-rows.cjs `matchText`, ADR §5.3). Never used to rewrite a stored value.
  */
 export function comparableManualRowCode(value: unknown): string | null {
   const text = typeof value === 'string'
-    ? value
-    : (typeof value === 'number' && Number.isFinite(value)) || typeof value === 'boolean' || typeof value === 'bigint' ? String(value) : null
-  if (text === null) return null
-  const trimmed = text.trim()
-  return trimmed === '' ? null : trimmed
+    ? value.trim()
+    : typeof value === 'number' && Number.isFinite(value) ? String(value) : ''
+  return text === '' ? null : text
 }
 
 /**
- * P5: the row would be its own parent. Case-sensitive, surrounding whitespace ignored on both sides (the 图号 rule
- * the same-material reminder uses, ADR §5.3). A blank parent or a row without its own 图号 is never a self-parent.
+ * P5: the row would be its own parent. Case-sensitive, surrounding whitespace ignored on both sides (how the
+ * same-material reminder compares 图号, ADR §5.3). A blank parent or a row without its own 图号 is never a self-parent.
  */
 export function isManualRowSelfParent(parentCode: unknown, componentCode: unknown): boolean {
   const parent = comparableManualRowCode(parentCode)

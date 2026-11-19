@@ -21451,7 +21451,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const pool = poolManager.get()
       const query = pool.query.bind(pool)
       const recordLookup = await pool.query('SELECT id, sheet_id, data, created_by FROM meta_records WHERE id = $1', [recordId])
-      const recordRow: any = recordLookup.rows[0]
+      const recordRow = recordLookup.rows[0] as { id: unknown; sheet_id: unknown; data: unknown; created_by: unknown } | undefined
       if (!recordRow) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
       }

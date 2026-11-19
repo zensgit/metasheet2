@@ -19,7 +19,9 @@
  *   K-10 (B4) the per-sheet switch: the plugin's reader (the switch route's) answers exactly as the host's, value for
  *        value, and what the plugin writes survives the host sanitizer with the lock and the key stanza kept; the switch
  *        route's 「manual rows offered on this sheet」 rule (manualRowsSupportedOnObject) answers exactly as the host's
- *        predicate (a), id for id.
+ *        predicate (a), id for id;
+ *   K-11 (ADR §12, rule P5) the host decides "a row is its own parent" with the SAME reading of a 图号 cell as the
+ *        plugin's same-material reminder (trimmed text, a finite number as its text, anything else nothing).
  */
 import { createRequire } from 'node:module'
 import { readFileSync } from 'node:fs'
@@ -363,6 +365,58 @@ describe('K-10 (B4) the per-sheet switch: the plugin reader answers exactly as t
       expect(isManualRowsProjectSheetHost({ kind: 'present', row: { projectId: 'p', objectId, pluginName: 'plugin-integration-core' } }), `host: ${label}`).toBe(expected)
       expect(pluginRows.manualRowsSupportedOnObject(objectId), `plugin: ${label}`).toBe(expected)
     }
+  })
+})
+
+/**
+ * K-11 (ADR §12.3 rule P5) THE 图号 COMPARISON. 「父组件图号不能等于本行自己的图号」 is decided by the host with
+ * `isManualRowSelfParent`; the plugin already has a rule for "the same 图号" — the same-material reminder (ADR §5.3,
+ * lib/stock-preparation-manual-rows.cjs `summarizeManualSupplement`: a manual row matches an ADD row that carries its
+ * 图号). The two must read a cell the same way (a string trimmed, a finite number as its text, anything else nothing;
+ * case kept), or a pair the reminder calls "the same part" could be accepted here as "another part". The plugin's
+ * answer is taken through its public function, on its own input shape; the expected column is stated explicitly.
+ */
+describe('K-11 (ADR §12) P5 compares 图号 exactly as the plugin\'s same-material reminder does', () => {
+  const pluginSameCode = (manualCode: unknown, otherCode: unknown): boolean => {
+    const collector = pluginRows.createManualPrefixCollector()
+    // Distinct names keep the reminder's no-图号 fallback (名称 + 规格 + 材料) from ever matching.
+    collector.add('manual', { componentCode: manualCode, componentName: 'manual-only' }, 'rec_k11')
+    const summary = pluginRows.summarizeManualSupplement({
+      existingRows: collector.attachTo([]),
+      addRecords: [{ componentCode: otherCode, componentName: 'add-only' }],
+    })
+    return summary.matchedManualCount === 1
+  }
+  const CASES: Array<[string, unknown, unknown, boolean]> = [
+    ['the same text', 'SYN-1', 'SYN-1', true],
+    ['whitespace around the first', ' SYN-1\t', 'SYN-1', true],
+    ['whitespace around the second', 'SYN-1', '\n SYN-1 ', true],
+    ['a different case', 'syn-1', 'SYN-1', false],
+    ['an inner space', 'SYN 1', 'SYN1', false],
+    ['different text', 'SYN-1', 'SYN-2', false],
+    ['a number against its text', '123', 123, true],
+    ['its text against a number', 123, '123', true],
+    ['two equal numbers', 7, 7, true],
+    ['a boolean is not text', 'true', true, false],
+    ['a blank first', '  ', '  ', false],
+    ['an empty first', '', '', false],
+    ['null first', null, 'SYN-1', false],
+    ['null second', 'SYN-1', null, false],
+    ['an object', { code: 'SYN-1' }, 'SYN-1', false],
+    ['an array', ['SYN-1'], 'SYN-1', false],
+    ['NaN', Number.NaN, 'NaN', false],
+  ]
+  it.each(CASES)('%s', (_label, first, second, expected) => {
+    expect(host.isManualRowSelfParent(first, second)).toBe(expected)
+    expect(pluginSameCode(first, second)).toBe(expected)
+  })
+  it('the comparable form is null exactly where the plugin reads a blank cell', () => {
+    for (const value of [null, undefined, '', '   ', true, false, {}, [], Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(host.comparableManualRowCode(value), String(value)).toBeNull()
+      expect(pluginSameCode(value, value), String(value)).toBe(false)
+    }
+    expect(host.comparableManualRowCode(' SYN-1 ')).toBe('SYN-1')
+    expect(host.comparableManualRowCode(42)).toBe('42')
   })
 })
 

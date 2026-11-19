@@ -185,7 +185,7 @@ describe('R-02 P5 — a row is not its own parent', () => {
     ['both blank', '', '', false],
     ['both absent', undefined, undefined, false],
     ['a number stored in the row\'s own 图号 compares as its text', '123', 123, true],
-    ['a boolean stored in the row\'s own 图号 compares as its text', 'true', true, true],
+    ['a boolean in the row\'s own 图号 is not text and never matches', 'true', true, false],
     ['an object in the row\'s own 图号 never matches', '[object Object]', {}, false],
   ])('%s → %s', (_label, parentCode, componentCode, expected) => {
     expect(isManualRowSelfParent(parentCode, componentCode)).toBe(expected)
@@ -193,8 +193,7 @@ describe('R-02 P5 — a row is not its own parent', () => {
   it('the comparable form: trimmed text, or null when there is nothing to compare; never a rewrite of the stored value', () => {
     expect(comparableManualRowCode(' A ')).toBe('A')
     expect(comparableManualRowCode(7)).toBe('7')
-    expect(comparableManualRowCode(false)).toBe('false')
-    for (const nothing of [null, undefined, '', '  ', {}, [], Number.NaN, Number.POSITIVE_INFINITY]) expect(comparableManualRowCode(nothing), String(nothing)).toBeNull()
+    for (const nothing of [null, undefined, '', '  ', true, false, {}, [], Number.NaN, Number.POSITIVE_INFINITY]) expect(comparableManualRowCode(nothing), String(nothing)).toBeNull()
   })
 })
 
