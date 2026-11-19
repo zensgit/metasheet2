@@ -40,7 +40,8 @@
  *
  * THE PARENT PAIR (ADR §12, owner-ruled 2026-11-19; slice P1). 父组件图号 / 父组件名称 join the lock exemption (6 + 2 = 8
  * columns) on the same three routes and nowhere else. A request that names the pair is gated additionally on the
- * pair's own columns (`manualRowParentPairGateReason`: present and locked, else `contract_mismatch` / `lock_missing`),
+ * pair's own columns (`manualRowParentPairGateReason`: present and locked, else `contract_mismatch` / `lock_missing` —
+ * the latter with its own sentence when the pair's lock is the only one missing, `MANUAL_ROW_PARENT_LOCK_MISSING_MESSAGE`),
  * judged by rules P3 – P5 (`StockPrepManualRowParentRefusedError`; P5 for an edit inside the write transaction, under
  * the row lock, in both directions) and by the actor's per-subject field permissions for BOTH columns (the routes).
  * /context names the pair as `parentFieldIds` only to an actor who may write both; never as `editableFieldIds`.
@@ -291,13 +292,29 @@ export type ManualRowsVerdict =
   | Readonly<{ kind: 'not_project_sheet' }>
   | Readonly<{ kind: 'allowed'; sheet: ManualRowsSheet }>
   | Readonly<{ kind: 'disabled'; sheet: ManualRowsSheet }>
-  | Readonly<{ kind: 'unavailable'; reason: ManualRowsUnavailableReason; sheet: ManualRowsSheet | null }>
+  | Readonly<{
+    kind: 'unavailable'
+    reason: ManualRowsUnavailableReason
+    sheet: ManualRowsSheet | null
+    /**
+     * Present (true) only with `lock_missing`, and only when the locks every manual-row write needs ARE there and the
+     * one that is missing is the PARENT PAIR's (ADR §12.3) — so only for a request that names the pair, or the parent
+     * picker. It changes the sentence the refusal carries (`MANUAL_ROW_PARENT_LOCK_MISSING_MESSAGE`), nothing else:
+     * the code and the reason token are the ones of every `lock_missing`.
+     */
+    parentPairLock?: true
+  }>
 
 const NOT_PROJECT_SHEET: ManualRowsVerdict = Object.freeze({ kind: 'not_project_sheet' as const })
 const TARGET_STATUSES: ReadonlySet<unknown> = new Set(['active', 'archived'])
 
 function unavailable(reason: ManualRowsUnavailableReason, sheet: ManualRowsSheet | null): ManualRowsVerdict {
   return Object.freeze({ kind: 'unavailable' as const, reason, sheet })
+}
+
+/** `lock_missing` for the parent pair's own lock (the stamped / key columns are locked). */
+function parentPairLockMissing(sheet: ManualRowsSheet): ManualRowsVerdict {
+  return Object.freeze({ kind: 'unavailable' as const, reason: 'lock_missing' as const, sheet, parentPairLock: true as const })
 }
 
 /**
@@ -350,8 +367,12 @@ export function evaluateManualRowsGate(input: {
   if (!needed.every((id) => propertyById.has(id))) return unavailable('contract_mismatch', sheet)
 
   // 3: the locks. An edit needs the key's lock only (ADR §3.4 「K 已加锁」) — plus the pair's, when it writes the pair.
-  const locked = mode === 'create' ? [derived.key, derived.projectNo, derived.active, ...pair] : [derived.key, ...pair]
-  if (!locked.every((id) => humanWriteLockKindOfProperty(propertyById.get(id)) !== null)) return unavailable('lock_missing', sheet)
+  // The pair's lock is judged AFTER the others, so a sheet that lacks the key / 项目号 / 有效 lock answers what it
+  // always answered; only a sheet that lacks nothing but the pair's lock is told so (`parentPairLock`).
+  const isLocked = (id: string) => humanWriteLockKindOfProperty(propertyById.get(id)) !== null
+  const locked = mode === 'create' ? [derived.key, derived.projectNo, derived.active] : [derived.key]
+  if (!locked.every(isLocked)) return unavailable('lock_missing', sheet)
+  if (!pair.every(isLocked)) return parentPairLockMissing(sheet)
 
   // 4: the plugin registry row — well formed, the same object, and (for a create) active.
   if (row.sheetId !== sheetId || projectNo === null || !isNonBlankString(row.tenantId) || typeof row.objectId !== 'string' || !TARGET_STATUSES.has(row.status)) {
@@ -404,7 +425,10 @@ export const STOCK_PREP_MANUAL_FIELDS_NOT_FILLABLE_MESSAGE =
 
 export type ManualRowsRefusalReason = ManualRowsUnavailableReason | 'not_project_sheet' | 'disabled' | 'not_manual_row'
 
-/** zh, shown as-is by the web (ADR §3.1's table; the two route-only reasons are this slice's). */
+/**
+ * zh, shown as-is by the web (ADR §3.1's table; the two route-only reasons are this slice's). These are the sentences
+ * of the CREATE path and of every refusal that is not about the parent pair; they are unchanged since B2.
+ */
 export const MANUAL_ROWS_REFUSAL_MESSAGES: Readonly<Record<ManualRowsRefusalReason, string>> = Object.freeze({
   disabled: '本项目表已关闭「允许人工补充行」，不能新增行；如需新增请联系备料管理员。',
   lock_missing: '本表的 PLM 列锁还没有补齐，暂时不能新增行；请联系管理员修复本表。',
@@ -416,6 +440,14 @@ export const MANUAL_ROWS_REFUSAL_MESSAGES: Readonly<Record<ManualRowsRefusalReas
   not_manual_row: '这一行不是人工补充行，不能用这个入口修改；请照常编辑。',
 })
 
+/**
+ * zh, shown as-is by the web. `lock_missing` when the lock that is missing is the PARENT PAIR's (ADR §12.3): the sheet
+ * still takes new rows and edits of the six — what it cannot do is name a parent, so the sentence says that and not
+ * 「不能新增行」. Same code (STOCK_PREP_MANUAL_ROWS_UNAVAILABLE) and the same reason token (`lock_missing`) as the
+ * create path's refusal; only the sentence differs. Values-free.
+ */
+export const MANUAL_ROW_PARENT_LOCK_MISSING_MESSAGE = '本表的父组件列还没有加锁，暂时不能指定父组件；请联系管理员修复本表。'
+
 function refusalCodeOf(reason: ManualRowsRefusalReason): string {
   if (reason === 'disabled') return STOCK_PREP_MANUAL_ROWS_DISABLED_CODE
   if (reason === 'not_manual_row') return STOCK_PREP_MANUAL_ROW_REQUIRED_CODE
@@ -425,8 +457,12 @@ function refusalCodeOf(reason: ManualRowsRefusalReason): string {
 export class StockPrepManualRowsRefusedError extends Error {
   readonly status: number
   readonly code: string
-  constructor(readonly reason: ManualRowsRefusalReason) {
-    super(MANUAL_ROWS_REFUSAL_MESSAGES[reason])
+  /**
+   * `subject: 'parent_pair'` — only with `lock_missing` — picks the parent pair's sentence. The code, the status and
+   * `details.reason` are the same either way.
+   */
+  constructor(readonly reason: ManualRowsRefusalReason, subject?: 'parent_pair') {
+    super(reason === 'lock_missing' && subject === 'parent_pair' ? MANUAL_ROW_PARENT_LOCK_MISSING_MESSAGE : MANUAL_ROWS_REFUSAL_MESSAGES[reason])
     this.name = 'StockPrepManualRowsRefusedError'
     this.code = refusalCodeOf(reason)
     this.status = reason === 'registry_unreadable' ? 503 : 409
@@ -442,7 +478,7 @@ export function assertManualRowsAllowed(verdict: ManualRowsVerdict): ManualRowsS
   if (verdict.kind === 'allowed') return verdict.sheet
   if (verdict.kind === 'not_project_sheet') throw new StockPrepManualRowsRefusedError('not_project_sheet')
   if (verdict.kind === 'disabled') throw new StockPrepManualRowsRefusedError('disabled')
-  throw new StockPrepManualRowsRefusedError(verdict.reason)
+  throw new StockPrepManualRowsRefusedError(verdict.reason, verdict.parentPairLock === true ? 'parent_pair' : undefined)
 }
 
 // ── the parent pair's refusals (ADR §12.3, P3 – P5) ──────────────────────────────────────────────────

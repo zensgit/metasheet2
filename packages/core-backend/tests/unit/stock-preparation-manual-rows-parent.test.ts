@@ -8,6 +8,8 @@
  *   R-02 P5, the self-parent comparison: case-sensitive, surrounding whitespace ignored, a non-text own 图号 compared
  *        as its text;
  *   R-03 the refusal: one closed code, four reasons, 400 / 422, fixed values-free sentences;
+ *   R-04 `lock_missing` about the parent pair's own lock says so (its own sentence; the code and the reason token are
+ *        every `lock_missing`'s), and the create path's sentence is unchanged;
  *   G-01 the gate with the request's field ids: the pair's two columns must exist and be locked ONLY for a request
  *        that names the pair — every other verdict is what it was;
  *   G-02 the pair's own gate (the edit gate for a request naming the pair) and its loader;
@@ -36,7 +38,9 @@ import {
   MANUAL_ROW_KEY_V1_PREFIX,
 } from '../../src/multitable/stock-preparation-manual-rows'
 import {
+  MANUAL_ROW_PARENT_LOCK_MISSING_MESSAGE,
   MANUAL_ROW_PARENT_REFUSAL_MESSAGES,
+  MANUAL_ROWS_REFUSAL_MESSAGES,
   STOCK_PREP_MANUAL_PARENT_INVALID_CODE,
   STOCK_PREP_MANUAL_FIELDS_NOT_FILLABLE_MESSAGE,
   StockPrepManualRowParentRefusedError,
@@ -225,6 +229,70 @@ describe('R-03 the refusal', () => {
       expect(message).not.toMatch(/fld_|rec_|sheet_|SYN|\$\{/)
     }
     expect(STOCK_PREP_MANUAL_FIELDS_NOT_FILLABLE_MESSAGE).toBe('这个入口只修改人工补充行的图号、名称、规格、材料、用量、总用量，以及父组件图号和父组件名称（这两列要一起提交）；其他列请照常编辑。')
+  })
+})
+
+describe('R-04 lock_missing: the parent pair\'s lock has its own sentence', () => {
+  const B2_SENTENCE = '本表的 PLM 列锁还没有补齐，暂时不能新增行；请联系管理员修复本表。'
+  const PAIR_SENTENCE = '本表的父组件列还没有加锁，暂时不能指定父组件；请联系管理员修复本表。'
+  it('the create path\'s sentence is the B2 one, unchanged; the pair\'s is new — and neither carries an id or a value', () => {
+    expect(MANUAL_ROWS_REFUSAL_MESSAGES.lock_missing).toBe(B2_SENTENCE)
+    expect(MANUAL_ROW_PARENT_LOCK_MISSING_MESSAGE).toBe(PAIR_SENTENCE)
+    expect(PAIR_SENTENCE).not.toBe(B2_SENTENCE)
+    expect(PAIR_SENTENCE).not.toContain('新增行')
+    expect(PAIR_SENTENCE).not.toMatch(/fld_|rec_|sheet_|SYN|\$\{/)
+  })
+  it('the refusal: the same status, code and reason token either way — only the sentence differs', () => {
+    const plain = new StockPrepManualRowsRefusedError('lock_missing')
+    const pair = new StockPrepManualRowsRefusedError('lock_missing', 'parent_pair')
+    expect(plain.message).toBe(B2_SENTENCE)
+    expect(pair.message).toBe(PAIR_SENTENCE)
+    for (const err of [plain, pair]) {
+      expect(err.status).toBe(409)
+      expect(err.code).toBe('STOCK_PREP_MANUAL_ROWS_UNAVAILABLE')
+      expect(err.reason).toBe('lock_missing')
+      expect(err.body()).toEqual({ ok: false, error: { code: 'STOCK_PREP_MANUAL_ROWS_UNAVAILABLE', message: err.message, details: { reason: 'lock_missing' } } })
+    }
+  })
+  it('the subject changes no other reason\'s sentence', () => {
+    for (const reason of ['disabled', 'project_archived', 'project_sheets_off', 'contract_mismatch', 'registry_unreadable', 'not_project_sheet', 'not_manual_row'] as const) {
+      expect(new StockPrepManualRowsRefusedError(reason, 'parent_pair').message, reason).toBe(MANUAL_ROWS_REFUSAL_MESSAGES[reason])
+      expect(new StockPrepManualRowsRefusedError(reason, 'parent_pair').body(), reason).toEqual(new StockPrepManualRowsRefusedError(reason).body())
+    }
+  })
+  it('the gate marks the pair\'s lock ONLY when it is the only lock missing, and only for a request that names the pair', async () => {
+    const flagOf = (verdict: ManualRowsVerdict) => (verdict.kind === 'unavailable' ? [verdict.reason, verdict.parentPairLock === true] : [verdict.kind, false])
+    for (const key of ['PAIRUNLOCKED', 'PAIRHALFLOCKED']) {
+      const pair = pairOf(S[key])
+      for (const mode of ['create', 'edit'] as const) {
+        for (const submitted of [[pair.code, pair.name], [pair.code], [pair.name]]) {
+          expect(flagOf(await verdictOf(S[key], mode, submitted)), `${key} ${mode}`).toEqual(['lock_missing', true])
+        }
+      }
+    }
+    // nothing is locked: the key / 项目号 / 有效 lock is what is missing, pair or no pair — the B2 answer, unmarked
+    const nolock = pairOf(S.NOLOCK)
+    for (const mode of ['create', 'edit'] as const) {
+      for (const submitted of [undefined, [nolock.code, nolock.name], [ph(S.NOLOCK, 'componentName')]]) {
+        expect(flagOf(await verdictOf(S.NOLOCK, mode, submitted)), `NOLOCK ${mode}`).toEqual(['lock_missing', false])
+      }
+    }
+    // a verdict without the mark has no such key at all (the B2 verdict objects are what they were)
+    const b2 = await verdictOf(S.NOLOCK, 'create')
+    expect(Object.keys(b2).sort()).toEqual(['kind', 'reason', 'sheet'])
+    // the picker's gate: the same two answers
+    expect(flagOf(await loadManualRowParentPairVerdict(query, S.PAIRUNLOCKED.sheetId, S.PAIRUNLOCKED.fields))).toEqual(['lock_missing', true])
+    expect(flagOf(await loadManualRowParentPairVerdict(query, S.PAIRHALFLOCKED.sheetId, S.PAIRHALFLOCKED.fields))).toEqual(['lock_missing', true])
+    expect(flagOf(await loadManualRowParentPairVerdict(query, S.NOLOCK.sheetId, S.NOLOCK.fields))).toEqual(['lock_missing', false])
+    // a missing pair COLUMN is contract_mismatch, never this
+    expect(flagOf(await loadManualRowParentPairVerdict(query, S.NOPARENTNAME.sheetId, S.NOPARENTNAME.fields))).toEqual(['contract_mismatch', false])
+  })
+  it('/context is not told: its block reports the create gate, which never names the pair', async () => {
+    for (const key of ['PAIRUNLOCKED', 'PAIRHALFLOCKED']) {
+      const block = await resolveManualRowsContextBlock(query, S[key].sheetId, S[key].fields, { MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED: 'true' }, () => true)
+      expect(block, key).toEqual(manualRowsContextBlockOf(await verdictOf(S[key], 'create'), S[key].fields))
+      expect(block!.state).toBe('allowed')
+    }
   })
 })
 
@@ -512,8 +580,13 @@ describe('G-06 the create: the pair check, and the transaction\'s re-check of th
     await expect(assertManualRowCreateInTransaction(query, extension, reread, [code, name])).resolves.toMatchObject({ sheetId: S.PREG.sheetId })
     // The lock left 父组件名称 between the route's check and the transaction.
     const unlocked = reread.map((field) => (field.id === name ? { id: field.id, property: { ...field.property, humanWriteLock: undefined } } : field))
-    await expect(assertManualRowCreateInTransaction(query, extension, unlocked, [code, name])).rejects.toMatchObject({ reason: 'lock_missing' })
+    await expect(assertManualRowCreateInTransaction(query, extension, unlocked, [code, name])).rejects.toMatchObject({ reason: 'lock_missing', message: MANUAL_ROW_PARENT_LOCK_MISSING_MESSAGE })
     await expect(assertManualRowCreateInTransaction(query, extension, unlocked, [code])).rejects.toBeInstanceOf(StockPrepManualRowsRefusedError)
+    // …while a stamped column that lost its lock is the B2 refusal, with the B2 sentence — pair or no pair
+    const stampUnlocked = reread.map((field) => (field.id === sheet.derived.projectNo ? { id: field.id, property: { ...field.property, humanWriteLock: undefined } } : field))
+    for (const submitted of [[code, name], [sheet.derived.componentName]]) {
+      await expect(assertManualRowCreateInTransaction(query, extension, stampUnlocked, submitted)).rejects.toMatchObject({ reason: 'lock_missing', message: MANUAL_ROWS_REFUSAL_MESSAGES.lock_missing })
+    }
     // The same re-read fields are fine for a create that does not name the pair.
     await expect(assertManualRowCreateInTransaction(query, extension, unlocked, [sheet.derived.componentName])).resolves.toMatchObject({ sheetId: S.PREG.sheetId })
     await expect(assertManualRowCreateInTransaction(query, extension, unlocked)).resolves.toMatchObject({ sheetId: S.PREG.sheetId })
@@ -599,7 +672,7 @@ describe('G-07 the edit transaction\'s re-check — P5 on the locked, merged row
     })
     const sheet = await sheetOf(S.PREG)
     lift()
-    await expect(assertManualRowEditInTransaction(query, sheet, row.id, { [code]: 'SYN-P', [name]: null })).rejects.toMatchObject({ reason: 'lock_missing' })
+    await expect(assertManualRowEditInTransaction(query, sheet, row.id, { [code]: 'SYN-P', [name]: null })).rejects.toMatchObject({ reason: 'lock_missing', message: MANUAL_ROW_PARENT_LOCK_MISSING_MESSAGE })
     // the lock is gone for good on the fake now; an edit of the six is still fine
     await expect(assertManualRowEditInTransaction(query, sheet, row.id, { [ph(S.PREG, 'material')]: 'SYN' })).resolves.toBeUndefined()
   })

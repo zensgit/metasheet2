@@ -277,6 +277,16 @@ describe('C — 新增: POST /sheets/:sheetId/manual-rows', () => {
     expect(recordsOf(sheet)).toEqual([])
   })
 
+  it('C-09b the create path\'s lock_missing sentence is the B2 one, word for word (the parent pair\'s own sentence, ADR §12.3, is never this route\'s answer for a create that names no parent)', async () => {
+    for (const key of ['NOLOCK', 'KEYLOCKONLY']) {
+      const res = await createRow(S[key], minimal(S[key]))
+      expect(res.body, key).toEqual({
+        ok: false,
+        error: { code: STOCK_PREP_MANUAL_ROWS_UNAVAILABLE_CODE, message: '本表的 PLM 列锁还没有补齐，暂时不能新增行；请联系管理员修复本表。', details: { reason: 'lock_missing' } },
+      })
+    }
+  })
+
   it('C-10 the plugin registry cannot be read (any SQLSTATE but 42P01): 503 registry_unreadable, nothing written; classified by SQLSTATE, not message', async () => {
     fake.failures.target = { code: '42703', message: 'synthetic: column does not exist' }
     const res = await createRow(S.PREG, minimal(S.PREG))

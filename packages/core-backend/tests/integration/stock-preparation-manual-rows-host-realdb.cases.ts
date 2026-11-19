@@ -38,8 +38,9 @@
  *   MR3-RD-06 复制为新行: a half pair (a name without a 图号), a per-subject rule on ONE column, and a source that is its
  *             own parent each drop BOTH columns; the copy still succeeds.
  *   MR3-RD-07 the pair's own gate, read from the stored field property: with the lock stripped from the two columns the
- *             routes refuse a request that names the pair (409 lock_missing) and nothing else changes; /context sends no
- *             `parentFieldIds`; the candidates route refuses.
+ *             routes refuse a request that names the pair (409 lock_missing, with the PARENT's own sentence — the sheet
+ *             still takes new rows) and nothing else changes; /context sends no `parentFieldIds`; the candidates route
+ *             refuses the same way. A sheet the lock never reached keeps the B2 sentence (MR2-RD-03).
  *   MR3-RD-08 the candidates (GET …/manual-rows/parent-options) on real rows — ONE entry per parent 图号 though its rows
  *             name it differently (the name most rows use, a tie to the byte-smallest, every row counted) — and a column
  *             the actor's field_permissions hide is absent from the items and cannot be matched by `q` (the egress
@@ -125,6 +126,9 @@ export function defineStockPreparationManualRowsHostRealDbCases(): void {
     const pickerIds = { asm: '', part1: '', part2: '', manualParent: '', manualChild1: '', manualChild2: '' }
     let registry: any
     const PARENT_INVALID = 'STOCK_PREP_MANUAL_PARENT_INVALID'
+    // `lock_missing`, the two sentences: the create path's (B2, unchanged) and the parent pair's own (ADR §12.3).
+    const LOCK_MISSING_B2 = '本表的 PLM 列锁还没有补齐，暂时不能新增行；请联系管理员修复本表。'
+    const LOCK_MISSING_PARENT = '本表的父组件列还没有加锁，暂时不能指定父组件；请联系管理员修复本表。'
 
     const pinned = usePinnedServer()
     const http = () => request(pinned.url())
@@ -306,8 +310,13 @@ export function defineStockPreparationManualRowsHostRealDbCases(): void {
       await expectRefused(main, 409, 'disabled')
       await setSwitch(main, 'allowed')
       expect((await keyProperty(main)).stockPreparationManualRows).toBe('allowed')
-      // A sheet the lock never reached.
+      // A sheet the lock never reached: the B2 sentence, word for word — also for a create that names a parent (the
+      // stamped columns' lock is what is missing there, not only the pair's).
       await expectRefused(unlocked, 409, 'lock_missing')
+      for (const extra of [{}, parent(unlocked, 'SYN-PARENT-RD', null)]) {
+        const refused = await create(unlocked, minimal(unlocked, extra))
+        expect(refused.body, JSON.stringify(refused.body)).toEqual({ ok: false, error: { code: 'STOCK_PREP_MANUAL_ROWS_UNAVAILABLE', message: LOCK_MISSING_B2, details: { reason: 'lock_missing' } } })
+      }
       // An archived project (the store's own transition), then restored.
       await registry.archive({ tenantId, projectNo: main.projectNo, actorId: 'syn' })
       try {
@@ -720,12 +729,14 @@ export function defineStockPreparationManualRowsHostRealDbCases(): void {
       await q(`UPDATE meta_fields SET property = property - 'humanWriteLock' WHERE sheet_id = $1 AND id = ANY($2::text[])`, [stack.sheetId, pairIds])
       try {
         const rows = await rowCount(stack)
+        // The refusal is about the PARENT: this sheet still takes new rows (below), so it does not say 「不能新增行」.
+        const pairLockMissing = { ok: false, error: { code: 'STOCK_PREP_MANUAL_ROWS_UNAVAILABLE', message: LOCK_MISSING_PARENT, details: { reason: 'lock_missing' } } }
         const createWithPair = await create(stack, minimal(stack, parent(stack, 'SYN-PARENT-G7', null)))
         expect(createWithPair.status, JSON.stringify(createWithPair.body)).toBe(409)
-        expect(createWithPair.body.error).toMatchObject({ code: 'STOCK_PREP_MANUAL_ROWS_UNAVAILABLE', details: { reason: 'lock_missing' } })
+        expect(createWithPair.body).toEqual(pairLockMissing)
         const editPair = await edit(manualId, parent(stack, 'SYN-PARENT-OTHER', null))
         expect(editPair.status, JSON.stringify(editPair.body)).toBe(409)
-        expect(editPair.body.error.details).toEqual({ reason: 'lock_missing' })
+        expect(editPair.body).toEqual(pairLockMissing)
         expect(await rowCount(stack)).toBe(rows)
         expect((await row(manualId))!.data[pair(stack).code]).toBe('SYN-PARENT-G7')
         // everything that does not name the pair works exactly as before
@@ -743,7 +754,7 @@ export function defineStockPreparationManualRowsHostRealDbCases(): void {
         expect('parentFieldIds' in ctx.body.data.capabilities.stockPreparationManualRows).toBe(false)
         const candidates = await options(stack)
         expect(candidates.status).toBe(409)
-        expect(candidates.body.error.details).toEqual({ reason: 'lock_missing' })
+        expect(candidates.body).toEqual(pairLockMissing)
       } finally {
         for (const field of before) {
           await q('UPDATE meta_fields SET property = $3::jsonb WHERE sheet_id = $1 AND id = $2', [stack.sheetId, field.id, JSON.stringify(field.property)])

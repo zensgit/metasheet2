@@ -49,6 +49,9 @@ let app: Express
 const P = (n: number) => `plm_stock_preparation_sandbox_p_${n.toString(16).padStart(24, '0')}`
 const PARENT_INVALID = 'STOCK_PREP_MANUAL_PARENT_INVALID'
 const UNAVAILABLE = 'STOCK_PREP_MANUAL_ROWS_UNAVAILABLE'
+/** `lock_missing`, the two sentences: the create path's (B2, unchanged) and the parent pair's own (ADR §12.3). */
+const LOCK_MISSING_B2 = '本表的 PLM 列锁还没有补齐，暂时不能新增行；请联系管理员修复本表。'
+const LOCK_MISSING_PARENT = '本表的父组件列还没有加锁，暂时不能指定父组件；请联系管理员修复本表。'
 
 let S: Record<string, FakeSheet>
 
@@ -279,15 +282,26 @@ describe('CP — 新增 with a parent: POST /sheets/:sheetId/manual-rows', () =>
     })
   })
 
-  it('CP-09 the pair\'s columns carry no lock: a create that names the pair → 409 lock_missing, nothing written; the same create without the pair → 200, as before', async () => {
+  it('CP-09 the pair\'s columns carry no lock: a create that names the pair → 409 lock_missing saying it is the PARENT that cannot be named, nothing written; the same create without the pair → 200, as before', async () => {
     const sheet = S.PAIRUNLOCKED
     for (const body of [parent(sheet, 'SYN-PARENT', 'Synthetic parent'), { [pairOf(sheet).code]: 'SYN-PARENT' }, parent(sheet, null, null)]) {
       const res = await createRow(sheet, minimal(sheet, body))
       expect(res.status, JSON.stringify(res.body)).toBe(409)
-      expect(refusal(res)).toEqual([UNAVAILABLE, 'lock_missing'])
+      // the code and the reason token of every lock_missing; the sentence is the pair's own — rows CAN be added here
+      expect(res.body).toEqual({ ok: false, error: { code: UNAVAILABLE, message: LOCK_MISSING_PARENT, details: { reason: 'lock_missing' } } })
     }
     expect(recordsOf(sheet)).toEqual([])
     expect((await createRow(sheet, minimal(sheet))).status).toBe(200)
+  })
+
+  it('CP-09b a sheet that lacks the stamped columns\' lock keeps the B2 sentence — with or without a parent in the body', async () => {
+    const sheet = S.NOLOCK
+    for (const body of [{}, parent(sheet, 'SYN-PARENT', 'Synthetic parent')]) {
+      const res = await createRow(sheet, minimal(sheet, body))
+      expect(res.status, JSON.stringify(res.body)).toBe(409)
+      expect(res.body).toEqual({ ok: false, error: { code: UNAVAILABLE, message: LOCK_MISSING_B2, details: { reason: 'lock_missing' } } })
+    }
+    expect(recordsOf(sheet)).toEqual([])
   })
 
   it('CP-10 a sheet without one of the two columns: naming the pair → 409 contract_mismatch; a create without it → 200', async () => {
@@ -307,6 +321,7 @@ describe('CP — 新增 with a parent: POST /sheets/:sheetId/manual-rows', () =>
     const res = await createRow(S.PREG, minimal(S.PREG, parent(S.PREG, 'SYN-PARENT', 'Synthetic parent')))
     expect(res.status, JSON.stringify(res.body)).toBe(409)
     expect(refusal(res)).toEqual([UNAVAILABLE, 'lock_missing'])
+    expect(res.body.error.message).toBe(LOCK_MISSING_PARENT)
     expect(recordsOf(S.PREG)).toEqual([])
   })
 
@@ -672,10 +687,21 @@ describe('EP — 修改 the parent: PATCH /records/:recordId/manual-fields', () 
     for (const body of [parent(sheet, 'SYN-PARENT', null), { [pairOf(sheet).name]: 'Synthetic parent' }]) {
       const res = await editRow(row.id, body)
       expect(res.status, JSON.stringify(res.body)).toBe(409)
-      expect(refusal(res)).toEqual([UNAVAILABLE, 'lock_missing'])
+      // a parent edit is told that the PARENT cannot be named — not 「不能新增行」
+      expect(res.body).toEqual({ ok: false, error: { code: UNAVAILABLE, message: LOCK_MISSING_PARENT, details: { reason: 'lock_missing' } } })
     }
     expect(fake.records.get(row.id)).toEqual(before)
     expect((await editRow(row.id, { [ph(sheet, 'componentName')]: 'Renamed' })).status).toBe(200)
+  })
+
+  it('EP-11b the key column itself unlocked: every edit is refused with the B2 sentence, a parent edit included', async () => {
+    const sheet = S.NOLOCK
+    const row = manualRow(sheet, 'rec_mrp1_edit_nolock')
+    for (const body of [{ [ph(sheet, 'componentName')]: 'Renamed' }, parent(sheet, 'SYN-PARENT', null)]) {
+      const res = await editRow(row.id, body)
+      expect(res.status, JSON.stringify(res.body)).toBe(409)
+      expect(res.body).toEqual({ ok: false, error: { code: UNAVAILABLE, message: LOCK_MISSING_B2, details: { reason: 'lock_missing' } } })
+    }
   })
 
   it('EP-12 a sheet without one of the two columns: naming the pair → 409 contract_mismatch', async () => {
@@ -694,6 +720,7 @@ describe('EP — 修改 the parent: PATCH /records/:recordId/manual-fields', () 
     const res = await editRow(row.id, parent(S.PREG, 'SYN-PARENT', null))
     expect(res.status, JSON.stringify(res.body)).toBe(409)
     expect(refusal(res)).toEqual([UNAVAILABLE, 'lock_missing'])
+    expect(res.body.error.message).toBe(LOCK_MISSING_PARENT)
     expect(has(fake.records.get(row.id), S.PREG, 'parentComponentCode')).toBe(false)
   })
 
@@ -887,6 +914,11 @@ describe('O — GET /sheets/:sheetId/manual-rows/parent-options', () => {
     expect(res.status, JSON.stringify(res.body)).toBe(status)
     expect(refusal(res)).toEqual([UNAVAILABLE, reason])
     expect(statement()).toEqual([])
+  })
+
+  it('O-04b lock_missing tells the picker which lock: the pair\'s own (rows can still be added) or the stamped columns\' (the B2 sentence)', async () => {
+    expect((await options(S.PAIRUNLOCKED)).body).toEqual({ ok: false, error: { code: UNAVAILABLE, message: LOCK_MISSING_PARENT, details: { reason: 'lock_missing' } } })
+    expect((await options(S.NOLOCK)).body).toEqual({ ok: false, error: { code: UNAVAILABLE, message: LOCK_MISSING_B2, details: { reason: 'lock_missing' } } })
   })
 
   it('O-05 a registry that cannot be read: 503 registry_unreadable; an absent sheet: 404', async () => {
