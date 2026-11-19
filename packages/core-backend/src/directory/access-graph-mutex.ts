@@ -8,7 +8,9 @@
  * caller's transaction.
  *
  * D21 (slice Y5a): the FIRST statement bumps the D21 subject authorization version row of every
- * locked user, sorted, BEFORE the `users … FOR UPDATE` rows are taken. An admission transaction
+ * locked user, sorted, BEFORE the `users … FOR UPDATE` rows are taken (under `nowait`, #6924's
+ * authorization operation, it instead takes the existing version rows FOR UPDATE NOWAIT and writes
+ * nothing; the operation's DML triggers then advance them). An admission transaction
  * locks `subject_authorization_versions` FOR SHARE and only then `users` FOR SHARE (the
  * live-authority order); a writer that took `users` first and bumped the subject row later (through
  * a membership trigger) would form the one holder-vs-writer cycle the protocol forbids. Doing it here
