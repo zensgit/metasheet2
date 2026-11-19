@@ -612,13 +612,18 @@ describe('L — the admission lock helper', () => {
 describe('W — writers bump FIRST', () => {
   it('W-01 the access-graph mutex bumps the subject version rows (sorted, one statement) BEFORE the first users FOR UPDATE', () => {
     const source = readFileSync(path.join(SRC, 'directory', 'access-graph-mutex.ts'), 'utf8')
-    const bumpAt = source.indexOf('await bumpSubjectAuthorizationVersions(client, normalizedUserIds, { nowait: options.nowait === true })')
+    const bumpAt = source.indexOf('else await bumpSubjectAuthorizationVersions(client, normalizedUserIds)')
+    // #6924's operation intent (nowait): the lock-only NOWAIT form of the same first step.
+    const nowaitAt = source.indexOf('if (options.nowait === true) await lockSubjectAuthorizationVersionsNowait(client, normalizedUserIds)')
+    expect(nowaitAt).toBeGreaterThan(0)
+    expect(bumpAt).toBeGreaterThan(nowaitAt)
     // The statement text (the template literal's lock clause, #6924 added its NOWAIT switch), not
     // the docblock that explains it.
     const lockAt = source.indexOf("FOR UPDATE${options.nowait === true ? ' NOWAIT' : ''}`,")
     expect(bumpAt).toBeGreaterThan(0)
     expect(lockAt).toBeGreaterThan(bumpAt)
     expect(source.match(/bumpSubjectAuthorizationVersions\(/g)).toHaveLength(1)
+    expect(source.match(/lockSubjectAuthorizationVersionsNowait\(/g)).toHaveLength(1)
   })
 
   it('W-02 role assignment bumps between the roles FOR SHARE review and the membership write; the autocommit routes now write inside a transaction whose mutex bumps first', () => {

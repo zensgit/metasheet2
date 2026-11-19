@@ -68,7 +68,7 @@ describe('access-graph mutex protocol', () => {
     expect(statements).toEqual([])
   })
 
-  it('D21 x #6924: under nowait the existing subject version rows are taken FOR UPDATE NOWAIT before the bump, and the users rows NOWAIT; without it, no pre-lock', async () => {
+  it('D21 x #6924: under nowait the existing subject version rows are taken FOR UPDATE NOWAIT, lock-only (no upsert), then the users rows NOWAIT; without it, the bump and no pre-lock', async () => {
     const statements: Array<{ sql: string; params: unknown[] }> = []
     const client = {
       query: vi.fn(async (sql: string, params: unknown[] = []) => {
@@ -79,10 +79,10 @@ describe('access-graph mutex protocol', () => {
     await lockUsersForAccessGraphWrite(client, ['user-b', 'user-a'], { nowait: true })
     expect(statements[0].sql).toMatch(/FROM subject_authorization_versions[\s\S]*FOR UPDATE NOWAIT/)
     expect(statements[0].params).toEqual([['user-a', 'user-b']])
-    expect(statements[1].sql).toMatch(/INSERT INTO subject_authorization_versions/)
-    expect(statements[1].params).toEqual([['user-a', 'user-b']])
-    expect(statements.slice(2).map((call) => call.params[0])).toEqual(['user-a', 'user-b'])
-    expect(statements.slice(2).every((call) => /FROM users[\s\S]*FOR UPDATE NOWAIT/.test(call.sql))).toBe(true)
+    // #6924's denied operation paths issue no write statement: no upsert under nowait.
+    expect(statements.some((call) => /INSERT INTO|UPDATE subject_authorization_versions/.test(call.sql))).toBe(false)
+    expect(statements.slice(1).map((call) => call.params[0])).toEqual(['user-a', 'user-b'])
+    expect(statements.slice(1).every((call) => /FROM users[\s\S]*FOR UPDATE NOWAIT/.test(call.sql))).toBe(true)
 
     statements.length = 0
     await lockUsersForAccessGraphWrite(client, ['user-b', 'user-a'])

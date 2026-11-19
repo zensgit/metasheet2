@@ -418,10 +418,13 @@ describeIfDatabase.sequential('D21 authorization version protocol (real PostgreS
       expect(rows[0].n).toBeGreaterThan(0)
       await holder.query('COMMIT')
       expect(await subjectVersion(ACTOR)).toBe(locked.subjectVersion.version)
-      // Once the holder has committed, the same nowait call takes the row (B-05 shows that without
-      // nowait the call queues behind a holder instead).
+      // Once the holder has committed, the same nowait call takes the row, lock-only: no version
+      // change inside the transaction (B-05 shows that without nowait the
+      // call queues behind a holder and bumps instead).
       await writer.query('BEGIN')
       expect((await lockUsersForAccessGraphWrite(writer, [ACTOR], { nowait: true })).get(ACTOR)?.id).toBe(ACTOR)
+      const inside = await writer.query(`SELECT version::text AS version FROM ${SUBJECT_AUTHORIZATION_VERSIONS_TABLE} WHERE subject_id = $1`, [ACTOR])
+      expect(Number(inside.rows[0].version)).toBe(locked.subjectVersion.version)
       await writer.query('ROLLBACK')
     })
   })

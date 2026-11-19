@@ -14,7 +14,7 @@
  * a membership trigger) would form the one holder-vs-writer cycle the protocol forbids. Doing it here
  * makes "every caller bumps first" true by construction for all 14 writer files.
  */
-import { bumpSubjectAuthorizationVersions } from '../multitable/authz-version-protocol'
+import { bumpSubjectAuthorizationVersions, lockSubjectAuthorizationVersionsNowait } from '../multitable/authz-version-protocol'
 
 export type AccessGraphTransactionClient = {
   query: (
@@ -53,8 +53,10 @@ export async function lockUsersForAccessGraphWrite(
   const lockedUsers = new Map<string, LockedAccessGraphUser>()
 
   // D21: subject version rows first (sorted, one statement), then the users rows. Under `nowait`
-  // the bump takes the existing version rows without waiting too, like the users rows below.
-  await bumpSubjectAuthorizationVersions(client, normalizedUserIds, { nowait: options.nowait === true })
+  // (#6924's authorization operation) the existing version rows are taken NOWAIT and lock-only,
+  // like the users rows below; the operation's DML triggers advance them.
+  if (options.nowait === true) await lockSubjectAuthorizationVersionsNowait(client, normalizedUserIds)
+  else await bumpSubjectAuthorizationVersions(client, normalizedUserIds)
 
   for (const userId of normalizedUserIds) {
     const result = await client.query(

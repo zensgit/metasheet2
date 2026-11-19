@@ -77,8 +77,10 @@
  *     operation commit) bumps after the locks outside the holder's set and before its DML. The
  *     operation intent takes every lock with try / NOWAIT and holds the operation fence's EXCLUSIVE
  *     table locks (on `users`, `user_roles`, … — tables the holder shares) before R5; its mutex call
- *     passes `nowait`, so the bump takes held version rows NOWAIT too and a holder answers 55P03
- *     (retryable busy) at once instead of the operation queueing on it under those table locks;
+ *     passes `nowait`, so that first step is the lock-only NOWAIT form
+ *     ({@link lockSubjectAuthorizationVersionsNowait}): a holder answers 55P03 (retryable busy) at
+ *     once instead of the operation queueing on it under those table locks, a denied operation
+ *     issues no write statement, and the operation's DML triggers advance the held rows;
  *   - `rbac/namespace-admission.ts` advisory `lockNamespaceAdmissionWrites`: outside the holder's set;
  *   - `LOCK TABLE … IN SHARE / SHARE ROW EXCLUSIVE MODE` sites (automation-executor.ts,
  *     dingtalk-identity-repair.ts, controlled-handover.ts): compatible with FOR SHARE (ROW SHARE);
@@ -265,7 +267,7 @@ ON CONFLICT (subject_id) DO UPDATE
   SET version = v.version + 1,
       updated_at = now()`
 
-/** The no-wait pre-lock of {@link bumpSubjectAuthorizationVersions} `{ nowait: true }`: existing rows, ascending. */
+/** {@link lockSubjectAuthorizationVersionsNowait}: the existing version rows, ascending, without waiting and without a write. */
 export const SUBJECT_AUTHORIZATION_VERSIONS_NOWAIT_SQL = `SELECT subject_id FROM ${SUBJECT_AUTHORIZATION_VERSIONS_TABLE}
  WHERE subject_id = ANY($1::text[])
  ORDER BY subject_id
@@ -429,18 +431,30 @@ export async function bumpSheetPermissionVersionBehindSheetRow(
 export async function bumpSubjectAuthorizationVersions(
   queryable: AuthorizationVersionQueryable,
   userIds: readonly string[],
-  options: Readonly<{ nowait?: boolean }> = {},
 ): Promise<string[]> {
   const ids = canonicalAuthorizationIds(userIds)
   if (ids.length === 0) return ids
-  const query = queryFnOf(queryable)
-  // `nowait` (the access-graph mutex under the authorization-operation intent, whose every other
-  // lock is a try / NOWAIT): take the rows that already exist without waiting, so a holder's
-  // FOR SHARE answers 55P03 at once instead of the operation queueing on it while it holds the
-  // operation fence's table locks. For a row that does not exist yet the upsert can still wait, on
-  // a concurrent uncommitted insert of the same key only, bounded by the caller's lock_timeout.
-  if (options.nowait === true) await query(SUBJECT_AUTHORIZATION_VERSIONS_NOWAIT_SQL, [ids])
-  await query(SUBJECT_AUTHORIZATION_VERSIONS_BUMP_SQL, [ids])
+  await queryFnOf(queryable)(SUBJECT_AUTHORIZATION_VERSIONS_BUMP_SQL, [ids])
+  return ids
+}
+
+/**
+ * The no-wait, lock-only form for the access-graph mutex under #6924's authorization-operation
+ * intent, whose every other lock is a try / NOWAIT and whose denied paths issue no write statement:
+ * takes the version rows that already exist FOR UPDATE NOWAIT, ascending, and writes nothing. A
+ * holder's FOR SHARE answers 55P03 at once instead of the operation queueing on it while it holds
+ * the operation fence's table locks. The version is still advanced by the triggers when the
+ * operation writes a covered table (on rows this already holds). A subject with no version row yet
+ * is not locked here: its trigger creates the row at the DML, and can wait there only on a
+ * concurrent uncommitted insert of the same key, bounded by the operation's lock_timeout.
+ */
+export async function lockSubjectAuthorizationVersionsNowait(
+  queryable: AuthorizationVersionQueryable,
+  userIds: readonly string[],
+): Promise<string[]> {
+  const ids = canonicalAuthorizationIds(userIds)
+  if (ids.length === 0) return ids
+  await queryFnOf(queryable)(SUBJECT_AUTHORIZATION_VERSIONS_NOWAIT_SQL, [ids])
   return ids
 }
 
