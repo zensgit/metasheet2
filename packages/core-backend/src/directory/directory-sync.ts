@@ -1821,6 +1821,26 @@ function buildDirectoryProjectedMemberGroupName(
   return `钉钉同步 · ${normalizeText(integrationName)} · ${normalizedPath || normalizedDepartmentId}`
 }
 
+/**
+ * D21 (Y5a): every projected member-group marker a run of this configuration can write — a superset
+ * of the markers `buildDirectoryProjectedMemberGroupPlans` emits (which also skips departments the
+ * payload does not carry). The mutex inventory reads the CURRENT members of these groups, so the
+ * projection's removal bump re-acquires rows the inventory already holds.
+ */
+export function buildDirectoryProjectedMemberGroupMarkers(options: {
+  integrationId: string
+  memberGroupSyncMode: DirectoryMemberGroupSyncMode
+  memberGroupDepartmentIds: string[]
+}): string[] {
+  if (options.memberGroupSyncMode !== 'sync_scoped_departments') return []
+  return Array.from(new Set(
+    options.memberGroupDepartmentIds
+      .map((externalDepartmentId) => normalizeText(externalDepartmentId))
+      .filter(Boolean)
+      .map((externalDepartmentId) => buildDirectoryProjectedMemberGroupMarker(options.integrationId, externalDepartmentId)),
+  )).sort()
+}
+
 export function buildDirectoryProjectedMemberGroupPlans(options: {
   integrationId: string
   integrationName: string
@@ -3402,6 +3422,12 @@ async function lockDirectorySyncAccessGraphUsers(
     integrationId: string
     provider: string
     users: DirectoryMemberRecord[]
+    /**
+     * D21 (Y5a): the projected member-group markers this run can write
+     * (`buildDirectoryProjectedMemberGroupMarkers`). Their current members join the inventory, so
+     * every version row the run's projection can take is in the ONE sorted bump below.
+     */
+    projectedGroupMarkers: string[]
   },
 ): Promise<{
   lockedUserIds: Set<string>
@@ -3489,6 +3515,20 @@ async function lockDirectorySyncAccessGraphUsers(
                AND db_user.mobile IS NOT NULL
                AND regexp_replace(db_user.mobile, '\\s+', '', 'g') = regexp_replace(db_match.mobile, '\\s+', '', 'g')
              )
+         UNION ALL
+         -- D21 (Y5a, refute [1]): the CURRENT members of the run's projected member groups. The
+         -- projection removes a member the payload no longer places there and bumps that subject's
+         -- version row first; a member outside every arm above (any user an administrator added
+         -- to the group) was then a SECOND version-row statement in this transaction, after the
+         -- inventory's. Against #6924's exception writers and #6934's activation route (one sorted
+         -- statement over actor + target) that closed a 40P01 cycle on real PG14. With this arm
+         -- the inventory's one sorted statement holds every row the projection can take; a member
+         -- who joins after this read is refused fail-closed by the projection, not bumped late.
+         SELECT projected_member.user_id
+           FROM platform_member_group_members projected_member
+           JOIN platform_member_groups projected_group
+             ON projected_group.id = projected_member.group_id
+          WHERE projected_group.description = ANY($8::text[])
        ) candidate
       WHERE candidate.local_user_id IS NOT NULL`,
     [
@@ -3499,6 +3539,7 @@ async function lockDirectorySyncAccessGraphUsers(
       openIds,
       emails,
       mobiles,
+      options.projectedGroupMarkers,
     ],
   )
   const candidateUserIds = candidates.rows
@@ -4192,6 +4233,11 @@ export async function syncDirectoryIntegration(
         integrationId,
         provider: integration.provider,
         users: Array.from(users.values()),
+        projectedGroupMarkers: buildDirectoryProjectedMemberGroupMarkers({
+          integrationId,
+          memberGroupSyncMode: config.memberGroupSyncMode,
+          memberGroupDepartmentIds: config.memberGroupDepartmentIds,
+        }),
       })
       const priorAccessByAccountId = new Map(
         Array.from(syncAccess.priorAccessByExternalUserId.values())
@@ -4829,6 +4875,7 @@ export async function syncDirectoryIntegration(
         {
           defaultRoleIds: config.memberGroupDefaultRoleIds,
           defaultNamespaces: config.memberGroupDefaultNamespaces,
+          heldUserIds: new Set([...syncAccess.lockedUserIds, ...newlyAdmittedUserIds]),
         },
         triggeredBy,
       )
@@ -6703,6 +6750,7 @@ export const __directorySyncInternalsForTests = {
   doesExternalIdentityMatchAccount,
   loadMatchMaps,
   lockDirectorySyncAccessGraphUsers,
+  syncProjectedDepartmentMemberGroupsInTransaction,
 }
 
 async function applyDirectoryProjectedMemberGroupGovernanceInTransaction(
@@ -6816,6 +6864,13 @@ async function syncProjectedDepartmentMemberGroupsInTransaction(
   options: {
     defaultRoleIds: string[]
     defaultNamespaces: string[]
+    /**
+     * D21 (Y5a): the subjects whose version rows this transaction already holds — the mutex
+     * inventory plus the users it admitted. A membership change for anyone else is refused before
+     * its bump: that bump would be a second version-row statement (a 40P01 cycle against a writer
+     * holding that row and waiting on an inventory row).
+     */
+    heldUserIds: ReadonlySet<string>
   },
   adminUserId: string,
 ): Promise<{
@@ -6901,9 +6956,20 @@ async function syncProjectedDepartmentMemberGroupsInTransaction(
     const membersToDelete = Array.from(currentMembers).filter((value) => !desiredMembers.has(value))
     const membersToInsert = Array.from(desiredMembers).filter((value) => !currentMembers.has(value))
 
+    // D21 (Y5a, refute [1]): every subject this projection changes must already be held by the
+    // inventory's one sorted statement (its projected-group arm reads the current members; desired
+    // members are inventory or newly admitted users). A member who joined the group after the
+    // inventory read is refused here, fail-closed like 'resolved after the mutex inventory'; the
+    // next run's inventory holds that member.
+    const unheldMembers = [...membersToDelete, ...membersToInsert].filter((userId) => !options.heldUserIds.has(userId))
+    if (unheldMembers.length > 0) {
+      throw new DirectoryConflictError(
+        'Directory sync projected member group changed after the mutex inventory; retry the run',
+      )
+    }
     // D21 (Y5a): one sorted subject bump for every member the projection removes or adds (joining a
     // group that carries a deny row is a revocation), ahead of the multi-row DELETE whose trigger
-    // bumps would otherwise land in scan order.
+    // bumps would otherwise land in scan order. Every row is already held, so this waits for nothing.
     await bumpSubjectAuthorizationVersions(client, [...membersToDelete, ...membersToInsert])
 
     if (membersToDelete.length > 0) {

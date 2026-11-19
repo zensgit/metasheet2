@@ -26,7 +26,8 @@
  * stand in for a lock. CI: DATABASE_URL-gated; excluded from the no-DB default vitest config (so a
  * describeIfDatabase skip cannot pass as green) and wired as a WHOLE FILE into the approval real-DB
  * step of .github/workflows/plugin-tests.yml. EXPECT_DB=1 arms the anti-skip sentinel. The field-row writer rule
- * cases (the #6792 follow-up) are registered at the end: authz-version-field-row-order-realdb.cases.ts.
+ * cases (the #6792 follow-up) are registered at the end: authz-version-field-row-order-realdb.cases.ts; after them
+ * the directory-sync one-statement cases (refute [1]): authz-version-directory-sync-order-realdb.cases.ts.
  */
 import { randomUUID } from 'node:crypto'
 import { CompiledQuery, Kysely, PostgresDialect } from 'kysely'
@@ -51,6 +52,7 @@ import {
 } from '../../src/multitable/authz-version-protocol'
 import { loadFieldsForSheet } from '../../src/multitable/loaders'
 import { isFieldPermissionHidden } from '../../src/multitable/permission-derivation'
+import { defineAuthzVersionDirectorySyncOrderRealDbCases } from './authz-version-directory-sync-order-realdb.cases'
 import { defineAuthzVersionFieldRowOrderRealDbCases } from './authz-version-field-row-order-realdb.cases'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -555,3 +557,6 @@ describeIfDatabase.sequential('D21 authorization version protocol (real PostgreS
 
 // The field-row writer rule (#6792 follow-up): the sheet version row before the meta_fields row lock, path by path.
 defineAuthzVersionFieldRowOrderRealDbCases()
+
+// Directory sync (refute [1]): every subject version row a run can touch in ONE sorted statement, before its first bump.
+defineAuthzVersionDirectorySyncOrderRealDbCases()
