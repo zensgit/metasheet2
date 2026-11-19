@@ -381,7 +381,10 @@ describe('3 ★ G9 container layer', () => {
   it('publication is once per output, on exactly the declared columns, finite scalars only', () => {
     const store = createRunValueStoreFromRule(scopeA, basePlan())
     store.publish('read', [{ id: 'x', qty: 1 }])
+    // a refused duplicate is not counted: neither the output, its rows nor its bytes
+    const before = store.counts()
     expect(code(() => store.publish('read', [{ id: 'x', qty: 1 }]))).toBe('RUN_VALUE_DUPLICATE')
+    expect(store.counts()).toEqual(before)
     const fresh = () => createRunValueStoreFromRule(scopeA, basePlan())
     for (const rows of [[{ id: 'x' }], [{ id: 'x', qty: 1, extra: 1 }], [{ id: 'x', qty: Number.NaN }], [{ id: 'x', qty: { n: 1 } }], 'rows', [JSON.parse('{"id":"x","__proto__":{}}')]]) {
       expect(code(() => fresh().publish('read', rows))).toBe('RUN_VALUE_INPUT')
@@ -564,6 +567,65 @@ describe('5 ★ G12 container layer: rows, bytes, execution total, step-key coun
     const before = store.counts()
     expect(code(() => store.publish('k4', [{ c: 1 }]))).toBe('RUN_VALUE_OUTPUT_TOO_LARGE')
     expect(store.counts()).toEqual(before)
+  })
+
+  const sixColumnPlan = () => deriveStepOutputPlan({ steps: [
+    { type: 'call_connection', stepKey: 'wide', output: { columns: ['c0', 'c1', 'c2', 'c3', 'c4', 'c5'] } },
+  ] })
+  /** 100 rows × 6 columns, every cell the same store-legal 1 MiB string: ~600 MiB of canonical JSON. */
+  const hugeOutput = () => {
+    const cell = 'a'.repeat(1024 * 1024)
+    return Array.from({ length: 100 }, () => ({ c0: cell, c1: cell, c2: cell, c3: cell, c4: cell, c5: cell }))
+  }
+
+  it('a huge over-cap output fails with the frozen code (never a foreign RangeError) and publishes nothing', () => {
+    const store = createRunValueStoreFromRule(scopeA, sixColumnPlan())
+    const before = store.counts()
+    expect(code(() => store.publish('wide', hugeOutput()))).toBe('RUN_VALUE_OUTPUT_TOO_LARGE')
+    expect(store.counts()).toEqual(before)
+  })
+
+  it('bytes are counted incrementally and the publish stops at the first cell that crosses the cap', () => {
+    const store = createRunValueStoreFromRule(scopeA, sixColumnPlan())
+    const rows = hugeOutput()
+    const original = JSON.stringify
+    let calls = 0
+    const spy = (...args: Parameters<typeof JSON.stringify>) => { calls++; return original(...args) }
+    JSON.stringify = spy as typeof JSON.stringify
+    let result: string
+    try { result = code(() => store.publish('wide', rows)) } finally { JSON.stringify = original }
+    expect(result).toBe('RUN_VALUE_OUTPUT_TOO_LARGE')
+    // the first 1 MiB cell alone already crosses the 1 MiB cap: nothing after it is serialized (never 6, never 600)
+    expect(calls).toBeLessThanOrEqual(1)
+    expect(store.counts()).toEqual({ outputs: 0, rows: 0, bytes: 0 })
+  })
+
+  it('counted bytes equal the UTF-8 length of the canonical JSON exactly (framing, escapes, multi-byte)', () => {
+    const plan = deriveStepOutputPlan({ steps: [
+      { type: 'call_connection', stepKey: 'a', output: { columns: ['x', 'long_column_name', 'z'] } },
+      { type: 'call_connection', stepKey: 'b', output: { columns: ['only'] } },
+      { type: 'call_connection', stepKey: 'e', output: { columns: ['x'] } },
+    ] })
+    const store = createRunValueStoreFromRule(scopeA, plan)
+    const canonical = (rows: readonly Record<string, unknown>[], columns: readonly string[]) =>
+      Buffer.byteLength(JSON.stringify(rows.map((row) => Object.fromEntries(columns.map((column) => [column, row[column]])))), 'utf8')
+    const a = [
+      { z: null, x: 1, long_column_name: true },
+      { long_column_name: false, z: -12.5e-7, x: 'quote " backslash \\ newline \n tab \t ctl \u0001 \u001f' },
+      { x: 'é ü 中文 😀', long_column_name: '\ud800 lone surrogate', z: 0 },
+      { x: '', long_column_name: '  ', z: 9007199254740991 },
+    ]
+    const b = [{ only: 'one' }, { only: 2 }]
+    let expected = 0
+    store.publish('a', a)
+    expected += canonical(a, ['x', 'long_column_name', 'z'])
+    expect(store.counts().bytes).toBe(expected)
+    store.publish('b', b)
+    expected += canonical(b, ['only'])
+    expect(store.counts().bytes).toBe(expected)
+    store.publish('e', [])
+    expected += 2 // `[]`
+    expect(store.counts().bytes).toBe(expected)
   })
 
   it('a rule with 8 stepKeys derives; the 9th is refused', () => {

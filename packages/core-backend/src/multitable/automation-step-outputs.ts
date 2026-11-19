@@ -257,6 +257,33 @@ export interface RuleRunValueStore {
   readonly disposed: boolean
 }
 
+/**
+ * UTF-8 bytes of `JSON.stringify(rows)` for canonical rows (keys in declared column order), counted one cell
+ * at a time so that no whole-output string is ever built. Fails with RUN_VALUE_OUTPUT_TOO_LARGE as soon as
+ * the running total exceeds `cap`; the running total only grows, so stopping early gives the same verdict
+ * as measuring the whole string. Column names are ASCII (COLUMN_SHAPE), so `"<col>":` is length + 3 bytes.
+ */
+function measureCanonicalBytes(
+  rows: readonly Readonly<Record<string, RunValueScalar>>[],
+  columns: readonly string[],
+  cap: number,
+): number {
+  let bytes = 2 // `[` `]`
+  if (bytes > cap) fail('RUN_VALUE_OUTPUT_TOO_LARGE')
+  for (let r = 0; r < rows.length; r++) {
+    bytes += (r > 0 ? 1 : 0) + 2 // `,` between rows, `{` `}`
+    if (bytes > cap) fail('RUN_VALUE_OUTPUT_TOO_LARGE')
+    const row = rows[r]
+    for (let c = 0; c < columns.length; c++) {
+      const column = columns[c]
+      bytes += (c > 0 ? 1 : 0) + column.length + 3 // `,` between cells, `"<col>":`
+      bytes += Buffer.byteLength(JSON.stringify(row[column]), 'utf8')
+      if (bytes > cap) fail('RUN_VALUE_OUTPUT_TOO_LARGE')
+    }
+  }
+  return bytes
+}
+
 /** Positional ids can never collide with a stepKey (a stepKey must start with a letter). */
 function positionId(position: number): string {
   return `#${position}`
@@ -304,9 +331,8 @@ export function createRunValueStoreFromRule(scope: RunValueScope, plan: StepOutp
         for (const column of producer.columns) ordered[column] = projected[column]
         return ordered
       })
-      const bytes = Buffer.byteLength(JSON.stringify(canonical), 'utf8')
-      if (bytes > STEP_OUTPUT_MAX_BYTES) fail('RUN_VALUE_OUTPUT_TOO_LARGE')
-      if (totalBytes + bytes > EXECUTION_STEP_OUTPUTS_MAX_BYTES) fail('RUN_VALUE_OUTPUT_TOO_LARGE')
+      const bytes = measureCanonicalBytes(canonical, producer.columns,
+        Math.min(STEP_OUTPUT_MAX_BYTES, EXECUTION_STEP_OUTPUTS_MAX_BYTES - totalBytes))
       const handle = inner.publish(positionId(producer.position), OUTPUT_NAME, canonical)
       totalBytes += bytes
       return handle
