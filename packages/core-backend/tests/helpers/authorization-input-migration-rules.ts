@@ -17,7 +17,10 @@
  * parent however it is spelled. Nothing else about the statement is set aside, and a substituted
  * SET clause of a `users` UPDATE is never exempt.
  *
- * Two more set-asides exist, and only two. The first came with main (#6934): in the delegation
+ * Two more set-asides exist in this helper, and only two in this helper; the judge's fixed LOCK rule
+ * (authorization-input-migration-judge.ts:1124, #6924: the exact `LOCK TABLE user_roles IN ACCESS
+ * EXCLUSIVE MODE` is judged safe in any migration, with no path or digest binding) is separate and is
+ * not counted here. The first came with main (#6934): in the delegation
  * activation schema migration (`DELEGATION_ACTIVATION_SCHEMA_MIGRATION`, at its exact path and with
  * the CRLF-folded sha256 `DELEGATION_ACTIVATION_SCHEMA_SHA256`), a judgment that is not an input
  * write and whose problem is one of `REVIEWED_ACTIVATION_DDL` (its CREATE TABLE, LOCK and DROP TABLE)
