@@ -1,12 +1,15 @@
 /**
  * Role member add/remove on the roles page.
- * Confirmation is frozen to the user and role shown in the dialog. The write is the
- * existing assign/unassign route, checked with the shared readback helper.
+ * Confirmation is frozen to the user and role shown in the dialog. Opening the dialog
+ * previews once. Confirm posts one commit receipt. Recovery is GET. There is no
+ * assign or unassign fallback.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, type App } from 'vue'
 import { createMemoryHistory, createRouter, RouterView, type Router } from 'vue-router'
+import { useAuth } from '../src/composables/useAuth'
+import { ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY } from '../src/utils/adminAuthorizationOperation'
 import RoleManagementView from '../src/views/RoleManagementView.vue'
 
 const apiFetchMock = vi.fn()
@@ -31,6 +34,11 @@ type RoleRow = {
 }
 
 const UPDATED_AT = '2026-11-11T03:04:05.000Z'
+const PREVIEW_PATH = '/api/admin/authorization-operations/preview'
+const COMMIT_PATH = '/api/admin/authorization-operations'
+
+type FetchInit = { method?: string; body?: string }
+type JsonResult = ReturnType<typeof jsonResponse>
 
 function roleRow(overrides: Partial<RoleRow> & Pick<RoleRow, 'id' | 'name'>): RoleRow {
   return {
@@ -61,28 +69,6 @@ function accessBody(userId: string, roles: string[], name = '甲一') {
   }
 }
 
-function writeBody(input: {
-  userId: string
-  roleId: string
-  held: boolean
-  changed: boolean
-  roles?: string[]
-}) {
-  return {
-    ok: true,
-    data: {
-      user: { id: input.userId, name: '甲一' },
-      roles: input.roles ?? (input.held ? [input.roleId] : []),
-      permissions: ['attendance:read'],
-      isAdmin: false,
-      changedRoleId: input.roleId,
-      roleHeld: input.held,
-      membershipChanged: input.changed,
-      actorId: 'actor-1',
-    },
-  }
-}
-
 type Deferred = {
   resolve: (value: ReturnType<typeof jsonResponse>) => void
   reject: (reason?: unknown) => void
@@ -99,6 +85,109 @@ async function flushUi(cycles = 12): Promise<void> {
     await Promise.resolve()
     await nextTick()
   }
+}
+
+function parseBody(init?: FetchInit): Record<string, unknown> | null {
+  return init?.body ? JSON.parse(init.body) as Record<string, unknown> : null
+}
+
+function actionOf(body: Record<string, unknown> | null): { kind: string; roleId: string } | null {
+  const action = body?.action
+  if (!action || typeof action !== 'object') return null
+  const kind = (action as { kind?: unknown }).kind
+  const roleId = (action as { roleId?: unknown }).roleId
+  if (typeof kind !== 'string' || typeof roleId !== 'string' || !roleId) return null
+  return { kind, roleId }
+}
+
+type RolePreviewShape = 'role-only' | 'stock-prep-derived-close' | 'unavailable'
+
+let rolePreviewShape: RolePreviewShape = 'role-only'
+
+function impactFor(action: { kind: string; roleId: string } | null) {
+  const roleId = action?.roleId || 'role'
+  const revoke = action?.kind === 'role.revoke'
+  const derivedClose = revoke && rolePreviewShape === 'stock-prep-derived-close'
+  return {
+    sourceChanges: [{
+      source: 'role',
+      id: roleId,
+      operation: revoke ? 'revoke' as const : 'assign' as const,
+      changed: true,
+    }],
+    admissionChanges: derivedClose
+      ? [{ namespace: 'stock-prep', before: true, after: false, cause: 'role_revoke' as const }]
+      : [],
+    scopeCleanup: [],
+    effectiveBefore: [],
+    effectiveAfter: [{
+      code: derivedClose ? 'stock-prep:read' : 'attendance:read',
+      sources: [{ kind: 'role' as const, id: roleId }],
+      effective: !revoke,
+    }],
+    retainedOtherGrants: [],
+    warnings: [] as string[],
+  }
+}
+
+function previewPayload(action: { kind: string; roleId: string } | null) {
+  return {
+    expectedVersion: `version-${action?.roleId || 'role'}`,
+    impact: impactFor(action),
+  }
+}
+
+let lastCommitted: { id: string; payload: Record<string, unknown> } | null = null
+
+function committedPayload(body: Record<string, unknown> | null): Record<string, unknown> {
+  const action = actionOf(body)
+  const clientOperationId = body?.clientOperationId
+  const payload = {
+    status: 'committed',
+    clientOperationId,
+    receipt: {
+      targetUserId: body?.targetUserId,
+      action: body?.action,
+      impact: impactFor(action),
+      resultVersion: 'version-2',
+    },
+  }
+  if (typeof clientOperationId === 'string') lastCommitted = { id: clientOperationId, payload }
+  return payload
+}
+
+function operationIdFromUrl(url: string): string | null {
+  const match = url.match(/^\/api\/admin\/authorization-operations\/([^/]+)$/)
+  return match?.[1] ? decodeURIComponent(match[1]) : null
+}
+
+function isLegacyRoleWrite(url: string): boolean {
+  return url.includes('/roles/assign') || url.includes('/roles/unassign')
+}
+
+function authorizationResult(
+  url: string,
+  init: FetchInit | undefined,
+  onCommit?: (url: string, body: Record<string, unknown>) => JsonResult | Promise<JsonResult>,
+): JsonResult | Promise<JsonResult> | null {
+  const method = init?.method || 'GET'
+  if (isLegacyRoleWrite(url)) throw new Error(`old role route ${method} ${url}`)
+  if (method === 'POST' && url === PREVIEW_PATH) {
+    if (rolePreviewShape === 'unavailable') return jsonResponse({}, 503)
+    return jsonResponse(previewPayload(actionOf(parseBody(init))))
+  }
+  if (method === 'POST' && url === COMMIT_PATH) {
+    const body = parseBody(init) || {}
+    if (onCommit) return onCommit(url, body)
+    return jsonResponse(committedPayload(body))
+  }
+  if (method === 'GET') {
+    const operationId = operationIdFromUrl(url)
+    if (!operationId) return null
+    if (lastCommitted?.id === operationId) return jsonResponse(lastCommitted.payload)
+    return jsonResponse({ status: 'unknown_or_pending', clientOperationId: operationId })
+  }
+  return null
 }
 
 let container: HTMLElement | null = null
@@ -133,6 +222,42 @@ function memberGets(): string[] {
 
 function roleGets(): number {
   return apiFetchMock.mock.calls.filter((call) => String(call[0]) === '/api/admin/roles' && !(call[1] as { method?: string } | undefined)?.method).length
+}
+
+function previewCalls(): Array<{ url: string; body: Record<string, unknown> | null }> {
+  return postCalls().filter((call) => call.url === PREVIEW_PATH)
+}
+
+function commitCalls(): Array<{ url: string; body: Record<string, unknown> | null }> {
+  return postCalls().filter((call) => call.url === COMMIT_PATH)
+}
+
+function accessGets(): string[] {
+  return apiFetchMock.mock.calls.flatMap((call) => {
+    const url = String(call[0])
+    const init = call[1] as { method?: string } | undefined
+    if (init?.method && init.method !== 'GET') return []
+    if (!/\/api\/admin\/users\/[^/]+\/access$/.test(url)) return []
+    return [url]
+  })
+}
+
+function operationGets(): string[] {
+  return apiFetchMock.mock.calls.flatMap((call) => {
+    const url = String(call[0])
+    const init = call[1] as { method?: string } | undefined
+    if (init?.method && init.method !== 'GET') return []
+    if (!operationIdFromUrl(url)) return []
+    return [url]
+  })
+}
+
+function expectNoLegacyRoleWrite(): void {
+  expect(postCalls().filter((call) => isLegacyRoleWrite(call.url))).toEqual([])
+}
+
+function serverLine(testId: string): string {
+  return container?.querySelector(`[data-testid="${testId}"]`)?.textContent?.trim() || ''
 }
 
 function roleButton(id: string): HTMLButtonElement {
@@ -240,18 +365,15 @@ function install(options: {
   members?: (roleId: string, page: number) => { items: Array<{ id: string; displayName: string; email?: string }>; total: number } | Promise<{ items: Array<{ id: string; displayName: string; email?: string }>; total: number }>
   access?: (userId: string) => ReturnType<typeof jsonResponse> | Promise<ReturnType<typeof jsonResponse>>
   search?: (url: string) => ReturnType<typeof jsonResponse> | Promise<ReturnType<typeof jsonResponse>>
-  onPost?: (url: string, body: Record<string, unknown>) => ReturnType<typeof jsonResponse> | Promise<ReturnType<typeof jsonResponse>>
+  onCommit?: (url: string, body: Record<string, unknown>) => ReturnType<typeof jsonResponse> | Promise<ReturnType<typeof jsonResponse>>
 }): void {
-  apiFetchMock.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
+  apiFetchMock.mockImplementation(async (url: string, init?: FetchInit) => {
     const method = init?.method || 'GET'
+    const authorization = await authorizationResult(url, init, options.onCommit)
+    if (authorization) return authorization
     if (url === '/api/permissions') return jsonResponse({ ok: true, data: PERMISSIONS })
     if (url === '/api/admin/roles' && method === 'GET') {
       return jsonResponse({ ok: true, data: { items: options.roles, total: options.roles.length } })
-    }
-    if (method === 'POST' && url.includes('/roles/')) {
-      const body = init?.body ? JSON.parse(init.body) as Record<string, unknown> : {}
-      if (!options.onPost) throw new Error(`unexpected post ${url}`)
-      return options.onPost(url, body)
     }
     const members = url.match(/^\/api\/admin\/roles\/([^/]+)\/members/)
     if (members && method === 'GET') {
@@ -275,6 +397,10 @@ function install(options: {
 
 beforeEach(() => {
   apiFetchMock.mockReset()
+  lastCommitted = null
+  rolePreviewShape = 'role-only'
+  sessionStorage.removeItem(ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY)
+  useAuth().primeSession({ data: { user: { id: 'principal-1', name: '管理员' } } })
 })
 
 afterEach(() => {
@@ -283,6 +409,8 @@ afterEach(() => {
   router = null
   container?.remove()
   container = null
+  sessionStorage.removeItem(ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY)
+  useAuth().primeSession(null)
 })
 
 describe('RoleManagementView member authorization', () => {
@@ -447,7 +575,6 @@ describe('RoleManagementView member authorization', () => {
         total: roleId === 'admin' ? 1 : 1,
       }),
       access: (userId) => jsonResponse(accessBody(userId, ['attendance_admin'])),
-      onPost: () => jsonResponse(writeBody({ userId: 'user-1', roleId: 'attendance_admin', held: true, changed: true })),
     })
     await mountView()
     roleButton('attendance_admin').click()
@@ -460,10 +587,16 @@ describe('RoleManagementView member authorization', () => {
     expect(dialogText()).toContain('不写入直接权限')
     expect(dialogText()).toContain('也不开通插件使用')
     expect(container?.querySelector('[data-testid="admin-authorization-direct-permissions"]')?.textContent).toContain('无')
-    expect(postCalls()).toHaveLength(0)
+    expect(previewCalls()).toHaveLength(1)
+    expect(previewCalls()[0]?.body).toEqual({
+      targetUserId: 'user-1',
+      action: { kind: 'role.assign', roleId: 'attendance_admin' },
+      admissionChanges: [],
+    })
+    expect(commitCalls()).toHaveLength(0)
     cancelButton().click()
     await flushUi()
-    expect(postCalls()).toHaveLength(0)
+    expect(commitCalls()).toHaveLength(0)
     expect(container?.querySelector('[data-testid="admin-authorization-dialog"]')).toBeNull()
 
     roleButton('admin').click()
@@ -472,19 +605,27 @@ describe('RoleManagementView member authorization', () => {
     clickRemove()
     await flushUi()
     expect(dialogText()).toContain('取消平台管理员')
+    expect(previewCalls()).toHaveLength(2)
+    expect(previewCalls()[1]?.body).toEqual({
+      targetUserId: 'user-1',
+      action: { kind: 'role.revoke', roleId: 'admin' },
+      admissionChanges: [],
+    })
     setPhrase('取消')
     await flushUi()
     expect(confirmButton().disabled).toBe(true)
     confirmButton().click()
     confirmButton().dispatchEvent(new MouseEvent('click', { bubbles: true }))
     await flushUi()
-    expect(postCalls()).toHaveLength(0)
+    expect(commitCalls()).toHaveLength(0)
+    expectNoLegacyRoleWrite()
     expect(permissionBox('attendance:read').checked).toBe(false)
   })
 
   it('assigns with the catalog token and reloads the readback without clearing later editor edits', async () => {
     const pending: Deferred[] = []
     let memberReads = 0
+    let capturedCommit: Record<string, unknown> | null = null
     install({
       roles: [roleRow({
         id: 'attendance_admin',
@@ -503,8 +644,11 @@ describe('RoleManagementView member authorization', () => {
         }
         return { items: [{ id: 'user-1', displayName: '甲一' }], total: 1 }
       },
-      access: (userId) => jsonResponse(accessBody(userId, [])),
-      onPost: () => defer(pending),
+      access: (userId) => jsonResponse(accessBody(userId, ['attendance_admin'])),
+      onCommit: (_url, body) => {
+        capturedCommit = body
+        return defer(pending)
+      },
     })
 
     await mountView()
@@ -514,20 +658,40 @@ describe('RoleManagementView member authorization', () => {
     await selectMember('user-1')
     clickAdd()
     await flushUi()
-    expect(postCalls()).toHaveLength(0)
+    expect(previewCalls()).toHaveLength(1)
+    expect(previewCalls()[0]?.body).toEqual({
+      targetUserId: 'user-1',
+      action: { kind: 'role.assign', roleId: 'attendance_admin' },
+      admissionChanges: [],
+    })
+    expect(previewCalls()[0]?.body).not.toHaveProperty('expectedUpdatedAt')
+    expect(commitCalls()).toHaveLength(0)
     confirmButton().click()
-    expect(postCalls()).toHaveLength(1)
-    expect(postCalls()[0]?.url).toBe('/api/admin/users/user-1/roles/assign')
-    expect(postCalls()[0]?.body).toEqual({ roleId: 'attendance_admin', expectedUpdatedAt: UPDATED_AT })
+    expect(commitCalls()).toHaveLength(1)
+    expect(commitCalls()[0]?.url).toBe(COMMIT_PATH)
+    expect(commitCalls()[0]?.body).toMatchObject({
+      targetUserId: 'user-1',
+      action: { kind: 'role.assign', roleId: 'attendance_admin' },
+      admissionChanges: [],
+      expectedVersion: 'version-attendance_admin',
+    })
+    expect(commitCalls()[0]?.body?.clientOperationId).toEqual(expect.any(String))
+    expect(commitCalls()[0]?.body).not.toHaveProperty('expectedUpdatedAt')
+    expectNoLegacyRoleWrite()
     nameInput().value = '临时名称'
     nameInput().dispatchEvent(new Event('input'))
     permissionBox('custom:note').checked = true
     permissionBox('custom:note').dispatchEvent(new Event('change'))
     await flushUi()
-    pending[0]?.resolve(jsonResponse(writeBody({ userId: 'user-1', roleId: 'attendance_admin', held: true, changed: true })))
-    await flushUi()
-    expect(feedback()).toContain('已分配角色 attendance_admin')
-    expect(feedback()).toContain('用户 user-1')
+    pending[0]?.resolve(jsonResponse(committedPayload(capturedCommit)))
+    await flushUi(24)
+    expect(feedback()).toBe('已核对同一用户的角色成员状态。')
+    expect(container?.querySelector('[data-testid="role-member-authorization-phase"]')?.textContent).toBe('已核对同一用户的角色成员状态。')
+    expect(accessGets()).toEqual([
+      '/api/admin/users/user-1/access',
+      '/api/admin/users/user-1/access',
+    ])
+    expect(operationGets()).toHaveLength(0)
     expect(activeCount()).toBe('成员数：2')
     expect(rootText()).toContain('新成员')
     expect(nameInput().value).toBe('临时名称')
@@ -546,10 +710,16 @@ describe('RoleManagementView member authorization', () => {
         updatedAt: null,
       })],
       members: () => ({ items: [{ id: 'user-4', displayName: '丁' }], total: 4 }),
-      access: (userId) => jsonResponse(accessBody(userId, [], '丁')),
-      onPost: (_url, body) => {
-        expect(body).toEqual({ roleId: 'custom-role' })
-        return jsonResponse({ ok: true, data: { user: { id: 'user-4' } } })
+      access: (userId) => jsonResponse({ ok: true, data: { user: { id: userId, name: '丁' } } }),
+      onCommit: (_url, body) => {
+        expect(body).toMatchObject({
+          targetUserId: 'user-4',
+          action: { kind: 'role.assign', roleId: 'custom-role' },
+          admissionChanges: [],
+          expectedVersion: 'version-custom-role',
+        })
+        expect(body).not.toHaveProperty('expectedUpdatedAt')
+        return jsonResponse(committedPayload(body))
       },
     })
     await mountView()
@@ -561,8 +731,16 @@ describe('RoleManagementView member authorization', () => {
     await flushUi()
     confirmButton().click()
     await flushUi()
-    expect(postCalls()).toHaveLength(1)
-    expect(feedback()).toContain('角色回读不完整')
+    expect(previewCalls()).toHaveLength(1)
+    expect(previewCalls()[0]?.body).not.toHaveProperty('expectedUpdatedAt')
+    expect(commitCalls()).toHaveLength(1)
+    expect(accessGets()).toEqual([
+      '/api/admin/users/user-4/access',
+      '/api/admin/users/user-4/access',
+    ])
+    expect(operationGets()).toHaveLength(0)
+    expectNoLegacyRoleWrite()
+    expect(feedback()).toBe('回执已记录。角色回读还没有对上。')
     expect(activeCount()).toBe('成员数：4')
     expect(rootText()).toContain('丁')
     expect(container?.querySelector('.role-members__selected')?.getAttribute('data-user-id')).toBe('user-4')
@@ -597,15 +775,28 @@ describe('RoleManagementView member authorization', () => {
     roleButton('stock-prep_admin').click()
     await flushUi()
     await selectMember('user-1')
+    rolePreviewShape = 'stock-prep-derived-close'
     clickRemove()
     await flushUi()
-    expect(dialogText()).toContain('可能会关闭插件使用：stock-prep')
+    expect(serverLine('admin-authorization-explicit-admissions')).toBe('显式准入：无')
+    expect(serverLine('admin-authorization-derived-admissions')).toBe('派生准入：关闭 stock-prep')
     expect(dialogText()).toContain('stock-prep:read')
-    expect(postCalls()).toHaveLength(0)
+    expect(dialogText()).not.toContain('开通 attendance')
+    expect(previewCalls()).toHaveLength(1)
+    expect(previewCalls()[0]?.body).toEqual({
+      targetUserId: 'user-1',
+      action: { kind: 'role.revoke', roleId: 'stock-prep_admin' },
+      admissionChanges: [],
+    })
+    expect(commitCalls()).toHaveLength(0)
+    expectNoLegacyRoleWrite()
     cancelButton().click()
     await flushUi()
+    rolePreviewShape = 'role-only'
 
-    apiFetchMock.mockImplementation(async (url: string, init?: { method?: string }) => {
+    apiFetchMock.mockImplementation(async (url: string, init?: FetchInit) => {
+      const authorization = await authorizationResult(url, init)
+      if (authorization) return authorization
       if (url === '/api/permissions') return jsonResponse({ ok: true, data: PERMISSIONS })
       if (url === '/api/admin/roles') {
         return jsonResponse({
@@ -637,12 +828,16 @@ describe('RoleManagementView member authorization', () => {
     await selectMember('user-1')
     clickRemove()
     await flushUi()
+    expect(serverLine('admin-authorization-explicit-admissions')).toBe('显式准入：无')
+    expect(serverLine('admin-authorization-derived-admissions')).toBe('派生准入：无')
     expect(dialogText()).toContain('按目前的角色目录，这次撤销不会关闭插件使用')
     expect(dialogText()).not.toContain('可能会关闭插件使用')
     cancelButton().click()
     await flushUi()
 
-    apiFetchMock.mockImplementation(async (url: string, init?: { method?: string }) => {
+    apiFetchMock.mockImplementation(async (url: string, init?: FetchInit) => {
+      const authorization = await authorizationResult(url, init)
+      if (authorization) return authorization
       if (url === '/api/permissions') return jsonResponse({ ok: true, data: PERMISSIONS })
       if (url === '/api/admin/roles') {
         return jsonResponse({
@@ -664,13 +859,16 @@ describe('RoleManagementView member authorization', () => {
     await selectMember('user-1')
     clickRemove()
     await flushUi()
-    expect(container?.querySelector('[data-testid="admin-authorization-admissions-unknown"]')).toBeTruthy()
+    expect(serverLine('admin-authorization-explicit-admissions')).toBe('显式准入：无')
+    expect(serverLine('admin-authorization-derived-admissions')).toBe('派生准入：无')
     expect(dialogText()).toContain('目前看不出这次会不会关闭插件使用')
     expect(dialogText()).not.toContain('按目前的角色目录，这次撤销不会关闭插件使用')
     cancelButton().click()
     await flushUi()
 
-    apiFetchMock.mockImplementation(async (url: string, init?: { method?: string }) => {
+    apiFetchMock.mockImplementation(async (url: string, init?: FetchInit) => {
+      const authorization = await authorizationResult(url, init)
+      if (authorization) return authorization
       if (url === '/api/permissions') return jsonResponse({ ok: true, data: PERMISSIONS })
       if (url === '/api/admin/roles') {
         return jsonResponse({
@@ -695,11 +893,16 @@ describe('RoleManagementView member authorization', () => {
     roleButton('stock-prep_admin').click()
     await flushUi()
     await selectMember('user-1')
+    rolePreviewShape = 'unavailable'
     clickRemove()
     await flushUi()
-    expect(container?.querySelector('[data-testid="admin-authorization-admissions-unknown"]')).toBeTruthy()
+    expect(container?.querySelector('[data-testid="admin-authorization-server-impact"]')).toBeNull()
+    expect(container?.querySelector('[data-testid="admin-authorization-admissions-unknown"]')?.textContent).toContain('目前看不出这次会不会改变插件使用')
     expect(dialogText()).not.toContain('按目前的角色目录，这次撤销不会关闭插件使用')
-    expect(postCalls()).toHaveLength(0)
+    expect(dialogText()).not.toContain('派生准入：无')
+    expect(commitCalls()).toHaveLength(0)
+    expect(previewCalls()).toHaveLength(4)
+    expectNoLegacyRoleWrite()
   })
 
   it('keeps the editor when membership is blocked, and refuses last-admin and stale-version writes without changing state', async () => {
@@ -725,8 +928,9 @@ describe('RoleManagementView member authorization', () => {
         total: roleId === 'attendance_admin' ? 3 : 1,
       }),
       access: (userId) => jsonResponse(accessBody(userId, ['admin'], '甲一')),
-      onPost: (url) => {
-        if (url.endsWith('/roles/unassign')) {
+      onCommit: (_url, body) => {
+        const action = actionOf(body)
+        if (action?.kind === 'role.revoke' && action.roleId === 'admin') {
           return jsonResponse({ ok: false, error: { code: 'LAST_PLATFORM_ADMIN', message: '至少保留一名可登录的平台管理员' } }, 409)
         }
         return jsonResponse({ ok: false, error: { code: 'ROLE_MODIFIED', message: 'role row changed' } }, 409)
@@ -763,14 +967,22 @@ describe('RoleManagementView member authorization', () => {
     const readsBefore = roleGets()
     confirmButton().click()
     await flushUi()
-    expect(postCalls()).toHaveLength(1)
-    expect(postCalls()[0]?.body).toEqual({ roleId: 'admin' })
-    expect(feedback()).toBe('不能取消最后一名平台管理员')
+    expect(previewCalls()).toHaveLength(1)
+    expect(commitCalls()).toHaveLength(1)
+    expect(commitCalls()[0]?.body).toMatchObject({
+      targetUserId: 'user-1',
+      action: { kind: 'role.revoke', roleId: 'admin' },
+      admissionChanges: [],
+      expectedVersion: 'version-admin',
+    })
+    expect(commitCalls()[0]?.body).not.toHaveProperty('expectedUpdatedAt')
+    expectNoLegacyRoleWrite()
+    expect(feedback()).toBe('这次没有写入。请重新预览后再确认。')
     expect(rootText()).toContain('甲一')
     expect(container?.querySelector('.role-members__selected')?.getAttribute('data-user-id')).toBe('user-1')
     expect(activeCount()).toBe('成员数：1')
     expect(roleGets()).toBe(readsBefore)
-    expect(container?.querySelector('[data-testid="admin-authorization-dialog"]')).toBeNull()
+    expect(operationGets()).toHaveLength(0)
 
     roleButton('attendance_admin').click()
     await flushUi()
@@ -779,17 +991,27 @@ describe('RoleManagementView member authorization', () => {
     await flushUi()
     confirmButton().click()
     await flushUi()
-    expect(postCalls()).toHaveLength(2)
-    expect(feedback()).toBe('角色目录已变化，本次未写入。请刷新角色后再确认。')
+    expect(previewCalls()).toHaveLength(2)
+    expect(commitCalls()).toHaveLength(2)
+    expect(commitCalls()[1]?.body).toMatchObject({
+      targetUserId: 'user-1',
+      action: { kind: 'role.assign', roleId: 'attendance_admin' },
+      admissionChanges: [],
+    })
+    expect(commitCalls()[1]?.body).not.toHaveProperty('expectedUpdatedAt')
+    expectNoLegacyRoleWrite()
+    expect(feedback()).toBe('这次没有写入。请重新预览后再确认。')
     expect(activeCount()).toBe('成员数：3')
     expect(container?.querySelector('.role-members__selected')?.getAttribute('data-user-id')).toBe('user-1')
     expect(permissionBox('attendance:read').checked).toBe(true)
     expect(permissionBox('custom:note').checked).toBe(false)
     expect(roleGets()).toBe(readsBefore)
+    expect(operationGets()).toHaveLength(0)
   })
 
   it('refuses a confirm after the user or role changes, and ignores a stale assign reply', async () => {
     const pending: Deferred[] = []
+    let capturedCommit: Record<string, unknown> | null = null
     install({
       roles: [
         roleRow({ id: 'role-a', name: 'Role A', permissions: ['attendance:read'], memberCount: 1, admissionNamespaces: [] }),
@@ -805,7 +1027,10 @@ describe('RoleManagementView member authorization', () => {
         total: roleId === 'role-b' ? 7 : 2,
       }),
       access: (userId) => jsonResponse(accessBody(userId, [], '甲一')),
-      onPost: () => defer(pending),
+      onCommit: (_url, body) => {
+        capturedCommit = body
+        return defer(pending)
+      },
     })
     await mountView()
     roleButton('role-a').click()
@@ -815,7 +1040,9 @@ describe('RoleManagementView member authorization', () => {
     await flushUi()
     memberRow('user-2').click()
     await flushUi()
-    expect(postCalls()).toHaveLength(0)
+    expect(previewCalls()).toHaveLength(1)
+    expect(commitCalls()).toHaveLength(0)
+    expectNoLegacyRoleWrite()
     expect(container?.querySelector('[data-testid="admin-authorization-dialog"]')).toBeNull()
     expect(feedback()).toBe('确认对象已变化，本次未写入。')
 
@@ -823,20 +1050,24 @@ describe('RoleManagementView member authorization', () => {
     clickAdd()
     await flushUi()
     confirmButton().click()
-    expect(postCalls()).toHaveLength(1)
+    expect(previewCalls()).toHaveLength(2)
+    expect(commitCalls()).toHaveLength(1)
+    expect(commitCalls()[0]?.body).toMatchObject({
+      targetUserId: 'user-1',
+      action: { kind: 'role.assign', roleId: 'role-a' },
+      admissionChanges: [],
+    })
     roleButton('role-b').click()
     await flushUi()
     roleButton('role-a').click()
     await flushUi()
     const getsAfterSwitch = memberGets().length
-    pending[0]?.resolve(jsonResponse(writeBody({
-      userId: 'user-1',
-      roleId: 'role-a',
-      held: true,
-      changed: true,
-    })))
+    pending[0]?.resolve(jsonResponse(committedPayload(capturedCommit)))
     await flushUi()
     expect(memberGets()).toHaveLength(getsAfterSwitch)
+    expect(commitCalls()).toHaveLength(1)
+    expect(operationGets()).toHaveLength(0)
+    expectNoLegacyRoleWrite()
     expect(feedback()).not.toContain('已分配角色')
     expect(container?.querySelector('.admin-page__item--active span')?.textContent).toBe('role-a')
     expect(rootText()).toContain('甲一')
@@ -877,7 +1108,7 @@ describe('RoleManagementView member authorization', () => {
       ],
       members: () => ({ items: [{ id: 'user-1', displayName: '甲一' }], total: 1 }),
       access: (userId) => jsonResponse(accessBody(userId, [], '甲一')),
-      onPost: () => {
+      onCommit: () => {
         throw new Error('member write during leave')
       },
     })
@@ -888,18 +1119,24 @@ describe('RoleManagementView member authorization', () => {
     clickAdd()
     await flushUi()
     expect(container?.querySelector('[data-testid="admin-authorization-dialog"]')).toBeTruthy()
+    expect(previewCalls()).toHaveLength(1)
+    expect(commitCalls()).toHaveLength(0)
     nameInput().value = '临时名称'
     nameInput().dispatchEvent(new Event('input'))
     await flushUi()
-    expect(container?.querySelector('[data-testid="admin-authorization-dialog"]')).toBeTruthy()
+    expect(container?.querySelector('[data-testid="admin-authorization-dialog"]')).toBeNull()
+    expect(feedback()).toContain('成员变更已暂停')
     roleButton('role-b').click()
     await flushUi()
-    expect(postCalls()).toHaveLength(0)
+    expect(commitCalls()).toHaveLength(0)
+    expect(previewCalls()).toHaveLength(1)
+    expectNoLegacyRoleWrite()
     expect(container?.querySelector('[data-testid="admin-authorization-dialog"]')).toBeNull()
     expect(container?.querySelector('[data-role-leave-shield]')).toBeTruthy()
     ;(container?.querySelector('[data-role-leave-stay]') as HTMLButtonElement).click()
     await flushUi()
-    expect(postCalls()).toHaveLength(0)
+    expect(commitCalls()).toHaveLength(0)
+    expect(previewCalls()).toHaveLength(1)
     expect(nameInput().value).toBe('临时名称')
     expect(container?.querySelector('.admin-page__item--active span')?.textContent).toBe('role-a')
     expect(container?.querySelector('[data-testid="admin-authorization-dialog"]')).toBeNull()

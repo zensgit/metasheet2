@@ -3,7 +3,8 @@
 // Isolated real UserManagementView plus a synthetic subject request panel.
 // Scope mode also mounts real RoleDelegationView. This is not the full login or
 // workbench. Vite is loopback, configFile/envFile off. Two contexts each install
-// auth_token. API calls are proxied to the real listener and never fulfilled.
+// auth_token. The admin runs the normal session bootstrap before mounting.
+// API calls are proxied to the real listener and never fulfilled.
 // The Chromium route allowlist only filters browser requests.
 // It is not OS or native egress isolation.
 import { randomBytes, randomUUID } from 'node:crypto'
@@ -16,12 +17,16 @@ import express, { type RequestHandler } from 'express'
 import type { Browser, BrowserContext, Page } from '@playwright/test'
 import type { Plugin, ViteDevServer } from 'vite'
 import request from 'supertest'
+import type { AuthorizationOperationImpact } from '../../src/admin/authorization-operation-contract'
 import { authService } from '../../src/auth/AuthService'
 import { query, transaction } from '../../src/db/pg'
 import { authenticate } from '../../src/middleware/auth'
 import { findObjectSheet, type MultitableProvisioningQueryFn } from '../../src/multitable/provisioning'
 import { adminUsersRouter } from '../../src/routes/admin-users'
+import { authRouter } from '../../src/routes/auth'
 
+const AUTHORIZATION_PATH = '/api/admin/authorization-operations'
+const SESSION_PATH = '/api/auth/me'
 const BUSINESS_PATH = '/api/integration/stock-preparation/preflight'
 const HARNESS_PATH = '/__permission-browser-harness'
 const STOCK_PREP_ADMIN_ROLE_ID = 'stock-prep_admin'
@@ -41,7 +46,11 @@ export type PermissionBrowserMutation = {
   context: 'admin' | 'subject'
   method: string
   pathname: string
-  status: number
+  status: number | null
+}
+export type PermissionBrowserAudit = {
+  impact: AuthorizationOperationImpact | null
+  reasonOrigin: string | null
 }
 export type SubjectPreflightReading = {
   status: number
@@ -89,8 +98,8 @@ function assertAllowedDatabase(): void {
   if (parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') {
     throw new Error('permission browser suite refuses a non-loopback DATABASE_URL')
   }
-  if (name !== 'permission_boundaries_synthetic' && name !== 'metasheet_test') {
-    throw new Error('permission browser suite refuses a database that is not the synthetic or CI test database')
+  if (name !== 'permission_boundaries_synthetic') {
+    throw new Error('permission browser suite requires its dedicated synthetic database')
   }
 }
 
@@ -165,6 +174,7 @@ function createApiApp(): express.Express {
     const result = await query(sql, params)
     return { rows: result.rows, rowCount: result.rowCount }
   }
+  app.use('/api/auth', authRouter)
   app.use(adminUsersRouter())
   loaded.registerIntegrationRoutes({
     context: {
@@ -205,6 +215,7 @@ function harnessHtml(): string {
     import { createRouter, createMemoryHistory, RouterView } from 'vue-router'
     import { createPinia } from 'pinia'
     import UserManagementView from '/src/views/UserManagementView.vue'
+    import { useAuth } from '/src/composables/useAuth.ts'
     import { apiFetch } from '/src/utils/api.ts'
     const harness = new URLSearchParams(location.search).get('harness')
     if (harness === 'subject') {
@@ -264,6 +275,8 @@ function harnessHtml(): string {
         },
       }).mount('#app')
     } else {
+      const session = await useAuth().bootstrapSession()
+      if (!session.ok || !session.payload?.data?.user?.id) throw new Error('PERMISSION_BROWSER_ADMIN_SESSION_FAILED')
       const router = createRouter({
         history: createMemoryHistory(),
         routes: [{ path: '/:pathMatch(.*)*', component: UserManagementView }],
@@ -286,6 +299,7 @@ function scopeHarnessHtml(): string {
     import { createPinia } from 'pinia'
     import UserManagementView from '/src/views/UserManagementView.vue'
     import RoleDelegationView from '/src/views/RoleDelegationView.vue'
+    import { useAuth } from '/src/composables/useAuth.ts'
     import { apiFetch } from '/src/utils/api.ts'
     const harness = new URLSearchParams(location.search).get('harness')
     if (harness === 'subject') {
@@ -329,6 +343,8 @@ function scopeHarnessHtml(): string {
         },
       }).mount('#app')
     } else {
+      const session = await useAuth().bootstrapSession()
+      if (!session.ok || !session.payload?.data?.user?.id) throw new Error('PERMISSION_BROWSER_ADMIN_SESSION_FAILED')
       const View = harness === 'delegation' ? RoleDelegationView : UserManagementView
       const router = createRouter({
         history: createMemoryHistory(),
@@ -341,11 +357,8 @@ function scopeHarnessHtml(): string {
 }
 
 function isMutation(method: string, pathname: string): boolean {
-  if (method !== 'POST' && method !== 'PATCH') return false
-  return pathname.includes('/roles/')
-    || pathname.includes('/admission')
-    || pathname.includes('/scope-groups/')
-    || pathname.includes('/member-groups/')
+  return pathname !== `${AUTHORIZATION_PATH}/preview`
+    && ['POST', 'PATCH', 'PUT', 'DELETE'].includes(method)
 }
 
 function readEnvelopeId(body: unknown, key: 'item' | 'user'): string {
@@ -374,12 +387,19 @@ function watchMutations(
   label: 'admin' | 'subject',
   bucket: PermissionBrowserMutation[],
 ): void {
-  context.on('response', (response) => {
-    const url = new URL(response.url())
-    const method = response.request().method()
+  const ongoing = new WeakMap<object, PermissionBrowserMutation>()
+  context.on('request', (request) => {
+    const url = new URL(request.url())
+    const method = request.method()
     if (!url.pathname.startsWith('/api/')) return
     if (!isMutation(method, url.pathname)) return
-    bucket.push({ context: label, method, pathname: url.pathname, status: response.status() })
+    const mutation = { context: label, method, pathname: url.pathname, status: null }
+    ongoing.set(request, mutation)
+    bucket.push(mutation)
+  })
+  context.on('response', (response) => {
+    const mutation = ongoing.get(response.request())
+    if (mutation) mutation.status = response.status()
   })
 }
 
@@ -420,6 +440,8 @@ export type PermissionBrowserFixture = {
   violations: string[]
   pageErrors: string[]
   mutations: () => PermissionBrowserMutation[]
+  readOperation: (clientOperationId: string) => Promise<unknown>
+  operationAudits: () => Promise<Map<string, PermissionBrowserAudit>>
   reread: () => Promise<PermissionBrowserReread>
   readSubjectPreflight: () => Promise<SubjectPreflightReading>
   readSubjectDelegation: () => Promise<SubjectDelegationReading>
@@ -502,6 +524,8 @@ export async function createPermissionBrowserFixture(
   async function cleanupOwnedFixtures(): Promise<void> {
     if (!seedStarted) return
     await transaction(async (client) => {
+      await client.query('DELETE FROM authorization_operation_audit WHERE actor_id = ANY($1::text[])', [ownedUserIds])
+      await client.query('DELETE FROM authorization_operation_receipts WHERE actor_id = ANY($1::text[])', [ownedUserIds])
       await client.query('DELETE FROM role_permissions WHERE role_id = $1', [operatorRoleId])
       await client.query(
         `DELETE FROM user_roles
@@ -620,6 +644,27 @@ export async function createPermissionBrowserFixture(
     }
   }
 
+  async function loadHarness(page: Page, url: string, harness: 'admin' | 'subject', token: string): Promise<void> {
+    const navigation = { waitUntil: 'domcontentloaded', timeout: 120000 } as const
+    if (harness === 'admin') {
+      const [session] = await Promise.all([
+        page.waitForResponse(
+          (response) => new URL(response.url()).pathname === SESSION_PATH && response.request().method() === 'GET',
+          { timeout: 30000 },
+        ),
+        page.goto(url, navigation),
+      ])
+      const payload = await session.json()
+      if (session.status() !== 200 || payload?.success !== true || payload?.data?.user?.id !== adminId
+        || session.request().headers().authorization !== `Bearer ${token}`) {
+        throw new Error(`PERMISSION_BROWSER_ADMIN_SESSION_${session.status()}`)
+      }
+    } else {
+      await page.goto(url, navigation)
+    }
+    await assertContextToken(page, token, harness)
+  }
+
   try {
     await requireOneRow('SELECT id FROM roles WHERE id = $1', ['admin'], 'built-in role admin')
     await requireOneRow('SELECT id FROM roles WHERE id = $1', [STOCK_PREP_ADMIN_ROLE_ID], 'built-in role stock-prep_admin')
@@ -728,12 +773,14 @@ export async function createPermissionBrowserFixture(
 
     browser = await chromium.launch({ headless: true })
 
-    const openContext = async (token: string, harness: 'admin' | 'subject'): Promise<{ context: BrowserContext; page: Page }> => {
+    const openContext = async (token: string, harness: 'admin' | 'subject'): Promise<Page> => {
       const context = await browser!.newContext({
         viewport: { width: 1280, height: 900 },
         locale: 'zh-CN',
         serviceWorkers: 'block',
       })
+      if (harness === 'admin') adminContext = context
+      else subjectContext = context
       await context.addInitScript(({ authToken, ownedOrigin }) => {
         if (location.origin === ownedOrigin) localStorage.setItem('auth_token', authToken)
       }, { authToken: token, ownedOrigin: origin })
@@ -749,28 +796,24 @@ export async function createPermissionBrowserFixture(
       else if (mode === 'scope') {
         userQuery = `&targetId=${encodeURIComponent(targetId)}&roleId=${encodeURIComponent(operatorRoleId)}`
       }
-      await page.goto(`${origin}${HARNESS_PATH}?harness=${harness}${userQuery}`, { waitUntil: 'domcontentloaded', timeout: 120000 })
-      await assertContextToken(page, token, harness)
-      return { context, page }
+      await loadHarness(page, `${origin}${HARNESS_PATH}?harness=${harness}${userQuery}`, harness, token)
+      return page
     }
 
-    const admin = await openContext(adminToken, 'admin')
-    const subject = await openContext(subjectToken, 'subject')
-    adminContext = admin.context
-    subjectContext = subject.context
-    adminPage = admin.page
-    subjectPage = subject.page
+    adminPage = await openContext(adminToken, 'admin')
+    subjectPage = await openContext(subjectToken, 'subject')
     await adminPage.getByTestId('permission-browser-harness-label').waitFor()
     if (mode === 'scope') await subjectPage.getByTestId('subject-delegation').waitFor()
     else await subjectPage.getByTestId('subject-preflight').waitFor()
     let delegationReads = 0
 
     const gotoAdminHarness = async (harness: 'admin' | 'delegation', extra: string): Promise<void> => {
-      await adminPage!.goto(
+      await loadHarness(
+        adminPage!,
         `${origin}${HARNESS_PATH}?harness=${harness}${extra}`,
-        { waitUntil: 'domcontentloaded', timeout: 120000 },
+        'admin',
+        adminToken,
       )
-      await assertContextToken(adminPage!, adminToken, 'admin')
     }
 
     return {
@@ -786,7 +829,31 @@ export async function createPermissionBrowserFixture(
       groupName,
       violations,
       pageErrors,
-      mutations: () => mutations.slice(),
+      mutations: () => mutations.map(item => ({ ...item })),
+      async readOperation(clientOperationId) {
+        const response = await request(app)
+          .get(`${AUTHORIZATION_PATH}/${encodeURIComponent(clientOperationId)}`)
+          .auth(adminToken, { type: 'bearer' })
+        if (response.status !== 200) throw new Error(`PERMISSION_BROWSER_RECEIPT_READ_${response.status}`)
+        return response.body
+      },
+      async operationAudits() {
+        const result = await query<{
+          client_operation_id: string
+          impact: AuthorizationOperationImpact | null
+          reason_origin: string | null
+        }>(
+          `SELECT r.client_operation_id, a.impact, a.reason_origin
+             FROM authorization_operation_receipts r
+             LEFT JOIN authorization_operation_audit a USING (actor_id, client_operation_id)
+            WHERE r.actor_id = $1 AND r.target_user_id = $2`,
+          [adminId, subjectId],
+        )
+        return new Map(result.rows.map(row => [row.client_operation_id, {
+          impact: row.impact,
+          reasonOrigin: row.reason_origin,
+        }]))
+      },
       reread,
       async readSubjectPreflight() {
         await assertContextToken(subjectPage!, subjectToken, 'subject')

@@ -32,6 +32,7 @@ vi.mock('../../src/auth/invite-tokens', () => ({ issueInviteToken: vi.fn(() => '
 
 import { Logger } from '../../src/core/logger'
 import { adminDirectoryRouter } from '../../src/routes/admin-directory'
+import { strictLoginUninstalledRows } from '../utils/strict-login-uninstalled-fixture'
 
 const MARKER = 'MARKER_r41_batch'
 const DRIVER_TEXT = `${MARKER} relation "directory_account_links" does not exist at 198.51.100.4:5432`
@@ -41,7 +42,9 @@ function driverError(): Error {
 }
 
 const ACCOUNT_ROW = {
-  integration_id: 'dir-1',
+  // Pre-migration connection: a real UUID so the legacy-grant read reaches the catalog,
+  // which this fake answers as never-installed.
+  integration_id: '00000000-0000-4000-8000-0000000000d1',
   provider: 'dingtalk',
   corp_id: 'dingcorp',
   external_user_id: '0447654442691174',
@@ -55,7 +58,7 @@ const ACCOUNT_ROW = {
 
 function summaryRow(accountId: string, link: Record<string, unknown>): Record<string, unknown> {
   return {
-    integration_id: 'dir-1',
+    integration_id: '00000000-0000-4000-8000-0000000000d1',
     provider: 'dingtalk',
     corp_id: 'dingcorp',
     directory_account_id: accountId,
@@ -82,7 +85,9 @@ function summaryRow(accountId: string, link: Record<string, unknown>): Record<st
  * harness, so a trailing best-effort read of the committed item cannot shift the sequence.
  */
 function failAccountTwoWithDriverText(): void {
-  pgMocks.query.mockImplementation(async (_sql: unknown, params?: unknown[]) => {
+  pgMocks.query.mockImplementation(async (sql: unknown, params?: unknown[]) => {
+    const uninstalled = strictLoginUninstalledRows(String(sql))
+    if (uninstalled !== undefined) return { rows: uninstalled }
     if (Array.isArray(params) && params.some((value) => value === 'account-2')) throw driverError()
     return { rows: [] }
   })
@@ -94,6 +99,8 @@ function installTransactionMock(clientQuery: (sql: string, params?: unknown[]) =
   pgMocks.transaction.mockImplementation(async (handler: (client: unknown) => Promise<unknown>) => handler({
     query: async (sql: string, params?: unknown[]) => {
       const text = String(sql)
+      const uninstalled = strictLoginUninstalledRows(text)
+      if (uninstalled !== undefined) return { rows: uninstalled }
       if (/INSERT INTO user_login_aliases/i.test(text)) {
         aliasOwners.set(String(params?.[2] ?? ''), String(params?.[0] ?? ''))
         return { rows: [] }

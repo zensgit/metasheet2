@@ -1,0 +1,31 @@
+# Admin single user birth transaction boundary
+
+This B2 prerequisite converts only POST `/api/admin/users` into a data-only `createAdminUserBirthCommand`, preserving its complete atomic write set and existing response. Independent design review accepted the exact two nonblocking admission gates below. Batch birth is separate; no production purpose, flag, rollout transition or external capability is enabled.
+
+## Birth and authorization
+
+Capture a closed immutable snapshot of the existing validated scalar fields and owned copies of direct permissions/selected namespaces before the first await. Generate target ID/hash outside the transaction as today. No client, callback, arbitrary SQL/columns, plan or custom runner in the command interface. Use the existing default READ COMMITTED BIRTH root with selected action-role SHARE and actor-only R3/R5 witnesses. No top-level target locks, R1, upgrade, takeover, late acquire or kernel changes.
+
+Apply the batch birth contract's exact genuine/open/same-connection, plan identity, frozen shape, actual actor/parent and born-set checks. Recheck live activated non-recycled actor authority, raw users.role admin or exact positive admin membership held FOR SHARE. Recheck selected role and stored permission codes under the held parent and validate every explicit admission namespace from fresh role codes plus captured direct permissions before target DML. Do not silently adopt changed namespaces or repair the actor/target. Missing role and authority failures are fixed domain refusals.
+
+Call `insertUserForBirth` once, require its returned ID and exact born target, and preserve all current user fields/defaults. Users, aliases, selected role and its cleanup, explicit enabled admissions, conditional disabled attendance, direct permissions, user_orgs, optional group membership and shift assignment remain in this one transaction on tx. No copied role/admission SQL. Preserve user_orgs.is_active=true even when users.is_active=false. Assignment ID generation may happen in the command; no retry/replay. Cache, audit, access snapshot, invite work and response stay after confirmed COMMIT. Uncertain COMMIT and post-commit failure do not imply rollback.
+
+## Two nonblocking gates
+
+For this BIRTH producer only, after actor witnesses are held, organization and rollout admission are nonblocking and contention aborts the complete birth. The sole additional class-00 acquisition seam is `tryAcquireAttendanceCalculationRolloutLockForBirthV1`. Existing W4 wait/deadline helpers and source/rollback/transition/closure contracts remain unchanged.
+
+When authoritative org and group or default shift are selected, use exactly one `SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0)) AS acquired` with the unchanged `buildAttendanceTimezoneRuntimeOrgLockKeyV1` key. One row/true succeeds; false throws existing `AuthorizationInputBusyError('lock_timeout')`; malformed result is a fixed contract failure. No wait, retry, sleep, timeout change, copied key or session lock. Org-only user_orgs admission retains the original no-timezone-lock branch. Route maps actual AuthorizationInputBusyError to the existing fixed409 body.
+
+After org success retain the existing org-qualified shift FOR SHARE/segment-count check. Actual canonical shift update/delete and group delete acquire the same org prefix first; do not add a late group SHARE. Missing shift retains its error. Only locked shifts with more than one segment parse the canonical rollout org and enter the new helper. Invalid org/posture preserves the existing multisegment refusal.
+
+Add the narrowly named helper next to existing canonical acquisition helpers in `attendance/w4c0-identity.ts`. It accepts AuthorizationInputTx and CanonicalAttendanceRolloutOrgKeyV1 only, requires genuine/open/same-connection shared BIRTH before SQL, and refuses any ambient settlement coordination context. Reuse `buildAttendanceCalculationRolloutAdvisoryKey`; issue exactly one `SELECT pg_try_advisory_xact_lock_shared($1::bigint) AS acquired`. Exactly one true succeeds; false uses existing `busyError('rollout')`; malformed result has a fixed values-free protocol error. No mode argument, timeout/clock changes, retry, fallback or runtime import of the AIS engine. Existing helpers, enums, key builders and all old callers remain behavior-identical.
+
+Only this command may call/import the new helper. Immediately after acquisition use unchanged `resolveSegmentCalculationPosture(tx,org)` and require referenceSegments. Route maps the exact rollout-busy code to fixed503, preserving422 posture refusal. Repeat context/actual witness checks before the first target write. This is an explicit narrow amendment to the W4 no-try rule, not a general new rollout mode.
+
+## Verification
+
+Cover full no-onboarding/org-only/group-only/single-segment/multisegment rows and refusals; exact actor/role/born/target-collision negatives; whole atomic rollback at dependent writes; commit/post-commit distinctions; original route neighbors. Production caller/root/new helper guards require negative controls for aliases/loaders/raw clients/extra callbacks/options and missing witnesses. Main owns registry/caller/CI integration, retaining truthful B-04/W-07b ownership and all sibling tests.
+
+Native synthetic gates: direct org→actor competitor vs actor→org-try birth; inverse order and unrelated org; canonical shift update/delete before and after the real org prefix; rollout exclusive holder; actual SHARE→org waiter plus queued exclusive with birth try (assert no physical wait, allow true or false according to actual PG); successful multisegment SHARE held through COMMIT. Use blocker PID/phase evidence and full persisted effects. Mutate each nonblocking gate into blocking/removal and require physical/behavioral red, save bytes and exact restore. No assumed queue fairness, artificial timeout increase or forced victim.
+
+Main alone runs DB/heavy against the existing owned synthetic PG. Independent code/oracle review and actual gates remain necessary. This design PASS is not W16 conversion, remote CI, real environment or complete B2 acceptance. No install, commit, push, deployment, staging or real account/data operation.

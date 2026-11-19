@@ -8,13 +8,15 @@
  * caller's transaction.
  *
  * D21 (slice Y5a): the FIRST statement bumps the D21 subject authorization version row of every
- * locked user, sorted, BEFORE the `users … FOR UPDATE` rows are taken. An admission transaction
+ * locked user, sorted, BEFORE the `users … FOR UPDATE` rows are taken (under `nowait`, #6924's
+ * authorization operation, it instead takes the existing version rows FOR UPDATE NOWAIT and writes
+ * nothing; the operation's DML triggers then advance them). An admission transaction
  * locks `subject_authorization_versions` FOR SHARE and only then `users` FOR SHARE (the
  * live-authority order); a writer that took `users` first and bumped the subject row later (through
  * a membership trigger) would form the one holder-vs-writer cycle the protocol forbids. Doing it here
  * makes "every caller bumps first" true by construction for all 14 writer files.
  */
-import { bumpSubjectAuthorizationVersions } from '../multitable/authz-version-protocol'
+import { bumpSubjectAuthorizationVersions, lockSubjectAuthorizationVersions, lockSubjectAuthorizationVersionsNowait } from '../multitable/authz-version-protocol'
 
 export type AccessGraphTransactionClient = {
   query: (
@@ -47,12 +49,18 @@ function normalizeUserIds(userIds: string[]): string[] {
 export async function lockUsersForAccessGraphWrite(
   client: AccessGraphTransactionClient,
   userIds: string[],
+  options: Readonly<{ nowait?: boolean; lockOnly?: boolean }> = {},
 ): Promise<Map<string, LockedAccessGraphUser>> {
   const normalizedUserIds = normalizeUserIds(userIds)
   const lockedUsers = new Map<string, LockedAccessGraphUser>()
 
-  // D21: subject version rows first (sorted, one statement), then the users rows.
-  await bumpSubjectAuthorizationVersions(client, normalizedUserIds)
+  // D21: subject version rows first (sorted, one statement), then the users rows. Under `nowait`
+  // (#6924's authorization operation) the existing version rows are taken NOWAIT and lock-only,
+  // like the users rows below; the operation's DML triggers advance them. Under `lockOnly` (a
+  // read-only CONSUME_CLASS_DECISION plan, which issues no DML) they are taken lock-only and waiting.
+  if (options.nowait === true) await lockSubjectAuthorizationVersionsNowait(client, normalizedUserIds)
+  else if (options.lockOnly === true) await lockSubjectAuthorizationVersions(client, normalizedUserIds)
+  else await bumpSubjectAuthorizationVersions(client, normalizedUserIds)
 
   for (const userId of normalizedUserIds) {
     const result = await client.query(
@@ -69,7 +77,7 @@ export async function lockUsersForAccessGraphWrite(
               (to_jsonb(users) ->> 'purged_at') AS purged_at
          FROM users
         WHERE id = $1::text
-        FOR UPDATE`,
+        FOR UPDATE${options.nowait === true ? ' NOWAIT' : ''}`,
       [userId],
     )
     const row = result.rows[0]

@@ -35,6 +35,8 @@ const POLICY_IMPORTER_ALLOWLIST: ReadonlyArray<ImportEdge> = [
   ['auth/security-action-privilege.ts', './external-login-assurance'],
   ['auth/security-action-proof.ts', './external-login-assurance'],
   ['auth/security-action-proof.ts', './external-login-assurance'],
+  // Strict entry reads only SECURITY_ACTION_POLICY_REVISION. A second specifier from this file is a new edge.
+  ['auth/strict-dingtalk-entry.ts', './external-login-assurance'],
 ]
 /** Allowlists are posix. path.relative on Windows returns backslashes. */
 function posixImportEdges(edges: ReadonlyArray<ImportEdge>): ImportEdge[] {
@@ -361,7 +363,7 @@ describe('security action purpose registry', () => {
     expect(source).not.toMatch(/\brequire\s*\(/)
   })
 
-  it('is imported by exactly the allowlisted files: the classifier and the action proof service', () => {
+  it('is imported by exactly the allowlisted files: the classifier, the action proof service, and strict entry', () => {
     const edges = posixImportEdges(collectImportEdges(SRC, /external-login-assurance/, (file) => readFileSync(file, 'utf8')))
     expect(importEdgeViolations(edges, POLICY_IMPORTER_ALLOWLIST)).toEqual([])
     for (const file of listSourceFiles(SRC)) {
@@ -382,6 +384,6 @@ describe('security action purpose registry', () => {
     const loaded = importSpecifiers("module.exports = () => [require(`./external-login-assurance`), import(`./external-login-assurance`)]\n", 'scratch.js')
       .map((specifier): ImportEdge => ['scratch.js', specifier])
     expect(importEdgeViolations([...allowed, ...loaded], allowed)).toEqual(['unexpected: scratch.js -> ./external-login-assurance', 'unexpected: scratch.js -> ./external-login-assurance'])
-    expect(importEdgeViolations(allowed.slice(0, -1), allowed)).toEqual(['missing: auth/security-action-proof.ts -> ./external-login-assurance'])
+    expect(importEdgeViolations(allowed.slice(0, -1), allowed)).toEqual(['missing: auth/strict-dingtalk-entry.ts -> ./external-login-assurance'])
   })
 })

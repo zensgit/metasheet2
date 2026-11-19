@@ -44,13 +44,21 @@ const SRC = path.join(BACKEND, 'src')
 /**
  * The only files in `src` that may import the classifier or the policy module, as exact edges
  * relative to `src`: the classifier imports the policy types, and the action proof service imports
- * the policy module (a type import and a value import) and the classifier. Nothing else may.
+ * the policy module (a type import and a value import) and the classifier; the role-plan helper
+ * imports only the classifier. The closed B2 ceremony, proof and strict-runtime consumers add
+ * only the exact static declarations listed below.
  */
 const POLICY_MODULE_IMPORT_ALLOWLIST: ReadonlyArray<ImportEdge> = [
   ['auth/security-action-privilege.ts', './external-login-assurance'],
   ['auth/security-action-proof.ts', './external-login-assurance'],
   ['auth/security-action-proof.ts', './external-login-assurance'],
   ['auth/security-action-proof.ts', './security-action-privilege'],
+  ['rbac/authorization-privilege-witness-plan.ts', '../auth/security-action-privilege'],
+  ['auth/admin-grant-receiving-reader.ts', './security-action-privilege'],
+  ['auth/admin-grant-target-ceremony.ts', './security-action-privilege'],
+  ['auth/admin-grant-proof.ts', './security-action-privilege'],
+  ['auth/strict-dingtalk-entry.ts', './security-action-privilege'],
+  ['auth/strict-dingtalk-entry.ts', './external-login-assurance'],
 ]
 const MODULE_PATH = path.join(SRC, 'auth', 'security-action-privilege.ts')
 const DB_SPEC = 'tests/integration/security-action-privilege.db.test.ts'
@@ -107,9 +115,10 @@ describe('privilege inputs read', () => {
     expect(count(sql, 'WHERE una.user_id = $1::text')).toBe(1)
     expect(count(sql, 'WHERE s.admin_user_id = $1::text')).toBe(1)
     expect(count(sql, 'WHERE g.admin_user_id = $1::text')).toBe(1)
+    expect(count(sql, 'WHERE a.admin_user_id = $1::text')).toBe(1)
     expect(count(sql, 'WHERE u.id = $1::text')).toBe(1)
-    expect(count(sql, '(SELECT jsonb_agg(')).toBe(6)
-    expect(count(sql, '$1')).toBe(7)
+    expect(count(sql, '(SELECT jsonb_agg(')).toBe(7)
+    expect(count(sql, '$1')).toBe(8)
     expect(sql).toMatch(DEPARTMENT_SCOPE_PROJECTION)
   })
 
@@ -117,7 +126,7 @@ describe('privilege inputs read', () => {
     const { executor, calls } = privilegeHarness()
     await readPrivilegeInputs(executor, SUBJECT)
     expect(calls[3].sql).not.toMatch(/elearning_admin_scopes|attendance_scheduler_scopes|elearning_object_acl/)
-    expect(PRIVILEGE_GRANT_SOURCE_TABLES).toHaveLength(7)
+    expect(PRIVILEGE_GRANT_SOURCE_TABLES).toHaveLength(8)
     expect(HIGH_PRIVILEGE_REASONS).toEqual([
       'platform_admin_flag', 'platform_admin_role_column', 'platform_admin_role', 'delegated_admin_role',
       'delegated_admin_scope', 'admin_level_code', 'sensitive_authority_code',
@@ -510,6 +519,15 @@ describe('privilege witness', () => {
     expect(witness).toBe('3afa149f203a4a348f40845d0a1a0276aefa64eb9ce624c5f5739039517ff9e6')
   })
 
+  it('binds a stored delegation revision and keeps paused delegated administrators high privilege', async () => {
+    const row = { ...pinnedRow, role_ids: ['attendance_admin'] }
+    const first = await readInputs({ ...row, delegation_activations: [['attendance', false, 'dfa9ac17-29c4-4567-b936-79517e6b958d']] })
+    const later = await readInputs({ ...row, delegation_activations: [['attendance', false, '7cec0d1e-680c-4077-9e54-ce35ee48da61']] })
+    expect(classifyPrivilege(first).reasons).toContain('delegated_admin_role')
+    expect(computePrivilegeWitness(first)).not.toBe(computePrivilegeWitness(later))
+    expect(computePrivilegeWitness(first)).not.toBe(computePrivilegeWitness(await readInputs(row)))
+  })
+
   it('does not depend on the order rows arrive in and is deterministic', async () => {
     const shuffled: Partial<PrivilegeRow> = {
       ...pinnedRow,
@@ -638,7 +656,35 @@ describe('wiring', () => {
     expect(importSpecifiers("import { a } from './x'\nexport { b } from './y'\nexport * from './z'\nexport const c = 1\n")).toEqual(['./x', './y', './z'])
   })
 
-  it('is imported, together with the policy module, by exactly the allowlisted files: the classifier and the action proof service', () => {
+  it('permits exactly one static helper classifier edge and rejects missing, duplicate or unexpected edges', () => {
+    const edge: ImportEdge = ['rbac/authorization-privilege-witness-plan.ts', '../auth/security-action-privilege']
+    const original = POLICY_MODULE_IMPORT_ALLOWLIST.filter(([file]) => file !== edge[0])
+    expect(importEdgeViolations([...original, edge], POLICY_MODULE_IMPORT_ALLOWLIST)).toEqual([])
+    expect(importEdgeViolations(original, POLICY_MODULE_IMPORT_ALLOWLIST)).toEqual([`missing: ${edge[0]} -> ${edge[1]}`])
+    expect(importEdgeViolations([...original, edge, edge], POLICY_MODULE_IMPORT_ALLOWLIST)).toEqual([`unexpected: ${edge[0]} -> ${edge[1]}`])
+    expect(importEdgeViolations([...original, edge, ['rbac/unexpected.ts', edge[1]]], POLICY_MODULE_IMPORT_ALLOWLIST)).toEqual([`unexpected: rbac/unexpected.ts -> ${edge[1]}`])
+    const file = path.join(SRC, edge[0])
+    const source = readFileSync(file, 'utf8')
+    const expected = "import { PrivilegeInputsUnavailableError, readPrivilegeInputs } from '../auth/security-action-privilege'"
+    const loads = (text: string) => {
+      const tree = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true)
+      return tree.statements.filter((statement) => (ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement))
+        && statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier) && statement.moduleSpecifier.text === edge[1])
+        .map((statement) => statement.getText(tree).replace(/\s+/g, ' '))
+    }
+    expect(loads(source)).toEqual([expected])
+    for (const unexpected of [
+      "export { readPrivilegeInputs } from '../auth/security-action-privilege'",
+      "import * as privilege from '../auth/security-action-privilege'",
+      "import type { PrivilegeInputs } from '../auth/security-action-privilege'",
+      "import { assessSecurityActionPrivilege } from '../auth/security-action-privilege'",
+    ]) expect(loads(source.replace(expected, unexpected))).not.toEqual([expected])
+    for (const dynamic of ["import('../auth/security-action-privilege')", "require('../auth/security-action-privilege')"]) {
+      expect(`${source}\n${dynamic}`).toMatch(/(?:require|import)\(\s*['"`][^'"`]*(?:security-action-privilege|external-login-assurance)/)
+    }
+  })
+
+  it('is imported, together with the policy module, by exactly the allowlisted files', () => {
     const edges = posixImportEdges(collectImportEdges(SRC, /security-action-privilege|external-login-assurance/, (file) => readFileSync(file, 'utf8')))
     expect(importEdgeViolations(edges, POLICY_MODULE_IMPORT_ALLOWLIST)).toEqual([])
     for (const file of listSourceFiles(SRC)) {

@@ -98,6 +98,8 @@ const pg = vi.hoisted(() => ({
   poolQuery: vi.fn(),
 }))
 
+const operationProbe = vi.hoisted(() => ({ calls: [] as string[] }))
+
 const rbac = vi.hoisted(() => ({
   isAdmin: vi.fn(),
 }))
@@ -116,6 +118,41 @@ vi.mock('../../src/db/pg', () => ({
 vi.mock('../../src/middleware/auth', () => {
   const passThrough = (_req: Request, _res: Response, next: NextFunction) => next()
   return { authenticate: passThrough, authMiddleware: passThrough, default: passThrough }
+})
+
+// Preserve actual compatibility writer + actor authority; replace only its transaction carrier.
+vi.mock('../../src/rbac/authorization-input-lock', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/rbac/authorization-input-lock')>()
+  const brand = await import('../../src/rbac/authorization-input-brand')
+  return { ...actual, withAuthorizationInputTransaction: (plan: { intent: string }, work: (tx: unknown) => Promise<unknown>, ...rest: unknown[]) => {
+    if (plan.intent !== 'GRANT_DIRECT' && plan.intent !== 'REVOKE_DIRECT') return (actual.withAuthorizationInputTransaction as (...args: unknown[]) => unknown)(plan, work, ...rest)
+    const actor = { id: 'u-non-admin', isActive: true, activationStatus: 'activated', deletedAt: null, purgedAt: null }
+    const target = { id: 'u-target', isActive: true, activationStatus: 'activated', deletedAt: null, purgedAt: null }
+    const locked = new Map([[actor.id, actor], [target.id, target]])
+    const tx = {
+      plan, locked, roleRows: new Map(), born: new Set(), world: 'shared',
+      witnessed: { userIds: new Set(locked.keys()), admissionUserIds: new Set(locked.keys()) },
+      query: (sql: string, params?: unknown[]) => sql.includes('current_setting') || sql.includes('set_config')
+        ? Promise.resolve({ rows: [] }) : pg.query(sql, params),
+    }
+    const handle = brand.mintAuthorizationInputBrand(tx, [tx])
+    return Promise.resolve(work(tx)).finally(handle.close)
+  } }
+})
+vi.mock('../../src/auth/jwt-middleware', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/auth/jwt-middleware')>()),
+  readOnlyAuthorizationJwtAuth: (_req: Request, _res: Response, next: NextFunction) => next(),
+}))
+// Drive the production authorization evaluator with an active non-admin snapshot. Database and
+// transaction behavior are separately exercised by authorization-operation-http.db.test.ts.
+vi.mock('../../src/admin/authorization-operation-service', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/admin/authorization-operation-service')>()
+  const evaluate = (actorId: string, input: Parameters<typeof actual.evaluateAuthorizationOperationAccess>[2]) => {
+    operationProbe.calls.push(actorId)
+    const snapshot = { actor: { id: actorId, role: 'user', is_active: true, activation_status: 'activated' }, target: { id: input.targetUserId }, memberships: [], delegatedWitness: null }
+    return actual.evaluateAuthorizationOperationAccess(snapshot as Parameters<typeof actual.evaluateAuthorizationOperationAccess>[0], actorId, input, { admissionChanges: [] } as never)
+  }
+  return { ...actual, previewAuthorizationOperation: evaluate, commitAuthorizationOperation: evaluate }
 })
 
 // `isAdmin` 是三套判据共同的兜底（`rbac/service.ts` 的 `isAdmin` -> `user_roles`），由本文件驱动；
@@ -154,7 +191,7 @@ vi.mock('../../src/integrations/dingtalk/work-notification-verify', async (impor
 vi.mock('../../src/integrations/dingtalk/approval-card-config', async (importOriginal) =>
   probe.wrap(await importOriginal<Record<string, unknown>>(), 'dingtalk-approval-card-config'))
 vi.mock('../../src/auth/permission-templates', async (importOriginal) =>
-  probe.wrap(await importOriginal<Record<string, unknown>>(), 'permission-templates'))
+  probe.wrap(await importOriginal<Record<string, unknown>>(), 'permission-templates', ['getPermissionTemplate']))
 vi.mock('../../src/auth/session-revocation', async (importOriginal) =>
   probe.wrap(await importOriginal<Record<string, unknown>>(), 'session-revocation'))
 vi.mock('../../src/auth/session-registry', async (importOriginal) =>
@@ -204,15 +241,17 @@ type GateFamily =
   | 'delegation'
   /** `requireAdminRole()`（`guards/audit-integration.ts`），中间件首位 */
   | 'middleware'
-  /** `routes/permissions.ts` 处理器内 `isAdmin` 直调 */
+  /** `routes/permissions.ts` delegates authority to the transactional compatibility writer */
   | 'inline'
+  | 'operation'
 
 /** 每个门族的门函数名：`REGISTRY[*].gate` 里每条分支链的**最后一环**必须是它（自检）。 */
 const FAMILY_GATE: Readonly<Record<GateFamily, string>> = {
   platform: 'ensurePlatformAdmin',
   delegation: 'ensureRoleDelegationAdmin',
   middleware: 'requireAdminRole',
-  inline: 'isAdmin',
+  inline: 'writeLegacyAuthorizationException',
+  operation: 'previewAuthorizationOperation',
 }
 
 interface MountSpec {
@@ -436,7 +475,7 @@ function parseGate(gate: string): { file: string; branches: string[][] } | null 
 }
 
 // ---------------------------------------------------------------------------
-// 登记表（68 条）——`reg` = 注册文件，`gate` = 注册文件 + 门函数名链；均由「fixture 自检」对源码自证
+// 登记表（79 条）——`reg` = 注册文件，`gate` = 注册文件 + 门函数名链；均由「fixture 自检」对源码自证
 // ---------------------------------------------------------------------------
 
 interface WriteRouteEntry {
@@ -459,6 +498,8 @@ const P = 'platform' as const
 const D = 'delegation' as const
 
 const REGISTRY: readonly WriteRouteEntry[] = [
+  { mount: 'admin-users', method: 'post', path: '/api/admin/authorization-operations/preview', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts previewAuthorizationOperation', family: 'operation' },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/authorization-operations', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts commitAuthorizationOperation', family: 'operation' },
   { mount: 'admin-users', method: 'post', path: '/api/admin/users/batch/create', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/users/batch/update', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/users/batch/disable', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
@@ -466,11 +507,12 @@ const REGISTRY: readonly WriteRouteEntry[] = [
   { mount: 'admin-users', method: 'post', path: '/api/admin/users/recycle/restore', reg: 'routes/admin-user-recycle.ts', gate: 'routes/admin-user-recycle.ts ensureRecycleAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/users/recycle/purge', reg: 'routes/admin-user-recycle.ts', gate: 'routes/admin-user-recycle.ts ensureRecycleAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/users/recycle/rescrub', reg: 'routes/admin-user-recycle.ts', gate: 'routes/admin-user-recycle.ts ensureRecycleAdmin', family: P },
-  // --- routes/admin-users.ts（27 条；门为处理器第一条语句） ---
+  // --- routes/admin-users.ts（28 条；门为处理器第一条语句） ---
   { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/member-groups', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/scope-templates', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/scope-templates/:templateId/departments/:action(assign|unassign)', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/scope-templates/:templateId/member-groups/:action(assign|unassign)', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/users/:userId/scopes/activation', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/users/:userId/scopes/:action(assign|unassign)', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/users/:userId/scope-groups/:action(assign|unassign)', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/users/:userId/member-groups/:action(assign|unassign)', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
@@ -554,10 +596,9 @@ const REGISTRY: readonly WriteRouteEntry[] = [
   { mount: 'canary', method: 'post', path: '/promote/:topic', reg: 'routes/canary-routes.ts', gate: 'routes/canary-routes.ts requireAdminRole（中间件首位）', family: 'middleware' },
   { mount: 'canary', method: 'post', path: '/rollback/:topic', reg: 'routes/canary-routes.ts', gate: 'routes/canary-routes.ts requireAdminRole（中间件首位）', family: 'middleware' },
 
-  // --- routes/permissions.ts 的 /api/admin 切片（1 条） ---
-  // 门在处理器体内，顺序是：`if (!pool)` 503 -> 身份（`req.user` 的 id/sub/userId）缺失 401 ->
-  // `isAdmin(adminUserId)` 为假 403。W4-I §3.8 记的是行号（已漂移），本表只记函数名。
-  { mount: 'permissions', method: 'post', path: '/api/admin/permission-templates/apply', reg: 'routes/permissions.ts', gate: 'routes/permissions.ts isAdmin（处理器内直调：缺身份 401，非管理员 403）', family: 'inline' },
+  // --- routes/permissions.ts 的 /api/admin 切片（1 条；真实事务 writer 判权） ---
+  // 旧模板入口在事务写入器里以当前 RBAC admin membership 判定，而非请求 claim。
+  { mount: 'permissions', method: 'post', path: '/api/admin/permission-templates/apply', reg: 'routes/permissions.ts', gate: 'routes/permissions.ts writeLegacyAuthorizationException（事务内实时管理身份）', family: 'inline' },
 ]
 
 /**
@@ -723,6 +764,7 @@ const pinned = usePinnedServer()
 
 function armProbes(): void {
   probe.reset()
+  operationProbe.calls.length = 0
   pg.query.mockClear()
   pg.transaction.mockClear()
   pg.poolQuery.mockClear()
@@ -735,7 +777,12 @@ async function send(
 ) {
   pinned.setApp(buildApp(entry.mount, user))
   armProbes()
-  return request(pinned.url())[entry.method](toUrl(entry)).send(body)
+  const validBody = entry.family === 'inline' && Object.keys(body).length === 0
+    ? { userId: 'u-target', templateId: 'attendance-employee' }
+    : entry.family === 'operation' && Object.keys(body).length === 0
+      ? { targetUserId: 'u-target', action: { kind: 'direct.grant', code: 'attendance:read' }, admissionChanges: [], reason: 'test', ...(entry.path.endsWith('/preview') ? {} : { clientOperationId: '12345678-1234-4234-8234-123456789abc', expectedVersion: `opaque-v1:${'a'.repeat(64)}` }) }
+      : body
+  return request(pinned.url())[entry.method](toUrl(entry)).send(validBody)
 }
 
 /** 记录式 response，用于不经 HTTP 的直调（`isAdmin` 抛错时 express 4 不接管 async 拒绝，HTTP 会挂住）。 */
@@ -823,12 +870,13 @@ describe('/api/admin 挂载点写路由守卫 — fixture 自检', () => {
     }
   })
 
-  it('登记表条数与分族口径固定：76 条 / 2 条委派例外 / 4 条中间件门 / 1 条 inline', () => {
-    expect(REGISTRY).toHaveLength(76)
+  it('登记表条数与分族口径固定：79 条 / 2 条委派例外 / 4 条中间件门 / 1 条事务门 / 2 条操作门', () => {
+    expect(REGISTRY).toHaveLength(79)
     expect(REGISTRY.filter((e) => e.family === 'delegation')).toHaveLength(2)
     expect(REGISTRY.filter((e) => e.family === 'middleware')).toHaveLength(4)
     expect(REGISTRY.filter((e) => e.family === 'inline')).toHaveLength(1)
-    expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(69)
+    expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(70)
+    expect(REGISTRY.filter((e) => e.family === 'operation')).toHaveLength(2)
     // 每条都必须带来源：reg = 该挂载点的注册文件；gate 可解析，且每条分支链的最后一环是本族的门函数
     for (const entry of REGISTRY) {
       const delegatedRecycle = entry.mount === 'admin-users' && entry.path.startsWith('/api/admin/users/recycle/')
@@ -836,7 +884,7 @@ describe('/api/admin 挂载点写路由守卫 — fixture 自检', () => {
       const gate = parseGate(entry.gate)
       expect(gate, `${label(entry)} gate 形状不认识：${entry.gate}`).not.toBeNull()
       for (const branch of gate!.branches) {
-        expect(branch[branch.length - 1], label(entry)).toBe(delegatedRecycle ? 'ensureRecycleAdmin' : FAMILY_GATE[entry.family])
+        expect(branch[branch.length - 1], label(entry)).toBe(delegatedRecycle ? 'ensureRecycleAdmin' : entry.family === 'operation' && entry.path.endsWith('/authorization-operations') ? 'commitAuthorizationOperation' : FAMILY_GATE[entry.family])
       }
     }
   })
@@ -933,10 +981,14 @@ describe('(A) 非管理员（无任何 legacy admin claim，isAdmin 恒 false）
         })
       } else if (entry.family === 'middleware') {
         expect(response.body.code).toBe('ADMIN_REQUIRED')
+      } else if (entry.family === 'inline') {
+        expect(response.body).toEqual({ error: 'Admin access required', code: 'FORBIDDEN' })
+        expect(pg.query.mock.calls.map(call => String(call[0]))).toEqual([expect.stringContaining("role_id = 'admin' FOR SHARE")])
       } else {
-        expect(response.body.error).toBe('Only admins can apply permission templates')
+        expect(response.body.error.code).toBe('FORBIDDEN')
+        expect(operationProbe.calls).toEqual(['u-non-admin'])
       }
-      expectDeniedEffects(entry.family, effectReport())
+      if (entry.family !== 'inline') expectDeniedEffects(entry.family, effectReport())
     },
   )
 
@@ -1013,13 +1065,17 @@ describe('(A) RBAC 判据不可用（isAdmin 抛错）时 fail-closed', () => {
     }
   })
 
-  it('permissions（处理器内 isAdmin 直调）-> 500，不是 2xx，模板与审计零调用', async () => {
-    rbac.isAdmin.mockRejectedValue(new Error('rbac unavailable'))
+  it('permissions transactional authority lookup failure -> 500 with no write', async () => {
+    pg.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('SELECT role_id')) throw new Error('rbac unavailable')
+      return { rows: [] }
+    })
     const entry = REGISTRY.find((candidate) => candidate.family === 'inline')!
-    const response = await send(entry, NON_ADMIN_USER, { userId: 'u-target', templateId: 'tpl-1' })
+    const response = await send(entry, NON_ADMIN_USER, { userId: 'u-target', templateId: 'attendance-employee' })
     expect(response.status).toBe(500)
     expect(response.status).not.toBeLessThan(400)
     expect(probe.calls).toEqual([])
+    expect(pg.query.mock.calls.map(call => String(call[0]))).toEqual([expect.stringContaining("role_id = 'admin' FOR SHARE")])
     expect(pg.poolQuery.mock.calls).toEqual([])
   })
 
@@ -1092,12 +1148,17 @@ describe('(A) 控制组：同一请求、只改门的输入，结论必须翻面
   }
 
   it.each(CONTROLS.map((control) => [`${control.mount} ${control.path}`, control] as const))(
-    '%s：isAdmin=true（其余一切不变）-> 不再是 401/403',
+    '%s：对应权限判据为 admin -> 不再是 401/403',
     async (_name, control) => {
       const entry = entryOf(control)
       rbac.isAdmin.mockResolvedValue(true)
+      if (entry.family === 'inline') {
+        // The migrated template writer checks a live role row, not isAdmin().
+        pg.query.mockImplementation(async (sql: string) => ({ rows: sql.includes('SELECT role_id') ? [{ role_id: 'admin' }] : [] }))
+      }
       const response = await send(entry, NON_ADMIN_USER)
       expect([401, 403], label(entry)).not.toContain(response.status)
+      if (entry.family === 'inline') expect(pg.query.mock.calls.some(call => String(call[0]).includes('SELECT role_id'))).toBe(true)
       if (control.expectDownstream) {
         expect(probe.calls).toContain(control.expectDownstream)
       }

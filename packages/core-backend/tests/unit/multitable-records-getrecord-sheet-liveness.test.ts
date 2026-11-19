@@ -173,6 +173,64 @@ describe('#5833 records.getRecord sheet liveness', () => {
     expect(db.recordSelects()).toHaveLength(1)
   })
 
+  it('platform 1b: patchRecord reads the row FOR UPDATE before its UPDATE on the same query; getRecord never locks', async () => {
+    const patchDb = createFakeDb()
+    await patchRecord({ query: patchDb.query, sheetId: LIVE, recordId: 'rec_live', changes: { [`fld_${LIVE}`]: 'y' } })
+    const readIndex = patchDb.log.findIndex((entry) => entry.sql.startsWith(RECORD_SELECT))
+    const updateIndex = patchDb.log.findIndex((entry) => entry.sql.startsWith('UPDATE meta_records'))
+    expect(readIndex).toBeGreaterThanOrEqual(0)
+    expect(updateIndex).toBeGreaterThan(readIndex)
+    expect(patchDb.log[readIndex]!.sql).toBe(`${RECORD_SELECT} WHERE id = $1 AND sheet_id = $2 FOR UPDATE`)
+    expect(patchDb.log[readIndex]!.params).toEqual(['rec_live', LIVE])
+
+    const getDb = createFakeDb()
+    await getRecord({ query: getDb.query, sheetId: LIVE, recordId: 'rec_live' })
+    expect(getDb.recordSelects().map((entry) => entry.sql)).toEqual([
+      `${RECORD_SELECT} WHERE id = $1 AND sheet_id = $2`,
+    ])
+  })
+
+  it('platform 1b backstop: a zero-row UPDATE still fails closed (NotFound / VERSION_CONFLICT) and writes no revision', async () => {
+    const zeroRowUpdate = () => {
+      const db = createFakeDb()
+      const query: MultitableRecordsQueryFn = async (sql, params = []) => {
+        if (sql.replace(/\s+/g, ' ').trim().startsWith('UPDATE meta_records')) {
+          db.log.push({ sql: 'UPDATE meta_records', params: [...params] })
+          return { rows: [], rowCount: 0 }
+        }
+        return db.query(sql, params)
+      }
+      return { db, query }
+    }
+    const revisionWrites = (db: ReturnType<typeof createFakeDb>) =>
+      db.log.filter((entry) => entry.sql.includes('meta_record_revisions') && !entry.sql.startsWith('SELECT'))
+
+    const unversioned = zeroRowUpdate()
+    const notFound = await captureRejection(patchRecord({
+      query: unversioned.query,
+      sheetId: LIVE,
+      recordId: 'rec_live',
+      changes: { [`fld_${LIVE}`]: 'y' },
+    }))
+    expect(shapeOf(notFound)).toEqual({
+      ctor: MultitableRecordNotFoundError,
+      code: 'NOT_FOUND',
+      message: 'Record not found: rec_live',
+    })
+    expect(revisionWrites(unversioned.db)).toEqual([])
+
+    const versioned = zeroRowUpdate()
+    const conflict = await captureRejection(patchRecord({
+      query: versioned.query,
+      sheetId: LIVE,
+      recordId: 'rec_live',
+      expectedVersion: 3,
+      changes: { [`fld_${LIVE}`]: 'y' },
+    }))
+    expect(conflict.code).toBe('VERSION_CONFLICT')
+    expect(revisionWrites(versioned.db)).toEqual([])
+  })
+
   it('plugin-scoped API surfaces the same refusal after the scope hook passes', async () => {
     const db = createFakeDb()
     const assertSheetScope = vi.fn(async () => ({ registered: true }))

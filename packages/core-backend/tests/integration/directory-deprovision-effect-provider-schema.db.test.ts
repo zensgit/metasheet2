@@ -25,6 +25,7 @@ import { randomUUID } from 'node:crypto'
 import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { readStrictLoginInstallation } from '../../src/auth/strict-login-grant-store'
 
 import { up as weakLedgerUp } from '../../src/db/migrations/zzzz20260724170000_directory_deprovision_ledger_and_generation'
 import { up as hardenedLedgerUp } from '../../src/db/migrations/zzzz20260728100000_harden_directory_deprovision_ledger'
@@ -80,6 +81,14 @@ describeDb('deprovision effect provider witness (real DB, isolated schema)', () 
     db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: testPool }) })
 
     await sql`CREATE EXTENSION IF NOT EXISTS pgcrypto`.execute(db)
+    // Match Kysely's real ledger shape. This isolated historical schema has never
+    // installed strict login grants; an absent ledger would instead be unreadable.
+    await sql`
+      CREATE TABLE kysely_migration (
+        name varchar(255) PRIMARY KEY,
+        timestamp varchar(255) NOT NULL
+      )
+    `.execute(db)
     await sql`
       CREATE TABLE users (
         id text PRIMARY KEY,
@@ -554,6 +563,7 @@ describeDb('deprovision effect provider witness (real DB, isolated schema)', () 
   it('after the migration the writer records the integration provider on the grant effect only, and the legacy INSERT still succeeds', async () => {
     await upInTransaction()
     await withLedgerClient(async (client) => {
+      expect(await readStrictLoginInstallation(client)).toEqual({ installation: 'never-installed' })
       expect(await probeDeprovisionEffectProviderColumn(client, {})).toBe(true)
     })
 
