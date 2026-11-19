@@ -78,9 +78,13 @@
  *     operation intent takes every lock with try / NOWAIT and holds the operation fence's EXCLUSIVE
  *     table locks (on `users`, `user_roles`, … — tables the holder shares) before R5; its mutex call
  *     passes `nowait`, so that first step is the lock-only NOWAIT form
- *     ({@link lockSubjectAuthorizationVersionsNowait}): a holder answers 55P03 (retryable busy) at
- *     once instead of the operation queueing on it under those table locks, a denied operation
- *     issues no write statement, and the operation's DML triggers advance the held rows;
+ *     ({@link lockSubjectAuthorizationVersionsNowait}): on a subject that HAS a version row, a holder
+ *     answers 55P03 (retryable busy) at once instead of the operation queueing on it under those
+ *     table locks, a denied operation issues no write statement, and the operation's DML triggers
+ *     advance the held rows. It is not "never queues": a subject with no version row yet (D21 does
+ *     not backfill) is locked only at the DML, where the operation can queue on a concurrent
+ *     uncommitted insert of that key up to its 500 ms lock_timeout and then answers the same
+ *     retryable busy (refute [2] on the e0e4406bf realign; probe C3: 55P03 at ~501 ms);
  *   - `rbac/namespace-admission.ts` advisory `lockNamespaceAdmissionWrites`: outside the holder's set;
  *   - `LOCK TABLE … IN SHARE / SHARE ROW EXCLUSIVE MODE` sites (automation-executor.ts,
  *     dingtalk-identity-repair.ts, controlled-handover.ts): compatible with FOR SHARE (ROW SHARE);
@@ -427,6 +431,12 @@ export async function bumpSheetPermissionVersionBehindSheetRow(
  * Explicit Layer-2 bump: takes the write lock of every listed user's version row, ascending, in ONE
  * statement. Multi-user membership writers (role un/assignment, member-group projection, directory
  * admissions) call it before their DML so concurrent writers acquire the rows in one global order.
+ * The order is global only per STATEMENT: a transaction that takes subject rows in more than one
+ * statement must cover, in its FIRST one, every row its later ones take (a later statement then only
+ * re-takes held rows). Otherwise a writer that sorts the same subjects in one statement (#6924's
+ * exception writers and #6934's activation route bump actor + target together) closes a 40P01 cycle.
+ * Directory sync does this through its mutex inventory, which reads the projected groups' current
+ * members, and its projection refuses any subject the inventory did not hold (refute [1]).
  */
 export async function bumpSubjectAuthorizationVersions(
   queryable: AuthorizationVersionQueryable,
