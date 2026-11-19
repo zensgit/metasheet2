@@ -66,10 +66,19 @@
  *     so the record-permission PUT / DELETE routes bump their sheet row AFTER phases 1–4 and BEFORE
  *     phase 5 — writer order = meta_sheets → sheet row → record, the holder's order for the rows they
  *     share, and the grant routes' order (meta_sheets → sheet row) for the rows they share;
- *   - `services/stock-preparation-members.ts` locks (`roles` FOR UPDATE / advisory, grantor rows FOR
- *     SHARE, `spreadsheet_permissions` FOR SHARE): none of them is in the holder's lock set, and its
- *     writes bump through the triggers after those locks; it never waits on a holder for anything the
+ *   - `services/stock-preparation-members.ts` locks (`roles` FOR UPDATE / advisory, since #6934 the
+ *     grantor's namespace-admission advisory in SHARED mode, grantor rows FOR SHARE,
+ *     `spreadsheet_permissions` FOR SHARE): none of them is in the holder's lock set, and its writes
+ *     bump through the triggers after those locks; it never waits on a holder for anything the
  *     holder waits on it for;
+ *   - the authorization-input contract (`rbac/authorization-input-lock.ts`, #6924): R0 world → R1 →
+ *     role rows → R3 namespace-admission advisory → R5 = this module's mutex bump, then `users`, so
+ *     every contract writer (the exception writers behind routes/permissions.ts, the authorization
+ *     operation commit) bumps after the locks outside the holder's set and before its DML. The
+ *     operation intent takes every lock with try / NOWAIT and holds the operation fence's EXCLUSIVE
+ *     table locks (on `users`, `user_roles`, … — tables the holder shares) before R5; its mutex call
+ *     passes `nowait`, so the bump takes held version rows NOWAIT too and a holder answers 55P03
+ *     (retryable busy) at once instead of the operation queueing on it under those table locks;
  *   - `rbac/namespace-admission.ts` advisory `lockNamespaceAdmissionWrites`: outside the holder's set;
  *   - `LOCK TABLE … IN SHARE / SHARE ROW EXCLUSIVE MODE` sites (automation-executor.ts,
  *     dingtalk-identity-repair.ts, controlled-handover.ts): compatible with FOR SHARE (ROW SHARE);
