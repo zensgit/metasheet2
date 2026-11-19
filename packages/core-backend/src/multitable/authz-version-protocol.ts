@@ -281,11 +281,16 @@ export const SUBJECT_AUTHORIZATION_VERSIONS_NOWAIT_SQL = `SELECT subject_id FROM
  ORDER BY subject_id
    FOR UPDATE NOWAIT`
 
-/** {@link lockSubjectAuthorizationVersions}: the existing version rows, ascending, waiting, without a write. */
-export const SUBJECT_AUTHORIZATION_VERSIONS_LOCK_SQL = `SELECT subject_id FROM ${SUBJECT_AUTHORIZATION_VERSIONS_TABLE}
- WHERE subject_id = ANY($1::text[])
- ORDER BY subject_id
-   FOR UPDATE`
+/**
+ * {@link lockSubjectAuthorizationVersions}: the existing version rows, waiting, without a write, in the
+ * caller's array order — the canonical (code-unit) order the bump uses through `ORDER BY s.ord` — not
+ * in `ORDER BY subject_id`, which follows the database collation (under en_US / ICU `Bob` and `alice`
+ * sort the other way round, and a bump-first writer of both would cycle with this reader).
+ */
+export const SUBJECT_AUTHORIZATION_VERSIONS_LOCK_SQL = `SELECT v.subject_id FROM unnest($1::text[]) WITH ORDINALITY AS s(subject_id, ord)
+  JOIN ${SUBJECT_AUTHORIZATION_VERSIONS_TABLE} AS v ON v.subject_id = s.subject_id
+ ORDER BY s.ord
+   FOR UPDATE OF v`
 
 const SHEET_VERSION_ENSURE_SQL = `INSERT INTO ${SHEET_PERMISSION_VERSIONS_TABLE} (sheet_id) VALUES ($1) ON CONFLICT (sheet_id) DO NOTHING`
 const SHEET_VERSION_SHARE_SQL = `SELECT sheet_id, version::text AS version FROM ${SHEET_PERMISSION_VERSIONS_TABLE} WHERE sheet_id = $1 FOR SHARE`
@@ -479,13 +484,17 @@ export async function lockSubjectAuthorizationVersionsNowait(
 }
 
 /**
- * The waiting, lock-only form for the access-graph mutex under a read-only plan (#6938's
- * CONSUME_CLASS_DECISION intent, including its identity-read slot: privilege-witness revalidation,
- * the admin-grant receiving reader), whose contract is that it issues no DML. It keeps the D21 order
- * (version rows, then users rows) without advancing any version, so a read does not invalidate the
- * subjects it only reads: takes the version rows that already exist FOR UPDATE, ascending, and writes
- * nothing. A subject with no version row is not locked here; a read-only plan never creates one, and a
- * concurrent bump-first writer that creates it holds nothing this plan waits on afterwards.
+ * The waiting, lock-only form for the access-graph mutex under a CONSUME_CLASS_DECISION plan (#6938:
+ * privilege-witness revalidation, the identity-read slot, the admin-grant / strict-entry / ceremony /
+ * security-action roots). Those plans consume the authorization inputs and write none of them, nor any
+ * D21-covered table: their DML is sessions, strict grants, receipts, challenges, pins, evidence,
+ * watermarks and audit rows. So nothing after this step bumps a version through a trigger, and the
+ * plan keeps the D21 order (version rows, then users rows) without advancing any version — a read does
+ * not invalidate the subjects it only reads. It takes the version rows that already exist FOR UPDATE,
+ * in the bump's canonical order, and writes nothing. A subject with no version row is not locked here;
+ * a bump-first writer that creates it meets this plan only at the users row, and the plan never comes
+ * back to the version table, so no cycle forms. A future CONSUME root that writes a D21-covered table
+ * must bump instead (a trigger bump after the users lock would invert the order).
  */
 export async function lockSubjectAuthorizationVersions(
   queryable: AuthorizationVersionQueryable,

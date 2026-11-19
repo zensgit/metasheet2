@@ -303,9 +303,9 @@ function assertParallelWorkflow(doc) {
         assert.ok(step.run.includes(pullSourceGateAddition + attendanceTemplateRuntimeAddition), 'Keep the attendance template runtime DB suite right after the pull-source write gate suite')
         // D21 authorization version protocol (slice Y5a): trigger coverage matrix, barrier and deadlock
         // cases against real Postgres, whole file, right after the last strict-login suite (the end of main's chain at df83192d9: pull-source gate -> attendance template runtime -> writer suites -> grant suites, #6938/#6939).
-        const authzVersionAddition = '  tests/integration/authz-version-protocol.db.test.ts \\n'
+        const authzVersionAddition = '  tests/integration/authz-version-protocol.db.test.ts \\\n'
         assert.equal(step.run.split(authzVersionAddition).length - 1, 1, 'Authorization version protocol DB suite must run exactly once')
-        assert.ok(step.run.includes('  tests/integration/strict-dingtalk-entry.db.test.ts \\n' + authzVersionAddition), 'Keep the authorization version protocol suite right after the strict DingTalk entry DB suite')
+        assert.ok(step.run.includes('  tests/integration/strict-dingtalk-entry.db.test.ts \\\n' + authzVersionAddition), 'Keep the authorization version protocol suite right after the strict DingTalk entry DB suite')
         step.run = step.run.replace(addition, '')
         step.run = step.run.replace(repairAddition, '')
         step.run = step.run.replace(privilegeAddition, '')
