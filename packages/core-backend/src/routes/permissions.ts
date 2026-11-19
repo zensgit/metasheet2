@@ -7,21 +7,44 @@ import { Router } from 'express'
 import type { Request, Response } from 'express'
 import { authenticate } from '../middleware/auth'
 import { Logger } from '../core/logger'
-import { pool, transaction } from '../db/pg'
+import { pool } from '../db/pg'
 import { sendIfRecoveryConflict } from '../db/recovery-conflict'
-import { auditLog } from '../audit/audit'
 import { AccessGraphUserUnavailableError } from '../directory/access-graph-mutex'
 import { PlatformActorAuthorityLost } from '../admin/platform-actor-authority'
-import { revokeLegacyUserPermission } from '../admin/legacy-permission-revoke'
+import { LegacyExceptionReasonInvalid, readLegacyExceptionReason, writeLegacyAuthorizationException } from '../admin/authorization-exception-compat'
+import { AuthorizationExceptionWriteError } from '../admin/authorization-exception-write'
+import { AuthorizationInputBusyError } from '../rbac/authorization-input-lock'
 import { getPermissionTemplate, listPermissionTemplates } from '../auth/permission-templates'
-import { userHasPermission, listUserPermissions, inspectUserPermissionGrants, isAdmin, invalidateUserPerms } from '../rbac/service'
+import { userHasPermission, listUserPermissions, inspectUserPermissionGrants, isAdmin } from '../rbac/service'
 import { isDatabaseSchemaError } from '../utils/database-errors'
+import { businessCheck } from '../rbac/business-check'
+import { readOnlyAuthorizationJwtAuth } from '../auth/jwt-middleware'
 
 const logger = new Logger('PermissionsRouter')
 
 // Graceful degradation for missing tables
 let permsDegraded = false
 const allowDegradation = process.env.RBAC_OPTIONAL === '1'
+
+function sendExceptionWriteError(res: Response, error: unknown): boolean {
+  if (error instanceof PlatformActorAuthorityLost) {
+    res.status(403).json({ error: error.message, code: error.code })
+  } else if (error instanceof AccessGraphUserUnavailableError) {
+    res.status(error.code === 'NOT_FOUND' ? 404 : 409).json({ error: error.message, code: error.code })
+  } else if (error instanceof LegacyExceptionReasonInvalid) {
+    res.status(400).json({ error: 'Reason must contain 1 to 255 characters', code: 'INVALID_REASON' })
+  } else if (error instanceof AuthorizationInputBusyError) {
+    res.status(409).json({ error: error.message, code: error.code })
+  } else if (error instanceof AuthorizationExceptionWriteError && (error.code === 'UNKNOWN_PERMISSION' || error.code === 'INVALID_INPUT')) {
+    res.status(400).json({ error: 'Invalid permission grant', code: error.code })
+  } else if ((error instanceof AuthorizationExceptionWriteError && error.code === 'STALE')
+    || (error instanceof Error && error.message === 'AUTHORIZATION_EXCEPTION_STALE')) {
+    res.status(409).json({ error: 'Permission sources changed, retry after reloading', code: 'STALE' })
+  } else {
+    return false
+  }
+  return true
+}
 
 interface Permission {
   code: string
@@ -90,7 +113,7 @@ export function permissionsRouter(): Router {
     }
   })
 
-  // Check permission
+  // RBAC service preflight; this does not represent a business route guard.
   r.post('/api/permissions/check', authenticate, async (req: Request, res: Response) => {
     try {
       const { permission, userId: targetUserId } = req.body
@@ -132,6 +155,9 @@ export function permissionsRouter(): Router {
     }
   })
 
+  // Business guard snapshot; resource and target adapters may report unknown.
+  r.post('/api/permissions/v2/business-check', readOnlyAuthorizationJwtAuth, businessCheck)
+
   // Grant permission (admin only)
   r.post('/api/permissions/grant', authenticate, async (req: Request, res: Response) => {
     try {
@@ -139,75 +165,28 @@ export function permissionsRouter(): Router {
         return res.status(503).json({ error: 'Database not available' })
       }
 
-      const { userId, permission } = req.body
-      const adminUserId = String(req.user?.id || req.user?.sub || req.user?.userId || '')
+      const { userId, permission, reason } = req.body ?? {}
+      const adminUserId = String(req.user?.id || req.user?.sub || req.user?.userId || '').trim()
 
       if (!adminUserId) {
         return res.status(401).json({ error: 'User ID not found in token' })
       }
 
-      if (!userId || !permission) {
+      if (typeof userId !== 'string' || !userId || typeof permission !== 'string' || !permission) {
         return res.status(400).json({ error: 'userId and permission are required' })
       }
 
-      // Check if requesting user is admin
-      const adminCheck = await isAdmin(adminUserId)
-      if (!adminCheck) {
-        return res.status(403).json({ error: 'Only admins can grant permissions' })
-      }
-
-      // Check if permission code exists
-      const permExists = await pool.query<{ code: string }>(
-        'SELECT code FROM permissions WHERE code = $1',
-        [permission]
-      )
-
-      if (permExists.rows.length === 0) {
-        return res.status(400).json({ error: `Permission code '${permission}' does not exist` })
-      }
-
-      // Grant permission (upsert to avoid duplicates)
-      await pool.query(
-        `INSERT INTO user_permissions (user_id, permission_code)
-         VALUES ($1, $2)
-         ON CONFLICT (user_id, permission_code) DO NOTHING`,
-        [userId, permission]
-      )
-
-      // Invalidate cache for the user
-      invalidateUserPerms(userId)
-
-      await auditLog({
-        actorId: adminUserId,
-        actorType: 'user',
-        action: 'grant',
-        resourceType: 'permission',
-        resourceId: `${userId}:${permission}`,
-        meta: {
-          adminUserId,
-          userId,
-          permission,
-        },
+      await writeLegacyAuthorizationException({
+        actorId: adminUserId, userId, action: { kind: 'direct.grant', code: permission },
+        reason: readLegacyExceptionReason(reason),
       })
-
-      logger.info(`Permission '${permission}' granted to user ${userId} by admin ${adminUserId}`)
       res.json({
         success: true,
         userId,
         permission
       })
     } catch (error) {
-      // O2-S2: user_permissions is a recovery-authority table — a marker 40001 under a
-      // held recovery lease is a retryable 409, not an unclassified 500. Additive only:
-      // every other error keeps the exact path below.
-      if (sendIfRecoveryConflict(res, error)) return
-      if (isDatabaseSchemaError(error) && allowDegradation) {
-        if (!permsDegraded) {
-          logger.warn('Permissions service degraded - tables not found')
-          permsDegraded = true
-        }
-        return res.json({ success: true, degraded: true })
-      }
+      if (sendIfRecoveryConflict(res, error) || sendExceptionWriteError(res, error)) return
       logger.error('Failed to grant permission', error instanceof Error ? error : undefined)
       res.status(500).json({ error: 'Failed to grant permission' })
     }
@@ -220,65 +199,32 @@ export function permissionsRouter(): Router {
         return res.status(503).json({ error: 'Database not available' })
       }
 
-      const { userId, permission } = req.body
-      const adminUserId = String(req.user?.id || req.user?.sub || req.user?.userId || '')
+      const { userId, permission, reason } = req.body ?? {}
+      const adminUserId = String(req.user?.id || req.user?.sub || req.user?.userId || '').trim()
 
       if (!adminUserId) {
         return res.status(401).json({ error: 'User ID not found in token' })
       }
 
-      if (!userId || !permission) {
+      if (typeof userId !== 'string' || !userId || typeof permission !== 'string' || !permission) {
         return res.status(400).json({ error: 'userId and permission are required' })
       }
 
-      // Check if requesting user is admin
-      const adminCheck = await isAdmin(adminUserId)
-      if (!adminCheck) {
-        return res.status(403).json({ error: 'Only admins can revoke permissions' })
-      }
-
-      // Revoke permission
-      const result = await pool.query(
-        'DELETE FROM user_permissions WHERE user_id = $1 AND permission_code = $2',
-        [userId, permission]
-      )
-
-      // Invalidate cache for the user
-      invalidateUserPerms(userId)
-
-      if (result.rowCount === 0) {
+      const result = await writeLegacyAuthorizationException({
+        actorId: adminUserId, userId, action: { kind: 'direct.revoke', code: permission },
+        reason: readLegacyExceptionReason(reason),
+      })
+      if (!result.changed) {
         return res.status(404).json({ error: 'Permission not found for user' })
       }
 
-      await auditLog({
-        actorId: adminUserId,
-        actorType: 'user',
-        action: 'revoke',
-        resourceType: 'permission',
-        resourceId: `${userId}:${permission}`,
-        meta: {
-          adminUserId,
-          userId,
-          permission,
-        },
-      })
-
-      logger.info(`Permission '${permission}' revoked from user ${userId} by admin ${adminUserId}`)
       res.json({
         success: true,
         userId,
         permission
       })
     } catch (error) {
-      // O2-S2: see the grant handler — marker 40001 → retryable 409, all else unchanged.
-      if (sendIfRecoveryConflict(res, error)) return
-      if (isDatabaseSchemaError(error) && allowDegradation) {
-        if (!permsDegraded) {
-          logger.warn('Permissions service degraded - tables not found')
-          permsDegraded = true
-        }
-        return res.json({ success: true, degraded: true })
-      }
+      if (sendIfRecoveryConflict(res, error) || sendExceptionWriteError(res, error)) return
       logger.error('Failed to revoke permission', error instanceof Error ? error : undefined)
       res.status(500).json({ error: 'Failed to revoke permission' })
     }
@@ -308,30 +254,13 @@ export function permissionsRouter(): Router {
         return res.status(400).json({ error: 'userId and permission are required' })
       }
 
-      const result = await transaction(async (client) => revokeLegacyUserPermission(client, {
-        actorId: adminUserId,
-        userId,
-        permission,
-      }))
+      const result = await writeLegacyAuthorizationException({
+        actorId: adminUserId, userId, action: { kind: 'legacy.revoke', code: permission },
+        reason: readLegacyExceptionReason(req.body.reason),
+      })
       if (!result.changed) {
         return res.status(404).json({ error: 'Legacy permission not found for user' })
       }
-
-      // Local generation bump for a read already in this process. The next
-      // listUserPermissions call in every process reads the committed row.
-      invalidateUserPerms(userId)
-      await auditLog({
-        actorId: adminUserId,
-        actorType: 'user',
-        action: 'revoke',
-        resourceType: 'legacy-permission',
-        resourceId: `${userId}:${permission}`,
-        meta: {
-          adminUserId,
-          userId,
-          permission,
-        },
-      })
 
       res.json({
         success: true,
@@ -340,14 +269,7 @@ export function permissionsRouter(): Router {
         changed: true,
       })
     } catch (error) {
-      if (sendIfRecoveryConflict(res, error)) return
-      if (error instanceof AccessGraphUserUnavailableError) {
-        if (error.code === 'NOT_FOUND') return res.status(404).json({ error: 'User not found', code: 'NOT_FOUND' })
-        return res.status(409).json({ error: error.message, code: 'USER_IN_RECYCLE_BIN' })
-      }
-      if (error instanceof PlatformActorAuthorityLost) {
-        return res.status(403).json({ error: error.message, code: error.code })
-      }
+      if (sendIfRecoveryConflict(res, error) || sendExceptionWriteError(res, error)) return
       logger.error('Failed to revoke legacy permission', error instanceof Error ? error : undefined)
       res.status(500).json({ error: 'Failed to revoke legacy permission' })
     }
@@ -458,14 +380,9 @@ export function permissionsRouter(): Router {
         return res.status(503).json({ error: 'Database not available' })
       }
 
-      const adminUserId = String(req.user?.id || req.user?.sub || req.user?.userId || '')
+      const adminUserId = String(req.user?.id || req.user?.sub || req.user?.userId || '').trim()
       if (!adminUserId) {
         return res.status(401).json({ error: 'User ID not found in token' })
-      }
-
-      const adminCheck = await isAdmin(adminUserId)
-      if (!adminCheck) {
-        return res.status(403).json({ error: 'Only admins can apply permission templates' })
       }
 
       const userId = typeof req.body?.userId === 'string' ? req.body.userId.trim() : ''
@@ -479,53 +396,22 @@ export function permissionsRouter(): Router {
         return res.status(404).json({ error: 'Permission template not found' })
       }
 
-      if (template.permissions.length > 0) {
-        const values = template.permissions.map((_, index) => `($1, $${index + 2})`).join(', ')
-        await pool.query(
-          `INSERT INTO user_permissions (user_id, permission_code)
-           VALUES ${values}
-           ON CONFLICT (user_id, permission_code) DO NOTHING`,
-          [userId, ...template.permissions],
-        )
-      }
-
-      invalidateUserPerms(userId)
-
-      await auditLog({
+      const { profile } = await writeLegacyAuthorizationException({
         actorId: adminUserId,
-        actorType: 'user',
-        action: 'grant',
-        resourceType: 'permission-template',
-        resourceId: `${userId}:${template.id}`,
-        meta: {
-          adminUserId,
-          userId,
-          templateId: template.id,
-          productMode: template.productMode,
-          permissions: template.permissions,
-        },
+        userId,
+        action: { kind: 'template.apply', templateId: template.id, codes: template.permissions },
+        reason: readLegacyExceptionReason(req.body.reason),
       })
-
-      const permissions = await listUserPermissions(userId)
-      const admin = await isAdmin(userId)
 
       res.json({
         success: true,
         userId,
         template,
-        permissions,
-        isAdmin: admin,
+        permissions: profile?.permissions ?? [],
+        isAdmin: profile?.isAdmin ?? false,
       })
     } catch (error) {
-      // O2-S2: see the grant handler — marker 40001 → retryable 409, all else unchanged.
-      if (sendIfRecoveryConflict(res, error)) return
-      if (isDatabaseSchemaError(error) && allowDegradation) {
-        if (!permsDegraded) {
-          logger.warn('Permissions template service degraded - tables not found')
-          permsDegraded = true
-        }
-        return res.json({ success: true, degraded: true })
-      }
+      if (sendIfRecoveryConflict(res, error) || sendExceptionWriteError(res, error)) return
       logger.error('Failed to apply permission template', error instanceof Error ? error : undefined)
       res.status(500).json({ error: 'Failed to apply permission template' })
     }

@@ -104,7 +104,9 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
   const sql: string[] = [], tokenPayloads: Data[] = [], formPayloads: Data[] = []
   const sessions: Record<string, string> = {}, tokens: Record<string, string> = {}
   let enablement: unknown = 'false', tokenCommitted = false, validRequests = true, formOutcome: 'ack' | 'unknown' | 'unparsed' = 'ack'
-  let multiTargetEnablement: unknown = 'false', multiTargetUp = '', receiptUnparsedUp = '', sheet = defaultSheet()
+  let multiTargetEnablement: unknown = 'false', multiTargetUp = '', receiptUnparsedUp = '', sourceBindingUp = '', sheet = defaultSheet()
+  // D20: the raw INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS value as the runtime reads it per call (absent = no listed target).
+  let unboundTestTargetRefs: unknown
   // Gate 1 proof controls: destroy the in-flight client socket at the first token call (after admission has
   // committed), observe the server-side close, and let the test wait for the host run to settle afterwards.
   let disconnectAtToken = false, inflight: ClientRequest | undefined, closedResponses = 0
@@ -114,11 +116,16 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
   // can never leave the run (or the next reset) waiting.
   let formHold: { enter(): void; open: Promise<void> } | undefined
   const formReleases: Array<() => void> = []
-  // Every call on the sheet read path (access, fields, view, records, record permissions) counts.
+  // Every call on the sheet read path (access, fields, view, records, record permissions, project registry) counts.
   let sheetReads = 0
-  const sheetFields = [{ id: 'fld_project', type: 'string' }, { id: 'fld_line', type: 'string' }, { id: 'fld_parent', type: 'string' },
-    { id: 'fld_qty', type: 'number' }, { id: 'fld_desc', type: 'string' }]
+  // Source binding (design baseline v2.3 §7.2): the project the registry names for the synthetic sheet, or null
+  // (the default: an unregistered sheet, so every sheet read stays unbound exactly as before). fld_line carries the
+  // template's key marker; the reader consults it only for a registered sheet.
+  let projectSheet: { projectNo: string } | null = null
+  const sheetFields = [{ id: 'fld_project', type: 'string' }, { id: 'fld_line', type: 'string', property: { stockPreparation: { key: true } } },
+    { id: 'fld_parent', type: 'string' }, { id: 'fld_qty', type: 'number' }, { id: 'fld_desc', type: 'string' }]
   const sheetSource = {
+    async resolveProjectSheet() { sheetReads++; return projectSheet },
     async resolveAccess() {
       sheetReads++
       return { userId: principals.owner, isAdminRole: false, canRead: true, canExport: true, live: true, bounded: false,
@@ -212,7 +219,8 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
     await closeRuntime()
     runtime = createRuntime({ database, security, fetch: syntheticFetch,
       ...(useDefault ? {} : { readEnablement: () => enablement }), timeoutMs: 5000,
-      ...(options.multiTarget ? { readMultiTargetEnablement: () => multiTargetEnablement } : {}) })
+      ...(options.multiTarget ? { readMultiTargetEnablement: () => multiTargetEnablement,
+        readUnboundTestTargetRefs: () => unboundTestTargetRefs } : {}) })
     // Match the production plugin injector: class methods are captured as
     // narrow own data members, never supplied as an inherited capability.
     const pluginSecurity = Object.freeze({ encrypt: security.encrypt.bind(security), decrypt: security.decrypt.bind(security) })
@@ -339,6 +347,9 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
     // Gate 6 (a2): the audit reason CHECK widened by receipt_unparsed, as production migrates it.
     receiptUnparsedUp = (await load('packages/core-backend/src/db/migrations/zzzz20261105033000_add_integration_yida_delivery_audit_receipt_unparsed.ts'))
       .YIDA_DELIVERY_AUDIT_RECEIPT_UNPARSED_UP_SQL as string
+    // Source binding (design baseline v2.3 §7.2): the two digest columns and the identity fence, as production migrates them.
+    sourceBindingUp = (await load('packages/core-backend/src/db/migrations/zzzz20261106110300_add_integration_yida_source_binding.ts'))
+      .YIDA_SOURCE_BINDING_UP_SQL as string
     const route = await load('packages/core-backend/src/routes/integration-yida-owner.ts')
     createRouter = route.createIntegrationYidaOwnerRouter as typeof createRouter
     noStore = route.yidaOwnerNoStoreMiddleware as RequestHandler; jsonOnly = route.yidaOwnerJsonOnlyMiddleware as RequestHandler
@@ -346,17 +357,19 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
     const current = await hostPool.query('SELECT current_schema() AS schema')
     if (current.rows[0]?.schema !== schema) throw new Error('SYNTHETIC_NATIVE_AUTH_POOL_SCHEMA_REQUIRED')
   } catch (error) { await cleanup(); throw error }
-  const ddl = ['090_create_integration_yida_delivery_ledger.sql', '091_create_integration_yida_create_fence.sql',
+  // 087 (project-sheet registry): a bound admission re-reads it inside the admission transaction.
+  const ddl = ['087_create_integration_stock_prep_project_target.sql', '090_create_integration_yida_delivery_ledger.sql', '091_create_integration_yida_create_fence.sql',
     '092_create_integration_yida_credential_materials.sql', '093_create_integration_yida_draft_plans.sql',
     '094_create_integration_yida_approved_target.sql', '095_create_integration_yida_send_approvals.sql',
     ...(options.initialization ? ['096_create_integration_yida_initialization.sql'] : [])]
     .map(name => readFileSync(path.join(root, 'packages/core-backend/migrations', name), 'utf8')).join('\n')
-    + '\n' + receiptUnparsedUp
+    + '\n' + receiptUnparsedUp + '\n' + sourceBindingUp
     + (options.multiTarget ? '\n' + multiTargetUp : '')
   return {
     sql, tokens, sessions, tokenPayloads, formPayloads, rows, proof, http, tokenFor, startRuntime, closeRuntime, cleanup,
     setEnablement(value: unknown) { enablement = value }, setFormOutcome(value: 'ack' | 'unknown' | 'unparsed') { formOutcome = value },
     setMultiTarget(value: unknown) { multiTargetEnablement = value },
+    setUnboundTestTargetRefs(value: unknown) { unboundTestTargetRefs = value },
     setDisconnectAtToken(value: boolean) { disconnectAtToken = value },
     async settleSubmissions() { await lastSubmission },
     holdNextForm() {
@@ -367,6 +380,7 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
       return { reached, release }
     },
     setSheet(patch: Partial<SheetState>) { sheet = { ...defaultSheet(), ...patch } },
+    setProjectSheet(value: { projectNo: string } | null) { projectSheet = value },
     get sheetReads() { return sheetReads },
     get tokenCommitted() { return tokenCommitted }, get validRequests() { return validRequests },
     get seedDraft() { return seedDraft }, get runtime() { return runtime! },
@@ -449,7 +463,7 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
       if (current.rows[0]?.schema !== schema) throw new Error('SYNTHETIC_NATIVE_AUTH_POOL_SCHEMA_REQUIRED')
       tokenPayloads.length = 0; formPayloads.length = 0; sql.length = 0
       enablement = 'false'; tokenCommitted = false; validRequests = true; formOutcome = 'ack'
-      multiTargetEnablement = 'false'; sheet = defaultSheet(); sheetReads = 0
+      multiTargetEnablement = 'false'; unboundTestTargetRefs = undefined; sheet = defaultSheet(); sheetReads = 0; projectSheet = null
       disconnectAtToken = false; inflight = undefined; closedResponses = 0; lastSubmission = Promise.resolve()
       await startRuntime()
     },

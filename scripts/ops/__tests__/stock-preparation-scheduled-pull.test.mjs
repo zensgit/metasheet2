@@ -42,6 +42,7 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
 import test from 'node:test'
+import { createRequire } from 'node:module'
 
 // `fileURLToPath`, not `new URL(...).pathname` — on Windows the latter yields `/C:/Users/...` (a
 // leading slash before the drive letter), which `path.dirname`/`path.resolve` then mangle into a
@@ -543,7 +544,13 @@ test('SP-1 (M-2B-6) a sheet being installed is recorded skipped_pull_batch_insta
 })
 
 test('SP-2 (M-2B-7) any OTHER WRITE_LOCKED stays an error (a small apply holding the sheet is not an install window)', async () => {
-  for (const details of [{ holderPurpose: 'small_apply' }, {}, null]) {
+  // Ruling 2026-11-16: contention with the YiDa issue-confirm write-back is an ERROR (exit 1; the next run retries), never a
+  // held skip — that would be silent, exit 0, no alert. Only 'pull_batch_install' is held; every other write purpose errors.
+  const { PROJECT_WRITE_PURPOSES } = createRequire(import.meta.url)(path.join(ROOT_DIR, 'plugins', 'plugin-integration-core', 'lib', 'stock-preparation-project-write-lock.cjs'))
+  const notHeldPurposes = PROJECT_WRITE_PURPOSES.filter((purpose) => purpose !== 'pull_batch_install')
+  assert.ok(notHeldPurposes.includes('issue_confirm_writeback'), 'the write-back purpose is a known lease purpose')
+  assert.ok(notHeldPurposes.length >= 2)
+  for (const details of [...notHeldPurposes.map((holderPurpose) => ({ holderPurpose })), {}, null]) {
     const other = await withMockFetch(
       () => ({ status: 409, json: { ok: false, error: { code: 'STOCK_PREP_PROJECT_WRITE_LOCKED', message: 'locked', ...(details ? { details } : {}) } } }),
       () => runMain(['--apply'], BASE_ENV),

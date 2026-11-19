@@ -136,7 +136,7 @@ describe('domain floor', () => {
   it('the scanned table set is the classifier\'s table constant plus the four cascade parents', () => {
     expect([...INPUT_TABLES]).toEqual([...PRIVILEGE_GRANT_SOURCE_TABLES])
     expect([...CASCADE_PARENT_TABLES].sort()).toEqual(['directory_departments', 'permissions', 'platform_member_groups', 'roles'])
-    expect(SCANNED_TABLES.size).toBe(11)
+    expect(SCANNED_TABLES.size).toBe(12)
   })
 })
 
@@ -696,12 +696,19 @@ function contractEdges(files: readonly string[], sourceOf: (file: string) => str
   return edges
 }
 
-describe('contract modules have no production importer', () => {
-  it('the set of import edges from production source (migrations included) and plugins to a contract module is empty', () => {
+describe('contract modules have a closed production importer list', () => {
+  it('all production import edges are declared, including migrations and plugins', () => {
     const sourceFiles = listFiles(REPO_ROOT, { roots: [SRC, 'plugins'], exclude: [] }).filter((file) => SOURCE_EXTENSIONS.has(path.extname(file)))
     expect(sourceFiles.length).toBeGreaterThan(productionFiles.length)
     expect(sourceFiles.some((file) => file.startsWith(`${SRC}/db/migrations/`))).toBe(true)
-    expect(contractEdges(sourceFiles, read)).toEqual([])
+    expect(contractEdges(sourceFiles, read).sort()).toEqual([
+      [`${SRC}/admin/authorization-exception-compat.ts`, '../rbac/authorization-input-lock'],
+      [`${SRC}/admin/authorization-operation-fence.ts`, '../rbac/authorization-input-brand'],
+      [`${SRC}/admin/authorization-operation-service.ts`, '../rbac/authorization-input-lock'],
+      [`${SRC}/db/migration-provider.ts`, '../rbac/authorization-input-lock'],
+      [`${SRC}/routes/admin-users.ts`, '../rbac/authorization-input-brand'],
+      [`${SRC}/routes/permissions.ts`, '../rbac/authorization-input-lock'],
+    ].sort())
   })
 
   it('the brand is minted by the lock module only', () => {
@@ -1176,8 +1183,9 @@ function readerProblems(reader: string, source: string): string[] {
   return [...readerClosureProblems(reader, source), ...roleNameStatementSiteProblems(reader, source), ...rolesResourceNameSiteProblems(reader, source)]
 }
 
-const serviceSource = read(SERVICE_READER)
-const namespaceSource = read(NAMESPACE_READER)
+// Replacement anchors below use LF regardless of the checkout's line endings.
+const serviceSource = read(SERVICE_READER).replaceAll('\r\n', '\n')
+const namespaceSource = read(NAMESPACE_READER).replaceAll('\r\n', '\n')
 const ROLE_NAME_TEMPLATE = /`SELECT DISTINCT rp\.permission_code AS code,[^`]*`/
 const roleNameTemplate = (serviceSource.match(ROLE_NAME_TEMPLATE) ?? [''])[0]
 const ROLE_NAME_CALL = /await exec\(\s*`SELECT DISTINCT rp\.permission_code AS code,[^`]*`,\s*\[userId\],\s*\)/

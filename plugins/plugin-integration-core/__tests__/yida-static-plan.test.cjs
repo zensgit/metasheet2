@@ -845,9 +845,10 @@ test('in-memory v2 guard mutations break independent identity, parser, options a
     assert.equal(source.split(from).length, 2, 'mutation target occurs exactly once')
     return importPlannerSource(source.replace(from, to))
   }
+  // The v2 sort lives in the shared business-key helper (also used by v3 and the ⑦.5 reconciliation).
   const unsorted = await mutant(
-    '}).sort((left, right) => left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0)',
-    '})',
+    "JSON.stringify(['yida-protocol-v2', locator.appType, locator.formUuid, [...pairs].sort(byFirstElement)])",
+    "JSON.stringify(['yida-protocol-v2', locator.appType, locator.formUuid, [...pairs]])",
   )
   assert.notEqual(unsorted.buildYidaStaticPlan({ config: protocolConfig(),
     rows: [protocolRow()] }).rows[0].localBusinessKey, expectedProtocolKey())
@@ -922,4 +923,26 @@ test('R-71 ⑦.3: source columns are sorted, de-duplicated, order-independent an
   for (const invalid of [createYidaProtocolExample().config, { ...config, version: 4 }, { ...config, fieldMap: [] }, null]) {
     assert.throws(() => yidaTransformSourceColumns(invalid), { code: 'YIDA_STATIC_CONFIG_INVALID' })
   }
+})
+
+test('source binding (Y4): transformDependencies names the columns ONE entry reads, by kind, and refuses unknown kinds', async () => {
+  const { transformDependencies, validateYidaStaticConfig, YidaStaticPlanError } = await modulePromise
+  const config = validateYidaStaticConfig(transformLayout(TRANSFORM_COLUMN_CASES.copy.entry)).normalized
+  const copy = config.fieldMap.find((entry) => entry.transform === 'copy')
+  assert.deepEqual(transformDependencies(copy, config), ['colKey'])
+  assert.deepEqual(transformDependencies(TRANSFORM_COLUMN_CASES.direct.entry), ['colDirect'])
+  assert.deepEqual(transformDependencies(TRANSFORM_COLUMN_CASES.constant.entry), [])
+  assert.deepEqual(transformDependencies(TRANSFORM_COLUMN_CASES.concat.entry), ['colA', 'colB', 'colKey'])
+  assert.equal(Object.isFrozen(transformDependencies(TRANSFORM_COLUMN_CASES.concat.entry)), true)
+  // Duplicated parts are reported once, sorted by code point.
+  assert.deepEqual(transformDependencies({ transform: 'concat', parts: [{ source: 'z' }, { source: 'a' }, { source: 'z' }],
+    separator: '-', blank: 'skip', target: 'extra', type: 'string', required: false }), ['a', 'z'])
+  // A v2 entry has no transform and binds exactly its source column.
+  assert.deepEqual(transformDependencies({ source: 'projectNo', target: 'project', type: 'string', required: true }), ['projectNo'])
+  for (const bad of [{ transform: 'generated', target: 'x' }, { transform: 'copy', copyOf: 'missing', target: 'x' }, { target: 'x' },
+    { source: 'bad alias', target: 'x' }, null, [], 'direct']) {
+    assert.throws(() => transformDependencies(bad, config), { code: 'YIDA_STATIC_CONFIG_INVALID' })
+  }
+  assert.throws(() => transformDependencies(copy), { code: 'YIDA_STATIC_CONFIG_INVALID' })
+  assert.ok(new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID'))
 })

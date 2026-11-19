@@ -532,3 +532,95 @@ test('arbitrary upstream errors cannot expose URL, query credentials, bodies or 
   }
   assert.equal(touched + logged, 0)
 })
+
+// ---- R-71 ⑦.5 cut-over reconciliation: the paginated search read (RC6). Synthetic only. ----
+const { createYidaFormSearchReadback } = require('../lib/yida-form-readback.cjs')
+const searchInput = (patch = {}) => ({
+  appType: 'synthetic-app', formUuid: 'synthetic-form', accessToken: 'synthetic-private-access',
+  systemToken: 'synthetic-private-system', userId: 'synthetic-private-user', pageNumber: 1, pageSize: 2,
+  searchCondition: '[{"key":"project","value":"DEMO-P1","type":"TEXT","operator":"eq","componentName":"TextField"}]', ...patch,
+})
+const record = (id, formData = { project: 'DEMO-P1' }) => ({ formInstanceId: id, formUuid: 'synthetic-form', formData,
+  title: 'ignored', createTimeGMT: '2026-01-01T00:00Z', version: 1, originator: { userId: 'ignored' } })
+const page = (patch = {}) => ({ pageNumber: 1, totalCount: 2, data: [record('FINST-1'), record('FINST-2')], ...patch })
+const searcher = (fetch, patch = {}) => createYidaFormSearchReadback({ fetch, readEnablement: () => 'true', ...patch })
+
+test('RC6: fixed POST search endpoint, closed body, access header only, no time filter', async () => {
+  const controller = new AbortController()
+  const request = searchInput()
+  let calls = 0
+  const result = await searcher(async (url, options) => {
+    calls += 1
+    const actual = new URL(url)
+    assert.equal(actual.href, 'https://api.dingtalk.com/v1.0/yida/forms/instances/advances/query')
+    assert.deepEqual(Object.keys(options).sort(), ['body', 'headers', 'method', 'redirect', 'signal'])
+    assert.equal(options.method, 'POST')
+    assert.equal(options.redirect, 'error')
+    assert.deepEqual(options.headers, { Accept: 'application/json', 'Content-Type': 'application/json',
+      'x-acs-dingtalk-access-token': request.accessToken })
+    const body = JSON.parse(options.body)
+    assert.deepEqual(Object.keys(body), ['appType', 'formUuid', 'systemToken', 'userId', 'pageNumber', 'pageSize',
+      'searchCondition', 'orderConfigJson'])
+    assert.equal(body.orderConfigJson, '{"gmt_create":"+"}')
+    assert.equal(body.searchCondition, request.searchCondition)
+    assert.equal(Object.keys(body).some(key => /Time|accessToken/u.test(key)), false)
+    return response(page())
+  }).search(request, { signal: controller.signal })
+  assert.equal(calls, 1)
+  assert.equal(result.statusCode, 200)
+  assert.equal(result.totalCount, 2)
+  assert.deepEqual(result.records.map(item => Object.keys(item)), [['formInstanceId', 'formData'], ['formInstanceId', 'formData']])
+  assert.match(result.responseDigest, /^[0-9a-f]{64}$/)
+  assert.equal(Object.isFrozen(result), true)
+})
+
+test('RC6: closed input (extra key, bad page bounds) and non-literal switch make zero fetches', async () => {
+  let calls = 0
+  const fetch = async () => { calls += 1; return response(page()) }
+  for (const patch of [{ extra: 1 }, { pageSize: 101 }, { pageSize: 0 }, { pageNumber: 0 }, { pageNumber: 601 },
+    { formUuid: ' synthetic-form' }, { searchCondition: '' }]) {
+    await assert.rejects(searcher(fetch).search(searchInput(patch), { signal: signal() }), code('INPUT'))
+  }
+  for (const value of [undefined, 'TRUE', ' true', 'true ', true, Promise.resolve('true')]) {
+    await assert.rejects(searcher(fetch, { readEnablement: () => value }).search(searchInput(), { signal: signal() }), code('DISABLED'))
+  }
+  assert.equal(calls, 0)
+})
+
+test('RC6: response shape is closed and checked against the request', async () => {
+  const run = (body, options) => searcher(async () => (typeof body === 'string' ? new Response(body, options) : response(body, options)))
+    .search(searchInput(), { signal: signal() })
+  await assert.rejects(run(page({ extra: true })), code('RESPONSE'), 'extra top-level key')
+  await assert.rejects(run({ pageNumber: 1, data: [] }), code('RESPONSE'), 'missing totalCount')
+  await assert.rejects(run(page({ pageNumber: 2 })), code('RESPONSE'), 'page number echo')
+  await assert.rejects(run(page({ totalCount: 60001 })), code('RESPONSE'), 'implausible total')
+  await assert.rejects(run(page({ data: [record('FINST-1'), record('FINST-2'), record('FINST-3')] })), code('RESPONSE'), 'more than pageSize')
+  await assert.rejects(run(page({ data: [{ ...record('FINST-1'), formUuid: 'other-form' }] })), code('RESPONSE'), 'other form')
+  await assert.rejects(run(page({ data: [record('bad id!')] })), code('RESPONSE'), 'instance id')
+  await assert.rejects(run(page({ data: [{ formInstanceId: 'FINST-1', formUuid: 'synthetic-form', formData: [] }] })), code('RESPONSE'))
+  await assert.rejects(run('{"pageNumber":1,"pageNumber":1,"totalCount":0,"data":[]}'), code('RESPONSE'), 'duplicate key')
+  await assert.rejects(run('{"pageNumber":1,"totalCount":0.10000000000000001,"data":[]}'), code('RESPONSE'), 'lossy number')
+  await assert.rejects(run(page(), { status: 500 }), code('RESPONSE'))
+})
+
+test('RC6: throttling (429 or a documented code in the body) is THROTTLED, never RESPONSE', async () => {
+  const run = (body, options) => searcher(async () => response(body, options)).search(searchInput(), { signal: signal() })
+  await assert.rejects(run({ code: 'x' }, { status: 429 }), code('THROTTLED'))
+  await assert.rejects(run({ code: 'failure.operation.requestTooFast', message: 'synthetic' }, { status: 403 }), code('THROTTLED'))
+  await assert.rejects(run({ errorCode: 'failure.operation.tooManyVisitors' }, { status: 200 }), code('THROTTLED'))
+  await assert.rejects(run({ code: 'failure.operation.other' }, { status: 403 }), code('RESPONSE'))
+})
+
+test('RC6: the 1 MiB page budget is TOO_LARGE (declared or streamed)', async () => {
+  const big = 1024 * 1024 + 1
+  await assert.rejects(searcher(async () => new Response('{}', { headers: { 'content-length': String(big) } }))
+    .search(searchInput(), { signal: signal() }), code('TOO_LARGE'))
+  const chunk = new Uint8Array(64 * 1024).fill(0x20)
+  const { response: streamed, counts } = streamResponse(Array.from({ length: 17 }, () => chunk))
+  await assert.rejects(searcher(async () => streamed).search(searchInput(), { signal: signal() }), code('TOO_LARGE'))
+  assert.equal(counts.cancels, 1)
+  // A page larger than the single-instance GET budget is fine for the search read.
+  const wide = page({ data: [record('FINST-1', Object.fromEntries(Array.from({ length: 250 }, (_, index) => [`field_${index}`, 'x'.repeat(600)])))] })
+  assert.ok(JSON.stringify(wide).length > MAX_BYTES)
+  assert.equal((await searcher(async () => response(wide)).search(searchInput(), { signal: signal() })).records.length, 1)
+})

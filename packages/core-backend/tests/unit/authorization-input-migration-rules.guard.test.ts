@@ -24,6 +24,7 @@ import {
   checkNewMigration,
   closureProblems,
   COMPLIANT_LOCK_BLOCK,
+  DELEGATION_ACTIVATION_SCHEMA_MIGRATION,
   digestOfFiles,
   historicalMigrationFiles,
   isNewMigration,
@@ -98,6 +99,40 @@ describe('historical migration files', () => {
     expect(checkNewMigration(backdated, body).verdicts.map((line) => line.verdict)).toEqual(['unreadable'])
     expect(isNewMigration(NEW_TS)).toBe(true)
     expect(digestOfFiles([...historicalMigrationFiles(), NEW_TS])).not.toBe(HISTORICAL_DIGEST)
+  })
+})
+
+describe('role provenance down migration lock', () => {
+  it('accepts only the exact fixed membership table access-exclusive lock', () => {
+    expect(check(locked('LOCK TABLE user_roles IN ACCESS EXCLUSIVE MODE')).problems).toEqual([])
+    expect(check(locked('LOCK TABLE user_roles IN SHARE MODE')).problems).toContain('unreadable LOCK: statement kind is not on the safe list')
+    expect(check(locked('LOCK TABLE users IN ACCESS EXCLUSIVE MODE')).problems).toContain('unreadable LOCK: statement kind is not on the safe list')
+    expect(check(locked('LOCK TABLE user_roles, users IN ACCESS EXCLUSIVE MODE')).problems).toContain('unreadable LOCK: statement kind is not on the safe list')
+  })
+})
+
+describe('delegation activation schema migration', () => {
+  const file = DELEGATION_ACTIVATION_SCHEMA_MIGRATION
+  const readMigration = () => fs.readFileSync(path.join(REPO_ROOT, file), 'utf8')
+
+  it('accepts only the reviewed path and normalized bytes', () => {
+    const source = readMigration().replace(/\r\n/g, '\n')
+    expect(check(source, file)).toMatchObject({ problems: [], inputWrites: 0 })
+    expect(check(source.replace(/\n/g, '\r\n'), file).problems).toEqual([])
+    expect(check(source, NEW_TS).problems).toContain('unreadable CREATE TABLE: creates an input table')
+  })
+
+  it('rejects removing the rollback guard, moving the audit boundary, or inserting state', () => {
+    const source = readMigration()
+    for (const mutant of [
+      source.replace("  if (result.rows[0]?.present !== false) throw new Error('DELEGATED_SCOPE_ACTIVATION_STATE_PRESENT')", ''),
+      source.replace('IN ACCESS EXCLUSIVE MODE', 'IN SHARE MODE'),
+      source.replace('PRIMARY KEY (admin_user_id, namespace)', 'PRIMARY KEY (admin_user_id)'),
+      source.replace('  `.execute(db)', '  `.execute(db)\n  await sql`INSERT INTO delegated_role_admin_activation (admin_user_id, namespace, enabled, revision) VALUES (\'u\', \'x\', TRUE, gen_random_uuid())`.execute(db)'),
+    ]) {
+      expect(mutant).not.toBe(source)
+      expect(check(mutant, file).problems).toContain('delegation activation schema differs from reviewed migration')
+    }
   })
 })
 

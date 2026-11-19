@@ -224,6 +224,11 @@ const ELEARNING_NON_BOOLEAN_FLAGS = new Set(['ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS
 // above: a suffix rule would also catch source constants). M4 PR-3b: the scheduler tick interval.
 const TASKS_NON_BOOLEAN_FLAGS = new Set(['TASKS_SCHEDULER_INTERVAL_MS'])
 
+// Non-boolean YiDa env reads that belong in the manifest, by exact name (same reason as above: the
+// `_ENABLED` rule keeps constant names and refusal codes out). Design baseline v2.3 D20: the exact
+// list of test-copy target refs that may still take unbound rows, read in index.ts as process.env.
+const YIDA_NON_BOOLEAN_FLAGS = new Set(['INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS'])
+
 test('audience scan timeout (#6175): numeric, default 5000, sourced from the resolver parser', () => {
   const spec = GLOBAL_HISTORY_FLAG_BY_KEY.ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS
   assert.ok(spec)
@@ -486,8 +491,10 @@ function globalHistoryFlagsInSource() {
   // PLUGIN LIB, this one exact name (grep -o answers only the literal): the error codes that share its suffix
   // (…PROJECT_TARGET_TENANT_CLAIM_REQUIRED, the bare TENANT_CLAIM_REQUIRED) are not flags and never match it.
   const stockPrepTenantClaim = grepPluginFlagTokens('MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED')
-  // Derive the reviewed owner-send switch from actual core reads, including phantom detection.
-  const yidaOwner = grepFlagTokens('INTEGRATION_YIDA_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
+  // Derive the reviewed owner-send switches from actual core reads, including phantom detection; the one
+  // non-boolean YiDa knob (the D20 unbound test-target list) is named exactly, as the e-learning and task
+  // families do, so a list flag that source stops reading is still reported as a phantom.
+  const yidaOwner = grepFlagTokens('INTEGRATION_YIDA_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED') || YIDA_NON_BOOLEAN_FLAGS.has(t))
   // YiDa 发料确认日期回写 (slice Y9a): the switch and the target list are read by the PLUGIN module
   // (lib/yida-issue-confirm-writeback.cjs), so this one family is scanned in the plugin lib, the members-page precedent.
   const yidaIssueConfirm = grepPluginFlagTokens('INTEGRATION_YIDA_ISSUE_CONFIRM_[A-Z_0-9]+').filter((t) => !t.endsWith('_'))
@@ -578,7 +585,7 @@ test('leave cancel-round launch flag: registered against the plugin reader, exac
   for (const value of [undefined, '', 'false']) assert.equal(isActivated(spec, value), false)
 })
 
-// Exact-department rollout. `_ENABLED` keeps the refusal code
+// Delegation rollouts. `_ENABLED` keeps the refusal code
 // DELEGATED_SCOPE_EXACT_DEPARTMENT_DISABLED and the include_children migration
 // constants out of the flag population.
 function delegatedScopeTokensInSource() {
@@ -589,12 +596,32 @@ function delegatedScopeFlagsInSource() {
   return delegatedScopeTokensInSource().filter((t) => t.endsWith('_ENABLED')).sort()
 }
 
-test('delegated scope flags: the read-site scan finds the registered key and filters the refusal code', () => {
-  assert.deepEqual(delegatedScopeFlagsInSource(), ['DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED'])
+test('delegated scope flags: the read-site scan finds both registered keys and excludes refusal codes', () => {
+  assert.deepEqual(delegatedScopeFlagsInSource(), ['DELEGATED_SCOPE_ACTIVATION_ENABLED', 'DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED'])
   const all = delegatedScopeTokensInSource()
   assert.ok(all.includes('DELEGATED_SCOPE_EXACT_DEPARTMENT_DISABLED'), 'the refusal code shares the prefix and must be scanned')
   assert.ok(all.some((t) => !t.endsWith('_ENABLED')), 'the suffix filter is what excludes non-flags')
   assert.ok(delegatedScopeFlagsInSource().every((t) => GLOBAL_HISTORY_FLAG_KEYS.includes(t)))
+})
+
+
+test('DELEGATED_SCOPE_ACTIVATION_ENABLED: exact true and independent from department precision', () => {
+  const key = 'DELEGATED_SCOPE_ACTIVATION_ENABLED'
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY[key]
+  assert.equal(spec.source, 'packages/core-backend/src/admin/delegated-scope-activation.ts#isDelegatedScopeActivationEnabled')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  const source = readRepoSource(spec.source.split('#')[0])
+  assert.match(source, /return process\.env\.DELEGATED_SCOPE_ACTIVATION_ENABLED === 'true'/)
+  assert.match(spec.purpose, /still enforces all stored stops/)
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of [undefined, '', 'false', 'TRUE', ' true', 'true ', '1', 'yes']) {
+    assert.equal(isActivated(spec, value), false)
+  }
 })
 
 test('DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED: exact true, danger high, independent, predicate compares the literal', () => {
@@ -1018,6 +1045,51 @@ test('stock-prep project-sheet G1 grant role list (R-35): a list, danger high, s
     spec.source,
     'plugins/plugin-integration-core/lib/stock-preparation-project-targets.cjs#resolveProjectSheetGrantRoleIds',
   )
+})
+
+// R-71 ⑦.5 cut-over reconciliation: its own default-OFF switch, danger high, exact literal only, independent of
+// the send switch, every cited file real and the host reading exactly this env name.
+test('INTEGRATION_YIDA_RECONCILE_READ_ENABLED manifest entry: exact true, danger high, independent of the send switch, sources exist', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.INTEGRATION_YIDA_RECONCILE_READ_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.ok(spec.purpose.includes('Does not read, imply or require INTEGRATION_YIDA_OWNER_SEND_ENABLED'))
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+  for (const cited of spec.source.split('; ').map((entry) => entry.split('#')[0])) {
+    assert.ok(readFileSync(path.join(root, cited), 'utf8').length > 0, cited)
+  }
+  const host = readFileSync(path.join(root, 'packages/core-backend/src/index.ts'), 'utf8')
+  assert.ok(host.includes('readEnablement: () => process.env.INTEGRATION_YIDA_RECONCILE_READ_ENABLED,'))
+  const runtime = readFileSync(path.join(root, 'packages/core-backend/src/integration/yida-reconciliation-runtime.ts'), 'utf8')
+  assert.equal(runtime.includes('INTEGRATION_YIDA_OWNER_SEND_ENABLED'), false)
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of ['TRUE', ' true', 'true ', '1', 'yes', '', undefined]) assert.equal(isActivated(spec, value), false)
+})
+
+test('YiDa unbound test-target list (design baseline v2.3 D20): a list, danger high, no dependsOn, every cited file real and naming the exact-list reader', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS
+  assert.ok(spec)
+  assert.equal(spec.type, 'list')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  // A list is never "activated": it cannot enter a dependsOn/conflicts rule by construction.
+  assert.equal(isActivated(spec, 'true'), false)
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+  for (const cited of spec.source.split('; ').map((entry) => entry.split('#')[0])) {
+    assert.ok(readFileSync(path.join(root, cited), 'utf8').length > 0, cited)
+  }
+  // The runtime reads this exact env name and the host index wires it; slot 1 stays the only implicit unbound target.
+  const runtime = readFileSync(path.join(root, 'packages/core-backend/src/integration/yida-owner-runtime.ts'), 'utf8')
+  assert.match(runtime, /readUnboundTestTargetRefs/)
+  assert.match(readFileSync(path.join(root, 'packages/core-backend/src/index.ts'), 'utf8'), /process\.env\.INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS/)
+  assert.match(readFileSync(path.join(root, 'packages/core-backend/src/integration/yida-send-approval-service.ts'), 'utf8'),
+    /if \(slot === 1 \|\| unboundTargets\.has\(targetRef\)\) return/)
 })
 
 test('stock-prep members page switch (ADR §11.4-11.6 S5b, R-39): boolean, exact true, danger high, sourced from the plugin predicate, same literal in the host port', () => {

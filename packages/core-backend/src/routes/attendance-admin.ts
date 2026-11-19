@@ -1301,6 +1301,7 @@ export function attendanceAdminRouter(): Router {
         const result = await assignUserRoles({
           userIds,
           roleId: finalRoleId,
+          assignmentSource: 'manual',
           scope: roleWriteScope,
           executor: client,
         })
@@ -1510,6 +1511,7 @@ export function attendanceAdminRouter(): Router {
         membership = await assignUserRoles({
           userIds: [userId],
           roleId: finalRoleId,
+          assignmentSource: 'manual',
           scope: roleWriteScope,
           executor: client,
         })

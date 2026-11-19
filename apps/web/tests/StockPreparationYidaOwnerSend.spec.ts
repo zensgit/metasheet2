@@ -573,6 +573,25 @@ describe('StockPreparationYidaOwnerSendPanel explicit owner controls', () => {
     expect(absent('submit')).toBe(true)
   })
 
+  it('identity fence (D16): an approval refused with 409 YIDA_SEND_APPROVAL_IDENTITY_RESERVED shows the fixed code and its copy, no grant, no submit', async () => {
+    await preview(); await acknowledge()
+    fetchSpy.mockResolvedValueOnce(error('YIDA_SEND_APPROVAL_IDENTITY_RESERVED', 409))
+    await click('approve')
+    expect(q('error').textContent).toBe('YIDA_SEND_APPROVAL_IDENTITY_RESERVED')
+    expect(q('identity-reserved').textContent).toBe('此物料行在该目标已经创建过，不再新建；请到宜搭核对。')
+    expect(absent('grant')).toBe(true)
+    expect(absent('submit')).toBe(true)
+    expect(absent('limit')).toBe(true)
+    expect(submissionPosts()).toBe(0)
+    expect(fetchSpy).toHaveBeenCalledTimes(3)
+    // The same code on any other status is not this refusal: the client calls the reply invalid.
+    fetchSpy.mockResolvedValueOnce(error('YIDA_SEND_APPROVAL_IDENTITY_RESERVED', 503))
+    await click('approve')
+    expect(q('error').textContent).toBe('YIDA_OWNER_RESPONSE_INVALID')
+    expect(absent('identity-reserved')).toBe(true)
+    expect(absent('submit')).toBe(true)
+  })
+
   it('the frozen notice names the grant id and the durable record; the uncertain hint needs a submission and an error', async () => {
     await save(); await selectRow()
     fetchSpy.mockResolvedValueOnce(error('YIDA_OWNER_RUNTIME_UNAVAILABLE', 503))

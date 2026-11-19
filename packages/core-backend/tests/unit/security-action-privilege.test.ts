@@ -107,9 +107,10 @@ describe('privilege inputs read', () => {
     expect(count(sql, 'WHERE una.user_id = $1::text')).toBe(1)
     expect(count(sql, 'WHERE s.admin_user_id = $1::text')).toBe(1)
     expect(count(sql, 'WHERE g.admin_user_id = $1::text')).toBe(1)
+    expect(count(sql, 'WHERE a.admin_user_id = $1::text')).toBe(1)
     expect(count(sql, 'WHERE u.id = $1::text')).toBe(1)
-    expect(count(sql, '(SELECT jsonb_agg(')).toBe(6)
-    expect(count(sql, '$1')).toBe(7)
+    expect(count(sql, '(SELECT jsonb_agg(')).toBe(7)
+    expect(count(sql, '$1')).toBe(8)
     expect(sql).toMatch(DEPARTMENT_SCOPE_PROJECTION)
   })
 
@@ -117,7 +118,7 @@ describe('privilege inputs read', () => {
     const { executor, calls } = privilegeHarness()
     await readPrivilegeInputs(executor, SUBJECT)
     expect(calls[3].sql).not.toMatch(/elearning_admin_scopes|attendance_scheduler_scopes|elearning_object_acl/)
-    expect(PRIVILEGE_GRANT_SOURCE_TABLES).toHaveLength(7)
+    expect(PRIVILEGE_GRANT_SOURCE_TABLES).toHaveLength(8)
     expect(HIGH_PRIVILEGE_REASONS).toEqual([
       'platform_admin_flag', 'platform_admin_role_column', 'platform_admin_role', 'delegated_admin_role',
       'delegated_admin_scope', 'admin_level_code', 'sensitive_authority_code',
@@ -508,6 +509,15 @@ describe('privilege witness', () => {
     // delegatedMemberGroupScopes [['attendance','group-1']].
     // Domain metasheet:security-action:privilege:v2|. The boolean is inside the canonical JSON.
     expect(witness).toBe('3afa149f203a4a348f40845d0a1a0276aefa64eb9ce624c5f5739039517ff9e6')
+  })
+
+  it('binds a stored delegation revision and keeps paused delegated administrators high privilege', async () => {
+    const row = { ...pinnedRow, role_ids: ['attendance_admin'] }
+    const first = await readInputs({ ...row, delegation_activations: [['attendance', false, 'dfa9ac17-29c4-4567-b936-79517e6b958d']] })
+    const later = await readInputs({ ...row, delegation_activations: [['attendance', false, '7cec0d1e-680c-4077-9e54-ce35ee48da61']] })
+    expect(classifyPrivilege(first).reasons).toContain('delegated_admin_role')
+    expect(computePrivilegeWitness(first)).not.toBe(computePrivilegeWitness(later))
+    expect(computePrivilegeWitness(first)).not.toBe(computePrivilegeWitness(await readInputs(row)))
   })
 
   it('does not depend on the order rows arrive in and is deterministic', async () => {
