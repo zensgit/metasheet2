@@ -277,6 +277,12 @@ export const SUBJECT_AUTHORIZATION_VERSIONS_NOWAIT_SQL = `SELECT subject_id FROM
  ORDER BY subject_id
    FOR UPDATE NOWAIT`
 
+/** {@link lockSubjectAuthorizationVersions}: the existing version rows, ascending, waiting, without a write. */
+export const SUBJECT_AUTHORIZATION_VERSIONS_LOCK_SQL = `SELECT subject_id FROM ${SUBJECT_AUTHORIZATION_VERSIONS_TABLE}
+ WHERE subject_id = ANY($1::text[])
+ ORDER BY subject_id
+   FOR UPDATE`
+
 const SHEET_VERSION_ENSURE_SQL = `INSERT INTO ${SHEET_PERMISSION_VERSIONS_TABLE} (sheet_id) VALUES ($1) ON CONFLICT (sheet_id) DO NOTHING`
 const SHEET_VERSION_SHARE_SQL = `SELECT sheet_id, version::text AS version FROM ${SHEET_PERMISSION_VERSIONS_TABLE} WHERE sheet_id = $1 FOR SHARE`
 const SUBJECT_VERSION_ENSURE_SQL = `INSERT INTO ${SUBJECT_AUTHORIZATION_VERSIONS_TABLE} (subject_id) VALUES ($1) ON CONFLICT (subject_id) DO NOTHING`
@@ -465,6 +471,25 @@ export async function lockSubjectAuthorizationVersionsNowait(
   const ids = canonicalAuthorizationIds(userIds)
   if (ids.length === 0) return ids
   await queryFnOf(queryable)(SUBJECT_AUTHORIZATION_VERSIONS_NOWAIT_SQL, [ids])
+  return ids
+}
+
+/**
+ * The waiting, lock-only form for the access-graph mutex under a read-only plan (#6938's
+ * CONSUME_CLASS_DECISION intent, including its identity-read slot: privilege-witness revalidation,
+ * the admin-grant receiving reader), whose contract is that it issues no DML. It keeps the D21 order
+ * (version rows, then users rows) without advancing any version, so a read does not invalidate the
+ * subjects it only reads: takes the version rows that already exist FOR UPDATE, ascending, and writes
+ * nothing. A subject with no version row is not locked here; a read-only plan never creates one, and a
+ * concurrent bump-first writer that creates it holds nothing this plan waits on afterwards.
+ */
+export async function lockSubjectAuthorizationVersions(
+  queryable: AuthorizationVersionQueryable,
+  userIds: readonly string[],
+): Promise<string[]> {
+  const ids = canonicalAuthorizationIds(userIds)
+  if (ids.length === 0) return ids
+  await queryFnOf(queryable)(SUBJECT_AUTHORIZATION_VERSIONS_LOCK_SQL, [ids])
   return ids
 }
 

@@ -146,6 +146,8 @@ beforeEach(() => {
         if (state.failSql && text.includes(state.failSql)) throw state.failError
         if (text.includes('SET TRANSACTION') || text.includes('set_config') || text.includes('pg_advisory_xact_lock')) return answer(text, params, { rows: [] })
         if (text.includes('current_setting')) return answer(text, params, { rows: [{ lock_timeout: '0', statement_timeout: '0' }] })
+        // D21 (Y5a): the mutex's subject version bump, one sorted statement before the users-row locks.
+        if (text.startsWith('INSERT INTO subject_authorization_versions ')) return answer(text, params, { rows: [], rowCount: (params?.[0] as unknown[]).length })
         if (text.includes('FOR UPDATE')) {
           const row = state.users.get(String(params?.[0]))
           return answer(text, params, { rows: row ? [row] : [] })
