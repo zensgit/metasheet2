@@ -27,6 +27,7 @@
  */
 import {
   createRunValueStore,
+  isRunValueStoreError,
   projectRow,
   RunValueStoreError,
   type FrozenRunValueRows,
@@ -316,15 +317,23 @@ export function createRunValueStoreFromRule(scope: RunValueScope, plan: StepOutp
       const ref = parseStepOutputReference(reference)
       const consumer = consumerId(consumerPosition)
       const producer = producerFor(ref.stepKey, consumerPosition)
-      const rows = inner.resolveForConsumer(handle, {
-        fromStep: positionId(producer.position),
-        output: OUTPUT_NAME,
-        columns: ref.selector === 'count' ? producer.columns : [ref.column],
-      }, consumer, consumer, requestScope)
+      let rows: FrozenRunValueRows
+      try {
+        rows = inner.resolveForConsumer(handle, {
+          fromStep: positionId(producer.position),
+          output: OUTPUT_NAME,
+          columns: ref.selector === 'count' ? producer.columns : [ref.column],
+        }, consumer, consumer, requestScope)
+      } catch (error) {
+        // The container is the only check that enforces the declared columns; the resolver reports its
+        // refusal of a `first.<col>` outside them with the frozen resolver code (contract §4).
+        if (ref.selector === 'first' && isRunValueStoreError(error) && error.code === 'RUN_VALUE_UNDECLARED') fail('RUN_VALUE_REF_UNKNOWN')
+        throw error
+      }
       if (ref.selector === 'count') return rows.length
       if (rows.length !== 1) fail('RUN_VALUE_FIRST_NOT_SINGLE')
       const row = rows[0]
-      if (!Object.prototype.hasOwnProperty.call(row, ref.column)) fail('RUN_VALUE_UNDECLARED')
+      if (!Object.prototype.hasOwnProperty.call(row, ref.column)) fail('RUN_VALUE_REF_UNKNOWN')
       return row[ref.column]
     },
 

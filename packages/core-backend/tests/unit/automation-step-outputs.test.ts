@@ -186,7 +186,7 @@ describe('2 ★ prototype-chain names are refused everywhere; the resolver reads
     for (const inherited of ['toString', 'valueOf', 'hasOwnProperty']) {
       const store = createRunValueStoreFromRule(scopeA, plan)
       const handle = store.publish('k', [{ id: 'x' }])
-      expect(code(() => store.resolveScalar(handle, `{{steps.k.output.first.${inherited}}}`, 1, scopeA))).toBe('RUN_VALUE_UNDECLARED')
+      expect(code(() => store.resolveScalar(handle, `{{steps.k.output.first.${inherited}}}`, 1, scopeA))).toBe('RUN_VALUE_REF_UNKNOWN')
     }
   })
 })
@@ -339,7 +339,7 @@ describe('3 ★ G9 container layer', () => {
     const { store, read } = published()
     expect(code(() => store.resolveScalar(read, '{{steps.nope.output.count}}', 1, scopeA))).toBe('RUN_VALUE_REF_UNKNOWN')
     expect(code(() => store.resolveRows(read, { fromStep: 'nope' }, 1, scopeA))).toBe('RUN_VALUE_REF_UNKNOWN')
-    expect(code(() => store.resolveScalar(read, '{{steps.read.output.first.secret}}', 1, scopeA))).toBe('RUN_VALUE_UNDECLARED')
+    expect(code(() => store.resolveScalar(read, '{{steps.read.output.first.secret}}', 1, scopeA))).toBe('RUN_VALUE_REF_UNKNOWN')
     expect(code(() => store.publish('nope', [{ id: 'x' }]))).toBe('RUN_VALUE_UNDECLARED')
   })
 
