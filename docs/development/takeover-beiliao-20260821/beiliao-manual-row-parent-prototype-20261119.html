@@ -81,7 +81,7 @@ tr.m td{background:var(--manual)}
 <body>
 <main>
   <h1>人工补充行：指定和修改父组件 <span class="tag">页面原型 · 示例数据（合成）</span></h1>
-  <p class="lead">配合 ADR《备料项目表的人工补充行》§12（2026-11-19 提议，待确认）。只是样子，不连后端；可以点一点切换选法。</p>
+  <p class="lead">配合 ADR《备料项目表的人工补充行》§12（owner 2026-11-19 已裁决）。只是样子，不连后端；可以点一点切换选法。</p>
 
   <h2>① 新增人工补充行：多一栏「父组件」</h2>
   <p class="note">默认「不挂父组件」，和今天一样。选「选已有的」会出现可搜索的下拉，图号和名称成对带出；选「新建父组件」就自己填图号和名称。</p>
@@ -201,7 +201,7 @@ tr.m td{background:var(--manual)}
     </div>
   </div>
 
-  <h2>④ 正式导出（待确认 OQ-P2）</h2>
+  <h2>④ 正式导出（OQ-P2 已裁决：插到父组件下）</h2>
   <p class="note">建议：挂了父组件的人工行插到父组件那棵子树的末尾；找不到父组件（新建的）就留在表尾。只有 PLM 行的项目，导出和今天完全一样。</p>
   <div class="grid-wrap" style="max-width:760px"><table>
     <thead><tr><th>层级</th><th>父组件图号</th><th>图号</th><th>名称</th><th>来源</th></tr></thead>
