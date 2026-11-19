@@ -613,14 +613,15 @@ describe('W — writers bump FIRST', () => {
   it('W-01 the access-graph mutex bumps the subject version rows (sorted, one statement) BEFORE the first users FOR UPDATE', () => {
     const source = readFileSync(path.join(SRC, 'directory', 'access-graph-mutex.ts'), 'utf8')
     const bumpAt = source.indexOf('await bumpSubjectAuthorizationVersions(client, normalizedUserIds)')
-    // The statement text (template literal end), not the docblock that explains it.
-    const lockAt = source.indexOf('FOR UPDATE`,')
+    // The statement text (the template literal's lock clause, #6924 added its NOWAIT switch), not
+    // the docblock that explains it.
+    const lockAt = source.indexOf("FOR UPDATE${options.nowait === true ? ' NOWAIT' : ''}`,")
     expect(bumpAt).toBeGreaterThan(0)
     expect(lockAt).toBeGreaterThan(bumpAt)
     expect(source.match(/bumpSubjectAuthorizationVersions\(/g)).toHaveLength(1)
   })
 
-  it('W-02 role assignment bumps between the roles FOR SHARE review and the membership write; the five autocommit routes now run in transaction() with the bump first', () => {
+  it('W-02 role assignment bumps between the roles FOR SHARE review and the membership write; the autocommit routes now write inside a transaction whose mutex bumps first', () => {
     const roleAssignment = readFileSync(path.join(SRC, 'rbac', 'role-assignment.ts'), 'utf8')
     for (const write of ['INSERT INTO user_roles', 'DELETE FROM user_roles']) {
       const writeAt = roleAssignment.indexOf(write)
@@ -630,8 +631,17 @@ describe('W — writers bump FIRST', () => {
       expect(writeAt).toBeGreaterThan(bumpAt)
     }
     const permissions = readFileSync(path.join(SRC, 'routes', 'permissions.ts'), 'utf8')
-    expect(permissions.match(/await transaction\(async \(client\) => \{\s*await bumpSubjectAuthorizationVersions\(client, \[userId\]\)/g)).toHaveLength(3)
-    expect(permissions).not.toMatch(/pool\.query\(\s*[`']\s*(INSERT INTO|DELETE FROM) user_permissions/)
+    // #6924 moved the direct grant / revoke, the template apply and the legacy revoke into
+    // writeLegacyAuthorizationException: one withAuthorizationInputTransaction whose R5 step is the
+    // access-graph mutex (W-01), so the subject bump precedes the users rows and every DML. The
+    // statement order through the real contract entry is pinned in
+    // authz-version-authorization-exception.test.ts.
+    expect(permissions.match(/await writeLegacyAuthorizationException\(\{/g)).toHaveLength(4)
+    expect(permissions).not.toMatch(/(INSERT INTO|DELETE FROM) user_permissions|UPDATE users/)
+    const compat = readFileSync(path.join(SRC, 'admin', 'authorization-exception-compat.ts'), 'utf8')
+    expect(compat).toMatch(/const result = await withAuthorizationInputTransaction\(\{\s*intent: revoking \? 'REVOKE_DIRECT' : 'GRANT_DIRECT',\s*userIds: \[userId\],/)
+    const exceptionWrite = readFileSync(path.join(SRC, 'admin', 'authorization-exception-write.ts'), 'utf8')
+    expect(exceptionWrite).toMatch(/Caller holds the shared access-subject locks for both users through commit/)
     // #6833 moved the member-group route and syncLegacyAdminProfile into transactions behind the
     // access-graph mutex (lockSharedAccessSubjects: namespace-admission advisory → subject version
     // rows, sorted → users FOR UPDATE; W-01), so the bump comes first by construction there.
@@ -649,12 +659,15 @@ describe('W — writers bump FIRST', () => {
       expect(txnAt).toBeGreaterThan(0)
       expect(mutexAt).toBeGreaterThan(txnAt)
     }
-    // #6872's legacy users.permissions revoke: the mutex before the users UPDATE, in the route's transaction.
+    // #6872's legacy users.permissions revoke: the mutex before the users UPDATE. Since #6924 the route
+    // reaches the locked half (revokeLockedLegacyUserPermission) only through the exception writer,
+    // inside the contract transaction above; the self-locking wrapper keeps its own mutex first.
     const legacy = readFileSync(path.join(SRC, 'admin', 'legacy-permission-revoke.ts'), 'utf8')
     const legacyMutexAt = legacy.indexOf('await lockSharedAccessSubjects(client, [actorId, userId])')
     expect(legacyMutexAt).toBeGreaterThan(0)
     expect(legacy.indexOf('`UPDATE users')).toBeGreaterThan(legacyMutexAt)
-    expect(permissions).toMatch(/await transaction\(async \(client\) => revokeLegacyUserPermission\(client, /)
+    expect(exceptionWrite).toMatch(/await revokeLockedLegacyUserPermission\(client, /)
+    expect(permissions).toMatch(/action: \{ kind: 'legacy\.revoke', code: permission \}/)
   })
 
   it('W-03 sheet layer: every route bumps AFTER its meta_sheets row lock and BEFORE any exclusive record lock — the record-permission routes between record-link phases 1–4 (shared) and phase 5, the grant / configuration routes right after assertSheetLiveForUpdate', () => {

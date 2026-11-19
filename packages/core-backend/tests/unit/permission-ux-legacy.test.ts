@@ -351,6 +351,9 @@ describe('legacy revoke waits for the live actor', () => {
         if (text.includes('FOR UPDATE')) return { rows: [{ id: params?.[0], role: 'user', activation_status: 'activated', is_active: true, access_generation: 4, deleted_at: null, purged_at: null }] }
         if (text.includes('pg_typeof')) return { rows: [{ permissions_type: 'jsonb', permissions: ['changed'] }] }
         if (text.includes('to_jsonb(permissions)')) return { rows: [{ permissions: ['workflow:read'] }] }
+        // D21 (Y5a): the access-graph mutex's subject authorization version bump (a protocol upsert,
+        // before the users rows; it rolls back with the refused transaction).
+        if (text.includes('INSERT INTO subject_authorization_versions')) return { rows: [], rowCount: 1 }
         writes.push(text)
         throw new Error('unexpected write after stale before-image')
       },
