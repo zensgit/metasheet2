@@ -141,7 +141,11 @@ beforeEach(() => {
   S = seedSheets()
   actor = WRITER
   process.env[MR_SWITCH] = 'true'
+  fake.pool.transaction.mockClear()
 })
+
+/** The request was answered by the ROUTE's own checks: no write transaction was ever opened (no fence, no re-read). */
+const expectNoTransaction = () => expect(fake.pool.transaction).not.toHaveBeenCalled()
 
 afterEach(() => {
   if (SWITCH_BEFORE === undefined) delete process.env[MR_SWITCH]
@@ -198,6 +202,7 @@ describe('CP — 新增 with a parent: POST /sheets/:sheetId/manual-rows', () =>
     expect(res.status, JSON.stringify(res.body)).toBe(400)
     expect(res.body).toEqual({ ok: false, error: { code: PARENT_INVALID, message: '父组件图号和父组件名称要一起提交，不能只改其中一列。', details: { reason: 'pair_incomplete' } } })
     expect(recordsOf(S.PREG)).toEqual([])
+    expectNoTransaction()
   })
 
   it.each([
@@ -211,6 +216,7 @@ describe('CP — 新增 with a parent: POST /sheets/:sheetId/manual-rows', () =>
     expect(res.status, JSON.stringify(res.body)).toBe(400)
     expect(refusal(res)).toEqual([PARENT_INVALID, 'not_text'])
     expect(recordsOf(S.PREG)).toEqual([])
+    expectNoTransaction()
   })
 
   it.each([
@@ -222,6 +228,7 @@ describe('CP — 新增 with a parent: POST /sheets/:sheetId/manual-rows', () =>
     expect(res.status, JSON.stringify(res.body)).toBe(422)
     expect(refusal(res)).toEqual([PARENT_INVALID, 'name_without_code'])
     expect(recordsOf(S.PREG)).toEqual([])
+    expectNoTransaction()
   })
 
   it('CP-07 P5 the new row as its own parent: 422 self_parent (surrounding whitespace ignored, case kept); nothing written', async () => {
@@ -232,6 +239,7 @@ describe('CP — 新增 with a parent: POST /sheets/:sheetId/manual-rows', () =>
       expect(refusal(res)).toEqual([PARENT_INVALID, 'self_parent'])
     }
     expect(recordsOf(S.PREG)).toEqual([])
+    expectNoTransaction()
     // a different case is a different 图号; a row without its own 图号 can take any parent
     expect((await createRow(S.PREG, minimal(S.PREG, { [own]: 'SYN-1', ...parent(S.PREG, 'syn-1', null) }))).status).toBe(200)
     expect((await createRow(S.PREG, minimal(S.PREG, parent(S.PREG, 'SYN-1', null)))).status).toBe(200)
@@ -499,6 +507,7 @@ describe('EP — 修改 the parent: PATCH /records/:recordId/manual-fields', () 
     expect(res.status, JSON.stringify(res.body)).toBe(400)
     expect(refusal(res)).toEqual([PARENT_INVALID, 'pair_incomplete'])
     expect(fake.records.get(row.id)).toEqual(before)
+    expectNoTransaction()
   })
 
   it('EP-04 P4: a value that is not text → 400 not_text; a name without a 图号 → 422 name_without_code; nothing written', async () => {
@@ -515,6 +524,7 @@ describe('EP — 修改 the parent: PATCH /records/:recordId/manual-fields', () 
       expect(refusal(res)).toEqual([PARENT_INVALID, 'name_without_code'])
     }
     expect(fake.records.get(row.id)).toEqual(before)
+    expectNoTransaction()
   })
 
   describe('EP-05 P5 — a row is never its own parent, in both directions', () => {
@@ -527,6 +537,9 @@ describe('EP — 修改 the parent: PATCH /records/:recordId/manual-fields', () 
         expect(res.body).toEqual({ ok: false, error: { code: PARENT_INVALID, message: '父组件图号不能和这一行自己的图号相同。', details: { reason: 'self_parent' } } })
       }
       expect(fake.records.get(row.id)).toEqual(before)
+      // P5 is NOT a pre-check of the route: each of those refusals came out of the write transaction, under the row lock
+      expect(fake.pool.transaction).toHaveBeenCalledTimes(3)
+      expect(fake.statements(/^SELECT id, data, created_by FROM meta_records WHERE sheet_id = \$1 AND id = \$2 FOR UPDATE$/)).toHaveLength(3)
       expect((await editRow(row.id, parent(S.PREG, 'syn-1', null))).status).toBe(200)
     })
     it('direction 2: changing the row\'s own 图号 to the STORED parent → 422 self_parent, though the request names no parent column', async () => {

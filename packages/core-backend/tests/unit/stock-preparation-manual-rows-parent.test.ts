@@ -80,6 +80,8 @@ import {
 } from '../utils/stock-prep-manual-rows-fake-pg'
 
 const fake = createManualRowsFakePool()
+/** U+3000, which String.prototype.trim treats as whitespace — spelled by code point so the source holds no invisible character. */
+const IDEOGRAPHIC_SPACE = String.fromCharCode(0x3000)
 const P = (n: number) => `plm_stock_preparation_sandbox_p_${n.toString(16).padStart(24, '0')}`
 const query = fake.pool.query as never
 const ph = (sheet: FakeSheet, logical: string) => fake.phys(sheet, logical)
@@ -137,7 +139,7 @@ describe('R-01 P3 + P4 — the pair\'s shape', () => {
     ['a 图号 with a whitespace name', 'SYN-P', '  '],
     ['both text', 'SYN-P', 'Synthetic parent'],
     ['text with surrounding whitespace (stored as sent)', ' SYN-P ', ' Synthetic parent '],
-    ['the ideographic space counts as whitespace, so this is 「both blank」', '　', '　'],
+    ['the ideographic space counts as whitespace, so this is 「both blank」', IDEOGRAPHIC_SPACE, IDEOGRAPHIC_SPACE],
   ])('P4 %s → acceptable', (_label, code, name) => {
     expect(manualRowParentPairProblem({ hasCode: true, hasName: true, code, name })).toBeNull()
   })
@@ -160,7 +162,7 @@ describe('R-01 P3 + P4 — the pair\'s shape', () => {
     expect(manualRowParentPairProblem({ hasCode: true, hasName: true, code, name })).toBe('not_text')
   })
   it('the two primitives', () => {
-    for (const blank of [null, undefined, '', ' ', '\t\n', '　']) expect(isBlankManualRowParentValue(blank), JSON.stringify(blank)).toBe(true)
+    for (const blank of [null, undefined, '', ' ', '\t\n', IDEOGRAPHIC_SPACE]) expect(isBlankManualRowParentValue(blank), JSON.stringify(blank)).toBe(true)
     for (const filled of ['a', ' a ', 0, false, {}, []]) expect(isBlankManualRowParentValue(filled), JSON.stringify(filled)).toBe(false)
     for (const ok of [null, '', 'a']) expect(isManualRowParentValueType(ok)).toBe(true)
     for (const bad of [undefined, 0, 1, true, {}, []]) expect(isManualRowParentValueType(bad), JSON.stringify(bad)).toBe(false)
@@ -172,7 +174,7 @@ describe('R-02 P5 — a row is not its own parent', () => {
     ['the same text', 'SYN-1', 'SYN-1', true],
     ['surrounding whitespace on the parent', ' SYN-1\t', 'SYN-1', true],
     ['surrounding whitespace on the row\'s own 图号', 'SYN-1', '  SYN-1 ', true],
-    ['an ideographic space around it', '　SYN-1　', 'SYN-1', true],
+    ['an ideographic space around it', `${IDEOGRAPHIC_SPACE}SYN-1${IDEOGRAPHIC_SPACE}`, 'SYN-1', true],
     ['a different case is a different 图号', 'syn-1', 'SYN-1', false],
     ['an inner space is part of the text', 'SYN 1', 'SYN1', false],
     ['a different 图号', 'SYN-2', 'SYN-1', false],
@@ -619,8 +621,8 @@ describe('S-01 the query-string parser', () => {
     expect(ok({ q: '100%_\\' }).q).toBe('100%_\\')
   })
   it.each([
-    ['1', 1], ['20', 20], ['50', 50], ['51', 50], ['999999', 50], ['0', 1], [' 7 ', 7],
-    ['abc', 20], ['-3', 20], ['1.5', 20], ['', 20], ['1e3', 20], ['9999999', 20],
+    ['1', 1], ['20', 20], ['50', 50], ['51', 50], ['999999', 50], ['0', 1], [' 7 ', 7], ['007', 7], ['9999999', 50], ['9'.repeat(400), 50],
+    ['abc', 20], ['-3', 20], ['1.5', 20], ['', 20], ['1e3', 20], ['0x10', 20], ['5 6', 20],
   ])('limit %j → %s (clamped to 1 – 50; anything that is not an integer falls back to 20)', (raw, expected) => {
     expect(ok({ limit: raw }).limit).toBe(expected)
     expect(expected).toBeLessThanOrEqual(MANUAL_ROW_PARENT_OPTIONS_MAX_LIMIT)

@@ -46,10 +46,11 @@ export const MANUAL_ROW_PARENT_OPTIONS_MAX_QUERY_LENGTH = 200
 
 /**
  * The characters both statements treat as surrounding whitespace when they decide "blank" or compare two 图号: space,
- * tab, LF, CR, VT, FF, the no-break space and the ideographic space. Passed as a PARAMETER to BTRIM, so the SQL text
- * holds no escape sequence. (JS `trim()` knows a few more exotic code points; they do not occur in these columns.)
+ * tab, LF, CR, VT, FF, the no-break space (U+00A0) and the ideographic space (U+3000). Passed as a PARAMETER to BTRIM,
+ * so the SQL text holds no escape sequence; spelled as code points here, so this source holds no invisible character.
+ * (JS `trim()` knows a few more exotic code points; they do not occur in these columns.)
  */
-export const MANUAL_ROW_PARENT_SQL_TRIM_CHARS = ' \t\n\r\v\f 　'
+export const MANUAL_ROW_PARENT_SQL_TRIM_CHARS = String.fromCharCode(0x20, 0x09, 0x0a, 0x0d, 0x0b, 0x0c, 0xa0, 0x3000)
 
 export type ManualRowParentOptionsQuery = Readonly<{ q: string; limit: number }>
 
@@ -66,9 +67,9 @@ export function parseManualRowParentOptionsQuery(query: { q?: unknown; limit?: u
   if (q.length > MANUAL_ROW_PARENT_OPTIONS_MAX_QUERY_LENGTH) {
     return { kind: 'invalid', message: `q must be at most ${MANUAL_ROW_PARENT_OPTIONS_MAX_QUERY_LENGTH} characters` }
   }
-  const rawLimit = typeof query?.limit === 'string' && /^\d{1,6}$/.test(query.limit.trim()) ? Number.parseInt(query.limit.trim(), 10) : Number.NaN
-  const limit = Number.isFinite(rawLimit)
-    ? Math.min(Math.max(rawLimit, 1), MANUAL_ROW_PARENT_OPTIONS_MAX_LIMIT)
+  const rawLimit = typeof query?.limit === 'string' ? query.limit.trim() : ''
+  const limit = /^[0-9]+$/.test(rawLimit)
+    ? Math.min(Math.max(Number(rawLimit), 1), MANUAL_ROW_PARENT_OPTIONS_MAX_LIMIT)
     : MANUAL_ROW_PARENT_OPTIONS_DEFAULT_LIMIT
   return { kind: 'ok', value: { q, limit } }
 }

@@ -8390,10 +8390,10 @@ async function applyPermissionDeEscalation(query: TxnQuery, opts: { scope: Permi
 
 // ── 人工补充行 (manual supplementary rows; ADR adr-stock-prep-manual-rows-20261030 §3.2–§3.4, slice B2) ─────────
 //
-// Three session-only write routes: POST /sheets/:sheetId/manual-rows (新增), POST /records/:recordId/manual-copy
-// (复制为新行) and PATCH /records/:recordId/manual-fields (修改 the six fillable columns and — ADR §12 — the parent pair),
-// plus the two session-only reads behind the parent picker (GET /sheets/:sheetId/manual-rows/parent-options and
-// GET /records/:recordId/manual-parent-dependents). The gate, the registry reads and the create extension live in
+// Three session-only routes: POST /sheets/:sheetId/manual-rows (新增), POST /records/:recordId/manual-copy (复制为新行)
+// and PATCH /records/:recordId/manual-fields (修改 the six fillable columns and — ADR §12 — the parent pair). ADR §12
+// adds two session-only READS behind the parent picker: GET /sheets/:sheetId/manual-rows/parent-options and
+// GET /records/:recordId/manual-parent-dependents. The gate, the registry reads and the create extension live in
 // multitable/stock-preparation-manual-rows-gate.ts; these helpers are the route half.
 
 /** A field-level refusal of a manual-row route, mapped to its HTTP body by `sendManualRowWriteError`. */
@@ -9894,7 +9894,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             pool.query.bind(pool),
             effectiveSheetId,
             activeFields,
-            process.env,
+            undefined, // the deployment switch is read from the process environment, as before
             (manualSheet) => actorCanWriteManualRowParentPair(activeFields, manualSheet, capabilities, fieldScopeMap),
           )
         } catch (err) {
