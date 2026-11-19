@@ -45,11 +45,13 @@ import {
   SHEET_PERMISSION_VERSIONS_BUMP_SQL,
   SHEET_ROW_KEY_SHARE_SQL,
   SUBJECT_AUTHORIZATION_VERSIONS_BUMP_SQL,
+  SUBJECT_AUTHORIZATION_VERSIONS_LOCK_SQL,
   authorizationProtocolGapsFor,
   bumpAuthorizationVersions,
   bumpSheetPermissionVersionBehindSheetRow,
   bumpSheetPermissionVersions,
   bumpSubjectAuthorizationVersions,
+  lockSubjectAuthorizationVersions,
   canonicalAuthorizationIds,
   fieldVisibilityTriggerWouldFire,
   isAuthorizationVersionConflict,
@@ -388,6 +390,22 @@ describe('B — the explicit bump helpers', () => {
     statements.length = 0
     expect(await bumpSheetPermissionVersions(query, [])).toEqual([])
     expect(await bumpSubjectAuthorizationVersions(query, [' '])).toEqual([])
+    expect(statements).toEqual([])
+  })
+
+  it('B-02b the lock-only form (CONSUME plans) is one statement in the bump\'s canonical order, never in database collation order, and writes nothing', async () => {
+    const statements: Array<{ sql: string; params: unknown[] }> = []
+    const query = async (sql: string, params: unknown[] = []) => { statements.push({ sql, params }); return { rows: [] } }
+    // Code-unit order: 'Bob' < 'alice'; an en_US / ICU collation would sort them the other way round.
+    expect(await lockSubjectAuthorizationVersions({ query }, ['alice', 'Bob', 'alice'])).toEqual(['Bob', 'alice'])
+    expect(statements).toEqual([{ sql: SUBJECT_AUTHORIZATION_VERSIONS_LOCK_SQL, params: [['Bob', 'alice']] }])
+    const compact = SUBJECT_AUTHORIZATION_VERSIONS_LOCK_SQL.replace(/\s+/g, ' ')
+    expect(compact).toMatch(/FROM unnest\(\$1::text\[\]\) WITH ORDINALITY AS s\(subject_id, ord\)/)
+    expect(compact).toMatch(/ORDER BY s\.ord FOR UPDATE OF v$/)
+    expect(compact).not.toMatch(/ORDER BY (v\.)?subject_id/)
+    expect(compact).not.toMatch(/\b(INSERT|UPDATE\s+\w|DELETE|NOWAIT)\b/)
+    statements.length = 0
+    expect(await lockSubjectAuthorizationVersions({ query }, [' '])).toEqual([])
     expect(statements).toEqual([])
   })
 
@@ -1016,5 +1034,8 @@ describe('X — CI wiring of the real-DB half', () => {
     expect(existsSync(path.join(BACKEND, DB_SPEC))).toBe(true)
     const contract = readFileSync(path.join(ROOT, 'scripts/ops/plugin-tests-parallel-contract.test.mjs'), 'utf8')
     expect(contract.match(/authz-version-protocol\.db\.test\.ts/g)?.length ?? 0).toBeGreaterThanOrEqual(3)
+    // The contract strips this exact line (two spaces, the path, a backslash, a newline) from the parsed
+    // step; a literal 'backslash n' never matches and the contracts lane fails on Linux only.
+    expect(contract).toContain("const authzVersionAddition = '  tests/integration/authz-version-protocol.db.test.ts \\\\\\n'")
   })
 })
