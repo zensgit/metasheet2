@@ -1,0 +1,156 @@
+{
+  "handlerKeys": "c1ea4f848729baa43f589d59a6d63b6339cc4611d42f5f2887edb43d84f44374",
+  "handlerKeyCount": 170,
+  "cases": [
+    {
+      "name": "success: single_record, raw plane",
+      "status": 200,
+      "body": "{\"ok\":true,\"data\":{\"evidence\":{\"ok\":true,\"object\":\"material\",\"mode\":\"single_record\",\"boundedSmoke\":true,\"containers\":{\"primary\":{\"type\":\"object\",\"arrayLength\":null}},\"recordCount\":1,\"containerLocated\":true,\"boundedSmokeExecuted\":true,\"timeoutReached\":false,\"capReached\":false},\"data\":{\"containers\":{\"primary\":{\"records\":[{\"colGamma\":\"RAW-SIGMA\"}]}},\"recordCount\":1}}}",
+      "calls": "{\"store\":[{\"id\":\"rsc_single\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":\"ws_q\"}],\"systems\":[{\"id\":\"sys_s1a\",\"principal\":\"u_s1a_reader\",\"runAs\":\"user\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":\"ws_q\"}],\"adapters\":[{\"system\":{\"id\":\"sys_s1a\",\"tenantId\":\"tenant-s1a-governed\",\"kind\":\"erp:k3-wise-webapi\",\"config\":{\"objects\":{\"material\":{\"operations\":[\"read\"],\"readPath\":\"/K3API/Material/GetDetail\",\"readMethod\":\"POST\"}}}},\"hasCredentials\":true,\"deps\":{\"principal\":\"u_s1a_reader\"}}],\"reads\":[{\"object\":\"material\",\"filters\":{\"FNumber\":\"M-001\"}}]}"
+    },
+    {
+      "name": "success: single_record, record plane",
+      "status": 200,
+      "body": "{\"ok\":true,\"data\":{\"evidence\":{\"ok\":true,\"object\":\"material\",\"mode\":\"single_record\",\"boundedSmoke\":true,\"containers\":{\"primary\":{\"type\":\"array\",\"arrayLength\":1}},\"recordCount\":1,\"containerLocated\":true,\"boundedSmokeExecuted\":true,\"timeoutReached\":false,\"capReached\":false},\"data\":{\"containers\":{\"primary\":{\"records\":[{\"colGamma\":\"REC-SIGMA\"}]}},\"recordCount\":1}}}",
+      "calls": "{\"store\":[{\"id\":\"rsc_single\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":null}],\"systems\":[{\"id\":\"sys_s1a\",\"principal\":\"u_s1a_reader\",\"runAs\":\"user\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":null}],\"adapters\":[{\"system\":{\"id\":\"sys_s1a\",\"tenantId\":\"tenant-s1a-governed\",\"kind\":\"erp:k3-wise-webapi\",\"config\":{\"objects\":{\"material\":{\"operations\":[\"read\"],\"readPath\":\"/K3API/Material/GetDetail\",\"readMethod\":\"POST\"}}}},\"hasCredentials\":true,\"deps\":{\"principal\":\"u_s1a_reader\"}}],\"reads\":[{\"object\":\"material\",\"filters\":{\"FNumber\":\"M-001\"}}]}"
+    },
+    {
+      "name": "success: list_page, 12 source rows",
+      "status": 200,
+      "body": "{\"ok\":true,\"data\":{\"evidence\":{\"ok\":true,\"object\":\"material\",\"mode\":\"list_page\",\"boundedSmoke\":true,\"containers\":{\"primary\":{\"type\":\"array\",\"arrayLength\":12}},\"recordCount\":10,\"containerLocated\":true,\"boundedSmokeExecuted\":true,\"timeoutReached\":false,\"capReached\":true},\"data\":{\"containers\":{\"primary\":{\"records\":[{\"colGamma\":\"SIGMA-0\"},{\"colGamma\":\"SIGMA-1\"},{\"colGamma\":\"SIGMA-2\"},{\"colGamma\":\"SIGMA-3\"},{\"colGamma\":\"SIGMA-4\"},{\"colGamma\":\"SIGMA-5\"},{\"colGamma\":\"SIGMA-6\"},{\"colGamma\":\"SIGMA-7\"},{\"colGamma\":\"SIGMA-8\"},{\"colGamma\":\"SIGMA-9\"}]}},\"recordCount\":10}}}",
+      "calls": "{\"store\":[{\"id\":\"rsc_list\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":null}],\"systems\":[{\"id\":\"sys_s1a\",\"principal\":\"u_s1a_reader\",\"runAs\":\"user\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":null}],\"adapters\":[{\"system\":{\"id\":\"sys_s1a\",\"tenantId\":\"tenant-s1a-governed\",\"kind\":\"erp:k3-wise-webapi\",\"config\":{\"objects\":{\"material\":{\"operations\":[\"read\"],\"readPath\":\"/K3API/Material/GetList\",\"readMethod\":\"POST\",\"readMode\":\"list\",\"maxListLimit\":10}}}},\"hasCredentials\":true,\"deps\":{\"principal\":\"u_s1a_reader\"}}],\"reads\":[{\"object\":\"material\",\"limit\":10,\"options\":{\"k3ReadMode\":\"list\"}}]}"
+    },
+    {
+      "name": "success: resolver_lookup",
+      "status": 200,
+      "body": "{\"ok\":true,\"data\":{\"evidence\":{\"ok\":true,\"object\":\"material\",\"mode\":\"resolver_lookup\",\"boundedSmoke\":false,\"containers\":{\"primary\":{\"type\":\"array\",\"arrayLength\":1}},\"candidateCount\":1,\"matchedCount\":1,\"containerLocated\":true,\"resolved\":true,\"rule\":\"exactly_one\"},\"data\":{\"resolver\":{\"target\":\"item_id\",\"value\":4242}}}}",
+      "calls": "{\"store\":[{\"id\":\"rsc_resolver\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":null}],\"systems\":[{\"id\":\"sys_s1a\",\"principal\":\"u_s1a_reader\",\"runAs\":\"user\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":null}],\"adapters\":[{\"system\":{\"id\":\"sys_s1a\",\"tenantId\":\"tenant-s1a-governed\",\"kind\":\"erp:k3-wise-webapi\",\"config\":{\"objects\":{\"material\":{\"operations\":[\"read\"],\"readPath\":\"/K3API/Material/GetList\",\"readMethod\":\"POST\"}}}},\"hasCredentials\":true,\"deps\":{\"principal\":\"u_s1a_reader\"}}],\"reads\":[{\"object\":\"material\",\"filters\":{\"FMaterialId\":\"MAT-7\"}}]}"
+    },
+    {
+      "name": "read-level failure: adapter throws (200, evidence failure)",
+      "status": 200,
+      "body": "{\"ok\":true,\"data\":{\"evidence\":{\"ok\":false,\"object\":\"material\",\"mode\":\"single_record\",\"boundedSmoke\":true,\"errorCode\":\"READ_SOURCE_PROBE_FAILED\",\"errorType\":\"Error\"},\"data\":null}}",
+      "calls": "{\"store\":[{\"id\":\"rsc_single\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":null}],\"systems\":[{\"id\":\"sys_s1a\",\"principal\":\"u_s1a_reader\",\"runAs\":\"user\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":null}],\"adapters\":[{\"system\":{\"id\":\"sys_s1a\",\"tenantId\":\"tenant-s1a-governed\",\"kind\":\"erp:k3-wise-webapi\",\"config\":{\"objects\":{\"material\":{\"operations\":[\"read\"],\"readPath\":\"/K3API/Material/GetDetail\",\"readMethod\":\"POST\"}}}},\"hasCredentials\":true,\"deps\":{\"principal\":\"u_s1a_reader\"}}],\"reads\":[{\"object\":\"material\",\"filters\":{\"FNumber\":\"M-THROW\"}}]}"
+    },
+    {
+      "name": "no principal",
+      "status": 401,
+      "body": "{\"ok\":false,\"error\":{\"code\":\"UNAUTHENTICATED\",\"message\":\"Authentication required\",\"details\":{}}}",
+      "calls": "{\"store\":[],\"systems\":[],\"adapters\":[],\"reads\":[]}"
+    },
+    {
+      "name": "no principal, extra body key",
+      "status": 401,
+      "body": "{\"ok\":false,\"error\":{\"code\":\"UNAUTHENTICATED\",\"message\":\"Authentication required\",\"details\":{}}}",
+      "calls": "{\"store\":[],\"systems\":[],\"adapters\":[],\"reads\":[]}"
+    },
+    {
+      "name": "no permission",
+      "status": 403,
+      "body": "{\"ok\":false,\"error\":{\"code\":\"FORBIDDEN\",\"message\":\"Insufficient integration permissions\",\"details\":{}}}",
+      "calls": "{\"store\":[],\"systems\":[],\"adapters\":[],\"reads\":[]}"
+    },
+    {
+      "name": "no permission, extra body key",
+      "status": 403,
+      "body": "{\"ok\":false,\"error\":{\"code\":\"FORBIDDEN\",\"message\":\"Insufficient integration permissions\",\"details\":{}}}",
+      "calls": "{\"store\":[],\"systems\":[],\"adapters\":[],\"reads\":[]}"
+    },
+    {
+      "name": "array body",
+      "status": 400,
+      "body": "{\"ok\":false,\"error\":{\"code\":\"READ_SOURCE_READ_CONTRACT_INVALID\",\"message\":\"configured read request is invalid\",\"details\":{\"reason\":\"not_object\"}}}",
+      "calls": "{\"store\":[],\"systems\":[],\"adapters\":[],\"reads\":[]}"
+    },
+    {
+      "name": "extra body key",
+      "status": 400,
+      "body": "{\"ok\":false,\"error\":{\"code\":\"READ_SOURCE_READ_CONTRACT_INVALID\",\"message\":\"configured read request is invalid\",\"details\":{\"reason\":\"unexpected_field\"}}}",
+      "calls": "{\"store\":[],\"systems\":[],\"adapters\":[],\"reads\":[]}"
+    },
+    {
+      "name": "body smuggles a config",
+      "status": 400,
+      "body": "{\"ok\":false,\"error\":{\"code\":\"READ_SOURCE_READ_CONTRACT_INVALID\",\"message\":\"configured read request is invalid\",\"details\":{\"reason\":\"unexpected_field\"}}}",
+      "calls": "{\"store\":[],\"systems\":[],\"adapters\":[],\"reads\":[]}"
+    },
+    {
+      "name": "body carries workspaceId",
+      "status": 400,
+      "body": "{\"ok\":false,\"error\":{\"code\":\"READ_SOURCE_READ_CONTRACT_INVALID\",\"message\":\"configured read request is invalid\",\"details\":{\"reason\":\"unexpected_field\"}}}",
+      "calls": "{\"store\":[],\"systems\":[],\"adapters\":[],\"reads\":[]}"
+    },
+    {
+      "name": "body carries configId",
+      "status": 400,
+      "body": "{\"ok\":false,\"error\":{\"code\":\"READ_SOURCE_READ_CONTRACT_INVALID\",\"message\":\"configured read request is invalid\",\"details\":{\"reason\":\"unexpected_field\"}}}",
+      "calls": "{\"store\":[],\"systems\":[],\"adapters\":[],\"reads\":[]}"
+    },
+    {
+      "name": "bad rowSource",
+      "status": 400,
+      "body": "{\"ok\":false,\"error\":{\"code\":\"READ_SOURCE_READ_CONTRACT_INVALID\",\"message\":\"configured read request is invalid\",\"details\":{\"reason\":\"execution_row_source_invalid\"}}}",
+      "calls": "{\"store\":[],\"systems\":[],\"adapters\":[],\"reads\":[]}"
+    },
+    {
+      "name": "bad rowSource on a draft id",
+      "status": 400,
+      "body": "{\"ok\":false,\"error\":{\"code\":\"READ_SOURCE_READ_CONTRACT_INVALID\",\"message\":\"configured read request is invalid\",\"details\":{\"reason\":\"execution_row_source_invalid\"}}}",
+      "calls": "{\"store\":[],\"systems\":[],\"adapters\":[],\"reads\":[]}"
+    },
+    {
+      "name": "not approved",
+      "status": 409,
+      "body": "{\"ok\":false,\"error\":{\"code\":\"READ_SOURCE_CONFIG_NOT_APPROVED\",\"message\":\"read-source config version is not approved\",\"details\":{\"status\":\"draft\"}}}",
+      "calls": "{\"store\":[{\"id\":\"rsc_draft\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":null}],\"systems\":[],\"adapters\":[],\"reads\":[]}"
+    },
+    {
+      "name": "invalid inputs on a draft id",
+      "status": 409,
+      "body": "{\"ok\":false,\"error\":{\"code\":\"READ_SOURCE_CONFIG_NOT_APPROVED\",\"message\":\"read-source config version is not approved\",\"details\":{\"status\":\"draft\"}}}",
+      "calls": "{\"store\":[{\"id\":\"rsc_draft\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":null}],\"systems\":[],\"adapters\":[],\"reads\":[]}"
+    },
+    {
+      "name": "config not found",
+      "status": 404,
+      "body": "{\"ok\":false,\"error\":{\"code\":\"READ_SOURCE_CONFIG_NOT_FOUND\",\"message\":\"read-source config not found\",\"details\":{}}}",
+      "calls": "{\"store\":[{\"id\":\"rsc_absent\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":null}],\"systems\":[],\"adapters\":[],\"reads\":[]}"
+    },
+    {
+      "name": "invalid inputs: missing key",
+      "status": 400,
+      "body": "{\"ok\":false,\"error\":{\"code\":\"READ_SOURCE_READ_CONTRACT_INVALID\",\"message\":\"configured read request is invalid\",\"details\":{\"reason\":\"key_required\"}}}",
+      "calls": "{\"store\":[{\"id\":\"rsc_single\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":null}],\"systems\":[],\"adapters\":[],\"reads\":[]}"
+    },
+    {
+      "name": "invalid inputs: unknown input",
+      "status": 400,
+      "body": "{\"ok\":false,\"error\":{\"code\":\"READ_SOURCE_READ_CONTRACT_INVALID\",\"message\":\"configured read request is invalid\",\"details\":{\"reason\":\"inputs_unexpected_field\"}}}",
+      "calls": "{\"store\":[{\"id\":\"rsc_single\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":null}],\"systems\":[],\"adapters\":[],\"reads\":[]}"
+    },
+    {
+      "name": "invalid inputs: pageIndex out of range",
+      "status": 400,
+      "body": "{\"ok\":false,\"error\":{\"code\":\"READ_SOURCE_READ_CONTRACT_INVALID\",\"message\":\"configured read request is invalid\",\"details\":{\"reason\":\"page_index_invalid\"}}}",
+      "calls": "{\"store\":[{\"id\":\"rsc_list\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":null}],\"systems\":[],\"adapters\":[],\"reads\":[]}"
+    },
+    {
+      "name": "kind mismatch",
+      "status": 409,
+      "body": "{\"ok\":false,\"error\":{\"code\":\"READ_SOURCE_READ_KIND_MISMATCH\",\"message\":\"external system kind does not match the approved config\",\"details\":{}}}",
+      "calls": "{\"store\":[{\"id\":\"rsc_wrong_kind\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":null}],\"systems\":[{\"id\":\"sys_s1a_http\",\"principal\":\"u_s1a_reader\",\"runAs\":\"user\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":null}],\"adapters\":[],\"reads\":[]}"
+    },
+    {
+      "name": "system missing",
+      "status": 409,
+      "body": "{\"ok\":false,\"error\":{\"code\":\"READ_SOURCE_READ_KIND_MISMATCH\",\"message\":\"external system kind does not match the approved config\",\"details\":{}}}",
+      "calls": "{\"store\":[{\"id\":\"rsc_no_system\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":null}],\"systems\":[{\"id\":\"sys_s1a_absent\",\"principal\":\"u_s1a_reader\",\"runAs\":\"user\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":null}],\"adapters\":[],\"reads\":[]}"
+    },
+    {
+      "name": "record plane refused for resolver_lookup",
+      "status": 400,
+      "body": "{\"ok\":false,\"error\":{\"code\":\"READ_SOURCE_READ_CONTRACT_INVALID\",\"message\":\"configured read request is invalid\",\"details\":{\"reason\":\"execution_row_source_mode_not_supported\"}}}",
+      "calls": "{\"store\":[{\"id\":\"rsc_resolver\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":null}],\"systems\":[{\"id\":\"sys_s1a\",\"principal\":\"u_s1a_reader\",\"runAs\":\"user\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":null}],\"adapters\":[],\"reads\":[]}"
+    }
+  ]
+}
