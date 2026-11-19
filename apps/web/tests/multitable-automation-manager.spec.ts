@@ -365,6 +365,25 @@ describe('MetaAutomationManager', () => {
     expect(container.querySelector('.meta-automation__card-desc')?.textContent).toContain('Send notification')
   })
 
+  it('opens the read-only flow view for a rule from its card (integration assistant 1a, R-99 ③)', async () => {
+    const { client } = mockClient([fakeRule({ actions: [{ type: 'lock_record', config: { locked: true } }] })])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const open = container.querySelector('[data-automation-flow-view-open="true"]') as HTMLButtonElement
+    expect(open.textContent).toContain('Flow view')
+    expect(document.querySelector('[data-automation-flow-view]')).toBeNull()
+    open.click()
+    await flushPromises()
+
+    const view = document.querySelector('[data-automation-flow-view]') as HTMLElement
+    expect(view.querySelector('[data-flow-rule-name]')?.textContent).toBe('Notify on create')
+    expect(Array.from(view.querySelectorAll('[data-flow-step]')).map((el) => (el as HTMLElement).dataset.stepKey)).toEqual(['0'])
+    ;(view.querySelector('[data-flow-close]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(document.querySelector('[data-automation-flow-view]')).toBeNull()
+  })
+
   it('localizes zh-CN manager card chrome while preserving raw rule data and selectors', async () => {
     useLocale().setLocale('zh-CN')
     const { client } = mockClient([

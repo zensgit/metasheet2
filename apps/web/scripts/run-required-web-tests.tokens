@@ -193,6 +193,7 @@ automation-condition-legacy-person-picker
 automation-condition-typing-editor
 automation-condition-value-input
 automation-condition-values
+automation-flow-view
 automation-log-redact
 automation-log-support-packet
 automation-recipes
