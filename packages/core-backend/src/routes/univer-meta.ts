@@ -193,6 +193,7 @@ import {
   loadManualRowsVerdict,
   manualRowCopyParentPair,
   manualRowCopyRule,
+  manualRowEditFieldIdsComparedWithUnreadableCell,
   manualRowParentPairProblemOf,
   mintManualRowCreateExtension,
   namesManualRowParentPair,
@@ -21274,7 +21275,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
   })
 
   // 人工补充行 — 修改 the six fillable columns of a MANUAL row (ADR §3.4). Session requests only. Every other column
-  // keeps going through /patch (which is NOT changed: no per-row exemption there). Preconditions: the row satisfies M
+  // keeps going through /patch (which is NOT changed: no per-row exemption there). Preconditions: the actor may READ
+  // the row (the shared record gate: canRead 403, sheet live 404, record 404, row policy 403), the row satisfies M
   // and its key column is locked (re-checked inside the write transaction), canEditRecord, the row policy and the record
   // lock (RecordWriteService.patchRecords enforces both), every submitted column is one of the eight this route
   // accepts, 名称 / 总用量 are not cleared, and the actor's per-subject field permissions allow the write. The write is
@@ -21288,7 +21290,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
   //     per-subject permissions must allow writing BOTH (403) — whichever half was sent;
   //   - a row is never its own parent (422 `self_parent`), in BOTH directions — changing the pair, or changing the
   //     row's own 图号 to the stored parent's — decided inside the write transaction on the locked, merged row
-  //     (assertManualRowEditInTransaction), never on this handler's first read of the row.
+  //     (assertManualRowEditInTransaction), never on this handler's first read of the row;
+  //   - that rule compares the request with a STORED cell of the row (the 图号 for a change of the pair, the 父组件图号 for
+  //     a change of the 图号), and its 422 says whether the two are equal. So nobody is given it about a cell they may
+  //     not read: the row must be readable for the actor (above), and so must that cell — otherwise 403, before the
+  //     transaction, whatever else the request carries (manualRowEditFieldIdsComparedWithUnreadableCell).
   // The grid never sends one pair cell on its own: /context keeps the pair out of `editableFieldIds`.
   router.patch('/records/:recordId/manual-fields', async (req: Request, res: Response) => {
     const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
@@ -21321,12 +21327,18 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
       }
       const sheetId = String(recordRow.sheet_id)
-      const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, query, sheetId)
+      // Record-level READ first — the gate the copy route and every record read use (canRead 403, sheet not live 404,
+      // record 404, row policy 403). Everything below answers from this row (is it a manual row; rule P5 compares the
+      // request with its cells), so an actor the row policy denies is refused HERE, like on the read routes, and none
+      // of those answers is given about a row they may not read. Its capabilities are the ONE capability object of
+      // this request.
+      const readable = await requireRecordReadable(req, query, sheetId, recordId)
+      if ('status' in readable) return res.status(readable.status).json(readable.body)
+      const { access, capabilities, sheetScope } = readable
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canEditRecord) return sendForbidden(res)
-      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const fields = await loadFieldsForSheet(query, sheetId)
       // The gate sees the submitted ids: an edit that names the parent pair also needs the pair's two columns present
@@ -21377,6 +21389,18 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const forbiddenWriteFieldIds = manualRowWriteGatedFieldIds(sheet, submittedFieldIds).filter((fid) => isFieldWriteForbidden(manualEditFieldPermissions[fid]))
       if (forbiddenWriteFieldIds.length > 0) {
         return sendForbidden(res, `Field(s) not writable for this user${manualRowSubmittedIdSuffix(forbiddenWriteFieldIds, submittedFieldIds)}`)
+      }
+      // Rule P5 will compare this patch with a STORED cell of the row — the 图号 when the patch names the pair, the
+      // 父组件图号 when it names the 图号 — and say whether they are equal. An actor who may not READ that cell (the
+      // layer-2 ∧ layer-3 read set through the stored-data chokepoint, the set this request's echo is masked with) is
+      // refused here, so the comparison is never made for them. A column the sheet does not have holds no cell.
+      const cellUnreadableFieldIds = manualRowEditFieldIdsComparedWithUnreadableCell(
+        sheet.derived,
+        submittedFieldIds,
+        (fieldId) => !patchContext.fieldById.has(fieldId) || patchContext.readableEchoFieldIds.has(fieldId),
+      )
+      if (cellUnreadableFieldIds.length > 0) {
+        return sendForbidden(res, `Field(s) not writable for this user${manualRowSubmittedIdSuffix(cellUnreadableFieldIds, submittedFieldIds)}`)
       }
       // Rules P3 and P4 on the submitted pair (a half pair or a value that is not text: 400; a name without a 图号:
       // 422) — facts of the request alone. P5 needs the row and is decided in the transaction (below).

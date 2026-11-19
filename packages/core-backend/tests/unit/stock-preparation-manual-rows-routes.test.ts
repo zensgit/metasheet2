@@ -16,8 +16,9 @@
  *   X   GET /context — the block's state per condition, and who gets it.
  *
  * ADR §12 (2026-11-19) made 父组件图号 / 父组件名称 writable on these routes, as a pair. This file keeps the B2 cases and
- * states what changed for them (C-03, Y-01, Y-08, E-02, X-01); the pair's own rules, the parent picker's two reads and
- * /context `parentFieldIds` are in stock-preparation-manual-rows-parent-routes.test.ts.
+ * states what changed for them (C-03, Y-01, Y-08, E-02, X-01; E-14 and E-15 are the edit route's two new conditions,
+ * neither of which touches an actor who can read the row and its 父组件图号); the pair's own rules, the parent picker's
+ * two reads and /context `parentFieldIds` are in stock-preparation-manual-rows-parent-routes.test.ts.
  *
  * Mock pool, no DB; one pinned listener (`request(app)` is banned in tests/unit, #4154). Every value is synthetic.
  */
@@ -760,6 +761,56 @@ describe('E — 修改: PATCH /records/:recordId/manual-fields', () => {
     const row = manualRow(S.PREG, 'rec_mrb2_edit_token')
     const res = await http().patch(`/api/multitable/records/${row.id}/manual-fields`).set({ authorization: 'Bearer mst_synthetic_token' }).send({ data: { [ph(S.PREG, 'componentName')]: 'X' } })
     expect(res.status).toBe(401)
+  })
+
+  it('E-14 (ADR §12) the row must be READABLE for the actor: a manual row the row policy denies → 403 like a record read, nothing written; a sheet without the row-level flag, another user\'s deny and a platform admin are unaffected', async () => {
+    const row = manualRow(S.PREG, 'rec_mrb2_edit_denied')
+    const before = structuredClone(row)
+    fake.recordDenies.push({ sheetId: S.PREG.sheetId, recordId: row.id, userId: WRITER.id })
+    // the flag is off: the 'none' row is inert and the edit lands, as before ADR §12
+    expect((await editRow(row.id, { [ph(S.PREG, 'componentSpec')]: 'SYN-SPEC' })).status).toBe(200)
+    fake.records.set(row.id, structuredClone(before))
+    S.PREG.rowLevelReadDeny = true
+    fake.pool.transaction.mockClear()
+    for (const body of [{ [ph(S.PREG, 'componentName')]: 'X' }, { [ph(S.PREG, 'componentCode')]: 'SYN-X' }, { [ph(S.PREG, 'notes')]: 'outside the eight' }]) {
+      const res = await editRow(row.id, body, { expectedVersion: 99 })
+      expect(res.status, JSON.stringify(res.body)).toBe(403)
+      expect(res.body).toEqual({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+    }
+    expect(fake.records.get(row.id)).toEqual(before)
+    expect(fake.pool.transaction).not.toHaveBeenCalled()
+    actor = ADMIN
+    expect((await editRow(row.id, { [ph(S.PREG, 'componentName')]: 'By admin' })).status).toBe(200)
+    actor = WRITER
+    fake.recordDenies.length = 0
+    fake.recordDenies.push({ sheetId: S.PREG.sheetId, recordId: row.id, userId: 'u_mrb2_someone_else' })
+    expect((await editRow(row.id, { [ph(S.PREG, 'componentName')]: 'By writer' })).status).toBe(200)
+  })
+
+  it('E-15 (ADR §12) the ONE change for the six: 图号 is compared with the row\'s stored 父组件图号 (rule P5), so an actor who may not READ 父组件图号 can no longer change a 图号 here (403, the same for every value); the other five are edited as before, and so is the 图号 by anyone who can read both', async () => {
+    const row = fake.addRecord(S.PREG, 'rec_mrb2_edit_p5', { projectNo: MR_PROJECT_NO, idempotencyKey: 'manual:v1:rec_mrb2_edit_p5', active: true, componentName: 'SYN', totalQuantity: 1, componentCode: 'SYN-1', parentComponentCode: 'SYN-HIDDEN-PARENT', parentComponentName: null }, WRITER.id)
+    // an actor who can read 父组件图号: the 图号 is edited as before (and may not become the row's own parent)
+    expect((await editRow(row.id, { [ph(S.PREG, 'componentCode')]: 'SYN-2' })).status).toBe(200)
+    expect((await editRow(row.id, { [ph(S.PREG, 'componentCode')]: 'SYN-HIDDEN-PARENT' })).status).toBe(422)
+    fake.fieldPermissions.push({ sheetId: S.PREG.sheetId, fieldId: ph(S.PREG, 'parentComponentCode'), userId: WRITER.id, visible: false, readOnly: false })
+    const before = structuredClone(fake.records.get(row.id)!)
+    fake.pool.transaction.mockClear()
+    const answers = []
+    for (const value of ['SYN-HIDDEN-PARENT', 'SYN-3', null]) {
+      const res = await editRow(row.id, { [ph(S.PREG, 'componentCode')]: value }, { expectedVersion: 99 })
+      expect(res.status, `${String(value)} ${JSON.stringify(res.body)}`).toBe(403)
+      answers.push(JSON.stringify(res.body))
+    }
+    expect(new Set(answers).size).toBe(1)
+    expect(JSON.parse(answers[0]!)).toEqual({ ok: false, error: { code: 'FORBIDDEN', message: `Field(s) not writable for this user: ${ph(S.PREG, 'componentCode')}` } })
+    expect(fake.records.get(row.id)).toEqual(before)
+    expect(fake.pool.transaction).not.toHaveBeenCalled()
+    // the other five fillable columns are not compared with anything
+    const five = await editRow(row.id, { [ph(S.PREG, 'componentName')]: 'Renamed', [ph(S.PREG, 'componentSpec')]: 'SYN-SPEC', [ph(S.PREG, 'material')]: 'SYN-MATERIAL', [ph(S.PREG, 'rawQuantity')]: 2, [ph(S.PREG, 'totalQuantity')]: 5 })
+    expect(five.status, JSON.stringify(five.body)).toBe(200)
+    // …and a platform admin, for whom that per-subject rule does not exist, edits the 图号
+    actor = ADMIN
+    expect((await editRow(row.id, { [ph(S.PREG, 'componentCode')]: 'SYN-4' })).status).toBe(200)
   })
 })
 

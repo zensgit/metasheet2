@@ -20,6 +20,8 @@
  *   G-06 the create's pair check, and the create transaction's re-check of the pair's lock;
  *   G-07 the edit transaction's re-check: P5 on the LOCKED, merged row, in both directions, and only when the patch
  *        names 父组件图号 or the row's own 图号;
+ *   G-08 who may be given P5's answer: the stored cell the patch is compared with must be readable for the actor
+ *        (the pair → the row's own 图号; the 图号 → 父组件图号), else the patch's own columns are refused;
  *   S-01 the picker's query-string parser;
  *   S-02 the two statements are FIXED text: every column id, the deny set and the search text are parameters; the
  *        search text is folded by the statement's own LOWER (never by the application); one entry per parent 图号;
@@ -54,6 +56,7 @@ import {
   loadManualRowsVerdict,
   manualRowCopyParentPair,
   manualRowCopyRule,
+  manualRowEditFieldIdsComparedWithUnreadableCell,
   manualRowParentPairGateReason,
   manualRowParentPairProblemOf,
   manualRowsContextBlockOf,
@@ -756,6 +759,70 @@ describe('G-07 the edit transaction\'s re-check — P5 on the locked, merged row
     await expect(assertManualRowEditInTransaction(query, sheet, row.id, { [code]: 'SYN-P', [name]: null })).rejects.toMatchObject({ reason: 'lock_missing', message: MANUAL_ROW_PARENT_LOCK_MISSING_MESSAGE })
     // the lock is gone for good on the fake now; an edit of the six is still fine
     await expect(assertManualRowEditInTransaction(query, sheet, row.id, { [ph(S.PREG, 'material')]: 'SYN' })).resolves.toBeUndefined()
+  })
+})
+
+describe('G-08 rule P5 reads a STORED cell — the actor must be able to read it, or the patch\'s own columns are refused', () => {
+  const derived = { parent: { code: 'fld_pc', name: 'fld_pn' }, componentCode: 'fld_c' }
+  const all = () => true
+  const none = () => false
+  const refused = (submitted: string[], canRead: (fieldId: string) => boolean) => manualRowEditFieldIdsComparedWithUnreadableCell(derived, submitted, canRead)
+
+  it('the pair is compared with the row\'s stored 图号: unreadable → the SUBMITTED pair columns are refused (the pair is one unit, as in rule P7)', () => {
+    const cannotReadOwn = (fieldId: string) => fieldId !== 'fld_c'
+    expect(refused(['fld_pc', 'fld_pn'], cannotReadOwn)).toEqual(['fld_pc', 'fld_pn'])
+    expect(refused(['fld_pn', 'fld_pc', 'fld_material'], cannotReadOwn)).toEqual(['fld_pc', 'fld_pn'])
+    // a half pair: only what the caller sent is named
+    expect(refused(['fld_pc'], cannotReadOwn)).toEqual(['fld_pc'])
+    expect(refused(['fld_pn'], cannotReadOwn)).toEqual(['fld_pn'])
+    // readable → nothing to refuse
+    expect(refused(['fld_pc', 'fld_pn'], all)).toEqual([])
+  })
+  it('the row\'s own 图号 is compared with its stored 父组件图号: unreadable → the 图号 is refused', () => {
+    const cannotReadParentCode = (fieldId: string) => fieldId !== 'fld_pc'
+    expect(refused(['fld_c'], cannotReadParentCode)).toEqual(['fld_c'])
+    expect(refused(['fld_c', 'fld_material'], cannotReadParentCode)).toEqual(['fld_c'])
+    expect(refused(['fld_c'], all)).toEqual([])
+    // 父组件名称 is never compared: it being unreadable asks nothing of a 图号 edit
+    expect(refused(['fld_c'], (fieldId) => fieldId !== 'fld_pn')).toEqual([])
+  })
+  it('a patch that names BOTH 图号 and 父组件图号 is judged on its own two values: no stored cell is read, nothing is required, the actor is not even asked', () => {
+    const canRead = vi.fn(none)
+    expect(refused(['fld_c', 'fld_pc', 'fld_pn'], canRead)).toEqual([])
+    expect(canRead).not.toHaveBeenCalled()
+  })
+  it('a patch that names neither is not compared with anything', () => {
+    const canRead = vi.fn(none)
+    expect(refused([], canRead)).toEqual([])
+    expect(refused(['fld_material', 'fld_n'], canRead)).toEqual([])
+    expect(canRead).not.toHaveBeenCalled()
+  })
+  it('the actor is asked about exactly the cell that will be compared', () => {
+    const canRead = vi.fn(all)
+    refused(['fld_pc', 'fld_pn'], canRead)
+    expect(canRead.mock.calls).toEqual([['fld_c']])
+    canRead.mockClear()
+    refused(['fld_c'], canRead)
+    expect(canRead.mock.calls).toEqual([['fld_pc']])
+  })
+  it('a 图号 sent with only HALF a pair (名称): the 图号 is still compared with the stored 父组件图号', () => {
+    // (the request is refused for the half pair afterwards — rule P3; this rule does not depend on that)
+    expect(refused(['fld_c', 'fld_pn'], (fieldId) => fieldId !== 'fld_pc')).toEqual(['fld_c'])
+    expect(refused(['fld_c', 'fld_pn'], all)).toEqual([])
+  })
+  it('every answer is a subset of what was submitted, in the order pair then 图号 — never an id the caller did not send', () => {
+    for (const submitted of [['fld_pc'], ['fld_pn'], ['fld_pc', 'fld_pn'], ['fld_c'], ['fld_c', 'fld_pn'], ['fld_c', 'fld_pc', 'fld_pn'], ['fld_x']]) {
+      for (const id of refused(submitted, none)) expect(submitted, JSON.stringify(submitted)).toContain(id)
+    }
+    expect(refused(new Set(['fld_pn', 'fld_pc']) as never, none)).toEqual(['fld_pc', 'fld_pn'])
+  })
+  it('it reads the gate\'s own derivation: on a real sheet the three ids are 父组件图号, 父组件名称 and 图号', async () => {
+    const sheet = await sheetOf(S.PREG)
+    const { code, name } = pairOf(S.PREG)
+    const own = ph(S.PREG, 'componentCode')
+    expect(manualRowEditFieldIdsComparedWithUnreadableCell(sheet.derived, [code, name], (fieldId) => fieldId !== own)).toEqual([code, name])
+    expect(manualRowEditFieldIdsComparedWithUnreadableCell(sheet.derived, [own], (fieldId) => fieldId !== code)).toEqual([own])
+    expect(manualRowEditFieldIdsComparedWithUnreadableCell(sheet.derived, [ph(S.PREG, 'material')], none)).toEqual([])
   })
 })
 

@@ -44,6 +44,9 @@
  * the latter with its own sentence when the pair's lock is the only one missing, `MANUAL_ROW_PARENT_LOCK_MISSING_MESSAGE`),
  * judged by rules P3 – P5 (`StockPrepManualRowParentRefusedError`; P5 for an edit inside the write transaction, under
  * the row lock, in both directions) and by the actor's per-subject field permissions for BOTH columns (the routes).
+ * P5 on an edit compares the request with a STORED cell of the row, so the edit route first requires that the actor
+ * may read the row and that cell (`manualRowEditFieldIdsComparedWithUnreadableCell`) — its answer must never say what
+ * a cell the actor cannot read holds.
  * /context names the pair as `parentFieldIds` only to an actor who may write both; never as `editableFieldIds`.
  *
  * GENERIC CREATE (slice B3, ADR §3.1). POST /records and the xlsx import refuse a generic create on a P_reg sheet before
@@ -557,8 +560,9 @@ export type ManualRowsContextBlock = {
    * P5, the self-parent pre-check) and what it watches to warn before a 图号 other manual rows name as their parent is
    * changed (ADR §12.7 ①). Present ONLY together with `parentFieldIds`, and only when the column exists on the sheet
    * and this actor may READ it; a block without `parentFieldIds` never carries it and is byte-identical to what it
-   * was. Absent beside `parentFieldIds` = this actor cannot read the row's own 图号, so the web has nothing to compare
-   * with. An id only — never a value.
+   * was. Absent beside `parentFieldIds` = this actor cannot read the row's own 图号: the web has nothing to compare
+   * with, and PATCH …/manual-fields refuses that actor's change of an EXISTING row's parent (403 — rule P5 would
+   * compare with a cell they may not read; a new row can still be given a parent). An id only — never a value.
    */
   componentCodeFieldId?: string
 }
@@ -835,6 +839,43 @@ export async function assertManualRowEditInTransaction(
     const merged = (fieldId: string) => (hasOwn(changes, fieldId) ? changes[fieldId] : data[fieldId])
     if (isManualRowSelfParent(merged(parentCodeId), merged(componentCodeId))) throw new StockPrepManualRowParentRefusedError('self_parent')
   }
+}
+
+/**
+ * RULE P5 READS A STORED CELL — who may be given its answer (ADR §12.3 P5; the anti-oracle rule).
+ *
+ * `assertManualRowEditInTransaction` decides P5 on the locked, MERGED row: the patch's value where the patch names a
+ * column, the row's stored cell otherwise. So
+ *   - a patch that names the parent pair but not the row's own 图号 is compared with the STORED 图号, and
+ *   - a patch that names 图号 but not 父组件图号 is compared with the STORED 父组件图号,
+ * and the 422 `self_parent` it may answer says whether the submitted text EQUALS that stored cell. That answer comes
+ * before the write's own checks (the record lock, `expectedVersion`), so a request built to fail one of those would
+ * read the cell without writing anything. An actor who may not read the cell must therefore not reach the comparison
+ * at all: the edit route refuses the write (403) before the transaction.
+ *
+ * Returns the SUBMITTED field ids that cannot be written for that reason (empty = nothing to refuse): the pair's
+ * columns when the row's own 图号 is not readable for the actor, the 图号 when 父组件图号 is not. Only submitted ids, so
+ * the refusal can name them without telling the caller about a column it did not send.
+ *   - The pair is one unit here as in rule P7: either of its columns names it.
+ *   - A patch that names BOTH 图号 and 父组件图号 is judged on its own two values; no stored cell is read and nothing is
+ *     required of the actor.
+ * `canReadStoredCell`: the route's answer for ONE column of this sheet — the layer-2 ∧ layer-3 read set through the
+ * stored-data chokepoint, and true for a column the sheet does not have (no cell, nothing to learn). Pure.
+ */
+export function manualRowEditFieldIdsComparedWithUnreadableCell(
+  derived: Pick<ManualRowsDerivedFieldIds, 'parent' | 'componentCode'>,
+  submittedFieldIds: Iterable<string>,
+  canReadStoredCell: (fieldId: string) => boolean,
+): string[] {
+  const submitted = new Set(submittedFieldIds)
+  const { code, name } = derived.parent
+  const own = derived.componentCode
+  const refused: string[] = []
+  if ((submitted.has(code) || submitted.has(name)) && !submitted.has(own) && !canReadStoredCell(own)) {
+    for (const fieldId of [code, name]) if (submitted.has(fieldId)) refused.push(fieldId)
+  }
+  if (submitted.has(own) && !submitted.has(code) && !canReadStoredCell(code)) refused.push(own)
+  return refused
 }
 
 // ── field helpers the routes share ───────────────────────────────────────────────────────────────────

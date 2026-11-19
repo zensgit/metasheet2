@@ -53,6 +53,9 @@
  *   MR3-RD-11 the search text is folded by the DATABASE, like the columns it is matched against: text that is not ASCII,
  *             typed as the sheet stores it, is found whatever the database's LC_CTYPE (a "C" database folds ASCII only;
  *             a libc locale folds each character on its own and so never writes JavaScript's word-final sigma).
+ *   MR3-RD-12 rule P5 is no oracle: 修改 refuses (403) before it compares the request with a cell — or a row — the actor
+ *             may not read (图号 hidden for a change of the parent, 父组件图号 hidden for a change of the 图号, a row the
+ *             row policy denies), with ONE answer for every guess and every `expectedVersion`; nothing is written.
  * Values-free: every id is synthetic and per-run.
  */
 import { createRequire } from 'module'
@@ -984,6 +987,105 @@ export function defineStockPreparationManualRowsHostRealDbCases(): void {
       } finally {
         await q('DELETE FROM field_permissions WHERE sheet_id = $1 AND subject_id = $2', [picker.sheetId, WRITER.id])
       }
+    })
+
+    test('MR3-RD-12 rule P5 is no oracle: 修改 refuses before it compares the request with a cell — or a row — the actor may not read; one answer for every guess and every expectedVersion, nothing written', async () => {
+      actor = WRITER
+      const own = phys(main, 'componentCode')
+      const secret = `SYN-SECRET-${TOKEN}`
+      const secretParent = `SYN-SECRET-PARENT-${TOKEN}`
+      const other = `SYN-OTHER-${TOKEN}`
+      const created = await create(main, minimal(main, { [own]: secret, ...parent(main, secretParent, null) }))
+      expect(created.status, JSON.stringify(created.body)).toBe(200)
+      const id = created.body.data.record.id as string
+      const before = (await row(id))!
+      const staleVersion = before.version + 98
+      /** The same request with no expectedVersion, the right one and one that cannot match — as [status, body] texts. */
+      const probe = async (data: Record<string, unknown>) => {
+        const answers: string[] = []
+        for (const extra of [{}, { expectedVersion: before.version }, { expectedVersion: staleVersion }]) {
+          const res = await edit(id, data, extra)
+          answers.push(JSON.stringify([res.status, res.body]))
+        }
+        return answers
+      }
+      const hide = (fieldId: string) => q('INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,$3,$4,$5,$6)',
+        [main.sheetId, fieldId, 'user', WRITER.id, false, false])
+      const unhide = () => q('DELETE FROM field_permissions WHERE sheet_id = $1 AND subject_id = $2', [main.sheetId, WRITER.id])
+
+      // THE CONTROL — an actor who can read both cells. The rule answers BEFORE the version check: a request that cannot
+      // be written (a stale expectedVersion) is told 422 when its text equals the stored cell and 409 otherwise. That
+      // difference is what a hidden cell must never produce.
+      const equalStale = await edit(id, parent(main, secret, null), { expectedVersion: staleVersion })
+      expect(equalStale.status, JSON.stringify(equalStale.body)).toBe(422)
+      expect(equalStale.body.error).toMatchObject({ code: PARENT_INVALID, details: { reason: 'self_parent' } })
+      const otherStale = await edit(id, parent(main, other, null), { expectedVersion: staleVersion })
+      expect(otherStale.status, JSON.stringify(otherStale.body)).toBe(409)
+      expect(otherStale.body.error.code).toBe('VERSION_CONFLICT')
+      expect((await edit(id, { [own]: secretParent }, { expectedVersion: staleVersion })).status).toBe(422)
+      expect((await edit(id, { [own]: other }, { expectedVersion: staleVersion })).status).toBe(409)
+      expect(await row(id)).toEqual(before)
+
+      // (1) 图号 hidden for the actor (a stored field_permissions row): a change of the parent would be compared with it.
+      await hide(own)
+      try {
+        const answers = [...await probe(parent(main, secret, null)), ...await probe(parent(main, ` ${secret} `, null)), ...await probe(parent(main, other, null)), ...await probe(parent(main, null, null))]
+        expect(new Set(answers).size, answers.join('\n')).toBe(1)
+        expect(JSON.parse(answers[0]!)).toEqual([403, { ok: false, error: { code: 'FORBIDDEN', message: `Field(s) not writable for this user: ${pair(main).code}, ${pair(main).name}` } }])
+        expect(answers[0]).not.toContain(secret)
+        // a half pair: the same refusal (not the 400 of a half pair), naming only what was sent
+        const half = await edit(id, { [pair(main).code]: secret })
+        expect([half.status, half.body.error.message]).toEqual([403, `Field(s) not writable for this user: ${pair(main).code}`])
+        expect(await row(id)).toEqual(before)
+      } finally {
+        await unhide()
+      }
+
+      // (2) 父组件图号 hidden for the actor: a change of the row's own 图号 would be compared with it.
+      await hide(pair(main).code)
+      try {
+        const answers = [...await probe({ [own]: secretParent }), ...await probe({ [own]: `${secretParent} ` }), ...await probe({ [own]: other })]
+        expect(new Set(answers).size, answers.join('\n')).toBe(1)
+        expect(JSON.parse(answers[0]!)).toEqual([403, { ok: false, error: { code: 'FORBIDDEN', message: `Field(s) not writable for this user: ${own}` } }])
+        expect(answers[0]).not.toContain(secretParent)
+        expect(answers[0]).not.toContain(pair(main).code)
+        expect(await row(id)).toEqual(before)
+      } finally {
+        await unhide()
+      }
+
+      // (3) the row policy denies the actor the ROW: the record gate answers first, like every record read — for a
+      // parent change, a 图号 change and an ordinary edit alike.
+      await q('UPDATE meta_sheets SET row_level_read_permissions_enabled = true WHERE id = $1', [main.sheetId])
+      await q(`INSERT INTO record_permissions (sheet_id, record_id, subject_type, subject_id, access_level) VALUES ($1, $2, 'user', $3, 'none')`, [main.sheetId, id, WRITER.id])
+      try {
+        const answers = [
+          ...await probe(parent(main, secret, null)),
+          ...await probe(parent(main, other, null)),
+          ...await probe({ [own]: secretParent }),
+          ...await probe({ [own]: other }),
+          ...await probe({ [phys(main, 'material')]: 'SYN-MATERIAL' }),
+          ...await probe({ [phys(main, 'notes')]: 'outside the eight' }),
+        ]
+        expect(new Set(answers).size, answers.join('\n')).toBe(1)
+        expect(JSON.parse(answers[0]!)).toEqual([403, { ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } }])
+        expect(await row(id)).toEqual(before)
+        // a platform admin is not bound by the row policy and reads both cells: the rule answers them
+        actor = ADMIN
+        expect((await edit(id, parent(main, secret, null), { expectedVersion: staleVersion })).status).toBe(422)
+        expect((await edit(id, parent(main, other, null), { expectedVersion: staleVersion })).status).toBe(409)
+      } finally {
+        actor = WRITER
+        await q('DELETE FROM record_permissions WHERE sheet_id = $1', [main.sheetId])
+        await q('UPDATE meta_sheets SET row_level_read_permissions_enabled = false WHERE id = $1', [main.sheetId])
+      }
+      expect(await row(id)).toEqual(before)
+
+      // Readable again: the rule answers as before, and a real change lands.
+      expect((await edit(id, parent(main, secret, null))).status).toBe(422)
+      const landed = await edit(id, parent(main, other, 'Synthetic parent'), { expectedVersion: before.version })
+      expect(landed.status, JSON.stringify(landed.body)).toBe(200)
+      expect((await row(id))!.version).toBe(before.version + 1)
     })
   })
 }

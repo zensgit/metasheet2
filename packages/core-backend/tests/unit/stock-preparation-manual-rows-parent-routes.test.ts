@@ -13,6 +13,9 @@
  *   EP  PATCH /records/:recordId/manual-fields — the pair with or without the six; P3 / P4; P5 in both directions,
  *       decided under the row lock; P7 over both columns; P8 (archived / switched off / deployment switch off still
  *       edit); PLM rows refused; /patch and PATCH /records still refuse the pair on a manual row (P2).
+ *   EO  …and P5 is no ORACLE: its answer says whether the request equals a stored cell, so the row must be readable for
+ *       the actor (the record gate, 403 for a row the row policy denies) and so must that cell (403) — the same answer
+ *       whatever the guess and whatever `expectedVersion`, with no write transaction opened.
  *   XP  GET /context — `parentFieldIds` only for an actor who may write both columns, never in `editableFieldIds`;
  *       `componentCodeFieldId` (the row's own 图号) only beside it, and only for an actor who may read that column.
  *   O   GET /sheets/:sheetId/manual-rows/parent-options — the gates, the candidates, and that nothing outside the
@@ -742,6 +745,233 @@ describe('EP — 修改 the parent: PATCH /records/:recordId/manual-fields', () 
     expect(fake.records.get(row.id)!.version).toBe(1)
     const token = await http().patch(`/api/multitable/records/${row.id}/manual-fields`).set(TOKEN).send({ data: parent(S.PREG, 'SYN-PARENT', null) })
     expect(token.status).toBe(401)
+  })
+})
+
+// ── EO. rule P5 is not an oracle ─────────────────────────────────────────────────────────────────────
+
+describe('EO — 修改: rule P5 never answers about a cell or a row the actor may not read', () => {
+  const FORBIDDEN_ROW = { ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } }
+  const notWritable = (...fieldIds: string[]) => ({ ok: false, error: { code: 'FORBIDDEN', message: `Field(s) not writable for this user: ${fieldIds.join(', ')}` } })
+  const own = (sheet: FakeSheet) => ph(sheet, 'componentCode')
+
+  describe('EO-01 the row\'s own 图号 hidden for the actor — a change of the parent would be compared with it', () => {
+    it('403 naming the pair, whatever the guess and whatever expectedVersion; nothing written, no write transaction, the row not locked', async () => {
+      const row = manualRow(S.PREG, 'rec_mrp1_eo_own', { componentCode: 'SYN-SECRET' })
+      const before = structuredClone(row)
+      deny(S.PREG, 'componentCode', { visible: false })
+      // The probe this closes: a guess with an expectedVersion that cannot match. Before, a guess EQUAL to the hidden 图号
+      // answered 422 self_parent and any other 409 VERSION_CONFLICT — the cell was readable one guess at a time.
+      const answers = []
+      for (const guess of ['SYN-SECRET', ' SYN-SECRET ', 'SYN-OTHER', 'syn-secret']) {
+        for (const extra of [{}, { expectedVersion: 1 }, { expectedVersion: 99 }]) {
+          const res = await editRow(row.id, parent(S.PREG, guess, null), extra)
+          expect(res.status, `${guess} ${JSON.stringify(extra)} ${JSON.stringify(res.body)}`).toBe(403)
+          answers.push(JSON.stringify(res.body))
+        }
+      }
+      expect(new Set(answers).size, 'every guess must get the same answer').toBe(1)
+      expect(JSON.parse(answers[0]!)).toEqual(notWritable(pairOf(S.PREG).code, pairOf(S.PREG).name))
+      expect(fake.records.get(row.id)).toEqual(before)
+      expectNoTransaction()
+      expect(fake.statements(/^SELECT id, data, created_by FROM meta_records WHERE sheet_id = \$1 AND id = \$2 FOR UPDATE$/)).toEqual([])
+      // no value of the row is in the answer
+      expect(answers[0]).not.toContain('SYN-SECRET')
+    })
+    it('a half pair is refused the same way (403, not the 400 of a half pair), naming only what was sent', async () => {
+      const row = manualRow(S.PREG, 'rec_mrp1_eo_half', { componentCode: 'SYN-SECRET' })
+      deny(S.PREG, 'componentCode', { visible: false })
+      const codeOnly = await editRow(row.id, { [pairOf(S.PREG).code]: 'SYN-SECRET' })
+      expect(codeOnly.status).toBe(403)
+      expect(codeOnly.body).toEqual(notWritable(pairOf(S.PREG).code))
+      const nameOnly = await editRow(row.id, { [pairOf(S.PREG).name]: 'Synthetic parent' })
+      expect(nameOnly.status).toBe(403)
+      expect(nameOnly.body).toEqual(notWritable(pairOf(S.PREG).name))
+      expectNoTransaction()
+    })
+    it('removing the parent is a change of the pair too: 403', async () => {
+      const row = manualRow(S.PREG, 'rec_mrp1_eo_remove', { componentCode: 'SYN-SECRET', parentComponentCode: 'SYN-P', parentComponentName: null })
+      deny(S.PREG, 'componentCode', { visible: false })
+      expect((await editRow(row.id, parent(S.PREG, null, null))).status).toBe(403)
+      expect(cell(fake.records.get(row.id), S.PREG, 'parentComponentCode')).toBe('SYN-P')
+    })
+    it('the other columns of the same row are not touched by that rule: an edit that names neither the pair nor the 图号 lands', async () => {
+      const row = manualRow(S.PREG, 'rec_mrp1_eo_other', { componentCode: 'SYN-SECRET' })
+      deny(S.PREG, 'componentCode', { visible: false })
+      const res = await editRow(row.id, { [ph(S.PREG, 'material')]: 'SYN-MATERIAL' })
+      expect(res.status, JSON.stringify(res.body)).toBe(200)
+      // …and its echo does not hand the hidden cell back
+      expect(JSON.stringify(res.body)).not.toContain('SYN-SECRET')
+    })
+    it('a NEW row is not concerned: its own 图号 is in the request, no stored cell is read (新增 with a parent still works; the id of the hidden column stays out of /context)', async () => {
+      deny(S.PREG, 'componentCode', { visible: false })
+      expect((await createRow(S.PREG, minimal(S.PREG, parent(S.PREG, 'SYN-PARENT', null)))).status).toBe(200)
+      const block = (await context(S.PREG)).body.data.capabilities.stockPreparationManualRows
+      expect(block.parentFieldIds).toEqual(pairOf(S.PREG))
+      expect('componentCodeFieldId' in block).toBe(false)
+    })
+    it('图号 only READ-ONLY for the actor is still readable: the comparison is made and answers as for anyone who can read it', async () => {
+      const row = manualRow(S.PREG, 'rec_mrp1_eo_readonly', { componentCode: 'SYN-1' })
+      deny(S.PREG, 'componentCode', { readOnly: true })
+      const self = await editRow(row.id, parent(S.PREG, 'SYN-1', null))
+      expect(self.status, JSON.stringify(self.body)).toBe(422)
+      expect(refusal(self)).toEqual([PARENT_INVALID, 'self_parent'])
+      expect((await editRow(row.id, parent(S.PREG, 'SYN-P', null))).status).toBe(200)
+    })
+    it('another user\'s rule, and a platform admin, are not that subject', async () => {
+      const row = manualRow(S.PREG, 'rec_mrp1_eo_subject', { componentCode: 'SYN-1' })
+      deny(S.PREG, 'componentCode', { visible: false }, 'u_mrp1_someone_else')
+      expect((await editRow(row.id, parent(S.PREG, 'SYN-P', null))).status).toBe(200)
+      deny(S.PREG, 'componentCode', { visible: false })
+      expect((await editRow(row.id, parent(S.PREG, 'SYN-Q', null))).status).toBe(403)
+      actor = ADMIN
+      expect((await editRow(row.id, parent(S.PREG, 'SYN-Q', null))).status).toBe(200)
+      expect((await editRow(row.id, parent(S.PREG, 'SYN-1', null))).status).toBe(422)
+    })
+  })
+
+  describe('EO-02 父组件图号 hidden for the actor — a change of the row\'s own 图号 would be compared with it', () => {
+    it('403 naming the 图号, whatever the guess and whatever expectedVersion; nothing written, no write transaction', async () => {
+      const row = manualRow(S.PREG, 'rec_mrp1_eo_parent', { componentCode: 'SYN-1', parentComponentCode: 'SYN-SECRET-PARENT', parentComponentName: 'Synthetic parent' })
+      const before = structuredClone(row)
+      deny(S.PREG, 'parentComponentCode', { visible: false })
+      const answers = []
+      for (const guess of ['SYN-SECRET-PARENT', 'SYN-SECRET-PARENT ', 'SYN-OTHER']) {
+        for (const extra of [{}, { expectedVersion: 99 }]) {
+          const res = await editRow(row.id, { [own(S.PREG)]: guess }, extra)
+          expect(res.status, `${guess} ${JSON.stringify(extra)} ${JSON.stringify(res.body)}`).toBe(403)
+          answers.push(JSON.stringify(res.body))
+        }
+      }
+      expect(new Set(answers).size, 'every guess must get the same answer').toBe(1)
+      expect(JSON.parse(answers[0]!)).toEqual(notWritable(own(S.PREG)))
+      expect(fake.records.get(row.id)).toEqual(before)
+      expectNoTransaction()
+      expect(answers[0]).not.toContain('SYN-SECRET-PARENT')
+      // the hidden column's id is not in the answer either (the caller did not send it)
+      expect(answers[0]).not.toContain(pairOf(S.PREG).code)
+    })
+    it('the 图号 together with the other five: the whole request is refused (one unreadable comparison), the five alone land', async () => {
+      const row = manualRow(S.PREG, 'rec_mrp1_eo_parent_mixed', { componentCode: 'SYN-1', parentComponentCode: 'SYN-SECRET-PARENT', parentComponentName: null })
+      deny(S.PREG, 'parentComponentCode', { visible: false })
+      const mixed = await editRow(row.id, { [own(S.PREG)]: 'SYN-2', [ph(S.PREG, 'material')]: 'SYN-MATERIAL' })
+      expect(mixed.status).toBe(403)
+      expect(mixed.body).toEqual(notWritable(own(S.PREG)))
+      expect(has(fake.records.get(row.id), S.PREG, 'material')).toBe(false)
+      const five = await editRow(row.id, { [ph(S.PREG, 'componentName')]: 'Renamed', [ph(S.PREG, 'componentSpec')]: 'SYN-SPEC', [ph(S.PREG, 'material')]: 'SYN-MATERIAL', [ph(S.PREG, 'rawQuantity')]: 2, [ph(S.PREG, 'totalQuantity')]: 5 })
+      expect(five.status, JSON.stringify(five.body)).toBe(200)
+      expect(cell(fake.records.get(row.id), S.PREG, 'componentCode')).toBe('SYN-1')
+    })
+    it('父组件名称 hidden instead: the name is never compared, so a 图号 edit is judged as for anyone', async () => {
+      const row = manualRow(S.PREG, 'rec_mrp1_eo_name_hidden', { componentCode: 'SYN-1', parentComponentCode: 'SYN-P', parentComponentName: 'Synthetic parent' })
+      deny(S.PREG, 'parentComponentName', { visible: false })
+      expect((await editRow(row.id, { [own(S.PREG)]: 'SYN-2' })).status).toBe(200)
+      const self = await editRow(row.id, { [own(S.PREG)]: 'SYN-P' })
+      expect(self.status).toBe(422)
+      expect(refusal(self)).toEqual([PARENT_INVALID, 'self_parent'])
+    })
+    it('on a sheet where the pair carries no lock the comparison is made all the same — so the rule holds there too', async () => {
+      const sheet = S.PAIRUNLOCKED
+      const row = manualRow(sheet, 'rec_mrp1_eo_unlocked', { componentCode: 'SYN-1', parentComponentCode: 'SYN-SECRET-PARENT', parentComponentName: null })
+      // readable: a 图号 edit is compared with the stored parent, as everywhere
+      expect((await editRow(row.id, { [own(sheet)]: 'SYN-SECRET-PARENT' })).status).toBe(422)
+      deny(sheet, 'parentComponentCode', { visible: false })
+      for (const guess of ['SYN-SECRET-PARENT', 'SYN-OTHER']) {
+        const res = await editRow(row.id, { [own(sheet)]: guess })
+        expect(res.status, guess).toBe(403)
+        expect(res.body).toEqual(notWritable(own(sheet)))
+      }
+    })
+    it('a sheet WITHOUT a 父组件图号 column holds no such cell: the 图号 is edited as before', async () => {
+      const sheet = fake.addSheet('NOPARENTCODE', { objectId: P(9), omit: ['parentComponentCode'] })
+      const row = manualRow(sheet, 'rec_mrp1_eo_nocolumn', { componentCode: 'SYN-1' })
+      const res = await editRow(row.id, { [own(sheet)]: 'SYN-2' })
+      expect(res.status, JSON.stringify(res.body)).toBe(200)
+      expect(cell(fake.records.get(row.id), sheet, 'componentCode')).toBe('SYN-2')
+    })
+  })
+
+  it('EO-03 a request that names BOTH the 图号 and the pair is judged on its own two values — no stored cell is read, and every actor who may write the three gets the answer', async () => {
+    const row = manualRow(S.PREG, 'rec_mrp1_eo_both', { componentCode: 'SYN-1', parentComponentCode: 'SYN-P', parentComponentName: null })
+    const refused = await editRow(row.id, { [own(S.PREG)]: 'SYN-9', ...parent(S.PREG, 'SYN-9', null) })
+    expect(refused.status).toBe(422)
+    expect(refusal(refused)).toEqual([PARENT_INVALID, 'self_parent'])
+    expect((await editRow(row.id, { [own(S.PREG)]: 'SYN-P', ...parent(S.PREG, 'SYN-1', null) })).status).toBe(200)
+  })
+
+  describe('EO-04 a row the row policy denies the actor — the record gate answers first, like every record read', () => {
+    const denyRow = (sheet: FakeSheet, recordId: string, userId = WRITER.id) => {
+      sheet.rowLevelReadDeny = true
+      fake.recordDenies.push({ sheetId: sheet.sheetId, recordId, userId })
+    }
+    it('403 Insufficient permissions for every request about it — a parent change, a 图号 change, an ordinary edit — whatever they carry; nothing written, no write transaction, no registry read', async () => {
+      const row = manualRow(S.PREG, 'rec_mrp1_eo_denied', { componentCode: 'SYN-SECRET', parentComponentCode: 'SYN-SECRET-PARENT', parentComponentName: null })
+      const before = structuredClone(row)
+      denyRow(S.PREG, row.id)
+      fake.sqlLog.length = 0
+      const bodies: Array<Record<string, unknown>> = [
+        parent(S.PREG, 'SYN-SECRET', null),
+        parent(S.PREG, 'SYN-OTHER', null),
+        { [own(S.PREG)]: 'SYN-SECRET-PARENT' },
+        { [own(S.PREG)]: 'SYN-OTHER' },
+        { [ph(S.PREG, 'material')]: 'SYN-MATERIAL' },
+        { [ph(S.PREG, 'notes')]: 'outside the eight' },
+        { [pairOf(S.PREG).code]: 'half a pair' },
+      ]
+      for (const body of bodies) {
+        for (const extra of [{}, { expectedVersion: 99 }]) {
+          const res = await editRow(row.id, body, extra)
+          expect(res.status, `${JSON.stringify(body)} ${JSON.stringify(res.body)}`).toBe(403)
+          expect(res.body).toEqual(FORBIDDEN_ROW)
+        }
+      }
+      expect(fake.records.get(row.id)).toEqual(before)
+      expectNoTransaction()
+      // the row was not judged at all: neither registry of the gate was read on this actor's behalf
+      expect(fake.statements(/integration_stock_prep_project_target/)).toEqual([])
+    })
+    it('…also when the row is NOT a manual row: the same 403, not 409 not_manual_row (what kind of row it is stays unsaid)', async () => {
+      const plm = plmRow(S.PREG, 'rec_mrp1_eo_denied_plm', { componentCode: 'SYN-1' })
+      denyRow(S.PREG, plm.id)
+      const res = await editRow(plm.id, parent(S.PREG, 'SYN-P', null))
+      expect(res.status).toBe(403)
+      expect(res.body).toEqual(FORBIDDEN_ROW)
+    })
+    it('a platform admin bypasses the row policy, another user\'s deny does not apply, and a deny on a sheet whose flag is off is inert', async () => {
+      const row = manualRow(S.PREG, 'rec_mrp1_eo_denied_scope', { componentCode: 'SYN-1' })
+      // flag off: a 'none' row is inert (read stays grant-additive)
+      fake.recordDenies.push({ sheetId: S.PREG.sheetId, recordId: row.id, userId: WRITER.id })
+      expect((await editRow(row.id, parent(S.PREG, 'SYN-P', null))).status).toBe(200)
+      S.PREG.rowLevelReadDeny = true
+      expect((await editRow(row.id, parent(S.PREG, 'SYN-Q', null))).status).toBe(403)
+      actor = ADMIN
+      expect((await editRow(row.id, parent(S.PREG, 'SYN-Q', null))).status).toBe(200)
+      actor = WRITER
+      fake.recordDenies.length = 0
+      fake.recordDenies.push({ sheetId: S.PREG.sheetId, recordId: row.id, userId: 'u_mrp1_someone_else' })
+      expect((await editRow(row.id, parent(S.PREG, 'SYN-R', null))).status).toBe(200)
+    })
+    it('another row of the same sheet, not denied, is edited as before', async () => {
+      const denied = manualRow(S.PREG, 'rec_mrp1_eo_denied_a', { componentCode: 'SYN-A' })
+      const open = manualRow(S.PREG, 'rec_mrp1_eo_denied_b', { componentCode: 'SYN-B' })
+      denyRow(S.PREG, denied.id)
+      expect((await editRow(open.id, parent(S.PREG, 'SYN-P', null))).status).toBe(200)
+      expect((await editRow(open.id, parent(S.PREG, 'SYN-B', null))).status).toBe(422)
+    })
+  })
+
+  it('EO-05 a reader (canRead, not canEditRecord) is refused 403 after the record gate, as before; an unknown record is 404', async () => {
+    const row = manualRow(S.PREG, 'rec_mrp1_eo_reader', { componentCode: 'SYN-1' })
+    actor = READER
+    const res = await editRow(row.id, parent(S.PREG, 'SYN-1', null))
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual(FORBIDDEN_ROW)
+    expectNoTransaction()
+    actor = WRITER
+    expect((await editRow('rec_mrp1_eo_absent', parent(S.PREG, 'SYN-1', null))).status).toBe(404)
+    // a record id paired with ANOTHER sheet's id is not found there
+    const wrongSheet = await editRow(row.id, parent(S.PREG, 'SYN-P', null), { sheetId: S.DISABLED.sheetId })
+    expect(wrongSheet.status).toBe(404)
   })
 })
 
