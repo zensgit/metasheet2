@@ -1,0 +1,470 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>集成助手原型</title>
+<!-- 原型：静态 HTML，合成数据，不连任何后端。用来确认「类 n8n 集成助手」的形态，不是实现。 -->
+<style>
+:root{
+  --bg:#f5f6f8; --panel:#ffffff; --panel2:#fafbfc; --line:#e3e6eb; --text:#1d2330; --muted:#6b7280; --faint:#9aa1ad;
+  --accent:#3b6ef5; --accent-weak:#e8eefe; --ok:#16a34a; --ok-weak:#e7f6ec; --warn:#c27803; --warn-weak:#fdf3e1;
+  --bad:#dc2626; --bad-weak:#fde8e8; --lock:#7c5cd6; --lock-weak:#f1ecfc;
+  --trigger:#e8590c; --conn:#3b6ef5; --data:#0f9d8a; --sink:#7c5cd6; --ai:#c026d3;
+  --shadow:0 1px 2px rgba(16,24,40,.06),0 1px 3px rgba(16,24,40,.08);
+  --radius:10px; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#11141a; --panel:#181c24; --panel2:#1d222c; --line:#2a303c; --text:#e6e9ef; --muted:#9aa3b2; --faint:#6b7383;
+    --accent:#6b93ff; --accent-weak:#1e2a4a; --ok:#3ccf74; --ok-weak:#16301f; --warn:#f0b44a; --warn-weak:#33280f;
+    --bad:#f87171; --bad-weak:#3a1717; --lock:#a78bfa; --lock-weak:#261d3d;
+    --shadow:0 1px 2px rgba(0,0,0,.4);
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#11141a; --panel:#181c24; --panel2:#1d222c; --line:#2a303c; --text:#e6e9ef; --muted:#9aa3b2; --faint:#6b7383;
+  --accent:#6b93ff; --accent-weak:#1e2a4a; --ok:#3ccf74; --ok-weak:#16301f; --warn:#f0b44a; --warn-weak:#33280f;
+  --bad:#f87171; --bad-weak:#3a1717; --lock:#a78bfa; --lock-weak:#261d3d;
+  --shadow:0 1px 2px rgba(0,0,0,.4);
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+button{font:inherit;color:inherit;cursor:pointer}
+.app{display:grid;grid-template-rows:auto 1fr auto;grid-template-columns:minmax(0,1fr);height:100vh}
+/* top bar */
+.top{display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--line);flex-wrap:wrap}
+.top .title{font-weight:600;font-size:15px}
+.top .crumb{color:var(--muted);font-size:13px}
+.pill{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;font-size:12px;border:1px solid var(--line);background:var(--panel2);color:var(--muted);white-space:nowrap}
+.pill.off{color:var(--bad);border-color:transparent;background:var(--bad-weak)}
+.pill.ok{color:var(--ok);border-color:transparent;background:var(--ok-weak)}
+.pill.warn{color:var(--warn);border-color:transparent;background:var(--warn-weak)}
+.pill.lock{color:var(--lock);border-color:transparent;background:var(--lock-weak)}
+.spacer{flex:1}
+.btn{border:1px solid var(--line);background:var(--panel);padding:6px 12px;border-radius:8px}
+.btn:hover{border-color:var(--accent)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.ai{border-color:var(--ai);color:var(--ai)}
+.btn[disabled]{opacity:.5;cursor:not-allowed}
+/* main 3 columns */
+.main{display:grid;grid-template-columns:240px 1fr 340px;min-height:0}
+.col{min-height:0;min-width:0;overflow:auto}
+.lib{background:var(--panel);border-right:1px solid var(--line);padding:12px}
+.lib h4{margin:14px 4px 6px;font-size:12px;color:var(--muted);font-weight:600;letter-spacing:.02em}
+.lib h4:first-child{margin-top:2px}
+.libitem{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:8px;border:1px solid transparent;cursor:grab;user-select:none}
+.libitem:hover{background:var(--panel2);border-color:var(--line)}
+.libitem .dot{width:22px;height:22px;border-radius:6px;display:grid;place-items:center;color:#fff;font-size:12px;flex:none}
+.libitem .nm{flex:1;font-size:13px}
+.libitem small{color:var(--faint);font-size:11px}
+.libitem.locked{opacity:.55;cursor:not-allowed}
+.libitem.locked .nm::after{content:" 🔒";font-size:11px}
+.search{width:100%;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel2);color:var(--text)}
+/* canvas */
+.canvas{position:relative;background:
+  radial-gradient(circle,var(--line) 1px,transparent 1px) 0 0/18px 18px,var(--bg);padding:56px 24px 60px}
+.flow{display:flex;flex-direction:column;align-items:center;gap:0;max-width:440px;margin:0 auto}
+.node{width:100%;background:var(--panel);border:1.5px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:10px 12px;cursor:pointer;position:relative;transition:border-color .15s}
+.node:hover{border-color:var(--faint)}
+.node.sel{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-weak)}
+.node .hd{display:flex;align-items:center;gap:8px}
+.node .ic{width:26px;height:26px;border-radius:7px;display:grid;place-items:center;color:#fff;font-size:13px;flex:none}
+.node .nm{font-weight:600;font-size:13.5px;flex:1}
+.node .key{font-family:var(--mono);font-size:11px;color:var(--faint)}
+.node .sub{color:var(--muted);font-size:12.5px;margin:4px 0 0 34px}
+.node .tags{display:flex;gap:4px;flex-wrap:wrap;margin:6px 0 0 34px}
+.node .st{position:absolute;right:-8px;top:-8px;width:20px;height:20px;border-radius:50%;display:none;place-items:center;color:#fff;font-size:11px;border:2px solid var(--bg)}
+.node.run-ok .st{display:grid;background:var(--ok)}
+.node.run-run .st{display:grid;background:var(--accent);animation:pulse 1s infinite}
+.node.run-skip .st{display:grid;background:var(--faint)}
+@keyframes pulse{50%{opacity:.4}}
+.wire{width:2px;height:26px;background:var(--line);position:relative}
+.wire .add{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:20px;height:20px;border-radius:50%;border:1px solid var(--line);background:var(--panel);color:var(--muted);font-size:13px;line-height:17px;text-align:center;padding:0;opacity:0;transition:opacity .15s}
+.wire:hover .add,.wire .add:focus{opacity:1}
+.endcap{margin-top:6px;color:var(--faint);font-size:12px}
+.canvas-tools{position:absolute;left:16px;top:12px;display:flex;gap:6px;flex-wrap:wrap}
+.legend{position:absolute;right:16px;top:12px;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;max-width:60%}
+/* right panel */
+.side{background:var(--panel);border-left:1px solid var(--line);display:flex;flex-direction:column}
+.tabs{display:flex;border-bottom:1px solid var(--line);padding:0 8px}
+.tab{padding:10px 10px;border:0;background:none;color:var(--muted);border-bottom:2px solid transparent;font-size:13px}
+.tab.on{color:var(--text);border-bottom-color:var(--accent);font-weight:600}
+.pane{padding:14px;overflow:auto;flex:1}
+.field{margin-bottom:14px}
+.field label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
+.field .val,.field select,.field input,.field textarea{width:100%;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel2);color:var(--text);font:inherit;font-size:13px}
+.field textarea{min-height:64px;font-family:var(--mono);font-size:12px}
+.expr{font-family:var(--mono);font-size:12px;background:var(--accent-weak);color:var(--accent);padding:1px 6px;border-radius:5px}
+.note{font-size:12px;color:var(--muted);background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:12px}
+.note.lock{background:var(--lock-weak);border-color:transparent;color:var(--text)}
+.note.warn{background:var(--warn-weak);border-color:transparent;color:var(--text)}
+.gate{display:flex;gap:8px;align-items:flex-start;padding:8px 0;border-bottom:1px dashed var(--line);font-size:12.5px}
+.gate:last-child{border-bottom:0}
+.gate b{font-weight:600}
+.gate .who{margin-left:auto;flex:none}
+table.data{width:100%;border-collapse:collapse;font-size:12px}
+table.data th,table.data td{border-bottom:1px solid var(--line);padding:5px 6px;text-align:left;white-space:nowrap}
+table.data th{color:var(--muted);font-weight:500;background:var(--panel2);position:sticky;top:0}
+/* bottom: executions */
+.bottom{background:var(--panel);border-top:1px solid var(--line);max-height:34vh;display:flex;flex-direction:column}
+.bottom .bar{display:flex;align-items:center;gap:10px;padding:6px 14px;border-bottom:1px solid var(--line);font-size:13px}
+.bottom .body{overflow:auto;padding:0 14px 10px}
+.exec{display:grid;grid-template-columns:150px 90px 1fr 120px;gap:8px;padding:7px 0;border-bottom:1px solid var(--line);font-size:12.5px;align-items:center}
+.exec .mono{font-family:var(--mono);color:var(--muted);font-size:11.5px}
+/* AI drawer */
+.drawer{position:fixed;right:0;top:0;bottom:0;width:min(420px,100vw);background:var(--panel);border-left:1px solid var(--line);box-shadow:-8px 0 24px rgba(0,0,0,.12);transform:translateX(105%);transition:transform .2s;display:flex;flex-direction:column;z-index:20}
+.drawer.open{transform:none}
+.drawer .hd{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--line)}
+.msgs{flex:1;overflow:auto;padding:14px;display:flex;flex-direction:column;gap:10px}
+.msg{padding:9px 11px;border-radius:10px;max-width:92%;font-size:13px;white-space:pre-wrap}
+.msg.me{align-self:flex-end;background:var(--accent);color:#fff}
+.msg.bot{align-self:flex-start;background:var(--panel2);border:1px solid var(--line)}
+.msg.bot ul{margin:4px 0 0;padding-left:18px}
+.composer{display:flex;gap:8px;padding:10px;border-top:1px solid var(--line)}
+.composer textarea{flex:1;min-height:56px;resize:vertical;padding:8px;border-radius:8px;border:1px solid var(--line);background:var(--panel2);color:var(--text);font:inherit;font-size:13px}
+.chips{display:flex;gap:6px;flex-wrap:wrap;padding:0 14px 10px}
+.chip{font-size:12px;border:1px dashed var(--line);border-radius:999px;padding:3px 9px;background:none;color:var(--muted)}
+.chip:hover{border-color:var(--ai);color:var(--ai)}
+/* modal templates */
+.modal{position:fixed;inset:0;background:rgba(10,12,18,.45);display:none;place-items:center;z-index:30;padding:16px}
+.modal.open{display:grid}
+.card{background:var(--panel);border-radius:12px;max-width:760px;width:100%;padding:18px;box-shadow:var(--shadow);max-height:90vh;overflow:auto}
+.tpls{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px;margin-top:12px}
+.tpl{border:1px solid var(--line);border-radius:10px;padding:12px;text-align:left;background:var(--panel2)}
+.tpl:hover{border-color:var(--accent)}
+.tpl h5{margin:0 0 4px;font-size:13.5px}
+.tpl p{margin:0;color:var(--muted);font-size:12px}
+.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:8px 14px;border-radius:8px;font-size:13px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:40;max-width:90vw}
+.toast.show{opacity:1}
+/* responsive */
+@media (max-width:1100px){.main{grid-template-columns:200px 1fr 300px}}
+@media (max-width:820px){
+  .main{grid-template-columns:1fr}
+  .lib{border-right:0;border-bottom:1px solid var(--line);max-height:180px}
+  .side{border-left:0;border-top:1px solid var(--line)}
+  .app{height:auto;min-height:100vh}
+  .canvas{padding:52px 16px 40px}
+  .legend{display:none}
+  .exec{grid-template-columns:1fr 80px}
+  .exec .hide-sm{display:none}
+  .top{padding:10px 16px}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <span class="title">集成助手</span>
+    <span class="crumb">流程 / PLM 物料 → 宜搭测试副本草稿</span>
+    <span class="pill lock" title="规则状态">草稿 · 未启用</span>
+    <span class="spacer"></span>
+    <button class="btn" id="btnTpl">模板</button>
+    <button class="btn ai" id="btnAi">✦ AI 助手</button>
+    <button class="btn" id="btnRun">▶ 试运行（模拟）</button>
+    <button class="btn" id="btnSave">保存草稿</button>
+    <button class="btn primary" id="btnEnable" title="启用要过下面的门">申请启用</button>
+    <button class="btn" id="btnTheme" title="切换明暗">◐</button>
+  </header>
+
+  <div class="main">
+    <!-- 左：节点库 -->
+    <aside class="col lib" aria-label="节点库">
+      <input class="search" placeholder="搜索节点…" id="libSearch">
+      <div id="libList"></div>
+    </aside>
+
+    <!-- 中：画布 -->
+    <section class="col canvas" aria-label="流程画布">
+      <div class="canvas-tools">
+        <span class="pill">线性步骤 · 自上而下</span>
+        <span class="pill" title="首期不做分支画布；条件与并行分支沿用规则引擎已有能力，在下一阶段开放">分支：第 3 阶段</span>
+      </div>
+      <div class="legend">
+        <span class="pill" style="color:var(--trigger)">● 触发</span>
+        <span class="pill" style="color:var(--conn)">● 连接</span>
+        <span class="pill" style="color:var(--data)">● 数据</span>
+        <span class="pill" style="color:var(--sink)">● 落点</span>
+      </div>
+      <div class="flow" id="flow"></div>
+    </section>
+
+    <!-- 右：配置 / 数据 / 门 -->
+    <aside class="col side" aria-label="节点配置">
+      <div class="tabs" role="tablist">
+        <button class="tab on" data-tab="cfg">配置</button>
+        <button class="tab" data-tab="data">输入 / 输出</button>
+        <button class="tab" data-tab="gates">上线门</button>
+      </div>
+      <div class="pane" id="pane"></div>
+    </aside>
+  </div>
+
+  <!-- 下：执行历史 -->
+  <section class="bottom" aria-label="执行历史">
+    <div class="bar"><b>执行历史</b><span class="pill">日志只记行数与结果码，不落业务值</span><span class="spacer"></span><span class="pill" id="execCount">3 次</span></div>
+    <div class="body" id="execs"></div>
+  </section>
+</div>
+
+<!-- AI 抽屉 -->
+<div class="drawer" id="drawer" aria-label="AI 助手">
+  <div class="hd"><b style="color:var(--ai)">✦ AI 助手</b><span class="pill">只生成草稿，不执行、不启用</span><span class="spacer"></span><button class="btn" id="aiClose">关闭</button></div>
+  <div class="msgs" id="msgs">
+    <div class="msg bot">用一句话说你想自动化什么。我只会从<b>已批准的连接操作</b>里挑步骤，生成的是草稿，保存和启用仍按原有的审批走。</div>
+  </div>
+  <div class="chips">
+    <button class="chip">每天 6 点拉备料 BOM，失败通知我</button>
+    <button class="chip">选一行项目，查 PLM 物料，生成宜搭测试副本草稿</button>
+    <button class="chip">把物料写回 K3</button>
+  </div>
+  <div class="composer"><textarea id="aiInput" placeholder="例如：每天早上 6 点，把备料项目里新增的行去 PLM 查物料…"></textarea><button class="btn primary" id="aiSend">发送</button></div>
+</div>
+
+<!-- 模板 -->
+<div class="modal" id="modal">
+  <div class="card">
+    <div style="display:flex;align-items:center"><b>从模板开始</b><span class="spacer"></span><button class="btn" id="tplClose">关闭</button></div>
+    <div class="tpls" id="tpls"></div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+(function(){
+  // ---------- 节点类型（只列已有或已定的能力；锁着的是待裁/后置） ----------
+  const C={trigger:'var(--trigger)',conn:'var(--conn)',data:'var(--data)',sink:'var(--sink)',ai:'var(--ai)'};
+  const LIB=[
+    {g:'触发',items:[
+      {t:'cron',nm:'定时（cron）',ic:'⏰',c:'trigger',base:'schedule.cron · 已有'},
+      {t:'interval',nm:'定时（间隔）',ic:'⟳',c:'trigger',base:'schedule.interval · 已有'},
+      {t:'pick_row',nm:'手动：点选一行',ic:'☝',c:'trigger',base:'S4-d 预览 · S 线'},
+      {t:'job_done',nm:'集成作业完成',ic:'✓',c:'trigger',base:'integration.run_finished · I 链'},
+      {t:'record',nm:'记录变更',ic:'✎',c:'trigger',locked:'带外部读的记录事件触发：owner 裁定不放开（OQ4）'},
+      {t:'webhook',nm:'入站 Webhook',ic:'⇲',c:'trigger',locked:'入站 Webhook 触发：待裁（OQ4）'}]},
+    {g:'连接（只调已批准的具名操作）',items:[
+      {t:'plm_read',nm:'PLM 物料读取',ic:'P',c:'conn',base:'读源配置 · 已批准 v3'},
+      {t:'job',nm:'运行集成作业',ic:'⚙',c:'conn',base:'run_integration_job · I 链'},
+      {t:'k3_read',nm:'K3 物料读取',ic:'K',c:'conn',locked:'K3 种类：先要客户侧只读账号（硬前置），第 2 阶段准入'},
+      {t:'http_read',nm:'HTTP 系统读取',ic:'H',c:'conn',locked:'HTTP 种类：传输加固随准入交付，第 2 阶段'},
+      {t:'k3_write',nm:'K3 写回',ic:'✕',c:'conn',locked:'K3 Save/Submit/Audit：永久禁止'}]},
+    {g:'数据',items:[
+      {t:'transform',nm:'字段转换',ic:'⇄',c:'data',base:'transform_records · 8 种固定转换'},
+      {t:'yida_map',nm:'宜搭物料映射',ic:'Y',c:'data',base:'只调宜搭规划器 · v2 模板'},
+      {t:'filter',nm:'条件 / 分支',ic:'⑂',c:'data',locked:'带连接步骤的规则首期不带条件；第 3 阶段开放'},
+      {t:'code',nm:'代码节点',ic:'{}',c:'data',locked:'代码沙箱不在本期（冻结基线 :738）'}]},
+    {g:'落点',items:[
+      {t:'draft',nm:'存宜搭测试副本草稿',ic:'⬇',c:'sink',base:'1 号槽 · 只存草稿不发送'},
+      {t:'yida_send',nm:'发送宜搭',ic:'↗',c:'sink',locked:'走既有宜搭 owner 发送路径，逐次另批'},
+      {t:'notify',nm:'通知 / 钉钉',ic:'✉',c:'sink',locked:'作业失败告警：I 链摘要事件可接，发送开关另批'},
+      {t:'sheet_write',nm:'写多维表',ic:'▦',c:'sink',locked:'生产表写入属 O ②，本期不做'}]}
+  ];
+  const TYPES={};LIB.forEach(g=>g.items.forEach(i=>TYPES[i.t]=i));
+
+  // ---------- 当前流程（S 线点名场景） ----------
+  const SCEN_PLM=[
+    {id:'n1',t:'pick_row',key:'trigger',sub:'表：备料项目（已登记、在役）',tags:[['ok','预览专用，不能启用']]},
+    {id:'n2',t:'plm_read',key:'plm',sub:'读源：PLM 物料 · 按图号查 · 至多 99 行',tags:[['lock','首读需 owner 批（O ①）']]},
+    {id:'n3',t:'yida_map',key:'map',sub:'模板：物料表 v2（七键） · 不拆分分配',tags:[]},
+    {id:'n4',t:'draft',key:'draft',sub:'目标：1 号槽（物料表测试副本）',tags:[['warn','开关关']]}
+  ];
+  const SCEN_PULL=[
+    {id:'p1',t:'cron',key:'trigger',sub:'每天 06:00 · Asia/Shanghai',tags:[]},
+    {id:'p2',t:'job',key:'pull',sub:'作业：备料 BOM 拉取 · 先试算',tags:[['lock','只试算；真写另批']]}
+  ];
+  const SCEN_ALERT=[
+    {id:'a1',t:'job_done',key:'trigger',sub:'作业：备料 BOM 拉取 · 结果 = 失败',tags:[]},
+    {id:'a2',t:'notify',key:'notify',sub:'发给：备料管理员',tags:[['warn','发送开关关']]}
+  ];
+  let flow=SCEN_PLM.map(n=>({...n}));
+  let sel='n2', tab='cfg', ran=false;
+
+  const $=s=>document.querySelector(s);
+  function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');clearTimeout(toast.h);toast.h=setTimeout(()=>t.classList.remove('show'),2600)}
+
+  // ---------- 节点库 ----------
+  function renderLib(q=''){
+    const box=$('#libList');box.innerHTML='';
+    LIB.forEach(g=>{
+      const items=g.items.filter(i=>!q||i.nm.includes(q));
+      if(!items.length)return;
+      const h=document.createElement('h4');h.textContent=g.g;box.appendChild(h);
+      items.forEach(i=>{
+        const d=document.createElement('div');d.className='libitem'+(i.locked?' locked':'');
+        d.title=i.locked||i.base;
+        d.innerHTML=`<span class="dot" style="background:${C[i.c]}">${i.ic}</span><span class="nm">${i.nm}<br><small>${i.locked?'未开放':i.base}</small></span>`;
+        d.onclick=()=>{ if(i.locked){toast(i.locked);return} addNode(i.t) };
+        box.appendChild(d);
+      });
+    });
+  }
+  function addNode(t,at){
+    if(t==='pick_row'||t==='cron'||t==='interval'||t==='job_done'){ toast('一条流程只有一个触发；先删除现有触发再换');return }
+    if(flow.length>=9){toast('一条规则至多 8 个连接步骤（首期上限）');return}
+    const n={id:'x'+Date.now(),t,key:t.replace(/_.*/,'')+(flow.length),sub:'未配置',tags:[['warn','待配置']]};
+    if(at==null)flow.push(n);else flow.splice(at,0,n);
+    sel=n.id;ran=false;render();
+  }
+
+  // ---------- 画布 ----------
+  function renderFlow(){
+    const f=$('#flow');f.innerHTML='';
+    flow.forEach((n,i)=>{
+      if(i>0){const w=document.createElement('div');w.className='wire';w.innerHTML='<button class="add" title="在此插入步骤">+</button>';
+        w.querySelector('.add').onclick=e=>{e.stopPropagation();toast('从左侧节点库点选要插入的节点（原型里追加在末尾）')};f.appendChild(w)}
+      const T=TYPES[n.t];
+      const d=document.createElement('div');
+      d.className='node'+(n.id===sel?' sel':'')+(n.run?' run-'+n.run:'');
+      d.innerHTML=`<span class="st">${n.run==='ok'?'✓':n.run==='skip'?'–':'…'}</span>
+        <div class="hd"><span class="ic" style="background:${C[T.c]}">${T.ic}</span><span class="nm">${T.nm}</span><span class="key">steps.${n.key}</span></div>
+        <div class="sub">${n.sub}</div>
+        <div class="tags">${(n.tags||[]).map(([k,v])=>`<span class="pill ${k}">${v}</span>`).join('')}${n.rows!=null?`<span class="pill">${n.rows} 行</span>`:''}</div>`;
+      d.onclick=()=>{sel=n.id;render()};
+      f.appendChild(d);
+    });
+    const e=document.createElement('div');e.className='endcap';e.textContent='— 流程结束 —';f.appendChild(e);
+  }
+
+  // ---------- 右侧面板 ----------
+  const ROWS={
+    trigger:{cols:['项目号','图号','数量'],rows:[['P-DEMO-001','DWG-0001','4'],['P-DEMO-001','DWG-0002','12']],note:'点选的行（合成数据）'},
+    plm:{cols:['图号','物料名称','规格','单位'],rows:[['DWG-0001','示例支架','A-10','件'],['DWG-0002','示例螺栓','M8×30','个']],note:'读回的物料字段只在本次执行内存里'},
+    map:{cols:['宜搭字段','值','来源'],rows:[['项目号','P-DEMO-001','direct'],['物料名称','示例支架','direct'],['规格型号','A-10','direct'],['数量','4','direct']],note:'规划器编出的草稿行'},
+    draft:{cols:['草稿操作','行数','结果'],rows:[['(模拟) op-****','2','未保存：开关关']],note:'草稿进宜搭本地草稿库，不发宜搭'}
+  };
+  function cfgFor(n){
+    const T=TYPES[n.t];
+    const head=`<div class="note">${T.base}</div>`;
+    switch(n.t){
+      case 'pick_row':return head+`
+        <div class="field"><label>所在表</label><select><option>备料项目（P-DEMO 测试）</option></select></div>
+        <div class="field"><label>业务键列</label><select><option>图号</option><option>物料编码</option></select></div>
+        <div class="note warn">带「点选一行」的流程只能在预览里跑，不能定时启用（ADR §6.4）。</div>`;
+      case 'cron':return head+`<div class="field"><label>Cron 表达式</label><input value="0 6 * * *"></div><div class="field"><label>时区（必填）</label><input value="Asia/Shanghai"></div><div class="note">相邻两次触发不得近于 15 分钟。替代现场 06:00 的操作系统计划任务。</div>`;
+      case 'plm_read':return head+`
+        <div class="field"><label>具名操作（只能选已批准的读源配置）</label><select><option>PLM 物料 · 按图号 · v3（已批准）</option><option disabled>PLM 物料 · v4（草稿，未批准）</option></select></div>
+        <div class="field"><label>业务键 ←</label><div class="val"><span class="expr">{{trigger.row.图号}}</span></div></div>
+        <div class="field"><label>输出声明列</label><div class="val">图号 · 物料名称 · 规格 · 单位</div></div>
+        <div class="field"><label>页内行上限</label><input value="99" disabled></div>
+        <div class="note lock">规则作者看不到也改不了路径、请求体或凭据；连接由集成管理员登记并批准。读到的值不进日志。</div>`;
+      case 'job':return head+`<div class="field"><label>集成作业</label><select><option>备料 BOM 拉取（试算）</option></select></div><div class="note lock">只能是规则里唯一的动作；真写开关只登记不读（owner 另批）。</div>`;
+      case 'yida_map':return head+`
+        <div class="field"><label>模板</label><select><option>物料表 v2（1 号槽七键）</option><option disabled>物料表 v3（带物料编码，需表源绑定）</option></select></div>
+        <div class="field"><label>字段映射</label><textarea readonly>项目号   ← {{trigger.row.项目号}}
+物料名称 ← {{steps.plm.output.物料名称}}
+规格型号 ← {{steps.plm.output.规格}}
+数量     ← {{trigger.row.数量}}</textarea></div>
+        <div class="note">映射由宜搭规划器校验类型与选项；发送时由发送编译器重算，不读这一步的产物。</div>`;
+      case 'transform':return head+`<div class="field"><label>转换</label><select><option>trim</option><option>upper</option><option>toNumber</option><option>toDate</option><option>defaultValue</option><option>concat</option><option>dictMap</option></select></div><div class="note">纯函数、零 IO，不执行任何用户代码。</div>`;
+      case 'draft':return head+`
+        <div class="field"><label>目标</label><select><option>1 号槽 · 物料表（报工）测试副本</option><option disabled>2–6 号槽 · 正式表单（不可作落点）</option></select></div>
+        <div class="field"><label>操作者</label><div class="val">须同时是：规则所有者 · PLM 源属主 · 宜搭锚点 owner</div></div>
+        <div class="note warn">开关 INTEGRATION_AUTOMATION_TEST_COPY_DRAFT_ENABLED 关。服务端存草稿时从头重跑整条链，不收浏览器送回的行。</div>`;
+      case 'job_done':return head+`<div class="field"><label>作业</label><select><option>备料 BOM 拉取</option></select></div><div class="field"><label>结果</label><select><option>失败</option><option>挂起</option><option>成功</option></select></div><div class="note">一次作业只发一条摘要事件（I 链 R-69）。</div>`;
+      case 'notify':return head+`<div class="note warn">原型占位：通知节点未开放。</div>`;
+      default:return head;
+    }
+  }
+  function renderPane(){
+    document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('on',b.dataset.tab===tab));
+    const p=$('#pane');const n=flow.find(x=>x.id===sel)||flow[0];
+    if(tab==='cfg'){p.innerHTML=`<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><b>${TYPES[n.t].nm}</b><span class="key" style="font-family:var(--mono);font-size:11px;color:var(--faint)">steps.${n.key}</span><span class="spacer"></span><button class="btn" id="del">删除</button></div>`+cfgFor(n);
+      $('#del').onclick=()=>{ if(flow.length<=1)return; flow=flow.filter(x=>x.id!==n.id); sel=flow[0].id; render() }; return}
+    if(tab==='data'){
+      const d=ROWS[n.key];
+      if(!ran||!d){p.innerHTML=`<div class="note">点上方「▶ 试运行（模拟）」后，这里显示这一步的输入与输出（合成数据，只在本页内存）。</div>`;return}
+      p.innerHTML=`<div class="note">${d.note}</div><table class="data"><thead><tr>${d.cols.map(c=>`<th>${c}</th>`).join('')}</tr></thead><tbody>${d.rows.map(r=>`<tr>${r.map(c=>`<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table>
+      <p style="font-size:12px;color:var(--muted);margin-top:10px">引用这一步：<span class="expr">{{steps.${n.key}.output.…}}</span></p>`;return}
+    p.innerHTML=`<div class="note">启用前要过的门。T 层由技术负责人默认前进；O 层要 owner 先批。</div>
+      ${[
+        ['合并','本流程用到的切片（S1-b、S2-a、S3-a、S4-d/e）已合入 main','T','pill'],
+        ['开关','INTEGRATION_AUTOMATION_CONNECTION_CALL_ENABLED = 关','O ④','pill off'],
+        ['开关','步骤输出与转换开关 = 关','O ④','pill off'],
+        ['开关','测试副本草稿开关 = 关','O ④','pill off'],
+        ['真实读','对客户 PLM 的首读（预览那一次也算）','O ①','pill lock'],
+        ['身份','PLM 只读源需重新保存以盖上属主戳','现场','pill warn'],
+        ['写入','存草稿进宜搭本地草稿库','O ②','pill lock'],
+        ['外部写','发宜搭 / 写 K3','不在本流程','pill']
+      ].map(([a,b,c,k])=>`<div class="gate"><b>${a}</b><span>${b}</span><span class="who ${k}">${c}</span></div>`).join('')}`;
+  }
+
+  // ---------- 执行历史 ----------
+  let execs=[
+    ['2026-11-19 10:02','模拟','4 步 · 2 行 · ok','试运行'],
+    ['2026-11-18 16:40','模拟','停在 steps.plm · system_unavailable','试运行'],
+    ['2026-11-18 16:35','保存','保存门拒绝：规则带条件','—']
+  ];
+  function renderExecs(){
+    $('#execs').innerHTML=execs.map(([t,k,r,m])=>`<div class="exec"><span class="mono">${t}</span><span><span class="pill ${r.includes('ok')?'ok':r.includes('拒绝')||r.includes('停在')?'warn':''}">${k}</span></span><span class="hide-sm">${r}</span><span class="hide-sm mono">${m}</span></div>`).join('');
+    $('#execCount').textContent=execs.length+' 次';
+  }
+
+  function render(){renderFlow();renderPane();renderExecs()}
+
+  // ---------- 试运行（模拟） ----------
+  $('#btnRun').onclick=async()=>{
+    flow.forEach(n=>{n.run=null;n.rows=null});ran=false;render();
+    for(const n of flow){
+      n.run='run';renderFlow();await new Promise(r=>setTimeout(r,520));
+      if(n.t==='draft'||n.t==='notify'){n.run='skip';n.rows=0}
+      else{n.run='ok';n.rows=(ROWS[n.key]&&ROWS[n.key].rows.length)||1}
+      renderFlow();
+    }
+    ran=true;
+    const now=new Date();const p=v=>String(v).padStart(2,'0');
+    execs.unshift([`${now.getFullYear()}-${p(now.getMonth()+1)}-${p(now.getDate())} ${p(now.getHours())}:${p(now.getMinutes())}`,'模拟',`${flow.length} 步 · ok · 落点跳过（开关关）`,'试运行']);
+    tab='data';render();toast('模拟完成：只用合成数据，没有访问任何外部系统');
+  };
+  $('#btnSave').onclick=()=>toast('已保存草稿（原型不落库）。保存门会逐键校验配置与放置限制。');
+  $('#btnEnable').onclick=()=>{tab='gates';render();toast('启用要先过「上线门」里的各项')};
+  document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{tab=b.dataset.tab;renderPane()});
+  $('#libSearch').oninput=e=>renderLib(e.target.value.trim());
+
+  // ---------- 模板 ----------
+  const TPLS=[
+    {nm:'备料 BOM 每日拉取',d:'替代现场 06:00 计划任务；I 链，已合入、开关关',f:SCEN_PULL,s:'p2'},
+    {nm:'拉取失败告警',d:'作业完成（失败）→ 通知；告警发送另批',f:SCEN_ALERT,s:'a1'},
+    {nm:'PLM 物料 → 宜搭测试副本草稿',d:'S 线点名场景（形态 B）',f:SCEN_PLM,s:'n2'},
+    {nm:'宜搭报工回读 → 备料对账',d:'第 4 阶段候选；要客户出处',f:null},
+  ];
+  $('#tpls').innerHTML=TPLS.map((t,i)=>`<button class="tpl" data-i="${i}"><h5>${t.nm}</h5><p>${t.d}</p>${t.f?'':'<p style="margin-top:6px"><span class="pill">未开放</span></p>'}</button>`).join('');
+  document.querySelectorAll('.tpl').forEach(b=>b.onclick=()=>{const t=TPLS[b.dataset.i];if(!t.f){toast('这个模板还没有客户出处，暂不开放');return}
+    flow=t.f.map(n=>({...n}));sel=t.s;ran=false;tab='cfg';$('#modal').classList.remove('open');
+    document.querySelector('.crumb').textContent='流程 / '+t.nm;render()});
+  $('#btnTpl').onclick=()=>$('#modal').classList.add('open');
+  $('#tplClose').onclick=()=>$('#modal').classList.remove('open');
+  $('#modal').onclick=e=>{if(e.target.id==='modal')$('#modal').classList.remove('open')};
+
+  // ---------- AI 助手（原型：固定应答） ----------
+  const drawer=$('#drawer');
+  $('#btnAi').onclick=()=>drawer.classList.add('open');
+  $('#aiClose').onclick=()=>drawer.classList.remove('open');
+  function bot(html){const m=document.createElement('div');m.className='msg bot';m.innerHTML=html;$('#msgs').appendChild(m);$('#msgs').scrollTop=1e6}
+  function me(t){const m=document.createElement('div');m.className='msg me';m.textContent=t;$('#msgs').appendChild(m)}
+  function answer(q){
+    me(q);
+    setTimeout(()=>{
+      if(/k3/i.test(q)&&/写/.test(q)){
+        bot('这个我不能生成：<b>K3 写回（Save/Submit/Audit）永久禁止</b>。可以改成「读 K3 → 生成宜搭测试副本草稿」或「生成对账差异表给人确认」。');return}
+      if(/6\s*点|拉.*BOM|每天/.test(q)){
+        bot(`生成了草稿流程（未保存）：<ul><li>触发：定时 cron <span class="expr">0 6 * * *</span>，时区 Asia/Shanghai</li><li>步骤：运行集成作业「备料 BOM 拉取」，先试算</li><li>另建一条：作业完成=失败 → 通知（告警发送开关关）</li></ul>我用的都是已有能力（I 链）。启用前还要：开关打开（O ④），真写另批。`);
+        flow=SCEN_PULL.map(n=>({...n}));sel='p2';ran=false;tab='cfg';document.querySelector('.crumb').textContent='流程 / 备料 BOM 每日拉取（AI 草稿）';render();return}
+      if(/PLM|物料|宜搭/.test(q)){
+        bot(`生成了草稿流程（未保存）：<ul><li>触发：手动点选备料项目的一行</li><li>PLM 物料读取：用已批准的「PLM 物料 · 按图号 · v3」，业务键 ← <span class="expr">{{trigger.row.图号}}</span></li><li>宜搭物料映射：v2 模板，4 个字段</li><li>落点：存 1 号槽测试副本草稿</li></ul>没有找到「数量」对应的 PLM 字段，我先从行里取。要我改成别的列吗？`);
+        flow=SCEN_PLM.map(n=>({...n}));sel='n3';ran=false;tab='cfg';document.querySelector('.crumb').textContent='流程 / PLM 物料 → 宜搭测试副本草稿（AI 草稿）';render();return}
+      bot('我没把握对上已批准的连接操作。能说一下数据从哪个系统来、最后要落到哪里吗？（目前可用：PLM 物料读取、备料 BOM 拉取作业、宜搭测试副本草稿）');
+    },450);
+  }
+  $('#aiSend').onclick=()=>{const v=$('#aiInput').value.trim();if(!v)return;$('#aiInput').value='';answer(v)};
+  $('#aiInput').addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey))$('#aiSend').click()});
+  document.querySelectorAll('.chip').forEach(c=>c.onclick=()=>answer(c.textContent));
+
+  // ---------- 主题 ----------
+  $('#btnTheme').onclick=()=>{const r=document.documentElement;const dark=r.dataset.theme?r.dataset.theme==='dark':matchMedia('(prefers-color-scheme: dark)').matches;r.dataset.theme=dark?'light':'dark'};
+
+  renderLib();render();
+})();
+</script>
+</body>
+</html>
