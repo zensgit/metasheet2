@@ -1,6 +1,4 @@
 {
-  "handlerKeys": "c1ea4f848729baa43f589d59a6d63b6339cc4611d42f5f2887edb43d84f44374",
-  "handlerKeyCount": 170,
   "cases": [
     {
       "name": "success: single_record, raw plane",
@@ -151,6 +149,24 @@
       "status": 400,
       "body": "{\"ok\":false,\"error\":{\"code\":\"READ_SOURCE_READ_CONTRACT_INVALID\",\"message\":\"configured read request is invalid\",\"details\":{\"reason\":\"execution_row_source_mode_not_supported\"}}}",
       "calls": "{\"store\":[{\"id\":\"rsc_resolver\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":null}],\"systems\":[{\"id\":\"sys_s1a\",\"principal\":\"u_s1a_reader\",\"runAs\":\"user\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":null}],\"adapters\":[],\"reads\":[]}"
+    },
+    {
+      "name": "authUser-only principal",
+      "status": 200,
+      "body": "{\"ok\":true,\"data\":{\"evidence\":{\"ok\":true,\"object\":\"material\",\"mode\":\"single_record\",\"boundedSmoke\":true,\"containers\":{\"primary\":{\"type\":\"object\",\"arrayLength\":null}},\"recordCount\":1,\"containerLocated\":true,\"boundedSmokeExecuted\":true,\"timeoutReached\":false,\"capReached\":false},\"data\":{\"containers\":{\"primary\":{\"records\":[{\"colGamma\":\"RAW-SIGMA\"}]}},\"recordCount\":1}}}",
+      "calls": "{\"store\":[{\"id\":\"rsc_single\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":null}],\"systems\":[{\"id\":\"sys_s1a\",\"principal\":\"u_s1a_reader\",\"runAs\":\"user\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":null}],\"adapters\":[{\"system\":{\"id\":\"sys_s1a\",\"tenantId\":\"tenant-s1a-governed\",\"kind\":\"erp:k3-wise-webapi\",\"config\":{\"objects\":{\"material\":{\"operations\":[\"read\"],\"readPath\":\"/K3API/Material/GetDetail\",\"readMethod\":\"POST\"}}}},\"hasCredentials\":true,\"deps\":{\"principal\":\"u_s1a_reader\"}}],\"reads\":[{\"object\":\"material\",\"filters\":{\"FNumber\":\"M-001\"}}]}"
+    },
+    {
+      "name": "claim flag on, verified claim present",
+      "status": 200,
+      "body": "{\"ok\":true,\"data\":{\"evidence\":{\"ok\":true,\"object\":\"material\",\"mode\":\"single_record\",\"boundedSmoke\":true,\"containers\":{\"primary\":{\"type\":\"object\",\"arrayLength\":null}},\"recordCount\":1,\"containerLocated\":true,\"boundedSmokeExecuted\":true,\"timeoutReached\":false,\"capReached\":false},\"data\":{\"containers\":{\"primary\":{\"records\":[{\"colGamma\":\"RAW-SIGMA\"}]}},\"recordCount\":1}}}",
+      "calls": "{\"store\":[{\"id\":\"rsc_single\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":null}],\"systems\":[{\"id\":\"sys_s1a\",\"principal\":\"u_s1a_reader\",\"runAs\":\"user\",\"tenantId\":\"tenant-s1a-governed\",\"workspaceId\":null}],\"adapters\":[{\"system\":{\"id\":\"sys_s1a\",\"tenantId\":\"tenant-s1a-governed\",\"kind\":\"erp:k3-wise-webapi\",\"config\":{\"objects\":{\"material\":{\"operations\":[\"read\"],\"readPath\":\"/K3API/Material/GetDetail\",\"readMethod\":\"POST\"}}}},\"hasCredentials\":true,\"deps\":{\"principal\":\"u_s1a_reader\"}}],\"reads\":[{\"object\":\"material\",\"filters\":{\"FNumber\":\"M-001\"}}]}"
+    },
+    {
+      "name": "claim flag on, verified claim absent",
+      "status": 403,
+      "body": "{\"ok\":false,\"error\":{\"code\":\"OPERATOR_SCOPE_TENANT_REQUIRED\",\"message\":\"this deployment requires a tenant claim in the verified token; a request header cannot supply one\",\"details\":{}}}",
+      "calls": "{\"store\":[],\"systems\":[],\"adapters\":[],\"reads\":[]}"
     }
   ]
 }

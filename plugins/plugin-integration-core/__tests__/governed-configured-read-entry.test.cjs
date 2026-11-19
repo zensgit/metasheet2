@@ -18,16 +18,20 @@
 //        and no new ENUMERABLE member on the returned object (the executor's own non-enumerable `page` stays).
 //   C-06 an already-aborted signal: no system load, no adapter, no read; GOVERNED_ENTRY_ABORTED at `load`.
 //   C-07 a refusing checkpoint: at `load` => zero system loads; at `read` => zero outbound reads.
-//   C-08 the options key set is CLOSED to { signal, checkpoint }: transport / readPurpose / rowCap / foo and
-//        malformed shapes are a TypeError before any store read; the positive controls run.
+//   C-08 the options key set is CLOSED to { signal, checkpoint }: transport / readPurpose / rowCap / foo,
+//        symbol, non-enumerable and inherited keys, non-plain objects and malformed shapes are a TypeError
+//        before any store read; the positive controls run.
 //   C-09 the optional workspaceId hint reaches BOTH lookups (config row and external system) as one value; the
 //        HTTP handler never passes it (static).
-//   C-10 `governedEntries` is exactly three entries, non-enumerable, and the handler key set is unchanged.
+//   C-10 `governedEntries` is exactly three entries, non-enumerable; no entry name is an enumerable handler
+//        key, and every ROUTES handler name still resolves (this slice only: the handler table is not pinned).
 //   C-11 the entry's own gates for a request-free caller: the read tier first, then the closed request shape.
+//   C-12 no options (undefined / null / {}) => the checkpoint seam is never called (the `if (governedEntry)`
+//        guards), pinned through a require-cache stub of governed-entry-checkpoint.cjs.
 
 const assert = require('node:assert/strict')
-const crypto = require('node:crypto')
 const fs = require('node:fs')
+const Module = require('node:module')
 const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
@@ -42,6 +46,8 @@ const TENANT = 'tenant-s1a-governed'
 const PROJECT = 'PRJ-S1A-G1'
 const READ_PATH = '/api/integration/read-source-configs/:id/read'
 const FIXTURE = path.join(__dirname, 'fixtures', 'governed-configured-read-route-snapshots.json')
+// The existing tenant-claim flag (read by the route's tenant resolution); set per case, always restored.
+const CLAIM_FLAG = 'MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED'
 
 const READER = Object.freeze({ id: 'u_s1a_reader', tenantId: TENANT, permissions: ['integration:read'] })
 const STRANGER = Object.freeze({ id: 'u_s1a_stranger', tenantId: TENANT, permissions: ['multitable:read'] })
@@ -98,7 +104,7 @@ function storeRowFor(id) {
  * so the entry and the HTTP route run over one substrate. `log` records every argument, JSON-cloned in call
  * order — the key ORDER is part of what C-02 pins.
  */
-function mountConfiguredRead() {
+function mountConfiguredRead(routesModule = httpRoutes) {
   const log = { store: [], systems: [], adapters: [], reads: [] }
   const adapter = {
     async read(request) {
@@ -152,14 +158,42 @@ function mountConfiguredRead() {
       },
     },
   })
-  const handlers = httpRoutes.createHandlers(h.services, { context: h.context, logger: silentLogger })
+  const handlers = routesModule.createHandlers(h.services, { context: h.context, logger: silentLogger })
   return {
     h,
     log,
     handlers,
     calls() { return JSON.parse(JSON.stringify(log)) },
     reset() { for (const list of Object.values(log)) list.length = 0 },
-    http(req) { return harness.call(h.routes, 'POST', READ_PATH, req) },
+    http(req) {
+      // harness.call builds the request from user / body / query / params (+ authenticatedTenantId); an
+      // authUser-only principal is forwarded onto that same request object here, the way the auth middleware sets it.
+      if (req.authUser === undefined) return harness.call(h.routes, 'POST', READ_PATH, req)
+      const routes = {
+        get(key) {
+          const handler = h.routes.get(key)
+          return handler && ((request, res) => { request.authUser = req.authUser; return handler(request, res) })
+        },
+      }
+      return harness.call(routes, 'POST', READ_PATH, req)
+    },
+  }
+}
+
+/** Runs `fn` with the given env values set, restoring each one (deleting it if it was unset) afterwards. */
+async function withEnv(env, fn) {
+  const saved = new Map()
+  for (const [key, value] of Object.entries(env || {})) {
+    saved.set(key, Object.prototype.hasOwnProperty.call(process.env, key) ? process.env[key] : undefined)
+    process.env[key] = value
+  }
+  try {
+    return await fn()
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
   }
 }
 
@@ -192,23 +226,24 @@ const SNAPSHOT_CASES = Object.freeze([
   ['kind mismatch', { user: READER, params: { id: 'rsc_wrong_kind' }, body: { inputs: { key: 'M-001' } } }],
   ['system missing', { user: READER, params: { id: 'rsc_no_system' }, body: { inputs: { key: 'M-001' } } }],
   ['record plane refused for resolver_lookup', { user: READER, params: { id: 'rsc_resolver' }, body: { inputs: { key: 'MAT-7' }, rowSource: 'adapter_records' } }],
+  // Fix round 1 (captured on main e0e4406bf, appended; the 25 cases above are byte-identical): the two context
+  // fields the cases above never carry — an authUser-only principal, and the verified tenant claim under the
+  // claim flag (exact 'true'), present and absent.
+  ['authUser-only principal', { authUser: READER, params: { id: 'rsc_single' }, body: { inputs: { key: 'M-001' } } }],
+  ['claim flag on, verified claim present', { user: READER, authenticatedTenantId: TENANT, params: { id: 'rsc_single' }, body: { inputs: { key: 'M-001' } } }, { [CLAIM_FLAG]: 'true' }],
+  ['claim flag on, verified claim absent', { user: READER, params: { id: 'rsc_single' }, body: { inputs: { key: 'M-001' } } }, { [CLAIM_FLAG]: 'true' }],
 ])
-
-/** sha256 of the sorted ENUMERABLE handler keys: the handler table must not gain or lose a key. */
-function handlerKeysDigest(handlers) {
-  return crypto.createHash('sha256').update(JSON.stringify(Object.keys(handlers).sort())).digest('hex')
-}
 
 async function collectConfiguredReadSnapshots() {
   const m = mountConfiguredRead()
   const cases = []
   try {
-    for (const [name, req] of SNAPSHOT_CASES) {
+    for (const [name, req, env] of SNAPSHOT_CASES) {
       m.reset()
-      const res = await m.http(req)
+      const res = await withEnv(env, () => m.http(req))
       cases.push({ name, status: res.statusCode, body: JSON.stringify(res.body), calls: JSON.stringify(m.calls()) })
     }
-    return { handlerKeys: handlerKeysDigest(m.handlers), handlerKeyCount: Object.keys(m.handlers).length, cases }
+    return { cases }
   } finally {
     m.h.restore()
   }
@@ -314,6 +349,14 @@ const tests = [
     assert.equal(byName.get('extra body key').status, 400)
     assert.equal(byName.get('invalid inputs: missing key').status, 400)
     assert.equal(byName.get('no permission').status, 403)
+    // Calibration for the appended context-field cases: each takes the branch it names.
+    const authUserOnly = byName.get('authUser-only principal')
+    assert.equal(authUserOnly.status, 200, 'the authUser-only principal is admitted (it reached the handler)')
+    assert.equal(JSON.parse(authUserOnly.calls).systems[0].principal, READER.id, 'and the system is loaded as that principal')
+    assert.equal(byName.get('claim flag on, verified claim present').status, 200)
+    assert.equal(byName.get('claim flag on, verified claim absent').status, 403)
+    assert.equal(JSON.parse(byName.get('claim flag on, verified claim absent').body).error.code, 'OPERATOR_SCOPE_TENANT_REQUIRED')
+    assert.equal(process.env[CLAIM_FLAG], undefined, 'calibration: the claim flag is restored after collection')
     for (const entry of actual.cases) assert.ok(!entry.body.includes('synthetic-s1a-credential'), `${entry.name}: no credential in a body`)
   }],
 
@@ -485,6 +528,11 @@ const tests = [
         ['number', 1],
         ['malformed signal', { signal: 'stop' }],
         ['malformed checkpoint', { checkpoint: 'later' }],
+        // Fix round 1: keys Object.keys cannot see, and objects that are not plain.
+        ['a symbol key', { [Symbol('s1a')]: 1 }],
+        ['a non-enumerable rowCap', Object.defineProperty({}, 'rowCap', { value: 100 })],
+        ['an inherited key', Object.create({ transport: 'strict' })],
+        ['a class instance carrying checkpoint', new (class S1aOptions { constructor() { this.checkpoint = async () => {} } })()],
       ]) {
         m.reset()
         const error = await rejection(entry(readerContext(), job, options))
@@ -538,7 +586,7 @@ const tests = [
     }
   }],
 
-  ['C-10 governedEntries: exactly three entries, frozen, non-enumerable; the handler key set is unchanged', () => {
+  ['C-10 governedEntries: exactly three entries, frozen, non-enumerable; no entry is a handler key; every ROUTES handler resolves', () => {
     const m = mountConfiguredRead()
     try {
       const { governedEntries } = m.handlers
@@ -546,10 +594,18 @@ const tests = [
       assert.deepEqual(Object.keys(governedEntries).sort(), ['runGovernedConfiguredRead', 'runGovernedPipeline', 'runGovernedStockPrepPull'])
       assert.ok(Object.isFrozen(governedEntries), 'frozen')
       assert.equal(Object.getOwnPropertyDescriptor(m.handlers, 'governedEntries').enumerable, false, 'non-enumerable on the handler map')
-      assert.equal(Object.keys(m.handlers).includes('runGovernedConfiguredRead'), false, 'not a handler')
-      assert.ok(EXPECTED, 'the pre-refactor fixture exists')
-      assert.equal(Object.keys(m.handlers).length, EXPECTED.handlerKeyCount, 'the handler table has the same number of keys')
-      assert.equal(handlerKeysDigest(m.handlers), EXPECTED.handlerKeys, 'and the same keys')
+      // This slice only (fix round 1): the handler table itself is not pinned, so an unrelated new handler
+      // never turns this suite red. What S1-a could break is checked: no entry leaks into the enumerable
+      // handler map, and every route still names a handler that exists.
+      const handlerKeys = Object.keys(m.handlers)
+      for (const name of Object.keys(governedEntries)) {
+        assert.equal(handlerKeys.includes(name), false, `${name} is not an enumerable handler key`)
+      }
+      assert.ok(Array.isArray(httpRoutes.ROUTES) && httpRoutes.ROUTES.length > 0, 'calibration: ROUTES is exported')
+      for (const [method, routePath, handlerName] of httpRoutes.ROUTES) {
+        assert.equal(typeof m.handlers[handlerName], 'function', `${method} ${routePath}: handler ${handlerName} resolves`)
+      }
+      assert.ok(httpRoutes.ROUTES.some(([, routePath, handlerName]) => routePath === READ_PATH && handlerName === 'readSourceConfigsRead'), 'the configured-read route is in ROUTES')
       // The registered route list carries the same frozen object (index.cjs hands it to the run port).
       const registered = httpRoutes.registerIntegrationRoutes({
         context: { ...m.h.context, api: { ...m.h.context.api, http: { addRoute() {} } } },
@@ -574,6 +630,9 @@ const tests = [
       assert.equal(stranger.code, 'FORBIDDEN')
       for (const [label, job, reason] of [
         ['extra key', { configId: 'rsc_single', inputs: { key: 'M-001' }, rowCap: 100 }, 'unexpected_field'],
+        ['transport', { configId: 'rsc_single', inputs: { key: 'M-001' }, transport: 'strict' }, 'unexpected_field'],
+        ['readPurpose', { configId: 'rsc_single', inputs: { key: 'M-001' }, readPurpose: 'automation_connection_call' }, 'unexpected_field'],
+        ['an arbitrary key', { configId: 'rsc_single', inputs: { key: 'M-001' }, s1aArbitrary: 1 }, 'unexpected_field'],
         ['array', [{ configId: 'rsc_single' }], 'not_object'],
         ['bad rowSource', { configId: 'rsc_single', inputs: { key: 'M-001' }, rowSource: 'raw' }, 'execution_row_source_invalid'],
       ]) {
@@ -592,6 +651,54 @@ const tests = [
       assert.equal(kind.code, 'READ_SOURCE_READ_KIND_MISMATCH')
     } finally {
       m.h.restore()
+    }
+  }],
+
+  ['C-12 no options (undefined / null / {}) => zero checkpoint-seam calls; given a checkpoint => exactly two, load then read', async () => {
+    // http-routes.cjs destructures passGovernedCheckpoint at require time, so the stub must be in the require
+    // cache BEFORE a fresh copy of http-routes.cjs loads. Both cache entries are restored afterwards.
+    const seamPath = require.resolve(path.join(LIB, 'governed-entry-checkpoint.cjs'))
+    const routesPath = require.resolve(path.join(LIB, 'http-routes.cjs'))
+    const savedSeam = require.cache[seamPath]
+    const savedRoutes = require.cache[routesPath]
+    const seamCalls = []
+    const stub = new Module(seamPath)
+    stub.filename = seamPath
+    stub.loaded = true
+    stub.exports = {
+      ...checkpointSeam,
+      async passGovernedCheckpoint(governance, failureStage) {
+        seamCalls.push(failureStage)
+        return checkpointSeam.passGovernedCheckpoint(governance, failureStage)
+      },
+    }
+    let m = null
+    try {
+      require.cache[seamPath] = stub
+      delete require.cache[routesPath]
+      const freshRoutes = require(routesPath)
+      assert.notEqual(freshRoutes, httpRoutes, 'calibration: a fresh http-routes copy over the stubbed seam')
+      m = mountConfiguredRead(freshRoutes)
+      const entry = entryOf(m)
+      const job = { configId: 'rsc_single', inputs: { key: 'M-001' } }
+      for (const [label, options] of [['undefined', undefined], ['null', null], ['empty object', {}]]) {
+        seamCalls.length = 0
+        m.reset()
+        const result = await entry(readerContext(), job, options)
+        assert.equal(result.evidence.ok, true, `${label}: runs`)
+        assert.equal(m.log.reads.length, 1, `${label}: one read`)
+        assert.deepEqual(seamCalls, [], `${label}: the checkpoint seam is never called`)
+      }
+      // Positive control: the stub does sit on the entry's path.
+      seamCalls.length = 0
+      await entry(readerContext(), job, { checkpoint: async () => {} })
+      assert.deepEqual(seamCalls, ['load', 'read'], 'given a checkpoint: exactly two seam calls, in order')
+    } finally {
+      if (m) m.h.restore()
+      if (savedSeam) require.cache[seamPath] = savedSeam
+      else delete require.cache[seamPath]
+      if (savedRoutes) require.cache[routesPath] = savedRoutes
+      else delete require.cache[routesPath]
     }
   }],
 ]
