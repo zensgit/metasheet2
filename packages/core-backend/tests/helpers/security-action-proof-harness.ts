@@ -8,6 +8,9 @@
  *
  * Test files must mock `../../src/db/pg`, `../../src/integration/db/connection-pool` and
  * `../../src/audit/audit` before importing this helper.
+ *
+ * `serviceWith` substitutes the complete admission entry. That substitute records the same
+ * transaction boundaries and calls `readInputs` and `account`; it is not physical coordination.
  */
 import type { Request } from 'express'
 import { randomUUID } from 'node:crypto'
@@ -222,7 +225,7 @@ async function answer(key: StatementKey, sql: string, params: unknown[], state: 
   }
 }
 
-/** `runTransaction` stand-in: records begin / statements / commit / rollback and rethrows. */
+/** Records begin / statements / commit / rollback and rethrows. */
 export function fakeRunner(state: HarnessState, options: HarnessOptions = {}) {
   const events: HarnessEvent[] = []
   let current = 0
@@ -279,19 +282,24 @@ export function serviceWith(overrides: ServiceOverrides = {}) {
       login_grant_enable: okResolver,
       login_grant_disable: okResolver,
     },
-    runTransaction: runner.runTransaction,
-    verifyPassword: async (_password, hash) => {
-      verifyCalls.push({ hash })
+    runOwnedAttempt: async (_sessionId, _password, steps) => {
+      const first = await runner.runTransaction((executor) => steps.readInputs(executor))
+      verifyCalls.push({ hash: first.passwordHash })
       runner.events.push({ type: 'verifyPassword' })
-      return overrides.passwordOk !== false
+      const verified = overrides.passwordOk !== false
+      return runner.runTransaction((executor) => steps.account(executor, first, verified))
     },
     recordAudit: async (event) => {
       audits.push(event)
       runner.events.push({ type: 'audit', result: event.meta.result })
     },
     policyRevision: 1,
-    ...overrides,
   }
+  if (overrides.isPurposeAvailable) deps.isPurposeAvailable = overrides.isPurposeAvailable
+  if (overrides.resolvers) deps.resolvers = overrides.resolvers
+  if (overrides.runOwnedAttempt) deps.runOwnedAttempt = overrides.runOwnedAttempt
+  if (overrides.recordAudit) deps.recordAudit = overrides.recordAudit
+  if (overrides.policyRevision !== undefined) deps.policyRevision = overrides.policyRevision
   const service = createSecurityActionProofService(deps)
   return { service, state, runner, audits, verifyCalls, deps }
 }

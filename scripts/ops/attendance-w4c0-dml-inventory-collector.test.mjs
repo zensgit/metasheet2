@@ -1244,6 +1244,23 @@ test('P12-P14/P17-P19/P22/P26-P28 remain visible and explicitly canonicalized by
     assert.ok((claimsByEntryId.get(id) || []).length > 0, `${id} must expose its canonical writers`)
   }
 
+  const birthWrites = claimsByEntryId.get('P28')
+  assert.deepEqual(
+    birthWrites.map(({ relPath, enclosingSymbol, table, verb }) => [relPath, enclosingSymbol, table, verb]),
+    [['packages/core-backend/src/admin/admin-user-birth-command.ts', 'createAdminUserBirthCommand', 'attendance_shift_assignments', 'insert']],
+    'P28 must claim precisely the single-user birth command default shift insert',
+  )
+  for (const change of [
+    { relPath: 'packages/core-backend/src/routes/admin-users.ts', enclosingSymbol: 'body' },
+    { relPath: 'packages/core-backend/src/admin/admin-user-batch-birth-command.ts' },
+    { enclosingSymbol: 'otherWriter' },
+    { table: 'attendance_rotation_assignments' },
+    { verb: 'update' },
+  ]) {
+    const other = { ...birthWrites[0], ...change }
+    assert.deepEqual(classifyTrackedSites([other]).unclaimed, [other])
+  }
+
   const pluginSource = fs.readFileSync(path.join(rootDir, 'plugins/plugin-attendance/index.cjs'), 'utf8')
   assert.match(
     pluginSource,

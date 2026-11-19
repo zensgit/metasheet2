@@ -55,7 +55,7 @@ function makeChain(table?: string): Record<string, unknown> {
     'selectFrom', 'selectAll', 'select', 'where', 'orderBy',
     'limit', 'offset', 'groupBy', 'insertInto', 'values',
     'onConflict', 'columns', 'doUpdateSet',
-    'updateTable', 'set', 'deleteFrom', 'returningAll',
+    'updateTable', 'set', 'deleteFrom', 'returningAll', 'returning',
     'leftJoin', 'forUpdate', 'skipLocked',
   ]
   for (const m of methods) {
@@ -227,6 +227,7 @@ describe('ApiTokenService', () => {
       scopes: ['records:read'],
     })
     executeTakeFirstQueue.push(tokenRow(created), { ...ACTIVE_CREATOR })
+    executeQueue.push([{ id: created.token.id }]) // UPDATE ... RETURNING id
     const result = await svc.validateToken(created.plainTextToken)
     expect(result.valid).toBe(true)
     if (result.valid) {
@@ -255,6 +256,7 @@ describe('ApiTokenService', () => {
     })
     expect(created.token.lastUsedAt).toBeUndefined()
     executeTakeFirstQueue.push(tokenRow(created), { ...ACTIVE_CREATOR })
+    executeQueue.push([{ id: created.token.id }]) // UPDATE ... RETURNING id
     const result = await svc.validateToken(created.plainTextToken)
     expect(result.valid).toBe(true)
     if (result.valid) {
@@ -307,6 +309,7 @@ describe('ApiTokenService', () => {
     const created = await svc.createToken('user1', { name: 'JsonbCreator', scopes: ['records:read'] })
     selectArgCalls = []
     executeTakeFirstQueue.push(tokenRow(created), { ...ACTIVE_CREATOR, deleted_at: null, purged_at: null })
+    executeQueue.push([{ id: created.token.id }]) // UPDATE ... RETURNING id
     const result = await svc.validateToken(created.plainTextToken)
     expect(result.valid).toBe(true)
     const rendered = selectArgCalls.map((args) => args.map(renderSelectArg).join('\n')).join('\n')
@@ -378,6 +381,7 @@ describe('ApiTokenService', () => {
       created_at: created.token.createdAt,
       revoked: false,
     })
+    executeQueue.push([{ id: created.token.id }]) // UPDATE ... RETURNING id
     await svc.revokeToken(created.token.id, 'user1')
     executeTakeFirstQueue.push({
       id: created.token.id,
@@ -412,6 +416,7 @@ describe('ApiTokenService', () => {
       created_at: created.token.createdAt,
       revoked: false,
     })
+    executeQueue.push([{ id: created.token.id }]) // UPDATE ... RETURNING id
     await svc.revokeToken(created.token.id, 'user1')
     const revokedAt = new Date().toISOString()
     executeTakeFirstQueue.push({
@@ -455,6 +460,7 @@ describe('ApiTokenService', () => {
       revoked: false,
       token_prefix: created.token.tokenPrefix,
     })
+    executeQueue.push([{ id: created.token.id }]) // UPDATE ... RETURNING id
     await svc.revokeToken(created.token.id, 'user1')
     executeTakeFirstQueue.push({
       id: created.token.id,
@@ -503,6 +509,7 @@ describe('ApiTokenService', () => {
       tokenRow(created, { expires_at: future }),
       { ...ACTIVE_CREATOR },
     )
+    executeQueue.push([{ id: created.token.id }]) // UPDATE ... RETURNING id
     const result = await svc.validateToken(created.plainTextToken)
     expect(result.valid).toBe(true)
   })
@@ -543,6 +550,7 @@ describe('ApiTokenService', () => {
       created_at: oldToken.createdAt,
       revoked: false,
     })
+    executeQueue.push([{ id: oldToken.id }]) // Old-token UPDATE ... RETURNING id
     const { plainTextToken: newPt, token: newToken } = await svc.rotateToken(
       oldToken.id,
       'user1',
@@ -574,6 +582,7 @@ describe('ApiTokenService', () => {
       },
       { ...ACTIVE_CREATOR },
     )
+    executeQueue.push([{ id: newToken.id }]) // Last-used UPDATE ... RETURNING id
     expect((await svc.validateToken(newPt)).valid).toBe(true)
 
     expect(newToken.scopes).toEqual(

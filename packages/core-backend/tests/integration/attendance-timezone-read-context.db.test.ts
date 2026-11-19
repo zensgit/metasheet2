@@ -25,7 +25,7 @@ describe('readonly current, target-date calendar and stored export actual HTTP/P
     const original = clientPrototype.query
     const writes: string[] = []
     clientPrototype.query = function (this: unknown, ...args: unknown[]) {
-      const arg = args[0] as string | { text?: string }
+      const arg = args[0] as string | { text?: string; values?: unknown[] }
       const sql = typeof arg === 'string' ? arg : arg?.text || ''
       const verb = sql.trimStart().split(/\s+/, 1)[0].toUpperCase()
       if (['INSERT', 'UPDATE', 'DELETE', 'MERGE', 'TRUNCATE', 'CREATE', 'ALTER', 'DROP'].includes(verb)) {
@@ -33,7 +33,9 @@ describe('readonly current, target-date calendar and stored export actual HTTP/P
         // read semantics. Exempt only the exact assignUserRoles statement;
         // pg-pool defers the client call and does not retain the caller's stack.
         const normalized = sql.trim().replace(/\s+/g, ' ')
-        const roleMaterialization = normalized === 'INSERT INTO user_roles (user_id, role_id) SELECT unnest($1::text[]), $2 ON CONFLICT DO NOTHING RETURNING user_id'
+        const values = typeof arg === 'string' ? args[1] : arg?.values
+        const roleMaterialization = normalized === 'INSERT INTO user_roles (user_id, role_id, assignment_source) SELECT unnest($1::text[]), $2, $3::text ON CONFLICT DO NOTHING RETURNING user_id'
+          && Array.isArray(values) && values[1] === 'attendance_employee' && values[2] === null
         const existingAttendanceAudit = normalized === 'INSERT INTO operation_audit_logs ( actor_id, actor_type, action, resource_type, resource_id, request_id, ip, user_agent, route, status_code, latency_ms, meta, occurred_at, created_at ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb, now(), now())'
         if (roleMaterialization) authRoleStatements += 1
         else if (normalized === authzVersionBump) authzVersionStatements += 1
@@ -382,6 +384,12 @@ describe('readonly current, target-date calendar and stored export actual HTTP/P
         affected = result.rowCount ?? 0
       })).rejects.toThrow()
       expect(affected).toBe(1)
+      await expect(readWithoutBusinessDml(async () => {
+        await client.query(
+          'INSERT INTO user_roles (user_id, role_id, assignment_source) SELECT unnest($1::text[]), $2, $3::text ON CONFLICT DO NOTHING RETURNING user_id',
+          [[employee.userId], 'attendance_employee', 'manual'],
+        )
+      })).rejects.toThrow(/INSERT:user_roles/)
     } finally {
       await client.query('ROLLBACK')
       client.release()

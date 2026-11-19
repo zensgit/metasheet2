@@ -1,10 +1,30 @@
+import { queryAdminAuditFeed } from '../admin/authorization-operation-audit-feed'
+import { isUserWithinDelegatedScope } from '../admin/authorization-operation-audience'
+import {
+  DelegationActivationConflict,
+  filterEnabledDelegationNamespaces,
+  isDelegatedScopeActivationEnabled,
+  readDelegationActivations,
+  writeDelegationActivation,
+} from '../admin/delegated-scope-activation'
+import { readOnlyAuthorizationJwtAuth } from '../auth/jwt-middleware'
+import { OperationAdmissionConflict } from '../admin/authorization-operation-snapshot'
+import { AuthorizationOperationFenceUnavailable } from '../admin/authorization-operation-fence'
+import { commitAuthorizationOperation, getAuthorizationOperation, previewAuthorizationOperation, AuthorizationOperationError } from '../admin/authorization-operation-service'
+import { AuthorizationOperationInvalid, parseAuthorizationOperation, parseClientOperationId } from '../admin/authorization-operation-validation'
+import { AuthorizationInputContractError } from '../rbac/authorization-input-brand'
 import type { Request, Response } from 'express'
 import { Router } from 'express'
 import * as bcrypt from 'bcryptjs'
 import * as crypto from 'crypto'
-import { ATTENDANCE_SELF_SERVICE_NAMESPACE } from '../auth/attendanceSelfServiceBackfill'
 import { buildOnboardingPacket, getAccessPreset, listAccessPresets } from '../auth/access-presets'
 import { getDingTalkRuntimeStatus } from '../auth/dingtalk-oauth'
+import {
+  guardAdminLegacyGrantSwitch,
+  guardAdminLegacyGrantSwitchSet,
+  StrictCredentialChainError,
+} from '../auth/strict-credential-chain'
+import { StrictLoginGrantError } from '../auth/strict-login-grant-store'
 import { getDingTalkWorkNotificationRuntimeStatusFromStore } from '../integrations/dingtalk/work-notification-settings'
 import {
   INVITE_ACCOUNT_ALREADY_ONBOARDED,
@@ -20,21 +40,17 @@ import { revokeUserSessions } from '../auth/session-revocation'
 import { auditLog } from '../audit/audit'
 import { authenticate } from '../middleware/auth'
 import { query, transaction } from '../db/pg'
-import { buildAttendanceTimezoneRuntimeOrgLockKeyV1 } from '../attendance/attendance-timezone-runtime-locks'
 import { invalidateUserPerms, isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
 import { hasLegacyAdminClaim } from '../rbac/platform-admin'
 import {
   deriveDelegatedAdminNamespace,
   deriveGrantNamespaces,
   disableNamespaceAdmissionsWithoutRoles,
-  grantNamespaceAdmissions,
   isNamespaceAdmissionControlledResource,
   listRoleNamespaces,
   listUserNamespaceAdmissionSnapshots,
-  lockNamespaceAdmissionWrites,
   normalizeNamespace,
   roleIdMatchesNamespaces as matchRoleIdToNamespaces,
-  writeUserNamespaceAdmission,
 } from '../rbac/namespace-admission'
 import {
   assignUserRoles,
@@ -49,7 +65,6 @@ import {
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
 import {
   assertPendingUserCannotBeActivatedViaGenericStatusApi,
-  evaluateUserAuthenticationGate,
   PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE,
 } from '../auth/user-activation'
 import { activatePendingUser, isActivateMode } from '../auth/user-activate'
@@ -63,7 +78,6 @@ import {
   applyMobileLoginAliasChangeOrThrow,
   assertAliasCutoverAllowed,
   backfillUserLoginAliases,
-  claimNonEmptyLoginAliasesOrThrow,
   isAuthLoginAliasCutoverEnabled,
   LoginAliasClaimError,
 } from '../auth/login-alias-service'
@@ -104,14 +118,35 @@ import {
   PlatformActorAuthorityLost,
 } from '../admin/platform-actor-authority'
 import { isLastSignInPlatformAdmin, lockPlatformAdminInvariant } from '../admin/user-recycle'
+import { assignPlatformUserRoleCommand } from '../admin/platform-role-assign-command'
+import { unassignPlatformUserRoleCommand } from '../admin/platform-role-unassign-command'
+import {
+  applyDelegatedScopeTemplateCommand,
+  writeDelegatedAdminMemberGroupsCommand,
+  writeDelegatedAdminScopeCommand,
+} from '../admin/delegated-scope-commands'
+import { writePlatformNamespaceAdmissionCommand } from '../admin/platform-namespace-admission-command'
+import { writePlatformNamespaceAdmissionBulkCommand } from '../admin/platform-namespace-admission-bulk-command'
+import {
+  DelegationAuthorityRefusal,
+  deriveDelegableNamespaces,
+  fetchUserRoleIds,
+  recheckDelegatedAuthority,
+} from '../admin/delegated-authority'
+import { writeRoleDelegationNamespaceAdmissionCommand } from '../admin/role-delegation-namespace-admission-command'
+import { lockRoleRowForShare, RoleModifiedError, RoleRowMissingError } from '../admin/role-row-contract'
+import { syncLegacyAdminProfile } from '../admin/legacy-admin-profile'
+import { AuthorizationInputBusyError } from '../rbac/authorization-input-lock'
+import {
+  AdminUserBirthAdmissionError,
+  AttendanceDefaultShiftNotFoundError,
+  AttendanceShiftReferenceUnavailableError,
+  createAdminUserBirthCommand,
+} from '../admin/admin-user-birth-command'
 import { visibleUserPredicate } from '../admin/user-visibility'
 import { registerAdminUserRecycleRoutes } from './admin-user-recycle'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
-import {
-  acquireAttendanceCalculationRolloutLock,
-  parseCanonicalAttendanceRolloutOrgKeyV1,
-  resolveSegmentCalculationPosture,
-} from '../attendance/w4c0-identity'
+import { AttendanceW4OperationError } from '../attendance/w4c0-operation-contract'
 import { Logger } from '../core/logger'
 import { getCorrelationId } from '../context/request-context'
 import { isValidCorrelationId } from '../middleware/correlation'
@@ -158,33 +193,6 @@ function readFailureCorrelationId(req: Request): string | undefined {
     if (isValidCorrelationId(candidate)) return candidate
   }
   return undefined
-}
-
-class DelegationAuthorityRefusal extends Error {
-  constructor(public readonly code: 'ROLE_DELEGATION_FORBIDDEN' | 'ROLE_DELEGATION_SCOPE_REQUIRED' | 'ROLE_DELEGATION_USER_OUT_OF_SCOPE') {
-    super(code === 'ROLE_DELEGATION_FORBIDDEN'
-      ? 'Namespace is outside your delegated admin scope'
-      : code === 'ROLE_DELEGATION_SCOPE_REQUIRED'
-        ? 'No delegated department or member-group scope is configured for your plugin admin role'
-        : 'User is outside your delegated department or member-group scope')
-    this.name = 'DelegationAuthorityRefusal'
-  }
-}
-
-class RoleRowMissingError extends Error {
-  readonly code = 'ROLE_NOT_FOUND'
-  constructor() {
-    super('Role not found')
-    this.name = 'RoleRowMissingError'
-  }
-}
-
-class RoleModifiedError extends Error {
-  readonly code = 'ROLE_MODIFIED'
-  constructor() {
-    super('This role changed since it was loaded; reload it and re-apply the change')
-    this.name = 'RoleModifiedError'
-  }
 }
 
 class ExpectedUpdatedAtInvalidError extends Error {
@@ -274,7 +282,7 @@ type AdminRoleCatalogRow = {
 }
 
 type AdminAuditLogRow = {
-  id: number
+  id: number | null
   created_at: string
   event_type: string
   event_category: string
@@ -282,6 +290,9 @@ type AdminAuditLogRow = {
   action: string
   resource_type: string | null
   resource_id: string | null
+  actor_id: string | null
+  source: string
+  source_id: string
   user_id: number | null
   user_name: string | null
   user_email: string | null
@@ -518,21 +529,6 @@ type CreateUserRequestBody = {
   admissionNamespaces?: unknown
 }
 
-type AttendanceOnboardingResponse = {
-  orgId: string
-  group: {
-    id: string
-    name: string | null
-    memberCreated: boolean
-  } | null
-  defaultShift: {
-    id: string
-    name: string | null
-    startDate: string
-    assignmentId: string | null
-  } | null
-}
-
 const ADMIN_AUDIT_RESOURCE_TYPES = ['user', 'user-role', 'user-auth-grant', 'user-namespace-admission', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template', 'delegated-admin-scope', 'delegated-admin-scope-template', 'platform-member-group', 'delegated-admin-group-scope'] as const
 const DINGTALK_PROVIDER = 'dingtalk'
 const DINGTALK_OPEN_ID_REQUIRED_FOR_GRANT_ERROR =
@@ -557,26 +553,6 @@ export const ATTENDANCE_ROLE_IDS = new Set(
     .filter((preset) => preset.productMode === 'attendance' && Boolean(preset.roleId))
     .map((preset) => String(preset.roleId)),
 )
-const ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED =
-  'ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED'
-
-class AttendanceShiftReferenceUnavailableError extends Error {
-  readonly status = 422
-  readonly code = ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED
-  readonly details: Array<{ field: string; message: string }>
-
-  constructor(segmentCount: number) {
-    super(
-      `Shift has ${segmentCount} segments; authoritative segment calculation is disabled for this org, ` +
-      'so default user onboarding cannot reference a multi-segment shift',
-    )
-    this.name = 'AttendanceShiftReferenceUnavailableError'
-    this.details = [{
-      field: 'defaultShiftId',
-      message: 'Multi-segment shift is authoring preview-only while segment calculation is disabled',
-    }]
-  }
-}
 const ADMIN_USER_LIST_SORTS: Record<string, string> = {
   name: 'name',
   role: 'role',
@@ -717,35 +693,6 @@ async function fetchUserProfile(userId: string): Promise<AdminUserProfile | null
   return result.rows[0] ?? null
 }
 
-type RoleIdExecutor = {
-  query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<{ role_id?: string | null }> }>
-}
-
-async function fetchUserRoleIds(userId: string, executor?: RoleIdExecutor): Promise<string[]> {
-  const sql = `SELECT role_id
-     FROM user_roles
-     WHERE user_id = $1
-     ORDER BY role_id ASC`
-  const result = executor
-    ? await executor.query(sql, [userId])
-    : await query<{ role_id: string }>(sql, [userId])
-  return result.rows.map((row) => row.role_id).filter((roleId): roleId is string => Boolean(roleId))
-}
-
-/**
- * Scope writes share the per-user admission lock with role revoke.
- * Take that lock, then read roles again, and only then write.
- * Do not take the platform-admin invariant lock: admin revoke already takes it first.
- * Callers write only the requested namespace, so a sibling namespace's rows stay.
- */
-async function recheckDelegableNamespacesUnderAdmissionLock(
-  executor: RoleIdExecutor,
-  userId: string,
-): Promise<string[]> {
-  await lockNamespaceAdmissionWrites(executor, userId)
-  return deriveDelegableNamespaces(await fetchUserRoleIds(userId, executor))
-}
-
 function requireWritableTarget(
   locked: Map<string, LockedAccessGraphUser>,
   targetId: string,
@@ -756,11 +703,6 @@ function requireWritableTarget(
   return target
 }
 
-function toEpochMillis(value: unknown): number | null {
-  if (value === null || value === undefined) return null
-  const parsed = value instanceof Date ? value.getTime() : Date.parse(String(value))
-  return Number.isFinite(parsed) ? parsed : null
-}
 
 const STRICT_ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/
 
@@ -826,24 +768,6 @@ async function lockDelegatedScopeTemplate(client: TemplateStatementClient, templ
   return locked.rows.length > 0
 }
 
-async function readStoredScopeIncludeChildren(
-  client: TemplateStatementClient,
-  userId: string,
-  namespace: string,
-  directoryDepartmentId: string,
-): Promise<boolean | null> {
-  const current = await client.query(
-    `SELECT include_children
-     FROM delegated_role_admin_scopes
-     WHERE admin_user_id = $1
-       AND namespace = $2
-       AND directory_department_id = $3`,
-    [userId, namespace, directoryDepartmentId],
-  )
-  if (!current.rows.length) return null
-  return storedIncludeChildren(current.rows[0]?.include_children)
-}
-
 async function readStoredTemplateIncludeChildren(
   client: TemplateStatementClient,
   templateId: string,
@@ -867,58 +791,6 @@ function refuseExplicitExactDepartment(res: Response, action: string, intent: In
   return true
 }
 
-async function lockRoleRowForShare(
-  client: AccessGraphTransactionClient,
-  roleId: string,
-  expectedUpdatedAt: number | null = null,
-): Promise<boolean> {
-  if (expectedUpdatedAt === null) {
-    const locked = await client.query('SELECT id FROM roles WHERE id = $1 FOR SHARE', [roleId])
-    return locked.rows.length > 0
-  }
-  const locked = await client.query(
-    'SELECT id, updated_at FROM roles WHERE id = $1 FOR SHARE',
-    [roleId],
-  )
-  if (!locked.rows.length) return false
-  const stored = toEpochMillis(locked.rows[0]?.updated_at)
-  if (stored === null || stored !== expectedUpdatedAt) throw new RoleModifiedError()
-  return true
-}
-
-async function recheckDelegatedAuthority(
-  client: AccessGraphTransactionClient,
-  actorId: string,
-  userId: string,
-  requestedNamespaces: string[],
-  actor: LockedAccessGraphUser | undefined,
-): Promise<string[]> {
-  if (!actor || evaluateUserAuthenticationGate({
-    role: actor.role,
-    is_active: actor.isActive,
-    activation_status: actor.activationStatus,
-    deleted_at: actor.deletedAt,
-    purged_at: actor.purgedAt,
-  })) {
-    throw new DelegationAuthorityRefusal('ROLE_DELEGATION_FORBIDDEN')
-  }
-  const namespaces = deriveDelegableNamespaces(await fetchUserRoleIds(actorId, client as unknown as RoleIdExecutor))
-  const matching = requestedNamespaces.filter((namespace) => namespaces.includes(namespace))
-  if (matching.length === 0) throw new DelegationAuthorityRefusal('ROLE_DELEGATION_FORBIDDEN')
-  const audience = await client.query(
-    `SELECT EXISTS (
-       SELECT 1 FROM delegated_role_admin_scopes WHERE admin_user_id = $1 AND namespace = ANY($2::text[])
-       UNION ALL
-       SELECT 1 FROM delegated_role_admin_member_groups WHERE admin_user_id = $1 AND namespace = ANY($2::text[])
-     ) AS configured`,
-    [actorId, namespaces],
-  )
-  if (audience.rows[0]?.configured !== true) throw new DelegationAuthorityRefusal('ROLE_DELEGATION_SCOPE_REQUIRED')
-  if (!await isUserWithinDelegatedScope(actorId, matching, userId, client.query)) {
-    throw new DelegationAuthorityRefusal('ROLE_DELEGATION_USER_OUT_OF_SCOPE')
-  }
-  return namespaces
-}
 
 async function fetchRoleCatalog() {
   const result = await query<AdminRoleCatalogRow>(
@@ -1021,31 +893,33 @@ function parseExplicitAdmissionNamespaces(value: unknown): string[] | AdmissionN
   return namespaces.sort()
 }
 
+type RoleAssignmentView = { roleId: string; source: 'manual' | 'creation' | 'unknown' }
+async function fetchUserRoleAssignments(userId: string): Promise<RoleAssignmentView[]> {
+  const result = await query<{ role_id: string; assignment_source: string | null }>(
+    'SELECT role_id, assignment_source FROM user_roles WHERE user_id = $1 ORDER BY role_id ASC', [userId],
+  )
+  return result.rows.filter(row => typeof row.role_id === 'string' && row.role_id.length > 0).map(row => ({
+    roleId: row.role_id,
+    source: row.assignment_source === 'manual' || row.assignment_source === 'creation' ? row.assignment_source : 'unknown',
+  }))
+}
+
 async function fetchUserAccessSnapshot(userId: string) {
   const profile = await fetchUserProfile(userId)
   if (!profile) return null
 
-  const [roles, permissions, isAdmin] = await Promise.all([
-    fetchUserRoleIds(userId),
+  const [roleAssignments, permissions, isAdmin] = await Promise.all([
+    fetchUserRoleAssignments(userId),
     listUserPermissions(userId),
     isRbacAdmin(userId),
   ])
 
   return {
     user: profile,
-    roles,
+    roles: roleAssignments.map(assignment => assignment.roleId),
+    roleAssignments,
     permissions,
     isAdmin,
-  }
-}
-
-class AttendanceDefaultShiftNotFoundError extends Error {
-  readonly status = 404
-  readonly code = 'DEFAULT_SHIFT_NOT_FOUND'
-
-  constructor() {
-    super('Default shift not found')
-    this.name = 'AttendanceDefaultShiftNotFoundError'
   }
 }
 
@@ -1493,14 +1367,6 @@ async function upsertDingTalkGrants(
     })
   }
   return changedUserIds
-}
-
-function deriveDelegableNamespaces(roleIds: string[]): string[] {
-  return Array.from(new Set(
-    roleIds
-      .map((roleId) => deriveDelegatedAdminNamespace(roleId))
-      .filter((namespace): namespace is string => Boolean(namespace)),
-  )).sort()
 }
 
 function roleIdMatchesNamespaces(roleId: string, namespaces: string[]): boolean {
@@ -2425,70 +2291,6 @@ async function fetchScopedDelegationUsers(adminUserId: string, namespaces: strin
   }
 }
 
-async function isUserWithinDelegatedScope(
-  adminUserId: string,
-  namespaces: string[],
-  userId: string,
-  runQuery: AccessGraphTransactionClient['query'] = query,
-): Promise<boolean> {
-  if (namespaces.length === 0) return false
-
-  const result = await runQuery(
-    `WITH RECURSIVE seed_departments AS (
-        SELECT d.id,
-               d.integration_id,
-               d.external_department_id,
-               bool_or(COALESCE(s.include_children, TRUE)) AS include_children
-        FROM delegated_role_admin_scopes s
-        JOIN directory_departments d ON d.id = s.directory_department_id
-        WHERE s.admin_user_id = $1
-          AND s.namespace = ANY($2::text[])
-          AND d.is_active = true
-        GROUP BY d.id, d.integration_id, d.external_department_id
-      ),
-      allowed_departments AS (
-        SELECT id, integration_id, external_department_id, include_children
-        FROM seed_departments
-        UNION
-        SELECT child.id, child.integration_id, child.external_department_id, TRUE AS include_children
-        FROM directory_departments child
-        JOIN allowed_departments parent
-         ON child.integration_id = parent.integration_id
-         AND child.external_parent_department_id = parent.external_department_id
-        WHERE parent.include_children IS TRUE
-          AND child.is_active = true
-      ),
-      allowed_groups AS (
-        SELECT DISTINCT gscope.group_id
-        FROM delegated_role_admin_member_groups gscope
-        WHERE gscope.admin_user_id = $1
-          AND gscope.namespace = ANY($2::text[])
-      )
-      SELECT EXISTS (
-        SELECT 1
-        FROM directory_account_links l
-        JOIN directory_accounts a
-          ON a.id = l.directory_account_id
-         AND a.is_active = true
-        JOIN directory_account_departments ad
-          ON ad.directory_account_id = a.id
-        JOIN allowed_departments scoped
-          ON scoped.id = ad.directory_department_id
-        WHERE l.local_user_id = $3
-          AND l.link_status = 'linked'
-        UNION
-        SELECT 1
-        FROM platform_member_group_members gm
-        JOIN allowed_groups scoped_groups
-          ON scoped_groups.group_id = gm.group_id
-        WHERE gm.user_id = $3
-      ) AS allowed`,
-    [adminUserId, namespaces, userId],
-  )
-
-  return result.rows[0]?.allowed === true
-}
-
 function deriveVisibleDelegatedMemberGroupIds(groupAssignments: Array<{ groupId: string }>): string[] {
   return Array.from(new Set(groupAssignments.map((assignment) => assignment.groupId).filter(Boolean))).sort()
 }
@@ -2506,7 +2308,7 @@ async function resolveManageableNamespaces(
   if (delegableNamespaces.length <= 1) return [...delegableNamespaces]
   const manageable: string[] = []
   for (const namespace of delegableNamespaces) {
-    if (await isUserWithinDelegatedScope(actorId, [namespace], userId)) manageable.push(namespace)
+    if (await isUserWithinDelegatedScope(actorId, [namespace], userId, query)) manageable.push(namespace)
   }
   return manageable
 }
@@ -2781,14 +2583,15 @@ async function ensureRoleDelegationAdmin(req: Request, res: Response): Promise<{
   // This pre-check runs BEFORE the handler's own try/catch and Express 4 does not await handlers: a rejected
   // role read here used to leave the request unanswered (no 5xx, the client waits for its own timeout).
   // Answer the fixed 500 through the same helper as every other 500 of this file; the error text goes to the log.
-  let roleIds: string[]
+  let delegableNamespaces: string[]
   try {
-    roleIds = await fetchUserRoleIds(actorId)
+    delegableNamespaces = await filterEnabledDelegationNamespaces(
+      query, actorId, deriveDelegableNamespaces(await fetchUserRoleIds(actorId)),
+    )
   } catch (error) {
     sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_CHECK_FAILED', 'Failed to verify delegated role-admin access', error)
     return null as never
   }
-  const delegableNamespaces = deriveDelegableNamespaces(roleIds)
   if (delegableNamespaces.length === 0) {
     jsonError(res, 403, 'FORBIDDEN', 'Delegated role-admin access required')
     return null as never
@@ -3000,26 +2803,6 @@ class LastPlatformAdminConflict extends Error {
   }
 }
 
-type LegacyProfileQuery = (sql: string, params?: unknown[]) => Promise<unknown>
-
-async function syncLegacyAdminProfile(
-  userId: string,
-  enabled: boolean,
-  runQuery: LegacyProfileQuery,
-): Promise<void> {
-  await runQuery(
-    `UPDATE users
-     SET role = CASE
-       WHEN $2::boolean THEN 'admin'
-       WHEN role = 'admin' THEN 'user'
-       ELSE role
-     END,
-     is_admin = $2,
-     updated_at = NOW()
-     WHERE id = $1`,
-    [userId, enabled],
-  )
-}
 
 /**
  * Fallback for every failure whose reason is not an authored `ActivateErrorCode`.
@@ -3087,6 +2870,14 @@ const ACTIVATE_ERROR_POLICY_SOURCE: Record<ActivateErrorCode, { status: number; 
   ACTIVATE_DINGTALK_OPEN_ID_REQUIRED: {
     status: 409,
     message: 'DingTalk login cannot be granted yet: no DingTalk openId is available for this member (missing DingTalk openId). Activate without the DingTalk grant first, have them sign in with DingTalk once, then enable DingTalk login',
+  },
+  ACTIVATE_STRICT_CONNECTION: {
+    status: 403,
+    message: 'SSO activation is closed for this strict directory connection',
+  },
+  ACTIVATE_CONNECTION_AMBIGUOUS: {
+    status: 503,
+    message: 'Multiple directory connections include a strict login connection',
   },
 }
 
@@ -3320,6 +3111,32 @@ export function adminUsersRouter(): Router {
   const r = Router()
   registerAdminUserRecycleRoutes(r)
 
+  const authorizationOperationFailure = (res: Response, error: unknown, commit: boolean) => {
+    if (error instanceof AuthorizationOperationError || error instanceof AuthorizationOperationInvalid || error instanceof OperationAdmissionConflict || error instanceof AuthorizationOperationFenceUnavailable || error instanceof AuthorizationInputContractError) {
+      return jsonError(res, error.status, error.code, error.message)
+    }
+    if (error instanceof PlatformActorAuthorityLost) return jsonError(res, 403, 'FORBIDDEN', 'Admin access required')
+    return jsonError(res, 503, commit ? 'AUTHORIZATION_OPERATION_OUTCOME_UNKNOWN' : 'AUTHORIZATION_OPERATION_UNAVAILABLE', commit ? 'Operation outcome is unknown; query its receipt.' : 'Authorization operation is unavailable.')
+  }
+  r.post('/api/admin/authorization-operations/preview', readOnlyAuthorizationJwtAuth, async (req: Request, res: Response) => {
+    const actorId = getRequestUserId(req)
+    if (!actorId) return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+    try { return res.json(await previewAuthorizationOperation(actorId, parseAuthorizationOperation(req.body, false))) }
+    catch (error) { return authorizationOperationFailure(res, error, false) }
+  })
+  r.post('/api/admin/authorization-operations', readOnlyAuthorizationJwtAuth, async (req: Request, res: Response) => {
+    const actorId = getRequestUserId(req)
+    if (!actorId) return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+    try { return res.json(await commitAuthorizationOperation(actorId, parseAuthorizationOperation(req.body, true), syncLegacyAdminProfile)) }
+    catch (error) { return authorizationOperationFailure(res, error, true) }
+  })
+  r.get('/api/admin/authorization-operations/:clientOperationId', readOnlyAuthorizationJwtAuth, async (req: Request, res: Response) => {
+    const actorId = getRequestUserId(req)
+    if (!actorId) return jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+    try { return res.json(await getAuthorizationOperation(actorId, parseClientOperationId(req.params.clientOperationId))) }
+    catch (error) { return authorizationOperationFailure(res, error, false) }
+  })
+
   r.post('/api/admin/users/batch/create', authenticate, async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
@@ -3369,7 +3186,9 @@ export function adminUsersRouter(): Router {
       const roleIds = await fetchUserRoleIds(userId)
       const isRbacPlatformAdmin = roleIds.includes(PLATFORM_ADMIN_ROLE_ID)
       const isPlatformAdmin = account.role === PLATFORM_ADMIN_ROLE_ID || isRbacPlatformAdmin
-      const delegableNamespaces = isPlatformAdmin ? [] : deriveDelegableNamespaces(roleIds)
+      const delegableNamespaces = isPlatformAdmin
+        ? []
+        : await filterEnabledDelegationNamespaces(query, userId, deriveDelegableNamespaces(roleIds))
       return jsonOk(res, {
         isPlatformAdmin,
         canManageScope: isPlatformAdmin || delegableNamespaces.length > 0,
@@ -3805,9 +3624,71 @@ export function adminUsersRouter(): Router {
         adminNamespaces,
         scopeAssignments: scopeAssignments.filter((scope) => adminNamespaces.includes(scope.namespace)),
         groupAssignments: groupAssignments.filter((assignment) => adminNamespaces.includes(assignment.namespace)),
+        ...(isDelegatedScopeActivationEnabled()
+          ? { scopeActivations: await readDelegationActivations(query, adminUserId, userId, adminNamespaces) }
+          : {}),
       })
     } catch (error) {
       return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_READ_FAILED', 'Failed to load delegated admin scopes', error)
+    }
+  })
+
+  r.post('/api/admin/role-delegation/users/:userId/scopes/activation', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+    if (!isDelegatedScopeActivationEnabled()) {
+      return jsonError(res, 403, 'ROLE_DELEGATION_ACTIVATION_DISABLED', 'Delegation activation changes are unavailable')
+    }
+
+    const userId = String(req.params.userId || '').trim()
+    const namespace = typeof req.body?.namespace === 'string' ? req.body.namespace.trim() : ''
+    const enabled: unknown = req.body?.enabled
+    const expectedVersion: unknown = req.body?.expectedVersion
+    if (!userId || !namespace || typeof enabled !== 'boolean' ||
+        typeof expectedVersion !== 'string' || !/^v1:[0-9a-f]{64}$/.test(expectedVersion)) {
+      return jsonError(res, 400, 'ROLE_DELEGATION_ACTIVATION_INVALID', 'Namespace, boolean enabled and scope version are required')
+    }
+
+    try {
+      const updated = await transaction(async (client) => {
+        const subjects = await lockSharedAccessSubjects(client, [userId, adminUserId])
+        requireWritableTarget(subjects, userId)
+        await assertPlatformActorAuthority(client, subjects.get(adminUserId))
+        const namespaces = deriveDelegableNamespaces(await fetchUserRoleIds(userId, client))
+        if (!namespaces.includes(namespace)) return false
+        const [current] = await readDelegationActivations(client.query, adminUserId, userId, [namespace])
+        if (!current || current.version !== expectedVersion) {
+          throw new DelegationActivationConflict('ROLE_DELEGATION_ACTIVATION_CONFLICT')
+        }
+        if (enabled && !current.hasConfiguredScope) {
+          throw new DelegationActivationConflict('ROLE_DELEGATION_ACTIVATION_SCOPE_REQUIRED')
+        }
+        await writeDelegationActivation(client.query, userId, namespace, enabled)
+        const audit = await client.query(
+          `INSERT INTO audit_logs (
+             event_type, event_category, event_severity, resource_type, resource_id, action, action_details
+           ) VALUES (
+             'UPDATE', 'SECURITY', 'INFO', 'delegated-admin-activation', $1, $2,
+             jsonb_build_object('userId', $3::text, 'namespace', $4::text, 'adminUserId', $5::text, 'enabled', $6::boolean)
+           ) RETURNING id`,
+          [`${userId}:${namespace}`, enabled ? 'enable' : 'disable', userId, namespace, adminUserId, enabled],
+        )
+        if (audit.rows.length !== 1) throw new Error('DELEGATED_SCOPE_ACTIVATION_AUDIT_NOT_CONFIRMED')
+        return true
+      })
+      if (!updated) {
+        return jsonError(res, 409, 'ROLE_DELEGATION_NAMESPACE_NOT_HELD', 'Selected user does not hold that delegated admin namespace')
+      }
+      return jsonOk(res, { actorId: adminUserId, userId, namespace, enabled })
+    } catch (error) {
+      if (error instanceof DelegationActivationConflict) return jsonError(res, 409, error.code, error.message)
+      if (error instanceof PlatformActorAuthorityLost) return jsonError(res, 403, error.code, error.message)
+      if (error instanceof AccessGraphUserUnavailableError) {
+        return error.code === 'NOT_FOUND'
+          ? jsonError(res, 404, 'NOT_FOUND', 'User not found')
+          : jsonError(res, 409, 'USER_IN_RECYCLE_BIN', '账号在回收站中，请先恢复后再修改权限')
+      }
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_ACTIVATION_FAILED', 'Failed to update delegated admin activation', error)
     }
   })
 
@@ -3854,44 +3735,13 @@ export function adminUsersRouter(): Router {
         }
       }
 
-      const locked = await transaction(async (client) => {
-        const subjects = await lockSharedAccessSubjects(client, [userId, adminUserId])
-        requireWritableTarget(subjects, userId)
-        await assertPlatformActorAuthority(client, subjects.get(adminUserId))
-        const adminNamespaces = await recheckDelegableNamespacesUnderAdmissionLock(client, userId)
-        if (action === 'assign' && !adminNamespaces.includes(namespace)) {
-          return { refused: 'namespace' as const, adminNamespaces }
-        }
-        const stored = await readStoredScopeIncludeChildren(client, userId, namespace, directoryDepartmentId)
-        if (action === 'assign') {
-          const decision = resolveDelegatedIncludeChildrenWrite({
-            intent: includeChildrenIntent,
-            existingIncludeChildren: isDelegatedScopeExactDepartmentEnabled() ? null : stored,
-            exactDepartmentEnabled: isDelegatedScopeExactDepartmentEnabled(),
-          })
-          if (decision.outcome === 'refuse') return { refused: 'exact' as const, adminNamespaces }
-          await client.query(
-            `INSERT INTO delegated_role_admin_scopes (
-               admin_user_id, namespace, directory_department_id, include_children, created_by, created_at, updated_at
-             )
-             VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
-             ON CONFLICT (admin_user_id, namespace, directory_department_id)
-             DO UPDATE SET
-               include_children = EXCLUDED.include_children,
-               created_by = EXCLUDED.created_by,
-               updated_at = NOW()`,
-            [userId, namespace, directoryDepartmentId, decision.includeChildren, adminUserId],
-          )
-          return { refused: false as const, adminNamespaces, persisted: decision.includeChildren }
-        }
-        await client.query(
-          `DELETE FROM delegated_role_admin_scopes
-           WHERE admin_user_id = $1
-             AND namespace = $2
-             AND directory_department_id = $3`,
-          [userId, namespace, directoryDepartmentId],
-        )
-        return { refused: false as const, adminNamespaces, persisted: stored }
+      const locked = await writeDelegatedAdminScopeCommand({
+        actorId: adminUserId,
+        userId,
+        action: action === 'assign' ? 'assign' : 'unassign',
+        namespace,
+        directoryDepartmentId,
+        includeChildrenIntent,
       })
       if (locked.refused === 'namespace') {
         return jsonError(res, 409, 'ROLE_DELEGATION_NAMESPACE_NOT_HELD', 'Selected user does not hold that delegated admin namespace')
@@ -3925,6 +3775,10 @@ export function adminUsersRouter(): Router {
         groupAssignments,
       })
     } catch (error) {
+      if (error instanceof DelegationActivationConflict) return jsonError(res, 409, error.code, error.message)
+      if (error instanceof AuthorizationInputBusyError) {
+        return res.status(409).json({ ok: false, error: { code: 'AUTHORIZATION_INPUT_BUSY', message: 'Authorization inputs are busy; retry this change.', details: { retryable: true } } })
+      }
       return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_UPDATE_FAILED', 'Failed to update delegated admin scope', error)
     }
   })
@@ -3955,36 +3809,12 @@ export function adminUsersRouter(): Router {
         return jsonError(res, 409, 'ROLE_DELEGATION_NAMESPACE_NOT_HELD', 'Selected user does not hold that delegated admin namespace')
       }
 
-      const locked = await transaction(async (client) => {
-        const subjects = await lockSharedAccessSubjects(client, [userId, adminUserId])
-        requireWritableTarget(subjects, userId)
-        await assertPlatformActorAuthority(client, subjects.get(adminUserId))
-        const adminNamespaces = await recheckDelegableNamespacesUnderAdmissionLock(client, userId)
-        if (action === 'assign' && !adminNamespaces.includes(namespace)) {
-          return { refused: true as const, adminNamespaces }
-        }
-        if (action === 'assign') {
-          await client.query(
-            `INSERT INTO delegated_role_admin_member_groups (
-               admin_user_id, namespace, group_id, created_by, created_at, updated_at
-             )
-             VALUES ($1, $2, $3, $4, NOW(), NOW())
-             ON CONFLICT (admin_user_id, namespace, group_id)
-             DO UPDATE SET
-               created_by = EXCLUDED.created_by,
-               updated_at = NOW()`,
-            [userId, namespace, groupId, adminUserId],
-          )
-        } else {
-          await client.query(
-            `DELETE FROM delegated_role_admin_member_groups
-             WHERE admin_user_id = $1
-               AND namespace = $2
-               AND group_id = $3`,
-            [userId, namespace, groupId],
-          )
-        }
-        return { refused: false as const, adminNamespaces }
+      const locked = await writeDelegatedAdminMemberGroupsCommand({
+        actorId: adminUserId,
+        userId,
+        action: action === 'assign' ? 'assign' : 'unassign',
+        namespace,
+        groupId,
       })
       if (locked.refused) {
         return jsonError(res, 409, 'ROLE_DELEGATION_NAMESPACE_NOT_HELD', 'Selected user does not hold that delegated admin namespace')
@@ -4017,6 +3847,10 @@ export function adminUsersRouter(): Router {
         groupAssignments,
       })
     } catch (error) {
+      if (error instanceof DelegationActivationConflict) return jsonError(res, 409, error.code, error.message)
+      if (error instanceof AuthorizationInputBusyError) {
+        return res.status(409).json({ ok: false, error: { code: 'AUTHORIZATION_INPUT_BUSY', message: 'Authorization inputs are busy; retry this change.', details: { retryable: true } } })
+      }
       return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_GROUP_SCOPE_UPDATE_FAILED', 'Failed to update delegated admin member-group scope', error)
     }
   })
@@ -4103,7 +3937,7 @@ export function adminUsersRouter(): Router {
       if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
       if (!namespace) return jsonError(res, 400, 'NAMESPACE_REQUIRED', 'namespace is required')
       if (!templateId) return jsonError(res, 400, 'TEMPLATE_ID_REQUIRED', 'templateId is required')
-      if (!['replace', 'merge'].includes(mode)) return jsonError(res, 400, 'ROLE_DELEGATION_SCOPE_TEMPLATE_MODE_INVALID', 'mode must be replace or merge')
+      if (mode !== 'replace' && mode !== 'merge') return jsonError(res, 400, 'ROLE_DELEGATION_SCOPE_TEMPLATE_MODE_INVALID', 'mode must be replace or merge')
 
       const [profile, roleIds] = await Promise.all([
         fetchUserProfile(userId),
@@ -4116,71 +3950,12 @@ export function adminUsersRouter(): Router {
         return jsonError(res, 409, 'ROLE_DELEGATION_NAMESPACE_NOT_HELD', 'Selected user does not hold that delegated admin namespace')
       }
 
-      const locked = await transaction(async (client) => {
-        const subjects = await lockSharedAccessSubjects(client, [userId, adminUserId])
-        requireWritableTarget(subjects, userId)
-        await assertPlatformActorAuthority(client, subjects.get(adminUserId))
-        const adminNamespaces = await recheckDelegableNamespacesUnderAdmissionLock(client, userId)
-        if (!adminNamespaces.includes(namespace)) {
-          return { refused: 'namespace' as const, adminNamespaces }
-        }
-        // Access-subject locks are already held. The parent lock then makes this
-        // the snapshot that is gated and written. A pre-transaction read is not used.
-        const templateHeld = await lockDelegatedScopeTemplate(client, templateId)
-        if (!templateHeld) return { refused: 'missing-template' as const, adminNamespaces }
-        const departments = await fetchDelegatedScopeTemplateDepartments(templateId, client)
-        const memberGroups = await fetchDelegatedScopeTemplateMemberGroups(templateId, client)
-        if (departments.length === 0 && memberGroups.length === 0) {
-          return { refused: 'empty' as const, adminNamespaces }
-        }
-        if (
-          !isDelegatedScopeExactDepartmentEnabled()
-          && departments.some((department) => department.includeChildren === false)
-        ) {
-          return { refused: 'exact' as const, adminNamespaces }
-        }
-        if (mode === 'replace') {
-          await client.query(
-            `DELETE FROM delegated_role_admin_scopes
-             WHERE admin_user_id = $1
-               AND namespace = $2`,
-            [userId, namespace],
-          )
-          await client.query(
-            `DELETE FROM delegated_role_admin_member_groups
-             WHERE admin_user_id = $1
-               AND namespace = $2`,
-            [userId, namespace],
-          )
-        }
-        for (const department of departments) {
-          await client.query(
-            `INSERT INTO delegated_role_admin_scopes (
-               admin_user_id, namespace, directory_department_id, include_children, created_by, created_at, updated_at
-             )
-             VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
-             ON CONFLICT (admin_user_id, namespace, directory_department_id)
-             DO UPDATE SET
-               include_children = EXCLUDED.include_children,
-               created_by = EXCLUDED.created_by,
-               updated_at = NOW()`,
-            [userId, namespace, department.directoryDepartmentId, department.includeChildren, adminUserId],
-          )
-        }
-        for (const group of memberGroups) {
-          await client.query(
-            `INSERT INTO delegated_role_admin_member_groups (
-               admin_user_id, namespace, group_id, created_by, created_at, updated_at
-             )
-             VALUES ($1, $2, $3, $4, NOW(), NOW())
-             ON CONFLICT (admin_user_id, namespace, group_id)
-             DO UPDATE SET
-               created_by = EXCLUDED.created_by,
-               updated_at = NOW()`,
-            [userId, namespace, group.id, adminUserId],
-          )
-        }
-        return { refused: false as const, adminNamespaces, departments, memberGroups }
+      const locked = await applyDelegatedScopeTemplateCommand({
+        actorId: adminUserId,
+        userId,
+        namespace,
+        templateId,
+        mode,
       })
       if (locked.refused === 'namespace') {
         return jsonError(res, 409, 'ROLE_DELEGATION_NAMESPACE_NOT_HELD', 'Selected user does not hold that delegated admin namespace')
@@ -4227,6 +4002,10 @@ export function adminUsersRouter(): Router {
         groupAssignments: groupAssignments.filter((assignment) => adminNamespaces.includes(assignment.namespace)),
       })
     } catch (error) {
+      if (error instanceof DelegationActivationConflict) return jsonError(res, 409, error.code, error.message)
+      if (error instanceof AuthorizationInputBusyError) {
+        return res.status(409).json({ ok: false, error: { code: 'AUTHORIZATION_INPUT_BUSY', message: 'Authorization inputs are busy; retry this change.', details: { retryable: true } } })
+      }
       return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_TEMPLATE_APPLY_FAILED', 'Failed to apply scope template', error)
     }
   })
@@ -4334,7 +4113,7 @@ export function adminUsersRouter(): Router {
         return jsonError(res, 403, 'ROLE_DELEGATION_SCOPE_REQUIRED', 'No delegated department or member-group scope is configured for your plugin admin role')
       }
       if (!delegation.isPlatformAdmin) {
-        const allowed = await isUserWithinDelegatedScope(delegation.actorId, delegation.delegableNamespaces, userId)
+        const allowed = await isUserWithinDelegatedScope(delegation.actorId, delegation.delegableNamespaces, userId, query)
         if (!allowed) {
           return jsonError(res, 403, 'ROLE_DELEGATION_USER_OUT_OF_SCOPE', 'User is outside your delegated department or member-group scope')
         }
@@ -4365,6 +4144,7 @@ export function adminUsersRouter(): Router {
         roleCatalog,
         user: snapshot.user,
         roles: snapshot.roles,
+        roleAssignments: delegation.isPlatformAdmin ? snapshot.roleAssignments : snapshot.roleAssignments.filter(assignment => revocable.some(role => role.id === assignment.roleId)),
         memberGroups,
         namespaceAdmissions,
         // Both arms are cut to the revocable catalog. For a platform admin that catalog is every
@@ -4409,33 +4189,18 @@ export function adminUsersRouter(): Router {
         return jsonError(res, 403, 'ROLE_DELEGATION_SCOPE_REQUIRED', 'No delegated department or member-group scope is configured for your plugin admin role')
       }
       if (!delegation.isPlatformAdmin) {
-        const allowed = await isUserWithinDelegatedScope(delegation.actorId, [namespace], userId)
+        const allowed = await isUserWithinDelegatedScope(delegation.actorId, [namespace], userId, query)
         if (!allowed) {
           return jsonError(res, 403, 'ROLE_DELEGATION_USER_OUT_OF_SCOPE', 'User is outside your delegated department or member-group scope')
         }
       }
 
-      await transaction(async (client) => {
-        const subjects = await lockSharedAccessSubjects(client, [userId, delegation.actorId])
-        requireWritableTarget(subjects, userId)
-        if (delegation.isPlatformAdmin) {
-          await assertPlatformActorAuthority(client, subjects.get(delegation.actorId))
-        } else {
-          await recheckDelegatedAuthority(
-            client,
-            delegation.actorId,
-            userId,
-            [namespace],
-            subjects.get(delegation.actorId),
-          )
-        }
-        await writeUserNamespaceAdmission({
-          userId,
-          namespace,
-          enabled,
-          actorId: delegation.actorId,
-          source: delegation.isPlatformAdmin ? 'platform_admin' : 'delegated_admin',
-        }, client)
+      await writeRoleDelegationNamespaceAdmissionCommand({
+        actorId: delegation.actorId,
+        userId,
+        namespace,
+        enabled,
+        isPlatformAdmin: delegation.isPlatformAdmin,
       })
       const namespaceAdmissions = await listUserNamespaceAdmissionSnapshots(userId)
       invalidateUserPerms(userId)
@@ -4467,6 +4232,9 @@ export function adminUsersRouter(): Router {
           : namespaceAdmissions.filter((admission) => delegation.delegableNamespaces.includes(admission.namespace)),
       })
     } catch (error) {
+      if (error instanceof AuthorizationInputBusyError) {
+        return res.status(409).json({ ok: false, error: { code: 'AUTHORIZATION_INPUT_BUSY', message: 'Authorization inputs are busy; retry this change.', details: { retryable: true } } })
+      }
       return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_ADMISSION_FAILED', 'Failed to update delegated namespace admission', error)
     }
   })
@@ -4531,7 +4299,7 @@ export function adminUsersRouter(): Router {
       }
       if (!delegation.isPlatformAdmin) {
         const scopedNamespaces = deriveMatchingNamespacesForRole(roleId, delegation.delegableNamespaces)
-        const allowed = await isUserWithinDelegatedScope(delegation.actorId, scopedNamespaces, userId)
+        const allowed = await isUserWithinDelegatedScope(delegation.actorId, scopedNamespaces, userId, query)
         if (!allowed) {
           return jsonError(res, 403, 'ROLE_DELEGATION_USER_OUT_OF_SCOPE', 'User is outside your delegated department or member-group scope')
         }
@@ -4591,7 +4359,7 @@ export function adminUsersRouter(): Router {
             activeScope = { kind: 'namespaces', namespaces }
           }
           if (action === 'assign') {
-            const assigned = await assignUserRoles({ userIds: [userId], roleId, scope: activeScope, executor: client })
+            const assigned = await assignUserRoles({ userIds: [userId], roleId, assignmentSource: 'manual', scope: activeScope, executor: client })
             if (roleId === PLATFORM_ADMIN_ROLE_ID) await syncLegacyAdminProfile(userId, true, runQuery)
             return assigned
           }
@@ -4702,6 +4470,23 @@ export function adminUsersRouter(): Router {
       const sort = String(req.query.sort || '').trim()
       const dir = String(req.query.dir || '').trim()
       const includeMeta = String(req.query.meta || '').trim() === '1'
+      const includeAdmissionSummary = req.query.includeAdmissionSummary === '1'
+      const namespaceInput = req.query.admissionNamespace
+      const statusInput = req.query.admissionStatus
+      const hasAdmissionFilter = namespaceInput !== undefined || statusInput !== undefined
+      let admissionNamespace = ''
+      let admissionStatus: 'enabled' | 'disabled' | null = null
+      if (hasAdmissionFilter) {
+        if (typeof namespaceInput !== 'string' || typeof statusInput !== 'string') {
+          return jsonError(res, 400, 'ADMISSION_FILTER_INVALID', 'admissionNamespace and admissionStatus are required together')
+        }
+        admissionNamespace = normalizeNamespace(namespaceInput)
+        if (admissionNamespace.length > 255 || !isNamespaceAdmissionControlledResource(admissionNamespace) || (statusInput !== 'enabled' && statusInput !== 'disabled')) {
+          return jsonError(res, 400, 'ADMISSION_FILTER_INVALID', 'Invalid admission filter')
+        }
+        admissionStatus = statusInput
+      }
+      const admissionPredicate = (parameterIndex: number) => `${admissionStatus === 'disabled' ? 'NOT ' : ''}EXISTS (SELECT 1 FROM user_namespace_admissions admission WHERE admission.user_id = users.id AND admission.namespace = $${parameterIndex} AND admission.enabled IS TRUE)`
       const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>, {
         defaultPage: 1,
         defaultPageSize: 20,
@@ -4723,6 +4508,10 @@ export function adminUsersRouter(): Router {
       if (accountStatus === 'inactive') clauses.push('is_active IS NOT TRUE')
       const listFilterSql = adminUserListFilterSql(listFilter)
       if (listFilterSql) clauses.push(listFilterSql)
+      if (admissionStatus) {
+        params.push(admissionNamespace)
+        clauses.push(admissionPredicate(params.length))
+      }
       const where = `WHERE ${clauses.join(' AND ')}`
       const countSql = `SELECT COUNT(*)::int AS c FROM users ${where}`
       const limitIndex = params.length + 1
@@ -4747,8 +4536,8 @@ export function adminUsersRouter(): Router {
         const pinned = await query<AdminUserProfile & { roleIds?: string[] | null }>(
           `SELECT ${ADMIN_USER_LIST_SELECT}
            FROM users
-           WHERE id = $1 AND deleted_at IS NULL`,
-          [pinUserId],
+           WHERE id = $1 AND deleted_at IS NULL${admissionStatus ? ` AND ${admissionPredicate(2)}` : ''}`,
+          admissionStatus ? [pinUserId, admissionNamespace] : [pinUserId],
         )
         if (pinned.rows[0]) {
           items.unshift(pinned.rows[0])
@@ -4759,6 +4548,24 @@ export function adminUsersRouter(): Router {
       }
 
       const userSignals = await fetchAdminUserListSignals(items.map((row) => row.id))
+      const admissionSummary = new Map<string, { enabledAdmissionNamespaces: string[]; lastAdmissionChangedAt: string | null }>()
+      if (includeAdmissionSummary && items.length > 0) {
+        const summary = await query<{ user_id: string; enabled_namespaces: string[]; last_changed_at: Date | string | null }>(
+          `SELECT user_id,
+                  COALESCE(array_agg(namespace ORDER BY namespace) FILTER (WHERE enabled IS TRUE), ARRAY[]::text[]) AS enabled_namespaces,
+                  MAX(updated_at) AS last_changed_at
+             FROM user_namespace_admissions
+            WHERE user_id = ANY($1::text[])
+            GROUP BY user_id`,
+          [items.map((row) => row.id)],
+        )
+        for (const row of summary.rows) {
+          admissionSummary.set(row.user_id, {
+            enabledAdmissionNamespaces: row.enabled_namespaces,
+            lastAdmissionChangedAt: row.last_changed_at === null ? null : new Date(row.last_changed_at).toISOString(),
+          })
+        }
+      }
       const listMeta = includeMeta ? await fetchAdminUserListMeta(q) : null
 
       return jsonOk(res, {
@@ -4770,6 +4577,7 @@ export function adminUsersRouter(): Router {
           return {
             ...row,
             roleIds,
+            ...(includeAdmissionSummary ? (admissionSummary.get(row.id) ?? { enabledAdmissionNamespaces: [], lastAdmissionChangedAt: null }) : {}),
             dingtalkLoginEnabled: signals?.dingtalkLoginEnabled ?? false,
             dingtalkGrantUpdatedAt: signals?.dingtalkGrantUpdatedAt ?? null,
             dingtalkGrantUpdatedBy: signals?.dingtalkGrantUpdatedBy ?? null,
@@ -4787,6 +4595,7 @@ export function adminUsersRouter(): Router {
         total,
         ...(listMeta ?? {}),
         query: q,
+        appliedAdmissionFilter: admissionStatus ? { namespace: admissionNamespace, status: admissionStatus } : null,
         pinUserId: pinUserId || '',
         pinUserIncluded: pinUserId ? pinnedUserIncluded : null,
         actorId: adminUserId,
@@ -5327,214 +5136,30 @@ export function adminUsersRouter(): Router {
         userId,
       })
 
-      const attendanceOnboarding: AttendanceOnboardingResponse | null = attendanceOrgId
-        ? {
-            orgId: attendanceOrgId,
-            group: null,
-            defaultShift: null,
-          }
-        : null
-
-      // W4-PRE-1 (§3.3 of the Wave-4 onboarding design lock): this route is the first-priority
-      // user_orgs write site — it already resolves and validates a KNOWN AUTHORITATIVE org
-      // (attendanceOrgId — set either from the group/shift-derivation fallback, matched against
-      // attendance_groups/attendance_shifts.org_id above, OR from W4-PRE-1b's explicit
-      // `attendanceOrgId` body param, validated against `directory_integrations` above — see
-      // that block's comment) but historically wrote
-      // users/user_roles/user_permissions/attendance_group_members/attendance_shift_assignments
-      // as independent auto-commit statements with no shared transaction boundary. The W4-PRE-1
-      // atomicity requirement (a user_orgs write failure must roll back the whole admission —
-      // never a `users` row with no membership row) cannot be met without a transaction, and none
-      // existed to reuse, so this establishes the single boundary for the whole write sequence
-      // (not a second/competing one — every write below moved from `query()` to `client.query()`
-      // inside this one call).
-      await transaction(async (client) => {
-        if (attendanceOrgId && attendanceOnboarding && (cleanAttendanceGroupId || cleanDefaultShiftId)) {
-          // Only a new subject is admitted here. Serialize its source writes
-          // before shift/user/role locks; no existing subject is reassigned.
-          await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
-            buildAttendanceTimezoneRuntimeOrgLockKeyV1(attendanceOrgId),
-          ])
-        }
-        if (attendanceOnboarding && cleanDefaultShiftId && defaultShiftStartDate) {
-          // W3 safety erratum: this core route is a reference producer outside the
-          // attendance plugin. Lock the same parent row that canonical shift delete
-          // locks FOR UPDATE, and reject preview-only multi-segment shifts before any
-          // user/onboarding write. W4 must replace this hard block only in the same
-          // reviewed change that adds authoritative segment calculation.
-          const lockedShift = await client.query(
-            `SELECT s.id,
-                    (
-                      SELECT COUNT(*)::int
-                        FROM attendance_shift_segments seg
-                       WHERE seg.org_id = s.org_id
-                         AND seg.shift_id = s.id
-                    ) AS segment_count
-               FROM attendance_shifts s
-              WHERE s.id = $1 AND s.org_id = $2
-              FOR SHARE`,
-            [cleanDefaultShiftId, attendanceOrgId],
-          )
-          if (!lockedShift.rows.length) {
-            throw new AttendanceDefaultShiftNotFoundError()
-          }
-          const segmentCount = Number(lockedShift.rows[0]?.segment_count ?? 0)
-          if (segmentCount > 1) {
-            let rolloutOrg: ReturnType<typeof parseCanonicalAttendanceRolloutOrgKeyV1>
-            try {
-              rolloutOrg = parseCanonicalAttendanceRolloutOrgKeyV1(attendanceOrgId)
-            } catch {
-              throw new AttendanceShiftReferenceUnavailableError(segmentCount)
-            }
-            await acquireAttendanceCalculationRolloutLock(client, rolloutOrg, 'shared')
-            const posture = await resolveSegmentCalculationPosture(client, rolloutOrg)
-            if (!posture.referenceSegments) {
-              throw new AttendanceShiftReferenceUnavailableError(segmentCount)
-            }
-          }
-        }
-
-        await client.query(
-          `INSERT INTO users (
-             id, email, username, name, mobile, employee_no, department, position, hire_date,
-             password_hash, must_change_password, role, permissions, is_active, is_admin,
-             activation_status, local_password_set,
-             created_at, updated_at
-           )
-           VALUES (
-             $1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10, $11, $12, $13::jsonb, $14, $15,
-             'activated', TRUE,
-             NOW(), NOW()
-           )`,
-          [
-            userId,
-            cleanEmail || null,
-            cleanUsername,
-            cleanName,
-            cleanMobile,
-            cleanEmployeeNo,
-            cleanDepartment,
-            cleanPosition,
-            cleanHireDate,
-            passwordHash,
-            mustChangePassword,
-            effectiveRole,
-            JSON.stringify(directPermissions),
-            isActive,
-            effectiveRole === 'admin',
-          ],
-        )
-
-        // Load-bearing alias writer hook: admin create always inserts activation_status=activated.
-        // Removing claimNonEmptyLoginAliasesOrThrow must fail the admin_create writer tests.
-        await claimNonEmptyLoginAliasesOrThrow({
-          userId,
-          email: cleanEmail || null,
-          username: cleanUsername,
-          mobile: cleanMobile,
-          source: 'admin_create',
-          client,
-        })
-
-        if (roleId) {
-          await assignUserRoles({
-            userIds: [userId],
-            roleId,
-            // This route is behind `ensurePlatformAdmin`; creating administrators is one of
-            // the things it exists to do, so the scope is unbounded — and stated, not implied.
-            scope: { kind: 'platform-admin' },
-            executor: client,
-          })
-        }
-
-        // The list was checked before this transaction: each namespace is supported
-        // and derived from the selected role id, its stored permission codes, and
-        // the preset codes. Only those explicit namespaces are enabled. A missing
-        // attendance row is not an opt-out — login bootstraps it — so an unchecked
-        // attendance admission is persisted disabled, including presets that do not
-        // derive attendance.
-        if (parsedAdmissionNamespaces.length > 0) {
-          await grantNamespaceAdmissions(client, {
-            userId,
-            namespaces: parsedAdmissionNamespaces,
-            actorId: adminUserId,
-            source: 'admin_create',
-          })
-        }
-        if (!parsedAdmissionNamespaces.includes(ATTENDANCE_SELF_SERVICE_NAMESPACE)) {
-          await writeUserNamespaceAdmission({
-            userId,
-            namespace: ATTENDANCE_SELF_SERVICE_NAMESPACE,
-            enabled: false,
-            actorId: adminUserId,
-            source: 'admin_create',
-          }, client)
-        }
-
-        if (directPermissions.length > 0) {
-          const values = directPermissions.map((_, index) => `($1, $${index + 2})`).join(', ')
-          await client.query(
-            `INSERT INTO user_permissions (user_id, permission_code)
-             VALUES ${values}
-             ON CONFLICT DO NOTHING`,
-            [userId, ...directPermissions],
-          )
-        }
-
-        if (attendanceOrgId) {
-          // W4-PRE-1 item 1 (first-priority site, §3.3): maintain user_orgs in the SAME
-          // transaction as the users row whenever the org is known-authoritative.
-          //
-          // user_orgs.is_active is hardcoded TRUE (mirrors directory-sync.ts's own admission
-          // write, ~L5097) — it deliberately does NOT mirror the created user's `isActive` flag.
-          // The RD-3 dual-is_active count (§3.3 item 4: user_orgs.is_active=true AND
-          // users.is_active=true) already excludes an admin-created-inactive user via
-          // users.is_active=false, so mirroring `isActive` here would add nothing to that count
-          // — but it WOULD create an unrecoverable stuck-false membership row: no production
-          // write path ever updates user_orgs.is_active after admission (PATCH
-          // /api/admin/users/:userId/status only touches users.is_active), so an
-          // admin-created-inactive user later reactivated via that endpoint would stay
-          // permanently excluded from the ① count with no repair surface. Hardcoding TRUE avoids
-          // the absorbing state entirely: membership existence is TRUE the moment it is known,
-          // and users.is_active alone gates the active-member-count filter.
-          await client.query(
-            `INSERT INTO user_orgs (user_id, org_id, is_active)
-             VALUES ($1, $2, TRUE)
-             ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = EXCLUDED.is_active`,
-            [userId, attendanceOrgId],
-          )
-        }
-
-        if (attendanceOnboarding && cleanAttendanceGroupId) {
-          const memberResult = await client.query(
-            `INSERT INTO attendance_group_members (org_id, group_id, user_id, created_at, updated_at)
-             VALUES ($1, $2, $3, NOW(), NOW())
-             ON CONFLICT (org_id, group_id, user_id) DO NOTHING
-             RETURNING id AS "memberId"`,
-            [attendanceOrgId, cleanAttendanceGroupId, userId],
-          )
-          attendanceOnboarding.group = {
-            id: cleanAttendanceGroupId,
-            name: attendanceGroupName,
-            memberCreated: (memberResult.rows as Array<{ memberId: string }>).length > 0,
-          }
-        }
-        if (attendanceOnboarding && cleanDefaultShiftId && defaultShiftStartDate) {
-          const assignmentId = crypto.randomUUID()
-          const assignmentResult = await client.query(
-            `INSERT INTO attendance_shift_assignments
-               (id, org_id, user_id, shift_id, start_date, is_active, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5::date, true, NOW(), NOW())
-             RETURNING id AS "assignmentId"`,
-            [assignmentId, attendanceOrgId, userId, cleanDefaultShiftId, defaultShiftStartDate],
-          )
-          attendanceOnboarding.defaultShift = {
-            id: cleanDefaultShiftId,
-            name: defaultShiftName,
-            startDate: defaultShiftStartDate,
-            assignmentId: (assignmentResult.rows as Array<{ assignmentId: string }>)[0]?.assignmentId ?? assignmentId,
-          }
-        }
+      const attendanceOnboarding = await createAdminUserBirthCommand({
+        actorId: adminUserId,
+        userId,
+        email: cleanEmail || null,
+        username: cleanUsername,
+        name: cleanName,
+        mobile: cleanMobile,
+        employeeNo: cleanEmployeeNo,
+        department: cleanDepartment,
+        position: cleanPosition,
+        hireDate: cleanHireDate,
+        passwordHash,
+        mustChangePassword,
+        role: effectiveRole,
+        directPermissions,
+        isActive,
+        roleId,
+        admissionNamespaces: parsedAdmissionNamespaces,
+        attendanceOrgId,
+        attendanceGroupId: cleanAttendanceGroupId,
+        attendanceGroupName,
+        defaultShiftId: cleanDefaultShiftId,
+        defaultShiftName,
+        defaultShiftStartDate,
       })
 
       // Cache invalidation is a post-commit side effect, not part of the atomic write set.
@@ -5609,6 +5234,18 @@ export function adminUsersRouter(): Router {
       }
       if (error instanceof AttendanceDefaultShiftNotFoundError) {
         return jsonError(res, error.status, error.code, error.message)
+      }
+      if (error instanceof AdminUserBirthAdmissionError) {
+        if (error.code === 'NAMESPACE_NOT_SUPPORTED') {
+          return jsonError(res, 400, 'NAMESPACE_NOT_SUPPORTED', 'namespace is not managed by plugin admission controls')
+        }
+        return jsonError(res, 400, 'ADMISSION_NAMESPACE_NOT_DERIVED', 'admissionNamespaces must be derived from the selected role and preset')
+      }
+      if (error instanceof AuthorizationInputBusyError) {
+        return res.status(409).json({ ok: false, error: { code: 'AUTHORIZATION_INPUT_BUSY', message: 'Authorization inputs are busy; retry this change.', details: { retryable: true } } })
+      }
+      if (error instanceof AttendanceW4OperationError && error.code === 'ATTENDANCE_CALCULATION_ROLLOUT_BUSY') {
+        return jsonError(res, 503, 'ATTENDANCE_CALCULATION_ROLLOUT_BUSY', 'ATTENDANCE_CALCULATION_ROLLOUT_BUSY')
       }
       if (error instanceof LoginAliasClaimError) {
         // Fixed safe messages only — never echo error.stack / PG detail from nested drivers.
@@ -5955,17 +5592,11 @@ export function adminUsersRouter(): Router {
       const profile = await fetchUserProfile(userId)
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
-      await transaction(async (client) => {
-        const subjects = await lockSharedAccessSubjects(client, [userId, adminUserId])
-        requireWritableTarget(subjects, userId)
-        await assertPlatformActorAuthority(client, subjects.get(adminUserId))
-        await writeUserNamespaceAdmission({
-          userId,
-          namespace,
-          enabled,
-          actorId: adminUserId,
-          source: 'platform_admin',
-        }, client)
+      await writePlatformNamespaceAdmissionCommand({
+        actorId: adminUserId,
+        userId,
+        namespace,
+        enabled,
       })
       const namespaceAdmissions = await listUserNamespaceAdmissionSnapshots(userId)
       invalidateUserPerms(userId)
@@ -5990,6 +5621,9 @@ export function adminUsersRouter(): Router {
         namespaceAdmissions,
       })
     } catch (error) {
+      if (error instanceof AuthorizationInputBusyError) {
+        return res.status(409).json({ ok: false, error: { code: 'AUTHORIZATION_INPUT_BUSY', message: 'Authorization inputs are busy; retry this change.', details: { retryable: true } } })
+      }
       return sendAdminUsersServerFailure(req, res, 'MEMBER_NAMESPACE_ADMISSION_FAILED', 'Failed to update namespace admission', error)
     }
   })
@@ -6021,20 +5655,11 @@ export function adminUsersRouter(): Router {
         return jsonError(res, 404, 'USERS_NOT_FOUND', 'One or more users were not found', { missingUserIds })
       }
 
-      const sortedUserIds = [...userIds].sort()
-      await transaction(async (client) => {
-        const subjects = await lockSharedAccessSubjects(client, [adminUserId, ...sortedUserIds])
-        await assertPlatformActorAuthority(client, subjects.get(adminUserId))
-        for (const targetId of sortedUserIds) requireWritableTarget(subjects, targetId)
-        for (const targetId of sortedUserIds) {
-          await writeUserNamespaceAdmission({
-            userId: targetId,
-            namespace,
-            enabled,
-            actorId: adminUserId,
-            source: 'platform_admin',
-          }, client)
-        }
+      await writePlatformNamespaceAdmissionBulkCommand({
+        actorId: adminUserId,
+        namespace,
+        enabled,
+        userIds,
       })
       for (const userId of userIds) invalidateUserPerms(userId)
       await Promise.all(userIds.map((userId) => auditLog({
@@ -6061,6 +5686,9 @@ export function adminUsersRouter(): Router {
         userIds,
       })
     } catch (error) {
+      if (error instanceof AuthorizationInputBusyError) {
+        return res.status(409).json({ ok: false, error: { code: 'AUTHORIZATION_INPUT_BUSY', message: 'Authorization inputs are busy; retry this change.', details: { retryable: true } } })
+      }
       return sendAdminUsersServerFailure(req, res, 'MEMBER_NAMESPACE_ADMISSION_BULK_FAILED', 'Failed to update namespace admission in bulk', error)
     }
   })
@@ -6079,6 +5707,7 @@ export function adminUsersRouter(): Router {
         const locked = await lockUsersForAccessGraphWrite(client, [userId])
         if (!locked.has(userId)) return false
         if (enabled) await assertUsersCanEnableDingTalkGrant(client, [userId])
+        await guardAdminLegacyGrantSwitch(client, { userId, actorId: adminUserId, enabled })
         await upsertDingTalkGrants(client, [userId], enabled, adminUserId)
         return true
       })
@@ -6104,6 +5733,15 @@ export function adminUsersRouter(): Router {
         ...(await fetchDingTalkAccessSnapshot(userId)),
       })
     } catch (error) {
+      if (error instanceof StrictCredentialChainError && error.code === 'strict_connection') {
+        return jsonError(res, 403, 'strict_connection', 'DingTalk legacy grant enable is closed for this connection')
+      }
+      if (error instanceof StrictCredentialChainError && error.code === 'strict_connection_ambiguous') {
+        return jsonError(res, 503, 'strict_connection_ambiguous', 'DingTalk legacy grant disable cannot choose among strict connections')
+      }
+      if (error instanceof StrictCredentialChainError || error instanceof StrictLoginGrantError) {
+        return jsonError(res, 503, 'grant_state_unavailable', 'Unable to verify DingTalk login authorization; please retry')
+      }
       const message = (error as Error)?.message || 'Failed to update DingTalk access'
       if (message.includes('missing DingTalk openId')) {
         return jsonError(res, 400, 'DINGTALK_OPEN_ID_REQUIRED', message)
@@ -6127,6 +5765,7 @@ export function adminUsersRouter(): Router {
         const missing = userIds.filter((userId) => !locked.has(userId))
         if (missing.length > 0) return missing
         if (enabled) await assertUsersCanEnableDingTalkGrant(client, userIds)
+        await guardAdminLegacyGrantSwitchSet(client, { userIds, actorId: adminUserId, enabled })
         await upsertDingTalkGrants(client, userIds, enabled, adminUserId)
         return []
       })
@@ -6157,6 +5796,15 @@ export function adminUsersRouter(): Router {
         userIds,
       })
     } catch (error) {
+      if (error instanceof StrictCredentialChainError && error.code === 'strict_connection') {
+        return jsonError(res, 403, 'strict_connection', 'DingTalk legacy grant enable is closed for this connection')
+      }
+      if (error instanceof StrictCredentialChainError && error.code === 'strict_connection_ambiguous') {
+        return jsonError(res, 503, 'strict_connection_ambiguous', 'DingTalk legacy grant disable cannot choose among strict connections')
+      }
+      if (error instanceof StrictCredentialChainError || error instanceof StrictLoginGrantError) {
+        return jsonError(res, 503, 'grant_state_unavailable', 'Unable to verify DingTalk login authorization; please retry')
+      }
       const message = (error as Error)?.message || 'Failed to update DingTalk access in bulk'
       if (message.includes('missing DingTalk openId')) {
         return jsonError(res, 400, 'DINGTALK_OPEN_ID_REQUIRED', message)
@@ -6191,23 +5839,7 @@ export function adminUsersRouter(): Router {
       if (!roleRow.rows.length) return jsonError(res, 404, 'ROLE_NOT_FOUND', 'Role not found')
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
-      // Role share, then actor and target locks, then the membership and legacy profile.
-      const membership = await transaction(async (client) => {
-        if (!await lockRoleRowForShare(client, roleId, expectedUpdatedAt)) throw new RoleRowMissingError()
-        const subjects = await lockSharedAccessSubjects(client, [userId, adminUserId])
-        requireWritableTarget(subjects, userId)
-        await assertPlatformActorAuthority(client, subjects.get(adminUserId))
-        const assigned = await assignUserRoles({
-          userIds: [userId],
-          roleId,
-          scope: { kind: 'platform-admin' },
-          executor: client,
-        })
-        if (roleId === PLATFORM_ADMIN_ROLE_ID) {
-          await syncLegacyAdminProfile(userId, true, (sql, params) => client.query(sql, params))
-        }
-        return assigned
-      })
+      const membership = await assignPlatformUserRoleCommand({ actorId: adminUserId, userId, roleId, expectedUpdatedAt })
       await auditDelegatedAdminScopeCleanup({
         actorId: adminUserId,
         roleId,
@@ -6244,6 +5876,9 @@ export function adminUsersRouter(): Router {
         return jsonError(res, 409, 'ROLE_MODIFIED', error.message, { retryable: true })
       }
       if (sendIfRecoveryAuthorityBusy(res, error)) return
+      if (error instanceof AuthorizationInputBusyError) {
+        return res.status(409).json({ ok: false, error: { code: 'AUTHORIZATION_INPUT_BUSY', message: 'Authorization inputs are busy; retry this change.', details: { retryable: true } } })
+      }
       return sendAdminUsersServerFailure(req, res, 'ROLE_ASSIGN_FAILED', 'Failed to assign role', error)
     }
   })
@@ -6261,36 +5896,8 @@ export function adminUsersRouter(): Router {
       const profile = await fetchUserProfile(userId)
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
-      // Last-admin refusal returns before the role share and before any subject lock.
-      // A missing role row still drops an orphan membership.
-      const unassigned = await transaction(async (client) => {
-        if (roleId === PLATFORM_ADMIN_ROLE_ID) {
-          await lockPlatformAdminInvariant(client)
-          if (await isLastSignInPlatformAdmin(client, userId)) return { blocked: true as const }
-        }
-        await lockRoleRowForShare(client, roleId)
-        const subjects = await lockSharedAccessSubjects(client, [userId, adminUserId])
-        requireWritableTarget(subjects, userId)
-        await assertPlatformActorAuthority(client, subjects.get(adminUserId))
-        const membership = await unassignUserRoles({
-          userIds: [userId],
-          roleId,
-          scope: { kind: 'platform-admin' },
-          executor: client,
-        })
-        const disabledNamespaces = await disableNamespaceAdmissionsWithoutRoles({
-          userId,
-          namespaces: await listRoleNamespaces(roleId, client.query),
-          actorId: adminUserId,
-          source: 'role_unassigned',
-          revokedRoleId: roleId,
-        }, client.query)
-        if (roleId === PLATFORM_ADMIN_ROLE_ID) {
-          await syncLegacyAdminProfile(userId, false, (sql, params) => client.query(sql, params))
-        }
-        return { blocked: false as const, membership, disabledNamespaces }
-      })
-      if (unassigned.blocked) {
+      const unassigned = await unassignPlatformUserRoleCommand({ actorId: adminUserId, userId, roleId })
+      if (unassigned.blocked === true) {
         return jsonError(res, 409, 'LAST_PLATFORM_ADMIN', '至少保留一名可登录的平台管理员')
       }
       const { membership, disabledNamespaces } = unassigned
@@ -6326,6 +5933,9 @@ export function adminUsersRouter(): Router {
       })
     } catch (error) {
       if (sendIfRecoveryAuthorityBusy(res, error)) return
+      if (error instanceof AuthorizationInputBusyError) {
+        return res.status(409).json({ ok: false, error: { code: 'AUTHORIZATION_INPUT_BUSY', message: 'Authorization inputs are busy; retry this change.', details: { retryable: true } } })
+      }
       return sendAdminUsersServerFailure(req, res, 'ROLE_UNASSIGN_FAILED', 'Failed to unassign role', error)
     }
   })
@@ -6578,7 +6188,7 @@ export function adminUsersRouter(): Router {
       })
 
       const values: unknown[] = [resourceType ? [resourceType] : [...ADMIN_AUDIT_RESOURCE_TYPES]]
-      const where = ['resource_type = ANY($1::text[])']
+      const where = [resourceType ? 'resource_type = ANY($1::text[])' : "(resource_type = ANY($1::text[]) OR resource_type = 'legacy-permission')"]
 
       if (action) {
         values.push(action)
@@ -6592,7 +6202,8 @@ export function adminUsersRouter(): Router {
             OR COALESCE(action, '') ILIKE $${values.length}
             OR COALESCE(action_details::text, '') ILIKE $${values.length}
             OR COALESCE(user_email, '') ILIKE $${values.length}
-            OR COALESCE(user_name, '') ILIKE $${values.length})`,
+            OR COALESCE(user_name, '') ILIKE $${values.length}
+            OR COALESCE(actor_id, '') ILIKE $${values.length})`,
         )
       }
 
@@ -6607,15 +6218,15 @@ export function adminUsersRouter(): Router {
       }
 
       const whereSql = `WHERE ${where.join(' AND ')}`
-      const countResult = await query<{ c: number }>(
+      const countResult = await queryAdminAuditFeed<{ c: number }>(
         `SELECT COUNT(*)::int AS c
-         FROM audit_logs
+         FROM $AUDIT_FEED
          ${whereSql}`,
         values,
       )
 
       values.push(pageSize, offset)
-      const itemsResult = await query<AdminAuditLogRow>(
+      const itemsResult = await queryAdminAuditFeed<AdminAuditLogRow>(
         `SELECT
             id,
             created_at,
@@ -6629,10 +6240,10 @@ export function adminUsersRouter(): Router {
             user_name,
             user_email,
             action_details,
-            error_code
-         FROM audit_logs
+            error_code, actor_id, source, source_id
+         FROM $AUDIT_FEED
          ${whereSql}
-         ORDER BY created_at DESC
+         ORDER BY created_at DESC, source DESC, source_id DESC
          LIMIT $${values.length - 1} OFFSET $${values.length}`,
         values,
       )
@@ -6668,7 +6279,7 @@ export function adminUsersRouter(): Router {
       const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 5000) : 1000
 
       const values: unknown[] = [resourceType ? [resourceType] : [...ADMIN_AUDIT_RESOURCE_TYPES]]
-      const where = ['resource_type = ANY($1::text[])']
+      const where = [resourceType ? 'resource_type = ANY($1::text[])' : "(resource_type = ANY($1::text[]) OR resource_type = 'legacy-permission')"]
 
       if (action) {
         values.push(action)
@@ -6682,7 +6293,8 @@ export function adminUsersRouter(): Router {
             OR COALESCE(action, '') ILIKE $${values.length}
             OR COALESCE(action_details::text, '') ILIKE $${values.length}
             OR COALESCE(user_email, '') ILIKE $${values.length}
-            OR COALESCE(user_name, '') ILIKE $${values.length})`,
+            OR COALESCE(user_name, '') ILIKE $${values.length}
+            OR COALESCE(actor_id, '') ILIKE $${values.length})`,
         )
       }
 
@@ -6697,7 +6309,7 @@ export function adminUsersRouter(): Router {
       }
 
       values.push(limit)
-      const rows = await query<AdminAuditLogRow>(
+      const rows = await queryAdminAuditFeed<AdminAuditLogRow>(
         `SELECT
             id,
             created_at,
@@ -6711,10 +6323,10 @@ export function adminUsersRouter(): Router {
             user_name,
             user_email,
             action_details,
-            error_code
-         FROM audit_logs
+            error_code, actor_id, source, source_id
+         FROM $AUDIT_FEED
          WHERE ${where.join(' AND ')}
-         ORDER BY created_at DESC
+         ORDER BY created_at DESC, source DESC, source_id DESC
          LIMIT $${values.length}`,
         values,
       )
@@ -6722,11 +6334,11 @@ export function adminUsersRouter(): Router {
       const filename = `iam-admin-audit-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`
       res.setHeader('Content-Type', 'text/csv; charset=utf-8')
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
-      res.write('id,created_at,resource_type,resource_id,action,event_type,event_severity,user_email,user_name,error_code,action_details\n')
+      res.write('id,created_at,resource_type,resource_id,action,event_type,event_severity,user_email,user_name,actor_id,source,source_id,error_code,action_details\n')
 
       for (const item of rows.rows) {
         const line = [
-          item.id,
+          item.id ?? '',
           item.created_at,
           item.resource_type || '',
           item.resource_id || '',
@@ -6735,6 +6347,9 @@ export function adminUsersRouter(): Router {
           item.event_severity,
           item.user_email || '',
           item.user_name || '',
+          item.actor_id || '',
+          item.source || '',
+          item.source_id || '',
           item.error_code || '',
           JSON.stringify(item.action_details || {}),
         ].map((value) => {

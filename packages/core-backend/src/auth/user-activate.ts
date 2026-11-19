@@ -33,6 +33,13 @@ import {
   canDirectoryAccountEnableDingTalkGrant,
   type DirectoryAccountGrantOpenIdSource,
 } from '../directory/dingtalk-grant-open-id'
+import {
+  closedDingTalkOrigin,
+  closedPasswordOrigin,
+  connectionAdmitsLegacyGrant,
+  type ClosedExternalOrigin,
+  type QueryClient,
+} from './strict-credential-chain'
 
 export type ActivateMode = 'temp_password' | 'sso' | 'admin_no_password'
 
@@ -72,6 +79,8 @@ export type ActivateUserResult = {
   localPasswordSet: boolean
   /** The org the membership was actually written to — derived from the directory source (#4833 audit surface). */
   membershipOrgId: string | null
+  /** Closed stored origin for the issuer. A body org is not an origin. */
+  externalOrigin: ClosedExternalOrigin | null
 }
 
 /**
@@ -113,6 +122,10 @@ export type ActivateErrorCode =
    * same corp+unionId. Same rule as the directory page's bind/admit grant check.
    */
   | 'ACTIVATE_DINGTALK_OPEN_ID_REQUIRED'
+  /** SSO against exactly one strict directory connection. Password modes do not use this. */
+  | 'ACTIVATE_STRICT_CONNECTION'
+  /** The chosen org has more than one directory connection and at least one is strict. */
+  | 'ACTIVATE_CONNECTION_AMBIGUOUS'
 
 function throwCoded(message: string, code: ActivateErrorCode): never {
   const err = new Error(message)
@@ -134,6 +147,7 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
   // Derived-only: seeded null so no refactor can ever revive the client-orgId-as-membership
   // shape by skipping the source resolution — the ONLY assignment is from the helper's return.
   let membershipOrgId: string | null = null
+  let externalOrigin: ClosedExternalOrigin | null = null
 
   if (input.mode === 'temp_password') {
     temporaryPassword = input.temporaryPassword?.trim() || generateTempPassword()
@@ -181,14 +195,20 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
     // answer — the helper validates a caller-supplied orgId against the SET of active eligible
     // sources (mismatch → ACTIVATE_ORG_MISMATCH) and refuses a caller who names none
     // (ACTIVATE_ORG_AMBIGUOUS) instead of silently picking the lowest account id.
-    const sourceOrgId = await assertDirectorySourceActiveForActivate(client, {
+    const source = await assertDirectorySourceActiveForActivate(client, {
       userId,
       directoryAccountId: input.directoryAccountId ?? null,
       requireDingTalkSso: input.mode === 'sso',
       expectedDingTalkIdentity: input.expectedDingTalkIdentity ?? null,
       requestedOrgId: input.orgId?.trim() || null,
     })
-    membershipOrgId = sourceOrgId
+    membershipOrgId = source.orgId
+    const activationScope = await resolveActivationCredentialScope(client, {
+      mode: input.mode,
+      connectionIds: source.connectionIds,
+    })
+    externalOrigin = activationScope.origin
+    const skipLegacyDingTalkGrant = activationScope.skipLegacyGrant
 
     // DT-HARDEN-02 on the activation path. The directory page's bind/admit refuses a DingTalk grant
     // for a corp member without an openId; activation used to write the grant row unconditionally
@@ -200,7 +220,7 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
     // the scanning login's openId, so the predicate holds.
     // Scope: the source(s) this activation can use — active, linked, DingTalk; narrowed to the
     // named account when the caller passed one (a deactivated old link does not block).
-    if (input.enableDingTalkGrant === true) {
+    if (input.enableDingTalkGrant === true && !skipLegacyDingTalkGrant) {
       const linkedAccounts = await client.query(
         `SELECT account.corp_id,
                 account.open_id,
@@ -259,7 +279,7 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
       )
     }
 
-    if (input.enableDingTalkGrant === true) {
+    if (input.enableDingTalkGrant === true && !skipLegacyDingTalkGrant) {
       // The DingTalk grant lives in `user_external_auth_grants` — the table `dingtalk-oauth.ts`
       // reads to decide whether a login is allowed. This wrote `user_external_identities
       // .grant_enabled`, a column no migration creates, inside a `.catch`: activation reported
@@ -339,6 +359,7 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
     temporaryPassword,
     localPasswordSet,
     membershipOrgId,
+    externalOrigin,
   }
 }
 
@@ -354,6 +375,58 @@ type DirectorySourceRow = {
   account_open_id: string | null
   account_union_id: string | null
   integration_org_id: string | null
+  integration_id: string | null
+}
+
+const ACTIVATION_CONNECTION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+/**
+ * Classifies the chosen org's directory connections through the store scope read.
+ * SSO on exactly one strict connection refuses before the users update. More than
+ * one connection with any strict connection refuses as ambiguous. Password modes
+ * keep a password origin and skip the legacy DingTalk grant when that single
+ * anchoring connection is strict.
+ */
+async function resolveActivationCredentialScope(
+  client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }> },
+  input: { mode: ActivateMode; connectionIds: readonly string[] },
+): Promise<{ origin: ClosedExternalOrigin | null; skipLegacyGrant: boolean }> {
+  const admits: Array<{ id: string; legacy: boolean }> = []
+  for (const connectionId of input.connectionIds) {
+    if (!ACTIVATION_CONNECTION_UUID.test(connectionId)) {
+      throwCoded(
+        'Directory source is not a DingTalk account eligible for SSO activation',
+        'ACTIVATE_SOURCE_INELIGIBLE',
+      )
+    }
+    admits.push({
+      id: connectionId,
+      legacy: await connectionAdmitsLegacyGrant(client as QueryClient, connectionId),
+    })
+  }
+  const strictCount = admits.filter((row) => !row.legacy).length
+  if (input.connectionIds.length > 1 && strictCount > 0) {
+    throwCoded(
+      'Multiple directory connections include a strict login connection',
+      'ACTIVATE_CONNECTION_AMBIGUOUS',
+    )
+  }
+  if (input.mode === 'sso' && strictCount === 1) {
+    throwCoded(
+      'SSO activation is closed for this strict directory connection',
+      'ACTIVATE_STRICT_CONNECTION',
+    )
+  }
+  if (input.mode === 'sso') {
+    const origin = admits.length === 1 && admits[0]?.legacy
+      ? closedDingTalkOrigin(admits[0].id)
+      : null
+    return { origin, skipLegacyGrant: false }
+  }
+  return {
+    origin: closedPasswordOrigin(),
+    skipLegacyGrant: admits.length === 1 && admits[0]?.legacy === false,
+  }
 }
 
 async function assertDirectorySourceActiveForActivate(
@@ -365,7 +438,7 @@ async function assertDirectorySourceActiveForActivate(
     expectedDingTalkIdentity: ActivateUserInput['expectedDingTalkIdentity']
     requestedOrgId: string | null
   },
-): Promise<string> {
+): Promise<{ orgId: string; connectionIds: readonly string[] }> {
   // Closed set: linked directory account must be active; integration active.
   // Explicit id: account row + link fail-closed (INNER semantics enforced in TS after LEFT JOIN
   // so we can distinguish SOURCE_MISSING account-not-found from LINK_MISMATCH).
@@ -410,7 +483,7 @@ async function assertDirectorySourceActiveForActivate(
               da.provider AS account_provider, di.provider AS integration_provider,
               da.corp_id AS account_corp_id, di.corp_id AS integration_corp_id,
               da.open_id AS account_open_id, da.union_id AS account_union_id,
-              di.org_id AS integration_org_id
+              di.org_id AS integration_org_id, di.id::text AS integration_id
          FROM directory_accounts da
          JOIN directory_integrations di ON di.id = da.integration_id
          LEFT JOIN directory_account_links l ON l.directory_account_id = da.id
@@ -421,7 +494,7 @@ async function assertDirectorySourceActiveForActivate(
               da.provider AS account_provider, di.provider AS integration_provider,
               da.corp_id AS account_corp_id, di.corp_id AS integration_corp_id,
               da.open_id AS account_open_id, da.union_id AS account_union_id,
-              di.org_id AS integration_org_id
+              di.org_id AS integration_org_id, di.id::text AS integration_id
          FROM directory_account_links l
          JOIN directory_accounts da ON da.id = l.directory_account_id
          JOIN directory_integrations di ON di.id = da.integration_id
@@ -526,9 +599,20 @@ async function assertDirectorySourceActiveForActivate(
         'ACTIVATE_SOURCE_INELIGIBLE',
       )
     }
+    const connectionIdsFor = (orgId: string): readonly string[] => {
+      const ids = activeEligibleRows
+        .filter((candidate) => String(candidate.integration_org_id || '').trim() === orgId)
+        .map((candidate) => String(candidate.integration_id || '').trim())
+        .filter((id) => id.length > 0)
+      return [...new Set(ids)].sort()
+    }
+    const resolve = (orgId: string): { orgId: string; connectionIds: readonly string[] } => ({
+      orgId,
+      connectionIds: connectionIdsFor(orgId),
+    })
     if (options.requestedOrgId) {
       if (candidateOrgIds.includes(options.requestedOrgId)) {
-        return options.requestedOrgId
+        return resolve(options.requestedOrgId)
       }
       // The caller named an org none of the person's ACTIVE sources belongs to — steering.
       throwCoded(
@@ -537,7 +621,7 @@ async function assertDirectorySourceActiveForActivate(
       )
     }
     if (candidateOrgIds.length === 1) {
-      return candidateOrgIds[0]
+      return resolve(candidateOrgIds[0])
     }
     // No orgId and more than one legitimate answer: refusing beats silently picking one —
     // activation would otherwise write an arbitrary org's membership (#4833).
@@ -590,14 +674,14 @@ export async function resolveActivationDirectorySource(
   if (!directoryAccountId) {
     throwCoded('No linked active directory account for activation', 'ACTIVATE_SOURCE_MISSING')
   }
-  const orgId = await assertDirectorySourceActiveForActivate(client, {
+  const source = await assertDirectorySourceActiveForActivate(client, {
     userId: input.userId,
     directoryAccountId,
     requireDingTalkSso: false,
     expectedDingTalkIdentity: null,
     requestedOrgId: input.requestedOrgId?.trim() || null,
   })
-  return { orgId, directoryAccountId }
+  return { orgId: source.orgId, directoryAccountId }
 }
 
 /**

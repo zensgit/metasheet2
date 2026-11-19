@@ -499,6 +499,8 @@ function globalHistoryFlagsInSource() {
   // (lib/yida-issue-confirm-writeback.cjs), so this one family is scanned in the plugin lib, the members-page precedent.
   const yidaIssueConfirm = grepPluginFlagTokens('INTEGRATION_YIDA_ISSUE_CONFIRM_[A-Z_0-9]+').filter((t) => !t.endsWith('_'))
   const userRecycle = grepFlagTokens('USER_RECYCLE_[A-Z_0-9]+_ENABLED')
+  const strictSessionLifetime = grepFlagTokens('EXTERNAL_LOGIN_STRICT_SESSION_MAX_AGE_SECONDS')
+  const directoryDeprovision = grepFlagTokens('DIRECTORY_DEPROVISION_[A-Z_0-9]+_ENABLED')
   // #4196 Class-B outbound two-phase ledger switch (S0-c, AGENTS.md: every new env flag is registered
   // here). One family by name shape, scanned where the executor and retry-eligibility read it.
   const automationClassB = grepFlagTokens('AUTOMATION_CLASSB_[A-Z_0-9]+_ENABLED')
@@ -511,8 +513,40 @@ function globalHistoryFlagsInSource() {
   // there: the plugin's older env flags go through its lenient parseBoolean and are NOT registered here.
   const attendanceCancelRound = grepFlagTokens('ATTENDANCE_CANCEL_ROUND_[A-Z_0-9]+', { file: ATTENDANCE_PLUGIN_SOURCE })
     .filter((t) => t.endsWith('_ENABLED'))
-  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...stockPrepPullBatch, ...stockPrepSheetRepair, ...stockPrepPilotPath, ...stockPrepTenantClaim, ...yidaOwner, ...yidaIssueConfirm, ...attendanceCancelRound, ...userRecycle, ...automationClassB, ...integrationAutomationRun])].sort()
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...stockPrepPullBatch, ...stockPrepSheetRepair, ...stockPrepPilotPath, ...stockPrepTenantClaim, ...yidaOwner, ...yidaIssueConfirm, ...attendanceCancelRound, ...userRecycle, ...strictSessionLifetime, ...directoryDeprovision, ...automationClassB, ...integrationAutomationRun])].sort()
 }
+
+test('directory deprovision credential flag: source-derived discovery requires registration', () => {
+  const key = 'DIRECTORY_DEPROVISION_REVOKE_CREDENTIALS_ENABLED'
+  assert.deepEqual(grepFlagTokens('DIRECTORY_DEPROVISION_[A-Z_0-9]+_ENABLED'), [key])
+  const discovered = globalHistoryFlagsInSource()
+  assert.ok(discovered.includes(key))
+  assert.ok(GLOBAL_HISTORY_FLAG_BY_KEY[key])
+  const without = new Set(GLOBAL_HISTORY_FLAG_KEYS.filter((name) => name !== key))
+  assert.deepEqual(discovered.filter((name) => !without.has(name)), [key])
+})
+
+test('directory deprovision credential flag: manifest agrees with the actual exact-literal reader', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.DIRECTORY_DEPROVISION_REVOKE_CREDENTIALS_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.source, 'packages/core-backend/src/auth/strict-credential-chain.ts#credentialRevocationFlagOn')
+  assert.match(spec.purpose, /Default OFF/)
+  const source = readRepoSource(spec.source.split('#')[0])
+  const key = source.match(/export const CREDENTIAL_REVOCATION_FLAG = '([^']+)'/)?.[1]
+  assert.equal(key, spec.key)
+  const expression = source.match(/export function credentialRevocationFlagOn\([^)]*\): boolean \{\s*return ([^\n]+)\n\}/)?.[1]
+  assert.equal(expression, "env[CREDENTIAL_REVOCATION_FLAG] === 'true'")
+  const runtime = new Function('env', 'CREDENTIAL_REVOCATION_FLAG', `return ${expression}`)
+  const matrix = ['true', undefined, '', 'false', '0', 'TRUE', 'True', ' true', 'true ', '1', 'yes', 'on']
+  assert.deepEqual(matrix.map((value) => runtime({ [key]: value }, key)), [true, ...Array(11).fill(false)])
+  for (const value of matrix) assert.equal(isActivated(spec, value), runtime({ [key]: value }, key))
+})
 
 // #4196 Class-B outbound ledger switch (S0-c): default OFF, exact literal only, danger high, sourced from its
 // exported predicate; the purpose names both migrations the ON path depends on, as they are on disk.
@@ -585,7 +619,7 @@ test('leave cancel-round launch flag: registered against the plugin reader, exac
   for (const value of [undefined, '', 'false']) assert.equal(isActivated(spec, value), false)
 })
 
-// Exact-department rollout. `_ENABLED` keeps the refusal code
+// Delegation rollouts. `_ENABLED` keeps the refusal code
 // DELEGATED_SCOPE_EXACT_DEPARTMENT_DISABLED and the include_children migration
 // constants out of the flag population.
 function delegatedScopeTokensInSource() {
@@ -596,12 +630,32 @@ function delegatedScopeFlagsInSource() {
   return delegatedScopeTokensInSource().filter((t) => t.endsWith('_ENABLED')).sort()
 }
 
-test('delegated scope flags: the read-site scan finds the registered key and filters the refusal code', () => {
-  assert.deepEqual(delegatedScopeFlagsInSource(), ['DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED'])
+test('delegated scope flags: the read-site scan finds both registered keys and excludes refusal codes', () => {
+  assert.deepEqual(delegatedScopeFlagsInSource(), ['DELEGATED_SCOPE_ACTIVATION_ENABLED', 'DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED'])
   const all = delegatedScopeTokensInSource()
   assert.ok(all.includes('DELEGATED_SCOPE_EXACT_DEPARTMENT_DISABLED'), 'the refusal code shares the prefix and must be scanned')
   assert.ok(all.some((t) => !t.endsWith('_ENABLED')), 'the suffix filter is what excludes non-flags')
   assert.ok(delegatedScopeFlagsInSource().every((t) => GLOBAL_HISTORY_FLAG_KEYS.includes(t)))
+})
+
+
+test('DELEGATED_SCOPE_ACTIVATION_ENABLED: exact true and independent from department precision', () => {
+  const key = 'DELEGATED_SCOPE_ACTIVATION_ENABLED'
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY[key]
+  assert.equal(spec.source, 'packages/core-backend/src/admin/delegated-scope-activation.ts#isDelegatedScopeActivationEnabled')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  const source = readRepoSource(spec.source.split('#')[0])
+  assert.match(source, /return process\.env\.DELEGATED_SCOPE_ACTIVATION_ENABLED === 'true'/)
+  assert.match(spec.purpose, /still enforces all stored stops/)
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of [undefined, '', 'false', 'TRUE', ' true', 'true ', '1', 'yes']) {
+    assert.equal(isActivated(spec, value), false)
+  }
 })
 
 test('DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED: exact true, danger high, independent, predicate compares the literal', () => {

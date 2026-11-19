@@ -612,15 +612,21 @@ describe('L — the admission lock helper', () => {
 describe('W — writers bump FIRST', () => {
   it('W-01 the access-graph mutex bumps the subject version rows (sorted, one statement) BEFORE the first users FOR UPDATE', () => {
     const source = readFileSync(path.join(SRC, 'directory', 'access-graph-mutex.ts'), 'utf8')
-    const bumpAt = source.indexOf('await bumpSubjectAuthorizationVersions(client, normalizedUserIds)')
-    // The statement text (template literal end), not the docblock that explains it.
-    const lockAt = source.indexOf('FOR UPDATE`,')
+    const bumpAt = source.indexOf('else await bumpSubjectAuthorizationVersions(client, normalizedUserIds)')
+    // #6924's operation intent (nowait): the lock-only NOWAIT form of the same first step.
+    const nowaitAt = source.indexOf('if (options.nowait === true) await lockSubjectAuthorizationVersionsNowait(client, normalizedUserIds)')
+    expect(nowaitAt).toBeGreaterThan(0)
+    expect(bumpAt).toBeGreaterThan(nowaitAt)
+    // The statement text (the template literal's lock clause, #6924 added its NOWAIT switch), not
+    // the docblock that explains it.
+    const lockAt = source.indexOf("FOR UPDATE${options.nowait === true ? ' NOWAIT' : ''}`,")
     expect(bumpAt).toBeGreaterThan(0)
     expect(lockAt).toBeGreaterThan(bumpAt)
     expect(source.match(/bumpSubjectAuthorizationVersions\(/g)).toHaveLength(1)
+    expect(source.match(/lockSubjectAuthorizationVersionsNowait\(/g)).toHaveLength(1)
   })
 
-  it('W-02 role assignment bumps between the roles FOR SHARE review and the membership write; the five autocommit routes now run in transaction() with the bump first', () => {
+  it('W-02 role assignment bumps between the roles FOR SHARE review and the membership write; the autocommit routes now write inside a transaction whose mutex bumps first', () => {
     const roleAssignment = readFileSync(path.join(SRC, 'rbac', 'role-assignment.ts'), 'utf8')
     for (const write of ['INSERT INTO user_roles', 'DELETE FROM user_roles']) {
       const writeAt = roleAssignment.indexOf(write)
@@ -630,31 +636,56 @@ describe('W — writers bump FIRST', () => {
       expect(writeAt).toBeGreaterThan(bumpAt)
     }
     const permissions = readFileSync(path.join(SRC, 'routes', 'permissions.ts'), 'utf8')
-    expect(permissions.match(/await transaction\(async \(client\) => \{\s*await bumpSubjectAuthorizationVersions\(client, \[userId\]\)/g)).toHaveLength(3)
-    expect(permissions).not.toMatch(/pool\.query\(\s*[`']\s*(INSERT INTO|DELETE FROM) user_permissions/)
+    // #6924 moved the direct grant / revoke, the template apply and the legacy revoke into
+    // writeLegacyAuthorizationException: one withAuthorizationInputTransaction whose R5 step is the
+    // access-graph mutex (W-01), so the subject bump precedes the users rows and every DML. The
+    // statement order through the real contract entry is pinned in
+    // authz-version-authorization-exception.test.ts.
+    expect(permissions.match(/await writeLegacyAuthorizationException\(\{/g)).toHaveLength(4)
+    expect(permissions).not.toMatch(/(INSERT INTO|DELETE FROM) user_permissions|UPDATE users/)
+    const compat = readFileSync(path.join(SRC, 'admin', 'authorization-exception-compat.ts'), 'utf8')
+    // #6938 froze the compatibility plan first (actor + target sorted as `subjects`, both as R3 admission
+    // and R5 user subjects), then enters the contract with it: the R5 step is the mutex (W-01).
+    expect(compat).toMatch(/const plan = Object\.freeze\(\{\s*intent: revoking \? 'REVOKE_DIRECT' as const : 'GRANT_DIRECT' as const,\s*roleIds: Object\.freeze\(\[\] as string\[\]\),\s*userIds: subjects,/)
+    expect(compat).toMatch(/const result = await withAuthorizationInputTransaction\(plan, async \(tx\) => \{/)
+    const exceptionWrite = readFileSync(path.join(SRC, 'admin', 'authorization-exception-write.ts'), 'utf8')
+    expect(exceptionWrite).toMatch(/Caller holds the shared access-subject locks for both users through commit/)
     // #6833 moved the member-group route and syncLegacyAdminProfile into transactions behind the
     // access-graph mutex (lockSharedAccessSubjects: namespace-admission advisory → subject version
     // rows, sorted → users FOR UPDATE; W-01), so the bump comes first by construction there.
     const adminUsers = readFileSync(path.join(SRC, 'routes', 'admin-users.ts'), 'utf8')
     expect(adminUsers).toMatch(/await transaction\(async \(client\) => \{\s*const subjects = await lockSharedAccessSubjects\(client, \[userId, adminUserId\]\)\s*requireWritableTarget\(subjects, userId\)\s*await assertPlatformActorAuthority\(client, subjects\.get\(adminUserId\)\)\s*if \(action === 'assign'\) \{\s*await client\.query\(\s*`INSERT INTO platform_member_group_members/)
     expect(adminUsers).not.toMatch(/await query\(\s*`(INSERT INTO|DELETE FROM) platform_member_group_members/)
-    const syncLegacy = /async function syncLegacyAdminProfile\([\s\S]*?\n\}/.exec(adminUsers)?.[0] ?? ''
+    // #6938 moved syncLegacyAdminProfile into admin/legacy-admin-profile.ts (still only the caller's
+    // runQuery). Its callers: the two member-group/role routes below (transaction + mutex), the two
+    // platform role commands and the authorization operation, all on a withAuthorizationInputTransaction
+    // client whose R5 step is the mutex (W-01) or, under the operation, its lock-only NOWAIT form.
+    const legacyProfile = readFileSync(path.join(SRC, 'admin', 'legacy-admin-profile.ts'), 'utf8')
+    const syncLegacy = /export async function syncLegacyAdminProfile\([\s\S]*?\n\}/.exec(legacyProfile)?.[0] ?? ''
     expect(syncLegacy).toMatch(/await runQuery\(\s*`UPDATE users/)
     expect(syncLegacy).not.toMatch(/\bawait (query|transaction|pool\.)/)
+    for (const file of ['platform-role-assign-command.ts', 'platform-role-unassign-command.ts']) {
+      const command = readFileSync(path.join(SRC, 'admin', file), 'utf8')
+      expect(command, file).toMatch(/withAuthorizationInputTransaction\(/)
+      expect(command, file).toMatch(/await syncLegacyAdminProfile\(context\.userId, (?:true|false), \(sql, params\) => tx\.query\(sql, params\)\)/)
+    }
+    expect(readFileSync(path.join(SRC, 'admin', 'authorization-operation-service.ts'), 'utf8')).toMatch(/await syncLegacyAdminProfile\(request\.targetUserId, kind === 'role\.assign', tx\.query\)/)
     const syncCalls = Array.from(adminUsers.matchAll(/await syncLegacyAdminProfile\(userId, (?:true|false), /g)).map((match) => match.index!)
-    expect(syncCalls).toHaveLength(4)
+    expect(syncCalls).toHaveLength(2)
     for (const at of syncCalls) {
       const txnAt = adminUsers.lastIndexOf('await transaction(async (client) => {', at)
       const mutexAt = adminUsers.lastIndexOf('await lockSharedAccessSubjects(client, ', at)
       expect(txnAt).toBeGreaterThan(0)
       expect(mutexAt).toBeGreaterThan(txnAt)
     }
-    // #6872's legacy users.permissions revoke: the mutex before the users UPDATE, in the route's transaction.
+    // #6872's legacy users.permissions revoke. #6938 removed the self-locking wrapper: the locked half
+    // (revokeLockedLegacyUserPermission) is reached only through the exception writer, inside the
+    // contract transaction above (W-01 mutex first), and takes no lock or transaction of its own.
     const legacy = readFileSync(path.join(SRC, 'admin', 'legacy-permission-revoke.ts'), 'utf8')
-    const legacyMutexAt = legacy.indexOf('await lockSharedAccessSubjects(client, [actorId, userId])')
-    expect(legacyMutexAt).toBeGreaterThan(0)
-    expect(legacy.indexOf('`UPDATE users')).toBeGreaterThan(legacyMutexAt)
-    expect(permissions).toMatch(/await transaction\(async \(client\) => revokeLegacyUserPermission\(client, /)
+    expect(legacy).not.toMatch(/lockSharedAccessSubjects|lockUsersForAccessGraphWrite|\btransaction\(|bumpSubjectAuthorizationVersions/)
+    expect(legacy.indexOf('`UPDATE users')).toBeGreaterThan(legacy.indexOf('export async function revokeLockedLegacyUserPermission('))
+    expect(exceptionWrite).toMatch(/await revokeLockedLegacyUserPermission\(tx, /)
+    expect(permissions).toMatch(/action: \{ kind: 'legacy\.revoke', code: permission \}/)
   })
 
   it('W-03 sheet layer: every route bumps AFTER its meta_sheets row lock and BEFORE any exclusive record lock — the record-permission routes between record-link phases 1–4 (shared) and phase 5, the grant / configuration routes right after assertSheetLiveForUpdate', () => {
@@ -705,11 +736,21 @@ describe('W — writers bump FIRST', () => {
     expect(lockAfter).toBeGreaterThan(0)
   })
 
-  it('W-06 setUserNamespaceAdmission bumps after the advisory and before the upsert; the two user_orgs helpers bump before their first statement', () => {
+  it('W-06 every namespace admission upsert runs inside an authorization-input command (advisory, then the bump-first mutex); the two user_orgs helpers bump before their first statement', () => {
     const admission = readFileSync(path.join(SRC, 'rbac', 'namespace-admission.ts'), 'utf8')
-    // #6833: the advisory for every subject (sorted), then the access-graph mutex (subject version
-    // rows first, W-01), then the upsert through writeUserNamespaceAdmission on the same client.
-    expect(admission).toMatch(/for \(const subjectId of subjectIds\) await lockNamespaceAdmissionWrites\(client, subjectId\)\s*await lockVisibleUsersForAccessGraphWrite\(client, subjectIds\)\s*await writeUserNamespaceAdmission\(options, client\)/)
+    // #6938 removed setUserNamespaceAdmission: every admission upsert is writeUserNamespaceAdmission on
+    // the client of a withAuthorizationInputTransaction command (R3 admission advisory, then the R5
+    // access-graph mutex: subject version rows first, W-01). Pin that set of six caller modules.
+    expect(admission).not.toMatch(/export async function setUserNamespaceAdmission\(/)
+    const admissionCallers = [
+      'admin/admin-user-batch-birth-command.ts', 'admin/admin-user-birth-command.ts', 'admin/authorization-operation-service.ts',
+      'admin/platform-namespace-admission-bulk-command.ts', 'admin/platform-namespace-admission-command.ts', 'admin/role-delegation-namespace-admission-command.ts',
+    ]
+    for (const file of admissionCallers) {
+      const source = readFileSync(path.join(SRC, ...file.split('/')), 'utf8')
+      expect(source.match(/await writeUserNamespaceAdmission\(/g), file).toHaveLength(1)
+      expect(source, file).toMatch(/withAuthorizationInputTransaction\(/)
+    }
     const mutex = readFileSync(path.join(SRC, 'directory', 'access-graph-mutex.ts'), 'utf8')
     expect(mutex).toMatch(/export async function lockVisibleUsersForAccessGraphWrite\([^)]*\)[^{]*\{\s*const locked = await lockUsersForAccessGraphWrite\(client, userIds\)/)
     const sync = readFileSync(path.join(SRC, 'directory', 'directory-sync.ts'), 'utf8')

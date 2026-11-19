@@ -1,6 +1,6 @@
 import { Logger } from '../core/logger'
-import { query, transaction } from '../db/pg'
-import { lockVisibleUsersForAccessGraphWrite, type AccessGraphTransactionClient } from '../directory/access-graph-mutex'
+import { query } from '../db/pg'
+import type { AccessGraphTransactionClient } from '../directory/access-graph-mutex'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 
 const logger = new Logger('NamespaceAdmission')
@@ -499,24 +499,28 @@ export async function inspectPermissionCodesByNamespaceAdmission(
   }
 }
 
+type NamespaceAdmissionLockExecutor = { query: (sql: string, params?: unknown[]) => Promise<unknown> }
+
+function namespaceAdmissionLockKey(userId: string): string {
+  return `namespace-admission:${userId}`
+}
+
 /** Serialize bootstrap and admission/revocation writes even when no admission row exists.
  * The caller MUST hold one transaction through the protected read and all dependent writes.
  */
-export async function lockNamespaceAdmissionWrites(
-  executor: { query: (sql: string, params?: unknown[]) => Promise<unknown> },
-  userId: string,
-): Promise<void> {
-  await executor.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
-    `namespace-admission:${userId}`,
-  ])
+export async function lockNamespaceAdmissionWrites(executor: NamespaceAdmissionLockExecutor, userId: string): Promise<void> {
+  await executor.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [namespaceAdmissionLockKey(userId)])
+}
+
+/** Hold the input stable while a transaction writes other resources based on this user's authority. */
+export async function lockNamespaceAdmissionReads(executor: NamespaceAdmissionLockExecutor, userId: string): Promise<void> {
+  await executor.query('SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))', [namespaceAdmissionLockKey(userId)])
 }
 
 /**
  * Enable namespace admissions for a user through a caller-supplied query surface.
  *
- * `setUserNamespaceAdmission` below owns the platform-admin endpoint's transaction;
- * provisioning needs the same write inside its own `transaction()`, so this variant
- * takes the executor. Statement shape mirrors the projected-governance writer in
+ * Provisioning supplies its transaction executor. Statement shape mirrors the projected-governance writer in
  * `directory/directory-sync.ts`, which already performs this enable inside a transaction.
  *
  * A no-op when `namespaces` is empty, which is the derived result for every grant that does
@@ -594,21 +598,6 @@ export async function writeUserNamespaceAdmission(
       options.actorId ?? null,
     ],
   )
-}
-
-export async function setUserNamespaceAdmission(options: NamespaceAdmissionWrite): Promise<NamespaceAdmissionSnapshot[]> {
-  const userId = normalizeString(options.userId)
-  const namespace = normalizeNamespace(options.namespace)
-  if (!userId) throw new Error('userId is required')
-  if (!namespace) throw new Error('namespace is required')
-  const actorId = normalizeString(options.actorId)
-  const subjectIds = Array.from(new Set([userId, actorId].filter(Boolean))).sort()
-  await transaction(async (client) => {
-    for (const subjectId of subjectIds) await lockNamespaceAdmissionWrites(client, subjectId)
-    await lockVisibleUsersForAccessGraphWrite(client, subjectIds)
-    await writeUserNamespaceAdmission(options, client)
-  })
-  return listUserNamespaceAdmissionSnapshots(userId)
 }
 
 /** The caller holds lockNamespaceAdmissionWrites through membership DELETE and this witness. */

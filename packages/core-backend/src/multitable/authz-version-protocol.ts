@@ -70,10 +70,25 @@
  *     so the record-permission PUT / DELETE routes bump their sheet row AFTER phases 1–4 and BEFORE
  *     phase 5 — writer order = meta_sheets → sheet row → record, the holder's order for the rows they
  *     share, and the grant routes' order (meta_sheets → sheet row) for the rows they share;
- *   - `services/stock-preparation-members.ts` locks (`roles` FOR UPDATE / advisory, grantor rows FOR
- *     SHARE, `spreadsheet_permissions` FOR SHARE): none of them is in the holder's lock set, and its
- *     writes bump through the triggers after those locks; it never waits on a holder for anything the
+ *   - `services/stock-preparation-members.ts` locks (`roles` FOR UPDATE / advisory, since #6934 the
+ *     grantor's namespace-admission advisory in SHARED mode, grantor rows FOR SHARE,
+ *     `spreadsheet_permissions` FOR SHARE): none of them is in the holder's lock set, and its writes
+ *     bump through the triggers after those locks; it never waits on a holder for anything the
  *     holder waits on it for;
+ *   - the authorization-input contract (`rbac/authorization-input-lock.ts`, #6924): R0 world → R1 →
+ *     role rows → R3 namespace-admission advisory → R5 = this module's mutex bump, then `users`, so
+ *     every contract writer (the exception writers behind routes/permissions.ts, the authorization
+ *     operation commit) bumps after the locks outside the holder's set and before its DML. The
+ *     operation intent takes every lock with try / NOWAIT and holds the operation fence's EXCLUSIVE
+ *     table locks (on `users`, `user_roles`, … — tables the holder shares) before R5; its mutex call
+ *     passes `nowait`, so that first step is the lock-only NOWAIT form
+ *     ({@link lockSubjectAuthorizationVersionsNowait}): on a subject that HAS a version row, a holder
+ *     answers 55P03 (retryable busy) at once instead of the operation queueing on it under those
+ *     table locks, a denied operation issues no write statement, and the operation's DML triggers
+ *     advance the held rows. It is not "never queues": a subject with no version row yet (D21 does
+ *     not backfill) is locked only at the DML, where the operation can queue on a concurrent
+ *     uncommitted insert of that key up to its 500 ms lock_timeout and then answers the same
+ *     retryable busy (refute [2] on the e0e4406bf realign; probe C3: 55P03 at ~501 ms);
  *   - `rbac/namespace-admission.ts` advisory `lockNamespaceAdmissionWrites`: outside the holder's set;
  *   - `LOCK TABLE … IN SHARE / SHARE ROW EXCLUSIVE MODE` sites (automation-executor.ts,
  *     dingtalk-identity-repair.ts, controlled-handover.ts): compatible with FOR SHARE (ROW SHARE);
@@ -260,6 +275,18 @@ ON CONFLICT (subject_id) DO UPDATE
   SET version = v.version + 1,
       updated_at = now()`
 
+/** {@link lockSubjectAuthorizationVersionsNowait}: the existing version rows, ascending, without waiting and without a write. */
+export const SUBJECT_AUTHORIZATION_VERSIONS_NOWAIT_SQL = `SELECT subject_id FROM ${SUBJECT_AUTHORIZATION_VERSIONS_TABLE}
+ WHERE subject_id = ANY($1::text[])
+ ORDER BY subject_id
+   FOR UPDATE NOWAIT`
+
+/** {@link lockSubjectAuthorizationVersions}: the existing version rows, ascending, waiting, without a write. */
+export const SUBJECT_AUTHORIZATION_VERSIONS_LOCK_SQL = `SELECT subject_id FROM ${SUBJECT_AUTHORIZATION_VERSIONS_TABLE}
+ WHERE subject_id = ANY($1::text[])
+ ORDER BY subject_id
+   FOR UPDATE`
+
 const SHEET_VERSION_ENSURE_SQL = `INSERT INTO ${SHEET_PERMISSION_VERSIONS_TABLE} (sheet_id) VALUES ($1) ON CONFLICT (sheet_id) DO NOTHING`
 const SHEET_VERSION_SHARE_SQL = `SELECT sheet_id, version::text AS version FROM ${SHEET_PERMISSION_VERSIONS_TABLE} WHERE sheet_id = $1 FOR SHARE`
 const SUBJECT_VERSION_ENSURE_SQL = `INSERT INTO ${SUBJECT_AUTHORIZATION_VERSIONS_TABLE} (subject_id) VALUES ($1) ON CONFLICT (subject_id) DO NOTHING`
@@ -414,6 +441,12 @@ export async function bumpSheetPermissionVersionBehindSheetRow(
  * Explicit Layer-2 bump: takes the write lock of every listed user's version row, ascending, in ONE
  * statement. Multi-user membership writers (role un/assignment, member-group projection, directory
  * admissions) call it before their DML so concurrent writers acquire the rows in one global order.
+ * The order is global only per STATEMENT: a transaction that takes subject rows in more than one
+ * statement must cover, in its FIRST one, every row its later ones take (a later statement then only
+ * re-takes held rows). Otherwise a writer that sorts the same subjects in one statement (#6924's
+ * exception writers and #6934's activation route bump actor + target together) closes a 40P01 cycle.
+ * Directory sync does this through its mutex inventory, which reads the projected groups' current
+ * members, and its projection refuses any subject the inventory did not hold (refute [1]).
  */
 export async function bumpSubjectAuthorizationVersions(
   queryable: AuthorizationVersionQueryable,
@@ -422,6 +455,45 @@ export async function bumpSubjectAuthorizationVersions(
   const ids = canonicalAuthorizationIds(userIds)
   if (ids.length === 0) return ids
   await queryFnOf(queryable)(SUBJECT_AUTHORIZATION_VERSIONS_BUMP_SQL, [ids])
+  return ids
+}
+
+/**
+ * The no-wait, lock-only form for the access-graph mutex under #6924's authorization-operation
+ * intent, whose every other lock is a try / NOWAIT and whose denied paths issue no write statement:
+ * takes the version rows that already exist FOR UPDATE NOWAIT, ascending, and writes nothing. A
+ * holder's FOR SHARE answers 55P03 at once instead of the operation queueing on it while it holds
+ * the operation fence's table locks. The version is still advanced by the triggers when the
+ * operation writes a covered table (on rows this already holds). A subject with no version row yet
+ * is not locked here: its trigger creates the row at the DML, and can wait there only on a
+ * concurrent uncommitted insert of the same key, bounded by the operation's lock_timeout.
+ */
+export async function lockSubjectAuthorizationVersionsNowait(
+  queryable: AuthorizationVersionQueryable,
+  userIds: readonly string[],
+): Promise<string[]> {
+  const ids = canonicalAuthorizationIds(userIds)
+  if (ids.length === 0) return ids
+  await queryFnOf(queryable)(SUBJECT_AUTHORIZATION_VERSIONS_NOWAIT_SQL, [ids])
+  return ids
+}
+
+/**
+ * The waiting, lock-only form for the access-graph mutex under a read-only plan (#6938's
+ * CONSUME_CLASS_DECISION intent, including its identity-read slot: privilege-witness revalidation,
+ * the admin-grant receiving reader), whose contract is that it issues no DML. It keeps the D21 order
+ * (version rows, then users rows) without advancing any version, so a read does not invalidate the
+ * subjects it only reads: takes the version rows that already exist FOR UPDATE, ascending, and writes
+ * nothing. A subject with no version row is not locked here; a read-only plan never creates one, and a
+ * concurrent bump-first writer that creates it holds nothing this plan waits on afterwards.
+ */
+export async function lockSubjectAuthorizationVersions(
+  queryable: AuthorizationVersionQueryable,
+  userIds: readonly string[],
+): Promise<string[]> {
+  const ids = canonicalAuthorizationIds(userIds)
+  if (ids.length === 0) return ids
+  await queryFnOf(queryable)(SUBJECT_AUTHORIZATION_VERSIONS_LOCK_SQL, [ids])
   return ids
 }
 
