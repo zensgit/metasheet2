@@ -103,7 +103,7 @@ tr.m td{background:var(--manual)}
             <label><input type="radio" name="pm" value="pick" checked> 选已有的</label>
             <label><input type="radio" name="pm" value="new"> 新建父组件</label>
           </div>
-          <div id="pm-none" class="hidden"><p class="hint">这一行会出现在填写视图的「无父件」组。</p></div>
+          <div id="pm-none" class="hidden"><p class="hint">这一行会出现在填写视图的空值组（组头显示「(无值)」）。</p></div>
           <div id="pm-pick" class="picker">
             <div class="picked"><span><span class="code">DZ-1001</span> · 底座焊接件</span><button class="btn link" type="button" id="toggle-dd">更换</button></div>
             <div class="dropdown" id="dd">
@@ -137,7 +137,7 @@ tr.m td{background:var(--manual)}
   </div>
 
   <h2>② 加错了：人工行上「修改父组件」</h2>
-  <p class="note">入口在人工行的记录抽屉和行右键菜单。PLM 行没有这个入口；网格里父组件两格不能直接单格编辑（两列要一起改）。</p>
+  <p class="note">入口在人工行的记录抽屉（网格不做右键菜单，沿用 10-27 客户反馈后的做法）。PLM 行没有这个入口；网格里父组件两格不能直接单格编辑（两列要一起改）。</p>
   <div class="stage">
     <div class="drawer">
       <header><strong>内六角螺钉</strong><span class="badge">人工补充</span></header>
@@ -147,13 +147,6 @@ tr.m td{background:var(--manual)}
         <span>父组件名称</span><span>底座焊接件</span>
         <span>总用量</span><span>24</span>
       </div>
-    </div>
-    <div class="menu" aria-label="行右键菜单">
-      <div>打开记录</div>
-      <div>复制为新行</div>
-      <div class="on">修改父组件…</div>
-      <hr>
-      <div style="color:var(--danger)">删除</div>
     </div>
     <div class="modal" style="width:400px" role="dialog" aria-label="修改父组件">
       <header>修改父组件 <span>×</span></header>
@@ -171,11 +164,13 @@ tr.m td{background:var(--manual)}
     </div>
   </div>
 
+  <div class="callout" style="margin-top:16px;max-width:560px"><strong>改人工父组件本身时的提示</strong><p style="margin:4px 0">人工行 RG-DZ-01 被别的人工行当作父组件，修改它的图号或删除它时弹出：</p><p style="margin:4px 0;color:var(--danger)">有 3 行人工补充行以它为父组件，修改/删除后它们不会跟着变。</p><p class="hint">只给数字，不自动改子行。</p></div>
+
   <h2>③ 填写视图：前后对比</h2>
   <p class="note">填写视图本来就按父组件图号分组，人工行填了父组件就进对应的组，和 PLM 子件排在一起。</p>
   <div class="cmp">
     <div>
-      <h3>今天：人工行都在「无父件」</h3>
+      <h3>今天：人工行都在空值组</h3>
       <div class="grid-wrap"><table>
         <thead><tr><th>图号</th><th>名称</th><th>总用量</th><th>来源</th></tr></thead>
         <tbody>
@@ -183,7 +178,7 @@ tr.m td{background:var(--manual)}
           <tr><td class="code">DZ-1001-01</td><td>底板</td><td>2</td><td class="lockcell">PLM</td></tr>
           <tr><td class="code">DZ-1001-02</td><td>侧板</td><td>4</td><td class="lockcell">PLM</td></tr>
           <tr><td class="code">DZ-1001-03</td><td>底座立板</td><td>2</td><td class="lockcell">PLM</td></tr>
-          <tr class="g"><td colspan="4">无父件 · 2 行</td></tr>
+          <tr class="g"><td colspan="4">(无值) · 2 行</td></tr>
           <tr class="m"><td class="code">GB70-M8x25</td><td>内六角螺钉</td><td>24</td><td>人工补充</td></tr>
           <tr class="m"><td class="code">—</td><td>防锈漆</td><td>3</td><td>人工补充</td></tr>
         </tbody>
@@ -199,7 +194,7 @@ tr.m td{background:var(--manual)}
           <tr><td class="code">DZ-1001-02</td><td>侧板</td><td>4</td><td class="lockcell">PLM</td></tr>
           <tr><td class="code">DZ-1001-03</td><td>底座立板</td><td>2</td><td class="lockcell">PLM</td></tr>
           <tr class="m"><td class="code">GB70-M8x25</td><td>内六角螺钉</td><td>24</td><td>人工补充</td></tr>
-          <tr class="g"><td colspan="4">无父件 · 1 行</td></tr>
+          <tr class="g"><td colspan="4">(无值) · 1 行</td></tr>
           <tr class="m"><td class="code">—</td><td>防锈漆</td><td>3</td><td>人工补充</td></tr>
         </tbody>
       </table></div>
