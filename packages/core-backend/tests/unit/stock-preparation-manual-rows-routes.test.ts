@@ -772,7 +772,7 @@ describe('X — GET /context: capabilities.stockPreparationManualRows', () => {
     return res.body.data.capabilities.stockPreparationManualRows
   }
 
-  it('X-01 allowed on a P_reg sheet: the six fillable ids (template order), the create\'s required ids (名称, 总用量), (B3) the dialog\'s columns and (ADR §12.6) the parent pair\'s ids — which stay out of editableFieldIds', async () => {
+  it('X-01 allowed on a P_reg sheet: the six fillable ids (template order), the create\'s required ids (名称, 总用量), (B3) the dialog\'s columns and (ADR §12.6) the parent pair\'s ids — which stay out of editableFieldIds — with the row\'s own 图号 id beside them', async () => {
     const got = await block(S.PREG)
     expect(got).toEqual({
       state: 'allowed',
@@ -781,9 +781,12 @@ describe('X — GET /context: capabilities.stockPreparationManualRows', () => {
       // ADR §8 B3.3: 名称*、总用量*、图号、规格、材质、用量、备注.
       dialogFieldIds: ['componentName', 'totalQuantity', 'componentCode', 'componentSpec', 'material', 'rawQuantity', 'notes'].map((l) => ph(S.PREG, l)),
       parentFieldIds: { code: ph(S.PREG, 'parentComponentCode'), name: ph(S.PREG, 'parentComponentName') },
+      // Sent ONLY together with parentFieldIds, to an actor who may read 图号: what the web's self-parent pre-check
+      // compares a chosen parent with.
+      componentCodeFieldId: ph(S.PREG, 'componentCode'),
     })
-    // The key order of the block: the new key is appended, the four B2 / B3 keys keep their places.
-    expect(Object.keys(got)).toEqual(['state', 'editableFieldIds', 'requiredFieldIds', 'dialogFieldIds', 'parentFieldIds'])
+    // The key order of the block: the new keys are appended, the four B2 / B3 keys keep their places.
+    expect(Object.keys(got)).toEqual(['state', 'editableFieldIds', 'requiredFieldIds', 'dialogFieldIds', 'parentFieldIds', 'componentCodeFieldId'])
     for (const id of Object.values(got.parentFieldIds as Record<string, string>)) {
       expect(got.editableFieldIds).not.toContain(id)
       expect(got.dialogFieldIds).not.toContain(id)
@@ -803,6 +806,11 @@ describe('X — GET /context: capabilities.stockPreparationManualRows', () => {
     ['KEYMOVED', { state: 'unavailable', reason: 'contract_mismatch' }],
   ])('X-02 %s: %j', async (key, expected) => {
     expect(await block(S[key])).toMatchObject(expected)
+  })
+
+  it.each(['NOLOCK', 'KEYLOCKONLY', 'MISMATCH', 'TWOKEYS', 'KEYMOVED'])('X-02b %s: a block without parentFieldIds carries no componentCodeFieldId — exactly the B2 / B3 keys', async (key) => {
+    const got = await block(S[key])
+    expect(Object.keys(got)).toEqual(['state', 'reason', 'editableFieldIds', 'requiredFieldIds', 'dialogFieldIds'])
   })
 
   it('X-03 deployment switch off: unavailable / project_sheets_off', async () => {

@@ -552,6 +552,15 @@ export type ManualRowsContextBlock = {
    * `disabled` and `unavailable/project_archived`. Never part of `editableFieldIds`.
    */
   parentFieldIds?: { code: string; name: string }
+  /**
+   * The physical id of the row's OWN 图号 column — what the web compares a chosen parent with before it submits (rule
+   * P5, the self-parent pre-check) and what it watches to warn before a 图号 other manual rows name as their parent is
+   * changed (ADR §12.7 ①). Present ONLY together with `parentFieldIds`, and only when the column exists on the sheet
+   * and this actor may READ it; a block without `parentFieldIds` never carries it and is byte-identical to what it
+   * was. Absent beside `parentFieldIds` = this actor cannot read the row's own 图号, so the web has nothing to compare
+   * with. An id only — never a value.
+   */
+  componentCodeFieldId?: string
 }
 
 function explicitlyRequired(property: unknown): boolean {
@@ -631,6 +640,10 @@ export async function loadManualRowParentPairVerdict(
  * `actorCanWriteParentPair` (ADR §12.6, rule P7): the route's answer to "may THIS actor write both pair columns?",
  * asked only for a sheet on which the routes accept the pair at all. `parentFieldIds` is sent only when it says yes;
  * without the callback the key is never sent. No statement beyond the two registry reads the block already cost.
+ *
+ * `actorCanReadField`: the route's answer to "may THIS actor read this column?" (layer-2 ∧ layer-3). It is asked about
+ * ONE column, the row's own 图号, and only once `parentFieldIds` is being sent: `componentCodeFieldId` accompanies the
+ * pair when the column exists on the sheet and the answer is yes. Without the callback the key is never sent.
  */
 export async function resolveManualRowsContextBlock(
   query: ManualRowsQueryFn,
@@ -638,6 +651,7 @@ export async function resolveManualRowsContextBlock(
   fields: ReadonlyArray<GateFieldLike>,
   env: NodeJS.ProcessEnv = process.env,
   actorCanWriteParentPair?: (sheet: ManualRowsSheet) => boolean,
+  actorCanReadField?: (fieldId: string) => boolean,
 ): Promise<ManualRowsContextBlock | null> {
   // An ordinary sheet (no exact stanza) issues no statement at all.
   if (!fieldsCarryExactStockPreparationStanza(fields)) return null
@@ -648,7 +662,11 @@ export async function resolveManualRowsContextBlock(
   if (!block || !actorCanWriteParentPair) return block
   const pairVerdict = evaluateManualRowParentPairGate({ sheetId, fields, host, target })
   if (pairVerdict.kind === 'allowed' && actorCanWriteParentPair(pairVerdict.sheet)) {
-    block.parentFieldIds = { code: pairVerdict.sheet.derived.parent.code, name: pairVerdict.sheet.derived.parent.name }
+    const { derived } = pairVerdict.sheet
+    block.parentFieldIds = { code: derived.parent.code, name: derived.parent.name }
+    // The row's own 图号, beside the pair and never without it: the column must exist, and the actor must be able to read it.
+    const componentCodeExists = fields.some((field) => field?.id === derived.componentCode)
+    if (componentCodeExists && actorCanReadField?.(derived.componentCode) === true) block.componentCodeFieldId = derived.componentCode
   }
   return block
 }

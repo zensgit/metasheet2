@@ -9886,7 +9886,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // closed — the web hides its generic create entries); a thrown lookup fails closed the same way.
       // ADR §12.6: the block also names the parent pair (`parentFieldIds`) — only where a manual-row route accepts the
       // pair on this sheet, and only to an actor who may write BOTH columns (rule P7; `fieldScopeMap` above is this
-      // actor's). No extra statement; the two ids never join `editableFieldIds`.
+      // actor's). No extra statement; the two ids never join `editableFieldIds`. Beside the pair, and never without
+      // it, the id of the row's own 图号 column (`componentCodeFieldId`) when this actor may read that column
+      // (`allowedFieldIds` above, the layer-2 ∧ layer-3 read set): the web's self-parent pre-check compares with it.
       let manualRowsBlock: ManualRowsContextBlock | null = null
       if (effectiveSheetId && (capabilities.canCreateRecord === true || capabilities.canEditRecord === true || capabilities.canDeleteRecord === true)) {
         try {
@@ -9896,6 +9898,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             activeFields,
             undefined, // the deployment switch is read from the process environment, as before
             (manualSheet) => actorCanWriteManualRowParentPair(activeFields, manualSheet, capabilities, fieldScopeMap),
+            (fieldId) => allowedFieldIds.has(fieldId),
           )
         } catch (err) {
           console.error(

@@ -14,6 +14,7 @@
  *        that names the pair — every other verdict is what it was;
  *   G-02 the pair's own gate (the edit gate for a request naming the pair) and its loader;
  *   G-03 /context's block: `parentFieldIds` only where the routes accept the pair AND the actor callback says yes;
+ *        `componentCodeFieldId` (the row's own 图号) only beside it, and only for an actor who may read that column;
  *   G-04 the lock exemption is exactly eight columns; the copy rule's 'pair' class;
  *   G-05 「复制为新行」: the pair is carried whole or not at all;
  *   G-06 the create's pair check, and the create transaction's re-check of the pair's lock;
@@ -455,6 +456,86 @@ describe('G-03 /context: parentFieldIds', () => {
     fake.sqlLog.length = 0
     await blockOf(S.PLAIN, yes)
     expect(fake.sqlLog).toEqual([])
+  })
+
+  describe('componentCodeFieldId — the row\'s own 图号, beside the pair and never without it', () => {
+    const ENV_ON = { MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED: 'true' }
+    const withRead = (sheet: FakeSheet, canWritePair: ((manualSheet: ManualRowsSheet) => boolean) | undefined, canRead: ((fieldId: string) => boolean) | undefined, env: NodeJS.ProcessEnv = ENV_ON) =>
+      resolveManualRowsContextBlock(query, sheet.sheetId, sheet.fields, env, canWritePair, canRead)
+
+    it('sent with parentFieldIds when the actor may read the column: the physical id of 图号, appended last', async () => {
+      const block = (await withRead(S.PREG, yes, yes))!
+      expect(block.componentCodeFieldId).toBe(ph(S.PREG, 'componentCode'))
+      expect(Object.keys(block)).toEqual(['state', 'editableFieldIds', 'requiredFieldIds', 'dialogFieldIds', 'parentFieldIds', 'componentCodeFieldId'])
+      // it is one of the six the grid already edits — the block names it once more, on its own, for the parent picker
+      expect(block.editableFieldIds).toContain(block.componentCodeFieldId)
+      expect(block.parentFieldIds).toEqual(pairOf(S.PREG))
+    })
+    it('the actor is asked about ONE column — the row\'s own 图号 — and only once the pair is being sent', async () => {
+      const canRead = vi.fn((fieldId: string) => fieldId === ph(S.PREG, 'componentCode'))
+      expect((await withRead(S.PREG, yes, canRead))!.componentCodeFieldId).toBe(ph(S.PREG, 'componentCode'))
+      expect(canRead.mock.calls).toEqual([[ph(S.PREG, 'componentCode')]])
+    })
+    it('NOT sent when the actor may not read 图号: the pair is still named, the block is otherwise the same', async () => {
+      const readable = (await withRead(S.PREG, yes, yes))!
+      const unreadable = (await withRead(S.PREG, yes, () => false))!
+      expect('componentCodeFieldId' in unreadable).toBe(false)
+      expect(unreadable.parentFieldIds).toEqual(pairOf(S.PREG))
+      const { componentCodeFieldId: _dropped, ...rest } = readable
+      expect(unreadable).toEqual(rest)
+      // …and without a read callback it is never sent (the block is the one the pair alone produced)
+      expect(await withRead(S.PREG, yes, undefined)).toEqual(unreadable)
+    })
+    it.each([
+      ['the actor may not write the pair', 'PREG', () => false],
+      ['no write callback at all', 'PREG', undefined],
+      ['the pair\'s columns carry no lock', 'PAIRUNLOCKED', () => true],
+      ['one pair column carries no lock', 'PAIRHALFLOCKED', () => true],
+      ['a pair column is absent', 'NOPARENTNAME', () => true],
+      ['nothing is locked', 'NOLOCK', () => true],
+    ] as const)('never without parentFieldIds (%s): the block is BYTE-IDENTICAL to the one without the read callback, and the actor is not asked', async (_label, key, canWritePair) => {
+      const canRead = vi.fn(() => true)
+      const block = await withRead(S[key], canWritePair, canRead)
+      expect('parentFieldIds' in block!).toBe(false)
+      expect('componentCodeFieldId' in block!).toBe(false)
+      expect(canRead).not.toHaveBeenCalled()
+      expect(JSON.stringify(block)).toBe(JSON.stringify(await withRead(S[key], canWritePair, undefined)))
+      // …which is what the pure B2 / B3 block function answers
+      expect(JSON.stringify(block)).toBe(JSON.stringify(manualRowsContextBlockOf(await verdictOf(S[key], 'create'), S[key].fields)))
+    })
+    it.each([
+      ['DISABLED', { state: 'disabled' }, ENV_ON],
+      ['ARCHIVED', { state: 'unavailable', reason: 'project_archived' }, ENV_ON],
+      ['PREG', { state: 'unavailable', reason: 'project_sheets_off' }, {}],
+    ] as const)('rule P8 — %s (%j): the pair is still named, so its companion is too', async (key, expected, env) => {
+      const block = (await withRead(S[key], yes, yes, env as NodeJS.ProcessEnv))!
+      expect(block).toMatchObject(expected)
+      expect(block.parentFieldIds).toEqual(pairOf(S[key]))
+      expect(block.componentCodeFieldId).toBe(ph(S[key], 'componentCode'))
+    })
+    it('a sheet WITHOUT a 图号 column: the pair is named, the absent column is not — whatever the callback says', async () => {
+      const sheet = fake.addSheet('NOCODE', { objectId: P(9), omit: ['componentCode'] })
+      const canRead = vi.fn(() => true)
+      const block = (await withRead(sheet, yes, canRead))!
+      expect(block.state).toBe('allowed')
+      expect(block.parentFieldIds).toEqual(pairOf(sheet))
+      expect('componentCodeFieldId' in block).toBe(false)
+      expect(canRead).not.toHaveBeenCalled()
+      expect(JSON.stringify(block)).not.toContain(ph(sheet, 'componentCode'))
+    })
+    it('not P_reg, or a registry that cannot be read: nothing of it', async () => {
+      const canRead = vi.fn(() => true)
+      expect(await withRead(S.ENV, yes, canRead)).toBeNull()
+      expect(await withRead(S.PLAIN, yes, canRead)).toBeNull()
+      fake.failures.target = { code: '08006', message: 'synthetic: connection failure' }
+      expect(await withRead(S.PREG, yes, canRead)).toEqual({ state: 'unavailable', reason: 'registry_unreadable', editableFieldIds: [], requiredFieldIds: [], dialogFieldIds: [] })
+      expect(canRead).not.toHaveBeenCalled()
+    })
+    it('costs no statement of its own', async () => {
+      fake.sqlLog.length = 0
+      await withRead(S.PREG, yes, yes)
+      expect(fake.sqlLog).toHaveLength(2)
+    })
   })
 })
 

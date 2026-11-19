@@ -25,8 +25,8 @@
  *   MR2-RD-06b the in-transaction re-check runs AFTER the sheet fence: a second connection holds the fence and turns the
  *             switch off; the waiting create sees the committed 'disabled' (409, nothing written).
  *   MR2-RD-07 the person field routes cannot touch the switch: PATCH /fields keeps the stored value.
- *   MR2-RD-08 /context: the block is `allowed` with the six editable ids and the parent pair's ids, then `disabled`
- *             after the switch.
+ *   MR2-RD-08 /context: the block is `allowed` with the six editable ids, the parent pair's ids and the row's own 图号
+ *             id beside them, then `disabled` after the switch.
  *
  * ADR §12 (owner-ruled 2026-11-19), slice P1 — 父组件图号 / 父组件名称 of a manual row, on the same real sheets:
  *   MR3-RD-01 新增 with a parent: stored as submitted; the pair's rules P3 / P4 / P5 refuse before any write.
@@ -48,7 +48,8 @@
  *   MR3-RD-09 rows the row policy denies the actor are neither listed nor counted (nor do they vote for a parent's
  *             name) — by the candidates statement and by GET …/manual-parent-dependents; a platform admin sees them.
  *   MR3-RD-10 /context `parentFieldIds`: sent to an actor who may write both columns, withheld when a per-subject rule
- *             makes one of them read-only.
+ *             makes one of them read-only — and `componentCodeFieldId` (the row's own 图号) only beside it, withheld from
+ *             an actor whose field_permissions hide 图号.
  *   MR3-RD-11 the search text is folded by the DATABASE, like the columns it is matched against: text that is not ASCII,
  *             typed as the sheet stores it, is found whatever the database's LC_CTYPE (a "C" database folds ASCII only;
  *             a libc locale folds each character on its own and so never writes JavaScript's word-final sigma).
@@ -500,6 +501,8 @@ export function defineStockPreparationManualRowsHostRealDbCases(): void {
         dialogFieldIds: ['componentName', 'totalQuantity', 'componentCode', 'componentSpec', 'material', 'rawQuantity', 'notes'].map((l) => phys(main, l)),
         // ADR §12.6: the parent pair, for an actor who may write both columns — never among editableFieldIds.
         parentFieldIds: pair(main),
+        // …and, only beside it, the row's own 图号 column for an actor who may read it (the web's self-parent pre-check).
+        componentCodeFieldId: phys(main, 'componentCode'),
       })
       await setSwitch(main, 'disabled')
       try {
@@ -507,6 +510,7 @@ export function defineStockPreparationManualRowsHostRealDbCases(): void {
         expect(disabled.body.data.capabilities.stockPreparationManualRows.state).toBe('disabled')
         // Rule P8: a switched-off sheet still lets an existing manual row's parent be changed, so the ids stay.
         expect(disabled.body.data.capabilities.stockPreparationManualRows.parentFieldIds).toEqual(pair(main))
+        expect(disabled.body.data.capabilities.stockPreparationManualRows.componentCodeFieldId).toBe(phys(main, 'componentCode'))
       } finally {
         await setSwitch(main, 'allowed')
       }
@@ -902,6 +906,7 @@ export function defineStockPreparationManualRowsHostRealDbCases(): void {
       const blockOf = async () => (await http().get('/api/multitable/context').query({ sheetId: main.sheetId })).body.data.capabilities.stockPreparationManualRows
       const unrestricted = await blockOf()
       expect(unrestricted.parentFieldIds).toEqual(pair(main))
+      expect(unrestricted.componentCodeFieldId).toBe(phys(main, 'componentCode'))
       expect(unrestricted.editableFieldIds).not.toContain(pair(main).code)
       expect(unrestricted.editableFieldIds).not.toContain(pair(main).name)
       const created = await create(main, minimal(main))
@@ -911,6 +916,9 @@ export function defineStockPreparationManualRowsHostRealDbCases(): void {
       try {
         const restricted = await blockOf()
         expect('parentFieldIds' in restricted).toBe(false)
+        // its companion goes with it, though 图号 itself is readable for this actor
+        expect('componentCodeFieldId' in restricted).toBe(false)
+        expect(Object.keys(restricted)).toEqual(['state', 'editableFieldIds', 'requiredFieldIds', 'dialogFieldIds'])
         expect(restricted.editableFieldIds).toEqual(unrestricted.editableFieldIds)
         // …and the routes agree: the pair is refused whichever half is sent, the six still work
         expect((await edit(id, parent(main, 'SYN-PARENT-RD', 'Synthetic parent'))).status).toBe(403)
@@ -926,6 +934,20 @@ export function defineStockPreparationManualRowsHostRealDbCases(): void {
         await q('DELETE FROM field_permissions WHERE sheet_id = $1 AND subject_id = $2', [main.sheetId, WRITER.id])
       }
       expect((await blockOf()).parentFieldIds).toEqual(pair(main))
+      // 图号 hidden for the actor (a stored field_permissions row): the pair is still named, the 图号 id is not
+      await q('INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,$3,$4,$5,$6)',
+        [main.sheetId, phys(main, 'componentCode'), 'user', WRITER.id, false, false])
+      try {
+        const hidden = await blockOf()
+        expect(hidden.parentFieldIds).toEqual(pair(main))
+        expect('componentCodeFieldId' in hidden).toBe(false)
+        actor = ADMIN
+        expect((await blockOf()).componentCodeFieldId).toBe(phys(main, 'componentCode'))
+      } finally {
+        actor = WRITER
+        await q('DELETE FROM field_permissions WHERE sheet_id = $1 AND subject_id = $2', [main.sheetId, WRITER.id])
+      }
+      expect((await blockOf()).componentCodeFieldId).toBe(phys(main, 'componentCode'))
     })
 
     test('MR3-RD-11 the search text is folded by the database, like the columns: text that is not ASCII, typed as the sheet stores it, is found whatever the database\'s LC_CTYPE', async () => {

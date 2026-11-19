@@ -13,7 +13,8 @@
  *   EP  PATCH /records/:recordId/manual-fields — the pair with or without the six; P3 / P4; P5 in both directions,
  *       decided under the row lock; P7 over both columns; P8 (archived / switched off / deployment switch off still
  *       edit); PLM rows refused; /patch and PATCH /records still refuse the pair on a manual row (P2).
- *   XP  GET /context — `parentFieldIds` only for an actor who may write both columns, never in `editableFieldIds`.
+ *   XP  GET /context — `parentFieldIds` only for an actor who may write both columns, never in `editableFieldIds`;
+ *       `componentCodeFieldId` (the row's own 图号) only beside it, and only for an actor who may read that column.
  *   O   GET /sheets/:sheetId/manual-rows/parent-options — the gates, the candidates, and that nothing outside the
  *       actor's read sets is listed, matched by `q` or counted (columns travel as NULL, denied rows as ids).
  *   D   GET /records/:recordId/manual-parent-dependents — the gates and the count.
@@ -757,11 +758,14 @@ describe('XP — GET /context: stockPreparationManualRows.parentFieldIds', () =>
   it.each([
     ['a writer', WRITER],
     ['a platform admin', ADMIN],
-  ])('XP-01 %s on a P_reg sheet: both ids, and editableFieldIds is still exactly the six', async (_label, who) => {
+  ])('XP-01 %s on a P_reg sheet: both ids, the row\'s own 图号 id beside them, and editableFieldIds is still exactly the six', async (_label, who) => {
     actor = who
     const block = (await blockOf(S.PREG))!
     expect(block.parentFieldIds).toEqual(pairOf(S.PREG))
     expect(block.editableFieldIds).toEqual(SIX(S.PREG))
+    // the row's own 图号 column: what the web's self-parent pre-check compares a chosen parent with
+    expect(block.componentCodeFieldId).toBe(ph(S.PREG, 'componentCode'))
+    expect(Object.keys(block)).toEqual(['state', 'editableFieldIds', 'requiredFieldIds', 'dialogFieldIds', 'parentFieldIds', 'componentCodeFieldId'])
   })
 
   it.each([
@@ -769,12 +773,14 @@ describe('XP — GET /context: stockPreparationManualRows.parentFieldIds', () =>
     ['父组件图号 read-only for the actor', 'parentComponentCode', { readOnly: true }],
     ['父组件名称 hidden for the actor', 'parentComponentName', { visible: false }],
     ['父组件图号 hidden for the actor', 'parentComponentCode', { visible: false }],
-  ])('XP-02 rule P7 — %s: the block is sent WITHOUT parentFieldIds (and is otherwise unchanged)', async (_label, logical, rule) => {
+  ])('XP-02 rule P7 — %s: the block is sent WITHOUT parentFieldIds — and without its companion componentCodeFieldId, though 图号 is readable (and is otherwise unchanged)', async (_label, logical, rule) => {
     const unrestricted = (await blockOf(S.PREG))!
     deny(S.PREG, logical, rule)
     const block = (await blockOf(S.PREG))!
     expect('parentFieldIds' in block).toBe(false)
+    expect('componentCodeFieldId' in block).toBe(false)
     expect(block).toEqual({ state: unrestricted.state, editableFieldIds: unrestricted.editableFieldIds, requiredFieldIds: unrestricted.requiredFieldIds, dialogFieldIds: unrestricted.dialogFieldIds })
+    expect(Object.keys(block)).toEqual(['state', 'editableFieldIds', 'requiredFieldIds', 'dialogFieldIds'])
   })
 
   it('XP-03 the rule is per subject: another user\'s restriction does not hide the pair from this actor', async () => {
@@ -786,10 +792,13 @@ describe('XP — GET /context: stockPreparationManualRows.parentFieldIds', () =>
     ['PAIRUNLOCKED', 'allowed'],
     ['NOPARENTNAME', 'allowed'],
     ['NOLOCK', 'unavailable'],
-  ])('XP-04 %s: the routes do not accept the pair there — no parentFieldIds (state %s)', async (key, state) => {
+  ])('XP-04 %s: the routes do not accept the pair there — no parentFieldIds, so no componentCodeFieldId either (state %s)', async (key, state) => {
     const block = (await blockOf(S[key]))!
     expect(block.state).toBe(state)
     expect('parentFieldIds' in block).toBe(false)
+    expect('componentCodeFieldId' in block).toBe(false)
+    // exactly the four B2 / B3 keys (and the reason of an unavailable state): what the block was before the pair existed
+    expect(Object.keys(block).filter((key_) => key_ !== 'reason')).toEqual(['state', 'editableFieldIds', 'requiredFieldIds', 'dialogFieldIds'])
   })
 
   it.each([
@@ -799,6 +808,7 @@ describe('XP — GET /context: stockPreparationManualRows.parentFieldIds', () =>
     const block = (await blockOf(S[key]))!
     expect(block).toMatchObject(expected)
     expect(block.parentFieldIds).toEqual(pairOf(S[key]))
+    expect(block.componentCodeFieldId).toBe(ph(S[key], 'componentCode'))
   })
 
   it('XP-06 rule P8 — the deployment switch off: unavailable / project_sheets_off, the ids still sent', async () => {
@@ -806,11 +816,43 @@ describe('XP — GET /context: stockPreparationManualRows.parentFieldIds', () =>
     const block = (await blockOf(S.PREG))!
     expect(block).toMatchObject({ state: 'unavailable', reason: 'project_sheets_off' })
     expect(block.parentFieldIds).toEqual(pairOf(S.PREG))
+    expect(block.componentCodeFieldId).toBe(ph(S.PREG, 'componentCode'))
   })
 
   it('XP-07 a registry that cannot be read: the fail-closed block, no ids', async () => {
     fake.failures.target = { code: '42501', message: 'synthetic: permission denied' }
     expect(await blockOf(S.PREG)).toEqual({ state: 'unavailable', reason: 'registry_unreadable', editableFieldIds: [], requiredFieldIds: [], dialogFieldIds: [] })
+  })
+
+  describe('XP-09 componentCodeFieldId follows the actor\'s READ of the row\'s own 图号', () => {
+    it('图号 hidden for the actor: the pair is still named (a new row can still be given a parent), the 图号 id is not', async () => {
+      const unrestricted = (await blockOf(S.PREG))!
+      deny(S.PREG, 'componentCode', { visible: false })
+      const block = (await blockOf(S.PREG))!
+      expect(block.parentFieldIds).toEqual(pairOf(S.PREG))
+      expect('componentCodeFieldId' in block).toBe(false)
+      expect(Object.keys(block)).toEqual(['state', 'editableFieldIds', 'requiredFieldIds', 'dialogFieldIds', 'parentFieldIds'])
+      // nothing else moved (the six are named whatever the actor may do with them, as before)
+      const { componentCodeFieldId: _dropped, ...rest } = unrestricted
+      expect(block).toEqual(rest)
+    })
+    it('图号 read-only for the actor is still readable: the id is sent', async () => {
+      deny(S.PREG, 'componentCode', { readOnly: true })
+      expect((await blockOf(S.PREG))!.componentCodeFieldId).toBe(ph(S.PREG, 'componentCode'))
+    })
+    it('the rule is per subject: another user\'s restriction on 图号 does not hide the id from this actor', async () => {
+      deny(S.PREG, 'componentCode', { visible: false }, 'u_mrp1_someone_else')
+      expect((await blockOf(S.PREG))!.componentCodeFieldId).toBe(ph(S.PREG, 'componentCode'))
+    })
+    it('a platform admin is not that subject either', async () => {
+      deny(S.PREG, 'componentCode', { visible: false })
+      actor = ADMIN
+      expect((await blockOf(S.PREG))!.componentCodeFieldId).toBe(ph(S.PREG, 'componentCode'))
+    })
+    it('a column of ANOTHER name hidden (名称) changes nothing here', async () => {
+      deny(S.PREG, 'componentName', { visible: false })
+      expect((await blockOf(S.PREG))!.componentCodeFieldId).toBe(ph(S.PREG, 'componentCode'))
+    })
   })
 
   it('XP-08 a reader gets no block; an ordinary sheet and the env table get none — and the pair costs no statement of its own', async () => {
