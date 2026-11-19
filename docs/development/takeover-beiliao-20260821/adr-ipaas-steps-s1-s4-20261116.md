@@ -51,10 +51,10 @@
 | Q9 | 续跑与重试 | 首批没有续跑（Q8）。整次重试不恢复读输出——读步骤重读。续跑恢复随快照一起后置：两条续跑道、三个挂起点、整条规则的指纹都要逐一规定 | T 层默认 | §5.4、§5.5 |
 | Q10 | 转换步骤 | 新动作 `transform_records`：纯函数、零 IO，宿主在 core，把 `transform-engine.cjs` 当作单个纯函数注入（`yida-automation-preview.ts:148-194` 的做法） | T 层默认 | §6 |
 | Q11 | 宜搭 v3 映射怎么「表达在它上面」 | **v5：步骤内只调规划器**（owner 2026-11-19 就 OQ6 取 ADR 自带的退路）：宜搭方言的转换步骤只调用静态规划器、发布规划器一侧的行，不做引擎表达；发送路径照旧不读转换步骤的产物。原稿的「编译成映射规格 + 两个闭合扩展函数 + 影子对拍」挪到 §11（拉入条件照 R-87） | owner 2026-11-19（§12 OQ6，取退路） | §6.3、§11 |
-| Q12 | 出网守卫 | 现有两套守卫都是「只许 https + 禁内网」（`webhook-ssrf-guard.ts:98-114`，`egress-guard.ts:149-187`），而登记系统按设计允许 http 与内网（`http-adapter.cjs:67-76`），不能套用。本线的围栏按种类分别成立（§2 ⑧）：目的地只能是已登记系统的 origin；`http` 上「请求的路径与方法 = 已批准配置」**不是现有链的事实**，由 S1-b 强制；K3 的读路径与方法来自已批准配置，**例外**是 `material` 对象在登记系统里的条目选了具名档案（今天唯一的是只存物料档案）——那时线上走的是档案字面量的路径、方法与键字段，所以「请求 = 已批准配置」在 K3 上同样由 S1-b 强制（选了档案的条目即拒）；登录与取令牌的路径来自系统配置；桥与 SQL 只读源不用配置里的路径。不跟随重定向；origin 或认证身份变更必须重给认证材料 | T 层默认 | §3.2、§7 |
-| Q13 | 开关 | 三个新 env 开关，默认关、只认原文 `true`、登记 flag manifest；其中写开关只登记不读 | T 层默认（打开 = O 层） | §7.8 |
+| Q12 | 出网守卫 | 现有两套守卫都是「只许 https + 禁内网」（`webhook-ssrf-guard.ts:98-114`，`egress-guard.ts:149-187`），而登记系统按设计允许 http 与内网（`http-adapter.cjs:67-76`），不能套用。本线的围栏按种类分别成立（§2 ⑧）：目的地只能是已登记系统的 origin；`http` 上「请求的路径与方法 = 已批准配置」**不是现有链的事实**，由 S1-b 强制；K3 的读路径与方法来自已批准配置，**例外**是 `material` 对象在登记系统里的条目选了具名档案（今天唯一的是只存物料档案）——那时线上走的是档案字面量的路径、方法与键字段，所以「请求 = 已批准配置」在 K3 上同样由 S1-b 强制（选了档案的条目即拒）；登录与取令牌的路径来自系统配置；桥与 SQL 只读源不用配置里的路径。不跟随重定向；origin 或认证身份变更必须重给认证材料。**v5（形态 B）**：首片只准入 `data-source:sql-readonly`，它不经 HTTP；上面各 HTTP 种类的围栏作为锁定契约保留，随该种类准入一起交付（§3.2、§11） | T 层默认 | §3.2、§7 |
+| Q13 | 开关 | 四个新 env 开关（v5 加了落点的那一个），默认关、只认原文 `true`、登记 flag manifest；其中写开关只登记不读 | T 层默认（打开 = O 层） | §7.8 |
 | Q14 | 真实客户读怎么放行 | O ①：开关、读源配置的批准、每个系统 / 操作逐项由 owner 批；K3 种类另加客户侧只读账号这条硬前置。部署已武装 B2a 时再加登记——**一条登记只授权一次读**，不是长期授权（形态见 OQ8） | O | §7.9、§8 |
-| Q15 | 哪些切片可以交给第三个实现方（Grok） | 按 R-95 与接入说明：只接书面任务卡里边界清楚的切片——本线是动作配置面板、编写模块、标签与摘要及其 spec，加只含测试的对拍语料；守卫、凭据、锁、迁移判定、出站写闸、日志隔离、开关清单与车道接线一律不给 | 已由 R-95 裁定（`decision-register.md:100`） | §10.4 |
+| Q15 | 哪些切片可以交给第三个实现方（Grok） | 按 R-95 与接入说明：只接书面任务卡里边界清楚的切片——本线是动作配置面板、编写模块、标签与摘要及其 spec（v5：对拍语料随 OQ6 的退路挪到 §11，不再有）；守卫、凭据、锁、迁移判定、出站写闸、日志隔离、开关清单与车道接线一律不给 | 已由 R-95 裁定（`decision-register.md:100`） | §10.4 |
 
 ---
 
@@ -149,7 +149,7 @@
 
 ### 1.11 线索与代码的五处不一致（代码为准）
 
-1. **「S4 = 把宜搭规划器搬到 transform-engine 上，补 #6711 的缺口」**：那几种转换已经由 v3 在规划器内部实现（§1.7），而规划器带导入钉子、还要在浏览器里跑，**不能反过来依赖引擎**。所以 S4 不是搬家，是对拍。→ Q11。
+1. **「S4 = 把宜搭规划器搬到 transform-engine 上，补 #6711 的缺口」**：那几种转换已经由 v3 在规划器内部实现（§1.7），而规划器带导入钉子、还要在浏览器里跑，**不能反过来依赖引擎**。所以 S4 不是搬家，是对拍。→ Q11。（v5：OQ6 取了退路，连对拍也不做，步骤内只调规划器，§6.3。）
 2. **「要为真实读新建一个具名操作目录」**：已批准的读源配置就是具名、有版本、有批准流的读操作，而且已有只收业务键的运行时路由（§1.4）。→ Q1。
 3. **「出网守卫可以复用」**：两套守卫都拒 http 与内网（§1.5），登记系统两者都要。→ Q12。
 4. **「S0-b 之后适配器已经拒重定向、换源会重绑」**：在本基线上都不成立（§1.2、§1.3）。那项工作在另一条线，状态见文末附注。→ §7.3、§7.5、OQ5。
@@ -163,25 +163,25 @@
 
 ③ **一条链、两个调用方。** HTTP 路由与端口调用同一个 req-less 受治理入口；不得出现「端口版」的第二套检查，插件不得对收到的主体上下文加宽、补默认或另读权限（桥 ADR §2 ③ 的原话，这里照用）。自动化调用方与 HTTP 调用方之间唯一有意的差别是页内行上限（§3.1 的 `rowCap`）：它不碰主体上下文，也不碰任何一项权限。
 
-④ **本线只读。** 端口上没有写方法；引用写目标配置的规则保存即 400、不读任何开关；写开关只登记不读。这是结构上的，不是靠开关关着。
+④ **对外部系统只读。** 端口上没有写方法；引用写目标配置的规则保存即 400、不读任何开关；写开关只登记不读。这是结构上的，不是靠开关关着。**v5 的唯一例外是内部的一写**：落点切片 S4-e 经既有的宜搭 owner 草稿入口，往宜搭的本地草稿库存一份发往 1 号槽测试副本的草稿（§6.5）。它不经端口、不发宜搭，有自己的默认关开关，打开后属 O ②。
 
 ⑤ **步骤数据不进日志。** 步骤产生的值只进运行内通道；`step.output` 由宿主从枚举与计数重建，键集闭合。引用语法是闭集（§5.2），解析器是新写的严格函数，不复用 `lookupTemplateValue`。
 
 ⑥ **首批不持久化步骤输出。** 输出只活在一次执行的内存里；带新动作的规则不得含任何会挂起的动作（保存即拒，按位置遍历，含分支内的 `wait_for_callback`）。跨挂起的快照与续跑恢复后置（§11），它必须满足的契约记在 §5.4——恢复不信任快照；两条续跑道与三个挂起点逐一规定；整条规则的指纹对不上即拒；被脱敏的单元格被引用即失败关闭。
 
-⑦ **转换是纯函数；宜搭的权威不搬家。** `transform_records` 没有 IO。宜搭 v3 在它上面有一份等价表达，但发送路径继续用规划器自己编译；两者不一致时错的是转换步骤，并且会让步骤失败、不会静默通过。
+⑦ **转换是纯函数；宜搭的权威不搬家。** `transform_records` 没有 IO。v5 按 OQ6 的退路：宜搭方言的步骤只调规划器、发布规划器一侧的行，不在引擎上另做一份表达（那份表达与对拍挪到 §11）；发送路径继续用发送编译器自己编译，不读转换步骤的产物。
 
-⑧ **围栏不靠 URL 检查，并且按种类分别成立。** 四个准入种类共有的：目的地只能是已登记系统的 origin；规则作者与步骤数据到不了路径、动词、请求头与请求体，步骤数据只能填配置声明的业务键；不跟随重定向；origin 或认证身份变更必须重给认证材料（§7.5）；出站写门不加任何旁路或新参数。「路径只来自已批准配置」**不是现有链的共同事实**，要一个种类一个种类地说：
+⑧ **围栏不靠 URL 检查，并且按种类分别成立。**（v5：形态 B 首片只准入 `data-source:sql-readonly`，它没有 HTTP，适用的只有本条最后一项。下面关于 `http`、K3 与桥的规定是锁定的契约，随该种类准入一起交付，§3.2、§11。）四个种类共有的：目的地只能是已登记系统的 origin；规则作者与步骤数据到不了路径、动词、请求头与请求体，步骤数据只能填配置声明的业务键；不跟随重定向；origin 或认证身份变更必须重给认证材料（§7.5）；出站写门不加任何旁路或新参数。「路径只来自已批准配置」**不是现有链的共同事实**，要一个种类一个种类地说：
 - `http`：登记系统里同名对象的对象形条目会盖过已批准的路径与方法，并把它自己的查询参数与请求头并进请求（§3.2）。「请求 = 已批准配置」这条性质由 S1-b **强制**——带这类键的对象条目即拒，外加 wire 上的（方法, 路径）断言——不是继承来的。
 - `erp:k3-wise-webapi`：读路径与方法来自已批准配置，**只有一个例外**：被引用对象是 `material`、而登记系统里它的条目带 `profile` 键选了具名档案时，适配器把档案当作合并的底（`k3-wise-webapi-adapter.cjs:716-735`），合并之后对只存（save-only）档案再把档案拥有的请求键——含 `readPath`、`readMethod`、`keyField`——从档案字面量重钉一遍，并删掉档案不声明的键——含读模式、列表上限与读请求体模板（`:77-90,734,747-769`）。今天登记的档案只有一个，就是只存的物料档案，它有自己的读路径与 `POST`（`k3-wise-document-templates.cjs:177-200,240-242`）。于是已批准的路径与方法到不了 wire：单条读的证据照样答成功，列表读以 `READ_SOURCE_PROBE_REJECTED` 失败（§3.2）。所以 K3 上「请求 = 已批准配置」同样由 S1-b **强制**——选了档案的条目即拒，外加 wire 上的（方法, 路径）断言——不是继承来的。登录与取令牌的路径、（未选档案时）读请求体的模板来自系统配置。「K3 写永久拒绝」说的是 `upsert` / apply 面；读腿只被一张不闭合的词表拦着（§7.7），可证明的保证是客户侧的只读账号。
 - `bridge:legacy-sql-readonly`：配置里的路径与方法根本不参与请求——永远是向本机 Bridge Agent 的 `POST /query/<对象名>`。
 - `data-source:sql-readonly`：没有 HTTP；对象名与等值过滤经宿主的数据源门面。
 
-⑨ **三个开关**（§7.8）：连接调用、连接调用的写（只登记）、步骤输出与转换。保存时与每次触发时都读原文；关着的动作在触发时记 `skipped(action_disabled)`，不静默成功。本文的 `skipped(…)`、`not_started(…)`、`failed(…)` 都是 `output.outcome(reason)` 的写法，不是步骤状态：三者的步骤状态一律是 `failed`，规则停在这一步（§4.8）。
+⑨ **四个开关**（§7.8）：连接调用、连接调用的写（只登记）、步骤输出与转换，以及 v5 的落点（测试副本草稿）。保存时与每次触发时都读原文；关着的动作在触发时记 `skipped(action_disabled)`，不静默成功。本文的 `skipped(…)`、`not_started(…)`、`failed(…)` 都是 `output.outcome(reason)` 的写法，不是步骤状态：三者的步骤状态一律是 `failed`，规则停在这一步（§4.8）。
 
-⑩ **词表与表的变化**：动作 CHECK 增 `call_connection`、`transform_records`（各一支迁移，形式同 `zzzz20261106111300…:14-39`）；**本线不新增表**（步骤输出的快照表随 S2-b 后置，§11）；B2a 用途闭集增一项（`b2a-trial-registry.cjs:205-218`）。**出站写门的操作词表在本线不动**（`outbound-http-write-gate.cjs:194-197` 仍是 `upsert`、`request` 两项，由测试钉死）。
+⑩ **词表与表的变化**：动作 CHECK 增 `call_connection`、`transform_records`（各一支迁移，形式同 `zzzz20261106111300…:14-39`）；**本线不新增表**（步骤输出的快照表随 S2-b 后置，§11；v5 的落点写的是既有的宜搭本地草稿表，经既有入口，§6.5）；B2a 用途闭集增一项（`b2a-trial-registry.cjs:205-218`）。**出站写门的操作词表在本线不动**（`outbound-http-write-gate.cjs:194-197` 仍是 `upsert`、`request` 两项，由测试钉死）。
 
-⑪ **首片的放置限制**（都在保存时校验）：新动作只在顶层、不进任何分支；规则不带条件；触发器只许两种定时，相邻两次触发不得近于 15 分钟（cron 同样算，§4.4）；一条规则里的 `call_connection` 至多 8 步（§5.6）；不与任何会挂起的动作同处一条规则——`start_approval`、顶层的与分支内的 `wait_for_callback`，判定按位置遍历分支子步（后置的 S2-b 交付后解除，§11）；不上按钮路由；真发测试不支持。每一条限制都写明解除它的切片或问题编号，不留「以后再说」。
+⑪ **首片的放置限制**（都在保存时校验）：新动作只在顶层、不进任何分支；规则不带条件；触发器只许两种定时，相邻两次触发不得近于 15 分钟（cron 同样算，§4.4）；一条规则里的 `call_connection` 至多 8 步（§5.6）；不与任何会挂起的动作同处一条规则——`start_approval`、顶层的与分支内的 `wait_for_callback`，判定按位置遍历分支子步（后置的 S2-b 交付后解除，§11）；不上按钮路由；真发测试不支持；v5 的点选行声明（§6.4）只在预览与存草稿两条路由上可用，带它的规则不能启用。每一条限制都写明解除它的切片或问题编号，不留「以后再说」。
 
 ## 3. S1：连接请求服务与 req-less 受治理入口
 
@@ -190,7 +190,12 @@
 把 `readSourceConfigsRead`（`http-routes.cjs:8559-8629`）的整条链原样抽成接受主体上下文的函数，签名与两个既有入口同形：`(principalContext, { configId, workspaceId?, inputs, rowSource }, options?)`。链上的每一步都不变、顺序不变：读层权限 → 请求体闭合校验 → 只取已批准版本 → 准备读计划 → 用后端凭据上下文加载系统并比对种类 → 执行 → `{ evidence, data }`。`runAs:'user'` 仍由入口内部的 `scopedAdapterInput` 盖（`:1832-1838`），调用方盖不了。第二个参数里的 `workspaceId` 是可选的查找提示：它进 `scopedInput` 的 input 位，而 `resolveWorkspaceId` 本来就先读 input、再读 query 与 params（`:1817-1827`）；配置行与外部系统两次查找用同一个值。HTTP 处理器不传它，仍只从 query / params 取。
 
 - HTTP 处理器改成「用 `req` 构造上下文（`http-routes.cjs:2138-2145`）后调用、不传 `options`、也不传 `workspaceId`」。**对外逐字节不变**：请求形状、状态码、成功体、错误体都不变，以既有路由测试加一组失败路径的响应体快照为验收。
-- `options` 至多五个可选成员，**全部缺省就是今天的行为**（HTTP 处理器一个都不传）。前四个只能收紧；第五个 `rowCap` **会放宽**页内行上限，所以把它放宽什么、凭什么放宽单独写明：
+- `options` 至多五个可选成员，**全部缺省就是今天的行为**（HTTP 处理器一个都不传）。**v5 按切片分**，`acceptance-S1-a.md` 也按这个写：
+  - S1-a 只交 `signal` 与 `checkpoint`，外加第二个参数里可选的 `workspaceId`。它的入口对 `options` 做闭合键集校验，只收这两个键，别的键（包括下面三个名字）一律在入口拒绝。
+  - `readPurpose` 与 `rowCap` 随 S1-b 加入。
+  - `transport: 'strict'` 随第一个 HTTP 种类的准入加入（§3.2、§11）。
+
+  每一次加键都是闭合键集的一次显式扩充，带它自己的拒绝测试。前四个只能收紧；第五个 `rowCap` **会放宽**页内行上限，所以把它放宽什么、凭什么放宽单独写明：
   - `signal`、`checkpoint`：既有接缝，在加载凭据之前、每次出站读之前各过一次检查点（`governed-entry-checkpoint.cjs:94-110`）；都不传时不多一个 await（`:69-88`）。
   - `transport: 'strict'`：一个闭合的枚举值，只能收紧。适配器是在入口自己的闭包里建的（`http-routes.cjs:8609`），执行器只带一个参数调用它（`read-source-read-runtime.cjs:400-401`），所以 §3.2 的传输包装只能由入口装上；调用方给的是这个字面量，**给不了函数**。入口在这个模式下还做两件事：建适配器之前按种类算出本次调用允许的（方法, 路径）清单，并拒绝会改写请求的系统侧对象条目（§3.2）；把包装看到的闭合事实——出站次数、是否见到 3xx、是否被出站写门拒绝、包装自己拒绝了哪一个请求以及是哪一类（origin 不符 / 不在清单内）——连同执行器的内部页对象，以**不可枚举**成员挂在返回值上（执行器对内部页就是这么做的，`read-source-read-runtime.cjs:534-543`）。HTTP 处理器只取 `evidence` 与 `data` 两个成员回给调用方（`http-routes.cjs:8613`），响应字节不变。
   - `readPurpose`：一个 B2a 用途常量，只能多加一道围栏（§3.2）。
@@ -203,6 +208,8 @@
 
 - **读开关**：`INTEGRATION_AUTOMATION_CALL_CONNECTION_ENABLED` 在出站之前再读一次原文（第三个读取点，§7.8）。
 - **准入的连接器种类是闭集**：首片 `http`、`erp:k3-wise-webapi`、`bridge:legacy-sql-readonly`（三者的适配器都接受注入的 `fetchImpl`，传输包装因此装得上，见下一条）与 `data-source:sql-readonly`（不走 HTTP，凭据在规范连接里，`external-systems.cjs:1065-1091`）。表外种类记 `skipped(kind_not_admitted)`。`plm:yuantus-wrapper` 的传输在宿主的 PLM 能力里，本 ADR 没有核它的重定向行为，核实之前不纳入。加一个种类 = 改这张表的源码 + 一条传输评审。
+  - **v5（形态 B）：首片的准入表只有 `data-source:sql-readonly` 一项。** 场景要读的是客户的 PLM，而客户的 PLM 在现场就是按这个种类登记的只读数据源（`222-deploy-window-runbook-20260901.md:725`、`customer-delivery-guide-20260904.md:315` @e0e4406bf）。插件自己认作 PLM 来源的种类有三个（`stock-preparation-readonly-source-run.cjs:77-80` @e0e4406bf），另两个是 `plm:yuantus-wrapper`（未核传输，见上）与桥。现场今天用的是不是仍是这一种，要随附注 8 的现场计数再核一次。`http`、`erp:k3-wise-webapi`、`bridge:legacy-sql-readonly` 三种挪到 §11，拉入条件是一个用到该种类、有客户出处的场景。
+  - 因此本节下面只对 HTTP 种类成立的几条——传输包装（不跟随重定向、同源、（方法, 路径）清单）、系统侧对象条目的拒绝、出站写门拒绝的识别——**作为锁定契约保留，不随首片交付**，随第一个 HTTP 种类的准入一起交付并见证红（§10.1）。SQL 只读源上服务**不传** `transport`。对它成立的是：B2a、在途上限、两个面分开回、适配器建立时的拒绝、完整性判定，以及 §4.5 的属主检查。
 - **不跟随重定向、只去登记的 origin、只发批准过的请求**：服务调用入口时固定传 `transport: 'strict'`，入口据此在 `createAdapter(system, { principal, fetchImpl })` 里装上一个包装（`lib/contracts.cjs:223-236` 把 `deps` 交给工厂）。包装对适配器发出的**每一个**请求做三件事。一，加 `redirect: 'manual'`：3xx 于是不会引出第二个请求。它在适配器眼里只是一个普通的非 2xx，而配置读的证据词表是闭合的、没有「重定向」这一项（`read-source-probe-contract.cjs:45-61`），所以由包装自己把「见到 3xx」记进内部通道（§3.1），服务据此归为 `failed(redirect_refused)`。二，发出前断言请求 URL 的 origin 等于登记系统的有效 origin（按该适配器自己的键序取，§7.5）。三，断言（方法, 路径）在入口为本次调用算出的闭合清单里，清单外的请求不发出。路径比较的是 URL 规范化之后的 pathname，清单项按同一规则规范化：已批准路径的守卫只拒 `..` 段、不拒单点段（`read-source-config.cjs:112,116`），而单点段在 URL 解析时被去掉——假 fetch 实测，`http` 与 K3 两个适配器发到 wire 上的都是去掉之后的路径。二、三两条是包装**自己**的拒绝：被拒的请求不发出，事实记进内部通道（§3.1），服务对外归为 `failed(origin_refused)` 或 `failed(request_not_allowed)`（§4.8），不落到 `source_error`。K3 的登录 / 取令牌腿排在读腿之前（`k3-wise-webapi-adapter.cjs:2103-2106,2333-2336`），读腿被拒时同一次调用可能已经发出过登录请求，所以这两个原因的 `outcome` 是 `failed` 而不是 `skipped`。清单按种类：
   - `http`：恰好一项——已批准配置的方法与路径（路径按适配器的规则补前导 `/`）。
   - `erp:k3-wise-webapi`：读腿一项——已批准配置的方法与路径，按适配器自己的拼接规则拼上基路径（`k3-wise-webapi-adapter.cjs:429-442`）。**这一项只从已批准配置算，永远不得用档案的路径或方法加宽**：选了档案的条目在前一道就被拒（下文「系统侧不得改写已批准的请求」），包装若看到档案的路径，说明前一道失灵了，正确的结果是 `request_not_allowed`，不是把档案路径补进清单。登录与取令牌两条腿的路径来自系统配置（`k3-wise-webapi-adapter.cjs:1797-1798`），清单按系统配置列出它们；对这两条腿成立的只是「同 origin、路径在清单里」，**不是**「等于已批准配置」。
@@ -233,7 +240,7 @@ ConnectionCallPort = {
 
 - 登记与解绑照 `IntegrationRunPort`：`context.services.connectionCall.register(port)` 只对 `plugin-integration-core` 开放，按插件名记 owner，卸载 / 重载即解绑，缺席即 `port_inactive`（`integration-run-port.ts:132-156`；`core-backend/src/index.ts:3710-3718,1838-1841`）。
 - **键集恰好这两个方法**，由测试按集合相等钉住：没有写、没有 `testConnection`、没有「按路径请求」。
-- `operation` = `{ kind, configId, workspaceId, contentKey }`（§4.1）。`automation` = `{ executionId, stepPath, origin }`，`origin` 是闭集 `schedule` / `steps_preview`，由 core 填：服务用它拼 B2a 的 `runId`，并在已武装的部署上区分定时读与预览读（§3.2）。契约里**没有**行上限、超时、路径、方法这些键。
+- `operation` = `{ kind, configId, workspaceId, contentKey }`（§4.1）。`automation` = `{ executionId, stepPath, origin }`，`origin` 是闭集 `schedule` / `steps_preview` / `steps_draft`（v5 加了最后一项，S4-e 的存草稿路由，§6.5），由 core 填：服务用它拼 B2a 的 `runId`，并在已武装的部署上区分定时读与人点击触发的读（§3.2；`steps_draft` 与 `steps_preview` 同等对待）。契约里**没有**行上限、超时、路径、方法这些键。
 - **准入的读模式是闭集，按数据面的形状定**（§1.4）：首片只收 `list_page` 与 `single_record`——数据面是单个 `primary` 容器，服务取它组成 `rows`。`detail_with_lines`（表头与明细两个容器）与 `resolver_lookup`（绕过容器面、只回一对 `{ target, value }`）在 `describeRead` 时即拒，`reason` 是 `mode_not_admitted`。判定用配置的 `mode` 本身，**不用** `plan.containers`——解析模式的计划也报一个 `primary` 容器。`resolver_lookup` 最自然的映射是一行一列的输出，后置到 §11：首片的键值查找用 `single_record` 加 `first.<列>` 就够，多候选的裁决规则是另一件事。
 - **取行面由服务端按种类盖章，不由规则作者选**：`data-source:sql-readonly` 固定 `adapter_records`（它没有原始响应，§1.4），其余三个种类固定 `raw_containers`——工作台缺省读用的那个面，也就是集成管理员验证字段映射时看到的那个面。`describeRead` 把它随 `mode` 一起返回，保存时盖进配置，触发时比对。
 - **列名必须是扁平标识符**：`columns` 取自配置 `fieldMap` 的目标名，而那里的校验允许点号、冒号、连字符与数字开头（`read-source-config.cjs:84-86,124-128`），执行器自己的注释也写明 `constructor` / `toString` / `valueOf` 都是会被接受的目标名（`read-source-read-runtime.cjs:466-468`）。`describeRead` 因此拒绝任何目标名不满足 `^[A-Za-z_][A-Za-z0-9_]{0,63}$`、或等于 `__proto__` / `prototype` / `constructor` 的配置，`reason` 是 `columns_not_admitted`。不这样做，`first.<列>` 落不进引用语法（§5.2），带点号的列对引用语法与引擎的点号路径都有歧义。
@@ -261,6 +268,7 @@ ConnectionCallPort = {
   binding:    { principalId, tenantId } }          // 服务端盖章，客户端值丢弃
 ```
 
+- v5 的两处增补（点名场景用，§6.4）：一，规则的第一个 `call_connection` 可以多带一个闭合键 `rowInput: { columns: { <行列名>: <字段 id> } }`；二，`inputs.key` 还可以是 `'{{row.<行列名>}}'`（§5.2）。带 `rowInput` 的规则不能启用。
 - 除此之外的任何键 → 保存 400。**负对照必须逐个有测试**：`url`、`baseUrl`、`host`、`path`、`method`、`headers`、`body`、`query`、`timeoutMs`、`credentials`、`rowCap`、`limit`。超时与行上限都不是配置项：前者是配置读的平台常量（§1.4），后者是入口自己的常量（§3.1）。
 - `operation.kind` 是闭集 `{ read_source_config, write_target_config }`。**`write_target_config` 在本线保存一律 400、不读开关**——开关只是预留的名字与登记，一次提前的开关翻转造不出「可保存却没有实现」的规则（桥 ADR §3.1 对 `apply_when_ready` 的同一做法）。读源组合（两跳，`http-routes.cjs:44`）不在词表里，要加另议。
 - `operation.workspaceId`、`contentKey`、`rowSource`、`connection`、`output`、`binding` 都是服务端盖章：保存时调用 `describeRead`，把返回值写进配置；触发时重新 `describeRead` 并比对，`contentKey`、取行面或列集对不上即 `skipped(operation_changed)`，按盖章的 workspace 找不到那一行即 `skipped(operation_not_found)`。「声明 = 事实」每次都验，不是只在保存时。
@@ -387,10 +395,13 @@ ConnectionCallPort = {
 | `output_not_scalar` | core：结果消毒 | `failed` | `failed` | 是 |
 | `output_too_large` | core：§5.6 的上限 | `failed` | `failed` | 是 |
 | `transform_failed` | core：`transform_records` 任一行出错（§6.1） | `failed` | `failed` | 不适用（无 IO） |
-| `parity_violation` | core：宜搭方言两侧不一致（§6.3） | `failed` | `failed` | 不适用 |
 | `yida_plan_rejected` | core：规划器拒绝这一批（§6.3） | `failed` | `failed` | 不适用 |
+| `row_unavailable` | core（v5）：点选的那一行不在规则所在的表上、操作者读不到它、或它缺声明列（§6.4） | `not_started` | `failed` | 否 |
+| `draft_refused` | core（v5）：S4-e 借用的宜搭 owner 草稿入口拒绝了这一写——发送开关未开、不是锚点 owner、1 号槽不可用或输入不合格，细分只在闭合的 `errorClass`（§6.5） | `failed` | `failed` | 读：是；草稿：未写 |
 
 `errorClass` 只取证据面已经钳进闭集的错误码（§3.2），从不取适配器的原始错误码、类名或消息文本。
+
+**v5 的两点说明。** 一，`parity_violation` 随 OQ6 的退路一起挪到 §11，不再产生。二，`system_overrides_request`、`write_gate_refused`、`redirect_refused`、`origin_refused`、`request_not_allowed` 这五个原因只在 HTTP 种类上出现；形态 B 的首片不准入 HTTP 种类，这五个原因在首片里永远不出现。它们留在词表里，等那些种类准入时用（§3.2）。
 
 ### 4.9 登记点清单
 
@@ -443,6 +454,7 @@ ConnectionCallPort = {
 - **整值绑定，不做插值**：首片只接受「整个字符串恰好是一个 `{{引用}}`」，值按原类型交给使用方；混排文本另议。这样步骤数据拼不进任何更长的串里。
 - **行集不走模板**：把整个行集交给下一步，用结构化引用 `source: { fromStep }`（§6.1），与合成片的 `StepInputRef` 同形（`automation-run-values.ts:52-57`）。
 - **谁能用引用**：首片只有 `call_connection.inputs.key`（标量）与 `transform_records.source`（行集）。既有动作的模板继续走 `renderAutomationTemplate`，其模板数据里没有 `steps`——所以保存时就拒绝（§4.4），而不是让它在运行时渲染成空串。含花括号的模板与不带花括号的裸路径表达式都在拒绝之列（§4.4）。
+- **v5 加一个引用根 `row.`**（只为点名场景，§6.4）。写法是 `'row.' 行列名`，行列名必须在规则声明的 `rowInput.columns` 里。它只用在两个位置：`call_connection.inputs.key`，整值绑定、标量；以及 `transform_records.source.withRow: true`，把点选的那一行的声明列并进源步骤的每一行。带 `rowInput` 的规则不能启用定时（§6.4），所以这个引用只在预览与存草稿两条路由上有值。没有点选行时一律 `not_started(input_unresolved)`，不出站。
 - **解析器是新写的**：只按声明的列取自有属性，拒绝 `__proto__` / `prototype` / `constructor`，不复用 `lookupTemplateValue`（它不防原型链、对函数值会渲染出字面的 `undefined`，`automation-executor.ts:309-328`）。
 
 ### 5.3 运行内通道
@@ -498,13 +510,13 @@ ConnectionCallPort = {
 - 新动作的 `step.output` 键集闭合（§4.8），由宿主从枚举与计数重建，**不是**从原始结果展开后删字段（冻结基线 §10.3.1 的原则）。行摘要与计划摘要是值的派生物，对低熵的值可以被枚举还原，同样不进日志。
 - 验收用哨兵值：让一组带唯一标记的合成值流过一次完整执行（成功、失败、超时各一条路径），然后在 `multitable_automation_executions` 的四个自由形列、`multitable_automation_jobs.result`、出站意图表、发件箱、应用日志、指标标签与异常的 `cause` 里搜这个标记，命中数必须为 0；同一测试对运行内通道断言命中数**大于 0**——那是它该在的地方，也是这条测试不是空转的证明。哨兵还要放进一处对端可控的位置：桥对端响应体里的错误码（§3.2），它同样不得出现在任何持久面。这条测试由 S3-a2 交付——它是第一个有值流过一次真实执行的切片；S2-a 只能证明内存里的那一半（§10.2）。
 
-## 6. S4：转换步骤，以及宜搭 v3 映射在它上面的表达
+## 6. S4：转换步骤、宜搭 v3 方言、预览与落点
 
-### 6.1 动作 `transform_records`（通用方言，切片 S4-a）
+### 6.1 动作 `transform_records`（切片 S4-a：通用方言，加 v5 只调规划器的宜搭方言）
 
 ```
 { stepKey,
-  source:  { fromStep },                        // 前序的、声明了输出的步骤
+  source:  { fromStep, withRow? },              // 前序的、声明了输出的步骤；withRow（v5）见 §5.2、§6.4
   mapping: { dialect: 'field_mappings_v1', fieldMappings: [ { sourceField?, targetField, transform?, defaultValue? } ] }
          | { dialect: 'yida_form_protocol_static_v3', config, allocation: { mode: 'original' } },
   output:  { columns: string[] } }              // 服务端从映射推导并盖章
@@ -522,48 +534,33 @@ ConnectionCallPort = {
 | 读路径按点号逐段取属性、不防原型链，`a[]` 表示取数组首元素（`transform-engine.cjs:34-52`）；`concat` 的 `fields` 参数走同一条读路径（`transform-engine.cjs:183`） | 三层，只限制 `sourceField` 一处是不够的：保存时把 `sourceField` 与转换参数里的字段名都限制为声明列的名字（无点号、无 `[]`）；声明列本身不会是保留名（§3.3）；交给引擎的行是空原型副本（§6.1） |
 | 目标路径可嵌套（`transform-engine.cjs:54-83`） | `targetField` 只许扁平标识符——运行内通道只装标量列 |
 | 错误的 `details` 带原值，消息是自由文本（`transform-engine.cjs:96,104,164,239-246`） | 步骤只保留 `code`、字段名与行号；`message` 与 `details` 不出步骤 |
-| `toDate` 对非 ISO 文本用运行时的 `Date` 解析（`transform-engine.cjs:158-167`） | 通用方言照常可用并在界面上注明；宜搭方言里禁用（没有对应的 v3 转换） |
-| `concat` 默认把当前值拼在最前、静默丢掉空白片段、把布尔值转成文本（`transform-engine.cjs:172-190`） | 通用方言保持原样（管道在用，不改）；宜搭的拼接语义不同，用扩展函数表达（§6.3） |
+| `toDate` 对非 ISO 文本用运行时的 `Date` 解析（`transform-engine.cjs:158-167`） | 通用方言照常可用并在界面上注明；宜搭方言不走引擎（§6.3），不涉及 |
+| `concat` 默认把当前值拼在最前、静默丢掉空白片段、把布尔值转成文本（`transform-engine.cjs:172-190`） | 通用方言保持原样（管道在用，不改）；宜搭方言不走引擎，拼接语义只由规划器定（§6.3） |
 
-引擎文件本身只改一处：`transformRecord` 增加可选的第三个参数，接受一张冻结的扩展函数表；不传时行为逐字节不变，管道与其它既有调用方都不传（由它们现有的测试钉住，另加一条「扩展表泄漏进管道路径必红」的变异）。
+**v5：引擎文件不改。** 原稿给 `transformRecord` 加的可选扩展函数表参数，以及「扩展表泄漏进管道路径必红」的那条变异，随引擎表达一起挪到 §11（OQ6 的退路）。
 
-### 6.3 宜搭 v3 映射的表达与对拍（切片 S4-b）
+### 6.3 宜搭 v3 方言：步骤内只调规划器（v5，随 S4-a）
 
-**表达。** 新的纯模块 `lib/yida-transform-spec.mjs` 把一份已通过 `validateYidaStaticConfig` 的 v3 配置编译成转换步骤的映射规格：
+v4 在这里写的是「编译到引擎 + 两个扩展函数 + 影子对拍，规划器为权威」（切片 S4-b，全文见 `aadb188f3`）。owner 2026-11-19 就 OQ6 取了本 ADR 自带的退路，所以 v5 只留下面这一种做法。原稿的引擎表达、`yida-transform-spec.mjs`、`yida_concat` / `yida_generated` 两个扩展函数、影子比对、对拍语料与 G13 整体挪到 §11，拉入条件照 R-87（`decision-register.md:92` @e0e4406bf）。
 
-| v3 转换（`yida-static-plan.mjs:256-262`） | 映射规格 |
-|---|---|
-| `direct` | `{ sourceField: source, targetField: target }` |
-| `copy` | `{ sourceField: 主条目的 source, targetField: target }` |
-| `constant` | `{ targetField: target, defaultValue: value }` |
-| `concat` | `{ targetField: target, transform: 扩展函数 yida_concat(parts, separator, blank) }` |
-| `generated` | `{ targetField: target, transform: 扩展函数 yida_generated(template) }` |
-
-两个扩展函数与编译器放在规划器旁边，只导入规划器已经导入的 `./yida-material-code.mjs`；**规划器不导入它们**（导入钉子的方向不变，§1.7）。字段目录的类型 / 数值 / 选项校验、必填、业务键缺失、键重复与生成值重复——这些逐行校验与批次层的裁定**都不重写**，仍只由规划器做。
-
-**权威。** `yida-static-plan.mjs` 仍是唯一权威，在步骤里以两个导出函数的身份出现：
-
-- **逐行的判据**：`buildYidaStaticPlan({ config, rows: parseYidaStaticRows(rowsText, config) })`（两个都是导出函数，`yida-static-plan.mjs:638,865`）。它对每一行给出状态、`payload` 与问题码，对拍用的是这一侧。不拆分的分配下，编译器内部调用的就是同一句（`yida-draft-compiler.mjs:85-89`）。
-- **可发布的结果**：`compileYidaLocalDraft`（`yida-draft-compiler.mjs:198-203`）。它在逐行结果之上还要求没有任何无效行、没有重复键、批次非空，否则抛出，并且只留下一个闭合的错误种类（`:104-123,180-183`）——所以它**给不出逐行问题码，不能当对拍的判据**，只充当「这一批能不能成为草稿」的闸。
-- **步骤的顺序（影子模式）**：按映射规格在引擎上算一遍 → 调逐行判据 → 比对（定义见下）。不一致 → `failed(parity_violation)`，记一行 values-free 的告警日志，什么都不发布。一致 → 调 `compileYidaLocalDraft`：它抛出即 `failed(yida_plan_rejected)`（带那个闭合种类），不发布；它通过才发布**它的** `plan.rows[*].payload`。引擎一侧的结果从不发布。
-- **发布时补齐列**：规划器对缺失的可选目标不写 `payload` 的键（`yida-static-plan.mjs:784-790`），而运行内通道要求每行恰好是声明列（`automation-run-values.ts:94`），所以发布前把缺的列填成 `null`。
-- 发送路径不变，继续用 `compileYidaSendDraft` 自己编译（`yida-draft-compiler.mjs:192-196`），不读转换步骤的任何产物——预览不是授权（`yida-automation-preview.ts:9-12`）。
-
-**对拍的定义（合并门，也是运行时的比对内容）。** 对拍的对象是规划器的**逐条目求值**（`transformValue`，`yida-static-plan.mjs:766-772`）：对每一个（映射条目, 行），引擎一侧必须给出同一个结果——同一个值（含类型），或同一个「缺失」，或同一个拒绝码（`FIELD_PART_MISSING` / `FIELD_TYPE` / `FIELD_VALUE_TOO_LONG`，出处 `:701-706,731-763`），或同样地「因模板读到的键缺失而跳过」（`:722-724`；这种行由规划器记 `KEY_MISSING`，引擎一侧不得把它算成拒绝码）。这个函数没有导出，所以比对经逐行判据的公开输出来做：
-
-1. 规划器判为已规划的行：`payload` 里的每个目标，引擎给出的值与之相同（值与类型）；`payload` 里没有的目标，引擎给出的是「缺失」。
-2. 规划器判为无效的行：引擎给出拒绝码的每个目标，规划器在该行的问题里必须有同一目标的同一个码——引擎的拒绝是规划器问题的子集。反方向不要求：必填、目录的类型 / 数值 / 选项校验（`yida-static-plan.mjs:784-803`）、键缺失与两种重复是规划器独有的裁定，引擎一侧不算。
-3. CI 的语料保证第 2 条不是空转：每个拒绝码都有专门的单行批次，键齐全、目录校验全部通过，使规划器的问题恰好只剩那一个码，于是两侧必须逐码相等。
-
-键序不需要比：发布的是规划器一侧的 `payload`，它按字段目录顺序构造（`yida-static-plan.mjs:673-676`）。`localBusinessKey` 与四个摘要（`yida-draft-compiler.mjs:145-176`）也只由规划器一侧产生，所以不存在「两份摘要是否相等」的问题。
-
-**语料。** 规划器自带的那一组 v3 样例（`yida-static-plan.mjs:1060`；另两组自带样例是 v1 与 v2 的配置，`:991,1040`，不是 v3，不进语料）、入库的 v3 模板 `fixtures/yida-rule-templates/material-v3.json`、合成预设（`automation-operation-catalog.ts:178-222`），加一个确定性生成器：覆盖五种转换、两种 `blank` 规则、空键字段、数字 / 布尔 / 缺失 / 空串 / 纯空白 / 超长串 / 孤立代理项、同批重复键与重复生成值。生成器固定种子，失败时打印的是行号与问题码，不是值。
-
-**必须见证的变异**（每条先红再绿）：`yida_concat` 的 `refuse` 改成 `skip`；全部列片段为空时返回空串而不是缺失；布尔片段被转成文本；`copy` 读成目标名而不是主条目的源列；`constant` 的映射误带了 `sourceField`，行里同名列的值于是盖过常量；`yida_generated` 少一个部件或换了命名空间；影子比对被跳过（引擎一侧故意算错仍发布）；发布的是引擎一侧而不是规划器一侧；跳过 `compileYidaLocalDraft`、直接发布逐行判据的行（含无效行的批次于是被发布）；发布前不补齐列。
-
-**退路。** 如果某个 v3 构造在两轮评审内无法在引擎上逐字节复现，T 层默认退到「步骤内只调规划器、不做引擎表达」（§13 里保留的那个备选），**不放宽对拍**。
-
-**首片的限制。** 只接受 `allocation.mode: 'original'`；拆分分配仍在宜搭自己的预览路径里（`yida-draft-compiler.mjs:85-95`）。行数与文本上限沿用规划器的（`yida-static-plan.mjs:6-9`）。
+- **做法**：core 从插件目录的固定路径只注入一个纯函数 `compileYidaLocalDraft`，注入方式照 `yida-automation-preview.ts:148-194`。这个入口写明「从不持久化」，它的结果「nothing may store, approve or send」（`yida-draft-compiler.mjs:300-305` @e0e4406bf）。
+  - 步骤先在服务端拼出规划器要的 JSON 行文本（`parseYidaStaticRows` 收的就是 JSON，`yida-static-plan.mjs:664-672` @e0e4406bf）：每一行取源步骤的声明列，`withRow: true` 时再并进点选的那一行的声明列（§6.4）。
+  - 然后把这段行文本连同保存时盖章的 v3 配置、`allocation: { mode: 'original' }` 交给规划器。
+- **结果**：
+  - 规划器抛出 → `failed(yida_plan_rejected)`，只带它那个闭合的错误种类，什么都不发布。它在有无效行、键重复或批次为空时都会抛出（v4 的引用，`yida-draft-compiler.mjs:104-123,180-183` @35dc8b272）。
+  - 规划器通过 → 只发布**它的** `plan.rows[*].payload`。规划器对缺失的可选目标不写 `payload` 的键，而运行内通道要求每行恰好是声明列（`automation-run-values.ts:94`），所以发布前把缺的列填成 `null`。
+- **权威只有一份**：规划器是这个方言唯一的实现，没有第二份表达，所以不比对、不影子跑，也没有 `parity_violation`。
+- **保存时的校验**：
+  - 配置要过 `validateYidaStaticConfig`（`yida-static-plan.mjs:464` @e0e4406bf）。
+  - 配置读到的每一个源列（`yidaTransformSourceColumns`，`:528` @e0e4406bf）都必须是源步骤的声明列，或 `rowInput` 声明的行列名，否则保存 400。
+  - `output.columns` 由服务端从配置的目标推导并盖章。
+- **发送路径不变**：发送照旧由 `compileYidaSendDraft` 自己编译（`yida-draft-compiler.mjs:293-295` @e0e4406bf），不读转换步骤的任何产物。预览不是授权（`yida-automation-preview.ts:9-12`）。落点切片 S4-e 存草稿时，草稿库同样用发送编译器从行文本重算一遍（`yida-draft-plan-store.mjs:5,240` @e0e4406bf），也不读步骤的产物（§6.5）。
+- **必须见证的变异**（每条先红再绿）：
+  - 规划器抛出时仍发布；
+  - 发布前不补齐列；
+  - 源列校验被跳过（配置读一个未声明的列也能保存）；
+  - 行文本由引擎或客户端拼出，而不是服务端从声明列拼出。
+- **首片的限制**：只接受 `allocation.mode: 'original'`；拆分分配仍在宜搭自己的预览路径里。行数与文本上限沿用规划器的（`yida-static-plan.mjs:6-9`）。
 
 ### 6.4 手动预览：这条线的可演示出口（切片 S4-d）
 
@@ -574,6 +571,47 @@ ConnectionCallPort = {
 - **落库**：一行 values-free 摘要，`triggered_by = 'steps_preview'`，加进不计入规则监控的那张名单（`automation-log-service.ts:18`）；`trigger_event` 与 `rule_snapshot` 为空，所以既有的重试门自然拒绝它（合成片的同一做法，`:139-149`）。
 - **它是一次真实读**：在客户机器上由人点击触发，与定时触发同属 O ①，受同一个开关、同一份已批准配置、同一个 B2a 用途约束——已武装的部署上，预览里的每一次读各用掉一条登记，`runId` 取本次预览运行的 id 加步骤路径（§3.2）。开发与 CI 只对合成的登记系统（本机夹具服务）运行。
 
+- **点选的那一行（v5，点名场景的入口）**。场景的第一格是「指定备料项目的一行」，而定时触发的记录是空的（§4.4），既有的引用里也没有记录（§5.2），所以 v5 给预览加一个入口。它是 T 层默认（§12 第 10 项），在 S4-d 评审时定稿。
+  - **声明**：规则在第一个 `call_connection` 的配置里加一个闭合键 `rowInput: { columns: { <行列名>: <字段 id> } }`。至多 16 列；行列名是扁平标识符，规则与 §3.3 相同；字段 id 必须是规则所在表的字段，保存时核对。行列名不得与 `withRow` 并进的源步骤的列名重名，否则保存 400。
+  - **只能预览，不能启用**：带 `rowInput` 的规则保存时必须是停用的；启用、或保存成启用，一律 400 `ROW_INPUT_PREVIEW_ONLY`。所以定时触发到不了它，编辑记录也驱动不了它（OQ4 不放开）。
+  - **请求**：预览请求体只收 `{ recordId }`。规则带 `rowInput` 时必填；不带时出现即 400。
+  - **读这一行**：用操作者本人的多维表读，与宜搭 owner 路由读表源是同一口径——「the owner's own multitable read (this request's actor), never an elevated or plugin read」（`integration-yida-owner.ts:411` @e0e4406bf）。这条记录必须在规则所在的表上。读不到、不在这张表或缺声明列，都是 `not_started(row_unavailable)`，零出站。
+  - **为什么它就是「指定备料项目的一行」**：规则所在的表本来就要过 OQ3 的守卫，必须是绑定租户名下在役的备料项目登记表（§12 OQ3）。
+  - **值去哪里**：这一行的值只进运行内通道（一行，只含声明列），作为 §5.2 的 `row.<行列名>` 被引用；日志与 `step.output` 里只有计数。
+  - 守卫见 G19。
+
+### 6.5 落点：物料表测试副本草稿（切片 S4-e；v5，形态 B 唯一的落点）
+
+点名场景的最后一格是「物料表测试副本的草稿预览」。物料表测试副本就是宜搭的 1 号槽：物料表（报工）的测试副本（R-71 ①，`decision-register.md:76`）。代码里，1 号槽同样被当作物料测试副本，它可以收无绑定的行（`yida-owner-runtime.ts:29-33` @e0e4406bf；冻结基线 D20，`ipaas-yida-dev-baseline-v2.3-20261106.md:212`）。面板里的草稿预览 S4-d 已经给了；**落点**是把它存成一份宜搭草稿，之后能在既有的宜搭 owner 面板里逐行预览，而不发送。这是形态 B 唯一的落点，也是本线对内部表唯一的一写。
+
+- **路由**：新增 `POST /api/multitable/sheets/:sheetId/automations/:ruleId/steps-draft`，请求体只收 `{ recordId }`（规则带 `rowInput` 时必填，§6.4），`Cache-Control: no-store`。
+  - 它在服务端把规则的步骤**从头重跑一遍**，准入、检查点与排空都同 §6.4，`origin = 'steps_draft'`。最后一步必须是宜搭方言的 `transform_records`（§6.3），否则 400。
+  - 重跑成功后，它把**交给规划器的那段 JSON 行文本**连同盖章的 v3 配置、`allocation: { mode: 'original' }`，经既有的宜搭 owner 草稿入口 `prepareDraft(owner, { config, rowsText, allocation })` 存成一份草稿（`yida-owner-runtime.ts:334-343` @e0e4406bf）。
+  - **不带 `targetRef`，也不带 `sourceBinding`**：这两个键的代码路径在 S4-e 的模块里根本不存在，由静态扫描钉住。
+- **不收客户端的行**：请求体只有 `recordId`。行只来自这一次的服务端重跑，预览的响应不回流；所以浏览器造不出一份草稿。
+- **为什么借这个入口，而不是另写**（T 层默认，§12 第 10 项）：
+  - **不新增写路径、不新增表**：这是既有的、owner 用的草稿入口。草稿库写明自己不能批准、签发授权、加载凭据、准备投递台账或发送（`yida-draft-plan-store.mjs:7-10` @e0e4406bf），存进去的目标与操作快照先加密（`:123,163,221`）。
+  - **人与开关都由它自己证明**：它证明调用者是活的宜搭锚点 owner，也就是它自己的拒绝；它只在宜搭发送开关为原文 `true` 时收草稿（`yida-owner-runtime.ts:194-197,223` 与 `index.ts:673` @e0e4406bf）。S4-e 不绕开这两条，也不替它们做决定。
+  - **重复点击不会重复建**：内容相同的草稿再存一次，草稿库返回 `reused: true`（`yida-draft-plan-store.mjs:218` @e0e4406bf）。
+  - 被否掉的另一种做法是直接调草稿库的内部写入器。那会多出一个不看发送开关、也不证明锚点 owner 的第二写入方。
+- **目标只能是 1 号槽**：
+  - 多目标开关不为 `'true'` 时，这个入口只认 1 号槽（`yida-owner-runtime.ts:28-29,338` @e0e4406bf）。
+  - 多目标开关为 `'true'` 时，不带 `targetRef` 的草稿落在哪个目标，本 ADR **没有核**。所以 T 层默认是：S4-e 在这个开关为 `'true'` 的部署上一律拒写，记 `failed(draft_refused)`，直到 S4-e 评审读码证明缺省目标就是 1 号槽。
+  - 正式表单（2–6 号槽）在任何情况下都不是 S4-e 的落点。
+- **不能带 `generated`**：发送编译器在无绑定的行上拒绝 `generated` 字段（`yida-draft-compiler.mjs:228-232` @e0e4406bf），而 S4-e 的草稿永远无绑定。所以规则的宜搭配置里有 `generated` 条目时，路由在任何读之前就答 400 `TEST_COPY_DRAFT_GENERATED_UNSUPPORTED`。物料编码（R-71 ②）因此不在这个落点上。
+- **键布局**：1 号槽在 L4 时封存的是 v2 物料模板的七键布局（`runbook-yida-first-send-20261104.md:36`），而一份 v3 草稿只能进封存键定义与它完全相同的目标（`yida-draft-compiler.mjs:290-291` @e0e4406bf）。布局不符就是入口自己的拒绝，记 `failed(draft_refused)`。
+- **结果**：
+  - 成功时的响应只有 `{ operationId, rowCount, reused }`。
+  - 落库的是一行 values-free 摘要，`triggered_by = 'steps_draft'`，加进不计入规则监控的那张名单（同 §6.4）。
+  - 失败时，入口的闭合错误码进 `errorClass`，原因是 `draft_refused`（§4.8）。
+- **什么都不发**：S4-e 的模块不引用发送、批准、授权、准入、回执与表单传输（静态扫描）。存草稿前后，投递台账、批准、授权行与表单请求的计数都不变（G18）。之后要不要把这份草稿发到测试副本，是既有的宜搭 owner 发送路径上的事：R-50 / R-70 / R-71 逐次另批，发送时由发送编译器重算。S4-e 不改那条路径上的任何东西。
+- **开关**：`INTEGRATION_AUTOMATION_TEST_COPY_DRAFT_ENABLED`（§7.8）。路由入口读一次，调用草稿入口之前再读一次，都只认原文 `true`。关着时路由固定 404，零读、零草稿。
+- **门**：S4-e 是保证类切片，独立核验，每条守卫见证红（G18）。在任何部署上打开它的开关属 O ④；打开之后它会写表（宜搭本地草稿库），这一写属 O ②。两者一起由 owner 批，打开期间每一份草稿都由锚点 owner 本人点击产生。它读的那一次 PLM 照旧属 O ①（§7.9）。
+- **依赖**：
+  - S4-d：路由的准入、检查点与排空。
+  - S4-a：宜搭方言。
+  - 宜搭剩余系列（R-93）：`yida-draft-compiler.mjs`、`yida-static-plan.mjs` 与草稿库的测试正被宜搭栈的未合并分支修改（#6812 对 main 的差异里有它们）。所以 S4-e 在宜搭栈合并之后的 main 上开工，开工时重核本节的全部行号。
+
 ## 7. 安全
 
 ### 7.1 边界：谁控制什么
@@ -583,7 +621,7 @@ ConnectionCallPort = {
 | 集成管理员（`integration:write`） | 登记系统的 origin、凭据与系统配置（对象条目、默认请求头、K3 的登录路径与请求体模板）；读源配置的路径、方法、字段映射；批准与退役 | 让未批准的版本被运行时使用 |
 | 规则作者（`canManageAutomation` + 读层集成权限 + 租户内在役） | 选哪个已批准的操作、业务键的字面值或引用、步骤顺序与映射 | 端点、动词、请求头、请求体、凭据、超时、目的系统的地址 |
 | 步骤数据（来自上一步） | 成为业务键的值，或转换的输入行 | 成为路径、主机、键名、列名、扩展函数名 |
-| 部署者 | 三个开关、出站写门的允许清单文件、B2a 登记（一条登记只授权一次读） | 用请求或规则配置改变以上任何一项 |
+| 部署者 | 四个开关（v5 加了落点的那一个）、出站写门的允许清单文件、B2a 登记（一条登记只授权一次读） | 用请求或规则配置改变以上任何一项 |
 
 ### 7.2 SSRF：为什么不是一道 URL 检查
 
@@ -624,7 +662,7 @@ ConnectionCallPort = {
 ### 7.6 终态写的尝试身份
 
 - 本线的读步骤**不写意图行**（§4.6），因此不新增任何「先写 pending、后写终态」的位置；这一点由静态守卫钉住（新动作的模块不引用 `claimOutboundIntent` / `recordOutboundOutcome`），免得出现只用了台账一半的路径。
-- 本线**没有**新的值落库位置：步骤输出不持久化（§5.4），落库的只有 values-free 的步骤结果与预览的摘要行。后置的快照切片要自己回答「与挂起行、桥行是不是一个事务」（§5.4 契约的第 2 条）。
+- 本线**只有一个**新的值落库位置，就是 v5 的落点：S4-e 经既有的宜搭 owner 草稿入口存进宜搭本地草稿库的那份草稿，草稿库先加密再写（§6.5）。它不是一个新表，也不是一个新写入方。除此之外，步骤输出不持久化（§5.4），落库的只有 values-free 的步骤结果与预览、存草稿两行摘要。S4-e 不写意图行：它不发宜搭，「发出去了但不知道成没成」的歧义不存在；重复点击由草稿库的 `reused` 吸收（§6.5）。后置的快照切片要自己回答「与挂起行、桥行是不是一个事务」（§5.4 契约的第 2 条）。
 - 发送切片继承 §1.6 的全部语义：认领发令牌，结果写以令牌为围栏，0 行即 `confirmed:false`、步骤不得报成功；过期的 `pending` 只由观察到同一令牌的重放翻成 `outcome_unknown`；需要长于租约的写要按令牌续租。这些是契约，不是本线的实现。
 
 ### 7.7 K3：永久写围栏管到哪里，读腿的残余在哪里
@@ -642,18 +680,20 @@ ConnectionCallPort = {
 | `INTEGRATION_AUTOMATION_CALL_CONNECTION_ENABLED` | core 保存校验；执行器每次触发；插件服务出站之前；手动预览路由 | 含该动作的规则保存 403 `CALL_CONNECTION_DISABLED`；既有规则触发记 `skipped(action_disabled)`（步骤状态 `failed`，规则停在这一步）；预览路由固定 404；编辑器不渲染该动作 | high | 上机属 O ④；对真实系统的读属 O ①（§7.9） |
 | `INTEGRATION_AUTOMATION_CALL_CONNECTION_WRITE_ENABLED` | **本线不读**（写目标配置保存一律 400） | — | high | O ②③（§12 OQ2） |
 | `AUTOMATION_STEP_OUTPUTS_ENABLED` | core 保存校验（规则带 `stepKey`、步骤引用或 `transform_records`）；执行器每次触发 | 保存 403 `STEP_OUTPUTS_DISABLED`；触发记 `skipped(action_disabled)`（同上） | medium | T 层梯子（上机仍是 O ④） |
+| `INTEGRATION_AUTOMATION_TEST_COPY_DRAFT_ENABLED`（v5，落点） | S4-e 存草稿路由：入口一次、调用宜搭 owner 草稿入口之前再一次（§6.5） | 路由固定 404，零读、零草稿；编辑器不渲染「存为测试副本草稿」 | high | 打开属 O ④；打开之后它写宜搭本地草稿库，这一写属 O ②（§6.5、§7.9） |
 
-- 三个都是 `type: 'boolean'`、`activationValue: 'true'`、不修剪不折大小写（`'1'`、`'TRUE'`、`' true'` 都是关）、`dependsOn: []`、`conflictsWith: []`，登记在 `scripts/ops/global-history-flag-manifest.mjs` 里 R-69 四个开关之后（条目范例 `global-history-flag-manifest.mjs:1034-1043`）。三者互不联动：`call_connection` 不带 `stepKey` 时只报计数、不需要第三个开关；带了就需要。
+- 四个都是 `type: 'boolean'`、`activationValue: 'true'`、不修剪不折大小写（`'1'`、`'TRUE'`、`' true'` 都是关）、`dependsOn: []`、`conflictsWith: []`，登记在 `scripts/ops/global-history-flag-manifest.mjs` 里 R-69 四个开关之后（条目范例 `global-history-flag-manifest.mjs:1034-1043`）。四者互不联动：`call_connection` 不带 `stepKey` 时只报计数、不需要第三个开关；带了就需要。第四个开关**不**取代宜搭发送开关：S4-e 借用的草稿入口自己还要 `INTEGRATION_YIDA_OWNER_SEND_ENABLED` 为 `'true'`（`index.ts:673` @e0e4406bf），两者是「且」。这一层依赖不写成 manifest 里的 `dependsOn`，因为那是宜搭线自己的开关，它的读取点与登记都不归本线。
+- **S4-e 登记开关 ④**：它的第一个读取点就在 S4-e 的路由里。登记内容包括清单条目、显式读取点测试与 `.env.example` 的默认关示例行。若读取点落在缺省扫描面之外，或被一个精确列表断言抓到，照下一条的同一教训处理：加族扫描、更新列表，不能让它静默漏登。
 - **谁登记：落下该开关第一个读取点的那个切片**，不是「做动作的那个切片」。清单测试的缺省扫描面只有 `packages/core-backend/src` 下的 `*.ts`（`global-history-flag-manifest.test.mjs:369-375`），插件 `lib/` 只按**点了名的族**扫（`:503-507`），而既有的那一族正则 `INTEGRATION_AUTOMATION_RUN_…`（`:459`）匹配不到 `…_CALL_CONNECTION_…`。所以开关 ① 在 S1-b 落进插件 `lib/` 的那个读取点不在任何被扫描的集合里——**不登记，测试照样是绿的**，章程「新增 env flag 必须登记」会被静默地漏掉。因此：
   - **S1-b 登记开关 ①**：清单条目；给插件 `lib/` 加一条匹配新名字的族扫描，并把它并进完整性断言（`global-history-flag-manifest.test.mjs:598-616`）；一条显式的插件读取点测试（先例 `:1376-1387`；被读的谓词照 `integration-run-events.cjs:32-34` 的形状）；仓库根 `.env.example` 的默认关示例行。G7 多一条负对照：插件 `lib/` 里不存在未登记的对开关 ① 的读取。
   - **S3-a1 登记开关 ③ 与 ②**：③ 的第一个读取点在 core，`env.AUTOMATION_*` 的读取点扫描（`global-history-flag-manifest.test.mjs:1205-1212`）会自己抓到它，那条精确列表断言（`:1214-1224`）当场变红——带来这个读取点的切片必须同时更新列表与清单，拆不开。② 只登记不读：幽灵检查（`:598-627`）要求每个登记的键都在被扫描的源码里出现，所以它的名字像 `automation-run-integration-job.ts:45-48` 那样写进 core 的动作模块，随 S3-a1 落地。同一个切片补上开关 ① 在 core 的读取点与显式读取点测试（范例 `global-history-flag-manifest.test.mjs:1312-1346`，含「不得按前缀匹配」的断言 `:1337`，以及对 `.env.example` 示例行的断言 `:1346`）。
-- **OQ3 的守卫带来对第四个开关的依赖**：I 链那个「规则所在的表」守卫只在 `MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED` 恰为 `'true'` 时才把登记表当权威，关着时一律判 `switch_off`、失败关闭（`automation-run-integration-job-rule-sheet.ts:19-21`）。所以若 OQ3 取建议值，这个既有开关就是本线的一个前置，要写进 L2（§8）；它不是新开关，不需要重新登记。
-- 会话特性：把第一个与第三个开关的布尔值露给编辑器（`core-backend/src/routes/auth.ts:334-338` 的做法），关着的功能在界面上不可见。
+- **OQ3 的守卫带来对一个既有开关的依赖**：I 链那个「规则所在的表」守卫只在 `MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED` 恰为 `'true'` 时才把登记表当权威，关着时一律判 `switch_off`、失败关闭（`automation-run-integration-job-rule-sheet.ts:19-21`）。所以若 OQ3 取建议值，这个既有开关就是本线的一个前置，要写进 L2（§8）；它不是新开关，不需要重新登记。
+- 会话特性：把第一个与第三个开关的布尔值露给编辑器（`core-backend/src/routes/auth.ts:334-338` 的做法），关着的功能在界面上不可见。v5 的第四个开关同样露给面板：关着时「存为测试副本草稿」不渲染（S4-e）。
 
 ### 7.9 O 层的门
 
 - **O ① 真实客户读**：对客户真实系统的每一个「系统 × 操作」的首次读——不论由定时规则还是手动预览触发——逐项由 owner 批准；登记系统换 origin 之后，它上面此前批准过的每个操作重新算作首次读（§4.1 的残余）。机制上挡在前面的有：开关、读源配置的批准状态、规则创建者的实时权限；部署已武装 B2a 时再加一层登记。**B2a 登记不是长期授权**：一条登记只授权一次读（§1.4、§3.2），已武装的部署上定时读在 OQ8 裁定之前一律被拒，手动预览每读一次用掉一条登记；休眠的部署上这一层不存在，挡在前面的只有前三样加 owner 的逐项批准。K3 种类另有一条硬前置：客户侧的只读账号（§7.7）。开发与 CI 只用合成的登记系统。
-- **O ② 生产写 / O ③ 外部写回**：本线不含任何写路径。发送切片的每一个写操作、写开关的打开、允许清单文件里的每一个条目都逐项由 owner 批准；K3 写永久禁止，不在可批准之列。
+- **O ② 生产写 / O ③ 外部写回**：本线不含任何外部写路径。v5 的唯一一写是 S4-e 往宜搭本地草稿库存测试副本草稿（§6.5）：在部署上打开它的开关、以及打开后的这一写，属 O ②，由 owner 批；它不发宜搭，不是 O ③。把草稿发到测试副本仍走既有的宜搭发送路径，按 R-50 / R-70 / R-71 逐次另批。发送切片的每一个写操作、写开关的打开、允许清单文件里的每一个条目，都逐项由 owner 批准；K3 写永久禁止，不在可批准之列。
 - **O ④**：上机、在任何部署上打开开关、开对外 PR。把任务卡交给第三个实现方已由 R-95 裁定，不再是待裁事项（§10.4）；它的 PR 合并仍逐项批。
 
 ### 7.10 CI 必须钉住的守卫
@@ -664,33 +704,45 @@ ConnectionCallPort = {
 |---|---|---|---|---|
 | G1 | 只能引用具名操作 | 引用一个已批准版本的规则保存成功 | 配置里出现 `url` / `path` / `method` / `headers` / `body` / `query` / `timeoutMs` 任一键即 400；引用 `draft` 或 `retired` 版本即拒 | 去掉闭合键集检查 |
 | G2 | 一个门 | 扫描确实找到那唯一的出站调用点（端口的 `callRead`） | core 的新动作模块里没有 `fetch` / `http` / `https` / `undici` / `axios`；插件服务里没有 `.upsert(`、`testConnection(` | 在动作里加一处直接 `fetch` |
-| G3 | 写默认拒绝 | `http` 种类上无体的 GET 读成功 | 引用写目标配置的规则保存 400（开关设成 `true` 也一样）；端口的键集恰为两个方法；写门操作词表恰为两项；`http` 种类上写门 env 未设时，POST 形状的读零出站、步骤是 `skipped(write_gate_refused)`——原始拒绝码经这条链观察不到（§3.2），断言的是出站计数与闭合原因 | 给服务加一个按目录分类跳过写门的分支；去掉入口对写门拒绝码的识别（步骤于是被读成认证失败） |
-| G4 | 重定向 | 本机夹具回 200 时读成功 | 夹具回 302 时步骤 `failed(redirect_refused)`，跳转目标上的请求计数为 0、从未见到任何请求头；307 加 POST 体同样为 0 | 去掉 `redirect: 'manual'`；去掉包装对 3xx 的记录（步骤于是变成 `source_error`） |
-| G5 | 同源与路径 | 已批准路径解析到登记的 origin；`http` 系统的对象条目不存在或是字符串形时、K3 系统的 `material` 条目不选档案时读成功，wire 上的（方法, 路径）等于已批准配置；已批准路径带单点段时按规范化后的 pathname 比较、读成功 | 含 scheme、`//`、`..`、百分号编码的路径在保存与执行两处都被拒；交给包装的请求 URL 不同源即拒、不发出，原因是 `origin_refused`；`http` 系统的对象条目带 `path` / `method` / `query` / `headers` 任一键 → `describeRead` 与每次调用都答 `system_overrides_request`、零出站（四个键各一条）；**K3 的负对照**（用 `single_record` 配置：`list_page` 下适配器在发请求前就拒绝，档案路径到不了包装，两层变异无从见证）：`material` 条目选了只存档案、已批准路径与档案的不同 → `describeRead` 与每次调用都答 `system_overrides_request`、零出站，且这样的系统上 K3 清单的内容不含档案路径（直接断言清单）；K3 与桥各一条「清单外的（方法, 路径）不发出」，原因是 `request_not_allowed`。每条都同时断言出站计数与闭合原因；K3 用会话凭据夹具，登录腿不出站，零出站指整次调用 | 去掉执行时的再检查；去掉包装里的同源断言；去掉 `http` 对象条目的拒绝（存量路径于是到达包装，被清单断言拦下——两层各见一次红）；去掉 K3 的档案拒绝（档案路径于是到达包装，被清单断言以 `request_not_allowed` 拦下、档案路径上的请求为 0——拒绝这一层见红；再同时去掉清单断言，档案路径上出现一个请求——清单这一层见红）；K3 清单改为取适配器合并后的读路径（清单内容的断言变红）；去掉清单断言 |
+| G3 | 写默认拒绝（v5：保存那一半随 S3-a1；`http` 传输那一半随 HTTP 种类准入，§11） | `http` 种类上无体的 GET 读成功 | 引用写目标配置的规则保存 400（开关设成 `true` 也一样）；端口的键集恰为两个方法；写门操作词表恰为两项；`http` 种类上写门 env 未设时，POST 形状的读零出站、步骤是 `skipped(write_gate_refused)`——原始拒绝码经这条链观察不到（§3.2），断言的是出站计数与闭合原因 | 给服务加一个按目录分类跳过写门的分支；去掉入口对写门拒绝码的识别（步骤于是被读成认证失败） |
+| G4 | 重定向（v5：随 HTTP 种类准入，§11） | 本机夹具回 200 时读成功 | 夹具回 302 时步骤 `failed(redirect_refused)`，跳转目标上的请求计数为 0、从未见到任何请求头；307 加 POST 体同样为 0 | 去掉 `redirect: 'manual'`；去掉包装对 3xx 的记录（步骤于是变成 `source_error`） |
+| G5 | 同源与路径（v5：路径守卫那一条照常；其余随 HTTP 种类准入，§11） | 已批准路径解析到登记的 origin；`http` 系统的对象条目不存在或是字符串形时、K3 系统的 `material` 条目不选档案时读成功，wire 上的（方法, 路径）等于已批准配置；已批准路径带单点段时按规范化后的 pathname 比较、读成功 | 含 scheme、`//`、`..`、百分号编码的路径在保存与执行两处都被拒；交给包装的请求 URL 不同源即拒、不发出，原因是 `origin_refused`；`http` 系统的对象条目带 `path` / `method` / `query` / `headers` 任一键 → `describeRead` 与每次调用都答 `system_overrides_request`、零出站（四个键各一条）；**K3 的负对照**（用 `single_record` 配置：`list_page` 下适配器在发请求前就拒绝，档案路径到不了包装，两层变异无从见证）：`material` 条目选了只存档案、已批准路径与档案的不同 → `describeRead` 与每次调用都答 `system_overrides_request`、零出站，且这样的系统上 K3 清单的内容不含档案路径（直接断言清单）；K3 与桥各一条「清单外的（方法, 路径）不发出」，原因是 `request_not_allowed`。每条都同时断言出站计数与闭合原因；K3 用会话凭据夹具，登录腿不出站，零出站指整次调用 | 去掉执行时的再检查；去掉包装里的同源断言；去掉 `http` 对象条目的拒绝（存量路径于是到达包装，被清单断言拦下——两层各见一次红）；去掉 K3 的档案拒绝（档案路径于是到达包装，被清单断言以 `request_not_allowed` 拦下、档案路径上的请求为 0——拒绝这一层见红；再同时去掉清单断言，档案路径上出现一个请求——清单这一层见红）；K3 清单改为取适配器合并后的读路径（清单内容的断言变红）；去掉清单断言 |
 | G6 | 换源重绑 | 同源内改路径不要求重绑；只换密文不要求重给配置键；一次把认证材料逐项表态的更新成功 | origin 变更而请求里没有 `credentials` 键即拒；认证头只在 `config.headers`、库里没有密文时换 origin 而不重给 → 拒；桥系统只改 `sharedSecretEnvVar` 而不对其余认证材料表态 → 拒；经 `bridgeUrl` 键换 origin、把三个地址键清空落回内置缺省，都算变更；K3 改 `authorityCode` / `authMode` 同理 | 去掉 origin 比较；把触发条件改回「库里有密文才查」；桥的键序里漏掉 `bridgeUrl` |
 | G7 | 开关 | 原文 `true` 时可保存、可执行 | `'1'`、`'TRUE'`、`' true'`、未设都是关；关着时保存 403、触发记 `skipped(action_disabled)`（步骤状态 `failed`）、端口调用 0 次；插件 `lib/` 里没有未登记的对开关 ① 的读取 | 读取点改成 `!== 'false'`；插件侧的读取点删掉；清单里删掉开关 ① 的条目 |
 | G8 | 运行身份 | 在役且有权限的创建者触发成功 | 撤权后的下一次触发即 `skipped(principal_unauthorized)`；无权限的操作者不能保存、启用或重试；客户端送来的 `binding` 被丢弃；无租户主体保存即拒；SQL 只读源上，非属主的创建者保存即拒、非属主的操作者不能启用或重试（`system_unavailable`）；系统侧对象条目会改写请求时（`http` 的改写键、K3 的档案条目）保存即拒（`system_overrides_request`，变异见 G5） | 去掉触发时的实时复核；操作者检查改成只查创建者；去掉属主戳的比对 |
 | G9 | 引用完整性 | `call_connection → call_connection`（标量）与 `call_connection → transform_records`（行集）的引用在保存与运行时都解析成功 | 前向、自引用、未知键、未声明列、别的运行的句柄、原型链上的名字一律拒绝；目标名带点号 / 冒号 / 连字符、以数字开头或是保留名的配置在 `describeRead` 被拒（`columns_not_admitted`）；`concat.fields` 指向未声明列保存 400；既有动作里的 `{{steps.…}}` 与裸 `steps.…` 表达式保存 400 | 去掉容器的前序检查；去掉列名准入；把交给引擎的行换回普通对象 |
 | G10 | 值不进日志 | 哨兵在运行内通道里找得到 | 哨兵在 §5.7 列的每一个持久面与日志里命中 0 次（成功、失败、超时三条路径）；放在桥对端错误码里的哨兵同样 0 次；`step.output` 多一个键即红 | 把原始结果赋给 `step.output`；`errorClass` 改取适配器的原始错误码 |
 | G11 | 快照与续跑（**后置，不随本线交付**） | — | 契约与对照见 §5.4；首批由 G14 的「不与会挂起的动作同规则」顶替 | — |
-| G12 | 完整性与上限 | 99 行的读（K3 的列表读：9 行；桥：缺省 `maxLimit` 的夹具上 19 行，`maxLimit` 为 500 的夹具上 99 行）被完整发布 | 恰好 100 行（K3：10 行；桥用 `maxLimit` 为 500 的夹具）即 `failed(row_cap_reached)`、不发布；缺省 `maxLimit` 的桥夹具上一页 20 行即 `failed(source_incomplete)`（信号 3）、不发布；§4.6 表里每个种类的每个信号各一条 `failed(source_incomplete)`；§5.6 每一项超限都失败；规则配置、请求体与端口入参里的 `rowCap` 一律被拒 | 把 `CONFIGURED_READ_AUTOMATION_ROW_CAP` 调大十倍（100 行的负对照变红；桥夹具取 `maxLimit` 500 而不是 100 正是为了这条——`maxLimit` 为 100 时上限调大后发给源的仍是 100，信号 3 会把这一页拦下，变异只能从原因上看出来）；把平台常量 `READ_SOURCE_PROBE_ROW_CAP` 调大十倍（K3 的 10 行负对照变红）；§5.6 的 core 常量各调大十倍；逐个去掉 §4.6 的信号 2、3、4（去掉信号 3 时缺省桥夹具的 20 行负对照变红） |
-| G13 | 宜搭对拍 | 语料全集上两侧一致；全部有效的批次被发布，发布的是规划器一侧的行 | §6.3 列的每一个变异都红；运行时故意算错的引擎一侧导致 `failed(parity_violation)`；含无效行或重复键的批次得到 `failed(yida_plan_rejected)`、不发布 | 跳过影子比对；跳过编译这道闸 |
+| G12 | 完整性与上限（v5：首片只做 SQL 只读源那一对与它的信号 2；K3 与桥的各对随种类准入，§11） | 99 行的读（K3 的列表读：9 行；桥：缺省 `maxLimit` 的夹具上 19 行，`maxLimit` 为 500 的夹具上 99 行）被完整发布 | 恰好 100 行（K3：10 行；桥用 `maxLimit` 为 500 的夹具）即 `failed(row_cap_reached)`、不发布；缺省 `maxLimit` 的桥夹具上一页 20 行即 `failed(source_incomplete)`（信号 3）、不发布；§4.6 表里每个种类的每个信号各一条 `failed(source_incomplete)`；§5.6 每一项超限都失败；规则配置、请求体与端口入参里的 `rowCap` 一律被拒 | 把 `CONFIGURED_READ_AUTOMATION_ROW_CAP` 调大十倍（100 行的负对照变红；桥夹具取 `maxLimit` 500 而不是 100 正是为了这条——`maxLimit` 为 100 时上限调大后发给源的仍是 100，信号 3 会把这一页拦下，变异只能从原因上看出来）；把平台常量 `READ_SOURCE_PROBE_ROW_CAP` 调大十倍（K3 的 10 行负对照变红）；§5.6 的 core 常量各调大十倍；逐个去掉 §4.6 的信号 2、3、4（去掉信号 3 时缺省桥夹具的 20 行负对照变红） |
+| G13 | 宜搭方言（v5：只调规划器；原「对拍」随 OQ6 的退路挪到 §11） | 全部有效的批次被发布，发布的是规划器一侧的行、缺的列补成 `null` | 含无效行、重复键或空批次得到 `failed(yida_plan_rejected)`、不发布；配置读未声明的列保存 400 | §6.3 列的四条变异 |
 | G14 | 放置与既有不变量 | 顶层的定时规则可保存 | 进分支（含条件分支，那里要显式拒绝）、带条件、非定时触发、相邻触发近于 15 分钟的 cron、上按钮路由、进审批触发器白名单、`call_connection` 超过 8 步、与 `start_approval` 或顶层 / 分支内的 `wait_for_callback` 同规则——都被拒；真发测试答 `TEST_RUN_ACTION_UNSUPPORTED`；模拟时端口调用 0 次；任何非 `ok` 结果之后，同规则里排在后面的发送类动作一个都不执行。合成目录仍只有一个操作、其步骤类型仍不在 `ALL_ACTION_TYPES`；`IntegrationRunSummary` 的键集不变 | 把新类型加进并行分支白名单；去掉条件分支里的显式拒绝；把同规则检查改成只看顶层；把门拒绝的步骤状态改回 `skipped` |
 | G15 | B2a | 休眠部署上字节不变；已武装且有登记时，手动预览的一次读成功 | 已武装而无登记时在凭据加载之前被拒；**同一条登记上的第二次读被拒**（另一次预览、同一次预览里的另一步都算）；已武装部署上定时触发的读被拒且不消耗登记；新用途在闭集里、别的用途的登记不能被它花掉 | 把出示用途的调用挪到凭据加载之后；把 `runId` 改成由规则 id 派生（第二次读于是放行） |
 | G16 | 预览行只留在面板内存 | 预览成功后行显示在面板里 | 不写 `localStorage` / `sessionStorage` / IndexedDB；取消、清除、关闭抽屉、重开与卸载之后行都不在了；响应带 `no-store` | 把结果存进 store 或浏览器存储；去掉卸载时的清空 |
-| G17 | K3 读腿的写端点词表 | 词表外、形如读端点的路径经假 `fetch` 读成功 | 已批准配置的读路径含词表里的任何一个词 → 适配器建立时即拒，步骤是 `skipped(adapter_refused)`、零出站（带扩展名、不在末段两种写法各一条） | 同时去掉适配器建立时的检查与 wire 关口的读意图检查——本线的零出站断言必须变红 |
+| G17 | K3 读腿的写端点词表（v5：随 K3 种类准入，§11） | 词表外、形如读端点的路径经假 `fetch` 读成功 | 已批准配置的读路径含词表里的任何一个词 → 适配器建立时即拒，步骤是 `skipped(adapter_refused)`、零出站（带扩展名、不在末段两种写法各一条） | 同时去掉适配器建立时的检查与 wire 关口的读意图检查——本线的零出站断言必须变红 |
+
+| G18 | 落点只存测试副本草稿（v5，S4-e） | 两个开关（落点开关与宜搭发送开关）都为原文 `true`、操作者是规则所有者且是活的锚点 owner 时，合成部署上恰好多出一份发往 1 号槽的草稿操作；草稿内容等于草稿库从同一段行文本自己重算的结果；同一内容再存一次得到 `reused: true` | 落点开关不是原文 `true` → 404，零读、零草稿；宜搭发送开关关着 → `failed(draft_refused)`、零草稿；非锚点 owner → `draft_refused`；多目标开关为 `'true'` → 拒写（§6.5）；请求体带行、配置、`targetRef` 或 `sourceBinding` 任一键 → 400；宜搭配置带 `generated` → 400，在任何读之前；最后一步不是宜搭方言 → 400；存草稿前后投递台账、批准、授权行与表单请求的计数都不变；S4-e 模块里没有对发送、批准、授权、准入、回执与表单传输模块的引用 | 让路由接受客户端的行；给 `prepareDraft` 传 `targetRef`；去掉落点开关的第二次读取；把写改成直接调草稿库的内部写入器（静态扫描变红）；去掉 `generated` 的前置拒绝（草稿库以 `PLAN` 拒绝，原因从 400 变成 `draft_refused`，断言变红） |
+| G19 | 点选的那一行（v5，S4-d） | 规则带 `rowInput`、操作者读得到规则所在表上的那条记录时，预览把它的声明列当业务键读一次、并把声明列并进转换的每一行 | 带 `rowInput` 的规则保存成启用或被启用 → 400 `ROW_INPUT_PREVIEW_ONLY`；记录在别的表上、操作者读不到、缺声明列 → `not_started(row_unavailable)`、零出站；不带 `rowInput` 的规则收到 `recordId` → 400；带 `rowInput` 而缺 `recordId` → 400；`row.` 引用出现在 `call_connection.inputs.key` 与 `withRow` 之外 → 保存 400；行列名与源列重名 → 保存 400；这一行的值在 §5.7 的每一个持久面上 0 命中 | 去掉「不能启用」的检查；把这一行的读换成插件或提权读；去掉「必须在规则所在表上」的比对 |
 
 G17 钉的是本线对既有词表的**依赖**，证明这条对照不是空转；它不把词表说成闭合的（§7.7）。G11 留着编号但不随本线交付。
+
+**v5 对 G10 的修订**：S4-e 让宜搭本地草稿库成了本线唯一允许落值的面（§6.5、§7.6），这与 §5.4 契约第 6 条「哨兵在快照表里找得到、在其它持久面找不到」是同一个形状。所以 S4-e 重跑 G10 时：哨兵在草稿库经它自己的读取器解密之后必须找得到（大于 0），在草稿库的密文列、§5.7 的其它每一个持久面与日志里都是 0 次。草稿库里凡是不加密、而又带值的列，S4-e 评审时逐列点名，加进 G10。
 
 ## 8. 上线梯子与回退
 
 每一级都由 owner 另批，上一级成立不自动成立下一级。
 
-- **L0** 合并休眠代码：三个开关未设；迁移只放宽 CHECK（本线不新增表），旧代码不写新值。
+- **L0** 合并休眠代码：四个开关未设；迁移只放宽 CHECK（本线不新增表），旧代码不写新值。
 - **L1** 上机，开关仍不设。
-- **L2 的前置**（全部成立才谈打开）：① §7.3 的重定向拒绝、§3.2 的对象条目拒绝与（方法, 路径）断言、§7.5 的重给认证材料都在 main 上，各有见证红的测试；② 规则创建者的令牌带租户、且在该租户恰有一行在役成员关系（与桥 ADR §7 的 L2 前置相同）；③ 目标系统上有一份由集成管理员批准的读源配置；④ 若 OQ3 取建议值，`MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED` 在该部署上恰为 `'true'`（§7.8）；⑤ 推荐由租户绑定的服务账号经 API 创建规则（桥 ADR §6.2 的建议，理由相同：人员变动不影响定时读）。B2a 不在 L2 的前置里：L2 只读合成系统。
+- **L2 的前置**（全部成立才谈打开）：① §7.5 的重给认证材料在 main 上（S1-c，或 S0-b，看归属裁定，§11.1），有见证红的测试；§7.3 的重定向拒绝、§3.2 的对象条目拒绝与（方法, 路径）断言只在某个 HTTP 种类准入时才成为前置（v5：形态 B 首片不收 HTTP 种类）；② 规则创建者的令牌带租户、且在该租户恰有一行在役成员关系（与桥 ADR §7 的 L2 前置相同）；③ 目标系统上有一份由集成管理员批准的读源配置；④ 若 OQ3 取建议值，`MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED` 在该部署上恰为 `'true'`（§7.8）；⑤ 推荐由租户绑定的服务账号经 API 创建规则（桥 ADR §6.2 的建议，理由相同：人员变动不影响定时读）。B2a 不在 L2 的前置里：L2 只读合成系统。
 - **L2** 打开两个读取开关，只对**合成的登记系统**建一条定时规则与一次手动预览，观察步骤结果与日志。
 - **L3**（O ①）对客户真实系统的第一个读操作：逐系统、逐操作批准。**K3 种类的硬前置**：该系统连的是客户侧的只读账号，批准之前逐系统核对（§7.7）。次序是先手动预览、再谈定时。**部署已武装 B2a 时，L3 只有手动预览这一种形态**——每次预览读用掉一条登记，定时读要等 OQ8 的裁定（§3.2）。所以「已武装」不是 L3 的一个前置条件，而是决定 L3 长什么样的分支：把它当前置的话，第一次定时读之后的每一次都会失败。
+- **L3-d**（v5，O ② + O ④）打开落点开关 `INTEGRATION_AUTOMATION_TEST_COPY_DRAFT_ENABLED`，让锚点 owner 把场景的结果存成 1 号槽测试副本的草稿（§6.5）。前置有四条：
+  1. L3 的那一个 PLM 读操作已经批准，并在手动预览里看过；
+  2. 该部署上宜搭发送开关已按 R-50 / R-70 打开——这是宜搭线既有的门，不由本级打开；
+  3. 1 号槽已初始化，它封存的键布局与场景的宜搭配置相符（`runbook-yida-first-send-20261104.md:36`）；
+  4. 多目标开关不为 `'true'`，除非 S4-e 评审已证明缺省目标是 1 号槽（§6.5）。
+
+  先在合成部署上演练一遍。把草稿发到测试副本不在本级，仍按 R-50 / R-70 / R-71 逐次另批。
 - **L4**（O ②③，另一个切片）写。
 - **回退**：把开关改成 `=false` 并重启、确认进程里读到的是关，**然后**再删那一行——只删行再重启不会把变量从运行中的进程里清掉（`222-deploy-window-runbook-20260901.md:977` 记的实测）。回退不需要迁移回滚；规则留在表里，每次触发在这一步记 `skipped(action_disabled)`——步骤状态是 `failed`，所以这些规则在监控里会按次显示为失败，直到有人把规则停掉。这是有意的（§4.4），做回退的人要事先知道。动作 CHECK 的 `down()` 只在该类型从未被保存过的部署上是无害的（与 `zzzz20261106111300…:1-8` 的说明相同）。
 
@@ -721,22 +773,29 @@ G17 钉的是本线对既有词表的**依赖**，证明这条对照不是空转
 | 切片 | 内容 | 规模 | 依赖 | 迁移 | 开关（登记 / 读取点） | 类别 | 第三个实现方 |
 |---|---|---|---|---|---|---|---|
 | P0 | 本 ADR（登记行由主会话另行入册） | — | — | — | — | 文档 | 否 |
-| S1-a | 插件：抽出 `runGovernedConfiguredRead`（含可选的 `workspaceId` 输入与五个可选成员），HTTP 逐字节不变，加检查点 | M | — | 无 | 无 | 保证类 | 否 |
-| S1-b | 插件 + core：连接调用服务、`ConnectionCallPort` 与登记接线、`describeRead` 的各项准入、B2a 新用途与一次性规则、不跟随重定向、同源与（方法, 路径）断言、对象条目拒绝、完整性判定、在途上限。没有生产调用方，休眠合并，经测试夹具验证（§10.2） | L | S1-a | 无 | **登记 ①**；① 的插件侧读取点 | 保证类 | 否 |
-| S1-c | 插件：origin 或认证身份变更必须重给认证材料（若由本线交付，OQ5） | M | — | 无 | 无 | 保证类 | 否 |
-| S2-a | core：**只有库**——容器一般化、严格解析器、输出声明与 `step.output` 契约的类型。不碰保存门、不读开关；经测试夹具验证（§10.2） | M | — | 无 | 无 | 保证类 | 否 |
+| S1-a | 插件：抽出 `runGovernedConfiguredRead`（含可选的 `workspaceId` 输入与 `signal` / `checkpoint` 两个可选成员；`options` 的闭合键集只收这两个，§3.1），HTTP 逐字节不变，加检查点。**v5：现在可在本地开工**，带冻结的验收契约 | M | — | 无 | 无 | 保证类 | 否 |
+| S1-b | 插件 + core：连接调用服务、`ConnectionCallPort` 与登记接线、`describeRead` 的各项准入（v5：种类准入表只有 `data-source:sql-readonly`）、入口的 `readPurpose` 与 `rowCap` 两个成员、B2a 新用途与一次性规则、完整性判定、在途上限。v5 **不含**传输包装（不跟随重定向、同源与（方法, 路径）断言）、对象条目拒绝与写门拒绝的识别——它们随第一个 HTTP 种类的准入交付（§3.2、§11）。没有生产调用方，休眠合并，经测试夹具验证（§10.2） | L（v5 收窄后估 M–L） | S1-a | 无 | **登记 ①**；① 的插件侧读取点 | 保证类 | 否 |
+| S1-c | 插件：origin 或认证身份变更必须重给认证材料（若由本线交付，OQ5）。**v5：等 S0-b 归属的裁定**（Codex 线，§11.1），两边不同时做 | M | S0-b 归属裁定 | 无 | 无 | 保证类 | 否 |
+| S2-a | core：**只有库**——容器一般化、严格解析器、输出声明与 `step.output` 契约的类型。不碰保存门、不读开关；经测试夹具验证（§10.2）。**v5：现在可在本地开工**，带冻结的验收契约；它不依赖 S1-b | M | — | 无 | 无 | 保证类 | 否 |
 | S3-a1 | core：`call_connection` 的类型、CHECK 迁移、配置解析与闭合校验、`describeRead` 盖章、保存门（触发耦合、cron 间隔、放置、同规则检查）、`stepKey` 与保存时引用图、操作者权限、会话特性。执行器分支只有失败关闭的桩 | L | S1-b、S2-a | 动作 CHECK +1 | **登记 ③ 与 ②**；① 与 ③ 的保存读取点 | 保证类 | 否 |
 | S3-a2 | core：执行步、结果消毒与发布、模拟、重试资格、端到端守卫 | L | S3-a1 | 无 | ①、③ 的触发读取点 | 保证类 | 否 |
 | S3-b1 | 前端：动作配置面板、编写模块（与服务端文案逐字节对拍）、标签与规则摘要，及它们的 web spec | L | S3-a1 冻结的 DTO 与文案 | 无 | 会话特性 | 非保证类 | **是** |
 | S3-b2 | 前端 + core 测试：日志 / 执行详情 / 支持包对新步骤的 values-free 呈现、服务端对拍测试、spec 登记 | S | S3-a2 | 无 | — | 保证类（日志隔离） | 否 |
-| S4-a | core + 插件：`transform_records` 通用方言、引擎的单函数注入与纯度钉子、引擎的可选扩展表参数 | M | S2-a、S3-a1（迁移链与它唯一可能的源步骤都来自 S3-a1）；端到端对照还要 S3-a2 | 动作 CHECK +1 | ③ | 保证类（隔离部分） | 否 |
-| S4-b | 插件 + core：宜搭 v3 编译器、两个扩展函数、影子比对、对拍门 | L | S4-a | 无 | ③ | 保证类 | 仅 `__tests__/` 下的对拍语料与生成器 |
+| S4-a | core + 插件：`transform_records`——通用方言（引擎的单函数注入与纯度钉子），加 v5 的宜搭 v3 方言（只注入 `compileYidaLocalDraft`，§6.3）与 `source.withRow`；引擎文件不改 | M | S2-a、S3-a1（迁移链与它唯一可能的源步骤都来自 S3-a1）；端到端对照还要 S3-a2 | 动作 CHECK +1 | ③ | 保证类（隔离部分） | 否 |
+| ~~S4-b~~ | **v5 移除**：宜搭 v3 的引擎表达、两个扩展函数、影子比对与对拍门随 OQ6 的退路挪到 §11（拉入条件照 R-87）；它在形态 B 里的位置由落点 S4-e 取代 | — | — | — | — | — | — |
 | S4-c | 前端：映射编辑面板、编写模块、web spec | M | S4-a 冻结的 DTO | 无 | 会话特性 | 非保证类 | **是** |
-| S4-d | core + 前端：手动预览路由与面板 | 路由 L、面板 M | S3-a2、S4-a | 无 | ①、③ | 保证类（面板装的是真实读到的值，G16） | 否 |
+| S4-d | core + 前端：手动预览路由与面板；v5 加点选的那一行（`rowInput`、`recordId`、`row_unavailable`、「不能启用」，§6.4，G19） | 路由 L、面板 M | S3-a2、S4-a | 无 | ①、③ | 保证类（面板装的是真实读到的值，G16、G19） | 否 |
+| S4-e | core + 前端（v5，形态 B 唯一的落点）：存草稿路由 `steps-draft`——服务端重跑整条链，经既有的宜搭 owner 草稿入口把结果存成 1 号槽（物料表测试副本）的草稿，不带 `targetRef` / `sourceBinding`、不收客户端的行；面板上的「存为测试副本草稿」（§6.5） | M | S4-d、S4-a；宜搭剩余系列（R-93）合并之后的 main（§6.5） | 无 | **登记 ④**；④ 的两个读取点 | 保证类（G18，并重跑 G10） | 否 |
 | S2-b | **后置（§11）**：快照表、挂起时落快照、续跑核对与恢复、清扫 | — | — | — | — | — | — |
 
-- **顺序**：S1-a → S1-b → S2-a → S3-a1 → S3-a2 →（S3-b2 ∥ S4-a）→ S4-b →（S4-c ∥ S4-d）。S3-b1 只依赖 S3-a1 冻结的 DTO 与文案，可以与 S3-a2 并行。S1-c 可以在任何时候做，但必须先于梯子的 L2。
-- **每周的可演示增量**：S3-a2 加 S3-b1 / S3-b2 之后——一条定时规则每隔 N 分钟读一次合成的登记系统，执行详情里看到读了多少行（一步至多 99 行，缺省配置的桥 19 行，§4.6）、多少列；S4-d 之后——在预览面板里看到读出来并映射好的行，以及宜搭草稿预览。两者都只对合成系统，不需要任何 O 层批准。S1-a 到 S3-a1 是休眠合并，属「可合并」而不是「可演示」。
+- **顺序（v5）**：（S1-a ∥ S2-a）→ S1-b → S3-a1 → S3-a2 →（S3-b2 ∥ S4-a）→ S4-d → S4-e。S3-b1 只依赖 S3-a1 冻结的 DTO 与文案，可以与 S3-a2 并行；S4-c 在 S4-a 之后，可以与 S4-d 并行。
+  - **S2-a 与 S1-b 之间没有依赖**：S2-a 的依赖列一直是「—」，它只碰 core 的纯模块。v4 的顺序行把它排在 S1-b 之后，那是一条假依赖。真正同时需要两者的是 S3-a1。
+  - S1-c 先等 S0-b 归属的裁定，再先于梯子的 L2。
+- **开工状态（v5，owner 2026-11-19「按建议执行」，计划评审决定 #7）**：
+  - **现在可以开工、只在本地**：S1-a、S2-a。各带一份冻结的验收契约（输入、输出、错误码、必须存在的测试、范围之外），在证据目录 `s-line-20261119/adr/acceptance-S1-a.md` 与 `acceptance-S2-a.md` 里，values-free、不入库。它们由本 ADR 的 §3.1、§5.1–§5.3、§5.6、§10.2 推出，与本节不一致时以本 ADR 为准。推送、开 PR 与合并仍逐项另批。
+  - **等 S0-b 归属的裁定**（Codex 线，§11.1）：S1-c。
+  - **等本 ADR 合并**（R-94 ①）：S1-b 及之后的全部切片。R-94 ② 原有的「宜搭剩余系列合并完」对它们是否仍是条件，以 owner 对 R-94 ② 的收窄为准——决定 #7 只点名了 S1-a、S2-a。S4-e 另外一定要等宜搭剩余系列合并（§6.5）。
+- **每周的可演示增量**：S3-a2 加 S3-b1 / S3-b2 之后——一条定时规则每隔 N 分钟读一次合成的登记系统，执行详情里看到读了多少行（一步至多 99 行，§4.6）、多少列；S4-d 之后——在预览面板里点选合成项目表的一行，看到读出来的物料字段与规划器编出的宜搭草稿行；S4-e 之后——在合成部署上把它存成一份 1 号槽草稿，并在既有的宜搭 owner 面板里预览它。三者都只对合成系统，不需要任何 O 层批准。S1-a 到 S3-a1 是休眠合并，属「可合并」而不是「可演示」。
 - **迁移前缀**：两支迁移（都是动作 CHECK；本线不新增表）各用互不相同、且晚于 `zzzz20261111181500` 的时间戳前缀；并行切片各自预先分配，避免两支迁移撞前缀后其中一支要改名。动作 CHECK 的类型表按 `zzzz20261106111300…:10-17` 的方式链式导入上一支。**次序是硬约束**：迁移器允许乱序历史（`packages/core-backend/src/db/migrate.ts:32`），而每一支 CHECK 迁移都是先删约束、再按自己链上的列表重建（`zzzz20261106111300…:24-31`）。所以 S4-a 的前缀必须排在 S3-a1 之后，并且 S3-a1 先合并；反过来的话，后应用的那一支会把另一支加的类型悄悄从约束里去掉。
 
 ### 10.2 各切片的验收
@@ -753,10 +812,11 @@ G17 钉的是本线对既有词表的**依赖**，证明这条对照不是空转
 | G2 | S1-b | 插件服务一侧的负对照与变异（服务模块里没有 `.upsert(`、`testConnection(`） | P |
 | G2 | S3-a2 | core 动作模块的扫描：正（找到唯一的出站点）、负、变异（在动作里加一处直接 `fetch`） | U |
 | G2 | S4-d | 预览路由成为第二个端口调用方：扫描重钉，变异重做 | U |
-| G3 | S1-b | 传输部分：正、负（零出站加 `write_gate_refused`）、两条变异；端口键集、写门词表 | P |
+| G3 | S1-b | 端口键集恰为两个方法、写门词表恰为两项。传输部分——正、负（零出站加 `write_gate_refused`）、两条变异——（v5：随 HTTP 种类准入，§11） | P |
 | G3 | S3-a1 | 保存部分：引用写目标配置即 400，与开关无关 | U |
-| G4 | S1-b | 正、负、两条变异 | P |
-| G5 | S1-b | 正、负（四个键各一条；K3 的档案条目与清单内容；K3 与桥的清单外请求；包装的两个闭合原因）、六条变异（含去掉 K3 档案拒绝，两层各见一次红） | P |
+| G4 | （v5：随 HTTP 种类准入，§11） | 正、负、两条变异 | P |
+| G5 | S1-b | 路径守卫在保存与执行两处的拒绝（种类无关） | P |
+| G5 | （v5：随 HTTP 种类准入，§11） | 正、负（四个键各一条；K3 的档案条目与清单内容；K3 与桥的清单外请求；包装的两个闭合原因）、六条变异（含去掉 K3 档案拒绝，两层各见一次红） | P |
 | G6 | S1-c | 正、负、三条变异 | P |
 | G7 | S1-b | 开关 ①：插件读取点的正、负、变异；登记与「无未登记读取」 | P、C |
 | G7 | S3-a1 | 开关 ③ 与 ②：登记、精确列表、③ 的保存读取点；开关 ① 的保存读取点 | U、C |
@@ -769,48 +829,53 @@ G17 钉的是本线对既有词表的**依赖**，证明这条对照不是空转
 | G9 | S3-a2 | 端到端的 `call_connection → call_connection`：正、负，容器前序检查的变异重新见红 | U |
 | G9 | S4-a | 端到端的 `call_connection → transform_records`；`concat.fields`；空原型行的变异 | U |
 | G10 | S2-a | 只有内存那一半：两次执行的容器互不可见、`dispose` | U |
-| G10 | S3-a2 | **持久面哨兵**：成功、失败、超时三条路径，各持久面 0 命中、通道内大于 0；桥错误码里的哨兵；两条变异 | DB |
-| G10 | S4-a、S4-d | 各自新增的落库面（转换步骤的结果、预览摘要行）重跑哨兵 | DB |
+| G10 | S3-a2 | **持久面哨兵**：成功、失败、超时三条路径，各持久面 0 命中、通道内大于 0；两条变异（桥错误码里的哨兵随桥种类准入） | DB |
+| G10 | S4-a、S4-d | 各自新增的落库面（转换步骤的结果、预览摘要行）重跑哨兵；S4-d 另含点选那一行的值 | DB |
+| G10 | S4-e | 草稿库作为唯一允许落值的面：经它自己的读取器解密后大于 0，密文列、存草稿摘要行与其它持久面 0 命中（§7.10 的 v5 修订） | DB |
 | G11 | 后置 | 不随本线交付（§5.4） | — |
-| G12 | S1-b | 插件一侧：99 / 100 与 9 / 10（桥的这一对用 `maxLimit` 为 500 的夹具），缺省桥夹具上的 19 / 20（20 行是 `source_incomplete`）；各种类的完整性信号；`rowCap` 只收那一个值；两个常量的变异与三条信号的变异 | P |
+| G12 | S1-b | 插件一侧：SQL 只读源的 99 / 100 与它的信号 2（满页即 `done: false`、带游标 → `source_incomplete`）；`rowCap` 只收那一个值；`CONFIGURED_READ_AUTOMATION_ROW_CAP` 的变异与信号 2 的变异。K3 的 9 / 10、桥的 19 / 20 与它们的信号 3、4（v5：随 HTTP 种类准入，§11） | P |
 | G12 | S2-a | 容器层的行数与字节上限 | U |
 | G12 | S3-a2 | 端到端：触顶与不完整的读不发布；§5.6 的 core 常量变异 | U |
 | G12 | S4-a | 转换输出过同一组上限 | U |
-| G13 | S4-b | 正、负、全部变异 | U、P |
+| G13 | S4-a | 宜搭方言（只调规划器）：正、负、§6.3 的四条变异（v5；原对拍随 OQ6 的退路挪到 §11） | U、P |
 | G14 | S3-a1 | 保存一侧的全部放置对照与变异 | U |
 | G14 | S3-a2 | 模拟时端口调用 0 次；真发测试不支持；非 `ok` 之后发送类动作不执行，及其变异 | U |
 | G14 | S4-a | `transform_records` 重跑同一组放置对照 | U |
 | G15 | S1-b | 正、负（含同一条登记上的第二次读）、两条变异 | P |
 | G15 | S4-d | 预览路由下的一次性：两次预览各要一条登记 | DB |
+| G15 | S4-e | 存草稿路由下的一次性：重跑的那一次读另要一条登记，不能沿用预览那一条 | DB |
 | G16 | S4-d | 面板 spec：正、负、变异；浏览器真库用例一条 | W、DB |
-| G17 | S1-b | 正、负、变异 | P |
+| G17 | （v5：随 K3 种类准入，§11） | 正、负、变异 | P |
+| G18 | S4-e | 正、负、五条变异（§7.10） | U、DB |
+| G19 | S4-d | 正、负、三条变异（§7.10） | U、DB |
 
 各切片在上表之外的验收：
 
 - **S1-a**：既有路由测试全绿；失败路径的响应体快照（未批准、种类不符、请求体多键、输入非法、无权限）逐字节相等；「用 `req` 构造的上下文 = 处理器此前从 `req` 读到的字段」的等价测试；不传 `options` 时请求与响应与快照相同（先例 `governed-entry-abort-checkpoints.test.cjs`）；不传 `options` 也不传 `workspaceId` 时，计划的行上限是 10、发给源的 `limit` 是 10、返回值上没有新增的可枚举成员——把 `rowCap` 与内部通道的缺省行为钉在 HTTP 这一侧；信号已中止时不加载系统、不建适配器（探针计数为 0）；s6a 的 pin 重算；`test-chain.txt` 登记。
-- **S1-b**：入口的 `transport` 只接受字面量 `'strict'`，别的值（包括函数）直接拒绝；`readPurpose` 只接受用途闭集里的常量；`rowCap` 只接受入口自己的那个常量；端口登记与解绑（非 owner 解绑是空操作，旧 owner 解不掉后继者的登记）；同一系统两次并发调用恰一次执行、一次 `skipped(busy)`，且槽位在迟到的落定时才释放（用一个晚于超时才落定的假适配器见证）；表外种类被拒；**每个读模式一条**——两个准入模式各一条正对照，`detail_with_lines` 与 `resolver_lookup` 各一条 `mode_not_admitted`，SQL 只读源上取行面被盖成 `adapter_records`；**带 workspace 的配置**——带着保存时的提示查得到，不带提示查不到（`operation_not_found`），盖章值等于那一行自己的值，系统一侧从非空提示回退到租户级行；失败夹具的响应体里放哨兵，哨兵不出服务。
+- **S1-b**：入口的 `options` 闭合键集从 S1-a 的两个扩到四个，`transport` 不在其中、给了即拒（v5，它随 HTTP 种类准入）；`readPurpose` 只接受用途闭集里的常量；`rowCap` 只接受入口自己的那个常量；端口登记与解绑（非 owner 解绑是空操作，旧 owner 解不掉后继者的登记）；同一系统两次并发调用恰一次执行、一次 `skipped(busy)`，且槽位在迟到的落定时才释放（用一个晚于超时才落定的假适配器见证）；表外种类被拒（v5：`http`、K3、桥三种各一条 `kind_not_admitted`）；**每个读模式一条**——两个准入模式各一条正对照，`detail_with_lines` 与 `resolver_lookup` 各一条 `mode_not_admitted`，SQL 只读源上取行面被盖成 `adapter_records`；**带 workspace 的配置**——带着保存时的提示查得到，不带提示查不到（`operation_not_found`），盖章值等于那一行自己的值，系统一侧从非空提示回退到租户级行；失败夹具的响应体里放哨兵，哨兵不出服务。
 - **S1-c**：G6。
 - **S2-a**：引用语法的逐例表；解析器拒绝原型链上的名字；两次执行的容器互不可见；失败与抛错路径上都 `dispose`。它不碰保存门、不读开关，所以没有 G7 的份。
 - **S3-a1**：真库用例（DB）：动作 CHECK 迁移的 up / down；两次并发保存不会留下没盖章的绑定（I 链 F1 的同一类用例）；无权限管理员的重试在任何调用之前被拒；带 workspace 的配置存下之后，规则里的 `operation.workspaceId` 等于那一行自己的值。执行器的桩：这个切片里执行器不取端口，一律按端口缺席处理（`not_started(port_inactive)`），所以即使开关被提前打开，也一次端口调用都没有。
 - **S3-a2**：真库用例（DB）：授权事务在端口调用之前已提交（端口调用期间对该用户 `user_roles` 的 UPDATE 不被阻塞）；撤权后的下一次触发被拒；配置版本退役后记 `operation_not_approved`；重新 `describeRead` 发现列集变化时记 `operation_changed`；按盖章的 workspace 找不到配置行时记 `operation_not_found`。
 - **S3-b1**：开关关时面板不渲染；开关关时打开一条已带该动作的规则仍完整显示、不被静默丢掉；选择器对集成列表的 403 显示为「看不到」而不是报错；选择器把列出配置时用的 workspace 提示带进 `operation`；编写模块的文案与服务端逐字节一致。
 - **S3-b2**：日志里的一句话不含任何值；支持包剥掉绑定与 workspace 标识，对新步骤只给 values-free 的那一句——它今天对 `run_integration_job` 就是这么做的（`automation-log-support-packet.ts:73-77`）；服务端对拍测试；spec 登记。
-- **S4-a**：八个转换各自经步骤走一遍的逐例表；全有或全无；错误 `details` 里的哨兵不出步骤；引擎纯度钉子；「扩展表泄漏进管道路径」的变异必红；管道与外部写试算的既有测试不变。
-- **S4-b**：发送路径的调用点与测试不变（`compileYidaSendDraft` 的调用方集合由静态测试钉住）。
+- **S4-a**：八个转换各自经步骤走一遍的逐例表；全有或全无；错误 `details` 里的哨兵不出步骤；引擎纯度钉子；引擎文件逐字节不变（v5）；宜搭方言的 G13；`withRow` 的并列与重名拒绝；管道与外部写试算的既有测试不变。
+- ~~S4-b~~（v5 移除）。它原有的一条验收——发送路径的调用点与测试不变，`compileYidaSendDraft` 的调用方集合由静态测试钉住——转给 S4-a 与 S4-e 共同承担：两者都不得新增 `compileYidaSendDraft` 的调用方（S4-e 只经草稿入口间接用到它）。
 - **S4-c**：映射表的增删改；`sourceField` 只能从源步骤的声明列里选；保存阻断原因与服务端一致。
-- **S4-d**：两条连接加屏障的准入用例（检查点之间撤权，下一个检查点即停，照合成片的 C04）；响应带 `no-store`；摘要行不含值、不可重试、不计入规则监控；断开 / 取消 / 停机走同一套排空。
+- **S4-d**：两条连接加屏障的准入用例（检查点之间撤权，下一个检查点即停，照合成片的 C04）；响应带 `no-store`；摘要行不含值、不可重试、不计入规则监控；断开 / 取消 / 停机走同一套排空；G19。
+- **S4-e**（v5）：G18；真库用例在合成部署上走完「点一行 → 读合成 PLM → 存草稿 → 既有 owner 预览看到它」；同内容第二次存草稿得到 `reused: true`、草稿操作数不变；存草稿前后宜搭投递台账、批准与授权行计数不变、表单传输的假 `fetch` 调用 0 次；宜搭发送开关关、落点开关开时零草稿；多目标开关为 `'true'` 时拒写（直到读码证明缺省目标是 1 号槽）；开关 ④ 的登记与读取点测试。
 
 ### 10.3 CI 陷阱清单
 
-桥 ADR §11 列过的那几条在这里全部适用（`adr-automation-pipeline-bridge-20261103.md:345`）：插件新测试要登记 `test-chain.txt`；S1-a / S1-b 必动 `http-routes.cjs` 与 `index.cjs`，s6a 的两个来源 pin 要重算（`s6a-package-provenance-pins.json:72-73`）；真库用例的三处镜像；开关清单的扫描与显式测试（§7.8）；`core-backend/src/index.ts` 新增 `this.X` 要跑完整的 core-backend 单元套件；web spec 的登记文件；动到 `scripts/ops/__tests__` 时同步 `EXPECTED_OPS_TESTS_COUNT`（`.github/workflows/plugin-tests.yml:1145`）。本线另加两条：`yida-transform-spec.mjs` 只要被前端引用，就要进前端镜像与浏览器车道的闭包清单（附录一对 `yida-material-code.mjs` 的同一要求，`ipaas-yida-dev-baseline-addendum-20261106.md:28`）；规划器的导入钉子测试必须保持绿——它是「规划器不依赖引擎」的唯一机器证明。再加三条：每加一个动作类型，都要改既有的逐动作迁移漂移测试——I 链的动作切片就改了五个旧的 `*-automation-action-migration.test.ts`（#6789 的 numstat），S3-a1 与 S4-a 各要再来一遍；插件链只在受守卫路径变动时运行（§10.2），被它读到的 core 新文件要进两份清单；两支 CHECK 迁移的前缀次序与合并次序是硬约束（§10.1）。
+桥 ADR §11 列过的那几条在这里全部适用（`adr-automation-pipeline-bridge-20261103.md:345`）：插件新测试要登记 `test-chain.txt`；S1-a / S1-b 必动 `http-routes.cjs` 与 `index.cjs`，s6a 的两个来源 pin 要重算（`s6a-package-provenance-pins.json:72-73`）；真库用例的三处镜像；开关清单的扫描与显式测试（§7.8）；`core-backend/src/index.ts` 新增 `this.X` 要跑完整的 core-backend 单元套件；web spec 的登记文件；动到 `scripts/ops/__tests__` 时同步 `EXPECTED_OPS_TESTS_COUNT`（`.github/workflows/plugin-tests.yml:1145`）。本线另加两条：规划器的导入钉子测试必须保持绿——它是「规划器不依赖引擎」的唯一机器证明；v5 的 S4-a 从插件目录注入 `compileYidaLocalDraft`，被 core 跨边界读到的这个模块（及它的导入）要进插件链的受守卫路径清单（§10.2 的两份清单）。（v4 这里还有一条 `yida-transform-spec.mjs` 进前端闭包清单的要求，随 OQ6 的退路挪到 §11。）S4-e 另加一条：它碰 `core-backend/src/routes/` 与宜搭 owner 端口的接线，宜搭栈（R-93）的各支在这些文件上有未合并的改动（§6.5），开工前在届时的 main 上重核。再加三条：每加一个动作类型，都要改既有的逐动作迁移漂移测试——I 链的动作切片就改了五个旧的 `*-automation-action-migration.test.ts`（#6789 的 numstat），S3-a1 与 S4-a 各要再来一遍；插件链只在受守卫路径变动时运行（§10.2），被它读到的 core 新文件要进两份清单；两支 CHECK 迁移的前缀次序与合并次序是硬约束（§10.1）。
 
 ### 10.4 哪些切片可以交给第三个实现方（Grok）
 
 这件事已由 R-95 裁定（`decision-register.md:100`），规则在接入说明里（`ai-collaboration-grok-onboarding-20261116.md`）。本节只把那两处的规定落到本线的切片上，不另立口径；与它们冲突时以它们为准。
 
 - **它是怎样工作的**（接入说明的规定，不是本 ADR 的假设）：只接书面任务卡；在自己的克隆或工作树里干活、分支前缀 `grok/`、只开 Draft PR；PR 走同样的 CI，由 Codex 或 Claude 审，合并逐项批（`ai-collaboration-grok-onboarding-20261116.md:7-15,26-35,65`；R-95 ②）。原稿把它写成「看不到仓库的历史与约定、不参与评审」，那与接入说明不符：它看得到仓库，开工前要读章程、R-93 至 R-95 与任务卡所引的 ADR（`:19-22`）。它接触不到的是凭据、`.env`、现场与真实客户数据（`:42`）。
-- **可以交**：S3-b1（动作配置面板、编写模块、标签与规则摘要，及它们的 web spec）、S4-c（映射编辑面板、编写模块及其 spec）、S4-b 里只含测试的那一块——对拍语料与确定性生成器，文件只落在 `__tests__/` 下。共同点：前端配置界面或只含测试，边界能写进一张任务卡，写错了的后果是界面不对或测试变红，而不是一道门开了。
-- **不交**：S1-a、S1-b、S1-c、S2-a、S3-a1、S3-a2、S3-b2、S4-a、S4-b 的编译器 / 扩展函数 / 影子比对、S4-d 整片。理由逐条对得上接入说明的「不接」与禁区（`ai-collaboration-grok-onboarding-20261116.md:12-14,49-60`）：授权链、端口、凭据、出站写闸、B2a、台账、迁移判定都在「不接」之列；`plugins/plugin-integration-core/lib/yida-*`、`.github/workflows/**`、开关清单与来源 pin 在禁区里——所以 S4-b 的编译器与扩展函数（它们就落在 `lib/yida-*`）、每个切片的车道接线与开关登记都留在我们手里。另有三样接入说明没有点名、本线自己判为不交：**日志隔离**（S3-b2：日志、执行详情、支持包对新步骤的呈现与服务端对拍测试——值不进日志是这条线的中心保证，G10）、**装真实值的界面**（S4-d 的面板，G16）、**spec 与测试链的登记文件**（已知的冲突点，自己做更便宜）。
+- **可以交**：S3-b1（动作配置面板、编写模块、标签与规则摘要，及它们的 web spec）、S4-c（映射编辑面板、编写模块及其 spec）。（v4 还列了 S4-b 的对拍语料与生成器；v5 里 S4-b 已移除，这一项随之没有。）共同点：前端配置界面，边界能写进一张任务卡，写错了的后果是界面不对或测试变红，而不是一道门开了。
+- **不交**：S1-a、S1-b、S1-c、S2-a、S3-a1、S3-a2、S3-b2、S4-a、S4-d 整片、S4-e 整片（v5：它写宜搭草稿库，碰宜搭 owner 端口与 `lib/yida-*` 的接线，是保证类）。理由逐条对得上接入说明的「不接」与禁区（`ai-collaboration-grok-onboarding-20261116.md:12-14,49-60`）：授权链、端口、凭据、出站写闸、B2a、台账、迁移判定都在「不接」之列；`plugins/plugin-integration-core/lib/yida-*`、`.github/workflows/**`、开关清单与来源 pin 在禁区里——所以宜搭方言的注入与 S4-e 的接线（都碰 `lib/yida-*`）、每个切片的车道接线与开关登记都留在我们手里。另有三样接入说明没有点名、本线自己判为不交：**日志隔离**（S3-b2：日志、执行详情、支持包对新步骤的呈现与服务端对拍测试——值不进日志是这条线的中心保证，G10）、**装真实值的界面**（S4-d 的面板，G16）、**spec 与测试链的登记文件**（已知的冲突点，自己做更便宜）。
 - **任务卡**用接入说明的模板（`ai-collaboration-grok-onboarding-20261116.md:83-95`），另外必须包含：冻结的 DTO 与类型；服务端校验文案的逐字节清单（前端编写模块要与之对拍）；合成样例数据；允许修改的文件清单；验收用的 spec 名单与需要亲眼见红的断言。**不包含**：任何客户值、现场事实、凭据位置。开关一栏写「不允许新增」。
 - **我们保留的**：评审；对它交回的每一条测试再见证一次红；合并前的保真核对。它交回的测试在我们手里见过红之前只算语料，不算守卫。
 
@@ -833,6 +898,21 @@ G17 钉的是本线对既有词表的**依赖**，证明这条对照不是空转
 - **K3 读路径的正向目录**。拉入条件：OQ10 的裁定。
 - **已武装部署上可重复的自动化读授权**（「一条登记一次读」之外的形态）。拉入条件：OQ8 的裁定。
 - **core `data_sources` HTTP 适配器写路径的审计**、接活或删除既有死表、用户自定义连接器种类、连接器市场、OAuth2：另案或不做，本线不碰。
+- **v5：`http`、`erp:k3-wise-webapi`、`bridge:legacy-sql-readonly` 三个种类**（形态 B 首片只收 `data-source:sql-readonly`，§3.2）。拉入条件：一个用到该种类、有客户出处的点名场景，加 owner 对形态的裁定。随种类一起交付的，是本 ADR 已锁定的契约：
+  - §3.2 的传输包装、对象条目拒绝与写门拒绝的识别，入口的 `transport: 'strict'`；
+  - §7.3–§7.7 的结论；
+  - G3 的传输一半、G4、G5、G17，以及 K3 与桥的 G12 各对。
+
+  K3 另有两条：客户侧只读账号这个硬前置，以及 OQ10。`plm:yuantus-wrapper` 先要一条传输评审（附注 4）。
+- **v5：宜搭 v3 的引擎表达**——原 S4-b 的全部内容，全文见 `aadb188f3` 的 §6.3。它包括：
+  - `yida-transform-spec.mjs`、`yida_concat` / `yida_generated` 两个扩展函数；
+  - `transformRecord` 的可选扩展表参数及其「泄漏进管道」变异；
+  - 影子比对、对拍语料与生成器、原 G13、原因码 `parity_violation`。
+
+  拉入条件照 R-87（`decision-register.md:92` @e0e4406bf），任一即可：备料宜搭链路在 222 首发成功并稳定；该客户提出第二个宜搭场景；owner 决定作为对外功能。在那之前，宜搭方言只调规划器（§6.3）。
+- **v5：第二个落点**——正式表单（2–6 号槽）、其它测试副本、把读到的值写进多维表记录、发通知。S4-e 只落 1 号槽测试副本（§6.5）。拉入条件：一个有客户出处的场景，加 owner 对形态的裁定。每个新落点各是一个保证类切片、各有一个默认关并登记的新开关；写表属 O ②，发通知属 O ④，发外部系统属 O ③。
+- **v5：带绑定的草稿与物料编码（`generated`）进落点**。S4-e 的草稿无绑定，所以不能带 `generated`（§6.5）。拉入条件：宜搭栈的表源绑定路径（D17）可用，加 owner 裁定，让落点产出带绑定的草稿。
+- **v5：点选行规则的定时运行**（带 `rowInput` 的规则今天不能启用，§6.4）。拉入条件：OQ4 那一类的裁定——由什么事件、按什么速率驱动「对某一行读一次」。
 
 ## 12. 待 owner 裁定（2026-11-19 已答）
 
@@ -854,7 +934,7 @@ G17 钉的是本线对既有词表的**依赖**，证明这条对照不是空转
 5. **OQ5 三项传输 / 凭据加固由谁交、交到哪一层**。（a）换 origin 或认证身份必须重给认证材料（§7.5）：若 S0-b 在 S3-a1 就绪时仍未进 main，是否由本线以 S1-c 交付？**建议**：是。（b）不跟随重定向：本线只对自动化调用方生效；是否改成适配器对所有调用方的默认行为？**建议**：先在现场数清有无依赖跳转的源，再定。（c）是否在自动化路径上额外拒绝回环 / 链路本地地址？**建议**：不加——那是登记权限的职责，加了会让工作台与规则两套口径。**owner 答复（2026-11-19）：按建议**，（a）带一个条件。（a）由本线以 S1-c 交付，前提是先和 S0-b 定下唯一的实现归属，两边不同时做（计划评审决定 #7、#8；§11.1）。在那个裁定之前 S1-c 不开工。（b）先在现场计数再定；形态 B 首片不收 HTTP 种类，所以本线在 HTTP 种类准入之前不改变任何重定向行为。（c）不加。
 6. **OQ6 宜搭 v3 在转换步骤上的做法**。本 ADR 取「编译到引擎 + 影子对拍，规划器为权威」。备选是「步骤内只调规划器，不做引擎表达」（零漂移，但转换步骤里就有一个宜搭专属的旁路）。**建议**：取前者，并保留 §6.3 的退路条款。**owner 答复（2026-11-19）：取退路——步骤内只调规划器。** 依据是计划评审决定 #7 的原文「OQ6 取 ADR 自带的退路」，这是本节唯一一处没有取原建议的地方。随之：
    - 宜搭方言在步骤里只调规划器（§6.3）。
-   - 引擎表达（`yida-transform-spec.mjs`）、两个扩展函数（`yida_concat`、`yida_generated`）、影子比对与对拍门 G13 整体挪到 §11，拉入条件照 R-87（`decision-register.md:92` @e0e4406bf）。
+   - 引擎表达（`yida-transform-spec.mjs`）、两个扩展函数（`yida_concat`、`yida_generated`）、影子比对与对拍门（原 G13；v5 里 G13 这个编号改指宜搭方言自己的守卫，§7.10）整体挪到 §11，拉入条件照 R-87（`decision-register.md:92` @e0e4406bf）。
    - 引擎文件的可选扩展表参数（§6.2 末段）不再随本线交付。
    - 原因码 `parity_violation` 不再产生（§4.8）。
    - 原 S4-b 整片由落点切片 S4-e 取代（§10.1）。
@@ -881,7 +961,8 @@ G17 钉的是本线对既有词表的**依赖**，证明这条对照不是空转
 - **为真实读另建一个代码资产目录**（合成目录的延伸）。不作为主路径。每加一个客户端点都要改仓库、走发版；而已批准的读源配置已经提供了版本、批准流与只收业务键的运行时。代码资产目录仍适合第一方的固定操作，合成片照旧。
 - **把步骤输出放进 `step.output`，续跑时从日志读回**。不取。日志面保留业务值并流向界面、作业面与支持包（§1.1）；续跑读回的会是被擦过的值，而且没有办法区分「值本来如此」与「值被擦过」。
 - **让 `IntegrationRunPort` 兼带数据**。不取（§2 ②）。
-- **步骤内只调宜搭规划器**（S4 的备选）。保留为退路（§6.3、OQ6）。
+- **步骤内只调宜搭规划器**（v4 里是 S4 的备选与退路）。**v5 采用**：owner 2026-11-19 就 OQ6 取了这条退路（§6.3）。
+- **把宜搭 v3 编译到引擎上、影子对拍、规划器为权威**（v4 的主方案，原 S4-b）。v5 不取，挪到 §11，拉入条件照 R-87。理由是计划评审的结论：它的结果从不发布，发送路径也不读，却是一个 L 级切片；形态 B 的点名场景用不到第二份表达。
 - **BPMN 引擎**。不适用（R-75）。
 
 ## 附注：未能核实的事项
