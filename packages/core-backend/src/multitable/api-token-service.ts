@@ -7,6 +7,7 @@
 import { createHash, randomBytes } from 'crypto'
 import { sql, type Kysely } from 'kysely'
 import { Logger } from '../core/logger'
+import { refuseZeroReturning } from '../auth/strict-credential-chain'
 import { evaluateUserAuthenticationGate } from '../auth/user-activation'
 import type { Database } from '../db/types'
 import { nowTimestamp, toJsonValue } from '../db/type-helpers'
@@ -216,11 +217,14 @@ export class ApiTokenService {
       return // already revoked, idempotent
     }
 
-    await this.db
+    const revokedRows = await this.db
       .updateTable('multitable_api_tokens')
       .set({ revoked: true, revoked_at: nowTimestamp() })
       .where('id', '=', tokenId)
+      .where('revoked', '=', false)
+      .returning('id')
       .execute()
+    refuseZeroReturning(revokedRows.length, 'API token was revoked concurrently')
 
     logger.info(
       `API token revoked: ${row.token_prefix}... by user ${userId}`,
@@ -287,12 +291,16 @@ export class ApiTokenService {
       return { valid: false, reason: gate.message }
     }
 
-    // Update last used timestamp
-    await this.db
+    const touched = await this.db
       .updateTable('multitable_api_tokens')
       .set({ last_used_at: nowTimestamp() })
       .where('id', '=', row.id)
+      .where('revoked', '=', false)
+      .returning('id')
       .execute()
+    if (touched.length === 0) {
+      return { valid: false, reason: 'Token has been revoked' }
+    }
 
     const token = rowToToken(row as Parameters<typeof rowToToken>[0])
     // Re-read to get updated last_used_at
@@ -327,11 +335,14 @@ export class ApiTokenService {
     // Revoke old + create new in a transaction
     return this.db.transaction().execute(async (trx) => {
       await this.fenceCredentialIssuance(trx, userId, expectedAccessGeneration)
-      await trx
+      const revokedRows = await trx
         .updateTable('multitable_api_tokens')
         .set({ revoked: true, revoked_at: nowTimestamp() })
         .where('id', '=', tokenId)
+        .where('revoked', '=', false)
+        .returning('id')
         .execute()
+      refuseZeroReturning(revokedRows.length, 'API token was revoked concurrently')
 
       // Create new token with same name and scopes
       const plainTextToken = generatePlainTextToken()

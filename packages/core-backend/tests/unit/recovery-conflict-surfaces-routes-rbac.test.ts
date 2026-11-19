@@ -17,11 +17,14 @@
 
 import type { Request, Response, Router } from 'express'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { mintAuthorizationInputBrand } from '../../src/rbac/authorization-input-brand'
 
 const pgMocks = vi.hoisted(() => ({
   query: vi.fn(),
   transaction: vi.fn(),
   poolQuery: vi.fn(),
+  attendanceRoot: false,
+  attendanceCommitted: false,
 }))
 
 const rbacServiceMocks = vi.hoisted(() => ({
@@ -30,6 +33,8 @@ const rbacServiceMocks = vi.hoisted(() => ({
   invalidateUserPerms: vi.fn(),
   userHasPermission: vi.fn(),
 }))
+
+const exceptionTransaction = vi.hoisted(() => ({ run: vi.fn() }))
 
 const auditMocks = vi.hoisted(() => ({
   auditLog: vi.fn(),
@@ -51,12 +56,41 @@ vi.mock('../../src/db/pg', () => ({
   pool: { query: pgMocks.poolQuery },
 }))
 
+vi.mock('../../src/integration/db/connection-pool', () => ({
+  poolManager: { get: () => ({
+    transaction: async (work: (client: { query: typeof pgMocks.poolQuery }) => Promise<unknown>) => pgMocks.attendanceRoot ? pgMocks.transaction(work) : work({
+      query: vi.fn(async (sql: string, params?: unknown[]) => {
+        if (/FROM users/.test(sql)) return { rows: [{
+          id: params?.[0], role: 'user', is_active: true, activation_status: 'activated',
+          deleted_at: null, purged_at: null,
+        }] }
+        if (/FROM user_roles/.test(sql)) return { rows: [{ role_id: 'admin' }] }
+        if (/current_setting|set_config|pg_advisory|SET TRANSACTION/.test(sql)) return { rows: [] }
+        return pgMocks.poolQuery(sql, params)
+      }),
+    }),
+  }) },
+}))
+
 vi.mock('../../src/rbac/service', () => ({
   isAdmin: rbacServiceMocks.isAdmin,
   listUserPermissions: rbacServiceMocks.listUserPermissions,
   invalidateUserPerms: rbacServiceMocks.invalidateUserPerms,
   userHasPermission: rbacServiceMocks.userHasPermission,
 }))
+
+// Keep the actual compatibility adapter and writeAuthorizationException; only replace its
+// transaction carrier so the real INSERT/DELETE callback reaches the injected database fault.
+vi.mock('../../src/rbac/authorization-input-lock', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/rbac/authorization-input-lock')>()
+  return {
+    ...actual,
+    withAuthorizationInputTransaction: (plan: { intent: string }, work: unknown, ...rest: unknown[]) =>
+      plan.intent === 'GRANT_DIRECT' || plan.intent === 'REVOKE_DIRECT'
+        ? exceptionTransaction.run(plan, work)
+        : (actual.withAuthorizationInputTransaction as (...args: unknown[]) => unknown)(plan, work, ...rest),
+  }
+})
 
 vi.mock('../../src/audit/audit', () => ({
   auditLog: auditMocks.auditLog,
@@ -101,6 +135,14 @@ const UNIFORM_409_BODY = {
   error: {
     code: RECOVERY_CONFLICT_HTTP_CODE,
     message: RECOVERY_CONFLICT_HTTP_MESSAGE,
+    details: { retryable: true },
+  },
+}
+const AUTHORIZATION_INPUT_BUSY_BODY = {
+  ok: false,
+  error: {
+    code: 'AUTHORIZATION_INPUT_BUSY',
+    message: 'Authorization inputs are busy; retry this change.',
     details: { retryable: true },
   },
 }
@@ -163,6 +205,9 @@ function invokeHandler(
 }
 
 beforeEach(() => {
+  exceptionTransaction.run.mockReset()
+  pgMocks.attendanceRoot = false
+  pgMocks.attendanceCommitted = false
   pgMocks.query.mockReset()
   pgMocks.transaction.mockReset()
   pgMocks.poolQuery.mockReset()
@@ -368,97 +413,66 @@ describe('routes/spreadsheet-permissions.ts', () => {
 })
 
 describe('routes/permissions.ts', () => {
-  // D21 (Y5a): the three writes run inside transaction(). The client's query is backed by the same
-  // pool mock, so each leg scripts: [pool reads…], the subject version bump, then the write.
-  beforeEach(() => {
-    pgMocks.transaction.mockImplementation(async (handler: (client: { query: typeof pgMocks.poolQuery }) => unknown) =>
-      handler({ query: pgMocks.poolQuery }))
-  })
+  function injectWriteFailure(error: Error, revoke = false) {
+    const seen: string[] = []
+    exceptionTransaction.run.mockImplementationOnce(async (plan, work) => {
+      const actor = { id: 'admin-1', isActive: true, activationStatus: 'activated', deletedAt: null, purgedAt: null }
+      const target = { id: 'user-1', isActive: true, activationStatus: 'activated', deletedAt: null, purgedAt: null }
+      const query = async (raw: string, params: unknown[] = []) => {
+        const sql = raw.replace(/\s+/g, ' ').trim()
+        seen.push(sql)
+        if (sql.includes('set_config') || sql.includes('current_setting')) return { rows: [] }
+        if (sql.startsWith('SELECT role_id')) return { rows: [{ role_id: 'admin' }] }
+        if (sql.startsWith('SELECT permission_code FROM user_permissions')) return { rows: revoke ? [{ permission_code: 'perm:x' }] : [] }
+        if (sql.startsWith('SELECT code FROM permissions')) return { rows: (params[0] as string[]).map(code => ({ code })).sort((a, b) => a.code.localeCompare(b.code)) }
+        if (/^(INSERT INTO|DELETE FROM) user_permissions/.test(sql)) throw error
+        throw new Error(`unexpected query: ${sql}`)
+      }
+      const locked = new Map([['admin-1', actor], ['user-1', target]])
+      const tx = { plan, world:'shared', query, locked, roleRows:new Map(), born:new Set(),
+        witnessed:{ userIds:new Set(locked.keys()), admissionUserIds:new Set(locked.keys()) } }
+      const handle = mintAuthorizationInputBrand(tx, [tx])
+      try { return await work(tx) } finally { handle.close() }
+    })
+    return seen
+  }
 
-  it('[recovery-census:permissions:grant] grant: marker 40001 on the user_permissions INSERT → exact uniform retryable 409', async () => {
-    rbacServiceMocks.isAdmin.mockResolvedValue(true)
-    pgMocks.poolQuery
-      .mockResolvedValueOnce({ rows: [{ code: 'perm:x' }] }) // permission exists
-      .mockResolvedValueOnce({ rows: [] }) // D21 subject version bump
-      .mockRejectedValueOnce(markerError()) // INSERT INTO user_permissions
+  async function assertMarker(path: string, body: Record<string, string>, verb: 'INSERT' | 'DELETE') {
+    const seen = injectWriteFailure(markerError(), verb === 'DELETE')
     const res = mockResponse()
-    await invokeHandler(permissionsRouter(), 'post', '/api/permissions/grant', {
-      body: { userId: 'user-1', permission: 'perm:x' },
-    }, res)
+    await invokeHandler(permissionsRouter(), 'post', path, { body }, res)
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
+    expect(seen.some(sql => sql.startsWith(`${verb} ${verb === 'INSERT' ? 'INTO ' : 'FROM '}user_permissions`))).toBe(true)
+  }
+
+  it('[recovery-census:permissions:grant] real exception writer INSERT marker → exact uniform retryable 409', async () => {
+    await assertMarker('/api/permissions/grant', { userId: 'user-1', permission: 'perm:x' }, 'INSERT')
     census.record('permissions:grant')
   })
-
-  it('grant: non-40001 error → ORIGINAL 500 body, exactly as before', async () => {
-    rbacServiceMocks.isAdmin.mockResolvedValue(true)
-    pgMocks.poolQuery
-      .mockResolvedValueOnce({ rows: [{ code: 'perm:x' }] })
-      .mockResolvedValueOnce({ rows: [] }) // D21 subject version bump
-      .mockRejectedValueOnce(otherDbError())
-    const res = mockResponse()
-    await invokeHandler(permissionsRouter(), 'post', '/api/permissions/grant', {
-      body: { userId: 'user-1', permission: 'perm:x' },
-    }, res)
-    expect(res.statusCode).toBe(500)
-    expect(res.body).toEqual({ error: 'Failed to grant permission' })
-  })
-
-  it('[recovery-census:permissions:revoke] revoke: marker 40001 on the user_permissions DELETE → exact uniform retryable 409', async () => {
-    rbacServiceMocks.isAdmin.mockResolvedValue(true)
-    pgMocks.poolQuery
-      .mockResolvedValueOnce({ rows: [] }) // D21 subject version bump
-      .mockRejectedValueOnce(markerError()) // DELETE FROM user_permissions
-    const res = mockResponse()
-    await invokeHandler(permissionsRouter(), 'post', '/api/permissions/revoke', {
-      body: { userId: 'user-1', permission: 'perm:x' },
-    }, res)
-    expect(res.statusCode).toBe(409)
-    expect(res.body).toEqual(UNIFORM_409_BODY)
+  it('[recovery-census:permissions:revoke] real exception writer DELETE marker → exact uniform retryable 409', async () => {
+    await assertMarker('/api/permissions/revoke', { userId: 'user-1', permission: 'perm:x' }, 'DELETE')
     census.record('permissions:revoke')
   })
-
-  it('revoke: non-40001 error → ORIGINAL 500 body, exactly as before', async () => {
-    rbacServiceMocks.isAdmin.mockResolvedValue(true)
-    pgMocks.poolQuery
-      .mockResolvedValueOnce({ rows: [] }) // D21 subject version bump
-      .mockRejectedValueOnce(otherDbError())
-    const res = mockResponse()
-    await invokeHandler(permissionsRouter(), 'post', '/api/permissions/revoke', {
-      body: { userId: 'user-1', permission: 'perm:x' },
-    }, res)
-    expect(res.statusCode).toBe(500)
-    expect(res.body).toEqual({ error: 'Failed to revoke permission' })
-  })
-
-  it('[recovery-census:permissions:template-apply] template apply: marker 40001 on the user_permissions INSERT → exact uniform retryable 409', async () => {
-    rbacServiceMocks.isAdmin.mockResolvedValue(true)
-    // 'attendance-employee' is a REAL preset-backed template with non-empty permissions,
-    // so the handler reaches the INSERT INTO user_permissions write.
-    pgMocks.poolQuery
-      .mockResolvedValueOnce({ rows: [] }) // D21 subject version bump
-      .mockRejectedValueOnce(markerError())
-    const res = mockResponse()
-    await invokeHandler(permissionsRouter(), 'post', '/api/admin/permission-templates/apply', {
-      body: { userId: 'user-1', templateId: 'attendance-employee' },
-    }, res)
-    expect(res.statusCode).toBe(409)
-    expect(res.body).toEqual(UNIFORM_409_BODY)
+  it('[recovery-census:permissions:template-apply] real exception writer INSERT marker → exact uniform retryable 409', async () => {
+    await assertMarker('/api/admin/permission-templates/apply', { userId: 'user-1', templateId: 'attendance-employee' }, 'INSERT')
     census.record('permissions:template-apply')
   })
 
-  it('template apply: non-40001 error → ORIGINAL 500 body, exactly as before', async () => {
-    rbacServiceMocks.isAdmin.mockResolvedValue(true)
-    pgMocks.poolQuery
-      .mockResolvedValueOnce({ rows: [] }) // D21 subject version bump
-      .mockRejectedValueOnce(otherDbError())
-    const res = mockResponse()
-    await invokeHandler(permissionsRouter(), 'post', '/api/admin/permission-templates/apply', {
-      body: { userId: 'user-1', templateId: 'attendance-employee' },
-    }, res)
-    expect(res.statusCode).toBe(500)
-    expect(res.body).toEqual({ error: 'Failed to apply permission template' })
-  })
+  for (const [id, path, body, verb] of [
+    ['permissions:grant', '/api/permissions/grant', { userId: 'user-1', permission: 'perm:x' }, 'INSERT'],
+    ['permissions:revoke', '/api/permissions/revoke', { userId: 'user-1', permission: 'perm:x' }, 'DELETE'],
+    ['permissions:template-apply', '/api/admin/permission-templates/apply', { userId: 'user-1', templateId: 'attendance-employee' }, 'INSERT'],
+  ] as const) {
+    it(`${id}: real exception writer non-marker database error → 500`, async () => {
+      const seen = injectWriteFailure(otherDbError(), verb === 'DELETE')
+      const res = mockResponse()
+      await invokeHandler(permissionsRouter(), 'post', path, { body }, res)
+      expect(res.statusCode).toBe(500)
+      expect(res.body).toEqual({ error: id === 'permissions:grant' ? 'Failed to grant permission' : id === 'permissions:revoke' ? 'Failed to revoke permission' : 'Failed to apply permission template' })
+      expect(seen.some(sql => sql.startsWith(`${verb} ${verb === 'INSERT' ? 'INTO ' : 'FROM '}user_permissions`))).toBe(true)
+    })
+  }
 })
 
 // Request bodies here name a role TEMPLATE rather than a raw role id. These cases assert
@@ -470,7 +484,12 @@ describe('routes/permissions.ts', () => {
 // titles are byte-identical so the recorded census set is untouched.
 describe('routes/attendance-admin.ts', () => {
   beforeEach(() => {
-    pgMocks.transaction.mockImplementation(async (handler) => handler({ query: pgMocks.query }))
+    pgMocks.attendanceRoot = true
+    pgMocks.transaction.mockImplementation(async (handler) => {
+      const result = await handler({ query: pgMocks.query })
+      pgMocks.attendanceCommitted = true
+      return result
+    })
   })
 
   function attendanceAuthorityRow(sql: string, params?: unknown[]): { rows: unknown[]; rowCount: number } | null {
@@ -507,7 +526,7 @@ describe('routes/attendance-admin.ts', () => {
 
 function installUserRolesRejection(error: unknown): void {
     pgMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
-      if (/INSERT INTO user_roles/.test(sql)) throw error
+      if (/(?:INSERT INTO|DELETE FROM) user_roles/.test(sql)) throw error
       const authority = attendanceAuthorityRow(sql, params)
       if (authority) return authority
       if (/FROM users/.test(sql)) {
@@ -519,7 +538,6 @@ function installUserRolesRejection(error: unknown): void {
           }],
         }
       }
-      // ensureAttendanceRoleTemplates seeds permissions / role_permissions.
       return { rows: [], rowCount: 0 }
     })
   }
@@ -546,7 +564,7 @@ function installUserRolesRejection(error: unknown): void {
     census.record('attendance-admin:assign')
   })
 
-  it('single role assign: non-40001 error → ORIGINAL 500 ROLE_ASSIGN_FAILED, exactly as before', async () => {
+  it('single role assign: membership deadlock inherits the contract busy 409', async () => {
     installUserRolesRejection(otherDbError())
     const res = mockResponse()
     await invokeHandler(
@@ -561,11 +579,11 @@ function installUserRolesRejection(error: unknown): void {
       },
       res,
     )
-    expect(res.statusCode).toBe(500)
-    expect(res.body).toEqual({
-      ok: false,
-      error: { code: 'ROLE_ASSIGN_FAILED', message: 'deadlock detected', details: undefined },
-    })
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual(AUTHORIZATION_INPUT_BUSY_BODY)
+    expect(pgMocks.transaction).toHaveBeenCalledTimes(1)
+    expect(pgMocks.attendanceCommitted).toBe(false)
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
   })
 
   it('[recovery-census:attendance-admin:batch-assign] batch role assign: marker 40001 on the user_roles INSERT → exact uniform retryable 409', async () => {
@@ -630,7 +648,7 @@ function installUserRolesRejection(error: unknown): void {
     census.record('attendance-admin:unassign')
   })
 
-  it('single role unassign: non-40001 error → ORIGINAL 500 ROLE_UNASSIGN_FAILED, exactly as before', async () => {
+  it('single role unassign: membership deadlock inherits the contract busy 409', async () => {
     pgMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
       if (/DELETE FROM user_roles/.test(sql)) throw otherDbError()
       const authority = attendanceAuthorityRow(sql, params)
@@ -659,11 +677,11 @@ function installUserRolesRejection(error: unknown): void {
       },
       res,
     )
-    expect(res.statusCode).toBe(500)
-    expect(res.body).toEqual({
-      ok: false,
-      error: { code: 'ROLE_UNASSIGN_FAILED', message: 'deadlock detected', details: undefined },
-    })
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual(AUTHORIZATION_INPUT_BUSY_BODY)
+    expect(pgMocks.transaction).toHaveBeenCalledTimes(1)
+    expect(pgMocks.attendanceCommitted).toBe(false)
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
   })
 
   it('[recovery-census:attendance-admin:batch-unassign] batch role unassign: marker 40001 on the user_roles DELETE → exact uniform retryable 409', async () => {
@@ -692,5 +710,38 @@ function installUserRolesRejection(error: unknown): void {
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
     census.record('attendance-admin:batch-unassign')
+  })
+
+  it.each(['assign', 'unassign'] as const)('single role %s keeps genuine non-busy failures as the original 500', async action => {
+    installUserRolesRejection(Object.assign(new Error('synthetic non-busy failure'), { code: 'XX000' }))
+    const res = mockResponse()
+    await invokeHandler(attendanceAdminRouter(), 'post', `/api/attendance-admin/users/:userId/roles/${action}`, {
+      params: { userId: 'user-1' }, query: { scope: 'global' }, body: { template: 'employee' },
+      user: { id: 'admin-1', role: 'admin' },
+    }, res)
+    expect(res.statusCode).toBe(500)
+    expect(res.body).toEqual({
+      ok: false,
+      error: { code: action === 'assign' ? 'ROLE_ASSIGN_FAILED' : 'ROLE_UNASSIGN_FAILED', message: 'synthetic non-busy failure', details: undefined },
+    })
+    expect(pgMocks.transaction).toHaveBeenCalledTimes(1)
+    expect(pgMocks.attendanceCommitted).toBe(false)
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+    expect(rbacServiceMocks.listUserPermissions).not.toHaveBeenCalled()
+  })
+
+  it.each(['assign', 'unassign'] as const)('single role %s maps a non-marker serialization failure to busy, not recovery', async action => {
+    installUserRolesRejection(Object.assign(new Error('synthetic serialization failure'), { code: '40001' }))
+    const res = mockResponse()
+    await invokeHandler(attendanceAdminRouter(), 'post', `/api/attendance-admin/users/:userId/roles/${action}`, {
+      params: { userId: 'user-1' }, query: { scope: 'global' }, body: { template: 'employee' },
+      user: { id: 'admin-1', role: 'admin' },
+    }, res)
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual(AUTHORIZATION_INPUT_BUSY_BODY)
+    expect(pgMocks.transaction).toHaveBeenCalledTimes(1)
+    expect(pgMocks.attendanceCommitted).toBe(false)
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+    expect(rbacServiceMocks.listUserPermissions).not.toHaveBeenCalled()
   })
 })

@@ -49,6 +49,7 @@ export const INPUT_TABLES = [
   'user_namespace_admissions',
   'delegated_role_admin_scopes',
   'delegated_role_admin_member_groups',
+  'delegated_role_admin_activation',
 ] as const
 
 export const CASCADE_PARENT_TABLES = ['roles', 'permissions', 'directory_departments', 'platform_member_groups'] as const

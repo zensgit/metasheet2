@@ -22,6 +22,10 @@ vi.mock('../../src/db/pg', () => ({
   transaction: state.transaction,
 }))
 
+vi.mock('../../src/integration/db/connection-pool', () => ({
+  poolManager: { get: () => ({ transaction: state.transaction }) },
+}))
+
 vi.mock('../../src/audit/audit', () => ({
   auditLog: state.auditLog,
 }))
@@ -146,6 +150,7 @@ describe('legacy revoke waits for the live actor', () => {
       const client = {
         query: async (sql: string, params?: unknown[]) => {
           const text = String(sql)
+          if (text.startsWith('SET TRANSACTION') || text.includes('current_setting(') || text.includes('set_config(')) return { rows: [] }
           if (text.includes('DELETE FROM user_permissions') || text.includes('role_permissions') && text.includes('DELETE')) {
             throw new Error('legacy revoke touched a direct or role grant')
           }
@@ -154,8 +159,8 @@ describe('legacy revoke waits for the live actor', () => {
             await gate
             return { rows: [] }
           }
-          if (text.includes('ORDER BY role_id ASC')) {
-            return { rows: actor.roles.map((roleId) => ({ role_id: roleId })) }
+          if (text.includes("role_id = 'admin' FOR SHARE")) {
+            return { rows: actor.roles.filter(roleId => roleId === 'admin').map((roleId) => ({ role_id: roleId })) }
           }
           if (text.includes('FROM user_roles')) return { rows: [{ role_id: 'attendance_employee' }] }
           if (text.includes('FOR SHARE') || text.includes('pg_advisory_xact_lock')) return { rows: [{ id: params?.[0] }] }
@@ -173,6 +178,7 @@ describe('legacy revoke waits for the live actor', () => {
               }],
             }
           }
+          if (text.includes('to_jsonb(permissions)') && !text.includes('pg_typeof')) return { rows: [{ permissions: ['workflow:read'] }] }
           if (text.includes('pg_typeof')) return { rows: [{ permissions_type: 'jsonb', permissions: ['workflow:read'] }] }
           if (text.includes('SET permissions')) {
             permissionWrite = params
@@ -213,6 +219,7 @@ describe('legacy revoke waits for the live actor', () => {
       const client = {
         query: async (sql: string, params?: unknown[]) => {
           const text = String(sql)
+          if (text.startsWith('SET TRANSACTION') || text.includes('current_setting(') || text.includes('set_config(')) return { rows: [] }
           sqlLog.push(text)
           if (text.includes('DELETE FROM user_permissions') || (text.includes('role_permissions') && text.includes('DELETE'))) {
             throw new Error('legacy revoke touched a direct or role grant')
@@ -222,10 +229,10 @@ describe('legacy revoke waits for the live actor', () => {
             await gate
             return { rows: [] }
           }
-          if (text.includes('ORDER BY role_id ASC')) {
-            return { rows: actor.roles.map((roleId) => ({ role_id: roleId })) }
+          if (text.includes("role_id = 'admin' FOR SHARE")) {
+            return { rows: actor.roles.filter(roleId => roleId === 'admin').map((roleId) => ({ role_id: roleId })) }
           }
-          if (text.includes('FROM user_roles')) return { rows: actor.roles.map((roleId) => ({ role_id: roleId })) }
+          if (text.includes('FROM user_roles')) return { rows: actor.roles.filter(roleId => roleId === 'admin').map((roleId) => ({ role_id: roleId })) }
           if (text.includes('FOR SHARE') || text.includes('pg_advisory_xact_lock')) return { rows: [{ id: params?.[0] }] }
           if (text.includes('FOR UPDATE')) {
             const id = String(params?.[0] ?? '')
@@ -241,6 +248,7 @@ describe('legacy revoke waits for the live actor', () => {
               }],
             }
           }
+          if (text.includes('to_jsonb(permissions)') && !text.includes('pg_typeof')) return { rows: [{ permissions: ['workflow:read'] }] }
           if (text.includes('pg_typeof')) return { rows: [{ permissions_type: 'jsonb', permissions: ['workflow:read'] }] }
           if (text.includes('SET permissions') || text.includes('SET access_generation') || text.includes('directory_deprovision')) {
             permissionWrite = params
@@ -272,11 +280,13 @@ describe('legacy revoke waits for the live actor', () => {
   })
 
   it('allows a live user_roles admin whose users.role is user', async () => {
+    const operationWrites: Array<{ sql: string; params?: unknown[] }> = []
     state.transaction.mockImplementation(async (handler: (client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }> }) => Promise<unknown>) => {
       const client = {
         query: async (sql: string, params?: unknown[]) => {
           const text = String(sql)
-          if (text.includes('ORDER BY role_id ASC')) return { rows: [{ role_id: 'admin' }] }
+          if (text.startsWith('SET TRANSACTION') || text.includes('current_setting(') || text.includes('set_config(')) return { rows: [] }
+          if (text.includes("role_id = 'admin' FOR SHARE")) return { rows: [{ role_id: 'admin' }] }
           if (text.includes('FROM user_roles')) return { rows: [{ role_id: 'attendance_employee' }] }
           if (text.includes('FOR SHARE') || text.includes('pg_advisory_xact_lock')) return { rows: [] }
           if (text.includes('FOR UPDATE')) {
@@ -294,7 +304,12 @@ describe('legacy revoke waits for the live actor', () => {
             }
           }
           if (text.includes('SET permissions')) return { rows: [{ id: params?.[0] }], rowCount: 1 }
+          if (text.includes('to_jsonb(permissions)') && !text.includes('pg_typeof')) return { rows: [{ permissions: ['workflow:read'] }] }
           if (text.includes('pg_typeof')) return { rows: [{ permissions_type: 'jsonb', permissions: ['workflow:read'] }] }
+          if (text.includes('INSERT INTO authorization_operation_receipts') || text.includes('INSERT INTO authorization_operation_audit')) {
+            operationWrites.push({ sql: text, params })
+            return { rows: [] }
+          }
           if (text.includes('directory_deprovision')) return { rows: [] }
           if (text.includes('SET access_generation')) return { rows: [{ access_generation: 5 }] }
           // D21 (Y5a): the access-graph mutex's subject authorization version bump (a protocol upsert).
@@ -314,6 +329,40 @@ describe('legacy revoke waits for the live actor', () => {
       permission: 'workflow:read',
       changed: true,
     })
+    expect(operationWrites).toHaveLength(2)
+    expect(operationWrites[0].sql).toContain('authorization_operation_receipts')
+    expect(operationWrites[0].params?.slice(0, 1)).toEqual(['admin-1'])
+    expect(operationWrites[0].params?.[2]).toBe('user-9')
+    expect(operationWrites[1].sql).toContain('authorization_operation_audit')
+    expect(operationWrites[1].params?.[0]).toBe('admin-1')
+    expect(operationWrites[1].params?.[1]).toBe(operationWrites[0].params?.[1])
+    expect(operationWrites[1].params?.slice(2, 4)).toEqual([null, 'legacy_unprovided'])
+  })
+
+  it('returns 409 and writes nothing when the locked legacy before-image changes', async () => {
+    const writes: string[] = []
+    state.transaction.mockImplementation(async (handler: (client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }> }) => Promise<unknown>) => handler({
+      query: async (sql: string, params?: unknown[]) => {
+        const text = String(sql)
+        if (text.startsWith('SET TRANSACTION') || text.includes('current_setting(') || text.includes('set_config(')) return { rows: [] }
+        if (text.includes("role_id = 'admin' FOR SHARE")) return { rows: [{ role_id: 'admin' }] }
+        if (text.includes('FROM user_roles')) return { rows: [{ role_id: 'admin' }] }
+        if (text.includes('FOR SHARE') || text.includes('pg_advisory_xact_lock')) return { rows: [] }
+        if (text.includes('FOR UPDATE')) return { rows: [{ id: params?.[0], role: 'user', activation_status: 'activated', is_active: true, access_generation: 4, deleted_at: null, purged_at: null }] }
+        if (text.includes('pg_typeof')) return { rows: [{ permissions_type: 'jsonb', permissions: ['changed'] }] }
+        if (text.includes('to_jsonb(permissions)')) return { rows: [{ permissions: ['workflow:read'] }] }
+        // D21 (Y5a): the access-graph mutex's subject authorization version bump (a protocol upsert,
+        // before the users rows; it rolls back with the refused transaction).
+        if (text.includes('INSERT INTO subject_authorization_versions')) return { rows: [], rowCount: 1 }
+        writes.push(text)
+        throw new Error('unexpected write after stale before-image')
+      },
+    }))
+    const response = await invokeLegacyRevoke({ userId: 'user-9', permission: 'workflow:read' })
+    expect(response.statusCode).toBe(409)
+    expect(response.body).toEqual({ error: 'Permission sources changed, retry after reloading', code: 'STALE' })
+    expect(writes).toEqual([])
+    expect(state.auditLog).not.toHaveBeenCalled()
   })
 
   it('rolls back the legacy column and deprovision evidence when the generation write fails', async () => {
@@ -334,7 +383,8 @@ describe('legacy revoke waits for the live actor', () => {
       const client = {
         query: async (sql: string, params?: unknown[]) => {
           const text = String(sql)
-          if (text.includes('ORDER BY role_id ASC')) return { rows: [{ role_id: 'admin' }] }
+          if (text.startsWith('SET TRANSACTION') || text.includes('current_setting(') || text.includes('set_config(')) return { rows: [] }
+          if (text.includes("role_id = 'admin' FOR SHARE")) return { rows: [{ role_id: 'admin' }] }
           if (text.includes('FROM user_roles')) return { rows: [{ role_id: 'attendance_employee' }] }
           if (text.includes('FOR SHARE') || text.includes('pg_advisory_xact_lock')) return { rows: [] }
           if (text.includes('FOR UPDATE')) {
@@ -351,6 +401,7 @@ describe('legacy revoke waits for the live actor', () => {
               }],
             }
           }
+          if (text.includes('to_jsonb(permissions)') && !text.includes('pg_typeof') && !text.includes('SET permissions')) return { rows: [{ permissions: database.permissions }] }
           // The text[] write also names pg_typeof in its WHERE guard.
           if (text.includes('SET permissions')) {
             observed.wrotePermissions = true

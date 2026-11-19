@@ -172,7 +172,8 @@ const ROUTES = [
   ['POST', '/api/integration/stock-preparation/unit-conversions/retire', 'stockPreparationUnitConversionRetire'],
   // W4b (execution-plan general-prep-execution-plan-20260722.md:125): the K2 carry confirm — the
   // human confirms a CARRY_VIA_CONFIRM proposal and the server carries the inactive predecessor's
-  // human fields onto the re-keyed row (applyCarryViaConfirm: admin-gated, closed body allowlist,
+  // human fields onto the re-keyed row — and, in the same patch, the machine write-back date into an
+  // empty successor cell (owner ruling 2026-11-17) (applyCarryViaConfirm: admin-gated, closed body allowlist,
   // server-stamped carriedBy/carriedAt, no-overwrite, values-free audit). Optionally closes the
   // matching carry ledger row (decisionId + inputFingerprint together).
   ['POST', '/api/integration/stock-preparation/carry/confirm', 'stockPreparationCarryConfirm'],
@@ -336,8 +337,9 @@ const ROUTES = [
   //                                          of a run left open is in its target state and finishes that run. Every
   //                                          real run is owner gate ② per sheet.
   //   GET  target/sheet-repair/fills-report  which old row / copy pairs carry human fills and what the K2 carry could
-  //                                          do with each — values-free, audited before the answer.
-  //   GET  target/sheet-repair/runs          the values-free run list (the run ids a restore names).
+  //                                          do with each, and how many machine write-back cells the old subtree
+  //                                          holds — values-free, audited before the answer.
+  //   GET  target/sheet-repair/runs         the values-free run list (the run ids a restore names).
   ['POST', '/api/integration/stock-preparation/projects/:projectNo/target/sheet-repair', 'stockPreparationProjectSheetRepair'],
   ['GET', '/api/integration/stock-preparation/projects/:projectNo/target/sheet-repair/fills-report', 'stockPreparationProjectSheetRepairFillsReport'],
   ['GET', '/api/integration/stock-preparation/projects/:projectNo/target/sheet-repair/runs', 'stockPreparationProjectSheetRepairRuns'],
@@ -1873,7 +1875,10 @@ function stockPreparationErpAutoPersistEnabled() {
 // docs/development/takeover-beiliao-20260821/customer-delivery-guide-20260904.md §5-5: fill `user_orgs`
 // so every account has exactly one active row, re-issue tokens (`--tenant-id` for the ops runner),
 // have everyone sign in again so their tokens carry the claim, and only then set this. Rolling back
-// is deleting the line and restarting; nothing persists.
+// is NOT deleting the line: pm2 keeps a removed key in the running process. Set the line to `=false`,
+// restart with scripts/ops/attendance-onprem-start-pm2.ps1, check the key in `pm2 env`, and only then
+// delete the line. Nothing persists. The steps, and the rule that this switch stays on while any 备料
+// pilot is enabled, are in customer-delivery-guide-20260904.md §5-5.
 //
 // ONE EXCEPTION TO "OFF CHANGES NOTHING", NAMED HERE SO NOBODY HAS TO DISCOVER IT. The PR that added
 // this flag also moved `stockPreparationConfirmationDecisionsConfirm` from `resolveAuthUserTenantId`
@@ -2047,8 +2052,11 @@ function readMvpPersistSourceContentDigest(body) {
 // its dry run, and the dry-run `revision` hashes the target sheet as it stands plus the plan computed
 // against it. The review executed two consequences:
 //   * one human edit (备注 and the other columns people own) moved both ids. The mint now hashes the
-//     sheet WITHOUT those columns (`archiveRevision`, stock-preparation-table-actions.cjs). For a sheet
-//     nobody has typed into that is byte-identical to the old revision, so this re-keys nothing kept.
+//     sheet WITHOUT those columns (`archiveRevision`, stock-preparation-table-actions.cjs), and since #6925
+//     also without the machine write-back column(s) (MACHINE_WRITEBACK_FIELD_IDS). For a sheet nobody has
+//     typed into and nothing has written back to, that is byte-identical to the old revision, so this
+//     re-keys nothing kept; a sheet that already holds a written-back date re-keys once, at the install
+//     that brings #6925.
 //   * under the creation-hour rule the batch id (the newest material's creation hour) never moves with
 //     the sheet, so ANY sheet-side difference that still reaches the mint — a sync that rewrote cells
 //     (a partial write completed later, a hand edit of a PLM cell put back), or a batch kept before
@@ -9637,8 +9645,11 @@ function requireStockPreparationAudit() {
       const stableScope = `${tenantId}\n${action.actionId}\n${prepared.parameters.projectNo}`
       const projectId = `stockprep_${crypto.createHash('sha256').update(stableScope).digest('hex').slice(0, 32)}`
       // #6475 round 2: the ARCHIVE revision — the dry-run revision with the columns people own taken
-      // out of the sheet it hashes (see prepareStockPreparationMvpSnapshot). Unchanged for a sheet
-      // nobody has typed into, so no batch already kept is re-keyed.
+      // out of the sheet it hashes (see prepareStockPreparationMvpSnapshot). Since #6925 it also drops
+      // the machine write-back column(s) (MACHINE_WRITEBACK_FIELD_IDS, today `issueConfirmDate`;
+      // withoutPeopleOwnedColumns in stock-preparation-table-actions.cjs), so a YiDa issue-confirm date
+      // never mints a new batch. Unchanged for a sheet nobody has typed into and nothing has written
+      // back to, so no batch kept from such a sheet is re-keyed.
       const batchScope = `${stableScope}\n${prepared.archiveRevision}`
       const batchDigest = crypto.createHash('sha256').update(batchScope).digest('hex').slice(0, 32)
       // 备料 BATCH IDENTITY. The owner's rule is that the material CREATION HOUR separates a
@@ -11643,7 +11654,8 @@ function requireStockPreparationAudit() {
     // W4b (execution-plan W4a/W4b; adjudication Layer 3): the K2 carry confirm — mirror of
     // stockPreparationMaterialMappingConfirm. The human confirms a CARRY_VIA_CONFIRM proposal;
     // the carry EXECUTOR (confirm-writes.applyCarryViaConfirm) copies the inactive predecessor's
-    // human fields onto the re-keyed row IN THE BOUND TARGET TABLE (see the target resolution in
+    // human fields — and the machine write-back date, into an empty successor cell only (owner ruling
+    // 2026-11-17 「按建议」) — onto the re-keyed row IN THE BOUND TARGET TABLE (see the target resolution in
     // the handler): admin-gated, closed body allowlist (the body can carry NO stamp and NO table —
     // carriedBy is the route identity, carriedAt is module-stamped, the sheet is the bound action's),
     // no-overwrite, values-free audit. When the body names the matching carry LEDGER row
@@ -11856,6 +11868,9 @@ function requireStockPreparationAudit() {
           persisted: result.persisted,
           carriedFieldCount: result.carriedFields.length,
           alreadyCarriedFieldCount: result.alreadyCarriedFields.length,
+          // The machine write-back column(s) the carry copied / kept (counts only, values-free).
+          machineCarriedFieldCount: result.machineCarriedFields.length,
+          machineKeptExistingCount: result.machineKeptExistingFields.length,
           ...(ledger ? { ledgerConfirmed: ledger.ok === true } : {}),
           // PR-0: whether the post-release generation bump landed (a written carry only; boolean).
           ...(result.persisted === true ? { generationBumped } : {}),

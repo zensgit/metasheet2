@@ -311,9 +311,12 @@ function expectRefusal(res, { status, code, reason, field }) {
   return error
 }
 
+// A machine write-back date (the YiDa issue-confirm column) RR-08 plants on an old row: never in an answer.
+const PLANTED_MACHINE_DATE = '2026-11-29'
+
 function assertValuesFree(value, st, label) {
   const text = JSON.stringify(value)
-  for (const planted of [PROJECT, TENANT, 'S-001', 'P-001', 'PART-A', 'D100-01', 'synthetic note', st.seeded.sheetId, st.seeded.objectId, 'fld_']) {
+  for (const planted of [PROJECT, TENANT, 'S-001', 'P-001', 'PART-A', 'D100-01', 'synthetic note', PLANTED_MACHINE_DATE, st.seeded.sheetId, st.seeded.objectId, 'fld_']) {
     assert.equal(text.includes(planted), false, `${label}: ${planted} leaked`)
   }
 }
@@ -787,9 +790,14 @@ test('RR-07 a host that cannot honour the write fence refuses the execute (501) 
 
 // ── RR-08 ────────────────────────────────────────────────────────────────────────────────────────────────
 
-test('RR-08 the fills report and the run list through their routes: values-free, audited before the answer', async () => {
+test('RR-08 the fills report and the run list through their routes: values-free, audited before the answer; a machine write-back date on an old row is counted, never shown', async () => {
   const st = await mount()
   try {
+    // The old root (the row with the note) also holds an issue-confirm date, stored under its PHYSICAL id: the route's
+    // reader hands it to the report under the logical id.
+    const oldRoot = st.records.rows.find((row) => row.data[st.physical('notes')] === 'synthetic note')
+    assert.match(oldRoot.id, /^rec_s_/)
+    oldRoot.data[st.physical('issueConfirmDate')] = PLANTED_MACHINE_DATE
     const summary = dataOf(await withEnv(ON, () => call(st, 'GET', PATHS.fills)))
     assert.deepEqual([summary.componentHandle, summary.total, summary.components.length], [null, 1, 1])
     assert.deepEqual([summary.components[0].componentHandle, summary.components[0].shape, summary.components[0].counts.pairs, summary.components[0].counts.k2Carryable, summary.components[0].counts.pairsWithFills, summary.components[0].problems], [HANDLE, 'two_copy', 4, 1, 1, []])
@@ -797,12 +805,16 @@ test('RR-08 the fills report and the run list through their routes: values-free,
     assert.deepEqual([detail.found, detail.pairs.length, detail.pairs[0].class, detail.pairs[0].depth, detail.pairs[0].fields.notes, detail.nextCursor], [true, 1, 'k2_carryable', 0, { old: true, copy: false, state: 'carry' }, null])
     assert.match(detail.pairs[0].oldRecordId, /^rec_s_/)
     assert.match(detail.pairs[0].copyRecordId, /^rec_p_/)
+    assert.deepEqual([summary.components[0].machineWriteback, detail.machineWriteback], [{ onActiveOldRows: 1, onInactiveOldRows: 0 }, { onActiveOldRows: 1, onInactiveOldRows: 0 }])
+    assert.equal(detail.pairs.some((pair) => Object.keys(pair.fields).includes('issueConfirmDate')), false, 'the machine column is never a pair field')
     assertValuesFree(summary, st, 'fills summary')
     assertValuesFree(detail, st, 'fills detail')
     const runs = dataOf(await withEnv(ON, () => call(st, 'GET', PATHS.runs)))
     assert.deepEqual(runs, { runs: [], truncated: false })
     assert.deepEqual(st.h.auditAppends.map((entry) => [entry.action, entry.mode]), [['project_board_read', 'sheet_fills_report_read'], ['project_board_read', 'sheet_fills_report_read'], ['project_board_read', 'sheet_repair_runs_read']])
     assert.deepEqual([st.h.auditAppends[1].detail.pairs, st.h.auditAppends[1].detail.pairsWithFills, st.h.auditAppends[1].detail.listing], [4, 1, false])
+    assert.deepEqual(st.h.auditAppends.slice(0, 2).map((entry) => entry.detail.machineWritebackCells), [1, 1])
+    assert.equal(JSON.stringify(st.h.auditAppends).includes(PLANTED_MACHINE_DATE), false, 'no audit row names the date')
     assert.equal(JSON.stringify(st.h.auditAppends).includes(PROJECT), false, 'a read\'s audit row names no project')
     assert.deepEqual([st.records.calls.includes('patchRecord'), st.runs(), st.lockRow(), st.sourceState.reads], [false, [], null, 0], 'reads only: no write, no lease, no source read')
     // A refusing audit store: no report.

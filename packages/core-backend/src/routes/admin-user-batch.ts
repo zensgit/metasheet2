@@ -2,8 +2,6 @@ import type { Request, Response, Router } from 'express'
 import * as bcrypt from 'bcryptjs'
 import * as crypto from 'crypto'
 import { auditLog } from '../audit/audit'
-import { ATTENDANCE_SELF_SERVICE_NAMESPACE } from '../auth/attendanceSelfServiceBackfill'
-import { claimNonEmptyLoginAliasesOrThrow } from '../auth/login-alias-service'
 import { revokeUserSessions } from '../auth/session-revocation'
 import { assertPendingUserCannotBeActivatedViaGenericStatusApi, PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE } from '../auth/user-activation'
 import {
@@ -24,6 +22,7 @@ import {
   type PlannedCreateRow,
   type PlannedUpdate,
 } from '../admin/user-batch-plan'
+import { createAdminBatchUserCommand } from '../admin/admin-user-batch-birth-command'
 import { query, transaction } from '../db/pg'
 import {
   lockUsersForAccessGraphWrite,
@@ -35,7 +34,6 @@ import {
   disableNamespaceAdmissionsWithoutRoles,
   listRoleNamespaces,
   lockNamespaceAdmissionWrites,
-  writeUserNamespaceAdmission,
 } from '../rbac/namespace-admission'
 import { assignUserRoles, unassignUserRoles } from '../rbac/role-assignment'
 import { invalidateUserPerms, isAdmin as isRbacAdmin } from '../rbac/service'
@@ -347,56 +345,32 @@ export function registerAdminUserBatchRoutes(router: Router): void {
 async function createOne(adminUserId: string, row: PlannedCreateRow): Promise<BatchItemResult> {
   const userId = crypto.randomUUID()
   const temporaryPassword = generateTemporaryPassword()
-  const displayRole = row.roleId === PLATFORM_ADMIN_ROLE_ID ? 'admin' : (row.roleId || 'user')
+  const index = row.index
+  const email = row.email
+  const name = row.name
+  const department = row.department
+  const roleId = row.roleId
   try {
     const passwordHash = await bcrypt.hash(temporaryPassword, getBcryptSaltRounds())
-    await transaction(async (client) => {
-      await client.query(
-        `INSERT INTO users (
-           id, email, username, name, mobile, employee_no, department, position, hire_date,
-           password_hash, must_change_password, role, permissions, is_active, is_admin,
-           activation_status, local_password_set, created_at, updated_at
-         )
-         VALUES (
-           $1, $2, NULL, $3, NULL, NULL, $4, NULL, NULL, $5, TRUE, $6, '[]'::jsonb, TRUE, $7,
-           'activated', TRUE, NOW(), NOW()
-         )`,
-        [userId, row.email, row.name, row.department, passwordHash, displayRole, displayRole === 'admin'],
-      )
-      await claimNonEmptyLoginAliasesOrThrow({
-        userId,
-        email: row.email,
-        source: 'admin_batch_create',
-        client,
-      })
-      if (row.roleId) {
-        await assignUserRoles({
-          userIds: [userId],
-          roleId: row.roleId,
-          scope: { kind: 'platform-admin' },
-          executor: client,
-        })
-      }
-      // Batch create has no admission checkbox. A missing attendance row still
-      // bootstraps attendance_employee on login, so persist the disabled intent.
-      await writeUserNamespaceAdmission({
-        userId,
-        namespace: ATTENDANCE_SELF_SERVICE_NAMESPACE,
-        enabled: false,
-        actorId: adminUserId,
-        source: 'admin_batch_create',
-      }, client)
+    await createAdminBatchUserCommand({
+      actorId: adminUserId,
+      userId,
+      email,
+      name,
+      department,
+      passwordHash,
+      roleId,
     })
     invalidateUserPerms(userId)
     await auditItem(adminUserId, 'create', userId, {
-      email: row.email,
-      roleId: row.roleId,
-      department: row.department,
+      email,
+      roleId,
+      department,
     })
     return {
-      index: row.index,
+      index,
       ok: true,
-      email: row.email,
+      email,
       userId,
       code: null,
       message: '已创建',
@@ -405,9 +379,9 @@ async function createOne(adminUserId: string, row: PlannedCreateRow): Promise<Ba
   } catch (error) {
     const code = error && typeof error === 'object' && 'code' in error ? String((error as { code?: unknown }).code || 'CREATE_FAILED') : 'CREATE_FAILED'
     return {
-      index: row.index,
+      index,
       ok: false,
-      email: row.email,
+      email,
       userId: null,
       code,
       message: '创建失败',
@@ -467,6 +441,7 @@ async function applyUpdate(adminUserId: string, row: PlannedUpdate): Promise<Bat
         await assignUserRoles({
           userIds: [row.userId],
           roleId,
+          assignmentSource: 'manual',
           scope: { kind: 'platform-admin' },
           executor: client,
         })

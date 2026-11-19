@@ -19,6 +19,7 @@ import {
   applyDirectoryDeprovisionPolicies,
   deactivateUserOrgMembershipIfNoOtherActiveBinding,
 } from '../../src/directory/directory-sync'
+import { strictLoginUninstalledRows } from '../utils/strict-login-uninstalled-fixture'
 import {
   bindProspectiveAccountIds,
   globalVouchExists,
@@ -201,6 +202,8 @@ function recordingClient() {
     recorded,
     query: async (sql: string, params?: unknown[]) => {
       recorded.push({ sql, params })
+      const uninstalled = strictLoginUninstalledRows(sql)
+      if (uninstalled !== undefined) return { rows: uninstalled }
       // D21 (Y5a): the subject authorization version bump the deprovision writer takes before its
       // users FOR UPDATE — a protocol upsert, no vouching state.
       if (/^\s*INSERT INTO subject_authorization_versions/.test(sql)) return { rows: [] }
@@ -254,7 +257,7 @@ describe('statements that need "nobody vouches"', () => {
   it('candidate selection interpolates the org expression and binds an empty exclusion array', async () => {
     const client = recordingClient()
     await applyDirectoryDeprovisionPolicies(client, {
-      integrationId: 'dir-1',
+      integrationId: '22222222-2222-4222-8222-222222222222',
       runId: 'run-1',
       triggeredBy: 'unit-test',
       deactivatedAccountIds: [ACCOUNT_ID],
@@ -317,7 +320,7 @@ describe('statements that need "nobody vouches"', () => {
   it('the write-time membership recheck interpolates the org expression and binds an empty exclusion array', async () => {
     const client = recordingClient()
     await applyDirectoryDeprovisionPolicies(client, {
-      integrationId: 'dir-1',
+      integrationId: '22222222-2222-4222-8222-222222222222',
       runId: 'run-1',
       triggeredBy: 'unit-test',
       deactivatedAccountIds: [ACCOUNT_ID],

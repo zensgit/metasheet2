@@ -14,10 +14,8 @@ import { query } from '../../src/db/pg'
  * id was ALSO submitted, so a brand-new org's first member could never complete step① — you
  * needed a group/shift to get an org, and a group/shift needs an org).
  *
- * Auth: platform admin via dev-token (`roles=admin` → `hasLegacyAdminClaim` inside
- * `ensurePlatformAdmin`) — this route's OWN gate, unrelated to the S7-5/rbacGuard namespace-
- * admission subsystem F5 had to route around, so the full real-server + dev-token path (proven
- * working by the existing `admin-users.api.test.ts` sanity test) is the natural fit here.
+ * The dev token exercises the route grant. The birth command independently checks the actor's
+ * current platform administrator role inside the write transaction.
  */
 async function canListenOnEphemeralPort(): Promise<boolean> {
   return await new Promise((resolve) => {
@@ -70,22 +68,24 @@ describeIfDatabase('W4-PRE-1b item D (F6) — POST /api/admin/users explicit att
   let server: MetaSheetServer | undefined
   let baseUrl = ''
   let adminToken = ''
+  const platformActorId = `${NS}-platform-admin`
+  const claimOnlyActorId = `${NS}-claim-only`
   const createdUserIds: string[] = []
   const freshOrg = `${NS}-fresh-org`
   const groupDerivedOrg = `${NS}-group-org`
   const conflictOrg = `${NS}-conflict-org`
 
-  async function devToken(): Promise<string> {
-    const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(`${NS}-platform-admin`)}&roles=admin&perms=${encodeURIComponent('*:*')}`)
+  async function devToken(userId: string): Promise<string> {
+    const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('*:*')}`)
     const token = (res.body as { token?: string }).token
     if (!token) throw new Error('dev-token issuance failed')
     return token
   }
 
-  async function createUser(body: Record<string, unknown>): Promise<HttpResponse> {
+  async function createUser(body: Record<string, unknown>, token = adminToken): Promise<HttpResponse> {
     const res = await requestJson(`${baseUrl}/api/admin/users`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })
     const userId = (res.body?.data as { user?: { id?: string } } | undefined)?.user?.id
@@ -136,7 +136,12 @@ describeIfDatabase('W4-PRE-1b item D (F6) — POST /api/admin/users explicit att
     const address = server.getAddress()
     if (!address || typeof address === 'string') throw new Error('server did not expose a TCP address')
     baseUrl = `http://127.0.0.1:${address.port}`
-    adminToken = await devToken()
+    await query(
+      `INSERT INTO users (id, username, name, password_hash, role, is_active, activation_status)
+       VALUES ($1, $1, 'Synthetic attendance administrator', 'unused', 'admin', TRUE, 'activated')`,
+      [platformActorId],
+    )
+    adminToken = await devToken(platformActorId)
   })
 
   afterAll(async () => {
@@ -145,7 +150,17 @@ describeIfDatabase('W4-PRE-1b item D (F6) — POST /api/admin/users explicit att
       await query(`DELETE FROM users WHERE id = ANY($1::text[])`, [createdUserIds])
     }
     await query(`DELETE FROM directory_integrations WHERE org_id = ANY($1::text[])`, [[freshOrg, groupDerivedOrg, conflictOrg]])
+    await query('DELETE FROM user_sessions WHERE user_id = ANY($1::text[])', [[platformActorId, claimOnlyActorId]])
+    await query('DELETE FROM users WHERE id = $1', [platformActorId])
     if (server) await server.stop()
+  })
+
+  it('refuses a token with an admin claim when the actor has no database authority', async () => {
+    const email = `${NS}-refused@example.test`
+    const res = await createUser({ name: 'Refused', email, attendanceOrgId: freshOrg }, await devToken(claimOnlyActorId))
+    expect(res.status).toBe(403)
+    expect(res.body.error?.code).toBe('FORBIDDEN')
+    expect((await query('SELECT id FROM users WHERE email = $1', [email])).rows).toEqual([])
   })
 
   it('fresh-org explicit attendanceOrgId with ZERO attendanceGroupId/defaultShiftId creates active membership (falsifies the old circular dependency)', async () => {
@@ -199,55 +214,94 @@ describeIfDatabase('W4-PRE-1b item D (F6) — POST /api/admin/users explicit att
     expect(res.body?.data && (res.body.data as { attendanceOnboarding?: unknown }).attendanceOnboarding).toBeNull()
   })
 
-  it('onboarding waits for the timezone org prefix before creating any user rows', async () => {
+  it('returns a retryable conflict under the org prefix and commits one onboarding on resubmission after release', async () => {
+    const orgId = NS + '-prefix-org'
+    const email = NS + '-prefix@example.test'
+    await query(
+      `INSERT INTO directory_integrations (org_id, name, corp_id, provider, status)
+       VALUES ($1, $2, $3, 'local', 'active')`,
+      [orgId, NS + '-prefix-integration', 'local:' + orgId],
+    )
     const group = await query<{ id: string }>(
       "INSERT INTO attendance_groups (org_id,name,timezone) VALUES ($1,$2,'UTC') RETURNING id",
-      [freshOrg, NS + '-prefix-group'],
+      [orgId, NS + '-prefix-group'],
     )
     const groupId = group.rows[0].id
-    const email = NS + '-prefix@example.test'
-    const lockKey = buildAttendanceTimezoneRuntimeOrgLockKeyV1(freshOrg)
+    const body = { name: 'Prefix onboarding', email, orgId, attendanceOrgId: orgId, attendanceGroupId: groupId }
+    const lockKey = buildAttendanceTimezoneRuntimeOrgLockKeyV1(orgId)
     const blockerPool = new Pool({ connectionString: dbUrl, max: 1 })
     const blocker = await blockerPool.connect()
+    const holderPid = (await blocker.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid
+
+    async function holderLock() {
+      return (await query<{ mode: string }>(
+        `SELECT mode FROM pg_locks
+          WHERE pid = $1 AND granted AND locktype = 'advisory'
+            AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+            AND classid = ((hashtextextended($2,0) >> 32) & 4294967295)::oid
+            AND objid = (hashtextextended($2,0) & 4294967295)::oid AND objsubid = 1`,
+        [holderPid, lockKey],
+      )).rows
+    }
+    async function effectRows() {
+      return (await query(
+        `SELECT ARRAY(SELECT id::text FROM users WHERE email = $1) AS users,
+                ARRAY(SELECT kind || ':' || user_id::text FROM user_login_aliases WHERE normalized_value = $1) AS aliases,
+                ARRAY(SELECT user_id::text FROM user_orgs WHERE org_id = $2) AS memberships,
+                ARRAY(SELECT user_id::text FROM attendance_group_members WHERE group_id = $3) AS members`,
+        [email, orgId, groupId],
+      )).rows
+    }
+
+    const empty = [{ users: [], aliases: [], memberships: [], members: [] }]
     let pending: Promise<HttpResponse> | undefined
+    let deadline: ReturnType<typeof setTimeout> | undefined
     try {
+      expect(await effectRows()).toEqual(empty)
       await blocker.query('BEGIN')
       await blocker.query('SELECT pg_advisory_xact_lock_shared(hashtextextended($1,0))', [lockKey])
-      let settled = false
-      pending = createUser({ name: 'Prefix onboarding', email, orgId: freshOrg, attendanceOrgId: freshOrg, attendanceGroupId: groupId })
-      void pending.then(() => { settled = true })
-      let waiting = false
-      for (let attempt = 0; attempt < 250 && !settled; attempt += 1) {
-        const locks = await query<{ waiting: boolean }>(
-          `SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory'
-            AND mode='ExclusiveLock' AND NOT granted
-            AND classid=((hashtextextended($1,0) >> 32) & 4294967295)::oid
-            AND objid=(hashtextextended($1,0) & 4294967295)::oid AND objsubid=1) AS waiting`,
-          [lockKey],
-        )
-        waiting = locks.rows[0].waiting
-        if (waiting) break
-        await new Promise(resolve => setTimeout(resolve, 20))
-      }
-      // A red control must reach a valid successful endpoint, not a 4xx fixture refusal.
-      if (!waiting && settled) expect((await pending).status).toBe(200)
-      expect(waiting).toBe(true)
-      expect((await query<{ count: number }>('SELECT COUNT(*)::int AS count FROM users WHERE email=$1', [email])).rows).toEqual([{ count: 0 }])
+      expect(await holderLock()).toEqual([{ mode: 'ShareLock' }])
+
+      pending = createUser(body)
+      const busy = await Promise.race([
+        pending,
+        new Promise<never>((_, reject) => {
+          deadline = setTimeout(() => reject(new Error('Onboarding did not respond while the org lock was held')), 10_000)
+        }),
+      ])
+      expect(busy).toEqual({
+        status: 409,
+        body: {
+          ok: false,
+          error: {
+            code: 'AUTHORIZATION_INPUT_BUSY',
+            message: 'Authorization inputs are busy; retry this change.',
+            details: { retryable: true },
+          },
+        },
+      })
+      expect(await holderLock()).toEqual([{ mode: 'ShareLock' }])
+      expect(await effectRows()).toEqual(empty)
+
       await blocker.query('COMMIT')
-      const result = await pending
-      expect(result.status).toBe(200)
-      const userId = (result.body.data as { user: { id: string } }).user.id
-      expect(await membershipRow(userId, freshOrg)).toEqual({ is_active: true })
-      expect((await query<{ user_id: string }>('SELECT user_id FROM attendance_group_members WHERE group_id=$1', [groupId])).rows).toEqual([{ user_id: userId }])
+      expect(await holderLock()).toEqual([])
+      const created = await createUser(body)
+      expect(created.status).toBe(200)
+      const userId = (created.body.data as { user: { id: string } }).user.id
+      expect(typeof userId).toBe('string')
+      expect(await effectRows()).toEqual([{ users: [userId], aliases: ['email:' + userId], memberships: [userId], members: [userId] }])
+      expect(await membershipRow(userId, orgId)).toEqual({ is_active: true })
     } finally {
+      clearTimeout(deadline)
       await blocker.query('ROLLBACK')
       blocker.release()
       await blockerPool.end()
       if (pending) await pending
       await query('DELETE FROM attendance_group_members WHERE group_id=$1', [groupId])
       await query('DELETE FROM attendance_groups WHERE id=$1', [groupId])
+      await query('DELETE FROM directory_integrations WHERE org_id=$1', [orgId])
     }
-  })
+  }, 20_000)
 
   it('explicit attendanceOrgId conflicting with the group/shift-derived org → 400 ATTENDANCE_ORG_CONFLICT', async () => {
     // Seed a real attendance_group under `groupDerivedOrg` so resolveAttendanceOnboardingOrgId's

@@ -11,6 +11,15 @@ import { PasswordPolicyError } from '../auth/password-policy-error'
 import { Logger } from '../core/logger'
 import { query, transaction } from '../db/pg'
 import { RecoveryConflictError, translateRecoveryConflict } from '../db/recovery-conflict'
+import {
+  completeIdentityDeletion,
+  sealExactAndCredentialSessions,
+  connectionAdmitsLegacyGrant,
+  credentialRevocationFlagOn,
+  noRemainingLoginMethod,
+  otherDirectorySourceRemains,
+  selectCredentialLegs,
+} from '../auth/strict-credential-chain'
 import { sweepStaleDepartmentBindings } from './department-binding-reconciliation'
 import {
   buildDirectoryAccountLinkedIdentityOpenIdSql,
@@ -1515,6 +1524,11 @@ export type DirectoryDeprovisionOutcome = {
    */
   membershipDeactivationAttemptedCount: number
   /**
+   * Strict-scope candidates. Not folded into `grantsDisabledCount`. Counts a
+   * candidate whose departed connection has a login-scope row, including preview.
+   */
+  strictDeprovisionCandidateCount: number
+  /**
    * Delta-review NIT-D3: per-candidate races (vanished user / concurrently-unbound source) are
    * SKIPPED rather than aborting the run — counted here so a run that silently skipped people is
    * distinguishable from one that considered them, without digging through logs.
@@ -1632,6 +1646,7 @@ export async function applyDirectoryDeprovisionPolicies(
     grantsDisabledCount: 0,
     usersDeactivatedCount: 0,
     membershipDeactivationAttemptedCount: 0,
+    strictDeprovisionCandidateCount: 0,
     skippedCandidateCount: 0,
     abortedReason: null,
     affected: [],
@@ -1760,6 +1775,9 @@ export async function applyDirectoryDeprovisionPolicies(
       continue
     }
     const effectTypes = new Set(result.plan.effects.map((effect) => effect.type))
+    const strictWork = result.strictDeprovision.eligible || result.strictDeprovision.applied
+    if (effectTypes.size === 0 && !strictWork) continue
+    if (strictWork) outcome.strictDeprovisionCandidateCount += 1
     if (effectTypes.size === 0) continue
 
     outcome.affected.push({
@@ -1819,6 +1837,28 @@ function buildDirectoryProjectedMemberGroupName(
   const normalizedPath = normalizeText(departmentPath)
   const normalizedDepartmentId = normalizeText(externalDepartmentId)
   return `钉钉同步 · ${normalizeText(integrationName)} · ${normalizedPath || normalizedDepartmentId}`
+}
+
+/**
+ * D21 (Y5a): every projected member-group marker a run of this configuration can write — a superset
+ * of the markers `buildDirectoryProjectedMemberGroupPlans` emits (which also skips departments the
+ * payload does not carry). The orchestration passes only the configured departments its payload
+ * carries, so the set it hands the inventory equals the plans' set. The mutex inventory reads the
+ * CURRENT members of these groups, so the projection's removal bump re-acquires rows the inventory
+ * already holds.
+ */
+export function buildDirectoryProjectedMemberGroupMarkers(options: {
+  integrationId: string
+  memberGroupSyncMode: DirectoryMemberGroupSyncMode
+  memberGroupDepartmentIds: string[]
+}): string[] {
+  if (options.memberGroupSyncMode !== 'sync_scoped_departments') return []
+  return Array.from(new Set(
+    options.memberGroupDepartmentIds
+      .map((externalDepartmentId) => normalizeText(externalDepartmentId))
+      .filter(Boolean)
+      .map((externalDepartmentId) => buildDirectoryProjectedMemberGroupMarker(options.integrationId, externalDepartmentId)),
+  )).sort()
 }
 
 export function buildDirectoryProjectedMemberGroupPlans(options: {
@@ -3402,6 +3442,13 @@ async function lockDirectorySyncAccessGraphUsers(
     integrationId: string
     provider: string
     users: DirectoryMemberRecord[]
+    /**
+     * D21 (Y5a): the projected member-group markers this run can write
+     * (`buildDirectoryProjectedMemberGroupMarkers` over the configured departments this run
+     * fetched — the plans' marker set exactly). Their current members join the inventory, so
+     * every version row the run's projection can take is in the ONE sorted bump below.
+     */
+    projectedGroupMarkers: string[]
   },
 ): Promise<{
   lockedUserIds: Set<string>
@@ -3489,6 +3536,20 @@ async function lockDirectorySyncAccessGraphUsers(
                AND db_user.mobile IS NOT NULL
                AND regexp_replace(db_user.mobile, '\\s+', '', 'g') = regexp_replace(db_match.mobile, '\\s+', '', 'g')
              )
+         UNION ALL
+         -- D21 (Y5a, refute [1]): the CURRENT members of the run's projected member groups. The
+         -- projection removes a member the payload no longer places there and bumps that subject's
+         -- version row first; a member outside every arm above (any user an administrator added
+         -- to the group) was then a SECOND version-row statement in this transaction, after the
+         -- inventory's. Against #6924's exception writers and #6934's activation route (one sorted
+         -- statement over actor + target) that closed a 40P01 cycle on real PG14. With this arm
+         -- the inventory's one sorted statement holds every row the projection can take; a member
+         -- who joins after this read is refused fail-closed by the projection, not bumped late.
+         SELECT projected_member.user_id
+           FROM platform_member_group_members projected_member
+           JOIN platform_member_groups projected_group
+             ON projected_group.id = projected_member.group_id
+          WHERE projected_group.description = ANY($8::text[])
        ) candidate
       WHERE candidate.local_user_id IS NOT NULL`,
     [
@@ -3499,6 +3560,7 @@ async function lockDirectorySyncAccessGraphUsers(
       openIds,
       emails,
       mobiles,
+      options.projectedGroupMarkers,
     ],
   )
   const candidateUserIds = candidates.rows
@@ -4188,10 +4250,38 @@ export async function syncDirectoryIntegration(
       // → the two-connection create/refreeze-vs-sync barrier suite reds.
       await acquireSourceSyncFreezeLock(client, integrationId)
       await assertDirectorySyncNotFrozenByTransfer(integrationId, client as FreezeCheckClient)
+      // D21 (Y5a): only a configured department this run fetched gets a plan (the plans skip the
+      // rest), so the inventory reads exactly the markers the projection can write. A configured
+      // department missing from this payload adds no member to the inventory and no version row.
+      const projectedGroupMarkers = buildDirectoryProjectedMemberGroupMarkers({
+        integrationId,
+        memberGroupSyncMode: config.memberGroupSyncMode,
+        memberGroupDepartmentIds: config.memberGroupDepartmentIds.filter((id) => departments.has(normalizeText(id))),
+      })
+      // D21 (Y5a), the subject-layer writer rule of authz-version-protocol.ts: locks outside the
+      // holder's set come BEFORE the version rows. The projection's governance INSERTs
+      // (member, default role) rows. On a schema that still carries the legacy 033 FK
+      // user_roles.role_id -> roles(id), that INSERT takes FOR KEY SHARE on the role row after the
+      // inventory's bump. A role delete holds the same row FOR UPDATE and then bumps the role's
+      // members, one of whom the inventory holds, and the two transactions deadlock (40P01).
+      // Taking the default roles' rows here, sorted, in one statement, makes one side wait for the
+      // other before either holds a version row the other wants. A role delete or PUT of a default
+      // role therefore waits for the run (or the run for it). No statement when nothing is
+      // projected or no default role is configured.
+      const projectedDefaultRoleIds = projectedGroupMarkers.length > 0
+        ? normalizeMemberGroupDefaultRoleIds(config.memberGroupDefaultRoleIds)
+        : []
+      if (projectedDefaultRoleIds.length > 0) {
+        await client.query(
+          'SELECT id FROM roles WHERE id = ANY($1::text[]) ORDER BY id FOR KEY SHARE',
+          [projectedDefaultRoleIds],
+        )
+      }
       const syncAccess = await lockDirectorySyncAccessGraphUsers(client, {
         integrationId,
         provider: integration.provider,
         users: Array.from(users.values()),
+        projectedGroupMarkers,
       })
       const priorAccessByAccountId = new Map(
         Array.from(syncAccess.priorAccessByExternalUserId.values())
@@ -4829,6 +4919,7 @@ export async function syncDirectoryIntegration(
         {
           defaultRoleIds: config.memberGroupDefaultRoleIds,
           defaultNamespaces: config.memberGroupDefaultNamespaces,
+          heldUserIds: new Set([...syncAccess.lockedUserIds, ...newlyAdmittedUserIds]),
         },
         triggeredBy,
       )
@@ -4912,6 +5003,9 @@ export async function syncDirectoryIntegration(
         // `deprovisionGrantsDisabledCount`. See `membershipDeactivationAttemptedCount`'s own
         // doc-comment for what "attempted" does and does not mean.
         deprovisionMembershipDeactivationAttemptedCount: deprovisionOutcome.membershipDeactivationAttemptedCount,
+        ...(deprovisionOutcome.strictDeprovisionCandidateCount > 0
+          ? { deprovisionStrictCandidateCount: deprovisionOutcome.strictDeprovisionCandidateCount }
+          : {}),
         deprovisionAbortedReason: deprovisionOutcome.abortedReason,
         // Identities, not just a number: an operator deciding whether to flip
         // DIRECTORY_DEPROVISION_ENABLED needs to see WHO would lose access, and there is no
@@ -6445,7 +6539,7 @@ async function applyDirectoryAccountBindInTransaction(
     )
   }
 
-  if (enableDingTalkGrant) {
+  if (enableDingTalkGrant && await connectionAdmitsLegacyGrant(client, account.integration_id)) {
     await client.query(
       `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
        VALUES ($1::text, $2::text, TRUE, $3::text, NOW(), NOW())
@@ -6703,6 +6797,7 @@ export const __directorySyncInternalsForTests = {
   doesExternalIdentityMatchAccount,
   loadMatchMaps,
   lockDirectorySyncAccessGraphUsers,
+  syncProjectedDepartmentMemberGroupsInTransaction,
 }
 
 async function applyDirectoryProjectedMemberGroupGovernanceInTransaction(
@@ -6816,6 +6911,13 @@ async function syncProjectedDepartmentMemberGroupsInTransaction(
   options: {
     defaultRoleIds: string[]
     defaultNamespaces: string[]
+    /**
+     * D21 (Y5a): the subjects whose version rows this transaction already holds — the mutex
+     * inventory plus the users it admitted. A membership change for anyone else is refused before
+     * its bump: that bump would be a second version-row statement (a 40P01 cycle against a writer
+     * holding that row and waiting on an inventory row).
+     */
+    heldUserIds: ReadonlySet<string>
   },
   adminUserId: string,
 ): Promise<{
@@ -6901,9 +7003,20 @@ async function syncProjectedDepartmentMemberGroupsInTransaction(
     const membersToDelete = Array.from(currentMembers).filter((value) => !desiredMembers.has(value))
     const membersToInsert = Array.from(desiredMembers).filter((value) => !currentMembers.has(value))
 
+    // D21 (Y5a, refute [1]): every subject this projection changes must already be held by the
+    // inventory's one sorted statement (its projected-group arm reads the current members; desired
+    // members are inventory or newly admitted users). A member who joined the group after the
+    // inventory read is refused here, fail-closed like 'resolved after the mutex inventory'; the
+    // next run's inventory holds that member.
+    const unheldMembers = [...membersToDelete, ...membersToInsert].filter((userId) => !options.heldUserIds.has(userId))
+    if (unheldMembers.length > 0) {
+      throw new DirectoryConflictError(
+        'Directory sync projected member group changed after the mutex inventory; retry the run',
+      )
+    }
     // D21 (Y5a): one sorted subject bump for every member the projection removes or adds (joining a
     // group that carries a deny row is a revocation), ahead of the multi-row DELETE whose trigger
-    // bumps would otherwise land in scan order.
+    // bumps would otherwise land in scan order. Every row is already held, so this waits for nothing.
     await bumpSubjectAuthorizationVersions(client, [...membersToDelete, ...membersToInsert])
 
     if (membersToDelete.length > 0) {
@@ -7504,6 +7617,7 @@ export async function unbindDirectoryAccount(
       throw new DirectoryConflictError('Directory account binding changed; retry the operation')
     }
 
+    let strictGrantIds: readonly string[] = []
     if (previousLinkedUser?.local_user_id) {
       const candidateIdentityParams: unknown[] = [
         account.provider,
@@ -7545,6 +7659,13 @@ export async function unbindDirectoryAccount(
           .map((row) => normalizeText(row.id))
           .filter(Boolean)
         if (candidateIds.length > 0) {
+          const removed = await completeIdentityDeletion(client, {
+            userId: previousLinkedUser.local_user_id,
+            identityIds: candidateIds,
+            actorId: normalizedAdminUserId,
+            reason: 'admin_unbind',
+          })
+          strictGrantIds = removed.grantIds
           await client.query(
             `DELETE FROM user_external_identities
              WHERE id = ANY($1::uuid[])`,
@@ -7562,6 +7683,28 @@ export async function unbindDirectoryAccount(
           [account.provider, previousLinkedUser.local_user_id, normalizedAdminUserId],
         )
       }
+      const revokeCredentials = credentialRevocationFlagOn()
+      const clear = revokeCredentials && !await otherDirectorySourceRemains(client, {
+        userId: previousLinkedUser.local_user_id,
+        exceptAccountId: normalizedAccountId,
+      })
+      const noMethod = revokeCredentials && !clear && await noRemainingLoginMethod(client, {
+        userId: previousLinkedUser.local_user_id,
+        departedConnectionId: account.integration_id,
+      })
+      await sealExactAndCredentialSessions(client, {
+        userId: previousLinkedUser.local_user_id,
+        actorId: normalizedAdminUserId,
+        reason: 'directory-admin-unbind',
+        grantIds: strictGrantIds,
+        legs: selectCredentialLegs({
+          surface: 'linked_admin_unbind',
+          closesAuthorization: disableDingTalkGrant,
+          strict: strictGrantIds.length > 0,
+          clear,
+          noMethod,
+        }, revokeCredentials),
+      })
     }
 
     await client.query(

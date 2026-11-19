@@ -966,7 +966,7 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     conflictsWith: [],
     danger: 'high',
     purpose:
-      "W4 tenant-claim hard door of the integration plugin (registered 2026-11-11 under register R-91; it predates this registry). Default OFF; the ONE reader is plugins/plugin-integration-core/lib/http-routes.cjs#stockPreparationTenantClaimRequired (trimmed, case-folded 'true'), asked per request. OFF: byte-for-byte today's behaviour except the unconditional F3 fix on the confirmation-decisions confirm route (see the reader's comment) — including requireTableActionAccess's legacy integration:* branch, which lets a tenantless platform admin name a tenant (query / params tenantId) and preview AND apply a stock-prep pull into it. ON: assertVerifiedTenantClaim refuses every request whose tenant does not come from the verified token claim — 403 OPERATOR_SCOPE_TENANT_REQUIRED for a claimless token (a tenantless platform admin included, on every carrier), and the contradiction / mismatch refusals — on the three shared entries (the table-action legacy branch, resolveTenantId, resolveAuthUserTenantId) plus the source-preflight route, i.e. the WHOLE integration plugin surface, not only stock-prep. Owner ruling 2026-11-11 (R-91, option A): this flag being on is a PILOT-ENABLE PRECONDITION — pilot readiness v6's check tenant_claim_required (plugins/plugin-integration-core/lib/stock-preparation-pilot-readiness.cjs) passes only while the reader answers true, so no batch-refresh pilot can be enabled while it is off. It gates the enable only: after an enable nothing refuses at run time (only the pilot GET re-lists the id), so removing the flag while a pilot is enabled reopens the legacy path on that pilot sheet (the pilot runbook's stop condition forbids it). Danger=high: turning it on refuses every claimless caller at once — the order is customer-delivery-guide-20260904.md §5-5 (user_orgs, re-issued tenant-bound tokens incl. the daily scheduled pull's, everyone signs in again, then the env line); flipping it on a customer host is a separate owner gate at install time. Rollback = delete the line and restart; nothing persists.",
+      "W4 tenant-claim hard door of the integration plugin (registered 2026-11-11 under register R-91; it predates this registry). Default OFF; the ONE reader is plugins/plugin-integration-core/lib/http-routes.cjs#stockPreparationTenantClaimRequired (trimmed, case-folded 'true'), asked per request. OFF: byte-for-byte today's behaviour except the unconditional F3 fix on the confirmation-decisions confirm route (see the reader's comment) — including requireTableActionAccess's legacy integration:* branch, which lets a tenantless platform admin name a tenant (query / params tenantId) and preview AND apply a stock-prep pull into it. ON: assertVerifiedTenantClaim refuses every request whose tenant does not come from the verified token claim — 403 OPERATOR_SCOPE_TENANT_REQUIRED for a claimless token (a tenantless platform admin included, on every carrier), and the contradiction / mismatch refusals — on the three shared entries (the table-action legacy branch, resolveTenantId, resolveAuthUserTenantId) plus the source-preflight route, i.e. the WHOLE integration plugin surface, not only stock-prep. Owner ruling 2026-11-11 (R-91, option A): this flag being on is a PILOT-ENABLE PRECONDITION — pilot readiness v6's check tenant_claim_required (plugins/plugin-integration-core/lib/stock-preparation-pilot-readiness.cjs) passes only while the reader answers true, so no batch-refresh pilot can be enabled while it is off. It gates the enable only: after an enable nothing refuses at run time (only the pilot GET re-lists the id), so removing the flag while a pilot is enabled reopens the legacy path on that pilot sheet (the pilot runbook's stop condition forbids it). Danger=high: turning it on refuses every claimless caller at once — the order is customer-delivery-guide-20260904.md §5-5 (user_orgs, re-issued tenant-bound tokens incl. the daily scheduled pull's, everyone signs in again, then the env line); flipping it on a customer host is a separate owner gate at install time. Rollback is not deleting the line (pm2 keeps a removed key in the running process): set it to =false, restart with scripts/ops/attendance-onprem-start-pm2.ps1, check the key in pm2 env, then delete the line (a list or path key is emptied as a double-quoted single space, never a bare KEY=, which PS 5.1 treats as a deleted line); nothing persists. Steps: customer-delivery-guide-20260904.md §5-5.",
     source: 'plugins/plugin-integration-core/lib/http-routes.cjs#stockPreparationTenantClaimRequired',
   },
   {
@@ -1174,6 +1174,39 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     purpose:
       "Default OFF. Only the byte-exact env string 'true' enables persisting an exact department scope (includeChildren false); no trim and no case folding. Unset, '', false, 0, TRUE, True, ' true', 'true ', ' true ', 1, yes and on stay OFF. Gates three write sinks before any scope or template mutation: template department assign, direct delegated-admin scope assign, and template apply in both merge and replace. A refusal is HTTP 403 DELEGATED_SCOPE_EXACT_DEPARTMENT_DISABLED with no audit and no permission invalidation, and replace does not delete first. Readers are not gated. Rollback: turning the flag off does not rewrite a stored false and does not change reader semantics; explicit true and unassign remain available; an omitted includeChildren on an existing false is preserved; a new omitted assign still defaults to true. Enabling a deployed process is a separate owner decision.",
     source: 'packages/core-backend/src/admin/delegated-scope-rollout.ts#isDelegatedScopeExactDepartmentEnabled',
+  },
+  {
+    key: 'DELEGATED_SCOPE_ACTIVATION_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "Default OFF; only exact literal 'true' exposes explicit delegation lifecycle writes and makes a new scope configuration inactive until enabled. Upgrade or drain every previous permission reader and writer before enabling. Turning OFF prevents new activation changes and still enforces all stored stops. A stopped subject's range remains editable. This switch is independent of DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED.",
+    source: 'packages/core-backend/src/admin/delegated-scope-activation.ts#isDelegatedScopeActivationEnabled',
+  },
+  {
+    key: 'EXTERNAL_LOGIN_STRICT_SESSION_MAX_AGE_SECONDS',
+    type: 'numeric',
+    activationValue: 'An exact integer string in [300, 2592000]. No default.',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      'Absolute lifetime bound for strict external sessions. Absent or invalid values refuse session issuance. This does not enable login, grant admission, container login, or autoprovision. Setting a deployed value is a separate owner decision.',
+    source: 'packages/core-backend/src/auth/strict-dingtalk-entry.ts#readConfiguredStrictSessionMaxAgeSeconds',
+  },
+  {
+    key: 'DIRECTORY_DEPROVISION_REVOKE_CREDENTIALS_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "Default OFF; only the byte-exact literal 'true' enables the credential-chain selector's session and API-token revocation legs. No trim or case folding. The selected legs still depend on the operation's persisted user, grant and remaining-login-method facts; this flag does not enable login or grant issuance. Setting a deployed value is a separate owner decision.",
+    source: 'packages/core-backend/src/auth/strict-credential-chain.ts#credentialRevocationFlagOn',
   },
 ])
 

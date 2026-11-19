@@ -2010,6 +2010,7 @@ exec npx vitest run \
   run-required-web-tests-shape \
   searchApprovalDirectoryUsers \
   serverFormDraft \
+  sessionCenterView.spec.ts \
   SessionOrgSwitcher.spec.ts \
   shared-comments-stub-client \
   statusTag \

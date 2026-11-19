@@ -1,0 +1,68 @@
+# Security action attempt coordination
+
+## Scope
+
+Coordinate the existing local-password security-action issuer, without enabling a purpose, resolver, assurance prerequisite, login path or feature flag. Keep the existing proof TTL300 and actor-wide five failed attempts per900 seconds, across sessions and purposes. The failure-count SQL and challenge migration remain byte-identical. Different sessions may compare concurrently; the actor accounting lock remains inside the second transaction only. Consume does not acquire this coordination mechanism.
+
+This is a trusted-application coordination boundary, not a database-privilege boundary against arbitrary shared-role SQL or a database owner. No role provisioning, lease, expiry, steal, sweeper, recovery UI or challenge-row reservation is introduced. An unresolved active session latch fails closed; another session still shares the actor's failure budget.
+
+## Closed private entry
+
+- The admission module exports only the named internal `runOwnedAttempt` entry for the sole static production import in `security-action-proof.ts`. No re-export, route/admin exposure, general capability factory, raw connection or caller-supplied quiescence assertion. The existing issue function is not an administrator proof issuer.
+- Effective entry shape: `runOwnedAttempt(sessionId, password, { readInputs(tx), account(tx, firstSnapshot, verified) })`. Return the existing issue outcome, retaining existing snapshot/outcome types and domain errors. Only the existing issue adapter supplies the two named private steps. Neither step chooses transaction order, compares a password or reconnects.
+- The orchestrator owns exactly one TX1/read step, at most one actual comparison, then at most one TX2/account step. Both transactions use the same non-reconnecting physical client; comparison runs outside any SQL transaction. No second checkout beneath a retained client, including audit.
+- Reserve each operation synchronously before any await. Each transaction step receives a callback-scoped query wrapper, not the raw client. On step return/throw, seal that query epoch and drain all dispatched queries before COMMIT/ROLLBACK; a drained query failure must not be committed. Retained queries cannot dispatch after scope closure. No hidden queueing of overlapping transactions or comparison during a transaction.
+- Terminal failure seals the entire attempt and drains all admitted operations. Issuer/step return, outer-promise rejection, request abort and connection loss alone are not proof that an actual comparison terminated.
+- A refusal before invoking bcrypt has invocation count0 and a sealed not-started state. Immediately before the one invocation reserve admitted irrevocably. An invoked synchronous throw has count1; only if no callback remains in flight is it terminal/quiescent with unavailable outcome and no TX2. Otherwise drain the actual admitted operation. Never reset to not-started or permit a second invocation. Promise/callback fulfillment and rejection terminate that same admission once.
+- Factory-level isolated tests may substitute the complete mandatory admission entry. Production must bind the exact real internal entry with no fallback to the old issue runner/comparator. Such a test substitute is not physical coordination evidence; combined PG tests must execute the real entry. Existing consume transaction behavior remains separate.
+
+## Persistent session latch
+
+- Add one new migration/table, `security_action_session_flight`: text session ID primary key, internally generated random32-byte owner token encoded as64 lowercase hexadecimal characters, active-only state, bound time from database clock. No user/session FK or delete cascade; no update or expiry. Do not edit the published challenges migration.
+- The new module is the only production latch writer and comparison caller for this attempt. Scope exact AST writer/import/loader/alias guards to this module, its sole importer and the authorized new migration; do not prohibit unrelated repository comparisons or DELETE statements. Any existing writer/cascade able to clear this latch prevents acceptance.
+- Exact-token acquire/release helpers and transaction-local GUC checks provide consistency against accidental writes, not authority against the shared SQL role/owner. Match both immutable session ID and original owner token on cleanup. Do not publish/log tokens, passwords, session IDs or hashes.
+- Keep session-lock keys in the fixed `security-action-sid:` namespace, distinct from actor accounting keys. Use existing runtime5000ms lock/30000ms statement bounds without increasing them. Helper functions are SECURITY INVOKER with pg_catalog search path and safely qualified application relations; do not redirect through caller-controlled or temporary same-name tables.
+- Namespace selection is the first effective explicitly configured application namespace in server-resolved `current_schemas(false)` ordinality, excluding `pg_*` and `information_schema`. Validate that selected identifier before lookup; never skip an invalid or uninstalled selected application schema to find a lower-priority public or unrelated installation. `up`, runtime and `down` use this same rule. Resolve the fixed relation only in that namespace and validate its OID, ordinary-table kind and permanent persistence. Runtime refuses a missing/unsupported relation; down may no-op only for an absent relation in a valid selected namespace, not for an invalid namespace or unsupported same-name object. Hold this qualified namespace throughout the attempt and original-token cleanup without reselecting it on a cleanup connection. Unrelated installed copies and temporary shadows remain untouched.
+- Healthy order on one client: acknowledge the session advisory lock acquisition and its transaction COMMIT; acknowledge the own-latch claim COMMIT; TX1; comparison; TX2; release own latch; exact-key unlock; dispose. No comparison before acknowledged ownership and successful TX1. A foreign active latch is refused without comparison or replacement.
+- Install owned-client error/end handling before queries/comparison; loss is sticky. Track possibly-sent acquisition/claim, confirmed ownership, comparison, accounting, cleanup and disposal separately. Unknown lock ownership or wire state requires discard once, never clean pool return. A ROLLBACK does not release a session advisory lock. Exact unlock on the owning live client must return exactly true; otherwise discard. No unlock-all or unlock of an old backend through another connection.
+- After loss, discard the old client, seal new admissions and actually drain the comparison/work. Only then may a cleanup-only connection acquire and acknowledge the same session advisory key, order itself after a possibly unresolved old claim, and release only the original session/token. It may not compare, run TX2, read users, replay accounting, mint a replacement token, recreate an unqualified row or delete challenges.
+- Preserve the original token even when claim COMMIT acknowledgement is missing. A sealed never-started comparison can be vacuously quiescent. No-claim-sent/known-foreign-latch paths need no own-row deletion. An early zero-row observation before old-claim ordering proves nothing; an acknowledged zero after serialization proves only absence of the original token. Lost release-COMMIT acknowledgement means the latch may remain or may be gone. A late old-token cleanup must not affect a newer owner.
+
+## Transactional migration removal
+
+Use the migration caller's already-open transaction and validate READ COMMITTED before destructive work. Do not change isolation after earlier batch statements. Apply existing migration timeout policy without increasing it; restore healthy-path settings. Obtain ACCESS EXCLUSIVE on the actual latch relation first, then use a separate fresh-snapshot statement to test for any row. Any row refuses before every DROP. If empty, drop only the new dependent objects/table in that same transaction, holding the table lock through commit. Timeout, unsupported isolation or other failure leaves objects and rows unchanged. No count-before-lock or check/drop split across transactions. A writer queued behind removal cannot acknowledge a claim and then compare on a removed table.
+
+## Outcomes and audit
+
+Classify immutable accounting outcome; seal/drain; finish or classify exact own-latch cleanup; exact unlock or discard; dispose every owned client; select response; attempt one best-effort values-free verification audit; return/throw. Audit must not borrow under a retained pin, duplicate the verification outcome or change a known result on failure. One attempted audit is not an exactly-once crash guarantee.
+
+| Accounting outcome | Required response and persistence distinction |
+|---|---|
+| Preflight flag/shape/purpose/org refusal | Existing refusal; zero admission connect/query/compare/audit, excluding existing authentication middleware |
+| Pre-owner lock/claim uncertainty | No comparison; unavailable; original-token serialized cleanup only after sealed never-started state; uncertain latch state retained honestly |
+| Foreign latch | Unavailable; no comparison or deletion of that owner |
+| TX1 known domain/rate refusal | Existing domain status; own-latch cleanup still required |
+| TX1 infrastructure failure | Unavailable; same own-claim cleanup discipline |
+| Pre-invocation refusal | Count0; unavailable; no TX2 |
+| Invoked comparison error/terminal throw | Count1; unavailable; no TX2; actual callback quiescence required |
+| TX2 domain/rate refusal with acknowledged rollback | Existing domain status; no new failed row; own-latch cleanup |
+| TX2 rollback not acknowledged | Unavailable; effects uncertain; no replay |
+| TX2 issued/rejected COMMIT acknowledged | Return the existing proof/credential refusal despite cleanup true/zero/unknown; committed proof/budget rows remain |
+| TX2 COMMIT acknowledgement unknown | Unavailable with possible issued/superseded/failed rows; no replay or compensating challenge deletion |
+
+Unknown transport/cleanup results do not prove rollback or zero effects. Wrong-password accounting still commits before credential refusal. A lock timeout is not a failed-password row. Preserve the accepted six wrong-password requests on three sessions yielding five credential refusals, one rate limit and five failed rows; do not replace it with a maximum-started-comparisons policy.
+
+## Verification gates
+
+1. Exact production binding and closed importer/writer/entry guards; bypass, alias, detached-reference, extra importer/compare and unauthorized latch-writer mutations must fail. Preserve all default-OFF/all-false prerequisite and zero-IO tests.
+2. Real coordination from two OS processes and separate pools on the same owned synthetic primary, distinct process/backend IDs; actual advisory blocker/waiter evidence before the second comparison. Two pools in one process or a Map is not this proof. Preserve same-session successful issue/supersede outcomes with a reachable serialized schedule, not the former dual-comparison barrier.
+3. Lose the owner backend while actual comparison is paused; a peer must observe the active latch and compare zero times. Resume true/false/error separately: no stale TX2 or reconnection, no cleanup before actual termination. No process-death assertion substitutes for quiescence. Capacity max1/maxN must not form nested-checkout cycles.
+4. Exercise retained query/step use, unawaited dispatched queries, concurrent transaction attempts, comparison during TX, second comparison, pre-dispatch loss, synchronous invocation failure and actual callback drain. Match every operation to its epoch and one disposal.
+5. Exercise acquisition/claim/accounting/release COMMIT-ACK loss, rollback faults, exact unlock false/error, error/end, cleanup preceding unresolved claim completion and late old-token cleanup after a new owner. Independently inspect persisted effects, no double release and no clean pool return under uncertainty.
+6. Apply/remove migration only in owned synthetic schemas; prove no user/session delete cascade, any-row down refusal, actual before-lock and behind-lock writer schedules, RR/stale-snapshot refusal, unchanged prior objects and correct timeout restoration. No role creation or public schema alteration.
+7. Preserve byte-identical failure-count SQL, 5/900/300 and distinct-session overlap. Cover the complete outcome/cleanup matrix and audit-after-disposal ordering, exactly one attempted audit, no response rewrite after audit failure and no internal replay.
+8. Register each new whole PG suite in the required lane with default unit exclusion and exact Node ownership/removal/duplicate/relocation controls, preserving the union. No-URL/unreachable expected-DB execution must fail rather than skip-green. Main executes all tests serially, including source faults with pre-execution bytes and exact restore. Local tests/registration are not remote CI, native/full-app or business acceptance.
+
+## Delivery boundary
+
+Grok authors after independent design review and explicit main implementation handoff. Codex integrates, reviews and executes serial validation against released bytes; independent review closes concrete findings. New files are one admission module, one migration and focused unit/PG suites, with minimal issue-adapter/test-oracle changes. No migrate.ts help edit, published migration edit, assurance/flag/route change, consume change, intent/producer/login implementation, install, commit, push, deployment, staging or real-data action. All purposes/prerequisites remain unavailable; full B2 remains incomplete until its own gates close.

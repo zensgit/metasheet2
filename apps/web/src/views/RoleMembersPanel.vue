@@ -46,25 +46,54 @@
 
     <p v-if="mutationsDisabled" class="role-members__locked" data-role-members-locked>角色权限有未保存修改，成员变更已暂停。</p>
 
-    <div class="role-members__actions">
-      <button
-        class="role-members__add"
-        data-role-member-add
-        type="button"
-        :disabled="memberActionDisabled"
-        @click="void openAuthorization('assign')"
+    <div class="role-members__write">
+      <div class="role-members__actions">
+        <button
+          class="role-members__add"
+          data-role-member-add
+          type="button"
+          :disabled="memberActionDisabled"
+          @click="void openAuthorization('assign')"
+        >
+          加入此角色
+        </button>
+        <button
+          class="role-members__remove"
+          data-role-member-remove
+          type="button"
+          :disabled="memberActionDisabled"
+          @click="void openAuthorization('unassign')"
+        >
+          移出此角色
+        </button>
+      </div>
+      <div
+        v-if="showOperationStatus"
+        class="role-members__operation"
+        data-testid="role-member-authorization-status"
       >
-        加入此角色
-      </button>
-      <button
-        class="role-members__remove"
-        data-role-member-remove
-        type="button"
-        :disabled="memberActionDisabled"
-        @click="void openAuthorization('unassign')"
-      >
-        移出此角色
-      </button>
+        <p data-testid="role-member-authorization-phase">{{ operationStatusText }}</p>
+        <p v-if="operationPreviewText" data-testid="role-member-authorization-preview">{{ operationPreviewText }}</p>
+        <button
+          class="role-members__reread"
+          type="button"
+          data-testid="role-member-authorization-reread"
+          :disabled="!rereadAllowed || submitting"
+          @click="void rereadAuthorization()"
+        >
+          重新读取
+        </button>
+        <button
+          v-if="dialogVisible"
+          class="role-members__reread"
+          type="button"
+          data-testid="role-member-authorization-dismiss"
+          :disabled="dialogBusy"
+          @click="dismissAuthorization()"
+        >
+          关闭
+        </button>
+      </div>
     </div>
 
     <p v-if="feedback" class="role-members__feedback" :data-tone="feedbackTone">{{ feedback }}</p>
@@ -98,31 +127,39 @@
     </div>
 
     <AdminAuthorizationConfirmDialog
-      v-if="authorizationDraft"
+      v-if="authorizationDraft && dialogVisible"
       :draft="authorizationDraft"
       :phrase="phrase"
-      :busy="writeBusy"
+      :busy="dialogBusy"
+      :phase="operationPhase"
+      :impact="operationImpact"
+      :outcome-text="operationOutcomeText"
+      :allow-read-again="rereadAllowed"
       @update:phrase="phrase = $event"
       @confirm="void submitAuthorization()"
       @cancel="cancelAuthorization()"
+      @close="dismissAuthorization()"
+      @read-again="void rereadAuthorization()"
     />
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
+import { useAdminAuthorizationOperation } from '../composables/useAdminAuthorizationOperation'
+import type { AdminAuthorizationOperationPhase } from '../composables/useAdminAuthorizationOperation'
+import { useAuth } from '../composables/useAuth'
+import type {
+  AdminAuthorizationImpact,
+  AdminAuthorizationTransportRequest,
+  AdminAuthorizationTransportResponse,
+} from '../utils/adminAuthorizationOperation'
 import {
-  LAST_PLATFORM_ADMIN_MESSAGE,
-  ROLE_VERSION_MISMATCH_MESSAGE,
   adminAuthorizationStillCurrent,
   buildRoleMembershipAuthorization,
   type AdminAuthorizationDraft,
 } from './AdminAuthorizationConfirm'
 import AdminAuthorizationConfirmDialog from './AdminAuthorizationConfirmDialog.vue'
-import {
-  describeRoleMembershipWrite,
-  roleWriteOutcomeFromPayload,
-} from './adminUserRoleAction'
 import {
   fetchRoleMemberAccess,
   fetchRoleMemberCandidates,
@@ -131,6 +168,8 @@ import {
 } from './roleMembers'
 import type { RoleMember } from './roleMembers'
 import { apiFetch } from '../utils/api'
+
+const ROLE_EFFECT_LIMIT = '这里只核对了角色成员。派生准入和范围清理只记在回执里。'
 
 const props = defineProps<{
   roleId: string
@@ -172,6 +211,8 @@ const feedbackTone = ref<'info' | 'error'>('info')
 const authorizationDraft = ref<AdminAuthorizationDraft | null>(null)
 const phrase = ref('')
 const writeBusy = ref(false)
+const submitting = ref(false)
+const dialogVisible = ref(false)
 const accessGeneration = ref(0)
 const epoch = ref(0)
 const frozenHeldRoleIds = ref<string[]>([])
@@ -179,14 +220,84 @@ const frozenHeldRolesKnown = ref(false)
 const focusGeneration = ref(0)
 let disposed = false
 
+const auth = useAuth()
+
+function currentPrincipalId(): string {
+  const id = auth.getCurrentUser()?.id
+  return typeof id === 'string' ? id.trim() : ''
+}
+
+async function authorizationTransport(
+  request: AdminAuthorizationTransportRequest,
+): Promise<AdminAuthorizationTransportResponse> {
+  const response = await apiFetch(request.path, {
+    method: request.method,
+    signal: request.signal,
+    ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
+  })
+  let body: unknown
+  try {
+    body = await response.json()
+  } catch {
+    body = undefined
+  }
+  return { status: response.status, body }
+}
+
+async function verifyRoleMembership(): Promise<boolean> {
+  const receipt = operation.receipt.value
+  const action = receipt?.action
+  const roleAction = action && (action.kind === 'role.assign' || action.kind === 'role.revoke')
+    ? action
+    : null
+  if (!receipt || !roleAction) return false
+  if (receipt.targetUserId !== selectedUserId.value || roleAction.roleId !== props.roleId) return false
+  const fact = await fetchRoleMemberAccess(receipt.targetUserId)
+  if (!fact || fact.userId !== receipt.targetUserId || fact.heldRolesKnown !== true) return false
+  if (receipt.targetUserId !== selectedUserId.value || roleAction.roleId !== props.roleId) return false
+  const holds = fact.heldRoleIds.includes(roleAction.roleId)
+  return roleAction.kind === 'role.assign' ? holds : !holds
+}
+
+const operation = useAdminAuthorizationOperation({
+  transport: authorizationTransport,
+  getPrincipalId: currentPrincipalId,
+  getTargetId: () => selectedUserId.value,
+  verifyLive: () => verifyRoleMembership(),
+})
+
+const operationPhase = computed(() => operation.phase.value)
+const operationImpact = computed(() => operation.impact.value)
+const blocksMemberWrite = computed(() => {
+  const phase = operationPhase.value
+  return phase === 'previewing'
+    || phase === 'committing'
+    || phase === 'pending'
+    || phase === 'committed'
+    || phase === 'unverified_no_read'
+})
+const dialogBusy = computed(() => (
+  writeBusy.value
+  || submitting.value
+  || operationPhase.value === 'previewing'
+  || operationPhase.value === 'committing'
+))
+const rereadAllowed = computed(() => {
+  const phase = operationPhase.value
+  return (phase === 'pending' || phase === 'committed' || phase === 'unverified_no_read')
+    && Boolean(operation.clientOperationId.value)
+})
+
 const canGoNext = computed(() => total.value === null || page.value * ROLE_MEMBER_PAGE_SIZE < total.value)
 const canSearchNext = computed(() => searchTotal.value !== null && searchPage.value * ROLE_MEMBER_PAGE_SIZE < searchTotal.value)
 const memberActionDisabled = computed(() => (
   props.mutationsDisabled
   || props.actionsLocked
   || writeBusy.value
+  || submitting.value
+  || blocksMemberWrite.value
   || !selectedUserId.value
-  || authorizationDraft.value !== null
+  || dialogVisible.value
 ))
 
 function setFeedback(message: string, tone: 'info' | 'error'): void {
@@ -203,10 +314,139 @@ function selectCandidate(candidate: RoleMember): void {
 }
 
 function closePendingAuthorization(message?: string): void {
-  const open = authorizationDraft.value !== null
+  const open = authorizationDraft.value !== null || dialogVisible.value
   authorizationDraft.value = null
+  dialogVisible.value = false
   phrase.value = ''
   if (open && message) setFeedback(message, 'error')
+}
+
+function joinedLabels(values: readonly string[]): string {
+  return values.length > 0 ? values.join('、') : '无'
+}
+
+function pushUnique(target: string[], value: string): void {
+  const label = value.trim()
+  if (!label || target.includes(label)) return
+  target.push(label)
+}
+
+function receiptRecordsUnreadableEffects(impact: AdminAuthorizationImpact | null): boolean {
+  if (!impact) return false
+  if (impact.scopeCleanup.length > 0) return true
+  return impact.admissionChanges.some((change) => change.cause === 'role_revoke')
+}
+
+function previewSummary(impact: AdminAuthorizationImpact | null): string {
+  if (!impact) return ''
+  const roleSources: string[] = []
+  for (const change of impact.sourceChanges) {
+    if (change.source === 'role') pushUnique(roleSources, change.id)
+  }
+  for (const permission of [...impact.effectiveBefore, ...impact.effectiveAfter]) {
+    for (const source of permission.sources) {
+      if (source.kind === 'role') pushUnique(roleSources, source.id)
+    }
+  }
+  const explicitAdmissions = impact.admissionChanges
+    .filter((change) => change.cause === 'explicit')
+    .map((change) => `${change.after ? '开通' : '关闭'} ${change.namespace}`)
+  const derivedAdmissions = impact.admissionChanges
+    .filter((change) => change.cause === 'role_revoke')
+    .map((change) => `${change.after ? '开通' : '关闭'} ${change.namespace}`)
+  const retainedSources = impact.retainedOtherGrants.map((grant) => grant.code)
+  return [
+    `角色来源：${joinedLabels(roleSources)}`,
+    `显式准入：${joinedLabels(explicitAdmissions)}`,
+    `派生准入：${joinedLabels(derivedAdmissions)}`,
+    `范围清理：${impact.scopeCleanup.length}`,
+    `其他仍保留来源：${joinedLabels(retainedSources)}`,
+  ].join(' ')
+}
+
+const operationPreviewText = computed(() => previewSummary(operationImpact.value))
+const operationStatusText = computed(() => {
+  const limited = receiptRecordsUnreadableEffects(operationImpact.value)
+  const limit = limited ? ROLE_EFFECT_LIMIT : ''
+  switch (operationPhase.value) {
+    case 'previewing':
+      return '正在读取服务器预览。'
+    case 'awaiting_confirmation':
+      return '请核对服务器预览后再确认。这次只变更角色。'
+    case 'committing':
+      return '正在提交。请不要再次确认。'
+    case 'pending':
+      return '提交结果还不能确认。请重新读取。不会再次提交。'
+    case 'validation_failed':
+      return '这次没有写入。请重新预览后再确认。'
+    case 'forbidden':
+      return '没有执行这次授权的权限。'
+    case 'unverified_no_read':
+      return `已有回执，但这次读取不能确认角色。${limit}`
+    case 'committed':
+      return `回执已记录。角色回读还没有对上。${limit}`
+    case 'verified':
+      return limited
+        ? `已核对同一用户的角色成员状态。${ROLE_EFFECT_LIMIT}`
+        : '已核对同一用户的角色成员状态。'
+    default:
+      return operation.detail.value === 'preview_failed' ? '服务器预览没有完成，尚未写入。' : ''
+  }
+})
+const operationOutcomeText = computed(() => {
+  const preview = operationPreviewText.value
+  return preview ? `${operationStatusText.value} ${preview}` : operationStatusText.value
+})
+const showOperationStatus = computed(() => {
+  const phase = operationPhase.value
+  if (
+    phase === 'previewing'
+    || phase === 'committing'
+    || phase === 'pending'
+    || phase === 'committed'
+    || phase === 'verified'
+    || phase === 'unverified_no_read'
+    || phase === 'validation_failed'
+    || phase === 'forbidden'
+  ) return true
+  if (operation.detail.value === 'preview_failed') return true
+  return dialogVisible.value && phase === 'awaiting_confirmation'
+})
+
+function contextStill(token: number, userId: string, roleId: string): boolean {
+  return token === epoch.value && selectedUserId.value === userId && props.roleId === roleId && !disposed
+}
+
+function publishOutcome(): void {
+  const message = operationStatusText.value
+  if (!message) return
+  const phase = operationPhase.value
+  const tone = phase === 'verified' || phase === 'awaiting_confirmation' || phase === 'committed'
+    ? 'info'
+    : 'error'
+  setFeedback(message, tone)
+}
+
+async function confirmRoleReadbackIfCommitted(): Promise<void> {
+  if (operation.phase.value !== 'committed') return
+  const token = epoch.value
+  const userId = selectedUserId.value
+  const roleId = props.roleId
+  await operation.verify()
+  await operation.whenSettled()
+  if (!contextStill(token, userId, roleId) || !operation.verified.value) return
+  const reloaded = await load(roleId, page.value)
+  if (!contextStill(token, userId, roleId)) return
+  if (reloaded || !frozenHeldRolesKnown.value) return
+  const action = operation.receipt.value?.action
+  const roleAction = action && (action.kind === 'role.assign' || action.kind === 'role.revoke')
+    ? action
+    : null
+  if (!roleAction || roleAction.roleId !== roleId) return
+  const held = frozenHeldRoleIds.value.includes(roleId)
+  const delta = roleAction.kind === 'role.assign' ? (held ? 0 : 1) : (held ? -1 : 0)
+  if (delta === 0) return
+  emit('membershipAdjusted', { roleId, delta })
 }
 
 async function load(roleId: string, nextPage: number): Promise<boolean> {
@@ -345,43 +585,79 @@ async function openAuthorization(action: 'assign' | 'unassign'): Promise<void> {
   frozenHeldRolesKnown.value = heldRolesKnown
   phrase.value = ''
   authorizationDraft.value = buildDraft(action, userId, selectedUserName.value, heldRoleIds, heldRolesKnown)
+  dialogVisible.value = true
+  const openedEpoch = epoch.value
+  operation.syncContext()
+  await operation.preview({
+    targetUserId: userId,
+    action: {
+      kind: action === 'assign' ? 'role.assign' : 'role.revoke',
+      roleId,
+    },
+    admissionChanges: [],
+  })
+  await operation.whenSettled()
+  if (openedEpoch !== epoch.value || selectedUserId.value !== userId || props.roleId !== roleId || disposed) return
+  await confirmRoleReadbackIfCommitted()
+  if (openedEpoch !== epoch.value || selectedUserId.value !== userId || props.roleId !== roleId || disposed) return
+  publishOutcome()
 }
 
 function cancelAuthorization(): void {
-  if (writeBusy.value) return
+  if (dialogBusy.value) return
+  const phase: AdminAuthorizationOperationPhase = operation.phase.value
+  if (
+    phase === 'pending'
+    || phase === 'committed'
+    || phase === 'verified'
+    || phase === 'unverified_no_read'
+    || phase === 'committing'
+  ) return
+  closePendingAuthorization()
+}
+
+function dismissAuthorization(): void {
+  if (dialogBusy.value) return
+  dialogVisible.value = false
+  const phase = operation.phase.value
+  if (
+    phase === 'pending'
+    || phase === 'committed'
+    || phase === 'verified'
+    || phase === 'unverified_no_read'
+  ) return
   authorizationDraft.value = null
   phrase.value = ''
 }
 
-async function readJson(response: Response): Promise<Record<string, unknown>> {
+async function rereadAuthorization(): Promise<void> {
+  if (!rereadAllowed.value || submitting.value || dialogBusy.value) return
+  const token = epoch.value
+  const userId = selectedUserId.value
+  const roleId = props.roleId
+  submitting.value = true
   try {
-    return await response.json() as Record<string, unknown>
-  } catch {
-    return {}
+    await operation.lookup()
+    await operation.whenSettled()
+    if (!contextStill(token, userId, roleId)) return
+    await confirmRoleReadbackIfCommitted()
+    if (!contextStill(token, userId, roleId)) return
+    publishOutcome()
+  } finally {
+    if (!disposed) submitting.value = false
   }
-}
-
-function errorRecord(payload: Record<string, unknown>): Record<string, unknown> | null {
-  const error = payload.error
-  if (!error || typeof error !== 'object' || Array.isArray(error)) return null
-  return error as Record<string, unknown>
-}
-
-function membershipChanged(data: unknown): boolean {
-  if (!data || typeof data !== 'object' || Array.isArray(data)) return false
-  return (data as { membershipChanged?: unknown }).membershipChanged === true
 }
 
 async function submitAuthorization(): Promise<void> {
   const draft = authorizationDraft.value
-  if (!draft || writeBusy.value) return
+  if (!draft || writeBusy.value || submitting.value) return
+  if (operation.phase.value !== 'awaiting_confirmation') return
   const action = draft.kind === 'unassign-role' ? 'unassign' : 'assign'
   // Leave, save, and role transition lock the parent before the role id changes.
   // A dialog that is still on screen must not post into that window.
   if (props.actionsLocked || props.mutationsDisabled) {
     if (props.mutationsDisabled) setFeedback('角色权限有未保存修改，成员变更已暂停。', 'error')
-    authorizationDraft.value = null
-    phrase.value = ''
+    closePendingAuthorization()
     return
   }
   if (draft.requiresTypedPhrase && phrase.value !== draft.requiresTypedPhrase) return
@@ -400,99 +676,23 @@ async function submitAuthorization(): Promise<void> {
   )
   if (!adminAuthorizationStillCurrent(draft, live.fingerprint)) {
     setFeedback('确认对象已变化，本次未写入。', 'error')
-    authorizationDraft.value = null
-    phrase.value = ''
+    closePendingAuthorization()
     return
   }
 
-  const startedEpoch = epoch.value
+  const token = epoch.value
   const frozenUserId = draft.targetUserId
   const frozenRoleId = draft.roleId
-  writeBusy.value = true
+  submitting.value = true
   try {
-    const body: Record<string, unknown> = { roleId: frozenRoleId }
-    if (action === 'assign' && draft.expectedUpdatedAt) body.expectedUpdatedAt = draft.expectedUpdatedAt
-    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(frozenUserId)}/roles/${action}`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    })
-    const payload = await readJson(response)
-    if (startedEpoch !== epoch.value || selectedUserId.value !== frozenUserId || props.roleId !== frozenRoleId) {
-      authorizationDraft.value = null
-      phrase.value = ''
-      return
-    }
-    const error = errorRecord(payload)
-    const code = typeof error?.code === 'string' ? error.code : ''
-    if (response.status === 409 && code === 'LAST_PLATFORM_ADMIN') {
-      setFeedback(LAST_PLATFORM_ADMIN_MESSAGE, 'error')
-      authorizationDraft.value = null
-      phrase.value = ''
-      return
-    }
-    if (response.status === 409 && (code === 'ROLE_MODIFIED' || code === 'ROLE_VERSION_MISMATCH')) {
-      setFeedback(ROLE_VERSION_MISMATCH_MESSAGE, 'error')
-      authorizationDraft.value = null
-      phrase.value = ''
-      return
-    }
-    if (!response.ok || payload.ok !== true) {
-      const message = typeof error?.message === 'string' && error.message
-        ? error.message
-        : '保存角色失败'
-      const outcome = describeRoleMembershipWrite({
-        action,
-        requestedUserId: frozenUserId,
-        selectedUserId: selectedUserId.value,
-        roleId: frozenRoleId,
-        persistedRoleIds: [],
-        ok: false,
-        errorMessage: message,
-      })
-      setFeedback(outcome.message, outcome.tone)
-      authorizationDraft.value = null
-      phrase.value = ''
-      return
-    }
-
-    const result = roleWriteOutcomeFromPayload(payload.data, {
-      action,
-      requestedUserId: frozenUserId,
-      selectedUserId: selectedUserId.value,
-      roleId: frozenRoleId,
-    })
-    if (startedEpoch !== epoch.value || selectedUserId.value !== frozenUserId || props.roleId !== frozenRoleId) {
-      authorizationDraft.value = null
-      phrase.value = ''
-      return
-    }
-    setFeedback(result.outcome.message, result.outcome.tone)
-    authorizationDraft.value = null
-    phrase.value = ''
-    const changed = membershipChanged(payload.data)
-    if (!(result.outcome.applySnapshot && result.outcome.tone === 'info' && changed)) return
-    const reloaded = await load(frozenRoleId, page.value)
-    if (startedEpoch !== epoch.value || props.roleId !== frozenRoleId) return
-    if (!reloaded) {
-      emit('membershipAdjusted', { roleId: frozenRoleId, delta: action === 'assign' ? 1 : -1 })
-    }
-  } catch (error) {
-    if (startedEpoch !== epoch.value || selectedUserId.value !== frozenUserId || props.roleId !== frozenRoleId) return
-    const message = error instanceof Error ? error.message : '保存角色失败'
-    const outcome = describeRoleMembershipWrite({
-      action,
-      requestedUserId: frozenUserId,
-      selectedUserId: selectedUserId.value,
-      roleId: frozenRoleId,
-      persistedRoleIds: [],
-      ok: false,
-      errorMessage: message,
-    })
-    setFeedback(outcome.message, outcome.tone)
-    authorizationDraft.value = null
-    phrase.value = ''
+    await operation.confirm()
+    await operation.whenSettled()
+    if (!contextStill(token, frozenUserId, frozenRoleId)) return
+    await confirmRoleReadbackIfCommitted()
+    if (!contextStill(token, frozenUserId, frozenRoleId)) return
+    publishOutcome()
   } finally {
-    if (!disposed) writeBusy.value = false
+    if (!disposed) submitting.value = false
   }
 }
 
@@ -502,6 +702,7 @@ watch(() => props.roleId, (roleId, previous) => {
   searchGeneration.value += 1
   if (previous !== undefined) {
     authorizationDraft.value = null
+    dialogVisible.value = false
     phrase.value = ''
     selectedUserId.value = ''
     selectedUserName.value = ''
@@ -522,10 +723,31 @@ watch(selectedUserId, () => {
   accessGeneration.value += 1
   epoch.value += 1
   closePendingAuthorization('确认对象已变化，本次未写入。')
+  operation.syncContext()
+  void recoverSelectedReceipt()
 })
 
+async function recoverSelectedReceipt(): Promise<void> {
+  const token = epoch.value
+  const userId = selectedUserId.value
+  await operation.whenSettled()
+  if (!contextStill(token, userId, props.roleId)) return
+  if (operation.phase.value === 'committed') await confirmRoleReadbackIfCommitted()
+  if (!contextStill(token, userId, props.roleId)) return
+  const phase = operation.phase.value
+  if (phase === 'idle' || phase === 'awaiting_confirmation' || phase === 'previewing') return
+  publishOutcome()
+}
+
 watch(() => props.actionsLocked, (locked) => {
-  if (!locked || writeBusy.value) return
+  if (!locked || writeBusy.value || submitting.value || operation.phase.value === 'committing') return
+  closePendingAuthorization()
+})
+
+watch(() => props.mutationsDisabled, (disabled) => {
+  if (!disabled || writeBusy.value || submitting.value || operation.phase.value === 'committing') return
+  if (!dialogVisible.value && authorizationDraft.value === null) return
+  setFeedback('角色权限有未保存修改，成员变更已暂停。', 'error')
   closePendingAuthorization()
 })
 
@@ -565,11 +787,26 @@ watch(() => [props.roleId, props.focusUserId] as const, ([roleId, userId]) => {
 .role-members__head,
 .role-members__pager,
 .role-members__actions,
-.role-members__search {
+.role-members__search,
+.role-members__write,
+.role-members__operation {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.role-members__write {
+  align-items: flex-start;
+}
+
+.role-members__operation {
+  flex: 1;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 8px 10px;
 }
 
 .role-members__query {
@@ -629,7 +866,8 @@ watch(() => [props.roleId, props.focusUserId] as const, ([roleId, userId]) => {
 .role-members__search-prev,
 .role-members__search-next,
 .role-members__add,
-.role-members__remove {
+.role-members__remove,
+.role-members__reread {
   border: none;
   border-radius: 10px;
   background: #e2e8f0;
@@ -652,6 +890,7 @@ watch(() => [props.roleId, props.focusUserId] as const, ([roleId, userId]) => {
 .role-members__search-next:disabled,
 .role-members__add:disabled,
 .role-members__remove:disabled,
+.role-members__reread:disabled,
 .role-members__pick:disabled {
   cursor: not-allowed;
   opacity: 0.6;

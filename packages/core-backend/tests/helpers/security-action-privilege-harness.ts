@@ -41,6 +41,7 @@ export type PrivilegeRow = {
   admissions: unknown
   department_scopes: unknown
   member_group_scopes: unknown
+  delegation_activations: unknown
 }
 
 export type PrivilegeFixture = {
@@ -68,6 +69,7 @@ export function privilegeRow(overrides: Partial<PrivilegeRow> = {}): PrivilegeRo
     admissions: [],
     department_scopes: [],
     member_group_scopes: [],
+    delegation_activations: [],
     ...overrides,
   }
 }
@@ -106,6 +108,7 @@ const COLUMN_SOURCE_TABLE: Record<keyof PrivilegeRow, string> = {
   admissions: 'user_namespace_admissions',
   department_scopes: 'delegated_role_admin_scopes',
   member_group_scopes: 'delegated_role_admin_member_groups',
+  delegation_activations: 'delegated_role_admin_activation',
 }
 
 function statementNamesTable(sql: string, table: string): boolean {
