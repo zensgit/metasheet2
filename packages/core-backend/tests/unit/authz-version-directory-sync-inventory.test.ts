@@ -14,9 +14,17 @@
  *   I-02  the markers the inventory reads are a superset of the markers the plans write, and empty
  *         when projection is off;
  *   I-03  the projection refuses a membership change for a subject the transaction does not hold,
- *         before any version-row statement or DML; a held subject gets one bump, then the DELETE;
- *   I-04  the orchestration passes both: the markers from the run's config, the held set from the
- *         inventory plus the users it admitted.
+ *         before that plan's version-row statement or DML (per plan: with several plans, an earlier
+ *         plan's bump and DML have already run and roll back with the throw); a held subject gets
+ *         one bump, then the DELETE;
+ *   I-04  the orchestration passes both: the markers from the run's config (only the configured
+ *         departments this run fetched, so a department absent from the payload locks nobody), the
+ *         held set from the inventory plus the users it admitted;
+ *   I-05  the projected default roles are taken FOR KEY SHARE, sorted, in one statement, after the
+ *         freeze lock and before the inventory's bump (the writer rule: locks outside the holder's
+ *         set first). Witnessed on real PG14 with the legacy 033 FK added by hand to a throwaway
+ *         database (out of CI on purpose: adding that FK to the shared CI database would change the
+ *         schema every other real-DB file sees).
  */
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -144,9 +152,28 @@ describe('D21 directory sync takes its version rows in one sorted statement (ref
 
   it('I-04 the orchestration passes the run\'s markers to the inventory and the held set to the projection', () => {
     const source = readFileSync(path.join(__dirname, '../../src/directory/directory-sync.ts'), 'utf8')
-    expect(source).toMatch(/const syncAccess = await lockDirectorySyncAccessGraphUsers\(client, \{\s*integrationId,\s*provider: integration\.provider,\s*users: Array\.from\(users\.values\(\)\),\s*projectedGroupMarkers: buildDirectoryProjectedMemberGroupMarkers\(\{\s*integrationId,\s*memberGroupSyncMode: config\.memberGroupSyncMode,\s*memberGroupDepartmentIds: config\.memberGroupDepartmentIds,\s*\}\),\s*\}\)/)
+    // The markers come only from configured departments this run fetched (the plans' marker set exactly).
+    expect(source).toMatch(/const projectedGroupMarkers = buildDirectoryProjectedMemberGroupMarkers\(\{\s*integrationId,\s*memberGroupSyncMode: config\.memberGroupSyncMode,\s*memberGroupDepartmentIds: config\.memberGroupDepartmentIds\.filter\(\(id\) => departments\.has\(normalizeText\(id\)\)\),\s*\}\)/)
+    expect(source).toMatch(/const syncAccess = await lockDirectorySyncAccessGraphUsers\(client, \{\s*integrationId,\s*provider: integration\.provider,\s*users: Array\.from\(users\.values\(\)\),\s*projectedGroupMarkers,\s*\}\)/)
     expect(source).toMatch(/syncProjectedDepartmentMemberGroupsInTransaction\(\s*client,\s*memberGroupPlans,\s*\{\s*defaultRoleIds: config\.memberGroupDefaultRoleIds,\s*defaultNamespaces: config\.memberGroupDefaultNamespaces,\s*heldUserIds: new Set\(\[\.\.\.syncAccess\.lockedUserIds, \.\.\.newlyAdmittedUserIds\]\),\s*\},/)
     // The projection builds its plans from the same config the markers come from.
     expect(source).toMatch(/buildDirectoryProjectedMemberGroupPlans\(\{\s*integrationId,\s*integrationName: integration\.name,\s*memberGroupSyncMode: config\.memberGroupSyncMode,\s*memberGroupDepartmentIds: config\.memberGroupDepartmentIds,/)
+  })
+
+  it('I-05 the projected default roles are taken FOR KEY SHARE (sorted, one statement) after the freeze lock and before the inventory, only when something is projected', () => {
+    const source = readFileSync(path.join(__dirname, '../../src/directory/directory-sync.ts'), 'utf8')
+    const freezeAt = source.indexOf('await acquireSourceSyncFreezeLock(client, integrationId)')
+    const freezeCheckAt = source.indexOf('await assertDirectorySyncNotFrozenByTransfer(integrationId, client as FreezeCheckClient)', freezeAt)
+    const rolesAt = source.indexOf("'SELECT id FROM roles WHERE id = ANY($1::text[]) ORDER BY id FOR KEY SHARE'", freezeCheckAt)
+    const inventoryAt = source.indexOf('const syncAccess = await lockDirectorySyncAccessGraphUsers(client, {', freezeCheckAt)
+    expect(freezeAt).toBeGreaterThan(0)
+    expect(freezeCheckAt).toBeGreaterThan(freezeAt)
+    expect(rolesAt).toBeGreaterThan(freezeCheckAt)
+    expect(inventoryAt).toBeGreaterThan(rolesAt)
+    // Exactly one such statement in the module: the governance path takes no other role lock of its own.
+    expect(source.split('ORDER BY id FOR KEY SHARE').length - 1).toBe(1)
+    // Gated: no statement unless the run projects a group and a default role is configured.
+    const between = source.slice(freezeCheckAt, inventoryAt)
+    expect(between).toMatch(/const projectedDefaultRoleIds = projectedGroupMarkers\.length > 0\s*\? normalizeMemberGroupDefaultRoleIds\(config\.memberGroupDefaultRoleIds\)\s*: \[\]\s*if \(projectedDefaultRoleIds\.length > 0\) \{\s*await client\.query\(\s*'SELECT id FROM roles WHERE id = ANY\(\$1::text\[\]\) ORDER BY id FOR KEY SHARE',\s*\[projectedDefaultRoleIds\],\s*\)\s*\}/)
   })
 })

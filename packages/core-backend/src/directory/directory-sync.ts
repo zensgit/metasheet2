@@ -1824,8 +1824,10 @@ function buildDirectoryProjectedMemberGroupName(
 /**
  * D21 (Y5a): every projected member-group marker a run of this configuration can write — a superset
  * of the markers `buildDirectoryProjectedMemberGroupPlans` emits (which also skips departments the
- * payload does not carry). The mutex inventory reads the CURRENT members of these groups, so the
- * projection's removal bump re-acquires rows the inventory already holds.
+ * payload does not carry). The orchestration passes only the configured departments its payload
+ * carries, so the set it hands the inventory equals the plans' set. The mutex inventory reads the
+ * CURRENT members of these groups, so the projection's removal bump re-acquires rows the inventory
+ * already holds.
  */
 export function buildDirectoryProjectedMemberGroupMarkers(options: {
   integrationId: string
@@ -3424,7 +3426,8 @@ async function lockDirectorySyncAccessGraphUsers(
     users: DirectoryMemberRecord[]
     /**
      * D21 (Y5a): the projected member-group markers this run can write
-     * (`buildDirectoryProjectedMemberGroupMarkers`). Their current members join the inventory, so
+     * (`buildDirectoryProjectedMemberGroupMarkers` over the configured departments this run
+     * fetched — the plans' marker set exactly). Their current members join the inventory, so
      * every version row the run's projection can take is in the ONE sorted bump below.
      */
     projectedGroupMarkers: string[]
@@ -4229,15 +4232,38 @@ export async function syncDirectoryIntegration(
       // → the two-connection create/refreeze-vs-sync barrier suite reds.
       await acquireSourceSyncFreezeLock(client, integrationId)
       await assertDirectorySyncNotFrozenByTransfer(integrationId, client as FreezeCheckClient)
+      // D21 (Y5a): only a configured department this run fetched gets a plan (the plans skip the
+      // rest), so the inventory reads exactly the markers the projection can write. A configured
+      // department missing from this payload adds no member to the inventory and no version row.
+      const projectedGroupMarkers = buildDirectoryProjectedMemberGroupMarkers({
+        integrationId,
+        memberGroupSyncMode: config.memberGroupSyncMode,
+        memberGroupDepartmentIds: config.memberGroupDepartmentIds.filter((id) => departments.has(normalizeText(id))),
+      })
+      // D21 (Y5a), the subject-layer writer rule of authz-version-protocol.ts: locks outside the
+      // holder's set come BEFORE the version rows. The projection's governance INSERTs
+      // (member, default role) rows. On a schema that still carries the legacy 033 FK
+      // user_roles.role_id -> roles(id), that INSERT takes FOR KEY SHARE on the role row after the
+      // inventory's bump. A role delete holds the same row FOR UPDATE and then bumps the role's
+      // members, one of whom the inventory holds, and the two transactions deadlock (40P01).
+      // Taking the default roles' rows here, sorted, in one statement, makes one side wait for the
+      // other before either holds a version row the other wants. A role delete or PUT of a default
+      // role therefore waits for the run (or the run for it). No statement when nothing is
+      // projected or no default role is configured.
+      const projectedDefaultRoleIds = projectedGroupMarkers.length > 0
+        ? normalizeMemberGroupDefaultRoleIds(config.memberGroupDefaultRoleIds)
+        : []
+      if (projectedDefaultRoleIds.length > 0) {
+        await client.query(
+          'SELECT id FROM roles WHERE id = ANY($1::text[]) ORDER BY id FOR KEY SHARE',
+          [projectedDefaultRoleIds],
+        )
+      }
       const syncAccess = await lockDirectorySyncAccessGraphUsers(client, {
         integrationId,
         provider: integration.provider,
         users: Array.from(users.values()),
-        projectedGroupMarkers: buildDirectoryProjectedMemberGroupMarkers({
-          integrationId,
-          memberGroupSyncMode: config.memberGroupSyncMode,
-          memberGroupDepartmentIds: config.memberGroupDepartmentIds,
-        }),
+        projectedGroupMarkers,
       })
       const priorAccessByAccountId = new Map(
         Array.from(syncAccess.priorAccessByExternalUserId.values())

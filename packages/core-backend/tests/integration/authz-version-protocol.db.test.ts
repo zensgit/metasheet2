@@ -27,12 +27,46 @@
  * describeIfDatabase skip cannot pass as green) and wired as a WHOLE FILE into the approval real-DB
  * step of .github/workflows/plugin-tests.yml. EXPECT_DB=1 arms the anti-skip sentinel. The field-row writer rule
  * cases (the #6792 follow-up) are registered at the end: authz-version-field-row-order-realdb.cases.ts; after them
- * the directory-sync one-statement cases (refute [1]): authz-version-directory-sync-order-realdb.cases.ts.
+ * the directory-sync one-statement cases (refute [1]): authz-version-directory-sync-order-realdb.cases.ts. Its DS-03
+ * runs the real syncDirectoryIntegration; the DingTalk HTTP client it calls is mocked in this file (vi.mock below).
  */
 import { randomUUID } from 'node:crypto'
 import { CompiledQuery, Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+
+// DS-03 (authz-version-directory-sync-order-realdb.cases.ts) drives the REAL syncDirectoryIntegration; only the
+// DingTalk HTTP client is replaced, by a synthetic directory the case fills in. Declared here because vi.mock is
+// hoisted per test file; no other case in this file reaches the DingTalk client.
+const directorySyncDingTalkStub = vi.hoisted(() => ({
+  departments: [] as Array<{ id: string; parentId: string; name: string }>,
+  users: [] as Array<{ userId: string; name: string; email: string; unionId: string; openId: string; departmentIds: string[] }>,
+}))
+vi.mock('../../src/integrations/dingtalk/client', async (original) => ({
+  ...(await original<Record<string, unknown>>()),
+  fetchDingTalkAppAccessToken: async () => 'y5a-ds03-synthetic-token',
+  listDingTalkDepartments: async (_token: string, parentId: string) =>
+    directorySyncDingTalkStub.departments
+      .filter((d) => d.parentId === String(parentId))
+      .map((d) => ({ id: d.id, parentId: d.parentId, name: d.name, order: 0, source: {} })),
+  getDingTalkDepartmentDetail: async () => ({ deptManagerUserIdList: [] }),
+  listDingTalkDepartmentUsers: async (_token: string, deptId: string) => ({
+    users: directorySyncDingTalkStub.users
+      .filter((u) => u.departmentIds.includes(String(deptId)))
+      .map((u) => ({ userId: u.userId, name: u.name, departmentIds: [String(deptId)], source: {} })),
+    nextCursor: null,
+    hasMore: false,
+  }),
+  getDingTalkUserDetail: async (_token: string, userId: string) => {
+    const u = directorySyncDingTalkStub.users.find((x) => x.userId === userId)
+    if (!u) throw new Error('y5a DS-03: unknown synthetic user')
+    return {
+      userId: u.userId, name: u.name, unionId: u.unionId, openId: u.openId, email: u.email,
+      mobile: undefined, departmentIds: [...u.departmentIds], source: {},
+    }
+  },
+}))
+
 import {
   dropAuthorizationVersionProtocol,
   installAuthorizationVersionProtocol,
@@ -559,4 +593,4 @@ describeIfDatabase.sequential('D21 authorization version protocol (real PostgreS
 defineAuthzVersionFieldRowOrderRealDbCases()
 
 // Directory sync (refute [1]): every subject version row a run can touch in ONE sorted statement, before its first bump.
-defineAuthzVersionDirectorySyncOrderRealDbCases()
+defineAuthzVersionDirectorySyncOrderRealDbCases(directorySyncDingTalkStub)
