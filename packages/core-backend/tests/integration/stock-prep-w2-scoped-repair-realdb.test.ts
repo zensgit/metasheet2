@@ -1613,6 +1613,44 @@ describeDb('S5b members port (real host wiring, real DB)', () => {
     expect(audit.map((row) => row.action)).toEqual(['create', 'update', 'grant'])
     expect(audit[2].action_details).toMatchObject({ adminUserId: ADMIN, sheetId: SHEET, permission: 'spreadsheet:write', granted: true })
   })
+
+  it('RD-07 pauses stock-prep members reads and writes while retaining role, admission and scope', async () => {
+    const { roleId } = await port.createCustomRole({ actorId: ADMIN, name: 'activation fixture', permissionCodes: ['stock-prep:read'] }) as { roleId: string }
+    createdRoleIds.push(roleId)
+    const setActivation = (namespace: string, enabled: boolean) => pool.query(
+      `INSERT INTO delegated_role_admin_activation (admin_user_id, namespace, enabled, revision)
+       VALUES ($1, $2, $3, $4::uuid)
+       ON CONFLICT (admin_user_id, namespace) DO UPDATE SET enabled = EXCLUDED.enabled, revision = EXCLUDED.revision`,
+      [DELEGATED, namespace, enabled, randomUUID()],
+    )
+    const resolveTargets = vi.fn(async () => [])
+    try {
+      await setActivation('attendance', false)
+      await expect(port.describe({ actorId: DELEGATED })).resolves.toMatchObject({ actor: { delegated: true } })
+      const auditBefore = await auditRows(roleId)
+      await setActivation('stock-prep', false)
+      for (const run of [
+        () => port.describe({ actorId: DELEGATED }),
+        () => port.createCustomRole({ actorId: DELEGATED, name: 'paused create', permissionCodes: ['stock-prep:read'] }),
+        () => port.updateCustomRole({ actorId: DELEGATED, roleId, name: 'paused rename' }),
+        () => port.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId, resolveTargets }),
+      ]) {
+        expect(await refusal(run())).toMatchObject({ status: 403, code: 'STOCK_PREP_MEMBERS_FORBIDDEN' })
+      }
+      expect(resolveTargets).not.toHaveBeenCalled()
+      expect(await auditRows(roleId)).toEqual(auditBefore)
+      expect(await rbacListUserPermissions(DELEGATED, appQuery)).toContain('stock-prep:admin')
+      expect((await pool.query(
+        'SELECT group_id::text FROM delegated_role_admin_member_groups WHERE admin_user_id = $1 AND namespace = $2',
+        [DELEGATED, 'stock-prep'],
+      )).rows).toEqual([{ group_id: groupId }])
+      await expect(port.describe({ actorId: ADMIN })).resolves.toMatchObject({ actor: { isPlatformAdmin: true } })
+      await setActivation('stock-prep', true)
+      await expect(port.describe({ actorId: DELEGATED })).resolves.toMatchObject({ actor: { delegated: true } })
+    } finally {
+      await pool.query('DELETE FROM delegated_role_admin_activation WHERE admin_user_id = $1', [DELEGATED])
+    }
+  })
 })
 
 // ---------------------------------------------------------------------------------------------
@@ -1640,6 +1678,7 @@ describeDb('S5b members port (real host wiring, real DB)', () => {
 // ---------------------------------------------------------------------------------------------
 import { createStockPrepMembersHostDeps } from '../../src/services/stock-preparation-members-host'
 import { createStockPrepMembersPort, type StockPrepMembersQueryFn } from '../../src/services/stock-preparation-members'
+import { lockNamespaceAdmissionWrites } from '../../src/rbac/namespace-admission'
 import { listUserPermissions as rbacListUserPermissions } from '../../src/rbac/service'
 import { assignUserRoles, unassignUserRoles, type RoleAssignmentExecutor } from '../../src/rbac/role-assignment'
 import { pool as appPool, query as appQuery, transaction as appTransaction } from '../../src/db/pg'
@@ -2560,6 +2599,75 @@ describeDb('S5b members port — role-row lock redesign (real host wiring, real 
     console.log(`[S5bl LR-06] PATCH after a role editor committed a platform code → ${result}`)
     expect(result).toBe('409/STOCK_PREP_CUSTOM_ROLE_HAS_PLATFORM_CODES')
     expect(await roleCodes(roleId)).toEqual(['multitable:write', 'stock-prep:read'])
+  })
+
+  const proveAdvisoryWait = async (waiter: number | null, blocker: number | null) => {
+    await vi.waitFor(async () => {
+      const { rows } = await pool.query<{ blocked: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM pg_stat_activity
+           WHERE wait_event_type = 'Lock' AND wait_event = 'advisory'
+             AND ($1::int IS NULL OR pid = $1)
+             AND ($2::int IS NULL OR $2 = ANY(pg_blocking_pids(pid)))
+         ) AS blocked`,
+        [waiter, blocker],
+      )
+      expect(rows[0]?.blocked).toBe(true)
+    }, { timeout: 2500, interval: 25 })
+  }
+
+  it.each(['activation-first', 'members-first'] as const)('LR-09 %s: a first pause and a stock-prep members write serialize', async (order) => {
+    const roleId = await createRole('before pause', ['stock-prep:read'])
+    const transition = await pool.connect()
+    let membersResult: Promise<string> | undefined
+    let transitionResult: Promise<string> | undefined
+    let committed = false
+    const pause = async () => {
+      await lockNamespaceAdmissionWrites(transition, DELEGATED)
+      await transition.query(
+        `INSERT INTO delegated_role_admin_activation (admin_user_id, namespace, enabled, revision)
+         VALUES ($1, 'stock-prep', false, $2::uuid)`,
+        [DELEGATED, randomUUID()],
+      )
+    }
+    try {
+      await transition.query('BEGIN')
+      await transition.query("SET LOCAL lock_timeout = '5s'")
+      const transitionPid = (await transition.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid
+      const update = { actorId: DELEGATED, roleId, name: 'after members write' }
+      if (order === 'activation-first') {
+        await pause()
+        membersResult = outcome(port().updateCustomRole(update))
+        await proveAdvisoryWait(null, transitionPid)
+      } else {
+        const pausedPort = hookedPort({ beforeTx: async (sql) => {
+          if (sql.startsWith('UPDATE roles SET name')) {
+            transitionResult = outcome(pause())
+            await proveAdvisoryWait(transitionPid, null)
+          }
+        } })
+        membersResult = outcome(pausedPort.updateCustomRole(update))
+        expect(await membersResult).toBe('ok')
+        expect(await transitionResult).toBe('ok')
+      }
+      await transition.query('COMMIT')
+      committed = true
+      const membersWon = order === 'members-first'
+      expect(await membersResult).toBe(membersWon ? 'ok' : '403/STOCK_PREP_MEMBERS_FORBIDDEN')
+      expect(await outcome(port().describe({ actorId: DELEGATED }))).toBe('403/STOCK_PREP_MEMBERS_FORBIDDEN')
+      expect((await pool.query('SELECT name FROM roles WHERE id = $1', [roleId])).rows[0]?.name)
+        .toBe(membersWon ? 'after members write' : 'before pause')
+      expect((await pool.query(
+        "SELECT COUNT(*)::int AS n FROM audit_logs WHERE resource_type = 'role' AND resource_id = $1 AND action = 'update'",
+        [roleId],
+      )).rows[0].n).toBe(membersWon ? 1 : 0)
+    } finally {
+      await transitionResult
+      if (!committed) await transition.query('ROLLBACK').catch(() => {})
+      transition.release()
+      await membersResult
+      await pool.query('DELETE FROM delegated_role_admin_activation WHERE admin_user_id = $1', [DELEGATED])
+    }
   })
 
   it('LR-07 (2) while a members write\'s transaction is open the app pool sees nothing but that transaction\'s own connection', async () => {

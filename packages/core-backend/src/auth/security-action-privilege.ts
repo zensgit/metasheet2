@@ -23,11 +23,12 @@
  *
  * Grant sources in this revision: the users admin flag and role column, role membership, direct and
  * role-derived permission codes, the legacy permission column, namespace admissions (witness only)
- * and the two delegated role administration scope tables. Domain-specific scope tables are not grant
+ * and the delegated role administration scope and activation tables. Domain-specific scope tables are not grant
  * sources of this classifier.
  *
  * The witness is a domain-separated SHA-256 over a canonical encoding of every grant input; any change
- * to any input changes it, including the include-children flag on a department scope. The domain is v2.
+ * to any input changes it, including the include-children flag on a department scope. Subjects without
+ * an explicit delegation decision retain v2. A stored activation revision uses the v3 domain.
  * A v1 digest is not accepted. Challenges store only the digest, and the department tuple is not
  * persisted, so there is no legacy pair to read back and no stored hash is rewritten.
  *
@@ -92,6 +93,8 @@ export type PrivilegeInputs = Readonly<{
   delegatedDepartmentScopes: readonly (readonly [string, string, boolean])[]
   /** `[namespace, groupId]` pairs, ascending by canonical encoding. */
   delegatedMemberGroupScopes: readonly (readonly [string, string])[]
+  /** `[namespace, enabled, revision]` triples, ascending by canonical encoding. */
+  delegatedActivations: readonly (readonly [string, boolean, string])[]
   readonly [privilegeInputsBrand]: true
 }>
 
@@ -126,9 +129,11 @@ export const PRIVILEGE_GRANT_SOURCE_TABLES = [
   'user_namespace_admissions',
   'delegated_role_admin_scopes',
   'delegated_role_admin_member_groups',
+  'delegated_role_admin_activation',
 ] as const
 
 export const PRIVILEGE_WITNESS_DOMAIN = 'metasheet:security-action:privilege:v2|'
+const ACTIVATION_WITNESS_DOMAIN = 'metasheet:security-action:privilege:v3|'
 
 const PRIVILEGE_INPUTS_STATEMENT = `SELECT u.id::text AS id,
        u.is_admin,
@@ -147,7 +152,9 @@ const PRIVILEGE_INPUTS_STATEMENT = `SELECT u.id::text AS id,
        COALESCE((SELECT jsonb_agg(jsonb_build_array(s.namespace, s.directory_department_id::text, s.include_children))
                    FROM delegated_role_admin_scopes s WHERE s.admin_user_id = $1::text), '[]'::jsonb) AS department_scopes,
        COALESCE((SELECT jsonb_agg(jsonb_build_array(g.namespace, g.group_id::text))
-                   FROM delegated_role_admin_member_groups g WHERE g.admin_user_id = $1::text), '[]'::jsonb) AS member_group_scopes
+                   FROM delegated_role_admin_member_groups g WHERE g.admin_user_id = $1::text), '[]'::jsonb) AS member_group_scopes,
+       COALESCE((SELECT jsonb_agg(jsonb_build_array(a.namespace, a.enabled, a.revision::text))
+                   FROM delegated_role_admin_activation a WHERE a.admin_user_id = $1::text), '[]'::jsonb) AS delegation_activations
   FROM users u
  WHERE u.id = $1::text`
 
@@ -228,6 +235,12 @@ function isDepartmentScopeArray(value: unknown): value is Array<[string, string,
   ))
 }
 
+function isActivationArray(value: unknown): value is Array<[string, boolean, string]> {
+  return Array.isArray(value) && value.every((item) => (
+    Array.isArray(item) && item.length === 3 && isString(item[0]) && isBoolean(item[1]) && isString(item[2])
+  ))
+}
+
 function parsePrivilegeRow(row: Record<string, unknown>, userId: string): PrivilegeInputs {
   if (row.id !== userId) throw new PrivilegeInputsUnavailableError('input_malformed')
   if (!isBoolean(row.is_admin) || !isString(row.role)) throw new PrivilegeInputsUnavailableError('input_malformed')
@@ -236,6 +249,7 @@ function parsePrivilegeRow(row: Record<string, unknown>, userId: string): Privil
   if (!isPairArray(row.admissions, isString, isBoolean)) throw new PrivilegeInputsUnavailableError('input_malformed')
   if (!isDepartmentScopeArray(row.department_scopes)) throw new PrivilegeInputsUnavailableError('input_malformed')
   if (!isPairArray(row.member_group_scopes, isString, isString)) throw new PrivilegeInputsUnavailableError('input_malformed')
+  if (!isActivationArray(row.delegation_activations)) throw new PrivilegeInputsUnavailableError('input_malformed')
   if (!Array.isArray(row.legacy_permissions)) throw new PrivilegeInputsUnavailableError('input_malformed')
   try {
     canonicalJson(row.legacy_permissions)
@@ -253,6 +267,7 @@ function parsePrivilegeRow(row: Record<string, unknown>, userId: string): Privil
     admissions: sortedTuples(row.admissions),
     delegatedDepartmentScopes: sortedTuples(row.department_scopes),
     delegatedMemberGroupScopes: sortedTuples(row.member_group_scopes),
+    delegatedActivations: sortedTuples(row.delegation_activations),
   }
   return Object.freeze(inputs) as unknown as PrivilegeInputs
 }
@@ -393,6 +408,7 @@ export function classifyPrivilege(inputs: PrivilegeInputs): PrivilegeClassificat
 }
 
 function witnessOf(inputs: PrivilegeInputs): string {
+  const hasActivation = inputs.delegatedActivations.length > 0
   const encoded = canonicalJson({
     isAdmin: inputs.isAdmin,
     role: inputs.role,
@@ -403,8 +419,10 @@ function witnessOf(inputs: PrivilegeInputs): string {
     admissions: inputs.admissions,
     delegatedDepartmentScopes: inputs.delegatedDepartmentScopes,
     delegatedMemberGroupScopes: inputs.delegatedMemberGroupScopes,
+    ...(hasActivation ? { delegatedActivations: inputs.delegatedActivations } : {}),
   })
-  return createHash('sha256').update(PRIVILEGE_WITNESS_DOMAIN + encoded, 'utf8').digest('hex')
+  const domain = hasActivation ? ACTIVATION_WITNESS_DOMAIN : PRIVILEGE_WITNESS_DOMAIN
+  return createHash('sha256').update(domain + encoded, 'utf8').digest('hex')
 }
 
 /**

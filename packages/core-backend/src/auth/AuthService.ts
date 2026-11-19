@@ -11,6 +11,7 @@ import { Logger } from '../core/logger'
 import { secretManager } from '../security/SecretManager'
 import { getBcryptSaltRounds, getProductionAuthSecurityIssues, resolveRuntimeJwtSecret } from '../security/auth-runtime-config'
 import { invalidateUserPerms, isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
+import { strictGuardLookups } from '../rbac/strict-guard-lookups'
 import { supportsAttendanceSelfService } from '../config/product-mode'
 import {
   ATTENDANCE_SELF_SERVICE_NAMESPACE,
@@ -19,6 +20,7 @@ import {
 } from './attendanceSelfServiceBackfill'
 import { isUserSessionRevoked } from './session-revocation'
 import { isSessionTokenPayload } from './session-token-kind'
+import { classifyVerifiedSessionPayload, verifyPersistedStrictSession } from './strict-dingtalk-entry'
 import { createUserSession, isUserSessionActive } from './session-registry'
 import {
   assertAliasCutoverAllowed,
@@ -256,13 +258,26 @@ export class AuthService {
   /**
    * 验证JWT token
    */
-  async verifyToken(token: string): Promise<User | null> {
+  async verifyToken(token: string, options?: { readOnlyPermissionCheck?: boolean }): Promise<User | null> {
     try {
       // 验证token格式和签名
       const payload = this.verifySessionTokenPayload(token)
       if (!payload) {
         this.logger.warn('Token verification failed: not a session token')
         return null
+      }
+      const sessionClass = classifyVerifiedSessionPayload(payload)
+      if (sessionClass === 'conflict') {
+        this.logger.warn('Token verification failed: strict session is not an ordinary session')
+        return null
+      }
+      if (sessionClass === 'strict') {
+        return await poolManager.get().transaction(async (client) => {
+          await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+          return verifyPersistedStrictSession({
+            query: (sql, params) => client.query(sql, params),
+          }, payload)
+        })
       }
       const userId = this.resolveTokenUserId(payload)
       if (!userId) {
@@ -278,13 +293,13 @@ export class AuthService {
       }
 
       // 从数据库获取最新用户信息
-      const user = await this.getUserById(userId)
+      const user = await this.getUserById(userId, options?.readOnlyPermissionCheck === true)
       if (!user) {
         return null
       }
 
       // T1: fail-closed on pending / invalid activation / inactive (shared gate).
-      if (evaluateUserAuthenticationGate(user)) {
+      if ((options?.readOnlyPermissionCheck === true && user.is_active !== true) || evaluateUserAuthenticationGate(user)) {
         return null
       }
 
@@ -307,6 +322,7 @@ export class AuthService {
         : undefined
       return this.sanitizeUser(tenantId ? { ...user, tenantId } : user)
     } catch (error) {
+      if (options?.readOnlyPermissionCheck === true && !(error instanceof jwt.JsonWebTokenError)) throw error
       this.logger.warn('Token verification failed', error instanceof Error ? error : undefined)
       return null
     }
@@ -315,13 +331,27 @@ export class AuthService {
   /**
    * 创建JWT token
    */
-  createToken(user: User, options: { sid?: string } = {}): string {
-    const payload: Omit<TokenPayload, 'iat' | 'exp'> = {
+  createToken(user: User, options: { sid?: string; externalAuth?: boolean } = {}): string {
+    const externalAuth = options.externalAuth === true
+    const sid = typeof options.sid === 'string' && options.sid.trim().length > 0 ? options.sid.trim() : undefined
+    if (externalAuth) {
+      if (!sid || !sid.startsWith('xs.')) {
+        const error = new Error('STRICT_SESSION_SID_REQUIRED')
+        ;(error as Error & { code?: string }).code = 'STRICT_SESSION_SID_REQUIRED'
+        throw error
+      }
+    } else if (sid?.startsWith('xs.')) {
+      const error = new Error('STRICT_SESSION_SID_REFUSED')
+      ;(error as Error & { code?: string }).code = 'STRICT_SESSION_SID_REFUSED'
+      throw error
+    }
+    const payload: Omit<TokenPayload, 'iat' | 'exp'> & { xa?: true } = {
       userId: user.id,
       email: user.email ?? '',
       role: user.role,
       ...(typeof user.tenantId === 'string' && user.tenantId.trim().length > 0 ? { tenantId: user.tenantId.trim() } : {}),
-      ...(typeof options.sid === 'string' && options.sid.trim().length > 0 ? { sid: options.sid.trim() } : {}),
+      ...(sid ? { sid } : {}),
+      ...(externalAuth ? { xa: true as const } : {}),
     }
 
     return jwt.sign(payload, this.config.jwtSecret, {
@@ -371,7 +401,7 @@ export class AuthService {
 
       const sessionId = crypto.randomUUID()
       const tenantId = await this.resolveSessionTenantId(user.id, options.tenantId)
-      const token = this.createToken(tenantId ? { ...user, tenantId } : user, { sid: sessionId })
+      const token = this.createToken(tenantId ? { ...user, tenantId } : user, { sid: sessionId, externalAuth: false })
       const payload = this.readTokenPayload(token)
       if (payload?.exp) {
         await createUserSession(user.id, {
@@ -528,7 +558,7 @@ export class AuthService {
               permissions: registrationPermissions,
             })
             if (created && selfServiceRoleIds.length > 0) {
-              await this.insertUserRolesOnce(client, userId, selfServiceRoleIds)
+              await this.insertUserRolesOnce(client, userId, selfServiceRoleIds, 'creation')
             }
             return created
           })
@@ -584,7 +614,7 @@ export class AuthService {
   /**
    * 通过ID获取用户
    */
-  private async getUserById(userId: string): Promise<(User & { password_hash: string }) | null> {
+  private async getUserById(userId: string, readOnlyPermissionCheck = false): Promise<(User & { password_hash: string }) | null> {
     try {
       // 首先尝试从数据库获取
       try {
@@ -596,7 +626,7 @@ export class AuthService {
 
         if (result.rows.length > 0) {
           const row = result.rows[0] as UserRow
-          const resolved = await this.resolveRbacProfile(row.id, row.role, Array.isArray(row.permissions) ? row.permissions : [])
+          const resolved = await this.resolveRbacProfile(row.id, row.role, Array.isArray(row.permissions) ? row.permissions : [], readOnlyPermissionCheck)
           return {
             id: row.id,
             email: row.email,
@@ -605,6 +635,7 @@ export class AuthService {
             name: row.name,
             role: resolved.role,
             permissions: resolved.permissions,
+            ...(resolved.permissionCheckProfileUnknown ? { permissionCheckProfileUnknown: true } : {}),
             is_active: row.is_active,
             must_change_password: row.must_change_password,
             activation_status: row.activation_status,
@@ -618,11 +649,12 @@ export class AuthService {
           }
         }
       } catch (dbError) {
+        if (readOnlyPermissionCheck) throw dbError
         this.logger.warn('Database query failed', dbError instanceof Error ? dbError : undefined)
       }
 
       // 降级：返回mock用户（非生产环境）
-      if (process.env.NODE_ENV !== 'production') {
+      if (!readOnlyPermissionCheck && process.env.NODE_ENV !== 'production') {
         return {
           id: userId,
           email: 'dev@metasheet.com',
@@ -643,6 +675,7 @@ export class AuthService {
 
       return null
     } catch (error) {
+      if (readOnlyPermissionCheck) throw error
       this.logger.error('Get user by ID error', error instanceof Error ? error : undefined)
       return null
     }
@@ -756,8 +789,32 @@ export class AuthService {
   private async resolveRbacProfile(
     userId: string,
     fallbackRole: string,
-    fallbackPermissions: string[]
-  ): Promise<{ role: string; permissions: string[] }> {
+    fallbackPermissions: string[],
+    readOnlyPermissionCheck = false,
+  ): Promise<{ role: string; permissions: string[]; permissionCheckProfileUnknown?: boolean }> {
+    if (readOnlyPermissionCheck) {
+      // A checker must never run the attendance role bootstrap or development fallback.
+      // Use strict readers so a missing schema cannot be mistaken for an empty profile.
+      const query = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
+      const lookups = strictGuardLookups(query)
+      const role = await lookups.isAdmin(userId) ? 'admin' : fallbackRole
+      const permissions = await lookups.listPermissions(userId)
+      let permissionCheckProfileUnknown = false
+      if (this.shouldBackfillAttendanceSelfService(role, permissions)) {
+        const result = await query(
+          `SELECT enabled, source FROM user_namespace_admissions
+           WHERE user_id = $1 AND namespace = $2 LIMIT 1`,
+          [userId, ATTENDANCE_SELF_SERVICE_NAMESPACE],
+        )
+        permissionCheckProfileUnknown = decideAttendanceSelfServiceBackfill({
+          supportsProductMode: supportsAttendanceSelfService(process.env.PRODUCT_MODE),
+          role,
+          permissions,
+          admission: parseAttendanceSelfServiceAdmissionRows(result.rows),
+        }) === 'bootstrap'
+      }
+      return { role, permissions, permissionCheckProfileUnknown }
+    }
     let role = fallbackRole
     let permissions = fallbackPermissions
 
@@ -882,6 +939,7 @@ export class AuthService {
     client: AliasQueryClient,
     userId: string,
     roleIds: readonly string[],
+    assignmentSource?: 'creation',
   ): Promise<number> {
     let inserted = 0
     for (const roleId of roleIds) {
@@ -891,6 +949,7 @@ export class AuthService {
         userIds: [userId],
         roleId,
         scope: { kind: 'fixed', roleIds: SELF_SERVICE_ASSIGNABLE_ROLE_IDS },
+        assignmentSource,
         executor: client,
       })
       inserted += membership.rowCount
@@ -980,6 +1039,11 @@ export class AuthService {
         this.logger.warn('Token refresh failed: not a session token')
         return null
       }
+      const sessionClass = classifyVerifiedSessionPayload(payload)
+      if (sessionClass === 'strict' || sessionClass === 'conflict') {
+        this.logger.warn('Token refresh failed: strict session is not an ordinary session')
+        return null
+      }
       const userId = this.resolveTokenUserId(payload)
       if (!userId) {
         this.logger.warn('Token refresh failed: missing user identity claim')
@@ -1015,7 +1079,7 @@ export class AuthService {
       const refreshedUser = tenantId
         ? { ...user, tenantId }
         : user
-      const refreshedToken = this.createToken(refreshedUser, { sid: sessionId })
+      const refreshedToken = this.createToken(refreshedUser, { sid: sessionId, externalAuth: false })
       const refreshedPayload = this.readTokenPayload(refreshedToken)
       if (refreshedPayload?.exp) {
         const session = await createUserSession(user.id, {

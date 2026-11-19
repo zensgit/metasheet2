@@ -35,7 +35,24 @@ export function requiredSuiteJobBody(workflow, suite) {
   }
   const matrix = [
     '    strategy:', '      fail-fast: false', '      matrix:',
-    '        node-version: [20.x]', '    steps:',
+    '        node-version: [20.x]',
+  ]
+  const permissionBrowserService = [
+    '    services:',
+    '      permission-browser-postgres:',
+    '        image: postgres:16',
+    '        env:',
+    '          POSTGRES_USER: postgres',
+    '          POSTGRES_PASSWORD: synthetic_ci_only',
+    '          POSTGRES_DB: permission_boundaries_synthetic',
+    "          POSTGRES_INITDB_ARGS: '--locale=C --encoding=UTF8'",
+    '        ports:',
+    "          - '127.0.0.1:5433:5432'",
+    '        options: >-',
+    '          --health-cmd "pg_isready -U postgres -d permission_boundaries_synthetic"',
+    '          --health-interval 5s',
+    '          --health-timeout 5s',
+    '          --health-retries 20',
   ]
   const assertHeader = (id, expected) => {
     const parts = body(id).split(/^    steps:\n/m)
@@ -46,13 +63,15 @@ export function requiredSuiteJobBody(workflow, suite) {
   }
   assertHeader('test', [
     `    needs: [${REQUIRED_SUITES.join(', ')}]`, '    if: always()',
-    '    runs-on: ubuntu-latest', '    timeout-minutes: 10', ...matrix,
+    '    runs-on: ubuntu-latest', '    timeout-minutes: 10', ...matrix, '    steps:',
   ])
   for (const id of REQUIRED_SUITES) {
     const preflight = ['contracts', 'permissions'].includes(id)
     assertHeader(id, [
       ...(preflight ? [] : ['    needs: [contracts, permissions]']),
       '    runs-on: ubuntu-22.04', `    timeout-minutes: ${preflight ? 30 : 90}`, ...matrix,
+      ...(id === 'runtime-db' ? permissionBrowserService : []),
+      '    steps:',
     ])
   }
   assert.ok(REQUIRED_SUITES.includes(suite), 'Unknown required suite')

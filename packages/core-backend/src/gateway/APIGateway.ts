@@ -12,6 +12,7 @@ import {
 } from './redis-circuit-breaker-store'
 import { getRedisClient } from '../db/redis'
 import { authService, type User } from '../auth/AuthService'
+import { classifyVerifiedSessionPayload } from '../auth/strict-dingtalk-entry'
 import { Logger } from '../core/logger'
 
 /**
@@ -457,6 +458,11 @@ export class APIGateway extends EventEmitter {
             const token = req.headers.authorization?.replace('Bearer ', '')
             if (!token) {
               return res.status(401).json({ error: 'No token provided' })
+            }
+
+            const sessionClass = classifyVerifiedSessionPayload(authService.readTokenPayload(token))
+            if (sessionClass === 'strict' || sessionClass === 'conflict') {
+              return res.status(403).json({ error: 'STRICT_SESSION_NOT_PERMITTED' })
             }
 
             const user = await authService.verifyToken(token)

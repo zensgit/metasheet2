@@ -1,0 +1,67 @@
+{
+  "boundary": "Actual AuthorizationAuditFeed.vue in isolated Vue wrapper with mocked synthetic API; not AdminAuditView integration or backend authorization",
+  "sourceSha256": "b4a9800e17c17440fd50f97a4e35d9a2d111ab186704dd0e2e1eaad3d78e9ea9",
+  "output": [
+    {
+      "mode": "allowed",
+      "renderedRows": 2,
+      "details": "{\n  \"operationKind\": \"legacy.revoke\"\n}",
+      "filename": "admin-authorization-audit.csv",
+      "csv": "source,action\nauthorization_operation,revoke\n",
+      "requests": [
+        {
+          "path": "/api/admin/audit-activity",
+          "method": "GET",
+          "query": {
+            "page": "1",
+            "pageSize": "20"
+          }
+        },
+        {
+          "path": "/api/admin/audit-activity",
+          "method": "GET",
+          "query": {
+            "q": "synthetic-actor",
+            "resourceType": "legacy-permission",
+            "action": "revoke",
+            "from": "2026-01-01",
+            "to": "2026-01-31",
+            "page": "1",
+            "pageSize": "20"
+          }
+        },
+        {
+          "path": "/api/admin/audit-activity/export.csv",
+          "method": "GET",
+          "query": {
+            "q": "synthetic-actor",
+            "resourceType": "legacy-permission",
+            "action": "revoke",
+            "from": "2026-01-01",
+            "to": "2026-01-31",
+            "limit": "5000"
+          }
+        }
+      ],
+      "external": 0,
+      "errors": 0
+    },
+    {
+      "mode": "denied",
+      "message": "synthetic actor denied",
+      "requests": [
+        {
+          "path": "/api/admin/audit-activity",
+          "method": "GET",
+          "query": {
+            "page": "1",
+            "pageSize": "20"
+          }
+        }
+      ],
+      "external": 0,
+      "errors": 0
+    }
+  ],
+  "ok": true
+}

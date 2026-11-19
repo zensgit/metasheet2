@@ -11,6 +11,7 @@ const priorEnv = {
   LOG_LEVEL: process.env.LOG_LEVEL,
   JWT_SECRET: process.env.JWT_SECRET,
   RBAC_OPTIONAL: process.env.RBAC_OPTIONAL,
+  DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED: process.env.DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED,
 }
 
 function restoreEnvKey(key: string, value: string | undefined): void {
@@ -29,10 +30,12 @@ export function restorePermissionBrowserEnv(): void {
   restoreEnvKey('LOG_LEVEL', priorEnv.LOG_LEVEL)
   restoreEnvKey('JWT_SECRET', priorEnv.JWT_SECRET)
   restoreEnvKey('RBAC_OPTIONAL', priorEnv.RBAC_OPTIONAL)
+  restoreEnvKey('DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED', priorEnv.DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED)
 }
 
 process.env.RBAC_BYPASS = 'false'
 process.env.RBAC_TOKEN_TRUST = 'false'
+process.env.DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED = 'false'
 process.env.PRODUCT_MODE = 'plm-workbench'
 process.env.NODE_ENV = process.env.NODE_ENV || 'test'
 process.env.LOG_LEVEL = process.env.LOG_LEVEL || 'error'
@@ -57,10 +60,9 @@ if (!process.env.DATABASE_URL) {
 const databaseUrl = new URL(process.env.DATABASE_URL)
 const databaseHost = databaseUrl.hostname
 const databaseName = databaseUrl.pathname.replace(/^\//, '')
-const allowedDatabases = new Set(['permission_boundaries_synthetic', 'metasheet_test'])
 if (databaseHost !== 'localhost' && databaseHost !== '127.0.0.1') {
   throw new Error('permission browser suite refuses a non-loopback DATABASE_URL')
 }
-if (!allowedDatabases.has(databaseName)) {
-  throw new Error('permission browser suite refuses a database that is not the synthetic or CI test database')
+if (databaseName !== 'permission_boundaries_synthetic') {
+  throw new Error('permission browser suite requires its dedicated synthetic database')
 }

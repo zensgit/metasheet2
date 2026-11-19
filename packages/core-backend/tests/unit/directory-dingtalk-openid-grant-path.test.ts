@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { strictLoginUninstalledRows } from '../utils/strict-login-uninstalled-fixture'
 
 /**
  * Directory page "bind + enable DingTalk login" dead end (DT-HARDEN-02 openId source).
@@ -104,7 +105,7 @@ describe('DT-HARDEN-02 grant predicate — openId source', () => {
 
 const ACCOUNT_ROW = {
   id: 'account-1',
-  integration_id: 'dir-1',
+  integration_id: '22222222-2222-4222-8222-222222222222',
   provider: 'dingtalk',
   corp_id: 'dingcorp',
   external_user_id: 'emp-1',
@@ -129,6 +130,8 @@ function installBindMocks(options: {
     query: async (sql: string, params: unknown[] = []) => {
       const statement = String(sql)
       txCalls.push({ sql: statement, params })
+      const installationRows = strictLoginUninstalledRows(statement)
+      if (installationRows !== undefined) return { rows: installationRows }
       if (/FROM directory_accounts account\s+JOIN directory_integrations integration/.test(statement)) {
         return {
           rows: [{
@@ -170,7 +173,7 @@ function installBindMocks(options: {
     })
     .mockResolvedValueOnce({
       rows: [{
-        integration_id: 'dir-1',
+        integration_id: ACCOUNT_ROW.integration_id,
         provider: 'dingtalk',
         corp_id: 'dingcorp',
         directory_account_id: 'account-1',

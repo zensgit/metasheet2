@@ -48,6 +48,7 @@ vi.mock('../../src/integrations/dingtalk/client', () => ({
 }))
 
 import { __resetDingTalkOAuthStateStoreForTests, exchangeCodeForUser } from '../../src/auth/dingtalk-oauth'
+import { strictLoginUninstalledRows } from '../utils/strict-login-uninstalled-fixture'
 
 type Call = { sql: string; params: unknown[] }
 
@@ -73,6 +74,8 @@ function installTransaction(options: {
     query: async (sql: string, params: unknown[] = []) => {
       const statement = String(sql)
       calls.push({ sql: statement, params })
+      const uninstalled = strictLoginUninstalledRows(statement)
+      if (uninstalled !== undefined) return { rows: uninstalled }
       if (/FROM users[\s\S]*FOR UPDATE/i.test(statement)) {
         return {
           rows: [{

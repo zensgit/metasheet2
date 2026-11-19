@@ -27,7 +27,10 @@ import express from 'express'
 import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { authService } from '../../src/auth/AuthService'
-import { query, transaction } from '../../src/db/pg'
+import { pool, query, transaction } from '../../src/db/pg'
+import { acquireRecoveryAuthorityLease } from '../../src/multitable/recovery-authorization-stability'
+import { RECOVERY_CONFLICT_HTTP_CODE, RECOVERY_CONFLICT_HTTP_MESSAGE } from '../../src/db/recovery-conflict'
+import { RECOVERY_AUTHORITY_TRIGGERS } from '../../src/db/migrations/zzzz20260721121000_add_recovery_authority_locks'
 import { authenticate } from '../../src/middleware/auth'
 import { rbacGuard } from '../../src/rbac/rbac'
 import { inspectUserPermissionGrants, listUserPermissions } from '../../src/rbac/service'
@@ -299,6 +302,11 @@ function rememberTemplateId(body: unknown): string {
 async function cleanupOwnedFixtures(): Promise<void> {
   const groupIds = [ownedGroupId, ...extraGroupIds].filter((id): id is string => Boolean(id))
   await transaction(async (client) => {
+    // Compatibility writes now leave mandatory receipt/audit rows for our synthetic users.
+    await client.query(`DELETE FROM authorization_operation_audit a USING authorization_operation_receipts r
+      WHERE a.actor_id=r.actor_id AND a.client_operation_id=r.client_operation_id
+        AND (r.actor_id=ANY($1::text[]) OR r.target_user_id=ANY($1::text[]))`, [ownedUserIds])
+    await client.query('DELETE FROM authorization_operation_receipts WHERE actor_id=ANY($1::text[]) OR target_user_id=ANY($1::text[])', [ownedUserIds])
     await client.query('DELETE FROM role_permissions WHERE role_id = ANY($1::text[])', [fixtureRoleIds])
     await client.query(
       `DELETE FROM user_roles
@@ -1264,4 +1272,50 @@ describe.sequential('permission lifecycle real database', () => {
       await child.stop()
     }
   }, 120_000)
+  it('preserves the recovery-conflict response for all four legacy permission writes under a real held lease', async () => {
+    const target = controlUserId
+    await query('INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,$2) ON CONFLICT DO NOTHING', [target, 'stock-prep:read'])
+    await query('UPDATE users SET permissions=$2::jsonb WHERE id=$1', [target, JSON.stringify(['stock-prep:read'])])
+    const beforeReceipts = await query('SELECT COUNT(*)::int AS n FROM authorization_operation_receipts WHERE actor_id=$1 AND target_user_id=$2', [adminId, target])
+    const originalTriggers: Array<{ table: string; trigger: string; state: string }> = []
+    const holder = await pool!.connect()
+    try {
+      for (const [table, trigger] of RECOVERY_AUTHORITY_TRIGGERS) {
+        const found = await query('SELECT tgenabled FROM pg_trigger WHERE tgrelid=to_regclass($1) AND tgname=$2', [table, trigger])
+        const state = found.rows[0]?.tgenabled
+        if (typeof state !== 'string' || !['O', 'D', 'A', 'R'].includes(state)) throw new Error('recovery trigger unavailable')
+        originalTriggers.push({ table, trigger, state })
+        await query(`ALTER TABLE ${table} ENABLE TRIGGER ${trigger}`)
+      }
+      await holder.query('BEGIN')
+      expect(await acquireRecoveryAuthorityLease((sql, params) => holder.query(sql, params), [target])).toBe('ready')
+      for (const [path, body] of [
+        ['/api/permissions/grant', { userId: target, permission: 'stock-prep:operate' }],
+        ['/api/permissions/revoke', { userId: target, permission: 'stock-prep:read' }],
+        ['/api/permissions/legacy/revoke', { userId: target, permission: 'stock-prep:read' }],
+        ['/api/admin/permission-templates/apply', { userId: target, templateId: 'attendance-employee' }],
+      ] as const) {
+        const result = await post(path, adminToken, body)
+        expect(result.status, path).toBe(409)
+        expect(result.body, path).toEqual({ ok: false, error: { code: RECOVERY_CONFLICT_HTTP_CODE, message: RECOVERY_CONFLICT_HTTP_MESSAGE, details: { retryable: true } } })
+      }
+    } finally {
+      await holder.query('ROLLBACK')
+      holder.release()
+      for (const { table, trigger, state } of originalTriggers) {
+        const setting = state === 'D' ? 'DISABLE' : state === 'A' ? 'ENABLE ALWAYS' : state === 'R' ? 'ENABLE REPLICA' : 'ENABLE'
+        await query(`ALTER TABLE ${table} ${setting} TRIGGER ${trigger}`)
+      }
+    }
+    expect((await query('SELECT COUNT(*)::int AS n FROM authorization_operation_receipts WHERE actor_id=$1 AND target_user_id=$2', [adminId, target])).rows).toEqual(beforeReceipts.rows)
+    expect((await query('SELECT permission_code FROM user_permissions WHERE user_id=$1 ORDER BY permission_code', [target])).rows).toEqual([{ permission_code: 'stock-prep:read' }])
+    expect((await query('SELECT permissions FROM users WHERE id=$1', [target])).rows[0]?.permissions).toEqual(['stock-prep:read'])
+    // Same grant after release proves the held lease, not an invalid request, caused the refusals.
+    expect((await post('/api/permissions/grant', adminToken, { userId: target, permission: 'stock-prep:operate' })).status).toBe(200)
+    const evidence = await query(`SELECT a.reason_origin FROM authorization_operation_audit a
+      JOIN authorization_operation_receipts r USING (actor_id, client_operation_id)
+      WHERE r.actor_id=$1 AND r.target_user_id=$2 AND r.action->'action'->>'kind'='direct.grant'`, [adminId, target])
+    expect(evidence.rows).toEqual([{ reason_origin: 'legacy_unprovided' }])
+  })
+
 })

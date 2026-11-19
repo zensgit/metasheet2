@@ -61,6 +61,15 @@ const GUIDANCE_BY_CODE: Readonly<Record<string, Guidance>> = Object.freeze(Objec
     'DingTalk sign-in has been turned off for this account. Ask an administrator to check it.',
   ],
 
+  strict_connection: [
+    '此登录方式当前不可用。请联系管理员核验登录授权。',
+    'This sign-in method is unavailable. Ask an administrator to check the sign-in authorization.',
+  ],
+  strict_connection_ambiguous: [
+    '暂时无法确定登录使用的企业连接。请联系管理员核查连接配置。',
+    'The enterprise connection for sign-in cannot be determined. Ask an administrator to check the connection configuration.',
+  ],
+
   // Identity conflicts
   identity_already_bound: [
     '该钉钉身份已关联其他本地账号。请联系管理员核验；不要重复绑定或新建账号。',
@@ -82,13 +91,13 @@ const GUIDANCE_BY_CODE: Readonly<Record<string, Guidance>> = Object.freeze(Objec
     '该账号的钉钉身份由目录同步管理。请联系管理员处理。',
     'This account\'s DingTalk identity is managed by directory sync. Ask an administrator to handle it.',
   ],
-  directory_managed_conflict: [
-    '当前账号的钉钉身份由目录同步管理，不能自行绑定。请联系管理员处理。',
-    'The current account\'s DingTalk identity is managed by directory sync and cannot be bound here. Ask an administrator to handle it.',
-  ],
   bind_user_mismatch: [
-    '发起绑定的账号与当前登录的账号不一致。请用发起绑定的账号登录后重新绑定。',
-    'The account that started the binding is not the account currently signed in. Sign in with that account and start the binding again.',
+    '发起绑定的账号与当前登录的账号不一致。当前未开放自行绑定，请联系管理员核实可用办理方式。',
+    'The account that started the binding is not the account currently signed in. Self-service binding is unavailable; ask an administrator about the available options.',
+  ],
+  self_service_disabled: [
+    '当前未开放自行绑定或解绑钉钉账号。请联系管理员核实可用办理方式。',
+    'Self-service DingTalk binding and unbinding are unavailable. Ask an administrator about the available options.',
   ],
   auto_provision_email_conflict: [
     '无法自动开通账号：已有使用相同邮箱的本地账号。请联系管理员核验并完成关联。',
@@ -125,6 +134,14 @@ const GUIDANCE_BY_CODE: Readonly<Record<string, Guidance>> = Object.freeze(Objec
   activate_source_ineligible: [
     '扫码的钉钉身份不符合该账号的激活条件。请联系管理员核验。',
     'The scanned DingTalk identity is not eligible to activate this account. Ask an administrator to verify it.',
+  ],
+  activate_strict_connection: [
+    '此连接不能用于扫码激活账号。请联系管理员核验账号及登录授权。',
+    'This connection cannot activate the account by scanning a code. Ask an administrator to check the account and sign-in authorization.',
+  ],
+  activate_connection_ambiguous: [
+    '暂时无法确定激活使用的企业连接。请联系管理员核查连接配置。',
+    'The enterprise connection for activation cannot be determined. Ask an administrator to check the connection configuration.',
   ],
   activate_target_not_found: [
     '要激活的账号不存在。请联系管理员核查。',

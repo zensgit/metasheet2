@@ -24,6 +24,11 @@
     <p v-if="status" class="user-admin__status" :class="{ 'user-admin__status--error': statusTone === 'error' }">
       {{ status }}
     </p>
+    <p v-if="foreignAuthorizationReceipt" class="user-admin__status user-admin__status--error" data-testid="authorization-foreign-receipt">
+      这次回执不是成员页的角色或准入变更。当前的角色和准入读取不能确认回执里的来源是否仍在。请回到
+      <router-link data-testid="authorization-foreign-receipt-link" :to="permissionSourceLocation">权限来源与例外</router-link>
+      查看。
+    </p>
     <section
       v-if="hasDirectorySyncNavigation"
       class="user-admin__status user-admin__source-banner"
@@ -510,6 +515,11 @@
             <option value="inactive">停用</option>
           </select>
         </div>
+        <MemberAdmissionListFilter
+          v-model:namespace="admissionFilterNamespace"
+          v-model:status="admissionFilterStatus"
+          :namespaces="namespaceOptions"
+        />
         <div class="user-admin__filters" role="group" aria-label="成员治理筛选">
           <button
             v-for="option in userFilterOptions"
@@ -662,6 +672,7 @@
           <div v-if="bulkConfirm" class="user-admin__confirm" role="dialog" aria-label="确认批量操作" data-testid="bulk-confirm">
             <strong>{{ bulkConfirmTitle }}</strong>
             <p>将影响 {{ selectedUserIds.length }} 人：{{ selectedUserLabels }}</p>
+            <p class="user-admin__hint" data-testid="bulk-independent-flow">{{ INDEPENDENT_BATCH_FLOW_MESSAGE }}</p>
             <div v-if="bulkConfirm === 'namespace' && bulkAdmissionPreview" data-testid="bulk-admission-preview">
               <p class="user-admin__hint">将开通插件使用「{{ bulkAdmissionPreview.namespace }}」。不改变这些用户的角色，也不写入直接权限。</p>
               <p v-for="target in bulkAdmissionPreview.targets" :key="target.userId" class="user-admin__hint" data-testid="bulk-admission-target">
@@ -700,6 +711,7 @@
         <div v-if="reimportOpen" class="user-admin__confirm" role="dialog" aria-label="导入更新" data-testid="reimport-dialog">
           <strong>导入更新</strong>
           <p class="user-admin__hint">按用户 ID 或邮箱匹配。先看差异，再写入。部门是文本字段；考勤组不在这里改。</p>
+          <p class="user-admin__hint" data-testid="reimport-independent-flow">{{ INDEPENDENT_BATCH_FLOW_MESSAGE }}</p>
           <input type="file" accept=".csv,.xlsx,text/csv" data-testid="reimport-file" @change="void onReimportFile($event)" />
           <div v-for="row in reimportPreview" :key="row.index" class="user-admin__hint">
             {{ row.email || row.userId }}：{{ row.message }}<template v-if="row.changes.length">（{{ row.changes.map((change) => `${change.field} ${change.before || '空'} → ${change.after || '空'}`).join('；') }}）</template>
@@ -753,6 +765,7 @@
           <label class="user-admin__user-select">
             <input
               :checked="selectedUserIdSet.has(user.id)"
+              :disabled="loading && admissionFilterStatus !== ''"
               type="checkbox"
               :aria-label="`选择 ${user.name || formatManagedUserLabel(user)}`"
               @change="void handleUserSelectionChange(user.id, $event)"
@@ -767,7 +780,15 @@
                 <span>{{ formatManagedUserIdentifier(user) }}</span>
               </span>
             </span>
-            <span class="user-admin__meta">{{ user.role }}</span>
+            <span class="user-admin__meta">
+              {{ user.roleIds?.length ? user.roleIds.map(roleIdTitle).join('、') : user.role }}
+              <small v-if="user.enabledAdmissionNamespaces" class="user-admin__hint" data-testid="member-list-admission-summary">
+                插件准入：{{ user.enabledAdmissionNamespaces.join('、') || '未开通' }}
+              </small>
+              <small v-if="user.lastAdmissionChangedAt" class="user-admin__hint">
+                准入更新：{{ formatDate(user.lastAdmissionChangedAt) }}
+              </small>
+            </span>
             <span class="user-admin__row-badges">
               <span class="user-admin__row-badge" :class="{ 'user-admin__row-badge--success': user.is_active, 'user-admin__row-badge--danger': !user.is_active }">
                 {{ user.is_active ? '账号启用' : '账号停用' }}
@@ -909,8 +930,8 @@
             <h3>角色</h3>
             <p class="user-admin__hint">已分配的角色显示在这里。</p>
             <div class="user-admin__chips">
-              <span v-for="role in access.roles" :key="role" class="user-admin__chip">
-                {{ roleIdTitle(role) }}
+              <span v-for="role in access.roles" :key="role" class="user-admin__chip" data-testid="assigned-role">
+                {{ roleIdTitle(role) }} · {{ roleAssignmentLabel(role) }}
               </span>
               <span v-if="access.roles.length === 0" class="user-admin__empty">未分配角色</span>
             </div>
@@ -925,13 +946,29 @@
                   {{ roleTitleFromCatalog(role) }} ({{ role.id }})
                 </option>
               </select>
-              <button class="user-admin__button" type="button" data-testid="assign-role-button" :disabled="busy || !roleSnapshotReady || !selectedRoleId" @click="void assignRole()">
+              <button class="user-admin__button" type="button" data-testid="assign-role-button" :disabled="busy || authorizationPanelHeld || !roleSnapshotReady || !selectedRoleId" @click="void assignRole()">
                 分配角色
               </button>
-              <button class="user-admin__button user-admin__button--secondary" type="button" data-testid="unassign-role-button" :disabled="busy || !roleSnapshotReady || !selectedRoleId" @click="void unassignRole()">
+              <button class="user-admin__button user-admin__button--secondary" type="button" data-testid="unassign-role-button" :disabled="busy || authorizationPanelHeld || !roleSnapshotReady || !selectedRoleId" @click="void unassignRole()">
                 撤销角色
               </button>
             </div>
+            <div v-if="roleAssignAdmissionOffer.known && roleAssignAdmissionOffer.namespaces.length > 0" data-testid="role-assign-admissions">
+              <p class="user-admin__hint">可选插件使用来自这个角色报告的范围，默认都不开通。勾选后和角色一起提交。</p>
+              <label v-for="namespace in roleAssignAdmissionOffer.namespaces" :key="namespace" class="user-admin__hint">
+                <input
+                  data-testid="role-assign-admission"
+                  type="checkbox"
+                  :checked="roleAssignAdmissionNamespaces.includes(namespace)"
+                  :disabled="authorizationPanelHeld || authorizationBusy"
+                  @change="toggleRoleAssignAdmission(namespace, $event)"
+                />
+                {{ namespace }}
+              </label>
+            </div>
+            <p v-else-if="selectedRoleId && !roleAssignAdmissionOffer.known" class="user-admin__hint" data-testid="role-assign-admissions-unknown">
+              所选角色没有报告可开通的插件范围。未列出的范围不会开通。
+            </p>
             <p data-testid="selected-role-membership" class="user-admin__hint">{{ selectedRoleMembership.text }}</p>
             <p
               v-if="roleActionFeedback"
@@ -1110,10 +1147,10 @@
                 </div>
                 <p>只有角色和开通状态同时满足时，成员才能使用对应插件。</p>
                 <div class="user-admin__role-actions">
-                  <button class="user-admin__button" type="button" :disabled="busy || admission.enabled" @click="void updateNamespaceAdmission(admission, true)">
+                  <button class="user-admin__button" type="button" :disabled="busy || authorizationPanelHeld || admission.enabled" @click="void updateNamespaceAdmission(admission, true)">
                     开通插件使用
                   </button>
-                  <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="busy || !admission.enabled" @click="void updateNamespaceAdmission(admission, false)">
+                  <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="busy || authorizationPanelHeld || !admission.enabled" @click="void updateNamespaceAdmission(admission, false)">
                     关闭插件使用
                   </button>
                 </div>
@@ -1167,7 +1204,7 @@
                 class="user-admin__button"
                 type="button"
                 data-testid="promote-platform-admin-button"
-                :disabled="busy || !roleSnapshotReady || hasPlatformAdminAccess"
+                :disabled="busy || authorizationPanelHeld || !roleSnapshotReady || hasPlatformAdminAccess"
                 @click="void updateNamedRole('admin', true)"
               >
                 提升为平台管理员
@@ -1176,7 +1213,7 @@
                 class="user-admin__button user-admin__button--secondary"
                 type="button"
                 data-testid="revoke-platform-admin-button"
-                :disabled="busy || !roleSnapshotReady || !hasPlatformAdminAccess"
+                :disabled="busy || authorizationPanelHeld || !roleSnapshotReady || !hasPlatformAdminAccess"
                 @click="void updateNamedRole('admin', false)"
               >
                 取消平台管理员
@@ -1185,7 +1222,7 @@
                 class="user-admin__button"
                 type="button"
                 data-testid="enable-attendance-admin-button"
-                :disabled="busy || !roleSnapshotReady || hasAttendanceAdminAccess"
+                :disabled="busy || authorizationPanelHeld || !roleSnapshotReady || hasAttendanceAdminAccess"
                 @click="void updateNamedRole('attendance_admin', true)"
               >
                 开通考勤管理员
@@ -1194,7 +1231,7 @@
                 class="user-admin__button user-admin__button--secondary"
                 type="button"
                 data-testid="disable-attendance-admin-button"
-                :disabled="busy || !roleSnapshotReady || !hasAttendanceAdminAccess"
+                :disabled="busy || authorizationPanelHeld || !roleSnapshotReady || !hasAttendanceAdminAccess"
                 @click="void updateNamedRole('attendance_admin', false)"
               >
                 关闭考勤管理员
@@ -1391,14 +1428,21 @@
       :draft="authorizationDraft"
       :phrase="authorizationPhrase"
       :busy="authorizationBusy"
+      :phase="dialogPhase"
+      :impact="dialogImpact"
+      :outcome-text="authorizationOutcomeText"
+      :allow-read-again="!authorizationDetached"
       @update:phrase="authorizationPhrase = $event"
       @confirm="void confirmAuthorization()"
       @cancel="cancelAuthorization()"
+      @close="closeAuthorizationPanel()"
+      @read-again="void rereadAuthorization()"
     />
   </section>
 </template>
 
 <script setup lang="ts">
+import MemberAdmissionListFilter from '../components/MemberAdmissionListFilter.vue'
 import {
   buildImportTemplateCsv,
   buildUpdateExportCsv,
@@ -1413,6 +1457,7 @@ import {
 import { copyText } from '../utils/clipboard'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAuth } from '../composables/useAuth'
+import { useAdminAuthorizationOperation } from '../composables/useAdminAuthorizationOperation'
 import { useLocale } from '../composables/useLocale'
 import { userRecycleLabel, type UserRecycleLabelKey } from './userRecycleLabels'
 import { sanitizeCsvCell, sanitizeCsvRow } from '../utils/csvFormulaCell'
@@ -1421,31 +1466,47 @@ import { subscribeToLocationChanges } from '../utils/browserLocation'
 import { describeCreateUserError, getCreateUserRuleHints } from '../utils/createUserValidationCopy'
 import {
   accessReadStillCurrent,
-  describeRoleMembershipWrite,
   nextAccessReadGeneration,
-  roleWriteOutcomeFromPayload,
   selectedRoleMembershipHint,
   userAccessSnapshotMatches,
-  type RoleMembershipSnapshot,
-  type RoleMembershipWriteOutcome,
 } from './adminUserRoleAction'
 import AdminAuthorizationConfirmDialog from './AdminAuthorizationConfirmDialog.vue'
 import {
+  AUTHORIZATION_FORBIDDEN_MESSAGE,
+  AUTHORIZATION_MEMBER_CHANGED_MESSAGE,
+  AUTHORIZATION_NOT_CHECKED_MESSAGE,
+  AUTHORIZATION_PENDING_MESSAGE,
+  AUTHORIZATION_PREVIEW_FAILED_MESSAGE,
+  AUTHORIZATION_PRINCIPAL_CHANGED_MESSAGE,
+  AUTHORIZATION_PRINCIPAL_MISSING_MESSAGE,
+  INDEPENDENT_BATCH_FLOW_MESSAGE,
   LAST_PLATFORM_ADMIN_MESSAGE,
   PLATFORM_ADMIN_AUTHORITY_NOTE,
   PLATFORM_ADMIN_REMOVAL_PHRASE,
   ROLE_VERSION_MISMATCH_MESSAGE,
+  AUTHORIZATION_FOREIGN_RECEIPT_MESSAGE,
   adminAuthorizationStillCurrent,
   admissionChangesForRevoke,
+  authorizationLiveReadAgrees,
+  memberPageCanVerifyAction,
   describeAdmissionChange,
+  describeVerifiedAuthorization,
+  buildAdmissionDisableAuthorization,
   buildAdmissionEnableAuthorization,
   buildCreateUserAuthorization,
+  buildRecoveredAuthorizationDraft,
   buildRoleMembershipAuthorization,
   catalogPermissionCodesForRoles,
   readAdmissionNamespaceFact,
   readExplicitNamespaceAdmissionCapability,
 } from './AdminAuthorizationConfirm'
-import type { AdminAuthorizationDraft } from './AdminAuthorizationConfirm'
+import type { AdminAuthorizationDraft, ReadableAuthorizationImpact } from './AdminAuthorizationConfirm'
+import type { AdminAuthorizationOperationPhase } from '../composables/useAdminAuthorizationOperation'
+import type {
+  AdminAuthorizationRequest,
+  AdminAuthorizationTransportRequest,
+  AdminAuthorizationTransportResponse,
+} from '../utils/adminAuthorizationOperation'
 import { presentPermission, presentRoleTitle } from './builtinCatalogPresentation'
 import {
   ADMIN_TEMPORARY_PASSWORD_RULE_HINT,
@@ -1483,6 +1544,8 @@ type ManagedUser = {
   dingtalkCorpId?: string | null
   lastDirectorySyncAt?: string | null
   businessRoleCount?: number
+  enabledAdmissionNamespaces?: string[]
+  lastAdmissionChangedAt?: string | null
 }
 
 type RoleCatalogItem = {
@@ -1497,6 +1560,7 @@ type RoleCatalogItem = {
 type UserAccess = {
   user: ManagedUser
   roles: string[]
+  roleAssignments?: unknown
   permissions: string[]
   isAdmin: boolean
 }
@@ -1742,7 +1806,8 @@ type InitialUserNavigation = {
   directoryFailure: string
 }
 
-const { hasAdminAccess } = useAuth()
+const auth = useAuth()
+const { hasAdminAccess } = auth
 
 const adminAllowed = hasAdminAccess()
 const loading = ref(false)
@@ -1873,6 +1938,8 @@ const inviteStatusFilter = ref<'pending' | 'all'>('pending')
 const detailOpen = ref(false)
 const rowMenuUserId = ref('')
 const roleFilter = ref('')
+const admissionFilterNamespace = ref('')
+const admissionFilterStatus = ref<'' | 'enabled' | 'disabled'>('')
 const accountStatusFilter = ref<'' | 'active' | 'inactive'>('')
 const sortKey = ref<'' | 'name' | 'role' | 'status' | 'lastLogin'>('')
 const sortDir = ref<'asc' | 'desc'>('asc')
@@ -1918,6 +1985,52 @@ const createAdmissionNamespaces = ref<string[]>([])
 const authorizationDraft = ref<AdminAuthorizationDraft | null>(null)
 const authorizationPhrase = ref('')
 const authorizationBusy = ref(false)
+const authorizationPanelHeld = ref(false)
+const authorizationDetached = ref(false)
+const authorizationOutcomeText = ref('')
+const roleAssignAdmissionNamespaces = ref<string[]>([])
+const suppressRecovery = ref(false)
+const foreignAuthorizationReceipt = ref(false)
+const submittedRequest = ref<AdminAuthorizationRequest | null>(null)
+let authorizationFaultCode = ''
+let authorizationVerifying = false
+
+function currentPrincipalId(): string {
+  const reader = auth.getCurrentUser
+  if (typeof reader !== 'function') return ''
+  const user = reader()
+  if (!user || typeof user !== 'object') return ''
+  const id = (user as { id?: unknown }).id
+  return typeof id === 'string' ? id.trim() : ''
+}
+
+let authorizationPrincipalSeen = ''
+
+async function authorizationTransport(
+  request: AdminAuthorizationTransportRequest,
+): Promise<AdminAuthorizationTransportResponse> {
+  const response = await apiFetch(request.path, {
+    method: request.method,
+    body: request.body === undefined ? undefined : JSON.stringify(request.body),
+    signal: request.signal,
+  })
+  const body = await readJson(response)
+  if (
+    request.method === 'POST'
+    && (response.status === 400 || response.status === 403 || response.status === 404 || response.status === 409 || response.status >= 500)
+  ) {
+    authorizationFaultCode = readErrorCode(body)
+  }
+  return { status: response.status, body }
+}
+
+const authorizationOperation = useAdminAuthorizationOperation({
+  transport: authorizationTransport,
+  getPrincipalId: () => currentPrincipalId(),
+  getTargetId: () => selectedUserId.value.trim(),
+  verifyLive: () => verifyAuthorizationLive(),
+})
+authorizationPrincipalSeen = currentPrincipalId()
 const userAccessReadGeneration = ref(0)
 const selectedRoleId = ref('')
 const roleActionFeedback = ref<{ tone: 'info' | 'error'; message: string } | null>(null)
@@ -1946,6 +2059,18 @@ const managementScopeLocation = computed(() => {
 
 function roleTitleFromCatalog(role: { id: string; name: string }): string {
   return presentRoleTitle(role)
+}
+
+function roleAssignmentLabel(roleId: string): string {
+  const assignments = access.value?.roleAssignments
+  if (!Array.isArray(assignments)) return '来源未记录'
+  const records = assignments.filter((entry) => (
+    entry !== null && typeof entry === 'object' && entry.roleId === roleId
+  ))
+  if (records.length !== 1) return '来源未记录'
+  if (records[0].source === 'manual') return '手动分配'
+  if (records[0].source === 'creation') return '创建时联动'
+  return '来源未记录'
 }
 
 function roleIdTitle(roleId: string): string {
@@ -2191,6 +2316,25 @@ const userFilterOptions = [
   { value: 'platform-admin', label: '平台管理员' },
 ] as const
 const roleSnapshotReady = computed(() => userAccessSnapshotMatches(access.value, selectedUserId.value))
+const roleAssignAdmissionOffer = computed(() => {
+  const roleId = selectedRoleId.value.trim()
+  if (!roleId) return { known: true, namespaces: [] as string[] }
+  const role = catalogRole(roleId)
+  if (!role || !Object.prototype.hasOwnProperty.call(role, 'admissionNamespaces')) {
+    return { known: false, namespaces: [] as string[] }
+  }
+  return readAdmissionNamespaceFact(role.admissionNamespaces)
+})
+const dialogPhase = computed<AdminAuthorizationOperationPhase | undefined>(() => {
+  const draft = authorizationDraft.value
+  if (!draft || draft.kind === 'create-user') return undefined
+  if (authorizationDetached.value) return 'committed'
+  return authorizationOperation.phase.value
+})
+const dialogImpact = computed<ReadableAuthorizationImpact | null>(() => {
+  if (!dialogPhase.value) return null
+  return authorizationOperation.impact.value
+})
 const hasPlatformAdminAccess = computed(() => {
   if (!access.value) return false
   return access.value.roles.includes('admin') || access.value.user.role === 'admin' || access.value.user.is_admin
@@ -2768,11 +2912,16 @@ function clearSelectionForCriteriaChange(): void {
 
 async function selectVisibleUsers(): Promise<void> {
   const version = selectionFilterVersion
-  const pageAlreadyComplete = userTotal.value > 0 && users.value.length >= userTotal.value
-  const collected = pageAlreadyComplete ? displayedUsers.value : await collectFilteredUsers(version)
-  if (version !== selectionFilterVersion) return
-  rememberUsers(collected)
-  selectedUserIds.value = collected.map((user) => user.id)
+  try {
+    const pageAlreadyComplete = userTotal.value > 0 && users.value.length >= userTotal.value
+    const collected = pageAlreadyComplete ? displayedUsers.value : await collectFilteredUsers(version)
+    if (version !== selectionFilterVersion) return
+    rememberUsers(collected)
+    selectedUserIds.value = collected.map((user) => user.id)
+  } catch (error) {
+    if (version !== selectionFilterVersion) return
+    setStatus(error instanceof Error ? error.message : '加载筛选成员失败', 'error')
+  }
 }
 
 function toggleUserSelection(userId: string, checked: boolean): void {
@@ -3121,6 +3270,10 @@ function normalizeManagedUser(item: ManagedUser): ManagedUser {
     dingtalkCorpId: item.dingtalkCorpId ?? null,
     lastDirectorySyncAt: item.lastDirectorySyncAt ?? null,
     businessRoleCount: item.businessRoleCount ?? 0,
+    enabledAdmissionNamespaces: Array.isArray(item.enabledAdmissionNamespaces)
+      ? item.enabledAdmissionNamespaces.filter((namespace) => typeof namespace === 'string' && namespace.trim() !== '')
+      : undefined,
+    lastAdmissionChangedAt: typeof item.lastAdmissionChangedAt === 'string' ? item.lastAdmissionChangedAt : null,
   }
 }
 
@@ -3133,7 +3286,14 @@ function buildUserListParams(pageNumber: number, size: number, withMeta: boolean
   params.set('q', search.value)
   params.set('page', String(pageNumber))
   params.set('pageSize', String(size))
-  if (withMeta) params.set('meta', '1')
+  if (withMeta) {
+    params.set('meta', '1')
+    params.set('includeAdmissionSummary', '1')
+  }
+  if (admissionFilterNamespace.value && admissionFilterStatus.value) {
+    params.set('admissionNamespace', admissionFilterNamespace.value)
+    params.set('admissionStatus', admissionFilterStatus.value)
+  }
   if (roleFilter.value) params.set('role', roleFilter.value)
   if (accountStatusFilter.value) params.set('accountStatus', accountStatusFilter.value)
   if (userListFilter.value !== 'all') params.set('listFilter', userListFilter.value)
@@ -3144,6 +3304,16 @@ function buildUserListParams(pageNumber: number, size: number, withMeta: boolean
   const pinUserId = userNavigation.value.userId.trim()
   if (pinUserId) params.set('userId', pinUserId)
   return params
+}
+
+function assertAppliedAdmissionFilter(params: URLSearchParams, value: unknown): void {
+  const namespace = params.get('admissionNamespace')
+  if (!namespace) return
+  const status = params.get('admissionStatus')
+  const filter = value as { namespace?: unknown; status?: unknown } | null | undefined
+  if (filter?.namespace !== namespace || filter.status !== status) {
+    throw new Error('服务器未确认插件准入筛选，请清除筛选或更新服务后重试。')
+  }
 }
 
 function readUserListSummary(value: unknown): typeof serverSummary.value {
@@ -3194,7 +3364,9 @@ async function fetchUserListPage(pageNumber: number, size: number, withMeta: boo
     total?: number
     roleOptions?: unknown
     summary?: unknown
+    appliedAdmissionFilter?: unknown
   } | undefined
+  assertAppliedAdmissionFilter(params, data?.appliedAdmissionFilter)
   const items = Array.isArray(data?.items) ? data.items.map((item) => normalizeManagedUser(item)) : []
   return {
     items,
@@ -3243,7 +3415,9 @@ async function loadUsers(): Promise<void> {
       total?: number
       roleOptions?: unknown
       summary?: unknown
+      appliedAdmissionFilter?: unknown
     } | undefined
+    assertAppliedAdmissionFilter(params, data?.appliedAdmissionFilter)
     const items = Array.isArray(data?.items) ? data.items.map((item) => normalizeManagedUser(item)) : []
     users.value = items
     userTotal.value = typeof data?.total === 'number' ? data.total : items.length
@@ -3277,6 +3451,12 @@ async function loadUsers(): Promise<void> {
     }
   } catch (error) {
     if (generation !== userListGeneration) return
+    if (admissionFilterNamespace.value && admissionFilterStatus.value) {
+      users.value = []
+      userTotal.value = 0
+      clearSelectionForCriteriaChange()
+      clearStaleUserSelection()
+    }
     setStatus(error instanceof Error ? error.message : '加载用户失败', 'error')
   } finally {
     if (generation === userListGeneration) loading.value = false
@@ -3404,7 +3584,12 @@ async function fetchUserAccessOrThrow(userId: string): Promise<UserAccess> {
 }
 
 async function selectUser(userId: string): Promise<void> {
-  clearAuthorization()
+  if (authorizationPanelHeld.value) {
+    if (selectedUserId.value && selectedUserId.value !== userId) markAuthorizationDetached('member')
+  } else {
+    suppressRecovery.value = false
+    clearAuthorization()
+  }
   const generation = nextAccessReadGeneration(userAccessReadGeneration.value)
   userAccessReadGeneration.value = generation
   selectedUserId.value = userId
@@ -3745,6 +3930,7 @@ function buildLiveCreateDraft(): AdminAuthorizationDraft {
 
 function buildLiveMembershipDraft(draft: AdminAuthorizationDraft): AdminAuthorizationDraft | null {
   if (!access.value || access.value.user.id !== draft.targetUserId) return null
+  if (draft.kind !== 'assign-role' && draft.kind !== 'unassign-role') return null
   const action = draft.kind === 'assign-role' ? 'assign' : 'unassign'
   const role = catalogRole(draft.roleId)
   const permissions = membershipPermissionFact(draft.roleId)
@@ -3761,27 +3947,32 @@ function buildLiveMembershipDraft(draft: AdminAuthorizationDraft): AdminAuthoriz
     heldRolesKnown: true,
     namespacesByRoleId: namespacesByRoleId(),
     dropdownRoleId: selectedRoleId.value,
+    ...(action === 'assign' ? { openedAdmissionNamespaces: draft.admissionNamespaces } : {}),
   })
 }
 
 function buildLiveAdmissionDraft(draft: AdminAuthorizationDraft): AdminAuthorizationDraft | null {
   if (!access.value || access.value.user.id !== draft.targetUserId) return null
   const namespace = draft.admissionNamespaces[0] || ''
-  return buildAdmissionEnableAuthorization({
+  const shared = {
     userId: draft.targetUserId,
     userName: userDisplayName(access.value.user),
     namespace,
     roleIds: access.value.roles,
     catalogPermissionsByRoleId: catalogPermissionsByRoleId(),
     dropdownRoleId: selectedRoleId.value,
-  })
+  }
+  if (draft.kind === 'disable-admission') return buildAdmissionDisableAuthorization(shared)
+  return buildAdmissionEnableAuthorization(shared)
 }
 
 function liveAuthorizationFingerprint(): string {
   const draft = authorizationDraft.value
   if (!draft) return ''
   if (draft.kind === 'create-user') return buildLiveCreateDraft().fingerprint
-  if (draft.kind === 'enable-admission') return buildLiveAdmissionDraft(draft)?.fingerprint || ''
+  if (draft.kind === 'enable-admission' || draft.kind === 'disable-admission') {
+    return buildLiveAdmissionDraft(draft)?.fingerprint || ''
+  }
   return buildLiveMembershipDraft(draft)?.fingerprint || ''
 }
 
@@ -3791,17 +3982,18 @@ function clearAuthorization(): void {
 }
 
 function cancelAuthorization(): void {
-  if (authorizationBusy.value) return
+  if (authorizationBusy.value || authorizationPanelHeld.value) return
   clearAuthorization()
 }
 
 function clearStaleUserSelection(): void {
   userAccessReadGeneration.value = nextAccessReadGeneration(userAccessReadGeneration.value)
+  if (authorizationPanelHeld.value && selectedUserId.value) markAuthorizationDetached('member')
   selectedUserId.value = ''
   access.value = null
   detailOpen.value = false
   roleActionFeedback.value = null
-  clearAuthorization()
+  if (!authorizationPanelHeld.value) clearAuthorization()
 }
 
 function readErrorCode(payload: Record<string, unknown>): string {
@@ -3832,14 +4024,64 @@ function requestCreateUser(): void {
   authorizationDraft.value = buildLiveCreateDraft()
 }
 
-function requestRoleMembership(action: 'assign' | 'unassign', roleId: string): void {
+function checkedRoleAssignNamespaces(): string[] {
+  const allowed = new Set(roleAssignAdmissionOffer.value.namespaces)
+  return roleAssignAdmissionNamespaces.value.filter((namespace) => allowed.has(namespace))
+}
+
+function atomicRequestForDraft(draft: AdminAuthorizationDraft): AdminAuthorizationRequest | null {
+  if (draft.kind === 'assign-role' || draft.kind === 'unassign-role') {
+    return {
+      targetUserId: draft.targetUserId,
+      action: {
+        kind: draft.kind === 'assign-role' ? 'role.assign' : 'role.revoke',
+        roleId: draft.roleId,
+      },
+      admissionChanges: draft.kind === 'assign-role'
+        ? draft.admissionNamespaces.map((namespace) => ({ namespace, enabled: true }))
+        : [],
+    }
+  }
+  if (draft.kind !== 'enable-admission' && draft.kind !== 'disable-admission') return null
+  const namespace = draft.admissionNamespaces[0]?.trim() || ''
+  if (!namespace) return null
+  return {
+    targetUserId: draft.targetUserId,
+    action: { kind: 'admission.set' },
+    admissionChanges: [{ namespace, enabled: draft.kind === 'enable-admission' }],
+  }
+}
+
+function beginAtomicDraft(draft: AdminAuthorizationDraft): void {
+  const request = atomicRequestForDraft(draft)
+  if (!request) return
+  authorizationOutcomeText.value = ''
+  authorizationPhrase.value = ''
+  authorizationFaultCode = ''
+  submittedRequest.value = null
+  authorizationDraft.value = draft
+  void previewAtomic(request)
+}
+
+function requestRoleMembership(
+  action: 'assign' | 'unassign',
+  roleId: string,
+  openedAdmissionNamespaces?: readonly string[],
+): void {
+  if (authorizationPanelHeld.value || authorizationDetached.value) return
   if (!access.value || !roleSnapshotReady.value || busy.value || authorizationBusy.value) return
   const requestedRoleId = roleId.trim()
   if (!requestedRoleId) return
+  if (!currentPrincipalId()) {
+    setStatus(AUTHORIZATION_PRINCIPAL_MISSING_MESSAGE, 'error')
+    return
+  }
   const role = catalogRole(requestedRoleId)
   const permissions = membershipPermissionFact(requestedRoleId)
-  authorizationPhrase.value = ''
-  authorizationDraft.value = buildRoleMembershipAuthorization({
+  const opened = action === 'assign'
+    ? [...(openedAdmissionNamespaces ?? checkedRoleAssignNamespaces())]
+    : undefined
+  beginAtomicDraft(buildRoleMembershipAuthorization({
     action,
     userId: access.value.user.id,
     userName: userDisplayName(access.value.user),
@@ -3852,24 +4094,42 @@ function requestRoleMembership(action: 'assign' | 'unassign', roleId: string): v
     heldRolesKnown: true,
     namespacesByRoleId: namespacesByRoleId(),
     dropdownRoleId: selectedRoleId.value,
-  })
+    ...(opened !== undefined ? { openedAdmissionNamespaces: opened } : {}),
+  }))
 }
 
 function requestAdmissionEnable(admission: NamespaceAdmission): void {
+  if (authorizationPanelHeld.value || authorizationDetached.value) return
   if (!access.value || busy.value || authorizationBusy.value) return
-  authorizationPhrase.value = ''
-  authorizationDraft.value = buildAdmissionEnableAuthorization({
+  if (!currentPrincipalId()) {
+    setStatus(AUTHORIZATION_PRINCIPAL_MISSING_MESSAGE, 'error')
+    return
+  }
+  beginAtomicDraft(buildAdmissionEnableAuthorization({
     userId: access.value.user.id,
     userName: userDisplayName(access.value.user),
     namespace: admission.namespace,
     roleIds: access.value.roles,
     catalogPermissionsByRoleId: catalogPermissionsByRoleId(),
     dropdownRoleId: selectedRoleId.value,
-  })
+  }))
 }
 
-function admissionReadStillCurrent(generation: number, userId: string): boolean {
-  return accessReadStillCurrent(generation, userAccessReadGeneration.value, userId, selectedUserId.value)
+function requestAdmissionDisable(admission: NamespaceAdmission): void {
+  if (authorizationPanelHeld.value || authorizationDetached.value) return
+  if (!access.value || busy.value || authorizationBusy.value) return
+  if (!currentPrincipalId()) {
+    setStatus(AUTHORIZATION_PRINCIPAL_MISSING_MESSAGE, 'error')
+    return
+  }
+  beginAtomicDraft(buildAdmissionDisableAuthorization({
+    userId: access.value.user.id,
+    userName: userDisplayName(access.value.user),
+    namespace: admission.namespace,
+    roleIds: access.value.roles,
+    catalogPermissionsByRoleId: catalogPermissionsByRoleId(),
+    dropdownRoleId: selectedRoleId.value,
+  }))
 }
 
 function memberAdmissionFromData(data: Record<string, unknown> | undefined): MemberAdmission {
@@ -3889,62 +4149,10 @@ async function readMemberAdmissionOrThrow(userId: string): Promise<MemberAdmissi
   return memberAdmissionFromData(payload.data as Record<string, unknown> | undefined)
 }
 
-async function commitNamespaceAdmission(userId: string, namespace: string, enabled: boolean): Promise<void> {
-  const generation = userAccessReadGeneration.value
-  try {
-    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}/namespaces/${encodeURIComponent(namespace)}/admission`, {
-      method: 'PATCH',
-      body: JSON.stringify({ enabled }),
-    })
-    const payload = await readJson(response)
-    if (!admissionReadStillCurrent(generation, userId)) return
-    if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '更新插件使用准入失败'))
-    }
-
-    const admission = await readMemberAdmissionOrThrow(userId)
-    if (!admissionReadStillCurrent(generation, userId)) return
-    const readBack = admission.namespaceAdmissions.find((item) => item.namespace === namespace)
-    if (!readBack || readBack.enabled !== enabled) {
-      memberAdmission.value = admission
-      access.value = null
-      setStatus(enabled
-        ? `插件使用回读未显示「${namespace}」已开通，本次未记为成功。`
-        : `插件使用回读未显示「${namespace}」已关闭，本次未记为成功。`, 'error')
-      return
-    }
-
-    const snapshot = await fetchUserAccessOrThrow(userId)
-    if (!admissionReadStillCurrent(generation, userId)) return
-    if (!userAccessSnapshotMatches(snapshot, userId)) {
-      memberAdmission.value = admission
-      access.value = null
-      setStatus('生效权限回读与当前用户不一致，本次插件使用未记为成功。', 'error')
-      return
-    }
-    memberAdmission.value = admission
-    access.value = snapshot
-    syncProfileDraftFromAccess()
-    setStatus(enabled ? `已开通 ${namespace} 插件使用` : `已关闭 ${namespace} 插件使用`)
-  } catch (error) {
-    if (!admissionReadStillCurrent(generation, userId)) return
-    access.value = null
-    setStatus(error instanceof Error ? error.message : '更新插件使用准入失败', 'error')
-  }
-}
-
-async function updateNamespaceAdmission(admission: NamespaceAdmission, enabled: boolean): Promise<void> {
-  if (!access.value || busy.value || authorizationBusy.value) return
-  if (enabled) {
-    requestAdmissionEnable(admission)
-    return
-  }
-  busy.value = true
-  try {
-    await commitNamespaceAdmission(access.value.user.id, admission.namespace, false)
-  } finally {
-    busy.value = false
-  }
+function updateNamespaceAdmission(admission: NamespaceAdmission, enabled: boolean): void {
+  if (!access.value || busy.value || authorizationBusy.value || authorizationPanelHeld.value) return
+  if (enabled) requestAdmissionEnable(admission)
+  else requestAdmissionDisable(admission)
 }
 
 async function updateDingTalkGrant(enabled: boolean): Promise<void> {
@@ -4448,119 +4656,277 @@ async function revokeSingleSession(sessionId: string): Promise<void> {
   }
 }
 
-function finishRoleWrite(
-  generation: number,
-  requestedUserId: string,
-  outcome: RoleMembershipWriteOutcome,
-  snapshot: RoleMembershipSnapshot | null,
-): boolean {
-  const stillCurrent = accessReadStillCurrent(
-    generation,
-    userAccessReadGeneration.value,
-    requestedUserId,
-    selectedUserId.value,
-  )
-  if (!stillCurrent) {
-    if (selectedUserId.value !== requestedUserId) {
-      roleActionFeedback.value = { tone: outcome.tone, message: outcome.message }
-      setStatus(outcome.message, outcome.tone)
-    }
+function publishAuthorizationMessage(message: string, tone: 'info' | 'error'): void {
+  authorizationOutcomeText.value = message
+  roleActionFeedback.value = { tone, message }
+  setStatus(message, tone)
+}
+
+function markAuthorizationDetached(reason: 'member' | 'principal'): void {
+  authorizationDetached.value = true
+  authorizationOutcomeText.value = reason === 'principal'
+    ? AUTHORIZATION_PRINCIPAL_CHANGED_MESSAGE
+    : AUTHORIZATION_MEMBER_CHANGED_MESSAGE
+}
+
+async function verifyAuthorizationLive(): Promise<boolean> {
+  if (authorizationDetached.value) return false
+  const principal = currentPrincipalId()
+  if (!principal) return false
+  const receipt = authorizationOperation.receipt.value
+  if (!receipt || selectedUserId.value !== receipt.targetUserId) return false
+  const generation = userAccessReadGeneration.value
+  const targetId = receipt.targetUserId
+  let snapshot: UserAccess
+  let admission: MemberAdmission
+  try {
+    snapshot = await fetchUserAccessOrThrow(targetId)
+    admission = await readMemberAdmissionOrThrow(targetId)
+  } catch {
     return false
   }
-
-  roleActionFeedback.value = { tone: outcome.tone, message: outcome.message }
-  setStatus(outcome.message, outcome.tone)
-  if (!outcome.applySnapshot || !snapshot || snapshot.user.id !== requestedUserId) {
-    access.value = null
-    return false
-  }
-
-  access.value = {
-    user: snapshot.user as UserAccess['user'],
+  if (authorizationDetached.value || currentPrincipalId() !== principal) return false
+  if (selectedUserId.value !== targetId || userAccessReadGeneration.value !== generation) return false
+  if (!userAccessSnapshotMatches(snapshot, targetId) || admission.userId !== targetId) return false
+  const agrees = authorizationLiveReadAgrees({
+    action: receipt.action,
     roles: snapshot.roles,
-    permissions: snapshot.permissions,
-    isAdmin: snapshot.isAdmin,
-  }
+    admissions: admission.namespaceAdmissions,
+    impact: receipt.impact,
+  })
+  if (!agrees) return false
+  access.value = snapshot
+  memberAdmission.value = admission
+  memberAdmissionLoadFailure.value = null
   syncProfileDraftFromAccess()
   return true
 }
 
-async function commitRoleMembership(draft: AdminAuthorizationDraft): Promise<void> {
-  const action: 'assign' | 'unassign' = draft.kind === 'unassign-role' ? 'unassign' : 'assign'
-  const requestedUserId = draft.targetUserId
-  const requestedRoleId = draft.roleId
-  const generation = userAccessReadGeneration.value
-  const body: Record<string, unknown> = { roleId: requestedRoleId }
-  if (action === 'assign' && draft.expectedUpdatedAt) body.expectedUpdatedAt = draft.expectedUpdatedAt
-  try {
-    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(requestedUserId)}/roles/${action}`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    })
-    const payload = await readJson(response)
-    if (!response.ok || payload.ok !== true) {
-      const code = readErrorCode(payload)
-      if (code === 'LAST_PLATFORM_ADMIN') throw new Error(LAST_PLATFORM_ADMIN_MESSAGE)
-      if (response.status === 409) {
-        await loadRoles()
-        throw new Error(ROLE_VERSION_MISMATCH_MESSAGE)
-      }
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存角色失败'))
-    }
-
-    const result = roleWriteOutcomeFromPayload(payload.data, {
-      action,
-      requestedUserId,
-      selectedUserId: selectedUserId.value,
-      roleId: requestedRoleId,
-    })
-    if (!finishRoleWrite(generation, requestedUserId, result.outcome, result.snapshot)) return
-    await loadRoles()
-    await loadUsers()
-    if (accessReadStillCurrent(generation, userAccessReadGeneration.value, requestedUserId, selectedUserId.value)) {
-      await loadMemberAdmission(requestedUserId)
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : '保存角色失败'
-    const outcome = describeRoleMembershipWrite({
-      action,
-      requestedUserId,
-      selectedUserId: selectedUserId.value,
-      roleId: requestedRoleId,
-      persistedRoleIds: [],
-      ok: false,
-      errorMessage: message,
-    })
-    finishRoleWrite(generation, requestedUserId, outcome, null)
+async function previewAtomic(request: AdminAuthorizationRequest): Promise<void> {
+  if (!currentPrincipalId()) {
+    setStatus(AUTHORIZATION_PRINCIPAL_MISSING_MESSAGE, 'error')
+    return
+  }
+  authorizationFaultCode = ''
+  await authorizationOperation.preview(request)
+  await authorizationOperation.whenSettled()
+  if (authorizationDetached.value || authorizationPanelHeld.value) return
+  const phase = authorizationOperation.phase.value
+  const detail = authorizationOperation.detail.value
+  if (phase === 'awaiting_confirmation' || phase === 'previewing') return
+  if (phase === 'forbidden' || detail === 'no_access') {
+    setStatus(AUTHORIZATION_FORBIDDEN_MESSAGE, 'error')
+    return
+  }
+  if (authorizationFaultCode === 'LAST_PLATFORM_ADMIN') {
+    setStatus(LAST_PLATFORM_ADMIN_MESSAGE, 'error')
+    return
+  }
+  if (phase === 'validation_failed' && authorizationFaultCode) {
+    setStatus(ROLE_VERSION_MISMATCH_MESSAGE, 'error')
+    return
+  }
+  if (detail === 'preview_failed' || phase === 'idle' || phase === 'validation_failed') {
+    setStatus(AUTHORIZATION_PREVIEW_FAILED_MESSAGE, 'error')
   }
 }
 
-async function commitAdmissionEnable(draft: AdminAuthorizationDraft): Promise<void> {
-  const namespace = draft.admissionNamespaces[0]
-  if (!namespace) return
-  await commitNamespaceAdmission(draft.targetUserId, namespace, true)
+async function finishCommittedAuthorization(): Promise<void> {
+  if (authorizationVerifying || authorizationDetached.value) return
+  if (authorizationOperation.phase.value !== 'committed') return
+  authorizationVerifying = true
+  try {
+    await authorizationOperation.verify()
+    await authorizationOperation.whenSettled()
+  } finally {
+    authorizationVerifying = false
+  }
+  if (authorizationDetached.value) return
+  const settledReceipt = authorizationOperation.receipt.value
+  if (settledReceipt && !memberPageCanVerifyAction(settledReceipt.action)) {
+    foreignAuthorizationReceipt.value = true
+    publishAuthorizationMessage(AUTHORIZATION_FOREIGN_RECEIPT_MESSAGE, 'error')
+    return
+  }
+  if (authorizationOperation.verified.value) {
+    const receipt = authorizationOperation.receipt.value
+    const message = receipt
+      ? describeVerifiedAuthorization({
+        action: receipt.action,
+        impact: receipt.impact,
+        requestedAdmissionChanges: submittedRequest.value?.targetUserId === receipt.targetUserId
+          ? submittedRequest.value.admissionChanges
+          : null,
+      })
+      : AUTHORIZATION_NOT_CHECKED_MESSAGE
+    publishAuthorizationMessage(message, 'info')
+    await loadRoles()
+    await loadUsers()
+    return
+  }
+  publishAuthorizationMessage(AUTHORIZATION_NOT_CHECKED_MESSAGE, 'error')
+}
+
+async function refreshRejectedAuthorizationReads(userId: string): Promise<void> {
+  const generation = userAccessReadGeneration.value
+  try {
+    const response = await apiFetch('/api/admin/roles')
+    const payload = await readJson(response)
+    if (response.ok && payload.ok === true && !authorizationDetached.value && selectedUserId.value === userId) {
+      const data = payload.data as { items?: RoleCatalogItem[] } | undefined
+      roleCatalog.value = Array.isArray(data?.items) ? data.items : []
+    }
+  } catch {
+    // A failed catalog read must not replace the rejected outcome.
+  }
+  if (authorizationDetached.value || selectedUserId.value !== userId) return
+  try {
+    const snapshot = await fetchUserAccessOrThrow(userId)
+    if (authorizationDetached.value || selectedUserId.value !== userId) return
+    if (userAccessReadGeneration.value !== generation) return
+    if (!userAccessSnapshotMatches(snapshot, userId)) return
+    access.value = snapshot
+    syncProfileDraftFromAccess()
+  } catch {
+    // Keep the snapshot already on screen. The rejected outcome stays frozen.
+  }
+}
+
+async function settleAfterConfirm(): Promise<void> {
+  if (authorizationDetached.value) return
+  const phase = authorizationOperation.phase.value
+  if (phase === 'validation_failed') {
+    if (authorizationFaultCode === 'LAST_PLATFORM_ADMIN') {
+      access.value = null
+      publishAuthorizationMessage(LAST_PLATFORM_ADMIN_MESSAGE, 'error')
+      return
+    }
+    // The panel stays held. A rejected 409 does not open a new clickable preview.
+    publishAuthorizationMessage(ROLE_VERSION_MISMATCH_MESSAGE, 'error')
+    const userId = selectedUserId.value
+    if (userId) await refreshRejectedAuthorizationReads(userId)
+    if (!authorizationDetached.value) publishAuthorizationMessage(ROLE_VERSION_MISMATCH_MESSAGE, 'error')
+    return
+  }
+  if (phase === 'forbidden') {
+    publishAuthorizationMessage(AUTHORIZATION_FORBIDDEN_MESSAGE, 'error')
+    return
+  }
+  if (phase === 'pending' || phase === 'unverified_no_read') {
+    publishAuthorizationMessage(AUTHORIZATION_PENDING_MESSAGE, 'error')
+    return
+  }
+  if (phase === 'committed') await finishCommittedAuthorization()
 }
 
 async function confirmAuthorization(): Promise<void> {
   const draft = authorizationDraft.value
-  if (!draft || authorizationBusy.value || busy.value) return
+  if (!draft || authorizationBusy.value || busy.value || authorizationPanelHeld.value) return
   if (draft.requiresTypedPhrase && authorizationPhrase.value !== draft.requiresTypedPhrase) return
   if (!adminAuthorizationStillCurrent(draft, liveAuthorizationFingerprint())) {
     clearAuthorization()
     return
   }
+  if (draft.kind === 'create-user') {
+    authorizationBusy.value = true
+    busy.value = true
+    const frozen = draft
+    clearAuthorization()
+    try {
+      await commitCreateUser(frozen)
+    } finally {
+      authorizationBusy.value = false
+      busy.value = false
+    }
+    return
+  }
+  if (!currentPrincipalId()) {
+    setStatus(AUTHORIZATION_PRINCIPAL_MISSING_MESSAGE, 'error')
+    return
+  }
+  if (authorizationOperation.phase.value !== 'awaiting_confirmation') return
+  const request = atomicRequestForDraft(draft)
+  if (!request) return
+  // Synchronous latch. The dialog stays mounted so a second click cannot pass through.
   authorizationBusy.value = true
+  authorizationPanelHeld.value = true
   busy.value = true
-  const frozen = draft
-  clearAuthorization()
+  submittedRequest.value = request
+  authorizationFaultCode = ''
   try {
-    if (frozen.kind === 'create-user') await commitCreateUser(frozen)
-    else if (frozen.kind === 'enable-admission') await commitAdmissionEnable(frozen)
-    else await commitRoleMembership(frozen)
+    await authorizationOperation.confirm()
+    await authorizationOperation.whenSettled()
+    await settleAfterConfirm()
   } finally {
     authorizationBusy.value = false
     busy.value = false
   }
+}
+
+async function rereadAuthorization(): Promise<void> {
+  if (authorizationDetached.value) return
+  const phase = authorizationOperation.phase.value
+  if (phase === 'pending' || phase === 'unverified_no_read') {
+    await authorizationOperation.lookup()
+    await authorizationOperation.whenSettled()
+    if (!authorizationDetached.value && authorizationOperation.phase.value === 'committed') {
+      await finishCommittedAuthorization()
+    }
+    return
+  }
+  if (phase === 'committed') await finishCommittedAuthorization()
+}
+
+function closeAuthorizationPanel(): void {
+  if (!authorizationDetached.value && authorizationOperation.phase.value === 'committing') return
+  authorizationPanelHeld.value = false
+  authorizationDetached.value = false
+  submittedRequest.value = null
+  suppressRecovery.value = true
+  authorizationOutcomeText.value = ''
+  clearAuthorization()
+}
+
+function presentRecoveredAuthorization(): void {
+  if (suppressRecovery.value || authorizationPanelHeld.value || authorizationDetached.value) return
+  if (authorizationDraft.value) return
+  const phase = authorizationOperation.phase.value
+  if (phase !== 'pending' && phase !== 'committed' && phase !== 'unverified_no_read') return
+  const receipt = authorizationOperation.receipt.value
+  foreignAuthorizationReceipt.value = Boolean(receipt && !memberPageCanVerifyAction(receipt.action))
+  const targetId = receipt?.targetUserId || selectedUserId.value
+  if (!targetId || targetId !== selectedUserId.value) return
+  const draft = buildRecoveredAuthorizationDraft({
+    receipt,
+    userName: access.value && access.value.user.id === targetId ? userDisplayName(access.value.user) : targetId,
+    dropdownRoleId: selectedRoleId.value,
+    heldRoleIds: access.value && access.value.user.id === targetId ? access.value.roles : [],
+    heldRolesKnown: Boolean(access.value && access.value.user.id === targetId),
+    namespacesByRoleId: namespacesByRoleId(),
+    catalogPermissionsByRoleId: catalogPermissionsByRoleId(),
+  })
+  authorizationPanelHeld.value = true
+  authorizationDraft.value = draft
+  if (phase === 'pending' || phase === 'unverified_no_read') {
+    authorizationOutcomeText.value = AUTHORIZATION_PENDING_MESSAGE
+  }
+  if (phase === 'committed') void finishCommittedAuthorization()
+}
+
+function syncAuthorizationIdentity(): void {
+  const next = currentPrincipalId()
+  const previous = authorizationPrincipalSeen
+  if (previous && next !== previous && authorizationPanelHeld.value) markAuthorizationDetached('principal')
+  authorizationPrincipalSeen = next
+  authorizationOperation.syncContext()
+  if (!authorizationPanelHeld.value && previous && next !== previous) {
+    clearAuthorization()
+    setStatus(next ? AUTHORIZATION_PRINCIPAL_CHANGED_MESSAGE : AUTHORIZATION_PRINCIPAL_MISSING_MESSAGE, 'error')
+  }
+}
+
+function onAuthorizationIdentitySignal(): void {
+  syncAuthorizationIdentity()
 }
 
 function assignRole(): void {
@@ -4572,7 +4938,20 @@ function unassignRole(): void {
 }
 
 function updateNamedRole(roleId: string, enabled: boolean): void {
-  requestRoleMembership(enabled ? 'assign' : 'unassign', roleId)
+  requestRoleMembership(enabled ? 'assign' : 'unassign', roleId, [])
+}
+
+function toggleRoleAssignAdmission(namespace: string, event: Event): void {
+  if (authorizationPanelHeld.value || authorizationBusy.value) return
+  const checked = event.target instanceof HTMLInputElement && event.target.checked
+  const allowed = new Set(roleAssignAdmissionOffer.value.namespaces)
+  const next = new Set(roleAssignAdmissionNamespaces.value.filter((item) => allowed.has(item)))
+  if (checked && allowed.has(namespace)) next.add(namespace)
+  else next.delete(namespace)
+  roleAssignAdmissionNamespaces.value = [...next]
+  const draft = authorizationDraft.value
+  if (!draft || draft.kind !== 'assign-role' || draft.roleId !== selectedRoleId.value) return
+  requestRoleMembership('assign', selectedRoleId.value)
 }
 
 async function saveUserProfile(): Promise<void> {
@@ -5351,7 +5730,7 @@ watch(search, () => {
   if (page.value !== 1) page.value = 1
 })
 
-watch([userListFilter, roleFilter, accountStatusFilter], () => {
+watch([userListFilter, roleFilter, accountStatusFilter, admissionFilterNamespace, admissionFilterStatus], () => {
   clearSelectionForCriteriaChange()
   if (page.value !== 1) page.value = 1
   else void loadUsers()
@@ -5408,14 +5787,45 @@ watch(
   { deep: true },
 )
 
+watch(selectedRoleId, (roleId, previous) => {
+  if (roleId === previous) return
+  roleAssignAdmissionNamespaces.value = []
+  if (authorizationPanelHeld.value || authorizationDetached.value) return
+  const draft = authorizationDraft.value
+  if (!draft || draft.kind !== 'assign-role' || draft.targetUserId !== selectedUserId.value) return
+  if (!roleId.trim()) {
+    clearAuthorization()
+    return
+  }
+  requestRoleMembership('assign', roleId)
+})
+
+watch(selectedUserId, (userId, previous) => {
+  if (previous && userId !== previous && authorizationPanelHeld.value) markAuthorizationDetached('member')
+  authorizationOperation.syncContext()
+})
+
+watch(() => authorizationOperation.phase.value, () => {
+  presentRecoveredAuthorization()
+})
+
+watch(() => authorizationOperation.receipt.value, (receipt) => {
+  if (!receipt || selectedUserId.value !== receipt.targetUserId) return
+  if (!memberPageCanVerifyAction(receipt.action)) foreignAuthorizationReceipt.value = true
+})
+
 watch(
   [selectedUserId, selectedRoleId, createForm, createAdmissionNamespaces, roleCatalog, access, namespaceAdmissionCapability],
   () => {
     const draft = authorizationDraft.value
-    if (!draft || authorizationBusy.value) return
+    if (!draft || authorizationBusy.value || authorizationPanelHeld.value || authorizationDetached.value) return
     if (draft.kind === 'create-user' && namespaceAdmissionCapability.value !== 'ready') {
       clearAuthorization()
       return
+    }
+    if (draft.kind !== 'create-user' && draft.targetUserId === selectedUserId.value) {
+      const phase = authorizationOperation.phase.value
+      if (phase === 'validation_failed' || phase === 'previewing') return
     }
     if (!adminAuthorizationStillCurrent(draft, liveAuthorizationFingerprint())) clearAuthorization()
   },
@@ -5439,11 +5849,15 @@ const stopUserLocationSync = subscribeToLocationChanges(() => {
 
 onMounted(async () => {
   window.addEventListener('keydown', onUserAdminKeydown)
+  window.addEventListener('focus', onAuthorizationIdentitySignal)
+  window.addEventListener('storage', onAuthorizationIdentitySignal)
   await Promise.all([loadRoles(), loadUsers(), loadAccessPresets(), loadInviteRecords(), loadAttendanceOnboardingOptions(), loadAttendanceOrgOptions()])
 })
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onUserAdminKeydown)
+  window.removeEventListener('focus', onAuthorizationIdentitySignal)
+  window.removeEventListener('storage', onAuthorizationIdentitySignal)
   stopUserLocationSync()
 })
 </script>

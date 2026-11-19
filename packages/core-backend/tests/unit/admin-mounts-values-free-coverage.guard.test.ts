@@ -81,7 +81,7 @@ const ALLOWLIST: Readonly<Record<string, AllowlistEntry>> = {
   'admin-directory-org-transfers.ts': { since: SINCE, echo: 'none', followUp: ADD_TO_SCAN, reason: `${UNSCANNED} Its one 500 (handleOrgTransferError) sends the fixed fallbackMessage and logs fixed metadata only; 4xx carry typed messages; the scanner finds no echo (h).` },
   'admin-directory-capabilities.ts': { since: '2026-11-06', echo: 'none', followUp: ADD_TO_SCAN, reason: `${UNSCANNED} Read-only display route; its one 500 is the fixed sentence DIRECTORY_CAPABILITIES_INTERNAL and the log line carries the error class and SQLSTATE only; the scanner finds no echo (h).` },
   'canary-routes.ts': { since: SINCE, echo: 'none', followUp: ADD_TO_SCAN, reason: `${UNSCANNED} 6 fixed-status 5xx branches with literal bodies; the scanner finds no echo (h).` },
-  'permissions.ts': { since: SINCE, echo: 'none', followUp: ADD_TO_SCAN, reason: `${UNSCANNED} Mounted path-less; defines /api/admin/permission-templates and …/apply. 12 fixed-status 5xx branches with literal bodies; the scanner finds no echo (h).` },
+  'permissions.ts': { since: SINCE, echo: 'known', followUp: ADD_TO_SCAN, reason: `${UNSCANNED} Mounted path-less; the scanner treats the dynamic 404/409 status of AccessGraphUserUnavailableError as a possible 5xx. Pin that sole site and its status choices separately.` },
 }
 
 /** Today's in-scope mounts, `<path> -> <file under src/routes/>`, pinned so an extraction regression cannot pass (e). */
@@ -512,6 +512,14 @@ describe('every /api/admin mount in src/index.ts is covered by a values-free 5xx
       return { file, echo: e.echo, offenders, holds: e.echo === 'none' ? offenders === 0 : offenders > 0 }
     })
     expect(checked.filter((c) => !c.holds)).toEqual([])
+  })
+  it('permissions has only the bounded 404/409 dynamic-status echo', () => {
+    const source = readSrcFile('routes/permissions.ts')!
+    const offenders = scanResponseErrorEcho('permissions.ts', source).offenders
+    expect(offenders).toHaveLength(1)
+    expect(offenders[0].text).toContain("res.status(error.code === 'NOT_FOUND' ? 404 : 409).json({ error: error.message, code: error.code })")
+    const mutated = source.replace("error.code === 'NOT_FOUND' ? 404 : 409", '500')
+    expect(scanResponseErrorEcho('permissions.ts', mutated).offenders[0].text).not.toEqual(offenders[0].text)
   })
   it('every ALLOWLIST entry carries a reason, an ISO date and a follow-up', () => {
     for (const [file, e] of Object.entries(ALLOWLIST)) {

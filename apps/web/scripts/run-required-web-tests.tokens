@@ -505,6 +505,7 @@ run-required-web-tests-shape
 searchApprovalDirectoryDepartments
 searchApprovalDirectoryUsers
 serverFormDraft
+sessionCenterView.spec.ts
 SessionOrgSwitcher.spec.ts
 shared-comments-stub-client
 statusTag

@@ -53,9 +53,10 @@ export function importSpecifiers(source: string, fileName = 'm.ts'): string[] {
   return specifiers
 }
 
-/** Every file below `dir`, whatever its extension. */
+/** Every repository file below `dir`, excluding installed dependencies. */
 export function listAllFiles(dir: string): string[] {
   return readdirSync(dir).flatMap((entry) => {
+    if (entry === 'node_modules') return []
     const full = path.join(dir, entry)
     return statSync(full).isDirectory() ? listAllFiles(full) : [full]
   })

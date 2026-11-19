@@ -24,8 +24,9 @@
  * observed.
  */
 
+import { randomUUID } from 'node:crypto'
 import type { Request, Response, Router } from 'express'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const pgMocks = vi.hoisted(() => ({
   query: vi.fn(),
@@ -85,6 +86,7 @@ interface FakeDbState {
   delegatedScopes?: Array<{ admin_user_id: string; namespace: string }>
   /** `delegated_role_admin_member_groups` (member-group audience), one entry per row. */
   delegatedGroupScopes?: Array<{ admin_user_id: string; namespace: string }>
+  delegatedActivations?: Array<{ admin_user_id: string; namespace: string; enabled: boolean; revision: string }>
 }
 
 function cloneState(state: FakeDbState): FakeDbState {
@@ -95,6 +97,7 @@ function cloneState(state: FakeDbState): FakeDbState {
     members: new Map(Array.from(state.members, ([k, v]) => [k, [...v]])),
     delegatedScopes: (state.delegatedScopes ?? []).map((row) => ({ ...row })),
     delegatedGroupScopes: (state.delegatedGroupScopes ?? []).map((row) => ({ ...row })),
+    delegatedActivations: (state.delegatedActivations ?? []).map((row) => ({ ...row })),
   }
 }
 
@@ -200,6 +203,25 @@ function makeFakeDb(options: {
       }
       return { rows, rowCount: rows.length }
     }
+    const resetActivation = 'INSERT INTO delegated_role_admin_activation (admin_user_id, namespace, enabled, revision) ' +
+      'SELECT subject.user_id, $2, FALSE, pg_catalog.gen_random_uuid() FROM unnest($1::text[]) AS subject(user_id) ' +
+      'WHERE $3::boolean OR EXISTS ( SELECT 1 FROM delegated_role_admin_activation previous ' +
+      'WHERE previous.admin_user_id = subject.user_id AND previous.namespace = $2 ) ' +
+      'ON CONFLICT (admin_user_id, namespace) DO UPDATE SET enabled = FALSE, revision = EXCLUDED.revision'
+    if (norm === resetActivation) {
+      const [userIds, namespace, rolloutEnabled] = params as [string[], string, boolean]
+      const activations = state.delegatedActivations ??= []
+      let rowCount = 0
+      for (const userId of userIds) {
+        const index = activations.findIndex((row) => row.admin_user_id === userId && row.namespace === namespace)
+        if (index === -1 && !rolloutEnabled) continue
+        const row = { admin_user_id: userId, namespace, enabled: false, revision: randomUUID() }
+        if (index === -1) activations.push(row)
+        else activations[index] = row
+        rowCount++
+      }
+      return { rows: [], rowCount }
+    }
     const audienceDelete = /^DELETE FROM (delegated_role_admin_scopes|delegated_role_admin_member_groups) WHERE admin_user_id = ANY\(\$1::text\[\]\) AND namespace = \$2 RETURNING admin_user_id$/i.exec(norm)
     if (audienceDelete) {
       const key = audienceDelete[1] === 'delegated_role_admin_scopes' ? 'delegatedScopes' : 'delegatedGroupScopes'
@@ -260,6 +282,9 @@ function makeFakeDb(options: {
       departments: (state.delegatedScopes ?? []).filter((row) => row.admin_user_id === userId && row.namespace === namespace).length,
       groups: (state.delegatedGroupScopes ?? []).filter((row) => row.admin_user_id === userId && row.namespace === namespace).length,
     }),
+    activationOf: (userId: string, namespace: string) => state.delegatedActivations?.find(
+      (row) => row.admin_user_id === userId && row.namespace === namespace,
+    ),
     /** ATOMIC: the callback's writes survive only if it resolves. */
     transaction: async <T>(handler: (client: { query: typeof run }) => Promise<T>): Promise<T> => {
       const snapshot = cloneState(state)
@@ -1273,15 +1298,19 @@ function seedAdminRoles(options: { cascade?: boolean; failOn?: (sql: string, par
         { admin_user_id: 'user-b', namespace: 'crm' },
         { admin_user_id: 'user-a', namespace: 'hr' },
       ],
+      delegatedActivations: [
+        { admin_user_id: 'user-a', namespace: 'crm', enabled: true, revision: randomUUID() },
+        { admin_user_id: 'user-a', namespace: 'hr', enabled: true, revision: randomUUID() },
+      ],
     },
   })
 }
 
-/** Statements that WRITE membership or audience — the cleanup's whole footprint. */
+/** Statements that write membership, audience or delegated activation during cleanup. */
 function membershipWrites(db: ReturnType<typeof makeFakeDb>): string[] {
   return db.statements
     .map((statement) => statement.sql.replace(/\s+/g, ' ').trim())
-    .filter((sql) => /^DELETE FROM (user_roles|delegated_role_admin_scopes|delegated_role_admin_member_groups)\b/i.test(sql))
+    .filter((sql) => /^(DELETE FROM (user_roles|delegated_role_admin_scopes|delegated_role_admin_member_groups)|INSERT INTO delegated_role_admin_activation)\b/i.test(sql))
 }
 
 describe('ADMIN-LEVEL codes in the role editor — only a platform admin adds or removes them (owner ruling 「只有平台管理员能任命 *_admin」)', () => {
@@ -1362,6 +1391,8 @@ describe('ADMIN-LEVEL codes in the role editor — only a platform admin adds or
 })
 
 describe('DELETE of a namespace main-admin or admin-equivalent role — platform admin only; memberships and audience go with it', () => {
+  afterEach(() => vi.unstubAllEnvs())
+
   it('a roles:write holder cannot delete `<ns>_admin`: 403, role, memberships and audience intact, refusal audited', async () => {
     const db = seedAdminRoles()
     wire(db)
@@ -1404,10 +1435,13 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
   })
 
   it('a platform admin deletes `<ns>_admin` on the no-FK schema: memberships gone, that namespace\'s audience gone (another namespace\'s stays), audited, one transaction', async () => {
+    vi.stubEnv('DELEGATED_SCOPE_ACTIVATION_ENABLED', 'false')
     rbacServiceMocks.isAdmin.mockResolvedValue(true)
     const db = seedAdminRoles({ cascade: false })
     wire(db)
     const res = mockResponse()
+    const priorCrm = db.activationOf('user-a', 'crm')
+    const priorHr = db.activationOf('user-a', 'hr')
 
     await deleteRole(res, 'crm_admin')
 
@@ -1418,6 +1452,11 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
     expect(db.audienceOf('user-b', 'crm')).toEqual({ departments: 0, groups: 0 })
     expect(db.audienceOf('user-a', 'hr')).toEqual({ departments: 1, groups: 1 })
     expect(db.membersOf('hr_admin')).toEqual(['user-a'])
+    const nextCrm = db.activationOf('user-a', 'crm')
+    expect(nextCrm).toMatchObject({ enabled: false, revision: expect.any(String) })
+    expect(nextCrm?.revision).not.toBe(priorCrm?.revision)
+    expect(db.activationOf('user-b', 'crm')).toBeUndefined()
+    expect(db.activationOf('user-a', 'hr')).toEqual(priorHr)
     // Every write went through the transaction client (pool.query is the same interpreter here,
     // so assert the route never called it for DML).
     expect(pgMocks.poolQuery.mock.calls.filter((call) => /^\s*(DELETE|INSERT|UPDATE)/i.test(String(call[0])))).toEqual([])
@@ -1525,22 +1564,26 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
 
   it('ATOMIC: a failure in the audience cleanup rolls back the membership removal and keeps the role', async () => {
     rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const isFailingDelete = (sql: string) => /^DELETE FROM delegated_role_admin_member_groups/i.test(sql)
     const db = seedAdminRoles({
       cascade: false,
-      failOn: (sql) => (/DELETE FROM delegated_role_admin_member_groups/i.test(sql)
+      failOn: (sql) => (isFailingDelete(sql)
         ? Object.assign(new Error('could not serialize access'), { code: '40P01' })
         : null),
     })
     wire(db)
     const res = mockResponse()
+    const priorCrm = db.activationOf('user-a', 'crm')
 
     await deleteRole(res, 'crm_admin')
 
     expect(res.statusCode).toBe(500)
     expect(res.body).toEqual({ ok: false, error: { code: 'ROLE_WRITE_FAILED', message: 'Role write failed' } })
+    expect(db.statements.some(({ sql }) => isFailingDelete(sql))).toBe(true)
     expect(db.nameOf('crm_admin')).toBe('CRM 管理员')
     expect(db.membersOf('crm_admin')).toEqual(['user-a', 'user-b'])
     expect(db.audienceOf('user-a', 'crm')).toEqual({ departments: 2, groups: 1 })
+    expect(db.activationOf('user-a', 'crm')).toEqual(priorCrm)
   })
 
   it('memberships that outlived an earlier delete of the role row are removed when the id is deleted again (platform admin)', async () => {
