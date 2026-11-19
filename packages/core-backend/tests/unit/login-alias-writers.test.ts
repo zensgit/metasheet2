@@ -282,8 +282,10 @@ describe('writer hook call contracts (load-bearing mutation notes)', () => {
   it('POST /api/admin/users wires claimNonEmptyLoginAliasesOrThrow (admin_create)', async () => {
     const fs = await import('node:fs/promises')
     const src = await fs.readFile(new URL('../../src/routes/admin-users.ts', import.meta.url), 'utf8')
-    expect(src).toMatch(/claimNonEmptyLoginAliasesOrThrow/)
-    expect(src).toMatch(/source:\s*'admin_create'/)
+    const command = await fs.readFile(new URL('../../src/admin/admin-user-birth-command.ts', import.meta.url), 'utf8')
+    expect(src).toMatch(/await createAdminUserBirthCommand\(/)
+    expect(command).toMatch(/await claimNonEmptyLoginAliasesOrThrow\(/)
+    expect(command).toMatch(/source:\s*'admin_create'/)
     expect(src).toMatch(/applyMobileLoginAliasChangeOrThrow/)
     expect(src).toMatch(/source:\s*'admin_profile_mobile'/)
   })

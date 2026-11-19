@@ -3,8 +3,9 @@
 // R-71 ⑦.4 PR-4 — two template columns and the pull / write exclusions that keep existing sheets working.
 //
 //   发料确认日期 `issueConfirmDate`  plm_system (so the project sheet's human lock covers it) AND listed in
-//                                   MACHINE_WRITEBACK_FIELD_IDS: a PLM refresh never writes it. Its one writer is the
-//                                   YiDa issue-confirm write-back (PR-5, not in this slice).
+//                                   MACHINE_WRITEBACK_FIELD_IDS: a PLM refresh never writes it. Its only originating
+//                                   writer is the YiDa issue-confirm write-back (PR-5, not in this slice); the carry
+//                                   confirm copies an existing value onto the re-keyed successor (empty cell only).
 //   项目规格型号 `projectSpecModel`  plm_system, an EMPTY column: its PLM source is field question F1 (open), so nothing
 //                                   produces the key yet.
 //

@@ -15,6 +15,12 @@
 //   6  idempotency / no-overwrite: a non-blank target human field is NEVER clobbered — equal
 //      values skip (no-op replay), differing values refuse with a closed reason.
 //
+// M1–M10 + MP (owner ruling 2026-11-17 「按建议」): the carry also copies the MACHINE write-back
+// column(s) (MACHINE_WRITEBACK_FIELD_IDS, today `issueConfirmDate`) from the predecessor onto an
+// EMPTY successor cell, by the write-back's own D8 cell rule (decideIssueConfirmCell): blank -> carried,
+// equal -> already set, any other value -> kept (never an overwrite, never a refusal). People can still
+// never name the column in a decision.
+//
 // W4b: POST /api/integration/stock-preparation/carry/confirm, handler stockPreparationCarryConfirm,
 // mirroring stockPreparationMaterialMappingConfirm — admin gate, closed body allowlist,
 // values-free audit (existing exception_resolve action + fixed operation subtype, the same
@@ -38,7 +44,11 @@ const {
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   HUMAN_PRESERVED_FIELD_IDS,
+  MACHINE_WRITEBACK_FIELD_IDS,
 } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
+// The write-back's own D8 cell rule — required ONLY by this test, to pin the carry leg's parity with it
+// (the executor deliberately does not import the write-back module).
+const { decideIssueConfirmCell } = require(path.join(LIB, 'yida-issue-confirm-writeback.cjs'))
 const {
   makeFakeProvisioning,
   makeStrictRecordsApi,
@@ -79,6 +89,10 @@ const NEW_KEY = JSON.stringify({ projectNo: 'P-9', componentSourceId: 'COMP-X', 
 const OLD_KEY = JSON.stringify({ projectNo: 'P-9', componentSourceId: 'COMP-X', parentSourceId: null, path: ['OLD', 'COMP-X'] })
 const HUMAN_NOTE = 'ordered 2026-08-01 supplier confirmed'
 const HUMAN_REPLY = 'in transit, ETA 09-10'
+// Synthetic machine write-back dates (the date-typed column stores a string).
+const MACHINE_FIELD = 'issueConfirmDate'
+const SYN_DATE = '2031-04-17'
+const SYN_DATE_OTHER = '2031-05-23'
 
 let passed = 0
 let failed = 0
@@ -533,6 +547,166 @@ async function main() {
   })
 
   // -------------------------------------------------------------------------
+  // M1–M10 + MP — the machine write-back column follows the re-keyed row (empty cell only).
+  // -------------------------------------------------------------------------
+  const valuesFree = (label, value) => {
+    const text = JSON.stringify(value)
+    assert.equal(text.includes(SYN_DATE) || text.includes(SYN_DATE_OTHER), false, `${label}: values-free (no date)`)
+  }
+  const patchedKeys = (env, index = 0) => Object.keys(logicalData(STAGING, CANONICAL_OBJECT_ID, env.records.patchCalls[index].changes)).sort()
+  const targetData = (env) => canonicalRows(env).find((row) => row.data.idempotencyKey === NEW_KEY).data
+
+  await run('M0: calibration — the machine band is exactly issueConfirmDate, outside the human whitelist', async () => {
+    assert.deepEqual(MACHINE_WRITEBACK_FIELD_IDS.slice(), [MACHINE_FIELD])
+    assert.equal(HUMAN_PRESERVED_FIELD_IDS.includes(MACHINE_FIELD), false)
+    assert.ok(CARRY_TARGET.fieldIdMap[MACHINE_FIELD], 'the explicit-map fixture binds the machine column')
+  })
+
+  await run('M1: notes + date on the predecessor, blank successor => ONE patch carrying the human fields AND the date', async () => {
+    const env = carryEnv({ rows: [sourceRowFixture({ [MACHINE_FIELD]: SYN_DATE }), targetRowFixture()] })
+    const result = await applyCarryViaConfirm(callInput(env))
+    assert.equal(result.persisted, true)
+    assert.equal(result.mode, 'carried')
+    assert.deepEqual(result.carriedFields.slice().sort(), ['notes', 'procurementReply'])
+    assert.deepEqual(result.machineCarriedFields, [MACHINE_FIELD])
+    assert.deepEqual(result.machineAlreadySetFields, [])
+    assert.deepEqual(result.machineKeptExistingFields, [])
+    assert.equal(Object.prototype.hasOwnProperty.call(result, 'machineCode'), false)
+    assert.equal(env.records.patchCalls.length, 1, 'one patch, no second write')
+    assert.deepEqual(patchedKeys(env), [MACHINE_FIELD, 'notes', 'procurementReply'])
+    assert.equal(targetData(env)[MACHINE_FIELD], SYN_DATE, 'the date followed the row')
+    assert.deepEqual(result.evidence.machine, { carried: 1, alreadySet: 0, keptExisting: 0 })
+    valuesFree('M1 result', result)
+  })
+
+  await run('M2: the successor already holds the SAME date => counted already set, not patched', async () => {
+    const env = carryEnv({ rows: [sourceRowFixture({ [MACHINE_FIELD]: SYN_DATE }), targetRowFixture({ [MACHINE_FIELD]: SYN_DATE })] })
+    const result = await applyCarryViaConfirm(callInput(env))
+    assert.equal(result.mode, 'carried')
+    assert.deepEqual(result.machineCarriedFields, [])
+    assert.deepEqual(result.machineAlreadySetFields, [MACHINE_FIELD])
+    assert.deepEqual(result.machineKeptExistingFields, [])
+    assert.deepEqual(patchedKeys(env), ['notes', 'procurementReply'])
+    assert.deepEqual(result.evidence.machine, { carried: 0, alreadySet: 1, keptExisting: 0 })
+    valuesFree('M2 result', result)
+  })
+
+  await run('M3: the successor holds a DIFFERENT date => kept_existing + code; human fields still carried; the date never overwritten; no 409', async () => {
+    const env = carryEnv({ rows: [sourceRowFixture({ [MACHINE_FIELD]: SYN_DATE }), targetRowFixture({ [MACHINE_FIELD]: SYN_DATE_OTHER })] })
+    const result = await applyCarryViaConfirm(callInput(env))
+    assert.equal(result.persisted, true)
+    assert.equal(result.mode, 'carried')
+    assert.deepEqual(result.carriedFields.slice().sort(), ['notes', 'procurementReply'])
+    assert.deepEqual(result.machineCarriedFields, [])
+    assert.deepEqual(result.machineKeptExistingFields, [MACHINE_FIELD])
+    assert.equal(result.machineCode, 'CONFIRM_CARRY_MACHINE_KEPT_EXISTING')
+    assert.deepEqual(patchedKeys(env), ['notes', 'procurementReply'], 'no date in the patch')
+    assert.equal(targetData(env)[MACHINE_FIELD], SYN_DATE_OTHER, 'the successor date stands')
+    assert.deepEqual(result.evidence.machine, { carried: 0, alreadySet: 0, keptExisting: 1 })
+    valuesFree('M3 result', result)
+  })
+
+  await run('M4: a replay whose human fields are already equal carries just the date (persisted, mode carried, one patch)', async () => {
+    const env = carryEnv({ rows: [sourceRowFixture({ [MACHINE_FIELD]: SYN_DATE }), targetRowFixture({ notes: HUMAN_NOTE, procurementReply: HUMAN_REPLY })] })
+    const result = await applyCarryViaConfirm(callInput(env))
+    assert.equal(result.persisted, true)
+    assert.equal(result.mode, 'carried')
+    assert.deepEqual(result.carriedFields, [])
+    assert.deepEqual(result.alreadyCarriedFields.slice().sort(), ['notes', 'procurementReply'])
+    assert.deepEqual(result.machineCarriedFields, [MACHINE_FIELD])
+    assert.equal(env.records.patchCalls.length, 1)
+    assert.deepEqual(patchedKeys(env), [MACHINE_FIELD])
+    assert.equal(targetData(env)[MACHINE_FIELD], SYN_DATE)
+    // ...and the replay of THAT is a true no-op.
+    const again = await applyCarryViaConfirm(callInput(env))
+    assert.equal(again.persisted, false)
+    assert.equal(again.mode, 'skipped_already_carried')
+    assert.deepEqual(again.machineAlreadySetFields, [MACHINE_FIELD])
+    assert.equal(env.records.patchCalls.length, 1, 'no second patch')
+    valuesFree('M4 result', [result, again])
+  })
+
+  await run('M5: a human conflict with a source date is still 409 with ZERO patches (a refused carry writes nothing, not even the date)', async () => {
+    const env = carryEnv({ rows: [sourceRowFixture({ [MACHINE_FIELD]: SYN_DATE }), targetRowFixture({ notes: 'a newer human note' })] })
+    const caught = await expectError(applyCarryViaConfirm(callInput(env)), { status: 409, code: 'CONFIRM_CARRY_TARGET_ALREADY_SET' })
+    assert.deepEqual(caught.details.fields, ['notes'])
+    assert.equal(env.records.patchCalls.length, 0)
+    assert.equal(targetData(env)[MACHINE_FIELD], undefined)
+    valuesFree('M5 details', caught.details)
+  })
+
+  await run('M6: no source date => empty machine arrays, the patch is the human fields only', async () => {
+    const env = carryEnv()
+    const result = await applyCarryViaConfirm(callInput(env))
+    assert.deepEqual(result.machineCarriedFields, [])
+    assert.deepEqual(result.machineAlreadySetFields, [])
+    assert.deepEqual(result.machineKeptExistingFields, [])
+    assert.equal(Object.prototype.hasOwnProperty.call(result, 'machineCode'), false)
+    assert.deepEqual(patchedKeys(env), ['notes', 'procurementReply'])
+    assert.deepEqual(result.evidence.machine, { carried: 0, alreadySet: 0, keptExisting: 0 })
+  })
+
+  await run('M7: a person can never name the machine column in carryFields (422, zero IO)', async () => {
+    for (const carryFields of [[MACHINE_FIELD], ['notes', MACHINE_FIELD]]) {
+      const env = carryEnv({ rows: [sourceRowFixture({ [MACHINE_FIELD]: SYN_DATE }), targetRowFixture()] })
+      await expectError(applyCarryViaConfirm(callInput(env, { decision: decisionFixture({ carryFields }) })), { status: 422, code: 'CONFIRM_CARRY_DECISION_INVALID' })
+      assert.equal(env.records.queryCalls.length, 0)
+      assert.equal(env.records.patchCalls.length, 0)
+    }
+  })
+
+  await run('M8: the machine column as a decision KEY is refused by name (422, zero IO)', async () => {
+    const env = carryEnv({ rows: [sourceRowFixture({ [MACHINE_FIELD]: SYN_DATE }), targetRowFixture()] })
+    await expectError(applyCarryViaConfirm(callInput(env, { decision: decisionFixture({ [MACHINE_FIELD]: SYN_DATE }) })), { status: 422, code: 'CONFIRM_CARRY_DECISION_INVALID' })
+    assert.equal(env.records.queryCalls.length, 0)
+    assert.equal(env.records.patchCalls.length, 0)
+  })
+
+  await run('M9: an explicit map that does not bind the machine column => 500 CONFIRM_CARRY_TARGET_FIELDS_UNRESOLVED, zero IO', async () => {
+    const fieldIdMap = { ...CARRY_TARGET.fieldIdMap }
+    delete fieldIdMap[MACHINE_FIELD]
+    const env = carryEnv({ rows: [sourceRowFixture({ [MACHINE_FIELD]: SYN_DATE }), targetRowFixture()] })
+    const caught = await expectError(applyCarryViaConfirm(callInput(env, { target: { ...CARRY_TARGET, fieldIdMap } })), { status: 500, code: 'CONFIRM_CARRY_TARGET_FIELDS_UNRESOLVED' })
+    assert.deepEqual(caught.details.missingFields, [MACHINE_FIELD])
+    assert.equal(env.records.queryCalls.length, 0)
+    assert.equal(env.records.patchCalls.length, 0)
+  })
+
+  await run('M10: a version conflict on a machine-only patch is 409 CONFIRM_CARRY_TARGET_VERSION_CONFLICT naming the field', async () => {
+    const env = carryEnv({ rows: [sourceRowFixture({ [MACHINE_FIELD]: SYN_DATE }), targetRowFixture({ notes: HUMAN_NOTE, procurementReply: HUMAN_REPLY })] })
+    const originalPatch = env.records.patchRecord.bind(env.records)
+    env.records.patchRecord = async (input) => {
+      env.records.store.get(CANONICAL_SHEET).find((row) => row.id === input.recordId).version += 1 // the row moved meanwhile
+      return originalPatch(input)
+    }
+    const caught = await expectError(applyCarryViaConfirm(callInput(env)), { status: 409, code: 'CONFIRM_CARRY_TARGET_VERSION_CONFLICT' })
+    assert.deepEqual(caught.details.fields, [MACHINE_FIELD])
+    assert.equal(targetData(env)[MACHINE_FIELD], undefined, 'nothing written')
+    valuesFree('M10 details', caught.details)
+  })
+
+  await run('MP: parity with the write-back D8 cell rule (decideIssueConfirmCell) over undefined / null / empty / equal / other / blank-padded', async () => {
+    const cases = [
+      ['undefined', undefined, false],
+      ['null', null, true],
+      ['empty', '', true],
+      ['equal', SYN_DATE, true],
+      ['other', SYN_DATE_OTHER, true],
+      ['spaces', '  ', true],
+    ]
+    for (const [label, cell, present] of cases) {
+      const env = carryEnv({ rows: [sourceRowFixture({ [MACHINE_FIELD]: SYN_DATE }), targetRowFixture(present ? { [MACHINE_FIELD]: cell } : {})] })
+      const result = await applyCarryViaConfirm(callInput(env))
+      const states = [
+        ...result.machineCarriedFields.map(() => 'patch'),
+        ...result.machineAlreadySetFields.map(() => 'already_set'),
+        ...result.machineKeptExistingFields.map(() => 'kept_existing'),
+      ]
+      assert.deepEqual(states, [decideIssueConfirmCell(cell, SYN_DATE)], `parity: ${label}`)
+    }
+  })
+
+  // -------------------------------------------------------------------------
   // W4b — the route.
   // -------------------------------------------------------------------------
   await run('W4b-1: happy path — admin POST applies the carry, closes the named ledger row, audits values-free', async () => {
@@ -570,6 +744,29 @@ async function main() {
     assert.equal(audit.detail.operation, 'stock_preparation_carry_confirm')
     assert.equal(audit.actor, OPERATOR)
     assert.equal(JSON.stringify(audit).includes(HUMAN_NOTE), false, 'audit stays values-free')
+  })
+
+  await run('W4b-1m: the route carries the machine date too — counts in the response and in the audit, values-free', async () => {
+    const mounted = mountCarryRoute({ rows: [sourceRowFixture({ [MACHINE_FIELD]: SYN_DATE }), targetRowFixture()] })
+    const ledgerRow = await seedCarryLedgerRow(mounted)
+    const res = await call(mounted.routes, 'POST', CARRY_ROUTE, {
+      user: ADMIN,
+      body: { decision: decisionFixture(), decisionId: ledgerRow.decisionId, inputFingerprint: ledgerRow.inputFingerprint },
+    })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    assert.equal(res.body.data.mode, 'carried')
+    assert.deepEqual(res.body.data.machineCarriedFields, [MACHINE_FIELD])
+    assert.equal(res.body.data.ledger.status, 'confirmed')
+    const target = mounted.records.rows(CANONICAL_SHEET).map((row) => logicalData(STAGING, CANONICAL_OBJECT_ID, row.data))
+      .find((data) => data.idempotencyKey === NEW_KEY)
+    assert.equal(target[MACHINE_FIELD], SYN_DATE)
+    assert.equal(mounted.auditDb.rows.length, 1)
+    const audit = mounted.auditDb.rows[0]
+    assert.equal(audit.detail.machineCarriedFieldCount, 1)
+    assert.equal(audit.detail.machineKeptExistingCount, 0)
+    assert.equal(audit.detail.carriedFieldCount, 2)
+    const text = JSON.stringify([audit, res.body])
+    assert.equal(text.includes(SYN_DATE) || text.includes(HUMAN_NOTE), false, 'values-free')
   })
 
   await run('W4b-2: the admin gate — anonymous 401, read-tier 403, ZERO records IO on refusal', async () => {

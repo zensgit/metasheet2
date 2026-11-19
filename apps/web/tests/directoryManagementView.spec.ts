@@ -1,14 +1,79 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, nextTick, type App } from 'vue'
+import { createApp, nextTick, ref, type App } from 'vue'
+import { compileStyle, parse } from 'vue/compiler-sfc'
 import { ElMessageBox } from 'element-plus'
 import DirectoryManagementView from '../src/views/DirectoryManagementView.vue'
+import DirectoryOperationResults from '../src/components/directory/DirectoryOperationResults.vue'
+import { directoryManagementKey, type useDirectoryManagement } from '../src/components/directory/useDirectoryManagement'
 import AttendanceDingTalkMicroappHelpView from '../src/views/AttendanceDingTalkMicroappHelpView.vue'
+
+const directoryStyleSources = import.meta.glob<string>([
+  '../src/views/DirectoryManagementView.vue',
+  '../src/components/directory/Directory*.vue',
+  '!../src/components/directory/DirectoryDeprovisionEvidencePanel.vue',
+  '!../src/components/directory/DirectoryIntegrationIdentityPanel.vue',
+  '!../src/components/directory/DirectoryOptionPicker.vue',
+], { eager: true, query: '?raw', import: 'default' })
+
+const directoryStyleComponents: Record<string, object> = {
+  '../src/views/DirectoryManagementView.vue': DirectoryManagementView,
+  ...import.meta.glob<object>('../src/components/directory/Directory*.vue', { eager: true, import: 'default' }),
+}
+
+function compileDirectoryStyle(filename: string, source: string): string {
+  const style = parse(source).descriptor.styles.find((entry) => entry.src?.endsWith('directory-admin.css'))
+  expect(style).toBeDefined()
+  expect(style?.scoped).toBe(true)
+  const scopeId = Reflect.get(directoryStyleComponents[filename], '__scopeId') as string | undefined
+  expect(scopeId).toMatch(/^data-v-/)
+  const stylesheetUrl = new URL(style!.src!, new URL(filename, import.meta.url))
+  const compiled = compileStyle({
+    source: readFileSync(fileURLToPath(stylesheetUrl), 'utf8'),
+    filename,
+    id: scopeId!,
+    scoped: style?.scoped,
+  })
+  expect(compiled.errors).toEqual([])
+  return compiled.code
+}
 
 const apiFetchMock = vi.fn()
 
 vi.mock('../src/utils/api', () => ({
   apiFetch: (...args: unknown[]) => apiFetchMock(...args),
 }))
+
+describe('directory component style isolation', () => {
+  it('covers the view and every extracted section', () => {
+    expect(Object.keys(directoryStyleSources)).toEqual(expect.arrayContaining([
+      '../src/views/DirectoryManagementView.vue',
+      '../src/components/directory/DirectoryAccountsSection.vue',
+    ]))
+  })
+
+  it.each(Object.entries(directoryStyleSources))('keeps shared styles scoped in %s', (filename, source) => {
+    const stylesheet = document.createElement('style')
+    const inside = document.createElement('button')
+    const outside = document.createElement('button')
+    stylesheet.textContent = compileDirectoryStyle(filename, source)
+    inside.className = 'directory-admin__button'
+    inside.setAttribute(Reflect.get(directoryStyleComponents[filename], '__scopeId'), '')
+    outside.className = 'directory-admin__button'
+    document.body.append(inside, outside)
+    const outsideBackground = getComputedStyle(outside).backgroundColor
+    document.head.append(stylesheet)
+    try {
+      expect(getComputedStyle(inside).backgroundColor).toBe('rgb(29, 78, 216)')
+      expect(getComputedStyle(outside).backgroundColor).toBe(outsideBackground)
+    } finally {
+      stylesheet.remove()
+      inside.remove()
+      outside.remove()
+    }
+  })
+})
 
 async function flushUi(cycles = 6): Promise<void> {
   for (let index = 0; index < cycles; index += 1) {
@@ -370,7 +435,9 @@ describe('DirectoryManagementView', () => {
   let scrollIntoViewMock = vi.fn()
 
   beforeEach(() => {
+    window.history.replaceState({}, '', '/admin/directory')
     apiFetchMock.mockReset()
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     scrollIntoViewMock = vi.fn()
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
       configurable: true,
@@ -391,6 +458,647 @@ describe('DirectoryManagementView', () => {
     window.history.replaceState({}, '', '/')
     app = null
     container = null
+    vi.restoreAllMocks()
+  })
+
+  it('groups the nine integration actions once by purpose without changing their enabled state', async () => {
+    mockInitialLoad([], [])
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const groups = [
+      ['directory-connection-settings', ['保存变更', '测试连通性']],
+      ['directory-notification-settings', ['测试工作通知', '保存 Agent ID']],
+      ['directory-approval-settings', ['生成随机密钥', '保存对外访问地址']],
+      ['directory-sync-actions', ['预览同步', '手动同步', '后台同步']],
+    ] as const
+    for (const [testId, labels] of groups) {
+      const group = container!.querySelector(`[data-testid="${testId}"]`)!
+      expect(group).toBeInstanceOf(HTMLElement)
+      for (const label of labels) {
+        expect(Array.from(container!.querySelectorAll('button')).filter((button) => button.textContent?.trim() === label)).toHaveLength(1)
+        expect(findButtonByLabel(group as HTMLElement, label)).toBeTruthy()
+      }
+    }
+    expect(findButtonByLabel(container!, '保存 Agent ID')?.disabled).toBe(true)
+    expect(findButtonByLabel(container!, '手动同步')?.disabled).toBe(false)
+    expect(findButtonByLabel(container!, '生成随机密钥')?.classList.contains('directory-admin__button--danger')).toBe(true)
+    expect(container!.querySelector('#directory-panel-sync [data-testid="directory-sync-actions"]')).not.toBeNull()
+    expect(container!.querySelector('#directory-panel-settings [data-testid="directory-connection-settings"]')).not.toBeNull()
+  })
+
+  it('shows overview cards with explicit count scopes instead of subtracting incompatible totals', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [createIntegration({
+        stats: { departmentCount: 12, accountCount: 1, linkedCount: 88, pendingLinkCount: 4, lastRunStatus: 'completed' },
+      })] } }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+      .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([
+        { id: 'alert-overview', level: 'warning', code: 'TEST_ALERT', message: 'Test alert', createdAt: '2026-04-08T01:00:00Z', acknowledgedAt: null },
+      ])))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([
+        createAccount(),
+        createAccount({ id: 'pending', linkStatus: 'pending' }),
+      ], { total: 50 })))
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const cards = container!.querySelector('[data-testid="directory-overview-cards"]')!
+    expect(cards.querySelectorAll('article')).toHaveLength(8)
+    const numbers = Array.from(cards.querySelectorAll('strong')).map((node) => node.textContent)
+    expect(numbers.slice(0, 5)).toEqual(['12', '1', '88', '4', '1'])
+    expect(cards.textContent).toContain('不是全量统计')
+    expect(cards.textContent).toContain('自动同步已启用')
+    expect(cards.textContent).toContain('待确认 1 条')
+    expect(cards.textContent).toContain('TEST_ALERT')
+    expect(apiFetchMock).toHaveBeenCalledTimes(6)
+  })
+
+  it.each(['loading', 'out-of-order'])('keeps overview data bound to its current integration during %s responses', async (mode) => {
+    let release!: () => void
+    const pending = new Promise<void>((resolve) => { release = resolve })
+    const slowId = mode === 'loading' ? 'dir-2' : 'dir-1'
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/admin/directory/integrations') {
+        return createJsonResponse({ ok: true, data: { items: [createIntegration({ name: 'Alpha' }), createIntegration({ id: 'dir-2', name: 'Beta' })] } })
+      }
+      const id = url.includes('/dir-2/') ? 'dir-2' : 'dir-1'
+      if (id === slowId && /\/(accounts|alerts|schedule)[?]?/.test(url)) await pending
+      if (url.includes('/accounts?')) {
+        return createJsonResponse(createAccountListPayload(
+          Array.from({ length: id === 'dir-1' ? 3 : 1 }, (_, index) => createAccount({ id: `${id}-${index}` })),
+        ))
+      }
+      if (url.includes('/alerts?')) {
+        return createJsonResponse(createAlertListPayload([{ id, code: id === 'dir-1' ? 'A_ONLY' : 'B_ONLY', level: 'warning', createdAt: '2026-04-08T01:00:00Z', acknowledgedAt: null }]))
+      }
+      if (url.includes('/schedule')) return createJsonResponse(createScheduleSnapshotPayload({ syncEnabled: id === 'dir-1', observationStatus: id === 'dir-1' ? 'awaiting_first_run' : 'disabled' }))
+      return createJsonResponse({ ok: true, data: { items: [], total: 0 } })
+    })
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    const unmatched = () => container!.querySelector('[data-overview="unmatched"] strong')?.textContent
+    const alerts = () => container!.querySelector('[data-overview="alerts"]')?.textContent
+    if (mode === 'loading') expect(unmatched()).toBe('3')
+    const beta = Array.from(container!.querySelectorAll<HTMLButtonElement>('.directory-admin__item')).find((button) => button.textContent?.includes('用途：Beta'))!
+    expect(beta).toBeTruthy()
+    beta.click()
+    await flushUi()
+    if (mode === 'loading') {
+      expect(unmatched()).toBe('加载中...')
+      expect(alerts()).toContain('加载中...')
+      expect(alerts()).not.toContain('A_ONLY')
+    } else {
+      expect(unmatched()).toBe('1')
+      expect(alerts()).toContain('B_ONLY')
+    }
+    release()
+    await flushUi(12)
+    expect(unmatched()).toBe('1')
+    expect(alerts()).toContain('B_ONLY')
+    expect(alerts()).not.toContain('A_ONLY')
+    expect(container!.querySelector('[data-overview="schedule"]')?.textContent).toContain('仅手动同步')
+  })
+
+  it('ignores an earlier member search when a newer search in the same integration has finished', async () => {
+    let release!: () => void
+    const pending = new Promise<void>((resolve) => { release = resolve })
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/admin/directory/integrations') return createJsonResponse({ ok: true, data: { items: [createIntegration()] } })
+      if (url.includes('/accounts?')) {
+        if (!url.includes('q=newer')) await pending
+        return createJsonResponse(createAccountListPayload([createAccount({ name: url.includes('q=newer') ? 'Newer result' : 'Stale result', linkStatus: url.includes('q=newer') ? 'linked' : 'unmatched' })]))
+      }
+      if (url.includes('/schedule')) return createJsonResponse(createScheduleSnapshotPayload())
+      return createJsonResponse({ ok: true, data: { items: [], total: 0 } })
+    })
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    const search = container!.querySelector<HTMLInputElement>('input[placeholder="搜索姓名 / 邮箱 / 手机 / 钉钉 ID / 本地用户"]')!
+    search.value = 'newer'
+    search.dispatchEvent(new Event('input', { bubbles: true }))
+    search.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }))
+    await flushUi()
+    expect(container!.querySelector('[data-overview="unmatched"] strong')?.textContent).toBe('0')
+    expect(container!.querySelector('.directory-admin__account-head strong')?.textContent).toBe('Newer result')
+    release()
+    await flushUi()
+    expect(container!.querySelector('[data-overview="unmatched"] strong')?.textContent).toBe('0')
+    expect(container!.querySelector('.directory-admin__account-head strong')?.textContent).toBe('Newer result')
+  })
+
+  it.each([200, 404, 'network'] as const)('does not restore an obsolete deep-link focus after reset (result %s)', async (status) => {
+    window.history.replaceState({}, '', '/admin/directory?integrationId=dir-1&accountId=late-account')
+    let release!: () => void
+    const pending = new Promise<void>((resolve) => { release = resolve })
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/admin/directory/integrations') return createJsonResponse({ ok: true, data: { items: [createIntegration({ name: 'Alpha' }), createIntegration({ id: 'dir-2', name: 'Beta' })] } })
+      if (url === '/api/admin/directory/accounts/late-account') {
+        await pending
+        if (status === 'network') throw new Error('Obsolete navigation read failed')
+        return createJsonResponse({ ok: status === 200, data: { account: createAccount({ id: 'late-account', externalUserId: 'obsolete-query' }) } }, status)
+      }
+      if (url.includes('/schedule')) return createJsonResponse({ ok: true, data: { snapshot: null } })
+      return createJsonResponse({ ok: true, data: { items: [], total: 0 } })
+    })
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    clickButton(container!, '新建集成')
+    await flushUi()
+    release()
+    await flushUi()
+    expect(container!.textContent).not.toContain('Obsolete navigation read failed')
+    expect(container!.querySelector('.directory-admin__focus-card')).toBeNull()
+    expect(container!.querySelector('.directory-admin__route-banner')).toBeNull()
+    const beta = Array.from(container!.querySelectorAll<HTMLButtonElement>('.directory-admin__item')).find((button) => button.textContent?.includes('用途：Beta'))!
+    beta.click()
+    await flushUi()
+    const search = container!.querySelector<HTMLInputElement>('input[placeholder="搜索姓名 / 邮箱 / 手机 / 钉钉 ID / 本地用户"]')!
+    expect(search.value).toBe('')
+    expect(apiFetchMock.mock.calls.some(([url]) => String(url).includes('q=obsolete-query'))).toBe(false)
+    expect(container!.querySelector('.directory-admin__focus-card')).toBeNull()
+    expect(container!.querySelector('.directory-admin__route-banner')).toBeNull()
+  })
+
+  it('recovers the created integration and loads its detail after the first list refresh fails', async () => {
+    const created = createIntegration({ id: 'dir-new', name: '新建测试集成' })
+    const member = createAccount({ integrationId: created.id, name: '新集成成员' })
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { integration: created } }))
+      .mockResolvedValueOnce(createApiErrorResponse('列表暂不可用'))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [createIntegration(), created] } }))
+      .mockImplementation(async (url: string) => {
+        if (url.includes('/accounts?')) return createJsonResponse(createAccountListPayload([member]))
+        if (url.includes('/schedule')) return createJsonResponse(createScheduleSnapshotPayload({ integrationId: created.id }))
+        if (url.includes('/alerts?')) return createJsonResponse(createAlertListPayload([]))
+        if (url.includes('/review-items')) return createJsonResponse(createReviewItemsPayload([]))
+        return createJsonResponse({ ok: true, data: { items: [] } })
+      })
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    clickButton(container!, '新建集成')
+    await flushUi()
+    clickButton(container!, '创建集成')
+    await flushUi()
+    expect(apiFetchMock.mock.calls[1]).toEqual(['/api/admin/directory/integrations', expect.objectContaining({ method: 'POST' })])
+    expect(findButtonByLabel(container!, '重试加载集成')).toBeDefined()
+    expect(apiFetchMock).toHaveBeenCalledTimes(3)
+    clickButton(container!, '重试加载集成')
+    await flushUi()
+    expect(findAccountsSection(container!).textContent).toContain('新集成成员')
+    expect(container!.querySelector('[data-overview="unmatched"] strong')?.textContent).toBe('1')
+    expect(container!.querySelector('[data-overview="alerts"] strong')?.textContent).toBe('0')
+    expect(container!.querySelector('[data-overview="schedule"] strong')?.textContent).toBe('等待首次自动触发')
+    const detailUrls = apiFetchMock.mock.calls.slice(4).map(([url]) => String(url))
+    expect(detailUrls).toHaveLength(5)
+    expect(detailUrls.every((url) => url.startsWith('/api/admin/directory/integrations/dir-new/'))).toBe(true)
+  })
+
+  it('shows failed overview reads as unavailable rather than successful zero counts', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/admin/directory/integrations') return createJsonResponse({ ok: true, data: { items: [createIntegration()] } })
+      if (url.includes('/accounts?') || url.includes('/alerts?') || url.includes('/schedule')) return createJsonResponse({ ok: false, error: { code: 'TEST_READ_FAILED', message: 'Read failed' } }, 503)
+      return createJsonResponse({ ok: true, data: { items: [], total: 0 } })
+    })
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    expect(container!.querySelector('[data-overview="unmatched"] strong')?.textContent).toBe('加载失败')
+    expect(container!.querySelector('[data-overview="alerts"] strong')?.textContent).toBe('加载失败')
+    expect(container!.querySelector('[data-overview="schedule"] strong')?.textContent).toBe('加载失败')
+    expect(container!.querySelector('[data-overview="alerts"] small')).toBeNull()
+  })
+
+  it('renders key regeneration in a scoped warning color rather than the base button color', async () => {
+    mockInitialLoad([], [])
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    const stylesheet = document.createElement('style')
+    stylesheet.textContent = Object.entries(directoryStyleSources).map(([filename, source]) => compileDirectoryStyle(filename, source)).join('\n')
+    document.head.append(stylesheet)
+    try {
+      const button = findButtonByLabel(container!, '生成随机密钥')!
+      expect(getComputedStyle(button).color).toBe('rgb(185, 28, 28)')
+      expect(getComputedStyle(button).backgroundColor).toBe('rgb(254, 242, 242)')
+      expect(getComputedStyle(button).borderTopColor).toBe('rgb(185, 28, 28)')
+    } finally {
+      stylesheet.remove()
+    }
+  })
+
+  it('filters account states on the current page without changing requests, totals or review selection', async () => {
+    const items = [
+      createAccount({ id: 'linked', name: 'Linked', linkStatus: 'linked', reviewNote: 'unbound by admin', localUser: { id: 'linked-user', name: 'Linked' } }),
+      createAccount({ id: 'pending', name: 'Pending', linkStatus: 'pending' }),
+      createAccount({ id: 'unmatched', name: 'Unmatched' }),
+      createAccount({ id: 'manual', name: 'Manual', linkStatus: 'pending', reviewNote: 'unbound by admin', reviewedBy: null }),
+      createAccount({ id: 'reviewed', name: 'Reviewed', reviewedBy: 'admin-1' }),
+    ]
+    mockInitialLoad([], items)
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    const initialCalls = apiFetchMock.mock.calls.length
+    const filter = container!.querySelector<HTMLSelectElement>('[aria-label="本页成员状态"]')!
+    expect(Array.from(filter.options).map((option) => option.value)).toEqual(['all', 'linked', 'pending', 'unmatched', 'manual_unbound'])
+    const expected = [
+      ['linked', ['Linked']],
+      ['pending', ['Pending', 'Manual']],
+      ['unmatched', ['Unmatched', 'Reviewed']],
+      ['manual_unbound', ['Manual']],
+      ['all', ['Linked', 'Pending', 'Unmatched', 'Manual', 'Reviewed']],
+    ] as const
+    for (const [state, names] of expected) {
+      filter.value = state
+      filter.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi()
+      expect(Array.from(container!.querySelectorAll('.directory-admin__account-head strong')).map((node) => node.textContent)).toEqual(names)
+    }
+    expect(apiFetchMock).toHaveBeenCalledTimes(initialCalls)
+    expect(container!.querySelector('.directory-admin__pagination')?.textContent).toContain('/ 5')
+    expect(container!.querySelector('[data-testid="directory-account-filter-scope"]')?.textContent).toContain('不改变分页总数或待处理批量选择')
+    const more = container!.querySelector<HTMLDetailsElement>('.directory-admin__account-more')!
+    expect(more.open).toBe(false)
+    expect(more.querySelector('summary')?.textContent).toBe('更多操作')
+    expect(findButtonByLabel(more, '解除绑定')).not.toBeNull()
+  })
+
+  it('distinguishes an empty current-page state match from an empty directory and resets the filter for a new draft', async () => {
+    mockInitialLoad([], [createAccount()])
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    const filter = container!.querySelector<HTMLSelectElement>('[aria-label="本页成员状态"]')!
+    filter.value = 'linked'
+    filter.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect(container!.textContent).toContain('当前页没有符合状态的成员')
+    expect(container!.querySelector('.directory-admin__pagination')?.textContent).toContain('/ 1')
+    clickButton(container!, '新建集成')
+    await flushUi()
+    expect(container!.querySelector('#directory-panel-settings')?.getAttribute('style')).not.toContain('display: none')
+    expect(apiFetchMock).toHaveBeenCalledTimes(6)
+  })
+
+  it('clears all three one-time credential results without persistence or requests', async () => {
+    const packets = [{ userId: 'packet-user', name: 'Packet', username: 'packet', temporaryPassword: 'Test-only-password', onboarding: null }]
+    const context = {
+      manualAdmissionResult: ref<Record<string, unknown> | null>({ userId: 'manual-user', accountId: 'manual-account', integrationId: 'dir-1', accountName: 'Manual', username: 'manual', bound: true, temporaryPassword: 'Test-only-manual' }),
+      autoAdmissionOnboardingPackets: ref([...packets]),
+      batchAdmissionOnboardingPackets: ref([...packets]),
+      buildUserManagementLocation: () => '/admin/users',
+      clearManualAdmissionResult: () => { context.manualAdmissionResult.value = null },
+      clearAutoAdmissionOnboardingPackets: () => { context.autoAdmissionOnboardingPackets.value = [] },
+      clearBatchAdmissionOnboardingPackets: () => { context.batchAdmissionOnboardingPackets.value = [] },
+    }
+    const storage = vi.spyOn(Storage.prototype, 'setItem')
+    const locationBefore = window.location.href
+    app = createApp(DirectoryOperationResults)
+    app.provide(directoryManagementKey, context as unknown as ReturnType<typeof useDirectoryManagement>)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="directory-operation-results"]')).toHaveLength(1)
+    expect(container!.querySelectorAll('.directory-admin__progress-card')).toHaveLength(3)
+    expect(container!.textContent).toContain('Test-only-password')
+    clickButton(container!, '关闭全部结果')
+    await flushUi()
+    expect(container!.querySelector('[data-testid="directory-operation-results"]')).toBeNull()
+    expect(context.manualAdmissionResult.value).toBeNull()
+    expect(context.autoAdmissionOnboardingPackets.value).toEqual([])
+    expect(context.batchAdmissionOnboardingPackets.value).toEqual([])
+    expect(container!.textContent).not.toContain('Test-only')
+    expect(storage).not.toHaveBeenCalled()
+    expect(apiFetchMock).not.toHaveBeenCalled()
+    expect(window.location.href).toBe(locationBefore)
+  })
+
+  it('styles the mounted view and extracted sections without styling outside elements', async () => {
+    mockInitialLoad([], [])
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const stylesheet = document.createElement('style')
+    stylesheet.textContent = Object.entries(directoryStyleSources).map(([filename, source]) => compileDirectoryStyle(filename, source)).join('\n')
+    const outside = document.createElement('button')
+    outside.className = 'directory-admin__button'
+    document.body.append(outside)
+    const outsideBackground = getComputedStyle(outside).backgroundColor
+    document.head.append(stylesheet)
+    try {
+      const pageButton = container!.querySelector<HTMLButtonElement>('header button.directory-admin__button:not(.directory-admin__button--secondary)')!
+      const formInput = container!.querySelector<HTMLInputElement>('.directory-admin__form-grid .directory-admin__input')!
+      const integrationDetail = container!.querySelector<HTMLElement>('.directory-admin__item small')!
+      expect(getComputedStyle(pageButton).backgroundColor).toBe('rgb(29, 78, 216)')
+      container!.querySelector<HTMLButtonElement>('#directory-tab-sync')!.click()
+      await nextTick()
+      const syncPanel = container!.querySelector<HTMLElement>('#directory-panel-sync')!
+      expect(getComputedStyle(syncPanel).display).toBe('flex')
+      expect(getComputedStyle(syncPanel).gap).toBe('20px')
+      expect(getComputedStyle(formInput).borderTopWidth).toBe('1px')
+      expect(getComputedStyle(formInput).borderTopColor).toBe('rgb(203, 213, 225)')
+      expect(getComputedStyle(integrationDetail).color).toBe('rgb(71, 85, 105)')
+      expect(getComputedStyle(outside).backgroundColor).toBe(outsideBackground)
+    } finally {
+      stylesheet.remove()
+      outside.remove()
+    }
+  })
+
+  it('changes detail tabs without reloading data and restores the selected tab from the URL', async () => {
+    window.history.replaceState({}, '', '/admin/directory?tab=organization&keep=one#tree')
+    mockInitialLoad([], [])
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    expect(container!.querySelector('#directory-tab-organization')?.getAttribute('aria-selected')).toBe('true')
+    const requestCount = apiFetchMock.mock.calls.length
+    const nameInput = container!.querySelector<HTMLInputElement>('.directory-admin__form-grid input')!
+    nameInput.value = 'draft-name'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    for (const tab of ['accounts', 'settings', 'sync', 'organization']) {
+      container!.querySelector<HTMLButtonElement>(`#directory-tab-${tab}`)!.click()
+      await flushUi(2)
+      expect(container!.querySelector(`#directory-tab-${tab}`)?.getAttribute('aria-selected')).toBe('true')
+      expect(getComputedStyle(container!.querySelector<HTMLElement>(`#directory-panel-${tab}`)!).display).not.toBe('none')
+    }
+    expect(apiFetchMock).toHaveBeenCalledTimes(requestCount)
+    expect(nameInput.value).toBe('draft-name')
+    expect(window.location.search).toContain('tab=organization')
+    expect(window.location.search).toContain('keep=one')
+    expect(window.location.hash).toBe('#tree')
+    app.unmount()
+    mockInitialLoad([], [])
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    expect(container!.querySelector('#directory-tab-organization')?.getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('supports keyboard tab navigation and opens settings when creating an integration', async () => {
+    mockInitialLoad([], [])
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    const overview = container!.querySelector<HTMLButtonElement>('#directory-tab-overview')!
+    overview.focus()
+    overview.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+    await flushUi(2)
+    expect(document.activeElement?.id).toBe('directory-tab-accounts')
+    document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }))
+    await flushUi(2)
+    expect(document.activeElement?.id).toBe('directory-tab-settings')
+    expect(window.location.search).toContain('tab=settings')
+    clickButton(container!, '新建集成')
+    await flushUi(2)
+    expect(container!.querySelector('#directory-tab-settings')?.getAttribute('aria-selected')).toBe('true')
+    expect(getComputedStyle(container!.querySelector<HTMLElement>('#directory-panel-settings')!).display).not.toBe('none')
+  })
+
+  it('keeps integration name order and selection after saving and separates paused and unknown states', async () => {
+    const zeta = createIntegration({ id: 'dir-z', name: 'Zeta' })
+    const alpha = createIntegration({ id: 'dir-a', name: 'Alpha' })
+    const paused = createIntegration({ id: 'dir-p', name: 'Paused', status: 'paused' })
+    const unknown = createIntegration({ id: 'dir-u', name: 'Unknown', status: 'inactive' })
+    let items = [zeta, paused, unknown, alpha]
+    apiFetchMock.mockImplementation(async (url: string, options?: { method?: string }) => {
+      if (options?.method === 'PUT') {
+        items = [unknown, alpha, paused, zeta]
+        return createJsonResponse({ ok: true, data: { integration: zeta } })
+      }
+      return createJsonResponse({ ok: true, data: { items: url === '/api/admin/directory/integrations' ? items : [] } })
+    })
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    const readNames = () => Array.from(container!.querySelectorAll('.directory-admin__item')).map((item) => item.querySelector('span')?.textContent)
+    expect(readNames()).toEqual(['用途：Alpha', '用途：Zeta', '用途：Unknown', '用途：Paused'])
+    const pausedGroup = container!.querySelector<HTMLDetailsElement>('.directory-admin__integration-group:is(details)')!
+    expect(pausedGroup.open).toBe(false)
+    expect(pausedGroup.querySelector('[data-testid="directory-integration-status"]')?.textContent).toBe('已暂停')
+    expect(container!.querySelectorAll('[data-testid="directory-integration-status"]')[2].textContent).toBe('状态未知')
+    container!.querySelector<HTMLButtonElement>('#directory-tab-settings')!.click()
+    clickButton(container!, '保存变更')
+    await flushUi(16)
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/integrations/dir-z', expect.objectContaining({ method: 'PUT' }))
+    expect(readNames()).toEqual(['用途：Alpha', '用途：Zeta', '用途：Unknown', '用途：Paused'])
+    expect(container!.querySelector('.directory-admin__item--active')?.textContent).toContain('用途：Zeta')
+    pausedGroup.open = true
+    pausedGroup.querySelector<HTMLButtonElement>('button')!.click()
+    await flushUi()
+    expect(container!.querySelector('.directory-admin__item--active')?.textContent).toContain('用途：Paused')
+  })
+
+  it('cancels a single unbind without sending a request or changing the account', async () => {
+    mockInitialLoad([], [createLinkedAccount('account-1', 'linked-member', { id: 'user-1', name: 'Member', email: 'member@example.com' })])
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    const requests = apiFetchMock.mock.calls.length
+    const accountBefore = container!.querySelector('.directory-admin__account')!.textContent
+    vi.mocked(ElMessageBox.confirm).mockRejectedValueOnce('cancel')
+    clickButton(container!, '解除绑定')
+    await flushUi()
+    expect(ElMessageBox.confirm).toHaveBeenCalledWith(
+      expect.stringContaining('已登录的会话不会被结束'),
+      '确认解除绑定',
+      expect.objectContaining({ confirmButtonText: '确认解除绑定', cancelButtonText: '取消' }),
+    )
+    expect(apiFetchMock).toHaveBeenCalledTimes(requests)
+    expect(container!.querySelector('.directory-admin__account')?.textContent).toBe(accountBefore)
+  })
+
+  it('explains a second unbind while the first request is pending', async () => {
+    const local = { id: 'user-a', name: 'Member', email: 'member@example.com' }
+    mockInitialLoad([], [
+      createLinkedAccount('account-a', 'first member', local),
+      createLinkedAccount('account-b', 'second member', { ...local, id: 'user-b' }),
+    ])
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    let finish!: (response: unknown) => void
+    apiFetchMock.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+    const [first, second] = Array.from(findAccountsSection(container!).querySelectorAll<HTMLElement>('.directory-admin__account'))
+    clickButton(first, '解除绑定')
+    await flushUi()
+    clickButton(second, '解除绑定')
+    await flushUi()
+    expect(container!.textContent).toContain('已有解绑操作正在处理，请稍后再试')
+    expect(ElMessageBox.confirm).toHaveBeenCalledTimes(1)
+    expect(apiFetchMock.mock.calls.filter(([url]) => String(url).endsWith('/unbind')).map(([url]) => url)).toEqual([
+      '/api/admin/directory/accounts/account-a/unbind',
+    ])
+    finish(createApiErrorResponse('操作结束'))
+    await flushUi()
+  })
+
+  it('cancels a batch unbind without sending a request or clearing the selection', async () => {
+    const item = createInactiveLinkedReviewItem('account-1', 'inactive-member', { id: 'user-1', name: 'Member', email: 'member@example.com' })
+    mockInitialLoad([item], [])
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    const checkbox = readReviewCheckboxes(container!)[0]
+    expect(checkbox).toBeDefined()
+    checkbox.checked = true
+    checkbox.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+    const requests = apiFetchMock.mock.calls.length
+    vi.mocked(ElMessageBox.confirm).mockRejectedValueOnce('cancel')
+    clickButton(container!, '批量停权处理')
+    await flushUi()
+    expect(ElMessageBox.confirm).toHaveBeenCalledWith(expect.stringContaining('组织成员身份'), '确认解除绑定', expect.any(Object))
+    expect(apiFetchMock).toHaveBeenCalledTimes(requests)
+    expect(checkbox.checked).toBe(true)
+  })
+
+  it.each(['single', 'batch'])('does not submit a delayed %s unbind after the context changes', async (kind) => {
+    const localUser = { id: 'user-1', name: 'Member', email: 'member@example.com' }
+    mockInitialLoad(
+      [createInactiveLinkedReviewItem('account-1', 'inactive-member', localUser)],
+      [createLinkedAccount('account-1', 'linked-member', localUser)],
+    )
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    if (kind === 'batch') {
+      const checkbox = readReviewCheckboxes(container!)[0]
+      checkbox.checked = true
+      checkbox.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi(2)
+    }
+    let confirm!: (value: never) => void
+    vi.mocked(ElMessageBox.confirm).mockReturnValueOnce(new Promise((resolve) => { confirm = resolve }))
+    const requests = apiFetchMock.mock.calls.length
+    clickButton(container!, kind === 'single' ? '解除绑定' : '批量停权处理')
+    await flushUi(2)
+    clickButton(container!, '新建集成')
+    confirm('confirm' as never)
+    await flushUi()
+    expect(apiFetchMock).toHaveBeenCalledTimes(requests)
+    expect(container!.textContent).toContain('页面上下文已变化')
+  })
+
+  it.each(['single', 'batch'])('does not submit a delayed %s unbind after unmounting', async (kind) => {
+    const localUser = { id: 'user-1', name: 'Member', email: 'member@example.com' }
+    mockInitialLoad(
+      [createInactiveLinkedReviewItem('account-1', 'inactive-member', localUser)],
+      [createLinkedAccount('account-1', 'linked-member', localUser)],
+    )
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    if (kind === 'batch') {
+      const checkbox = readReviewCheckboxes(container!)[0]
+      checkbox.checked = true
+      checkbox.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi(2)
+    }
+    let confirm!: (value: never) => void
+    vi.mocked(ElMessageBox.confirm).mockReturnValueOnce(new Promise((resolve) => { confirm = resolve }))
+    const requests = apiFetchMock.mock.calls.length
+    clickButton(container!, kind === 'single' ? '解除绑定' : '批量停权处理')
+    await flushUi(2)
+    app.unmount()
+    app = null
+    confirm('confirm' as never)
+    await flushUi()
+    expect(apiFetchMock).toHaveBeenCalledTimes(requests)
+  })
+
+  it('freezes batch targets and the grant option before asking for confirmation', async () => {
+    const localUser = { id: 'user-1', name: 'Member', email: 'member@example.com' }
+    mockInitialLoad([createInactiveLinkedReviewItem('account-1', 'inactive-member', localUser)], [])
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    const checkbox = readReviewCheckboxes(container!)[0]
+    checkbox.checked = true
+    checkbox.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+    let confirm!: (value: never) => void
+    vi.mocked(ElMessageBox.confirm).mockReturnValueOnce(new Promise((resolve) => { confirm = resolve }))
+    clickButton(container!, '批量停权处理')
+    await flushUi(2)
+    const grantOption = Array.from(container!.querySelectorAll('label')).find((label) => label.textContent?.includes('停权时同时关闭钉钉登录'))!.querySelector<HTMLInputElement>('input')!
+    grantOption.checked = false
+    grantOption.dispatchEvent(new Event('change', { bubbles: true }))
+    checkbox.checked = false
+    checkbox.dispatchEvent(new Event('change', { bubbles: true }))
+    apiFetchMock.mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [], updatedCount: 1, failedCount: 0 } }))
+    mockBatchReload({ reviewItems: [], accounts: [] })
+    confirm('confirm' as never)
+    await flushUi(12)
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/admin/directory/accounts/batch-unbind', {
+      method: 'POST',
+      body: JSON.stringify({ accountIds: ['account-1'], disableDingTalkGrant: true }),
+    })
+  })
+
+  it('shows member deep links even when an incoming URL requests another tab', async () => {
+    const account = createAccount()
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/admin/directory/integrations') return createJsonResponse({ ok: true, data: { items: [createIntegration()] } })
+      if (url === '/api/admin/directory/accounts/account-1') return createJsonResponse({ ok: true, data: { account } })
+      if (url.includes('/accounts?')) return createJsonResponse(createAccountListPayload([account]))
+      if (url.includes('/review-items')) return createJsonResponse(createReviewItemsPayload([]))
+      return createJsonResponse({ ok: true, data: { items: [] } })
+    })
+    window.history.replaceState({}, '', '/admin/directory?tab=review&integrationId=dir-1&accountId=account-1')
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(12)
+    expect(container!.querySelector('#directory-tab-accounts')?.getAttribute('aria-selected')).toBe('true')
+    expect(getComputedStyle(container!.querySelector<HTMLElement>('#directory-panel-accounts')!).display).not.toBe('none')
+    container!.querySelector<HTMLButtonElement>('#directory-tab-review')!.click()
+    await flushUi(2)
+    expect(new URL(window.location.href).searchParams.has('accountId')).toBe(false)
+    expect(container!.querySelector('#directory-tab-review')?.getAttribute('aria-selected')).toBe('true')
+    window.history.pushState({}, '', '/admin/directory?tab=settings&integrationId=dir-1&accountId=account-1')
+    await flushUi(12)
+    expect(container!.querySelector('#directory-tab-accounts')?.getAttribute('aria-selected')).toBe('true')
+    expect(getComputedStyle(container!.querySelector<HTMLElement>('#directory-panel-accounts')!).display).not.toBe('none')
+    const requests = apiFetchMock.mock.calls.length
+    window.history.replaceState({}, '', '/admin/directory?tab=review&integrationId=dir-1&accountId=account-1')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await flushUi(2)
+    expect(new URL(window.location.href).searchParams.get('tab')).toBe('accounts')
+    expect(container!.querySelector('#directory-tab-accounts')?.getAttribute('aria-selected')).toBe('true')
+    expect(apiFetchMock).toHaveBeenCalledTimes(requests)
   })
 
   it('distinguishes loading, list failure and confirmed empty, and allows a read-only retry', async () => {
@@ -2213,6 +2921,16 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('https://example.com/invite/abc')
     expect(container?.textContent).toContain('请使用邀请链接加入平台')
     expect(container?.textContent).toContain('已创建本地用户并完成绑定')
+    expect(container!.querySelector('[data-testid="directory-operation-results"]')).not.toBeNull()
+    app.unmount()
+    mockInitialLoad([], [])
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    expect(container!.querySelector('[data-testid="directory-operation-results"]')).toBeNull()
+    expect(container!.textContent).not.toContain('Temp#123456')
+    expect(container!.textContent).not.toContain('https://example.com/invite/abc')
   })
 
   it('supports no-email manual admission with username/mobile and shows temporary-password onboarding', async () => {
@@ -2610,7 +3328,7 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).not.toContain(LOGIN_NAME_RULE_ZH)
   })
 
-  it('focuses a reviewed account and quick-binds it from the accounts banner', async () => {
+  it.each([false, true])('focuses a reviewed account and quick-binds it with visible grant=%s', async (enableGrant) => {
     apiFetchMock
       .mockResolvedValueOnce(createJsonResponse({
         ok: true,
@@ -2751,7 +3469,19 @@ describe('DirectoryManagementView', () => {
     const focusedAccountBindInput = focusedAccount?.querySelector('input[placeholder="例如 user-123 或 alpha@example.com"]') as HTMLInputElement | null
     expect(focusedAccountBindInput?.value).toBe('alpha@example.com')
 
-    const quickBindButton = Array.from(focusCard?.querySelectorAll('button') ?? []).find((button) => button.textContent?.includes('绑定当前成员'))
+    const focusedRow = container!.querySelector('.directory-admin__account--focused')!
+    const quickBindButton = focusedRow.querySelector<HTMLButtonElement>('[data-testid="directory-focused-bind"]')!
+    const targetInput = focusedRow.querySelector('input[placeholder="例如 user-123 或 alpha@example.com"]')!
+    const grantInput = focusedRow.querySelector<HTMLInputElement>('input[type="checkbox"]')!
+    expect(targetInput.closest('details')).toBeNull()
+    expect(grantInput.closest('details')).toBeNull()
+    expect(quickBindButton.closest('.directory-admin__form-grid')).toBe(targetInput.closest('.directory-admin__form-grid'))
+    expect(quickBindButton.closest('.directory-admin__form-grid')).toBe(grantInput.closest('.directory-admin__form-grid'))
+    expect(focusCard?.querySelector('[data-testid="directory-focused-bind"]')).toBeNull()
+    expect(grantInput.checked).toBe(true)
+    grantInput.checked = enableGrant
+    grantInput.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
     expect(quickBindButton).toBeTruthy()
     quickBindButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     await flushUi(8)
@@ -2762,7 +3492,7 @@ describe('DirectoryManagementView', () => {
         method: 'POST',
         body: JSON.stringify({
           localUserRef: 'alpha@example.com',
-          enableDingTalkGrant: true,
+          enableDingTalkGrant: enableGrant,
         }),
       }),
     )
@@ -2829,6 +3559,13 @@ describe('DirectoryManagementView', () => {
 
     const userLink = Array.from(container!.querySelectorAll('a')).find((candidate) => candidate.textContent?.includes('前往用户管理'))
     expect(userLink?.getAttribute('href')).toBe('/admin/users?userId=user-1&source=directory-sync&integrationId=dir-1&accountId=account-focus')
+    const destination = userLink!.getAttribute('href')!
+    const requests = apiFetchMock.mock.calls.length
+    window.history.pushState({}, '', destination)
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await flushUi()
+    expect(window.location.pathname + window.location.search).toBe(destination)
+    expect(apiFetchMock).toHaveBeenCalledTimes(requests)
   })
 
   it('clears stale focus and shows a specific error when query targets a missing integration', async () => {
@@ -2941,7 +3678,7 @@ describe('DirectoryManagementView', () => {
     expect(retainButton).toBeTruthy()
     retainButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     await flushUi(4)
-    expect(window.location.search).toBe('?integrationId=dir-1')
+    expect(window.location.search).toBe('?integrationId=dir-1&tab=accounts')
     expect(container?.textContent).toContain('已保留当前目录上下文 DingTalk CN')
     expect(findAccountsSection(container!).querySelector('.directory-admin__route-banner')).toBeNull()
   })
@@ -5225,7 +5962,7 @@ describe('DirectoryManagementView', () => {
     await flushUi()
 
     clickButton(container!, '解除绑定')
-    await flushUi(8)
+    await flushUi(12)
 
     expect(apiFetchMock).toHaveBeenCalledWith(
       '/api/admin/directory/accounts/account-1/unbind',
@@ -7720,7 +8457,7 @@ describe('DirectoryManagementView', () => {
     const batchButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('批量停权处理'))
     expect(batchButton).toBeTruthy()
     batchButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await flushUi(8)
+    await flushUi(12)
 
     expect(apiFetchMock).toHaveBeenCalledWith(
       '/api/admin/directory/accounts/batch-unbind',
@@ -7890,7 +8627,7 @@ describe('DirectoryManagementView', () => {
     const batchButton = findButton('批量停权处理')
     expect(batchButton?.textContent).toContain('批量停权处理 (3)')
     batchButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await flushUi(8)
+    await flushUi(12)
 
     expect(apiFetchMock).toHaveBeenCalledWith(
       '/api/admin/directory/accounts/batch-unbind',
@@ -8066,7 +8803,7 @@ describe('DirectoryManagementView', () => {
     }
     await flushUi(2)
     findButton('批量停权处理')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await flushUi(8)
+    await flushUi(12)
 
     const statusEl = container!.querySelector('.directory-admin__status')
     expect(statusEl?.className).toContain('directory-admin__status--error')
@@ -8223,7 +8960,7 @@ describe('DirectoryManagementView', () => {
     const batchButton = findButton('批量停权处理')
     expect(batchButton?.textContent).toContain('批量停权处理 (2)')
     batchButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await flushUi(8)
+    await flushUi(12)
 
     const statusEl = container!.querySelector('.directory-admin__status')
     expect(statusEl?.className).toContain('directory-admin__status--error')
@@ -9053,7 +9790,7 @@ describe('DirectoryManagementView', () => {
     await flushUi(2)
     expect(findButtonByLabel(container!, '批量停权处理')?.textContent).toContain('批量停权处理 (2)')
     clickButton(container!, '批量停权处理')
-    await flushUi(8)
+    await flushUi(12)
 
     expect(container?.textContent).toContain('进度 1 / 2')
     expect(container?.textContent).toContain('已停权处理 1 个目录成员，另有 1 个失败：account-2: Failed to unbind directory account')

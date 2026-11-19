@@ -218,6 +218,7 @@ interface Harness {
 const LOCK_STATEMENTS = new Set([
   norm(STOCK_PREP_MEMBERS_LOCK_TIMEOUT_SQL),
   norm(STOCK_PREP_MEMBERS_ADVISORY_LOCK_SQL),
+  'SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))',
   ...STOCK_PREP_MEMBERS_GRANTOR_LOCK_SQL.map(norm),
   norm(STOCK_PREP_MEMBERS_GRANTOR_SHEET_LOCK_SQL),
 ])
@@ -269,6 +270,7 @@ function harness(options: HarnessOptions = {}): Harness {
     if (text === norm(STOCK_PREP_MEMBERS_DELEGATED_ADMIN_HELD_SQL)) {
       return { rows: world.userRoles.filter((row) => row.user_id === params[0] && row.role_id === params[1]).slice(0, 1).map(() => ({ held: 1 })) }
     }
+    if (text.includes('FROM delegated_role_admin_activation')) return { rows: [] }
     if (text.startsWith('SELECT code FROM permissions')) {
       return { rows: (params[0] as string[]).filter((code) => world.catalog.has(code)).map((code) => ({ code })) }
     }
@@ -989,13 +991,14 @@ describe('stock-prep members port (S5b, R-39)', () => {
     expect(STOCK_PREP_MEMBERS_GRANTOR_LOCK_SQL.map(norm)).toEqual(GRANTOR_LOCKS_LITERAL)
     expect(norm(STOCK_PREP_MEMBERS_GRANTOR_SHEET_LOCK_SQL)).toMatch(/^SELECT sp\.sheet_id FROM spreadsheet_permissions sp WHERE sp\.sheet_id = ANY\(\$2::text\[\]\) .* FOR SHARE OF sp$/)
     const timeout = norm(STOCK_PREP_MEMBERS_LOCK_TIMEOUT_SQL)
+    const activationLock = 'SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))'
     const grantor = GRANTOR_LOCKS_LITERAL
     const roleRow = norm(STOCK_PREP_MEMBERS_ROLE_ROW_LOCK_SQL)
     const writes: Array<[string, (h: Harness) => Promise<unknown>, string[]]> = [
-      ['create', (h) => h.port.createCustomRole({ actorId: DELEGATED, name: '甲', permissionCodes: ['stock-prep:read'] }), [timeout, norm(STOCK_PREP_MEMBERS_ADVISORY_LOCK_SQL), ...grantor]],
-      ['update', (h) => h.port.updateCustomRole({ actorId: DELEGATED, roleId: CUSTOM, permissionCodes: ['stock-prep:read', 'stock-prep:operate'] }), [timeout, roleRow, ...grantor]],
-      ['rename', (h) => h.port.updateCustomRole({ actorId: DELEGATED, roleId: CUSTOM, name: '乙' }), [timeout, roleRow, ...grantor]],
-      ['grant', (h) => h.port.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId: CUSTOM, resolveTargets: async () => targets([SHEET_A]).list }), [timeout, roleRow, ...grantor, norm(STOCK_PREP_MEMBERS_GRANTOR_SHEET_LOCK_SQL)]],
+      ['create', (h) => h.port.createCustomRole({ actorId: DELEGATED, name: '甲', permissionCodes: ['stock-prep:read'] }), [timeout, norm(STOCK_PREP_MEMBERS_ADVISORY_LOCK_SQL), activationLock, ...grantor]],
+      ['update', (h) => h.port.updateCustomRole({ actorId: DELEGATED, roleId: CUSTOM, permissionCodes: ['stock-prep:read', 'stock-prep:operate'] }), [timeout, roleRow, activationLock, ...grantor]],
+      ['rename', (h) => h.port.updateCustomRole({ actorId: DELEGATED, roleId: CUSTOM, name: '乙' }), [timeout, roleRow, activationLock, ...grantor]],
+      ['grant', (h) => h.port.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId: CUSTOM, resolveTargets: async () => targets([SHEET_A]).list }), [timeout, roleRow, activationLock, ...grantor, norm(STOCK_PREP_MEMBERS_GRANTOR_SHEET_LOCK_SQL)]],
     ]
     for (const [name, run, prefix] of writes) {
       const h = harness()
@@ -1005,6 +1008,7 @@ describe('stock-prep members port (S5b, R-39)', () => {
       // No table lock, ever; the advisory lock only for a create; the role row only for the role writes.
       expect(h.txStatements.filter((text) => /LOCK\s+TABLE/i.test(text)), name).toEqual([])
       expect(h.txStatements.filter((text) => text === norm(STOCK_PREP_MEMBERS_ADVISORY_LOCK_SQL)).length, name).toBe(name === 'create' ? 1 : 0)
+      expect(h.txParams[2], `${name}: the activation lock covers the grantor`).toEqual([`namespace-admission:${DELEGATED}`])
       if (name !== 'create') {
         expect(h.txParams[1], `${name}: the row locked is the role being written`).toEqual([CUSTOM])
       }

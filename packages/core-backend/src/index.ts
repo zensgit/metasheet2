@@ -89,7 +89,9 @@ import { initializeEventBusService } from './integration/events/event-bus-servic
 import { messageBus } from './integration/messaging/message-bus'
 import { isApiPath } from './auth/api-path-policy'
 import { jwtAuthMiddleware, optionalJwtAuthMiddleware, isPublicFormAuthBypass, isWhitelisted } from './auth/jwt-middleware'
+import { isReadOnlyAuthorizationRequest, readOnlyAuthorizationJwtAuth } from './auth/jwt-middleware'
 import { authService } from './auth/AuthService'
+import { classifyVerifiedSessionPayload } from './auth/strict-dingtalk-entry'
 import { cache } from './cache-init'
 import {
   findObjectSheet as findProvisionedObjectSheet,
@@ -1456,6 +1458,8 @@ export class MetaSheetServer {
 
       auth: {
         verifyToken: async (token: string) => {
+          const sessionClass = classifyVerifiedSessionPayload(authService.readTokenPayload(token))
+          if (sessionClass === 'strict' || sessionClass === 'conflict') return null
           return await authService.verifyToken(token)
         },
         checkPermission: (user: UserInfo, resource: string, action: string) => {
@@ -1482,7 +1486,7 @@ export class MetaSheetServer {
             created_at: new Date(),
             updated_at: new Date()
           }
-          return authService.createToken(userAsUser)
+          return authService.createToken(userAsUser, { externalAuth: false })
         }
       },
 
@@ -2014,6 +2018,7 @@ export class MetaSheetServer {
 
     // 全局 JWT 保护 `/api/**`（白名单在中间件内判定）
     this.app.use((req: Request, res: Response, next: NextFunction) => {
+      if (isReadOnlyAuthorizationRequest(req.method, req.path)) return readOnlyAuthorizationJwtAuth(req, res, next)
       if (isWhitelisted(req.path)) return next()
       if (isPublicFormAuthBypass(req)) return optionalJwtAuthMiddleware(req, res, next)
       // OAPI-1/2a: let an `mst_` API token reach the per-route apiTokenAuth + requireScope guards on the

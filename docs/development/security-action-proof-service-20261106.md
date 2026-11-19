@@ -57,11 +57,15 @@ consumes a proof; no binding, login grant, session or login behaviour changes.
 10. **Secret once.** The proof's secret appears only in the `200` response body; the table stores a
     domain-separated SHA-256 of it. No answer the route gives echoes a password, and the route and
     the service never log or audit one.
-11. **Lock order.** The user row is always the first lock. Issuance takes a per-user advisory lock, then
-    the user row (`FOR KEY SHARE`), before any proof row. Consumption runs inside the caller's
-    transaction after the caller took the user row through `lockUsersForAccessGraphWrite` and any other
-    row it needs; it re-enters the user row, then takes the session row (`FOR SHARE`) and the proof row
-    (`FOR UPDATE`). No path waits for the user row while holding a session or proof row.
+11. **Lock order.** The user row is always the first row lock. Issuance holds one session advisory lock
+    (`security-action-sid:` plus the authenticated session) and one active `security_action_session_flight`
+    row on one connection across both issuance transactions and the password comparison. That session
+    lock is not the per-user accounting lock and is not a lock on `user_sessions`. Inside the second
+    transaction, issuance takes the per-user advisory lock, then the user row (`FOR KEY SHARE`), before
+    any proof row. Consumption runs inside the caller's transaction after the caller took the user row
+    through `lockUsersForAccessGraphWrite` and any other row it needs; it re-enters the user row, then
+    takes the session row (`FOR SHARE`) and the proof row (`FOR UPDATE`). No path waits for the user row
+    while holding a session or proof row. Consumption does not take the session flight latch.
 12. **Isolation.** Both issuance transactions pin `READ COMMITTED` as their first statement; consumption
     refuses a caller transaction that is not read committed before taking any lock.
 13. **Transitions.** Rows are admitted only as `issued` or `failed`; the only transitions are

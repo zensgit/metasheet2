@@ -47,6 +47,7 @@ const dingtalkOauthMocks = vi.hoisted(() => ({
   validateState: vi.fn(),
   isDingTalkConfigured: vi.fn(),
   exchangeCodeForDingTalkProfile: vi.fn(),
+  exchangeCodeForUser: vi.fn(),
   getDingTalkRuntimeStatus: vi.fn(),
   bindDingTalkIdentityToUser: vi.fn(),
   unbindSelfManagedDingTalkIdentity: vi.fn(),
@@ -89,6 +90,7 @@ vi.mock('../../src/auth/dingtalk-oauth', async (importOriginal) => {
     validateState: dingtalkOauthMocks.validateState,
     isDingTalkConfigured: dingtalkOauthMocks.isDingTalkConfigured,
     exchangeCodeForDingTalkProfile: dingtalkOauthMocks.exchangeCodeForDingTalkProfile,
+    exchangeCodeForUser: dingtalkOauthMocks.exchangeCodeForUser,
     getDingTalkRuntimeStatus: dingtalkOauthMocks.getDingTalkRuntimeStatus,
     bindDingTalkIdentityToUser: dingtalkOauthMocks.bindDingTalkIdentityToUser,
     unbindSelfManagedDingTalkIdentity: dingtalkOauthMocks.unbindSelfManagedDingTalkIdentity,
@@ -344,32 +346,38 @@ describe('remaining routes/auth.ts recovery-conflict call sites', () => {
   }
 
   describe('POST /dingtalk/unbind', () => {
-    function scriptUnbind(): void {
-      scriptAuthenticatedUser()
-      dingtalkOauthMocks.getDingTalkRuntimeStatus.mockReturnValue(runtimeStatus())
-      // The access snapshot's three reads: grant / identity / linked-count — all empty,
-      // so the self-managed unbind proceeds to the service write.
-      pgMocks.query.mockResolvedValue({ rows: [] })
-    }
-
-    it('[recovery-census:auth:dingtalk-unbind] named conflict from the unbind write → exact uniform retryable 409', async () => {
-      scriptUnbind()
-      dingtalkOauthMocks.unbindSelfManagedDingTalkIdentity.mockRejectedValue(namedConflict())
+    it('[recovery-census:auth:dingtalk-unbind] named conflict from authentication → exact uniform retryable 409', async () => {
+      authServiceMocks.verifyToken.mockRejectedValue(namedConflict())
       const res = await invokeRoute('post', '/dingtalk/unbind', { headers: AUTH_HEADERS })
       expect(res.statusCode).toBe(409)
       expect(res.body).toEqual(UNIFORM_409_BODY)
+      expect(dingtalkOauthMocks.unbindSelfManagedDingTalkIdentity).not.toHaveBeenCalled()
       census.record('auth:dingtalk-unbind')
     })
 
     it('non-conflict failure keeps the ORIGINAL fail-closed 500, exactly', async () => {
-      scriptUnbind()
-      dingtalkOauthMocks.unbindSelfManagedDingTalkIdentity.mockRejectedValue(new Error('driver text'))
+      authServiceMocks.verifyToken.mockRejectedValue(new Error('driver text'))
       const res = await invokeRoute('post', '/dingtalk/unbind', { headers: AUTH_HEADERS })
       expect(res.statusCode).toBe(500)
       expect(res.body).toEqual({
         success: false,
         error: 'Failed to unbind DingTalk identity',
       })
+      expect(dingtalkOauthMocks.unbindSelfManagedDingTalkIdentity).not.toHaveBeenCalled()
+    })
+
+    it('refuses authenticated self-unbind before a potential recovery-conflict write', async () => {
+      scriptAuthenticatedUser()
+      dingtalkOauthMocks.unbindSelfManagedDingTalkIdentity.mockRejectedValue(namedConflict())
+      const res = await invokeRoute('post', '/dingtalk/unbind', { headers: AUTH_HEADERS })
+      expect(res.statusCode).toBe(403)
+      expect(res.body).toEqual({
+        success: false,
+        error: 'Self-service DingTalk identity changes are unavailable. Please contact an administrator.',
+        code: 'self_service_disabled',
+      })
+      expect(dingtalkOauthMocks.unbindSelfManagedDingTalkIdentity).not.toHaveBeenCalled()
+      expect(pgMocks.query).not.toHaveBeenCalled()
     })
   })
 
@@ -395,15 +403,34 @@ describe('remaining routes/auth.ts recovery-conflict call sites', () => {
       })
     }
 
-    it('[recovery-census:auth:dingtalk-callback] bind intent: named conflict from the bind write → exact uniform retryable 409', async () => {
+    it('bind intent refuses before a potential recovery-conflict write', async () => {
       scriptBindIntent()
       dingtalkOauthMocks.bindDingTalkIdentityToUser.mockRejectedValue(namedConflict())
       const res = await invokeRoute('post', '/dingtalk/callback', {
         headers: AUTH_HEADERS,
         body: { code: 'auth-code', state: 'state-1' },
       })
+      expect(res.statusCode).toBe(403)
+      expect(res.body).toEqual({
+        success: false,
+        error: 'Self-service DingTalk identity changes are unavailable. Please contact an administrator.',
+        code: 'self_service_disabled',
+      })
+      expect(dingtalkOauthMocks.exchangeCodeForDingTalkProfile).not.toHaveBeenCalled()
+      expect(dingtalkOauthMocks.bindDingTalkIdentityToUser).not.toHaveBeenCalled()
+      expect(pgMocks.query).not.toHaveBeenCalled()
+    })
+
+    it('[recovery-census:auth:dingtalk-callback] login intent: named conflict from JIT provision → exact uniform retryable 409', async () => {
+      dingtalkOauthMocks.validateState.mockResolvedValue({ valid: true, intent: 'login', redirectPath: null })
+      dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+      dingtalkOauthMocks.exchangeCodeForUser.mockRejectedValue(namedConflict())
+      const res = await invokeRoute('post', '/dingtalk/callback', {
+        body: { code: 'auth-code', state: 'state-1' },
+      })
       expect(res.statusCode).toBe(409)
       expect(res.body).toEqual(UNIFORM_409_BODY)
+      expect(dingtalkOauthMocks.exchangeCodeForUser).toHaveBeenCalledWith('auth-code')
       census.record('auth:dingtalk-callback')
     })
 

@@ -46,6 +46,10 @@ import {
   bindDirectoryAccount,
   unbindDirectoryAccount,
 } from '../../src/directory/directory-sync'
+import { strictLoginUninstalledRows } from '../utils/strict-login-uninstalled-fixture'
+
+/** RFC connection id. Legacy grant admission rejects any other shape before it reads the witness. */
+const CONNECTION_ID = '22222222-2222-4222-8222-222222222222'
 import { LOGIN_NAME_RULE_MESSAGE, LoginNameRuleError } from '../../src/auth/login-name-rule'
 import { PasswordPolicyError } from '../../src/auth/password-policy-error'
 
@@ -78,6 +82,8 @@ describe('bindDirectoryAccount', () => {
     const aliasOwners = new Map<string, string>()
     pgMocks.transaction.mockImplementation(async (handler) => handler({
       query: async (sql: string, params?: unknown[]) => {
+        const uninstalled = strictLoginUninstalledRows(String(sql))
+        if (uninstalled !== undefined) return { rows: uninstalled }
         if (/INSERT INTO user_login_aliases/i.test(String(sql))) {
           aliasOwners.set(String(params?.[2] ?? ''), String(params?.[0] ?? ''))
           return { rows: [] as Array<Record<string, unknown>> }
@@ -92,7 +98,7 @@ describe('bindDirectoryAccount', () => {
           return {
             rows: [{
               id: accountId,
-              integration_id: 'dir-1',
+              integration_id: CONNECTION_ID,
               provider: 'dingtalk',
               corp_id: 'dingcorp',
               external_user_id: '0447654442691174',
@@ -162,7 +168,7 @@ describe('bindDirectoryAccount', () => {
       .mockResolvedValueOnce({
         rows: [{
           id: 'account-1',
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           external_user_id: '0447654442691174',
@@ -192,7 +198,7 @@ describe('bindDirectoryAccount', () => {
       })
       .mockResolvedValueOnce({
         rows: [{
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           directory_account_id: 'account-1',
@@ -271,7 +277,7 @@ describe('bindDirectoryAccount', () => {
       .mockResolvedValueOnce({
         rows: [{
           id: 'account-1',
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           external_user_id: '0447654442691174',
@@ -305,7 +311,7 @@ describe('bindDirectoryAccount', () => {
       .mockResolvedValueOnce({
         rows: [{
           id: 'account-1',
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           external_user_id: '0447654442691174',
@@ -350,7 +356,7 @@ describe('bindDirectoryAccount', () => {
       .mockResolvedValueOnce({
         rows: [{
           id: 'account-1',
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           external_user_id: '0447654442691174',
@@ -380,7 +386,7 @@ describe('bindDirectoryAccount', () => {
       })
       .mockResolvedValueOnce({
         rows: [{
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           directory_account_id: 'account-1',
@@ -434,7 +440,7 @@ describe('bindDirectoryAccount', () => {
       .mockResolvedValueOnce({
         rows: [{
           id: 'account-1',
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           external_user_id: '0447654442691174',
@@ -495,7 +501,7 @@ describe('bindDirectoryAccount', () => {
       .mockResolvedValueOnce({
         rows: [{
           id: 'account-1',
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           external_user_id: '0447654442691174',
@@ -562,7 +568,7 @@ describe('bindDirectoryAccount', () => {
       .mockResolvedValueOnce({
         rows: [{
           id: 'account-1',
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           external_user_id: '0447654442691174',
@@ -605,7 +611,7 @@ describe('bindDirectoryAccount', () => {
       })
       .mockResolvedValueOnce({
         rows: [{
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           directory_account_id: 'account-1',
@@ -659,7 +665,7 @@ describe('bindDirectoryAccount', () => {
       .mockResolvedValueOnce({
         rows: [{
           id: 'account-admit-1',
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           external_user_id: '0447654442691174',
@@ -680,7 +686,7 @@ describe('bindDirectoryAccount', () => {
       })
       .mockResolvedValueOnce({
         rows: [{
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           directory_account_id: 'account-admit-1',
@@ -770,7 +776,7 @@ describe('bindDirectoryAccount', () => {
       .mockResolvedValueOnce({
         rows: [{
           id: 'account-admit-2',
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           external_user_id: '0447654442691188',
@@ -792,7 +798,7 @@ describe('bindDirectoryAccount', () => {
       })
       .mockResolvedValueOnce({
         rows: [{
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           directory_account_id: 'account-admit-2',
@@ -864,7 +870,7 @@ describe('bindDirectoryAccount', () => {
       .mockResolvedValueOnce({
         rows: [{
           id: 'account-admit-union-only',
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           external_user_id: '0447654442691100',
@@ -886,7 +892,7 @@ describe('bindDirectoryAccount', () => {
       })
       .mockResolvedValueOnce({
         rows: [{
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           directory_account_id: 'account-admit-union-only',
@@ -966,7 +972,7 @@ describe('bindDirectoryAccount', () => {
       .mockResolvedValueOnce({
         rows: [{
           id: 'account-admit-3',
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           external_user_id: '0447654442691199',
@@ -1065,7 +1071,7 @@ describe('bindDirectoryAccount', () => {
       {
         account: {
           id: 'account-seam',
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           external_user_id: 'external-seam',
@@ -1108,7 +1114,7 @@ describe('bindDirectoryAccount', () => {
       .mockResolvedValueOnce({
         rows: [{
           id: 'account-1',
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           external_user_id: 'external-1',
@@ -1199,7 +1205,7 @@ describe('bindDirectoryAccount', () => {
     pgMocks.query
       .mockResolvedValueOnce({
         rows: [{
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           directory_account_id: 'account-1',
@@ -1287,7 +1293,7 @@ describe('bindDirectoryAccount', () => {
       .mockResolvedValueOnce({
         rows: [{
           id: 'account-1',
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           external_user_id: '0447654442691174',
@@ -1301,7 +1307,7 @@ describe('bindDirectoryAccount', () => {
       })
       .mockResolvedValueOnce({
         rows: [{
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           directory_account_id: 'account-1',
@@ -1361,7 +1367,7 @@ describe('bindDirectoryAccount', () => {
       // account-1 unbinds and reloads its summary
       .mockResolvedValueOnce({
         rows: [{
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           directory_account_id: 'account-1',
@@ -1423,7 +1429,7 @@ describe('bindDirectoryAccount', () => {
       .mockResolvedValueOnce({
         rows: [{
           id: 'account-bulk-1',
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           external_user_id: '0447654442691174',
@@ -1443,7 +1449,7 @@ describe('bindDirectoryAccount', () => {
       .mockResolvedValueOnce({
         rows: [{
           id: 'account-bulk-1',
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           external_user_id: '0447654442691174',
@@ -1459,7 +1465,7 @@ describe('bindDirectoryAccount', () => {
       // summary reload
       .mockResolvedValueOnce({
         rows: [{
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           directory_account_id: 'account-bulk-1',
@@ -1535,7 +1541,7 @@ describe('bindDirectoryAccount', () => {
       .mockResolvedValueOnce({
         rows: [{
           id: 'account-case-mismatch',
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           external_user_id: '0447654442691175',
@@ -1575,7 +1581,7 @@ describe('bindDirectoryAccount', () => {
       .mockResolvedValueOnce({
         rows: [{
           id: 'account-already-linked',
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           external_user_id: '0447654442691176',
@@ -1623,7 +1629,7 @@ describe('bindDirectoryAccount', () => {
       .mockResolvedValueOnce({
         rows: [{
           id: 'account-1',
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           external_user_id: '0447654442691174',
@@ -1653,7 +1659,7 @@ describe('bindDirectoryAccount', () => {
       })
       .mockResolvedValueOnce({
         rows: [{
-          integration_id: 'dir-1',
+          integration_id: CONNECTION_ID,
           provider: 'dingtalk',
           corp_id: 'dingcorp',
           directory_account_id: 'account-1',

@@ -11,6 +11,7 @@ vi.mock('../../src/db/pg', () => pgMocks)
 vi.mock('../../src/integrations/dingtalk/client', () => clientMocks)
 
 import { bindDingTalkIdentityToUser, exchangeCodeForUser } from '../../src/auth/dingtalk-oauth'
+import { strictLoginUninstalledRows } from '../utils/strict-login-uninstalled-fixture'
 
 const ID = 'synthetic-boundary-user'
 const profile = { openId: 'synthetic-open', unionId: 'synthetic-union', nick: 'Synthetic', email: 'boundary@example.test' }
@@ -20,6 +21,8 @@ let managed: boolean
 let failGrantRead: boolean
 const writes: string[] = []
 const txQuery = vi.fn(async (sql: string) => {
+  const uninstalled = strictLoginUninstalledRows(sql)
+  if (uninstalled !== undefined) return { rows: uninstalled }
   // D21 (Y5a): the access-graph mutex's subject version bump is a lock-taking protocol statement
   // (rolled back with the refusal), not an identity / grant write.
   if (/^\s*(INSERT|UPDATE|DELETE)\b/i.test(sql) && !/INSERT INTO subject_authorization_versions/i.test(sql)) writes.push(sql)
@@ -54,6 +57,8 @@ describe('DingTalk identity write-boundary policy', () => {
     writes.length = 0
     txQuery.mockClear()
     pgMocks.query.mockReset().mockImplementation(async (sql: string) => {
+      const uninstalled = strictLoginUninstalledRows(sql)
+      if (uninstalled !== undefined) return { rows: uninstalled }
       if (/FROM user_external_identities\b/i.test(sql)) return { rows: [] }
       if (/FROM users\b/i.test(sql)) return { rows: [user] }
       if (/FROM user_external_auth_grants\b/i.test(sql)) return { rows: [{ enabled: true }] }

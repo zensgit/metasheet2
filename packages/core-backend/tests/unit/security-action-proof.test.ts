@@ -24,6 +24,7 @@ vi.mock('../../src/core/logger', () => ({
 import { SECURITY_ACTION_PURPOSES } from '../../src/auth/external-login-assurance'
 import { assessSecurityActionPrivilege } from '../../src/auth/security-action-privilege'
 import {
+  assertAuthenticatedSessionContext,
   clientBindingDigestOf,
   computeCredentialWitness,
   consumeSecurityActionProof,
@@ -182,6 +183,24 @@ describe('proof token', () => {
 // ---------------------------------------------------------------------------
 
 describe('session context', () => {
+  it('asserts only the existing genuine session brand without reading or minting a context', () => {
+    const context = contextFor()
+    const genuine: unknown = context
+    assertAuthenticatedSessionContext(genuine)
+    expect(genuine.userId).toBe(USER)
+    expect(genuine).toBe(context)
+    expect(Object.isFrozen(genuine)).toBe(true)
+    expect(assertAuthenticatedSessionContext(context)).toBeUndefined()
+    for (const invalid of [{ ...context }, null]) {
+      let rejected: unknown
+      try { assertAuthenticatedSessionContext(invalid) } catch (error) { rejected = error }
+      expect(rejected).toBeInstanceOf(SecurityActionProofContractError)
+      expect(rejected).toMatchObject({ code: 'SECURITY_ACTION_CONTEXT_REQUIRED' })
+    }
+    expect(pgMocks.query).not.toHaveBeenCalled()
+    expect(pgMocks.transaction).not.toHaveBeenCalled()
+  })
+
   it('reads the user, the session id, the issue time and the authenticated organization', () => {
     const context = contextFor()
     expect(context.userId).toBe(USER)

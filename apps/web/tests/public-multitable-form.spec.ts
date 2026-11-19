@@ -175,7 +175,7 @@ describe('PublicMultitableFormView', () => {
     expect(container.textContent).toContain('Redirecting to DingTalk sign-in…')
   })
 
-  it('offers DingTalk binding when a signed-in user is not bound', async () => {
+  it('shows administrative guidance without offering self-binding when a signed-in user is not bound', async () => {
     loadFormContextSpy.mockRejectedValue(Object.assign(new Error('DingTalk binding is required for this form'), {
       code: 'DINGTALK_BIND_REQUIRED',
     }))
@@ -206,18 +206,11 @@ describe('PublicMultitableFormView', () => {
     app.mount(container)
     await flushUi()
 
-    expect(container.textContent).toContain('This form only accepts users with a bound DingTalk account.')
+    expect(container.textContent).toContain('Ask an administrator about the available options')
     const bindButton = container.querySelector<HTMLButtonElement>('[data-dingtalk-bind]')
-    expect(bindButton?.textContent).toContain('Bind DingTalk and return to this form')
-
-    bindButton?.click()
-    await flushUi()
-
-    expect(apiFetchSpy).toHaveBeenCalledWith(
-      expect.stringContaining('/api/auth/dingtalk/launch?intent=bind&redirect='),
-      expect.objectContaining({ suppressUnauthorizedRedirect: true }),
-    )
-    expect(container.textContent).toContain('Redirecting to DingTalk binding…')
+    expect(bindButton).toBeNull()
+    expect(apiFetchSpy).not.toHaveBeenCalled()
+    expect(submitFormSpy).not.toHaveBeenCalled()
   })
 
   it('shows an allowlist message when the DingTalk user is not selected for the form', async () => {

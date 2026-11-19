@@ -277,6 +277,29 @@ function componentSourceSingleMatchNoHumanContext() {
   assert.equal(decision.reason, 'no_human_context')
 }
 
+// Owner ruling 2026-11-17 (「按建议」): a predecessor holding ONLY the machine write-back date is reported
+// (machine_context_only), never proposed — a proposal is a manual_confirm hold, which would block the pull.
+function componentSourceSingleMatchMachineContextOnly() {
+  const policy = { carryKey: 'component_source_id', manualRowReattach: 'propose_confirm' }
+  const dateOnly = planCarry([removedRow('old-1', 'c1', { issueConfirmDate: '2031-04-17' })], newAdd('k-new', 'c1'), policy)
+  assert.equal(dateOnly.decision, CARRY_DECISIONS.NO_CARRY)
+  assert.equal(dateOnly.reason, 'machine_context_only')
+  assert.ok(require(MODULE_PATH).CARRY_NO_CARRY_REASONS.includes('machine_context_only'), 'the reason is in the closed vocabulary')
+  assert.equal(JSON.stringify(dateOnly).includes('2031-04-17'), false, 'values-free')
+  // A blank date is no context at all.
+  const blankDate = planCarry([removedRow('old-1', 'c1', { issueConfirmDate: '  ' })], newAdd('k-new', 'c1'), policy)
+  assert.equal(blankDate.reason, 'no_human_context')
+  // A date beside human context changes nothing: still a K2 proposal over the HUMAN fields only.
+  const both = planCarry([removedRow('old-1', 'c1', { notes: 'n', issueConfirmDate: '2031-04-17' })], newAdd('k-new', 'c1'), policy)
+  assert.equal(both.decision, CARRY_DECISIONS.CARRY_VIA_CONFIRM)
+  assert.deepEqual(both.carryFields, ['notes'])
+  // classifyCarry's default is unchanged (no hasMachineContext => no_human_context).
+  assert.equal(classifyCarry({ carryKey: 'component_source_id', manualRowReattach: 'propose_confirm', matchCount: 1, hasHumanContext: false }).reason, 'no_human_context')
+  assert.equal(classifyCarry({ carryKey: 'component_source_id', manualRowReattach: 'propose_confirm', matchCount: 1, hasHumanContext: false, hasMachineContext: true }).reason, 'machine_context_only')
+  // 'none' mode with only a date still holds as before (the reason only renames a NO_CARRY).
+  assert.equal(classifyCarry({ carryKey: 'component_source_id', manualRowReattach: 'none', matchCount: 1, hasHumanContext: false, hasMachineContext: true }).decision, CARRY_DECISIONS.MANUAL_CONFIRM)
+}
+
 function componentSourceMultiMatchHolds() {
   // 1→N ambiguity: two distinct removed rows share the source id under different
   // keys. ALWAYS a hold, regardless of reattach mode. Never auto-pick.
@@ -501,6 +524,7 @@ function main() {
   bareDefaultSingleMatch()
   componentSourceSingleMatchNoneHolds()
   componentSourceSingleMatchNoHumanContext()
+  componentSourceSingleMatchMachineContextOnly()
   componentSourceMultiMatchHolds()
   sourceSelectionEdges()
   classifyBranchTable()

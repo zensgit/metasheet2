@@ -42,13 +42,13 @@
           <div>
             <h2>钉钉登录</h2>
             <p class="session-center__current-meta">
-              查看当前账号的钉钉开通、绑定和目录接管状态，并发起自助绑定。
+              查看当前账号的钉钉开通、绑定和目录接管状态。
             </p>
           </div>
           <button
             class="session-center__button session-center__button--secondary"
             type="button"
-            :disabled="dingtalkLoading || dingtalkBinding || dingtalkUnbinding"
+            :disabled="dingtalkLoading"
             @click="void loadDingTalkAccess()"
           >
             {{ dingtalkLoading ? '刷新中...' : '刷新钉钉状态' }}
@@ -85,24 +85,9 @@
             <p v-if="dingtalkAccess.directory.linked" class="session-center__status session-center__status--error">
               当前钉钉身份由目录同步接管，请联系平台管理员。
             </p>
-            <div class="session-center__actions">
-              <button
-                class="session-center__button"
-                type="button"
-                :disabled="dingtalkBinding || !canBindDingTalk"
-                @click="void launchDingTalkBind()"
-              >
-                {{ dingtalkBinding ? '跳转中...' : dingtalkAccess.identity.exists ? '重新绑定钉钉账号' : '绑定钉钉账号' }}
-              </button>
-              <button
-                class="session-center__button session-center__button--secondary"
-                type="button"
-                :disabled="dingtalkUnbinding || !canUnbindDingTalk"
-                @click="void unbindDingTalk()"
-              >
-                {{ dingtalkUnbinding ? '处理中...' : '解除当前绑定' }}
-              </button>
-            </div>
+            <p class="session-center__current-meta">
+              当前仅支持查看钉钉关联。自行绑定和解绑未开放；请联系平台管理员核实可用办理方式。
+            </p>
           </article>
         </div>
       </section>
@@ -270,8 +255,6 @@ const currentSessionId = ref<string | null>(null)
 const status = ref('')
 const statusTone = ref<StatusTone>('info')
 const dingtalkLoading = ref(false)
-const dingtalkBinding = ref(false)
-const dingtalkUnbinding = ref(false)
 const dingtalkAccess = ref<DingTalkAccessSnapshot | null>(null)
 let heartbeatTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -279,18 +262,6 @@ const accountEmail = computed(() => auth.getAccessSnapshot().email)
 const activeSessionCount = computed(() => sessions.value.filter((session) => !session.revokedAt).length)
 const revokedSessionCount = computed(() => sessions.value.filter((session) => Boolean(session.revokedAt)).length)
 const currentSession = computed(() => sessions.value.find((session) => session.id === currentSessionId.value) ?? null)
-const canBindDingTalk = computed(() =>
-  Boolean(
-    dingtalkAccess.value?.available
-    && !dingtalkAccess.value.directory.linked,
-  ),
-)
-const canUnbindDingTalk = computed(() =>
-  Boolean(
-    dingtalkAccess.value?.identity.exists
-    && !dingtalkAccess.value.directory.linked,
-  ),
-)
 
 function setStatus(message: string, tone: StatusTone = 'info') {
   status.value = message
@@ -403,69 +374,6 @@ async function loadDingTalkAccess() {
     setStatus('加载钉钉状态失败，请稍后重试', 'error')
   } finally {
     dingtalkLoading.value = false
-  }
-}
-
-async function launchDingTalkBind() {
-  if (!canBindDingTalk.value) return
-  dingtalkBinding.value = true
-  try {
-    const response = await apiFetch('/api/auth/dingtalk/launch?intent=bind&redirect=%2Fsettings%3Fdingtalk%3Dbound', {
-      method: 'GET',
-      suppressUnauthorizedRedirect: true,
-    })
-    const payload = await response.json().catch(() => null)
-
-    if (response.status === 401) {
-      await redirectToLogin()
-      return
-    }
-
-    if (!response.ok) {
-      setStatus(extractError(payload) || '发起钉钉绑定失败', 'error')
-      return
-    }
-
-    const data = payload && typeof payload === 'object' ? (payload as Record<string, unknown>).data : null
-    const url = data && typeof data === 'object' ? (data as Record<string, unknown>).url : null
-    if (typeof url !== 'string' || url.trim().length === 0) {
-      setStatus('发起钉钉绑定失败', 'error')
-      return
-    }
-    window.open(url, '_self')
-  } catch {
-    setStatus('发起钉钉绑定失败，请稍后重试', 'error')
-  } finally {
-    dingtalkBinding.value = false
-  }
-}
-
-async function unbindDingTalk() {
-  dingtalkUnbinding.value = true
-  try {
-    const response = await apiFetch('/api/auth/dingtalk/unbind', {
-      method: 'POST',
-      suppressUnauthorizedRedirect: true,
-    })
-    const payload = await response.json().catch(() => null)
-
-    if (response.status === 401) {
-      await redirectToLogin()
-      return
-    }
-
-    if (!response.ok) {
-      setStatus(extractError(payload) || '解除钉钉绑定失败', 'error')
-      return
-    }
-
-    const data = payload && typeof payload === 'object' ? (payload as Record<string, unknown>).data : null
-    dingtalkAccess.value = data && typeof data === 'object' ? data as DingTalkAccessSnapshot : dingtalkAccess.value
-    setStatus('当前钉钉绑定已解除')
-  } catch {
-    setStatus('解除钉钉绑定失败，请稍后重试', 'error')
-  } finally {
-    dingtalkUnbinding.value = false
   }
 }
 
