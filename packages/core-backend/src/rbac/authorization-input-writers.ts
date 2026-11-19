@@ -73,19 +73,21 @@ function entry(fields: Omit<AuthorizationInputWriterEntry, 'status'> & { status?
 export const AUTHORIZATION_INPUT_WRITERS: readonly AuthorizationInputWriterEntry[] = Object.freeze([
   entry({ id: 'W-01', file: `${SRC}/rbac/role-assignment.ts`, symbol: 'assignUserRoles', intent: 'GRANT_ROLE', class: 'U+', statements: [st('user_roles', 'INSERT')], actor: 'human', slice: 'AIS-2a' }),
   entry({ id: 'W-02', file: `${SRC}/rbac/role-assignment.ts`, symbol: 'unassignUserRoles', intent: 'REVOKE_ROLE', class: 'U-', statements: [st('user_roles', 'DELETE')], actor: 'human', slice: 'AIS-2a' }),
-  entry({ id: 'W-03', file: `${SRC}/rbac/role-assignment.ts`, symbol: 'clearDelegatedAdminScopesWhereNamespaceLost', intent: 'REVOKE_ROLE', class: 'U-', statements: [st('delegated_role_admin_scopes', 'DELETE'), st('delegated_role_admin_member_groups', 'DELETE')], actor: 'human', slice: 'AIS-2a' }),
-  entry({ id: 'W-04', file: `${SRC}/routes/permissions.ts`, symbol: 'callback:r.post', intent: 'GRANT_DIRECT', class: 'U+', statements: [st('user_permissions', 'INSERT')], actor: 'human', slice: 'AIS-2a' }),
-  entry({ id: 'W-05', file: `${SRC}/routes/permissions.ts`, symbol: 'callback:r.post', intent: 'REVOKE_DIRECT', class: 'U-', statements: [st('user_permissions', 'DELETE')], actor: 'human', slice: 'AIS-2a' }),
-  entry({ id: 'W-06', file: `${SRC}/routes/permissions.ts`, symbol: 'callback:r.post', intent: 'GRANT_DIRECT', class: 'U+', statements: [st('user_permissions', 'INSERT')], actor: 'human', slice: 'AIS-2a' }),
+  entry({ id: 'W-03', file: `${SRC}/rbac/role-assignment.ts`, symbol: 'clearDelegatedAdminScopesWhereNamespaceLost', intent: 'REVOKE_ROLE', class: 'U-', statements: [st('delegated_role_admin_scopes', 'DELETE'), st('delegated_role_admin_member_groups', 'DELETE'), st('delegated_role_admin_activation', 'INSERT')], actor: 'human', slice: 'AIS-2a' }),
+  // Direct and template grants use the same statement after the locked actor check.
+  entry({ id: 'W-04', file: `${SRC}/admin/authorization-exception-write.ts`, symbol: 'writeAuthorizationException', intent: 'GRANT_DIRECT', class: 'U+', statements: [st('user_permissions', 'INSERT')], actor: 'human', slice: 'AIS-2a', status: 'converted' }),
+  entry({ id: 'W-05', file: `${SRC}/admin/authorization-exception-write.ts`, symbol: 'writeAuthorizationException', intent: 'REVOKE_DIRECT', class: 'U-', statements: [st('user_permissions', 'DELETE')], actor: 'human', slice: 'AIS-2a', status: 'converted' }),
   entry({ id: 'W-07a', file: `${SRC}/auth/AuthService.ts`, symbol: 'createUserInTransaction', intent: 'BIRTH', class: 'B', statements: [st('user_permissions', 'INSERT')], actor: 'n/a', slice: 'AIS-2a' }),
-  entry({ id: 'W-07b', file: `${SRC}/routes/admin-users.ts`, symbol: 'callback:transaction', intent: 'BIRTH', class: 'B', statements: [st('user_permissions', 'INSERT')], actor: 'human', slice: 'AIS-2c' }),
+  entry({ id: 'W-07b', file: `${SRC}/admin/admin-user-birth-command.ts`, symbol: 'callback:withAuthorizationInputTransaction', intent: 'BIRTH', class: 'B', statements: [st('user_permissions', 'INSERT')], actor: 'human', slice: 'AIS-2c' }),
   // One statement serves both directions: its `enabled` argument is a runtime boolean, so the same UPDATE is U+ when it is true and U- when it is false.
-  entry({ id: 'W-08', file: `${SRC}/routes/admin-users.ts`, symbol: 'syncLegacyAdminProfile', intent: 'SET_ADMIN_PROFILE', class: 'U+', statements: [st('users', 'UPDATE')], actor: 'human', slice: 'AIS-2c' }),
+  entry({ id: 'W-08', file: `${SRC}/admin/legacy-admin-profile.ts`, symbol: 'syncLegacyAdminProfile', intent: 'SET_ADMIN_PROFILE', class: 'U+', statements: [st('users', 'UPDATE')], actor: 'human', slice: 'AIS-2c' }),
   entry({ id: 'W-10', file: `${SRC}/routes/admin-user-batch.ts`, symbol: 'callback:transaction', intent: 'SET_ADMIN_PROFILE', class: 'U+', statements: [st('users', 'UPDATE')], actor: 'human', slice: 'AIS-2c' }),
   entry({ id: 'W-11', file: `${SRC}/admin/user-recycle.ts`, symbol: 'applyRecyclePurge', intent: 'PURGE', class: 'U-', statements: [st('user_permissions', 'DELETE'), st('users', 'UPDATE')], actor: 'human', slice: 'AIS-2a' }),
-  entry({ id: 'W-12', file: `${SRC}/routes/admin-users.ts`, symbol: 'callback:transaction', intent: 'SET_DELEGATED_SCOPE', class: 'U+', statements: [st('delegated_role_admin_scopes', 'INSERT'), st('delegated_role_admin_scopes', 'DELETE')], actor: 'human', slice: 'AIS-2c' }),
-  entry({ id: 'W-13', file: `${SRC}/routes/admin-users.ts`, symbol: 'callback:transaction', intent: 'SET_DELEGATED_SCOPE', class: 'U+', statements: [st('delegated_role_admin_member_groups', 'INSERT'), st('delegated_role_admin_member_groups', 'DELETE')], actor: 'human', slice: 'AIS-2c' }),
-  entry({ id: 'W-14', file: `${SRC}/routes/admin-users.ts`, symbol: 'callback:transaction', intent: 'SET_DELEGATED_SCOPE', class: 'U+', statements: [st('delegated_role_admin_scopes', 'DELETE'), st('delegated_role_admin_member_groups', 'DELETE'), st('delegated_role_admin_scopes', 'INSERT'), st('delegated_role_admin_member_groups', 'INSERT')], actor: 'human', slice: 'AIS-2c' }),
+  entry({ id: 'W-12', file: `${SRC}/admin/delegated-scope-commands.ts`, symbol: 'writeDelegatedAdminScopeOnTx', intent: 'SET_DELEGATED_SCOPE', class: 'U+', statements: [st('delegated_role_admin_scopes', 'INSERT'), st('delegated_role_admin_scopes', 'DELETE')], actor: 'human', slice: 'AIS-2c', status: 'converted' }),
+  entry({ id: 'W-13', file: `${SRC}/admin/delegated-scope-commands.ts`, symbol: 'writeDelegatedAdminMemberGroupsOnTx', intent: 'SET_DELEGATED_SCOPE', class: 'U+', statements: [st('delegated_role_admin_member_groups', 'INSERT'), st('delegated_role_admin_member_groups', 'DELETE')], actor: 'human', slice: 'AIS-2c', status: 'converted' }),
+  entry({ id: 'W-14', file: `${SRC}/admin/delegated-scope-commands.ts`, symbol: 'applyDelegatedScopeTemplateOnTx', intent: 'SET_DELEGATED_SCOPE', class: 'U+', statements: [st('delegated_role_admin_scopes', 'DELETE'), st('delegated_role_admin_member_groups', 'DELETE'), st('delegated_role_admin_scopes', 'INSERT'), st('delegated_role_admin_member_groups', 'INSERT')], actor: 'human', slice: 'AIS-2c', status: 'converted' }),
+  entry({ id: 'W-14a', file: `${SRC}/admin/delegated-scope-activation.ts`, symbol: 'initializeDelegationActivation', intent: 'SET_DELEGATED_SCOPE', class: 'U-', statements: [st('delegated_role_admin_activation', 'INSERT')], actor: 'human', slice: 'AIS-2c' }),
+  entry({ id: 'W-14b', file: `${SRC}/admin/delegated-scope-activation.ts`, symbol: 'writeDelegationActivation', intent: 'SET_DELEGATED_SCOPE', class: 'U+', statements: [st('delegated_role_admin_activation', 'INSERT')], actor: 'human', slice: 'AIS-2c' }),
   entry({ id: 'W-15', file: `${SRC}/rbac/namespace-admission.ts`, symbol: 'grantNamespaceAdmissions', intent: 'SET_ADMISSION', class: 'U0', statements: [st('user_namespace_admissions', 'INSERT')], actor: 'human', slice: 'AIS-2a' }),
   entry({ id: 'W-16', file: `${SRC}/rbac/namespace-admission.ts`, symbol: 'writeUserNamespaceAdmission', intent: 'SET_ADMISSION', class: 'U0', statements: [st('user_namespace_admissions', 'INSERT')], actor: 'human', slice: 'AIS-2c' }),
   entry({ id: 'W-17', file: `${SRC}/rbac/namespace-admission.ts`, symbol: 'disableNamespaceAdmissionsWithoutRoles', intent: 'SET_ADMISSION', class: 'U0', statements: [st('user_namespace_admissions', 'INSERT')], actor: 'human', slice: 'AIS-2a' }),
@@ -95,26 +97,25 @@ export const AUTHORIZATION_INPUT_WRITERS: readonly AuthorizationInputWriterEntry
   entry({ id: 'W-21', file: `${SRC}/routes/roles.ts`, symbol: 'callback:transaction', intent: 'DELETE_ROLE', class: 'X', statements: [st('role_permissions', 'DELETE'), st('roles', 'DELETE')], actor: 'human', slice: 'AIS-3a' }),
   entry({ id: 'W-22', file: `${SRC}/services/PluginRbacProvisioningService.ts`, symbol: 'applyRoleMatrix', intent: 'EDIT_ROLE_CONTENT', class: 'W+', statements: [st('roles', 'INSERT'), st('role_permissions', 'INSERT')], actor: 'human', slice: 'AIS-3a' }),
   entry({ id: 'W-23', file: `${SRC}/services/stock-preparation-members.ts`, symbol: 'callback:runLockedWrite', intent: 'EDIT_ROLE_CONTENT', class: 'W+', statements: [st('roles', 'INSERT'), st('roles', 'UPDATE'), st('role_permissions', 'INSERT', 2), st('role_permissions', 'DELETE')], actor: 'human', slice: 'AIS-3a' }),
-  entry({ id: 'W-24', file: `${SRC}/routes/attendance-admin.ts`, symbol: 'ensureAttendanceRoleTemplates', intent: 'EDIT_ROLE_CONTENT', class: 'W+', statements: [st('role_permissions', 'INSERT')], actor: 'human', slice: 'AIS-3a' }),
   entry({ id: 'W-25', file: `${SRC}/routes/admin-routes.ts`, symbol: 'callback:router.put', intent: 'SET_ADMIN_PROFILE', class: 'D', statements: [], dynamic: { form: 'query_builder_non_literal', count: 1 }, actor: 'human', slice: 'AIS-2a' }),
   // Two statements, one per stored type of the column; each writes the list back without the revoked code.
-  entry({ id: 'W-26', file: `${SRC}/admin/legacy-permission-revoke.ts`, symbol: 'revokeLegacyUserPermission', intent: 'REVOKE_DIRECT', class: 'U+', statements: [st('users', 'UPDATE', 2)], actor: 'human', slice: 'AIS-2a' }),
+  entry({ id: 'W-26', file: `${SRC}/admin/legacy-permission-revoke.ts`, symbol: 'revokeLockedLegacyUserPermission', intent: 'REVOKE_DIRECT', class: 'U+', statements: [st('users', 'UPDATE', 2)], actor: 'human', slice: 'AIS-2a', status: 'converted' }),
   entry({ id: 'X-03', file: `${SRC}/routes/admin-routes.ts`, symbol: 'callback:router.delete', intent: 'PURGE', class: 'D', statements: [], dynamic: { form: 'query_builder_non_literal', count: 1 }, actor: 'human', slice: 'AIS-2a' }),
   entry({ id: 'X-02', file: `${SRC}/directory/controlled-handover.ts`, symbol: 'callback:transaction', intent: 'CASCADE_PARENT_DELETE', class: 'X', statements: [st('directory_departments', 'DELETE')], actor: 'human', slice: 'AIS-3a' }),
   entry({ id: 'B-01', file: `${SRC}/auth/AuthService.ts`, symbol: 'createUserInTransaction', intent: 'BIRTH', class: 'B', statements: [st('users', 'INSERT')], actor: 'n/a', slice: 'AIS-2a' }),
   entry({ id: 'B-02', file: `${SRC}/auth/dingtalk-oauth.ts`, symbol: 'callback:transaction', intent: null, class: 'B0', statements: [st('users', 'INSERT')], actor: 'n/a', slice: 'none' }),
   entry({ id: 'B-03', file: `${SRC}/directory/directory-sync.ts`, symbol: 'createDirectoryAdmittedUserInTransaction', intent: 'PROJECTION_GRANT', class: 'B', statements: [st('users', 'INSERT')], actor: 'human', slice: 'AIS-2b' }),
-  entry({ id: 'B-04', file: `${SRC}/routes/admin-users.ts`, symbol: 'callback:transaction', intent: 'BIRTH', class: 'B', statements: [st('users', 'INSERT')], actor: 'human', slice: 'AIS-2c' }),
-  entry({ id: 'B-05', file: `${SRC}/routes/admin-user-batch.ts`, symbol: 'callback:transaction', intent: 'BIRTH', class: 'B', statements: [st('users', 'INSERT')], actor: 'human', slice: 'AIS-2c' }),
+  entry({ id: 'B-04', file: `${SRC}/admin/admin-user-birth-command.ts`, symbol: 'createAdminUserBirthCommand', intent: 'BIRTH', class: 'B', statements: [], actor: 'human', slice: 'AIS-2c' }),
+  entry({ id: 'B-05', file: `${SRC}/admin/admin-user-batch-birth-command.ts`, symbol: 'createAdminBatchUserCommand', intent: 'BIRTH', class: 'B', statements: [], actor: 'human', slice: 'AIS-2c' }),
   // Permission catalogue inserts: they register codes and grant them to nobody.
   entry({ id: 'C-01', file: `${SRC}/services/PluginRbacProvisioningService.ts`, symbol: 'applyRoleMatrix', intent: null, class: 'C', statements: [st('permissions', 'INSERT')], actor: 'human', slice: 'none' }),
-  entry({ id: 'C-02', file: `${SRC}/routes/attendance-admin.ts`, symbol: 'ensureAttendanceRoleTemplates', intent: null, class: 'C', statements: [st('permissions', 'INSERT')], actor: 'human', slice: 'none' }),
   // Content writes on cascade parents that are not deletes: they cannot remove an input row.
   entry({ id: 'P-01', file: `${SRC}/directory/controlled-handover.ts`, symbol: 'callback:transaction', intent: null, class: 'P', statements: [st('directory_departments', 'INSERT')], actor: 'human', slice: 'none' }),
   entry({ id: 'P-02', file: `${SRC}/directory/directory-sync.ts`, symbol: 'callback:transaction', intent: null, class: 'P', statements: [st('directory_departments', 'INSERT'), st('directory_departments', 'UPDATE')], actor: 'n/a', slice: 'none' }),
   entry({ id: 'P-03', file: `${SRC}/directory/directory-sync.ts`, symbol: 'syncProjectedDepartmentMemberGroupsInTransaction', intent: null, class: 'P', statements: [st('platform_member_groups', 'INSERT'), st('platform_member_groups', 'UPDATE')], actor: 'n/a', slice: 'none' }),
   entry({ id: 'P-04', file: `${SRC}/directory/local-directory-org.ts`, symbol: 'callback:withLocalAnchorTransaction', intent: null, class: 'P', statements: [st('directory_departments', 'INSERT'), st('directory_departments', 'UPDATE', 2)], actor: 'human', slice: 'none' }),
   entry({ id: 'P-05', file: `${SRC}/routes/admin-users.ts`, symbol: 'callback:r.post', intent: null, class: 'P', statements: [st('platform_member_groups', 'INSERT')], actor: 'human', slice: 'none' }),
+  entry({ id: 'D-01', file: `${SRC}/auth/admin-grant-local-credential.ts`, symbol: 'adminGrantCredentialStatements', intent: null, class: 'D', statements: [], dynamic: { form: 'template_substitution', count: 1 }, actor: 'human', slice: 'none' }),
 ])
 
 /* ───────────────────────────── late role rows ───────────────────────────── */
@@ -181,6 +182,11 @@ export const AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS: readonly AuthorizationInput
   exemption({ id: 'DX-12', file: `${SRC}/db/migrations/_patterns.ts`, form: 'query_builder_non_literal', count: 1, reachableTables: ['<migration helper parameter>'], reason: 'migration helper; callers are frozen migrations or pass a non-input table' }),
   exemption({ id: 'DX-13', file: `${SRC}/db/migrations/zzzz20260724120000_create_attendance_shift_segments.ts`, form: 'template_substitution', count: 1, reachableTables: ['attendance_shift_segments'], reason: 'same-file constant passed through sql.table()' }),
   exemption({ id: 'DX-14', file: `${SRC}/db/migrations/zzzz20260804120000_attendance_shift_flex_policy.ts`, form: 'template_substitution', count: 1, reachableTables: ['attendance_shifts'], reason: 'same-file constant passed through sql.table()' }),
+  exemption({ id: 'DX-15', file: `${SRC}/db/migrations/zzzz20261117120100_create_security_action_session_flight.ts`, form: 'template_substitution', count: 2, reachableTables: ['security_action_session_flight'], reason: 'schema-qualified session latch from same-file table constant' }),
+  exemption({ id: 'DX-16', file: `${SRC}/auth/admin-grant-browser-context.ts`, form: 'template_substitution', count: 2, reachableTables: ['security_action_browser_bindings', 'user_session_revocations'], reason: 'schema-qualified browser binding and session-watermark inserts' }),
+  exemption({ id: 'DX-17', file: `${SRC}/auth/strict-login-grant-store.ts`, form: 'template_substitution', count: 6, reachableTables: ['directory_connection_login_scope', 'user_external_identity_evidence', 'user_external_identity_login_grants', 'user_session_revocations', 'user_sessions'], reason: 'schema-qualified strict login scope, revocation and session writes named by imported or same-file constants' }),
+  exemption({ id: 'DX-18', file: `${SRC}/auth/admin-grant-local-credential.ts`, form: 'template_substitution', count: 3, reachableTables: ['user_local_credential_establishments', 'user_session_revocations'], reason: 'schema-qualified credential watermark and establishment writes; the users update is the separate checked writer' }),
+  exemption({ id: 'DX-19', file: `${SRC}/auth/strict-login-grant-bundle.ts`, form: 'template_substitution', count: 2, reachableTables: ['admin_login_grant_command_receipts', 'user_external_identity_login_grants'], reason: 'cold consumed-proof bundle inserts only the receipt and grants named by imported constants' }),
 ])
 
 /**
@@ -276,6 +282,7 @@ export const AUTHORIZATION_INPUT_MIGRATION_TABLE_RULES: Readonly<Record<string, 
   user_namespace_admissions: Object.freeze({ INSERT: 'safe', UPDATE: 'safe', ...LOWERING_ONLY }),
   delegated_role_admin_scopes: Object.freeze({ INSERT: 'raising', UPDATE: 'raising', ...LOWERING_ONLY }),
   delegated_role_admin_member_groups: Object.freeze({ INSERT: 'raising', UPDATE: 'raising', ...LOWERING_ONLY }),
+  delegated_role_admin_activation: NO_MIGRATION_WRITE,
 })
 
 /**
@@ -300,6 +307,7 @@ export const AUTHORIZATION_INPUT_MIGRATION_SENSITIVE_COLUMNS: Readonly<Record<st
   user_namespace_admissions: Object.freeze([]),
   delegated_role_admin_scopes: '*',
   delegated_role_admin_member_groups: '*',
+  delegated_role_admin_activation: '*',
 })
 
 /** Key columns of the cascade parents that a foreign key of an input table may reference. */

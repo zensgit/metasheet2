@@ -11,7 +11,6 @@ import jwt, { type SignOptions } from 'jsonwebtoken'
 import { authService, type User } from '../auth/AuthService'
 import { buildOnboardingPacket, getAccessPreset } from '../auth/access-presets'
 import {
-  bindDingTalkIdentityToUser,
   buildAuthUrl,
   DingTalkLoginPolicyError,
   exchangeCodeForDingTalkProfile,
@@ -20,7 +19,6 @@ import {
   getDingTalkRuntimeStatus,
   generateState,
   isDingTalkConfigured,
-  unbindSelfManagedDingTalkIdentity,
   validateState,
 } from '../auth/dingtalk-oauth'
 import {
@@ -33,11 +31,32 @@ import { INVITE_NOT_PENDING, isInviteTokenPending } from '../auth/invite-ledger'
 import { verifyInviteToken } from '../auth/invite-tokens'
 import { validatePassword } from '../auth/password-policy'
 import { classifyRecoveryConflict, sendIfRecoveryConflict } from '../db/recovery-conflict'
-import { query } from '../db/pg'
+import { query, transaction } from '../db/pg'
+import {
+  assertOrdinaryIssuerAllowsLegacySession,
+  closedPasswordOrigin,
+  StrictCredentialChainError,
+  type ClosedExternalOrigin,
+} from '../auth/strict-credential-chain'
+import { StrictLoginGrantError } from '../auth/strict-login-grant-store'
+import {
+  bindStrictDingTalkEntryLocal,
+  classifyVerifiedSessionPayload,
+  StrictDingTalkEntryError,
+  type StrictDingTalkLocalBinding,
+  type StrictSessionPrincipal,
+} from '../auth/strict-dingtalk-entry'
+import type { AuthorizationInputTransactionRunner } from '../rbac/authorization-input-lock'
 import { escapeLikePattern, visibleUserPredicate } from '../admin/user-visibility'
 import { activatePendingUser } from '../auth/user-activate'
 import { createUserSession, getUserSession, listUserSessions, revokeUserSession, touchUserSession } from '../auth/session-registry'
 import { revokeUserSessions } from '../auth/session-revocation'
+import { readAuthenticatedSessionContext } from '../auth/security-action-proof'
+import {
+  AdminGrantActorInputError,
+  changeRequiredPasswordWithProvenance,
+  classifyAdminGrantActorInputSchema,
+} from '../auth/admin-grant-local-credential'
 import { FEATURE_FLAGS } from '../config/flags'
 import { isElearningEnabled } from '../elearning/feature-flags'
 import { isTasksEnabled } from '../tasks/feature-flag'
@@ -61,7 +80,109 @@ import { classifyDirectoryFailureText } from '../directory/directory-failure-tex
 
 const logger = new Logger('AuthRouter')
 
-export const authRouter = Router()
+function strictDingTalkSessionRunner(): AuthorizationInputTransactionRunner {
+  return (handler) => transaction(async (client) => {
+    const held = client as {
+      query: (sql: string, params?: unknown[]) => Promise<import('pg').QueryResult>
+      __rawClient?: import('pg').PoolClient
+    }
+    return handler({
+      query: (sql, params) => held.query(sql, params),
+      __rawClient: held.__rawClient,
+    })
+  })
+}
+
+function strictDingTalkAuthUser(user: StrictSessionPrincipal): User {
+  return {
+    id: user.id,
+    email: user.email,
+    name: user.name,
+    role: user.role,
+    permissions: user.permissions,
+    tenantId: user.tenantId,
+    is_active: user.is_active,
+    must_change_password: user.must_change_password,
+    activation_status: user.activation_status,
+    local_password_set: user.local_password_set,
+    created_at: user.created_at,
+    updated_at: user.updated_at,
+    strictSessionOrgId: user.strictSessionOrgId,
+  }
+}
+
+function sendStrictDingTalkEntryError(res: Response, error: StrictDingTalkEntryError): Response {
+  return res.status(error.httpStatus).json({
+    success: false,
+    error: error.message,
+    code: error.code,
+  })
+}
+
+export type LocalStrictDingTalkAuthRouterInput = {
+  readonly fetchFn: typeof fetch
+  readonly env: Readonly<Record<string, string | undefined>>
+}
+
+function buildFeaturePayload(authUser: User) {
+  const permissions = Array.isArray(authUser.permissions) ? authUser.permissions : []
+  const attendance = authUser.role === 'admin' || permissions.some((permission) => permission.startsWith('attendance:'))
+  const attendanceAdmin = authUser.role === 'admin' || permissions.includes('attendance:admin')
+  const attendanceImport = attendanceAdmin || permissions.includes('attendance:write')
+  const workflow = FEATURE_FLAGS.workflowEnabled
+  const plm = isPlmEnabled(process.env.PRODUCT_MODE, process.env.ENABLE_PLM)
+  const mode = resolveEffectiveProductMode(process.env.PRODUCT_MODE, process.env.ENABLE_PLM)
+
+  return {
+    attendance,
+    workflow,
+    attendanceAdmin,
+    attendanceImport,
+    plm,
+    // B3-07 (#4195): surfaces the APPROVAL_ATTACHMENTS_ENABLED master flag (D5, default OFF) to the
+    // web client so the fill view swaps the B2-28 placeholder for the real uploader ONLY flag-ON.
+    approvalAttachments: isApprovalAttachmentsEnabled(),
+    // Canvas V2 is the default authoring surface. It is never inferred from admin role, product
+    // mode, or plugin state; an explicit false env value selects the operator rollback renderer.
+    approvalCanvasV2: isApprovalCanvasV2Enabled(),
+    // FWB production authoring (write_approval_form_values). Surfaces APPROVAL_FWB_WRITEBACK_ENABLED
+    // (default OFF) so the automation rule editor can offer the mapping UI only when execution is
+    // actually enabled. Never inferred from admin/role/mode.
+    approvalFwbWriteback: isFwbWritebackEnabled(),
+    // 抄送我的 unread badge (test report 2026-10-08): APPROVAL_CC_UNREAD_BADGE_ENABLED, default OFF,
+    // exact 'true'. The SAME predicate gates GET /api/approvals/cc-unread-count, so the web asks for
+    // the count only when the server answers it. Never inferred from role/mode.
+    approvalCcUnreadBadge: isApprovalCcUnreadBadgeEnabled(),
+    // 我发起的 new-outcome badge (test report 2026-10-08): APPROVAL_MINE_OUTCOME_BADGE_ENABLED, default
+    // OFF, exact 'true'; the SAME predicate gates GET /api/approvals/mine-outcomes/unseen-count.
+    approvalMineOutcomeBadge: isApprovalMineOutcomeBadgeEnabled(),
+    // W6-3 (#4556) OD-W6-7=(a): the group effective-policy panel's default-OFF, two-layer gate
+    // (master env switch AND per-org exact allowlist — see w6-group-effective-policy-panel-flag.ts).
+    // Never inferred from role/mode/plugin state.
+    attendanceGroupEffectivePolicyPanel: isAttendanceGroupEffectivePolicyPanelEnabledForOrgV1(authUser.tenantId),
+    // E-learning V0.1 named pilot: master flag only. Never inferred from admin
+    // role, product mode, or plugin state.
+    elearning: isElearningEnabled(),
+    // Tasks: true only when TASKS_ENABLED is exactly 'true', i.e. exactly when tasksRouter() mounts
+    // /api/tasks. The web hides the 任务 entry, its badge and the /tasks route otherwise, so a
+    // server without the flag issues no /api/tasks request at all. Never inferred from role.
+    tasks: isTasksEnabled(),
+    // R-69 1b-iii: surfaces I3's INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED (default OFF, exact 'true') so the
+    // automation rule editor offers run_integration_job only when a save could succeed (ADR PR 1b-iii: not
+    // rendered while the switch is off). The SAME predicate gates the save (403 RUN_ACTION_DISABLED) and every
+    // trigger. Not a new flag. Never inferred from role/mode/plugin state.
+    integrationAutomationRunAction: isIntegrationAutomationRunActionEnabled(),
+    // R-69 1c: surfaces INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED (default OFF, exact 'true') so the rule editor
+    // offers the integration.run_finished trigger (and its alert template) only while summaries can actually be
+    // published and received. The SAME predicate gates publish, receipt and dispatch. Not a new flag. Never
+    // inferred from role/mode/plugin state.
+    integrationAutomationRunEvent: isIntegrationAutomationRunEventEnabled(),
+    mode,
+  }
+}
+
+function buildAuthRouter(localStrict?: StrictDingTalkLocalBinding): Router {
+const authRouter = Router()
 
 // ============================================
 // Dev Token (non-production only)
@@ -168,6 +289,13 @@ function getClientIP(req: Request): string {
     return forwarded.split(',')[0].trim()
   }
   return req.ip || req.socket.remoteAddress || 'unknown'
+}
+
+function strictDingTalkRequestFields(req: Request): { ipAddress: string; userAgent: string | null } {
+  return {
+    ipAddress: getClientIP(req),
+    userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
+  }
 }
 
 function resolveRequestTenantId(req: Request): string | undefined {
@@ -286,63 +414,6 @@ function sanitizeLoginIdentifier(identifier: string): string {
 function sanitizeName(name: string): string {
   // Remove potentially dangerous characters, keep letters, numbers, spaces
   return name.trim().replace(/[<>'"&;]/g, '').slice(0, 100)
-}
-
-function buildFeaturePayload(authUser: User) {
-  const permissions = Array.isArray(authUser.permissions) ? authUser.permissions : []
-  const attendance = authUser.role === 'admin' || permissions.some((permission) => permission.startsWith('attendance:'))
-  const attendanceAdmin = authUser.role === 'admin' || permissions.includes('attendance:admin')
-  const attendanceImport = attendanceAdmin || permissions.includes('attendance:write')
-  const workflow = FEATURE_FLAGS.workflowEnabled
-  const plm = isPlmEnabled(process.env.PRODUCT_MODE, process.env.ENABLE_PLM)
-  const mode = resolveEffectiveProductMode(process.env.PRODUCT_MODE, process.env.ENABLE_PLM)
-
-  return {
-    attendance,
-    workflow,
-    attendanceAdmin,
-    attendanceImport,
-    plm,
-    // B3-07 (#4195): surfaces the APPROVAL_ATTACHMENTS_ENABLED master flag (D5, default OFF) to the
-    // web client so the fill view swaps the B2-28 placeholder for the real uploader ONLY flag-ON.
-    approvalAttachments: isApprovalAttachmentsEnabled(),
-    // Canvas V2 is the default authoring surface. It is never inferred from admin role, product
-    // mode, or plugin state; an explicit false env value selects the operator rollback renderer.
-    approvalCanvasV2: isApprovalCanvasV2Enabled(),
-    // FWB production authoring (write_approval_form_values). Surfaces APPROVAL_FWB_WRITEBACK_ENABLED
-    // (default OFF) so the automation rule editor can offer the mapping UI only when execution is
-    // actually enabled. Never inferred from admin/role/mode.
-    approvalFwbWriteback: isFwbWritebackEnabled(),
-    // 抄送我的 unread badge (test report 2026-10-08): APPROVAL_CC_UNREAD_BADGE_ENABLED, default OFF,
-    // exact 'true'. The SAME predicate gates GET /api/approvals/cc-unread-count, so the web asks for
-    // the count only when the server answers it. Never inferred from role/mode.
-    approvalCcUnreadBadge: isApprovalCcUnreadBadgeEnabled(),
-    // 我发起的 new-outcome badge (test report 2026-10-08): APPROVAL_MINE_OUTCOME_BADGE_ENABLED, default
-    // OFF, exact 'true'; the SAME predicate gates GET /api/approvals/mine-outcomes/unseen-count.
-    approvalMineOutcomeBadge: isApprovalMineOutcomeBadgeEnabled(),
-    // W6-3 (#4556) OD-W6-7=(a): the group effective-policy panel's default-OFF, two-layer gate
-    // (master env switch AND per-org exact allowlist — see w6-group-effective-policy-panel-flag.ts).
-    // Never inferred from role/mode/plugin state.
-    attendanceGroupEffectivePolicyPanel: isAttendanceGroupEffectivePolicyPanelEnabledForOrgV1(authUser.tenantId),
-    // E-learning V0.1 named pilot: master flag only. Never inferred from admin
-    // role, product mode, or plugin state.
-    elearning: isElearningEnabled(),
-    // Tasks: true only when TASKS_ENABLED is exactly 'true', i.e. exactly when tasksRouter() mounts
-    // /api/tasks. The web hides the 任务 entry, its badge and the /tasks route otherwise, so a
-    // server without the flag issues no /api/tasks request at all. Never inferred from role.
-    tasks: isTasksEnabled(),
-    // R-69 1b-iii: surfaces I3's INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED (default OFF, exact 'true') so the
-    // automation rule editor offers run_integration_job only when a save could succeed (ADR PR 1b-iii: not
-    // rendered while the switch is off). The SAME predicate gates the save (403 RUN_ACTION_DISABLED) and every
-    // trigger. Not a new flag. Never inferred from role/mode/plugin state.
-    integrationAutomationRunAction: isIntegrationAutomationRunActionEnabled(),
-    // R-69 1c: surfaces INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED (default OFF, exact 'true') so the rule editor
-    // offers the integration.run_finished trigger (and its alert template) only while summaries can actually be
-    // published and received. The SAME predicate gates publish, receipt and dispatch. Not a new flag. Never
-    // inferred from role/mode/plugin state.
-    integrationAutomationRunEvent: isIntegrationAutomationRunEventEnabled(),
-    mode,
-  }
 }
 
 function normalizeDingTalkRedirectPath(value: unknown): string | null {
@@ -622,6 +693,20 @@ function mapDingTalkActivationFailure(error: unknown): DingTalkActivationIntentE
   const code = error instanceof Error
     ? String((error as Error & { code?: unknown }).code || '')
     : ''
+  if (code === 'ACTIVATE_STRICT_CONNECTION') {
+    return new DingTalkActivationIntentError(
+      403,
+      'activate_strict_connection',
+      'SSO activation is closed for this strict directory connection',
+    )
+  }
+  if (code === 'ACTIVATE_CONNECTION_AMBIGUOUS') {
+    return new DingTalkActivationIntentError(
+      503,
+      'activate_connection_ambiguous',
+      'Multiple directory connections include a strict login connection',
+    )
+  }
   if (code === 'ACTIVATE_USER_NOT_FOUND') {
     return new DingTalkActivationIntentError(404, 'activate_target_not_found', 'Activation target was not found')
   }
@@ -658,21 +743,56 @@ function mapDingTalkActivationFailure(error: unknown): DingTalkActivationIntentE
   )
 }
 
-async function issueAuthSessionToken(user: User, req: Request, expectedAccessGeneration?: number): Promise<string> {
+async function issueAuthSessionToken(
+  user: User,
+  req: Request,
+  options: { expectedAccessGeneration?: number; origin: ClosedExternalOrigin | null },
+): Promise<string> {
   const sessionId = randomUUID()
   const tenantId = await authService.resolveSessionTenantId(user.id, resolveRequestTenantId(req))
   const tokenUser = tenantId ? { ...user, tenantId } : user
-  const token = authService.createToken(tokenUser, { sid: sessionId })
+  const token = authService.createToken(tokenUser, { sid: sessionId, externalAuth: false })
   const payload = authService.readTokenPayload(token)
 
   if (payload?.exp) {
-    const session = await createUserSession(user.id, {
+    const sessionOptions = {
       sessionId,
-      expectedAccessGeneration,
+      expectedAccessGeneration: options.expectedAccessGeneration,
       expiresAt: new Date(payload.exp * 1000).toISOString(),
       ipAddress: getClientIP(req),
       userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
-    })
+    }
+    const origin = options.origin
+    const session = origin !== null && origin.kind !== 'password'
+      ? await transaction(async (client) => {
+        await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        const subject = await client.query('SELECT id FROM users WHERE id = $1 FOR SHARE', [user.id])
+        if (subject.rows.length !== 1) return null
+        const connection = await client.query(
+          'SELECT id FROM directory_integrations WHERE id = $1::uuid FOR SHARE',
+          [origin.connectionId],
+        )
+        if (connection.rows.length !== 1) return null
+        try {
+          await assertOrdinaryIssuerAllowsLegacySession(client, origin)
+        } catch (error) {
+          if (error instanceof StrictCredentialChainError && error.code === 'strict_connection') {
+            throw new DingTalkLoginPolicyError('DingTalk legacy login is closed for this connection', {
+              statusCode: 403,
+              code: 'strict_connection',
+            })
+          }
+          if (error instanceof StrictCredentialChainError || error instanceof StrictLoginGrantError) {
+            throw new DingTalkLoginPolicyError('DingTalk login authorization is unavailable', {
+              statusCode: 503,
+              code: 'grant_state_unavailable',
+            })
+          }
+          throw error
+        }
+        return createUserSession(user.id, sessionOptions, client)
+      })
+      : await createUserSession(user.id, sessionOptions)
     if (!session) throw new DingTalkLoginPolicyError('Authentication changed; please sign in again', {statusCode:409,code:'authentication_changed'})
   }
 
@@ -842,7 +962,7 @@ authRouter.post('/register', registerRateLimiter, async (req: Request, res: Resp
 
     // 注册成功，自动生成token
     const tenantId = await authService.resolveSessionTenantId(user.id, resolveRequestTenantId(req))
-    const token = authService.createToken(tenantId ? { ...user, tenantId } : user)
+    const token = authService.createToken(tenantId ? { ...user, tenantId } : user, { externalAuth: false })
     logger.info(`Successful registration for ${cleanEmail} from ${ip}`)
 
     res.status(201).json({
@@ -1126,6 +1246,15 @@ authRouter.post('/password/change', async (req: Request, res: Response) => {
     }
 
     const passwordHash = await bcrypt.hash(password, getBcryptSaltRounds())
+    const actorSession = readAuthenticatedSessionContext(req)
+    const actorSchema = await classifyAdminGrantActorInputSchema({ query })
+    if (actorSchema === 'partial') {
+      return res.status(503).json({
+        success: false,
+        error: 'Password change is unavailable',
+      })
+    }
+    if (actorSchema === 'absent') {
     await query(
       `UPDATE users
        SET password_hash = $1,
@@ -1140,6 +1269,18 @@ authRouter.post('/password/change', async (req: Request, res: Response) => {
       updatedBy: authenticated.user.id,
       reason: 'password-change-required-cleared',
     })
+    } else {
+      if (actorSession === null || actorSession.userId !== authenticated.user.id) {
+        return res.status(401).json({
+          success: false,
+          error: 'Invalid token',
+        })
+      }
+      await changeRequiredPasswordWithProvenance({
+        session: actorSession,
+        passwordHash,
+      })
+    }
 
     const refreshedUser = {
       ...authenticated.user,
@@ -1150,7 +1291,10 @@ authRouter.post('/password/change', async (req: Request, res: Response) => {
     const token = await issueAuthSessionToken(
       refreshedUser,
       req,
-      Number(authenticated.user.access_generation ?? 0),
+      {
+        expectedAccessGeneration: Number(authenticated.user.access_generation ?? 0),
+        origin: closedPasswordOrigin(),
+      },
     )
 
     return res.json({
@@ -1163,6 +1307,13 @@ authRouter.post('/password/change', async (req: Request, res: Response) => {
       },
     })
   } catch (error) {
+    if (error instanceof AdminGrantActorInputError) {
+      return res.status(error.code === 'ADMIN_GRANT_CREDENTIAL_INELIGIBLE' ? 403 : 503).json({
+        success: false,
+        error: 'Password change is unavailable',
+        code: error.code,
+      })
+    }
     if (error instanceof DingTalkLoginPolicyError && error.code === 'authentication_changed') {
       return res.status(error.statusCode).json({
         success: false,
@@ -1190,6 +1341,45 @@ authRouter.post('/refresh-token', async (req: Request, res: Response) => {
         success: false,
         error: 'Token is required'
       })
+    }
+
+    if (localStrict) {
+      const binding = localStrict
+      const strictPayload = authService.readTokenPayload(token, { ignoreExpiration: true })
+      const sessionClass = classifyVerifiedSessionPayload(strictPayload)
+      if (sessionClass === 'conflict' || sessionClass === 'strict') {
+        if (sessionClass === 'conflict') {
+          return res.status(401).json({
+            success: false,
+            error: 'Invalid or expired token'
+          })
+        }
+        try {
+          const refreshed = await strictDingTalkSessionRunner()(async (client) => {
+            await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+            return binding.refreshStrictSession({
+              caller: client,
+              payload: strictPayload,
+              ...strictDingTalkRequestFields(req),
+            })
+          })
+          if (!refreshed) {
+            return res.status(401).json({
+              success: false,
+              error: 'Invalid or expired token'
+            })
+          }
+          return res.json({
+            success: true,
+            data: {
+              token: refreshed.token
+            }
+          })
+        } catch (error) {
+          if (error instanceof StrictDingTalkEntryError) return sendStrictDingTalkEntryError(res, error)
+          throw error
+        }
+      }
     }
 
     // 刷新token
@@ -1291,6 +1481,46 @@ authRouter.get('/session-orgs', async (req: Request, res: Response) => {
 
 authRouter.post('/session-org', async (req: Request, res: Response) => {
   try {
+    if (localStrict) {
+      const binding = localStrict
+      const header = req.headers.authorization
+      const bearer = header?.startsWith('Bearer ') ? header.substring(7) : null
+      const signed = bearer ? authService.readTokenPayload(bearer) : null
+      const sessionClass = classifyVerifiedSessionPayload(signed)
+      if (sessionClass === 'conflict') {
+        return res.status(401).json({ success: false, error: 'Invalid token' })
+      }
+      if (sessionClass === 'strict') {
+        const body = req.body
+        if (!body || typeof body !== 'object' || Array.isArray(body)
+          || Object.keys(body).length !== 1 || typeof body.orgId !== 'string' || !body.orgId.trim()) {
+          return res.status(400).json({ success: false, error: 'An explicit organization is required', code: 'SESSION_ORG_REQUIRED' })
+        }
+        const orgId = body.orgId.trim()
+        try {
+          const switched = await strictDingTalkSessionRunner()(async (client) => {
+            await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+            return binding.switchStrictSessionOrg({
+              caller: client,
+              payload: signed,
+              orgId,
+              ...strictDingTalkRequestFields(req),
+            })
+          })
+          if (!switched) {
+            return res.status(401).json({ success: false, error: 'Invalid token' })
+          }
+          const strictUser = strictDingTalkAuthUser(switched.user)
+          return res.json({ success: true, data: { token: switched.token, user: strictUser, currentOrgId: switched.user.strictSessionOrgId } })
+        } catch (error) {
+          if (error instanceof StrictDingTalkEntryError && error.code === 'SESSION_ORG_NOT_MEMBER') {
+            return res.status(403).json({ success: false, error: 'Not a member of the requested organization', code: 'SESSION_ORG_NOT_MEMBER' })
+          }
+          if (error instanceof StrictDingTalkEntryError) return sendStrictDingTalkEntryError(res, error)
+          throw error
+        }
+      }
+    }
     const authResult = await requireAuthenticatedUser(req, res)
     if (!authResult) return
     const { token, user } = authResult
@@ -1307,7 +1537,7 @@ authRouter.post('/session-org', async (req: Request, res: Response) => {
     const payload = authService.readTokenPayload(token)
     const sessionId = typeof payload?.sid === 'string' && payload.sid.trim() ? payload.sid : randomUUID()
     const tokenUser = { ...user, tenantId: chosen }
-    const nextToken = authService.createToken(tokenUser, { sid: sessionId })
+    const nextToken = authService.createToken(tokenUser, { sid: sessionId, externalAuth: false })
     const nextPayload = authService.readTokenPayload(nextToken)
     if (!nextPayload?.exp) {
       return res.status(503).json({ success: false, error: 'Organization switch unavailable', code: 'SESSION_ORG_SWITCH_UNAVAILABLE' })
@@ -1472,35 +1702,13 @@ authRouter.post('/dingtalk/unbind', async (req: Request, res: Response) => {
     const authResult = await requireAuthenticatedUser(req, res)
     if (!authResult) return
 
-    const snapshot = await fetchCurrentUserDingTalkAccessSnapshot(authResult.user.id)
-    if (snapshot.directory.linked) {
-      return res.status(409).json({
-        success: false,
-        error: 'Current DingTalk identity is directory-managed. Please contact an administrator.',
-      })
-    }
-
-    await unbindSelfManagedDingTalkIdentity({
-      localUserId: authResult.user.id,
-      actorId: authResult.user.id,
-    })
-
-    const nextSnapshot = await fetchCurrentUserDingTalkAccessSnapshot(authResult.user.id)
-    return res.json({
-      success: true,
-      data: nextSnapshot,
+    return res.status(403).json({
+      success: false,
+      error: 'Self-service DingTalk identity changes are unavailable. Please contact an administrator.',
+      code: 'self_service_disabled',
     })
   } catch (error) {
-    // O2-S2: unbind runs under the access-graph users mutex — marker 40001 → uniform
-    // retryable 409. Policy errors and the fail-closed 500 below are unchanged.
     if (sendIfRecoveryConflict(res, error)) return
-    if (error instanceof DingTalkLoginPolicyError) {
-      return res.status(error.statusCode).json({
-        success: false,
-        error: error.message,
-        code: error.code,
-      })
-    }
     logger.error('DingTalk self-unbind error', error instanceof Error ? error : undefined)
     return res.status(500).json({
       success: false,
@@ -1546,13 +1754,16 @@ authRouter.get('/dingtalk/launch', async (req: Request, res: Response) => {
         : 'login'
     const redirectPath = normalizeDingTalkRedirectPath(req.query.redirect)
 
-    let bindUserId: string | null = null
     let activateUserId: string | null = null
     let activateAdminUserId: string | null = null
     if (mode === 'bind') {
       const authResult = await requireAuthenticatedUser(req, res)
       if (!authResult) return
-      bindUserId = authResult.user.id
+      return res.status(403).json({
+        success: false,
+        error: 'Self-service DingTalk identity changes are unavailable. Please contact an administrator.',
+        code: 'self_service_disabled',
+      })
     } else if (mode === 'activate') {
       const authResult = await requireAuthenticatedUser(req, res)
       if (!authResult) return
@@ -1593,15 +1804,13 @@ authRouter.get('/dingtalk/launch', async (req: Request, res: Response) => {
     }
 
     const state = await generateState(
-      mode === 'bind'
-        ? { redirectPath, intent: 'bind', bindUserId }
-        : mode === 'activate'
-          ? {
-              redirectPath,
-              intent: 'activate',
-              activateUserId,
-              activateAdminUserId,
-            }
+      mode === 'activate'
+        ? {
+            redirectPath,
+            intent: 'activate',
+            activateUserId,
+            activateAdminUserId,
+          }
         : { redirectPath },
     )
     const url = buildAuthUrl(state)
@@ -1643,7 +1852,7 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
       })
     }
 
-    if (!isDingTalkConfigured()) {
+    if ((!localStrict || stateCheck.intent === 'bind' || stateCheck.intent === 'activate') && !isDingTalkConfigured()) {
       return res.status(503).json({
         success: false,
         error: 'DingTalk login is not configured on this server',
@@ -1663,37 +1872,10 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
         })
       }
 
-      // Directory-managed users must not self-rebind — their DingTalk identity
-      // is owned by the admin directory sync flow.
-      const preSnapshot = await fetchCurrentUserDingTalkAccessSnapshot(authResult.user.id)
-      if (preSnapshot.directory.linked) {
-        return res.status(409).json({
-          success: false,
-          error: 'Current user is directory-managed for DingTalk. Please contact an administrator to rebind.',
-          code: 'directory_managed_conflict',
-        })
-      }
-
-      const dtUser = await exchangeCodeForDingTalkProfile(code)
-      await bindDingTalkIdentityToUser({
-        localUserId: authResult.user.id,
-        dtUser,
-        boundBy: authResult.user.id,
-        enableGrant: true,
-      })
-
-      const snapshot = await fetchCurrentUserDingTalkAccessSnapshot(authResult.user.id)
-
-      logger.info(`DingTalk self-bind for ${authResult.user.email} (openId: ${dtUser.openId})`)
-
-      return res.json({
-        success: true,
-        data: {
-          mode: 'bind',
-          bound: true,
-          redirectPath: stateCheck.redirectPath || null,
-          identity: snapshot,
-        },
+      return res.status(403).json({
+        success: false,
+        error: 'Self-service DingTalk identity changes are unavailable. Please contact an administrator.',
+        code: 'self_service_disabled',
       })
     }
 
@@ -1724,8 +1906,9 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
         unionId: profile.unionId,
       })
 
+      let activationOrigin: ClosedExternalOrigin | null = null
       try {
-        await activatePendingUser({
+        const activated = await activatePendingUser({
           userId: activateUserId,
           mode: 'sso',
           adminUserId: activateAdminUserId,
@@ -1737,6 +1920,7 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
             unionId: profile.unionId,
           },
         })
+        activationOrigin = activated.externalOrigin
       } catch (error) {
         // O2-S2: a recovery conflict (named retryable RecoveryConflictError from
         // activatePendingUser) must NOT collapse into the 500 'activate_failed'
@@ -1747,7 +1931,7 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
       }
 
       const user = await loadActivatedAuthUser(activateUserId)
-      const token = await issueAuthSessionToken(user, req)
+      const token = await issueAuthSessionToken(user, req, { origin: activationOrigin })
       await auditLog({
         actorId: activateAdminUserId,
         actorType: 'user',
@@ -1778,6 +1962,39 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
       })
     }
 
+    if (localStrict) {
+      const binding = localStrict
+      try {
+        const strictOutcome = await binding.signInWeb({
+          code,
+          selector: { connectionId: req.body?.connectionId, corpId: req.body?.corpId },
+          ...strictDingTalkRequestFields(req),
+        })
+        if (strictOutcome.status === 'issued') {
+          const authUser = strictDingTalkAuthUser(strictOutcome.user)
+          return res.json({
+            success: true,
+            data: {
+              mode: 'login',
+              user: { id: authUser.id, email: authUser.email, name: authUser.name, role: authUser.role, permissions: authUser.permissions },
+              token: strictOutcome.token,
+              redirectPath: stateCheck.redirectPath || null,
+              features: buildFeaturePayload(authUser),
+            },
+          })
+        }
+      } catch (error) {
+        if (error instanceof StrictDingTalkEntryError) return sendStrictDingTalkEntryError(res, error)
+        throw error
+      }
+      if (!isDingTalkConfigured()) {
+        return res.status(503).json({
+          success: false,
+          error: 'DingTalk login is not configured on this server',
+        })
+      }
+    }
+
     const result = await exchangeCodeForUser(code)
     const permissions = await loadAuthPermissions(result.localUserId)
     const user: User = {
@@ -1789,7 +2006,10 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
       created_at: new Date(),
       updated_at: new Date(),
     }
-    const token = await issueAuthSessionToken(user, req, result.sessionGeneration)
+    const token = await issueAuthSessionToken(user, req, {
+      expectedAccessGeneration: result.sessionGeneration,
+      origin: result.externalOrigin,
+    })
 
     logger.info(`DingTalk login for ${user.email} (openId: ${result.dingtalkUser.openId}, new: ${result.isNewUser})`)
 
@@ -1810,7 +2030,7 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
       },
     })
   } catch (error) {
-    // O2-S2: bind/JIT-provision/activate all write recovery-authority tables — marker
+    // O2-S2: JIT-provision/activate write recovery-authority tables — marker
     // 40001 (re-raised as the named retryable RecoveryConflictError by the service
     // layer) → uniform retryable 409. Every DingTalk policy/request mapping below is
     // unchanged; nothing fail-closed is loosened.
@@ -1864,7 +2084,7 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
 authRouter.post('/login/dingtalk/container', async (req: Request, res: Response) => {
   try {
     const flag = String(process.env.DINGTALK_CONTAINER_LOGIN_ENABLED ?? '').trim().toLowerCase()
-    if (!['true', '1', 'yes'].includes(flag)) {
+    if (!localStrict && !['true', '1', 'yes'].includes(flag)) {
       return res.status(404).json({
         success: false,
         error: 'DingTalk container login is not enabled',
@@ -1894,6 +2114,40 @@ authRouter.post('/login/dingtalk/container', async (req: Request, res: Response)
       })
     }
 
+    if (localStrict) {
+      const binding = localStrict
+      try {
+        const strictOutcome = await binding.signInContainer({
+          code: authCode,
+          selector: { connectionId: req.body?.connectionId, corpId: req.body?.corpId },
+          ...strictDingTalkRequestFields(req),
+        })
+        if (strictOutcome.status === 'issued') {
+          resetRateLimit(rateKey)
+          const authUser = strictDingTalkAuthUser(strictOutcome.user)
+          return res.json({
+            success: true,
+            data: {
+              mode: 'login',
+              user: { id: authUser.id, email: authUser.email, name: authUser.name, role: authUser.role, permissions: authUser.permissions },
+              token: strictOutcome.token,
+              features: buildFeaturePayload(authUser),
+            },
+          })
+        }
+      } catch (error) {
+        if (error instanceof StrictDingTalkEntryError) return sendStrictDingTalkEntryError(res, error)
+        throw error
+      }
+      if (!['true', '1', 'yes'].includes(flag)) {
+        return res.status(404).json({
+          success: false,
+          error: 'DingTalk container login is not enabled',
+          code: 'container_login_disabled',
+        })
+      }
+    }
+
     const result = await exchangeEnterpriseAuthCodeForUser(authCode)
     resetRateLimit(rateKey)
     const permissions = await loadAuthPermissions(result.localUserId)
@@ -1906,7 +2160,10 @@ authRouter.post('/login/dingtalk/container', async (req: Request, res: Response)
       created_at: new Date(),
       updated_at: new Date(),
     }
-    const token = await issueAuthSessionToken(user, req, result.sessionGeneration)
+    const token = await issueAuthSessionToken(user, req, {
+      expectedAccessGeneration: result.sessionGeneration,
+      origin: result.externalOrigin,
+    })
 
     logger.info(`DingTalk container login for ${user.email} (unionId: ${result.dingtalkUser.unionId}, new: ${result.isNewUser})`)
 
@@ -2111,3 +2368,18 @@ authRouter.get('/users', async (req: Request, res: Response) => {
     })
   }
 })
+return authRouter
+}
+
+export const authRouter = buildAuthRouter()
+
+export async function createLocalStrictDingTalkAuthRouter(
+  input: LocalStrictDingTalkAuthRouterInput,
+): Promise<Router> {
+  const binding = await bindStrictDingTalkEntryLocal({
+    fetchFn: input.fetchFn,
+    env: input.env,
+    transaction: strictDingTalkSessionRunner(),
+  })
+  return buildAuthRouter(binding)
+}

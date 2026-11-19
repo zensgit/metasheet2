@@ -52,7 +52,7 @@ export async function revokeUserSessions(
       `INSERT INTO user_session_revocations (user_id, revoked_after, updated_at, updated_by, reason)
        VALUES ($1, NOW(), NOW(), $2, $3)
        ON CONFLICT (user_id) DO UPDATE
-       SET revoked_after = EXCLUDED.revoked_after,
+       SET revoked_after = GREATEST(user_session_revocations.revoked_after, EXCLUDED.revoked_after),
            updated_at = EXCLUDED.updated_at,
            updated_by = EXCLUDED.updated_by,
            reason = EXCLUDED.reason

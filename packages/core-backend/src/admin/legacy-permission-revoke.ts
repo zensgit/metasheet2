@@ -1,12 +1,6 @@
-import {
-  AccessGraphUserUnavailableError,
-  supersedeDeprovisionEvidenceForAccessGraphWrite,
-  type AccessGraphTransactionClient,
-} from '../directory/access-graph-mutex'
-import {
-  assertPlatformActorAuthority,
-  lockSharedAccessSubjects,
-} from './platform-actor-authority'
+import { AccessGraphUserUnavailableError, supersedeDeprovisionEvidenceForAccessGraphWrite } from '../directory/access-graph-mutex'
+import type { AuthorizationInputTx } from '../rbac/authorization-input-lock'
+import { assertPermissionExceptionRoot, type PermissionExceptionRoot } from './direct-permission-authority'
 
 export type LegacyPermissionRevokeResult = {
   changed: boolean
@@ -46,43 +40,14 @@ function acknowledgedLegacyWrite(result: PermissionWriteResult, userId: string):
     && String(result.rows[0]?.id ?? '') === userId
 }
 
-/**
- * Remove one legacy code from `users.permissions` and nothing else.
- *
- * This writer does not touch roles, so it does not pre-read or FOR SHARE
- * lock them. It locks the actor and target through lockSharedAccessSubjects,
- * then requires the locked actor to be active, activated, not recycled, and
- * to hold a live user_roles admin membership. users.role, is_admin, and a
- * token claim are not authority. The target may be inactive or pending.
- * A missing or recycled target is refused.
- *
- * `to_jsonb(permissions)` is already decoded by the driver. A scalar is left
- * unchanged: inspection never treats it as grants, even when the scalar text
- * is itself an encoded JSON array. JSONB and text[] are written back with the
- * matching cast, and text[] keeps null elements. Any other pg_typeof throws
- * and writes nothing. changed is true only after RETURNING id with rowCount 1.
- * A no-match or a zero-row update does not supersede evidence.
- */
-export async function revokeLegacyUserPermission(
-  client: AccessGraphTransactionClient,
-  options: { actorId: string; userId: string; permission: string },
+/** Caller already holds the actor and target locks and has checked authority. */
+export async function revokeLockedLegacyUserPermission(
+  tx: AuthorizationInputTx,
+  options: PermissionExceptionRoot & { permission: string; expected: { value: unknown } },
 ): Promise<LegacyPermissionRevokeResult> {
-  const actorId = options.actorId.trim()
-  const userId = options.userId.trim()
-  const permission = options.permission.trim()
-  if (!actorId || !userId || !permission) {
-    throw new Error('legacy permission revoke requires actorId, userId, and permission')
-  }
-
-  const subjects = await lockSharedAccessSubjects(client, [actorId, userId])
-  const target = subjects.get(userId)
-  if (!target) throw new AccessGraphUserUnavailableError('NOT_FOUND')
-  if (target.deletedAt || target.purgedAt) throw new AccessGraphUserUnavailableError('USER_IN_RECYCLE_BIN')
-  await assertPlatformActorAuthority(client, subjects.get(actorId), {
-    requireLiveRbacAdmin: true,
-  })
-
-  const inspected = await client.query(
+  const { actorId, userId, permission, expected } = options
+  assertPermissionExceptionRoot(tx, options, true, true)
+  const inspected = await tx.query(
     `SELECT pg_typeof(permissions)::text AS permissions_type,
             to_jsonb(permissions) AS permissions
        FROM users
@@ -95,35 +60,45 @@ export async function revokeLegacyUserPermission(
   if (columnType !== 'jsonb' && columnType !== 'text[]') {
     throw new Error('unsupported users.permissions type')
   }
+  if (JSON.stringify(row.permissions) !== JSON.stringify(expected.value)) {
+    throw new Error('AUTHORIZATION_EXCEPTION_STALE')
+  }
   const removed = removeMatchingLegacyPermission(row.permissions, permission)
   if (!removed.changed || !Array.isArray(removed.next)) return { changed: false }
 
   let updated: PermissionWriteResult
   if (columnType === 'jsonb') {
-    updated = await client.query(
+    assertPermissionExceptionRoot(tx, options, true, true)
+    updated = await tx.query(
       `UPDATE users
           SET permissions = $2::jsonb
         WHERE id = $1
           AND pg_typeof(permissions)::text = 'jsonb'
+          AND to_jsonb(permissions) IS NOT DISTINCT FROM $3::jsonb
         RETURNING id`,
-      [userId, JSON.stringify(removed.next)],
+      [userId, JSON.stringify(removed.next), JSON.stringify(row.permissions)],
     ) as PermissionWriteResult
   } else {
     if (removed.next.some((item) => item !== null && typeof item !== 'string')) {
       throw new Error('unsupported users.permissions type')
     }
-    updated = await client.query(
+    assertPermissionExceptionRoot(tx, options, true, true)
+    updated = await tx.query(
       `UPDATE users
           SET permissions = $2::text[]
         WHERE id = $1
           AND pg_typeof(permissions)::text = 'text[]'
+          AND to_jsonb(permissions) IS NOT DISTINCT FROM $3::jsonb
         RETURNING id`,
-      [userId, removed.next],
+      [userId, removed.next, JSON.stringify(row.permissions)],
     ) as PermissionWriteResult
   }
-  if (!acknowledgedLegacyWrite(updated, userId)) return { changed: false }
+  if (!acknowledgedLegacyWrite(updated, userId)) {
+    throw new Error('AUTHORIZATION_EXCEPTION_WRITE_NOT_ACKNOWLEDGED')
+  }
 
-  await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
+  assertPermissionExceptionRoot(tx, options, true, true)
+  await supersedeDeprovisionEvidenceForAccessGraphWrite(tx, {
     userIds: [userId],
     actorId,
     reason: 'superseded by administrator legacy permission revoke',

@@ -1243,8 +1243,35 @@ const pluginBridgeStillTrue = (o: OpaqueRegistration) => /\bawait handler\(req, 
 /** Callees that mount an APIGateway endpoint. */
 const GATEWAY_REGISTRARS = new Set(['registerEndpoint', 'registerEndpoints', 'registerVersionedEndpoint', 'registerBulkEndpoints'])
 
+/** The checker returns decisions only, after caller visibility and live-sheet checks. */
+function businessCheckSheetFact(route: string, module: string, handler: string, context: string): boolean {
+  handler = handler.replace(/\s+/g, ' ')
+  context = context.replace(/\s+/g, ' ')
+  const call = handler.indexOf('await checkSheetContext(')
+  const send = handler.indexOf('output = resourceResponse(body.policyId, result.visibility, result.context)')
+  const liveRow = context.indexOf('s.deleted_at IS NULL AND b.deleted_at IS NULL')
+  const noSheet = context.indexOf('if (!sheet || isHiddenSystemSheet(sheet)) return unknown')
+  const resolve = context.indexOf('await resolveSheetCapabilitiesForAccess(query, resource.sheetId, access)')
+  const notLive = context.indexOf("if (resolved.sheetLiveness !== 'live') return false")
+  const visible = context.indexOf('if (!caller.userId || !await visible(caller)) return unknown')
+  const allow = context.indexOf("if (subject.kind === 'self') return { visibility: 'allow', context: 'allow' }")
+  return route.includes("import { businessCheck } from '../rbac/business-check'")
+    && module.includes("import { checkSheetContext, ResourceCheckUnavailable } from '../multitable/context-check'")
+    && handler.includes('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
+    && call >= 0 && send > call
+    && liveRow >= 0 && noSheet > liveRow && resolve > noSheet && notLive > resolve
+    && visible > notLive && allow > visible
+}
+
 /** Registrations whose handler cannot be read, each named with the fact that makes it harmless. */
 const OPAQUE_REGISTRATIONS: Record<string, Record<string, { handler: string; reason: string; stillTrue: (o: OpaqueRegistration) => boolean }>> = {
+  'routes/permissions.ts': {
+    'POST /api/permissions/v2/business-check': {
+      handler: 'businessCheck',
+      reason: 'READ-ONLY CHECKER — businessCheck returns decisions only, through checkSheetContext; the caller must see a live sheet and its live parent before an allow. The checker fails closed on unavailable context and never returns sheet rows. Its cross-file liveness and visibility facts are asserted and the PostgreSQL suite exercises deleted and hidden sheets.',
+      stillTrue: () => businessCheckSheetFact(readSource('routes/permissions.ts'), readSource('rbac/business-check.ts'), functionCode('rbac/business-check.ts', 'businessCheck'), functionCode('multitable/context-check.ts', 'checkSheetContext')),
+    },
+  },
   'gateway/APIGateway.ts': {
     '<dynamic method> <path endpoint.path> in registerEndpoint': {
       handler: '...middlewares',
@@ -1460,6 +1487,21 @@ const GATE_HELPER = [
 ]
 
 describe('sheet-liveness closure over EVERY route file', () => {
+  it('checker classification detects removed liveness and caller visibility checks', () => {
+    const route = readSource('routes/permissions.ts')
+    const module = readSource('rbac/business-check.ts')
+    const handler = functionCode('rbac/business-check.ts', 'businessCheck')
+    const context = functionCode('multitable/context-check.ts', 'checkSheetContext')
+    expect(businessCheckSheetFact(route, module, handler, context)).toBe(true)
+    for (const required of ["s.deleted_at IS NULL", "b.deleted_at IS NULL", "resolved.sheetLiveness !== 'live'", '!caller.userId || !await visible(caller)']) {
+      expect(context).toContain(required)
+      expect(businessCheckSheetFact(route, module, handler, context.replace(required, ''))).toBe(false)
+    }
+    expect(businessCheckSheetFact(route, module, handler.replace('await checkSheetContext(', 'await otherCheck('), context)).toBe(false)
+    expect(businessCheckSheetFact(route.replace("from '../rbac/business-check'", "from '../rbac/other'"), module, handler, context)).toBe(false)
+    expect(businessCheckSheetFact(route, module.replace("from '../multitable/context-check'", "from '../multitable/other'"), handler, context)).toBe(false)
+  })
+
   it('scanner self-test: registrations of every shape, lexical helpers, opaque handlers, comments never count, CRLF', () => {
     const fixture = [
       "import { requireRecordReadable } from './univer-meta'",

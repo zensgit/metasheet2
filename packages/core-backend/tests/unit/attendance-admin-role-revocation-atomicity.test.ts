@@ -29,6 +29,13 @@ vi.mock('../../src/db/pg', () => ({
   transaction: pgMocks.transaction,
   pool: { query: pgMocks.poolQuery },
 }))
+vi.mock('../../src/integration/db/connection-pool', () => ({
+  poolManager: { get: () => ({
+    query: pgMocks.query,
+    transaction: pgMocks.transaction,
+    getInternalPool: () => ({ connect: async () => { throw new Error('UNEXPECTED_ATOMICITY_POOL_ACCESS') } }),
+  }) },
+}))
 
 vi.mock('../../src/rbac/service', () => rbacServiceMocks)
 
@@ -158,6 +165,12 @@ function installTransaction(options: {
   }
   const clientQuery = vi.fn(async (sql: string, params?: unknown[]): Promise<SqlResult> => {
     const text = sql.replace(/\s+/g, ' ').trim()
+    if (/SET TRANSACTION|set_config/.test(text)) return { rows: [], rowCount: 0 }
+    if (/current_setting/.test(text)) return { rows: [{ lock_timeout: '0', statement_timeout: '0' }], rowCount: 1 }
+    if (/pg_advisory_xact_lock_shared/.test(text)) {
+      call.events.push('world-lock')
+      return { rows: [], rowCount: 1 }
+    }
     if (/pg_advisory_xact_lock/.test(text)) {
       call.events.push('lock')
       call.lockKeys.push(String(params?.[0] ?? ''))
@@ -169,7 +182,7 @@ function installTransaction(options: {
       call.events.push('authz-version')
       return { rows: [], rowCount: 1 }
     }
-    if (/FROM roles WHERE id = \$1 FOR SHARE/.test(text)) {
+    if (/FROM roles WHERE id = \$1(?:::text)? FOR SHARE/.test(text)) {
       call.events.push('role-lock')
       call.roleLockIds.push(String(params?.[0] ?? ''))
       return { rows: [{ id: params?.[0] }], rowCount: 1 }
@@ -282,11 +295,12 @@ function installTransaction(options: {
       throw error
     }
   })
-  pgMocks.query.mockImplementation(async (sql: string) => {
+  pgMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
     call.poolSql.push(sql)
-    if (/pg_advisory_xact_lock|DELETE FROM user_roles|INSERT INTO user_namespace_admissions|FROM role_permissions|SELECT TRUE AS allowed|INSERT INTO subject_authorization_versions/.test(sql)) {
+    if (/pg_advisory_xact_lock|DELETE FROM user_roles|INSERT INTO user_namespace_admissions|FROM role_permissions|SELECT TRUE AS allowed|FOR SHARE|FOR UPDATE|SET TRANSACTION|current_setting|set_config|INSERT INTO subject_authorization_versions/.test(sql)) {
       throw new Error('transaction statement reached the pool')
     }
+    if (/uo\.user_id = \$1|u\.id = ANY\(\$1::text\[\]\)/.test(sql)) return clientQuery(sql, params)
     return { rows: [], rowCount: 0 }
   })
   return call
@@ -371,7 +385,8 @@ describe('attendance-admin unassign scope and target guards do not mutate', () =
 
     expect(res.statusCode).toBe(403)
     expect(res.body).toMatchObject({ ok: false, error: { code: 'ORG_SCOPED_ROLE_WRITE_UNAVAILABLE' } })
-    expect(call.events).toEqual(['begin', 'actor-membership', 'rollback'])
+    expect(call.events).toEqual(['actor-membership'])
+    expect(pgMocks.transaction).not.toHaveBeenCalled()
     expectNoMembershipMutation(call)
     expect(rbacServiceMocks.listUserPermissions).not.toHaveBeenCalled()
   })
@@ -387,7 +402,8 @@ describe('attendance-admin unassign scope and target guards do not mutate', () =
 
     expect(res.statusCode).toBe(404)
     expect(res.body).toMatchObject({ ok: false, error: { code: 'USER_TARGET_NOT_FOUND' } })
-    expect(call.events).toEqual(['begin', 'resolve-targets', 'rollback'])
+    expect(call.events).toEqual(['resolve-targets'])
+    expect(pgMocks.transaction).not.toHaveBeenCalled()
     expect(call.roleLockIds).toEqual([])
     expectNoMembershipMutation(call)
   })
@@ -403,7 +419,8 @@ describe('attendance-admin unassign scope and target guards do not mutate', () =
     }, forbiddenRes)
     expect(forbiddenRes.statusCode).toBe(403)
     expect(forbiddenRes.body).toMatchObject({ ok: false, error: { code: 'FORBIDDEN' } })
-    expect(forbidden.events).toEqual(['begin', 'rollback'])
+    expect(forbidden.events).toEqual([])
+    expect(pgMocks.transaction).not.toHaveBeenCalled()
     expectNoMembershipMutation(forbidden)
 
     const anonymous = installTransaction()
@@ -416,7 +433,8 @@ describe('attendance-admin unassign scope and target guards do not mutate', () =
     }, anonymousRes)
     expect(anonymousRes.statusCode).toBe(401)
     expect(anonymousRes.body).toMatchObject({ ok: false, error: { code: 'UNAUTHENTICATED' } })
-    expect(anonymous.events).toEqual(['begin', 'rollback'])
+    expect(anonymous.events).toEqual([])
+    expect(pgMocks.transaction).not.toHaveBeenCalled()
     expectNoMembershipMutation(anonymous)
   })
 })
@@ -434,9 +452,10 @@ describe('attendance-admin unassign rechecks the locked actor and targets after 
     const subjects = lockedWriteSubjectIds(entry.name)
     expect(res.statusCode).toBe(404)
     expect(res.body).toMatchObject({ ok: false, error: { code: 'USER_TARGET_NOT_FOUND' } })
-    expect(call.events).toEqual([
-      'begin',
+    expect(call.events, JSON.stringify(call.events)).toEqual([
       'resolve-targets',
+      'begin',
+      'world-lock',
       'role-lock',
       ...subjects.map(() => 'lock'),
       'authz-version',
@@ -477,9 +496,10 @@ describe('attendance-admin unassign rechecks the locked actor and targets after 
     const subjects = lockedWriteSubjectIds(entry.name)
     expect(res.statusCode).toBe(403)
     expect(res.body).toMatchObject({ ok: false, error: { code: 'FORBIDDEN' } })
-    expect(call.events).toEqual([
-      'begin',
+    expect(call.events, JSON.stringify(call.events)).toEqual([
       'resolve-targets',
+      'begin',
+      'world-lock',
       'role-lock',
       ...subjects.map(() => 'lock'),
       'authz-version',
@@ -527,9 +547,10 @@ describe('attendance-admin unassign lock, DELETE and witness share one transacti
       },
     })
     expect((res.body as { data: Record<string, unknown> }).data).not.toHaveProperty('disabledNamespaces')
-    expect(call.events).toEqual([
-      'begin',
+    expect(call.events, JSON.stringify(call.events)).toEqual([
       'resolve-targets',
+      'begin',
+      'world-lock',
       'role-lock',
       'lock',
       'lock',
@@ -587,9 +608,10 @@ describe('attendance-admin unassign lock, DELETE and witness share one transacti
       inactiveUserIds: [],
     })
     expect(data).not.toHaveProperty('disabledNamespaces')
-    expect(call.events).toEqual([
-      'begin',
+    expect(call.events, JSON.stringify(call.events)).toEqual([
       'resolve-targets',
+      'begin',
+      'world-lock',
       'role-lock',
       'lock',
       'lock',
@@ -633,7 +655,8 @@ describe('attendance-admin unassign lock, DELETE and witness share one transacti
     expect(call.events.indexOf('commit')).toBeGreaterThan(lastWitness)
     expect(call.events.indexOf('lock')).toBeLessThan(call.events.indexOf('delete'))
     expect(call.committed).toBe(true)
-    expect(call.poolSql).toEqual([])
+    expect(call.poolSql).toHaveLength(1)
+    expect(call.poolSql[0]).toMatch(/u\.id = ANY\(\$1::text\[\]\)/)
     expect(rbacServiceMocks.listUserPermissions).not.toHaveBeenCalled()
     expect(rbacServiceMocks.invalidateUserPerms).not.toHaveBeenCalled()
   })

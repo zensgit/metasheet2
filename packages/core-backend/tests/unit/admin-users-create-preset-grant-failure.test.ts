@@ -121,12 +121,37 @@ function readStatement(config: unknown, values?: unknown[]): { text: string; val
   return { text: object.text, values: object.values ?? [] }
 }
 
+function heldBirthActor(id: string) {
+  // Aliases and native types of lockUsersForAccessGraphWrite: bigint comes back as text.
+  return {
+    id,
+    name: null,
+    email: null,
+    username: null,
+    mobile: null,
+    activation_status: 'activated',
+    role: 'admin',
+    is_active: true,
+    access_generation: '0',
+    deleted_at: null,
+    purged_at: null,
+  }
+}
+
 function execute(text: string, values: unknown[], target: Tables) {
   db.statements.push(text.trim().split('\n')[0].trim())
   if (db.failOn && db.failOn.statement.test(text)) throw db.failOn.error
+  if (/FROM users/.test(text) && /FOR UPDATE/.test(text) && /to_jsonb\(users\)/.test(text)) {
+    return emptyResult([heldBirthActor(String(values[0] ?? ''))])
+  }
+  if (/FROM roles\b/.test(text) && /FOR SHARE/.test(text)) {
+    const roleId = String(values[0] ?? '')
+    return emptyResult(roleId ? [{ id: roleId }] : [])
+  }
   if (/^\s*INSERT INTO users\b/.test(text)) {
-    target.users.push(String(values[0]))
-    return emptyResult()
+    const id = String(values[0])
+    target.users.push(id)
+    return emptyResult([{ id }])
   }
   if (/^\s*INSERT INTO user_permissions\b/.test(text)) {
     const [userId, ...codes] = values.map(String)
@@ -256,6 +281,10 @@ function expectFixedFailure(response: request.Response) {
   }
 }
 
+function usersInsertAt(): number {
+  return db.statements.findIndex((statement) => statement.startsWith('INSERT INTO users ('))
+}
+
 function expectNothingLeftBehind() {
   expect(db.statements).toContain('BEGIN')
   expect(db.statements).toContain('ROLLBACK')
@@ -290,7 +319,7 @@ describe('POST /api/admin/users — a refused preset grant (#6185)', () => {
 
     expectFixedFailure(response)
     // The refusal really came from the grant insert, after the users insert ran in the same transaction.
-    const usersInsert = db.statements.indexOf('INSERT INTO users (')
+    const usersInsert = usersInsertAt()
     const grantInsert = db.statements.indexOf('INSERT INTO user_permissions (user_id, permission_code)')
     expect(usersInsert).toBeGreaterThan(db.statements.indexOf('BEGIN'))
     expect(grantInsert).toBeGreaterThan(usersInsert)
@@ -308,7 +337,7 @@ describe('POST /api/admin/users — a refused preset grant (#6185)', () => {
     const response = await createUser()
 
     expectFixedFailure(response)
-    expect(db.statements).toContain('INSERT INTO users (')
+    expect(usersInsertAt()).toBeGreaterThanOrEqual(0)
     expectNothingLeftBehind()
   })
 })

@@ -31,6 +31,8 @@ export default defineConfig({
     exclude: [
       'tests/integration/admin-user-batch-review.db.test.ts',
       'tests/integration/admin-user-recycle-review.db.test.ts',
+      // This suite has a dedicated isolated-PG runner with trust-on/off sentinels.
+      'tests/integration/business-check-realdb.test.ts',
       '**/node_modules/**',
       '**/dist/**',
       // Integration tests requiring a live DB or pluginDirs PluginLoader API:
@@ -469,6 +471,31 @@ export default defineConfig({
       // tests/unit/authorization-input-lock.test.ts, the position by
       // plugin-tests-parallel-contract.test.mjs).
       'tests/integration/authorization-input-serialization.db.test.ts',
+      'tests/integration/attendance-role-template-runtime.db.test.ts',
+      'tests/integration/direct-permission-writers.db.test.ts',
+      'tests/integration/platform-role-assign-transaction.db.test.ts',
+      'tests/integration/platform-role-unassign-transaction.db.test.ts',
+      'tests/integration/attendance-role-writers-transaction.db.test.ts',
+      'tests/integration/delegated-scope-writers-transaction.db.test.ts',
+      'tests/integration/platform-namespace-admission-transaction.db.test.ts',
+      'tests/integration/platform-namespace-admission-bulk-transaction.db.test.ts',
+      'tests/integration/legacy-permission-revoke-transaction.db.test.ts',
+      'tests/integration/role-delegation-namespace-admission-transaction.db.test.ts',
+      'tests/integration/admin-user-batch-birth-transaction.db.test.ts',
+      'tests/integration/admin-user-single-birth-transaction.db.test.ts',
+      'tests/integration/admin-grant-receiving-reader.db.test.ts',
+      'tests/integration/admin-grant-receiving-invalidation.db.test.ts',
+      'tests/integration/security-action-attempt-admission.db.test.ts',
+      'tests/integration/security-action-session-flight-migration.db.test.ts',
+      'tests/integration/admin-grant-receiving-first-birth.db.test.ts',
+      'tests/integration/admin-grant-target-ceremony.db.test.ts',
+      'tests/integration/admin-grant-actor-inputs.db.test.ts',
+      'tests/integration/admin-grant-proof.db.test.ts',
+      'tests/integration/strict-login-grant-scope.db.test.ts',
+      'tests/integration/admin-login-grant-command.db.test.ts',
+      'tests/integration/auth-b2-issuer-provenance.db.test.ts',
+      'tests/integration/strict-credential-chain.db.test.ts',
+      'tests/integration/strict-dingtalk-entry.db.test.ts',
       // Database-side census of the classifier input tables (triggers, rules, function bodies,
       // users-locking functions, cascading foreign keys, the default expressions of the three
       // users columns the classifier reads, views and materialized views over an input table, the
