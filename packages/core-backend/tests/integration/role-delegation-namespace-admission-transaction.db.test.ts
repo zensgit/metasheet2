@@ -1613,7 +1613,7 @@ describeWithDatabase('role delegation namespace admission on the real pool; regi
     )).rows).toEqual([{ scopes: 0 }])
   })
 
-  test('projection delete of an excluded-inventory target commits before the share and the admission writes nothing', async () => {
+  test('projection delete of an excluded-inventory target commits while the admission queues on the version row (D21), and the admission writes nothing', async () => {
     const fixture = await delegatedPair()
     const groupId = await insertGroup()
     await seedGroup(fixture.actorId, fixture.namespace, groupId, fixture.targetId)
@@ -1653,6 +1653,7 @@ describeWithDatabase('role delegation namespace admission on the real pool; regi
     // D21 (Y5a): the admission queued on the target's version row until the delete committed, so its
     // inventory no longer holds the membership and no membership share is taken.
     expect(counts).toEqual([])
+    expect(statementParams(state.traces[0], MEMBERSHIP_SHARE)).toEqual([])
     expect(state.traces).toHaveLength(1)
     expect(state.traces[0]?.committed).toBe(false)
     expect(state.traces[0]?.sql.some(sql => ADMISSION_INSERT.test(sql))).toBe(false)
@@ -1808,6 +1809,7 @@ describeWithDatabase('role delegation namespace admission on the real pool; regi
       expect(holder.pid).toBeGreaterThan(0)
       expectQueuedOnSubjectVersions(waiting, [fixture.actorId, fixture.targetId])
       await holder.client.query(PROJECTION_MEMBER_DELETE_SQL, [lowGroupId, [fixture.targetId]])
+      expectQueuedOnSubjectVersions(await blockedQuery(rootPid(), holder.pid), [fixture.actorId, fixture.targetId])
       expect(state.events).not.toContain('BUSINESS_COMMIT')
       expect(await storedAdmissions([fixture.targetId])).toEqual([])
       await holder.client.query('COMMIT')
