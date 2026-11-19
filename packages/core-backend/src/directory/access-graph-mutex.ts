@@ -57,7 +57,7 @@ export async function lockUsersForAccessGraphWrite(
   // D21: subject version rows first (sorted, one statement), then the users rows. Under `nowait`
   // (#6924's authorization operation) the existing version rows are taken NOWAIT and lock-only,
   // like the users rows below; the operation's DML triggers advance them. Under `lockOnly` (a
-  // read-only CONSUME_CLASS_DECISION plan, which issues no DML) they are taken lock-only and waiting.
+  // CONSUME_CLASS_DECISION plan, which writes no D21-covered table) they are taken lock-only and waiting.
   if (options.nowait === true) await lockSubjectAuthorizationVersionsNowait(client, normalizedUserIds)
   else if (options.lockOnly === true) await lockSubjectAuthorizationVersions(client, normalizedUserIds)
   else await bumpSubjectAuthorizationVersions(client, normalizedUserIds)
