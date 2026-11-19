@@ -11,7 +11,6 @@ import jwt, { type SignOptions } from 'jsonwebtoken'
 import { authService, type User } from '../auth/AuthService'
 import { buildOnboardingPacket, getAccessPreset } from '../auth/access-presets'
 import {
-  bindDingTalkIdentityToUser,
   buildAuthUrl,
   DingTalkLoginPolicyError,
   exchangeCodeForDingTalkProfile,
@@ -20,7 +19,6 @@ import {
   getDingTalkRuntimeStatus,
   generateState,
   isDingTalkConfigured,
-  unbindSelfManagedDingTalkIdentity,
   validateState,
 } from '../auth/dingtalk-oauth'
 import {
@@ -1704,35 +1702,13 @@ authRouter.post('/dingtalk/unbind', async (req: Request, res: Response) => {
     const authResult = await requireAuthenticatedUser(req, res)
     if (!authResult) return
 
-    const snapshot = await fetchCurrentUserDingTalkAccessSnapshot(authResult.user.id)
-    if (snapshot.directory.linked) {
-      return res.status(409).json({
-        success: false,
-        error: 'Current DingTalk identity is directory-managed. Please contact an administrator.',
-      })
-    }
-
-    await unbindSelfManagedDingTalkIdentity({
-      localUserId: authResult.user.id,
-      actorId: authResult.user.id,
-    })
-
-    const nextSnapshot = await fetchCurrentUserDingTalkAccessSnapshot(authResult.user.id)
-    return res.json({
-      success: true,
-      data: nextSnapshot,
+    return res.status(403).json({
+      success: false,
+      error: 'Self-service DingTalk identity changes are unavailable. Please contact an administrator.',
+      code: 'self_service_disabled',
     })
   } catch (error) {
-    // O2-S2: unbind runs under the access-graph users mutex — marker 40001 → uniform
-    // retryable 409. Policy errors and the fail-closed 500 below are unchanged.
     if (sendIfRecoveryConflict(res, error)) return
-    if (error instanceof DingTalkLoginPolicyError) {
-      return res.status(error.statusCode).json({
-        success: false,
-        error: error.message,
-        code: error.code,
-      })
-    }
     logger.error('DingTalk self-unbind error', error instanceof Error ? error : undefined)
     return res.status(500).json({
       success: false,
@@ -1778,13 +1754,16 @@ authRouter.get('/dingtalk/launch', async (req: Request, res: Response) => {
         : 'login'
     const redirectPath = normalizeDingTalkRedirectPath(req.query.redirect)
 
-    let bindUserId: string | null = null
     let activateUserId: string | null = null
     let activateAdminUserId: string | null = null
     if (mode === 'bind') {
       const authResult = await requireAuthenticatedUser(req, res)
       if (!authResult) return
-      bindUserId = authResult.user.id
+      return res.status(403).json({
+        success: false,
+        error: 'Self-service DingTalk identity changes are unavailable. Please contact an administrator.',
+        code: 'self_service_disabled',
+      })
     } else if (mode === 'activate') {
       const authResult = await requireAuthenticatedUser(req, res)
       if (!authResult) return
@@ -1825,15 +1804,13 @@ authRouter.get('/dingtalk/launch', async (req: Request, res: Response) => {
     }
 
     const state = await generateState(
-      mode === 'bind'
-        ? { redirectPath, intent: 'bind', bindUserId }
-        : mode === 'activate'
-          ? {
-              redirectPath,
-              intent: 'activate',
-              activateUserId,
-              activateAdminUserId,
-            }
+      mode === 'activate'
+        ? {
+            redirectPath,
+            intent: 'activate',
+            activateUserId,
+            activateAdminUserId,
+          }
         : { redirectPath },
     )
     const url = buildAuthUrl(state)
@@ -1895,37 +1872,10 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
         })
       }
 
-      // Directory-managed users must not self-rebind — their DingTalk identity
-      // is owned by the admin directory sync flow.
-      const preSnapshot = await fetchCurrentUserDingTalkAccessSnapshot(authResult.user.id)
-      if (preSnapshot.directory.linked) {
-        return res.status(409).json({
-          success: false,
-          error: 'Current user is directory-managed for DingTalk. Please contact an administrator to rebind.',
-          code: 'directory_managed_conflict',
-        })
-      }
-
-      const dtUser = await exchangeCodeForDingTalkProfile(code)
-      await bindDingTalkIdentityToUser({
-        localUserId: authResult.user.id,
-        dtUser,
-        boundBy: authResult.user.id,
-        enableGrant: true,
-      })
-
-      const snapshot = await fetchCurrentUserDingTalkAccessSnapshot(authResult.user.id)
-
-      logger.info(`DingTalk self-bind for ${authResult.user.email} (openId: ${dtUser.openId})`)
-
-      return res.json({
-        success: true,
-        data: {
-          mode: 'bind',
-          bound: true,
-          redirectPath: stateCheck.redirectPath || null,
-          identity: snapshot,
-        },
+      return res.status(403).json({
+        success: false,
+        error: 'Self-service DingTalk identity changes are unavailable. Please contact an administrator.',
+        code: 'self_service_disabled',
       })
     }
 
@@ -2080,7 +2030,7 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
       },
     })
   } catch (error) {
-    // O2-S2: bind/JIT-provision/activate all write recovery-authority tables — marker
+    // O2-S2: JIT-provision/activate write recovery-authority tables — marker
     // 40001 (re-raised as the named retryable RecoveryConflictError by the service
     // layer) → uniform retryable 409. Every DingTalk policy/request mapping below is
     // unchanged; nothing fail-closed is loosened.
