@@ -405,7 +405,7 @@ async function revoke(
   reason: string,
 ) {
   await c.query(
-    `INSERT INTO user_session_revocations(user_id,revoked_after,updated_at,updated_by,reason) VALUES($1,clock_timestamp(),clock_timestamp(),$2,$3) ON CONFLICT(user_id) DO UPDATE SET revoked_after=EXCLUDED.revoked_after,updated_at=EXCLUDED.updated_at,updated_by=EXCLUDED.updated_by,reason=EXCLUDED.reason`,
+    `INSERT INTO user_session_revocations(user_id,revoked_after,updated_at,updated_by,reason) VALUES($1,clock_timestamp(),clock_timestamp(),$2,$3) ON CONFLICT(user_id) DO UPDATE SET revoked_after=GREATEST(user_session_revocations.revoked_after, EXCLUDED.revoked_after),updated_at=EXCLUDED.updated_at,updated_by=EXCLUDED.updated_by,reason=EXCLUDED.reason`,
     [userId, actorId, reason],
   )
   await c.query(

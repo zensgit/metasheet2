@@ -143,6 +143,284 @@ describe('domain floor', () => {
   })
 })
 
+const DYNAMIC_BROWSER = `${SRC}/auth/admin-grant-browser-context.ts`
+const DYNAMIC_CREDENTIAL = `${SRC}/auth/admin-grant-local-credential.ts`
+const DYNAMIC_STORE = `${SRC}/auth/strict-login-grant-store.ts`
+const DYNAMIC_BUNDLE = `${SRC}/auth/strict-login-grant-bundle.ts`
+const DYNAMIC_SCOPE = `${SRC}/db/migrations/zzzz20261118120000_strict_login_grant_scope.ts`
+const DYNAMIC_SCOPE_SPECIFIER = '../db/migrations/zzzz20261118120000_strict_login_grant_scope'
+const BROWSER_QUALIFY = [
+  'function qualify(schema: string, relation: string): string {',
+  "  if (!IDENT.test(schema) || !IDENT.test(relation)) throw new AdminGrantActorInputError('ADMIN_GRANT_BROWSER_UNAVAILABLE')",
+  '  return `"${schema}"."${relation}"`',
+  '}',
+].join('\n')
+const CREDENTIAL_QUALIFY = [
+  'function qualify(schema: string, relation: string): string {',
+  '  if (!IDENT.test(schema) || !IDENT.test(relation)) {',
+  "    throw new AdminGrantActorInputError('ADMIN_GRANT_CREDENTIAL_UNAVAILABLE')",
+  '  }',
+  '  return `"${schema}"."${relation}"`',
+  '}',
+].join('\n')
+const STORE_QUOTE_IDENT = [
+  'function quoteIdent(identifier: string): string {',
+  "  if (!IDENTIFIER.test(identifier)) refuse('STRICT_LOGIN_GRANT_INSTALLATION_REFUSED')",
+  '  return `"${identifier}"`',
+  '}',
+].join('\n')
+const STORE_QUALIFIED = [
+  'function qualified(schemaName: string, identifier: string): string {',
+  '  return `${quoteIdent(schemaName)}.${quoteIdent(identifier)}`',
+  '}',
+].join('\n')
+const STORE_TARGET_CONSTANT_NAMES = ['STRICT_LOGIN_GRANT_SCOPE_TABLE', 'STRICT_LOGIN_GRANT_GRANT_TABLE']
+const BUNDLE_TARGET_CONSTANT_NAMES = ['STRICT_LOGIN_GRANT_GRANT_TABLE', 'STRICT_LOGIN_GRANT_RECEIPT_TABLE']
+const USERS_CREDENTIAL_UPDATE = [
+  'UPDATE ${users}',
+  '   SET password_hash = $1,',
+  '       must_change_password = FALSE,',
+  '       local_password_set = TRUE,',
+  '       updated_at = pg_catalog.clock_timestamp()',
+  ' WHERE id = $2',
+  '   AND must_change_password IS TRUE',
+  'RETURNING local_credential_version::text AS local_credential_version',
+].join('\n')
+const BROWSER_TABLES = ['security_action_browser_bindings', 'user_session_revocations']
+const CREDENTIAL_TABLES = ['user_local_credential_establishments', 'user_session_revocations']
+const STORE_TABLES = ['directory_connection_login_scope', 'user_external_identity_evidence', 'user_external_identity_login_grants', 'user_session_revocations', 'user_sessions']
+const BUNDLE_TABLES = ['admin_login_grant_command_receipts', 'user_external_identity_login_grants']
+const CREDENTIAL_WRITE_TABLES = ['user_local_credential_establishments', 'user_session_revocations', 'user_session_revocations']
+const STORE_WRITE_TABLES = ['directory_connection_login_scope', 'user_external_identity_evidence', 'user_external_identity_login_grants', 'user_session_revocations', 'user_session_revocations', 'user_sessions']
+
+function dynamicClosedShapeProblems(overrides: Record<string, string> = {}): string[] {
+  const problems: string[] = []
+  const sourceOf = (file: string) => overrides[file] ?? read(file)
+  const plainTable = (table: string) => {
+    const parts = table.split('.').map((piece) => piece.trim().replace(/^"|"$/g, '')).filter((piece) => piece.length > 0)
+    return (parts[parts.length - 1] ?? '').toLowerCase()
+  }
+  const sameTables = (left: readonly string[], right: readonly string[]) => [...left].sort().join('|') === [...right].sort().join('|')
+  const parse = (file: string) => ts.createSourceFile(file, sourceOf(file), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  const topFunction = (tree: ts.SourceFile, name: string) => tree.statements.filter((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === name)
+  const nameBindings = (tree: ts.SourceFile, name: string): ts.Node[] => {
+    const found: ts.Node[] = []
+    const visit = (node: ts.Node) => {
+      if (ts.isFunctionDeclaration(node) && node.name?.text === name) found.push(node.name)
+      else if ((ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isFunctionExpression(node) || ts.isClassDeclaration(node) || ts.isClassExpression(node) || ts.isEnumDeclaration(node)) && node.name && ts.isIdentifier(node.name) && node.name.text === name) found.push(node.name)
+      else if (ts.isBindingElement(node) && ts.isIdentifier(node.name) && node.name.text === name) found.push(node.name)
+      else if (ts.isImportSpecifier(node) && node.name.text === name) found.push(node.name)
+      else if (ts.isCatchClause(node) && node.variableDeclaration && ts.isIdentifier(node.variableDeclaration.name) && node.variableDeclaration.name.text === name) found.push(node.variableDeclaration.name)
+      ts.forEachChild(node, visit)
+    }
+    visit(tree)
+    return found
+  }
+  const pinHelper = (tree: ts.SourceFile, name: string, text: string): boolean => {
+    const declarations = topFunction(tree, name)
+    const declaration = declarations[0]
+    const nodes = nameBindings(tree, name)
+    const trusted = declarations.length === 1 && !!declaration && declaration.getText(tree) === text && nodes.length === 1 && nodes[0] === declaration.name
+    if (!trusted) problems.push(`${name} qualifier shape`)
+    return trusted
+  }
+  const helperReferences = (tree: ts.SourceFile, names: readonly string[], allowedReferences: readonly ts.Node[] = []) => {
+    const allowed = new Set(names)
+    const visit = (node: ts.Node) => {
+      if (ts.isIdentifier(node) && allowed.has(node.text)) {
+        const declared = ts.isFunctionDeclaration(node.parent) && node.parent.name === node
+        const called = ts.isCallExpression(node.parent) && node.parent.expression === node && !node.parent.questionDotToken
+        if (!declared && !called && !allowedReferences.includes(node)) problems.push(`${node.text} helper reference`)
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(tree)
+  }
+  const scopeOf = (tree: ts.SourceFile, node: ts.Node | undefined): ts.Node => {
+    let current = node
+    while (current) {
+      if (ts.isSourceFile(current) || ts.isFunctionLike(current) || ts.isBlock(current) || ts.isForStatement(current) || ts.isForInStatement(current) || ts.isForOfStatement(current)) return current
+      current = current.parent
+    }
+    return tree
+  }
+  const constBindings = (tree: ts.SourceFile) => {
+    const bindings = new Map<ts.Node, Map<string, ts.Expression | undefined>>()
+    const slot = (owner: ts.Node) => {
+      let names = bindings.get(owner)
+      if (!names) bindings.set(owner, names = new Map())
+      return names
+    }
+    const bindConst = (owner: ts.Node, name: string, value?: ts.Expression) => {
+      const names = slot(owner)
+      names.set(name, names.has(name) ? undefined : value)
+    }
+    const blockName = (owner: ts.Node, name: ts.BindingName) => {
+      if (ts.isIdentifier(name)) {
+        slot(owner).set(name.text, undefined)
+        return
+      }
+      for (const element of name.elements) if (ts.isBindingElement(element)) blockName(owner, element.name)
+    }
+    const varOwner = (node: ts.Node) => {
+      let current: ts.Node | undefined = node
+      while (current) {
+        if (ts.isSourceFile(current) || ts.isFunctionLike(current)) return current
+        current = current.parent
+      }
+      return tree
+    }
+    const collect = (node: ts.Node) => {
+      if (ts.isVariableDeclaration(node) && ts.isVariableDeclarationList(node.parent)) {
+        const list = node.parent
+        const isConst = (list.flags & ts.NodeFlags.Const) !== 0
+        const owner = isConst || (list.flags & ts.NodeFlags.Let) !== 0 ? scopeOf(tree, list) : varOwner(list)
+        if (isConst && ts.isIdentifier(node.name)) bindConst(owner, node.name.text, node.initializer)
+        else blockName(owner, node.name)
+      } else if (ts.isParameter(node) && ts.isFunctionLike(node.parent)) blockName(node.parent, node.name)
+      else if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node) || ts.isEnumDeclaration(node)) && node.name) blockName(scopeOf(tree, node.parent), node.name)
+      else if (ts.isCatchClause(node) && node.variableDeclaration) blockName(node.block, node.variableDeclaration.name)
+      ts.forEachChild(node, collect)
+    }
+    collect(tree)
+    return bindings
+  }
+  const migrationValues = (tree: ts.SourceFile) => {
+    const values = new Map<string, string>()
+    for (const statement of tree.statements) {
+      if (!ts.isVariableStatement(statement) || !statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)) continue
+      if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) continue
+      for (const declaration of statement.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name) && declaration.initializer && ts.isStringLiteral(declaration.initializer)) values.set(declaration.name.text, declaration.initializer.text)
+      }
+    }
+    return values
+  }
+  const importedValues = (tree: ts.SourceFile, values: ReadonlyMap<string, string>) => {
+    const imported = new Map<string, string>()
+    for (const statement of tree.statements) {
+      if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier) || statement.moduleSpecifier.text !== DYNAMIC_SCOPE_SPECIFIER) continue
+      const clause = statement.importClause
+      const bindings = clause?.namedBindings
+      if (!clause || clause.isTypeOnly || clause.name || !bindings || !ts.isNamedImports(bindings)) continue
+      for (const element of bindings.elements) {
+        if (element.isTypeOnly || element.propertyName) continue
+        const value = values.get(element.name.text)
+        if (value !== undefined) imported.set(element.name.text, value)
+      }
+    }
+    return imported
+  }
+  const resolveTable = (expression: ts.Expression | undefined, tree: ts.SourceFile, bindings: ReadonlyMap<ts.Node, ReadonlyMap<string, ts.Expression | undefined>>, imported: ReadonlyMap<string, string>, qualifier: string, schemaName: string, trustQualifier: boolean) => {
+    const seen = new Set<ts.Node>()
+    const readExpression = (node: ts.Expression | undefined): string | undefined => {
+      if (!node || seen.has(node)) return undefined
+      seen.add(node)
+      if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) || ts.isSatisfiesExpression(node) || ts.isNonNullExpression(node)) return readExpression(node.expression)
+      if (ts.isCallExpression(node)) {
+        if (!trustQualifier || node.questionDotToken || node.arguments.length !== 2 || !ts.isIdentifier(node.expression) || node.expression.text !== qualifier) return undefined
+        const schema = node.arguments[0]
+        if (!ts.isIdentifier(schema) || schema.text !== schemaName) return undefined
+        return readExpression(node.arguments[1])
+      }
+      if (ts.isStringLiteral(node)) return node.text
+      if (!ts.isIdentifier(node)) return undefined
+      let owner = scopeOf(tree, node.parent)
+      while (true) {
+        const names = bindings.get(owner)
+        if (names?.has(node.text)) {
+          const initializer = names.get(node.text)
+          return initializer ? readExpression(initializer) : undefined
+        }
+        if (owner === tree) return imported.get(node.text)
+        owner = scopeOf(tree, owner.parent)
+      }
+    }
+    return readExpression(expression)
+  }
+  const writeTargets = (tree: ts.SourceFile, bindings: ReadonlyMap<ts.Node, ReadonlyMap<string, ts.Expression | undefined>>, imported: ReadonlyMap<string, string>, qualifier: string, schemaName: string, trustQualifier: boolean) => {
+    const writes: Array<{ table: string; text: string }> = []
+    let unresolved = 0
+    const visit = (node: ts.Node) => {
+      if (ts.isTemplateExpression(node) && /^(?:INSERT\s+INTO|DELETE\s+FROM|UPDATE|TRUNCATE(?:\s+TABLE)?|MERGE\s+INTO|COPY)\s+$/i.test(node.head.text)) {
+        const table = resolveTable(node.templateSpans[0]?.expression, tree, bindings, imported, qualifier, schemaName, trustQualifier)
+        if (table === undefined) unresolved += 1
+        else writes.push({ table, text: node.getText(tree) })
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(tree)
+    return { writes, unresolved }
+  }
+  const browserTree = parse(DYNAMIC_BROWSER)
+  const credentialTree = parse(DYNAMIC_CREDENTIAL)
+  const storeTree = parse(DYNAMIC_STORE)
+  const bundleTree = parse(DYNAMIC_BUNDLE)
+  const scopeTree = parse(DYNAMIC_SCOPE)
+  const trustBrowserQualify = pinHelper(browserTree, 'qualify', BROWSER_QUALIFY)
+  const trustCredentialQualify = pinHelper(credentialTree, 'qualify', CREDENTIAL_QUALIFY)
+  const trustQualified = pinHelper(storeTree, 'qualified', STORE_QUALIFIED)
+  pinHelper(storeTree, 'quoteIdent', STORE_QUOTE_IDENT)
+  const qualifierExports = storeTree.statements.flatMap((statement) =>
+    ts.isExportDeclaration(statement) && !statement.isTypeOnly && !statement.moduleSpecifier && statement.exportClause && ts.isNamedExports(statement.exportClause)
+      ? statement.exportClause.elements.filter((element) => !element.isTypeOnly && element.propertyName?.text === 'qualified' && element.name.text === 'strictLoginGrantQualified') : [])
+  const qualifierImports = bundleTree.statements.flatMap((statement) => {
+    if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier) || statement.moduleSpecifier.text !== './strict-login-grant-store') return []
+    const clause = statement.importClause
+    return clause && !clause.isTypeOnly && !clause.name && clause.namedBindings && ts.isNamedImports(clause.namedBindings)
+      ? clause.namedBindings.elements.filter((element) => !element.isTypeOnly && element.propertyName?.text === 'strictLoginGrantQualified' && element.name.text === 'qualified') : []
+  })
+  const qualifierBindings = nameBindings(bundleTree, 'qualified')
+  const trustBundleQualified = trustQualified && qualifierExports.length === 1 && qualifierImports.length === 1
+    && qualifierBindings.length === 1 && qualifierBindings[0] === qualifierImports[0]?.name
+  if (!trustBundleQualified) problems.push('bundle qualifier binding')
+  helperReferences(browserTree, ['qualify'])
+  helperReferences(credentialTree, ['qualify'])
+  helperReferences(storeTree, ['quoteIdent', 'qualified'], qualifierExports.map((element) => element.propertyName!))
+  helperReferences(bundleTree, ['qualified'], qualifierImports.map((element) => element.name))
+  const bundleExports = bundleTree.statements.filter((statement) => ts.isExportDeclaration(statement) || ts.isExportAssignment(statement)
+    || (ts.canHaveModifiers(statement) && ts.getModifiers(statement)?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)))
+  if (bundleExports.length !== 1 || !ts.isFunctionDeclaration(bundleExports[0]) || bundleExports[0].name?.text !== 'insertConsumedGrantBundle') problems.push('bundle public write entry')
+  const storeImports = importedValues(storeTree, migrationValues(scopeTree))
+  const bundleImports = importedValues(bundleTree, migrationValues(scopeTree))
+  for (const [tree, names, imported] of [[storeTree, STORE_TARGET_CONSTANT_NAMES, storeImports], [bundleTree, BUNDLE_TARGET_CONSTANT_NAMES, bundleImports]] as const) {
+    for (const name of names) {
+      const nodes = nameBindings(tree, name)
+      if (nodes.length !== 1 || !ts.isImportSpecifier(nodes[0]?.parent) || !imported.has(name)) {
+        problems.push('shadowed target binding')
+        imported.delete(name)
+      }
+    }
+  }
+  const browser = writeTargets(browserTree, constBindings(browserTree), new Map(), 'qualify', 'schema', trustBrowserQualify)
+  const credential = writeTargets(credentialTree, constBindings(credentialTree), new Map(), 'qualify', 'schema', trustCredentialQualify)
+  const store = writeTargets(storeTree, constBindings(storeTree), storeImports, 'qualified', 'schemaName', trustQualified)
+  const bundle = writeTargets(bundleTree, constBindings(bundleTree), bundleImports, 'qualified', 'schemaName', trustBundleQualified)
+  if (browser.unresolved !== 0 || credential.unresolved !== 0 || store.unresolved !== 0 || bundle.unresolved !== 0) problems.push('unresolved dynamic target')
+  const usersWrites = credential.writes.filter((write) => plainTable(write.table) === 'users')
+  const credentialWrites = credential.writes.filter((write) => plainTable(write.table) !== 'users').map((write) => write.table)
+  if (browser.writes.length !== 2 || !sameTables(browser.writes.map((write) => write.table), BROWSER_TABLES) || browser.writes.some((write) => plainTable(write.table) === 'users')) problems.push('browser dynamic target shape')
+  if (credential.writes.length !== 4 || usersWrites.length !== 1 || usersWrites[0]?.text !== `\`${USERS_CREDENTIAL_UPDATE}\`` || !sameTables(credentialWrites, CREDENTIAL_WRITE_TABLES)) problems.push('credential dynamic target shape')
+  if (store.writes.length !== 6 || !sameTables(store.writes.map((write) => write.table), STORE_WRITE_TABLES) || store.writes.some((write) => plainTable(write.table) === 'users')) problems.push('store dynamic target shape')
+  if (bundle.writes.length !== 2 || !sameTables(bundle.writes.map((write) => write.table), BUNDLE_TABLES)) problems.push('bundle dynamic target shape')
+  const exemptionShape = (id: string, file: string, count: number, tables: readonly string[]) => {
+    const rows = AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS.filter((exemption) => exemption.id === id)
+    const row = rows[0]
+    if (rows.length !== 1 || !row || row.file !== file || row.form !== 'template_substitution' || row.count !== count || row.reason.trim().length === 0
+      || !sameTables(row.reachableTables, tables) || row.reachableTables.some((table) => plainTable(table) === 'users')) problems.push(`${id} registry shape`)
+  }
+  exemptionShape('DX-16', DYNAMIC_BROWSER, 2, BROWSER_TABLES)
+  exemptionShape('DX-17', DYNAMIC_STORE, 6, STORE_TABLES)
+  exemptionShape('DX-18', DYNAMIC_CREDENTIAL, 3, CREDENTIAL_TABLES)
+  exemptionShape('DX-19', DYNAMIC_BUNDLE, 2, BUNDLE_TABLES)
+  const writers = AUTHORIZATION_INPUT_WRITERS.filter((writer) => writer.id === 'D-01')
+  const writer = writers[0]
+  if (writers.length !== 1 || !writer || writer.file !== DYNAMIC_CREDENTIAL || writer.symbol !== 'adminGrantCredentialStatements' || writer.intent !== null
+    || writer.class !== 'D' || writer.statements.length !== 0 || writer.actor !== 'human' || writer.status !== 'pending' || writer.slice !== 'none'
+    || writer.dynamic?.form !== 'template_substitution' || writer.dynamic?.count !== 1) problems.push('D-01 registry shape')
+  return problems
+}
+
 describe('production writers equal the registry', () => {
   it('per file, table and verb, the literal write counts equal the registered counts', () => {
     const scanned = sortedEntries(tally(production.writes))
@@ -179,6 +457,68 @@ describe('production writers equal the registry', () => {
       expect(exemption.reachableTables.length, exemption.id).toBeGreaterThan(0)
       expect(exemption.reason.length).toBeGreaterThan(0)
     }
+  })
+
+  it('pins the browser, credential and strict-store dynamic targets, including the users column shape', () => {
+    const browser = read(DYNAMIC_BROWSER)
+    const credential = read(DYNAMIC_CREDENTIAL)
+    const store = read(DYNAMIC_STORE)
+    const scope = read(DYNAMIC_SCOPE)
+    const bindings = "const bindings = qualify(schema, 'security_action_browser_bindings')"
+    const scopeTable = "export const STRICT_LOGIN_GRANT_SCOPE_TABLE = 'directory_connection_login_scope'"
+    const qualifyReturn = '  return `"${schema}"."${relation}"`'
+    const qualifiedHead = 'function qualified(schemaName: string, identifier: string): string {'
+    const nestedAliasOpen = '  return Object.freeze({\n    lockUser:'
+    const nestedAliasClose = '  })\n}\n\nconst defaultTransaction: AdminGrantTransactionRunner'
+    expect(browser.split(bindings)).toHaveLength(2)
+    expect(browser.split(qualifyReturn)).toHaveLength(2)
+    expect(browser.split(nestedAliasOpen)).toHaveLength(2)
+    expect(browser.split(nestedAliasClose)).toHaveLength(2)
+    expect(credential.split('password_hash = $1')).toHaveLength(2)
+    expect(scope.split(scopeTable)).toHaveLength(2)
+    expect(store.split(qualifiedHead)).toHaveLength(2)
+    expect(dynamicClosedShapeProblems()).toEqual([])
+    expect(dynamicClosedShapeProblems({ [DYNAMIC_CREDENTIAL]: credential.replace('password_hash = $1', 'role = $1') })).not.toEqual([])
+    expect(dynamicClosedShapeProblems({ [DYNAMIC_BROWSER]: browser.replace(bindings, "const bindings = qualify(schema, 'users')") })).not.toEqual([])
+    expect(dynamicClosedShapeProblems({ [DYNAMIC_SCOPE]: scope.replace(scopeTable, "export const STRICT_LOGIN_GRANT_SCOPE_TABLE = 'users'") })).not.toEqual([])
+    expect(dynamicClosedShapeProblems({ [DYNAMIC_BROWSER]: browser.replace(bindings, "const qualify = (_schema: string, _relation: string) => 'users'\n  " + bindings) })).not.toEqual([])
+    expect(dynamicClosedShapeProblems({ [DYNAMIC_BROWSER]: browser.replace(bindings, "qualify = (_schema, _relation) => 'users'\n  " + bindings) })).not.toEqual([])
+    expect(dynamicClosedShapeProblems({ [DYNAMIC_BROWSER]: browser.replace(nestedAliasOpen, "  {\n    let bindings = 'users'\n    return Object.freeze({\n    lockUser:").replace(nestedAliasClose, '  })\n  }\n}\n\nconst defaultTransaction: AdminGrantTransactionRunner') })).not.toEqual([])
+    expect(dynamicClosedShapeProblems({ [DYNAMIC_BROWSER]: browser.replace(nestedAliasOpen, "  {\n    class bindings { static toString() { return 'users' } }\n    return Object.freeze({\n    lockUser:").replace(nestedAliasClose, '  })\n  }\n}\n\nconst defaultTransaction: AdminGrantTransactionRunner') })).not.toEqual([])
+    expect(dynamicClosedShapeProblems({ [DYNAMIC_BROWSER]: browser.replace(qualifyReturn, "  relation = 'users'\n" + qualifyReturn) })).not.toEqual([])
+    expect(dynamicClosedShapeProblems({ [DYNAMIC_STORE]: store.replace(qualifiedHead, "let STRICT_LOGIN_GRANT_SCOPE_TABLE = 'users'\n" + qualifiedHead) })).not.toEqual([])
+    expect(dynamicClosedShapeProblems({ [DYNAMIC_STORE]: store.replace(qualifiedHead, 'function shadowScope(STRICT_LOGIN_GRANT_SCOPE_TABLE: string) { return STRICT_LOGIN_GRANT_SCOPE_TABLE }\n' + qualifiedHead) })).not.toEqual([])
+    expect(dynamicClosedShapeProblems({ [DYNAMIC_STORE]: store.replace(qualifiedHead, "const { STRICT_LOGIN_GRANT_SCOPE_TABLE } = { STRICT_LOGIN_GRANT_SCOPE_TABLE: 'users' }\n" + qualifiedHead) })).not.toEqual([])
+  })
+
+  it('pins the cold bundle to two targets and the genuine imported qualifier, without exporting a SQL executor', () => {
+    const bundle = read(DYNAMIC_BUNDLE)
+    const receipt = '  const receipts = qualified(schemaName, STRICT_LOGIN_GRANT_RECEIPT_TABLE)'
+    expect(bundle.split(receipt)).toHaveLength(2)
+    expect(dynamicClosedShapeProblems()).toEqual([])
+    const mutations = [
+      ['input-table target', receipt, "  const receipts = qualified(schemaName, 'users')"],
+      ['local qualifier shadow', receipt, "  const qualified = (_schema: string, _table: string) => 'users'\n" + receipt],
+      ['qualifier reassignment', receipt, "  qualified = (_schema, _table) => 'users'\n" + receipt],
+      ['qualifier alias escape', receipt, '  const escaped = qualified\n' + receipt],
+      ['mutable target shadow', receipt, "  let STRICT_LOGIN_GRANT_RECEIPT_TABLE = 'users'\n" + receipt],
+      ['parameter target shadow', receipt, '  function shadow(STRICT_LOGIN_GRANT_RECEIPT_TABLE: string) { return STRICT_LOGIN_GRANT_RECEIPT_TABLE }\n' + receipt],
+      ['destructured target shadow', receipt, "  const { STRICT_LOGIN_GRANT_RECEIPT_TABLE } = { STRICT_LOGIN_GRANT_RECEIPT_TABLE: 'users' }\n" + receipt],
+      ['wrong import source', "} from './strict-login-grant-store'", "} from './unreviewed-qualifier'"],
+      ['wrong imported symbol', 'strictLoginGrantQualified as qualified', 'strictLoginGrantRows as qualified'],
+      ['SQL executor export', 'async function insertReturning(', 'export async function insertReturning('],
+    ]
+    for (const [name, from, to] of mutations) {
+      const changed = bundle.replace(from, to)
+      expect(changed, name).not.toBe(bundle)
+      expect(dynamicClosedShapeProblems({ [DYNAMIC_BUNDLE]: changed }), name).not.toEqual([])
+    }
+    const thirdWrite = bundle + '\nconst third = `INSERT INTO ${qualified(schemaName, STRICT_LOGIN_GRANT_GRANT_TABLE)} (id) VALUES ($1)`\n'
+    expect(dynamicClosedShapeProblems({ [DYNAMIC_BUNDLE]: thirdWrite })).toContain('bundle dynamic target shape')
+    const store = read(DYNAMIC_STORE)
+    const changedExport = store.replace('qualified as strictLoginGrantQualified', 'rowsOf as strictLoginGrantQualified')
+    expect(changedExport).not.toBe(store)
+    expect(dynamicClosedShapeProblems({ [DYNAMIC_STORE]: changedExport })).toContain('bundle qualifier binding')
   })
 
   it('the one exemption of the migration helper module is pinned, and sets no verdict aside when a migration is judged', () => {
@@ -704,6 +1044,8 @@ const ROLE_PLAN_IMPORTS = [
   "import { normalizeAuthorizationInputIdentityRead } from './authorization-input-lock'",
   "import type { AuthorizationInputIdentityRead } from './authorization-input-lock'",
 ]
+const ADMIN_GRANT_RECEIVING_READER_MODULE = `${SRC}/auth/admin-grant-receiving-reader.ts`
+const ADMIN_GRANT_PROOF_MODULE = `${SRC}/auth/admin-grant-proof.ts`
 const CONTRACT_IMPORT_ALLOWLIST: ReadonlyArray<readonly [string, string]> = [
   [`${SRC}/attendance/w4c0-identity.ts`, '../rbac/authorization-input-brand'],
   [`${SRC}/attendance/w4c0-identity.ts`, '../rbac/authorization-input-lock'],
@@ -726,9 +1068,20 @@ const CONTRACT_IMPORT_ALLOWLIST: ReadonlyArray<readonly [string, string]> = [
   [`${SRC}/admin/delegated-scope-commands.ts`, '../rbac/authorization-input-brand'],
   [`${SRC}/admin/delegated-scope-commands.ts`, '../rbac/authorization-input-lock'],
   [`${SRC}/admin/delegated-scope-commands.ts`, '../rbac/authorization-input-lock'],
+  [ADMIN_GRANT_RECEIVING_READER_MODULE, '../rbac/authorization-input-brand'],
+  [ADMIN_GRANT_RECEIVING_READER_MODULE, '../rbac/authorization-input-lock'],
+  [`${SRC}/auth/admin-grant-target-ceremony.ts`, '../rbac/authorization-input-brand'],
+  [`${SRC}/auth/admin-grant-target-ceremony.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/auth/admin-grant-proof.ts`, '../rbac/authorization-input-brand'],
+  [`${SRC}/auth/admin-grant-proof.ts`, '../rbac/authorization-input-brand'],
+  [`${SRC}/auth/admin-grant-proof.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/auth/security-action-attempt-admission.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/auth/security-action-attempt-admission.ts`, '../rbac/authorization-input-lock'],
   [`${SRC}/auth/admin-login-grant-command.ts`, '../rbac/authorization-input-brand'],
   [`${SRC}/auth/admin-login-grant-command.ts`, '../rbac/authorization-input-lock'],
   [`${SRC}/auth/admin-login-grant-command.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/auth/strict-login-grant-bundle.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/auth/strict-dingtalk-entry.ts`, '../rbac/authorization-input-lock'],
   [`${SRC}/admin/platform-role-assign-command.ts`, '../rbac/authorization-input-brand'],
   [`${SRC}/admin/platform-role-assign-command.ts`, '../rbac/authorization-input-lock'],
   [`${SRC}/admin/platform-role-assign-command.ts`, '../rbac/authorization-input-lock'],
@@ -738,6 +1091,7 @@ const CONTRACT_IMPORT_ALLOWLIST: ReadonlyArray<readonly [string, string]> = [
   [`${SRC}/admin/attendance-role-commands.ts`, '../rbac/authorization-input-brand'],
   [`${SRC}/admin/attendance-role-commands.ts`, '../rbac/authorization-input-lock'],
   [`${SRC}/admin/attendance-role-commands.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/routes/auth.ts`, '../rbac/authorization-input-lock'],
   [`${SRC}/routes/attendance-admin.ts`, '../rbac/authorization-input-lock'],
   [`${SRC}/routes/admin-users.ts`, '../rbac/authorization-input-lock'],
   [ROLE_PLAN_MODULE, './authorization-input-brand'],
@@ -1195,6 +1549,173 @@ describe('single platform role assign producer boundary', () => {
   })
 })
 
+function preparedReaderIdentityProblems(tree: ts.SourceFile, uses: readonly ts.Node[]): string[] {
+  const problems: string[] = []
+  const owners = tree.statements.filter((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === 'resolveAdminGrantTargetSet')
+  const owner = owners[0]
+  if (owners.length !== 1 || !owner.body || !owner.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.ExportKeyword)
+    || owner.parameters.map(parameter => parameter.name.getText(tree)).join(',') !== 'tx,context,intent,phase'
+    || owner.parameters.some(parameter => parameter.initializer || parameter.questionToken || parameter.dotDotDotToken)) return ['prepared reader owner binding']
+  const declarations = owner.body.statements.filter(ts.isVariableStatement).flatMap(statement =>
+    statement.declarationList.declarations.map(declaration => ({ statement, declaration })))
+  const normalized = declarations.filter(({ declaration }) => ts.isIdentifier(declaration.name) && declaration.name.text === 'normalized')
+  const binding = normalized[0]
+  const initializer = binding?.declaration.initializer
+  if (normalized.length !== 1 || !(binding.statement.declarationList.flags & ts.NodeFlags.Const)
+    || !initializer || !ts.isCallExpression(initializer) || initializer.questionDotToken
+    || !ts.isIdentifier(initializer.expression) || initializer.expression.text !== 'normalizeIntent'
+    || initializer.arguments.length !== 1 || !ts.isIdentifier(initializer.arguments[0]) || initializer.arguments[0].text !== 'intent') problems.push('prepared reader normalized binding')
+  const use = uses[0]
+  const access = use?.parent
+  const call = access?.parent
+  const argument = call && ts.isCallExpression(call) ? call.arguments[0] : undefined
+  const element = argument && ts.isArrayLiteralExpression(argument) ? argument.elements[0] : undefined
+  let callOwner: ts.Node | undefined = call?.parent
+  while (callOwner && !ts.isFunctionDeclaration(callOwner) && !ts.isFunctionExpression(callOwner) && !ts.isArrowFunction(callOwner) && !ts.isMethodDeclaration(callOwner)) callOwner = callOwner.parent
+  if (uses.length !== 1 || !use || !ts.isIdentifier(use) || use.text !== 'requireIdentityRead'
+    || !access || !ts.isPropertyAccessExpression(access) || access.questionDotToken || access.name !== use
+    || !ts.isIdentifier(access.expression) || access.expression.text !== 'tx'
+    || !call || !ts.isCallExpression(call) || call.expression !== access || call.questionDotToken || call.arguments.length !== 1
+    || !argument || !ts.isArrayLiteralExpression(argument) || argument.elements.length !== 1
+    || !element || !ts.isPropertyAccessExpression(element) || element.questionDotToken || element.name.text !== 'connectionId'
+    || !ts.isIdentifier(element.expression) || element.expression.text !== 'normalized' || callOwner !== owner) problems.push('prepared reader exact identity assertion')
+  let normalizedBindings = 0
+  const protectedNames = new Set(['tx', 'intent', 'normalized', 'normalizeIntent'])
+  const visitBindings = (node: ts.Node) => {
+    if (ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) {
+      const name = node.name
+      if (name && ts.isIdentifier(name) && protectedNames.has(name.text)) {
+        if (ts.isVariableDeclaration(node) && name.text === 'normalized') normalizedBindings += 1
+        else problems.push('prepared reader shadowed binding')
+      } else if (name && /\b(?:tx|intent|normalized|normalizeIntent)\b/.test(name.getText(tree))) problems.push('prepared reader shadowed binding')
+    }
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+      && /^(?:tx|intent|normalized)(?:\.|\[|$)/.test(node.left.getText(tree))) problems.push('prepared reader reassigned binding')
+    ts.forEachChild(node, visitBindings)
+  }
+  visitBindings(owner.body)
+  if (normalizedBindings !== 1) problems.push('prepared reader shadowed normalization')
+  const forbidden = new Set([...FORBIDDEN_IN_WORK, 'withAuthorizationInputTransaction', 'enterAuthorizationInputTransaction', 'acquireSourceSyncFreezeLock', 'lockUsersForAccessGraphWrite', 'lockNamespaceAdmissionWrites'])
+  const visitAcquisitions = (node: ts.Node) => {
+    if (ts.isIdentifier(node) && forbidden.has(node.text)) problems.push('prepared reader forbidden acquisition or side effect')
+    if (ts.isStringLiteralLike(node) && (node.text === 'MAINTENANCE' || /\bpg_(?:try_)?advisory_(?:xact_)?lock(?:_shared)?\b|\bLOCK\s+TABLE\b|\b(?:INSERT\s+INTO|UPDATE\s+\w|DELETE\s+FROM)\b/i.test(blankSqlComments(node.text)))) problems.push('prepared reader direct lock or write')
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && ['acquire', 'transaction', 'insertInto', 'updateTable', 'deleteFrom'].includes(node.expression.name.text)) problems.push('prepared reader late acquisition or write')
+    ts.forEachChild(node, visitAcquisitions)
+  }
+  visitAcquisitions(tree)
+  return [...new Set(problems)]
+}
+
+function grantIssuerIdentityProblems(tree: ts.SourceFile, uses: readonly ts.Node[]): string[] {
+  const problems: string[] = []
+  const owners = tree.statements.filter((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === 'readIssueSnapshot')
+  const owner = owners[0]
+  const parameterNames = owner?.parameters.map((parameter) => parameter.name.getText(tree)) ?? []
+  if (owners.length !== 1 || !owner || !owner.body || owner.parent !== tree
+    || !owner.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword)
+    || owner.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)
+    || parameterNames[0] !== 'tx' || !parameterNames.includes('intent')
+    || owner.parameters.some((parameter) => parameter.initializer || parameter.questionToken || parameter.dotDotDotToken || !ts.isIdentifier(parameter.name))) return ['grant issuer identity slot']
+  const use = uses[0]
+  const access = use?.parent
+  const call = access?.parent
+  const argument = call && ts.isCallExpression(call) ? call.arguments[0] : undefined
+  const element = argument && ts.isArrayLiteralExpression(argument) ? argument.elements[0] : undefined
+  if (uses.length !== 1 || !use || !ts.isIdentifier(use) || use.text !== 'requireIdentityRead'
+    || !access || !ts.isPropertyAccessExpression(access) || access.questionDotToken || access.name !== use
+    || !ts.isIdentifier(access.expression) || access.expression.text !== 'tx'
+    || !call || !ts.isCallExpression(call) || call.expression !== access || call.questionDotToken || call.arguments.length !== 1 || call.typeArguments
+    || !argument || !ts.isArrayLiteralExpression(argument) || argument.elements.length !== 1
+    || !element || !ts.isPropertyAccessExpression(element) || element.questionDotToken || element.name.text !== 'connectionId'
+    || !ts.isIdentifier(element.expression) || element.expression.text !== 'intent'
+    || !ts.isExpressionStatement(call.parent) || call.parent.expression !== call || call.parent.parent !== owner.body) problems.push('grant issuer identity slot')
+  const writesProtected = (node: ts.Node): boolean => {
+    let found = false
+    const visit = (current: ts.Node) => {
+      if (found) return
+      if (ts.isIdentifier(current) && (current.text === 'tx' || current.text === 'intent')) found = true
+      else ts.forEachChild(current, visit)
+    }
+    visit(node)
+    return found
+  }
+  const visitBindings = (node: ts.Node) => {
+    if (ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) {
+      const name = node.name
+      if (name && ts.isIdentifier(name) && (name.text === 'tx' || name.text === 'intent')) problems.push('grant issuer identity slot')
+      else if (name && /\b(?:tx|intent)\b/.test(name.getText(tree))) problems.push('grant issuer identity slot')
+    }
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+      && writesProtected(node.left)) problems.push('grant issuer identity slot')
+    ts.forEachChild(node, visitBindings)
+  }
+  visitBindings(owner.body)
+  return [...new Set(problems)]
+}
+
+function assignmentWrites(root: ts.Node, name: string): boolean {
+  let found = false
+  const visit = (node: ts.Node) => {
+    if (found) return
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
+      let writes = false
+      const left = (current: ts.Node) => {
+        if (writes) return
+        if (ts.isIdentifier(current) && current.text === name) writes = true
+        else ts.forEachChild(current, left)
+      }
+      left(node.left)
+      if (writes) found = true
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(root)
+  return found
+}
+
+function entryPortIdentityProblems(file: string, source: string): string[] {
+  const port = ENTRY_OPTION_PORTS.find((item) => item.file === file && (item.owner === 'runRoot' || item.owner === 'issueOnRoot'))
+  if (!port) return ['identity slot production caller']
+  const problems = [...portFileProblems(file, source), ...entryOptionProblems(file, source)]
+  const { tree, calls } = entryCalls(file, source)
+  const identityUses: ts.Node[] = []
+  const collect = (node: ts.Node) => {
+    if ((ts.isIdentifier(node) || ts.isStringLiteralLike(node)) && ['identityRead', 'requireIdentityRead'].includes(node.text)) identityUses.push(node)
+    ts.forEachChild(node, collect)
+  }
+  collect(tree)
+  const counted = calls.filter((call) => call.counted && call.owner === port.owner)
+  const use = identityUses[0]
+  const entry = counted[0]?.node
+  const work = entry?.arguments[1]
+  const outerName = port.owner === 'runRoot' ? 'connectionId' : 'snapshot'
+  if (identityUses.length !== 1 || counted.length !== 1 || !use || !ts.isIdentifier(use) || !entry || !work || !ts.isArrowFunction(work) || !ts.isBlock(work.body)) {
+    problems.push('identity slot production caller')
+    return [...new Set(problems)]
+  }
+  const access = use.parent
+  const invocation = access?.parent
+  const argument = invocation && ts.isCallExpression(invocation) ? invocation.arguments[0] : undefined
+  const element = argument && ts.isArrayLiteralExpression(argument) ? argument.elements[0] : undefined
+  const receiver = !!access && ts.isPropertyAccessExpression(access) && !access.questionDotToken && access.name === use && ts.isIdentifier(access.expression) && access.expression.text === 'tx'
+  const target = port.owner === 'runRoot'
+    ? !!element && ts.isIdentifier(element) && element.text === 'connectionId'
+    : !!element && ts.isPropertyAccessExpression(element) && !element.questionDotToken && element.name.text === 'connectionId' && ts.isIdentifier(element.expression) && element.expression.text === 'snapshot'
+  const direct = !!invocation && ts.isCallExpression(invocation) && invocation.expression === access && !invocation.questionDotToken && invocation.arguments.length === 1 && !invocation.typeArguments
+    && !!argument && ts.isArrayLiteralExpression(argument) && argument.elements.length === 1
+    && ts.isExpressionStatement(invocation.parent) && invocation.parent.expression === invocation && invocation.parent.parent === work.body
+  const parameter = work.parameters[0]
+  const callbackTx = work.parameters.length === 1 && !!parameter && ts.isIdentifier(parameter.name) && parameter.name.text === 'tx' && !parameter.initializer && !parameter.questionToken && !parameter.dotDotDotToken
+  const outer = parentFunction(entry)
+  const outerBody = outer?.body
+  const outerParameter = !!outerBody && outer?.name?.text === port.owner && !!outer?.parameters.some((item) => ts.isIdentifier(item.name) && item.name.text === outerName)
+  const shadowed = !callbackTx || !outerParameter || !outerBody
+    || subtreeDeclares(work.body, 'tx') || assignmentWrites(work.body, 'tx')
+    || subtreeDeclares(outerBody, outerName) || assignmentWrites(outerBody, outerName)
+  if (!receiver || !target || !direct || shadowed) problems.push('identity slot production caller')
+  return [...new Set(problems)]
+}
+
 function identitySlotProblems(file: string, source: string): string[] {
   const problems: string[] = []
   const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true)
@@ -1239,7 +1760,10 @@ function identitySlotProblems(file: string, source: string): string[] {
       if (identitySites.length !== 1 || identitySites[0].literal !== identityExclusive || identitySites[0].owner !== legacyOwner) problems.push('legacy R2 shape')
     } else if (identitySites.length !== 0) problems.push('identity R2 bypass')
   }
-  if (identityUse && file !== LOCK_MODULE && file !== ROLE_PLAN_MODULE) problems.push('identity slot production caller')
+  if (file === ADMIN_GRANT_RECEIVING_READER_MODULE) problems.push(...preparedReaderIdentityProblems(tree, identityUses))
+  else if (file === ADMIN_GRANT_PROOF_MODULE) problems.push(...grantIssuerIdentityProblems(tree, identityUses))
+  else if (file === ENTRY_OPTION_PORTS[0].file || file === ENTRY_OPTION_PORTS[2].file) problems.push(...entryPortIdentityProblems(file, source))
+  else if (identityUse && file !== LOCK_MODULE && file !== ROLE_PLAN_MODULE) problems.push('identity slot production caller')
   if (helperCalls !== (helperSites[file] ?? 0) || (sourceHelperImport && !Object.hasOwn(helperSites, file))) problems.push('source helper sites')
   return problems
 }
@@ -1247,6 +1771,94 @@ function identitySlotProblems(file: string, source: string): string[] {
 describe('identity slot acquisition is central and closed', () => {
   it('accepts the coherent production baseline', () => {
     for (const file of productionFiles) expect(identitySlotProblems(file, read(file)), file).toEqual([])
+  })
+
+  it('admits only the named dormant reader metadata assertion and rejects its altered bindings or acquisitions', () => {
+    const baseline = 'export async function resolveAdminGrantTargetSet(tx, context, intent, phase) { const normalized = normalizeIntent(intent); tx.requireIdentityRead([normalized.connectionId]); }'
+    expect(identitySlotProblems(ADMIN_GRANT_RECEIVING_READER_MODULE, baseline)).toEqual([])
+    const assertion = 'tx.requireIdentityRead([normalized.connectionId])'
+    const mutations = [
+      baseline.replace(assertion, 'void 0'),
+      baseline.replace(assertion, `${assertion}; ${assertion}`),
+      baseline.replace(assertion, 'other.requireIdentityRead([normalized.connectionId])'),
+      baseline.replace(assertion, 'tx.requireIdentityRead([])'),
+      baseline.replace(assertion, 'tx.requireIdentityRead([context.connectionId])'),
+      baseline.replace(assertion, 'tx.requireIdentityRead([normalized.connectionId, other])'),
+      baseline.replace(assertion, 'const detached = tx.requireIdentityRead'),
+      baseline.replace(assertion, `const nested = () => ${assertion}`),
+      baseline.replace(assertion, `{ const normalized = intent; ${assertion} }`),
+      baseline.replace(assertion, `((tx) => ${assertion})(other)`),
+      baseline.replace('const normalized', 'let normalized'),
+      baseline.replace(assertion, `normalized = intent; ${assertion}`),
+      baseline.replace(assertion, 'tx?.requireIdentityRead([normalized.connectionId])'),
+      baseline.replace(assertion, "tx['requireIdentityRead']([normalized.connectionId])"),
+      baseline.replace('resolveAdminGrantTargetSet', 'differentOwner'),
+      `${baseline}\nconst plan = { identityRead: { sourceIntegrationIds: [] } }`,
+      `${baseline}\nwithAuthorizationInputTransaction(plan, work)`,
+      `${baseline}\nenterAuthorizationInputTransaction(client, plan)`,
+      `${baseline}\ntx.acquire({ userIds: [] })`,
+      `${baseline}\nrunGatedPullSourceWrite()`,
+      `${baseline}\nacquireSourceSyncFreezeLock(client, sourceId)`,
+      `${baseline}\nawait tx.query("SELECT pg_advisory_xact_lock_shared(hashtext('directory:identity-maintenance'))")`,
+    ]
+    for (const [index, source] of mutations.entries()) expect(identitySlotProblems(ADMIN_GRANT_RECEIVING_READER_MODULE, source), `prepared metadata mutation ${index}`).not.toEqual([])
+    expect(identitySlotProblems(`${SRC}/auth/other-prepared-reader.ts`, baseline)).not.toEqual([])
+  })
+
+  it('admits only the grant issuer metadata assertion inside readIssueSnapshot', () => {
+    const baseline = read(ADMIN_GRANT_PROOF_MODULE)
+    const assertion = 'tx.requireIdentityRead([intent.connectionId])'
+    expect(baseline.split(assertion)).toHaveLength(2)
+    expect(identitySlotProblems(ADMIN_GRANT_PROOF_MODULE, baseline)).toEqual([])
+    const mutations = [
+      baseline.replace(assertion, 'void 0'),
+      baseline.replace(assertion, `${assertion}\n  ${assertion}`),
+      baseline.replace(assertion, 'other.requireIdentityRead([intent.connectionId])'),
+      baseline.replace(assertion, 'tx.requireIdentityRead([intent.orgId])'),
+      baseline.replace(assertion, `const nested = () => { ${assertion} }`),
+      baseline.replace('  const userIds = [intent.actorId', '  const tx = intent\n  const userIds = [intent.actorId'),
+      baseline.replace(assertion, `intent = otherIntent\n  ${assertion}`),
+      baseline.replace(assertion, `const { tx } = other\n  ${assertion}`),
+      baseline.replace(assertion, `({ intent } = other)\n  ${assertion}`),
+      `${baseline}\nawait tx.query("SELECT pg_advisory_xact_lock(hashtext('directory:identity-maintenance'))")`,
+    ]
+    for (const [index, source] of mutations.entries()) expect(identitySlotProblems(ADMIN_GRANT_PROOF_MODULE, source), `grant issuer identity mutation ${index}`).not.toEqual([])
+    expect(identitySlotProblems(`${SRC}/auth/other-grant-proof.ts`, baseline)).not.toEqual([])
+  })
+
+  it('admits only the reviewed ceremony runRoot and strict-entry issueOnRoot identity reads', () => {
+    const ceremony = ENTRY_OPTION_PORTS[0].file
+    const runtime = ENTRY_OPTION_PORTS[2].file
+    const ceremonySource = read(ceremony)
+    const runtimeSource = read(runtime)
+    const ceremonyCall = 'tx.requireIdentityRead([connectionId])'
+    const runtimeCall = 'tx.requireIdentityRead([snapshot.connectionId])'
+    const ceremonyShadow = '): Promise<T | CurrentAppCeremonyRefusal> {\n  try {'
+    const runtimeShadow = '): Promise<StrictDingTalkSignInResult> {\n  const issued = await withAuthorizationInputTransaction'
+    expect(ceremonySource.split(ceremonyCall)).toHaveLength(2)
+    expect(runtimeSource.split(runtimeCall)).toHaveLength(2)
+    expect(ceremonySource.split(ceremonyShadow)).toHaveLength(2)
+    expect(runtimeSource.split(runtimeShadow)).toHaveLength(2)
+    expect(identitySlotProblems(ceremony, ceremonySource)).toEqual([])
+    expect(identitySlotProblems(runtime, runtimeSource)).toEqual([])
+    const ceremonyMutants = [
+      ceremonySource.replace(`      ${ceremonyCall}\n`, ''),
+      ceremonySource.replace(ceremonyCall, `${ceremonyCall}\n      ${ceremonyCall}`),
+      ceremonySource.replace(ceremonyCall, 'tx.requireIdentityRead([otherId])'),
+      ceremonySource.replace(ceremonyCall, `const detached = () => ${ceremonyCall}`),
+      ceremonySource.replace(ceremonyShadow, '): Promise<T | CurrentAppCeremonyRefusal> {\n  const connectionId = other\n  try {'),
+    ]
+    const runtimeMutants = [
+      runtimeSource.replace(`    ${runtimeCall}\n`, ''),
+      runtimeSource.replace(runtimeCall, `${runtimeCall}\n    ${runtimeCall}`),
+      runtimeSource.replace(runtimeCall, 'tx.requireIdentityRead([snapshot.orgId])'),
+      runtimeSource.replace(runtimeCall, `const detached = () => ${runtimeCall}`),
+      runtimeSource.replace(runtimeShadow, '): Promise<StrictDingTalkSignInResult> {\n  snapshot = otherSnapshot\n  const issued = await withAuthorizationInputTransaction'),
+    ]
+    for (const [index, source] of ceremonyMutants.entries()) expect(identitySlotProblems(ceremony, source), `ceremony identity ${index}`).not.toEqual([])
+    for (const [index, source] of runtimeMutants.entries()) expect(identitySlotProblems(runtime, source), `runtime identity ${index}`).not.toEqual([])
+    expect(identitySlotProblems(`${SRC}/auth/other-grant-target-ceremony.ts`, ceremonySource)).not.toEqual([])
+    expect(identitySlotProblems(`${SRC}/auth/other-strict-dingtalk-entry.ts`, runtimeSource)).not.toEqual([])
   })
 
   it('rejects one changed key, mode or helper from the passing central baseline', () => {
@@ -2515,38 +3127,543 @@ function workClosureProblems(file: string, source: string): string[] {
   return problems
 }
 
+/** Entry options a production caller may not supply, except one reviewed transaction runner at three ports. */
 const TEST_ONLY_ENTRY_OPTIONS = ['transaction', 'afterAcquire']
+const ENTRY_OPTION_PORTS = [
+  { file: `${SRC}/auth/admin-grant-target-ceremony.ts`, owner: 'runRoot' },
+  { file: `${SRC}/auth/security-action-attempt-admission.ts`, owner: 'runOwnedAttempt.runAis' },
+  { file: `${SRC}/auth/strict-dingtalk-entry.ts`, owner: 'issueOnRoot' },
+] as const
+const CEREMONY_MOUNTS = ['startCurrentAppCeremony', 'completeCurrentAppCeremony']
+const RUNTIME_MOUNTS = ['signInStrictDingTalkWeb', 'signInStrictDingTalkContainer', 'bindStrictDingTalkEntryLocal']
+const PROVIDER_CALLS = ['exchangeCodeForUserAccessToken', 'fetchDingTalkCurrentUser', 'fetchDingTalkAppAccessTokenFresh', 'getDingTalkUserDetail', 'getDingTalkUserInfoByAuthCode']
+const CEREMONY_WORK = ['assertGate(session)', 'await revalidatePrivilegeRolePlan(tx, plan)', 'tx.requireIdentityRead([connectionId])', 'return work(tx)']
+const CEREMONY_OPTION = 'deps?.transaction ? { transaction: deps.transaction } : undefined'
+const CEREMONY_DEPS = `export type CurrentAppCeremonyDeps = Readonly<{
+  fetchFn?: typeof fetch
+  transaction?: AuthorizationInputTransactionRunner
+}>`
+const CEREMONY_BINDER = `export function bindProductionTargetCeremony(): CurrentAppCeremonyRefusal {
+  return { success: false, code: 'production_unavailable' }
+}`
+const ATTEMPT_ADAPTER = `async <U>(handler: (client: AuthorizationInputHandlerClient) => Promise<U>): Promise<U> => {
+  rawOutcome.current = null
+  if (!owner) {
+    const error = new AttemptUnavailable()
+    rawOutcome.current = { ok: false, error, rollbackAcked: true }
+    throw error
+  }
+  const current = owner
+  const result = await runStep((tx) => handler({
+    query: (sql, params) => tx.query(sql, params),
+    __rawClient: current.client,
+  }))
+  if (result.ok === true) {
+    rawOutcome.current = { ok: true, value: result.value }
+    return result.value
+  }
+  rawOutcome.current = { ok: false, error: result.error, rollbackAcked: result.rollbackAcked }
+  throw result.error
+}`
+const ATTEMPT_CATCH = `catch (error) {
+  const recorded = rawOutcome.current
+  if (recorded !== null && recorded.ok === false) return recorded
+  if (recorded !== null && recorded.ok === true) return { ok: false, error, rollbackAcked: false }
+  return { ok: false, error, rollbackAcked: owner ? !owner.lost : true }
+}`
+const RUNTIME_RUNNER = `function runnerOf(transaction: AuthorizationInputTransactionRunner | undefined): AuthorizationInputTransactionRunner {
+  if (transaction) return transaction
+  return (handler) => poolManager.get().transaction((client) => handler({
+    query: (sql, params) => client.query(sql, params),
+    __rawClient: client.__rawClient,
+  }))
+}`
+const RUNTIME_GATES = `export const STRICT_DINGTALK_ENTRY_GATES = Object.freeze({
+  implementationPermit: false,
+  productionAvailable: false,
+  b2Complete: false,
+  delivered: false,
+  containerAdapterProved: false,
+})`
+const ENTRY_BINDING = 'withAuthorizationInputTransaction'
+const ENTRY_MODULE = '../rbac/authorization-input-lock'
+const AUTH_ROUTER_FILE = `${SRC}/routes/auth.ts`
+const LOCAL_ENTRY = 'bindStrictDingTalkEntryLocal'
+const LOCAL_ENTRY_MODULE = '../auth/strict-dingtalk-entry'
+const LOCAL_ADAPTER = `function strictDingTalkSessionRunner(): AuthorizationInputTransactionRunner {
+  return (handler) => transaction(async (client) => {
+    const held = client as {
+      query: (sql: string, params?: unknown[]) => Promise<import('pg').QueryResult>
+      __rawClient?: import('pg').PoolClient
+    }
+    return handler({
+      query: (sql, params) => held.query(sql, params),
+      __rawClient: held.__rawClient,
+    })
+  })
+}`
+const LOCAL_FORWARDING = `const binding = await bindStrictDingTalkEntryLocal({
+  fetchFn: input.fetchFn,
+  env: input.env,
+  transaction: strictDingTalkSessionRunner(),
+})`
+const LOCAL_FACTORY = `export async function bindStrictDingTalkEntryLocal(options: {
+  fetchFn?: typeof fetch
+  transaction?: AuthorizationInputTransactionRunner
+  env?: Readonly<Record<string, string | undefined>>
+} = {}): Promise<StrictDingTalkLocalBinding> {
+  const auth = await import('./AuthService')
+  const createToken: StrictTokenMinter = (user, tokenOptions) => auth.authService.createToken(user, tokenOptions)
+  const readExp: StrictTokenExpReader = (token) => {
+    const exp = auth.authService.readTokenPayload(token)?.exp
+    return typeof exp === 'number' ? exp : null
+  }
+  const readIssuedAt: StrictTokenExpReader = (token) => {
+    const issuedAt = auth.authService.readTokenPayload(token)?.iat
+    return typeof issuedAt === 'number' ? issuedAt : null
+  }
+  const signInBound = (
+    kind: 'web' | 'container',
+    input: Omit<StrictDingTalkSignInInput, 'createToken' | 'readExp' | 'readIssuedAt' | 'transaction'>,
+  ) => {
+    const request = capturedSignInRequest(input)
+    const call = kind === 'web' ? signInStrictDingTalkWeb : signInStrictDingTalkContainer
+    return call({
+      ...request,
+      transport: {
+        fetchFn: request.transport?.fetchFn ?? options.fetchFn,
+        timeoutMs: request.transport?.timeoutMs,
+        signal: request.transport?.signal,
+      },
+      env: request.env ?? options.env,
+      transaction: options.transaction,
+      createToken,
+      readExp,
+      readIssuedAt,
+    })
+  }
+  return {
+    gates: STRICT_DINGTALK_ENTRY_GATES,
+    currentStrictGrantUsable,
+    signInWeb: (input) => signInBound('web', input),
+    signInContainer: (input) => signInBound('container', input),
+    verifyPersistedStrictSession,
+    refreshStrictSession: (input) => refreshStrictSession({ ...input, createToken, readExp, env: input.env ?? options.env }),
+    switchStrictSessionOrg: (input) => switchStrictSessionOrg({ ...input, createToken, readExp, env: input.env ?? options.env }),
+  }
+}`
+const DISPATCH_PREFIXES = ['runAis:adminReads', 'runAis:adminAccounts', 'runStep:adminAccounts', 'runStep:reads', 'runStep:accounts']
 
-function entryOptionProblems(file: string, source: string): string[] {
-  const problems: string[] = []
-  const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true)
+function lexicalOwner(node: ts.Node): string {
+  const names: string[] = []
+  for (let current: ts.Node | undefined = node; current; current = current.parent) {
+    if (ts.isFunctionDeclaration(current) && current.name) names.push(current.name.text)
+  }
+  return names.reverse().join('.')
+}
+
+function functionsNamed(root: ts.Node, name: string): ts.FunctionDeclaration[] {
+  const found: ts.FunctionDeclaration[] = []
   const visit = (node: ts.Node) => {
-    if (ts.isCallExpression(node) && node.expression.getText(tree) === 'withAuthorizationInputTransaction' && node.arguments.length > 2) {
-      const options = node.arguments[2]
-      const line = tree.getLineAndCharacterOfPosition(node.getStart(tree)).line + 1
-      if (!ts.isObjectLiteralExpression(options)) problems.push(`${file}:${line}: entry options are not an object literal`)
-      else {
-        for (const property of options.properties) {
-          const name = property.name?.getText(tree) ?? '<spread>'
-          if (!property.name || TEST_ONLY_ENTRY_OPTIONS.includes(name)) problems.push(`${file}:${line}: entry option ${name} is reserved for tests`)
-        }
-      }
+    if (ts.isFunctionDeclaration(node) && node.name?.text === name) found.push(node)
+    ts.forEachChild(node, visit)
+  }
+  visit(root)
+  return found
+}
+
+function parentFunction(node: ts.Node): ts.FunctionDeclaration | undefined {
+  for (let current = node.parent; current; current = current.parent) if (ts.isFunctionDeclaration(current)) return current
+  return undefined
+}
+
+function localsNamed(fn: ts.FunctionDeclaration, name: string): ts.VariableDeclaration[] {
+  const found: ts.VariableDeclaration[] = []
+  const visit = (node: ts.Node) => {
+    if (node !== fn && ts.isFunctionLike(node)) return
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === name) found.push(node)
+    ts.forEachChild(node, visit)
+  }
+  if (fn.body) visit(fn.body)
+  return found
+}
+
+function nodeTexts(root: ts.Node, tree: ts.SourceFile): Set<string> {
+  const found = new Set<string>()
+  const visit = (node: ts.Node) => {
+    found.add(compact(node.getText(tree)))
+    ts.forEachChild(node, visit)
+  }
+  visit(root)
+  return found
+}
+
+function oneFunction(tree: ts.SourceFile, name: string, parent: string): ts.FunctionDeclaration | undefined {
+  const found = functionsNamed(tree, name)
+  if (found.length !== 1) return undefined
+  const enclosing = parentFunction(found[0])
+  if ((enclosing?.name?.text ?? '') !== parent) return undefined
+  return found[0]
+}
+
+function entryCalls(file: string, source: string): { tree: ts.SourceFile, calls: Array<{ node: ts.CallExpression, owner: string, counted: boolean }> } {
+  const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true)
+  const calls: Array<{ node: ts.CallExpression, owner: string, counted: boolean }> = []
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && node.expression.getText(tree) === 'withAuthorizationInputTransaction') {
+      const owner = lexicalOwner(node)
+      const port = ENTRY_OPTION_PORTS.find(item => item.file === file && item.owner === owner)
+      const helper = port ? enclosingFunctionAt(file, source, node.getStart(tree))?.name ?? '' : ''
+      calls.push({ node, owner, counted: !!port && helper === (owner.split('.').pop() ?? '') })
     }
     ts.forEachChild(node, visit)
   }
   visit(tree)
+  return { tree, calls }
+}
+
+function genericOptionProblems(file: string, node: ts.CallExpression, tree: ts.SourceFile): string[] {
+  const options = node.arguments[2]
+  const line = tree.getLineAndCharacterOfPosition(node.getStart(tree)).line + 1
+  if (!options || !ts.isObjectLiteralExpression(options)) return [`${file}:${line}: entry options are not an object literal`]
+  const problems: string[] = []
+  for (const property of options.properties) {
+    if (ts.isSpreadAssignment(property)) {
+      problems.push(`${file}:${line}: entry option <spread> is reserved for tests`)
+      continue
+    }
+    if (!property.name || ts.isComputedPropertyName(property.name)) {
+      problems.push(`${file}:${line}: entry option <computed> is reserved for tests`)
+      continue
+    }
+    const name = ts.isIdentifier(property.name) || ts.isStringLiteral(property.name) ? property.name.text : property.name.getText(tree)
+    if (TEST_ONLY_ENTRY_OPTIONS.includes(name)) problems.push(`${file}:${line}: entry option ${name} is reserved for tests`)
+  }
+  return problems
+}
+
+function reviewedShape(file: string, owner: string, node: ts.CallExpression, tree: ts.SourceFile): string[] {
+  const line = tree.getLineAndCharacterOfPosition(node.getStart(tree)).line + 1
+  const fail = (reason: string) => `${file}:${line}: reviewed transaction port ${reason}`
+  const problems: string[] = []
+  const [plan, work, options] = node.arguments
+  if (node.arguments.length !== 3 || !plan || compact(plan.getText(tree)) !== 'plan.lockPlan') problems.push(fail('plan'))
+  if (owner === 'runRoot') {
+    const statements = work && ts.isArrowFunction(work) && ts.isBlock(work.body) ? [...work.body.statements] : []
+    if (!work || !ts.isArrowFunction(work) || !compact(work.getText(tree)).startsWith('async') || statements.length !== CEREMONY_WORK.length || statements.some((statement, index) => compact(statement.getText(tree)) !== CEREMONY_WORK[index])) problems.push(fail('ceremony work'))
+    if (!options || compact(options.getText(tree)) !== CEREMONY_OPTION) problems.push(fail('ceremony transaction option'))
+  } else if (owner === 'runOwnedAttempt.runAis') {
+    const property = options && ts.isObjectLiteralExpression(options) && options.properties.length === 1 ? options.properties[0] : undefined
+    if (!work || !ts.isIdentifier(work) || work.text !== 'work' || !property || !ts.isPropertyAssignment(property) || !property.name || !ts.isIdentifier(property.name) || property.name.text !== 'transaction' || compact(property.initializer.getText(tree)) !== compact(ATTEMPT_ADAPTER)) problems.push(fail('attempt adapter'))
+  } else {
+    const statements = work && ts.isArrowFunction(work) && ts.isBlock(work.body) ? [...work.body.statements] : []
+    const property = options && ts.isObjectLiteralExpression(options) && options.properties.length === 1 ? options.properties[0] : undefined
+    if (!work || !ts.isArrowFunction(work) || !compact(work.getText(tree)).startsWith('async') || compact(statements[0]?.getText(tree) ?? '') !== 'await revalidatePrivilegeRolePlan(tx, plan)' || compact(statements[1]?.getText(tree) ?? '') !== 'tx.requireIdentityRead([snapshot.connectionId])') problems.push(fail('runtime work'))
+    if (!property || !ts.isPropertyAssignment(property) || !property.name || !ts.isIdentifier(property.name) || property.name.text !== 'transaction' || compact(property.initializer.getText(tree)) !== 'input.transaction') problems.push(fail('runtime transaction option'))
+  }
+  return problems
+}
+
+function statementNamed(tree: ts.SourceFile, name: string): ts.Statement | undefined {
+  return tree.statements.find(statement => {
+    if (ts.isTypeAliasDeclaration(statement) || ts.isFunctionDeclaration(statement)) return statement.name?.text === name
+    if (!ts.isVariableStatement(statement)) return false
+    return statement.declarationList.declarations.some(declaration => ts.isIdentifier(declaration.name) && declaration.name.text === name)
+  })
+}
+
+function bindingNameHas(name: ts.BindingName, text: string): boolean {
+  if (ts.isIdentifier(name)) return name.text === text
+  for (const element of name.elements) if (ts.isBindingElement(element) && bindingNameHas(element.name, text)) return true
+  return false
+}
+
+function nodeDeclares(node: ts.Node, text: string): boolean {
+  if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name?.text === text) return true
+  if ((ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isBindingElement(node)) && bindingNameHas(node.name, text)) return true
+  return !!ts.isCatchClause(node) && !!node.variableDeclaration && bindingNameHas(node.variableDeclaration.name, text)
+}
+
+function subtreeDeclares(root: ts.Node, text: string): boolean {
+  let found = false
+  const visit = (node: ts.Node) => {
+    if (found) return
+    if (nodeDeclares(node, text)) found = true
+    else ts.forEachChild(node, visit)
+  }
+  visit(root)
+  return found
+}
+
+function callsNamed(root: ts.Node, name: string): ts.CallExpression[] {
+  const found: ts.CallExpression[] = []
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === name) found.push(node)
+    ts.forEachChild(node, visit)
+  }
+  visit(root)
+  return found
+}
+
+function hasTextOutsideFunctions(root: ts.Node, tree: ts.SourceFile, text: string): boolean {
+  let found = false
+  const visit = (node: ts.Node) => {
+    if (found || ts.isFunctionLike(node)) return
+    if (compact(node.getText(tree)) === text) found = true
+    else ts.forEachChild(node, visit)
+  }
+  ts.forEachChild(root, visit)
+  return found
+}
+
+function dispatchedPrefixes(root: ts.Node, tree: ts.SourceFile): string[] {
+  const found: string[] = []
+  const visit = (node: ts.Node) => {
+    if (ts.isFunctionLike(node)) return
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && (node.expression.text === 'runAis' || node.expression.text === 'runStep')) {
+      const arrow = node.arguments.find(argument => ts.isArrowFunction(argument))
+      const body = arrow && ts.isArrowFunction(arrow) && ts.isBlock(arrow.body) ? arrow.body : undefined
+      const statements = body?.statements
+      const first = statements?.[0]
+      const second = statements?.[1]
+      const third = statements?.[2]
+      const step = statements?.length === 3 && first ? compact(first.getText(tree)) : ''
+      const name = step.endsWith(' += 1') ? step.slice(0, -' += 1'.length) : ''
+      if (name && second && third && compact(second.getText(tree)) === `if (${name} !== 1) throw new AttemptUnavailable()` && ts.isReturnStatement(third)) found.push(`${node.expression.text}:${name}`)
+    }
+    ts.forEachChild(node, visit)
+  }
+  ts.forEachChild(root, visit)
+  return found
+}
+
+function localEntryNodes(tree: ts.SourceFile): Set<ts.Node> {
+  const allowed = new Set<ts.Node>()
+  for (const statement of tree.statements) {
+    if (!ts.isImportDeclaration(statement) || statement.importClause?.isTypeOnly || !ts.isStringLiteral(statement.moduleSpecifier) || statement.moduleSpecifier.text !== LOCAL_ENTRY_MODULE) continue
+    const named = statement.importClause?.namedBindings
+    if (!named || !ts.isNamedImports(named)) continue
+    for (const specifier of named.elements) if (!specifier.isTypeOnly && !specifier.propertyName && specifier.name.text === LOCAL_ENTRY) allowed.add(specifier.name)
+  }
+  const constructor = oneFunction(tree, 'createLocalStrictDingTalkAuthRouter', '')
+  if (constructor) for (const call of callsNamed(constructor, LOCAL_ENTRY)) allowed.add(call.expression)
+  return allowed
+}
+
+function localConstructorProblems(file: string, tree: ts.SourceFile): string[] {
+  const fail = `${file}: local strict constructor`
+  const adapter = statementNamed(tree, 'strictDingTalkSessionRunner')
+  const constructor = oneFunction(tree, 'createLocalStrictDingTalkAuthRouter', '')
+  const statements = constructor?.body?.statements ?? []
+  const forwarding = statements[0]
+  const returned = statements[1]
+  const builds = callsNamed(tree, 'buildAuthRouter')
+  const bare = builds.filter(call => call.arguments.length === 0)
+  const bound = builds.filter(call => call.arguments.length === 1 && !!call.arguments[0] && ts.isIdentifier(call.arguments[0]) && call.arguments[0].text === 'binding')
+  const exported = statementNamed(tree, 'authRouter')
+  const initializer = exported && ts.isVariableStatement(exported)
+    ? exported.declarationList.declarations.find(declaration => ts.isIdentifier(declaration.name) && declaration.name.text === 'authRouter')?.initializer
+    : undefined
+  const boundCall = bound[0]
+  if (localEntryNodes(tree).size !== 2) return [fail]
+  if (!adapter || compact(adapter.getText(tree)) !== compact(LOCAL_ADAPTER)) return [fail]
+  if (!constructor || statements.length !== 2 || !forwarding || compact(forwarding.getText(tree)) !== compact(LOCAL_FORWARDING)) return [fail]
+  if (!returned || !ts.isReturnStatement(returned) || !boundCall || returned.expression !== boundCall) return [fail]
+  if (builds.length !== 2 || bare.length !== 1 || bound.length !== 1 || initializer !== bare[0]) return [fail]
+  if (parentFunction(boundCall)?.name?.text !== 'createLocalStrictDingTalkAuthRouter') return [fail]
+  return []
+}
+
+function ceremonyFileProblems(file: string, tree: ts.SourceFile): string[] {
+  const problems: string[] = []
+  const runRoot = oneFunction(tree, 'runRoot', '')
+  const deps = runRoot?.parameters.find(parameter => ts.isIdentifier(parameter.name) && parameter.name.text === 'deps')
+  if (!runRoot || localsNamed(runRoot, 'deps').length !== 0 || !deps?.type || compact(deps.type.getText(tree)) !== 'CurrentAppCeremonyDeps | undefined') problems.push(`${file}: ceremony deps`)
+  const depsType = statementNamed(tree, 'CurrentAppCeremonyDeps')
+  if (!depsType || compact(depsType.getText(tree)) !== compact(CEREMONY_DEPS)) problems.push(`${file}: ceremony deps type`)
+  const assertGate = oneFunction(tree, 'assertGate', '')
+  const tried = assertGate?.body?.statements?.find(ts.isTryStatement)
+  const asserted = !!tried?.tryBlock.statements.some(statement => compact(statement.getText(tree)) === 'assertAuthenticatedSessionContext(session)')
+  if (!asserted) problems.push(`${file}: ceremony session assertion`)
+  const binder = statementNamed(tree, 'bindProductionTargetCeremony')
+  if (!binder || !ts.isFunctionDeclaration(binder) || binder.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.AsyncKeyword) || compact(binder.getText(tree)) !== compact(CEREMONY_BINDER)) problems.push(`${file}: ceremony production binder`)
+  const calls: ts.CallExpression[] = []
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'runRoot') calls.push(node)
+    ts.forEachChild(node, visit)
+  }
+  visit(tree)
+  if (calls.length !== 3 || calls.some(call => compact(call.arguments[3]?.getText(tree) ?? '') !== 'deps')) problems.push(`${file}: ceremony deps forwarding`)
+  return problems
+}
+
+function attemptFileProblems(file: string, tree: ts.SourceFile): string[] {
+  const problems: string[] = []
+  const owned = oneFunction(tree, 'runOwnedAttempt', '')
+  const names = owned?.parameters.map(parameter => ts.isIdentifier(parameter.name) ? parameter.name.text : '') ?? []
+  if (!owned || names.join(',') !== 'sessionId,password,steps' || localsNamed(owned, 'owner').length !== 1) problems.push(`${file}: attempt owner`)
+  const runAis = oneFunction(tree, 'runAis', 'runOwnedAttempt')
+  const runAisStatements = runAis?.body?.statements
+  const first = runAisStatements?.[0]
+  const tryStatement = runAisStatements?.find(ts.isTryStatement)
+  if (!runAis || localsNamed(runAis, 'owner').length !== 0 || !first || compact(first.getText(tree)) !== 'const rawOutcome: { current: RawStepOutcome | null } = { current: null }' || !tryStatement?.catchClause || compact(tryStatement.catchClause.getText(tree)) !== compact(ATTEMPT_CATCH)) problems.push(`${file}: attempt outcome`)
+  const performBody = oneFunction(tree, 'perform', 'runOwnedAttempt')?.body
+  const prefixes = performBody ? dispatchedPrefixes(performBody, tree) : []
+  if (!performBody || !hasTextOutsideFunctions(performBody, tree, "steps.kind !== 'admin_grant_issue'") || prefixes.length !== DISPATCH_PREFIXES.length || DISPATCH_PREFIXES.some(prefix => !prefixes.includes(prefix))) problems.push(`${file}: attempt dispatch`)
+  const runStep = oneFunction(tree, 'runStep', 'runOwnedAttempt')
+  const stepTexts = runStep ? nodeTexts(runStep, tree) : new Set<string>()
+  if (!stepTexts.has("runQuery(owner, 'BEGIN')") || !stepTexts.has("runQuery(owner, 'COMMIT')") || !stepTexts.has('rollback(owner)')) problems.push(`${file}: attempt settle`)
+  const compares: ts.Node[] = []
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && compact(node.expression.getText(tree)) === 'bcrypt.compare') compares.push(node)
+    ts.forEachChild(node, visit)
+  }
+  visit(tree)
+  if (compares.length !== 1 || parentFunction(compares[0])?.name?.text !== 'invokeCompare' || parentFunction(parentFunction(compares[0]) ?? compares[0])?.name?.text !== 'runOwnedAttempt') problems.push(`${file}: attempt compare`)
+  return problems
+}
+
+function propertyText(property: ts.ObjectLiteralElementLike): string {
+  if (!('name' in property) || !property.name) return ''
+  return ts.isIdentifier(property.name) || ts.isStringLiteral(property.name) ? property.name.text : ''
+}
+
+function runtimeFileProblems(file: string, tree: ts.SourceFile): string[] {
+  const problems: string[] = []
+  const issueOnRoot = oneFunction(tree, 'issueOnRoot', '')
+  const signIn = oneFunction(tree, 'signIn', '')
+  if (!issueOnRoot || localsNamed(issueOnRoot, 'input').length !== 0) problems.push(`${file}: runtime input`)
+  const runners = signIn ? localsNamed(signIn, 'runner') : []
+  const runner = runners[0]
+  const awaits: number[] = []
+  const visitAwait = (node: ts.Node) => {
+    if (ts.isAwaitExpression(node)) awaits.push(node.getStart(tree))
+    ts.forEachChild(node, visitAwait)
+  }
+  if (signIn?.body) visitAwait(signIn.body)
+  const firstAwait = awaits.reduce((left, right) => Math.min(left, right), Number.POSITIVE_INFINITY)
+  const constRunner = !!runner && ts.isVariableDeclarationList(runner.parent) && (runner.parent.flags & ts.NodeFlags.Const) !== 0
+  if (!signIn || localsNamed(signIn, 'input').length !== 0 || runners.length !== 1 || !runner?.initializer || !constRunner || compact(runner.initializer.getText(tree)) !== 'runnerOf(input.transaction)' || !Number.isFinite(firstAwait) || runner.getStart(tree) > firstAwait) problems.push(`${file}: runtime capture`)
+  const handoffs: ts.CallExpression[] = []
+  const visitHandoff = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'issueOnRoot') handoffs.push(node)
+    ts.forEachChild(node, visitHandoff)
+  }
+  visitHandoff(tree)
+  if (handoffs.length !== 1 || parentFunction(handoffs[0])?.name?.text !== 'signIn' || compact(handoffs[0].arguments[0]?.getText(tree) ?? '') !== '{ ...input, transaction: runner }') problems.push(`${file}: runtime handoff`)
+  const runnerOf = statementNamed(tree, 'runnerOf')
+  if (!runnerOf || compact(runnerOf.getText(tree)) !== compact(RUNTIME_RUNNER)) problems.push(`${file}: runtime runner`)
+  const gates = statementNamed(tree, 'STRICT_DINGTALK_ENTRY_GATES')
+  if (!gates || compact(gates.getText(tree)) !== compact(RUNTIME_GATES)) problems.push(`${file}: runtime gates`)
+  const bind = oneFunction(tree, 'bindStrictDingTalkEntryLocal', '')
+  if (!bind || compact(bind.getText(tree)) !== compact(LOCAL_FACTORY)) problems.push(`${file}: runtime factory`)
+  const bindStatements = bind?.body?.statements
+  const returned = bindStatements ? [...bindStatements].reverse().find(ts.isReturnStatement) : undefined
+  const gatesProperty = returned?.expression && ts.isObjectLiteralExpression(returned.expression) ? returned.expression.properties.find(property => propertyText(property) === 'gates') : undefined
+  if (!gatesProperty || !ts.isPropertyAssignment(gatesProperty) || compact(gatesProperty.initializer.getText(tree)) !== 'STRICT_DINGTALK_ENTRY_GATES') problems.push(`${file}: runtime gate binding`)
+  const called: string[] = []
+  const visitCall = (node: ts.Node) => {
+    if (ts.isCallExpression(node)) {
+      const callee = node.expression
+      called.push(ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text : '')
+    }
+    ts.forEachChild(node, visitCall)
+  }
+  if (issueOnRoot?.body) visitCall(issueOnRoot.body)
+  if (PROVIDER_CALLS.some(name => called.includes(name))) problems.push(`${file}: runtime provider`)
+  return problems
+}
+
+function entryBindingProblems(file: string, tree: ts.SourceFile): string[] {
+  let valueImports = 0
+  for (const statement of tree.statements) {
+    if (nodeDeclares(statement, ENTRY_BINDING)) return [`${file}: entry binding`]
+    if (ts.isVariableStatement(statement) && statement.declarationList.declarations.some(declaration => bindingNameHas(declaration.name, ENTRY_BINDING))) return [`${file}: entry binding`]
+    if (!ts.isImportDeclaration(statement) || statement.importClause?.isTypeOnly || !ts.isStringLiteral(statement.moduleSpecifier) || statement.moduleSpecifier.text !== ENTRY_MODULE) continue
+    const named = statement.importClause?.namedBindings
+    if (!named || !ts.isNamedImports(named)) continue
+    for (const specifier of named.elements) {
+      if (specifier.isTypeOnly || specifier.propertyName) continue
+      if (specifier.name.text === ENTRY_BINDING) valueImports += 1
+    }
+  }
+  if (valueImports !== 1) return [`${file}: entry binding`]
+  for (const name of ['runRoot', 'runAis', 'issueOnRoot']) {
+    if (functionsNamed(tree, name).some(fn => subtreeDeclares(fn, ENTRY_BINDING))) return [`${file}: entry binding`]
+  }
+  return []
+}
+
+function portFileProblems(file: string, source: string): string[] {
+  const port = ENTRY_OPTION_PORTS.find(item => item.file === file)
+  if (!port) return []
+  const { tree, calls } = entryCalls(file, source)
+  const count = calls.filter(call => call.counted).length
+  const problems: string[] = []
+  if (count !== 1) problems.push(`${file}|${port.owner}|withAuthorizationInputTransaction: expected one reviewed entry, found ${count}`)
+  problems.push(...entryBindingProblems(file, tree))
+  if (port.owner === 'runRoot') problems.push(...ceremonyFileProblems(file, tree))
+  else if (port.owner === 'runOwnedAttempt.runAis') problems.push(...attemptFileProblems(file, tree))
+  else problems.push(...runtimeFileProblems(file, tree))
+  return problems
+}
+
+function mountedCallerProblems(files: readonly string[], sourceOf: (file: string) => string): string[] {
+  const problems: string[] = []
+  const names = [...CEREMONY_MOUNTS, ...RUNTIME_MOUNTS]
+  for (const file of files) {
+    if (!/\.[cm]?[jt]sx?$/.test(file)) continue
+    const source = sourceOf(file)
+    if (!names.some(name => source.includes(name))) continue
+    const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true)
+    const allowed = file === AUTH_ROUTER_FILE ? localEntryNodes(tree) : new Set<ts.Node>()
+    if (file === AUTH_ROUTER_FILE) problems.push(...localConstructorProblems(file, tree))
+    const visit = (node: ts.Node) => {
+      const text = ts.isIdentifier(node) || ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) ? node.text : ''
+      if (text && CEREMONY_MOUNTS.includes(text) && file !== ENTRY_OPTION_PORTS[0].file) problems.push(`${file}: mounted ceremony caller ${text}`)
+      if (text && RUNTIME_MOUNTS.includes(text) && file !== ENTRY_OPTION_PORTS[2].file && !(text === LOCAL_ENTRY && allowed.has(node))) problems.push(`${file}: mounted strict sign-in ${text}`)
+      ts.forEachChild(node, visit)
+    }
+    visit(tree)
+  }
+  return problems
+}
+
+function entryOptionProblems(file: string, source: string): string[] {
+  const problems: string[] = []
+  const { tree, calls } = entryCalls(file, source)
+  for (const call of calls) {
+    if (call.counted) problems.push(...reviewedShape(file, call.owner, call.node, tree))
+    else if (call.node.arguments.length > 2) problems.push(...genericOptionProblems(file, call.node, tree))
+  }
+  return problems
+}
+
+function productionEntryProblems(files: readonly string[], sourceOf: (file: string) => string): string[] {
+  const problems: string[] = []
+  const ports = new Set<string>(ENTRY_OPTION_PORTS.map(port => port.file))
+  const checked = new Set<string>()
+  for (const file of files) {
+    if (!file.endsWith('.ts') || file === LOCK_MODULE) continue
+    const source = sourceOf(file)
+    if (!ports.has(file) && !source.includes('AuthorizationInputTransaction')) continue
+    checked.add(file)
+    problems.push(...workClosureProblems(file, source), ...entryOptionProblems(file, source))
+  }
+  for (const port of ENTRY_OPTION_PORTS) {
+    if (!checked.has(port.file)) {
+      const source = sourceOf(port.file)
+      problems.push(...workClosureProblems(port.file, source), ...entryOptionProblems(port.file, source))
+    }
+    problems.push(...portFileProblems(port.file, sourceOf(port.file)))
+  }
+  problems.push(...mountedCallerProblems(files, sourceOf))
   return problems
 }
 
 describe('work closures make no external call, and production callers pass no test-only entry option', () => {
   it('no production work closure references a forbidden identifier; no production caller supplies a transaction runner or a post-acquire hook', () => {
-    const problems = productionFiles
-      .filter((file) => file.endsWith('.ts') && file !== LOCK_MODULE)
-      .flatMap((file) => {
-        const source = read(file)
-        return /AuthorizationInputTransaction\(/.test(source) ? [...workClosureProblems(file, source), ...entryOptionProblems(file, source)] : []
-      })
-    expect(problems).toEqual([])
+    expect(productionEntryProblems(productionFiles, read)).toEqual([])
   })
 
   it('the forbidden pull-source names are the ones the organisation lock module exports, and every function the write gate exports is forbidden', () => {
@@ -2586,6 +3703,227 @@ describe('work closures make no external call, and production callers pass no te
     expect(entryOptionProblems('x.ts', 'withAuthorizationInputTransaction(plan, work, options)')).toHaveLength(1)
     expect(entryOptionProblems('x.ts', 'withAuthorizationInputTransaction(plan, work, { exclusive: { attempts: 3 } })')).toEqual([])
     expect(entryOptionProblems('x.ts', 'withAuthorizationInputTransaction(plan, work)')).toEqual([])
+  })
+
+  it('POSITIVE CONTROL — quoted and computed reserved entry options stay rejected', () => {
+    expect(entryOptionProblems('x.ts', "withAuthorizationInputTransaction(plan, work, { 'transaction': runner })")).toEqual(['x.ts:1: entry option transaction is reserved for tests'])
+    expect(entryOptionProblems('x.ts', "withAuthorizationInputTransaction(plan, work, { 'afterAcquire': hook })")).toEqual(['x.ts:1: entry option afterAcquire is reserved for tests'])
+    expect(entryOptionProblems('x.ts', "withAuthorizationInputTransaction(plan, work, { ['transaction']: runner })")).toEqual(['x.ts:1: entry option <computed> is reserved for tests'])
+    expect(entryOptionProblems('x.ts', "withAuthorizationInputTransaction(plan, work, { ['exclusive']: true })")).toEqual(['x.ts:1: entry option <computed> is reserved for tests'])
+    expect(entryOptionProblems('x.ts', "withAuthorizationInputTransaction(plan, work, { 'exclusive': true })")).toEqual([])
+  })
+
+  it('POSITIVE CONTROL — the three reviewed ports reject a missing, duplicate, relocated, or altered runner', () => {
+    expect(ENTRY_OPTION_PORTS.map(port => `${port.file}|${port.owner}|withAuthorizationInputTransaction`)).toEqual([
+      `${SRC}/auth/admin-grant-target-ceremony.ts|runRoot|withAuthorizationInputTransaction`,
+      `${SRC}/auth/security-action-attempt-admission.ts|runOwnedAttempt.runAis|withAuthorizationInputTransaction`,
+      `${SRC}/auth/strict-dingtalk-entry.ts|issueOnRoot|withAuthorizationInputTransaction`,
+    ])
+    const ceremony = ENTRY_OPTION_PORTS[0].file
+    const attempt = ENTRY_OPTION_PORTS[1].file
+    const runtime = ENTRY_OPTION_PORTS[2].file
+    const command = `${SRC}/auth/admin-login-grant-command.ts`
+    const auth = `${SRC}/routes/auth.ts`
+    const files = [ceremony, attempt, runtime, command, auth]
+    const problemsOf = (overrides: Record<string, string> = {}) => productionEntryProblems(files, file => overrides[file] ?? read(file))
+    expect(problemsOf()).toEqual([])
+    const authSource = read(auth)
+    expect(authSource.split('export const authRouter = buildAuthRouter()').length).toBe(2)
+    expect(problemsOf({ [auth]: authSource.replace('export const authRouter = buildAuthRouter()', 'export const authRouter = buildAuthRouter(binding)') })).not.toEqual([])
+    expect(authSource.split('fetchFn: input.fetchFn,').length).toBe(2)
+    expect(problemsOf({ [auth]: authSource.replace('fetchFn: input.fetchFn,', 'fetchFn: fetch,') })).not.toEqual([])
+    expect(authSource.split('__rawClient: held.__rawClient,').length).toBe(2)
+    expect(problemsOf({ [auth]: authSource.replace('__rawClient: held.__rawClient,', '__rawClient: client,') })).not.toEqual([])
+    expect(problemsOf({ [auth]: `${authSource}\nvoid bindStrictDingTalkEntryLocal\n` })).not.toEqual([])
+    const otherCaller = `${SRC}/routes/other-strict-entry.ts`
+    expect(productionEntryProblems([...files, otherCaller], file => file === otherCaller ? 'export const mounted = bindStrictDingTalkEntryLocal\n' : read(file))).not.toEqual([])
+    const spacedCeremony = read(ceremony).replace('return await withAuthorizationInputTransaction(', 'return await withAuthorizationInputTransaction (')
+    expect(spacedCeremony).not.toBe(read(ceremony))
+    expect(problemsOf({ [ceremony]: spacedCeremony })).toEqual([])
+    expect(problemsOf({ [ceremony]: read(ceremony).replace('return await withAuthorizationInputTransaction(', 'return await withAuthorizationInputTransaction /* reviewed */ (') })).toEqual([])
+    expect(problemsOf({ [ceremony]: spacedCeremony.replace('      await revalidatePrivilegeRolePlan(tx, plan)\n', '') })).not.toEqual([])
+    expect(problemsOf({ [ceremony]: spacedCeremony.replace(CEREMONY_OPTION, 'body?.transaction ? { transaction: body.transaction } : undefined') })).not.toEqual([])
+    const spacedGeneric = `${SRC}/auth/spaced-generic-entry.ts`
+    expect(productionEntryProblems([...files, spacedGeneric], file => file === spacedGeneric ? 'export function otherRoot(plan: { lockPlan: unknown }, work: unknown) {\n  return withAuthorizationInputTransaction (plan.lockPlan, work, { transaction: runner })\n}\n' : read(file))).not.toEqual([])
+    const reject = (file: string, needle: string, replacement: string) => {
+      const source = read(file)
+      expect(source.split(needle).length, needle).toBe(2)
+      const changed = source.replace(needle, replacement)
+      expect(changed, needle).not.toBe(source)
+      expect(problemsOf(), needle).toEqual([])
+      expect(problemsOf({ [file]: changed }), needle).not.toEqual([])
+    }
+    const census = (file: string, owner: string, count: number) => `${file}|${owner}|withAuthorizationInputTransaction: expected one reviewed entry, found ${count}`
+    const removedCeremony = read(ceremony).replace('return await withAuthorizationInputTransaction(', 'return await notAnEntry(')
+    expect(/AuthorizationInputTransaction\(/.test(removedCeremony)).toBe(false)
+    expect(entryOptionProblems(ceremony, removedCeremony)).toEqual([])
+    expect(workClosureProblems(ceremony, removedCeremony)).toEqual([])
+    expect(problemsOf({ [ceremony]: removedCeremony })).toContain(census(ceremony, 'runRoot', 0))
+    const ceremonyCall = `    return await withAuthorizationInputTransaction(plan.lockPlan, async (tx) => {
+      assertGate(session)
+      await revalidatePrivilegeRolePlan(tx, plan)
+      tx.requireIdentityRead([connectionId])
+      return work(tx)
+    }, deps?.transaction ? { transaction: deps.transaction } : undefined)`
+    expect(read(ceremony).split(ceremonyCall).length).toBe(2)
+    expect(problemsOf({ [ceremony]: read(ceremony).replace(ceremonyCall, `${ceremonyCall}\n${ceremonyCall}`) })).toContain(census(ceremony, 'runRoot', 2))
+    reject(ceremony, 'async function runRoot', 'async function runRootMoved')
+    reject(ceremony, CEREMONY_OPTION, 'deps?.transaction ? { transaction: deps.transaction } : deps')
+    reject(ceremony, CEREMONY_OPTION, 'body?.transaction ? { transaction: body.transaction } : undefined')
+    reject(ceremony, CEREMONY_OPTION, 'deps?.transaction ? { transaction: pool.transaction } : undefined')
+    reject(ceremony, '{ transaction: deps.transaction }', '{ transaction: deps.transaction, afterAcquire: hook }')
+    reject(ceremony, '{ transaction: deps.transaction }', '{ transaction: deps.transaction, exclusive: true }')
+    reject(ceremony, '{ transaction: deps.transaction }', '{ ...deps, transaction: deps.transaction }')
+    reject(ceremony, '{ transaction: deps.transaction }', "{ ['transaction']: deps.transaction }")
+    reject(ceremony, '{ transaction: deps.transaction }', "{ 'transaction': deps.transaction }")
+    reject(ceremony, '{ transaction: deps.transaction }', '{ transaction: runner }')
+    reject(ceremony, '      assertGate(session)\n', '')
+    reject(ceremony, '      await revalidatePrivilegeRolePlan(tx, plan)\n', '      revalidatePrivilegeRolePlan(tx, plan)\n')
+    reject(ceremony, '      tx.requireIdentityRead([connectionId])\n', '')
+    reject(ceremony, 'function assertGate(session: unknown): asserts session is AuthenticatedSessionContext {\n  try {\n    assertAuthenticatedSessionContext(session)\n', 'function assertGate(session: unknown): asserts session is AuthenticatedSessionContext {\n  try {\n    session\n')
+    reject(ceremony, 'function assertGate(session: unknown): asserts session is AuthenticatedSessionContext {\n  try {\n    assertAuthenticatedSessionContext(session)\n', 'function assertGate(session: unknown): asserts session is AuthenticatedSessionContext {\n  try {\n    const unused = () => assertAuthenticatedSessionContext(session)\n')
+    reject(ceremony, '  transaction?: AuthorizationInputTransactionRunner\n', '  transaction?: AuthorizationInputTransactionRunner\n  clock?: () => number\n')
+    reject(ceremony, "return { success: false, code: 'production_unavailable' }", "return { success: true, code: 'production_unavailable' }")
+    reject(ceremony, '  withAuthorizationInputTransaction,\n', '  withAuthorizationInputTransaction as entry,\n')
+    reject(ceremony, '  withAuthorizationInputTransaction,\n', '  type withAuthorizationInputTransaction,\n')
+    reject(ceremony, '      assertGate(session)\n', '      assertGate(session)\n      await fetch(url)\n')
+    const fetchedCeremony = read(ceremony).replace('      assertGate(session)\n', '      assertGate(session)\n      await fetch(url)\n')
+    expect(workClosureProblems(ceremony, fetchedCeremony)).toContain(`${ceremony}: work closure references fetch`)
+    expect(entryOptionProblems(ceremony, fetchedCeremony).some(problem => problem.includes('ceremony work'))).toBe(true)
+    const pooled = read(ceremony).replace(CEREMONY_OPTION, 'deps?.transaction ? { transaction: pool.transaction } : undefined')
+    expect(workClosureProblems(ceremony, pooled)).toEqual([])
+    expect(entryOptionProblems(ceremony, pooled).some(problem => problem.includes('ceremony transaction option'))).toBe(true)
+    const otherFunction = `${read(ceremony)}\nasync function otherRoot(plan: { lockPlan: unknown }, work: unknown) {\n  return withAuthorizationInputTransaction(plan.lockPlan, work, { transaction: runner })\n}\n`
+    expect(otherFunction).not.toBe(read(ceremony))
+    expect(problemsOf({ [ceremony]: otherFunction })).not.toEqual([])
+    const shadowed = `${read(ceremony)}\nfunction withAuthorizationInputTransaction() { return null }\n`
+    expect(problemsOf({ [ceremony]: shadowed })).toContain(`${ceremony}: entry binding`)
+    const nestedShadow = read(ceremony).replace('  try {\n    return await withAuthorizationInputTransaction(', '  try {\n    const { withAuthorizationInputTransaction } = { withAuthorizationInputTransaction: runner }\n    return await withAuthorizationInputTransaction(')
+    expect(nestedShadow.split('const { withAuthorizationInputTransaction }').length).toBe(2)
+    expect(problemsOf({ [ceremony]: nestedShadow })).toContain(`${ceremony}: entry binding`)
+    const clone = `${SRC}/auth/cloned-transaction-port.ts`
+    expect(productionEntryProblems([...files, clone], file => file === clone ? 'export function otherRoot(plan: { lockPlan: unknown }, work: unknown) {\n  return withAuthorizationInputTransaction(plan.lockPlan, work, { transaction: runner })\n}\n' : read(file))).not.toEqual([])
+    const removedAttempt = read(attempt).replace('await withAuthorizationInputTransaction(plan.lockPlan, work, {', 'await notAnEntry(plan.lockPlan, work, {')
+    expect(/AuthorizationInputTransaction\(/.test(removedAttempt)).toBe(false)
+    expect(entryOptionProblems(attempt, removedAttempt)).toEqual([])
+    expect(problemsOf({ [attempt]: removedAttempt })).toContain(census(attempt, 'runOwnedAttempt.runAis', 0))
+    const attemptTwice = read(attempt).replace('    const rawOutcome: { current: RawStepOutcome | null } = { current: null }\n', '    const rawOutcome: { current: RawStepOutcome | null } = { current: null }\n    void withAuthorizationInputTransaction(plan.lockPlan, work, { transaction: runner })\n')
+    expect(attemptTwice).not.toBe(read(attempt))
+    expect(problemsOf({ [attempt]: attemptTwice })).toContain(census(attempt, 'runOwnedAttempt.runAis', 2))
+    reject(attempt, 'export async function runOwnedAttempt', 'export async function runOwnedAttemptMoved')
+    reject(attempt, '(sql, params) => tx.query(sql, params)', '(sql, params) => pool.query(sql, params)')
+    reject(attempt, '__rawClient: current.client', '__rawClient: owner.client')
+    reject(attempt, '          const result = await runStep((tx) => handler({\n            query: (sql, params) => tx.query(sql, params),\n            __rawClient: current.client,\n          }))', '          const result = await handler({\n            query: (sql, params) => tx.query(sql, params),\n            __rawClient: current.client,\n          })')
+    reject(attempt, 'rollbackAcked: result.rollbackAcked', 'released: true')
+    reject(attempt, 'if (recorded !== null && recorded.ok === true) return { ok: false, error, rollbackAcked: false }', 'if (recorded !== null && recorded.ok === true) return { ok: true, error, rollbackAcked: false }')
+    reject(attempt, 'async <U>(handler:', 'async (handler:')
+    reject(attempt, 'throw result.error', 'handler(null as never)\n          throw result.error')
+    reject(attempt, 'if (adminReads !== 1) throw new AttemptUnavailable()', 'if (adminReads !== 1) {}')
+    reject(attempt, `        const adminFirst = await runAis(adminSteps.privilegePlan, async (tx) => {
+          adminReads += 1
+          if (adminReads !== 1) throw new AttemptUnavailable()
+          return adminSteps.readInputs(tx)
+        })`, `        const adminFirst = await runAis(adminSteps.privilegePlan, async (tx) => {
+          void adminSteps
+          adminReads += 1
+          if (adminReads !== 1) throw new AttemptUnavailable()
+          return adminSteps.readInputs(tx)
+        })`)
+    reject(attempt, `        const adminFirst = await runAis(adminSteps.privilegePlan, async (tx) => {
+          adminReads += 1
+          if (adminReads !== 1) throw new AttemptUnavailable()
+          return adminSteps.readInputs(tx)
+        })`, `        const unused = async () => runAis(adminSteps.privilegePlan, async (tx) => {
+          adminReads += 1
+          if (adminReads !== 1) throw new AttemptUnavailable()
+          return adminSteps.readInputs(tx)
+        })
+        void unused
+        const adminFirst = await runAis(adminSteps.privilegePlan, async (tx) => {
+          return adminSteps.readInputs(tx)
+        })`)
+    reject(attempt, 'steps: OwnedAttemptSteps<Snapshot, Outcome> | AdminGrantOwnedSteps<Snapshot, Outcome>,', 'steps: OwnedAttemptSteps<Snapshot, Outcome> | AdminGrantOwnedSteps<Snapshot, Outcome>,\n  runner?: unknown,')
+    const topLevelAis = `${read(attempt)}\nasync function runAis() { return 0 }\n`
+    expect(topLevelAis).not.toBe(read(attempt))
+    expect(problemsOf({ [attempt]: topLevelAis })).not.toEqual([])
+    const removedRuntime = read(runtime).replace('await withAuthorizationInputTransaction(plan.lockPlan, async (tx) => {', 'await notAnEntry(plan.lockPlan, async (tx) => {')
+    expect(/AuthorizationInputTransaction\(/.test(removedRuntime)).toBe(false)
+    expect(entryOptionProblems(runtime, removedRuntime)).toEqual([])
+    expect(problemsOf({ [runtime]: removedRuntime })).toContain(census(runtime, 'issueOnRoot', 0))
+    const runtimeTwice = read(runtime).replace('  const issued = await withAuthorizationInputTransaction', '  void withAuthorizationInputTransaction(plan.lockPlan, async (tx) => tx, { transaction: input.transaction })\n  const issued = await withAuthorizationInputTransaction')
+    expect(runtimeTwice).not.toBe(read(runtime))
+    expect(problemsOf({ [runtime]: runtimeTwice })).toContain(census(runtime, 'issueOnRoot', 2))
+    reject(runtime, 'async function issueOnRoot', 'async function issueOnRootMoved')
+    reject(runtime, '{ ...input, transaction: runner }', '{ transaction: input.transaction }')
+    reject(runtime, '    __rawClient: client.__rawClient,\n', '')
+    reject(runtime, '    return call({\n      ...request,\n', '    return call({\n      transaction: options.transaction,\n      createToken,\n      readExp,\n      readIssuedAt,\n      ...request,\n')
+    reject(runtime, `    return call({
+      ...request,
+      transport: {
+        fetchFn: request.transport?.fetchFn ?? options.fetchFn,
+        timeoutMs: request.transport?.timeoutMs,
+        signal: request.transport?.signal,
+      },
+      env: request.env ?? options.env,
+      transaction: options.transaction,
+      createToken,
+      readExp,
+      readIssuedAt,
+    })`, `    const unused = {
+      ...request,
+      transaction: options.transaction,
+      createToken,
+      readExp,
+      readIssuedAt,
+    }
+    return call({
+      ...request,
+      transport: {
+        fetchFn: request.transport?.fetchFn ?? options.fetchFn,
+        timeoutMs: request.transport?.timeoutMs,
+        signal: request.transport?.signal,
+      },
+      env: request.env ?? options.env,
+    })`)
+    reject(runtime, `    return call({
+      ...request,
+      transport: {
+        fetchFn: request.transport?.fetchFn ?? options.fetchFn,
+        timeoutMs: request.transport?.timeoutMs,
+        signal: request.transport?.signal,
+      },
+      env: request.env ?? options.env,
+      transaction: options.transaction,
+      createToken,
+      readExp,
+      readIssuedAt,
+    })`, `    const unused = () => {
+      return call({
+        ...request,
+        transport: {
+          fetchFn: request.transport?.fetchFn ?? options.fetchFn,
+          timeoutMs: request.transport?.timeoutMs,
+          signal: request.transport?.signal,
+        },
+        env: request.env ?? options.env,
+        transaction: options.transaction,
+        createToken,
+        readExp,
+        readIssuedAt,
+      })
+    }
+    void unused
+    return request`)
+    reject(runtime, '(user, tokenOptions) => auth.authService.createToken(user, tokenOptions)', '(user, tokenOptions) => auth.authService.readTokenPayload(user)')
+    reject(runtime, 'refreshStrictSession({ ...input, createToken, readExp, env: input.env ?? options.env })', 'refreshStrictSession({ createToken, readExp, ...input, env: input.env ?? options.env })')
+    reject(runtime, 'switchStrictSessionOrg({ ...input, createToken, readExp, env: input.env ?? options.env })', 'switchStrictSessionOrg({ createToken, readExp, ...input, env: input.env ?? options.env })')
+    const runtimeFetch = read(runtime).replace('    tx.requireIdentityRead([snapshot.connectionId])\n', '    tx.requireIdentityRead([snapshot.connectionId])\n    await fetch(url)\n')
+    expect(runtimeFetch).not.toBe(read(runtime))
+    expect(entryOptionProblems(runtime, runtimeFetch)).toEqual([])
+    expect(workClosureProblems(runtime, runtimeFetch)).toEqual([`${runtime}: work closure references fetch`])
+    expect(problemsOf({ [runtime]: runtimeFetch })).not.toEqual([])
+    reject(command, '    return work(tx, plan)\n  })', '    return work(tx, plan)\n  }, { transaction: runner })')
+    reject(command, '      await insertCommandAudit(tx, inserted)\n      committedWork = true\n      return inserted\n    })', '      await insertCommandAudit(tx, inserted)\n      committedWork = true\n      return inserted\n    }, { transaction: runner })')
   })
 })
 

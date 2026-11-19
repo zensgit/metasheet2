@@ -142,6 +142,22 @@ function resultUpload(suite) {
   }
 }
 
+const grantDbFiles = [
+  'tests/integration/admin-grant-receiving-reader.db.test.ts',
+  'tests/integration/admin-grant-receiving-invalidation.db.test.ts',
+  'tests/integration/security-action-attempt-admission.db.test.ts',
+  'tests/integration/security-action-session-flight-migration.db.test.ts',
+  'tests/integration/admin-grant-receiving-first-birth.db.test.ts',
+  'tests/integration/admin-grant-target-ceremony.db.test.ts',
+  'tests/integration/admin-grant-actor-inputs.db.test.ts',
+  'tests/integration/admin-grant-proof.db.test.ts',
+  'tests/integration/strict-login-grant-scope.db.test.ts',
+  'tests/integration/admin-login-grant-command.db.test.ts',
+  'tests/integration/auth-b2-issuer-provenance.db.test.ts',
+  'tests/integration/strict-credential-chain.db.test.ts',
+  'tests/integration/strict-dingtalk-entry.db.test.ts',
+]
+
 function assertParallelWorkflow(doc) {
   const metadata = Object.fromEntries(Object.entries(doc).filter(([key]) => key !== 'jobs'))
   assert.equal(digest(metadata), baseline.workflowMetadataSha256, 'Triggers, concurrency and workflow environment stay unchanged')
@@ -329,6 +345,12 @@ function assertParallelWorkflow(doc) {
           'tests/integration/admin-user-single-birth-transaction.db.test.ts',
         ].map(file => '  ' + file + ' \\\n')
         assert.ok(step.run.includes(writerAdditions.join('')), 'Keep the writer suites together in the reviewed order')
+        const grantLines = grantDbFiles.map(file => `  ${file} \\\n`)
+        assert.ok(step.run.includes(writerAdditions.join('') + grantLines.join('')), 'Keep the grant suites together immediately after the writer suites')
+        for (const line of grantLines) {
+          assert.equal(step.run.split(line).length - 1, 1, 'Each grant suite must run exactly once')
+          step.run = step.run.replace(line, '')
+        }
         for (const addition of writerAdditions) {
           assert.equal(step.run.split(addition).length - 1, 1, 'Each writer DB suite must run exactly once')
           step.run = step.run.replace(addition, '')
@@ -556,6 +578,25 @@ test('attendance template wiring rejects omissions, duplicates, wrong lanes and 
     const candidate = structuredClone(doc)
     mutate(candidate)
     assert.throws(() => assertParallelWorkflow(candidate))
+  }
+})
+
+test('the grant database suites are excluded from the default job and run whole-file in the required database job', () => {
+  const doc = parseYamlDocument(workflow)
+  const exclusion = readFileSync(new URL('../../packages/core-backend/vitest.config.ts', import.meta.url), 'utf8')
+  requireExecutableRealDbStep(workflow, 'approval-real-db-integration')
+  const args = realDbStepWholeFileArgs(workflow, 'approval-real-db-integration')
+  for (const file of grantDbFiles) {
+    assert.ok(isQuotedInTestExclude(exclusion, file), file)
+    assert.equal(args.filter(arg => arg === file).length, 1, file)
+    const step = doc.jobs['approval-db'].steps.find(entry => entry.id === 'approval-real-db-integration')
+    const line = `  ${file} \\\n`
+    const original = step.run
+    for (const replacement of ['', line + line]) {
+      step.run = original.replace(line, replacement)
+      assert.throws(() => assertParallelWorkflow(doc))
+    }
+    step.run = original
   }
 })
 

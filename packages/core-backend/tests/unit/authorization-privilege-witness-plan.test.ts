@@ -422,16 +422,37 @@ describe('revalidatePrivilegeRolePlan', () => {
   })
 })
 
+const ROLE_PLAN_IMPORT_EDGES = [
+  ['auth/admin-grant-proof.ts', '../rbac/authorization-privilege-witness-plan'],
+  ['auth/admin-grant-proof.ts', '../rbac/authorization-privilege-witness-plan'],
+  ['auth/admin-grant-receiving-reader.ts', '../rbac/authorization-privilege-witness-plan'],
+  ['auth/admin-grant-target-ceremony.ts', '../rbac/authorization-privilege-witness-plan'],
+  ['auth/admin-login-grant-command.ts', '../rbac/authorization-privilege-witness-plan'],
+  ['auth/admin-login-grant-command.ts', '../rbac/authorization-privilege-witness-plan'],
+  ['auth/security-action-attempt-admission.ts', '../rbac/authorization-privilege-witness-plan'],
+  ['auth/strict-dingtalk-entry.ts', '../rbac/authorization-privilege-witness-plan'],
+] as const
+
 describe('read-only bounded surface', () => {
-  it('keeps the role plan internal until a consumer is registered', () => {
+  it('allows only the exact receiving, ceremony, proof, command, attempt and runtime imports, including plugins', () => {
     const root = path.resolve(__dirname, '..', '..', '..', '..')
     const pattern = /authorization-privilege-witness-plan/
     for (const directory of ['packages/core-backend/src', 'plugins']) {
-      const edges = collectImportEdges(path.join(root, directory), pattern, (file) => readFileSync(file, 'utf8'))
-      expect(importEdgeViolations(edges, [])).toEqual([])
+      const expected = directory === 'packages/core-backend/src'
+        ? ROLE_PLAN_IMPORT_EDGES
+        : []
+      expect(importEdgeViolations(collectImportEdges(path.join(root, directory), pattern, (file) => readFileSync(file, 'utf8')), expected)).toEqual([])
     }
-    expect(importEdgeViolations([['other.ts', './authorization-privilege-witness-plan']], []))
-      .toEqual(['unexpected: other.ts -> ./authorization-privilege-witness-plan'])
+  })
+
+  it('rejects omission, duplication, relocation or computed loading of each current role-plan edge', () => {
+    ROLE_PLAN_IMPORT_EDGES.forEach((edge, index) => {
+      const omitted = ROLE_PLAN_IMPORT_EDGES.filter((_candidate, candidateIndex) => candidateIndex !== index)
+      expect(importEdgeViolations(omitted, ROLE_PLAN_IMPORT_EDGES)).not.toEqual([])
+      expect(importEdgeViolations([...ROLE_PLAN_IMPORT_EDGES, edge], ROLE_PLAN_IMPORT_EDGES)).not.toEqual([])
+      expect(importEdgeViolations([...omitted, ['auth/other.ts', edge[1]]], ROLE_PLAN_IMPORT_EDGES)).not.toEqual([])
+      expect(importEdgeViolations([...omitted, [edge[0], '<non-literal>']], ROLE_PLAN_IMPORT_EDGES)).not.toEqual([])
+    })
   })
 
   it('rejects an omitted, duplicate, dynamic or unrelated prepared-reader edge', () => {

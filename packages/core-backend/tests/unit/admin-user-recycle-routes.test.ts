@@ -113,8 +113,13 @@ describe('admin user recycle routes', () => {
     expect(mismatch.body.error.code).toBe('CONFIRM_TEXT_MISMATCH')
 
     pg.query.mockImplementation(async (sql: string) => {
+      // Existing legacy identity; the strict migration ledger and census remain empty.
+      if (sql.includes('AS schema_name')) return { rows: [{ schema_name: 'unit_recycle' }] }
+      if (sql.includes('FROM user_external_identities') && sql.includes('FOR UPDATE')) {
+        return { rows: [{ id: '11111111-1111-4111-8111-111111111111' }] }
+      }
       if (String(sql).includes('SET access_generation')) return { rows: [{ access_generation: 1 }] }
-      if (String(sql).includes('FOR UPDATE')) {
+      if (String(sql).includes('FOR UPDATE') && sql.includes('FROM users')) {
         return { rows: [{ id: 'user-lin', email: 'lin@example.com', deleted_at: '2026-10-01T00:00:00.000Z', purged_at: null }] }
       }
       if (String(sql).includes('SET email = NULL')) return { rows: [{ id: 'user-lin' }] }
@@ -128,6 +133,8 @@ describe('admin user recycle routes', () => {
     expect(response.status).toBe(200)
     expect(response.body.data.results[0]).toMatchObject({ ok: true, email: null })
     const statements = pg.query.mock.calls.map((call) => String(call[0]))
+    expect(statements.some((sql) => sql.includes('kysely_migration'))).toBe(true)
+    expect(statements.some((sql) => sql.includes("SELECT 'table'::text AS kind"))).toBe(true)
     expect(statements.some((sql) => sql.includes('DELETE FROM user_login_aliases'))).toBe(true)
     expect(statements.some((sql) => /DELETE\s+FROM\s+users\b/i.test(sql))).toBe(false)
     expect(audit.auditLog).toHaveBeenCalledWith(expect.objectContaining({

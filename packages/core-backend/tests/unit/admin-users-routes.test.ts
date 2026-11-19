@@ -1,5 +1,7 @@
 import type { Request, Response } from 'express'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { StrictCredentialChainError } from '../../src/auth/strict-credential-chain'
+import { StrictLoginGrantError } from '../../src/auth/strict-login-grant-store'
 
 const state = vi.hoisted(() => ({
   authUser: {
@@ -3360,6 +3362,7 @@ describe('admin-users routes', () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ access_generation: 1 }] })
       .mockResolvedValueOnce({
         rows: [{
@@ -3495,6 +3498,7 @@ describe('admin-users routes', () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ access_generation: 1 }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
@@ -3543,6 +3547,42 @@ describe('admin-users routes', () => {
     expect(pgMocks.query.mock.calls.filter((call) =>
       String(call[0]).includes('access_generation = COALESCE'))).toHaveLength(2)
   })
+
+  for (const surface of ['single', 'bulk'] as const) {
+    it.each([
+      ['strict_connection', 403, 'strict_connection', 'DingTalk legacy grant enable is closed for this connection'],
+      ['strict_connection_ambiguous', 503, 'strict_connection_ambiguous', 'DingTalk legacy grant disable cannot choose among strict connections'],
+      ['internal_detail', 503, 'grant_state_unavailable', 'Unable to verify DingTalk login authorization; please retry'],
+      ['store_unavailable', 503, 'grant_state_unavailable', 'Unable to verify DingTalk login authorization; please retry'],
+    ] as const)(`closes ${surface} grant policy %s before any legacy write`, async (reason, status, code, message) => {
+      rbacMocks.isAdmin.mockResolvedValue(true)
+      const failure = reason === 'store_unavailable'
+        ? new StrictLoginGrantError('STRICT_LOGIN_GRANT_INSTALLATION_REFUSED')
+        : new StrictCredentialChainError(reason, 'synthetic-private-policy-detail', 200)
+      pgMocks.query.mockImplementation(async (statement: unknown, params?: unknown[]) => {
+        const sql = String(statement)
+        if (/FROM users[\s\S]*FOR UPDATE/i.test(sql)) {
+          return { rows: [{ id: params?.[0], is_active: true, activation_status: 'activated', access_generation: 0 }] }
+        }
+        if (sql.includes('FROM directory_account_links link')) throw failure
+        return { rows: [] }
+      })
+      const response = surface === 'single'
+        ? await invokeRoute('patch', '/api/admin/users/:userId/dingtalk-grant', {
+          params: { userId: 'user-1' }, body: { enabled: false },
+        })
+        : await invokeRoute('post', '/api/admin/users/dingtalk-grants/bulk', {
+          body: { userIds: ['user-1', 'user-2'], enabled: false },
+        })
+      expect(response.statusCode).toBe(status)
+      expect(response.body).toEqual({ ok: false, error: { code, message } })
+      const discoveries = pgMocks.query.mock.calls.filter((call) => String(call[0]).includes('FROM directory_account_links link'))
+      expect(discoveries).toHaveLength(1)
+      expect(discoveries[0]?.[1]).toEqual([surface === 'single' ? ['user-1'] : ['user-1', 'user-2'], 'dingtalk'])
+      expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('INSERT INTO user_external_auth_grants'))).toBe(false)
+      expect(auditMocks.auditLog).not.toHaveBeenCalled()
+    })
+  }
 
   it('rejects bulk enabling dingtalk grants when one identity is missing openId', async () => {
     rbacMocks.isAdmin.mockResolvedValue(true)

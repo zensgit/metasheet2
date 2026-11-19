@@ -54,6 +54,7 @@ import {
   listDeprovisionEffects,
   restoreDeprovisionEvent,
 } from '../../src/directory/deprovision-evidence-api'
+import { strictLoginUninstalledRows } from '../utils/strict-login-uninstalled-fixture'
 
 // The effects INSERT as every ledger writer issued it before the provider column existed. This
 // copy is deliberately independent of the production constant so a change to either side is a
@@ -67,6 +68,11 @@ const FROZEN_LEGACY_INSERT = `INSERT INTO directory_deprovision_effects (
 type Recorded = { sql: string; params: unknown[] | undefined }
 
 function statementShape(sql: string): string {
+  if (strictLoginUninstalledRows(sql) !== undefined) {
+    if (sql.includes('AS schema_name')) return 'scope_schema'
+    if (sql.includes('"kysely_migration"')) return 'scope_ledger'
+    return 'scope_catalog'
+  }
   if (/^\s*SELECT id FROM users WHERE id = \$1::text\s+FOR UPDATE/.test(sql)) return 'lock_user'
   if (/FROM users candidate_user/.test(sql)) return 'read_state'
   if (/^\s*UPDATE users\s+SET access_generation/.test(sql)) return 'bump_generation'
@@ -93,6 +99,10 @@ function writerClient(options: {
     query: async (sql: string, params?: unknown[]) => {
       recorded.push({ sql, params })
       switch (statementShape(sql)) {
+        case 'scope_schema':
+        case 'scope_ledger':
+        case 'scope_catalog':
+          return { rows: strictLoginUninstalledRows(sql) ?? [] }
         case 'lock_user':
           return { rows: [{ id: String(params?.[0]) }] }
         case 'read_state':
@@ -302,6 +312,9 @@ describe('statement sequence', () => {
     await applyDirectoryDeprovisionCandidate(client, APPLY_INPUT)
     const shapes = client.recorded.map((entry) => statementShape(entry.sql))
     const expected = [...WRITE_SEQUENCE_BEFORE_COLUMN]
+    const scopeReads = ['scope_schema', 'scope_ledger', 'scope_catalog']
+    expected.splice(expected.indexOf('read_state') + 1, 0, ...scopeReads)
+    expected.push(...scopeReads)
     expected.splice(expected.indexOf('insert_effect'), 0, 'probe_provider_column')
     expect(shapes).toEqual(expected)
     expect(shapes.filter((shape) => shape === 'probe_provider_column')).toHaveLength(1)

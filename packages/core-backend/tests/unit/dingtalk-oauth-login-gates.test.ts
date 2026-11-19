@@ -50,6 +50,7 @@ import {
   getDingTalkRuntimeStatus,
   listMissingDingTalkLoginEnv,
 } from '../../src/auth/dingtalk-oauth'
+import { strictLoginUninstalledRows } from '../utils/strict-login-uninstalled-fixture'
 
 const defaultTransactionStatements: string[] = []
 
@@ -58,6 +59,8 @@ function createDefaultTransactionQuery(options: { grant?: boolean | null; identi
   return vi.fn(async (sql: string, params: unknown[] = []) => {
     const statement = String(sql)
     defaultTransactionStatements.push(statement)
+    const uninstalled = strictLoginUninstalledRows(statement)
+    if (uninstalled !== undefined) return { rows: uninstalled }
     if (/INSERT INTO users/i.test(statement)) {
       return {
         rows: [{

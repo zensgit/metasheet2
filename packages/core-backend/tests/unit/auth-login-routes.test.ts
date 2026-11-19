@@ -149,6 +149,22 @@ import request from 'supertest'
 import { jwtAuthMiddleware, isWhitelisted } from '../../src/auth/jwt-middleware'
 import { usePinnedServer } from '../utils/pinned-server'
 
+const actorInputsAbsent = {
+  schema_name: 'public',
+  version_column: false,
+  version_ready: false,
+  establishments: false,
+  bindings: false,
+  version_fn: false,
+  establishment_fn: false,
+  browser_fn: false,
+  version_trigger: false,
+  establishment_truncate: false,
+  browser_truncate: false,
+  establishment_row: false,
+  browser_row: false,
+}
+
 function createMockResponse() {
   return {
     statusCode: 200,
@@ -245,7 +261,7 @@ describe('explicit session organization routes', () => {
     })
     expect(res.statusCode).toBe(200)
     expect(authServiceMocks.resolveSessionTenantId).toHaveBeenCalledWith('actor', 'org-b')
-    expect(authServiceMocks.createToken).toHaveBeenCalledWith({ id: 'actor', tenantId: 'org-b' }, { sid: 'session' })
+    expect(authServiceMocks.createToken).toHaveBeenCalledWith({ id: 'actor', tenantId: 'org-b' }, { sid: 'session', externalAuth: false })
     expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledTimes(1)
     expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledWith('actor', expect.objectContaining({
       sessionId: 'session', expectedAccessGeneration: 0,
@@ -791,6 +807,7 @@ describe('auth login routes', () => {
       exp: Math.floor(new Date('2026-03-14T00:00:00.000Z').getTime() / 1000),
     })
     pgMocks.query
+      .mockResolvedValueOnce({ rows: [actorInputsAbsent] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
 
@@ -806,11 +823,11 @@ describe('auth login routes', () => {
 
     expect(response.statusCode).toBe(200)
     expect(pgMocks.query).toHaveBeenNthCalledWith(
-      1,
+      2,
       expect.stringContaining('must_change_password = FALSE'),
       ['hashed-password', 'user-1'],
     )
-    expect(String(pgMocks.query.mock.calls[0]?.[0] || '')).toContain('local_password_set = TRUE')
+    expect(String(pgMocks.query.mock.calls[1]?.[0] || '')).toContain('local_password_set = TRUE')
     expect(sessionMocks.revokeUserSessions).toHaveBeenCalledWith('user-1', expect.objectContaining({
       updatedBy: 'user-1',
       reason: 'password-change-required-cleared',
@@ -858,7 +875,7 @@ describe('auth login routes', () => {
       sid: 'fresh-session',
       exp: Math.floor(new Date('2026-03-14T00:00:00.000Z').getTime() / 1000),
     })
-    pgMocks.query.mockResolvedValue({ rows: [] })
+    pgMocks.query.mockResolvedValueOnce({ rows: [actorInputsAbsent] }).mockResolvedValue({ rows: [] })
 
     const response = await invokeRoute('post', '/password/change', {
       headers: { authorization: 'Bearer live-token' },
@@ -895,7 +912,7 @@ describe('auth login routes', () => {
       exp: Math.floor(new Date('2026-03-14T00:00:00.000Z').getTime() / 1000),
     })
     sessionRegistryMocks.createUserSession.mockResolvedValue(null)
-    pgMocks.query.mockResolvedValue({ rows: [] })
+    pgMocks.query.mockResolvedValueOnce({ rows: [actorInputsAbsent] }).mockResolvedValue({ rows: [] })
 
     const response = await invokeRoute('post', '/password/change', {
       headers: { authorization: 'Bearer live-token' },
@@ -909,7 +926,7 @@ describe('auth login routes', () => {
       code: 'authentication_changed',
     })
     // The password write and the session revocation stay committed; only the re-issued session is refused.
-    expect(pgMocks.query).toHaveBeenCalledTimes(1)
+    expect(pgMocks.query).toHaveBeenCalledTimes(2)
     expect(pgMocks.query).toHaveBeenCalledWith(
       expect.stringContaining('must_change_password = FALSE'),
       ['hashed-password', 'user-1'],
@@ -2075,6 +2092,7 @@ describe('auth login routes', () => {
     })
     dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
     dingtalkOauthMocks.exchangeCodeForUser.mockResolvedValue({
+        externalOrigin: null,
       dingtalkUser: {
         openId: 'open-id-1',
         unionId: 'union-id-1',
@@ -2343,6 +2361,7 @@ describe('auth login routes', () => {
       dingtalkOauthMocks.validateState.mockResolvedValue({ valid: true, redirectPath: '/attendance' })
       dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
       dingtalkOauthMocks.exchangeCodeForUser.mockResolvedValue({
+        externalOrigin: null,
         localUserId: 'user-1', localUserEmail: 'synthetic@example.test', localUserName: 'Synthetic', isNewUser: false,
         dingtalkUser: { openId: 'open-x', unionId: 'union-x', nick: 'Synthetic', email: 'synthetic@example.test' },
       })
@@ -2406,9 +2425,11 @@ describe('auth login routes', () => {
       'ACCOUNT_PENDING_ACTIVATION',
       'activate_admin_required',
       'activate_commit_incomplete',
+      'activate_connection_ambiguous',
       'activate_failed',
       'activate_source_ineligible',
       'activate_state_invalid',
+      'activate_strict_connection',
       'activate_target_not_found',
       'authentication_changed',
       'auto_provision_alias_conflict',
@@ -2425,6 +2446,8 @@ describe('auth login routes', () => {
       'identity_mismatch',
       'local_user_disabled',
       'repair_identity_mismatch',
+      'strict_connection',
+      'strict_connection_ambiguous',
       'unlinked_enabled_local_user',
       'unlinked_local_user',
     ]
@@ -2494,6 +2517,7 @@ describe('auth login routes', () => {
     it('mints the same-shape session token on success', async () => {
       vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', 'true')
       dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser.mockResolvedValue({
+        externalOrigin: null,
         dingtalkUser: { unionId: 'union-1', nick: 'Alpha' },
         localUserId: 'user-1',
         sessionGeneration: 9,
