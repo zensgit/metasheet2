@@ -567,6 +567,9 @@ describe('5 ★ G12 container layer: rows, bytes, execution total, step-key coun
     const before = store.counts()
     expect(code(() => store.publish('k4', [{ c: 1 }]))).toBe('RUN_VALUE_OUTPUT_TOO_LARGE')
     expect(store.counts()).toEqual(before)
+    // even an empty output is `[]` (2 bytes) and does not fit in a spent budget
+    expect(code(() => store.publish('k5', []))).toBe('RUN_VALUE_OUTPUT_TOO_LARGE')
+    expect(store.counts()).toEqual(before)
   })
 
   const sixColumnPlan = () => deriveStepOutputPlan({ steps: [
