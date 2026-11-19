@@ -59,6 +59,7 @@ import {
   batchUnbindDirectoryAccounts,
   type DirectoryAccountBatchOutcome,
 } from '../../src/directory/directory-sync'
+import { strictLoginUninstalledRows } from '../utils/strict-login-uninstalled-fixture'
 import { DirectoryUserPaginationError } from '../../src/directory/directory-user-pagination'
 import { LoginAliasClaimError } from '../../src/auth/login-alias-service'
 import { LoginNameRuleError } from '../../src/auth/login-name-rule'
@@ -114,7 +115,7 @@ const MEMBER_FACTORIES: Readonly<Record<string, () => Error>> = {
 
 const accountRow = (id: string, overrides: Record<string, unknown> = {}) => ({
   id,
-  integration_id: 'dir-1',
+  integration_id: '00000000-0000-4000-8000-0000000000d1',
   provider: 'dingtalk',
   corp_id: 'dingcorp',
   external_user_id: '0447654442691174',
@@ -128,7 +129,7 @@ const accountRow = (id: string, overrides: Record<string, unknown> = {}) => ({
 })
 
 const summaryRow = (id: string, linked: boolean) => ({
-  integration_id: 'dir-1',
+  integration_id: '00000000-0000-4000-8000-0000000000d1',
   provider: 'dingtalk',
   corp_id: 'dingcorp',
   directory_account_id: id,
@@ -163,6 +164,8 @@ function installTransaction(failInside?: (sql: string, params: unknown[]) => unk
   const client: { query: ClientQuery } = {
     query: async (sql, params = []) => {
       const text = String(sql)
+      const uninstalled = strictLoginUninstalledRows(text)
+      if (uninstalled !== undefined) return { rows: uninstalled }
       const failure = failInside?.(text, params)
       if (failure !== undefined) throw failure
       if (/SELECT org_id\s+FROM directory_integrations/.test(text)) return { rows: [{ org_id: 'default' }] }

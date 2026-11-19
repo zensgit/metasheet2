@@ -2,12 +2,15 @@
  * API Token, Webhook, and DingTalk group destination REST routes.
  */
 
-import type { Request, Response } from 'express'
+import type { NextFunction, Request, Response } from 'express'
 import { Router } from 'express'
 import { z } from 'zod'
 import { db } from '../db/db'
 import { Logger } from '../core/logger'
 import { query } from '../db/pg'
+import { authService } from '../auth/AuthService'
+import { apiTokenBearer, StrictCredentialChainError } from '../auth/strict-credential-chain'
+import { classifyVerifiedSessionPayload } from '../auth/strict-dingtalk-entry'
 import { authenticate } from '../middleware/auth'
 import { ApiTokenService } from '../multitable/api-token-service'
 import { ALL_API_TOKEN_SCOPES } from '../multitable/api-tokens'
@@ -312,7 +315,34 @@ function zodError(res: Response, err: z.ZodError): void {
   })
 }
 
+function rejectStrictApiTokenSession(req: Request, res: Response, next: NextFunction): void {
+  const token = apiTokenBearer(req.headers.authorization)
+  if (!token) {
+    next()
+    return
+  }
+  const kind = classifyVerifiedSessionPayload(authService.readTokenPayload(token))
+  if (kind === 'strict' || kind === 'conflict') {
+    res.status(403).json({
+      ok: false,
+      error: {
+        code: 'API_TOKEN_STRICT_SESSION_DENIED',
+        message: 'Strict sessions cannot create or rotate API tokens',
+      },
+    })
+    return
+  }
+  next()
+}
+
 function serviceErrorResponse(res: Response, err: unknown, action: string): void {
+  if (err instanceof StrictCredentialChainError && err.code === 'API_TOKEN_REVOKED_CONCURRENTLY') {
+    res.status(err.statusCode).json({
+      ok: false,
+      error: { code: err.code, message: err.message },
+    })
+    return
+  }
   const message = err instanceof Error ? err.message : 'Unknown error'
   let status = 500
   let code = `${action.toUpperCase()}_FAILED`
@@ -352,6 +382,15 @@ function serviceErrorResponse(res: Response, err: unknown, action: string): void
 
 export function apiTokensRouter(): Router {
   const router = Router()
+
+  router.use(tokenListPaths, (req, res, next) => {
+    if (req.method !== 'POST') {
+      next()
+      return
+    }
+    rejectStrictApiTokenSession(req, res, next)
+  })
+  router.use(tokenRotatePaths, rejectStrictApiTokenSession)
 
   router.use(
     [...tokenListPaths, ...tokenItemPaths, ...tokenRotatePaths, ...webhookPaths, ...dingTalkGroupPaths],

@@ -49,9 +49,10 @@ import { acquireAuthorizationOperationFence } from '../admin/authorization-opera
 import { lockUsersForAccessGraphWrite } from '../directory/access-graph-mutex'
 import type { LockedAccessGraphUser } from '../directory/access-graph-mutex'
 import { isInsidePullSourceGate } from '../directory/pull-source-gate-context'
+import { acquireSourceSyncFreezeLock } from '../directory/source-sync-freeze-lock'
 import { poolManager } from '../integration/db/connection-pool'
 import { RECOVERY_AUTHORITY_BUSY_MARKER } from '../multitable/recovery-authorization-stability'
-import { AuthorizationInputContractError, mintAuthorizationInputBrand } from './authorization-input-brand'
+import { assertAuthorizationInputTx, AuthorizationInputContractError, mintAuthorizationInputBrand } from './authorization-input-brand'
 import type { AuthorizationInputQueryResult, AuthorizationInputQueryable } from './authorization-input-brand'
 import { isClassRaisingPermissionCode, isClassRaisingRoleId } from './authorization-input-classes'
 
@@ -215,11 +216,12 @@ export type AuthorizationInputPlan = Readonly<{
   intent: AuthorizationInputIntent
   /** Composite identity for a command receipt, required only for AUTHORIZATION_OPERATION. */
   operation?: Readonly<{ actorId: string; clientOperationId: string }>
+  identityRead?: AuthorizationInputIdentityRead
   /** Users whose rows the entry locks (R5), in code-unit order. */
   userIds?: readonly string[]
   /**
    * Roles whose rows the entry locks before R3 and R5, in code-unit order: for update when the
-   * intent writes role content, in share mode when it writes a membership of the role.
+   * intent writes role content, in share mode for memberships or read-only consumer witnesses.
    */
   roleIds?: readonly string[]
   /** Users whose namespace-admission lock the entry takes (R3), in code-unit order. */
@@ -276,6 +278,7 @@ export type AuthorizationInputTx = Readonly<{
   requireUserRows(userIds: readonly string[]): void
   /** Throws before any statement unless the row lock of every role id is held; a `missing` row is not held. */
   requireRoleRows(roleIds: readonly string[]): void
+  requireIdentityRead(sourceIntegrationIds: readonly string[]): void
   insertUserForBirth(row: Readonly<Record<string, unknown>>): Promise<{ id: string }>
   open: boolean
 }>
@@ -431,8 +434,8 @@ function normalizeIds(values: readonly string[] | undefined, what: string): stri
 
 /** Intents that lock the role rows they name for update: they write role content. */
 const ROLE_ROW_UPDATE_INTENTS: ReadonlySet<AuthorizationInputIntent> = new Set(['EDIT_ROLE_CONTENT', 'DELETE_ROLE', 'MAINTENANCE'])
-/** Intents that lock the role rows they name in share mode: they write a membership of the role. */
-const ROLE_ROW_SHARE_INTENTS: ReadonlySet<AuthorizationInputIntent> = new Set(['AUTHORIZATION_OPERATION', 'GRANT_ROLE', 'REVOKE_ROLE', 'SET_ADMIN_PROFILE', 'BIRTH', 'PROJECTION_GRANT'])
+/** Intents that share-lock role rows for memberships or read-only classification witnesses. */
+const ROLE_ROW_SHARE_INTENTS: ReadonlySet<AuthorizationInputIntent> = new Set(['AUTHORIZATION_OPERATION', 'GRANT_ROLE', 'REVOKE_ROLE', 'SET_ADMIN_PROFILE', 'SET_DELEGATED_SCOPE', 'SET_ADMISSION', 'BIRTH', 'PROJECTION_GRANT', 'CONSUME_CLASS_DECISION'])
 /** Content intents: a shared-start plan names no users or admissions; `work` adds the locks it needs through `tx.acquire`. */
 const CONTENT_INTENTS: ReadonlySet<AuthorizationInputIntent> = new Set(['EDIT_ROLE_CONTENT', 'DELETE_ROLE'])
 /** The reserved platform administrator role, compared by exact equality. */
@@ -440,6 +443,7 @@ const PLATFORM_ADMIN_ROLE_ID = 'admin'
 
 type NormalizedPlan = Readonly<{
   plan: AuthorizationInputPlan
+  identityRead?: AuthorizationInputIdentityRead
   ruleOf: AuthorizationInputIntentRule
   operation: Readonly<{ actorId: string; clientOperationId: string }> | undefined
   /** R5 set: the plan's targets merged with its witnesses. */
@@ -460,7 +464,7 @@ function mergeIds(a: readonly string[], b: readonly string[]): string[] {
 }
 
 /** The shapes are closed: a key the contract does not define names no lock, so it is refused, never ignored. */
-const PLAN_KEYS: ReadonlySet<string> = new Set(['intent', 'operation', 'userIds', 'roleIds', 'admissionUserIds', 'witness', 'platformAdminInvariant', 'world', 'sharedAcquire', 'caller'])
+const PLAN_KEYS: ReadonlySet<string> = new Set(['intent', 'operation', 'userIds', 'roleIds', 'admissionUserIds', 'witness', 'platformAdminInvariant', 'world', 'sharedAcquire', 'caller', 'identityRead'])
 const WITNESS_KEYS: ReadonlySet<string> = new Set(['userIds', 'admissionUserIds'])
 const ACQUIRE_REQUEST_KEYS: ReadonlySet<string> = new Set(['admissionUserIds', 'userIds'])
 
@@ -470,12 +474,56 @@ function refuseUnknownKeys(value: object, known: ReadonlySet<string>, reason: st
   }
 }
 
+export type AuthorizationInputIdentityRead = Readonly<{ sourceIntegrationIds: readonly string[] }>
+
+export function normalizeAuthorizationInputIdentityRead(value: unknown): AuthorizationInputIdentityRead {
+  try {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)
+      || ![Object.prototype, null].includes(Object.getPrototypeOf(value))
+      || Reflect.ownKeys(value).length !== 1) {
+      throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'identity_read_invalid')
+    }
+    const source = Object.getOwnPropertyDescriptor(value, 'sourceIntegrationIds')
+    const ids: unknown = source && 'value' in source ? source.value : undefined
+    if (!Array.isArray(ids) || ![Array.prototype, null].includes(Object.getPrototypeOf(ids))) {
+      throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'identity_read_invalid')
+    }
+    const length = Object.getOwnPropertyDescriptor(ids, 'length')?.value
+    if (!Number.isInteger(length) || length <= 0 || Reflect.ownKeys(ids).length !== length + 1) {
+      throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'identity_read_invalid')
+    }
+    const canonicalIds = new Set<string>()
+    for (let index = 0; index < length; index += 1) {
+      const item = Object.getOwnPropertyDescriptor(ids, String(index))
+      const id: unknown = item && 'value' in item ? item.value : undefined
+      if (typeof id !== 'string' || !/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(id)) {
+        throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'identity_read_invalid')
+      }
+      canonicalIds.add(id.toLowerCase())
+    }
+    return Object.freeze({ sourceIntegrationIds: Object.freeze([...canonicalIds].sort(compareCodeUnits)) })
+  } catch {
+    throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'identity_read_invalid')
+  }
+}
+
 function normalizePlan(plan: AuthorizationInputPlan, entry: 'self' | 'takeover'): NormalizedPlan {
   if (typeof plan !== 'object' || plan === null) throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'plan_missing')
   // The catalogue is closed: only its own keys name an intent, never a property inherited from Object.
   if (typeof plan.intent !== 'string' || !Object.hasOwn(AUTHORIZATION_INPUT_INTENT_CATALOG, plan.intent)) throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'intent_unknown')
   const ruleOf = AUTHORIZATION_INPUT_INTENT_CATALOG[plan.intent]
-  refuseUnknownKeys(plan, PLAN_KEYS, 'plan_unknown_key')
+  let identityRead: AuthorizationInputIdentityRead | undefined
+  try {
+    if ('identityRead' in plan) {
+      const slot = Object.getOwnPropertyDescriptor(plan, 'identityRead')
+      if (!slot || !('value' in slot) || entry !== 'self' || plan.intent !== 'CONSUME_CLASS_DECISION') throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'identity_read_invalid')
+      identityRead = normalizeAuthorizationInputIdentityRead(slot.value)
+      refuseUnknownKeys(plan, PLAN_KEYS, 'plan_unknown_key')
+    }
+  } catch {
+    throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'identity_read_invalid')
+  }
+  if (!identityRead) refuseUnknownKeys(plan, PLAN_KEYS, 'plan_unknown_key')
   if (plan.witness !== undefined && (typeof plan.witness !== 'object' || plan.witness === null)) throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'witness_not_object')
   if (plan.witness !== undefined) refuseUnknownKeys(plan.witness, WITNESS_KEYS, 'witness_unknown_key')
   const witnessUserIds = normalizeIds(plan.witness?.userIds, 'witness_user_ids')
@@ -520,8 +568,13 @@ function normalizePlan(plan: AuthorizationInputPlan, entry: 'self' | 'takeover')
     throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'content_intent_locks_users')
   }
   if (plan.intent === 'DELETE_ROLE' && roleIds.includes(PLATFORM_ADMIN_ROLE_ID)) throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'delete_role_platform_admin')
+  // B2 commands bind their already-frozen plan by identity. Mutable callers get a snapshot,
+  // and receipt operations always expose the validated composite key.
+  const tokenPlan = operation ? Object.freeze({ ...plan, operation })
+    : Object.isFrozen(plan) ? plan : Object.freeze({ ...plan })
   return Object.freeze({
-    plan: Object.freeze({ ...plan, operation }),
+    plan: tokenPlan,
+    identityRead,
     ruleOf,
     operation,
     userIds: mergeIds(userIds, witnessUserIds),
@@ -570,6 +623,9 @@ type AcquiredLocks = Readonly<{
   locked: Map<string, LockedAccessGraphUser>
   roleRows: Map<string, AuthorizationInputRoleRowState>
   admissionHeld: Set<string>
+  identityHeld: boolean
+  sourceHeld: readonly string[]
+  highestRank: number
 }>
 
 /** Sets the transaction-local lock and statement timeouts and returns the function that restores the caller's values. */
@@ -587,58 +643,101 @@ async function openTimeoutWindow(query: AuthorizationInputQueryable['query'], op
  * canonical user mutex; restores the caller's timeouts afterwards. The state of every planned role
  * row is recorded in both world modes. In shared mode a missing role row requests the upgrade for
  * `EDIT_ROLE_CONTENT` only, whose write may create the row; for every other intent the missing row
- * is recorded and `work` decides. The two refusals that involve no failed statement (a shared try
- * not granted, a missing role row) restore the timeouts before they are raised, since the caller's
+ * is recorded and `work` decides, except consumers refuse missing witnesses before lower ranks.
+ * Refusals with no failed statement (a shared try not granted or a missing role row) restore the
+ * timeouts before they are raised, since the caller's
  * transaction stays usable; after a failed statement the transaction is aborted and nothing is
  * restored.
  */
-async function acquireLocks(client: AuthorizationInputQueryable, normalized: NormalizedPlan, world: AuthorizationInputWorldMode, options: AuthorizationInputEntryOptions | undefined): Promise<AcquiredLocks> {
-  const query = (sql: string, params?: unknown[]) => client.query(sql, params)
-  const restore = await openTimeoutWindow(query, normalized.plan.intent === 'AUTHORIZATION_OPERATION')
-
-  if (world === 'exclusive') {
-    await acquireExclusive(query, budgetFor(normalized.plan.intent, options), options)
-  } else if (normalized.sharedAcquire === 'try') {
-    const result = await query(normalized.plan.intent === 'AUTHORIZATION_OPERATION' ? AUTHORIZATION_INPUT_STATEMENTS.worldSharedTry.replace('SELECT pg_', 'SELECT pg_catalog.pg_') : AUTHORIZATION_INPUT_STATEMENTS.worldSharedTry)
-    if (result.rows[0]?.acquired !== true) {
-      await restore()
-      throw new AuthorizationInputBusyError('lock_timeout')
+async function acquireLocks(client: AuthorizationInputQueryable, normalized: NormalizedPlan, world: AuthorizationInputWorldMode, options: AuthorizationInputEntryOptions | undefined, connectionState?: { lost: boolean }): Promise<AcquiredLocks> {
+  let statementFailed = false
+  const query = async (sql: string, params?: unknown[]) => {
+    try { return await client.query(sql, params) } catch (error) {
+      if (sqlState(error) !== null) statementFailed = true
+      throw error
     }
-  } else {
-    await query(AUTHORIZATION_INPUT_STATEMENTS.worldShared)
   }
-  const operation = normalized.plan.intent === 'AUTHORIZATION_OPERATION'
-  if (operation) {
-    const op = normalized.operation!
-    const result = await query(AUTHORIZATION_INPUT_STATEMENTS.operationTry.replace('SELECT pg_', 'SELECT pg_catalog.pg_').replace('hashtextextended(', 'pg_catalog.hashtextextended('), [JSON.stringify([op.actorId, op.clientOperationId])])
-    if (result.rows[0]?.acquired !== true) throw new AuthorizationInputBusyError('lock_timeout')
-    await acquireAuthorizationOperationFence(query)
-  }
-  if (normalized.platformAdminInvariant) {
+  const operation = normalized.operation
+  const restoreTimeouts = await openTimeoutWindow(query, operation !== undefined)
+  let restoreAttempted = false
+  const restore = async () => { restoreAttempted = true; await restoreTimeouts() }
+  const ranks = AUTHORIZATION_INPUT_LOCK_RANKS
+  let highestRank: number = ranks.R0_WORLD
+  let identityHeld = false
+  const sourceHeld: string[] = []
+
+  try {
+    if (world === 'exclusive') {
+      await acquireExclusive(query, budgetFor(normalized.plan.intent, options), options)
+    } else if (normalized.sharedAcquire === 'try') {
+      const result = await query(operation ? AUTHORIZATION_INPUT_STATEMENTS.worldSharedTry.replace('SELECT pg_', 'SELECT pg_catalog.pg_') : AUTHORIZATION_INPUT_STATEMENTS.worldSharedTry)
+      if (result.rows[0]?.acquired !== true) {
+        await restore()
+        throw new AuthorizationInputBusyError('lock_timeout')
+      }
+    } else {
+      await query(AUTHORIZATION_INPUT_STATEMENTS.worldShared)
+    }
     if (operation) {
-      const result = await query(AUTHORIZATION_INPUT_STATEMENTS.platformAdminInvariantTry)
+      const result = await query(AUTHORIZATION_INPUT_STATEMENTS.operationTry.replace('SELECT pg_', 'SELECT pg_catalog.pg_').replace('hashtextextended(', 'pg_catalog.hashtextextended('), [JSON.stringify([operation.actorId, operation.clientOperationId])])
       if (result.rows[0]?.acquired !== true) throw new AuthorizationInputBusyError('lock_timeout')
-    } else await query(AUTHORIZATION_INPUT_STATEMENTS.platformAdminInvariant)
-  }
-  const roleRows = new Map<string, AuthorizationInputRoleRowState>()
-  const roleRowStatement = normalized.roleRowMode === 'update' ? AUTHORIZATION_INPUT_STATEMENTS.roleRow : operation ? AUTHORIZATION_INPUT_STATEMENTS.roleRowSharedNowait : AUTHORIZATION_INPUT_STATEMENTS.roleRowShared
-  for (const roleId of normalized.roleIds) {
-    const row = await query(roleRowStatement, [roleId])
-    roleRows.set(roleId, row.rows.length === 0 ? 'missing' : 'held')
-  }
-  // Decided by intent, not by whether the intent may upgrade: only a role content edit can create
-  // the row it names, and creating a role row is a write that needs the exclusive world lock.
-  if (world === 'shared' && normalized.plan.intent === 'EDIT_ROLE_CONTENT' && [...roleRows.values()].includes('missing')) {
+      await acquireAuthorizationOperationFence(query)
+    }
+    if (normalized.platformAdminInvariant) {
+      if (operation) {
+        const result = await query(AUTHORIZATION_INPUT_STATEMENTS.platformAdminInvariantTry)
+        if (result.rows[0]?.acquired !== true) throw new AuthorizationInputBusyError('lock_timeout')
+      } else {
+        await query(AUTHORIZATION_INPUT_STATEMENTS.platformAdminInvariant)
+      }
+      highestRank = ranks.R1_PLATFORM_ADMIN_INVARIANT
+    }
+    if (normalized.identityRead) {
+      await query("SELECT pg_advisory_xact_lock_shared(hashtext('directory:identity-maintenance'))")
+      identityHeld = true
+      highestRank = ranks.R2_IDENTITY_MAINTENANCE
+      for (const sourceId of normalized.identityRead.sourceIntegrationIds) {
+        await acquireSourceSyncFreezeLock({ query }, sourceId)
+        sourceHeld.push(sourceId)
+        highestRank = ranks.R2F_SOURCE_SYNC_FREEZE
+      }
+    }
+    const roleRows = new Map<string, AuthorizationInputRoleRowState>()
+    const roleRowStatement = normalized.roleRowMode === 'update' ? AUTHORIZATION_INPUT_STATEMENTS.roleRow : operation ? AUTHORIZATION_INPUT_STATEMENTS.roleRowSharedNowait : AUTHORIZATION_INPUT_STATEMENTS.roleRowShared
+    for (const roleId of normalized.roleIds) {
+      const row = await query(roleRowStatement, [roleId])
+      roleRows.set(roleId, row.rows.length === 0 ? 'missing' : 'held')
+      if (row.rows.length > 0) highestRank = ranks.R2R_ROLE_ROW
+    }
+    // Decided by intent, not by whether the intent may upgrade: only a role content edit can create
+    // the row it names, and creating a role row is a write that needs the exclusive world lock.
+    if (world === 'shared' && normalized.plan.intent === 'EDIT_ROLE_CONTENT' && [...roleRows.values()].includes('missing')) {
+      await restore()
+      throw new AuthorizationInputUpgradeRequired('role_row_missing')
+    }
+    if ((normalized.identityRead || normalized.plan.intent === 'CONSUME_CLASS_DECISION') && [...roleRows.values()].includes('missing')) {
+      await restore()
+      throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'role_row_not_held')
+    }
+    for (const userId of normalized.admissionUserIds) {
+      const result = await query(operation ? AUTHORIZATION_INPUT_STATEMENTS.namespaceAdmissionTry : AUTHORIZATION_INPUT_STATEMENTS.namespaceAdmission, [`namespace-admission:${userId}`])
+      if (operation && result.rows[0]?.acquired !== true) throw new AuthorizationInputBusyError('lock_timeout')
+      highestRank = ranks.R3_NAMESPACE_ADMISSION
+    }
+    const locked = normalized.userIds.length > 0 ? await lockUsersForAccessGraphWrite({ query }, [...normalized.userIds], { nowait: operation !== undefined }) : new Map<string, LockedAccessGraphUser>()
+    if (locked.size > 0) highestRank = ranks.R5_USER_ROW
+    if (normalized.identityRead) {
+      if (normalized.userIds.some((id) => !locked.has(id))) throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'user_row_not_held')
+      const sources = await query('SELECT id::text AS id FROM directory_integrations WHERE id = ANY($1::uuid[])', [[...sourceHeld]])
+      const found = new Set(sources.rows.map((row) => row.id))
+      if (found.size !== sourceHeld.length || sourceHeld.some((id) => !found.has(id))) throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'source_row_not_held')
+    }
     await restore()
-    throw new AuthorizationInputUpgradeRequired('role_row_missing')
+    return Object.freeze({ locked, roleRows, admissionHeld: new Set(normalized.admissionUserIds), identityHeld, sourceHeld: Object.freeze(sourceHeld), highestRank })
+  } catch (error) {
+    if (normalized.identityRead && !statementFailed && !restoreAttempted && !connectionState?.lost) await restore()
+    throw error
   }
-  for (const userId of normalized.admissionUserIds) {
-    const result = await query(operation ? AUTHORIZATION_INPUT_STATEMENTS.namespaceAdmissionTry : AUTHORIZATION_INPUT_STATEMENTS.namespaceAdmission, [`namespace-admission:${userId}`])
-    if (operation && result.rows[0]?.acquired !== true) throw new AuthorizationInputBusyError('lock_timeout')
-  }
-  const locked = normalized.userIds.length > 0 ? await lockUsersForAccessGraphWrite(client, [...normalized.userIds], { nowait: operation }) : new Map<string, LockedAccessGraphUser>()
-  await restore()
-  return Object.freeze({ locked, roleRows, admissionHeld: new Set(normalized.admissionUserIds) })
 }
 
 /** A read-only view of a map: the mutators throw, the readers delegate to the live map. */
@@ -718,9 +817,17 @@ function mintTx(client: AuthorizationInputQueryable, extraClients: readonly obje
       if (locks.roleRows.get(roleId) !== 'held') throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'role_row_not_held')
     }
   }
+  token.requireIdentityRead = function (this: AuthorizationInputTx, sourceIntegrationIds) {
+    assertAuthorizationInputTx(this, { client })
+    if (this !== token) throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'identity_read_receiver_mismatch')
+    const ids = normalizeAuthorizationInputIdentityRead({ sourceIntegrationIds }).sourceIntegrationIds
+    if (!locks.identityHeld || ids.length !== locks.sourceHeld.length || ids.some((id, index) => id !== locks.sourceHeld[index])) {
+      throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'identity_read_not_held')
+    }
+  }
   // Highest rank this transaction has taken, and the ranks of which a batch has been taken.
   const ranks = AUTHORIZATION_INPUT_LOCK_RANKS
-  let highestRank: number = normalized.userIds.length > 0 ? ranks.R5_USER_ROW : normalized.admissionUserIds.length > 0 ? ranks.R3_NAMESPACE_ADMISSION : normalized.roleIds.length > 0 ? ranks.R2R_ROLE_ROW : normalized.platformAdminInvariant ? ranks.R1_PLATFORM_ADMIN_INVARIANT : ranks.R0_WORLD
+  let highestRank: number = normalized.identityRead ? locks.highestRank : normalized.userIds.length > 0 ? ranks.R5_USER_ROW : normalized.admissionUserIds.length > 0 ? ranks.R3_NAMESPACE_ADMISSION : normalized.roleIds.length > 0 ? ranks.R2R_ROLE_ROW : normalized.platformAdminInvariant ? ranks.R1_PLATFORM_ADMIN_INVARIANT : ranks.R0_WORLD
   const batchTaken = new Set<number>()
   if (normalized.admissionUserIds.length > 0) batchTaken.add(ranks.R3_NAMESPACE_ADMISSION)
   if (normalized.userIds.length > 0) batchTaken.add(ranks.R5_USER_ROW)
@@ -739,7 +846,7 @@ function mintTx(client: AuthorizationInputQueryable, extraClients: readonly obje
     const requested: number[] = [...(admissionUserIds.length > 0 ? [ranks.R3_NAMESPACE_ADMISSION] : []), ...(userIds.length > 0 ? [ranks.R5_USER_ROW] : [])]
     if (requested.some((rank) => rank < highestRank)) throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'acquire_rank_regression')
     if (world === 'shared' && requested.some((rank) => batchTaken.has(rank))) throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'acquire_rank_repeated')
-    const intent = normalized.plan.intent
+    const intent = normalized.identityRead ? 'CONSUME_CLASS_DECISION' : normalized.plan.intent
     const open = (intent === 'DELETE_ROLE' && userIds.length === 0) || (intent === 'EDIT_ROLE_CONTENT' && world === 'exclusive' && admissionUserIds.length === 0)
     if (!open) throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'acquire_not_open')
     acquiring = true
@@ -794,6 +901,7 @@ function refuseInsidePullSourceGate(): void {
 async function runSelfBuilt<T>(normalized: NormalizedPlan, world: AuthorizationInputWorldMode, work: AuthorizationInputWork<T>, options: AuthorizationInputEntryOptions | undefined): Promise<T> {
   const transaction = options?.transaction ?? defaultTransaction
   let heardAny = false
+  const connectionState = { lost: false }
   let heardBeforeReturn = false
   let workReturned = false
   let raw: PoolClient | undefined
@@ -802,12 +910,13 @@ async function runSelfBuilt<T>(normalized: NormalizedPlan, world: AuthorizationI
   let abortListener: (() => void) | undefined
   const onError = () => {
     heardAny = true
+    connectionState.lost = true
   }
   try {
     return await transaction(async (client) => {
       raw = client.__rawClient
       if (raw && typeof raw.on === 'function') raw.on('error', onError)
-      if (normalized.plan.intent === 'AUTHORIZATION_OPERATION') {
+      if (normalized.operation) {
         const stream = (raw as (PoolClient & { connection?: { stream?: { destroy(): void } } }) | undefined)?.connection?.stream
         if (!stream && options?.transaction === undefined) throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'operation_connection_unavailable')
         const deadlineAt = options?.deadlineAt ?? Date.now() + AUTHORIZATION_OPERATION_DEADLINE_MS
@@ -818,10 +927,10 @@ async function runSelfBuilt<T>(normalized: NormalizedPlan, world: AuthorizationI
         deadlineTimer = setTimeout(abortListener, Math.min(AUTHORIZATION_OPERATION_DEADLINE_MS, deadlineAt - Date.now()))
       }
       await client.query(AUTHORIZATION_INPUT_STATEMENTS.setTransaction)
-      if (normalized.plan.intent === 'AUTHORIZATION_OPERATION') {
+      if (normalized.operation) {
         await client.query(AUTHORIZATION_INPUT_STATEMENTS.setTimeouts, [String(AUTHORIZATION_OPERATION_LOCK_TIMEOUT_MS), String(AUTHORIZATION_OPERATION_STATEMENT_TIMEOUT_MS)])
       }
-      const locks = await acquireLocks(client, normalized, world, options)
+      const locks = await acquireLocks(client, normalized, world, options, connectionState)
       const minted = mintTx(client, raw ? [raw] : [], normalized, world, locks)
       try {
         if (options?.afterAcquire) await options.afterAcquire(minted.tx)

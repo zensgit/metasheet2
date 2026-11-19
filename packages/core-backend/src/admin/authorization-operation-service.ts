@@ -166,7 +166,16 @@ async function commitAuthorizationOperationWithinDeadline(actorId: string, input
     const plannedRoles = [...new Set([...memberships.rows.map(row => row.role_id), ...(isRoleAction(actual.action) ? [actual.action.roleId] : [])])].sort()
     if (signal.aborted) return deny(503, 'AUTHORIZATION_OPERATION_OUTCOME_UNKNOWN')
     try {
-      const result = await withAuthorizationInputTransaction({ intent: 'AUTHORIZATION_OPERATION', operation: { actorId, clientOperationId }, userIds: ids, admissionUserIds: ids, roleIds: plannedRoles }, async tx => {
+      const subjects = Object.freeze(ids)
+      const plan = Object.freeze({
+        intent: 'AUTHORIZATION_OPERATION' as const,
+        operation: Object.freeze({ actorId, clientOperationId }),
+        userIds: subjects,
+        admissionUserIds: subjects,
+        roleIds: Object.freeze(plannedRoles),
+        witness: Object.freeze({ userIds: subjects, admissionUserIds: subjects }),
+      })
+      const result = await withAuthorizationInputTransaction(plan, async tx => {
         if (!tx.locked.has(actorId)) return deny(403, 'FORBIDDEN')
         const stored = await readReceipt(tx.query, actorId, clientOperationId)
         if (stored && stored.target_user_id !== actual.targetUserId) throw new ReceiptReplan()
@@ -200,7 +209,11 @@ async function commitAuthorizationOperationWithinDeadline(actorId: string, input
         }
         if (isExceptionAction(request.action)) {
           const action=request.action.kind==='template.apply' ? {kind:'template.grant' as const,codes:snapshot.requestedCodes} : request.action
-          await writeAuthorizationException(tx, {actorId,userId:request.targetUserId,actor:tx.locked.get(actorId),target:tx.locked.get(request.targetUserId),action,expectedDirectCodes:snapshot.direct.map(row=>String(row.permission_code)),expectedLegacy:{value:snapshot.target?.permissions}})
+          await writeAuthorizationException(tx, Object.freeze({
+            actorId, userId: request.targetUserId, plan, action,
+            expectedDirectCodes: snapshot.direct.map(row => String(row.permission_code)),
+            expectedLegacy: { value: snapshot.target?.permissions },
+          }))
         }
         for (const change of request.admissionChanges) await writeUserNamespaceAdmission({ userId: request.targetUserId, namespace: change.namespace, enabled: change.enabled, actorId, source: access.kind==='platform' ? 'platform_admin' : 'delegated_admin' }, tx)
         const after = await readOperationSnapshot(tx.query, actorId, request)

@@ -1175,6 +1175,28 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
       "Default OFF; only exact literal 'true' exposes explicit delegation lifecycle writes and makes a new scope configuration inactive until enabled. Upgrade or drain every previous permission reader and writer before enabling. Turning OFF prevents new activation changes and still enforces all stored stops. A stopped subject's range remains editable. This switch is independent of DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED.",
     source: 'packages/core-backend/src/admin/delegated-scope-activation.ts#isDelegatedScopeActivationEnabled',
   },
+  {
+    key: 'EXTERNAL_LOGIN_STRICT_SESSION_MAX_AGE_SECONDS',
+    type: 'numeric',
+    activationValue: 'An exact integer string in [300, 2592000]. No default.',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      'Absolute lifetime bound for strict external sessions. Absent or invalid values refuse session issuance. This does not enable login, grant admission, container login, or autoprovision. Setting a deployed value is a separate owner decision.',
+    source: 'packages/core-backend/src/auth/strict-dingtalk-entry.ts#readConfiguredStrictSessionMaxAgeSeconds',
+  },
+  {
+    key: 'DIRECTORY_DEPROVISION_REVOKE_CREDENTIALS_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "Default OFF; only the byte-exact literal 'true' enables the credential-chain selector's session and API-token revocation legs. No trim or case folding. The selected legs still depend on the operation's persisted user, grant and remaining-login-method facts; this flag does not enable login or grant issuance. Setting a deployed value is a separate owner decision.",
+    source: 'packages/core-backend/src/auth/strict-credential-chain.ts#credentialRevocationFlagOn',
+  },
 ])
 
 /** Flat lookup by key, built once. */

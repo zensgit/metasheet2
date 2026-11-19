@@ -39,7 +39,22 @@
  *
  * The body of a function or a procedure is read only as dollar-quoted text. A definition whose
  * body is a quoted string, or that carries no dollar-quoted text, is `unreadable`, like a block
- * whose body is not dollar-quoted.
+ * whose body is not dollar-quoted. One closed builder keeps that text: the file's
+ * collision-avoiding `dollarTag(value, seed)`, bound as `const tag = dollarTag(valueName, 'seed')`
+ * and neither reassigned nor shadowed at that use, around a template whose paired delimiters
+ * enclose only that value. The value's call must return a template. A fragment in that template is
+ * read only when it is a strict string constant, the closed `dollarLiteral(schemaName, 'seed')`
+ * value, the closed `insertGuardSql()` text, or the closed immutable-column join. Any other
+ * fragment leaves the body unreadable. The reviewed `EXECUTE format` shapes are accepted only
+ * inside a body reconstructed this way.
+ *
+ * A `'users'` literal is not judged as a statement only when it is the second argument of
+ * `qualified(schemaName, 'users')`, both `qualified` and `quoteAdminGrantActorInputIdent` are the
+ * closed actor helpers (the quoter refuses identifiers outside `/^[a-z_][a-z0-9_]*$/`), neither
+ * binding is reassigned or shadowed at the use, the schema argument is that function's own
+ * parameter, and the call is inside `adminGrantActorInputUpStatements`,
+ * `adminGrantActorInputDropStatements`, `usersReady`, `lockPresent`, or `retainedHistory`. The
+ * same literal anywhere else stays a statement.
  *
  * A table name of three or more parts is never read: a write on one is `unreadable` in every file,
  * whatever else the statement does, and so is a table definition, an inheritance or partition
@@ -883,6 +898,56 @@ function stripControlPrefix(tokens: readonly Token[]): Token[] {
 
 const READ_KINDS = ['SELECT', 'WITH', 'VALUES', 'TABLE', 'PERFORM', 'EXPLAIN', 'SHOW']
 
+/** Column, table, and the single `USING NEW.<column>` names of the reviewed non-AIS touch updates. */
+const CLOSED_FORMAT_TOUCH: readonly (readonly [string, string, readonly string[]])[] = [
+  ['schedule_cron', 'directory_integrations', ['connection_id']],
+  ['profile', 'user_external_identities', ['identity_id', 'live_identity_id']],
+]
+const CLOSED_LINEAGE_TABLE = 'admin_grant_target_ceremony_challenges'
+const CLOSED_LINEAGE_INTO = 'challenge_count'
+const CLOSED_LINEAGE_USING = ['id', 'connection_id', 'org_id', 'identity_id', 'subject_key', 'app_scope', 'application_revision', 'binding_revision', 'material_fingerprint', 'capability_revision_seen', 'slot_snapshot', 'created_by', 'assurance'] as const
+const CLOSED_LINEAGE_SQL = "SELECT count(*) FROM %I.%I AS ceremony WHERE ceremony.consumed_evidence_id = $1 AND ceremony.exchange_claimed_at IS NOT NULL AND ceremony.consumed_at IS NOT NULL AND ceremony.connection_id IS NOT DISTINCT FROM $2 AND ceremony.org_id IS NOT DISTINCT FROM $3 AND ceremony.identity_id IS NOT DISTINCT FROM $4 AND ceremony.subject_key IS NOT DISTINCT FROM $5 AND ceremony.app_scope IS NOT DISTINCT FROM $6 AND ceremony.application_revision IS NOT DISTINCT FROM $7 AND ceremony.binding_revision IS NOT DISTINCT FROM $8::text AND ceremony.material_fingerprint IS NOT DISTINCT FROM $9 AND ceremony.capability_revision_seen IS NOT DISTINCT FROM $10::text AND ceremony.slot_snapshot IS NOT DISTINCT FROM $11 AND ceremony.target_user_id IS NOT DISTINCT FROM $12 AND $13 = 'self_authenticated'"
+
+/** `USING NEW.a, NEW.b` and nothing after it. Null when the list is any other shape. */
+function readUsingNewColumns(tokens: readonly Token[], index: number): { names: string[]; next: number } | null {
+  if (!isKeyword(tokens[index], 'USING')) return null
+  const names: string[] = []
+  let at = index + 1
+  for (;;) {
+    if (!isKeyword(tokens[at], 'NEW') || !isOp(tokens[at + 1], '.') || tokens[at + 2]?.type !== 'id') return null
+    names.push(tokens[at + 2].text.toLowerCase())
+    at += 3
+    if (!isOp(tokens[at], ',')) return { names, next: at }
+    at += 1
+  }
+}
+
+/**
+ * The reviewed function-body `EXECUTE format` shapes: an idempotent touch of one of the two
+ * non-AIS parent tables, or the ceremony lineage count. Any other format text, table, or tail
+ * stays a dynamic statement.
+ */
+function closedFormatExecute(tokens: readonly Token[]): boolean {
+  if (!isKeyword(tokens[0], 'EXECUTE') || !isKeyword(tokens[1], 'FORMAT') || !isOp(tokens[2], '(')) return false
+  const format = tokens[3]
+  if (format?.type !== 'str' || format.opaque) return false
+  if (!isOp(tokens[4], ',') || nameOf(tokens[5]) !== 'install_schema' || !isOp(tokens[6], ',')) return false
+  const table = tokens[7]
+  if (table?.type !== 'str' || table.opaque || !isOp(tokens[8], ')')) return false
+  const formatText = format.value.replace(/\s+/g, ' ').trim()
+  const touch = /^UPDATE %I\.%I SET ([a-z_][a-z0-9_]*) = \1 WHERE id = \$1$/.exec(formatText)
+  if (touch) {
+    const allowed = CLOSED_FORMAT_TOUCH.find((entry) => entry[0] === touch[1] && entry[1] === table.value)
+    if (!allowed) return false
+    const using = readUsingNewColumns(tokens, 9)
+    return using !== null && using.next === tokens.length && using.names.length === 1 && allowed[2].includes(using.names[0])
+  }
+  if (formatText !== CLOSED_LINEAGE_SQL || table.value !== CLOSED_LINEAGE_TABLE) return false
+  if (!isKeyword(tokens[9], 'INTO') || nameOf(tokens[10]) !== CLOSED_LINEAGE_INTO) return false
+  const using = readUsingNewColumns(tokens, 11)
+  return using !== null && using.next === tokens.length && using.names.length === CLOSED_LINEAGE_USING.length && using.names.every((name, index) => name === CLOSED_LINEAGE_USING[index])
+}
+
 /**
  * A write verb on an input table after the first token of a statement: a data-modifying CTE, the
  * statement an EXPLAIN runs, a write nested in another write. A row-lock clause (`FOR UPDATE`), an
@@ -944,7 +1009,7 @@ function nestedWriteReadOnlyAtHead(tokens: readonly Token[]): string | null {
 const DML_VERBS = ['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'MERGE', 'COPY']
 const OBJECT_KINDS = ['VIEW', 'RULE', 'TRIGGER', 'FUNCTION', 'PROCEDURE']
 
-type Sink = { judgments: MigrationJudgment[]; writes: Map<string, number>; dynamic: Map<string, number> }
+type Sink = { judgments: MigrationJudgment[]; writes: Map<string, number>; dynamic: Map<string, number>; admittedBodies: Set<string> }
 
 /** `block`: the statement is a piece of a PL/pgSQL body. `count`: its writes are not already counted by an enclosing statement. `at`: where it stands, as `WrittenStatement` names it (a text assembled from a `+` chain is `other` whatever the mode says). */
 type StatementMode = Readonly<{ block: boolean; count: boolean; at: WrittenStatement['at'] }>
@@ -1033,11 +1098,13 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
     }
   }
   // The body of a function or procedure definition is read for dynamic execution as well.
+  // The closed format shapes apply only to a body the reviewed builder reconstructed.
   if (head === 'CREATE' && tokens.some((token) => isKeyword(token, 'FUNCTION', 'PROCEDURE'))) {
     for (const body of tokens.filter((token) => token.type === 'dollar')) {
+      const admitted = sink.admittedBodies.has(body.value)
       for (const inner of splitStatements(blankSqlComments(body.value))) {
         const piece = stripControlPrefix(tokenize(inner.text, sql.folds))
-        if (isKeyword(piece[0], 'EXECUTE') && !(piece.length === 2 && piece[1].type === 'str' && !piece[1].opaque)) pushDynamicStatement()
+        if (isKeyword(piece[0], 'EXECUTE') && !(piece.length === 2 && piece[1].type === 'str' && !piece[1].opaque) && !(admitted && closedFormatExecute(piece))) pushDynamicStatement()
       }
     }
   }
@@ -1334,6 +1401,238 @@ function judgeHelperCall(name: string, call: ts.CallExpression, resolve: (node: 
   }
 }
 
+const USERS_QUALIFIER_OWNERS: ReadonlySet<string> = new Set([
+  'adminGrantActorInputUpStatements',
+  'adminGrantActorInputDropStatements',
+  'usersReady',
+  'lockPresent',
+  'retainedHistory',
+])
+const DOLLAR_TAG_SEED = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+type DollarTagBinding = Readonly<{ valueName: string; seed: string }>
+
+/** The reviewed collision-avoiding tag helper, and no other function of that name. */
+function isCollisionAvoidingDollarTag(fn: ts.FunctionDeclaration): boolean {
+  if (!fn.name || fn.name.text !== 'dollarTag' || !fn.body || fn.parameters.length !== 2) return false
+  if (!ts.isIdentifier(fn.parameters[0].name) || fn.parameters[0].name.text !== 'value') return false
+  if (!ts.isIdentifier(fn.parameters[1].name) || fn.parameters[1].name.text !== 'seed') return false
+  const statements = fn.body.statements
+  if (statements.length !== 4) return false
+  const tagLet = statements[0]
+  const counterLet = statements[1]
+  const loop = statements[2]
+  const returned = statements[3]
+  if (!ts.isVariableStatement(tagLet) || (tagLet.declarationList.flags & ts.NodeFlags.Let) === 0 || tagLet.declarationList.declarations.length !== 1) return false
+  const tagDecl = tagLet.declarationList.declarations[0]
+  if (!ts.isIdentifier(tagDecl.name) || tagDecl.name.text !== 'tag' || !tagDecl.initializer || !ts.isIdentifier(tagDecl.initializer) || tagDecl.initializer.text !== 'seed') return false
+  if (!ts.isVariableStatement(counterLet) || (counterLet.declarationList.flags & ts.NodeFlags.Let) === 0 || counterLet.declarationList.declarations.length !== 1) return false
+  const counterDecl = counterLet.declarationList.declarations[0]
+  if (!ts.isIdentifier(counterDecl.name) || counterDecl.name.text !== 'counter' || !counterDecl.initializer || !ts.isNumericLiteral(counterDecl.initializer) || counterDecl.initializer.text !== '0') return false
+  if (!ts.isWhileStatement(loop) || !ts.isBlock(loop.statement) || loop.statement.statements.length !== 2) return false
+  const includes = loop.expression
+  if (!ts.isCallExpression(includes) || includes.arguments.length !== 1 || !ts.isPropertyAccessExpression(includes.expression)) return false
+  if (!ts.isIdentifier(includes.expression.expression) || includes.expression.expression.text !== 'value' || includes.expression.name.text !== 'includes') return false
+  const needle = includes.arguments[0]
+  if (!ts.isTemplateExpression(needle) || needle.head.text !== '$' || needle.templateSpans.length !== 1) return false
+  if (!ts.isIdentifier(needle.templateSpans[0].expression) || needle.templateSpans[0].expression.text !== 'tag' || needle.templateSpans[0].literal.text !== '$') return false
+  const increment = loop.statement.statements[0]
+  const assignment = loop.statement.statements[1]
+  if (!ts.isExpressionStatement(increment) || !ts.isBinaryExpression(increment.expression) || increment.expression.operatorToken.kind !== ts.SyntaxKind.PlusEqualsToken) return false
+  if (!ts.isIdentifier(increment.expression.left) || increment.expression.left.text !== 'counter' || !ts.isNumericLiteral(increment.expression.right) || increment.expression.right.text !== '1') return false
+  if (!ts.isExpressionStatement(assignment) || !ts.isBinaryExpression(assignment.expression) || assignment.expression.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return false
+  if (!ts.isIdentifier(assignment.expression.left) || assignment.expression.left.text !== 'tag' || !ts.isTemplateExpression(assignment.expression.right)) return false
+  const rebuilt = assignment.expression.right
+  if (rebuilt.head.text !== '' || rebuilt.templateSpans.length !== 2) return false
+  if (!ts.isIdentifier(rebuilt.templateSpans[0].expression) || rebuilt.templateSpans[0].expression.text !== 'seed' || rebuilt.templateSpans[0].literal.text !== '_') return false
+  if (!ts.isIdentifier(rebuilt.templateSpans[1].expression) || rebuilt.templateSpans[1].expression.text !== 'counter' || rebuilt.templateSpans[1].literal.text !== '') return false
+  return ts.isReturnStatement(returned) && returned.expression !== undefined && ts.isIdentifier(returned.expression) && returned.expression.text === 'tag'
+}
+
+function quoterCall(expression: ts.Expression, parameter: string): boolean {
+  if (!ts.isCallExpression(expression) || expression.arguments.length !== 1 || !ts.isIdentifier(expression.expression)) return false
+  if (expression.expression.text !== 'quoteAdminGrantActorInputIdent') return false
+  const argument = expression.arguments[0]
+  return ts.isIdentifier(argument) && argument.text === parameter
+}
+
+/** `qualified` returns `"schema"."identifier"` through the actor quoter, and nothing else. */
+function isClosedActorQualified(fn: ts.FunctionDeclaration): boolean {
+  if (!fn.name || fn.name.text !== 'qualified' || !fn.body || fn.parameters.length !== 2 || fn.body.statements.length !== 1) return false
+  if (!ts.isIdentifier(fn.parameters[0].name) || fn.parameters[0].name.text !== 'schemaName') return false
+  if (!ts.isIdentifier(fn.parameters[1].name) || fn.parameters[1].name.text !== 'identifier') return false
+  const returned = fn.body.statements[0]
+  if (!ts.isReturnStatement(returned) || !returned.expression || !ts.isTemplateExpression(returned.expression)) return false
+  const template = returned.expression
+  if (template.head.text !== '' || template.templateSpans.length !== 2) return false
+  if (template.templateSpans[0].literal.text !== '.' || template.templateSpans[1].literal.text !== '') return false
+  return quoterCall(template.templateSpans[0].expression, 'schemaName') && quoterCall(template.templateSpans[1].expression, 'identifier')
+}
+
+function ownerFunctionName(node: ts.Node): string | null {
+  let current: ts.Node | undefined = node.parent
+  while (current) {
+    if (ts.isFunctionDeclaration(current)) return current.name?.text ?? null
+    current = current.parent
+  }
+  return null
+}
+
+/** The tag `dollarTag` would return for `body`, or null when the search does not settle. */
+function collisionTag(body: string, seed: string): string | null {
+  let tag = seed
+  let counter = 0
+  while (body.includes(`$${tag}$`)) {
+    counter += 1
+    if (counter > 32) return null
+    tag = `${seed}_${counter}`
+  }
+  return tag
+}
+
+const ASSIGNMENT_KINDS: ReadonlySet<ts.SyntaxKind> = new Set([
+  ts.SyntaxKind.EqualsToken,
+  ts.SyntaxKind.PlusEqualsToken,
+  ts.SyntaxKind.MinusEqualsToken,
+  ts.SyntaxKind.AsteriskEqualsToken,
+  ts.SyntaxKind.AsteriskAsteriskEqualsToken,
+  ts.SyntaxKind.SlashEqualsToken,
+  ts.SyntaxKind.PercentEqualsToken,
+  ts.SyntaxKind.LessThanLessThanEqualsToken,
+  ts.SyntaxKind.GreaterThanGreaterThanEqualsToken,
+  ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken,
+  ts.SyntaxKind.AmpersandEqualsToken,
+  ts.SyntaxKind.BarEqualsToken,
+  ts.SyntaxKind.CaretEqualsToken,
+  ts.SyntaxKind.AmpersandAmpersandEqualsToken,
+  ts.SyntaxKind.BarBarEqualsToken,
+  ts.SyntaxKind.QuestionQuestionEqualsToken,
+])
+const NULL_COLUMN_JOIN = '\n       OR '
+const DISTINCT_COLUMN_JOIN = '\n         OR '
+const ACTOR_IDENT_PATTERN = '/^[a-z_][a-z0-9_]*$/'
+const ACTOR_SCHEMA_CODE = 'ADMIN_GRANT_ACTOR_INPUTS_SCHEMA_BLOCKED'
+
+/** A declaration pattern, or the left side of an assignment, names `name`. */
+function patternDeclares(pattern: ts.Node, name: string): boolean {
+  if (ts.isIdentifier(pattern)) return pattern.text === name
+  if (ts.isObjectBindingPattern(pattern) || ts.isArrayBindingPattern(pattern)) return pattern.elements.some((element) => ts.isBindingElement(element) && patternDeclares(element.name, name))
+  if (ts.isBindingElement(pattern)) return patternDeclares(pattern.name, name)
+  return false
+}
+
+function addWrittenPattern(node: ts.Node, names: Set<string>): void {
+  if (ts.isIdentifier(node)) {
+    names.add(node.text)
+    return
+  }
+  if (ts.isParenthesizedExpression(node)) {
+    addWrittenPattern(node.expression, names)
+    return
+  }
+  if (ts.isObjectLiteralExpression(node)) {
+    for (const property of node.properties) {
+      if (ts.isShorthandPropertyAssignment(property)) names.add(property.name.text)
+      else if (ts.isPropertyAssignment(property)) addWrittenPattern(property.initializer, names)
+      else if (ts.isSpreadAssignment(property)) addWrittenPattern(property.expression, names)
+    }
+    return
+  }
+  if (ts.isArrayLiteralExpression(node)) {
+    for (const element of node.elements) if (element) addWrittenPattern(element, names)
+  }
+}
+
+/** Declarations of `name` in scopes that enclose `use`, nearest first. A homonym in another function is not one of them. */
+function visibleDeclarations(name: string, use: ts.Node): ts.Node[] {
+  const found: ts.Node[] = []
+  let current: ts.Node | undefined = use.parent
+  while (current) {
+    const statements = ts.isBlock(current) || ts.isSourceFile(current) || ts.isModuleBlock(current) ? current.statements : null
+    if (statements) {
+      for (const statement of statements) {
+        if (ts.isVariableStatement(statement)) {
+          for (const declaration of statement.declarationList.declarations) if (patternDeclares(declaration.name, name)) found.push(declaration)
+        } else if (ts.isFunctionDeclaration(statement) && statement.name?.text === name) found.push(statement)
+        else if (ts.isClassDeclaration(statement) && statement.name?.text === name) found.push(statement)
+        else if (ts.isImportDeclaration(statement) && statement.importClause) {
+          const clause = statement.importClause
+          if (clause.name?.text === name) found.push(clause.name)
+          const bindings = clause.namedBindings
+          if (bindings && ts.isNamespaceImport(bindings) && bindings.name.text === name) found.push(bindings)
+          if (bindings && ts.isNamedImports(bindings)) for (const specifier of bindings.elements) if (specifier.name.text === name) found.push(specifier)
+        }
+      }
+    }
+    if (ts.isFunctionDeclaration(current) || ts.isFunctionExpression(current) || ts.isArrowFunction(current) || ts.isMethodDeclaration(current) || ts.isConstructorDeclaration(current)) {
+      for (const parameter of current.parameters) if (patternDeclares(parameter.name, name)) found.push(parameter)
+    }
+    if ((ts.isForOfStatement(current) || ts.isForInStatement(current) || ts.isForStatement(current)) && current.initializer && ts.isVariableDeclarationList(current.initializer)) {
+      for (const declaration of current.initializer.declarations) if (patternDeclares(declaration.name, name)) found.push(declaration)
+    }
+    if (ts.isCatchClause(current) && current.variableDeclaration && patternDeclares(current.variableDeclaration.name, name)) found.push(current.variableDeclaration)
+    current = current.parent
+  }
+  return found
+}
+
+function writtenDeclarationsOf(root: ts.Node): Set<ts.Node> {
+  const written = new Set<ts.Node>()
+  const visit = (node: ts.Node): void => {
+    const targets = new Set<string>()
+    if (ts.isBinaryExpression(node) && ASSIGNMENT_KINDS.has(node.operatorToken.kind)) addWrittenPattern(node.left, targets)
+    if ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) && (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken) && ts.isIdentifier(node.operand)) targets.add(node.operand.text)
+    if ((ts.isForOfStatement(node) || ts.isForInStatement(node)) && ts.isIdentifier(node.initializer)) targets.add(node.initializer.text)
+    for (const name of targets) {
+      const visible = visibleDeclarations(name, node)
+      if (visible.length === 1) written.add(visible[0])
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(root)
+  return written
+}
+
+/** `dollarLiteral` returns `$tag$value$tag$` through the closed `dollarTag`, and nothing else. */
+function isClosedDollarLiteral(fn: ts.FunctionDeclaration): boolean {
+  if (!fn.name || fn.name.text !== 'dollarLiteral' || !fn.body || fn.parameters.length !== 2) return false
+  if (!ts.isIdentifier(fn.parameters[0].name) || fn.parameters[0].name.text !== 'value') return false
+  if (!ts.isIdentifier(fn.parameters[1].name) || fn.parameters[1].name.text !== 'seed') return false
+  const statements = fn.body.statements
+  if (statements.length !== 2 || !ts.isVariableStatement(statements[0]) || !ts.isReturnStatement(statements[1])) return false
+  if ((statements[0].declarationList.flags & ts.NodeFlags.Const) === 0 || statements[0].declarationList.declarations.length !== 1) return false
+  const tag = statements[0].declarationList.declarations[0]
+  if (!ts.isIdentifier(tag.name) || tag.name.text !== 'tag' || !tag.initializer || !ts.isCallExpression(tag.initializer)) return false
+  const call = tag.initializer
+  if (!ts.isIdentifier(call.expression) || call.expression.text !== 'dollarTag' || call.arguments.length !== 2) return false
+  if (!ts.isIdentifier(call.arguments[0]) || call.arguments[0].text !== 'value' || !ts.isIdentifier(call.arguments[1]) || call.arguments[1].text !== 'seed') return false
+  const returned = statements[1].expression
+  if (!returned || !ts.isTemplateExpression(returned) || returned.head.text !== '$' || returned.templateSpans.length !== 3) return false
+  const [open, value, close] = returned.templateSpans
+  return ts.isIdentifier(open.expression) && open.expression.text === 'tag' && open.literal.text === '$' && ts.isIdentifier(value.expression) && value.expression.text === 'value' && value.literal.text === '$' && ts.isIdentifier(close.expression) && close.expression.text === 'tag' && close.literal.text === '$'
+}
+
+/** The actor quoter refuses a non-IDENT name and returns the quoted identifier, and nothing else. */
+function isClosedActorQuoter(fn: ts.FunctionDeclaration): boolean {
+  if (!fn.name || fn.name.text !== 'quoteAdminGrantActorInputIdent' || !fn.body || fn.parameters.length !== 1) return false
+  if (!ts.isIdentifier(fn.parameters[0].name) || fn.parameters[0].name.text !== 'identifier') return false
+  const statements = fn.body.statements
+  if (statements.length !== 2 || !ts.isIfStatement(statements[0]) || statements[0].elseStatement || !ts.isReturnStatement(statements[1])) return false
+  const test = statements[0].expression
+  if (!ts.isPrefixUnaryExpression(test) || test.operator !== ts.SyntaxKind.ExclamationToken || !ts.isCallExpression(test.operand) || test.operand.arguments.length !== 1) return false
+  const called = test.operand.expression
+  if (!ts.isPropertyAccessExpression(called) || called.name.text !== 'test' || !ts.isIdentifier(called.expression) || called.expression.text !== 'IDENT') return false
+  if (!ts.isIdentifier(test.operand.arguments[0]) || test.operand.arguments[0].text !== 'identifier') return false
+  const thrown = statements[0].thenStatement
+  if (!ts.isThrowStatement(thrown) || !thrown.expression || !ts.isCallExpression(thrown.expression) || thrown.expression.arguments.length !== 1) return false
+  if (!ts.isIdentifier(thrown.expression.expression) || thrown.expression.expression.text !== 'withCode') return false
+  if (!ts.isIdentifier(thrown.expression.arguments[0]) || thrown.expression.arguments[0].text !== 'ADMIN_GRANT_ACTOR_INPUTS_SCHEMA_CODE') return false
+  const returned = statements[1].expression
+  if (!returned || !ts.isTemplateExpression(returned) || returned.head.text !== '"' || returned.templateSpans.length !== 1) return false
+  const span = returned.templateSpans[0]
+  return ts.isIdentifier(span.expression) && span.expression.text === 'identifier' && span.literal.text === '"'
+}
+
 function judgeSource(file: string, source: string, sink: Sink): void {
   const kind = /\.[cm]?js$/.test(file) ? ts.ScriptKind.JS : ts.ScriptKind.TS
   const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, kind)
@@ -1347,6 +1646,8 @@ function judgeSource(file: string, source: string, sink: Sink): void {
   /** Names declared other than as a plain parameter, and whether `sql` is imported by that name from kysely. */
   const nonParameters = new Set<string>()
   let kyselySqlImported = false
+  const functionDeclarations = new Map<string, ts.FunctionDeclaration>()
+  const constDeclarations = new Map<string, ts.VariableDeclaration>()
   const declare = (name: ts.Node | undefined, parameter = false) => {
     if (name && ts.isIdentifier(name)) {
       declarations.set(name.text, (declarations.get(name.text) ?? 0) + 1)
@@ -1355,6 +1656,7 @@ function judgeSource(file: string, source: string, sink: Sink): void {
   }
   const collect = (node: ts.Node) => {
     if (ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isBindingElement(node) || ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isClassDeclaration(node) || ts.isEnumDeclaration(node)) declare(node.name, ts.isParameter(node))
+    if (ts.isFunctionDeclaration(node) && node.name) functionDeclarations.set(node.name.text, node)
     if (ts.isImportClause(node)) declare(node.name)
     if (ts.isNamespaceImport(node)) declare(node.name)
     if (ts.isImportSpecifier(node)) {
@@ -1364,6 +1666,7 @@ function judgeSource(file: string, source: string, sink: Sink): void {
       if (node.propertyName === undefined && ts.isStringLiteral(declaration.moduleSpecifier) && declaration.moduleSpecifier.text === HELPER_MODULE_SPECIFIER && Object.hasOwn(AUTHORIZATION_INPUT_MIGRATION_HELPERS, node.name.text)) helperImports.add(node.name.text)
     }
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer && ts.isVariableDeclarationList(node.parent) && (node.parent.flags & ts.NodeFlags.Const) !== 0) {
+      constDeclarations.set(node.name.text, node)
       let init: ts.Expression = node.initializer
       if (ts.isAsExpression(init) && ts.isTypeReferenceNode(init.type) && init.type.getText(tree) === 'const') init = init.expression
       if (ts.isStringLiteral(init) || ts.isNoSubstitutionTemplateLiteral(init)) constants.set(node.name.text, init.text)
@@ -1509,6 +1812,239 @@ function judgeSource(file: string, source: string, sink: Sink): void {
     return `${FOLD}${folds.length - 1}${FOLD}`
   }
 
+  const written = writtenDeclarationsOf(tree)
+  /** The one visible binding of `name` at `use` is `expected`, and that binding is not written. */
+  const stableBinding = (name: string, use: ts.Node, expected: ts.Node): boolean => {
+    const visible = visibleDeclarations(name, use)
+    return visible.length === 1 && visible[0] === expected && !written.has(expected)
+  }
+  // These two modeled objects may only occur at their declaration and validated reads.
+  // Refuse aliases, member writes, wrapped receivers and additional calls conservatively.
+  const referencesLimitedTo = (declaration: ts.VariableDeclaration, reads: ReadonlySet<ts.Identifier>): boolean => {
+    if (!ts.isIdentifier(declaration.name)) return false
+    const name = declaration.name.text
+    let closed = true
+    const inspect = (node: ts.Node) => {
+      if (ts.isIdentifier(node) && node.text === name && node !== declaration.name && !reads.has(node)) closed = false
+      ts.forEachChild(node, inspect)
+    }
+    inspect(tree)
+    return closed
+  }
+  const enclosingFunction = (node: ts.Node): ts.FunctionDeclaration | null => {
+    let current: ts.Node | undefined = node.parent
+    while (current) {
+      if (ts.isFunctionDeclaration(current)) return current
+      current = current.parent
+    }
+    return null
+  }
+  const dollarTagFn = functionDeclarations.get('dollarTag')
+  const dollarTagReady = dollarTagFn?.name !== undefined && isCollisionAvoidingDollarTag(dollarTagFn) && stableBinding('dollarTag', dollarTagFn.name, dollarTagFn)
+  const dollarLiteralFn = functionDeclarations.get('dollarLiteral')
+  const dollarLiteralCall = dollarLiteralFn?.body?.statements[0] && ts.isVariableStatement(dollarLiteralFn.body.statements[0]) ? dollarLiteralFn.body.statements[0].declarationList.declarations[0]?.initializer : undefined
+  const dollarLiteralTag = dollarLiteralCall && ts.isCallExpression(dollarLiteralCall) && ts.isIdentifier(dollarLiteralCall.expression) ? dollarLiteralCall.expression : undefined
+  const dollarLiteralReady = dollarTagReady && dollarLiteralFn?.name !== undefined && dollarLiteralTag !== undefined && isClosedDollarLiteral(dollarLiteralFn) && stableBinding('dollarLiteral', dollarLiteralFn.name, dollarLiteralFn) && stableBinding('dollarTag', dollarLiteralTag, dollarTagFn!)
+  const tagBindings = new Map<string, DollarTagBinding>()
+  if (dollarTagReady && dollarTagFn) {
+    for (const [name, declaration] of constDeclarations) {
+      if (!ts.isIdentifier(declaration.name) || !declaration.initializer || !ts.isCallExpression(declaration.initializer) || !stableBinding(name, declaration.name, declaration)) continue
+      const call = declaration.initializer
+      if (!ts.isIdentifier(call.expression) || call.expression.text !== 'dollarTag' || call.arguments.length !== 2 || !stableBinding('dollarTag', call.expression, dollarTagFn)) continue
+      const value = call.arguments[0]
+      const seed = call.arguments[1]
+      if (!ts.isIdentifier(value) || !ts.isStringLiteral(seed) || !DOLLAR_TAG_SEED.test(seed.text)) continue
+      const valueDecl = constDeclarations.get(value.text)
+      if (!valueDecl || !stableBinding(value.text, value, valueDecl)) continue
+      tagBindings.set(name, { valueName: value.text, seed: seed.text })
+    }
+  }
+  const qualifiedFn = functionDeclarations.get('qualified')
+  const quoterFn = functionDeclarations.get('quoteAdminGrantActorInputIdent')
+  const identDecl = constDeclarations.get('IDENT')
+  const schemaCodeDecl = constDeclarations.get('ADMIN_GRANT_ACTOR_INPUTS_SCHEMA_CODE')
+  const identReads = new Set<ts.Identifier>()
+  const identReceiver = (expression: ts.Expression): ts.Identifier | null => {
+    if (!ts.isPrefixUnaryExpression(expression) || expression.operator !== ts.SyntaxKind.ExclamationToken) return null
+    const call = expression.operand
+    if (!ts.isCallExpression(call) || call.questionDotToken || call.arguments.length !== 1 || !ts.isIdentifier(call.arguments[0])) return null
+    const access = call.expression
+    return ts.isPropertyAccessExpression(access) && !access.questionDotToken && access.name.text === 'test' && ts.isIdentifier(access.expression) && access.expression.text === 'IDENT' ? access.expression : null
+  }
+  if (quoterFn && isClosedActorQuoter(quoterFn)) {
+    const statement = quoterFn.body?.statements[0]
+    const receiver = statement && ts.isIfStatement(statement) ? identReceiver(statement.expression) : null
+    if (receiver) identReads.add(receiver)
+  }
+  const schemaResolver = functionDeclarations.get('resolveInstallSchema')
+  const schemaReads: ts.Identifier[] = []
+  const inspectSchemaGuard = (node: ts.Node) => {
+    if (ts.isIfStatement(node) && !node.elseStatement && ts.isBinaryExpression(node.expression) && node.expression.operatorToken.kind === ts.SyntaxKind.BarBarToken) {
+      const typeCheck = node.expression.left
+      const predicate = node.expression.right
+      const receiver = identReceiver(predicate)
+      const thrown = node.thenStatement
+      if (receiver && ts.isBinaryExpression(typeCheck) && typeCheck.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken && ts.isTypeOfExpression(typeCheck.left) && ts.isIdentifier(typeCheck.left.expression) && typeCheck.left.expression.text === 'name' && ts.isStringLiteral(typeCheck.right) && typeCheck.right.text === 'string' && ts.isPrefixUnaryExpression(predicate) && ts.isCallExpression(predicate.operand) && ts.isIdentifier(predicate.operand.arguments[0]) && predicate.operand.arguments[0].text === 'name' && ts.isThrowStatement(thrown) && thrown.expression && ts.isCallExpression(thrown.expression) && ts.isIdentifier(thrown.expression.expression) && thrown.expression.expression.text === 'withCode' && thrown.expression.arguments.length === 1 && ts.isIdentifier(thrown.expression.arguments[0]) && thrown.expression.arguments[0].text === 'ADMIN_GRANT_ACTOR_INPUTS_SCHEMA_CODE') schemaReads.push(receiver)
+    }
+    ts.forEachChild(node, inspectSchemaGuard)
+  }
+  if (schemaResolver?.body) inspectSchemaGuard(schemaResolver.body)
+  if (schemaReads.length === 1) identReads.add(schemaReads[0])
+  const identReadsClosed = identDecl !== undefined && referencesLimitedTo(identDecl, identReads)
+  const actorChainClosed = qualifiedFn?.name !== undefined && quoterFn?.name !== undefined && identDecl !== undefined && schemaCodeDecl !== undefined && ts.isIdentifier(identDecl.name) && ts.isIdentifier(schemaCodeDecl.name) && isClosedActorQualified(qualifiedFn) && isClosedActorQuoter(quoterFn) && identDecl.initializer !== undefined && ts.isRegularExpressionLiteral(identDecl.initializer) && identDecl.initializer.text === ACTOR_IDENT_PATTERN && constants.get('ADMIN_GRANT_ACTOR_INPUTS_SCHEMA_CODE') === ACTOR_SCHEMA_CODE && stableBinding('qualified', qualifiedFn.name, qualifiedFn) && stableBinding('quoteAdminGrantActorInputIdent', quoterFn.name, quoterFn) && stableBinding('IDENT', identDecl.name, identDecl) && stableBinding(schemaCodeDecl.name.text, schemaCodeDecl.name, schemaCodeDecl)
+  const declaredInside = (owner: ts.FunctionDeclaration, declaration: ts.Node): boolean => owner.body !== undefined && declaration.pos >= owner.body.pos && declaration.end <= owner.body.end
+  const columnList = (receiver: ts.Identifier): readonly string[] | null => {
+    const declaration = constDeclarations.get('IMMUTABLE_COLUMNS')
+    if (!columnReadsClosed || !declaration?.initializer || !stableBinding('IMMUTABLE_COLUMNS', receiver, declaration)) return null
+    let init: ts.Expression = declaration.initializer
+    if (ts.isAsExpression(init)) init = init.expression
+    if (!ts.isArrayLiteralExpression(init) || init.elements.length === 0) return null
+    const names: string[] = []
+    for (const element of init.elements) {
+      if (!ts.isStringLiteral(element) || !/^[a-z_][a-z0-9_]*$/.test(element.text)) return null
+      names.push(element.text)
+    }
+    return names
+  }
+  const columnJoinReceiver = (expression: ts.Expression, literals: readonly string[], joinText: string): ts.Identifier | null => {
+    if (!ts.isCallExpression(expression) || expression.arguments.length !== 1 || !ts.isPropertyAccessExpression(expression.expression) || expression.expression.name.text !== 'join') return null
+    const joinTextNode = expression.arguments[0]
+    if ((!ts.isStringLiteral(joinTextNode) && !ts.isNoSubstitutionTemplateLiteral(joinTextNode)) || joinTextNode.text !== joinText) return null
+    const mapCall = expression.expression.expression
+    if (!ts.isCallExpression(mapCall) || mapCall.arguments.length !== 1 || !ts.isPropertyAccessExpression(mapCall.expression) || mapCall.expression.name.text !== 'map') return null
+    const receiver = mapCall.expression.expression
+    if (!ts.isIdentifier(receiver) || receiver.text !== 'IMMUTABLE_COLUMNS') return null
+    const arrow = mapCall.arguments[0]
+    if (!ts.isArrowFunction(arrow) || arrow.parameters.length !== 1 || !ts.isIdentifier(arrow.parameters[0].name) || !ts.isTemplateExpression(arrow.body)) return null
+    if (arrow.body.head.text !== 'NEW.' || arrow.body.templateSpans.length !== literals.length) return null
+    const column = arrow.parameters[0].name.text
+    if (!arrow.body.templateSpans.every((span, index) => ts.isIdentifier(span.expression) && span.expression.text === column && span.literal.text === literals[index])) return null
+    return receiver
+  }
+  const columnReads = new Set<ts.Identifier>()
+  for (const [owner, variable, literals, separator] of [
+    ['insertGuardSql', 'required', [' IS NULL'], NULL_COLUMN_JOIN],
+    ['challengeGuardBody', 'immutable', [' IS DISTINCT FROM OLD.', ''], DISTINCT_COLUMN_JOIN],
+  ] as const) {
+    const matches: ts.Identifier[] = []
+    for (const statement of functionDeclarations.get(owner)?.body?.statements ?? []) {
+      if (!ts.isVariableStatement(statement) || !(statement.declarationList.flags & ts.NodeFlags.Const) || statement.declarationList.declarations.length !== 1) continue
+      const declaration = statement.declarationList.declarations[0]
+      if (!ts.isIdentifier(declaration.name) || declaration.name.text !== variable || !declaration.initializer) continue
+      const receiver = columnJoinReceiver(declaration.initializer, literals, separator)
+      if (receiver) matches.push(receiver)
+    }
+    if (matches.length === 1) columnReads.add(matches[0])
+  }
+  const columnsDecl = constDeclarations.get('IMMUTABLE_COLUMNS')
+  const columnReadsClosed = columnsDecl !== undefined && referencesLimitedTo(columnsDecl, columnReads)
+  const columnJoin = (expression: ts.Expression, literals: readonly string[], joinText: string): readonly string[] | null => {
+    const receiver = columnJoinReceiver(expression, literals, joinText)
+    return receiver === null ? null : columnList(receiver)
+  }
+  const renderInsertGuard = (callee: ts.Identifier): string | null => {
+    const fn = functionDeclarations.get('insertGuardSql')
+    if (!fn?.body || !fn.name || fn.parameters.length !== 0 || !stableBinding('insertGuardSql', callee, fn)) return null
+    const statements = fn.body.statements
+    if (statements.length !== 2 || !ts.isVariableStatement(statements[0]) || !ts.isReturnStatement(statements[1])) return null
+    if ((statements[0].declarationList.flags & ts.NodeFlags.Const) === 0 || statements[0].declarationList.declarations.length !== 1) return null
+    const required = statements[0].declarationList.declarations[0]
+    if (!required || !ts.isIdentifier(required.name) || required.name.text !== 'required' || !required.initializer || !stableBinding('required', required.name, required)) return null
+    const columns = columnJoin(required.initializer, [' IS NULL'], NULL_COLUMN_JOIN)
+    if (columns === null) return null
+    const returned = statements[1].expression
+    if (!returned || !ts.isTemplateExpression(returned) || returned.templateSpans.length !== 1) return null
+    const span = returned.templateSpans[0]
+    if (!ts.isIdentifier(span.expression) || span.expression.text !== 'required' || !stableBinding('required', span.expression, required)) return null
+    const predicates = columns.map((column) => `NEW.${column} IS NULL`).join(NULL_COLUMN_JOIN)
+    return returned.head.text + predicates + span.literal.text
+  }
+  const renderFragment = (expression: ts.Expression, owner: ts.FunctionDeclaration): string | null => {
+    if (ts.isIdentifier(expression)) {
+      const folded = strictFold(expression)
+      const foldedDecl = constDeclarations.get(expression.text)
+      if (folded !== null && foldedDecl && stableBinding(expression.text, expression, foldedDecl)) return folded
+      const schemaDecl = constDeclarations.get(expression.text)
+      if (schemaDecl?.initializer && ts.isCallExpression(schemaDecl.initializer) && dollarLiteralReady && dollarLiteralFn && declaredInside(owner, schemaDecl) && stableBinding(expression.text, expression, schemaDecl)) {
+        const call = schemaDecl.initializer
+        const value = call.arguments[0]
+        const seed = call.arguments[1]
+        if (ts.isIdentifier(call.expression) && call.expression.text === 'dollarLiteral' && call.arguments.length === 2 && stableBinding('dollarLiteral', call.expression, dollarLiteralFn) && ts.isIdentifier(value) && ts.isStringLiteral(seed) && DOLLAR_TAG_SEED.test(seed.text)) {
+          const parameter = owner.parameters.find((item) => ts.isIdentifier(item.name) && item.name.text === value.text)
+          const tag = parameter && stableBinding(value.text, value, parameter) ? collisionTag(SUBSTITUTION, seed.text) : null
+          if (tag !== null) return `$${tag}$${SUBSTITUTION}$${tag}$`
+        }
+      }
+      if (schemaDecl?.initializer && declaredInside(owner, schemaDecl) && stableBinding(expression.text, expression, schemaDecl)) {
+        const columns = columnJoin(schemaDecl.initializer, [' IS DISTINCT FROM OLD.', ''], DISTINCT_COLUMN_JOIN)
+        if (columns !== null) return columns.map((column) => `NEW.${column} IS DISTINCT FROM OLD.${column}`).join(DISTINCT_COLUMN_JOIN)
+      }
+      return null
+    }
+    if (ts.isCallExpression(expression) && expression.arguments.length === 0 && ts.isIdentifier(expression.expression) && expression.expression.text === 'insertGuardSql') return renderInsertGuard(expression.expression)
+    return null
+  }
+  const renderBuilderBody = (valueName: string, valueUse: ts.Node): string | null => {
+    const declaration = constDeclarations.get(valueName)
+    if (!declaration?.initializer || !ts.isCallExpression(declaration.initializer) || !stableBinding(valueName, valueUse, declaration)) return null
+    if (!declaration.initializer.arguments.every((argument) => ts.isIdentifier(argument))) return null
+    const callee = declaration.initializer.expression
+    if (!ts.isIdentifier(callee)) return null
+    const fn = functionDeclarations.get(callee.text)
+    if (!fn?.body || !fn.name || fn.body.statements.length === 0 || !stableBinding(callee.text, callee, fn)) return null
+    const statements = fn.body.statements
+    if (!statements.slice(0, -1).every((statement) => ts.isVariableStatement(statement))) return null
+    const returned = statements[statements.length - 1]
+    if (!ts.isReturnStatement(returned) || !returned.expression) return null
+    const expression = returned.expression
+    if (ts.isNoSubstitutionTemplateLiteral(expression) || ts.isStringLiteral(expression)) return expression.text
+    if (!ts.isTemplateExpression(expression)) return null
+    let text = expression.head.text
+    for (const span of expression.templateSpans) {
+      const piece = renderFragment(span.expression, fn)
+      if (piece === null) return null
+      text += piece + span.literal.text
+    }
+    return text
+  }
+  const renderClosedTemplate = (template: ts.TemplateExpression, folds: string[]): string => {
+    let text = ''
+    let pending = template.head.text
+    const spans = template.templateSpans
+    for (let index = 0; index < spans.length; index += 1) {
+      const first = spans[index]
+      const bodySpan = spans[index + 1]
+      const close = spans[index + 2]
+      const paired = first !== undefined && bodySpan !== undefined && close !== undefined && /(?:^|\s)\$$/.test(pending) && ts.isIdentifier(first.expression) && ts.isIdentifier(bodySpan.expression) && ts.isIdentifier(close.expression) && first.expression.text === close.expression.text && /^\$\s*$/.test(first.literal.text) && /^\s*\$$/.test(bodySpan.literal.text) && close.literal.text.startsWith('$')
+      const tagName = paired && ts.isIdentifier(first.expression) ? first.expression.text : undefined
+      const tagDecl = tagName !== undefined ? constDeclarations.get(tagName) : undefined
+      const binding = tagName !== undefined && tagDecl !== undefined && ts.isIdentifier(first.expression) && stableBinding(tagName, first.expression, tagDecl) ? tagBindings.get(tagName) : undefined
+      const body = binding !== undefined && ts.isIdentifier(bodySpan.expression) && binding.valueName === bodySpan.expression.text ? renderBuilderBody(binding.valueName, bodySpan.expression) : null
+      const tag = body !== null && binding !== undefined ? collisionTag(body, binding.seed) : null
+      if (paired && binding !== undefined && body !== null && tag !== null) {
+        sink.admittedBodies.add(body)
+        text += `${pending.slice(0, -1)}$${tag}$${body}$${tag}$`
+        pending = close.literal.text.slice(1)
+        index += 2
+        continue
+      }
+      text += pending + fold(first.expression, folds)
+      pending = first.literal.text
+    }
+    return text + pending
+  }
+  const isReviewedUsersArgument = (node: ts.StringLiteral): boolean => {
+    if (!actorChainClosed || !identReadsClosed || !qualifiedFn || node.text !== 'users') return false
+    const call = node.parent
+    if (!ts.isCallExpression(call) || call.arguments.length !== 2 || call.arguments[1] !== node || !ts.isIdentifier(call.expression) || call.expression.text !== 'qualified' || !stableBinding('qualified', call.expression, qualifiedFn)) return false
+    const schema = call.arguments[0]
+    const owner = enclosingFunction(node)
+    if (!owner || !ts.isIdentifier(schema) || schema.text !== 'schemaName') return false
+    const parameter = owner.parameters.find((item) => ts.isIdentifier(item.name) && item.name.text === 'schemaName')
+    if (!parameter || !stableBinding('schemaName', schema, parameter)) return false
+    return owner.name !== undefined && USERS_QUALIFIER_OWNERS.has(owner.name.text)
+  }
+
   const visit = (node: ts.Node) => {
     if (consumed.has(node)) {
       if (ts.isCallExpression(node)) node.arguments.forEach((argument) => (ts.isArrowFunction(argument) || ts.isFunctionExpression(argument) ? visit(argument) : undefined))
@@ -1564,6 +2100,8 @@ function judgeSource(file: string, source: string, sink: Sink): void {
       }
     }
     if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+      // The reviewed qualifier argument is an identifier, not a statement. The same text elsewhere is judged.
+      if (ts.isStringLiteral(node) && isReviewedUsersArgument(node)) return
       // A literal that is the name of a cascade parent, and is not the table of a call read above,
       // may be the target of a write that has no text. The name of an input table is refused as text.
       const named = builderTable(node.text)
@@ -1573,9 +2111,7 @@ function judgeSource(file: string, source: string, sink: Sink): void {
     }
     if (ts.isTemplateExpression(node)) {
       const folds: string[] = []
-      let text = node.head.text
-      for (const span of node.templateSpans) text += fold(span.expression, folds) + span.literal.text
-      judgeText(text, folds, node)
+      judgeText(renderClosedTemplate(node, folds), folds, node)
       for (const span of node.templateSpans) visit(span.expression)
       return
     }
@@ -1604,7 +2140,7 @@ function judgeSource(file: string, source: string, sink: Sink): void {
  * writes a cascade parent, and counts the scanned-table writes found inside the judged statements.
  */
 export function judgeMigrationInputWrites(file: string, source: string): MigrationJudgeResult {
-  const sink: Sink = { judgments: [], writes: new Map(), dynamic: new Map() }
+  const sink: Sink = { judgments: [], writes: new Map(), dynamic: new Map(), admittedBodies: new Set() }
   if (SOURCE_EXTENSIONS.has(path.extname(file))) judgeSource(file, source, sink)
   else judgeSqlText(file, { text: source, folds: [], direct: true }, 1, sink)
   return Object.freeze({ judgments: Object.freeze(sink.judgments), writes: sink.writes, dynamic: sink.dynamic })

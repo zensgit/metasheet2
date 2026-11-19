@@ -1,6 +1,6 @@
 import { Logger } from '../core/logger'
-import { query, transaction } from '../db/pg'
-import { lockVisibleUsersForAccessGraphWrite, type AccessGraphTransactionClient } from '../directory/access-graph-mutex'
+import { query } from '../db/pg'
+import type { AccessGraphTransactionClient } from '../directory/access-graph-mutex'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 
 const logger = new Logger('NamespaceAdmission')
@@ -520,9 +520,7 @@ export async function lockNamespaceAdmissionReads(executor: NamespaceAdmissionLo
 /**
  * Enable namespace admissions for a user through a caller-supplied query surface.
  *
- * `setUserNamespaceAdmission` below owns the platform-admin endpoint's transaction;
- * provisioning needs the same write inside its own `transaction()`, so this variant
- * takes the executor. Statement shape mirrors the projected-governance writer in
+ * Provisioning supplies its transaction executor. Statement shape mirrors the projected-governance writer in
  * `directory/directory-sync.ts`, which already performs this enable inside a transaction.
  *
  * A no-op when `namespaces` is empty, which is the derived result for every grant that does
@@ -600,21 +598,6 @@ export async function writeUserNamespaceAdmission(
       options.actorId ?? null,
     ],
   )
-}
-
-export async function setUserNamespaceAdmission(options: NamespaceAdmissionWrite): Promise<NamespaceAdmissionSnapshot[]> {
-  const userId = normalizeString(options.userId)
-  const namespace = normalizeNamespace(options.namespace)
-  if (!userId) throw new Error('userId is required')
-  if (!namespace) throw new Error('namespace is required')
-  const actorId = normalizeString(options.actorId)
-  const subjectIds = Array.from(new Set([userId, actorId].filter(Boolean))).sort()
-  await transaction(async (client) => {
-    for (const subjectId of subjectIds) await lockNamespaceAdmissionWrites(client, subjectId)
-    await lockVisibleUsersForAccessGraphWrite(client, subjectIds)
-    await writeUserNamespaceAdmission(options, client)
-  })
-  return listUserNamespaceAdmissionSnapshots(userId)
 }
 
 /** The caller holds lockNamespaceAdmissionWrites through membership DELETE and this witness. */

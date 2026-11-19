@@ -1,10 +1,11 @@
 import express from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type { AuditLogOptions } from '../../src/audit/audit'
 import { usePinnedServer } from '../utils/pinned-server'
 
 const pg = vi.hoisted(() => ({ query: vi.fn() }))
-const audit = vi.hoisted(() => ({ auditLog: vi.fn(async () => undefined) }))
+const audit = vi.hoisted(() => ({ auditLog: vi.fn(async (_options: AuditLogOptions) => undefined) }))
 const alias = vi.hoisted(() => ({ claimNonEmptyLoginAliasesOrThrow: vi.fn(async () => []) }))
 const roles = vi.hoisted(() => ({
   assignUserRoles: vi.fn(async () => ({ rowCount: 1, affectedUserIds: [], delegatedAdminScopeCleanup: [] })),
@@ -16,6 +17,17 @@ const rbac = vi.hoisted(() => ({
   invalidateUserPerms: vi.fn(),
 }))
 const authState = vi.hoisted(() => ({ id: 'admin-1', role: 'admin' }))
+const birth = vi.hoisted(() => ({
+  createAdminBatchUserCommand: vi.fn(async (_input: {
+    actorId: string
+    userId: string
+    email: string
+    name: string
+    department: string | null
+    passwordHash: string
+    roleId: string | null
+  }) => undefined),
+}))
 
 vi.mock('../../src/middleware/auth', () => ({
   authenticate: (req: express.Request, _res: express.Response, next: express.NextFunction) => {
@@ -43,6 +55,17 @@ vi.mock('../../src/rbac/service', () => ({
 vi.mock('bcryptjs', () => ({
   hash: vi.fn(async () => 'hashed'),
 }))
+vi.mock('../../src/admin/admin-user-batch-birth-command', () => ({
+  createAdminBatchUserCommand: (input: {
+    actorId: string
+    userId: string
+    email: string
+    name: string
+    department: string | null
+    passwordHash: string
+    roleId: string | null
+  }) => birth.createAdminBatchUserCommand(input),
+}))
 
 import { registerAdminUserBatchRoutes } from '../../src/routes/admin-user-batch'
 
@@ -63,13 +86,17 @@ describe('admin user batch routes', () => {
     authState.id = 'admin-1'
     authState.role = 'admin'
     pg.query.mockReset()
-    audit.auditLog.mockClear()
+    audit.auditLog.mockReset()
+    audit.auditLog.mockImplementation(async () => undefined)
     alias.claimNonEmptyLoginAliasesOrThrow.mockClear()
     roles.assignUserRoles.mockReset()
     roles.unassignUserRoles.mockReset()
     roles.assignUserRoles.mockResolvedValue({ rowCount: 1, affectedUserIds: [], delegatedAdminScopeCleanup: [] })
     roles.unassignUserRoles.mockResolvedValue({ rowCount: 1, affectedUserIds: [], delegatedAdminScopeCleanup: [] })
     sessions.revokeUserSessions.mockClear()
+    rbac.invalidateUserPerms.mockClear()
+    birth.createAdminBatchUserCommand.mockReset()
+    birth.createAdminBatchUserCommand.mockResolvedValue(undefined)
   })
 
   it('creates a valid row, skips a duplicate, and audits the batch without storing the password', async () => {
@@ -96,14 +123,188 @@ describe('admin user batch routes', () => {
     const failed = response.body.data.results.find((item: { ok: boolean }) => !item.ok)
     const created = response.body.data.results.find((item: { ok: boolean }) => item.ok)
     expect(failed.code).toBe('INVALID_EMAIL')
+    expect(failed.temporaryPassword).toBeUndefined()
     expect(created.temporaryPassword).toMatch(/^Tmp-/)
-    expect(roles.assignUserRoles).toHaveBeenCalledTimes(1)
-    const admission = pg.query.mock.calls.find((call) => String(call[0]).includes('user_namespace_admissions'))
-    expect(String(admission?.[0])).toContain('INSERT INTO user_namespace_admissions')
-    expect(admission?.[1]).toEqual(expect.arrayContaining([false, 'attendance', 'admin_batch_create']))
+    expect(birth.createAdminBatchUserCommand).toHaveBeenCalledTimes(1)
+    const commandInput = birth.createAdminBatchUserCommand.mock.calls[0]?.[0]
+    expect(commandInput).toMatchObject({
+      actorId: 'admin-1',
+      email: 'new@example.com',
+      name: '新同事',
+      department: '计划部',
+      roleId: 'user',
+      passwordHash: 'hashed',
+    })
+    expect(Object.keys(commandInput ?? {}).sort()).toEqual([
+      'actorId', 'department', 'email', 'name', 'passwordHash', 'roleId', 'userId',
+    ])
+    expect(commandInput?.userId).toBe(created.userId)
+    expect(JSON.stringify(commandInput)).not.toContain('Tmp-')
+    expect(pg.query.mock.calls.some((call) => String(call[0]).includes('INSERT INTO users'))).toBe(false)
+    expect(pg.query.mock.calls.some((call) => String(call[0]).includes('user_namespace_admissions'))).toBe(false)
+    expect(roles.assignUserRoles).not.toHaveBeenCalled()
+    expect(rbac.invalidateUserPerms).toHaveBeenCalledWith(created.userId)
     const batchAudit = audit.auditLog.mock.calls.find((call) => call[0]?.resourceType === 'user-batch')
     expect(batchAudit?.[0]).toMatchObject({ action: 'create', resourceId: 'create' })
-    expect(JSON.stringify(batchAudit?.[0])).not.toContain('Tmp-')
+    expect(JSON.stringify(audit.auditLog.mock.calls)).not.toContain('Tmp-')
+    expect(JSON.stringify(audit.auditLog.mock.calls)).not.toContain('hashed')
+  })
+
+  it('keeps an earlier created row when a later row fails and a following row succeeds', async () => {
+    pg.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM roles')) return { rows: [{ id: 'user' }] }
+      if (sql.includes('FROM users WHERE lower(email)')) return { rows: [] }
+      return { rows: [] }
+    })
+    birth.createAdminBatchUserCommand.mockImplementation(async (input) => {
+      if (input.email === 'middle@example.com') throw Object.assign(new Error('alias'), { code: 'ALIAS_CONFLICT' })
+    })
+
+    const response = await request(pinned.url())
+      .post('/api/admin/users/batch/create')
+      .send({
+        items: [
+          { email: 'bad', name: '坏行' },
+          { email: 'first@example.com', name: '甲乙', roleId: 'user', department: '一车间' },
+          { email: 'middle@example.com', name: '丙丁', roleId: 'user' },
+          { email: 'later@example.com', name: '戊己', roleId: 'user' },
+        ],
+      })
+
+    expect(response.status).toBe(200)
+    expect(response.body.data.successCount).toBe(2)
+    expect(response.body.data.failureCount).toBe(2)
+    expect(response.body.data.results.map((item: { code: string | null }) => item.code)).toEqual([
+      'INVALID_EMAIL', null, 'ALIAS_CONFLICT', null,
+    ])
+    const passwords = response.body.data.results.map((item: { temporaryPassword?: string }) => item.temporaryPassword)
+    expect(passwords[0]).toBeUndefined()
+    expect(passwords[1]).toMatch(/^Tmp-/)
+    expect(passwords[2]).toBeUndefined()
+    expect(passwords[3]).toMatch(/^Tmp-/)
+    expect(birth.createAdminBatchUserCommand.mock.calls.map((call) => call[0].email)).toEqual([
+      'first@example.com', 'middle@example.com', 'later@example.com',
+    ])
+    expect(rbac.invalidateUserPerms).toHaveBeenCalledTimes(2)
+    expect(JSON.stringify(audit.auditLog.mock.calls)).not.toContain('Tmp-')
+  })
+
+  it('stops later rows with FORBIDDEN after the actor is revoked and keeps the first row', async () => {
+    pg.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM roles')) return { rows: [{ id: 'user' }] }
+      if (sql.includes('FROM users WHERE lower(email)')) return { rows: [] }
+      return { rows: [] }
+    })
+    let seen = 0
+    birth.createAdminBatchUserCommand.mockImplementation(async () => {
+      seen += 1
+      if (seen > 1) throw Object.assign(new Error('Admin access required'), { code: 'FORBIDDEN' })
+    })
+
+    const response = await request(pinned.url())
+      .post('/api/admin/users/batch/create')
+      .send({
+        items: [
+          { email: 'first@example.com', name: '甲乙', roleId: 'user' },
+          { email: 'second@example.com', name: '丙丁', roleId: 'user' },
+        ],
+      })
+
+    expect(response.status).toBe(200)
+    expect(response.body.data.results.map((item: { code: string | null; ok: boolean }) => [item.ok, item.code])).toEqual([
+      [true, null],
+      [false, 'FORBIDDEN'],
+    ])
+    expect(response.body.data.results[0].temporaryPassword).toMatch(/^Tmp-/)
+    expect(response.body.data.results[1].temporaryPassword).toBeUndefined()
+    expect(response.body.data.results[1].userId).toBeNull()
+    expect(birth.createAdminBatchUserCommand).toHaveBeenCalledTimes(2)
+    expect(birth.createAdminBatchUserCommand.mock.calls[0]?.[0].actorId).toBe('admin-1')
+    expect(birth.createAdminBatchUserCommand.mock.calls[1]?.[0].actorId).toBe('admin-1')
+    expect(rbac.invalidateUserPerms).toHaveBeenCalledTimes(1)
+    expect(rbac.invalidateUserPerms).toHaveBeenCalledWith(response.body.data.results[0].userId)
+  })
+
+  it('passes no-role and admin role through as plain data and does not insert from the route', async () => {
+    pg.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM roles')) return { rows: [{ id: 'admin' }] }
+      if (sql.includes('FROM users WHERE lower(email)')) return { rows: [] }
+      return { rows: [] }
+    })
+
+    const response = await request(pinned.url())
+      .post('/api/admin/users/batch/create')
+      .send({
+        items: [
+          { email: 'plain@example.com', name: '甲乙', department: '装配' },
+          { email: 'admin@example.com', name: '丙丁', roleId: 'admin' },
+        ],
+      })
+
+    expect(response.status).toBe(200)
+    expect(response.body.data.successCount).toBe(2)
+    expect(birth.createAdminBatchUserCommand.mock.calls.map((call) => call[0].roleId)).toEqual([null, 'admin'])
+    expect(birth.createAdminBatchUserCommand.mock.calls[0]?.[0]).toMatchObject({
+      email: 'plain@example.com',
+      name: '甲乙',
+      department: '装配',
+      passwordHash: 'hashed',
+    })
+    expect(roles.assignUserRoles).not.toHaveBeenCalled()
+    expect(pg.query.mock.calls.some((call) => String(call[0]).includes('INSERT INTO'))).toBe(false)
+  })
+
+  it('reports a committed row as failed when the post-commit item audit throws and omits the password', async () => {
+    pg.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM roles')) return { rows: [{ id: 'user' }] }
+      if (sql.includes('FROM users WHERE lower(email)')) return { rows: [] }
+      return { rows: [] }
+    })
+    audit.auditLog.mockImplementation(async (entry: { resourceType?: string }) => {
+      if (entry?.resourceType === 'user') throw new Error('audit failed')
+    })
+
+    const response = await request(pinned.url())
+      .post('/api/admin/users/batch/create')
+      .send({ items: [{ email: 'new@example.com', name: '甲乙', roleId: 'user' }] })
+
+    expect(response.status).toBe(200)
+    expect(response.body.data.successCount).toBe(0)
+    expect(response.body.data.failureCount).toBe(1)
+    expect(response.body.data.results[0]).toMatchObject({
+      ok: false,
+      userId: null,
+      code: 'CREATE_FAILED',
+    })
+    expect(response.body.data.results[0].temporaryPassword).toBeUndefined()
+    expect(birth.createAdminBatchUserCommand).toHaveBeenCalledTimes(1)
+    expect(rbac.invalidateUserPerms).toHaveBeenCalledTimes(1)
+    expect(audit.auditLog.mock.calls.some((call) => call[0]?.resourceType === 'user-batch')).toBe(true)
+    expect(JSON.stringify(response.body)).not.toContain('Tmp-')
+  })
+
+  it('omits the password and post-commit effects when the birth root does not commit', async () => {
+    pg.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM roles')) return { rows: [{ id: 'user' }] }
+      if (sql.includes('FROM users WHERE lower(email)')) return { rows: [] }
+      return { rows: [] }
+    })
+    birth.createAdminBatchUserCommand.mockRejectedValue(Object.assign(new Error('commit failed'), { code: 'COMMIT_UNCONFIRMED' }))
+
+    const response = await request(pinned.url())
+      .post('/api/admin/users/batch/create')
+      .send({ items: [{ email: 'new@example.com', name: '甲乙', roleId: 'user' }] })
+
+    expect(response.status).toBe(200)
+    expect(response.body.data.results[0]).toMatchObject({
+      ok: false,
+      userId: null,
+      code: 'COMMIT_UNCONFIRMED',
+    })
+    expect(response.body.data.results[0].temporaryPassword).toBeUndefined()
+    expect(rbac.invalidateUserPerms).not.toHaveBeenCalled()
+    expect(audit.auditLog.mock.calls.some((call) => call[0]?.resourceType === 'user')).toBe(false)
+    expect(JSON.stringify(response.body)).not.toContain('Tmp-')
   })
 
   it('returns a dry-run diff and does not write', async () => {
