@@ -40,12 +40,17 @@
  *   MR3-RD-07 the pair's own gate, read from the stored field property: with the lock stripped from the two columns the
  *             routes refuse a request that names the pair (409 lock_missing) and nothing else changes; /context sends no
  *             `parentFieldIds`; the candidates route refuses.
- *   MR3-RD-08 the candidates (GET …/manual-rows/parent-options) on real rows — and a column the actor's
- *             field_permissions hide is absent from the items and cannot be matched by `q` (the egress locking case).
- *   MR3-RD-09 rows the row policy denies the actor are neither listed nor counted — by the candidates statement and by
- *             GET …/manual-parent-dependents; a platform admin sees them.
+ *   MR3-RD-08 the candidates (GET …/manual-rows/parent-options) on real rows — ONE entry per parent 图号 though its rows
+ *             name it differently (the name most rows use, a tie to the byte-smallest, every row counted) — and a column
+ *             the actor's field_permissions hide is absent from the items and cannot be matched by `q` (the egress
+ *             locking case).
+ *   MR3-RD-09 rows the row policy denies the actor are neither listed nor counted (nor do they vote for a parent's
+ *             name) — by the candidates statement and by GET …/manual-parent-dependents; a platform admin sees them.
  *   MR3-RD-10 /context `parentFieldIds`: sent to an actor who may write both columns, withheld when a per-subject rule
  *             makes one of them read-only.
+ *   MR3-RD-11 the search text is folded by the DATABASE, like the columns it is matched against: text that is not ASCII,
+ *             typed as the sheet stores it, is found whatever the database's LC_CTYPE (a "C" database folds ASCII only;
+ *             a libc locale folds each character on its own and so never writes JavaScript's word-final sigma).
  * Values-free: every id is synthetic and per-run.
  */
 import { createRequire } from 'module'
@@ -164,6 +169,14 @@ export function defineStockPreparationManualRowsHostRealDbCases(): void {
         asm: plm('asm', { componentCode: 'ASM-1', componentName: 'Assembly' }),
         part1: plm('p1', { componentCode: 'PRT-1', componentName: 'Part one', parentComponentCode: 'ASM-1', parentComponentName: 'Assembly and spec' }),
         part2: plm('p2', { componentCode: 'PRT-2', componentName: 'Part two', parentComponentCode: 'ASM-1', parentComponentName: 'Assembly and spec' }),
+        // the same parent 图号 under ANOTHER name (PLM renamed the assembly between two pulls): still one ASM-1 entry
+        part3: plm('p3', { componentCode: 'PRT-3', componentName: 'Part three', parentComponentCode: 'ASM-1', parentComponentName: 'Assembly (renamed)' }),
+        // a parent two rows name differently, one row each: the byte-smallest name ('B' 0x42 is before 'a' 0x61)
+        tieA: plm('ta', { componentCode: 'TIE-A', componentName: 'Tie a', parentComponentCode: 'TIE-1', parentComponentName: 'a name' }),
+        tieB: plm('tb', { componentCode: 'TIE-B', componentName: 'Tie b', parentComponentCode: 'TIE-1', parentComponentName: 'B name' }),
+        // text that is not ASCII (MR3-RD-11). Greek on purpose: Φ, Δ and Σ look like no Latin letter.
+        axle: plm('ax', { componentCode: 'AXL-1', componentName: '轴 Φ20' }),
+        sigma: plm('sg', { componentCode: 'SYN-ΔΣ', componentName: 'Sigma shaft' }),
         manual1: manual('m1', { componentCode: 'MAN-1', componentName: 'Manual one', parentComponentCode: 'PRT-1', parentComponentName: 'Part one' }),
         manualParent: manual('mp', { componentCode: 'MAN-P', componentName: 'Manual parent' }),
         manualChild1: manual('mc1', { componentCode: 'MAN-C1', componentName: 'Manual child one', parentComponentCode: 'MAN-P', parentComponentName: 'Manual parent' }),
@@ -746,19 +759,27 @@ export function defineStockPreparationManualRowsHostRealDbCases(): void {
       actor = WRITER
       const stack = picker
       const PARENTS = [
-        { code: 'ASM-1', name: 'Assembly and spec', kind: 'parent', childCount: 2 },
+        // ONE entry though its three children store two names: the name two of them use, all three counted
+        { code: 'ASM-1', name: 'Assembly and spec', kind: 'parent', childCount: 3 },
         // two manual children and one PLM child carry it
         { code: 'MAN-P', name: 'Manual parent', kind: 'parent', childCount: 3 },
         { code: 'PRT-1', name: 'Part one', kind: 'parent', childCount: 1 },
+        // one row each for 'a name' and 'B name': the byte-smallest, whatever the database's own collation would say
+        { code: 'TIE-1', name: 'B name', kind: 'parent', childCount: 2 },
       ]
       const ALL = [
         ...PARENTS,
         { code: ' SP-1 ', name: 'Spaced', kind: 'component' },
+        { code: 'AXL-1', name: '轴 Φ20', kind: 'component' },
         { code: 'MAN-1', name: 'Manual one', kind: 'component' },
         { code: 'MAN-C1', name: 'Manual child one', kind: 'component' },
         { code: 'MAN-C2', name: 'Manual child two', kind: 'component' },
         { code: 'PRT-2', name: 'Part two', kind: 'component' },
+        { code: 'PRT-3', name: 'Part three', kind: 'component' },
         { code: 'PRT-9', name: 'Part nine', kind: 'component' },
+        { code: 'SYN-ΔΣ', name: 'Sigma shaft', kind: 'component' },
+        { code: 'TIE-A', name: 'Tie a', kind: 'component' },
+        { code: 'TIE-B', name: 'Tie b', kind: 'component' },
       ]
       const all = await options(stack)
       expect(all.status, JSON.stringify(all.body)).toBe(200)
@@ -766,10 +787,16 @@ export function defineStockPreparationManualRowsHostRealDbCases(): void {
       // parent (ASM-1, MAN-P, PRT-1) is listed once, under the PARENT's name; the row without a 图号, the inactive row and
       // the number in the 图号 cell are not candidates; values exactly as stored (' SP-1 ' keeps its spaces)
       expect(all.body).toEqual({ ok: true, data: { items: ALL, truncated: false } })
+      // no 图号 is listed twice, and the name only one of ASM-1's children uses is not listed at all
+      expect(new Set(ALL.map((item) => item.code)).size).toBe(ALL.length)
+      expect(JSON.stringify(all.body)).not.toContain('Assembly (renamed)')
       expect((await options(stack, { limit: '2' })).body.data).toEqual({ items: ALL.slice(0, 2), truncated: true })
-      expect((await options(stack, { limit: '9' })).body.data).toEqual({ items: ALL, truncated: false })
-      expect((await options(stack, { q: ' PART ' })).body.data.items.map((item: { code: string }) => item.code)).toEqual(['PRT-1', 'PRT-2', 'PRT-9'])
+      expect((await options(stack, { limit: String(ALL.length - 1) })).body.data).toEqual({ items: ALL.slice(0, -1), truncated: true })
+      expect((await options(stack, { limit: String(ALL.length) })).body.data).toEqual({ items: ALL, truncated: false })
+      expect((await options(stack, { q: ' PART ' })).body.data.items.map((item: { code: string }) => item.code)).toEqual(['PRT-1', 'PRT-2', 'PRT-3', 'PRT-9'])
       expect((await options(stack, { q: 'and spec' })).body.data.items).toEqual([ALL[0]])
+      // the search reads the ENTRY: the name a minority of ASM-1's rows use finds nothing
+      expect((await options(stack, { q: 'renamed' })).body.data.items).toEqual([])
       // SQL wildcards are plain characters
       expect((await options(stack, { q: '%' })).body.data.items).toEqual([])
       expect((await options(stack, { q: '_' })).body.data.items).toEqual([])
@@ -784,9 +811,10 @@ export function defineStockPreparationManualRowsHostRealDbCases(): void {
       try {
         const masked = await options(stack, { limit: '50' })
         expect(masked.status).toBe(200)
-        expect(masked.body.data.items.slice(0, 3)).toEqual(PARENTS.map((item) => ({ ...item, name: null })))
+        // still one entry per 图号, each with all of its rows counted — and no name
+        expect(masked.body.data.items.slice(0, PARENTS.length)).toEqual(PARENTS.map((item) => ({ ...item, name: null })))
         // the readable columns are untouched by that rule
-        expect(masked.body.data.items.slice(3)).toEqual(ALL.slice(3))
+        expect(masked.body.data.items.slice(PARENTS.length)).toEqual(ALL.slice(PARENTS.length))
         expect(JSON.stringify(masked.body)).not.toContain('Assembly and spec')
         // …and `q` cannot be used to find out what the hidden column holds
         expect((await options(stack, { q: 'and spec' })).body.data).toEqual({ items: [], truncated: false })
@@ -834,8 +862,9 @@ export function defineStockPreparationManualRowsHostRealDbCases(): void {
         const res = await options(stack, { limit: '50' })
         expect(res.status, JSON.stringify(res.body)).toBe(200)
         const items = res.body.data.items as Array<{ code: string; kind: string; childCount?: number }>
-        // PRT-2's row is denied: its own entry is gone and ASM-1 counts one child less
-        expect(items.find((item) => item.code === 'ASM-1')).toEqual({ code: 'ASM-1', name: 'Assembly and spec', kind: 'parent', childCount: 1 })
+        // PRT-2's row is denied: its own entry is gone, ASM-1 counts one child less — and its name is voted by the rows
+        // this actor may read: one for each text now, so the byte-smallest ('(' 0x28 is before 'a' 0x61)
+        expect(items.find((item) => item.code === 'ASM-1')).toEqual({ code: 'ASM-1', name: 'Assembly (renamed)', kind: 'parent', childCount: 2 })
         expect(items.some((item) => item.code === 'PRT-2')).toBe(false)
         expect(JSON.stringify(res.body)).not.toContain('Part two')
         expect((await options(stack, { q: 'part two' })).body.data.items).toEqual([])
@@ -844,7 +873,10 @@ export function defineStockPreparationManualRowsHostRealDbCases(): void {
         // the row itself denied → the shared record gate refuses
         expect((await dependents(pickerIds.manualChild1)).status).toBe(403)
         actor = ADMIN
-        expect((await options(stack, { limit: '50' })).body.data.items.some((item: { code: string }) => item.code === 'PRT-2')).toBe(true)
+        const adminItems = (await options(stack, { limit: '50' })).body.data.items as Array<{ code: string }>
+        expect(adminItems.some((item) => item.code === 'PRT-2')).toBe(true)
+        // a platform admin reads all three children: the majority name again
+        expect(adminItems.find((item) => item.code === 'ASM-1')).toEqual({ code: 'ASM-1', name: 'Assembly and spec', kind: 'parent', childCount: 3 })
         expect((await dependents(manualParent)).body.data).toEqual({ count: 2 })
       } finally {
         actor = WRITER
@@ -883,6 +915,42 @@ export function defineStockPreparationManualRowsHostRealDbCases(): void {
         await q('DELETE FROM field_permissions WHERE sheet_id = $1 AND subject_id = $2', [main.sheetId, WRITER.id])
       }
       expect((await blockOf()).parentFieldIds).toEqual(pair(main))
+    })
+
+    test('MR3-RD-11 the search text is folded by the database, like the columns: text that is not ASCII, typed as the sheet stores it, is found whatever the database\'s LC_CTYPE', async () => {
+      actor = WRITER
+      const codes = async (search: string) => {
+        const res = await options(picker, { q: search })
+        expect(res.status, JSON.stringify(res.body)).toBe(200)
+        return (res.body.data.items as Array<{ code: string }>).map((item) => item.code)
+      }
+      // Typed exactly as stored: found on EVERY database. The application does not fold the text first — JavaScript
+      // would make these '轴 φ20' and 'δς', and neither is what a database makes of the column: a LC_CTYPE "C" database
+      // leaves Φ alone (a needle folded by JavaScript found nothing there for the first two), and a libc locale folds
+      // each character on its own, so it writes σ where JavaScript writes the word-final ς (nothing for the third).
+      expect(await codes('轴 Φ20')).toEqual(['AXL-1'])
+      expect(await codes('Φ20')).toEqual(['AXL-1'])
+      expect(await codes('ΔΣ')).toEqual(['SYN-ΔΣ'])
+      expect(await codes(' 轴 Φ20 ')).toEqual(['AXL-1'])
+      // ASCII letters fold on every database
+      expect(await codes('axl-')).toEqual(['AXL-1'])
+      expect(await codes('SIGMA')).toEqual(['SYN-ΔΣ'])
+      expect(await codes('syn-ΔΣ')).toEqual(['SYN-ΔΣ'])
+      // How far the match ignores case beyond ASCII is the database's own rule — so ask THIS database, and expect the
+      // route to answer exactly that (both sides of the match are folded by it).
+      const folds = (await q(`SELECT lower('Φ') = 'φ' AS phi, strpos(lower('SYN-ΔΣ'), lower('δσ')) > 0 AS small_sigma, strpos(lower('SYN-ΔΣ'), lower('δς')) > 0 AS final_sigma`)).rows[0] as { phi: boolean; small_sigma: boolean; final_sigma: boolean }
+      expect(await codes('φ20')).toEqual(folds.phi ? ['AXL-1'] : [])
+      expect(await codes('δσ')).toEqual(folds.small_sigma ? ['SYN-ΔΣ'] : [])
+      expect(await codes('δς')).toEqual(folds.final_sigma ? ['SYN-ΔΣ'] : [])
+      // a hidden column is still not matched, whatever the text: 名称 hidden → '轴 Φ20' lives only there
+      await q('INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,$3,$4,$5,$6)',
+        [picker.sheetId, phys(picker, 'componentName'), 'user', WRITER.id, false, false])
+      try {
+        expect(await codes('轴 Φ20')).toEqual([])
+        expect(await codes('ΔΣ')).toEqual(['SYN-ΔΣ'])
+      } finally {
+        await q('DELETE FROM field_permissions WHERE sheet_id = $1 AND subject_id = $2', [picker.sheetId, WRITER.id])
+      }
     })
   })
 }

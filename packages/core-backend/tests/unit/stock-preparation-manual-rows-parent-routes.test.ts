@@ -828,6 +828,35 @@ describe('O — GET /sheets/:sheetId/manual-rows/parent-options', () => {
     expect(res.body).toEqual({ ok: true, data: { items: ALL, truncated: false } })
   })
 
+  it('O-01b ONE entry per parent 图号 though its rows name it differently: the name most rows use (a tie → the byte-smallest), childCount = all of them', async () => {
+    seed(S.PREG)
+    // PLM renamed the assembly between two pulls (a third child stores the newer text), and a manual child typed no name.
+    plmRow(S.PREG, 'rec_mrp1_o_part3', { componentCode: 'PRT-3', componentName: 'Part three', parentComponentCode: 'ASM-1', parentComponentName: 'Assembly (renamed)' })
+    manualRow(S.PREG, 'rec_mrp1_o_manual2', { componentCode: 'MAN-2', componentName: 'Manual two', parentComponentCode: 'ASM-1', parentComponentName: null })
+    // a tie under PRT-1: one row each — 'Part ONE' sorts before 'Part one' in byte order
+    manualRow(S.PREG, 'rec_mrp1_o_manual3', { componentCode: 'MAN-3', componentName: 'Manual three', parentComponentCode: 'PRT-1', parentComponentName: 'Part ONE' })
+    const res = await options(S.PREG, { limit: '50' })
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    const items = res.body.data.items as Array<{ code: string; name: string | null; kind: string; childCount?: number }>
+    expect(items.filter((item) => item.kind === 'parent')).toEqual([
+      { code: 'ASM-1', name: 'Assembly and spec', kind: 'parent', childCount: 4 },
+      { code: 'PRT-1', name: 'Part ONE', kind: 'parent', childCount: 2 },
+    ])
+    // no 图号 twice anywhere in the list, and the minority name is not listed at all
+    expect(new Set(items.map((item) => item.code)).size).toBe(items.length)
+    expect(JSON.stringify(res.body)).not.toContain('Assembly (renamed)')
+    // the search reads the ENTRY: the minority name finds nothing, the entry's name finds the one entry
+    expect((await options(S.PREG, { q: 'renamed' })).body.data.items).toEqual([])
+    expect((await options(S.PREG, { q: 'and spec' })).body.data.items).toEqual([{ code: 'ASM-1', name: 'Assembly and spec', kind: 'parent', childCount: 4 }])
+    // 父组件名称 hidden for the actor: still one entry per 图号, no name, the same counts
+    deny(S.PREG, 'parentComponentName', { visible: false })
+    const hidden = (await options(S.PREG, { limit: '50' })).body.data.items as Array<{ kind: string }>
+    expect(hidden.filter((item) => item.kind === 'parent')).toEqual([
+      { code: 'ASM-1', name: null, kind: 'parent', childCount: 4 },
+      { code: 'PRT-1', name: null, kind: 'parent', childCount: 2 },
+    ])
+  })
+
   it('O-02 session requests only: an mst_ bearer is refused 401 before any read', async () => {
     seed(S.PREG)
     fake.sqlLog.length = 0
@@ -885,11 +914,11 @@ describe('O — GET /sheets/:sheetId/manual-rows/parent-options', () => {
     expect((await options(S.PREG)).status).toBe(200)
   })
 
-  it('O-07 q: a case-insensitive substring of an entry\'s 图号 or 名称; the search text travels lower-cased as a parameter', async () => {
+  it('O-07 q: a case-insensitive substring of an entry\'s 图号 or 名称; the search text travels AS TYPED (trimmed) as a parameter — the statement folds it', async () => {
     seed(S.PREG)
     const byName = await options(S.PREG, { q: ' PART ' })
     expect(byName.body.data.items.map((item: { code: string }) => item.code)).toEqual(['PRT-1', 'PRT-2'])
-    expect(statement().at(-1)!.params[8]).toBe('part')
+    expect(statement().at(-1)!.params[8]).toBe('PART')
     const byCode = await options(S.PREG, { q: 'asm' })
     expect(byCode.body.data.items).toEqual([ALL[0]])
     // a part listed under its parent entry is found by the ENTRY's text
@@ -898,6 +927,25 @@ describe('O — GET /sheets/:sheetId/manual-rows/parent-options', () => {
     // SQL wildcards are plain characters
     expect((await options(S.PREG, { q: '%' })).body.data.items).toEqual([])
     expect((await options(S.PREG, { q: '_' })).body.data.items).toEqual([])
+  })
+
+  it.each([
+    ['C', 'LOWER folds ASCII letters only there'],
+    ['utf8', 'LOWER folds every letter there, each on its own'],
+  ] as const)('O-07b a search text that is not ASCII, typed as the sheet stores it, is found on a database whose LC_CTYPE is %s (%s): it reaches the statement as typed', async (ctype) => {
+    fake.setDatabaseCtype(ctype)
+    seed(S.PREG)
+    plmRow(S.PREG, 'rec_mrp1_o_phi', { componentCode: 'AXL-1', componentName: '轴 Φ20' })
+    plmRow(S.PREG, 'rec_mrp1_o_sigma', { componentCode: 'SYN-ΔΣ', componentName: 'Sigma part' })
+    // (JavaScript would fold these to '轴 φ20' and 'δς' — neither is what a "C" database, or any libc one, makes of the column.)
+    for (const [q, code] of [['轴 Φ20', 'AXL-1'], ['Φ20', 'AXL-1'], ['ΔΣ', 'SYN-ΔΣ'], [' 轴 Φ20 ', 'AXL-1']]) {
+      const res = await options(S.PREG, { q })
+      expect(res.status, JSON.stringify(res.body)).toBe(200)
+      expect(res.body.data.items.map((item: { code: string }) => item.code), q).toEqual([code])
+      expect(statement().at(-1)!.params[8], q).toBe(q.trim())
+    }
+    // ASCII still folds on both
+    expect((await options(S.PREG, { q: 'axl' })).body.data.items.map((item: { code: string }) => item.code)).toEqual(['AXL-1'])
   })
 
   it('O-08 limit: default 20, 1 – 50, `truncated` when more entries exist; the statement is asked for limit + 1', async () => {

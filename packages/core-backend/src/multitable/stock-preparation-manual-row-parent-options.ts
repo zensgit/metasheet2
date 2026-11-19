@@ -5,13 +5,25 @@
  *
  * CANDIDATES — GET /api/multitable/sheets/:sheetId/manual-rows/parent-options?q=&limit=
  *   What a manual row may be hung under, read from the sheet itself:
- *     kind 'parent'     a 父组件图号 + 父组件名称 that already appears on some row, with `childCount` = how many rows carry it;
+ *     kind 'parent'     a 父组件图号 that already appears on some row — ONE entry per 图号, with `childCount` = how many
+ *                       rows carry it. The same 图号 can be stored with different 父组件名称 (PLM renamed the parent
+ *                       between pulls, a person typed another name): the entry's name is the one MOST of those rows
+ *                       use (a tie goes to the byte-smallest; rows without a name do not vote, and the name is null
+ *                       only when none of them has one), so a parent is never listed twice with its children split;
  *     kind 'component'  a row's own 图号 + 名称 (PLM rows and manual rows alike), unless that 图号 is already listed as a
  *                       'parent' — then only the 'parent' entry is listed, with ITS name. A PLM child stores its parent's
  *                       UNSPLIT 「名称及规格」 while the parent's own row stores the split first segment; listing the
  *                       'parent' text keeps a manual child's 父组件名称 equal to its PLM siblings'.
  *   A blank 图号 is never listed. Values are returned exactly as stored (never trimmed): the fill view groups by the
  *   raw text, so the picked value must equal the PLM text byte for byte.
+ *
+ * THE SEARCH (`q`) is a substring match on an entry's 图号 or 名称, and BOTH sides are folded by the database:
+ * `strpos(LOWER(column), LOWER($9))`, with `q` passed as typed. The application never lower-cases it. JavaScript
+ * and the database do not fold the same way: a database whose LC_CTYPE is "C" (this repository provisions such
+ * ones) folds ASCII letters only, and a libc locale folds each character on its own, where JavaScript writes a
+ * word-final capital sigma as ς. A needle folded by one and a column folded by the other therefore miss each other
+ * on text such as 「Φ20」 even when it is typed exactly as stored. Folded by one engine, a needle typed as stored
+ * always matches; how far the match ignores case is the database's own rule (ASCII only on a "C" database).
  *
  * DEPENDENTS — GET /api/multitable/records/:recordId/manual-parent-dependents
  *   How many OTHER manual rows name this manual row's own 图号 as their 父组件图号. The web asks before it changes a
@@ -89,11 +101,14 @@ export type ManualRowParentOptionColumns = Readonly<{
 /**
  * The candidate statement. Parameters:
  *   $1 sheet id · $2 图号 · $3 名称 · $4 父组件图号 · $5 父组件名称 (column ids, NULL = not readable) · $6 有效 (column id,
- *   NULL = no active filter) · $7 record ids the actor may not read · $8 the trim characters · $9 the search text,
- *   lower-cased ('' = no search) · $10 the row cap (the route asks for limit + 1 to learn `truncated`).
- * Only JSON strings count as a 图号 / 名称 (a number or object in the cell is not a candidate). Ordering is fixed and
- * locale-independent: 'parent' entries first, then by 图号, then by 名称 (COLLATE "C"); every row of the result is a
- * distinct (kind, 图号, 名称), so the order is total.
+ *   NULL = no active filter) · $7 record ids the actor may not read · $8 the trim characters · $9 the search text AS
+ *   TYPED ('' = no search; the statement folds it with the same LOWER it folds the columns with) · $10 the row cap
+ *   (the route asks for limit + 1 to learn `truncated`).
+ * Only JSON strings count as a 图号 / 名称 (a number or object in the cell is not a candidate).
+ * `parent_names` counts the rows per (父组件图号, 父组件名称); `parents` folds them into one row per 图号: the name with
+ * the most rows (then the byte-smallest; a NULL name never wins over a name), and the sum of the rows as the child
+ * count. Ordering is fixed and locale-independent: 'parent' entries first, then by 图号, then by 名称 (COLLATE "C");
+ * every row of the result is a distinct (kind, 图号, 名称), so the order is total.
  */
 export const MANUAL_ROW_PARENT_OPTIONS_SQL = `
 WITH picked AS MATERIALIZED (
@@ -113,13 +128,20 @@ texts AS (
          CASE WHEN jsonb_typeof(parent_name_json) = 'string' THEN parent_name_json #>> '{}' END AS parent_name
     FROM picked
 ),
-parents AS (
+parent_names AS (
   SELECT parent_code AS code,
          CASE WHEN BTRIM(parent_name, $8::text) <> '' THEN parent_name END AS name,
-         COUNT(*)::int AS child_count
+         COUNT(*)::int AS uses
     FROM texts
    WHERE BTRIM(parent_code, $8::text) <> ''
    GROUP BY 1, 2
+),
+parents AS (
+  SELECT code,
+         (ARRAY_AGG(name ORDER BY uses DESC, name COLLATE "C") FILTER (WHERE name IS NOT NULL))[1] AS name,
+         SUM(uses)::int AS child_count
+    FROM parent_names
+   GROUP BY code
 ),
 components AS (
   SELECT DISTINCT code,
@@ -136,8 +158,8 @@ items AS (
 SELECT code, name, kind, child_count
   FROM items
  WHERE $9::text = ''
-    OR strpos(LOWER(code), $9::text) > 0
-    OR strpos(LOWER(COALESCE(name, '')), $9::text) > 0
+    OR strpos(LOWER(code), LOWER($9::text)) > 0
+    OR strpos(LOWER(COALESCE(name, '')), LOWER($9::text)) > 0
  ORDER BY CASE WHEN kind = 'parent' THEN 0 ELSE 1 END, code COLLATE "C", name COLLATE "C" NULLS FIRST
  LIMIT $10::int`.trim()
 
@@ -158,7 +180,8 @@ export function manualRowParentOptionsParams(input: {
     columns.active,
     [...input.deniedRecordIds],
     MANUAL_ROW_PARENT_SQL_TRIM_CHARS,
-    input.q.toLowerCase(),
+    // As typed — never folded here: the statement applies LOWER to this text and to the columns alike (see the header).
+    input.q,
     input.limit + 1,
   ]
 }

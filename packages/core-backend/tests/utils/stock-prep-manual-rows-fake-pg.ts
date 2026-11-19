@@ -15,8 +15,9 @@
  * record_permissions (`recordDenies`) — and answers the two FIXED parent-picker statements
  * (multitable/stock-preparation-manual-row-parent-options.ts) by evaluating them in JS over its records, from the very
  * parameter list the route sent (`evaluateParentOptionsStatement` / `evaluateParentDependentsStatement` below: a null
- * column id reads nothing, the denied ids are excluded before anything is grouped or counted). The statements' own SQL
- * is proven on real Postgres by the registered real-DB cases; here the route's gates, read sets and parameters are.
+ * column id reads nothing, the denied ids are excluded before anything is grouped or counted, and the search text is
+ * folded by the same `LOWER` as the columns — `setDatabaseCtype` picks which database that is). The statements' own
+ * SQL is proven on real Postgres by the registered real-DB cases; here the route's gates, read sets and parameters are.
  *
  * Every value is synthetic.
  */
@@ -179,9 +180,24 @@ function compareC(a: string, b: string): number {
   return Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'))
 }
 
+/**
+ * SQL `LOWER()` is the DATABASE's: what it folds depends on the database's LC_CTYPE, and neither model below is
+ * JavaScript's `toLowerCase()` over the whole text. The candidate statement folds the column and the search text with
+ * the SAME one, which is the property the suites pin — whichever model is active.
+ *   'C'     LC_CTYPE "C" (`initdb --locale=C`, as this repository's own provisioning does): ASCII letters only.
+ *   'utf8'  a libc UTF-8 locale: every character on its own (`towlower`) — no context rule, so a capital sigma is
+ *           always σ, where JavaScript writes the word-final ς.
+ */
+export type FakeDatabaseCtype = 'C' | 'utf8'
+export const SQL_LOWER: Readonly<Record<FakeDatabaseCtype, (text: string) => string>> = Object.freeze({
+  C: (text: string) => text.replace(/[A-Z]/g, (letter) => letter.toLowerCase()),
+  utf8: (text: string) => Array.from(text, (character) => Array.from(character.toLowerCase())[0] ?? character).join(''),
+})
+
 export function evaluateParentOptionsStatement(
   records: Iterable<Pick<FakeRecord, 'id' | 'sheet_id' | 'data'>>,
   params: unknown[],
+  ctype: FakeDatabaseCtype = 'utf8',
 ): Array<{ code: string; name: string | null; kind: 'parent' | 'component'; child_count: number | null }> {
   const [sheetId, codeId, nameId, parentCodeId, parentNameId, activeId, denied, trimChars, search, cap] = params
   const deniedIds = new Set(asIds(denied))
@@ -197,16 +213,22 @@ export function evaluateParentOptionsStatement(
       parentCode: jsonStringCell(record.data, parentCodeId),
       parentName: jsonStringCell(record.data, parentNameId),
     }))
-  const parents = new Map<string, { code: string; name: string | null; child_count: number }>()
+  // `parent_names`: the rows per (父组件图号, 父组件名称); `parents`: one row per 图号 — the name most rows use (then the
+  // byte-smallest; a row without a name does not vote), and every row counted.
+  const parentNames = new Map<string, { code: string; uses: Map<string, number>; child_count: number }>()
   for (const row of texts) {
     if (!nonBlank(row.parentCode)) continue
-    const name = nonBlank(row.parentName) ? row.parentName : null
-    const key = JSON.stringify([row.parentCode, name])
-    const entry = parents.get(key) ?? { code: row.parentCode, name, child_count: 0 }
+    const entry = parentNames.get(row.parentCode) ?? { code: row.parentCode, uses: new Map<string, number>(), child_count: 0 }
     entry.child_count += 1
-    parents.set(key, entry)
+    if (nonBlank(row.parentName)) entry.uses.set(row.parentName, (entry.uses.get(row.parentName) ?? 0) + 1)
+    parentNames.set(row.parentCode, entry)
   }
-  const parentCodes = new Set([...parents.values()].map((entry) => entry.code))
+  const parents = [...parentNames.values()].map((entry) => ({
+    code: entry.code,
+    name: [...entry.uses.entries()].sort((a, b) => b[1] - a[1] || compareC(a[0], b[0]))[0]?.[0] ?? null,
+    child_count: entry.child_count,
+  }))
+  const parentCodes = new Set(parents.map((entry) => entry.code))
   const components = new Map<string, { code: string; name: string | null }>()
   for (const row of texts) {
     if (!nonBlank(row.code) || parentCodes.has(row.code)) continue
@@ -214,12 +236,15 @@ export function evaluateParentOptionsStatement(
     components.set(JSON.stringify([row.code, name]), { code: row.code, name })
   }
   const items = [
-    ...[...parents.values()].map((entry) => ({ ...entry, kind: 'parent' as const })),
+    ...parents.map((entry) => ({ ...entry, kind: 'parent' as const })),
     ...[...components.values()].map((entry) => ({ ...entry, kind: 'component' as const, child_count: null })),
   ]
-  const needle = String(search)
+  // `strpos(LOWER(column), LOWER($9)) > 0`: the search text arrives as typed and is folded here, by the same LOWER.
+  const lower = SQL_LOWER[ctype]
+  const typed = String(search)
+  const needle = lower(typed)
   return items
-    .filter((item) => needle === '' || item.code.toLowerCase().includes(needle) || (item.name ?? '').toLowerCase().includes(needle))
+    .filter((item) => typed === '' || lower(item.code).includes(needle) || lower(item.name ?? '').includes(needle))
     .sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'parent' ? -1 : 1)
       || compareC(a.code, b.code)
       || (a.name === b.name ? 0 : a.name === null ? -1 : b.name === null ? 1 : compareC(a.name, b.name)))
@@ -258,6 +283,8 @@ export function createManualRowsFakePool() {
   let onRecordLockForUpdate: ((record: FakeRecord) => void) | null = null
   /** One-shot: the rows the candidate statement answers with INSTEAD of its evaluation (to prove the route's own mask). */
   let parentOptionsRowsOverride: unknown[] | null = null
+  /** The LC_CTYPE this fake database folds text with in SQL `LOWER()` (see SQL_LOWER). */
+  let databaseCtype: FakeDatabaseCtype = 'utf8'
   let trashSeq = 0
 
   function addSheet(key: string, options: SheetOptions): FakeSheet {
@@ -334,7 +361,7 @@ export function createManualRowsFakePool() {
         parentOptionsRowsOverride = null
         return rows(override)
       }
-      return rows(evaluateParentOptionsStatement(records.values(), params))
+      return rows(evaluateParentOptionsStatement(records.values(), params, databaseCtype))
     }
     if (q === PARENT_DEPENDENTS_STATEMENT) return rows([{ dependents: evaluateParentDependentsStatement(records.values(), params) }])
 
@@ -528,6 +555,7 @@ export function createManualRowsFakePool() {
     setOnTransactionFieldRead(hook: ((sheet: FakeSheet) => void) | null) { onTransactionFieldRead = hook },
     setOnRecordLockForUpdate(hook: ((record: FakeRecord) => void) | null) { onRecordLockForUpdate = hook },
     overrideParentOptionsRows(rowsToReturn: unknown[] | null) { parentOptionsRowsOverride = rowsToReturn },
+    setDatabaseCtype(ctype: FakeDatabaseCtype) { databaseCtype = ctype },
     statements(pattern: RegExp) { return sqlLog.filter((entry) => pattern.test(entry.sql)) },
     reset() {
       sheets.clear()
@@ -541,6 +569,7 @@ export function createManualRowsFakePool() {
       onTransactionFieldRead = null
       onRecordLockForUpdate = null
       parentOptionsRowsOverride = null
+      databaseCtype = 'utf8'
     },
   }
 }

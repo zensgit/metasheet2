@@ -18,8 +18,10 @@
  *   G-07 the edit transaction's re-check: P5 on the LOCKED, merged row, in both directions, and only when the patch
  *        names 父组件图号 or the row's own 图号;
  *   S-01 the picker's query-string parser;
- *   S-02 the two statements are FIXED text: every column id, the deny set and the search text are parameters;
- *   S-03 their parameter lists; S-04 the row mappers.
+ *   S-02 the two statements are FIXED text: every column id, the deny set and the search text are parameters; the
+ *        search text is folded by the statement's own LOWER (never by the application); one entry per parent 图号;
+ *   S-03 their parameter lists; S-04 the row mappers;
+ *   F-01 / F-02 what the fake's evaluation of the two statements implements (the route suite runs on it).
  *
  * Mock pool, no DB. Every value is synthetic.
  */
@@ -73,9 +75,11 @@ import { isFieldHumanWriteLocked } from '../../src/multitable/human-write-lock'
 import {
   MR_ENV_OBJECT,
   MR_PROJECT_NO,
+  SQL_LOWER,
   createManualRowsFakePool,
   evaluateParentDependentsStatement,
   evaluateParentOptionsStatement,
+  type FakeDatabaseCtype,
   type FakeSheet,
 } from '../utils/stock-prep-manual-rows-fake-pg'
 
@@ -614,10 +618,11 @@ describe('S-01 the query-string parser', () => {
     expect(ok(null)).toEqual({ q: '', limit: MANUAL_ROW_PARENT_OPTIONS_DEFAULT_LIMIT })
     expect(ok(undefined)).toEqual({ q: '', limit: 20 })
   })
-  it('q is trimmed and otherwise kept as typed (lower-casing is the parameter list\'s job)', () => {
+  it('q is trimmed and otherwise kept as typed (folding is the database\'s job: the statement applies LOWER to both sides)', () => {
     expect(ok({ q: '  SYN-Parent ' }).q).toBe('SYN-Parent')
     expect(ok({ q: '' }).q).toBe('')
     expect(ok({ q: '100%_\\' }).q).toBe('100%_\\')
+    expect(ok({ q: ' 轴 Φ20 ' }).q).toBe('轴 Φ20')
   })
   it.each([
     ['1', 1], ['20', 20], ['50', 50], ['51', 50], ['999999', 50], ['0', 1], [' 7 ', 7], ['007', 7], ['9999999', 50], ['9'.repeat(400), 50],
@@ -675,9 +680,34 @@ describe('S-02 the two statements are fixed text', () => {
     expect(sql).toContain('AND NOT EXISTS (SELECT 1 FROM parents WHERE parents.code = texts.code)')
     const tail = sql.slice(sql.lastIndexOf('SELECT code, name, kind, child_count'))
     expect(tail).toContain("WHERE $9::text = ''")
-    expect(tail).toContain('OR strpos(LOWER(code), $9::text) > 0')
-    expect(tail).toContain("OR strpos(LOWER(COALESCE(name, '')), $9::text) > 0")
+    expect(tail).toContain('OR strpos(LOWER(code), LOWER($9::text)) > 0')
+    expect(tail).toContain("OR strpos(LOWER(COALESCE(name, '')), LOWER($9::text)) > 0")
     expect(tail).not.toMatch(/LIKE|ESCAPE/)
+  })
+  it('options: the search text is folded by the SAME LOWER as the columns — it never reaches strpos as typed, so the application has nothing to fold', () => {
+    const sql = MANUAL_ROW_PARENT_OPTIONS_SQL
+    // the search text is used three times: the "no search" test, and once inside each of the two matches
+    expect(sql.match(/\$9::text/g)).toHaveLength(3)
+    const matches = [...sql.matchAll(/strpos\(([^\n]*)\) > 0/g)].map((m) => m[1])
+    expect(matches).toEqual(['LOWER(code), LOWER($9::text)', "LOWER(COALESCE(name, '')), LOWER($9::text)"])
+    // no other fold, and no collation of its own: both sides take the database's
+    expect(sql.match(/LOWER\(/g)).toHaveLength(4)
+    expect(sql).not.toMatch(/UPPER\(|ILIKE|citext/i)
+  })
+  it('options: ONE entry per parent 图号 — the rows are counted per (图号, 名称) and folded per 图号: the name most rows use, then the byte-smallest; a NULL name never wins', () => {
+    const sql = MANUAL_ROW_PARENT_OPTIONS_SQL
+    const parentNames = sql.slice(sql.indexOf('parent_names AS ('), sql.indexOf('parents AS ('))
+    expect(parentNames).toContain("CASE WHEN BTRIM(parent_name, $8::text) <> '' THEN parent_name END AS name")
+    expect(parentNames).toContain('COUNT(*)::int AS uses')
+    expect(parentNames).toContain('GROUP BY 1, 2')
+    const parents = sql.slice(sql.indexOf('parents AS ('), sql.indexOf('components AS ('))
+    expect(parents).toContain('(ARRAY_AGG(name ORDER BY uses DESC, name COLLATE "C") FILTER (WHERE name IS NOT NULL))[1] AS name')
+    expect(parents).toContain('SUM(uses)::int AS child_count')
+    expect(parents).toContain('FROM parent_names')
+    expect(parents).toContain('GROUP BY code')
+    // the components still step aside for a parent of the same 图号 (the existing-parent name wins)
+    expect(sql.indexOf('parent_names AS (')).toBeLessThan(sql.indexOf('parents AS ('))
+    expect(sql.indexOf('parents AS (')).toBeLessThan(sql.indexOf('components AS ('))
   })
   it('options: the order is fixed and locale-independent — parents first, then 图号, then 名称', () => {
     expect(MANUAL_ROW_PARENT_OPTIONS_SQL).toContain('ORDER BY CASE WHEN kind = \'parent\' THEN 0 ELSE 1 END, code COLLATE "C", name COLLATE "C" NULLS FIRST')
@@ -699,10 +729,14 @@ describe('S-02 the two statements are fixed text', () => {
 
 describe('S-03 the parameter lists', () => {
   const columns = { code: 'fld_c', name: 'fld_n', parentCode: 'fld_pc', parentName: 'fld_pn', active: 'fld_a' }
-  it('options: the layout the statement documents; limit + 1; the search lower-cased', () => {
+  it('options: the layout the statement documents; limit + 1; the search text AS TYPED — never lower-cased here', () => {
     expect(manualRowParentOptionsParams({ sheetId: 'sheet_x', columns, deniedRecordIds: ['rec_1'], q: 'SYN-Parent', limit: 20 })).toEqual([
-      'sheet_x', 'fld_c', 'fld_n', 'fld_pc', 'fld_pn', 'fld_a', ['rec_1'], MANUAL_ROW_PARENT_SQL_TRIM_CHARS, 'syn-parent', 21,
+      'sheet_x', 'fld_c', 'fld_n', 'fld_pc', 'fld_pn', 'fld_a', ['rec_1'], MANUAL_ROW_PARENT_SQL_TRIM_CHARS, 'SYN-Parent', 21,
     ])
+    // JavaScript's fold is not the database's (it would make these '轴 φ20' and 'δς'): the text travels untouched
+    for (const typed of ['轴 Φ20', 'ΔΣ', 'STRASSE']) {
+      expect(manualRowParentOptionsParams({ sheetId: 'sheet_x', columns, deniedRecordIds: [], q: typed, limit: 20 })[8], typed).toBe(typed)
+    }
   })
   it('options: a column the actor may not read travels as NULL, never as an id', () => {
     const params = manualRowParentOptionsParams({ sheetId: 'sheet_x', columns: { code: null, name: null, parentCode: 'fld_pc', parentName: null, active: null }, deniedRecordIds: [], q: '', limit: 50 })
@@ -758,10 +792,10 @@ describe('F-01 the fake evaluates the candidate statement as documented', () => 
   const A = 'fld_a'
   const row = (id: string, data: Record<string, unknown>, sheet = 'sheet_x') => ({ id, sheet_id: sheet, data: { [A]: true, ...data } })
   const all = { code: C, name: N, parentCode: PC, parentName: PN, active: A }
-  const run = (records: Array<ReturnType<typeof row>>, over: Partial<{ columns: typeof all | Record<string, string | null>; denied: string[]; q: string; limit: number }> = {}) =>
+  const run = (records: Array<ReturnType<typeof row>>, over: Partial<{ columns: typeof all | Record<string, string | null>; denied: string[]; q: string; limit: number; ctype: FakeDatabaseCtype }> = {}) =>
     evaluateParentOptionsStatement(records, manualRowParentOptionsParams({
       sheetId: 'sheet_x', columns: (over.columns ?? all) as never, deniedRecordIds: over.denied ?? [], q: over.q ?? '', limit: over.limit ?? 20,
-    }))
+    }), over.ctype)
   const RECORDS = [
     row('r1', { [C]: 'A-1', [N]: 'Assembly', [PC]: null }),
     row('r2', { [C]: 'B-1', [N]: 'Part b', [PC]: 'A-1', [PN]: 'Assembly and spec' }),
@@ -808,6 +842,108 @@ describe('F-01 the fake evaluates the candidate statement as documented', () => 
   it('byte order, and values returned exactly as stored', () => {
     const records = [row('a', { [C]: 'b' }), row('b', { [C]: 'B' }), row('c', { [C]: ' a ' }), row('d', { [C]: '图' })]
     expect(run(records).map((item) => item.code)).toEqual([' a ', 'B', 'b', '图'])
+  })
+
+  // One 父组件图号 stored with different names (PLM renamed the parent between two pulls; a person typed another one).
+  const SPLIT = [
+    row('s1', { [C]: 'K-1', [PC]: 'P-1', [PN]: 'Old name' }),
+    row('s2', { [C]: 'K-2', [PC]: 'P-1', [PN]: 'New name' }),
+    row('s3', { [C]: 'K-3', [PC]: 'P-1', [PN]: 'New name' }),
+    // counted, but without a vote: no name, a blank name, a name that is not text
+    row('s4', { [C]: 'K-4', [PC]: 'P-1' }),
+    row('s5', { [C]: 'K-5', [PC]: 'P-1', [PN]: '   ' }),
+    row('s6', { [C]: 'K-6', [PC]: 'P-1', [PN]: 7 }),
+    // a tie, one row each: the byte-smallest — 'B' (0x42) is before 'a' (0x61), which a dictionary order would reverse
+    row('t1', { [C]: 'K-7', [PC]: 'P-2', [PN]: 'a name' }),
+    row('t2', { [C]: 'K-8', [PC]: 'P-2', [PN]: 'B name' }),
+    // nobody names it
+    row('n1', { [C]: 'K-9', [PC]: 'P-3' }),
+    row('n2', { [C]: 'K-10', [PC]: 'P-3', [PN]: '' }),
+    // another 图号: values are compared as stored
+    row('w1', { [C]: 'K-11', [PC]: ' P-1 ', [PN]: 'Old name' }),
+  ]
+  const parentsOf = (items: ReturnType<typeof run>) => items.filter((item) => item.kind === 'parent')
+  it('ONE entry per parent 图号: the name most of its rows use, a tie to the byte-smallest, null only when none has one; every row is counted', () => {
+    expect(parentsOf(run(SPLIT))).toEqual([
+      { code: ' P-1 ', name: 'Old name', kind: 'parent', child_count: 1 },
+      { code: 'P-1', name: 'New name', kind: 'parent', child_count: 6 },
+      { code: 'P-2', name: 'B name', kind: 'parent', child_count: 2 },
+      { code: 'P-3', name: null, kind: 'parent', child_count: 2 },
+    ])
+    // no 图号 is listed twice, whatever the names
+    const codes = parentsOf(run(SPLIT)).map((item) => item.code)
+    expect(new Set(codes).size).toBe(codes.length)
+  })
+  it('…over READABLE rows and columns only: a denied row loses its vote and its count; an unreadable name column leaves no name', () => {
+    // without the two 'New name' rows the older text is the only one left
+    expect(parentsOf(run(SPLIT, { denied: ['s2', 's3'] }))[1]).toEqual({ code: 'P-1', name: 'Old name', kind: 'parent', child_count: 4 })
+    // one 'New name' row denied: one vote each — the tie goes to the byte-smallest ('N' before 'O')
+    expect(parentsOf(run(SPLIT, { denied: ['s3'] }))[1]).toEqual({ code: 'P-1', name: 'New name', kind: 'parent', child_count: 5 })
+    expect(parentsOf(run(SPLIT, { denied: ['s2'] }))[1]).toEqual({ code: 'P-1', name: 'New name', kind: 'parent', child_count: 5 })
+    expect(parentsOf(run(SPLIT, { columns: { ...all, parentName: null } }))).toEqual([
+      { code: ' P-1 ', name: null, kind: 'parent', child_count: 1 },
+      { code: 'P-1', name: null, kind: 'parent', child_count: 6 },
+      { code: 'P-2', name: null, kind: 'parent', child_count: 2 },
+      { code: 'P-3', name: null, kind: 'parent', child_count: 2 },
+    ])
+  })
+  it('…and the search matches the ENTRY: a name only a minority of the rows use is not the entry\'s and finds nothing under that 图号', () => {
+    expect(run(SPLIT, { q: 'new name' }).map((item) => item.code)).toEqual(['P-1'])
+    expect(run(SPLIT, { q: 'old name' }).map((item) => item.code)).toEqual([' P-1 '])
+    expect(run(SPLIT, { q: 'a name' }).map((item) => item.code)).toEqual([])
+    // the cap counts entries, so a parent stored under many names takes ONE of the slots
+    expect(parentsOf(run(SPLIT, { limit: 1 })).map((item) => item.code)).toEqual([' P-1 ', 'P-1'])
+  })
+  it('a part that is also a parent is still listed once, under the parent entry\'s name', () => {
+    const records = [
+      row('a1', { [C]: 'A-1', [N]: 'Assembly' }),
+      row('b1', { [C]: 'B-1', [N]: 'Part b', [PC]: 'A-1', [PN]: 'Assembly and spec' }),
+      row('b2', { [C]: 'B-2', [N]: 'Part c', [PC]: 'A-1', [PN]: 'Assembly (renamed)' }),
+      row('b3', { [C]: 'B-3', [N]: 'Part d', [PC]: 'A-1', [PN]: 'Assembly and spec' }),
+    ]
+    expect(run(records).filter((item) => item.code === 'A-1')).toEqual([{ code: 'A-1', name: 'Assembly and spec', kind: 'parent', child_count: 3 }])
+  })
+
+  // What the database folds in LOWER depends on its LC_CTYPE; the statement folds the column and the search text alike.
+  // (Greek on purpose: Φ, Δ and Σ look like no Latin letter, and Σ is the letter JavaScript and a database fold differently.)
+  const FOLD = [
+    row('g1', { [C]: 'AXL-1', [N]: '轴 Φ20' }),
+    row('g2', { [C]: 'SYN-ΔΣ', [N]: 'Sigma part' }),
+    row('g3', { [C]: 'AXL-3', [N]: 'Shaft' }),
+  ]
+  const find = (q: string, ctype: FakeDatabaseCtype) => run(FOLD, { q, ctype }).map((item) => item.code)
+  it.each(['C', 'utf8'] as const)('the search text is folded by the database, like the column: typed as stored it is always found (LC_CTYPE %s)', (ctype) => {
+    expect(find('轴 Φ20', ctype)).toEqual(['AXL-1'])
+    expect(find('Φ20', ctype)).toEqual(['AXL-1'])
+    expect(find('ΔΣ', ctype)).toEqual(['SYN-ΔΣ'])
+    // ASCII letters fold on every database
+    expect(find('SHAFT', ctype)).toEqual(['AXL-3'])
+    expect(find('syn-', ctype)).toEqual(['SYN-ΔΣ'])
+    expect(find('axl', ctype)).toEqual(['AXL-1', 'AXL-3'])
+  })
+  it('how far the match ignores case is the DATABASE\'s rule: LC_CTYPE "C" folds ASCII only, a UTF-8 locale every letter', () => {
+    expect(find('φ20', 'utf8')).toEqual(['AXL-1'])
+    expect(find('φ20', 'C')).toEqual([])
+    expect(find('δσ', 'utf8')).toEqual(['SYN-ΔΣ'])
+    expect(find('δσ', 'C')).toEqual([])
+  })
+  it('a needle folded by JavaScript first misses text typed exactly as stored — which is why the parameter is the text as typed', () => {
+    // LC_CTYPE "C": the column keeps its capital Φ, JavaScript's lower-cased needle has the small φ
+    expect('轴 Φ20'.toLowerCase()).toBe('轴 φ20')
+    expect(find('轴 Φ20'.toLowerCase(), 'C')).toEqual([])
+    // a UTF-8 locale: the database writes every capital Σ as σ, JavaScript writes the word-final ς
+    expect('ΔΣ'.toLowerCase()).toBe('δς')
+    expect(find('ΔΣ'.toLowerCase(), 'utf8')).toEqual([])
+    // …while the parameter list hands the statement the text as typed
+    const params = (q: string) => manualRowParentOptionsParams({ sheetId: 'sheet_x', columns: all, deniedRecordIds: [], q, limit: 20 })
+    expect(params('轴 Φ20')[8]).toBe('轴 Φ20')
+    expect(params('ΔΣ')[8]).toBe('ΔΣ')
+  })
+  it('the two models of LOWER: ASCII only, and every character on its own (no word-final sigma)', () => {
+    expect(SQL_LOWER.C('ABC Φ20 ΔΣ Ä')).toBe('abc Φ20 ΔΣ Ä')
+    expect(SQL_LOWER.utf8('ABC Φ20 ΔΣ Ä')).toBe('abc φ20 δσ ä')
+    // JavaScript, by contrast, applies the final-sigma rule
+    expect('ABC Φ20 ΔΣ Ä'.toLowerCase()).toBe('abc φ20 δς ä')
   })
 })
 
