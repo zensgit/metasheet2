@@ -41,6 +41,8 @@ const SRC_ALLOWLIST: ReadonlyArray<ImportEdge> = [
   ['notifications/endpoints-service.ts', '../integrations/directory-integration-capabilities-flag'],
   ['notifications/endpoints-service.ts', '../integrations/integration-capability-implementations'],
   ['notifications/endpoints-service.ts', '../integrations/provider-capability-registry'],
+  // Ceremony derives one integration scope from the corp id and app key. No other registry name.
+  ['auth/admin-grant-target-ceremony.ts', '../integrations/provider-capability-registry'],
 ]
 
 const read = (file: string): string => readFileSync(file, 'utf8')
@@ -115,13 +117,18 @@ describe('importers of the capability modules', () => {
 describe('source files that name a capability table', () => {
   const TABLE_NAME = /directory_integration_capabilit(?:ies|y_history)/
   const ROOTS = [SRC, path.join(ROOT, 'scripts'), BACKEND_SCRIPTS, path.join(ROOT, '.github'), path.join(ROOT, 'docker')]
+  // Exact namers. A new file, including another migration or reader, is a violation until added here.
   const ALLOWED = [
+    'packages/core-backend/src/auth/admin-grant-receiving-reader.ts',
+    'packages/core-backend/src/auth/admin-grant-target-ceremony.ts',
+    'packages/core-backend/src/auth/strict-dingtalk-entry.ts',
     'packages/core-backend/src/db/migrate.ts',
     'packages/core-backend/src/db/migrations/zzzz20261106130000_create_directory_integration_capabilities.ts',
+    'packages/core-backend/src/db/migrations/zzzz20261117183000_admin_grant_receiving_invalidation.ts',
     'packages/core-backend/src/integrations/integration-capability-evaluate.ts',
   ]
 
-  it('are exactly the migration, its help text and the capability reader', () => {
+  it('are exactly the audited readers, the two migrations, and the runner help text', () => {
     const named: string[] = []
     for (const root of ROOTS) {
       expect(existsSync(root), root).toBe(true)

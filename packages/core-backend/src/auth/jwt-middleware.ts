@@ -5,6 +5,7 @@ import { apiPathEquals, isGateException } from './api-path-policy'
 import { authService } from './AuthService'
 import { pool } from '../db/pg'
 import { validateStrictSession } from '../rbac/strict-principal'
+import { strictSelectorMismatch, strictSessionOrgIdOf } from './strict-dingtalk-entry'
 
 const PASSWORD_CHANGE_WHITELIST = [
   '/api/auth/me',
@@ -82,6 +83,29 @@ async function hydrateAuthenticatedUser(req: Request, token: string, readOnlyPer
       }
     }
 
+    const strictOrgId = strictSessionOrgIdOf(user)
+    if (
+      strictOrgId
+      && strictSelectorMismatch({
+        orgId: strictOrgId,
+        headers: req.headers,
+        query: req.query,
+        body: req.body,
+      })
+    ) {
+      return {
+        ok: false,
+        statusCode: 403,
+        body: {
+          ok: false,
+          error: {
+            code: 'SESSION_ORG_NOT_MEMBER',
+            message: 'Not a member of the requested organization',
+          },
+        },
+      }
+    }
+
     // DingTalk-protected public forms use optional auth. A local temporary
     // password requirement should not block this external-auth form flow.
     if (
@@ -107,9 +131,11 @@ async function hydrateAuthenticatedUser(req: Request, token: string, readOnlyPer
       req.authenticatedTenantId = authenticatedTenantId
     }
 
-    const headerTenantId = extractTenantFromHeaders(req.headers as Record<string, unknown> | undefined)
-    if (!user.tenantId && headerTenantId) {
-      user.tenantId = headerTenantId
+    if (!strictOrgId) {
+      const headerTenantId = extractTenantFromHeaders(req.headers as Record<string, unknown> | undefined)
+      if (!user.tenantId && headerTenantId) {
+        user.tenantId = headerTenantId
+      }
     }
 
     req.user = user as Express.Request['user']
@@ -140,6 +166,9 @@ export async function optionalJwtAuthMiddleware(req: Request, res: Response, nex
 
   const result = await hydrateAuthenticatedUser(req, token)
   if (isHydrateFailure(result)) {
+    if (result.body.error.code === 'SESSION_ORG_NOT_MEMBER') {
+      return res.status(result.statusCode).json(result.body)
+    }
     if (isPublicFormAuthBypass(req)) {
       // Public-form auth is optional. A stale local browser token should not
       // block anonymous or DingTalk re-authenticated form access.

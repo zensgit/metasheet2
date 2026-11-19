@@ -243,6 +243,53 @@ describe('directory config pickers', () => {
     })
   })
 
+  it('saves every consolidated advanced field with the unchanged request shape', async () => {
+    installApi(createIntegration())
+    const root = await mount()
+    await openPicker(root, 'directory-admission-department-picker')
+    const advanced = root.querySelector<HTMLDetailsElement>('[data-testid="directory-advanced-settings"]')!
+    expect(root.querySelectorAll('details.directory-admin__manual-ids')).toHaveLength(1)
+    expect(advanced.open).toBe(false)
+    advanced.open = true
+    advanced.dispatchEvent(new Event('toggle'))
+    const fields = [
+      ['input[aria-label="手动填写根部门 ID"]', '2'],
+      ['textarea[placeholder^="填写部门 ID"]', '2, gone-dept'],
+      ['textarea[placeholder^="填写需要排除"]', '3'],
+      ['textarea[placeholder^="填写需要投影"]', '2'],
+      ['textarea[placeholder^="填写 role ID"]', 'crm_user, retired_role'],
+      ['textarea[placeholder^="填写命名空间"]', 'crm, legacy-plugin'],
+    ]
+    for (const [selector, value] of fields) {
+      const field = advanced.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector)!
+      expect(field).toBeTruthy()
+      field.value = value
+      field.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+    await flushUi()
+    expect(await save(root)).toEqual({
+      integrationId: 'dir-1',
+      name: 'DingTalk CN',
+      corpId: 'dingcorp',
+      appKey: 'ding-app-key',
+      appSecret: '',
+      rootDepartmentId: '2',
+      baseUrl: '',
+      pageSize: 50,
+      admissionMode: 'auto_for_scoped_departments',
+      admissionDepartmentIds: ['2', 'gone-dept'],
+      excludeDepartmentIds: ['3'],
+      memberGroupSyncMode: 'sync_scoped_departments',
+      memberGroupDepartmentIds: ['2'],
+      memberGroupDefaultRoleIds: ['crm_user', 'retired_role'],
+      memberGroupDefaultNamespaces: ['crm', 'legacy-plugin'],
+      status: 'active',
+      scheduleCron: '*/30 * * * *',
+      defaultDeprovisionPolicy: 'mark_inactive',
+      syncEnabled: true,
+    })
+  })
+
   it('writes department ids picked by name and keeps unknown ids as removable chips', async () => {
     installApi(createIntegration({ admissionDepartmentIds: ['gone-dept'] }))
     const root = await mount()
@@ -292,7 +339,7 @@ describe('directory config pickers', () => {
     const admission = await openPicker(root, 'directory-admission-department-picker')
     expect(admission.textContent).toContain('请先同步一次目录以加载部门')
 
-    const fallback = admission.parentElement!.querySelector('details') as HTMLDetailsElement
+    const fallback = root.querySelector('[data-testid="directory-advanced-settings"]') as HTMLDetailsElement
     expect(fallback.open).toBe(false)
     expect(fallback.querySelector('summary')?.textContent).toContain('高级：手动填写 ID')
     const textarea = fallback.querySelector('textarea') as HTMLTextAreaElement
@@ -431,9 +478,9 @@ describe('directory config pickers', () => {
     button(root, '将所选部门加入成员组同步').click()
     await flushUi()
 
-    const fallback = root.querySelector('[data-testid="directory-manual-department-fallback"]') as HTMLDetailsElement
-    expect(fallback.open).toBe(false)
-    expect(fallback.querySelector('summary')?.textContent).toContain('高级：部门尚未同步时手动填写 ID')
+    const fallback = root.querySelector('[data-testid="directory-manual-department-fallback"]') as HTMLElement
+    expect(fallback.closest('details')?.open).toBe(false)
+    expect(fallback.querySelector('h4')?.textContent).toContain('高级：部门尚未同步时手动填写 ID')
     const idInput = fallback.querySelector('input[placeholder="例如 123456"]') as HTMLInputElement
     idInput.value = 'not-yet-synced'
     idInput.dispatchEvent(new Event('input', { bubbles: true }))
@@ -496,9 +543,9 @@ describe('directory config pickers', () => {
     await flushUi()
     expect((await save(root)).rootDepartmentId).toBe('1')
 
-    const manual = root.querySelector('[data-testid="directory-root-department-manual"]') as HTMLDetailsElement
-    expect(manual.open).toBe(false)
-    expect(manual.querySelector('summary')?.textContent).toContain('高级：手动填写 ID')
+    const manual = root.querySelector('[data-testid="directory-root-department-manual"]') as HTMLElement
+    expect(manual.closest('details')?.open).toBe(false)
+    expect(manual.closest('details')?.querySelector('summary')?.textContent).toContain('高级：手动填写 ID')
     const input = manual.querySelector('input') as HTMLInputElement
     input.value = 'corp-wide-9'
     input.dispatchEvent(new Event('input', { bubbles: true }))

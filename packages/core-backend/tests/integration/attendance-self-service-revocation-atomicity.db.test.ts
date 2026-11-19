@@ -46,8 +46,8 @@ import {
   filterPermissionCodesByNamespaceAdmission,
   listRoleNamespaces,
   lockNamespaceAdmissionWrites,
-  setUserNamespaceAdmission,
 } from '../../src/rbac/namespace-admission'
+import { writePlatformNamespaceAdmissionCommand } from '../../src/admin/platform-namespace-admission-command'
 import { RECOVERY_AUTHORITY_BUSY_MARKER } from '../../src/multitable/recovery-authorization-stability'
 
 function deferred() {
@@ -346,11 +346,13 @@ describe('default attendance bootstrap/revocation atomicity (real PostgreSQL)', 
   })
 
   it('an explicit admission disable also serializes against a pending bootstrap', async () => {
+    const actorId = 'r2r3-platform-actor'
+    await pool.query("INSERT INTO users (id, role) VALUES ($1, 'admin')", [actorId])
     gate = pause('before-lock')
     const pending = verify()
     try {
       await gate.reached.promise
-      await setUserNamespaceAdmission({ userId, namespace: 'attendance', enabled: false })
+      await writePlatformNamespaceAdmissionCommand({ actorId, userId, namespace: 'attendance', enabled: false })
     } finally {
       gate.release.resolve()
       await pending

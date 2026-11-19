@@ -8,16 +8,64 @@
  * Every purpose is made available to the service instance under test by injection; the production
  * binding is never used here. Committed fixtures are removed in afterAll.
  */
+import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+
+const capture = vi.hoisted(() => {
+  if (process.env.EXPECT_DB !== '1' || !process.env.DATABASE_URL) {
+    throw new Error('security-action-proof.db.test.ts requires EXPECT_DB=1 and DATABASE_URL')
+  }
+  const originalUrl = process.env.DATABASE_URL
+  const bytes = new Uint8Array(8)
+  const webcrypto = (globalThis as { crypto?: { getRandomValues: (array: Uint8Array) => Uint8Array } }).crypto
+  if (!webcrypto) throw new Error('security-action-proof.db.test.ts requires Web Crypto')
+  webcrypto.getRandomValues(bytes)
+  let hex = ''
+  for (const byte of bytes) hex += byte.toString(16).padStart(2, '0')
+  const schema = `sa_wpc_proof_${hex}`
+  if (!/^[a-z_][a-z0-9_]*$/.test(schema)) throw new Error('owned schema was refused')
+  const savedPoolMin = process.env.DB_POOL_MIN
+  function withSingleOption(base: string, options: string): string {
+    const url = new URL(base)
+    url.searchParams.set('options', options)
+    return url.href.replace(/(^|[?&])options=([^&]*)/, (_match, separator: string, value: string) => `${separator}options=${value.replace(/\+/g, '%20')}`)
+  }
+  process.env.SECRET_PROVIDER = 'env'
+  process.env.DB_POOL_MIN = '0'
+  process.env.DATABASE_URL = withSingleOption(originalUrl, `-c search_path=${schema},public`)
+  return { originalUrl, schema, savedPoolMin, withSingleOption }
+})
+
+const bcryptProbe = vi.hoisted(() => ({
+  compares: [] as number[],
+  before: undefined as (() => Promise<void>) | undefined,
+}))
+
+vi.mock('bcryptjs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('bcryptjs')>()
+  return {
+    ...actual,
+    compare: async (password: string, hash: string) => {
+      bcryptProbe.compares.push(1)
+      if (bcryptProbe.before) await bcryptProbe.before()
+      return actual.compare(password, hash)
+    },
+  }
+})
+
 import * as bcrypt from 'bcryptjs'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Pool as PgPool } from 'pg'
 import type { PoolClient } from 'pg'
-import { CompiledQuery, Kysely, PostgresDialect } from 'kysely'
+import { CompiledQuery, Kysely, PostgresDialect, sql } from 'kysely'
 import type { Request } from 'express'
 import { authService } from '../../src/auth/AuthService'
 import { SECURITY_ACTION_POLICY_REVISION, SECURITY_ACTION_PURPOSE_REGISTRY, SECURITY_ACTION_PURPOSES } from '../../src/auth/external-login-assurance'
 import type { SecurityActionPurpose } from '../../src/auth/external-login-assurance'
+import { runOwnedAttempt } from '../../src/auth/security-action-attempt-admission'
 import { assessSecurityActionPrivilege } from '../../src/auth/security-action-privilege'
 import {
   clientBindingDigestOf,
@@ -41,13 +89,16 @@ import type {
 import { revokeUserSession } from '../../src/auth/session-registry'
 import { revokeUserSessions } from '../../src/auth/session-revocation'
 import { down, SECURITY_ACTION_CHALLENGES_DOWN_BLOCKED_CODE, up } from '../../src/db/migrations/zzzz20261106120000_create_security_action_challenges'
+import { up as createSessionFlight } from '../../src/db/migrations/zzzz20261117120100_create_security_action_session_flight'
 import { lockUsersForAccessGraphWrite, supersedeDeprovisionEvidenceForAccessGraphWrite } from '../../src/directory/access-graph-mutex'
 import type { LockedAccessGraphUser } from '../../src/directory/access-graph-mutex'
 import type { Queryable } from '../../src/multitable/automation-durable-dispatcher'
 
-const suite = process.env.DATABASE_URL ? describe : describe.skip
-const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
-itIfExpectDb('requires a real DB', () => expect(process.env.DATABASE_URL).toBeTruthy())
+process.env.DATABASE_URL = capture.originalUrl
+if (capture.savedPoolMin === undefined) delete process.env.DB_POOL_MIN
+else process.env.DB_POOL_MIN = capture.savedPoolMin
+
+const suite = describe
 
 const TABLE = 'security_action_challenges'
 const ORG = 'sa-proof-org-' + randomUUID()
@@ -61,26 +112,44 @@ const ROLLBACK = Symbol('sa-proof-rollback')
 
 type Runner = (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }>
 
-function withOptions(options: string): string {
-  const base = process.env.DATABASE_URL ?? ''
-  const sep = base.includes('?') ? '&' : '?'
-  return `${base}${sep}options=${encodeURIComponent(options)}`
-}
-
 let mainPool: PgPool | null = null
 let rrPool: PgPool | null = null
 let absentPool: PgPool | null = null
+let flightInstalled = false
+const WORKER = fileURLToPath(new URL('../fixtures/security-action-attempt-worker.ts', import.meta.url))
+const AUDIT_BCRYPT_OBSERVER = fileURLToPath(new URL('../fixtures/security-action-audit-bcrypt-observer.cjs', import.meta.url))
+const PACKAGE_ROOT = fileURLToPath(new URL('../..', import.meta.url))
+
+function withAuditBcryptObserver(env: NodeJS.ProcessEnv): void {
+  const flag = `--require ${AUDIT_BCRYPT_OBSERVER}`
+  const prior = env.NODE_OPTIONS
+  if (prior?.includes(AUDIT_BCRYPT_OBSERVER)) return
+  env.NODE_OPTIONS = prior && prior.length > 0 ? `${flag} ${prior}` : flag
+}
+
 function pool(): PgPool {
-  mainPool ??= new PgPool({ connectionString: process.env.DATABASE_URL, max: 8 })
+  mainPool ??= new PgPool({ connectionString: capture.originalUrl, max: 8 })
   return mainPool
 }
 function repeatableReadPool(): PgPool {
-  rrPool ??= new PgPool({ connectionString: withOptions('-c default_transaction_isolation=repeatable\\ read'), max: 8 })
+  rrPool ??= new PgPool({
+    connectionString: capture.withSingleOption(capture.originalUrl, '-c default_transaction_isolation=repeatable\\ read'),
+    max: 8,
+  })
   return rrPool
 }
 function absentSchemaPool(): PgPool {
-  absentPool ??= new PgPool({ connectionString: withOptions('-c search_path=sa_proof_absent'), max: 2 })
+  absentPool ??= new PgPool({
+    connectionString: capture.withSingleOption(capture.originalUrl, '-c search_path=sa_proof_absent'),
+    max: 2,
+  })
   return absentPool
+}
+function issueDatabaseUrl(kind: 'default' | 'repeatable read' | 'absent'): string {
+  if (kind === 'absent') return capture.withSingleOption(capture.originalUrl, '-c search_path=sa_proof_absent')
+  const path = `-c search_path=${capture.schema},public`
+  if (kind === 'default') return capture.withSingleOption(capture.originalUrl, path)
+  return capture.withSingleOption(capture.originalUrl, `${path} -c default_transaction_isolation=repeatable\\ read`)
 }
 
 const q: Runner = async (sql, params = []) => (await pool().query(sql, params)) as { rows: Array<Record<string, unknown>> }
@@ -97,10 +166,43 @@ const seededRoles: string[] = []
 const seededPermissionCodes: string[] = []
 const seededRolePermissions: Array<[string, string]> = []
 
-beforeAll(() => {
+beforeAll(async () => {
   for (const key of ['SECURITY_ACTION_PROOF_ENABLED', 'PRODUCT_MODE']) savedEnv.set(key, process.env[key])
   process.env.SECURITY_ACTION_PROOF_ENABLED = 'true'
   process.env.PRODUCT_MODE = 'plm-workbench'
+  const probe = new PgPool({ connectionString: capture.originalUrl, max: 1, connectionTimeoutMillis: 5000 })
+  try {
+    try {
+      await probe.query('SELECT 1')
+    } catch {
+      throw new Error('DATABASE_URL is unreachable')
+    }
+    await probe.query(`CREATE SCHEMA "${capture.schema}"`)
+    flightInstalled = true
+    const kpool = new PgPool({ connectionString: capture.originalUrl, max: 1 })
+    const kdb = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: kpool }) })
+    try {
+      await kdb.transaction().execute(async (trx) => {
+        await sql`SELECT pg_catalog.set_config('search_path', ${capture.schema}::text, true)`.execute(trx)
+        await createSessionFlight(trx)
+      })
+    } finally {
+      await kdb.destroy()
+    }
+    const found = await probe.query(
+      `SELECT count(*)::int AS n
+         FROM pg_catalog.pg_class c
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = $1
+          AND c.relname = 'security_action_session_flight'
+          AND c.relkind = 'r'
+          AND c.relpersistence = 'p'`,
+      [capture.schema],
+    )
+    if (Number(found.rows[0]?.n) !== 1) throw new Error('owned session flight relation was not installed')
+  } finally {
+    await probe.end()
+  }
 })
 
 afterAll(async () => {
@@ -117,6 +219,11 @@ afterAll(async () => {
     for (const [roleId, code] of seededRolePermissions) await q('DELETE FROM role_permissions WHERE role_id = $1 AND permission_code = $2', [roleId, code])
     if (seededRoles.length > 0) await q('DELETE FROM roles WHERE id = ANY($1::text[])', [seededRoles])
     if (seededPermissionCodes.length > 0) await q('DELETE FROM permissions WHERE code = ANY($1::text[])', [seededPermissionCodes])
+  }
+  if (flightInstalled) {
+    const dropping = mainPool ?? new PgPool({ connectionString: capture.originalUrl, max: 1 })
+    await dropping.query(`DROP SCHEMA IF EXISTS "${capture.schema}" CASCADE`)
+    if (dropping !== mainPool) await dropping.end()
   }
   for (const [key, value] of savedEnv) {
     if (value === undefined) delete process.env[key]
@@ -196,12 +303,9 @@ async function grantDirect(userId: string, code: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 type ServiceOptions = {
-  pool?: PgPool
   targetRevision?: { value: string }
   beforeCompare?: () => Promise<void>
   policyRevision?: number
-  pids?: number[]
-  requests?: unknown[]
 }
 
 function fakeResolver(purpose: SecurityActionPurpose, revision: { value: string }): SecurityActionTargetResolver {
@@ -212,40 +316,17 @@ function fakeResolver(purpose: SecurityActionPurpose, revision: { value: string 
   })
 }
 
-function runnerOf(target: PgPool, pids?: number[]) {
-  return async <T>(work: (executor: Queryable) => Promise<T>): Promise<T> => {
-    const client = await target.connect()
-    try {
-      if (pids) pids.push(Number((await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid))
-      await client.query('BEGIN')
-      try {
-        const result = await work(executorOf(client))
-        await client.query('COMMIT')
-        return result
-      } catch (error) {
-        await client.query('ROLLBACK').catch(() => undefined)
-        throw error
-      }
-    } finally {
-      client.release()
-    }
-  }
-}
-
 function serviceOn(options: ServiceOptions = {}) {
   const revision = options.targetRevision ?? { value: 'r1' }
   const audits: SecurityActionAuditEvent[] = []
-  const compares: number[] = []
+  bcryptProbe.compares.length = 0
+  bcryptProbe.before = options.beforeCompare
+  const compares = bcryptProbe.compares
   const resolvers = Object.fromEntries(SECURITY_ACTION_PURPOSES.map((purpose) => [purpose, fakeResolver(purpose, revision)])) as Record<SecurityActionPurpose, SecurityActionTargetResolver>
   const service = createSecurityActionProofService({
     isPurposeAvailable: () => true,
     resolvers,
-    runTransaction: runnerOf(options.pool ?? pool(), options.pids),
-    verifyPassword: async (password, hash) => {
-      compares.push(1)
-      await options.beforeCompare?.()
-      return bcrypt.compare(password, hash)
-    },
+    runOwnedAttempt,
     recordAudit: async (event) => { audits.push(event) },
     policyRevision: options.policyRevision ?? SECURITY_ACTION_POLICY_REVISION,
   })
@@ -343,18 +424,153 @@ async function waitUntilBlocked(waiterPid: number, timeoutMs = 8_000): Promise<s
   throw new Error('timed out waiting for the backend to block')
 }
 
-async function waitUntilBlockedCount(pids: number[], expected: number, timeoutMs = 4_000): Promise<number> {
+async function waitUntilBlockedCount(excludePid: number, expected: number, timeoutMs = 4_000): Promise<number> {
   const deadline = Date.now() + timeoutMs
   let count = 0
   while (Date.now() < deadline) {
     count = Number((await q(
-      `SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid = ANY($1::int[]) AND state = 'active' AND wait_event_type = 'Lock'`,
-      [pids],
+      `SELECT count(*)::int AS n
+         FROM pg_stat_activity
+        WHERE pid <> $1
+          AND state = 'active'
+          AND wait_event_type = 'Lock'
+          AND (query LIKE '%FOR KEY SHARE%' OR query LIKE '%pg_advisory_lock(%' OR query LIKE '%pg_advisory_xact_lock%')`,
+      [excludePid],
     )).rows[0].n)
     if (count >= expected) return count
     await new Promise((resolve) => setTimeout(resolve, 20))
   }
   return count
+}
+
+async function advisoryParts(key: string): Promise<{ classid: string; objid: string }> {
+  const raw = String((await q('SELECT pg_catalog.hashtextextended($1::text, 0)::text AS k', [key])).rows[0].k)
+  const value = BigInt(raw)
+  const unsigned = value < 0n ? value + (1n << 64n) : value
+  return { classid: ((unsigned >> 32n) & 0xffffffffn).toString(), objid: (unsigned & 0xffffffffn).toString() }
+}
+
+async function sessionFlightRows(sessionId: string): Promise<number> {
+  return Number((await q(`SELECT count(*)::int AS n FROM "${capture.schema}".security_action_session_flight WHERE session_id = $1`, [sessionId])).rows[0].n)
+}
+
+async function waitForGrantedIdleAdvisory(classid: string, objid: string, sessionId: string, timeoutMs = 20_000): Promise<number> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const rows = (await q(
+      `SELECT a.pid
+         FROM pg_catalog.pg_locks l
+         JOIN pg_catalog.pg_stat_activity a ON a.pid = l.pid
+        WHERE l.locktype = 'advisory'
+          AND l.granted = true
+          AND l.objsubid = 1
+          AND l.classid = $1::oid
+          AND l.objid = $2::oid
+          AND a.xact_start IS NULL`,
+      [classid, objid],
+    )).rows
+    if (rows.length === 1 && await sessionFlightRows(sessionId) === 1) return Number(rows[0].pid)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  throw new Error('timed out waiting for the owned comparison')
+}
+
+async function waitForUngrantedAdvisory(classid: string, objid: string, timeoutMs = 8_000): Promise<number> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const rows = (await q(
+      `SELECT l.pid
+         FROM pg_catalog.pg_locks l
+        WHERE l.locktype = 'advisory'
+          AND l.granted = false
+          AND l.objsubid = 1
+          AND l.classid = $1::oid
+          AND l.objid = $2::oid`,
+      [classid, objid],
+    )).rows
+    if (rows.length >= 1) return Number(rows[0].pid)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  throw new Error('timed out waiting for the session lock')
+}
+
+async function waitForUserKeyShare(timeoutMs = 8_000): Promise<string> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const rows = (await q(
+      `SELECT query FROM pg_stat_activity WHERE state = 'active' AND wait_event_type = 'Lock' AND query LIKE '%FOR KEY SHARE%'`,
+    )).rows
+    if (rows.length === 1) return String(rows[0].query)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  throw new Error('timed out waiting for the user row lock')
+}
+
+type ChildEvent = { event?: string; ok?: boolean; ttlSeconds?: number; status?: number; code?: string; name?: string }
+
+function eventFrom(stdout: string): ChildEvent | undefined {
+  for (const line of stdout.split('\n')) {
+    if (!line.startsWith('{')) continue
+    try {
+      const value = JSON.parse(line) as ChildEvent
+      if (value.event === 'result' || value.event === 'owned' || value.event === 'crash') return value
+    } catch {
+      continue
+    }
+  }
+  return undefined
+}
+
+function startIssueChild(input: { databaseUrl: string; userId: string; sid: string; password: string }): { pid: number; done: Promise<ChildEvent>; stop: () => void } {
+  const tsx = createRequire(import.meta.url).resolve('tsx/cli')
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    SECURITY_ACTION_PROOF_ENABLED: 'true',
+    PRODUCT_MODE: process.env.PRODUCT_MODE ?? 'plm-workbench',
+    SECRET_PROVIDER: 'env',
+    DB_POOL_MIN: '0',
+    DATABASE_URL: input.databaseUrl,
+    SA_WORKER_MODE: 'issue',
+    SA_USER_ID: input.userId,
+    SA_SESSION_ID: input.sid,
+    SA_ORG_ID: ORG,
+    SA_PASSWORD: input.password,
+    SA_PURPOSE: 'external_identity_unbind',
+    SA_CONNECTION_ID: CONNECTION,
+    SA_TARGET_IDENTITY_ID: TARGET_IDENTITY,
+    SA_BINDING_REVISION: '2',
+    SA_REVISION: 'r1',
+  }
+  delete env.SA_SCHEMA
+  delete env.SA_SLOT
+  delete env.SA_PASSWORD_HASH
+  delete env.SA_READ_GATE
+  delete env.SA_START_GATE
+  delete env.SA_SESSION_ID_OTHER
+  const child = spawn(process.execPath, [tsx, WORKER], {
+    cwd: PACKAGE_ROOT,
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let out = ''
+  child.stdout.setEncoding('utf8')
+  child.stderr.on('data', () => undefined)
+  child.stdout.on('data', (chunk: string) => { out += chunk })
+  const done = new Promise<ChildEvent>((resolve, reject) => {
+    let settled = false
+    const finish = (settle: () => void) => {
+      if (settled) return
+      settled = true
+      settle()
+    }
+    child.on('error', () => finish(() => reject(new Error('worker failed to start'))))
+    child.on('close', () => finish(() => {
+      const event = eventFrom(out)
+      if (!event || event.event === 'crash') reject(new Error('worker crashed'))
+      else resolve(event)
+    }))
+  })
+  return { pid: child.pid ?? -1, done, stop: () => { if (child.exitCode === null) child.kill() } }
 }
 
 // ---------------------------------------------------------------------------
@@ -363,27 +579,37 @@ async function waitUntilBlockedCount(pids: number[], expected: number, timeoutMs
 
 type Column = { name: string; type: string; nullable: string; def: string | null }
 
-async function columns(run: Runner): Promise<Column[]> {
+const BASE_CHALLENGE_CONSTRAINTS = [
+  'security_action_challenges_action_ref_chk', 'security_action_challenges_action_ref_status_chk', 'security_action_challenges_binding_revision_chk',
+  'security_action_challenges_client_binding_chk', 'security_action_challenges_consumed_chk', 'security_action_challenges_empty_slot_chk',
+  'security_action_challenges_failed_shape_chk', 'security_action_challenges_identity_target_chk', 'security_action_challenges_method_chk',
+  'security_action_challenges_method_connection_chk', 'security_action_challenges_pkey', 'security_action_challenges_policy_revision_chk',
+  'security_action_challenges_privilege_class_chk', 'security_action_challenges_proof_hash_chk', 'security_action_challenges_proof_shape_chk',
+  'security_action_challenges_purpose_chk', 'security_action_challenges_status_chk', 'security_action_challenges_superseded_chk',
+  'security_action_challenges_target_kind_chk', 'security_action_challenges_ttl_chk', 'security_action_challenges_user_fk', 'security_action_challenges_witness_chk',
+] as const
+
+async function columns(run: Runner, schema = 'public'): Promise<Column[]> {
   return (await run(
     `SELECT column_name AS name, data_type AS type, is_nullable AS nullable, column_default AS def
-       FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 ORDER BY ordinal_position`,
-    [TABLE],
+       FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position`,
+    [schema, TABLE],
   )).rows as Column[]
 }
 
-async function constraints(run: Runner): Promise<Array<{ name: string; def: string }>> {
+async function constraints(run: Runner, schema = 'public'): Promise<Array<{ name: string; def: string }>> {
   return (await run(
     `SELECT conname AS name, pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conrelid = $1::regclass ORDER BY conname`,
-    [`public.${TABLE}`],
+    [`${schema}.${TABLE}`],
   )).rows as Array<{ name: string; def: string }>
 }
 
-async function indexes(run: Runner): Promise<Array<{ name: string; def: string }>> {
-  return (await run(`SELECT indexname AS name, indexdef AS def FROM pg_indexes WHERE schemaname = 'public' AND tablename = $1 ORDER BY indexname`, [TABLE])).rows as Array<{ name: string; def: string }>
+async function indexes(run: Runner, schema = 'public'): Promise<Array<{ name: string; def: string }>> {
+  return (await run(`SELECT indexname AS name, indexdef AS def FROM pg_indexes WHERE schemaname = $1 AND tablename = $2 ORDER BY indexname`, [schema, TABLE])).rows as Array<{ name: string; def: string }>
 }
 
-async function catalog(run: Runner) {
-  return { columns: await columns(run), constraints: await constraints(run), indexes: await indexes(run) }
+async function catalog(run: Runner, schema = 'public') {
+  return { columns: await columns(run, schema), constraints: await constraints(run, schema), indexes: await indexes(run, schema) }
 }
 
 type RowSeed = Partial<Record<string, unknown>>
@@ -511,18 +737,19 @@ suite('migration', () => {
       ['consumed_at', 'timestamp with time zone', 'YES', null], ['consumed_action_ref', 'text', 'YES', null], ['superseded_at', 'timestamp with time zone', 'YES', null],
     ])
     expect(current.constraints.map((c) => c.name).sort()).toEqual([
-      'security_action_challenges_action_ref_chk', 'security_action_challenges_action_ref_status_chk', 'security_action_challenges_binding_revision_chk',
-      'security_action_challenges_client_binding_chk', 'security_action_challenges_consumed_chk', 'security_action_challenges_empty_slot_chk',
-      'security_action_challenges_failed_shape_chk', 'security_action_challenges_identity_target_chk', 'security_action_challenges_method_chk',
-      'security_action_challenges_method_connection_chk', 'security_action_challenges_pkey', 'security_action_challenges_policy_revision_chk',
-      'security_action_challenges_privilege_class_chk', 'security_action_challenges_proof_hash_chk', 'security_action_challenges_proof_shape_chk',
-      'security_action_challenges_purpose_chk', 'security_action_challenges_status_chk', 'security_action_challenges_superseded_chk',
-      'security_action_challenges_target_kind_chk', 'security_action_challenges_ttl_chk', 'security_action_challenges_user_fk', 'security_action_challenges_witness_chk',
-    ])
+      ...BASE_CHALLENGE_CONSTRAINTS,
+      'admin_grant_proof_set_commit',
+      'security_action_challenges_admin_grant_pair_chk',
+      'security_action_challenges_admin_grant_shape_chk',
+      'strict_login_grant_challenge_commit',
+    ].sort())
     expect(current.constraints.find((c) => c.name === 'security_action_challenges_user_fk')?.def).toBe('FOREIGN KEY (user_id) REFERENCES users(id)')
     expect(current.indexes.find((i) => i.name === 'uq_security_action_live_proof')?.def).toContain("WHERE (status = 'issued'::text)")
     expect(current.indexes.map((i) => i.name).sort()).toEqual(['idx_security_action_user_created', 'security_action_challenges_pkey', 'uq_security_action_live_proof'])
-    const fk = (await q(`SELECT convalidated, confdeltype FROM pg_constraint WHERE conname = 'security_action_challenges_user_fk'`)).rows[0]
+    const fk = (await q(
+      `SELECT convalidated, confdeltype FROM pg_constraint WHERE conname = 'security_action_challenges_user_fk' AND conrelid = $1::regclass`,
+      [`public.${TABLE}`],
+    )).rows[0]
     expect(fk).toEqual({ convalidated: true, confdeltype: 'a' })
     const trigger = (await q(`SELECT tgenabled, tgtype FROM pg_trigger WHERE tgname = 'security_action_challenge_transition' AND tgrelid = $1::regclass`, [`public.${TABLE}`])).rows[0]
     expect(trigger.tgenabled).toBe('O')
@@ -615,6 +842,8 @@ suite('migration', () => {
     const userId = await seedUser()
     await withRollback(async (run) => {
       const id = await insertRow(run, userId)
+      // Execute the installed deferred bundle checks before ALTER; none are disabled.
+      await run('SET CONSTRAINTS ALL IMMEDIATE')
       await run('SAVEPOINT sa_trigger_off')
       await run(`ALTER TABLE ${TABLE} DISABLE TRIGGER security_action_challenge_transition`)
       await expectCheckRefusal(run, [userId], 'security_action_challenges_status_chk', () => insertRow(run, userId, { status: 'other' }))
@@ -799,25 +1028,46 @@ suite('migration', () => {
   it('round-trips down() and up() inside one rolled-back transaction and restores the timeouts it read', async () => {
     const userId = await seedUser()
     const sentinel = await insertRow(q, userId, { status: 'failed', failure_code: 'credential_rejected', proof_hash: null, assurance: null })
+    const sentinelBefore = await rowImage(q, sentinel)
     const oidBefore = String((await q(`SELECT 'public.${TABLE}'::regclass::oid::text AS oid`)).rows[0].oid)
-    const before = await catalog(q)
-    const kpool = new PgPool({ connectionString: process.env.DATABASE_URL, max: 1 })
+    const publicBefore = await catalog(q)
+    const schema = `sa_proof_migration_${randomUUID().replaceAll('-', '')}`
+    const kpool = new PgPool({ connectionString: capture.originalUrl, max: 1 })
     const kdb = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: kpool }) })
     let reachedEnd = false
     try {
       await kdb.transaction().execute(async (trx) => {
         const run: Runner = async (text, params = []) => ({ rows: (await trx.executeQuery(CompiledQuery.raw(text, params))).rows as Array<Record<string, unknown>> })
+        await run(`CREATE SCHEMA "${schema}"`)
+        await run("SELECT set_config('search_path', $1, true)", [schema])
+        await run('CREATE TABLE users (id text PRIMARY KEY)')
         await run("SELECT set_config('lock_timeout', '7s', true), set_config('statement_timeout', '42s', true)")
         const read = async () => (await run("SELECT current_setting('lock_timeout') AS l, current_setting('statement_timeout') AS s")).rows[0]
         expect(await read()).toEqual({ l: '7s', s: '42s' })
-        await run(`DELETE FROM ${TABLE}`)
+        await up(trx)
+        const before = await catalog(run, schema)
+        expect(before.columns).toEqual(publicBefore.columns)
+        expect(before.constraints.map((c) => c.name).sort()).toEqual(BASE_CHALLENGE_CONSTRAINTS)
+        expect(before.constraints.find((c) => c.name === 'security_action_challenges_user_fk')?.def).toBe('FOREIGN KEY (user_id) REFERENCES users(id)')
+        expect(before.indexes.map((i) => i.name).sort()).toEqual(['idx_security_action_user_created', 'security_action_challenges_pkey', 'uq_security_action_live_proof'])
+        expect(await read()).toEqual({ l: '7s', s: '42s' })
         await down(trx)
-        expect((await run(`SELECT to_regclass('public.${TABLE}')::text AS r`)).rows[0].r).toBeNull()
-        expect((await run(`SELECT count(*)::int AS n FROM pg_proc WHERE proname = 'guard_security_action_challenge_transition'`)).rows[0].n).toBe(0)
+        expect((await run('SELECT to_regclass($1)::text AS r', [`${schema}.${TABLE}`])).rows[0].r).toBeNull()
+        expect((await run(
+          `SELECT count(*)::int AS n
+             FROM pg_catalog.pg_proc p
+             JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname = $1
+              AND p.proname = 'guard_security_action_challenge_transition'`,
+          [schema],
+        )).rows[0].n).toBe(0)
         expect(await read()).toEqual({ l: '7s', s: '42s' })
         await up(trx)
-        const after = await catalog(run)
-        expect(after).toEqual(before)
+        expect(await catalog(run, schema)).toEqual(before)
+        expect((await run(
+          `SELECT tgenabled, tgtype FROM pg_trigger WHERE tgname = 'security_action_challenge_transition' AND tgrelid = $1::regclass`,
+          [`${schema}.${TABLE}`],
+        )).rows).toEqual([{ tgenabled: 'O', tgtype: 23 }])
         expect(await read()).toEqual({ l: '7s', s: '42s' })
         reachedEnd = true
         throw ROLLBACK
@@ -828,13 +1078,15 @@ suite('migration', () => {
       await kdb.destroy()
     }
     expect(reachedEnd).toBe(true)
+    expect((await q('SELECT to_regnamespace($1)::text AS n', [schema])).rows).toEqual([{ n: null }])
+    expect(await catalog(q)).toEqual(publicBefore)
     expect(String((await q(`SELECT 'public.${TABLE}'::regclass::oid::text AS oid`)).rows[0].oid)).toBe(oidBefore)
-    expect((await q(`SELECT count(*)::int AS n FROM ${TABLE} WHERE id = $1::uuid`, [sentinel])).rows[0].n).toBe(1)
+    expect(await rowImage(q, sentinel)).toEqual(sentinelBefore)
   })
 
   it('refuses down() while the table holds a row and leaves the table in place', async () => {
     const userId = await seedUser()
-    const kpool = new PgPool({ connectionString: process.env.DATABASE_URL, max: 1 })
+    const kpool = new PgPool({ connectionString: capture.originalUrl, max: 1 })
     const kdb = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: kpool }) })
     let refused: unknown = null
     try {
@@ -1082,16 +1334,24 @@ suite('issuance', () => {
     expect((await repeatableReadPool().query('SHOW default_transaction_isolation')).rows[0].default_transaction_isolation).toBe('repeatable read')
     const userId = await seedUser()
     const sid = await seedSession(userId)
-    const service = serviceOn({ pool: repeatableReadPool() })
-    await expect(service.service.issue(contextOf(userId, sid), request())).resolves.toMatchObject({ ttlSeconds: 300 })
+    const child = startIssueChild({ databaseUrl: issueDatabaseUrl('repeatable read'), userId, sid, password: PASSWORD })
+    try {
+      await expect(child.done).resolves.toMatchObject({ event: 'result', ok: true, ttlSeconds: 300, status: 200 })
+    } finally {
+      child.stop()
+    }
   })
 
   it('refuses with 503 and writes nothing when the relations are not visible on the connection', async () => {
+    expect(String((await absentSchemaPool().query('SHOW search_path')).rows[0].search_path)).toContain('sa_proof_absent')
     const userId = await seedUser()
     const sid = await seedSession(userId)
-    const service = serviceOn({ pool: absentSchemaPool() })
-    const refusal = await expectRefusal(service.service.issue(contextOf(userId, sid), request()), 'SECURITY_ACTION_UNAVAILABLE')
-    expect(refusal.status).toBe(503)
+    const child = startIssueChild({ databaseUrl: issueDatabaseUrl('absent'), userId, sid, password: PASSWORD })
+    try {
+      await expect(child.done).resolves.toMatchObject({ event: 'result', ok: false, code: 'SECURITY_ACTION_UNAVAILABLE', status: 503 })
+    } finally {
+      child.stop()
+    }
     expect(await rowsOf(userId)).toEqual([])
   })
 })
@@ -1344,64 +1604,127 @@ suite('concurrency', () => {
     expect((await rowsOf(userId)).filter((r) => r.status === 'consumed')).toHaveLength(1)
   })
 
-  it.each([['read committed', () => pool()], ['repeatable read default', () => repeatableReadPool()]])('issues exactly one live proof when two issuances race on a %s pool', async (_label, target) => {
+  it.each(['read committed', 'repeatable read default'])('issues exactly one live proof when two issuances race on a %s pool', async (label) => {
     const userId = await seedUser()
     const sid = await seedSession(userId)
-    let arrived = 0
-    let release!: () => void
-    const gate = new Promise<void>((resolve) => { release = resolve })
-    const service = serviceOn({ pool: target(), beforeCompare: async () => { arrived += 1; if (arrived === 2) release(); await gate } })
-    const context = contextOf(userId, sid)
-    const results = await Promise.allSettled([service.service.issue(context, request()), service.service.issue(context, request())])
-    expect(results.map((r) => r.status)).toEqual(['fulfilled', 'fulfilled'])
+    const parts = await advisoryParts(`security-action-sid:${sid}`)
+    if (label === 'repeatable read default') {
+      expect((await repeatableReadPool().query('SHOW default_transaction_isolation')).rows[0].default_transaction_isolation).toBe('repeatable read')
+      await q('UPDATE users SET password_hash = $2 WHERE id = $1', [userId, await bcrypt.hash(PASSWORD, 16)])
+      const databaseUrl = issueDatabaseUrl('repeatable read')
+      const holder = startIssueChild({ databaseUrl, userId, sid, password: PASSWORD })
+      const waiter = { stop: () => undefined } as { stop: () => void; done?: Promise<ChildEvent>; pid?: number }
+      try {
+        expect(holder.pid).toBeGreaterThan(0)
+        expect(holder.pid).not.toBe(process.pid)
+        const holderBackend = await waitForGrantedIdleAdvisory(parts.classid, parts.objid, sid)
+        await new Promise((resolve) => setTimeout(resolve, 300))
+        expect(await waitForGrantedIdleAdvisory(parts.classid, parts.objid, sid)).toBe(holderBackend)
+        const second = startIssueChild({ databaseUrl, userId, sid, password: PASSWORD })
+        waiter.stop = second.stop
+        waiter.done = second.done
+        const waiterBackend = await waitForUngrantedAdvisory(parts.classid, parts.objid)
+        expect(waiterBackend).not.toBe(holderBackend)
+        expect(second.pid).toBeGreaterThan(0)
+        expect(second.pid).not.toBe(process.pid)
+        const results = await Promise.all([holder.done, second.done])
+        expect(results.map((result) => result.ok)).toEqual([true, true])
+      } finally {
+        holder.stop()
+        waiter.stop()
+      }
+    } else {
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => { release = resolve })
+      let parked!: () => void
+      const ready = new Promise<void>((resolve) => { parked = resolve })
+      const service = serviceOn({
+        beforeCompare: async () => {
+          if (bcryptProbe.compares.length === 1) {
+            parked()
+            await gate
+          }
+        },
+      })
+      const context = contextOf(userId, sid)
+      const holder = service.service.issue(context, request())
+      try {
+        await Promise.race([
+          ready,
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timed out waiting for the comparison')), 8_000)),
+        ])
+        expect(service.compares).toHaveLength(1)
+        const waiter = service.service.issue(context, request())
+        await waitForUngrantedAdvisory(parts.classid, parts.objid)
+        expect(service.compares).toHaveLength(1)
+        release()
+        const results = await Promise.allSettled([holder, waiter])
+        expect(results.map((result) => result.status)).toEqual(['fulfilled', 'fulfilled'])
+      } finally {
+        release()
+      }
+    }
     const rows = await rowsOf(userId)
-    expect(rows.map((r) => r.status).sort()).toEqual(['issued', 'superseded'])
-  })
+    expect(rows.map((row) => row.status).sort()).toEqual(['issued', 'superseded'])
+  }, 120_000)
 
   it.each([
-    ['read committed, one session', () => pool(), 1],
-    ['repeatable read default, one session', () => repeatableReadPool(), 1],
-    ['read committed, three sessions', () => pool(), 3],
-  ])('records exactly five failures and refuses the sixth when six wrong passwords queue behind the user row (%s)', async (_label, target, sessionCount) => {
+    ['read committed, one session', 1, 'read committed'],
+    ['repeatable read default, one session', 1, 'repeatable read'],
+    ['read committed, three sessions', 3, 'read committed'],
+  ] as const)('records exactly five failures and refuses the sixth when six wrong passwords queue behind the user row (%s)', async (label, sessionCount, isolation) => {
     const userId = await seedUser()
     const sids: string[] = []
     for (let index = 0; index < sessionCount; index += 1) sids.push(await seedSession(userId))
-    const pids: number[] = []
-    const service = serviceOn({ pool: target(), pids })
     const holder = await pool().connect()
+    const children: Array<{ stop: () => void }> = []
+    const repeatableRead = isolation === 'repeatable read'
     try {
+      expect(repeatableRead).toBe(label === 'repeatable read default, one session')
+      if (repeatableRead) {
+        expect((await repeatableReadPool().query('SHOW default_transaction_isolation')).rows[0].default_transaction_isolation).toBe('repeatable read')
+      }
+      const holderPid = Number((await holder.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
       await holder.query('BEGIN')
       await holder.query('SELECT 1 FROM users WHERE id = $1 FOR UPDATE', [userId])
-      const attempts = Array.from({ length: 6 }, (_, index) => service.service.issue(contextOf(userId, sids[index % sessionCount]), request({ password: WRONG })).then(() => 'issued', (error: SecurityActionProofError) => error.code))
-      // T1 of every attempt completes without a lock; each T2 then waits on the advisory lock or the user row.
-      await waitUntilBlockedCount(pids, 1)
+      const service = repeatableRead ? undefined : serviceOn()
+      const outcomesPromise = repeatableRead
+        ? Promise.all(Array.from({ length: 6 }, (_, index) => {
+          const child = startIssueChild({
+            databaseUrl: issueDatabaseUrl('repeatable read'),
+            userId,
+            sid: sids[index % sessionCount],
+            password: WRONG,
+          })
+          children.push(child)
+          return child.done.then((result) => (result.ok ? 'issued' : String(result.code)))
+        }))
+        : Promise.all(Array.from({ length: 6 }, (_, index) => service!.service.issue(contextOf(userId, sids[index % sessionCount]), request({ password: WRONG })).then(() => 'issued', (error: SecurityActionProofError) => error.code)))
+      await waitUntilBlockedCount(holderPid, 1)
       await new Promise((resolve) => setTimeout(resolve, 300))
       await holder.query('ROLLBACK')
-      const outcomes = (await Promise.all(attempts)).sort()
+      const outcomes = (await outcomesPromise).sort()
       expect(outcomes).toEqual(['SECURITY_ACTION_CREDENTIAL_REJECTED', 'SECURITY_ACTION_CREDENTIAL_REJECTED', 'SECURITY_ACTION_CREDENTIAL_REJECTED', 'SECURITY_ACTION_CREDENTIAL_REJECTED', 'SECURITY_ACTION_CREDENTIAL_REJECTED', 'SECURITY_ACTION_RATE_LIMITED'])
     } finally {
+      for (const child of children) child.stop()
       holder.release()
     }
-    expect((await rowsOf(userId)).filter((r) => r.status === 'failed')).toHaveLength(5)
-  })
+    expect((await rowsOf(userId)).filter((row) => row.status === 'failed')).toHaveLength(5)
+  }, 120_000)
 
   it.each([true, false])('an issuance for the same key waits on the user row, not on the proof row, while a consumer holds both (consumer commits: %s)', async (commitConsumer) => {
     const userId = await seedUser()
     const sid = await seedSession(userId)
-    const pids: number[] = []
-    const service = serviceOn({ pids })
+    const service = serviceOn()
     const { context, issued, witness } = await issueFor(userId, sid, service)
     const consumer = await pool().connect()
     try {
       await consumer.query('BEGIN ISOLATION LEVEL READ COMMITTED')
       const locked = (await lockUsersForAccessGraphWrite(executorOf(consumer), [userId])).get(userId)!
       await service.service.consume(executorOf(consumer), context, { ...consumeInput(issued.proof, { target: { kind: 'identity_revision', witness } }), lockedUser: locked })
-      pids.length = 0
       const pendingIssue = service.service.issue(context, request())
-      await waitUntilBlockedCount(pids, 1, 8_000)
-      const waiting = (await q(`SELECT query FROM pg_stat_activity WHERE pid = ANY($1::int[]) AND wait_event_type = 'Lock'`, [pids])).rows
-      expect(waiting).toHaveLength(1)
-      expect(String(waiting[0].query).replace(/\s+/g, ' ')).toBe(SECURITY_ACTION_SQL.userKeyShare)
+      const waiting = await waitForUserKeyShare()
+      expect(waiting.replace(/\s+/g, ' ')).toBe(SECURITY_ACTION_SQL.userKeyShare)
       await consumer.query(commitConsumer ? 'COMMIT' : 'ROLLBACK')
       await expect(pendingIssue).resolves.toMatchObject({ ttlSeconds: 300 })
     } finally {
@@ -1411,5 +1734,865 @@ suite('concurrency', () => {
     const original = rows.find((r) => r.proof_hash === hashProofSecret(parseProof(issued.proof)!.secret))!
     expect(original.status).toBe(commitConsumer ? 'consumed' : 'superseded')
     expect(rows.filter((r) => r.status === 'issued')).toHaveLength(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Native audit after disposal. The existing cases above stay on the inert issue path.
+// ---------------------------------------------------------------------------
+
+type AuditColumn = {
+  name: string
+  type: string
+  udt?: string
+  nullable: 'YES' | 'NO'
+  length?: number
+  precision?: number
+  scale?: number
+  defaulted: boolean
+}
+
+const AUDIT_LOG_COLUMNS: readonly AuditColumn[] = [
+  { name: 'id', type: 'bigint', nullable: 'NO', defaulted: true },
+  { name: 'event_id', type: 'uuid', nullable: 'YES', defaulted: true },
+  { name: 'event_type', type: 'character varying', nullable: 'NO', length: 100, defaulted: false },
+  { name: 'event_category', type: 'character varying', nullable: 'NO', length: 50, defaulted: false },
+  { name: 'event_severity', type: 'character varying', nullable: 'YES', length: 20, defaulted: true },
+  { name: 'resource_type', type: 'character varying', nullable: 'YES', length: 100, defaulted: false },
+  { name: 'resource_id', type: 'character varying', nullable: 'YES', length: 255, defaulted: false },
+  { name: 'resource_name', type: 'character varying', nullable: 'YES', length: 500, defaulted: false },
+  { name: 'resource_path', type: 'text', nullable: 'YES', defaulted: false },
+  { name: 'action', type: 'character varying', nullable: 'NO', length: 100, defaulted: false },
+  { name: 'action_details', type: 'jsonb', nullable: 'YES', defaulted: false },
+  { name: 'user_id', type: 'integer', nullable: 'YES', defaulted: false },
+  { name: 'user_name', type: 'character varying', nullable: 'YES', length: 255, defaulted: false },
+  { name: 'user_email', type: 'character varying', nullable: 'YES', length: 255, defaulted: false },
+  { name: 'user_roles', type: 'ARRAY', udt: '_text', nullable: 'YES', defaulted: false },
+  { name: 'impersonated_by', type: 'integer', nullable: 'YES', defaulted: false },
+  { name: 'session_id', type: 'character varying', nullable: 'YES', length: 255, defaulted: false },
+  { name: 'ip_address', type: 'inet', nullable: 'YES', defaulted: false },
+  { name: 'user_agent', type: 'text', nullable: 'YES', defaulted: false },
+  { name: 'device_id', type: 'character varying', nullable: 'YES', length: 255, defaulted: false },
+  { name: 'device_type', type: 'character varying', nullable: 'YES', length: 50, defaulted: false },
+  { name: 'geo_country', type: 'character varying', nullable: 'YES', length: 2, defaulted: false },
+  { name: 'geo_region', type: 'character varying', nullable: 'YES', length: 100, defaulted: false },
+  { name: 'geo_city', type: 'character varying', nullable: 'YES', length: 100, defaulted: false },
+  { name: 'geo_latitude', type: 'numeric', nullable: 'YES', precision: 10, scale: 8, defaulted: false },
+  { name: 'geo_longitude', type: 'numeric', nullable: 'YES', precision: 11, scale: 8, defaulted: false },
+  { name: 'request_id', type: 'character varying', nullable: 'YES', length: 100, defaulted: false },
+  { name: 'request_method', type: 'character varying', nullable: 'YES', length: 10, defaulted: false },
+  { name: 'request_path', type: 'text', nullable: 'YES', defaulted: false },
+  { name: 'request_query', type: 'jsonb', nullable: 'YES', defaulted: false },
+  { name: 'request_body', type: 'jsonb', nullable: 'YES', defaulted: false },
+  { name: 'request_headers', type: 'jsonb', nullable: 'YES', defaulted: false },
+  { name: 'response_status', type: 'integer', nullable: 'YES', defaulted: false },
+  { name: 'response_time_ms', type: 'integer', nullable: 'YES', defaulted: false },
+  { name: 'response_size_bytes', type: 'bigint', nullable: 'YES', defaulted: false },
+  { name: 'error_code', type: 'character varying', nullable: 'YES', length: 100, defaulted: false },
+  { name: 'error_message', type: 'text', nullable: 'YES', defaulted: false },
+  { name: 'error_stack', type: 'text', nullable: 'YES', defaulted: false },
+  { name: 'compliance_flags', type: 'ARRAY', udt: '_text', nullable: 'YES', defaulted: false },
+  { name: 'data_classification', type: 'character varying', nullable: 'YES', length: 50, defaulted: false },
+  { name: 'retention_period', type: 'integer', nullable: 'YES', defaulted: false },
+  { name: 'tags', type: 'ARRAY', udt: '_text', nullable: 'YES', defaulted: false },
+  { name: 'correlation_id', type: 'character varying', nullable: 'YES', length: 255, defaulted: false },
+  { name: 'parent_event_id', type: 'uuid', nullable: 'YES', defaulted: false },
+  { name: 'created_at', type: 'timestamp with time zone', nullable: 'NO', defaulted: true },
+]
+
+type AuditStep = {
+  kind?: string
+  ordinal?: number
+  pid?: number
+  form?: string
+  open?: number
+  duringAudit?: boolean
+  total?: number
+  idle?: number
+  waiting?: number
+  ok?: boolean
+  sqlstate?: string | null
+  constraint?: boolean
+  queryConfig?: boolean
+  attempt?: number
+  discard?: boolean
+}
+
+type ReleaseControl = {
+  nativeDuplicate: boolean
+  openUnchanged: boolean
+  stepsUnchanged: boolean
+  releaseCountUnchanged: boolean
+}
+
+type AuditTrace = {
+  event?: string
+  samePool?: boolean
+  max?: number | null
+  min?: number | null
+  auditAttempts?: number
+  insertAttempts?: number
+  partitionHeal?: number
+  maxTotal?: number
+  destinationOwned?: boolean
+  searchPathOwned?: boolean
+  ordinary?: boolean
+  partitioned?: boolean
+  markerRows?: number
+  visibleRows?: number
+  steps?: AuditStep[]
+  releaseControl?: ReleaseControl
+  ownerLoss?: boolean
+  compareCount?: number
+}
+
+function ownedAuditName(name: string): string {
+  if (!/^[a-z_][a-z0-9_]*$/.test(capture.schema) || !/^[a-z_][a-z0-9_]*$/.test(name)) throw new Error('owned audit name was refused')
+  return `"${capture.schema}"."${name}"`
+}
+
+function asNumber(value: unknown): number | null {
+  if (value === null || value === undefined) return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+async function publicAuditImage(): Promise<string> {
+  const rows = (await q(
+    `SELECT c.oid::text AS oid, c.relkind, c.relnatts, c.relpersistence, COALESCE(pg_get_constraintdef(con.oid), '') AS def
+       FROM pg_class c
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       LEFT JOIN pg_constraint con ON con.conrelid = c.oid
+      WHERE n.nspname = 'public' AND c.relname = 'audit_logs'
+      ORDER BY def`,
+  )).rows
+  return JSON.stringify(rows)
+}
+
+async function assertOwnedAuditContract(reject: boolean): Promise<void> {
+  const found = (await q(
+    `SELECT column_name, data_type, udt_name, is_nullable, character_maximum_length, numeric_precision, numeric_scale, column_default
+       FROM information_schema.columns
+      WHERE table_schema = $1 AND table_name = 'audit_logs'
+      ORDER BY ordinal_position`,
+    [capture.schema],
+  )).rows
+  expect(found.map((row) => row.column_name)).toEqual(AUDIT_LOG_COLUMNS.map((column) => column.name))
+  for (const [index, column] of AUDIT_LOG_COLUMNS.entries()) {
+    const row = found[index]
+    expect(row.data_type).toBe(column.type)
+    expect(row.is_nullable).toBe(column.nullable)
+    expect(row.column_default === null).toBe(!column.defaulted)
+    if (column.udt) expect(row.udt_name).toBe(column.udt)
+    if (column.length !== undefined) expect(asNumber(row.character_maximum_length)).toBe(column.length)
+    if (column.precision !== undefined) expect(asNumber(row.numeric_precision)).toBe(column.precision)
+    if (column.scale !== undefined) expect(asNumber(row.numeric_scale)).toBe(column.scale)
+  }
+  const relation = (await q(
+    `SELECT c.relkind, c.relispartition, c.relpersistence
+       FROM pg_class c
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = $1 AND c.relname = 'audit_logs'`,
+    [capture.schema],
+  )).rows
+  expect(relation).toEqual([{ relkind: 'r', relispartition: false, relpersistence: 'p' }])
+  const constraints = (await q(
+    `SELECT conname, contype, pg_get_constraintdef(oid) AS def
+       FROM pg_constraint
+      WHERE conrelid = format('%I.audit_logs', $1::text)::regclass
+      ORDER BY contype, conname`,
+    [capture.schema],
+  )).rows
+  expect(constraints.filter((row) => row.contype === 'p').map((row) => row.def)).toEqual(['PRIMARY KEY (id, created_at)'])
+  expect(constraints.filter((row) => row.contype === 'u').map((row) => row.def)).toEqual(['UNIQUE (event_id, created_at)'])
+  const checks = constraints.filter((row) => row.contype === 'c')
+  expect(checks.map((row) => [row.conname, row.def])).toEqual(reject ? [['audit_logs_native_reject', 'CHECK (false)']] : [])
+  const relations = Number((await q(
+    `SELECT count(*)::int AS n
+       FROM pg_class c
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = $1 AND c.relname LIKE 'audit_logs%' AND c.relkind IN ('r', 'p')`,
+    [capture.schema],
+  )).rows[0].n)
+  expect(relations).toBe(1)
+}
+
+async function installOwnedAuditTable(reject: boolean): Promise<void> {
+  await q(`DROP TABLE IF EXISTS ${ownedAuditName('audit_logs')}`)
+  await q(
+    `CREATE TABLE ${ownedAuditName('audit_logs')} (
+      id BIGSERIAL,
+      event_id UUID DEFAULT gen_random_uuid(),
+      event_type VARCHAR(100) NOT NULL,
+      event_category VARCHAR(50) NOT NULL,
+      event_severity VARCHAR(20) DEFAULT 'INFO',
+      resource_type VARCHAR(100),
+      resource_id VARCHAR(255),
+      resource_name VARCHAR(500),
+      resource_path TEXT,
+      action VARCHAR(100) NOT NULL,
+      action_details JSONB,
+      user_id INTEGER,
+      user_name VARCHAR(255),
+      user_email VARCHAR(255),
+      user_roles TEXT[],
+      impersonated_by INTEGER,
+      session_id VARCHAR(255),
+      ip_address INET,
+      user_agent TEXT,
+      device_id VARCHAR(255),
+      device_type VARCHAR(50),
+      geo_country VARCHAR(2),
+      geo_region VARCHAR(100),
+      geo_city VARCHAR(100),
+      geo_latitude DECIMAL(10, 8),
+      geo_longitude DECIMAL(11, 8),
+      request_id VARCHAR(100),
+      request_method VARCHAR(10),
+      request_path TEXT,
+      request_query JSONB,
+      request_body JSONB,
+      request_headers JSONB,
+      response_status INTEGER,
+      response_time_ms INTEGER,
+      response_size_bytes BIGINT,
+      error_code VARCHAR(100),
+      error_message TEXT,
+      error_stack TEXT,
+      compliance_flags TEXT[],
+      data_classification VARCHAR(50),
+      retention_period INTEGER,
+      tags TEXT[],
+      correlation_id VARCHAR(255),
+      parent_event_id UUID,
+      created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id, created_at),
+      UNIQUE (event_id, created_at)
+    )`,
+  )
+  if (reject) await q(`ALTER TABLE ${ownedAuditName('audit_logs')} ADD CONSTRAINT audit_logs_native_reject CHECK (false)`)
+  await assertOwnedAuditContract(reject)
+}
+
+async function ownedAuditRows(): Promise<Array<Record<string, unknown>>> {
+  return (await q(
+    `SELECT t.action, t.event_type, t.event_category, t.event_severity, t.resource_type, t.resource_id, t.user_id, t.action_details,
+            n.nspname AS destination, c.relkind
+       FROM ${ownedAuditName('audit_logs')} t
+       JOIN pg_class c ON c.oid = t.tableoid
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+      ORDER BY t.id`,
+  )).rows
+}
+
+function auditDetails(value: unknown): Record<string, unknown> {
+  const parsed = typeof value === 'string' ? JSON.parse(value) as unknown : value
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('audit details')
+  return parsed as Record<string, unknown>
+}
+
+function isAuditStep(value: unknown): value is AuditStep {
+  if (!value || typeof value !== 'object') return false
+  const kind = (value as { kind?: unknown }).kind
+  return kind === 'checkout' || kind === 'release' || kind === 'audit-entry' || kind === 'insert' || kind === 'terminal'
+}
+
+function auditOutcomeFrom(stdout: string): { trace: AuditTrace; result: ChildEvent } {
+  const events: unknown[] = []
+  for (const line of stdout.split('\n')) {
+    if (!line.startsWith('{')) continue
+    events.push(JSON.parse(line) as unknown)
+  }
+  const traces = events.filter((event): event is AuditTrace => Boolean(event) && typeof event === 'object' && (event as { event?: unknown }).event === 'audit-trace')
+  const results = events.filter((event): event is ChildEvent => Boolean(event) && typeof event === 'object' && (event as { event?: unknown }).event === 'result')
+  if (traces.length !== 1 || results.length !== 1) throw new Error('audit worker output')
+  if (!Array.isArray(traces[0].steps) || !traces[0].steps.every(isAuditStep)) throw new Error('audit worker trace')
+  return { trace: traces[0], result: results[0] }
+}
+
+function startAuditChild(input: { userId: string; sid: string; password: string }): { done: Promise<{ trace: AuditTrace; result: ChildEvent; stdout: string }>; stop: () => void } {
+  const tsx = createRequire(import.meta.url).resolve('tsx/cli')
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    SECURITY_ACTION_PROOF_ENABLED: 'true',
+    PRODUCT_MODE: process.env.PRODUCT_MODE ?? 'plm-workbench',
+    SECRET_PROVIDER: 'env',
+    DB_POOL_MIN: '0',
+    DB_POOL_MAX: '1',
+    DATABASE_URL: issueDatabaseUrl('default'),
+    SA_WORKER_MODE: 'audit',
+    SA_AUDIT_SCHEMA: capture.schema,
+    SA_USER_ID: input.userId,
+    SA_SESSION_ID: input.sid,
+    SA_ORG_ID: ORG,
+    SA_PASSWORD: input.password,
+    SA_PURPOSE: 'external_identity_unbind',
+    SA_CONNECTION_ID: CONNECTION,
+    SA_TARGET_IDENTITY_ID: TARGET_IDENTITY,
+    SA_BINDING_REVISION: '2',
+    SA_REVISION: 'r1',
+  }
+  delete env.SA_SCHEMA
+  delete env.SA_SLOT
+  delete env.SA_PASSWORD_HASH
+  delete env.SA_READ_GATE
+  delete env.SA_START_GATE
+  delete env.SA_SESSION_ID_OTHER
+  withAuditBcryptObserver(env)
+  const child = spawn(process.execPath, ['--require', AUDIT_BCRYPT_OBSERVER, tsx, WORKER], { cwd: PACKAGE_ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] })
+  let out = ''
+  child.stdout.setEncoding('utf8')
+  child.stderr.on('data', () => undefined)
+  child.stdout.on('data', (chunk: string) => { out += chunk })
+  const done = new Promise<{ trace: AuditTrace; result: ChildEvent; stdout: string }>((resolve, reject) => {
+    let settled = false
+    const finish = (settle: () => void) => {
+      if (settled) return
+      settled = true
+      settle()
+    }
+    child.on('error', () => finish(() => reject(new Error('worker failed to start'))))
+    child.on('close', () => finish(() => {
+      if (out.split('\n').some((line) => line.includes('"event":"crash"'))) reject(new Error('worker crashed'))
+      else {
+        try {
+          resolve({ ...auditOutcomeFrom(out), stdout: out })
+        } catch {
+          reject(new Error('worker crashed'))
+        }
+      }
+    }))
+  })
+  return { done, stop: () => { if (child.exitCode === null) child.kill() } }
+}
+
+const FAULT_APPLICATION = 'sa-wpc-audit-fault'
+
+function factDeadline<T>(pending: Promise<T>, fact: string, timeoutMs = 8_000): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(fact)), timeoutMs)
+    pending.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error: unknown) => {
+        clearTimeout(timer)
+        reject(error)
+      },
+    )
+  })
+}
+
+type NeighborLatch = { sessionId: string; token: string; tokenHash: string }
+
+async function withFlightToken<T>(token: string, work: (client: PoolClient) => Promise<T>): Promise<T> {
+  const client = await pool().connect()
+  try {
+    await client.query('BEGIN')
+    await client.query("SELECT pg_catalog.set_config('security_action.session_flight_token', $1, true)", [token])
+    const result = await work(client)
+    await client.query('COMMIT')
+    return result
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined)
+    throw error
+  } finally {
+    client.release()
+  }
+}
+
+async function insertNeighborLatch(): Promise<NeighborLatch> {
+  const sessionId = `sa-proof-neighbor-${randomUUID()}`
+  const token = createHash('sha256').update(randomUUID()).digest('hex')
+  await withFlightToken(token, (client) => client.query(
+    `INSERT INTO "${capture.schema}".security_action_session_flight (session_id, owner_token, state) VALUES ($1, $2, 'active')`,
+    [sessionId, token],
+  ))
+  return { sessionId, token, tokenHash: createHash('sha256').update(token).digest('hex') }
+}
+
+async function neighborLatchImage(sessionId: string): Promise<{ n: number; state: string | null; tokenHash: string | null }> {
+  const rows = (await q(
+    `SELECT state, owner_token FROM "${capture.schema}".security_action_session_flight WHERE session_id = $1`,
+    [sessionId],
+  )).rows
+  if (rows.length !== 1) return { n: rows.length, state: null, tokenHash: null }
+  const token = rows[0].owner_token
+  return {
+    n: 1,
+    state: typeof rows[0].state === 'string' ? rows[0].state : null,
+    tokenHash: typeof token === 'string' ? createHash('sha256').update(token).digest('hex') : null,
+  }
+}
+
+async function deleteNeighborLatch(neighbor: NeighborLatch): Promise<void> {
+  await withFlightToken(neighbor.token, (client) => client.query(
+    `DELETE FROM "${capture.schema}".security_action_session_flight WHERE session_id = $1`,
+    [neighbor.sessionId],
+  ))
+}
+
+async function waitUntilOwnerBackendAbsent(pid: number): Promise<void> {
+  const deadline = Date.now() + 8_000
+  while (Date.now() < deadline) {
+    const count = Number((await q(
+      `SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid = $1::int AND datname = current_database()`,
+      [pid],
+    )).rows[0].n)
+    if (count === 0) return
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  throw new Error('owner backend remained after terminate')
+}
+
+function preAudit(trace: AuditTrace): { checkouts: AuditStep[]; releases: AuditStep[] } {
+  const steps = trace.steps ?? []
+  const entry = steps.findIndex((step) => step.kind === 'audit-entry')
+  const before = steps.slice(0, entry)
+  return {
+    checkouts: before.filter((step) => step.kind === 'checkout'),
+    releases: before.filter((step) => step.kind === 'release'),
+  }
+}
+
+function startAuditFaultChild(input: { userId: string; sid: string; password: string }): {
+  gate: Promise<{ pid: number }>
+  done: Promise<{ trace: AuditTrace; result: ChildEvent; stdout: string }>
+  releaseAck: () => void
+  stop: () => void
+} {
+  const tsx = createRequire(import.meta.url).resolve('tsx/cli')
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    SECURITY_ACTION_PROOF_ENABLED: 'true',
+    PRODUCT_MODE: process.env.PRODUCT_MODE ?? 'plm-workbench',
+    SECRET_PROVIDER: 'env',
+    DB_POOL_MIN: '0',
+    DB_POOL_MAX: '1',
+    APP_NAME: FAULT_APPLICATION,
+    DATABASE_URL: issueDatabaseUrl('default'),
+    SA_WORKER_MODE: 'audit-fault',
+    SA_AUDIT_SCHEMA: capture.schema,
+    SA_USER_ID: input.userId,
+    SA_SESSION_ID: input.sid,
+    SA_ORG_ID: ORG,
+    SA_PASSWORD: input.password,
+    SA_PURPOSE: 'external_identity_unbind',
+    SA_CONNECTION_ID: CONNECTION,
+    SA_TARGET_IDENTITY_ID: TARGET_IDENTITY,
+    SA_BINDING_REVISION: '2',
+    SA_REVISION: 'r1',
+  }
+  delete env.SA_SCHEMA
+  delete env.SA_SLOT
+  delete env.SA_PASSWORD_HASH
+  delete env.SA_READ_GATE
+  delete env.SA_START_GATE
+  delete env.SA_SESSION_ID_OTHER
+  withAuditBcryptObserver(env)
+  const child = spawn(process.execPath, ['--require', AUDIT_BCRYPT_OBSERVER, tsx, WORKER], { cwd: PACKAGE_ROOT, env, stdio: ['pipe', 'pipe', 'pipe'] })
+  child.stdin?.on('error', () => undefined)
+  child.stderr.on('data', () => undefined)
+  let out = ''
+  let pending = ''
+  let gateSettled = false
+  let resolveGate: (value: { pid: number }) => void = () => undefined
+  let rejectGate: (error: Error) => void = () => undefined
+  const gate = new Promise<{ pid: number }>((resolve, reject) => {
+    resolveGate = resolve
+    rejectGate = reject
+  })
+  gate.catch(() => undefined)
+  const settleGate = (settle: () => void) => {
+    if (gateSettled) return
+    gateSettled = true
+    settle()
+  }
+  child.stdout?.setEncoding('utf8')
+  child.stdout?.on('data', (chunk: string) => {
+    out += chunk
+    pending += chunk
+    let newline = pending.indexOf('\n')
+    while (newline >= 0) {
+      const line = pending.slice(0, newline).trim()
+      pending = pending.slice(newline + 1)
+      newline = pending.indexOf('\n')
+      if (gateSettled || !line.startsWith('{')) continue
+      try {
+        const value = JSON.parse(line) as { event?: unknown; pid?: unknown }
+        if (value.event !== 'commit-gate') continue
+        if (typeof value.pid !== 'number' || !Number.isInteger(value.pid) || value.pid <= 0) {
+          settleGate(() => rejectGate(new Error('commit gate was not reached')))
+          continue
+        }
+        const pid = value.pid
+        settleGate(() => resolveGate({ pid }))
+      } catch {
+        continue
+      }
+    }
+  })
+  const done = new Promise<{ trace: AuditTrace; result: ChildEvent; stdout: string }>((resolve, reject) => {
+    let settled = false
+    const finish = (settle: () => void) => {
+      if (settled) return
+      settled = true
+      settle()
+    }
+    child.on('error', () => finish(() => reject(new Error('worker failed to start'))))
+    child.on('close', () => finish(() => {
+      if (!gateSettled) settleGate(() => rejectGate(new Error('commit gate was not reached')))
+      if (out.split('\n').some((line) => line.includes('"event":"crash"'))) reject(new Error('worker crashed'))
+      else {
+        try {
+          resolve({ ...auditOutcomeFrom(out), stdout: out })
+        } catch {
+          reject(new Error('worker crashed'))
+        }
+      }
+    }))
+  })
+  done.catch(() => undefined)
+  return {
+    gate,
+    done,
+    releaseAck: () => {
+      if (!child.stdin) throw new Error('commit gate was not reached')
+      child.stdin.write('{"event":"release-ack"}\n')
+    },
+    stop: () => { if (child.exitCode === null) child.kill() },
+  }
+}
+
+function expectAuditChronology(trace: AuditTrace, insert: { ok: boolean; sqlstate: string | null }): void {
+  expect(pool().options.max).toBe(8)
+  expect(trace.samePool).toBe(true)
+  expect(trace.max).toBe(1)
+  expect(trace.min).toBe(0)
+  expect(trace.maxTotal).toBe(1)
+  expect(trace.destinationOwned).toBe(true)
+  expect(trace.searchPathOwned).toBe(true)
+  expect(trace.ordinary).toBe(true)
+  expect(trace.partitioned).toBe(false)
+  expect(trace.partitionHeal).toBe(0)
+  expect(trace.auditAttempts).toBe(1)
+  expect(trace.insertAttempts).toBe(1)
+  const steps = trace.steps ?? []
+  const entry = steps.findIndex((step) => step.kind === 'audit-entry')
+  expect(entry).toBeGreaterThan(0)
+  const before = steps.slice(0, entry)
+  const after = steps.slice(entry + 1)
+  const checkouts = before.filter((step) => step.kind === 'checkout')
+  const releases = before.filter((step) => step.kind === 'release')
+  expect(checkouts.length).toBeGreaterThan(0)
+  expect(releases.map((step) => step.ordinal)).toEqual(checkouts.map((step) => step.ordinal))
+  expect(checkouts.some((step) => step.form === 'promise')).toBe(true)
+  expect(checkouts.every((step) => step.open === 1 && step.waiting === 0 && step.total !== undefined && step.total <= 1 && step.duringAudit === false)).toBe(true)
+  expect(releases.every((step) => step.duringAudit === false && step.open === 0)).toBe(true)
+  expect(releases[releases.length - 1]?.open).toBe(0)
+  expect(steps[entry]).toMatchObject({ open: 0, waiting: 0, attempt: 1, duringAudit: false })
+  expect(steps[entry]?.idle).toBe(steps[entry]?.total)
+  expect(steps[entry]?.total).toBeLessThanOrEqual(1)
+  expect(after.at(-1)?.kind).toBe('terminal')
+  const auditCheckout = after[0]
+  expect(auditCheckout).toMatchObject({ kind: 'checkout', form: 'callback', duringAudit: true, open: 1, waiting: 0 })
+  expect(auditCheckout?.total).toBeLessThanOrEqual(1)
+  expect(checkouts.some((step) => step.ordinal === auditCheckout?.ordinal)).toBe(false)
+  const reused = checkouts.find((step) => step.pid === auditCheckout?.pid)
+  if (reused) expect(releases.some((step) => step.ordinal === reused.ordinal)).toBe(true)
+  expect(after[1]).toMatchObject({ kind: 'insert', ok: insert.ok, sqlstate: insert.sqlstate, constraint: !insert.ok, queryConfig: true, duringAudit: true })
+  expect(after[2]).toMatchObject({ kind: 'release', ordinal: auditCheckout?.ordinal, duringAudit: true, open: 0 })
+  expect(after.slice(3, -1).every((step) => step.kind !== 'checkout' && step.kind !== 'insert' && step.kind !== 'audit-entry')).toBe(true)
+  expect(steps.filter((step) => step.kind === 'audit-entry')).toHaveLength(1)
+  expect(steps.filter((step) => step.kind === 'insert')).toHaveLength(1)
+  expect(steps.filter((step) => step.kind === 'terminal')).toHaveLength(1)
+}
+
+function expectFixedAudit(row: Record<string, unknown>, userId: string, challenge: Record<string, unknown>, result: string, code: string | null): void {
+  expect(row.action).toBe('security_action_verify')
+  expect(row.event_type).toBe('SECURITY_ACTION_VERIFY')
+  expect(row.event_category).toBe('SYSTEM')
+  expect(row.event_severity).toBe('INFO')
+  expect(row.resource_type).toBe('user-security-action')
+  expect(row.resource_id).toBe(`user:${userId}`)
+  expect(row.user_id).toBeNull()
+  expect(row.destination).toBe(capture.schema)
+  expect(row.relkind).toBe('r')
+  expect(auditDetails(row.action_details)).toEqual({
+    userId,
+    purpose: 'external_identity_unbind',
+    method: 'local_password',
+    result,
+    code,
+    connectionId: CONNECTION,
+    privilegeClass: challenge.privilege_class,
+  })
+}
+
+suite('native audit after disposal tranche', () => {
+  beforeAll(() => {
+    const workerSource = readFileSync(WORKER, 'utf8')
+    expect(workerSource.includes('messageBus')).toBe(false)
+    expect(workerSource.includes('AuditService')).toBe(false)
+    expect(workerSource.includes('createAuditLog')).toBe(true)
+    expect(workerSource.includes('recordAudit: async () => undefined')).toBe(true)
+    expect(workerSource.includes("SA_WORKER_MODE === 'audit'")).toBe(true)
+  })
+
+  it('returns the issued 300 second result and one native audit row after every disposal', async () => {
+    const before = await publicAuditImage()
+    await installOwnedAuditTable(false)
+    expect(await publicAuditImage()).toBe(before)
+    const userId = await seedUser()
+    const sid = await seedSession(userId)
+    const child = startAuditChild({ userId, sid, password: PASSWORD })
+    try {
+      const outcome = await child.done
+      expect(outcome.stdout.includes(PASSWORD)).toBe(false)
+      expectAuditChronology(outcome.trace, { ok: true, sqlstate: null })
+      expect(outcome.result).toEqual({ event: 'result', ok: true, ttlSeconds: 300, status: 200 })
+      expect(outcome.trace.compareCount).toBe(1)
+      const rows = await rowsOf(userId)
+      expect(rows).toHaveLength(1)
+      expect(rows[0].status).toBe('issued')
+      const lifetime = (await q(`SELECT extract(epoch FROM (expires_at - created_at))::int AS s FROM ${TABLE} WHERE id = $1::uuid`, [rows[0].id])).rows[0].s
+      expect(Number(lifetime)).toBe(300)
+      const audit = await ownedAuditRows()
+      expect(audit).toHaveLength(1)
+      expectFixedAudit(audit[0], userId, rows[0], 'issued', null)
+      expect(outcome.trace.visibleRows).toBe(1)
+      expect(outcome.trace.markerRows).toBe(1)
+      expect(await sessionFlightRows(sid)).toBe(0)
+    } finally {
+      child.stop()
+    }
+    await assertOwnedAuditContract(false)
+    expect(await publicAuditImage()).toBe(before)
+  })
+
+  it('returns the credential rejection 403 and one native audit row after the failed challenge commits', async () => {
+    const before = await publicAuditImage()
+    await installOwnedAuditTable(false)
+    const userId = await seedUser()
+    const sid = await seedSession(userId)
+    const child = startAuditChild({ userId, sid, password: WRONG })
+    try {
+      const outcome = await child.done
+      expect(outcome.stdout.includes(PASSWORD)).toBe(false)
+      expect(outcome.stdout.includes(WRONG)).toBe(false)
+      expectAuditChronology(outcome.trace, { ok: true, sqlstate: null })
+      expect(outcome.result).toEqual({ event: 'result', ok: false, code: 'SECURITY_ACTION_CREDENTIAL_REJECTED', status: 403 })
+      expect(outcome.trace.compareCount).toBe(1)
+      const rows = await rowsOf(userId)
+      expect(rows.map((row) => [row.status, row.failure_code])).toEqual([['failed', 'credential_rejected']])
+      const audit = await ownedAuditRows()
+      expect(audit).toHaveLength(1)
+      expectFixedAudit(audit[0], userId, rows[0], 'credential_rejected', 'SECURITY_ACTION_CREDENTIAL_REJECTED')
+      expect(outcome.trace.visibleRows).toBe(1)
+      expect(outcome.trace.markerRows).toBe(1)
+      expect(await sessionFlightRows(sid)).toBe(0)
+    } finally {
+      child.stop()
+    }
+    await assertOwnedAuditContract(false)
+    expect(await publicAuditImage()).toBe(before)
+  })
+
+  it('returns the original issued result when the native audit insert fails with check 23514', async () => {
+    const before = await publicAuditImage()
+    await installOwnedAuditTable(true)
+    const userId = await seedUser()
+    const sid = await seedSession(userId)
+    const child = startAuditChild({ userId, sid, password: PASSWORD })
+    try {
+      const outcome = await child.done
+      expect(outcome.stdout.includes(PASSWORD)).toBe(false)
+      expectAuditChronology(outcome.trace, { ok: false, sqlstate: '23514' })
+      expect(outcome.result).toEqual({ event: 'result', ok: true, ttlSeconds: 300, status: 200 })
+      const rows = await rowsOf(userId)
+      expect(rows).toHaveLength(1)
+      expect(rows[0].status).toBe('issued')
+      const lifetime = (await q(`SELECT extract(epoch FROM (expires_at - created_at))::int AS s FROM ${TABLE} WHERE id = $1::uuid`, [rows[0].id])).rows[0].s
+      expect(Number(lifetime)).toBe(300)
+      expect(await ownedAuditRows()).toHaveLength(0)
+      expect(outcome.trace.visibleRows).toBe(0)
+      expect(outcome.trace.markerRows).toBe(0)
+      expect(await sessionFlightRows(sid)).toBe(0)
+    } finally {
+      child.stop()
+    }
+    await assertOwnedAuditContract(true)
+    expect(await publicAuditImage()).toBe(before)
+  })
+
+  it('native release control after the audit terminal', async () => {
+    const nativeDuplicateRelease = 'Release called on client which has already been released to the pool.'
+    await installOwnedAuditTable(false)
+    const userId = await seedUser()
+    const sid = await seedSession(userId)
+    const child = startAuditChild({ userId, sid, password: PASSWORD })
+    try {
+      const outcome = await child.done
+      expect(outcome.stdout.includes(PASSWORD)).toBe(false)
+      expect(outcome.stdout.includes(nativeDuplicateRelease)).toBe(false)
+      expectAuditChronology(outcome.trace, { ok: true, sqlstate: null })
+      expect(outcome.result).toEqual({ event: 'result', ok: true, ttlSeconds: 300, status: 200 })
+      expect(outcome.trace.releaseControl).toEqual({
+        nativeDuplicate: true,
+        openUnchanged: true,
+        stepsUnchanged: true,
+        releaseCountUnchanged: true,
+      })
+    } finally {
+      child.stop()
+    }
+  })
+
+  it('returns 429 when the owner read finds five recent failures and writes one rate-limited audit row', async () => {
+    const before = await publicAuditImage()
+    await installOwnedAuditTable(false)
+    const userId = await seedUser()
+    const sid = await seedSession(userId)
+    const ids: string[] = []
+    for (let index = 0; index < 5; index += 1) {
+      ids.push(await insertRow(q, userId, { status: 'failed', failure_code: 'credential_rejected', proof_hash: null, assurance: null }))
+    }
+    const child = startAuditChild({ userId, sid, password: PASSWORD })
+    try {
+      const outcome = await child.done
+      expect(outcome.stdout.includes(PASSWORD)).toBe(false)
+      expectAuditChronology(outcome.trace, { ok: true, sqlstate: null })
+      const prior = preAudit(outcome.trace)
+      expect(prior.checkouts).toHaveLength(1)
+      expect(prior.releases).toHaveLength(1)
+      expect(prior.checkouts[0]).toMatchObject({ form: 'promise', open: 1, duringAudit: false })
+      expect(prior.releases[0]).toMatchObject({ open: 0, duringAudit: false, ordinal: prior.checkouts[0]?.ordinal })
+      expect(prior.releases[0]?.discard).toBeUndefined()
+      expect(outcome.trace.ownerLoss).toBe(false)
+      expect(outcome.trace.max).toBe(1)
+      expect(outcome.trace.min).toBe(0)
+      expect(outcome.trace.maxTotal).toBe(1)
+      expect(outcome.result).toEqual({ event: 'result', ok: false, code: 'SECURITY_ACTION_RATE_LIMITED', status: 429 })
+      expect(outcome.trace.compareCount).toBe(0)
+      const rows = await rowsOf(userId)
+      expect(rows).toHaveLength(5)
+      expect(rows.map((row) => String(row.id)).sort()).toEqual([...ids].sort())
+      expect(rows.every((row) => row.status === 'failed' && row.failure_code === 'credential_rejected' && row.proof_hash === null && row.assurance === null)).toBe(true)
+      const audit = await ownedAuditRows()
+      expect(audit).toHaveLength(1)
+      expect(audit[0].action).toBe('security_action_verify')
+      expect(audit[0].event_type).toBe('SECURITY_ACTION_VERIFY')
+      expect(audit[0].event_category).toBe('SYSTEM')
+      expect(audit[0].event_severity).toBe('INFO')
+      expect(audit[0].resource_type).toBe('user-security-action')
+      expect(audit[0].resource_id).toBe(`user:${userId}`)
+      expect(audit[0].user_id).toBeNull()
+      expect(audit[0].destination).toBe(capture.schema)
+      expect(audit[0].relkind).toBe('r')
+      expect(auditDetails(audit[0].action_details)).toEqual({
+        userId,
+        purpose: 'external_identity_unbind',
+        method: 'local_password',
+        result: 'rate_limited',
+        code: 'SECURITY_ACTION_RATE_LIMITED',
+        connectionId: CONNECTION,
+        privilegeClass: null,
+      })
+      expect(outcome.trace.visibleRows).toBe(1)
+      expect(outcome.trace.markerRows).toBe(1)
+      expect(await sessionFlightRows(sid)).toBe(0)
+    } finally {
+      child.stop()
+    }
+    await assertOwnedAuditContract(false)
+    expect(await publicAuditImage()).toBe(before)
+  })
+
+  it('returns unavailable after the claim commit owner is terminated and cleanup releases before the audit', async () => {
+    const nativeDuplicateRelease = 'Release called on client which has already been released to the pool.'
+    const before = await publicAuditImage()
+    await installOwnedAuditTable(false)
+    const userId = await seedUser()
+    const sid = await seedSession(userId)
+    const neighbor = await insertNeighborLatch()
+    const child = startAuditFaultChild({ userId, sid, password: PASSWORD })
+    try {
+      const neighborBefore = await neighborLatchImage(neighbor.sessionId)
+      expect(neighborBefore).toEqual({ n: 1, state: 'active', tokenHash: neighbor.tokenHash })
+      const gate = await factDeadline(child.gate, 'commit gate was not reached', 20_000)
+      if (await sessionFlightRows(sid) !== 1) throw new Error('claim latch was not visible')
+      const terminated = await q(
+        `SELECT pg_terminate_backend(a.pid) AS terminated
+           FROM pg_stat_activity a
+          WHERE a.pid = $1::int
+            AND a.datname = current_database()
+            AND a.application_name = $2
+            AND a.backend_type = 'client backend'
+            AND a.pid <> pg_backend_pid()`,
+        [gate.pid, FAULT_APPLICATION],
+      )
+      if (terminated.rows.length !== 1) throw new Error('terminate missed the owned backend')
+      if (terminated.rows[0].terminated !== true) throw new Error('terminate returned false')
+      await waitUntilOwnerBackendAbsent(gate.pid)
+      child.releaseAck()
+      const outcome = await factDeadline(child.done, 'audit worker did not finish after the owned backend loss', 15_000)
+      expect(outcome.stdout.includes(PASSWORD)).toBe(false)
+      expect(outcome.stdout.includes(nativeDuplicateRelease)).toBe(false)
+      expectAuditChronology(outcome.trace, { ok: true, sqlstate: null })
+      const steps = outcome.trace.steps ?? []
+      const entry = steps.findIndex((step) => step.kind === 'audit-entry')
+      expect(steps.slice(0, entry).map((step) => step.kind)).toEqual(['checkout', 'release', 'checkout', 'release'])
+      const prior = preAudit(outcome.trace)
+      expect(prior.checkouts).toHaveLength(2)
+      expect(prior.releases).toHaveLength(2)
+      expect(prior.checkouts.every((step) => step.form === 'promise' && step.open === 1 && step.duringAudit === false && step.waiting === 0)).toBe(true)
+      expect(prior.releases.every((step) => step.open === 0 && step.duringAudit === false)).toBe(true)
+      expect(prior.releases[0]?.discard).toBe(true)
+      expect(prior.releases[1]?.discard).toBeUndefined()
+      expect(prior.checkouts[0]?.pid).toBe(gate.pid)
+      expect(prior.releases[0]?.pid).toBe(gate.pid)
+      expect(prior.checkouts[1]?.pid).not.toBe(gate.pid)
+      expect(prior.checkouts[0]?.ordinal).not.toBe(prior.checkouts[1]?.ordinal)
+      expect(steps[entry]).toMatchObject({ open: 0, duringAudit: false })
+      expect(steps[entry]?.idle).toBe(steps[entry]?.total)
+      expect(outcome.trace.ownerLoss).toBe(true)
+      expect(outcome.trace.max).toBe(1)
+      expect(outcome.trace.min).toBe(0)
+      expect(outcome.trace.maxTotal).toBe(1)
+      expect(outcome.result).toEqual({ event: 'result', ok: false, code: 'SECURITY_ACTION_UNAVAILABLE', status: 503 })
+      expect(outcome.trace.compareCount).toBe(0)
+      expect(await rowsOf(userId)).toEqual([])
+      const audit = await ownedAuditRows()
+      expect(audit).toHaveLength(1)
+      expect(audit[0].action).toBe('security_action_verify')
+      expect(audit[0].event_type).toBe('SECURITY_ACTION_VERIFY')
+      expect(audit[0].event_category).toBe('SYSTEM')
+      expect(audit[0].event_severity).toBe('INFO')
+      expect(audit[0].resource_type).toBe('user-security-action')
+      expect(audit[0].resource_id).toBe(`user:${userId}`)
+      expect(audit[0].user_id).toBeNull()
+      expect(audit[0].destination).toBe(capture.schema)
+      expect(audit[0].relkind).toBe('r')
+      expect(auditDetails(audit[0].action_details)).toEqual({
+        userId,
+        purpose: 'external_identity_unbind',
+        method: 'local_password',
+        result: 'unavailable',
+        code: 'SECURITY_ACTION_UNAVAILABLE',
+        connectionId: CONNECTION,
+        privilegeClass: null,
+      })
+      expect(outcome.trace.visibleRows).toBe(1)
+      expect(outcome.trace.markerRows).toBe(1)
+      expect(await sessionFlightRows(sid)).toBe(0)
+      expect(await neighborLatchImage(neighbor.sessionId)).toEqual(neighborBefore)
+    } finally {
+      child.stop()
+      await factDeadline(child.done.then(() => undefined, () => undefined), 'audit worker did not finish after the owned backend loss', 2_000).catch(() => undefined)
+      await deleteNeighborLatch(neighbor).catch(() => undefined)
+    }
+    await assertOwnedAuditContract(false)
+    expect(await publicAuditImage()).toBe(before)
   })
 })

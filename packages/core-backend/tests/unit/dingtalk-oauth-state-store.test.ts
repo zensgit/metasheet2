@@ -197,6 +197,7 @@ import {
   validateState,
 } from '../../src/auth/dingtalk-oauth'
 import { query, transaction } from '../../src/db/pg'
+import { strictLoginUninstalledRows } from '../utils/strict-login-uninstalled-fixture'
 import {
   exchangeCodeForUserAccessToken,
   fetchDingTalkCurrentUser,
@@ -491,6 +492,8 @@ describe('DingTalk OAuth state store', () => {
       const aliasOwners = new Map<string, string>()
       const clientQuery = vi.fn(async (sql: string, params: unknown[] = []) => {
         const statement = String(sql)
+        const uninstalled = strictLoginUninstalledRows(statement)
+        if (uninstalled !== undefined) return { rows: uninstalled }
         if (/INSERT INTO user_login_aliases/i.test(statement)) {
           aliasOwners.set(String(params[2] ?? ''), String(params[0] ?? ''))
           return { rows: [] }

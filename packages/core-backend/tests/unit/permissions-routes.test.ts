@@ -34,6 +34,22 @@ vi.mock('../../src/db/pg', () => ({
   },
 }))
 
+vi.mock('../../src/integration/db/connection-pool', () => ({
+  poolManager: { get: () => ({
+    transaction: async (work: (client: { query: typeof poolMocks.query }) => Promise<unknown>) => work({
+      query: vi.fn(async (sql: string, params?: unknown[]) => {
+        if (/FROM users/.test(sql)) return { rows: [{
+          id: params?.[0], role: 'user', is_active: true, activation_status: 'activated',
+          deleted_at: null, purged_at: null,
+        }] }
+        if (/FROM user_roles/.test(sql)) return { rows: [{ role_id: 'admin' }] }
+        if (/current_setting|set_config|pg_advisory|SET TRANSACTION/.test(sql)) return { rows: [] }
+        return poolMocks.query(sql, params)
+      }),
+    }),
+  }) },
+}))
+
 vi.mock('../../src/rbac/service', () => ({
   isAdmin: rbacMocks.isAdmin,
   listUserPermissions: rbacMocks.listUserPermissions,

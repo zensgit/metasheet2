@@ -522,7 +522,11 @@ const CURATED_DEBT_ENTRIES = [
     owningSlice: 'W4C-3b',
     sharedHook: false,
     canonicalizedBy: 'W4C-3b',
-    claims: bySymbol('packages/core-backend/src/routes/admin-users.ts', /^body$/),
+    claims: (site) =>
+      site.relPath === 'packages/core-backend/src/admin/admin-user-birth-command.ts' &&
+      site.enclosingSymbol === 'createAdminUserBirthCommand' &&
+      site.table === 'attendance_shift_assignments' &&
+      site.verb === 'insert',
   },
 
   // ---------------------------------------------------------------------------------------

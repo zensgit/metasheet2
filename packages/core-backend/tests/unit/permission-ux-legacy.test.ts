@@ -159,8 +159,8 @@ describe('legacy revoke waits for the live actor', () => {
             await gate
             return { rows: [] }
           }
-          if (text.includes('ORDER BY role_id ASC')) {
-            return { rows: actor.roles.map((roleId) => ({ role_id: roleId })) }
+          if (text.includes("role_id = 'admin' FOR SHARE")) {
+            return { rows: actor.roles.filter(roleId => roleId === 'admin').map((roleId) => ({ role_id: roleId })) }
           }
           if (text.includes('FROM user_roles')) return { rows: [{ role_id: 'attendance_employee' }] }
           if (text.includes('FOR SHARE') || text.includes('pg_advisory_xact_lock')) return { rows: [{ id: params?.[0] }] }
@@ -229,10 +229,10 @@ describe('legacy revoke waits for the live actor', () => {
             await gate
             return { rows: [] }
           }
-          if (text.includes('ORDER BY role_id ASC')) {
-            return { rows: actor.roles.map((roleId) => ({ role_id: roleId })) }
+          if (text.includes("role_id = 'admin' FOR SHARE")) {
+            return { rows: actor.roles.filter(roleId => roleId === 'admin').map((roleId) => ({ role_id: roleId })) }
           }
-          if (text.includes('FROM user_roles')) return { rows: actor.roles.map((roleId) => ({ role_id: roleId })) }
+          if (text.includes('FROM user_roles')) return { rows: actor.roles.filter(roleId => roleId === 'admin').map((roleId) => ({ role_id: roleId })) }
           if (text.includes('FOR SHARE') || text.includes('pg_advisory_xact_lock')) return { rows: [{ id: params?.[0] }] }
           if (text.includes('FOR UPDATE')) {
             const id = String(params?.[0] ?? '')
@@ -286,7 +286,7 @@ describe('legacy revoke waits for the live actor', () => {
         query: async (sql: string, params?: unknown[]) => {
           const text = String(sql)
           if (text.startsWith('SET TRANSACTION') || text.includes('current_setting(') || text.includes('set_config(')) return { rows: [] }
-          if (text.includes('ORDER BY role_id ASC')) return { rows: [{ role_id: 'admin' }] }
+          if (text.includes("role_id = 'admin' FOR SHARE")) return { rows: [{ role_id: 'admin' }] }
           if (text.includes('FROM user_roles')) return { rows: [{ role_id: 'attendance_employee' }] }
           if (text.includes('FOR SHARE') || text.includes('pg_advisory_xact_lock')) return { rows: [] }
           if (text.includes('FOR UPDATE')) {
@@ -345,7 +345,7 @@ describe('legacy revoke waits for the live actor', () => {
       query: async (sql: string, params?: unknown[]) => {
         const text = String(sql)
         if (text.startsWith('SET TRANSACTION') || text.includes('current_setting(') || text.includes('set_config(')) return { rows: [] }
-        if (text.includes('ORDER BY role_id ASC')) return { rows: [{ role_id: 'admin' }] }
+        if (text.includes("role_id = 'admin' FOR SHARE")) return { rows: [{ role_id: 'admin' }] }
         if (text.includes('FROM user_roles')) return { rows: [{ role_id: 'admin' }] }
         if (text.includes('FOR SHARE') || text.includes('pg_advisory_xact_lock')) return { rows: [] }
         if (text.includes('FOR UPDATE')) return { rows: [{ id: params?.[0], role: 'user', activation_status: 'activated', is_active: true, access_generation: 4, deleted_at: null, purged_at: null }] }
@@ -384,7 +384,7 @@ describe('legacy revoke waits for the live actor', () => {
         query: async (sql: string, params?: unknown[]) => {
           const text = String(sql)
           if (text.startsWith('SET TRANSACTION') || text.includes('current_setting(') || text.includes('set_config(')) return { rows: [] }
-          if (text.includes('ORDER BY role_id ASC')) return { rows: [{ role_id: 'admin' }] }
+          if (text.includes("role_id = 'admin' FOR SHARE")) return { rows: [{ role_id: 'admin' }] }
           if (text.includes('FROM user_roles')) return { rows: [{ role_id: 'attendance_employee' }] }
           if (text.includes('FOR SHARE') || text.includes('pg_advisory_xact_lock')) return { rows: [] }
           if (text.includes('FOR UPDATE')) {
