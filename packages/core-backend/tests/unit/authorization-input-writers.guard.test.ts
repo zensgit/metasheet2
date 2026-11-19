@@ -14,7 +14,8 @@
  * between the classifier's statement and its table constant; the birth-only shape of the one
  * user insert that stays outside the contract; the closed set of callers that take a role row late;
  * and the identifiers a work closure may not reference, which include the pull-source organisation
- * lock and the functions of its write gate.
+ * lock and the functions of its write gate. Three reviewed ports may pass one transaction runner:
+ * ceremony runRoot, owned-attempt runOwnedAttempt.runAis, and strict issueOnRoot.
  *
  * The table list closure has one exception, and only one: the service reader left-joins `roles` to
  * show the name of each role a permission is inherited from. The exception is pinned by shape
@@ -38,6 +39,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
+import { importEdgeViolations } from '../helpers/import-edge-allowlist'
 import { PRIVILEGE_GRANT_SOURCE_TABLES } from '../../src/auth/security-action-privilege'
 import {
   AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS,
@@ -69,6 +71,7 @@ import {
 } from '../helpers/authorization-input-migration-rules'
 import {
   CASCADE_PARENT_TABLES,
+  blankSqlComments,
   enclosingFunctionAt,
   INPUT_TABLES,
   isTestPath,
@@ -210,11 +213,18 @@ describe('production writers equal the registry', () => {
     expect(problemsOf(virtual('V-4', AUTHORIZATION_INPUT_MIGRATION_HELPER_MODULE, ['users']))).toEqual(['V-4: reaches users'])
   })
 
-  it('a `D` entry registers no literal statements and every other entry registers at least one', () => {
+  it('dynamic entries and the closed birth producers register no duplicate literal statements', () => {
     for (const writer of AUTHORIZATION_INPUT_WRITERS) {
       if (writer.class === 'D') {
         expect(writer.statements).toEqual([])
         expect(writer.dynamic).toBeDefined()
+      } else if (writer.id === 'B-04' || writer.id === 'B-05') {
+        expect(writer).toEqual({
+          id: writer.id,
+          file: `${SRC}/admin/${writer.id === 'B-04' ? 'admin-user-birth-command' : 'admin-user-batch-birth-command'}.ts`,
+          symbol: writer.id === 'B-04' ? 'createAdminUserBirthCommand' : 'createAdminBatchUserCommand',
+          intent: 'BIRTH', class: 'B', statements: [], actor: 'human', status: 'pending', slice: 'AIS-2c',
+        })
       } else {
         expect(writer.statements.length, writer.id).toBeGreaterThan(0)
         expect(writer.dynamic).toBeUndefined()
@@ -232,9 +242,9 @@ describe('production writers equal the registry', () => {
     expect(AUTHORIZATION_INPUT_WRITERS.length).toBeGreaterThan(30)
   })
 
-  it('the registry is still entirely pending: no production caller uses the contract yet', () => {
+  it('only direct permissions, delegated scopes and legacy permission revoke are converted; other writers remain pending', () => {
     expect(hasPendingWriters()).toBe(true)
-    expect(AUTHORIZATION_INPUT_WRITERS.filter((writer) => writer.status === 'converted')).toEqual([])
+    expect(AUTHORIZATION_INPUT_WRITERS.filter((writer) => writer.status === 'converted').map(writer => writer.id)).toEqual(['W-04', 'W-05', 'W-12', 'W-13', 'W-14', 'W-26'])
     expect(AUTHORIZATION_INPUT_TABLE_ALLOWLIST_RATCHET.status).toBe('pending')
   })
 })
@@ -246,11 +256,13 @@ describe('scan controls', () => {
 
   it('the control file carries the needle and matches only its registered writes', () => {
     expect(original).toContain(CONTROL_NEEDLE)
-    expect(baseline.writes.map((w) => `${w.table}|${w.verb}`).sort()).toEqual(['permissions|INSERT', 'role_permissions|INSERT'])
+    expect(baseline.writes).toEqual([])
     expect(baseline.dynamic).toEqual([])
   })
 
   const positives: Array<[string, string, string]> = [
+    ['reintroduced permission catalogue INSERT', "const x = 'INSERT INTO permissions (code) VALUES ($1)'", 'permissions|INSERT'],
+    ['reintroduced role permission INSERT', "const x = 'INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, $2)'", 'role_permissions|INSERT'],
     ['raw INSERT', "const x = 'INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)'", 'user_roles|INSERT'],
     ['raw DELETE', "const x = 'DELETE FROM user_permissions WHERE user_id = $1'", 'user_permissions|DELETE'],
     ['users UPDATE of an input column', "const x = 'UPDATE users SET is_admin = TRUE WHERE id = $1'", 'users|UPDATE'],
@@ -683,6 +695,81 @@ function importSpecifiers(source: string): string[] {
 }
 
 const CONTRACT_SPECIFIER = /authorization-input-(?:brand|classes|lock|writers|consumers)/
+const ROLE_PLAN_MODULE = `${SRC}/rbac/authorization-privilege-witness-plan.ts`
+const ROLE_PLAN_IMPORTS = [
+  "import { PrivilegeInputsUnavailableError, readPrivilegeInputs } from '../auth/security-action-privilege'",
+  "import { assertAuthorizationInputTx, AuthorizationInputContractError } from './authorization-input-brand'",
+  "import type { AuthorizationInputQueryable } from './authorization-input-brand'",
+  "import type { AuthorizationInputPlan, AuthorizationInputTx } from './authorization-input-lock'",
+  "import { normalizeAuthorizationInputIdentityRead } from './authorization-input-lock'",
+  "import type { AuthorizationInputIdentityRead } from './authorization-input-lock'",
+]
+const CONTRACT_IMPORT_ALLOWLIST: ReadonlyArray<readonly [string, string]> = [
+  [`${SRC}/attendance/w4c0-identity.ts`, '../rbac/authorization-input-brand'],
+  [`${SRC}/attendance/w4c0-identity.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/admin/admin-user-birth-command.ts`, '../rbac/authorization-input-brand'],
+  [`${SRC}/admin/admin-user-birth-command.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/admin/admin-user-birth-command.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/admin/admin-user-batch-birth-command.ts`, '../rbac/authorization-input-brand'],
+  [`${SRC}/admin/admin-user-batch-birth-command.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/admin/admin-user-batch-birth-command.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/admin/role-delegation-namespace-admission-command.ts`, '../rbac/authorization-input-brand'],
+  [`${SRC}/admin/role-delegation-namespace-admission-command.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/admin/role-delegation-namespace-admission-command.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/admin/legacy-permission-revoke.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/admin/platform-namespace-admission-bulk-command.ts`, '../rbac/authorization-input-brand'],
+  [`${SRC}/admin/platform-namespace-admission-bulk-command.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/admin/platform-namespace-admission-bulk-command.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/admin/platform-namespace-admission-command.ts`, '../rbac/authorization-input-brand'],
+  [`${SRC}/admin/platform-namespace-admission-command.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/admin/platform-namespace-admission-command.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/admin/delegated-scope-commands.ts`, '../rbac/authorization-input-brand'],
+  [`${SRC}/admin/delegated-scope-commands.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/admin/delegated-scope-commands.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/auth/admin-login-grant-command.ts`, '../rbac/authorization-input-brand'],
+  [`${SRC}/auth/admin-login-grant-command.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/auth/admin-login-grant-command.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/admin/platform-role-assign-command.ts`, '../rbac/authorization-input-brand'],
+  [`${SRC}/admin/platform-role-assign-command.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/admin/platform-role-assign-command.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/admin/platform-role-unassign-command.ts`, '../rbac/authorization-input-brand'],
+  [`${SRC}/admin/platform-role-unassign-command.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/admin/platform-role-unassign-command.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/admin/attendance-role-commands.ts`, '../rbac/authorization-input-brand'],
+  [`${SRC}/admin/attendance-role-commands.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/admin/attendance-role-commands.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/routes/attendance-admin.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/routes/admin-users.ts`, '../rbac/authorization-input-lock'],
+  [ROLE_PLAN_MODULE, './authorization-input-brand'],
+  [ROLE_PLAN_MODULE, './authorization-input-brand'],
+  [ROLE_PLAN_MODULE, './authorization-input-lock'],
+  [`${SRC}/admin/direct-permission-authority.ts`, '../rbac/authorization-input-brand'],
+  [`${SRC}/admin/direct-permission-authority.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/admin/direct-permission-authority.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/admin/authorization-exception-compat.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/admin/authorization-exception-write.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/admin/authorization-operation-fence.ts`, '../rbac/authorization-input-brand'],
+  [`${SRC}/admin/authorization-operation-service.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/db/migration-provider.ts`, '../rbac/authorization-input-lock'],
+  [`${SRC}/routes/admin-users.ts`, '../rbac/authorization-input-brand'],
+  [`${SRC}/routes/permissions.ts`, '../rbac/authorization-input-lock'],
+  [ROLE_PLAN_MODULE, './authorization-input-lock'],
+  [ROLE_PLAN_MODULE, './authorization-input-lock'],
+]
+
+function contractEdgeProblems(files: readonly string[], sourceOf: (file: string) => string): string[] {
+  const problems = importEdgeViolations(contractEdges(files, sourceOf), CONTRACT_IMPORT_ALLOWLIST.filter(([file]) => files.includes(file)))
+  if (files.includes(ROLE_PLAN_MODULE)) {
+    const tree = ts.createSourceFile(ROLE_PLAN_MODULE, sourceOf(ROLE_PLAN_MODULE), ts.ScriptTarget.Latest, true)
+    const imports = tree.statements.filter((statement) => ts.isImportDeclaration(statement) || (ts.isExportDeclaration(statement) && statement.moduleSpecifier))
+      .map((statement) => statement.getText(tree).replace(/\s+/g, ' ')).sort()
+    const expected = [...ROLE_PLAN_IMPORTS].sort()
+    if (imports.length !== expected.length || imports.some((statement, index) => statement !== expected[index])) {
+      problems.push('role-plan imports must match the exact static shapes')
+    }
+  }
+  return problems.sort()
+}
 
 function contractEdges(files: readonly string[], sourceOf: (file: string) => string): Array<[string, string]> {
   const edges: Array<[string, string]> = []
@@ -696,19 +783,37 @@ function contractEdges(files: readonly string[], sourceOf: (file: string) => str
   return edges
 }
 
-describe('contract modules have a closed production importer list', () => {
-  it('all production import edges are declared, including migrations and plugins', () => {
+describe('contract module imports are exact', () => {
+  it('only the read-only role-plan helper has the exact production contract edges', () => {
     const sourceFiles = listFiles(REPO_ROOT, { roots: [SRC, 'plugins'], exclude: [] }).filter((file) => SOURCE_EXTENSIONS.has(path.extname(file)))
     expect(sourceFiles.length).toBeGreaterThan(productionFiles.length)
     expect(sourceFiles.some((file) => file.startsWith(`${SRC}/db/migrations/`))).toBe(true)
-    expect(contractEdges(sourceFiles, read).sort()).toEqual([
-      [`${SRC}/admin/authorization-exception-compat.ts`, '../rbac/authorization-input-lock'],
-      [`${SRC}/admin/authorization-operation-fence.ts`, '../rbac/authorization-input-brand'],
-      [`${SRC}/admin/authorization-operation-service.ts`, '../rbac/authorization-input-lock'],
-      [`${SRC}/db/migration-provider.ts`, '../rbac/authorization-input-lock'],
-      [`${SRC}/routes/admin-users.ts`, '../rbac/authorization-input-brand'],
-      [`${SRC}/routes/permissions.ts`, '../rbac/authorization-input-lock'],
-    ].sort())
+    expect(contractEdgeProblems(sourceFiles, read)).toEqual([])
+  })
+
+  it('rejects a missing, duplicate, value, namespace, mint, re-export, dynamic or other-file edge', () => {
+    const baseline = ROLE_PLAN_IMPORTS.join('\n')
+    expect(contractEdgeProblems([ROLE_PLAN_MODULE], () => baseline)).toEqual([])
+    expect(contractEdgeProblems([ROLE_PLAN_MODULE], () => baseline.replace(ROLE_PLAN_IMPORTS[3], ''))).toEqual([
+      `missing: ${ROLE_PLAN_MODULE} -> ./authorization-input-lock`,
+      'role-plan imports must match the exact static shapes',
+    ])
+    for (const addition of [
+      "import type { AuthorizationInputPlan } from './authorization-input-lock'",
+      "import { mintAuthorizationInputBrand } from './authorization-input-brand'",
+      "export * from './authorization-input-lock'",
+      "const load = () => import('./authorization-input-lock')",
+      "const load = () => require('./authorization-input-brand')",
+    ]) expect(contractEdgeProblems([ROLE_PLAN_MODULE], () => `${baseline}\n${addition}`)).not.toEqual([])
+    for (const replacement of [
+      "import { AuthorizationInputPlan, AuthorizationInputTx } from './authorization-input-lock'",
+      "import * as locks from './authorization-input-lock'",
+      "export type { AuthorizationInputPlan, AuthorizationInputTx } from './authorization-input-lock'",
+    ]) expect(contractEdgeProblems([ROLE_PLAN_MODULE], () => baseline.replace(ROLE_PLAN_IMPORTS[3], replacement))).toEqual(['role-plan imports must match the exact static shapes'])
+    const other = `${SRC}/rbac/unexpected.ts`
+    expect(contractEdgeProblems([ROLE_PLAN_MODULE, other], (file) => file === ROLE_PLAN_MODULE ? baseline : ROLE_PLAN_IMPORTS[3])).toEqual([
+      `unexpected: ${other} -> ./authorization-input-lock`,
+    ])
   })
 
   it('the brand is minted by the lock module only', () => {
@@ -728,6 +833,456 @@ describe('contract modules have a closed production importer list', () => {
     ]
     for (const source of cases) expect(contractEdges(['x.ts'], () => source), source).toHaveLength(1)
     expect(contractEdges(['x.ts'], () => "import { z } from './role-assignment'")).toEqual([])
+  })
+})
+
+const DIRECT_COMPAT = `${SRC}/admin/authorization-exception-compat.ts`
+const DIRECT_ROUTE = `${SRC}/routes/permissions.ts`
+const DIRECT_WRITER = `${SRC}/admin/authorization-exception-write.ts`
+const DIRECT_CONFIRM = `${SRC}/admin/authorization-operation-service.ts`
+const DIRECT_AUTHORIZE = `${SRC}/admin/direct-permission-authority.ts`
+const LEGACY_WRITER = `${SRC}/admin/legacy-permission-revoke.ts`
+const DIRECT_MODULE_PATTERN = /(?:authorization-exception-(?:compat|write)|direct-permission-authority)/
+const compact = (source: string) => source.replace(/\s+/g, ' ').trim()
+
+// A single data-only compatibility root serves the four legacy routes. The confirmed command owns
+// its separate receipt transaction. Both call the same branded writer with their own tx.
+const DIRECT_IMPORTS: Record<string, string[]> = {
+  [DIRECT_ROUTE]: [
+    "import { LegacyExceptionReasonInvalid, readLegacyExceptionReason, writeLegacyAuthorizationException } from '../admin/authorization-exception-compat'",
+    "import { AuthorizationExceptionWriteError } from '../admin/authorization-exception-write'",
+  ],
+  [DIRECT_COMPAT]: [
+    "import { randomUUID } from 'node:crypto'",
+    "import { withAuthorizationInputTransaction } from '../rbac/authorization-input-lock'",
+    "import { invalidateUserPerms, listUserPermissions } from '../rbac/service'",
+    "import { hasLiveRbacAdmin } from '../rbac/strict-principal'",
+    "import { AuthorizationExceptionWriteError, writeAuthorizationException, type AuthorizationExceptionAction } from './authorization-exception-write'",
+  ],
+  [DIRECT_CONFIRM]: ["import { writeAuthorizationException } from './authorization-exception-write'"],
+  [DIRECT_WRITER]: [
+    "import { supersedeDeprovisionEvidenceForAccessGraphWrite } from '../directory/access-graph-mutex'",
+    "import type { AuthorizationInputTx } from '../rbac/authorization-input-lock'",
+    "import { assertPermissionExceptionRoot, checkPermissionExceptionAuthority, type PermissionExceptionRoot } from './direct-permission-authority'",
+    "import { revokeLockedLegacyUserPermission } from './legacy-permission-revoke'",
+  ],
+  [DIRECT_AUTHORIZE]: [
+    "import { assertAuthorizationInputTx, AuthorizationInputContractError } from '../rbac/authorization-input-brand'",
+    "import { AUTHORIZATION_INPUT_LOCK_TIMEOUT_MS, AUTHORIZATION_INPUT_STATEMENT_TIMEOUT_MS, AUTHORIZATION_INPUT_STATEMENTS } from '../rbac/authorization-input-lock'",
+    "import type { AuthorizationInputPlan, AuthorizationInputTx } from '../rbac/authorization-input-lock'",
+    "import { AccessGraphUserUnavailableError } from '../directory/access-graph-mutex'",
+    "import { PlatformActorAuthorityLost } from './platform-actor-authority'",
+  ],
+  [LEGACY_WRITER]: ["import { assertPermissionExceptionRoot, type PermissionExceptionRoot } from './direct-permission-authority'"],
+}
+const DIRECT_OWNERS = {
+  writeLegacyAuthorizationException: DIRECT_COMPAT,
+  writeAuthorizationException: DIRECT_WRITER,
+  checkPermissionExceptionAuthority: DIRECT_AUTHORIZE,
+} as const
+const DIRECT_ROUTE_ACTIONS = [
+  "{ kind: 'direct.grant', code: permission }",
+  "{ kind: 'direct.revoke', code: permission }",
+  "{ kind: 'legacy.revoke', code: permission }",
+  "{ kind: 'template.apply', templateId: template.id, codes: template.permissions }",
+]
+function directPermissionProblems(files: readonly string[], sourceOf: (file: string) => string): string[] {
+  const problems: string[] = []
+  const declarations: string[] = []
+  const calls: string[] = []
+  const actions: string[] = []
+  const compatibilityCalls: string[] = []
+  for (const file of files) {
+    const source = sourceOf(file)
+    if (!DIRECT_MODULE_PATTERN.test(source) && !Object.keys(DIRECT_OWNERS).some(name => source.includes(name))) continue
+    const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true)
+    const imports: string[] = []
+    function visit(node: ts.Node) {
+      if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier &&
+        ([DIRECT_COMPAT, DIRECT_WRITER, DIRECT_AUTHORIZE].includes(file) || DIRECT_MODULE_PATTERN.test(node.moduleSpecifier.getText(tree)))) {
+        imports.push(compact(node.getText(tree)))
+      }
+      if (file === DIRECT_COMPAT && ts.isCallExpression(node) && node.expression.getText(tree) === 'withAuthorizationInputTransaction') {
+        const callback = node.arguments[1]
+        if (node.arguments.length !== 2 || node.arguments[0].getText(tree) !== 'plan' || !ts.isArrowFunction(callback)) problems.push('compatibility transaction')
+        else {
+          function collectCalls(child: ts.Node) {
+            if (ts.isCallExpression(child)) compatibilityCalls.push(child.expression.getText(tree))
+            ts.forEachChild(child, collectCalls)
+          }
+          collectCalls(callback)
+        }
+      }
+      if (ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword || node.expression.getText(tree) === 'require')
+        && (file === DIRECT_COMPAT || file === DIRECT_WRITER || DIRECT_MODULE_PATTERN.test(node.getText(tree)))) problems.push('dynamic permission command')
+      if (ts.isIdentifier(node) && Object.hasOwn(DIRECT_OWNERS, node.text)) {
+        const name = node.text as keyof typeof DIRECT_OWNERS
+        const parent = node.parent
+        if (ts.isFunctionDeclaration(parent) && parent.name === node) {
+          declarations.push(`${file}|${name}`)
+          const signature = parent.parameters.map(parameter => compact(parameter.getText(tree))).join(',')
+          if (name === 'writeLegacyAuthorizationException' && signature !== 'input: { actorId: string userId: string action: CompatibilityAction reason?: string }') problems.push('compatibility input')
+          if (name === 'writeAuthorizationException' && signature !== 'tx: AuthorizationInputTx,input: AuthorizationExceptionInput') problems.push('branded writer input')
+        } else if (ts.isCallExpression(parent) && parent.expression === node) {
+          calls.push(`${file}|${name}`)
+          if (name === 'writeLegacyAuthorizationException') {
+            const input = parent.arguments[0]
+            if (parent.arguments.length !== 1 || !input || !ts.isObjectLiteralExpression(input)) problems.push('route input')
+            else {
+              const values = input.properties.map(prop => compact(prop.getText(tree)))
+              if (values.length !== 4 || values[0] !== 'actorId: adminUserId' || values[1] !== 'userId' ||
+                !['reason: readLegacyExceptionReason(reason)', 'reason: readLegacyExceptionReason(req.body.reason)'].includes(values[3])) problems.push('route fields')
+              actions.push(values[2])
+            }
+          } else if (parent.arguments[0]?.getText(tree) !== 'tx') problems.push('permission writer receiver')
+        } else if (!(ts.isImportSpecifier(parent) && parent.name === node && !parent.propertyName)) problems.push('permission command alias')
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(tree)
+    if (JSON.stringify(imports.sort()) !== JSON.stringify([...(DIRECT_IMPORTS[file] ?? [])].sort())) problems.push(`permission imports ${file}`)
+  }
+  const expectedDeclarations = Object.entries(DIRECT_OWNERS).map(([name, file]) => `${file}|${name}`).sort()
+  const expectedCalls = [
+    ...DIRECT_ROUTE_ACTIONS.map(() => `${DIRECT_ROUTE}|writeLegacyAuthorizationException`),
+    `${DIRECT_COMPAT}|writeAuthorizationException`, `${DIRECT_CONFIRM}|writeAuthorizationException`, `${DIRECT_WRITER}|checkPermissionExceptionAuthority`,
+  ].sort()
+  if (JSON.stringify(declarations.sort()) !== JSON.stringify(expectedDeclarations)) problems.push('permission declarations')
+  if (JSON.stringify(calls.sort()) !== JSON.stringify(expectedCalls)) problems.push('permission caller union')
+  if (JSON.stringify(actions) !== JSON.stringify(DIRECT_ROUTE_ACTIONS.map(action => 'action: ' + action))) problems.push('permission route actions')
+  const expectedCompatibilityCalls = [
+    'writeAuthorizationException', 'Object.freeze', 'listUserPermissions', 'hasLiveRbacAdmin', 'randomUUID',
+    'changedCodes.map', 'tx.query', 'JSON.stringify', 'JSON.stringify', 'tx.query', 'JSON.stringify',
+  ]
+  if (JSON.stringify(compatibilityCalls) !== JSON.stringify(expectedCompatibilityCalls)) problems.push('compatibility transaction calls')
+  const root = compact(sourceOf(DIRECT_COMPAT))
+  for (const fragment of [
+    'const subjects = Object.freeze([...new Set([actorId, userId])].sort())',
+    "const plan = Object.freeze({ intent: revoking ? 'REVOKE_DIRECT' as const : 'GRANT_DIRECT' as const,",
+    'roleIds: Object.freeze([] as string[]), userIds: subjects, admissionUserIds: subjects, witness: Object.freeze({ userIds: subjects, admissionUserIds: subjects }),',
+    'withAuthorizationInputTransaction(plan, async (tx) => { const { changedCodes } = await writeAuthorizationException(tx, Object.freeze({ actorId, userId, plan,',
+  ]) if (!root.includes(fragment)) problems.push('permission root or actor witnesses')
+  return problems
+}
+
+describe('direct permission closed commands', () => {
+  it('pins the four data-only route calls, two transaction owners, fixed writer and frozen subject witnesses', () => {
+    expect(directPermissionProblems(productionFiles, read)).toEqual([])
+  })
+
+  it('rejects an undeclared importer, dynamic load, capability alias, injected callback, altered intent, receiver, plan or endpoint', () => {
+    const rogue = `${SRC}/admin/unregistered-permission.ts`
+    const files = [...new Set([...Object.values(DIRECT_OWNERS), ...Object.keys(DIRECT_IMPORTS)])]
+    const mutations = [
+      [rogue, '', "import { writeAuthorizationException } from './authorization-exception-write'"],
+      [DIRECT_COMPAT, 'writeAuthorizationException, type', 'renamed, type'],
+      [DIRECT_COMPAT, 'writeAuthorizationException, type', 'writeAuthorizationException as renamed, type'],
+      [DIRECT_COMPAT, 'const { actorId, userId, reason }', "const load = () => import('./authorization-exception-write'); const { actorId, userId, reason }"],
+      [DIRECT_COMPAT, 'const profile =', 'await hook(tx); const profile ='],
+      [DIRECT_COMPAT, "revoking ? 'REVOKE_DIRECT'", "revoking ? 'GRANT_DIRECT'"],
+      [DIRECT_COMPAT, 'userIds: subjects,', 'userIds: [actorId],'],
+      [DIRECT_COMPAT, 'action: CompatibilityAction', 'action: CompatibilityAction; runner: Function'],
+      [DIRECT_COMPAT, 'await writeAuthorizationException(tx,', 'await writeAuthorizationException(client,'],
+      [DIRECT_COMPAT, 'const { changedCodes }', 'const alias = writeAuthorizationException; const { changedCodes }'],
+      [DIRECT_WRITER, 'export async function writeAuthorizationException(', 'export async function anotherWrite('],
+      [DIRECT_ROUTE, "kind: 'direct.grant', code: permission", "kind: 'direct.revoke', code: permission"],
+      [DIRECT_ROUTE, 'actorId: adminUserId, userId, action:', 'actorId: adminUserId, userId, tx, action:'],
+    ]
+    for (const [file, before, after] of mutations) {
+      const original = file === rogue ? '' : read(file)
+      expect(original.includes(before)).toBe(true)
+      const changed = original.replace(before, after)
+      expect(directPermissionProblems(file === rogue ? [...files, rogue] : files, f => f === file ? changed : read(f)), after).not.toEqual([])
+    }
+    const writer = AUTHORIZATION_INPUT_WRITERS.find(entry => entry.id === 'W-04')!
+    const source = read(writer.file)
+    const bypass = source.replace(/tx\.query\((?=['"`]INSERT INTO user_permissions)/, 'pool.query(')
+    expect(bypass).not.toBe(source)
+    expect(conversionProblems(writer, bypass, scanSource(writer.file, bypass).writes)).not.toEqual([])
+  })
+})
+
+const PLATFORM_ROLE_COMMAND = `${SRC}/admin/platform-role-assign-command.ts`
+const PLATFORM_ROLE_UNASSIGN_COMMAND = `${SRC}/admin/platform-role-unassign-command.ts`
+const PLATFORM_ROLE_ROUTE = `${SRC}/routes/admin-users.ts`
+const PLATFORM_ROLE_IMPORTS: Record<string, readonly string[]> = {
+  "packages/core-backend/src/admin/admin-user-birth-command.ts": [
+    "import * as crypto from 'crypto'",
+    "import { ATTENDANCE_SELF_SERVICE_NAMESPACE } from '../auth/attendanceSelfServiceBackfill'",
+    "import { claimNonEmptyLoginAliasesOrThrow } from '../auth/login-alias-service'",
+    "import { buildAttendanceTimezoneRuntimeOrgLockKeyV1 } from '../attendance/attendance-timezone-runtime-locks'",
+    "import { parseCanonicalAttendanceRolloutOrgKeyV1, resolveSegmentCalculationPosture, tryAcquireAttendanceCalculationRolloutLockForBirthV1, } from '../attendance/w4c0-identity'",
+    "import type { CanonicalAttendanceRolloutOrgKeyV1 } from '../attendance/w4c0-identity'",
+    "import { PlatformActorAuthorityLost } from './platform-actor-authority'",
+    "import { RoleRowMissingError } from './role-row-contract'",
+    "import { assertAuthorizationInputTx, AuthorizationInputContractError } from '../rbac/authorization-input-brand'",
+    "import { AUTHORIZATION_INPUT_LOCK_TIMEOUT_MS, AUTHORIZATION_INPUT_STATEMENT_TIMEOUT_MS, AUTHORIZATION_INPUT_STATEMENTS, AuthorizationInputBusyError, withAuthorizationInputTransaction, } from '../rbac/authorization-input-lock'",
+    "import type { AuthorizationInputPlan, AuthorizationInputTx } from '../rbac/authorization-input-lock'",
+    "import { deriveGrantNamespaces, grantNamespaceAdmissions, isNamespaceAdmissionControlledResource, writeUserNamespaceAdmission, } from '../rbac/namespace-admission'",
+    "import { assignUserRoles } from '../rbac/role-assignment'",
+  ],
+  "packages/core-backend/src/admin/admin-user-batch-birth-command.ts": [
+    "import { ATTENDANCE_SELF_SERVICE_NAMESPACE } from '../auth/attendanceSelfServiceBackfill'",
+    "import { claimNonEmptyLoginAliasesOrThrow } from '../auth/login-alias-service'",
+    "import { assertAuthorizationInputTx, AuthorizationInputContractError } from '../rbac/authorization-input-brand'",
+    "import { AUTHORIZATION_INPUT_LOCK_TIMEOUT_MS, AUTHORIZATION_INPUT_STATEMENT_TIMEOUT_MS, AUTHORIZATION_INPUT_STATEMENTS, withAuthorizationInputTransaction, } from '../rbac/authorization-input-lock'",
+    "import type { AuthorizationInputPlan, AuthorizationInputTx } from '../rbac/authorization-input-lock'",
+    "import { writeUserNamespaceAdmission } from '../rbac/namespace-admission'",
+    "import { assignUserRoles } from '../rbac/role-assignment'",
+    "import { assertPlatformActorAuthority, PlatformActorAuthorityLost } from './platform-actor-authority'",
+    "import { RoleRowMissingError } from './role-row-contract'",
+  ],
+  "packages/core-backend/src/admin/platform-role-unassign-command.ts": [
+      "import { assertAuthorizationInputTx, AuthorizationInputContractError } from '../rbac/authorization-input-brand'",
+      "import { AUTHORIZATION_INPUT_LOCK_TIMEOUT_MS, AUTHORIZATION_INPUT_STATEMENT_TIMEOUT_MS, AUTHORIZATION_INPUT_STATEMENTS, withAuthorizationInputTransaction, } from '../rbac/authorization-input-lock'",
+      "import type { AuthorizationInputPlan, AuthorizationInputTx } from '../rbac/authorization-input-lock'",
+      "import { unassignUserRoles } from '../rbac/role-assignment'",
+      "import type { RoleAssignmentResult } from '../rbac/role-assignment'",
+      "import { disableNamespaceAdmissionsWithoutRoles, listRoleNamespaces } from '../rbac/namespace-admission'",
+      "import { AccessGraphUserUnavailableError } from '../directory/access-graph-mutex'",
+      "import { assertPlatformActorAuthority, PlatformActorAuthorityLost } from './platform-actor-authority'",
+      "import { isLastSignInPlatformAdmin } from './user-recycle'",
+      "import { syncLegacyAdminProfile } from './legacy-admin-profile'"
+  ],
+  "packages/core-backend/src/admin/platform-role-assign-command.ts": [
+    "import { assertAuthorizationInputTx, AuthorizationInputContractError } from '../rbac/authorization-input-brand'",
+    "import { AUTHORIZATION_INPUT_LOCK_TIMEOUT_MS, AUTHORIZATION_INPUT_STATEMENT_TIMEOUT_MS, AUTHORIZATION_INPUT_STATEMENTS, withAuthorizationInputTransaction, } from '../rbac/authorization-input-lock'",
+    "import type { AuthorizationInputPlan, AuthorizationInputTx } from '../rbac/authorization-input-lock'",
+    "import { assignUserRoles } from '../rbac/role-assignment'",
+    "import type { RoleAssignmentResult } from '../rbac/role-assignment'",
+    "import { AccessGraphUserUnavailableError } from '../directory/access-graph-mutex'",
+    "import { assertPlatformActorAuthority, PlatformActorAuthorityLost } from './platform-actor-authority'",
+    "import { lockRoleRowForShare, RoleRowMissingError } from './role-row-contract'",
+    "import { syncLegacyAdminProfile } from './legacy-admin-profile'"
+  ],
+  "packages/core-backend/src/admin/role-row-contract.ts": [
+    "import type { AccessGraphTransactionClient } from '../directory/access-graph-mutex'"
+  ],
+  "packages/core-backend/src/admin/legacy-admin-profile.ts": [],
+  "packages/core-backend/src/routes/admin-users.ts": [
+    "import { assignPlatformUserRoleCommand } from '../admin/platform-role-assign-command'",
+    "import { unassignPlatformUserRoleCommand } from '../admin/platform-role-unassign-command'",
+    "import { lockRoleRowForShare, RoleModifiedError, RoleRowMissingError } from '../admin/role-row-contract'",
+    "import { syncLegacyAdminProfile } from '../admin/legacy-admin-profile'",
+    "import { AuthorizationInputBusyError } from '../rbac/authorization-input-lock'"
+  ]
+}
+const PLATFORM_ROLE_FUNCTION = "export async function assignPlatformUserRoleCommand(input: PlatformRoleAssignInput): Promise<RoleAssignmentResult> {\n  const { actorId, userId, roleId, expectedUpdatedAt } = input\n  const subjects = Object.freeze([...new Set([actorId, userId])].sort())\n  const plan: AuthorizationInputPlan = Object.freeze({\n    intent: 'GRANT_ROLE',\n    roleIds: Object.freeze([roleId]),\n    userIds: subjects,\n    admissionUserIds: subjects,\n    witness: Object.freeze({ userIds: subjects, admissionUserIds: subjects }),\n  })\n  const context = Object.freeze({ actorId, userId, roleId, expectedUpdatedAt, action: 'platform-role-assign' as const, plan })\n  return withAuthorizationInputTransaction(context.plan, async (tx) => {\n    assertContext(tx, context)\n    const roleState = tx.roleRows.get(context.roleId)\n    if (roleState === 'missing') throw new RoleRowMissingError()\n    if (roleState !== 'held') invalidContext()\n    if (!await lockRoleRowForShare(tx, context.roleId, context.expectedUpdatedAt)) throw new RoleRowMissingError()\n    const target = tx.locked.get(context.userId)\n    if (!target) throw new AccessGraphUserUnavailableError('NOT_FOUND')\n    if (target.deletedAt || target.purgedAt) throw new AccessGraphUserUnavailableError('USER_IN_RECYCLE_BIN')\n    const actor = tx.locked.get(context.actorId)\n    await assertPlatformActorAuthority(tx, actor)\n    if (actor!.role !== 'admin') await stabilizeMembership(tx, context)\n    assertContext(tx, context)\n    if (tx.roleRows.get(context.roleId) !== 'held'\n      || !tx.locked.has(context.actorId) || !tx.locked.has(context.userId)\n      || !tx.witnessed.userIds.has(context.actorId) || !tx.witnessed.userIds.has(context.userId)) invalidContext()\n    const assigned = await assignUserRoles({\n      userIds: [context.userId],\n      roleId: context.roleId,\n      assignmentSource: 'manual',\n      scope: { kind: 'platform-admin' },\n      executor: tx,\n    })\n    if (context.roleId === 'admin') {\n      await syncLegacyAdminProfile(context.userId, true, (sql, params) => tx.query(sql, params))\n    }\n    return assigned\n  })\n}"
+const PLATFORM_ROLE_UNASSIGN_FUNCTION = "export async function unassignPlatformUserRoleCommand(input: PlatformRoleUnassignInput): Promise<PlatformRoleUnassignResult> {\n  const { actorId, userId, roleId } = input\n  const subjects = Object.freeze([...new Set([actorId, userId])].sort())\n  const plan: AuthorizationInputPlan = Object.freeze({\n    intent: 'REVOKE_ROLE',\n    roleIds: Object.freeze([roleId]),\n    userIds: subjects,\n    admissionUserIds: subjects,\n    witness: Object.freeze({ userIds: subjects, admissionUserIds: subjects }),\n    ...(roleId === 'admin' ? { platformAdminInvariant: true } : {}),\n  })\n  const context = Object.freeze({ actorId, userId, roleId, action: 'platform-role-unassign' as const, plan })\n  return withAuthorizationInputTransaction(context.plan, async (tx) => {\n    assertContext(tx, context)\n    if (context.roleId === 'admin' && await isLastSignInPlatformAdmin(tx, context.userId)) return { blocked: true }\n    const target = tx.locked.get(context.userId)\n    if (!target) throw new AccessGraphUserUnavailableError('NOT_FOUND')\n    if (target.deletedAt || target.purgedAt) throw new AccessGraphUserUnavailableError('USER_IN_RECYCLE_BIN')\n    const actor = tx.locked.get(context.actorId)\n    await assertPlatformActorAuthority(tx, actor)\n    if (actor!.role !== 'admin') await stabilizeMembership(tx, context)\n    assertContext(tx, context)\n    if (!tx.locked.has(context.actorId) || !tx.locked.has(context.userId)\n      || !tx.witnessed.userIds.has(context.actorId) || !tx.witnessed.userIds.has(context.userId)) invalidContext()\n    const membership = await unassignUserRoles({\n      userIds: [context.userId],\n      roleId: context.roleId,\n      scope: { kind: 'platform-admin' },\n      executor: tx,\n    })\n    const disabledNamespaces = await disableNamespaceAdmissionsWithoutRoles({\n      userId: context.userId,\n      namespaces: await listRoleNamespaces(context.roleId, tx.query),\n      actorId: context.actorId,\n      source: 'role_unassigned',\n      revokedRoleId: context.roleId,\n    }, tx.query)\n    if (context.roleId === 'admin') {\n      await syncLegacyAdminProfile(context.userId, false, (sql, params) => tx.query(sql, params))\n    }\n    return { blocked: false, membership, disabledNamespaces }\n  })\n}"
+const PLATFORM_ROLE_MODULE = /platform-role-|role-row-contract|legacy-admin-profile/
+
+function platformRoleAssignProblems(files: readonly string[], sourceOf: (file: string) => string): string[] {
+  const problems: string[] = []
+  const calls: Record<string, string[]> = {}
+  let commandDeclarations = 0
+  let unassignDeclarations = 0
+  for (const file of files) {
+    const source = sourceOf(file)
+    if (!PLATFORM_ROLE_MODULE.test(source) && !Object.hasOwn(PLATFORM_ROLE_IMPORTS, file)
+      && !source.includes('assignPlatformUserRoleCommand') && !source.includes('syncLegacyAdminProfile')) continue
+    const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true)
+    const imports: string[] = []
+    const visit = (node: ts.Node) => {
+      if (ts.isImportDeclaration(node) || (ts.isExportDeclaration(node) && node.moduleSpecifier)) {
+        const specifier = node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier) ? node.moduleSpecifier.text : ''
+        const selected = file === PLATFORM_ROLE_ROUTE ? PLATFORM_ROLE_MODULE.test(specifier) || /authorization-input-lock/.test(specifier)
+          : Object.hasOwn(PLATFORM_ROLE_IMPORTS, file) || PLATFORM_ROLE_MODULE.test(specifier)
+        if (selected) imports.push(compact(node.getText(tree)))
+      }
+      if (ts.isCallExpression(node)) {
+        const callee = node.expression.getText(tree)
+        if ((callee === 'require' || node.expression.kind === ts.SyntaxKind.ImportKeyword)
+          && ((file !== PLATFORM_ROLE_ROUTE && Object.hasOwn(PLATFORM_ROLE_IMPORTS, file)) || PLATFORM_ROLE_MODULE.test(node.getText(tree)))) problems.push('platform role dynamic load')
+        if (['assignPlatformUserRoleCommand', 'unassignPlatformUserRoleCommand', 'syncLegacyAdminProfile', 'lockRoleRowForShare'].includes(callee)) {
+          ;(calls[callee] ??= []).push(file)
+          if (callee === 'assignPlatformUserRoleCommand'
+            && (file !== PLATFORM_ROLE_ROUTE || node.arguments.length !== 1
+              || compact(node.arguments[0].getText(tree)) !== '{ actorId: adminUserId, userId, roleId, expectedUpdatedAt }')) problems.push('platform role route data call')
+          if (callee === 'unassignPlatformUserRoleCommand'
+            && (file !== PLATFORM_ROLE_ROUTE || node.arguments.length !== 1
+              || compact(node.arguments[0].getText(tree)) !== '{ actorId: adminUserId, userId, roleId }')) problems.push('platform role unassign data call')
+        }
+      }
+      if (ts.isFunctionDeclaration(node) && node.name?.text === 'assignPlatformUserRoleCommand') {
+        commandDeclarations += 1
+        if (file !== PLATFORM_ROLE_COMMAND || compact(node.getText(tree)) !== compact(PLATFORM_ROLE_FUNCTION)) problems.push('platform role fixed producer')
+      }
+      if (ts.isFunctionDeclaration(node) && node.name?.text === 'unassignPlatformUserRoleCommand') {
+        unassignDeclarations += 1
+        if (file !== PLATFORM_ROLE_UNASSIGN_COMMAND || compact(node.getText(tree)) !== compact(PLATFORM_ROLE_UNASSIGN_FUNCTION)) problems.push('platform role unassign fixed producer')
+      }
+      if (ts.isIdentifier(node) && ['assignPlatformUserRoleCommand', 'unassignPlatformUserRoleCommand'].includes(node.text)) {
+        const parent = node.parent
+        if (!((ts.isImportSpecifier(parent) && parent.name === node && !parent.propertyName)
+          || (ts.isFunctionDeclaration(parent) && parent.name === node)
+          || (ts.isCallExpression(parent) && parent.expression === node))) problems.push('platform role command alias')
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(tree)
+    if (JSON.stringify(imports.sort()) !== JSON.stringify([...(PLATFORM_ROLE_IMPORTS[file] ?? [])].sort())) problems.push(`platform role exact imports ${file}`)
+  }
+  if (commandDeclarations !== 1) problems.push('platform role declaration census')
+  if (unassignDeclarations !== 1) problems.push('platform role unassign declaration census')
+  const expected: Record<string, string[]> = {
+    assignPlatformUserRoleCommand: [PLATFORM_ROLE_ROUTE],
+    unassignPlatformUserRoleCommand: [PLATFORM_ROLE_ROUTE],
+    syncLegacyAdminProfile: [DIRECT_CONFIRM, PLATFORM_ROLE_COMMAND, PLATFORM_ROLE_UNASSIGN_COMMAND, PLATFORM_ROLE_ROUTE, PLATFORM_ROLE_ROUTE],
+    lockRoleRowForShare: [PLATFORM_ROLE_COMMAND, PLATFORM_ROLE_ROUTE],
+  }
+  for (const [symbol, expectedFiles] of Object.entries(expected)) {
+    if (JSON.stringify((calls[symbol] ?? []).sort()) !== JSON.stringify(expectedFiles.sort())) problems.push(`platform role caller union ${symbol}`)
+  }
+  return problems
+}
+
+describe('single platform role assign producer boundary', () => {
+  it('rejects unassign capability injection, incomplete plans, missing R1 and a changed fixed receiver', () => {
+    const baseline = read(PLATFORM_ROLE_UNASSIGN_COMMAND)
+    const relevant = Object.keys(PLATFORM_ROLE_IMPORTS)
+    const mutations = [
+      baseline.replace('input: PlatformRoleUnassignInput', 'input: PlatformRoleUnassignInput, runner: Function'),
+      baseline.replace("intent: 'REVOKE_ROLE'", "intent: 'GRANT_ROLE'"),
+      baseline.replace('userIds: subjects,', 'userIds: [actorId],'),
+      baseline.replace('roleIds: Object.freeze([roleId])', 'roleIds: Object.freeze([])'),
+      baseline.replace("...(roleId === 'admin' ? { platformAdminInvariant: true } : {}),", ''),
+      baseline.replace('executor: tx', 'executor: pool'),
+      baseline.replace('async (tx) => {', 'async (tx) => { await hook(tx);'),
+      baseline.replace("import { unassignUserRoles }", "import * as unassignUserRoles"),
+      baseline + "\nconst load = () => import('./platform-role-unassign-command')",
+      baseline + '\nconst alias = unassignPlatformUserRoleCommand',
+      baseline.replace('await syncLegacyAdminProfile(context.userId, false, (sql, params) => tx.query(sql, params))', 'await pool.query(sql)'),
+    ]
+    expect(platformRoleAssignProblems(productionFiles, read)).toEqual([])
+    for (const [index, changed] of mutations.entries()) {
+      expect(changed, `unassign control ${index}`).not.toBe(baseline)
+      expect(platformRoleAssignProblems(relevant, file => file === PLATFORM_ROLE_UNASSIGN_COMMAND ? changed : read(file)), `unassign control ${index}`).not.toEqual([])
+    }
+    const rogue = `${SRC}/admin/rogue-platform-role-unassign.ts`
+    expect(platformRoleAssignProblems([...relevant, rogue], file => file === rogue ? "import { unassignPlatformUserRoleCommand } from './platform-role-unassign-command'" : read(file))).not.toEqual([])
+    const duplicate = baseline + '\n' + PLATFORM_ROLE_UNASSIGN_FUNCTION
+    expect(platformRoleAssignProblems(relevant, file => file === PLATFORM_ROLE_UNASSIGN_COMMAND ? duplicate : read(file))).not.toEqual([])
+  })
+  it('pins the one data-only producer and unchanged helper caller union without converting shared writers', () => {
+    expect(platformRoleAssignProblems(productionFiles, read)).toEqual([])
+    for (const id of ['W-01', 'W-02', 'W-03', 'W-08']) expect(AUTHORIZATION_INPUT_WRITERS.find(writer => writer.id === id)?.status).toBe('pending')
+    expect(AUTHORIZATION_INPUT_WRITERS.find(writer => writer.id === 'W-08')?.file).toBe(`${SRC}/admin/legacy-admin-profile.ts`)
+  })
+
+  it('rejects altered producer shape, API, intent, plans, callback, receiver, imports or helper union', () => {
+    const baseline = read(PLATFORM_ROLE_COMMAND)
+    const relevant = Object.keys(PLATFORM_ROLE_IMPORTS)
+    const rogue = `${SRC}/admin/rogue-platform-role.ts`
+    const mutations = [
+      baseline.replace('input: PlatformRoleAssignInput', 'input: PlatformRoleAssignInput, runner: Function'),
+      baseline.replace("intent: 'GRANT_ROLE'", "intent: 'REVOKE_ROLE'"),
+      baseline.replace('userIds: subjects,', 'userIds: [actorId],'),
+      baseline.replace('roleIds: Object.freeze([roleId])', 'roleIds: Object.freeze([])'),
+      baseline.replace('executor: tx', 'executor: pool'),
+      baseline.replace('async (tx) => {', 'async (tx) => { await hook(tx);'),
+      baseline.replace("import { assignUserRoles }", "import * as assignUserRoles"),
+      baseline.replace("import { assignUserRoles }", "import assignUserRoles"),
+      baseline + "\nconst load = () => import('./legacy-admin-profile')",
+      baseline + "\nconst alias = assignPlatformUserRoleCommand",
+      baseline.replace('await syncLegacyAdminProfile(context.userId, true, (sql, params) => tx.query(sql, params))', 'await pool.query(sql)'),
+    ]
+    for (const [index, changed] of mutations.entries()) expect(platformRoleAssignProblems(relevant, file => file === PLATFORM_ROLE_COMMAND ? changed : read(file)), `platform producer negative ${index}`).not.toEqual([])
+    const duplicate = baseline + '\n' + PLATFORM_ROLE_FUNCTION
+    expect(platformRoleAssignProblems(relevant, file => file === PLATFORM_ROLE_COMMAND ? duplicate : read(file))).not.toEqual([])
+    expect(platformRoleAssignProblems([...relevant, rogue], file => file === rogue ? "import { assignPlatformUserRoleCommand } from './platform-role-assign-command'" : read(file))).not.toEqual([])
+    const missingLegacy = read(PLATFORM_ROLE_ROUTE).replace('await syncLegacyAdminProfile(userId, false, runQuery)', 'await unrelated()')
+    expect(platformRoleAssignProblems(relevant, file => file === PLATFORM_ROLE_ROUTE ? missingLegacy : read(file))).not.toEqual([])
+  })
+})
+
+function identitySlotProblems(file: string, source: string): string[] {
+  const problems: string[] = []
+  const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true)
+  const identityShared = "SELECT pg_advisory_xact_lock_shared(hashtext('directory:identity-maintenance'))"
+  const identityExclusive = "SELECT pg_advisory_xact_lock(hashtext('directory:identity-maintenance'))"
+  const identitySites: Array<{ literal: string; owner: string | undefined }> = []
+  let helperCalls = 0
+  let identityUse = false
+  const identityUses: ts.Node[] = []
+  let sourceHelperImport = false
+  const visit = (node: ts.Node) => {
+    if (ts.isStringLiteralLike(node) && node.text.includes('directory:identity-maintenance')) {
+      const sql = blankSqlComments(node.text)
+      const calls = sql.includes('directory:identity-maintenance') ? sql.matchAll(/\bpg_(?:try_)?advisory_(?:xact_)?lock(?:_shared)?\b/gi) : []
+      for (const _call of calls) {
+        identitySites.push({ literal: node.text, owner: enclosingFunctionAt(file, source, node.getStart(tree))?.name })
+      }
+    }
+    if ((ts.isIdentifier(node) || ts.isStringLiteralLike(node)) && ['identityRead', 'requireIdentityRead'].includes(node.text)) {
+      identityUse = true
+      identityUses.push(node)
+    }
+    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) && node.moduleSpecifier.text.endsWith('/source-sync-freeze-lock')) sourceHelperImport = true
+    if (ts.isCallExpression(node) && node.expression.getText(tree) === 'acquireSourceSyncFreezeLock') helperCalls += 1
+    ts.forEachChild(node, visit)
+  }
+  visit(tree)
+  const helperSites: Record<string, number> = {
+    [LOCK_MODULE]: 1,
+    [`${SRC}/directory/controlled-handover.ts`]: 1,
+    [`${SRC}/directory/org-transfer-service.ts`]: 2,
+    [`${SRC}/directory/directory-sync.ts`]: 1,
+    [`${SRC}/directory/source-sync-freeze-lock.ts`]: 0,
+  }
+  if (file === LOCK_MODULE) {
+    if (identitySites.length !== 1 || identitySites[0].literal !== identityShared || identitySites[0].owner !== 'acquireLocks') problems.push('central shared R2 shape')
+    if (!source.includes('await acquireSourceSyncFreezeLock({ query }, sourceId)')) problems.push('central R2F helper shape')
+  } else {
+    const legacyOwner = file === `${SRC}/auth/dingtalk-identity-repair.ts` ? 'lock'
+      : file === `${SRC}/directory/controlled-handover.ts` ? 'lockPair' : undefined
+    if (legacyOwner) {
+      if (identitySites.length !== 1 || identitySites[0].literal !== identityExclusive || identitySites[0].owner !== legacyOwner) problems.push('legacy R2 shape')
+    } else if (identitySites.length !== 0) problems.push('identity R2 bypass')
+  }
+  if (identityUse && file !== LOCK_MODULE && file !== ROLE_PLAN_MODULE) problems.push('identity slot production caller')
+  if (helperCalls !== (helperSites[file] ?? 0) || (sourceHelperImport && !Object.hasOwn(helperSites, file))) problems.push('source helper sites')
+  return problems
+}
+
+describe('identity slot acquisition is central and closed', () => {
+  it('accepts the coherent production baseline', () => {
+    for (const file of productionFiles) expect(identitySlotProblems(file, read(file)), file).toEqual([])
+  })
+
+  it('rejects one changed key, mode or helper from the passing central baseline', () => {
+    const source = read(LOCK_MODULE)
+    expect(identitySlotProblems(LOCK_MODULE, source)).toEqual([])
+    for (const [before, after] of [
+      ['directory:identity-maintenance', 'directory:identity-other'],
+      ["pg_advisory_xact_lock_shared(hashtext('directory:identity-maintenance'))", "pg_advisory_xact_lock(hashtext('directory:identity-maintenance'))"],
+      ['await acquireSourceSyncFreezeLock({ query }, sourceId)', 'await query("SELECT 1")'],
+    ]) {
+      expect(source.split(before)).toHaveLength(2)
+      expect(identitySlotProblems(LOCK_MODULE, source.replace(before, after))).not.toEqual([])
+    }
+  })
+
+  it.each([
+    'const plan = { identityRead: { sourceIntegrationIds: [] } }',
+    'tx.requireIdentityRead(ids)',
+    "await client.query(\"SELECT pg_advisory_xact_lock_shared(hashtext('directory:identity-maintenance'))\")",
+    "await client.query(\"SELECT  pg_advisory_xact_lock_shared(hashtext('directory:identity-maintenance'))\")",
+    "await client.query(\"SELECT pg_advisory_xact_lock_shared ( hashtext ( 'directory:identity-maintenance' ) )\")",
+    "await client.query(\"select PG_ADVISORY_XACT_LOCK_SHARED(HASHTEXT('directory:identity-maintenance'))\")",
+    "await client.query(\"SELECT pg_advisory_xact_lock_shared/* gap */(hashtext('directory:identity-maintenance'))\")",
+    "await client.query(\"SELECT pg_catalog.pg_advisory_xact_lock_shared(pg_catalog.hashtext('directory:identity-maintenance'))\")",
+    "await client.query(\"SELECT pg_advisory_xact_lock_shared(hashtext(E'directory:identity-maintenance'))\")",
+    "await client.query(\"SELECT pg_advisory_xact_lock_shared(hashtext(('directory:identity-maintenance')::text))\")",
+    'await client.query(`SELECT "pg_advisory_xact_lock_shared"("hashtext"(\'directory:identity-maintenance\'))`)',
+    "await client.query(\"SELECT pg_advisory_xact_lock(hashtext('directory:identity-maintenance'))\")",
+    "await client.query(\"SELECT pg_try_advisory_xact_lock_shared(hashtext('directory:identity-maintenance'))\")",
+    "await client.query(\"SELECT pg_advisory_lock_shared(hashtext('directory:identity-maintenance'))\")",
+    "import { acquireSourceSyncFreezeLock as take } from '../directory/source-sync-freeze-lock'",
+  ])('rejects a single new production path: %s', (addition) => {
+    const file = `${SRC}/rbac/new-caller.ts`
+    const baseline = 'export const unrelated = true'
+    expect(identitySlotProblems(file, baseline)).toEqual([])
+    expect(identitySlotProblems(file, `${baseline}\n${addition}`)).not.toEqual([])
   })
 })
 
@@ -893,9 +1448,165 @@ describe('world-lock key forms', () => {
 
 /* ───────────────────────────── function-level ratchet, table closure, birth-only shape ───────────────────────────── */
 
+const DELEGATED_SCOPE_COMMAND = `${SRC}/admin/delegated-scope-commands.ts`
+const DELEGATED_SCOPE_WRITERS = [
+  { id: 'W-12', symbol: 'writeDelegatedAdminScopeOnTx', statements: ['DELETE|delegated_role_admin_scopes', 'INSERT|delegated_role_admin_scopes'] },
+  { id: 'W-13', symbol: 'writeDelegatedAdminMemberGroupsOnTx', statements: ['DELETE|delegated_role_admin_member_groups', 'INSERT|delegated_role_admin_member_groups'] },
+  { id: 'W-14', symbol: 'applyDelegatedScopeTemplateOnTx', statements: ['DELETE|delegated_role_admin_member_groups', 'DELETE|delegated_role_admin_scopes', 'INSERT|delegated_role_admin_member_groups', 'INSERT|delegated_role_admin_scopes'] },
+] as const
+const DELEGATED_SCOPE_CALLERS = [
+  ['writeDelegatedAdminScopeCommand', '/api/admin/role-delegation/users/:userId/scopes/:action(assign|unassign)'],
+  ['writeDelegatedAdminMemberGroupsCommand', '/api/admin/role-delegation/users/:userId/scope-groups/:action(assign|unassign)'],
+  ['applyDelegatedScopeTemplateCommand', '/api/admin/role-delegation/users/:userId/scope-templates/apply'],
+] as const
+const DELEGATED_SCOPE_REQUEST_KEYS: Readonly<Record<string, readonly string[]>> = {
+  writeDelegatedAdminScopeCommand: ['action', 'actorId', 'directoryDepartmentId', 'includeChildrenIntent', 'namespace', 'userId'],
+  writeDelegatedAdminMemberGroupsCommand: ['action', 'actorId', 'groupId', 'namespace', 'userId'],
+  applyDelegatedScopeTemplateCommand: ['actorId', 'mode', 'namespace', 'templateId', 'userId'],
+}
+
+function delegatedScopeCallerProblems(file: string, source: string): string[] {
+  const problems: string[] = []
+  const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true)
+  const unwrap = (expression: ts.Expression): ts.Expression => {
+    while (ts.isAsExpression(expression) || ts.isTypeAssertionExpression(expression) || ts.isParenthesizedExpression(expression) || ts.isSatisfiesExpression(expression)) expression = expression.expression
+    return expression
+  }
+  const seen: string[] = []
+  const expectedNames = DELEGATED_SCOPE_CALLERS.map(([name]) => name)
+  for (const statement of tree.statements) {
+    if (ts.isExportDeclaration(statement) && statement.moduleSpecifier?.getText(tree).includes('delegated-scope-commands')) problems.push('delegated scope reexport')
+    if (!ts.isImportDeclaration(statement) || !statement.moduleSpecifier.getText(tree).includes('delegated-scope-commands')) continue
+    const bindings = statement.importClause?.namedBindings
+    if (file !== `${SRC}/routes/admin-users.ts` || !ts.isStringLiteral(statement.moduleSpecifier)
+      || statement.moduleSpecifier.text !== '../admin/delegated-scope-commands' || statement.importClause?.isTypeOnly
+      || statement.importClause?.name || !bindings || !ts.isNamedImports(bindings)
+      || bindings.elements.some(element => element.propertyName || element.isTypeOnly)
+      || JSON.stringify(bindings.elements.map(element => element.name.text).sort()) !== JSON.stringify([...expectedNames].sort())) problems.push('delegated scope importer')
+  }
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(node.expression) && node.expression.text === 'require'))
+      && node.getText(tree).includes('delegated-scope-commands')) problems.push('delegated scope dynamic load')
+    if (ts.isIdentifier(node) && expectedNames.some(name => name === node.text)) {
+      const parent = node.parent
+      if (ts.isImportSpecifier(parent)) return
+      if (!ts.isCallExpression(parent) || parent.expression !== node) problems.push('delegated scope detached reference')
+      else {
+        const expected = DELEGATED_SCOPE_CALLERS.find(([name]) => name === node.text)!
+        seen.push(node.text)
+        const argument = parent.arguments[0]
+        const fields = argument && ts.isObjectLiteralExpression(argument) ? fieldsOf(argument, tree) : undefined
+        if (!fields || JSON.stringify([...fields.keys()].sort()) !== JSON.stringify(DELEGATED_SCOPE_REQUEST_KEYS[node.text])) problems.push('delegated scope data keys')
+        if (argument && ts.isObjectLiteralExpression(argument) && argument.properties.some(property => {
+          if (!ts.isShorthandPropertyAssignment(property) && !ts.isPropertyAssignment(property)) return true
+          if (!ts.isIdentifier(property.name) && !ts.isStringLiteral(property.name)) return true
+          const key = property.name.text
+          const value = unwrap(ts.isShorthandPropertyAssignment(property) ? property.name : property.initializer)
+          if (key !== 'action') return !ts.isIdentifier(value) || value.text !== (key === 'actorId' ? 'adminUserId' : key)
+          if (ts.isIdentifier(value)) return value.text !== 'action'
+          if (!ts.isConditionalExpression(value)) return true
+          const condition = unwrap(value.condition)
+          if (!ts.isBinaryExpression(condition) || condition.operatorToken.kind !== ts.SyntaxKind.EqualsEqualsEqualsToken) return true
+          const left = unwrap(condition.left)
+          const right = unwrap(condition.right)
+          const assigned = unwrap(value.whenTrue)
+          const unassigned = unwrap(value.whenFalse)
+          return !ts.isIdentifier(left) || left.text !== 'action'
+            || !ts.isStringLiteral(right) || right.text !== 'assign'
+            || !ts.isStringLiteral(assigned) || assigned.text !== 'assign'
+            || !ts.isStringLiteral(unassigned) || unassigned.text !== 'unassign'
+        })) problems.push('delegated scope data binding')
+        let owner: ts.Node | undefined = parent.parent
+        while (owner && !ts.isFunctionLike(owner)) owner = owner.parent
+        const registration = owner?.parent
+        if (file !== `${SRC}/routes/admin-users.ts` || parent.arguments.length !== 1 || !ts.isObjectLiteralExpression(parent.arguments[0])
+          || !owner || !ts.isArrowFunction(owner) || !registration || !ts.isCallExpression(registration)
+          || !ts.isPropertyAccessExpression(registration.expression) || registration.expression.getText(tree) !== 'r.post'
+          || registration.arguments[registration.arguments.length - 1] !== owner || !registration.arguments[0]
+          || !ts.isStringLiteral(registration.arguments[0]) || registration.arguments[0].text !== expected[1]) problems.push('delegated scope call boundary')
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(tree)
+  if (file === `${SRC}/routes/admin-users.ts` && JSON.stringify(seen.sort()) !== JSON.stringify([...expectedNames].sort())) problems.push('delegated scope caller coverage')
+  return problems
+}
+
+function delegatedScopeConversionProblems(entries: readonly AuthorizationInputWriterEntry[], source: string, writes: readonly LiteralWrite[]): string[] {
+  const problems: string[] = []
+  const tree = ts.createSourceFile(DELEGATED_SCOPE_COMMAND, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  const functions: ts.FunctionDeclaration[] = []
+  const visit = (node: ts.Node) => {
+    if (ts.isFunctionDeclaration(node)) functions.push(node)
+    if (ts.isIdentifier(node) && DELEGATED_SCOPE_WRITERS.some(expected => expected.symbol === node.text)) {
+      if (!((ts.isFunctionDeclaration(node.parent) || ts.isFunctionExpression(node.parent) || ts.isMethodDeclaration(node.parent)) && node.parent.name === node)
+        && !(ts.isCallExpression(node.parent) && node.parent.expression === node)) problems.push('delegated scope private binding exposed')
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(tree)
+  const moduleWrites = writes.filter(write => write.file === DELEGATED_SCOPE_COMMAND)
+  const ownership = moduleWrites.map(write => {
+    let owner: ts.Node | undefined
+    const findOwner = (node: ts.Node) => {
+      if (node.getStart(tree) <= write.position && write.position < node.getEnd()) {
+        if (ts.isFunctionLike(node) && !ts.isTypeNode(node)) owner = node
+        ts.forEachChild(node, findOwner)
+      }
+    }
+    findOwner(tree)
+    return { write, owner }
+  })
+  if (entries.filter(entry => entry.file === DELEGATED_SCOPE_COMMAND).length !== DELEGATED_SCOPE_WRITERS.length) problems.push('delegated scope registry coverage')
+  for (const expected of DELEGATED_SCOPE_WRITERS) {
+    const declarations = functions.filter(declaration => declaration.name?.text === expected.symbol)
+    const declaration = declarations[0]
+    const token = declaration?.parameters.filter(parameter => ts.isIdentifier(parameter.name) && parameter.name.text === 'tx')
+    const tokenType = token?.[0]?.type
+    if (declarations.length !== 1 || !declaration || declaration.parent !== tree
+      || declaration.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.ExportKeyword)
+      || token?.length !== 1 || !tokenType || !ts.isTypeReferenceNode(tokenType)
+      || !ts.isIdentifier(tokenType.typeName) || tokenType.typeName.text !== 'AuthorizationInputTx' || tokenType.typeArguments) {
+      problems.push(`${expected.id}: delegated scope private token writer`)
+    }
+    if (declaration?.body) {
+      const referencesToken = (node: ts.Node): boolean => (ts.isIdentifier(node) && node.text === 'tx') || Boolean(ts.forEachChild(node, referencesToken))
+      const checkTokenBinding = (node: ts.Node) => {
+        if ((ts.isVariableDeclaration(node) || ts.isBindingElement(node) || ts.isParameter(node) || ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node))
+          && node.name && ts.isIdentifier(node.name) && node.name.text === 'tx') problems.push(`${expected.id}: delegated scope token shadow`)
+        const target = ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment ? node.left
+          : (ts.isForOfStatement(node) || ts.isForInStatement(node)) && !ts.isVariableDeclarationList(node.initializer) ? node.initializer
+            : (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) && (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken) ? node.operand : undefined
+        if (target && referencesToken(target)) problems.push(`${expected.id}: delegated scope token reassignment`)
+        ts.forEachChild(node, checkTokenBinding)
+      }
+      checkTokenBinding(declaration.body)
+    }
+    const matching = entries.filter(entry => entry.id === expected.id)
+    const entry = matching[0]
+    if (matching.length !== 1 || !entry || entry.file !== DELEGATED_SCOPE_COMMAND || entry.symbol !== expected.symbol
+      || entry.statements.some(statement => statement.count !== 1)
+      || JSON.stringify(entry.statements.map(statement => `${statement.verb}|${statement.table}`).sort()) !== JSON.stringify(expected.statements)) {
+      problems.push(`${expected.id}: delegated scope registry shape`)
+    }
+    const sites = ownership.filter(site => site.owner === declaration)
+    if (JSON.stringify(sites.map(site => `${site.write.verb}|${site.write.table}`).sort()) !== JSON.stringify(expected.statements)) {
+      problems.push(`${expected.id}: delegated scope owner multiset`)
+    }
+    for (const site of sites) {
+      if (queryReceiverAt(DELEGATED_SCOPE_COMMAND, source, site.write.position) !== 'tx') problems.push(`${expected.id}: delegated scope query receiver`)
+    }
+  }
+  if (ownership.some(site => !functions.some(declaration => declaration === site.owner && declaration.parent === tree
+    && DELEGATED_SCOPE_WRITERS.some(expected => expected.symbol === declaration.name?.text)))) problems.push('delegated scope orphan statement')
+  return problems
+}
+
 function conversionProblems(writer: AuthorizationInputWriterEntry, source: string, writes: readonly LiteralWrite[]): string[] {
   const problems: string[] = []
   if (writer.status !== 'converted') return problems
+  if (writer.file === DELEGATED_SCOPE_COMMAND) return delegatedScopeConversionProblems(AUTHORIZATION_INPUT_WRITERS, source, writes)
   const sites = writes.filter((write) => write.file === writer.file && writer.statements.some((s) => s.table === write.table && s.verb === write.verb))
   if (sites.length === 0) problems.push(`${writer.id}: no statement site found`)
   for (const site of sites) {
@@ -912,6 +1623,109 @@ function conversionProblems(writer: AuthorizationInputWriterEntry, source: strin
 }
 
 describe('function-level conversion ratchet', () => {
+  it('delegated scope commands have only their three registered direct data-only route callers', () => {
+    const problems = productionFiles.filter(file => file !== DELEGATED_SCOPE_COMMAND).flatMap(file => {
+      const source = read(file)
+      return source.includes('delegated-scope-commands') || DELEGATED_SCOPE_CALLERS.some(([name]) => source.includes(name))
+        ? delegatedScopeCallerProblems(file, source) : []
+    })
+    expect(problems).toEqual([])
+    expect(productionFiles.flatMap(file => importSpecifiers(read(file)).filter(specifier => specifier.includes('delegated-scope-commands')).map(specifier => [file, specifier])))
+      .toEqual([[`${SRC}/routes/admin-users.ts`, '../admin/delegated-scope-commands']])
+  })
+
+  it('delegated scope caller controls reject aliases, detached calls, loaders and wrong route/data boundaries', () => {
+    const file = `${SRC}/routes/admin-users.ts`
+    const imported = `import { ${DELEGATED_SCOPE_CALLERS.map(([name]) => name).join(', ')} } from '../admin/delegated-scope-commands'`
+    const baseline = imported + '\n' + DELEGATED_SCOPE_CALLERS.map(([name, route]) => `r.post('${route}', authenticate, async (req, res) => { await ${name}({ ${DELEGATED_SCOPE_REQUEST_KEYS[name].map(key => key === 'actorId' ? 'actorId: adminUserId' : key).join(', ')} }); })`).join('\n')
+    expect(delegatedScopeCallerProblems(file, baseline)).toEqual([])
+    expect(delegatedScopeCallerProblems(file, baseline.replace('action, actorId:', 'action: action as "assign" | "unassign", actorId:'))).toEqual([])
+    expect(delegatedScopeCallerProblems(file, baseline.replace('action, actorId:', "action: action === 'assign' ? 'assign' : 'unassign', actorId:"))).toEqual([])
+    expect(delegatedScopeCallerProblems(file, baseline.replace('action, actorId:', 'action: (( action === "assign" ) ? ("assign" as const) : "unassign") as "assign" | "unassign", actorId:'))).toEqual([])
+    for (const candidate of [
+      baseline.replace('writeDelegatedAdminScopeCommand,', 'writeDelegatedAdminScopeCommand as aliased,'),
+      baseline.replace(/\(\{ [^}]+ \}\)/, '(actorId, userId)'),
+      baseline.replace(/\(\{ [^}]+ \}\)/, '(request)'),
+      baseline.replace('action, actorId: adminUserId,', 'action, actorId: adminUserId, callback: () => {},'),
+      baseline.replace('action, actorId: adminUserId,', 'action, actorId: adminUserId, ...extra,'),
+      baseline.replace('action, actorId: adminUserId,', 'action, actorId: () => {},'),
+      baseline.replace('action, actorId: adminUserId,', 'action, actorId() {},'),
+      baseline.replace('actorId: adminUserId', 'actorId: userId'),
+      baseline.replace('actorId: adminUserId', '"\'actorId\'": adminUserId'),
+      baseline.replace('action, actorId:', "action: action === 'as sign' ? 'assign' : 'unassign', actorId:"),
+      baseline.replace('action, actorId:', "action: action === ' assign ' ? 'assign' : 'unassign', actorId:"),
+      baseline.replace('action, actorId:', "action: action === 'assign' ? 'as sign' : 'unassign', actorId:"),
+      baseline.replace('action, actorId:', "action: action === 'assign' ? 'assign' : 'un assign', actorId:"),
+      baseline.replace("r.post('/api/admin/role-delegation/users/:userId/scopes/:action(assign|unassign)'", "r.post('/other'"),
+      baseline + '\nconst detached = writeDelegatedAdminScopeCommand;',
+      baseline + "\nconst loaded = import('../admin/delegated-scope-commands');",
+      baseline + "\nexport * from '../admin/delegated-scope-commands';",
+      baseline.replace('await writeDelegatedAdminScopeCommand', 'await Promise.resolve().then(async () => writeDelegatedAdminScopeCommand').replace(/(writeDelegatedAdminScopeCommand\(\{ [^}]+ \}\));/, '$1);'),
+    ]) expect(delegatedScopeCallerProblems(file, candidate)).not.toEqual([])
+    expect(delegatedScopeCallerProblems(`${SRC}/other.ts`, baseline)).not.toEqual([])
+  })
+
+  it('delegated scope writers have exact per-symbol multisets covering every module write', () => {
+    const source = read(DELEGATED_SCOPE_COMMAND)
+    expect(delegatedScopeConversionProblems(AUTHORIZATION_INPUT_WRITERS, source, scanSource(DELEGATED_SCOPE_COMMAND, source).writes)).toEqual([])
+  })
+
+  it('delegated scope ownership rejects moved, orphaned, duplicate, renamed, untyped and wrong-receiver statements', () => {
+    const entries = DELEGATED_SCOPE_WRITERS.map(expected => ({
+      ...AUTHORIZATION_INPUT_WRITERS.find(entry => entry.id === expected.id)!,
+      file: DELEGATED_SCOPE_COMMAND,
+      symbol: expected.symbol,
+      statements: expected.statements.map(statement => {
+        const [verb, table] = statement.split('|')
+        return { verb, table, count: 1 }
+      }),
+    })) as AuthorizationInputWriterEntry[]
+    const functions = DELEGATED_SCOPE_WRITERS.map(expected => `async function ${expected.symbol}(tx: AuthorizationInputTx) { ${expected.statements.map(statement => {
+      const [verb, table] = statement.split('|')
+      return `await tx.query('${verb === 'INSERT' ? 'INSERT INTO' : 'DELETE FROM'} ${table}');`
+    }).join(' ')} }`)
+    const baseline = functions.join('\n')
+    const check = (source: string) => delegatedScopeConversionProblems(entries, source, scanSource(DELEGATED_SCOPE_COMMAND, source).writes)
+    expect(check(baseline)).toEqual([])
+    const statement = "await tx.query('INSERT INTO delegated_role_admin_scopes');"
+    const firstBody = DELEGATED_SCOPE_WRITERS[0].statements.map(statement => {
+      const [verb, table] = statement.split('|')
+      return `await tx.query('${verb === 'INSERT' ? 'INSERT INTO' : 'DELETE FROM'} ${table}');`
+    }).join(' ')
+    const emptyFirst = baseline.replace(firstBody, '')
+    for (const candidate of [
+      baseline.replace(statement, ''),
+      baseline.replace(statement, statement + statement),
+      baseline.replace(statement, "await pool.query('INSERT INTO delegated_role_admin_scopes');"),
+      baseline.replace('tx: AuthorizationInputTx', 'tx'),
+      baseline.replace('tx: AuthorizationInputTx', 'tx: AuthorizationInputTx | undefined'),
+      baseline.replace('tx: AuthorizationInputTx', 'tx: AuthorizationInputTx & any'),
+      baseline.replace('async function writeDelegatedAdminScopeOnTx', 'export async function writeDelegatedAdminScopeOnTx'),
+      baseline + '\nasync function writeDelegatedAdminScopeOnTx(tx: AuthorizationInputTx) {}',
+      emptyFirst + `\nconst detachedWriter = async function writeDelegatedAdminScopeOnTx(tx: AuthorizationInputTx) { ${firstBody} };`,
+      emptyFirst + `\nconst object = { async writeDelegatedAdminScopeOnTx(tx: AuthorizationInputTx) { ${firstBody} } };`,
+      baseline.replace(firstBody, `{ const tx = { query }; ${firstBody} }`),
+      baseline.replace(firstBody, `{ const { runner: tx } = { runner: { query } }; ${firstBody} }`),
+      baseline.replace(firstBody, `tx = { query } as unknown as AuthorizationInputTx; ${firstBody}`),
+      baseline.replace(firstBody, `({ tx } = { tx: { query } as unknown as AuthorizationInputTx }); ${firstBody}`),
+      baseline.replace(firstBody, `for (tx of [{ query } as unknown as AuthorizationInputTx]) { ${firstBody} }`),
+      baseline + '\nexport { writeDelegatedAdminScopeOnTx };',
+      baseline + '\nexport { writeDelegatedAdminScopeOnTx as exposedWriter };',
+      baseline + '\nexport default writeDelegatedAdminScopeOnTx;',
+      baseline + '\nconst exposed = writeDelegatedAdminScopeOnTx; export { exposed };',
+      baseline.replace('writeDelegatedAdminScopeOnTx', 'otherWriter'),
+      baseline.replace(statement, '') + `\nasync function orphan(tx: AuthorizationInputTx) { ${statement} }`,
+      baseline.replace(statement, '') + `\n${statement}`,
+      baseline.replace(statement, '') + `\nasync function otherWriter(tx: AuthorizationInputTx) { ${statement} }`,
+      baseline.replace(statement, `await Promise.resolve().then(async () => { ${statement} });`),
+    ]) expect(check(candidate)).not.toEqual([])
+    expect(delegatedScopeConversionProblems(entries.slice(1), baseline, scanSource(DELEGATED_SCOPE_COMMAND, baseline).writes)).not.toEqual([])
+    expect(delegatedScopeConversionProblems([...entries, entries[0]], baseline, scanSource(DELEGATED_SCOPE_COMMAND, baseline).writes)).not.toEqual([])
+    expect(delegatedScopeConversionProblems([...entries, { ...entries[0], id: 'W-extra' }], baseline, scanSource(DELEGATED_SCOPE_COMMAND, baseline).writes)).not.toEqual([])
+    expect(delegatedScopeConversionProblems(entries.map(entry => entry.id === 'W-12' ? { ...entry, statements: entry.statements.map(statement => ({ ...statement, count: 2 })) } : entry), baseline, scanSource(DELEGATED_SCOPE_COMMAND, baseline).writes)).not.toEqual([])
+    expect(delegatedScopeConversionProblems(entries.map(entry => entry.id === 'W-12' ? { ...entry, symbol: 'otherWriter' } : entry), baseline, scanSource(DELEGATED_SCOPE_COMMAND, baseline).writes)).not.toEqual([])
+  })
+
   it('every converted entry issues its statements on the token inside the named function', () => {
     const problems = AUTHORIZATION_INPUT_WRITERS.flatMap((writer) => conversionProblems(writer, read(writer.file), production.writes))
     expect(problems).toEqual([])
@@ -929,6 +1743,119 @@ describe('function-level conversion ratchet', () => {
     expect(conversionProblems(converted, otherReceiver, scanSource('x.ts', otherReceiver).writes)).toHaveLength(1)
     const elsewhere = "async function other(tx: AuthorizationInputTx) { await tx.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', ['u', 'r']) }\nasync function grant(tx: AuthorizationInputTx) {}"
     expect(conversionProblems(converted, elsewhere, scanSource('x.ts', elsewhere).writes)).toHaveLength(1)
+  })
+})
+
+const PLATFORM_ADMISSION_COMMAND = `${SRC}/admin/platform-namespace-admission-command.ts`
+const PLATFORM_ADMISSION_CALLER = `${SRC}/routes/admin-users.ts`
+const PLATFORM_ADMISSION_EXPORT = 'writePlatformNamespaceAdmissionCommand'
+const PLATFORM_ADMISSION_MODULE = '../admin/platform-namespace-admission-command'
+const PLATFORM_ADMISSION_ROUTE = '/api/admin/users/:userId/namespaces/:namespace/admission'
+
+function platformAdmissionCallerProblems(file: string, source: string): string[] {
+  const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true)
+  const problems: string[] = []
+  const unwrap = (expression: ts.Expression): ts.Expression => {
+    while (ts.isAsExpression(expression) || ts.isTypeAssertionExpression(expression) || ts.isParenthesizedExpression(expression) || ts.isSatisfiesExpression(expression)) expression = expression.expression
+    return expression
+  }
+  const mentionsModule = (expression: ts.Expression): boolean => {
+    const decoded = unwrap(expression)
+    return expression.getText(tree).includes('platform-namespace-admission-command')
+      || ((ts.isStringLiteral(decoded) || ts.isNoSubstitutionTemplateLiteral(decoded)) && decoded.text.includes('platform-namespace-admission-command'))
+  }
+  let imports = 0
+  let calls = 0
+  for (const statement of tree.statements) {
+    if (ts.isExportDeclaration(statement) && statement.moduleSpecifier && mentionsModule(statement.moduleSpecifier)) problems.push('platform admission reexport')
+    if (!ts.isImportDeclaration(statement) || !mentionsModule(statement.moduleSpecifier)) continue
+    imports += 1
+    const bindings = statement.importClause?.namedBindings
+    if (file !== PLATFORM_ADMISSION_CALLER || !ts.isStringLiteral(statement.moduleSpecifier) || statement.moduleSpecifier.text !== PLATFORM_ADMISSION_MODULE
+      || statement.importClause?.isTypeOnly || statement.importClause?.name || !bindings || !ts.isNamedImports(bindings)
+      || bindings.elements.length !== 1 || bindings.elements[0].propertyName || bindings.elements[0].isTypeOnly
+      || bindings.elements[0].name.text !== PLATFORM_ADMISSION_EXPORT) problems.push('platform admission import')
+  }
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(node.expression) && node.expression.text === 'require'))
+      && (node.getText(tree).includes('platform-namespace-admission-command') || (node.arguments[0] !== undefined && mentionsModule(node.arguments[0])))) problems.push('platform admission dynamic load')
+    if (ts.isIdentifier(node) && node.text === PLATFORM_ADMISSION_EXPORT) {
+      const parent = node.parent
+      if (ts.isImportSpecifier(parent)) return
+      if (!ts.isCallExpression(parent) || parent.expression !== node) problems.push('platform admission detached reference')
+      else {
+        calls += 1
+        const argument = parent.arguments[0]
+        if (parent.arguments.length !== 1 || !argument || !ts.isObjectLiteralExpression(argument)) problems.push('platform admission data argument')
+        else {
+          const keys: string[] = []
+          for (const property of argument.properties) {
+            if ((!ts.isShorthandPropertyAssignment(property) && !ts.isPropertyAssignment(property))
+              || (!ts.isIdentifier(property.name) && !ts.isStringLiteral(property.name))) {
+              problems.push('platform admission data property')
+              continue
+            }
+            const key = property.name.text
+            keys.push(key)
+            const value = unwrap(ts.isShorthandPropertyAssignment(property) ? property.name : property.initializer)
+            if (!ts.isIdentifier(value) || value.text !== (key === 'actorId' ? 'adminUserId' : key)) problems.push('platform admission data binding')
+          }
+          if (JSON.stringify(keys.sort()) !== JSON.stringify(['actorId', 'enabled', 'namespace', 'userId'])) problems.push('platform admission data keys')
+        }
+        let owner: ts.Node | undefined = parent.parent
+        while (owner && !ts.isFunctionLike(owner)) owner = owner.parent
+        const registration = owner?.parent
+        if (file !== PLATFORM_ADMISSION_CALLER || !owner || !ts.isArrowFunction(owner) || !registration || !ts.isCallExpression(registration)
+          || !ts.isPropertyAccessExpression(registration.expression) || registration.expression.expression.getText(tree) !== 'r'
+          || registration.expression.name.text !== 'patch' || registration.arguments.at(-1) !== owner
+          || !registration.arguments[0] || !ts.isStringLiteral(registration.arguments[0]) || registration.arguments[0].text !== PLATFORM_ADMISSION_ROUTE) problems.push('platform admission registered route')
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(tree)
+  if (file === PLATFORM_ADMISSION_CALLER && (imports !== 1 || calls !== 1)) problems.push('platform admission caller coverage')
+  return problems
+}
+
+describe('platform namespace admission caller boundary', () => {
+  const baseline = `import { ${PLATFORM_ADMISSION_EXPORT} } from '${PLATFORM_ADMISSION_MODULE}';\nr.patch('${PLATFORM_ADMISSION_ROUTE}', authenticate, async (req, res) => { await ${PLATFORM_ADMISSION_EXPORT}({ actorId: adminUserId, userId, namespace, enabled }); })`
+
+  it('has only the registered direct data-only platform caller', () => {
+    const candidates = productionFiles.filter(file => SOURCE_EXTENSIONS.has(path.extname(file)) && file !== PLATFORM_ADMISSION_COMMAND)
+    expect(candidates.flatMap(file => platformAdmissionCallerProblems(file, read(file)))).toEqual([])
+    expect(candidates.flatMap(file => importSpecifiers(read(file)).filter(specifier => specifier.includes('platform-namespace-admission-command')).map(specifier => [file, specifier])))
+      .toEqual([[PLATFORM_ADMISSION_CALLER, PLATFORM_ADMISSION_MODULE]])
+  })
+
+  it('accepts literal data fields and TypeScript wrappers without changing their meaning', () => {
+    expect(platformAdmissionCallerProblems(PLATFORM_ADMISSION_CALLER, baseline)).toEqual([])
+    expect(platformAdmissionCallerProblems(PLATFORM_ADMISSION_CALLER, baseline.replace(PLATFORM_ADMISSION_MODULE, '../admin/platform-namespace-admission-\\u0063ommand'))).toEqual([])
+    expect(platformAdmissionCallerProblems(PLATFORM_ADMISSION_CALLER, baseline.replace('actorId: adminUserId', "'actorId': (adminUserId as string)").replace('namespace, enabled', 'namespace, enabled: (enabled as boolean)'))).toEqual([])
+  })
+
+  it('rejects aliases, detached calls, wrong routes and wrong data bindings', () => {
+    for (const candidate of [
+      baseline.replace(`{ ${PLATFORM_ADMISSION_EXPORT} }`, `{ ${PLATFORM_ADMISSION_EXPORT} as other }`),
+      baseline.replace("r.patch(", 'r.post('),
+      baseline.replace(PLATFORM_ADMISSION_ROUTE, `${PLATFORM_ADMISSION_ROUTE} `),
+      baseline.replace('actorId: adminUserId', 'actorId: userId'),
+      baseline.replace('actorId: adminUserId', '"\'actorId\'": adminUserId'),
+      baseline.replace('namespace, enabled', 'namespace, enabled: true'),
+      baseline.replace('namespace, enabled', 'namespace, enabled, callback: () => {}'),
+      baseline.replace('namespace, enabled', 'namespace, enabled, ...other'),
+      baseline.replace('namespace, enabled', 'namespace, enabled() {}'),
+      baseline.replace('namespace, enabled', 'namespace, enabled, actorId: adminUserId'),
+      baseline.replace('namespace, enabled });', 'namespace, enabled }, tx);'),
+      baseline.replace(`await ${PLATFORM_ADMISSION_EXPORT}`, `await Promise.resolve().then(async () => ${PLATFORM_ADMISSION_EXPORT}`).replace('namespace, enabled });', 'namespace, enabled }));'),
+      baseline + `\nconst detached = ${PLATFORM_ADMISSION_EXPORT};`,
+      baseline + `\nconst loaded = import('${PLATFORM_ADMISSION_MODULE}');`,
+      baseline + "\nconst loaded = import('../admin/platform-namespace-admission-\\u0063ommand');",
+      baseline + "\nconst loaded = require('../admin/platform-namespace-admission-\\u0063ommand');",
+      baseline + "\nconst loaded = import(`../admin/platform-namespace-admission-\\u0063ommand`);",
+      baseline + `\nexport * from '${PLATFORM_ADMISSION_MODULE}';`,
+    ]) expect(platformAdmissionCallerProblems(PLATFORM_ADMISSION_CALLER, candidate)).not.toEqual([])
+    expect(platformAdmissionCallerProblems(`${SRC}/other.ts`, baseline)).not.toEqual([])
   })
 })
 
@@ -1588,7 +2515,6 @@ function workClosureProblems(file: string, source: string): string[] {
   return problems
 }
 
-/** Entry options a production caller may not supply: the transaction runner and the post-acquire hook belong to tests. */
 const TEST_ONLY_ENTRY_OPTIONS = ['transaction', 'afterAcquire']
 
 function entryOptionProblems(file: string, source: string): string[] {
@@ -1660,5 +2586,242 @@ describe('work closures make no external call, and production callers pass no te
     expect(entryOptionProblems('x.ts', 'withAuthorizationInputTransaction(plan, work, options)')).toHaveLength(1)
     expect(entryOptionProblems('x.ts', 'withAuthorizationInputTransaction(plan, work, { exclusive: { attempts: 3 } })')).toEqual([])
     expect(entryOptionProblems('x.ts', 'withAuthorizationInputTransaction(plan, work)')).toEqual([])
+  })
+})
+
+const ATTENDANCE_COMMAND = `${SRC}/admin/attendance-role-commands.ts`
+const ATTENDANCE_ROUTE = `${SRC}/routes/attendance-admin.ts`
+const ATTENDANCE_SPEC = '../admin/attendance-role-commands'
+const ASSIGN = 'assignAttendanceGlobalRolesCommand'
+const UNASSIGN = 'unassignAttendanceGlobalRolesCommand'
+const PLAN_KEYS = ['admissionUserIds', 'intent', 'roleIds', 'userIds', 'witness']
+const INPUT_KEYS = ['actorId', 'includeProfile', 'legacyAdminClaim', 'roleId', 'userIds']
+const EXPECTED_CALLS = [
+  `${ASSIGN}|getAttendanceAdminRequestUserId(req)|userIds|finalRoleId|hasLegacyAdminClaim(req)|false`,
+  `${UNASSIGN}|getAttendanceAdminRequestUserId(req)|userIds|finalRoleId|hasLegacyAdminClaim(req)|false`,
+  `${ASSIGN}|getAttendanceAdminRequestUserId(req)|[userId]|finalRoleId|hasLegacyAdminClaim(req)|true`,
+  `${UNASSIGN}|getAttendanceAdminRequestUserId(req)|[userId]|finalRoleId|hasLegacyAdminClaim(req)|true`,
+]
+const FORBIDDEN = ['requireRoleRows', 'lockRoleRowForShare', 'enterAuthorizationInputTransaction', 'MAINTENANCE', 'poolManager', 'pool.transaction']
+
+function ownerName(node: ts.Node): string {
+  for (let current: ts.Node | undefined = node; current; current = current.parent) if (ts.isFunctionDeclaration(current) && current.name) return current.name.text
+  return ''
+}
+
+function fieldsOf(object: ts.ObjectLiteralExpression, file: ts.SourceFile): Map<string, string> | undefined {
+  const fields = new Map<string, string>()
+  for (const property of object.properties) {
+    if (ts.isShorthandPropertyAssignment(property)) fields.set(property.name.text, property.name.text)
+    else if (ts.isPropertyAssignment(property) && property.name && (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name))) fields.set(property.name.getText(file).replace(/['"]/g, ''), compact(property.initializer.getText(file)))
+    else return undefined
+  }
+  return fields.size === object.properties.length ? fields : undefined
+}
+
+function stringArray(expression: ts.Expression | undefined): string[] | undefined {
+  const array = expression && ts.isCallExpression(expression) && ts.isPropertyAccessExpression(expression.expression) && expression.expression.name.text === 'freeze' ? expression.arguments[0] : expression
+  if (!array || !ts.isArrayLiteralExpression(array) || array.elements.some(element => !ts.isStringLiteral(element))) return undefined
+  return array.elements.map(element => (element as ts.StringLiteral).text)
+}
+
+function dynamicCommandLoads(file: string, source: string): string[] {
+  if (!source.includes('attendance-role-commands')) return []
+  const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true)
+  const problems: string[] = []
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(node.expression) && node.expression.text === 'require'))) {
+      const argument = node.arguments[0]
+      const literal = argument && (ts.isStringLiteral(argument) || ts.isNoSubstitutionTemplateLiteral(argument)) ? argument.text : ''
+      if (literal.includes('attendance-role-commands')) problems.push('attendance command dynamic load')
+      else if (!literal && node.getText(tree).includes('attendance-role-commands')) problems.push('attendance command computed loader')
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(tree)
+  return problems
+}
+
+function routeCallProblems(source: string): string[] {
+  const problems: string[] = []
+  const tree = ts.createSourceFile(ATTENDANCE_ROUTE, source, ts.ScriptTarget.Latest, true)
+  const signatures: string[] = []
+  let imports = 0
+  const visit = (node: ts.Node) => {
+    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) && node.moduleSpecifier.text === ATTENDANCE_SPEC) {
+      imports += 1
+      const named = node.importClause?.namedBindings
+      const namedImports = named && ts.isNamedImports(named) ? named : undefined
+      const imported = namedImports ? namedImports.elements.map(element => `${element.propertyName ? 'alias' : ''}${element.name.text}${element.isTypeOnly ? ':type' : ''}`) : []
+      if (node.importClause?.isTypeOnly || node.importClause?.name || !namedImports || JSON.stringify(imported) !== JSON.stringify([ASSIGN, UNASSIGN])) problems.push('attendance command import shape')
+    }
+    if (ts.isIdentifier(node) && (node.text === ASSIGN || node.text === UNASSIGN)) {
+      const parent = node.parent
+      const ok = (ts.isImportSpecifier(parent) && parent.name === node && !parent.propertyName) || (ts.isCallExpression(parent) && parent.expression === node) || (ts.isFunctionDeclaration(parent) && parent.name === node)
+      if (!ok) problems.push('attendance command alias')
+    }
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && (node.expression.text === ASSIGN || node.expression.text === UNASSIGN)) {
+      const owner = enclosingFunctionAt(ATTENDANCE_ROUTE, source, node.getStart(tree))
+      let body: ts.Node | undefined = node
+      while (body && !ts.isFunctionLike(body)) body = body.parent
+      let preflight = false
+      const seek = (child: ts.Node) => {
+        if (child !== body && ts.isFunctionLike(child)) return
+        if (ts.isCallExpression(child) && child.getStart(tree) < node.getStart(tree) && ts.isIdentifier(child.expression) && child.expression.text === 'preflightAttendanceGlobalRoleWrite' && ts.isAwaitExpression(child.parent)) preflight = true
+        ts.forEachChild(child, seek)
+      }
+      if (body) seek(body)
+      if (owner?.name !== 'callback:r.post' || !preflight) problems.push('attendance command preflight order')
+      const argument = node.arguments[0]
+      const fields = node.arguments.length === 1 && argument && ts.isObjectLiteralExpression(argument) ? fieldsOf(argument, tree) : undefined
+      if (!fields || [...fields.keys()].sort().join() !== INPUT_KEYS.join()) problems.push('attendance command call shape')
+      else signatures.push(`${node.expression.text}|${fields.get('actorId')}|${fields.get('userIds')}|${fields.get('roleId')}|${fields.get('legacyAdminClaim')}|${fields.get('includeProfile')}`)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(tree)
+  if (imports !== 1) problems.push('attendance command import shape')
+  if (JSON.stringify(signatures.sort()) !== JSON.stringify([...EXPECTED_CALLS].sort())) problems.push('attendance command call shape')
+  return problems
+}
+
+function catalogRoleIds(source: string): string[] {
+  const tree = ts.createSourceFile(ATTENDANCE_ROUTE, source, ts.ScriptTarget.Latest, true)
+  const ids: string[] = []
+  const visit = (node: ts.Node) => {
+    const init = ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === 'ATTENDANCE_ROLE_TEMPLATES' ? node.initializer : undefined
+    if (init && ts.isObjectLiteralExpression(init)) for (const entry of init.properties) if (ts.isPropertyAssignment(entry) && ts.isObjectLiteralExpression(entry.initializer)) for (const field of entry.initializer.properties) if (ts.isPropertyAssignment(field) && ts.isIdentifier(field.name) && field.name.text === 'roleId' && ts.isStringLiteral(field.initializer)) ids.push(field.initializer.text)
+    ts.forEachChild(node, visit)
+  }
+  visit(tree)
+  return ids
+}
+
+function producerProblems(command: string, route: string): string[] {
+  const problems: string[] = []
+  const tree = ts.createSourceFile(ATTENDANCE_COMMAND, command, ts.ScriptTarget.Latest, true)
+  const exported: string[] = []
+  let templates: string[] | undefined
+  const counts = { transactions: 0, assignWrites: 0, unassignWrites: 0, scopeCalls: 0, plans: 0 }
+  const visit = (node: ts.Node) => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === 'ATTENDANCE_TEMPLATE_ROLE_IDS') templates = stringArray(node.initializer)
+    if (ts.isFunctionDeclaration(node) && node.name && node.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.ExportKeyword)) {
+      exported.push(node.name.text)
+      if (node.parameters.length !== 1 || !node.parameters[0].type || !ts.isTypeReferenceNode(node.parameters[0].type)) problems.push('attendance command producer')
+    }
+    if (ts.isFunctionDeclaration(node) && node.name?.text === 'buildPlan') {
+      counts.plans += 1
+      const expression = node.body?.statements.find(ts.isReturnStatement)?.expression
+      const object = expression && ts.isCallExpression(expression) ? expression.arguments[0] : expression
+      const fields = object && ts.isObjectLiteralExpression(object) ? fieldsOf(object, tree) : undefined
+      if (!fields || JSON.stringify([...fields.keys()].sort()) !== JSON.stringify(PLAN_KEYS)) problems.push('attendance command plan')
+    }
+    if (ts.isFunctionDeclaration(node) && node.name?.text === 'assignParentRoleIds' && compact(node.body?.getText(tree) ?? '') !== '{ return Object.freeze([...new Set([...ATTENDANCE_TEMPLATE_ROLE_IDS, roleId])].sort(compareCodeUnits)) }') problems.push('attendance command parents')
+    if (ts.isFunctionDeclaration(node) && node.name?.text === 'declaredParentRoleIds' && !compact(node.body?.getText(tree) ?? '').includes('return Object.freeze([context.roleId])')) problems.push('attendance command parents')
+    if (ts.isFunctionDeclaration(node) && node.name?.text === 'freezeRequestedUserIds' && compact(node.body?.getText(tree) ?? '') !== '{ return Object.freeze([...userIds]) }') problems.push('attendance command frozen input')
+    if (ts.isFunctionDeclaration(node) && node.name?.text === 'commandContext' && !compact(node.body?.getText(tree) ?? '').includes('const userIds = freezeRequestedUserIds(input.userIds)')) problems.push('attendance command frozen input')
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+      const name = node.expression.text
+      if (name === 'withAuthorizationInputTransaction') {
+        counts.transactions += 1
+        const callback = node.arguments[1]
+        const callbackText = callback?.getText(tree) ?? ''
+        const asyncArrow = !!callback && ts.isArrowFunction(callback) && callback.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.AsyncKeyword) === true && callback.parameters.map(parameter => parameter.name.getText(tree)).join() === 'tx'
+        if (node.arguments.length !== 2 || compact(node.arguments[0]?.getText(tree) ?? '') !== 'context.plan' || !asyncArrow || /\binput\./.test(callbackText) || callbackText.includes('withAuthorizationInputTransaction')) problems.push('attendance command transaction')
+        const names: string[] = []
+        const calls = (child: ts.Node) => { if (ts.isCallExpression(child) && ts.isIdentifier(child.expression)) names.push(child.expression.text); ts.forEachChild(child, calls) }
+        if (callback) calls(callback)
+        const writer = ownerName(node)
+        const sequence = writer === ASSIGN ? ['assertContext', 'assertLockedActorScope', 'assertWitnessedSubjects', 'assertContext', 'assignUserRoles'] : writer === UNASSIGN ? ['assertContext', 'assertLockedActorScope', 'assertWitnessedSubjects', 'assertContext', 'unassignUserRoles'] : ['missing-owner']
+        let from = 0
+        if (sequence.some(step => { const at = names.indexOf(step, from); if (at < 0) return true; from = at + 1; return false })) problems.push('attendance command context')
+      }
+      if (name === 'deriveAttendanceRoleAssignmentScope') {
+        counts.scopeCalls += 1
+        if (node.arguments.length !== 1 || compact(node.arguments[0].getText(tree)) !== "{ kind: 'global' }") problems.push('attendance command writer')
+      }
+      if (name === 'assignUserRoles' || name === 'unassignUserRoles') {
+        counts[name === 'assignUserRoles' ? 'assignWrites' : 'unassignWrites'] += 1
+        const fields = node.arguments.length === 1 && node.arguments[0] && ts.isObjectLiteralExpression(node.arguments[0]) ? fieldsOf(node.arguments[0], tree) : undefined
+        if (fields?.get('executor') !== 'tx' || fields.get('scope') !== 'roleWriteScope') problems.push('attendance command writer')
+      }
+      if (name === 'commandContext') {
+        const third = compact(node.arguments[2]?.getText(tree) ?? '')
+        const owner = ownerName(node)
+        if ((owner === ASSIGN && third !== 'assignParentRoleIds(input.roleId)') || (owner === UNASSIGN && third !== 'Object.freeze([input.roleId])')) problems.push('attendance command parents')
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(tree)
+  const alias = tree.statements.find((statement): statement is ts.TypeAliasDeclaration => ts.isTypeAliasDeclaration(statement) && statement.name.text === 'AttendanceGlobalRoleCommandInput')
+  const literal = alias && ts.isTypeReferenceNode(alias.type) ? alias.type.typeArguments?.[0] : undefined
+  const inputKeys = literal && ts.isTypeLiteralNode(literal) ? literal.members.flatMap(member => ts.isPropertySignature(member) && member.name ? [member.name.getText(tree)] : []) : []
+  if (JSON.stringify(exported.sort()) !== JSON.stringify([ASSIGN, UNASSIGN].sort()) || JSON.stringify(inputKeys.sort()) !== JSON.stringify(INPUT_KEYS)) problems.push('attendance command producer')
+  if (counts.transactions !== 2 || counts.assignWrites !== 1 || counts.unassignWrites !== 1 || counts.scopeCalls !== 2 || counts.plans !== 1) problems.push('attendance command transaction')
+  for (const token of FORBIDDEN) if (command.includes(token)) problems.push('attendance command forbidden form')
+  const catalog = catalogRoleIds(route).sort()
+  if (!templates || JSON.stringify(templates.slice().sort()) !== JSON.stringify(catalog) || catalog.length === 0) problems.push('attendance command catalog')
+  return problems
+}
+
+function attendanceCommandProblems(files: readonly string[], sourceOf: (file: string) => string): string[] {
+  const found: Array<readonly [string, string]> = []
+  const problems: string[] = []
+  let command = ''
+  let route = ''
+  for (const file of files) {
+    if (!/\.[cm]?[jt]sx?$/.test(file)) continue
+    const source = sourceOf(file)
+    if (file === ATTENDANCE_COMMAND) command = source
+    if (file === ATTENDANCE_ROUTE) route = source
+    for (const specifier of importSpecifiers(source)) if (specifier.includes('attendance-role-commands')) found.push([file, specifier])
+    problems.push(...dynamicCommandLoads(file, source))
+  }
+  problems.push(...importEdgeViolations(found, [[ATTENDANCE_ROUTE, ATTENDANCE_SPEC]]))
+  if (!command || !route) return [...problems, 'attendance command pair missing']
+  return [...problems, ...routeCallProblems(route), ...producerProblems(command, route)]
+}
+
+describe('attendance global role command caller boundary', () => {
+  const relevant = [ATTENDANCE_COMMAND, ATTENDANCE_ROUTE]
+
+  it('accepts the production pair once and an unrelated module', () => {
+    expect(attendanceCommandProblems(productionFiles, read)).toEqual([])
+    for (const id of ['W-01', 'W-02', 'W-03', 'W-15', 'W-17']) expect(AUTHORIZATION_INPUT_WRITERS.find(writer => writer.id === id)?.status).toBe('pending')
+    const unrelated = `${SRC}/admin/platform-actor-authority.ts`
+    expect(attendanceCommandProblems([...relevant, unrelated], file => file === unrelated ? 'export const untouched = 1\n' : read(file))).toEqual([])
+  })
+
+  it('rejects importer, shape, plan, parent, catalog, writer, context, and order edits', () => {
+    const command = read(ATTENDANCE_COMMAND)
+    const route = read(ATTENDANCE_ROUTE)
+    const swapped = route.replace('await preflightAttendanceGlobalRoleWrite(req, [userId])\n      const written = await assignAttendanceGlobalRolesCommand({', 'const written = await assignAttendanceGlobalRolesCommand({').replace('includeProfile: true,\n      })', 'includeProfile: true,\n      })\n      await preflightAttendanceGlobalRoleWrite(req, [userId])')
+    const edits: Array<readonly [string, string]> = [
+      [ATTENDANCE_ROUTE, route.replace('assignAttendanceGlobalRolesCommand,\n  unassignAttendanceGlobalRolesCommand,', 'assignAttendanceGlobalRolesCommand as assignRoles,\n  unassignAttendanceGlobalRolesCommand,')],
+      [ATTENDANCE_ROUTE, route.replace(`import {\n  ${ASSIGN},\n  ${UNASSIGN},\n} from '${ATTENDANCE_SPEC}'`, `import '${ATTENDANCE_SPEC}'`)],
+      [ATTENDANCE_ROUTE, route.replace(`import {\n  ${ASSIGN},\n  ${UNASSIGN},\n} from '${ATTENDANCE_SPEC}'`, `import AttendanceRoleCommands from '${ATTENDANCE_SPEC}'`)],
+      [ATTENDANCE_ROUTE, route.replace('includeProfile: false,\n      })', 'includeProfile: false,\n      }, () => undefined)')],
+      [ATTENDANCE_ROUTE, route.replace('legacyAdminClaim: hasLegacyAdminClaim(req)', 'legacyAdminClaim: true')],
+      [ATTENDANCE_COMMAND, command.replace('[...ATTENDANCE_TEMPLATE_ROLE_IDS, roleId]', '[...ATTENDANCE_TEMPLATE_ROLE_IDS]')],
+      [ATTENDANCE_COMMAND, command.replace('Object.freeze([context.roleId])', 'Object.freeze([])')],
+      [ATTENDANCE_COMMAND, command.replace('Object.freeze([context.roleId])', 'Object.freeze([...ATTENDANCE_TEMPLATE_ROLE_IDS])')],
+      [ATTENDANCE_COMMAND, command.split('executor: tx').join('executor: pool')],
+      [ATTENDANCE_COMMAND, command.replace('return Object.freeze({\n    intent,', 'return Object.freeze({\n    intent,\n    platformAdminInvariant: true,')],
+      [ATTENDANCE_ROUTE, route.replace("roleId: 'attendance_employee'", "roleId: 'attendance_employee_x'")],
+      [ATTENDANCE_COMMAND, command.replace('assertWitnessedSubjects(tx, context)\n', '')],
+      [ATTENDANCE_COMMAND, command.replace('assertContext(tx, context)\n', '')],
+      [ATTENDANCE_ROUTE, swapped],
+      [ATTENDANCE_COMMAND, command.replace('input: AttendanceGlobalRoleCommandInput,\n): Promise<AttendanceGlobalRoleCommandResult>', 'input: AttendanceGlobalRoleCommandInput, runner?: unknown,\n): Promise<AttendanceGlobalRoleCommandResult>')],
+      [ATTENDANCE_ROUTE, `${route}\nvoid import('${ATTENDANCE_SPEC}')\n`],
+      [ATTENDANCE_COMMAND, `${command}\nvoid requireRoleRows\n`],
+    ]
+    for (const [index, [target, changed]] of edits.entries()) {
+      expect(changed, `attendance control ${index}`).not.toBe(target === ATTENDANCE_COMMAND ? command : route)
+      expect(attendanceCommandProblems(relevant, file => file === target ? changed : read(file)), `attendance control ${index}`).not.toEqual([])
+    }
+    const rogue = `${SRC}/admin/rogue-attendance-command.ts`
+    expect(attendanceCommandProblems([...relevant, rogue], file => file === rogue ? `import { ${ASSIGN} } from '${ATTENDANCE_SPEC}'` : read(file))).not.toEqual([])
+    expect(attendanceCommandProblems(relevant, file => file === ATTENDANCE_ROUTE ? `${route}\nimport { ${ASSIGN}, ${UNASSIGN} } from '${ATTENDANCE_SPEC}'\n` : read(file))).not.toEqual([])
   })
 })

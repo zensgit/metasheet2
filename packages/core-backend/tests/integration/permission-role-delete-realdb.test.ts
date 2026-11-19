@@ -1,14 +1,14 @@
 /**
- * Role DELETE must wait on the same per-user admission lock a scope assign already holds.
+ * Scope assign and role DELETE serialize on the role row and the same per-user admission lock.
  * Real HTTP only: admin scope assign and DELETE /api/roles/:id. Terra recorded the old
  * route separately (DELETE 200 while the insert was paused, then scope 1 after release).
  */
 import { restorePermissionLifecycleEnv } from '../utils/permission-lifecycle-setup'
 import {
+  holdNamespaceAdmissionLock,
   holdScopeInsertLock,
   scopeInsertLockKey,
   waitForAdvisoryLockWaiterPid,
-  writerHoldsAdvisoryLockBesides,
 } from '../utils/permission-lifecycle-fault'
 import {
   createPermissionLifecycleDirectory,
@@ -18,7 +18,7 @@ import {
 import { randomBytes, randomUUID } from 'node:crypto'
 import express from 'express'
 import request from 'supertest'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { authService } from '../../src/auth/AuthService'
 import { jwtAuthMiddleware } from '../../src/auth/jwt-middleware'
 import { query, transaction } from '../../src/db/pg'
@@ -197,33 +197,53 @@ describe('permission role delete real database', () => {
     void pendingAssign.catch(() => undefined)
     let pendingDelete: Promise<HttpResult> | undefined
     let writerPid: number | null = null
-    let writerHeldLock = false
-    let revokerPid: number | null = null
+    let admissionProbe: ReturnType<typeof holdNamespaceAdmissionLock> | undefined
     let assignStatus = 0
     let deleteStatus = 0
     try {
       writerPid = await waitForAdvisoryLockWaiterPid(gate.pid)
       if (writerPid) {
-        writerHeldLock = await writerHoldsAdvisoryLockBesides(writerPid, gate.pid)
+        // Queue on this user's exact admission lock before starting DELETE.
+        admissionProbe = holdNamespaceAdmissionLock(holderId)
+        void admissionProbe.catch(() => undefined)
+        expect(await waitForAdvisoryLockWaiterPid(writerPid), 'scope assign must hold the target admission lock').not.toBeNull()
         const started = request(app)
           .delete(`/api/roles/${roleId}`)
           .auth(adminToken, { type: 'bearer' })
         const deletion = Promise.resolve(started).then((response: HttpResult) => ({ status: response.status, body: response.body }))
         pendingDelete = deletion
         void deletion.catch(() => undefined)
-        revokerPid = await waitForAdvisoryLockWaiterPid(writerPid)
+        const deletePid = await vi.waitFor(async () => {
+          const { rows } = await query<{ pid: number }>(
+            `SELECT pid FROM pg_stat_activity
+              WHERE wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid)) AND query = $2`,
+            [writerPid, 'SELECT id, name FROM roles WHERE id=$1 FOR UPDATE'],
+          )
+          expect(rows, 'role DELETE must wait for the scope writer on the role row').toHaveLength(1)
+          return rows[0]!.pid
+        }, { timeout: 5000, interval: 25 })
+
+        // The role row is the first conflict. After assign commits, observe the same DELETE
+        // transaction at the second lock, before allowing it to remove the audience.
+        await gate.release()
+        const admission = await admissionProbe
+        expect(await waitForAdvisoryLockWaiterPid(admission.pid)).toBe(deletePid)
       }
     } finally {
       await gate.release()
-      const assigned = await pendingAssign
-      assignStatus = assigned.status
-      if (pendingDelete) deleteStatus = (await pendingDelete).status
-      await dropScopeInsertGate()
+      try {
+        if (admissionProbe) await (await admissionProbe).release()
+      } finally {
+        try {
+          assignStatus = (await pendingAssign).status
+          if (pendingDelete) deleteStatus = (await pendingDelete).status
+        } finally {
+          await dropScopeInsertGate()
+        }
+      }
     }
 
     expect(writerPid, 'scope assign did not block on the insert gate').not.toBeNull()
-    expect(writerHeldLock, 'scope assign did not hold the user admission lock').toBe(true)
-    expect(revokerPid, 'role DELETE did not block on the scope writer').not.toBeNull()
     expect(assignStatus).toBe(200)
     expect(deleteStatus).toBe(200)
     expect(await count(

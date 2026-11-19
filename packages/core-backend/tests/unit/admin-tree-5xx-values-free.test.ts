@@ -2072,7 +2072,7 @@ describe('structural guard: routes/admin-users.ts (mounted at the root, outside 
       const sf = ts.createSourceFile(file.path, file.text, ts.ScriptTarget.Latest, true)
       const found: string[] = []
       const visit = (node: ts.Node): void => {
-        if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && classes.has(node.expression.text)) found.push(`${file.path}: ${node.getText(sf)}`)
+        if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && classes.has(node.expression.text)) found.push(`${file.path}: ${node.getText(sf).replace(/\s*\n\s*/g, ' ')}`)
         ts.forEachChild(node, visit)
       }
       visit(sf)
@@ -2090,6 +2090,19 @@ describe('structural guard: routes/admin-users.ts (mounted at the root, outside 
       "admin/authorization-operation-validation.ts: new AuthorizationOperationInvalid()",
       "admin/authorization-operation-validation.ts: new AuthorizationOperationInvalid('AUTHORIZATION_OPERATION_TOO_LARGE')",
       "admin/authorization-operation-validation.ts: new AuthorizationOperationInvalid('REASON_REQUIRED')",
+      "admin/admin-user-batch-birth-command.ts: new AuthorizationInputContractError('AUTHORIZATION_INPUT_PLAN_INVALID', { status: 500, retryable: false, reason: 'admin_batch_birth_context', message: 'Batch user birth transaction context is invalid', })",
+      "admin/admin-user-birth-command.ts: new AuthorizationInputContractError('AUTHORIZATION_INPUT_PLAN_INVALID', { status: 500, retryable: false, reason, message: 'Authorization input plan is invalid', })",
+      "admin/attendance-role-commands.ts: new AuthorizationInputContractError('AUTHORIZATION_INPUT_PLAN_INVALID', { status: 500, retryable: false, reason: 'attendance_global_role_context', message: 'Authorization input plan is invalid', })",
+      "admin/delegated-scope-commands.ts: new AuthorizationInputContractError('AUTHORIZATION_INPUT_PLAN_INVALID', { status: 500, retryable: false, reason: 'delegated_scope_context', message: 'Authorization input plan is invalid', })",
+      "admin/direct-permission-authority.ts: new AuthorizationInputContractError('AUTHORIZATION_INPUT_PLAN_INVALID', { status: 500, retryable: false, reason: 'permission_exception_root', message: 'Authorization input plan is invalid', })",
+      "admin/platform-namespace-admission-bulk-command.ts: new AuthorizationInputContractError('AUTHORIZATION_INPUT_PLAN_INVALID', { status: 500, retryable: false, reason: 'platform_namespace_admission_context', message: 'Authorization input plan is invalid', })",
+      "admin/platform-namespace-admission-command.ts: new AuthorizationInputContractError('AUTHORIZATION_INPUT_PLAN_INVALID', { status: 500, retryable: false, reason: 'platform_namespace_admission_context', message: 'Authorization input plan is invalid', })",
+      "admin/platform-role-assign-command.ts: new AuthorizationInputContractError('AUTHORIZATION_INPUT_PLAN_INVALID', { status: 500, retryable: false, reason: 'platform_role_assign_context', message: 'Platform role assignment transaction context is invalid', })",
+      "admin/platform-role-unassign-command.ts: new AuthorizationInputContractError('AUTHORIZATION_INPUT_PLAN_INVALID', { status: 500, retryable: false, reason: 'platform_role_unassign_context', message: 'Platform role unassignment transaction context is invalid', })",
+      "admin/role-delegation-namespace-admission-command.ts: new AuthorizationInputContractError('AUTHORIZATION_INPUT_PLAN_INVALID', { status: 500, retryable: false, reason: 'role_delegation_namespace_admission_context', message: 'Authorization input plan is invalid', })",
+      "admin/role-delegation-namespace-admission-command.ts: new AuthorizationInputContractError('AUTHORIZATION_INPUT_PLAN_STALE', { status: 500, retryable: false, reason, message: 'Authorization input plan is stale; retry this change.', })",
+      "rbac/authorization-privilege-witness-plan.ts: new AuthorizationInputContractError('AUTHORIZATION_INPUT_PLAN_INVALID', { status: 500, retryable: false, reason, message: 'Authorization input plan is invalid', })",
+      "rbac/authorization-privilege-witness-plan.ts: new AuthorizationInputContractError('AUTHORIZATION_INPUT_PLAN_STALE', { status: 409, retryable: false, reason: 'role_membership_changed', message: 'Authorization input plan is stale; retry this change.', })",
       "rbac/authorization-input-lock.ts: new AuthorizationInputContractError(code, { status, retryable: false, reason, message: CONTRACT_MESSAGES[code] })",
     ].sort()
     expect(constructions(files)).toEqual(expected)

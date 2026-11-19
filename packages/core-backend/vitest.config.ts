@@ -469,6 +469,18 @@ export default defineConfig({
       // tests/unit/authorization-input-lock.test.ts, the position by
       // plugin-tests-parallel-contract.test.mjs).
       'tests/integration/authorization-input-serialization.db.test.ts',
+      'tests/integration/attendance-role-template-runtime.db.test.ts',
+      'tests/integration/direct-permission-writers.db.test.ts',
+      'tests/integration/platform-role-assign-transaction.db.test.ts',
+      'tests/integration/platform-role-unassign-transaction.db.test.ts',
+      'tests/integration/attendance-role-writers-transaction.db.test.ts',
+      'tests/integration/delegated-scope-writers-transaction.db.test.ts',
+      'tests/integration/platform-namespace-admission-transaction.db.test.ts',
+      'tests/integration/platform-namespace-admission-bulk-transaction.db.test.ts',
+      'tests/integration/legacy-permission-revoke-transaction.db.test.ts',
+      'tests/integration/role-delegation-namespace-admission-transaction.db.test.ts',
+      'tests/integration/admin-user-batch-birth-transaction.db.test.ts',
+      'tests/integration/admin-user-single-birth-transaction.db.test.ts',
       // Database-side census of the classifier input tables (triggers, rules, function bodies,
       // users-locking functions, cascading foreign keys, the default expressions of the three
       // users columns the classifier reads, views and materialized views over an input table, the

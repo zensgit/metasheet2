@@ -165,6 +165,26 @@ const pgMocks = vi.hoisted(() => {
   }
 })
 
+vi.mock('../../src/integration/db/connection-pool', async () => {
+  const db = await import('../../src/db/pg')
+  return { poolManager: { get: () => ({
+    getInternalPool: () => null,
+    query: db.query,
+    transaction: async (work: (client: { query: (sql: string, params?: unknown[]) => Promise<unknown> }) => Promise<unknown>) => db.transaction(async client => {
+      let parent: Awaited<ReturnType<typeof client.query>> | undefined
+      return work({ query: async (sql, params) => {
+        if (/SET TRANSACTION|current_setting|set_config|pg_advisory/.test(sql)) return { rows: [] }
+        if (sql === 'SELECT id::text AS id FROM roles WHERE id = $1::text FOR SHARE') {
+          parent = await client.query('SELECT id FROM roles WHERE id = $1 FOR SHARE', params)
+          return parent
+        }
+        if (sql === 'SELECT id FROM roles WHERE id = $1 FOR SHARE' && parent) return parent
+        return client.query(sql, params)
+      } })
+    }),
+  }) } }
+})
+
 vi.mock('../../src/db/pg', () => ({
   query: pgMocks.query,
   transaction: pgMocks.transaction,

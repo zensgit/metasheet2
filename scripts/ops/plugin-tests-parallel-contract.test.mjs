@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { parseYamlDocument } from './ci-realdb-step-contract.mjs'
+import { isQuotedInTestExclude, parseYamlDocument, realDbStepWholeFileArgs, requireExecutableRealDbStep } from './ci-realdb-step-contract.mjs'
 import { REQUIRED_SUITES, requireSuccessfulSuites } from './plugin-tests-required-gate.mjs'
 import { requiredSuiteJob, requiredSuiteJobBody } from './plugin-tests-workflow-contract.mjs'
 
@@ -282,6 +282,9 @@ function assertParallelWorkflow(doc) {
         const pullSourceGateAddition = '  tests/integration/directory-pull-source-gate.db.test.ts \\\n'
         assert.equal(step.run.split(pullSourceGateAddition).length - 1, 1, 'Pull-source write gate DB suite must run exactly once')
         assert.ok(step.run.includes(authzCensusAddition + pullSourceGateAddition), 'Keep the pull-source write gate DB suite right after the authorization-input census suite')
+        const attendanceTemplateRuntimeAddition = '  tests/integration/attendance-role-template-runtime.db.test.ts \\\n'
+        assert.equal(step.run.split(attendanceTemplateRuntimeAddition).length - 1, 1, 'Attendance template runtime DB suite must run exactly once')
+        assert.ok(step.run.includes(pullSourceGateAddition + attendanceTemplateRuntimeAddition), 'Keep the attendance template runtime DB suite right after the pull-source write gate suite')
         step.run = step.run.replace(addition, '')
         step.run = step.run.replace(repairAddition, '')
         step.run = step.run.replace(privilegeAddition, '')
@@ -303,6 +306,33 @@ function assertParallelWorkflow(doc) {
         step.run = step.run.replace(authzSerializationAddition, '')
         step.run = step.run.replace(authzCensusAddition, '')
         step.run = step.run.replace(pullSourceGateAddition, '')
+        step.run = step.run.replace(attendanceTemplateRuntimeAddition, '')
+        const directPermissionAddition = '  tests/integration/direct-permission-writers.db.test.ts \\\n'
+        assert.equal(step.run.split(directPermissionAddition).length - 1, 1, 'Direct permission writer DB suite must run exactly once')
+        assert.ok(step.run.includes(directPermissionAddition), 'Keep the direct permission writer whole-file suite')
+        step.run = step.run.replace(directPermissionAddition, '')
+        // This whole-file proof requires zero existing sign-in administrators.
+        // Run it on the freshly migrated database before any shared fixture can seed users.
+        const unassignFirst = 'pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \\\n  tests/integration/platform-role-unassign-transaction.db.test.ts \\\n  --reporter=verbose\n'
+        const requireApprovalDb = ': "${DATABASE_URL:?DATABASE_URL is required for approval real-DB integration}"\n'
+        assert.ok(step.run.startsWith(requireApprovalDb + unassignFirst), 'Run the last-admin proof first with no sibling fixtures')
+        step.run = step.run.replace(unassignFirst, '')
+        const writerAdditions = [
+          'tests/integration/platform-role-assign-transaction.db.test.ts',
+          'tests/integration/attendance-role-writers-transaction.db.test.ts',
+          'tests/integration/delegated-scope-writers-transaction.db.test.ts',
+          'tests/integration/platform-namespace-admission-transaction.db.test.ts',
+          'tests/integration/platform-namespace-admission-bulk-transaction.db.test.ts',
+          'tests/integration/legacy-permission-revoke-transaction.db.test.ts',
+          'tests/integration/role-delegation-namespace-admission-transaction.db.test.ts',
+          'tests/integration/admin-user-batch-birth-transaction.db.test.ts',
+          'tests/integration/admin-user-single-birth-transaction.db.test.ts',
+        ].map(file => '  ' + file + ' \\\n')
+        assert.ok(step.run.includes(writerAdditions.join('')), 'Keep the writer suites together in the reviewed order')
+        for (const addition of writerAdditions) {
+          assert.equal(step.run.split(addition).length - 1, 1, 'Each writer DB suite must run exactly once')
+          step.run = step.run.replace(addition, '')
+        }
       }
       if (suite === 'multitable-db' && step.id === 'multitable-real-db-integration') {
         // R-69 1b-ii (job lease): explicit additive suite — preserve the frozen original command byte-for-byte.
@@ -361,6 +391,172 @@ test('all 129 original steps retain their commands, conditions and required-gate
     }
   }
   assertParallelWorkflow(parseYamlDocument(workflow))
+})
+
+test('platform role assign regression has exact whole-file ownership and exclusion', () => {
+  const file = 'tests/integration/platform-role-assign-transaction.db.test.ts'
+  const doc = parseYamlDocument(workflow)
+  const occurrences = Object.entries(doc.jobs).flatMap(([job, config]) => (config.steps ?? []).flatMap(step =>
+    (step.run ?? '').split('\n').filter(line => line.includes(file)).map(line => ({ job, step: step.id, line }))))
+  assert.deepEqual(occurrences, [{ job: 'approval-db', step: 'approval-real-db-integration', line: '  '+file+' \\' }])
+  requireExecutableRealDbStep(workflow, 'approval-real-db-integration')
+  assert.equal(realDbStepWholeFileArgs(workflow, 'approval-real-db-integration').filter(argument => argument === file).length, 1)
+  const config = readFileSync(new URL('../../packages/core-backend/vitest.config.ts', import.meta.url), 'utf8')
+  assert.equal(config.split("'"+file+"'").length - 1, 1)
+  assert.ok(isQuotedInTestExclude(config, file))
+  assert.equal(isQuotedInTestExclude(config.replace("      '"+file+"',\n", ''), file), false)
+  assert.equal(isQuotedInTestExclude(config.replace("      '"+file+"',", "      // '"+file+"',"), file), false)
+  const line = '  '+file+' \\\n'
+  for (const change of ['remove', 'duplicate', 'move']) {
+    const candidate = structuredClone(doc)
+    const step = candidate.jobs['approval-db'].steps.find(entry => entry.id === 'approval-real-db-integration')
+    assert.ok(step.run.includes(line))
+    step.run = step.run.replace(line, change === 'duplicate' ? line + line : '')
+    if (change === 'move') candidate.jobs['runtime-db'].steps.find(entry => entry.run).run += line
+    assert.throws(() => assertParallelWorkflow(candidate))
+  }
+})
+
+test('platform role unassign regression has exact whole-file ownership and exclusion', () => {
+  const file = 'tests/integration/platform-role-unassign-transaction.db.test.ts'
+  const doc = parseYamlDocument(workflow)
+  const occurrences = Object.entries(doc.jobs).flatMap(([job, config]) => (config.steps ?? []).flatMap(step =>
+    (step.run ?? '').split('\n').filter(line => line.includes(file)).map(line => ({ job, step: step.id, line }))))
+  assert.deepEqual(occurrences, [{ job: 'approval-db', step: 'approval-real-db-integration', line: '  '+file+' \\' }])
+  requireExecutableRealDbStep(workflow, 'approval-real-db-integration')
+  assert.equal(realDbStepWholeFileArgs(workflow, 'approval-real-db-integration').filter(argument => argument === file).length, 1)
+  const config = readFileSync(new URL('../../packages/core-backend/vitest.config.ts', import.meta.url), 'utf8')
+  assert.equal(config.split("'"+file+"'").length - 1, 1)
+  assert.ok(isQuotedInTestExclude(config, file))
+  assert.equal(isQuotedInTestExclude(config.replace("      '"+file+"',\n", ''), file), false)
+  assert.equal(isQuotedInTestExclude(config.replace("      '"+file+"',", "      // '"+file+"',"), file), false)
+  const line = '  '+file+' \\\n'
+  for (const change of ['remove', 'duplicate', 'move']) {
+    const candidate = structuredClone(doc)
+    const step = candidate.jobs['approval-db'].steps.find(entry => entry.id === 'approval-real-db-integration')
+    assert.ok(step.run.includes(line))
+    step.run = step.run.replace(line, change === 'duplicate' ? line + line : '')
+    if (change === 'move') candidate.jobs['runtime-db'].steps.find(entry => entry.run).run += line
+    assert.throws(() => assertParallelWorkflow(candidate))
+  }
+})
+
+for (const file of [
+  'tests/integration/attendance-role-writers-transaction.db.test.ts',
+  'tests/integration/delegated-scope-writers-transaction.db.test.ts',
+  'tests/integration/platform-namespace-admission-transaction.db.test.ts',
+  'tests/integration/platform-namespace-admission-bulk-transaction.db.test.ts',
+  'tests/integration/legacy-permission-revoke-transaction.db.test.ts',
+  'tests/integration/role-delegation-namespace-admission-transaction.db.test.ts',
+  'tests/integration/admin-user-batch-birth-transaction.db.test.ts',
+  'tests/integration/admin-user-single-birth-transaction.db.test.ts',
+]) test(`${file} has exact whole-file ownership and exclusion`, () => {
+  const doc = parseYamlDocument(workflow)
+  const occurrences = Object.entries(doc.jobs).flatMap(([job, config]) => (config.steps ?? []).flatMap(step =>
+    (step.run ?? '').split('\n').filter(line => line.includes(file)).map(line => ({ job, step: step.id, line }))))
+  assert.deepEqual(occurrences, [{ job: 'approval-db', step: 'approval-real-db-integration', line: '  '+file+' \\' }])
+  requireExecutableRealDbStep(workflow, 'approval-real-db-integration')
+  assert.equal(realDbStepWholeFileArgs(workflow, 'approval-real-db-integration').filter(argument => argument === file).length, 1)
+  const config = readFileSync(new URL('../../packages/core-backend/vitest.config.ts', import.meta.url), 'utf8')
+  assert.equal(config.split("'"+file+"'").length - 1, 1)
+  assert.ok(isQuotedInTestExclude(config, file))
+  assert.equal(isQuotedInTestExclude(config.replace("      '"+file+"',\n", ''), file), false)
+  assert.equal(isQuotedInTestExclude(config.replace("      '"+file+"',", "      // '"+file+"',"), file), false)
+  const line = '  '+file+' \\\n'
+  for (const change of ['remove', 'duplicate', 'move']) {
+    const candidate = structuredClone(doc)
+    const step = candidate.jobs['approval-db'].steps.find(entry => entry.id === 'approval-real-db-integration')
+    assert.ok(step.run.includes(line))
+    step.run = step.run.replace(line, change === 'duplicate' ? line + line : '')
+    if (change === 'move') candidate.jobs['runtime-db'].steps.find(entry => entry.run).run += line
+    assert.throws(() => assertParallelWorkflow(candidate))
+  }
+})
+
+test('admin batch birth keeps its fail-not-skip sentinel and reviewed owner position', () => {
+  const file = 'tests/integration/admin-user-batch-birth-transaction.db.test.ts'
+  const doc = parseYamlDocument(workflow)
+  const stepId = 'approval-real-db-integration'
+  assert.equal(doc.jobs['approval-db'].steps.find(step => step.id === stepId).env.EXPECT_DB, '1')
+  const source = readFileSync(new URL(`../../packages/core-backend/${file}`, import.meta.url), 'utf8')
+  assert.match(source, /if \(process\.env\.EXPECT_DB === '1' && !databaseUrl\) throw new Error\('BATCH_BIRTH_DATABASE_REQUIRED'\)/)
+  const line = '  '+file+' \\\n'
+  const predecessor = '  tests/integration/role-delegation-namespace-admission-transaction.db.test.ts \\\n'
+  for (const change of ['missing-expect-db', 'disabled-expect-db', 'wrong-position']) {
+    const candidate = structuredClone(doc)
+    const step = candidate.jobs['approval-db'].steps.find(entry => entry.id === stepId)
+    if (change === 'missing-expect-db') delete step.env.EXPECT_DB
+    if (change === 'disabled-expect-db') step.env.EXPECT_DB = '0'
+    if (change === 'wrong-position') step.run = step.run.replace(line, '').replace(predecessor, line + predecessor)
+    assert.throws(() => assertParallelWorkflow(candidate))
+  }
+})
+
+test('direct permission regression has exact required-lane ownership and default exclusion', () => {
+  const doc = parseYamlDocument(workflow)
+  const file = 'tests/integration/direct-permission-writers.db.test.ts'
+  const occurrences = Object.entries(doc.jobs).flatMap(([job, config]) => (config.steps ?? []).flatMap(step =>
+    (step.run ?? '').split('\n').filter(line => line.includes(file)).map(line => ({ job, step: step.id, line }))))
+  assert.deepEqual(occurrences, [{ job: 'approval-db', step: 'approval-real-db-integration', line: `  ${file} \\` }])
+  requireExecutableRealDbStep(workflow, 'approval-real-db-integration')
+  assert.equal(realDbStepWholeFileArgs(workflow, 'approval-real-db-integration').filter(argument => argument === file).length, 1)
+  const config = readFileSync(new URL('../../packages/core-backend/vitest.config.ts', import.meta.url), 'utf8')
+  assert.equal(config.split(`'${file}'`).length - 1, 1)
+  assert.ok(isQuotedInTestExclude(config, file))
+  assert.equal(isQuotedInTestExclude(config.replace(`      '${file}',\n`, ''), file), false)
+  assert.equal(isQuotedInTestExclude(config.replace(`      '${file}',`, `      // '${file}',`), file), false)
+})
+
+test('attendance template runtime regression is a whole file exactly once in the required approval lane', () => {
+  const doc = parseYamlDocument(workflow)
+  const file = 'tests/integration/attendance-role-template-runtime.db.test.ts'
+  const occurrences = Object.entries(doc.jobs).flatMap(([job, config]) => (config.steps ?? []).flatMap(step =>
+    (step.run ?? '').split('\n').filter(line => line.includes(file)).map(line => ({ job, step: step.id, line }))))
+  assert.deepEqual(occurrences, [{ job: 'approval-db', step: 'approval-real-db-integration', line: `  ${file} \\` }])
+  const step = doc.jobs['approval-db'].steps.find(entry => entry.id === 'approval-real-db-integration')
+  assert.ok(step.run.includes(`  tests/integration/directory-pull-source-gate.db.test.ts \\\n  ${file} \\\n`))
+  requireExecutableRealDbStep(workflow, 'approval-real-db-integration')
+  assert.equal(realDbStepWholeFileArgs(workflow, 'approval-real-db-integration').filter(argument => argument === file).length, 1)
+  const config = readFileSync(new URL('../../packages/core-backend/vitest.config.ts', import.meta.url), 'utf8')
+  assert.equal(config.split(`'${file}'`).length - 1, 1)
+  assert.ok(isQuotedInTestExclude(config, file))
+  assert.equal(isQuotedInTestExclude(config.replace(`      '${file}',\n`, ''), file), false)
+  assert.equal(isQuotedInTestExclude(config.replace(`      '${file}',`, `      // '${file}',`), file), false)
+  const source = readFileSync(new URL(`../../packages/core-backend/${file}`, import.meta.url), 'utf8')
+  assert.match(source, /process\.env\.EXPECT_DB === '1'/)
+  assert.match(source, /sentinel: EXPECT_DB lane must have DATABASE_URL/)
+})
+
+test('direct permission wiring rejects deletion, duplication and relocation', () => {
+  const line = '  tests/integration/direct-permission-writers.db.test.ts \\\n'
+  for (const change of ['remove', 'duplicate', 'move']) {
+    const doc = structuredClone(parseYamlDocument(workflow))
+    const step = doc.jobs['approval-db'].steps.find(entry => entry.id === 'approval-real-db-integration')
+    assert.ok(step.run.includes(line))
+    step.run = step.run.replace(line, change === 'duplicate' ? line + line : '')
+    if (change === 'move') doc.jobs['runtime-db'].steps.find(entry => entry.run).run += line
+    assert.throws(() => assertParallelWorkflow(doc))
+  }
+})
+
+test('attendance template wiring rejects omissions, duplicates, wrong lanes and unknown additions', () => {
+  const line = '  tests/integration/attendance-role-template-runtime.db.test.ts \\\n'
+  const doc = parseYamlDocument(workflow)
+  const step = doc.jobs['approval-db'].steps.find(entry => entry.id === 'approval-real-db-integration')
+  assert.equal(step.run.split(line).length - 1, 1)
+  assert.doesNotThrow(() => assertParallelWorkflow(doc))
+  const mutations = [
+    candidate => { const target = candidate.jobs['approval-db'].steps.find(entry => entry.id === step.id); target.run = target.run.replace(line, '') },
+    candidate => { const target = candidate.jobs['approval-db'].steps.find(entry => entry.id === step.id); target.run = target.run.replace(line, line + line) },
+    candidate => { const target = candidate.jobs['approval-db'].steps.find(entry => entry.id === step.id); target.run = target.run.replace(line, ''); candidate.jobs['runtime-db'].steps.find(entry => entry.run).run += line },
+    candidate => { const target = candidate.jobs['approval-db'].steps.find(entry => entry.id === step.id); target.run = target.run.replace(line, '').replace('  tests/integration/authorization-input-census.db.test.ts \\\n', '  tests/integration/authorization-input-census.db.test.ts \\\n' + line) },
+    candidate => { const target = candidate.jobs['approval-db'].steps.find(entry => entry.id === step.id); target.run = target.run.replace(line, line + '  tests/integration/unknown-new-suite.db.test.ts \\\n') },
+  ]
+  for (const mutate of mutations) {
+    const candidate = structuredClone(doc)
+    mutate(candidate)
+    assert.throws(() => assertParallelWorkflow(candidate))
+  }
 })
 
 test('each database suite owns a fresh runner/database and migration ordering', () => {

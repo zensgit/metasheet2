@@ -123,11 +123,20 @@ vi.mock('../../src/middleware/auth', () => {
 // Preserve actual compatibility writer + actor authority; replace only its transaction carrier.
 vi.mock('../../src/rbac/authorization-input-lock', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/rbac/authorization-input-lock')>()
-  return { ...actual, withAuthorizationInputTransaction: (plan: { intent: string }, work: (tx: unknown) => unknown, ...rest: unknown[]) => {
+  const brand = await import('../../src/rbac/authorization-input-brand')
+  return { ...actual, withAuthorizationInputTransaction: (plan: { intent: string }, work: (tx: unknown) => Promise<unknown>, ...rest: unknown[]) => {
     if (plan.intent !== 'GRANT_DIRECT' && plan.intent !== 'REVOKE_DIRECT') return (actual.withAuthorizationInputTransaction as (...args: unknown[]) => unknown)(plan, work, ...rest)
     const actor = { id: 'u-non-admin', isActive: true, activationStatus: 'activated', deletedAt: null, purgedAt: null }
     const target = { id: 'u-target', isActive: true, activationStatus: 'activated', deletedAt: null, purgedAt: null }
-    return work({ query: pg.query, locked: new Map([[actor.id, actor], [target.id, target]]) })
+    const locked = new Map([[actor.id, actor], [target.id, target]])
+    const tx = {
+      plan, locked, roleRows: new Map(), born: new Set(), world: 'shared',
+      witnessed: { userIds: new Set(locked.keys()), admissionUserIds: new Set(locked.keys()) },
+      query: (sql: string, params?: unknown[]) => sql.includes('current_setting') || sql.includes('set_config')
+        ? Promise.resolve({ rows: [] }) : pg.query(sql, params),
+    }
+    const handle = brand.mintAuthorizationInputBrand(tx, [tx])
+    return Promise.resolve(work(tx)).finally(handle.close)
   } }
 })
 vi.mock('../../src/auth/jwt-middleware', async (importOriginal) => ({
@@ -974,7 +983,7 @@ describe('(A) 非管理员（无任何 legacy admin claim，isAdmin 恒 false）
         expect(response.body.code).toBe('ADMIN_REQUIRED')
       } else if (entry.family === 'inline') {
         expect(response.body).toEqual({ error: 'Admin access required', code: 'FORBIDDEN' })
-        expect(pg.query.mock.calls.map(call => String(call[0]))).toEqual([expect.stringContaining('SELECT permission_code FROM user_permissions'), expect.stringContaining('SELECT role_id')])
+        expect(pg.query.mock.calls.map(call => String(call[0]))).toEqual([expect.stringContaining("role_id = 'admin' FOR SHARE")])
       } else {
         expect(response.body.error.code).toBe('FORBIDDEN')
         expect(operationProbe.calls).toEqual(['u-non-admin'])
@@ -1066,7 +1075,7 @@ describe('(A) RBAC 判据不可用（isAdmin 抛错）时 fail-closed', () => {
     expect(response.status).toBe(500)
     expect(response.status).not.toBeLessThan(400)
     expect(probe.calls).toEqual([])
-    expect(pg.query.mock.calls.map(call => String(call[0]))).toEqual([expect.stringContaining('SELECT permission_code FROM user_permissions'), expect.stringContaining('SELECT role_id')])
+    expect(pg.query.mock.calls.map(call => String(call[0]))).toEqual([expect.stringContaining("role_id = 'admin' FOR SHARE")])
     expect(pg.poolQuery.mock.calls).toEqual([])
   })
 

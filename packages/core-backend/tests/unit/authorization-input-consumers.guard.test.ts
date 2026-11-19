@@ -30,6 +30,11 @@ type CallSite = { file: string; line: number; position: number; call: string; in
 const CONSUMER_FUNCTIONS = AUTHORIZATION_INPUT_CONSUMER_FUNCTIONS as readonly string[]
 
 const PROOF_MODULE = `${SRC}/auth/security-action-proof.ts`
+const ROLE_PLAN_MODULE = `${SRC}/rbac/authorization-privilege-witness-plan.ts`
+const ROLE_PLAN_CONSUMER: AuthorizationInputConsumerEntry = {
+  id: 'K-03', file: ROLE_PLAN_MODULE, symbol: 'revalidatePrivilegeRolePlan', call: 'readPrivilegeInputs', count: 1,
+  mode: 'ADVISORY', reason: 'role-plan consistency only; success does not authorize; a complete consumer must reassess inputs',
+}
 /** Every production call site outside the classifier, as `file|function|call`, one item per site. */
 const CALL_SITE_KEYS: readonly string[] = [
   `${PROOF_MODULE}|consume|assessSecurityActionPrivilege`,
@@ -40,11 +45,34 @@ const CALL_SITE_KEYS: readonly string[] = [
   `${SRC}/admin/authorization-operation-service.ts|callback:consistentRead|readActorOnly`,
   `${SRC}/admin/authorization-operation-service.ts|callback:withAuthorizationInputTransaction|evaluateAuthorizationOperationAccess`,
   `${SRC}/admin/authorization-operation-service.ts|callback:withAuthorizationInputTransaction|evaluateAuthorizationOperationAccess`,
+  `${ROLE_PLAN_MODULE}|revalidatePrivilegeRolePlan|readPrivilegeInputs`,
 ]
 /** Decision points not yet inside a contract transaction. An item leaves this list only by becoming a locked decision; none may be added. */
 const PENDING_CONSUMER_KEYS: readonly string[] = [`${PROOF_MODULE}|consume|assessSecurityActionPrivilege`]
 
 const keyOfEntry = (entry: AuthorizationInputConsumerEntry) => `${entry.file}|${entry.symbol}|${entry.call}`
+
+function rolePlanConsumerProblems(registry: readonly AuthorizationInputConsumerEntry[]): string[] {
+  return advisoryConsumerProblems(registry, ROLE_PLAN_CONSUMER, 'role-plan reader')
+}
+
+function exactConsumer(entry: AuthorizationInputConsumerEntry, expected: AuthorizationInputConsumerEntry): boolean {
+  const keys = Object.keys(entry).sort()
+  const expectedKeys = Object.keys(expected).sort()
+  return keys.length === expectedKeys.length && keys.every((key, index) => key === expectedKeys[index])
+    && expectedKeys.every((key) => entry[key as keyof AuthorizationInputConsumerEntry] === expected[key as keyof AuthorizationInputConsumerEntry])
+}
+
+function advisoryConsumerProblems(registry: readonly AuthorizationInputConsumerEntry[], expected: AuthorizationInputConsumerEntry, label: string, sibling?: AuthorizationInputConsumerEntry): string[] {
+  const refusal = `${expected.id} must be the exact advisory ${label}`
+  const entries = registry.filter((entry) => entry.id === expected.id || (entry.file === expected.file && !(sibling && exactConsumer(entry, sibling))))
+  if (entries.length !== 1) return [refusal]
+  const entry = entries[0]
+  if (!exactConsumer(entry, expected)) {
+    return [refusal]
+  }
+  return []
+}
 
 /** Problems with the pending set: a pending entry outside the pin, or a pinned item that left the pending set without becoming a locked decision. */
 function pendingProblems(registry: readonly AuthorizationInputConsumerEntry[], pinned: readonly string[]): string[] {
@@ -129,6 +157,46 @@ function registryProblems(sites: readonly CallSite[], registry: readonly Authori
 }
 
 describe('consumer registry', () => {
+  it('pins K-03 as advisory even though its function takes a branded token', () => {
+    expect(rolePlanConsumerProblems(AUTHORIZATION_INPUT_CONSUMERS)).toEqual([])
+    expect(AUTHORIZATION_INPUT_CONSUMERS.find((entry) => entry.id === 'K-03')).toEqual(ROLE_PLAN_CONSUMER)
+    expect(AUTHORIZATION_INPUT_CONSUMERS.find((entry) => entry.id === 'K-02')).toEqual({
+      id: 'K-02', file: PROOF_MODULE, symbol: 'consume', call: 'assessSecurityActionPrivilege', count: 1, mode: 'PENDING_LOCKED', slice: 'AIS-3b',
+    })
+    const omitted = AUTHORIZATION_INPUT_CONSUMERS.filter((entry) => entry.id !== 'K-03')
+    const bad = ['K-03 must be the exact advisory role-plan reader']
+    expect(rolePlanConsumerProblems(omitted)).toEqual(bad)
+    for (const replacement of [
+      { ...ROLE_PLAN_CONSUMER, mode: 'LOCKED_DECISION' as const },
+      { ...ROLE_PLAN_CONSUMER, mode: 'PENDING_LOCKED' as const, slice: 'future' },
+      { ...ROLE_PLAN_CONSUMER, symbol: 'renamed' },
+      { ...ROLE_PLAN_CONSUMER, id: 'K-04' },
+      { ...ROLE_PLAN_CONSUMER, count: 2 },
+      { ...ROLE_PLAN_CONSUMER, reason: '' },
+      { ...ROLE_PLAN_CONSUMER, slice: 'unexpected' },
+    ]) expect(rolePlanConsumerProblems([...omitted, replacement])).toEqual(bad)
+    expect(rolePlanConsumerProblems([...AUTHORIZATION_INPUT_CONSUMERS, ROLE_PLAN_CONSUMER])).toEqual(bad)
+  })
+
+  it('detects renamed and namespace helper reads and refuses omission, symbol drift or duplicate calls', () => {
+    for (const source of [
+      "import { readPrivilegeInputs as read } from '../auth/security-action-privilege'\nexport async function revalidatePrivilegeRolePlan(tx: AuthorizationInputTx) { await read(tx, 'u1') }",
+      "import * as privilege from '../auth/security-action-privilege'\nexport async function revalidatePrivilegeRolePlan(tx: AuthorizationInputTx) { await privilege.readPrivilegeInputs(tx, 'u1') }",
+    ]) {
+      const sites = callSites(ROLE_PLAN_MODULE, source)
+      expect(sites.map((site) => site.call)).toEqual(['readPrivilegeInputs'])
+      expect(registryProblems(sites, [ROLE_PLAN_CONSUMER], () => source)).toEqual([])
+      expect(registryProblems(sites, [], () => source)).toEqual([
+        `unregistered consumer ${ROLE_PLAN_MODULE}|revalidatePrivilegeRolePlan|readPrivilegeInputs at line 2`,
+      ])
+      const renamed = source.replace('function revalidatePrivilegeRolePlan', 'function renamed')
+      expect(registryProblems(callSites(ROLE_PLAN_MODULE, renamed), [ROLE_PLAN_CONSUMER], () => renamed)).toHaveLength(2)
+      expect(registryProblems([...sites, ...sites], [ROLE_PLAN_CONSUMER], () => source)).toEqual([
+        `registered consumer ${ROLE_PLAN_MODULE}|revalidatePrivilegeRolePlan|readPrivilegeInputs expected 1 site(s), found 2`,
+      ])
+    }
+  })
+
   const files = listFiles(REPO_ROOT, { roots: [SRC, 'plugins'], exclude: [] }).filter((file) => SOURCE_EXTENSIONS.has(path.extname(file)) && file !== AUTHORIZATION_INPUT_CLASSIFIER_MODULE)
 
   it('every privilege-class read outside the classifier is a registered consumer, and every registered consumer exists', () => {
@@ -147,7 +215,7 @@ describe('consumer registry', () => {
   })
 
   it('the authorization command write decision is registered as locked', () => {
-    expect(AUTHORIZATION_INPUT_CONSUMERS.find(entry => entry.id === 'K-05')).toMatchObject({
+    expect(AUTHORIZATION_INPUT_CONSUMERS.find(entry => entry.id === 'K-12')).toMatchObject({
       symbol: 'callback:withAuthorizationInputTransaction', call: 'evaluateAuthorizationOperationAccess', count: 2, mode: 'LOCKED_DECISION',
     })
   })

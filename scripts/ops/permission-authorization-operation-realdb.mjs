@@ -24,6 +24,7 @@ export const baseline = Object.freeze([
     'rechecks the stopped actor inside a queued legacy role write',
   ], skipped: [] },
   { file: 'authorization-operation-exception.db.test.ts', min: 8, required: ['requires live RBAC admin before disclosing target existence', 'requires reason for grant and template and rejects a stale template before any writes', 'hides compatibility receipts and does not let a colliding key create a new receipt'], skipped: ['rejects a post-write legacy non-string mutation and rolls back', 'rolls back a direct write and receipt after post-fence audit failure'] },
+  { file: 'authorization-exception-write.db.test.ts', min: 3, required: ['rolls back a multi-code grant and evidence together', 'uses catalog FK and commits direct and legacy changes with exact before-image', 'preserves text array nulls and unrelated whitespace'], skipped: [] },
   { file: 'authorization-operation-exception-compat.db.test.ts', min: 5, required: ['checks live RBAC authority for every compatibility entry and conceals target existence', 'rolls back template codes and receipt on a mandatory audit error'], skipped: [] },
   { file: 'authorization-operation-migration.db.test.ts', min: 2, required: ['rolls the receipt back when mandatory audit insertion fails'], skipped: [] },
   { file: 'authorization-operation-migration-provider.db.test.ts', min: 1, required: ['refuses migration and ledger writes while an authorization reader holds the world lock'], skipped: [] },
