@@ -114,6 +114,29 @@ function belongsToB2Catalog(section: number, row: CatalogRow): boolean {
   }
 }
 
+// D21 (zzzz20261106110500, Y5a #6786) only adds catalog rows too: one subject authorization
+// version trigger on each of five fenced tables (two on users) and the two public trigger functions.
+// It is hashed as its own addition, exactly like B2, so the base profile stays the one each
+// PostgreSQL version/locale was qualified with. On this base path an absent or partial D21
+// addition is refused: this code bumps subject_authorization_versions, so a database that lost
+// D21's triggers or functions is not one it was qualified against. (A database matching one of the
+// pre-B2 exact profiles above has neither addition and is unchanged by this.)
+const D21_CATALOG_ADDITIONS = 'e726ffee09a3b6193a1e5ecb167a5064df67ea121447caec73b0b6c2f66f9ced'
+const D21_TRIGGERS = new Set([
+  'trg_platform_member_group_members_zz_authz_subject_version', 'trg_user_namespace_admissions_zz_authz_subject_version',
+  'trg_user_permissions_zz_authz_subject_version', 'trg_user_roles_zz_authz_subject_version',
+  'trg_users_zz_authz_subject_version_lifecycle', 'trg_users_zz_authz_subject_version_update',
+])
+const D21_FUNCTIONS = new Set(['metasheet_authz_bump_sheet_permission_version', 'metasheet_authz_bump_subject_authorization_version'])
+
+function belongsToD21Catalog(section: number, row: CatalogRow): boolean {
+  switch (section) {
+    case 4: return D21_TRIGGERS.has(String(row.tgname))
+    case 7: return D21_FUNCTIONS.has(String(row.proname))
+    default: return false
+  }
+}
+
 function schemaDigest(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex')
 }
@@ -121,13 +144,19 @@ function schemaDigest(value: unknown): string {
 function readBaseProfile(database: CatalogRow | null, rows: CatalogRow[][]): string | undefined {
   const base = rows.map(() => [] as CatalogRow[])
   const additions = rows.map(() => [] as CatalogRow[])
+  const d21 = rows.map(() => [] as CatalogRow[])
   for (const [section, catalog] of rows.entries()) {
     for (const row of catalog) {
-      const partition = belongsToB2Catalog(section, row) ? additions : base
+      const partition = belongsToB2Catalog(section, row) ? additions : belongsToD21Catalog(section, row) ? d21 : base
       partition[section].push(row)
     }
   }
-  if (schemaDigest(additions) === B2_CATALOG_ADDITIONS) return schemaDigest({ database, rows: base })
+  if (schemaDigest(additions) === B2_CATALOG_ADDITIONS && schemaDigest(d21) === D21_CATALOG_ADDITIONS) return schemaDigest({ database, rows: base })
+}
+
+/** The D21 addition's digest over raw catalog rows (section order as in the schema queries); used to measure and pin D21_CATALOG_ADDITIONS. */
+export function authorizationOperationD21AdditionDigest(rows: CatalogRow[][]): string {
+  return schemaDigest(rows.map((catalog, section) => catalog.filter(row => !belongsToB2Catalog(section, row) && belongsToD21Catalog(section, row))))
 }
 
 /** Compute only structural metadata. Never reads customer rows or emits SQL values. */

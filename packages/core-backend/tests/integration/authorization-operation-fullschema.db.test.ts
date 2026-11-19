@@ -107,6 +107,32 @@ suite('real authorization operation on the migrated synthetic schema', () => {
     }
   })
 
+  it('refuses a changed, disabled or missing D21 subject-version addition', async () => {
+    // D21 (Y5a #6786) is hashed as its own catalog addition next to B2; each edit of one of its six
+    // fenced-table triggers or two functions must leave no accepted profile, and rolling the edit back restores it.
+    const query = (sql: string, params?: unknown[]) => control.query(sql, params)
+    await control.query('BEGIN')
+    try {
+      await control.query('SET LOCAL search_path TO pg_catalog, public, pg_temp')
+      await assertAuthorizationOperationSchema(query)
+      await control.query('SAVEPOINT original_profile')
+      for (const ddl of [
+        'ALTER TABLE public.user_roles DISABLE TRIGGER trg_user_roles_zz_authz_subject_version',
+        'DROP TRIGGER trg_users_zz_authz_subject_version_update ON public.users',
+        `CREATE OR REPLACE FUNCTION public.metasheet_authz_bump_sheet_permission_version() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$`,
+      ]) {
+        await control.query(ddl)
+        await expect(assertAuthorizationOperationSchema(query), ddl).rejects.toMatchObject({
+          code: 'AUTHORIZATION_OPERATION_FENCE_UNAVAILABLE',
+        })
+        await control.query('ROLLBACK TO SAVEPOINT original_profile')
+        await assertAuthorizationOperationSchema(query)
+      }
+    } finally {
+      await control.query('ROLLBACK')
+    }
+  })
+
   it('previews, commits and replays using the real fence and current migrated schema', async () => {
     const p=await preview(); expect(p.status,JSON.stringify(p.body)).toBe(200)
     expect(p.body.impact.effectiveAfter).toEqual([{code,sources:[{kind:'role',id:roleId}],effective:true}])

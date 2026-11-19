@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { AUTHORIZATION_OPERATION_FENCE_LOCK_SQL, AUTHORIZATION_OPERATION_FENCE_TABLES, AUTHORIZATION_OPERATION_SCHEMA_PROFILE, inspectAuthorizationOperationSchema, isSupportedAuthorizationOperationSchema } from '../../src/admin/authorization-operation-fence'
+import { AUTHORIZATION_OPERATION_FENCE_LOCK_SQL, AUTHORIZATION_OPERATION_FENCE_TABLES, AUTHORIZATION_OPERATION_SCHEMA_PROFILE, authorizationOperationD21AdditionDigest, inspectAuthorizationOperationSchema, isSupportedAuthorizationOperationSchema } from '../../src/admin/authorization-operation-fence'
 
 describe('authorization operation schema profile', () => {
   it('requires the exact known digest and ordinary tables', () => {
@@ -43,4 +43,43 @@ describe('authorization operation schema profile', () => {
     expect((await inspect(regular(),true,false)).ordinary).toBe(false)
   })
 
+  it('hashes the D21 addition from exactly its six fenced-table triggers and two functions', () => {
+    const d21Triggers = [
+      'trg_platform_member_group_members_zz_authz_subject_version', 'trg_user_namespace_admissions_zz_authz_subject_version',
+      'trg_user_permissions_zz_authz_subject_version', 'trg_user_roles_zz_authz_subject_version',
+      'trg_users_zz_authz_subject_version_lifecycle', 'trg_users_zz_authz_subject_version_update',
+    ]
+    const catalog = () => {
+      const rows: Array<Array<Record<string, unknown>>> = Array.from({ length: 8 }, () => [])
+      rows[1].push({ relname: 'users', attname: 'role' })
+      rows[4].push({ relname: 'users', tgname: 'trg_users_recovery_authority_lock_update', tgenabled: 'D' })
+      rows[4].push({ relname: 'users', tgname: 'admin_grant_local_credential_version', tgenabled: 'O' })
+      for (const tgname of d21Triggers) rows[4].push({ relname: 'x', tgname, tgenabled: 'O' })
+      rows[7].push({ proname: 'metasheet_authz_bump_sheet_permission_version', definition: 'a' })
+      rows[7].push({ proname: 'metasheet_authz_bump_subject_authorization_version', definition: 'b' })
+      rows[7].push({ proname: 'admin_grant_local_credential_establishment_guard', definition: 'c' })
+      rows[7].push({ proname: 'guard_repaired_directory_link', definition: 'd' })
+      return rows
+    }
+    const original = authorizationOperationD21AdditionDigest(catalog())
+    // Rows outside the addition (base and B2) do not move it.
+    for (const edit of [
+      (rows: ReturnType<typeof catalog>) => { rows[1][0].attname = 'is_admin' },
+      (rows: ReturnType<typeof catalog>) => { rows[4][0].tgenabled = 'O' },
+      (rows: ReturnType<typeof catalog>) => { rows[4][1].tgenabled = 'D' },
+      (rows: ReturnType<typeof catalog>) => { rows[7][2].definition = 'changed' },
+      (rows: ReturnType<typeof catalog>) => { rows[7][3].definition = 'changed' },
+      (rows: ReturnType<typeof catalog>) => { rows[4].push({ relname: 'user_roles', tgname: 'trg_user_roles_zz_authz_subject_version_extra' }) },
+    ]) {
+      const rows = catalog(); edit(rows)
+      expect(authorizationOperationD21AdditionDigest(rows)).toBe(original)
+    }
+    // Every one of its own rows does, including a missing one.
+    for (const [section, index] of [[4, 2], [4, 3], [4, 4], [4, 5], [4, 6], [4, 7], [7, 0], [7, 1]] as const) {
+      const changed = catalog(); changed[section][index] = { ...changed[section][index], tgenabled: 'D', definition: 'changed' }
+      expect(authorizationOperationD21AdditionDigest(changed), `${section}:${index}`).not.toBe(original)
+      const missing = catalog(); missing[section].splice(index, 1)
+      expect(authorizationOperationD21AdditionDigest(missing), `${section}:${index} missing`).not.toBe(original)
+    }
+  })
 })
