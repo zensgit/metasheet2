@@ -93,7 +93,6 @@ const EXPECTED_TRIGGERS: ReadonlyArray<readonly [string, string, string]> = [
 
 /** The (table, trigger) pairs of `EXPECTED_TRIGGERS`, for the controls that compare names only. */
 const EXPECTED_TRIGGER_PAIRS: ReadonlyArray<readonly [string, string]> = EXPECTED_TRIGGERS.map(([table, trigger]) => [table, trigger] as const)
-]
 
 /**
  * The parts of a subject-version trigger's definition that are empty for all five: no `UPDATE OF`
