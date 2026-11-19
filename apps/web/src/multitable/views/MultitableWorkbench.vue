@@ -3534,10 +3534,18 @@ async function onManualCopyRecord(recordId?: string | null): Promise<void> {
 // cell editor (it is not in `editableFieldIds`; resolveManualRowEditableFieldIds drops it besides), and there is no grid
 // context menu (customer feedback 2026-10-27). 复制为新行 needs nothing here: the server carries the pair (OQ-P1).
 const manualRowParentFieldIds = computed(() => (capabilitiesStale.value ? null : manualRowsBlock.value?.parentFieldIds ?? null))
-// The 图号 column's physical id. The manual-rows block does not name it; the BOM-relations block of the same sheet does
-// (a stock-preparation project sheet, an actor who can read the column). Without it the client-side self-parent check
-// and the 图号 change warning are skipped — the server still refuses a self-parent (P5).
-const manualRowCodeFieldId = computed(() => bomRelationsBlock.value?.componentCodeFieldId ?? null)
+// The row's own 图号 column (`componentCodeFieldId`): the manual-rows block names it beside the pair, and only to an
+// actor who may READ it. The client-side self-parent check (P5) compares with this column; without it the check is
+// skipped in the 新增 dialog (the server still refuses a self-parent, and a new row may still be given a parent) and
+// the drawer offers no 「修改父组件」 — PATCH …/manual-fields would refuse that actor's change of the pair (403).
+const manualRowCodeFieldId = computed(() =>
+  (manualRowParentFieldIds.value ? manualRowsBlock.value?.componentCodeFieldId ?? null : null))
+// The 图号 change warning (ADR §12.7 ①) protects OTHER rows, so it is asked of anyone who edits a manual row's 图号 —
+// also an actor who may not write the pair (no `parentFieldIds`, hence no `componentCodeFieldId`). For them the same
+// physical column comes from the BOM-relations block of the sheet (sent only to an actor who can read it). Without
+// either id no warning is asked; the edit itself is the server's to judge.
+const manualRowDependentsCodeFieldId = computed(() =>
+  manualRowCodeFieldId.value ?? bomRelationsBlock.value?.componentCodeFieldId ?? null)
 
 function searchManualRowParentOptions(q: string): Promise<unknown> {
   const sheetId = workbench.activeSheetId.value
@@ -3549,7 +3557,9 @@ function searchManualRowParentOptions(q: string): Promise<unknown> {
 const inspectorManualParent = computed<{ code: string | null; name: string | null } | null>(() => {
   const ids = manualRowParentFieldIds.value
   const record = selectedRecordResolved.value
-  if (!ids || !record || !manualRowsEditGate.value || !isManualRowRecord(record.id)) return null
+  // No `componentCodeFieldId` beside the pair = this actor cannot read the row's own 图号, and the edit route refuses
+  // their change of an existing row's parent (rule P5 would compare with that cell): nothing to offer.
+  if (!ids || !manualRowCodeFieldId.value || !record || !manualRowsEditGate.value || !isManualRowRecord(record.id)) return null
   return { code: manualRowParentCellText(record.data[ids.code]), name: manualRowParentCellText(record.data[ids.name]) }
 })
 
@@ -3567,9 +3577,10 @@ function openManualParentDialog(): void {
   const current = inspectorManualParent.value
   if (!record || !current || !ensureCanEditRecord(record.id)) return
   const codeFieldId = manualRowCodeFieldId.value
+  if (!codeFieldId) return
   manualParentDialog.value = {
     visible: true, submitting: false, error: null, recordId: record.id, current,
-    ownCode: codeFieldId ? record.data[codeFieldId] ?? null : null,
+    ownCode: record.data[codeFieldId] ?? null,
   }
 }
 
@@ -3632,7 +3643,7 @@ function manualRowIdsForDependentsCheck(recordIds: readonly string[]): string[] 
 
 /** Synchronous, so every other cell write keeps its timing: is this a manual row's 图号 actually changing? */
 function manualRowCodeChangeChecked(recordId: string, fieldId: string, value: unknown): boolean {
-  const codeFieldId = manualRowCodeFieldId.value
+  const codeFieldId = manualRowDependentsCodeFieldId.value
   if (!codeFieldId || fieldId !== codeFieldId || !manualRowDependentsCheckable() || !isManualRowRecord(recordId)) return false
   const record = drawerRecordById(recordId)
   return !!record && manualRowCodeChangeNeedsDependentsCheck(record.data[fieldId], value)

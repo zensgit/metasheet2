@@ -67,8 +67,21 @@ export function readManualRowsBlock(capabilities: unknown): MetaManualRowsBlock 
   }
   if (state === 'unavailable' && typeof block.reason === 'string' && block.reason.trim() !== '') read.reason = block.reason
   const parentFieldIds = readParentFieldIds(block.parentFieldIds)
-  if (parentFieldIds) read.parentFieldIds = parentFieldIds
+  if (parentFieldIds) {
+    read.parentFieldIds = parentFieldIds
+    const componentCodeFieldId = readComponentCodeFieldId(block.componentCodeFieldId, parentFieldIds)
+    if (componentCodeFieldId) read.componentCodeFieldId = componentCodeFieldId
+  }
   return read
+}
+
+/**
+ * ADR §12.6 `componentCodeFieldId` (the row's own 图号), read only beside a well-formed pair, fail closed: a non-blank id
+ * that is neither of the pair's — or nothing (then no drawer 「修改父组件」 and no client-side self-parent check).
+ */
+function readComponentCodeFieldId(value: unknown, pair: MetaManualRowParentFieldIds): string | null {
+  if (typeof value !== 'string' || value.trim() === '') return null
+  return value === pair.code || value === pair.name ? null : value
 }
 
 /** ADR §12.6 `parentFieldIds`, fail closed: two distinct non-blank ids or nothing (then no parent picker anywhere). */

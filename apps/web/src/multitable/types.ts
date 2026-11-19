@@ -372,6 +372,12 @@ export interface MetaManualRowsContextBlock {
    * edited one at a time; they change together through the dialog / the drawer's 「修改父组件」.
    */
   parentFieldIds?: MetaManualRowParentFieldIds
+  /**
+   * ADR §12.6 / §12.3 P5: the physical id of the row's OWN 图号 column — sent ONLY beside `parentFieldIds`, and only when
+   * this actor may READ that column. Absent beside the pair = the actor cannot read 图号: PATCH …/manual-fields refuses
+   * their change of an existing row's parent (403), while a new row can still be given one. An id only, never a value.
+   */
+  componentCodeFieldId?: string
 }
 
 export interface MetaManualRowParentFieldIds {
@@ -415,6 +421,8 @@ export interface MetaManualRowsBlock {
   dialogFieldIds: string[]
   /** Present only when /context sent a well-formed pair (ADR §12.6); absent ⇒ no parent picker anywhere. */
   parentFieldIds?: MetaManualRowParentFieldIds
+  /** The row's own 图号 column — kept only beside a well-formed `parentFieldIds` (absent ⇒ no drawer 「修改父组件」). */
+  componentCodeFieldId?: string
 }
 
 export interface MetaScopedPermissions {

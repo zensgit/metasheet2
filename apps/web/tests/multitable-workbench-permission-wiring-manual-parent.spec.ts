@@ -8,10 +8,12 @@ import type { ManualCellWrite } from '../src/multitable/composables/useMultitabl
 //
 //   MP-W1 the 新增 dialog shows 「父组件」 only with /context `parentFieldIds`; 选已有的 reads the host candidates (the
 //         typed own 图号 left out) and the pick is sent exactly as returned; the pair never becomes a grid cell editor;
-//   MP-W2 the drawer's 「修改父组件」 is offered for a manual row with the pair only; it saves BOTH columns through
+//   MP-W2 the drawer's 「修改父组件」 is offered for a manual row with the pair AND `componentCodeFieldId` only (the
+//         self-parent check compares with that column; without it the edit route answers 403); it saves BOTH columns through
 //         PATCH …/manual-fields with the row's version and reloads; a refusal keeps the dialog with the server text;
 //   MP-W3 changing a manual row's 图号 (grid cell, drawer) or deleting manual rows asks 「有 N 行人工补充行以它为父组件…」
-//         when the host counts dependents; cancel aborts; no count / no change / PLM rows ask nothing.
+//         when the host counts dependents; cancel aborts; no count / no change / PLM rows ask nothing; an actor without
+//         the pair is still asked, the 图号 column then named by the BOM-relations block.
 //
 // Collected by the required web gate through the existing `multitable-workbench-permission-wiring` token.
 
@@ -242,8 +244,9 @@ const PARENT_FIELDS = [
   { id: PARENT.code, name: '父组件图号', type: 'string', property: { ...LOCK } },
   { id: PARENT.name, name: '父组件名称', type: 'string', property: { ...LOCK } },
 ]
-const PARENT_BLOCK = { ...BLOCK, parentFieldIds: { ...PARENT } }
-// The 图号 column's id reaches the web through the BOM-relations block of the same sheet.
+// Beside the pair the block names the row's own 图号 (`componentCodeFieldId`) to an actor who may read it.
+const PARENT_BLOCK = { ...BLOCK, parentFieldIds: { ...PARENT }, componentCodeFieldId: F.code }
+// The same column as the BOM-relations block of the sheet names it — only the 图号 change warning falls back to it.
 const BOM_BLOCK = {
   componentSourceFieldId: 'fld_wb_src', parentSourceFieldId: 'fld_wb_psrc', activeFieldId: 'fld_wb_active',
   componentCodeFieldId: F.code, componentNameFieldId: F.name,
@@ -253,7 +256,7 @@ const PARENT_ROWS = () => [
   { id: 'rec_wb_plm', version: 5, data: { [F.code]: 'SYN-PLM', [F.name]: 'PLM part', [PARENT.code]: 'SYN-P0', [PARENT.name]: 'PLM parent' } },
 ]
 
-async function mountParent(block: Record<string, unknown> = PARENT_BLOCK, extraCaps: Record<string, unknown> = { stockPreparationBomRelations: BOM_BLOCK }): Promise<void> {
+async function mountParent(block: Record<string, unknown> = PARENT_BLOCK, extraCaps: Record<string, unknown> = {}): Promise<void> {
   gridMock.fields.value = PARENT_FIELDS
   gridMock.visibleFields.value = PARENT_FIELDS
   gridMock.rows.value = PARENT_ROWS()
@@ -309,6 +312,13 @@ describe('MP-W1 the 新增 dialog gets the parent picker only with /context pare
     })
   })
 
+  it('with the pair but no componentCodeFieldId (the actor cannot read 图号): the fieldset still shows — a create is not refused for it', async () => {
+    const { componentCodeFieldId: _omit, ...pairOnly } = PARENT_BLOCK
+    await mountParent(pairOnly)
+    await openFromToolbarEntry()
+    expect(dialog()?.querySelector('[data-testid="manual-row-dialog-parent"]')).not.toBeNull()
+  })
+
   it('without the pair: no fieldset, and the create sends no parent key', async () => {
     await mountParent(BLOCK)
     await openFromToolbarEntry()
@@ -338,6 +348,32 @@ describe('MP-W2 the drawer\'s 「修改父组件」', () => {
     await mountParent(BLOCK)
     await selectRow('rec_wb_manual')
     expect(captured.MetaRecordInspector!['manual-parent']).toBeNull()
+  })
+
+  it('is hidden when the block names the pair without componentCodeFieldId (PATCH …/manual-fields would answer 403) — the BOM block does not stand in', async () => {
+    const { componentCodeFieldId: _omit, ...pairOnly } = PARENT_BLOCK
+    await mountParent(pairOnly, { stockPreparationBomRelations: BOM_BLOCK })
+    await selectRow('rec_wb_manual')
+    expect(captured.MetaRecordInspector!['manual-parent']).toBeNull()
+  })
+
+  it('takes the row\'s own 图号 from componentCodeFieldId for the self-parent check', async () => {
+    await mountParent()
+    await selectRow('rec_wb_manual')
+    ;(captured.MetaRecordInspector!.onEditManualParent as () => void)()
+    await flushUi()
+    const modal = document.body.querySelector('[data-testid="manual-parent-dialog"]')!
+    const fresh = modal.querySelector<HTMLInputElement>('[data-manual-parent-mode="new"]')!
+    fresh.checked = true; fresh.dispatchEvent(new Event('change'))
+    await flushUi()
+    const code = modal.querySelector<HTMLInputElement>('[data-testid="manual-parent-new-code"]')!
+    const name = modal.querySelector<HTMLInputElement>('[data-testid="manual-parent-new-name"]')!
+    code.value = ' SYN-OWN '; code.dispatchEvent(new Event('input'))
+    name.value = 'Synthetic self'; name.dispatchEvent(new Event('input'))
+    modal.querySelector<HTMLButtonElement>('[data-action="manual-parent-dialog-submit"]')!.click()
+    await flushUi()
+    expect(workbenchMock.client.patchManualRowFields).not.toHaveBeenCalled()
+    expect(document.body.querySelector('[data-testid="manual-parent-dialog-error"]')?.textContent?.trim()).toBeTruthy()
   })
 
   it('saves BOTH columns through manual-fields with the row\'s version, then reloads the page', async () => {
@@ -415,6 +451,24 @@ describe('MP-W3 §12.7 ①: 图号 change and delete ask when other manual rows 
     expect(workbenchMock.client.countManualRowParentDependents).not.toHaveBeenCalled()
     expect(confirmSpy).not.toHaveBeenCalled()
     expect(gridMock.patchCell).toHaveBeenCalledTimes(4)
+  })
+
+  it('an actor without the pair is still asked: the 图号 column then comes from the BOM-relations block', async () => {
+    await mountParent(BLOCK, { stockPreparationBomRelations: BOM_BLOCK })
+    workbenchMock.client.countManualRowParentDependents.mockResolvedValue({ count: 2 })
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    await onPatchCell()('rec_wb_manual', F.code, 'SYN-OWN-2', 3)
+    expect(confirmSpy).toHaveBeenCalledWith(TEXT)
+    expect(gridMock.patchCell).not.toHaveBeenCalled()
+  })
+
+  it('without either id no question is asked (nothing names the 图号 column)', async () => {
+    await mountParent(BLOCK)
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    await onPatchCell()('rec_wb_manual', F.code, 'SYN-OWN-2', 3)
+    expect(workbenchMock.client.countManualRowParentDependents).not.toHaveBeenCalled()
+    expect(confirmSpy).not.toHaveBeenCalled()
+    expect(gridMock.patchCell).toHaveBeenCalledTimes(1)
   })
 
   it('a count that cannot be read does not stop the write (a hint, not a gate)', async () => {

@@ -104,6 +104,20 @@ describe('MP-U the pure rules', () => {
     expect(resolveManualRowEditableFieldIds(block, FIELDS, {})).toEqual([F.name, F.code])
   })
 
+  it('reads componentCodeFieldId only beside a well-formed pair, fail closed', () => {
+    const base = { state: 'allowed', editableFieldIds: [F.name, F.code], requiredFieldIds: [F.name], dialogFieldIds: [] }
+    const read = (extra: Record<string, unknown>) => readManualRowsBlock({ stockPreparationManualRows: { ...base, ...extra } })
+    expect(read({ parentFieldIds: IDS, componentCodeFieldId: F.code })?.componentCodeFieldId).toBe(F.code)
+    // Absent beside the pair: the actor cannot read 图号 (the drawer offers no 「修改父组件」).
+    expect(read({ parentFieldIds: IDS })).not.toHaveProperty('componentCodeFieldId')
+    // Never without the pair, even if a host sent it.
+    expect(read({ componentCodeFieldId: F.code })).not.toHaveProperty('componentCodeFieldId')
+    expect(read({ parentFieldIds: { code: F.pcode }, componentCodeFieldId: F.code })).not.toHaveProperty('componentCodeFieldId')
+    for (const bad of [undefined, null, '', '  ', 7, [], {}, F.pcode, F.pname]) {
+      expect(read({ parentFieldIds: IDS, componentCodeFieldId: bad })?.componentCodeFieldId, JSON.stringify(bad)).toBeUndefined()
+    }
+  })
+
   it('groups the candidates, drops the own 图号 (trimmed comparison) and malformed entries, keeps values exactly', () => {
     const groups = groupManualRowParentOptions({ ...CANDIDATES, items: [...CANDIDATES.items, { code: '  ', kind: 'parent' }, { code: 'X', kind: 'other' }, null] }, ' SYN-OWN ')
     expect(groups.parents).toEqual([
@@ -190,6 +204,11 @@ describe('MP-D MetaManualRowDialog 「父组件」', () => {
     await new Promise((resolve) => setTimeout(resolve, 5))
     await flushUi()
     expect(search).toHaveBeenLastCalledWith('底座')
+    // Sent as typed (trimmed only): the host folds the case of both sides itself; the client never lower-cases.
+    type(q<HTMLInputElement>('[data-testid="manual-parent-search"]'), ' Syn-Φ20 ')
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    await flushUi()
+    expect(search).toHaveBeenLastCalledWith('Syn-Φ20')
     // Nothing picked yet: refused before submit.
     await submit()
     expect(onSubmit).not.toHaveBeenCalled()
