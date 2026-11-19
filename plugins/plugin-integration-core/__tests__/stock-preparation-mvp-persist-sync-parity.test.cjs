@@ -33,6 +33,12 @@ const { consumableMap } = require('./support/consumable-storage.cjs')
 //          refresh stamps move): 200 persisted:false, `replayedUnderKeptRun`.
 //      B3d creation-hour rule, review P4: a partial ③ archived by a direct call (no content digest),
 //          then the next sync completes the write — ④ answers 200, and again on the sync after.
+//      B3e default rule, the YiDa issue-confirm write-back fills `issueConfirmDate` (the one machine
+//          write-back column, MACHINE_WRITEBACK_FIELD_IDS) on a kept row: ④ answers 200 persisted:false
+//          and there is still ONE batch (before, the next sync kept a second batch of identical lines
+//          under a new batch id and run id).
+//      B3f creation-hour rule, the same write-back: 200 persisted:false WITHOUT the kept-run replay
+//          (before, it reached 200 only through `replayedUnderKeptRun`).
 //   B4 nothing loosened —
 //      B4a creation-hour rule, a corrected quantity in the same hour is still 409
 //          PERSIST_IDEMPOTENCY_CONFLICT snapshot_batch/content_mismatch;
@@ -50,7 +56,11 @@ const { consumableMap } = require('./support/consumable-storage.cjs')
 //   B6 the two revisions on their own: the content revision ignores row order and every tenant `ext_`
 //      key and moves with any other row value; the archive revision is byte-identical to the dry-run
 //      revision for a sheet nobody typed into, ignores the people-owned columns, keeps the declared
-//      `ext_` band and the refresh stamps.
+//      `ext_` band and the refresh stamps; it ignores the machine write-back column too (absent, null,
+//      '' and a date hash alike), while the dry-run revision still moves with that column.
+//   G5 the dry-run token still binds the machine write-back column: a token minted before the
+//      write-back is refused after it (409 TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH); the same token with no
+//      write-back in between applies (control).
 //   B7 the newest-batch identity read on its own: admin only; null for no tables, no rows, a tied top
 //      version, an unparseable version or a top row with no run id; another project's rows ignored.
 //
@@ -63,6 +73,8 @@ const { consumableMap } = require('./support/consumable-storage.cjs')
 //   SY5b the archive revision strips nothing                                 => B3a B3b B6 red
 //   SY5c … strips the human columns but no `ext_` column                     => B3a B6 red
 //   SY5d … strips the declared `ext_` band too                               => B6 red
+//   SY5e … keeps the machine write-back column                               => B3e B3f B6 red
+//   SY5f the dry-run revision drops the machine write-back column too        => B6 G5 red
 //   SY6  drop the kept-run replay after the persist's refusal                 => B3c B3d B4a red
 //   SY6b replay after ANY idempotency conflict                               => B4f red
 //   SY7  the identity read picks the oldest batch                            => B4b B7 red
@@ -85,7 +97,10 @@ const {
   stockPreparationSourceContentDigest,
   __internals: { buildArchiveRevision, buildRevision, buildSourceContentRevision },
 } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
-const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
+const {
+  STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+  MACHINE_WRITEBACK_FIELD_IDS,
+} = require(path.join(LIB, 'stock-preparation-templates.cjs'))
 const { PLM_STOCK_PREPARATION_BOM_READ_PLAN } = require(path.join(LIB, 'stock-preparation-bom-expansion.cjs'))
 const {
   BATCH_OBJECT_ID,
@@ -613,6 +628,35 @@ async function b3dHourRulePartialThenCompleted() {
   await assertAlreadyKept(h, 'B3d the sync after that', { replayed: true })
 }
 
+// The YiDa issue-confirm write-back (lib/yida-issue-confirm-writeback.cjs): a host patch of the ONE machine
+// write-back column on an existing row — no sync, no refresh stamp.
+const ISSUE_CONFIRM_DATE = '2026-11-17'
+async function issueConfirmWriteBack(h, code) {
+  const row = h.records.rows(CANONICAL_SHEET_ID).find((entry) => entry.data.componentCode === code)
+  assert.ok(row, `write-back: no sheet row for ${code}`)
+  assert.equal(Object.prototype.hasOwnProperty.call(row.data, 'issueConfirmDate'), false,
+    'write-back control: a sync never writes the machine write-back column (the key is absent until the write-back)')
+  await h.records.api.patchRecord({ sheetId: CANONICAL_SHEET_ID, recordId: row.id, changes: { issueConfirmDate: ISSUE_CONFIRM_DATE } })
+}
+
+async function b3eDefaultRuleIssueConfirmWriteBack() {
+  assert.ok(MACHINE_WRITEBACK_FIELD_IDS.includes('issueConfirmDate'), 'B3e control: the date is the machine write-back column')
+  const h = mount({ parts: [PART.A1] })
+  assertStatus(await sync(h), 201, 'B3e first sync')
+  await issueConfirmWriteBack(h, 'A-1')
+  await assertAlreadyKept(h, 'B3e after the issue-confirm write-back (default rule)')
+}
+
+async function b3fHourRuleIssueConfirmWriteBack() {
+  const h = mount({ parts: [PART.A1], hourRule: true })
+  const first = await sync(h)
+  assertStatus(first, 201, 'B3f first sync')
+  assert.equal(first.body.data.batchIdentity.mode, 'material_create_hour', 'B3f control: the hour rule is in effect')
+  await issueConfirmWriteBack(h, 'A-1')
+  // Not a replay under the kept run: the archive mints the SAME run id it kept.
+  await assertAlreadyKept(h, 'B3f after the issue-confirm write-back (creation-hour rule)', { replayed: false })
+}
+
 // ── B4 ───────────────────────────────────────────────────────────────────────────────────────
 
 async function b4aHourRuleCorrectionInTheSameHourStillRefused() {
@@ -758,9 +802,43 @@ function b6TheRevisionsOnTheirOwn() {
     'B6: for a sheet nobody typed into the archive revision IS the dry-run revision (no kept batch re-keyed)')
   assert.equal(archiveOf([{ ...sheetRow, notes: 'synthetic', procurementReply: 'synthetic', [PEOPLE_EXT_COLUMN]: 'synthetic' }]), untouched,
     'B6: the columns people own do not move it')
+  // The machine write-back column. The dry-run revision — what a dry-run token binds — still moves with it
+  // (G5). The archive revision never does: a row without the key, one holding null or '' (the write-back's
+  // "empty", rule D8) and one holding a date all hash alike, so no batch kept from an untouched sheet is re-keyed.
+  const dated = { ...sheetRow, issueConfirmDate: ISSUE_CONFIRM_DATE }
+  assert.notEqual(buildRevision({ action, parameters, ...dryRun([dated]) }), buildRevision({ action, parameters, ...dryRun([sheetRow]) }),
+    'B6: the dry-run revision still moves with the machine write-back column (G5)')
+  for (const [label, value] of [['a date', ISSUE_CONFIRM_DATE], ['null', null], ["''", '']]) {
+    assert.equal(archiveOf([{ ...sheetRow, issueConfirmDate: value }]), untouched,
+      `B6: the machine write-back column holding ${label} does not move the archive revision`)
+  }
   assert.notEqual(archiveOf([{ ...sheetRow, ext_declared: 'rewritten' }]), untouched, 'B6: the declared ext_ band stays in')
   assert.notEqual(archiveOf([{ ...sheetRow, lastPlmRefreshDecision: 'update' }]), untouched, 'B6: the refresh stamps stay in')
   assert.notEqual(archiveOf([{ ...sheetRow, rawQuantity: 7 }]), untouched, 'B6: a PLM-owned cell stays in')
+}
+
+// ── G5 ───────────────────────────────────────────────────────────────────────────────────────
+
+async function g5TokenStillBindsTheMachineColumn() {
+  for (const writeBack of [false, true]) {
+    const label = `G5 ${writeBack ? 'a write-back between the dry-run and the apply' : 'no write-back in between (control)'}`
+    const h = mount({ parts: [PART.A1] })
+    assertStatus(await sync(h), 201, `${label}: first sync`)
+    const planned = await call(h.routes, ROUTE.dryRun, { body: pull(), query: pageQuery() })
+    assertStatus(planned, 200, `${label}: dry-run`)
+    assert.equal(typeof planned.body.data.dryRunToken, 'string', `${label}: a token was minted`)
+    if (writeBack) await issueConfirmWriteBack(h, 'A-1')
+    const applied = await call(h.routes, ROUTE.apply, {
+      body: { ...pull(), confirm: { dryRunToken: planned.body.data.dryRunToken } },
+      query: pageQuery(),
+    })
+    if (writeBack) {
+      assertStatus(applied, 409, label)
+      assert.equal(applied.body.error.code, 'TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH', `${label}: the token no longer matches`)
+    } else {
+      assertStatus(applied, 200, label)
+    }
+  }
 }
 
 // ── B7 ───────────────────────────────────────────────────────────────────────────────────────
@@ -804,6 +882,8 @@ const CASES = Object.freeze({
   B3b: b3bHourRuleNotesEdit,
   B3c: b3cHourRuleSheetRewrittenBack,
   B3d: b3dHourRulePartialThenCompleted,
+  B3e: b3eDefaultRuleIssueConfirmWriteBack,
+  B3f: b3fHourRuleIssueConfirmWriteBack,
   B4a: b4aHourRuleCorrectionInTheSameHourStillRefused,
   B4b: b4bHourRuleBackToAnOlderBatchStillRefused,
   B4c: b4cDefaultRuleBackAndForthKeepsItsHistory,
@@ -813,6 +893,7 @@ const CASES = Object.freeze({
   B4g: b4gExtMappingDeploymentIsNotRefused,
   B5: b5TheWire,
   B6: b6TheRevisionsOnTheirOwn,
+  G5: g5TokenStillBindsTheMachineColumn,
   B7: b7NewestBatchIdentityRead,
 })
 

@@ -212,6 +212,20 @@ const tests = [
     assert.equal(classifyRefusal(new HttpRouteError(409, 'STOCK_PREP_PROJECT_WRITE_LOCKED', 'x', { holderPurpose: 'pull_batch_install' }), t0).reason, 'pull_batch_installing')
     const otherHolder = classifyRefusal(lockRefusal({ holderPurpose: 'small_apply', interrupted: false }), t0)
     assert.deepEqual([otherHolder.status, otherHolder.errorClass], ['failed', 'STOCK_PREP_PROJECT_WRITE_LOCKED'])
+    // Ruling 2026-11-16: contention with the YiDa issue-confirm write-back is an ERROR (the next run retries), never held —
+    // a held skip would be silent. Only 'pull_batch_install' is held; every other write purpose stays failed.
+    const { PROJECT_WRITE_PURPOSES } = require(path.join(LIB, 'stock-preparation-project-write-lock.cjs'))
+    const notHeldPurposes = PROJECT_WRITE_PURPOSES.filter((purpose) => purpose !== 'pull_batch_install')
+    assert.ok(notHeldPurposes.includes('issue_confirm_writeback'), 'the write-back purpose is a known lease purpose')
+    assert.ok(notHeldPurposes.length >= 2)
+    for (const purpose of notHeldPurposes) {
+      for (const refusal of [lockRefusal({ holderPurpose: purpose, interrupted: false }), new HttpRouteError(409, 'STOCK_PREP_PROJECT_WRITE_LOCKED', 'x', { holderPurpose: purpose })]) {
+        const result = classifyRefusal(refusal, t0)
+        assert.deepEqual([result.status, result.errorClass], ['failed', 'STOCK_PREP_PROJECT_WRITE_LOCKED'], purpose)
+        assert.notEqual(result.status, 'held', purpose)
+        assert.equal(result.reason, undefined, purpose)
+      }
+    }
     assert.deepEqual([classifyRefusal(lockRefusal({ reason: 'contention' }), t0).status, classifyRefusal(lockRefusal(undefined), t0).status], ['failed', 'failed'])
     const other = classifyRefusal(new HttpRouteError(503, 'B2A_AUTHORITY_UNAVAILABLE', 'the message body must not leak'), t0)
     assert.deepEqual(other, { status: 'failed', errorClass: 'B2A_AUTHORITY_UNAVAILABLE', failureStage: 'authorize', durationMs: other.durationMs })

@@ -33,6 +33,9 @@
 //   C12 (F-1) the carry's patch runs inside the guard's host-write bracket: a heartbeat tick while the patch is
 //       in flight is SKIPPED (no holder CAS, manual timers — the lock suite's L18 pattern, the writer's W10
 //       rule); the next tick after the patch renews. Kills "carry patch without the withHostWrite bracket".
+//   C13 (owner ruling 2026-11-17 「按建议」) a carry whose human fields are already equal but whose predecessor holds
+//       the machine write-back date: ONE fenced, version-pinned patch of exactly that column under the lease, the
+//       generation bumped once, the audit counts the machine cell (values-free).
 //
 // Every value here is synthetic.
 
@@ -579,6 +582,42 @@ test('C12 (F-1) the carry patch runs inside the host-write bracket: a heartbeat 
   assert.equal(outcome.afterPatch, 1, 'calibration: outside the bracket the same tick renews the lease')
   assert.equal(fenced.fakeHostFences.length, 1, 'the patch was fenced')
   assert.equal(fake.rows.find((row) => row.id === 'r_new').data.notes, NOTE)
+})
+
+// ── C13 ───────────────────────────────────────────────────────────────────────────────────────────
+test('C13 a machine-only carry (human fields already equal, predecessor holds the date) is ONE fenced, version-pinned patch of exactly that column under the lease; bumped once; audited values-free', async () => {
+  const h = mount()
+  try {
+    const SYN_DATE = '2031-04-17'
+    const predecessor = h.fake.rows.find((row) => row.data[h.physical('idempotencyKey')] === OLD_KEY)
+    predecessor.data[h.physical('issueConfirmDate')] = SYN_DATE
+    h.targetRow().data[h.physical('notes')] = NOTE
+    let casBeforePatch = null
+    const casCount = () => h.env.db.log.filter(([method]) => method === 'updateRow').length
+    let casAtStart = null
+    h.hooks.beforeQuery = async () => { if (casAtStart === null) casAtStart = casCount() }
+    h.hooks.beforePatch = async () => { casBeforePatch = casCount() - casAtStart }
+    const res = await carry(h)
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    assert.equal(res.body.data.mode, 'carried')
+    assert.deepEqual(res.body.data.carriedFields, [])
+    assert.deepEqual(res.body.data.machineCarriedFields, ['issueConfirmDate'])
+    assert.equal(casBeforePatch, 1, 'exactly one holder CAS between the reads and the patch')
+    assert.equal(h.fences().length, 1, 'exactly one fenced host write')
+    assert.equal(h.fences()[0][1].scopeKey, h.scope)
+    assert.equal(h.fake.patches().length, 1)
+    assert.equal(h.fake.patches()[0][1].expectedVersion, 1)
+    assert.deepEqual(Object.keys(h.fake.patches()[0][1].changes), [h.physical('issueConfirmDate')], 'exactly the machine column')
+    assert.equal(h.targetRow().data[h.physical('issueConfirmDate')], SYN_DATE)
+    assert.equal(h.lockRow().generation, 1, 'a written carry bumps once')
+    assert.equal(h.lockRow().lease_id, null, 'released')
+    const audit = h.carryAudits()
+    assert.equal(audit.length, 1)
+    assert.equal(audit[0].detail.machineCarriedFieldCount, 1)
+    assert.equal(audit[0].detail.machineKeptExistingCount, 0)
+    assert.equal(audit[0].detail.carriedFieldCount, 0)
+    assert.equal(JSON.stringify([audit, res.body, h.warns]).includes(SYN_DATE), false, 'values-free')
+  } finally { h.restore() }
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-carry-confirm-write-lease.test.cjs', tests, { passLine: '✓ stock-preparation-carry-confirm-write-lease' })

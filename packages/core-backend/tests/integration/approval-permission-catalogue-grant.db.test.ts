@@ -165,6 +165,11 @@ describeIfDatabase('approval-product permission catalogue registration — grant
         await pool().query(`DELETE FROM approval_instances WHERE id = ANY($1::text[])`, [createdInstanceIds])
       }
       if (createdUserIds.length > 0) {
+        // Grant/revoke now write mandatory receipts and audit rows; remove only this run's fixtures.
+        await pool().query(`DELETE FROM authorization_operation_audit a USING authorization_operation_receipts r
+          WHERE a.actor_id=r.actor_id AND a.client_operation_id=r.client_operation_id
+            AND (r.actor_id=ANY($1::text[]) OR r.target_user_id=ANY($1::text[]))`, [createdUserIds])
+        await pool().query(`DELETE FROM authorization_operation_receipts WHERE actor_id=ANY($1::text[]) OR target_user_id=ANY($1::text[])`, [createdUserIds])
         await pool().query(`DELETE FROM approval_delegations WHERE delegator_user_id = ANY($1::text[])`, [createdUserIds])
         await pool().query(`DELETE FROM approval_reads WHERE user_id = ANY($1::text[])`, [createdUserIds])
         await pool().query(`DELETE FROM user_permissions WHERE user_id = ANY($1::text[])`, [createdUserIds])

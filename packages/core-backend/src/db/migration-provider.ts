@@ -5,7 +5,9 @@ import {
   sql,
   type Migration,
   type MigrationProvider,
+  type Transaction,
 } from 'kysely'
+import { runAuthorizationSchemaMutation } from '../rbac/authorization-input-lock'
 
 type NodeFsLike = Pick<typeof fs, 'readdir' | 'readFile'>
 type NodePathLike = Pick<typeof path, 'basename' | 'join' | 'resolve'>
@@ -198,6 +200,35 @@ function createNoopMigration(): Migration {
   }
 }
 
+/**
+ * Table locks cannot fence CREATE OR REPLACE FUNCTION. Every real migration
+ * therefore shares the authorization world's maintenance gate, on Kysely's
+ * existing transaction. A missing transaction or a busy world refuses the
+ * body; the migrator continues to own its history, COMMIT, and ROLLBACK.
+ */
+function protectSchemaMutation(migration: Migration): Migration {
+  const guarded: Migration = {
+    ...migration,
+    up(db) {
+      // The formal entry verifies isTransaction before issuing any SQL.
+      return runAuthorizationSchemaMutation(
+        db as Transaction<unknown>,
+        (tx) => migration.up(tx),
+        { caller: 'core_migration_provider' },
+      )
+    },
+  }
+  if (migration.down) {
+    const down = migration.down.bind(migration)
+    guarded.down = (db) => runAuthorizationSchemaMutation(
+      db as Transaction<unknown>,
+      (tx) => down(tx),
+      { caller: 'core_migration_provider' },
+    )
+  }
+  return guarded
+}
+
 async function addProviderMigrations(
   destination: Record<string, Migration>,
   provider: MigrationProvider
@@ -307,7 +338,12 @@ export function createCoreBackendMigrationProvider(
       }
 
       return Object.fromEntries(
-        Object.entries(migrations).filter(([name]) => !excludedNames.has(name))
+        Object.entries(migrations)
+          .filter(([name]) => !excludedNames.has(name))
+          .map(([name, migration]) => [
+            name,
+            supersededLegacySqlNames.has(name) ? migration : protectSchemaMutation(migration),
+          ] as const)
       )
     },
   }

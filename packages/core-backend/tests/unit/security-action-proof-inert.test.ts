@@ -59,11 +59,55 @@ const SERVICE = path.join(SRC, 'auth', 'security-action-proof.ts')
 const ROUTE = path.join(SRC, 'routes', 'security-actions.ts')
 const INDEX = path.join(SRC, 'index.ts')
 const MIGRATION = path.join(SRC, 'db', 'migrations', 'zzzz20261106120000_create_security_action_challenges.ts')
+const PROOF_STORAGE = path.join(SRC, 'auth', 'admin-grant-proof-storage.ts')
+const PROOF_SET_MIGRATION = path.join(SRC, 'db', 'migrations', 'zzzz20261118100000_admin_grant_proof_sets.ts')
+const SCOPE_MIGRATION = path.join(SRC, 'db', 'migrations', 'zzzz20261118120000_strict_login_grant_scope.ts')
+const GRANT_PROOF = path.join(SRC, 'auth', 'admin-grant-proof.ts')
 const DB_SPEC = 'tests/integration/security-action-proof.db.test.ts'
 const TABLE = 'security_action_challenges'
 
 function parse(file: string): ts.SourceFile {
   return ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true)
+}
+
+function databaseArmingProblems(source: string): string[] {
+  const tree = ts.createSourceFile(DB_SPEC, source, ts.ScriptTarget.Latest, true)
+  const declarations = tree.statements.filter(ts.isVariableStatement)
+    .flatMap(statement => [...statement.declarationList.declarations])
+  const named = (name: string) => declarations.filter(declaration => ts.isIdentifier(declaration.name) && declaration.name.text === name)
+  const problems: string[] = []
+  const captures = named('capture')
+  const initializer = captures.length === 1 ? captures[0].initializer : undefined
+  const callback = initializer && ts.isCallExpression(initializer) && initializer.expression.getText(tree) === 'vi.hoisted'
+    && initializer.arguments.length === 1 ? initializer.arguments[0] : undefined
+  const first = callback && ts.isArrowFunction(callback) && ts.isBlock(callback.body) ? callback.body.statements[0] : undefined
+  const refusal = first && ts.isIfStatement(first) && ts.isBlock(first.thenStatement)
+    && first.thenStatement.statements.length === 1 ? first.thenStatement.statements[0] : undefined
+  const thrown = refusal && ts.isThrowStatement(refusal) ? refusal.expression : undefined
+  const arming = first && ts.isIfStatement(first) && !first.elseStatement
+    && first.expression.getText(tree).replace(/\s+/g, '') === "process.env.EXPECT_DB!=='1'||!process.env.DATABASE_URL"
+    && thrown && ts.isNewExpression(thrown) && ts.isIdentifier(thrown.expression) && thrown.expression.text === 'Error'
+    && thrown.arguments?.length === 1 && ts.isStringLiteral(thrown.arguments[0])
+    && thrown.arguments[0].text === 'security-action-proof.db.test.ts requires EXPECT_DB=1 and DATABASE_URL'
+  if (!arming) problems.push('arming')
+  const suites = named('suite')
+  const suite = suites.length === 1 ? suites[0] : undefined
+  if (!suite || !(suite.parent.flags & ts.NodeFlags.Const) || !suite.initializer
+    || !ts.isIdentifier(suite.initializer) || suite.initializer.text !== 'describe') problems.push('suite')
+  let suiteCalls = 0
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'suite') suiteCalls += 1
+    if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node))
+      && ts.isIdentifier(node.expression) && ['it', 'describe', 'suite'].includes(node.expression.text)) {
+      const skip = ts.isPropertyAccessExpression(node) ? node.name.text === 'skip'
+        : ts.isStringLiteral(node.argumentExpression) && node.argumentExpression.text === 'skip'
+      if (skip) problems.push('skip')
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(tree)
+  if (suiteCalls === 0) problems.push('suite call')
+  return problems
 }
 
 /** Module specifiers of every module load in the file (see the import-edge helper). */
@@ -95,6 +139,14 @@ function identifierCount(file: string, name: string): number {
 function exportedRuntimeNames(file: string): string[] {
   const names: string[] = []
   for (const statement of parse(file).statements) {
+    if (ts.isExportDeclaration(statement)) {
+      if (!statement.isTypeOnly && statement.exportClause && ts.isNamedExports(statement.exportClause)) {
+        for (const element of statement.exportClause.elements) {
+          if (!element.isTypeOnly) names.push(element.name.text)
+        }
+      }
+      continue
+    }
     const modifiers = ts.canHaveModifiers(statement) ? ts.getModifiers(statement) ?? [] : []
     if (!modifiers.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) continue
     if (ts.isFunctionDeclaration(statement) && statement.name) names.push(statement.name.text)
@@ -207,15 +259,16 @@ describe('production binding', () => {
     expect(ts.isObjectLiteralExpression(literal)).toBe(true)
     const bindings = new Map<string, string>()
     for (const property of (literal as ts.ObjectLiteralExpression).properties) {
+      expect(ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)).toBe(true)
       if (ts.isPropertyAssignment(property)) bindings.set(property.name.getText(source), property.initializer.getText(source))
+      if (ts.isShorthandPropertyAssignment(property)) bindings.set(property.name.text, property.name.text)
     }
     expect(bindings.get('isPurposeAvailable')).toBe('isSecurityActionPurposeAvailable')
     expect(bindings.get('resolvers')).toBe('Object.freeze({})')
-    expect(bindings.get('runTransaction')).toBe('transaction')
-    expect(bindings.get('verifyPassword')).toBe('(password: string, hash: string) => bcrypt.compare(password, hash)')
+    expect(bindings.get('runOwnedAttempt')).toBe('runOwnedAttempt')
     expect(bindings.get('recordAudit')).toBe('auditSecurityAction')
     expect(bindings.get('policyRevision')).toBe('SECURITY_ACTION_POLICY_REVISION')
-    expect([...bindings.keys()].sort()).toEqual(['isPurposeAvailable', 'policyRevision', 'recordAudit', 'resolvers', 'runTransaction', 'verifyPassword'])
+    expect([...bindings.keys()].sort()).toEqual(['isPurposeAvailable', 'policyRevision', 'recordAudit', 'resolvers', 'runOwnedAttempt'])
     const users = listSourceFiles(SRC).filter((file) => readFileSync(file, 'utf8').includes('createSecurityActionProofService'))
     expect(users).toEqual([SERVICE])
     const availabilityUsers = listSourceFiles(SRC).filter((file) => readFileSync(file, 'utf8').includes('evaluateSecurityActionPurposeAvailability'))
@@ -224,17 +277,19 @@ describe('production binding', () => {
 })
 
 describe('module boundaries', () => {
-  it('names the table only in the migration and the service module; the migration runner mentions it in its help text only', () => {
+  it('names the table only in the audited modules; the migration runner mentions it in its help text only', () => {
     const files = listSourceFiles(SRC).filter((file) => readFileSync(file, 'utf8').includes(TABLE))
     const runner = path.join(SRC, 'db', 'migrate.ts')
-    expect(files.sort()).toEqual([SERVICE, MIGRATION, runner].sort())
+    // Service statements, the admin-grant storage writer, the creating migration, the proof-set
+    // constraint migration, the scope migration, and the runner help text. No other file.
+    expect(files.sort()).toEqual([SERVICE, PROOF_STORAGE, MIGRATION, PROOF_SET_MIGRATION, SCOPE_MIGRATION, runner].sort())
     const help = readFileSync(runner, 'utf8')
     expect(help).not.toMatch(new RegExp(`(?:FROM|INTO|UPDATE|TABLE|JOIN|regclass\\(')\\s*${TABLE}`))
     expect(help.split(TABLE)).toHaveLength(3)
     expect(help).toContain(`zzzz20261106120000_create_${TABLE}.ts refuses while`)
   })
 
-  it('has exactly the expected importers: the route imports the service, index imports the route', () => {
+  it('has exactly the expected importers: the audited proof consumers, and index imports the route', () => {
     const serviceImporters: string[] = []
     const routeImporters: string[] = []
     for (const file of listSourceFiles(SRC)) {
@@ -243,7 +298,35 @@ describe('module boundaries', () => {
         if (/routes\/security-actions(?:\.ts)?$/.test(edge)) routeImporters.push(path.relative(SRC, file))
       }
     }
-    expect(serviceImporters).toEqual(['routes/security-actions.ts'])
+    // One entry per load. Two entries means a value import and a separate type import, not a blanket.
+    expect(serviceImporters.sort()).toEqual([
+      'auth/admin-grant-browser-context.ts',
+      'auth/admin-grant-local-credential.ts',
+      'auth/admin-grant-proof.ts',
+      'auth/admin-grant-proof.ts',
+      'auth/admin-grant-target-ceremony.ts',
+      'auth/admin-login-grant-command.ts',
+      'auth/admin-login-grant-command.ts',
+      'auth/strict-login-grant-bundle.ts',
+      'routes/admin-grant-proofs.ts',
+      'routes/auth.ts',
+      'routes/security-actions.ts',
+    ])
+    const importedBy: Record<string, readonly string[]> = {
+      'auth/admin-grant-browser-context.ts': ['AuthenticatedSessionContext', 'SecurityActionProofContractError', 'assertAuthenticatedSessionContext', 'readAuthenticatedSessionContext'],
+      'auth/admin-grant-local-credential.ts': ['AuthenticatedSessionContext', 'SecurityActionProofContractError', 'assertAuthenticatedSessionContext'],
+      'auth/admin-grant-proof.ts': ['AuthenticatedSessionContext', 'SECURITY_ACTION_FAILURE_LIMIT', 'SECURITY_ACTION_FAILURE_WINDOW_SECONDS', 'SECURITY_ACTION_SQL', 'SecurityActionProofError', 'assertAuthenticatedSessionContext', 'computeCredentialWitness'],
+      'auth/admin-grant-target-ceremony.ts': ['AuthenticatedSessionContext', 'assertAuthenticatedSessionContext'],
+      'auth/admin-login-grant-command.ts': ['AuthenticatedSessionContext', 'assertAuthenticatedSessionContext'],
+      'auth/strict-login-grant-bundle.ts': ['AuthenticatedSessionContext'],
+      'routes/admin-grant-proofs.ts': ['SecurityActionProofContractError', 'readAuthenticatedSessionContext'],
+      'routes/auth.ts': ['readAuthenticatedSessionContext'],
+      'routes/security-actions.ts': ['SecurityActionProofError', 'issueSecurityActionProof', 'parseSecurityActionVerifyRequest', 'readAuthenticatedSessionContext'],
+    }
+    for (const [file, names] of Object.entries(importedBy)) {
+      const specifier = file.startsWith('routes/') ? '../auth/security-action-proof' : './security-action-proof'
+      expect(importedNames(path.join(SRC, file), specifier), file).toEqual(names)
+    }
     expect(routeImporters).toEqual(['index.ts'])
   })
 
@@ -251,26 +334,36 @@ describe('module boundaries', () => {
     expect(exportedRuntimeNames(SERVICE)).toEqual([
       'SECURITY_ACTION_CREDENTIAL_WITNESS_DOMAIN', 'SECURITY_ACTION_FAILURE_CODES', 'SECURITY_ACTION_FAILURE_LIMIT', 'SECURITY_ACTION_FAILURE_WINDOW_SECONDS',
       'SECURITY_ACTION_NEXT_STEPS', 'SECURITY_ACTION_PROOF_HASH_DOMAIN', 'SECURITY_ACTION_PROOF_STATUSES', 'SECURITY_ACTION_PROOF_TTL_SECONDS', 'SECURITY_ACTION_SQL',
-      'SecurityActionProofContractError', 'SecurityActionProofError', 'clientBindingDigestOf', 'computeCredentialWitness', 'consumeSecurityActionProof',
+      'SecurityActionProofContractError', 'SecurityActionProofError', 'assertAuthenticatedSessionContext', 'clientBindingDigestOf', 'computeCredentialWitness', 'consumeSecurityActionProof',
       'createSecurityActionProofService', 'hashProofSecret', 'issueSecurityActionProof', 'parseProof', 'parseSecurityActionVerifyRequest', 'readAuthenticatedSessionContext',
     ])
     expect(importedNames(ROUTE, '../auth/security-action-proof')).toEqual(['SecurityActionProofError', 'issueSecurityActionProof', 'parseSecurityActionVerifyRequest', 'readAuthenticatedSessionContext'])
   })
 
-  it('keeps consumption and the statements inside the service module', () => {
+  it('keeps consumption inside the service module and limits statement reuse to four audited members', () => {
     for (const file of listSourceFiles(SRC)) {
       if (file === SERVICE) continue
       expect(identifierCount(file, 'consumeSecurityActionProof'), file).toBe(0)
+      if (file === GRANT_PROOF) continue
       expect(identifierCount(file, 'SECURITY_ACTION_SQL'), file).toBe(0)
     }
+    const members: string[] = []
+    const visit = (node: ts.Node): void => {
+      if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'SECURITY_ACTION_SQL') members.push(node.name.text)
+      ts.forEachChild(node, visit)
+    }
+    visit(parse(GRANT_PROOF))
+    // Import plus these four accesses. failureCount, the read-committed set, the advisory lock, the user key share.
+    expect(members.sort()).toEqual(['advisoryLock', 'failureCount', 'setReadCommitted', 'userKeyShare'])
+    expect(identifierCount(GRANT_PROOF, 'SECURITY_ACTION_SQL')).toBe(5)
     expect(identifierCount(SERVICE, 'SECURITY_ACTION_SQL')).toBeGreaterThan(1)
   })
 
   it('imports a fixed set of modules and never a cache, a request field, the environment or a session helper', () => {
     expect(importEdges(SERVICE).sort()).toEqual([
-      '../audit/audit', '../db/pg', '../directory/access-graph-mutex', '../directory/access-graph-mutex', '../multitable/automation-durable-dispatcher',
-      '../multitable/pg-transaction-guard', './AuthService', './external-login-assurance', './external-login-assurance', './security-action-privilege',
-      './security-action-proof-flag', './user-activation', 'bcryptjs', 'express', 'node:crypto',
+      '../audit/audit', '../directory/access-graph-mutex', '../directory/access-graph-mutex', '../multitable/automation-durable-dispatcher',
+      '../multitable/pg-transaction-guard', './AuthService', './external-login-assurance', './external-login-assurance', './security-action-attempt-admission',
+      './security-action-privilege', './security-action-proof-flag', './user-activation', 'express', 'node:crypto',
     ])
     expect(importEdges(ROUTE).sort()).toEqual(['../auth/security-action-proof', '../auth/security-action-proof-flag', '../core/logger', 'express', 'express'])
     for (const file of [SERVICE, ROUTE]) {
@@ -396,7 +489,18 @@ describe('wiring', () => {
     expect(excluded).toBe(true)
     const spec = path.join(BACKEND, DB_SPEC)
     expect(existsSync(spec)).toBe(true)
-    expect(readFileSync(spec, 'utf8')).toMatch(/itIfExpectDb\s*=\s*process\.env\.EXPECT_DB\s*===\s*'1'/)
+    expect(databaseArmingProblems(readFileSync(spec, 'utf8'))).toEqual([])
+  })
+
+  it.each([
+    ['bracket skip', (source: string) => source.replace('const suite = describe', "const suite = describe['skip']")],
+    ['comment decoy', (source: string) => source.replace('const suite = describe', "const suite = 'describe'; /* const suite = describe */")],
+    ['missing URL', (source: string) => source.replace("process.env.EXPECT_DB !== '1' || !process.env.DATABASE_URL", "process.env.EXPECT_DB !== '1'")],
+    ['weakened arming', (source: string) => source.replace("process.env.EXPECT_DB !== '1' || !process.env.DATABASE_URL", "process.env.EXPECT_DB !== '1' && !process.env.DATABASE_URL")],
+  ] as const)('refuses a malformed database suite sentinel: %s', (_name, mutate) => {
+    const source = readFileSync(path.join(ROOT, 'packages/core-backend', DB_SPEC), 'utf8')
+    expect(databaseArmingProblems(source)).toEqual([])
+    expect(databaseArmingProblems(mutate(source))).not.toEqual([])
   })
 
   it('declares the route in the OpenAPI source with the closed purpose set and a closed request schema', () => {

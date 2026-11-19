@@ -14874,7 +14874,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Grant permission (admin only) */
+        /**
+         * Grant permission (admin only)
+         * @description Target userId follows the strict canonical-string rule; permission handling and catalogue semantics remain unchanged.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -14885,6 +14888,10 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
+                        /**
+                         * @description Existing user id, identical to its runtime trimmed spelling. No coercion, implicit trimming or UUID restriction. Internal whitespace is allowed. No target active, activation or recycle state restriction is added.
+                         * @example synthetic user
+                         */
                         userId: string;
                         permission: string;
                     };
@@ -14898,9 +14905,65 @@ export interface paths {
                     };
                     content?: never;
                 };
-                400: components["responses"]["ValidationError"];
+                /** @description Existing required-field and permission-code errors remain unchanged. After the administrator precheck, invalid target shape returns exactly { error: 'userId must be a non-empty canonical string' }. Existing absent/falsy required-field errors may precede it. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                        } | {
+                            /** @enum {string} */
+                            error: "userId must be a non-empty canonical string";
+                        };
+                    };
+                };
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description Missing target is disclosed only after locked administrator authority is accepted and performs no permission DML. Historical orphan rows are not cleaned. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {string} */
+                            error: "User not found";
+                        };
+                    };
+                };
+                /** @description AUTHORIZATION_INPUT_BUSY and RECOVERY_AUTHORITY_BUSY indicate contention. STALE requires reloading the permission sources. USER_IN_RECYCLE_BIN requires restoring the account before a permission change. Fixed bodies contain no internal causes or user values. This is not an automatic replay instruction or proof of rollback after an ambiguous commit or response. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {string} */
+                            code: "AUTHORIZATION_INPUT_BUSY";
+                            /** @enum {string} */
+                            error: "Authorization inputs are busy; retry this change.";
+                        } | {
+                            /** @enum {string} */
+                            code: "STALE" | "USER_IN_RECYCLE_BIN";
+                            error: string;
+                        } | {
+                            /** @enum {boolean} */
+                            ok: false;
+                            error: {
+                                /** @enum {string} */
+                                code: "RECOVERY_AUTHORITY_BUSY";
+                                /** @enum {string} */
+                                message: "Recovery is stabilizing permissions; retry this change.";
+                                details: {
+                                    /** @enum {boolean} */
+                                    retryable: true;
+                                };
+                            };
+                        };
+                    };
+                };
             };
         };
         delete?: never;
@@ -14918,7 +14981,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Revoke permission (admin only) */
+        /**
+         * Revoke permission (admin only)
+         * @description Target userId follows the strict canonical-string rule; permission handling and catalogue semantics remain unchanged.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -14929,6 +14995,10 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
+                        /**
+                         * @description Existing user id, identical to its runtime trimmed spelling. No coercion, implicit trimming or UUID restriction. Internal whitespace is allowed. No target active, activation or recycle state restriction is added.
+                         * @example synthetic user
+                         */
                         userId: string;
                         permission: string;
                     };
@@ -14942,9 +15012,189 @@ export interface paths {
                     };
                     content?: never;
                 };
-                400: components["responses"]["ValidationError"];
+                /** @description Existing required-field and permission-code errors remain unchanged. After the administrator precheck, invalid target shape returns exactly { error: 'userId must be a non-empty canonical string' }. Existing absent/falsy required-field errors may precede it. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                        } | {
+                            /** @enum {string} */
+                            error: "userId must be a non-empty canonical string";
+                        };
+                    };
+                };
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description Missing target is disclosed only after locked administrator authority is accepted and performs no permission DML. For an existing target, the unchanged no-match revoke also returns 404. Historical orphan rows are not cleaned. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {string} */
+                            error: "User not found" | "Permission not found for user";
+                        };
+                    };
+                };
+                /** @description AUTHORIZATION_INPUT_BUSY and RECOVERY_AUTHORITY_BUSY indicate contention. STALE requires reloading the permission sources. USER_IN_RECYCLE_BIN requires restoring the account before a permission change. Fixed bodies contain no internal causes or user values. This is not an automatic replay instruction or proof of rollback after an ambiguous commit or response. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {string} */
+                            code: "AUTHORIZATION_INPUT_BUSY";
+                            /** @enum {string} */
+                            error: "Authorization inputs are busy; retry this change.";
+                        } | {
+                            /** @enum {string} */
+                            code: "STALE" | "USER_IN_RECYCLE_BIN";
+                            error: string;
+                        } | {
+                            /** @enum {boolean} */
+                            ok: false;
+                            error: {
+                                /** @enum {string} */
+                                code: "RECOVERY_AUTHORITY_BUSY";
+                                /** @enum {string} */
+                                message: "Recovery is stabilizing permissions; retry this change.";
+                                details: {
+                                    /** @enum {boolean} */
+                                    retryable: true;
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/permission-templates/apply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Apply permission template (admin only)
+         * @description Applies the existing template's permission list, not its metadata role. Target userId follows the strict canonical-string rule; templateId keeps its existing string, trimming and lookup behavior. Does not add runtime capabilities or change template contents.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /**
+                         * @description Existing user id, identical to its runtime trimmed spelling. No coercion, implicit trimming or UUID restriction. Internal whitespace is allowed. No target active, activation or recycle state restriction is added.
+                         * @example synthetic user
+                         */
+                        userId: string;
+                        templateId: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Existing successful readback, or existing optional-schema degradation */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: true;
+                            userId: string;
+                            /** @description The complete existing template definition object, not just its id. Its metadata role is not granted. */
+                            template: {
+                                [key: string]: unknown;
+                            };
+                            permissions: string[];
+                            isAdmin: boolean;
+                        } | {
+                            /** @enum {boolean} */
+                            success: true;
+                            /** @enum {boolean} */
+                            degraded: true;
+                        };
+                    };
+                };
+                /** @description Existing required-field errors remain unchanged. After the administrator precheck, invalid target shape returns exactly { error: 'userId must be a non-empty canonical string' }. Existing absent/falsy required-field errors may precede it. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                        } | {
+                            /** @enum {string} */
+                            error: "userId must be a non-empty canonical string";
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Missing target is disclosed only after locked administrator authority is accepted and performs no permission DML. The unchanged missing-template response also returns 404. Historical orphan rows are not cleaned. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {string} */
+                            error: "User not found" | "Permission template not found";
+                        };
+                    };
+                };
+                /** @description AUTHORIZATION_INPUT_BUSY and RECOVERY_AUTHORITY_BUSY indicate contention. STALE requires reloading the permission sources. USER_IN_RECYCLE_BIN requires restoring the account before a permission change. Fixed bodies contain no internal causes or user values. This is not an automatic replay instruction or proof of rollback after an ambiguous commit or response. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {string} */
+                            code: "AUTHORIZATION_INPUT_BUSY";
+                            /** @enum {string} */
+                            error: "Authorization inputs are busy; retry this change.";
+                        } | {
+                            /** @enum {string} */
+                            code: "STALE" | "USER_IN_RECYCLE_BIN";
+                            error: string;
+                        } | {
+                            /** @enum {boolean} */
+                            ok: false;
+                            error: {
+                                /** @enum {string} */
+                                code: "RECOVERY_AUTHORITY_BUSY";
+                                /** @enum {string} */
+                                message: "Recovery is stabilizing permissions; retry this change.";
+                                details: {
+                                    /** @enum {boolean} */
+                                    retryable: true;
+                                };
+                            };
+                        };
+                    };
+                };
             };
         };
         delete?: never;

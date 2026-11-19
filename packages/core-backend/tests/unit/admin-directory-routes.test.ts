@@ -23,6 +23,7 @@ import { LoginAliasClaimError } from '../../src/auth/login-alias-service'
 // work-notification-settings / approval-card-config factories below cannot hide it).
 import { DingTalkConfigValidationError } from '../../src/integrations/dingtalk/config-validation-error'
 import { DingTalkBusinessError } from '../../src/integrations/dingtalk/transport'
+import { StrictLoginGrantError } from '../../src/auth/strict-login-grant-store'
 
 const COMPENSATION_EVENT_ID = '11111111-1111-4111-8111-111111111111'
 const DEPROVISION_EVENT_ID = '22222222-2222-4222-8222-222222222222'
@@ -3075,6 +3076,39 @@ describe('adminDirectoryRouter', () => {
       ok: true,
       data: { updatedCount: 1, failedCount: 1, failed: [{ accountId: 'ac000000-0000-4000-8000-000000000002' }] },
     })
+  })
+
+  it.each(['single', 'batch'] as const)('maps only the %s unbind installation refusal to a fixed 503', async (mode) => {
+    const error = Object.assign(new StrictLoginGrantError('STRICT_LOGIN_GRANT_INSTALLATION_REFUSED'), {
+      message: 'synthetic private database details', statusCode: 200,
+    })
+    if (mode === 'single') directoryMocks.unbindDirectoryAccount.mockRejectedValue(error)
+    else directoryMocks.batchUnbindDirectoryAccounts.mockResolvedValue({ succeeded: [], failed: [{}], failedErrors: [error] })
+    const response = await invokeRoute('post', mode === 'single' ? '/accounts/:accountId/unbind' : '/accounts/batch-unbind', {
+      params: { accountId: 'ac000000-0000-4000-8000-000000000001' },
+      body: { accountIds: ['ac000000-0000-4000-8000-000000000001'] },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+    expect(response.statusCode).toBe(503)
+    expect(response.body).toEqual({
+      ok: false,
+      error: { code: mode === 'single' ? 'DIRECTORY_UNBIND_FAILED' : 'DIRECTORY_BATCH_UNBIND_FAILED', message: 'Directory authorization is unavailable' },
+    })
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    Object.assign(new Error('synthetic private database details'), { code: 'STRICT_LOGIN_GRANT_INSTALLATION_REFUSED', statusCode: 409 }),
+    new StrictLoginGrantError('STRICT_LOGIN_GRANT_SESSION_LOCK_REFUSED'),
+  ])('does not turn an unbind internal failure or same-code lookalike into a 409/503', async (error) => {
+    directoryMocks.unbindDirectoryAccount.mockRejectedValue(error)
+    const response = await invokeRoute('post', '/accounts/:accountId/unbind', {
+      params: { accountId: 'ac000000-0000-4000-8000-000000000001' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+    expect(response.statusCode).toBe(500)
+    expect(response.body).toEqual({ ok: false, error: { code: 'DIRECTORY_UNBIND_FAILED', message: 'Failed to unbind directory account' } })
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
   })
 
   it('unbinds a directory account', async () => {

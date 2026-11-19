@@ -11,6 +11,15 @@ import { PasswordPolicyError } from '../auth/password-policy-error'
 import { Logger } from '../core/logger'
 import { query, transaction } from '../db/pg'
 import { RecoveryConflictError, translateRecoveryConflict } from '../db/recovery-conflict'
+import {
+  completeIdentityDeletion,
+  sealExactAndCredentialSessions,
+  connectionAdmitsLegacyGrant,
+  credentialRevocationFlagOn,
+  noRemainingLoginMethod,
+  otherDirectorySourceRemains,
+  selectCredentialLegs,
+} from '../auth/strict-credential-chain'
 import { sweepStaleDepartmentBindings } from './department-binding-reconciliation'
 import {
   buildDirectoryAccountLinkedIdentityOpenIdSql,
@@ -1514,6 +1523,11 @@ export type DirectoryDeprovisionOutcome = {
    */
   membershipDeactivationAttemptedCount: number
   /**
+   * Strict-scope candidates. Not folded into `grantsDisabledCount`. Counts a
+   * candidate whose departed connection has a login-scope row, including preview.
+   */
+  strictDeprovisionCandidateCount: number
+  /**
    * Delta-review NIT-D3: per-candidate races (vanished user / concurrently-unbound source) are
    * SKIPPED rather than aborting the run — counted here so a run that silently skipped people is
    * distinguishable from one that considered them, without digging through logs.
@@ -1631,6 +1645,7 @@ export async function applyDirectoryDeprovisionPolicies(
     grantsDisabledCount: 0,
     usersDeactivatedCount: 0,
     membershipDeactivationAttemptedCount: 0,
+    strictDeprovisionCandidateCount: 0,
     skippedCandidateCount: 0,
     abortedReason: null,
     affected: [],
@@ -1759,6 +1774,9 @@ export async function applyDirectoryDeprovisionPolicies(
       continue
     }
     const effectTypes = new Set(result.plan.effects.map((effect) => effect.type))
+    const strictWork = result.strictDeprovision.eligible || result.strictDeprovision.applied
+    if (effectTypes.size === 0 && !strictWork) continue
+    if (strictWork) outcome.strictDeprovisionCandidateCount += 1
     if (effectTypes.size === 0) continue
 
     outcome.affected.push({
@@ -4911,6 +4929,9 @@ export async function syncDirectoryIntegration(
         // `deprovisionGrantsDisabledCount`. See `membershipDeactivationAttemptedCount`'s own
         // doc-comment for what "attempted" does and does not mean.
         deprovisionMembershipDeactivationAttemptedCount: deprovisionOutcome.membershipDeactivationAttemptedCount,
+        ...(deprovisionOutcome.strictDeprovisionCandidateCount > 0
+          ? { deprovisionStrictCandidateCount: deprovisionOutcome.strictDeprovisionCandidateCount }
+          : {}),
         deprovisionAbortedReason: deprovisionOutcome.abortedReason,
         // Identities, not just a number: an operator deciding whether to flip
         // DIRECTORY_DEPROVISION_ENABLED needs to see WHO would lose access, and there is no
@@ -6437,7 +6458,7 @@ async function applyDirectoryAccountBindInTransaction(
     )
   }
 
-  if (enableDingTalkGrant) {
+  if (enableDingTalkGrant && await connectionAdmitsLegacyGrant(client, account.integration_id)) {
     await client.query(
       `INSERT INTO user_external_auth_grants (provider, local_user_id, enabled, granted_by, created_at, updated_at)
        VALUES ($1::text, $2::text, TRUE, $3::text, NOW(), NOW())
@@ -7487,6 +7508,7 @@ export async function unbindDirectoryAccount(
       throw new DirectoryConflictError('Directory account binding changed; retry the operation')
     }
 
+    let strictGrantIds: readonly string[] = []
     if (previousLinkedUser?.local_user_id) {
       const candidateIdentityParams: unknown[] = [
         account.provider,
@@ -7528,6 +7550,13 @@ export async function unbindDirectoryAccount(
           .map((row) => normalizeText(row.id))
           .filter(Boolean)
         if (candidateIds.length > 0) {
+          const removed = await completeIdentityDeletion(client, {
+            userId: previousLinkedUser.local_user_id,
+            identityIds: candidateIds,
+            actorId: normalizedAdminUserId,
+            reason: 'admin_unbind',
+          })
+          strictGrantIds = removed.grantIds
           await client.query(
             `DELETE FROM user_external_identities
              WHERE id = ANY($1::uuid[])`,
@@ -7545,6 +7574,28 @@ export async function unbindDirectoryAccount(
           [account.provider, previousLinkedUser.local_user_id, normalizedAdminUserId],
         )
       }
+      const revokeCredentials = credentialRevocationFlagOn()
+      const clear = revokeCredentials && !await otherDirectorySourceRemains(client, {
+        userId: previousLinkedUser.local_user_id,
+        exceptAccountId: normalizedAccountId,
+      })
+      const noMethod = revokeCredentials && !clear && await noRemainingLoginMethod(client, {
+        userId: previousLinkedUser.local_user_id,
+        departedConnectionId: account.integration_id,
+      })
+      await sealExactAndCredentialSessions(client, {
+        userId: previousLinkedUser.local_user_id,
+        actorId: normalizedAdminUserId,
+        reason: 'directory-admin-unbind',
+        grantIds: strictGrantIds,
+        legs: selectCredentialLegs({
+          surface: 'linked_admin_unbind',
+          closesAuthorization: disableDingTalkGrant,
+          strict: strictGrantIds.length > 0,
+          clear,
+          noMethod,
+        }, revokeCredentials),
+      })
     }
 
     await client.query(

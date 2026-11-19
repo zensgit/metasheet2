@@ -493,14 +493,22 @@ export async function getRecord(
 
 /**
  * Raw record read with NO sheet-liveness check. Only for callers that have already proven liveness in
- * the same flow (`patchRecord` runs `loadSheetAndFields` first); keeps that path's statement sequence
- * unchanged. Not exported — plugins must go through `getRecord`.
+ * the same flow (`patchRecord` runs `loadSheetAndFields` first). Not exported — plugins must go through
+ * `getRecord`.
+ *
+ * `lockForUpdate` (platform 1b, owner ruling 「批平台 1b」 2026-11-17) appends `FOR UPDATE`, so the row
+ * is locked from the read until the caller's transaction ends. Only `patchRecord` passes it; it merges
+ * the row in JavaScript and writes the whole object back, so an unlocked read could lose a key another
+ * writer committed in between. The default stays a plain SELECT: `getRecord` runs on an autocommit
+ * query in production and must not lock.
  */
 async function loadRecordRowForLiveSheet(
   input: GetMultitableRecordInput,
+  options: { lockForUpdate?: boolean } = {},
 ): Promise<LoadedMultitableRecord> {
+  const recordSql = 'SELECT id, sheet_id, version, data, locked, locked_by, locked_at FROM meta_records WHERE id = $1 AND sheet_id = $2'
   const recordRes = await input.query(
-    'SELECT id, sheet_id, version, data, locked, locked_by, locked_at FROM meta_records WHERE id = $1 AND sheet_id = $2',
+    options.lockForUpdate === true ? recordSql + ' FOR UPDATE' : recordSql,
     [input.recordId, input.sheetId],
   )
   const row = (recordRes.rows as any[])[0]
@@ -599,11 +607,21 @@ export async function patchRecord(
   )
 
   // Liveness already proven by loadSheetAndFields above in this same flow.
-  const existing = await loadRecordRowForLiveSheet({
-    query,
-    sheetId: input.sheetId,
-    recordId: input.recordId,
-  })
+  // Platform 1b: lock the row at the read (`FOR UPDATE`, same transaction as the UPDATE below — every
+  // production wiring runs patchRecord inside one). The JavaScript merge below writes the whole object
+  // back, so a concurrent writer must either commit before this read (its keys are then read and kept)
+  // or wait until this transaction ends. Only plain (non-locking) SELECTs run between here and the
+  // UPDATE (the record-lock guard, link-id validation). The row lock is now taken at the read, as on the
+  // REST patch and the plugin recoverable delete: a session that holds a table lock admitting this read
+  // but not the UPDATE (e.g. SHARE) and then writes this row deadlocks with it.
+  const existing = await loadRecordRowForLiveSheet(
+    {
+      query,
+      sheetId: input.sheetId,
+      recordId: input.recordId,
+    },
+    { lockForUpdate: true },
+  )
   if (input.expectedVersion !== undefined && existing.version !== input.expectedVersion) {
     throw new MultitableRecordVersionConflictError()
   }
@@ -635,20 +653,17 @@ export async function patchRecord(
   )
 
   // W0 slice ② required fix (concurrent-delete fail-closed — recycled from Draft #4216's P1 review):
-  // `existing` above was read via `loadRecordRowForLiveSheet` (a plain SELECT, no `FOR UPDATE`) and
-  // `guardRecordNotLockedForPlugin` likewise takes no row lock — so this UPDATE is the FIRST point in
-  // this function that actually locks the row, and a concurrent DELETE of this exact record IS reachable
-  // in the window between those reads and this statement (unlike the form-submit EDIT branch fixed in
-  // slice ①, which already holds a `SELECT ... FOR UPDATE` before its own UPDATE — no such lock exists
-  // here). Under READ COMMITTED, if another transaction deletes and commits this row while this UPDATE is
-  // blocked behind it, Postgres resumes the UPDATE against zero rows rather than erroring — the original
-  // code's `?? existing.version + 1` fallback SILENTLY SYNTHESIZED a version for that case and fell
-  // through to write a spurious `update` revision for a record that no longer exists. Because
-  // `meta_record_revisions.record_id` carries no FK (migration zzzz20260430172000), that spurious
-  // revision would persist forever and could RESURRECT the deleted record via `reconstructRecordsAtT`.
-  // Fail closed instead: a zero-row RETURNING throws here, before any revision is written and before
-  // `nextVersion` can be synthesized. Proven under genuine two-connection lock contention (not a sleep
-  // heuristic) by the concurrent-delete golden in the real-DB suite.
+  // a zero-row RETURNING throws here, before any revision is written and before `nextVersion` can be
+  // synthesized. The original `?? existing.version + 1` fallback SILENTLY SYNTHESIZED a version and
+  // wrote a spurious `update` revision for a record that no longer exists; because
+  // `meta_record_revisions.record_id` carries no FK (migration zzzz20260430172000), that revision could
+  // RESURRECT the deleted record via `reconstructRecordsAtT`.
+  // Platform 1b: `existing` is now read `FOR UPDATE` in this transaction, so the row lock is held from
+  // the read and this UPDATE is no longer the first lock. A concurrent DELETE or version bump now
+  // resolves at the locked read (NotFound / VERSION_CONFLICT above). This branch is kept as a
+  // defensive fail-closed backstop (e.g. a caller whose `query` is not transactional). Since 1b the
+  // real-DB concurrent-delete golden resolves at the locked read, not here; this branch itself is pinned
+  // only by the fake-DB unit test (multitable-records-getrecord-sheet-liveness.test.ts, "platform 1b backstop").
   if ((updated.rows as unknown[]).length === 0) {
     if (input.expectedVersion !== undefined) {
       throw new MultitableRecordVersionConflictError()

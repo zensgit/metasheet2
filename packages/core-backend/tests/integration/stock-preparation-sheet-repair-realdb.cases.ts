@@ -514,6 +514,11 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
         async humanEdit(recordId: string, text: string) {
           await q('UPDATE meta_records SET data = data || $2::jsonb, version = version + 1 WHERE id = $1', [recordId, JSON.stringify({ [fields.notes]: text })])
         },
+        // The machine write-back (the YiDa issue-confirm date) landing on a row: its one column, the version moves.
+        async machineEdit(recordId: string, value: string) {
+          if (!fields.issueConfirmDate) throw new Error('the sandbox sheet has no issueConfirmDate column')
+          await q('UPDATE meta_records SET data = data || $2::jsonb, version = version + 1 WHERE id = $1', [recordId, JSON.stringify({ [fields.issueConfirmDate]: value })])
+        },
         runs: async () => (await q(`SELECT * FROM ${RT.run} WHERE tenant_id = $1 ORDER BY sequence_no`, [tenantId])).rows,
         claims: async () => (await q(`SELECT * FROM ${RT.claim} WHERE tenant_id = $1 ORDER BY claimed_at`, [tenantId])).rows,
         // `created_at` is the transaction's NOW(): the rows of ONE transaction (a begin that closes an abandoned run and
@@ -1022,14 +1027,18 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
       expect(auditRows.map((row: any) => [row.action, row.mode, row.subject_id, row.project_id])).toEqual([['exception_resolve', 'sheet_repair_started', accepted.runId, scope.projectNo]])
     }, 120_000)
 
-    test('S9D-18 the fills report through the route on real rows: the pair that carries the note is K2-carryable; audited; never the note', async () => {
+    test('S9D-18 the fills report through the route on real rows: the pair that carries the note is K2-carryable; a machine write-back date on an old row is counted; audited; never the note, never the date', async () => {
       const st = await world('d18')
+      const DATE = '2026-11-29'
+      await st.machineEdit(st.oldIds[0], DATE)
       const summary = dataOf(await st.call('GET', PATHS.fills))
       expect([summary.total, summary.components[0].componentHandle, summary.components[0].shape, summary.components[0].counts.pairs, summary.components[0].counts.k2Carryable, summary.components[0].counts.pairsWithFills]).toEqual([1, st.handle, 'two_copy', 4, 1, 1])
       const detail = dataOf(await st.call('GET', PATHS.fills, { query: { componentHandle: st.handle } }))
       expect([detail.pairs.length, detail.pairs[0].class, detail.pairs[0].fields.notes, st.oldIds.includes(detail.pairs[0].oldRecordId), st.copyIds.includes(detail.pairs[0].copyRecordId)]).toEqual([1, 'k2_carryable', { old: true, copy: false, state: 'carry' }, true, true])
+      // The real host reader hands the stored date to the report under its logical id: counted on the active old row.
+      expect([summary.components[0].machineWriteback, detail.machineWriteback]).toEqual([{ onActiveOldRows: 1, onInactiveOldRows: 0 }, { onActiveOldRows: 1, onInactiveOldRows: 0 }])
       const text = JSON.stringify([summary, detail])
-      for (const planted of ['synthetic note', PROJECT, 'S-001', 'P-001', st.tenantId, st.sheetId]) expect(text.includes(planted), `${planted} leaked`).toBe(false)
+      for (const planted of ['synthetic note', DATE, PROJECT, 'S-001', 'P-001', st.tenantId, st.sheetId]) expect(text.includes(planted), `${planted} leaked`).toBe(false)
       const runs = dataOf(await st.call('GET', PATHS.runs))
       expect(runs).toEqual({ runs: [], truncated: false })
       expect((await st.audits()).map((row: any) => [row.action, row.mode, row.project_id])).toEqual([
@@ -1037,6 +1046,9 @@ export function defineStockPreparationSheetRepairRealDbCases(): void {
         ['project_board_read', 'sheet_fills_report_read', null],
         ['project_board_read', 'sheet_repair_runs_read', null],
       ])
+      const audited = await st.audits()
+      expect(audited.slice(0, 2).map((row: any) => row.detail.machineWritebackCells)).toEqual([1, 1])
+      expect(JSON.stringify(audited).includes(DATE), 'no audit row names the date').toBe(false)
       expect([st.patchInputs.length, await st.runs(), await st.lockRow(), st.source.reads], 'reads only: no write, no lease, no source read').toEqual([0, [], null, 0])
       // With the repair switch off the surface is gone (404) and the ledger is not read.
       delete process.env[STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED_ENV]

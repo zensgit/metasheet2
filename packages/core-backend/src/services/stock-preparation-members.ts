@@ -134,9 +134,10 @@
 
 import { randomBytes } from 'node:crypto'
 
+import { filterEnabledDelegationNamespaces } from '../admin/delegated-scope-activation'
 import type { AuditLogOptions } from '../audit/audit'
 import { classifyRecoveryConflict, RECOVERY_CONFLICT_HTTP_CODE, RECOVERY_CONFLICT_HTTP_MESSAGE } from '../db/recovery-conflict'
-import { deriveDelegatedAdminNamespace, roleIdMatchesNamespace } from '../rbac/namespace-admission'
+import { deriveDelegatedAdminNamespace, lockNamespaceAdmissionReads, roleIdMatchesNamespace } from '../rbac/namespace-admission'
 
 // ── vocabulary ─────────────────────────────────────────────────────────────────────────────────
 
@@ -240,7 +241,7 @@ const DEADLOCK_SQLSTATE = '40P01'
  *      on one row instead of each holding what the other waits for (the 40P01 of the table-lock
  *      design). ONE 40P01 REMAINS, between two updates of THIS port on DIFFERENT roles whose grantors
  *      each hold the other's role (A, a member of Z, edits X while B, a member of X, edits Z): each
- *      holds lock 3's FOR SHARE on the other role's codes and then removes a code of its own role.
+ *      holds a FOR SHARE lock on the other role's codes and then removes a code of its own role.
  *      PostgreSQL breaks it after `deadlock_timeout`; the victim rolled back entirely, and an update
  *      re-runs its whole transaction ONCE (every lock and every check again) before it answers 409
  *      BUSY. Leaving those codes unlocked instead would let the grantor's codes change under the
@@ -251,11 +252,13 @@ const DEADLOCK_SQLSTATE = '40P01'
  *      OR, for a create, the per-namespace advisory lock — the role does not exist yet, and the
  *      100-cap is a count over a set (two creates that both count 99 would both insert), which only a
  *      lock on something other than a row can serialise. Only creates take it;
- *   3. FOR SHARE on the grantor's own authority rows — their role memberships (the caller tier and
+ *   3. a shared lock on the grantor's namespace-admission key. The delegation activation writer
+ *      takes it exclusively, so this also protects the decision before any activation row exists;
+ *   4. FOR SHARE on the grantor's own authority rows — their role memberships (the caller tier and
  *      every role-derived code), the codes of those roles, their direct codes, their member groups,
  *      their admission and their delegation scope — so those EXISTING rows cannot be deleted under the
  *      decision (a new row, e.g. a new member-group membership, is not held off);
- *   4. (sheet grant only) FOR SHARE on the grantor's existing grants on the named sheets — direct,
+ *   5. (sheet grant only) FOR SHARE on the grantor's existing grants on the named sheets — direct,
  *      member-group and role subjects, the rows the grid's write decision reads — so the grantor's
  *      EXISTING grant rows on a sheet cannot be deleted or changed between the in-lock check and the
  *      G1 call (N3). It does NOT stop an insert-only downgrade (a lower direct row for a grantor with
@@ -280,7 +283,7 @@ export const STOCK_PREP_MEMBERS_GRANTOR_LOCK_SQL = Object.freeze([
   'SELECT s.namespace FROM delegated_role_admin_scopes s WHERE s.admin_user_id = $1 FOR SHARE',
   'SELECT g.namespace FROM delegated_role_admin_member_groups g WHERE g.admin_user_id = $1 FOR SHARE',
 ] as const)
-/** Lock 4: the grantor's grants on the named sheets — the subject predicate of permission-service.ts `loadSheetPermissionScopeMap`. */
+/** Lock 5: the grantor's grants on the named sheets — the subject predicate of permission-service.ts `loadSheetPermissionScopeMap`. */
 export const STOCK_PREP_MEMBERS_GRANTOR_SHEET_LOCK_SQL = `SELECT sp.sheet_id
   FROM spreadsheet_permissions sp
  WHERE sp.sheet_id = ANY($2::text[])
@@ -709,8 +712,8 @@ export function createStockPrepMembersPort(deps: StockPrepMembersDeps): StockPre
 
   /**
    * THE CALLER TIER. Platform admin (DB) → admitted. Otherwise the actor must hold the role
-   * `stock-prep_admin` AND have an effective `stock-prep` admission, else 403; and a delegated admin
-   * must have a department / member-group scope for `stock-prep`, else 403
+   * `stock-prep_admin`, have enabled delegation and an effective `stock-prep` admission, else 403;
+   * and a delegated admin must have a department / member-group scope for `stock-prep`, else 403
    * ROLE_DELEGATION_SCOPE_REQUIRED. Every write runs it twice: before its transaction (a fast
    * refusal, on the pool) and again inside it, under the locks and on the transaction's own
    * connection (`txQuery`), where the answer decides.
@@ -722,6 +725,10 @@ export function createStockPrepMembersPort(deps: StockPrepMembersDeps): StockPre
     const held = await run(STOCK_PREP_MEMBERS_DELEGATED_ADMIN_HELD_SQL, [actorId, STOCK_PREP_DELEGATED_ADMIN_ROLE_ID])
     if ((held.rows as unknown[]).length === 0) {
       throw new StockPrepMembersError(403, 'STOCK_PREP_MEMBERS_FORBIDDEN', 'only a platform administrator or the stock-prep main administrator may manage stock-prep members')
+    }
+    const namespaces = await filterEnabledDelegationNamespaces(run, actorId, [STOCK_PREP_MEMBERS_NAMESPACE])
+    if (namespaces.length === 0) {
+      throw new StockPrepMembersError(403, 'STOCK_PREP_MEMBERS_FORBIDDEN', 'delegation is disabled for this stock-prep main administrator')
     }
     const admitted = txQuery
       ? await deps.hasEffectiveNamespaceAdmission(actorId, STOCK_PREP_MEMBERS_NAMESPACE, txQuery)
@@ -869,8 +876,8 @@ export function createStockPrepMembersPort(deps: StockPrepMembersDeps): StockPre
 
   /**
    * A write transaction that first takes the locks (STOCK_PREP_MEMBERS_* lock SQL, in that order:
-   * the role row — or, for a create, the advisory lock — then the grantor's rows, then the grantor's
-   * grants on the named sheets), then re-resolves the caller FRESH under them on the transaction's
+   * the role row — or, for a create, the advisory lock — then the grantor's namespace-admission lock,
+   * authority rows and grants on the named sheets), then re-resolves the caller FRESH on the transaction's
    * own connection, and only then runs `fn` with that caller. `fn` must decide on `query` only.
    */
   async function runLockedWrite<T>(
@@ -889,6 +896,7 @@ export function createStockPrepMembersPort(deps: StockPrepMembersDeps): StockPre
           throw new StockPrepMembersError(404, 'STOCK_PREP_CUSTOM_ROLE_NOT_FOUND', 'custom role not found', { field: 'roleId' })
         }
       }
+      await lockNamespaceAdmissionReads({ query }, actorId)
       for (const sql of STOCK_PREP_MEMBERS_GRANTOR_LOCK_SQL) await query(sql, [actorId])
       if (target.kind === 'role' && target.sheetIds && target.sheetIds.length > 0) {
         await query(STOCK_PREP_MEMBERS_GRANTOR_SHEET_LOCK_SQL, [actorId, [...target.sheetIds]])

@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "testedMain": "ba385e10a1c1a4cece6a37216a37c6e10c38b367",
+  "testedSourceCommit": "84a367f70270126d825c98c0916f068ed1116bdb",
+  "inputBytes": "Git blobs, without newline normalization",
+  "sourceSha256": {
+    "apps/web/src/views/RoleDelegationView.vue": "ec92effd249f08f60929412f1ac066aec132b088e1bcb913af769a6886de893d",
+    "apps/web/src/views/DelegationConfirmationPanel.vue": "59f50b6694b34cb42b30e457f0a8dcc0855d4e387c0e044a3fb42f4c1c9d4b04",
+    "apps/web/tests/roleDelegationView.spec.ts": "72b9ec1b3504875f29af98d398b849272309d55f73d9e43fd052858a554b57c5"
+  },
+  "componentTests": { "passed": 52, "failed": 0 },
+  "targetedEslint": "passed",
+  "browser": {
+    "scope": "Real Vue components, synthetic mocked API",
+    "explicitSelectionCasesPassed": 4,
+    "confirmationRegressionCasesPassed": 11,
+    "unexpectedErrors": 0,
+    "externalRequests": 0,
+    "selectionReportSha256": "6b72e013281c32e1647afc9258019db44d428dfe391a4414a38c8ae7d6b05019",
+    "confirmationReportSha256": "9ad3dc7cea9099bff79cbd2da11e2c0d9e145676fb04f9a435f2898c808ce472",
+    "baselineReportSha256": "5ad27c1721820527024998e20d5a58dfe9039ac468c55a29bb37656a3a3d01fb",
+    "baselineFailuresObserved": ["first member automatically selected", "search replaces omitted member", "late list replaces explicit choice"]
+  },
+  "negativeComponentControls": ["restore automatic selection: two new cases fail", "remove late selection guard: late list case fails"],
+  "limits": ["pagination UI not separately exercised", "mock API, not live backend", "not a Windows installation-package acceptance"],
+  "exactDepartmentScopeFlag": false,
+  "productionDeployment": false
+}

@@ -6,6 +6,10 @@ import {
   isDirectoryDeprovisionEnabled,
   resolveDirectoryDeprovisionPolicy,
 } from '../../src/directory/directory-sync'
+import { strictLoginUninstalledRows } from '../utils/strict-login-uninstalled-fixture'
+
+/** RFC connection id. Legacy grant admission rejects any other shape before it reads the witness. */
+const CONNECTION_ID = '22222222-2222-4222-8222-222222222222'
 
 /**
  * SCOPE NOTE — read before adding a test here.
@@ -53,6 +57,8 @@ function stubClient(
     queries,
     query: async (sql: string, params?: unknown[]) => {
       queries.push(sql)
+      const uninstalled = strictLoginUninstalledRows(sql)
+      if (uninstalled !== undefined) return { rows: uninstalled }
       if (
         /FROM directory_accounts a/i.test(sql)
         && /JOIN directory_account_links/i.test(sql)
@@ -143,7 +149,7 @@ const CANDIDATE = { directory_account_id: 'acct-1', local_user_id: 'user-1', dep
 
 describe('DT-OPS-01 deprovision executor (policy dispatch, given candidates)', () => {
   const baseOptions = {
-    integrationId: 'dir-1',
+    integrationId: CONNECTION_ID,
     runId: 'run-1',
     triggeredBy: 'unit-test',
     deactivatedAccountIds: ['acct-1'],

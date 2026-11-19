@@ -30248,6 +30248,9 @@ paths:
   /api/permissions/grant:
     post:
       summary: Grant permission (admin only)
+      description: >-
+        Target userId follows the strict canonical-string rule; permission
+        handling and catalogue semantics remain unchanged.
       security:
         - bearerAuth: []
       requestBody:
@@ -30259,6 +30262,17 @@ paths:
               properties:
                 userId:
                   type: string
+                  minLength: 1
+                  not:
+                    anyOf:
+                      - pattern: ^\s
+                      - pattern: \s$
+                  description: >-
+                    Existing user id, identical to its runtime trimmed spelling.
+                    No coercion, implicit trimming or UUID restriction. Internal
+                    whitespace is allowed. No target active, activation or
+                    recycle state restriction is added.
+                  example: synthetic user
                 permission:
                   type: string
               required:
@@ -30268,14 +30282,137 @@ paths:
         '200':
           description: OK
         '400':
-          $ref: '#/components/responses/ValidationError'
+          description: >-
+            Existing required-field and permission-code errors remain unchanged.
+            After the administrator precheck, invalid target shape returns
+            exactly { error: 'userId must be a non-empty canonical string' }.
+            Existing absent/falsy required-field errors may precede it.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - type: object
+                    description: >-
+                      Existing required-field or catalogue errors; semantics
+                      unchanged
+                    required:
+                      - error
+                    properties:
+                      error:
+                        type: string
+                  - type: object
+                    additionalProperties: false
+                    required:
+                      - error
+                    properties:
+                      error:
+                        type: string
+                        enum:
+                          - userId must be a non-empty canonical string
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '404':
+          description: >-
+            Missing target is disclosed only after locked administrator
+            authority is accepted and performs no permission DML. Historical
+            orphan rows are not cleaned.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - error
+                properties:
+                  error:
+                    type: string
+                    enum:
+                      - User not found
+        '409':
+          description: >-
+            AUTHORIZATION_INPUT_BUSY and RECOVERY_AUTHORITY_BUSY indicate
+            contention. STALE requires reloading the permission sources.
+            USER_IN_RECYCLE_BIN requires restoring the account before a
+            permission change. Fixed bodies contain no internal causes or user
+            values. This is not an automatic replay instruction or proof of
+            rollback after an ambiguous commit or response.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    additionalProperties: false
+                    required:
+                      - code
+                      - error
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - AUTHORIZATION_INPUT_BUSY
+                      error:
+                        type: string
+                        enum:
+                          - Authorization inputs are busy; retry this change.
+                  - type: object
+                    additionalProperties: false
+                    required:
+                      - code
+                      - error
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - STALE
+                          - USER_IN_RECYCLE_BIN
+                      error:
+                        type: string
+                  - type: object
+                    additionalProperties: false
+                    required:
+                      - ok
+                      - error
+                    properties:
+                      ok:
+                        type: boolean
+                        enum:
+                          - false
+                      error:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - code
+                          - message
+                          - details
+                        properties:
+                          code:
+                            type: string
+                            enum:
+                              - RECOVERY_AUTHORITY_BUSY
+                          message:
+                            type: string
+                            enum:
+                              - >-
+                                Recovery is stabilizing permissions; retry this
+                                change.
+                          details:
+                            type: object
+                            additionalProperties: false
+                            required:
+                              - retryable
+                            properties:
+                              retryable:
+                                type: boolean
+                                enum:
+                                  - true
   /api/permissions/revoke:
     post:
       summary: Revoke permission (admin only)
+      description: >-
+        Target userId follows the strict canonical-string rule; permission
+        handling and catalogue semantics remain unchanged.
       security:
         - bearerAuth: []
       requestBody:
@@ -30287,6 +30424,17 @@ paths:
               properties:
                 userId:
                   type: string
+                  minLength: 1
+                  not:
+                    anyOf:
+                      - pattern: ^\s
+                      - pattern: \s$
+                  description: >-
+                    Existing user id, identical to its runtime trimmed spelling.
+                    No coercion, implicit trimming or UUID restriction. Internal
+                    whitespace is allowed. No target active, activation or
+                    recycle state restriction is added.
+                  example: synthetic user
                 permission:
                   type: string
               required:
@@ -30296,11 +30444,344 @@ paths:
         '200':
           description: OK
         '400':
-          $ref: '#/components/responses/ValidationError'
+          description: >-
+            Existing required-field and permission-code errors remain unchanged.
+            After the administrator precheck, invalid target shape returns
+            exactly { error: 'userId must be a non-empty canonical string' }.
+            Existing absent/falsy required-field errors may precede it.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - type: object
+                    description: >-
+                      Existing required-field or catalogue errors; semantics
+                      unchanged
+                    required:
+                      - error
+                    properties:
+                      error:
+                        type: string
+                  - type: object
+                    additionalProperties: false
+                    required:
+                      - error
+                    properties:
+                      error:
+                        type: string
+                        enum:
+                          - userId must be a non-empty canonical string
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '404':
+          description: >-
+            Missing target is disclosed only after locked administrator
+            authority is accepted and performs no permission DML. For an
+            existing target, the unchanged no-match revoke also returns 404.
+            Historical orphan rows are not cleaned.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - error
+                properties:
+                  error:
+                    type: string
+                    enum:
+                      - User not found
+                      - Permission not found for user
+        '409':
+          description: >-
+            AUTHORIZATION_INPUT_BUSY and RECOVERY_AUTHORITY_BUSY indicate
+            contention. STALE requires reloading the permission sources.
+            USER_IN_RECYCLE_BIN requires restoring the account before a
+            permission change. Fixed bodies contain no internal causes or user
+            values. This is not an automatic replay instruction or proof of
+            rollback after an ambiguous commit or response.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    additionalProperties: false
+                    required:
+                      - code
+                      - error
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - AUTHORIZATION_INPUT_BUSY
+                      error:
+                        type: string
+                        enum:
+                          - Authorization inputs are busy; retry this change.
+                  - type: object
+                    additionalProperties: false
+                    required:
+                      - code
+                      - error
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - STALE
+                          - USER_IN_RECYCLE_BIN
+                      error:
+                        type: string
+                  - type: object
+                    additionalProperties: false
+                    required:
+                      - ok
+                      - error
+                    properties:
+                      ok:
+                        type: boolean
+                        enum:
+                          - false
+                      error:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - code
+                          - message
+                          - details
+                        properties:
+                          code:
+                            type: string
+                            enum:
+                              - RECOVERY_AUTHORITY_BUSY
+                          message:
+                            type: string
+                            enum:
+                              - >-
+                                Recovery is stabilizing permissions; retry this
+                                change.
+                          details:
+                            type: object
+                            additionalProperties: false
+                            required:
+                              - retryable
+                            properties:
+                              retryable:
+                                type: boolean
+                                enum:
+                                  - true
+  /api/admin/permission-templates/apply:
+    post:
+      summary: Apply permission template (admin only)
+      description: >-
+        Applies the existing template's permission list, not its metadata role.
+        Target userId follows the strict canonical-string rule; templateId keeps
+        its existing string, trimming and lookup behavior. Does not add runtime
+        capabilities or change template contents.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId:
+                  type: string
+                  minLength: 1
+                  not:
+                    anyOf:
+                      - pattern: ^\s
+                      - pattern: \s$
+                  description: >-
+                    Existing user id, identical to its runtime trimmed spelling.
+                    No coercion, implicit trimming or UUID restriction. Internal
+                    whitespace is allowed. No target active, activation or
+                    recycle state restriction is added.
+                  example: synthetic user
+                templateId:
+                  type: string
+              required:
+                - userId
+                - templateId
+      responses:
+        '200':
+          description: >-
+            Existing successful readback, or existing optional-schema
+            degradation
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    required:
+                      - success
+                      - userId
+                      - template
+                      - permissions
+                      - isAdmin
+                    properties:
+                      success:
+                        type: boolean
+                        enum:
+                          - true
+                      userId:
+                        type: string
+                      template:
+                        type: object
+                        description: >-
+                          The complete existing template definition object, not
+                          just its id. Its metadata role is not granted.
+                        additionalProperties: true
+                      permissions:
+                        type: array
+                        items:
+                          type: string
+                      isAdmin:
+                        type: boolean
+                  - type: object
+                    required:
+                      - success
+                      - degraded
+                    properties:
+                      success:
+                        type: boolean
+                        enum:
+                          - true
+                      degraded:
+                        type: boolean
+                        enum:
+                          - true
+        '400':
+          description: >-
+            Existing required-field errors remain unchanged. After the
+            administrator precheck, invalid target shape returns exactly {
+            error: 'userId must be a non-empty canonical string' }. Existing
+            absent/falsy required-field errors may precede it.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - type: object
+                    description: >-
+                      Existing required-field or catalogue errors; semantics
+                      unchanged
+                    required:
+                      - error
+                    properties:
+                      error:
+                        type: string
+                  - type: object
+                    additionalProperties: false
+                    required:
+                      - error
+                    properties:
+                      error:
+                        type: string
+                        enum:
+                          - userId must be a non-empty canonical string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: >-
+            Missing target is disclosed only after locked administrator
+            authority is accepted and performs no permission DML. The unchanged
+            missing-template response also returns 404. Historical orphan rows
+            are not cleaned.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - error
+                properties:
+                  error:
+                    type: string
+                    enum:
+                      - User not found
+                      - Permission template not found
+        '409':
+          description: >-
+            AUTHORIZATION_INPUT_BUSY and RECOVERY_AUTHORITY_BUSY indicate
+            contention. STALE requires reloading the permission sources.
+            USER_IN_RECYCLE_BIN requires restoring the account before a
+            permission change. Fixed bodies contain no internal causes or user
+            values. This is not an automatic replay instruction or proof of
+            rollback after an ambiguous commit or response.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    additionalProperties: false
+                    required:
+                      - code
+                      - error
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - AUTHORIZATION_INPUT_BUSY
+                      error:
+                        type: string
+                        enum:
+                          - Authorization inputs are busy; retry this change.
+                  - type: object
+                    additionalProperties: false
+                    required:
+                      - code
+                      - error
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - STALE
+                          - USER_IN_RECYCLE_BIN
+                      error:
+                        type: string
+                  - type: object
+                    additionalProperties: false
+                    required:
+                      - ok
+                      - error
+                    properties:
+                      ok:
+                        type: boolean
+                        enum:
+                          - false
+                      error:
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - code
+                          - message
+                          - details
+                        properties:
+                          code:
+                            type: string
+                            enum:
+                              - RECOVERY_AUTHORITY_BUSY
+                          message:
+                            type: string
+                            enum:
+                              - >-
+                                Recovery is stabilizing permissions; retry this
+                                change.
+                          details:
+                            type: object
+                            additionalProperties: false
+                            required:
+                              - retryable
+                            properties:
+                              retryable:
+                                type: boolean
+                                enum:
+                                  - true
   /api/permissions/health:
     get:
       summary: Permissions health check
