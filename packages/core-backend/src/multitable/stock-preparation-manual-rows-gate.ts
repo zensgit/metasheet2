@@ -560,9 +560,10 @@ export type ManualRowsContextBlock = {
    * P5, the self-parent pre-check) and what it watches to warn before a 图号 other manual rows name as their parent is
    * changed (ADR §12.7 ①). Present ONLY together with `parentFieldIds`, and only when the column exists on the sheet
    * and this actor may READ it; a block without `parentFieldIds` never carries it and is byte-identical to what it
-   * was. Absent beside `parentFieldIds` = this actor cannot read the row's own 图号: the web has nothing to compare
-   * with, and PATCH …/manual-fields refuses that actor's change of an EXISTING row's parent (403 — rule P5 would
-   * compare with a cell they may not read; a new row can still be given a parent). An id only — never a value.
+   * was. Absent beside `parentFieldIds` on a sheet that has the column = this actor cannot read the row's own 图号:
+   * the web has nothing to compare with, and PATCH …/manual-fields refuses that actor's change of an EXISTING row's
+   * parent (403 — rule P5 would compare with a cell they may not read; a new row can still be given a parent). An id
+   * only — never a value.
    */
   componentCodeFieldId?: string
 }
