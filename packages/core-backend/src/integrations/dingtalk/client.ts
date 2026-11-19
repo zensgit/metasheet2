@@ -320,6 +320,7 @@ export function isDingTalkConfigured(): boolean {
 export async function exchangeCodeForUserAccessToken(
   code: string,
   config: DingTalkOauthConfig = readDingTalkOauthConfig(),
+  options?: DingTalkRequestOptions,
 ): Promise<DingTalkUserAccessToken> {
   const payload = await requestDingTalkJson(
     'https://api.dingtalk.com/v1.0/oauth2/userAccessToken',
@@ -337,6 +338,7 @@ export async function exchangeCodeForUserAccessToken(
     // One-shot authorization-code exchange: a retry after ANY ambiguous failure
     // burns or double-redeems the single-use code — never retried.
     'exchange',
+    options,
   )
 
   const accessToken = typeof payload.accessToken === 'string'
@@ -366,7 +368,10 @@ export async function exchangeCodeForUserAccessToken(
   }
 }
 
-export async function fetchDingTalkCurrentUser(accessToken: string): Promise<DingTalkCurrentUserProfile> {
+export async function fetchDingTalkCurrentUser(
+  accessToken: string,
+  options?: DingTalkRequestOptions,
+): Promise<DingTalkCurrentUserProfile> {
   const payload = await requestDingTalkJson(
     'https://api.dingtalk.com/v1.0/contact/users/me',
     {
@@ -377,6 +382,7 @@ export async function fetchDingTalkCurrentUser(accessToken: string): Promise<Din
     },
     'Failed to get current user info from DingTalk',
     'read',
+    options,
   )
 
   const openId = typeof payload.openId === 'string'
@@ -721,6 +727,7 @@ export async function getDingTalkUserDetail(
   accessToken: string,
   userId: string,
   config?: { baseUrl?: string },
+  options?: DingTalkRequestOptions,
 ): Promise<DingTalkDirectoryUser> {
   const payload = await requestDingTalkDirectoryJson(
     `/topapi/v2/user/get?access_token=${encodeURIComponent(accessToken)}`,
@@ -735,6 +742,7 @@ export async function getDingTalkUserDetail(
     'Failed to read DingTalk user detail',
     'read',
     config?.baseUrl,
+    options,
   )
 
   const result = readNestedPayload(payload)
@@ -790,6 +798,7 @@ export async function getDingTalkUserInfoByAuthCode(
   accessToken: string,
   authCode: string,
   config?: { baseUrl?: string },
+  options?: DingTalkRequestOptions,
 ): Promise<DingTalkContainerUserInfo> {
   const payload = await requestDingTalkDirectoryJson(
     `/topapi/v2/user/getuserinfo?access_token=${encodeURIComponent(accessToken)}`,
@@ -803,6 +812,7 @@ export async function getDingTalkUserInfoByAuthCode(
     // double-redeems the single-use code — never retried.
     'exchange',
     config?.baseUrl,
+    options,
   )
 
   const result = readNestedPayload(payload)

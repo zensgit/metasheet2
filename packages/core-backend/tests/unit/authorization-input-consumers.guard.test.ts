@@ -35,6 +35,21 @@ const ROLE_PLAN_CONSUMER: AuthorizationInputConsumerEntry = {
   id: 'K-03', file: ROLE_PLAN_MODULE, symbol: 'revalidatePrivilegeRolePlan', call: 'readPrivilegeInputs', count: 1,
   mode: 'ADVISORY', reason: 'role-plan consistency only; success does not authorize; a complete consumer must reassess inputs',
 }
+const RECEIVING_MODULE = `${SRC}/auth/admin-grant-receiving-reader.ts`
+const RECEIVING_CONSUMER: AuthorizationInputConsumerEntry = {
+  id: 'K-04', file: RECEIVING_MODULE, symbol: 'readPreparedTarget', call: 'assessSecurityActionPrivilege', count: 1,
+  mode: 'ADVISORY', reason: 'unmounted prepared receiver may only refuse; success neither authorizes nor enables a purpose',
+}
+const RECEIVING_ACTOR_CONSUMER: AuthorizationInputConsumerEntry = {
+  id: 'K-05', file: RECEIVING_MODULE, symbol: 'resolveAdminGrantTargetSet', call: 'assessSecurityActionPrivilege', count: 1,
+  mode: 'ADVISORY', reason: 'Prepares the actor privilege witness on the same locked receiving transaction; does not authorize a proof or grant',
+}
+const B2_CONSUMERS: readonly AuthorizationInputConsumerEntry[] = [
+  { id: 'K-06', file: `${SRC}/auth/admin-grant-target-ceremony.ts`, symbol: 'lockAndRead', call: 'assessSecurityActionPrivilege', count: 1, mode: 'LOCKED_DECISION' },
+  { id: 'K-07', file: `${SRC}/auth/admin-grant-proof.ts`, symbol: 'readIssueSnapshot', call: 'assessSecurityActionPrivilege', count: 1, mode: 'LOCKED_DECISION' },
+  { id: 'K-08', file: `${SRC}/auth/strict-dingtalk-entry.ts`, symbol: 'callback:withAuthorizationInputTransaction', call: 'assessSecurityActionPrivilege', count: 1, mode: 'LOCKED_DECISION' },
+  { id: 'K-09', file: `${SRC}/auth/strict-dingtalk-entry.ts`, symbol: 'currentPrivilegeRemainsEligible', call: 'assessSecurityActionPrivilege', count: 1, mode: 'ADVISORY', reason: 'Current eligibility veto for an existing strict grant/session only; success does not authorize a new grant or initial session' },
+]
 /** Every production call site outside the classifier, as `file|function|call`, one item per site. */
 const CALL_SITE_KEYS: readonly string[] = [
   `${PROOF_MODULE}|consume|assessSecurityActionPrivilege`,
@@ -46,6 +61,12 @@ const CALL_SITE_KEYS: readonly string[] = [
   `${SRC}/admin/authorization-operation-service.ts|callback:withAuthorizationInputTransaction|evaluateAuthorizationOperationAccess`,
   `${SRC}/admin/authorization-operation-service.ts|callback:withAuthorizationInputTransaction|evaluateAuthorizationOperationAccess`,
   `${ROLE_PLAN_MODULE}|revalidatePrivilegeRolePlan|readPrivilegeInputs`,
+  `${RECEIVING_MODULE}|readPreparedTarget|assessSecurityActionPrivilege`,
+  `${RECEIVING_MODULE}|resolveAdminGrantTargetSet|assessSecurityActionPrivilege`,
+  `${SRC}/auth/admin-grant-target-ceremony.ts|lockAndRead|assessSecurityActionPrivilege`,
+  `${SRC}/auth/admin-grant-proof.ts|readIssueSnapshot|assessSecurityActionPrivilege`,
+  `${SRC}/auth/strict-dingtalk-entry.ts|callback:withAuthorizationInputTransaction|assessSecurityActionPrivilege`,
+  `${SRC}/auth/strict-dingtalk-entry.ts|currentPrivilegeRemainsEligible|assessSecurityActionPrivilege`,
 ]
 /** Decision points not yet inside a contract transaction. An item leaves this list only by becoming a locked decision; none may be added. */
 const PENDING_CONSUMER_KEYS: readonly string[] = [`${PROOF_MODULE}|consume|assessSecurityActionPrivilege`]
@@ -54,6 +75,14 @@ const keyOfEntry = (entry: AuthorizationInputConsumerEntry) => `${entry.file}|${
 
 function rolePlanConsumerProblems(registry: readonly AuthorizationInputConsumerEntry[]): string[] {
   return advisoryConsumerProblems(registry, ROLE_PLAN_CONSUMER, 'role-plan reader')
+}
+
+function receivingConsumerProblems(registry: readonly AuthorizationInputConsumerEntry[]): string[] {
+  return advisoryConsumerProblems(registry, RECEIVING_CONSUMER, 'prepared receiving reader', RECEIVING_ACTOR_CONSUMER)
+}
+
+function receivingActorConsumerProblems(registry: readonly AuthorizationInputConsumerEntry[]): string[] {
+  return advisoryConsumerProblems(registry, RECEIVING_ACTOR_CONSUMER, 'prepared actor reader', RECEIVING_CONSUMER)
 }
 
 function exactConsumer(entry: AuthorizationInputConsumerEntry, expected: AuthorizationInputConsumerEntry): boolean {
@@ -70,6 +99,15 @@ function advisoryConsumerProblems(registry: readonly AuthorizationInputConsumerE
   const entry = entries[0]
   if (!exactConsumer(entry, expected)) {
     return [refusal]
+  }
+  return []
+}
+
+function b2ConsumerProblems(registry: readonly AuthorizationInputConsumerEntry[]): string[] {
+  const entries = registry.filter(entry => B2_CONSUMERS.some(expected => entry.id === expected.id || entry.file === expected.file))
+  if (entries.length !== B2_CONSUMERS.length
+    || B2_CONSUMERS.some(expected => !entries.some(entry => exactConsumer(entry, expected)))) {
+    return ['B2 consumers must retain the exact locked issuance and advisory continuation entries']
   }
   return []
 }
@@ -157,6 +195,84 @@ function registryProblems(sites: readonly CallSite[], registry: readonly Authori
 }
 
 describe('consumer registry', () => {
+  it('pins the four B2 consumer sites without changing K-02 or existing advisory semantics', () => {
+    expect(b2ConsumerProblems(AUTHORIZATION_INPUT_CONSUMERS)).toEqual([])
+    for (const expected of B2_CONSUMERS) {
+      const omitted = AUTHORIZATION_INPUT_CONSUMERS.filter(entry => entry.id !== expected.id)
+      expect(b2ConsumerProblems(omitted)).not.toEqual([])
+      expect(b2ConsumerProblems([...AUTHORIZATION_INPUT_CONSUMERS, expected])).not.toEqual([])
+      expect(b2ConsumerProblems([...AUTHORIZATION_INPUT_CONSUMERS, { ...expected, id: 'K-extra', symbol: 'otherRead' }])).not.toEqual([])
+      for (const patch of [
+        { id: 'K-extra' }, { file: `${SRC}/auth/other.ts` }, { symbol: 'otherRead' },
+        { call: 'readPrivilegeInputs' as const }, { count: 2 }, { reason: 'changed' },
+        { mode: expected.mode === 'ADVISORY' ? 'LOCKED_DECISION' as const : 'ADVISORY' as const },
+        { mode: 'PENDING_LOCKED' as const, slice: 'future' },
+      ]) expect(b2ConsumerProblems([...omitted, { ...expected, ...patch }])).not.toEqual([])
+    }
+    expect(AUTHORIZATION_INPUT_CONSUMERS.find(entry => entry.id === 'K-02')).toEqual({
+      id: 'K-02', file: PROOF_MODULE, symbol: 'consume', call: 'assessSecurityActionPrivilege', count: 1, mode: 'PENDING_LOCKED', slice: 'AIS-3b',
+    })
+    expect(rolePlanConsumerProblems(AUTHORIZATION_INPUT_CONSUMERS)).toEqual([])
+    expect(receivingConsumerProblems(AUTHORIZATION_INPUT_CONSUMERS)).toEqual([])
+    expect(receivingActorConsumerProblems(AUTHORIZATION_INPUT_CONSUMERS)).toEqual([])
+    expect(hasPendingConsumers()).toBe(true)
+  })
+
+  it('pins the same-file K-04 and K-05 pair without admitting a third reader or changing the pending set', () => {
+    expect(receivingActorConsumerProblems(AUTHORIZATION_INPUT_CONSUMERS)).toEqual([])
+    expect(AUTHORIZATION_INPUT_CONSUMERS.find(entry => entry.id === 'K-05')).toEqual(RECEIVING_ACTOR_CONSUMER)
+    const omitted = AUTHORIZATION_INPUT_CONSUMERS.filter(entry => entry.id !== 'K-05')
+    const refusal = ['K-05 must be the exact advisory prepared actor reader']
+    expect(receivingActorConsumerProblems(omitted)).toEqual(refusal)
+    for (const patch of [
+      { mode: 'LOCKED_DECISION' as const }, { mode: 'PENDING_LOCKED' as const, slice: 'AIS-3b' },
+      { id: 'K-04' }, { file: `${SRC}/auth/other.ts` }, { symbol: 'readPreparedTarget' },
+      { call: 'readPrivilegeInputs' as const }, { count: 2 }, { reason: '' }, { reason: 'changed' }, { slice: 'future' },
+    ]) expect(receivingActorConsumerProblems([...omitted, { ...RECEIVING_ACTOR_CONSUMER, ...patch }])).toEqual(refusal)
+    expect(receivingActorConsumerProblems([...AUTHORIZATION_INPUT_CONSUMERS, RECEIVING_ACTOR_CONSUMER])).toEqual(refusal)
+    const third = [...AUTHORIZATION_INPUT_CONSUMERS, { ...RECEIVING_ACTOR_CONSUMER, id: 'K-06', symbol: 'otherRead' }]
+    expect(receivingConsumerProblems(third)).not.toEqual([])
+    expect(receivingActorConsumerProblems(third)).toEqual(refusal)
+    const source = "import { assessSecurityActionPrivilege as assess } from './security-action-privilege'\nasync function resolveAdminGrantTargetSet(tx: AuthorizationInputTx) { await assess(tx, 'u1') }\nasync function readPreparedTarget(tx: AuthorizationInputTx) { await assess(tx, 'u2') }"
+    const sites = callSites(RECEIVING_MODULE, source)
+    const pair = [RECEIVING_CONSUMER, RECEIVING_ACTOR_CONSUMER]
+    expect(registryProblems(sites, pair, () => source)).toEqual([])
+    expect(registryProblems(sites, [RECEIVING_CONSUMER], () => source)).not.toEqual([])
+    expect(registryProblems([...sites, sites[0]], pair, () => source)).not.toEqual([])
+    expect(pendingProblems(AUTHORIZATION_INPUT_CONSUMERS, PENDING_CONSUMER_KEYS)).toEqual([])
+    expect(hasPendingConsumers()).toBe(true)
+  })
+
+  it('pins K-04 as one advisory prepared target read without closing a pending consumer', () => {
+    expect(receivingConsumerProblems(AUTHORIZATION_INPUT_CONSUMERS)).toEqual([])
+    expect(AUTHORIZATION_INPUT_CONSUMERS.find(entry => entry.id === 'K-04')).toEqual(RECEIVING_CONSUMER)
+    const omitted = AUTHORIZATION_INPUT_CONSUMERS.filter(entry => entry.id !== 'K-04')
+    const refusal = ['K-04 must be the exact advisory prepared receiving reader']
+    expect(receivingConsumerProblems(omitted)).toEqual(refusal)
+    for (const patch of [
+      { mode: 'LOCKED_DECISION' as const }, { mode: 'PENDING_LOCKED' as const, slice: 'AIS-3b' },
+      { id: 'K-05' }, { file: `${SRC}/auth/other.ts` }, { symbol: 'renamed' },
+      { call: 'readPrivilegeInputs' as const }, { count: 2 }, { reason: '' }, { reason: 'changed' }, { slice: 'future' },
+    ]) expect(receivingConsumerProblems([...omitted, { ...RECEIVING_CONSUMER, ...patch }])).toEqual(refusal)
+    const missingReason = { ...RECEIVING_CONSUMER }
+    delete missingReason.reason
+    expect(receivingConsumerProblems([...omitted, missingReason])).toEqual(refusal)
+    expect(receivingConsumerProblems([...AUTHORIZATION_INPUT_CONSUMERS, RECEIVING_CONSUMER])).toEqual(refusal)
+    for (const source of [
+      "import { assessSecurityActionPrivilege as assess } from './security-action-privilege'\nasync function readPreparedTarget(tx: AuthorizationInputTx) { await assess(tx, 'u1') }",
+      "import * as privilege from './security-action-privilege'\nasync function readPreparedTarget(tx: AuthorizationInputTx) { await privilege.assessSecurityActionPrivilege(tx, 'u1') }",
+    ]) {
+      const sites = callSites(RECEIVING_MODULE, source)
+      expect(sites.map(site => site.call)).toEqual(['assessSecurityActionPrivilege'])
+      expect(registryProblems(sites, [RECEIVING_CONSUMER], () => source)).toEqual([])
+      expect(registryProblems(sites, [], () => source)).not.toEqual([])
+      expect(registryProblems([...sites, ...sites], [RECEIVING_CONSUMER], () => source)).not.toEqual([])
+      const renamed = source.replace('function readPreparedTarget', 'function renamed')
+      expect(registryProblems(callSites(RECEIVING_MODULE, renamed), [RECEIVING_CONSUMER], () => renamed)).not.toEqual([])
+    }
+    expect(hasPendingConsumers()).toBe(true)
+  })
+
   it('pins K-03 as advisory even though its function takes a branded token', () => {
     expect(rolePlanConsumerProblems(AUTHORIZATION_INPUT_CONSUMERS)).toEqual([])
     expect(AUTHORIZATION_INPUT_CONSUMERS.find((entry) => entry.id === 'K-03')).toEqual(ROLE_PLAN_CONSUMER)

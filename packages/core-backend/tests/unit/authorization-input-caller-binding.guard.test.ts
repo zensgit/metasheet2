@@ -83,6 +83,8 @@ const CALLER_BINDINGS: readonly string[] = [
   `${ADMIN_USERS}|${POOL_CALLBACK}|syncLegacyAdminProfile|client.query|false`,
 ]
 
+const K04_REASON = 'unmounted prepared receiver may only refuse; success neither authorizes nor enables a purpose'
+const K05_REASON = 'Prepares the actor privilege witness on the same locked receiving transaction; does not authorize a proof or grant'
 
 type SourceMap = ReadonlyMap<string, string>
 
@@ -910,7 +912,7 @@ function consumerModeProblems(source: string): string[] {
   const byId = new Map<string, ts.ObjectLiteralExpression>()
   for (const object of objects) {
     const id = stringProperty(object, 'id', constants)
-    if (id === 'K-02') {
+    if (id && (id === 'K-02' || id === 'K-04' || id === 'K-05')) {
       if (byId.has(id)) problems.push(`consumer: duplicate ${id}`)
       byId.set(id, object)
     }
@@ -935,6 +937,22 @@ function consumerModeProblems(source: string): string[] {
     mode: 'PENDING_LOCKED',
     slice: 'AIS-3b',
     reason: undefined,
+  })
+  expectEntry('K-04', {
+    file: `${SRC}/auth/admin-grant-receiving-reader.ts`,
+    symbol: 'readPreparedTarget',
+    call: 'assessSecurityActionPrivilege',
+    mode: 'ADVISORY',
+    reason: K04_REASON,
+    slice: undefined,
+  })
+  expectEntry('K-05', {
+    file: `${SRC}/auth/admin-grant-receiving-reader.ts`,
+    symbol: 'resolveAdminGrantTargetSet',
+    call: 'assessSecurityActionPrivilege',
+    mode: 'ADVISORY',
+    reason: K05_REASON,
+    slice: undefined,
   })
   if (!pendingShape) problems.push('consumer: hasPendingConsumers')
   return problems
@@ -1081,7 +1099,7 @@ describe('authorization input caller binding', () => {
     expect(handoverProblems(deleteReceiver).some((problem) => problem.includes('effect'))).toBe(true)
   })
 
-  it('preserves the raw helper signatures and the pending K-02 consumer', () => {
+  it('preserves the raw helper signatures, pending K-02, and advisory K-04 and K-05', () => {
     expect(signatureProblems(read(ROLE_FILE), read(ADMISSION_FILE), read(LEGACY_FILE))).toEqual([])
     expect(consumerModeProblems(read(CONSUMER_FILE))).toEqual([])
     expect(hasPendingConsumers()).toBe(true)
@@ -1097,6 +1115,10 @@ describe('authorization input caller binding', () => {
       "symbol: 'consume', call: 'assessSecurityActionPrivilege', count: 1, mode: 'LOCKED_DECISION', slice: 'AIS-3b'",
     )
     expect(consumerModeProblems(locked)).toContain('consumer: K-02 mode')
+    const k04Reason = once(read(CONSUMER_FILE), K04_REASON, K04_REASON.replace('only refuse', 'authorize'))
+    expect(consumerModeProblems(k04Reason)).toContain('consumer: K-04 reason')
+    const reason = once(read(CONSUMER_FILE), K05_REASON, K05_REASON.replace('does not authorize', 'does authorize'))
+    expect(consumerModeProblems(reason)).toContain('consumer: K-05 reason')
   })
 
   it('rejects an element access, a later executor override, an unthrown conflict, and a call that does not complete', () => {

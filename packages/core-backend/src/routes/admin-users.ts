@@ -19,6 +19,12 @@ import * as bcrypt from 'bcryptjs'
 import * as crypto from 'crypto'
 import { buildOnboardingPacket, getAccessPreset, listAccessPresets } from '../auth/access-presets'
 import { getDingTalkRuntimeStatus } from '../auth/dingtalk-oauth'
+import {
+  guardAdminLegacyGrantSwitch,
+  guardAdminLegacyGrantSwitchSet,
+  StrictCredentialChainError,
+} from '../auth/strict-credential-chain'
+import { StrictLoginGrantError } from '../auth/strict-login-grant-store'
 import { getDingTalkWorkNotificationRuntimeStatusFromStore } from '../integrations/dingtalk/work-notification-settings'
 import {
   INVITE_ACCOUNT_ALREADY_ONBOARDED,
@@ -2865,6 +2871,14 @@ const ACTIVATE_ERROR_POLICY_SOURCE: Record<ActivateErrorCode, { status: number; 
     status: 409,
     message: 'DingTalk login cannot be granted yet: no DingTalk openId is available for this member (missing DingTalk openId). Activate without the DingTalk grant first, have them sign in with DingTalk once, then enable DingTalk login',
   },
+  ACTIVATE_STRICT_CONNECTION: {
+    status: 403,
+    message: 'SSO activation is closed for this strict directory connection',
+  },
+  ACTIVATE_CONNECTION_AMBIGUOUS: {
+    status: 503,
+    message: 'Multiple directory connections include a strict login connection',
+  },
 }
 
 type ActivatePolicyRow = Readonly<{ status: number; message: string }>
@@ -5693,6 +5707,7 @@ export function adminUsersRouter(): Router {
         const locked = await lockUsersForAccessGraphWrite(client, [userId])
         if (!locked.has(userId)) return false
         if (enabled) await assertUsersCanEnableDingTalkGrant(client, [userId])
+        await guardAdminLegacyGrantSwitch(client, { userId, actorId: adminUserId, enabled })
         await upsertDingTalkGrants(client, [userId], enabled, adminUserId)
         return true
       })
@@ -5718,6 +5733,15 @@ export function adminUsersRouter(): Router {
         ...(await fetchDingTalkAccessSnapshot(userId)),
       })
     } catch (error) {
+      if (error instanceof StrictCredentialChainError && error.code === 'strict_connection') {
+        return jsonError(res, 403, 'strict_connection', 'DingTalk legacy grant enable is closed for this connection')
+      }
+      if (error instanceof StrictCredentialChainError && error.code === 'strict_connection_ambiguous') {
+        return jsonError(res, 503, 'strict_connection_ambiguous', 'DingTalk legacy grant disable cannot choose among strict connections')
+      }
+      if (error instanceof StrictCredentialChainError || error instanceof StrictLoginGrantError) {
+        return jsonError(res, 503, 'grant_state_unavailable', 'Unable to verify DingTalk login authorization; please retry')
+      }
       const message = (error as Error)?.message || 'Failed to update DingTalk access'
       if (message.includes('missing DingTalk openId')) {
         return jsonError(res, 400, 'DINGTALK_OPEN_ID_REQUIRED', message)
@@ -5741,6 +5765,7 @@ export function adminUsersRouter(): Router {
         const missing = userIds.filter((userId) => !locked.has(userId))
         if (missing.length > 0) return missing
         if (enabled) await assertUsersCanEnableDingTalkGrant(client, userIds)
+        await guardAdminLegacyGrantSwitchSet(client, { userIds, actorId: adminUserId, enabled })
         await upsertDingTalkGrants(client, userIds, enabled, adminUserId)
         return []
       })
@@ -5771,6 +5796,15 @@ export function adminUsersRouter(): Router {
         userIds,
       })
     } catch (error) {
+      if (error instanceof StrictCredentialChainError && error.code === 'strict_connection') {
+        return jsonError(res, 403, 'strict_connection', 'DingTalk legacy grant enable is closed for this connection')
+      }
+      if (error instanceof StrictCredentialChainError && error.code === 'strict_connection_ambiguous') {
+        return jsonError(res, 503, 'strict_connection_ambiguous', 'DingTalk legacy grant disable cannot choose among strict connections')
+      }
+      if (error instanceof StrictCredentialChainError || error instanceof StrictLoginGrantError) {
+        return jsonError(res, 503, 'grant_state_unavailable', 'Unable to verify DingTalk login authorization; please retry')
+      }
       const message = (error as Error)?.message || 'Failed to update DingTalk access in bulk'
       if (message.includes('missing DingTalk openId')) {
         return jsonError(res, 400, 'DINGTALK_OPEN_ID_REQUIRED', message)

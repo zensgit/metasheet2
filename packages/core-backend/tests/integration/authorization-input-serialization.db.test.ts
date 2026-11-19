@@ -17,9 +17,14 @@
 import { randomUUID } from 'node:crypto'
 import { Pool as PgPool } from 'pg'
 import type { PoolClient } from 'pg'
+import { resolveAdminGrantTargetSet, AdminGrantReceivingRefusal } from '../../src/auth/admin-grant-receiving-reader'
+import { assessSecurityActionPrivilege } from '../../src/auth/security-action-privilege'
 import { acquireSourceSyncFreezeLock } from '../../src/directory/source-sync-freeze-lock'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { assertAuthorizationInputTx } from '../../src/rbac/authorization-input-brand'
+import { lockNamespaceAdmissionWrites } from '../../src/rbac/namespace-admission'
+import { unassignUserRoles } from '../../src/rbac/role-assignment'
+import { applyRoleMatrix } from '../../src/services/PluginRbacProvisioningService'
 import {
   AUTHORIZATION_INPUT_STATEMENTS,
   AUTHORIZATION_INPUT_WORLD_LOCK_KEY1,
@@ -131,6 +136,7 @@ describeIfDatabase('authorization-input serialization (real PostgreSQL)', () => 
     if (createdSourceIds.length > 0) await observer.query('DELETE FROM directory_integrations WHERE id = ANY($1::uuid[])', [createdSourceIds])
     if (createdPlanUserIds.length > 0) await observer.query('DELETE FROM user_roles WHERE user_id = ANY($1::text[])', [createdPlanUserIds])
     if (createdUserIds.length > 0) await observer.query('DELETE FROM users WHERE id = ANY($1::text[])', [createdUserIds])
+    if (createdRoleIds.length > 0) await observer.query('DELETE FROM role_permissions WHERE role_id = ANY($1::text[])', [createdRoleIds])
     if (createdRoleIds.length > 0) await observer.query('DELETE FROM roles WHERE id = ANY($1::text[])', [createdRoleIds])
     service.stopMetricsCollection()
     repeatableRead.stopMetricsCollection()
@@ -951,6 +957,721 @@ describeIfDatabase('authorization-input serialization (real PostgreSQL)', () => 
       gate.resolve()
       await holder
       expect(await maintenance).toBe(maintenancePid)
+    }, 30_000)
+  })
+
+  describe('actual-table counterpart lock classes', () => {
+    const USER_ROW_LOCK = [
+      'SELECT id::text AS id,',
+      '              name,',
+      '              email,',
+      '              username,',
+      '              mobile,',
+      '              activation_status,',
+      '              role,',
+      '              COALESCE(is_active, TRUE) AS is_active,',
+      '              COALESCE(access_generation, 0)::bigint AS access_generation,',
+      "              (to_jsonb(users) ->> 'deleted_at') AS deleted_at,",
+      "              (to_jsonb(users) ->> 'purged_at') AS purged_at",
+      '         FROM users',
+      '        WHERE id = $1::text',
+      '        FOR UPDATE',
+    ].join('\n')
+    const ROLE_PARENT_LOCK = 'SELECT id, name, updated_at FROM roles WHERE id=$1 FOR UPDATE'
+    const ROLE_PERMISSION_DELETE = 'DELETE FROM role_permissions WHERE role_id=$1 AND permission_code <> ALL($2::text[])'
+    const ROLE_PERMISSION_INSERT = 'INSERT INTO role_permissions(role_id, permission_code) VALUES ($1,$2) ON CONFLICT DO NOTHING'
+    const PERMISSION_CATALOG_INSERT = [
+      'INSERT INTO permissions (code, name, description)',
+      '       VALUES ($1, $2, $3)',
+      '       ON CONFLICT (code) DO NOTHING',
+    ].join('\n')
+    const ROLE_UPSERT = [
+      'INSERT INTO roles (id, name)',
+      '       VALUES ($1, $2)',
+      '       ON CONFLICT (id) DO UPDATE SET',
+      '         name = EXCLUDED.name,',
+      '         updated_at = now()',
+    ].join('\n')
+    const ROLE_PERMISSION_CHILD = [
+      'INSERT INTO role_permissions (role_id, permission_code)',
+      '         VALUES ($1, $2)',
+      '         ON CONFLICT (role_id, permission_code) DO NOTHING',
+    ].join('\n')
+    const MEMBERSHIP_DELETE = [
+      'DELETE FROM user_roles',
+      '     WHERE role_id = $2 AND user_id = ANY($1::text[])',
+      '     RETURNING user_id',
+    ].join('\n')
+    const IDENTITY_EXCLUSIVE = "SELECT pg_advisory_xact_lock(hashtext('directory:identity-maintenance'))"
+    const IDENTITY_SHARED = "SELECT pg_advisory_xact_lock_shared(hashtext('directory:identity-maintenance'))"
+    const INTEGRATION_LOCK = [
+      'SELECT id::text AS id, org_id, provider, corp_id, config',
+      '  FROM directory_integrations',
+      ' WHERE id = $1::uuid',
+      '   FOR SHARE',
+    ].join('\n')
+    const DEPARTMENT_DELETE = 'DELETE FROM directory_departments WHERE id = $1::uuid'
+    const USER_ROLE_UPDATE = 'UPDATE users SET role = $2 WHERE id = $1'
+
+    type RecordingQuery = (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>>; rowCount: number | null }>
+    type HeldWriter = {
+      pid: number
+      issued: string[]
+      query: RecordingQuery
+      commit: () => Promise<void>
+      rollback: () => Promise<void>
+    }
+    type ActorExpectation = { privilegeClass: 'standard' | 'high'; witness: string; reasons: readonly string[] }
+    type World = { actorId: string; targetId: string; orgId: string; connectionId: string; roleId: string | null }
+
+    async function waitForWaiterOn(sql: string, blockerPid: number, timeoutMs = 8_000, stopped: () => boolean = () => false): Promise<number> {
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline && !stopped()) {
+        const waiting = await observer.query(
+          `SELECT pid FROM pg_stat_activity
+            WHERE pid <> pg_backend_pid() AND state = 'active' AND wait_event_type = 'Lock' AND query = $1 AND $2 = ANY(pg_blocking_pids(pid))
+            LIMIT 1`,
+          [sql, blockerPid],
+        )
+        if (waiting.rows[0]?.pid) return Number(waiting.rows[0].pid)
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      if (stopped()) throw new Error('wait observation stopped')
+      throw new Error(`timed out waiting for a backend to block on ${blockerPid}`)
+    }
+
+    async function countOf(sql: string, params: unknown[]): Promise<number> {
+      const rows = await observer.query(sql, params)
+      return Number(rows.rows[0]?.n ?? 0)
+    }
+
+    async function relationLocks(pid: number, relation: string): Promise<number> {
+      return countOf(
+        `SELECT count(*)::int AS n FROM pg_locks l JOIN pg_class c ON c.oid = l.relation
+          WHERE l.pid = $1 AND c.relname = $2`,
+        [pid, relation],
+      )
+    }
+
+    async function readAssessment(userId: string): Promise<ActorExpectation> {
+      const assessment = await service.transaction(async (client) => assessSecurityActionPrivilege({
+        query: async (sql: string, params?: unknown[]) => {
+          const result = await client.query(sql, params)
+          return { rows: result.rows as Array<Record<string, unknown>>, rowCount: result.rowCount ?? null }
+        },
+      }, userId))
+      return { privilegeClass: assessment.privilegeClass, witness: assessment.witness, reasons: assessment.reasons }
+    }
+
+    async function insertUser(userId: string, admin: boolean): Promise<void> {
+      createdUserIds.push(userId)
+      createdPlanUserIds.push(userId)
+      await observer.query(
+        `INSERT INTO users (id, username, name, password_hash, is_active, is_admin, role, permissions, activation_status, local_password_set)
+         VALUES ($1, $1, $1, 'synthetic-unused', true, $2, 'user', '[]'::jsonb, 'activated', false)`,
+        [userId, admin],
+      )
+    }
+
+    async function seedWorld(options: { actorAdmin?: boolean; roleId?: string; roleName?: string; permissionCodes?: string[] } = {}): Promise<World> {
+      const actorId = `ais-n2-actor-${randomUUID()}`
+      const targetId = `ais-n2-target-${randomUUID()}`
+      const orgId = `ais-n2-org-${randomUUID()}`
+      const connectionId = randomUUID()
+      createdSourceIds.push(connectionId)
+      await observer.query('INSERT INTO directory_integrations (id, org_id, name, corp_id) VALUES ($1, $2, $2, $2)', [connectionId, orgId])
+      await insertUser(actorId, options.actorAdmin === true)
+      await insertUser(targetId, false)
+      if (options.roleId) {
+        createdRoleIds.push(options.roleId)
+        await observer.query('INSERT INTO roles (id, name) VALUES ($1, $2)', [options.roleId, options.roleName ?? options.roleId])
+        for (const code of options.permissionCodes ?? []) {
+          await observer.query('INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, $2)', [options.roleId, code])
+        }
+        await observer.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [actorId, options.roleId])
+      }
+      return { actorId, targetId, orgId, connectionId, roleId: options.roleId ?? null }
+    }
+
+    async function discoverWorld(world: World): Promise<PrivilegeRolePlan> {
+      return discoverPrivilegeRolePlan(observer, [world.actorId, world.targetId], { sourceIntegrationIds: [world.connectionId] })
+    }
+
+    function grantIntent(world: World): Record<string, unknown> {
+      return {
+        purpose: 'admin_login_grant_enable',
+        commandId: `ais-n2-${randomUUID()}`,
+        actorId: world.actorId,
+        orgId: world.orgId,
+        provider: 'dingtalk',
+        connectionId: world.connectionId,
+        applicationRevision: '1',
+        targets: [{
+          userId: world.targetId,
+          identityId: randomUUID(),
+          bindingRevision: '1',
+          evidenceId: `ais-n2-evidence-${randomUUID()}`,
+          evidenceWitness: `ais-n2-witness-${randomUUID()}`,
+          accessGeneration: '0',
+          privilegeWitness: 'ab'.repeat(32),
+        }],
+      }
+    }
+
+    async function openWriter(): Promise<HeldWriter> {
+      const writer = await service.getInternalPool().connect()
+      const issued: string[] = []
+      let settled = false
+      const close = async (sql: 'COMMIT' | 'ROLLBACK') => {
+        if (settled) return
+        settled = true
+        try {
+          await writer.query(sql)
+        } finally {
+          writer.release()
+        }
+      }
+      try {
+        await writer.query('BEGIN')
+        const pid = Number((await writer.query('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
+        return {
+          pid,
+          issued,
+          query: async (sql, params) => {
+            issued.push(sql)
+            const result = await writer.query(sql, params)
+            return { rows: result.rows as Array<Record<string, unknown>>, rowCount: result.rowCount }
+          },
+          commit: () => close('COMMIT'),
+          rollback: () => close('ROLLBACK'),
+        }
+      } catch (error) {
+        await close('ROLLBACK')
+        throw error
+      }
+    }
+
+    async function membershipCount(userId: string, roleId: string): Promise<number> {
+      return countOf('SELECT count(*)::int AS n FROM user_roles WHERE user_id = $1 AND role_id = $2', [userId, roleId])
+    }
+
+    async function permissionCount(roleId: string, code: string): Promise<number> {
+      return countOf('SELECT count(*)::int AS n FROM role_permissions WHERE role_id = $1 AND permission_code = $2', [roleId, code])
+    }
+
+    async function runConsumerFirst(input: {
+      plan: PrivilegeRolePlan
+      actorId: string
+      before: ActorExpectation
+      blockedSql: string
+      mutate: (query: RecordingQuery) => Promise<unknown>
+      whileBlocked: (writer: HeldWriter) => Promise<void>
+      afterRelease: (writer: HeldWriter) => Promise<void>
+    }): Promise<void> {
+      const gate = deferred()
+      let readerPid = 0
+      let seen: ActorExpectation | undefined
+      const reader = withAuthorizationInputTransaction(input.plan.lockPlan, async (tx) => {
+        await revalidatePrivilegeRolePlan(tx, input.plan)
+        const assessment = await assessSecurityActionPrivilege({
+          query: async (sql: string, params?: unknown[]) => {
+            const result = await tx.query(sql, params)
+            return { rows: result.rows, rowCount: result.rowCount ?? null }
+          },
+        }, input.actorId)
+        seen = { privilegeClass: assessment.privilegeClass, witness: assessment.witness, reasons: assessment.reasons }
+        readerPid = await pidOf(tx)
+        await gate.promise
+      }, { transaction: runnerOf(service) })
+      let stopReady = false
+      const ready = (async () => {
+        while (readerPid === 0 && !stopReady) await new Promise((resolve) => setTimeout(resolve, 10))
+      })()
+      const writer = await (async () => {
+        try {
+          await Promise.race([ready, reader])
+          if (readerPid === 0) throw new Error('consumer returned before actor assessment')
+          return await openWriter()
+        } catch (error) {
+          stopReady = true
+          gate.resolve()
+          await reader.catch(() => undefined)
+          throw error
+        }
+      })()
+      stopReady = true
+      const pending = input.mutate(writer.query)
+      let committed = false
+      let stopBlocked = false
+      const blocked = waitForWaiterOn(input.blockedSql, readerPid, 8_000, () => stopBlocked).then((pid) => ({ kind: 'blocked' as const, pid }))
+      try {
+        const finished = pending.then(() => ({ kind: 'finished' as const }), () => ({ kind: 'failed' as const }))
+        const outcome = await Promise.race([blocked, finished])
+        if (outcome.kind === 'failed') await pending
+        if (outcome.kind !== 'blocked') throw new Error(`writer finished before blocking on ${input.blockedSql}`)
+        const waiterPid = outcome.pid
+        expect(waiterPid).toBe(writer.pid)
+        expect(seen).toEqual({ privilegeClass: input.before.privilegeClass, witness: input.before.witness, reasons: input.before.reasons })
+        await input.whileBlocked(writer)
+        gate.resolve()
+        await reader
+        await pending
+        await writer.commit()
+        committed = true
+        await input.afterRelease(writer)
+      } finally {
+        stopBlocked = true
+        gate.resolve()
+        await pending.catch(() => undefined)
+        if (!committed) await writer.rollback().catch(() => undefined)
+        await reader.catch(() => undefined)
+        await blocked.catch(() => undefined)
+      }
+    }
+
+    async function runWriterFirst(input: {
+      world: World
+      plan: PrivilegeRolePlan
+      before: ActorExpectation
+      blockedSql: string
+      expectedCode: 'role_plan_stale' | 'actor_privilege_witness_mismatch'
+      mutate: (query: RecordingQuery) => Promise<unknown>
+      whileHeld: (writer: HeldWriter) => Promise<void>
+      afterCommit: (writer: HeldWriter) => Promise<void>
+      sameClass: boolean
+    }): Promise<void> {
+      const writer = await openWriter()
+      let reader: Promise<unknown> | undefined
+      let committed = false
+      try {
+        await input.mutate(writer.query)
+        await input.whileHeld(writer)
+        const statements: string[] = []
+        reader = withAuthorizationInputTransaction(input.plan.lockPlan, async (tx) => resolveAdminGrantTargetSet(tx, {
+          client: tx,
+          privilegePlan: input.plan,
+          actorPrivilege: { userId: input.world.actorId, orgId: input.world.orgId, privilegeWitness: input.before.witness },
+        }, grantIntent(input.world), 'issue'), {
+          transaction: (handler) => service.transaction((client) => handler({
+            query: (sql, params) => {
+              statements.push(sql)
+              return client.query(sql, params)
+            },
+            __rawClient: client.__rawClient,
+          })),
+        })
+        const waiterPid = await waitForWaiterOn(input.blockedSql, writer.pid)
+        expect(waiterPid).not.toBe(writer.pid)
+        await writer.commit()
+        committed = true
+        const error = await rejection(reader)
+        expect(error).toBeInstanceOf(AdminGrantReceivingRefusal)
+        expect(error).toMatchObject({ code: input.expectedCode })
+        expect(statements).toContain(input.blockedSql)
+        expect(statements).not.toContain(INTEGRATION_LOCK)
+        await input.afterCommit(writer)
+        if (input.sameClass) {
+          const after = await readAssessment(input.world.actorId)
+          expect(after.privilegeClass).toBe(input.before.privilegeClass)
+          expect(after.witness).not.toBe(input.before.witness)
+        }
+      } finally {
+        if (!committed) await writer.rollback().catch(() => undefined)
+        if (reader) await reader.catch(() => undefined)
+      }
+    }
+
+    async function seedOrdinaryRole(): Promise<World> {
+      return seedWorld({ roleId: `ais-n2-role-${randomUUID()}` })
+    }
+
+    it('R3 consumer-first holds root revalidation and actor assessment, the membership writer waits on the subject admission key, and the deletion commits after release', async () => {
+      const world = await seedOrdinaryRole()
+      const plan = await discoverWorld(world)
+      const before = await readAssessment(world.actorId)
+      expect(before.privilegeClass).toBe('standard')
+      expect(before.reasons).toEqual([])
+      expect(await membershipCount(world.actorId, world.roleId!)).toBe(1)
+      await runConsumerFirst({
+        plan,
+        actorId: world.actorId,
+        before,
+        blockedSql: AUTHORIZATION_INPUT_STATEMENTS.namespaceAdmission,
+        mutate: async (query) => {
+          await lockNamespaceAdmissionWrites({ query }, world.actorId)
+          await unassignUserRoles({ userIds: [world.actorId], roleId: world.roleId!, scope: { kind: 'platform-admin' }, executor: { query } })
+        },
+        whileBlocked: async (writer) => {
+          expect(writer.issued).toEqual([AUTHORIZATION_INPUT_STATEMENTS.namespaceAdmission])
+          expect(await relationLocks(writer.pid, 'users')).toBe(0)
+          expect(await relationLocks(writer.pid, 'roles')).toBe(0)
+          expect(await membershipCount(world.actorId, world.roleId!)).toBe(1)
+        },
+        afterRelease: async (writer) => {
+          expect(writer.issued).toEqual([AUTHORIZATION_INPUT_STATEMENTS.namespaceAdmission, MEMBERSHIP_DELETE])
+          expect(writer.issued.some((sql) => sql.includes('FROM users') || sql.includes('FOR UPDATE'))).toBe(false)
+          expect(await membershipCount(world.actorId, world.roleId!)).toBe(0)
+          const after = await readAssessment(world.actorId)
+          expect(after.privilegeClass).toBe('standard')
+          expect(after.reasons).toEqual([])
+        },
+      })
+    }, 30_000)
+
+    it('R3 writer-first holds the admission key and uncommitted deletion, the reader waits on that key, and the original plan is role_plan_stale before the integration lock', async () => {
+      const world = await seedOrdinaryRole()
+      const plan = await discoverWorld(world)
+      const before = await readAssessment(world.actorId)
+      expect(before.privilegeClass).toBe('standard')
+      expect(await membershipCount(world.actorId, world.roleId!)).toBe(1)
+      await runWriterFirst({
+        world,
+        plan,
+        before,
+        blockedSql: AUTHORIZATION_INPUT_STATEMENTS.namespaceAdmission,
+        expectedCode: 'role_plan_stale',
+        sameClass: false,
+        mutate: async (query) => {
+          await lockNamespaceAdmissionWrites({ query }, world.actorId)
+          await unassignUserRoles({ userIds: [world.actorId], roleId: world.roleId!, scope: { kind: 'platform-admin' }, executor: { query } })
+        },
+        whileHeld: async (writer) => {
+          expect(writer.issued).toEqual([AUTHORIZATION_INPUT_STATEMENTS.namespaceAdmission, MEMBERSHIP_DELETE])
+          expect(await relationLocks(writer.pid, 'users')).toBe(0)
+          expect(await relationLocks(writer.pid, 'roles')).toBe(0)
+          expect(await membershipCount(world.actorId, world.roleId!)).toBe(1)
+        },
+        afterCommit: async () => {
+          expect(await membershipCount(world.actorId, world.roleId!)).toBe(0)
+        },
+      })
+    }, 30_000)
+
+    it('R5 consumer-first holds root revalidation and actor assessment, the raw role update waits on the user row, and the update persists after release', async () => {
+      const world = await seedOrdinaryRole()
+      const plan = await discoverWorld(world)
+      const before = await readAssessment(world.actorId)
+      expect(before.privilegeClass).toBe('standard')
+      expect(before.reasons).toEqual([])
+      await runConsumerFirst({
+        plan,
+        actorId: world.actorId,
+        before,
+        blockedSql: USER_ROLE_UPDATE,
+        mutate: (query) => query(USER_ROLE_UPDATE, [world.actorId, 'clerk']),
+        whileBlocked: async (writer) => {
+          expect(writer.issued).toEqual([USER_ROLE_UPDATE])
+          const row = await observer.query('SELECT role, name FROM users WHERE id = $1', [world.actorId])
+          expect(row.rows).toEqual([{ role: 'user', name: world.actorId }])
+          expect(await membershipCount(world.actorId, world.roleId!)).toBe(1)
+        },
+        afterRelease: async () => {
+          const row = await observer.query('SELECT role, name FROM users WHERE id = $1', [world.actorId])
+          expect(row.rows).toEqual([{ role: 'clerk', name: world.actorId }])
+          expect(await membershipCount(world.actorId, world.roleId!)).toBe(1)
+          const after = await readAssessment(world.actorId)
+          expect(after.privilegeClass).toBe('standard')
+          expect(after.reasons).toEqual([])
+          expect(after.witness).not.toBe(before.witness)
+        },
+      })
+    }, 30_000)
+
+    it('R5 writer-first saves the expectation, the reader waits on the user row, and the committed role change mismatches with the class still standard', async () => {
+      const world = await seedOrdinaryRole()
+      const plan = await discoverWorld(world)
+      const before = await readAssessment(world.actorId)
+      expect(before.privilegeClass).toBe('standard')
+      expect(before.reasons).toEqual([])
+      await runWriterFirst({
+        world,
+        plan,
+        before,
+        blockedSql: USER_ROW_LOCK,
+        expectedCode: 'actor_privilege_witness_mismatch',
+        sameClass: true,
+        mutate: (query) => query(USER_ROLE_UPDATE, [world.actorId, 'clerk']),
+        whileHeld: async (writer) => {
+          expect(writer.issued).toEqual([USER_ROLE_UPDATE])
+          const row = await observer.query('SELECT role, name FROM users WHERE id = $1', [world.actorId])
+          expect(row.rows).toEqual([{ role: 'user', name: world.actorId }])
+          expect(await membershipCount(world.actorId, world.roleId!)).toBe(1)
+        },
+        afterCommit: async () => {
+          const row = await observer.query('SELECT role, name FROM users WHERE id = $1', [world.actorId])
+          expect(row.rows).toEqual([{ role: 'clerk', name: world.actorId }])
+          expect(await membershipCount(world.actorId, world.roleId!)).toBe(1)
+          const after = await readAssessment(world.actorId)
+          expect(after.privilegeClass).toBe('standard')
+          expect(after.reasons).toEqual([])
+        },
+      })
+    }, 30_000)
+
+    it('role parent consumer-first holds the ordinary role, the direct parent lock waits, and the permission child persists after release', async () => {
+      const world = await seedOrdinaryRole()
+      const plan = await discoverWorld(world)
+      const before = await readAssessment(world.actorId)
+      expect(before.privilegeClass).toBe('standard')
+      expect(before.reasons).toEqual([])
+      expect(plan.roleIds).toEqual([world.roleId])
+      await runConsumerFirst({
+        plan,
+        actorId: world.actorId,
+        before,
+        blockedSql: ROLE_PARENT_LOCK,
+        mutate: async (query) => {
+          await query(ROLE_PARENT_LOCK, [world.roleId])
+          await query(ROLE_PERMISSION_DELETE, [world.roleId, ['demo:read']])
+          await query(ROLE_PERMISSION_INSERT, [world.roleId, 'demo:read'])
+        },
+        whileBlocked: async (writer) => {
+          expect(writer.issued).toEqual([ROLE_PARENT_LOCK])
+          expect(await permissionCount(world.roleId!, 'demo:read')).toBe(0)
+          expect(await membershipCount(world.actorId, world.roleId!)).toBe(1)
+        },
+        afterRelease: async (writer) => {
+          expect(writer.issued).toEqual([ROLE_PARENT_LOCK, ROLE_PERMISSION_DELETE, ROLE_PERMISSION_INSERT])
+          expect(await permissionCount(world.roleId!, 'demo:read')).toBe(1)
+          expect(await membershipCount(world.actorId, world.roleId!)).toBe(1)
+          const after = await readAssessment(world.actorId)
+          expect(after.privilegeClass).toBe('standard')
+          expect(after.reasons).toEqual([])
+          expect(after.witness).not.toBe(before.witness)
+        },
+      })
+    }, 30_000)
+
+    it('role parent writer-first saves the low expectation, the reader waits on the shared role row, and the committed permission mismatches with the class still standard', async () => {
+      const world = await seedOrdinaryRole()
+      const plan = await discoverWorld(world)
+      const before = await readAssessment(world.actorId)
+      expect(before.privilegeClass).toBe('standard')
+      expect(before.reasons).toEqual([])
+      expect(plan.roleIds).toEqual([world.roleId])
+      await runWriterFirst({
+        world,
+        plan,
+        before,
+        blockedSql: AUTHORIZATION_INPUT_STATEMENTS.roleRowShared,
+        expectedCode: 'actor_privilege_witness_mismatch',
+        sameClass: true,
+        mutate: async (query) => {
+          await query(ROLE_PARENT_LOCK, [world.roleId])
+          await query(ROLE_PERMISSION_DELETE, [world.roleId, ['demo:read']])
+          await query(ROLE_PERMISSION_INSERT, [world.roleId, 'demo:read'])
+        },
+        whileHeld: async (writer) => {
+          expect(writer.issued).toEqual([ROLE_PARENT_LOCK, ROLE_PERMISSION_DELETE, ROLE_PERMISSION_INSERT])
+          expect(await permissionCount(world.roleId!, 'demo:read')).toBe(0)
+          expect(await membershipCount(world.actorId, world.roleId!)).toBe(1)
+        },
+        afterCommit: async () => {
+          expect(await permissionCount(world.roleId!, 'demo:read')).toBe(1)
+          expect(await membershipCount(world.actorId, world.roleId!)).toBe(1)
+          const after = await readAssessment(world.actorId)
+          expect(after.privilegeClass).toBe('standard')
+          expect(after.reasons).toEqual([])
+        },
+      })
+    }, 30_000)
+
+    it('applyRoleMatrix consumer-first waits on the existing-role upsert before the permission insert, then the content commits', async () => {
+      const pluginId = `aisn2p${randomUUID().slice(0, 8)}`
+      const appId = `aisn2a${randomUUID().slice(0, 8)}`
+      const roleId = `${pluginId}:${appId}:clerk`
+      const world = await seedWorld({ roleId, roleName: 'ordinary', permissionCodes: ['demo:read'] })
+      const plan = await discoverWorld(world)
+      const before = await readAssessment(world.actorId)
+      expect(before.privilegeClass).toBe('standard')
+      expect(before.reasons).toEqual([])
+      expect(plan.roleIds).toEqual([roleId])
+      await runConsumerFirst({
+        plan,
+        actorId: world.actorId,
+        before,
+        blockedSql: ROLE_UPSERT,
+        mutate: (query) => applyRoleMatrix(query, {
+          pluginId,
+          appId,
+          tenantId: 'ais-n2-tenant',
+          projectId: 'ais-n2-project',
+          matrix: { roles: [{ slug: 'clerk', label: 'N2 clerk', permissions: ['demo:read', 'test:read'] }] },
+        }),
+        whileBlocked: async (writer) => {
+          expect(writer.issued.at(-1)).toBe(ROLE_UPSERT)
+          expect(writer.issued.filter((sql) => sql === PERMISSION_CATALOG_INSERT)).toHaveLength(2)
+          expect(writer.issued).not.toContain(ROLE_PERMISSION_CHILD)
+          expect(writer.issued).not.toContain(ROLE_PARENT_LOCK)
+          const role = await observer.query('SELECT name FROM roles WHERE id = $1', [roleId])
+          expect(role.rows).toEqual([{ name: 'ordinary' }])
+          expect(await permissionCount(roleId, 'test:read')).toBe(0)
+          expect(await permissionCount(roleId, 'demo:read')).toBe(1)
+        },
+        afterRelease: async (writer) => {
+          expect(writer.issued).toContain(ROLE_PERMISSION_CHILD)
+          const role = await observer.query('SELECT name FROM roles WHERE id = $1', [roleId])
+          expect(role.rows).toEqual([{ name: 'N2 clerk' }])
+          expect(await permissionCount(roleId, 'test:read')).toBe(1)
+          expect(await permissionCount(roleId, 'demo:read')).toBe(1)
+          expect(await membershipCount(world.actorId, roleId)).toBe(1)
+          const after = await readAssessment(world.actorId)
+          expect(after.privilegeClass).toBe('standard')
+          expect(after.reasons).toEqual([])
+          expect(after.witness).not.toBe(before.witness)
+        },
+      })
+    }, 30_000)
+
+    it('applyRoleMatrix writer-first saves the low expectation, the reader waits on the shared role row, and the committed upsert content mismatches with the class still standard', async () => {
+      const pluginId = `aisn2p${randomUUID().slice(0, 8)}`
+      const appId = `aisn2a${randomUUID().slice(0, 8)}`
+      const roleId = `${pluginId}:${appId}:clerk`
+      const world = await seedWorld({ roleId, roleName: 'ordinary', permissionCodes: ['demo:read'] })
+      const plan = await discoverWorld(world)
+      const before = await readAssessment(world.actorId)
+      expect(before.privilegeClass).toBe('standard')
+      expect(before.reasons).toEqual([])
+      expect(plan.roleIds).toEqual([roleId])
+      await runWriterFirst({
+        world,
+        plan,
+        before,
+        blockedSql: AUTHORIZATION_INPUT_STATEMENTS.roleRowShared,
+        expectedCode: 'actor_privilege_witness_mismatch',
+        sameClass: true,
+        mutate: (query) => applyRoleMatrix(query, {
+          pluginId,
+          appId,
+          tenantId: 'ais-n2-tenant',
+          projectId: 'ais-n2-project',
+          matrix: { roles: [{ slug: 'clerk', label: 'N2 clerk', permissions: ['demo:read', 'test:read'] }] },
+        }),
+        whileHeld: async (writer) => {
+          expect(writer.issued).toContain(ROLE_UPSERT)
+          expect(writer.issued).toContain(ROLE_PERMISSION_CHILD)
+          expect(writer.issued).not.toContain(ROLE_PARENT_LOCK)
+          const role = await observer.query('SELECT name FROM roles WHERE id = $1', [roleId])
+          expect(role.rows).toEqual([{ name: 'ordinary' }])
+          expect(await permissionCount(roleId, 'test:read')).toBe(0)
+        },
+        afterCommit: async () => {
+          const role = await observer.query('SELECT name FROM roles WHERE id = $1', [roleId])
+          expect(role.rows).toEqual([{ name: 'N2 clerk' }])
+          expect(await permissionCount(roleId, 'test:read')).toBe(1)
+          expect(await membershipCount(world.actorId, roleId)).toBe(1)
+          const after = await readAssessment(world.actorId)
+          expect(after.privilegeClass).toBe('standard')
+          expect(after.reasons).toEqual([])
+        },
+      })
+    }, 30_000)
+
+    async function seedCascade(): Promise<World & { departmentId: string }> {
+      const world = await seedWorld({ actorAdmin: true })
+      const departmentId = randomUUID()
+      await observer.query(
+        `INSERT INTO directory_departments (id, integration_id, external_department_id, name)
+         VALUES ($1::uuid, $2::uuid, $3, $3)`,
+        [departmentId, world.connectionId, `ais-n2-dept-${departmentId}`],
+      )
+      await observer.query(
+        `INSERT INTO delegated_role_admin_scopes (admin_user_id, namespace, directory_department_id)
+         VALUES ($1, 'ais-n2', $2::uuid)`,
+        [world.actorId, departmentId],
+      )
+      return { ...world, departmentId }
+    }
+
+    async function linkedCount(world: World): Promise<number> {
+      return countOf(
+        `SELECT count(*)::int AS n
+           FROM directory_account_links l
+           JOIN directory_accounts a ON a.id = l.directory_account_id
+          WHERE l.local_user_id = $1 AND a.integration_id = $2::uuid`,
+        [world.actorId, world.connectionId],
+      )
+    }
+
+    async function cascadeCounts(world: World, departmentId: string): Promise<{ departments: number; scopes: number }> {
+      return {
+        departments: await countOf('SELECT count(*)::int AS n FROM directory_departments WHERE id = $1::uuid', [departmentId]),
+        scopes: await countOf('SELECT count(*)::int AS n FROM delegated_role_admin_scopes WHERE admin_user_id = $1 AND directory_department_id = $2::uuid', [world.actorId, departmentId]),
+      }
+    }
+
+    it('X02 consumer-first holds root revalidation and actor assessment, the department delete waits on the exclusive identity key, and the scope cascade commits after release', async () => {
+      const world = await seedCascade()
+      const plan = await discoverWorld(world)
+      const before = await readAssessment(world.actorId)
+      expect(before.privilegeClass).toBe('high')
+      expect(before.reasons).toEqual(['platform_admin_flag', 'delegated_admin_scope'])
+      expect(plan.roleIds).toEqual([])
+      expect(await linkedCount(world)).toBe(0)
+      expect(await cascadeCounts(world, world.departmentId)).toEqual({ departments: 1, scopes: 1 })
+      await runConsumerFirst({
+        plan,
+        actorId: world.actorId,
+        before,
+        blockedSql: IDENTITY_EXCLUSIVE,
+        mutate: async (query) => {
+          await query(IDENTITY_EXCLUSIVE)
+          await query(DEPARTMENT_DELETE, [world.departmentId])
+        },
+        whileBlocked: async (writer) => {
+          expect(writer.issued).toEqual([IDENTITY_EXCLUSIVE])
+          expect(await relationLocks(writer.pid, 'users')).toBe(0)
+          expect(await cascadeCounts(world, world.departmentId)).toEqual({ departments: 1, scopes: 1 })
+          expect(await linkedCount(world)).toBe(0)
+        },
+        afterRelease: async (writer) => {
+          expect(writer.issued).toEqual([IDENTITY_EXCLUSIVE, DEPARTMENT_DELETE])
+          expect(writer.issued.some((sql) => sql.includes('delegated_role_admin_scopes') || sql.includes('FROM users'))).toBe(false)
+          expect(await cascadeCounts(world, world.departmentId)).toEqual({ departments: 0, scopes: 0 })
+          expect(await linkedCount(world)).toBe(0)
+          const after = await readAssessment(world.actorId)
+          expect(after.privilegeClass).toBe('high')
+          expect(after.reasons).toEqual(['platform_admin_flag'])
+          expect(after.witness).not.toBe(before.witness)
+        },
+      })
+    }, 30_000)
+
+    it('X02 writer-first saves the high expectation, the reader waits on the shared identity key, and the committed cascade mismatches high to high before the integration lock', async () => {
+      const world = await seedCascade()
+      const plan = await discoverWorld(world)
+      const before = await readAssessment(world.actorId)
+      expect(before.privilegeClass).toBe('high')
+      expect(before.reasons).toEqual(['platform_admin_flag', 'delegated_admin_scope'])
+      expect(plan.roleIds).toEqual([])
+      expect(await linkedCount(world)).toBe(0)
+      await runWriterFirst({
+        world,
+        plan,
+        before,
+        blockedSql: IDENTITY_SHARED,
+        expectedCode: 'actor_privilege_witness_mismatch',
+        sameClass: true,
+        mutate: async (query) => {
+          await query(IDENTITY_EXCLUSIVE)
+          await query(DEPARTMENT_DELETE, [world.departmentId])
+        },
+        whileHeld: async (writer) => {
+          expect(writer.issued).toEqual([IDENTITY_EXCLUSIVE, DEPARTMENT_DELETE])
+          expect(writer.issued.some((sql) => sql.includes('delegated_role_admin_scopes') || sql.includes('FROM users'))).toBe(false)
+          expect(await relationLocks(writer.pid, 'users')).toBe(0)
+          expect(await relationLocks(writer.pid, 'directory_departments')).toBeGreaterThan(0)
+          expect(await cascadeCounts(world, world.departmentId)).toEqual({ departments: 1, scopes: 1 })
+          expect(await linkedCount(world)).toBe(0)
+        },
+        afterCommit: async () => {
+          expect(await cascadeCounts(world, world.departmentId)).toEqual({ departments: 0, scopes: 0 })
+          expect(await linkedCount(world)).toBe(0)
+          const after = await readAssessment(world.actorId)
+          expect(after.privilegeClass).toBe('high')
+          expect(after.reasons).toEqual(['platform_admin_flag'])
+        },
+      })
     }, 30_000)
   })
 })

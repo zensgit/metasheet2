@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import * as bcrypt from 'bcryptjs'
 import express from 'express'
 import request from 'supertest'
-import { afterAll, describe, it, expect, vi } from 'vitest'
+import { afterAll, describe, it, expect, onTestFinished, vi } from 'vitest'
 import { Pool as PgPool } from 'pg'
 import { readPoolConnection, resolveEffectiveRepairTimeout } from '../../src/auth/dingtalk-identity-repair-cli'
 const provider = vi.hoisted(() => ({
@@ -38,6 +38,7 @@ import { exchangeCodeForUser } from '../../src/auth/dingtalk-oauth'
 import * as revocations from '../../src/auth/session-revocation'
 import * as sessionRegistry from '../../src/auth/session-registry'
 import { AuthService, authService } from '../../src/auth/AuthService'
+import { jwtAuthMiddleware } from '../../src/auth/jwt-middleware'
 import { authRouter } from '../../src/routes/auth'
 import { ApiTokenService } from '../../src/multitable/api-token-service'
 import { probeEncryptedStores } from '../../src/security/encrypted-store-probe'
@@ -72,6 +73,14 @@ import {
 const suite = process.env.DATABASE_URL ? describe : describe.skip
 if (process.env.EXPECT_DB === '1')
   it('requires a real DB', () => expect(process.env.DATABASE_URL).toBeTruthy())
+async function promoteFixtureUser(userId: string): Promise<void> {
+  const previous = (await query('SELECT role FROM users WHERE id=$1', [userId])).rows[0].role
+  onTestFinished(async () => {
+    await query('UPDATE users SET role=$2 WHERE id=$1', [userId, previous])
+  })
+  await query("UPDATE users SET role='admin' WHERE id=$1", [userId])
+}
+
 async function fixture() {
   process.env.ENCRYPTION_KEY = 'synthetic-repair-key-'.repeat(5)
   process.env.ENCRYPTION_SALT = 'synthetic-repair-salt-'.repeat(3)
@@ -897,7 +906,7 @@ suite('DingTalk controlled login repair', () => {
       proof = await f.verify(),
       p = await previewDingTalkRepair(proof)
     await expect(applyDingTalkRepair(proof, p.digest, 'yes')).rejects.toThrow()
-    await query("UPDATE users SET role='admin' WHERE id=$1", [f.user])
+    await promoteFixtureUser(f.user)
     await expect(
       applyDingTalkRepair(proof, p.digest, 'apply'),
     ).rejects.toThrow()
@@ -913,7 +922,7 @@ suite('DingTalk controlled login repair', () => {
       f.password,
       'rollback',
     )
-    await query("UPDATE users SET role='admin' WHERE id=$1", [f.user])
+    await promoteFixtureUser(f.user)
     await expect(
       rollbackDingTalkRepair(
         r.id,
@@ -2172,6 +2181,7 @@ suite('DingTalk controlled login repair', () => {
   describe('POST /api/auth/password/change across a repair rollback', () => {
     const app = express()
     app.use(express.json())
+    app.use(jwtAuthMiddleware)
     app.use('/api/auth', authRouter)
     const newPassword = 'SyntheticRotated-Only!58'
     const changePassword = (token: string) =>
@@ -2206,9 +2216,8 @@ suite('DingTalk controlled login repair', () => {
         else process.env.RBAC_TOKEN_TRUST = trust
       }
     }
-    // Parks the request after authentication (generation already read) and after the password write,
-    // before the session write. The first tenant lookup is token verification's; the second is the
-    // session re-issuance's, reached only once the new password and the revocation watermark are committed.
+    // Both the real JWT gate and the route verify the bearer before the password write.
+    // Park only the later issuer lookup, after the committed password write is visible.
     const parkBeforeSession = (user: string) => {
       let entered!: () => void, resume!: () => void
       const reached = new Promise<void>((resolve) => {
@@ -2218,23 +2227,24 @@ suite('DingTalk controlled login repair', () => {
           resume = resolve
         })
       const real = authService.resolveSessionTenantId.bind(authService)
-      let calls = 0
-      const spy = vi
-        .spyOn(authService, 'resolveSessionTenantId')
-        .mockImplementation(async (...args) => {
-          const result = await real(...args)
-          if (++calls === 2) {
-            entered()
-            await released
-          }
-          return result
-        })
       const parkedAfterPasswordWrite = async () =>
         (
           await query('SELECT must_change_password FROM users WHERE id=$1', [
             user,
           ])
         ).rows[0].must_change_password === false
+      let parked = false
+      const spy = vi
+        .spyOn(authService, 'resolveSessionTenantId')
+        .mockImplementation(async (...args) => {
+          const result = await real(...args)
+          if (!parked && args[0] === user && await parkedAfterPasswordWrite()) {
+            parked = true
+            entered()
+            await released
+          }
+          return result
+        })
       return { reached, resume, spy, parkedAfterPasswordWrite }
     }
 
@@ -2253,7 +2263,10 @@ suite('DingTalk controlled login repair', () => {
         const park = parkBeforeSession(f.user)
         const pending = changePassword(login!.token).then((res) => res)
         try {
-          await park.reached
+          await Promise.race([
+            park.reached,
+            pending.then((res) => { throw new Error(`PASSWORD_CHANGE_PARK_NOT_REACHED:${res.status}`) }),
+          ])
           expect(await park.parkedAfterPasswordWrite()).toBe(true)
           const recovery = await previewDingTalkRepairRecovery(
             r.id,
@@ -2300,7 +2313,10 @@ suite('DingTalk controlled login repair', () => {
         const slow = parkBeforeSession(f.user)
         const normal = changePassword(again!.token).then((res) => res)
         try {
-          await slow.reached
+          await Promise.race([
+            slow.reached,
+            normal.then((res) => { throw new Error(`PASSWORD_CHANGE_PARK_NOT_REACHED:${res.status}`) }),
+          ])
           expect(await slow.parkedAfterPasswordWrite()).toBe(true)
           // JWT iat has second precision: a token minted now would postdate the revocation watermark.
           await new Promise((resolve) => setTimeout(resolve, 1100))
@@ -4350,7 +4366,7 @@ suite('DingTalk controlled login repair', () => {
           const { f, r } = await loginAppSwitched(),
             b = await secondAdmin(f)
           const req = await requestReanchor(f, r.id, b, f.admin, 'synthetic-scan')
-          await query("UPDATE users SET role='admin' WHERE id=$1", [f.user])
+          await promoteFixtureUser(f.user)
           await expectReanchorRefused(
             f,
             r.id,
@@ -5884,6 +5900,364 @@ suite('DingTalk controlled login repair', () => {
     })
   })
 
+  describe('monotonic session watermark', () => {
+    /**
+     * The holder locks the seeded watermark and writes nothing yet. The real writer evaluates its
+     * own clock, then waits on that row. Only that observed wait lets the holder store a newer
+     * database clock and commit. The writer's own completion has to leave exactly that clock.
+     */
+    const readWatermark = async (userId: string) => {
+      const rows = (
+        await query(
+          `SELECT revoked_after::text AS revoked_after,
+                  updated_at::text AS updated_at,
+                  updated_by,
+                  reason,
+                  ((extract(epoch FROM revoked_after) * 1000000)::bigint)::text AS epoch_us
+           FROM user_session_revocations
+           WHERE user_id=$1`,
+          [userId],
+        )
+      ).rows
+      return (rows[0] as {
+        revoked_after: string
+        updated_at: string
+        updated_by: string | null
+        reason: string | null
+        epoch_us: string
+      } | undefined) ?? null
+    }
+    const restingRows = async (userId: string) => ({
+      user: (await query('SELECT to_jsonb(u) AS row FROM users u WHERE id=$1', [userId])).rows,
+      sessions: (
+        await query(
+          'SELECT to_jsonb(t) AS row FROM user_sessions t WHERE user_id=$1 ORDER BY to_jsonb(t)::text',
+          [userId],
+        )
+      ).rows,
+      tokens: (
+        await query(
+          'SELECT to_jsonb(t) AS row FROM multitable_api_tokens t WHERE created_by=$1 ORDER BY to_jsonb(t)::text',
+          [userId],
+        )
+      ).rows,
+    })
+    const plantIdleCredential = async (userId: string) => {
+      const session = await sessionRegistry.createUserSession(userId, {
+        sessionId: randomUUID(),
+        expiresAt: new Date(Date.now() + 600000).toISOString(),
+      })
+      expect(session).not.toBeNull()
+      await query(
+        `INSERT INTO multitable_api_tokens(id,name,token_hash,token_prefix,scopes,created_by,revoked) VALUES($1,'synthetic watermark token',$1,$1,'["records:read"]',$2,false)`,
+        [randomUUID(), userId],
+      )
+    }
+    const seedPastWatermark = async (userId: string, updatedBy: string, reason: string) => {
+      await query(
+        `INSERT INTO user_session_revocations (user_id, revoked_after, updated_at, updated_by, reason)
+         VALUES ($1, clock_timestamp() - interval '1 hour', clock_timestamp() - interval '1 hour', $2, $3)`,
+        [userId, updatedBy, reason],
+      )
+    }
+    const holdWatermarkRow = async (userId: string) => {
+      const holder = await pool!.connect()
+      await holder.query('BEGIN')
+      const locked = await holder.query(
+        'SELECT user_id FROM user_session_revocations WHERE user_id=$1 FOR UPDATE',
+        [userId],
+      )
+      if (locked.rows.length !== 1) {
+        await holder.query('ROLLBACK').catch(() => undefined)
+        holder.release()
+        throw new Error('the watermark row was not locked')
+      }
+      const pid = Number((await holder.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      let open = true
+      const end = async (sql: 'COMMIT' | 'ROLLBACK' = 'ROLLBACK') => {
+        if (!open) return
+        open = false
+        try {
+          await holder.query(sql)
+        } finally {
+          holder.release()
+        }
+      }
+      const raiseAndCommit = async (queryStartUs: string) => {
+        const raised = await holder.query(
+          `UPDATE user_session_revocations
+           SET revoked_after = clock_timestamp()
+           WHERE user_id=$1
+           RETURNING revoked_after::text AS h,
+                     ((extract(epoch FROM revoked_after) * 1000000)::bigint)::text AS epoch_us,
+                     (((extract(epoch FROM revoked_after) * 1000000)::bigint) > $2::bigint) AS above_query_start`,
+          [userId, queryStartUs],
+        )
+        expect(raised.rows).toHaveLength(1)
+        expect(raised.rows[0].above_query_start).toBe(true)
+        const saved = { h: String(raised.rows[0].h), epochUs: String(raised.rows[0].epoch_us) }
+        expect(saved.epochUs).toMatch(/^[0-9]+$/)
+        await end('COMMIT')
+        return saved
+      }
+      return { pid, end, raiseAndCommit }
+    }
+    const observeWaitingInsert = async (holderPid: number, marker: string) => {
+      for (let i = 0; i < 600; i++) {
+        const rows = (
+          await query(
+            `SELECT pid::int AS pid,
+                    query,
+                    ((extract(epoch FROM query_start) * 1000000)::bigint)::text AS query_start_us,
+                    pg_backend_pid()::int AS observer
+             FROM pg_stat_activity
+             WHERE datname = current_database()
+               AND pid <> pg_backend_pid()
+               AND pid <> $1
+               AND state = 'active'
+               AND wait_event_type = 'Lock'
+               AND $1 = ANY(pg_blocking_pids(pid))
+               AND query LIKE '%INSERT INTO user_session_revocations%'
+               AND query LIKE '%ON CONFLICT%'
+               AND query LIKE '%EXCLUDED.revoked_after%'
+               AND query LIKE $2`,
+            [holderPid, `%${marker}%`],
+          )
+        ).rows as Array<{ pid: number; query: string; query_start_us: string; observer: number }>
+        if (rows.length > 1) throw new Error('more than one native waiter on the watermark row')
+        if (rows.length === 1) {
+          const pid = Number(rows[0].pid)
+          const observer = Number(rows[0].observer)
+          if (pid === holderPid || pid === observer || holderPid === observer) {
+            throw new Error('watermark wait did not use distinct native PIDs')
+          }
+          return {
+            pid,
+            observer,
+            query: rows[0].query,
+            queryStartUs: String(rows[0].query_start_us),
+          }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      return null
+    }
+    const finishBehindHolder = async <T>(userId: string, marker: string, start: () => Promise<T>) => {
+      const holder = await holdWatermarkRow(userId)
+      const writer = start().then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      )
+      try {
+        const waiting = await observeWaitingInsert(holder.pid, marker)
+        if (!waiting) throw new Error(`the native writer never waited on its ${marker} watermark INSERT`)
+        expect(waiting.query).toContain('INSERT INTO user_session_revocations')
+        expect(waiting.query).toContain('ON CONFLICT')
+        expect(waiting.query).toContain('EXCLUDED.revoked_after')
+        expect(waiting.query).toContain(marker)
+        expect(waiting.pid).not.toBe(holder.pid)
+        expect(waiting.pid).not.toBe(waiting.observer)
+        expect(holder.pid).not.toBe(waiting.observer)
+        const saved = await holder.raiseAndCommit(waiting.queryStartUs)
+        const done = await writer
+        if (done.ok === false) throw done.error
+        return { saved, value: done.value }
+      } finally {
+        await holder.end()
+        await writer
+      }
+    }
+    const assertExactWatermark = async (
+      userId: string,
+      saved: { h: string; epochUs: string },
+      updatedBy: string,
+      reason: string,
+    ) => {
+      const rows = (
+        await query(
+          `SELECT revoked_after,
+                  updated_at,
+                  (revoked_after = $2::timestamptz) AS exact_text,
+                  (((extract(epoch FROM revoked_after) * 1000000)::bigint)::text = $3) AS exact_us,
+                  (revoked_after > updated_at) AS later_than_metadata_clock,
+                  updated_by,
+                  reason
+           FROM user_session_revocations
+           WHERE user_id=$1`,
+          [userId, saved.h, saved.epochUs],
+        )
+      ).rows
+      expect(rows).toHaveLength(1)
+      expect(rows[0].exact_text).toBe(true)
+      expect(rows[0].exact_us).toBe(true)
+      expect(rows[0].later_than_metadata_clock).toBe(true)
+      expect(rows[0].updated_by).toBe(updatedBy)
+      expect(rows[0].reason).toBe(reason)
+      const text = await readWatermark(userId)
+      expect(text).toMatchObject({
+        revoked_after: saved.h,
+        epoch_us: saved.epochUs,
+        updated_by: updatedBy,
+        reason,
+      })
+      return rows[0]
+    }
+
+    it('W1: in-flight revokeUserSessions keeps the later holder watermark and still writes its metadata', async () => {
+      const untouched = await fixture()
+      await plantIdleCredential(untouched.user)
+      expect(await readWatermark(untouched.user)).toBeNull()
+      const untouchedBefore = await restingRows(untouched.user)
+      const target = await bareUser()
+      await plantIdleCredential(target)
+      const targetBefore = await restingRows(target)
+      const sibling = await bareUser()
+      await seedPastWatermark(sibling, 'wm-sibling-actor', 'wm-sibling-reason')
+      const siblingBefore = await readWatermark(sibling)
+      await seedPastWatermark(target, 'wm-stale-actor', 'wm-stale-reason')
+      const stale = await readWatermark(target)
+      expect(stale?.updated_by).toBe('wm-stale-actor')
+      const updatedBy = 'wm-helper-actor'
+      const reason = 'wm-helper-reason'
+      const { saved, value } = await finishBehindHolder(target, 'NOW()', () =>
+        revocations.revokeUserSessions(target, { updatedBy, reason }),
+      )
+      expect(value).not.toBeNull()
+      if (!value) throw new Error('revokeUserSessions returned null')
+      const stored = await assertExactWatermark(target, saved, updatedBy, reason)
+      expect(value.revokedAfter).toBe(new Date(stored.revoked_after).toISOString())
+      expect(value.updatedAt).toBe(new Date(stored.updated_at).toISOString())
+      expect(value).toMatchObject({ updatedBy, reason })
+      expect(saved.epochUs).not.toBe(stale?.epoch_us)
+      expect(await restingRows(target)).toEqual(targetBefore)
+      expect(await restingRows(untouched.user)).toEqual(untouchedBefore)
+      expect(await readWatermark(untouched.user)).toBeNull()
+      expect(await readWatermark(sibling)).toEqual(siblingBefore)
+      expect(
+        (await query('SELECT count(*)::int AS n FROM user_session_revocations WHERE user_id=$1', [target])).rows,
+      ).toEqual([{ n: 1 }])
+    })
+
+    it('W2: in-flight applyDingTalkRepair keeps the later holder watermark and still applies', async () => {
+      const f = await fixture()
+      const proof = await f.verify()
+      const preview = await previewDingTalkRepair(proof)
+      const graph = await f.graph()
+      const sibling = await bareUser()
+      await seedPastWatermark(sibling, 'wm-sibling-actor', 'wm-sibling-reason')
+      const siblingBefore = await readWatermark(sibling)
+      await seedPastWatermark(f.user, 'wm-stale-actor', 'wm-stale-reason')
+      const credentials = await liveCredentials(f)
+      const { saved, value } = await finishBehindHolder(f.user, 'clock_timestamp()', () =>
+        applyDingTalkRepair(proof, preview.digest, 'apply'),
+      )
+      expect(value).toMatchObject({
+        id: expect.any(String),
+        digest: expect.any(String),
+        accountCount: 1,
+        targetSessionsRevoked: true,
+        permissionsChanged: false,
+      })
+      await assertExactWatermark(f.user, saved, f.admin, 'dingtalk_identity_repair_apply')
+      await credentials.expectRevoked()
+      expect(await f.graph()).toEqual(graph)
+      expect((await identityOf(f.user))[0].row).toMatchObject({
+        external_key: f.corp + ':new-open-' + f.user,
+        corp_id: f.corp,
+        provider_open_id: 'new-open-' + f.user,
+        provider_union_id: 'new-union-' + f.user,
+      })
+      expect(await repairRow(value.id)).toMatchObject({ state: 'applied', actor_id: f.admin })
+      expect(await auditOf(value.id)).toEqual([{ action: 'apply', action_details: { actorId: f.admin } }])
+      expect(
+        (await query('SELECT id FROM dingtalk_login_repairs WHERE user_id=$1', [f.user])).rows,
+      ).toEqual([{ id: value.id }])
+      expect(await readWatermark(sibling)).toEqual(siblingBefore)
+    })
+
+    it('W3: revokeUserSessions inserts, then advances a past watermark and replaces metadata', async () => {
+      const user = await bareUser()
+      await plantIdleCredential(user)
+      const resting = await restingRows(user)
+      const sibling = await bareUser()
+      await seedPastWatermark(sibling, 'wm-sibling-actor', 'wm-sibling-reason')
+      const siblingBefore = await readWatermark(sibling)
+      const created = await revocations.revokeUserSessions(user, {
+        updatedBy: 'wm-insert-actor',
+        reason: 'wm-insert-reason',
+      })
+      expect(created).not.toBeNull()
+      if (!created) throw new Error('revokeUserSessions returned null')
+      expect(created).toMatchObject({ updatedBy: 'wm-insert-actor', reason: 'wm-insert-reason' })
+      expect(created.revokedAfter).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+      expect(created.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+      const inserted = (
+        await query(
+          `SELECT revoked_after,
+                  updated_at,
+                  (revoked_after <= clock_timestamp()) AS not_future,
+                  (revoked_after > clock_timestamp() - interval '1 minute') AS recent
+           FROM user_session_revocations
+           WHERE user_id=$1`,
+          [user],
+        )
+      ).rows
+      expect(inserted).toHaveLength(1)
+      expect(inserted[0].not_future).toBe(true)
+      expect(inserted[0].recent).toBe(true)
+      expect(created.revokedAfter).toBe(new Date(inserted[0].revoked_after).toISOString())
+      expect(created.updatedAt).toBe(new Date(inserted[0].updated_at).toISOString())
+      expect(await readWatermark(user)).toMatchObject({
+        updated_by: 'wm-insert-actor',
+        reason: 'wm-insert-reason',
+      })
+      const seeded = (
+        await query(
+          `UPDATE user_session_revocations
+           SET revoked_after = clock_timestamp() - interval '1 hour',
+               updated_at = clock_timestamp() - interval '1 hour',
+               updated_by = $2,
+               reason = $3
+           WHERE user_id=$1
+           RETURNING revoked_after::text AS revoked_after`,
+          [user, 'wm-stale-actor', 'wm-stale-reason'],
+        )
+      ).rows[0]
+      const advanced = await revocations.revokeUserSessions(user, {
+        updatedBy: 'wm-forward-actor',
+        reason: 'wm-forward-reason',
+      })
+      expect(advanced).not.toBeNull()
+      if (!advanced) throw new Error('revokeUserSessions returned null')
+      const after = (
+        await query(
+          `SELECT revoked_after,
+                  updated_at,
+                  updated_by,
+                  reason,
+                  (revoked_after > $2::timestamptz) AS advanced,
+                  (revoked_after <= clock_timestamp()) AS not_future
+           FROM user_session_revocations
+           WHERE user_id=$1`,
+          [user, seeded.revoked_after],
+        )
+      ).rows
+      expect(after).toHaveLength(1)
+      expect(after[0].advanced).toBe(true)
+      expect(after[0].not_future).toBe(true)
+      expect(after[0].updated_by).toBe('wm-forward-actor')
+      expect(after[0].reason).toBe('wm-forward-reason')
+      expect(advanced).toMatchObject({ updatedBy: 'wm-forward-actor', reason: 'wm-forward-reason' })
+      expect(advanced.revokedAfter).toBe(new Date(after[0].revoked_after).toISOString())
+      expect(advanced.updatedAt).toBe(new Date(after[0].updated_at).toISOString())
+      expect(
+        (await query('SELECT count(*)::int AS n FROM user_session_revocations WHERE user_id=$1', [user])).rows,
+      ).toEqual([{ n: 1 }])
+      expect(await restingRows(user)).toEqual(resting)
+      expect(await readWatermark(sibling)).toEqual(siblingBefore)
+    })
+  })
+
   describe('maintenance CLI process against the real database', () => {
     const backendRoot = fileURLToPath(new URL('../..', import.meta.url))
     const entry = path.join(backendRoot, 'scripts/dingtalk-login-repair.ts')
@@ -5957,7 +6331,10 @@ suite('DingTalk controlled login repair', () => {
       const sockets: Socket[] = []
       let stalled = false
       const server = createServer((client) => {
-        const upstream = connect(Number(target.port || 5432), target.hostname)
+        const host = target.searchParams.get('host') || target.hostname
+        const upstream = host.startsWith('/')
+          ? connect(path.join(host, `.s.PGSQL.${target.port || 5432}`))
+          : connect(Number(target.port || 5432), host)
         sockets.push(client, upstream)
         client.on('data', (d) => {
           if (!stalled) upstream.write(d)
@@ -5981,6 +6358,7 @@ suite('DingTalk controlled login repair', () => {
       await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()))
       const relayed = new URL(target.toString())
       relayed.hostname = '127.0.0.1'
+      relayed.searchParams.delete('host')
       relayed.port = String((server.address() as AddressInfo).port)
       return {
         url: relayed.toString(),

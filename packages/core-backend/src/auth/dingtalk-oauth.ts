@@ -25,6 +25,13 @@ import {
 } from './login-alias-service'
 import { recordDingTalkOAuthStateFallback, recordDingTalkOAuthStateOperation } from '../metrics/metrics'
 import { translateRecoveryConflict } from '../db/recovery-conflict'
+import {
+  refuseStrictLegacyDingTalkWrite,
+  refuseStrictLiveEvidence,
+  StrictCredentialChainError,
+  type ClosedExternalOrigin,
+} from './strict-credential-chain'
+import { StrictLoginGrantError } from './strict-login-grant-store'
 import type { AccessGraphTransactionClient } from '../directory/access-graph-mutex'
 import {
   lockUsersForAccessGraphWrite,
@@ -66,6 +73,8 @@ export interface DingTalkExchangeResult {
   localUserName: string
   localUserRole: string
   isNewUser: boolean
+  /** Closed stored connection for this exchange. Null is not a body-selected origin. */
+  externalOrigin: ClosedExternalOrigin | null
 }
 
 interface LocalUserRow {
@@ -205,6 +214,56 @@ function createPolicyError(
   options: { statusCode?: number; code?: string } = {},
 ): DingTalkLoginPolicyError {
   return new DingTalkLoginPolicyError(message, options)
+}
+
+function rethrowStrictPolicy(error: unknown): never {
+  if (error instanceof StrictCredentialChainError && error.code === 'strict_connection') {
+    throw createPolicyError('DingTalk legacy login is closed for this connection', {
+      statusCode: 403,
+      code: 'strict_connection',
+    })
+  }
+  if (error instanceof StrictCredentialChainError && error.code === 'strict_connection_ambiguous') {
+    throw createPolicyError('DingTalk legacy login cannot choose among strict connections', {
+      statusCode: 503,
+      code: 'strict_connection_ambiguous',
+    })
+  }
+  if (
+    error instanceof StrictLoginGrantError
+    && (
+      error.code === 'STRICT_LOGIN_GRANT_INSTALLATION_REFUSED'
+      || error.code === 'STRICT_LOGIN_GRANT_INPUT_REFUSED'
+    )
+  ) {
+    throw createPolicyError('Unable to verify DingTalk login authorization; please retry', {
+      statusCode: 503,
+      code: 'grant_state_unavailable',
+    })
+  }
+  throw error
+}
+
+async function fenceLegacyDingTalkWrite(
+  client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> },
+  corpId: string | null | undefined,
+): Promise<ClosedExternalOrigin | null> {
+  try {
+    return await refuseStrictLegacyDingTalkWrite(client, corpId)
+  } catch (error) {
+    rethrowStrictPolicy(error)
+  }
+}
+
+async function fenceStrictEvidence(
+  client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> },
+  userId: string,
+): Promise<void> {
+  try {
+    await refuseStrictLiveEvidence(client, userId)
+  } catch (error) {
+    rethrowStrictPolicy(error)
+  }
 }
 
 function parseBooleanEnv(name: string, fallback: boolean): boolean {
@@ -550,7 +609,7 @@ async function readGrantState(
  * genuinely NEW grant (row created, RETURNING non-empty) IS an access-graph write, so it takes
  * the mutex and supersedes open deprovision evidence (§5.4 both legs) below.
  */
-async function ensureGrant(localUserId: string): Promise<void> {
+async function ensureGrant(localUserId: string, corpId = readStringEnv('DINGTALK_CORP_ID') || null): Promise<void> {
   await transaction(async (client) => {
     const lockedUsers = await lockUsersForAccessGraphWrite(client, [localUserId])
     if (!lockedUsers.has(localUserId)) {
@@ -559,6 +618,7 @@ async function ensureGrant(localUserId: string): Promise<void> {
         code: 'local_user_disabled',
       })
     }
+    await fenceLegacyDingTalkWrite(client, corpId)
     if (await insertGrantIfAbsent(client, localUserId, localUserId)) {
       await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
         userIds: [localUserId],
@@ -865,7 +925,7 @@ async function upsertExternalIdentity(
   localUserId: string,
   dtUser: DingTalkUserInfo,
   options: ImplicitIdentityWriteOptions,
-): Promise<number> {
+): Promise<{ sessionGeneration: number; externalOrigin: ClosedExternalOrigin | null }> {
   const config = readDingTalkOauthConfig()
   const externalKey = buildExternalKey(dtUser)
   const profile = JSON.stringify(dtUser)
@@ -879,6 +939,8 @@ async function upsertExternalIdentity(
         code: 'local_user_disabled',
       })
     }
+    const externalOrigin = await fenceLegacyDingTalkWrite(client, config.corpId)
+    await fenceStrictEvidence(client, localUserId)
     await lockUnscopedIdentityNamespace(client, config.corpId)
     await recheckUnscopedIdentity(client, localUserId, dtUser, config.corpId)
     const grantState = await recheckLocalUserAuthorization(client, localUserId, options.requireGrant)
@@ -993,7 +1055,10 @@ async function upsertExternalIdentity(
     }
 
     await backfillDirectoryAccountOpenIdInTransaction(client, dtUser, identityCorpId, localUserId)
-    return lockedUsers.get(localUserId)!.accessGeneration + (accessGraphChanged ? 1 : 0)
+    return {
+      sessionGeneration: lockedUsers.get(localUserId)!.accessGeneration + (accessGraphChanged ? 1 : 0),
+      externalOrigin,
+    }
   })
 }
 
@@ -1185,7 +1250,7 @@ function assertLocalUserLoginAllowed(
 // guess. Deliberately: this function does NOT write user_orgs. Verified by
 // tests/integration/attendance-w4pre1-user-orgs-policy.db.test.ts (zero user_orgs rows for a
 // user created via this path).
-async function createProvisionedUser(dtUser: DingTalkUserInfo): Promise<LocalUserRow> {
+async function createProvisionedUser(dtUser: DingTalkUserInfo, corpId = readStringEnv('DINGTALK_CORP_ID') || null): Promise<LocalUserRow> {
   const userId = crypto.randomUUID()
   // unionId first (review #3771 P2-1): the container surface has no openId, and
   // `dingtalk_undefined@…` collides on the users.email UNIQUE index from the
@@ -1247,6 +1312,7 @@ async function createProvisionedUser(dtUser: DingTalkUserInfo): Promise<LocalUse
       if (!created) {
         throw new Error('Failed to create local user for DingTalk login')
       }
+      await fenceLegacyDingTalkWrite(client, corpId)
 
       if (realEmail || realMobile) {
         await claimNonEmptyLoginAliasesOrThrow({
@@ -1290,7 +1356,12 @@ async function createProvisionedUser(dtUser: DingTalkUserInfo): Promise<LocalUse
   }
 }
 
-async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: LocalUserRow; isNewUser: boolean; sessionGeneration: number }> {
+async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{
+  localUser: LocalUserRow
+  isNewUser: boolean
+  sessionGeneration: number
+  externalOrigin: ClosedExternalOrigin | null
+}> {
   const requireGrant = shouldRequireGrant()
   const identityUser = await findIdentityUser(dtUser)
   if (identityUser) {
@@ -1310,12 +1381,17 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: 
         code: 'grant_disabled',
       })
     }
-    const sessionGeneration = await upsertExternalIdentity(identityUser.id, dtUser, {
+    const identityWrite = await upsertExternalIdentity(identityUser.id, dtUser, {
       resolvedBy: 'identity',
       requireGrant,
       createGrantIfAbsent: false,
     })
-    return { localUser: identityUser, isNewUser: false, sessionGeneration }
+    return {
+      localUser: identityUser,
+      isNewUser: false,
+      sessionGeneration: identityWrite.sessionGeneration,
+      externalOrigin: identityWrite.externalOrigin,
+    }
   }
 
   if (dtUser.email && shouldAutoLinkEmail()) {
@@ -1337,12 +1413,17 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: 
       }
       // The non-strict creation-only grant is written inside the identity transaction, after its
       // authorization and association rechecks — never ahead of them in a separate transaction.
-      const sessionGeneration = await upsertExternalIdentity(emailUser.id, dtUser, {
+      const emailWrite = await upsertExternalIdentity(emailUser.id, dtUser, {
         resolvedBy: 'association',
         requireGrant,
         createGrantIfAbsent: !requireGrant,
       })
-      return { localUser: emailUser, isNewUser: false, sessionGeneration }
+      return {
+        localUser: emailUser,
+        isNewUser: false,
+        sessionGeneration: emailWrite.sessionGeneration,
+        externalOrigin: emailWrite.externalOrigin,
+      }
     }
   }
 
@@ -1391,21 +1472,27 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{ localUser: 
 
   // An allowlist alone cannot authorize a new account when there is no enterprise to
   // compare with it. Unique pre-existing associations remain usable without configuration.
-  if (!readDingTalkOauthConfig().corpId) {
+  const corpId = readDingTalkOauthConfig().corpId
+  if (!corpId) {
     throw createPolicyError('An enterprise must be configured before DingTalk auto-provisioning', {
       statusCode: 409,
       code: 'auto_provision_corp_required',
     })
   }
 
-  const provisionedUser = await createProvisionedUser(dtUser)
-  await ensureGrant(provisionedUser.id)
-  const sessionGeneration = await upsertExternalIdentity(provisionedUser.id, dtUser, {
+  const provisionedUser = await createProvisionedUser(dtUser, corpId)
+  await ensureGrant(provisionedUser.id, corpId)
+  const provisionedWrite = await upsertExternalIdentity(provisionedUser.id, dtUser, {
     resolvedBy: 'association',
     requireGrant,
     createGrantIfAbsent: false,
   })
-  return { localUser: provisionedUser, isNewUser: true, sessionGeneration }
+  return {
+    localUser: provisionedUser,
+    isNewUser: true,
+    sessionGeneration: provisionedWrite.sessionGeneration,
+    externalOrigin: provisionedWrite.externalOrigin,
+  }
 }
 
 export function isDingTalkConfigured(): boolean {
@@ -1655,7 +1742,7 @@ export async function exchangeEnterpriseAuthCodeForUser(authCode: string): Promi
     mobile: detailMobile,
     avatarUrl: detailAvatar,
   }
-  const { localUser, isNewUser, sessionGeneration } = await resolveLocalUser(dingtalkUser)
+  const { localUser, isNewUser, sessionGeneration, externalOrigin } = await resolveLocalUser(dingtalkUser)
 
   return {
     dingtalkUser,
@@ -1665,12 +1752,13 @@ export async function exchangeEnterpriseAuthCodeForUser(authCode: string): Promi
     localUserName: localUser.name,
     localUserRole: localUser.role,
     isNewUser,
+    externalOrigin,
   }
 }
 
 export async function exchangeCodeForUser(code: string): Promise<DingTalkExchangeResult> {
   const dingtalkUser = await exchangeCodeForDingTalkProfile(code)
-  const { localUser, isNewUser, sessionGeneration } = await resolveLocalUser(dingtalkUser)
+  const { localUser, isNewUser, sessionGeneration, externalOrigin } = await resolveLocalUser(dingtalkUser)
 
   return {
     dingtalkUser,
@@ -1680,6 +1768,7 @@ export async function exchangeCodeForUser(code: string): Promise<DingTalkExchang
     localUserName: localUser.name,
     localUserRole: localUser.role,
     isNewUser,
+    externalOrigin,
   }
 }
 
@@ -1718,6 +1807,8 @@ export async function bindDingTalkIdentityToUser(input: {
         code: 'local_user_disabled',
       })
     }
+    await fenceLegacyDingTalkWrite(client, config.corpId)
+    await fenceStrictEvidence(client, localUserId)
     await lockUnscopedIdentityNamespace(client, config.corpId)
     // Self-bind never requires a grant row (first binding creates it), but an explicit
     // disabled row rejects regardless of DINGTALK_AUTH_REQUIRE_GRANT.
@@ -1856,6 +1947,20 @@ export async function unbindSelfManagedDingTalkIdentity(input: {
         },
       )
     }
+
+    const currentIdentity = await client.query(
+      `SELECT corp_id
+         FROM user_external_identities
+        WHERE provider = $1 AND local_user_id = $2
+        FOR UPDATE`,
+      [PROVIDER, localUserId],
+    )
+    if (currentIdentity.rows.length === 0) return false
+    const corps = [...new Set(currentIdentity.rows.map((row) => String(row.corp_id || '').trim()))]
+    for (const corpId of corps) {
+      await fenceLegacyDingTalkWrite(client, corpId)
+    }
+    await fenceStrictEvidence(client, localUserId)
 
     const removed = await client.query(
       `DELETE FROM user_external_identities

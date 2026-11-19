@@ -2771,6 +2771,19 @@ jobs:
             tests/integration/role-delegation-namespace-admission-transaction.db.test.ts \
             tests/integration/admin-user-batch-birth-transaction.db.test.ts \
             tests/integration/admin-user-single-birth-transaction.db.test.ts \
+            tests/integration/admin-grant-receiving-reader.db.test.ts \
+            tests/integration/admin-grant-receiving-invalidation.db.test.ts \
+            tests/integration/security-action-attempt-admission.db.test.ts \
+            tests/integration/security-action-session-flight-migration.db.test.ts \
+            tests/integration/admin-grant-receiving-first-birth.db.test.ts \
+            tests/integration/admin-grant-target-ceremony.db.test.ts \
+            tests/integration/admin-grant-actor-inputs.db.test.ts \
+            tests/integration/admin-grant-proof.db.test.ts \
+            tests/integration/strict-login-grant-scope.db.test.ts \
+            tests/integration/admin-login-grant-command.db.test.ts \
+            tests/integration/auth-b2-issuer-provenance.db.test.ts \
+            tests/integration/strict-credential-chain.db.test.ts \
+            tests/integration/strict-dingtalk-entry.db.test.ts \
             tests/integration/directory-source-freeze-lock-correctness.db.test.ts \
             tests/integration/invite-accept-concurrency-rollback.db.test.ts \
             tests/integration/directory-account-external-key-collision-mechanism.db.test.ts \

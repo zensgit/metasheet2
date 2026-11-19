@@ -115,6 +115,7 @@ export const AUTHORIZATION_INPUT_WRITERS: readonly AuthorizationInputWriterEntry
   entry({ id: 'P-03', file: `${SRC}/directory/directory-sync.ts`, symbol: 'syncProjectedDepartmentMemberGroupsInTransaction', intent: null, class: 'P', statements: [st('platform_member_groups', 'INSERT'), st('platform_member_groups', 'UPDATE')], actor: 'n/a', slice: 'none' }),
   entry({ id: 'P-04', file: `${SRC}/directory/local-directory-org.ts`, symbol: 'callback:withLocalAnchorTransaction', intent: null, class: 'P', statements: [st('directory_departments', 'INSERT'), st('directory_departments', 'UPDATE', 2)], actor: 'human', slice: 'none' }),
   entry({ id: 'P-05', file: `${SRC}/routes/admin-users.ts`, symbol: 'callback:r.post', intent: null, class: 'P', statements: [st('platform_member_groups', 'INSERT')], actor: 'human', slice: 'none' }),
+  entry({ id: 'D-01', file: `${SRC}/auth/admin-grant-local-credential.ts`, symbol: 'adminGrantCredentialStatements', intent: null, class: 'D', statements: [], dynamic: { form: 'template_substitution', count: 1 }, actor: 'human', slice: 'none' }),
 ])
 
 /* ───────────────────────────── late role rows ───────────────────────────── */
@@ -181,6 +182,11 @@ export const AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS: readonly AuthorizationInput
   exemption({ id: 'DX-12', file: `${SRC}/db/migrations/_patterns.ts`, form: 'query_builder_non_literal', count: 1, reachableTables: ['<migration helper parameter>'], reason: 'migration helper; callers are frozen migrations or pass a non-input table' }),
   exemption({ id: 'DX-13', file: `${SRC}/db/migrations/zzzz20260724120000_create_attendance_shift_segments.ts`, form: 'template_substitution', count: 1, reachableTables: ['attendance_shift_segments'], reason: 'same-file constant passed through sql.table()' }),
   exemption({ id: 'DX-14', file: `${SRC}/db/migrations/zzzz20260804120000_attendance_shift_flex_policy.ts`, form: 'template_substitution', count: 1, reachableTables: ['attendance_shifts'], reason: 'same-file constant passed through sql.table()' }),
+  exemption({ id: 'DX-15', file: `${SRC}/db/migrations/zzzz20261117120100_create_security_action_session_flight.ts`, form: 'template_substitution', count: 2, reachableTables: ['security_action_session_flight'], reason: 'schema-qualified session latch from same-file table constant' }),
+  exemption({ id: 'DX-16', file: `${SRC}/auth/admin-grant-browser-context.ts`, form: 'template_substitution', count: 2, reachableTables: ['security_action_browser_bindings', 'user_session_revocations'], reason: 'schema-qualified browser binding and session-watermark inserts' }),
+  exemption({ id: 'DX-17', file: `${SRC}/auth/strict-login-grant-store.ts`, form: 'template_substitution', count: 6, reachableTables: ['directory_connection_login_scope', 'user_external_identity_evidence', 'user_external_identity_login_grants', 'user_session_revocations', 'user_sessions'], reason: 'schema-qualified strict login scope, revocation and session writes named by imported or same-file constants' }),
+  exemption({ id: 'DX-18', file: `${SRC}/auth/admin-grant-local-credential.ts`, form: 'template_substitution', count: 3, reachableTables: ['user_local_credential_establishments', 'user_session_revocations'], reason: 'schema-qualified credential watermark and establishment writes; the users update is the separate checked writer' }),
+  exemption({ id: 'DX-19', file: `${SRC}/auth/strict-login-grant-bundle.ts`, form: 'template_substitution', count: 2, reachableTables: ['admin_login_grant_command_receipts', 'user_external_identity_login_grants'], reason: 'cold consumed-proof bundle inserts only the receipt and grants named by imported constants' }),
 ])
 
 /**

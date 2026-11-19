@@ -80,6 +80,7 @@ import { LoginNameRuleError } from '../auth/login-name-rule'
 import { PasswordPolicyError } from '../auth/password-policy-error'
 // NOT a directory error: thrown by the alias claim inside admission (directory-sync.ts) with a fixed sentence.
 import { LoginAliasClaimError } from '../auth/login-alias-service'
+import { StrictLoginGrantError } from '../auth/strict-login-grant-store'
 import { isAdmin as isRbacAdmin } from '../rbac/service'
 // R-41: values-free by design (names the env vars, never their values) — shown as it is on the config routes.
 import { EncryptionMaterialError } from '../security/encrypted-secrets'
@@ -172,6 +173,12 @@ export function sendIfPullSourceGateRefusal(
     return true
   }
   return false
+}
+
+function sendIfStrictUnbindUnavailable(res: Response, error: unknown, code: string): boolean {
+  if (!(error instanceof StrictLoginGrantError) || error.code !== 'STRICT_LOGIN_GRANT_INSTALLATION_REFUSED') return false
+  jsonError(res, 503, code, 'Directory authorization is unavailable')
+  return true
 }
 
 /**
@@ -1465,6 +1472,7 @@ export function adminDirectoryRouter(): Router {
     } catch (error) {
       // O2-S2: named retryable RecoveryConflictError from the unbind write → retryable 409.
       if (sendIfRecoveryConflict(res, error)) return
+      if (sendIfStrictUnbindUnavailable(res, error, 'DIRECTORY_UNBIND_FAILED')) return
       sendDirectoryFailure(res, error, 'DIRECTORY_UNBIND_FAILED', 'Failed to unbind directory account')
     }
   })
@@ -1517,6 +1525,7 @@ export function adminDirectoryRouter(): Router {
     } catch (error) {
       // O2-S2: named retryable RecoveryConflictError from an unbind write → retryable 409.
       if (sendIfRecoveryConflict(res, error)) return
+      if (sendIfStrictUnbindUnavailable(res, error, 'DIRECTORY_BATCH_UNBIND_FAILED')) return
       sendDirectoryFailure(res, error, 'DIRECTORY_BATCH_UNBIND_FAILED', 'Failed to batch unbind directory accounts')
     }
   })

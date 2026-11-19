@@ -230,10 +230,18 @@ function writesIn(text: string, table: string = TABLE): WriteKind[] {
 const isPlus = (node: ts.Node): node is ts.BinaryExpression =>
   ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken
 
-/** The text of a literal, a template (substitutions read as `${}`) or a `+` chain of them. */
+/** Literal/concatenated SQL; only qualified(schema, 'table') substitutions resolve to an identifier. */
 function textOf(node: ts.Node): string {
   if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text
-  if (ts.isTemplateExpression(node)) return node.head.text + node.templateSpans.map((span) => `\${}${span.literal.text}`).join('')
+  if (ts.isTemplateExpression(node)) return node.head.text + node.templateSpans.map((span) => {
+    const expression = span.expression
+    const table = ts.isCallExpression(expression)
+      && ts.isIdentifier(expression.expression) && expression.expression.text === 'qualified'
+      && expression.arguments.length === 2
+      && (ts.isStringLiteral(expression.arguments[1]) || ts.isNoSubstitutionTemplateLiteral(expression.arguments[1]))
+      ? expression.arguments[1].text : '${}'
+    return `${table}${span.literal.text}`
+  }).join('')
   if (isPlus(node)) return textOf(node.left) + textOf(node.right)
   if (ts.isParenthesizedExpression(node)) return textOf(node.expression)
   return '${}'
@@ -370,6 +378,7 @@ const SYNTHETIC: ReadonlyArray<{ spelling: string; code: string; kind: WriteKind
   { spelling: 'lower case', kind: 'update-source-columns', code: 'const s = `update directory_integrations set provider = $2 where id = $1`' },
   { spelling: 'schema-qualified', kind: 'update-source-columns', code: 'const s = `UPDATE public.directory_integrations SET org_id = $2 WHERE id = $1`' },
   { spelling: 'quoted identifiers', kind: 'update-source-columns', code: 'const s = `UPDATE "public"."directory_integrations" SET "corp_id" = $2 WHERE id = $1`' },
+  { spelling: 'qualified table interpolation', kind: 'update-source-columns', code: "const s = `UPDATE ${qualified(schemaName, 'directory_integrations')} SET status = $2 WHERE id = $1`" },
   { spelling: 'aliased with AS', kind: 'update-source-columns', code: 'const s = `UPDATE directory_integrations AS di SET status = $2 WHERE di.id = $1`' },
   { spelling: 'aliased without AS, qualified target', kind: 'update-source-columns', code: 'const s = `UPDATE directory_integrations di SET name = $3, di.status = $2 WHERE di.id = $1`' },
   { spelling: 'ONLY', kind: 'update-source-columns', code: 'const s = `UPDATE ONLY directory_integrations SET status = $2`' },
@@ -555,8 +564,16 @@ describe('census of statements that write directory_integrations', () => {
       if (file.text.includes(TABLE)) visit(source)
       return bare
     }).map((file) => file.path).sort()
-    // The fence uses this table name only to build its qualified LOCK and schema inspection inputs.
-    expect(carriers).toEqual(['admin/authorization-operation-fence.ts', 'directory/pull-source-rule.ts', 'rbac/authorization-input-writers.ts', 'security/encrypted-store-probe.ts'])
+    // Catalogues, plus the grant store. The store may name the table only as the schema argument of
+    // qualified() inside a read or lock template. A writable statement, a bare constant, or a fourth
+    // use is still a violation, as is any other file.
+    expect(carriers).toEqual([
+      'admin/authorization-operation-fence.ts',
+      'auth/strict-login-grant-store.ts',
+      'directory/pull-source-rule.ts',
+      'rbac/authorization-input-writers.ts',
+      'security/encrypted-store-probe.ts',
+    ])
     const fence = SOURCE.find((file) => file.path === 'admin/authorization-operation-fence.ts')!
     expect(fence.text).toContain("`LOCK TABLE ${TABLES.map(name => `\"public\".\"${name}\"`).join(', ')} IN EXCLUSIVE MODE NOWAIT`")
     const tableUses = (files: SourceFile[]): string[] => files.flatMap((file) => {
@@ -584,6 +601,41 @@ describe('census of statements that write directory_integrations', () => {
     expect(tableUses(carrierMutation)).not.toEqual(expectedUses)
     expect(population([fence])).toEqual([])
     expect(population([{ ...fence, text: fence.text + '\nconst injected = `UPDATE directory_integrations SET status = $1`' }]).map((w) => w.kind)).toEqual(['update-source-columns'])
+    const store = SOURCE.find((file) => file.path === 'auth/strict-login-grant-store.ts')
+    expect(store).toBeDefined()
+    const storeFile = ts.createSourceFile(store!.path, store!.text, ts.ScriptTarget.Latest, true)
+    const uses: string[] = []
+    const visitStore = (node: ts.Node): void => {
+      if ((ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) && node.text.trim() === TABLE) {
+        const call = node.parent
+        expect(ts.isCallExpression(call) && ts.isIdentifier(call.expression) && call.expression.text === 'qualified').toBe(true)
+        const callExpr = call as ts.CallExpression
+        expect(callExpr.arguments[1]).toBe(node)
+        let template: ts.Node | undefined = callExpr.parent
+        while (template && !ts.isTemplateExpression(template) && !ts.isNoSubstitutionTemplateLiteral(template)) template = template.parent
+        expect(template).toBeDefined()
+        const text = textOf(template!)
+        expect(writesIn(text), text).toEqual([])
+        uses.push(text)
+      }
+      ts.forEachChild(node, visitStore)
+    }
+    visitStore(storeFile)
+    expect(uses).toHaveLength(3)
+  })
+
+  it('rejects a qualified-table write in the admitted read carrier and in a new source', () => {
+    const path = 'auth/strict-login-grant-store.ts'
+    const write = "`UPDATE ${qualified(schemaName, 'directory_integrations')} SET config = $2 WHERE id = $1`"
+    const changed = withText(SOURCE, path, (text) => edited(
+      text,
+      "`SELECT id::text AS id FROM ${qualified(schemaName, 'directory_integrations')} WHERE id = $1::uuid FOR SHARE`",
+      write,
+    ))
+    expect(census(changed).join('\n')).toContain(`${path}:`)
+    const added = { path: 'auth/unregistered-qualified-writer.ts', text: `const s = ${write}` }
+    expect(statementsOf(added).map((member) => member.kind)).toEqual(['update-other-columns'])
+    expect(census([...SOURCE, added]).join('\n')).toContain(`${added.path}:1 (update-other-columns in <module>) is not classified exactly once`)
   })
 })
 

@@ -623,12 +623,9 @@ describeWithDatabase('unassign whole-file PostgreSQL proof; registered handler e
 
   it.each(['status-disable', 'recycle-move', 'delegated-demotion', 'protected-role-delete'] as const)('waits behind source-pinned %s lock/write fragment, not a whole HTTP competitor', async mode => {
     const source = readFileSync(new URL(mode === 'recycle-move' ? '../../src/admin/user-recycle.ts' : mode === 'protected-role-delete' ? '../../src/routes/roles.ts' : '../../src/routes/admin-users.ts', import.meta.url), 'utf8')
-    // The credential-revocation schema changes purge handling. Both source versions have the same recycle-move implementation.
-    const expectedPins = mode === 'recycle-move' ? [
-      'ab484e7a910dcadfd761468b32f9211fa307842cc0a07885ac34f285e9c6551d',
-      'ee591b541b631d09161d528912ff068f4872848db9dd51fe4ca01b1509a222bf',
-    ] : mode === 'protected-role-delete' ? ['144b83d990585cfdfbad609e0d55a305db65b1d3769c7da0347e94d89cf98ba1'] : undefined
-    if (expectedPins) expect(expectedPins).toContain(createHash('sha256').update(source).digest('hex'))
+    const expectedPin = mode === 'recycle-move' ? 'ee591b541b631d09161d528912ff068f4872848db9dd51fe4ca01b1509a222bf'
+      : mode === 'protected-role-delete' ? '144b83d990585cfdfbad609e0d55a305db65b1d3769c7da0347e94d89cf98ba1' : undefined
+    if (expectedPin) expect(createHash('sha256').update(source).digest('hex')).toBe(expectedPin)
     else expect(source).toContain(mode === 'status-disable' ? 'if (isActive === false) await lockPlatformAdminInvariant(client)' : "if (action === 'unassign' && roleId === PLATFORM_ADMIN_ROLE_ID)")
     const fixture = await seed('raw')
     if (mode === 'status-disable' || mode === 'recycle-move' || mode === 'delegated-demotion') {

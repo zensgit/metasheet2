@@ -54,6 +54,11 @@ const POLICY_MODULE_IMPORT_ALLOWLIST: ReadonlyArray<ImportEdge> = [
   ['auth/security-action-proof.ts', './external-login-assurance'],
   ['auth/security-action-proof.ts', './security-action-privilege'],
   ['rbac/authorization-privilege-witness-plan.ts', '../auth/security-action-privilege'],
+  ['auth/admin-grant-receiving-reader.ts', './security-action-privilege'],
+  ['auth/admin-grant-target-ceremony.ts', './security-action-privilege'],
+  ['auth/admin-grant-proof.ts', './security-action-privilege'],
+  ['auth/strict-dingtalk-entry.ts', './security-action-privilege'],
+  ['auth/strict-dingtalk-entry.ts', './external-login-assurance'],
 ]
 const MODULE_PATH = path.join(SRC, 'auth', 'security-action-privilege.ts')
 const DB_SPEC = 'tests/integration/security-action-privilege.db.test.ts'

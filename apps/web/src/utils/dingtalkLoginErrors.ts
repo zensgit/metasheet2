@@ -61,6 +61,15 @@ const GUIDANCE_BY_CODE: Readonly<Record<string, Guidance>> = Object.freeze(Objec
     'DingTalk sign-in has been turned off for this account. Ask an administrator to check it.',
   ],
 
+  strict_connection: [
+    '此登录方式当前不可用。请联系管理员核验登录授权。',
+    'This sign-in method is unavailable. Ask an administrator to check the sign-in authorization.',
+  ],
+  strict_connection_ambiguous: [
+    '暂时无法确定登录使用的企业连接。请联系管理员核查连接配置。',
+    'The enterprise connection for sign-in cannot be determined. Ask an administrator to check the connection configuration.',
+  ],
+
   // Identity conflicts
   identity_already_bound: [
     '该钉钉身份已关联其他本地账号。请联系管理员核验；不要重复绑定或新建账号。',
@@ -125,6 +134,14 @@ const GUIDANCE_BY_CODE: Readonly<Record<string, Guidance>> = Object.freeze(Objec
   activate_source_ineligible: [
     '扫码的钉钉身份不符合该账号的激活条件。请联系管理员核验。',
     'The scanned DingTalk identity is not eligible to activate this account. Ask an administrator to verify it.',
+  ],
+  activate_strict_connection: [
+    '此连接不能用于扫码激活账号。请联系管理员核验账号及登录授权。',
+    'This connection cannot activate the account by scanning a code. Ask an administrator to check the account and sign-in authorization.',
+  ],
+  activate_connection_ambiguous: [
+    '暂时无法确定激活使用的企业连接。请联系管理员核查连接配置。',
+    'The enterprise connection for activation cannot be determined. Ask an administrator to check the connection configuration.',
   ],
   activate_target_not_found: [
     '要激活的账号不存在。请联系管理员核查。',
