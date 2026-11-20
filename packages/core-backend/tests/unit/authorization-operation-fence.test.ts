@@ -61,7 +61,14 @@ describe('authorization operation schema profile', () => {
       rows[7].push({ proname: 'guard_repaired_directory_link', definition: 'd' })
       return rows
     }
-    const original = authorizationOperationD21AdditionDigest(catalog())
+    const versionTable = () => [
+      [{ relname: 'subject_authorization_versions', relkind: 'r', owner_trusted: true }],
+      [{ relname: 'subject_authorization_versions', attname: 'subject_id', type: 'text', attnotnull: true }],
+      [{ source: 'subject_authorization_versions', conname: 'subject_authorization_versions_pkey', contype: 'p', definition: 'PRIMARY KEY (subject_id)' }],
+      [{ table_name: 'subject_authorization_versions', index_name: 'subject_authorization_versions_pkey', indisunique: true }],
+      [], [], [],
+    ] as Array<Array<Record<string, unknown>>>
+    const original = authorizationOperationD21AdditionDigest(catalog(), versionTable())
     // Rows outside the addition (base and B2) do not move it.
     for (const edit of [
       (rows: ReturnType<typeof catalog>) => { rows[1][0].attname = 'is_admin' },
@@ -72,14 +79,32 @@ describe('authorization operation schema profile', () => {
       (rows: ReturnType<typeof catalog>) => { rows[4].push({ relname: 'user_roles', tgname: 'trg_user_roles_zz_authz_subject_version_extra' }) },
     ]) {
       const rows = catalog(); edit(rows)
-      expect(authorizationOperationD21AdditionDigest(rows)).toBe(original)
+      expect(authorizationOperationD21AdditionDigest(rows, versionTable())).toBe(original)
     }
     // Every one of its own rows does, including a missing one.
     for (const [section, index] of [[4, 2], [4, 3], [4, 4], [4, 5], [4, 6], [4, 7], [7, 0], [7, 1]] as const) {
       const changed = catalog(); changed[section][index] = { ...changed[section][index], tgenabled: 'D', definition: 'changed' }
-      expect(authorizationOperationD21AdditionDigest(changed), `${section}:${index}`).not.toBe(original)
+      expect(authorizationOperationD21AdditionDigest(changed, versionTable()), `${section}:${index}`).not.toBe(original)
       const missing = catalog(); missing[section].splice(index, 1)
-      expect(authorizationOperationD21AdditionDigest(missing), `${section}:${index} missing`).not.toBe(original)
+      expect(authorizationOperationD21AdditionDigest(missing, versionTable()), `${section}:${index} missing`).not.toBe(original)
     }
+  })
+  it('folds the D21 version table profile into the D21 addition, and refuses a schema whose D21 addition does not match', () => {
+    const catalog = () => { const rows: Array<Array<Record<string, unknown>>> = Array.from({ length: 8 }, () => []); rows[4].push({ tgname: 'trg_user_roles_zz_authz_subject_version' }); return rows }
+    const table = (pk: boolean) => [
+      [{ relname: 'subject_authorization_versions', relkind: 'r' }],
+      [{ attname: 'subject_id', type: 'text' }],
+      pk ? [{ conname: 'subject_authorization_versions_pkey', contype: 'p', definition: 'PRIMARY KEY (subject_id)' }] : [],
+      pk ? [{ index_name: 'subject_authorization_versions_pkey', indisunique: true }] : [],
+      [], [], [],
+    ] as Array<Array<Record<string, unknown>>>
+    const original = authorizationOperationD21AdditionDigest(catalog(), table(true))
+    expect(authorizationOperationD21AdditionDigest(catalog(), table(false))).not.toBe(original)
+    expect(authorizationOperationD21AdditionDigest(catalog(), [])).not.toBe(original)
+    const retyped = table(true); retyped[1][0].type = 'character varying'
+    expect(authorizationOperationD21AdditionDigest(catalog(), retyped)).not.toBe(original)
+    // An exact known profile alone no longer suffices: this code needs D21 on every path.
+    expect(isSupportedAuthorizationOperationSchema({ ordinary: true, digest: AUTHORIZATION_OPERATION_SCHEMA_PROFILE, d21Ready: false })).toBe(false)
+    expect(isSupportedAuthorizationOperationSchema({ ordinary: true, digest: AUTHORIZATION_OPERATION_SCHEMA_PROFILE, d21Ready: true })).toBe(true)
   })
 })

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Stand-in for util-linux setsid, installed only where it is absent (macOS): a new session, with
+# a fork first when the caller leads its process group (as util-linux does).
+exec perl -MPOSIX -e 'if (POSIX::setsid() < 0) { exit 0 if fork(); POSIX::setsid(); } exec @ARGV or exit 127' "$@"
