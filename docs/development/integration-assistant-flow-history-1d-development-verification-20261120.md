@@ -100,3 +100,10 @@
 - 同条数、同类型但配置改过的规则仍按位置叠加（顶层步骤键就是下标，位置与类型对上时结果确属该位置）。
 - 历史取最近 20 次；更早的仍在「查看日志」里看。
 - 模板只覆盖 A、B 两个场景；项目号、收件人须作者填写，编辑器原有保存门照常把关。
+
+## 附：主会话复核
+
+- 审阅了 `MetaAutomationRuleEditor.vue`（`seedRule` 经 `draftFromRule` 进入，动作标为新建、无原配置快照）与 `MetaAutomationManager.vue`（模板面板、关闭时清空种子、打开前再查一次开关）的改动。
+- 在 `apps/web`：`pnpm exec vitest run automation-flow-history automation-flow-view automation-rule-editor-flow-mode automation-rule-editor-flow-library multitable-automation-rule-editor multitable-automation-manager.spec automation-recipes meta-automation-labels run-required-web-tests-shape ui-foundation-style-guard --reporter=dot` → 10 个文件 541 例全过。
+- `pnpm exec vue-tsc --noEmit -p tsconfig.app.json` 0 错；仓库根 `required-web-lane-token-manifest.mjs --check` MANIFEST MATCHES。
+- 本片未做界面截图（执行历史需要模拟客户端返回执行记录，临时页面成本高于收益）；上线前在测试环境用真实界面过一遍。
