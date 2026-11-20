@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Test double for `date`: epoch seconds come from a scaled clock that starts at $H_EPOCH when the
+# scenario starts ($H_CLOCK_START, real seconds) and runs $H_CLOCK_SPEED times faster than real
+# time, matching the sleep double. Every other form is the real date.
+if [[ "$*" == "+%s" || "$*" == "-u +%s" ]]; then
+  exec perl -MTime::HiRes=time -e 'printf "%d\n", $ARGV[0] + (time() - $ARGV[1]) * $ARGV[2]' \
+    "${H_EPOCH:?}" "${H_CLOCK_START:?}" "${H_CLOCK_SPEED:-20}"
+fi
+exec /bin/date "$@"

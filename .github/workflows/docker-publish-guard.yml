@@ -10,14 +10,18 @@ on:
       - 'scripts/ops/docker-publish-*.mjs'
       - 'scripts/ops/deploy-immutable-traceability-contract.test.mjs'
       - 'scripts/ops/integration-erp-plm-deploy-readiness*.mjs'
+      - 'scripts/ops/docker-build-prod-window.test.mjs'
+      - 'scripts/ops/fixtures/docker-build-prod-window/**'
+      - 'scripts/ops/remote-summary-pipefail-contract.test.mjs'
 
 permissions:
   contents: read
 
 jobs:
   guard:
+    name: docker publish and deploy window contracts
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -34,3 +38,5 @@ jobs:
           scripts/ops/docker-publish-workflow-contract.test.mjs
           scripts/ops/deploy-immutable-traceability-contract.test.mjs
           scripts/ops/integration-erp-plm-deploy-readiness.test.mjs
+          scripts/ops/remote-summary-pipefail-contract.test.mjs
+          scripts/ops/docker-build-prod-window.test.mjs

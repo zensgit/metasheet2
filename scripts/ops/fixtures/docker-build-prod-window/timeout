@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Stand-in for coreutils timeout, installed only where it is absent (macOS). It does not bound
+# the duration; scenarios inject timeouts as exit code 124 from the docker double instead.
+shift
+exec "$@"
