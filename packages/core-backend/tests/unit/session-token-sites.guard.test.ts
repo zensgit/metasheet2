@@ -14,6 +14,7 @@
  * binding. A call the tables below do not classify fails the check. So does `jsonwebtoken` loaded or
  * used in any form other than a default or namespace import called as `<binding>.sign(…)`,
  * `<binding>.verify(…)` or `<binding>.decode(…)`, and so does any other token library.
+ * The signer's time calculation is classified separately at its one registration call.
  */
 import { readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -23,8 +24,9 @@ import { describe, expect, it } from 'vitest'
 const SRC_ROOT = path.resolve(__dirname, '../../src')
 const CODE_FILE = /\.(?:[cm]?ts|tsx|[cm]?js|jsx|vue)$/
 const TOKEN_LIBRARY = 'jsonwebtoken'
+const EXPIRY_MODULE = 'jsonwebtoken/lib/timespan'
 const TOKEN_LIBRARY_LIKE = /jwt|jose|jws|jsonwebtoken|paseto/i
-const MODULE_SPECIFIER = /(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*|\bimport\s+)(['"])([^'"\n]+)\1/g
+const MODULE_SPECIFIER = /(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*|\bimport\s+)(['"`])([^'"\n]+?)\1/g
 
 type TokenCall = 'sign' | 'verify' | 'decode'
 
@@ -180,24 +182,56 @@ function resolvePayload(argument: ts.Expression | undefined, scope: ts.Node | nu
   return describeObjectLiteral(declaration.initializer)
 }
 
+function isRegistrationExpiryCalculation(source: ts.SourceFile): boolean {
+  const declarations = source.statements.filter(ts.isImportDeclaration)
+    .filter(node => ts.isStringLiteral(node.moduleSpecifier) && node.moduleSpecifier.text === EXPIRY_MODULE)
+  if (declarations.length !== 1) return false
+  const clause = declarations[0].importClause
+  const binding = clause?.name
+  if (!binding || clause.isTypeOnly || clause.namedBindings) return false
+
+  const uses: ts.Identifier[] = []
+  let moduleReferences = 0
+  const visit = (node: ts.Node) => {
+    if (ts.isStringLiteralLike(node) && node.text === EXPIRY_MODULE) moduleReferences++
+    if (ts.isIdentifier(node) && node !== binding && node.text === binding.text) uses.push(node)
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  if (moduleReferences !== 1 || uses.length !== 1) return false
+
+  const use = uses[0]
+  const call = use.parent
+  if (!ts.isCallExpression(call) || call.expression !== use || call.questionDotToken || call.arguments.length !== 2) return false
+  const [expiry, issuedAt] = call.arguments
+  const { name, scope: method } = enclosingName(use)
+  return name === 'sessionExpiresAt' && method !== null && ts.isMethodDeclaration(method)
+    && ts.findAncestor(use, ts.isFunctionLike) === method
+    && ts.isClassDeclaration(method.parent) && method.parent.name?.text === 'AuthService' && method.parent.parent === source
+    && ts.isIdentifier(expiry) && expiry.text === 'expiry' && ts.isIdentifier(issuedAt) && issuedAt.text === 'issuedAt'
+}
+
 function scanTokenSites(files: Map<string, string>): TokenScan {
   const scan: TokenScan = { users: [], sites: [], offenders: [] }
 
   for (const [file, text] of files) {
+    const mentionsLibrary = text.includes(TOKEN_LIBRARY)
+    const source = mentionsLibrary && /\.(?:[cm]?ts|tsx|[cm]?js|jsx)$/.test(file)
+      ? ts.createSourceFile(file, text, ts.ScriptTarget.ES2022, true) : null
     for (const match of text.matchAll(MODULE_SPECIFIER)) {
       const specifier = match[2]
       const bare = !specifier.startsWith('.') && !specifier.startsWith('/')
       if (bare && specifier !== TOKEN_LIBRARY && TOKEN_LIBRARY_LIKE.test(specifier)) {
+        if (specifier === EXPIRY_MODULE && file === 'auth/AuthService.ts' && source && isRegistrationExpiryCalculation(source)) continue
         scan.offenders.push(`${file}: loads a token library other than ${TOKEN_LIBRARY} (${specifier})`)
       }
     }
-    if (!text.includes(TOKEN_LIBRARY)) continue
-    if (!/\.(?:[cm]?ts|tsx|[cm]?js|jsx)$/.test(file)) {
+    if (!mentionsLibrary) continue
+    if (!source) {
       scan.offenders.push(`${file}: mentions ${TOKEN_LIBRARY} in a file this check cannot parse`)
       continue
     }
 
-    const source = ts.createSourceFile(file, text, ts.ScriptTarget.ES2022, true)
     const bindings = new Set<string>()
     const importNodes = new Set<ts.Node>()
     let loads = false
@@ -400,7 +434,13 @@ describe('token site check: each departure is reported', () => {
   const HOLDS: Record<string, string> = {
     'auth/AuthService.ts': `
       import * as jwt from 'jsonwebtoken'
+      import jwtTimespan from 'jsonwebtoken/lib/timespan'
       export class AuthService {
+        sessionExpiresAt(issuedAt: number) {
+          const expiry = this.config.jwtExpiry
+          const expiresAt = jwtTimespan(expiry, issuedAt)
+          return expiresAt
+        }
         createToken(user: { id: string }, options: { sid?: string } = {}): string {
           const payload = { userId: user.id, ...(options.sid ? { sid: options.sid } : {}) }
           return jwt.sign(payload, this.config.jwtSecret, { expiresIn: '1h' } as jwt.SignOptions)
@@ -474,7 +514,29 @@ describe('token site check: each departure is reported', () => {
     expect(offendersWith({ 'auth/AuthService.ts': (text: string) => `${text}\nclass Other { verifyToken(error: unknown) { return error instanceof jwt.JsonWebTokenError } }` }).join('\n')).toMatch(/uses the jsonwebtoken binding other than as/)
   })
 
+  it.each([
+    ['named import', 'import jwtTimespan from', 'import { default as jwtTimespan } from'],
+    ['dynamic import', "import jwtTimespan from 'jsonwebtoken/lib/timespan'", "const jwtTimespan = import(`jsonwebtoken/lib/timespan`)"],
+    ['second module reference', 'export class AuthService', "const extra = require('jsonwebtoken/lib/timespan')\nexport class AuthService"],
+    ['unused import', 'jwtTimespan(expiry, issuedAt)', 'issuedAt'],
+    ['additional call', 'return expiresAt', 'jwtTimespan(expiry, issuedAt); return expiresAt'],
+    ['binding passed on', 'return expiresAt', 'return jwtTimespan'],
+    ['changed arguments', 'jwtTimespan(expiry, issuedAt)', 'jwtTimespan(issuedAt, expiry)'],
+    ['other method', 'sessionExpiresAt(issuedAt:', 'other(issuedAt:'],
+    ['other class', 'class AuthService', 'class Other'],
+    ['nested function', 'jwtTimespan(expiry, issuedAt)', '(() => jwtTimespan(expiry, issuedAt))()'],
+    ['other submodule', 'jsonwebtoken/lib/timespan', 'jsonwebtoken/lib/other'],
+  ])('reports a registration expiry helper with %s', (_label, from, to) => {
+    const offenders = offendersWith({ 'auth/AuthService.ts': swap(from, to) })
+    expect(offenders.join('\n')).toMatch(/auth\/AuthService\.ts: loads a token library other than jsonwebtoken/)
+  })
+
   it.each<[string, Record<string, string | ((text: string) => string)>, RegExp]>([
+    [
+      'the registration expiry helper imported by another file',
+      { 'services/other.ts': "import calc from 'jsonwebtoken/lib/timespan'\nexport const seconds = calc('1s', 1)" },
+      /services\/other\.ts: loads a token library other than jsonwebtoken \(jsonwebtoken\/lib\/timespan\)/,
+    ],
     [
       'a second verification against the session secret, in another method',
       { 'auth/AuthService.ts': swap('private verifySessionTokenPayload', 'verifyToken(token: string) { return jwt.verify(token, this.config.jwtSecret) }\n private verifySessionTokenPayload') },
@@ -579,6 +641,11 @@ describe('token site check: each departure is reported', () => {
       'another token library',
       { 'services/other.ts': "import { jwtVerify } from 'jose'\nexport const read = jwtVerify" },
       /services\/other\.ts: loads a token library other than jsonwebtoken \(jose\)/,
+    ],
+    [
+      'a quoted token library name containing a literal backtick',
+      { 'services/other.ts': "import fake from 'jwt`fixture'" },
+      /services\/other\.ts: loads a token library other than jsonwebtoken \(jwt`fixture\)/,
     ],
     [
       'the library named in a file that cannot be parsed',
