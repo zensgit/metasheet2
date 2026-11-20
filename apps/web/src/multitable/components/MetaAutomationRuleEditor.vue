@@ -392,6 +392,16 @@
             @configure="configureFlowStep"
             @edit-trigger="editFlowTrigger"
           />
+          <!-- Integration assistant 1c (R-99 ③): node library + read-only go-live gates. Every entry and lock reason
+               comes from the Form logic below (selectableActionTypes / actionTypeOptionDisabled / addAction's
+               refusals); picking one goes through addAction() + onDraftActionTypeChange, as the Form select does. -->
+          <MetaAutomationFlowLibraryPanel
+            v-if="editorMode === 'flow'"
+            :groups="flowLibraryGroups"
+            :coming-soon="flowLibraryComingSoonEntries"
+            :gates="flowGates"
+            @pick="addActionFromLibrary"
+          />
           <div
             v-for="(action, idx) in draft.actions"
             v-show="editorMode === 'form'"
@@ -407,7 +417,7 @@
                   :key="type"
                   :value="type"
                   :data-value="type"
-                  :disabled="isUnsupportedSelectableActionType(type) || isDeletedTriggerBlockedActionType(type)"
+                  :disabled="actionTypeOptionDisabled(type)"
                   :label="automationActionTypeLabel(type, isZh)"
                 />
               </el-select>
@@ -2104,7 +2114,14 @@ import {
 } from '../utils/automation-condition-values'
 import ConditionValueInput from './ConditionValueInput.vue'
 import MetaAutomationFlowEditPanel from './MetaAutomationFlowEditPanel.vue'
+import MetaAutomationFlowLibraryPanel from './MetaAutomationFlowLibraryPanel.vue'
 import { flowStepCategory, flowTriggerCard, type FlowEditStep } from '../automationFlowView'
+import {
+  buildFlowGates,
+  buildFlowLibrary,
+  flowLibraryComingSoon,
+  flowLibraryLockReason,
+} from '../automationFlowLibrary'
 
 interface FieldPair {
   fieldId: string
@@ -2625,7 +2642,12 @@ function isUnsupportedSelectableActionType(type: AutomationActionType): boolean 
   return UNSUPPORTED_SELECTABLE_ACTION_TYPES.includes(type)
 }
 
-function selectableActionTypes(currentType: AutomationActionType): AutomationActionType[] {
+// 1c: `actionCount` defaults to the draft's own count (the Form rows); the node library asks for the row
+// addAction() would append, counted with that row — the same list that row's select would then show.
+function selectableActionTypes(
+  currentType: AutomationActionType,
+  actionCount: number = draft.value.actions.length,
+): AutomationActionType[] {
   const types: AutomationActionType[] = [...SUPPORTED_SELECTABLE_ACTION_TYPES]
   // FWB: newly selectable only when flag ON + approval.completed; a loaded FWB action always remains
   // in the option list so it is never silently dropped from the UI.
@@ -2640,13 +2662,18 @@ function selectableActionTypes(currentType: AutomationActionType): AutomationAct
   // R-69 1b-iii: run_integration_job — new only with the switch ON and a schedule.cron trigger; a loaded one
   // always stays listed (never silently dropped). Top-level only: not in any branch-authorable list.
   // R-69 I6d fix round 2 (F2): and only on a rule with ONE action row — the job is its rule's only action.
-  if (isRunIntegrationJobSelectable(integrationRunActionEnabled.value, draft.value.triggerType, currentType, draft.value.actions.length)) {
+  if (isRunIntegrationJobSelectable(integrationRunActionEnabled.value, draft.value.triggerType, currentType, actionCount)) {
     if (!types.includes(RUN_INTEGRATION_JOB_ACTION_TYPE)) types.push(RUN_INTEGRATION_JOB_ACTION_TYPE)
   }
   if (isUnsupportedSelectableActionType(currentType) && !types.includes(currentType)) {
     types.push(currentType)
   }
   return types
+}
+
+/** The Form type select's :disabled for one option — shared with the Flow node library (1c). */
+function actionTypeOptionDisabled(type: AutomationActionType): boolean {
+  return isUnsupportedSelectableActionType(type) || isDeletedTriggerBlockedActionType(type)
 }
 
 function fwbActionReadOnly(action: DraftAction): boolean {
@@ -4381,6 +4408,47 @@ const flowAddBlockedReason = computed(() => {
   return ''
 })
 
+// Integration assistant 1c (R-99 ③): the node library. The catalog is every top-level type a Form row can
+// ever offer; whether one is open right now is the Form's own answer for the row addAction() would append.
+const FLOW_LIBRARY_CATALOG: readonly AutomationActionType[] = [
+  ...SUPPORTED_SELECTABLE_ACTION_TYPES,
+  FWB_ACTION_TYPE,
+  RUN_INTEGRATION_JOB_ACTION_TYPE,
+]
+
+function flowLibraryLockReasonFor(type: AutomationActionType): string {
+  const nextCount = draft.value.actions.length + 1
+  return flowLibraryLockReason(type, {
+    addBlockedReason: flowAddBlockedReason.value,
+    offered: selectableActionTypes(NEW_ACTION_TYPE, nextCount),
+    optionDisabled: actionTypeOptionDisabled,
+    deletedTriggerBlocked: isDeletedTriggerBlockedActionType,
+    fwb: { flagOn: fwbWritebackEnabled.value, triggerType: draft.value.triggerType, outcomes: approvalCompletedOutcomes.value },
+    runIntegrationJob: { switchOn: integrationRunActionEnabled.value, triggerType: draft.value.triggerType, actionCount: nextCount },
+  }, isZh.value)
+}
+
+const flowLibraryGroups = computed(() => buildFlowLibrary({
+  catalog: FLOW_LIBRARY_CATALOG,
+  isZh: isZh.value,
+  lockReason: flowLibraryLockReasonFor,
+}))
+
+const flowLibraryComingSoonEntries = computed(() => flowLibraryComingSoon(isZh.value))
+
+// 1c: 上线门 — read-only; only the switches this editor already reads, plus the rule's loaded enabled state.
+const flowGates = computed(() => buildFlowGates({
+  actionTypes: draft.value.actions.map((action) => action.type),
+  triggerType: draft.value.triggerType,
+  features: {
+    runAction: integrationRunActionEnabled.value,
+    runEvent: integrationRunEventEnabled.value,
+    fwb: fwbWritebackEnabled.value,
+  },
+  ruleEnabled: props.rule ? props.rule.enabled === true : null,
+  isZh: isZh.value,
+}))
+
 /** 「配置」: back to Form with that action expanded and scrolled into view (the save-block-reason path). */
 function configureFlowStep(idx: number): void {
   scrollToSaveBlockAnchor(`[data-action-index="${idx}"]`)
@@ -4631,11 +4699,31 @@ function removeConditionNode(path: ConditionPath) {
   parent.group.conditions.splice(parent.index, 1)
 }
 
+// The type addAction() gives a new row (the Form author then changes it through the row's type select).
+const NEW_ACTION_TYPE: AutomationActionType = 'update_record'
+
 function addAction() {
   if (draft.value.actions.length >= 3) return
   // R-69 I6d fix round 2 (F2): run_integration_job is its rule's only action — nothing is added beside it.
   if (draftCarriesRunIntegrationJob.value) return
-  draft.value.actions.push(createDraftAction('update_record'))
+  draft.value.actions.push(createDraftAction(NEW_ACTION_TYPE))
+}
+
+/**
+ * Integration assistant 1c: add a step of `type` from the Flow node library — exactly what a Form author does:
+ * 「添加动作」 (addAction) and then pick `type` in the new row's select (v-model sets the type, @change runs
+ * onDraftActionTypeChange; an el-select emits no change when the value is already selected). Locked entries
+ * (the same lock the library shows) add nothing.
+ */
+function addActionFromLibrary(type: AutomationActionType): void {
+  if (flowLibraryLockReasonFor(type) !== '') return
+  const before = draft.value.actions.length
+  addAction()
+  if (draft.value.actions.length !== before + 1) return
+  const action = draft.value.actions[before]
+  if (action.type === type) return
+  action.type = type
+  onDraftActionTypeChange(action)
 }
 
 function parseUserIdsText(value: unknown): string[] {

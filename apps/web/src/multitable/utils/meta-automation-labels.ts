@@ -137,6 +137,56 @@ export type AutomationLabelKey =
   | 'editor.flowAddStep'
   | 'editor.flowAddStepMaxReached'
   | 'editor.flowAddStepIntegrationOnly'
+  | 'editor.libraryTab'
+  | 'editor.gatesTab'
+  | 'editor.libraryHint'
+  | 'editor.libraryLockedBadge'
+  | 'editor.libraryComingSoon'
+  | 'editor.libraryDescUpdateRecord'
+  | 'editor.libraryDescCreateRecord'
+  | 'editor.libraryDescDeleteRecord'
+  | 'editor.libraryDescLockRecord'
+  | 'editor.libraryDescSendWebhook'
+  | 'editor.libraryDescSendNotification'
+  | 'editor.libraryDescSendEmail'
+  | 'editor.libraryDescDingTalkGroup'
+  | 'editor.libraryDescDingTalkPerson'
+  | 'editor.libraryDescDingTalkApprovalCard'
+  | 'editor.libraryDescWaitForCallback'
+  | 'editor.libraryDescConditionBranch'
+  | 'editor.libraryDescParallelBranch'
+  | 'editor.libraryDescStartApproval'
+  | 'editor.libraryDescFwb'
+  | 'editor.libraryDescRunIntegrationJob'
+  | 'editor.libraryComingConnectionCall'
+  | 'editor.libraryComingFieldTransform'
+  | 'editor.libraryComingCode'
+  | 'editor.libraryComingK3Write'
+  | 'editor.libraryComingReasonSLine'
+  | 'editor.libraryComingReasonCode'
+  | 'editor.libraryComingReasonK3Write'
+  | 'editor.libraryLockUnsupported'
+  | 'editor.libraryLockUnavailable'
+  | 'editor.libraryLockFwbFlagOff'
+  | 'editor.libraryLockFwbTrigger'
+  | 'editor.libraryLockFwbOutcome'
+  | 'editor.libraryLockRunJobSwitchOff'
+  | 'editor.libraryLockRunJobTrigger'
+  | 'editor.libraryLockRunJobSole'
+  | 'editor.gatesHint'
+  | 'editor.gatesStateOn'
+  | 'editor.gatesStateOff'
+  | 'editor.gatesRunAction'
+  | 'editor.gatesRunActionNote'
+  | 'editor.gatesRunEvent'
+  | 'editor.gatesFwb'
+  | 'editor.gatesOutbound'
+  | 'editor.gatesOutboundNote'
+  | 'editor.gatesRuleState'
+  | 'editor.gatesRuleNew'
+  | 'editor.gatesRuleStateNote'
+  | 'editor.gatesSave'
+  | 'editor.gatesSaveNote'
   | 'editor.executionModeLabel'
   | 'editor.executionModeHint'
   | 'editor.executionModeRequiredHint'
@@ -564,6 +614,56 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'editor.flowAddStep',
   'editor.flowAddStepMaxReached',
   'editor.flowAddStepIntegrationOnly',
+  'editor.libraryTab',
+  'editor.gatesTab',
+  'editor.libraryHint',
+  'editor.libraryLockedBadge',
+  'editor.libraryComingSoon',
+  'editor.libraryDescUpdateRecord',
+  'editor.libraryDescCreateRecord',
+  'editor.libraryDescDeleteRecord',
+  'editor.libraryDescLockRecord',
+  'editor.libraryDescSendWebhook',
+  'editor.libraryDescSendNotification',
+  'editor.libraryDescSendEmail',
+  'editor.libraryDescDingTalkGroup',
+  'editor.libraryDescDingTalkPerson',
+  'editor.libraryDescDingTalkApprovalCard',
+  'editor.libraryDescWaitForCallback',
+  'editor.libraryDescConditionBranch',
+  'editor.libraryDescParallelBranch',
+  'editor.libraryDescStartApproval',
+  'editor.libraryDescFwb',
+  'editor.libraryDescRunIntegrationJob',
+  'editor.libraryComingConnectionCall',
+  'editor.libraryComingFieldTransform',
+  'editor.libraryComingCode',
+  'editor.libraryComingK3Write',
+  'editor.libraryComingReasonSLine',
+  'editor.libraryComingReasonCode',
+  'editor.libraryComingReasonK3Write',
+  'editor.libraryLockUnsupported',
+  'editor.libraryLockUnavailable',
+  'editor.libraryLockFwbFlagOff',
+  'editor.libraryLockFwbTrigger',
+  'editor.libraryLockFwbOutcome',
+  'editor.libraryLockRunJobSwitchOff',
+  'editor.libraryLockRunJobTrigger',
+  'editor.libraryLockRunJobSole',
+  'editor.gatesHint',
+  'editor.gatesStateOn',
+  'editor.gatesStateOff',
+  'editor.gatesRunAction',
+  'editor.gatesRunActionNote',
+  'editor.gatesRunEvent',
+  'editor.gatesFwb',
+  'editor.gatesOutbound',
+  'editor.gatesOutboundNote',
+  'editor.gatesRuleState',
+  'editor.gatesRuleNew',
+  'editor.gatesRuleStateNote',
+  'editor.gatesSave',
+  'editor.gatesSaveNote',
   'editor.executionModeLabel',
   'editor.executionModeHint',
   'editor.executionModeRequiredHint',
@@ -1006,6 +1106,56 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'editor.flowAddStep': { en: '+ Add step', zh: '+ 添加步骤' },
   'editor.flowAddStepMaxReached': { en: 'A rule has at most 3 steps', zh: '一条规则最多 3 个步骤' },
   'editor.flowAddStepIntegrationOnly': { en: 'Run integration job must be the rule\'s only step', zh: '「运行集成任务」必须是规则唯一的步骤' },
+  'editor.libraryTab': { en: 'Node library', zh: '节点库' },
+  'editor.gatesTab': { en: 'Go-live gates', zh: '上线门' },
+  'editor.libraryHint': { en: 'Pick a type to add a step, the same as adding an action in Form and choosing that type. Locked entries say why.', zh: '点选一个类型即添加一步，等同于在表单里「添加动作」后选这个类型。锁着的写明原因。' },
+  'editor.libraryLockedBadge': { en: 'Locked', zh: '未开放' },
+  'editor.libraryComingSoon': { en: 'Coming later', zh: '即将开放' },
+  'editor.libraryDescUpdateRecord': { en: 'Write values into record fields', zh: '把值写进记录的字段' },
+  'editor.libraryDescCreateRecord': { en: 'Create a record in a sheet', zh: '在表里新建一条记录' },
+  'editor.libraryDescDeleteRecord': { en: 'Delete the trigger record', zh: '删除触发记录' },
+  'editor.libraryDescLockRecord': { en: 'Lock the record against edits', zh: '锁定记录，禁止再编辑' },
+  'editor.libraryDescSendWebhook': { en: 'Send an HTTP request to an external address', zh: '向外部地址发 HTTP 请求' },
+  'editor.libraryDescSendNotification': { en: 'Send an in-app notification to members', zh: '给成员发站内通知' },
+  'editor.libraryDescSendEmail': { en: 'Send an email', zh: '发送邮件' },
+  'editor.libraryDescDingTalkGroup': { en: 'Post a message to a DingTalk group', zh: '发消息到钉钉群' },
+  'editor.libraryDescDingTalkPerson': { en: 'Send a DingTalk work notice to people', zh: '给个人发钉钉工作通知' },
+  'editor.libraryDescDingTalkApprovalCard': { en: 'Push the approval task as a DingTalk card', zh: '把审批待办推成钉钉卡片' },
+  'editor.libraryDescWaitForCallback': { en: 'Suspend until an external callback arrives', zh: '挂起，等外部回调后继续' },
+  'editor.libraryDescConditionBranch': { en: 'Take one branch by condition', zh: '按条件走其中一个分支' },
+  'editor.libraryDescParallelBranch': { en: 'Run several branches side by side', zh: '多个分支同时执行' },
+  'editor.libraryDescStartApproval': { en: 'Start an approval from a template', zh: '用审批模板发起审批' },
+  'editor.libraryDescFwb': { en: 'Create a record from approved form values', zh: '把审批通过的表单值写成新记录' },
+  'editor.libraryDescRunIntegrationJob': { en: 'Run an integration job (dry run only)', zh: '运行集成作业（只试算）' },
+  'editor.libraryComingConnectionCall': { en: 'Call a connection (approved named operations only)', zh: '调用连接（只调已批准的具名操作）' },
+  'editor.libraryComingFieldTransform': { en: 'Field transform', zh: '字段转换' },
+  'editor.libraryComingCode': { en: 'Code node', zh: '代码节点' },
+  'editor.libraryComingK3Write': { en: 'K3 write-back', zh: 'K3 写回' },
+  'editor.libraryComingReasonSLine': { en: 'S line (ADR #6914) not merged yet', zh: 'S 线（ADR #6914）未合入' },
+  'editor.libraryComingReasonCode': { en: 'Not in this phase (frozen baseline v2.3 :738)', zh: '不在本期（冻结基线 v2.3 :738）' },
+  'editor.libraryComingReasonK3Write': { en: 'Permanently forbidden', zh: '永久禁止' },
+  'editor.libraryLockUnsupported': { en: 'This type cannot be newly chosen', zh: '该类型当前不可新选' },
+  'editor.libraryLockUnavailable': { en: 'Not available for this rule', zh: '当前规则不可选此类型' },
+  'editor.libraryLockFwbFlagOff': { en: 'The approval writeback switch is off (approvalFwbWriteback)', zh: '审批回写开关未开（approvalFwbWriteback）' },
+  'editor.libraryLockFwbTrigger': { en: 'Only on the approval.completed trigger', zh: '只能用于「审批完成」触发' },
+  'editor.libraryLockFwbOutcome': { en: 'Supports the approved outcome only: set completion outcomes to approved only', zh: '只支持「通过」结果：把完成结果改为仅通过' },
+  'editor.libraryLockRunJobSwitchOff': { en: 'The run-integration-job switch is off (integrationAutomationRunAction)', zh: '运行集成任务开关未开（integrationAutomationRunAction）' },
+  'editor.libraryLockRunJobTrigger': { en: 'Only on a scheduled (cron) trigger', zh: '只能用于「定时（cron）」触发' },
+  'editor.libraryLockRunJobSole': { en: 'Must be the rule\'s only step: remove the other steps first', zh: '必须是规则唯一的步骤：先删除其他步骤' },
+  'editor.gatesHint': { en: 'Read only: the switches and gates this draft touches.', zh: '只读：列出当前草稿涉及的开关与门。' },
+  'editor.gatesStateOn': { en: 'On', zh: '开' },
+  'editor.gatesStateOff': { en: 'Off', zh: '关' },
+  'editor.gatesRunAction': { en: 'Run integration job switch', zh: '「运行集成任务」动作开关' },
+  'editor.gatesRunActionNote': { en: 'Dry run only; the real-write switch is approved separately (owner layer)', zh: '只试算；真写开关另批（O 层）' },
+  'editor.gatesRunEvent': { en: 'Integration run finished trigger switch', zh: '「集成运行完成」触发开关' },
+  'editor.gatesFwb': { en: 'Approval writeback switch', zh: '审批回写开关' },
+  'editor.gatesOutbound': { en: 'Outbound sends (webhook / DingTalk / email)', zh: '对外发送（Webhook / 钉钉 / 邮件）' },
+  'editor.gatesOutboundNote': { en: 'Follow the existing delivery switches; this page does not read their state', zh: '按既有的发送开关执行；本页不读取其状态' },
+  'editor.gatesRuleState': { en: 'Rule state', zh: '规则状态' },
+  'editor.gatesRuleNew': { en: 'New rule', zh: '新规则' },
+  'editor.gatesRuleStateNote': { en: 'Switched on or off in the rule list; saving here does not change it', zh: '在规则列表里开关；在这里保存不改变它' },
+  'editor.gatesSave': { en: 'Save', zh: '保存' },
+  'editor.gatesSaveNote': { en: 'Saving goes through the one save gate; this page changes no switch', zh: '保存只经同一个保存门；本页不改任何开关' },
   'editor.advancedSection': {
     en: 'Advanced',
     zh: '高级设置',
