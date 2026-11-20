@@ -830,17 +830,14 @@ async function identityRequiresEmptyScope(
        FROM directory_account_links link
        JOIN directory_accounts account ON account.id = link.directory_account_id
       WHERE link.local_user_id = $1 AND link.link_status = 'linked' AND account.provider = $2
-      ORDER BY account.id LIMIT 2 FOR SHARE OF link, account NOWAIT`,
-    [userId, PROVIDER],
+      ORDER BY (NULLIF(account.corp_id, '') IS NOT NULL AND account.corp_id <> $3) DESC, account.id
+      LIMIT 2 FOR SHARE OF link, account NOWAIT`,
+    [userId, PROVIDER, source.corpId],
   ).catch(() => { throw new DingTalkSourceError(503) })
-  if (links.rows.length > 1) refuseDingTalkSource()
+  // Read a foreign affiliation first so the bounded lookup cannot hide one
+  // behind two same-enterprise accounts. A null enterprise proves no origin.
   const linked = links.rows[0]
-  if (linked && (linked.integration_id !== source.connectionId || linked.corp_id !== source.corpId)) {
-    refuseDingTalkSource()
-  }
-  if (linked?.is_active === true && linked.union_id && linked.union_id !== profile.unionId) refuseDingTalkSource()
-  const linkedHere = linked?.is_active === true && Boolean(profile.unionId) && linked.union_id === profile.unionId
-
+  if (linked?.corp_id && linked.corp_id !== source.corpId) refuseDingTalkSource()
   const key = String(identity.external_key ?? '')
   const pairs = [
     [identity.provider_open_id, profile.openId],
@@ -849,10 +846,17 @@ async function identityRequiresEmptyScope(
   const canonicalHere = pairs.some(([stored, verified]) => typeof stored === 'string' && stored && stored === verified && key === `${source.corpId}:${stored}`)
   const foreignKey = pairs.some(([id]) => typeof id === 'string' && id && key.endsWith(`:${id}`) && key !== `${source.corpId}:${id}`)
   if (foreignKey) refuseDingTalkSource()
-  if (canonicalHere) return identityCorpRequiresEmptyScope(client, source)
-  if (linkedHere) return false
-  // The compatibility rule is restricted to a bare identifier of this row.
-  if (source.explicit || !pairs.some(([stored]) => stored && key === stored) || !describesSameDingTalkPerson(identity, profile, null)) {
+  const directoryConflict = linked && (
+    links.rows.length > 1 || linked.integration_id !== source.connectionId || linked.corp_id !== source.corpId
+    || (linked.is_active === true && linked.union_id && linked.union_id !== profile.unionId)
+  )
+  if (!directoryConflict) {
+    if (linked?.is_active === true && profile.unionId && linked.union_id === profile.unionId) return false
+    if (canonicalHere) return identityCorpRequiresEmptyScope(client, source)
+  }
+  // Ambiguous same-enterprise affiliations cannot identify a connection. Only an implicit
+  // login with the same established identity may proceed under the global empty-scope lock.
+  if (source.explicit || (!canonicalHere && !pairs.some(([stored]) => stored && key === stored)) || !describesSameDingTalkPerson(identity, profile, null)) {
     refuseDingTalkSource()
   }
   return true
@@ -1086,7 +1090,7 @@ async function upsertExternalIdentity(
       // enrichment; alternating logins stay stable).
       const hasOpenId = Boolean(dtUser.openId)
       // An optional OAuth corp must not erase the established identity namespace.
-      identityCorpId = existing.corp_id ? String(existing.corp_id) : (emptyScope ? config.corpId : null)
+      identityCorpId = existing.corp_id ? String(existing.corp_id) : null
       const identityExternalKey = buildEnrichmentExternalKey(existing, dtUser, identityCorpId, source)
       const nextExternalKey = hasOpenId
         ? identityExternalKey
@@ -1166,7 +1170,7 @@ async function upsertExternalIdentity(
       })
     }
 
-    await backfillDirectoryAccountOpenIdInTransaction(client, dtUser, identityCorpId, localUserId, emptyScope ? undefined : source)
+    await backfillDirectoryAccountOpenIdInTransaction(client, dtUser, identityCorpId ?? config.corpId, localUserId, emptyScope ? undefined : source)
     // This lock is last: account, identity, grant and evidence writers above complete on this client.
     if (emptyScope) await checkEmptyDingTalkScope(client)
     return {
@@ -1214,7 +1218,7 @@ async function enrichMissingOpenIdForRejectedLogin(localUserId: string, dtUser: 
     const emptyScope = await identityRequiresEmptyScope(client, localUserId, existing, dtUser, source)
     const matchCorp = !existing.corp_id && source.connectionId && !emptyScope ? null : config.corpId
     if (!describesSameDingTalkPerson(existing, dtUser, matchCorp)) return
-    const identityCorpId = existing.corp_id ? String(existing.corp_id) : (emptyScope ? config.corpId : null)
+    const identityCorpId = existing.corp_id ? String(existing.corp_id) : null
     const externalKey = buildEnrichmentExternalKey(existing, dtUser, identityCorpId, source)
     const conflictResult = await client.query(
       `SELECT local_user_id
@@ -1252,7 +1256,7 @@ async function enrichMissingOpenIdForRejectedLogin(localUserId: string, dtUser: 
 
     // The login is still rejected (no grant yet) — but the openId is now proven, which is exactly
     // what the directory page needs before an admin can turn the grant on.
-    await backfillDirectoryAccountOpenIdInTransaction(client, dtUser, identityCorpId, localUserId, emptyScope ? undefined : source)
+    await backfillDirectoryAccountOpenIdInTransaction(client, dtUser, identityCorpId ?? config.corpId, localUserId, emptyScope ? undefined : source)
     if (emptyScope) await checkEmptyDingTalkScope(client)
   })
 }

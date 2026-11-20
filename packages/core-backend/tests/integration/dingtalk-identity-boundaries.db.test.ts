@@ -566,12 +566,12 @@ describe('DingTalk identity authorization boundaries (real DB)', () => {
     expect(await state(id)).toEqual({ ...before, links: [{ directory_account_id: account, link_status: 'linked' }] })
   })
 
-  it('can fill a missing corp column when the existing canonical key proves the current corp', async () => {
+  it('recognizes a missing identity corp when the verified canonical key matches the configured corp', async () => {
     const { id, email } = await seed({ identity: true, grant: true })
     await q(`UPDATE user_external_identities SET corp_id=NULL WHERE provider='dingtalk' AND local_user_id=$1`, [id])
     clientMocks.fetchDingTalkCurrentUser.mockResolvedValue({ openId: `${id}-open-A`, unionId: `${id}-union-A`, nick: 'Synthetic A', email })
     expect((await exchangeCodeForUser('synthetic-code')).localUserId).toBe(id)
-    expect((await state(id)).identity).toEqual([{ corp_id: CORP, provider_union_id: `${id}-union-A`, provider_open_id: `${id}-open-A` }])
+    expect((await state(id)).identity).toEqual([{ corp_id: null, provider_union_id: `${id}-union-A`, provider_open_id: `${id}-open-A` }])
   })
 
   it.each([false, true])('an unset configured corp preserves an established identity scope (known OpenID=%s)', async knownOpenId => {
@@ -642,7 +642,7 @@ describe('DingTalk identity authorization boundaries (real DB)', () => {
     if (!grant) await q(`UPDATE user_external_auth_grants SET enabled=TRUE WHERE provider='dingtalk' AND local_user_id=$1`, [id])
     expect((await exchangeCodeForUser('synthetic-code')).localUserId).toBe(id)
     expect((await q(`SELECT corp_id, external_key FROM user_external_identities WHERE provider='dingtalk' AND local_user_id=$1`, [id])).rows)
-      .toEqual([{ corp_id: CORP, external_key: `${CORP}:${id}-open-B` }])
+      .toEqual([{ corp_id: null, external_key: `${CORP}:${id}-open-B` }])
   })
 
   async function useProviderResponseDecoders() {
@@ -656,6 +656,28 @@ describe('DingTalk identity authorization boundaries (real DB)', () => {
     await useProviderResponseDecoders()
     const { checkDingTalkLoginSurfaces } = await import('../helpers/dingtalk-login-http')
     await checkDingTalkLoginSurfaces()
+  })
+
+  for (const mixed of [false, true]) {
+    it.each(['sibling', 'multiple', 'foreign', 'foreign among multiple', 'different directory UnionID', 'verified sole link'] as const)(
+      `checks %s affiliation on web and container with strict scope ${mixed} and reconciles rejected writes`, async affiliation => {
+        await useProviderResponseDecoders()
+        const { checkDingTalkLoginSurfaces } = await import('../helpers/dingtalk-login-http')
+        await checkDingTalkLoginSurfaces({ mixed, affiliation })
+      },
+    )
+  }
+
+  it('keeps the identity mismatch for a configured enterprise and an unattributed bare key on both surfaces', async () => {
+    await useProviderResponseDecoders()
+    const { checkDingTalkLoginSurfaces } = await import('../helpers/dingtalk-login-http')
+    await checkDingTalkLoginSurfaces({ mixed: false, affiliation: 'configured bare sibling' })
+  })
+
+  it('configured enterprise compatibility keeps corp NULL through grant-denied enrichment and both successful login surfaces', async () => {
+    await useProviderResponseDecoders()
+    const { checkDingTalkLoginSurfaces } = await import('../helpers/dingtalk-login-http')
+    await checkDingTalkLoginSurfaces({ mixed: false, knownOpenId: false, ambiguous: true, grant: false, configured: true })
   })
 
   it.each([

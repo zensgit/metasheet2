@@ -6,16 +6,20 @@ import request from 'supertest'
 import { expect, vi } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
 
-type CanonicalUnionScenario = { mixed: boolean; knownOpenId: boolean; grant?: false; ambiguous?: true; storedCorp?: true }
+type DirectoryAffiliation = 'sibling' | 'multiple' | 'foreign' | 'foreign among multiple' | 'different directory UnionID' | 'verified sole link' | 'configured bare sibling'
+type AffiliationScenario = { mixed: boolean; affiliation: DirectoryAffiliation }
+type CanonicalUnionScenario = { mixed: boolean; knownOpenId: boolean; grant?: false; ambiguous?: true; storedCorp?: true; configured?: true }
 
 /** Run real routes and provider response decoders against one disposable SQL transaction.
  * The scope row is insert-only. Savepoints preserve application rollback without leaving a
  * committed scope in the shared integration database. Only the provider's HTTP wire is stubbed. */
-export async function checkDingTalkLoginSurfaces(canonical?: CanonicalUnionScenario): Promise<void> {
+export async function checkDingTalkLoginSurfaces(scenario?: CanonicalUnionScenario | AffiliationScenario): Promise<void> {
+  const canonical = scenario && 'knownOpenId' in scenario ? scenario : undefined
   const appKey = `login-app-${randomUUID()}`
   vi.stubEnv('DINGTALK_CLIENT_ID', appKey)
   vi.stubEnv('DINGTALK_CORP_ID', '')
   vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', 'true')
+  vi.stubEnv('AUTH_LOGIN_MAX_ATTEMPTS', '100')
   vi.stubEnv('DINGTALK_OAUTH_REQUIRE_SHARED_STATE_STORE', 'false')
   const { authRouter } = await import('../../src/routes/auth')
   const { generateState } = await import('../../src/auth/dingtalk-oauth')
@@ -52,9 +56,9 @@ export async function checkDingTalkLoginSurfaces(canonical?: CanonicalUnionScena
   })
   const ordinary = randomUUID(), strict = randomUUID()
   const bare = randomUUID(), known = randomUUID()
-  async function connection(id: string, key: string) {
+  async function connection(id: string, key: string, corp = `corp-${id}`) {
     await fixture(`INSERT INTO directory_integrations(id, org_id, provider, name, status, corp_id, config)
-      VALUES ($1, 'login-test', 'dingtalk', $2, 'active', $2, $3)`, [id, `corp-${id}`, { appKey: key }])
+      VALUES ($1, 'login-test', 'dingtalk', $2, 'active', $4, $3)`, [id, `corp-${id}`, { appKey: key }, corp])
   }
   async function send(surface: 'web' | 'container', user: string, selector?: string) {
     person = user
@@ -65,13 +69,17 @@ export async function checkDingTalkLoginSurfaces(canonical?: CanonicalUnionScena
   async function login(surface: 'web' | 'container', user: string, expected: number, selector?: string) {
     const state = () => fixture(`SELECT e.updated_at, e.corp_id, e.external_key, g.enabled,
       e.ctid::text AS identity_version, g.ctid::text AS grant_version,
+      (SELECT u.ctid::text FROM users u WHERE u.id=e.local_user_id) AS user_version,
+      (SELECT array_agg(ARRAY[link.ctid::text,account.ctid::text] ORDER BY account.id)
+         FROM directory_account_links link JOIN directory_accounts account ON account.id=link.directory_account_id
+         WHERE link.local_user_id=e.local_user_id) AS account_and_link_versions,
       (SELECT count(*)::int FROM user_sessions s WHERE s.user_id = e.local_user_id) AS sessions
       FROM user_external_identities e JOIN user_external_auth_grants g USING (local_user_id, provider) WHERE e.local_user_id=$1`, [user])
     const before = (await state()).rows
     const res = await send(surface, user, selector)
     expect(res.status, `${surface} ${res.body.code ?? ''}`).toBe(expected)
-    if (expected === 403) {
-      expect(res.body.code).toBe('strict_connection')
+    if (expected === 403 || expected === 409) {
+      expect(res.body.code).toBe(expected === 403 ? 'strict_connection' : 'identity_mismatch')
       expect(res.body.data?.token).toBeUndefined()
       expect((await state()).rows).toEqual(before)
       return
@@ -85,9 +93,51 @@ export async function checkDingTalkLoginSurfaces(canonical?: CanonicalUnionScena
     await fixture('BEGIN ISOLATION LEVEL READ COMMITTED')
     expect((await fixture('SELECT 1 FROM directory_connection_login_scope LIMIT 1')).rowCount).toBe(0)
     await connection(ordinary, appKey)
+    if (scenario && 'affiliation' in scenario) {
+      const user = randomUUID(), sibling = randomUUID(), foreign = randomUUID()
+      const corp = `corp-${ordinary}`, unionId = `union-${user}`
+      const configuredBare = scenario.affiliation === 'configured bare sibling'
+      if (configuredBare) vi.stubEnv('DINGTALK_CORP_ID', corp)
+      await connection(sibling, `sibling-${appKey}`, corp)
+      await connection(foreign, `foreign-${appKey}`)
+      if (scenario.mixed) {
+        await connection(strict, `strict-${appKey}`)
+        await fixture('INSERT INTO directory_connection_login_scope(connection_id, command_id) VALUES ($1,$2)', [strict, randomUUID()])
+      }
+      await fixture(`INSERT INTO users(id,email,name,password_hash,role,is_active,activation_status)
+        VALUES ($1,$2,'Synthetic','fixture','user',true,'activated')`, [user, `${user}@example.invalid`])
+      await fixture(`INSERT INTO user_external_identities(provider,local_user_id,external_key,provider_union_id,corp_id)
+        VALUES ('dingtalk',$1,$2,$3,NULL)`, [user, scenario.affiliation === 'verified sole link' ? `${corp}:${unionId}` : unionId, unionId])
+      await fixture("INSERT INTO user_external_auth_grants(provider,local_user_id,enabled) VALUES ('dingtalk',$1,true)", [user])
+      const connections = {
+        sibling: [sibling], multiple: [ordinary, sibling], foreign: [foreign],
+        'foreign among multiple': [ordinary, sibling, foreign], 'different directory UnionID': [ordinary], 'verified sole link': [ordinary], 'configured bare sibling': [sibling],
+      }[scenario.affiliation]
+      const accountIds = connections.map(() => randomUUID()).sort()
+      for (const [index, id] of connections.entries()) {
+        const account = accountIds[index]
+        await fixture(`INSERT INTO directory_accounts(id,integration_id,provider,corp_id,external_user_id,external_key,name,is_active,union_id)
+          VALUES ($1,$2,'dingtalk',$3,$4,$4,'Synthetic',true,$5)`, [
+          account, id, id === foreign ? `corp-${foreign}` : corp, randomUUID(),
+          scenario.affiliation === 'different directory UnionID' ? `other-${user}` : unionId,
+        ])
+        await fixture("INSERT INTO directory_account_links(directory_account_id,local_user_id,link_status) VALUES($1,$2,'linked')", [account, user])
+      }
+      const exact = scenario.affiliation === 'verified sole link'
+      const allowed = exact || (!scenario.mixed && !connections.includes(foreign) && !configuredBare)
+      for (const surface of ['web', 'container'] as const) {
+        await login(surface, user, exact ? 200 : 403, corp)
+        await login(surface, user, configuredBare ? 409 : allowed ? 200 : 403)
+      }
+      expect((await fixture('SELECT corp_id FROM user_external_identities WHERE local_user_id=$1', [user])).rows).toEqual([{ corp_id: null }])
+      expect((await fixture('SELECT external_auth_context FROM user_sessions WHERE user_id=$1', [user])).rows)
+        .toEqual(Array.from({ length: exact ? 4 : allowed ? 2 : 0 }, () => ({ external_auth_context: null })))
+      return
+    }
     if (canonical) {
       const user = randomUUID()
       const corp = `corp-${ordinary}`, unionId = `union-${user}`, openId = `open-${user}`
+      if (canonical.configured) vi.stubEnv('DINGTALK_CORP_ID', corp)
       if (canonical.mixed || canonical.ambiguous) await connection(strict, `other-${appKey}`)
       if (canonical.ambiguous) await fixture('UPDATE directory_integrations SET corp_id=$1 WHERE id=$2', [corp, strict])
       if (canonical.mixed) await fixture('INSERT INTO directory_connection_login_scope(connection_id, command_id) VALUES ($1,$2)', [strict, randomUUID()])
