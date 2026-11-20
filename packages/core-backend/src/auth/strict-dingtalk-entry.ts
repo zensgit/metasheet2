@@ -1007,8 +1007,12 @@ async function insertStrictSession(
          id, user_id, issued_at, expires_at, last_seen_at, revoked_at, revoked_by, revoke_reason,
          ip_address, user_agent, created_at, updated_at, external_auth_context
        )
-       SELECT $1, $2, clock_timestamp(), clock_timestamp() + make_interval(secs => $3::int),
-              clock_timestamp(), NULL, NULL, NULL, $4, $5, clock_timestamp(), clock_timestamp(), $6::jsonb
+       WITH session_clock AS MATERIALIZED (
+         SELECT pg_catalog.clock_timestamp() AS issued_at
+       )
+       SELECT $1, $2, issued_at, issued_at + make_interval(secs => $3::int),
+              issued_at, NULL, NULL, NULL, $4, $5, issued_at, issued_at, $6::jsonb
+         FROM session_clock
         WHERE EXISTS (SELECT 1 FROM users WHERE id = $2)
        RETURNING id`,
       [sid, user.id, maxAge, ipAddress, userAgent, JSON.stringify(context)],
