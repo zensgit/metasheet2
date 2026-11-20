@@ -337,6 +337,132 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
     }
   })
 
+  it.each([
+    { scenario: 'core-violation', inTime: '10:30', outTime: '14:30', minutes: 240, late: 25, early: 205,
+      status: 'late_early', reasons: ['early_check_out', 'late_check_in'] },
+    { scenario: 'on-time-control', inTime: '10:00', outTime: '18:00', minutes: 480, late: 0, early: 0,
+      status: 'normal', reasons: ['within_window'] },
+  ] as const)('PARENT_CALC10_CORE_HTTP: legal core policy ($scenario)', async proof => {
+    const fixture = await seedOrg('shadow')
+    const workDate = '2026-07-01'
+    const headers = { Authorization: 'Bearer ' + fixture.token }
+    await pool.query("UPDATE users SET activation_status = 'activated' WHERE id = $1", [fixture.userId])
+    await pool.query(
+      "INSERT INTO user_permissions (user_id, permission_code) SELECT $1, unnest($2::text[]) ON CONFLICT DO NOTHING",
+      [fixture.userId, ['attendance:read', 'attendance:write']],
+    )
+    const flexPolicy = { mode: 'flex_required_duration', requiredMinutes: 480,
+      arrivalWindowBeforeMinutes: 60, arrivalWindowAfterMinutes: 60,
+      coreStartTime: '10:00', coreEndTime: '15:00' }
+    // Every permitted clamped start in [08:00,10:00] covers core [10:00,15:00].
+    const created = await requestJson(baseUrl + '/api/attendance/shifts', {
+      method: 'POST', headers,
+      body: { name: 'Core-hours native proof', timezone: 'UTC',
+        segments: [{ startTime: '09:00', endTime: '18:00' }], flexPolicy,
+        lateGraceMinutes: 5, earlyGraceMinutes: 5, roundingMinutes: 1,
+        workingDays: [0, 1, 2, 3, 4, 5, 6] },
+    })
+    expect(created.status, created.raw).toBe(201)
+    expect(created.body?.data?.flexPolicy).toEqual(flexPolicy)
+    const shiftId = created.body?.data?.id as string
+    expect(typeof shiftId).toBe('string')
+    // Native synthetic source fixture, not public assignment-write admission.
+    await pool.query(
+      `INSERT INTO attendance_shift_assignments
+         (id, org_id, user_id, shift_id, start_date, end_date, is_active, publish_status, slot_index)
+       VALUES ($1, $2, $3, $4, $5::date, $5::date, true, 'published', 0)`,
+      [randomUUID(), fixture.orgId, fixture.userId, shiftId, workDate],
+    )
+    for (const [state, prior, version] of [['eligible', 'shadow', 3], ['authoritative', 'eligible', 4]] as const) {
+      await pool.query(
+        'UPDATE attendance_calculation_rollout_state SET state = $2, prior_state = $3, version = $4 WHERE org_id = $1',
+        [fixture.orgId, state, prior, version],
+      )
+    }
+    for (const [eventType, time] of [['check_in', proof.inTime], ['check_out', proof.outTime]] as const) {
+      const response = await requestJson(baseUrl + '/api/attendance/punch', {
+        method: 'POST', headers, body: { orgId: fixture.orgId, eventType,
+          operationId: randomUUID(), occurredAt: workDate + 'T' + time + ':00.000Z' },
+      })
+      expect(response.status, 'PARENT_CALC10_CANONICAL_HTTP_200: ' + response.raw).toBe(200)
+    }
+    const rows = await pool.query(
+      `SELECT r.id, r.work_date::text, r.current_calculation_id, r.projection_owner, r.visibility_state,
+              r.status, r.work_minutes, r.late_minutes, r.early_leave_minutes,
+              r.first_in_at, r.last_out_at, c.id AS calculation_id, c.mode, c.outcome, c.outcome_reason_code,
+              c.entrypoint, c.projection_effect, c.expected_segment_count, c.projected_status,
+              c.projected_work_minutes, c.projected_late_minutes, c.projected_early_leave_minutes,
+              c.attribution_snapshot, c.context_snapshot, c.segment_snapshot
+         FROM attendance_records r JOIN attendance_record_calculations c
+           ON c.id = r.current_calculation_id AND c.org_id = r.org_id AND c.attendance_record_id = r.id
+        WHERE r.org_id = $1 AND r.user_id = $2`,
+      [fixture.orgId, fixture.userId],
+    )
+    expect(rows.rows).toHaveLength(1)
+    const row = rows.rows[0]
+    expect({
+      workDate: row.work_date, currentIsCanonical: row.current_calculation_id === row.calculation_id,
+      projectionOwner: row.projection_owner, visibility: row.visibility_state,
+      status: row.status, worked: row.work_minutes, late: row.late_minutes, early: row.early_leave_minutes,
+      firstIn: row.first_in_at.toISOString(), lastOut: row.last_out_at.toISOString(),
+      mode: row.mode, outcome: row.outcome, reason: row.outcome_reason_code, entrypoint: row.entrypoint,
+      effect: row.projection_effect, segmentCount: row.expected_segment_count,
+      projectedStatus: row.projected_status, projectedWorked: row.projected_work_minutes,
+      projectedLate: row.projected_late_minutes, projectedEarly: row.projected_early_leave_minutes,
+    }).toEqual({
+      workDate, currentIsCanonical: true, projectionOwner: 'w4', visibility: 'active',
+      status: proof.status, worked: proof.minutes, late: proof.late, early: proof.early,
+      firstIn: workDate + 'T' + proof.inTime + ':00.000Z', lastOut: workDate + 'T' + proof.outTime + ':00.000Z',
+      mode: 'authoritative', outcome: 'completed', reason: 'calculated', entrypoint: 'live',
+      effect: 'set_active', segmentCount: 1, projectedStatus: proof.status,
+      projectedWorked: proof.minutes, projectedLate: proof.late, projectedEarly: proof.early,
+    })
+    expect(row.attribution_snapshot).toMatchObject({
+      posture: 'resolved_v2', value: { orgId: fixture.orgId, userId: fixture.userId, workDate, shiftId },
+    })
+    expect(row.context_snapshot).toMatchObject({ selector: 'legacy', workDate, timezone: 'UTC', shiftId })
+    expect(row.context_snapshot.flexPolicy).toEqual(flexPolicy)
+    expect(row.context_snapshot.segments).toEqual([{ index: 0, startTime: '09:00', endTime: '18:00',
+      startDayOffset: 0, endDayOffset: 0, lateGraceMinutes: 5, earlyLeaveGraceMinutes: 5 }])
+    const expected = {
+      segment_index: 0, expected_start_at: workDate + 'T10:00:00.000Z',
+      expected_end_at: workDate + 'T18:00:00.000Z',
+      actual_in_at: workDate + 'T' + proof.inTime + ':00.000Z',
+      actual_out_at: workDate + 'T' + proof.outTime + ':00.000Z',
+      status: proof.status, status_reasons: [...proof.reasons],
+      work_minutes: proof.minutes, late_minutes: proof.late, early_leave_minutes: proof.early,
+    }
+    const children = await pool.query(
+      `SELECT segment_index, expected_start_at, expected_end_at, actual_in_at, actual_out_at,
+              status, status_reasons, work_minutes, late_minutes, early_leave_minutes
+         FROM attendance_record_segments WHERE org_id = $1 AND record_id = $2 AND calculation_id = $3
+        ORDER BY segment_index`, [fixture.orgId, row.id, row.calculation_id],
+    )
+    expect(children.rows.map(child => ({ ...child, expected_start_at: child.expected_start_at.toISOString(),
+      expected_end_at: child.expected_end_at.toISOString(), actual_in_at: child.actual_in_at.toISOString(),
+      actual_out_at: child.actual_out_at.toISOString() }))).toEqual([expected])
+    expect(row.segment_snapshot).toHaveLength(1)
+    // The immutable calculation snapshot stores authored definitions, while
+    // calculated output is persisted in the canonical child rows asserted above.
+    expect(row.segment_snapshot).toEqual(row.context_snapshot.segments)
+    const events = await pool.query(
+      'SELECT work_date::text, event_type, occurred_at FROM attendance_events WHERE org_id = $1 ORDER BY occurred_at',
+      [fixture.orgId],
+    )
+    expect(events.rows.map(event => [event.work_date, event.event_type, event.occurred_at.toISOString()])).toEqual([
+      [workDate, 'check_in', expected.actual_in_at], [workDate, 'check_out', expected.actual_out_at],
+    ])
+    console.log('PARENT_CALC10_CORE_HTTP_RECEIPT ' + JSON.stringify({
+      scenario: proof.scenario, authoringHTTP: 201, punchHTTP: [200, 200],
+      canonicalMode: row.mode, outcome: row.outcome, selector: row.context_snapshot.selector,
+      exactFrozenCore: row.context_snapshot.flexPolicy.coreStartTime === '10:00'
+        && row.context_snapshot.flexPolicy.coreEndTime === '15:00',
+      workedMinutes: proof.minutes, lateMinutes: proof.late, earlyLeaveMinutes: proof.early,
+      expectedStartAt: expected.expected_start_at, expectedEndAt: expected.expected_end_at,
+      reasons: proof.reasons, canonicalChildAndParentAgree: true,
+    }))
+  }, 120000)
+
   it('replays shadow create and edit without duplicate source, snapshot, operation, or outbox rows', async () => {
     const fixture = await seedOrg('shadow')
     const createOperationId = randomUUID()
