@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Logging wrapper for `python3`: records each python3 invocation in the call log (not its stdin
+# or its environment), then runs the real python3.
+if [[ -n "${H_CALLS:-}" ]]; then
+  line="$*"
+  line="${line//$'\n'/ }"
+  line="${line//$'\t'/ }"
+  printf 'python3\t-\t-\t-\t%s\n' "$line" >> "${H_CALLS}"
+fi
+real="${H_REAL_PYTHON3:-}"
+if [[ -z "$real" ]]; then
+  IFS=: read -ra dirs <<< "${PATH}"
+  for d in "${dirs[@]}"; do
+    if [[ -n "$d" && -x "${d}/python3" && ! "${d}/python3" -ef "$0" ]]; then real="${d}/python3"; break; fi
+  done
+fi
+[[ -n "$real" ]] || { echo "python3 double: no real python3 on PATH" >&2; exit 127; }
+exec "$real" "$@"

@@ -38,6 +38,17 @@
  * actor's own resolved capabilities and still checks canCreateRecord (unlike the copy-sheet path, which hands the
  * server constant COPY_SHEET_RECORD_CAPABILITIES as its capability object; that precedent is deliberately NOT copied).
  *
+ * THE PARENT PAIR (ADR §12, owner-ruled 2026-11-19; slice P1). 父组件图号 / 父组件名称 join the lock exemption (6 + 2 = 8
+ * columns) on the same three routes and nowhere else. A request that names the pair is gated additionally on the
+ * pair's own columns (`manualRowParentPairGateReason`: present and locked, else `contract_mismatch` / `lock_missing` —
+ * the latter with its own sentence when the pair's lock is the only one missing, `MANUAL_ROW_PARENT_LOCK_MISSING_MESSAGE`),
+ * judged by rules P3 – P5 (`StockPrepManualRowParentRefusedError`; P5 for an edit inside the write transaction, under
+ * the row lock, in both directions) and by the actor's per-subject field permissions for BOTH columns (the routes).
+ * P5 on an edit compares the request with a STORED cell of the row, so the edit route first requires that the actor
+ * may read the row and that cell (`manualRowEditFieldIdsComparedWithUnreadableCell`) — its answer must never say what
+ * a cell the actor cannot read holds.
+ * /context names the pair as `parentFieldIds` only to an actor who may write both; never as `editableFieldIds`.
+ *
  * GENERIC CREATE (slice B3, ADR §3.1). POST /records and the xlsx import refuse a generic create on a P_reg sheet before
  * RecordService.createRecord, by the same verdict /context reports (`resolveGenericCreateRefusal`, below the /context
  * section); every other sheet keeps its old answer.
@@ -54,20 +65,29 @@ import { isStockPreparationProjectSheetObjectId } from './stock-preparation-proj
 import { STOCK_PREPARATION_PROJECT_SHEET_PLUGIN } from './stock-preparation-project-sheet-schema-clamp'
 import {
   MANUAL_ROW_ACTIVE_FIELD_ID,
+  MANUAL_ROW_COMPONENT_CODE_FIELD_ID,
+  MANUAL_ROW_COMPONENT_NAME_FIELD_ID,
   MANUAL_ROW_DIALOG_FIELD_IDS,
   MANUAL_ROW_FILLABLE_FIELD_IDS,
   MANUAL_ROW_KEY_FIELD_ID,
+  MANUAL_ROW_LOCK_EXEMPT_CLASSES,
   MANUAL_ROW_NEVER_WRITTEN_CLASSES,
   MANUAL_ROW_NOT_CLEARABLE_FIELD_IDS,
+  MANUAL_ROW_PARENT_CODE_FIELD_ID,
+  MANUAL_ROW_PARENT_NAME_FIELD_ID,
   MANUAL_ROW_PROJECT_NO_FIELD_ID,
   MANUAL_ROW_REQUIRED_ADDED_FIELD_IDS,
   MANUAL_ROW_REQUIRED_DROPPED_FIELD_IDS,
   MANUAL_ROW_STAMP_FIELD_IDS,
   MANUAL_ROW_TEMPLATE_CLASSES,
   MANUAL_ROWS_POLICY_DISABLED,
+  isBlankManualRowParentValue,
+  isManualRowSelfParent,
   isManualSupplementRow,
   isNonBlankString,
+  manualRowParentPairProblem,
   manualRowsPolicyOfProperty,
+  type ManualRowParentPairProblem,
   type ManualRowTemplateClass,
 } from './stock-preparation-manual-rows'
 
@@ -165,9 +185,19 @@ export type ManualRowsDerivedFieldIds = Readonly<{
   byLogical: Readonly<Record<string, string>>
   /** Physical id → template class. */
   classOf: ReadonlyMap<string, ManualRowTemplateClass>
-  /** The six fillable columns, physical ids, template order — the ONLY columns the lock exemption covers. */
+  /**
+   * The six fillable columns, physical ids, template order — the columns a manual row's cells are edited ONE BY ONE
+   * (/context `editableFieldIds`). The parent pair is not among them.
+   */
   fillable: readonly string[]
-  /** Lineage ∪ identity/RUN ∪ stamp: no manual-row route writes a value into these. */
+  /** 父组件图号 / 父组件名称 (ADR §12): the pair a manual-row route may write, only together. */
+  parent: Readonly<{ code: string; name: string }>
+  /** 图号 / 名称 of the row itself (two of the six): P5 compares 父组件图号 with `componentCode`. */
+  componentCode: string
+  componentName: string
+  /** fillable ∪ the parent pair (8): the ONLY columns the lock exemption covers. */
+  lockExempt: ReadonlySet<string>
+  /** Identity/RUN ∪ stamp: no manual-row route writes a value into these. */
   neverWritten: ReadonlySet<string>
   requiredDropped: ReadonlySet<string>
   requiredAdded: readonly string[]
@@ -187,7 +217,11 @@ export function deriveManualRowsFieldIds(projectId: string, objectId: string): M
   }
   const physicalOf = (logical: string) => byLogical[logical]
   const neverWritten = new Set<string>()
-  for (const [physical, cls] of classOf) if (MANUAL_ROW_NEVER_WRITTEN_CLASSES.includes(cls)) neverWritten.add(physical)
+  const lockExempt = new Set<string>()
+  for (const [physical, cls] of classOf) {
+    if (MANUAL_ROW_NEVER_WRITTEN_CLASSES.includes(cls)) neverWritten.add(physical)
+    if (MANUAL_ROW_LOCK_EXEMPT_CLASSES.includes(cls)) lockExempt.add(physical)
+  }
   return Object.freeze({
     key: physicalOf(MANUAL_ROW_KEY_FIELD_ID),
     projectNo: physicalOf(MANUAL_ROW_PROJECT_NO_FIELD_ID),
@@ -195,11 +229,45 @@ export function deriveManualRowsFieldIds(projectId: string, objectId: string): M
     byLogical: Object.freeze(byLogical),
     classOf,
     fillable: Object.freeze(MANUAL_ROW_FILLABLE_FIELD_IDS.map(physicalOf)),
+    parent: Object.freeze({ code: physicalOf(MANUAL_ROW_PARENT_CODE_FIELD_ID), name: physicalOf(MANUAL_ROW_PARENT_NAME_FIELD_ID) }),
+    componentCode: physicalOf(MANUAL_ROW_COMPONENT_CODE_FIELD_ID),
+    componentName: physicalOf(MANUAL_ROW_COMPONENT_NAME_FIELD_ID),
+    lockExempt,
     neverWritten,
     requiredDropped: new Set(MANUAL_ROW_REQUIRED_DROPPED_FIELD_IDS.map(physicalOf)),
     requiredAdded: Object.freeze(MANUAL_ROW_REQUIRED_ADDED_FIELD_IDS.map(physicalOf)),
     notClearable: Object.freeze(MANUAL_ROW_NOT_CLEARABLE_FIELD_IDS.map(physicalOf)),
   })
+}
+
+/** Does this request (its submitted physical field ids) name 父组件图号 or 父组件名称? */
+export function namesManualRowParentPair(derived: Pick<ManualRowsDerivedFieldIds, 'parent'>, submittedFieldIds: Iterable<string> | null | undefined): boolean {
+  if (!submittedFieldIds) return false
+  for (const fieldId of submittedFieldIds) if (fieldId === derived.parent.code || fieldId === derived.parent.name) return true
+  return false
+}
+
+/**
+ * THE PARENT PAIR'S OWN CONDITION (ADR §12.3 「锁豁免的边界变化」, last bullet). A manual-row route writes the pair only
+ * where BOTH columns exist and BOTH carry the human write lock: there the manual-row routes are the pair's only
+ * person writers (P1) and rules P3 – P5 hold for every such write. Where a pair column carries no lock, /patch already
+ * writes it on every row with none of those rules, and a second, stricter way of writing the same two cells would
+ * only make the sheet's state ambiguous — so a request that NAMES the pair is refused there (`lock_missing`; a missing
+ * column is `contract_mismatch`), 「复制为新行」 carries neither value, and /context sends no `parentFieldIds`.
+ *
+ * SCOPE — only a request that names the pair. The gate's other answers are unchanged: a create or an edit that does
+ * not touch the pair behaves on such a sheet exactly as before this rule existed.
+ */
+export function manualRowParentPairGateReason(
+  fields: ReadonlyArray<GateFieldLike>,
+  derived: Pick<ManualRowsDerivedFieldIds, 'parent'>,
+): 'contract_mismatch' | 'lock_missing' | null {
+  const pair = [derived.parent.code, derived.parent.name]
+  const propertyById = new Map<string, unknown>()
+  for (const field of fields) if (typeof field?.id === 'string' && pair.includes(field.id)) propertyById.set(field.id, field.property)
+  if (!pair.every((id) => propertyById.has(id))) return 'contract_mismatch'
+  if (!pair.every((id) => humanWriteLockKindOfProperty(propertyById.get(id)) !== null)) return 'lock_missing'
+  return null
 }
 
 // ── the gate ─────────────────────────────────────────────────────────────────────────────────────────
@@ -227,7 +295,18 @@ export type ManualRowsVerdict =
   | Readonly<{ kind: 'not_project_sheet' }>
   | Readonly<{ kind: 'allowed'; sheet: ManualRowsSheet }>
   | Readonly<{ kind: 'disabled'; sheet: ManualRowsSheet }>
-  | Readonly<{ kind: 'unavailable'; reason: ManualRowsUnavailableReason; sheet: ManualRowsSheet | null }>
+  | Readonly<{
+    kind: 'unavailable'
+    reason: ManualRowsUnavailableReason
+    sheet: ManualRowsSheet | null
+    /**
+     * Present (true) only with `lock_missing`, and only when the locks every manual-row write needs ARE there and the
+     * one that is missing is the PARENT PAIR's (ADR §12.3) — so only for a request that names the pair, or the parent
+     * picker. It changes the sentence the refusal carries (`MANUAL_ROW_PARENT_LOCK_MISSING_MESSAGE`), nothing else:
+     * the code and the reason token are the ones of every `lock_missing`.
+     */
+    parentPairLock?: true
+  }>
 
 const NOT_PROJECT_SHEET: ManualRowsVerdict = Object.freeze({ kind: 'not_project_sheet' as const })
 const TARGET_STATUSES: ReadonlySet<unknown> = new Set(['active', 'archived'])
@@ -236,11 +315,21 @@ function unavailable(reason: ManualRowsUnavailableReason, sheet: ManualRowsSheet
   return Object.freeze({ kind: 'unavailable' as const, reason, sheet })
 }
 
+/** `lock_missing` for the parent pair's own lock (the stamped / key columns are locked). */
+function parentPairLockMissing(sheet: ManualRowsSheet): ManualRowsVerdict {
+  return Object.freeze({ kind: 'unavailable' as const, reason: 'lock_missing' as const, sheet, parentPairLock: true as const })
+}
+
 /**
  * Pure. `mode: 'create'` runs conditions 2–6 (5 only when `flagOn` is given — the in-transaction re-check omits it, as
  * ADR §3.2 names only 3, 4 and 6 there); `mode: 'edit'` asks what the edit route needs (ADR §3.4): P_reg, the
  * structural contract and the key column's lock — an archived project, the deployment switch and the per-sheet switch
  * do NOT stop an edit (§4 「关闭的含义」, §6 归档对比).
+ *
+ * `submittedFieldIds` (ADR §12.3): the physical field ids the request writes. When they name 父组件图号 or 父组件名称, BOTH
+ * pair columns must exist (`contract_mismatch` otherwise) and carry the lock (`lock_missing` otherwise), in either
+ * mode — see `manualRowParentPairGateReason` for why, and why only then. Omitted or not naming the pair: the verdict is
+ * exactly what it was before the pair became writable.
  */
 export function evaluateManualRowsGate(input: {
   sheetId: string
@@ -249,6 +338,7 @@ export function evaluateManualRowsGate(input: {
   target: ManualRowsProjectTargetRead | null
   mode: 'create' | 'edit'
   flagOn?: boolean
+  submittedFieldIds?: Iterable<string> | null
 }): ManualRowsVerdict {
   const { sheetId, fields, host, mode } = input
   if (!fieldsCarryExactStockPreparationStanza(fields)) return NOT_PROJECT_SHEET
@@ -272,14 +362,20 @@ export function evaluateManualRowsGate(input: {
   if (keyFieldIds.length !== 1 || keyFieldIds[0] !== derived.key) return unavailable('contract_mismatch', sheet)
   const propertyById = new Map<string, unknown>()
   for (const field of fields) if (typeof field?.id === 'string') propertyById.set(field.id, field.property)
+  // The parent pair joins both lists ONLY for a request that names it (ADR §12.3; `manualRowParentPairGateReason`).
+  const pair = namesManualRowParentPair(derived, input.submittedFieldIds) ? [derived.parent.code, derived.parent.name] : []
   const needed = mode === 'create'
-    ? [derived.key, derived.projectNo, derived.active, ...derived.requiredAdded, derived.byLogical.totalQuantity]
-    : [derived.key]
+    ? [derived.key, derived.projectNo, derived.active, ...derived.requiredAdded, derived.byLogical.totalQuantity, ...pair]
+    : [derived.key, ...pair]
   if (!needed.every((id) => propertyById.has(id))) return unavailable('contract_mismatch', sheet)
 
-  // 3: the locks. An edit needs the key's lock only (ADR §3.4 「K 已加锁」).
+  // 3: the locks. An edit needs the key's lock only (ADR §3.4 「K 已加锁」) — plus the pair's, when it writes the pair.
+  // The pair's lock is judged AFTER the others, so a sheet that lacks the key / 项目号 / 有效 lock answers what it
+  // always answered; only a sheet that lacks nothing but the pair's lock is told so (`parentPairLock`).
+  const isLocked = (id: string) => humanWriteLockKindOfProperty(propertyById.get(id)) !== null
   const locked = mode === 'create' ? [derived.key, derived.projectNo, derived.active] : [derived.key]
-  if (!locked.every((id) => humanWriteLockKindOfProperty(propertyById.get(id)) !== null)) return unavailable('lock_missing', sheet)
+  if (!locked.every(isLocked)) return unavailable('lock_missing', sheet)
+  if (!pair.every(isLocked)) return parentPairLockMissing(sheet)
 
   // 4: the plugin registry row — well formed, the same object, and (for a create) active.
   if (row.sheetId !== sheetId || projectNo === null || !isNonBlankString(row.tenantId) || typeof row.objectId !== 'string' || !TARGET_STATUSES.has(row.status)) {
@@ -299,19 +395,23 @@ export function evaluateManualRowsGate(input: {
   return Object.freeze({ kind: 'allowed' as const, sheet })
 }
 
-/** Reads both registries (the plugin one only for a project-sheet host row) and evaluates. Never throws on a read. */
+/**
+ * Reads both registries (the plugin one only for a project-sheet host row) and evaluates. Never throws on a read.
+ * `submittedFieldIds`: the physical field ids the request writes (see `evaluateManualRowsGate`).
+ */
 export async function loadManualRowsVerdict(
   query: ManualRowsQueryFn,
   sheetId: string,
   fields: ReadonlyArray<GateFieldLike>,
   mode: 'create' | 'edit',
   flagOn?: boolean,
+  submittedFieldIds?: Iterable<string> | null,
 ): Promise<ManualRowsVerdict> {
   // An ordinary sheet (no exact stanza) issues no statement at all.
   if (!fieldsCarryExactStockPreparationStanza(fields)) return NOT_PROJECT_SHEET
   const host = await readManualRowsHostRegistry(query, sheetId)
   const target = isManualRowsProjectSheetHost(host) ? await readManualRowsProjectTarget(query, sheetId) : null
-  return evaluateManualRowsGate({ sheetId, fields, host, target, mode, flagOn })
+  return evaluateManualRowsGate({ sheetId, fields, host, target, mode, flagOn, submittedFieldIds })
 }
 
 // ── refusals ─────────────────────────────────────────────────────────────────────────────────────────
@@ -320,12 +420,18 @@ export const STOCK_PREP_MANUAL_ROWS_DISABLED_CODE = 'STOCK_PREP_MANUAL_ROWS_DISA
 export const STOCK_PREP_MANUAL_ROWS_UNAVAILABLE_CODE = 'STOCK_PREP_MANUAL_ROWS_UNAVAILABLE'
 /** The edit route on a row that is not a manual supplementary row (M fails). */
 export const STOCK_PREP_MANUAL_ROW_REQUIRED_CODE = 'STOCK_PREP_MANUAL_ROW_REQUIRED'
-/** The edit route was handed a column outside the six fillable ones. */
+/** The edit route was handed a column outside the eight it accepts (the six fillable ones and the parent pair). */
 export const STOCK_PREP_MANUAL_FIELDS_NOT_FILLABLE_CODE = 'STOCK_PREP_MANUAL_FIELDS_NOT_FILLABLE'
+/** zh, shown as-is by the web. Names the columns by what they are called on the sheet's template, never a value. */
+export const STOCK_PREP_MANUAL_FIELDS_NOT_FILLABLE_MESSAGE =
+  '这个入口只修改人工补充行的图号、名称、规格、材料、用量、总用量，以及父组件图号和父组件名称（这两列要一起提交）；其他列请照常编辑。'
 
 export type ManualRowsRefusalReason = ManualRowsUnavailableReason | 'not_project_sheet' | 'disabled' | 'not_manual_row'
 
-/** zh, shown as-is by the web (ADR §3.1's table; the two route-only reasons are this slice's). */
+/**
+ * zh, shown as-is by the web (ADR §3.1's table; the two route-only reasons are this slice's). These are the sentences
+ * of the CREATE path and of every refusal that is not about the parent pair; they are unchanged since B2.
+ */
 export const MANUAL_ROWS_REFUSAL_MESSAGES: Readonly<Record<ManualRowsRefusalReason, string>> = Object.freeze({
   disabled: '本项目表已关闭「允许人工补充行」，不能新增行；如需新增请联系备料管理员。',
   lock_missing: '本表的 PLM 列锁还没有补齐，暂时不能新增行；请联系管理员修复本表。',
@@ -337,6 +443,14 @@ export const MANUAL_ROWS_REFUSAL_MESSAGES: Readonly<Record<ManualRowsRefusalReas
   not_manual_row: '这一行不是人工补充行，不能用这个入口修改；请照常编辑。',
 })
 
+/**
+ * zh, shown as-is by the web. `lock_missing` when the lock that is missing is the PARENT PAIR's (ADR §12.3): the sheet
+ * still takes new rows and edits of the six — what it cannot do is name a parent, so the sentence says that and not
+ * 「不能新增行」. Same code (STOCK_PREP_MANUAL_ROWS_UNAVAILABLE) and the same reason token (`lock_missing`) as the
+ * create path's refusal; only the sentence differs. Values-free.
+ */
+export const MANUAL_ROW_PARENT_LOCK_MISSING_MESSAGE = '本表的父组件列还没有加锁，暂时不能指定父组件；请联系管理员修复本表。'
+
 function refusalCodeOf(reason: ManualRowsRefusalReason): string {
   if (reason === 'disabled') return STOCK_PREP_MANUAL_ROWS_DISABLED_CODE
   if (reason === 'not_manual_row') return STOCK_PREP_MANUAL_ROW_REQUIRED_CODE
@@ -346,8 +460,12 @@ function refusalCodeOf(reason: ManualRowsRefusalReason): string {
 export class StockPrepManualRowsRefusedError extends Error {
   readonly status: number
   readonly code: string
-  constructor(readonly reason: ManualRowsRefusalReason) {
-    super(MANUAL_ROWS_REFUSAL_MESSAGES[reason])
+  /**
+   * `subject: 'parent_pair'` — only with `lock_missing` — picks the parent pair's sentence. The code, the status and
+   * `details.reason` are the same either way.
+   */
+  constructor(readonly reason: ManualRowsRefusalReason, subject?: 'parent_pair') {
+    super(reason === 'lock_missing' && subject === 'parent_pair' ? MANUAL_ROW_PARENT_LOCK_MISSING_MESSAGE : MANUAL_ROWS_REFUSAL_MESSAGES[reason])
     this.name = 'StockPrepManualRowsRefusedError'
     this.code = refusalCodeOf(reason)
     this.status = reason === 'registry_unreadable' ? 503 : 409
@@ -363,7 +481,61 @@ export function assertManualRowsAllowed(verdict: ManualRowsVerdict): ManualRowsS
   if (verdict.kind === 'allowed') return verdict.sheet
   if (verdict.kind === 'not_project_sheet') throw new StockPrepManualRowsRefusedError('not_project_sheet')
   if (verdict.kind === 'disabled') throw new StockPrepManualRowsRefusedError('disabled')
-  throw new StockPrepManualRowsRefusedError(verdict.reason)
+  throw new StockPrepManualRowsRefusedError(verdict.reason, verdict.parentPairLock === true ? 'parent_pair' : undefined)
+}
+
+// ── the parent pair's refusals (ADR §12.3, P3 – P5) ──────────────────────────────────────────────────
+
+/** A request's 父组件图号 / 父组件名称 break rule P3, P4 or P5. One closed code; `details.reason` says which rule. */
+export const STOCK_PREP_MANUAL_PARENT_INVALID_CODE = 'STOCK_PREP_MANUAL_PARENT_INVALID'
+
+export type ManualRowParentRefusalReason = ManualRowParentPairProblem | 'self_parent'
+
+/** zh, shown as-is by the web. Values-free: no 图号, name or id. */
+export const MANUAL_ROW_PARENT_REFUSAL_MESSAGES: Readonly<Record<ManualRowParentRefusalReason, string>> = Object.freeze({
+  pair_incomplete: '父组件图号和父组件名称要一起提交，不能只改其中一列。',
+  not_text: '父组件图号和父组件名称只能填文字，或者留空。',
+  name_without_code: '只填了父组件名称、没有父组件图号，不能保存；请补上父组件图号，或者把两项都清空。',
+  self_parent: '父组件图号不能和这一行自己的图号相同。',
+})
+
+/**
+ * 400 for a malformed request (P3 a half pair; P4 a value that is neither text nor null), 422 for a well-formed pair
+ * the rules do not accept (P4 a name without a 图号; P5 the row as its own parent).
+ */
+export class StockPrepManualRowParentRefusedError extends Error {
+  readonly status: number
+  readonly code = STOCK_PREP_MANUAL_PARENT_INVALID_CODE
+  constructor(readonly reason: ManualRowParentRefusalReason) {
+    super(MANUAL_ROW_PARENT_REFUSAL_MESSAGES[reason])
+    this.name = 'StockPrepManualRowParentRefusedError'
+    this.status = reason === 'pair_incomplete' || reason === 'not_text' ? 400 : 422
+  }
+
+  body(): { ok: false; error: { code: string; message: string; details: { reason: ManualRowParentRefusalReason } } } {
+    return { ok: false, error: { code: this.code, message: this.message, details: { reason: this.reason } } }
+  }
+}
+
+const hasOwn = (data: Readonly<Record<string, unknown>>, fieldId: string) => Object.prototype.hasOwnProperty.call(data, fieldId)
+
+/** P3 + P4 over the pair a request body (physical field id → value) names; null when it is acceptable or not named. */
+export function manualRowParentPairProblemOf(sheet: ManualRowsSheet, data: Readonly<Record<string, unknown>>): ManualRowParentPairProblem | null {
+  const { code, name } = sheet.derived.parent
+  return manualRowParentPairProblem({ hasCode: hasOwn(data, code), hasName: hasOwn(data, name), code: data[code], name: data[name] })
+}
+
+/**
+ * P3, P4 and P5 for a NEW manual row, whose own 图号 is in the same body (新增 and 复制为新行). Throws the refusal. Called by
+ * the create route before anything is written AND by RecordService.createRecord's manual-row branch inside the create
+ * transaction, so no caller that reaches the branch can store a pair these rules refuse.
+ */
+export function assertManualRowParentPairForCreate(sheet: ManualRowsSheet, data: Readonly<Record<string, unknown>>): void {
+  const problem = manualRowParentPairProblemOf(sheet, data)
+  if (problem) throw new StockPrepManualRowParentRefusedError(problem)
+  if (isManualRowSelfParent(data[sheet.derived.parent.code], data[sheet.derived.componentCode])) {
+    throw new StockPrepManualRowParentRefusedError('self_parent')
+  }
 }
 
 // ── /context (ADR §3.7) ──────────────────────────────────────────────────────────────────────────────
@@ -375,6 +547,25 @@ export type ManualRowsContextBlock = {
   requiredFieldIds: string[]
   /** Slice B3: the 新增人工补充行 dialog's columns in its order (MANUAL_ROW_DIALOG_FIELD_IDS, the present ones). */
   dialogFieldIds: string[]
+  /**
+   * ADR §12.6: the physical ids of 父组件图号 / 父组件名称 — present ONLY when a manual-row route would accept the pair on
+   * this sheet (both columns exist and are locked, and the edit gate passes) AND this actor may write both columns
+   * (rule P7). Absent otherwise, and the web then shows no parent picker. Independent of `state`: a switched-off or
+   * archived sheet still lets the parent of an EXISTING manual row be changed (rule P8), so the key can accompany
+   * `disabled` and `unavailable/project_archived`. Never part of `editableFieldIds`.
+   */
+  parentFieldIds?: { code: string; name: string }
+  /**
+   * The physical id of the row's OWN 图号 column — what the web compares a chosen parent with before it submits (rule
+   * P5, the self-parent pre-check) and what it watches to warn before a 图号 other manual rows name as their parent is
+   * changed (ADR §12.7 ①). Present ONLY together with `parentFieldIds`, and only when the column exists on the sheet
+   * and this actor may READ it; a block without `parentFieldIds` never carries it and is byte-identical to what it
+   * was. Absent beside `parentFieldIds` on a sheet that has the column = this actor cannot read the row's own 图号:
+   * the web has nothing to compare with, and PATCH …/manual-fields refuses that actor's change of an EXISTING row's
+   * parent (403 — rule P5 would compare with a cell they may not read; a new row can still be given a parent). An id
+   * only — never a value.
+   */
+  componentCodeFieldId?: string
 }
 
 function explicitlyRequired(property: unknown): boolean {
@@ -413,17 +604,76 @@ export function manualRowsContextBlockOf(verdict: ManualRowsVerdict, fields: Rea
 }
 
 /**
+ * Pure. THE PARENT PAIR'S GATE: the EDIT gate evaluated for a request that names both pair columns — the weakest gate
+ * under which any of the three routes writes the pair (the create gate only adds conditions to it). So it answers
+ * `lock_missing` / `contract_mismatch` for the pair exactly as the routes do, and it does not look at the switch, the
+ * archive status or the deployment switch (rule P8: a switched-off or archived sheet still lets an existing manual
+ * row's parent be changed). Evaluated in two steps so the pair's ids come from the gate's own derivation.
+ */
+export function evaluateManualRowParentPairGate(input: {
+  sheetId: string
+  fields: ReadonlyArray<GateFieldLike>
+  host: ManualRowsHostRegistryRead
+  target: ManualRowsProjectTargetRead | null
+}): ManualRowsVerdict {
+  const edit = evaluateManualRowsGate({ ...input, mode: 'edit' })
+  if (edit.kind !== 'allowed') return edit
+  const { code, name } = edit.sheet.derived.parent
+  return evaluateManualRowsGate({ ...input, mode: 'edit', submittedFieldIds: [code, name] })
+}
+
+/**
+ * The parent pair's gate with its two registry reads — what GET …/manual-rows/parent-options is gated on (ADR §12.6
+ * 「P_reg 按修改的口径判断」). Never throws on a read.
+ */
+export async function loadManualRowParentPairVerdict(
+  query: ManualRowsQueryFn,
+  sheetId: string,
+  fields: ReadonlyArray<GateFieldLike>,
+): Promise<ManualRowsVerdict> {
+  // An ordinary sheet (no exact stanza) issues no statement at all.
+  if (!fieldsCarryExactStockPreparationStanza(fields)) return NOT_PROJECT_SHEET
+  const host = await readManualRowsHostRegistry(query, sheetId)
+  const target = isManualRowsProjectSheetHost(host) ? await readManualRowsProjectTarget(query, sheetId) : null
+  return evaluateManualRowParentPairGate({ sheetId, fields, host, target })
+}
+
+/**
  * GET /context's block (only for an actor who can create, edit or delete — the caller decides). A sheet without the
  * exact stanza issues no statement. Never throws: a registry that cannot be read is `unavailable/registry_unreadable`.
+ *
+ * `actorCanWriteParentPair` (ADR §12.6, rule P7): the route's answer to "may THIS actor write both pair columns?",
+ * asked only for a sheet on which the routes accept the pair at all. `parentFieldIds` is sent only when it says yes;
+ * without the callback the key is never sent. No statement beyond the two registry reads the block already cost.
+ *
+ * `actorCanReadField`: the route's answer to "may THIS actor read this column?" (layer-2 ∧ layer-3). It is asked about
+ * ONE column, the row's own 图号, and only once `parentFieldIds` is being sent: `componentCodeFieldId` accompanies the
+ * pair when the column exists on the sheet and the answer is yes. Without the callback the key is never sent.
  */
 export async function resolveManualRowsContextBlock(
   query: ManualRowsQueryFn,
   sheetId: string,
   fields: ReadonlyArray<GateFieldLike>,
   env: NodeJS.ProcessEnv = process.env,
+  actorCanWriteParentPair?: (sheet: ManualRowsSheet) => boolean,
+  actorCanReadField?: (fieldId: string) => boolean,
 ): Promise<ManualRowsContextBlock | null> {
-  const verdict = await loadManualRowsVerdict(query, sheetId, fields, 'create', stockPrepProjectSheetsEnabledForManualRows(env))
-  return manualRowsContextBlockOf(verdict, fields)
+  // An ordinary sheet (no exact stanza) issues no statement at all.
+  if (!fieldsCarryExactStockPreparationStanza(fields)) return null
+  const host = await readManualRowsHostRegistry(query, sheetId)
+  const target = isManualRowsProjectSheetHost(host) ? await readManualRowsProjectTarget(query, sheetId) : null
+  const verdict = evaluateManualRowsGate({ sheetId, fields, host, target, mode: 'create', flagOn: stockPrepProjectSheetsEnabledForManualRows(env) })
+  const block = manualRowsContextBlockOf(verdict, fields)
+  if (!block || !actorCanWriteParentPair) return block
+  const pairVerdict = evaluateManualRowParentPairGate({ sheetId, fields, host, target })
+  if (pairVerdict.kind === 'allowed' && actorCanWriteParentPair(pairVerdict.sheet)) {
+    const { derived } = pairVerdict.sheet
+    block.parentFieldIds = { code: derived.parent.code, name: derived.parent.name }
+    // The row's own 图号, beside the pair and never without it: the column must exist, and the actor must be able to read it.
+    const componentCodeExists = fields.some((field) => field?.id === derived.componentCode)
+    if (componentCodeExists && actorCanReadField?.(derived.componentCode) === true) block.componentCodeFieldId = derived.componentCode
+  }
+  return block
 }
 
 // ── generic create on a P_reg sheet (ADR §3.1, slice B3) ─────────────────────────────────────────────
@@ -518,18 +768,23 @@ export function isMintedManualRowCreateExtension(value: unknown): value is Manua
  * Inside the create transaction, after the fence: conditions 3, 4 and 6 on the RE-READ fields (raw `meta_fields` rows)
  * and on both registries read on the transaction's own query — and the host registry must still be the one the route
  * minted the extension from. Returns the sheet the create stamps from; throws the refusal otherwise.
+ *
+ * `submittedFieldIds`: the field ids of the create's own data. When they name the parent pair, the pair's condition
+ * (both columns present and locked, ADR §12.3) is re-checked here too, on the same re-read fields — derived from the
+ * data itself, never from a flag on the extension.
  */
 export async function assertManualRowCreateInTransaction(
   query: ManualRowsQueryFn,
   extension: ManualRowCreateExtension,
   fieldRows: ReadonlyArray<GateFieldLike>,
+  submittedFieldIds?: Iterable<string> | null,
 ): Promise<ManualRowsSheet> {
   const host = await readManualRowsHostRegistry(query, extension.sheetId)
   if (host.kind === 'present' && (host.row.projectId !== extension.hostProjectId || host.row.objectId !== extension.hostObjectId)) {
     throw new StockPrepManualRowsRefusedError('contract_mismatch')
   }
   const target = isManualRowsProjectSheetHost(host) ? await readManualRowsProjectTarget(query, extension.sheetId) : null
-  const sheet = assertManualRowsAllowed(evaluateManualRowsGate({ sheetId: extension.sheetId, fields: fieldRows, host, target, mode: 'create' }))
+  const sheet = assertManualRowsAllowed(evaluateManualRowsGate({ sheetId: extension.sheetId, fields: fieldRows, host, target, mode: 'create', submittedFieldIds }))
   if (sheet.projectNo === null) throw new StockPrepManualRowsRefusedError('contract_mismatch')
   return sheet
 }
@@ -539,11 +794,22 @@ export async function assertManualRowCreateInTransaction(
  * — after the fence, before the record is read for the patch: the record row is locked FOR UPDATE and must STILL be a
  * manual supplementary row (M), and the sheet must still pass the edit gate on fields and registries re-read on the
  * transaction's own query, with the same host registry identity the route resolved. Throws the refusal otherwise.
+ *
+ * `changes` (ADR §12.3): the route's own patch, physical field id → value.
+ *   - When it names the parent pair, the pair's condition (both columns present and locked) is part of the re-check.
+ *   - RULE P5, BOTH DIRECTIONS, decided HERE and nowhere earlier: when the patch names 父组件图号 (the pair is being
+ *     changed) or the row's own 图号 (an ordinary fillable edit, which the grid sends on its own), the row as it WILL be
+ *     — the locked row's stored cells overlaid with the patch — must not be its own parent. The route's first read of
+ *     the row happens outside this transaction; two edits racing, one setting the parent and one setting the 图号 to
+ *     the same text, would each pass a check made on that stale read. Under the row lock the second one sees the
+ *     first's committed value and is refused (422 `self_parent`). A patch that names neither column is not judged, so
+ *     an unrelated edit never fails on a row's existing cells.
  */
 export async function assertManualRowEditInTransaction(
   query: ManualRowsQueryFn,
   sheet: ManualRowsSheet,
   recordId: string,
+  changes: Readonly<Record<string, unknown>> = {},
 ): Promise<void> {
   const recordRes = await query('SELECT id, data, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE', [sheet.sheetId, recordId])
   const record = (Array.isArray(recordRes?.rows) ? recordRes.rows[0] : undefined) as Record<string, unknown> | undefined
@@ -559,36 +825,87 @@ export async function assertManualRowEditInTransaction(
     host,
     target,
     mode: 'edit',
+    submittedFieldIds: Object.keys(changes),
   }))
   const data = normalizeProperty(record?.data) ?? {}
   if (!record || !isManualSupplementRow({ objectId: fresh.hostObjectId, createdBy: record.created_by, recordId: record.id, key: data[fresh.derived.key] })) {
     throw new StockPrepManualRowsRefusedError('not_manual_row')
   }
+  // P3 / P4 again (the route already answered them before the transaction; this guard does not depend on that).
+  const pairProblem = manualRowParentPairProblemOf(fresh, changes)
+  if (pairProblem) throw new StockPrepManualRowParentRefusedError(pairProblem)
+  const parentCodeId = fresh.derived.parent.code
+  const componentCodeId = fresh.derived.componentCode
+  if (hasOwn(changes, parentCodeId) || hasOwn(changes, componentCodeId)) {
+    const merged = (fieldId: string) => (hasOwn(changes, fieldId) ? changes[fieldId] : data[fieldId])
+    if (isManualRowSelfParent(merged(parentCodeId), merged(componentCodeId))) throw new StockPrepManualRowParentRefusedError('self_parent')
+  }
+}
+
+/**
+ * RULE P5 READS A STORED CELL — who may be given its answer (ADR §12.3 P5; the anti-oracle rule).
+ *
+ * `assertManualRowEditInTransaction` decides P5 on the locked, MERGED row: the patch's value where the patch names a
+ * column, the row's stored cell otherwise. So
+ *   - a patch that names the parent pair but not the row's own 图号 is compared with the STORED 图号, and
+ *   - a patch that names 图号 but not 父组件图号 is compared with the STORED 父组件图号,
+ * and the 422 `self_parent` it may answer says whether the submitted text EQUALS that stored cell. That answer comes
+ * before the write's own checks (the record lock, `expectedVersion`), so a request built to fail one of those would
+ * read the cell without writing anything. An actor who may not read the cell must therefore not reach the comparison
+ * at all: the edit route refuses the write (403) before the transaction.
+ *
+ * Returns the SUBMITTED field ids that cannot be written for that reason (empty = nothing to refuse): the pair's
+ * columns when the row's own 图号 is not readable for the actor, the 图号 when 父组件图号 is not. Only submitted ids, so
+ * the refusal can name them without telling the caller about a column it did not send.
+ *   - The pair is one unit here as in rule P7: either of its columns names it.
+ *   - A patch that names BOTH 图号 and 父组件图号 is judged on its own two values; no stored cell is read and nothing is
+ *     required of the actor.
+ * `canReadStoredCell`: the route's answer for ONE column of this sheet — the layer-2 ∧ layer-3 read set through the
+ * stored-data chokepoint, and true for a column the sheet does not have (no cell, nothing to learn). Pure.
+ */
+export function manualRowEditFieldIdsComparedWithUnreadableCell(
+  derived: Pick<ManualRowsDerivedFieldIds, 'parent' | 'componentCode'>,
+  submittedFieldIds: Iterable<string>,
+  canReadStoredCell: (fieldId: string) => boolean,
+): string[] {
+  const submitted = new Set(submittedFieldIds)
+  const { code, name } = derived.parent
+  const own = derived.componentCode
+  const refused: string[] = []
+  if ((submitted.has(code) || submitted.has(name)) && !submitted.has(own) && !canReadStoredCell(own)) {
+    for (const fieldId of [code, name]) if (submitted.has(fieldId)) refused.push(fieldId)
+  }
+  if (submitted.has(own) && !submitted.has(code) && !canReadStoredCell(code)) refused.push(own)
+  return refused
 }
 
 // ── field helpers the routes share ───────────────────────────────────────────────────────────────────
 
 /**
- * Copies of the six fillable fields with the human write lock removed from `property` (every other field is returned
- * as is). Fed to deriveFieldPermissions / the field-guard builder by the manual-row routes ONLY: the lock-induced
- * read-only goes for exactly these six physical ids, every other restriction (per-subject field_permissions, hidden,
- * always-read-only) stays.
+ * Copies of the eight lock-exempt fields — the six fillable ones and the parent pair (ADR §12.3) — with the human
+ * write lock removed from `property` (every other field is returned as is). Fed to deriveFieldPermissions / the
+ * field-guard builder by the manual-row routes ONLY: the lock-induced read-only goes for exactly these eight physical
+ * ids, every other restriction (per-subject field_permissions, hidden, always-read-only) stays. Whether a route may
+ * write the PAIR at all is the gate's question (`manualRowParentPairGateReason`), not this helper's.
  */
-export function liftManualRowFillableLocks<T extends { id: string; property?: Record<string, unknown> }>(fields: readonly T[], sheet: ManualRowsSheet): T[] {
-  const fillable = new Set(sheet.derived.fillable)
-  return fields.map((field) => (fillable.has(field.id) && field.property
+export function liftManualRowExemptLocks<T extends { id: string; property?: Record<string, unknown> }>(fields: readonly T[], sheet: ManualRowsSheet): T[] {
+  const exempt = sheet.derived.lockExempt
+  return fields.map((field) => (exempt.has(field.id) && field.property
     ? { ...field, property: stripHumanWriteLockKey(field.property) }
     : field))
 }
 
 /**
  * ADR §3.3's whitelist for 「复制为新行」: 'read_write' = copied when the actor can read AND write the column;
- * 'never' = never copied. Template columns by class (the six fillable and 备料计划 copy; lineage, 进度与回复, identity /
- * RUN and the stamps never do); a column with the stanza that is not a template column copies only when its ownership
- * is `human_preserved` (the `ext_` rule); a column without the stanza copies like any column.
+ * 'never' = never copied; 'pair' = the parent pair (ADR §12.5, OQ-P1), which the copy carries BOTH of or NEITHER of
+ * and so is decided for the two columns together, never column by column (`manualRowCopyParentPair`). Template columns
+ * by class (the six fillable and 备料计划 copy; 进度与回复, identity / RUN and the stamps never do); a column with the
+ * stanza that is not a template column copies only when its ownership is `human_preserved` (the `ext_` rule); a
+ * column without the stanza copies like any column.
  */
-export function manualRowCopyRule(field: { id: string; property?: unknown }, sheet: ManualRowsSheet): 'read_write' | 'never' {
+export function manualRowCopyRule(field: { id: string; property?: unknown }, sheet: ManualRowsSheet): 'read_write' | 'pair' | 'never' {
   const cls = sheet.derived.classOf.get(field.id)
+  if (cls === 'parent_assignable') return 'pair'
   if (cls) return cls === 'fillable' || cls === 'plan' ? 'read_write' : 'never'
   const property = normalizeProperty(field.property)
   if (property && Object.prototype.hasOwnProperty.call(property, 'stockPreparation')) {
@@ -596,6 +913,39 @@ export function manualRowCopyRule(field: { id: string; property?: unknown }, she
     return stanza?.ownership === 'human_preserved' ? 'read_write' : 'never'
   }
   return 'read_write'
+}
+
+/**
+ * 「复制为新行」 and the parent pair (ADR §12.5, owner ruling OQ-P1 「带上」). The copy carries the SOURCE row's pair — a PLM
+ * row's or a manual row's — only when EVERY one of these holds, and otherwise carries NEITHER column (the copy then
+ * lands in the no-parent group; it never fails because of the pair):
+ *   - a manual-row route may write the pair on this sheet at all (both columns present and locked);
+ *   - the actor can READ both source columns and WRITE both columns (`canRead` / `canWrite` are the route's own
+ *     layer-2 ∧ layer-3 answers — a per-subject rule that covers one column only drops both);
+ *   - the source pair is acceptable under P4 and names a parent: text or empty, a non-blank 图号 (a PLM child whose
+ *     parent has no drawing number holds a name without a 图号 — not carried);
+ *   - P5 against the NEW row: the parent is not the copy's own 图号.
+ * Returns the entries to add to the copy's data — both keys, the values as the source stores them (an absent name
+ * becomes null, so the create still receives the pair together, P3) — or an empty object. Pure.
+ */
+export function manualRowCopyParentPair(input: {
+  fields: ReadonlyArray<GateFieldLike>
+  sheet: ManualRowsSheet
+  sourceData: Readonly<Record<string, unknown>>
+  /** The copy's own 图号 as it will be written (undefined when the copy carries none). */
+  copyComponentCode: unknown
+  canRead: (fieldId: string) => boolean
+  canWrite: (fieldId: string) => boolean
+}): Record<string, unknown> {
+  const { code, name } = input.sheet.derived.parent
+  if (manualRowParentPairGateReason(input.fields, input.sheet.derived) !== null) return {}
+  if (![code, name].every((fieldId) => input.canRead(fieldId) && input.canWrite(fieldId))) return {}
+  const sourceCode = input.sourceData[code] ?? null
+  const sourceName = input.sourceData[name] ?? null
+  if (manualRowParentPairProblem({ hasCode: true, hasName: true, code: sourceCode, name: sourceName }) !== null) return {}
+  if (isBlankManualRowParentValue(sourceCode)) return {}
+  if (isManualRowSelfParent(sourceCode, input.copyComponentCode)) return {}
+  return { [code]: sourceCode, [name]: sourceName }
 }
 
 /** The validation a manual-row create runs: `required` dropped from componentSourceId / path, added to 名称. */

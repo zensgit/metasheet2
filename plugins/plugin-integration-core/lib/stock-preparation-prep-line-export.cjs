@@ -826,6 +826,126 @@ function orderRowsAsBomTree(rows) {
   }
 }
 
+// ── 人工补充行插回树(ADR adr-stock-prep-manual-rows-20261030 §12.5「正式导出」,OQ-P2 owner 2026-11-19) ──────────
+//
+// A POST-PASS over `ordering.rows`: the prefix rows never enter `orderRowsAsBomTree`, its identity or its dedupe (B1
+// 「去重吞行」 stays fixed); this only decides WHERE each prefix row prints.
+//   * Spliceable: a 人工补充 row (M′, `rowSourceOf`) with a non-blank 父组件图号 that is not its own 图号 (self-parent
+//     stays in the tail). 「人工（非补充）」 prefix rows and parentless rows stay in the tail exactly as before.
+//   * Anchor: the FIRST printed tree row whose 图号 equals the 父组件图号 (both `orderText`). Collapsed twins and inactive
+//     rows are not in `ordering.rows`, so they are never anchors. On an equal 图号 a tree row wins over a manual row.
+//   * Otherwise the parent may be another 人工补充 row (the first one with that 图号 in today's tail order): the row
+//     then follows that row — wherever it prints, spliced or tail — after that row's earlier manual children.
+//     Rows on a cycle of such links stay in the tail (their links are dropped); a row hanging off a cycle follows it.
+//   * Position: the END of the anchor's subtree. `orderRowsAsBomTree` returns no extents, so the subtree is re-derived
+//     from the row path: the contiguous run after the anchor whose parent path is the anchor's or a run member's (the
+//     walk is depth-first, so that run IS the subtree). Only the path mode can do that; the degraded part-id mode and
+//     the flat comparator keep every prefix row in the tail (today's bytes).
+//   * Several manual rows under one anchor sort by `compareSiblingRows`, after every tree row of the subtree; when two
+//     anchors' subtrees end at the same row (nested), the deeper anchor's rows come first.
+//   * The tail is today's: `sortExportRows` over the rows that were not placed, each followed by its manual children.
+// No spliceable row => `ordering.rows` + `sortExportRows(prefixRows)`, the pre-P3 expression (C09 byte identity).
+function exportPrintOrder(ordering, prefixRows) {
+  if (prefixRows.length === 0) return ordering.rows
+  const flat = () => ordering.rows.concat(sortExportRows(prefixRows))
+  if (!ordering.treeOrdered || ordering.treeIdentity !== TREE_IDENTITY_PATH) return flat()
+  const codeOf = (row) => orderText(columnSourceValue(row, COMPONENT_CODE_ORDER_COLUMN))
+  const parentCodeOf = (row) => orderText(columnSourceValue(row, PARENT_CODE_ORDER_COLUMN))
+  const isSupplement = (row) => rowSourceOf(row) === ROW_SOURCES.MANUAL_SUPPLEMENT
+  const spliceable = prefixRows.filter((row) => isSupplement(row) && parentCodeOf(row) !== '' && parentCodeOf(row) !== codeOf(row))
+  if (spliceable.length === 0) return flat()
+
+  const treeRows = ordering.rows
+  const firstTreeIndexByCode = new Map()
+  treeRows.forEach((row, index) => {
+    const code = codeOf(row)
+    if (code !== '' && !firstTreeIndexByCode.has(code)) firstTreeIndexByCode.set(code, index)
+  })
+  const tailOrder = sortExportRows(prefixRows)
+  const firstSupplementByCode = new Map()
+  for (const row of tailOrder) {
+    const code = codeOf(row)
+    if (isSupplement(row) && code !== '' && !firstSupplementByCode.has(code)) firstSupplementByCode.set(code, row)
+  }
+
+  const treeAnchorOf = new Map() // manual row -> index of its anchor in `treeRows`
+  const manualParentOf = new Map() // manual row -> the 人工补充 row it hangs under
+  for (const row of spliceable) {
+    const parentCode = parentCodeOf(row)
+    if (firstTreeIndexByCode.has(parentCode)) treeAnchorOf.set(row, firstTreeIndexByCode.get(parentCode))
+    else if (firstSupplementByCode.has(parentCode)) manualParentOf.set(row, firstSupplementByCode.get(parentCode))
+  }
+  // Cycles among manual→manual links (a functional graph: one parent per row). Iterative, linear: 1 = on the current
+  // chain, 2 = settled. A chain that runs back into itself marks the loop's members; their links are dropped.
+  const state = new Map()
+  for (const start of manualParentOf.keys()) {
+    if (state.has(start)) continue
+    const chain = []
+    let node = start
+    while (node !== undefined && !state.has(node)) {
+      state.set(node, 1)
+      chain.push(node)
+      node = manualParentOf.get(node)
+    }
+    if (node !== undefined && state.get(node) === 1) {
+      for (let at = chain.indexOf(node); at < chain.length; at += 1) manualParentOf.delete(chain[at])
+    }
+    for (const member of chain) state.set(member, 2)
+  }
+  const manualChildren = new Map()
+  for (const [row, parent] of manualParentOf) {
+    if (!manualChildren.has(parent)) manualChildren.set(parent, [])
+    manualChildren.get(parent).push(row)
+  }
+  // Depth-first: the row, then its manual children (sibling order), each with theirs. Explicit stack — a long chain of
+  // manual rows must not exhaust the call stack.
+  const emitWithManualChildren = (row, out) => {
+    const stack = [row]
+    while (stack.length > 0) {
+      const current = stack.pop()
+      out.push(current)
+      const children = manualChildren.get(current)
+      if (children) stack.push(...children.slice().sort(compareSiblingRows).reverse())
+    }
+  }
+
+  const anchoredByIndex = new Map()
+  for (const [row, index] of treeAnchorOf) {
+    if (!anchoredByIndex.has(index)) anchoredByIndex.set(index, [])
+    anchoredByIndex.get(index).push(row)
+  }
+  // End (exclusive) of each anchor's subtree in `treeRows`, from the row path.
+  const anchorsByEnd = new Map()
+  for (const index of anchoredByIndex.keys()) {
+    const identity = pathIdentityOf(treeRows[index])
+    let end = index + 1
+    if (identity !== null) {
+      const members = new Set([identity.self])
+      while (end < treeRows.length) {
+        const next = pathIdentityOf(treeRows[end])
+        if (next === null || next.parent === null || !members.has(next.parent)) break
+        members.add(next.self)
+        end += 1
+      }
+    }
+    if (!anchorsByEnd.has(end)) anchorsByEnd.set(end, [])
+    anchorsByEnd.get(end).push(index)
+  }
+  const out = []
+  treeRows.forEach((row, index) => {
+    out.push(row)
+    const anchors = anchorsByEnd.get(index + 1)
+    if (!anchors) return
+    for (const anchor of anchors.slice().sort((left, right) => right - left)) {
+      for (const manual of anchoredByIndex.get(anchor).slice().sort(compareSiblingRows)) emitWithManualChildren(manual, out)
+    }
+  })
+  for (const row of tailOrder) {
+    if (!treeAnchorOf.has(row) && !manualParentOf.has(row)) emitWithManualChildren(row, out)
+  }
+  return out
+}
+
 // "Does this target bind logical ids to physical ids AT ALL?" — the writer's own predicate
 // (apply-writer.cjs fieldIdMapHasExplicitBindings), restated on the read side so the two modes are
 // decided by the same question. An EMPTY map is a legitimate mode: the target is addressed by
@@ -1003,13 +1123,16 @@ async function exportStockPreparationPrepLines({ recordsApi, target, projectNo, 
   // 唯一键 tiebreak) or be swallowed itself, and a prefix row with a path would adopt PLM children. They are appended
   // after the tree (and its stranded rows), in the flat comparator's order, so the export never loses one. For a sheet
   // without a prefix row `treeRows` holds every active row and nothing below differs from before.
+  // P3 (ADR §12.5, OQ-P2): a 人工补充 row with a 父组件图号 is then spliced back under its printed parent by a post-pass
+  // over the tree's order (`exportPrintOrder`) — still outside the tree's identity and dedupe. Without such a row the
+  // order is the B1 one above, byte for byte.
   const treeRows = activeRows.filter((data) => !isManualPrefixKey(data.idempotencyKey))
   const prefixRows = activeRows.filter((data) => isManualPrefixKey(data.idempotencyKey))
   // Deterministic hierarchy order BEFORE the projection — since F1c the DEPTH-FIRST BOM TREE
   // (orderRowsAsBomTree), 老系统 iterHandle 的形状,而不再只是「按父组件图号分带」。身份列认不出
   // 来的老部署自动退回 F1b 的平比较器,所以没有任何一种部署会比改之前更乱。
   const ordering = orderRowsAsBomTree(treeRows)
-  const printedRows = prefixRows.length > 0 ? ordering.rows.concat(sortExportRows(prefixRows)) : ordering.rows
+  const printedRows = exportPrintOrder(ordering, prefixRows)
   // PR-5: the 沿用说明 column exists only for a project with a live 沿用关系 (see CONTINUATION_NOTE_COLUMN);
   // without one, `headers` and every row below are the pre-PR-5 projection byte for byte. (A prefix row is never a
   // relationship's member nor its new parent: the planner never sees one.)
@@ -1128,6 +1251,7 @@ module.exports = {
     nameAndSpecDisplayKey,
     rowCarriesSpecColumn,
     orderRowsAsBomTree,
+    exportPrintOrder,
     encodeBomPath,
     bomPathTokensOf,
     pathIdentityOf,
