@@ -54,6 +54,7 @@ import { isFieldAlwaysReadOnly, isFieldPermissionHidden, isFieldReadOnlyForPeopl
 import { FIELD_READONLY_PLM_SYSTEM_CODE, fieldHumanWriteLockKind, humanWriteLockRefusalCode } from './human-write-lock'
 import {
   assertManualRowCreateInTransaction,
+  assertManualRowParentPairForCreate,
   isMintedManualRowCreateExtension,
   rewriteManualRowValidation,
   type ManualRowCreateExtension,
@@ -321,8 +322,9 @@ export type RecordCreateInput = {
    * 人工补充行 (ADR adr-stock-prep-manual-rows-20261030 §3.2 「实现」): present ONLY on the two manual-row routes, and
    * only as an extension object minted by stock-preparation-manual-rows-gate.ts (any other object is refused before
    * any read). It turns the manual-row branch ON — the in-transaction re-check, the lock exemption for the six
-   * fillable columns, the stamps, the required rewrite — and NOTHING else: `capabilities` stays the actor's own and
-   * canCreateRecord is checked as on every create.
+   * fillable columns and the parent pair (ADR §12; the pair is held to rules P3 – P5 inside the branch), the stamps,
+   * the required rewrite — and NOTHING else: `capabilities` stays the actor's own and canCreateRecord is checked as
+   * on every create.
    */
   manualRow?: ManualRowCreateExtension
 }
@@ -726,12 +728,19 @@ export class RecordService {
       }
 
       // 人工补充行: conditions 3, 4 and 6 again, on the fields just re-read and the plugin registry row read on THIS
-      // transaction's query, after the fence (ADR §3.2). Refuses before any write; the stamps come from here.
+      // transaction's query, after the fence (ADR §3.2). Refuses before any write; the stamps come from here. The
+      // create's own field ids go along: when they name the parent pair, the pair's columns must still be present and
+      // locked on the re-read fields (ADR §12.3).
       const manualSheet: ManualRowsSheet | null = manualRow
-        ? await assertManualRowCreateInTransaction(query, manualRow, fieldRes.rows as Array<{ id?: unknown; property?: unknown }>)
+        ? await assertManualRowCreateInTransaction(query, manualRow, fieldRes.rows as Array<{ id?: unknown; property?: unknown }>, Object.keys(data))
         : null
-      const manualFillableFieldIds = new Set(manualSheet?.derived.fillable ?? [])
+      // The lock exemption: the six fillable columns and the parent pair derived for this sheet (8 physical ids).
+      const manualLockExemptFieldIds = manualSheet?.derived.lockExempt ?? new Set<string>()
       const manualNeverWrittenFieldIds = manualSheet?.derived.neverWritten ?? new Set<string>()
+      // 人工补充行, the parent pair (ADR §12.3 P3 – P5): both columns or neither, text or null, never a name without a
+      // 图号, never the new row's own 图号. Judged on the data as submitted, before anything is written; the values
+      // themselves are stored as submitted (the loop below does not rewrite a `string` cell).
+      if (manualSheet) assertManualRowParentPairForCreate(manualSheet, data)
 
       const fieldById = buildCreateFieldGuardMap(fieldRes.rows)
       const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
@@ -764,14 +773,15 @@ export class RecordService {
           throw new RecordValidationError(`Unknown fieldId: ${fieldId}`, 'VALIDATION_ERROR', fieldId)
         }
 
-        // 人工补充行: the stamps, the identity / RUN columns and the lineage pair are the server's on a manual row — a
-        // submitted value is refused with the closed code whether or not the column carries its lock.
+        // 人工补充行: the stamps and the identity / RUN columns are the server's on a manual row — a submitted value is
+        // refused with the closed code whether or not the column carries its lock.
         if (manualNeverWrittenFieldIds.has(fieldId)) {
           throw new RecordFieldForbiddenError(`Field is written by the server on a manual row: ${fieldId}`, fieldId, FIELD_READONLY_PLM_SYSTEM_CODE)
         }
         const humanLockKind = humanLockKindByFieldId.get(fieldId)
-        // The lock exemption: ONLY the six fillable columns derived for this sheet, and only on the manual-row branch.
-        if (humanLockKind && !manualFillableFieldIds.has(fieldId)) {
+        // The lock exemption: ONLY the six fillable columns and the parent pair derived for this sheet, and only on the
+        // manual-row branch (the set is empty on every other create).
+        if (humanLockKind && !manualLockExemptFieldIds.has(fieldId)) {
           throw new RecordFieldForbiddenError(`Field is read-only (system-written): ${fieldId}`, fieldId, humanWriteLockRefusalCode(humanLockKind))
         }
 

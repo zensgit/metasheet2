@@ -132,6 +132,10 @@ const ALLOWLIST: Record<string, Record<string, { disposition: 'CHOKEPOINT' | 'SA
       disposition: 'CHOKEPOINT',
       reason: 'GET /sheets/:sheetId/trash list (#15 recycle bin): visibleFieldIds from maskStoredRecordFieldIds masks each trashed record data so field_permissions-denied / taint values do not leak through the trash API',
     },
+    'projected|readableFieldIds': {
+      disposition: 'CHOKEPOINT',
+      reason: '人工补充行 parent picker (GET /sheets/:sheetId/manual-rows/parent-options, ADR adr-stock-prep-manual-rows-20261030 §12.6): readableFieldIds comes from loadManualRowParentReadScope = computeAllowedFieldIds → maskStoredRecordFieldIds; the SQL projection already received NULL for every column id outside that set, and each returned entry is masked with it again',
+    },
   },
   'multitable/webhook-delivery-authority.ts': {
     'valueMap|readableFieldIds': {

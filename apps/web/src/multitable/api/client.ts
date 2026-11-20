@@ -40,6 +40,7 @@ import type {
   DeletePersonalViewConfigResponse,
   CreateRecordInput,
   PatchManualRowFieldsInput,
+  MetaManualRowParentOptionsPage,
   PatchRecordsInput,
   FormSubmitInput,
   MultitableComment,
@@ -3865,6 +3866,22 @@ export class MultitableApiClient implements CommentsApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
+    return this.parseJson(res)
+  }
+
+  // 人工补充行的父组件 (ADR §12.6, host slice P1; session requests only). The picker's candidates: parents already used on
+  // the sheet first, then any row's own 图号 + 名称; values exactly as stored. `q` ≤ 200 characters, `limit` ≤ 50.
+  async listManualRowParentOptions(sheetId: string, params?: { q?: string; limit?: number }): Promise<MetaManualRowParentOptionsPage> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/manual-rows/parent-options${qs({
+      q: params?.q,
+      limit: params?.limit,
+    })}`)
+    return this.parseJson(res)
+  }
+
+  // ADR §12.7 ①: how many OTHER manual rows name this manual row's own 图号 as their 父组件图号 (a number, never a row).
+  async countManualRowParentDependents(recordId: string): Promise<{ count: number }> {
+    const res = await this.fetch(`/api/multitable/records/${encodeURIComponent(recordId)}/manual-parent-dependents`)
     return this.parseJson(res)
   }
 

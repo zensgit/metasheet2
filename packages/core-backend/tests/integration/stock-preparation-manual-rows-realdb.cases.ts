@@ -27,17 +27,28 @@
  *            => 200 with 来源; the manual row edited through the host (version + 1, two PLM-band cells) => 200 (never
  *            409 SHEET_CHANGED_SINCE_SETTLEMENT), and the next preview stays `ready`; control: a host-side machine write
  *            on a PLM row => 409 SHEET_CHANGED_SINCE_SETTLEMENT.
+ *   MR-RD-04 ADR §12.4 ③ (slice P1) — the reader's set-aside of prefix rows is what keeps a manual row's PARENT out of
+ *            the pull and out of the settlement digest (父组件图号 / 父组件名称 are denormalized PLM columns the planner
+ *            compares and the digest includes). On a settled PILOT project a person adds a manual row under a PLM
+ *            assembly and then moves it to a new parent, both through the HOST's manual-row routes (the real univer-meta
+ *            router): the next preview is `ready` and does not touch the row (version and cells byte-identical); the
+ *            pull is then EXECUTED (the apply, inside its real write lease) and still leaves the row byte-identical; and
+ *            the formal export stays 200 — never 409 SHEET_CHANGED_SINCE_SETTLEMENT — printing the parent the person set.
  * Values-free: every id is synthetic and per-run.
  */
 import { createRequire } from 'module'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { afterAll, describe, expect, test } from 'vitest'
+import express from 'express'
+import request from 'supertest'
+import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import type { LoadedPlugin } from '../../src/core/plugin-loader'
 import type { PluginContext } from '../../src/types/plugin'
+import { univerMetaRouter } from '../../src/routes/univer-meta'
+import { usePinnedServer } from '../utils/pinned-server'
 
 const require = createRequire(import.meta.url)
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..')
@@ -125,6 +136,30 @@ export function defineStockPreparationManualRowsRealDbCases(): void {
   const kvKeys: string[] = []
 
   describeIfDatabase('stock-prep manual supplementary rows B1 (real Postgres, real host, real routes)', () => {
+    // MR-RD-04: the HOST's manual-row routes, mounted as the product mounts them, for a person with write access.
+    const HOST_WRITER = { id: `u_mrb1_host_writer_${TOKEN}`, roles: ['member'], perms: ['multitable:read', 'multitable:write'] }
+    const pinned = usePinnedServer()
+    const hostHttp = () => request(pinned.url())
+    /** A host request with the project-sheets deployment switch on (the manual-row create reads it per request). */
+    const withHostSwitch = async <T>(send: () => PromiseLike<T>): Promise<T> => {
+      const before = process.env[SWITCH]
+      process.env[SWITCH] = 'true'
+      try {
+        return await send()
+      } finally {
+        if (before === undefined) delete process.env[SWITCH]
+        else process.env[SWITCH] = before
+      }
+    }
+
+    beforeAll(() => {
+      const app = express()
+      app.use(express.json())
+      app.use((req, _res, next) => { ;(req as unknown as { user: unknown }).user = HOST_WRITER; next() })
+      app.use('/api/multitable', univerMetaRouter())
+      pinned.setApp(app)
+    })
+
     afterAll(async () => {
       for (const sheetId of sheets) {
         await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [sheetId]).catch(() => {})
@@ -396,6 +431,97 @@ export function defineStockPreparationManualRowsRealDbCases(): void {
       const refused = await st.exportLines()
       expect(refused.statusCode).toBe(409)
       expect(errorOf(refused).code).toBe(SHEET_CHANGED)
+    }, 300000)
+
+    test("MR-RD-04 (ADR §12.4 ③) a manual row's parent, set and then changed through the HOST routes after the settlement: the pull — previewed, then EXECUTED — leaves the row alone and the formal export stays 200", async () => {
+      const st = await stack('parent', { pilot: true })
+      const first = await st.dryRun()
+      expect(first.statusCode, JSON.stringify(first.body)).toBe(200)
+      expect(first.body.data.status).toBe('ready')
+      const applied = await st.apply(first.body.data.dryRunToken)
+      expect(applied.statusCode, JSON.stringify(applied.body)).toBe(200)
+      expect(applied.body.data.status).toBe('succeeded')
+      const settling = await st.dryRun()
+      expect(settling.body.data.status, JSON.stringify(settling.body)).toBe('ready')
+      const settled = await st.exportLines()
+      expect(settled.statusCode, JSON.stringify(settled.body)).toBe(200)
+      const plmIds = await st.plmRecordIds()
+      expect(plmIds.length).toBe(2)
+      const plmBefore = await Promise.all(plmIds.map((id) => st.recordState(id)))
+
+      // A person adds a manual row UNDER the PLM assembly (its 图号 and name as the sheet shows them), through the host.
+      const parentCodeId = st.physical('parentComponentCode')
+      const parentNameId = st.physical('parentComponentName')
+      const created = await withHostSwitch(() => hostHttp().post(`/api/multitable/sheets/${st.sheetId}/manual-rows`).send({
+        data: {
+          [st.physical('componentName')]: '人工补充件',
+          [st.physical('totalQuantity')]: 2,
+          [st.physical('componentCode')]: 'MRB1-M-101',
+          [parentCodeId]: 'MRB1-A-001',
+          [parentNameId]: 'Synthetic assembly',
+        },
+      }))
+      expect(created.status, JSON.stringify(created.body)).toBe(200)
+      const manualId = created.body.data.record.id as string
+      const afterCreate = await st.recordState(manualId)
+      expect(afterCreate.data[st.physical('idempotencyKey')]).toBe(`manual:v1:${manualId}`)
+      expect(afterCreate.data[parentCodeId]).toBe('MRB1-A-001')
+      expect(afterCreate.data[parentNameId]).toBe('Synthetic assembly')
+
+      // The formal export of the settled project: 200, the manual line carries the parent the person chose.
+      const manualLine = (res: any) => {
+        const workbook = workbookOf(res)
+        const codeAt = workbook.headers.indexOf('图号')
+        const line = workbook.rows.find((row: any[]) => row[codeAt] === 'MRB1-M-101')
+        return { parent: line && line[workbook.headers.indexOf('父组件图号')], source: line && line[workbook.headers.indexOf('来源')] }
+      }
+      const withParent = await st.exportLines()
+      expect(withParent.statusCode, JSON.stringify(errorOf(withParent))).toBe(200)
+      expect(manualLine(withParent)).toEqual({ parent: 'MRB1-A-001', source: '人工补充' })
+
+      // The person moves the row to a parent that exists nowhere on the sheet (新建父组件): version + 1.
+      const edited = await withHostSwitch(() => hostHttp().patch(`/api/multitable/records/${manualId}/manual-fields`).send({
+        data: { [parentCodeId]: 'MRB1-NEW-PARENT', [parentNameId]: '新建父组件' },
+        expectedVersion: 1,
+      }))
+      expect(edited.status, JSON.stringify(edited.body)).toBe(200)
+      const afterEdit = await st.recordState(manualId)
+      expect(afterEdit.version).toBe(2)
+      expect(afterEdit.data[parentCodeId]).toBe('MRB1-NEW-PARENT')
+
+      // The pull: the plan is ready, the manual row is set aside (counted, never planned) and stays byte-identical.
+      const preview = await st.dryRun()
+      expect(preview.statusCode, JSON.stringify(preview.body)).toBe(200)
+      expect(preview.body.data.status, JSON.stringify(preview.body)).toBe('ready')
+      expect(preview.body.data.manualSupplement).toMatchObject({ rowCount: 1, unboundKeyCount: 0 })
+      expect(await st.recordState(manualId)).toEqual(afterEdit)
+
+      // …and it is EXECUTED (ADR §12.4 ③ 「执行拉取」): the apply takes the sheet's write lease and recomputes the plan
+      // inside it, from the same reader. It finds the two PLM rows unchanged and writes nothing; the manual row is set
+      // aside there too — the same version, the same cells, the same creator after the pull has run.
+      const pulled = await st.apply(preview.body.data.dryRunToken)
+      expect(pulled.statusCode, JSON.stringify(pulled.body)).toBe(200)
+      expect(pulled.body.data.status).toBe('succeeded')
+      expect(pulled.body.data.apply.counts).toEqual({ created: 0, updated: 0, inactive: 0, skipped: 2, held: 0, failed: 0 })
+      expect(pulled.body.data.manualSupplement).toMatchObject({ rowCount: 1, unboundKeyCount: 0 })
+      expect(await st.recordState(manualId)).toEqual(afterEdit)
+      // That apply really ran in the write lane: its reminder was persisted INSIDE its own lease (read through the real lock).
+      expect(st.reminderWrites.at(-1)).toEqual({ mode: 'apply', leaseHeld: true, leasePurpose: 'small_apply' })
+
+      // …and the formal export is still delivered after the executed pull: the settlement digest never saw the pair
+      // change, and the pull did not move it either.
+      const afterPull = await st.exportLines()
+      expect(afterPull.statusCode, JSON.stringify(errorOf(afterPull))).toBe(200)
+      expect(manualLine(afterPull)).toEqual({ parent: 'MRB1-NEW-PARENT', source: '人工补充' })
+      // The PLM rows were not touched by any of it (version and cells as they were at the settlement).
+      expect(await st.plmRecordIds()).toEqual(plmIds)
+      expect(await Promise.all(plmIds.map((id) => st.recordState(id)))).toEqual(plmBefore)
+      // A further preview finds nothing to do, still sets the row aside, and the export answers 200 once more.
+      const next = await st.dryRun()
+      expect(next.body.data.status, JSON.stringify(next.body)).toBe('ready')
+      expect(next.body.data.counts).toEqual({ add: 0, update: 0, skip: 2, inactive: 0, manual_confirm: 0 })
+      expect(await st.recordState(manualId)).toEqual(afterEdit)
+      expect((await st.exportLines()).statusCode).toBe(200)
     }, 300000)
   })
 }
