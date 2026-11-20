@@ -719,6 +719,11 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
    * chunk carry the SHEET they write, and migration 087's unique index makes "sheet -> row" one row. Not
    * tenant-scoped on purpose (sheet ids are globally unique; the caller compares `tenantId` if it must);
    * a refusal derived from it is values-free, so no tenant learns anything it could not already see.
+   * D2 (generic-writer machine-column strip; its counts are a switch-on precondition in register R-96 ⑦): the
+   * governed-sheet probe's `registryBindingBySheet` also reads this, and hands the row's `tenantId` / `objectId`
+   * IN-PROCESS to its one consumer, resolveRegisteredSheetMachineColumns in lib/generic-writer-machine-columns.cjs (the
+   * generic writers' machine-column strip set). That consumer never returns, logs or puts them in an error; its single
+   * call site is pinned by B-10 (generic-writer-machine-column-binding.test.cjs).
    */
   async function getPilotStateBySheetId(input = {}, options = {}) {
     const sheetId = requiredString(input.sheetId, 'sheetId')
