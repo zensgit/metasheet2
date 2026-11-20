@@ -724,6 +724,14 @@ const originalIdentityShape = (f: Fixture) => ({
   provider_open_id: 'old-open-' + f.user,
   provider_union_id: 'old-union-' + f.user,
 })
+async function renewalFixture() {
+  const f = await fixture()
+  // The fixture already holds attendance_employee. Complete its admission before login so
+  // profile reads cannot queue a role backfill behind repair before reaching the renewal SQL.
+  await query("INSERT INTO user_namespace_admissions(user_id,namespace,enabled) VALUES($1,'attendance',true)", [f.user])
+  return f
+}
+
 // Identify the exact waiter and the granted transaction lock it is waiting on.
 async function waitingTransaction(holder: number, sqlFragment: string): Promise<number> {
   const end = Date.now() + 3500
@@ -1852,7 +1860,7 @@ suite('DingTalk controlled login repair', () => {
     expect((await f.graph()).at(-1).todos).toHaveLength(1)
   })
   it('an in-flight refresh cannot resurrect a session revoked by repair', async () => {
-    const f = await fixture(),
+    const f = await renewalFixture(),
       auth = new AuthService(),
       login = await auth.login(f.user, f.password)
     expect(login?.user.id).toBe(f.user)
@@ -2061,7 +2069,7 @@ suite('DingTalk controlled login repair', () => {
     },
   )
   it('an in-flight legacy refresh without a sid cannot mint a new post-repair session', async () => {
-    const f = await fixture(),
+    const f = await renewalFixture(),
       auth = new AuthService(),
       login = await auth.login(f.user, f.password)
     const legacy = auth.createToken(login!.user)
@@ -2129,7 +2137,7 @@ suite('DingTalk controlled login repair', () => {
       'a credential %s authenticated before apply cannot obtain a new session after apply',
       async (shape) => {
         await withDbTokenVerification(async () => {
-          const f = await fixture(),
+          const f = await renewalFixture(),
             orgB = await secondOrg(f.user)
           const login = await authService.login(f.user, f.password)
           const credential =
