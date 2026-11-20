@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# Test double for `curl`: answers from the docker double's container state, never the network.
+set -u
+C="${H_DS:?}/ctr"
+# The call log's meta column records the limits curl would apply (the last --connect-timeout and
+# --max-time win, as in curl), so the harness sees a curl without a limit.
+url=""
+connect="none"
+maxtime="none"
+while (( $# )); do
+  case "$1" in
+    --connect-timeout) connect="${2:-}"; shift 2 ;;
+    --max-time|-m) maxtime="${2:-}"; shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+printf 'curl\t-\t-\tconnect_timeout=%s max_time=%s\t%s\n' "$connect" "$maxtime" "$url" >> "${H_CALLS}"
+# H_CURL_HANG=new-health: the new backend accepts /health and never answers; curl gives up after
+# its --max-time (on the scaled clock of the sleep double) with exit 28. Without a limit, or with
+# one above 60 s, the call would hang: logged as unmodelled.
+if [[ "${H_CURL_HANG:-}" == "new-health" && "$url" == */health && -d "${H_DS}/ctr/metasheet-backend" \
+  && "$(cat "${H_DS}/ctr/metasheet-backend/image_id")" == sha256:new* && "$(cat "${H_DS}/ctr/metasheet-backend/running")" == "true" ]]; then
+  if [[ ! "$maxtime" =~ ^[0-9]+$ ]] || (( maxtime > 60 )); then
+    printf 'UNMODELED\t-\t-\t-\tcurl without a bounded --max-time against a peer that never answers: %s\n' "$url" >> "${H_CALLS}"
+    exit 99
+  fi
+  sleep "$maxtime"
+  echo "curl: (28) Operation timed out after ${maxtime}000 milliseconds with 0 bytes received" >&2
+  exit 28
+fi
+running() { [[ -d "${C}/$1" && "$(cat "${C}/$1/running")" == "true" ]]; }
+rev_of() {
+  local id k
+  id="$(cat "${C}/$1/image_id")"
+  k="${id//\//_}"; k="${k//:/_}"; k="${k//@/_}"
+  cat "${H_DS}/img/${k}/rev"
+}
+case "$url" in
+  */api/plugins)
+    running metasheet-backend || exit 7
+    if [[ "${H_PLUGINS_FAIL:-0}" == "1" && "$(cat "${C}/metasheet-backend/image_id")" == sha256:new* ]]; then exit 22; fi
+    echo '{"plugins":[]}'
+    ;;
+  */build-info.json)
+    running metasheet-web || exit 7
+    printf '{"commit":"%s"}\n' "$(rev_of metasheet-web)"
+    ;;
+  */health)
+    running metasheet-backend || exit 7
+    # H_TERM_ON_HEALTH_TRY=N: TERM to the window during the new backend's Nth /health try.
+    if [[ -n "${H_TERM_ON_HEALTH_TRY:-}" && "$(cat "${C}/metasheet-backend/image_id")" == sha256:new* ]]; then
+      tries=$(( $(cat "${H_DS}/new_health_tries" 2>/dev/null || echo 0) + 1 ))
+      printf '%s' "$tries" > "${H_DS}/new_health_tries"
+      if (( tries == H_TERM_ON_HEALTH_TRY )); then kill -TERM "$(cat "${H_RUN_DIR}/window.pid")"; fi
+    fi
+    commit="$(rev_of metasheet-backend)"
+    if [[ "${H_NEW_HEALTH_FAIL:-0}" == "1" && "$(cat "${C}/metasheet-backend/image_id")" == sha256:new* ]]; then exit 22; fi
+    if [[ "${H_OLD_RESTART_WRONG:-0}" == "1" && -e "${C}/metasheet-backend/restarted" ]]; then commit="$(printf 'e%.0s' {1..40})"; fi
+    if [[ "${H_OLD_HEALTH_WRONG:-0}" == "1" && "$(cat "${C}/metasheet-backend/image_id")" == sha256:old* ]]; then commit="$(printf 'e%.0s' {1..40})"; fi
+    printf '{"status":"ok","build":{"commit":"%s"}}\n' "$commit"
+    ;;
+  http://127.0.0.1:8081|http://127.0.0.1:8081/)
+    running metasheet-web || exit 7
+    # H_WEB_REFUSE_FIRST=N: the new web container refuses its first N requests (nginx not yet
+    # listening right after the container start).
+    if [[ -n "${H_WEB_REFUSE_FIRST:-}" && "$(cat "${C}/metasheet-web/image_id")" == sha256:new* ]]; then
+      refused="$(cat "${H_DS}/web_refused" 2>/dev/null || echo 0)"
+      if (( refused < H_WEB_REFUSE_FIRST )); then
+        printf '%s' "$((refused + 1))" > "${H_DS}/web_refused"
+        echo "curl: (56) Recv failure: Connection reset by peer" >&2
+        exit 56
+      fi
+    fi
+    echo '<!doctype html><title>harness</title>'
+    ;;
+  *)
+    printf 'UNMODELED\t-\t-\t-\tcurl %s\n' "$url" >> "${H_CALLS}"
+    exit 99
+    ;;
+esac

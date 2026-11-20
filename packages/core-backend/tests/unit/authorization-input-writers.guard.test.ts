@@ -58,7 +58,9 @@ import {
 } from '../../src/rbac/authorization-input-writers'
 import type { AuthorizationInputDynamicExemption, AuthorizationInputLateRoleRowCaller, AuthorizationInputWriterEntry } from '../../src/rbac/authorization-input-writers'
 import { AUTHORIZATION_INPUT_TAKEOVER_CALLERS, AUTHORIZATION_INPUT_WORLD_LOCK_KEY1 } from '../../src/rbac/authorization-input-lock'
+import { judgeMigrationInputWrites } from '../helpers/authorization-input-migration-judge'
 import {
+  AUTHORIZATION_INPUT_PINNED_STATEMENT_SETS,
   checkNewMigration,
   COMPLIANT_LOCK_BLOCK,
   exemptDynamicForms,
@@ -860,6 +862,25 @@ describe('migrations', () => {
   it('every migration outside the frozen list is checked: one that writes an input carries the bounded try form and each of its writes is judged safe', () => {
     expect(traversalProblems(migrations.files, AUTHORIZATION_INPUT_FROZEN_MIGRATIONS, read, writing.size)).toEqual([])
     expect(migrations.files.length).toBeGreaterThan(400)
+  })
+
+  it('the pinned statements set nothing aside in any migration but their own: judged as new or as it is, every other migration has the same problems with and without them, and none of them carries a pinned text', () => {
+    const pinnedFiles = new Set(AUTHORIZATION_INPUT_PINNED_STATEMENT_SETS.map((set) => set.file))
+    const pinnedTexts = new Set(AUTHORIZATION_INPUT_PINNED_STATEMENT_SETS.flatMap((set) => set.statements.map((statement) => statement.text)))
+    const others = migrations.files.filter((file) => !pinnedFiles.has(file))
+    expect(others.length).toBeGreaterThan(400)
+    let refusedAsNew = 0
+    for (const file of others) {
+      const source = read(file)
+      for (const isNew of [true, false]) {
+        const withPins = checkNewMigration(file, source, isNew).problems
+        expect(checkNewMigration(file, source, isNew, AUTHORIZATION_INPUT_DYNAMIC_EXEMPTIONS, []).problems, file).toEqual(withPins)
+        if (isNew) refusedAsNew += withPins.length
+      }
+      expect(judgeMigrationInputWrites(file, source).judgments.filter((judgment) => pinnedTexts.has(judgment.statement?.text ?? '')), file).toEqual([])
+    }
+    // The comparison is not vacuous: judged as new, the migrations of the tree carry problems the pins could have touched.
+    expect(refusedAsNew).toBeGreaterThan(0)
   })
 
   it('pins the retry-loop marks of the bounded try block', () => {
