@@ -1,3 +1,7 @@
+import {
+  calculateAttendanceSegmentsV1,
+  type AttendanceSegmentCalculationInputV1,
+} from '../../src/attendance/w4c1-segment-calculator'
 import { requestOnlinePunchFixture } from '../utils/attendance-online-punch-fixture'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { randomUUID } from 'node:crypto'
@@ -335,6 +339,262 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
     }
+  })
+
+  // Canonical day proofs: committed HTTP inputs replayed through the real calculator.
+  // This is a fresh replay, not a capture of the original in-flight result.
+  type CanonicalDayRow = {
+    record_id: string
+    record_work_date: string
+    record_http_work_date: string | Date
+    current_calculation_id: string
+    projection_owner: string
+    visibility_state: string
+    status: string
+    work_minutes: number
+    id: string
+    calculation_kind: string
+    mode: string
+    entrypoint: string
+    outcome: string
+    outcome_reason_code: string
+    expected_segment_count: number
+    projected_status: string
+    projected_work_minutes: number
+    attribution_snapshot: AttendanceSegmentCalculationInputV1['attribution']
+    context_snapshot: AttendanceSegmentCalculationInputV1['context']
+    evidence_snapshot: AttendanceSegmentCalculationInputV1['evidence']
+    approved_facts_snapshot: AttendanceSegmentCalculationInputV1['approvedFacts']
+  }
+
+  async function seedCanonicalDay(
+    workDate: string,
+    segments: Array<{ startTime: string; endTime: string; startDayOffset?: 0; endDayOffset?: 1 }>,
+  ) {
+    const fixture = await seedOrg('shadow')
+    await pool.query("UPDATE users SET activation_status = 'activated' WHERE id = $1", [fixture.userId])
+    // Existing RBAC_BYPASS fixture posture; this is not a real-auth proof.
+    await pool.query(
+      `INSERT INTO user_permissions (user_id, permission_code)
+       SELECT $1, unnest($2::text[]) ON CONFLICT DO NOTHING`,
+      [fixture.userId, ['attendance:read', 'attendance:write']],
+    )
+    const headers = { Authorization: `Bearer ${fixture.token}` }
+    const shift = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+      method: 'POST', headers,
+      body: {
+        name: 'canonical day synthetic', timezone: 'UTC',
+        lateGraceMinutes: 0, earlyGraceMinutes: 0, roundingMinutes: 1,
+        workingDays: [0, 1, 2, 3, 4, 5, 6], segments,
+      },
+    })
+    expect(shift.status, 'PARENT_CALC_DAY_SHIFT_HTTP_STATUS').toBe(201)
+    const shiftId: unknown = shift.body?.data?.id
+    expect(typeof shiftId).toBe('string')
+    if (typeof shiftId !== 'string') throw new Error('PARENT_CALC_DAY_SHIFT_ID_REQUIRED')
+    for (const [state, prior, version] of [['eligible', 'shadow', 3], ['authoritative', 'eligible', 4]] as const) {
+      await pool.query(
+        `UPDATE attendance_calculation_rollout_state SET state = $2, prior_state = $3, version = $4 WHERE org_id = $1`,
+        [fixture.orgId, state, prior, version],
+      )
+    }
+    expect(process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED === fixture.orgId).toBe(true)
+    const assigned = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+      method: 'POST', headers,
+      body: { userId: fixture.userId, shiftId, startDate: workDate, endDate: workDate },
+    })
+    expect(assigned.status, 'PARENT_CALC_DAY_ASSIGNMENT_HTTP_STATUS').toBe(201)
+    return { ...fixture, headers, shiftId, workDate }
+  }
+
+  async function punchCanonicalDay(
+    fixture: Awaited<ReturnType<typeof seedCanonicalDay>>,
+    eventType: 'check_in' | 'check_out',
+    occurredAt: string,
+  ) {
+    // requestJson uses the historical clock wrapper and strips occurredAt before HTTP.
+    const response = await requestJson(`${baseUrl}/api/attendance/punch`, {
+      method: 'POST', headers: fixture.headers,
+      body: { orgId: fixture.orgId, eventType, operationId: randomUUID(), occurredAt, timezone: 'UTC' },
+    })
+    expect(response.status, `PARENT_CALC_DAY_PUNCH_HTTP_STATUS:${String(response.body?.error?.code ?? 'NO_CODE')}`).toBe(200)
+    const current = await readCanonicalDay(fixture)
+    expect(response.body?.data?.record).toMatchObject({
+      id: current.record_id, work_date: JSON.parse(JSON.stringify(current.record_http_work_date)),
+      current_calculation_id: current.id, projection_owner: 'w4', visibility_state: 'active',
+      status: current.status, work_minutes: current.work_minutes,
+    })
+    return response
+  }
+
+  async function readCanonicalDay(fixture: Awaited<ReturnType<typeof seedCanonicalDay>>) {
+    const rows = await pool.query<CanonicalDayRow>(
+      `SELECT c.*, r.id AS record_id, r.work_date::text AS record_work_date, r.work_date AS record_http_work_date,
+              r.current_calculation_id, r.projection_owner, r.visibility_state, r.status, r.work_minutes
+         FROM attendance_records r JOIN attendance_record_calculations c
+           ON c.id = r.current_calculation_id AND c.org_id = r.org_id AND c.attendance_record_id = r.id
+        WHERE r.org_id = $1 AND r.user_id = $2 ORDER BY r.work_date`,
+      [fixture.orgId, fixture.userId],
+    )
+    expect(rows.rows).toHaveLength(1)
+    const row = rows.rows[0]
+    expect(row.current_calculation_id).toBe(row.id)
+    expect(row).toMatchObject({
+      record_work_date: fixture.workDate, projection_owner: 'w4', visibility_state: 'active',
+      calculation_kind: 'calculation', mode: 'authoritative', entrypoint: 'live',
+      outcome: 'completed', outcome_reason_code: 'calculated',
+    })
+    expect(row.attribution_snapshot).toMatchObject({
+      posture: 'resolved_v2',
+      value: { orgId: fixture.orgId, userId: fixture.userId, workDate: fixture.workDate, shiftId: fixture.shiftId },
+    })
+    expect(row.context_snapshot).toMatchObject({ workDate: fixture.workDate, timezone: 'UTC', shiftId: fixture.shiftId })
+    expect(row.approved_facts_snapshot).toEqual([])
+    return row
+  }
+
+  async function assertCanonicalDay(
+    fixture: Awaited<ReturnType<typeof seedCanonicalDay>>,
+    events: ReadonlyArray<readonly ['check_in' | 'check_out', string]>,
+    status: 'normal' | 'partial',
+    workedMinutes: number,
+  ) {
+    const row = await readCanonicalDay(fixture)
+    const source = await pool.query<{ id: string; work_date: string; event_type: string; occurred_at: Date }>(
+      `SELECT id::text, work_date::text, event_type, occurred_at FROM attendance_events
+        WHERE org_id = $1 AND user_id = $2 ORDER BY occurred_at, id`,
+      [fixture.orgId, fixture.userId],
+    )
+    expect(source.rows.map(event => [event.work_date, event.event_type, event.occurred_at.toISOString()])).toEqual(
+      events.map(([direction, instant]) => [fixture.workDate, direction, instant]),
+    )
+    expect(row.evidence_snapshot).toEqual(source.rows.map(event => ({
+      kind: 'punch', ref: event.id, direction: event.event_type,
+      occurredAt: event.occurred_at.toISOString(), source: 'attendance_event',
+    })))
+    const replay = calculateAttendanceSegmentsV1({
+      attribution: row.attribution_snapshot, context: row.context_snapshot,
+      evidence: row.evidence_snapshot, approvedFacts: row.approved_facts_snapshot,
+    })
+    expect(replay.outcome).toBe('completed')
+    expect(replay.outcomeReasonCode).toBe('calculated')
+    expect(replay.dailyProjection).toMatchObject({ workDate: fixture.workDate, timezone: 'UTC', status, workedMinutes })
+    expect([row.status, row.work_minutes, row.projected_status, row.projected_work_minutes]).toEqual(
+      [status, workedMinutes, status, workedMinutes],
+    )
+    expect(row.expected_segment_count).toBe(replay.segments.length)
+    const children = await pool.query(
+      `SELECT segment_index, expected_start_at, expected_end_at, actual_in_at, actual_out_at,
+              work_minutes, status, status_reasons FROM attendance_record_segments
+        WHERE org_id = $1 AND record_id = $2 AND calculation_id = $3 ORDER BY segment_index`,
+      [fixture.orgId, row.record_id, row.id],
+    )
+    expect(children.rows).toEqual(replay.segments.map(segment => ({
+      segment_index: segment.segmentIndex,
+      expected_start_at: new Date(segment.expectedStartAt), expected_end_at: new Date(segment.expectedEndAt),
+      actual_in_at: segment.actualInAt === null ? null : new Date(segment.actualInAt),
+      actual_out_at: segment.actualOutAt === null ? null : new Date(segment.actualOutAt),
+      work_minutes: segment.workedMinutes, status: segment.status, status_reasons: segment.reasons,
+    })))
+    return { row, replay }
+  }
+
+  async function frozenCanonicalCalculation(orgId: string, calculationId: string) {
+    const rows = await pool.query(
+      `SELECT to_jsonb(c) AS calculation,
+              (SELECT jsonb_agg(to_jsonb(s) ORDER BY s.segment_index) FROM attendance_record_segments s
+                WHERE s.org_id = c.org_id AND s.record_id = c.attendance_record_id AND s.calculation_id = c.id) AS children
+         FROM attendance_record_calculations c WHERE c.org_id = $1 AND c.id = $2`,
+      [orgId, calculationId],
+    )
+    expect(rows.rows).toHaveLength(1)
+    return rows.rows[0]
+  }
+
+  it('CALC02_HTTP_PG: healthy morning and missing afternoon checkout, then CALC01 completes without rewriting history', async () => {
+    const fixture = await seedCanonicalDay('2026-02-04', [
+      { startTime: '08:00', endTime: '12:00' }, { startTime: '13:00', endTime: '17:00' },
+    ])
+    const events = [
+      ['check_in', '2026-02-04T08:00:00.000Z'], ['check_out', '2026-02-04T12:00:00.000Z'],
+      ['check_in', '2026-02-04T13:00:00.000Z'],
+    ] as const
+    for (const [direction, instant] of events) await punchCanonicalDay(fixture, direction, instant)
+    const partial = await assertCanonicalDay(fixture, events, 'partial', 240)
+    expect(partial.row.context_snapshot?.segments).toMatchObject([
+      { index: 0, startTime: '08:00', endTime: '12:00', startDayOffset: 0, endDayOffset: 0, lateGraceMinutes: 0, earlyLeaveGraceMinutes: 0 },
+      { index: 1, startTime: '13:00', endTime: '17:00', startDayOffset: 0, endDayOffset: 0, lateGraceMinutes: 0, earlyLeaveGraceMinutes: 0 },
+    ])
+    expect(partial.replay.segments.map(segment => [
+      segment.segmentIndex, segment.expectedStartAt, segment.expectedEndAt,
+      segment.actualInAt, segment.actualOutAt, segment.status, segment.reasons, segment.workedMinutes,
+    ])).toEqual([
+      [0, events[0][1], events[1][1], events[0][1], events[1][1], 'normal', ['within_window'], 240],
+      [1, events[2][1], '2026-02-04T17:00:00.000Z', events[2][1], null, 'missing_check_out', ['missing_check_out'], 0],
+    ])
+    const frozen = await frozenCanonicalCalculation(fixture.orgId, partial.row.id)
+    console.log('PARENT_CALC_DAY_RECEIPT ' + JSON.stringify({
+      phase: 'CALC02', sourceEvents: 3, segments: 2, status: 'partial', workedMinutes: 240,
+      morningMinutes: 240, afternoonMinutes: 0, afternoonStatus: 'missing_check_out',
+      httpStatus: 200, currentAuthoritative: true, committedInputReplay: true, inflightCapture: false, realAuth: false,
+    }))
+
+    // CALC01 is a phase of this same case, not a third named test.
+    const checkout = ['check_out', '2026-02-04T17:00:00.000Z'] as const
+    await punchCanonicalDay(fixture, ...checkout)
+    const complete = await assertCanonicalDay(fixture, [...events, checkout], 'normal', 480)
+    expect(complete.row.record_id).toBe(partial.row.record_id)
+    expect(complete.row.current_calculation_id).not.toBe(partial.row.current_calculation_id)
+    expect(complete.replay.segments.map(segment => [
+      segment.segmentIndex, segment.expectedStartAt, segment.expectedEndAt,
+      segment.actualInAt, segment.actualOutAt, segment.status, segment.reasons, segment.workedMinutes,
+    ])).toEqual([
+      [0, events[0][1], events[1][1], events[0][1], events[1][1], 'normal', ['within_window'], 240],
+      [1, events[2][1], checkout[1], events[2][1], checkout[1], 'normal', ['within_window'], 240],
+    ])
+    expect(await frozenCanonicalCalculation(fixture.orgId, partial.row.id)).toEqual(frozen)
+    console.log('PARENT_CALC_DAY_RECEIPT ' + JSON.stringify({
+      phase: 'CALC01', sourceEvents: 4, segments: 2, status: 'normal', workedMinutes: 480,
+      morningMinutes: 240, afternoonMinutes: 240, pointerChanged: true, priorCalculationAndChildrenUnchanged: true,
+      httpStatus: 200, currentAuthoritative: true, committedInputReplay: true, inflightCapture: false, realAuth: false,
+    }))
+  })
+
+  it('CALC04_HTTP_PG: explicit overnight segment preserves originating canonical and persisted day', async () => {
+    const fixture = await seedCanonicalDay('2026-02-04', [
+      { startTime: '21:00', endTime: '06:00', startDayOffset: 0, endDayOffset: 1 },
+    ])
+    const events = [
+      ['check_in', '2026-02-04T21:00:00.000Z'], ['check_out', '2026-02-05T06:00:00.000Z'],
+    ] as const
+    for (const [direction, instant] of events) await punchCanonicalDay(fixture, direction, instant)
+    const complete = await assertCanonicalDay(fixture, events, 'normal', 540)
+    expect(complete.row.context_snapshot?.segments).toMatchObject([
+      { index: 0, startTime: '21:00', endTime: '06:00', startDayOffset: 0, endDayOffset: 1, lateGraceMinutes: 0, earlyLeaveGraceMinutes: 0 },
+    ])
+    expect(complete.replay.dailyProjection?.workDate).toBe('2026-02-04')
+    expect(complete.replay.dailyProjection?.workDate).not.toBe('2026-02-05')
+    expect(complete.replay.segments.map(segment => [
+      segment.segmentIndex, segment.expectedStartAt, segment.expectedEndAt,
+      segment.actualInAt, segment.actualOutAt, segment.status, segment.reasons, segment.workedMinutes,
+    ])).toEqual([
+      [0, events[0][1], events[1][1], events[0][1], events[1][1], 'normal', ['within_window'], 540],
+    ])
+    const parents = await pool.query(
+      `SELECT work_date::text FROM attendance_records WHERE org_id = $1 AND user_id = $2 ORDER BY work_date`,
+      [fixture.orgId, fixture.userId],
+    )
+    expect(parents.rows).toEqual([{ work_date: '2026-02-04' }])
+    const nextDay = await pool.query(
+      `SELECT count(*)::int AS n FROM attendance_records WHERE org_id = $1 AND user_id = $2 AND work_date = $3::date`,
+      [fixture.orgId, fixture.userId, '2026-02-05'],
+    )
+    expect(nextDay.rows).toEqual([{ n: 0 }])
+    console.log('PARENT_CALC_DAY_RECEIPT ' + JSON.stringify({
+      phase: 'CALC04', sourceEvents: 2, segments: 1, status: 'normal', workedMinutes: 540,
+      parents: 1, nextDayParents: 0, originDayPreserved: true,
+      httpStatus: 200, currentAuthoritative: true, committedInputReplay: true, inflightCapture: false, realAuth: false,
+    }))
   })
 
   it('replays shadow create and edit without duplicate source, snapshot, operation, or outbox rows', async () => {
