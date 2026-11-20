@@ -6353,10 +6353,10 @@ async function onTestRun(): Promise<void> {
 
 .meta-rule-editor__section-title { font-size: 14px; font-weight: 600; color: var(--ms-text-1); }
 /* 1b: Form / Flow segmented toggle in the actions header. */
-.meta-rule-editor__mode-toggle { float: right; display: inline-flex; border: 1px solid var(--ms-border, #d1d5db); border-radius: 6px; overflow: hidden; }
-.meta-rule-editor__mode-btn { font: inherit; font-size: 12px; font-weight: 400; padding: 2px 10px; border: 0; background: transparent; color: var(--ms-text-2, #4b5563); cursor: pointer; }
-.meta-rule-editor__mode-btn + .meta-rule-editor__mode-btn { border-left: 1px solid var(--ms-border, #d1d5db); }
-.meta-rule-editor__mode-btn--active { background: var(--ms-primary, #3b6ef5); color: #fff; }
+.meta-rule-editor__mode-toggle { float: right; display: inline-flex; border: 1px solid var(--ms-border); border-radius: 6px; overflow: hidden; }
+.meta-rule-editor__mode-btn { font: inherit; font-size: 12px; font-weight: 400; padding: 2px 10px; border: 0; background: transparent; color: var(--ms-text-2); cursor: pointer; }
+.meta-rule-editor__mode-btn + .meta-rule-editor__mode-btn { border-left: 1px solid var(--ms-border); }
+.meta-rule-editor__mode-btn--active { background: var(--ms-color-primary); color: var(--ms-bg-card); }
 .meta-rule-editor__hint { font-weight: 400; color: var(--ms-text-3); font-size: 12px; }
 
 .meta-rule-editor__access-summary {

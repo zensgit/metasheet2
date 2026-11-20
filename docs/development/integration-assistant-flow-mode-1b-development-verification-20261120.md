@@ -47,6 +47,8 @@
 - 新 spec 在必跑脚本里放在 `automation-rule-concurrent-merge` 之后，而不是紧挨 `automation-flow-view`：清单形状守卫要求按字母序（忽略大小写）。
 - 切换按钮最初带 `aria-label`，导致原编辑器 spec 里两个按无障碍名称计数的用例变红；去掉了这个属性与对应标签键。按钮有可见文字与 `aria-pressed`。
 
+远端 CI 第一次（头 `6bd879aca`）：`approval-web-guard` 里的 `ui-foundation-style-guard.spec.ts` 红——它要求 `MetaAutomationRuleEditor.vue` 的 `<style>` 里零颜色字面量，1b 的切换按钮样式写了 5 处带十六进制回退值的颜色（含 `#fff`）。本地当初没有跑这个守卫，是漏跑。修复：改用设计色变量 `--ms-border`、`--ms-text-2`、`--ms-color-primary`、`--ms-bg-card`，不带字面量回退；本地 `pnpm exec vitest run ui-foundation-style-guard automation-rule-editor-flow-mode` 2 个文件 116 例全过。
+
 未执行：`pnpm validate:all`、`pnpm lint` 全量（改动文件的 eslint 已过，子代理执行）。远端 CI 结果在 PR 上看。
 
 ## 4. 界面
