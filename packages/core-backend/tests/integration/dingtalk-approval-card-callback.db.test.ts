@@ -23,6 +23,7 @@ import { createHmac, randomUUID } from 'crypto'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { Logger } from '../../src/core/logger'
 import { ApprovalProductService } from '../../src/services/ApprovalProductService'
+import { legacyGrantAllowsPublicForm } from '../../src/auth/dingtalk-legacy-resource-scope'
 import { executeDingTalkApprovalCardCallback } from '../../src/integrations/dingtalk/interactive-card-callback'
 import {
   insertDingTalkApprovalCardDelivery,
@@ -62,7 +63,7 @@ const q = (sqlText: string, params?: unknown[]) => poolManager.get().query(sqlTe
 
 let approvals: ApprovalProductService
 let templateId = ''
-const deps = { query: q, approvals: null as unknown as ApprovalProductService }
+const deps = { query: q, transaction: <T>(work: (client: { query: typeof q }) => Promise<T>) => poolManager.get().transaction(work), approvals: null as unknown as ApprovalProductService }
 
 // P1-2: `corpId` is the official clicker corp the callback carries. It defaults to CORP_A (the
 // corp the default INTEGRATION_A deliveries belong to) so the happy path passes the corp
@@ -254,6 +255,61 @@ describeIfDatabase('B-3 DingTalk card callback adapter (real DB)', () => {
   })
 
   test('sentinel: DATABASE_URL set', () => { expect(process.env.DATABASE_URL).toBeTruthy() })
+
+  test('the stored connection controls legacy card and form authorization in a mixed directory', async () => {
+    const deliveryId = await newSentDelivery(await newInstance())
+    const rollback = new Error('roll back scoped authorization fixtures')
+    const dispatchAction = vi.fn<ApprovalProductService['dispatchAction']>().mockImplementation(async () => {
+      throw new Error('strict card reached approval engine')
+    })
+    await expect(poolManager.get().transaction(async ({ query }) => {
+      await query('INSERT INTO directory_connection_login_scope (connection_id, command_id) VALUES ($1, $2)',
+        [INTEGRATION_A, `card-form-scope-${TS}`])
+      await query(
+        `INSERT INTO user_external_identities (provider, local_user_id, external_key, provider_union_id, corp_id)
+         VALUES ('dingtalk', $1, $2, $3, $4)`,
+        [CREATOR, `${CORP_B}:form-${TS}`, `form-${TS}`, CORP_B],
+      )
+      const result = await executeDingTalkApprovalCardCallback(
+        { query, transaction: work => work({ query }), approvals: { dispatchAction } }, payloadFor(deliveryId, DD_OP),
+      )
+      expect(result).toEqual({ outcome: 'operator_unresolved', deliveryId, reason: 'source_unavailable' })
+      expect(dispatchAction).not.toHaveBeenCalled()
+      for (const lock of [false, true]) {
+        expect(await legacyGrantAllowsPublicForm(query, CREATOR, false, lock)).toBe(true)
+        expect(await legacyGrantAllowsPublicForm(query, APPROVER, false, lock)).toBe(false)
+        expect(await legacyGrantAllowsPublicForm(query, REQUESTER, false, lock)).toBe(false)
+        expect(await legacyGrantAllowsPublicForm(query, CREATOR, true, lock)).toBe(false)
+      }
+      throw rollback
+    })).rejects.toBe(rollback)
+    expect(await cardState(deliveryId)).toBe('sent')
+  })
+
+  test('rechecks the stored connection inside the execution transaction before dispatch', async () => {
+    const deliveryId = await newSentDelivery(await newInstance())
+    const dispatchAction = vi.fn<ApprovalProductService['dispatchAction']>().mockRejectedValue(new Error('unexpected dispatch'))
+    let transactions = 0
+    const result = await executeDingTalkApprovalCardCallback({
+      query: q,
+      approvals: { dispatchAction },
+      transaction: work => poolManager.get().transaction(async client => {
+        transactions++
+        await client.query('SAVEPOINT card_execution_scope')
+        await client.query(
+          'INSERT INTO directory_connection_login_scope (connection_id, command_id) VALUES ($1, $2)',
+          [INTEGRATION_A, `card-execution-scope-${TS}`],
+        )
+        const outcome = await work(client)
+        await client.query('ROLLBACK TO SAVEPOINT card_execution_scope')
+        return outcome
+      }),
+    }, payloadFor(deliveryId, DD_OP))
+    expect(transactions).toBe(1)
+    expect(dispatchAction).not.toHaveBeenCalled()
+    expect(result).toEqual({ outcome: 'operator_unresolved', deliveryId, reason: 'source_unavailable' })
+    expect(await cardState(deliveryId)).toBe('sent')
+  })
 
   test('linked recipient approves via callback: engine record + channel attribution + acted claim; HOSTILE payload instanceId is ignored', async () => {
     const instanceId = await newInstance()

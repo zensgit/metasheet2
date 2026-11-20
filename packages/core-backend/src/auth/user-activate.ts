@@ -41,6 +41,13 @@ import {
   type QueryClient,
 } from './strict-credential-chain'
 
+import {
+  checkOrdinaryDingTalkSource,
+  checkEmptyDingTalkScope,
+  refuseDingTalkSource,
+  type DingTalkLoginSource,
+} from './dingtalk-login-source'
+
 export type ActivateMode = 'temp_password' | 'sso' | 'admin_no_password'
 
 export const ACTIVATE_MODES: readonly ActivateMode[] = [
@@ -64,6 +71,7 @@ export type ActivateUserInput = {
   /** SSO: directory account that must be active + linked to this user. */
   directoryAccountId?: string | null
   /** OAuth SSO: provider identity that the locked directory source must still match. */
+  loginSource?: DingTalkLoginSource
   expectedDingTalkIdentity?: {
     corpId: string
     openId?: string | null
@@ -169,6 +177,7 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
   // (mapActivateError in routes/admin-users.ts maps it to a retryable 409); every other
   // error — every ACTIVATE_* reason included — rethrows unchanged.
   await translateRecoveryConflict(() => transaction(async (client) => {
+    if (input.loginSource) await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
     const lockedUsers = await lockUsersForAccessGraphWrite(client, [userId])
     const user = lockedUsers.get(userId)
     if (!user) {
@@ -208,6 +217,9 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
       connectionIds: source.connectionIds,
     })
     externalOrigin = activationScope.origin
+    if (input.loginSource?.connectionId && !source.connectionIds.includes(input.loginSource.connectionId)) {
+      refuseDingTalkSource()
+    }
     const skipLegacyDingTalkGrant = activationScope.skipLegacyGrant
 
     // DT-HARDEN-02 on the activation path. The directory page's bind/admit refuses a DingTalk grant
@@ -350,6 +362,10 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
       actorId: input.adminUserId ?? userId,
       reason: 'superseded by pending-user activation',
     })
+    if (input.loginSource) {
+      await checkOrdinaryDingTalkSource(client, input.loginSource)
+      if (!externalOrigin && input.loginSource.connectionId) await checkEmptyDingTalkScope(client)
+    }
   }))
 
   return {

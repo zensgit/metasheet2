@@ -11,18 +11,19 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 const SCHEMA_RE = /^b2iss_[0-9a-f]{32}$/
 const REPEATABLE_READ = 'repeatable read'
 const READ_COMMITTED = 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED'
-const STRICT_CONNECTION_ERROR = 'DingTalk legacy login is closed for this connection'
-const AUTHENTICATION_CHANGED = 'Authentication changed; please sign in again'
+const STRICT_CONNECTION_ERROR = 'DingTalk login is not eligible for this source'
 const OLD_PASSWORD = 'Old-issuer-1'
 const NEW_PASSWORD = 'New-issuer-9'
 const SCOPE_COMMAND = 'issuer-scope-1'
 const WAIT_MS = 3000
 const BLOCK_MS = 5000
+const providerFetch = vi.fn(async () => { throw new Error('FINAL_ISSUER_NETWORK_FORBIDDEN') })
 const ENV_KEYS = [
   'REDIS_URL',
   'REDIS_HOST',
   'DINGTALK_OAUTH_REQUIRE_SHARED_STATE_STORE',
   'DINGTALK_CLIENT_ID',
+  'DINGTALK_CORP_ID',
   'DINGTALK_CLIENT_SECRET',
   'DINGTALK_REDIRECT_URI',
 ] as const
@@ -39,6 +40,7 @@ const state = vi.hoisted(() => {
   if (!/^b2iss_[0-9a-f]{32}$/.test(schema)) throw new Error('B2_ISSUER_SCHEMA_INVALID')
   return {
     schema,
+    fixtureDatabaseUrl: undefined as string | undefined,
     service: undefined as unknown,
     sql: [] as string[],
     started: [] as string[],
@@ -63,10 +65,10 @@ vi.mock('../../src/integration/db/connection-pool', async (importOriginal) => {
     ...actual,
     poolManager: {
       get: () => {
-        if (!/^b2iss_[0-9a-f]{32}$/.test(state.schema)) throw new Error('B2_ISSUER_SCHEMA_REQUIRED')
+        if (!(state.fixtureDatabaseUrl && state.schema === 'public') && !/^b2iss_[0-9a-f]{32}$/.test(state.schema)) throw new Error('B2_ISSUER_SCHEMA_REQUIRED')
         // Startup isolation is the discriminator. The product transaction stays plain BEGIN.
         const service = (state.service ??= new actual.ConnectionPool({
-          connectionString: process.env.DATABASE_URL,
+          connectionString: state.fixtureDatabaseUrl ?? process.env.DATABASE_URL,
           max: 1,
           name: 'b2-issuer',
           application_name: 'b2_issuer_app',
@@ -160,6 +162,7 @@ import {
   classifyAdminGrantActorInputSchema,
 } from '../../src/auth/admin-grant-local-credential'
 import * as dingtalk from '../../src/auth/dingtalk-oauth'
+import { checkEmptyDingTalkScope, resolveDingTalkLoginSource } from '../../src/auth/dingtalk-login-source'
 import { jwtAuthMiddleware } from '../../src/auth/jwt-middleware'
 import { readAuthenticatedSessionContext } from '../../src/auth/security-action-proof'
 import { createUserSession } from '../../src/auth/session-registry'
@@ -274,7 +277,7 @@ function armIssuerSessionHold(): { release: () => void } {
 }
 
 function startupOptions(schema: string): string {
-  if (!SCHEMA_RE.test(schema)) throw new Error('B2_ISSUER_SCHEMA_INVALID')
+  if (!(state.fixtureDatabaseUrl && schema === 'public') && !SCHEMA_RE.test(schema)) throw new Error('B2_ISSUER_SCHEMA_INVALID')
   return `-c search_path=${schema},pg_catalog -c default_transaction_isolation=repeatable\\ read`
 }
 
@@ -379,8 +382,14 @@ async function installShells(pool: PgPool, schema: string): Promise<void> {
     updated_by text,
     reason text
   )`)
-  await pool.query(`CREATE TABLE ${ident(schema, 'directory_integrations')} (id uuid PRIMARY KEY)`)
-  await pool.query(`CREATE TABLE ${ident(schema, 'user_external_identities')} (id uuid PRIMARY KEY)`)
+  await pool.query(`CREATE TABLE ${ident(schema, 'directory_integrations')} (
+    id uuid PRIMARY KEY, name text NOT NULL, org_id text NOT NULL, provider text NOT NULL, status text NOT NULL,
+    corp_id text NOT NULL, config jsonb NOT NULL
+  )`)
+  await pool.query(`CREATE TABLE ${ident(schema, 'user_external_identities')} (
+    id uuid PRIMARY KEY, provider text NOT NULL, external_key text NOT NULL, provider_open_id text,
+    provider_union_id text, corp_id text, local_user_id text NOT NULL, profile jsonb NOT NULL DEFAULT '{}'
+  )`)
   await pool.query(`CREATE TABLE ${ident(schema, 'user_external_identity_evidence')} (id text PRIMARY KEY)`)
   await pool.query(`CREATE TABLE ${ident(schema, 'security_action_challenges')} (
     id uuid PRIMARY KEY,
@@ -434,6 +443,23 @@ async function commitScope(pool: PgPool, connectionId: string, commandId: string
   }
 }
 
+// An installed database series permits exercising the identical behavioral suite from frozen snapshots.
+// Each case uses an empty, dedicated clone. Historical migrations run only in the original CI fixture path.
+let fixtureNumber = 0
+async function selectFixtureDatabase(installed: boolean): Promise<string | null> {
+  await endAppService()
+  state.fixtureDatabaseUrl = undefined
+  const prefix = process.env.B2_ISSUER_FIXTURE_DATABASE_PREFIX
+  if (!prefix || !installed) return null
+  if (!/^b2iss_[a-z0-9_]{1,32}$/.test(prefix)) throw new Error('B2_ISSUER_FIXTURE_PREFIX_INVALID')
+  const url = new URL(process.env.DATABASE_URL!)
+  url.pathname = '/' + prefix + '_' + (++fixtureNumber)
+  state.fixtureDatabaseUrl = url.href
+  state.schema = 'public'
+  resetTrace()
+  return 'public'
+}
+
 async function prepare(input: {
   actor: ActorKind
   strict: boolean
@@ -443,17 +469,25 @@ async function prepare(input: {
   session: boolean
   origin?: 'dingtalk' | 'null'
 }): Promise<Prepared> {
-  const schema = `b2iss_${randomUUID().replace(/-/g, '')}`
-  if (!SCHEMA_RE.test(schema)) throw new Error('B2_ISSUER_SCHEMA_INVALID')
-  await useAppSchema(schema)
+  const installed = await selectFixtureDatabase(input.strict || input.actor !== 'absent')
+  const schema = installed ?? `b2iss_${randomUUID().replace(/-/g, '')}`
+  if (!installed) await useAppSchema(schema)
   const next = new PgPool({
-    connectionString: process.env.DATABASE_URL,
+    connectionString: state.fixtureDatabaseUrl ?? process.env.DATABASE_URL,
     max: 4,
     application_name: 'b2_issuer_witness',
     options: startupOptions(schema),
   })
   witness = next
-  await installShells(next, schema)
+  if (installed) {
+    const expectedDatabase = new URL(state.fixtureDatabaseUrl!).pathname.slice(1)
+    const clean = await next.query('SELECT current_database() AS name, NOT EXISTS (SELECT 1 FROM users) AND NOT EXISTS (SELECT 1 FROM directory_integrations) AND NOT EXISTS (SELECT 1 FROM directory_connection_login_scope) AS empty')
+    if (clean.rows[0]?.name !== expectedDatabase || clean.rows[0]?.empty !== true) throw new Error('B2_ISSUER_FIXTURE_NOT_EMPTY')
+    const snapshot = await readStrictLoginInstallation(queryable(next))
+    if (snapshot.installation !== 'installed') throw new Error('B2_ISSUER_SNAPSHOT_NOT_INSTALLED')
+  } else {
+    await installShells(next, schema)
+  }
   const userId = `issuer-${randomUUID()}`
   const email = `issuer-${userId.slice(-12)}@b2.example`
   const connectionId = randomUUID()
@@ -476,12 +510,13 @@ async function prepare(input: {
   )
   if (input.integration) {
     await next.query(
-      `INSERT INTO ${ident(schema, 'directory_integrations')} (id) VALUES ($1::uuid)`,
-      [connectionId],
+      `INSERT INTO ${ident(schema, 'directory_integrations')} (id,name,org_id,provider,status,corp_id,config)
+       VALUES ($1::uuid,'Fixture','default','dingtalk','active','fixture-corp',$2::jsonb)`,
+      [connectionId, JSON.stringify({ appKey: input.origin === 'null' ? 'other-fixture-app' : 'b2-issuer-client' })],
     )
   }
   if (input.actor !== 'absent') {
-    await installActor(next)
+    if (!installed) await installActor(next)
     const actorState = await classifyAdminGrantActorInputSchema(queryable(next))
     if (actorState !== 'ready') throw new Error('B2_ISSUER_ACTOR_NOT_READY')
     if (input.actor === 'partial') {
@@ -495,7 +530,7 @@ async function prepare(input: {
       if (ready !== 'ready') throw new Error('B2_ISSUER_ACTOR_FAILURE_NOT_READY')
     }
   }
-  if (input.strict) await installStrict(next, schema)
+  if (input.strict && !installed) await installStrict(next, schema)
   if (input.scope) await commitScope(next, connectionId, SCOPE_COMMAND)
   exchangeTarget.userId = userId
   exchangeTarget.email = email
@@ -707,19 +742,22 @@ async function raceResponse(
 describe('ordinary final issuer and required password provenance', () => {
   beforeAll(async () => {
     originalFetch = globalThis.fetch
-    globalThis.fetch = (() => Promise.reject(new Error('FINAL_ISSUER_NETWORK_FORBIDDEN'))) as typeof fetch
+    globalThis.fetch = providerFetch
     for (const key of ENV_KEYS) savedEnv.set(key, process.env[key])
     delete process.env.REDIS_URL
     delete process.env.REDIS_HOST
     process.env.DINGTALK_OAUTH_REQUIRE_SHARED_STATE_STORE = 'false'
+    delete process.env.DINGTALK_CORP_ID
     process.env.DINGTALK_CLIENT_ID = 'b2-issuer-client'
     process.env.DINGTALK_CLIENT_SECRET = 'b2-issuer-secret'
     process.env.DINGTALK_REDIRECT_URI = 'https://issuer.example/callback'
     await dingtalk.__resetDingTalkOAuthStateStoreForTests()
     vi.spyOn(dingtalk, 'exchangeCodeForUser').mockImplementation(async () => {
-      if (state.started.length !== 0 || state.sql.length !== 0) {
+      if (state.transactions.some(tx => tx.outcome === 'open')) {
         throw new Error('FINAL_ISSUER_EXCHANGE_UNDER_LOCK')
       }
+      // The read-only source transaction has already committed. Trace the final issuer separately.
+      resetTrace()
       return {
         dingtalkUser: { unionId: 'issuer-union', nick: 'Issuer', openId: 'issuer-open' },
         localUserId: exchangeTarget.userId,
@@ -740,6 +778,7 @@ describe('ordinary final issuer and required password provenance', () => {
   })
 
   beforeEach(() => {
+    providerFetch.mockClear()
     vi.mocked(dingtalk.exchangeCodeForUser).mockClear()
     state.issuerHold?.release()
     state.issuerHold = null
@@ -827,12 +866,9 @@ describe('ordinary final issuer and required password provenance', () => {
       error: STRICT_CONNECTION_ERROR,
       code: 'strict_connection',
     })
-    expect(dingtalk.exchangeCodeForUser).toHaveBeenCalledTimes(1)
-    assertIssuerOrder()
-    expect(state.sql.some((sqlText) => sqlText.includes('directory_connection_login_scope'))).toBe(true)
-    expect(state.sql.some((sqlText) => sqlText.includes('INSERT INTO user_sessions'))).toBe(false)
-    expect(state.commits).toBe(0)
-    expect(state.rollbacks).toBe(1)
+    expect(dingtalk.exchangeCodeForUser).not.toHaveBeenCalled()
+    expect(state.sql.some(sqlText => sqlText.includes('directory_connection_login_scope'))).toBe(true)
+    expect(state.sql.some(sqlText => sqlText.includes('INSERT INTO user_sessions'))).toBe(false)
     expect(await countRows(env.witness, env.schema, 'user_sessions')).toBe(0)
     expect(await countRows(env.witness, env.schema, 'directory_connection_login_scope')).toBe(1)
   }, 60_000)
@@ -847,6 +883,18 @@ describe('ordinary final issuer and required password provenance', () => {
       session: false,
     })
     const stateToken = await dingtalk.generateState()
+    // Complete the initial lookup before the writer locks the connection; this witness concerns final issuance.
+    let enteredExchange!: () => void
+    let finishExchange!: () => void
+    const entered = new Promise<void>(resolve => { enteredExchange = resolve })
+    const finish = new Promise<void>(resolve => { finishExchange = resolve })
+    const exchange = vi.mocked(dingtalk.exchangeCodeForUser)
+    const reply = exchange.getMockImplementation()!
+    exchange.mockImplementationOnce(async (...args) => {
+      enteredExchange()
+      await finish
+      return reply(...args)
+    })
     const client = await env.witness.connect()
     const writerSql: string[] = []
     const record = (sqlText: string, params?: unknown[]) => {
@@ -862,6 +910,8 @@ describe('ordinary final issuer and required password provenance', () => {
         async (sql, params) => client.query(sql, params),
         'B2_ISSUER_HOLDER_PID_UNAVAILABLE',
       )
+      pending = callback(stateToken)
+      await Promise.race([entered, pending.then(() => { throw new Error('B2_ISSUER_EXCHANGE_NOT_ENTERED') })])
       await record('BEGIN')
       const shown = await record('SHOW transaction_isolation')
       expect(shown.rows[0]?.transaction_isolation).toBe(REPEATABLE_READ)
@@ -869,7 +919,7 @@ describe('ordinary final issuer and required password provenance', () => {
         'SELECT id FROM directory_integrations WHERE id = $1::uuid FOR UPDATE',
         [env.connectionId],
       )
-      pending = callback(stateToken)
+      finishExchange()
       const waiterPid = await waitForIntegrationShare(env.witness, holderPid)
       expect(waiterPid).toBe(state.transactionPids[0])
       expect(state.sql[0]).toBe(READ_COMMITTED)
@@ -888,6 +938,7 @@ describe('ordinary final issuer and required password provenance', () => {
     } catch (error) {
       primary = error
     } finally {
+      finishExchange()
       if (!committed) await client.query('ROLLBACK').catch(() => undefined)
       client.release()
       if (pending) {
@@ -1025,86 +1076,55 @@ describe('ordinary final issuer and required password provenance', () => {
     expect(response?.status).toBe(200)
   }, 60_000)
 
-  it('final issuer rejects a missing integration without a token', async () => {
-    const env = await prepare({
-      actor: 'absent',
-      strict: true,
-      integration: false,
-      scope: false,
-      mustChange: false,
-      session: false,
+  it('rejects an integration removed after the initial lookup and before final issuance', async () => {
+    const env = await prepare({ actor: 'absent', strict: true, integration: true, scope: false, mustChange: false, session: false })
+    const exchange = vi.mocked(dingtalk.exchangeCodeForUser)
+    const reply = exchange.getMockImplementation()!
+    exchange.mockImplementationOnce(async (...args) => {
+      await env.witness.query(`DELETE FROM ${ident(env.schema, 'directory_integrations')} WHERE id=$1`, [env.connectionId])
+      return reply(...args)
     })
-    const stateToken = await dingtalk.generateState()
-    const response = await callback(stateToken)
-    expect(response.status).toBe(409)
-    expect(response.body).toEqual({
-      success: false,
-      error: AUTHENTICATION_CHANGED,
-      code: 'authentication_changed',
-    })
-    expect(dingtalk.exchangeCodeForUser).toHaveBeenCalledTimes(1)
-    expect(state.sql[0]).toBe(READ_COMMITTED)
-    expect(state.sql.some((sqlText) => sqlText.includes('directory_integrations') && sqlText.includes('FOR SHARE'))).toBe(true)
-    expect(state.sql.some((sqlText) => sqlText.includes('INSERT INTO user_sessions'))).toBe(false)
-    expect(state.commits).toBe(1)
-    expect(state.rollbacks).toBe(0)
+    const response = await callback(await dingtalk.generateState())
+    expect(response.status).toBe(403)
+    expect(response.body).toEqual({ success: false, error: STRICT_CONNECTION_ERROR, code: 'strict_connection' })
+    expect(state.sql.some(stmt => stmt.includes('directory_integrations') && stmt.includes('FOR SHARE'))).toBe(true)
+    expect(state.sql.some(stmt => stmt.includes('INSERT INTO user_sessions'))).toBe(false)
     expect(await countRows(env.witness, env.schema, 'user_sessions')).toBe(0)
   }, 60_000)
 
-  it('null origin stays on the ordinary session path beside a committed scope', async () => {
-    const env = await prepare({
-      actor: 'absent',
-      strict: true,
-      integration: true,
-      scope: true,
-      mustChange: false,
-      session: false,
-      origin: 'null',
+  it('rejects an explicit missing integration without exchanging a code or issuing a session', async () => {
+    const env = await prepare({ actor: 'absent', strict: true, integration: false, scope: false, mustChange: false, session: false })
+    const response = await request(app).post('/api/auth/dingtalk/callback').send({
+      code: 'fixture', state: await dingtalk.generateState(), connectionId: env.connectionId,
     })
-    const stateToken = await dingtalk.generateState()
-    const client = await env.witness.connect()
-    let pending: ReturnType<typeof callback> | undefined
-    try {
-      const holderPid = await readBackendPid(
-        async (sql, params) => client.query(sql, params),
-        'B2_ISSUER_HOLDER_PID_UNAVAILABLE',
-      )
-      await client.query('BEGIN')
-      await client.query(
-        'SELECT id FROM directory_integrations WHERE id = $1::uuid FOR UPDATE',
-        [env.connectionId],
-      )
-      pending = callback(stateToken)
-      const response = await raceResponse(pending, 'NULL_ORIGIN_WAITED_ON_INTEGRATION')
-      expect(response.status).toBe(200)
-      expect(response.body.success).toBe(true)
-      expect(response.body.data).toMatchObject({ mode: 'login' })
-      expect(typeof (response.body.data as { token?: unknown }).token).toBe('string')
-      expect(state.started.some((sqlText) => sqlText.includes('directory_integrations'))).toBe(false)
-      expect(state.sql).toEqual([])
-      expect(state.commits).toBe(0)
-      const held = await env.witness.query(
-        `SELECT 1 AS held
-           FROM pg_locks lk
-           JOIN pg_class rel ON rel.oid = lk.relation
-           JOIN pg_namespace ns ON ns.oid = rel.relnamespace
-          WHERE lk.pid = $1
-            AND lk.granted
-            AND rel.relname = 'directory_integrations'
-            AND ns.nspname = $2`,
-        [holderPid, env.schema],
-      )
-      expect(held.rowCount).toBeGreaterThan(0)
-      expect(await countRows(env.witness, env.schema, 'user_sessions')).toBe(1)
-      expect(await countRows(env.witness, env.schema, 'directory_connection_login_scope')).toBe(1)
-      const payload = authService.readTokenPayload((response.body.data as { token: string }).token)
-      expect(payload && !('xa' in payload)).toBe(true)
-    } finally {
-      await client.query('ROLLBACK').catch(() => undefined)
-      client.release()
-      if (pending) await Promise.resolve(pending).catch(() => undefined)
-    }
-    expect(dingtalk.exchangeCodeForUser).toHaveBeenCalledTimes(1)
+    expect(response.status).toBe(403)
+    expect(response.body).toEqual({ success: false, error: STRICT_CONNECTION_ERROR, code: 'strict_connection' })
+    expect(dingtalk.exchangeCodeForUser).not.toHaveBeenCalled()
+    expect(await countRows(env.witness, env.schema, 'user_sessions')).toBe(0)
+  }, 60_000)
+
+  it('requires a verified ordinary source beside a committed scope', async () => {
+    const env = await prepare({ actor: 'absent', strict: true, integration: true, scope: true,
+      mustChange: false, session: false, origin: 'null' })
+    await env.witness.query(`INSERT INTO ${ident(env.schema, 'user_external_identities')}
+      (id,provider,external_key,provider_union_id,provider_open_id,local_user_id)
+      VALUES ($1,'dingtalk','issuer-union','issuer-union','issuer-open',$2)`, [randomUUID(), env.userId])
+    const identitySnapshot = () => env.witness.query(`SELECT to_jsonb(i) AS identity FROM ${ident(env.schema, 'user_external_identities')} i WHERE local_user_id=$1`, [env.userId])
+    const original = (await identitySnapshot()).rows
+    // Use the normal exchange entry point. Source admission is required before any provider request.
+    const { exchangeCodeForUser } = await vi.importActual<typeof dingtalk>('../../src/auth/dingtalk-oauth')
+    const previousExchange = vi.mocked(dingtalk.exchangeCodeForUser).getMockImplementation()
+    vi.mocked(dingtalk.exchangeCodeForUser).mockImplementation(exchangeCodeForUser)
+    const response = await callback(await dingtalk.generateState()).finally(() => {
+      if (previousExchange) vi.mocked(dingtalk.exchangeCodeForUser).mockImplementation(previousExchange)
+    })
+    expect(response.status).toBe(403)
+    expect(response.body).toEqual({ success: false, error: STRICT_CONNECTION_ERROR, code: 'strict_connection' })
+    expect(dingtalk.exchangeCodeForUser).not.toHaveBeenCalled()
+    expect(await countRows(env.witness, env.schema, 'user_sessions')).toBe(0)
+    expect(providerFetch).not.toHaveBeenCalled()
+    expect((await identitySnapshot()).rows).toEqual(original)
+    expect(await countRows(env.witness, env.schema, 'directory_connection_login_scope')).toBe(1)
   }, 60_000)
 
   it('password origin stays on the ordinary session path beside a committed scope', async () => {
@@ -1378,5 +1398,86 @@ describe('ordinary final issuer and required password provenance', () => {
     expect(await countRows(env.witness, env.schema, 'user_sessions')).toBe(1)
     expect(await countRows(env.witness, env.schema, 'user_local_credential_establishments')).toBe(0)
     expect(await countRows(env.witness, env.schema, 'user_session_revocations')).toBe(0)
+  }, 60_000)
+
+  it('serializes an unattributed login with the first scope, including rollback and lock timeout', async () => {
+    const env = await prepare({ actor: 'absent', strict: true, integration: true, scope: false,
+      mustChange: false, session: false, origin: 'null' })
+    const login = await env.witness.connect()
+    const cutover = await env.witness.connect()
+    const loginPid = await readBackendPid((sql, params) => login.query(sql, params), 'LOGIN_PID_REQUIRED')
+    const cutoverPid = await readBackendPid((sql, params) => cutover.query(sql, params), 'SCOPE_PID_REQUIRED')
+    const begin = async (client: PoolClient) => {
+      await client.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+      await client.query("SET LOCAL lock_timeout = '4s'")
+    }
+    const insert = () => insertConnectionLoginScope(queryable(cutover), { connectionId: env.connectionId, commandId: SCOPE_COMMAND })
+    const read = () => checkEmptyDingTalkScope(queryable(login))
+    const waitForBlock = async (waiter: number, holder: number) => {
+      const deadline = Date.now() + WAIT_MS
+      do {
+        const found = await env.witness.query('SELECT $1::int = ANY(pg_catalog.pg_blocking_pids($2)) AS held', [holder, waiter])
+        if (found.rows[0]?.held) return
+        await new Promise(resolve => setTimeout(resolve, 15))
+      } while (Date.now() < deadline)
+      throw new Error('SCOPE_LOCK_WAIT_MISSING')
+    }
+    try {
+      await begin(login)
+      await read()
+      await begin(cutover)
+      const inserting = insert().then(() => 'inserted', () => 'failed')
+      await waitForBlock(cutoverPid, loginPid)
+      await login.query('COMMIT')
+      expect(await inserting).toBe('inserted')
+      await cutover.query('ROLLBACK')
+
+      // Each wait is observed by an independent PostgreSQL backend before the holder is released.
+      for (const outcome of ['rollback', 'timeout', 'commit'] as const) {
+        await begin(cutover)
+        await insert()
+        await begin(login)
+        if (outcome === 'timeout') await login.query("SET LOCAL lock_timeout = '100ms'")
+        const reading = read().then(() => 'allowed', (error: unknown) => error)
+        if (outcome === 'timeout') {
+          expect(await reading).toMatchObject({ statusCode: 503, code: 'grant_state_unavailable' })
+          await login.query('ROLLBACK')
+          await cutover.query('ROLLBACK')
+          continue
+        }
+        await waitForBlock(loginPid, cutoverPid)
+        await cutover.query(outcome === 'commit' ? 'COMMIT' : 'ROLLBACK')
+        if (outcome === 'commit') expect(await reading).toMatchObject({ statusCode: 403, code: 'strict_connection' })
+        else expect(await reading).toBe('allowed')
+        await login.query('ROLLBACK')
+      }
+      expect(await countRows(env.witness, env.schema, 'directory_connection_login_scope')).toBe(1)
+      expect(await countRows(env.witness, env.schema, 'user_sessions')).toBe(0)
+    } finally {
+      await Promise.all([login.query('ROLLBACK'), cutover.query('ROLLBACK')])
+      login.release()
+      cutover.release()
+    }
+  }, 60_000)
+
+  it('uses the configured exchange application and validates every supplied selector', async () => {
+    const env = await prepare({ actor: 'absent', strict: true, integration: true, scope: false,
+      mustChange: false, session: false })
+    const config = { DINGTALK_CLIENT_ID: '  ', DINGTALK_APP_KEY: ' b2-issuer-client ' }
+    const { connectionId } = env
+    const corpId = 'fixture-corp'
+    const source = await resolveDingTalkLoginSource({ connectionId, corpId }, config)
+    expect(source).toEqual({ connectionId, corpId, orgId: 'default', appKey: 'b2-issuer-client',
+      configuredCorp: null, explicit: true, strict: false })
+    for (const selector of [
+      { connectionId: null }, { connectionId: 123 }, { connectionId: 'invalid' },
+      { corpId: '' }, { corpId: ' ' }, { corpId: 'other-corp', connectionId },
+      { corpId, connectionId: randomUUID() },
+    ]) {
+      await expect(async () => resolveDingTalkLoginSource(selector, config)).rejects.toMatchObject({
+        statusCode: 403, code: 'strict_connection',
+      })
+    }
+    expect(await countRows(env.witness, env.schema, 'user_sessions')).toBe(0)
   }, 60_000)
 })

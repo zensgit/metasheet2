@@ -3244,6 +3244,11 @@ const LOCAL_FACTORY = `export async function bindStrictDingTalkEntryLocal(option
   }
   return {
     gates: STRICT_DINGTALK_ENTRY_GATES,
+    loginSourceEnv: Object.freeze({
+      DINGTALK_CLIENT_ID: (options.env ?? process.env).DINGTALK_CLIENT_ID,
+      DINGTALK_APP_KEY: (options.env ?? process.env).DINGTALK_APP_KEY,
+      DINGTALK_CORP_ID: (options.env ?? process.env).DINGTALK_CORP_ID,
+    }),
     currentStrictGrantUsable,
     signInWeb: (input) => signInBound('web', input),
     signInContainer: (input) => signInBound('container', input),

@@ -14,6 +14,7 @@
  * Plus the Slice-A-style static tripwire: the callback chain must go through
  * `executeApprovalActionFromCardDelivery` and never carry a raw approvals-actions route path.
  */
+import { strictLoginUninstalledRows } from '../utils/strict-login-uninstalled-fixture'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -306,6 +307,8 @@ function makeHarness(state: {
   ]
   const query = async (sql: string, params?: unknown[]) => {
     calls.push({ sql, params: params ?? [] })
+    const uninstalled = strictLoginUninstalledRows(sql)
+    if (uninstalled) return { rows: uninstalled }
     if (sql.includes('FROM dingtalk_approval_card_deliveries')) return { rows: deliveryRows }
     // P1-2 corp cross-check resolver (SELECT corp_id FROM directory_integrations …). The
     // link-secret resolver also reads directory_integrations but selects id/name/status/config

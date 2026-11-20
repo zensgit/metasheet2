@@ -5,7 +5,9 @@ const authServiceMocks = vi.hoisted(() => ({
   login: vi.fn(),
   register: vi.fn(),
   refreshToken: vi.fn(),
+  switchOrdinarySessionOrg: vi.fn(),
   verifyToken: vi.fn(),
+  sessionExpiresAt: vi.fn((iat: number) => iat + 86400),
   createToken: vi.fn(),
   readTokenPayload: vi.fn(),
   resolveSessionTenantId: vi.fn(),
@@ -18,6 +20,23 @@ const inviteTokenMocks = vi.hoisted(() => ({
 
 const pgMocks = vi.hoisted(() => ({
   query: vi.fn(),
+}))
+
+const ordinarySource = vi.hoisted(() => ({
+  connectionId: null, orgId: null, corpId: null, configuredCorp: null, appKey: 'test-app', explicit: false, strict: false,
+}))
+const issuerClient = vi.hoisted(() => ({
+  query: vi.fn(async (sql: string) => {
+    if (sql.includes('floor(extract(epoch')) return { rows: [{ issued_at: 1800000000 }] }
+    if (sql.includes('FROM users')) return { rows: [{ id: 'test-user' }] }
+    if (sql.startsWith('SET TRANSACTION')) return { rows: [] }
+    throw new Error('Unexpected issuer query')
+  }),
+}))
+vi.mock('../../src/auth/dingtalk-login-source', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/auth/dingtalk-login-source')>(),
+  resolveDingTalkLoginSource: vi.fn(async () => ordinarySource),
+  checkOrdinaryDingTalkSource: vi.fn(async () => undefined),
 }))
 
 const bcryptMocks = vi.hoisted(() => ({
@@ -84,6 +103,7 @@ vi.mock('../../src/auth/invite-tokens', () => ({
 
 vi.mock('../../src/db/pg', () => ({
   query: pgMocks.query,
+  transaction: (work: (client: typeof issuerClient) => Promise<unknown>) => work(issuerClient),
 }))
 
 vi.mock('bcryptjs', () => bcryptMocks)
@@ -240,7 +260,7 @@ describe('explicit session organization routes', () => {
     vi.clearAllMocks()
     authServiceMocks.verifyToken.mockResolvedValue({ id: 'actor', tenantId: 'org-a' })
     authServiceMocks.listActiveMembershipOrgIds.mockResolvedValue(['org-a', 'org-b'])
-    authServiceMocks.resolveSessionTenantId.mockResolvedValue('org-b')
+    authServiceMocks.switchOrdinarySessionOrg.mockResolvedValue({ kind: 'ok', token: 'signed-new-token', user: { id: 'actor', tenantId: 'org-b' } })
     authServiceMocks.readTokenPayload.mockReturnValue({ sid: 'session', exp: 2000000000 })
     authServiceMocks.createToken.mockReturnValue('signed-new-token')
     sessionRegistryMocks.createUserSession.mockResolvedValue({id:'synthetic-session'})
@@ -260,29 +280,23 @@ describe('explicit session organization routes', () => {
       headers: { authorization: 'Bearer current' }, body: { orgId: 'org-b' },
     })
     expect(res.statusCode).toBe(200)
-    expect(authServiceMocks.resolveSessionTenantId).toHaveBeenCalledWith('actor', 'org-b')
-    expect(authServiceMocks.createToken).toHaveBeenCalledWith({ id: 'actor', tenantId: 'org-b' }, { sid: 'session', externalAuth: false })
-    expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledTimes(1)
-    expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledWith('actor', expect.objectContaining({
-      sessionId: 'session', expectedAccessGeneration: 0,
-    }))
+    expect(res.body).toEqual({ success: true, data: { token: 'signed-new-token', currentOrgId: 'org-b', user: { id: 'actor', tenantId: 'org-b' } } })
+    expect(authServiceMocks.switchOrdinarySessionOrg).toHaveBeenCalledWith('current', { id: 'actor', tenantId: 'org-a' }, 'org-b', expect.any(Object))
   })
 
   it('fences the reminted session on the authenticated access generation and returns 409 when it moved', async () => {
     authServiceMocks.verifyToken.mockResolvedValue({ id: 'actor', tenantId: 'org-a', access_generation: 3 })
-    sessionRegistryMocks.createUserSession.mockResolvedValue(null)
+    authServiceMocks.switchOrdinarySessionOrg.mockResolvedValue({ kind: 'changed' })
     const res = await invokeRoute('post', '/session-org', {
       headers: { authorization: 'Bearer current' }, body: { orgId: 'org-b' },
     })
-    expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledWith('actor', expect.objectContaining({
-      sessionId: 'session', expectedAccessGeneration: 3,
-    }))
+    expect(authServiceMocks.switchOrdinarySessionOrg).toHaveBeenCalledWith('current', expect.objectContaining({ access_generation: 3 }), 'org-b', expect.any(Object))
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual({ success: false, error: 'Authentication changed; please sign in again', code: 'authentication_changed' })
   })
 
   it.each(['non-member', 'revoked-member'])('refuses %s without token or session writes', async () => {
-    authServiceMocks.resolveSessionTenantId.mockResolvedValue(undefined)
+    authServiceMocks.switchOrdinarySessionOrg.mockResolvedValue({ kind: 'not_member' })
     const res = await invokeRoute('post', '/session-org', {
       headers: { authorization: 'Bearer current' }, body: { orgId: 'org-b' },
     })
@@ -295,14 +309,14 @@ describe('explicit session organization routes', () => {
   it.each([{}, { orgId: '' }, { orgId: 'org-b', userId: 'other' }])('rejects a missing or expanded selector %j', async body => {
     const res = await invokeRoute('post', '/session-org', { headers: { authorization: 'Bearer current' }, body })
     expect(res.statusCode).toBe(400)
-    expect(authServiceMocks.resolveSessionTenantId).not.toHaveBeenCalled()
+    expect(authServiceMocks.switchOrdinarySessionOrg).not.toHaveBeenCalled()
     expect(authServiceMocks.createToken).not.toHaveBeenCalled()
   })
 
   it('requires a real bearer authentication result, not an actor header', async () => {
     const res = await invokeRoute('post', '/session-org', { headers: { 'x-user-id': 'actor' }, body: { orgId: 'org-b' } })
     expect(res.statusCode).toBe(401)
-    expect(authServiceMocks.resolveSessionTenantId).not.toHaveBeenCalled()
+    expect(authServiceMocks.switchOrdinarySessionOrg).not.toHaveBeenCalled()
   })
 })
 
@@ -1718,6 +1732,7 @@ describe('auth login routes', () => {
       mode: 'sso',
       adminUserId: 'platform-admin',
       directoryAccountId: 'account-1',
+      loginSource: ordinarySource,
       enableDingTalkGrant: true,
       expectedDingTalkIdentity: {
         corpId: 'ding-corp',
@@ -2222,7 +2237,7 @@ describe('auth login routes', () => {
 
     expect(response.statusCode).toBe(200)
     expect(dingtalkOauthMocks.validateState).toHaveBeenCalledWith('state-1')
-    expect(dingtalkOauthMocks.exchangeCodeForUser).toHaveBeenCalledWith('auth-code')
+    expect(dingtalkOauthMocks.exchangeCodeForUser).toHaveBeenCalledWith('auth-code', ordinarySource)
     expect(rbacMocks.listUserPermissions).toHaveBeenCalledWith('user-1')
     expect(authServiceMocks.createToken).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -2241,6 +2256,7 @@ describe('auth login routes', () => {
         expectedAccessGeneration: 7,
         userAgent: 'Vitest Browser',
       }),
+      issuerClient,
     )
     expect((response.body as Record<string, any>).data).toMatchObject({
       token: 'jwt-dingtalk-token',
@@ -2634,10 +2650,10 @@ describe('auth login routes', () => {
       })
 
       expect(response.statusCode).toBe(200)
-      expect(dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser).toHaveBeenCalledWith('auth-code-9')
+      expect(dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser).toHaveBeenCalledWith('auth-code-9', ordinarySource)
       const body = response.body as Record<string, any>
       expect(body.success).toBe(true)
-      expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledWith('user-1',expect.objectContaining({expectedAccessGeneration:9}))
+      expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledWith('user-1',expect.objectContaining({expectedAccessGeneration:9}), issuerClient)
       expect(body.data).toMatchObject({
         mode: 'login',
         token: 'jwt-container-token',

@@ -769,23 +769,26 @@ describe('AuthService.refreshToken', () => {
     sessionMocks.isUserSessionActive.mockResolvedValue(true)
   })
 
-  it('refreshes token when legacy id claim is present', async () => {
-    jwtMocks.verify.mockReturnValue({ id: 'u4', email: 'refresh@x', role: 'admin', iat: 0, exp: 0 })
-    poolMocks.query.mockResolvedValueOnce({
-      rows: [{
-        id: 'u4',
-        email: 'refresh@x',
-        name: 'Refresh User',
-        role: 'admin',
-        permissions: ['attendance:admin'],
-        password_hash: 'hash',
-        is_active: true,
-        activation_status: 'activated',
-        local_password_set: true,
-        created_at: new Date(),
-        updated_at: new Date(),
-      }]
+  function lockedRenewal(eligible = true, generation = 0) {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('FROM users WHERE id = $1 FOR SHARE')) {
+        return { rows: [{ is_active: true, role: 'user', activation_status: 'activated', access_generation: generation }] }
+      }
+      if (sql.includes('FROM user_session_revocations')) return { rows: [{ eligible, issued_at: 1500000000 }] }
+      if (sql.includes('FROM user_orgs')) return { rows: [{ org_id: 'org-member' }] }
+      return { rows: [] }
     })
+    poolMocks.transaction.mockImplementationOnce(async handler => handler({ query }))
+    return query
+  }
+
+  it('refreshes token when legacy id claim is present', async () => {
+    jwtMocks.verify.mockImplementation((token: string) => token === 'old-token'
+      ? { id: 'u4', email: 'refresh@x', role: 'admin', iat: 0, exp: 0 }
+      : { userId: 'u4', iat: 10, exp: 2000000000 })
+    stubPoolForAuthReads({ userRow: platformAuthUserRow({ id: 'u4', email: 'refresh@x', access_generation: 0 }) })
+    lockedRenewal()
+    sessionMocks.createUserSession.mockResolvedValue({ id: 'minted' })
     rbacMocks.isAdmin.mockResolvedValue(true)
     rbacMocks.listUserPermissions.mockResolvedValue(['attendance:admin'])
     jwtMocks.sign.mockReturnValue('new-token')
@@ -814,12 +817,35 @@ describe('AuthService.refreshToken', () => {
     jwtMocks.sign.mockReturnValue('new-token')
     sessionMocks.createUserSession.mockResolvedValue({ id: 'minted' })
 
+    const query = lockedRenewal(true, 3)
     expect(await new AuthService().refreshToken('old-token')).toBe('new-token')
+    expect(query.mock.calls.map(call => call[0])).toEqual([
+      'SET TRANSACTION ISOLATION LEVEL READ COMMITTED', expect.stringContaining('FOR SHARE'),
+      expect.stringContaining('FROM user_session_revocations'), expect.stringContaining('FOR SHARE OF uo'),
+    ])
+    expect(sessionMocks.createUserSession).toHaveBeenCalledWith('u-refresh', expect.objectContaining({ expectedAccessGeneration: 3 }), { query })
 
     expect(jwtMocks.sign).toHaveBeenCalledTimes(1)
     expect(jwtMocks.sign.mock.calls[0]?.[0]).not.toHaveProperty('type')
     expect(sessionMocks.createUserSession).toHaveBeenCalledTimes(1)
     expect(sessionMocks.createUserSession.mock.calls[0]?.[0]).toBe('u-refresh')
+  })
+
+  it.each([undefined, 'existing'])('rejects a session before the cutoff with sid %s', async sid => {
+    jwtMocks.verify.mockReturnValue({ userId: 'u-refresh', iat: 1, exp: 2, sid })
+    stubPoolForAuthReads({ userRow: refreshableUserRow('u-refresh') })
+    const query = lockedRenewal(false, 3)
+    expect(await new AuthService().refreshToken('old-token')).toBeNull()
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('revoked_after >= to_timestamp'), ['u-refresh', 1, sid ?? null])
+    expect(jwtMocks.sign).not.toHaveBeenCalled()
+    expect(sessionMocks.createUserSession).not.toHaveBeenCalled()
+  })
+
+  it('declines a missing original issue time without registering a session', async () => {
+    jwtMocks.verify.mockReturnValue({ userId: 'u-refresh', exp: 2 })
+    stubPoolForAuthReads({ userRow: refreshableUserRow('u-refresh') })
+    expect(await new AuthService().refreshToken('old-token')).toBeNull()
+    expect(sessionMocks.createUserSession).not.toHaveBeenCalled()
   })
 
   it.each([
@@ -1393,6 +1419,23 @@ describe('AuthService.createToken', () => {
     jwtMocks.sign.mockReturnValue('signed-token')
     secretManagerMocks.get.mockReset()
     secretManagerMocks.get.mockReturnValue('unit-test-secret-abcdefghijklmnopqrstuvwxyz123456')
+  })
+
+  it('uses the same configured expiry and fixed issue time for registration and signing', () => {
+    vi.stubEnv('JWT_EXPIRY', '1500ms')
+    try {
+      const auth = new AuthService()
+      expect(auth.sessionExpiresAt(100)).toBe(101)
+      const user = platformAuthUserRow({ id: 'expiry-test' })
+      auth.createToken(user, { issuedAt: 100, sid: 'session' })
+      expect(jwtMocks.sign.mock.calls[0]?.[0]).toMatchObject({ iat: 100, sid: 'session' })
+      expect(jwtMocks.sign.mock.calls[0]?.[2]).toEqual({ expiresIn: '1500ms' })
+      expect(() => auth.sessionExpiresAt(NaN)).toThrow('Invalid session issue time')
+      vi.stubEnv('JWT_EXPIRY', 'unavailable')
+      expect(() => new AuthService().sessionExpiresAt(100)).toThrow('Invalid session lifetime')
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 
   it('includes tenantId when present on the authenticated user', () => {

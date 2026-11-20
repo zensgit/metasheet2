@@ -177,7 +177,8 @@ describe('dingtalk oauth login gates', () => {
       is_active: true, activation_status: 'activated', [marker]: '2026-10-01T00:00:00Z',
     }] })
     await expect(exchangeCodeForUser('synthetic-code')).rejects.toMatchObject({ statusCode: 403, code: 'local_user_disabled' })
-    expect(pgMocks.transaction).not.toHaveBeenCalled()
+    expect(pgMocks.transaction).toHaveBeenCalledTimes(1)
+    expect(defaultTransactionStatements.filter(sql => /^\s*(INSERT|UPDATE|DELETE)\b/i.test(sql))).toEqual([])
     expect(String(pgMocks.query.mock.calls[0][0])).toContain(marker)
   })
 
@@ -400,7 +401,7 @@ describe('dingtalk oauth login gates', () => {
     // No-op transaction client so the rejected-login openId enrichment is harmless here.
     pgMocks.transaction.mockImplementation(
       async (callback: (client: { query: typeof pgMocks.query }) => Promise<unknown>) =>
-        callback({ query: (async () => ({ rows: [] })) as unknown as typeof pgMocks.query }),
+        callback({ query: (async (sql: string) => ({ rows: strictLoginUninstalledRows(sql) ?? [] })) as unknown as typeof pgMocks.query }),
     )
     pgMocks.query
       .mockResolvedValueOnce({ rows: [IDENTITY_USER] }) // findIdentityUser: HIT

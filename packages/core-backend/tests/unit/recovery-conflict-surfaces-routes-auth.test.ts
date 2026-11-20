@@ -83,6 +83,13 @@ vi.mock('../../src/auth/session-revocation', () => ({
   revokeUserSessions: sessionMocks.revokeUserSessions,
 }))
 
+vi.mock('../../src/auth/dingtalk-login-source', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/auth/dingtalk-login-source')>(),
+  resolveDingTalkLoginSource: vi.fn(async () => ({
+    connectionId: null, orgId: null, corpId: null, configuredCorp: null, appKey: 'test-app', explicit: false, strict: false,
+  })),
+}))
+
 vi.mock('../../src/auth/dingtalk-oauth', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/auth/dingtalk-oauth')>()
   return {
@@ -430,7 +437,7 @@ describe('remaining routes/auth.ts recovery-conflict call sites', () => {
       })
       expect(res.statusCode).toBe(409)
       expect(res.body).toEqual(UNIFORM_409_BODY)
-      expect(dingtalkOauthMocks.exchangeCodeForUser).toHaveBeenCalledWith('auth-code')
+      expect(dingtalkOauthMocks.exchangeCodeForUser).toHaveBeenCalledWith('auth-code', expect.objectContaining({ connectionId: null, strict: false }))
       census.record('auth:dingtalk-callback')
     })
 

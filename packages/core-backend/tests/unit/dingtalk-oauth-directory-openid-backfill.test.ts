@@ -47,7 +47,7 @@ vi.mock('../../src/integrations/dingtalk/client', () => ({
   readDingTalkOauthConfig: clientMocks.readDingTalkOauthConfig,
 }))
 
-import { __resetDingTalkOAuthStateStoreForTests, exchangeCodeForUser } from '../../src/auth/dingtalk-oauth'
+import { __resetDingTalkOAuthStateStoreForTests, exchangeCodeForUser, exchangeEnterpriseAuthCodeForUser } from '../../src/auth/dingtalk-oauth'
 import { strictLoginUninstalledRows } from '../utils/strict-login-uninstalled-fixture'
 
 type Call = { sql: string; params: unknown[] }
@@ -67,6 +67,10 @@ function installTransaction(options: {
   failSavepoint?: boolean
   /** rows answered to the corp-less identity's linked-directory-account lookup (field item 3) */
   linkedAccounts?: Array<Record<string, unknown>>
+  connectionId?: string
+  storedKey?: string
+  storedOpenId?: string
+  storedCorp?: string
   failLinkedLookup?: boolean
 } = {}): Call[] {
   const calls: Call[] = []
@@ -74,6 +78,10 @@ function installTransaction(options: {
     query: async (sql: string, params: unknown[] = []) => {
       const statement = String(sql)
       calls.push({ sql: statement, params })
+      if (options.connectionId && statement.includes('SELECT id FROM directory_integrations WHERE id =')) {
+        return { rows: params[0] === options.connectionId ? [{ id: options.connectionId }] : [] }
+      }
+      if (options.connectionId && statement.startsWith('SELECT id::text FROM directory_integrations')) return { rows: [{ id: options.connectionId }] }
       const uninstalled = strictLoginUninstalledRows(statement)
       if (uninstalled !== undefined) return { rows: uninstalled }
       if (/FROM users[\s\S]*FOR UPDATE/i.test(statement)) {
@@ -93,10 +101,10 @@ function installTransaction(options: {
       if (/SELECT COALESCE\(role[\s\S]*FROM users/i.test(statement)) return { rows: [IDENTITY_USER] }
       if (/SELECT enabled[\s\S]*FROM user_external_auth_grants/i.test(statement)) return { rows: [{ enabled: true }] }
       if (/SELECT id,[\s\S]*FROM user_external_identities/i.test(statement)) {
-        const corpId = clientMocks.readDingTalkOauthConfig().corpId
+        const corpId = options.storedCorp ?? clientMocks.readDingTalkOauthConfig().corpId
         return { rows: [{
-          id: 'identity-1', external_key: corpId ? `${corpId}:union-1` : 'union-1',
-          provider_union_id: 'union-1', provider_open_id: null, corp_id: corpId || null,
+          id: 'identity-1', external_key: options.storedKey ?? (corpId ? `${corpId}:union-1` : 'union-1'),
+          provider_union_id: 'union-1', provider_open_id: options.storedOpenId ?? null, corp_id: corpId || null,
         }] }
       }
       if (/UPDATE users[\s\S]*access_generation/i.test(statement)) return { rows: [{ access_generation: 1 }] }
@@ -239,6 +247,86 @@ describe('DingTalk login backfills the directory member openId', () => {
 
     await exchangeCodeForUser('code-no-corp')
     expect(backfillCall(calls)).toBeUndefined()
+  })
+
+  describe('the selected login connection owns the identity and enrichment', () => {
+    const source = {
+      connectionId: '00000000-0000-4000-8000-000000000011',
+      orgId: 'test-org', corpId: 'ding-corp', configuredCorp: null,
+      appKey: 'dt-client', strict: false, explicit: false,
+    }
+
+    beforeEach(() => {
+      clientMocks.readDingTalkOauthConfig.mockReturnValue({
+        clientId: 'dt-client', clientSecret: 'dt-secret', redirectUri: 'https://example.invalid/cb', corpId: null,
+      })
+      pgMocks.query
+        .mockResolvedValueOnce({ rows: [IDENTITY_USER] })
+        .mockResolvedValueOnce({ rows: [{ enabled: true }] })
+    })
+
+    it.each(['linked account', 'canonical key'])('accepts a stored null enterprise with a matching %s', async proof => {
+      const calls = installTransaction({
+        connectionId: source.connectionId,
+        storedKey: proof === 'canonical key' ? 'ding-corp:union-1' : 'union-1',
+        linkedAccounts: proof === 'linked account'
+          ? [{ integration_id: source.connectionId, corp_id: source.corpId, union_id: 'union-1', is_active: true }]
+          : [],
+      })
+      const result = await exchangeCodeForUser('code', source)
+      expect(result.externalOrigin).toMatchObject({ kind: 'dingtalk', connectionId: source.connectionId })
+      expect(result.requiresEmptyScope).toBeUndefined()
+      expect(backfillCall(calls)?.params).toEqual(['dingtalk', source.corpId, 'union-1', 'open-1', source.connectionId])
+      expect(backfillCall(calls)?.sql).toContain('candidate.integration_id = $5::uuid')
+    })
+
+    it('preserves the independently matched corporate identity when the same user also has other directory links', async () => {
+      const calls = installTransaction({
+        connectionId: source.connectionId, storedCorp: source.corpId,
+        linkedAccounts: [
+          { integration_id: source.connectionId, corp_id: source.corpId, union_id: 'union-1', is_active: true },
+          { integration_id: '00000000-0000-4000-8000-000000000012', corp_id: 'other', union_id: 'other', is_active: true },
+        ],
+      })
+      const result = await exchangeCodeForUser('code', source)
+      expect(result.externalOrigin).toMatchObject({ kind: 'dingtalk', connectionId: source.connectionId })
+      expect(backfillCall(calls)?.params).toEqual(['dingtalk', source.corpId, 'union-1', 'open-1', source.connectionId])
+    })
+
+    it('retains the final empty-scope requirement for a matching bare identity', async () => {
+      installTransaction({ connectionId: source.connectionId })
+      const result = await exchangeCodeForUser('code', source)
+      expect(result.externalOrigin).toBeNull()
+      expect(result.requiresEmptyScope).toBe(true)
+    })
+
+    it('preserves a web openId-keyed legacy account when the container proves its stored unionId', async () => {
+      installTransaction({ connectionId: source.connectionId, storedKey: 'open-1', storedOpenId: 'open-1' })
+      clientMocks.fetchDingTalkAppAccessToken.mockResolvedValue('test-app-token')
+      clientMocks.getDingTalkUserInfoByAuthCode.mockResolvedValue({ userId: 'test-user', unionId: 'union-1' })
+      clientMocks.getDingTalkUserDetail.mockResolvedValue({ unionId: 'union-1', name: 'Alpha' })
+      const result = await exchangeEnterpriseAuthCodeForUser('code', source)
+      expect(result.localUserId).toBe(IDENTITY_USER.id)
+      expect(result.externalOrigin).toBeNull()
+      expect(result.requiresEmptyScope).toBe(true)
+    })
+
+    it('rejects explicit selection without an identity origin before enrichment', async () => {
+      const calls = installTransaction({ connectionId: source.connectionId })
+      await expect(exchangeCodeForUser('code', { ...source, explicit: true })).rejects.toMatchObject({ statusCode: 403 })
+      expect(calls.some(call => call.sql.includes('UPDATE user_external_identities'))).toBe(false)
+      expect(backfillCall(calls)).toBeUndefined()
+    })
+
+    it('rejects conflicting directory and canonical evidence before enrichment', async () => {
+      const calls = installTransaction({
+        connectionId: source.connectionId, storedKey: 'ding-corp:union-1',
+        linkedAccounts: [{ integration_id: '00000000-0000-4000-8000-000000000012', corp_id: source.corpId, union_id: 'union-1', is_active: true }],
+      })
+      await expect(exchangeCodeForUser('code', source)).rejects.toMatchObject({ statusCode: 403 })
+      expect(calls.some(call => call.sql.includes('UPDATE user_external_identities'))).toBe(false)
+      expect(backfillCall(calls)).toBeUndefined()
+    })
   })
 
   describe('field item 3: a corp-less identity borrows the corp of its single linked directory account, for the backfill only', () => {
