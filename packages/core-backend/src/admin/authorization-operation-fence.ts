@@ -137,6 +137,16 @@ function belongsToD21Catalog(section: number, row: CatalogRow): boolean {
   }
 }
 
+// Y6 (zzzz20261108120000, #6797) adds one public function, the generated-layout immutability guard.
+// It touches no fenced table, but the fence pins every public function, so it is a reviewed addition
+// of its own, hashed and required on the base path like D21.
+const YIDA_LAYOUT_CATALOG_ADDITIONS = 'bcd3224cc13d9701dc2da0f16b708e7ba012b4c22efc57f73d694b3b0ccf9432'
+const YIDA_LAYOUT_FUNCTIONS = new Set(['integration_yida_generated_layout_immutable_guard'])
+
+function belongsToYidaLayoutCatalog(section: number, row: CatalogRow): boolean {
+  return section === 7 && YIDA_LAYOUT_FUNCTIONS.has(String(row.proname))
+}
+
 function schemaDigest(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex')
 }
@@ -145,13 +155,23 @@ function readBaseProfile(database: CatalogRow | null, rows: CatalogRow[][]): str
   const base = rows.map(() => [] as CatalogRow[])
   const additions = rows.map(() => [] as CatalogRow[])
   const d21 = rows.map(() => [] as CatalogRow[])
+  const yidaLayout = rows.map(() => [] as CatalogRow[])
   for (const [section, catalog] of rows.entries()) {
     for (const row of catalog) {
-      const partition = belongsToB2Catalog(section, row) ? additions : belongsToD21Catalog(section, row) ? d21 : base
+      const partition = belongsToB2Catalog(section, row) ? additions
+        : belongsToD21Catalog(section, row) ? d21
+          : belongsToYidaLayoutCatalog(section, row) ? yidaLayout
+            : base
       partition[section].push(row)
     }
   }
-  if (schemaDigest(additions) === B2_CATALOG_ADDITIONS && schemaDigest(d21) === D21_CATALOG_ADDITIONS) return schemaDigest({ database, rows: base })
+  if (schemaDigest(additions) === B2_CATALOG_ADDITIONS && schemaDigest(d21) === D21_CATALOG_ADDITIONS
+    && schemaDigest(yidaLayout) === YIDA_LAYOUT_CATALOG_ADDITIONS) return schemaDigest({ database, rows: base })
+}
+
+/** The Y6 generated-layout addition's digest over raw catalog rows; used to measure and pin YIDA_LAYOUT_CATALOG_ADDITIONS. */
+export function authorizationOperationYidaLayoutAdditionDigest(rows: CatalogRow[][]): string {
+  return schemaDigest(rows.map((catalog, section) => catalog.filter(row => belongsToYidaLayoutCatalog(section, row))))
 }
 
 /** The D21 addition's digest over raw catalog rows (section order as in the schema queries); used to measure and pin D21_CATALOG_ADDITIONS. */
