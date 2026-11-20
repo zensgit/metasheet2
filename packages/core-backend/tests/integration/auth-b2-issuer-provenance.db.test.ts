@@ -1480,4 +1480,21 @@ describe('ordinary final issuer and required password provenance', () => {
     }
     expect(await countRows(env.witness, env.schema, 'user_sessions')).toBe(0)
   }, 60_000)
+
+  it('admits a confirmed uninstalled policy and refuses unreadable or partial policy state', async () => {
+    const env = await prepare({ actor: 'absent', strict: false, integration: true, scope: false,
+      mustChange: false, session: false })
+    const config = { DINGTALK_CLIENT_ID: 'b2-issuer-client' }
+    const unavailable = { statusCode: 503, code: 'grant_state_unavailable' }
+    await expect(resolveDingTalkLoginSource({}, config)).rejects.toMatchObject(unavailable)
+    await env.witness.query(`CREATE TABLE ${ident(env.schema, 'kysely_migration')} (name text PRIMARY KEY)`)
+    const source = await resolveDingTalkLoginSource({}, config)
+    expect(source).toMatchObject({ connectionId: env.connectionId, strict: false })
+    await env.witness.query(`CREATE TABLE ${ident(env.schema, 'directory_connection_login_scope')} (connection_id uuid)`)
+    const response = await callback(await dingtalk.generateState())
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({ success: false, error: 'DingTalk login authorization is unavailable', code: 'grant_state_unavailable' })
+    expect(dingtalk.exchangeCodeForUser).not.toHaveBeenCalled()
+    expect(await countRows(env.witness, env.schema, 'user_sessions')).toBe(0)
+  }, 60_000)
 })

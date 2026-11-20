@@ -97,6 +97,7 @@ vi.mock('../../src/auth/dingtalk-oauth', async (importOriginal) => {
     validateState: dingtalkOauthMocks.validateState,
     isDingTalkConfigured: dingtalkOauthMocks.isDingTalkConfigured,
     exchangeCodeForDingTalkProfile: dingtalkOauthMocks.exchangeCodeForDingTalkProfile,
+    readDingTalkLoginContext: async () => ({ config: { corpId: dingtalkOauthMocks.getDingTalkRuntimeStatus().corpId } }),
     exchangeCodeForUser: dingtalkOauthMocks.exchangeCodeForUser,
     getDingTalkRuntimeStatus: dingtalkOauthMocks.getDingTalkRuntimeStatus,
     bindDingTalkIdentityToUser: dingtalkOauthMocks.bindDingTalkIdentityToUser,

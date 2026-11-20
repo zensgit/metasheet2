@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto'
+import express from 'express'
+import jwt from 'jsonwebtoken'
+import request from 'supertest'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { Pool, type PoolClient } from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -43,6 +46,25 @@ dbSuite('ordinary session renewal against PostgreSQL', () => {
   })
 
   afterAll(async () => { await pool.end(); vi.unstubAllEnvs() })
+
+  it('verifies legacy ordinary sessions without an issue time only until a real revocation watermark exists', async () => {
+    const { authRouter } = await import('../../src/routes/auth')
+    const app = express().use('/api/auth', authRouter)
+    const legacy = jwt.sign({ userId: user.id }, process.env.JWT_SECRET!, { noTimestamp: true, expiresIn: '1h' })
+    const older = auth.createToken(user, { issuedAt: Math.floor(Date.now() / 1000) - 60 })
+    const verify = (token: string) => request(app).get('/api/auth/verify').set('Authorization', `Bearer ${token}`)
+    expect((await verify(legacy)).status).toBe(200)
+    await pool.query(`INSERT INTO user_session_revocations (user_id, revoked_after)
+      VALUES ($1, timestamptz '1970-01-01 00:00:00+00')`, [user.id])
+    expect((await verify(legacy)).status).toBe(200)
+    await pool.query("UPDATE user_session_revocations SET revoked_after=clock_timestamp()-interval '2 seconds' WHERE user_id=$1", [user.id])
+    for (const token of [legacy, older]) {
+      const rejected = await verify(token)
+      expect(rejected.status).toBe(401)
+      expect(rejected.body).toEqual({ success: false, error: 'Invalid token' })
+    }
+    expect((await verify(auth.createToken(user))).status).toBe(200)
+  })
 
   function original(kind: 'refresh' | 'switch', withSid: boolean) {
     const issuedAt = Math.floor(Date.now() / 1000) - (kind === 'refresh' ? 3 * 86400 : 10)

@@ -73,6 +73,7 @@ const dingtalkOauthMocks = vi.hoisted(() => ({
   exchangeCodeForUser: vi.fn(),
   exchangeEnterpriseAuthCodeForUser: vi.fn(),
   exchangeCodeForDingTalkProfile: vi.fn(),
+  readDingTalkLoginContext: vi.fn(),
   bindDingTalkIdentityToUser: vi.fn(),
   unbindSelfManagedDingTalkIdentity: vi.fn(),
   DingTalkLoginPolicyError: class DingTalkLoginPolicyError extends Error {
@@ -137,6 +138,7 @@ vi.mock('../../src/auth/dingtalk-oauth', () => ({
   exchangeCodeForUser: dingtalkOauthMocks.exchangeCodeForUser,
   exchangeEnterpriseAuthCodeForUser: dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser,
   exchangeCodeForDingTalkProfile: dingtalkOauthMocks.exchangeCodeForDingTalkProfile,
+  readDingTalkLoginContext: dingtalkOauthMocks.readDingTalkLoginContext,
   bindDingTalkIdentityToUser: dingtalkOauthMocks.bindDingTalkIdentityToUser,
   unbindSelfManagedDingTalkIdentity: dingtalkOauthMocks.unbindSelfManagedDingTalkIdentity,
   DingTalkLoginPolicyError: dingtalkOauthMocks.DingTalkLoginPolicyError,
@@ -343,6 +345,7 @@ describe('auth login routes', () => {
     bcryptMocks.compare.mockReset()
     sessionMocks.revokeUserSessions.mockReset()
     activationMocks.activatePendingUser.mockReset()
+    dingtalkOauthMocks.readDingTalkLoginContext.mockImplementation(async () => ({ config: { corpId: dingtalkOauthMocks.getDingTalkRuntimeStatus().corpId } }))
     auditMocks.auditLog.mockReset()
     sessionRegistryMocks.createUserSession.mockReset().mockResolvedValue({id:'synthetic-session'})
     sessionRegistryMocks.listUserSessions.mockReset()
@@ -1677,15 +1680,13 @@ describe('auth login routes', () => {
     })
     rbacMocks.isAdmin.mockResolvedValue(true)
     rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read'])
-    let resolveActivation!: (result: {
-      userId: string
-      activationStatus: 'activated'
-      isActive: true
-      localPasswordSet: boolean
-    }) => void
-    activationMocks.activatePendingUser.mockReturnValue(new Promise((resolve) => {
-      resolveActivation = resolve
-    }))
+    let finishActivation!: () => void
+    const commit = new Promise<void>(resolve => { finishActivation = resolve })
+    activationMocks.activatePendingUser.mockImplementation(async (_input, registerSession) => {
+      const session = await registerSession(issuerClient)
+      await commit
+      return { session }
+    })
     pgMocks.query
       .mockResolvedValueOnce({
         rows: [{
@@ -1717,12 +1718,8 @@ describe('auth login routes', () => {
       expect(activationMocks.activatePendingUser).toHaveBeenCalledTimes(1)
     })
     expect(authServiceMocks.createToken).not.toHaveBeenCalled()
-    resolveActivation({
-      userId: 'pending-user',
-      activationStatus: 'activated',
-      isActive: true,
-      localPasswordSet: false,
-    })
+    expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledTimes(1)
+    finishActivation()
     const response = await responsePromise
 
     expect(response.statusCode).toBe(200)
@@ -1739,7 +1736,7 @@ describe('auth login routes', () => {
         openId: 'open-1',
         unionId: 'union-1',
       },
-    })
+    }, expect.any(Function))
     expect((response.body as Record<string, any>).data).toMatchObject({
       mode: 'activate',
       token: 'activated-session-token',

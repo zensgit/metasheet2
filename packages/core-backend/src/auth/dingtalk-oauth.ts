@@ -778,7 +778,7 @@ type OAuthLoginContext = {
   source: DingTalkLoginSource
 }
 
-async function readLoginContext(source?: DingTalkLoginSource): Promise<OAuthLoginContext> {
+export async function readDingTalkLoginContext(source?: DingTalkLoginSource): Promise<OAuthLoginContext> {
   const current = readDingTalkOauthConfig()
   const config = { ...current, corpId: current.corpId || null }
   const selected = source ?? await resolveDingTalkLoginSource({}, {
@@ -1828,7 +1828,7 @@ export async function exchangeEnterpriseAuthCodeForUser(authCode: string, source
   // the client-id/secret aliases double as appKey/appSecret for the app token.
   // E1 therefore shares web-OAuth's env prerequisites — the embed direction
   // lock's premise is that web SSO is already configured.
-  const context = await readLoginContext(source)
+  const context = await readDingTalkLoginContext(source)
   const oauthConfig = context.config
   const appConfig = {
     appKey: oauthConfig.clientId,
@@ -1887,7 +1887,7 @@ export async function exchangeEnterpriseAuthCodeForUser(authCode: string, source
 }
 
 export async function exchangeCodeForUser(code: string, source?: DingTalkLoginSource): Promise<DingTalkExchangeResult> {
-  const context = await readLoginContext(source)
+  const context = await readDingTalkLoginContext(source)
   const dingtalkUser = await exchangeCodeForDingTalkProfile(code, context.config)
   const { localUser, isNewUser, sessionGeneration, externalOrigin, requiresEmptyScope } = await resolveLocalUser(dingtalkUser, context)
 

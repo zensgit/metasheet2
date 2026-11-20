@@ -79,7 +79,10 @@ export type ActivateUserInput = {
   } | null
 }
 
+export type RegisteredActivationSession = { sid: string; issuedAt: number; tenantId?: string }
+
 export type ActivateUserResult = {
+  session?: RegisteredActivationSession
   userId: string
   activationStatus: 'activated'
   isActive: true
@@ -144,7 +147,10 @@ function throwCoded(message: string, code: ActivateErrorCode): never {
 /**
  * Activate a pending user. All durable writes in one transaction.
  */
-export async function activatePendingUser(input: ActivateUserInput): Promise<ActivateUserResult> {
+export async function activatePendingUser(
+  input: ActivateUserInput,
+  registerSession?: (client: Parameters<Parameters<typeof transaction>[0]>[0]) => Promise<RegisteredActivationSession>,
+): Promise<ActivateUserResult> {
   const userId = String(input.userId || '').trim()
   if (!userId) throwCoded('userId is required', 'ACTIVATE_USER_REQUIRED')
 
@@ -176,7 +182,7 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
   // fails with the marker 40001. Re-raise it as the named retryable RecoveryConflictError
   // (mapActivateError in routes/admin-users.ts maps it to a retryable 409); every other
   // error — every ACTIVATE_* reason included — rethrows unchanged.
-  await translateRecoveryConflict(() => transaction(async (client) => {
+  const session = await translateRecoveryConflict(() => transaction(async (client) => {
     if (input.loginSource) await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
     const lockedUsers = await lockUsersForAccessGraphWrite(client, [userId])
     const user = lockedUsers.get(userId)
@@ -362,13 +368,17 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
       actorId: input.adminUserId ?? userId,
       reason: 'superseded by pending-user activation',
     })
+    // The source fence, including the empty-scope table lock, comes after all prior writers.
+    const registered = registerSession ? await registerSession(client) : undefined
     if (input.loginSource) {
       await checkOrdinaryDingTalkSource(client, input.loginSource)
       if (!externalOrigin && input.loginSource.connectionId) await checkEmptyDingTalkScope(client)
     }
+    return registered
   }))
 
   return {
+    ...(session && { session }),
     userId,
     activationStatus: 'activated',
     isActive: true,
