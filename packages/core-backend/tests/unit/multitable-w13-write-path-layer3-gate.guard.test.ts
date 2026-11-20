@@ -541,11 +541,19 @@ const WRITE_PORTS: Record<PortId, Port> = {
         {
           disposition: 'GATED',
           reason:
-            '人工补充行 PATCH /records/:recordId/manual-fields (ADR adr-stock-prep-manual-rows-20261030 §3.4) — ' +
+            '人工补充行 PATCH /records/:recordId/manual-fields (ADR adr-stock-prep-manual-rows-20261030 §3.4, §12) — ' +
             'manualEditFieldPermissions = deriveFieldPermissions over the fields with the human write lock lifted from ' +
-            'the six fillable columns ONLY, with the per-subject fieldScopeMap (loadFieldPermissionScopeMap), then the ' +
-            'isFieldWriteForbidden pre-check and sendForbidden BEFORE patchRecords. Only the six fillable columns are ' +
-            'accepted at all, on a row that satisfies M (re-checked in the transaction by the preWriteGuard).',
+            'the eight lock-exempt columns ONLY (the six fillable ones and, since §12, the parent pair), with the ' +
+            'per-subject fieldScopeMap (loadFieldPermissionScopeMap), then the isFieldWriteForbidden pre-check and ' +
+            'sendForbidden BEFORE patchRecords. The pre-check judges every submitted column and, when the request names ' +
+            'either parent column, BOTH of them (manualRowWriteGatedFieldIds — rule P7: the pair is written together or ' +
+            'not at all). Only those eight columns are accepted at all, on a row that satisfies M (re-checked in the ' +
+            'transaction by the preWriteGuard, which also decides the pair rules P3 – P5 under the row lock). Two more ' +
+            'refusals stand before patchRecords since the final review of §12: the row is read through the shared ' +
+            'record gate first (requireRecordReadable — a row the row policy denies is refused like a record read), ' +
+            'and a patch whose rule-P5 comparison would read a stored cell outside the actor\'s read set is refused ' +
+            'after the write gate (manualRowEditFieldIdsComparedWithUnreadableCell over readableEchoFieldIds), so the ' +
+            'rule\'s 422 never says what a cell the actor cannot read holds.',
         },
       ],
       'routes/multitable-ai.ts': [
@@ -634,12 +642,13 @@ const WRITE_PORTS: Record<PortId, Port> = {
           reason:
             '人工补充行 create — createManualSupplementRow, the ONE createRecord call shared by POST ' +
             '/sheets/:sheetId/manual-rows and POST /records/:recordId/manual-copy (ADR ' +
-            'adr-stock-prep-manual-rows-20261030 §3.2/§3.3). assertManualRowCreateFieldsWritable runs the layer-3 ' +
+            'adr-stock-prep-manual-rows-20261030 §3.2/§3.3, §12). assertManualRowCreateFieldsWritable runs the layer-3 ' +
             'per-subject gate (loadFieldPermissionScopeMap + deriveFieldPermissions(allowCreateOnly) + ' +
-            'isFieldWriteForbidden) over EVERY submitted field before the create, on fields whose human write lock is ' +
-            'lifted for the six fillable columns only; the copy payload is additionally built from columns the actor ' +
-            'can read AND write. The create runs on the actor\'s own capabilities with a minted manual-row extension. ' +
-            'Session-only routes.',
+            'isFieldWriteForbidden) over EVERY submitted field before the create — and over BOTH parent columns when ' +
+            'either is submitted (rule P7) — on fields whose human write lock is lifted for the eight lock-exempt ' +
+            'columns only (the six fillable ones and the parent pair); the copy payload is additionally built from ' +
+            'columns the actor can read AND write, the parent pair only when that holds for both of its columns. The ' +
+            'create runs on the actor\'s own capabilities with a minted manual-row extension. Session-only routes.',
         },
       ],
       'multitable/copy-sheet-service.ts': [
@@ -1051,6 +1060,8 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
     expect(gate).toContain('deriveFieldPermissions(')
     expect(gate).toContain('allowCreateOnly: true')
     expect(gate).toContain('isFieldWriteForbidden(manualCreateFieldPermissions[fid])')
+    // ADR §12 rule P7: the gated ids are the submitted ones PLUS both parent columns when either is submitted.
+    expect(gate).toContain('manualRowWriteGatedFieldIds(sheet, submitted).filter((fid) => isFieldWriteForbidden(manualCreateFieldPermissions[fid]))')
     expect(univerMeta.slice(createAt, copyAt)).toMatch(
       /loadFieldPermissionScopeMap\([\s\S]{0,300}assertManualRowCreateFieldsWritable\([\s\S]{0,800}recordService\.createRecord\(\{/,
     )
@@ -1058,9 +1069,60 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
 
   test('smoke: PATCH /records/:recordId/manual-fields gates per subject BEFORE recordWriteService.patchRecords', () => {
     const univerMeta = read('routes/univer-meta.ts')
+    // The write gate and its 403, then (ADR §12, final review) the gate on the cell rule P5 compares with and ITS 403,
+    // and only then the write. Each stretch has its own bound, so a gate that drifts behind patchRecords reds here.
     expect(univerMeta).toMatch(
-      /isFieldWriteForbidden\(manualEditFieldPermissions\[fid\]\)[\s\S]{0,400}sendForbidden\(res, `Field\(s\) not writable[\s\S]{0,2500}recordWriteService\.patchRecords\(\{/,
+      /isFieldWriteForbidden\(manualEditFieldPermissions\[fid\]\)[\s\S]{0,400}sendForbidden\(res, `Field\(s\) not writable[\s\S]{0,1000}manualRowEditFieldIdsComparedWithUnreadableCell\([\s\S]{0,600}sendForbidden\(res, `Field\(s\) not writable[\s\S]{0,2500}recordWriteService\.patchRecords\(\{/,
     )
+    // ADR §12 rule P7: the same widening as the create gate — a request naming either parent column is judged on both.
+    expect(univerMeta).toContain('manualRowWriteGatedFieldIds(sheet, submittedFieldIds).filter((fid) => isFieldWriteForbidden(manualEditFieldPermissions[fid]))')
+  })
+
+  test('smoke: PATCH /records/:recordId/manual-fields reads the row through the record gate BEFORE it judges or writes it, and gives rule P5\'s answer only about a readable cell (ADR §12)', () => {
+    const univerMeta = read('routes/univer-meta.ts')
+    const headAt = univerMeta.indexOf("router.patch('/records/:recordId/manual-fields'")
+    const endAt = univerMeta.indexOf("router.get('/records/:recordId/manual-parent-dependents'")
+    expect(headAt, 'the manual-fields route is gone or renamed').toBeGreaterThan(-1)
+    expect(endAt, 'the route after it is gone or renamed').toBeGreaterThan(headAt)
+    const handler = univerMeta.slice(headAt, endAt)
+    const at = (needle: string) => {
+      const index = handler.indexOf(needle)
+      expect(index, `not in the manual-fields handler: ${needle}`).toBeGreaterThan(-1)
+      return index
+    }
+    // (a) The shared record gate — the one the copy route and every record read use — and it is the handler's ONLY
+    // capability resolver: nothing about the row (is it a manual row; rule P5) is judged for an actor it refuses.
+    const recordGate = at('await requireRecordReadable(req, query, sheetId, recordId)')
+    expect(handler).not.toContain('resolveSheetCapabilities(')
+    expect(handler.split('requireRecordReadable(').length - 1).toBe(1)
+    for (const judged of ["loadManualRowsVerdict(query, sheetId, fields, 'edit'", 'isManualSupplementRow({', 'buildRecordPatchContext(', 'recordWriteService.patchRecords({']) {
+      expect(recordGate, judged).toBeLessThan(at(judged))
+    }
+    // (b) Rule P5 compares the patch with a stored cell; the handler asks the pure rule whether the actor may read that
+    // cell — from the set the echo of this very request is masked with — before the transaction that makes the comparison.
+    const cellGate = at('manualRowEditFieldIdsComparedWithUnreadableCell(')
+    const cellGateCall = handler.slice(cellGate, cellGate + 500)
+    expect(cellGateCall).toContain('sheet.derived,')
+    expect(cellGateCall).toContain('submittedFieldIds,')
+    expect(cellGateCall).toContain('(fieldId) => !patchContext.fieldById.has(fieldId) || patchContext.readableEchoFieldIds.has(fieldId),')
+    expect(cellGateCall).toContain('if (cellUnreadableFieldIds.length > 0) {')
+    expect(cellGate).toBeLessThan(at('assertManualRowEditInTransaction(txQuery, sheet, recordId, changes)'))
+    expect(cellGate).toBeLessThan(at('recordWriteService.patchRecords({'))
+    // exactly one call site in the router
+    expect(univerMeta.split('manualRowEditFieldIdsComparedWithUnreadableCell(').length - 1).toBe(1)
+  })
+
+  test('smoke: the manual-row write gates judge BOTH parent columns whenever a request names either (ADR §12 rule P7)', () => {
+    const univerMeta = read('routes/univer-meta.ts')
+    const headAt = univerMeta.indexOf('function manualRowWriteGatedFieldIds(')
+    expect(headAt, 'manualRowWriteGatedFieldIds is gone or renamed').toBeGreaterThan(-1)
+    const body = univerMeta.slice(headAt, univerMeta.indexOf('function assertManualRowCreateFieldsWritable('))
+    expect(body).toContain('const gated = new Set(submittedFieldIds)')
+    expect(body).toContain('if (namesManualRowParentPair(sheet.derived, submittedFieldIds)) {')
+    expect(body).toContain('gated.add(sheet.derived.parent.code)')
+    expect(body).toContain('gated.add(sheet.derived.parent.name)')
+    // exactly the two gates call it
+    expect(univerMeta.split('manualRowWriteGatedFieldIds(').length - 1).toBe(3)
   })
 
   /**

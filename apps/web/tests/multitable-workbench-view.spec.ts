@@ -554,9 +554,25 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
 vi.mock('../src/multitable/components/MetaFormView.vue', () => ({
   default: defineComponent({
     name: 'MetaFormView',
+    props: {
+      record: { type: Object, default: null },
+      deleteAttachmentFn: { type: Function, default: undefined },
+    },
     emits: ['submit', 'update:dirty'],
     render() {
       return h('div', [
+        // A remove in the form's attachment field, as the real form calls it (the record it shows, the field).
+        ...['att_new', 'att_1'].map((attachmentId) => h(
+          'button',
+          {
+            'data-form-remove-attachment': attachmentId,
+            onClick: () => (this.$props.deleteAttachmentFn as ((id: string, context: { recordId?: string; fieldId?: string }) => Promise<unknown>) | undefined)?.(
+              attachmentId,
+              { recordId: (this.$props.record as { id?: string } | null)?.id, fieldId: 'fld_files' },
+            ),
+          },
+          `form-remove-${attachmentId}`,
+        )),
         h(
           'button',
           {
@@ -3271,6 +3287,33 @@ describe('MultitableWorkbench view wiring', () => {
     container!.querySelector<HTMLButtonElement>('[data-form-submit="true"]')!.click()
     await flushUi()
     expect(workbenchMock.client.submitForm).toHaveBeenCalledWith('view_form', expect.objectContaining({ recordId: 'rec_1', expectedVersion: 9 }))
+  })
+
+  // The server moves the record on an attachment delete only when its stored list holds the attachment. A file
+  // uploaded in the form is in the form's draft only until Save: removed again, the record stays at its version.
+  it.each([
+    ['a file uploaded in the form and removed again before Save (the stored list never held it)', 'att_new', 9],
+    ['a stored file removed (control: the server moves the record one on)', 'att_1', 10],
+  ])('a form view, %s: Save sends the version the server has', async (_label, attachmentId, expectedVersion) => {
+    workbenchMock.views.value = [
+      { id: 'view_form', sheetId: 'sheet_orders', name: 'Form', type: 'form' },
+    ]
+    workbenchMock.activeViewId.value = 'view_form'
+    workbenchMock.client.loadFormContext.mockResolvedValue({
+      fields: [{ id: 'fld_title', name: 'Title', type: 'text' }, { id: 'fld_files', name: 'Files', type: 'attachment' }],
+      record: { id: 'rec_1', version: 9, data: { fld_title: 'Form record', fld_files: ['att_1'] } },
+      rowActions: { canEdit: true, canDelete: true, canComment: true },
+    })
+    workbenchMock.client.deleteAttachment = vi.fn().mockResolvedValue({ deleted: attachmentId })
+    workbenchMock.client.submitForm.mockResolvedValue({ mode: 'update', record: { id: 'rec_1', version: expectedVersion + 1, data: { fld_title: 'Saved title', fld_files: [] } }, attachmentSummaries: {} })
+    mountWorkbench({ viewId: 'view_form', recordId: 'rec_1' })
+    await flushUi(8)
+    container!.querySelector<HTMLButtonElement>(`[data-form-remove-attachment="${attachmentId}"]`)!.click()
+    await flushUi()
+    expect(workbenchMock.client.deleteAttachment).toHaveBeenCalledWith(attachmentId)
+    container!.querySelector<HTMLButtonElement>('[data-form-submit="true"]')!.click()
+    await flushUi()
+    expect(workbenchMock.client.submitForm).toHaveBeenCalledWith('view_form', expect.objectContaining({ recordId: 'rec_1', expectedVersion }))
   })
 
   it('blocks form submit updates when scoped rowActions disallow edits', async () => {
@@ -6481,6 +6524,17 @@ describe('MultitableWorkbench view wiring', () => {
       await inspectorStubSeen.deleteAttachmentFn!('att_9', { recordId: 'rec_2', fieldId: 'fld_files' })
       await flushUi()
       expect(workbenchMock.client.deleteAttachment).toHaveBeenCalledWith('att_9')
+      acceptNextPatch()
+      await patchFor('rec_remote')
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_files', ['att_2'], 4, COPY_SAVE]])
+    })
+
+    it('an attachment delete of an id the deep-linked rec_remote copy\'s list does not hold (an upload never saved into the record) leaves the copy at its version, as the server leaves the record: its later patch carries 4', async () => {
+      await openRemoteThenRec2()
+      workbenchMock.client.deleteAttachment = vi.fn().mockResolvedValue({ deleted: 'att_new' })
+      await inspectorStubSeen.deleteAttachmentFn!('att_new', { recordId: 'rec_remote', fieldId: 'fld_files' })
+      await flushUi()
+      expect(workbenchMock.client.deleteAttachment).toHaveBeenCalledWith('att_new')
       acceptNextPatch()
       await patchFor('rec_remote')
       expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_files', ['att_2'], 4, COPY_SAVE]])

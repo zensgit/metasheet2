@@ -406,6 +406,14 @@ export default defineConfig({
       // wired as a WHOLE FILE into the approval real-DB step in plugin-tests.yml (pinned by
       // plugin-tests-parallel-contract.test.mjs).
       'tests/integration/directory-adapter-golden-parity.db.test.ts',
+      // Directory integration capability consumer resolver against real PostgreSQL: effective and refused
+      // decisions, the read-committed / in-transaction / bounded-lock-wait contract, the two FOR SHARE
+      // locks against a generic PUT and a disable (two-connection barrier), a repeatable-read-default
+      // pool, and several candidates for one scope. DATABASE_URL-gated with the EXPECT_DB sentinel;
+      // excluded here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the approval
+      // real-DB step in plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs and
+      // tests/unit/directory-integration-capabilities-wiring.test.ts).
+      'tests/integration/directory-integration-capability-resolve.db.test.ts',
       // Directory integration capability tables against real PostgreSQL: structure and constraints,
       // update and append-only guards, the guarded down(), the table-existence probe on an open
       // transaction, and the login scope unique index. DATABASE_URL-gated; excluded here so the no-DB
