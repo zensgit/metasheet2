@@ -545,6 +545,10 @@ describe('the witness', () => {
     expect(computeIntegrationCapabilityWitness({ ...base, anchor: { ...base.anchor } })).toBe(computeIntegrationCapabilityWitness(base))
   })
 
+  it('matches the fixed v1 vector for the base fields', () => {
+    expect(computeIntegrationCapabilityWitness(base)).toBe('7c59bf69adedfa5adae92abcb96e20780bd64101805747d4417b12442b222d60')
+  })
+
   it('changes with every covered field, including the organization source marker, the revision and the anchor', () => {
     const variants = [
       { ...base, orgSource: 'login_intent' },

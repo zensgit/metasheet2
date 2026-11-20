@@ -274,6 +274,30 @@ describeIfDatabase('directory integration capability resolver (real database)', 
         orgSource: 'authenticated_tenant', integrationId: id, orgId: org, provider: 'dingtalk', status: 'active',
         capability: 'login', revision: 1, anchor: { tenant: CORP, appScope: APP },
       }))
+
+      // A capability row update must advance the revision by exactly one and keep its immutable columns.
+      const bumped = await run(
+        `UPDATE ${CAPS} SET revision = revision + 1, updated_by = 'admin-2', updated_at = now()
+          WHERE integration_id = $1 AND revision = 1
+          RETURNING revision::text AS revision, bound_provider, bound_org_id, login_enabled, login_bound_tenant, login_bound_app_scope`,
+        [id],
+      )
+      expect(bumped.rowCount).toBe(1)
+      expect(bumped.rows[0]).toEqual({
+        revision: '2', bound_provider: 'dingtalk', bound_org_id: org,
+        login_enabled: true, login_bound_tenant: CORP, login_bound_app_scope: APP,
+      })
+
+      // Only the revision changed, so the decision differs from the earlier one only in revision and witness.
+      const next = await resolveFresh(id, org)
+      if (!next.effective) throw new Error(`expected effective, got ${next.reason}`)
+      expect(next.revision).toBe(2)
+      expect(next).toEqual({ ...decision, revision: 2, witness: expect.stringMatching(/^[0-9a-f]{64}$/) })
+      expect(next.witness).not.toBe(decision.witness)
+      expect(next.witness).toBe(computeIntegrationCapabilityWitness({
+        orgSource: 'authenticated_tenant', integrationId: id, orgId: org, provider: 'dingtalk', status: 'active',
+        capability: 'login', revision: 2, anchor: { tenant: CORP, appScope: APP },
+      }))
     })
 
     it('refuses each single broken condition with its own reason', async () => {
