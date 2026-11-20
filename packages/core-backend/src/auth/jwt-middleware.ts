@@ -208,6 +208,10 @@ export function isReadOnlyPermissionCheckRequest(method: string, path: string): 
   return method.toUpperCase() === 'POST' && apiPathEquals(path, '/api/permissions/v2/business-check')
 }
 
+function isManualDeliveryRequest(method: string, path: string): boolean {
+  return method.toUpperCase() === 'POST' && /^\/api\/admin\/invites\/[^/]+\/manual-delivery\/?$/i.test(path)
+}
+
 /** Same JWT context as the normal gate, without development fallback or attendance bootstrap writes. */
 export async function readOnlyAuthorizationJwtAuth(req: Request, res: Response, next: NextFunction) {
   const token = resolveBearerToken(req)
@@ -216,15 +220,26 @@ export async function readOnlyAuthorizationJwtAuth(req: Request, res: Response, 
     metrics.authFailures.inc()
     return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Missing Bearer token' } })
   }
-  const result = await hydrateAuthenticatedUser(req, token, true)
-  if (isHydrateFailure(result)) {
-    if (result.metricReason) {
-      metrics.jwtAuthFail.inc({ reason: result.metricReason })
-      metrics.authFailures.inc()
+  const manualDelivery = isManualDeliveryRequest(req.method, req.path)
+  let userId: string | undefined
+  if (manualDelivery) {
+    const payload = authService.readTokenPayload(token)
+    const subject = payload?.userId || payload?.id || payload?.sub
+    if (typeof subject !== 'string' || !subject.trim()) {
+      return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Invalid token' } })
     }
-    return res.status(result.statusCode).json(result.body)
+    userId = subject.trim()
+  } else {
+    const result = await hydrateAuthenticatedUser(req, token, true)
+    if (isHydrateFailure(result)) {
+      if (result.metricReason) {
+        metrics.jwtAuthFail.inc({ reason: result.metricReason })
+        metrics.authFailures.inc()
+      }
+      return res.status(result.statusCode).json(result.body)
+    }
+    userId = req.user?.id?.toString()
   }
-  const userId = req.user?.id?.toString()
   if (!userId || !pool) return res.status(503).json({ ok: false, error: { code: 'AUTH_UNAVAILABLE', message: 'Authentication unavailable' } })
   try {
     const client = await pool.connect()
@@ -232,8 +247,13 @@ export async function readOnlyAuthorizationJwtAuth(req: Request, res: Response, 
       await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
       await client.query("SET LOCAL statement_timeout = '2000ms'")
       const valid = await validateStrictSession((sql, params) => client.query(sql, params), token, userId)
+      const actor = valid && manualDelivery
+        ? (await client.query('SELECT role, must_change_password FROM users WHERE id = $1', [userId])).rows[0]
+        : undefined
       await client.query('COMMIT')
-      if (!valid) return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Invalid token' } })
+      if (!valid || (manualDelivery && !actor)) return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Invalid token' } })
+      if (actor?.must_change_password === true) return res.status(403).json({ ok: false, error: { code: 'PASSWORD_CHANGE_REQUIRED', message: 'Password change required' } })
+      if (actor) req.user = { id: userId, role: actor.role }
     } catch (error) {
       await client.query('ROLLBACK').catch(() => undefined)
       throw error
@@ -248,7 +268,7 @@ export async function readOnlyAuthorizationJwtAuth(req: Request, res: Response, 
 
 /** Selects authentication mode only; every selected path still requires a valid JWT and live session. */
 export function isReadOnlyAuthorizationRequest(method: string, path: string): boolean {
-  if (isReadOnlyPermissionCheckRequest(method, path)) return true
+  if (isReadOnlyPermissionCheckRequest(method, path) || isManualDeliveryRequest(method, path)) return true
   const verb = method.toUpperCase()
   if (verb === 'POST' && (apiPathEquals(path, '/api/admin/authorization-operations')
     || apiPathEquals(path, '/api/admin/authorization-operations/preview'))) return true

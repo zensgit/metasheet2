@@ -11,14 +11,16 @@ import { Logger } from '../core/logger'
 import { secretManager } from '../security/SecretManager'
 import { getBcryptSaltRounds, getProductionAuthSecurityIssues, resolveRuntimeJwtSecret } from '../security/auth-runtime-config'
 import { invalidateUserPerms, isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
+import { withoutUnverifiedAttendance } from './auth-permission-profile'
 import { strictGuardLookups } from '../rbac/strict-guard-lookups'
-import { supportsAttendanceSelfService } from '../config/product-mode'
+import { normalizeProductMode, supportsAttendanceSelfService } from '../config/product-mode'
 import {
   ATTENDANCE_SELF_SERVICE_NAMESPACE,
   decideAttendanceSelfServiceBackfill,
   parseAttendanceSelfServiceAdmissionRows,
 } from './attendanceSelfServiceBackfill'
 import { isUserSessionRevoked } from './session-revocation'
+import { isSessionRevision } from './session-revision'
 import { isSessionTokenPayload } from './session-token-kind'
 import { classifyVerifiedSessionPayload, verifyPersistedStrictSession } from './strict-dingtalk-entry'
 import { createUserSession, isUserSessionActive } from './session-registry'
@@ -60,6 +62,9 @@ interface UserRow extends User {
 
 const USER_AUTH_SELECT =
   'id, email, username, mobile, name, role, permissions, password_hash, access_generation, is_active, must_change_password, activation_status, local_password_set, created_at, updated_at'
+const PASSWORD_AUTH_SELECT = `${USER_AUTH_SELECT}, COALESCE((
+  SELECT revision::text FROM user_session_revocations WHERE user_id = users.id
+), 'none') AS revocation_revision`
 
 export interface TokenPayload {
   userId: string
@@ -67,6 +72,8 @@ export interface TokenPayload {
   role: string
   tenantId?: string
   sid?: string
+  sessionRevision?: string
+  revocationIat?: number
   iat: number
   exp: number
 }
@@ -288,12 +295,13 @@ export class AuthService {
       const trustedUser = this.buildTrustedTokenUser(
         payload as TokenPayload & { id?: string; sub?: string; roles?: unknown; perms?: unknown; name?: unknown; email?: unknown; role?: unknown },
       )
-      if (trustedUser) {
+      if (trustedUser && payload.sessionRevision === undefined && payload.revocationIat === undefined) {
         return trustedUser
       }
 
       // 从数据库获取最新用户信息
-      const user = await this.getUserById(userId, options?.readOnlyPermissionCheck === true)
+      const user = await this.getUserById(userId, options?.readOnlyPermissionCheck === true,
+        payload.sessionRevision === undefined && payload.revocationIat === undefined)
       if (!user) {
         return null
       }
@@ -303,7 +311,7 @@ export class AuthService {
         return null
       }
 
-      if (await isUserSessionRevoked(user.id, payload.iat)) {
+      if (await isUserSessionRevoked(user.id, payload)) {
         this.logger.warn(`Token verification failed: session revoked for user ${user.id}`)
         return null
       }
@@ -316,6 +324,9 @@ export class AuthService {
         }
       }
 
+      if (!options?.readOnlyPermissionCheck && !user.attendanceProfileUnavailable) {
+        user.permissions = await this.withAttendanceSelfService(user.id, user.role, user.permissions)
+      }
       const tenantClaim = this.normalizeClaimString(payload.tenantId)
       const tenantId = tenantClaim
         ? await this.resolveSessionTenantId(user.id, tenantClaim)
@@ -331,7 +342,7 @@ export class AuthService {
   /**
    * 创建JWT token
    */
-  createToken(user: User, options: { sid?: string; externalAuth?: boolean } = {}): string {
+  createToken(user: User, options: { sid?: string; externalAuth?: boolean; sessionRevision?: string; revocationIat?: number } = {}): string {
     const externalAuth = options.externalAuth === true
     const sid = typeof options.sid === 'string' && options.sid.trim().length > 0 ? options.sid.trim() : undefined
     if (externalAuth) {
@@ -345,6 +356,8 @@ export class AuthService {
       ;(error as Error & { code?: string }).code = 'STRICT_SESSION_SID_REFUSED'
       throw error
     }
+    if (options.sessionRevision !== undefined && (!isSessionRevision(options.sessionRevision)
+      || !sid || options.revocationIat !== undefined)) throw new Error('Invalid session revision')
     const payload: Omit<TokenPayload, 'iat' | 'exp'> & { xa?: true } = {
       userId: user.id,
       email: user.email ?? '',
@@ -352,6 +365,8 @@ export class AuthService {
       ...(typeof user.tenantId === 'string' && user.tenantId.trim().length > 0 ? { tenantId: user.tenantId.trim() } : {}),
       ...(sid ? { sid } : {}),
       ...(externalAuth ? { xa: true as const } : {}),
+      ...(options.sessionRevision !== undefined ? { sessionRevision: options.sessionRevision } : {}),
+      ...(options.revocationIat !== undefined ? { revocationIat: options.revocationIat } : {}),
     }
 
     return jwt.sign(payload, this.config.jwtSecret, {
@@ -400,17 +415,23 @@ export class AuthService {
       }
 
       const sessionId = crypto.randomUUID()
+      const sessionRevision = user.revocation_revision
+      if (!isSessionRevision(sessionRevision)) return null
       const tenantId = await this.resolveSessionTenantId(user.id, options.tenantId)
-      const token = this.createToken(tenantId ? { ...user, tenantId } : user, { sid: sessionId, externalAuth: false })
+      const token = this.createToken(tenantId ? { ...user, tenantId } : user, { sid: sessionId, externalAuth: false, sessionRevision })
       const payload = this.readTokenPayload(token)
-      if (payload?.exp) {
-        await createUserSession(user.id, {
-          sessionId,
-          expiresAt: new Date(payload.exp * 1000).toISOString(),
-          ipAddress: options.ipAddress ?? null,
-          userAgent: options.userAgent ?? null,
-        })
-      }
+      if (!payload?.exp) return null
+      const session = await createUserSession(user.id, {
+        sessionId,
+        expectedSessionRevision: sessionRevision,
+        expectedAccessGeneration: Number(user.access_generation ?? 0),
+        expiresAt: new Date(payload.exp * 1000).toISOString(),
+        ipAddress: options.ipAddress ?? null,
+        userAgent: options.userAgent ?? null,
+      })
+      if (!session) return null
+
+      if (!user.attendanceProfileUnavailable) user.permissions = await this.withAttendanceSelfService(user.id, user.role, user.permissions)
 
       // 更新最后登录时间
       await this.updateLastLogin(user.id)
@@ -519,7 +540,7 @@ export class AuthService {
 
       // 加密密码 — self-service register is always activated + local password set
       const passwordHash = await bcrypt.hash(password, this.config.saltRounds)
-      const enableAttendanceSelfService = supportsAttendanceSelfService(process.env.PRODUCT_MODE)
+      const enableAttendanceSelfService = normalizeProductMode(process.env.PRODUCT_MODE) === 'attendance'
       const registrationPermissions = [
         'spreadsheet:read',
         'spreadsheet:write',
@@ -614,7 +635,7 @@ export class AuthService {
   /**
    * 通过ID获取用户
    */
-  private async getUserById(userId: string, readOnlyPermissionCheck = false): Promise<(User & { password_hash: string }) | null> {
+  private async getUserById(userId: string, readOnlyPermissionCheck = false, allowDevFallback = true): Promise<(User & { password_hash: string }) | null> {
     try {
       // 首先尝试从数据库获取
       try {
@@ -635,6 +656,7 @@ export class AuthService {
             name: row.name,
             role: resolved.role,
             permissions: resolved.permissions,
+            attendanceProfileUnavailable: resolved.attendanceProfileUnavailable,
             ...(resolved.permissionCheckProfileUnknown ? { permissionCheckProfileUnknown: true } : {}),
             is_active: row.is_active,
             must_change_password: row.must_change_password,
@@ -654,7 +676,7 @@ export class AuthService {
       }
 
       // 降级：返回mock用户（非生产环境）
-      if (!readOnlyPermissionCheck && process.env.NODE_ENV !== 'production') {
+      if (!readOnlyPermissionCheck && allowDevFallback && process.env.NODE_ENV !== 'production') {
         return {
           id: userId,
           email: 'dev@metasheet.com',
@@ -701,7 +723,7 @@ export class AuthService {
           const userId = await findUserIdByLoginAlias(trimmedIdentifier)
           if (!userId) return null
           const byId = await pool.query(
-            `SELECT ${USER_AUTH_SELECT}, (to_jsonb(users) ->> 'deleted_at') AS deleted_at, (to_jsonb(users) ->> 'purged_at') AS purged_at FROM users WHERE id = $1 LIMIT 1`,
+            `SELECT ${PASSWORD_AUTH_SELECT}, (to_jsonb(users) ->> 'deleted_at') AS deleted_at, (to_jsonb(users) ->> 'purged_at') AS purged_at FROM users WHERE id = $1 LIMIT 1`,
             [userId],
           )
           if (!byId.rows[0]) return null
@@ -713,7 +735,7 @@ export class AuthService {
         const normalizedUsername = trimmedIdentifier.toLowerCase()
         const normalizedMobile = trimmedIdentifier.replace(/\s+/g, '')
         const result = await pool.query(
-          `SELECT ${USER_AUTH_SELECT}, (to_jsonb(users) ->> 'deleted_at') AS deleted_at, (to_jsonb(users) ->> 'purged_at') AS purged_at
+          `SELECT ${PASSWORD_AUTH_SELECT}, (to_jsonb(users) ->> 'deleted_at') AS deleted_at, (to_jsonb(users) ->> 'purged_at') AS purged_at
            FROM users
            WHERE lower(email) = $1
               OR lower(username) = $2
@@ -755,7 +777,7 @@ export class AuthService {
   }
 
   private async mapAuthUserRow(row: UserRow): Promise<(User & { password_hash: string })> {
-    const resolved = await this.resolveRbacProfile(
+    const resolved = await this.readRbacProfile(
       row.id,
       row.role,
       Array.isArray(row.permissions) ? row.permissions : [],
@@ -768,12 +790,14 @@ export class AuthService {
       name: row.name,
       role: resolved.role,
       permissions: resolved.permissions,
+      attendanceProfileUnavailable: resolved.attendanceProfileUnavailable,
       is_active: row.is_active,
       must_change_password: row.must_change_password,
       activation_status: row.activation_status,
       local_password_set: row.local_password_set,
       password_hash: row.password_hash,
       access_generation: Number(row.access_generation ?? 0),
+      revocation_revision: row.revocation_revision,
       deleted_at: (row as UserRow & { deleted_at?: string | null }).deleted_at ?? null,
       purged_at: (row as UserRow & { purged_at?: string | null }).purged_at ?? null,
       created_at: row.created_at,
@@ -782,7 +806,7 @@ export class AuthService {
   }
 
   private sanitizeUser(user: User & { password_hash?: string }): User {
-    const { password_hash: _password_hash, ...safeUser } = user
+    const { password_hash: _password_hash, revocation_revision: _revision, attendanceProfileUnavailable: _unavailable, ...safeUser } = user
     return safeUser as User
   }
 
@@ -791,7 +815,7 @@ export class AuthService {
     fallbackRole: string,
     fallbackPermissions: string[],
     readOnlyPermissionCheck = false,
-  ): Promise<{ role: string; permissions: string[]; permissionCheckProfileUnknown?: boolean }> {
+  ): Promise<{ role: string; permissions: string[]; permissionCheckProfileUnknown?: boolean; attendanceProfileUnavailable?: boolean }> {
     if (readOnlyPermissionCheck) {
       // A checker must never run the attendance role bootstrap or development fallback.
       // Use strict readers so a missing schema cannot be mistaken for an empty profile.
@@ -801,6 +825,9 @@ export class AuthService {
       const permissions = await lookups.listPermissions(userId)
       let permissionCheckProfileUnknown = false
       if (this.shouldBackfillAttendanceSelfService(role, permissions)) {
+        if (normalizeProductMode(process.env.PRODUCT_MODE) === 'platform') {
+          return { role, permissions, permissionCheckProfileUnknown: await this.hasLegacyAttendanceRole(userId) }
+        }
         const result = await query(
           `SELECT enabled, source FROM user_namespace_admissions
            WHERE user_id = $1 AND namespace = $2 LIMIT 1`,
@@ -815,27 +842,51 @@ export class AuthService {
       }
       return { role, permissions, permissionCheckProfileUnknown }
     }
+    return this.readRbacProfile(userId, fallbackRole, fallbackPermissions)
+  }
+
+  private async readRbacProfile(userId: string, fallbackRole: string, fallbackPermissions: string[]) {
     let role = fallbackRole
-    let permissions = fallbackPermissions
+    let permissions: string[]
+    let attendanceProfileUnavailable = false
 
     try {
       const admin = await isRbacAdmin(userId)
       if (admin) role = 'admin'
     } catch (error) {
+      attendanceProfileUnavailable = true
       this.logger.warn('RBAC role lookup failed', error instanceof Error ? error : undefined)
     }
 
     try {
-      permissions = await listUserPermissions(userId)
+      permissions = await listUserPermissions(userId, 'authoritative')
     } catch (error) {
+      attendanceProfileUnavailable = true
+      permissions = withoutUnverifiedAttendance(fallbackPermissions)
       this.logger.warn('RBAC permission lookup failed', error instanceof Error ? error : undefined)
     }
 
+    return { role, permissions, attendanceProfileUnavailable }
+  }
+
+  private async hasLegacyAttendanceRole(userId: string): Promise<boolean> {
+    const result = await poolManager.get().query(
+      `SELECT 1 FROM user_roles ur WHERE ur.user_id = $1 AND ur.role_id = $2
+       AND NOT EXISTS (SELECT 1 FROM user_namespace_admissions WHERE user_id = ur.user_id AND namespace = $3)`,
+      [userId, ATTENDANCE_SELF_SERVICE_ROLE_ID, ATTENDANCE_SELF_SERVICE_NAMESPACE],
+    )
+    return result.rows.length > 0
+  }
+
+  private async withAttendanceSelfService(userId: string, role: string, permissions: string[]): Promise<string[]> {
     if (this.shouldBackfillAttendanceSelfService(role, permissions)) {
       // Only merge after the locked eligibility read + role INSERT commit. Recovery-busy
       // retries start a fresh transaction and re-read the revoke witness under the same lock.
       try {
-        if (await this.backfillAttendanceSelfService(userId, role, permissions)) {
+        const allowed = normalizeProductMode(process.env.PRODUCT_MODE) === 'platform'
+          ? await this.hasLegacyAttendanceRole(userId)
+          : await this.backfillAttendanceSelfService(userId, role, permissions)
+        if (allowed) {
           permissions = Array.from(new Set([...permissions, ...ATTENDANCE_SELF_SERVICE_PERMISSIONS]))
         }
       } catch (error) {
@@ -846,7 +897,7 @@ export class AuthService {
       }
     }
 
-    return { role, permissions }
+    return permissions
   }
 
   private shouldBackfillAttendanceSelfService(role: string, permissions: string[]): boolean {
@@ -1051,7 +1102,7 @@ export class AuthService {
       }
 
       // 获取用户最新信息
-      const user = await this.getUserById(userId)
+      const user = await this.getUserById(userId, false, payload.sessionRevision === undefined && payload.revocationIat === undefined)
       if (!user) {
         return null
       }
@@ -1059,7 +1110,7 @@ export class AuthService {
         return null
       }
 
-      if (await isUserSessionRevoked(user.id, payload.iat)) {
+      if (await isUserSessionRevoked(user.id, payload)) {
         this.logger.warn(`Token refresh failed: session revoked for user ${user.id}`)
         return null
       }
@@ -1079,17 +1130,25 @@ export class AuthService {
       const refreshedUser = tenantId
         ? { ...user, tenantId }
         : user
-      const refreshedToken = this.createToken(refreshedUser, { sid: sessionId, externalAuth: false })
+      const evidence = payload.sessionRevision === undefined
+        ? { revocationIat: payload.revocationIat ?? payload.iat }
+        : { sessionRevision: payload.sessionRevision }
+      const refreshedToken = this.createToken(refreshedUser, { sid: sessionId, externalAuth: false, ...evidence })
       const refreshedPayload = this.readTokenPayload(refreshedToken)
-      if (refreshedPayload?.exp) {
-        const session = await createUserSession(user.id, {
-          sessionId,
-          expectedAccessGeneration: Number(user.access_generation ?? 0),
-          expiresAt: new Date(refreshedPayload.exp * 1000).toISOString(),
-        })
-        if (!session) return null
-      }
+      if (!refreshedPayload?.exp) return null
+      const session = await createUserSession(user.id, {
+        sessionId,
+        expectedSessionRevision: evidence.sessionRevision,
+        expectedRevocationIat: evidence.revocationIat,
+        requireExistingSession: payload.sid !== undefined,
+        expectedAccessGeneration: Number(user.access_generation ?? 0),
+        expiresAt: new Date(refreshedPayload.exp * 1000).toISOString(),
+      })
+      if (!session) return null
 
+      if (!user.attendanceProfileUnavailable && normalizeProductMode(process.env.PRODUCT_MODE) === 'attendance') {
+        await this.withAttendanceSelfService(user.id, user.role, user.permissions)
+      }
       return refreshedToken
     } catch (error) {
       this.logger.warn('Token refresh failed', error instanceof Error ? error : undefined)

@@ -3,7 +3,11 @@ import { describe, expect, it, vi } from 'vitest'
 
 const authServiceMocks = vi.hoisted(() => ({
   verifyToken: vi.fn(),
+  readTokenPayload: vi.fn(),
 }))
+
+const sessionClient = vi.hoisted(() => ({ query: vi.fn(), release: vi.fn() }))
+vi.mock('../../src/db/pg', () => ({ pool: { connect: async () => sessionClient } }))
 
 const metricsMocks = vi.hoisted(() => ({
   jwtAuthFail: { inc: vi.fn() },
@@ -18,7 +22,45 @@ vi.mock('../../src/metrics/metrics', () => ({
   metrics: metricsMocks,
 }))
 
-import { isPublicFormAuthBypass, isWhitelisted, jwtAuthMiddleware, optionalJwtAuthMiddleware } from '../../src/auth/jwt-middleware'
+import { isPublicFormAuthBypass, isWhitelisted, jwtAuthMiddleware, optionalJwtAuthMiddleware, readOnlyAuthorizationJwtAuth } from '../../src/auth/jwt-middleware'
+
+describe('manual delivery session authentication', () => {
+  it.each([
+    ['live', 200], ['invalid token', 401], ['missing principal', 401], ['revoked user', 401],
+    ['revoked session', 401], ['password change required', 403], ['unavailable', 503],
+  ] as const)('uses only signed identity and read-only live state: %s', async (scenario, status) => {
+    authServiceMocks.verifyToken.mockClear()
+    authServiceMocks.readTokenPayload.mockReturnValue(scenario === 'invalid token' ? null : {
+      userId: 'member', sid: 'session', iat: 100, roles: ['admin'], perms: ['*:*'],
+    })
+    sessionClient.query.mockReset().mockImplementation(async (sql: string) => {
+      if (/^(BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY|SET LOCAL|COMMIT|ROLLBACK)/.test(sql)) return { rows: [] }
+      if (sql.startsWith('SELECT id, role')) return { rows: scenario === 'missing principal' ? [] : [
+        { id: 'member', role: 'user', is_active: true, activation_status: 'activated' },
+      ] }
+      if (sql.includes('FROM user_sessions LIMIT 0')) return { rows: [] }
+      if (sql.includes('FROM user_session_revocations')) return { rows: scenario === 'revoked user' ? [{ revoked_after: new Date(100000) }] : [] }
+      if (sql.includes('FROM user_sessions WHERE id')) return { rows: scenario === 'revoked session' ? [] : [{}] }
+      if (scenario === 'unavailable') throw new Error('unavailable')
+      if (sql.startsWith('SELECT role, must_change_password')) return { rows: [{ role: 'user', must_change_password: scenario === 'password change required' }] }
+      throw new Error('unexpected statement')
+    })
+    const req = { headers: { authorization: 'Bearer synthetic' }, method: 'POST', path: '/api/admin/invites/example/manual-delivery' } as Request
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() } as unknown as Response
+    const next = vi.fn()
+    await readOnlyAuthorizationJwtAuth(req, res, next)
+    expect(authServiceMocks.verifyToken).not.toHaveBeenCalled()
+    if (status === 200) {
+      expect(next).toHaveBeenCalledOnce()
+      expect(req.user).toEqual({ id: 'member', role: 'user' })
+      expect(sessionClient.query).toHaveBeenCalledWith('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
+    } else {
+      expect(next).not.toHaveBeenCalled()
+      expect(res.status).toHaveBeenCalledWith(status)
+      expect(req.user).toBeUndefined()
+    }
+  })
+})
 
 describe('jwt auth whitelist', () => {
   it('does not whitelist metrics endpoints anymore', () => {

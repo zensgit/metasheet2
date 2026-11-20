@@ -8,6 +8,8 @@ on:
       - 'packages/core-backend/src/auth/**'
       - 'packages/core-backend/src/multitable/api-token-service.ts'
       - 'packages/core-backend/src/routes/admin-user*.ts'
+      - 'packages/core-backend/src/routes/auth.ts'
+      - 'packages/core-backend/src/index.ts'
       - 'packages/core-backend/src/directory/access-graph-mutex.ts'
       - 'packages/core-backend/src/rbac/role-assignment.ts'
       - 'packages/core-backend/src/rbac/namespace-admission.ts'
@@ -17,10 +19,14 @@ on:
       - 'packages/core-backend/src/services/stock-preparation-members.ts'
       - 'packages/core-backend/src/db/migrations/**'
       - 'packages/core-backend/tests/integration/admin-user-*.db.test.ts'
+      - 'packages/core-backend/tests/integration/password-session-revision.db.test.ts'
+      - 'packages/core-backend/src/rbac/strict-principal.ts'
       - 'packages/core-backend/tests/integration/permission-ux-*.db.test.ts'
       - 'packages/core-backend/tests/utils/permission-lifecycle-setup.ts'
+      - 'packages/core-backend/tests/utils/pinned-server.ts'
       - 'packages/core-backend/tests/utils/permission-ux-*.ts'
       - 'packages/core-backend/vitest.admin-users-realdb.config.ts'
+      - 'packages/core-backend/vitest.invite-manual-delivery.config.ts'
       - 'packages/core-backend/vitest.permission-ux-*.config.ts'
       - '.github/workflows/admin-users-realdb-review.yml'
   push:
@@ -30,6 +36,8 @@ on:
       - 'packages/core-backend/src/auth/**'
       - 'packages/core-backend/src/multitable/api-token-service.ts'
       - 'packages/core-backend/src/routes/admin-user*.ts'
+      - 'packages/core-backend/src/routes/auth.ts'
+      - 'packages/core-backend/src/index.ts'
       - 'packages/core-backend/src/directory/access-graph-mutex.ts'
       - 'packages/core-backend/src/rbac/role-assignment.ts'
       - 'packages/core-backend/src/rbac/namespace-admission.ts'
@@ -39,10 +47,14 @@ on:
       - 'packages/core-backend/src/services/stock-preparation-members.ts'
       - 'packages/core-backend/src/db/migrations/**'
       - 'packages/core-backend/tests/integration/admin-user-*.db.test.ts'
+      - 'packages/core-backend/tests/integration/password-session-revision.db.test.ts'
+      - 'packages/core-backend/src/rbac/strict-principal.ts'
       - 'packages/core-backend/tests/integration/permission-ux-*.db.test.ts'
       - 'packages/core-backend/tests/utils/permission-lifecycle-setup.ts'
+      - 'packages/core-backend/tests/utils/pinned-server.ts'
       - 'packages/core-backend/tests/utils/permission-ux-*.ts'
       - 'packages/core-backend/vitest.admin-users-realdb.config.ts'
+      - 'packages/core-backend/vitest.invite-manual-delivery.config.ts'
       - 'packages/core-backend/vitest.permission-ux-*.config.ts'
       - '.github/workflows/admin-users-realdb-review.yml'
 
@@ -55,23 +67,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        slice: [batch, recycle, permission-ux-admin, permission-ux-legacy, permission-ux-witness]
+        slice: [batch, recycle, manual-delivery, permission-ux-admin, permission-ux-legacy, permission-ux-witness]
     services:
       postgres:
         image: postgres:15-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: admin_review_synthetic
+          POSTGRES_DB: ${{ matrix.slice == 'manual-delivery' && 'admin_review_synthetic_delivery' || 'admin_review_synthetic' }}
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d admin_review_synthetic"
+          --health-cmd "pg_isready -U postgres -d ${{ matrix.slice == 'manual-delivery' && 'admin_review_synthetic_delivery' || 'admin_review_synthetic' }}"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
     env:
-      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/admin_review_synthetic
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/${{ matrix.slice == 'manual-delivery' && 'admin_review_synthetic_delivery' || 'admin_review_synthetic' }}
       EXPECT_DB: '1'
       NODE_ENV: test
     steps:
@@ -105,6 +117,13 @@ jobs:
             tests/integration/admin-user-recycle-review.db.test.ts \
             --reporter=verbose --reporter=json --outputFile.json=../../artifacts/admin-users-realdb/recycle-vitest.json
           node scripts/ops/vitest-zero-skip.mjs artifacts/admin-users-realdb/recycle-vitest.json 1
+      - name: Manual delivery against dedicated PostgreSQL
+        if: matrix.slice == 'manual-delivery'
+        run: |
+          mkdir -p artifacts/admin-users-realdb
+          pnpm --filter @metasheet/core-backend exec vitest run --config vitest.invite-manual-delivery.config.ts \
+            --reporter=verbose --reporter=json --outputFile.json=../../artifacts/admin-users-realdb/manual-delivery-vitest.json
+          node scripts/ops/vitest-zero-skip.mjs artifacts/admin-users-realdb/manual-delivery-vitest.json 2
       - name: Permission management UX against isolated PostgreSQL
         if: startsWith(matrix.slice, 'permission-ux-')
         run: |

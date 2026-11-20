@@ -206,6 +206,7 @@ describe('AuthService.register — null is exists-only (O2-A3)', () => {
   })
 
   it('an OUTER (post-transaction) failure rethrows the SAME object', async () => {
+    process.env.PRODUCT_MODE = 'attendance'
     // The registration transaction commits, then the post-commit cache invalidation
     // throws — the outer catch must rethrow it, never swallow it to a fabricated
     // "exists" null.

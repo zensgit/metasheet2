@@ -121,15 +121,17 @@ function expectGuardSawName(
   expect(input?.matchedNames).toContain(name)
 }
 
-async function boot() {
+async function boot(publicInvite = false) {
   vi.resetModules()
   cap.router = null
   seen.inputs = []
   live.policy = await vi.importActual<typeof import('../src/router/guardPolicy')>('../src/router/guardPolicy')
-  window.history.replaceState({}, '', '/settings')
+  window.history.replaceState({}, '', publicInvite ? '/accept-invite?token=invalid-fixture' : '/settings')
   window.localStorage.clear()
-  window.localStorage.setItem('auth_token', 'session-token')
-  window.localStorage.setItem('jwt', 'session-token')
+  if (!publicInvite) {
+    window.localStorage.setItem('auth_token', 'session-token')
+    window.localStorage.setItem('jwt', 'session-token')
+  }
   const requests: string[] = []
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input)
@@ -194,6 +196,14 @@ describe('installed management route guard fails closed', () => {
     seen.inputs = []
     window.localStorage.clear()
     vi.unstubAllGlobals()
+  })
+
+  it('does not start authentication on the public invitation route before returning to sign-in', async () => {
+    const { router, requests } = await boot(true)
+    expect(router.currentRoute.value.path).toBe('/accept-invite')
+    await go(router, '/login?redirect=%2Fsettings', requests)
+    expect(router.currentRoute.value.path).toBe('/login')
+    expect(requests.filter(url => url.includes('/api/auth/'))).toEqual([])
   })
 
   it.each(['feature', 'context', 'policy'] as const)(

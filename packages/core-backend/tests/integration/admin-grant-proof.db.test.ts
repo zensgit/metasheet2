@@ -531,6 +531,8 @@ describe('admin grant proof native issuer', () => {
     await proof.up(db)
     const strictGrant = await import('../../src/db/migrations/zzzz20261118120000_strict_login_grant_scope.js')
     await strictGrant.up(db)
+    const revision = await import('../../src/db/migrations/zzzz20261118180000_add_session_revocation_revision.js')
+    await revision.up(db)
     await pool.query(
       'INSERT INTO kysely_migration (name, timestamp) VALUES ($1, $2)',
       [STRICT_LOGIN_GRANT_MIGRATION_NAME, 'fixture'],

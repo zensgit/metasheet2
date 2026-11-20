@@ -29,10 +29,12 @@ import { getDingTalkWorkNotificationRuntimeStatusFromStore } from '../integratio
 import {
   INVITE_ACCOUNT_ALREADY_ONBOARDED,
   INVITE_RESEND_CONFLICT,
+  type InviteLedgerStatus,
   inviteAccountOnboardedSql,
   recordInvite,
 } from '../auth/invite-ledger'
 import { isInviteTokenExpired, issueInviteToken } from '../auth/invite-tokens'
+import { deliverInviteManually, ManualDeliveryConflict } from '../auth/invite-manual-delivery'
 import { LOGIN_NAME_RULE_CODE, validateLoginName } from '../auth/login-name-rule'
 import { validatePassword } from '../auth/password-policy'
 import { getUserSession, listUserSessions, revokeUserSession } from '../auth/session-registry'
@@ -321,7 +323,7 @@ type AdminInviteLedgerRow = {
   role_id: string | null
   invited_by: string | null
   invite_token: string
-  status: 'pending' | 'accepted' | 'revoked' | 'expired'
+  status: InviteLedgerStatus
   accepted_at: string | null
   consumed_by: string | null
   last_sent_at: string
@@ -4724,6 +4726,28 @@ export function adminUsersRouter(): Router {
     }
   })
 
+  r.post('/api/admin/invites/:inviteId/manual-delivery', readOnlyAuthorizationJwtAuth, async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store')
+    const actorId = await ensurePlatformAdmin(req, res)
+    if (!actorId) return
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body) || Object.keys(req.body).length) {
+      return jsonError(res, 400, 'INVALID_BODY', 'Expected an empty object')
+    }
+    const inviteId = req.params.inviteId
+    if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(inviteId)) {
+      return jsonError(res, 400, 'INVALID_INVITE_ID', 'Invalid invite ID')
+    }
+    try {
+      return jsonOk(res, await deliverInviteManually(inviteId.toLowerCase(), actorId))
+    } catch (error) {
+      if (sendIfRecoveryAuthorityBusy(res, error)) return
+      if (error instanceof ManualDeliveryConflict) {
+        return jsonError(res, 409, 'INVITE_MANUAL_DELIVERY_CONFLICT', 'Invite cannot be delivered manually')
+      }
+      return sendAdminUsersServerFailure(req, res, 'INVITE_MANUAL_DELIVERY_FAILED', 'Manual delivery failed', error)
+    }
+  })
+
   r.post('/api/admin/invites/:inviteId/revoke', authenticate, async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
@@ -4822,6 +4846,9 @@ export function adminUsersRouter(): Router {
       if (normalized.status === 'accepted') {
         return jsonError(res, 409, 'INVITE_ALREADY_ACCEPTED', 'Accepted invite cannot be resent')
       }
+      if (!['pending', 'expired', 'revoked'].includes(normalized.status)) {
+        return jsonError(res, 409, INVITE_RESEND_CONFLICT, 'Invite cannot be resent')
+      }
       // An account that has completed its first sign-in is not sent another invite. Decided before a
       // token is issued, so a refusal writes nothing.
       if (current.account_onboarded === true) {
@@ -4851,7 +4878,7 @@ export function adminUsersRouter(): Router {
              last_sent_at = NOW(),
              updated_at = NOW()
          WHERE id = $1
-           AND status <> 'accepted'
+           AND status IN ('pending', 'expired', 'revoked')
            AND NOT ${inviteAccountOnboardedSql('user_invites')}
          RETURNING id, user_id, email, preset_id, product_mode, role_id, invited_by, invite_token, status, accepted_at, consumed_by, last_sent_at, created_at, updated_at,
                    NULL::text AS user_name,

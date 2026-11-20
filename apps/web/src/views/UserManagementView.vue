@@ -12,7 +12,7 @@
         <router-link class="user-admin__link" data-testid="permission-source-link" :to="permissionSourceLocation">权限来源与例外</router-link>
         <router-link class="user-admin__link" to="/admin/directory">目录同步</router-link>
         <router-link class="user-admin__link" to="/admin/audit">管理审计</router-link>
-        <button class="user-admin__button" type="button" data-testid="open-invite-user" @click="openInvite()">
+        <button class="user-admin__button" type="button" data-testid="open-invite-user" :disabled="deliverySending" @click="openInvite()">
           邀请用户
         </button>
       </div>
@@ -53,6 +53,7 @@
         type="button"
         role="tab"
         :aria-selected="surface === 'members'"
+        :disabled="deliverySending"
         @click="surface = 'members'"
       >
         成员
@@ -75,6 +76,7 @@
         type="button"
         role="tab"
         :aria-selected="surface === 'recycle'"
+        :disabled="deliverySending"
         data-testid="recycle-bin-tab"
         @click="surface = 'recycle'"
       >
@@ -93,6 +95,7 @@
           <button
             class="user-admin__filter"
             :class="{ 'user-admin__filter--active': inviteStatusFilter === 'pending' }"
+            :disabled="deliverySending"
             type="button"
             @click="inviteStatusFilter = 'pending'"
           >
@@ -101,6 +104,7 @@
           <button
             class="user-admin__filter"
             :class="{ 'user-admin__filter--active': inviteStatusFilter === 'all' }"
+            :disabled="deliverySending"
             type="button"
             @click="inviteStatusFilter = 'all'"
           >
@@ -111,21 +115,41 @@
           </button>
         </div>
       </div>
+      <p v-if="deliveryNeedsRefresh" role="alert">未能确认交付结果。请先刷新邀请记录，不要重复提交。</p>
+      <section v-if="deliveryTarget" aria-label="手动交付" class="user-admin__role-card">
+        <template v-if="deliveryCredentials">
+          <strong>已改为手动交付</strong>
+          <p>登录标识：{{ deliveryCredentials.loginIdentifier }}</p>
+          <p>临时密码：{{ deliveryCredentials.temporaryPassword }}</p>
+          <p>请通过安全渠道交给本人。关闭后不再显示。</p>
+        </template>
+        <template v-else>
+          <strong>确认将这条邀请改为手动交付？</strong>
+          <p>姓名：{{ deliveryTarget.userName || '未提供' }} · 登录标识：{{ deliveryTarget.email }}</p>
+          <p>原邀请链接和旧密码将失效，不会发送邮件。请将临时密码交给本人，首次登录必须改密。</p>
+          <button type="button" class="user-admin__button" :disabled="deliverySending || busy || loadingInvites" @click="confirmDelivery">确认手动交付</button>
+        </template>
+        <p v-if="deliverySending" role="status">正在交付，请留在此页等待一次性密码。</p>
+        <button type="button" class="user-admin__button user-admin__button--secondary" :disabled="deliverySending" @click="closeDelivery">关闭</button>
+      </section>
       <div v-if="inviteRecords.length === 0" class="user-admin__empty">暂无邀请记录</div>
       <div v-else-if="visibleInviteRecords.length === 0" class="user-admin__empty">没有待处理的邀请</div>
       <div v-else class="user-admin__role-list user-admin__invite-list">
         <article v-for="record in visibleInviteRecords" :key="record.id" class="user-admin__role-card">
           <strong>{{ record.userName || record.email }}</strong>
           <span>{{ record.email }}</span>
-          <small>{{ record.productMode }} · {{ record.status }} · 创建于 {{ formatDate(record.createdAt) }}</small>
+          <small>{{ record.productMode }} · {{ record.status === 'manual_delivery' ? '已手动交付' : record.status }} · 创建于 {{ formatDate(record.createdAt) }}</small>
           <p>最近发送：{{ formatDate(record.lastSentAt) }}</p>
           <p v-if="record.acceptedAt">接受时间：{{ formatDate(record.acceptedAt) }}</p>
-          <a :href="buildInviteUrl(record.inviteToken)" target="_blank" rel="noreferrer">打开邀请链接</a>
+          <a v-if="record.status !== 'manual_delivery'" :href="buildInviteUrl(record.inviteToken)" target="_blank" rel="noreferrer">打开邀请链接</a>
+          <p v-if="record.status === 'pending' && deliveryConflicts.has(record.id)" role="alert">此邀请不符合手动交付条件，请勿再次提交。</p>
+          <button v-else-if="adminAllowed && record.status === 'pending'" type="button" class="user-admin__button"
+            :disabled="busy || loadingInvites || deliveryLocked" @click="openDelivery(record)">改为手动交付</button>
           <button
-            v-if="record.status !== 'accepted'"
+            v-if="['pending', 'expired', 'revoked'].includes(record.status)"
             class="user-admin__button user-admin__button--secondary"
             type="button"
-            :disabled="busy || loadingInvites"
+            :disabled="busy || loadingInvites || deliveryLocked"
             @click="void resendInvite(record)"
           >
             重发邀请
@@ -134,7 +158,7 @@
             v-if="record.status === 'pending'"
             class="user-admin__button user-admin__button--secondary"
             type="button"
-            :disabled="busy || loadingInvites"
+            :disabled="busy || loadingInvites || deliveryLocked"
             @click="void revokeInvite(record)"
           >
             撤销邀请
@@ -1457,6 +1481,7 @@ import {
 import { copyText } from '../utils/clipboard'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAuth } from '../composables/useAuth'
+import { useInviteManualDelivery } from './useInviteManualDelivery'
 import { useAdminAuthorizationOperation } from '../composables/useAdminAuthorizationOperation'
 import { useLocale } from '../composables/useLocale'
 import { userRecycleLabel, type UserRecycleLabelKey } from './userRecycleLabels'
@@ -1764,7 +1789,7 @@ type InviteLedgerRecord = {
   roleId: string | null
   invitedByEmail: string | null
   invitedByName: string | null
-  status: 'pending' | 'accepted' | 'revoked' | 'expired'
+  status: 'pending' | 'accepted' | 'revoked' | 'expired' | 'manual_delivery'
   acceptedAt: string | null
   inviteToken: string
   lastSentAt: string
@@ -2043,6 +2068,19 @@ const createdInviteMessage = ref('')
 const createdOnboarding = ref<OnboardingPacket | null>(null)
 const createdAttendanceOnboardingTarget = ref<AttendanceOnboardingTarget | null>(null)
 const inviteRecords = ref<InviteLedgerRecord[]>([])
+let inviteReadGeneration = 0
+const {
+  target: deliveryTarget, credentials: deliveryCredentials, sending: deliverySending, needsRefresh: deliveryNeedsRefresh,
+  conflicts: deliveryConflicts,
+  open: openDelivery, close: closeDelivery, confirm: confirmDelivery,
+} = useInviteManualDelivery((id) => {
+  inviteReadGeneration++
+  loadingInvites.value = false
+  const record = inviteRecords.value.find((item) => item.id === id)
+  if (record) record.status = 'manual_delivery'
+})
+const deliveryLocked = computed(() => Boolean(deliveryTarget.value || deliverySending.value || deliveryNeedsRefresh.value))
+watch([surface, inviteStatusFilter, selectedUserId, inviteOpen], closeDelivery, { flush: 'sync' })
 const userSessions = ref<UserSessionRecord[]>([])
 const access = ref<UserAccess | null>(null)
 const selectedRoleMembership = computed(() => selectedRoleMembershipHint(selectedRoleId.value, access.value?.roles || []))
@@ -3498,6 +3536,9 @@ async function loadAccessPresets(): Promise<void> {
 }
 
 async function loadInviteRecords(userId?: string): Promise<void> {
+  const generation = ++inviteReadGeneration
+  const reconcilesDelivery = deliveryNeedsRefresh.value
+  if (!deliveryCredentials.value && !deliverySending.value) closeDelivery()
   loadingInvites.value = true
   try {
     const params = new URLSearchParams({ page: '1', pageSize: '10' })
@@ -3509,7 +3550,7 @@ async function loadInviteRecords(userId?: string): Promise<void> {
     }
 
     const data = payload.data as { items?: Array<Record<string, unknown>> } | undefined
-    if (userId && userId !== selectedUserId.value) return
+    if (generation !== inviteReadGeneration || (userId && userId !== selectedUserId.value)) return
     inviteRecords.value = Array.isArray(data?.items)
       ? data.items.map((item) => ({
           id: String(item.id || ''),
@@ -3521,18 +3562,19 @@ async function loadInviteRecords(userId?: string): Promise<void> {
           roleId: typeof item.role_id === 'string' ? item.role_id : typeof item.roleId === 'string' ? item.roleId : null,
           invitedByEmail: typeof item.invited_by_email === 'string' ? item.invited_by_email : typeof item.invitedByEmail === 'string' ? item.invitedByEmail : null,
           invitedByName: typeof item.invited_by_name === 'string' ? item.invited_by_name : typeof item.invitedByName === 'string' ? item.invitedByName : null,
-          status: (item.status || 'pending') as InviteLedgerRecord['status'],
+          status: item.status as InviteLedgerRecord['status'],
           acceptedAt: typeof item.accepted_at === 'string' ? item.accepted_at : typeof item.acceptedAt === 'string' ? item.acceptedAt : null,
           inviteToken: String(item.invite_token || item.inviteToken || ''),
           lastSentAt: String(item.last_sent_at || item.lastSentAt || item.created_at || item.createdAt || ''),
           createdAt: String(item.created_at || item.createdAt || ''),
         }))
       : []
+    if (reconcilesDelivery && Array.isArray(data?.items)) deliveryNeedsRefresh.value = false
   } catch (error) {
-    if (userId && userId !== selectedUserId.value) return
+    if (generation !== inviteReadGeneration || (userId && userId !== selectedUserId.value)) return
     setStatus(error instanceof Error ? error.message : '加载邀请记录失败', 'error')
   } finally {
-    loadingInvites.value = false
+    if (generation === inviteReadGeneration) loadingInvites.value = false
   }
 }
 

@@ -126,7 +126,7 @@ async function readUserPermissionsOn(userId: string, runQuery: RbacPermissionQue
   }
 }
 
-async function readUserPermissionsFromPool(userId: string): Promise<string[]> {
+async function readUserPermissionsFromPool(userId: string, authoritative: boolean): Promise<string[]> {
   const { rows } = await pool!.query(
     `SELECT DISTINCT permission_code AS code FROM (
        SELECT up.permission_code FROM user_permissions up WHERE up.user_id = $1
@@ -139,10 +139,15 @@ async function readUserPermissionsFromPool(userId: string): Promise<string[]> {
   const legacy = await pool!.query('SELECT permissions FROM users WHERE id = $1', [userId])
   const legacyPerms = Array.isArray(legacy.rows[0]?.permissions) ? legacy.rows[0].permissions : []
   const merged = Array.from(new Set([...codes, ...legacyPerms]))
+  if (authoritative) {
+    const inspected = await inspectPermissionCodesByNamespaceAdmission(userId, merged)
+    if (inspected.unavailable) throw new Error('Permission inputs unavailable')
+    return inspected.codes
+  }
   return filterPermissionCodesByNamespaceAdmission(userId, merged)
 }
 
-export async function listUserPermissions(userId: string, runQuery?: RbacPermissionQueryFn): Promise<string[]> {
+export async function listUserPermissions(userId: string, runQuery?: RbacPermissionQueryFn | 'authoritative'): Promise<string[]> {
   if (typeof runQuery === 'function') return readUserPermissionsOn(userId, runQuery)
   // Each pool-path call reads committed rows (direct ∪ role ∪ legacy, then admission).
   // Cost is those indexed reads on every profile load instead of a 60s Map hit.
@@ -150,24 +155,29 @@ export async function listUserPermissions(userId: string, runQuery?: RbacPermiss
   // this process never runs invalidateUserPerms. RBAC_CACHE_TTL_MS does not change that.
   const generation = currentPermCacheGeneration(userId)
   metrics.rbacPermCacheMiss.inc()
-  if (!pool) return []
+  const authoritative = runQuery === 'authoritative'
+  if (!pool) {
+    if (authoritative) throw new Error('Permission inputs unavailable')
+    return []
+  }
   try {
-    const filtered = await readUserPermissionsFromPool(userId)
+    const filtered = await readUserPermissionsFromPool(userId, authoritative)
     if (currentPermCacheGeneration(userId) !== generation) {
       // One bounded retry. If that retry's generation also moves, the codes it
       // read are not a witness for this caller: do not return them. Empty fails
       // closed the current profile; the next caller reads again. Optional-schema
       // errors still use the catch below. Nothing is stored for a later call.
       const retryGeneration = currentPermCacheGeneration(userId)
-      const retried = await readUserPermissionsFromPool(userId)
+      const retried = await readUserPermissionsFromPool(userId, authoritative)
       if (currentPermCacheGeneration(userId) !== retryGeneration) {
+        if (authoritative) throw new Error('Permission inputs changed')
         return []
       }
       return retried
     }
     return filtered
   } catch (error) {
-    if (isDatabaseSchemaError(error) && rbacOptionalEnabled()) {
+    if (!authoritative && isDatabaseSchemaError(error) && rbacOptionalEnabled()) {
       if (!rbacDegraded) {
         logger.warn('RBAC service degraded - permission tables not found')
         logger.warn('RBAC queries will return empty results')

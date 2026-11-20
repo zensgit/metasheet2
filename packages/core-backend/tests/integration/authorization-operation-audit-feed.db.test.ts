@@ -25,7 +25,7 @@ suite('unified administrator audit feed on PostgreSQL', () => {
     await control.query(`
       CREATE TABLE users (id text PRIMARY KEY, name text, email text, username text, mobile text, role text, is_admin boolean, is_active boolean DEFAULT true, activation_status text DEFAULT 'activated', deleted_at timestamptz, purged_at timestamptz, permissions jsonb DEFAULT '[]', access_generation bigint DEFAULT 0, password_hash text, must_change_password boolean DEFAULT false, local_password_set boolean DEFAULT true, created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now());
       CREATE TABLE user_roles (user_id text, role_id text, PRIMARY KEY(user_id,role_id));
-      CREATE TABLE user_session_revocations (user_id text PRIMARY KEY, revoked_after timestamptz, updated_at timestamptz, updated_by text, reason text);
+      CREATE TABLE user_session_revocations (user_id text PRIMARY KEY, revoked_after timestamptz, updated_at timestamptz, updated_by text, reason text, revision uuid NOT NULL DEFAULT gen_random_uuid());
       CREATE TABLE user_sessions (id text, user_id text, revoked_at timestamptz);
       CREATE TABLE audit_logs (id bigint, created_at timestamptz, event_type text, event_category text, event_severity text, action text, resource_type text, resource_id text, user_id integer, user_name text, user_email text, action_details jsonb, error_code text);
       CREATE TABLE authorization_operation_receipts (actor_id text, client_operation_id uuid, request_digest text, target_user_id text, action jsonb, receipt jsonb, PRIMARY KEY(actor_id,client_operation_id));

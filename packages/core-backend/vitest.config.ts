@@ -30,6 +30,8 @@ export default defineConfig({
     // Mock-DB integration tests (comment-flow, collab-ux-flow) can run without a live DB.
     exclude: [
       'tests/integration/admin-user-batch-review.db.test.ts',
+      'tests/integration/admin-user-invite-manual-delivery.db.test.ts',
+      'tests/integration/password-session-revision.db.test.ts',
       'tests/integration/admin-user-recycle-review.db.test.ts',
       // This suite has a dedicated isolated-PG runner with trust-on/off sentinels.
       'tests/integration/business-check-realdb.test.ts',

@@ -43,6 +43,7 @@ const namespaceAdmissionMocks = vi.hoisted(() => ({
 }))
 
 const inviteMocks = vi.hoisted(() => ({
+  verifyInviteToken: vi.fn(),
   issueInviteToken: vi.fn(() => 'invite-token-fixed'),
   isInviteTokenExpired: vi.fn((token: string) => token === 'eyJhbGciOiJIUzI1NiJ9.eyJ0eXBlIjoiaW52aXRlIiwiZXhwIjoxfQ.sig'),
 }))
@@ -53,6 +54,14 @@ const dingtalkOauthMocks = vi.hoisted(() => ({
 
 const activateMocks = vi.hoisted(() => ({
   activatePendingUser: vi.fn(),
+}))
+
+vi.mock('../../src/auth/jwt-middleware', async (original) => ({
+  ...await original<typeof import('../../src/auth/jwt-middleware')>(),
+  readOnlyAuthorizationJwtAuth: (req: Request, _res: Response, next: () => void) => {
+    req.user = { ...state.authUser }
+    next()
+  },
 }))
 
 const attendanceW4Mocks = vi.hoisted(() => ({
@@ -219,6 +228,7 @@ vi.mock('../../src/rbac/namespace-admission', async () => ({
 }))
 
 vi.mock('../../src/auth/invite-tokens', () => ({
+  verifyInviteToken: inviteMocks.verifyInviteToken,
   issueInviteToken: inviteMocks.issueInviteToken,
   isInviteTokenExpired: inviteMocks.isInviteTokenExpired,
 }))
@@ -6030,7 +6040,7 @@ describe('admin-users routes', () => {
     expect(readSql).toContain(`( ${signedIn('inv')} OR ${acceptedBefore('inv')} ) AS account_onboarded`)
     expect(writeSql).toContain('UPDATE user_invites')
     expect(writeSql).toContain(
-      `WHERE id = $1 AND status <> 'accepted' AND NOT ( ${signedIn('user_invites')} OR ${acceptedBefore('user_invites')} ) RETURNING`,
+      `WHERE id = $1 AND status IN ('pending', 'expired', 'revoked') AND NOT ( ${signedIn('user_invites')} OR ${acceptedBefore('user_invites')} ) RETURNING`,
     )
     expect(pgMocks.query.mock.calls[1]?.[1]).toEqual(['invite-1', 'invite-token-fixed', 'admin-1'])
   })
@@ -6052,6 +6062,79 @@ describe('admin-users routes', () => {
     expect(pgMocks.query).toHaveBeenCalledTimes(2)
     expect(auditMocks.auditLog).not.toHaveBeenCalled()
   })
+
+  it('does not issue a resend token after manual delivery', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query.mockResolvedValueOnce({ rows: [resendLedgerRow({ status: 'manual_delivery' })] })
+    const response = await invokeRoute('post', '/api/admin/invites/:inviteId/resend', { params: { inviteId: 'invite-1' } })
+    expect(response.statusCode).toBe(409)
+    expect(pgMocks.query).toHaveBeenCalledTimes(1)
+    expect(inviteMocks.issueInviteToken).not.toHaveBeenCalled()
+  })
+
+  async function deliverWithUserWriteError(message: string) {
+    vi.stubEnv('AUTH_LOGIN_USE_ALIASES', 'false')
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    const inviteId = '00000000-0000-4000-8000-000000000001'
+    const email = 'target@example.test'
+    inviteMocks.verifyInviteToken.mockReturnValue({ userId: 'target', email, iat: 100, exp: 200 })
+    for (const rows of [[], [{ user_id: 'target' }], [{ email, updated_at: new Date(100000) }],
+      [{ id: inviteId, email, invite_token: 'latest', status: 'pending', accepted_at: null, consumed_by: null }],
+      [{ id: 'admin-1' }], [], [{ id: 'target' }], [{ id: inviteId }]]) pgMocks.query.mockResolvedValueOnce({ rows })
+    pgMocks.query.mockImplementationOnce(async (sql) => {
+      expect(sql).toContain('UPDATE users SET password_hash')
+      throw Object.assign(new Error(message), { code: '40001' })
+    })
+    return invokeRoute('post', '/api/admin/invites/:inviteId/manual-delivery', { params: { inviteId } })
+  }
+
+  it('mounts the read-only session gate on manual delivery itself', async () => {
+    const { readOnlyAuthorizationJwtAuth } = await import('../../src/auth/jwt-middleware')
+    const layer = adminUsersRouter().stack.find(entry => entry.route?.path === '/api/admin/invites/:inviteId/manual-delivery')
+    expect(layer?.route?.stack[0].handle).toBe(readOnlyAuthorizationJwtAuth)
+  })
+
+  it('[recovery-census:admin-users:manual-delivery] maps the lease marker at manual password update', async () => {
+    const response = await deliverWithUserWriteError('METASHEET_RECOVERY_AUTHORITY_BUSY')
+    expect(response.statusCode).toBe(409)
+    expect(response.body).toEqual({ ok: false, error: { code: 'RECOVERY_AUTHORITY_BUSY',
+      message: 'Recovery is stabilizing permissions; retry this change.', details: { retryable: true } } })
+    census.record('admin-users:manual-delivery')
+  })
+
+  it('does not classify bare 40001 on manual password update as a recovery lease', async () => {
+    const response = await deliverWithUserWriteError('serialization failure')
+    expect(response.statusCode).toBe(500)
+    expect(response.body).toMatchObject({ ok: false, error: { code: 'INVITE_MANUAL_DELIVERY_FAILED' } })
+    expect(response.body).not.toHaveProperty('data')
+  })
+
+  it('refuses a stale admin claim when locked persisted authority is missing after the target wait', async () => {
+    state.authUser.role = 'admin'
+    const inviteId = '00000000-0000-4000-8000-000000000001'
+    const email = 'target@example.test'
+    for (const rows of [[], [{ user_id: 'target' }], [{ email, updated_at: new Date() }],
+      [{ id: inviteId, email, status: 'pending', accepted_at: null, consumed_by: null }], []]) {
+      pgMocks.query.mockResolvedValueOnce({ rows })
+    }
+    const response = await invokeRoute('post', '/api/admin/invites/:inviteId/manual-delivery', { params: { inviteId } })
+    expect(response.statusCode).toBe(403)
+    expect(response.body).toEqual({ ok: false, error: { code: 'FORBIDDEN', message: 'Admin access required' } })
+    expect(pgMocks.query.mock.calls.at(-1)).toEqual([expect.stringContaining('FOR SHARE OF u, membership'), ['admin-1']])
+    expect(pgMocks.query.mock.calls.some(([sql]) => /^\s*(UPDATE|INSERT)/i.test(sql))).toBe(false)
+  })
+
+  it.each([{ body: { loginIdentifier: 'override' } }, { body: { temporaryPassword: 'override' } }, { body: [] }])(
+    'rejects manual delivery overrides or non-object bodies before any write', async ({ body }) => {
+      rbacMocks.isAdmin.mockResolvedValue(true)
+      const response = await invokeRoute('post', '/api/admin/invites/:inviteId/manual-delivery', {
+        params: { inviteId: '00000000-0000-4000-8000-000000000001' }, body: body as Record<string, unknown>,
+      })
+      expect(response.statusCode).toBe(400)
+      expect(response.headers['cache-control']).toBe('no-store')
+      expect(pgMocks.query).not.toHaveBeenCalled()
+    },
+  )
 
   it('revokes a pending invite and writes an audit entry', async () => {
     rbacMocks.isAdmin.mockResolvedValue(true)

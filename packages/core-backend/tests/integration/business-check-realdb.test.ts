@@ -1,8 +1,9 @@
 import express from 'express'
 import * as jwt from 'jsonwebtoken'
 import request from 'supertest'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { authService } from '../../src/auth/AuthService'
+import { matchesPermission } from '../../src/auth/permission-match'
 import { pool } from '../../src/db/pg'
 import { authenticate } from '../../src/middleware/auth'
 import { rbacGuard, rbacGuardAll } from '../../src/rbac/rbac'
@@ -46,7 +47,7 @@ beforeAll(async () => {
   await db.query('CREATE TABLE role_permissions (role_id text, permission_code text)')
   await db.query('CREATE TABLE user_permissions (user_id text, permission_code text)')
   await db.query('CREATE TABLE user_namespace_admissions (user_id text, namespace text, enabled boolean, source text, granted_by text, updated_by text, created_at timestamptz, updated_at timestamptz)')
-  await db.query('CREATE TABLE user_session_revocations (user_id text, revoked_after timestamptz, updated_at timestamptz, updated_by text, reason text)')
+  await db.query('CREATE TABLE user_session_revocations (user_id text, revoked_after timestamptz, revision uuid NOT NULL DEFAULT gen_random_uuid(), updated_at timestamptz, updated_by text, reason text)')
   await db.query('CREATE TABLE user_orgs (user_id text, org_id text, is_active boolean)')
   await db.query('CREATE TABLE plugin_multitable_object_registry (sheet_id text, object_id text, plugin_name text)')
   await db.query('CREATE TABLE elearning_stats_multitable_sheets (sheet_id text, base_id text, org_id text)')
@@ -308,7 +309,7 @@ function get(user: string, path: string) { return request(app).get(path).set('Au
         }
         const needsBootstrap = await request(globalApp).post('/api/permissions/v2/business-check').set('Authorization', `Bearer ${tokens.sheetreader}`).send(input)
         expect(needsBootstrap.status).toBe(200)
-        expect(needsBootstrap.body.result).toBe('unknown')
+        expect(needsBootstrap.body.result).toBe(mode === 'attendance' ? 'unknown' : 'deny')
         expect((await db.query("SELECT 1 FROM user_roles WHERE user_id='sheetreader' AND role_id='attendance_employee'")).rows).toHaveLength(0)
         expect((await db.query('SELECT is_called FROM write_attempt_probe')).rows[0].is_called).toBe(false)
       }
@@ -439,6 +440,29 @@ function get(user: string, path: string) { return request(app).get(path).set('Au
     expect((await post('wildcard', single)).body.result).toBe('allow')
     expect((await get('wildcard', '/api/approval-templates?section=invalid')).status).toBe(400)
     expect((await post('wildcard', { ...single, subject: { kind: 'target', userId: 'target' } })).status).toBe(403)
+  })
+
+  it('omits stale attendance permissions when the optional admission table cannot be read', async () => {
+    vi.stubEnv('PRODUCT_MODE', 'platform')
+    vi.stubEnv('RBAC_OPTIONAL', '1')
+    try {
+      const id = 'missing_admission_witness'
+      const email = `${id}@invalid.test`
+      await db.query(`INSERT INTO users(id,email,name,role,permissions,is_active,activation_status) VALUES ($1,$2,$1,'user','[" attendance:admin "," *:* ","workflow:read"]',true,'activated')`, [id,email])
+      await db.query("INSERT INTO user_permissions VALUES ($1,'attendance:write')", [id])
+      const token = authService.createToken({ id, email, name: id, role: 'user', permissions: [], created_at: new Date(), updated_at: new Date() })
+      await db.query('ALTER TABLE user_namespace_admissions RENAME TO missing_admissions')
+      try {
+        const user = await authService.verifyToken(token)
+        expect(user?.permissions).toEqual(['workflow:read'])
+        expect(matchesPermission(user!.permissions, 'attendance:read')).toBe(false)
+        expect((await db.query('SELECT role_id FROM user_roles WHERE user_id=$1', [id])).rows).toEqual([])
+      } finally {
+        await db.query('ALTER TABLE missing_admissions RENAME TO user_namespace_admissions')
+      }
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 
 })

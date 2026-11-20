@@ -136,7 +136,14 @@ function throwCoded(message: string, code: ActivateErrorCode): never {
 /**
  * Activate a pending user. All durable writes in one transaction.
  */
-export async function activatePendingUser(input: ActivateUserInput): Promise<ActivateUserResult> {
+export type ActivationSessionReceipt = {
+  sessionGeneration: number
+  externalOrigin: ClosedExternalOrigin | null
+}
+
+export function activatePendingUser(input: ActivateUserInput): Promise<ActivateUserResult>
+export function activatePendingUser(input: ActivateUserInput & { mode: 'sso' }, forSession: true): Promise<ActivationSessionReceipt>
+export async function activatePendingUser(input: ActivateUserInput, forSession = false): Promise<ActivateUserResult | ActivationSessionReceipt> {
   const userId = String(input.userId || '').trim()
   if (!userId) throwCoded('userId is required', 'ACTIVATE_USER_REQUIRED')
 
@@ -147,7 +154,6 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
   // Derived-only: seeded null so no refactor can ever revive the client-orgId-as-membership
   // shape by skipping the source resolution — the ONLY assignment is from the helper's return.
   let membershipOrgId: string | null = null
-  let externalOrigin: ClosedExternalOrigin | null = null
 
   if (input.mode === 'temp_password') {
     temporaryPassword = input.temporaryPassword?.trim() || generateTempPassword()
@@ -168,7 +174,7 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
   // fails with the marker 40001. Re-raise it as the named retryable RecoveryConflictError
   // (mapActivateError in routes/admin-users.ts maps it to a retryable 409); every other
   // error — every ACTIVATE_* reason included — rethrows unchanged.
-  await translateRecoveryConflict(() => transaction(async (client) => {
+  return translateRecoveryConflict(() => transaction(async (client) => {
     const lockedUsers = await lockUsersForAccessGraphWrite(client, [userId])
     const user = lockedUsers.get(userId)
     if (!user) {
@@ -207,7 +213,7 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
       mode: input.mode,
       connectionIds: source.connectionIds,
     })
-    externalOrigin = activationScope.origin
+    const externalOrigin = activationScope.origin
     const skipLegacyDingTalkGrant = activationScope.skipLegacyGrant
 
     // DT-HARDEN-02 on the activation path. The directory page's bind/admit refuses a DingTalk grant
@@ -345,22 +351,28 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
       )
     }
 
-    await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
+    const generations = await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
       userIds: [userId],
       actorId: input.adminUserId ?? userId,
       reason: 'superseded by pending-user activation',
     })
+    if (forSession) {
+      const next = generations.get(userId)
+      if (next === undefined || !Number.isSafeInteger(next) || next <= 0) {
+        throw new Error('Invalid activation generation')
+      }
+      return { sessionGeneration: next, externalOrigin }
+    }
+    return {
+      userId,
+      activationStatus: 'activated' as const,
+      isActive: true as const,
+      temporaryPassword,
+      localPasswordSet,
+      membershipOrgId,
+      externalOrigin,
+    }
   }))
-
-  return {
-    userId,
-    activationStatus: 'activated',
-    isActive: true,
-    temporaryPassword,
-    localPasswordSet,
-    membershipOrgId,
-    externalOrigin,
-  }
 }
 
 type DirectorySourceRow = {

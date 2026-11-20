@@ -87,6 +87,9 @@ describe('activatePendingUser (T3)', () => {
       temporaryPassword: 'TempPass9A!',
     })
     expect(result.activationStatus).toBe('activated')
+    expect(Object.keys(result).sort()).toEqual([
+      'activationStatus', 'externalOrigin', 'isActive', 'localPasswordSet', 'membershipOrgId', 'temporaryPassword', 'userId',
+    ])
     expect(result.isActive).toBe(true)
     expect(result.temporaryPassword).toBe('TempPass9A!')
     expect(result.localPasswordSet).toBe(true)
@@ -340,7 +343,7 @@ describe('activatePendingUser (T3)', () => {
     ).rejects.toMatchObject({ code: 'ACTIVATE_SOURCE_INELIGIBLE' })
   })
 
-  it('accepts an implicit SSO source when at least one linked DingTalk source is active', async () => {
+  it.each([false, true])('accepts an eligible implicit SSO source, for session: %s', async (forSession) => {
     pgMocks.query
       .mockResolvedValueOnce({
         rows: [{
@@ -382,18 +385,17 @@ describe('activatePendingUser (T3)', () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [{ access_generation: 1 }] })
+      .mockResolvedValueOnce({ rows: [{ access_generation: '37' }] })
 
-    await expect(
-      activatePendingUser({
-        userId: 'u1',
-        mode: 'sso',
-      }),
-    ).resolves.toMatchObject({
-      userId: 'u1',
-      activationStatus: 'activated',
-      localPasswordSet: false,
-    })
+    const input = { userId: 'u1', mode: 'sso' } as const
+    if (forSession) {
+      await expect(activatePendingUser(input, true)).resolves.toEqual({ sessionGeneration: 37, externalOrigin: null })
+    } else {
+      await expect(activatePendingUser(input)).resolves.toEqual({
+        userId: 'u1', activationStatus: 'activated', isActive: true, localPasswordSet: false,
+        membershipOrgId: 'org-2', temporaryPassword: undefined, externalOrigin: null,
+      })
+    }
     const membershipWrite = pgMocks.query.mock.calls.find((call) =>
       String(call[0]).includes('INSERT INTO user_orgs'))
     expect(membershipWrite?.[1]).toEqual(['u1', 'org-2'])

@@ -61,7 +61,7 @@ export const appRoutes: RouteRecordRaw[] = [
     path: '/accept-invite',
     name: 'accept-invite',
     component: () => import('../views/AcceptInviteView.vue'),
-    meta: { title: 'Accept Invite', hideNavbar: true, requiresAuth: false }
+    meta: { title: 'Accept Invite', hideNavbar: true, requiresAuth: false, skipShellBootstrap: true }
   },
   {
     path: ROUTE_PATHS.FORCE_PASSWORD_CHANGE,

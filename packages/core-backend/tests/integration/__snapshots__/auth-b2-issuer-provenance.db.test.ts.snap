@@ -1,0 +1,101 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`ordinary final issuer and required password provenance > password origin stays on the ordinary session path beside a committed scope 1`] = `
+[
+  "SELECT id FROM users WHERE id = $1 AND access_generation = $2 AND must_change_password AND local_password_set FOR UPDATE",
+  "SELECT revision FROM user_session_revocations WHERE user_id = $1 FOR UPDATE",
+  "SELECT id, role, is_active, activation_status, deleted_at, purged_at FROM users WHERE id = $1",
+  "SELECT id, user_id, revoked_at FROM user_sessions LIMIT 0",
+  "SELECT revoked_after, revision FROM user_session_revocations WHERE user_id = $1",
+  "SELECT 1 FROM user_sessions WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL LIMIT 1",
+  "SELECT id FROM user_sessions WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL FOR SHARE",
+  "UPDATE users SET password_hash = $1, must_change_password = FALSE, local_password_set = TRUE, updated_at = NOW() WHERE id = $2 RETURNING id",
+  "INSERT INTO user_session_revocations (user_id, revoked_after, updated_at, updated_by, reason) VALUES ($1, clock_timestamp(), NOW(), $1, 'password-change-required-cleared') ON CONFLICT (user_id) DO UPDATE SET revoked_after = GREATEST(user_session_revocations.revoked_after, EXCLUDED.revoked_after), updated_at = EXCLUDED.updated_at, updated_by = EXCLUDED.updated_by, reason = EXCLUDED.reason WHERE user_session_revocations.revision = $2::uuid RETURNING revision",
+]
+`;
+
+exports[`ordinary final issuer and required password provenance > password origin stays on the ordinary session path beside a committed scope 2`] = `
+[
+  "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+  "WITH subject AS ( SELECT id FROM users WHERE id=$2 AND ($6::bigint IS NULL OR COALESCE(access_generation,0)=$6::bigint) FOR SHARE ) INSERT INTO user_sessions ( id, user_id, issued_at, expires_at, last_seen_at, revoked_at, revoked_by, revoke_reason, ip_address, user_agent, created_at, updated_at ) SELECT $1, $2, NOW(), $3::timestamptz, NOW(), NULL, NULL, NULL, $4, $5, NOW(), NOW() WHERE (EXISTS (SELECT 1 FROM subject) OR ($6::bigint IS NULL AND $7::boolean AND NOT EXISTS (SELECT 1 FROM users WHERE id=$2))) ON CONFLICT (id) DO UPDATE SET user_id = EXCLUDED.user_id, expires_at = EXCLUDED.expires_at, last_seen_at = NOW(), ip_address = COALESCE(EXCLUDED.ip_address, user_sessions.ip_address), user_agent = COALESCE(EXCLUDED.user_agent, user_sessions.user_agent), updated_at = NOW() WHERE user_sessions.revoked_at IS NULL AND user_sessions.user_id=EXCLUDED.user_id RETURNING id, user_id, issued_at, expires_at, last_seen_at, revoked_at, revoked_by, revoke_reason, ip_address, user_agent, created_at, updated_at",
+  "SELECT revision, revoked_after FROM user_session_revocations WHERE user_id=$1 FOR SHARE",
+]
+`;
+
+exports[`ordinary final issuer and required password provenance > required password change does not fall back when the ready helper fails 1`] = `
+[
+  "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+  "SELECT id FROM users WHERE id = $1 AND access_generation = $2 AND must_change_password AND local_password_set FOR UPDATE",
+  "SELECT revision FROM user_session_revocations WHERE user_id = $1 FOR UPDATE",
+  "SELECT id, role, is_active, activation_status, deleted_at, purged_at FROM users WHERE id = $1",
+  "SELECT id, user_id, revoked_at FROM user_sessions LIMIT 0",
+  "SELECT revoked_after, revision FROM user_session_revocations WHERE user_id = $1",
+  "SELECT 1 FROM user_sessions WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL LIMIT 1",
+  "INSERT INTO user_session_revocations (user_id, revoked_after, updated_at, updated_by, reason) VALUES ($1, TIMESTAMPTZ 'epoch', clock_timestamp(), $1, 'admin-grant-baseline') ON CONFLICT (user_id) DO NOTHING RETURNING revision",
+  "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+  "SET LOCAL lock_timeout = '5s'",
+  "SET LOCAL statement_timeout = '30s'",
+  "SELECT candidate.nspname AS schema_name FROM pg_catalog.unnest(pg_catalog.current_schemas(false)) WITH ORDINALITY AS candidate(nspname, ord) ORDER BY candidate.ord",
+  "SELECT u.id, u.local_password_set, u.must_change_password, u.activation_status, u.is_active, u.role, u.local_credential_version::text AS local_credential_version, (pg_catalog.to_jsonb(u) ->> 'deleted_at') AS deleted_at, (pg_catalog.to_jsonb(u) ->> 'purged_at') AS purged_at FROM "synthetic_schema"."users" u WHERE u.id = $1 FOR UPDATE",
+  "INSERT INTO "synthetic_schema"."user_session_revocations" (user_id, revoked_after, updated_at, updated_by, reason) VALUES ($1, TIMESTAMPTZ '1970-01-01 00:00:00+00', pg_catalog.clock_timestamp(), $1, $2) ON CONFLICT (user_id) DO NOTHING",
+  "SELECT floor(extract(epoch FROM revoked_after) * 1000)::text AS revoked_after_ms, floor(extract(epoch FROM revoked_after) * 1000000)::text AS revoked_after_us FROM "synthetic_schema"."user_session_revocations" WHERE user_id = $1 FOR UPDATE",
+  "SELECT s.user_id, (s.revoked_at IS NULL AND s.expires_at > pg_catalog.clock_timestamp()) AS live FROM "synthetic_schema"."user_sessions" s WHERE s.id = $1 FOR SHARE",
+  "UPDATE "synthetic_schema"."users" SET password_hash = $1, must_change_password = FALSE, local_password_set = TRUE, updated_at = pg_catalog.clock_timestamp() WHERE id = $2 AND must_change_password IS TRUE RETURNING local_credential_version::text AS local_credential_version",
+  "INSERT INTO "synthetic_schema"."user_local_credential_establishments" (user_id, credential_version, kind, source_session_id) VALUES ($1, $2::uuid, 'self_password_change', $3) RETURNING id::text AS establishment_id, established_at",
+]
+`;
+
+exports[`ordinary final issuer and required password provenance > required password change keeps the pre-provenance update when actor tables are absent 1`] = `
+[
+  "SELECT id FROM users WHERE id = $1 AND access_generation = $2 AND must_change_password AND local_password_set FOR UPDATE",
+  "SELECT revision FROM user_session_revocations WHERE user_id = $1 FOR UPDATE",
+  "SELECT id, role, is_active, activation_status, deleted_at, purged_at FROM users WHERE id = $1",
+  "SELECT id, user_id, revoked_at FROM user_sessions LIMIT 0",
+  "SELECT revoked_after, revision FROM user_session_revocations WHERE user_id = $1",
+  "SELECT 1 FROM user_sessions WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL LIMIT 1",
+  "SELECT id FROM user_sessions WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL FOR SHARE",
+  "UPDATE users SET password_hash = $1, must_change_password = FALSE, local_password_set = TRUE, updated_at = NOW() WHERE id = $2 RETURNING id",
+  "INSERT INTO user_session_revocations (user_id, revoked_after, updated_at, updated_by, reason) VALUES ($1, clock_timestamp(), NOW(), $1, 'password-change-required-cleared') ON CONFLICT (user_id) DO UPDATE SET revoked_after = GREATEST(user_session_revocations.revoked_after, EXCLUDED.revoked_after), updated_at = EXCLUDED.updated_at, updated_by = EXCLUDED.updated_by, reason = EXCLUDED.reason WHERE user_session_revocations.revision = $2::uuid RETURNING revision",
+]
+`;
+
+exports[`ordinary final issuer and required password provenance > required password change keeps the pre-provenance update when actor tables are absent 2`] = `
+[
+  "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+  "WITH subject AS ( SELECT id FROM users WHERE id=$2 AND ($6::bigint IS NULL OR COALESCE(access_generation,0)=$6::bigint) FOR SHARE ) INSERT INTO user_sessions ( id, user_id, issued_at, expires_at, last_seen_at, revoked_at, revoked_by, revoke_reason, ip_address, user_agent, created_at, updated_at ) SELECT $1, $2, NOW(), $3::timestamptz, NOW(), NULL, NULL, NULL, $4, $5, NOW(), NOW() WHERE (EXISTS (SELECT 1 FROM subject) OR ($6::bigint IS NULL AND $7::boolean AND NOT EXISTS (SELECT 1 FROM users WHERE id=$2))) ON CONFLICT (id) DO UPDATE SET user_id = EXCLUDED.user_id, expires_at = EXCLUDED.expires_at, last_seen_at = NOW(), ip_address = COALESCE(EXCLUDED.ip_address, user_sessions.ip_address), user_agent = COALESCE(EXCLUDED.user_agent, user_sessions.user_agent), updated_at = NOW() WHERE user_sessions.revoked_at IS NULL AND user_sessions.user_id=EXCLUDED.user_id RETURNING id, user_id, issued_at, expires_at, last_seen_at, revoked_at, revoked_by, revoke_reason, ip_address, user_agent, created_at, updated_at",
+  "SELECT revision, revoked_after FROM user_session_revocations WHERE user_id=$1 FOR SHARE",
+]
+`;
+
+exports[`ordinary final issuer and required password provenance > required password change records version, establishment, and a later watermark, then accepts the new password 1`] = `
+[
+  "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+  "SELECT id FROM users WHERE id = $1 AND access_generation = $2 AND must_change_password AND local_password_set FOR UPDATE",
+  "SELECT revision FROM user_session_revocations WHERE user_id = $1 FOR UPDATE",
+  "SELECT id, role, is_active, activation_status, deleted_at, purged_at FROM users WHERE id = $1",
+  "SELECT id, user_id, revoked_at FROM user_sessions LIMIT 0",
+  "SELECT revoked_after, revision FROM user_session_revocations WHERE user_id = $1",
+  "SELECT 1 FROM user_sessions WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL LIMIT 1",
+  "INSERT INTO user_session_revocations (user_id, revoked_after, updated_at, updated_by, reason) VALUES ($1, TIMESTAMPTZ 'epoch', clock_timestamp(), $1, 'admin-grant-baseline') ON CONFLICT (user_id) DO NOTHING RETURNING revision",
+  "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+  "SET LOCAL lock_timeout = '5s'",
+  "SET LOCAL statement_timeout = '30s'",
+  "SELECT candidate.nspname AS schema_name FROM pg_catalog.unnest(pg_catalog.current_schemas(false)) WITH ORDINALITY AS candidate(nspname, ord) ORDER BY candidate.ord",
+  "SELECT u.id, u.local_password_set, u.must_change_password, u.activation_status, u.is_active, u.role, u.local_credential_version::text AS local_credential_version, (pg_catalog.to_jsonb(u) ->> 'deleted_at') AS deleted_at, (pg_catalog.to_jsonb(u) ->> 'purged_at') AS purged_at FROM "synthetic_schema"."users" u WHERE u.id = $1 FOR UPDATE",
+  "INSERT INTO "synthetic_schema"."user_session_revocations" (user_id, revoked_after, updated_at, updated_by, reason) VALUES ($1, TIMESTAMPTZ '1970-01-01 00:00:00+00', pg_catalog.clock_timestamp(), $1, $2) ON CONFLICT (user_id) DO NOTHING",
+  "SELECT floor(extract(epoch FROM revoked_after) * 1000)::text AS revoked_after_ms, floor(extract(epoch FROM revoked_after) * 1000000)::text AS revoked_after_us FROM "synthetic_schema"."user_session_revocations" WHERE user_id = $1 FOR UPDATE",
+  "SELECT s.user_id, (s.revoked_at IS NULL AND s.expires_at > pg_catalog.clock_timestamp()) AS live FROM "synthetic_schema"."user_sessions" s WHERE s.id = $1 FOR SHARE",
+  "UPDATE "synthetic_schema"."users" SET password_hash = $1, must_change_password = FALSE, local_password_set = TRUE, updated_at = pg_catalog.clock_timestamp() WHERE id = $2 AND must_change_password IS TRUE RETURNING local_credential_version::text AS local_credential_version",
+  "INSERT INTO "synthetic_schema"."user_local_credential_establishments" (user_id, credential_version, kind, source_session_id) VALUES ($1, $2::uuid, 'self_password_change', $3) RETURNING id::text AS establishment_id, established_at",
+  "UPDATE "synthetic_schema"."user_session_revocations" SET revoked_after = GREATEST(revoked_after, pg_catalog.clock_timestamp()), updated_at = pg_catalog.clock_timestamp(), updated_by = $2, reason = $3 WHERE user_id = $1 RETURNING floor(extract(epoch FROM revoked_after) * 1000000)::text AS watermark_us",
+  "SELECT revision FROM user_session_revocations WHERE user_id = $1",
+]
+`;
+
+exports[`ordinary final issuer and required password provenance > required password change records version, establishment, and a later watermark, then accepts the new password 2`] = `
+[
+  "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+  "WITH subject AS ( SELECT id FROM users WHERE id=$2 AND ($6::bigint IS NULL OR COALESCE(access_generation,0)=$6::bigint) FOR SHARE ) INSERT INTO user_sessions ( id, user_id, issued_at, expires_at, last_seen_at, revoked_at, revoked_by, revoke_reason, ip_address, user_agent, created_at, updated_at ) SELECT $1, $2, NOW(), $3::timestamptz, NOW(), NULL, NULL, NULL, $4, $5, NOW(), NOW() WHERE (EXISTS (SELECT 1 FROM subject) OR ($6::bigint IS NULL AND $7::boolean AND NOT EXISTS (SELECT 1 FROM users WHERE id=$2))) ON CONFLICT (id) DO UPDATE SET user_id = EXCLUDED.user_id, expires_at = EXCLUDED.expires_at, last_seen_at = NOW(), ip_address = COALESCE(EXCLUDED.ip_address, user_sessions.ip_address), user_agent = COALESCE(EXCLUDED.user_agent, user_sessions.user_agent), updated_at = NOW() WHERE user_sessions.revoked_at IS NULL AND user_sessions.user_id=EXCLUDED.user_id RETURNING id, user_id, issued_at, expires_at, last_seen_at, revoked_at, revoked_by, revoke_reason, ip_address, user_agent, created_at, updated_at",
+  "SELECT revision, revoked_after FROM user_session_revocations WHERE user_id=$1 FOR SHARE",
+]
+`;

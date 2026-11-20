@@ -816,6 +816,12 @@ export const NOT_DRIVEN_SITES = Object.freeze([
       'AuthService.register mints the new user id with crypto.randomUUID() inside the transaction, so the battery cannot hold a lease on the subject the users/user_roles triggers will key on.',
   },
   {
+    site: 'admin-users:manual-delivery',
+    reason: 'no-trigger-on-written-columns',
+    detail:
+      'Manual delivery updates only password_hash, must_change_password, access_generation and updated_at on users. The recovery UPDATE trigger watches role, permissions and is_active; the lifecycle trigger is INSERT/DELETE only. The actor membership is locked, not written. Neither user_invites nor audit_logs carries a recovery trigger. The route unit tests inject marked and unmarked 40001 errors; these are not held-lease HTTP evidence.',
+  },
+  {
     site: 'admin-users:create-user',
     reason: 'unknowable-lease-key',
     detail:

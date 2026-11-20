@@ -420,7 +420,7 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
         CREATE TABLE user_namespace_admissions(user_id text,namespace text,enabled boolean,source text,granted_by text,
           updated_by text,created_at timestamptz,updated_at timestamptz,PRIMARY KEY(user_id,namespace));
         CREATE TABLE user_session_revocations(user_id text PRIMARY KEY,revoked_after timestamptz,updated_at timestamptz,
-          updated_by text,reason text);
+          updated_by text,reason text,revision uuid NOT NULL DEFAULT gen_random_uuid());
         CREATE TABLE user_sessions(id text PRIMARY KEY,user_id text,issued_at timestamptz,expires_at timestamptz,
           last_seen_at timestamptz,revoked_at timestamptz,revoked_by text,revoke_reason text,ip_address text,user_agent text,
           created_at timestamptz,updated_at timestamptz);

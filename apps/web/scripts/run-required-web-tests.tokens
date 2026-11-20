@@ -648,6 +648,7 @@ useAttendanceRequestTimezone
 useAutoSumTotal
 useDingTalkPersonRecipientStatus
 usePlmExportActions
+userManagementManualDelivery
 userManagementRoleMembership
 userManagementView
 uuid-no-bare-randomuuid

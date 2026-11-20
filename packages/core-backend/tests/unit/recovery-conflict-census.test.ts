@@ -677,12 +677,10 @@ describe('O2-S2/O2-A1 recovery-conflict wiring census', () => {
     expect(countCalls('function sendIfRecoveryAuthorityBusy(res: Response, error: unknown): boolean {', 'sendIfRecoveryAuthorityBusy')).toBe(0)
     // …while a real call site still counts (positive control for the counter).
     expect(countCalls('if (sendIfRecoveryAuthorityBusy(res, error)) return', 'sendIfRecoveryAuthorityBusy')).toBe(1)
-    // And the REAL admin-users source counts exactly its six writer sites, not seven
-    // (six calls + one declaration).
     const source = stripComments(
       readFileSync(path.join(SRC_ROOT, 'routes/admin-users.ts'), 'utf8'),
     )
-    expect(countCalls(source, 'sendIfRecoveryAuthorityBusy')).toBe(6)
+    expect(countCalls(source, 'sendIfRecoveryAuthorityBusy')).toBe(7)
   })
 
   it('NEGATIVE CONTROL: a comment cannot satisfy the census (call counting ignores comments)', () => {
@@ -1115,7 +1113,7 @@ describe('P3-1 runtime census recorder — the execution-proof mechanism', () =>
       expect([...(sites as ReadonlySet<string>)].sort()).toEqual([...(byFile.get(testFile) as ReadonlySet<string>)].sort())
       total += (sites as ReadonlySet<string>).size
     }
-    // The whole enumerated surface: 58 call sites ⇒ 58 registered legs, no duplicates.
+    // The whole enumerated surface: 59 call sites including invite manual delivery.
     // (48 until the O2-D1 denominator slice added univer-meta's 5 and AuthService's 2; 55 → 56 is the
     // S5b members port's role write, R-39; 56 → 57 is roles.ts DELETE of a namespace-admin /
     // admin-equivalent role, whose membership removal reaches user_roles; 57 → 58 is
@@ -1123,7 +1121,7 @@ describe('P3-1 runtime census recorder — the execution-proof mechanism', () =>
     // sendIfRecoveryConflict site on routes/permissions.ts.)
     expect(total).toBe(allCensusLegs().length)
     expect(new Set(allCensusLegs().map((leg) => leg.site)).size).toBe(total)
-    expect(total).toBe(58)
+    expect(total).toBe(59)
   })
 
   it('a COMPLETE executed set is clean (positive control for the coverage predicate)', () => {
@@ -1162,7 +1160,7 @@ describe('P3-1 runtime census recorder — the execution-proof mechanism', () =>
         checked += 1
       }
     }
-    expect(checked).toBe(58)
+    expect(checked).toBe(59)
   })
 
   it('an EXTRA / foreign recorded site reds too (the set comparison is exact, not a subset test)', () => {

@@ -1,7 +1,7 @@
 import { query } from '../db/pg'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 
-export type InviteLedgerStatus = 'pending' | 'accepted' | 'revoked' | 'expired'
+export type InviteLedgerStatus = 'pending' | 'accepted' | 'revoked' | 'expired' | 'manual_delivery'
 export type InviteLedgerProductMode = 'platform' | 'attendance' | 'plm-workbench'
 
 export interface InviteLedgerEntry {
