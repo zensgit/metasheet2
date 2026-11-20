@@ -149,7 +149,13 @@ function createAttendanceShiftService(deps) {
     DEFAULT_ORG_ID,
     normalizeLegacyRotationRulesForShiftName,
     prepareTimezoneSourceChange,
+    readReferenceSegmentsCapability,
   } = deps
+
+  async function readReferenceCapability(db, orgId) {
+    if (typeof readReferenceSegmentsCapability !== 'function') return false
+    return await readReferenceSegmentsCapability(db, orgId) === true
+  }
 
   function segmentValidationError(details) {
     return new HttpError(
@@ -497,35 +503,18 @@ function createAttendanceShiftService(deps) {
     }]
   }
 
-  /**
-   * Values-safe capability projection: state and labels only, no secrets and no
-   * member/user values. Shows authoritative segment calculation disabled by default.
-   *
-   * #4556 Gate A / Option B: this projection is a pure DTO with no write trx / port in
-   * hand, so it is pinned to the closed legacy posture (`enabled: false`) rather than
-   * re-deriving posture from the environment. That is byte-identical to the retired
-   * env-gate's production behaviour (the plugin master gate was OFF, so this was always
-   * `false`). The authoritative reference-writer decision is made by the port, not here;
-   * a shadow/authoritative org's capability hint stays 'preview_only'.
-   *
-   * STILL PINNED after the residual-R4 slice — deliberately, and adjudicated rather than
-   * forgotten. R4 opened the AUTHORIZATION door
-   * (`index.cjs`, `assertWorkContextSegmentCalculationAllowed`), which refuses writes; this
-   * function is a DISPLAY hint that gates nothing (Gate A adjudication #3: the whole
-   * `SEGMENT_CALCULATION_IMPLEMENTED` family reaches only the read-only W6 effective-policy
-   * aggregate, whose transaction is `SET TRANSACTION READ ONLY`). Making it accurate needs a
-   * posture read on a request-scoped client this synchronous DTO does not have, i.e. a route
-   * change, not a one-line thread-through. Named out of scope, not claimed resolved: an
-   * enabled org sees `preview_only` in the shift DTO while its writers are admitted.
+  /** Values-safe display metadata, separate from reference-writer admission.
+   * The bare/default DTO remains closed. A request-scoped readonly reader can
+   * report reference authoring without claiming the calculator is available.
    */
-  function buildShiftCapabilities(orgId) {
+  function buildShiftCapabilities(orgId, referenceSegmentsCapability = false) {
     const enabled = false
     return {
       segmentCalculation: {
         enabled,
         defaultEnabled: false,
         authoritativeResults: enabled,
-        multiSegmentAuthoring: enabled ? 'enabled' : 'preview_only',
+        multiSegmentAuthoring: referenceSegmentsCapability === true ? 'enabled' : 'preview_only',
         flag: SEGMENT_CALCULATION_FLAG_ENV,
       },
     }
@@ -562,7 +551,7 @@ function createAttendanceShiftService(deps) {
    * Full shift DTO: legacy envelope fields (compatibility projection), segments,
    * calculationMode, plannedMinutes, flexPolicy, and the values-safe capability block.
    */
-  function mapShiftWithSegments(shiftRow, segmentRows, orgId) {
+  function mapShiftWithSegments(shiftRow, segmentRows, orgId, referenceSegmentsCapability = false) {
     const base = mapShiftRow(shiftRow)
     const persisted = (segmentRows ?? []).map(mapSegmentRow)
     const segments = persisted.length > 0 ? persisted : synthesizeSegmentsFromEnvelope(shiftRow)
@@ -579,7 +568,7 @@ function createAttendanceShiftService(deps) {
       plannedMinutes,
       flexPolicy,
       flexEligible: segments.length === 1,
-      capabilities: buildShiftCapabilities(orgId ?? base.orgId),
+      capabilities: buildShiftCapabilities(orgId ?? base.orgId, referenceSegmentsCapability),
     }
   }
 
@@ -642,9 +631,9 @@ function createAttendanceShiftService(deps) {
     }
   }
 
-  async function readShiftWithSegments(trx, orgId, shiftRow) {
+  async function readShiftWithSegments(trx, orgId, shiftRow, referenceSegmentsCapability = false) {
     const segmentsByShiftId = await loadSegmentsByShiftId(trx, orgId, [shiftRow.id])
-    return mapShiftWithSegments(shiftRow, segmentsByShiftId.get(String(shiftRow.id)) ?? [], orgId)
+    return mapShiftWithSegments(shiftRow, segmentsByShiftId.get(String(shiftRow.id)) ?? [], orgId, referenceSegmentsCapability)
   }
 
   /**
@@ -696,6 +685,7 @@ function createAttendanceShiftService(deps) {
     )
 
     const shiftId = randomUUID()
+    const referenceSegmentsCapability = await readReferenceCapability(db, orgId)
     return db.transaction(async (trx) => {
       const verifyTimezone = typeof prepareTimezoneSourceChange === 'function'
         ? await prepareTimezoneSourceChange(trx,{orgId}) : async () => {}
@@ -729,7 +719,7 @@ function createAttendanceShiftService(deps) {
         ],
       )
       await insertSegmentRows(trx, orgId, shiftId, segments)
-      const result = await readShiftWithSegments(trx, orgId, rows[0])
+      const result = await readShiftWithSegments(trx, orgId, rows[0], referenceSegmentsCapability)
       await verifyTimezone()
       return result
     })
@@ -761,6 +751,7 @@ function createAttendanceShiftService(deps) {
       )
     }
     const mode = hasSegments ? 'segments' : (hasEnvelopeTiming ? 'envelope' : 'metadata')
+    const referenceSegmentsCapability = await readReferenceCapability(db, orgId)
 
     return db.transaction(async (trx) => {
       const verifyTimezone = typeof prepareTimezoneSourceChange === 'function'
@@ -935,7 +926,7 @@ function createAttendanceShiftService(deps) {
         await insertSegmentRows(trx, orgId, shiftId, segments)
       }
 
-      const result = await readShiftWithSegments(trx, orgId, rows[0])
+      const result = await readShiftWithSegments(trx, orgId, rows[0], referenceSegmentsCapability)
       await verifyTimezone()
       return result
     })
@@ -948,7 +939,8 @@ function createAttendanceShiftService(deps) {
       [shiftId, orgId],
     )
     if (!rows.length) return null
-    return readShiftWithSegments(db, orgId, rows[0])
+    const referenceSegmentsCapability = await readReferenceCapability(db, orgId)
+    return readShiftWithSegments(db, orgId, rows[0], referenceSegmentsCapability)
   }
 
   /** Parent-first pagination, then one batched segment hydration for the page. */
@@ -966,8 +958,9 @@ function createAttendanceShiftService(deps) {
       [orgId, pageSize, offset],
     )
     const segmentsByShiftId = await loadSegmentsByShiftId(db, orgId, rows.map((row) => row.id))
+    const referenceSegmentsCapability = rows.length > 0 ? await readReferenceCapability(db, orgId) : false
     return {
-      items: rows.map((row) => mapShiftWithSegments(row, segmentsByShiftId.get(String(row.id)) ?? [], orgId)),
+      items: rows.map((row) => mapShiftWithSegments(row, segmentsByShiftId.get(String(row.id)) ?? [], orgId, referenceSegmentsCapability)),
       total,
       page,
       pageSize,
