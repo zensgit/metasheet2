@@ -68,7 +68,14 @@
 - 中途按协调方补充要求 cherry-pick 了 `165a8cdcb`，新组件样式也只用设计令牌；新组件未加入 `ui-foundation-style-guard` 的目标清单（该清单不归本切片），但其样式块经检查无颜色字面量。
 - 用例里按行取表单下拉时，选择器 `[data-action-index="1"] .meta-rule-editor__action-header .el-select` 在两个编辑器同时挂载时 jsdom 返回空（原因未深究），改为先取行元素再在行内查找。
 
-未执行：`pnpm validate:all`、`pnpm lint` 全量、全仓 web 必跑清单全集、浏览器截图自检（本切片没有做临时页面截图）。远端 CI 结果待 PR 上看。
+主会话复核（#6953 合入 main `7f083d494` 后，1c 变基到其上，去掉已被 squash 吸收的 cherry-pick）：
+
+- 在 `apps/web`：`pnpm exec vitest run automation-rule-editor-flow-library automation-rule-editor-flow-mode automation-flow-view multitable-automation-rule-editor multitable-run-integration-job-editor meta-automation-labels automation-action-summary run-required-web-tests-shape ui-foundation-style-guard --reporter=dot` → 9 个文件 461 例全过；
+- `pnpm exec vue-tsc --noEmit -p tsconfig.app.json` 0 错；仓库根 `required-web-lane-token-manifest.mjs --check` MANIFEST MATCHES；
+- 新组件样式块颜色字面量计数为 0；
+- 用不入库的临时页面（加载 `src/styles/tokens.css`）以合成数据截图自检节点库与上线门两个页签：分组、上锁原因、即将开放、上线门各行显示正确。
+
+未执行：`pnpm validate:all`、`pnpm lint` 全量、全仓 web 必跑清单全集。远端 CI 结果待 PR 上看。
 
 ## 4. 已知限制
 
