@@ -4406,6 +4406,13 @@ const flowTrigger = computed(() => {
     const minutes = Number(triggerConfig.intervalMinutes)
     triggerConfig.intervalMs = Number.isFinite(minutes) && minutes > 0 ? minutes * 60000 : 0
   }
+  // schedule.cron: describe the expression and timezone the save path will write — the preset over `cron`
+  // (effectiveCronExpression, as buildPayload does) and the effective timezone (legacy UTC rules stay UTC).
+  if (draft.value.triggerType === 'schedule.cron') {
+    delete triggerConfig.expression
+    triggerConfig.cron = effectiveCronExpression.value
+    triggerConfig.timezone = scheduleTriggerTimezone.value
+  }
   return flowTriggerCard({ triggerType: draft.value.triggerType, triggerConfig }, {
     isZh: isZh.value,
     fieldLabel: (id: string) => props.fields.find((field) => field.id === id)?.name ?? id,
