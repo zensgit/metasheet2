@@ -705,7 +705,43 @@
           >
             {{ l('manager.quickLegacyForm') }}
           </el-button>
+          <el-button
+            class="meta-automation__btn-add"
+            data-automation-new-rule="template"
+            :aria-pressed="showTemplates"
+            @click="showTemplates = !showTemplates"
+          >
+            {{ l('manager.templatesOpen') }}
+          </el-button>
         </div>
+
+        <!-- Integration assistant 1d (R-99 ③): templates A / B. Each fills a NEW draft in the advanced editor
+             (never saved, never enabled here). A template whose session feature is off is listed LOCKED with the
+             reason — the same features the editor gates its trigger / action on. -->
+        <section v-if="showTemplates && !showForm && !showRuleEditor" class="meta-automation__templates" data-automation-templates="true">
+          <div class="meta-automation__recipe-title">{{ l('manager.templatesTitle') }}</div>
+          <p class="meta-automation__templates-hint">{{ l('manager.templatesHint') }}</p>
+          <div class="meta-automation__recipe-grid">
+            <button
+              v-for="offer in templateOffers"
+              :key="offer.template.key"
+              type="button"
+              class="meta-automation__recipe-card"
+              :class="{ 'meta-automation__recipe-card--locked': !offer.open }"
+              :data-automation-template="offer.template.key"
+              :data-template-locked="offer.open ? undefined : 'true'"
+              :disabled="!offer.open"
+              @click="openRuleEditorFromTemplate(offer)"
+            >
+              <span class="meta-automation__recipe-card-title">
+                {{ l(offer.template.titleKey) }}
+                <span v-if="!offer.open" class="meta-automation__template-badge">{{ l('manager.templateLockedBadge') }}</span>
+              </span>
+              <span class="meta-automation__recipe-card-desc">{{ l(offer.template.descriptionKey) }}</span>
+              <span v-if="!offer.open" class="meta-automation__template-reason" data-template-locked-reason="true">{{ l(offer.template.lockedReasonKey) }}</span>
+            </button>
+          </div>
+        </section>
 
         <!-- Rule list -->
         <div v-if="loading" class="meta-automation__empty">{{ l('manager.loading') }}</div>
@@ -858,13 +894,14 @@
       :visible="showRuleEditor"
       :sheet-id="sheetId"
       :rule="editingRule ?? undefined"
+      :seed-rule="ruleEditorSeed"
       :fields="fields"
       :client="client"
       :views="views"
       :test-run-state="activeRuleTestRunState"
       :can-open-ding-talk-group-settings="props.canOpenDingTalkGroupSettings === true"
       :save-error="ruleEditorSaveError"
-      @close="showRuleEditor = false"
+      @close="closeRuleEditor"
       @save="onRuleEditorSave"
       @test="onTestRule"
       @open-dingtalk-groups="emit('open-dingtalk-groups')"
@@ -873,6 +910,8 @@
       :visible="showFlowView"
       :rule="flowViewRule"
       :fields="fields"
+      :sheet-id="sheetId"
+      :client="client"
       @close="showFlowView = false"
     />
     <MetaAutomationLogViewer
@@ -988,7 +1027,16 @@ import {
   type AutomationLastRunChip,
 } from '../utils/meta-automation-labels'
 import { loadRuleEntriesConcurrently, mergeRuleEntries } from '../utils/automation-rule-concurrent-merge'
-import { AUTOMATION_RECIPES, applyRecipeToDraft, type AutomationRecipe } from '../automationRecipes'
+import {
+  AUTOMATION_RECIPES,
+  applyRecipeToDraft,
+  automationRuleTemplateOffers,
+  buildAutomationTemplateSeed,
+  type AutomationRecipe,
+  type AutomationRuleTemplateOffer,
+  type AutomationRuleTemplateSeed,
+} from '../automationRecipes'
+import { useFeatureFlags } from '../../stores/featureFlags'
 import { storedRuleHasDeletedTriggerSelfMutation } from '../automationSaveBlockReasons'
 
 const props = defineProps<{
@@ -1901,9 +1949,37 @@ const activeRuleTestRunState = computed(() => {
 function openRuleEditor(rule?: AutomationRule) {
   editingRule.value = rule ?? null
   editingRuleId.value = rule?.id ?? null
+  ruleEditorSeed.value = null
   ruleEditorSaveError.value = null
   showRuleEditor.value = true
   showForm.value = false
+}
+
+function closeRuleEditor() {
+  showRuleEditor.value = false
+  ruleEditorSeed.value = null
+}
+
+// Integration assistant 1d (register R-99 ③): templates A / B. A template opens the advanced editor on a NEW
+// rule whose draft the editor builds from the seed (its own draftFromRule) — nothing is saved until the author
+// saves through the editor's normal save gate. Open only while the editor's own gating feature is on.
+const featureFlags = useFeatureFlags()
+const showTemplates = ref(false)
+const ruleEditorSeed = ref<AutomationRuleTemplateSeed | null>(null)
+const templateOffers = computed<AutomationRuleTemplateOffer[]>(() => automationRuleTemplateOffers(
+  (feature) => featureFlags.hasFeature(feature),
+))
+
+function openRuleEditorFromTemplate(offer: AutomationRuleTemplateOffer) {
+  // Re-checked here as well as by the disabled button: a locked template never reaches the editor.
+  if (!offer.open || !featureFlags.hasFeature(offer.template.requiredFeature)) return
+  editingRule.value = null
+  editingRuleId.value = null
+  ruleEditorSeed.value = buildAutomationTemplateSeed(offer.template, isZh.value)
+  ruleEditorSaveError.value = null
+  showTemplates.value = false
+  showForm.value = false
+  showRuleEditor.value = true
 }
 
 function openLogViewer(rule: AutomationRule) {
@@ -1955,6 +2031,7 @@ async function onRuleEditorSave(payload: Partial<AutomationRule>, meta?: { dingt
     }
     showRuleEditor.value = false
     editingRule.value = null
+    ruleEditorSeed.value = null
     emit('updated')
   } catch {
     // error ref is set by composable (readable copy for a refused webhook target included)
@@ -2616,6 +2693,40 @@ watch(
 .meta-automation__recipe-card-desc {
   font-size: 12px;
   color: var(--el-text-color-secondary);
+}
+
+.meta-automation__templates {
+  margin-bottom: 10px;
+}
+
+.meta-automation__templates-hint {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.meta-automation__recipe-card--locked {
+  cursor: not-allowed;
+  opacity: 0.75;
+}
+
+.meta-automation__recipe-card--locked:hover {
+  border-color: var(--el-border-color);
+}
+
+.meta-automation__template-badge {
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 400;
+  border: 1px solid var(--el-border-color);
+  border-radius: 999px;
+  padding: 0 6px;
+  color: var(--el-text-color-secondary);
+}
+
+.meta-automation__template-reason {
+  font-size: 12px;
+  color: var(--ms-color-warning);
 }
 
 .meta-automation__recipe-blank {
