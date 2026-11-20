@@ -628,7 +628,7 @@ describe('Attendance admin anchor navigation', () => {
     expect(deleteUrls).toEqual([`/api/attendance/groups/group-a/members/${secondMemberUserId}`])
   })
 
-  it('falls back to saved user IDs when attendance group member label resolution fails', async () => {
+  it('shows a neutral member label and separate saved user ID when label resolution fails', async () => {
     const memberUserId = '44444444-4444-4444-8444-444444444444'
     vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input.toString()
@@ -687,12 +687,12 @@ describe('Attendance admin anchor navigation', () => {
 
     const people = container!.querySelector<HTMLElement>('[data-attendance-group-people]')
     expect(people).toBeTruthy()
-    expect(people!.querySelector('[data-attendance-group-member-label]')).toBeNull()
+    expect(people!.querySelector('[data-attendance-group-member-label]')?.textContent?.trim()).toBe('Unknown member')
     expect(people!.querySelector('[data-attendance-group-member-user-id]')?.textContent).toContain(memberUserId)
     expect(container!.textContent).not.toContain('resolver unavailable')
   })
 
-  it('sends non-UUID (legacy) member IDs to label resolve and falls back to the raw ID (no uuid handoffs)', async () => {
+  it('sends non-UUID (legacy) member IDs to label resolve and keeps a neutral label with the separate raw ID (no uuid handoffs)', async () => {
     const resolveBodies: unknown[] = []
     vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input.toString()
@@ -755,9 +755,214 @@ describe('Attendance admin anchor navigation', () => {
     // No uuid handoffs (496e3a082): non-UUID / legacy member IDs are now sent to the label
     // resolver too (the resolver no longer pre-filters to UUIDs).
     expect(resolveBodies).toEqual([{ userIds: ['legacy-user-1'], orgId: 'default' }])
-    // The resolver rejects the legacy ID (400), so the UI falls back to showing the raw ID.
-    expect(people!.querySelector('[data-attendance-group-member-label]')).toBeNull()
+    // Resolver rejection (400) keeps the raw ID separate from the neutral primary label.
+    expect(people!.querySelector('[data-attendance-group-member-label]')?.textContent?.trim()).toBe('Unknown member')
     expect(people!.querySelector('[data-attendance-group-member-user-id]')?.textContent).toContain('legacy-user-1')
+  })
+
+  describe.each(['member', 'manager'] as const)('W6 %s personnel label residue', (actor) => {
+    const actorUserId = '55555555-5555-4555-8555-555555555555'
+    const foreignUserId = '99999999-9999-4999-8999-999999999999'
+    const rosterEndpoint = actor === 'member' ? 'members' : 'managers'
+
+    async function mountPersonnelRoster(
+      resolve: () => Response | Promise<Response>,
+      userIds = [actorUserId],
+    ): Promise<void> {
+      const resolveBodies: unknown[] = []
+      const resolveMethods: (string | undefined)[] = []
+      const requestedUrls: string[] = []
+      vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        requestedUrls.push(url)
+        if (url === '/api/attendance-admin/users/batch/resolve') {
+          resolveBodies.push(JSON.parse(String(init?.body || '{}')))
+          resolveMethods.push(init?.method)
+          return resolve()
+        }
+        if (url.startsWith('/api/attendance/groups?')) {
+          return jsonResponse(200, {
+            ok: true,
+            data: {
+              items: [{
+                id: 'group-a',
+                name: 'Synthetic group',
+                code: 'synthetic_group',
+                timezone: 'Asia/Shanghai',
+                ruleSetId: null,
+              }],
+            },
+          })
+        }
+        if (url === `/api/attendance/groups/group-a/${rosterEndpoint}`) {
+          return jsonResponse(200, {
+            ok: true,
+            data: {
+              items: userIds.map((userId, index) => ({
+                id: `${actor}-${index + 1}`,
+                groupId: 'group-a',
+                userId,
+                role: 'owner',
+                createdAt: '2026-05-27T08:00:00.000Z',
+              })),
+              total: userIds.length,
+            },
+          })
+        }
+        return jsonResponse(200, { ok: true, data: { items: [], summary: null } })
+      })
+
+      app = createApp(AttendanceView, { mode: 'admin' })
+      app.mount(container!)
+      await flushUi(8)
+
+      const groupsAnchor = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')
+      expect(groupsAnchor).toBeTruthy()
+      groupsAnchor!.click()
+      await flushUi(8)
+
+      expect(container!.querySelectorAll(`[data-attendance-group-${actor}-identity]`)).toHaveLength(userIds.length)
+      expect(resolveBodies).toEqual([{ userIds, orgId: 'default' }])
+      expect(resolveMethods).toEqual(['POST'])
+      expect(requestedUrls.some(url => url.startsWith('/api/admin/users'))).toBe(false)
+    }
+
+    it.each([
+      'missing deleted-representative row',
+      'missing unseen indeterminate row',
+      'resolver 403',
+      'resolver 404',
+      'resolver 500',
+      'rejected network',
+      'whitespace name and email',
+      'null name and empty email',
+      'unexpected extra foreign resolve row',
+    ] as const)('renders a neutral primary label with a separate technical ID for %s', async (scenario) => {
+      await mountPersonnelRoster(() => {
+        if (scenario === 'rejected network') return Promise.reject(new Error('RESOLVER_UNAVAILABLE'))
+        if (scenario === 'resolver 403' || scenario === 'resolver 404' || scenario === 'resolver 500') {
+          return jsonResponse(Number(scenario.slice(-3)), {
+            ok: false,
+            error: { code: 'RESOLVER_UNAVAILABLE', message: 'RESOLVER_UNAVAILABLE' },
+          })
+        }
+        // Missing rows have no tombstone evidence. Deleted-representative and unseen
+        // fixtures deliberately use the same indeterminate scoped response.
+        const items = scenario === 'whitespace name and email'
+          ? [{ id: actorUserId, name: '   ', email: '  ', is_active: true }]
+          : scenario === 'null name and empty email'
+            ? [{ id: actorUserId, name: null, email: '', is_active: true }]
+            : scenario === 'unexpected extra foreign resolve row'
+              ? [{ id: foreignUserId, name: 'Synthetic foreign label', email: 'foreign@example.invalid', is_active: true }]
+              : []
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            requested: 1,
+            items,
+            missingUserIds: items.some(item => item.id === actorUserId) ? [] : [actorUserId],
+            inactiveUserIds: [],
+          },
+        })
+      })
+
+      const identity = container!.querySelector(`[data-attendance-group-${actor}-identity]`)
+      const primary = identity!.querySelector(`[data-attendance-group-${actor}-label]`)
+      const technicalId = identity!.querySelector(`[data-attendance-group-${actor}-user-id]`)
+      expect(primary?.textContent?.trim()).toBe('Unknown member')
+      expect(technicalId?.tagName).toBe('SPAN')
+      expect(technicalId?.textContent?.trim()).toBe(actorUserId)
+      expect(technicalId?.classList.contains('attendance__id-clip')).toBe(false)
+      expect(identity!.querySelector(`[data-attendance-group-${actor}-secondary]`)).toBeNull()
+      expect(identity!.textContent?.includes('Deleted')).toBe(false)
+      expect(container!.textContent?.includes('RESOLVER_UNAVAILABLE')).toBe(false)
+      expect(container!.textContent?.includes('Synthetic foreign label')).toBe(false)
+      expect(container!.textContent?.includes('foreign@example.invalid')).toBe(false)
+      expect(container!.textContent?.includes(foreignUserId)).toBe(false)
+
+      if (actor === 'manager') {
+        const role = container!.querySelector<HTMLSelectElement>('[data-attendance-group-manager-role]')
+        expect(Array.from(role!.options).map(option => option.value)).toEqual(['owner', 'sub_owner'])
+        expect(container!.querySelector<HTMLButtonElement>('[data-attendance-group-manager-remove]')?.disabled).toBe(false)
+      }
+    })
+
+    it('preserves trimmed names, email fallback, and authorized Inactive secondary labels without inferring deletion', async () => {
+      const emailUserId = '66666666-6666-4666-8666-666666666666'
+      const inactiveUserId = '77777777-7777-4777-8777-777777777777'
+      await mountPersonnelRoster(() => jsonResponse(200, {
+        ok: true,
+        data: {
+          requested: 3,
+          items: [
+            { id: actorUserId, name: '  Synthetic Name  ', email: 'name@example.invalid', is_active: true },
+            { id: emailUserId, name: '  ', email: '  email@example.invalid  ', is_active: true },
+            { id: inactiveUserId, name: 'Synthetic Inactive', email: 'inactive@example.invalid', is_active: false },
+          ],
+          missingUserIds: [],
+          inactiveUserIds: [inactiveUserId],
+        },
+      }), [actorUserId, emailUserId, inactiveUserId])
+
+      const identities = Array.from(container!.querySelectorAll(`[data-attendance-group-${actor}-identity]`))
+      expect(identities.map(identity => identity.querySelector(`[data-attendance-group-${actor}-label]`)?.textContent?.trim()))
+        .toEqual(['Synthetic Name', 'email@example.invalid', 'Synthetic Inactive'])
+      expect(identities.map(identity => identity.querySelector(`[data-attendance-group-${actor}-user-id]`)?.textContent?.trim()))
+        .toEqual([actorUserId, emailUserId, inactiveUserId])
+      expect(identities.map(identity => identity.querySelector(`[data-attendance-group-${actor}-secondary]`)?.textContent?.trim() ?? null))
+        .toEqual(['name@example.invalid', null, 'inactive@example.invalid · Inactive'])
+      expect(identities.some(identity => identity.textContent?.includes('Deleted'))).toBe(false)
+      expect(identities.some(identity => identity.textContent?.includes('Unknown member'))).toBe(false)
+    })
+    it('keeps two unresolved people visually distinguishable with identity-bound removal names', async () => {
+      const otherId = '88888888-8888-4888-8888-888888888888'
+      await mountPersonnelRoster(() => jsonResponse(200, { ok: true, data: { items: [], missingUserIds: [actorUserId, otherId] } }), [actorUserId, otherId])
+      const identities = Array.from(container!.querySelectorAll(`[data-attendance-group-${actor}-identity]`))
+      expect(identities.map(node => node.querySelector(`[data-attendance-group-${actor}-label]`)?.textContent?.trim())).toEqual(['Unknown member', 'Unknown member'])
+      expect(identities.map(node => node.querySelector(`[data-attendance-group-${actor}-user-id]`)?.classList.contains('attendance__id-clip'))).toEqual([false, false])
+      expect(identities.map(node => node.querySelector(`[data-attendance-group-${actor}-user-id]`)?.textContent?.trim())).toEqual([actorUserId, otherId])
+      expect(identities.map(node => node.closest('tr')?.querySelector('.attendance__table-actions button')?.getAttribute('aria-label'))).toEqual([
+        `Remove Unknown member (${actorUserId})`, `Remove Unknown member (${otherId})`,
+      ])
+    })
+
+  })
+
+  it('keeps unresolved pending chips visually distinguishable without sending a member write', async () => {
+    const ids = ['pending-a', 'pending-b']
+    const writes: unknown[] = []
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.startsWith('/api/attendance/groups?')) return jsonResponse(200, { ok: true, data: { items: [{ id: 'group-a', name: 'Synthetic group', code: 'synthetic', timezone: 'UTC', ruleSetId: null }] } })
+      if (url.startsWith('/api/attendance-admin/users/search')) return jsonResponse(200, { ok: true, data: { items: ids.map(id => ({ id, name: null, email: '' })), total: 2 } })
+      if (url === '/api/attendance/groups/group-a/members' && init?.method === 'POST') writes.push(init.body)
+      return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+    })
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')!.click()
+    await flushUi(8)
+    const people = container!.querySelector<HTMLElement>('[data-attendance-group-people]')!
+    const select = people.querySelector<HTMLSelectElement>('.attendance__user-picker select')!
+    const append = Array.from(people.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('Append selected user'))!
+    for (const id of ids) {
+      select.value = id
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi(2)
+      append.click()
+      await flushUi(2)
+    }
+    const chips = Array.from(people.querySelectorAll('[data-attendance-group-pending-member]'))
+    expect(chips).toHaveLength(2)
+    expect(chips.map(chip => chip.querySelector('span')?.textContent)).toEqual(['Unknown member', 'Unknown member'])
+    expect(chips.map(chip => chip.querySelectorAll('span')[1]?.classList.contains('attendance__id-clip'))).toEqual([false, false])
+    expect(chips.map(chip => chip.querySelectorAll('span')[1]?.textContent)).toEqual(ids)
+    expect(chips.map(chip => chip.querySelector('button')?.getAttribute('aria-label'))).toEqual(['Remove Unknown member (pending-a)', 'Remove Unknown member (pending-b)'])
+    chips[0].querySelector<HTMLButtonElement>('button')!.click()
+    await flushUi(2)
+    expect(Array.from(people.querySelectorAll('[data-attendance-group-pending-member]')).map(chip => chip.querySelectorAll('span')[1]?.textContent)).toEqual(['pending-b'])
+    expect(writes).toEqual([])
   })
 
   it('explains duplicate-only attendance group member input without posting', async () => {

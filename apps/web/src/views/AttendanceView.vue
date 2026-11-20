@@ -5365,10 +5365,10 @@
                           data-attendance-group-pending-member
                         >
                           <span>{{ attendanceGroupPendingMemberLabel(userId) }}</span>
-                          <span v-if="attendanceGroupPendingMemberLabel(userId) !== userId" class="attendance__id-clip">{{ userId }}</span>
+                          <span v-if="attendanceGroupPendingMemberLabel(userId) !== userId" :class="{ 'attendance__id-clip': Boolean(attendanceGroupPendingMemberLabels[userId] || attendanceGroupMemberPrimaryLabel(userId)) }">{{ userId }}</span>
                           <button
                             type="button"
-                            :aria-label="tr(`Remove ${attendanceGroupPendingMemberLabel(userId)}`, `移除 ${attendanceGroupPendingMemberLabel(userId)}`)"
+                            :aria-label="tr(`Remove ${attendanceGroupPendingMemberLabel(userId)} (${userId})`, `移除 ${attendanceGroupPendingMemberLabel(userId)}（${userId}）`)"
                             data-attendance-group-pending-remove
                             @click="removeAttendanceGroupPendingMember(userId)"
                           >
@@ -5416,10 +5416,10 @@
                               <td>
                                 <span class="attendance__group-member-identity" data-attendance-group-member-identity>
                                   <strong
-                                    v-if="attendanceGroupMemberPrimaryLabel(member.userId)"
+                                    v-if="attendanceGroupMemberDisplayLabel(member.userId)"
                                     data-attendance-group-member-label
                                   >
-                                    {{ attendanceGroupMemberPrimaryLabel(member.userId) }}
+                                    {{ attendanceGroupMemberDisplayLabel(member.userId) }}
                                   </strong>
                                   <span
                                     data-attendance-group-member-user-id
@@ -5440,6 +5440,7 @@
                                   class="attendance__btn attendance__btn--danger"
                                   type="button"
                                   :disabled="attendanceGroupMemberSaving"
+                                  :aria-label="tr(`Remove ${attendanceGroupMemberDisplayLabel(member.userId)} (${member.userId})`, `移除 ${attendanceGroupMemberDisplayLabel(member.userId)}（${member.userId}）`)"
                                   @click="removeAttendanceGroupMember(member.userId)"
                                 >
                                   {{ tr('Remove', '移除') }}
@@ -5540,10 +5541,10 @@
                               <td>
                                 <span class="attendance__group-member-identity" data-attendance-group-manager-identity>
                                   <strong
-                                    v-if="attendanceGroupManagerPrimaryLabel(manager.userId)"
+                                    v-if="attendanceGroupManagerDisplayLabel(manager.userId)"
                                     data-attendance-group-manager-label
                                   >
-                                    {{ attendanceGroupManagerPrimaryLabel(manager.userId) }}
+                                    {{ attendanceGroupManagerDisplayLabel(manager.userId) }}
                                   </strong>
                                   <span
                                     data-attendance-group-manager-user-id
@@ -5571,6 +5572,7 @@
                                   type="button"
                                   :disabled="attendanceGroupManagerSaving"
                                   data-attendance-group-manager-remove
+                                  :aria-label="tr(`Remove ${attendanceGroupManagerDisplayLabel(manager.userId)} (${manager.userId})`, `移除 ${attendanceGroupManagerDisplayLabel(manager.userId)}（${manager.userId}）`)"
                                   @click="removeAttendanceGroupManager(manager.id)"
                                 >
                                   {{ tr('Remove', '移除') }}
@@ -10677,6 +10679,7 @@ import {
 } from './attendance/useAttendanceAdminRail'
 import { useAttendanceAdminRailNavigation } from './attendance/useAttendanceAdminRailNavigation'
 import type { AttendanceGroupRouteStep, AttendanceGroupRouteSurface } from '../router/attendanceGroupContextRoute'
+import { attendanceGroupEffectivePolicyNeutralMemberLabel } from './attendance/attendanceGroupEffectivePolicyLabels'
 import type { AttendanceAuthorizedGroup } from './attendance/useAttendanceGroupRouteContext'
 import { hydrateAttendanceGroupRoute } from './attendance/attendanceGroupRouteHydration'
 import { shouldReloadSetupReadinessOnSurfaceOpen, useAttendanceSetupReadiness } from './attendance/useAttendanceSetupReadiness'
@@ -14554,13 +14557,18 @@ function rememberAttendanceGroupMemberPickerLabel(name: string): void {
 function attendanceGroupPendingMemberLabel(userId: string): string {
   return attendanceGroupPendingMemberLabels.value[userId]
     || attendanceGroupMemberPrimaryLabel(userId)
-    || userId
+    || attendanceGroupEffectivePolicyNeutralMemberLabel('unknown', tr)
 }
 
 function attendanceGroupMemberPrimaryLabel(userId: string): string {
   const item = attendanceGroupMemberResolvedUsers.value[userId]
   if (!item) return ''
   return item.name?.trim() || item.email.trim() || ''
+}
+
+function attendanceGroupMemberDisplayLabel(userId: string): string {
+  return attendanceGroupMemberPrimaryLabel(userId)
+    || attendanceGroupEffectivePolicyNeutralMemberLabel('unknown', tr)
 }
 
 function attendanceGroupMemberSecondaryLabel(userId: string): string {
@@ -14594,6 +14602,11 @@ function attendanceGroupManagerPrimaryLabel(userId: string): string {
   const item = attendanceGroupManagerResolvedUsers.value[userId]
   if (!item) return ''
   return item.name?.trim() || item.email.trim() || ''
+}
+
+function attendanceGroupManagerDisplayLabel(userId: string): string {
+  return attendanceGroupManagerPrimaryLabel(userId)
+    || attendanceGroupEffectivePolicyNeutralMemberLabel('unknown', tr)
 }
 
 function attendanceGroupManagerSecondaryLabel(userId: string): string {
