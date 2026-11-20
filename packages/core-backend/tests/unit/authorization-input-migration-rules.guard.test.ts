@@ -1581,3 +1581,256 @@ describe('migration helpers', () => {
     expect(helperMapProblems(swapped)).toEqual(['createIndexIfNotExists: parameters are db,tableName,indexName,columns,options, expected db,indexName,tableName,columns,options'])
   })
 })
+
+describe('closed dollar-tag builders and reviewed users qualifier arguments', () => {
+  const DOLLAR_TAG = [
+    'function dollarTag(value: string, seed: string): string {',
+    '  let tag = seed',
+    '  let counter = 0',
+    '  while (value.includes(`$${tag}$`)) {',
+    '    counter += 1',
+    '    tag = `${seed}_${counter}`',
+    '  }',
+    '  return tag',
+    '}',
+  ].join('\n')
+  const QUALIFIED = [
+    'const IDENT = /^[a-z_][a-z0-9_]*$/',
+    "const ADMIN_GRANT_ACTOR_INPUTS_SCHEMA_CODE = 'ADMIN_GRANT_ACTOR_INPUTS_SCHEMA_BLOCKED'",
+    'function withCode(code: string): Error {',
+    '  return new Error(code)',
+    '}',
+    'function quoteAdminGrantActorInputIdent(identifier: string): string {',
+    '  if (!IDENT.test(identifier)) throw withCode(ADMIN_GRANT_ACTOR_INPUTS_SCHEMA_CODE)',
+    '  return `"${identifier}"`',
+    '}',
+    'function qualified(schemaName: string, identifier: string): string {',
+    '  return `${quoteAdminGrantActorInputIdent(schemaName)}.${quoteAdminGrantActorInputIdent(identifier)}`',
+    '}',
+  ].join('\n')
+  const LINEAGE_SQL = "SELECT count(*) FROM %I.%I AS ceremony WHERE ceremony.consumed_evidence_id = $1 AND ceremony.exchange_claimed_at IS NOT NULL AND ceremony.consumed_at IS NOT NULL AND ceremony.connection_id IS NOT DISTINCT FROM $2 AND ceremony.org_id IS NOT DISTINCT FROM $3 AND ceremony.identity_id IS NOT DISTINCT FROM $4 AND ceremony.subject_key IS NOT DISTINCT FROM $5 AND ceremony.app_scope IS NOT DISTINCT FROM $6 AND ceremony.application_revision IS NOT DISTINCT FROM $7 AND ceremony.binding_revision IS NOT DISTINCT FROM $8::text AND ceremony.material_fingerprint IS NOT DISTINCT FROM $9 AND ceremony.capability_revision_seen IS NOT DISTINCT FROM $10::text AND ceremony.slot_snapshot IS NOT DISTINCT FROM $11 AND ceremony.target_user_id IS NOT DISTINCT FROM $12 AND $13 = 'self_authenticated'"
+  const LINEAGE_USING = 'NEW.id, NEW.connection_id, NEW.org_id, NEW.identity_id, NEW.subject_key, NEW.app_scope, NEW.application_revision, NEW.binding_revision, NEW.material_fingerprint, NEW.capability_revision_seen, NEW.slot_snapshot, NEW.created_by, NEW.assurance'
+  const wrapper = (call: string, valueName: string, tagName: string, seed: string) => [
+    'async function buildIt(schemaName: string): Promise<void> {',
+    `  const ${valueName} = ${call}`,
+    `  const ${tagName} = dollarTag(${valueName}, '${seed}')`,
+    '  await db.query(`CREATE FUNCTION ${schemaName}.touch() RETURNS trigger',
+    '     LANGUAGE plpgsql',
+    '     AS $' + '${' + tagName + '}$',
+    '${' + valueName + '}',
+    '     $' + '${' + tagName + '}$`)',
+    '}',
+  ].join('\n')
+  const returning = (name: string, sqlLines: string[]) => [
+    `function ${name}(schemaName: string): string {`,
+    '  return `BEGIN',
+    ...sqlLines,
+    '  END`',
+    '}',
+  ].join('\n')
+  const touchBody = returning('touchParents', [
+    '    EXECUTE format(',
+    "      'UPDATE %I.%I SET schedule_cron = schedule_cron WHERE id = $1',",
+    '      install_schema,',
+    "      'directory_integrations'",
+    '    ) USING NEW.connection_id;',
+    '    EXECUTE format(',
+    "      'UPDATE %I.%I SET profile = profile WHERE id = $1',",
+    '      install_schema,',
+    "      'user_external_identities'",
+    '    ) USING NEW.identity_id;',
+    '    EXECUTE format(',
+    "      'UPDATE %I.%I SET profile = profile WHERE id = $1',",
+    '      install_schema,',
+    "      'user_external_identities'",
+    '    ) USING NEW.live_identity_id;',
+  ])
+  const plainBody = returning('touchParents', ['    RETURN NEW;'])
+  const NOT_QUOTED = ['unreadable CREATE FUNCTION: body is not dollar-quoted text']
+
+  it('reads the reviewed touch updates and the ceremony lineage count as the function body', () => {
+    expect(check(`${DOLLAR_TAG}\n${touchBody}\n${wrapper('touchParents(schemaName)', 'body', 'bodyTag', 'agr_s3_body')}`).problems).toEqual([])
+    const lineage = returning('lineageParents', [
+      '    EXECUTE format(',
+      `      '${LINEAGE_SQL.replace(/'/g, "''")}',`,
+      '      install_schema,',
+      "      'admin_grant_target_ceremony_challenges'",
+      '    )',
+      '    INTO challenge_count',
+      `    USING ${LINEAGE_USING};`,
+    ])
+    expect(check(`${DOLLAR_TAG}\n${lineage}\n${wrapper('lineageParents(schemaName)', 'lineage', 'lineageTag', 'agr_t2_lineage')}`).problems).toEqual([])
+  })
+
+  it('keeps a raising body, a changed format, and a changed target refused', () => {
+    const raising = returning('touchParents', ["    UPDATE users SET role = 'admin';"])
+    const raised = check(`${up(LOCK)}\n${DOLLAR_TAG}\n${raising}\n${wrapper('touchParents(schemaName)', 'body', 'bodyTag', 'agr_s3_body')}`)
+    expect(raised.problems.filter((problem) => problem !== 'unreadable UPDATE: UPDATE on users is not the outermost statement')).toEqual([])
+    expect(raised.problems.length).toBeGreaterThan(0)
+    const changedFormat = returning('touchParents', [
+      '    EXECUTE format(',
+      "      'DELETE FROM %I.%I',",
+      '      install_schema,',
+      "      'directory_integrations'",
+      '    ) USING NEW.connection_id;',
+    ])
+    expect(check(`${DOLLAR_TAG}\n${changedFormat}\n${wrapper('touchParents(schemaName)', 'body', 'bodyTag', 'agr_s3_body')}`).problems).toEqual(['unreadable EXECUTE: dynamic statement'])
+    const changedTarget = returning('touchParents', [
+      '    EXECUTE format(',
+      "      'UPDATE %I.%I SET schedule_cron = schedule_cron WHERE id = $1',",
+      '      install_schema,',
+      "      'users'",
+      '    ) USING NEW.connection_id;',
+    ])
+    const retargeted = check(`${DOLLAR_TAG}\n${changedTarget}\n${wrapper('touchParents(schemaName)', 'body', 'bodyTag', 'agr_s3_body')}`)
+    expect(retargeted.problems).toContain('unreadable EXECUTE: dynamic statement')
+    expect(retargeted.verdicts.every((line) => line.verdict === 'unreadable')).toBe(true)
+  })
+
+  it('refuses a mismatched tag, an unknown builder, and a body that is not the tagged value', () => {
+    expect(check(`${DOLLAR_TAG}\n${plainBody}\n${wrapper('touchParents(schemaName)', 'body', 'bodyTag', 'agr_s3_body').replace('${body}', '${copied}').replace('const body = touchParents(schemaName)', 'const body = touchParents(schemaName)\n  const copied = body')}`).problems).toEqual(NOT_QUOTED)
+    const mismatched = [
+      DOLLAR_TAG,
+      plainBody,
+      'async function buildIt(schemaName: string): Promise<void> {',
+      '  const body = touchParents(schemaName)',
+      "  const bodyTag = dollarTag(body, 'agr_s3_body')",
+      "  const otherTag = dollarTag(body, 'agr_s3_other')",
+      '  await db.query(`CREATE FUNCTION ${schemaName}.touch() RETURNS trigger',
+      '     LANGUAGE plpgsql',
+      '     AS $' + '${bodyTag}$',
+      '${body}',
+      '     $' + '${otherTag}$`)',
+      '}',
+    ].join('\n')
+    expect(check(mismatched).problems).toEqual(NOT_QUOTED)
+    const unknown = ['function dollarTag(value: string, seed: string): string {', '  return seed', '}'].join('\n')
+    expect(unknown).not.toBe(DOLLAR_TAG)
+    expect(check(`${unknown}\n${plainBody}\n${wrapper('touchParents(schemaName)', 'body', 'bodyTag', 'agr_s3_body')}`).problems).toEqual(NOT_QUOTED)
+  })
+
+  const owners = () => [
+    QUALIFIED,
+    'export function adminGrantActorInputUpStatements(schemaName: string): readonly string[] {',
+    "  const users = qualified(schemaName, 'users')",
+    '  return [`ALTER TABLE ${users} ADD COLUMN local_credential_version uuid`]',
+    '}',
+    'export function adminGrantActorInputDropStatements(schemaName: string): readonly string[] {',
+    "  const users = qualified(schemaName, 'users')",
+    '  return [`ALTER TABLE ${users} DROP COLUMN IF EXISTS local_credential_version`]',
+    '}',
+    'async function usersReady(schemaName: string): Promise<boolean> {',
+    "  const relation = qualified(schemaName, 'users')",
+    '  return relation.length > 0',
+    '}',
+    'async function lockPresent(schemaName: string): Promise<void> {',
+    "  await db.query(`LOCK TABLE ${qualified(schemaName, 'users')} IN ACCESS EXCLUSIVE MODE`)",
+    '}',
+    'async function retainedHistory(schemaName: string): Promise<void> {',
+    '  const checks = [`EXISTS (SELECT 1 FROM ${qualified(schemaName, \'users\')} WHERE local_credential_version IS NOT NULL)`]',
+    '  await db.query(checks[0])',
+    '}',
+  ].join('\n')
+
+  it('does not judge the five reviewed qualifier arguments as statements', () => {
+    expect(check(owners()).problems).toEqual([])
+  })
+
+  it('refuses IDENT mutation and escape outside the validated predicate reads', () => {
+    const schemaRead = [
+      'async function resolveInstallSchema(name: unknown): Promise<string> {',
+      "  if (typeof name !== 'string' || !IDENT.test(name)) throw withCode(ADMIN_GRANT_ACTOR_INPUTS_SCHEMA_CODE)",
+      '  return name',
+      '}',
+    ].join('\n')
+    const source = `${owners()}\n${schemaRead}`
+    expect(check(source).problems).toEqual([])
+    for (const mutation of [
+      'IDENT.test = replacement',
+      "(IDENT as unknown as Record<string, unknown>)['test'] = replacement",
+      'const predicate = IDENT; predicate.test = replacement',
+      'IDENT.test(replacement())',
+    ]) {
+      const changed = source.replace("  const users = qualified(schemaName, 'users')", `${mutation}\n  const users = qualified(schemaName, 'users')`)
+      expect(changed).not.toBe(source)
+      expect(check(changed).problems, mutation).toEqual(Array(5).fill('unreadable USERS: statement kind is not on the safe list'))
+    }
+  })
+
+  it('refuses a users literal, another owner, a changed qualifier, another argument, and an input-column write', () => {
+    const USERS = ['unreadable USERS: statement kind is not on the safe list']
+    const withLiteral = owners().replace('return [`ALTER TABLE ${users} ADD COLUMN local_credential_version uuid`]', "await db.query('users')\n    return [`ALTER TABLE ${users} ADD COLUMN local_credential_version uuid`]")
+    expect(check(withLiteral).problems).toEqual(USERS)
+    const otherOwner = `${QUALIFIED}\nfunction otherOwner(schemaName: string): string {\n  return qualified(schemaName, 'users')\n}`
+    expect(check(otherOwner).problems).toEqual(USERS)
+    const rawQualified = QUALIFIED.replace('return `${quoteAdminGrantActorInputIdent(schemaName)}.${quoteAdminGrantActorInputIdent(identifier)}`', 'return identifier')
+    expect(check(`${rawQualified}\nexport function adminGrantActorInputUpStatements(schemaName: string): string {\n  return qualified(schemaName, 'users')\n}`).problems).toEqual(USERS)
+    expect(check(`${QUALIFIED}\nexport function adminGrantActorInputUpStatements(schemaName: string): string {\n  const other = schemaName\n  return qualified(other, 'users')\n}`).problems).toEqual(USERS)
+    expect(check(`${QUALIFIED}\nexport function adminGrantActorInputUpStatements(schemaName: string): string {\n  return qualified(schemaName, 'user_roles')\n}`).problems).toEqual(['unreadable USER_ROLES: statement kind is not on the safe list'])
+    const dynamicWrite = `${QUALIFIED}\nexport function adminGrantActorInputUpStatements(schemaName: string): readonly string[] {\n  const users = qualified(schemaName, 'users')\n  return [\`UPDATE \${users} SET role = 'admin'\`]\n}`
+    expect(check(dynamicWrite).problems).toEqual(['unreadable UPDATE: dynamic write target'])
+    const directWrite = `${up(LOCK)}\n${QUALIFIED}\nexport function adminGrantActorInputUpStatements(schemaName: string): string {\n  const users = qualified(schemaName, 'users')\n  await db.query("UPDATE users SET role = 'admin'")\n  return users\n}`
+    expect(check(directWrite).problems).toEqual(['assigns class-raising role admin'])
+    const bareQuoter = QUALIFIED.replace('  if (!IDENT.test(identifier)) throw withCode(ADMIN_GRANT_ACTOR_INPUTS_SCHEMA_CODE)\n', '')
+    expect(bareQuoter).not.toBe(QUALIFIED)
+    expect(check(`${bareQuoter}\nexport function adminGrantActorInputUpStatements(schemaName: string): string {\n  return qualified(schemaName, 'users')\n}`).problems).toEqual(USERS)
+    const reassignedQualified = `${QUALIFIED}\nexport function adminGrantActorInputUpStatements(schemaName: string, replacement: (schemaName: string, identifier: string) => string): string {\n  qualified = replacement\n  return qualified(schemaName, 'users')\n}`
+    expect(check(reassignedQualified).problems).toEqual(USERS)
+    const destructuredQualified = `${QUALIFIED}\nexport function adminGrantActorInputUpStatements(schemaName: string, replacement: (schemaName: string, identifier: string) => string): string {\n  ({ qualified } = { qualified: replacement })\n  return qualified(schemaName, 'users')\n}`
+    expect(check(destructuredQualified).problems).toEqual(USERS)
+    const shadowedSchema = `${QUALIFIED}\nexport function adminGrantActorInputUpStatements(schemaName: string): string {\n  let schemaAlias = schemaName\n  return qualified(schemaAlias, 'users')\n}`
+    expect(check(shadowedSchema).problems).toEqual(USERS)
+  })
+
+  it('refuses an unrecognized guard fragment and an execute outside the reconstructed body', () => {
+    const columns = ['const IMMUTABLE_COLUMNS = [', "  'state_hash',", "  'browser_hash',", '] as const'].join('\n')
+    const insertGuard = [
+      'function insertGuardSql(): string {',
+      '  const required = IMMUTABLE_COLUMNS.map((column) => `NEW.${column} IS NULL`).join(\'\\n       OR \')',
+      '  return `IF ${required} THEN RETURN NEW; END IF;`',
+      '}',
+    ].join('\n')
+    const guardFn = [
+      'function challengeGuardBody(): string {',
+      '  const immutable = IMMUTABLE_COLUMNS.map((column) => `NEW.${column} IS DISTINCT FROM OLD.${column}`).join(\'\\n         OR \')',
+      '  return `BEGIN',
+      '    ${insertGuardSql()}',
+      '    IF ${immutable} THEN',
+      '      RETURN NEW;',
+      '    END IF;',
+      '  END`',
+      '}',
+    ].join('\n')
+    const guard = `${DOLLAR_TAG}\n${columns}\n${insertGuard}\n${guardFn}\n${wrapper('challengeGuardBody()', 'guard', 'guardTag', 'agr_t2_guard')}`
+    expect(check(guard).problems).toEqual([])
+    for (const mutation of [
+      '(IMMUTABLE_COLUMNS as unknown as string[])[0] = fragment',
+      'const columnsAlias = IMMUTABLE_COLUMNS; columnsAlias[0] = fragment',
+      'IMMUTABLE_COLUMNS.map(replacement)',
+      'IMMUTABLE_COLUMNS.splice(0, 1, fragment)',
+    ]) {
+      const changed = guard.replace('  const guard = challengeGuardBody()', `${mutation}\n  const guard = challengeGuardBody()`)
+      expect(changed).not.toBe(guard)
+      expect(check(changed).problems, mutation).toEqual(NOT_QUOTED)
+    }
+    const unknownFragment = guardFn.replace('${insertGuardSql()}', '${process.env.ADMIN_GRANT_SQL_FRAGMENT}')
+    expect(unknownFragment).not.toBe(guardFn)
+    expect(check(`${DOLLAR_TAG}\n${columns}\n${insertGuard}\n${unknownFragment}\n${wrapper('challengeGuardBody()', 'guard', 'guardTag', 'agr_t2_guard')}`).problems).toEqual(NOT_QUOTED)
+    const reassignedBuilder = wrapper('touchParents(schemaName)', 'body', 'bodyTag', 'agr_s3_body').replace('  const body = touchParents(schemaName)', '  touchParents = replacement\n  const body = touchParents(schemaName)')
+    expect(check(`${DOLLAR_TAG}\n${plainBody}\n${reassignedBuilder}`).problems).toEqual(NOT_QUOTED)
+    const reassignedTag = wrapper('touchParents(schemaName)', 'body', 'bodyTag', 'agr_s3_body').replace('  const body = touchParents(schemaName)', '  dollarTag = replacement\n  const body = touchParents(schemaName)')
+    expect(check(`${DOLLAR_TAG}\n${plainBody}\n${reassignedTag}`).problems).toEqual(NOT_QUOTED)
+    const untied = [
+      'export async function up(db) {',
+      '  await db.query(`CREATE FUNCTION t() RETURNS trigger LANGUAGE plpgsql AS $fn$',
+      '    EXECUTE format(',
+      "      'UPDATE %I.%I SET schedule_cron = schedule_cron WHERE id = $1',",
+      '      install_schema,',
+      "      'directory_integrations'",
+      '    ) USING NEW.connection_id;',
+      '  $fn$`)',
+      '}',
+    ].join('\n')
+    expect(check(untied).problems).toContain('unreadable EXECUTE: dynamic statement')
+  })
+})

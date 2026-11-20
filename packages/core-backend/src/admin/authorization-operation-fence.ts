@@ -93,26 +93,65 @@ export const AUTHORIZATION_OPERATION_SCHEMA_QUERIES = [
     WHERE n.nspname='public' AND p.prokind='f' ORDER BY n.nspname,p.proname,arguments`,
 ] as const
 
+// The eight B2 migrations only add catalog rows to the accepted profiles.
+// Hash the entire B2 addition separately so each previously qualified PostgreSQL
+// version/locale still has to match its own original exact catalog profile.
+const B2_CATALOG_ADDITIONS = 'c8b8994bc64060dde36280a452662854741816a88091d1b2280d7f3f1ca0f743'
+const B2_FOREIGN_KEY_SOURCES = new Set([
+  'admin_grant_target_ceremony_challenges', 'directory_connection_application_pins',
+  'directory_connection_login_scope', 'user_external_identity_evidence', 'user_external_identity_login_grants',
+])
+
+type CatalogRow = Record<string, unknown>
+
+function belongsToB2Catalog(section: number, row: CatalogRow): boolean {
+  switch (section) {
+    case 1: return row.relname === 'users' && row.attname === 'local_credential_version'
+    case 2: return B2_FOREIGN_KEY_SOURCES.has(String(row.source))
+    case 4: return row.tgname === 'admin_grant_integration_invalidate' || row.tgname === 'admin_grant_local_credential_version'
+    case 7: return /^(admin_grant_|strict_login_grant_|security_action_session_flight_)/.test(String(row.proname))
+    default: return false
+  }
+}
+
+function schemaDigest(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex')
+}
+
+function readBaseProfile(database: CatalogRow | null, rows: CatalogRow[][]): string | undefined {
+  const base = rows.map(() => [] as CatalogRow[])
+  const additions = rows.map(() => [] as CatalogRow[])
+  for (const [section, catalog] of rows.entries()) {
+    for (const row of catalog) {
+      const partition = belongsToB2Catalog(section, row) ? additions : base
+      partition[section].push(row)
+    }
+  }
+  if (schemaDigest(additions) === B2_CATALOG_ADDITIONS) return schemaDigest({ database, rows: base })
+}
+
 /** Compute only structural metadata. Never reads customer rows or emits SQL values. */
-export async function inspectAuthorizationOperationSchema(query: AuthorizationInputQueryable['query']): Promise<{ digest: string; tableCount: number; ordinary: boolean }> {
+export async function inspectAuthorizationOperationSchema(query: AuthorizationInputQueryable['query']): Promise<{ digest: string; tableCount: number; ordinary: boolean; baseDigest?: string }> {
   const version = await query(`SELECT pg_catalog.current_setting('server_version_num')::int / 10000 AS version, pg_catalog.current_schema() AS schema, d.datcollate,d.datctype,
     pg_catalog.to_jsonb(d)->>'datlocprovider' AS datlocprovider,
     pg_catalog.to_jsonb(d)->>'datcollversion' AS datcollversion,
     NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(COALESCE(n.nspacl,pg_catalog.acldefault('n',n.nspowner))) a
       WHERE a.privilege_type='CREATE' AND a.grantee<>n.nspowner AND a.grantee<>d.datdba) AS schema_create_trusted
     FROM pg_catalog.pg_database d JOIN pg_catalog.pg_namespace n ON n.nspname='public' WHERE d.datname=pg_catalog.current_database()`)
-  const rows: unknown[][] = []
+  const rows: CatalogRow[][] = []
   for (const statement of AUTHORIZATION_OPERATION_SCHEMA_QUERIES) rows.push((await query(statement, statement.includes('$1') ? [TABLES] : undefined)).rows)
   const tables = rows[0] as Array<Record<string, unknown>>
   const ordinary = tables.length === TABLES.length && tables.every(row => row.relkind === 'r' && row.relpersistence === 'p' && row.relispartition === false && row.relhassubclass === false && row.relrowsecurity === false && row.relforcerowsecurity === false && row.owner_trusted === true)
     && version.rows[0]?.schema_create_trusted === true
     && (rows[7] as Array<Record<string, unknown>>).every(row => row.owner_trusted === true)
-  const digest = createHash('sha256').update(JSON.stringify({ database: version.rows[0] ?? null, rows })).digest('hex')
-  return { digest, tableCount: tables.length, ordinary }
+  const database = version.rows[0] ?? null
+  const digest = schemaDigest({ database, rows })
+  const baseDigest = ordinary && !SUPPORTED_SCHEMA_PROFILES.has(digest) ? readBaseProfile(database, rows) : undefined
+  return { digest, tableCount: tables.length, ordinary, baseDigest }
 }
 
-export function isSupportedAuthorizationOperationSchema(result: { digest: string; ordinary: boolean }): boolean {
-  return result.ordinary && SUPPORTED_SCHEMA_PROFILES.has(result.digest)
+export function isSupportedAuthorizationOperationSchema(result: { digest: string; ordinary: boolean; baseDigest?: string }): boolean {
+  return result.ordinary && SUPPORTED_SCHEMA_PROFILES.has(result.baseDigest ?? result.digest)
 }
 export async function assertAuthorizationOperationSchema(query: AuthorizationInputQueryable['query']): Promise<void> {
   const result = await inspectAuthorizationOperationSchema(query)

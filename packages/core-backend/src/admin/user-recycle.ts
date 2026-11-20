@@ -8,6 +8,13 @@
 import { auditLog } from '../audit/audit'
 import { buildUnusablePasswordHash } from '../auth/user-activation'
 import { revokeUserSessions } from '../auth/session-revocation'
+import {
+  completeIdentityDeletion,
+  credentialRevocationFlagOn,
+  sealExactAndCredentialSessions,
+  selectCredentialLegs,
+  shareIntegrations,
+} from '../auth/strict-credential-chain'
 import { Logger } from '../core/logger'
 import { ADMIN_USER_BATCH_LIMIT, type BatchItemResult } from './user-batch-plan'
 import { query, transaction } from '../db/pg'
@@ -398,6 +405,40 @@ export async function applyRecyclePurge(
   }
   const passwordHash = input.passwordHash ?? await buildUnusablePasswordHash()
   await client.query(`DELETE FROM user_login_aliases WHERE user_id = $1`, [input.userId])
+  const integrationRows = await client.query(
+    `SELECT integration.id::text AS id
+       FROM directory_account_links link
+       JOIN directory_accounts account ON account.id = link.directory_account_id
+       JOIN directory_integrations integration ON integration.id = account.integration_id
+      WHERE link.local_user_id = $1
+      ORDER BY integration.id`,
+    [input.userId],
+  )
+  await shareIntegrations(client, integrationRows.rows.map((row) => String(row.id || '')).filter(Boolean))
+  const identityRows = await client.query(
+    `SELECT id::text AS id
+       FROM user_external_identities
+      WHERE local_user_id = $1
+      ORDER BY id
+      FOR UPDATE`,
+    [input.userId],
+  )
+  const identityIds = identityRows.rows.map((row) => String(row.id || '')).filter(Boolean)
+  if (identityIds.length > 0) {
+    const removed = await completeIdentityDeletion(client, {
+      userId: input.userId,
+      identityIds,
+      actorId: input.actorId,
+      reason: 'recycle_purge',
+    })
+    await sealExactAndCredentialSessions(client, {
+      userId: input.userId,
+      actorId: input.actorId,
+      reason: 'recycle-purge',
+      grantIds: removed.grantIds,
+      legs: selectCredentialLegs({ surface: 'recycle_purge' }, credentialRevocationFlagOn()),
+    })
+  }
   await client.query(`DELETE FROM user_external_identities WHERE local_user_id = $1`, [input.userId])
   await client.query(
     `UPDATE user_external_auth_grants

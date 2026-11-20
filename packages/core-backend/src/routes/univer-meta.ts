@@ -177,6 +177,7 @@ import {
 } from '../multitable/plm-row-delete-guard'
 import {
   carryManualRowPolicy,
+  comparableManualRowCode,
   isClearingManualRowValue,
   isManualSupplementRow,
   stripManualRowPolicyKey,
@@ -185,20 +186,41 @@ import {
 import { carryPullBatchBandMarker, stripPullBatchBandMarker } from '../multitable/stock-preparation-pull-batch-band'
 import {
   assertManualRowEditInTransaction,
+  assertManualRowParentPairForCreate,
   assertManualRowsAllowed,
-  liftManualRowFillableLocks,
+  liftManualRowExemptLocks,
+  loadManualRowParentPairVerdict,
   loadManualRowsVerdict,
+  manualRowCopyParentPair,
   manualRowCopyRule,
+  manualRowEditFieldIdsComparedWithUnreadableCell,
+  manualRowParentPairProblemOf,
   mintManualRowCreateExtension,
+  namesManualRowParentPair,
   resolveGenericCreateRefusal,
   resolveManualRowsContextBlock,
   STOCK_PREP_MANUAL_FIELDS_NOT_FILLABLE_CODE,
+  STOCK_PREP_MANUAL_FIELDS_NOT_FILLABLE_MESSAGE,
+  StockPrepManualRowParentRefusedError,
   StockPrepManualRowsRefusedError,
   stockPrepProjectSheetsEnabledForManualRows,
   type ManualRowCreateOrigin,
   type ManualRowsContextBlock,
   type ManualRowsSheet,
 } from '../multitable/stock-preparation-manual-rows-gate'
+import {
+  MANUAL_ROW_PARENT_DEPENDENTS_SQL,
+  MANUAL_ROW_PARENT_OPTIONS_SQL,
+  manualRowParentDependentsCountOf,
+  manualRowParentDependentsParams,
+  manualRowParentOptionKindOf,
+  manualRowParentOptionOf,
+  manualRowParentOptionsPage,
+  manualRowParentOptionsParams,
+  parseManualRowParentOptionsQuery,
+  type ManualRowParentOption,
+  type ManualRowParentOptionRow,
+} from '../multitable/stock-preparation-manual-row-parent-options'
 import { resolveBomRelationsContextBlock, type BomRelationsContextBlock } from '../multitable/stock-preparation-bom-relations-context'
 import {
   VIEWER_FILTER_FIELD_NOT_PERMITTED_MESSAGE,
@@ -8370,8 +8392,10 @@ async function applyPermissionDeEscalation(query: TxnQuery, opts: { scope: Permi
 // ── 人工补充行 (manual supplementary rows; ADR adr-stock-prep-manual-rows-20261030 §3.2–§3.4, slice B2) ─────────
 //
 // Three session-only routes: POST /sheets/:sheetId/manual-rows (新增), POST /records/:recordId/manual-copy (复制为新行)
-// and PATCH /records/:recordId/manual-fields (修改 the six fillable columns). The gate, the registry reads and the
-// create extension live in multitable/stock-preparation-manual-rows-gate.ts; these helpers are the route half.
+// and PATCH /records/:recordId/manual-fields (修改 the six fillable columns and — ADR §12 — the parent pair). ADR §12
+// adds two session-only READS behind the parent picker: GET /sheets/:sheetId/manual-rows/parent-options and
+// GET /records/:recordId/manual-parent-dependents. The gate, the registry reads and the create extension live in
+// multitable/stock-preparation-manual-rows-gate.ts; these helpers are the route half.
 
 /** A field-level refusal of a manual-row route, mapped to its HTTP body by `sendManualRowWriteError`. */
 class ManualRowFieldRefusalError extends Error {
@@ -8382,11 +8406,35 @@ class ManualRowFieldRefusalError extends Error {
 }
 
 /**
+ * The tail of the per-subject field gate's 403 sentence: the forbidden ids the CALLER SUBMITTED, and nothing when the
+ * only forbidden column is the parent pair's other half, which the caller did not name (no existence oracle).
+ */
+function manualRowSubmittedIdSuffix(forbiddenFieldIds: readonly string[], submittedFieldIds: readonly string[]): string {
+  const named = forbiddenFieldIds.filter((fid) => submittedFieldIds.includes(fid))
+  return named.length > 0 ? `: ${named.join(', ')}` : ''
+}
+
+/**
+ * The field ids the per-subject WRITE gate of a manual-row route judges (ADR §12.3 rule P7): the submitted ids, and —
+ * when the request names 父组件图号 or 父组件名称 — BOTH pair columns, so an actor who may write only one of the two cannot
+ * change the pair at all (the answer is 403 whichever half they sent).
+ */
+function manualRowWriteGatedFieldIds(sheet: ManualRowsSheet, submittedFieldIds: readonly string[]): string[] {
+  const gated = new Set(submittedFieldIds)
+  if (namesManualRowParentPair(sheet.derived, submittedFieldIds)) {
+    gated.add(sheet.derived.parent.code)
+    gated.add(sheet.derived.parent.name)
+  }
+  return [...gated]
+}
+
+/**
  * The layer-3 per-subject field-WRITE gate of the manual-row create (ADR §3.2 「逐人字段权限照常生效」), on the fields
- * with the lock lifted from the six fillable columns ONLY. Before it, the closed-code refusal: a submitted column the
- * server writes on a manual row (stamps, identity / RUN, lineage) or that keeps its PLM lock answers
- * FIELD_READONLY_PLM_SYSTEM — for visible fields only, caller-submitted ids only (no existence oracle). Then the
- * per-subject gate (`isFieldWriteForbidden`, the shared W1-3 predicate). Throws; writes nothing.
+ * with the lock lifted from the eight lock-exempt columns ONLY (the six fillable ones and the parent pair). Before it,
+ * the closed-code refusal: a submitted column the server writes on a manual row (stamps, identity / RUN) or that keeps
+ * its PLM lock answers FIELD_READONLY_PLM_SYSTEM — for visible fields only, caller-submitted ids only (no existence
+ * oracle). Then the per-subject gate (`isFieldWriteForbidden`, the shared W1-3 predicate), over both pair columns when
+ * either is submitted (rule P7). Throws; writes nothing.
  */
 function assertManualRowCreateFieldsWritable(
   fields: UniverMetaField[],
@@ -8395,7 +8443,7 @@ function assertManualRowCreateFieldsWritable(
   fieldScopeMap: Map<string, FieldPermissionScope>,
   submittedFieldIds: string[],
 ): void {
-  const lifted = liftManualRowFillableLocks(fields, sheet)
+  const lifted = liftManualRowExemptLocks(fields, sheet)
   const liftedById = new Map(lifted.map((field) => [field.id, field]))
   const manualCreateFieldPermissions = deriveFieldPermissions(filterVisiblePropertyFields(lifted), capabilities, {
     allowCreateOnly: true,
@@ -8405,8 +8453,28 @@ function assertManualRowCreateFieldsWritable(
   const serverWrittenFieldIds = submitted.filter((fid) => manualCreateFieldPermissions[fid]?.visible === true
     && (sheet.derived.neverWritten.has(fid) || isFieldHumanWriteLocked(liftedById.get(fid))))
   if (serverWrittenFieldIds.length > 0) throw new ManualRowFieldRefusalError('plm_system', serverWrittenFieldIds)
-  const forbiddenWriteFieldIds = submitted.filter((fid) => isFieldWriteForbidden(manualCreateFieldPermissions[fid]))
-  if (forbiddenWriteFieldIds.length > 0) throw new ManualRowFieldRefusalError('not_writable', forbiddenWriteFieldIds)
+  const forbiddenWriteFieldIds = manualRowWriteGatedFieldIds(sheet, submitted).filter((fid) => isFieldWriteForbidden(manualCreateFieldPermissions[fid]))
+  if (forbiddenWriteFieldIds.length > 0) {
+    throw new ManualRowFieldRefusalError('not_writable', forbiddenWriteFieldIds.filter((fid) => submitted.includes(fid)))
+  }
+}
+
+/**
+ * ADR §12.6 / rule P7, for /context: may THIS actor write both parent columns through a manual-row route — as a
+ * create (canCreateRecord) or as an edit (canEditRecord)? The per-subject rule is the same in both; the lock is lifted
+ * from the eight exempt columns exactly as the routes lift it. Pure over what /context already loaded.
+ */
+function actorCanWriteManualRowParentPair(
+  fields: UniverMetaField[],
+  sheet: ManualRowsSheet,
+  capabilities: MultitableCapabilities,
+  fieldScopeMap: Map<string, FieldPermissionScope>,
+): boolean {
+  const lifted = filterVisiblePropertyFields(liftManualRowExemptLocks(fields, sheet))
+  const pair = [sheet.derived.parent.code, sheet.derived.parent.name]
+  const writable = (permissions: Record<string, MultitableFieldPermission>) => pair.every((fid) => !isFieldWriteForbidden(permissions[fid]))
+  return writable(deriveFieldPermissions(lifted, capabilities, { allowCreateOnly: true, fieldScopeMap }))
+    || writable(deriveFieldPermissions(lifted, capabilities, { hiddenFieldIds: [], fieldScopeMap }))
 }
 
 /**
@@ -8431,10 +8499,16 @@ async function createManualSupplementRow(
 ): Promise<{ id: string; version: number; data: Record<string, unknown> }> {
   const query = pool.query.bind(pool)
   const fields = input.fields ?? await loadFieldsForSheet(query, input.sheetId)
+  const submittedFieldIds = Object.keys(input.data)
+  // The gate sees the submitted ids: a create that names the parent pair also needs the pair's two columns present and
+  // locked (ADR §12.3) — `lock_missing` / `contract_mismatch` otherwise, before any write. (The copy route resolved its
+  // sheet before it built the payload, and carries the pair only on a sheet that passes that same condition.)
   const sheet = input.sheet
-    ?? assertManualRowsAllowed(await loadManualRowsVerdict(query, input.sheetId, fields, 'create', stockPrepProjectSheetsEnabledForManualRows()))
+    ?? assertManualRowsAllowed(await loadManualRowsVerdict(query, input.sheetId, fields, 'create', stockPrepProjectSheetsEnabledForManualRows(), submittedFieldIds))
   const fieldScopeMap = input.fieldScopeMap ?? await loadFieldPermissionScopeMap(query, input.sheetId, input.access.userId)
-  assertManualRowCreateFieldsWritable(fields, sheet, input.capabilities, fieldScopeMap, Object.keys(input.data))
+  assertManualRowCreateFieldsWritable(fields, sheet, input.capabilities, fieldScopeMap, submittedFieldIds)
+  // Rules P3 – P5 on the submitted pair (400 / 422), after the 403s; the create transaction checks them again.
+  assertManualRowParentPairForCreate(sheet, input.data)
 
   const recordService = new RecordService(pool, eventBus)
   // A-min-create (#2255): the new row's same-record formula-over-lookup, as on POST /records.
@@ -8463,9 +8537,14 @@ async function createManualSupplementRow(
 /**
  * 「复制为新行」's payload (ADR §3.3): the whitelist (`manualRowCopyRule`) and, for every copied column, READ on the
  * source column (layer-2 ∧ layer-3 visibility, formula taint through the read chokepoint) AND the create-time WRITE bit
- * with the lock lifted from the six fillable columns only. Lineage, 进度与回复, identity / RUN and the stamps are never
+ * with the lock lifted from the eight lock-exempt columns only. 进度与回复, identity / RUN and the stamps are never
  * copied; the server stamps the new row's own 项目号, key and 有效. Forward-link values come from meta_links (the
  * duplicate route's overlay). An empty source cell is not copied.
+ *
+ * THE PARENT PAIR (ADR §12.5, owner ruling OQ-P1 「带上」) is not decided column by column: the source row's 父组件图号 and
+ * 父组件名称 are carried TOGETHER when the pair may be written on this sheet, the actor can read and write BOTH columns
+ * and the pair satisfies P4 and — against the new row's own 图号 — P5; otherwise NEITHER is carried and the copy still
+ * succeeds (`manualRowCopyParentPair`).
  */
 async function buildManualRowCopyData(
   req: Request,
@@ -8480,7 +8559,7 @@ async function buildManualRowCopyData(
     fieldScopeMap: Map<string, FieldPermissionScope>
   },
 ): Promise<Record<string, unknown>> {
-  const visible = filterVisiblePropertyFields(liftManualRowFillableLocks(input.fields, input.sheet))
+  const visible = filterVisiblePropertyFields(liftManualRowExemptLocks(input.fields, input.sheet))
   const readPermissions = deriveFieldPermissions(visible, input.capabilities, { hiddenFieldIds: [], fieldScopeMap: input.fieldScopeMap })
   const copyWritePermissions = deriveFieldPermissions(visible, input.capabilities, { allowCreateOnly: true, fieldScopeMap: input.fieldScopeMap })
   const readableFieldIds = await maskStoredRecordFieldIds(
@@ -8500,22 +8579,58 @@ async function buildManualRowCopyData(
   }
   const copyData: Record<string, unknown> = {}
   for (const field of visible) {
+    // 'pair' (the two parent columns) is decided below for both columns at once; 'never' is never copied.
     if (manualRowCopyRule(field, input.sheet) !== 'read_write') continue
     if (!readableFieldIds.has(field.id) || isFieldWriteForbidden(copyWritePermissions[field.id])) continue
     const value = sourceData[field.id]
     if (value === null || value === undefined) continue
     copyData[field.id] = value
   }
+  // The parent pair: both columns or neither. `input.fields` (not the lock-lifted copies) answers whether the pair's
+  // columns carry their lock; the copy's own 图号 is what the loop above decided to write.
+  Object.assign(copyData, manualRowCopyParentPair({
+    fields: input.fields,
+    sheet: input.sheet,
+    sourceData,
+    copyComponentCode: copyData[input.sheet.derived.componentCode],
+    canRead: (fieldId) => readableFieldIds.has(fieldId),
+    canWrite: (fieldId) => !isFieldWriteForbidden(copyWritePermissions[fieldId]),
+  }))
   return copyData
 }
 
-/** The three routes' refusal mapping (null = not one of theirs; the route answers 500). */
+/**
+ * What the two parent-picker reads may see for THIS actor (ADR §12.6): the readable field ids — layer-2 ∧ layer-3
+ * (`computeAllowedFieldIds`) through the stored-data chokepoint (`maskStoredRecordFieldIds`), the set every stored-record
+ * read masks with — and the record ids the row policy denies the actor (`loadDeniedRecordIds`, only when the sheet's
+ * row-level read flag is on and the actor is not an admin: the list / count read surfaces' own rule).
+ */
+async function loadManualRowParentReadScope(
+  req: Request,
+  query: QueryFn,
+  sheetId: string,
+  fields: UniverMetaField[],
+  access: ResolvedRequestAccess,
+  capabilities: MultitableCapabilities,
+): Promise<{ readableFieldIds: Set<string>; deniedRecordIds: string[] }> {
+  const fieldScopeMap = await loadFieldPermissionScopeMap(query, sheetId, access.userId)
+  const readableFieldIds = await maskStoredRecordFieldIds(req, query, sheetId, fields, computeAllowedFieldIds(fields, capabilities, fieldScopeMap))
+  const deniedRecordIds = !access.isAdminRole && (await loadRowLevelReadDenyEnabled(query, sheetId))
+    ? [...await loadDeniedRecordIds(query, sheetId, access.userId)]
+    : []
+  return { readableFieldIds, deniedRecordIds }
+}
+
+/** The manual-row routes' refusal mapping (null = not one of theirs; the route answers 500). */
 function sendManualRowWriteError(res: Response, err: unknown): Response | null {
   if (err instanceof StockPrepManualRowsRefusedError) return res.status(err.status).json(err.body())
+  // ADR §12.3 rules P3 – P5 on the parent pair: 400 (a half pair, a value that is not text) or 422 (a name without a
+  // 图号, the row as its own parent). Also thrown from inside the create / edit transaction, which it rolls back.
+  if (err instanceof StockPrepManualRowParentRefusedError) return res.status(err.status).json(err.body())
   if (err instanceof ManualRowFieldRefusalError) {
     return err.kind === 'plm_system'
       ? res.status(403).json(humanWriteLockRefusalBody(err.fieldIds))
-      : sendForbidden(res, `Field(s) not writable for this user: ${err.fieldIds.join(', ')}`)
+      : sendForbidden(res, `Field(s) not writable for this user${manualRowSubmittedIdSuffix(err.fieldIds, err.fieldIds)}`)
   }
   if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
   const writerFenceResponse = sendWriterFenceConflict(res, err)
@@ -9770,10 +9885,22 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // other sheet and actor gets no key (the body is byte-identical); a sheet without the exact stanza issues no
       // statement. Never 500s the load: a registry that cannot be read is `unavailable/registry_unreadable` (fail
       // closed — the web hides its generic create entries); a thrown lookup fails closed the same way.
+      // ADR §12.6: the block also names the parent pair (`parentFieldIds`) — only where a manual-row route accepts the
+      // pair on this sheet, and only to an actor who may write BOTH columns (rule P7; `fieldScopeMap` above is this
+      // actor's). No extra statement; the two ids never join `editableFieldIds`. Beside the pair, and never without
+      // it, the id of the row's own 图号 column (`componentCodeFieldId`) when this actor may read that column
+      // (`allowedFieldIds` above, the layer-2 ∧ layer-3 read set): the web's self-parent pre-check compares with it.
       let manualRowsBlock: ManualRowsContextBlock | null = null
       if (effectiveSheetId && (capabilities.canCreateRecord === true || capabilities.canEditRecord === true || capabilities.canDeleteRecord === true)) {
         try {
-          manualRowsBlock = await resolveManualRowsContextBlock(pool.query.bind(pool), effectiveSheetId, activeFields)
+          manualRowsBlock = await resolveManualRowsContextBlock(
+            pool.query.bind(pool),
+            effectiveSheetId,
+            activeFields,
+            undefined, // the deployment switch is read from the process environment, as before
+            (manualSheet) => actorCanWriteManualRowParentPair(activeFields, manualSheet, capabilities, fieldScopeMap),
+            (fieldId) => allowedFieldIds.has(fieldId),
+          )
         } catch (err) {
           console.error(
             '[univer-meta] load context: manual-rows probe failed; failing closed to unavailable',
@@ -20974,6 +21101,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
   // 人工补充行 — 新增 (ADR adr-stock-prep-manual-rows-20261030 §3.2). Session requests only. Body `{ data: { <physical
   // field id>: value } }`. Condition 1 (canCreateRecord) on the actor's OWN capabilities here; conditions 2–6 before any
   // write in createManualSupplementRow, and 3, 4, 6 again inside the create transaction.
+  // ADR §12 (the parent pair): the body may name 父组件图号 and 父组件名称 — both or neither (400), text or null (400), never
+  // a name without a 图号 (422), never the new row's own 图号 (422); both columns must be writable for the actor (403) and
+  // present and locked on the sheet (409 lock_missing / contract_mismatch). The values are stored as submitted.
   router.post('/sheets/:sheetId/manual-rows', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     if (!sheetId) {
@@ -21009,10 +21139,87 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
   })
 
+  // 人工补充行 — 父组件候选 (ADR §12.6). Session requests only; a READ (nothing is written, no fence is taken).
+  //   GET …/sheets/:sheetId/manual-rows/parent-options?q=<text, optional, ≤200>&limit=<1–50, default 20>
+  //   200 { ok, data: { items: [{ code, name, kind: 'parent' | 'component', childCount? }], truncated } }
+  // Gates, in order: canRead (403) → canCreateRecord or canEditRecord (403) → the sheet is live (404) → the parent
+  // pair's gate, i.e. the EDIT gate for a request that names the pair (409 / 503: not_project_sheet, lock_missing,
+  // contract_mismatch, registry_unreadable) — so a switched-off or archived sheet still answers (rule P8: an existing
+  // manual row's parent can still be changed there). The actor's write permission on the pair is NOT a gate here: the
+  // list only ever holds what the actor may read, and /context already withholds `parentFieldIds` from an actor who
+  // cannot write the pair.
+  // What it reads is bounded by the actor's own read sets (multitable/stock-preparation-manual-row-parent-options.ts):
+  // rows the row policy denies are excluded inside the statement, and a column outside the layer-2 ∧ layer-3 read set
+  // (through the stored-data chokepoint) is passed as NULL — not projected, not matched by `q`, not counted. 「本行自己
+  // 不列」 is the picker's own filter (it knows which row it edits); rule P5 refuses a self-parent at write time.
+  router.get('/sheets/:sheetId/manual-rows/parent-options', async (req: Request, res: Response) => {
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+    if (isApiTokenBearer(req.headers.authorization)) return sendManualRowsSessionOnly(res)
+    const parsedQuery = parseManualRowParentOptionsQuery(req.query)
+    if (parsedQuery.kind === 'invalid') {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsedQuery.message } })
+    }
+    const { q, limit } = parsedQuery.value
+
+    try {
+      const pool = poolManager.get()
+      const query = pool.query.bind(pool)
+      const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, query, sheetId)
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      if (!capabilities.canRead) return sendForbidden(res)
+      if (!capabilities.canCreateRecord && !capabilities.canEditRecord) return sendForbidden(res)
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+
+      const fields = await loadFieldsForSheet(query, sheetId)
+      const sheet = assertManualRowsAllowed(await loadManualRowParentPairVerdict(query, sheetId, fields))
+      const { readableFieldIds, deniedRecordIds } = await loadManualRowParentReadScope(req, query, sheetId, fields, access, capabilities)
+      const { derived } = sheet
+      const readableColumn = (fieldId: string) => (readableFieldIds.has(fieldId) ? fieldId : null)
+      const columns = {
+        code: readableColumn(derived.componentCode),
+        name: readableColumn(derived.componentName),
+        parentCode: readableColumn(derived.parent.code),
+        parentName: readableColumn(derived.parent.name),
+        // 有效 the actor cannot read is not filtered on (a filter on an unreadable column would be an oracle for it).
+        active: readableColumn(derived.active),
+      }
+      // Neither 图号 column is readable for this actor: nothing can be listed, and no statement is issued.
+      if (columns.code === null && columns.parentCode === null) {
+        return res.json({ ok: true, data: { items: [], truncated: false } })
+      }
+      const result = await query(MANUAL_ROW_PARENT_OPTIONS_SQL, manualRowParentOptionsParams({ sheetId, columns, deniedRecordIds, q, limit }))
+      const page = manualRowParentOptionsPage(result.rows as ManualRowParentOptionRow[], limit)
+      const items: ManualRowParentOption[] = []
+      for (const row of page.rows) {
+        const ids = manualRowParentOptionKindOf(row) === 'parent'
+          ? derived.parent
+          : { code: derived.componentCode, name: derived.componentName }
+        // The statement projected readable columns only; the same read set masks each entry again on the way out, so
+        // a projection that ever names a column outside it yields no entry instead of a value.
+        const projected = { [ids.code]: row.code, [ids.name]: row.name }
+        const masked = filterRecordDataByFieldIds(projected, readableFieldIds)
+        const item = manualRowParentOptionOf(row, masked[ids.code], masked[ids.name])
+        if (item) items.push(item)
+      }
+      return res.json({ ok: true, data: { items, truncated: page.truncated } })
+    } catch (err) {
+      const refusal = sendManualRowWriteError(res, err)
+      if (refusal) return refusal
+      console.error('[univer-meta] manual-row parent options failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load parent options' } })
+    }
+  })
+
   // 人工补充行 — 复制为新行 (ADR §3.3). Session requests only. The source row must be readable at record level by the
   // actor (the duplicate route's gate); the new row is created on the SAME sheet through the same extension as 新增,
-  // from the whitelisted columns the actor can read (and, for every copied column, write) — never the lineage pair
-  // (OQ5), 进度与回复, identity / RUN or the stamps. Its own key, 项目号 and 有效 are stamped by the server.
+  // from the whitelisted columns the actor can read (and, for every copied column, write) — never 进度与回复, identity /
+  // RUN or the stamps. Its own key, 项目号 and 有效 are stamped by the server. ADR §12.5 (OQ-P1): the source row's parent
+  // pair is carried when BOTH columns can be carried, and neither otherwise — see buildManualRowCopyData.
   router.post('/records/:recordId/manual-copy', async (req: Request, res: Response) => {
     const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
     if (!recordId) {
@@ -21068,12 +21275,27 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
   })
 
   // 人工补充行 — 修改 the six fillable columns of a MANUAL row (ADR §3.4). Session requests only. Every other column
-  // keeps going through /patch (which is NOT changed: no per-row exemption there). Preconditions: the row satisfies M
+  // keeps going through /patch (which is NOT changed: no per-row exemption there). Preconditions: the actor may READ
+  // the row (the shared record gate: canRead 403, sheet live 404, record 404, row policy 403), the row satisfies M
   // and its key column is locked (re-checked inside the write transaction), canEditRecord, the row policy and the record
-  // lock (RecordWriteService.patchRecords enforces both), every submitted column is one of the six, 名称 / 总用量 are not
-  // cleared, and the actor's per-subject field permissions allow the write. The write is patchRecords on this one
-  // record, with a field-guard map that drops ONLY the lock-induced read-only of the six. An archived project, the
-  // deployment switch and the per-sheet switch do not stop an edit (§4, §6).
+  // lock (RecordWriteService.patchRecords enforces both), every submitted column is one of the eight this route
+  // accepts, 名称 / 总用量 are not cleared, and the actor's per-subject field permissions allow the write. The write is
+  // patchRecords on this one record, with a field-guard map that drops ONLY the lock-induced read-only of those eight.
+  // An archived project, the deployment switch and the per-sheet switch do not stop an edit (§4, §6).
+  //
+  // ADR §12 — the parent pair (父组件图号 / 父组件名称) is accepted here as well as the six, under rules P3 – P8:
+  //   - the two columns are submitted together (400 `pair_incomplete`), each as text or null (400 `not_text`); both
+  //     blank removes the parent, a name without a 图号 is refused (422 `name_without_code`); values are stored as sent;
+  //   - the pair's two columns must exist and carry their lock (409 contract_mismatch / lock_missing), and the actor's
+  //     per-subject permissions must allow writing BOTH (403) — whichever half was sent;
+  //   - a row is never its own parent (422 `self_parent`), in BOTH directions — changing the pair, or changing the
+  //     row's own 图号 to the stored parent's — decided inside the write transaction on the locked, merged row
+  //     (assertManualRowEditInTransaction), never on this handler's first read of the row;
+  //   - that rule compares the request with a STORED cell of the row (the 图号 for a change of the pair, the 父组件图号 for
+  //     a change of the 图号), and its 422 says whether the two are equal. So nobody is given it about a cell they may
+  //     not read: the row must be readable for the actor (above), and so must that cell — otherwise 403, before the
+  //     transaction, whatever else the request carries (manualRowEditFieldIdsComparedWithUnreadableCell).
+  // The grid never sends one pair cell on its own: /context keeps the pair out of `editableFieldIds`.
   router.patch('/records/:recordId/manual-fields', async (req: Request, res: Response) => {
     const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
     if (!recordId) {
@@ -21105,15 +21327,23 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
       }
       const sheetId = String(recordRow.sheet_id)
-      const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, query, sheetId)
+      // Record-level READ first — the gate the copy route and every record read use (canRead 403, sheet not live 404,
+      // record 404, row policy 403). Everything below answers from this row (is it a manual row; rule P5 compares the
+      // request with its cells), so an actor the row policy denies is refused HERE, like on the read routes, and none
+      // of those answers is given about a row they may not read. Its capabilities are the ONE capability object of
+      // this request.
+      const readable = await requireRecordReadable(req, query, sheetId, recordId)
+      if ('status' in readable) return res.status(readable.status).json(readable.body)
+      const { access, capabilities, sheetScope } = readable
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canEditRecord) return sendForbidden(res)
-      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const fields = await loadFieldsForSheet(query, sheetId)
-      const sheet = assertManualRowsAllowed(await loadManualRowsVerdict(query, sheetId, fields, 'edit'))
+      // The gate sees the submitted ids: an edit that names the parent pair also needs the pair's two columns present
+      // and locked (ADR §12.3); an edit of the six alone is gated exactly as before.
+      const sheet = assertManualRowsAllowed(await loadManualRowsVerdict(query, sheetId, fields, 'edit', undefined, submittedFieldIds))
       if (!isManualSupplementRow({
         objectId: sheet.hostObjectId,
         createdBy: recordRow.created_by,
@@ -21122,14 +21352,15 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       })) {
         throw new StockPrepManualRowsRefusedError('not_manual_row')
       }
-      const fillable = new Set(sheet.derived.fillable)
-      const notFillableFieldIds = [...new Set(submittedFieldIds)].filter((fid) => !fillable.has(fid))
+      // The eight columns this route accepts: the six fillable ones and the parent pair (the lock-exempt set).
+      const acceptedFieldIds = sheet.derived.lockExempt
+      const notFillableFieldIds = [...new Set(submittedFieldIds)].filter((fid) => !acceptedFieldIds.has(fid))
       if (notFillableFieldIds.length > 0) {
         return res.status(400).json({
           ok: false,
           error: {
             code: STOCK_PREP_MANUAL_FIELDS_NOT_FILLABLE_CODE,
-            message: '这个入口只修改人工补充行的图号、名称、规格、材料、用量和总用量；其他列请照常编辑。',
+            message: STOCK_PREP_MANUAL_FIELDS_NOT_FILLABLE_MESSAGE,
             fieldIds: notFillableFieldIds,
           },
         })
@@ -21147,20 +21378,37 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE } })
       }
       // Layer-3 per-subject field-WRITE gate (parity with PATCH /records), on the fields with the lock lifted from the
-      // six only — every other restriction of these columns stays.
-      const liftedFields = liftManualRowFillableLocks(patchContext.fields, sheet)
+      // eight accepted columns only — every other restriction of these columns stays. A request that names either
+      // parent column is judged on BOTH (rule P7: the pair is written together or not at all).
+      const liftedFields = liftManualRowExemptLocks(patchContext.fields, sheet)
       const fieldScopeMap = await loadFieldPermissionScopeMap(query, sheetId, access.userId)
       const manualEditFieldPermissions = deriveFieldPermissions(filterVisiblePropertyFields(liftedFields), capabilities, {
         hiddenFieldIds: [],
         fieldScopeMap,
       })
-      const forbiddenWriteFieldIds = [...new Set(submittedFieldIds)].filter((fid) => isFieldWriteForbidden(manualEditFieldPermissions[fid]))
+      const forbiddenWriteFieldIds = manualRowWriteGatedFieldIds(sheet, submittedFieldIds).filter((fid) => isFieldWriteForbidden(manualEditFieldPermissions[fid]))
       if (forbiddenWriteFieldIds.length > 0) {
-        return sendForbidden(res, `Field(s) not writable for this user: ${forbiddenWriteFieldIds.join(', ')}`)
+        return sendForbidden(res, `Field(s) not writable for this user${manualRowSubmittedIdSuffix(forbiddenWriteFieldIds, submittedFieldIds)}`)
       }
-      // The field-guard map: the general one, with ONLY the six fillable entries rebuilt from the lock-lifted fields.
+      // Rule P5 will compare this patch with a STORED cell of the row — the 图号 when the patch names the pair, the
+      // 父组件图号 when it names the 图号 — and say whether they are equal. An actor who may not READ that cell (the
+      // layer-2 ∧ layer-3 read set through the stored-data chokepoint, the set this request's echo is masked with) is
+      // refused here, so the comparison is never made for them. A column the sheet does not have holds no cell.
+      const cellUnreadableFieldIds = manualRowEditFieldIdsComparedWithUnreadableCell(
+        sheet.derived,
+        submittedFieldIds,
+        (fieldId) => !patchContext.fieldById.has(fieldId) || patchContext.readableEchoFieldIds.has(fieldId),
+      )
+      if (cellUnreadableFieldIds.length > 0) {
+        return sendForbidden(res, `Field(s) not writable for this user${manualRowSubmittedIdSuffix(cellUnreadableFieldIds, submittedFieldIds)}`)
+      }
+      // Rules P3 and P4 on the submitted pair (a half pair or a value that is not text: 400; a name without a 图号:
+      // 422) — facts of the request alone. P5 needs the row and is decided in the transaction (below).
+      const parentPairProblem = manualRowParentPairProblemOf(sheet, changes)
+      if (parentPairProblem) throw new StockPrepManualRowParentRefusedError(parentPairProblem)
+      // The field-guard map: the general one, with ONLY the eight accepted entries rebuilt from the lock-lifted fields.
       const fieldById = new Map(patchContext.fieldById)
-      for (const [fieldId, guard] of buildFieldMutationGuardMap(liftedFields.filter((field) => fillable.has(field.id)))) {
+      for (const [fieldId, guard] of buildFieldMutationGuardMap(liftedFields.filter((field) => acceptedFieldIds.has(field.id)))) {
         fieldById.set(fieldId, guard)
       }
 
@@ -21168,8 +21416,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (yjsInvalidator) {
         recordWriteService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
       }
+      // In the write transaction, after the fence and under the row lock: M and the gate again, and rule P5 on the row
+      // as this patch will leave it (both directions — the patch is handed over for that).
       const manualRowRecheck = async (txQuery: QueryFn): Promise<void> => {
-        await assertManualRowEditInTransaction(txQuery, sheet, recordId)
+        await assertManualRowEditInTransaction(txQuery, sheet, recordId, changes)
       }
       const result = await recordWriteService.patchRecords({
         sheetId,
@@ -21202,6 +21452,77 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (refusal) return refusal
       console.error('[univer-meta] patch manual fields failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update manual row fields' } })
+    }
+  })
+
+  // 人工补充行 — 「被当作父组件的行数」 (ADR §12.7 ①, §12.8). Session requests only; a READ.
+  //   GET …/records/:recordId/manual-parent-dependents  →  200 { ok, data: { count } }
+  // `count` = how many OTHER manual rows on the sheet, readable for this actor, name THIS manual row's own stored 图号 as
+  // their 父组件图号 (surrounding whitespace ignored, the P5 comparison). The web asks before it changes a manual row's 图号
+  // or deletes the row and shows 「有 N 行人工补充行以它为父组件，修改/删除后它们不会跟着变」; nothing is rewritten (rule
+  // P6). A number only — never a row, an id or a value.
+  // SHAPE: addressed by the RECORD, not by a 图号 in the query string. The server reads the row's own stored 图号, so no
+  // business value travels in a URL and the count cannot be pointed at an arbitrary text.
+  // Gates, in order: the record is readable (canRead 403, sheet live 404, record 404, row policy 403 — the shared
+  // record gate) → canEditRecord or canDeleteRecord, the two actions the hint serves (403) → the edit gate (409 / 503) →
+  // the row satisfies M (409 not_manual_row). The count is 0 when the row has no 图号, or when the actor may not read
+  // 图号 or 父组件图号 (a count over a column the actor cannot read would be an oracle for it).
+  router.get('/records/:recordId/manual-parent-dependents', async (req: Request, res: Response) => {
+    const recordId = typeof req.params.recordId === 'string' ? req.params.recordId.trim() : ''
+    if (!recordId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'recordId is required' } })
+    }
+    if (isApiTokenBearer(req.headers.authorization)) return sendManualRowsSessionOnly(res)
+
+    try {
+      const pool = poolManager.get()
+      const query = pool.query.bind(pool)
+      const recordLookup = await pool.query('SELECT id, sheet_id, data, created_by FROM meta_records WHERE id = $1', [recordId])
+      const recordRow = recordLookup.rows[0] as { id: unknown; sheet_id: unknown; data: unknown; created_by: unknown } | undefined
+      if (!recordRow) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
+      }
+      const sheetId = String(recordRow.sheet_id)
+      const readable = await requireRecordReadable(req, query, sheetId, recordId)
+      if ('status' in readable) return res.status(readable.status).json(readable.body)
+      const { access, capabilities } = readable
+      if (!access.userId) {
+        return res.status(401).json({ error: 'Authentication required' })
+      }
+      if (!capabilities.canEditRecord && !capabilities.canDeleteRecord) return sendForbidden(res)
+
+      const fields = await loadFieldsForSheet(query, sheetId)
+      const sheet = assertManualRowsAllowed(await loadManualRowsVerdict(query, sheetId, fields, 'edit'))
+      const recordData = normalizeJson(recordRow.data)
+      if (!isManualSupplementRow({
+        objectId: sheet.hostObjectId,
+        createdBy: recordRow.created_by,
+        recordId: recordRow.id,
+        key: recordData[sheet.derived.key],
+      })) {
+        throw new StockPrepManualRowsRefusedError('not_manual_row')
+      }
+      const { readableFieldIds, deniedRecordIds } = await loadManualRowParentReadScope(req, query, sheetId, fields, access, capabilities)
+      const ownCode = comparableManualRowCode(recordData[sheet.derived.componentCode])
+      const countable = ownCode !== null
+        && readableFieldIds.has(sheet.derived.componentCode)
+        && readableFieldIds.has(sheet.derived.parent.code)
+      const count = countable
+        ? manualRowParentDependentsCountOf((await query(MANUAL_ROW_PARENT_DEPENDENTS_SQL, manualRowParentDependentsParams({
+          sheetId,
+          recordId,
+          parentCodeFieldId: sheet.derived.parent.code,
+          ownCode,
+          keyFieldId: sheet.derived.key,
+          deniedRecordIds,
+        }))).rows as Array<{ dependents?: unknown }>)
+        : 0
+      return res.json({ ok: true, data: { count } })
+    } catch (err) {
+      const refusal = sendManualRowWriteError(res, err)
+      if (refusal) return refusal
+      console.error('[univer-meta] manual-row parent dependents failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to count parent dependents' } })
     }
   })
 

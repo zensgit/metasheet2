@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { __directorySyncInternalsForTests } from '../../src/directory/directory-sync'
+import { strictLoginUninstalledRows } from '../utils/strict-login-uninstalled-fixture'
 
 const { createDirectoryAdmittedUserInTransaction } = __directorySyncInternalsForTests
 
@@ -23,6 +24,8 @@ function fakeClient(account = CORP_ACCOUNT_WITHOUT_OPENID) {
     queries,
     query: async (sql: string, params?: unknown[]) => {
       queries.push(sql)
+      const installationRows = strictLoginUninstalledRows(sql)
+      if (installationRows !== undefined) return { rows: installationRows }
       if (/INSERT INTO user_login_aliases/i.test(sql)) {
         aliasOwners.set(String(params?.[2] ?? ''), String(params?.[0] ?? ''))
         return { rows: [] as Array<Record<string, unknown>> }
@@ -57,7 +60,7 @@ const CORP_ACCOUNT_WITHOUT_OPENID = {
   // #4651: the bind path re-reads the account under lock and refuses an inactive one.
   is_active: true,
   id: '11111111-1111-1111-1111-111111111111',
-  integration_id: '22222222-2222-2222-2222-222222222222',
+  integration_id: '22222222-2222-4222-8222-222222222222',
   provider: 'dingtalk',
   corp_id: 'corpA',
   external_user_id: 'ext-1',

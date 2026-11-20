@@ -36,6 +36,26 @@ import { describe, expect, it, vi } from 'vitest'
 // attendance-admin.ts pulls a real module graph at import time; the registry and the route
 // handlers are what this file needs, not the database.
 const pgMocks = vi.hoisted(() => ({ query: vi.fn(), transaction: vi.fn(), poolQuery: vi.fn() }))
+vi.mock('../../src/integration/db/connection-pool', async () => {
+  const db = await import('../../src/db/pg')
+  return { poolManager: { get: () => ({
+    getInternalPool: () => null,
+    query: db.query,
+    transaction: async (work: (client: { query: (sql: string, params?: unknown[]) => Promise<unknown> }) => Promise<unknown>) => db.transaction(async client => {
+      let parent: Awaited<ReturnType<typeof client.query>> | undefined
+      return work({ query: async (sql, params) => {
+        if (/SET TRANSACTION|current_setting|set_config|pg_advisory_xact_lock_shared\(20261106, 1\)/.test(sql)) return { rows: [] }
+        if (sql === 'SELECT id::text AS id FROM roles WHERE id = $1::text FOR SHARE') {
+          parent = await client.query('SELECT id FROM roles WHERE id = $1 FOR SHARE', params)
+          return parent
+        }
+        if (sql === 'SELECT id FROM roles WHERE id = $1 FOR SHARE' && parent) return parent
+        return client.query(sql, params)
+      } })
+    }),
+  }) } }
+})
+
 vi.mock('../../src/db/pg', () => ({
   query: pgMocks.query,
   transaction: pgMocks.transaction,
@@ -504,6 +524,89 @@ describe('attendance role routes are bounded by the router scope', () => {
     ))
   }
 
+  it('returns exact template metadata without querying or opening a transaction', async () => {
+    const seen: string[] = []
+    installPg(seen)
+    pgMocks.poolQuery.mockReset()
+    const res = mockResponse()
+    await invokeHandler(attendanceAdminRouter(), 'get', '/api/attendance-admin/role-templates', {}, res)
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toEqual({
+      ok: true,
+      data: {
+        templates: [
+          { id: 'employee', roleId: 'attendance_employee', permissions: ['attendance:read', 'attendance:write'], description: 'Punch, submit adjustment requests, and read attendance records.' },
+          { id: 'approver', roleId: 'attendance_approver', permissions: ['attendance:read', 'attendance:approve'], description: 'Approve or reject attendance adjustment requests.' },
+          { id: 'importer', roleId: 'attendance_importer', permissions: ['attendance:read', 'attendance:import'], description: 'Import attendance files, run import sync, and inspect import batches.' },
+          { id: 'admin', roleId: 'attendance_admin', permissions: ['attendance:read', 'attendance:write', 'attendance:approve', 'attendance:import', 'attendance:admin'], description: 'Full attendance administration (rules, imports, holidays, groups).' },
+        ],
+      },
+      meta: undefined,
+    })
+    expect(pgMocks.query.mock.calls).toEqual([])
+    expect(pgMocks.poolQuery.mock.calls).toEqual([])
+    expect(pgMocks.transaction.mock.calls).toEqual([])
+  })
+
+  for (const route of [ROLE_ROUTES[0], ROLE_ROUTES[2]]) {
+    it(`${route.path} assigns membership without repairing template permissions and retains lock order`, async () => {
+      const seen: string[] = []
+      installPg(seen)
+      pgMocks.poolQuery.mockReset()
+      const originalQuery = pgMocks.query.getMockImplementation()!
+      pgMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        const result = await originalQuery(sql, params)
+        if (/INSERT INTO user_roles/i.test(sql)) return { rows: [{ user_id: BATCH_USER_ID }], rowCount: 1 }
+        return result
+      })
+      const res = mockResponse()
+      await invokeHandler(attendanceAdminRouter(), 'post', route.path, {
+        params: { userId: BATCH_USER_ID },
+        body: route.template,
+      }, res)
+
+      expect(res.statusCode).toBe(200)
+      const calls = pgMocks.query.mock.calls as Array<[string, unknown[]?]>
+      expect(calls.filter(([sql]) => /(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+(?:permissions|role_permissions)\b/i.test(sql))).toEqual([])
+      expect(pgMocks.poolQuery.mock.calls).toEqual([])
+      expect(pgMocks.transaction).toHaveBeenCalledTimes(1)
+      expect(calls.filter(([sql]) => /INSERT INTO user_roles/i.test(sql)).map(([, params]) => params))
+        .toEqual([[[BATCH_USER_ID], 'attendance_employee', 'manual']])
+      const roleLocks = calls.flatMap(([sql, params], index) => /FROM roles WHERE id = \$1 FOR SHARE/.test(sql) ? [{ index, roleId: params?.[0] }] : [])
+      expect(roleLocks.map(({ roleId }) => roleId)).toEqual(['attendance_admin', 'attendance_approver', 'attendance_employee', 'attendance_importer'])
+      const admissionLocks = calls.flatMap(([sql, params], index) => /pg_advisory_xact_lock/.test(sql) ? [{ index, key: params?.[0] }] : [])
+      const subjects = [BATCH_USER_ID, 'admin-1'].sort()
+      expect(admissionLocks.map(({ key }) => key)).toEqual(subjects.map((id) => `namespace-admission:${id}`))
+      const userLocks = calls.flatMap(([sql, params], index) => /FROM users/.test(sql) && /FOR UPDATE/.test(sql) ? [{ index, id: params?.[0] }] : [])
+      expect(userLocks.map(({ id }) => id)).toEqual(subjects)
+      const actorRead = calls.findIndex(([sql, params]) => /SELECT role_id/.test(sql) && /FROM user_roles/.test(sql) && params?.[0] === 'admin-1')
+      const lockedResolve = calls.findIndex(([sql]) => /FOR SHARE OF u/.test(sql))
+      const membershipWrite = calls.findIndex(([sql]) => /INSERT INTO user_roles/i.test(sql))
+      expect(actorRead).toBeGreaterThan(-1)
+      expect(lockedResolve).toBeGreaterThan(-1)
+      expect(membershipWrite).toBeGreaterThan(-1)
+      expect(roleLocks[3].index).toBeLessThan(admissionLocks[0].index)
+      expect(admissionLocks[1].index).toBeLessThan(userLocks[0].index)
+      expect(userLocks[1].index).toBeLessThan(actorRead)
+      expect(actorRead).toBeLessThan(lockedResolve)
+      expect(lockedResolve).toBeLessThan(membershipWrite)
+      if (route.path.includes('/batch/')) {
+        expect(res.body).toEqual({
+          ok: true,
+          data: {
+            roleId: 'attendance_employee', requested: 1, eligible: 1, updated: 1,
+            affectedUserIds: [BATCH_USER_ID], affectedUserIdsTruncated: false,
+            unchangedUserIds: [], unchangedUserIdsTruncated: false,
+            missingUserIds: [], inactiveUserIds: [],
+            items: [{ id: BATCH_USER_ID, email: 'u@example.com', name: 'U', employeeNo: null, department: null, role: 'user', is_active: true, is_admin: false, last_login_at: null, created_at: 'now' }],
+          },
+          meta: undefined,
+        })
+      }
+    })
+  }
+
   // Every one of the four routes, not just the assign pair: an unbounded unassign can strip
   // authority from an account the caller has none over, which the assign-side framing misses.
   for (const route of ROLE_ROUTES) {
@@ -606,8 +709,7 @@ describe('attendance-admin user scope is explicit, org-bound and atomic with rol
   it('refuses delegated global-role writes and keeps explicit platform-global writes atomic', async () => {
     const transactionSql: string[] = []
     const poolSql: string[] = []
-    const txQuery = vi.fn(async (sql: string, params?: unknown[]) => {
-      transactionSql.push(sql)
+    const respond = async (sql: string, params?: unknown[]) => {
       if (/FOR UPDATE/.test(sql) && /FROM users/.test(sql)) {
         const id = String(params?.[0] ?? '')
         return {
@@ -639,11 +741,15 @@ describe('attendance-admin user scope is explicit, org-bound and atomic with rol
         return { rows: requested.map((user_id) => ({ user_id })), rowCount: requested.length }
       }
       return { rows: [], rowCount: 0 }
+    }
+    const txQuery = vi.fn(async (sql: string, params?: unknown[]) => {
+      transactionSql.push(sql)
+      return respond(sql, params)
     })
     pgMocks.query.mockReset()
-    pgMocks.query.mockImplementation(async (sql: string) => {
+    pgMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
       poolSql.push(sql)
-      return { rows: [], rowCount: 0 }
+      return respond(sql, params)
     })
     pgMocks.transaction.mockReset()
     pgMocks.transaction.mockImplementation(async (handler: (client: { query: typeof txQuery }) => unknown) => (
@@ -1067,18 +1173,18 @@ describe('user_roles has exactly one writer', () => {
 /* ───────── B5. the attendance router's writer scope is DERIVED from the resolved caller ───────── */
 
 const ATTENDANCE_ADMIN_SOURCE = 'packages/core-backend/src/routes/attendance-admin.ts'
+const ATTENDANCE_COMMAND_SOURCE = 'packages/core-backend/src/admin/attendance-role-commands.ts'
 
 /**
- * Every `assignUserRoles({...})` / `unassignUserRoles({...})` call in the attendance router must hand
- * the writer `scope: roleWriteScope`, and every `roleWriteScope` must be bound from
- * `deriveAttendanceRoleAssignmentScope(scope)` — the resolved caller scope of the same route. A
- * constant scope (what the router used before, guarded only by a comment) is a violation.
+ * The router has no direct role writer. Both closed commands pass `scope: roleWriteScope`, bound
+ * from the global scope derivation after the router's resolved-scope preflight. A constant scope
+ * at either command writer, or a direct writer added back to the router, is a violation.
  */
-function attendanceWriterScopeViolations(source: string): string[] {
+function attendanceWriterScopeViolations(source: string, routeSource: string): string[] {
   const violations: string[] = []
+  if (/\b(?:assignUserRoles|unassignUserRoles)\s*\(/.test(routeSource)) violations.push('route directly calls a role writer')
   const calls = [...source.matchAll(/\b(assignUserRoles|unassignUserRoles)\(\{([\s\S]*?)\}\)/g)]
-  // Floor: the four role routes. "No violations" over zero calls would be vacuous.
-  if (calls.length < 4) violations.push(`expected >= 4 writer calls, found ${calls.length}`)
+  if (calls.length !== 2) violations.push(`expected 2 command writer calls, found ${calls.length}`)
   for (const [, writer, body] of calls) {
     if (!/\bscope:\s*roleWriteScope\s*,/.test(body)) violations.push(`${writer} call does not pass the derived roleWriteScope`)
   }
@@ -1087,7 +1193,7 @@ function attendanceWriterScopeViolations(source: string): string[] {
     violations.push(`expected one roleWriteScope binding per writer call (${calls.length}), found ${bindings.length}`)
   }
   for (const binding of bindings) {
-    if (binding !== 'deriveAttendanceRoleAssignmentScope(scope)') violations.push(`roleWriteScope bound from '${binding}'`)
+    if (binding !== "deriveAttendanceRoleAssignmentScope({ kind: 'global' })") violations.push(`roleWriteScope bound from '${binding}'`)
   }
   return violations
 }
@@ -1122,26 +1228,30 @@ describe('attendance role writes run under the scope derived from the resolved c
     }
   })
 
-  it('every writer call in the router passes the derived scope, bound from the resolved caller scope', () => {
-    const source = fs.readFileSync(path.join(REPO_ROOT, ATTENDANCE_ADMIN_SOURCE), 'utf8')
-    expect(attendanceWriterScopeViolations(source)).toEqual([])
+  it('the router has no direct writers and both closed commands pass the derived global scope', () => {
+    const source = fs.readFileSync(path.join(REPO_ROOT, ATTENDANCE_COMMAND_SOURCE), 'utf8')
+    const routeSource = fs.readFileSync(path.join(REPO_ROOT, ATTENDANCE_ADMIN_SOURCE), 'utf8')
+    expect(attendanceWriterScopeViolations(source, routeSource)).toEqual([])
   })
 
   it('POSITIVE CONTROL — the source check fires on a constant scope at a writer, or a binding that is not the derivation (mutated in memory)', () => {
-    const source = fs.readFileSync(path.join(REPO_ROOT, ATTENDANCE_ADMIN_SOURCE), 'utf8')
+    const source = fs.readFileSync(path.join(REPO_ROOT, ATTENDANCE_COMMAND_SOURCE), 'utf8')
+    const routeSource = fs.readFileSync(path.join(REPO_ROOT, ATTENDANCE_ADMIN_SOURCE), 'utf8')
     const constantAtWriter = source.replace('scope: roleWriteScope,', 'scope: ATTENDANCE_ROLE_ID_BOUND,')
     expect(constantAtWriter).not.toBe(source)
-    expect(attendanceWriterScopeViolations(constantAtWriter)).toEqual(expect.arrayContaining([
+    expect(attendanceWriterScopeViolations(constantAtWriter, routeSource)).toEqual(expect.arrayContaining([
       expect.stringContaining('does not pass the derived roleWriteScope'),
     ]))
     const constantBinding = source.replace(
-      'const roleWriteScope = deriveAttendanceRoleAssignmentScope(scope)',
+      "const roleWriteScope = deriveAttendanceRoleAssignmentScope({ kind: 'global' })",
       'const roleWriteScope = ATTENDANCE_ROLE_ID_BOUND',
     )
     expect(constantBinding).not.toBe(source)
-    expect(attendanceWriterScopeViolations(constantBinding)).toEqual([
+    expect(attendanceWriterScopeViolations(constantBinding, routeSource)).toEqual([
       "roleWriteScope bound from 'ATTENDANCE_ROLE_ID_BOUND'",
     ])
+    expect(attendanceWriterScopeViolations(source, `${routeSource}\nassignUserRoles({ scope: roleWriteScope })`))
+      .toEqual(['route directly calls a role writer'])
   })
 
   it('all four role routes refuse an org-scoped caller before any user_roles write (the derivation is on every route)', async () => {
@@ -1162,7 +1272,7 @@ describe('attendance role writes run under the scope derived from the resolved c
         return { rows: [], rowCount: 0 }
       })
       pgMocks.query.mockReset()
-      pgMocks.query.mockResolvedValue({ rows: [], rowCount: 0 })
+      pgMocks.query.mockImplementation(txQuery)
       pgMocks.transaction.mockReset()
       pgMocks.transaction.mockImplementation(async (handler: (client: { query: typeof txQuery }) => unknown) => (
         handler({ query: txQuery })
@@ -1179,6 +1289,7 @@ describe('attendance role writes run under the scope derived from the resolved c
       expect({ route: route.path, status: res.statusCode }).toEqual({ route: route.path, status: 403 })
       expect(res.body).toMatchObject({ ok: false, error: { code: 'ORG_SCOPED_ROLE_WRITE_UNAVAILABLE' } })
       expect(transactionSql.filter((sql) => /(INSERT INTO|DELETE FROM)\s+user_roles/i.test(sql))).toEqual([])
+      expect(pgMocks.transaction).not.toHaveBeenCalled()
     }
   })
 })

@@ -18,7 +18,7 @@ const auditMocks = vi.hoisted(() => ({
 }))
 
 const pgMocks = vi.hoisted(() => ({
-  query: vi.fn(),
+  query: vi.fn(), transaction: vi.fn(),
 }))
 
 const transactionMock = vi.hoisted(() => vi.fn())
@@ -36,9 +36,16 @@ vi.mock('../../src/db/pg', () => ({
   transaction: vi.fn(() => { throw new Error('unexpected database transaction') }),
 }))
 
-vi.mock('../../src/rbac/authorization-input-lock', async (importOriginal) => ({
-  ...await importOriginal<typeof import('../../src/rbac/authorization-input-lock')>(),
-  withAuthorizationInputTransaction: transactionMock,
+vi.mock('../../src/rbac/authorization-input-lock', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/rbac/authorization-input-lock')>()
+  return { ...actual, withAuthorizationInputTransaction: (...args: Parameters<typeof actual.withAuthorizationInputTransaction>) => {
+    transactionMock(...args)
+    return actual.withAuthorizationInputTransaction(...args)
+  } }
+})
+
+vi.mock('../../src/integration/db/connection-pool', () => ({
+  poolManager: { get: () => ({ transaction: pgMocks.transaction }) },
 }))
 
 vi.mock('../../src/rbac/service', () => ({
@@ -53,7 +60,7 @@ vi.mock('../../src/audit/audit', () => ({
   auditLog: auditMocks.auditLog,
 }))
 
-import { lockSharedAccessSubjects } from '../../src/admin/platform-actor-authority'
+
 import { permissionsRouter } from '../../src/routes/permissions'
 import { removeMatchingLegacyPermission } from '../../src/admin/legacy-permission-revoke'
 import {
@@ -140,6 +147,7 @@ type Script = {
   deletedAt?: string | null
   missingTarget?: boolean
   failWrite?: Error | null
+  failAudit?: boolean
   suppressWrite?: boolean
   holdActorAdmission?: boolean
 }
@@ -157,11 +165,13 @@ function installScript(script: Script) {
   const admissionStarted = admissionHeld
     ? new Promise<void>((resolve) => { markAdmission = resolve })
     : null
-  transactionMock.mockImplementation(async (plan: { userIds: string[]; witness: { userIds: string[] } }, handler: (tx: unknown) => Promise<unknown>) => {
+  pgMocks.transaction.mockImplementation(async (handler: (client: unknown) => Promise<unknown>) => {
     const client = {
       query: async (sql: string, params?: unknown[]) => {
         const text = String(sql)
         sqlLog.push(text)
+        if (text.includes('SET TRANSACTION') || text.includes('set_config')) return { rows: [] }
+        if (text.includes('current_setting')) return { rows: [{ lock_timeout: '0', statement_timeout: '0' }] }
         if (text.includes('pg_advisory_xact_lock') && String(params?.[0]) === 'namespace-admission:admin-1' && admissionHeld) {
           markAdmission()
           await admissionHeld
@@ -211,16 +221,18 @@ function installScript(script: Script) {
         }
         if (text.includes('SELECT to_jsonb(permissions)')) return { rows: [{ permissions: script.permissions }] }
         if (text.includes('INSERT INTO authorization_operation_receipts')) return { rows: [] }
-        if (text.includes('INSERT INTO authorization_operation_audit')) { auditWrite = params; return { rows: [] } }
+        if (text.includes('INSERT INTO authorization_operation_audit')) {
+          if (script.failAudit) throw new Error('audit store unavailable')
+          auditWrite = params
+          return { rows: [] }
+        }
         if (text.includes('access_generation')) return { rows: [{ access_generation: 2 }] }
         if (text.includes('directory_deprovision')) return { rows: [] }
         throw new Error(`unexpected legacy sql: ${text.slice(0, 180)}`)
       },
     }
     try {
-      // Simulate the transaction carrier while exercising the real writer and authority checks.
-      const locked = await lockSharedAccessSubjects(client, [...plan.userIds, ...plan.witness.userIds])
-      const result = await handler({ query: client.query, locked })
+      const result = await handler(client)
       order.push('commit')
       return result
     } catch (error) {
@@ -260,10 +272,11 @@ describe('legacy permission revoke', () => {
     rbacMocks.invalidateUserPerms.mockReset()
     auditMocks.auditLog.mockReset()
     auditMocks.auditLog.mockResolvedValue(undefined)
+    pgMocks.transaction.mockReset()
     pgMocks.query.mockReset()
     pgMocks.query.mockImplementation(() => { throw new Error('unexpected database query') })
     transactionMock.mockReset()
-    transactionMock.mockImplementation(() => { throw new Error('transaction script not installed') })
+
   })
 
   it('removes every padded copy and keeps other values in order', () => {
@@ -314,7 +327,7 @@ describe('legacy permission revoke', () => {
     const admissionAt = script.sqlLog.findIndex((sql) => sql.includes('pg_advisory_xact_lock'))
     const userAt = script.sqlLog.findIndex((sql) => sql.includes('FOR UPDATE'))
     const writeAt = script.sqlLog.findIndex((sql) => sql.includes('SET permissions'))
-    expect(script.sqlLog.some((sql) => sql.includes('FOR SHARE'))).toBe(false)
+    expect(script.sqlLog.some((sql) => sql.includes("role_id = 'admin' FOR SHARE"))).toBe(true)
     expect(script.sqlLog.some((sql) => sql.includes('FROM roles'))).toBe(false)
     expect(admissionAt).toBeGreaterThanOrEqual(0)
     expect(admissionAt).toBeLessThan(userAt)
@@ -323,8 +336,8 @@ describe('legacy permission revoke', () => {
     expect(script.sqlLog.some((sql) => sql.includes('directory_deprovision_effects'))).toBe(true)
     expect(script.order).toEqual(['commit'])
     expect(transactionMock).toHaveBeenCalledWith(expect.objectContaining({
-      intent: 'REVOKE_DIRECT', userIds: ['user-1'], admissionUserIds: ['user-1'],
-      witness: { userIds: ['admin-1'], admissionUserIds: ['admin-1'] },
+      intent: 'REVOKE_DIRECT', userIds: ['admin-1', 'user-1'], admissionUserIds: ['admin-1', 'user-1'],
+      witness: { userIds: ['admin-1', 'user-1'], admissionUserIds: ['admin-1', 'user-1'] },
     }), expect.any(Function))
     expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledWith('user-1')
     expect(script.sqlLog.some((sql) => sql.includes('INSERT INTO authorization_operation_receipts'))).toBe(true)
@@ -432,7 +445,7 @@ describe('legacy permission revoke', () => {
     const response = await invokeLegacyRevoke({ userId: 'user-1', permission: 'attendance:read' })
 
     expectClosedLegacyRefusal(script, response)
-    expect(script.sqlLog.some((sql) => sql.includes('ORDER BY role_id ASC'))).toBe(true)
+    expect(script.sqlLog.some((sql) => sql.includes("role_id = 'admin' FOR SHARE"))).toBe(true)
   })
 
   it('refuses an is_admin row and a token admin claim without calling isAdmin', async () => {
@@ -538,7 +551,7 @@ describe('legacy permission revoke', () => {
     census.record('permissions:legacy-revoke')
   })
 
-  it('keeps the original 500 when the permission write raises a bare 40P01', async () => {
+  it('adopts the typed busy 409 when the permission write raises a bare 40P01', async () => {
     const deadlock = Object.assign(new Error('deadlock detected'), { code: '40P01' })
     const script = installScript({
       columnType: 'jsonb',
@@ -549,14 +562,14 @@ describe('legacy permission revoke', () => {
     const response = await invokeLegacyRevoke({ userId: 'user-1', permission: 'attendance:read' })
 
     expect(script.sqlLog.some((sql) => sql.includes('UPDATE users') && sql.includes('SET permissions'))).toBe(true)
-    expect(response.statusCode).toBe(500)
-    expect(response.body).toEqual({ error: 'Failed to revoke legacy permission' })
+    expect(response.statusCode).toBe(409)
+    expect(response.body).toEqual({ code: 'AUTHORIZATION_INPUT_BUSY', error: 'Authorization inputs are busy; retry this change.' })
     expect(script.order).toEqual(['rollback'])
     expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
     expect(auditMocks.auditLog).not.toHaveBeenCalled()
   })
 
-  it('keeps the original 500 when the permission write raises a 40001 without the recovery marker', async () => {
+  it('adopts the typed busy 409 when the permission write raises a 40001 without the recovery marker', async () => {
     const serialization = Object.assign(new Error('could not serialize access'), { code: '40001' })
     const script = installScript({
       columnType: 'jsonb',
@@ -568,8 +581,8 @@ describe('legacy permission revoke', () => {
 
     expect(serialization.message).not.toBe(RECOVERY_AUTHORITY_BUSY_MARKER)
     expect(script.sqlLog.some((sql) => sql.includes('UPDATE users') && sql.includes('SET permissions'))).toBe(true)
-    expect(response.statusCode).toBe(500)
-    expect(response.body).toEqual({ error: 'Failed to revoke legacy permission' })
+    expect(response.statusCode).toBe(409)
+    expect(response.body).toEqual({ code: 'AUTHORIZATION_INPUT_BUSY', error: 'Authorization inputs are busy; retry this change.' })
     expect(script.order).toEqual(['rollback'])
     expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
     expect(auditMocks.auditLog).not.toHaveBeenCalled()
@@ -587,5 +600,23 @@ describe('legacy permission revoke', () => {
     expect(script.readWrite()).toBeUndefined()
     expect(script.order).toEqual(['rollback'])
     expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
+  })
+
+  it('rolls back the revoke and receipt if mandatory audit fails and never replays', async () => {
+    const script = installScript({
+      failAudit: true,
+      columnType: 'jsonb',
+      permissions: ['attendance:read'],
+    })
+
+    const response = await invokeLegacyRevoke({ userId: 'user-1', permission: 'attendance:read' })
+
+    expect(response.statusCode).toBe(500)
+    expect(response.body).toEqual({ error: 'Failed to revoke legacy permission' })
+    expect(script.order).toEqual(['rollback'])
+    expect(pgMocks.transaction).toHaveBeenCalledTimes(1)
+    expect(script.sqlLog.filter((sql) => sql.includes('SET permissions'))).toHaveLength(1)
+    expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
+    expect(script.sqlLog.some(sql => sql.includes('INSERT INTO authorization_operation_audit'))).toBe(true)
   })
 })

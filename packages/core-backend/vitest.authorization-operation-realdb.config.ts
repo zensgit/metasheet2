@@ -113,7 +113,7 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     pool: 'forks',
-    include: ['tests/integration/authorization-operation-*.db.test.ts', 'tests/unit/authorization-operation-deadline.test.ts'],
+    include: ['tests/integration/authorization-operation-*.db.test.ts', 'tests/integration/authorization-exception-write.db.test.ts', 'tests/unit/authorization-operation-deadline.test.ts'],
     testTimeout: 30000,
     hookTimeout: 60000,
     fileParallelism: false,

@@ -11,12 +11,6 @@ export default mergeConfig(base, defineConfig({
       if(!source.includes(anchor))throw new Error('missing lock judge mutation anchor')
       return source.replace(anchor,mutation==='lock_judge_missing' ? 'false' : "head === 'LOCK'")
     }
-    if (file.endsWith('/src/routes/attendance-admin.ts') && (mutation==='attendance_single' || mutation==='attendance_batch')) {
-      const anchor="assignmentSource: 'manual',"
-      const pos=mutation==='attendance_batch' ? source.indexOf(anchor) : source.lastIndexOf(anchor)
-      if(pos<0)throw new Error('missing attendance provenance anchor')
-      return source.slice(0,pos)+source.slice(pos+anchor.length)
-    }
     let transformed=source
     if (file.endsWith('/src/db/migrations/zzzz20261117130000_add_user_role_assignment_source.ts') && process.env.PERMISSION_PROVENANCE_TEST_LOCK_RACE==='1') {
       const anchor="  if (Number(result.rows[0]?.count ?? 0)>0)"
@@ -29,10 +23,12 @@ export default mergeConfig(base, defineConfig({
       down_lock:['/src/db/migrations/zzzz20261117130000_add_user_role_assignment_source.ts','await sql`LOCK TABLE user_roles IN ACCESS EXCLUSIVE MODE`.execute(db)','void db'],
       down:['/src/db/migrations/zzzz20261117130000_add_user_role_assignment_source.ts','if (Number(result.rows[0]?.count ?? 0)>0)','if (false)'],
       unknown:['/src/routes/admin-users.ts',"row.assignment_source : 'unknown'","row.assignment_source : 'manual'"],
-      create:['/src/routes/admin-users.ts',"assignmentSource: 'creation',","assignmentSource: 'manual',"],
-      manual:['/src/routes/admin-users.ts',"roleId,\n          assignmentSource: 'manual',\n          scope: { kind: 'platform-admin' },","roleId,\n          scope: { kind: 'platform-admin' },"],
+      create:['/src/admin/admin-user-birth-command.ts',"assignmentSource: 'creation',","assignmentSource: 'manual',"],
+      manual:['/src/admin/platform-role-assign-command.ts',"assignmentSource: 'manual',",''],
+      attendance_single:['/src/admin/attendance-role-commands.ts',"assignmentSource: 'manual',",''],
+      attendance_batch:['/src/admin/attendance-role-commands.ts',"assignmentSource: 'manual',",''],
       delegated_manual:['/src/routes/admin-users.ts',"roleId, assignmentSource: 'manual', scope: activeScope",'roleId, scope: activeScope'],
-      batch_create:['/src/routes/admin-user-batch.ts',"assignmentSource: 'creation',","assignmentSource: undefined,"],
+      batch_create:['/src/admin/admin-user-batch-birth-command.ts',"assignmentSource: 'creation',","assignmentSource: undefined,"],
       batch_update:['/src/routes/admin-user-batch.ts',"assignmentSource: 'manual',","assignmentSource: undefined,"],
       delegated_view:['/src/routes/admin-users.ts',"snapshot.roleAssignments.filter(assignment => revocable.some(role => role.id === assignment.roleId))",'snapshot.roleAssignments'],
       command:['/src/admin/authorization-operation-service.ts',"roleId, assignmentSource: 'manual', scope: access.kind",'roleId, scope: access.kind'],

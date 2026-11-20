@@ -10,7 +10,8 @@
  *   K-04 the pinned details: a whitespace-only creator is no creator, keys are compared raw (never trimmed), a blank or
  *        whitespace-only record id is never manual;
  *   K-05 the 35 template columns (33 + the two R-71 7.4 PR-4 machine columns), each in exactly ONE class of the host's whitelist (the ADR §3.3 table), with the
- *        classes' ownership and required-ness as the plugin template declares them;
+ *        classes' ownership and required-ness as the plugin template declares them — since ADR §12 (2026-11-19) the two
+ *        parent columns are their own class (`parent_assignable`): lock-exempt on the manual-row routes, never `fillable`;
  *   K-06 the plugin registry read is a FIXED statement over columns migration 087 created (parsed from the migration);
  *   K-07 the failure direction is decided by SQLSTATE alone (42P01 = not registered; anything else = unreadable);
  *   K-08 the deployment switch reads with the plugin's exact-literal rule;
@@ -18,7 +19,9 @@
  *   K-10 (B4) the per-sheet switch: the plugin's reader (the switch route's) answers exactly as the host's, value for
  *        value, and what the plugin writes survives the host sanitizer with the lock and the key stanza kept; the switch
  *        route's 「manual rows offered on this sheet」 rule (manualRowsSupportedOnObject) answers exactly as the host's
- *        predicate (a), id for id.
+ *        predicate (a), id for id;
+ *   K-11 (ADR §12, rule P5) the host decides "a row is its own parent" with the SAME reading of a 图号 cell as the
+ *        plugin's same-material reminder (trimmed text, a finite number as its text, anything else nothing).
  */
 import { createRequire } from 'node:module'
 import { readFileSync } from 'node:fs'
@@ -171,7 +174,7 @@ describe('K-05 the template census (ADR §3.3)', () => {
   })
   it('the class sizes are the ADR\'s 6 / 2 / 5 / 8 / 9 / 3, identity / RUN grown by the two PR-4 machine columns to 11', () => {
     expect(Object.fromEntries(Object.entries(classes).map(([cls, ids]) => [cls, ids.length]))).toEqual({
-      fillable: 6, lineage: 2, plan: 5, progress: 8, identity_run: 11, stamp: 3,
+      fillable: 6, parent_assignable: 2, plan: 5, progress: 8, identity_run: 11, stamp: 3,
     })
   })
   it('R-71 7.4 PR-4: the machine write-back column and the empty spec column sit in identity / RUN (never written by a manual-row route)', () => {
@@ -181,7 +184,7 @@ describe('K-05 the template census (ADR §3.3)', () => {
   it('ownership: 备料计划 and 进度与回复 are the template\'s human columns; every other class is plm_system', () => {
     const human = new Set(fields.filter((f) => f.ownership === 'human_preserved').map((f) => f.id))
     expect([...classes.plan, ...classes.progress].sort()).toEqual([...human].sort())
-    for (const cls of ['fillable', 'lineage', 'identity_run', 'stamp'] as const) {
+    for (const cls of ['fillable', 'parent_assignable', 'identity_run', 'stamp'] as const) {
       for (const id of classes[cls]) expect(fields.find((f) => f.id === id)?.ownership, id).toBe('plm_system')
     }
   })
@@ -197,9 +200,29 @@ describe('K-05 the template census (ADR §3.3)', () => {
     expect([...host.MANUAL_ROW_NOT_CLEARABLE_FIELD_IDS].sort()).toEqual(['componentName', 'totalQuantity'])
     for (const id of host.MANUAL_ROW_NOT_CLEARABLE_FIELD_IDS) expect(classes.fillable).toContain(id)
   })
-  it('the lineage pair is the copy\'s DERIVED_LINEAGE pair (OQ5), and the never-written classes are lineage, identity / RUN and the stamps', () => {
-    expect([...classes.lineage].sort()).toEqual(['parentComponentCode', 'parentComponentName'])
-    expect([...host.MANUAL_ROW_NEVER_WRITTEN_CLASSES].sort()).toEqual(['identity_run', 'lineage', 'stamp'])
+  it('ADR §12: the parent pair is its own class — the plugin\'s DERIVED_LINEAGE pair, both locked on a project sheet — and no longer never-written', () => {
+    expect([...classes.parent_assignable]).toEqual(['parentComponentCode', 'parentComponentName'])
+    expect([...classes.parent_assignable]).toEqual([host.MANUAL_ROW_PARENT_CODE_FIELD_ID, host.MANUAL_ROW_PARENT_NAME_FIELD_ID])
+    expect([...host.MANUAL_ROW_PARENT_FIELD_IDS]).toEqual([...classes.parent_assignable])
+    // The same two columns the plugin's planner treats as denormalized PLM display columns — read from the plugin's
+    // own source, so a rename on either side reds here.
+    const pairingSource = readFileSync(join(__dirname, '..', '..', '..', '..', 'plugins', 'plugin-integration-core', 'lib', 'stock-preparation-continuation-pairing.cjs'), 'utf8')
+    expect(pairingSource).toContain("const DERIVED_LINEAGE_DISPLAY_FIELD_IDS = Object.freeze(['parentComponentCode', 'parentComponentName'])")
+    // P1 「只能经人工行路由写入」 rests on the lock: the project-sheet marking locks both.
+    for (const id of classes.parent_assignable) expect(pluginTargets.PROJECT_SHEET_PLM_SYSTEM_FIELD_IDS, id).toContain(id)
+    expect([...host.MANUAL_ROW_NEVER_WRITTEN_CLASSES].sort()).toEqual(['identity_run', 'stamp'])
+  })
+  it('ADR §12: the lock exemption covers exactly fillable ∪ the parent pair (6 + 2 = 8), disjoint from the never-written classes; the pair is NOT fillable', () => {
+    expect([...host.MANUAL_ROW_LOCK_EXEMPT_CLASSES].sort()).toEqual(['fillable', 'parent_assignable'])
+    for (const cls of host.MANUAL_ROW_LOCK_EXEMPT_CLASSES) expect(host.MANUAL_ROW_NEVER_WRITTEN_CLASSES).not.toContain(cls)
+    for (const id of host.MANUAL_ROW_PARENT_FIELD_IDS) {
+      expect(host.MANUAL_ROW_FILLABLE_FIELD_IDS as readonly string[], id).not.toContain(id)
+      expect(host.MANUAL_ROW_DIALOG_FIELD_IDS as readonly string[], id).not.toContain(id)
+    }
+    expect(host.MANUAL_ROW_COMPONENT_CODE_FIELD_ID).toBe('componentCode')
+    expect(host.MANUAL_ROW_COMPONENT_NAME_FIELD_ID).toBe('componentName')
+    expect(host.MANUAL_ROW_FILLABLE_FIELD_IDS).toContain(host.MANUAL_ROW_COMPONENT_CODE_FIELD_ID)
+    expect(host.MANUAL_ROW_FILLABLE_FIELD_IDS).toContain(host.MANUAL_ROW_COMPONENT_NAME_FIELD_ID)
   })
 })
 
@@ -345,6 +368,58 @@ describe('K-10 (B4) the per-sheet switch: the plugin reader answers exactly as t
   })
 })
 
+/**
+ * K-11 (ADR §12.3 rule P5) THE 图号 COMPARISON. 「父组件图号不能等于本行自己的图号」 is decided by the host with
+ * `isManualRowSelfParent`; the plugin already has a rule for "the same 图号" — the same-material reminder (ADR §5.3,
+ * lib/stock-preparation-manual-rows.cjs `summarizeManualSupplement`: a manual row matches an ADD row that carries its
+ * 图号). The two must read a cell the same way (a string trimmed, a finite number as its text, anything else nothing;
+ * case kept), or a pair the reminder calls "the same part" could be accepted here as "another part". The plugin's
+ * answer is taken through its public function, on its own input shape; the expected column is stated explicitly.
+ */
+describe('K-11 (ADR §12) P5 compares 图号 exactly as the plugin\'s same-material reminder does', () => {
+  const pluginSameCode = (manualCode: unknown, otherCode: unknown): boolean => {
+    const collector = pluginRows.createManualPrefixCollector()
+    // Distinct names keep the reminder's no-图号 fallback (名称 + 规格 + 材料) from ever matching.
+    collector.add('manual', { componentCode: manualCode, componentName: 'manual-only' }, 'rec_k11')
+    const summary = pluginRows.summarizeManualSupplement({
+      existingRows: collector.attachTo([]),
+      addRecords: [{ componentCode: otherCode, componentName: 'add-only' }],
+    })
+    return summary.matchedManualCount === 1
+  }
+  const CASES: Array<[string, unknown, unknown, boolean]> = [
+    ['the same text', 'SYN-1', 'SYN-1', true],
+    ['whitespace around the first', ' SYN-1\t', 'SYN-1', true],
+    ['whitespace around the second', 'SYN-1', '\n SYN-1 ', true],
+    ['a different case', 'syn-1', 'SYN-1', false],
+    ['an inner space', 'SYN 1', 'SYN1', false],
+    ['different text', 'SYN-1', 'SYN-2', false],
+    ['a number against its text', '123', 123, true],
+    ['its text against a number', 123, '123', true],
+    ['two equal numbers', 7, 7, true],
+    ['a boolean is not text', 'true', true, false],
+    ['a blank first', '  ', '  ', false],
+    ['an empty first', '', '', false],
+    ['null first', null, 'SYN-1', false],
+    ['null second', 'SYN-1', null, false],
+    ['an object', { code: 'SYN-1' }, 'SYN-1', false],
+    ['an array', ['SYN-1'], 'SYN-1', false],
+    ['NaN', Number.NaN, 'NaN', false],
+  ]
+  it.each(CASES)('%s', (_label, first, second, expected) => {
+    expect(host.isManualRowSelfParent(first, second)).toBe(expected)
+    expect(pluginSameCode(first, second)).toBe(expected)
+  })
+  it('the comparable form is null exactly where the plugin reads a blank cell', () => {
+    for (const value of [null, undefined, '', '   ', true, false, {}, [], Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(host.comparableManualRowCode(value), String(value)).toBeNull()
+      expect(pluginSameCode(value, value), String(value)).toBe(false)
+    }
+    expect(host.comparableManualRowCode(' SYN-1 ')).toBe('SYN-1')
+    expect(host.comparableManualRowCode(42)).toBe('42')
+  })
+})
+
 describe('K-09 the derived physical ids are provisioning\'s', () => {
   it('every template column, and the six fillable in template order', () => {
     const derived = deriveManualRowsFieldIds('tenant_k:integration-core', truth.PROJECT_OBJECT_ID)
@@ -353,7 +428,20 @@ describe('K-09 the derived physical ids are provisioning\'s', () => {
     }
     expect(derived.key).toBe(derived.byLogical.idempotencyKey)
     expect(derived.fillable).toEqual(host.MANUAL_ROW_FILLABLE_FIELD_IDS.map((id) => derived.byLogical[id]))
-    // lineage 2 + identity / RUN 11 (9 + the two R-71 7.4 PR-4 machine columns) + stamps 3
-    expect(derived.neverWritten.size).toBe(2 + 11 + 3)
+    // identity / RUN 11 (9 + the two R-71 7.4 PR-4 machine columns) + stamps 3 — the parent pair left this set (ADR §12)
+    expect(derived.neverWritten.size).toBe(11 + 3)
+  })
+  it('ADR §12: the parent pair, the row\'s own 图号 / 名称 and the lock-exempt set', () => {
+    const derived = deriveManualRowsFieldIds('tenant_k:integration-core', truth.PROJECT_OBJECT_ID)
+    const physical = (id: string) => getObjectFieldId('tenant_k:integration-core', truth.PROJECT_OBJECT_ID, id)
+    expect(derived.parent).toEqual({ code: physical('parentComponentCode'), name: physical('parentComponentName') })
+    expect(derived.componentCode).toBe(physical('componentCode'))
+    expect(derived.componentName).toBe(physical('componentName'))
+    expect([...derived.lockExempt].sort()).toEqual([...derived.fillable, derived.parent.code, derived.parent.name].sort())
+    expect(derived.lockExempt.size).toBe(8)
+    for (const id of derived.lockExempt) expect(derived.neverWritten.has(id), id).toBe(false)
+    // never part of the single-cell editable list
+    expect(derived.fillable).not.toContain(derived.parent.code)
+    expect(derived.fillable).not.toContain(derived.parent.name)
   })
 })

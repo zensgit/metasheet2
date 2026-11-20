@@ -1,8 +1,9 @@
 /**
  * Database-side census of the privilege-classifier input tables against the standard migrated
- * schema: the non-internal triggers on the seven input tables are exactly the five recovery-lease
- * triggers; no rule writes an input table; no user-defined function body writes an input table or
- * runs dynamic SQL that names one; the functions that lock `users` rows are exactly four; every
+ * schema: the non-internal triggers on the seven input tables are exactly the five disabled recovery-
+ * lease triggers and the enabled local-credential-version trigger; no rule writes an input table;
+ * no user-defined function body writes an input table or runs dynamic SQL that names one; the
+ * functions that lock `users` rows are exactly five; every
  * cascading foreign key from an input table points at one of five known parents; the three `users`
  * columns the classifier reads carry their pinned default expressions; no view or materialized view
  * is defined over an input table; the foreign keys whose child is an input table are a pinned
@@ -31,13 +32,14 @@ const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
 const INPUT_TABLES: readonly string[] = PRIVILEGE_GRANT_SOURCE_TABLES
 
-/** (table, trigger) pairs expected on the input tables. */
-const EXPECTED_TRIGGERS: ReadonlyArray<readonly [string, string]> = [
-  ['users', 'trg_users_recovery_authority_lock_update'],
-  ['users', 'trg_users_recovery_authority_lock_lifecycle'],
-  ['user_roles', 'trg_user_roles_recovery_authority_lock'],
-  ['user_permissions', 'trg_user_permissions_recovery_authority_lock'],
-  ['role_permissions', 'trg_role_permissions_recovery_authority_lock'],
+/** (table, trigger, enabled) tuples from the recovery-authority and admin-grant actor-input migrations. */
+const EXPECTED_TRIGGERS: ReadonlyArray<readonly [string, string, string]> = [
+  ['users', 'trg_users_recovery_authority_lock_update', 'D'],
+  ['users', 'trg_users_recovery_authority_lock_lifecycle', 'D'],
+  ['user_roles', 'trg_user_roles_recovery_authority_lock', 'D'],
+  ['user_permissions', 'trg_user_permissions_recovery_authority_lock', 'D'],
+  ['role_permissions', 'trg_role_permissions_recovery_authority_lock', 'D'],
+  ['users', 'admin_grant_local_credential_version', 'O'],
 ]
 
 const EXPECTED_USERS_LOCKING_FUNCTIONS: readonly string[] = [
@@ -45,6 +47,9 @@ const EXPECTED_USERS_LOCKING_FUNCTIONS: readonly string[] = [
   'guard_repaired_directory_link',
   'attendance_employee_timezone_member_guard',
   'guard_attendance_calculation_group_membership_user_org',
+  // Actor-input migration: establishment INSERT rechecks the user already locked by
+  // changeRequiredPasswordWithProvenance (user -> watermark -> session -> establishment).
+  'admin_grant_local_credential_establishment_guard',
 ]
 
 const CASCADE_PARENT_ALLOWLIST: readonly string[] = ['roles', 'permissions', 'users', 'directory_departments', 'platform_member_groups']
@@ -292,12 +297,10 @@ describeIfDatabase('authorization-input census (real PostgreSQL)', () => {
     expect(result.rows.map((row) => String(row.relname)).sort()).toEqual([...INPUT_TABLES].sort())
   })
 
-  it('1. the non-internal triggers on the input tables are exactly the five recovery-lease triggers', async () => {
+  it('1. the input tables have exactly five disabled recovery-lease triggers and one enabled credential-version trigger', async () => {
     const triggers = await triggersOnInputs(run)
-    const byPair = (a: readonly [string, string], b: readonly [string, string]) => (a[0] === b[0] ? (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0) : a[0] < b[0] ? -1 : 1)
-    expect(triggers.map((t) => [t.table, t.trigger] as const).sort(byPair)).toEqual([...EXPECTED_TRIGGERS].sort(byPair))
-    // Enabled state is recorded, not asserted: the lease triggers install disabled.
-    for (const trigger of triggers) expect(['O', 'D', 'R', 'A']).toContain(trigger.enabled)
+    const byPair = (a: readonly [string, string, string], b: readonly [string, string, string]) => (a[0] === b[0] ? (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0) : a[0] < b[0] ? -1 : 1)
+    expect(triggers.map((t) => [t.table, t.trigger, t.enabled] as const).sort(byPair)).toEqual([...EXPECTED_TRIGGERS].sort(byPair))
   })
 
   it('2. no rule is defined on an input table, and no rule anywhere names one', async () => {
@@ -314,7 +317,7 @@ describeIfDatabase('authorization-input census (real PostgreSQL)', () => {
     expect(functions.some((fn) => /recovery_authority/.test(fn.name))).toBe(true)
   })
 
-  it('4. the functions that lock users rows are exactly the four known guards', async () => {
+  it('4. the functions that lock users rows are exactly the five known guards', async () => {
     const functions = await userFunctions(run)
     expect(usersLockingFunctions(functions)).toEqual([...EXPECTED_USERS_LOCKING_FUNCTIONS].sort())
   })
@@ -347,6 +350,24 @@ describeIfDatabase('authorization-input census (real PostgreSQL)', () => {
   })
 
   describe('positive controls (each created inside a rolled-back transaction)', () => {
+    it('a disabled credential-version trigger or enabled recovery-lease trigger is detected by assertion 1', async () => {
+      await inRolledBackTransaction(async (client, runner) => {
+        await client.query('ALTER TABLE public.users DISABLE TRIGGER admin_grant_local_credential_version')
+        const trigger = (await triggersOnInputs(runner)).find((row) => row.trigger === 'admin_grant_local_credential_version')!
+        expect(trigger).toEqual({ table: 'users', trigger: 'admin_grant_local_credential_version', enabled: 'D' })
+        expect(EXPECTED_TRIGGERS).not.toContainEqual([trigger.table, trigger.trigger, trigger.enabled])
+      })
+      await inRolledBackTransaction(async (client, runner) => {
+        await client.query('ALTER TABLE public.users ENABLE TRIGGER trg_users_recovery_authority_lock_update')
+        const trigger = (await triggersOnInputs(runner)).find((row) => row.trigger === 'trg_users_recovery_authority_lock_update')!
+        expect(trigger).toEqual({ table: 'users', trigger: 'trg_users_recovery_authority_lock_update', enabled: 'O' })
+        expect(EXPECTED_TRIGGERS).not.toContainEqual([trigger.table, trigger.trigger, trigger.enabled])
+      })
+      const restored = await triggersOnInputs(run)
+      expect(restored.find((row) => row.trigger === 'admin_grant_local_credential_version')).toEqual({ table: 'users', trigger: 'admin_grant_local_credential_version', enabled: 'O' })
+      expect(restored.find((row) => row.trigger === 'trg_users_recovery_authority_lock_update')).toEqual({ table: 'users', trigger: 'trg_users_recovery_authority_lock_update', enabled: 'D' })
+    })
+
     it('a trigger added to user_roles is detected by assertion 1', async () => {
       await inRolledBackTransaction(async (client, runner) => {
         await client.query('CREATE FUNCTION ais1_census_noop() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$')

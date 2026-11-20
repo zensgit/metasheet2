@@ -172,8 +172,11 @@ export function permissionsRouter(): Router {
         return res.status(401).json({ error: 'User ID not found in token' })
       }
 
-      if (typeof userId !== 'string' || !userId || typeof permission !== 'string' || !permission) {
+      if (!userId || typeof permission !== 'string' || !permission) {
         return res.status(400).json({ error: 'userId and permission are required' })
+      }
+      if (typeof userId !== 'string' || userId !== userId.trim()) {
+        return res.status(400).json({ error: 'userId must be a non-empty canonical string' })
       }
 
       await writeLegacyAuthorizationException({
@@ -206,8 +209,11 @@ export function permissionsRouter(): Router {
         return res.status(401).json({ error: 'User ID not found in token' })
       }
 
-      if (typeof userId !== 'string' || !userId || typeof permission !== 'string' || !permission) {
+      if (!userId || typeof permission !== 'string' || !permission) {
         return res.status(400).json({ error: 'userId and permission are required' })
+      }
+      if (typeof userId !== 'string' || userId !== userId.trim()) {
+        return res.status(400).json({ error: 'userId must be a non-empty canonical string' })
       }
 
       const result = await writeLegacyAuthorizationException({
@@ -385,10 +391,13 @@ export function permissionsRouter(): Router {
         return res.status(401).json({ error: 'User ID not found in token' })
       }
 
-      const userId = typeof req.body?.userId === 'string' ? req.body.userId.trim() : ''
+      const userId = req.body?.userId
       const templateId = typeof req.body?.templateId === 'string' ? req.body.templateId.trim() : ''
       if (!userId || !templateId) {
         return res.status(400).json({ error: 'userId and templateId are required' })
+      }
+      if (typeof userId !== 'string' || userId !== userId.trim()) {
+        return res.status(400).json({ error: 'userId must be a non-empty canonical string' })
       }
 
       const template = getPermissionTemplate(templateId)

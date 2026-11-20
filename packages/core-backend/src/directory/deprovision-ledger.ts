@@ -21,6 +21,10 @@ import {
 } from './departure-vouching'
 import { DEFAULT_LEGACY_LOGIN_GRANT_PROVIDER } from './login-grant-registry'
 import { translateRecoveryConflict } from '../db/recovery-conflict'
+import {
+  connectionAdmitsLegacyGrant,
+  finishDeprovisionCredentials,
+} from '../auth/strict-credential-chain'
 
 export type DirectoryTransactionClient = {
   query: (
@@ -106,6 +110,20 @@ export type ApplyDeprovisionCandidateResult = {
    */
   skipReason: 'candidate_vanished' | null
   plan: DirectoryDeprovisionStatePlan
+  strictDeprovision: StrictDeprovisionResult
+}
+
+export type StrictDeprovisionResult = {
+  eligible: boolean
+  applied: boolean
+  /** Unrevoked ids seen by a read-only preview. Empty after a write attempt. */
+  unrevokedGrantIds: readonly string[]
+  revokedGrantIds: readonly string[]
+  provenance: { runId: string; eventId: string | null } | null
+}
+
+function idleStrictDeprovision(): StrictDeprovisionResult {
+  return { eligible: false, applied: false, unrevokedGrantIds: [], revokedGrantIds: [], provenance: null }
 }
 
 type CandidateStateRow = {
@@ -452,6 +470,7 @@ async function applyDirectoryDeprovisionCandidateWrites(
         globallyClear: false,
         skipReason: 'candidate_vanished',
         plan: { localUserId: input.localUserId, skipReason: 'candidate_vanished', effects: [] },
+        strictDeprovision: idleStrictDeprovision(),
       }
     }
   }
@@ -464,6 +483,7 @@ async function applyDirectoryDeprovisionCandidateWrites(
       globallyClear: false,
       skipReason: 'candidate_vanished',
       plan: { localUserId: input.localUserId, skipReason: 'candidate_vanished', effects: [] },
+      strictDeprovision: idleStrictDeprovision(),
     }
   }
   const loginGrantProvider = requireLoginGrantProvider(state)
@@ -484,8 +504,12 @@ async function applyDirectoryDeprovisionCandidateWrites(
     suppressedByLocal: suppressedByLocalFrom(state),
   }
   const currentGeneration = Number(state.access_generation)
+  // Preview reports the legacy state plan without acquiring a write fence.
+  const strictEligible = input.write && input.integrationId
+    ? !await connectionAdmitsLegacyGrant(client, input.integrationId)
+    : false
 
-  if (!input.write || plan.effects.length === 0) {
+  if (!input.write || (plan.effects.length === 0 && !strictEligible)) {
     return {
       applied: false,
       eventId: null,
@@ -493,9 +517,19 @@ async function applyDirectoryDeprovisionCandidateWrites(
       globallyClear: state.globally_clear,
       skipReason: null,
       plan,
+      strictDeprovision: {
+        eligible: strictEligible,
+        applied: false,
+        unrevokedGrantIds: [],
+        revokedGrantIds: [],
+        provenance: null,
+      },
     }
   }
 
+  let eventId: string | null = null
+  let generation = currentGeneration
+  if (plan.effects.length > 0) {
   const membershipChanged = hasEffect(plan.effects, 'membership_changed')
   const userChanged = hasEffect(plan.effects, 'user_changed')
 
@@ -517,7 +551,7 @@ async function applyDirectoryDeprovisionCandidateWrites(
         RETURNING access_generation`,
         [input.localUserId],
       )
-  const generation = Number(
+  generation = Number(
     (
       generationResult.rows[0] as
         | { access_generation?: string | number }
@@ -628,7 +662,7 @@ async function applyDirectoryDeprovisionCandidateWrites(
       generation,
     ],
   )
-  const eventId = (eventResult.rows[0] as { id?: string } | undefined)?.id
+  eventId = (eventResult.rows[0] as { id?: string } | undefined)?.id ?? null
   if (!eventId) {
     throw new Error('directory deprovision event INSERT returned no id')
   }
@@ -641,13 +675,37 @@ async function applyDirectoryDeprovisionCandidateWrites(
     plan.effects,
     input.ledgerScope,
   )
+  }
+
+  const finished = await finishDeprovisionCredentials(client, {
+    userId: input.localUserId,
+    actorId: input.triggeredBy,
+    connectionId: input.integrationId,
+    runId: input.runId,
+    eventId,
+    accountId: input.directoryAccountId,
+    orgId: input.orgId,
+    user: hasEffect(plan.effects, 'user_changed'),
+    departAll: state.globally_clear && plan.effects.length > 0,
+    clear: state.globally_clear,
+    grant: hasEffect(plan.effects, 'grant_changed'),
+  })
 
   return {
-    applied: true,
+    applied: plan.effects.length > 0,
     eventId,
     accessGeneration: generation,
     globallyClear: state.globally_clear,
     skipReason: null,
     plan,
+    strictDeprovision: {
+      eligible: strictEligible,
+      applied: finished.grantIds.length > 0,
+      unrevokedGrantIds: [],
+      revokedGrantIds: finished.grantIds,
+      provenance: finished.grantIds.length > 0
+        ? { runId: input.runId, eventId }
+        : null,
+    },
   }
 }
