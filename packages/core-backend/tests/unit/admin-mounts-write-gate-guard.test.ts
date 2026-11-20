@@ -7,6 +7,8 @@
  *
  * 2026-10-30：新增身份元数据保存路由，当前 68 条 / platform 61 条；下述 67 条口径保留为原基线说明。
  * 2026-11-05：新增钉钉工作通知显式验证路由（`POST /dingtalk/work-notification/verify`），当前 76 条 / platform 69 条。
+ * 2026-11-20：新增集成能力状态写路由（`PATCH /api/admin/directory/integration-capabilities/:integrationId`），
+ *   登记表 79 → 80 条 / platform 70 → 71 条（挂载点此前已登记，当时零条写路由）。
  *
  * 为什么不能照搬 #5680 的「中间件首位必须是门」判据：
  *   本批 67 条写路由里只有 `canary-routes.ts` 的 4 条把门放在中间件位（`requireAdminRole()`）。
@@ -475,7 +477,7 @@ function parseGate(gate: string): { file: string; branches: string[][] } | null 
 }
 
 // ---------------------------------------------------------------------------
-// 登记表（79 条）——`reg` = 注册文件，`gate` = 注册文件 + 门函数名链；均由「fixture 自检」对源码自证
+// 登记表（80 条）——`reg` = 注册文件，`gate` = 注册文件 + 门函数名链；均由「fixture 自检」对源码自证
 // ---------------------------------------------------------------------------
 
 interface WriteRouteEntry {
@@ -582,6 +584,9 @@ const REGISTRY: readonly WriteRouteEntry[] = [
 
   // --- routes/admin-directory-routing-policy.ts（1 条） ---
   { mount: 'admin-directory-routing-policy', method: 'patch', path: '/:purpose', reg: 'routes/admin-directory-routing-policy.ts', gate: 'routes/admin-directory-routing-policy.ts ensurePlatformAdmin', family: P },
+
+  // --- routes/admin-directory-capabilities.ts（1 条；门是处理器第一条语句，在 try 之外，从 ./admin-directory import） ---
+  { mount: 'admin-directory-integration-capabilities', method: 'patch', path: '/:integrationId', reg: 'routes/admin-directory-capabilities.ts', gate: 'routes/admin-directory-capabilities.ts ensurePlatformAdmin', family: P },
 
   // --- routes/admin-directory-org-transfers.ts（5 条） ---
   { mount: 'admin-directory-org-transfers', method: 'post', path: '/', reg: 'routes/admin-directory-org-transfers.ts', gate: 'routes/admin-directory-org-transfers.ts ensurePlatformAdmin', family: P },
@@ -870,12 +875,12 @@ describe('/api/admin 挂载点写路由守卫 — fixture 自检', () => {
     }
   })
 
-  it('登记表条数与分族口径固定：79 条 / 2 条委派例外 / 4 条中间件门 / 1 条事务门 / 2 条操作门', () => {
-    expect(REGISTRY).toHaveLength(79)
+  it('登记表条数与分族口径固定：80 条 / 2 条委派例外 / 4 条中间件门 / 1 条事务门 / 2 条操作门', () => {
+    expect(REGISTRY).toHaveLength(80)
     expect(REGISTRY.filter((e) => e.family === 'delegation')).toHaveLength(2)
     expect(REGISTRY.filter((e) => e.family === 'middleware')).toHaveLength(4)
     expect(REGISTRY.filter((e) => e.family === 'inline')).toHaveLength(1)
-    expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(70)
+    expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(71)
     expect(REGISTRY.filter((e) => e.family === 'operation')).toHaveLength(2)
     // 每条都必须带来源：reg = 该挂载点的注册文件；gate 可解析，且每条分支链的最后一环是本族的门函数
     for (const entry of REGISTRY) {
@@ -1088,6 +1093,7 @@ describe('(A) RBAC 判据不可用（isAdmin 抛错）时 fail-closed', () => {
         'admin-directory-department-bindings',
         'admin-directory-routing-policy',
         'admin-directory-org-transfers',
+        'admin-directory-integration-capabilities',
       ] as MountKey[]
     ).flatMap((mount) => {
       const representatives = REGISTRY.filter((entry) => entry.mount === mount && entry.family === 'platform')
@@ -1135,6 +1141,7 @@ describe('(A) 控制组：同一请求、只改门的输入，结论必须翻面
     { mount: 'admin-directory-local', path: '/departments' },
     { mount: 'admin-directory-department-bindings', path: '/sweep' },
     { mount: 'admin-directory-routing-policy', path: '/:purpose' },
+    { mount: 'admin-directory-integration-capabilities', path: '/:integrationId' },
     { mount: 'admin-directory-org-transfers', path: '/' },
     { mount: 'admin-users', path: '/api/admin/login-aliases/backfill', expectDownstream: 'login-alias-service.backfillUserLoginAliases' },
     { mount: 'permissions', path: '/api/admin/permission-templates/apply' },
@@ -1282,7 +1289,8 @@ describe('(B) 清单双向反查：router.stack 枚举出的写路由集合必�
       entry.mount === 'admin-directory-org-transfers'
       || entry.mount === 'admin-directory-local'
       || entry.mount === 'admin-directory-department-bindings'
-      || entry.mount === 'admin-directory-routing-policy',
+      || entry.mount === 'admin-directory-routing-policy'
+      || entry.mount === 'admin-directory-integration-capabilities',
     )
     for (const entry of overlapping) {
       const response = await request(pinned.url())[entry.method](toUrl(entry)).send({})
