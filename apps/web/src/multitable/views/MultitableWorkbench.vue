@@ -3035,19 +3035,21 @@ async function deleteAttachment(attachmentId: string, context?: MetaAttachmentUp
   await Promise.allSettled(context?.recordId ? drawerSavesOutOf(context.recordId) : [])
   // The deep-linked copy (the reload refreshes the page's rows only) takes the delete as the server does for an
   // attachment bound to that record (the id out of its list, version + 1), also when the drawer has moved on: a
-  // later patch of that record starts from it.
+  // later patch of that record starts from it. The server moves the record only when its stored list holds the
+  // attachment; one the copy's list does not hold (uploaded in a form and removed again before Save) leaves the copy
+  // as it is, as the server leaves the record.
   const linked = deepLinkedRecord.value
   if (context?.recordId && context.fieldId && linked?.id === context.recordId) {
-    const updatedIds = (linked.data[context.fieldId] as unknown[] | undefined)
-      ?.map(String)
-      .filter((id) => id !== attachmentId) ?? []
-    deepLinkedRecord.value = {
-      ...linked,
-      version: linked.version + 1,
-      data: {
-        ...linked.data,
-        [context.fieldId]: updatedIds,
-      },
+    const storedIds = (linked.data[context.fieldId] as unknown[] | undefined)?.map(String) ?? []
+    if (storedIds.includes(attachmentId)) {
+      deepLinkedRecord.value = {
+        ...linked,
+        version: linked.version + 1,
+        data: {
+          ...linked.data,
+          [context.fieldId]: storedIds.filter((id) => id !== attachmentId),
+        },
+      }
     }
     deepLinkedRecordAttachmentSummaries.value = {
       ...deepLinkedRecordAttachmentSummaries.value,
