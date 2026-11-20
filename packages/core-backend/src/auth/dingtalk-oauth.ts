@@ -856,7 +856,9 @@ async function identityRequiresEmptyScope(
   }
   // Ambiguous same-enterprise affiliations cannot identify a connection. Only an implicit
   // login with the same established identity may proceed under the global empty-scope lock.
-  if (source.explicit || (!canonicalHere && !pairs.some(([stored]) => stored && key === stored)) || !describesSameDingTalkPerson(identity, profile, null)) {
+  const legacyKey = canonicalHere || pairs.some(([stored]) => typeof stored === 'string' && stored
+    && (key === stored || (!source.configuredCorp && key === `${source.corpId}:${stored}`)))
+  if (source.explicit || !legacyKey || !describesSameDingTalkPerson(identity, profile, null)) {
     refuseDingTalkSource()
   }
   return true

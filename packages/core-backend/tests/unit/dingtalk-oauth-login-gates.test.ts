@@ -847,7 +847,7 @@ describe('dingtalk oauth login gates', () => {
       expect(update!.params[7]).toBe(false)
     })
 
-    it('supersedes evidence when a container login fills a previously missing corp scope', async () => {
+    it('keeps a missing identity corp and its existing evidence and generation on a same-person container login', async () => {
       vi.stubEnv('DINGTALK_AUTH_REQUIRE_GRANT', '1')
       vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '1')
       const txCalls: Array<{ sql: string; params: unknown[] }> = []
@@ -888,16 +888,20 @@ describe('dingtalk oauth login gates', () => {
         })
         .mockResolvedValueOnce({ rows: [{ enabled: true }] })
 
-      await exchangeEnterpriseAuthCodeForUser('auth-code-corp-fill')
+      const result = await exchangeEnterpriseAuthCodeForUser('auth-code-existing-person')
+      expect(result.localUserId).toBe('user-1')
+      const identity = txCalls.find(call => call.sql.includes('UPDATE user_external_identities'))
+      expect(identity?.params[2]).toBe('ding-corp:union-1')
+      expect(identity?.params[5]).toBeNull()
 
       expect(
         txCalls.some((call) =>
           call.sql.includes('UPDATE directory_deprovision_events')),
-      ).toBe(true)
+      ).toBe(false)
       expect(
         txCalls.some((call) =>
           /UPDATE users[\s\S]*access_generation/.test(call.sql)),
-      ).toBe(true)
+      ).toBe(false)
     })
 
     it('proceeds on user/get failure when getuserinfo already carried unionid', async () => {

@@ -328,6 +328,27 @@ describe('DingTalk login backfills the directory member openId', () => {
       expect(backfillCall(calls)).toBeUndefined()
     })
 
+    it('rolls back both rejected-login openId writes if a scope now exists', async () => {
+      const store = await import('../../src/auth/strict-login-grant-store')
+      const empty = vi.spyOn(store, 'lockEmptyConnectionLoginScope').mockResolvedValue(false)
+      const committedWrites: Call[] = []
+      const calls = installTransaction({
+        connectionId: source.connectionId, storedKey: 'ding-corp:union-1', storedCorp: '',
+        corpOrigins: [source.connectionId, '00000000-0000-4000-8000-000000000012'], committedWrites,
+      })
+      clientMocks.readDingTalkOauthConfig.mockReturnValue({ clientId: 'dt-client', corpId: source.corpId })
+      pgMocks.query.mockReset().mockResolvedValueOnce({ rows: [IDENTITY_USER] }).mockResolvedValueOnce({ rows: [{ enabled: false }] })
+      try {
+        await expect(exchangeCodeForUser('code', { ...source, configuredCorp: source.corpId }))
+          .rejects.toMatchObject({ statusCode: 403 })
+        expect(calls.some(call => call.sql.includes('UPDATE user_external_identities'))).toBe(true)
+        expect(backfillCall(calls)).toBeDefined()
+        expect(committedWrites).toEqual([])
+      } finally {
+        empty.mockRestore()
+      }
+    })
+
     it.each([true, false])('configured enterprise compatibility preserves a missing identity corp during web enrichment (grant=%s)', async grant => {
       clientMocks.readDingTalkOauthConfig.mockReturnValue({ clientId: 'dt-client', corpId: source.corpId })
       pgMocks.query.mockReset().mockResolvedValueOnce({ rows: [IDENTITY_USER] }).mockResolvedValueOnce({ rows: [{ enabled: grant }] })
@@ -367,6 +388,7 @@ describe('DingTalk login backfills the directory member openId', () => {
     const scenarios = [
       { affiliation: 'sibling', links: [same] },
       { affiliation: 'canonical sibling', links: [same], key: 'ding-corp:union-1' },
+      { affiliation: 'stored corporate OpenID matched by UnionID', links: [same], key: 'ding-corp:previous-open', openId: 'previous-open' },
       { affiliation: 'multiple', links: [selected, same] },
       { affiliation: 'directory UnionID differs', links: [{ ...selected, union_id: 'other' }] },
       { affiliation: 'corporate key and two applications', links: [], key: 'ding-corp:union-1', duplicateCorp: true },
@@ -382,7 +404,7 @@ describe('DingTalk login backfills the directory member openId', () => {
           const committedWrites: Call[] = []
           try {
             installTransaction({
-              connectionId: source.connectionId, linkedAccounts: scenario.links, storedKey: scenario.key,
+              connectionId: source.connectionId, linkedAccounts: scenario.links, storedKey: scenario.key, storedOpenId: scenario.openId,
               corpOrigins: scenario.duplicateCorp ? [source.connectionId, sibling] : undefined, committedWrites,
             })
             clientMocks.fetchDingTalkAppAccessToken.mockResolvedValue('fixture-token')

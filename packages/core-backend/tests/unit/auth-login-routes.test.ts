@@ -2266,6 +2266,35 @@ describe('auth login routes', () => {
     })
   })
 
+  it('refuses an ordinary session when its final empty-scope check sees a scope', async () => {
+    const sources = await import('../../src/auth/dingtalk-login-source')
+    const store = await import('../../src/auth/strict-login-grant-store')
+    vi.mocked(sources.resolveDingTalkLoginSource).mockResolvedValueOnce({
+      ...ordinarySource, connectionId: '00000000-0000-4000-8000-000000000011',
+      orgId: 'test-org', corpId: 'test-corp',
+    })
+    const empty = vi.spyOn(store, 'lockEmptyConnectionLoginScope').mockResolvedValue(false)
+    try {
+      dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+      dingtalkOauthMocks.validateState.mockResolvedValue({ valid: true, intent: 'login' })
+      dingtalkOauthMocks.exchangeCodeForUser.mockResolvedValue({
+        localUserId: 'user-1', localUserName: 'Ding User', localUserRole: 'user',
+        externalOrigin: null, requiresEmptyScope: true, sessionGeneration: 7,
+      })
+      rbacMocks.listUserPermissions.mockResolvedValue([])
+      const response = await invokeRoute('post', '/dingtalk/callback', {
+        body: { code: 'auth-code', state: 'state-1' },
+      })
+      expect(response.statusCode).toBe(403)
+      expect(response.body).toMatchObject({ success: false, code: 'strict_connection' })
+      expect(response.body).not.toHaveProperty('data.token')
+      expect(sessionRegistryMocks.createUserSession).not.toHaveBeenCalled()
+      expect(authServiceMocks.createToken).not.toHaveBeenCalled()
+    } finally {
+      empty.mockRestore()
+    }
+  })
+
   it('rejects DingTalk callback when state validation fails', async () => {
     dingtalkOauthMocks.validateState.mockResolvedValue({
       valid: false,

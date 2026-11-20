@@ -381,6 +381,24 @@ describe('executeDingTalkApprovalCardCallback (B-3 §B-3 execution)', () => {
     expect(h.dispatchAction).toHaveBeenCalledTimes(1)
   })
 
+  it('leaves the approval and its card untouched when the scope read fails at dispatch', async () => {
+    const store = await import('../../src/auth/strict-login-grant-store')
+    const initial = vi.spyOn(store, 'readCurrentConnectionLoginScope').mockResolvedValue({ installation: 'installed', scope: null })
+    const final = vi.spyOn(store, 'readConnectionLoginScope').mockRejectedValue(new Error('scope unavailable'))
+    const h = makeHarness()
+    try {
+      const result = await executeDingTalkApprovalCardCallback({
+        ...h.deps, transaction: work => work({ query: h.query }),
+      }, wirePayload())
+      expect(result).toEqual({ outcome: 'operator_unresolved', deliveryId: DELIVERY_ID, reason: 'source_unavailable' })
+      expect(h.dispatchAction).not.toHaveBeenCalled()
+      expect(h.calls.some(call => /^\s*UPDATE dingtalk_approval_card_deliveries/i.test(call.sql))).toBe(false)
+    } finally {
+      final.mockRestore()
+      initial.mockRestore()
+    }
+  })
+
   it('unknown delivery id → delivery_not_found (values-free, no engine call)', async () => {
     const h = makeHarness({ deliveryRows: [] })
     const result = await executeDingTalkApprovalCardCallback(h.deps as never, wirePayload())

@@ -659,7 +659,7 @@ describe('DingTalk identity authorization boundaries (real DB)', () => {
   })
 
   for (const mixed of [false, true]) {
-    it.each(['sibling', 'multiple', 'foreign', 'foreign among multiple', 'different directory UnionID', 'verified sole link'] as const)(
+    it.each(['sibling', 'multiple', 'foreign', 'foreign among multiple', 'different directory UnionID', 'verified sole link', 'stored corporate OpenID'] as const)(
       `checks %s affiliation on web and container with strict scope ${mixed} and reconciles rejected writes`, async affiliation => {
         await useProviderResponseDecoders()
         const { checkDingTalkLoginSurfaces } = await import('../helpers/dingtalk-login-http')
@@ -668,11 +668,13 @@ describe('DingTalk identity authorization boundaries (real DB)', () => {
     )
   }
 
-  it('keeps the identity mismatch for a configured enterprise and an unattributed bare key on both surfaces', async () => {
-    await useProviderResponseDecoders()
-    const { checkDingTalkLoginSurfaces } = await import('../helpers/dingtalk-login-http')
-    await checkDingTalkLoginSurfaces({ mixed: false, affiliation: 'configured bare sibling' })
-  })
+  it.each(['configured bare sibling', 'configured stored corporate OpenID'] as const)(
+    'keeps an unverified %s row closed on both surfaces', async affiliation => {
+      await useProviderResponseDecoders()
+      const { checkDingTalkLoginSurfaces } = await import('../helpers/dingtalk-login-http')
+      await checkDingTalkLoginSurfaces({ mixed: false, affiliation })
+    },
+  )
 
   it('configured enterprise compatibility keeps corp NULL through grant-denied enrichment and both successful login surfaces', async () => {
     await useProviderResponseDecoders()
