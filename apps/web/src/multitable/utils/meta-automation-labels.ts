@@ -257,6 +257,7 @@ export type AutomationLabelKey =
   | 'manager.lastRunNone'
   | 'manager.edit'
   | 'manager.viewLogs'
+  | 'manager.viewFlow'
   | 'manager.viewDeliveries'
   | 'manager.delete'
   | 'manager.deleteConfirmTitle'
@@ -666,6 +667,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'manager.lastRunNone',
   'manager.edit',
   'manager.viewLogs',
+  'manager.viewFlow',
   'manager.viewDeliveries',
   'manager.delete',
   'manager.deleteConfirmTitle',
@@ -1221,6 +1223,7 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'manager.lastRunNone': { en: 'Not run yet', zh: '尚未运行' },
   'manager.edit': { en: 'Edit', zh: '编辑' },
   'manager.viewLogs': { en: 'View Logs', zh: '查看日志' },
+  'manager.viewFlow': { en: 'Flow view', zh: '流程视图' },
   'manager.viewDeliveries': { en: 'View Deliveries', zh: '查看投递记录' },
   'manager.delete': { en: 'Delete', zh: '删除' },
   'manager.deleteConfirmTitle': { en: 'Delete rule', zh: '删除规则' },

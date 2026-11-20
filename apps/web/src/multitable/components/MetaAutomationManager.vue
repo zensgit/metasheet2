@@ -834,6 +834,7 @@
           <div class="meta-automation__card-actions">
             <el-button data-automation-edit="true" @click="openRuleEditor(rule)">{{ l('manager.edit') }}</el-button>
             <el-button data-automation-logs="true" @click="openLogViewer(rule)">{{ l('manager.viewLogs') }}</el-button>
+            <el-button data-automation-flow-view-open="true" @click="openFlowView(rule)">{{ l('manager.viewFlow') }}</el-button>
             <el-button
               v-if="ruleHasActionType(rule, 'send_dingtalk_group_message')"
               :data-automation-group-deliveries="rule.id"
@@ -867,6 +868,12 @@
       @save="onRuleEditorSave"
       @test="onTestRule"
       @open-dingtalk-groups="emit('open-dingtalk-groups')"
+    />
+    <MetaAutomationFlowView
+      :visible="showFlowView"
+      :rule="flowViewRule"
+      :fields="fields"
+      @close="showFlowView = false"
     />
     <MetaAutomationLogViewer
       :visible="showLogViewer"
@@ -922,6 +929,7 @@ import { useMultitableAutomations } from '../composables/useMultitableAutomation
 import type { MultitableApiClient } from '../api/client'
 import MetaAutomationRuleEditor from './MetaAutomationRuleEditor.vue'
 import MetaAutomationLogViewer from './MetaAutomationLogViewer.vue'
+import MetaAutomationFlowView from './MetaAutomationFlowView.vue'
 import MetaAutomationGroupDeliveryViewer from './MetaAutomationGroupDeliveryViewer.vue'
 import MetaAutomationPersonDeliveryViewer from './MetaAutomationPersonDeliveryViewer.vue'
 import MetaAutomationIntegrationPreview from './MetaAutomationIntegrationPreview.vue'
@@ -1901,6 +1909,15 @@ function openRuleEditor(rule?: AutomationRule) {
 function openLogViewer(rule: AutomationRule) {
   logViewerRuleId.value = rule.id
   showLogViewer.value = true
+}
+
+// Integration assistant stage 1a (register R-99 ③): read-only flow view of one rule.
+const showFlowView = ref(false)
+const flowViewRule = ref<AutomationRule | null>(null)
+
+function openFlowView(rule: AutomationRule) {
+  flowViewRule.value = rule
+  showFlowView.value = true
 }
 
 function openGroupDeliveryViewer(rule: AutomationRule) {
