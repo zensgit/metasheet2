@@ -1,12 +1,15 @@
 /**
- * Capability state for display: the pure evaluator and the non-locking reads behind it.
+ * Capability state: the pure evaluator and the non-locking display read.
  *
- * NOT AUTHORITATIVE. The evaluator and `peekIntegrationCapabilityState` answer for the display route
- * and for tests only: the integration row and the capability row are read by two statements that may
- * come from different snapshots, and nothing is locked. A path that decides whether something may
- * happen must not call them.
+ * The evaluator decides only over the rows it is given; it reads nothing and locks nothing, so its
+ * answer is only as authoritative as the rows its caller supplied.
  *
- * This module and the migration are the only source files that name the capability tables.
+ * `peekIntegrationCapabilityState` is a non-locking display read: the integration row and the
+ * capability row are read by two statements that may come from different snapshots. It serves the
+ * display route and tests and must not be used to decide whether something may happen.
+ *
+ * Consumers obtain authorization only through `resolveEffectiveIntegrationCapability`
+ * (`./integration-capability-resolve`), which locks the rows and then runs this evaluator over them.
  */
 import type { Queryable } from '../multitable/automation-durable-dispatcher'
 import type {
