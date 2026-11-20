@@ -308,6 +308,13 @@ export type AutomationLabelKey =
   | 'recipe.updatedNotifyDesc'
   | 'recipe.fieldChangedUpdateTitle'
   | 'recipe.fieldChangedUpdateDesc'
+  | 'recipe.stockPrepDailyPullTitle'
+  | 'recipe.stockPrepDailyPullDesc'
+  | 'recipe.stockPrepDailyPullLocked'
+  | 'recipe.stockPrepPullFailedAlertTitle'
+  | 'recipe.stockPrepPullFailedAlertDesc'
+  | 'recipe.stockPrepPullFailedAlertLocked'
+  | 'recipe.stockPrepPullFailedAlertMessage'
   | 'manager.enabled'
   | 'manager.disabled'
   // #6155: non-blocking notice on a rule that is on (or being switched on) with an action that can only no-op.
@@ -319,6 +326,26 @@ export type AutomationLabelKey =
   | 'manager.edit'
   | 'manager.viewLogs'
   | 'manager.viewFlow'
+  | 'manager.templatesOpen'
+  | 'manager.templatesTitle'
+  | 'manager.templatesHint'
+  | 'manager.templateLockedBadge'
+  | 'flowHistory.title'
+  | 'flowHistory.hint'
+  | 'flowHistory.loading'
+  | 'flowHistory.empty'
+  | 'flowHistory.loadFailed'
+  | 'flowHistory.retry'
+  | 'flowHistory.triggeredBy'
+  | 'flowHistory.stepTotal'
+  | 'flowHistory.stepStatus.success'
+  | 'flowHistory.stepStatus.failed'
+  | 'flowHistory.stepStatus.skipped'
+  | 'flowHistory.stepStatus.simulated'
+  | 'flowHistory.overlayShown'
+  | 'flowHistory.ruleChanged'
+  | 'flowHistory.noSteps'
+  | 'flowHistory.clear'
   | 'manager.viewDeliveries'
   | 'manager.delete'
   | 'manager.deleteConfirmTitle'
@@ -780,6 +807,13 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'recipe.updatedNotifyDesc',
   'recipe.fieldChangedUpdateTitle',
   'recipe.fieldChangedUpdateDesc',
+  'recipe.stockPrepDailyPullTitle',
+  'recipe.stockPrepDailyPullDesc',
+  'recipe.stockPrepDailyPullLocked',
+  'recipe.stockPrepPullFailedAlertTitle',
+  'recipe.stockPrepPullFailedAlertDesc',
+  'recipe.stockPrepPullFailedAlertLocked',
+  'recipe.stockPrepPullFailedAlertMessage',
   'manager.enabled',
   'manager.disabled',
   'manager.deletedTriggerSkipNotice',
@@ -790,6 +824,26 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'manager.edit',
   'manager.viewLogs',
   'manager.viewFlow',
+  'manager.templatesOpen',
+  'manager.templatesTitle',
+  'manager.templatesHint',
+  'manager.templateLockedBadge',
+  'flowHistory.title',
+  'flowHistory.hint',
+  'flowHistory.loading',
+  'flowHistory.empty',
+  'flowHistory.loadFailed',
+  'flowHistory.retry',
+  'flowHistory.triggeredBy',
+  'flowHistory.stepTotal',
+  'flowHistory.stepStatus.success',
+  'flowHistory.stepStatus.failed',
+  'flowHistory.stepStatus.skipped',
+  'flowHistory.stepStatus.simulated',
+  'flowHistory.overlayShown',
+  'flowHistory.ruleChanged',
+  'flowHistory.noSteps',
+  'flowHistory.clear',
   'manager.viewDeliveries',
   'manager.delete',
   'manager.deleteConfirmTitle',
@@ -1388,6 +1442,13 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'recipe.updatedNotifyDesc': { en: 'When a record is updated, send an in-app notification.', zh: '记录更新时，发送站内通知。' },
   'recipe.fieldChangedUpdateTitle': { en: 'Update a field on change', zh: '字段变更时回填' },
   'recipe.fieldChangedUpdateDesc': { en: 'When a field changes, write a value into another field.', zh: '字段变更时，向另一字段写入值。' },
+  'recipe.stockPrepDailyPullTitle': { en: 'Stock-prep BOM daily pull', zh: '备料 BOM 每日拉取' },
+  'recipe.stockPrepDailyPullDesc': { en: 'Every day at 06:00 (Asia/Shanghai), run a stock-prep pull for one project — dry run only. You fill in the project number.', zh: '每天 06:00（Asia/Shanghai）对一个项目做备料拉取，只试算。项目号由你填写。' },
+  'recipe.stockPrepDailyPullLocked': { en: 'Not available: the run-integration-job switch (integrationAutomationRunAction) is off.', zh: '暂不可用：运行集成任务的开关（integrationAutomationRunAction）未开。' },
+  'recipe.stockPrepPullFailedAlertTitle': { en: 'Pull failure alert', zh: '拉取失败告警' },
+  'recipe.stockPrepPullFailedAlertDesc': { en: 'When a stock-prep pull job ends as failed, send an in-app notification. You pick the recipients.', zh: '备料拉取作业以「失败」结束时，发站内通知。收件人由你选择。' },
+  'recipe.stockPrepPullFailedAlertLocked': { en: 'Not available: the integration-run event switch (integrationAutomationRunEvent) is off.', zh: '暂不可用：集成作业完成事件的开关（integrationAutomationRunEvent）未开。' },
+  'recipe.stockPrepPullFailedAlertMessage': { en: 'A stock-prep BOM pull failed. See the rule\'s recent runs.', zh: '备料 BOM 拉取失败，请查看该规则的最近执行。' },
   'manager.enabled': { en: 'Enabled', zh: '已启用' },
   'manager.disabled': { en: 'Disabled', zh: '已停用' },
   // #6155: shown (never blocking) on the automation panel card of a rule that is on or being switched on while its
@@ -1407,6 +1468,26 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'manager.edit': { en: 'Edit', zh: '编辑' },
   'manager.viewLogs': { en: 'View Logs', zh: '查看日志' },
   'manager.viewFlow': { en: 'Flow view', zh: '流程视图' },
+  'manager.templatesOpen': { en: 'From a template', zh: '从模板新建' },
+  'manager.templatesTitle': { en: 'Templates', zh: '模板' },
+  'manager.templatesHint': { en: 'A template only fills a new draft in the editor. Nothing is saved or enabled until you save it yourself.', zh: '模板只在编辑器里生成一份新草稿；你自己保存之前，什么都不会保存或启用。' },
+  'manager.templateLockedBadge': { en: 'Locked', zh: '未开放' },
+  'flowHistory.title': { en: 'Recent runs', zh: '最近执行' },
+  'flowHistory.hint': { en: 'Status, source and step counts only — step output is not shown here. Pick a run to see each step\'s result on the cards.', zh: '只显示状态、触发来源与步数，不显示步骤输出。点选一次执行，可在步骤卡上看每一步的结果。' },
+  'flowHistory.loading': { en: 'Loading runs…', zh: '正在加载执行记录…' },
+  'flowHistory.empty': { en: 'This rule has not run yet.', zh: '这条规则还没有执行记录。' },
+  'flowHistory.loadFailed': { en: 'Could not load the runs.', zh: '执行记录加载失败。' },
+  'flowHistory.retry': { en: 'Retry', zh: '重试' },
+  'flowHistory.triggeredBy': { en: 'Source', zh: '来源' },
+  'flowHistory.stepTotal': { en: '{n} steps', zh: '{n} 步' },
+  'flowHistory.stepStatus.success': { en: 'succeeded', zh: '成功' },
+  'flowHistory.stepStatus.failed': { en: 'failed', zh: '失败' },
+  'flowHistory.stepStatus.skipped': { en: 'skipped', zh: '已跳过' },
+  'flowHistory.stepStatus.simulated': { en: 'simulated', zh: '模拟' },
+  'flowHistory.overlayShown': { en: 'The step cards show the selected run\'s result per step.', zh: '步骤卡上显示的是所选这次执行的逐步结果。' },
+  'flowHistory.ruleChanged': { en: 'The rule may have changed since this run (its steps no longer line up), so results cannot be matched step by step.', zh: '规则可能已改动（步骤数或类型与这次执行对不上），无法逐步对应。' },
+  'flowHistory.noSteps': { en: 'This run recorded no step results (for example, the conditions did not match).', zh: '这次执行没有逐步记录（例如条件未满足）。' },
+  'flowHistory.clear': { en: 'Clear selection', zh: '取消选择' },
   'manager.viewDeliveries': { en: 'View Deliveries', zh: '查看投递记录' },
   'manager.delete': { en: 'Delete', zh: '删除' },
   'manager.deleteConfirmTitle': { en: 'Delete rule', zh: '删除规则' },

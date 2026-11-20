@@ -109,6 +109,13 @@ describe('automationFlowView (integration assistant 1a, R-99 ③)', () => {
       .toBe('(not configured)')
   })
 
+  it('reads a stored cron under `cron` as well as `expression` (scheduler order: expression first)', () => {
+    expect(buildAutomationFlow(rule({ triggerType: 'schedule.cron', triggerConfig: { cron: '30 8 * * *', timezone: 'Asia/Shanghai' } }), { isZh: false }).trigger.detail)
+      .toBe('30 8 * * * · Asia/Shanghai')
+    expect(buildAutomationFlow(rule({ triggerType: 'schedule.cron', triggerConfig: { expression: '0 1 * * *', cron: '30 8 * * *' } }), { isZh: false }).trigger.detail)
+      .toBe('0 1 * * *')
+  })
+
   it('flags rule-level conditions only when the group has members', () => {
     expect(buildAutomationFlow(rule({ conditions: { conjunction: 'AND', conditions: [] } }), { isZh: false }).hasRuleConditions).toBe(false)
     expect(buildAutomationFlow(rule({

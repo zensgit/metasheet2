@@ -312,7 +312,9 @@ function triggerDetail(
   const { isZh } = options
   switch (rule.triggerType) {
     case 'schedule.cron': {
-      const expr = str(cfg.expression).trim()
+      // Stored rules carry the expression under `expression` or `cron` (the editor saves `cron`); the
+      // scheduler reads `expression` first, then `cron` (automation-scheduler.ts) — same order here.
+      const expr = (str(cfg.expression).trim() || str(cfg.cron).trim())
       const tz = str(cfg.timezone).trim()
       if (!expr) return pick(isZh, '（未配置）', '(not configured)')
       return tz ? `${expr} · ${tz}` : expr
