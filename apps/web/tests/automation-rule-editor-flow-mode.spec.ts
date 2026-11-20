@@ -10,6 +10,7 @@ import { createApp, h, nextTick, reactive } from 'vue'
 
 import MetaAutomationRuleEditor from '../src/multitable/components/MetaAutomationRuleEditor.vue'
 import { automationTriggerTypeLabel } from '../src/multitable/utils/meta-automation-labels'
+import { epSetSelect } from './helpers/epControls'
 import { useLocale } from '../src/composables/useLocale'
 import type { AutomationRule } from '../src/multitable/types'
 
@@ -281,6 +282,39 @@ describe('rule editor: Form / Flow layout toggle (integration assistant 1b)', ()
     await flushPromises()
     expect(flowCards(rij.container)).toHaveLength(1)
     expect(q(rij.container, '[data-action="add-action"]')).toBeNull()
+  }, TIMEOUT_MS)
+
+  // Review P2 (2026-11-20): the Flow trigger card must describe the cron the save path will write.
+  it('a loaded cron rule shows its saved expression and timezone in Flow (not 「未配置」)', async () => {
+    const { container } = mountEditor({
+      rule: savedRule({
+        triggerType: 'schedule.cron',
+        triggerConfig: { cron: '15 7 * * 1-5', timezone: 'Asia/Shanghai' },
+      }),
+    })
+    await flushPromises()
+    await setMode(container, 'flow')
+    expect(q(container, '[data-flow-trigger-detail="true"]')?.textContent?.trim()).toBe('15 7 * * 1-5 · Asia/Shanghai')
+  }, TIMEOUT_MS)
+
+  it('changing the cron preset in Form, then switching to Flow, shows the preset that will be saved', async () => {
+    const saved = vi.fn()
+    const { container } = mountEditor({
+      rule: savedRule({
+        triggerType: 'schedule.cron',
+        triggerConfig: { cron: '15 7 * * 1-5', timezone: 'Asia/Shanghai' },
+      }),
+      onSave: saved,
+    })
+    await flushPromises()
+    epSetSelect(q(container, '[data-field="cronPreset"]'), '0 0 * * 1')
+    await flushPromises()
+    await setMode(container, 'flow')
+    expect(q(container, '[data-flow-trigger-detail="true"]')?.textContent?.trim()).toBe('0 0 * * 1 · Asia/Shanghai')
+    // and it is exactly what Save sends
+    await setMode(container, 'form')
+    const payload = await save(container, saved)
+    expect((payload as { triggerConfig: Record<string, unknown> }).triggerConfig.cron).toBe('0 0 * * 1')
   }, TIMEOUT_MS)
 
   it('Flow mode carries no config inputs — only cards and buttons; the toggle sits outside it', async () => {
