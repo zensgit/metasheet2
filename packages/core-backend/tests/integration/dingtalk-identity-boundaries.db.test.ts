@@ -659,7 +659,7 @@ describe('DingTalk identity authorization boundaries (real DB)', () => {
   })
 
   for (const mixed of [false, true]) {
-    it.each(['sibling', 'multiple', 'foreign', 'foreign among multiple', 'different directory UnionID', 'verified sole link', 'stored corporate OpenID'] as const)(
+    it.each(['sibling', 'multiple', 'foreign', 'foreign among multiple', 'different directory UnionID', 'verified sole link', 'stored corporate OpenID', 'matching email', 'other email', 'other person'] as const)(
       `checks %s affiliation on web and container with strict scope ${mixed} and reconciles rejected writes`, async affiliation => {
         await useProviderResponseDecoders()
         const { checkDingTalkLoginSurfaces } = await import('../helpers/dingtalk-login-http')

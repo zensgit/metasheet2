@@ -6,7 +6,7 @@ import request from 'supertest'
 import { expect, vi } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
 
-type DirectoryAffiliation = 'sibling' | 'multiple' | 'foreign' | 'foreign among multiple' | 'different directory UnionID' | 'verified sole link' | 'configured bare sibling' | 'stored corporate OpenID' | 'configured stored corporate OpenID'
+type DirectoryAffiliation = 'sibling' | 'multiple' | 'foreign' | 'foreign among multiple' | 'different directory UnionID' | 'verified sole link' | 'configured bare sibling' | 'stored corporate OpenID' | 'configured stored corporate OpenID' | 'matching email' | 'other email' | 'other person'
 type AffiliationScenario = { mixed: boolean; affiliation: DirectoryAffiliation }
 type CanonicalUnionScenario = { mixed: boolean; knownOpenId: boolean; grant?: false; ambiguous?: true; storedCorp?: true; configured?: true }
 
@@ -42,13 +42,18 @@ export async function checkDingTalkLoginSurfaces(scenario?: CanonicalUnionScenar
     }
   })
   let person = ''
+  const association = scenario && 'affiliation' in scenario && (scenario.affiliation === 'matching email' || scenario.affiliation === 'other email' || scenario.affiliation === 'other person')
+    ? scenario.affiliation : null
+  if (association) vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '1')
   vi.stubGlobal('fetch', async (url: string | URL) => {
+    const email = association === 'other email' ? 'other@example.invalid' : association ? `${person}@example.invalid` : undefined
+    const unionId = association === 'other person' ? `someone-else-${person}` : `union-${person}`
     const payload: Record<string, unknown> = {
       '/v1.0/oauth2/userAccessToken': { accessToken: 'fixture-web' },
-      '/v1.0/contact/users/me': { openId: `open-${person}`, unionId: `union-${person}`, nick: 'Synthetic' },
+      '/v1.0/contact/users/me': { openId: `open-${person}`, unionId, nick: 'Synthetic', email },
       '/gettoken': { errcode: 0, access_token: 'fixture-app', expires_in: 3600 },
-      '/topapi/v2/user/getuserinfo': { errcode: 0, result: { userid: person, unionid: `union-${person}` } },
-      '/topapi/v2/user/get': { errcode: 0, result: { userid: person, unionid: `union-${person}`, name: 'Synthetic' } },
+      '/topapi/v2/user/getuserinfo': { errcode: 0, result: { userid: person, unionid: unionId } },
+      '/topapi/v2/user/get': { errcode: 0, result: { userid: person, unionid: unionId, name: 'Synthetic', email } },
     }
     const endpoint = new URL(url).pathname
     if (!(endpoint in payload)) throw new Error('Unexpected provider operation')
@@ -105,7 +110,7 @@ export async function checkDingTalkLoginSurfaces(scenario?: CanonicalUnionScenar
       const corp = `corp-${ordinary}`, unionId = `union-${user}`
       const configuredBare = scenario.affiliation === 'configured bare sibling'
       const configuredOld = scenario.affiliation === 'configured stored corporate OpenID'
-      if (configuredBare || configuredOld) vi.stubEnv('DINGTALK_CORP_ID', corp)
+      if (configuredBare || configuredOld || association) vi.stubEnv('DINGTALK_CORP_ID', corp)
       await connection(sibling, `sibling-${appKey}`, corp)
       await connection(foreign, `foreign-${appKey}`)
       if (scenario.mixed) {
@@ -114,14 +119,14 @@ export async function checkDingTalkLoginSurfaces(scenario?: CanonicalUnionScenar
       }
       await fixture(`INSERT INTO users(id,email,name,password_hash,role,is_active,activation_status)
         VALUES ($1,$2,'Synthetic','fixture','user',true,'activated')`, [user, `${user}@example.invalid`])
-      const oldOpenId = configuredOld || scenario.affiliation === 'stored corporate OpenID' ? `previous-${user}` : null
+      const oldOpenId = configuredOld || association || scenario.affiliation === 'stored corporate OpenID' ? `previous-${user}` : null
       const key = oldOpenId ? `${corp}:${oldOpenId}` : scenario.affiliation === 'verified sole link' ? `${corp}:${unionId}` : unionId
       await fixture(`INSERT INTO user_external_identities(provider,local_user_id,external_key,provider_union_id,provider_open_id,corp_id)
         VALUES ('dingtalk',$1,$2,$3,$4,NULL)`, [user, key, unionId, oldOpenId])
       await fixture("INSERT INTO user_external_auth_grants(provider,local_user_id,enabled) VALUES ('dingtalk',$1,true)", [user])
       const connections = {
         sibling: [sibling], multiple: [ordinary, sibling], foreign: [foreign],
-        'foreign among multiple': [ordinary, sibling, foreign], 'different directory UnionID': [ordinary], 'verified sole link': [ordinary], 'configured bare sibling': [sibling], 'stored corporate OpenID': [sibling], 'configured stored corporate OpenID': [sibling],
+        'foreign among multiple': [ordinary, sibling, foreign], 'different directory UnionID': [ordinary], 'verified sole link': [ordinary], 'configured bare sibling': [sibling], 'stored corporate OpenID': [sibling], 'configured stored corporate OpenID': [sibling], 'matching email': [sibling], 'other email': [sibling], 'other person': [sibling],
       }[scenario.affiliation]
       const accountIds = connections.map(() => randomUUID()).sort()
       for (const [index, id] of connections.entries()) {
@@ -134,7 +139,7 @@ export async function checkDingTalkLoginSurfaces(scenario?: CanonicalUnionScenar
         await fixture("INSERT INTO directory_account_links(directory_account_id,local_user_id,link_status) VALUES($1,$2,'linked')", [account, user])
       }
       const exact = scenario.affiliation === 'verified sole link'
-      const allowed = exact || (!scenario.mixed && !connections.includes(foreign) && !configuredBare && !configuredOld)
+      const allowed = exact || (!scenario.mixed && !connections.includes(foreign) && !configuredBare && !configuredOld && (!association || association === 'matching email'))
       for (const surface of ['container', 'web'] as const) {
         await login(surface, user, exact ? 200 : 403, corp)
         await login(surface, user, configuredBare ? 409 : allowed ? 200 : 403)

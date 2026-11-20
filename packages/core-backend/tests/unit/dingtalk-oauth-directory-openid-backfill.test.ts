@@ -68,6 +68,7 @@ function installTransaction(options: {
   /** rows answered to the corp-less identity's linked-directory-account lookup (field item 3) */
   linkedAccounts?: Array<Record<string, unknown>>
   connectionId?: string
+  emailOwners?: string[]
   corpOrigins?: string[]
   committedWrites?: Call[]
   storedKey?: string
@@ -80,6 +81,9 @@ function installTransaction(options: {
     query: async (sql: string, params: unknown[] = []) => {
       const statement = String(sql)
       calls.push({ sql: statement, params })
+      if (statement.startsWith('SELECT id::text FROM users WHERE LOWER(email)')) {
+        return { rows: (options.emailOwners ?? []).map(id => ({ id })) }
+      }
       if (options.connectionId && statement.includes('SELECT id FROM directory_integrations WHERE id =')) {
         return { rows: params[0] === options.connectionId ? [{ id: options.connectionId }] : [] }
       }
@@ -384,6 +388,37 @@ describe('DingTalk login backfills the directory member openId', () => {
         empty.mockRestore()
       }
     })
+
+    for (const surface of ['web', 'container'] as const) {
+      it.each([
+        { owners: ['user-1'], mixed: false, allowed: true },
+        { owners: ['user-1'], mixed: true, allowed: false },
+        { owners: ['user-2'], mixed: false, allowed: false },
+        { owners: ['user-1', 'user-2'], mixed: false, allowed: false },
+      ])(`requires the enabled email association to select only the same user for a configured old OpenID on ${surface} (%j)`, async scenario => {
+        vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '1')
+        clientMocks.readDingTalkOauthConfig.mockReturnValue({ clientId: 'dt-client', corpId: source.corpId })
+        clientMocks.fetchDingTalkAppAccessToken.mockResolvedValue('fixture-token')
+        clientMocks.getDingTalkUserInfoByAuthCode.mockResolvedValue({ userId: 'test-user', unionId: 'union-1' })
+        clientMocks.getDingTalkUserDetail.mockResolvedValue({ unionId: 'union-1', name: 'Alpha', email: IDENTITY_USER.email })
+        const store = await import('../../src/auth/strict-login-grant-store')
+        const empty = vi.spyOn(store, 'lockEmptyConnectionLoginScope').mockResolvedValue(!scenario.mixed)
+        const committedWrites: Call[] = []
+        try {
+          installTransaction({ connectionId: source.connectionId, linkedAccounts: [same], storedCorp: '',
+            storedKey: 'ding-corp:previous-open', storedOpenId: 'previous-open', emailOwners: scenario.owners, committedWrites })
+          const exchange = surface === 'web' ? exchangeCodeForUser : exchangeEnterpriseAuthCodeForUser
+          const result = exchange('code', { ...source, configuredCorp: source.corpId })
+          if (scenario.allowed) await expect(result).resolves.toMatchObject({ localUserId: IDENTITY_USER.id, externalOrigin: null, requiresEmptyScope: true })
+          else {
+            await expect(result).rejects.toMatchObject({ statusCode: 403 })
+            expect(committedWrites).toEqual([])
+          }
+        } finally {
+          empty.mockRestore()
+        }
+      })
+    }
 
     const scenarios = [
       { affiliation: 'sibling', links: [same] },

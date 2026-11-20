@@ -815,6 +815,7 @@ async function identityRequiresEmptyScope(
   identity: Record<string, unknown>,
   profile: DingTalkUserInfo,
   source: DingTalkLoginSource,
+  allowEmailAssociation = false,
 ): Promise<boolean> {
   if (!source.connectionId) return true
   const storedCorp = String(identity.corp_id ?? '').trim()
@@ -856,12 +857,19 @@ async function identityRequiresEmptyScope(
   }
   // Ambiguous same-enterprise affiliations cannot identify a connection. Only an implicit
   // login with the same established identity may proceed under the global empty-scope lock.
-  const legacyKey = canonicalHere || pairs.some(([stored]) => typeof stored === 'string' && stored
-    && (key === stored || (!source.configuredCorp && key === `${source.corpId}:${stored}`)))
-  if (source.explicit || !legacyKey || !describesSameDingTalkPerson(identity, profile, null)) {
-    refuseDingTalkSource()
+  if (source.explicit || !describesSameDingTalkPerson(identity, profile, null)) refuseDingTalkSource()
+  const bare = pairs.some(([stored]) => stored && key === stored)
+  const storedCorporateKey = pairs.some(([stored]) => typeof stored === 'string' && stored && key === `${source.corpId}:${stored}`)
+  if (canonicalHere || bare || (!source.configuredCorp && storedCorporateKey)) return true
+
+  // A configured enterprise could also recover this same person's old OpenID key by
+  // the existing opt-in email association. Never turn that branch into identity proof.
+  if (allowEmailAssociation && source.configuredCorp && storedCorporateKey && profile.unionId
+    && profile.unionId === identity.provider_union_id && profile.email && shouldAutoLinkEmail()) {
+    const owners = await client.query('SELECT id::text FROM users WHERE LOWER(email) = LOWER($1) LIMIT 2', [profile.email])
+    if (owners.rows.length === 1 && owners.rows[0].id === userId) return true
   }
-  return true
+  return refuseDingTalkSource()
 }
 
 type BackfillTransactionClient = AccessGraphTransactionClient
@@ -1076,7 +1084,7 @@ async function upsertExternalIdentity(
     let accessGraphChanged = false
     if (existingByUser.rows.length > 0) {
       const existing = existingByUser.rows[0]
-      emptyScope = await identityRequiresEmptyScope(client, localUserId, existing, dtUser, source)
+      emptyScope = await identityRequiresEmptyScope(client, localUserId, existing, dtUser, source, true)
       // The optional environment corp remains the legacy key namespace, including null.
       const matchCorp = !existing.corp_id && source.connectionId && !emptyScope ? null : config.corpId
       if (!describesSameDingTalkPerson(existing, dtUser, matchCorp)) {

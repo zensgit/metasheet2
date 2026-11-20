@@ -22,7 +22,7 @@ function expand(rows: string[]): string[] {
 const fences: Array<[string, string[]]> = [
   [src + 'routes/auth.ts', ["stateCheck.intent === 'bind'", "stateCheck.intent === 'activate'", "code: 'self_service_disabled'", 'if (loginSource.strict) refuseDingTalkSource()', 'options.requiresEmptyScope || !options.origin']],
   [src + 'auth/dingtalk-login-source.ts', ['if (!await lockEmptyConnectionLoginScope(client)) refuseDingTalkSource()', 'if (current.rows.length !== 1) refuseDingTalkSource()', 'if ((await readConnectionLoginScope(client, source.connectionId)).scope) refuseDingTalkSource()']],
-  [src + 'auth/dingtalk-oauth.ts', ['if (storedCorp !== source.corpId) refuseDingTalkSource()', 'if (linked?.corp_id && linked.corp_id !== source.corpId) refuseDingTalkSource()', 'links.rows.length > 1 || linked.integration_id !== source.connectionId', 'if (source.explicit || !legacyKey || !describesSameDingTalkPerson(identity, profile, null))', 'if (foreignKey) refuseDingTalkSource()', 'if (canonicalHere) return identityCorpRequiresEmptyScope(client, source)', 'if (emptyScope) await checkEmptyDingTalkScope(client)']],
+  [src + 'auth/dingtalk-oauth.ts', ['if (storedCorp !== source.corpId) refuseDingTalkSource()', 'if (linked?.corp_id && linked.corp_id !== source.corpId) refuseDingTalkSource()', 'links.rows.length > 1 || linked.integration_id !== source.connectionId', 'if (source.explicit || !describesSameDingTalkPerson(identity, profile, null))', 'if (foreignKey) refuseDingTalkSource()', 'if (canonicalHere) return identityCorpRequiresEmptyScope(client, source)', 'if (emptyScope) await checkEmptyDingTalkScope(client)']],
   [src + 'auth/AuthService.ts', ['Number.isSafeInteger(payload.iat)', 'revoked_after >= to_timestamp($2::double precision)', 'revoked_at IS NULL FOR UPDATE', 'issuedAt: result.issuedAt']],
   [src + 'auth/dingtalk-legacy-resource-scope.ts', ['if (strictSession) return false', "return state.scope ? 'refused' : 'ordinary'", 'return !lock || await store.lockEmptyConnectionLoginScope(caller)', "return state.installation === 'installed' && !state.scope"]],
   [src + 'integrations/dingtalk/interactive-card-callback.ts', ["await checkCardConnectionBeforeDispatch(query, connectionId, true) !== 'ordinary'", 'outcome = await deps.transaction(']],
@@ -51,7 +51,8 @@ describe('DingTalk session issuers, identity writers and grant consumers', () =>
       'if (foreignKey) refuseDingTalkSource()', 'if (!directoryConflict) {',
       'linked.union_id === profile.unionId) return false',
       'if (canonicalHere) return identityCorpRequiresEmptyScope',
-      'if (source.explicit || !legacyKey || !describesSameDingTalkPerson', 'return true',
+      'if (source.explicit || !describesSameDingTalkPerson', 'return true',
+      'profile.unionId === identity.provider_union_id', 'owners.rows.length === 1 && owners.rows[0].id === userId',
     ]
     let position = -1
     for (const check of checks) {
