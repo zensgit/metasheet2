@@ -2116,6 +2116,7 @@ import ConditionValueInput from './ConditionValueInput.vue'
 import MetaAutomationFlowEditPanel from './MetaAutomationFlowEditPanel.vue'
 import MetaAutomationFlowLibraryPanel from './MetaAutomationFlowLibraryPanel.vue'
 import { flowStepCategory, flowTriggerCard, type FlowEditStep } from '../automationFlowView'
+import type { AutomationRuleTemplateSeed } from '../automationRecipes'
 import {
   buildFlowGates,
   buildFlowLibrary,
@@ -2249,6 +2250,11 @@ const props = defineProps<{
   canOpenDingTalkGroupSettings?: boolean
   /** The host's save failure (the drawer covers the host's own error line), already in readable copy. */
   saveError?: string | null
+  /**
+   * Integration assistant 1d (R-99 ③): a template's starting draft for a NEW rule (ignored when `rule` is set).
+   * Loaded through draftFromRule — the same path a stored rule takes — so a template is never a second draft model.
+   */
+  seedRule?: AutomationRuleTemplateSeed | null
 }>()
 
 const emit = defineEmits<{
@@ -3649,6 +3655,21 @@ function draftFromRule(rule: AutomationRule): Draft {
   }
 }
 
+/**
+ * 1d: a template seed → a NEW rule's draft. Built by draftFromRule (no id, so every "saved rule" branch — legacy
+ * UTC, keep-stored-secret, test run — stays off), then each action is marked as authored-now rather than loaded:
+ * `persisted: false` (expanded, like a fresh row) and no raw-config snapshot, so the saved config is exactly what
+ * the Form builds for a row the author added and filled by hand.
+ */
+function draftFromTemplateSeed(seed: AutomationRuleTemplateSeed): Draft {
+  const seeded = draftFromRule({ ...seed, id: '', sheetId: props.sheetId, enabled: false })
+  for (const action of seeded.actions) {
+    action.persisted = false
+    action.originalConfig = null
+  }
+  return seeded
+}
+
 const draft = ref<Draft>(emptyDraft())
 // B1-07: serialized snapshot taken when the editor opens — the dirty check for close-path
 // discard protection. JSON.stringify is stable here: the draft is rebuilt from the same
@@ -3920,7 +3941,7 @@ watch(
   () => props.visible,
   async (v) => {
     if (v) {
-      draft.value = props.rule ? draftFromRule(props.rule) : emptyDraft()
+      draft.value = props.rule ? draftFromRule(props.rule) : props.seedRule ? draftFromTemplateSeed(props.seedRule) : emptyDraft()
       editorMode.value = 'form' // 1b: the layout is per open, never persisted
       cronPreset.value = cronPresetForDraft(draft.value)
       draftSnapshot.value = JSON.stringify(draft.value) // B1-07: dirty baseline per open
