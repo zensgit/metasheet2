@@ -420,6 +420,27 @@ describe('DingTalk login backfills the directory member openId', () => {
       })
     }
 
+    it('leaves the identity and directory account unchanged when an email-associated login is denied', async () => {
+      vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '1')
+      clientMocks.readDingTalkOauthConfig.mockReturnValue({ clientId: source.appKey, corpId: source.corpId })
+      pgMocks.query.mockReset()
+        .mockResolvedValueOnce({ rows: [IDENTITY_USER] })
+        .mockResolvedValueOnce({ rows: [{ enabled: false }] })
+      const calls = installTransaction({
+        connectionId: source.connectionId,
+        linkedAccounts: [same],
+        storedCorp: '',
+        storedKey: 'ding-corp:previous-open',
+        storedOpenId: 'previous-open',
+        emailOwners: [IDENTITY_USER.id],
+      })
+
+      await expect(exchangeCodeForUser('code', { ...source, configuredCorp: source.corpId }))
+        .rejects.toMatchObject({ statusCode: 403 })
+      expect.soft(calls.some(call => call.sql.includes('UPDATE user_external_identities')), 'identity updated').toBe(false)
+      expect.soft(Boolean(backfillCall(calls)), 'directory account updated').toBe(false)
+    })
+
     const scenarios = [
       { affiliation: 'sibling', links: [same] },
       { affiliation: 'canonical sibling', links: [same], key: 'ding-corp:union-1' },
