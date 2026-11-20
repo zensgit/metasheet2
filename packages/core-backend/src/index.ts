@@ -91,6 +91,7 @@ import { isApiPath } from './auth/api-path-policy'
 import { jwtAuthMiddleware, optionalJwtAuthMiddleware, isPublicFormAuthBypass, isWhitelisted } from './auth/jwt-middleware'
 import { isReadOnlyAuthorizationRequest, readOnlyAuthorizationJwtAuth } from './auth/jwt-middleware'
 import { authService } from './auth/AuthService'
+import { classifyVerifiedSessionPayload } from './auth/strict-dingtalk-entry'
 import { cache } from './cache-init'
 import {
   findObjectSheet as findProvisionedObjectSheet,
@@ -1453,6 +1454,8 @@ export class MetaSheetServer {
 
       auth: {
         verifyToken: async (token: string) => {
+          const sessionClass = classifyVerifiedSessionPayload(authService.readTokenPayload(token))
+          if (sessionClass === 'strict' || sessionClass === 'conflict') return null
           return await authService.verifyToken(token)
         },
         checkPermission: (user: UserInfo, resource: string, action: string) => {
@@ -1479,7 +1482,7 @@ export class MetaSheetServer {
             created_at: new Date(),
             updated_at: new Date()
           }
-          return authService.createToken(userAsUser)
+          return authService.createToken(userAsUser, { externalAuth: false })
         }
       },
 

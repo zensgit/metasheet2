@@ -1712,11 +1712,15 @@ exec npx vitest run \
   automation-condition-typing-editor \
   automation-condition-value-input \
   automation-condition-values \
+  automation-flow-history \
+  automation-flow-view \
   automation-log-redact \
   automation-log-support-packet \
   automation-recipes \
   automation-rerun-execution \
   automation-rule-concurrent-merge \
+  automation-rule-editor-flow-library \
+  automation-rule-editor-flow-mode \
   automation-save-block-reasons \
   automation-target-sheet-options \
   AutomationExecutionsView \
@@ -2010,6 +2014,7 @@ exec npx vitest run \
   run-required-web-tests-shape \
   searchApprovalDirectoryUsers \
   serverFormDraft \
+  sessionCenterView.spec.ts \
   SessionOrgSwitcher.spec.ts \
   shared-comments-stub-client \
   statusTag \

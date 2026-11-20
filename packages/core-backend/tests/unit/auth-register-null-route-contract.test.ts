@@ -228,7 +228,7 @@ describe('POST /register — the route half of the register-null invariant (O2-P
 
     expect(authServiceMocks.register).toHaveBeenCalledTimes(1)
     expect(authServiceMocks.register).toHaveBeenCalledWith(...SANITIZED_ARGS)
-    expect(authServiceMocks.createToken).toHaveBeenCalledWith(user)
+    expect(authServiceMocks.createToken).toHaveBeenCalledWith(user, { externalAuth: false })
     expect(res.statusCode).toBe(201)
     expect(res.body).toEqual({
       success: true,

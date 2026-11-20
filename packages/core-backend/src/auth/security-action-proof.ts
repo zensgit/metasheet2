@@ -6,11 +6,11 @@
  * organization, the purpose, the connection, the target witness, the access generation, a
  * credential witness, a privilege witness and the policy revision.
  *
- * Issuance decides every refusal that needs no data before any statement. A read-committed
- * transaction then reads the inputs without row locks; the password is compared outside any
- * transaction; a second read-committed transaction takes a per-user advisory lock and the user row
- * before any proof row, counts failures again, and either records the rejected attempt or re-reads
- * every input and writes the proof only when nothing changed. The account gate decides whether the
+ * Issuance decides every refusal that needs no data before any statement. The admission entry then
+ * holds one connection: a read-committed transaction reads the inputs without row locks; the password
+ * is compared outside any transaction; a second read-committed transaction takes a per-user advisory
+ * lock and the user row before any proof row, counts failures again, and either records the rejected
+ * attempt or re-reads every input and writes the proof only when nothing changed. The account gate decides whether the
  * session is still usable; whether the local password is an eligible method is decided separately,
  * so an account that cannot use it is told which step comes next.
  *
@@ -32,10 +32,8 @@
  * 'true'. This module is the only reader and writer of security_action_challenges.
  */
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
-import * as bcrypt from 'bcryptjs'
 import type { Request } from 'express'
 import { auditLog } from '../audit/audit'
-import { transaction } from '../db/pg'
 import { lockUsersForAccessGraphWrite } from '../directory/access-graph-mutex'
 import type { LockedAccessGraphUser } from '../directory/access-graph-mutex'
 import type { Queryable } from '../multitable/automation-durable-dispatcher'
@@ -50,6 +48,7 @@ import {
 } from './external-login-assurance'
 import type { PrivilegeClass, SecurityActionPurpose, SecurityActionTargetKind } from './external-login-assurance'
 import { assessSecurityActionPrivilege } from './security-action-privilege'
+import { runOwnedAttempt } from './security-action-attempt-admission'
 import { isSecurityActionProofEnabled } from './security-action-proof-flag'
 import { evaluateUserAuthenticationGate } from './user-activation'
 
@@ -294,6 +293,8 @@ function assertSessionContext(session: unknown): asserts session is Authenticate
   }
 }
 
+export { assertSessionContext as assertAuthenticatedSessionContext }
+
 // ---------------------------------------------------------------------------
 // Request schema
 // ---------------------------------------------------------------------------
@@ -482,8 +483,7 @@ export type SecurityActionAuditEvent = Readonly<{
 export type SecurityActionProofServiceDeps = Readonly<{
   isPurposeAvailable: (purpose: SecurityActionPurpose) => boolean
   resolvers: Readonly<Partial<Record<SecurityActionPurpose, SecurityActionTargetResolver>>>
-  runTransaction: <T>(work: (executor: Queryable) => Promise<T>) => Promise<T>
-  verifyPassword: (password: string, hash: string) => Promise<boolean>
+  runOwnedAttempt: typeof runOwnedAttempt
   recordAudit: (event: SecurityActionAuditEvent) => Promise<void>
   policyRevision: number
 }>
@@ -529,10 +529,6 @@ type IssueSnapshot = Readonly<{
   targetKind: SecurityActionTargetKind
   targetWitness: string
 }>
-
-type IssueOutcome =
-  | Readonly<{ kind: 'issued'; proof: string; expiresAt: string }>
-  | Readonly<{ kind: 'rejected' }>
 
 function unavailable(): SecurityActionProofError {
   return new SecurityActionProofError('SECURITY_ACTION_UNAVAILABLE')
@@ -827,29 +823,28 @@ export function createSecurityActionProofService(deps: SecurityActionProofServic
 
     let privilegeClass: PrivilegeClass | null = null
     try {
-      const first = await deps.runTransaction(async (executor) => {
-        await setReadCommitted(executor)
-        return readIssueInputs(executor, session, verifyRequest, orgId, resolver, true)
-      })
-      privilegeClass = first.privilegeClass
-
-      // Outside any transaction and without a connection.
-      const verified = await deps.verifyPassword(verifyRequest.password, first.passwordHash) === true
-
-      const outcome = await deps.runTransaction<IssueOutcome>(async (executor) => {
-        await setReadCommitted(executor)
-        await executor.query(SECURITY_ACTION_SQL.advisoryLock, [ADVISORY_KEY_PREFIX + session.userId])
-        const locked = await readRows(executor, SECURITY_ACTION_SQL.userKeyShare, [session.userId])
-        if (locked.length !== 1) throw unavailable()
-        await refuseWhenRateLimited(executor, session.userId)
-        if (!verified) {
-          await recordRejected(executor, session, verifyRequest, orgId, first)
-          return { kind: 'rejected' }
-        }
-        const second = await readIssueInputs(executor, session, verifyRequest, orgId, resolver, false)
-        if (!snapshotsAgree(first, second)) throw new SecurityActionProofError('SECURITY_ACTION_STATE_CHANGED')
-        const written = await writeProof(executor, session, verifyRequest, orgId, second)
-        return { kind: 'issued', proof: written.proof, expiresAt: written.expiresAt }
+      const outcome = await deps.runOwnedAttempt(session.sessionId, verifyRequest.password, {
+        readInputs: async (executor) => {
+          await setReadCommitted(executor)
+          const first = await readIssueInputs(executor, session, verifyRequest, orgId, resolver, true)
+          privilegeClass = first.privilegeClass
+          return first
+        },
+        account: async (executor, first, verified) => {
+          await setReadCommitted(executor)
+          await executor.query(SECURITY_ACTION_SQL.advisoryLock, [ADVISORY_KEY_PREFIX + session.userId])
+          const locked = await readRows(executor, SECURITY_ACTION_SQL.userKeyShare, [session.userId])
+          if (locked.length !== 1) throw unavailable()
+          await refuseWhenRateLimited(executor, session.userId)
+          if (!verified) {
+            await recordRejected(executor, session, verifyRequest, orgId, first)
+            return { kind: 'rejected' as const }
+          }
+          const second = await readIssueInputs(executor, session, verifyRequest, orgId, resolver, false)
+          if (!snapshotsAgree(first, second)) throw new SecurityActionProofError('SECURITY_ACTION_STATE_CHANGED')
+          const written = await writeProof(executor, session, verifyRequest, orgId, second)
+          return { kind: 'issued' as const, proof: written.proof, expiresAt: written.expiresAt }
+        },
       })
 
       if (outcome.kind === 'rejected') {
@@ -1022,8 +1017,7 @@ async function auditSecurityAction(event: SecurityActionAuditEvent): Promise<voi
 const PRODUCTION = createSecurityActionProofService(Object.freeze({
   isPurposeAvailable: isSecurityActionPurposeAvailable,
   resolvers: Object.freeze({}),
-  runTransaction: transaction,
-  verifyPassword: (password: string, hash: string) => bcrypt.compare(password, hash),
+  runOwnedAttempt,
   recordAudit: auditSecurityAction,
   policyRevision: SECURITY_ACTION_POLICY_REVISION,
 }))

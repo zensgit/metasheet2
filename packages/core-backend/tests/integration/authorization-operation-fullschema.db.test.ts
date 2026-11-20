@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process'
 import nodePath from 'node:path'
 import { createInterface } from 'node:readline'
 import { Client } from 'pg'
+import { assertAuthorizationOperationSchema } from '../../src/admin/authorization-operation-fence'
 import express from 'express'
 import request from 'supertest'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
@@ -83,6 +84,29 @@ suite('real authorization operation on the migrated synthetic schema', () => {
   }
   const preview=()=>request(app).post(`${path}/preview`).auth(token,{type:'bearer'}).send(body)
   const commit=(version:string,id:string)=>request(app).post(path).auth(token,{type:'bearer'}).send({...body,expectedVersion:version,clientOperationId:id})
+  it('refuses changes to either side of the integrated B2 schema profile', async () => {
+    const query = (sql: string, params?: unknown[]) => control.query(sql, params)
+    await control.query('BEGIN')
+    try {
+      await control.query('SET LOCAL search_path TO pg_catalog, public, pg_temp')
+      await assertAuthorizationOperationSchema(query)
+      await control.query('SAVEPOINT original_profile')
+      for (const ddl of [
+        'ALTER TABLE public.users DISABLE TRIGGER admin_grant_local_credential_version',
+        'ALTER TABLE public.roles ADD COLUMN fixture_extra text',
+      ]) {
+        await control.query(ddl)
+        await expect(assertAuthorizationOperationSchema(query)).rejects.toMatchObject({
+          code: 'AUTHORIZATION_OPERATION_FENCE_UNAVAILABLE',
+        })
+        await control.query('ROLLBACK TO SAVEPOINT original_profile')
+        await assertAuthorizationOperationSchema(query)
+      }
+    } finally {
+      await control.query('ROLLBACK')
+    }
+  })
+
   it('previews, commits and replays using the real fence and current migrated schema', async () => {
     const p=await preview(); expect(p.status,JSON.stringify(p.body)).toBe(200)
     expect(p.body.impact.effectiveAfter).toEqual([{code,sources:[{kind:'role',id:roleId}],effective:true}])

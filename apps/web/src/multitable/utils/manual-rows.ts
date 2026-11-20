@@ -19,6 +19,8 @@
 import type {
   MetaField,
   MetaFieldPermission,
+  MetaManualRowParentFieldIds,
+  MetaManualRowParentOption,
   MetaManualRowsBlock,
   MetaManualRowsUnavailableReason,
   MetaRowActions,
@@ -64,7 +66,30 @@ export function readManualRowsBlock(capabilities: unknown): MetaManualRowsBlock 
     dialogFieldIds: idList(block.dialogFieldIds),
   }
   if (state === 'unavailable' && typeof block.reason === 'string' && block.reason.trim() !== '') read.reason = block.reason
+  const parentFieldIds = readParentFieldIds(block.parentFieldIds)
+  if (parentFieldIds) {
+    read.parentFieldIds = parentFieldIds
+    const componentCodeFieldId = readComponentCodeFieldId(block.componentCodeFieldId, parentFieldIds)
+    if (componentCodeFieldId) read.componentCodeFieldId = componentCodeFieldId
+  }
   return read
+}
+
+/**
+ * ADR §12.6 `componentCodeFieldId` (the row's own 图号), read only beside a well-formed pair, fail closed: a non-blank id
+ * that is neither of the pair's — or nothing (then no drawer 「修改父组件」 and no client-side self-parent check).
+ */
+function readComponentCodeFieldId(value: unknown, pair: MetaManualRowParentFieldIds): string | null {
+  if (typeof value !== 'string' || value.trim() === '') return null
+  return value === pair.code || value === pair.name ? null : value
+}
+
+/** ADR §12.6 `parentFieldIds`, fail closed: two distinct non-blank ids or nothing (then no parent picker anywhere). */
+function readParentFieldIds(value: unknown): MetaManualRowParentFieldIds | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const { code, name } = value as Record<string, unknown>
+  if (typeof code !== 'string' || code.trim() === '' || typeof name !== 'string' || name.trim() === '') return null
+  return code === name ? null : { code, name }
 }
 
 /** May a person ADD (新增 / 复制为新行) on this block's sheet? Only in state `allowed` (ADR §3.1: the one state that points at the entry). */
@@ -125,7 +150,10 @@ export function resolveManualRowEditableFieldIds(
 ): string[] {
   if (!block || !manualRowsEditEnabled(block)) return []
   const byId = new Map(fields.map((field) => [field.id, field]))
-  return block.editableFieldIds.filter((id) => manualRowFieldAccess(byId.get(id), fieldPermissions?.[id]) === 'writable')
+  // ADR §12.2: the parent pair is never a single-cell editor (the two columns change together, or they stop matching).
+  // The host never lists them as editable; should one ever arrive here it is still dropped.
+  const pair = new Set(block.parentFieldIds ? [block.parentFieldIds.code, block.parentFieldIds.name] : [])
+  return block.editableFieldIds.filter((id) => !pair.has(id) && manualRowFieldAccess(byId.get(id), fieldPermissions?.[id]) === 'writable')
 }
 
 /** Cell types the 新增 dialog renders a control for; any other required column blocks the dialog (fill it in the grid). */
@@ -207,4 +235,119 @@ export function manualRowsNoticeOf(block: MetaManualRowsBlock): ManualRowsNotice
 export function manualRowsCreateRefusalKey(block: MetaManualRowsBlock): ManualRowLabelKey {
   const notice = manualRowsNoticeOf(block)
   return notice.kind === 'entry' ? 'notice.useManualRow' : notice.key
+}
+
+// ── 人工补充行的父组件 (ADR §12.2 / §12.3 / §12.6, slice P2) ─────────────────────────────────────────────────────────
+
+/**
+ * What a 图号 cell compares as (the host's P5 reading, comparableManualRowCode): a string without its surrounding
+ * whitespace, a finite number as its text; null when there is nothing to compare. Never used to rewrite a value.
+ */
+export function comparableManualRowCode(value: unknown): string | null {
+  const text = typeof value === 'string'
+    ? value.trim()
+    : typeof value === 'number' && Number.isFinite(value) ? String(value) : ''
+  return text === '' ? null : text
+}
+
+/** P5: would `parentCode` make the row its own parent? A blank parent or a row without its own 图号 never is. */
+export function isManualRowSelfParent(parentCode: unknown, ownCode: unknown): boolean {
+  const parent = comparableManualRowCode(parentCode)
+  return parent !== null && parent === comparableManualRowCode(ownCode)
+}
+
+export type ManualRowParentOptionGroups = {
+  /** 「已有父组件」: parents already used on the sheet (with their child count). */
+  parents: MetaManualRowParentOption[]
+  /** 「本项目物料」: any row's own 图号 + 名称. */
+  components: MetaManualRowParentOption[]
+  truncated: boolean
+}
+
+/**
+ * The candidates answer read fail closed (an entry that is not well formed is dropped) and split into its two groups.
+ * The row's own 图号 (`ownCode`, as typed in the dialog or stored on the row) is left out (ADR §12.2 「本行自己不列」).
+ * Values are kept EXACTLY as returned: the fill view groups by the raw text.
+ */
+export function groupManualRowParentOptions(raw: unknown, ownCode?: unknown): ManualRowParentOptionGroups {
+  const groups: ManualRowParentOptionGroups = { parents: [], components: [], truncated: false }
+  if (!raw || typeof raw !== 'object') return groups
+  const { items, truncated } = raw as { items?: unknown; truncated?: unknown }
+  groups.truncated = truncated === true
+  if (!Array.isArray(items)) return groups
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue
+    const { code, name, kind, childCount } = item as Record<string, unknown>
+    if (typeof code !== 'string' || code.trim() === '') continue
+    if (kind !== 'parent' && kind !== 'component') continue
+    if (isManualRowSelfParent(code, ownCode)) continue
+    const option: MetaManualRowParentOption = { code, name: typeof name === 'string' && name.trim() !== '' ? name : null, kind }
+    if (kind === 'parent') {
+      option.childCount = typeof childCount === 'number' && Number.isFinite(childCount) && childCount > 0 ? Math.trunc(childCount) : 0
+      groups.parents.push(option)
+    } else {
+      groups.components.push(option)
+    }
+  }
+  return groups
+}
+
+/**
+ * A choice in the 「父组件」 picker:
+ *   none — 不挂父组件 (新增) / 移出父组件 (修改): both columns empty;
+ *   pick — an entry of the candidates, saved exactly as returned (never trimmed);
+ *   new  — 新建父组件: both typed values, trimmed before they are sent.
+ */
+export type ManualRowParentChoice =
+  | { mode: 'none' }
+  | { mode: 'pick'; option: { code: string; name: string | null } | null }
+  | { mode: 'new'; code: string; name: string }
+
+export type ManualRowParentProblem = 'pick_required' | 'code_required' | 'name_required' | 'name_without_code' | 'self_parent'
+
+/**
+ * The client-side refusals, checked before anything is sent (the server re-checks P3–P5 and its message is shown as
+ * is). `ownCode` = the row's own 图号 as it will be stored (typed in the dialog, or the drawer's row).
+ */
+export function manualRowParentProblem(choice: ManualRowParentChoice, ownCode: unknown): ManualRowParentProblem | null {
+  if (choice.mode === 'none') return null
+  if (choice.mode === 'pick') {
+    if (!choice.option) return 'pick_required'
+    return isManualRowSelfParent(choice.option.code, ownCode) ? 'self_parent' : null
+  }
+  const code = choice.code.trim()
+  const name = choice.name.trim()
+  if (code === '' && name !== '') return 'name_without_code'
+  if (code === '') return 'code_required'
+  if (name === '') return 'name_required'
+  return isManualRowSelfParent(code, ownCode) ? 'self_parent' : null
+}
+
+/** The pair's values as the routes take them (both keys always together, rule P3; a string or null, rule P4). */
+export function manualRowParentValues(choice: ManualRowParentChoice): { code: string | null; name: string | null } {
+  if (choice.mode === 'none') return { code: null, name: null }
+  if (choice.mode === 'pick') return { code: choice.option?.code ?? null, name: choice.option?.name ?? null }
+  return { code: choice.code.trim(), name: choice.name.trim() }
+}
+
+/** `{ <父组件图号 id>: code, <父组件名称 id>: name }` — both keys, always. */
+export function manualRowParentPayload(choice: ManualRowParentChoice, ids: MetaManualRowParentFieldIds): Record<string, string | null> {
+  const values = manualRowParentValues(choice)
+  return { [ids.code]: values.code, [ids.name]: values.name }
+}
+
+/** A stored parent cell as the drawer shows it (text, or a number's text; anything else is nothing). */
+export function manualRowParentCellText(value: unknown): string | null {
+  if (typeof value === 'string') return value.trim() === '' ? null : value
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return null
+}
+
+/**
+ * ADR §12.7 ①: does writing `next` into a manual row's 图号 (stored: `previous`) change it in a way its manual children
+ * could notice? Only when the row had a 图号 to be named by (the host counts 0 otherwise) and the compared text changes.
+ */
+export function manualRowCodeChangeNeedsDependentsCheck(previous: unknown, next: unknown): boolean {
+  const before = comparableManualRowCode(previous)
+  return before !== null && before !== comparableManualRowCode(next)
 }

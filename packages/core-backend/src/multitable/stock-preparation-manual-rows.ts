@@ -33,6 +33,10 @@
  * reason this is not `withHumanWriteLockKey`'s drop rule). The person field routes cannot change it: POST /fields
  * strips it, PATCH /fields and the config revert carry the STORED value over whatever the body or the revision says.
  *
+ * THE PARENT PAIR (ADR §12, owner-ruled 2026-11-19, revising OQ5). A manual row may name its parent component: 父组件图号
+ * and 父组件名称 form their own column class (`parent_assignable`), written only by the three manual-row routes and only
+ * as a pair; the pure rules P3 – P5 are at the end of this module.
+ *
  * VALUES-FREE: ids and closed tokens only.
  */
 import { isStockPreparationProjectSheetObjectId } from './stock-preparation-project-sheet-grant-contract'
@@ -168,12 +172,26 @@ export function carryManualRowPolicy(storedProperty: unknown, nextProperty: Reco
 // registry row. The census test requires the plugin template and pins that every one of its 35 columns sits in
 // exactly one class below.
 
-/** 人工可填 (6): the only locked columns the manual-row routes may write (the lock exemption). */
+/**
+ * 人工可填 (6): the locked columns a manual-row route may write ONE BY ONE — the grid edits these single cells through
+ * PATCH /records/:recordId/manual-fields, and /context names them as `editableFieldIds`.
+ */
 export const MANUAL_ROW_FILLABLE_FIELD_IDS = Object.freeze([
   'componentCode', 'componentName', 'componentSpec', 'material', 'rawQuantity', 'totalQuantity',
 ] as const)
-/** 谱系显示 (2): never copied (OQ5) and never written by a manual-row route. */
-export const MANUAL_ROW_LINEAGE_FIELD_IDS = Object.freeze(['parentComponentCode', 'parentComponentName'] as const)
+export const MANUAL_ROW_COMPONENT_CODE_FIELD_ID = 'componentCode' as const
+export const MANUAL_ROW_COMPONENT_NAME_FIELD_ID = 'componentName' as const
+export const MANUAL_ROW_PARENT_CODE_FIELD_ID = 'parentComponentCode' as const
+export const MANUAL_ROW_PARENT_NAME_FIELD_ID = 'parentComponentName' as const
+/**
+ * 人工可指定父组件 (2; ADR §12, revising OQ5): 父组件图号 and 父组件名称. The three manual-row routes may write them on a
+ * manual row — and ONLY as a pair, under the rules below (`manualRowParentPairProblem`, `isManualRowSelfParent`). They
+ * share the lock exemption with the six but are deliberately NOT part of `fillable`: /context never lists them as
+ * `editableFieldIds`, so the grid cannot edit one of the two cells on its own and leave the pair mismatched. Every
+ * generic write path (/patch, PATCH /records, Yjs, range fill, paste, import, forms, automations) keeps treating
+ * them as locked PLM columns, on manual rows and PLM rows alike.
+ */
+export const MANUAL_ROW_PARENT_FIELD_IDS = Object.freeze([MANUAL_ROW_PARENT_CODE_FIELD_ID, MANUAL_ROW_PARENT_NAME_FIELD_ID] as const)
 /** 备料计划 (5, human columns): copied when the actor can read and write them. */
 export const MANUAL_ROW_PLAN_FIELD_IDS = Object.freeze([
   'materialType', 'blankType', 'demandDate', 'leadTimeDays', 'makeOrBuy',
@@ -207,11 +225,11 @@ export const MANUAL_ROW_REQUIRED_DROPPED_FIELD_IDS = Object.freeze(['componentSo
 export const MANUAL_ROW_REQUIRED_ADDED_FIELD_IDS = Object.freeze(['componentName'] as const)
 export const MANUAL_ROW_NOT_CLEARABLE_FIELD_IDS = Object.freeze(['componentName', 'totalQuantity'] as const)
 
-export type ManualRowTemplateClass = 'fillable' | 'lineage' | 'plan' | 'progress' | 'identity_run' | 'stamp'
+export type ManualRowTemplateClass = 'fillable' | 'parent_assignable' | 'plan' | 'progress' | 'identity_run' | 'stamp'
 
 export const MANUAL_ROW_TEMPLATE_CLASSES: Readonly<Record<ManualRowTemplateClass, readonly string[]>> = Object.freeze({
   fillable: MANUAL_ROW_FILLABLE_FIELD_IDS,
-  lineage: MANUAL_ROW_LINEAGE_FIELD_IDS,
+  parent_assignable: MANUAL_ROW_PARENT_FIELD_IDS,
   plan: MANUAL_ROW_PLAN_FIELD_IDS,
   progress: MANUAL_ROW_PROGRESS_FIELD_IDS,
   identity_run: MANUAL_ROW_IDENTITY_RUN_FIELD_IDS,
@@ -219,7 +237,13 @@ export const MANUAL_ROW_TEMPLATE_CLASSES: Readonly<Record<ManualRowTemplateClass
 })
 
 /** The classes a manual-row route may never write a value into (the server stamps or leaves them empty). */
-export const MANUAL_ROW_NEVER_WRITTEN_CLASSES: readonly ManualRowTemplateClass[] = Object.freeze(['lineage', 'identity_run', 'stamp'] as const)
+export const MANUAL_ROW_NEVER_WRITTEN_CLASSES: readonly ManualRowTemplateClass[] = Object.freeze(['identity_run', 'stamp'] as const)
+
+/**
+ * The classes the LOCK EXEMPTION covers (ADR §12.3 「锁豁免的边界变化」): 6 + 2 = 8 columns, on the three manual-row routes
+ * only, and only for a new manual row or a row that satisfies M. Disjoint from the never-written classes.
+ */
+export const MANUAL_ROW_LOCK_EXEMPT_CLASSES: readonly ManualRowTemplateClass[] = Object.freeze(['fillable', 'parent_assignable'] as const)
 
 /**
  * 「新增人工补充行」's columns, in the dialog's order (ADR §8 B3.3: 名称*、总用量*、图号、规格、材质、用量、备注). Logical ids;
@@ -234,4 +258,62 @@ export const MANUAL_ROW_DIALOG_FIELD_IDS = Object.freeze([
 /** A value the edit route treats as CLEARING a not-clearable column. */
 export function isClearingManualRowValue(value: unknown): boolean {
   return value === null || value === undefined || (typeof value === 'string' && value.trim() === '')
+}
+
+// ── the parent pair (ADR §12.3, rules P3 – P5) ──────────────────────────────────────────────────────
+//
+// 父组件图号 / 父组件名称 of a manual row are a DISPLAY attribute of that one row (P6: the server never checks that the
+// parent exists on the sheet, and no reference is created). What the server does hold is the shape of the pair:
+//   P3  the two columns travel together: a request that names one names the other too;
+//   P4  each value is a string or null. Both blank = no parent. 图号 non-blank + 名称 blank = a parent without a name
+//       (PLM has such parents). 名称 non-blank + 图号 blank is refused — the fill view groups by 图号, so a parent that
+//       has only a name cannot be grouped. BLANK is judged on the trimmed value; the STORED value is the submitted
+//       one, never rewritten (a candidate picked from the sheet must match the PLM text byte for byte, or the row
+//       lands in another group);
+//   P5  a row is not its own parent: 父组件图号 must differ from the row's own 图号 (`isManualRowSelfParent`).
+
+/** P4 「空」: null / absent, or a string that is empty once trimmed. */
+export function isBlankManualRowParentValue(value: unknown): boolean {
+  return value === null || value === undefined || (typeof value === 'string' && value.trim() === '')
+}
+
+/** P4: the only value types a pair column takes. */
+export function isManualRowParentValueType(value: unknown): value is string | null {
+  return value === null || typeof value === 'string'
+}
+
+export type ManualRowParentPairProblem = 'pair_incomplete' | 'not_text' | 'name_without_code'
+
+/**
+ * P3 and P4 for ONE request (or one source row, for the copy). `hasCode` / `hasName` say whether the column was named
+ * at all; a request that names neither has no pair to judge (null). Pure; reads nothing but its arguments.
+ */
+export function manualRowParentPairProblem(input: { hasCode: boolean; hasName: boolean; code?: unknown; name?: unknown }): ManualRowParentPairProblem | null {
+  if (!input.hasCode && !input.hasName) return null
+  if (input.hasCode !== input.hasName) return 'pair_incomplete'
+  if (!isManualRowParentValueType(input.code) || !isManualRowParentValueType(input.name)) return 'not_text'
+  if (isBlankManualRowParentValue(input.code) && !isBlankManualRowParentValue(input.name)) return 'name_without_code'
+  return null
+}
+
+/**
+ * What a 图号 cell COMPARES as for P5: a string without its surrounding whitespace, a finite number as its decimal
+ * text (a raw client can store one in the text column; the grid groups it under that text), anything else nothing —
+ * null when there is nothing to compare. The same reading of a cell as the plugin's same-material reminder
+ * (stock-preparation-manual-rows.cjs `matchText`, ADR §5.3). Never used to rewrite a stored value.
+ */
+export function comparableManualRowCode(value: unknown): string | null {
+  const text = typeof value === 'string'
+    ? value.trim()
+    : typeof value === 'number' && Number.isFinite(value) ? String(value) : ''
+  return text === '' ? null : text
+}
+
+/**
+ * P5: the row would be its own parent. Case-sensitive, surrounding whitespace ignored on both sides (how the
+ * same-material reminder compares 图号, ADR §5.3). A blank parent or a row without its own 图号 is never a self-parent.
+ */
+export function isManualRowSelfParent(parentCode: unknown, componentCode: unknown): boolean {
+  const parent = comparableManualRowCode(parentCode)
+  return parent !== null && parent === comparableManualRowCode(componentCode)
 }

@@ -362,9 +362,49 @@
 
         <!-- 3. Actions -->
         <section class="meta-rule-editor__section">
-          <div class="meta-rule-editor__section-title">{{ automationLabel('editor.actions', isZh) }} <span class="meta-rule-editor__hint">{{ automationLabel('editor.actionStepHint', isZh) }}</span></div>
+          <div class="meta-rule-editor__section-title">
+            {{ automationLabel('editor.actions', isZh) }} <span class="meta-rule-editor__hint">{{ automationLabel('editor.actionStepHint', isZh) }}</span>
+            <!-- Integration assistant 1b (R-99 ③): Form / Flow layout over the SAME draft. Flow mode only
+                 reorders / removes / adds through moveAction / removeAction / addAction below; every config
+                 edit, the trigger and the conditions stay in Form mode; Save is the one buildPayload path. -->
+            <span class="meta-rule-editor__mode-toggle">
+              <button
+                v-for="mode in EDITOR_MODES"
+                :key="mode"
+                type="button"
+                class="meta-rule-editor__mode-btn"
+                :class="{ 'meta-rule-editor__mode-btn--active': editorMode === mode }"
+                :data-editor-mode="mode"
+                :aria-pressed="editorMode === mode"
+                @click="editorMode = mode"
+              >{{ automationLabel(mode === 'form' ? 'editor.modeForm' : 'editor.modeFlow', isZh) }}</button>
+            </span>
+          </div>
+          <MetaAutomationFlowEditPanel
+            v-if="editorMode === 'flow'"
+            :trigger="flowTrigger"
+            :has-rule-conditions="draft.conditions.conditions.length > 0"
+            :steps="flowSteps"
+            :add-blocked-reason="flowAddBlockedReason"
+            @move="moveAction"
+            @remove="removeAction"
+            @add="addAction"
+            @configure="configureFlowStep"
+            @edit-trigger="editFlowTrigger"
+          />
+          <!-- Integration assistant 1c (R-99 ③): node library + read-only go-live gates. Every entry and lock reason
+               comes from the Form logic below (selectableActionTypes / actionTypeOptionDisabled / addAction's
+               refusals); picking one goes through addAction() + onDraftActionTypeChange, as the Form select does. -->
+          <MetaAutomationFlowLibraryPanel
+            v-if="editorMode === 'flow'"
+            :groups="flowLibraryGroups"
+            :coming-soon="flowLibraryComingSoonEntries"
+            :gates="flowGates"
+            @pick="addActionFromLibrary"
+          />
           <div
             v-for="(action, idx) in draft.actions"
+            v-show="editorMode === 'form'"
             :key="action.draftId"
             class="meta-rule-editor__action-row"
             :data-action-index="idx"
@@ -377,7 +417,7 @@
                   :key="type"
                   :value="type"
                   :data-value="type"
-                  :disabled="isUnsupportedSelectableActionType(type) || isDeletedTriggerBlockedActionType(type)"
+                  :disabled="actionTypeOptionDisabled(type)"
                   :label="automationActionTypeLabel(type, isZh)"
                 />
               </el-select>
@@ -1816,6 +1856,7 @@
                (the server refuses anything else; the job's own config block says so). -->
           <el-button
             v-if="draft.actions.length < 3 && !draftCarriesRunIntegrationJob"
+            v-show="editorMode === 'form'"
             size="small"
             class="meta-rule-editor__btn"
             data-action="add-action"
@@ -2072,6 +2113,16 @@ import {
   isUnaryConditionOperator,
 } from '../utils/automation-condition-values'
 import ConditionValueInput from './ConditionValueInput.vue'
+import MetaAutomationFlowEditPanel from './MetaAutomationFlowEditPanel.vue'
+import MetaAutomationFlowLibraryPanel from './MetaAutomationFlowLibraryPanel.vue'
+import { flowStepCategory, flowTriggerCard, type FlowEditStep } from '../automationFlowView'
+import type { AutomationRuleTemplateSeed } from '../automationRecipes'
+import {
+  buildFlowGates,
+  buildFlowLibrary,
+  flowLibraryComingSoon,
+  flowLibraryLockReason,
+} from '../automationFlowLibrary'
 
 interface FieldPair {
   fieldId: string
@@ -2199,6 +2250,11 @@ const props = defineProps<{
   canOpenDingTalkGroupSettings?: boolean
   /** The host's save failure (the drawer covers the host's own error line), already in readable copy. */
   saveError?: string | null
+  /**
+   * Integration assistant 1d (R-99 ③): a template's starting draft for a NEW rule (ignored when `rule` is set).
+   * Loaded through draftFromRule — the same path a stored rule takes — so a template is never a second draft model.
+   */
+  seedRule?: AutomationRuleTemplateSeed | null
 }>()
 
 const emit = defineEmits<{
@@ -2223,6 +2279,10 @@ const integrationRunActionEnabled = computed(() => featureFlags.hasFeature('inte
 // While the draft carries one, no action is added beside it; a LOADED rule that already has others is shown whole
 // and blocked at save (runIntegrationJobSaveBlockReasons) until they are removed.
 const draftCarriesRunIntegrationJob = computed(() => draft.value.actions.some((action) => action.type === RUN_INTEGRATION_JOB_ACTION_TYPE))
+// Integration assistant 1b (R-99 ③): which layout the actions section shows. Form is the default and the
+// only place config is edited; Flow is a second view of the same draft (see MetaAutomationFlowEditPanel).
+const EDITOR_MODES = ['form', 'flow'] as const
+const editorMode = ref<(typeof EDITOR_MODES)[number]>('form')
 // R-69 1c: integration.run_finished is offered for a NEW rule only while the server switch is on
 // (INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED, surfaced as the session feature integrationAutomationRunEvent).
 const integrationRunEventEnabled = computed(() => featureFlags.hasFeature('integrationAutomationRunEvent'))
@@ -2588,7 +2648,12 @@ function isUnsupportedSelectableActionType(type: AutomationActionType): boolean 
   return UNSUPPORTED_SELECTABLE_ACTION_TYPES.includes(type)
 }
 
-function selectableActionTypes(currentType: AutomationActionType): AutomationActionType[] {
+// 1c: `actionCount` defaults to the draft's own count (the Form rows); the node library asks for the row
+// addAction() would append, counted with that row — the same list that row's select would then show.
+function selectableActionTypes(
+  currentType: AutomationActionType,
+  actionCount: number = draft.value.actions.length,
+): AutomationActionType[] {
   const types: AutomationActionType[] = [...SUPPORTED_SELECTABLE_ACTION_TYPES]
   // FWB: newly selectable only when flag ON + approval.completed; a loaded FWB action always remains
   // in the option list so it is never silently dropped from the UI.
@@ -2603,13 +2668,18 @@ function selectableActionTypes(currentType: AutomationActionType): AutomationAct
   // R-69 1b-iii: run_integration_job — new only with the switch ON and a schedule.cron trigger; a loaded one
   // always stays listed (never silently dropped). Top-level only: not in any branch-authorable list.
   // R-69 I6d fix round 2 (F2): and only on a rule with ONE action row — the job is its rule's only action.
-  if (isRunIntegrationJobSelectable(integrationRunActionEnabled.value, draft.value.triggerType, currentType, draft.value.actions.length)) {
+  if (isRunIntegrationJobSelectable(integrationRunActionEnabled.value, draft.value.triggerType, currentType, actionCount)) {
     if (!types.includes(RUN_INTEGRATION_JOB_ACTION_TYPE)) types.push(RUN_INTEGRATION_JOB_ACTION_TYPE)
   }
   if (isUnsupportedSelectableActionType(currentType) && !types.includes(currentType)) {
     types.push(currentType)
   }
   return types
+}
+
+/** The Form type select's :disabled for one option — shared with the Flow node library (1c). */
+function actionTypeOptionDisabled(type: AutomationActionType): boolean {
+  return isUnsupportedSelectableActionType(type) || isDeletedTriggerBlockedActionType(type)
 }
 
 function fwbActionReadOnly(action: DraftAction): boolean {
@@ -3585,6 +3655,21 @@ function draftFromRule(rule: AutomationRule): Draft {
   }
 }
 
+/**
+ * 1d: a template seed → a NEW rule's draft. Built by draftFromRule (no id, so every "saved rule" branch — legacy
+ * UTC, keep-stored-secret, test run — stays off), then each action is marked as authored-now rather than loaded:
+ * `persisted: false` (expanded, like a fresh row) and no raw-config snapshot, so the saved config is exactly what
+ * the Form builds for a row the author added and filled by hand.
+ */
+function draftFromTemplateSeed(seed: AutomationRuleTemplateSeed): Draft {
+  const seeded = draftFromRule({ ...seed, id: '', sheetId: props.sheetId, enabled: false })
+  for (const action of seeded.actions) {
+    action.persisted = false
+    action.originalConfig = null
+  }
+  return seeded
+}
+
 const draft = ref<Draft>(emptyDraft())
 // B1-07: serialized snapshot taken when the editor opens — the dirty check for close-path
 // discard protection. JSON.stringify is stable here: the draft is rebuilt from the same
@@ -3856,7 +3941,8 @@ watch(
   () => props.visible,
   async (v) => {
     if (v) {
-      draft.value = props.rule ? draftFromRule(props.rule) : emptyDraft()
+      draft.value = props.rule ? draftFromRule(props.rule) : props.seedRule ? draftFromTemplateSeed(props.seedRule) : emptyDraft()
+      editorMode.value = 'form' // 1b: the layout is per open, never persisted
       cronPreset.value = cronPresetForDraft(draft.value)
       draftSnapshot.value = JSON.stringify(draft.value) // B1-07: dirty baseline per open
       resetDeleteRecordAcknowledgements()
@@ -4311,6 +4397,88 @@ function clearActionExpandOverride(draftId: string): void {
   actionManualExpandOverrides.value = next
 }
 
+// Integration assistant 1b (R-99 ③): the Flow layout's view of the draft. Read-only derivations — the step
+// summary is actionSummaries[idx] itself, so both layouts always say the same thing about a step.
+const flowTrigger = computed(() => {
+  const triggerConfig = { ...draft.value.triggerConfig }
+  // The draft edits schedule.interval in minutes (buildPayload sends minutes); describe what would be saved.
+  if (draft.value.triggerType === 'schedule.interval') {
+    const minutes = Number(triggerConfig.intervalMinutes)
+    triggerConfig.intervalMs = Number.isFinite(minutes) && minutes > 0 ? minutes * 60000 : 0
+  }
+  return flowTriggerCard({ triggerType: draft.value.triggerType, triggerConfig }, {
+    isZh: isZh.value,
+    fieldLabel: (id: string) => props.fields.find((field) => field.id === id)?.name ?? id,
+  })
+})
+
+const flowSteps = computed<FlowEditStep[]>(() =>
+  draft.value.actions.map((action, idx) => ({
+    id: action.draftId,
+    type: action.type,
+    label: automationActionTypeLabel(action.type, isZh.value),
+    summary: actionSummaries.value[idx] ?? '',
+    category: flowStepCategory(action.type),
+  })),
+)
+
+// Mirrors addAction()'s own refusals (and the Form layout hiding its add button) — never a third rule.
+const flowAddBlockedReason = computed(() => {
+  if (draftCarriesRunIntegrationJob.value) return automationLabel('editor.flowAddStepIntegrationOnly', isZh.value)
+  if (draft.value.actions.length >= 3) return automationLabel('editor.flowAddStepMaxReached', isZh.value)
+  return ''
+})
+
+// Integration assistant 1c (R-99 ③): the node library. The catalog is every top-level type a Form row can
+// ever offer; whether one is open right now is the Form's own answer for the row addAction() would append.
+const FLOW_LIBRARY_CATALOG: readonly AutomationActionType[] = [
+  ...SUPPORTED_SELECTABLE_ACTION_TYPES,
+  FWB_ACTION_TYPE,
+  RUN_INTEGRATION_JOB_ACTION_TYPE,
+]
+
+function flowLibraryLockReasonFor(type: AutomationActionType): string {
+  const nextCount = draft.value.actions.length + 1
+  return flowLibraryLockReason(type, {
+    addBlockedReason: flowAddBlockedReason.value,
+    offered: selectableActionTypes(NEW_ACTION_TYPE, nextCount),
+    optionDisabled: actionTypeOptionDisabled,
+    deletedTriggerBlocked: isDeletedTriggerBlockedActionType,
+    fwb: { flagOn: fwbWritebackEnabled.value, triggerType: draft.value.triggerType, outcomes: approvalCompletedOutcomes.value },
+    runIntegrationJob: { switchOn: integrationRunActionEnabled.value, triggerType: draft.value.triggerType, actionCount: nextCount },
+  }, isZh.value)
+}
+
+const flowLibraryGroups = computed(() => buildFlowLibrary({
+  catalog: FLOW_LIBRARY_CATALOG,
+  isZh: isZh.value,
+  lockReason: flowLibraryLockReasonFor,
+}))
+
+const flowLibraryComingSoonEntries = computed(() => flowLibraryComingSoon(isZh.value))
+
+// 1c: 上线门 — read-only; only the switches this editor already reads, plus the rule's loaded enabled state.
+const flowGates = computed(() => buildFlowGates({
+  actionTypes: draft.value.actions.map((action) => action.type),
+  triggerType: draft.value.triggerType,
+  features: {
+    runAction: integrationRunActionEnabled.value,
+    runEvent: integrationRunEventEnabled.value,
+    fwb: fwbWritebackEnabled.value,
+  },
+  ruleEnabled: props.rule ? props.rule.enabled === true : null,
+  isZh: isZh.value,
+}))
+
+/** 「配置」: back to Form with that action expanded and scrolled into view (the save-block-reason path). */
+function configureFlowStep(idx: number): void {
+  scrollToSaveBlockAnchor(`[data-action-index="${idx}"]`)
+}
+
+function editFlowTrigger(): void {
+  scrollToSaveBlockAnchor('[data-field="triggerType"]')
+}
+
 // G-B2-22: locates the first entry collectConditionEditorEntries would flag as incomplete, in the
 // same depth-first order areConditionsComplete's recursive `.every()` short-circuits on — so this
 // always names the same condition/group the boolean check would have failed on first.
@@ -4509,6 +4677,12 @@ const canSave = computed(() => saveBlockReasons.value.length === 0)
 // isActionExpanded/setActionExpanded) and scroll on the next tick once it has re-rendered.
 function scrollToSaveBlockAnchor(anchor?: string): void {
   if (!anchor) return
+  // 1b: every anchor lives in the Form layout — leave Flow mode first, then scroll once it has rendered.
+  if (editorMode.value !== 'form') {
+    editorMode.value = 'form'
+    void nextTick().then(() => scrollToSaveBlockAnchor(anchor))
+    return
+  }
   const actionIndexMatch = anchor.match(/data-action-index="(\d+)"/)
   const action = actionIndexMatch ? draft.value.actions[Number(actionIndexMatch[1])] : undefined
   if (action && !isActionExpanded(action)) {
@@ -4546,11 +4720,31 @@ function removeConditionNode(path: ConditionPath) {
   parent.group.conditions.splice(parent.index, 1)
 }
 
+// The type addAction() gives a new row (the Form author then changes it through the row's type select).
+const NEW_ACTION_TYPE: AutomationActionType = 'update_record'
+
 function addAction() {
   if (draft.value.actions.length >= 3) return
   // R-69 I6d fix round 2 (F2): run_integration_job is its rule's only action — nothing is added beside it.
   if (draftCarriesRunIntegrationJob.value) return
-  draft.value.actions.push(createDraftAction('update_record'))
+  draft.value.actions.push(createDraftAction(NEW_ACTION_TYPE))
+}
+
+/**
+ * Integration assistant 1c: add a step of `type` from the Flow node library — exactly what a Form author does:
+ * 「添加动作」 (addAction) and then pick `type` in the new row's select (v-model sets the type, @change runs
+ * onDraftActionTypeChange; an el-select emits no change when the value is already selected). Locked entries
+ * (the same lock the library shows) add nothing.
+ */
+function addActionFromLibrary(type: AutomationActionType): void {
+  if (flowLibraryLockReasonFor(type) !== '') return
+  const before = draft.value.actions.length
+  addAction()
+  if (draft.value.actions.length !== before + 1) return
+  const action = draft.value.actions[before]
+  if (action.type === type) return
+  action.type = type
+  onDraftActionTypeChange(action)
 }
 
 function parseUserIdsText(value: unknown): string[] {
@@ -6267,6 +6461,11 @@ async function onTestRun(): Promise<void> {
 }
 
 .meta-rule-editor__section-title { font-size: 14px; font-weight: 600; color: var(--ms-text-1); }
+/* 1b: Form / Flow segmented toggle in the actions header. */
+.meta-rule-editor__mode-toggle { float: right; display: inline-flex; border: 1px solid var(--ms-border); border-radius: 6px; overflow: hidden; }
+.meta-rule-editor__mode-btn { font: inherit; font-size: 12px; font-weight: 400; padding: 2px 10px; border: 0; background: transparent; color: var(--ms-text-2); cursor: pointer; }
+.meta-rule-editor__mode-btn + .meta-rule-editor__mode-btn { border-left: 1px solid var(--ms-border); }
+.meta-rule-editor__mode-btn--active { background: var(--ms-color-primary); color: var(--ms-bg-card); }
 .meta-rule-editor__hint { font-weight: 400; color: var(--ms-text-3); font-size: 12px; }
 
 .meta-rule-editor__access-summary {

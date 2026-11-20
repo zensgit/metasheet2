@@ -20,6 +20,7 @@ import {
 } from './attendanceSelfServiceBackfill'
 import { isUserSessionRevoked } from './session-revocation'
 import { isSessionTokenPayload } from './session-token-kind'
+import { classifyVerifiedSessionPayload, verifyPersistedStrictSession } from './strict-dingtalk-entry'
 import { createUserSession, isUserSessionActive } from './session-registry'
 import {
   assertAliasCutoverAllowed,
@@ -265,6 +266,19 @@ export class AuthService {
         this.logger.warn('Token verification failed: not a session token')
         return null
       }
+      const sessionClass = classifyVerifiedSessionPayload(payload)
+      if (sessionClass === 'conflict') {
+        this.logger.warn('Token verification failed: strict session is not an ordinary session')
+        return null
+      }
+      if (sessionClass === 'strict') {
+        return await poolManager.get().transaction(async (client) => {
+          await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+          return verifyPersistedStrictSession({
+            query: (sql, params) => client.query(sql, params),
+          }, payload)
+        })
+      }
       const userId = this.resolveTokenUserId(payload)
       if (!userId) {
         this.logger.warn('Token verification failed: missing user identity claim')
@@ -317,13 +331,27 @@ export class AuthService {
   /**
    * 创建JWT token
    */
-  createToken(user: User, options: { sid?: string } = {}): string {
-    const payload: Omit<TokenPayload, 'iat' | 'exp'> = {
+  createToken(user: User, options: { sid?: string; externalAuth?: boolean } = {}): string {
+    const externalAuth = options.externalAuth === true
+    const sid = typeof options.sid === 'string' && options.sid.trim().length > 0 ? options.sid.trim() : undefined
+    if (externalAuth) {
+      if (!sid || !sid.startsWith('xs.')) {
+        const error = new Error('STRICT_SESSION_SID_REQUIRED')
+        ;(error as Error & { code?: string }).code = 'STRICT_SESSION_SID_REQUIRED'
+        throw error
+      }
+    } else if (sid?.startsWith('xs.')) {
+      const error = new Error('STRICT_SESSION_SID_REFUSED')
+      ;(error as Error & { code?: string }).code = 'STRICT_SESSION_SID_REFUSED'
+      throw error
+    }
+    const payload: Omit<TokenPayload, 'iat' | 'exp'> & { xa?: true } = {
       userId: user.id,
       email: user.email ?? '',
       role: user.role,
       ...(typeof user.tenantId === 'string' && user.tenantId.trim().length > 0 ? { tenantId: user.tenantId.trim() } : {}),
-      ...(typeof options.sid === 'string' && options.sid.trim().length > 0 ? { sid: options.sid.trim() } : {}),
+      ...(sid ? { sid } : {}),
+      ...(externalAuth ? { xa: true as const } : {}),
     }
 
     return jwt.sign(payload, this.config.jwtSecret, {
@@ -373,7 +401,7 @@ export class AuthService {
 
       const sessionId = crypto.randomUUID()
       const tenantId = await this.resolveSessionTenantId(user.id, options.tenantId)
-      const token = this.createToken(tenantId ? { ...user, tenantId } : user, { sid: sessionId })
+      const token = this.createToken(tenantId ? { ...user, tenantId } : user, { sid: sessionId, externalAuth: false })
       const payload = this.readTokenPayload(token)
       if (payload?.exp) {
         await createUserSession(user.id, {
@@ -1011,6 +1039,11 @@ export class AuthService {
         this.logger.warn('Token refresh failed: not a session token')
         return null
       }
+      const sessionClass = classifyVerifiedSessionPayload(payload)
+      if (sessionClass === 'strict' || sessionClass === 'conflict') {
+        this.logger.warn('Token refresh failed: strict session is not an ordinary session')
+        return null
+      }
       const userId = this.resolveTokenUserId(payload)
       if (!userId) {
         this.logger.warn('Token refresh failed: missing user identity claim')
@@ -1046,7 +1079,7 @@ export class AuthService {
       const refreshedUser = tenantId
         ? { ...user, tenantId }
         : user
-      const refreshedToken = this.createToken(refreshedUser, { sid: sessionId })
+      const refreshedToken = this.createToken(refreshedUser, { sid: sessionId, externalAuth: false })
       const refreshedPayload = this.readTokenPayload(refreshedToken)
       if (refreshedPayload?.exp) {
         const session = await createUserSession(user.id, {

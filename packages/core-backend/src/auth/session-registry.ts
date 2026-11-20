@@ -83,15 +83,17 @@ export async function createUserSession(
     userAgent?: string | null
     expectedAccessGeneration?: number
   },
+  executor?: { query: typeof query },
 ): Promise<UserSessionRecord | null> {
   const sessionId = options.sessionId?.trim() || crypto.randomUUID()
   // Only a generation-fenced issuance locks the users row: FOR SHARE makes it wait for a concurrent generation
   // bump to commit and then compares the committed value. Without a generation nothing is compared, so an
   // unfenced issuance (password login, activation, dev token) reads the row without a lock, as before the fence.
   const fenced = options.expectedAccessGeneration !== undefined
+  const execute: typeof query = executor === undefined ? query : executor.query.bind(executor)
 
   try {
-    const result = await query<UserSessionRow>(
+    const result = await execute<UserSessionRow>(
       `WITH subject AS (
          SELECT id FROM users WHERE id=$2
            AND ($6::bigint IS NULL OR COALESCE(access_generation,0)=$6::bigint)${fenced ? ' FOR SHARE' : ''}
@@ -122,11 +124,12 @@ export async function createUserSession(
            updated_at = NOW()
        WHERE user_sessions.revoked_at IS NULL AND user_sessions.user_id=EXCLUDED.user_id
        RETURNING id, user_id, issued_at, expires_at, last_seen_at, revoked_at, revoked_by, revoke_reason, ip_address, user_agent, created_at, updated_at`,
-      [sessionId, userId, options.expiresAt, options.ipAddress ?? null, options.userAgent ?? null, options.expectedAccessGeneration ?? null, process.env.NODE_ENV !== 'production'],
+      [sessionId, userId, options.expiresAt, options.ipAddress ?? null, options.userAgent ?? null, options.expectedAccessGeneration ?? null, executor === undefined && process.env.NODE_ENV !== 'production'],
     )
     const row = result.rows[0]
     return row ? mapRow(row) : null
   } catch (error) {
+    if (executor !== undefined) throw error
     if (isDatabaseSchemaError(error)) {
       if (options.expectedAccessGeneration !== undefined) return null
       return buildSyntheticSession(userId, sessionId, options.expiresAt)

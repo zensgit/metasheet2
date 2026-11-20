@@ -19,6 +19,7 @@ import {
   applyDirectoryDeprovisionPolicies,
   deactivateUserOrgMembershipIfNoOtherActiveBinding,
 } from '../../src/directory/directory-sync'
+import { strictLoginUninstalledRows } from '../utils/strict-login-uninstalled-fixture'
 import {
   bindProspectiveAccountIds,
   globalVouchExists,
@@ -201,6 +202,8 @@ function recordingClient() {
     recorded,
     query: async (sql: string, params?: unknown[]) => {
       recorded.push({ sql, params })
+      const uninstalled = strictLoginUninstalledRows(sql)
+      if (uninstalled !== undefined) return { rows: uninstalled }
       if (/FROM directory_accounts a\b/.test(sql) && /JOIN directory_account_links l/.test(sql)) {
         return {
           rows: [{ directory_account_id: ACCOUNT_ID, local_user_id: 'user-1', deprovision_policy_override: null }],
@@ -251,7 +254,7 @@ describe('statements that need "nobody vouches"', () => {
   it('candidate selection interpolates the org expression and binds an empty exclusion array', async () => {
     const client = recordingClient()
     await applyDirectoryDeprovisionPolicies(client, {
-      integrationId: 'dir-1',
+      integrationId: '22222222-2222-4222-8222-222222222222',
       runId: 'run-1',
       triggeredBy: 'unit-test',
       deactivatedAccountIds: [ACCOUNT_ID],
@@ -314,7 +317,7 @@ describe('statements that need "nobody vouches"', () => {
   it('the write-time membership recheck interpolates the org expression and binds an empty exclusion array', async () => {
     const client = recordingClient()
     await applyDirectoryDeprovisionPolicies(client, {
-      integrationId: 'dir-1',
+      integrationId: '22222222-2222-4222-8222-222222222222',
       runId: 'run-1',
       triggeredBy: 'unit-test',
       deactivatedAccountIds: [ACCOUNT_ID],

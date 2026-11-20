@@ -26,6 +26,8 @@
  */
 import crypto from 'node:crypto'
 import { performance } from 'node:perf_hooks'
+import { assertAuthorizationInputTx } from '../rbac/authorization-input-brand'
+import type { AuthorizationInputTx } from '../rbac/authorization-input-lock'
 import { currentSettlementCoordinationContextV1 } from './coordination/settlement-coordination-context'
 import {
   AttendanceW4OperationError,
@@ -1174,6 +1176,9 @@ export function buildAttendanceScheduledRunAdvisoryKey(key: CanonicalAttendanceS
 // No try-lock, no swallowed non-timeout error, no timeout-to-continue, no
 // row-lock fallback: any SQL failure other than the helper's OWN acquisition
 // 55P03 propagates and aborts the whole transaction.
+// B2 single-create exception: tryAcquireAttendanceCalculationRolloutLockForBirthV1
+// alone may try class-00 shared after actor witnesses; contention aborts that birth.
+// Existing helpers, callers, and the deadline contracts below stay unchanged.
 //
 // Deadline protocol (lock section 7.1): each helper call enforces ONE
 // helper-wide monotonic deadline, not one fresh timeout per key. At entry the
@@ -1309,6 +1314,26 @@ export async function acquireAttendanceCalculationRolloutLock(
       ? 'SELECT pg_advisory_xact_lock_shared($1::bigint)'
       : 'SELECT pg_advisory_xact_lock($1::bigint)'
   await acquireKeysWithDeadline(trx, 'rollout', acquisitionSql, [key])
+}
+
+export async function tryAcquireAttendanceCalculationRolloutLockForBirthV1(
+  tx: AuthorizationInputTx,
+  org: CanonicalAttendanceRolloutOrgKeyV1,
+): Promise<void> {
+  assertAuthorizationInputTx(tx, { client: tx })
+  if (tx.plan?.intent !== 'BIRTH' || tx.world !== 'shared' || tx.open !== true) {
+    fail('W4C0_BIRTH_ROLLOUT_TRY_CONTEXT_INVALID')
+  }
+  if (currentSettlementCoordinationContextV1()) fail('W4C0_BIRTH_ROLLOUT_TRY_COORDINATED')
+  const key = buildAttendanceCalculationRolloutAdvisoryKey(org)
+  const result = await tx.query(
+    'SELECT pg_try_advisory_xact_lock_shared($1::bigint) AS acquired',
+    [key.toString()],
+  )
+  if (result.rows.length !== 1) fail('W4C0_BIRTH_ROLLOUT_TRY_RESULT_INVALID')
+  const acquired = result.rows[0]?.acquired
+  if (acquired !== true && acquired !== false) fail('W4C0_BIRTH_ROLLOUT_TRY_RESULT_INVALID')
+  if (acquired !== true) throw busyError('rollout')
 }
 
 /**
