@@ -9500,6 +9500,176 @@ describe('Attendance admin regressions', () => {
     expect(importBatchesSection!.textContent).toContain('Selected item detail')
     expect(importBatchesSection!.textContent).toContain('Engine: bulk')
   })
+
+  describe('assignment neutral labels', () => {
+    const userIds = [
+      '11111111-1111-4111-8111-111111111111',
+      '22222222-2222-4222-8222-222222222222',
+      '33333333-3333-4333-8333-333333333333',
+    ]
+    const failures = ['missing', 'legacy missing', 'nameless', '403', '404', '500', 'network'] as const
+    type ResolvedUser = { id: string; name: string | null; email: string; is_active?: boolean }
+
+    afterEach(() => useLocale().setLocale('en'))
+
+    function installFixture(outcome: string, users: ResolvedUser[] = []) {
+      window.localStorage.setItem('tenantId', 'default')
+      const fallback = vi.mocked(apiFetch).getMockImplementation()!
+      const ids = outcome === 'legacy missing'
+        ? ['legacy-assignment-a', 'legacy-assignment-b']
+        : users.length ? users.map(user => user.id) : userIds.slice(0, 2)
+      const shift = {
+        id: 'neutral-base', name: 'Same shift', timezone: 'UTC', workStartTime: '09:00',
+        workEndTime: '18:00', isOvernight: false, lateGraceMinutes: 10,
+        earlyGraceMinutes: 10, roundingMinutes: 5, workingDays: [1, 2, 3, 4, 5],
+      }
+      const items = ids.map((userId, index) => ({
+        assignment: {
+          id: 'neutral-assignment-' + index, userId, shiftId: shift.id,
+          startDate: '2026-06-15', endDate: '2026-06-20', isActive: true,
+          slotIndex: 0, publishStatus: 'published', assignmentKind: 'regular',
+        },
+        shift,
+      }))
+      const resolveCalls: Array<{ method: string; body: Record<string, unknown> }> = []
+      const writes: Array<{ url: string; method: string; body: Record<string, unknown> }> = []
+      vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+        const url = input
+        const method = String(init?.method || 'GET').toUpperCase()
+        if (url === '/api/attendance-admin/users/batch/resolve') {
+          const body = JSON.parse(String(init?.body || '{}')) as { userIds: string[] }
+          resolveCalls.push({ method, body })
+          if (outcome === 'network') throw new Error('SYNTHETIC_RESOLVE_FAILURE')
+          if (['403', '404', '500'].includes(outcome)) {
+            return jsonResponse(Number(outcome), { ok: false, error: { code: 'SYNTHETIC_RESOLVE_FAILURE' } })
+          }
+          const resolved = outcome === 'nameless'
+            ? ids.map((id, index) => ({ id, name: index ? null : '  ', email: index ? '' : '  ' }))
+            : users
+          return jsonResponse(200, { ok: true, data: {
+            items: [
+              ...resolved.filter(user => body.userIds.includes(user.id)),
+              { id: '44444444-4444-4444-8444-444444444444', name: 'FOREIGN_LABEL_CONTROL', email: '' },
+            ],
+            missingUserIds: body.userIds.filter(id => !resolved.some(user => user.id === id)),
+          } })
+        }
+        if (method !== 'GET') {
+          writes.push({ url, method, body: JSON.parse(String(init?.body || '{}')) })
+        }
+        if (url === '/api/attendance/schedule-drafts/assignments' && method === 'POST') {
+          return jsonResponse(201, { ok: true, data: { assignment: { ...items[1]!.assignment, publishStatus: 'draft' } } })
+        }
+        if (url.startsWith('/api/attendance/assignments?')) {
+          return jsonResponse(200, { ok: true, data: { items } })
+        }
+        if (url.startsWith('/api/attendance/rotation-assignments?')) {
+          return jsonResponse(200, { ok: true, data: { items: items.map(item => ({
+            assignment: { ...item.assignment, id: 'rotation-' + item.assignment.id, rotationRuleId: 'neutral-rotation' },
+            rotation: { id: 'neutral-rotation', name: 'Same rotation', timezone: 'UTC', shiftSequence: [shift.id], isActive: true },
+          })) } })
+        }
+        if (url.startsWith('/api/attendance/rotation-rules')) {
+          return jsonResponse(200, { ok: true, data: { items: [
+            { id: 'neutral-rotation', name: 'Same rotation', timezone: 'UTC', shiftSequence: [shift.id], isActive: true },
+          ] } })
+        }
+        if (url.startsWith('/api/attendance/shifts')) {
+          return jsonResponse(200, { ok: true, data: { items: [shift, { ...shift, id: 'neutral-temp', name: 'Replacement shift' }] } })
+        }
+        return fallback(input, init)
+      })
+      return { ids, items, resolveCalls, writes }
+    }
+
+    async function mountFixture() {
+      app = createAttendanceApp(AttendanceView, { mode: 'admin' })
+      app.mount(container!)
+      await flushUi(10)
+      container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-assignments"]')!.click()
+      await flushUi(4)
+      return container!.querySelector<HTMLSelectElement>('#attendance-temporary-shift-replacement-assignment')!
+    }
+
+    it.each([
+      ...failures.map(outcome => ({ outcome, locale: 'en' as const })),
+      { outcome: 'missing', locale: 'zh-CN' as const },
+    ])('keeps table and temporary identities neutral for $outcome / $locale', async ({ outcome, locale }) => {
+      const fixture = installFixture(outcome)
+      useLocale().setLocale(locale)
+      const select = await mountFixture()
+      const neutral = locale === 'en' ? 'Unknown member' : '未知成员'
+      const technical = locale === 'en' ? 'User ID' : '用户 ID'
+      const slot = locale === 'en' ? 'Slot 0' : '槽位 0'
+      for (const prefix of ['assignment', 'rotation-assignment']) {
+        const rows = container!.querySelectorAll('[data-attendance-' + prefix + '-user-identity]')
+        expect(rows).toHaveLength(2)
+        rows.forEach((row, index) => {
+          const id = row.querySelector('[data-attendance-' + prefix + '-user-id]')
+          expect(id?.textContent).toBe(fixture.ids[index])
+          expect(id?.classList.contains('attendance__id-clip')).toBe(false)
+          expect(row.textContent).toContain(neutral)
+          expect(row.querySelector('[data-attendance-' + prefix + '-user-label]')?.textContent?.trim()).toBe(neutral)
+          expect(row.textContent).not.toMatch(/Deleted member|已删除成员|FOREIGN_LABEL_CONTROL/)
+        })
+      }
+      expect(Array.from(select.options).map(option => option.value)).toEqual(['', ...fixture.items.map(item => item.assignment.id)])
+      expect(Array.from(select.options).slice(1).map(option => option.textContent?.trim())).toEqual(
+        fixture.ids.map(id => neutral + ' (' + technical + ': ' + id + ') · Same shift · 2026-06-15 - 2026-06-20 · ' + slot),
+      )
+      const calls = fixture.resolveCalls.filter(call => (call.body.userIds as string[]).some(id => fixture.ids.includes(id)))
+      expect(calls.length).toBeGreaterThan(0)
+      for (const call of calls) expect(call).toEqual({ method: 'POST', body: { userIds: fixture.ids, orgId: 'default' } })
+      expect(vi.mocked(apiFetch).mock.calls.some(([input]) => String(input).startsWith('/api/admin/users'))).toBe(false)
+      expect(fixture.writes).toEqual([])
+    })
+
+    it.each(['en', 'zh-CN'] as const)('preserves resolved names email and inactive metadata / %s', async (locale) => {
+      const users = [
+        { id: userIds[0]!, name: '  Valid Name  ', email: 'named@example.invalid' },
+        { id: userIds[1]!, name: null, email: '  fallback@example.invalid  ' },
+        { id: userIds[2]!, name: '  Inactive Name  ', email: 'inactive@example.invalid', is_active: false },
+      ]
+      const fixture = installFixture('resolved', users)
+      useLocale().setLocale(locale)
+      const select = await mountFixture()
+      const labels = ['Valid Name', 'fallback@example.invalid', 'Inactive Name']
+      for (const prefix of ['assignment', 'rotation-assignment']) {
+        expect(Array.from(container!.querySelectorAll('[data-attendance-' + prefix + '-user-label]')).map(row => row.textContent?.trim())).toEqual(labels)
+        expect(container!.querySelectorAll('[data-attendance-' + prefix + '-user-identity]')[2]?.querySelector('[data-attendance-' + prefix + '-user-secondary]')?.textContent)
+          .toContain(locale === 'en' ? 'Inactive' : '已停用')
+      }
+      expect(Array.from(select.options).slice(1).map(option => option.textContent?.trim())).toEqual(
+        labels.map(label => label + ' · Same shift · 2026-06-15 - 2026-06-20 · ' + (locale === 'en' ? 'Slot 0' : '槽位 0')),
+      )
+      expect(fixture.writes).toEqual([])
+    })
+
+    it('selects the second unresolved temporary target without changing its draft payload', async () => {
+      const fixture = installFixture('missing')
+      const select = await mountFixture()
+      expect(select.options[1]!.textContent).not.toBe(select.options[2]!.textContent)
+      select.value = fixture.items[1]!.assignment.id
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      const shift = container!.querySelector<HTMLSelectElement>('#attendance-temporary-shift-replacement-shift')!
+      shift.value = 'neutral-temp'
+      shift.dispatchEvent(new Event('change', { bubbles: true }))
+      setInput(container!, '#attendance-temporary-shift-work-date', '2026-06-16')
+      setInput(container!, '#attendance-temporary-shift-reason', 'synthetic coverage')
+      await flushUi(2)
+      expect(select.value).toBe(fixture.items[1]!.assignment.id)
+      container!.querySelector<HTMLButtonElement>('[data-attendance-temporary-shift-save-draft]')!.click()
+      await flushUi(8)
+      expect(fixture.writes).toEqual([{
+        url: '/api/attendance/schedule-drafts/assignments', method: 'POST', body: {
+          userId: fixture.ids[1], orgId: 'default', shiftId: 'neutral-temp', startDate: '2026-06-16', endDate: '2026-06-16',
+          isActive: true, slotIndex: 0, assignmentKind: 'temporary', temporaryMode: 'replace',
+          temporaryReplacesKind: 'shift', temporaryReplacesAssignmentId: fixture.items[1]!.assignment.id,
+          temporaryReason: 'synthetic coverage',
+        },
+      }])
+    })
+  })
 })
 
 describe('#3530 batch anomaly resolution (pure)', () => {

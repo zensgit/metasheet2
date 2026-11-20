@@ -348,14 +348,10 @@ export function resolveAttendanceGroupEffectivePolicyEditorNavigationV1(
 // ---------------------------------------------------------------------------
 // R7 — native neutral labels for unknown/deleted members.
 //
-// NOTE on call sites: the W6-1 aggregate is values-free by design-lock red line W6-R2 (counts and
-// closed enums only — no member list, no user ID; see `managerPosture` and
-// `conflicts[].affectedUserCount`, both counts). This panel therefore has NO current call site for
-// this helper: it never renders a member identity. Shipped here per the W6-3 build brief item 3
-// ("native R7 neutral labels for unknown/deleted users from the start"), pre-positioned for a
-// future member-bearing surface, and deliberately DISTINCT from the raw-UUID fallback at
-// AttendanceView.vue's member render path (~L5160, tracked separately as FE-06, a live runtime
-// defect elsewhere this module does not touch or paper over).
+// The aggregate remains values-free (W6-R2), so its panel renders no member identity.
+// AttendanceView's assignment tables/options reuse `unknown` for unresolved or nameless
+// authorized results. Missing results do not distinguish deleted, inactive and out-of-scope
+// identities, so this repair never infers `deleted`. Technical IDs remain explicit fields.
 // ---------------------------------------------------------------------------
 
 export type AttendanceGroupEffectivePolicyMemberLabelKind = 'unknown' | 'deleted'
