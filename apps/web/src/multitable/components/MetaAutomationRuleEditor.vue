@@ -362,9 +362,39 @@
 
         <!-- 3. Actions -->
         <section class="meta-rule-editor__section">
-          <div class="meta-rule-editor__section-title">{{ automationLabel('editor.actions', isZh) }} <span class="meta-rule-editor__hint">{{ automationLabel('editor.actionStepHint', isZh) }}</span></div>
+          <div class="meta-rule-editor__section-title">
+            {{ automationLabel('editor.actions', isZh) }} <span class="meta-rule-editor__hint">{{ automationLabel('editor.actionStepHint', isZh) }}</span>
+            <!-- Integration assistant 1b (R-99 ③): Form / Flow layout over the SAME draft. Flow mode only
+                 reorders / removes / adds through moveAction / removeAction / addAction below; every config
+                 edit, the trigger and the conditions stay in Form mode; Save is the one buildPayload path. -->
+            <span class="meta-rule-editor__mode-toggle">
+              <button
+                v-for="mode in EDITOR_MODES"
+                :key="mode"
+                type="button"
+                class="meta-rule-editor__mode-btn"
+                :class="{ 'meta-rule-editor__mode-btn--active': editorMode === mode }"
+                :data-editor-mode="mode"
+                :aria-pressed="editorMode === mode"
+                @click="editorMode = mode"
+              >{{ automationLabel(mode === 'form' ? 'editor.modeForm' : 'editor.modeFlow', isZh) }}</button>
+            </span>
+          </div>
+          <MetaAutomationFlowEditPanel
+            v-if="editorMode === 'flow'"
+            :trigger="flowTrigger"
+            :has-rule-conditions="draft.conditions.conditions.length > 0"
+            :steps="flowSteps"
+            :add-blocked-reason="flowAddBlockedReason"
+            @move="moveAction"
+            @remove="removeAction"
+            @add="addAction"
+            @configure="configureFlowStep"
+            @edit-trigger="editFlowTrigger"
+          />
           <div
             v-for="(action, idx) in draft.actions"
+            v-show="editorMode === 'form'"
             :key="action.draftId"
             class="meta-rule-editor__action-row"
             :data-action-index="idx"
@@ -1816,6 +1846,7 @@
                (the server refuses anything else; the job's own config block says so). -->
           <el-button
             v-if="draft.actions.length < 3 && !draftCarriesRunIntegrationJob"
+            v-show="editorMode === 'form'"
             size="small"
             class="meta-rule-editor__btn"
             data-action="add-action"
@@ -2072,6 +2103,8 @@ import {
   isUnaryConditionOperator,
 } from '../utils/automation-condition-values'
 import ConditionValueInput from './ConditionValueInput.vue'
+import MetaAutomationFlowEditPanel from './MetaAutomationFlowEditPanel.vue'
+import { flowStepCategory, flowTriggerCard, type FlowEditStep } from '../automationFlowView'
 
 interface FieldPair {
   fieldId: string
@@ -2223,6 +2256,10 @@ const integrationRunActionEnabled = computed(() => featureFlags.hasFeature('inte
 // While the draft carries one, no action is added beside it; a LOADED rule that already has others is shown whole
 // and blocked at save (runIntegrationJobSaveBlockReasons) until they are removed.
 const draftCarriesRunIntegrationJob = computed(() => draft.value.actions.some((action) => action.type === RUN_INTEGRATION_JOB_ACTION_TYPE))
+// Integration assistant 1b (R-99 ③): which layout the actions section shows. Form is the default and the
+// only place config is edited; Flow is a second view of the same draft (see MetaAutomationFlowEditPanel).
+const EDITOR_MODES = ['form', 'flow'] as const
+const editorMode = ref<(typeof EDITOR_MODES)[number]>('form')
 // R-69 1c: integration.run_finished is offered for a NEW rule only while the server switch is on
 // (INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED, surfaced as the session feature integrationAutomationRunEvent).
 const integrationRunEventEnabled = computed(() => featureFlags.hasFeature('integrationAutomationRunEvent'))
@@ -3857,6 +3894,7 @@ watch(
   async (v) => {
     if (v) {
       draft.value = props.rule ? draftFromRule(props.rule) : emptyDraft()
+      editorMode.value = 'form' // 1b: the layout is per open, never persisted
       cronPreset.value = cronPresetForDraft(draft.value)
       draftSnapshot.value = JSON.stringify(draft.value) // B1-07: dirty baseline per open
       resetDeleteRecordAcknowledgements()
@@ -4311,6 +4349,47 @@ function clearActionExpandOverride(draftId: string): void {
   actionManualExpandOverrides.value = next
 }
 
+// Integration assistant 1b (R-99 ③): the Flow layout's view of the draft. Read-only derivations — the step
+// summary is actionSummaries[idx] itself, so both layouts always say the same thing about a step.
+const flowTrigger = computed(() => {
+  const triggerConfig = { ...draft.value.triggerConfig }
+  // The draft edits schedule.interval in minutes (buildPayload sends minutes); describe what would be saved.
+  if (draft.value.triggerType === 'schedule.interval') {
+    const minutes = Number(triggerConfig.intervalMinutes)
+    triggerConfig.intervalMs = Number.isFinite(minutes) && minutes > 0 ? minutes * 60000 : 0
+  }
+  return flowTriggerCard({ triggerType: draft.value.triggerType, triggerConfig }, {
+    isZh: isZh.value,
+    fieldLabel: (id: string) => props.fields.find((field) => field.id === id)?.name ?? id,
+  })
+})
+
+const flowSteps = computed<FlowEditStep[]>(() =>
+  draft.value.actions.map((action, idx) => ({
+    id: action.draftId,
+    type: action.type,
+    label: automationActionTypeLabel(action.type, isZh.value),
+    summary: actionSummaries.value[idx] ?? '',
+    category: flowStepCategory(action.type),
+  })),
+)
+
+// Mirrors addAction()'s own refusals (and the Form layout hiding its add button) — never a third rule.
+const flowAddBlockedReason = computed(() => {
+  if (draftCarriesRunIntegrationJob.value) return automationLabel('editor.flowAddStepIntegrationOnly', isZh.value)
+  if (draft.value.actions.length >= 3) return automationLabel('editor.flowAddStepMaxReached', isZh.value)
+  return ''
+})
+
+/** 「配置」: back to Form with that action expanded and scrolled into view (the save-block-reason path). */
+function configureFlowStep(idx: number): void {
+  scrollToSaveBlockAnchor(`[data-action-index="${idx}"]`)
+}
+
+function editFlowTrigger(): void {
+  scrollToSaveBlockAnchor('[data-field="triggerType"]')
+}
+
 // G-B2-22: locates the first entry collectConditionEditorEntries would flag as incomplete, in the
 // same depth-first order areConditionsComplete's recursive `.every()` short-circuits on — so this
 // always names the same condition/group the boolean check would have failed on first.
@@ -4509,6 +4588,12 @@ const canSave = computed(() => saveBlockReasons.value.length === 0)
 // isActionExpanded/setActionExpanded) and scroll on the next tick once it has re-rendered.
 function scrollToSaveBlockAnchor(anchor?: string): void {
   if (!anchor) return
+  // 1b: every anchor lives in the Form layout — leave Flow mode first, then scroll once it has rendered.
+  if (editorMode.value !== 'form') {
+    editorMode.value = 'form'
+    void nextTick().then(() => scrollToSaveBlockAnchor(anchor))
+    return
+  }
   const actionIndexMatch = anchor.match(/data-action-index="(\d+)"/)
   const action = actionIndexMatch ? draft.value.actions[Number(actionIndexMatch[1])] : undefined
   if (action && !isActionExpanded(action)) {
@@ -6267,6 +6352,11 @@ async function onTestRun(): Promise<void> {
 }
 
 .meta-rule-editor__section-title { font-size: 14px; font-weight: 600; color: var(--ms-text-1); }
+/* 1b: Form / Flow segmented toggle in the actions header. */
+.meta-rule-editor__mode-toggle { float: right; display: inline-flex; border: 1px solid var(--ms-border); border-radius: 6px; overflow: hidden; }
+.meta-rule-editor__mode-btn { font: inherit; font-size: 12px; font-weight: 400; padding: 2px 10px; border: 0; background: transparent; color: var(--ms-text-2); cursor: pointer; }
+.meta-rule-editor__mode-btn + .meta-rule-editor__mode-btn { border-left: 1px solid var(--ms-border); }
+.meta-rule-editor__mode-btn--active { background: var(--ms-color-primary); color: var(--ms-bg-card); }
 .meta-rule-editor__hint { font-weight: 400; color: var(--ms-text-3); font-size: 12px; }
 
 .meta-rule-editor__access-summary {

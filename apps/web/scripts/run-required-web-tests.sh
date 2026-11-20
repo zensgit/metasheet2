@@ -1718,6 +1718,7 @@ exec npx vitest run \
   automation-recipes \
   automation-rerun-execution \
   automation-rule-concurrent-merge \
+  automation-rule-editor-flow-mode \
   automation-save-block-reasons \
   automation-target-sheet-options \
   AutomationExecutionsView \

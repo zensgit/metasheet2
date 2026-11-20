@@ -56,6 +56,17 @@ export interface FlowStepCard {
   branches: FlowBranch[]
 }
 
+/** Stage 1b: one top-level step card in the rule editor's Flow mode, built from the editor's draft. */
+export interface FlowEditStep {
+  /** The draft action's stable id (draftId) — keeps cards keyed across reorders. */
+  id: string
+  type: string
+  label: string
+  /** The same one-line summary the Form mode shows in the action's collapse header. */
+  summary: string
+  category: FlowStepCategory
+}
+
 export interface AutomationFlowModel {
   ruleId: string
   ruleName: string
@@ -293,7 +304,10 @@ function stepCard(
   }
 }
 
-function triggerDetail(rule: AutomationRule, options: Required<AutomationFlowOptions>): string {
+function triggerDetail(
+  rule: Pick<AutomationRule, 'triggerType' | 'triggerConfig'>,
+  options: Required<AutomationFlowOptions>,
+): string {
   const cfg = isRecord(rule.triggerConfig) ? rule.triggerConfig : {}
   const { isZh } = options
   switch (rule.triggerType) {
@@ -328,12 +342,40 @@ function triggerDetail(rule: AutomationRule, options: Required<AutomationFlowOpt
   }
 }
 
-export function buildAutomationFlow(rule: AutomationRule, options: AutomationFlowOptions): AutomationFlowModel {
-  const resolved: Required<AutomationFlowOptions> = {
-    isZh: options.isZh,
-    fieldLabel: options.fieldLabel ?? ((id: string) => id),
-  }
+function resolveOptions(options: AutomationFlowOptions): Required<AutomationFlowOptions> {
+  return { isZh: options.isZh, fieldLabel: options.fieldLabel ?? ((id: string) => id) }
+}
+
+/**
+ * The trigger card alone. Stage 1b (the rule editor's Flow mode) builds it from the editor's draft trigger
+ * (type + config, already in the saved shape), so both stages describe a trigger with the same line.
+ */
+export function flowTriggerCard(
+  rule: Pick<AutomationRule, 'triggerType' | 'triggerConfig'>,
+  options: AutomationFlowOptions,
+): FlowTriggerCard {
+  const resolved = resolveOptions(options)
   const triggerType = String(rule.triggerType ?? '')
+  return {
+    type: triggerType,
+    label: automationTriggerTypeLabel(triggerType, resolved.isZh),
+    detail: triggerDetail(rule, resolved),
+  }
+}
+
+export function flowStepCategoryLabel(category: FlowStepCategory, isZh: boolean): string {
+  switch (category) {
+    case 'record': return pick(isZh, '记录', 'Record')
+    case 'message': return pick(isZh, '消息', 'Message')
+    case 'control': return pick(isZh, '控制', 'Control')
+    case 'integration': return pick(isZh, '集成', 'Integration')
+    case 'approval': return pick(isZh, '审批', 'Approval')
+    default: return pick(isZh, '动作', 'Action')
+  }
+}
+
+export function buildAutomationFlow(rule: AutomationRule, options: AutomationFlowOptions): AutomationFlowModel {
+  const resolved = resolveOptions(options)
   const conditions = rule.conditions as unknown
   const hasRuleConditions = isRecord(conditions)
     && Array.isArray(conditions.conditions)
@@ -342,11 +384,7 @@ export function buildAutomationFlow(rule: AutomationRule, options: AutomationFlo
     ruleId: rule.id,
     ruleName: rule.name,
     enabled: rule.enabled === true,
-    trigger: {
-      type: triggerType,
-      label: automationTriggerTypeLabel(triggerType, resolved.isZh),
-      detail: triggerDetail(rule, resolved),
-    },
+    trigger: flowTriggerCard(rule, resolved),
     hasRuleConditions,
     steps: ruleActions(rule).map((action, i) => stepCard(action, String(i), i, resolved, true)),
   }

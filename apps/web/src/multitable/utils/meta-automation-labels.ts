@@ -126,6 +126,17 @@ export type AutomationLabelKey =
   | 'editor.moveUpTitle'
   | 'editor.moveDownTitle'
   | 'editor.removeActionTitle'
+  | 'editor.modeForm'
+  | 'editor.modeFlow'
+  | 'editor.flowHint'
+  | 'editor.flowTriggerBadge'
+  | 'editor.flowTriggerEditTitle'
+  | 'editor.flowConditionsGate'
+  | 'editor.flowEmpty'
+  | 'editor.flowConfigure'
+  | 'editor.flowAddStep'
+  | 'editor.flowAddStepMaxReached'
+  | 'editor.flowAddStepIntegrationOnly'
   | 'editor.executionModeLabel'
   | 'editor.executionModeHint'
   | 'editor.executionModeRequiredHint'
@@ -542,6 +553,17 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'editor.moveUpTitle',
   'editor.moveDownTitle',
   'editor.removeActionTitle',
+  'editor.modeForm',
+  'editor.modeFlow',
+  'editor.flowHint',
+  'editor.flowTriggerBadge',
+  'editor.flowTriggerEditTitle',
+  'editor.flowConditionsGate',
+  'editor.flowEmpty',
+  'editor.flowConfigure',
+  'editor.flowAddStep',
+  'editor.flowAddStepMaxReached',
+  'editor.flowAddStepIntegrationOnly',
   'editor.executionModeLabel',
   'editor.executionModeHint',
   'editor.executionModeRequiredHint',
@@ -973,6 +995,17 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'editor.moveUpTitle': { en: 'Move up', zh: '上移' },
   'editor.moveDownTitle': { en: 'Move down', zh: '下移' },
   'editor.removeActionTitle': { en: 'Remove action', zh: '移除动作' },
+  'editor.modeForm': { en: 'Form', zh: '表单' },
+  'editor.modeFlow': { en: 'Flow', zh: '流程' },
+  'editor.flowHint': { en: 'Steps run top-down. Reorder or remove them here; use Configure to edit a step.', zh: '按执行顺序自上而下显示。可在此调整顺序或删除；点「配置」编辑步骤。' },
+  'editor.flowTriggerBadge': { en: 'Trigger', zh: '触发' },
+  'editor.flowTriggerEditTitle': { en: 'Edit the trigger in Form', zh: '在表单中编辑触发' },
+  'editor.flowConditionsGate': { en: 'Continues only when the rule conditions match', zh: '满足规则条件才继续' },
+  'editor.flowEmpty': { en: 'No steps yet', zh: '还没有步骤' },
+  'editor.flowConfigure': { en: 'Configure', zh: '配置' },
+  'editor.flowAddStep': { en: '+ Add step', zh: '+ 添加步骤' },
+  'editor.flowAddStepMaxReached': { en: 'A rule has at most 3 steps', zh: '一条规则最多 3 个步骤' },
+  'editor.flowAddStepIntegrationOnly': { en: 'Run integration job must be the rule\'s only step', zh: '「运行集成任务」必须是规则唯一的步骤' },
   'editor.advancedSection': {
     en: 'Advanced',
     zh: '高级设置',

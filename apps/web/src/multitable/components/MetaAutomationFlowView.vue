@@ -88,7 +88,7 @@
 import { computed } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import type { AutomationRule } from '../types'
-import { buildAutomationFlow, type FlowStepCategory } from '../automationFlowView'
+import { buildAutomationFlow, flowStepCategoryLabel, type FlowStepCategory } from '../automationFlowView'
 import { MtIconButton } from '../ui'
 
 const props = defineProps<{
@@ -115,14 +115,7 @@ const model = computed(() => {
 })
 
 function categoryLabel(category: FlowStepCategory): string {
-  switch (category) {
-    case 'record': return t('记录', 'Record')
-    case 'message': return t('消息', 'Message')
-    case 'control': return t('控制', 'Control')
-    case 'integration': return t('集成', 'Integration')
-    case 'approval': return t('审批', 'Approval')
-    default: return t('动作', 'Action')
-  }
+  return flowStepCategoryLabel(category, isZh.value)
 }
 </script>
 
