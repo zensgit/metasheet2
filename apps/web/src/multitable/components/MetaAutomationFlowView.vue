@@ -41,10 +41,18 @@
               data-flow-step="true"
               :data-step-key="step.stepKey"
               :data-step-type="step.type"
+              :data-step-run-status="stepRunStatus(step.stepKey) || undefined"
             >
               <div class="meta-flow-view__card-head">
                 <span class="meta-flow-view__badge" :class="`meta-flow-view__badge--${step.category}`">{{ categoryLabel(step.category) }}</span>
                 <span class="meta-flow-view__card-label">{{ step.label }}</span>
+                <!-- 1d: the selected run's result for this top-level step (status only; never its output). -->
+                <span
+                  v-if="stepRunStatus(step.stepKey)"
+                  class="meta-flow-view__run"
+                  :class="`meta-flow-view__run--${stepRunStatus(step.stepKey)}`"
+                  data-flow-step-run="true"
+                >{{ stepRunLabel(stepRunStatus(step.stepKey)) }}</span>
                 <code class="meta-flow-view__key">steps.{{ step.stepKey }}</code>
               </div>
               <div class="meta-flow-view__card-summary" data-flow-step-summary="true">{{ step.summary }}</div>
@@ -77,6 +85,14 @@
 
           <div class="meta-flow-view__end">{{ t('— 流程结束 —', '— end of flow —') }}</div>
         </div>
+
+        <MetaAutomationFlowHistory
+          :visible="visible"
+          :rule="rule"
+          :sheet-id="sheetId"
+          :client="client"
+          @overlay="runOverlay = $event"
+        />
       </div>
     </div>
   </div>
@@ -84,17 +100,26 @@
 
 <script setup lang="ts">
 // Integration assistant stage 1a (register R-99 ③): read-only flow view of one saved rule. It renders the
-// pure model from automationFlowView.ts and never writes, fetches or saves anything.
-import { computed } from 'vue'
+// pure model from automationFlowView.ts and never writes or saves anything. Stage 1d adds 「最近执行」
+// (MetaAutomationFlowHistory): the one read — the run log's own getAutomationLogs call — and a per-step status
+// overlay on the top-level cards when a picked run matches the rule without guessing.
+import { computed, ref } from 'vue'
 import { useLocale } from '../../composables/useLocale'
+import type { MultitableApiClient } from '../api/client'
 import type { AutomationRule } from '../types'
 import { buildAutomationFlow, flowStepCategoryLabel, type FlowStepCategory } from '../automationFlowView'
+import type { FlowStepOverlay } from '../automationFlowHistory'
+import { automationLabel } from '../utils/meta-automation-labels'
 import { MtIconButton } from '../ui'
+import MetaAutomationFlowHistory from './MetaAutomationFlowHistory.vue'
 
 const props = defineProps<{
   visible: boolean
   rule: AutomationRule | null
   fields?: Array<{ id: string; name: string }>
+  /** 1d: the run log's client + sheet; without them 「最近执行」 is not shown. */
+  sheetId?: string
+  client?: MultitableApiClient
 }>()
 
 defineEmits<{ (e: 'close'): void }>()
@@ -116,6 +141,25 @@ const model = computed(() => {
 
 function categoryLabel(category: FlowStepCategory): string {
   return flowStepCategoryLabel(category, isZh.value)
+}
+
+// 1d: set by MetaAutomationFlowHistory; only a 'matched' overlay paints the cards.
+const runOverlay = ref<FlowStepOverlay | null>(null)
+
+function stepRunStatus(stepKey: string): string {
+  const overlay = runOverlay.value
+  if (!overlay || overlay.kind !== 'matched') return ''
+  return overlay.byStepKey[stepKey] ?? ''
+}
+
+function stepRunLabel(status: string): string {
+  switch (status) {
+    case 'success': return automationLabel('flowHistory.stepStatus.success', isZh.value)
+    case 'failed': return automationLabel('flowHistory.stepStatus.failed', isZh.value)
+    case 'skipped': return automationLabel('flowHistory.stepStatus.skipped', isZh.value)
+    case 'simulated': return automationLabel('flowHistory.stepStatus.simulated', isZh.value)
+    default: return status
+  }
 }
 </script>
 
@@ -243,6 +287,21 @@ function categoryLabel(category: FlowStepCategory): string {
 .meta-flow-view__badge--control { background: #6b7280; }
 .meta-flow-view__badge--integration { background: #7c5cd6; }
 .meta-flow-view__badge--approval { background: #c27803; }
+
+/* 1d: per-step run status — design tokens only. */
+.meta-flow-view__run {
+  font-size: 11px;
+  border-radius: var(--ms-radius-sm);
+  padding: 0 6px;
+  border: 1px solid var(--ms-border);
+  color: var(--ms-text-2);
+  flex: none;
+}
+
+.meta-flow-view__run--success { border-color: var(--ms-color-success); color: var(--ms-color-success); }
+.meta-flow-view__run--failed { border-color: var(--ms-color-danger); color: var(--ms-color-danger); }
+.meta-flow-view__run--skipped { border-color: var(--ms-color-info); color: var(--ms-color-info); }
+.meta-flow-view__run--simulated { border-color: var(--ms-color-warning); color: var(--ms-color-warning); }
 
 .meta-flow-view__key {
   font-size: 11px;

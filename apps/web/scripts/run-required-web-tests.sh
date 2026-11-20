@@ -1712,6 +1712,7 @@ exec npx vitest run \
   automation-condition-typing-editor \
   automation-condition-value-input \
   automation-condition-values \
+  automation-flow-history \
   automation-flow-view \
   automation-log-redact \
   automation-log-support-packet \
