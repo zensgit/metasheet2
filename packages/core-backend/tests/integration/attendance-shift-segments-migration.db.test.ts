@@ -42,13 +42,17 @@ describeDb('attendance_shift_segments migration (real DB, isolated schema)', () 
   let schema: string
   let testPool: Pool
   let testDb: Kysely<unknown>
+  let downStatements: string[] | null = null
 
   beforeEach(async () => {
     adminPool = new Pool({ connectionString: dbUrl })
     schema = `w3seg_${randomUUID().replace(/-/g, '')}`
     await adminPool.query(`CREATE SCHEMA "${schema}"`)
     testPool = new Pool({ connectionString: dbUrl, options: `-c search_path=${schema}` })
-    testDb = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: testPool }) })
+    testDb = new Kysely<unknown>({
+      dialect: new PostgresDialect({ pool: testPool }),
+      log: event => { downStatements?.push(event.query.sql) },
+    })
 
     // Pre-segment attendance_shifts shape (zzzz20260114120000 + zzzz20260323153000).
     await sql`
@@ -226,11 +230,26 @@ describeDb('attendance_shift_segments migration (real DB, isolated schema)', () 
     await segmentsUp(testDb)
     expect(await segmentRows()).toHaveLength(1)
 
-    await expect(segmentsDown(testDb)).rejects.toThrow(/aborted before DDL/)
+    const beforeSegments = await segmentRows()
+    const beforeShifts = (await sql`SELECT * FROM attendance_shifts ORDER BY id`.execute(testDb)).rows
+    const observed: string[] = []
+    downStatements = observed
+    try {
+      await expect(segmentsDown(testDb)).rejects.toThrow(/aborted before DDL/)
+    } finally {
+      downStatements = null
+    }
     // Nothing was dropped: table, data, and the shifts index are all intact.
     expect(await tableExists('attendance_shift_segments')).toBe(true)
     expect(await segmentRows()).toHaveLength(1)
     expect(await indexExists(SHIFTS_ID_ORG_INDEX)).toBe(true)
+    expect(await segmentRows()).toEqual(beforeSegments)
+    expect((await sql`SELECT * FROM attendance_shifts ORDER BY id`.execute(testDb)).rows).toEqual(beforeShifts)
+    expect(observed.some(statement => /SELECT COUNT\(\*\)/i.test(statement))).toBe(true)
+    expect(observed.filter(statement => /^\s*(?:CREATE|ALTER|DROP|TRUNCATE|COMMENT)\b/i.test(statement)),
+      'PARENT_DB11_SCHEMA_DOWN_MUST_ABORT_WITH_ZERO_DDL').toEqual([])
+    console.log('PARENT_SCHEMA_DOWN_PRESERVATION_RECEIPT ' + JSON.stringify({ fullShiftRowsUnchanged: true,
+      fullSegmentRowsUnchanged: true, observedStatements: observed.length, ddlStatements: 0 }))
 
     // Empty the table through an explicit data action (not the migration), then down()
     // may drop the empty table plus the index this migration introduced.
