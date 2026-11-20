@@ -6,10 +6,12 @@ import request from 'supertest'
 import { expect, vi } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
 
+type CanonicalUnionScenario = { mixed: boolean; knownOpenId: boolean; grant?: false; ambiguous?: true }
+
 /** Run real routes and provider response decoders against one disposable SQL transaction.
  * The scope row is insert-only. Savepoints preserve application rollback without leaving a
  * committed scope in the shared integration database. Only the provider's HTTP wire is stubbed. */
-export async function checkDingTalkLoginSurfaces(): Promise<void> {
+export async function checkDingTalkLoginSurfaces(canonical?: CanonicalUnionScenario): Promise<void> {
   const appKey = `login-app-${randomUUID()}`
   vi.stubEnv('DINGTALK_CLIENT_ID', appKey)
   vi.stubEnv('DINGTALK_CORP_ID', '')
@@ -54,15 +56,19 @@ export async function checkDingTalkLoginSurfaces(): Promise<void> {
     await fixture(`INSERT INTO directory_integrations(id, org_id, provider, name, status, corp_id, config)
       VALUES ($1, 'login-test', 'dingtalk', $2, 'active', $2, $3)`, [id, `corp-${id}`, { appKey: key }])
   }
-  async function login(surface: 'web' | 'container', user: string, expected: number, selector?: string) {
+  async function send(surface: 'web' | 'container', user: string, selector?: string) {
     person = user
     const body = surface === 'web' ? { state: await generateState({ intent: 'login' }), code: 'fixture' } : { authCode: 'fixture' }
+    return request(app).post('/api/auth/' + (surface === 'web' ? 'dingtalk/callback' : 'login/dingtalk/container'))
+      .send({ ...body, corpId: selector })
+  }
+  async function login(surface: 'web' | 'container', user: string, expected: number, selector?: string) {
     const state = () => fixture(`SELECT e.updated_at, e.corp_id, e.external_key, g.enabled,
+      e.ctid::text AS identity_version, g.ctid::text AS grant_version,
       (SELECT count(*)::int FROM user_sessions s WHERE s.user_id = e.local_user_id) AS sessions
       FROM user_external_identities e JOIN user_external_auth_grants g USING (local_user_id, provider) WHERE e.local_user_id=$1`, [user])
     const before = (await state()).rows
-    const res = await request(app).post('/api/auth/' + (surface === 'web' ? 'dingtalk/callback' : 'login/dingtalk/container'))
-      .send({ ...body, corpId: selector })
+    const res = await send(surface, user, selector)
     expect(res.status, `${surface} ${res.body.code ?? ''}`).toBe(expected)
     if (expected === 403) {
       expect(res.body.code).toBe('strict_connection')
@@ -79,6 +85,45 @@ export async function checkDingTalkLoginSurfaces(): Promise<void> {
     await fixture('BEGIN ISOLATION LEVEL READ COMMITTED')
     expect((await fixture('SELECT 1 FROM directory_connection_login_scope LIMIT 1')).rowCount).toBe(0)
     await connection(ordinary, appKey)
+    if (canonical) {
+      const user = randomUUID()
+      const corp = `corp-${ordinary}`, unionId = `union-${user}`, openId = `open-${user}`
+      if (canonical.mixed) {
+        await connection(strict, `other-${appKey}`)
+        await fixture('INSERT INTO directory_connection_login_scope(connection_id, command_id) VALUES ($1,$2)', [strict, randomUUID()])
+        if (canonical.ambiguous) await fixture('UPDATE directory_integrations SET corp_id=$1 WHERE id=$2', [corp, strict])
+      }
+      await fixture(`INSERT INTO users(id,email,name,password_hash,role,is_active,activation_status)
+        VALUES ($1,$2,'Synthetic','fixture','user',true,'activated')`, [user, `${user}@example.invalid`])
+      await fixture(`INSERT INTO user_external_identities(provider,local_user_id,external_key,provider_union_id,provider_open_id,corp_id)
+        VALUES ('dingtalk',$1,$2,$3,$4,NULL)`, [user, `${corp}:${unionId}`, unionId, canonical.knownOpenId ? openId : null])
+      await fixture("INSERT INTO user_external_auth_grants(provider,local_user_id,enabled) VALUES ('dingtalk',$1,$2)", [user, canonical.grant !== false])
+      const readIdentity = async () => (await fixture(`SELECT external_key, provider_union_id, provider_open_id, corp_id
+        FROM user_external_identities WHERE provider='dingtalk' AND local_user_id=$1`, [user])).rows
+      const expected = { external_key: `${corp}:${unionId}`, provider_union_id: unionId, provider_open_id: openId, corp_id: null }
+      if (canonical.grant === false) {
+        const denied = await send('web', user)
+        expect(denied.status).toBe(403)
+        expect(denied.body.code).toBe('grant_required')
+        expect(denied.body.data?.token).toBeUndefined()
+        expect((await fixture('SELECT id FROM user_sessions WHERE user_id=$1', [user])).rows).toEqual([])
+        expect(await readIdentity()).toEqual([expected])
+        await fixture("UPDATE user_external_auth_grants SET enabled=true WHERE provider='dingtalk' AND local_user_id=$1", [user])
+      }
+      const initial = await readIdentity()
+      const afterEachSurface = []
+      for (const surface of ['web', 'container'] as const) {
+        await login(surface, user, canonical.ambiguous ? 403 : 200)
+        afterEachSurface.push(await readIdentity())
+        const sessions = await fixture('SELECT external_auth_context FROM user_sessions WHERE user_id=$1', [user])
+        const sessionCount = canonical.ambiguous ? 0 : surface === 'web' ? 1 : 2
+        expect(sessions.rows).toEqual(Array.from({ length: sessionCount }, () => ({ external_auth_context: null })))
+      }
+      const expectedIdentity = canonical.ambiguous ? initial : [expected]
+      expect(afterEachSurface).toEqual([expectedIdentity, expectedIdentity])
+      expect((await fixture('SELECT directory_account_id FROM directory_account_links WHERE local_user_id=$1', [user])).rows).toEqual([])
+      return
+    }
     for (const id of [bare, known]) {
       await fixture(`INSERT INTO users(id,email,name,password_hash,role,is_active,activation_status)
         VALUES ($1,$2,'Synthetic','fixture','user',true,'activated')`, [id, `${id}@example.invalid`])

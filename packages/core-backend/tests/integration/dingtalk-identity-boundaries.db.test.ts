@@ -645,13 +645,28 @@ describe('DingTalk identity authorization boundaries (real DB)', () => {
       .toEqual([{ corp_id: CORP, external_key: `${CORP}:${id}-open-B` }])
   })
 
-  it('the web and container entry points enforce the selected source using real provider response decoders', async () => {
+  async function useProviderResponseDecoders() {
     const provider = await vi.importActual<typeof import('../../src/integrations/dingtalk/client')>('../../src/integrations/dingtalk/client')
     for (const key of Object.keys(clientMocks) as Array<keyof typeof clientMocks>) {
       clientMocks[key].mockImplementation(provider[key])
     }
+  }
+
+  it('the web and container entry points enforce the selected source using real provider response decoders', async () => {
+    await useProviderResponseDecoders()
     const { checkDingTalkLoginSurfaces } = await import('../helpers/dingtalk-login-http')
     await checkDingTalkLoginSurfaces()
+  })
+
+  it.each([
+    { mixed: false, knownOpenId: false }, { mixed: false, knownOpenId: true },
+    { mixed: true, knownOpenId: false }, { mixed: true, knownOpenId: true },
+    { mixed: true, knownOpenId: false, grant: false as const },
+    { mixed: true, knownOpenId: false, ambiguous: true as const },
+  ])('preserves verified canonical UnionID continuity and refuses ambiguous corporate origins (%j)', async scenario => {
+    await useProviderResponseDecoders()
+    const { checkDingTalkLoginSurfaces } = await import('../helpers/dingtalk-login-http')
+    await checkDingTalkLoginSurfaces(scenario)
   })
 
 })

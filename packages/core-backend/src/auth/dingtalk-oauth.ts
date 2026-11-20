@@ -763,8 +763,13 @@ function buildEnrichmentExternalKey(
   existing: Record<string, unknown>,
   dtUser: DingTalkUserInfo,
   corpId: string | null | undefined,
+  source: DingTalkLoginSource,
 ): string {
   if (corpId) return buildExternalKey(dtUser, corpId)
+  // A verified corporate UnionID key is usable on both login surfaces. The web
+  // OpenID can be enriched separately without removing that proof for container login.
+  if (source.connectionId && source.corpId && dtUser.unionId && existing.provider_union_id === dtUser.unionId
+    && existing.external_key === `${source.corpId}:${dtUser.unionId}`) return existing.external_key
   const existingKey = String(existing.external_key ?? '').trim()
   const previousId = [existing.provider_open_id, existing.provider_union_id]
     .map(value => String(value ?? '').trim())
@@ -791,6 +796,14 @@ export async function readDingTalkLoginContext(source?: DingTalkLoginSource): Pr
   return { config, source: selected }
 }
 
+async function requireUniqueIdentityCorp(client: AccessGraphTransactionClient, source: DingTalkLoginSource): Promise<void> {
+  const origins = await client.query(
+    'SELECT id::text FROM directory_integrations WHERE provider = $1 AND corp_id = $2 LIMIT 2',
+    [PROVIDER, source.corpId],
+  ).catch(() => { throw new DingTalkSourceError(503) })
+  if (origins.rows.length !== 1 || origins.rows[0].id !== source.connectionId) refuseDingTalkSource()
+}
+
 /** Return true only for the unscoped compatibility case that must finish under the empty-scope lock. */
 async function identityRequiresEmptyScope(
   client: AccessGraphTransactionClient,
@@ -805,11 +818,7 @@ async function identityRequiresEmptyScope(
     if (storedCorp !== source.corpId) refuseDingTalkSource()
     // An independently attributed identity does not derive its origin from the user's
     // other directory accounts. Require the stored corporate namespace to identify X alone.
-    const origins = await client.query(
-      'SELECT id::text FROM directory_integrations WHERE provider = $1 AND corp_id = $2 LIMIT 2',
-      [PROVIDER, storedCorp],
-    ).catch(() => { throw new DingTalkSourceError(503) })
-    if (origins.rows.length !== 1 || origins.rows[0].id !== source.connectionId) refuseDingTalkSource()
+    await requireUniqueIdentityCorp(client, source)
     return false
   }
 
@@ -837,6 +846,7 @@ async function identityRequiresEmptyScope(
   const canonicalHere = pairs.some(([stored, verified]) => typeof stored === 'string' && stored && stored === verified && key === `${source.corpId}:${stored}`)
   const foreignKey = pairs.some(([id]) => typeof id === 'string' && id && key.endsWith(`:${id}`) && key !== `${source.corpId}:${id}`)
   if (foreignKey) refuseDingTalkSource()
+  if (canonicalHere) await requireUniqueIdentityCorp(client, source)
   if (linkedHere || canonicalHere) return false
   // The compatibility rule is restricted to a bare identifier of this row.
   if (source.explicit || !pairs.some(([stored]) => stored && key === stored) || !describesSameDingTalkPerson(identity, profile, null)) {
@@ -1074,7 +1084,7 @@ async function upsertExternalIdentity(
       const hasOpenId = Boolean(dtUser.openId)
       // An optional OAuth corp must not erase the established identity namespace.
       identityCorpId = existing.corp_id ? String(existing.corp_id) : (emptyScope ? config.corpId : null)
-      const identityExternalKey = buildEnrichmentExternalKey(existing, dtUser, identityCorpId)
+      const identityExternalKey = buildEnrichmentExternalKey(existing, dtUser, identityCorpId, source)
       const nextExternalKey = hasOpenId
         ? identityExternalKey
         : String(existing.external_key ?? '').trim() || identityExternalKey
@@ -1202,7 +1212,7 @@ async function enrichMissingOpenIdForRejectedLogin(localUserId: string, dtUser: 
     const matchCorp = !existing.corp_id && source.connectionId && !emptyScope ? null : config.corpId
     if (!describesSameDingTalkPerson(existing, dtUser, matchCorp)) return
     const identityCorpId = existing.corp_id ? String(existing.corp_id) : (emptyScope ? config.corpId : null)
-    const externalKey = buildEnrichmentExternalKey(existing, dtUser, identityCorpId)
+    const externalKey = buildEnrichmentExternalKey(existing, dtUser, identityCorpId, source)
     const conflictResult = await client.query(
       `SELECT local_user_id
        FROM user_external_identities
