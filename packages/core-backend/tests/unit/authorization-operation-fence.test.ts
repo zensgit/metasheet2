@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { AUTHORIZATION_OPERATION_FENCE_LOCK_SQL, AUTHORIZATION_OPERATION_FENCE_TABLES, AUTHORIZATION_OPERATION_SCHEMA_PROFILE, authorizationOperationD21AdditionDigest, inspectAuthorizationOperationSchema, isSupportedAuthorizationOperationSchema } from '../../src/admin/authorization-operation-fence'
+import { AUTHORIZATION_OPERATION_FENCE_LOCK_SQL, AUTHORIZATION_OPERATION_FENCE_TABLES, AUTHORIZATION_OPERATION_SCHEMA_PROFILE, authorizationOperationD21AdditionDigest, authorizationOperationYidaLayoutAdditionDigest, inspectAuthorizationOperationSchema, isSupportedAuthorizationOperationSchema } from '../../src/admin/authorization-operation-fence'
 
 describe('authorization operation schema profile', () => {
   it('requires the exact known digest and ordinary tables', () => {
@@ -81,5 +81,20 @@ describe('authorization operation schema profile', () => {
       const missing = catalog(); missing[section].splice(index, 1)
       expect(authorizationOperationD21AdditionDigest(missing), `${section}:${index} missing`).not.toBe(original)
     }
+  })
+  it('hashes the Y6 layout addition from exactly its one guard function', () => {
+    const rows = (definition: string) => {
+      const catalog: Array<Array<Record<string, unknown>>> = Array.from({ length: 8 }, () => [])
+      catalog[4].push({ relname: 'users', tgname: 'trg_users_zz_authz_subject_version_update' })
+      catalog[7].push({ proname: 'integration_yida_generated_layout_immutable_guard', definition })
+      catalog[7].push({ proname: 'metasheet_authz_bump_subject_authorization_version', definition: 'd21' })
+      return catalog
+    }
+    const original = authorizationOperationYidaLayoutAdditionDigest(rows('guard'))
+    expect(authorizationOperationYidaLayoutAdditionDigest(rows('changed'))).not.toBe(original)
+    const other = rows('guard'); other[7][1].definition = 'changed'; other[4][0].tgenabled = 'D'
+    expect(authorizationOperationYidaLayoutAdditionDigest(other)).toBe(original)
+    const missing = rows('guard'); missing[7].splice(0, 1)
+    expect(authorizationOperationYidaLayoutAdditionDigest(missing)).not.toBe(original)
   })
 })
