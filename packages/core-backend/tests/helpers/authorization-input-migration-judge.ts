@@ -85,6 +85,18 @@
  * Its verdict carries the form of the target and says nothing else about the statement: the rest of
  * the statement is judged as if the target were another table, so the caller may set that one
  * verdict aside for a registered exemption without setting aside anything else.
+ *
+ * The verdict of a CREATE or a DROP whose kind is not read further carries the statement as written
+ * and where it stands (`WrittenStatement`). It is still `unreadable`: the judge sets nothing aside;
+ * the caller may set aside a statement it names exactly, never a kind of statement. Every literal of
+ * a source is judged where it stands, whatever is done with it afterwards; a statement stands at the
+ * top of its text only when its literal is passed, as written, in one of two syntactic shapes
+ * (`Folded.direct`). That is a shape of the literal, not a proof of what runs: the judge reads
+ * literals, not runtime values, so a runner wrapped or replaced (`.execute(wrap(db))`, a parameter
+ * reassigned, a helper called with a wrapping object, from this file or from another module) and
+ * SQL computed at run time are outside what it can see, here as for every migration on main. A
+ * caller that sets a statement aside therefore pins the whole content of the file as well (the
+ * digest of `authorization-input-migration-rules.ts`).
  */
 import path from 'node:path'
 import ts from 'typescript'
@@ -115,7 +127,28 @@ export type MigrationJudgment = Readonly<{
   forbiddenTable?: boolean
   /** Set when the verdict stands for dynamic targets and for nothing else: the form of each. */
   dynamic?: readonly AuthorizationInputDynamicForm[]
+  /**
+   * Set only on the verdict of a CREATE or a DROP of a kind that is not read further (an object
+   * defined over an input table, or a kind not on the safe list): the statement as written, so the
+   * caller can name such a statement exactly. See `WrittenStatement`.
+   */
+  statement?: WrittenStatement
 }>
+
+/**
+ * A statement as written. `text` is its tokens after the control-flow words of a block body, each
+ * separated from the one before by one space where white space (or a blanked comment) separates
+ * them, and by nothing where nothing does; `written` is the same with those control-flow words.
+ * A substitution and a folded constant stay as the marks they are in the text, so neither is ever
+ * equal to a name written out. Case and the inside of quoted text are kept as written.
+ * `at` is where the statement stands: `text` at the top of one SQL text that is not assembled from
+ * a `+` chain and whose literal is passed as written in one of the two shapes of `Folded.direct`,
+ * `block` as a piece of a dollar-quoted `DO` body of such a statement, and `other` anywhere else
+ * (the text of a dynamically executed literal, a block inside one, any piece of an assembled text,
+ * a block inside a block, and any literal in another shape). `text` and `block` say how the literal
+ * is written and passed, not what the runner it is passed to does with it.
+ */
+export type WrittenStatement = Readonly<{ text: string; written: string; at: 'text' | 'block' | 'other' }>
 
 export type MigrationJudgeResult = Readonly<{
   judgments: readonly MigrationJudgment[]
@@ -703,8 +736,17 @@ export function judgeInputWrite(table: string, verb: WriteVerb | string, tokens:
 
 /* ───────────────────────────── statement kinds ───────────────────────────── */
 
-/** `concatenated`: the text was assembled from a `+` chain, so its substitutions are concatenation operands. */
-type Folded = Readonly<{ text: string; folds: readonly string[]; concatenated?: boolean }>
+/**
+ * `concatenated`: the text was assembled from a `+` chain, so its substitutions are concatenation operands.
+ * `direct`: the text is a whole SQL file, or a literal of a source passed as written in one of the two
+ * syntactic shapes `isPassedAsWrittenToRunner` admits. It is a shape of the literal and says nothing
+ * about the runner: the receiver of `.execute` or `.query` may itself be a wrapper that changes the
+ * text, which a literal judge cannot see. Anything else (a member call on the literal, a constant
+ * holding it, a template with a substitution, another tag, a helper call, a conditional, an array) is
+ * not one of the two shapes, so none of its statements stands at the top of a text. Only
+ * `WrittenStatement.at` reads it.
+ */
+type Folded = Readonly<{ text: string; folds: readonly string[]; concatenated?: boolean; direct?: boolean }>
 
 /** The text the write scanner reads: folded substitutions spliced in as text. */
 function scannerView(sql: Folded): string {
@@ -969,10 +1011,19 @@ const OBJECT_KINDS = ['VIEW', 'RULE', 'TRIGGER', 'FUNCTION', 'PROCEDURE']
 
 type Sink = { judgments: MigrationJudgment[]; writes: Map<string, number>; dynamic: Map<string, number>; admittedBodies: Set<string> }
 
-/** `block`: the statement is a piece of a PL/pgSQL body. `count`: its writes are not already counted by an enclosing statement. */
-type StatementMode = Readonly<{ block: boolean; count: boolean }>
-const TOP_LEVEL: StatementMode = { block: false, count: true }
-const IN_BLOCK: StatementMode = { block: true, count: false }
+/** `block`: the statement is a piece of a PL/pgSQL body. `count`: its writes are not already counted by an enclosing statement. `at`: where it stands, as `WrittenStatement` names it (a text assembled from a `+` chain is `other` whatever the mode says). */
+type StatementMode = Readonly<{ block: boolean; count: boolean; at: WrittenStatement['at'] }>
+const TOP_LEVEL: StatementMode = { block: false, count: true, at: 'text' }
+const IN_BLOCK: StatementMode = { block: true, count: false, at: 'block' }
+/** A piece of a block body that does not stand directly in a top-level statement. */
+const IN_OTHER_BLOCK: StatementMode = { block: true, count: false, at: 'other' }
+/** The text of a dynamically executed literal. */
+const EXECUTED: StatementMode = { block: false, count: false, at: 'other' }
+
+/** Tokens as written: one space where white space separates two of them, nothing where nothing does. */
+function writtenText(tokens: readonly Token[]): string {
+  return tokens.map((token, index) => (index === 0 || token.joined === true ? token.text : ` ${token.text}`)).join('')
+}
 
 function countWrite(sink: Sink, table: string, verb: string): void {
   sink.writes.set(`${table}|${verb}`, (sink.writes.get(`${table}|${verb}`) ?? 0) + 1)
@@ -991,7 +1042,8 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
     for (const write of scanned.writes) countWrite(sink, write.table, write.verb)
     for (const form of dynamicForms) countDynamic(sink, form)
   }
-  let tokens = tokenize(sql.text, sql.folds)
+  const writtenTokens = tokenize(sql.text, sql.folds)
+  let tokens = writtenTokens
   if (mode.block) tokens = stripControlPrefix(tokens)
   if (tokens.length === 0) return
   const inputWrites = scanned.writes.filter((write) => INPUTS.has(write.table))
@@ -1021,7 +1073,7 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
   if (head === 'DO') {
     const body = tokens.find((token) => token.type === 'dollar')
     if (!body || tokens.length > 3) return push('DO', 'unreadable', 'block body is not one dollar-quoted text')
-    for (const inner of splitStatements(blankSqlComments(body.value))) judgeStatement(file, { text: inner.text, folds: sql.folds, concatenated: sql.concatenated }, line, sink, IN_BLOCK)
+    for (const inner of splitStatements(blankSqlComments(body.value))) judgeStatement(file, { text: inner.text, folds: sql.folds, concatenated: sql.concatenated, direct: sql.direct }, line, sink, mode.at === 'text' ? IN_BLOCK : IN_OTHER_BLOCK)
     return
   }
   // Dynamic execution inside a block body: a single literal is judged as a statement, anything else
@@ -1030,7 +1082,7 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
   if (mode.block && head === 'EXECUTE') {
     const literal = tokens[1]
     if (tokens.length === 2 && literal.type === 'str' && !literal.opaque) {
-      for (const inner of splitStatements(blankSqlComments(literal.value))) judgeStatement(file, { text: inner.text, folds: [] }, line, sink, { block: false, count: false })
+      for (const inner of splitStatements(blankSqlComments(literal.value))) judgeStatement(file, { text: inner.text, folds: [] }, line, sink, EXECUTED)
       return
     }
     pushDynamicStatement()
@@ -1231,8 +1283,11 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
       const tied = head === 'CREATE' ? createdHierarchyProblem(tokens, tableAt(tokens, at)?.next ?? tokens.length) : null
       return tied ? push(`${head} TABLE`, 'unreadable', tied) : push(`${head} TABLE`, 'safe', '')
     }
-    if (head === 'CREATE' && (OBJECT_KINDS.includes(object) || materialized)) return push(`CREATE ${materialized ? 'MATERIALIZED VIEW' : object}`, 'unreadable', 'defines an object over an input table')
-    return push(`${head} ${object}`.trim(), 'unreadable', 'statement kind is not on the safe list')
+    // These two verdicts carry the statement as written: a caller may name such a statement exactly
+    // (the pinned statements of `authorization-input-migration-rules.ts`), never by its kind alone.
+    const statement: WrittenStatement = { text: writtenText(tokens), written: writtenText(writtenTokens), at: sql.concatenated || sql.direct !== true ? 'other' : mode.at }
+    if (head === 'CREATE' && (OBJECT_KINDS.includes(object) || materialized)) return push(`CREATE ${materialized ? 'MATERIALIZED VIEW' : object}`, 'unreadable', 'defines an object over an input table', { statement })
+    return push(`${head} ${object}`.trim(), 'unreadable', 'statement kind is not on the safe list', { statement })
   }
   if (head === 'COMMENT' && isKeyword(tokens[1], 'ON')) return push('COMMENT ON', 'safe', '')
   return push(head, 'unreadable', 'statement kind is not on the safe list')
@@ -1242,7 +1297,7 @@ function judgeStatement(file: string, sql: Folded, line: number, sink: Sink, mod
 function judgeSqlText(file: string, sql: Folded, line: number, sink: Sink): void {
   const text = blankSqlComments(sql.text)
   for (const statement of splitStatements(text)) {
-    judgeStatement(file, { text: statement.text, folds: sql.folds, concatenated: sql.concatenated }, line + text.slice(0, statement.offset).split('\n').length - 1, sink, TOP_LEVEL)
+    judgeStatement(file, { text: statement.text, folds: sql.folds, concatenated: sql.concatenated, direct: sql.direct }, line + text.slice(0, statement.offset).split('\n').length - 1, sink, TOP_LEVEL)
   }
 }
 
@@ -1588,19 +1643,26 @@ function judgeSource(file: string, source: string, sink: Sink): void {
   const declarations = new Map<string, number>()
   const constants = new Map<string, string>()
   const helperImports = new Set<string>()
+  /** Names declared other than as a plain parameter, and whether `sql` is imported by that name from kysely. */
+  const nonParameters = new Set<string>()
+  let kyselySqlImported = false
   const functionDeclarations = new Map<string, ts.FunctionDeclaration>()
   const constDeclarations = new Map<string, ts.VariableDeclaration>()
-  const declare = (name: ts.Node | undefined) => {
-    if (name && ts.isIdentifier(name)) declarations.set(name.text, (declarations.get(name.text) ?? 0) + 1)
+  const declare = (name: ts.Node | undefined, parameter = false) => {
+    if (name && ts.isIdentifier(name)) {
+      declarations.set(name.text, (declarations.get(name.text) ?? 0) + 1)
+      if (!parameter) nonParameters.add(name.text)
+    }
   }
   const collect = (node: ts.Node) => {
-    if (ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isBindingElement(node) || ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isClassDeclaration(node) || ts.isEnumDeclaration(node)) declare(node.name)
+    if (ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isBindingElement(node) || ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isClassDeclaration(node) || ts.isEnumDeclaration(node)) declare(node.name, ts.isParameter(node))
     if (ts.isFunctionDeclaration(node) && node.name) functionDeclarations.set(node.name.text, node)
     if (ts.isImportClause(node)) declare(node.name)
     if (ts.isNamespaceImport(node)) declare(node.name)
     if (ts.isImportSpecifier(node)) {
       declare(node.name)
       const declaration = node.parent.parent.parent
+      if (node.name.text === 'sql' && (node.propertyName === undefined || node.propertyName.text === 'sql') && !node.isTypeOnly && !node.parent.parent.isTypeOnly && ts.isStringLiteral(declaration.moduleSpecifier) && declaration.moduleSpecifier.text === 'kysely') kyselySqlImported = true
       if (node.propertyName === undefined && ts.isStringLiteral(declaration.moduleSpecifier) && declaration.moduleSpecifier.text === HELPER_MODULE_SPECIFIER && Object.hasOwn(AUTHORIZATION_INPUT_MIGRATION_HELPERS, node.name.text)) helperImports.add(node.name.text)
     }
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer && ts.isVariableDeclarationList(node.parent) && (node.parent.flags & ts.NodeFlags.Const) !== 0) {
@@ -1713,7 +1775,36 @@ function judgeSource(file: string, source: string, sink: Sink): void {
 
   const isPlus = (node: ts.Node): node is ts.BinaryExpression => ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken
   const literalOf = (expression: ts.Expression): string | null => stringOf(expression)
-  const judgeText = (text: string, folds: string[], node: ts.Node, concatenated = false) => judgeSqlText(file, { text, folds, concatenated }, lineOf(node), sink)
+  /**
+   * Whether the string literal or substitution-free template `literal` is passed as written to a
+   * runner, read from its parent alone and in exactly two syntactic shapes: the template of a `sql`
+   * tag, the one `sql` of the file imported by that name from kysely, on which `.execute` is called;
+   * and the first argument of a `.query` call on a name declared in the file only as a parameter.
+   * The shape says nothing about the runner: the argument of `.execute`, or the parameter `.query`
+   * is called on, may be a wrapper that rewrites or extends the text (a parameter reassigned, a
+   * helper called with a wrapping object, from this file or from another module), and a literal
+   * judge cannot see that. Anything else between the literal and the runner is not one of the two
+   * shapes: a member call on the literal (`.replace`, `.concat`, `.slice`, ...), a constant that
+   * holds it, another tag (`String.raw` among them), a helper call, a conditional, an array,
+   * parentheses or an assertion. Such a literal is still judged as before; none of its statements
+   * stands at the top of a text.
+   */
+  const isPassedAsWrittenToRunner = (literal: ts.StringLiteral | ts.NoSubstitutionTemplateLiteral): boolean => {
+    const parent = literal.parent
+    if (ts.isTaggedTemplateExpression(parent) && parent.template === literal) {
+      const run = parent.parent
+      return (
+        ts.isIdentifier(parent.tag) && parent.tag.text === 'sql' && kyselySqlImported && declarations.get('sql') === 1 &&
+        ts.isPropertyAccessExpression(run) && run.expression === parent && run.name.text === 'execute' && ts.isCallExpression(run.parent) && run.parent.expression === run
+      )
+    }
+    if (ts.isCallExpression(parent) && parent.arguments[0] === literal) {
+      const callee = parent.expression
+      return ts.isPropertyAccessExpression(callee) && callee.name.text === 'query' && ts.isIdentifier(callee.expression) && declarations.has(callee.expression.text) && !nonParameters.has(callee.expression.text)
+    }
+    return false
+  }
+  const judgeText = (text: string, folds: string[], node: ts.Node, concatenated = false, direct = false) => judgeSqlText(file, { text, folds, concatenated, direct }, lineOf(node), sink)
   const fold = (expression: ts.Expression, folds: string[]): string => {
     const value = strictFold(expression)
     if (value === null) return SUBSTITUTION
@@ -2015,7 +2106,7 @@ function judgeSource(file: string, source: string, sink: Sink): void {
       // may be the target of a write that has no text. The name of an input table is refused as text.
       const named = builderTable(node.text)
       if (named !== null && PARENTS.has(named)) sink.judgments.push({ line: lineOf(node), kind: 'literal', verdict: 'unreadable', detail: `names the cascade parent ${named} outside a call that is read`, inputWrite: false, table: named })
-      judgeText(node.text, [], node)
+      judgeText(node.text, [], node, false, isPassedAsWrittenToRunner(node))
       return
     }
     if (ts.isTemplateExpression(node)) {
@@ -2051,7 +2142,7 @@ function judgeSource(file: string, source: string, sink: Sink): void {
 export function judgeMigrationInputWrites(file: string, source: string): MigrationJudgeResult {
   const sink: Sink = { judgments: [], writes: new Map(), dynamic: new Map(), admittedBodies: new Set() }
   if (SOURCE_EXTENSIONS.has(path.extname(file))) judgeSource(file, source, sink)
-  else judgeSqlText(file, { text: source, folds: [] }, 1, sink)
+  else judgeSqlText(file, { text: source, folds: [], direct: true }, 1, sink)
   return Object.freeze({ judgments: Object.freeze(sink.judgments), writes: sink.writes, dynamic: sink.dynamic })
 }
 
