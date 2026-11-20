@@ -287,7 +287,9 @@ export function matchText(file: string, text: string, line: number, basePosition
 /**
  * Replaces SQL comments (`--` to the end of the line, and nested block comments) with blanks of the
  * same length, so offsets and line numbers are unchanged. Comment marks inside single-quoted,
- * double-quoted and dollar-quoted text are text.
+ * double-quoted and dollar-quoted text are text. A `--` comment ends where PostgreSQL ends it: at
+ * the first carriage return or line feed. Ending it only at a line feed would hide from the judgment
+ * whatever follows a lone carriage return, which the server still runs.
  */
 export function blankSqlComments(text: string): string {
   let out = ''
@@ -308,8 +310,8 @@ export function blankSqlComments(text: string): string {
       out += text.slice(i, end)
       i = end
     } else if (ch === '-' && text[i + 1] === '-') {
-      let end = text.indexOf('\n', i)
-      if (end < 0) end = text.length
+      let end = i + 2
+      while (end < text.length && text[end] !== '\n' && text[end] !== '\r') end += 1
       out += blank(i, end)
       i = end
     } else if (ch === '/' && text[i + 1] === '*') {
