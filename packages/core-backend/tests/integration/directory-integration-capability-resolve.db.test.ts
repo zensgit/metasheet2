@@ -291,7 +291,7 @@ describeIfDatabase('directory integration capability resolver (real database)', 
 
       // Only the revision changed, so the decision differs from the earlier one only in revision and witness.
       const next = await resolveFresh(id, org)
-      if (!next.effective) throw new Error(`expected effective, got ${next.reason}`)
+      if (next.effective === false) throw new Error(`expected effective, got ${next.reason}`)
       expect(next.revision).toBe(2)
       expect(next).toEqual({ ...decision, revision: 2, witness: expect.stringMatching(/^[0-9a-f]{64}$/) })
       expect(next.witness).not.toBe(decision.witness)
