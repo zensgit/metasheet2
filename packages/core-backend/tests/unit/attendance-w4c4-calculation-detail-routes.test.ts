@@ -132,6 +132,7 @@ describe('W4C-4 calculation-detail dual-host authorization', () => {
         visibilityState: 'active',
         visibilityReason: 'active',
         posture: 'undeterminable',
+        calculationMode: 'envelope_legacy',
       },
     })
   })

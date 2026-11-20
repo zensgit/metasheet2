@@ -61,6 +61,19 @@ describe('W7-1a-M provenance widening — derive-and-diff completeness', () => {
     }
   })
 
+  it('CALC15 legacy read selection and its contract annotation require exact ledger entries', () => {
+    const sites = [
+      { file: 'packages/core-backend/src/services/AttendanceW4CalculationDetail.ts', text: "...(row.projection_owner === 'legacy_untracked' && row.current_calculation_id === null" },
+      { file: 'packages/openapi/src/base.yml', text: 'description: Present only for an active visible legacy_untracked daily projection with no current calculation pointer. Does not classify immutable history.' },
+    ]
+    for (const site of sites) {
+      const entries = W7_PROVENANCE_WIDENING_LEDGER_V1.filter(entry => entry.file === site.file && entry.text === site.text)
+      expect(entries).toHaveLength(1)
+      const violations = diffProvenanceWideningV1(derivation, W7_PROVENANCE_WIDENING_LEDGER_V1.filter(entry => entry !== entries[0]))
+      expect(violations.some(item => item.kind === 'unledgered_site' && item.detail.includes(site.text))).toBe(true)
+    }
+  })
+
   // -------------------------------------------------------------------------
   // Non-vacuity. A derivation that found nothing would pass the diff trivially,
   // so the shape of what it found is asserted, not just the empty violation set.
