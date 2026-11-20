@@ -101,6 +101,10 @@ The status step prints only these `state` keys: `phase`, `rc`, `raw_rc`, `env_wr
   running backend's mounts
   (`docker inspect -f '{{range .Mounts}}{{println .Destination}}{{end}}' metasheet-backend`)
   and resolve that mount before dispatching again.
+- If the running backend has no files under the app-data paths, the window logs
+  `appdata probe=ok copy=none` and copies nothing into the new version. Files written to
+  those paths after that probe and before the old backend is stopped are then not carried
+  over. In that case keep uploads quiet from the dispatch until `=== STOP WRITES END ===`.
 - A deploy is always a fresh dispatch. "Re-run failed jobs" on a deploy run skips the
   build job's input validation (the probe-silence check included) and runs the window
   again with the first attempt's inputs; never use it for the deploy job.
