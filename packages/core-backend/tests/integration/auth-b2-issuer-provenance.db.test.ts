@@ -1,6 +1,6 @@
 /**
  * Ordinary final issuer and required-password provenance on PostgreSQL.
- * The completed DingTalk exchange result is the only substituted output.
+ * Legacy issuer probes substitute the completed exchange. Source-transition cases use the real exchange and synthetic provider transport.
  * Scope SQL, session SQL, and signing stay on the mounted router.
  * This file does not claim complete B2, provider acceptance, or strict-login acceptance.
  */
@@ -46,6 +46,7 @@ const state = vi.hoisted(() => {
     started: [] as string[],
     pids: [] as number[],
     transactionPids: [] as number[],
+    afterIdentityCommit: null as null | (() => Promise<void>),
     commits: 0,
     rollbacks: 0,
     transactions: [] as RecordedTransaction[],
@@ -123,6 +124,9 @@ vi.mock('../../src/integration/db/connection-pool', async (importOriginal) => {
               })
               record.outcome = 'commit'
               state.commits += 1
+              if (state.afterIdentityCommit && record.completed.some(sql => /UPDATE user_external_identities\s+SET external_key/.test(sql))) {
+                await state.afterIdentityCommit()
+              }
               return result
             } catch (error) {
               record.outcome = 'rollback'
@@ -739,6 +743,88 @@ async function raceResponse(
   return outcome.response
 }
 
+const realWebExchange = dingtalk.exchangeCodeForUser
+
+async function checkLoginDuringSourceChange(change: 'removed' | 'scope-before-session' | 'scope-before-enrichment'): Promise<void> {
+  const enrichment = change === 'scope-before-enrichment'
+  const env = await prepare({ actor: 'absent', strict: true, integration: true, scope: false,
+    mustChange: false, session: false, origin: enrichment ? 'null' : 'dingtalk' })
+  const db = env.witness
+  if (env.schema !== 'public') {
+    // The issuer's minimal schema has only the identity columns used for isolated issuance.
+    // Full-schema fixtures already contain the real directory, grant and evidence tables.
+    await db.query(`ALTER TABLE user_external_identities ADD COLUMN bound_by text, ADD COLUMN last_login_at timestamptz,
+      ADD COLUMN updated_at timestamptz NOT NULL DEFAULT now();
+      ALTER TABLE user_external_identity_evidence ADD COLUMN IF NOT EXISTS connection_id uuid,
+        ADD COLUMN IF NOT EXISTS live_identity_id uuid, ADD COLUMN IF NOT EXISTS identity_id text, ADD COLUMN IF NOT EXISTS revoked_at timestamptz;
+      CREATE TABLE user_external_auth_grants(provider text, local_user_id text, enabled boolean);
+      CREATE TABLE directory_accounts(id uuid PRIMARY KEY, integration_id uuid, provider text, corp_id text, external_user_id text,
+        external_key text, name text, is_active boolean, union_id text, open_id text, updated_at timestamptz DEFAULT now());
+      CREATE TABLE directory_account_links(directory_account_id uuid, local_user_id text, link_status text)`)
+  }
+  const account = randomUUID()
+  const other = randomUUID()
+  const target = enrichment ? env.connectionId : other
+  if (!enrichment && change !== 'removed') {
+    await db.query(`INSERT INTO directory_integrations(id,name,org_id,provider,status,corp_id,config)
+      VALUES($1,'Other','second','dingtalk','active','other','{"appKey":"other-application"}')`, [other])
+  }
+  await db.query(`INSERT INTO user_external_identities(id,provider,external_key,provider_union_id,provider_open_id,local_user_id)
+    VALUES ($1,'dingtalk',$2,'issuer-union',$3,$4)`, [randomUUID(), enrichment ? 'issuer-union' : 'issuer-open', enrichment ? null : 'issuer-open', env.userId])
+  await db.query("INSERT INTO user_external_auth_grants(provider,local_user_id,enabled) VALUES ('dingtalk',$1,$2)", [env.userId, !enrichment])
+  if (enrichment) {
+    await db.query(`INSERT INTO directory_accounts(id,integration_id,provider,corp_id,external_user_id,external_key,name,is_active,union_id)
+      VALUES($1,$2,'dingtalk','fixture-corp','issuer-employee','issuer-employee','Fixture',true,'issuer-union')`, [account, env.connectionId])
+    await db.query("INSERT INTO directory_account_links(directory_account_id,local_user_id,link_status) VALUES($1,$2,'linked')", [account, env.userId])
+  }
+  const snapshot = async () => ({
+    identity: (await db.query('SELECT to_jsonb(i) AS row FROM user_external_identities i WHERE local_user_id=$1', [env.userId])).rows,
+    account: (await db.query('SELECT to_jsonb(a) AS row FROM directory_accounts a WHERE id=$1', [account])).rows,
+  })
+  const initial = await snapshot()
+  vi.mocked(dingtalk.exchangeCodeForUser).mockImplementationOnce(realWebExchange)
+  let changed = 0
+  if (!enrichment) state.afterIdentityCommit = async () => {
+    // This independent client must see the committed identity write before changing admission.
+    expect((await db.query('SELECT last_login_at IS NOT NULL AS written FROM user_external_identities WHERE local_user_id=$1', [env.userId])).rows).toEqual([{ written: true }])
+    if (change === 'removed') await db.query('DELETE FROM directory_integrations WHERE id=$1', [env.connectionId])
+    else await commitScope(db, target, SCOPE_COMMAND)
+    changed++
+  }
+  const savedFetch = globalThis.fetch
+  let calls = 0
+  globalThis.fetch = async input => {
+    const endpoint = new URL(String(input)).pathname
+    calls++
+    if (endpoint === '/v1.0/oauth2/userAccessToken') return Response.json({ accessToken: 'fixture-token' })
+    if (endpoint !== '/v1.0/contact/users/me') throw new Error('Unexpected provider operation')
+    if (enrichment) {
+      await commitScope(db, target, SCOPE_COMMAND)
+      changed++
+    }
+    return Response.json({ openId: 'issuer-open', unionId: 'issuer-union', nick: 'Issuer' })
+  }
+  try {
+    const response = await callback(await dingtalk.generateState())
+    expect(calls, `provider calls at HTTP ${response.status} (${response.body.code ?? 'issued'})`).toBe(2)
+    expect(changed, `source change at HTTP ${response.status} (${response.body.code ?? 'issued'})`).toBe(1)
+    expect(response.status).toBe(403)
+    expect(response.body).toEqual({ success: false, error: STRICT_CONNECTION_ERROR, code: 'strict_connection' })
+    expect(await countRows(db, env.schema, 'user_sessions')).toBe(0)
+    expect(state.started.some(sql => sql.includes('INSERT INTO user_sessions'))).toBe(false)
+    if (enrichment) {
+      const rolledBack = state.transactions.find(tx => tx.outcome === 'rollback' && tx.completed.some(sql => sql.includes('UPDATE directory_accounts AS account')))
+      expect(rolledBack?.completed.some(sql => /UPDATE user_external_identities\s+SET/.test(sql))).toBe(true)
+      expect(await snapshot()).toEqual(initial)
+    } else {
+      expect(state.sql.some(sql => sql.includes('directory_integrations') && sql.includes('FOR SHARE'))).toBe(true)
+    }
+  } finally {
+    state.afterIdentityCommit = null
+    globalThis.fetch = savedFetch
+  }
+}
+
 describe('ordinary final issuer and required password provenance', () => {
   beforeAll(async () => {
     originalFetch = globalThis.fetch
@@ -1077,19 +1163,7 @@ describe('ordinary final issuer and required password provenance', () => {
   }, 60_000)
 
   it('rejects an integration removed after the initial lookup and before final issuance', async () => {
-    const env = await prepare({ actor: 'absent', strict: true, integration: true, scope: false, mustChange: false, session: false })
-    const exchange = vi.mocked(dingtalk.exchangeCodeForUser)
-    const reply = exchange.getMockImplementation()!
-    exchange.mockImplementationOnce(async (...args) => {
-      await env.witness.query(`DELETE FROM ${ident(env.schema, 'directory_integrations')} WHERE id=$1`, [env.connectionId])
-      return reply(...args)
-    })
-    const response = await callback(await dingtalk.generateState())
-    expect(response.status).toBe(403)
-    expect(response.body).toEqual({ success: false, error: STRICT_CONNECTION_ERROR, code: 'strict_connection' })
-    expect(state.sql.some(stmt => stmt.includes('directory_integrations') && stmt.includes('FOR SHARE'))).toBe(true)
-    expect(state.sql.some(stmt => stmt.includes('INSERT INTO user_sessions'))).toBe(false)
-    expect(await countRows(env.witness, env.schema, 'user_sessions')).toBe(0)
+    await checkLoginDuringSourceChange('removed')
   }, 60_000)
 
   it('rejects an explicit missing integration without exchanging a code or issuing a session', async () => {
@@ -1497,4 +1571,12 @@ describe('ordinary final issuer and required password provenance', () => {
     expect(dingtalk.exchangeCodeForUser).not.toHaveBeenCalled()
     expect(await countRows(env.witness, env.schema, 'user_sessions')).toBe(0)
   }, 60_000)
+  it('rechecks the empty scope after a bare identity commits and before ordinary issuance', async () => {
+    await checkLoginDuringSourceChange('scope-before-session')
+  }, 60_000)
+
+  it('rolls back rejected login enrichment of both identity and directory account after a first scope commits', async () => {
+    await checkLoginDuringSourceChange('scope-before-enrichment')
+  }, 60_000)
+
 })

@@ -663,6 +663,9 @@ describe('DingTalk identity authorization boundaries (real DB)', () => {
     { mixed: true, knownOpenId: false }, { mixed: true, knownOpenId: true },
     { mixed: true, knownOpenId: false, grant: false as const },
     { mixed: true, knownOpenId: false, ambiguous: true as const },
+    { mixed: false, knownOpenId: false, ambiguous: true as const },
+    { mixed: true, knownOpenId: true, ambiguous: true as const, storedCorp: true as const },
+    { mixed: false, knownOpenId: true, ambiguous: true as const, storedCorp: true as const },
   ])('preserves verified canonical UnionID continuity and refuses ambiguous corporate origins (%j)', async scenario => {
     await useProviderResponseDecoders()
     const { checkDingTalkLoginSurfaces } = await import('../helpers/dingtalk-login-http')

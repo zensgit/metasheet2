@@ -6,7 +6,7 @@ import request from 'supertest'
 import { expect, vi } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
 
-type CanonicalUnionScenario = { mixed: boolean; knownOpenId: boolean; grant?: false; ambiguous?: true }
+type CanonicalUnionScenario = { mixed: boolean; knownOpenId: boolean; grant?: false; ambiguous?: true; storedCorp?: true }
 
 /** Run real routes and provider response decoders against one disposable SQL transaction.
  * The scope row is insert-only. Savepoints preserve application rollback without leaving a
@@ -88,19 +88,17 @@ export async function checkDingTalkLoginSurfaces(canonical?: CanonicalUnionScena
     if (canonical) {
       const user = randomUUID()
       const corp = `corp-${ordinary}`, unionId = `union-${user}`, openId = `open-${user}`
-      if (canonical.mixed) {
-        await connection(strict, `other-${appKey}`)
-        await fixture('INSERT INTO directory_connection_login_scope(connection_id, command_id) VALUES ($1,$2)', [strict, randomUUID()])
-        if (canonical.ambiguous) await fixture('UPDATE directory_integrations SET corp_id=$1 WHERE id=$2', [corp, strict])
-      }
+      if (canonical.mixed || canonical.ambiguous) await connection(strict, `other-${appKey}`)
+      if (canonical.ambiguous) await fixture('UPDATE directory_integrations SET corp_id=$1 WHERE id=$2', [corp, strict])
+      if (canonical.mixed) await fixture('INSERT INTO directory_connection_login_scope(connection_id, command_id) VALUES ($1,$2)', [strict, randomUUID()])
       await fixture(`INSERT INTO users(id,email,name,password_hash,role,is_active,activation_status)
         VALUES ($1,$2,'Synthetic','fixture','user',true,'activated')`, [user, `${user}@example.invalid`])
       await fixture(`INSERT INTO user_external_identities(provider,local_user_id,external_key,provider_union_id,provider_open_id,corp_id)
-        VALUES ('dingtalk',$1,$2,$3,$4,NULL)`, [user, `${corp}:${unionId}`, unionId, canonical.knownOpenId ? openId : null])
+        VALUES ('dingtalk',$1,$2,$3,$4,$5)`, [user, `${corp}:${unionId}`, unionId, canonical.knownOpenId ? openId : null, canonical.storedCorp ? corp : null])
       await fixture("INSERT INTO user_external_auth_grants(provider,local_user_id,enabled) VALUES ('dingtalk',$1,$2)", [user, canonical.grant !== false])
       const readIdentity = async () => (await fixture(`SELECT external_key, provider_union_id, provider_open_id, corp_id
         FROM user_external_identities WHERE provider='dingtalk' AND local_user_id=$1`, [user])).rows
-      const expected = { external_key: `${corp}:${unionId}`, provider_union_id: unionId, provider_open_id: openId, corp_id: null }
+      const expected = { external_key: `${corp}:${canonical.storedCorp ? openId : unionId}`, provider_union_id: unionId, provider_open_id: openId, corp_id: canonical.storedCorp ? corp : null }
       if (canonical.grant === false) {
         const denied = await send('web', user)
         expect(denied.status).toBe(403)
@@ -111,15 +109,17 @@ export async function checkDingTalkLoginSurfaces(canonical?: CanonicalUnionScena
         await fixture("UPDATE user_external_auth_grants SET enabled=true WHERE provider='dingtalk' AND local_user_id=$1", [user])
       }
       const initial = await readIdentity()
+      const refused = canonical.mixed && canonical.ambiguous
       const afterEachSurface = []
       for (const surface of ['web', 'container'] as const) {
-        await login(surface, user, canonical.ambiguous ? 403 : 200)
+        if (canonical.ambiguous) await login(surface, user, 403, corp)
+        await login(surface, user, refused ? 403 : 200)
         afterEachSurface.push(await readIdentity())
         const sessions = await fixture('SELECT external_auth_context FROM user_sessions WHERE user_id=$1', [user])
-        const sessionCount = canonical.ambiguous ? 0 : surface === 'web' ? 1 : 2
+        const sessionCount = refused ? 0 : surface === 'web' ? 1 : 2
         expect(sessions.rows).toEqual(Array.from({ length: sessionCount }, () => ({ external_auth_context: null })))
       }
-      const expectedIdentity = canonical.ambiguous ? initial : [expected]
+      const expectedIdentity = refused ? initial : [expected]
       expect(afterEachSurface).toEqual([expectedIdentity, expectedIdentity])
       expect((await fixture('SELECT directory_account_id FROM directory_account_links WHERE local_user_id=$1', [user])).rows).toEqual([])
       return

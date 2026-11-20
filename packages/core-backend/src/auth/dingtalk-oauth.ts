@@ -796,12 +796,16 @@ export async function readDingTalkLoginContext(source?: DingTalkLoginSource): Pr
   return { config, source: selected }
 }
 
-async function requireUniqueIdentityCorp(client: AccessGraphTransactionClient, source: DingTalkLoginSource): Promise<void> {
+async function identityCorpRequiresEmptyScope(client: AccessGraphTransactionClient, source: DingTalkLoginSource): Promise<boolean> {
   const origins = await client.query(
     'SELECT id::text FROM directory_integrations WHERE provider = $1 AND corp_id = $2 LIMIT 2',
     [PROVIDER, source.corpId],
   ).catch(() => { throw new DingTalkSourceError(503) })
+  // A handover can leave two applications in the same corporate namespace. An
+  // implicit login may use that old identity only while all connection scopes are empty.
+  if (origins.rows.length > 1 && !source.explicit) return true
   if (origins.rows.length !== 1 || origins.rows[0].id !== source.connectionId) refuseDingTalkSource()
+  return false
 }
 
 /** Return true only for the unscoped compatibility case that must finish under the empty-scope lock. */
@@ -818,8 +822,7 @@ async function identityRequiresEmptyScope(
     if (storedCorp !== source.corpId) refuseDingTalkSource()
     // An independently attributed identity does not derive its origin from the user's
     // other directory accounts. Require the stored corporate namespace to identify X alone.
-    await requireUniqueIdentityCorp(client, source)
-    return false
+    return identityCorpRequiresEmptyScope(client, source)
   }
 
   const links = await client.query(
@@ -846,8 +849,8 @@ async function identityRequiresEmptyScope(
   const canonicalHere = pairs.some(([stored, verified]) => typeof stored === 'string' && stored && stored === verified && key === `${source.corpId}:${stored}`)
   const foreignKey = pairs.some(([id]) => typeof id === 'string' && id && key.endsWith(`:${id}`) && key !== `${source.corpId}:${id}`)
   if (foreignKey) refuseDingTalkSource()
-  if (canonicalHere) await requireUniqueIdentityCorp(client, source)
-  if (linkedHere || canonicalHere) return false
+  if (canonicalHere) return identityCorpRequiresEmptyScope(client, source)
+  if (linkedHere) return false
   // The compatibility rule is restricted to a bare identifier of this row.
   if (source.explicit || !pairs.some(([stored]) => stored && key === stored) || !describesSameDingTalkPerson(identity, profile, null)) {
     refuseDingTalkSource()

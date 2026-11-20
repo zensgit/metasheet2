@@ -22,7 +22,7 @@ function expand(rows: string[]): string[] {
 const fences: Array<[string, string[]]> = [
   [src + 'routes/auth.ts', ["stateCheck.intent === 'bind'", "stateCheck.intent === 'activate'", "code: 'self_service_disabled'", 'if (loginSource.strict) refuseDingTalkSource()', 'options.requiresEmptyScope || !options.origin']],
   [src + 'auth/dingtalk-login-source.ts', ['if (!await lockEmptyConnectionLoginScope(client)) refuseDingTalkSource()', 'if (current.rows.length !== 1) refuseDingTalkSource()', 'if ((await readConnectionLoginScope(client, source.connectionId)).scope) refuseDingTalkSource()']],
-  [src + 'auth/dingtalk-oauth.ts', ['if (storedCorp !== source.corpId) refuseDingTalkSource()', 'if (links.rows.length > 1) refuseDingTalkSource()', 'if (foreignKey) refuseDingTalkSource()', 'if (canonicalHere) await requireUniqueIdentityCorp(client, source)', 'if (emptyScope) await checkEmptyDingTalkScope(client)']],
+  [src + 'auth/dingtalk-oauth.ts', ['if (storedCorp !== source.corpId) refuseDingTalkSource()', 'if (links.rows.length > 1) refuseDingTalkSource()', 'if (foreignKey) refuseDingTalkSource()', 'if (canonicalHere) return identityCorpRequiresEmptyScope(client, source)', 'if (emptyScope) await checkEmptyDingTalkScope(client)']],
   [src + 'auth/AuthService.ts', ['Number.isSafeInteger(payload.iat)', 'revoked_after >= to_timestamp($2::double precision)', 'revoked_at IS NULL FOR UPDATE', 'issuedAt: result.issuedAt']],
   [src + 'auth/dingtalk-legacy-resource-scope.ts', ['if (strictSession) return false', "return state.scope ? 'refused' : 'ordinary'", 'return !lock || await store.lockEmptyConnectionLoginScope(caller)', "return state.installation === 'installed' && !state.scope"]],
   [src + 'integrations/dingtalk/interactive-card-callback.ts', ["await checkCardConnectionBeforeDispatch(query, connectionId, true) !== 'ordinary'", 'outcome = await deps.transaction(']],
@@ -66,6 +66,8 @@ describe('DingTalk session issuers, identity writers and grant consumers', () =>
     expect(authoritySites('tool.sh', "node <<'JS'\nconst {createToken: issue} = authService\nJS")).toEqual(['script > createToken'])
     expect(authoritySites('probe.ts', 'db.updateTable(runtimeTable)')).toEqual(['module > updateTable dynamic runtimeTable'])
     expect(authoritySites('probe.ts', 'db.query(`SELECT enabled FROM user_external_auth_grants`)')).toEqual([])
+    expect(authoritySites('probe.ts', 'function grant(user) { return __dingtalkOAuthInternalsForTests.ensureGrant(user) }')).toContain('grant > ensureGrant')
+    expect(authoritySites('probe.ts', 'function session(service) { const alias = service; return alias.login() }')).toContain('session > member login')
     const callback = src + 'routes/auth.ts'
     const live = read(callback)
     const added = live.replace('await exchangeCodeForUser(code, loginSource)', 'await (true ? exchangeCodeForUser(code, loginSource) : exchangeCodeForUser(code, loginSource))')

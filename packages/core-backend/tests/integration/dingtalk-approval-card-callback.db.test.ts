@@ -286,6 +286,28 @@ describeIfDatabase('B-3 DingTalk card callback adapter (real DB)', () => {
     expect(await cardState(deliveryId)).toBe('sent')
   })
 
+  test('an incomplete scope installation leaves the signed card and approval untouched', async () => {
+    const instanceId = await newInstance()
+    const deliveryId = await newSentDelivery(instanceId)
+    const dispatchAction = vi.fn<ApprovalProductService['dispatchAction']>().mockRejectedValue(new Error('unexpected dispatch'))
+    await poolManager.get().transaction(async ({ query }) => {
+      await query('SAVEPOINT card_installation')
+      try {
+        const removed = await query('DELETE FROM kysely_migration WHERE name=$1 RETURNING name', ['zzzz20261118120000_strict_login_grant_scope'])
+        expect(removed.rowCount).toBe(1)
+        const result = await executeDingTalkApprovalCardCallback(
+          { query, transaction: work => work({ query }), approvals: { dispatchAction } }, payloadFor(deliveryId, DD_OP),
+        )
+        expect(result).toEqual({ outcome: 'operator_unresolved', deliveryId, reason: 'source_unavailable' })
+        expect(dispatchAction).not.toHaveBeenCalled()
+      } finally {
+        await query('ROLLBACK TO SAVEPOINT card_installation')
+      }
+    })
+    expect(await cardState(deliveryId)).toBe('sent')
+    expect(await approveRecordCount(instanceId)).toBe(0)
+  })
+
   test('rechecks the stored connection inside the execution transaction before dispatch', async () => {
     const deliveryId = await newSentDelivery(await newInstance())
     const dispatchAction = vi.fn<ApprovalProductService['dispatchAction']>().mockRejectedValue(new Error('unexpected dispatch'))

@@ -107,6 +107,7 @@ export const loginAuthorityManifest: Record<string, string[]> = {
     "bindDingTalkIdentityToUser > insert user_external_identities",
     "bindDingTalkIdentityToUser > insertGrantIfAbsent",
     "bindDingTalkIdentityToUser > update user_external_identities",
+    "createProvisionedUser > createProvisionedUser",
     "enrichMissingOpenIdForRejectedLogin > backfillDirectoryAccountOpenIdInTransaction",
     "enrichMissingOpenIdForRejectedLogin > checkEmptyDingTalkScope",
     "enrichMissingOpenIdForRejectedLogin > checkOrdinaryDingTalkSource",
@@ -119,7 +120,10 @@ export const loginAuthorityManifest: Record<string, string[]> = {
     "exchangeEnterpriseAuthCodeForUser > resolveLocalUser",
     "fenceLegacyDingTalkWrite > refuseStrictLegacyDingTalkWrite",
     "insertGrantIfAbsent > insert user_external_auth_grants",
+    "module > createProvisionedUser",
+    "module > ensureGrant",
     "readDingTalkLoginContext > resolveDingTalkLoginSource",
+    "resolveLocalUser > createProvisionedUser",
     "2 × resolveLocalUser > enrichMissingOpenIdForRejectedLogin",
     "resolveLocalUser > insertGrantIfAbsent",
     "3 × resolveLocalUser > upsertExternalIdentity",
@@ -240,6 +244,9 @@ export const loginAuthorityManifest: Record<string, string[]> = {
     "applyDirectoryDeprovisionCandidateWrites > insert user_external_auth_grants",
     "applyDirectoryDeprovisionCandidateWrites > update user_external_auth_grants",
   ],
+  "packages/core-backend/src/directory/directory-sync-scheduler.ts": [
+    "runScheduledSync > syncDirectoryIntegration",
+  ],
   "packages/core-backend/src/directory/directory-sync.ts": [
     "applyDirectoryAccountBindInTransaction > insert user_external_auth_grants",
     "applyDirectoryAccountBindInTransaction > insert user_external_identities",
@@ -259,7 +266,7 @@ export const loginAuthorityManifest: Record<string, string[]> = {
     "updateLocalAccount > update directory_accounts",
   ],
   "packages/core-backend/src/gateway/APIGateway.ts": [
-    "createAuthMiddleware > platform password login",
+    "createAuthMiddleware > member login",
   ],
   "packages/core-backend/src/index.ts": [
     "createCoreAPI > createToken",
@@ -339,6 +346,7 @@ export const loginAuthorityManifest: Record<string, string[]> = {
     "post /deprovision-events/:eventId/force-reactivate > restoreDeprovisionEventForRequest",
     "post /deprovision-events/:eventId/reactivate > restoreDeprovisionEventForRequest",
     "post /deprovision/events/:eventId/restore > restoreDeprovisionEventForRequest",
+    "2 × post /integrations/:integrationId/sync > syncDirectoryIntegration",
     "restoreDeprovisionEventForRequest > restoreDeprovisionEvent",
   ],
   "packages/core-backend/src/routes/admin-routes.ts": [
@@ -387,8 +395,8 @@ export const loginAuthorityManifest: Record<string, string[]> = {
     "post /dingtalk/callback > registerDingTalkSession",
     "2 × post /dingtalk/callback > resolveDingTalkLoginSource",
     "post /dingtalk/callback > signInWeb",
-    "post /invite/accept > platform password login",
-    "post /login > platform password login",
+    "post /invite/accept > member login",
+    "post /login > member login",
     "post /login/dingtalk/container > exchangeEnterpriseAuthCodeForUser",
     "post /login/dingtalk/container > issueAuthSessionToken",
     "post /login/dingtalk/container > resolveDingTalkLoginSource",
