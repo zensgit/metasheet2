@@ -4,9 +4,9 @@
  */
 
 import * as jwt from 'jsonwebtoken'
+import jwtTimespan from 'jsonwebtoken/lib/timespan'
 import * as bcrypt from 'bcryptjs'
 import * as crypto from 'node:crypto'
-import ms from 'ms'
 import type { query } from '../db/pg'
 import { poolManager } from '../integration/db/connection-pool'
 import { Logger } from '../core/logger'
@@ -81,7 +81,7 @@ type SessionRenewal = { kind: 'ok'; token: string; user: User } | { kind: 'chang
 
 export interface AuthConfig {
   jwtSecret: string
-  jwtExpiry: string
+  jwtExpiry: string | number
   saltRounds: number
 }
 
@@ -333,12 +333,15 @@ export class AuthService {
     }
   }
 
-  /** Apply jsonwebtoken's string expiresIn calculation to the timestamp reserved at registration. */
+  /** Use the same expiry function as jsonwebtoken's signer with the issue time reserved at registration. */
   sessionExpiresAt(issuedAt: number): number {
     if (!Number.isSafeInteger(issuedAt) || issuedAt <= 0) throw new Error('Invalid session issue time')
-    const duration = ms(this.config.jwtExpiry as ms.StringValue)
-    const expiresAt = Math.floor(issuedAt + duration / 1000)
-    if (!Number.isSafeInteger(expiresAt)) throw new Error('Invalid session lifetime')
+    const expiry = this.config.jwtExpiry
+    if (typeof expiry === 'string' ? expiry.length === 0 : !Number.isInteger(expiry)) {
+      throw new Error('Invalid session lifetime')
+    }
+    const expiresAt: number | undefined = jwtTimespan(expiry, issuedAt)
+    if (expiresAt === undefined || !Number.isSafeInteger(expiresAt)) throw new Error('Invalid session lifetime')
     return expiresAt
   }
 
@@ -1092,6 +1095,7 @@ export class AuthService {
   ): Promise<SessionRenewal> {
     if (!Number.isSafeInteger(payload.iat)) return { kind: 'changed' }
     const originalSid = this.normalizeClaimString(payload.sid)
+    const sessionId = originalSid ?? this.createSessionId()
     type Registration = { kind: 'registered'; user: User; sessionId: string; issuedAt: number }
       | { kind: 'changed' } | { kind: 'not_member' }
     const result = await poolManager.get().transaction(async (client): Promise<Registration> => {
@@ -1108,6 +1112,10 @@ export class AuthService {
         || Number(locked.access_generation ?? 0) !== Number(user.access_generation ?? 0)) {
         return { kind: 'changed' }
       }
+      // Repair waits up to five seconds for this user lock. Bound each of the three
+      // remaining statements to one second, preserving a stricter deployment timeout.
+      await client.query(`SELECT set_config('statement_timeout', LEAST(1000, NULLIF(setting::int, 0))::text, true)
+        FROM pg_catalog.pg_settings WHERE name = 'statement_timeout'`)
       const current = await client.query<{ eligible: boolean; issued_at: string | number }>(
         `SELECT NOT EXISTS (
            SELECT 1 FROM user_session_revocations
@@ -1128,7 +1136,6 @@ export class AuthService {
       const tokenUser = { ...user }
       if (tenantId) tokenUser.tenantId = tenantId
       else delete tokenUser.tenantId
-      const sessionId = originalSid ?? this.createSessionId()
       const issuedAt = Number(current.rows[0].issued_at)
       const expiresAt = this.sessionExpiresAt(issuedAt)
       const registered = await createUserSession(user.id, {

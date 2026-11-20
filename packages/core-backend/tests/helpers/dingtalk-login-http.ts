@@ -5,6 +5,7 @@ import pg from 'pg'
 import request from 'supertest'
 import { expect, vi } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
+import { runtimeJwtSecret } from './runtime-jwt-secret'
 
 type DirectoryAffiliation = 'sibling' | 'multiple' | 'foreign' | 'foreign among multiple' | 'different directory UnionID' | 'verified sole link' | 'configured bare sibling' | 'stored corporate OpenID' | 'configured stored corporate OpenID' | 'matching email' | 'other email' | 'other person'
 type AffiliationScenario = { mixed: boolean; affiliation: DirectoryAffiliation }
@@ -96,7 +97,7 @@ export async function checkDingTalkLoginSurfaces(scenario?: CanonicalUnionScenar
       expect((await versions()).rows).toEqual(before)
       return
     }
-    const claims = jwt.verify(res.body.data.token, process.env.JWT_SECRET!) as jwt.JwtPayload
+    const claims = jwt.verify(res.body.data.token, runtimeJwtSecret()) as jwt.JwtPayload
     expect(claims.userId).toBe(user)
     expect(claims.xa).toBeFalsy()
     expect((await fixture('SELECT id FROM user_sessions WHERE user_id=$1 AND id=$2', [user, claims.sid])).rowCount).toBe(1)

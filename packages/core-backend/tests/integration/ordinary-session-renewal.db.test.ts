@@ -6,6 +6,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { Pool, type PoolClient } from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AuthService, type User } from '../../src/auth/AuthService'
+import { runtimeJwtSecret } from '../helpers/runtime-jwt-secret'
 
 const EXPECT_DB = process.env.EXPECT_DB === '1'
 const url = process.env.DATABASE_URL
@@ -50,7 +51,7 @@ dbSuite('ordinary session renewal against PostgreSQL', () => {
   it('verifies legacy ordinary sessions without an issue time only until a real revocation watermark exists', async () => {
     const { authRouter } = await import('../../src/routes/auth')
     const app = express().use('/api/auth', authRouter)
-    const legacy = jwt.sign({ userId: user.id }, process.env.JWT_SECRET!, { noTimestamp: true, expiresIn: '1h' })
+    const legacy = jwt.sign({ userId: user.id }, runtimeJwtSecret(), { noTimestamp: true, expiresIn: '1h' })
     const older = auth.createToken(user, { issuedAt: Math.floor(Date.now() / 1000) - 60 })
     const verify = (token: string) => request(app).get('/api/auth/verify').set('Authorization', `Bearer ${token}`)
     expect((await verify(legacy)).status).toBe(200)

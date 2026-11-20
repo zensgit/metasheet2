@@ -821,6 +821,7 @@ describe('AuthService.refreshToken', () => {
     expect(await new AuthService().refreshToken('old-token')).toBe('new-token')
     expect(query.mock.calls.map(call => call[0])).toEqual([
       'SET TRANSACTION ISOLATION LEVEL READ COMMITTED', expect.stringContaining('FOR SHARE'),
+      expect.stringContaining("set_config('statement_timeout', LEAST(1000, NULLIF(setting::int, 0))::text, true)"),
       expect.stringContaining('FROM user_session_revocations'), expect.stringContaining('FOR SHARE OF uo'),
     ])
     expect(sessionMocks.createUserSession).toHaveBeenCalledWith('u-refresh', expect.objectContaining({ expectedAccessGeneration: 3 }), { query })
@@ -1421,20 +1422,35 @@ describe('AuthService.createToken', () => {
     secretManagerMocks.get.mockReturnValue('unit-test-secret-abcdefghijklmnopqrstuvwxyz123456')
   })
 
-  it('uses the same configured expiry and fixed issue time for registration and signing', () => {
-    vi.stubEnv('JWT_EXPIRY', '1500ms')
-    try {
-      const auth = new AuthService()
-      expect(auth.sessionExpiresAt(100)).toBe(101)
-      const user = platformAuthUserRow({ id: 'expiry-test' })
-      auth.createToken(user, { issuedAt: 100, sid: 'session' })
-      expect(jwtMocks.sign.mock.calls[0]?.[0]).toMatchObject({ iat: 100, sid: 'session' })
-      expect(jwtMocks.sign.mock.calls[0]?.[2]).toEqual({ expiresIn: '1500ms' })
-      expect(() => auth.sessionExpiresAt(NaN)).toThrow('Invalid session issue time')
-      vi.stubEnv('JWT_EXPIRY', 'unavailable')
-      expect(() => new AuthService().sessionExpiresAt(100)).toThrow('Invalid session lifetime')
-    } finally {
-      vi.unstubAllEnvs()
+  afterEach(() => vi.unstubAllEnvs())
+
+  it.each([
+    [3600, 3600], ['3600', 3], ['2h', 7200], ['7d', 604800], ['1 week', 604800],
+    ['2 MINS', 120], ['1 year', 31557600], ['1500ms', 1], ['0.5s', 0], ['-0.5s', -1],
+    [0, 0], [-1, -1],
+  ] as const)('registers the exact signed exp for expiresIn %j', async (expiry, seconds) => {
+    const realJwt = await vi.importActual<typeof import('jsonwebtoken')>('jsonwebtoken')
+    jwtMocks.sign.mockImplementation(realJwt.sign as never)
+    const issuedAt = 1700000000
+    if (typeof expiry === 'string') vi.stubEnv('JWT_EXPIRY', expiry)
+    const auth = new AuthService()
+    if (typeof expiry === 'number') auth['config'].jwtExpiry = expiry
+    const registeredExpiry = auth.sessionExpiresAt(issuedAt)
+    const user = platformAuthUserRow({ id: 'expiry-test' })
+    const token = auth.createToken(user, { issuedAt, sid: 'session' })
+    expect(realJwt.decode(token)).toMatchObject({ iat: issuedAt, exp: registeredExpiry, sid: 'session' })
+    expect(registeredExpiry).toBe(issuedAt + seconds)
+    expect(jwtMocks.sign).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects invalid issue times, invalid lifetimes and unsafe expiry timestamps', () => {
+    const auth = new AuthService()
+    for (const issuedAt of [NaN, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => auth.sessionExpiresAt(issuedAt)).toThrow('Invalid session issue time')
+    }
+    for (const expiry of ['', 'unavailable', '1 month', '1'.repeat(101), 1.5, Infinity, Number.MAX_SAFE_INTEGER]) {
+      auth['config'].jwtExpiry = expiry
+      expect(() => auth.sessionExpiresAt(100)).toThrow('Invalid session lifetime')
     }
   })
 

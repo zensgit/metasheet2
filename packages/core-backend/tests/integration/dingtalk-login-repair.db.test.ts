@@ -724,6 +724,76 @@ const originalIdentityShape = (f: Fixture) => ({
   provider_open_id: 'old-open-' + f.user,
   provider_union_id: 'old-union-' + f.user,
 })
+// Identify the exact waiter and the granted transaction lock it is waiting on.
+async function waitingTransaction(holder: number, sqlFragment: string): Promise<number> {
+  const end = Date.now() + 3500
+  while (Date.now() < end) {
+    const result = await query<{ pid: number }>(
+      `SELECT a.pid FROM pg_stat_activity a
+       JOIN pg_locks w ON w.pid = a.pid AND w.locktype = 'transactionid' AND NOT w.granted
+       JOIN pg_locks h ON h.transactionid = w.transactionid AND h.granted AND h.mode = 'ExclusiveLock'
+       WHERE a.datname = current_database() AND h.pid = $1 AND h.pid = ANY(pg_blocking_pids(a.pid))
+         AND a.query LIKE $2`,
+      [holder, '%' + sqlFragment + '%'],
+    )
+    if (result.rows.length === 1) return result.rows[0].pid
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error('Missing database lock witness for ' + sqlFragment)
+}
+
+async function renewAcrossRepair<T>(
+  f: Fixture, withSid: boolean, renew: () => Promise<T>,
+): Promise<{ busy: T; afterRepair: T }> {
+  const proof = await f.verify()
+  const preview = await previewDingTalkRepair(proof)
+  const control = await pool!.connect()
+  const pending: Promise<unknown>[] = []
+  const track = <R>(operation: Promise<R>) => {
+    pending.push(operation)
+    void operation.catch(() => undefined) // Join all operations even when a lock assertion fails.
+    return operation
+  }
+  try {
+    await control.query('BEGIN')
+    const sessions = await control.query(
+      'SELECT pg_backend_pid() AS pid, to_jsonb(s) AS row FROM user_sessions s WHERE user_id=$1 FOR UPDATE', [f.user],
+    )
+    expect(sessions.rows).toHaveLength(1)
+    const holder = Number(sessions.rows[0].pid)
+    await control.query('SELECT org_id FROM user_orgs WHERE user_id=$1 FOR UPDATE', [f.user])
+
+    // First renewal holds users FOR SHARE and is blocked inside eligibility or membership lookup.
+    const first = track(renew())
+    const renewing = await waitingTransaction(holder, withSid ? 'AND revoked_at IS NULL FOR UPDATE' : 'FOR SHARE OF uo')
+    const repair = track(applyDingTalkRepair(proof, preview.digest, 'apply'))
+    const repairing = await waitingTransaction(renewing, 'WHERE id = $1::text%FOR UPDATE')
+    const busy = await Promise.race([
+      first, repair.then(() => { throw new Error('Repair completed before the blocked renewal released users') }),
+    ])
+    // The bounded renewal released its lock without our control releasing either row.
+    expect(await waitingTransaction(holder, 'UPDATE user_sessions SET revoked_at=clock_timestamp()')).toBe(repairing)
+    const original = await control.query('SELECT to_jsonb(s) AS row FROM user_sessions s WHERE user_id=$1', [f.user])
+    expect(original.rows).toEqual([{ row: sessions.rows[0].row }])
+
+    // Second renewal completes ordinary authentication against the still-committed old state.
+    // Its authoritative transaction cannot pass the user lock already held by the real repair.
+    const second = track(renew())
+    await waitingTransaction(repairing, 'FROM users WHERE id = $1 FOR SHARE')
+    // The repair wrote its watermark before its now-blocked session UPDATE. Cross that second
+    // so an incorrectly issued JWT would have a fresh iat, independent of clock rounding.
+    await query(`SELECT pg_sleep(GREATEST(0, floor(extract(epoch FROM query_start)) + 1
+      - extract(epoch FROM clock_timestamp()))::double precision) FROM pg_stat_activity WHERE pid=$1`, [repairing])
+    await control.query('COMMIT')
+    expect((await repair).targetSessionsRevoked).toBe(true)
+    return { busy, afterRepair: await second }
+  } finally {
+    await control.query('ROLLBACK')
+    control.release()
+    await Promise.allSettled(pending)
+  }
+}
+
 suite('DingTalk controlled login repair', () => {
   it('verification and preview do not write rows, issue sessions, or return raw identifiers', async () => {
     const f = await fixture(),
@@ -1786,43 +1856,14 @@ suite('DingTalk controlled login repair', () => {
       auth = new AuthService(),
       login = await auth.login(f.user, f.password)
     expect(login?.user.id).toBe(f.user)
-    const proof = await f.verify(),
-      p = await previewDingTalkRepair(proof)
-    let entered!: () => void, resume!: () => void
-    const reached = new Promise<void>((resolve) => {
-        entered = resolve
-      }),
-      released = new Promise<void>((resolve) => {
-        resume = resolve
-      })
-    const real = sessionRegistry.isUserSessionActive
-    const spy = vi
-      .spyOn(sessionRegistry, 'isUserSessionActive')
-      .mockImplementation(async (...args) => {
-        const active = await real(...args)
-        entered()
-        await released
-        return active
-      })
-    const refresh = auth.refreshToken(login!.token)
-    try {
-      await reached
-      await applyDingTalkRepair(proof, p.digest, 'apply')
-      await new Promise((resolve) => setTimeout(resolve, 1100))
-      resume()
-      expect((await refresh) === null).toBe(true)
-      expect(
-        (
-          await query('SELECT revoked_at FROM user_sessions WHERE user_id=$1', [
-            f.user,
-          ])
-        ).rows.every((row) => row.revoked_at),
-      ).toBe(true)
-    } finally {
-      resume()
-      await refresh
-      spy.mockRestore()
-    }
+    const sid = auth.readTokenPayload(login!.token)?.sid
+    expect(sid).toEqual(expect.any(String))
+    const { busy, afterRepair } = await renewAcrossRepair(f, true, () => auth.refreshToken(login!.token))
+    expect(busy).toBeNull()
+    expect(afterRepair).toBeNull()
+    expect((await query(
+      'SELECT id, revoked_at IS NOT NULL AS revoked FROM user_sessions WHERE user_id=$1', [f.user],
+    )).rows).toEqual([{ id: sid, revoked: true }])
   })
   it('rejects a previously authenticated OAuth result after repair and admits a fresh current-person result', async () => {
     const f = await fixture()
@@ -2024,44 +2065,13 @@ suite('DingTalk controlled login repair', () => {
       auth = new AuthService(),
       login = await auth.login(f.user, f.password)
     const legacy = auth.createToken(login!.user)
-    const proof = await f.verify(),
-      p = await previewDingTalkRepair(proof)
-    let entered!: () => void, resume!: () => void
-    const reached = new Promise<void>((resolve) => {
-        entered = resolve
-      }),
-      released = new Promise<void>((resolve) => {
-        resume = resolve
-      })
-    const real = revocations.isUserSessionRevoked
-    const spy = vi
-      .spyOn(revocations, 'isUserSessionRevoked')
-      .mockImplementation(async (...args) => {
-        const result = await real(...args)
-        entered()
-        await released
-        return result
-      })
-    const refresh = auth.refreshToken(legacy)
-    try {
-      await reached
-      await applyDingTalkRepair(proof, p.digest, 'apply')
-      await new Promise((resolve) => setTimeout(resolve, 1100))
-      resume()
-      expect((await refresh) === null).toBe(true)
-      expect(
-        (
-          await query(
-            'SELECT id FROM user_sessions WHERE user_id=$1 AND revoked_at IS NULL',
-            [f.user],
-          )
-        ).rows,
-      ).toHaveLength(0)
-    } finally {
-      resume()
-      await refresh
-      spy.mockRestore()
-    }
+    expect(auth.readTokenPayload(legacy)?.sid).toBeUndefined()
+    const { busy, afterRepair } = await renewAcrossRepair(f, false, () => auth.refreshToken(legacy))
+    expect(busy).toBeNull()
+    expect(afterRepair).toBeNull()
+    expect((await query(
+      'SELECT id, revoked_at IS NOT NULL AS revoked FROM user_sessions WHERE user_id=$1', [f.user],
+    )).rows).toEqual([{ id: auth.readTokenPayload(login!.token)?.sid, revoked: true }])
   })
 
   describe('POST /api/auth/session-org across a repair apply', () => {
@@ -2128,46 +2138,22 @@ suite('DingTalk controlled login repair', () => {
               : authService.createToken(login!.user)
           if (shape === 'without a sid')
             expect(authService.readTokenPayload(credential)?.sid).toBeUndefined()
-          const proof = await f.verify(),
-            p = await previewDingTalkRepair(proof)
-          let entered!: () => void, resume!: () => void
-          const reached = new Promise<void>((resolve) => {
-              entered = resolve
-            }),
-            released = new Promise<void>((resolve) => {
-              resume = resolve
-            })
-          const real = authService.resolveSessionTenantId.bind(authService)
-          // Parks the request after authentication (generation already read) and before the session write.
-          const spy = vi
-            .spyOn(authService, 'resolveSessionTenantId')
-            .mockImplementation(async (...args) => {
-              const result = await real(...args)
-              entered()
-              await released
-              return result
-            })
-          const pending = switchOrg(credential, orgB).then((res) => res)
-          try {
-            await reached
-            await applyDingTalkRepair(proof, p.digest, 'apply')
-            // JWT iat has second precision: a token minted now would postdate the revocation watermark.
-            await new Promise((resolve) => setTimeout(resolve, 1100))
-            resume()
-            const res = await pending
-            expect(res.status).toBe(409)
-            expect(res.body).toEqual({
-              success: false,
-              error: 'Authentication changed; please sign in again',
-              code: 'authentication_changed',
-            })
-            expect(await activeSessions(f.user)).toHaveLength(0)
-            expect(await authService.verifyToken(credential)).toBeNull()
-          } finally {
-            resume()
-            await pending.catch(() => undefined)
-            spy.mockRestore()
-          }
+          const { busy, afterRepair } = await renewAcrossRepair(f, shape === 'with a sid',
+            () => switchOrg(credential, orgB).then(res => res))
+          expect(busy.status).toBe(503)
+          expect(busy.body).toEqual({
+            success: false, error: 'Organization switch unavailable', code: 'SESSION_ORG_SWITCH_UNAVAILABLE',
+          })
+          expect(afterRepair.status).toBe(409)
+          expect(afterRepair.body).toEqual({
+            success: false,
+            error: 'Authentication changed; please sign in again',
+            code: 'authentication_changed',
+          })
+          expect(await activeSessions(f.user)).toHaveLength(0)
+          expect((await query('SELECT id FROM user_sessions WHERE user_id=$1', [f.user])).rows)
+            .toEqual([{ id: authService.readTokenPayload(login!.token)?.sid }])
+          expect(await authService.verifyToken(credential)).toBeNull()
           // A fresh post-apply sign-in can still switch organizations.
           const next = await authService.login(f.user, f.password)
           const after = await switchOrg(next!.token, orgB)

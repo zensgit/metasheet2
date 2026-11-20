@@ -9,6 +9,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { query } from '../../src/db/pg'
 import { activatePendingUser } from '../../src/auth/user-activate'
 import { poolManager } from '../../src/integration/db/connection-pool'
+import { runtimeJwtSecret } from '../helpers/runtime-jwt-secret'
 
 // Two-point wiring self-check (feedback: an unwired *.db.test.ts skip-greens forever). This
 // suite must be BOTH excluded from the no-DB job (so it cannot skip-green there) AND listed in
@@ -213,7 +214,7 @@ describeIfDatabase('T3 activation source read serialises against integration dea
         await holder.query('ROLLBACK')
         const result = await pending
         expect(result.status, result.body.code).toBe(200)
-        const claims = jwt.verify(result.body.data.token, process.env.JWT_SECRET!) as jwt.JwtPayload
+        const claims = jwt.verify(result.body.data.token, runtimeJwtSecret()) as jwt.JwtPayload
         expect(claims.userId).toBe(target.userId)
         expect(claims.tenantId).toBe(target.orgId)
         expect((await query('SELECT id FROM user_sessions WHERE id=$1 AND user_id=$2', [claims.sid, target.userId])).rowCount).toBe(1)
