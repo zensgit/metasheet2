@@ -76,7 +76,17 @@ const GOLDEN: Record<string, Partial<Record<(typeof EGRESS_HELPERS)[number], num
     // (record-write-service.ts, counted above). Real-DB locking test: MR2-RD-01 in the manual-row block of
     // tests/integration/multitable-record-duplicate.test.ts (a field_permissions.visible=false column — the server-stamped
     // 项目号 — absent from the create echo while present in the stored row).
-    filterRecordDataByFieldIds: 16,
+    // 17 = +1 for the 人工补充行 parent picker (ADR adr-stock-prep-manual-rows-20261030 §12.6): GET
+    // /sheets/:sheetId/manual-rows/parent-options. Its read is a FIXED `data -> $n` projection of four columns, which this
+    // guard cannot see on its own (gap 2 in the header), so the route is made visible here on purpose: the column ids it
+    // hands the statement are NULL outside the actor's layer-2 ∧ layer-3 read set (computeAllowedFieldIds →
+    // maskStoredRecordFieldIds — a NULL id is neither projected, matched by `q` nor counted), rows the row policy denies
+    // are excluded inside the statement (loadDeniedRecordIds), and every returned entry is masked AGAIN with that same
+    // set through filterRecordDataByFieldIds before the response. GET /records/:recordId/manual-parent-dependents adds no
+    // call: it answers one number. Real-DB locking tests: MR3-RD-08 (a field_permissions.visible=false column — 父组件名称,
+    // then 图号 — absent from the items and not matchable by `q`) and MR3-RD-09 (a row-level-denied row neither listed
+    // nor counted), manual-row block of tests/integration/multitable-record-duplicate.test.ts.
+    filterRecordDataByFieldIds: 17,
     loadRecordSummaries: 3,
     // 6 = +2 for the 2a filter-by-link materialization in GET /view and loadDashboardSourceRows. These two
     // call-sites are FILTER-INTERNAL: buildLinkSummaries computes the permission-filtered display set used

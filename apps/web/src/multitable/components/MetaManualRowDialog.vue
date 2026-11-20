@@ -83,6 +83,45 @@
             >{{ fieldMessage(entry.field.id) }}</span>
           </label>
 
+          <!-- ADR §12.2 「新增时选父组件」: only when /context names the pair for this actor (`parentFieldIds`). -->
+          <fieldset v-if="parentFieldIds" class="meta-manual-row__parent" data-testid="manual-row-dialog-parent">
+            <legend class="meta-manual-row__parent-legend">{{ l('parent.legend') }}</legend>
+            <div class="meta-manual-row__parent-modes" role="radiogroup" :aria-label="l('parent.legend')">
+              <label v-for="mode in parentModes" :key="mode.value" class="meta-manual-row__parent-mode">
+                <input
+                  v-model="parentMode"
+                  type="radio"
+                  :name="parentRadioName"
+                  :value="mode.value"
+                  :data-manual-parent-mode="mode.value"
+                  :disabled="submitting"
+                />
+                {{ l(mode.label) }}
+              </label>
+            </div>
+            <p v-if="parentMode === 'none'" class="meta-manual-row__hint">{{ l('parent.noneHint') }}</p>
+            <MetaManualRowParentPicker
+              v-else-if="parentMode === 'pick' && searchParentOptions"
+              v-model="parentPicked"
+              :search="searchParentOptions"
+              :own-code="ownCode"
+              :disabled="submitting"
+              :debounce-ms="parentSearchDebounceMs"
+            />
+            <template v-else-if="parentMode === 'new'">
+              <label class="meta-manual-row__row">
+                <span class="meta-manual-row__label">{{ l('parent.code') }}<span class="meta-manual-row__required" aria-hidden="true"> *</span></span>
+                <input v-model="parentNewCode" class="meta-manual-row__input" type="text" aria-required="true" data-testid="manual-parent-new-code" :disabled="submitting" />
+              </label>
+              <label class="meta-manual-row__row">
+                <span class="meta-manual-row__label">{{ l('parent.name') }}<span class="meta-manual-row__required" aria-hidden="true"> *</span></span>
+                <input v-model="parentNewName" class="meta-manual-row__input" type="text" aria-required="true" data-testid="manual-parent-new-name" :disabled="submitting" />
+              </label>
+              <p class="meta-manual-row__hint">{{ l('parent.newHint') }}</p>
+            </template>
+            <span v-if="parentError" class="meta-manual-row__field-error" role="alert" data-testid="manual-row-dialog-parent-error">{{ parentError }}</span>
+          </fieldset>
+
           <div v-if="plan.blockedRequiredCount > 0" class="meta-manual-row__error" role="alert" data-testid="manual-row-dialog-blocked">
             {{ l('dialog.blockedRequired') }}
           </div>
@@ -111,12 +150,24 @@
 // field permissions); only 名称 and 总用量 are required on the template. 项目号 is never typed — the server stamps it,
 // together with the row's own key and 有效 (ADR §3.2). This component only collects values; the workbench sends them to
 // POST /sheets/:sheetId/manual-rows and owns the error / success handling.
-import { computed, reactive, watch } from 'vue'
+// ADR §12.2 (slice P2): with `parentFieldIds` the dialog also offers 「父组件」 — 不挂父组件 (default; nothing is sent, as
+// before), 选已有的 (a candidate saved exactly as returned) or 新建父组件 (both typed values required, trimmed). The pair is
+// always sent with both keys (rule P3). A name without a code and the row as its own parent are refused here before
+// anything is sent; the server re-checks both and its message is shown as is.
+import { computed, reactive, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { MtButton, MtIconButton } from '../ui'
-import type { MetaField } from '../types'
+import type { MetaField, MetaManualRowParentFieldIds } from '../types'
 import { manualRowLabel, manualRowRequiredMessage, type ManualRowLabelKey } from '../utils/manual-row-labels'
-import { isBlankManualRowValue, type ManualRowDialogPlan } from '../utils/manual-rows'
+import {
+  isBlankManualRowValue,
+  manualRowParentPayload,
+  manualRowParentProblem,
+  type ManualRowDialogPlan,
+  type ManualRowParentChoice,
+  type ManualRowParentProblem,
+} from '../utils/manual-rows'
+import MetaManualRowParentPicker from './MetaManualRowParentPicker.vue'
 
 const props = withDefaults(defineProps<{
   visible: boolean
@@ -125,10 +176,21 @@ const props = withDefaults(defineProps<{
   error?: string | null
   /** The server's per-field messages (422 fieldErrors), keyed by field id. */
   fieldErrors?: Record<string, string> | null
+  /** ADR §12.6: /context's pair — absent ⇒ no 「父组件」 fieldset. */
+  parentFieldIds?: MetaManualRowParentFieldIds | null
+  /** The 图号 column's id, so the row's own 图号 is neither offered nor accepted as its parent. */
+  ownCodeFieldId?: string | null
+  /** GET …/manual-rows/parent-options for 「选已有的」. */
+  searchParentOptions?: ((q: string) => Promise<unknown>) | null
+  parentSearchDebounceMs?: number
 }>(), {
   submitting: false,
   error: null,
   fieldErrors: null,
+  parentFieldIds: null,
+  ownCodeFieldId: null,
+  searchParentOptions: null,
+  parentSearchDebounceMs: 250,
 })
 
 const emit = defineEmits<{
@@ -147,10 +209,46 @@ const checks = reactive<Record<string, boolean>>({})
 const localErrors = reactive<Record<string, string>>({})
 const hasRequiredField = computed(() => props.plan.fields.some((entry) => entry.required))
 
+type ParentMode = 'none' | 'pick' | 'new'
+const parentMode = ref<ParentMode>('none')
+const parentPicked = ref<{ code: string; name: string | null } | null>(null)
+const parentNewCode = ref('')
+const parentNewName = ref('')
+const parentError = ref<string | null>(null)
+const parentRadioName = `manual-row-parent-${Math.random().toString(36).slice(2)}`
+const parentModes = computed<Array<{ value: ParentMode; label: ManualRowLabelKey }>>(() => [
+  { value: 'none', label: 'parent.modeNone' },
+  ...(props.searchParentOptions ? [{ value: 'pick' as const, label: 'parent.modePick' as const }] : []),
+  { value: 'new', label: 'parent.modeNew' },
+])
+// The row's own 图号 as typed here (P5 compares it with the parent).
+const ownCode = computed(() => (props.ownCodeFieldId ? draft[props.ownCodeFieldId] ?? null : null))
+
+const PARENT_PROBLEM_KEYS: Readonly<Record<ManualRowParentProblem, ManualRowLabelKey>> = {
+  pick_required: 'parent.problem.pickRequired',
+  code_required: 'parent.problem.codeRequired',
+  name_required: 'parent.problem.nameRequired',
+  name_without_code: 'parent.problem.nameWithoutCode',
+  self_parent: 'parent.problem.selfParent',
+}
+
+function parentChoice(): ManualRowParentChoice {
+  if (parentMode.value === 'pick') return { mode: 'pick', option: parentPicked.value }
+  if (parentMode.value === 'new') return { mode: 'new', code: parentNewCode.value, name: parentNewName.value }
+  return { mode: 'none' }
+}
+
+watch(parentMode, () => { parentError.value = null })
+
 function resetDraft(): void {
   for (const key of Object.keys(draft)) delete draft[key]
   for (const key of Object.keys(checks)) delete checks[key]
   for (const key of Object.keys(localErrors)) delete localErrors[key]
+  parentMode.value = 'none'
+  parentPicked.value = null
+  parentNewCode.value = ''
+  parentNewName.value = ''
+  parentError.value = null
   for (const entry of props.plan.fields) {
     if (entry.field.type === 'boolean') checks[entry.field.id] = false
     else draft[entry.field.id] = ''
@@ -201,7 +299,15 @@ function onSubmit(): void {
     }
     data[entry.field.id] = value
   }
-  if (Object.keys(localErrors).length > 0) return
+  parentError.value = null
+  if (props.parentFieldIds) {
+    const choice = parentChoice()
+    const problem = manualRowParentProblem(choice, ownCode.value)
+    if (problem) parentError.value = l(PARENT_PROBLEM_KEYS[problem])
+    // 不挂父组件 sends nothing (exactly as before); a parent is sent as the pair, both keys.
+    else if (choice.mode !== 'none') Object.assign(data, manualRowParentPayload(choice, props.parentFieldIds))
+  }
+  if (Object.keys(localErrors).length > 0 || parentError.value) return
   emit('submit', data)
 }
 
@@ -226,5 +332,9 @@ function onCancel(): void {
 .meta-manual-row__hint--muted { color: #909399; font-style: italic; }
 .meta-manual-row__field-error { color: #f56c6c; font-size: 12px; }
 .meta-manual-row__error { color: #f56c6c; background: #fef0f0; padding: 8px 10px; border-radius: 4px; font-size: 13px; }
+.meta-manual-row__parent { border: 1px solid #dcdfe6; border-radius: 6px; margin: 4px 0 0; padding: 6px 12px 10px; display: flex; flex-direction: column; gap: 8px; }
+.meta-manual-row__parent-legend { padding: 0 4px; font-size: 13px; font-weight: 600; color: #303133; }
+.meta-manual-row__parent-modes { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; }
+.meta-manual-row__parent-mode { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
 .meta-manual-row__actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--ms-border-light, #ebedf0); }
 </style>
