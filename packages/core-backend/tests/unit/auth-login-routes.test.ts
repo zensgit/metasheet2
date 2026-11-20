@@ -18,6 +18,8 @@ const inviteTokenMocks = vi.hoisted(() => ({
 
 const pgMocks = vi.hoisted(() => ({
   query: vi.fn(),
+  transaction: vi.fn(),
+  transactionQuery: vi.fn(),
 }))
 
 const bcryptMocks = vi.hoisted(() => ({
@@ -84,6 +86,7 @@ vi.mock('../../src/auth/invite-tokens', () => ({
 
 vi.mock('../../src/db/pg', () => ({
   query: pgMocks.query,
+  transaction: pgMocks.transaction,
 }))
 
 vi.mock('bcryptjs', () => bcryptMocks)
@@ -143,6 +146,7 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { DingTalkBusinessError, DingTalkRequestError } from '../../src/integrations/dingtalk/transport'
 import { ACCOUNT_ACTIVATION_INVALID_CODE, ACCOUNT_PENDING_ACTIVATION_CODE } from '../../src/auth/user-activation'
+import { closedDingTalkOrigin } from '../../src/auth/strict-credential-chain'
 import { authRouter } from '../../src/routes/auth'
 import express from 'express'
 import request from 'supertest'
@@ -241,7 +245,7 @@ describe('explicit session organization routes', () => {
     authServiceMocks.verifyToken.mockResolvedValue({ id: 'actor', tenantId: 'org-a' })
     authServiceMocks.listActiveMembershipOrgIds.mockResolvedValue(['org-a', 'org-b'])
     authServiceMocks.resolveSessionTenantId.mockResolvedValue('org-b')
-    authServiceMocks.readTokenPayload.mockReturnValue({ sid: 'session', exp: 2000000000 })
+    authServiceMocks.readTokenPayload.mockReturnValue({ sid: 'session', iat: 100, exp: 2000000000 })
     authServiceMocks.createToken.mockReturnValue('signed-new-token')
     sessionRegistryMocks.createUserSession.mockResolvedValue({id:'synthetic-session'})
   })
@@ -261,10 +265,11 @@ describe('explicit session organization routes', () => {
     })
     expect(res.statusCode).toBe(200)
     expect(authServiceMocks.resolveSessionTenantId).toHaveBeenCalledWith('actor', 'org-b')
-    expect(authServiceMocks.createToken).toHaveBeenCalledWith({ id: 'actor', tenantId: 'org-b' }, { sid: 'session', externalAuth: false })
+    expect(authServiceMocks.createToken).toHaveBeenCalledWith({ id: 'actor', tenantId: 'org-b' }, { sid: 'session', externalAuth: false, revocationIat: 100 })
     expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledTimes(1)
     expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledWith('actor', expect.objectContaining({
       sessionId: 'session', expectedAccessGeneration: 0,
+      expectedRevocationIat: 100, requireExistingSession: true,
     }))
   })
 
@@ -279,6 +284,33 @@ describe('explicit session organization routes', () => {
     }))
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual({ success: false, error: 'Authentication changed; please sign in again', code: 'authentication_changed' })
+  })
+
+  it.each([
+    [{ sessionRevision: 'none' }, { expectedSessionRevision: 'none' }],
+    [{ sessionRevision: '00000000-0000-4000-8000-000000000009' }, { expectedSessionRevision: '00000000-0000-4000-8000-000000000009' }],
+    [{ revocationIat: 42 }, { expectedRevocationIat: 42 }],
+  ])('preserves original organization-switch evidence %j and refuses lost registration', async (claims, fence) => {
+    authServiceMocks.readTokenPayload.mockReturnValue({ sid: 'session', iat: 100, exp: 2000000000, ...claims })
+    sessionRegistryMocks.createUserSession.mockResolvedValue(null)
+    const response = await invokeRoute('post', '/session-org', { headers: { authorization: 'Bearer current' }, body: { orgId: 'org-b' } })
+    expect(authServiceMocks.createToken).toHaveBeenCalledWith(expect.anything(), { sid: 'session', externalAuth: false, ...claims })
+    expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledWith('actor', expect.objectContaining({
+      sessionId: 'session', requireExistingSession: true, ...fence,
+    }))
+    expect(response.statusCode).toBe(409)
+    expect(response.body).not.toHaveProperty('data')
+  })
+
+  it('keeps a sidless legacy switch tied to its original iat', async () => {
+    authServiceMocks.readTokenPayload.mockReturnValue({ iat: 42, exp: 2000000000 })
+    const response = await invokeRoute('post', '/session-org', { headers: { authorization: 'Bearer current' }, body: { orgId: 'org-b' } })
+    expect(response.statusCode).toBe(200)
+    const sessionId = authServiceMocks.createToken.mock.lastCall?.[1].sid
+    expect(sessionId).toEqual(expect.any(String))
+    expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledWith('actor', expect.objectContaining({
+      sessionId, requireExistingSession: false, expectedRevocationIat: 42, expectedSessionRevision: undefined,
+    }))
   })
 
   it.each(['non-member', 'revoked-member'])('refuses %s without token or session writes', async () => {
@@ -325,6 +357,8 @@ describe('auth login routes', () => {
     authServiceMocks.resolveSessionTenantId.mockResolvedValue(undefined)
     inviteTokenMocks.verifyInviteToken.mockReset()
     pgMocks.query.mockReset()
+    pgMocks.transaction.mockReset()
+    pgMocks.transactionQuery.mockReset()
     bcryptMocks.hash.mockReset()
     bcryptMocks.compare.mockReset()
     sessionMocks.revokeUserSessions.mockReset()
@@ -794,157 +828,123 @@ describe('auth login routes', () => {
     expect((response.body as Record<string, any>).data.features.attendance).toBe(true)
   })
 
-  it('changes password for an authenticated session that is forced to rotate password', async () => {
-    authServiceMocks.verifyToken.mockResolvedValue({
-      id: 'user-1',
-      email: 'manager@example.com',
-      name: 'Manager',
-      role: 'user',
-      permissions: ['attendance:read'],
-      must_change_password: true,
-      created_at: new Date('2026-03-13T00:00:00.000Z'),
-      updated_at: new Date('2026-03-13T00:00:00.000Z'),
-    })
-    bcryptMocks.hash.mockResolvedValue('hashed-password')
-    sessionMocks.revokeUserSessions.mockResolvedValue({ revokedAfter: '2026-03-13T00:10:00.000Z' })
-    authServiceMocks.createToken.mockReturnValue('fresh-token')
-    authServiceMocks.readTokenPayload.mockReturnValue({
-      sub: 'user-1',
-      sid: 'fresh-session',
-      exp: Math.floor(new Date('2026-03-14T00:00:00.000Z').getTime() / 1000),
-    })
-    pgMocks.query
-      .mockResolvedValueOnce({ rows: [actorInputsAbsent] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
-
-    const response = await invokeRoute('post', '/password/change', {
-      headers: {
-        authorization: 'Bearer live-token',
-        'user-agent': 'Vitest',
-      },
-      body: {
-        password: 'WelcomePass9A',
-      },
-    })
-
-    expect(response.statusCode).toBe(200)
-    expect(pgMocks.query).toHaveBeenNthCalledWith(
-      2,
-      expect.stringContaining('must_change_password = FALSE'),
-      ['hashed-password', 'user-1'],
-    )
-    expect(String(pgMocks.query.mock.calls[1]?.[0] || '')).toContain('local_password_set = TRUE')
-    expect(sessionMocks.revokeUserSessions).toHaveBeenCalledWith('user-1', expect.objectContaining({
-      updatedBy: 'user-1',
-      reason: 'password-change-required-cleared',
-    }))
-    expect(authServiceMocks.createToken).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'user-1',
-        must_change_password: false,
-      }),
-      expect.objectContaining({
-        sid: expect.any(String),
-      }),
-    )
-    expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledWith(
-      'user-1',
-      expect.objectContaining({
-        sessionId: expect.any(String),
-        expiresAt: '2026-03-14T00:00:00.000Z',
-        ipAddress: '127.0.0.1',
-        userAgent: 'Vitest',
-        expectedAccessGeneration: 0,
-      }),
-    )
-    expect((response.body as Record<string, any>).data.passwordChangeRequired).toBe(false)
-    expect((response.body as Record<string, any>).data.token).toBe('fresh-token')
-  })
-
-  it('fences the forced password change session with the access generation read at authentication', async () => {
-    authServiceMocks.verifyToken.mockResolvedValue({
-      id: 'user-1',
-      email: 'manager@example.com',
-      name: 'Manager',
-      role: 'user',
-      permissions: ['attendance:read'],
-      must_change_password: true,
-      access_generation: 4,
-      created_at: new Date('2026-03-13T00:00:00.000Z'),
-      updated_at: new Date('2026-03-13T00:00:00.000Z'),
-    })
-    bcryptMocks.hash.mockResolvedValue('hashed-password')
-    sessionMocks.revokeUserSessions.mockResolvedValue({ revokedAfter: '2026-03-13T00:10:00.000Z' })
-    authServiceMocks.createToken.mockReturnValue('fresh-token')
-    authServiceMocks.readTokenPayload.mockReturnValue({
-      sub: 'user-1',
-      sid: 'fresh-session',
-      exp: Math.floor(new Date('2026-03-14T00:00:00.000Z').getTime() / 1000),
-    })
-    pgMocks.query.mockResolvedValueOnce({ rows: [actorInputsAbsent] }).mockResolvedValue({ rows: [] })
-
-    const response = await invokeRoute('post', '/password/change', {
-      headers: { authorization: 'Bearer live-token' },
+  describe('atomic forced password change', () => {
+    const priorRevision = '00000000-0000-4000-8000-000000000001'
+    const receiptRevision = '00000000-0000-4000-8000-000000000002'
+    const userId = 'user-1'
+    const rotate = () => invokeRoute('post', '/password/change', {
+      headers: { authorization: 'Bearer live-token', 'user-agent': 'Vitest' },
       body: { password: 'WelcomePass9A' },
     })
+    let committed: boolean
+    let input: Record<string, unknown>
+    let watermark: { revision: string; revoked_after: Date } | undefined
+    let written: unknown
+    let lost: string
 
-    expect(response.statusCode).toBe(200)
-    expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledTimes(1)
-    expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledWith(
-      'user-1',
-      expect.objectContaining({ expectedAccessGeneration: 4 }),
-    )
-    expect((response.body as Record<string, any>).data.token).toBe('fresh-token')
-  })
+    beforeEach(() => {
+      committed = false
+      lost = ''
+      written = receiptRevision
+      input = { sub: userId, sid: 'old-session', iat: 100, sessionRevision: 'none' }
+      watermark = undefined
+      authServiceMocks.verifyToken.mockResolvedValue({ id: userId, must_change_password: true, access_generation: 4 })
+      pgMocks.query.mockResolvedValueOnce({ rows: [actorInputsAbsent] })
+      bcryptMocks.hash.mockResolvedValue('hashed-password')
+      authServiceMocks.createToken.mockImplementation(() => {
+        expect(committed).toBe(true)
+        return 'fresh-token'
+      })
+      authServiceMocks.readTokenPayload.mockImplementation(token => token === 'live-token' ? input : {
+        ...authServiceMocks.createToken.mock.lastCall?.[1], exp: 2000000000,
+      })
+      pgMocks.transaction.mockImplementation(async run => {
+        const result = await run({ query: pgMocks.transactionQuery })
+        committed = true
+        return result
+      })
+      pgMocks.transactionQuery.mockImplementation(async (sql: string) => {
+        if (sql.includes('FROM users WHERE id') && sql.includes('FOR UPDATE')) {
+          expect(sql).toContain('must_change_password AND local_password_set FOR UPDATE')
+          expect(sql).toContain('access_generation = $2')
+          return { rows: lost === 'user' ? [] : [{ id: userId }] }
+        }
+        if (sql.includes('FROM users')) return { rows: [{ id: userId, is_active: true, activation_status: 'activated' }] }
+        if (sql.includes('FROM user_session_revocations')) return { rows: watermark ? [watermark] : [] }
+        if (sql.includes('FROM user_sessions')) return { rows: sql.includes('FOR SHARE') && lost === 'sid' ? [] : [{ id: 'old-session' }] }
+        if (sql.includes('UPDATE users SET password_hash')) return { rows: [{ id: userId }] }
+        if (sql.includes('INSERT INTO user_session_revocations')) {
+          expect(sql).toContain('WHERE user_session_revocations.revision = $2::uuid')
+          expect(sql).toContain("'password-change-required-cleared'")
+          expect(sql).toContain('RETURNING revision')
+          if (lost === 'schema') throw Object.assign(new Error('schema'), { code: '42703' })
+          return { rows: written === undefined ? [] : [{ revision: written }] }
+        }
+        throw new Error('Unexpected transaction statement')
+      })
+    })
 
-  it('returns 409 authentication_changed and no token when the generation moved during a forced password change', async () => {
-    authServiceMocks.verifyToken.mockResolvedValue({
-      id: 'user-1',
-      email: 'manager@example.com',
-      name: 'Manager',
-      role: 'user',
-      permissions: ['attendance:read'],
-      must_change_password: true,
-      access_generation: 3,
-      created_at: new Date('2026-03-13T00:00:00.000Z'),
-      updated_at: new Date('2026-03-13T00:00:00.000Z'),
-    })
-    bcryptMocks.hash.mockResolvedValue('hashed-password')
-    sessionMocks.revokeUserSessions.mockResolvedValue({ revokedAfter: '2026-03-13T00:10:00.000Z' })
-    authServiceMocks.createToken.mockReturnValue('fresh-token')
-    authServiceMocks.readTokenPayload.mockReturnValue({
-      sub: 'user-1',
-      sid: 'fresh-session',
-      exp: Math.floor(new Date('2026-03-14T00:00:00.000Z').getTime() / 1000),
-    })
-    sessionRegistryMocks.createUserSession.mockResolvedValue(null)
-    pgMocks.query.mockResolvedValueOnce({ rows: [actorInputsAbsent] }).mockResolvedValue({ rows: [] })
-
-    const response = await invokeRoute('post', '/password/change', {
-      headers: { authorization: 'Bearer live-token' },
-      body: { password: 'WelcomePass9A' },
+    it.each([['none', 0], ['existing', 4], ['legacy', 4]] as const)('signs and registers only the committed receipt (%s)', async (mode, generation) => {
+      authServiceMocks.verifyToken.mockResolvedValue({ id: userId, must_change_password: true, access_generation: generation })
+      if (mode !== 'none') {
+        watermark = { revision: priorRevision, revoked_after: new Date(99500) }
+        if (mode === 'legacy') delete input.sessionRevision
+        else input.sessionRevision = priorRevision
+      }
+      const response = await rotate()
+      expect(response.statusCode).toBe(200)
+      expect(pgMocks.transaction).toHaveBeenCalledTimes(1)
+      expect(pgMocks.transactionQuery).toHaveBeenNthCalledWith(1, expect.stringContaining('FOR UPDATE'), [userId, generation])
+      expect(pgMocks.transactionQuery).toHaveBeenCalledWith(expect.stringMatching(/must_change_password = FALSE,\s+local_password_set = TRUE/), ['hashed-password', userId])
+      expect(pgMocks.transactionQuery).toHaveBeenCalledWith(expect.stringContaining('RETURNING revision'), [userId, watermark?.revision ?? null])
+      expect(sessionMocks.revokeUserSessions).not.toHaveBeenCalled()
+      expect(authServiceMocks.createToken).toHaveBeenCalledWith(expect.objectContaining({ id: userId, must_change_password: false }), {
+        sid: expect.any(String), externalAuth: false, sessionRevision: receiptRevision,
+      })
+      expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledTimes(1)
+      expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledWith(userId, {
+        sessionId: authServiceMocks.createToken.mock.lastCall?.[1].sid,
+        expectedAccessGeneration: generation, expectedSessionRevision: receiptRevision,
+        expiresAt: '2033-05-18T03:33:20.000Z', ipAddress: '127.0.0.1', userAgent: 'Vitest',
+      })
+      expect(response.body).toMatchObject({ success: true, data: { passwordChangeRequired: false, token: 'fresh-token' } })
     })
 
-    expect(response.statusCode).toBe(409)
-    expect(response.body).toEqual({
-      success: false,
-      error: 'Authentication changed; please sign in again with the new password',
-      code: 'authentication_changed',
+    it.each(['user', 'sid', 'legacy cutoff', 'conflict', 'invalid receipt', 'unchanged revision', 'schema'])(
+      'does not commit or sign if the locked transaction loses %s', async reason => {
+        lost = reason
+        if (reason === 'legacy cutoff') {
+          delete input.sessionRevision
+          input.revocationIat = 99
+          watermark = { revision: priorRevision, revoked_after: new Date(99500) }
+        }
+        if (reason === 'conflict') written = undefined
+        if (reason === 'invalid receipt') written = 'none'
+        if (reason === 'unchanged revision') {
+          input.sessionRevision = priorRevision
+          watermark = { revision: priorRevision, revoked_after: new Date(99000) }
+          written = priorRevision
+        }
+        const response = await rotate()
+        expect(response.statusCode).toBe(reason === 'schema' ? 500 : 409)
+        expect(response.body).not.toHaveProperty('data')
+        expect(committed).toBe(false)
+        expect(authServiceMocks.createToken).not.toHaveBeenCalled()
+        expect(sessionRegistryMocks.createUserSession).not.toHaveBeenCalled()
+      })
+
+    it('does not return the receipt if its generation or revision changed before registration', async () => {
+      sessionRegistryMocks.createUserSession.mockResolvedValue(null)
+      const response = await rotate()
+      expect(committed).toBe(true)
+      expect(pgMocks.transactionQuery).toHaveBeenCalledWith(expect.stringContaining('must_change_password = FALSE'), ['hashed-password', userId])
+      expect(pgMocks.transactionQuery).toHaveBeenCalledWith(expect.stringContaining('RETURNING revision'), [userId, null])
+      expect(response.statusCode).toBe(409)
+      expect(response.body).toEqual({ success: false, error: 'Authentication changed; please sign in again with the new password', code: 'authentication_changed' })
+      expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledWith(userId, expect.objectContaining({
+        expectedAccessGeneration: 4, expectedSessionRevision: receiptRevision,
+      }))
     })
-    // The password write and the session revocation stay committed; only the re-issued session is refused.
-    expect(pgMocks.query).toHaveBeenCalledTimes(2)
-    expect(pgMocks.query).toHaveBeenCalledWith(
-      expect.stringContaining('must_change_password = FALSE'),
-      ['hashed-password', 'user-1'],
-    )
-    expect(sessionMocks.revokeUserSessions).toHaveBeenCalledWith('user-1', expect.objectContaining({
-      reason: 'password-change-required-cleared',
-    }))
-    expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledWith(
-      'user-1',
-      expect.objectContaining({ sessionId: expect.any(String), expectedAccessGeneration: 3 }),
-    )
   })
 
   it('rejects a forced password change that hits the weak-pattern rule with the weak_pattern reason code', async () => {
@@ -1647,7 +1647,16 @@ describe('auth login routes', () => {
     expect(activationMocks.activatePendingUser).not.toHaveBeenCalled()
   })
 
-  it('activates the exact DingTalk source before issuing a session', async () => {
+  it.each([
+    ['unchanged', 37, 37, true, 200],
+    ['manual delivery committed before registration', 37, 38, true, 409],
+    ['origin connection removed before registration', 37, 37, true, 409],
+    ['missing generation', undefined, 37, true, 409],
+    ['null generation', null, 37, true, 409],
+    ['zero generation', 0, 37, true, 409],
+    ['unsafe generation', Number.MAX_SAFE_INTEGER + 1, 37, true, 409],
+    ['unreadable token expiry', 37, 37, false, 409],
+  ] as const)('fences the DingTalk activation callback: %s', async (label, generation, current, hasExpiry, status) => {
     dingtalkOauthMocks.validateState.mockResolvedValue({
       valid: true,
       redirectPath: '/admin/users',
@@ -1663,12 +1672,7 @@ describe('auth login routes', () => {
     })
     rbacMocks.isAdmin.mockResolvedValue(true)
     rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read'])
-    let resolveActivation!: (result: {
-      userId: string
-      activationStatus: 'activated'
-      isActive: true
-      localPasswordSet: boolean
-    }) => void
+    let resolveActivation!: (result: unknown) => void
     activationMocks.activatePendingUser.mockReturnValue(new Promise((resolve) => {
       resolveActivation = resolve
     }))
@@ -1694,7 +1698,9 @@ describe('auth login routes', () => {
       })
       .mockResolvedValueOnce({ rows: [] })
     authServiceMocks.createToken.mockReturnValue('activated-session-token')
-    authServiceMocks.readTokenPayload.mockReturnValue(null)
+    authServiceMocks.readTokenPayload.mockReturnValue(hasExpiry ? { exp: 2000000000 } : null)
+    sessionRegistryMocks.createUserSession.mockImplementation(async (_userId, options) =>
+      options.expectedAccessGeneration === undefined || options.expectedAccessGeneration === current ? { id: 'synthetic-session' } : null)
 
     const responsePromise = invokeRoute('post', '/dingtalk/callback', {
       body: { code: 'auth-code', state: 'state-activate-1' },
@@ -1703,15 +1709,19 @@ describe('auth login routes', () => {
       expect(activationMocks.activatePendingUser).toHaveBeenCalledTimes(1)
     })
     expect(authServiceMocks.createToken).not.toHaveBeenCalled()
-    resolveActivation({
-      userId: 'pending-user',
-      activationStatus: 'activated',
-      isActive: true,
-      localPasswordSet: false,
-    })
+    const externalOrigin = label === 'origin connection removed before registration'
+      ? closedDingTalkOrigin('00000000-0000-4000-8000-000000000003') : null
+    if (externalOrigin) {
+      pgMocks.transaction.mockImplementation(run => run({ query: pgMocks.transactionQuery }))
+      pgMocks.transactionQuery
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: 'pending-user' }] })
+        .mockResolvedValueOnce({ rows: [] })
+    }
+    resolveActivation({ sessionGeneration: generation, externalOrigin })
     const response = await responsePromise
 
-    expect(response.statusCode).toBe(200)
+    expect(response.statusCode).toBe(status)
     expect(dingtalkOauthMocks.exchangeCodeForUser).not.toHaveBeenCalled()
     expect(activationMocks.activatePendingUser).toHaveBeenCalledWith({
       userId: 'pending-user',
@@ -1724,7 +1734,24 @@ describe('auth login routes', () => {
         openId: 'open-1',
         unionId: 'union-1',
       },
-    })
+    }, true)
+    if (externalOrigin?.kind === 'dingtalk') {
+      expect(pgMocks.transactionQuery).toHaveBeenCalledWith(expect.stringContaining('FROM directory_integrations'), [externalOrigin.connectionId])
+      expect(sessionRegistryMocks.createUserSession).not.toHaveBeenCalled()
+    } else if (generation === 37 && hasExpiry) {
+      expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledWith('pending-user',
+        expect.objectContaining({ expectedAccessGeneration: generation }))
+    } else {
+      expect(sessionRegistryMocks.createUserSession).not.toHaveBeenCalled()
+      if (generation !== 37) expect(authServiceMocks.createToken).not.toHaveBeenCalled()
+    }
+    if (status !== 200) {
+      expect(response.body).toEqual({
+        success: false, error: 'Authentication changed; please sign in again', code: 'authentication_changed',
+      })
+      expect(auditMocks.auditLog).not.toHaveBeenCalled()
+      return
+    }
     expect((response.body as Record<string, any>).data).toMatchObject({
       mode: 'activate',
       token: 'activated-session-token',
@@ -2223,7 +2250,7 @@ describe('auth login routes', () => {
     expect(response.statusCode).toBe(200)
     expect(dingtalkOauthMocks.validateState).toHaveBeenCalledWith('state-1')
     expect(dingtalkOauthMocks.exchangeCodeForUser).toHaveBeenCalledWith('auth-code')
-    expect(rbacMocks.listUserPermissions).toHaveBeenCalledWith('user-1')
+    expect(rbacMocks.listUserPermissions).toHaveBeenCalledWith('user-1', 'authoritative')
     expect(authServiceMocks.createToken).toHaveBeenCalledWith(
       expect.objectContaining({
         id: 'user-1',

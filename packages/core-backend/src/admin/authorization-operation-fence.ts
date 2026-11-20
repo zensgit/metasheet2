@@ -97,6 +97,7 @@ export const AUTHORIZATION_OPERATION_SCHEMA_QUERIES = [
 // Hash the entire B2 addition separately so each previously qualified PostgreSQL
 // version/locale still has to match its own original exact catalog profile.
 const B2_CATALOG_ADDITIONS = 'c8b8994bc64060dde36280a452662854741816a88091d1b2280d7f3f1ca0f743'
+const SESSION_REVISION_FUNCTION_PROFILE = 'd3a68a34f287905fb17c2f17cdc0fc872459696e6f1391d5dbab56ef84a5124e'
 const B2_FOREIGN_KEY_SOURCES = new Set([
   'admin_grant_target_ceremony_challenges', 'directory_connection_application_pins',
   'directory_connection_login_scope', 'user_external_identity_evidence', 'user_external_identity_login_grants',
@@ -121,13 +122,19 @@ function schemaDigest(value: unknown): string {
 function readBaseProfile(database: CatalogRow | null, rows: CatalogRow[][]): string | undefined {
   const base = rows.map(() => [] as CatalogRow[])
   const additions = rows.map(() => [] as CatalogRow[])
+  const sessionFunctions: CatalogRow[] = []
   for (const [section, catalog] of rows.entries()) {
     for (const row of catalog) {
+      if (section === 7 && row.proname === 'rotate_user_session_revocation_revision') {
+        sessionFunctions.push(row)
+        continue
+      }
       const partition = belongsToB2Catalog(section, row) ? additions : base
       partition[section].push(row)
     }
   }
-  if (schemaDigest(additions) === B2_CATALOG_ADDITIONS) return schemaDigest({ database, rows: base })
+  if (sessionFunctions.length === 1 && schemaDigest(sessionFunctions[0]) === SESSION_REVISION_FUNCTION_PROFILE
+    && schemaDigest(additions) === B2_CATALOG_ADDITIONS) return schemaDigest({ database, rows: base })
 }
 
 /** Compute only structural metadata. Never reads customer rows or emits SQL values. */

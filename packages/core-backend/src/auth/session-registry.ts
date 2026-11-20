@@ -1,5 +1,6 @@
 import crypto from 'crypto'
-import { query } from '../db/pg'
+import { query, transaction } from '../db/pg'
+import { isSessionRevision, sessionRevisionAllows } from './session-revision'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 
 type UserSessionRow = {
@@ -74,6 +75,8 @@ function buildSyntheticSession(userId: string, sessionId: string, expiresAt: str
   }
 }
 
+class SessionEvidenceChanged extends Error {}
+
 export async function createUserSession(
   userId: string,
   options: {
@@ -82,18 +85,28 @@ export async function createUserSession(
     ipAddress?: string | null
     userAgent?: string | null
     expectedAccessGeneration?: number
+    expectedSessionRevision?: string
+    expectedRevocationIat?: number
+    requireExistingSession?: boolean
   },
   executor?: { query: typeof query },
 ): Promise<UserSessionRecord | null> {
   const sessionId = options.sessionId?.trim() || crypto.randomUUID()
   // Only a generation-fenced issuance locks the users row: FOR SHARE makes it wait for a concurrent generation
   // bump to commit and then compares the committed value. Without a generation nothing is compared, so an
-  // unfenced issuance (password login, activation, dev token) reads the row without a lock, as before the fence.
+  // unfenced issuance reads the row without a lock, as before the fence.
   const fenced = options.expectedAccessGeneration !== undefined
-  const execute: typeof query = executor === undefined ? query : executor.query.bind(executor)
+  const revision = options.expectedSessionRevision
+  const originalIat = options.expectedRevocationIat
+  const checksRevocation = revision !== undefined || originalIat !== undefined
+  if (checksRevocation && (typeof options.expectedAccessGeneration !== 'number'
+    || !Number.isSafeInteger(options.expectedAccessGeneration) || options.expectedAccessGeneration < 0 || !options.sessionId?.trim()
+    || (revision !== undefined && (!isSessionRevision(revision) || originalIat !== undefined))
+    || (originalIat !== undefined && (!Number.isSafeInteger(originalIat) || originalIat <= 0)))) return null
+  if (options.requireExistingSession && !checksRevocation) return null
 
-  try {
-    const result = await execute<UserSessionRow>(
+  const register = async (client: { query: typeof query }) => {
+    const result = await client.query<UserSessionRow>(
       `WITH subject AS (
          SELECT id FROM users WHERE id=$2
            AND ($6::bigint IS NULL OR COALESCE(access_generation,0)=$6::bigint)${fenced ? ' FOR SHARE' : ''}
@@ -113,8 +126,9 @@ export async function createUserSession(
          updated_at
        )
        SELECT $1, $2, NOW(), $3::timestamptz, NOW(), NULL, NULL, NULL, $4, $5, NOW(), NOW()
-       WHERE EXISTS (SELECT 1 FROM subject)
-          OR ($6::bigint IS NULL AND $7::boolean AND NOT EXISTS (SELECT 1 FROM users WHERE id=$2))
+       WHERE (EXISTS (SELECT 1 FROM subject)
+          OR ($6::bigint IS NULL AND $7::boolean AND NOT EXISTS (SELECT 1 FROM users WHERE id=$2)))
+       ${options.requireExistingSession ? 'AND EXISTS (SELECT 1 FROM user_sessions WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL FOR UPDATE)' : ''}
        ON CONFLICT (id) DO UPDATE
        SET user_id = EXCLUDED.user_id,
            expires_at = EXCLUDED.expires_at,
@@ -124,12 +138,31 @@ export async function createUserSession(
            updated_at = NOW()
        WHERE user_sessions.revoked_at IS NULL AND user_sessions.user_id=EXCLUDED.user_id
        RETURNING id, user_id, issued_at, expires_at, last_seen_at, revoked_at, revoked_by, revoke_reason, ip_address, user_agent, created_at, updated_at`,
-      [sessionId, userId, options.expiresAt, options.ipAddress ?? null, options.userAgent ?? null, options.expectedAccessGeneration ?? null, executor === undefined && process.env.NODE_ENV !== 'production'],
+      [sessionId, userId, options.expiresAt, options.ipAddress ?? null, options.userAgent ?? null,
+        options.expectedAccessGeneration ?? null, executor === undefined && process.env.NODE_ENV !== 'production'],
     )
     const row = result.rows[0]
-    return row ? mapRow(row) : null
+    if (!row) return null
+    if (checksRevocation) {
+      const current = await client.query<{ revision: string; revoked_after: string | Date }>(
+        'SELECT revision, revoked_after FROM user_session_revocations WHERE user_id=$1 FOR SHARE', [userId],
+      )
+      if (!sessionRevisionAllows({
+        sid: sessionId, iat: originalIat ?? Math.floor(Date.now() / 1000), sessionRevision: revision,
+      }, current.rows[0])) throw new SessionEvidenceChanged()
+    }
+    return mapRow(row)
+  }
+  try {
+    if (executor !== undefined) return await register(executor)
+    if (!checksRevocation) return await register({ query })
+    return await transaction(async (client) => {
+      await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+      return register(client)
+    })
   } catch (error) {
     if (executor !== undefined) throw error
+    if (error instanceof SessionEvidenceChanged) return null
     if (isDatabaseSchemaError(error)) {
       if (options.expectedAccessGeneration !== undefined) return null
       return buildSyntheticSession(userId, sessionId, options.expiresAt)
@@ -255,7 +288,7 @@ export async function isUserSessionActive(userId: string, sessionId: string): Pr
     return Boolean(result.rows[0]?.active)
   } catch (error) {
     if (isDatabaseSchemaError(error)) {
-      return true
+      return false
     }
     throw error
   }

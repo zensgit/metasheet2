@@ -30,7 +30,7 @@ vi.mock('../../src/security/SecretManager', () => ({
 vi.mock('../../src/auth/session-revocation', () => ({ isUserSessionRevoked: async () => false }))
 vi.mock('../../src/auth/session-registry', () => ({
   isUserSessionActive: async () => true,
-  createUserSession: async () => undefined,
+  createUserSession: async () => ({ id: 'synthetic-session' }),
 }))
 vi.mock('../../src/auth/login-alias-service', () => ({
   isAuthLoginAliasCutoverEnabled: () => false,
@@ -157,7 +157,7 @@ describe('default attendance bootstrap/revocation atomicity (real PostgreSQL)', 
   beforeAll(async () => {
     if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required for the isolated R2/R3 DB gate')
     vi.stubEnv('NODE_ENV', 'test')
-    vi.stubEnv('PRODUCT_MODE', 'platform')
+    vi.stubEnv('PRODUCT_MODE', 'attendance')
     vi.stubEnv('RBAC_TOKEN_TRUST', 'false')
     setupPool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1 })
     await setupPool.query(`CREATE SCHEMA ${schema}`)
@@ -178,6 +178,7 @@ describe('default attendance bootstrap/revocation atomicity (real PostgreSQL)', 
         created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now(), last_login_at timestamptz
       );
       CREATE TABLE user_orgs (user_id text, org_id text, is_active boolean);
+      CREATE TABLE user_session_revocations (user_id text PRIMARY KEY, revision uuid);
       CREATE TABLE roles (id text PRIMARY KEY);
       CREATE TABLE role_permissions (role_id text, permission_code text);
       CREATE TABLE user_roles (

@@ -25,4 +25,15 @@ describe('read-only permission-check global gate selection', () => {
     expect(isReadOnlyAuthorizationRequest('POST', `${base}/preview/extra`)).toBe(false)
   })
 
+  it('selects only manual delivery, including Express case and trailing slash variants', () => {
+    const base = '/api/admin/invites'
+    const path = `${base}/synthetic/manual-delivery`
+    expect(isReadOnlyAuthorizationRequest('POST', path)).toBe(true)
+    expect(isReadOnlyAuthorizationRequest('POST', path.toUpperCase() + '/')).toBe(true)
+    expect(isReadOnlyAuthorizationRequest('GET', path)).toBe(false)
+    for (const neighbor of [base, `${base}//manual-delivery`, `${path}/extra`, `${base}/synthetic/resend`, `${base}/synthetic/revoke`]) {
+      expect(isReadOnlyAuthorizationRequest('POST', neighbor)).toBe(false)
+    }
+  })
+
 })

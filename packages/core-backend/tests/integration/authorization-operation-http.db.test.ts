@@ -42,7 +42,12 @@ beforeAll(async () => {
     CREATE TABLE delegated_role_admin_scopes (id text PRIMARY KEY, admin_user_id text, namespace text, directory_department_id text, include_children boolean);
     CREATE TABLE delegated_role_admin_member_groups (id text PRIMARY KEY, admin_user_id text, namespace text, group_id text);
     CREATE TABLE delegated_role_admin_activation (admin_user_id text, namespace text, enabled boolean NOT NULL, revision uuid NOT NULL, PRIMARY KEY(admin_user_id, namespace));
-    CREATE TABLE user_session_revocations (user_id text PRIMARY KEY, revoked_after timestamptz, updated_at timestamptz, updated_by text, reason text);
+    CREATE TABLE directory_departments (id text PRIMARY KEY, integration_id text, external_department_id text, external_parent_department_id text, is_active boolean);
+    CREATE TABLE directory_account_links (directory_account_id text, local_user_id text, link_status text);
+    CREATE TABLE directory_accounts (id text PRIMARY KEY, is_active boolean);
+    CREATE TABLE directory_account_departments (directory_account_id text, directory_department_id text);
+    CREATE TABLE platform_member_group_members (user_id text, group_id text);
+    CREATE TABLE user_session_revocations (user_id text PRIMARY KEY, revoked_after timestamptz, updated_at timestamptz, updated_by text, reason text, revision uuid NOT NULL DEFAULT gen_random_uuid());
     CREATE TABLE user_sessions (id text, user_id text, revoked_at timestamptz);
     CREATE TABLE authorization_operation_receipts (actor_id text NOT NULL, client_operation_id uuid NOT NULL, request_digest text NOT NULL, expected_version text NOT NULL, target_user_id text NOT NULL, action jsonb NOT NULL, receipt jsonb NOT NULL, created_at timestamptz DEFAULT now(), PRIMARY KEY(actor_id, client_operation_id));
     CREATE TABLE authorization_operation_audit (actor_id text NOT NULL, client_operation_id uuid NOT NULL, reason text, reason_origin text NOT NULL, impact jsonb NOT NULL, created_at timestamptz DEFAULT now(), PRIMARY KEY(actor_id, client_operation_id), FOREIGN KEY(actor_id, client_operation_id) REFERENCES authorization_operation_receipts(actor_id, client_operation_id));
@@ -81,23 +86,30 @@ async function commit(version: string, id: string, body = base, who = actor) {
   return request(app).post(path).auth(token(who), { type: 'bearer' }).send({ ...body, expectedVersion: version, clientOperationId: id })
 }
 
-async function waitForLockWaiter() {
+async function waitForBlockedRoleRead() {
   const deadline = Date.now() + 4000
   while (Date.now() < deadline) {
-    const result = await control.query("SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted) AS waiting")
+    const result = await control.query(`SELECT EXISTS (SELECT 1 FROM pg_locks
+      WHERE locktype='relation' AND relation='roles'::regclass AND mode='RowShareLock'
+        AND NOT granted AND pg_backend_pid()=ANY(pg_blocking_pids(pid))) AS waiting`)
     if (result.rows[0].waiting === true) return
     await new Promise(resolve => setTimeout(resolve, 20))
   }
-  throw new Error('synthetic lock waiter did not appear')
+  throw new Error('command did not reach the fixture role-table barrier')
 }
-async function waitForAnyLockWaiter() {
-  const deadline = Date.now() + 4000
-  while (Date.now() < deadline) {
-    const result = await control.query("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock') AS waiting")
-    if (result.rows[0].waiting === true) return
-    await new Promise(resolve => setTimeout(resolve, 20))
+async function commitAcrossRoleRead(version: string, id: string, whileBlocked: () => Promise<void>) {
+  await control.query('BEGIN; LOCK TABLE roles IN EXCLUSIVE MODE')
+  const pending = commit(version, id)
+  try {
+    await waitForBlockedRoleRead()
+    await whileBlocked()
+    await control.query('COMMIT')
+  } catch (error) {
+    await control.query('ROLLBACK')
+    await pending
+    throw error
   }
-  throw new Error('synthetic row-lock waiter did not appear')
+  return pending
 }
 describe('authorization operation real HTTP and synthetic PostgreSQL', () => {
   ;(unfencedFixture ? it.skip : it)('rejects an unattested schema without any authorization writes', async () => {
@@ -129,33 +141,39 @@ describe('authorization operation real HTTP and synthetic PostgreSQL', () => {
       expect((await control.query('SELECT count(*)::int AS n FROM user_namespace_admissions')).rows[0].n).toBe(0)
     } finally { await control.query('DROP TRIGGER fail_audit ON authorization_operation_audit; DROP FUNCTION fail_operation_audit()') }
   })
+  it.each(['operation key', 'platform invariant', 'role row'])('refuses a held %s lock without writing', async kind => {
+    const pre = await preview(); expect(pre.status).toBe(200)
+    const id = randomUUID()
+    await control.query('BEGIN')
+    try {
+      if (kind === 'operation key') await control.query("SELECT pg_advisory_xact_lock(hashtextextended('authorization-operation:' || $1, 0))", [JSON.stringify([actor,id])])
+      if (kind === 'platform invariant') await control.query("SELECT pg_advisory_xact_lock(hashtextextended('user-recycle:platform-admin', 0))")
+      if (kind === 'role row') await control.query("SELECT id FROM roles WHERE id='attendance_member' FOR UPDATE")
+      const done = await commit(pre.body.expectedVersion, id)
+      expect(done.status).toBe(409); expect(done.body.error.code).toBe('AUTHORIZATION_INPUT_BUSY')
+      expect((await control.query('SELECT role_id FROM user_roles WHERE user_id=$1', [target])).rows).toEqual([])
+      expect((await control.query('SELECT namespace FROM user_namespace_admissions WHERE user_id=$1', [target])).rows).toEqual([])
+      expect((await control.query('SELECT count(*)::int AS n FROM authorization_operation_receipts')).rows[0].n).toBe(0)
+    } finally { await control.query('ROLLBACK') }
+  })
   it('reports unknown while a pending same-key operation waits, then exposes committed receipt', async () => {
     const pre = await preview(); expect(pre.status).toBe(200)
-    const id = randomUUID(), holder = new Client({ connectionString: url, options: `-c search_path=${schema}` })
-    await holder.connect(); await holder.query('BEGIN')
-    await holder.query("SELECT pg_advisory_xact_lock(hashtextextended('authorization-operation:' || $1, 0))", [JSON.stringify([actor,id])])
-    const pending = commit(pre.body.expectedVersion, id).then(value => value)
-    try {
-      await waitForLockWaiter()
+    const id = randomUUID()
+    const done = await commitAcrossRoleRead(pre.body.expectedVersion, id, async () => {
       const observed = await request(app).get(`${path}/${id}`).auth(token(actor), { type: 'bearer' })
       expect(observed.status).toBe(200); expect(observed.body.status).toBe('unknown_or_pending')
-    } finally { await holder.query('COMMIT'); await holder.end() }
-    const done = await pending; expect(done.status, JSON.stringify(done.body)).toBe(200)
+    })
+    expect(done.status, JSON.stringify(done.body)).toBe(200)
     const after = await request(app).get(`${path}/${id}`).auth(token(actor), { type: 'bearer' }); expect(after.body.status).toBe('committed')
   })
   it('denies an actor whose authority is revoked while the command waits', async () => {
     const pre = await preview(); expect(pre.status).toBe(200)
-    const holder = new Client({ connectionString: url, options: `-c search_path=${schema}` })
-    await holder.connect(); await holder.query('BEGIN')
-    await holder.query("SELECT pg_advisory_xact_lock(hashtextextended('user-recycle:platform-admin', 0))")
-    const pending = commit(pre.body.expectedVersion, randomUUID()).then(value => value)
-    try {
-      await waitForLockWaiter()
-      await holder.query("DELETE FROM user_roles WHERE user_id=$1 AND role_id='admin'", [actor])
-      await holder.query("UPDATE users SET role='user', is_admin=false WHERE id=$1", [actor])
-    } finally { await holder.query('COMMIT'); await holder.end() }
-    const result = await pending
+    const result = await commitAcrossRoleRead(pre.body.expectedVersion, randomUUID(), async () => {
+      await control.query("DELETE FROM user_roles WHERE user_id=$1 AND role_id='admin'", [actor])
+      await control.query("UPDATE users SET role='user', is_admin=false WHERE id=$1", [actor])
+    })
     expect(result.status).toBe(403)
+    expect(result.body.error.code).toBe('FORBIDDEN')
     expect((await control.query("SELECT count(*)::int AS n FROM user_roles WHERE user_id=$1 AND role_id='attendance_member'", [target])).rows[0].n).toBe(0)
   })
   it('rejects a changed role witness and does not write a receipt', async () => {
@@ -330,19 +348,14 @@ describe('authorization operation real HTTP and synthetic PostgreSQL', () => {
     const self = await preview({ ...base, targetUserId: actor }); expect(self.status).toBe(403); expect(self.body.error.code).toBe('SELF_WIDENING_FORBIDDEN')
   })
 
-  it('rechecks role contents after waiting for the role row', async () => {
+  it('rechecks role contents after planning and before reading the locked row', async () => {
     const pre = await preview(); expect(pre.status).toBe(200)
-    const holder = new Client({ connectionString: url, options: `-c search_path=${schema}` })
-    await holder.connect(); await holder.query('BEGIN')
-    await holder.query("SELECT id FROM roles WHERE id='attendance_member' FOR UPDATE")
-    const pending = commit(pre.body.expectedVersion, randomUUID()).then(value => value)
     try {
-      await waitForAnyLockWaiter()
-      await holder.query("INSERT INTO role_permissions VALUES ('attendance_member','attendance:write')")
-      await holder.query("UPDATE roles SET updated_at=now() WHERE id='attendance_member'")
-    } finally { await holder.query('COMMIT'); await holder.end() }
-    try {
-      const result = await pending; expect(result.status).toBe(409); expect(result.body.error.code).toBe('STALE_PREVIEW')
+      const result = await commitAcrossRoleRead(pre.body.expectedVersion, randomUUID(), async () => {
+        await control.query("INSERT INTO role_permissions VALUES ('attendance_member','attendance:write')")
+        await control.query("UPDATE roles SET updated_at=now() WHERE id='attendance_member'")
+      })
+      expect(result.status).toBe(409); expect(result.body.error.code).toBe('STALE_PREVIEW')
       expect((await control.query('SELECT count(*)::int AS n FROM authorization_operation_receipts')).rows[0].n).toBe(0)
     } finally { await control.query("DELETE FROM role_permissions WHERE permission_code='attendance:write'") }
   })
@@ -385,17 +398,14 @@ describe('authorization operation real HTTP and synthetic PostgreSQL', () => {
 
   it('refuses a role membership plan that changed while waiting even if its state returns to the preview', async () => {
     await control.query("INSERT INTO roles(id,name) VALUES ('bare_role','bare')")
-    await control.query("INSERT INTO user_roles VALUES ($1,'bare_role')", [target])
-    const pre = await preview(); expect(pre.status).toBe(200)
-    await control.query("DELETE FROM user_roles WHERE user_id=$1 AND role_id='bare_role'", [target])
-    const holder = new Client({ connectionString: url, options: `-c search_path=${schema}` })
-    await holder.connect(); await holder.query('BEGIN')
-    await holder.query("SELECT pg_advisory_xact_lock(hashtextextended('user-recycle:platform-admin', 0))")
-    const pending = commit(pre.body.expectedVersion, randomUUID()).then(value => value)
-    try { await waitForLockWaiter(); await holder.query("INSERT INTO user_roles VALUES ($1,'bare_role')", [target]) }
-    finally { await holder.query('COMMIT'); await holder.end() }
     try {
-      const result = await pending; expect(result.status).toBe(409); expect(result.body.error.code).toBe('STALE_PREVIEW')
+      await control.query("INSERT INTO user_roles VALUES ($1,'bare_role')", [target])
+      const pre = await preview(); expect(pre.status).toBe(200)
+      await control.query("DELETE FROM user_roles WHERE user_id=$1 AND role_id='bare_role'", [target])
+      const result = await commitAcrossRoleRead(pre.body.expectedVersion, randomUUID(), async () => {
+        await control.query("INSERT INTO user_roles VALUES ($1,'bare_role')", [target])
+      })
+      expect(result.status).toBe(409); expect(result.body.error.code).toBe('STALE_PREVIEW')
     } finally { await control.query("DELETE FROM roles WHERE id='bare_role'") }
   })
   it('rejects a suppressed role write even when it carries no permission codes', async () => {
@@ -545,13 +555,10 @@ describe('authorization operation real HTTP and synthetic PostgreSQL', () => {
 
   it.each([{ who: 'actor', status: 403 }, { who: 'target', status: 404 }])('refuses a missing locked $who before further reads', async ({ who, status }) => {
     const pre = await preview(); expect(pre.status).toBe(200)
-    const holder = new Client({ connectionString: url, options: `-c search_path=${schema}` })
-    await holder.connect(); await holder.query('BEGIN')
-    await holder.query("SELECT pg_advisory_xact_lock(hashtextextended('user-recycle:platform-admin', 0))")
-    const pending = commit(pre.body.expectedVersion, randomUUID()).then(value => value)
-    try { await waitForLockWaiter(); await holder.query('DELETE FROM users WHERE id=$1', [who === 'actor' ? actor : target]) }
-    finally { await holder.query('COMMIT'); await holder.end() }
-    const result = await pending; expect(result.status).toBe(status)
+    const result = await commitAcrossRoleRead(pre.body.expectedVersion, randomUUID(), async () => {
+      await control.query('DELETE FROM users WHERE id=$1', [who === 'actor' ? actor : target])
+    })
+    expect(result.status).toBe(status)
     expect((await control.query('SELECT count(*)::int AS n FROM authorization_operation_receipts')).rows[0].n).toBe(0)
   })
 

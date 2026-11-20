@@ -413,6 +413,32 @@ describe('first read', () => {
     }
   })
 
+  it('rechecks the signed revision after password verification, even at the same watermark', async () => {
+    const state = defaultState()
+    const token = tokenFor(USER, SESSION, ORG, { sessionRevision: state.revision })
+    const context = readAuthenticatedSessionContext(requestShape(USER, token))!
+    state.watermarkMs = String(context.tokenIssuedAt * 1000 + 500)
+    expect(SECURITY_ACTION_SQL.watermark).toMatch(/SELECT revoked_after, revision,/)
+    await expect(serviceWith({ state }).service.issue(context, verifyRequest())).resolves.toMatchObject({ ttlSeconds: 300 })
+    const afterPasswordCheck = vi.fn(() => { state.revision = CONNECTION })
+    const { service, runner } = serviceWith({ state, afterPasswordCheck })
+    await expectRefusal(service.issue(context, verifyRequest()), 'SECURITY_ACTION_SESSION_REQUIRED')
+    expect(afterPasswordCheck).toHaveBeenCalledTimes(1)
+    expect(keys(runner.events)).not.toContain('insertIssued')
+  })
+
+  it('does not upgrade a legacy refresh from request data or its later iat', async () => {
+    const original = Math.floor(Date.now() / 1000) - 60
+    const state = defaultState({ watermarkMs: String(original * 1000 + 500) })
+    const token = tokenFor(USER, SESSION, ORG, { revocationIat: original })
+    const context = readAuthenticatedSessionContext(requestShape(USER, token, ORG, {
+      user: { id: USER, sessionRevision: state.revision }, body: { sessionRevision: state.revision, revocationIat: original + 60 },
+    }))!
+    expect(context.revocationIat).toBe(original)
+    expect(context.sessionRevision).toBeUndefined()
+    await expectRefusal(serviceWith({ state }).service.issue(context, verifyRequest()), 'SECURITY_ACTION_SESSION_REQUIRED')
+  })
+
   it('refuses with 429 before the password is compared once the per-user failure limit is reached', async () => {
     const { service, verifyCalls, runner } = serviceWith({ state: defaultState({ failures: SECURITY_ACTION_FAILURE_LIMIT, retryAfter: 123 }) })
     const refusal = await expectRefusal(service.issue(contextFor(), verifyRequest()), 'SECURITY_ACTION_RATE_LIMITED')
@@ -841,6 +867,22 @@ describe('consumption decisions', () => {
     if (code !== 'SECURITY_ACTION_PROOF_ALREADY_USED' && code !== 'SECURITY_ACTION_PROOF_EXPIRED' && code !== 'SECURITY_ACTION_PROOF_STALE') {
       expect(statements.some((s) => s.key === 'consume')).toBe(false)
     }
+  })
+
+  it('uses the current revision and still orders proof creation against revocation in microseconds', async () => {
+    const state = await consumableState()
+    const token = tokenFor(USER, SESSION, ORG, { sessionRevision: state.revision })
+    const context = readAuthenticatedSessionContext(requestShape(USER, token))!
+    state.watermarkMs = String(context.tokenIssuedAt * 1000 + 500)
+    const cutoff = BigInt(state.watermarkMs) * 1000n + 123n
+    state.watermarkUs = String(cutoff)
+    const consume = () => serviceWith({ state }).service.consume(fakeClient(state).client, context, consumeInput())
+    state.proof!.created_at_us = String(cutoff)
+    await expectRefusal(consume(), 'SECURITY_ACTION_PROOF_STALE')
+    state.proof!.created_at_us = String(cutoff + 1n)
+    await expect(consume()).resolves.toMatchObject({ proofId: PROOF_ID })
+    state.revision = CONNECTION
+    await expectRefusal(consume(), 'SECURITY_ACTION_PROOF_STALE')
   })
 
   it('refuses a consuming token issued at or before the watermark, in milliseconds, with STALE', async () => {

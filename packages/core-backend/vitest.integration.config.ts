@@ -15,6 +15,8 @@ export default defineConfig({
     exclude: [
       // This suite has a dedicated isolated-PG runner with trust-on/off sentinels.
       'tests/integration/business-check-realdb.test.ts',
+      'tests/integration/admin-user-invite-manual-delivery.db.test.ts',
+      'tests/integration/password-session-revision.db.test.ts',
       '**/node_modules/**',
       '**/dist/**',
       // The enablement walk: its own trust-off step in tasks-realdb.yml (vitest.tasks-enablement.config.ts).

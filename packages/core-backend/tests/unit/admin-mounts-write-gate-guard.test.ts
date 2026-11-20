@@ -206,6 +206,8 @@ vi.mock('../../src/auth/invite-ledger', async (importOriginal) =>
   probe.wrap(await importOriginal<Record<string, unknown>>(), 'invite-ledger'))
 vi.mock('../../src/auth/invite-tokens', async (importOriginal) =>
   probe.wrap(await importOriginal<Record<string, unknown>>(), 'invite-tokens'))
+vi.mock('../../src/auth/invite-manual-delivery', async (importOriginal) =>
+  probe.wrap(await importOriginal<Record<string, unknown>>(), 'invite-manual-delivery'))
 vi.mock('../../src/rbac/role-assignment', async (importOriginal) =>
   probe.wrap(await importOriginal<Record<string, unknown>>(), 'role-assignment'))
 // `deriveDelegatedAdminNamespace` 保持真身：委派管理员口径（`admin-users.ts` 的 `ensureRoleDelegationAdmin`
@@ -525,6 +527,7 @@ const REGISTRY: readonly WriteRouteEntry[] = [
   { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/users/:userId/roles/:action(assign|unassign)', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensureRoleDelegationAdmin', family: D },
   { mount: 'admin-users', method: 'post', path: '/api/admin/invites/:inviteId/revoke', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/invites/:inviteId/resend', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/invites/:inviteId/manual-delivery', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/users', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'patch', path: '/api/admin/users/:userId/profile', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'patch', path: '/api/admin/users/:userId/namespaces/:namespace/admission', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
@@ -661,7 +664,7 @@ const PARAM_VALUES: Readonly<Record<string, string>> = {
   action: 'assign',
   userId: 'u-target',
   namespace: 'attendance',
-  inviteId: 'inv-1',
+  inviteId: '00000000-0000-4000-8000-000000000001',
   id: 'u-target',
   sessionId: 'sess-1',
   integrationId: '22222222-2222-4222-8222-222222222222',
@@ -1131,6 +1134,7 @@ describe('(A) 控制组：同一请求、只改门的输入，结论必须翻面
     readonly expectDownstream?: string
   }
   const CONTROLS: readonly Control[] = [
+    { mount: 'admin-users', path: '/api/admin/invites/:inviteId/manual-delivery', expectDownstream: 'invite-manual-delivery.deliverInviteManually' },
     { mount: 'admin-users', path: '/api/admin/users/batch/create' },
     { mount: 'admin-users', path: '/api/admin/users/batch/update' },
     { mount: 'admin-users', path: '/api/admin/users/batch/disable' },

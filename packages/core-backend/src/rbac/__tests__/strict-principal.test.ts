@@ -35,6 +35,39 @@ describe('strict principal', () => {
     expect(await validateStrictSession(queryFor(), 'token', 'actor')).toBe(true)
   })
 
+  it.each([
+    ['current', 'session', true, true],
+    ['stale', 'session', true, false],
+    ['invalid', 'session', false, false],
+    ['none', 'session', true, false],
+    ['none', 'session', false, true],
+    ['current', 'session', false, false],
+    ['current', undefined, true, false],
+  ] as const)('checks revision %s, sid %s and row present %s', async (kind, sid, present, allowed) => {
+    const revision = '857618f2-07de-4097-bc24-9a41c4267cf2'
+    const sessionRevision = kind === 'current' ? revision : kind === 'stale' ? '96dceee3-49e2-4794-a829-f2a3278aeb2a' : kind
+    vi.mocked(authService.readTokenPayload).mockReturnValueOnce({ userId: 'actor', email: '', role: 'user', iat: 10, exp: 100, sid, sessionRevision })
+    const query = queryFor(valid, present ? [{ revision, revoked_after: new Date(10500) }] : [])
+    expect(await validateStrictSession(query, 'token', 'actor')).toBe(allowed)
+    expect(query).toHaveBeenCalledWith(expect.stringMatching(/SELECT [^;]*\brevision\b FROM user_session_revocations/), ['actor'])
+  })
+
+  it('keeps the original revocation time on a refreshed legacy session', async () => {
+    vi.mocked(authService.readTokenPayload).mockReturnValueOnce({ userId: 'actor', email: '', role: 'user', sid: 'session', iat: 12, revocationIat: 10, exp: 100 })
+    expect(await validateStrictSession(queryFor(valid, [{ revoked_after: new Date(10500) }]), 'token', 'actor')).toBe(false)
+  })
+
+  it('does not substitute no-row for a missing revision column or a missing live session', async () => {
+    const payload = { userId: 'actor', email: '', role: 'user', sid: 'session', iat: 10, exp: 100, sessionRevision: 'none' }
+    vi.mocked(authService.readTokenPayload).mockReturnValue(payload)
+    const base = queryFor(valid, [], [])
+    await expect(validateStrictSession(async (sql, params) => {
+      if (sql.includes('user_session_revocations')) throw new Error('missing revision')
+      return base(sql, params)
+    }, 'token', 'actor')).rejects.toThrow('missing revision')
+    expect(await validateStrictSession(base, 'token', 'actor')).toBe(false)
+  })
+
   it('accepts a legacy JWT without sid after strict session schema checks', async () => {
     vi.mocked(authService.readTokenPayload).mockReturnValueOnce({ userId: 'actor', email: '', role: 'user', iat: 10, exp: 100 })
     expect(await validateStrictSession(queryFor(valid, [], []), 'token', 'actor')).toBe(true)

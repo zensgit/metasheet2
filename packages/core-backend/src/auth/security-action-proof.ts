@@ -50,6 +50,7 @@ import type { PrivilegeClass, SecurityActionPurpose, SecurityActionTargetKind } 
 import { assessSecurityActionPrivilege } from './security-action-privilege'
 import { runOwnedAttempt } from './security-action-attempt-admission'
 import { isSecurityActionProofEnabled } from './security-action-proof-flag'
+import { sessionRevisionAllows } from './session-revision'
 import { evaluateUserAuthenticationGate } from './user-activation'
 
 export const SECURITY_ACTION_PROOF_TTL_SECONDS = 300
@@ -83,7 +84,7 @@ export const SECURITY_ACTION_SQL = Object.freeze({
   session: `SELECT s.user_id, (s.revoked_at IS NULL AND s.expires_at > clock_timestamp()) AS live
   FROM user_sessions s
  WHERE s.id = $1`,
-  watermark: `SELECT floor(extract(epoch FROM revoked_after) * 1000)::text AS revoked_after_ms,
+  watermark: `SELECT revoked_after, revision,
        floor(extract(epoch FROM revoked_after) * 1000000)::text AS revoked_after_us
   FROM user_session_revocations
  WHERE user_id = $1`,
@@ -240,6 +241,8 @@ export type AuthenticatedSessionContext = Readonly<{
   userId: string
   sessionId: string
   tokenIssuedAt: number
+  sessionRevision?: unknown
+  revocationIat?: unknown
   orgId: string | null
   readonly [sessionBrand]: true
 }>
@@ -282,7 +285,9 @@ export function readAuthenticatedSessionContext(req: Request): AuthenticatedSess
   if (claimedUser !== userId) return null
   const orgId = trimmedNonEmpty(req.authenticatedTenantId)
   if (orgId !== null && trimmedNonEmpty(payload.tenantId) !== orgId) return null
-  const context = Object.freeze({ userId, sessionId, tokenIssuedAt, orgId }) as unknown as AuthenticatedSessionContext
+  const context = Object.freeze({ userId, sessionId, tokenIssuedAt, orgId,
+    sessionRevision: payload.sessionRevision, revocationIat: payload.revocationIat,
+  }) as unknown as AuthenticatedSessionContext
   sessionContexts.add(context)
   return context
 }
@@ -569,14 +574,16 @@ async function readSession(executor: Queryable, statement: string, session: Auth
   return { live: row.live === true }
 }
 
-/** True when the token was issued at or before the user's revocation watermark (millisecond precision). */
 async function isTokenRevoked(executor: Queryable, session: AuthenticatedSessionContext): Promise<{ revoked: boolean; watermarkUs: bigint | null }> {
   const rows = await readRows(executor, SECURITY_ACTION_SQL.watermark, [session.userId])
-  if (rows.length === 0) return { revoked: false, watermarkUs: null }
-  const ms = toText(rows[0].revoked_after_ms)
-  const us = toText(rows[0].revoked_after_us)
-  if (ms === null || us === null || !/^-?\d+$/.test(ms) || !/^-?\d+$/.test(us)) throw unavailable()
-  return { revoked: BigInt(session.tokenIssuedAt) * 1000n <= BigInt(ms), watermarkUs: BigInt(us) }
+  const row = rows[0]
+  const revoked = !sessionRevisionAllows({
+    sid: session.sessionId, iat: session.tokenIssuedAt, sessionRevision: session.sessionRevision, revocationIat: session.revocationIat,
+  }, row)
+  if (!row) return { revoked, watermarkUs: null }
+  const us = toText(row.revoked_after_us)
+  if (us === null || !/^-?\d+$/.test(us)) throw unavailable()
+  return { revoked, watermarkUs: BigInt(us) }
 }
 
 async function readFailures(executor: Queryable, userId: string): Promise<{ failures: number; retryAfter: number }> {

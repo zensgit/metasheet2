@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
+      - 'apps/web/src/views/useInviteManualDelivery.ts'
       - 'apps/web/src/views/UserManagementView.vue'
       - 'apps/web/src/views/adminUserBatch.ts'
       - 'apps/web/src/views/userRecycleLabels.ts'
@@ -29,6 +30,7 @@ on:
   push:
     branches: [main]
     paths:
+      - 'apps/web/src/views/useInviteManualDelivery.ts'
       - 'apps/web/src/views/UserManagementView.vue'
       - 'apps/web/src/views/adminUserBatch.ts'
       - 'apps/web/src/views/userRecycleLabels.ts'
@@ -70,7 +72,7 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Web regression tests
-        run: pnpm --filter @metasheet/web exec vitest run --watch=false tests/adminUserBatch.spec.ts tests/userManagementView.spec.ts tests/userManagementRoleMembership.spec.ts
+        run: pnpm --filter @metasheet/web exec vitest run --watch=false tests/adminUserBatch.spec.ts tests/userManagementView.spec.ts tests/userManagementRoleMembership.spec.ts tests/userManagementManualDelivery.spec.ts
       - name: Batch and permission guard tests
         run: pnpm --filter @metasheet/core-backend exec vitest run tests/unit/admin-user-batch-plan.test.ts tests/unit/admin-user-batch-routes.test.ts tests/unit/admin-mounts-write-gate-guard.test.ts tests/unit/admin-user-recycle.test.ts tests/unit/admin-user-recycle-routes.test.ts tests/unit/user-recycle-scheduler.test.ts tests/unit/user-activation.test.ts tests/unit/role-assignment-boundary.test.ts tests/unit/api-token-webhook.test.ts tests/unit/dingtalk-oauth-login-gates.test.ts tests/unit/user-visibility-mentions.test.ts
       - name: Flag registry contracts

@@ -2117,6 +2117,7 @@ exec npx vitest run \
   useDingTalkPersonRecipientStatus \
   usePlmExportActions \
   userManagementRoleMembership \
+  userManagementManualDelivery \
   userManagementView \
   uuid-no-bare-randomuuid \
   view-manager-multitable-contract \

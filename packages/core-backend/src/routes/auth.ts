@@ -47,8 +47,10 @@ import {
   type StrictSessionPrincipal,
 } from '../auth/strict-dingtalk-entry'
 import type { AuthorizationInputTransactionRunner } from '../rbac/authorization-input-lock'
+import { validateStrictSession } from '../rbac/strict-principal'
+import { isSessionRevision, sessionRevisionAllows } from '../auth/session-revision'
 import { escapeLikePattern, visibleUserPredicate } from '../admin/user-visibility'
-import { activatePendingUser } from '../auth/user-activate'
+import { activatePendingUser, type ActivationSessionReceipt } from '../auth/user-activate'
 import { createUserSession, getUserSession, listUserSessions, revokeUserSession, touchUserSession } from '../auth/session-registry'
 import { revokeUserSessions } from '../auth/session-revocation'
 import { readAuthenticatedSessionContext } from '../auth/security-action-proof'
@@ -71,6 +73,7 @@ import { isAttendanceGroupEffectivePolicyPanelEnabledForOrgV1 } from '../attenda
 import { extractTenantFromHeaders } from '../db/sharding/tenant-context'
 import { parseUserActivationStatus } from '../auth/user-activation'
 import { isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
+import { withoutUnverifiedAttendance } from '../auth/auth-permission-profile'
 import { auditLog } from '../audit/audit'
 import { secretManager } from '../security/SecretManager'
 import { isPlmEnabled, resolveEffectiveProductMode } from '../config/product-mode'
@@ -546,7 +549,7 @@ async function fetchCurrentUserDingTalkAccessSnapshot(userId: string): Promise<D
 
 async function loadAuthPermissions(userId: string): Promise<string[]> {
   try {
-    return await listUserPermissions(userId)
+    return await listUserPermissions(userId, 'authoritative')
   } catch (error) {
     logger.warn('Failed to load RBAC permissions for auth user', error instanceof Error ? error : undefined)
   }
@@ -557,7 +560,7 @@ async function loadAuthPermissions(userId: string): Promise<string[]> {
       [userId],
     )
     const permissions = result.rows[0]?.permissions
-    return Array.isArray(permissions) ? permissions.map((permission) => String(permission)) : []
+    return Array.isArray(permissions) ? withoutUnverifiedAttendance(permissions) : []
   } catch (error) {
     logger.warn('Failed to load legacy permissions for auth user', error instanceof Error ? error : undefined)
     return []
@@ -743,58 +746,71 @@ function mapDingTalkActivationFailure(error: unknown): DingTalkActivationIntentE
   )
 }
 
+function authenticationChanged(): DingTalkLoginPolicyError {
+  return new DingTalkLoginPolicyError('Authentication changed; please sign in again', { statusCode: 409, code: 'authentication_changed' })
+}
+
 async function issueAuthSessionToken(
   user: User,
   req: Request,
-  options: { expectedAccessGeneration?: number; origin: ClosedExternalOrigin | null },
+  { expectedAccessGeneration, origin, receiptRevision }: {
+    expectedAccessGeneration: number
+    origin: ClosedExternalOrigin | null
+    receiptRevision?: string
+  },
 ): Promise<string> {
+  if (!Number.isSafeInteger(expectedAccessGeneration) || expectedAccessGeneration < 0) throw authenticationChanged()
   const sessionId = randomUUID()
   const tenantId = await authService.resolveSessionTenantId(user.id, resolveRequestTenantId(req))
   const tokenUser = tenantId ? { ...user, tenantId } : user
-  const token = authService.createToken(tokenUser, { sid: sessionId, externalAuth: false })
+  const token = authService.createToken(tokenUser, {
+    sid: sessionId, externalAuth: false, ...(receiptRevision !== undefined && { sessionRevision: receiptRevision }),
+  })
   const payload = authService.readTokenPayload(token)
 
-  if (payload?.exp) {
-    const sessionOptions = {
-      sessionId,
-      expectedAccessGeneration: options.expectedAccessGeneration,
-      expiresAt: new Date(payload.exp * 1000).toISOString(),
-      ipAddress: getClientIP(req),
-      userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
-    }
-    const origin = options.origin
-    const session = origin !== null && origin.kind !== 'password'
-      ? await transaction(async (client) => {
-        await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-        const subject = await client.query('SELECT id FROM users WHERE id = $1 FOR SHARE', [user.id])
-        if (subject.rows.length !== 1) return null
-        const connection = await client.query(
-          'SELECT id FROM directory_integrations WHERE id = $1::uuid FOR SHARE',
-          [origin.connectionId],
-        )
-        if (connection.rows.length !== 1) return null
-        try {
-          await assertOrdinaryIssuerAllowsLegacySession(client, origin)
-        } catch (error) {
-          if (error instanceof StrictCredentialChainError && error.code === 'strict_connection') {
-            throw new DingTalkLoginPolicyError('DingTalk legacy login is closed for this connection', {
-              statusCode: 403,
-              code: 'strict_connection',
-            })
-          }
-          if (error instanceof StrictCredentialChainError || error instanceof StrictLoginGrantError) {
-            throw new DingTalkLoginPolicyError('DingTalk login authorization is unavailable', {
-              statusCode: 503,
-              code: 'grant_state_unavailable',
-            })
-          }
-          throw error
-        }
-        return createUserSession(user.id, sessionOptions, client)
-      })
-      : await createUserSession(user.id, sessionOptions)
-    if (!session) throw new DingTalkLoginPolicyError('Authentication changed; please sign in again', {statusCode:409,code:'authentication_changed'})
+  if (receiptRevision !== undefined && (payload?.sid !== sessionId || payload.sessionRevision !== receiptRevision)) {
+    throw authenticationChanged()
   }
+  if (!payload?.exp) throw authenticationChanged()
+  const sessionOptions = {
+    sessionId,
+    expectedAccessGeneration,
+    ...(receiptRevision !== undefined && { expectedSessionRevision: receiptRevision }),
+    expiresAt: new Date(payload.exp * 1000).toISOString(),
+    ipAddress: getClientIP(req),
+    userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
+  }
+  const session = origin !== null && origin.kind !== 'password'
+    ? await transaction(async (client) => {
+      await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+      const subject = await client.query('SELECT id FROM users WHERE id = $1 FOR SHARE', [user.id])
+      if (subject.rows.length !== 1) return null
+      const connection = await client.query(
+        'SELECT id FROM directory_integrations WHERE id = $1::uuid FOR SHARE',
+        [origin.connectionId],
+      )
+      if (connection.rows.length !== 1) return null
+      try {
+        await assertOrdinaryIssuerAllowsLegacySession(client, origin)
+      } catch (error) {
+        if (error instanceof StrictCredentialChainError && error.code === 'strict_connection') {
+          throw new DingTalkLoginPolicyError('DingTalk legacy login is closed for this connection', {
+            statusCode: 403,
+            code: 'strict_connection',
+          })
+        }
+        if (error instanceof StrictCredentialChainError || error instanceof StrictLoginGrantError) {
+          throw new DingTalkLoginPolicyError('DingTalk login authorization is unavailable', {
+            statusCode: 503,
+            code: 'grant_state_unavailable',
+          })
+        }
+        throw error
+      }
+      return createUserSession(user.id, sessionOptions, client)
+    })
+    : await createUserSession(user.id, sessionOptions)
+  if (!session) throw authenticationChanged()
 
   try {
     await query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id])
@@ -1254,33 +1270,69 @@ authRouter.post('/password/change', async (req: Request, res: Response) => {
         error: 'Password change is unavailable',
       })
     }
-    if (actorSchema === 'absent') {
-    await query(
-      `UPDATE users
-       SET password_hash = $1,
-           must_change_password = FALSE,
-           local_password_set = TRUE,
-           updated_at = NOW()
-       WHERE id = $2`,
-      [passwordHash, authenticated.user.id],
-    )
-
-    await revokeUserSessions(authenticated.user.id, {
-      updatedBy: authenticated.user.id,
-      reason: 'password-change-required-cleared',
-    })
-    } else {
-      if (actorSession === null || actorSession.userId !== authenticated.user.id) {
-        return res.status(401).json({
-          success: false,
-          error: 'Invalid token',
-        })
-      }
-      await changeRequiredPasswordWithProvenance({
-        session: actorSession,
-        passwordHash,
-      })
+    if (actorSchema === 'ready' && (!actorSession || actorSession.userId !== authenticated.user.id)) {
+      return res.status(401).json({ success: false, error: 'Invalid token' })
     }
+    const userId = authenticated.user.id
+    const generation = authenticated.user.access_generation
+    if (typeof generation !== 'number' || !Number.isSafeInteger(generation) || generation < 0) throw authenticationChanged()
+    const revision = await transaction(async (client) => {
+      if (actorSchema === 'ready') await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+      const locked = await client.query(
+        `SELECT id FROM users WHERE id = $1 AND access_generation = $2
+           AND must_change_password AND local_password_set FOR UPDATE`, [userId, generation],
+      )
+      if (!locked.rows[0]) throw authenticationChanged()
+      const prior = await client.query('SELECT revision FROM user_session_revocations WHERE user_id = $1 FOR UPDATE', [userId])
+      if (!await validateStrictSession(client.query.bind(client), authenticated.token, userId)) throw authenticationChanged()
+      const input = authService.readTokenPayload(authenticated.token)
+      if (!input || classifyVerifiedSessionPayload(input) !== 'standard') throw authenticationChanged()
+      if (actorSchema === 'absent' && input.sid !== undefined) {
+        const active = await client.query(
+          'SELECT id FROM user_sessions WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL FOR SHARE',
+          [input.sid.trim(), userId],
+        )
+        if (!active.rows[0]) throw authenticationChanged()
+      }
+      let priorRevision = prior.rows[0]?.revision
+      let written: unknown
+      if (actorSchema === 'ready') {
+        if (!actorSession || actorSession.sessionId !== input.sid?.trim() || actorSession.tokenIssuedAt !== input.iat) {
+          throw authenticationChanged()
+        }
+        if (!prior.rows.length) {
+          const baseline = await client.query(
+            `INSERT INTO user_session_revocations (user_id, revoked_after, updated_at, updated_by, reason)
+             VALUES ($1, TIMESTAMPTZ 'epoch', clock_timestamp(), $1, 'admin-grant-baseline')
+             ON CONFLICT (user_id) DO NOTHING RETURNING revision`, [userId],
+          )
+          priorRevision = baseline.rows[0]?.revision
+          if (!isSessionRevision(priorRevision) || priorRevision === 'none') throw authenticationChanged()
+        }
+        await changeRequiredPasswordWithProvenance({ session: actorSession, passwordHash }, run => run(client))
+        const cutoff = await client.query('SELECT revision FROM user_session_revocations WHERE user_id = $1', [userId])
+        written = cutoff.rows[0]?.revision
+      } else {
+        const changed = await client.query(
+          `UPDATE users SET password_hash = $1, must_change_password = FALSE,
+             local_password_set = TRUE, updated_at = NOW() WHERE id = $2 RETURNING id`,
+          [passwordHash, userId],
+        )
+        if (!changed.rows[0]) throw authenticationChanged()
+        const cutoff = await client.query(
+          `INSERT INTO user_session_revocations (user_id, revoked_after, updated_at, updated_by, reason)
+           VALUES ($1, clock_timestamp(), NOW(), $1, 'password-change-required-cleared')
+           ON CONFLICT (user_id) DO UPDATE SET
+             revoked_after = GREATEST(user_session_revocations.revoked_after, EXCLUDED.revoked_after),
+             updated_at = EXCLUDED.updated_at, updated_by = EXCLUDED.updated_by, reason = EXCLUDED.reason
+           WHERE user_session_revocations.revision = $2::uuid
+           RETURNING revision`, [userId, prior.rows[0]?.revision ?? null],
+        )
+        written = cutoff.rows[0]?.revision
+      }
+      if (!isSessionRevision(written) || written === 'none' || written === priorRevision) throw authenticationChanged()
+      return written
+    })
 
     const refreshedUser = {
       ...authenticated.user,
@@ -1291,10 +1343,7 @@ authRouter.post('/password/change', async (req: Request, res: Response) => {
     const token = await issueAuthSessionToken(
       refreshedUser,
       req,
-      {
-        expectedAccessGeneration: Number(authenticated.user.access_generation ?? 0),
-        origin: closedPasswordOrigin(),
-      },
+      { expectedAccessGeneration: generation, origin: closedPasswordOrigin(), receiptRevision: revision },
     )
 
     return res.json({
@@ -1535,9 +1584,18 @@ authRouter.post('/session-org', async (req: Request, res: Response) => {
       return res.status(403).json({ success: false, error: 'Not a member of the requested organization', code: 'SESSION_ORG_NOT_MEMBER' })
     }
     const payload = authService.readTokenPayload(token)
-    const sessionId = typeof payload?.sid === 'string' && payload.sid.trim() ? payload.sid : randomUUID()
+    if (!payload || classifyVerifiedSessionPayload(payload) !== 'standard'
+      || (payload.sid !== undefined && (typeof payload.sid !== 'string' || !payload.sid.trim()))
+      || (payload.sessionRevision === undefined ? !sessionRevisionAllows(payload, undefined)
+        : (!payload.sid || !isSessionRevision(payload.sessionRevision) || payload.revocationIat !== undefined))) {
+      return res.status(409).json({ success: false, error: 'Authentication changed; please sign in again', code: 'authentication_changed' })
+    }
+    const sessionId = payload.sid?.trim() ?? randomUUID()
+    const evidence = payload.sessionRevision === undefined
+      ? { revocationIat: payload.revocationIat ?? payload.iat }
+      : { sessionRevision: payload.sessionRevision }
     const tokenUser = { ...user, tenantId: chosen }
-    const nextToken = authService.createToken(tokenUser, { sid: sessionId, externalAuth: false })
+    const nextToken = authService.createToken(tokenUser, { sid: sessionId, externalAuth: false, ...evidence })
     const nextPayload = authService.readTokenPayload(nextToken)
     if (!nextPayload?.exp) {
       return res.status(503).json({ success: false, error: 'Organization switch unavailable', code: 'SESSION_ORG_SWITCH_UNAVAILABLE' })
@@ -1546,6 +1604,9 @@ authRouter.post('/session-org', async (req: Request, res: Response) => {
     // request authenticated is still current, so a credential verified before a revocation cannot mint one.
     const session = await createUserSession(user.id, {
       sessionId, expiresAt: new Date(nextPayload.exp * 1000).toISOString(),
+      expectedSessionRevision: evidence.sessionRevision,
+      expectedRevocationIat: evidence.revocationIat,
+      requireExistingSession: payload.sid !== undefined,
       expectedAccessGeneration: Number(user.access_generation ?? 0),
       ipAddress: getClientIP(req), userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
     })
@@ -1906,9 +1967,9 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
         unionId: profile.unionId,
       })
 
-      let activationOrigin: ClosedExternalOrigin | null = null
+      let activated: ActivationSessionReceipt
       try {
-        const activated = await activatePendingUser({
+        activated = await activatePendingUser({
           userId: activateUserId,
           mode: 'sso',
           adminUserId: activateAdminUserId,
@@ -1919,8 +1980,7 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
             openId: profile.openId,
             unionId: profile.unionId,
           },
-        })
-        activationOrigin = activated.externalOrigin
+        }, true)
       } catch (error) {
         // O2-S2: a recovery conflict (named retryable RecoveryConflictError from
         // activatePendingUser) must NOT collapse into the 500 'activate_failed'
@@ -1930,8 +1990,13 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
         throw mapDingTalkActivationFailure(error)
       }
 
+      if (!Number.isSafeInteger(activated.sessionGeneration) || activated.sessionGeneration <= 0) {
+        throw authenticationChanged()
+      }
       const user = await loadActivatedAuthUser(activateUserId)
-      const token = await issueAuthSessionToken(user, req, { origin: activationOrigin })
+      const token = await issueAuthSessionToken(user, req, {
+        expectedAccessGeneration: activated.sessionGeneration, origin: activated.externalOrigin,
+      })
       await auditLog({
         actorId: activateAdminUserId,
         actorType: 'user',

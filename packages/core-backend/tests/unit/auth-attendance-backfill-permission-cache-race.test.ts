@@ -1,5 +1,5 @@
 /**
- * Attendance self-service backfill x RBAC permission-cache generation (platform product mode).
+ * Attendance self-service backfill x RBAC permission-cache generation (attendance product mode).
  *
  * Field symptom (stock-prep pilot): a stock-prep main administrator sometimes lost the view-management
  * entry on a page load, with no log line. The chain pinned here, on the REAL code:
@@ -299,7 +299,7 @@ const STEADY_STATE_PERMISSIONS = ['attendance:read', 'attendance:write', 'stock-
 describe('attendance self-service backfill x permission-cache generation (real AuthService + RBAC)', () => {
   beforeEach(() => {
     vi.stubEnv('NODE_ENV', 'test')
-    vi.stubEnv('PRODUCT_MODE', 'platform')
+    vi.stubEnv('PRODUCT_MODE', 'attendance')
     vi.stubEnv('RBAC_TOKEN_TRUST', 'false')
     jwtMocks.verify.mockImplementation(() => ({ userId: fakeDb.subjectId(), email: '', role: 'user', iat: 0, exp: 0 }))
     vi.mocked(invalidateUserPerms).mockClear()

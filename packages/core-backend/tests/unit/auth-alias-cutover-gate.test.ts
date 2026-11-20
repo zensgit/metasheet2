@@ -81,7 +81,7 @@ describe('AuthService alias cutover gate (T2b execution path)', () => {
     rbacMocks.listUserPermissions.mockReset()
     rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read'])
     rbacMocks.isAdmin.mockResolvedValue(false)
-    sessionMocks.createUserSession.mockReset()
+    sessionMocks.createUserSession.mockReset().mockResolvedValue({ id: 'minted' })
     secretManagerMocks.get.mockReturnValue('unit-test-secret-abcdefghijklmnopqrstuvwxyz123456')
   })
 
@@ -97,6 +97,7 @@ describe('AuthService alias cutover gate (T2b execution path)', () => {
     poolMocks.query.mockResolvedValueOnce({
       rows: [{
         id: 'u1',
+        revocation_revision: '11924d99-006a-4c7a-be17-f864a2f36760',
         email: 'a@x.com',
         username: null,
         mobile: null,
@@ -122,6 +123,10 @@ describe('AuthService alias cutover gate (T2b execution path)', () => {
     const auth = new AuthService()
     const result = await auth.login('a@x.com', 'WelcomePass9A')
     expect(result).toBeTruthy()
+    expect(sessionMocks.createUserSession).toHaveBeenCalledWith('u1', expect.objectContaining({
+      expectedSessionRevision: '11924d99-006a-4c7a-be17-f864a2f36760',
+    }))
+    expect(String(poolMocks.query.mock.calls[0]?.[0])).toContain("), 'none') AS revocation_revision")
     expect(aliasMocks.assertAliasCutoverAllowed).toHaveBeenCalled()
     expect(aliasMocks.findUserIdByLoginAlias).toHaveBeenCalledWith('a@x.com')
     // Gate before lookup order

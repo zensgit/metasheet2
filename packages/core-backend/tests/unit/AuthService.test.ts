@@ -59,6 +59,7 @@ vi.mock('../../src/security/SecretManager', () => ({
 
 import { AuthService, USER_ROLE_ASSIGNMENT_RETRY_LIMIT, UserRoleAssignmentRecoveryBusyError, authService } from '../../src/auth/AuthService'
 import { jwtAuthMiddleware } from '../../src/auth/jwt-middleware'
+import { matchesPermission } from '../../src/auth/permission-match'
 import { createTenantPrincipalDirectoryBoundaryV1 } from '../../src/services/tenant-principal-directory-boundary'
 import { RECOVERY_AUTHORITY_BUSY_MARKER } from '../../src/multitable/recovery-authorization-stability'
 import { censusFile } from './lib/recovery-census-recorder'
@@ -90,6 +91,7 @@ function platformAuthUserRow(overrides: Record<string, unknown> = {}) {
     role: 'user',
     permissions: ['spreadsheet:read', 'spreadsheet:write'],
     password_hash: 'hash',
+    revocation_revision: 'none',
     activation_status: 'activated',
     local_password_set: true,
     is_active: true,
@@ -226,6 +228,7 @@ describe('AuthService.verifyToken', () => {
   // (that would turn "recovery is busy" into "you are logged out" for a valid session), AND the
   // unpersisted attendance:read/attendance:write permissions must not leak into the returned user.
   it('[recovery-census:auth-service:self-service-backfill] omits unpersisted attendance self-service permissions when backfill role assignment cannot persist under a busy recovery lease', async () => {
+    process.env.PRODUCT_MODE = 'attendance'
     jwtMocks.verify.mockReturnValue({ userId: 'u-backfill', email: 'backfill@x', role: 'user', iat: 0, exp: 0 })
     const backfillUserRow = {
       id: 'u-backfill',
@@ -345,8 +348,9 @@ describe('AuthService.verifyToken', () => {
     )
   })
 
-  it('falls back to stored role/permissions when RBAC lookup fails', async () => {
-    process.env.PRODUCT_MODE = 'plm-workbench'
+  it.each(['platform', 'attendance', 'plm-workbench'])('keeps only non-attendance fallback permissions on an unavailable RBAC profile (%s)', async (mode) => {
+    process.env.PRODUCT_MODE = mode
+    const initialTransactions = poolMocks.transaction.mock.calls.length
     jwtMocks.verify.mockReturnValue({ userId: 'u2', email: 'user@x', role: 'user', iat: 0, exp: 0 })
     poolMocks.query.mockResolvedValueOnce({
       rows: [{
@@ -354,7 +358,7 @@ describe('AuthService.verifyToken', () => {
         email: 'user@x',
         name: 'User',
         role: 'user',
-        permissions: ['spreadsheets:write'],
+        permissions: ['spreadsheets:write', ' attendance:admin ', ' *:* '],
         password_hash: 'hash',
         is_active: true,
         activation_status: 'activated',
@@ -372,6 +376,8 @@ describe('AuthService.verifyToken', () => {
     expect(user).toBeTruthy()
     expect(user?.role).toBe('user')
     expect(user?.permissions).toEqual(['spreadsheets:write'])
+    expect(matchesPermission(user!.permissions, 'attendance:read')).toBe(false)
+    expect(poolMocks.transaction.mock.calls).toHaveLength(initialTransactions)
     expect((user as any).password_hash).toBeUndefined()
   })
 
@@ -403,8 +409,8 @@ describe('AuthService.verifyToken', () => {
     expect(user?.permissions).toContain('attendance:read')
   })
 
-  it('backfills attendance self-service permissions for platform users without attendance roles', async () => {
-    process.env.PRODUCT_MODE = 'platform'
+  it('backfills attendance self-service permissions for attendance users without attendance roles', async () => {
+    process.env.PRODUCT_MODE = 'attendance'
     jwtMocks.verify.mockReturnValue({ userId: 'u5', email: 'worker@x', role: 'user', iat: 0, exp: 0 })
     poolMocks.query
       .mockResolvedValueOnce({
@@ -463,7 +469,7 @@ describe('AuthService.verifyToken', () => {
   })
 
   it('does not merge attendance permissions when a non-recovery INSERT fails', async () => {
-    process.env.PRODUCT_MODE = 'platform'
+    process.env.PRODUCT_MODE = 'attendance'
     jwtMocks.verify.mockReturnValue({ userId: 'u5', role: 'user', iat: 0, exp: 0 })
     rbacMocks.isAdmin.mockResolvedValue(false)
     rbacMocks.listUserPermissions.mockResolvedValue(['workflow:read'])
@@ -481,7 +487,7 @@ describe('AuthService.verifyToken', () => {
 
   it('does not reinsert attendance_employee on next auth after explicit role_unassigned admission', async () => {
     const previousMode = process.env.PRODUCT_MODE
-    process.env.PRODUCT_MODE = 'platform'
+    process.env.PRODUCT_MODE = 'attendance'
     try {
       jwtMocks.verify.mockReturnValue({ userId: 'u-revoked', email: 'revoked@x', role: 'user', iat: 0, exp: 0 })
       const tracked = stubPoolForAuthReads({
@@ -508,7 +514,7 @@ describe('AuthService.verifyToken', () => {
 
   it('does not backfill a blocked subject with disabled platform_admin attendance admission', async () => {
     const previousMode = process.env.PRODUCT_MODE
-    process.env.PRODUCT_MODE = 'platform'
+    process.env.PRODUCT_MODE = 'attendance'
     try {
       jwtMocks.verify.mockReturnValue({ userId: 'u-blocked', email: 'blocked@x', role: 'user', iat: 0, exp: 0 })
       const tracked = stubPoolForAuthReads({
@@ -533,7 +539,7 @@ describe('AuthService.verifyToken', () => {
 
   it('skips attendance backfill when the admission row cannot be read', async () => {
     const previousMode = process.env.PRODUCT_MODE
-    process.env.PRODUCT_MODE = 'platform'
+    process.env.PRODUCT_MODE = 'attendance'
     try {
       jwtMocks.verify.mockReturnValue({ userId: 'u-unavail', email: 'unavail@x', role: 'user', iat: 0, exp: 0 })
       const tracked = stubPoolForAuthReads({
@@ -563,7 +569,7 @@ describe('AuthService.verifyToken', () => {
   // request made concurrent permission reads of the same user fail closed to [].
   it('a no-op re-insert (default role already held) still merges attendance permissions but does not invalidate the permission cache', async () => {
     const previousMode = process.env.PRODUCT_MODE
-    process.env.PRODUCT_MODE = 'platform'
+    process.env.PRODUCT_MODE = 'attendance'
     try {
       jwtMocks.verify.mockReturnValue({ userId: 'u-steady', email: 'steady@x', role: 'user', iat: 0, exp: 0 })
       const tracked = stubPoolForAuthReads({
@@ -588,7 +594,7 @@ describe('AuthService.verifyToken', () => {
 
   it('skips the backfill transaction entirely when RBAC already yields attendance codes (enabled admission)', async () => {
     const previousMode = process.env.PRODUCT_MODE
-    process.env.PRODUCT_MODE = 'platform'
+    process.env.PRODUCT_MODE = 'attendance'
     try {
       jwtMocks.verify.mockReturnValue({ userId: 'u-enabled', email: 'enabled@x', role: 'user', iat: 0, exp: 0 })
       const tracked = stubPoolForAuthReads({
@@ -674,7 +680,7 @@ describe('AuthService.verifyToken', () => {
     expect(user?.role).toBe('user')
     expect(user?.permissions).toEqual(['multitable:read'])
     expect(poolMocks.query).toHaveBeenCalled()
-    expect(sessionMocks.isUserSessionRevoked).toHaveBeenCalledWith('prod-admin', 123)
+    expect(sessionMocks.isUserSessionRevoked).toHaveBeenCalledWith('prod-admin', expect.objectContaining({ iat: 123 }))
     expect(sessionMocks.isUserSessionActive).toHaveBeenCalledWith('prod-admin', 'prod-session')
   })
 
@@ -770,7 +776,9 @@ describe('AuthService.refreshToken', () => {
   })
 
   it('refreshes token when legacy id claim is present', async () => {
-    jwtMocks.verify.mockReturnValue({ id: 'u4', email: 'refresh@x', role: 'admin', iat: 0, exp: 0 })
+    jwtMocks.verify.mockImplementation((token: string) => ({ id: 'u4', email: 'refresh@x', role: 'admin', iat: 1,
+      exp: token === 'old-token' ? 2 : 2_000_000_000 }))
+    sessionMocks.createUserSession.mockResolvedValue({ id: 'minted' })
     poolMocks.query.mockResolvedValueOnce({
       rows: [{
         id: 'u4',
@@ -820,6 +828,44 @@ describe('AuthService.refreshToken', () => {
     expect(jwtMocks.sign.mock.calls[0]?.[0]).not.toHaveProperty('type')
     expect(sessionMocks.createUserSession).toHaveBeenCalledTimes(1)
     expect(sessionMocks.createUserSession.mock.calls[0]?.[0]).toBe('u-refresh')
+    expect(jwtMocks.sign.mock.calls[0]?.[0]).toMatchObject({ revocationIat: 1 })
+    expect(jwtMocks.sign.mock.calls[0]?.[0]).not.toHaveProperty('sessionRevision')
+    expect(sessionMocks.createUserSession.mock.calls[0]?.[1]).toMatchObject({
+      expectedRevocationIat: 1, requireExistingSession: false,
+    })
+  })
+
+  it.each([
+    { original: { sessionRevision: 'none' }, expected: { expectedSessionRevision: 'none' } },
+    { original: { revocationIat: 3 }, expected: { expectedRevocationIat: 3 } },
+  ])('refresh inherits the original evidence and returns nothing if final registration refuses it', async ({ original, expected }) => {
+    const payload = { userId: 'u-refresh', sid: 'old-sid', iat: 10, exp: 100, ...original }
+    jwtMocks.verify.mockImplementation((token: string) => token === 'old-token' ? payload : { ...payload, iat: 20 })
+    jwtMocks.sign.mockReturnValue('new-token')
+    stubPoolForAuthReads({ userRow: refreshableUserRow('u-refresh') })
+    rbacMocks.listUserPermissions.mockResolvedValue([])
+    sessionMocks.createUserSession.mockResolvedValue(null)
+    expect(await new AuthService().refreshToken('old-token')).toBeNull()
+    expect(sessionMocks.isUserSessionRevoked).toHaveBeenCalledWith('u-refresh', payload)
+    expect(jwtMocks.sign.mock.calls[0][0]).toMatchObject({ sid: 'old-sid', ...original })
+    expect(jwtMocks.sign.mock.calls[0][0]).not.toHaveProperty('sessionRevision' in original ? 'revocationIat' : 'sessionRevision')
+    expect(sessionMocks.createUserSession).toHaveBeenCalledWith('u-refresh', expect.objectContaining({
+      sessionId: 'old-sid', requireExistingSession: true, ...expected,
+    }))
+  })
+
+  it.each(['verifyToken', 'refreshToken'] as const)('%s denies revision tokens if the session registry schema is unavailable', async (method) => {
+    jwtMocks.verify.mockReturnValue({ userId: 'u-refresh', sid: 'old-sid', iat: 10, exp: 100, sessionRevision: 'none' })
+    const registry = await vi.importActual<typeof import('../../src/auth/session-registry')>('../../src/auth/session-registry')
+    sessionMocks.isUserSessionActive.mockImplementation(registry.isUserSessionActive)
+    poolMocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM user_sessions')) throw schemaMissingRelation('user_sessions')
+      return { rows: sql.includes('FROM users') ? [refreshableUserRow('u-refresh')] : [] }
+    })
+    rbacMocks.listUserPermissions.mockResolvedValue([])
+    expect(await new AuthService()[method]('old-token')).toBeNull()
+    expect(sessionMocks.isUserSessionActive).toHaveBeenCalledWith('u-refresh', 'old-sid')
+    expect(sessionMocks.createUserSession).not.toHaveBeenCalled()
   })
 
   it.each([
@@ -971,7 +1017,7 @@ describe('AuthService.register', () => {
     expect(poolMocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO user_roles'))).toBe(true)
   })
 
-  it('assigns attendance self-service permissions and role on platform registration', async () => {
+  it('does not grant attendance on platform registration', async () => {
     process.env.PRODUCT_MODE = 'platform'
     mockRegisterQueries({
       id: 'user-2',
@@ -982,8 +1028,6 @@ describe('AuthService.register', () => {
         'spreadsheet:write',
         'spreadsheets:read',
         'spreadsheets:write',
-        'attendance:read',
-        'attendance:write',
       ],
     })
 
@@ -991,10 +1035,10 @@ describe('AuthService.register', () => {
     const user = await auth.register('platform@example.com', 'WelcomePass9A', 'Platform User')
 
     expect(user).toBeTruthy()
-    expect(user?.permissions).toEqual(expect.arrayContaining(['attendance:read', 'attendance:write']))
+    expect(user?.permissions).not.toContain('attendance:read')
     expect(poolMocks.transaction).toHaveBeenCalled()
     expect(poolMocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO user_login_aliases'))).toBe(true)
-    expect(poolMocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO user_roles'))).toBe(true)
+    expect(poolMocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO user_roles'))).toBe(false)
   })
 
   // P23: user_roles is a recovery-authority table. While exact-anchor recovery holds its
@@ -1073,7 +1117,7 @@ describe('AuthService.login', () => {
     rbacMocks.listUserPermissions.mockReset()
     rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read'])
     rbacMocks.invalidateUserPerms.mockReset()
-    sessionMocks.createUserSession.mockReset()
+    sessionMocks.createUserSession.mockReset().mockResolvedValue({ id: 'minted' })
     sessionMocks.isUserSessionRevoked.mockReset()
     sessionMocks.isUserSessionActive.mockReset()
     secretManagerMocks.get.mockReset()
@@ -1089,6 +1133,8 @@ describe('AuthService.login', () => {
           email: null,
           username: 'liqing',
           mobile: '13900001234',
+          access_generation: 17,
+          revocation_revision: 'none',
           name: '李青',
           role: 'user',
           permissions: ['attendance:read'],
@@ -1124,6 +1170,8 @@ describe('AuthService.login', () => {
       'user-1',
       expect.objectContaining({
         sessionId: expect.any(String),
+        expectedAccessGeneration: 17,
+        expectedSessionRevision: 'none',
       }),
     )
     expect(poolMocks.query).toHaveBeenNthCalledWith(
@@ -1132,14 +1180,58 @@ describe('AuthService.login', () => {
       ['liqing', 'liqing', 'liqing'],
     )
     const loginSql = String(poolMocks.query.mock.calls[0]?.[0] ?? '')
+    expect(loginSql).toContain("), 'none') AS revocation_revision")
+    expect(result?.user).not.toHaveProperty('revocation_revision')
     expect(loginSql).not.toContain('COALESCE(email')
     expect(loginSql).not.toContain('COALESCE(username')
     expect(loginSql).not.toContain('COALESCE(mobile')
   })
 
+  it.each(['wrong password', 'inactive', 'session refused', 'success'])('defers attendance role writes until password login succeeds: %s', async outcome => {
+    vi.stubEnv('PRODUCT_MODE', 'attendance')
+    try {
+      const password = 'SyntheticGood9!'
+      rbacMocks.listUserPermissions.mockResolvedValue(['spreadsheet:read'])
+      const writes = stubPoolForAuthReads({
+        userRow: platformAuthUserRow({ password_hash: await bcrypt.hash(password, 4), is_active: outcome !== 'inactive' }),
+      })
+      jwtMocks.verify.mockReturnValue({ userId: 'u5', exp: 2_000_000_000, sid: 'synthetic' })
+      const insertsAtRegistration: number[] = []
+      sessionMocks.createUserSession.mockImplementation(async () => {
+        insertsAtRegistration.push(writes.roleInsertParams.length)
+        return outcome === 'session refused' ? null : { id: 'minted' }
+      })
+      const result = await new AuthService().login('worker@x', outcome === 'wrong password' ? 'incorrect' : password)
+      expect(insertsAtRegistration).toEqual(outcome === 'success' || outcome === 'session refused' ? [0] : [])
+      if (outcome === 'success') {
+        expect(result?.user.permissions).toContain('attendance:write')
+        expect(writes.roleInsertParams).toHaveLength(1)
+      } else {
+        expect(result).toBeNull()
+        expect(writes.roleInsertParams).toEqual([])
+        expect(writes.admissionParams).toEqual([])
+        expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
+      }
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
+  it('does not return a password-login token or mark a login when session registration loses its generation', async () => {
+    const password = 'SyntheticGood9!'
+    stubPoolForAuthReads({
+      userRow: platformAuthUserRow({ password_hash: await bcrypt.hash(password, 4), access_generation: 21 }),
+    })
+    jwtMocks.verify.mockReturnValue({ userId: 'u5', exp: 2_000_000_000, sid: 'synthetic' })
+    sessionMocks.createUserSession.mockResolvedValue(null)
+    expect(await new AuthService().login('worker@x', password)).toBeNull()
+    expect(sessionMocks.createUserSession).toHaveBeenCalledWith('u5', expect.objectContaining({ expectedAccessGeneration: 21 }))
+    expect(poolMocks.query.mock.calls.some(([sql]) => String(sql).includes('UPDATE users SET last_login_at'))).toBe(false)
+  })
+
   it('does not reinsert attendance_employee on fresh login after explicit role_unassigned admission', async () => {
     const previousMode = process.env.PRODUCT_MODE
-    process.env.PRODUCT_MODE = 'platform'
+    process.env.PRODUCT_MODE = 'attendance'
     try {
       const passwordHash = await bcrypt.hash('WelcomePass9A', 10)
       rbacMocks.listUserPermissions.mockResolvedValue(['spreadsheets:read'])
@@ -1179,7 +1271,7 @@ describe('AuthService.login', () => {
 
   it('still bootstraps attendance self-service on fresh login for eligible never-revoked users', async () => {
     const previousMode = process.env.PRODUCT_MODE
-    process.env.PRODUCT_MODE = 'platform'
+    process.env.PRODUCT_MODE = 'attendance'
     try {
       const passwordHash = await bcrypt.hash('WelcomePass9A', 10)
       rbacMocks.listUserPermissions.mockResolvedValue([])
@@ -1222,7 +1314,7 @@ describe('AuthService.login', () => {
 
   it('a fresh login of a steady-state user (default role already held) merges attendance permissions without invalidating', async () => {
     const previousMode = process.env.PRODUCT_MODE
-    process.env.PRODUCT_MODE = 'platform'
+    process.env.PRODUCT_MODE = 'attendance'
     try {
       const passwordHash = await bcrypt.hash('WelcomePass9A', 10)
       rbacMocks.listUserPermissions.mockResolvedValue([])
@@ -1475,6 +1567,7 @@ describe('AuthService tenant claim -> jwtAuthMiddleware -> stock-prep source pre
       activation_status: 'activated',
       local_password_set: true,
       created_at: new Date(0),
+      revocation_revision: 'none',
       updated_at: new Date(0),
     })
     if (/FROM users WHERE lower\(email\) = \$1/.test(sql)) {
@@ -1711,7 +1804,7 @@ describe('AuthService tenant claim -> jwtAuthMiddleware -> stock-prep source pre
     sessionMocks.isUserSessionRevoked.mockReset()
     sessionMocks.isUserSessionRevoked.mockResolvedValue(false)
     sessionMocks.createUserSession.mockReset()
-    sessionMocks.createUserSession.mockResolvedValue(undefined)
+    sessionMocks.createUserSession.mockResolvedValue({ id: 'minted' })
     sessionMocks.isUserSessionActive.mockReset()
     sessionMocks.isUserSessionActive.mockResolvedValue(true)
     memberships = [

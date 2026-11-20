@@ -77,6 +77,7 @@ export type HarnessState = {
   session: { user_id: unknown; live: unknown } | null
   /** Milliseconds; `null` means no watermark row. */
   watermarkMs: string | null
+  revision: string
   /** Microseconds; derived from `watermarkMs` when null. */
   watermarkUs: string | null
   failures: number
@@ -113,6 +114,7 @@ export function defaultState(overrides: Partial<HarnessState> = {}): HarnessStat
     xids: ['100'],
     session: { user_id: USER, live: true },
     watermarkMs: null,
+    revision: '572501b0-f792-45be-be21-29945802b35a',
     watermarkUs: null,
     failures: 0,
     retryAfter: 1,
@@ -187,7 +189,7 @@ async function answer(key: StatementKey, sql: string, params: unknown[], state: 
       return state.session ? [{ user_id: state.session.user_id, live: state.session.live }] : []
     case 'watermark':
       if (state.watermarkMs === null) return []
-      return [{ revoked_after_ms: state.watermarkMs, revoked_after_us: state.watermarkUs ?? `${state.watermarkMs}000` }]
+      return [{ revision: state.revision, revoked_after: new Date(Number(state.watermarkMs)), revoked_after_us: state.watermarkUs ?? `${state.watermarkMs}000` }]
     case 'failureCount':
       return [{ failures: state.failures, retry_after: state.retryAfter }]
     case 'account':
@@ -262,6 +264,7 @@ export type ServiceOverrides = Partial<SecurityActionProofServiceDeps> & {
   state?: HarnessState
   options?: HarnessOptions
   passwordOk?: boolean
+  afterPasswordCheck?: () => void
 }
 
 export function serviceWith(overrides: ServiceOverrides = {}) {
@@ -282,6 +285,7 @@ export function serviceWith(overrides: ServiceOverrides = {}) {
       verifyCalls.push({ hash: first.passwordHash })
       runner.events.push({ type: 'verifyPassword' })
       const verified = overrides.passwordOk !== false
+      overrides.afterPasswordCheck?.()
       return runner.runTransaction((executor) => steps.account(executor, first, verified))
     },
     recordAudit: async (event) => {
@@ -319,10 +323,11 @@ export function bindRequest(): SecurityActionVerifyRequest {
   return verifyRequest({ purpose: 'external_identity_bind', targetIdentityId: undefined, expectedBindingRevision: undefined })
 }
 
-export function tokenFor(userId: string, sid: string | undefined, orgId: string | null = ORG): string {
+export function tokenFor(userId: string, sid: string | undefined, orgId: string | null = ORG,
+  claims: { sessionRevision?: string; revocationIat?: number } = {}): string {
   return authService.createToken(
     { id: userId, email: null, name: userId, role: 'user', permissions: [], created_at: new Date(), updated_at: new Date(), ...(orgId ? { tenantId: orgId } : {}) },
-    sid === undefined ? {} : { sid },
+    { sid, ...claims },
   )
 }
 

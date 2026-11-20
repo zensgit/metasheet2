@@ -389,11 +389,22 @@ test('the battery actually drives every site it claims to drive', () => {
 })
 
 test('every NOT-DRIVEN site carries a named reason and a concrete detail', () => {
-  const allowedReasons = new Set(['unknowable-lease-key', 'no-trigger-on-target-table', 'external-provider-required', 'orthogonal-fixture-cost'])
+  const allowedReasons = new Set(['unknowable-lease-key', 'no-trigger-on-target-table', 'no-trigger-on-written-columns', 'external-provider-required', 'orthogonal-fixture-cost'])
   for (const entry of NOT_DRIVEN_SITES) {
     assert.ok(allowedReasons.has(entry.reason), `${entry.site}: unrecognised reason '${entry.reason}'`)
     assert.ok(entry.detail && entry.detail.length >= 40, `${entry.site}: detail is too thin to count as a disclosed cap`)
   }
+})
+
+test('manual delivery writes no recovery-triggering table events or user columns', () => {
+  const entry = NOT_DRIVEN_SITES.find(({ site }) => site === 'admin-users:manual-delivery')
+  assert.equal(entry?.reason, 'no-trigger-on-written-columns')
+  const service = readFileSync(new URL('../../packages/core-backend/src/auth/invite-manual-delivery.ts', import.meta.url), 'utf8')
+  const writes = [...service.matchAll(/[`'"]\s*((?:UPDATE|INSERT INTO|DELETE FROM) \w+)\b/gi)].map(match => match[1])
+  assert.deepEqual(writes, ['UPDATE user_invites', 'UPDATE users', 'INSERT INTO audit_logs'])
+  const columns = /UPDATE users SET ([^`]+?) WHERE id =/s.exec(service)[1].split(',').map(set => set.split('=')[0].trim())
+  const watched = /BEFORE UPDATE OF ([\w, ]+) ON users/i.exec(MIGRATION_SOURCE)[1].split(',').map(column => column.trim())
+  assert.deepEqual(columns.filter(column => watched.includes(column)), [])
 })
 
 // ---------------------------------------------------------------------------

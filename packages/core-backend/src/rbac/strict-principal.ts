@@ -1,4 +1,5 @@
 import { authService } from '../auth/AuthService'
+import { sessionRevisionAllows } from '../auth/session-revision'
 import { evaluateUserAuthenticationGate } from '../auth/user-activation'
 
 export type StrictPrincipalQuery = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>
@@ -42,12 +43,8 @@ export async function validateStrictSession(
   if (!principal) return false
 
   await query('SELECT id, user_id, revoked_at FROM user_sessions LIMIT 0')
-  const revocations = await query('SELECT revoked_after FROM user_session_revocations WHERE user_id = $1', [requestUserId])
-  const revocation = revocations.rows[0] as { revoked_after?: string | Date } | undefined
-  if (revocation) {
-    const revokedAt = new Date(revocation.revoked_after as string | Date).getTime()
-    if (!Number.isFinite(revokedAt) || payload.iat * 1000 <= revokedAt) return false
-  }
+  const revocations = await query('SELECT revoked_after, revision FROM user_session_revocations WHERE user_id = $1', [requestUserId])
+  if (!sessionRevisionAllows(payload, revocations.rows[0] as Parameters<typeof sessionRevisionAllows>[1])) return false
   // Legacy session JWTs may have no sid. When present, it must name a live row.
   if (payload.sid !== undefined) {
     if (typeof payload.sid !== 'string' || !payload.sid.trim()) return false

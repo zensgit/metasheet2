@@ -1,5 +1,6 @@
 import { query } from '../db/pg'
 import { isDatabaseSchemaError } from '../utils/database-errors'
+import { sessionRevisionAllows } from './session-revision'
 
 export interface SessionRevocationSnapshot {
   revokedAfter: string
@@ -76,12 +77,10 @@ export async function revokeUserSessions(
   }
 }
 
-export async function isUserSessionRevoked(userId: string, tokenIssuedAt?: number): Promise<boolean> {
-  if (typeof tokenIssuedAt !== 'number' || !Number.isFinite(tokenIssuedAt)) return false
-
-  const snapshot = await getSessionRevocationSnapshot(userId)
-  if (!snapshot) return false
-
-  const revokedAtMs = new Date(snapshot.revokedAfter).getTime()
-  return tokenIssuedAt * 1000 <= revokedAtMs
+export async function isUserSessionRevoked(userId: string, evidence: number | Parameters<typeof sessionRevisionAllows>[0]): Promise<boolean> {
+  const claims = typeof evidence === 'number' ? { iat: evidence } : evidence
+  const result = await query<{ revision: string; revoked_after: Date }>(
+    'SELECT revision, revoked_after FROM user_session_revocations WHERE user_id = $1', [userId],
+  )
+  return !sessionRevisionAllows(claims, result.rows[0])
 }

@@ -400,8 +400,8 @@ async function recordCollision(c: AliasCollision): Promise<void> {
  * (those would false-green cutover while real platform admins still lack aliases).
  * Usable password: local_password_set, non-empty password_hash, activated + is_active.
  */
-export async function hasActiveAdminWithPasswordAlias(): Promise<boolean> {
-  const result = await query<{ n: number }>(
+export async function hasActiveAdminWithPasswordAlias(client = { query }): Promise<boolean> {
+  const result = await client.query(
     `SELECT count(*)::int AS n
        FROM users u
        JOIN user_login_aliases a ON a.user_id = u.id

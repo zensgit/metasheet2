@@ -19,6 +19,7 @@ const SCOPE_COMMAND = 'issuer-scope-1'
 const WAIT_MS = 3000
 const BLOCK_MS = 5000
 const ENV_KEYS = [
+  'PRODUCT_MODE',
   'REDIS_URL',
   'REDIS_HOST',
   'DINGTALK_OAUTH_REQUIRE_SHARED_STATE_STORE',
@@ -134,6 +135,12 @@ vi.mock('../../src/integration/db/connection-pool', async (importOriginal) => {
   }
 })
 
+vi.mock('../../src/db/pg', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../../src/db/pg')>()
+  const { poolManager } = await import('../../src/integration/db/connection-pool')
+  return { ...original, get pool() { return poolManager.get().getInternalPool() } }
+})
+
 vi.mock('../../src/core/logger', () => ({
   Logger: class {
     info() {}
@@ -171,6 +178,7 @@ import {
 import type { Queryable } from '../../src/multitable/automation-durable-dispatcher'
 import { quoteAdminGrantActorInputIdent } from '../../src/db/migrations/zzzz20261118090000_admin_grant_actor_inputs'
 import { up as actorUp } from '../../src/db/migrations/zzzz20261118090000_admin_grant_actor_inputs'
+import { up as revisionUp } from '../../src/db/migrations/zzzz20261118180000_add_session_revocation_revision'
 import {
   STRICT_LOGIN_GRANT_MIGRATION_NAME,
   down as strictDown,
@@ -339,11 +347,16 @@ async function installShells(pool: PgPool, schema: string): Promise<void> {
     is_active boolean NOT NULL,
     must_change_password boolean NOT NULL,
     activation_status text,
+    deleted_at timestamptz,
+    purged_at timestamptz,
     local_password_set boolean NOT NULL,
     created_at timestamptz NOT NULL DEFAULT pg_catalog.clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT pg_catalog.clock_timestamp()
   )`)
   const admissions = ident(schema, 'user_namespace_admissions')
+  await pool.query(`CREATE TABLE ${ident(schema, 'user_roles')} (user_id text NOT NULL, role_id text NOT NULL, PRIMARY KEY (user_id, role_id))`)
+  await pool.query(`CREATE TABLE ${ident(schema, 'user_permissions')} (user_id text NOT NULL, permission_code text NOT NULL, PRIMARY KEY (user_id, permission_code))`)
+  await pool.query(`CREATE TABLE ${ident(schema, 'role_permissions')} (role_id text NOT NULL, permission_code text NOT NULL, PRIMARY KEY (role_id, permission_code))`)
   await pool.query(`CREATE TABLE ${admissions} (
     id uuid PRIMARY KEY DEFAULT pg_catalog.gen_random_uuid(),
     user_id text NOT NULL REFERENCES ${users} (id) ON DELETE CASCADE,
@@ -454,6 +467,7 @@ async function prepare(input: {
   })
   witness = next
   await installShells(next, schema)
+  await revisionUp(new Kysely<unknown>({ dialect: new PostgresDialect({ pool: next }) }))
   const userId = `issuer-${randomUUID()}`
   const email = `issuer-${userId.slice(-12)}@b2.example`
   const connectionId = randomUUID()
@@ -559,9 +573,6 @@ function assertIssuerOrder(): void {
   expect(state.maxWaiting).toBe(0)
 }
 
-const ADMISSION_LOCK_SQL = 'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))'
-const ADMISSION_READ_SQL = 'SELECT enabled, source FROM user_namespace_admissions WHERE user_id = $1 AND namespace = $2 LIMIT 1'
-
 function compactSql(sqlText: string): string {
   return sqlText.replace(/\s+/g, ' ').trim()
 }
@@ -573,33 +584,29 @@ function requireRecordedPid(pid: number | null, code: string): number {
 
 async function assertPasswordChangeBoundary(
   env: Prepared,
-  provenance: 'none' | 'commit' | 'rollback',
+  provenance: 'none' | 'partial' | 'commit' | 'rollback',
 ): Promise<void> {
   const records = state.transactions
-  expect(records).toHaveLength(provenance === 'none' ? 2 : 3)
-  for (const record of records.slice(0, 2)) {
-    expect(record.outcome).toBe('commit')
-    expect(requireRecordedPid(record.pid, 'B2_ISSUER_ADMISSION_PID_UNAVAILABLE')).toBeGreaterThan(0)
-    expect(record.started.map(compactSql)).toEqual([ADMISSION_LOCK_SQL, ADMISSION_READ_SQL])
-    expect(record.completed.map(compactSql)).toEqual([ADMISSION_LOCK_SQL, ADMISSION_READ_SQL])
-    const traced = [...record.started, ...record.completed]
-    expect(traced.some((sqlText) => sqlText.includes('pg_backend_pid'))).toBe(false)
-    expect(traced.some((sqlText) => /INSERT|user_roles|user_permissions|password_hash/i.test(sqlText))).toBe(false)
+  const outcomes = provenance === 'partial' ? [] : provenance === 'rollback' ? ['rollback'] : ['commit', 'commit']
+  expect(records.map(record => record.outcome)).toEqual(outcomes)
+  expect(state.commits).toBe(outcomes.filter(outcome => outcome === 'commit').length)
+  expect(state.rollbacks).toBe(outcomes.filter(outcome => outcome === 'rollback').length)
+  for (const record of records) {
+    expect(requireRecordedPid(record.pid, 'B2_ISSUER_TRANSACTION_PID_UNAVAILABLE')).toBeGreaterThan(0)
+    const statements = record.started.map(sql => compactSql(sql).replaceAll(env.schema, 'synthetic_schema'))
+    expect(statements).toMatchSnapshot()
+    expect(record.completed).toEqual(record.outcome === 'rollback' ? record.started.slice(0, -1) : record.started)
+    expect(statements.some(sql => /pg_backend_pid|user_namespace_admissions|user_roles|user_permissions/i.test(sql))).toBe(false)
   }
   expect([...state.started, ...state.sql].some((sqlText) => sqlText.includes('directory_integrations'))).toBe(false)
-  if (provenance === 'none') {
-    expect(state.commits).toBe(2)
-    expect(state.rollbacks).toBe(0)
-  } else {
-    const own = records[2]
+  if (provenance === 'commit' || provenance === 'rollback') {
+    const own = records[0]
     if (!own) throw new Error('B2_ISSUER_PROVENANCE_TRANSACTION_MISSING')
     expect(own.started[0]).toBe(READ_COMMITTED)
     expect(own.completed[0]).toBe(READ_COMMITTED)
     expect(requireRecordedPid(own.pid, 'B2_ISSUER_PROVENANCE_PID_UNAVAILABLE')).toBeGreaterThan(0)
     expect([...own.started, ...own.completed].some((sqlText) => sqlText.includes('pg_backend_pid'))).toBe(false)
     expect(own.outcome).toBe(provenance)
-    expect(state.commits).toBe(provenance === 'commit' ? 3 : 2)
-    expect(state.rollbacks).toBe(provenance === 'rollback' ? 1 : 0)
   }
   const admission = await env.witness.query(
     `SELECT namespace, enabled, source
@@ -709,6 +716,7 @@ describe('ordinary final issuer and required password provenance', () => {
     originalFetch = globalThis.fetch
     globalThis.fetch = (() => Promise.reject(new Error('FINAL_ISSUER_NETWORK_FORBIDDEN'))) as typeof fetch
     for (const key of ENV_KEYS) savedEnv.set(key, process.env[key])
+    process.env.PRODUCT_MODE = 'platform'
     delete process.env.REDIS_URL
     delete process.env.REDIS_HOST
     process.env.DINGTALK_OAUTH_REQUIRE_SHARED_STATE_STORE = 'false'
@@ -1174,6 +1182,31 @@ describe('ordinary final issuer and required password provenance', () => {
     expect(dingtalk.exchangeCodeForUser).not.toHaveBeenCalled()
   }, 60_000)
 
+  it('retains the locked read-only admission check on each dedicated-mode session read after opt-out', async () => {
+    const env = await prepare({ actor: 'ready', strict: false, integration: false, scope: false, mustChange: true, session: true })
+    if (!env.token) throw new Error('B2_ISSUER_PASSWORD_SESSION_MISSING')
+    const original = process.env.PRODUCT_MODE
+    try {
+      process.env.PRODUCT_MODE = 'attendance'
+      for (let read = 0; read < 2; read++) {
+        expect((await authService.verifyToken(env.token))?.permissions).toEqual([])
+      }
+      expect(state.transactions).toHaveLength(2)
+      for (const record of state.transactions) {
+        expect(record.outcome).toBe('commit')
+        expect(requireRecordedPid(record.pid, 'B2_ISSUER_ADMISSION_PID_UNAVAILABLE')).toBeGreaterThan(0)
+        expect(record.started.map(compactSql)).toEqual([
+          'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+          'SELECT enabled, source FROM user_namespace_admissions WHERE user_id = $1 AND namespace = $2 LIMIT 1',
+        ])
+        expect(record.completed).toEqual(record.started)
+      }
+    } finally {
+      if (original === undefined) delete process.env.PRODUCT_MODE
+      else process.env.PRODUCT_MODE = original
+    }
+  })
+
   it('required password change records version, establishment, and a later watermark, then accepts the new password', async () => {
     const env = await prepare({
       actor: 'ready',
@@ -1321,7 +1354,7 @@ describe('ordinary final issuer and required password provenance', () => {
       success: false,
       error: 'Password change is unavailable',
     })
-    await assertPasswordChangeBoundary(env, 'none')
+    await assertPasswordChangeBoundary(env, 'partial')
     const after = await env.witness.query(
       `SELECT password_hash, must_change_password FROM ${ident(env.schema, 'users')} WHERE id = $1`,
       [env.userId],
@@ -1361,7 +1394,7 @@ describe('ordinary final issuer and required password provenance', () => {
       code: 'ADMIN_GRANT_CREDENTIAL_UNAVAILABLE',
     })
     await assertPasswordChangeBoundary(env, 'rollback')
-    const provenance = state.transactions[2]
+    const provenance = state.transactions[0]
     expect(provenance?.started.some((sqlText) => sqlText.includes('INSERT INTO') && sqlText.includes('user_local_credential_establishments'))).toBe(true)
     expect(state.started.some((sqlText) => sqlText.includes('INSERT INTO') && sqlText.includes('user_local_credential_establishments'))).toBe(true)
     const after = await env.witness.query(

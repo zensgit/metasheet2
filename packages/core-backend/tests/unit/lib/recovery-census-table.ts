@@ -195,6 +195,7 @@ export const WIRING_CENSUS: readonly WiringRequirement[] = [
           { site: 'admin-users:member-group-action', testFile: ADMUSR },
           { site: 'admin-users:delegated-role-action', testFile: ADMUSR },
           { site: 'admin-users:create-user', testFile: ADMUSR },
+          { site: 'admin-users:manual-delivery', testFile: ADMUSR },
           { site: 'admin-users:role-assign', testFile: ADMUSR },
           { site: 'admin-users:role-unassign', testFile: ADMUSR },
           { site: 'admin-users:status', testFile: ADMUSR },

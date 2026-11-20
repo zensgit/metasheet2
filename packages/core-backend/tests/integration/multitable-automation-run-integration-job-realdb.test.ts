@@ -1578,10 +1578,7 @@ describeIfDatabase('R-69 1c integration.run_finished on real tables (event-fires
 //   F4  a role granting legacy integration:write + workflow:write, and an enabled `integration` admission
 //       (`integration` is admission-controlled like stock-prep; without the row both sides drop it — F3's case)
 //
-// PRODUCT_MODE: AuthService adds the attendance self-service codes when supportsAttendanceSelfService(PRODUCT_MODE)
-// holds — and an UNSET PRODUCT_MODE normalizes to 'platform', which supports it. So the strict matrix pins
-// PRODUCT_MODE to 'plm-workbench' (self-service off), and a second case runs the default (unset) mode and asserts
-// the difference explicitly: request − port is exactly {attendance:read, attendance:write}, nothing else differs.
+// Neither PLM nor default platform mode grants attendance to these fixtures without an administrator grant.
 //
 // Witness (seen red): replacing the admission-filtered listUserPermissions(id, trx) in automation-run-authority.ts
 // with the unfiltered union turns F2 and F3 red.
@@ -1590,7 +1587,6 @@ describeIfDatabase('ADR §11 permission equivalence: port principal codes ≡ re
   const ROLE_PULL = `role_mx_pull_${RUN}`
   const ROLE_LEGACY = `role_mx_legacy_${RUN}`
   const PULL_LADDER = ['stock-prep:operate', 'stock-prep:pull', 'stock-prep:read']
-  const ATTENDANCE_SELF_SERVICE = ['attendance:read', 'attendance:write']
   type Fixture = { name: 'F1' | 'F2' | 'F3' | 'F4'; expected: string[] }
   const FIXTURES: Fixture[] = [
     { name: 'F1', expected: [...PULL_LADDER, 'workflow:write'] },
@@ -1717,7 +1713,7 @@ describeIfDatabase('ADR §11 permission equivalence: port principal codes ≡ re
     }
   }, 20_000)
 
-  test('default PRODUCT_MODE (unset ⇒ platform, self-service ON): the ONLY difference is the attendance self-service pair the profile adds; every other code is equal and the pinned sets hold on the port', async () => {
+  test('default platform mode: profiles match the port and do not implicitly add attendance', async () => {
     // requestProfile(_, undefined) deletes PRODUCT_MODE for the read, whatever the lane's env carries
     for (const fixture of FIXTURES) {
       const userId = userIdOf(fixture.name, 'platform')
@@ -1725,9 +1721,8 @@ describeIfDatabase('ADR §11 permission equivalence: port principal codes ≡ re
       const port = await portPrincipal(userId)
       const requestCodes = sorted(request.permissions)
       const portCodes = sorted(port.permissions)
-      expect(requestCodes.filter((code) => !portCodes.includes(code)), fixture.name).toEqual(ATTENDANCE_SELF_SERVICE)
-      expect(portCodes.filter((code) => !requestCodes.includes(code)), fixture.name).toEqual([])
-      expect(requestCodes.filter((code) => !ATTENDANCE_SELF_SERVICE.includes(code)), fixture.name).toEqual(fixture.expected)
+      expect(requestCodes, fixture.name).toEqual(portCodes)
+      expect(requestCodes, fixture.name).toEqual(fixture.expected)
       expect(portCodes, fixture.name).toEqual(fixture.expected)
       expect(port.role).toBe(request.role)
       if (fixture.name === 'F2' || fixture.name === 'F3') {

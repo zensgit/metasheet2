@@ -359,12 +359,13 @@ describe('module boundaries', () => {
     expect(identifierCount(SERVICE, 'SECURITY_ACTION_SQL')).toBeGreaterThan(1)
   })
 
-  it('imports a fixed set of modules and never a cache, a request field, the environment or a session helper', () => {
+  it('imports a fixed set of modules and never a cache, a request field, the environment or a session lookup helper', () => {
     expect(importEdges(SERVICE).sort()).toEqual([
       '../audit/audit', '../directory/access-graph-mutex', '../directory/access-graph-mutex', '../multitable/automation-durable-dispatcher',
       '../multitable/pg-transaction-guard', './AuthService', './external-login-assurance', './external-login-assurance', './security-action-attempt-admission',
-      './security-action-privilege', './security-action-proof-flag', './user-activation', 'express', 'node:crypto',
+      './security-action-privilege', './security-action-proof-flag', './session-revision', './user-activation', 'express', 'node:crypto',
     ])
+    expect(importedNames(SERVICE, './session-revision')).toEqual(['sessionRevisionAllows'])
     expect(importEdges(ROUTE).sort()).toEqual(['../auth/security-action-proof', '../auth/security-action-proof-flag', '../core/logger', 'express', 'express'])
     for (const file of [SERVICE, ROUTE]) {
       const source = readFileSync(file, 'utf8')
