@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Test double for `loginctl show-user <user> -p Linger --value`.
+printf 'loginctl\t-\t-\t-\t%s\n' "$*" >> "${H_CALLS}"
+[[ "${1:-}" == "show-user" ]] || exit 99
+echo "${H_LINGER:-no}"

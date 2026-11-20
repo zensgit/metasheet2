@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>人工行父组件原型</title>
+<style>
+:root{
+  --bg:#f5f6f8;--panel:#fff;--text:#1f2329;--muted:#646a73;--line:#dee0e3;--accent:#3370ff;--accent-soft:#e1eaff;
+  --manual:#fff4e5;--manual-text:#b25e00;--danger:#d83931;--group:#f2f3f5;--chip:#eef0f3;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#17181a;--panel:#232427;--text:#e8e9eb;--muted:#9a9ea6;--line:#3a3c40;--accent:#5b8cff;--accent-soft:#25324f;
+  --manual:#3a2c17;--manual-text:#ffb85c;--danger:#ff6b63;--group:#2b2c30;--chip:#2f3034;
+}}
+:root[data-theme="dark"]{
+  --bg:#17181a;--panel:#232427;--text:#e8e9eb;--muted:#9a9ea6;--line:#3a3c40;--accent:#5b8cff;--accent-soft:#25324f;
+  --manual:#3a2c17;--manual-text:#ffb85c;--danger:#ff6b63;--group:#2b2c30;--chip:#2f3034;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+main{max-width:1080px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:22px;margin:0 0 4px}
+h2{font-size:17px;margin:40px 0 6px}
+.lead{color:var(--muted);margin:0 0 8px}
+.note{color:var(--muted);font-size:13px;margin:4px 0 14px}
+.tag{display:inline-block;font-size:12px;padding:0 6px;border-radius:4px;background:var(--chip);color:var(--muted);margin-left:6px;vertical-align:middle}
+.stage{display:flex;flex-wrap:wrap;gap:24px;align-items:flex-start}
+.modal{background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.12);width:460px;max-width:100%}
+.modal header{display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--line);font-weight:600}
+.modal header span{color:var(--muted);font-weight:400;cursor:default}
+.modal .body{padding:12px 18px}
+.modal footer{display:flex;justify-content:flex-end;gap:8px;padding:12px 18px;border-top:1px solid var(--line)}
+.row{display:grid;grid-template-columns:96px 1fr;gap:10px;align-items:center;margin:8px 0}
+.row label{color:var(--muted)}
+.req{color:var(--danger)}
+input[type=text],input[type=number]{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--text);font:inherit}
+.ro{color:var(--muted)}
+.btn{padding:6px 14px;border-radius:6px;border:1px solid var(--line);background:var(--panel);color:var(--text);font:inherit;cursor:pointer}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.link{border:none;background:none;color:var(--accent);padding:0}
+fieldset{border:1px solid var(--line);border-radius:8px;margin:12px 0 4px;padding:8px 12px 10px}
+legend{padding:0 4px;font-weight:600}
+.opts{display:flex;gap:14px;flex-wrap:wrap;margin:2px 0 6px}
+.opts label{display:flex;gap:4px;align-items:center;cursor:pointer}
+.picker{position:relative}
+.picked{display:flex;justify-content:space-between;align-items:center;padding:6px 8px;border:1px solid var(--accent);border-radius:6px;background:var(--accent-soft)}
+.dropdown{border:1px solid var(--line);border-radius:6px;margin-top:6px;background:var(--panel);max-height:260px;overflow:auto}
+.dropdown .search{padding:6px;border-bottom:1px solid var(--line)}
+.dropdown .grp{font-size:12px;color:var(--muted);padding:6px 10px 2px}
+.dropdown .item{display:flex;justify-content:space-between;gap:8px;padding:5px 10px;cursor:pointer}
+.dropdown .item:hover,.dropdown .item.on{background:var(--accent-soft)}
+.dropdown .item small{color:var(--muted)}
+.code{font-family:ui-monospace,Consolas,monospace}
+.hint{font-size:12px;color:var(--muted);margin:6px 0 0}
+.hidden{display:none}
+.callout{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:6px;padding:10px 14px;max-width:440px}
+.callout ul{margin:4px 0;padding-left:18px}
+.drawer{background:var(--panel);border:1px solid var(--line);border-radius:10px;width:360px;max-width:100%}
+.drawer header{padding:12px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+.drawer .kv{display:grid;grid-template-columns:96px 1fr;gap:6px 10px;padding:12px 16px}
+.drawer .kv span:nth-child(odd){color:var(--muted)}
+.badge{font-size:12px;padding:1px 6px;border-radius:4px;background:var(--manual);color:var(--manual-text)}
+.menu{background:var(--panel);border:1px solid var(--line);border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,.12);width:180px;padding:4px 0}
+.menu div{padding:6px 14px}
+.menu div.on{background:var(--accent-soft);color:var(--accent)}
+.menu hr{border:none;border-top:1px solid var(--line);margin:4px 0}
+.grid-wrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:8px}
+table{border-collapse:collapse;width:100%;min-width:620px}
+th,td{padding:6px 10px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+th{font-weight:600;color:var(--muted);font-size:13px}
+tr.g td{background:var(--group);font-weight:600}
+tr.m td{background:var(--manual)}
+.cmp{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media (max-width:760px){.cmp{grid-template-columns:1fr}}
+.cmp table{min-width:0}
+.cmp h3{font-size:14px;margin:0 0 6px}
+.lockcell{color:var(--muted)}
+</style>
+</head>
+<body>
+<main>
+  <h1>人工补充行：指定和修改父组件 <span class="tag">页面原型 · 示例数据（合成）</span></h1>
+  <p class="lead">配合 ADR《备料项目表的人工补充行》§12（owner 2026-11-19 已裁决）。只是样子，不连后端；可以点一点切换选法。</p>
+
+  <h2>① 新增人工补充行：多一栏「父组件」</h2>
+  <p class="note">默认「不挂父组件」，和今天一样。选「选已有的」会出现可搜索的下拉，图号和名称成对带出；选「新建父组件」就自己填图号和名称。</p>
+  <div class="stage">
+    <div class="modal" role="dialog" aria-label="新增人工补充行">
+      <header>新增人工补充行 <span>×</span></header>
+      <div class="body">
+        <div class="row"><label>项目号</label><span class="ro">保存时自动填写</span></div>
+        <div class="row"><label>名称<span class="req">*</span></label><input type="text" value="内六角螺钉"></div>
+        <div class="row"><label>总用量<span class="req">*</span></label><input type="number" value="24"></div>
+        <div class="row"><label>图号</label><input type="text" value="GB70-M8x25"></div>
+        <div class="row"><label>规格</label><input type="text" value="M8×25"></div>
+        <div class="row"><label>材质</label><input type="text" value="12.9级"></div>
+        <div class="row"><label>用量</label><input type="number" value="4"></div>
+        <fieldset>
+          <legend>父组件</legend>
+          <div class="opts" id="mode">
+            <label><input type="radio" name="pm" value="none"> 不挂父组件</label>
+            <label><input type="radio" name="pm" value="pick" checked> 选已有的</label>
+            <label><input type="radio" name="pm" value="new"> 新建父组件</label>
+          </div>
+          <div id="pm-none" class="hidden"><p class="hint">这一行会出现在填写视图的空值组（组头显示「(无值)」）。</p></div>
+          <div id="pm-pick" class="picker">
+            <div class="picked"><span><span class="code">DZ-1001</span> · 底座焊接件</span><button class="btn link" type="button" id="toggle-dd">更换</button></div>
+            <div class="dropdown" id="dd">
+              <div class="search"><input type="text" placeholder="按图号或名称搜索" value="底座"></div>
+              <div class="grp">已有父组件</div>
+              <div class="item on"><span><span class="code">DZ-1001</span> 底座焊接件</span><small>12 个子件</small></div>
+              <div class="item"><span><span class="code">DZ-1002</span> 底座盖板组件</span><small>5 个子件</small></div>
+              <div class="grp">本项目物料（选它就让它成为父组件）</div>
+              <div class="item"><span><span class="code">DZ-1001-03</span> 底座立板</span><small>PLM</small></div>
+              <div class="item"><span><span class="code">RG-DZ-01</span> 底座调平垫组件</span><small>人工补充</small></div>
+            </div>
+          </div>
+          <div id="pm-new" class="hidden">
+            <div class="row"><label>父组件图号<span class="req">*</span></label><input type="text" placeholder="例如 RG-DZ-02"></div>
+            <div class="row"><label>父组件名称<span class="req">*</span></label><input type="text" placeholder="例如 底座附件包"></div>
+            <p class="hint">只给这一行写上父组件，不会自动为父组件本身建一行。父组件本身也要备料的，先把它新增成一行人工补充行，再给子件选它。</p>
+          </div>
+        </fieldset>
+      </div>
+      <footer><button class="btn">取消</button><button class="btn primary">保存</button></footer>
+    </div>
+    <div class="callout">
+      <strong>规则</strong>
+      <ul>
+        <li>下拉只列你能看到的行；「本项目物料」包括 PLM 行和人工行，所以人工加的物料下次就能当父组件。</li>
+        <li>图号和名称一起带出、一起保存，不能只改一半。</li>
+        <li>新建父组件：图号、名称都要填；图号不能和本行自己的图号相同。</li>
+        <li>保存后，这一行出现在所选父组件的分组里。</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>② 加错了：人工行上「修改父组件」</h2>
+  <p class="note">入口在人工行的记录抽屉（网格不做右键菜单，沿用 10-27 客户反馈后的做法）。PLM 行没有这个入口；网格里父组件两格不能直接单格编辑（两列要一起改）。</p>
+  <div class="stage">
+    <div class="drawer">
+      <header><strong>内六角螺钉</strong><span class="badge">人工补充</span></header>
+      <div class="kv">
+        <span>图号</span><span class="code">GB70-M8x25</span>
+        <span>父组件图号</span><span class="code">DZ-1001 <button class="btn link" type="button">修改父组件</button></span>
+        <span>父组件名称</span><span>底座焊接件</span>
+        <span>总用量</span><span>24</span>
+      </div>
+    </div>
+    <div class="modal" style="width:400px" role="dialog" aria-label="修改父组件">
+      <header>修改父组件 <span>×</span></header>
+      <div class="body">
+        <div class="row"><label>当前</label><span><span class="code">DZ-1001</span> · 底座焊接件</span></div>
+        <div class="opts">
+          <label><input type="radio" name="em" checked> 改成已有的</label>
+          <label><input type="radio" name="em"> 新建父组件</label>
+          <label><input type="radio" name="em"> 移出父组件</label>
+        </div>
+        <div class="picked"><span><span class="code">DZ-1002</span> · 底座盖板组件</span><button class="btn link" type="button">更换</button></div>
+        <p class="hint">只改这一行。已经推送或导出过的不会自动更新；正式导出下次按新的父组件排。</p>
+      </div>
+      <footer><button class="btn">取消</button><button class="btn primary">保存</button></footer>
+    </div>
+  </div>
+
+  <div class="callout" style="margin-top:16px;max-width:560px"><strong>改人工父组件本身时的提示</strong><p style="margin:4px 0">人工行 RG-DZ-01 被别的人工行当作父组件，修改它的图号或删除它时弹出：</p><p style="margin:4px 0;color:var(--danger)">有 3 行人工补充行以它为父组件，修改/删除后它们不会跟着变。</p><p class="hint">只给数字，不自动改子行。</p></div>
+
+  <h2>③ 填写视图：前后对比</h2>
+  <p class="note">填写视图本来就按父组件图号分组，人工行填了父组件就进对应的组，和 PLM 子件排在一起。</p>
+  <div class="cmp">
+    <div>
+      <h3>今天：人工行都在空值组</h3>
+      <div class="grid-wrap"><table>
+        <thead><tr><th>图号</th><th>名称</th><th>总用量</th><th>来源</th></tr></thead>
+        <tbody>
+          <tr class="g"><td colspan="4">父组件 DZ-1001 · 3 行</td></tr>
+          <tr><td class="code">DZ-1001-01</td><td>底板</td><td>2</td><td class="lockcell">PLM</td></tr>
+          <tr><td class="code">DZ-1001-02</td><td>侧板</td><td>4</td><td class="lockcell">PLM</td></tr>
+          <tr><td class="code">DZ-1001-03</td><td>底座立板</td><td>2</td><td class="lockcell">PLM</td></tr>
+          <tr class="g"><td colspan="4">(无值) · 2 行</td></tr>
+          <tr class="m"><td class="code">GB70-M8x25</td><td>内六角螺钉</td><td>24</td><td>人工补充</td></tr>
+          <tr class="m"><td class="code">—</td><td>防锈漆</td><td>3</td><td>人工补充</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+    <div>
+      <h3>改后：挂在选定的父组件下</h3>
+      <div class="grid-wrap"><table>
+        <thead><tr><th>图号</th><th>名称</th><th>总用量</th><th>来源</th></tr></thead>
+        <tbody>
+          <tr class="g"><td colspan="4">父组件 DZ-1001 · 4 行</td></tr>
+          <tr><td class="code">DZ-1001-01</td><td>底板</td><td>2</td><td class="lockcell">PLM</td></tr>
+          <tr><td class="code">DZ-1001-02</td><td>侧板</td><td>4</td><td class="lockcell">PLM</td></tr>
+          <tr><td class="code">DZ-1001-03</td><td>底座立板</td><td>2</td><td class="lockcell">PLM</td></tr>
+          <tr class="m"><td class="code">GB70-M8x25</td><td>内六角螺钉</td><td>24</td><td>人工补充</td></tr>
+          <tr class="g"><td colspan="4">(无值) · 1 行</td></tr>
+          <tr class="m"><td class="code">—</td><td>防锈漆</td><td>3</td><td>人工补充</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+  </div>
+
+  <h2>④ 正式导出（OQ-P2 已裁决：插到父组件下）</h2>
+  <p class="note">建议：挂了父组件的人工行插到父组件那棵子树的末尾；找不到父组件（新建的）就留在表尾。只有 PLM 行的项目，导出和今天完全一样。</p>
+  <div class="grid-wrap" style="max-width:760px"><table>
+    <thead><tr><th>层级</th><th>父组件图号</th><th>图号</th><th>名称</th><th>来源</th></tr></thead>
+    <tbody>
+      <tr><td>0</td><td></td><td class="code">DZ-1000</td><td>底座总成</td><td>PLM</td></tr>
+      <tr><td>1</td><td class="code">DZ-1000</td><td class="code">DZ-1001</td><td>底座焊接件</td><td>PLM</td></tr>
+      <tr><td>2</td><td class="code">DZ-1001</td><td class="code">DZ-1001-01</td><td>底板</td><td>PLM</td></tr>
+      <tr><td>2</td><td class="code">DZ-1001</td><td class="code">DZ-1001-02</td><td>侧板</td><td>PLM</td></tr>
+      <tr><td>2</td><td class="code">DZ-1001</td><td class="code">DZ-1001-03</td><td>底座立板</td><td>PLM</td></tr>
+      <tr class="m"><td></td><td class="code">DZ-1001</td><td class="code">GB70-M8x25</td><td>内六角螺钉</td><td>人工补充</td></tr>
+      <tr><td>1</td><td class="code">DZ-1000</td><td class="code">DZ-1002</td><td>底座盖板组件</td><td>PLM</td></tr>
+      <tr class="m"><td></td><td class="code">RG-DZ-02</td><td class="code">RG-DZ-02-01</td><td>附件袋</td><td>人工补充</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">最后一行挂在新建的父组件 RG-DZ-02 下，树里找不到它，所以留在表尾。人工行的「层级」留空，不推算。</p>
+</main>
+<script>
+(function(){
+  var radios=document.querySelectorAll('#mode input');
+  function show(v){
+    ['none','pick','new'].forEach(function(k){document.getElementById('pm-'+k).classList.toggle('hidden',k!==v)});
+  }
+  radios.forEach(function(r){r.addEventListener('change',function(){show(r.value)})});
+  var dd=document.getElementById('dd');
+  document.getElementById('toggle-dd').addEventListener('click',function(){dd.classList.toggle('hidden')});
+  dd.querySelectorAll('.item').forEach(function(it){it.addEventListener('click',function(){
+    dd.querySelectorAll('.item').forEach(function(x){x.classList.remove('on')});it.classList.add('on');
+    var t=it.querySelector('span').innerHTML;document.querySelector('#pm-pick .picked span').innerHTML=t.replace('</span> ','</span> · ');
+  })});
+})();
+</script>
+</body>
+</html>

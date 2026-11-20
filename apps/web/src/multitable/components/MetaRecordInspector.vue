@@ -332,6 +332,18 @@
           bomRelations.disabledReason || bomRelationsLabel('action.hint', isZh)
         }}</p>
       </div>
+      <!-- 人工补充行的父组件 (ADR §12.2 「加错了能改」): the pair as stored, with 「修改父组件」 beside 父组件图号. Only when the
+           workbench passes `manualParent` (a manual row, /context's `parentFieldIds`); the two cells are never edited
+           one at a time — the link opens the workbench's dialog, which saves both. -->
+      <dl v-if="record && manualParent" class="meta-record-drawer__manual-parent" data-testid="record-inspector-manual-parent">
+        <dt>{{ manualRowLabel('parent.code', isZh) }}</dt>
+        <dd>
+          <span class="meta-record-drawer__manual-parent-code" data-testid="record-inspector-manual-parent-code">{{ manualParent.code ?? '—' }}</span>
+          <MtLink data-testid="record-inspector-manual-parent-edit" @click="emit('edit-manual-parent')">{{ manualRowLabel('parent.edit.entry', isZh) }}</MtLink>
+        </dd>
+        <dt>{{ manualRowLabel('parent.name', isZh) }}</dt>
+        <dd data-testid="record-inspector-manual-parent-name">{{ manualParent.name ?? '—' }}</dd>
+      </dl>
     </div>
     <div
       v-if="record"
@@ -654,7 +666,7 @@ import type {
 } from '../types'
 import type { MultitableApiClient } from '../api/client'
 import type { MetaCommentMentionSelection } from '../../shared/comments/types'
-import { MtButton, MtIconButton, MtMenu, MtMenuItem } from '../ui'
+import { MtButton, MtIconButton, MtLink, MtMenu, MtMenuItem } from '../ui'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import MetaRecordPermissionManager from './MetaRecordPermissionManager.vue'
 import MetaRecordFieldsPanel from './MetaRecordFieldsPanel.vue'
@@ -726,6 +738,10 @@ const props = withDefaults(defineProps<{
    *  (/context's stockPreparationBomRelations block). `disabledReason` set ⇒ both buttons disabled with it shown.
    *  null/absent ⇒ no buttons (every other sheet). */
   bomRelations?: { disabledReason: string | null } | null
+  /** 人工补充行的父组件 (ADR §12.2 「加错了能改」): the row's 父组件图号 / 父组件名称 as stored (null = empty). The workbench
+   *  passes it only for a manual row on a sheet whose /context names the pair for this actor; null/absent ⇒ no
+   *  「修改父组件」 (every PLM row, every other sheet). */
+  manualParent?: { code: string | null; name: string | null } | null
   canManageAutomation?: boolean
   /** 记录级送审 (阶段二 §5): server-derived `multitable:submit-approval`. Default false — an older
    *  backend, the deprecated MetaRecordDrawer shell's own caller, or any harness that omits it gets NO
@@ -860,6 +876,7 @@ const props = withDefaults(defineProps<{
   canSubmitApproval: false,
   manualCopyAvailable: false,
   bomRelations: null,
+  manualParent: null,
 })
 
 const emit = defineEmits<{
@@ -870,6 +887,8 @@ const emit = defineEmits<{
   (e: 'manual-copy'): void
   /** 备料: 「查看子件」 (`children`) / 「查看所有使用位置」 (`whereUsed`) for this record — the workbench sets the viewer filter. */
   (e: 'bom-relations', kind: BomRelationKind): void
+  /** 人工补充行: 「修改父组件」 of this record (the workbench opens the dialog and saves the pair). */
+  (e: 'edit-manual-parent'): void
   /** Record inspector v3 (2026-09-05, PR-A §1.2 Row A): copy-link icon. PR-A scope is this emit
    *  only — the clipboard write + copied/failed live-region text are PR-B1 (see the button's own
    *  template comment); WB has no listener for it yet. */
@@ -1906,6 +1925,10 @@ function formatCommentTimestamp(iso: string): string {
 .meta-record-drawer__bom-relations-hint { margin: 0; font-size: 12px; line-height: 1.4; color: var(--ms-text-3, #888); }
 .meta-record-drawer__eyebrow { margin: 0; font-size: 11px; line-height: 1.3; color: var(--ms-text-3, #999); text-transform: uppercase; letter-spacing: 0.02em; }
 /* 人工补充行 (OQ3): the same label the grid shows at the row head. */
+.meta-record-drawer__manual-parent { display: grid; grid-template-columns: max-content 1fr; gap: 2px 10px; margin: 8px 0 0; font-size: 12px; }
+.meta-record-drawer__manual-parent dt { color: var(--ms-text-3, #888); }
+.meta-record-drawer__manual-parent dd { margin: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.meta-record-drawer__manual-parent-code { font-family: ui-monospace, Consolas, monospace; }
 .meta-record-drawer__manual-row-tag { display: inline-block; margin-left: 6px; padding: 0 4px; font-size: 10px; line-height: 14px; color: #8a5a00; background: #fdf6ec; border: 1px solid #f5dab1; border-radius: 3px; text-transform: none; letter-spacing: 0; vertical-align: middle; }
 .meta-record-drawer__title-input, .meta-record-drawer__title-text {
   font-size: 18px; font-weight: 600; line-height: 1.3; min-width: 0; box-sizing: border-box;
