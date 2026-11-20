@@ -204,6 +204,8 @@ vi.mock('../../src/auth/invite-ledger', async (importOriginal) =>
   probe.wrap(await importOriginal<Record<string, unknown>>(), 'invite-ledger'))
 vi.mock('../../src/auth/invite-tokens', async (importOriginal) =>
   probe.wrap(await importOriginal<Record<string, unknown>>(), 'invite-tokens'))
+vi.mock('../../src/auth/invite-manual-delivery', async (importOriginal) =>
+  probe.wrap(await importOriginal<Record<string, unknown>>(), 'invite-manual-delivery'))
 vi.mock('../../src/rbac/role-assignment', async (importOriginal) =>
   probe.wrap(await importOriginal<Record<string, unknown>>(), 'role-assignment'))
 // `deriveDelegatedAdminNamespace` 保持真身：委派管理员口径（`admin-users.ts` 的 `ensureRoleDelegationAdmin`
@@ -475,7 +477,7 @@ function parseGate(gate: string): { file: string; branches: string[][] } | null 
 }
 
 // ---------------------------------------------------------------------------
-// 登记表（79 条）——`reg` = 注册文件，`gate` = 注册文件 + 门函数名链；均由「fixture 自检」对源码自证
+// 登记表（80 条）——`reg` = 注册文件，`gate` = 注册文件 + 门函数名链；均由「fixture 自检」对源码自证
 // ---------------------------------------------------------------------------
 
 interface WriteRouteEntry {
@@ -523,6 +525,7 @@ const REGISTRY: readonly WriteRouteEntry[] = [
   { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/users/:userId/roles/:action(assign|unassign)', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensureRoleDelegationAdmin', family: D },
   { mount: 'admin-users', method: 'post', path: '/api/admin/invites/:inviteId/revoke', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/invites/:inviteId/resend', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/invites/:inviteId/manual-delivery', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'post', path: '/api/admin/users', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'patch', path: '/api/admin/users/:userId/profile', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-users', method: 'patch', path: '/api/admin/users/:userId/namespaces/:namespace/admission', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
@@ -656,7 +659,7 @@ const PARAM_VALUES: Readonly<Record<string, string>> = {
   action: 'assign',
   userId: 'u-target',
   namespace: 'attendance',
-  inviteId: 'inv-1',
+  inviteId: '00000000-0000-4000-8000-000000000001',
   id: 'u-target',
   sessionId: 'sess-1',
   integrationId: '22222222-2222-4222-8222-222222222222',
@@ -870,12 +873,12 @@ describe('/api/admin 挂载点写路由守卫 — fixture 自检', () => {
     }
   })
 
-  it('登记表条数与分族口径固定：79 条 / 2 条委派例外 / 4 条中间件门 / 1 条事务门 / 2 条操作门', () => {
-    expect(REGISTRY).toHaveLength(79)
+  it('登记表条数与分族口径固定：80 条 / 2 条委派例外 / 4 条中间件门 / 1 条事务门 / 2 条操作门', () => {
+    expect(REGISTRY).toHaveLength(80)
     expect(REGISTRY.filter((e) => e.family === 'delegation')).toHaveLength(2)
     expect(REGISTRY.filter((e) => e.family === 'middleware')).toHaveLength(4)
     expect(REGISTRY.filter((e) => e.family === 'inline')).toHaveLength(1)
-    expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(70)
+    expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(71)
     expect(REGISTRY.filter((e) => e.family === 'operation')).toHaveLength(2)
     // 每条都必须带来源：reg = 该挂载点的注册文件；gate 可解析，且每条分支链的最后一环是本族的门函数
     for (const entry of REGISTRY) {
@@ -1125,6 +1128,7 @@ describe('(A) 控制组：同一请求、只改门的输入，结论必须翻面
     readonly expectDownstream?: string
   }
   const CONTROLS: readonly Control[] = [
+    { mount: 'admin-users', path: '/api/admin/invites/:inviteId/manual-delivery', expectDownstream: 'invite-manual-delivery.deliverInviteManually' },
     { mount: 'admin-users', path: '/api/admin/users/batch/create' },
     { mount: 'admin-users', path: '/api/admin/users/batch/update' },
     { mount: 'admin-users', path: '/api/admin/users/batch/disable' },

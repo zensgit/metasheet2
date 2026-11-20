@@ -72,8 +72,10 @@ suite('role assignment provenance with actual PostgreSQL and HTTP',()=>{
     expect((await db.query("SELECT assignment_source FROM user_roles WHERE user_id=$1 AND role_id='attendance_employee'",[registered!.id])).rows[0]?.assignment_source).toBe('creation')
     const old=randomUUID();createdUsers.push(old)
     await db.query("INSERT INTO users(id,email,name,password_hash,role,is_admin,permissions) VALUES ($1,$2,'old','synthetic','user',false,'[]')",[old,`${old}@example.test`])
-    const getUser=(authService as unknown as {getUserById(id:string):Promise<unknown>}).getUserById.bind(authService)
-    await getUser(old)
+    const session=authService.createToken({id:old,email:`${old}@example.test`,name:'old',role:'user',permissions:[],created_at:new Date(),updated_at:new Date()})
+    const verified=await authService.verifyToken(session)
+    expect(verified?.id).toBe(old)
+    expect(verified?.permissions).toEqual(expect.arrayContaining(['attendance:read','attendance:write']))
     const row=(await db.query("SELECT assignment_source FROM user_roles WHERE user_id=$1 AND role_id='attendance_employee'",[old])).rows[0]
     expect(row).toBeDefined();expect(row.assignment_source).toBeNull()
   })

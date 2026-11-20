@@ -94,6 +94,8 @@ suite('real authorization operation on the migrated synthetic schema', () => {
       for (const ddl of [
         'ALTER TABLE public.users DISABLE TRIGGER admin_grant_local_credential_version',
         'ALTER TABLE public.roles ADD COLUMN fixture_extra text',
+        'ALTER FUNCTION public.rotate_user_session_revocation_revision() STABLE',
+        'ALTER FUNCTION public.rotate_user_session_revocation_revision() RENAME TO fixture_session_revision',
       ]) {
         await control.query(ddl)
         await expect(assertAuthorizationOperationSchema(query)).rejects.toMatchObject({

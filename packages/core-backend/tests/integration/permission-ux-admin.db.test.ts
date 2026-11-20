@@ -451,15 +451,24 @@ describe('permission UX admin through production routes and real PostgreSQL', ()
     }
   })
 
-  it.each(['attendance', 'platform'])('negative control: an old missing-admission account really bootstraps in %s mode', async mode => {
+  it.each(['attendance', 'platform'])('only attendance mode provisions an old missing-admission account: %s', async mode => {
     const userId = await seedUser()
     expect((await query('SELECT 1 FROM user_namespace_admissions WHERE user_id = $1', [userId])).rows).toEqual([])
     const priorMode = process.env.PRODUCT_MODE
     try {
       process.env.PRODUCT_MODE = mode
       const profile = await authService.verifyToken(token(userId))
-      expect(profile?.permissions).toEqual(expect.arrayContaining(['attendance:read', 'attendance:write']))
-      expect((await query("SELECT role_id FROM user_roles WHERE user_id = $1 AND role_id = 'attendance_employee'", [userId])).rows).toEqual([{ role_id: 'attendance_employee' }])
+      expect(profile).toBeTruthy()
+      const roleRows = (await query("SELECT role_id FROM user_roles WHERE user_id = $1 AND role_id = 'attendance_employee'", [userId])).rows
+      if (mode === 'attendance') {
+        expect(profile?.permissions).toEqual(expect.arrayContaining(['attendance:read', 'attendance:write']))
+        expect(roleRows).toEqual([{ role_id: 'attendance_employee' }])
+      } else {
+        expect(profile?.permissions).not.toContain('attendance:read')
+        expect(profile?.permissions).not.toContain('attendance:write')
+        expect(roleRows).toEqual([])
+        expect((await query('SELECT 1 FROM user_namespace_admissions WHERE user_id = $1', [userId])).rows).toEqual([])
+      }
     } finally {
       if (priorMode === undefined) delete process.env.PRODUCT_MODE
       else process.env.PRODUCT_MODE = priorMode
