@@ -7438,7 +7438,7 @@
                      fixed here. -->
                 <AttendanceUserPickerField
                   v-model="annualBalanceUserId"
-                  v-model:display-name="annualBalanceUserDisplayName"
+                  @update:display-name="rememberAnnualBalanceIdentity"
                   :tr="tr"
                   :label="tr('User ID', '用户 ID')"
                   name="annualBalanceUserId"
@@ -7747,7 +7747,6 @@
                     data-attendance-annual-bulk-adjust-user-chip
                   >
                     <span>{{ annualBulkAdjustUserLabel(userId) }}</span>
-                    <span v-if="annualBulkAdjustUserLabel(userId) !== userId" class="attendance__id-clip">{{ userId }}</span>
                     <button
                       class="attendance__btn attendance__btn--inline"
                       type="button"
@@ -7788,16 +7787,16 @@
                   <table class="attendance__table">
                     <thead><tr><th>{{ tr('User', '用户') }}</th><th>{{ tr('Result', '结果') }}</th></tr></thead>
                     <tbody>
-                      <tr v-for="userId in annualBulkAdjustUserIds" :key="userId">
-                        <td>{{ userId }}</td>
+                      <tr v-for="row in annualBulkAdjust.rows" :key="row.userId">
+                        <td>{{ annualBulkAdjustResultUserLabel(row.userId) }}</td>
                         <td>
                           <span
-                            v-if="annualBulkAdjust.results[userId]"
+                            v-if="annualBulkAdjust.results[row.userId]"
                             class="attendance__status-chip"
-                            :data-attendance-annual-bulk-adjust-row-state="annualBulkAdjust.results[userId]?.state"
-                            :data-attendance-annual-bulk-adjust-row-error-kind="annualBulkAdjust.results[userId]?.errorKind"
+                            :data-attendance-annual-bulk-adjust-row-state="annualBulkAdjust.results[row.userId]?.state"
+                            :data-attendance-annual-bulk-adjust-row-error-kind="annualBulkAdjust.results[row.userId]?.errorKind"
                           >
-                            {{ annualBulkAdjustRowResultText(userId) }}
+                            {{ annualBulkAdjustRowResultText(row.userId) }}
                           </span>
                         </td>
                       </tr>
@@ -10722,7 +10721,8 @@ import AttendancePayrollCycleHelp from './attendance/AttendancePayrollCycleHelp.
 import AttendanceAnnualOpsHelp from './attendance/AttendanceAnnualOpsHelp.vue'
 import AttendanceAdminGuide from './attendance/AttendanceAdminGuide.vue'
 import AttendanceOverrideAudienceFields from './attendance/AttendanceOverrideAudienceFields.vue'
-import { formatAnnualBalanceSubject } from './attendance/annualBalanceSubject'
+import { useAttendanceAnnualBalance, type AnnualLeaveBalanceData } from './attendance/useAttendanceAnnualBalance'
+import { attendancePersonnelLabel, attendancePersonnelName, type AttendancePersonnelIdentity } from './attendance/attendancePersonnelIdentity'
 
 import { getCalendarVisibleRange } from '../composables/useCalendarDays'
 import {
@@ -26100,33 +26100,6 @@ async function loadLeaveTypes(options: { activeOnly?: boolean } = {}) {
 
 // 年假/法定假 L5a: read-only annual-leave balance/ledger for one user (admin console). Calls the L5a read endpoint
 // and renders summary + active lots + recent events so a balance is explainable. Read-only; no mutation here.
-interface AnnualLeaveBalanceLot {
-  id: string
-  leave_type_code: string
-  amount_minutes: number
-  remaining_minutes: number
-  source_type: string
-  source_id: string | null
-  status: string
-  granted_at: string | null
-  expires_at: string | null
-}
-interface AnnualLeaveBalanceEvent {
-  event_type: string
-  delta_minutes: number
-  source_type: string
-  source_id: string | null
-  balance_id: string
-  occurred_at: string
-}
-interface AnnualLeaveBalanceData {
-  userId: string
-  summary: { leaveTypeCode: string; grantedMinutes: number; remainingMinutes: number; exhaustedMinutes: number; expiredMinutes: number }
-  activeLots: AnnualLeaveBalanceLot[]
-  recentEvents: AnnualLeaveBalanceEvent[]
-  eventLimit: number
-}
-
 interface AttendanceSelfRulesGroupSummary {
   id?: string | null
   name?: string | null
@@ -26176,15 +26149,22 @@ interface AttendanceSelfRulesData {
   warnings?: Array<{ code?: string | null } | string>
 }
 
-const annualBalanceUserId = ref('')
-const annualBalanceUserDisplayName = ref('')
-const annualBalanceQueriedName = ref('')
-const annualBalanceLoading = ref(false)
-const annualBalanceData = ref<AnnualLeaveBalanceData | null>(null)
-const annualBalanceSubjectLabel = computed(() => formatAnnualBalanceSubject(
-  annualBalanceData.value?.userId,
-  annualBalanceQueriedName.value,
-))
+const {
+  userId: annualBalanceUserId,
+  rememberIdentity: rememberAnnualBalanceIdentity,
+  loading: annualBalanceLoading,
+  data: annualBalanceData,
+  subjectLabel: annualBalanceSubjectLabel,
+  load: loadAnnualLeaveBalance,
+} = useAttendanceAnnualBalance({
+  orgId,
+  globalScope: attendanceAdminGlobalUserScope,
+  sessionGuard: attendanceSessionGuard,
+  apiFetch,
+  adminForbidden,
+  tr,
+  onError: (error) => setStatus(readErrorMessage(error, tr('Failed to load annual leave balance', '加载年假余额失败')), 'error'),
+})
 
 const selfRulesSnapshot = ref<AttendanceSelfRulesData | null>(null)
 const currentTimeContext = computed(() => parseAttendanceCurrentTimeContext(selfRulesSnapshot.value?.attendanceTimeContext))
@@ -26508,40 +26488,6 @@ async function loadSelfAttendanceRules(background = false): Promise<void> {
   }
 }
 
-// OD-W5-7 leaveTypeCode parameterization (see loadAnnualSelfBalance above) — default 'annual' is
-// byte identical to the prior hardcoded literal for every existing (arg-less) caller.
-async function loadAnnualLeaveBalance(leaveTypeCode: string = 'annual') {
-  // clear any prior result up front so an empty ID / failed / 403 / errored query never leaves a stale balance
-  // from a previously-queried user on screen (the view renders solely on v-if="annualBalanceData").
-  annualBalanceData.value = null
-  annualBalanceQueriedName.value = ''
-  const targetUser = annualBalanceUserId.value.trim()
-  if (!targetUser) {
-    setStatus(tr('Enter a user ID to view the annual leave balance', '请输入用户 ID 查询年假余额'), 'error')
-    return
-  }
-  annualBalanceLoading.value = true
-  try {
-    const query = buildQuery({ orgId: normalizedOrgId(), userId: targetUser, leaveTypeCode })
-    const response = await apiFetch(`/api/attendance/leave-balances?${query.toString()}`)
-    if (response.status === 403) {
-      adminForbidden.value = true
-      return
-    }
-    const data = await response.json()
-    if (!response.ok || !data.ok) {
-      throw new Error(readErrorMessage(data, tr('Failed to load annual leave balance', '加载年假余额失败')))
-    }
-    adminForbidden.value = false
-    annualBalanceQueriedName.value = annualBalanceUserDisplayName.value.trim()
-    annualBalanceData.value = data.data as AnnualLeaveBalanceData
-  } catch (error: any) {
-    setStatus(readErrorMessage(error, tr('Failed to load annual leave balance', '加载年假余额失败')), 'error')
-  } finally {
-    annualBalanceLoading.value = false
-  }
-}
-
 // 年假/法定假 L5b: annualLeavePolicy config (admin console). Loads the policy from settings, edits it, and PUTs it
 // back. Client guards mirror the backend (an enabled policy needs a timezone; the backend additionally validates
 // IANA validity + the tier ladder and returns a clear error we surface).
@@ -26811,6 +26757,8 @@ interface AnnualAdjustPersonHit { id: string; email: string; name: string | null
 interface AnnualAdjustResult { id: string; delta: number; applied: boolean; alreadyApplied: boolean }
 const annualAdjustForm = reactive<{ userId: string; deltaMinutes: number; reason: string }>({ userId: '', deltaMinutes: 0, reason: '' })
 const annualAdjustPersonText = ref('')
+const annualAdjustIdentity = ref<AttendancePersonnelIdentity | null>(null)
+let annualAdjustPreviewEpoch = 0
 const annualAdjustPersonHits = ref<AnnualAdjustPersonHit[]>([])
 const annualAdjustPersonSearchPending = ref(false)
 const annualAdjustPersonSearchSettled = ref(false)
@@ -26829,18 +26777,16 @@ const annualAdjustReasonPresets = computed(() => [
 const annualAdjustSubmitting = ref(false)
 const annualAdjustResult = ref<AnnualAdjustResult | null>(null)
 const annualAdjustError = ref<string | null>(null)
-const annualAdjustPreview = ref<{ user: string; before: number; after: number } | null>(null)
+const annualAdjustPreview = ref<{ user: string; delta: number; before: number; after: number } | null>(null)
 const annualAdjustIdemKey = ref('')
 
 function annualAdjustPersonLabel(person: AnnualAdjustPersonHit): string {
-  const name = person.name?.trim() || ''
-  const email = person.email.trim()
-  if (name && email && email !== name) return `${name}（${email}）`
-  return name || email || person.id
+  return attendancePersonnelLabel(person.id, { id: person.id, name: attendancePersonnelName(person) }, tr)
 }
 
 function onAnnualAdjustPersonInput(event: Event): void {
   const value = (event.target as HTMLInputElement).value
+  annualAdjustIdentity.value = null
   annualAdjustPersonText.value = value
   annualAdjustForm.userId = value.trim()
   annualAdjustPersonHits.value = []
@@ -26849,8 +26795,10 @@ function onAnnualAdjustPersonInput(event: Event): void {
 }
 
 function chooseAnnualAdjustPerson(person: AnnualAdjustPersonHit): void {
+  annualAdjustPersonSearchSeq += 1
   annualAdjustForm.userId = person.id
-  annualAdjustPersonText.value = person.name?.trim() || person.email.trim() || person.id
+  annualAdjustIdentity.value = { id: person.id, name: attendancePersonnelName(person) }
+  annualAdjustPersonText.value = annualAdjustPersonLabel(person)
   annualAdjustPersonHits.value = []
   annualAdjustPersonSearchPending.value = false
   annualAdjustPersonSearchSettled.value = false
@@ -26859,6 +26807,8 @@ function chooseAnnualAdjustPerson(person: AnnualAdjustPersonHit): void {
 async function searchAnnualAdjustPeople(query: string): Promise<void> {
   const q = query.trim()
   const seq = ++annualAdjustPersonSearchSeq
+  const current = () => seq === annualAdjustPersonSearchSeq && attendanceSessionGuard.isCurrent()
+  if (!current()) return
   if (!q) {
     annualAdjustPersonHits.value = []
     annualAdjustPersonSearchPending.value = false
@@ -26870,14 +26820,14 @@ async function searchAnnualAdjustPeople(query: string): Promise<void> {
   try {
     const params = new URLSearchParams({ q, ...attendanceAdminUserScopePayload() })
     const response = await apiFetch(`/api/attendance-admin/users/search?${params.toString()}`)
-    if (seq !== annualAdjustPersonSearchSeq) return
+    if (!current()) return
     if (!response.ok) {
       annualAdjustPersonHits.value = []
       return
     }
     const data = await response.json()
-    if (seq !== annualAdjustPersonSearchSeq) return
-    const items = data?.data?.items
+    if (!current()) return
+    const items = data?.ok === true ? data?.data?.items : []
     annualAdjustPersonHits.value = Array.isArray(items)
       ? items.slice(0, 8).map((item: { id?: string; email?: string | null; name?: string | null }) => ({
         id: String(item?.id || '').trim(),
@@ -26886,10 +26836,10 @@ async function searchAnnualAdjustPeople(query: string): Promise<void> {
       })).filter((item: AnnualAdjustPersonHit) => item.id)
       : []
   } catch {
-    if (seq !== annualAdjustPersonSearchSeq) return
+    if (!current()) return
     annualAdjustPersonHits.value = []
   } finally {
-    if (seq === annualAdjustPersonSearchSeq) {
+    if (current()) {
       annualAdjustPersonSearchPending.value = false
       annualAdjustPersonSearchSettled.value = Boolean(q)
     }
@@ -26899,7 +26849,16 @@ async function searchAnnualAdjustPeople(query: string): Promise<void> {
 // OD-W5-7 leaveTypeCode parameterization (see loadAnnualSelfBalance above) — default 'annual' is
 // byte identical to the prior hardcoded literal for every existing (arg-less) caller.
 async function previewAnnualAdjust(leaveTypeCode: string = 'annual'): Promise<void> {
+  const epoch = ++annualAdjustPreviewEpoch
   const userId = annualAdjustForm.userId.trim()
+  const delta = Number(annualAdjustForm.deltaMinutes) || 0
+  const org = normalizedOrgId()
+  const scope = attendanceAdminGlobalUserScope.value
+  const current = () => epoch === annualAdjustPreviewEpoch
+    && userId === annualAdjustForm.userId.trim() && delta === (Number(annualAdjustForm.deltaMinutes) || 0)
+    && org === normalizedOrgId() && scope === attendanceAdminGlobalUserScope.value
+    && attendanceSessionGuard.isCurrent()
+  if (!current()) return
   annualAdjustError.value = null
   annualAdjustPreview.value = null
   if (!userId) {
@@ -26907,21 +26866,24 @@ async function previewAnnualAdjust(leaveTypeCode: string = 'annual'): Promise<vo
     return
   }
   try {
-    const query = buildQuery({ orgId: normalizedOrgId(), userId, leaveTypeCode })
+    const query = buildQuery({ orgId: org, userId, leaveTypeCode })
     const response = await apiFetch(`/api/attendance/leave-balances?${query.toString()}`)
+    if (!current()) return
     if (response.status === 403) {
       adminForbidden.value = true
       return
     }
     const data = await response.json()
-    if (!response.ok || !data.ok) {
+    if (!current()) return
+    if (!response.ok || !data.ok || data.data?.userId !== userId) {
       throw new Error(readErrorMessage(data, tr('Failed to read balance', '读取余额失败')))
     }
     adminForbidden.value = false
     // client preview ONLY — advisory; the backend 422 (FIFO-insufficient) is the final authority on a save.
     const before = Number(data.data?.summary?.remainingMinutes) || 0
-    annualAdjustPreview.value = { user: userId, before, after: before + (Number(annualAdjustForm.deltaMinutes) || 0) }
-  } catch (error: any) {
+    annualAdjustPreview.value = { user: userId, delta, before, after: before + delta }
+  } catch (error: unknown) {
+    if (!current()) return
     annualAdjustError.value = readErrorMessage(error, tr('Failed to read balance', '读取余额失败'))
   }
 }
@@ -26951,9 +26913,9 @@ function requestAnnualAdjust(): void {
   openAnnualOpsConfirm({
     title: tr('Confirm manual adjustment', '确认手工调整'),
     lines: [
-      { label: tr('User', '用户'), value: userId },
+      { label: tr('User', '用户'), value: attendancePersonnelLabel(userId, annualAdjustIdentity.value, tr) },
       { label: tr('Delta (min)', '变动(分钟)'), value: (delta > 0 ? '+' : '') + delta },
-      ...(preview && preview.user === userId ? [{ label: tr('Remaining (preview)', '剩余(预览)'), value: `${preview.before} → ${preview.after}` }] : []),
+      ...(preview && preview.user === userId && preview.delta === delta ? [{ label: tr('Remaining (preview)', '剩余(预览)'), value: `${preview.before} → ${preview.after}` }] : []),
       { label: tr('Reason', '原因'), value: reason },
       { label: tr('Idempotency key', '幂等键'), value: annualAdjustIdemKey.value },
       // G3 (override-import-guard design-lock, 2026-07-05): negative adjustments (deductions)
@@ -26991,7 +26953,9 @@ async function submitAnnualAdjust(snapshot: { userId: string; deltaMinutes: numb
 // shape for the confirm step; the actual network loop only runs from onConfirm, mirroring
 // the bulk-apply-schedule / batch-anomaly two-step precedent.
 const annualBulkAdjustUserPickerValue = ref('')
-const annualBulkAdjustPendingLabel = ref('')
+const annualBulkAdjustPendingIdentity = ref<AttendancePersonnelIdentity | null>(null)
+const annualBulkAdjustRowLabels = ref<Record<string, string>>({})
+let annualPersonnelLabelEpoch = 0
 const annualBulkAdjustUserLabels = ref<Record<string, string>>({})
 const annualBulkAdjustUserIds = ref<string[]>([])
 const annualBulkAdjustForm = reactive<{ deltaMinutes: number; reason: string }>({ deltaMinutes: 0, reason: '' })
@@ -27002,12 +26966,39 @@ const annualBulkAdjust = reactive<{
   results: Record<string, BulkBalanceAdjustRowResult>
 }>({ submitting: false, rows: [], results: {} })
 
+function invalidateAnnualPersonnelReads(): void {
+  annualPersonnelLabelEpoch += 1
+  annualBulkAdjustRowLabels.value = {}
+  annualAdjustPersonSearchSeq += 1
+  annualAdjustPersonHits.value = []
+  annualAdjustPersonSearchPending.value = false
+  annualAdjustPersonSearchSettled.value = false
+  annualAdjustIdentity.value = null
+  annualAdjustPreviewEpoch += 1
+  annualAdjustPreview.value = null
+  annualAdjustError.value = null
+  annualBulkAdjustPendingIdentity.value = null
+  annualBulkAdjustUserLabels.value = {}
+}
+watch([orgId, attendanceAdminGlobalUserScope, attendanceSessionStale], invalidateAnnualPersonnelReads, { flush: 'sync' })
+onUnmounted(invalidateAnnualPersonnelReads)
+watch(() => [annualAdjustForm.userId, annualAdjustForm.deltaMinutes], () => {
+  annualAdjustPreviewEpoch += 1
+  annualAdjustPreview.value = null
+}, { flush: 'sync' })
+watch(() => annualAdjustForm.userId, () => { annualAdjustIdentity.value = null }, { flush: 'sync' })
+watch(annualBulkAdjustUserPickerValue, () => { annualBulkAdjustPendingIdentity.value = null }, { flush: 'sync' })
+
 function rememberAnnualBulkAdjustLabel(name: string): void {
-  annualBulkAdjustPendingLabel.value = name
+  annualBulkAdjustPendingIdentity.value = { id: annualBulkAdjustUserPickerValue.value.trim(), name }
 }
 
 function annualBulkAdjustUserLabel(userId: string): string {
-  return annualBulkAdjustUserLabels.value[userId] || userId
+  return attendancePersonnelLabel(userId, { id: userId, name: annualBulkAdjustUserLabels.value[userId] || '' }, tr)
+}
+
+function annualBulkAdjustResultUserLabel(userId: string): string {
+  return annualBulkAdjustRowLabels.value[userId] || attendancePersonnelLabel(userId, null, tr)
 }
 
 function addAnnualBulkAdjustUser(): void {
@@ -27015,13 +27006,14 @@ function addAnnualBulkAdjustUser(): void {
   if (!userId) return
   if (!annualBulkAdjustUserIds.value.includes(userId)) {
     annualBulkAdjustUserIds.value = [...annualBulkAdjustUserIds.value, userId]
-    const label = annualBulkAdjustPendingLabel.value.trim()
-    if (label && label !== userId) {
+    const identity = annualBulkAdjustPendingIdentity.value
+    const label = identity?.id === userId ? identity.name.trim() : ''
+    if (label) {
       annualBulkAdjustUserLabels.value = { ...annualBulkAdjustUserLabels.value, [userId]: label }
     }
   }
   annualBulkAdjustUserPickerValue.value = ''
-  annualBulkAdjustPendingLabel.value = ''
+  annualBulkAdjustPendingIdentity.value = null
 }
 
 function removeAnnualBulkAdjustUser(userId: string): void {
@@ -27094,6 +27086,8 @@ function requestAnnualBulkAdjust(): void {
   // A brand-new confirmed request always starts a clean batch — a retry (below) reuses
   // submitAnnualBulkAdjust directly against the already-built rows, never through here.
   const rows = buildBulkBalanceAdjustRows(userIds, { deltaMinutes: delta, reason }, annualOpsIdempotencyKey)
+  const rowLabels = Object.fromEntries(rows.map(row => [row.userId, annualBulkAdjustUserLabel(row.userId)]))
+  const labelEpoch = annualPersonnelLabelEpoch
   annualBulkAdjust.results = {}
   openAnnualOpsConfirm({
     title: tr('Confirm bulk balance adjustment', '确认批量余额调整'),
@@ -27106,7 +27100,10 @@ function requestAnnualBulkAdjust(): void {
       // behavior change.
       ...(delta < 0 ? [buildManualAdjustDeductionLedgerLine(tr)] : []),
     ],
-    onConfirm: () => { void submitAnnualBulkAdjust(rows) },
+    onConfirm: () => {
+      annualBulkAdjustRowLabels.value = labelEpoch === annualPersonnelLabelEpoch && attendanceSessionGuard.isCurrent() ? rowLabels : {}
+      void submitAnnualBulkAdjust(rows)
+    },
   })
 }
 

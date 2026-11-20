@@ -1,7 +1,10 @@
-/** Heading next to 余额: picker display name first, short id kept when it differs. */
-export function formatAnnualBalanceSubject(userId: string | null | undefined, displayName: string | null | undefined): string {
-  const id = String(userId || '').trim()
-  const name = String(displayName || '').trim()
-  if (name && id && name !== id) return `${name}（${id}）`
-  return name || id
+import { attendancePersonnelLabel, type AttendancePersonnelIdentity } from './attendancePersonnelIdentity'
+
+/** Only an identity captured for this ID may supply the primary label. */
+export function formatAnnualBalanceSubject(
+  userId: string | null | undefined,
+  identity: AttendancePersonnelIdentity | null | undefined,
+  tr: (en: string, zh: string) => string = (en) => en,
+): string {
+  return attendancePersonnelLabel(String(userId || '').trim(), identity, tr)
 }
