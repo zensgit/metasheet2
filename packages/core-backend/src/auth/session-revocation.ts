@@ -77,7 +77,18 @@ export async function revokeUserSessions(
 }
 
 export async function isUserSessionRevoked(userId: string, tokenIssuedAt?: number): Promise<boolean> {
-  if (typeof tokenIssuedAt !== 'number' || !Number.isFinite(tokenIssuedAt)) return false
+  if (typeof tokenIssuedAt !== 'number' || !Number.isFinite(tokenIssuedAt * 1000)) {
+    // The Unix epoch is a coordination placeholder, not a revocation. An undated legacy
+    // token needs a successful read proving that the user has no effective watermark.
+    const result = await query<{ revoked: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM user_session_revocations WHERE user_id = $1
+           AND revoked_after <> TIMESTAMPTZ '1970-01-01 00:00:00+00'
+       ) AS revoked`,
+      [userId],
+    )
+    return result.rows[0]?.revoked !== false
+  }
 
   const snapshot = await getSessionRevocationSnapshot(userId)
   if (!snapshot) return false

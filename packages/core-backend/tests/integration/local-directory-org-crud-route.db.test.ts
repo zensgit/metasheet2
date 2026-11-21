@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto'
 import express from 'express'
-import request from 'supertest'
+import supertest from 'supertest'
 import { afterEach, describe, expect, it } from 'vitest'
 import { query, transaction } from '../../src/db/pg'
 import { applyDirectoryDeprovisionCandidate } from '../../src/directory/deprovision-ledger'
@@ -21,6 +21,7 @@ import {
   UPDATE_LOCAL_MEMBERSHIP_FIELDS,
 } from '../../src/directory/local-directory-org-request-schema'
 import { adminDirectoryLocalRouter } from '../../src/routes/admin-directory-local'
+import { usePinnedServer } from '../utils/pinned-server'
 
 /**
  * Canonical Org MVP — B2 (local departments/accounts/memberships CRUD), HTTP route layer, real
@@ -51,6 +52,12 @@ import { adminDirectoryLocalRouter } from '../../src/routes/admin-directory-loca
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
 const STAMP = Date.now()
+const pinned = usePinnedServer()
+
+function request(app: express.Express) {
+  pinned.setApp(app)
+  return supertest(pinned.url())
+}
 
 function fixtureName(tag: string): string {
   return `b2-route-${STAMP}-${tag}-${randomUUID().slice(0, 8)}`

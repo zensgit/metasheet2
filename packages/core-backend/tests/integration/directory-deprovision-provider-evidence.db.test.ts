@@ -16,10 +16,15 @@
  * non-default provider are inserted with SQL because no product writer creates them.
  */
 import { randomUUID } from 'node:crypto'
+import { Client } from 'pg'
 
-import { afterAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import * as database from '../../src/db/pg'
 import { query, transaction } from '../../src/db/pg'
+import { checkCardConnectionBeforeDispatch, legacyGrantAllowsPublicForm } from '../../src/auth/dingtalk-legacy-resource-scope'
+import { checkOrdinaryDingTalkSource } from '../../src/auth/dingtalk-login-source'
+import { insertConnectionLoginScope } from '../../src/auth/strict-login-grant-store'
 import {
   compensateSupersededDenyGrant,
   listDeprovisionEffects,
@@ -317,6 +322,97 @@ describeIfDatabase('deprovision effect provider witness (restore, compensation, 
         { provider: 'dingtalk', enabled: false, granted_by: 'system:directory-deprovision' },
       ])
     })
+  })
+
+  describe('provider-scoped ledger reversals', () => {
+    it('refuses forced restoration while a cutover owns the exact source lock', async () => {
+      const seeded = await seed()
+      await insertGrantRow(seeded.userId, 'dingtalk', false)
+      const eventId = await insertEvent(seeded)
+      await insertGrantEffect(seeded, eventId, { provider: 'dingtalk' })
+      const transition = new Client({ connectionString: process.env.DATABASE_URL })
+      await transition.connect()
+      try {
+        await transition.query('BEGIN')
+        await insertConnectionLoginScope(transition, { connectionId: seeded.integrationId, commandId: randomUUID() })
+        await expect(restoreDeprovisionEvent({ eventId, mode: 'admin_force', adminUserId: 'admin-test', confirm: true, note: 'verified source restore' }))
+          .rejects.toMatchObject({ code: 'DRIFT_CONFLICT' })
+        expect(await effectStatuses(eventId)).toEqual([{ effect_type: 'grant_changed', status: 'applied', provider: 'dingtalk' }])
+        expect((await grantRows(seeded.userId)).map(grant => grant.enabled)).toEqual([false])
+      } finally {
+        await transition.query('ROLLBACK')
+        await transition.end()
+      }
+    })
+
+    for (const action of ['rehire', 'admin_force', 'compensate'] as const) {
+      it(`${action} reverses the historical effect in strict scope without granting access`, async () => {
+        const seeded = await seed()
+        const creation = action === 'compensate'
+        const status = creation ? 'superseded' : 'applied'
+        await insertGrantRow(seeded.userId, 'dingtalk', false)
+        const eventId = await insertEvent(seeded, { status })
+        await insertGrantEffect(seeded, eventId, { provider: 'dingtalk', status, creation })
+        const application = randomUUID()
+        const integration = await query<{ corp_id: string }>(
+          "UPDATE directory_integrations SET config=jsonb_build_object('appKey',$2::text) WHERE id=$1 RETURNING corp_id",
+          [seeded.integrationId, application],
+        )
+        const corp = integration.rows[0].corp_id
+        await query('UPDATE directory_accounts SET corp_id=$2 WHERE id=$1', [seeded.accountId, corp])
+        const source = { connectionId: seeded.integrationId, orgId: seeded.orgId, corpId: corp,
+          appKey: application, configuredCorp: corp, explicit: true, strict: false }
+
+        const connection = new Client({ connectionString: process.env.DATABASE_URL })
+        await connection.connect()
+        try {
+          // Use the actual permanent-scope table and guards inside one rolled-back fixture transaction.
+          // Only the transaction owner is substituted: the service and readers execute their own SQL.
+          await connection.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+          await expect(checkOrdinaryDingTalkSource(connection, source)).resolves.toBeUndefined()
+          await insertConnectionLoginScope(connection, { connectionId: seeded.integrationId, commandId: randomUUID() })
+          const bound = vi.spyOn(database, 'transaction').mockImplementationOnce(handler => handler(connection))
+          try {
+            if (creation) {
+              const result = await compensateSupersededDenyGrant({ eventId, adminUserId: 'admin-test', confirm: true, note: 'verified source cleanup' })
+              expect(result.grantRow).toBe('deleted')
+            } else {
+              const result = await restoreDeprovisionEvent({ eventId, mode: action, adminUserId: 'admin-test', confirm: true, note: 'verified source restore' })
+              expect(result.effectsReversed).toEqual(['grant_changed'])
+            }
+          } finally { bound.mockRestore() }
+          const grants = await connection.query("SELECT enabled FROM user_external_auth_grants WHERE provider='dingtalk' AND local_user_id=$1", [seeded.userId])
+          expect(grants.rows).toEqual(creation ? [] : [{ enabled: true }])
+          const effects = await connection.query('SELECT status FROM directory_deprovision_effects WHERE event_id=$1', [eventId])
+          expect(effects.rows).toEqual([{ status: creation ? 'compensated' : 'reversed' }])
+          await expect(checkOrdinaryDingTalkSource(connection, source)).rejects.toMatchObject({ statusCode: 403 })
+          const read = connection.query.bind(connection)
+          await expect(legacyGrantAllowsPublicForm(read, seeded.userId, false, true)).resolves.toBe(false)
+          await expect(checkCardConnectionBeforeDispatch(read, seeded.integrationId, true)).resolves.toBe('refused')
+          expect((await connection.query('SELECT id FROM user_sessions WHERE user_id=$1', [seeded.userId])).rows).toEqual([])
+          expect((await connection.query('SELECT 1 FROM user_external_identity_login_grants WHERE local_user_id=$1', [seeded.userId])).rows).toEqual([])
+        } finally {
+          await connection.query('ROLLBACK')
+          await connection.end()
+        }
+      })
+
+      it(`${action} refuses a drifted source without changing the ledger or the grant`, async () => {
+        const seeded = await seed()
+        const creation = action === 'compensate'
+        const status = creation ? 'superseded' : 'applied'
+        await insertGrantRow(seeded.userId, 'dingtalk', false)
+        const eventId = await insertEvent(seeded, { status })
+        await insertGrantEffect(seeded, eventId, { provider: 'dingtalk', status, creation })
+        await query("UPDATE directory_accounts SET provider='wecom' WHERE id=$1", [seeded.accountId])
+        const act = creation
+          ? compensateSupersededDenyGrant({ eventId, adminUserId: 'admin-test', confirm: true, note: 'verified source cleanup' })
+          : restoreDeprovisionEvent({ eventId, mode: action, adminUserId: 'admin-test', confirm: true, note: 'verified source restore' })
+        await expect(act).rejects.toMatchObject({ code: 'DRIFT_CONFLICT' })
+        expect(await effectStatuses(eventId)).toEqual([{ effect_type: 'grant_changed', status, provider: 'dingtalk' }])
+        expect((await grantRows(seeded.userId)).map(g => g.enabled)).toEqual([false])
+      })
+    }
   })
 
   describe('compensation acts on the witnessed provider, NULL read as the default', () => {

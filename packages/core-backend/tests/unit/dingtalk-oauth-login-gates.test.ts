@@ -177,7 +177,8 @@ describe('dingtalk oauth login gates', () => {
       is_active: true, activation_status: 'activated', [marker]: '2026-10-01T00:00:00Z',
     }] })
     await expect(exchangeCodeForUser('synthetic-code')).rejects.toMatchObject({ statusCode: 403, code: 'local_user_disabled' })
-    expect(pgMocks.transaction).not.toHaveBeenCalled()
+    expect(pgMocks.transaction).toHaveBeenCalledTimes(1)
+    expect(defaultTransactionStatements.filter(sql => /^\s*(INSERT|UPDATE|DELETE)\b/i.test(sql))).toEqual([])
     expect(String(pgMocks.query.mock.calls[0][0])).toContain(marker)
   })
 
@@ -400,7 +401,7 @@ describe('dingtalk oauth login gates', () => {
     // No-op transaction client so the rejected-login openId enrichment is harmless here.
     pgMocks.transaction.mockImplementation(
       async (callback: (client: { query: typeof pgMocks.query }) => Promise<unknown>) =>
-        callback({ query: (async () => ({ rows: [] })) as unknown as typeof pgMocks.query }),
+        callback({ query: (async (sql: string) => ({ rows: strictLoginUninstalledRows(sql) ?? [] })) as unknown as typeof pgMocks.query }),
     )
     pgMocks.query
       .mockResolvedValueOnce({ rows: [IDENTITY_USER] }) // findIdentityUser: HIT
@@ -846,7 +847,7 @@ describe('dingtalk oauth login gates', () => {
       expect(update!.params[7]).toBe(false)
     })
 
-    it('supersedes evidence when a container login fills a previously missing corp scope', async () => {
+    it('keeps a missing identity corp and its existing evidence and generation on a same-person container login', async () => {
       vi.stubEnv('DINGTALK_AUTH_REQUIRE_GRANT', '1')
       vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '1')
       const txCalls: Array<{ sql: string; params: unknown[] }> = []
@@ -887,16 +888,20 @@ describe('dingtalk oauth login gates', () => {
         })
         .mockResolvedValueOnce({ rows: [{ enabled: true }] })
 
-      await exchangeEnterpriseAuthCodeForUser('auth-code-corp-fill')
+      const result = await exchangeEnterpriseAuthCodeForUser('auth-code-existing-person')
+      expect(result.localUserId).toBe('user-1')
+      const identity = txCalls.find(call => call.sql.includes('UPDATE user_external_identities'))
+      expect(identity?.params[2]).toBe('ding-corp:union-1')
+      expect(identity?.params[5]).toBeNull()
 
       expect(
         txCalls.some((call) =>
           call.sql.includes('UPDATE directory_deprovision_events')),
-      ).toBe(true)
+      ).toBe(false)
       expect(
         txCalls.some((call) =>
           /UPDATE users[\s\S]*access_generation/.test(call.sql)),
-      ).toBe(true)
+      ).toBe(false)
     })
 
     it('proceeds on user/get failure when getuserinfo already carried unionid', async () => {

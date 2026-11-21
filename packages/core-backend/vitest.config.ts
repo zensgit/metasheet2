@@ -509,6 +509,8 @@ export default defineConfig({
       'tests/integration/strict-login-grant-scope.db.test.ts',
       'tests/integration/admin-login-grant-command.db.test.ts',
       'tests/integration/auth-b2-issuer-provenance.db.test.ts',
+      'tests/integration/ordinary-session-renewal.db.test.ts',
+      'tests/integration/dingtalk-corp-backfill-scope.db.test.ts',
       'tests/integration/strict-credential-chain.db.test.ts',
       'tests/integration/strict-dingtalk-entry.db.test.ts',
       // Database-side census of the classifier input tables (triggers, rules, function bodies,

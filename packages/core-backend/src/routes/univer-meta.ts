@@ -1,3 +1,4 @@
+import { legacyGrantAllowsPublicForm } from '../auth/dingtalk-legacy-resource-scope'
 import type { Request, Response } from 'express'
 import { randomUUID, createHash } from 'crypto'
 import * as path from 'path'
@@ -1204,6 +1205,17 @@ async function loadDingTalkPublicFormAccessState(query: QueryFn, userId: string)
   }
 }
 
+class PublicFormGrantRefused extends Error {}
+
+async function recheckPublicFormGrant(query: QueryFn, req: Request, accessMode: PublicFormAccessMode | undefined, lock: boolean): Promise<void> {
+  if (accessMode !== 'dingtalk_granted') return
+  const userId = String(req.user?.id ?? req.user?.sub ?? req.user?.userId ?? '')
+  if (!await legacyGrantAllowsPublicForm(query, userId, typeof req.user?.strictSessionOrgId === 'string', lock)) {
+    throw new PublicFormGrantRefused()
+  }
+}
+
+
 async function evaluateProtectedPublicFormAccess(
   query: QueryFn,
   req: Request,
@@ -1237,7 +1249,9 @@ async function evaluateProtectedPublicFormAccess(
     }
   }
 
-  if (accessMode === 'dingtalk_granted' && !dingtalkAccess.grantEnabled) {
+  if (accessMode === 'dingtalk_granted' && (!dingtalkAccess.grantEnabled || !await legacyGrantAllowsPublicForm(
+    query, userId, typeof req.user?.strictSessionOrgId === 'string', false,
+  ))) {
     return {
       allowed: false,
       statusCode: 403,
@@ -18801,6 +18815,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         record.data = filterRecordDataByFieldIds(record.data, readableFieldIds)
       }
 
+      await recheckPublicFormGrant(pool.query.bind(pool), req, protectedPublicAccess?.accessMode, false)
       return res.json({
         ok: true,
         data: {
@@ -18851,6 +18866,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         },
       })
     } catch (err) {
+      if (err instanceof PublicFormGrantRefused) return res.status(403).json({ ok: false, error: { code: 'DINGTALK_GRANT_REQUIRED', message: 'A DingTalk-authorized account is required for this form' } })
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
       }
@@ -19293,6 +19309,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           // rolls the enqueue back with the txn). After the seal: the outbox row is not a record-history event,
           // so it never enters the operation's event count. Flag OFF ⇒ no-op (legacy post-commit emit fires).
           await enqueueRecordEventIfDurable(asProducerTxnQueryable(query), 'multitable.form.submitted', formSubmittedPayload)
+          await recheckPublicFormGrant(query, req, protectedPublicAccess?.accessMode, true)
           return
         }
 
@@ -19356,6 +19373,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // atomic with the INSERT + links + create revision. After the seal for the same reason as the EDIT
         // branch (the outbox row is not a record-history event). Flag OFF ⇒ no-op.
         await enqueueRecordEventIfDurable(asProducerTxnQueryable(query), 'multitable.form.submitted', formSubmittedPayload)
+        await recheckPublicFormGrant(query, req, protectedPublicAccess?.accessMode, true)
       })
 
       const recordRes = await pool.query(
@@ -19501,6 +19519,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         },
       })
     } catch (err) {
+      if (err instanceof PublicFormGrantRefused) return res.status(403).json({ ok: false, error: { code: 'DINGTALK_GRANT_REQUIRED', message: 'A DingTalk-authorized account is required for this form' } })
       if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const writerFenceResponse = sendWriterFenceConflict(res, err)
       if (writerFenceResponse) return writerFenceResponse

@@ -2,6 +2,7 @@
  * Integration tests for the public form flow: token validation, rate limiting,
  * submission, and audit logging.
  */
+import { strictLoginUninstalledRows } from '../utils/strict-login-uninstalled-fixture'
 import express from 'express'
 import request from 'supertest'
 import { afterEach, describe, expect, test, vi } from 'vitest'
@@ -90,6 +91,8 @@ function buildQueryHandler(
   const sheet = makeSheetRow(sheetId)
   const fields = makeFieldRows()
   return (sql: string, params?: unknown[]) => {
+    const uninstalled = strictLoginUninstalledRows(sql)
+    if (uninstalled) return { rows: uninstalled }
     if (sql.includes('FROM meta_views') || sql.includes('from meta_views')) {
       return { rows: [view], rowCount: 1 }
     }
@@ -170,7 +173,7 @@ function createMockPool(queryHandler: QueryHandler) {
 
 async function createApp(opts: {
   queryHandler?: QueryHandler
-  user?: { id?: string; roles?: string[]; perms?: string[] } | null
+  user?: { id?: string; roles?: string[]; perms?: string[]; strictSessionOrgId?: string } | null
   isAdmin?: boolean
 }) {
   vi.resetModules()
@@ -192,6 +195,7 @@ async function createApp(opts: {
   if (opts.user !== null && opts.user !== undefined) {
     app.use((req, _res, next) => {
       req.user = {
+        ...opts.user,
         id: opts.user?.id ?? 'user_1',
         roles: opts.user?.roles ?? [],
         perms: opts.user?.perms ?? [],
@@ -419,6 +423,39 @@ describe('Public form flow', () => {
 
     expect(res.status).toBe(403)
     expect(res.body.error?.code).toBe('DINGTALK_GRANT_REQUIRED')
+    expect(mockPool.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO meta_records'))).toBe(false)
+  })
+
+  test('withholds the prepared form when the final grant source read fails', async () => {
+    const ordinary = buildQueryHandler(VALID_TOKEN, { accessMode: 'dingtalk_granted', hasDingTalkBinding: true, hasDingTalkGrant: true })
+    let sourceReads = 0
+    const { app } = await createApp({
+      queryHandler: (sql, params) => {
+        if (sql.includes('pg_catalog.current_schemas(false)') && ++sourceReads === 2) throw new Error('source unavailable')
+        return ordinary(sql, params)
+      },
+      user: { id: 'user_bound' },
+    })
+    const result = await request(app).get(`/api/multitable/form-context?viewId=${TEST_VIEW_ID}&publicToken=${VALID_TOKEN}`)
+    expect(sourceReads).toBe(2)
+    expect(result.status).toBe(403)
+    expect(result.body).toEqual({ ok: false, error: { code: 'DINGTALK_GRANT_REQUIRED', message: 'A DingTalk-authorized account is required for this form' } })
+  })
+
+  test('a strict session cannot authorize a grant-protected form read or submission with a legacy grant', async () => {
+    const { app, mockPool } = await createApp({
+      queryHandler: buildQueryHandler(VALID_TOKEN, {
+        accessMode: 'dingtalk_granted', hasDingTalkBinding: true, hasDingTalkGrant: true,
+      }),
+      user: { id: 'user_bound', strictSessionOrgId: 'synthetic-org' },
+    })
+    const read = await request(app).get(`/api/multitable/form-context?viewId=${TEST_VIEW_ID}&publicToken=${VALID_TOKEN}`)
+    const submit = await request(app).post(`/api/multitable/views/${TEST_VIEW_ID}/submit`)
+      .send({ publicToken: VALID_TOKEN, data: { fld_1: 'Alice', fld_2: 'alice@test.com' } })
+    for (const result of [read, submit]) {
+      expect(result.status).toBe(403)
+      expect(result.body).toEqual({ ok: false, error: { code: 'DINGTALK_GRANT_REQUIRED', message: 'A DingTalk-authorized account is required for this form' } })
+    }
     expect(mockPool.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO meta_records'))).toBe(false)
   })
 

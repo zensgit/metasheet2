@@ -10,6 +10,7 @@ import {
   getDingTalkUserDetail,
   getDingTalkUserInfoByAuthCode,
   readDingTalkOauthConfig,
+  type DingTalkOauthConfig,
 } from '../integrations/dingtalk/client'
 import {
   assertDingTalkCorpAllowed,
@@ -26,11 +27,20 @@ import {
 import { recordDingTalkOAuthStateFallback, recordDingTalkOAuthStateOperation } from '../metrics/metrics'
 import { translateRecoveryConflict } from '../db/recovery-conflict'
 import {
+  closedDingTalkOrigin,
   refuseStrictLegacyDingTalkWrite,
   refuseStrictLiveEvidence,
   StrictCredentialChainError,
   type ClosedExternalOrigin,
 } from './strict-credential-chain'
+import {
+  DingTalkSourceError,
+  checkEmptyDingTalkScope,
+  checkOrdinaryDingTalkSource,
+  refuseDingTalkSource,
+  resolveDingTalkLoginSource,
+  type DingTalkLoginSource,
+} from './dingtalk-login-source'
 import { StrictLoginGrantError } from './strict-login-grant-store'
 import type { AccessGraphTransactionClient } from '../directory/access-graph-mutex'
 import {
@@ -75,6 +85,8 @@ export interface DingTalkExchangeResult {
   isNewUser: boolean
   /** Closed stored connection for this exchange. Null is not a body-selected origin. */
   externalOrigin: ClosedExternalOrigin | null
+  /** The matched legacy row had no independent connection evidence. */
+  requiresEmptyScope?: true
 }
 
 interface LocalUserRow {
@@ -743,7 +755,7 @@ function describesSameDingTalkPerson(
   if (unionId && existingUnionId) return unionId === existingUnionId
   const openId = String(dtUser.openId ?? '').trim()
   if (openId && existingOpenId) return openId === existingOpenId
-  return existingKey === buildExternalKey(dtUser)
+  return existingKey === buildExternalKey(dtUser, corpId)
 }
 
 /** Keep legacy key scope when corp_id is absent; only strip a proven stored ID suffix. */
@@ -751,14 +763,113 @@ function buildEnrichmentExternalKey(
   existing: Record<string, unknown>,
   dtUser: DingTalkUserInfo,
   corpId: string | null | undefined,
+  source: DingTalkLoginSource,
 ): string {
   if (corpId) return buildExternalKey(dtUser, corpId)
+  // A verified corporate UnionID key is usable on both login surfaces. The web
+  // OpenID can be enriched separately without removing that proof for container login.
+  if (source.connectionId && source.corpId && dtUser.unionId && existing.provider_union_id === dtUser.unionId
+    && existing.external_key === `${source.corpId}:${dtUser.unionId}`) return existing.external_key
   const existingKey = String(existing.external_key ?? '').trim()
   const previousId = [existing.provider_open_id, existing.provider_union_id]
     .map(value => String(value ?? '').trim())
     .find(id => id && existingKey.length > id.length + 1 && existingKey.endsWith(`:${id}`))
   if (previousId) return `${existingKey.slice(0, -previousId.length)}${dtUser.openId || dtUser.unionId}`
   return existingKey || buildExternalKey(dtUser, corpId)
+}
+
+type OAuthLoginContext = {
+  config: DingTalkOauthConfig
+  source: DingTalkLoginSource
+}
+
+export async function readDingTalkLoginContext(source?: DingTalkLoginSource): Promise<OAuthLoginContext> {
+  const current = readDingTalkOauthConfig()
+  const config = { ...current, corpId: current.corpId || null }
+  const selected = source ?? await resolveDingTalkLoginSource({}, {
+    DINGTALK_CLIENT_ID: config.clientId,
+    DINGTALK_CORP_ID: config.corpId ?? undefined,
+  })
+  if (selected.strict || selected.appKey !== config.clientId || selected.configuredCorp !== config.corpId) {
+    refuseDingTalkSource()
+  }
+  return { config, source: selected }
+}
+
+async function identityCorpRequiresEmptyScope(client: AccessGraphTransactionClient, source: DingTalkLoginSource): Promise<boolean> {
+  const origins = await client.query(
+    'SELECT id::text FROM directory_integrations WHERE provider = $1 AND corp_id = $2 LIMIT 2',
+    [PROVIDER, source.corpId],
+  ).catch(() => { throw new DingTalkSourceError(503) })
+  // A handover can leave two applications in the same corporate namespace. An
+  // implicit login may use that old identity only while all connection scopes are empty.
+  if (origins.rows.length > 1 && !source.explicit) return true
+  if (origins.rows.length !== 1 || origins.rows[0].id !== source.connectionId) refuseDingTalkSource()
+  return false
+}
+
+/** Return true only for the unscoped compatibility case that must finish under the empty-scope lock. */
+async function identityRequiresEmptyScope(
+  client: AccessGraphTransactionClient,
+  userId: string,
+  identity: Record<string, unknown>,
+  profile: DingTalkUserInfo,
+  source: DingTalkLoginSource,
+  allowEmailAssociation = false,
+): Promise<boolean> {
+  if (!source.connectionId) return true
+  const storedCorp = String(identity.corp_id ?? '').trim()
+  if (storedCorp) {
+    if (storedCorp !== source.corpId) refuseDingTalkSource()
+    // An independently attributed identity does not derive its origin from the user's
+    // other directory accounts. Require the stored corporate namespace to identify X alone.
+    return identityCorpRequiresEmptyScope(client, source)
+  }
+
+  const links = await client.query(
+    `SELECT account.integration_id::text, account.corp_id, account.union_id, account.is_active
+       FROM directory_account_links link
+       JOIN directory_accounts account ON account.id = link.directory_account_id
+      WHERE link.local_user_id = $1 AND link.link_status = 'linked' AND account.provider = $2
+      ORDER BY (NULLIF(account.corp_id, '') IS NOT NULL AND account.corp_id <> $3) DESC, account.id
+      LIMIT 2 FOR SHARE OF link, account NOWAIT`,
+    [userId, PROVIDER, source.corpId],
+  ).catch(() => { throw new DingTalkSourceError(503) })
+  // Read a foreign affiliation first so the bounded lookup cannot hide one
+  // behind two same-enterprise accounts. A null enterprise proves no origin.
+  const linked = links.rows[0]
+  if (linked?.corp_id && linked.corp_id !== source.corpId) refuseDingTalkSource()
+  const key = String(identity.external_key ?? '')
+  const pairs = [
+    [identity.provider_open_id, profile.openId],
+    [identity.provider_union_id, profile.unionId],
+  ]
+  const canonicalHere = pairs.some(([stored, verified]) => typeof stored === 'string' && stored && stored === verified && key === `${source.corpId}:${stored}`)
+  const foreignKey = pairs.some(([id]) => typeof id === 'string' && id && key.endsWith(`:${id}`) && key !== `${source.corpId}:${id}`)
+  if (foreignKey) refuseDingTalkSource()
+  const directoryConflict = linked && (
+    links.rows.length > 1 || linked.integration_id !== source.connectionId || linked.corp_id !== source.corpId
+    || (linked.is_active === true && linked.union_id && linked.union_id !== profile.unionId)
+  )
+  if (!directoryConflict) {
+    if (linked?.is_active === true && profile.unionId && linked.union_id === profile.unionId) return false
+    if (canonicalHere) return identityCorpRequiresEmptyScope(client, source)
+  }
+  // Ambiguous same-enterprise affiliations cannot identify a connection. Only an implicit
+  // login with the same established identity may proceed under the global empty-scope lock.
+  if (source.explicit || !describesSameDingTalkPerson(identity, profile, null)) refuseDingTalkSource()
+  const bare = pairs.some(([stored]) => stored && key === stored)
+  const storedCorporateKey = pairs.some(([stored]) => typeof stored === 'string' && stored && key === `${source.corpId}:${stored}`)
+  if (canonicalHere || bare || (!source.configuredCorp && storedCorporateKey)) return true
+
+  // A configured enterprise could also recover this same person's old OpenID key by
+  // the existing opt-in email association. Never turn that branch into identity proof.
+  if (allowEmailAssociation && source.configuredCorp && storedCorporateKey && profile.unionId
+    && profile.unionId === identity.provider_union_id && profile.email && shouldAutoLinkEmail()) {
+    const owners = await client.query('SELECT id::text FROM users WHERE LOWER(email) = LOWER($1) LIMIT 2', [profile.email])
+    if (owners.rows.length === 1 && owners.rows[0].id === userId) return true
+  }
+  return refuseDingTalkSource()
 }
 
 type BackfillTransactionClient = AccessGraphTransactionClient
@@ -785,9 +896,9 @@ async function resolveLinkedDirectoryCorpIdForOpenIdBackfill(
   client: BackfillTransactionClient,
   localUserId: string,
   unionId: string,
-): Promise<string | null> {
+): Promise<{ corpId: string; connectionId: string | null } | null> {
   const linked = await client.query(
-    `SELECT account.corp_id, account.union_id, account.is_active
+    `SELECT account.corp_id, account.union_id, account.is_active, account.integration_id
        FROM directory_account_links link
        JOIN directory_accounts account
          ON account.id = link.directory_account_id
@@ -801,7 +912,8 @@ async function resolveLinkedDirectoryCorpIdForOpenIdBackfill(
   const account = linked.rows[0]
   if (account.is_active !== true) return null
   if (String(account.union_id ?? '').trim() !== unionId) return null
-  return String(account.corp_id ?? '').trim() || null
+  const corpId = String(account.corp_id ?? '').trim()
+  return corpId ? { corpId, connectionId: String(account.integration_id ?? '').trim() || null } : null
 }
 
 /**
@@ -828,6 +940,7 @@ async function backfillDirectoryAccountOpenIdInTransaction(
   dtUser: DingTalkUserInfo,
   corpId: string | null | undefined,
   localUserId: string,
+  source?: DingTalkLoginSource,
 ): Promise<void> {
   const openId = String(dtUser.openId ?? '').trim()
   const unionId = String(dtUser.unionId ?? '').trim()
@@ -839,8 +952,11 @@ async function backfillDirectoryAccountOpenIdInTransaction(
   await client.query(`SAVEPOINT ${DIRECTORY_OPEN_ID_BACKFILL_SAVEPOINT}`)
   try {
     // Inside the savepoint on purpose: the corp lookup must not be able to fail the login either.
-    const backfillCorpId = normalizedCorpId
-      || await resolveLinkedDirectoryCorpIdForOpenIdBackfill(client, localUserId, unionId)
+    const linked = !source?.connectionId && !normalizedCorpId
+      ? await resolveLinkedDirectoryCorpIdForOpenIdBackfill(client, localUserId, unionId)
+      : null
+    const backfillCorpId = source?.connectionId ? source.corpId : normalizedCorpId || linked?.corpId
+    const connectionId = source?.connectionId ?? linked?.connectionId
     if (!backfillCorpId) {
       await client.query(`RELEASE SAVEPOINT ${DIRECTORY_OPEN_ID_BACKFILL_SAVEPOINT}`)
       return
@@ -854,13 +970,18 @@ async function backfillDirectoryAccountOpenIdInTransaction(
          WHERE candidate.provider = $1
            AND candidate.corp_id = $2
            AND candidate.union_id = $3
+           ${connectionId ? 'AND candidate.integration_id = $5::uuid' : `AND NOT EXISTS (
+             SELECT 1 FROM directory_accounts other
+              WHERE other.provider = candidate.provider AND other.corp_id = candidate.corp_id
+                AND other.union_id = candidate.union_id AND other.integration_id <> candidate.integration_id
+           )`}
            AND COALESCE(candidate.open_id, '') = ''
          FOR UPDATE SKIP LOCKED
        )`,
       // The candidate filter is the ONLY "never replace a known openId" guard: under READ COMMITTED
       // a row locked by FOR UPDATE is re-checked against it on its latest version, so a row that
       // gained an openId meanwhile is dropped. (A duplicate outer re-check would mask its removal.)
-      [PROVIDER, backfillCorpId, unionId, openId],
+      connectionId ? [PROVIDER, backfillCorpId, unionId, openId, connectionId] : [PROVIDER, backfillCorpId, unionId, openId],
     )
     await client.query(`RELEASE SAVEPOINT ${DIRECTORY_OPEN_ID_BACKFILL_SAVEPOINT}`)
   } catch (error) {
@@ -887,10 +1008,10 @@ async function recheckUnscopedIdentity(
   client: AccessGraphTransactionClient,
   localUserId: string,
   dtUser: DingTalkUserInfo,
-  corpId: string | null | undefined,
+  context: OAuthLoginContext,
 ): Promise<void> {
-  if (corpId) return
-  const current = await findIdentityUser(dtUser, client)
+  if (context.config.corpId && !context.source.connectionId) return
+  const current = await findIdentityUser(dtUser, client, context)
   if (current && current.id !== localUserId) {
     throw createPolicyError('DingTalk identity is already bound to another local user', {
       statusCode: 409,
@@ -925,13 +1046,14 @@ async function upsertExternalIdentity(
   localUserId: string,
   dtUser: DingTalkUserInfo,
   options: ImplicitIdentityWriteOptions,
-): Promise<{ sessionGeneration: number; externalOrigin: ClosedExternalOrigin | null }> {
-  const config = readDingTalkOauthConfig()
-  const externalKey = buildExternalKey(dtUser)
+  context: OAuthLoginContext,
+  inTransaction?: AccessGraphTransactionClient,
+): Promise<{ sessionGeneration: number; externalOrigin: ClosedExternalOrigin | null; requiresEmptyScope?: true }> {
+  const { config, source } = context
+  const externalKey = buildExternalKey(dtUser, source.corpId)
   const profile = JSON.stringify(dtUser)
 
-  return transaction(async (client) => {
-    if (!config.corpId) await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+  const write = async (client: AccessGraphTransactionClient) => {
     const lockedUsers = await lockUsersForAccessGraphWrite(client, [localUserId])
     if (!lockedUsers.has(localUserId)) {
       throw createPolicyError('Local user no longer exists', {
@@ -939,10 +1061,11 @@ async function upsertExternalIdentity(
         code: 'local_user_disabled',
       })
     }
-    const externalOrigin = await fenceLegacyDingTalkWrite(client, config.corpId)
+    if (source.connectionId) await checkOrdinaryDingTalkSource(client, source)
+    let emptyScope = !source.connectionId
     await fenceStrictEvidence(client, localUserId)
     await lockUnscopedIdentityNamespace(client, config.corpId)
-    await recheckUnscopedIdentity(client, localUserId, dtUser, config.corpId)
+    await recheckUnscopedIdentity(client, localUserId, dtUser, context)
     const grantState = await recheckLocalUserAuthorization(client, localUserId, options.requireGrant)
     const existingByUser = await client.query(
       `SELECT id,
@@ -957,10 +1080,14 @@ async function upsertExternalIdentity(
       [PROVIDER, localUserId],
     )
 
-    let identityCorpId = config.corpId
+    let identityCorpId = source.corpId
     let accessGraphChanged = false
     if (existingByUser.rows.length > 0) {
-      if (!describesSameDingTalkPerson(existingByUser.rows[0], dtUser, config.corpId)) {
+      const existing = existingByUser.rows[0]
+      emptyScope = await identityRequiresEmptyScope(client, localUserId, existing, dtUser, source, true)
+      // The optional environment corp remains the legacy key namespace, including null.
+      const matchCorp = !existing.corp_id && source.connectionId && !emptyScope ? null : config.corpId
+      if (!describesSameDingTalkPerson(existing, dtUser, matchCorp)) {
         throw createPolicyError('Local user is bound to a different DingTalk identity', {
           statusCode: 409,
           code: 'identity_mismatch',
@@ -972,10 +1099,9 @@ async function upsertExternalIdentity(
       // move when the incoming profile actually has an openId (one-way
       // enrichment; alternating logins stay stable).
       const hasOpenId = Boolean(dtUser.openId)
-      const existing = existingByUser.rows[0]
       // An optional OAuth corp must not erase the established identity namespace.
-      identityCorpId = config.corpId || String(existing.corp_id ?? '').trim() || null
-      const identityExternalKey = buildEnrichmentExternalKey(existing, dtUser, identityCorpId)
+      identityCorpId = existing.corp_id ? String(existing.corp_id) : null
+      const identityExternalKey = buildEnrichmentExternalKey(existing, dtUser, identityCorpId, source)
       const nextExternalKey = hasOpenId
         ? identityExternalKey
         : String(existing.external_key ?? '').trim() || identityExternalKey
@@ -986,7 +1112,7 @@ async function upsertExternalIdentity(
         : existing.provider_open_id || null
       const nextCorpId = hasOpenId
         ? identityCorpId
-        : existing.corp_id ?? config.corpId ?? null
+        : existing.corp_id ?? identityCorpId
       accessGraphChanged =
         (existing.external_key || '') !== nextExternalKey
         || (existing.provider_union_id ?? null) !== nextUnionId
@@ -1032,7 +1158,7 @@ async function upsertExternalIdentity(
          VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $6, NOW(), NOW(), NOW())
          ON CONFLICT (provider, external_key) DO NOTHING
          RETURNING id`,
-        [PROVIDER, externalKey, dtUser.unionId || null, dtUser.openId ?? null, config.corpId, localUserId, profile],
+        [PROVIDER, externalKey, dtUser.unionId || null, dtUser.openId ?? null, identityCorpId, localUserId, profile],
       )
       if (inserted.rows.length === 0) {
         throw createPolicyError('DingTalk identity is already bound to another local user', {
@@ -1054,30 +1180,40 @@ async function upsertExternalIdentity(
       })
     }
 
-    await backfillDirectoryAccountOpenIdInTransaction(client, dtUser, identityCorpId, localUserId)
+    await backfillDirectoryAccountOpenIdInTransaction(client, dtUser, identityCorpId ?? config.corpId, localUserId, emptyScope ? undefined : source)
+    // This lock is last: account, identity, grant and evidence writers above complete on this client.
+    if (emptyScope) await checkEmptyDingTalkScope(client)
     return {
       sessionGeneration: lockedUsers.get(localUserId)!.accessGeneration + (accessGraphChanged ? 1 : 0),
-      externalOrigin,
+      externalOrigin: !emptyScope && source.connectionId ? closedDingTalkOrigin(source.connectionId) : null,
+      ...(emptyScope && source.connectionId ? { requiresEmptyScope: true as const } : {}),
     }
+  }
+  if (inTransaction) return write(inTransaction)
+  return transaction(async (client) => {
+    await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+    return write(client)
   })
 }
 
 // Directory-managed users can be found by unionId before their web-OAuth openId
 // is known. Enrich that missing openId without granting a rejected login.
-async function enrichMissingOpenIdForRejectedLogin(localUserId: string, dtUser: DingTalkUserInfo): Promise<void> {
+async function enrichMissingOpenIdForRejectedLogin(localUserId: string, dtUser: DingTalkUserInfo, context: OAuthLoginContext): Promise<void> {
   if (!dtUser.openId) return
 
-  const config = readDingTalkOauthConfig()
+  const { config, source } = context
   const openId = dtUser.openId
   const unionId = dtUser.unionId || ''
   const profile = JSON.stringify(dtUser)
 
   await transaction(async (client) => {
-    if (!config.corpId) await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+    await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
     const lockedUsers = await lockUsersForAccessGraphWrite(client, [localUserId])
     if (!lockedUsers.has(localUserId)) return
+    if (source.connectionId) await checkOrdinaryDingTalkSource(client, source)
+    await fenceStrictEvidence(client, localUserId)
     await lockUnscopedIdentityNamespace(client, config.corpId)
-    await recheckUnscopedIdentity(client, localUserId, dtUser, config.corpId)
+    await recheckUnscopedIdentity(client, localUserId, dtUser, context)
     const currentIdentity = await client.query(
       `SELECT id, external_key, provider_union_id, provider_open_id, corp_id
        FROM user_external_identities
@@ -1088,9 +1224,12 @@ async function enrichMissingOpenIdForRejectedLogin(localUserId: string, dtUser: 
     )
     const existing = currentIdentity.rows[0]
     // Rejected logins may enrich the same person, but cannot undo a concurrent admin rebind.
-    if (!existing || !describesSameDingTalkPerson(existing, dtUser, config.corpId)) return
-    const identityCorpId = config.corpId || String(existing.corp_id ?? '').trim() || null
-    const externalKey = buildEnrichmentExternalKey(existing, dtUser, identityCorpId)
+    if (!existing) return
+    const emptyScope = await identityRequiresEmptyScope(client, localUserId, existing, dtUser, source)
+    const matchCorp = !existing.corp_id && source.connectionId && !emptyScope ? null : config.corpId
+    if (!describesSameDingTalkPerson(existing, dtUser, matchCorp)) return
+    const identityCorpId = existing.corp_id ? String(existing.corp_id) : null
+    const externalKey = buildEnrichmentExternalKey(existing, dtUser, identityCorpId, source)
     const conflictResult = await client.query(
       `SELECT local_user_id
        FROM user_external_identities
@@ -1127,7 +1266,8 @@ async function enrichMissingOpenIdForRejectedLogin(localUserId: string, dtUser: 
 
     // The login is still rejected (no grant yet) — but the openId is now proven, which is exactly
     // what the directory page needs before an admin can turn the grant on.
-    await backfillDirectoryAccountOpenIdInTransaction(client, dtUser, identityCorpId, localUserId)
+    await backfillDirectoryAccountOpenIdInTransaction(client, dtUser, identityCorpId ?? config.corpId, localUserId, emptyScope ? undefined : source)
+    if (emptyScope) await checkEmptyDingTalkScope(client)
   })
 }
 
@@ -1151,10 +1291,11 @@ async function findUserByEmail(email: string): Promise<LocalUserRow | null> {
 
 async function findIdentityUser(
   dtUser: DingTalkUserInfo,
-  runner: AccessGraphTransactionClient = { query },
+  runner: AccessGraphTransactionClient,
+  context: OAuthLoginContext,
 ): Promise<LocalUserRow | null> {
   try {
-    const config = readDingTalkOauthConfig()
+    const { config, source } = context
     const result = await runner.query(
       `SELECT u.id,
               u.email,
@@ -1163,14 +1304,15 @@ async function findIdentityUser(
               COALESCE(u.is_active, TRUE) AS is_active,
               u.activation_status,
               (to_jsonb(u) ->> 'deleted_at') AS deleted_at,
-              (to_jsonb(u) ->> 'purged_at') AS purged_at
+              (to_jsonb(u) ->> 'purged_at') AS purged_at,
+              identity.corp_id AS matched_corp_id
        FROM user_external_identities identity
        JOIN users u ON u.id = identity.local_user_id
        WHERE identity.provider = $1
          AND (
            identity.external_key = $2
            OR (
-             $5 = ''
+             ($5 = '' OR $6::boolean)
              AND (
                identity.provider_open_id = $3
                OR ($4 <> '' AND identity.provider_union_id = $4)
@@ -1185,20 +1327,27 @@ async function findIdentityUser(
              )
            )
          )
+       ORDER BY CASE WHEN identity.corp_id = $5 THEN 0 WHEN identity.corp_id IS NULL THEN 1 ELSE 2 END
        LIMIT 2`,
-      [PROVIDER, buildExternalKey(dtUser), dtUser.openId, dtUser.unionId || '', config.corpId || ''],
+      [PROVIDER, buildExternalKey(dtUser, config.corpId), dtUser.openId, dtUser.unionId || '', config.corpId || '', Boolean(source.connectionId)],
     )
     // Never choose a local account (and its privileges) by update order. The schema permits
     // the same provider identifier in different corps, including legacy NULL-corp rows.
-    if (result.rows.length > 1) {
+    // A scoped lookup may discard foreign rows only when the old contract already selected
+    // the matching corporate namespace. Foreign-only hits never enter association or JIT.
+    const preferred = source.connectionId && config.corpId
+      ? result.rows.filter(row => !row.matched_corp_id || row.matched_corp_id === config.corpId)
+      : result.rows
+    if (result.rows.length && !preferred.length) refuseDingTalkSource()
+    if (preferred.length > 1) {
       throw createPolicyError('DingTalk identity matches multiple accounts; configure the intended enterprise', {
         statusCode: 409,
         code: 'identity_ambiguous',
       })
     }
-    return (result.rows[0] as unknown as LocalUserRow | undefined) ?? null
+    return (preferred[0] as unknown as LocalUserRow | undefined) ?? null
   } catch (error) {
-    if (error instanceof DingTalkLoginPolicyError) throw error
+    if (error instanceof DingTalkLoginPolicyError || error instanceof DingTalkSourceError) throw error
     // Fail CLOSED (post-merge review P2-2): the same collapse readGrantState fixes lived here
     // too — a swallowed read error returned null, indistinguishable from "no linked identity",
     // so a failed identity read let the login fall through to the email-link / auto-provision
@@ -1250,7 +1399,11 @@ function assertLocalUserLoginAllowed(
 // guess. Deliberately: this function does NOT write user_orgs. Verified by
 // tests/integration/attendance-w4pre1-user-orgs-policy.db.test.ts (zero user_orgs rows for a
 // user created via this path).
-async function createProvisionedUser(dtUser: DingTalkUserInfo, corpId = readStringEnv('DINGTALK_CORP_ID') || null): Promise<LocalUserRow> {
+async function createProvisionedUser<T>(
+  dtUser: DingTalkUserInfo,
+  corpId: string | null,
+  finish: (client: AccessGraphTransactionClient, created: LocalUserRow) => Promise<T>,
+): Promise<T> {
   const userId = crypto.randomUUID()
   // unionId first (review #3771 P2-1): the container surface has no openId, and
   // `dingtalk_undefined@…` collides on the users.email UNIQUE index from the
@@ -1289,6 +1442,7 @@ async function createProvisionedUser(dtUser: DingTalkUserInfo, corpId = readStri
     // lease fails with the marker 40001 → named retryable RecoveryConflictError. Strictly
     // additive: every other error falls through the fail-closed mappings below unchanged.
     const row = await translateRecoveryConflict(() => transaction(async (client) => {
+      await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
       // Persist real mobile on users.mobile in the same transaction as the alias claim.
       // Claiming a mobile login alias without storing users.mobile left profile/login
       // mirrors inconsistent under T2a OR-column reads.
@@ -1312,8 +1466,6 @@ async function createProvisionedUser(dtUser: DingTalkUserInfo, corpId = readStri
       if (!created) {
         throw new Error('Failed to create local user for DingTalk login')
       }
-      await fenceLegacyDingTalkWrite(client, corpId)
-
       if (realEmail || realMobile) {
         await claimNonEmptyLoginAliasesOrThrow({
           userId,
@@ -1324,7 +1476,7 @@ async function createProvisionedUser(dtUser: DingTalkUserInfo, corpId = readStri
         })
       }
 
-      return created
+      return finish(client, created)
     }))
     return row
   } catch (error) {
@@ -1356,26 +1508,27 @@ async function createProvisionedUser(dtUser: DingTalkUserInfo, corpId = readStri
   }
 }
 
-async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{
+async function resolveLocalUser(dtUser: DingTalkUserInfo, context: OAuthLoginContext): Promise<{
   localUser: LocalUserRow
   isNewUser: boolean
   sessionGeneration: number
   externalOrigin: ClosedExternalOrigin | null
+  requiresEmptyScope?: true
 }> {
   const requireGrant = shouldRequireGrant()
-  const identityUser = await findIdentityUser(dtUser)
+  const identityUser = await findIdentityUser(dtUser, { query }, context)
   if (identityUser) {
     assertLocalUserLoginAllowed(identityUser)
     const grantState = await readGrantState(identityUser.id)
     if (requireGrant && grantState !== 'enabled') {
-      await enrichMissingOpenIdForRejectedLogin(identityUser.id, dtUser)
+      await enrichMissingOpenIdForRejectedLogin(identityUser.id, dtUser, context)
       throw createPolicyError('DingTalk login is not enabled for this user', {
         statusCode: 403,
         code: 'grant_required',
       })
     }
     if (grantState === 'disabled') {
-      await enrichMissingOpenIdForRejectedLogin(identityUser.id, dtUser)
+      await enrichMissingOpenIdForRejectedLogin(identityUser.id, dtUser, context)
       throw createPolicyError(DINGTALK_LOGIN_DISABLED_ERROR, {
         statusCode: 403,
         code: 'grant_disabled',
@@ -1385,12 +1538,11 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{
       resolvedBy: 'identity',
       requireGrant,
       createGrantIfAbsent: false,
-    })
+    }, context)
     return {
       localUser: identityUser,
       isNewUser: false,
-      sessionGeneration: identityWrite.sessionGeneration,
-      externalOrigin: identityWrite.externalOrigin,
+      ...identityWrite,
     }
   }
 
@@ -1417,12 +1569,11 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{
         resolvedBy: 'association',
         requireGrant,
         createGrantIfAbsent: !requireGrant,
-      })
+      }, context)
       return {
         localUser: emailUser,
         isNewUser: false,
-        sessionGeneration: emailWrite.sessionGeneration,
-        externalOrigin: emailWrite.externalOrigin,
+        ...emailWrite,
       }
     }
   }
@@ -1472,7 +1623,7 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{
 
   // An allowlist alone cannot authorize a new account when there is no enterprise to
   // compare with it. Unique pre-existing associations remain usable without configuration.
-  const corpId = readDingTalkOauthConfig().corpId
+  const corpId = context.config.corpId
   if (!corpId) {
     throw createPolicyError('An enterprise must be configured before DingTalk auto-provisioning', {
       statusCode: 409,
@@ -1480,19 +1631,22 @@ async function resolveLocalUser(dtUser: DingTalkUserInfo): Promise<{
     })
   }
 
-  const provisionedUser = await createProvisionedUser(dtUser, corpId)
-  await ensureGrant(provisionedUser.id, corpId)
-  const provisionedWrite = await upsertExternalIdentity(provisionedUser.id, dtUser, {
-    resolvedBy: 'association',
-    requireGrant,
-    createGrantIfAbsent: false,
+  return createProvisionedUser(dtUser, corpId, async (client, localUser) => {
+    // Grant, identity, aliases and the new account share the source fence and rollback boundary.
+    if (await insertGrantIfAbsent(client, localUser.id, localUser.id)) {
+      await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
+        userIds: [localUser.id],
+        actorId: localUser.id,
+        reason: 'DingTalk OAuth enabled the user grant',
+      })
+    }
+    const write = await upsertExternalIdentity(localUser.id, dtUser, {
+      resolvedBy: 'association',
+      requireGrant,
+      createGrantIfAbsent: false,
+    }, context, client)
+    return { localUser, isNewUser: true, ...write }
   })
-  return {
-    localUser: provisionedUser,
-    isNewUser: true,
-    sessionGeneration: provisionedWrite.sessionGeneration,
-    externalOrigin: provisionedWrite.externalOrigin,
-  }
 }
 
 export function isDingTalkConfigured(): boolean {
@@ -1677,8 +1831,8 @@ export function buildAuthUrl(state: string): string {
   return `https://login.dingtalk.com/oauth2/auth?${params.toString()}`
 }
 
-export async function exchangeCodeForDingTalkProfile(code: string): Promise<DingTalkUserInfo> {
-  const token = await exchangeCodeForUserAccessToken(code)
+export async function exchangeCodeForDingTalkProfile(code: string, config?: DingTalkOauthConfig): Promise<DingTalkUserInfo> {
+  const token = await exchangeCodeForUserAccessToken(code, config)
   const profile = await fetchDingTalkCurrentUser(token.accessToken)
   return {
     openId: profile.openId,
@@ -1696,12 +1850,13 @@ export async function exchangeCodeForDingTalkProfile(code: string): Promise<Ding
  * resolveLocalUser — require-grant / corp allowlist / auto-link /
  * auto-provision / disabled-user gates apply with identical semantics.
  */
-export async function exchangeEnterpriseAuthCodeForUser(authCode: string): Promise<DingTalkExchangeResult> {
+export async function exchangeEnterpriseAuthCodeForUser(authCode: string, source?: DingTalkLoginSource): Promise<DingTalkExchangeResult> {
   // Same config/corp gate as web-OAuth (assertDingTalkCorpAllowed fires inside);
   // the client-id/secret aliases double as appKey/appSecret for the app token.
   // E1 therefore shares web-OAuth's env prerequisites — the embed direction
   // lock's premise is that web SSO is already configured.
-  const oauthConfig = readDingTalkOauthConfig()
+  const context = await readDingTalkLoginContext(source)
+  const oauthConfig = context.config
   const appConfig = {
     appKey: oauthConfig.clientId,
     appSecret: oauthConfig.clientSecret,
@@ -1719,13 +1874,14 @@ export async function exchangeEnterpriseAuthCodeForUser(authCode: string): Promi
   let detailAvatar: string | undefined
   try {
     const detail = await getDingTalkUserDetail(accessToken, info.userId, appConfig)
+    if (unionId && detail.unionId && detail.unionId !== unionId) refuseDingTalkSource()
     unionId = unionId || detail.unionId
     detailName = detail.name
     detailEmail = detail.email
     detailMobile = detail.mobile
     detailAvatar = detail.avatarUrl
   } catch (error) {
-    if (!unionId) throw error
+    if (!unionId || error instanceof DingTalkSourceError) throw error
     logger.warn('DingTalk container login: user detail lookup failed; proceeding with getuserinfo fields', error)
   }
   if (!unionId) {
@@ -1742,7 +1898,7 @@ export async function exchangeEnterpriseAuthCodeForUser(authCode: string): Promi
     mobile: detailMobile,
     avatarUrl: detailAvatar,
   }
-  const { localUser, isNewUser, sessionGeneration, externalOrigin } = await resolveLocalUser(dingtalkUser)
+  const { localUser, isNewUser, sessionGeneration, externalOrigin, requiresEmptyScope } = await resolveLocalUser(dingtalkUser, context)
 
   return {
     dingtalkUser,
@@ -1753,12 +1909,14 @@ export async function exchangeEnterpriseAuthCodeForUser(authCode: string): Promi
     localUserRole: localUser.role,
     isNewUser,
     externalOrigin,
+    ...(requiresEmptyScope ? { requiresEmptyScope } : {}),
   }
 }
 
-export async function exchangeCodeForUser(code: string): Promise<DingTalkExchangeResult> {
-  const dingtalkUser = await exchangeCodeForDingTalkProfile(code)
-  const { localUser, isNewUser, sessionGeneration, externalOrigin } = await resolveLocalUser(dingtalkUser)
+export async function exchangeCodeForUser(code: string, source?: DingTalkLoginSource): Promise<DingTalkExchangeResult> {
+  const context = await readDingTalkLoginContext(source)
+  const dingtalkUser = await exchangeCodeForDingTalkProfile(code, context.config)
+  const { localUser, isNewUser, sessionGeneration, externalOrigin, requiresEmptyScope } = await resolveLocalUser(dingtalkUser, context)
 
   return {
     dingtalkUser,
@@ -1769,6 +1927,7 @@ export async function exchangeCodeForUser(code: string): Promise<DingTalkExchang
     localUserRole: localUser.role,
     isNewUser,
     externalOrigin,
+    ...(requiresEmptyScope ? { requiresEmptyScope } : {}),
   }
 }
 
@@ -1986,6 +2145,10 @@ export async function unbindSelfManagedDingTalkIdentity(input: {
  * pattern in directory-sync.ts — not a new production surface.
  */
 export const __dingtalkOAuthInternalsForTests = {
-  createProvisionedUser,
+  createProvisionedUser: (profile: DingTalkUserInfo, corpId = readStringEnv('DINGTALK_CORP_ID') || null) =>
+    createProvisionedUser(profile, corpId, async (client, row) => {
+      await fenceLegacyDingTalkWrite(client, corpId)
+      return row
+    }),
   ensureGrant,
 }

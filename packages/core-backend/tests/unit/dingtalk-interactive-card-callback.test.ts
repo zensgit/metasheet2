@@ -14,6 +14,7 @@
  * Plus the Slice-A-style static tripwire: the callback chain must go through
  * `executeApprovalActionFromCardDelivery` and never carry a raw approvals-actions route path.
  */
+import { strictLoginUninstalledRows } from '../utils/strict-login-uninstalled-fixture'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -306,6 +307,8 @@ function makeHarness(state: {
   ]
   const query = async (sql: string, params?: unknown[]) => {
     calls.push({ sql, params: params ?? [] })
+    const uninstalled = strictLoginUninstalledRows(sql)
+    if (uninstalled) return { rows: uninstalled }
     if (sql.includes('FROM dingtalk_approval_card_deliveries')) return { rows: deliveryRows }
     // P1-2 corp cross-check resolver (SELECT corp_id FROM directory_integrations …). The
     // link-secret resolver also reads directory_integrations but selects id/name/status/config
@@ -376,6 +379,24 @@ describe('executeDingTalkApprovalCardCallback (B-3 §B-3 execution)', () => {
     )
     expect(result.outcome).toBe('executed')
     expect(h.dispatchAction).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves the approval and its card untouched when the scope read fails at dispatch', async () => {
+    const store = await import('../../src/auth/strict-login-grant-store')
+    const initial = vi.spyOn(store, 'readCurrentConnectionLoginScope').mockResolvedValue({ installation: 'installed', scope: null })
+    const final = vi.spyOn(store, 'readConnectionLoginScope').mockRejectedValue(new Error('scope unavailable'))
+    const h = makeHarness()
+    try {
+      const result = await executeDingTalkApprovalCardCallback({
+        ...h.deps, transaction: work => work({ query: h.query }),
+      }, wirePayload())
+      expect(result).toEqual({ outcome: 'operator_unresolved', deliveryId: DELIVERY_ID, reason: 'source_unavailable' })
+      expect(h.dispatchAction).not.toHaveBeenCalled()
+      expect(h.calls.some(call => /^\s*UPDATE dingtalk_approval_card_deliveries/i.test(call.sql))).toBe(false)
+    } finally {
+      final.mockRestore()
+      initial.mockRestore()
+    }
   })
 
   it('unknown delivery id → delivery_not_found (values-free, no engine call)', async () => {
