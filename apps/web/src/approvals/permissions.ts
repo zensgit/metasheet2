@@ -33,7 +33,10 @@ function bindApprovalAccessRefresh() {
 
 function hasPermission(permission: ApprovalProductPermission): boolean {
   const access = currentAccess.value
-  return access.isAdmin || access.permissions.includes(permission)
+  // Match rbacGuard's resource wildcard; unlike the app-directory matcher,
+  // approvals:admin and approvals:write do not imply another approval grant.
+  const resource = permission.split(':')[0]
+  return access.isAdmin || access.permissions.includes(permission) || access.permissions.includes(`${resource}:*`)
 }
 
 export function useApprovalPermissions() {

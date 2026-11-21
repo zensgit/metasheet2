@@ -444,6 +444,7 @@ beforeEach(() => {
 })
 afterEach(() => {
   localStorage.removeItem('user_permissions')
+  localStorage.removeItem('user_roles')
 })
 
 describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
@@ -779,8 +780,14 @@ describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
     expect(dispatchActionSpy).not.toHaveBeenCalled()
   })
 
-  it('an actor (approvals:read + approvals:act) gets the pane 通过/驳回 (positive control for the reader case)', async () => {
-    localStorage.setItem('user_permissions', JSON.stringify(['approvals:read', 'approvals:act']))
+  it.each([
+    { name: 'explicit actor', codes: ['approvals:read', 'approvals:act'], roles: [] },
+    { name: 'approval wildcard', codes: ['approvals:*'], roles: [] },
+    { name: 'global wildcard', codes: ['*:*'], roles: [] },
+    { name: 'administrator role only', codes: [], roles: ['admin'] },
+  ])('$name gets the pane 通过/驳回 (positive control for the reader case)', async ({ codes, roles }) => {
+    localStorage.setItem('user_permissions', JSON.stringify(codes))
+    localStorage.setItem('user_roles', JSON.stringify(roles))
     getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销'))
     mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
     await mountView()
@@ -792,8 +799,8 @@ describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
     expect(container!.querySelector('[data-testid="approval-detail-pane-reject"]')).toBeTruthy()
   })
 
-  it('an actor gets no pane 通过/驳回 when the detail fetch says canDecideCurrentNode is false (list rows never carry the flag)', async () => {
-    localStorage.setItem('user_permissions', JSON.stringify(['approvals:read', 'approvals:act']))
+  it.each(['approvals:act', 'approvals:*'])('an actor (%s) gets no pane 通过/驳回 when the detail fetch says canDecideCurrentNode is false (list rows never carry the flag)', async (permission) => {
+    localStorage.setItem('user_permissions', JSON.stringify([permission]))
     getApprovalSpy.mockResolvedValue(pendingRow('apv_1', '出差报销', { canDecideCurrentNode: false }))
     mockPendingApprovals.value = [pendingRow('apv_1', '出差报销')]
     await mountView()
