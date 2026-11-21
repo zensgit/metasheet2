@@ -182,6 +182,74 @@ describe('ForcePasswordChangeView', () => {
     expect(mocks.routerReplace).toHaveBeenCalledWith('/attendance')
   })
 
+  async function submitWith(value: string): Promise<void> {
+    const inputs = Array.from(container!.querySelectorAll('input[type="password"]')) as HTMLInputElement[]
+    inputs[0]!.value = value
+    inputs[0]!.dispatchEvent(new Event('input', { bubbles: true }))
+    inputs[1]!.value = value
+    inputs[1]!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+    const submitButton = container!.querySelector('button[type="submit"]') as HTMLButtonElement | null
+    submitButton?.click()
+    await flushUi(8)
+  }
+
+  function policyRejection(reasons: string[], details: string[]): unknown {
+    return {
+      ok: false,
+      status: 400,
+      json: async () => ({
+        success: false,
+        error: 'Password does not meet requirements',
+        details,
+        reasons,
+      }),
+    }
+  }
+
+  it('shows each failed password rule in Chinese instead of the English summary', async () => {
+    mocks.apiFetch.mockResolvedValueOnce(policyRejection(
+      ['no_lowercase', 'no_uppercase'],
+      ['Password must contain at least one lowercase letter', 'Password must contain at least one uppercase letter'],
+    ))
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(ForcePasswordChangeViewComponent)
+    app.mount(container)
+    await flushUi(6)
+
+    await submitWith('12312300')
+
+    const errorText = container.querySelector('.force-password-error')?.textContent?.trim()
+    expect(errorText).toBe('密码不符合要求：要有小写字母；要有大写字母')
+    expect(errorText).not.toContain('Password does not meet requirements')
+    expect(window.localStorage.getItem('auth_token')).toBe('forced-token')
+    expect(mocks.routerReplace).not.toHaveBeenCalled()
+  })
+
+  it('keeps the server English for an unknown reason code and the plain message when no codes are sent', async () => {
+    mocks.apiFetch.mockResolvedValueOnce(policyRejection(
+      ['no_digit', 'future_rule'],
+      ['Password must contain at least one number', 'Some future rule'],
+    ))
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(ForcePasswordChangeViewComponent)
+    app.mount(container)
+    await flushUi(6)
+
+    await submitWith('Abcdefgh')
+    expect(container.querySelector('.force-password-error')?.textContent?.trim()).toBe('密码不符合要求：要有数字；Some future rule')
+
+    mocks.apiFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      json: async () => ({ success: false, error: 'Password is required' }),
+    })
+    await submitWith('Abcdefgh')
+    expect(container.querySelector('.force-password-error')?.textContent?.trim()).toBe('Password is required')
+  })
+
   it('shows the full password requirements before submission', async () => {
     container = document.createElement('div')
     document.body.appendChild(container)

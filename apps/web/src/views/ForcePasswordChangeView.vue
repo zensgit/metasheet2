@@ -65,6 +65,7 @@ import { useFeatureFlags } from '../stores/featureFlags'
 import { ROUTE_PATHS } from '../router/types'
 import { apiFetch, clearStoredAuthState } from '../utils/api'
 import { getPasswordRequirementCopy } from '../utils/passwordRequirements'
+import { describePasswordPolicyFailure } from '../utils/createUserValidationCopy'
 
 type AuthUserRecord = {
   email?: unknown
@@ -141,13 +142,18 @@ async function submit(): Promise<void> {
     const token = typeof payload?.data?.token === 'string' ? payload.data.token : ''
 
     if (!response.ok || payload?.success !== true || !token) {
-      const message =
+      // The change endpoint returns the policy reason codes at the top level of the payload
+      // (`reasons`, index-aligned with the English `details`); show them rule by rule.
+      const policyReasons: unknown[] = Array.isArray(payload?.reasons) ? payload.reasons : []
+      const policyDetails: unknown[] = Array.isArray(payload?.details) ? payload.details : []
+      const policyMessage = describePasswordPolicyFailure(policyReasons, isZh.value ? 'zh' : 'en', policyDetails)
+      const serverMessage =
         typeof payload?.error === 'string'
           ? payload.error
           : typeof payload?.error?.message === 'string'
             ? payload.error.message
             : (isZh.value ? '修改密码失败，请稍后重试。' : 'Failed to change password. Please try again.')
-      throw new Error(message)
+      throw new Error(policyMessage ?? serverMessage)
     }
 
     auth.setToken(token)
