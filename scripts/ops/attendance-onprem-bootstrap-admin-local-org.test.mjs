@@ -71,6 +71,7 @@ function makeFixture() {
   const bin = path.join(dir, 'bin')
   mkdirSync(bin)
   const psqlLog = path.join(dir, 'psql.log')
+  const adminInputLog = path.join(dir, 'admin-input.log')
 
   // psql stub: every caller in both scripts feeds SQL on stdin. Log it. The pre-existing admin
   // upserts are answered by shape; the step's three read-only statements only on an EXACT match
@@ -83,7 +84,16 @@ function makeFixture() {
       'sql="$(cat)"',
       `printf '%s\\n-----\\n' "$sql" >> ${JSON.stringify(psqlLog)}`,
       'case "$sql" in',
-      `  *"INSERT INTO users"*) echo "${SYNTHETIC_ADMIN_ID}" ;;`,
+      '  *"INSERT INTO users"*)',
+      '    if [[ "${STUB_ADMIN_INPUT_WITNESS:-0}" == "1" ]]; then',
+      '      for arg in "$@"; do',
+      '        if [[ "$arg" == v_email=* ]]; then',
+      '          [[ "${arg#v_email=}" == "${STUB_EXPECT_ADMIN_EMAIL-}" ]] || { echo "synthetic email argument mismatch" >&2; exit 9; }',
+      `          printf '%s\\n' email >> ${JSON.stringify(adminInputLog)}`,
+      '        fi',
+      '      done',
+      '    fi',
+      `    echo "${SYNTHETIC_ADMIN_ID}" ;;`,
       '  *"INSERT INTO user_roles"*) : ;;',
       '  *)',
       '    if [[ "$sql" == "$PINNED_EMPTINESS_SQL" ]]; then',
@@ -113,6 +123,10 @@ function makeFixture() {
       '#!/usr/bin/env bash',
       'for arg in "$@"; do',
       '  if [[ "$arg" == *bcryptjs* ]] || { [[ -f "$arg" ]] && grep -q bcryptjs "$arg"; }; then',
+      '    if [[ "${STUB_ADMIN_INPUT_WITNESS:-0}" == "1" ]]; then',
+      '      [[ "$#" -eq 4 && "${4-}" == "${STUB_EXPECT_ADMIN_PASSWORD-}" ]] || { echo "synthetic password argument mismatch" >&2; exit 9; }',
+      `      printf '%s\\n' bcrypt >> ${JSON.stringify(adminInputLog)}`,
+      '    fi',
       '    printf "%s" "\\$2a\\$12\\$synthetic.fake.hash.for.contract.tests.only"',
       '    exit 0',
       '  fi',
@@ -148,6 +162,9 @@ function makeFixture() {
       } catch {
         return []
       }
+    },
+    readAdminInputs: () => {
+      try { return read(adminInputLog).trim().split('\n') } catch { return [] }
     },
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
   }
@@ -668,3 +685,98 @@ test('parity: sh and ps1 print the same values-free step messages', () => {
     assert.ok(ps1.includes(message), `ps1 is missing step message: ${message}`)
   }
 })
+
+// The file owns the final credentials, but it must not replace a valid caller with invalid inputs.
+const shQuote = value => `'${String(value).replaceAll("'", "'\\''")}'`
+
+function prepareAdminInputFile(fixture, email, password) {
+  const sourceLog = path.join(fixture.dir, 'source.log')
+  writeFileSync(fixture.envFile, [
+    read(fixture.envFile),
+    `printf '%s\\n' loaded >> ${shQuote(sourceLog)}`,
+    `ADMIN_EMAIL=${shQuote(email)}`,
+    `ADMIN_PASSWORD=${shQuote(password)}`,
+    '',
+  ].join('\n'))
+  return () => {
+    try { return read(sourceLog) } catch { return '' }
+  }
+}
+
+const ADMIN_INPUT_REQUIRED_EMAIL = 'ADMIN_EMAIL is required'
+const ADMIN_INPUT_REQUIRED_PASSWORD = 'ADMIN_PASSWORD is required'
+const ADMIN_INPUT_MINIMUM_PASSWORD = 'ADMIN_PASSWORD must be at least 12 characters for production'
+const FILE_ADMIN_EMAIL = 'Effective.Admin@ci.invalid'
+const FILE_ADMIN_PASSWORD = ' synthetic file password-2 '
+
+for (const [label, email, password, diagnostic] of [
+  ['rejects a short file password before hashing or SQL', FILE_ADMIN_EMAIL, 'short', ADMIN_INPUT_MINIMUM_PASSWORD],
+  ['rejects an empty file password before hashing or SQL', FILE_ADMIN_EMAIL, '', ADMIN_INPUT_REQUIRED_PASSWORD],
+  ['rejects an empty file email before hashing or SQL', '', FILE_ADMIN_PASSWORD, ADMIN_INPUT_REQUIRED_EMAIL],
+  ['preserves distinct valid file credentials verbatim', FILE_ADMIN_EMAIL, FILE_ADMIN_PASSWORD, null],
+  ['accepts exactly 12 password characters without normalization', FILE_ADMIN_EMAIL, " a'bcd! 123 ", null],
+]) {
+  test(`effective admin inputs: ${label}`, async t => {
+    const fixture = makeFixture()
+    try {
+      const readSource = prepareAdminInputFile(fixture, email, password)
+      const result = await runSh(fixture, {
+        verifyLogin: '0',
+        stub: {
+          TMPDIR: fixture.dir,
+          LC_ALL: 'C',
+          STUB_ADMIN_INPUT_WITNESS: '1',
+          STUB_EXPECT_ADMIN_EMAIL: email,
+          STUB_EXPECT_ADMIN_PASSWORD: password,
+        },
+      })
+      const inputs = fixture.readAdminInputs()
+      const sql = fixture.readSql()
+      t.diagnostic(JSON.stringify({ status: result.status, sourceLoadedOnce: readSource() === 'loaded\n', inputs, sqlChunks: sql.length }))
+      assert.equal(readSource(), 'loaded\n')
+      if (diagnostic) {
+        assert.equal(result.status, 1, result.output)
+        assert.ok(result.output.includes(diagnostic), 'existing admin diagnostic must be retained')
+        assert.deepEqual(inputs, [])
+        assert.deepEqual(sql, [])
+      } else {
+        assert.equal(result.status, 0, result.output)
+        assert.deepEqual(inputs, ['bcrypt', 'email'])
+        assert.equal(sql.length, 2, 'only the existing admin upsert and role grant run')
+      }
+    } finally {
+      fixture.cleanup()
+    }
+  })
+}
+
+for (const [label, caller, diagnostic] of [
+  ['empty caller email', { ADMIN_EMAIL: '' }, ADMIN_INPUT_REQUIRED_EMAIL],
+  ['empty caller password', { ADMIN_PASSWORD: '' }, ADMIN_INPUT_REQUIRED_PASSWORD],
+  ['short caller password', { ADMIN_PASSWORD: 'short' }, ADMIN_INPUT_MINIMUM_PASSWORD],
+]) {
+  test(`effective admin inputs: ${label} refuses before sourcing a valid file`, async () => {
+    const fixture = makeFixture()
+    try {
+      const readSource = prepareAdminInputFile(fixture, FILE_ADMIN_EMAIL, FILE_ADMIN_PASSWORD)
+      const result = await runSh(fixture, {
+        verifyLogin: '0',
+        stub: {
+          TMPDIR: fixture.dir,
+          LC_ALL: 'C',
+          STUB_ADMIN_INPUT_WITNESS: '1',
+          STUB_EXPECT_ADMIN_EMAIL: FILE_ADMIN_EMAIL,
+          STUB_EXPECT_ADMIN_PASSWORD: FILE_ADMIN_PASSWORD,
+          ...caller,
+        },
+      })
+      assert.equal(result.status, 1, result.output)
+      assert.ok(result.output.includes(diagnostic), 'existing early diagnostic must be retained')
+      assert.equal(readSource(), '')
+      assert.deepEqual(fixture.readAdminInputs(), [])
+      assert.deepEqual(fixture.readSql(), [])
+    } finally {
+      fixture.cleanup()
+    }
+  })
+}
