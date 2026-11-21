@@ -9,11 +9,6 @@
       <div>
         <h2>本次操作结果</h2>
         <p class="directory-admin__hint">临时凭据仅保留在本次页面中，关闭或刷新后不再显示。请通过安全渠道交付。</p>
-        <p
-          v-if="operationResultIntegrationName"
-          class="directory-admin__hint"
-          data-testid="directory-operation-result-integration"
-        >所属集成：{{ operationResultIntegrationName }}</p>
       </div>
       <button class="directory-admin__button directory-admin__button--secondary" type="button" @click="dismissResults()">
         关闭全部结果
@@ -23,6 +18,11 @@
       <div class="directory-admin__section-head">
         <div>
           <h2>最近创建并绑定结果</h2>
+          <p
+            v-if="manualAdmissionResult.integrationName && manualAdmissionResult.integrationName.trim()"
+            class="directory-admin__hint"
+            data-testid="directory-operation-result-manual-integration"
+          >所属集成：{{ manualAdmissionResult.integrationName }}</p>
           <p class="directory-admin__hint">
             {{
               manualAdmissionResult.bound
@@ -102,6 +102,11 @@
         :key="packet.userId"
         class="directory-admin__review-admission"
       >
+        <p
+          v-if="packet.integrationName && packet.integrationName.trim()"
+          class="directory-admin__hint"
+          data-testid="directory-operation-result-auto-integration"
+        >所属集成：{{ packet.integrationName }}</p>
         <div class="directory-admin__account-grid">
           <div>
             <strong>本地用户</strong>
@@ -156,6 +161,11 @@
         :key="packet.userId"
         class="directory-admin__review-admission"
       >
+        <p
+          v-if="packet.integrationName && packet.integrationName.trim()"
+          class="directory-admin__hint"
+          data-testid="directory-operation-result-batch-integration"
+        >所属集成：{{ packet.integrationName }}</p>
         <div class="directory-admin__account-grid">
           <div>
             <strong>本地用户</strong>
@@ -196,7 +206,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, inject } from 'vue'
+import { inject } from 'vue'
 import { directoryManagementKey } from './useDirectoryManagement'
 
 const {
@@ -208,14 +218,6 @@ const {
   clearManualAdmissionResult,
   manualAdmissionResult,
 } = inject(directoryManagementKey)!
-
-const operationResultIntegrationName = computed(() => {
-  const manualName = manualAdmissionResult.value?.integrationName?.trim() ?? ''
-  if (manualName) return manualName
-  const packet = [...autoAdmissionOnboardingPackets.value, ...batchAdmissionOnboardingPackets.value]
-    .find((item) => item.integrationName?.trim())
-  return packet?.integrationName?.trim() ?? ''
-})
 
 function dismissResults() {
   clearManualAdmissionResult()
