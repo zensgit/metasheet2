@@ -1,3 +1,6 @@
+import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { gunzipSync } from 'node:zlib'
 import { describe, expect, it } from 'vitest'
 import { AUTHORIZATION_OPERATION_FENCE_LOCK_SQL, AUTHORIZATION_OPERATION_FENCE_TABLES, AUTHORIZATION_OPERATION_SCHEMA_PROFILE, inspectAuthorizationOperationSchema, isSupportedAuthorizationOperationSchema } from '../../src/admin/authorization-operation-fence'
 
@@ -43,4 +46,103 @@ describe('authorization operation schema profile', () => {
     expect((await inspect(regular(),true,false)).ordinary).toBe(false)
   })
 
+})
+
+type CatalogRow = Record<string, unknown>
+type CatalogSnapshot = {
+  database: CatalogRow
+  inspection: { digest: string }
+  rows: CatalogRow[][]
+  partitions: { base: CatalogRow[][]; b2: CatalogRow[][]; n78: CatalogRow[][] }
+  digests: { base: string; b2: string; n78: string }
+}
+const fixtureRoot = new URL('../fixtures/authorization-operation-catalog/', import.meta.url)
+const manifest: { snapshots: Array<{ major: number; sha256: string }> } = JSON.parse(readFileSync(new URL('manifest.json', fixtureRoot), 'utf8'))
+const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+
+async function inspectCatalog(database: CatalogRow, rows: CatalogRow[][]) {
+  let calls = 0
+  const result = await inspectAuthorizationOperationSchema(async () => ({ rows: calls++ === 0 ? [database] : rows[calls - 2] }))
+  expect(calls).toBe(9)
+  return result
+}
+
+function withoutPartition(snapshot: CatalogSnapshot, partition: CatalogRow[][]): CatalogRow[][] {
+  return snapshot.rows.map((rows, section) => {
+    const removed = new Set(partition[section].map(row => JSON.stringify(row)))
+    return rows.filter(row => !removed.has(JSON.stringify(row)))
+  })
+}
+
+describe.each(manifest.snapshots)('measured PostgreSQL $major authorization catalog', ({ major, sha256 }) => {
+  const bytes = gunzipSync(readFileSync(new URL(`pg${major}.json.gz`, fixtureRoot)))
+  const snapshot: CatalogSnapshot = JSON.parse(bytes.toString('utf8'))
+
+  it('preserves measured catalog bytes and independent partition digests', () => {
+    expect(createHash('sha256').update(bytes).digest('hex')).toBe(sha256)
+    expect(snapshot.database.version).toBe(major)
+    expect(digest({ database: snapshot.database, rows: snapshot.rows })).toBe(snapshot.inspection.digest)
+    expect(digest({ database: snapshot.database, rows: snapshot.partitions.base })).toBe(snapshot.digests.base)
+    expect(digest(snapshot.partitions.b2)).toBe('c8b8994bc64060dde36280a452662854741816a88091d1b2280d7f3f1ca0f743')
+    expect(digest(snapshot.partitions.n78)).toBe('ebb4eb31cb35209de3785b867c41c17093032eaf2eccc7ebd3912f56f0b3f515')
+  })
+
+  it(`accepts measured N78 and B2 additions with the original exact profile (PG${major})`, async () => {
+    const result = await inspectCatalog(snapshot.database, snapshot.rows)
+    expect(result.digest).toBe(snapshot.inspection.digest)
+    expect(result.baseDigest).toBe(snapshot.digests.base)
+    expect(result.ordinary).toBe(true)
+    expect(isSupportedAuthorizationOperationSchema(result)).toBe(true)
+  })
+
+  it(`preserves original and B2-only historical profiles (PG${major})`, async () => {
+    for (const rows of [snapshot.partitions.base, withoutPartition(snapshot, snapshot.partitions.n78)]) {
+      const result = await inspectCatalog(snapshot.database, rows)
+      expect(result.baseDigest ?? result.digest).toBe(snapshot.digests.base)
+      expect(isSupportedAuthorizationOperationSchema(result)).toBe(true)
+    }
+  })
+
+  it('rejects N78 without the complete B2 addition', async () => {
+    const result = await inspectCatalog(snapshot.database, withoutPartition(snapshot, snapshot.partitions.b2))
+    expect(isSupportedAuthorizationOperationSchema(result)).toBe(false)
+  })
+
+  it.each([
+    ['source_schema', 'unregistered'], ['source', 'unregistered_inbound_dependency'],
+    ['conname', 'ncv_drift_fk'], ['contype', 'c'], ['convalidated', false],
+    ['condeferrable', true], ['condeferred', true], ['connoinherit', false],
+    ['target_schema', 'unregistered'], ['target', 'roles'],
+    ['definition', 'FOREIGN KEY (connection_id, provider) REFERENCES directory_integrations(id, provider) ON UPDATE RESTRICT ON DELETE CASCADE'],
+  ])(`rejects changed N78 %s despite the registered source (PG${major})`, async (field, value) => {
+    const rows = structuredClone(snapshot.rows)
+    const n78 = rows[2].find(row => row.source === 'notification_connection_verifications')!
+    n78[String(field)] = value
+    expect(isSupportedAuthorizationOperationSchema(await inspectCatalog(snapshot.database, rows))).toBe(false)
+  })
+
+  it.each([
+    ['registered N78', 'notification_connection_verifications'],
+    ['unregistered', 'unregistered_inbound_dependency'],
+  ])(`rejects an extra inbound foreign key from the %s source (PG${major})`, async (_name, source) => {
+    const rows = structuredClone(snapshot.rows)
+    rows[2].push({ ...snapshot.partitions.n78[2][0], source, conname: 'ncv_extra_fk' })
+    expect(isSupportedAuthorizationOperationSchema(await inspectCatalog(snapshot.database, rows))).toBe(false)
+  })
+
+  it.each(['base', 'b2'] as const)('still rejects %s drift when N78 is valid', async partition => {
+    const rows = structuredClone(snapshot.rows)
+    const original = snapshot.partitions[partition][2][0]
+    const changed = rows[2].find(row => row.source === original.source && row.conname === original.conname)!
+    changed.conname = 'unregistered_constraint'
+    expect(isSupportedAuthorizationOperationSchema(await inspectCatalog(snapshot.database, rows))).toBe(false)
+  })
+
+  it.each([
+    ['version', 18], ['datcollate', 'unregistered'], ['datctype', 'unregistered'],
+    ['datlocprovider', 'unregistered'], ['schema_create_trusted', false],
+  ])('rejects unqualified database %s with valid additions', async (field, value) => {
+    const database = { ...snapshot.database, [String(field)]: value }
+    expect(isSupportedAuthorizationOperationSchema(await inspectCatalog(database, snapshot.rows))).toBe(false)
+  })
 })

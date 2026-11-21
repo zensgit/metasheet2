@@ -239,6 +239,7 @@ export const ADVISORY_TWO_INT4_CENSUS_V1: readonly AdvisoryTwoInt4CensusEntryV1[
   { file: `${CORE}/attendance/coordination/settlement-coordination-statements.ts`, key1: '${KEY1_LITERAL}', window: '', count: 9, kind: 'constant', registry: ['attendance-settlement-coordination'], binding: 'KEY1_LITERAL = (0x4D533243)::int4 inlined by the S1 / S2 / unlock builders' },
   // Constant key1 written as a literal.
   { file: `${CORE}/audit/AuditRepository.ts`, key1: "hashtext('audit_logs_partition')", window: '', count: 3, kind: 'constant', registry: ['audit-logs-partition'], binding: 'literal in the partition maintenance SQL' },
+  { file: `${CORE}/notifications/test-send-service.ts`, key1: "hashtext('notif-test-conn')", window: '[target.connectionId]', kind: 'constant', registry: ['notif-test-conn'], binding: 'literal namespace; connection id as key2' },
   { file: `${CORE}/db/migrations/zzzz20260830123000_create_elearning_titles.ts`, key1: "hashtext('elearning-title-balance-org')", window: '', kind: 'constant', registry: ['elearning-title-balance-org'], binding: 'literal in the trigger function' },
   { file: `${CORE}/rbac/authorization-input-lock.ts`, key1: '20261106', window: '', count: 3, kind: 'constant', registry: ['authorization-input-world'], boundConstants: [{ name: 'AUTHORIZATION_INPUT_WORLD_LOCK_KEY1', registry: 'authorization-input-world' }], binding: 'SQL literal (20261106, 1) in the shared, shared-try and exclusive-try world-lock statements' },
   { file: `${CORE}/rbac/authorization-input-writers.ts`, key1: '20261106', window: '', kind: 'constant', registry: ['authorization-input-world'], binding: 'SQL literal (20261106, 1) of the try form a new migration must contain before writing an input table' },
@@ -287,6 +288,7 @@ export const ADVISORY_TWO_INT4_CENSUS_V1: readonly AdvisoryTwoInt4CensusEntryV1[
   { file: ATT, key1: 'hashtext($1::text)', window: 'attendance-schedule-dispatch:', kind: 'variable', binding: '`attendance-schedule-dispatch:${orgId}`' },
   { file: ATT, key1: 'hashtext($1::text)', window: 'attendance:otbank-cap:', kind: 'variable', binding: '`attendance:otbank-cap:${orgId}:${userId}`' },
   { file: `${CORE}/notifications/notification-tx.ts`, key1: "hashtext('notif-user:' || $1::text)", window: "hashtext('notif-user:' || $1::text), hashtext($2::text)", kind: 'variable', binding: 'org id behind a fixed prefix; user id as key2' },
+  { file: `${CORE}/notifications/test-send-service.ts`, key1: "hashtext('notif-test:' || $1::text)", window: '[input.orgId, input.userId]', kind: 'variable', binding: 'org id behind a fixed prefix; user id as key2' },
   // Calls written inside documentation comments.
   { file: `${CORE}/multitable/canonical-sheet-fence.ts`, key1: 'PIT_RECOVERY_LOCK_NS::int', window: '', count: 2, kind: 'doc-comment', registry: ['multitable-pit-recovery'], boundConstants: [{ name: 'PIT_RECOVERY_LOCK_NS', registry: 'multitable-pit-recovery' }], binding: 'doc comments describing the PIT recovery namespace int' },
 ])

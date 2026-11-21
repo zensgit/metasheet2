@@ -19,6 +19,8 @@ type DirectoryIntegrationConfigRow = {
   id: string
   name: string
   status: string
+  corp_id: string
+  org_id: string
   config: JsonRecord | string | null
   updated_at: string
 }
@@ -79,6 +81,7 @@ type StoredWorkNotificationConfig = {
   integrationName: string
   integrationStatus: string
   integrationUpdatedAt: string
+  sourceScope: { orgId: string; corpId: string; appKey: string | null }
   appKey: string
   appSecret: string
   agentId: string
@@ -141,18 +144,27 @@ function readAgentIdFromConfig(config: JsonRecord): string {
   return decryptStoredText(config[AGENT_ID_CONFIG_KEY] ?? config.agentId)
 }
 
-async function loadStoredWorkNotificationConfig(integrationId?: string): Promise<StoredWorkNotificationConfig | null> {
+/** Optional transaction executor; omitted by all pre-existing callers. */
+export interface DingTalkMessageTupleClient {
+  query(sql: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }>
+}
+
+async function loadStoredWorkNotificationConfig(
+  integrationId?: string,
+  client?: DingTalkMessageTupleClient,
+): Promise<StoredWorkNotificationConfig | null> {
+  const reader = client ?? { query }
   const normalizedIntegrationId = normalizeText(integrationId)
   const result = normalizedIntegrationId
-    ? await query<DirectoryIntegrationConfigRow>(
-      `SELECT id, name, status, config, updated_at
+    ? await reader.query(
+      `SELECT id, name, status, corp_id, org_id, config, updated_at
        FROM directory_integrations
        WHERE id = $1 AND provider = $2
        LIMIT 1`,
       [normalizedIntegrationId, DEFAULT_PROVIDER],
     )
-    : await query<DirectoryIntegrationConfigRow>(
-      `SELECT id, name, status, config, updated_at
+    : await reader.query(
+      `SELECT id, name, status, corp_id, org_id, config, updated_at
        FROM directory_integrations
        WHERE provider = $1
        ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END, updated_at DESC
@@ -160,7 +172,7 @@ async function loadStoredWorkNotificationConfig(integrationId?: string): Promise
       [DEFAULT_PROVIDER],
     )
 
-  const row = result.rows[0]
+  const row = result.rows[0] as DirectoryIntegrationConfigRow | undefined
   if (!row) return null
 
   const config = parseJsonRecord(row.config)
@@ -169,6 +181,7 @@ async function loadStoredWorkNotificationConfig(integrationId?: string): Promise
     integrationName: row.name,
     integrationStatus: row.status,
     integrationUpdatedAt: row.updated_at,
+    sourceScope: { orgId: row.org_id, corpId: row.corp_id, appKey: typeof config.appKey === 'string' ? config.appKey : null },
     appKey: normalizeText(config.appKey),
     appSecret: decryptStoredText(config.appSecret),
     agentId: readAgentIdFromConfig(config),
@@ -221,6 +234,8 @@ export type DingTalkMessageEnvPresence = {
 
 /** The integration-scoped resolution plus the row's identity, for callers that report on it. */
 export type DingTalkIntegrationScopedMessageTuple = DingTalkMessageTupleResolution & {
+  /** Internal provenance from the same row read as config; never part of a verification report. */
+  sourceScope?: { orgId: string; corpId: string; appKey: string | null }
   integration: {
     id: string
     name: string
@@ -355,13 +370,15 @@ export function resolveDingTalkMessageTuple(
  */
 export async function readDingTalkIntegrationScopedMessageTuple(
   integrationId: string,
+  client?: DingTalkMessageTupleClient,
 ): Promise<DingTalkIntegrationScopedMessageTuple> {
   const env = readDingTalkMessageEnvSnapshot()
-  const stored = await loadStoredWorkNotificationConfig(integrationId)
+  const stored = await loadStoredWorkNotificationConfig(integrationId, client)
   // Throws integration_not_found on a missing row, so `stored` is non-null past this line.
   const resolution = resolveDingTalkMessageTuple(env, stored, integrationId)
   return {
     ...resolution,
+    sourceScope: stored.sourceScope,
     integration: {
       id: stored.integrationId,
       name: stored.integrationName,

@@ -2277,3 +2277,28 @@ describe('structural guard: routes/admin-role-members.ts (mounted at the root, o
     ])
   })
 })
+
+const ADMIN_NOTIFICATION_VERIFICATIONS = 'admin-notification-verifications.ts'
+
+function notificationVerificationOffenders(source: string) {
+  return scanResponseErrorEcho(ADMIN_NOTIFICATION_VERIFICATIONS, source).offenders
+}
+
+describe('structural guard: routes/admin-notification-verifications.ts (mounted outside the /api/admin tree)', () => {
+  it('admin-notification-verifications.ts is scanned on its own and its 5xx bodies carry no caught-error text', () => {
+    expect(routerTree().files).not.toContain(ADMIN_NOTIFICATION_VERIFICATIONS)
+    expect(notificationVerificationOffenders(readRoute(ADMIN_NOTIFICATION_VERIFICATIONS))).toEqual([])
+  })
+
+  it('flags a caught-error echo injected into the notification-verification 500', () => {
+    const source = readRoute(ADMIN_NOTIFICATION_VERIFICATIONS)
+    const injected = source.replace(
+      "res.status(500).json({ error: { code: 'INTERNAL' } })",
+      "res.status(500).json({ error: { code: 'INTERNAL', message: (error as Error).message } })",
+    )
+    expect(injected).not.toBe(source)
+    expect(notificationVerificationOffenders(injected)).toEqual([
+      expect.objectContaining({ file: ADMIN_NOTIFICATION_VERIFICATIONS, status: 500, reason: 'reads .message' }),
+    ])
+  })
+})

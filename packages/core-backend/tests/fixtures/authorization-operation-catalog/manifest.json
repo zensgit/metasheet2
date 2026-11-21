@@ -1,0 +1,21 @@
+{
+  "commit": "8b8c5e6de1d6d305d90cb8be374c99b839771be6",
+  "snapshots": [
+    {
+      "major": 14,
+      "sha256": "5bb2131bde39709090298ba1139c95e2a2d84107e8e7b16b8686eda2758ab407"
+    },
+    {
+      "major": 15,
+      "sha256": "5535c24361af187c8b3406bd13c04820f9e3e2c2eec8f5c75a170267ac383136"
+    },
+    {
+      "major": 16,
+      "sha256": "667dab99f22c1bc422829acc0fb0a4f9b266406a7d4956931cb6adc9eef1cfe7"
+    },
+    {
+      "major": 17,
+      "sha256": "6a1e0c77c894b98c19759072e95856a44bdf42ad4ef71d342e6974ed4e1c90b1"
+    }
+  ]
+}

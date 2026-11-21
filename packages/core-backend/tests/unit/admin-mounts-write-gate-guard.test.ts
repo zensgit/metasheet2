@@ -223,6 +223,7 @@ import { adminDirectoryDepartmentBindingsRouter } from '../../src/routes/admin-d
 import { adminDirectoryLocalRouter } from '../../src/routes/admin-directory-local'
 import { adminDirectoryOrgTransfersRouter } from '../../src/routes/admin-directory-org-transfers'
 import { adminDirectoryCapabilitiesRouter } from '../../src/routes/admin-directory-capabilities'
+import { adminNotificationVerificationsRouter } from '../../src/routes/admin-notification-verifications'
 import { adminDirectoryRoutingPolicyRouter } from '../../src/routes/admin-directory-routing-policy'
 import { adminUsersRouter } from '../../src/routes/admin-users'
 import { canaryRoutes } from '../../src/routes/canary-routes'
@@ -280,6 +281,7 @@ type MountKey =
   | 'admin-directory-department-bindings'
   | 'admin-directory-routing-policy'
   | 'admin-directory-integration-capabilities'
+  | 'admin-notification-verifications'
   | 'canary'
   | 'permissions'
 
@@ -343,6 +345,13 @@ const MOUNTS: Record<MountKey, MountSpec> = {
     factory: adminDirectoryRoutingPolicyRouter,
     routeFile: 'routes/admin-directory-routing-policy.ts',
     build: () => adminDirectoryRoutingPolicyRouter(),
+  },
+  'admin-notification-verifications': {
+    mountPath: '/api/admin/directory',
+    source: "this.app.use('/api/admin/directory', adminNotificationVerificationsRouter())",
+    factory: adminNotificationVerificationsRouter,
+    routeFile: 'routes/admin-notification-verifications.ts',
+    build: () => adminNotificationVerificationsRouter(),
   },
   'admin-directory-integration-capabilities': {
     mountPath: '/api/admin/directory/integration-capabilities',
@@ -584,6 +593,8 @@ const REGISTRY: readonly WriteRouteEntry[] = [
 
   // --- routes/admin-directory-routing-policy.ts（1 条） ---
   { mount: 'admin-directory-routing-policy', method: 'patch', path: '/:purpose', reg: 'routes/admin-directory-routing-policy.ts', gate: 'routes/admin-directory-routing-policy.ts ensurePlatformAdmin', family: P },
+
+  { mount: 'admin-notification-verifications', method: 'post', path: '/notification-verification', reg: 'routes/admin-notification-verifications.ts', gate: 'routes/admin-notification-verifications.ts ensurePlatformAdmin', family: P },
 
   // --- routes/admin-directory-capabilities.ts（1 条；门是处理器第一条语句，在 try 之外，从 ./admin-directory import） ---
   { mount: 'admin-directory-integration-capabilities', method: 'patch', path: '/:integrationId', reg: 'routes/admin-directory-capabilities.ts', gate: 'routes/admin-directory-capabilities.ts ensurePlatformAdmin', family: P },
@@ -875,12 +886,12 @@ describe('/api/admin 挂载点写路由守卫 — fixture 自检', () => {
     }
   })
 
-  it('登记表条数与分族口径固定：80 条 / 2 条委派例外 / 4 条中间件门 / 1 条事务门 / 2 条操作门', () => {
-    expect(REGISTRY).toHaveLength(80)
+  it('登记表条数与分族口径固定：81 条 / 2 条委派例外 / 4 条中间件门 / 1 条事务门 / 2 条操作门', () => {
+    expect(REGISTRY).toHaveLength(81)
     expect(REGISTRY.filter((e) => e.family === 'delegation')).toHaveLength(2)
     expect(REGISTRY.filter((e) => e.family === 'middleware')).toHaveLength(4)
     expect(REGISTRY.filter((e) => e.family === 'inline')).toHaveLength(1)
-    expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(71)
+    expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(72)
     expect(REGISTRY.filter((e) => e.family === 'operation')).toHaveLength(2)
     // 每条都必须带来源：reg = 该挂载点的注册文件；gate 可解析，且每条分支链的最后一环是本族的门函数
     for (const entry of REGISTRY) {
@@ -1094,6 +1105,7 @@ describe('(A) RBAC 判据不可用（isAdmin 抛错）时 fail-closed', () => {
         'admin-directory-routing-policy',
         'admin-directory-org-transfers',
         'admin-directory-integration-capabilities',
+        'admin-notification-verifications',
       ] as MountKey[]
     ).flatMap((mount) => {
       const representatives = REGISTRY.filter((entry) => entry.mount === mount && entry.family === 'platform')
@@ -1142,6 +1154,7 @@ describe('(A) 控制组：同一请求、只改门的输入，结论必须翻面
     { mount: 'admin-directory-department-bindings', path: '/sweep' },
     { mount: 'admin-directory-routing-policy', path: '/:purpose' },
     { mount: 'admin-directory-integration-capabilities', path: '/:integrationId' },
+    { mount: 'admin-notification-verifications', path: '/notification-verification' },
     { mount: 'admin-directory-org-transfers', path: '/' },
     { mount: 'admin-users', path: '/api/admin/login-aliases/backfill', expectDownstream: 'login-alias-service.backfillUserLoginAliases' },
     { mount: 'permissions', path: '/api/admin/permission-templates/apply' },
@@ -1290,7 +1303,8 @@ describe('(B) 清单双向反查：router.stack 枚举出的写路由集合必�
       || entry.mount === 'admin-directory-local'
       || entry.mount === 'admin-directory-department-bindings'
       || entry.mount === 'admin-directory-routing-policy'
-      || entry.mount === 'admin-directory-integration-capabilities',
+      || entry.mount === 'admin-directory-integration-capabilities'
+      || entry.mount === 'admin-notification-verifications',
     )
     for (const entry of overlapping) {
       const response = await request(pinned.url())[entry.method](toUrl(entry)).send({})

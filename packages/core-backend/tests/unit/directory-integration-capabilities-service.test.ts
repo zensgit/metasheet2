@@ -112,7 +112,7 @@ describe('read: switch and schema', () => {
 })
 
 describe('view for a dingtalk integration with no capability row', () => {
-  it('shows every capability as legacy-governed, off and unbound, with the legacy blocks', async () => {
+  it('shows gated notification off and unbound without a legacy block', async () => {
     const service = createDirectoryIntegrationCapabilitiesService(deps(executor()))
     const result = await service.read(ID)
     expect(result.kind).toBe('ok')
@@ -133,11 +133,7 @@ describe('view for a dingtalk integration with no capability row', () => {
           legacy: { covers: 'oauth_scan_login_only', available: true, requireGrant: false, autoLinkEmail: false, autoProvision: false },
         },
         notification: {
-          enabled: false, governance: 'legacy', effective: null, reason: 'governed_by_legacy_path', anchor: NO_ANCHOR,
-          legacy: {
-            integrationScopedCredentialsSwitch: false,
-            verification: { route: '/api/admin/directory/dingtalk/work-notification/verify', levels: ['config', 'token', 'send'] },
-          },
+          enabled: false, governance: 'gated', effective: false, reason: 'not_enabled', anchor: NO_ANCHOR,
         },
       },
     })
@@ -164,11 +160,11 @@ describe('view for a dingtalk integration with no capability row', () => {
     expect(result.view.capabilities.directory.legacy).toEqual({ syncEnabled: false, scheduleConfigured: false })
   })
 
-  it('shows the integration-scoped credentials switch as it is', async () => {
+  it('omits the notification legacy block regardless of the old credentials switch', async () => {
     const service = createDirectoryIntegrationCapabilitiesService(deps(executor(), { isIntegrationScopedCredentialsEnabled: () => true }))
     const result = await service.read(ID)
     if (result.kind !== 'ok') throw new Error('expected a view')
-    expect((result.view.capabilities.notification.legacy as { integrationScopedCredentialsSwitch: boolean }).integrationScopedCredentialsSwitch).toBe(true)
+    expect(result.view.capabilities.notification.legacy).toBeUndefined()
   })
 })
 
@@ -270,10 +266,10 @@ describe('view with an injected registry (gated capabilities)', () => {
 })
 
 describe('production binding of the implementation table', () => {
-  it('has no implementation for any provider, so no capability can be effective', () => {
+  it('implements only DingTalk notification', () => {
     for (const provider of ['dingtalk', 'wecom', 'local']) {
       for (const capability of ['directory', 'login', 'notification'] as const) {
-        expect(isCapabilityImplementationAvailable(provider, capability)).toBe(false)
+        expect(isCapabilityImplementationAvailable(provider, capability)).toBe(provider === 'dingtalk' && capability === 'notification')
       }
     }
   })

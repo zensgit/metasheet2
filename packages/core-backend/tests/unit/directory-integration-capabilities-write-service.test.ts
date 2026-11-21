@@ -3,8 +3,7 @@
  * fixed statement order, the revision check, what turning a capability off and on means per capability,
  * enable preconditions and enable gates, the typed error mapping, and the audit records.
  *
- * Turning a capability on is reachable only with an injected registry: the production registry governs
- * every capability as legacy. Rows are held by the script; the insert and update statements the service
+ * Most enable cases inject a test registry; production notification also requires persisted evidence. Rows are held by the script; the insert and update statements the service
  * issues are applied to them, so the assertions read what the service wrote.
  */
 import { describe, expect, it, vi } from 'vitest'
@@ -780,27 +779,33 @@ describe('turning a capability on: refusals, in order', () => {
     ])
   })
 
-  it('refuses every capability of the production registry and of an unregistered provider', async () => {
-    for (const [provider, code] of [['dingtalk', 'CAPABILITY_GOVERNED_BY_LEGACY_PATH'], ['local', 'CAPABILITY_PROVIDER_NOT_REGISTERED'], ['wecom', 'CAPABILITY_PROVIDER_NOT_REGISTERED']] as const) {
-      for (const capability of CAPABILITIES) {
-        const h = harness({ integration: integrationRow({ provider, config: { appKey: APP } }) })
-        const service = createDirectoryIntegrationCapabilitiesWriteService({
-          isEnabled: () => true,
-          resolveDescriptor: resolveProviderCapabilityDescriptor,
-          isImplementationAvailable: isCapabilityImplementationAvailable,
-          readLoginRuntime: () => ({ available: false, requireGrant: false, autoLinkEmail: false, autoProvision: false }),
-          isIntegrationScopedCredentialsEnabled: () => false,
-          transaction: (work) => work(h.client),
-          capabilityGates: PRODUCTION_CAPABILITY_ENABLE_GATES,
-          audit: async () => undefined,
-        })
-        expect(await service.patch(ID, body(0, { [capability]: true }), ACTOR)).toEqual({ kind: 'refused', code, capability })
-        expect(h.kinds().some((kind) => WRITES.includes(kind))).toBe(false)
-        const off = await service.patch(ID, body(0, { [capability]: false }), ACTOR)
-        expect(off).toMatchObject({ kind: 'ok', changed: false, view: { revision: 0 } })
-        expect(h.kinds().some((kind) => WRITES.includes(kind))).toBe(false)
+  it('refuses legacy and unregistered capabilities, and notification while its preferences gate is off', async () => {
+    vi.stubEnv('USER_NOTIFICATION_PREFERENCES_ENABLED', 'false')
+    try {
+      for (const [provider, code] of [['dingtalk', 'CAPABILITY_GOVERNED_BY_LEGACY_PATH'], ['local', 'CAPABILITY_PROVIDER_NOT_REGISTERED'], ['wecom', 'CAPABILITY_PROVIDER_NOT_REGISTERED']] as const) {
+        for (const capability of CAPABILITIES) {
+          const h = harness({ integration: integrationRow({ provider, config: { appKey: APP } }) })
+          const service = createDirectoryIntegrationCapabilitiesWriteService({
+            isEnabled: () => true,
+            resolveDescriptor: resolveProviderCapabilityDescriptor,
+            isImplementationAvailable: isCapabilityImplementationAvailable,
+            readLoginRuntime: () => ({ available: false, requireGrant: false, autoLinkEmail: false, autoProvision: false }),
+            isIntegrationScopedCredentialsEnabled: () => false,
+            transaction: (work) => work(h.client),
+            capabilityGates: PRODUCTION_CAPABILITY_ENABLE_GATES,
+            audit: async () => undefined,
+          })
+          const expected = provider === 'dingtalk' && capability === 'notification'
+            ? { kind: 'refused', code: 'CAPABILITY_PRECONDITION_FAILED', capability, reason: 'verification_missing' }
+            : { kind: 'refused', code, capability }
+          expect(await service.patch(ID, body(0, { [capability]: true }), ACTOR)).toEqual(expected)
+          expect(h.kinds().some((kind) => WRITES.includes(kind))).toBe(false)
+          const off = await service.patch(ID, body(0, { [capability]: false }), ACTOR)
+          expect(off).toMatchObject({ kind: 'ok', changed: false, view: { revision: 0 } })
+          expect(h.kinds().some((kind) => WRITES.includes(kind))).toBe(false)
+        }
       }
-    }
+    } finally { vi.unstubAllEnvs() }
   })
 })
 

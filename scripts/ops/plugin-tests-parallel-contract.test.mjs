@@ -316,6 +316,15 @@ function assertParallelWorkflow(doc) {
         const attendanceTemplateRuntimeAddition = '  tests/integration/attendance-role-template-runtime.db.test.ts \\\n'
         assert.equal(step.run.split(attendanceTemplateRuntimeAddition).length - 1, 1, 'Attendance template runtime DB suite must run exactly once')
         assert.ok(step.run.includes(pullSourceGateAddition + attendanceTemplateRuntimeAddition), 'Keep the attendance template runtime DB suite right after the pull-source write gate suite')
+        const notificationSendAddition = '  tests/integration/notification-verification-test-send.db.test.ts \\\n'
+        assert.equal(step.run.split(notificationSendAddition).length - 1, 1, 'Notification verification and test-send DB suite must run exactly once')
+        assert.ok(step.run.includes(attendanceTemplateRuntimeAddition + notificationSendAddition), 'Keep the notification sender suite after the current additive chain tail')
+        const notificationVerificationProductionAddition = '  tests/integration/notification-verification-production.db.test.ts \\\n'
+        assert.equal(step.run.split(notificationVerificationProductionAddition).length - 1, 1, 'Notification production DB suite must run exactly once')
+        assert.ok(step.run.includes(notificationSendAddition + notificationVerificationProductionAddition), 'Keep the notification production suite after its registered predecessor')
+        const notificationCapabilityProductionAddition = '  tests/integration/notification-capability-production.db.test.ts \\\n'
+        assert.equal(step.run.split(notificationCapabilityProductionAddition).length - 1, 1, 'Notification production DB suite must run exactly once')
+        assert.ok(step.run.includes(notificationVerificationProductionAddition + notificationCapabilityProductionAddition), 'Keep the notification production suite after its registered predecessor')
         step.run = step.run.replace(addition, '')
         step.run = step.run.replace(repairAddition, '')
         step.run = step.run.replace(privilegeAddition, '')
@@ -340,6 +349,9 @@ function assertParallelWorkflow(doc) {
         step.run = step.run.replace(authzCensusAddition, '')
         step.run = step.run.replace(pullSourceGateAddition, '')
         step.run = step.run.replace(attendanceTemplateRuntimeAddition, '')
+        step.run = step.run.replace(notificationSendAddition, '')
+        step.run = step.run.replace(notificationVerificationProductionAddition, '')
+        step.run = step.run.replace(notificationCapabilityProductionAddition, '')
         const directPermissionAddition = '  tests/integration/direct-permission-writers.db.test.ts \\\n'
         assert.equal(step.run.split(directPermissionAddition).length - 1, 1, 'Direct permission writer DB suite must run exactly once')
         assert.ok(step.run.includes(directPermissionAddition), 'Keep the direct permission writer whole-file suite')
@@ -684,6 +696,12 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/feishu-mock-harness-smoke.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-integration-lifecycle-history-readable.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-integration-lifecycle-history-readable.db.test.ts \\\n'; assert.ok(step.run.includes(line)); step.run = step.run.replace(line, line + line) },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/notification-verification-test-send.db.test.ts \\\n', '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/notification-verification-test-send.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/notification-verification-production.db.test.ts \\\n', '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/notification-verification-production.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/notification-capability-production.db.test.ts \\\n', '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/notification-capability-production.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/notification-endpoints-preferences.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/notification-endpoints-preferences.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/notification-endpoints-preferences.db.test.ts \\\n'; assert.ok(step.run.includes(line)); step.run = step.run.replace(line, line + line) },

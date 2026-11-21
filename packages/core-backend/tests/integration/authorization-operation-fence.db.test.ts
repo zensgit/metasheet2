@@ -3,7 +3,7 @@ import { Client, Pool } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { AUTHORIZATION_INPUT_STATEMENTS, withAuthorizationInputTransaction } from '../../src/rbac/authorization-input-lock'
 import type { AuthorizationInputTransactionRunner } from '../../src/rbac/authorization-input-lock'
-import { AUTHORIZATION_OPERATION_FENCE_TABLES, assertAuthorizationOperationReadReady } from '../../src/admin/authorization-operation-fence'
+import { AUTHORIZATION_OPERATION_FENCE_TABLES, assertAuthorizationOperationReadReady, assertAuthorizationOperationSchema } from '../../src/admin/authorization-operation-fence'
 
 const url = process.env.PERMISSION_COMMAND_FENCE_DATABASE_URL
 if (url) {
@@ -158,6 +158,42 @@ suite('authorization operation table fence on a migrated synthetic database', ()
       try { await expect(assertAuthorizationOperationReadReady((sql,params) => other.query(sql,params), AUTHORIZATION_INPUT_STATEMENTS.worldSharedTry)).rejects.toMatchObject({code:'AUTHORIZATION_OPERATION_FENCE_UNAVAILABLE'}) }
       finally { await other.query('ROLLBACK') }
     } finally { await other.query('ALTER TABLE public.user_roles DROP CONSTRAINT permission_command_extra_fk'); await other.query('DROP TABLE public.permission_command_extra_dependency') }
+  })
+
+  it('accepts the registered N78 inbound foreign key with the integrated B2 profile', async () => {
+    await other.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
+    try {
+      await other.query('SET LOCAL search_path TO pg_catalog, public, pg_temp')
+      const foreignKeys = await other.query(`SELECT conname FROM pg_catalog.pg_constraint
+        WHERE conrelid='public.notification_connection_verifications'::regclass
+          AND confrelid='public.directory_integrations'::regclass AND contype='f'`)
+      expect(foreignKeys.rows).toEqual([{ conname: 'ncv_conn_fk' }])
+      await assertAuthorizationOperationSchema((sql, params) => other.query(sql, params))
+    } finally { await other.query('ROLLBACK') }
+  })
+
+  for (const { name, ddl } of [
+    { name: 'unregistered inbound foreign key', ddl: 'CREATE TABLE public.permission_command_inbound_dependency(id text REFERENCES public.roles(id))' },
+    { name: 'renamed N78 foreign key', ddl: 'ALTER TABLE public.notification_connection_verifications RENAME CONSTRAINT ncv_conn_fk TO ncv_drift_fk' },
+    { name: 'deferrable N78 foreign key', ddl: 'ALTER TABLE public.notification_connection_verifications ALTER CONSTRAINT ncv_conn_fk DEFERRABLE INITIALLY DEFERRED' },
+    { name: 'unvalidated N78 foreign key', ddl: `ALTER TABLE public.notification_connection_verifications DROP CONSTRAINT ncv_conn_fk,
+        ADD CONSTRAINT ncv_conn_fk FOREIGN KEY (connection_id, provider) REFERENCES public.directory_integrations(id, provider) ON UPDATE RESTRICT ON DELETE RESTRICT NOT VALID` },
+    { name: 'changed N78 delete action', ddl: `ALTER TABLE public.notification_connection_verifications DROP CONSTRAINT ncv_conn_fk,
+        ADD CONSTRAINT ncv_conn_fk FOREIGN KEY (connection_id, provider) REFERENCES public.directory_integrations(id, provider) ON UPDATE RESTRICT ON DELETE CASCADE` },
+    { name: 'additional foreign key from the registered N78 source', ddl: `ALTER TABLE public.notification_connection_verifications
+        ADD CONSTRAINT ncv_extra_fk FOREIGN KEY (connection_id) REFERENCES public.directory_integrations(id)` },
+  ]) it(`refuses ${name} without weakening the original profile`, async () => {
+    const query = (sql: string, params?: unknown[]) => other.query(sql, params)
+    await other.query('BEGIN')
+    try {
+      await other.query('SET LOCAL search_path TO pg_catalog, public, pg_temp')
+      await assertAuthorizationOperationSchema(query)
+      await other.query('SAVEPOINT original_profile')
+      await other.query(ddl)
+      await expect(assertAuthorizationOperationSchema(query)).rejects.toMatchObject({ code: 'AUTHORIZATION_OPERATION_FENCE_UNAVAILABLE' })
+      await other.query('ROLLBACK TO SAVEPOINT original_profile')
+      await assertAuthorizationOperationSchema(query)
+    } finally { await other.query('ROLLBACK') }
   })
 
   it('does not let a session temporary table shadow the fenced public users table', async () => {

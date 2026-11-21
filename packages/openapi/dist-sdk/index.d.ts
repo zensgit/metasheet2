@@ -13,7 +13,7 @@ export interface paths {
         };
         /**
          * Show the capability state of one directory integration
-         * @description Platform administrators only. Answers 404 DIRECTORY_CAPABILITIES_DISABLED while DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED is not the exact string true. Read-only and display only: the response carries no scope value, corp id, application key, environment value or configuration value. `effective` is null where the stored state does not govern the capability (legacy path, unsupported capability, unregistered provider); null does not mean the capability is off.
+         * @description Platform administrators only. Answers 404 DIRECTORY_CAPABILITIES_DISABLED while DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED is not the exact string true. Read-only and display only: the response carries no scope value, corp id, application key, environment value or configuration value. `effective` is null where the stored state does not govern the capability (legacy path, unsupported capability, unregistered provider); null does not mean the capability is off. DingTalk notification is gated and its response never includes a legacy block.
          */
         get: operations["getDirectoryIntegrationCapabilities"];
         put?: never;
@@ -26,6 +26,26 @@ export interface paths {
          * @description Platform administrators only. Answers 404 DIRECTORY_CAPABILITIES_DISABLED while DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED is not the exact string true. Answers are given in this order: administrator check, switch, path, integration, body, revision, and then each named capability in the order directory, login, notification. `expectedRevision` is the revision the caller last read (0 while the integration has no capability row); any other stored revision is answered 409 DIRECTORY_CAPABILITIES_STALE whatever the request asks for. A capability that is not named keeps its state. False is always allowed. True is allowed only where the provider registry governs the capability as gated and every check passes; several capabilities in one request are applied together or not at all, and a refusal names the first capability that failed. A request that changes nothing answers 200 without advancing the revision. Every change advances the revision by one and is recorded with the administrator who made it. The response has the shape of the GET response and carries no scope value, corp id, application key or configuration value.
          */
         patch: operations["patchDirectoryIntegrationCapabilities"];
+        trace?: never;
+    };
+    "/api/admin/directory/notification-verification": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Verify one connection and record its notification readiness
+         * @description Platform administrators only. A token check does not send a notification. A send check requires delivery to be enabled and sends one test to the explicit DingTalk recipient. This is the sole notification endpoint that accepts a recipient value; the response never echoes it. A report answers 200 even when a check fails: read result.passed and result.reachedLevel. Evidence reports its level, expiry and current validity. A new check can replace or invalidate earlier evidence. Provider acceptance does not prove receipt or reading.
+         */
+        post: operations["verifyDirectoryNotificationConnection"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/admin/plugins": {
@@ -12277,7 +12297,7 @@ export interface paths {
         };
         /**
          * List the caller's notification endpoints and the connections that could become one
-         * @description Answers 404 while USER_NOTIFICATION_PREFERENCES_ENABLED is not the exact string true (and when the session token carries no organization). The caller and the organization come from the session only. The response carries no recipient identifier, digest or proof id. `capability` is a display state and is not authoritative.
+         * @description Answers 404 while USER_NOTIFICATION_PREFERENCES_ENABLED is not the exact string true (and when the session token carries no organization). The caller and the organization come from the session only. The response carries no recipient identifier, digest or proof id. `capability` is a display state and is not authoritative. `delivery` reports whether delivery is enabled, whether a test can be sent now, and a fixed reason when it cannot. Test controls use `delivery.testSendAvailable`.
          */
         get: operations["listMyNotificationEndpoints"];
         put?: never;
@@ -12307,6 +12327,26 @@ export interface paths {
          * @description Idempotent. The preferences that refer to the endpoint are cleared in the same transaction: a revoked primary is replaced by the backup when there is one. The preference's `enabled` is never changed. An endpoint of another user, of another organization and an unknown id are the same 404.
          */
         delete: operations["revokeMyNotificationEndpoint"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/me/notification-endpoints/{id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Send one fixed test notification to the caller's endpoint
+         * @description Requires confirm=true and an idempotency key of 8-64 letters, digits, underscores or hyphens. Unknown fields, including recipient identifiers, are refused. A disabled notification surface answers 404; disabled delivery answers 409. The endpoint must belong to the caller and be usable, and its connection must be ready. Repeating a key returns the stored outcome without sending again or consuming another rate-limit slot. An unfinished request answers TEST_SEND_IN_PROGRESS; after 90 seconds it answers outcome_unknown with code test_send_interrupted and is never resent under that key. Accepted means provider acceptance, not receipt or reading. The message is fixed and contains no caller-supplied content or links.
+         */
+        post: operations["testMyNotificationEndpoint"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -19457,9 +19497,26 @@ export interface components {
                 bound: boolean;
                 matchesCurrent: boolean | null;
             };
-            /** @description Present only for a legacy-governed capability of a registered provider; booleans and fixed strings only */
+            /** @description Present only for a legacy-governed capability of a registered provider; absent for gated DingTalk notification. Booleans and fixed strings only */
             legacy?: {
                 [key: string]: unknown;
+            };
+        };
+        /** @description DingTalk notification is gated and never includes legacy details */
+        DirectoryIntegrationNotificationCapability: {
+            enabled: boolean;
+            /**
+             * @description Null when the provider is not registered
+             * @enum {string|null}
+             */
+            governance: "gated" | "unsupported" | null;
+            /** @description Set only where governance is gated; null means the stored state does not govern the capability */
+            effective: boolean | null;
+            /** @enum {string|null} */
+            reason: "switch_off" | "schema_unavailable" | "org_mismatch" | "state_mismatch" | "provider_not_registered" | "unsupported" | "implementation_missing" | "not_enabled" | "integration_inactive" | "scope_changed" | null;
+            anchor: {
+                bound: boolean;
+                matchesCurrent: boolean | null;
             };
         };
         DirectoryIntegrationCapabilities: {
@@ -19474,7 +19531,7 @@ export interface components {
             capabilities: {
                 directory: components["schemas"]["DirectoryIntegrationCapability"];
                 login: components["schemas"]["DirectoryIntegrationCapability"];
-                notification: components["schemas"]["DirectoryIntegrationCapability"];
+                notification: components["schemas"]["DirectoryIntegrationNotificationCapability"];
             };
         };
         DirectoryIntegrationCapabilitiesPatch: {
@@ -19559,7 +19616,7 @@ export interface components {
                 effective: boolean;
                 reason: string | null;
             };
-            /** @description Connection verification evidence; always false until evidence is stored */
+            /** @description Whether current connection verification evidence is valid */
             verified: boolean;
             /** Format: date-time */
             lastVerifiedAt: string;
@@ -19577,14 +19634,12 @@ export interface components {
             endpointId: string | null;
         };
         NotificationEndpointListing: {
-            /** @description Nothing is sent in this version; delivery is always reported disabled */
+            /** @description Whether delivery is enabled and a usable endpoint is ready for a test send */
             delivery: {
-                /** @enum {boolean} */
-                enabled: false;
-                /** @enum {boolean} */
-                testSendAvailable: false;
-                /** @enum {string} */
-                reason: "delivery_disabled";
+                enabled: boolean;
+                testSendAvailable: boolean;
+                /** @enum {string|null} */
+                reason: "delivery_disabled" | "capability_off" | "not_verified" | "endpoint_unusable" | null;
             };
             endpoints: components["schemas"]["NotificationEndpoint"][];
             candidates: components["schemas"]["NotificationEndpointCandidate"][];
@@ -19606,6 +19661,125 @@ export interface components {
             connectionId: string;
             /** @enum {string} */
             proofKind: "directory_link" | "external_identity";
+        };
+        NotificationTestSendRequest: {
+            /** @enum {boolean} */
+            confirm: true;
+            idempotencyKey: string;
+        };
+        NotificationTestSendResult: {
+            /**
+             * @description Accepted means the provider accepted the request; receipt or reading is not observed
+             * @enum {string}
+             */
+            outcome: "accepted" | "failed" | "outcome_unknown";
+            /** @description Fixed outcome code without provider text or recipient values */
+            code: string;
+            /** Format: uuid */
+            testSendId: string;
+        };
+        NotificationVerificationRequest: {
+            /** Format: uuid */
+            integrationId: string;
+            /** @enum {string} */
+            level: "token" | "send";
+            /** @description One DingTalk user id, required for send; ignored for token and never returned */
+            recipientUserId?: string;
+        };
+        NotificationVerificationSummary: {
+            /** @enum {string|null} */
+            level: "token" | "send" | null;
+            /** Format: date-time */
+            verifiedUntil: string | null;
+            valid: boolean;
+        };
+        NotificationVerificationResult: {
+            result: components["schemas"]["NotificationVerificationReport"];
+            evidence: components["schemas"]["NotificationVerificationSummary"];
+        };
+        /** @description A verification report, including failed checks; no credentials, recipient values or credential fingerprints */
+        NotificationVerificationReport: {
+            /** Format: uuid */
+            integrationId: string;
+            integration: {
+                /** Format: uuid */
+                id: string;
+                name: string;
+                status: string;
+                /** Format: date-time */
+                updatedAt: string;
+            } | null;
+            /** @enum {string} */
+            requestedLevel: "token" | "send";
+            /** @enum {string} */
+            reachedLevel: "none" | "config" | "token" | "send";
+            passed: boolean;
+            scope: {
+                /** @description Fixed sentence describing the level reached */
+                proves: string;
+                /** @description Fixed sentence describing the limits of the check */
+                doesNotProve: string;
+            };
+            resolution: {
+                /** @enum {string} */
+                source: "env_override" | "integration";
+                appKey: {
+                    /** @enum {boolean} */
+                    configured: true;
+                    length: number;
+                    /** @enum {boolean} */
+                    valuePrinted: false;
+                };
+                appSecret: {
+                    /** @enum {boolean} */
+                    configured: true;
+                    /** @enum {boolean} */
+                    valuePrinted: false;
+                };
+                agentId: {
+                    /** @enum {boolean} */
+                    configured: true;
+                    length: number;
+                    /** @enum {boolean} */
+                    valuePrinted: false;
+                };
+                baseUrl: {
+                    configured: boolean;
+                    parseable: boolean | null;
+                };
+                environment: {
+                    appKey: boolean;
+                    appSecret: boolean;
+                    agentId: boolean;
+                    baseUrl: boolean;
+                };
+            } | null;
+            accessToken: {
+                verified: boolean;
+                /** @enum {boolean|null} */
+                cacheBypassed: true | null;
+                /** @enum {boolean} */
+                valuePrinted: false;
+            };
+            notification: {
+                attempted: boolean;
+                accepted: boolean | "unknown";
+                recipientUserIdLength: number | null;
+                verificationRunId: string | null;
+                taskId?: string;
+                requestId?: string;
+            };
+            failure: {
+                /** @enum {string} */
+                level: "config" | "token" | "send";
+                /** @description Fixed verification failure code */
+                code: string;
+                /** @description Fixed failure sentence */
+                message: string;
+                providerCode?: number;
+                /** @enum {string} */
+                providerCodeKind?: "errcode" | "http_status";
+            } | null;
         };
         /** @description A daily window; a reminder that falls due inside it is skipped, not delayed */
         NotificationQuietHours: {
@@ -23811,7 +23985,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description The stored revision is not the expected one (DIRECTORY_CAPABILITIES_STALE), or a capability may not be turned on (one of the CAPABILITY_ codes; `details.capability` names the capability and, for CAPABILITY_PRECONDITION_FAILED, `details.reason` is the fixed code of the precondition). Nothing was written. */
+            /** @description The stored revision is not the expected one (DIRECTORY_CAPABILITIES_STALE), or a capability may not be turned on (one of the CAPABILITY_ codes; `details.capability` names the capability and, for CAPABILITY_PRECONDITION_FAILED, `details.reason` is the fixed code of the precondition). Notification verification failures use verification_missing, verification_stale, verification_invalidated, verification_anchor_changed or verification_fingerprint_changed. Nothing was written. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -23845,6 +24019,86 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    verifyDirectoryNotificationConnection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NotificationVerificationRequest"];
+            };
+        };
+        responses: {
+            /** @description The verification report and the current evidence summary */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationVerificationResult"];
+                };
+            };
+            /** @description The integration id is not a UUID (DIRECTORY_INTEGRATION_ID_INVALID), or the verification input is invalid (INVALID_REQUEST) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description The notification surface is switched off, or no such connection belongs to the managed organization (NOT_FOUND) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            /** @description A send check was requested while delivery is disabled (NOTIFICATION_DELIVERY_DISABLED), or the connection cannot support notification verification (VERIFICATION_TUPLE_UNSUPPORTED). An unsupported connection is refused before any token request or send. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            /** @description Unknown fields or invalid request shape (INVALID_REQUEST) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            /** @description Verification completed but its evidence could not be recorded (VERIFICATION_EVIDENCE_WRITE_FAILED), or a fixed-sentence failure (INTERNAL). A test message may already have been sent when evidence recording fails; retrying a send check can send another message. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            /** @description NOTIFICATION_BUSY (retry), or NOTIFICATION_SCHEMA_UNAVAILABLE */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
                 };
             };
         };
@@ -27670,6 +27924,89 @@ export interface operations {
                 };
             };
             /** @description NOTIFICATION_BUSY (a lock wait, deadlock or cancelled statement; retry), or NOTIFICATION_SCHEMA_UNAVAILABLE (the tables of this surface are not provisioned yet) */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+        };
+    };
+    testMyNotificationEndpoint: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NotificationTestSendRequest"];
+            };
+        };
+        responses: {
+            /** @description The test outcome, including a previously stored outcome for this key */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationTestSendResult"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description The surface is switched off, or no such endpoint belongs to the caller (NOT_FOUND) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            /** @description NOTIFICATION_DELIVERY_DISABLED, ENDPOINT_NOT_USABLE or CONNECTION_NOT_READY (with a fixed reason), or TEST_SEND_IN_PROGRESS. Nothing new was sent. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            /** @description CONFIRM_REQUIRED, INVALID_REQUEST (invalid key or unknown fields), or ORG_MISSING */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            /** @description TEST_SEND_RATE_LIMITED; wait the number of seconds in Retry-After */
+            429: {
+                headers: {
+                    /** @description Seconds until a test may be attempted again */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            /** @description Fixed-sentence failure (INTERNAL) */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            /** @description NOTIFICATION_BUSY (retry), or NOTIFICATION_SCHEMA_UNAVAILABLE */
             503: {
                 headers: {
                     [name: string]: unknown;
