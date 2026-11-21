@@ -40,9 +40,36 @@ export type ActorResolver = (socketId: string) => string | undefined
  */
 export type YjsBridgeRefusalHandler = (recordId: string, error: unknown) => void | Promise<void>
 
+/** What one connection contributed to a pending write: who it was bound to and which fields it changed. */
+export interface YjsContribution {
+  /** Connection the changes arrived on; null when the origin of a change could not be told. */
+  originId: string | null
+  actorId: string
+  fieldIds: string[]
+}
+
+/**
+ * Re-checks one contribution right before the merged write is persisted. Resolves true only when
+ * the contributor may still write every field it changed.
+ */
+export type YjsContributionChecker = (recordId: string, contribution: YjsContribution) => Promise<boolean>
+
+/**
+ * A merged write was refused because one of its contributions is no longer authorized or cannot
+ * be attributed. The whole batch is refused: no contribution of it is persisted.
+ */
+export class YjsContributionRefusedError extends Error {
+  constructor(message = 'A contribution to this write is not authorized') {
+    super(message)
+    this.name = 'YjsContributionRefusedError'
+  }
+}
+
 interface PendingWrite {
   fields: Record<string, unknown>
   actorIds: Set<string>
+  /** Keyed by origin connection ('' for an unattributable change). */
+  contributions: Map<string, { originId: string | null; actorId: string; fieldIds: Set<string> }>
   timer: NodeJS.Timeout
   firstSeen: number
 }
@@ -76,6 +103,7 @@ export class YjsRecordBridge {
 
   private actorResolver: ActorResolver
   private refusalHandler: YjsBridgeRefusalHandler | null = null
+  private contributionChecker: YjsContributionChecker | null = null
 
   constructor(
     private syncService: YjsSyncService,
@@ -87,6 +115,15 @@ export class YjsRecordBridge {
     this.actorResolver = actorResolver ?? (() => undefined)
     this.mergeWindowMs = config?.mergeWindowMs ?? 200
     this.maxDelayMs = config?.maxDelayMs ?? 500
+  }
+
+  /**
+   * Attach (or detach, with null) the per-contributor re-check. With a checker attached, every
+   * contributor of a merged write is checked against the fields it changed before anything is
+   * persisted, and an unattributable or refused contribution refuses the whole write.
+   */
+  setContributionChecker(checker: YjsContributionChecker | null): void {
+    this.contributionChecker = checker
   }
 
   /** Attach (or detach, with null) the handler told about refused flushes. */
@@ -153,7 +190,7 @@ export class YjsRecordBridge {
       }
 
       if (Object.keys(changedFields).length > 0) {
-        this.scheduleFlush(recordId, changedFields, actorId)
+        this.scheduleFlush(recordId, changedFields, actorId, originSocketId ?? null)
       }
     }
 
@@ -180,12 +217,32 @@ export class YjsRecordBridge {
     this.flushNow(recordId)
   }
 
-  private scheduleFlush(recordId: string, changedFields: Record<string, unknown>, actorId: string): void {
+  private noteContribution(
+    pending: PendingWrite,
+    changedFields: Record<string, unknown>,
+    actorId: string,
+    originId: string | null,
+  ): void {
+    const key = originId ?? ''
+    const contribution = pending.contributions.get(key) ?? { originId, actorId, fieldIds: new Set<string>() }
+    // One connection is bound to one actor; a different actor on the same origin is not attributable.
+    if (contribution.actorId !== actorId) contribution.actorId = 'unknown'
+    for (const fieldId of Object.keys(changedFields)) contribution.fieldIds.add(fieldId)
+    pending.contributions.set(key, contribution)
+  }
+
+  private scheduleFlush(
+    recordId: string,
+    changedFields: Record<string, unknown>,
+    actorId: string,
+    originId: string | null = null,
+  ): void {
     const existing = this.pendingWrites.get(recordId)
 
     if (existing) {
       Object.assign(existing.fields, changedFields)
       existing.actorIds.add(actorId)
+      this.noteContribution(existing, changedFields, actorId, originId)
       clearTimeout(existing.timer)
 
       // Check if we've exceeded max delay — force flush
@@ -198,9 +255,11 @@ export class YjsRecordBridge {
     const entry: PendingWrite = existing ?? {
       fields: { ...changedFields },
       actorIds: new Set([actorId]),
+      contributions: new Map(),
       timer: null!,
       firstSeen: Date.now(),
     }
+    if (!existing) this.noteContribution(entry, changedFields, actorId, originId)
 
     entry.timer = setTimeout(() => this.flushNow(recordId), this.mergeWindowMs)
 
@@ -220,9 +279,15 @@ export class YjsRecordBridge {
     const actorIds = [...pending.actorIds]
     // Primary actor = first contributor in the window; all contributors tracked
     const primaryActorId = actorIds[0] ?? 'unknown'
+    const contributions: YjsContribution[] = [...pending.contributions.values()].map((contribution) => ({
+      originId: contribution.originId,
+      actorId: contribution.actorId,
+      fieldIds: [...contribution.fieldIds],
+    }))
 
     // Fire and forget — errors logged, not thrown
-    this.executePatch(recordId, fields, primaryActorId, actorIds)
+    this.recheckContributions(recordId, contributions)
+      .then(() => this.executePatch(recordId, fields, primaryActorId, actorIds))
       .then((applied) => {
         if (applied) this._flushSuccessCount++
       })
@@ -242,6 +307,26 @@ export class YjsRecordBridge {
       .catch((handlerError) => {
         console.error(`[yjs-bridge] Refusal handler failed for record ${recordId}:`, handlerError)
       })
+  }
+
+  /**
+   * Every contributor of the merged write is checked against its own fields, whatever the order the
+   * contributions arrived in. One refused or unattributable contribution refuses the whole write.
+   */
+  private async recheckContributions(recordId: string, contributions: YjsContribution[]): Promise<void> {
+    const checker = this.contributionChecker
+    if (!checker) return
+    if (contributions.length === 0) throw new YjsContributionRefusedError()
+    for (const contribution of contributions) {
+      if (contribution.originId === null || contribution.actorId === 'unknown') throw new YjsContributionRefusedError()
+      let allowed = false
+      try {
+        allowed = (await checker(recordId, contribution)) === true
+      } catch {
+        allowed = false
+      }
+      if (!allowed) throw new YjsContributionRefusedError()
+    }
   }
 
   private async executePatch(recordId: string, fields: Record<string, unknown>, primaryActorId: string, allActorIds: string[]): Promise<boolean> {

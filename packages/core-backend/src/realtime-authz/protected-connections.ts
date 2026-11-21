@@ -170,6 +170,19 @@ export class ProtectedConnections {
     })
   }
 
+  /**
+   * Marks a registered connection serviceable with a binding that was just read as current for it
+   * (a namespace handshake admits before the connection exists as a connected socket).
+   */
+  adoptAdmitted(socket: ProtectedSocket, binding: RealtimeSessionBinding, generation: number): void {
+    const state = this.states.get(socket)
+    if (!state || state.phase === 'ended') return
+    state.binding = binding
+    state.generation = generation
+    state.phase = 'serviceable'
+    this.armExpiry(state)
+  }
+
   unregister(socket: ProtectedSocket): void {
     const state = this.states.get(socket)
     if (!state) return

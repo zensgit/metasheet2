@@ -5118,7 +5118,7 @@ export class MetaSheetServer {
       const { YjsSyncService } = await import('./collab/yjs-sync-service')
       const { YjsWebSocketAdapter } = await import('./collab/yjs-websocket-adapter')
       const { YjsRecordBridge } = await import('./collab/yjs-record-bridge')
-      const { createYjsInvalidator, createFieldSchemaRefusalHandler } = await import('./collab/yjs-invalidation')
+      const { createYjsInvalidator, createFieldSchemaRefusalHandler, createAuthorizationRefusalHandler, composeRefusalHandlers } = await import('./collab/yjs-invalidation')
       const { canReadEveryYjsFieldForUser } = await import('./collab/yjs-field-read-access')
       const { RecordWriteService } = await import('./multitable/record-write-service')
       const { loadSheetMemberUserIdSet, loadFieldPermissionScopeMap } = await import('./multitable/permission-service')
@@ -5381,6 +5381,49 @@ export class MetaSheetServer {
           (socketId) => yjsWsAdapter.getSocketUserId(socketId),
         )
 
+        // Fresh write check for every realtime change, before it reaches the shared document: the
+        // record write decision comes from the auth checker above; this one answers for the fields
+        // the change touches, with the same property guards and per-subject field permissions the
+        // flush below applies. A field that is not a field of the record's sheet is refused.
+        yjsWsAdapter.setFieldWriteChecker(async (userId, recordId, fieldIds) => {
+          try {
+            const query = pool.query.bind(pool)
+            const recResult = await query('SELECT sheet_id FROM meta_records WHERE id = $1', [recordId])
+            if (recResult.rows.length === 0) return false
+            const sheetId = String((recResult.rows[0] as { sheet_id: unknown }).sheet_id)
+            // Soft delete: a deleted sheet takes no realtime write.
+            const liveness = await loadSheetLiveness(query, sheetId)
+            if (liveness !== 'live') return false
+            const fieldResult = await query(
+              'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC',
+              [sheetId],
+            )
+            const sheetFields = (fieldResult.rows as any[]).map((f: any) => {
+              const prop = f.property && typeof f.property === 'object' ? f.property : {}
+              return { id: String(f.id), name: String(f.name), type: f.type, property: prop, options: prop.options, order: Number(f.order ?? 0) }
+            })
+            const byId = new Map(sheetFields.map((f) => [f.id, f] as const))
+            for (const fieldId of fieldIds) {
+              const field = byId.get(fieldId)
+              if (!field) return false
+              if (isFieldReadOnlyForPeople(field as any)) return false
+              if (field.property.hidden === true || field.property.permissionHidden === true) return false
+            }
+            const visibleSheetFields = sheetFields.filter((f) => !(f.property.hidden === true || f.property.permissionHidden === true))
+            const { capabilities } = await resolveSheetCapabilitiesForUser(query, sheetId, userId)
+            const fieldScopeMap = await loadFieldPermissionScopeMap(query, sheetId, userId)
+            const fieldPermissions = deriveFieldPermissions(visibleSheetFields as any, capabilities, { fieldScopeMap })
+            return !fieldIds.some((fieldId) => isFieldWriteForbidden(fieldPermissions[fieldId]))
+          } catch {
+            return false
+          }
+        })
+        // Every contributor of a merged write is checked again, for its own fields, right before the
+        // write is persisted.
+        yjsBridge.setContributionChecker((recordId, contribution) => yjsWsAdapter.checkContribution(recordId, contribution))
+        if (this.realtimeProtection) {
+          yjsWsAdapter.setRealtimeProtection(this.realtimeProtection.protection, this.realtimeProtection.connections)
+        }
         yjsWsAdapter.setBridge(yjsBridge)
         yjsWsAdapter.register(collabIO)
 
@@ -5395,7 +5438,12 @@ export class MetaSheetServer {
         // (409 FIELD_SCHEMA_CHANGED) is no longer dropped in silence — the record's document is invalidated, so
         // its editors are told with the message they already handle. Inert unless the conversion flag AND the
         // writer fence are on; every other refusal on the bridge is left as it was.
-        yjsBridge.setRefusalHandler(createFieldSchemaRefusalHandler(yjsInvalidate))
+        // A write refused for an authorization reason (a contribution that is no longer authorized, a
+        // field the writer may not write) invalidates the document generation the same way, always.
+        yjsBridge.setRefusalHandler(composeRefusalHandlers(
+          createFieldSchemaRefusalHandler(yjsInvalidate),
+          createAuthorizationRefusalHandler(yjsInvalidate),
+        ))
         recordWriteService.setPostCommitHooks([
           createYjsInvalidationPostCommitHook(yjsInvalidate),
         ])
