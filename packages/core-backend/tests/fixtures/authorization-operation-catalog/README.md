@@ -11,7 +11,6 @@ with search_path set to pg_catalog, public, pg_temp.
 `manifest.json` pins the SHA256 of each decompressed original. Preserve JSON
 property order, query section order and row order: the production fence hashes
 their JSON serialization. No catalog rows or function bodies were rewritten.
-The original capture bundle is `N78-07B-R5-FENCE-CATALOG-20261121`.
 
 The recorded `inspection` is the old implementation's result, including its
 unsupported baseDigest that still contained N78. Tests replay `database` and
