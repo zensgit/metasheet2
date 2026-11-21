@@ -132,6 +132,8 @@ describe('attendance admin guide', () => {
     const permissions = container.querySelector('[data-attendance-guide-article="permissions"]')
     expect(permissions?.textContent).toContain(exportScopeWording)
     expect(permissions?.textContent).toContain('attendance:import')
+    expect(permissions?.textContent).toContain('导入员是读加导入')
+    expect(permissions?.textContent).toContain('导入员：读 + 导入')
     expect(permissions?.textContent).toContain('管理员：读 + 写 + 审批 + 导入 + 管理')
     expect(permissions?.textContent).not.toContain('管理员：读 + 写 + 审批 + 管理')
     app.unmount()
