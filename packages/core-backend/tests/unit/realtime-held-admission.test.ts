@@ -479,6 +479,32 @@ describe('switch off, read undecidable: a plugin connection handler', () => {
     expect(await ended).toEqual({ code: 'REALTIME_UNAVAILABLE', retry: true })
   })
 
+  it('the read answers while a new connection is being looked at: the handler meets it at once, not never', async () => {
+    const s = await open()
+    const met: string[] = []
+    s.collab.onConnection((socket) => { met.push(socket.id) })
+    await undecidable(s)
+    // The connection is looked at while handshakes are held; the release arrives before the
+    // service sees the answer.
+    const original = s.harness.connections.admit.bind(s.harness.connections)
+    let straddled = false
+    s.harness.connections.admit = async (socket) => {
+      const answer = await original(socket)
+      if (!straddled) {
+        straddled = true
+        await decidable(s)
+      }
+      return answer
+    }
+    const late = connectClient(s.url, 'token:late')
+    s.clients.push(late)
+    await once(late, 'connect')
+    await until(() => met.length === 1, 2000, 'the handler to meet the connection')
+    expect(straddled).toBe(true)
+    expect(met).toEqual([late.id])
+    expect(s.collab.heldConnectionCount()).toBe(0)
+  })
+
   it('a kept connection that goes away is never handed to the handler', async () => {
     const s = await open()
     const met: string[] = []
