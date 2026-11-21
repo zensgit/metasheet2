@@ -394,6 +394,12 @@ async function lock(c: Client, userId: string, actorIds: string[]) {
       "SELECT pg_advisory_xact_lock(hashtext('directory:identity-maintenance'))",
     )
     await lockUserAccessRows(c, [userId, ...actorIds])
+    // Known, and the same in #6964's order: the users rows are held while the table fences below are
+    // requested. Another session's single UPDATE of one of those rows (ROW EXCLUSIVE on `users`, then
+    // it queues on the row) and this LOCK TABLE wait for each other, and PostgreSQL fails one of the
+    // two with 40P01 (REPAIR_LOCK_BUSY when it is this one). Fences before rows would not cure it:
+    // every holder of a users row that goes on to write a fenced table would meet the repair the
+    // other way round.
     await c.query(
       'LOCK TABLE users,user_roles,user_permissions,user_namespace_admissions,user_orgs,user_external_auth_grants,directory_account_links,user_external_identities,directory_accounts,directory_integrations,roles,role_permissions,permissions IN SHARE ROW EXCLUSIVE MODE',
     )

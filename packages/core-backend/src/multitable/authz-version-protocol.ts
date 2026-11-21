@@ -96,21 +96,24 @@
  *   - attendance guard triggers that take `users` / `user_orgs` rows FOR UPDATE from attendance
  *     tables (zzzz20260723140000, zzzz20261012100000): they write no covered table, so they bump
  *     nothing; they wait on a holder's FOR SHARE until commit (bounded) and can never form a cycle;
- *   - `directory/access-graph-mutex.ts lockUsersForAccessGraphWrite` (every writer that calls it): bumps the
+ *   - `directory/access-graph-mutex.ts lockUsersForAccessGraphWrite` (every caller that passes neither
+ *     `nowait` nor `lockOnly`; those two take the existing rows without a write, see the contract
+ *     bullet above and the function): bumps the
  *     subject rows FIRST, sorted, before `users … FOR UPDATE`, so writer order = subject → users,
  *     the holder's order (judge delta B). The three writers that lock `users` rows on their own
  *     before (or without) the mutex bump first as well: `deprovision-ledger.ts lockCandidateUser`,
  *     the `deprovision-evidence-api.ts` restore transaction and `controlled-handover.ts` (whose
  *     `FOR UPDATE NOWAIT` probe now runs after the bump — the handover waits on an in-flight holder
  *     instead of failing fast on it, and keeps its fail-fast meaning for every other users-row holder;
- *     it bumps before its `LOCK TABLE … IN SHARE MODE NOWAIT` fences, holding only the maintenance
- *     mutex and the source freeze keys while it waits, so a writer that bumped first and then writes
- *     a fenced table is never queued on a fence the waiting handover holds).
+ *     it bumps before its `LOCK TABLE … IN SHARE MODE NOWAIT` fences, so a writer that bumped first
+ *     and then writes a fenced table is never queued on a fence the waiting handover holds. While it
+ *     waits it holds the maintenance mutex, the source freeze keys and the earlier rows of the same
+ *     sorted bump).
  *   - `auth/dingtalk-identity-repair.ts`: not a caller of that mutex since #6964. Its own protocol
  *     (`auth/user-access-lock.ts`) is sorted user admission keys, then the identity-maintenance
- *     mutex, then `users … FOR UPDATE`. It takes no subject row and needs none: on `users` it only
- *     advances `access_generation`, which the users trigger does not watch, and it writes no other
- *     subject-covered table. It holds no users row while it waits for the maintenance mutex, so it
+ *     mutex, then `users … FOR UPDATE`. It takes no subject row and needs none: on `users` it changes
+ *     only `access_generation` and `updated_at`, which the users trigger does not watch, and it
+ *     writes no other subject-covered table. It holds no users row while it waits for the maintenance mutex, so it
  *     cannot stand between a bump-first writer and a handover that holds the mutex and waits for
  *     that writer's subject row.
  *

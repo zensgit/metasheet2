@@ -82,11 +82,20 @@ async function lockPair(c: Client, p: Pair, actorId: string): Promise<void> {
     )
   // D21 (Y5a): the subject authorization version rows FIRST (sorted): before any users-row lock, as
   // every access-graph writer and every admission takes them (subject → users), and before the
-  // table fences below. This is the one statement of the lock phase that WAITS behind an in-flight
-  // admission or protocol-following writer, so it runs while the handover holds nothing that writer
-  // still needs. With the fences already held, a login that had bumped its version row and went on
-  // to update its identity row waited for the fence while the handover waited for the version row;
-  // PostgreSQL ended that with 40P01 in one of the two.
+  // table fences below. The handover WAITS here behind an in-flight admission or bump-first writer,
+  // so it holds no table fence yet. With the fences already held, a login that had bumped its
+  // version row and went on to update its identity row waited for the fence while the handover
+  // waited for the version row; PostgreSQL ended that with 40P01 in one of the two. While it waits
+  // here the handover holds the maintenance mutex, the source freeze keys and the version rows this
+  // same statement has already taken (it takes them in sorted order). A writer that reaches version
+  // rows in another order through triggers alone can therefore still meet it, as it can meet any
+  // admission.
+  //
+  // This is not the only wait of the lock phase. The three `FOR UPDATE` statements on directory
+  // rows at the end of this function wait as well, under the fences: a transaction that holds one of
+  // those rows (a login holds its source integration row FOR SHARE) and then writes a fenced table
+  // meets the handover there, and one of the two fails with 40P01. Main has the same order; it is
+  // not changed here.
   const versionedUserIds = [
     ...(await linkedUsers()).rows.map((r) => String(r.local_user_id)),
     actorId,
