@@ -178,6 +178,7 @@ attendanceLegacyPermissionPayload
 attendanceLocaleControls.spec.ts
 attendanceOverviewRequestReveal
 attendancePayrollHelp.spec.ts
+attendanceProvisionRoleTemplates.spec.ts
 attendanceRecordRequestPrefill
 attendanceReportCalendar.spec.ts
 attendanceRequestReviewEntitlement
