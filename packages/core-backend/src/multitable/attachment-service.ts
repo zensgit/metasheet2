@@ -176,6 +176,16 @@ export type EnsureAttachmentIdsExistInput = {
   attachmentIds: string[]
 }
 
+export type BindOwnDraftAttachmentsInput = {
+  query: AttachmentQueryFn
+  sheetId: string
+  recordId: string
+  fieldId: string
+  attachmentIds: string[]
+  /** The writer. Only attachments this user uploaded are bound; no writer (an anonymous public form) binds none. */
+  actorId: string | null | undefined
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers (kept private to avoid cross-importing route helpers)
 // ---------------------------------------------------------------------------
@@ -343,6 +353,64 @@ export async function ensureAttachmentIdsExist(
     return `Attachment belongs to a different field: ${mismatchedField.id}`
   }
   return null
+}
+
+/**
+ * Binds the writer's own draft attachments to the record a write just stored them in. Call it inside the
+ * write's transaction, after the record row is written, with the field's ids as stored.
+ *
+ * A file uploaded before its record existed (a create form: the upload carries no recordId) is stored with
+ * `record_id` NULL, and nothing bound it later. The draft sweep (`cleanupOrphanMultitableAttachments`,
+ * attachment-orphan-retention.ts) deletes rows with `record_id IS NULL` once they are older than the
+ * retention time and does not look at any record's list, so a file saved into a record from a create form
+ * was deleted about a day later while the record still listed its id. Bound here, the row is no longer a
+ * draft: the sweep leaves it, and the attachment delete route strips it from this record's list (it reads
+ * the row's record and field).
+ *
+ * Only a row that is still a draft (`record_id` NULL, not deleted), in this sheet, pinned to this field or
+ * to none, and uploaded by this writer (`created_by`, the id the upload route stores) is bound. Anything
+ * else is left as it is: a row already bound (to this record or another), another user's draft, a deleted
+ * row. A NULL `field_id` is set to this field so the delete route can find the list.
+ *
+ * The UPDATE runs only when the SELECT found such a row, and repeats every condition, so a row that changed
+ * in between is not bound.
+ */
+export async function bindOwnDraftAttachments(input: BindOwnDraftAttachmentsInput): Promise<string[]> {
+  const { query, sheetId, recordId, fieldId, attachmentIds } = input
+  const actorId = typeof input.actorId === 'string' ? input.actorId.trim() : ''
+  if (!actorId || attachmentIds.length === 0) return []
+
+  const result = await query(
+    `SELECT id, field_id, record_id, created_by
+     FROM multitable_attachments
+     WHERE sheet_id = $1
+       AND deleted_at IS NULL
+       AND id = ANY($2::text[])`,
+    [sheetId, attachmentIds],
+  )
+  const rows = result.rows as Array<{ id: unknown; field_id?: unknown; record_id?: unknown; created_by?: unknown }>
+  const draftIds = rows
+    .filter((row) => (row.record_id === null || row.record_id === undefined)
+      && typeof row.created_by === 'string' && row.created_by === actorId
+      && (!row.field_id || String(row.field_id) === fieldId))
+    .map((row) => String(row.id))
+  if (draftIds.length === 0) return []
+
+  const updated = await query(
+    `UPDATE multitable_attachments
+        SET record_id = $3,
+            field_id = COALESCE(field_id, $4),
+            updated_at = now()
+      WHERE sheet_id = $1
+        AND id = ANY($2::text[])
+        AND record_id IS NULL
+        AND deleted_at IS NULL
+        AND (field_id IS NULL OR field_id = $4)
+        AND created_by = $5
+      RETURNING id`,
+    [sheetId, draftIds, recordId, fieldId, actorId],
+  )
+  return (updated.rows as Array<{ id: unknown }>).map((row) => String(row.id))
 }
 
 /**

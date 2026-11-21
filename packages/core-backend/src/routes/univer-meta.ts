@@ -410,6 +410,7 @@ import {
   type LoadedMultitableRecord,
 } from '../multitable/records'
 import {
+  bindOwnDraftAttachments,
   buildAttachmentSummaries as buildAttachmentSummariesShared,
   deleteAttachmentBinary as deleteAttachmentBinaryShared,
   ensureAttachmentIdsExist as ensureAttachmentIdsExistShared,
@@ -18963,6 +18964,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const fieldErrors: Record<string, string> = {}
       const patch: Record<string, unknown> = {}
       const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
+      // Attachment fields as stored: the submitter's own draft uploads among them are bound to the record in the
+      // write's transaction (bindOwnDraftAttachments), so the draft sweep does not delete them.
+      const attachmentWrites = new Map<string, string[]>()
 
       // Native person (人员): #16 per-field allowed-assignee resolver (sheet members ∩ the field's
       // restrictToMemberGroupIds) — shared with RecordService/RecordWriteService so FORM SUBMIT
@@ -19070,6 +19074,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             continue
           }
           patch[fieldId] = ids
+          attachmentWrites.set(fieldId, ids)
           continue
         }
 
@@ -19302,6 +19307,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
               await query('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [fieldId, recordId])
             }
           }
+          for (const [fieldId, ids] of attachmentWrites.entries()) {
+            await bindOwnDraftAttachments({
+              query, sheetId: view.sheetId, recordId, fieldId, attachmentIds: ids, actorId: getRequestActorId(req),
+            })
+          }
           // W0-1 L6-a: seal the operation LAST for the EDIT branch (no-op when inert or a no-field-change edit).
           await sealOperation(query, op)
           // P1#2d REPLACE: same-transaction durable enqueue on the EDIT branch's SUCCESS path (flag ON) —
@@ -19341,6 +19351,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
               [buildId('lnk').slice(0, 50), fieldId, resultRecordId, foreignId],
             )
           }
+        }
+        // A create form uploads before the record exists, so its files are drafts (`record_id` NULL) until bound
+        // here; unbound, the draft sweep deleted them after the retention time. Anonymous: createActorId is null,
+        // nothing is bound.
+        for (const [fieldId, ids] of attachmentWrites.entries()) {
+          await bindOwnDraftAttachments({
+            query, sheetId: view.sheetId, recordId: resultRecordId, fieldId, attachmentIds: ids, actorId: createActorId,
+          })
         }
 
         // D-1c slice ① (form-submit CREATE = A6, ratified design-lock 2026-07-13, OD-1/OD-3; audit
