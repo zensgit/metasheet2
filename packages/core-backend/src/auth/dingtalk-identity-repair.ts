@@ -396,8 +396,9 @@ async function lock(c: Client, userId: string, actorIds: string[]) {
     await lockUserAccessRows(c, [userId, ...actorIds])
     // Known, and the same in #6964's order: the users rows are held while the table fences below are
     // requested. Another session's single UPDATE of one of those rows (ROW EXCLUSIVE on `users`, then
-    // it queues on the row) and this LOCK TABLE wait for each other, and PostgreSQL fails one of the
-    // two with 40P01 (REPAIR_LOCK_BUSY when it is this one). Fences before rows would not cure it:
+    // it queues on the row) and this LOCK TABLE wait for each other until PostgreSQL fails one of the
+    // two with 40P01 or this transaction's lock_timeout ends its wait (REPAIR_LOCK_BUSY either way
+    // when it is this one). Fences before rows would not cure it:
     // every holder of a users row that goes on to write a fenced table would meet the repair the
     // other way round.
     await c.query(

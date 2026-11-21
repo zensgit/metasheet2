@@ -94,8 +94,8 @@ async function lockPair(c: Client, p: Pair, actorId: string): Promise<void> {
   // This is not the only wait of the lock phase. The three `FOR UPDATE` statements on directory
   // rows at the end of this function wait as well, under the fences: a transaction that holds one of
   // those rows (a login holds its source integration row FOR SHARE) and then writes a fenced table
-  // meets the handover there, and one of the two fails with 40P01. Main has the same order; it is
-  // not changed here.
+  // meets the handover there: PostgreSQL fails one of the two with 40P01, unless the handover's
+  // lock_timeout ends its wait first. Main has the same order; it is not changed here.
   const versionedUserIds = [
     ...(await linkedUsers()).rows.map((r) => String(r.local_user_id)),
     actorId,

@@ -741,7 +741,7 @@ describe('W — writers bump FIRST', () => {
     const mutexAt = code.indexOf('await lockUsersForAccessGraphWrite(c, userIds)')
     expect(maintenanceAt).toBeGreaterThan(0)
     expect(bumpAt).toBeGreaterThan(maintenanceAt)
-    // The one waiting statement of the lock phase runs before any table fence or row lock is held.
+    // The version-row wait runs before any table fence or row lock is held.
     expect(code.slice(0, bumpAt)).not.toMatch(/LOCK TABLE|FOR UPDATE|FOR SHARE/)
     expect(code.match(/bumpSubjectAuthorizationVersions\(/g)).toHaveLength(1)
     expect(fenceAt).toBeGreaterThan(bumpAt)
