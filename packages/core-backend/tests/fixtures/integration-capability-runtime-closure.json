@@ -1,5 +1,6 @@
 {
   "note": "Exact reviewed source boundary. No global exception: additional, removed, changed or newly resolved gaps require review. Dynamic calls remain outside this static proof.",
+  "fileCount": 2181,
   "absentRoots": [
     "packages/core-backend/src/services/task-routed-reminders.ts",
     "packages/core-backend/src/services/task-routed-delivery-channel.ts"

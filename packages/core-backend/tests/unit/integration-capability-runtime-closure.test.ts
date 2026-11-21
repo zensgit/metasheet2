@@ -23,23 +23,38 @@ function write(root: string, file: string, source: string): void {
 }
 
 let graph: ModuleGraph
-let mirror: string
+let mirrorRoot: string | undefined
+// Parsing the full production graph can exceed the default hook budget during the full suite.
 beforeAll(() => {
   graph = collectModuleGraph(ROOT)
-  mirror = mkdtempSync(path.join(tmpdir(), 'capability-closure-'))
+}, 180_000)
+afterAll(() => { if (mirrorRoot) rmSync(mirrorRoot, { recursive: true, force: true }) })
+
+// Only mutation tests need a mirror; copy it once and restore each mutation in its own finally.
+// Their explicit timeout also covers copying and rescanning under full-suite contention.
+function getMirror(): string {
+  if (mirrorRoot) return mirrorRoot
   const files = new Set([...graph.files, ...graph.resolutionInputs.map((input) => input.path), ...GRAPH_ROOTS.flatMap((dir) => graphFiles(path.join(ROOT, dir)))
     .filter((file) => file.endsWith('.json')).map((file) => path.relative(ROOT, file)),
   'tsconfig.json', 'packages/core-backend/package.json', 'packages/core-backend/tsconfig.json', 'packages/mssql-readonly-utils/package.json'])
-  for (const file of files) {
-    mkdirSync(path.dirname(path.join(mirror, file)), { recursive: true })
-    copyFileSync(path.join(ROOT, file), path.join(mirror, file))
+  const mirror = mkdtempSync(path.join(tmpdir(), 'capability-closure-'))
+  try {
+    for (const directory of new Set([...files].map((file) => path.dirname(file)))) {
+      mkdirSync(path.join(mirror, directory), { recursive: true })
+    }
+    for (const file of files) copyFileSync(path.join(ROOT, file), path.join(mirror, file))
+    mirrorRoot = mirror
+    return mirror
+  } catch (error) {
+    rmSync(mirror, { recursive: true, force: true })
+    throw error
   }
-})
-afterAll(() => { if (mirror) rmSync(mirror, { recursive: true, force: true }) })
+}
 
 describe('capability runtime module boundaries', () => {
   it('registers the complete reverse runtime sets and edge multisets without line-number keys', () => {
     expect(graph.files.length).toBeGreaterThan(2000)
+    expect(graph.files).toHaveLength(registry.fileCount)
     expect(registry.reverse.map((entry) => entry.root)).toEqual([SCHEDULER, WORKER, BACKGROUND])
     for (const expected of registry.reverse) {
       expect(reverseRegistry(graph.edges, expected.root), expected.root).toEqual(expected)
@@ -112,6 +127,7 @@ describe('capability runtime module boundaries', () => {
   })
 
   it('pins the pure witness leaf and rejects changing its registry type import into a runtime load', () => {
+    const mirror = getMirror()
     const original = read(mirror, WITNESS)
     expect(moduleLoads(original)).toEqual([
       { specifier: 'node:crypto', typeOnly: false, kind: 'import' },
@@ -122,9 +138,10 @@ describe('capability runtime module boundaries', () => {
       expect(read(mirror, WITNESS)).not.toBe(original)
       expect(directEdges(collectModuleGraph(mirror))).not.toEqual(registry.directEdges)
     } finally { write(mirror, WITNESS, original) }
-  })
+  }, 180_000)
 
   it('resolves inherited aliases before package paths and rejects metadata-only remapping', () => {
+    const mirror = getMirror()
     const config = 'tsconfig.base.json', original = read(mirror, config)
     const importer = 'plugins/plugin-view-gantt/src/index.ts'
     const specifier = moduleLoads(read(mirror, importer)).find((load) => load.typeOnly)!.specifier
@@ -137,9 +154,10 @@ describe('capability runtime module boundaries', () => {
       expect(result.edges).toContainEqual(expect.objectContaining({ from: importer, to: BACKGROUND, typeOnly: true }))
       expect(directEdges(result)).not.toEqual(registry.directEdges)
     } finally { write(mirror, config, original) }
-  })
+  }, 180_000)
 
   it('rejects a new non-routes request wrapper through a barrel, with a shortest path', () => {
+    const mirror = getMirror()
     const request = 'plugins/boundary-control/src/request.ts', barrel = SOURCE_ROOT + 'services/boundary-control.ts'
     try {
       write(mirror, request, `import { value } from '../../../${barrel}'; export { value }`)
@@ -154,9 +172,10 @@ describe('capability runtime module boundaries', () => {
     } finally {
       rmSync(path.join(mirror, request)); rmSync(path.join(mirror, barrel)); write(mirror, BACKGROUND, read(ROOT, BACKGROUND))
     }
-  })
+  }, 180_000)
 
   it('keeps the real sender type-only edge non-transitive, then exposes its value mutation in a temporary future-consumer mirror', () => {
+    const mirror = getMirror()
     const sender = SOURCE_ROOT + 'services/task-notification-dingtalk.ts'
     const original = read(mirror, sender), scheduler = read(mirror, SCHEDULER), worker = read(mirror, WORKER)
     const [scan, delivery] = registry.absentRoots
@@ -181,9 +200,10 @@ describe('capability runtime module boundaries', () => {
       write(mirror, sender, original); write(mirror, SCHEDULER, scheduler); write(mirror, WORKER, worker)
       rmSync(path.join(mirror, scan)); rmSync(path.join(mirror, delivery))
     }
-  })
+  }, 180_000)
 
   it('rejects added or removed reverse edges, duplicate loads, roots and missing registry members', () => {
+    const mirror = getMirror()
     const file = SOURCE_ROOT + 'index.ts', original = read(mirror, file)
     const expected = registry.reverse.find((entry) => entry.root === WORKER)!
     expect(expected.members.length).toBeGreaterThan(5)
@@ -197,9 +217,10 @@ describe('capability runtime module boundaries', () => {
       expect(read(mirror, file)).not.toBe(original)
       expect(reverseRegistry(collectModuleGraph(mirror).edges, WORKER)).not.toEqual(expected)
     } finally { write(mirror, file, original) }
-  })
+  }, 180_000)
 
   it('requires re-review when a registered missing target appears or an unknown internal load is added', () => {
+    const mirror = getMirror()
     const target = 'plugins/plugin-view-gantt/src/api.ts'
     try {
       write(mirror, target, 'export class GanttAPIHandler {}')
@@ -211,5 +232,5 @@ describe('capability runtime module boundaries', () => {
       expect(graph.gaps).not.toEqual(gapEntries.slice(1))
       expect(graph.gaps).not.toEqual([...gapEntries, gapEntries[0]])
     } finally { rmSync(path.join(mirror, target)) }
-  })
+  }, 180_000)
 })
