@@ -511,6 +511,9 @@ export default defineConfig({
       'tests/integration/auth-b2-issuer-provenance.db.test.ts',
       'tests/integration/strict-credential-chain.db.test.ts',
       'tests/integration/strict-dingtalk-entry.db.test.ts',
+      // Realtime revalidation: authority reader, installation probe and the listening session on a
+      // real PostgreSQL; excluded from the no-DB job so describe.skip cannot report them green.
+      'tests/integration/realtime-authority-read.db.test.ts',
       // Database-side census of the classifier input tables (triggers, rules, function bodies,
       // users-locking functions, cascading foreign keys, the default expressions of the three
       // users columns the classifier reads, views and materialized views over an input table, the
