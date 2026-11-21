@@ -47,6 +47,40 @@
 
         <div id="directory-panel-settings" v-show="activeDirectoryTab === 'settings'" class="directory-admin__settings" role="tabpanel" aria-labelledby="directory-tab-settings">
           <DirectoryIntegrationForm />
+          <section v-if="testResult" class="directory-admin__section">
+            <h3>连通性测试</h3>
+            <div v-if="testResult.summary" class="directory-admin__diagnostic-summary">
+              <strong>{{ testResult.summary.title }}</strong>
+              <p class="directory-admin__hint">{{ testResult.summary.nextAction }}</p>
+            </div>
+            <div class="directory-admin__chips">
+              <span class="directory-admin__chip">部门样本 {{ testResult.departmentSampleCount }}</span>
+              <span class="directory-admin__chip">用户样本 {{ testResult.userSampleCount }}</span>
+              <span class="directory-admin__chip">Root {{ testResult.rootDepartmentId }}</span>
+              <span class="directory-admin__chip">根部门子部门 {{ testResult.diagnostics.rootDepartmentChildCount }}</span>
+              <span class="directory-admin__chip">根部门直属成员 {{ testResult.diagnostics.rootDepartmentDirectUserCount }}</span>
+              <span class="directory-admin__chip">含受限成员 {{ testResult.diagnostics.rootDepartmentDirectUserCountWithAccessLimit }}</span>
+            </div>
+            <p class="directory-admin__hint">
+              部门：{{ testResult.sampledDepartments.map((item) => item.name).join('，') || '无' }}
+            </p>
+            <p class="directory-admin__hint">
+              用户：{{ testResult.sampledUsers.map((item) => item.name).join('，') || '无' }}
+            </p>
+            <p class="directory-admin__hint">
+              根部门直属用户：{{ formatSampleUsers(testResult.diagnostics.sampledRootDepartmentUsers, testResult.diagnostics.rootDepartmentDirectUserHasMore) }}
+            </p>
+            <p class="directory-admin__hint">
+              根部门直属用户（含受限）：{{ formatSampleUsers(testResult.diagnostics.sampledRootDepartmentUsersWithAccessLimit, testResult.diagnostics.rootDepartmentDirectUserHasMoreWithAccessLimit) }}
+            </p>
+            <p
+              v-for="warning in testResult.warnings"
+              :key="warning"
+              class="directory-admin__status directory-admin__status--error"
+            >
+              {{ warning }}
+            </p>
+          </section>
         </div>
 
         <section id="directory-panel-overview" v-show="activeDirectoryTab === 'overview'" class="directory-admin__section" role="tabpanel" aria-labelledby="directory-tab-overview">
@@ -93,41 +127,6 @@
         <div id="directory-panel-accounts" ref="accountsSectionRef" v-show="activeDirectoryTab === 'accounts'" role="tabpanel" aria-labelledby="directory-tab-accounts">
           <DirectoryAccountsSection />
         </div>
-
-        <section v-if="testResult" v-show="activeDirectoryTab === 'settings'" class="directory-admin__section">
-          <h3>连通性测试</h3>
-          <div v-if="testResult.summary" class="directory-admin__diagnostic-summary">
-            <strong>{{ testResult.summary.title }}</strong>
-            <p class="directory-admin__hint">{{ testResult.summary.nextAction }}</p>
-          </div>
-          <div class="directory-admin__chips">
-            <span class="directory-admin__chip">部门样本 {{ testResult.departmentSampleCount }}</span>
-            <span class="directory-admin__chip">用户样本 {{ testResult.userSampleCount }}</span>
-            <span class="directory-admin__chip">Root {{ testResult.rootDepartmentId }}</span>
-            <span class="directory-admin__chip">根部门子部门 {{ testResult.diagnostics.rootDepartmentChildCount }}</span>
-            <span class="directory-admin__chip">根部门直属成员 {{ testResult.diagnostics.rootDepartmentDirectUserCount }}</span>
-            <span class="directory-admin__chip">含受限成员 {{ testResult.diagnostics.rootDepartmentDirectUserCountWithAccessLimit }}</span>
-          </div>
-          <p class="directory-admin__hint">
-            部门：{{ testResult.sampledDepartments.map((item) => item.name).join('，') || '无' }}
-          </p>
-          <p class="directory-admin__hint">
-            用户：{{ testResult.sampledUsers.map((item) => item.name).join('，') || '无' }}
-          </p>
-          <p class="directory-admin__hint">
-            根部门直属用户：{{ formatSampleUsers(testResult.diagnostics.sampledRootDepartmentUsers, testResult.diagnostics.rootDepartmentDirectUserHasMore) }}
-          </p>
-          <p class="directory-admin__hint">
-            根部门直属用户（含受限）：{{ formatSampleUsers(testResult.diagnostics.sampledRootDepartmentUsersWithAccessLimit, testResult.diagnostics.rootDepartmentDirectUserHasMoreWithAccessLimit) }}
-          </p>
-          <p
-            v-for="warning in testResult.warnings"
-            :key="warning"
-            class="directory-admin__status directory-admin__status--error"
-          >
-            {{ warning }}
-          </p>
-        </section>
 
         <div id="directory-panel-sync" class="directory-admin__sync" v-show="activeDirectoryTab === 'sync'" role="tabpanel" aria-labelledby="directory-tab-sync">
           <div class="directory-admin__actions" data-testid="directory-sync-actions">
