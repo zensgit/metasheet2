@@ -16,7 +16,19 @@ vi.mock('../../src/integrations/dingtalk/client', async (original) => ({
   isDingTalkConfigured: () => true,
 }))
 import { exchangeCodeForUser } from '../../src/auth/dingtalk-oauth'
-import { pool, query } from '../../src/db/pg'
+import { pool, query, transaction } from '../../src/db/pg'
+import {
+  applyRecycleMove,
+  applyRecyclePurge,
+  applyRecycleRescrub,
+} from '../../src/admin/user-recycle'
+import { sql } from 'kysely'
+import { readHandoverSnapshot } from '../../src/directory/handover-snapshot-v1'
+import { db as migrationDb } from '../../src/db/db'
+import {
+  up as minimizeJournals,
+  down as downgradeJournals,
+} from '../../src/db/migrations/zzzz20261105180000_minimize_directory_handover_journals'
 import {
   applyDirectoryHandover,
   finishDirectoryHandover,
@@ -269,6 +281,182 @@ db(
           )
         ).rows.every((r) => r.integration_id === f.source),
       ).toBe(true)
+    })
+
+    it('refuses rollback if a third integration has since attached a membership to a cloned department', async () => {
+      const f = await fixture(),
+        other = await fixture()
+      const preview = await previewDirectoryHandover(f.pair, f.admin)
+      const moved = await applyDirectoryHandover(
+        f.pair,
+        preview.digest,
+        f.admin,
+      )
+      const args = [other.unrelated, f.target]
+      await q(
+        `INSERT INTO directory_account_departments(directory_account_id,directory_department_id)
+        SELECT $1,id FROM directory_departments WHERE integration_id=$2 AND external_department_id='2'`,
+        args,
+      )
+      await expect(
+        finishDirectoryHandover(moved.id, moved.digest, f.admin, 'rollback'),
+      ).rejects.toThrow('still in use')
+      expect(
+        (
+          await q('SELECT state FROM directory_handovers WHERE id=$1', [
+            moved.id,
+          ])
+        ).rows[0].state,
+      ).toBe('applied')
+      expect(
+        (
+          await q(
+            'SELECT count(*)::int AS n FROM directory_account_departments WHERE directory_account_id=$1',
+            [other.unrelated],
+          )
+        ).rows[0].n,
+      ).toBe(1)
+      // An explicit cleanup of our synthetic foreign fixture restores normal rollback.
+      await q(
+        'DELETE FROM directory_account_departments WHERE directory_account_id=$1',
+        [other.unrelated],
+      )
+      await finishDirectoryHandover(moved.id, moved.digest, f.admin, 'rollback')
+    })
+
+    it('stores only reversible IDs and timestamps while applied and erases them at finish', async () => {
+      const f = await fixture()
+      await q(
+        `UPDATE directory_accounts SET email='member@example.invalid', mobile='synthetic-phone',
+        raw='{"nested":{"private":"synthetic-marker"}}'::jsonb WHERE integration_id=ANY($1::uuid[])`,
+        [[f.source, f.target]],
+      )
+      const preview = await previewDirectoryHandover(f.pair, f.admin)
+      const moved = await applyDirectoryHandover(
+        f.pair,
+        preview.digest,
+        f.admin,
+      )
+      const readJournal = async () =>
+        (
+          await q('SELECT before_state FROM directory_handovers WHERE id=$1', [
+            moved.id,
+          ])
+        ).rows[0].before_state
+      const journal = await readJournal()
+      expect(Object.keys(journal).sort()).toEqual([
+        'accounts',
+        'beforeDigest',
+        'targetDepartmentIds',
+        'version',
+      ])
+      expect(journal.beforeDigest).toBe(preview.digest)
+      expect(journal.accounts.map((a: { id: string }) => a.id).sort()).toEqual(
+        [...f.accounts].sort(),
+      )
+      for (const account of journal.accounts)
+        expect(Object.keys(account).sort()).toEqual(['id', 'updated_at'])
+      expect(JSON.stringify(journal)).not.toMatch(
+        /example[.]invalid|synthetic-phone|synthetic-marker/,
+      )
+      await finishDirectoryHandover(moved.id, moved.digest, f.admin, 'finalize')
+      const input = { actorId: f.admin, userId: f.users[0], index: 0 }
+      expect(
+        (
+          await transaction((c) =>
+            applyRecycleMove(c, { ...input, retentionDays: 30 }),
+          )
+        ).ok,
+      ).toBe(true)
+      expect(
+        (
+          await transaction((c) =>
+            applyRecyclePurge(c, {
+              ...input,
+              passwordHash: 'synthetic-unusable',
+            }),
+          )
+        ).ok,
+      ).toBe(true)
+      expect((await transaction((c) => applyRecycleRescrub(c, input))).ok).toBe(
+        true,
+      )
+      expect(await readJournal()).toEqual({})
+    })
+
+    it('converts legacy applied journals, erases both terminal states and fences old writers and downgrade', async () => {
+      const f = await fixture()
+      const { source, target } = f
+      const legacy = await transaction((c) => readHandoverSnapshot(c, f.pair))
+      const preview = await previewDirectoryHandover(f.pair, f.admin)
+      const moved = await applyDirectoryHandover(
+        f.pair,
+        preview.digest,
+        f.admin,
+      )
+      await migrationDb!.transaction().execute(async (trx) => {
+        // Temporary table shadows the real journal only on this connection.
+        await sql`CREATE TEMP TABLE directory_handovers (id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          source_integration_id uuid, target_integration_id uuid, after_digest text, state text NOT NULL, before_state jsonb NOT NULL)
+          ON COMMIT DROP`.execute(trx)
+        for (const state of ['applied', 'rolled_back', 'finalized']) {
+          await sql`INSERT INTO directory_handovers (source_integration_id,target_integration_id,after_digest,state,before_state)
+            VALUES(${source}::uuid,${target}::uuid,${moved.digest},${state},${JSON.stringify(legacy)}::jsonb)`.execute(
+            trx,
+          )
+        }
+        await sql`SAVEPOINT before_drift`.execute(trx)
+        await sql`UPDATE directory_handovers SET after_digest='stale' WHERE state='applied'`.execute(
+          trx,
+        )
+        await expect(minimizeJournals(trx)).rejects.toThrow(
+          'retain the legacy journal',
+        )
+        await sql`ROLLBACK TO SAVEPOINT before_drift`.execute(trx)
+        await minimizeJournals(trx)
+        await sql`SAVEPOINT mixed_version`.execute(trx)
+        await sql`UPDATE directory_handovers SET after_digest='stale' WHERE state='applied'`.execute(trx)
+        await expect(minimizeJournals(trx)).rejects.toThrow('retain the legacy journal')
+        await sql`ROLLBACK TO SAVEPOINT mixed_version`.execute(trx)
+        await minimizeJournals(trx)
+        const read = await sql<{
+          state: string
+          before_state: Record<string, unknown>
+        }>`SELECT state,before_state FROM directory_handovers ORDER BY state`.execute(
+          trx,
+        )
+        expect(read.rows[0].before_state).toEqual({
+          version: 2,
+          beforeDigest: preview.digest,
+          accounts: legacy.accounts
+            .filter((a) => a.integration_id === source)
+            .map(({ id, updated_at }) => ({ id, updated_at })),
+          targetDepartmentIds: legacy.departments
+            .filter((d) => d.integration_id === target)
+            .map((d) => d.id),
+        })
+        expect(read.rows.slice(1).map((r) => r.before_state)).toEqual([{}, {}])
+        await expect(downgradeJournals(trx)).rejects.toThrow('Resolve applied')
+        await sql`SAVEPOINT old_writer`.execute(trx)
+        await expect(
+          sql`UPDATE directory_handovers SET before_state=${JSON.stringify(legacy)}::jsonb WHERE state='applied'`.execute(
+            trx,
+          ),
+        ).rejects.toThrow('directory_handover_private_journal')
+        await sql`ROLLBACK TO SAVEPOINT old_writer`.execute(trx)
+        for (const patch of [
+          { accounts: [{ id: moved.id, updated_at: '2026-11-01T00:00:00Z', raw: { private: 'test' } }] },
+          { accounts: [{ id: moved.id, updated_at: 'test@example.invalid' }] },
+          { targetDepartmentIds: ['test@example.invalid'] },
+        ]) {
+          await expect(sql`UPDATE directory_handovers SET before_state=before_state || ${JSON.stringify(patch)}::jsonb WHERE state='applied'`.execute(trx)).rejects.toThrow()
+          await sql`ROLLBACK TO SAVEPOINT old_writer`.execute(trx)
+        }
+        await sql`UPDATE directory_handovers SET state='rolled_back',before_state='{}'::jsonb WHERE state='applied'`.execute(
+          trx,
+        )
+        await downgradeJournals(trx)
+      })
     })
 
     it('both sync directions are frozen after apply; finalize releases only target without enabling it', async () => {
