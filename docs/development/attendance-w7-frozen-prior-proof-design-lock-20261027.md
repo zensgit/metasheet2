@@ -1,0 +1,15 @@
+# W7-R6 frozen-prior recompute proof — 2026-10-27
+
+Authority: W7-R6 in attendance-issue-4556-w7-group-policy-cutover-design-lock-20260807.md. This is an evidence-only Draft slice on current main, not a new policy or activation decision.
+
+For each fact family (W1 membership, group policy, FSER schedule), create a separate synthetic org with a real group-authoritative calculation produced through the actual HTTP punch entrypoint. Change that family's live facts using ordinary legal SQL, then invoke the actual HTTP record recompute route with policy=frozen_prior and the prior identity/version. Assert successful append, byte-equal five snapshot fields and equal source-definition/semantic-input fingerprints. Identity/version/operation provenance/timestamps are outside equality. Re-read the original stored calculation unchanged. Trace actual native PostgreSQL query delegation during the request; no membership/group/shift/FSER live reads, with positive record/calculation SQL controls to prove the tracer sees the real request.
+
+Inject targeted real live-read faults at the recompute adapter seam, retain the matching family failure and unchanged controls where applicable, then restore exact source. Do not replace the actual endpoint with a direct core call or infer success from an unrelated refusal. Keep original tests/hooks/budgets unchanged and run only new cases plus the relevant existing cutover positive. Existing whole-file CI registration remains required, actual current-head logs after publication.
+
+No runtime changes are intended. If a product defect is reproduced, retain the red evidence and make only the minimal authorized correction without weakening the parent gate. No current_policy semantic decision is made. Human acceptance and stored detail/trace presentation gates remain separate from this recomputation proof.
+
+All PR Draft/HOLD; no merge/deploy/R71/config/Stream/lifecycle/provider writes. Only owned synthetic PostgreSQL and loopback HTTP; test-org calculation posture fixtures do not enable production.
+
+Actual defect reproduced: after valid stored attendance-admin fixture authorization, all three real HTTP frozen replays preserve the five snapshots and source fingerprint but change semantic fingerprint. The canonical live producer hashes append; recompute previously unconditionally hashed and persisted merge. The bounded correction reads the persisted merge_policy for frozen_prior and uses it for both hash and inserted metadata. current_policy remains merge; no fingerprint copying, existing rows rewriting, or semantic hash schema changes.
+
+Trace recognition conservatively rejects live-table identifiers anywhere in native SQL, including ONLY/schema qualification/comma joins. It is not a general SQL parser; the banned relation set covers the actual W7 fact resolver plus rotation sources. Per-family ONLY-read mutations verify real delegation. New randomly namespaced fixtures deliberately remain intact in the disposable integration database because immutable calculation history rejects deletion. Existing fixture cleanup hooks remain byte-identical; no trigger disabling or fictitious row-cleanup claim.
