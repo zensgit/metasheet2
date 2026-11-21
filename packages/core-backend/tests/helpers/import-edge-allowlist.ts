@@ -34,9 +34,10 @@ function literalText(node: ts.Node | undefined): string | null {
  * Module specifiers of every module load in `source`, in source order, anywhere in the file: static
  * imports and re-exports, `import x = require(…)`, `require(…)`, dynamic `import(…)` and `import(…)`
  * types. `fileName` selects how the text is parsed (TypeScript or JavaScript) by its extension.
+ * A caller that already parsed the source can reuse that AST, including its parse diagnostics.
  */
-export function moduleLoads(source: string, fileName = 'm.ts'): ModuleLoad[] {
-  const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true)
+export function moduleLoads(source: string | ts.SourceFile, fileName = 'm.ts'): ModuleLoad[] {
+  const file = typeof source === 'string' ? ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true) : source
   const loads: ModuleLoad[] = []
   const add = (node: ts.Node | undefined, typeOnly: boolean, kind: ModuleLoad['kind']): void => {
     loads.push({ specifier: literalText(node) ?? NON_LITERAL_SPECIFIER, typeOnly, kind })

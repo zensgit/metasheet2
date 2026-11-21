@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import registry from '../fixtures/integration-capability-runtime-closure.json'
 import { moduleLoads } from '../helpers/import-edge-allowlist'
-import { collectModuleGraph, forbiddenPaths, graphFiles, GRAPH_ROOTS, reverseRegistry, runtimePaths, SOURCE_ROOT, type ModuleGraph } from '../helpers/runtime-module-closure'
+import { collectModuleGraph, createModuleGraphCollector, forbiddenPaths, reverseRegistry, runtimePaths, SOURCE_ROOT, type ModuleGraph } from '../helpers/runtime-module-closure'
 
 const ROOT = path.resolve(__dirname, '../../../..')
 const BACKGROUND = SOURCE_ROOT + 'integrations/integration-capability-resolve-background.ts'
@@ -23,36 +23,26 @@ function write(root: string, file: string, source: string): void {
 }
 
 let graph: ModuleGraph
-let mirrorRoot: string | undefined
-// Parsing the full production graph can exceed the default hook budget during the full suite.
-beforeAll(() => {
-  graph = collectModuleGraph(ROOT)
-}, 180_000)
-afterAll(() => { if (mirrorRoot) rmSync(mirrorRoot, { recursive: true, force: true }) })
-
-// Only mutation tests need a mirror; copy it once and restore each mutation in its own finally.
-// Their explicit timeout also covers copying and rescanning under full-suite contention.
-function getMirror(): string {
-  if (mirrorRoot) return mirrorRoot
-  const files = new Set([...graph.files, ...graph.resolutionInputs.map((input) => input.path), ...GRAPH_ROOTS.flatMap((dir) => graphFiles(path.join(ROOT, dir)))
-    .filter((file) => file.endsWith('.json')).map((file) => path.relative(ROOT, file)),
-  'tsconfig.json', 'packages/core-backend/package.json', 'packages/core-backend/tsconfig.json', 'packages/mssql-readonly-utils/package.json'])
-  const mirror = mkdtempSync(path.join(tmpdir(), 'capability-closure-'))
-  try {
-    for (const directory of new Set([...files].map((file) => path.dirname(file)))) {
-      mkdirSync(path.join(mirror, directory), { recursive: true })
-    }
-    for (const file of files) copyFileSync(path.join(ROOT, file), path.join(mirror, file))
-    mirrorRoot = mirror
-    return mirror
-  } catch (error) {
-    rmSync(mirror, { recursive: true, force: true })
-    throw error
+let collect: ReturnType<typeof createModuleGraphCollector>
+const completedTests = new Set<string>()
+function checked<T extends unknown[]>(test: (...args: T) => void): (...args: T) => void {
+  return (...args) => {
+    test(...args)
+    // Count completed bodies, not hooks or retry attempts. All callbacks in this file are synchronous.
+    completedTests.add(expect.getState().currentTestName!)
   }
 }
+// Parse the complete production graph once; retain a generous setup budget under full-suite contention.
+beforeAll(() => {
+  collect = createModuleGraphCollector(ROOT)
+  graph = collect()
+}, 180_000)
+afterAll(() => {
+  expect(completedTests.size, 'runtime closure guard must complete all 26 cases (no pending/skipped cases)').toBe(26)
+})
 
 describe('capability runtime module boundaries', () => {
-  it('registers the complete reverse runtime sets and edge multisets without line-number keys', () => {
+  it('registers the complete reverse runtime sets and edge multisets without line-number keys', checked(() => {
     expect(graph.files.length).toBeGreaterThan(2000)
     expect(graph.files).toHaveLength(registry.fileCount)
     expect(registry.reverse.map((entry) => entry.root)).toEqual([SCHEDULER, WORKER, BACKGROUND])
@@ -65,23 +55,23 @@ describe('capability runtime module boundaries', () => {
       SOURCE_ROOT + 'services/task-routed-reminders.ts', SOURCE_ROOT + 'services/task-routed-delivery-channel.ts',
     ])
     expect(registry.reverse.find((entry) => entry.root === WORKER)?.members).toContain(SOURCE_ROOT + 'index.ts')
-  })
+  }))
 
-  it('checks resolved direct edges including type-only loads across all production roots', () => {
+  it('checks resolved direct edges including type-only loads across all production roots', checked(() => {
     expect(directEdges(graph)).toEqual(registry.directEdges)
     expect(graph.edges.filter((edge) => edge.to === BACKGROUND)).toEqual([])
-  })
+  }))
 
-  it('registers each missing, non-literal and parse item exactly, and follows test helpers separately', () => {
+  it('registers each missing, non-literal and parse item exactly, and follows test helpers separately', checked(() => {
     expect(graph.gaps).toEqual(gapEntries)
     expect(graph.resolutionInputs).toEqual(registry.resolutionInputs)
     expect(registry.reviewedGaps.every((entry) => entry.review.length > 30)).toBe(true)
     expect(graph.testEdges).toEqual(registry.testEdges)
     expect(graph.gaps.filter((entry) => entry.from.includes('plugin-view-gantt')).map((entry) => entry.specifier)).toEqual(['./api', './handlers'])
     expect(graph.gaps.some((entry) => entry.specifier.includes('tests/utils/'))).toBe(false)
-  })
+  }))
 
-  it('checks both directions, including non-route HTTP modules, dynamic routes and plugins', () => {
+  it('checks both directions, including non-route HTTP modules, dynamic routes and plugins', checked(() => {
     expect(graph.requestRoots).toEqual(registry.requestRoots)
     for (const file of ['services/elearning-pilot-runtime.ts', 'services/approval-attachment-runtime.ts',
       'services/elearning-media-runtime.ts', 'gateway/APIGateway.ts', 'routes/fallback-test.ts']) {
@@ -90,7 +80,7 @@ describe('capability runtime module boundaries', () => {
     expect(graph.requestRoots).toContain('plugins/plugin-view-gantt/src/index.ts')
     expect(forbiddenPaths(graph.edges, graph.requestRoots, [BACKGROUND, ...registry.absentRoots])).toEqual([])
     expect(forbiddenPaths(graph.edges, [BACKGROUND, WORKER, SCHEDULER], [REQUEST])).toEqual([])
-  })
+  }))
 
   it.each([
     ['import type { T } from "./x"', true], ['import { type T } from "./x"', true],
@@ -101,11 +91,11 @@ describe('capability runtime module boundaries', () => {
     ['import {} from "./x"', false], ['export * from "./x"', false],
     ['import x = require("./x")', false], ['const x = require("./x")', false],
     ['const x = import(`./x`)', false],
-  ])('classifies %s independently of its eventual use', (source, typeOnly) => {
+  ])('classifies %s independently of its eventual use', checked((source, typeOnly) => {
     expect(moduleLoads(source)).toEqual([expect.objectContaining({ specifier: './x', typeOnly })])
-  })
+  }))
 
-  it('resolves actual workspace subpaths, configured aliases, .js spellings and directory indexes without transmitting type-only edges', () => {
+  it('resolves actual workspace subpaths, configured aliases, .js spellings and directory indexes without transmitting type-only edges', checked(() => {
     const isolated = mkdtempSync(path.join(tmpdir(), 'capability-alias-'))
     const packageName = JSON.parse(read(ROOT, 'packages/core-backend/package.json')).name
     const request = 'plugins/control/src/request.ts', barrel = 'plugins/control/src/barrel/index.ts'
@@ -124,113 +114,92 @@ describe('capability runtime module boundaries', () => {
       write(isolated, barrel, `export { value } from '${packageName}/src/integrations/integration-capability-resolve-background.js'`)
       expect(forbiddenPaths(collectModuleGraph(isolated).edges, [request], [BACKGROUND])).toEqual([[request, barrel, BACKGROUND]])
     } finally { rmSync(isolated, { recursive: true, force: true }) }
-  })
+  }))
 
-  it('pins the pure witness leaf and rejects changing its registry type import into a runtime load', () => {
-    const mirror = getMirror()
-    const original = read(mirror, WITNESS)
+  it('pins the pure witness leaf and rejects changing its registry type import into a runtime load', checked(() => {
+    const original = read(ROOT, WITNESS)
     expect(moduleLoads(original)).toEqual([
       { specifier: 'node:crypto', typeOnly: false, kind: 'import' },
       { specifier: './provider-capability-registry', typeOnly: true, kind: 'import' },
     ])
-    try {
-      write(mirror, WITNESS, original.replace('import type {', 'import {'))
-      expect(read(mirror, WITNESS)).not.toBe(original)
-      expect(directEdges(collectModuleGraph(mirror))).not.toEqual(registry.directEdges)
-    } finally { write(mirror, WITNESS, original) }
-  }, 180_000)
+    const mutated = original.replace('import type {', 'import {')
+    expect(mutated).not.toBe(original)
+    expect(directEdges(collect(new Map([[WITNESS, mutated]])))).not.toEqual(registry.directEdges)
+  }))
 
-  it('resolves inherited aliases before package paths and rejects metadata-only remapping', () => {
-    const mirror = getMirror()
-    const config = 'tsconfig.base.json', original = read(mirror, config)
+  it('resolves inherited aliases before package paths and rejects metadata-only remapping', checked(() => {
+    const config = 'tsconfig.base.json', original = read(ROOT, config)
     const importer = 'plugins/plugin-view-gantt/src/index.ts'
-    const specifier = moduleLoads(read(mirror, importer)).find((load) => load.typeOnly)!.specifier
-    try {
-      const changed = JSON.parse(original)
-      changed.compilerOptions = { ...changed.compilerOptions, baseUrl: '.', paths: { [specifier]: [BACKGROUND] } }
-      write(mirror, config, JSON.stringify(changed))
-      const result = collectModuleGraph(mirror)
-      expect(result.resolutionInputs).not.toEqual(registry.resolutionInputs)
-      expect(result.edges).toContainEqual(expect.objectContaining({ from: importer, to: BACKGROUND, typeOnly: true }))
-      expect(directEdges(result)).not.toEqual(registry.directEdges)
-    } finally { write(mirror, config, original) }
-  }, 180_000)
+    const specifier = moduleLoads(read(ROOT, importer)).find((load) => load.typeOnly)!.specifier
+    const changed = JSON.parse(original)
+    changed.compilerOptions = { ...changed.compilerOptions, baseUrl: '.', paths: { [specifier]: [BACKGROUND] } }
+    const result = collect(new Map([[config, JSON.stringify(changed)]]))
+    expect(result.resolutionInputs).not.toEqual(registry.resolutionInputs)
+    expect(result.edges).toContainEqual(expect.objectContaining({ from: importer, to: BACKGROUND, typeOnly: true }))
+    expect(directEdges(result)).not.toEqual(registry.directEdges)
+  }))
 
-  it('rejects a new non-routes request wrapper through a barrel, with a shortest path', () => {
-    const mirror = getMirror()
+  it('rejects a new non-routes request wrapper through a barrel, with a shortest path', checked(() => {
     const request = 'plugins/boundary-control/src/request.ts', barrel = SOURCE_ROOT + 'services/boundary-control.ts'
-    try {
-      write(mirror, request, `import { value } from '../../../${barrel}'; export { value }`)
-      write(mirror, barrel, "export * from '../integrations/integration-capability-resolve-background.js'")
-      const changed = collectModuleGraph(mirror)
-      expect(reverseRegistry(changed.edges, BACKGROUND)).not.toEqual(registry.reverse.find((entry) => entry.root === BACKGROUND))
-      expect(forbiddenPaths(changed.edges, [request], [BACKGROUND])).toEqual([[request, barrel, BACKGROUND]])
-      expect(directEdges(changed)).not.toEqual(registry.directEdges)
-      write(mirror, barrel, "export * from '../integrations/integration-capability-resolve.js'")
-      write(mirror, BACKGROUND, read(ROOT, BACKGROUND) + "\nimport '../services/boundary-control'\n")
-      expect(forbiddenPaths(collectModuleGraph(mirror).edges, [BACKGROUND], [REQUEST])).toEqual([[BACKGROUND, barrel, REQUEST]])
-    } finally {
-      rmSync(path.join(mirror, request)); rmSync(path.join(mirror, barrel)); write(mirror, BACKGROUND, read(ROOT, BACKGROUND))
-    }
-  }, 180_000)
+    const overrides = new Map([
+      [request, `import { value } from '../../../${barrel}'; export { value }`],
+      [barrel, "export * from '../integrations/integration-capability-resolve-background.js'"],
+    ])
+    const changed = collect(overrides)
+    expect(reverseRegistry(changed.edges, BACKGROUND)).not.toEqual(registry.reverse.find((entry) => entry.root === BACKGROUND))
+    expect(forbiddenPaths(changed.edges, [request], [BACKGROUND])).toEqual([[request, barrel, BACKGROUND]])
+    expect(directEdges(changed)).not.toEqual(registry.directEdges)
+    overrides.set(barrel, "export * from '../integrations/integration-capability-resolve.js'")
+    overrides.set(BACKGROUND, read(ROOT, BACKGROUND) + "\nimport '../services/boundary-control'\n")
+    expect(forbiddenPaths(collect(overrides).edges, [BACKGROUND], [REQUEST])).toEqual([[BACKGROUND, barrel, REQUEST]])
+  }))
 
-  it('keeps the real sender type-only edge non-transitive, then exposes its value mutation in a temporary future-consumer mirror', () => {
-    const mirror = getMirror()
+  it('keeps the real sender type-only edge non-transitive, then exposes its value mutation in a temporary future-consumer overlay', checked(() => {
     const sender = SOURCE_ROOT + 'services/task-notification-dingtalk.ts'
-    const original = read(mirror, sender), scheduler = read(mirror, SCHEDULER), worker = read(mirror, WORKER)
+    const original = read(ROOT, sender), scheduler = read(ROOT, SCHEDULER), worker = read(ROOT, WORKER)
     const [scan, delivery] = registry.absentRoots
-    try {
-      write(mirror, scan, "import '../integrations/integration-capability-resolve-background'")
-      write(mirror, delivery, "import '../integrations/integration-capability-resolve-background'")
-      write(mirror, SCHEDULER, scheduler + "\nimport './task-routed-reminders'\n")
-      write(mirror, WORKER, worker + "\nimport './task-routed-delivery-channel'\n")
-      const control = collectModuleGraph(mirror)
-      expect(forbiddenPaths(control.edges, control.requestRoots, [BACKGROUND, scan, delivery])).toEqual([])
-      expect(runtimePaths(control.edges, SOURCE_ROOT + 'index.ts').has(delivery)).toBe(true)
-      expect(control.edges.find((edge) => edge.from === sender && edge.to === WORKER)?.typeOnly).toBe(true)
-      const mutated = original.replace(/import type (\{[^}]+\} from '\.\/task-notification-delivery-worker')/, 'import $1')
-      expect(mutated).not.toBe(original)
-      write(mirror, sender, mutated)
-      const changed = collectModuleGraph(mirror)
-      const paths = forbiddenPaths(changed.edges, changed.requestRoots, [delivery])
-      expect(paths.length).toBeGreaterThan(0)
-      expect(paths.every((entry) => entry.at(-2) === WORKER && entry.at(-1) === delivery)).toBe(true)
-      expect(paths.some((entry) => entry.includes(sender))).toBe(true)
-    } finally {
-      write(mirror, sender, original); write(mirror, SCHEDULER, scheduler); write(mirror, WORKER, worker)
-      rmSync(path.join(mirror, scan)); rmSync(path.join(mirror, delivery))
-    }
-  }, 180_000)
+    const overrides = new Map([
+      [scan, "import '../integrations/integration-capability-resolve-background'"],
+      [delivery, "import '../integrations/integration-capability-resolve-background'"],
+      [SCHEDULER, scheduler + "\nimport './task-routed-reminders'\n"],
+      [WORKER, worker + "\nimport './task-routed-delivery-channel'\n"],
+    ])
+    const control = collect(overrides)
+    expect(forbiddenPaths(control.edges, control.requestRoots, [BACKGROUND, scan, delivery])).toEqual([])
+    expect(runtimePaths(control.edges, SOURCE_ROOT + 'index.ts').has(delivery)).toBe(true)
+    expect(control.edges.find((edge) => edge.from === sender && edge.to === WORKER)?.typeOnly).toBe(true)
+    const mutated = original.replace(/import type (\{[^}]+\} from '\.\/task-notification-delivery-worker')/, 'import $1')
+    expect(mutated).not.toBe(original)
+    overrides.set(sender, mutated)
+    const changed = collect(overrides)
+    const paths = forbiddenPaths(changed.edges, changed.requestRoots, [delivery])
+    expect(paths.length).toBeGreaterThan(0)
+    expect(paths.every((entry) => entry.at(-2) === WORKER && entry.at(-1) === delivery)).toBe(true)
+    expect(paths.some((entry) => entry.includes(sender))).toBe(true)
+  }))
 
-  it('rejects added or removed reverse edges, duplicate loads, roots and missing registry members', () => {
-    const mirror = getMirror()
-    const file = SOURCE_ROOT + 'index.ts', original = read(mirror, file)
+  it('rejects added or removed reverse edges, duplicate loads, roots and missing registry members', checked(() => {
+    const file = SOURCE_ROOT + 'index.ts', original = read(ROOT, file)
     const expected = registry.reverse.find((entry) => entry.root === WORKER)!
     expect(expected.members.length).toBeGreaterThan(5)
     expect(expected.edges.length).toBeGreaterThan(5)
     expect(reverseRegistry(graph.edges, WORKER)).not.toEqual({ ...expected, members: expected.members.slice(1) })
     expect(reverseRegistry(graph.edges, WORKER)).not.toEqual({ ...expected, edges: expected.edges.slice(1) })
-    try {
-      write(mirror, file, original + "\nimport './services/task-scheduler'\n")
-      expect(reverseRegistry(collectModuleGraph(mirror).edges, WORKER)).not.toEqual(expected)
-      write(mirror, file, original.replace(/import\s*\{[^}]*\}\s*from\s*'\.\/services\/task-scheduler'\s*;?/, ''))
-      expect(read(mirror, file)).not.toBe(original)
-      expect(reverseRegistry(collectModuleGraph(mirror).edges, WORKER)).not.toEqual(expected)
-    } finally { write(mirror, file, original) }
-  }, 180_000)
+    expect(reverseRegistry(collect(new Map([[file, original + "\nimport './services/task-scheduler'\n"]])).edges, WORKER)).not.toEqual(expected)
+    const removed = original.replace(/import\s*\{[^}]*\}\s*from\s*'\.\/services\/task-scheduler'\s*;?/, '')
+    expect(removed).not.toBe(original)
+    expect(reverseRegistry(collect(new Map([[file, removed]])).edges, WORKER)).not.toEqual(expected)
+  }))
 
-  it('requires re-review when a registered missing target appears or an unknown internal load is added', () => {
-    const mirror = getMirror()
+  it('requires re-review when a registered missing target appears or an unknown internal load is added', checked(() => {
     const target = 'plugins/plugin-view-gantt/src/api.ts'
-    try {
-      write(mirror, target, 'export class GanttAPIHandler {}')
-      expect(collectModuleGraph(mirror).gaps).not.toEqual(gapEntries)
-      write(mirror, target, "import './unreviewed-internal-target'")
-      const gaps = collectModuleGraph(mirror).gaps
-      expect(gaps).not.toEqual(gapEntries)
-      expect(gaps).toContainEqual(expect.objectContaining({ from: target, specifier: './unreviewed-internal-target' }))
-      expect(graph.gaps).not.toEqual(gapEntries.slice(1))
-      expect(graph.gaps).not.toEqual([...gapEntries, gapEntries[0]])
-    } finally { rmSync(path.join(mirror, target)) }
-  }, 180_000)
+    expect(collect(new Map([[target, 'export class GanttAPIHandler {}']])).gaps).not.toEqual(gapEntries)
+    const gaps = collect(new Map([[target, "import './unreviewed-internal-target'"]])).gaps
+    expect(gaps).not.toEqual(gapEntries)
+    expect(gaps).toContainEqual(expect.objectContaining({ from: target, specifier: './unreviewed-internal-target' }))
+    expect(graph.gaps).not.toEqual(gapEntries.slice(1))
+    expect(graph.gaps).not.toEqual([...gapEntries, gapEntries[0]])
+    // No overlay (including added files or metadata) may leak into the cached baseline.
+    expect(collect()).toEqual(graph)
+  }))
 })
