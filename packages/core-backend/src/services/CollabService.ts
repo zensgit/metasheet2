@@ -270,10 +270,12 @@ export class CollabService {
     }
     for (const room of rooms) {
       const scope = this.scopeOfRoom(room)
-      if (scope.kind === 'opaque') continue
+      // Only sheet and comment rooms have a resource that can be narrowed while a session stays
+      // current. The session pass of the sweep has already read every connection in one batch.
+      if (scope.kind !== 'sheet' && scope.kind !== 'comment') continue
       const members = this.localRoomSockets(room)
-      if (members.length === 0 || (members.length === 1 && members[0].id === room)) continue
-      await this.connections.deliver(members, () => undefined, {
+      if (members.length === 0) continue
+      await this.connections.sweepResources(members, {
         resourceCheck: (binding, socket) => this.checkRoomScope(scope, binding, socket.id),
         onResourceDenied: (socket) => this.dropSubscription(socket as Socket, room, scope),
       })

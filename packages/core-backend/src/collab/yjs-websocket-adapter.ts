@@ -159,6 +159,7 @@ export class YjsWebSocketAdapter {
   setRealtimeProtection(protection: RealtimeProtection, connections: ProtectedConnections): void {
     this.protection = protection
     this.connections = connections
+    connections.onSweep(() => this.sweepSubscriptions())
     protection.subscribe((event) => {
       if (event.type !== 'decision' || !this.namespace || !this.connections || !this.isProtected()) return
       for (const socket of this.namespace.sockets.values()) this.adoptSocket(socket, true)
@@ -172,6 +173,28 @@ export class YjsWebSocketAdapter {
 
   private isProtected(): boolean {
     return this.connections !== null && this.protection.mode() !== 'baseline'
+  }
+
+  /**
+   * Idle pass over record subscriptions: a connection that stays subscribed without any traffic is
+   * still taken out of the record once its user may no longer read it.
+   */
+  private async sweepSubscriptions(): Promise<void> {
+    if (!this.namespace || !this.connections || !this.isProtected() || !this.authChecker) return
+    const authChecker = this.authChecker
+    for (const room of [...this.namespace.adapter.rooms.keys()]) {
+      if (!room.startsWith('yjs:')) continue
+      const recordId = room.slice('yjs:'.length)
+      const members = this.localRoomSockets(room)
+      if (members.length === 0) continue
+      await this.connections.sweepResources(members, {
+        resourceCheck: async (binding) => {
+          const access = await authChecker(binding.userId, recordId)
+          return Boolean(access && access.canRead && access.canReadAllFields !== false)
+        },
+        onResourceDenied: (socket) => this.dropSubscription(socket as Socket, recordId),
+      })
+    }
   }
 
   private adoptSocket(socket: Socket, established = false): void {

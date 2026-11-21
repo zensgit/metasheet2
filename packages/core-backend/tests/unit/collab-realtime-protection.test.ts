@@ -329,6 +329,28 @@ describe('switch on: every delivery reads the session of each recipient again', 
     expect([...reads[0]].sort()).toEqual(['u1', 'u2', 'u3', 'u4'])
   })
 
+  it('an idle sweep reads the session facts of every connection in one batch, whatever rooms they are in', async () => {
+    const s = await open()
+    const users = ['i1', 'i2', 'i3', 'i4', 'i5', 'i6']
+    const sockets = await Promise.all(users.map((user) => connected(s, `token:${user}`)))
+    for (const socket of sockets.slice(0, 3)) await joinSheet(socket, 'sheet-1')
+    sockets[3].emit('join-comment-inbox')
+    await once(sockets[3], 'joined-comment-inbox')
+    await settle()
+    const sheetChecks: string[] = []
+    s.collab.setSheetRoomAuthChecker(async ({ sheetId, userId }) => {
+      sheetChecks.push(`${sheetId}:${userId}`)
+      return true
+    })
+    const before = s.harness.authorityReads.length
+    await s.harness.connections.sweep()
+    const reads = s.harness.authorityReads.slice(before)
+    expect(reads).toHaveLength(1)
+    expect([...reads[0]].sort()).toEqual(users)
+    // The resource pass asks once per subscribed user of the one sheet room, and nothing else.
+    expect(sheetChecks.sort()).toEqual(['sheet-1:i1', 'sheet-1:i2', 'sheet-1:i3'])
+  })
+
   it('caches no positive answer between two deliveries', async () => {
     const s = await open()
     const a = await connected(s, 'token:a')

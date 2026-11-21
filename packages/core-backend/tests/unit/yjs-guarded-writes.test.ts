@@ -123,7 +123,7 @@ async function stage(options: { protectedMode?: boolean; mergeWindowMs?: number 
     sync,
     recordWriter as never,
     async (recordId, patch, actorId) => {
-      // The existing flush gate: the primary actor only.
+      // The gate of the write-input builder, applied to the primary actor of the merged write.
       const forbidden = world.forbiddenFields.get(actorId)
       if (Object.keys(patch).some((fieldId) => forbidden?.has(fieldId))) throw new FieldWritePermissionDeniedError()
       return { actorId, changesByRecord: new Map([[recordId, Object.entries(patch).map(([fieldId, value]) => ({ fieldId, value }))]]) } as never
@@ -657,6 +657,22 @@ describe('realtime protection on the record editing namespace', () => {
     await until(() => narrowed.errors.length === 1)
     expect(narrowed.received).toEqual([])
     expect(narrowed.socket.connected).toBe(true)
+  })
+
+  it('switch on: an idle subscription is dropped once its user may no longer read the record', async () => {
+    const s = current = await stage({ protectedMode: true })
+    const kept = await editor(s, 'kept')
+    const narrowed = await editor(s, 'narrowed')
+    s.world.noReadUsers.add('narrowed')
+    await s.harness?.connections.sweep()
+    await until(() => narrowed.errors.length === 1)
+    expect(narrowed.errors[0]).toMatchObject({ code: 'FORBIDDEN' })
+    expect(narrowed.socket.connected).toBe(true)
+    expect(kept.errors).toEqual([])
+    const writer = await editor(s, 'writer')
+    sendUpdate(writer, change(writer, 'f1', 'after-narrowing'))
+    await until(() => kept.fields().f1 === 'after-narrowing')
+    expect(narrowed.received).toEqual([])
   })
 
   it('switch on: document state is not returned to a session that ended', async () => {

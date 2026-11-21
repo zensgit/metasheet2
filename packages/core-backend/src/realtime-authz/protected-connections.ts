@@ -336,6 +336,42 @@ export class ProtectedConnections {
     return served
   }
 
+  /**
+   * Resource pass of a sweep: runs the resource check of a room for the connections that are
+   * serviceable right now and reports the ones that may no longer read it. It reads no session
+   * facts — the sweep has just read them for every connection in one batch — and it sends nothing.
+   */
+  async sweepResources(
+    candidates: Iterable<ProtectedSocket>,
+    options: Required<Pick<DeliveryOptions, 'resourceCheck' | 'onResourceDenied'>>,
+  ): Promise<void> {
+    const startedIn = this.protection.generation()
+    const sample: Array<{ state: ConnectionState; binding: RealtimeSessionBinding }> = []
+    for (const socket of candidates) {
+      const state = this.states.get(socket)
+      if (!state || state.phase !== 'serviceable' || !state.binding || !socket.connected) continue
+      if (state.generation !== startedIn) continue
+      sample.push({ state, binding: state.binding })
+    }
+    const perSubject = new Map<string, boolean>()
+    for (const entry of sample) {
+      const key = bindingKey(entry.binding)
+      if (perSubject.has(key)) continue
+      let allowed = false
+      try {
+        allowed = (await options.resourceCheck(entry.binding, entry.state.socket)) === true
+      } catch {
+        allowed = false
+      }
+      perSubject.set(key, allowed)
+    }
+    for (const entry of sample) {
+      if (perSubject.get(bindingKey(entry.binding)) === true) continue
+      if (this.states.get(entry.state.socket) !== entry.state || entry.state.phase !== 'serviceable') continue
+      options.onResourceDenied(entry.state.socket)
+    }
+  }
+
   /** Ends a connection: tells the client why, then closes the underlying transport. */
   end(socket: ProtectedSocket, payload: SessionEndedPayload): void {
     const state = this.states.get(socket)
