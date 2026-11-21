@@ -170,6 +170,12 @@ async function installStrict(pool: Pool, schema: string): Promise<void> {
       enabled boolean NOT NULL,
       granted_by text
     );
+    -- D21 (Y5a): the access-graph mutex bumps the subjects' version rows before the users rows.
+    CREATE TABLE subject_authorization_versions (
+      subject_id text PRIMARY KEY,
+      version bigint NOT NULL DEFAULT 1,
+      updated_at timestamptz NOT NULL DEFAULT now()
+    );
     CREATE TABLE users (
       id text PRIMARY KEY,
       email text,
@@ -413,6 +419,12 @@ async function releasePublishedPool(nativePool: Pool): Promise<void> {
 
 async function installPublishedParents(pool: Pool, schema: string): Promise<void> {
   await pool.query(`
+    -- D21 (Y5a): the access-graph mutex bumps the subjects' version rows before the users rows.
+    CREATE TABLE subject_authorization_versions (
+      subject_id text PRIMARY KEY,
+      version bigint NOT NULL DEFAULT 1,
+      updated_at timestamptz NOT NULL DEFAULT now()
+    );
     CREATE TABLE users (
       id text PRIMARY KEY,
       username text,
@@ -1323,6 +1335,12 @@ describeIfDatabase('strict credential chain native lifecycle', () => {
           timestamp varchar(255) NOT NULL
         );
         CREATE UNLOGGED TABLE directory_connection_login_scope (connection_id uuid);
+        -- D21 (Y5a): the access-graph mutex bumps the subjects' version rows before the users rows.
+        CREATE TABLE subject_authorization_versions (
+          subject_id text PRIMARY KEY,
+          version bigint NOT NULL DEFAULT 1,
+          updated_at timestamptz NOT NULL DEFAULT now()
+        );
         CREATE TABLE users (
           id text PRIMARY KEY,
           local_password_set boolean,
@@ -1959,6 +1977,12 @@ describeIfDatabase('strict credential chain native lifecycle', () => {
     let primary: unknown
     try {
       await pool.query(`
+        -- D21 (Y5a): the access-graph mutex bumps the subjects' version rows before the users rows.
+        CREATE TABLE subject_authorization_versions (
+          subject_id text PRIMARY KEY,
+          version bigint NOT NULL DEFAULT 1,
+          updated_at timestamptz NOT NULL DEFAULT now()
+        );
         CREATE TABLE users (
           id text PRIMARY KEY,
           is_active boolean,
@@ -2046,6 +2070,12 @@ describeIfDatabase('strict credential chain native lifecycle', () => {
     let primary: unknown
     try {
       await pool.query(`
+        -- D21 (Y5a): the access-graph mutex bumps the subjects' version rows before the users rows.
+        CREATE TABLE subject_authorization_versions (
+          subject_id text PRIMARY KEY,
+          version bigint NOT NULL DEFAULT 1,
+          updated_at timestamptz NOT NULL DEFAULT now()
+        );
         CREATE TABLE users (
           id text PRIMARY KEY,
           is_active boolean,

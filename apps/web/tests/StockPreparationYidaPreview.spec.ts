@@ -1014,6 +1014,12 @@ describe('StockPreparationYidaPreviewPanel', () => {
       expect(new Set(payloads().map((payload) => payload.materialCodeText)).size).toBe(host.plan.rows.length)
       expect(String(payloads()[0].materialCodeText)).toMatch(/^SYN-.+-[0-9A-F]{32}$/)
     }
+    // Ruling L1: the order the hash members are listed in is not part of the code, so the panel previews the same
+    // codes for the reversed list (above, original mode) and for the key order.
+    const reversedCodes = payloads().map((payload) => payload.materialCodeText)
+    edit(`sp-yida-map-generated-template-${at}`, JSON.stringify(template.map((part) => 'hash' in part ? { ...part, hash: [...example.config.businessKey] } : part)))
+    await flush(); await preview()
+    expect(payloads().map((payload) => payload.materialCodeText)).toEqual(reversedCodes)
     // Two rows with one preset code are both refused with the generated-duplicate reason.
     edit(`sp-yida-map-generated-template-${at}`, JSON.stringify([{ preset: 'material-code-v1', rowIdOf: 'sourceLineId', projectOf: 'project' }]))
     edit('sp-yida-rows', JSON.stringify(rows.map((row) => ({ ...row, idempotencyKey: 'SYN-LINE-1' }))))

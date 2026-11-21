@@ -132,6 +132,8 @@ const errorStatuses: Readonly<Record<string, readonly number[]>> = Object.freeze
   YIDA_SEND_APPROVAL_LIMIT: [422],
   // Identity fence (design baseline v2.3 §3.3, D16): this material row was already created under the target.
   YIDA_SEND_APPROVAL_IDENTITY_RESERVED: [409],
+  // Generated-layout seal (P1, 2026-11-08): the target's generated template layout is already sealed and this draft's differs.
+  YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT: [409],
   // Y2 target list and sheet/view source.
   YIDA_INITIALIZATION_INPUT: [400], YIDA_INITIALIZATION_DENIED: [403], YIDA_INITIALIZATION_DISABLED: [403],
   YIDA_INITIALIZATION_CONFLICT: [409], YIDA_INITIALIZATION_CANCELLED: [409], YIDA_INITIALIZATION_INACTIVE: [503],
