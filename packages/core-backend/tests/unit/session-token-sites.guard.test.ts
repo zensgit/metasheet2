@@ -505,6 +505,14 @@ describe('token site check: each departure is reported', () => {
     expect(tokenSiteOffenders(scanTokenSites(new Map(Object.entries(HOLDS))))).toEqual([])
   })
 
+  it('classifies the same registration expiry helper syntax only in its registered file', () => {
+    const source = HOLDS['auth/AuthService.ts']
+    expect(scanTokenSites(new Map([['auth/AuthService.ts', source]])).offenders).toEqual([])
+    expect(scanTokenSites(new Map([['services/other.ts', source]])).offenders).toEqual([
+      'services/other.ts: loads a token library other than jsonwebtoken (jsonwebtoken/lib/timespan)',
+    ])
+  })
+
   it('classifies only the session verification error test, not a reusable token-library binding', () => {
     const valid = { 'auth/AuthService.ts': (text: string) => text.replace('private verifySessionTokenPayload', 'verifyToken(error: unknown) { return error instanceof jwt.JsonWebTokenError }\n private verifySessionTokenPayload') }
     expect(offendersWith(valid)).toEqual([])

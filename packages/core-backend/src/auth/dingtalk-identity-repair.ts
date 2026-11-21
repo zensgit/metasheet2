@@ -4,9 +4,9 @@ import * as bcrypt from 'bcryptjs'
 import { query, transaction } from '../db/pg'
 import { evaluateUserAuthenticationGate } from './user-activation'
 import {
-  lockUsersForAccessGraphWrite,
   supersedeDeprovisionEvidenceForAccessGraphWrite,
 } from '../directory/access-graph-mutex'
+import { lockUserAccessExclusive } from './user-access-lock'
 import { readDingTalkOauthConfig } from '../integrations/dingtalk/client'
 import { exchangeCodeForDingTalkProfile } from './dingtalk-oauth'
 import {
@@ -390,7 +390,7 @@ async function lock(c: Client, userId: string, actorIds: string[]) {
     await c.query(
       'LOCK TABLE users,user_roles,user_permissions,user_namespace_admissions,user_orgs,user_external_auth_grants,directory_account_links,user_external_identities,directory_accounts,directory_integrations,roles,role_permissions,permissions IN SHARE ROW EXCLUSIVE MODE',
     )
-    await lockUsersForAccessGraphWrite(c, [userId, ...actorIds].sort())
+    await lockUserAccessExclusive(c, [userId, ...actorIds])
   } catch (error) {
     const code = (error as { code?: unknown } | null)?.code
     if (code === '55P03' || code === '40P01' || code === '57014')

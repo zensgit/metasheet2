@@ -35,6 +35,7 @@ import { assignUserRoles } from '../rbac/role-assignment'
 import { lockNamespaceAdmissionWrites } from '../rbac/namespace-admission'
 import { evaluateUserAuthenticationGate } from './user-activation'
 import { isRecoveryAuthorityBusyError } from '../multitable/recovery-authorization-stability'
+import { isSessionRenewalBusyError, lockUserAccessShared } from './user-access-lock'
 
 export interface User {
   id: string
@@ -646,6 +647,7 @@ export class AuthService {
 
         if (result.rows.length > 0) {
           const row = result.rows[0] as UserRow
+          if (!allowDevelopmentFallback && evaluateUserAuthenticationGate(row)) return null
           const resolved = await this.resolveRbacProfile(row.id, row.role, Array.isArray(row.permissions) ? row.permissions : [], readOnlyPermissionCheck)
           return {
             id: row.id,
@@ -669,7 +671,7 @@ export class AuthService {
           }
         }
       } catch (dbError) {
-        if (readOnlyPermissionCheck) throw dbError
+        if (readOnlyPermissionCheck || (!allowDevelopmentFallback && isSessionRenewalBusyError(dbError))) throw dbError
         this.logger.warn('Database query failed', dbError instanceof Error ? dbError : undefined)
       }
 
@@ -695,7 +697,7 @@ export class AuthService {
 
       return null
     } catch (error) {
-      if (readOnlyPermissionCheck) throw error
+      if (readOnlyPermissionCheck || (!allowDevelopmentFallback && isSessionRenewalBusyError(error))) throw error
       this.logger.error('Get user by ID error', error instanceof Error ? error : undefined)
       return null
     }
@@ -1070,11 +1072,13 @@ export class AuthService {
         return null
       }
 
+      if (!await this.isOrdinarySessionCurrent(payload, userId)) return null
       const user = await this.getUserById(userId, false, false)
       if (!user || evaluateUserAuthenticationGate(user)) return null
       const renewed = await this.renewOrdinarySession(payload, user)
       return renewed.kind === 'ok' ? renewed.token : null
     } catch (error) {
+      if (isSessionRenewalBusyError(error)) throw error
       this.logger.warn('Token refresh failed', error instanceof Error ? error : undefined)
       return null
     }
@@ -1087,27 +1091,36 @@ export class AuthService {
     if (!payload || classifyVerifiedSessionPayload(payload) !== 'standard' || this.resolveTokenUserId(payload) !== user.id) {
       return { kind: 'changed' }
     }
+    if (!await this.isOrdinarySessionCurrent(payload, user.id)) return { kind: 'changed' }
     return this.renewOrdinarySession(payload, user, orgId, requestInfo)
+  }
+
+  private async isOrdinarySessionCurrent(payload: SessionTokenClaims, userId: string): Promise<boolean> {
+    if (!Number.isSafeInteger(payload.iat)) return false
+    // Expired input JWTs and expired, unrevoked session rows remain refreshable.
+    // Refuse committed revocations before joining the user lock queue; recheck under lock below.
+    const preflight = await poolManager.get().query<{ eligible: boolean }>(
+      `SELECT NOT EXISTS (
+         SELECT 1 FROM user_session_revocations
+         WHERE user_id = $1 AND revoked_after >= to_timestamp($2::double precision)
+       ) AND ($3::text IS NULL OR EXISTS (
+         SELECT 1 FROM user_sessions WHERE id = $3 AND user_id = $1 AND revoked_at IS NULL
+       )) AS eligible`,
+      [userId, payload.iat, this.normalizeClaimString(payload.sid) ?? null],
+    )
+    return preflight.rows[0]?.eligible === true
   }
 
   private async renewOrdinarySession(
     payload: SessionTokenClaims, user: User, targetOrg?: string, requestInfo: SessionRequestInfo = {},
   ): Promise<SessionRenewal> {
-    if (!Number.isSafeInteger(payload.iat)) return { kind: 'changed' }
     const originalSid = this.normalizeClaimString(payload.sid)
     const sessionId = originalSid ?? this.createSessionId()
     type Registration = { kind: 'registered'; user: User; sessionId: string; issuedAt: number }
       | { kind: 'changed' } | { kind: 'not_member' }
     const result = await poolManager.get().transaction(async (client): Promise<Registration> => {
       await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-      // Take the same user row as account-wide revocation before reading its committed cutoff.
-      const account = await client.query(
-        `SELECT role, is_active, activation_status, access_generation,
-                to_jsonb(users)->>'deleted_at' AS deleted_at, to_jsonb(users)->>'purged_at' AS purged_at
-           FROM users WHERE id = $1 FOR SHARE`,
-        [user.id],
-      )
-      const locked = account.rows[0]
+      const locked = await lockUserAccessShared(client, user.id)
       if (!locked || locked.is_active !== true || evaluateUserAuthenticationGate(locked)
         || Number(locked.access_generation ?? 0) !== Number(user.access_generation ?? 0)) {
         return { kind: 'changed' }

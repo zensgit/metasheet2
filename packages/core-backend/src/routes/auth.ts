@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto'
 import * as bcrypt from 'bcryptjs'
 import jwt, { type SignOptions } from 'jsonwebtoken'
 import { authService, type User } from '../auth/AuthService'
+import { isSessionRenewalBusyError } from '../auth/user-access-lock'
 import { buildOnboardingPacket, getAccessPreset } from '../auth/access-presets'
 import {
   buildAuthUrl,
@@ -1411,6 +1412,10 @@ authRouter.post('/refresh-token', async (req: Request, res: Response) => {
       }
     })
   } catch (error) {
+    if (isSessionRenewalBusyError(error)) {
+      res.set('Retry-After', '1')
+      return res.status(503).json({ success: false, error: 'Token refresh unavailable', code: 'SESSION_REFRESH_UNAVAILABLE' })
+    }
     logger.error('Token refresh error', error instanceof Error ? error : undefined)
     res.status(500).json({
       success: false,

@@ -103,6 +103,8 @@ function stubPoolForAuthReads(options: {
   userRow: Record<string, unknown>
   admissionRows?: unknown[]
   admissionError?: Error
+  renewalEligible?: boolean
+  renewalError?: Error
   /** The default role row already exists, so the backfill's ON CONFLICT DO NOTHING insert inserts nothing. */
   roleAlreadyHeld?: boolean
 }) {
@@ -110,6 +112,10 @@ function stubPoolForAuthReads(options: {
   const admissionParams: unknown[][] = []
   poolMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
     const text = String(sql)
+    if (text.includes('FROM user_session_revocations')) {
+      if (options.renewalError) throw options.renewalError
+      return { rows: [{ eligible: options.renewalEligible ?? true }] }
+    }
     if (text.includes('user_namespace_admissions')) {
       admissionParams.push(params ?? [])
       if (options.admissionError) throw options.admissionError
@@ -757,6 +763,8 @@ describe('AuthService.refreshToken', () => {
     jwtMocks.sign.mockReset()
     poolMocks.query.mockReset()
     poolMocks.query.mockResolvedValue({ rows: [] })
+    poolMocks.transaction.mockReset()
+    poolMocks.transaction.mockImplementation(async handler => handler({ query: poolMocks.query }))
     rbacMocks.isAdmin.mockReset()
     rbacMocks.listUserPermissions.mockReset()
     rbacMocks.invalidateUserPerms.mockReset()
@@ -769,8 +777,9 @@ describe('AuthService.refreshToken', () => {
     sessionMocks.isUserSessionActive.mockResolvedValue(true)
   })
 
-  function lockedRenewal(eligible = true, generation = 0) {
+  function lockedRenewal(eligible = true, generation = 0, lockTimeout = '0') {
     const query = vi.fn(async (sql: string) => {
+      if (sql.includes("WHERE name = 'lock_timeout'")) return { rows: [{ previous: lockTimeout }] }
       if (sql.includes('FROM users WHERE id = $1 FOR SHARE')) {
         return { rows: [{ is_active: true, role: 'user', activation_status: 'activated', access_generation: generation }] }
       }
@@ -820,7 +829,10 @@ describe('AuthService.refreshToken', () => {
     const query = lockedRenewal(true, 3)
     expect(await new AuthService().refreshToken('old-token')).toBe('new-token')
     expect(query.mock.calls.map(call => call[0])).toEqual([
-      'SET TRANSACTION ISOLATION LEVEL READ COMMITTED', expect.stringContaining('FOR SHARE'),
+      'SET TRANSACTION ISOLATION LEVEL READ COMMITTED',
+      expect.stringContaining("set_config('lock_timeout', LEAST(1000, NULLIF(setting::int, 0))::text, true)"),
+      expect.stringContaining('pg_advisory_xact_lock_shared'), expect.stringContaining('FOR SHARE'),
+      "SELECT set_config('lock_timeout', $1, true)",
       expect.stringContaining("set_config('statement_timeout', LEAST(1000, NULLIF(setting::int, 0))::text, true)"),
       expect.stringContaining('FROM user_session_revocations'), expect.stringContaining('FOR SHARE OF uo'),
     ])
@@ -832,12 +844,99 @@ describe('AuthService.refreshToken', () => {
     expect(sessionMocks.createUserSession.mock.calls[0]?.[0]).toBe('u-refresh')
   })
 
-  it.each([undefined, 'existing'])('rejects a session before the cutoff with sid %s', async sid => {
-    jwtMocks.verify.mockReturnValue({ userId: 'u-refresh', iat: 1, exp: 2, sid })
+  it.each([undefined, 'existing'])('rejects an in-lock revocation after an eligible preflight with sid %s', async sid => {
+    jwtMocks.verify.mockReturnValue({ userId: 'u-refresh', iat: 1, exp: 9_999_999_999, sid })
     stubPoolForAuthReads({ userRow: refreshableUserRow('u-refresh') })
     const query = lockedRenewal(false, 3)
     expect(await new AuthService().refreshToken('old-token')).toBeNull()
+    expect(poolMocks.query).toHaveBeenCalledWith(expect.stringContaining('revoked_after >= to_timestamp'), ['u-refresh', 1, sid ?? null])
+    expect(poolMocks.transaction).toHaveBeenCalledTimes(1)
     expect(query).toHaveBeenCalledWith(expect.stringContaining('revoked_after >= to_timestamp'), ['u-refresh', 1, sid ?? null])
+    expect(jwtMocks.sign).not.toHaveBeenCalled()
+    expect(sessionMocks.createUserSession).not.toHaveBeenCalled()
+  })
+
+  it.each([undefined, 'revoked-session'])('rejects an unexpired token at preflight without a transaction with sid %s', async sid => {
+    const realJwt = await vi.importActual<typeof import('jsonwebtoken')>('jsonwebtoken')
+    const issuedAt = Math.floor(Date.now() / 1000) - 10
+    const token = realJwt.sign({ userId: 'u-refresh', iat: issuedAt, ...(sid ? { sid } : {}) }, secretManagerMocks.get(), { expiresIn: '1h' })
+    expect(realJwt.verify(token, secretManagerMocks.get())).toMatchObject({ userId: 'u-refresh', iat: issuedAt })
+    jwtMocks.verify.mockImplementation(realJwt.verify as never)
+    stubPoolForAuthReads({ userRow: refreshableUserRow('u-refresh'), renewalEligible: false })
+
+    expect(await new AuthService().refreshToken(token)).toBeNull()
+    expect(poolMocks.query).toHaveBeenCalledWith(expect.stringContaining('revoked_after >= to_timestamp'), ['u-refresh', issuedAt, sid ?? null])
+    expect(poolMocks.query).toHaveBeenCalledTimes(1)
+    expect(poolMocks.transaction).not.toHaveBeenCalled()
+    expect(poolMocks.query.mock.calls.some(([sql]) => /FOR SHARE|FOR UPDATE|pg_advisory/.test(sql))).toBe(false)
+    expect(rbacMocks.isAdmin).not.toHaveBeenCalled()
+    expect(rbacMocks.listUserPermissions).not.toHaveBeenCalled()
+    expect(jwtMocks.sign).not.toHaveBeenCalled()
+    expect(sessionMocks.createUserSession).not.toHaveBeenCalled()
+  })
+
+  it('rejects an inactive user before the renewal transaction', async () => {
+    jwtMocks.verify.mockReturnValue({ userId: 'u-refresh', iat: 1, exp: 9_999_999_999 })
+    stubPoolForAuthReads({ userRow: { ...refreshableUserRow('u-refresh'), is_active: false } })
+
+    expect(await new AuthService().refreshToken('old-token')).toBeNull()
+    expect(poolMocks.query.mock.calls[0]?.[0]).toContain('FROM user_session_revocations')
+    expect(poolMocks.transaction).not.toHaveBeenCalled()
+    expect(rbacMocks.isAdmin).not.toHaveBeenCalled()
+    expect(rbacMocks.listUserPermissions).not.toHaveBeenCalled()
+    expect(jwtMocks.sign).not.toHaveBeenCalled()
+    expect(sessionMocks.createUserSession).not.toHaveBeenCalled()
+  })
+
+  it.each(['0', '250'])('restores the prior lock timeout %s after shared admission', async lockTimeout => {
+    jwtMocks.verify.mockReturnValue({ userId: 'u-refresh', iat: 1, exp: 9_999_999_999 })
+    stubPoolForAuthReads({ userRow: refreshableUserRow('u-refresh') })
+    const query = lockedRenewal(false, 3, lockTimeout)
+
+    expect(await new AuthService().refreshToken('old-token')).toBeNull()
+    expect(query).toHaveBeenCalledWith("SELECT set_config('lock_timeout', $1, true)", [lockTimeout])
+    const statements = query.mock.calls.map(([sql]) => sql)
+    const restoreAt = statements.indexOf("SELECT set_config('lock_timeout', $1, true)")
+    expect(statements.findIndex(sql => sql.includes('FOR SHARE'))).toBeLessThan(restoreAt)
+    expect(restoreAt).toBeLessThan(statements.findIndex(sql => sql.includes('FROM user_session_revocations')))
+  })
+
+  it.each(['55P03', '40P01', '57014', '40001', 'Query read timeout'])('rethrows retryable database failure %s from the initial account lookup', async code => {
+    const error = code === 'Query read timeout' ? new Error(code) : Object.assign(new Error('synthetic database refusal'), { code })
+    jwtMocks.verify.mockReturnValue({ userId: 'u-refresh', iat: 1, exp: 9_999_999_999 })
+    poolMocks.query.mockResolvedValueOnce({ rows: [{ eligible: true }] }).mockRejectedValueOnce(error)
+
+    await expect(new AuthService().refreshToken('old-token')).rejects.toBe(error)
+    expect(poolMocks.query.mock.calls[1]?.[0]).toContain('FROM users WHERE id = $1')
+    expect(poolMocks.transaction).not.toHaveBeenCalled()
+    expect(jwtMocks.sign).not.toHaveBeenCalled()
+    expect(sessionMocks.createUserSession).not.toHaveBeenCalled()
+  })
+
+  it.each(['55P03', '40P01', '57014', '40001', 'Query read timeout'])('rethrows retryable database failure %s from the preflight', async code => {
+    const error = code === 'Query read timeout' ? new Error(code) : Object.assign(new Error('synthetic database refusal'), { code })
+    jwtMocks.verify.mockReturnValue({ userId: 'u-refresh', iat: 1, exp: 9_999_999_999 })
+    stubPoolForAuthReads({ userRow: refreshableUserRow('u-refresh'), renewalError: error })
+
+    await expect(new AuthService().refreshToken('old-token')).rejects.toBe(error)
+    expect(poolMocks.transaction).not.toHaveBeenCalled()
+    expect(jwtMocks.sign).not.toHaveBeenCalled()
+    expect(sessionMocks.createUserSession).not.toHaveBeenCalled()
+  })
+
+  it.each(['55P03', '40P01', '57014', '40001', 'Query read timeout'])('rethrows retryable database failure %s from shared admission', async code => {
+    const error = code === 'Query read timeout' ? new Error(code) : Object.assign(new Error('synthetic database refusal'), { code })
+    jwtMocks.verify.mockReturnValue({ userId: 'u-refresh', iat: 1, exp: 9_999_999_999 })
+    stubPoolForAuthReads({ userRow: refreshableUserRow('u-refresh') })
+    const query = lockedRenewal(true, 3)
+    const respond = query.getMockImplementation()!
+    query.mockImplementation(async sql => {
+      if (sql.includes('pg_advisory_xact_lock_shared')) throw error
+      return respond(sql)
+    })
+
+    await expect(new AuthService().refreshToken('old-token')).rejects.toBe(error)
+    expect(query.mock.calls.at(-1)?.[0]).toContain('pg_advisory_xact_lock_shared')
     expect(jwtMocks.sign).not.toHaveBeenCalled()
     expect(sessionMocks.createUserSession).not.toHaveBeenCalled()
   })

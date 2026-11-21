@@ -39,6 +39,7 @@ function fakeClient(failOn: (sql: string, afterLockTable: boolean) => boolean) {
       seen.push(sql)
       if (failOn(sql, afterLockTable)) throw statementTimeout()
       if (sql.startsWith('SELECT user_id FROM dingtalk_login_repairs')) return { rows: [{ user_id: 'synthetic-user' }] }
+      if (sql.includes('SELECT DISTINCT hashtextextended')) return { rows: [{ key: '-1' }, { key: '1' }] }
       return { rows: [] }
     }),
   }
@@ -71,19 +72,31 @@ describe('57014 classification around the repair lock phase', () => {
     ).rejects.toThrow(/^REPAIR_LOCK_BUSY$/)
   })
 
+  it.each(['rollback', 'release'] as const)('%s: a 57014 on a user admission key is REPAIR_LOCK_BUSY too', async (action) => {
+    const { client, seen } = fakeClient(sql => sql === 'SELECT pg_advisory_xact_lock($1::bigint)')
+    db.transaction.mockImplementation(async (fn: (c: unknown) => unknown) => fn(client))
+    await expect(
+      run[action]('synthetic-id', 'synthetic-actor', 'synthetic-digest', action, 'synthetic-password'),
+    ).rejects.toThrow(/^REPAIR_LOCK_BUSY$/)
+    expect(seen.some(sql => sql.includes('SELECT DISTINCT hashtextextended'))).toBe(true)
+    expect(seen.some(sql => /FOR UPDATE/.test(sql))).toBe(false)
+  })
+
   it.each(['rollback', 'release'] as const)(
     '%s: a 57014 on the first statement after the lock phase is not mapped by the module',
     async (action) => {
-      // After LOCK TABLE the lock phase only takes the user row locks; the first other statement is outside it.
-      const { client, seen } = fakeClient((sql, afterLockTable) => afterLockTable && !/FOR UPDATE/.test(sql))
+      // After LOCK TABLE, user admission keys and row locks are still inside the lock phase.
+      const userLockPhase = /SELECT DISTINCT hashtextextended|pg_advisory_xact_lock\(\$1::bigint\)|FOR UPDATE/
+      const { client, seen } = fakeClient((sql, afterLockTable) => afterLockTable && !userLockPhase.test(sql))
       db.transaction.mockImplementation(async (fn: (c: unknown) => unknown) => fn(client))
       const error = await run[action]('synthetic-id', 'synthetic-actor', 'synthetic-digest', action, 'synthetic-password').catch(
         (e) => e,
       )
       expect(error).toMatchObject({ code: '57014', message: 'canceling statement due to statement timeout' })
       expect(classifyRepairFailure(error)).toEqual({ code: 'REPAIR_STATEMENT_TIMEOUT', exit: 1 })
-      // The lock phase completed (advisory mutex, LOCK TABLE, user row locks) before the cancelled statement.
+      // The lock phase completed (advisory mutex, LOCK TABLE, user keys and row locks) before cancellation.
       expect(seen.some((s) => s.startsWith('LOCK TABLE '))).toBe(true)
+      expect(seen.filter(s => s === 'SELECT pg_advisory_xact_lock($1::bigint)')).toHaveLength(2)
       expect(seen.filter((s) => /FOR UPDATE/.test(s)).length).toBeGreaterThan(0)
       expect(seen.at(-1)).not.toMatch(/FOR UPDATE|^LOCK TABLE|pg_advisory_xact_lock/)
     },

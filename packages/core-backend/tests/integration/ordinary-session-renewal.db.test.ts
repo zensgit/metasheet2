@@ -6,6 +6,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { Pool, type PoolClient } from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AuthService, type User } from '../../src/auth/AuthService'
+import { poolManager } from '../../src/integration/db/connection-pool'
 import { runtimeJwtSecret } from '../helpers/runtime-jwt-secret'
 
 const EXPECT_DB = process.env.EXPECT_DB === '1'
@@ -142,6 +143,75 @@ dbSuite('ordinary session renewal against PostgreSQL', () => {
     expect(await auth.switchOrdinarySessionOrg(token, user, orgId, {})).toEqual({ kind: 'changed' })
     const result = await pool.query('SELECT expires_at < now() AS expired FROM user_sessions WHERE id=$1', [sid])
     expect(result.rows).toEqual([{ expired: true }])
+  })
+
+  for (const kind of ['refresh', 'switch'] as const) {
+    it.each(['cutoff', 'sid'] as const)(`${kind} rejects an unexpired JWT at a revoked %s before attempting any user lock`, async reason => {
+      const issuedAt = Math.floor(Date.now() / 1000) - 5
+      const token = auth.createToken(user, { sid, issuedAt })
+      expect(auth.readTokenPayload(token)?.exp).toBeGreaterThan(Date.now() / 1000 + 300)
+      await pool.query("UPDATE user_sessions SET expires_at=clock_timestamp()+interval '1 hour' WHERE id=$1", [sid])
+      if (reason === 'cutoff') {
+        await pool.query('INSERT INTO user_session_revocations(user_id,revoked_after) VALUES($1,to_timestamp($2))', [user.id, issuedAt])
+      } else {
+        await pool.query('UPDATE user_sessions SET revoked_at=clock_timestamp() WHERE id=$1', [sid])
+      }
+      const manager = poolManager.get(), original = manager.transaction.bind(manager)
+      const attempts: string[] = []
+      const spy = vi.spyOn(manager, 'transaction').mockImplementation(callback => original(async client => {
+        const run = client.query.bind(client)
+        client.query = (async (...args: Parameters<typeof client.query>) => {
+          const sql = typeof args[0] === 'string' ? args[0] : args[0].text
+          if (/pg_advisory_(?:xact_)?lock|FROM\s+users\b[\s\S]*FOR\s+(?:SHARE|UPDATE)/i.test(sql)) attempts.push(sql)
+          return run(...args)
+        }) as typeof client.query
+        return callback(client)
+      }))
+      try {
+        expect(await renew(kind, token)).toBeNull()
+        expect(attempts).toEqual([])
+      } finally { spy.mockRestore() }
+    })
+  }
+
+  it('renews an expired session row using an unexpired input JWT', async () => {
+    const token = auth.createToken(user, { sid })
+    expect(auth.readTokenPayload(token)?.exp).toBeGreaterThan(Date.now() / 1000 + 300)
+    expect((await pool.query('SELECT expires_at < clock_timestamp() AS expired FROM user_sessions WHERE id=$1', [sid])).rows)
+      .toEqual([{ expired: true }])
+    const renewed = await auth.refreshToken(token)
+    expect(renewed).toEqual(expect.any(String))
+    expect((await auth.verifyToken(renewed!))?.id).toBe(user.id)
+    expect((await pool.query('SELECT expires_at > clock_timestamp() AS live FROM user_sessions WHERE id=$1', [sid])).rows)
+      .toEqual([{ live: true }])
+  })
+
+  it('accepts an expired input JWT while its session row is still unexpired', async () => {
+    const token = original('refresh', true)
+    expect(auth.readTokenPayload(token, { ignoreExpiration: true })?.exp).toBeLessThan(Date.now() / 1000)
+    await pool.query("UPDATE user_sessions SET expires_at=clock_timestamp()+interval '1 hour' WHERE id=$1", [sid])
+    expect((await pool.query('SELECT expires_at > clock_timestamp() AS live FROM user_sessions WHERE id=$1', [sid])).rows)
+      .toEqual([{ live: true }])
+    const renewed = await auth.refreshToken(token)
+    expect(renewed).toEqual(expect.any(String))
+    expect((await auth.verifyToken(renewed!))?.id).toBe(user.id)
+  })
+
+  it.each(['user', 'session'] as const)('returns retryable HTTP 503 when refresh times out on the %s row', async blocked => {
+    const { authRouter } = await import('../../src/routes/auth')
+    const app = express().use(express.json()).use('/api/auth', authRouter)
+    const token = auth.createToken(user, { sid }), holder = await pool.connect()
+    try {
+      await holder.query('BEGIN')
+      if (blocked === 'user') await holder.query('SELECT id FROM users WHERE id=$1 FOR UPDATE', [user.id])
+      else await holder.query('SELECT id FROM user_sessions WHERE id=$1 FOR UPDATE', [sid])
+      const response = await request(app).post('/api/auth/refresh-token').send({ token })
+      expect(response.status).toBe(503)
+      expect(response.headers['retry-after']).toBe('1')
+      expect(response.body).toEqual({ success: false, error: 'Token refresh unavailable', code: 'SESSION_REFRESH_UNAVAILABLE' })
+      expect((await holder.query('SELECT expires_at < clock_timestamp() AS expired FROM user_sessions WHERE id=$1', [sid])).rows)
+        .toEqual([{ expired: true }])
+    } finally { await holder.query('ROLLBACK'); holder.release() }
   })
 
   it('uses an inclusive cutoff and accepts a subsequently issued live credential', async () => {
