@@ -248,6 +248,56 @@ describe.each(manifest.snapshots)('measured PostgreSQL $major authorization cata
     expect(isSupportedAuthorizationOperationSchema(originalWithStack)).toBe(false)
   })
 
+  // The cases above show that a missing stack addition is refused. These show that a changed one is:
+  // every row of D21, of its version table and of the Y6 guard is compared by content, and a row that
+  // only resembles a registered one is not set aside with them.
+  it.each([
+    ['a disabled D21 trigger', (rows: CatalogRow[][]) => { rows[4].find(row => row.tgname === 'trg_user_roles_zz_authz_subject_version')!.tgenabled = 'D' }],
+    ['a changed D21 trigger definition', (rows: CatalogRow[][]) => { const row = rows[4].find(r => r.tgname === 'trg_users_zz_authz_subject_version_update')!; row.definition = `${String(row.definition)} ` }],
+    ['a changed D21 function body', (rows: CatalogRow[][]) => { const row = rows[7].find(r => r.proname === 'metasheet_authz_bump_subject_authorization_version')!; row.definition = `${String(row.definition)}\n` }],
+    ['a D21 function made SECURITY DEFINER', (rows: CatalogRow[][]) => { rows[7].find(row => row.proname === 'metasheet_authz_bump_sheet_permission_version')!.prosecdef = true }],
+    ['a registered D21 trigger name on another table', (rows: CatalogRow[][]) => { rows[4].push({ ...rows[4].find(row => row.tgname === 'trg_user_roles_zz_authz_subject_version')!, relname: 'roles' }) }],
+  ] as Array<[string, (rows: CatalogRow[][]) => void]>)(`refuses %s (PG${major})`, async (_name, change) => {
+    const rows = structuredClone(withStack(snapshot.rows))
+    change(rows)
+    const result = await inspectCatalog(snapshot.database, rows)
+    // B2, N78, the Y6 guard and the base are untouched: D21 alone refuses it.
+    expect(result.baseDigest).toBe(snapshot.digests.base)
+    expect(result.d21Ready).toBe(false)
+    expect(isSupportedAuthorizationOperationSchema(result)).toBe(false)
+  })
+
+  it.each([
+    ['a retyped key column', (table: CatalogRow[][]) => { table[1].find(row => row.attname === 'subject_id')!.type = 'character varying' }],
+    ['a nullable version column', (table: CatalogRow[][]) => { table[1].find(row => row.attname === 'version')!.attnotnull = false }],
+    ['no primary key', (table: CatalogRow[][]) => { table[2].length = 0; table[3].length = 0 }],
+    ['a trigger of its own', (table: CatalogRow[][]) => { table[4].push({ relname: 'subject_authorization_versions', tgname: 'unregistered_trigger', tgenabled: 'O' }) }],
+    ['row security', (table: CatalogRow[][]) => { table[0][0].relrowsecurity = true }],
+  ] as Array<[string, (table: CatalogRow[][]) => void]>)(`refuses a D21 version table with %s (PG${major})`, async (_name, change) => {
+    const versionTable = structuredClone(stack.d21.versionTable)
+    change(versionTable)
+    const result = await inspectCatalog(snapshot.database, withStack(snapshot.rows), versionTable)
+    expect(result.baseDigest).toBe(snapshot.digests.base)
+    expect(result.d21Ready).toBe(false)
+    expect(isSupportedAuthorizationOperationSchema(result)).toBe(false)
+  })
+
+  it.each([
+    ['a changed Y6 guard body', (rows: CatalogRow[][]) => { const row = rows[7].find(r => r.proname === 'integration_yida_generated_layout_immutable_guard')!; row.definition = `${String(row.definition)}\n` }],
+    ['a Y6 guard owned by an untrusted role', (rows: CatalogRow[][]) => { rows[7].find(row => row.proname === 'integration_yida_generated_layout_immutable_guard')!.owner_trusted = false }],
+    ['a trigger that only resembles D21', (rows: CatalogRow[][]) => { rows[4].push({ ...rows[4].find(row => row.tgname === 'trg_user_roles_zz_authz_subject_version')!, tgname: 'trg_user_roles_zz_authz_subject_version_extra' }) }],
+    ['a function that only resembles D21', (rows: CatalogRow[][]) => { rows[7].push({ ...rows[7].find(row => row.proname === 'metasheet_authz_bump_subject_authorization_version')!, proname: 'metasheet_authz_bump_subject_authorization_version_v2' }) }],
+    ['a function that only resembles the Y6 guard', (rows: CatalogRow[][]) => { rows[7].push({ ...rows[7].find(row => row.proname === 'integration_yida_generated_layout_immutable_guard')!, proname: 'integration_yida_generated_layout_immutable_guard_v2' }) }],
+  ] as Array<[string, (rows: CatalogRow[][]) => void]>)(`refuses %s although D21 is intact (PG${major})`, async (_name, change) => {
+    const rows = structuredClone(withStack(snapshot.rows))
+    change(rows)
+    const result = await inspectCatalog(snapshot.database, rows)
+    // D21 still matches; the row is caught by the Y6 digest, by the base digest or by the ownership check.
+    expect(result.d21Ready).toBe(true)
+    expect(result.baseDigest === snapshot.digests.base && result.ordinary).toBe(false)
+    expect(isSupportedAuthorizationOperationSchema(result)).toBe(false)
+  })
+
   it('rejects N78 without the complete B2 addition', async () => {
     const result = await inspectCatalog(snapshot.database, withStack(withoutPartition(snapshot, snapshot.partitions.b2)))
     expect(result.d21Ready).toBe(true)

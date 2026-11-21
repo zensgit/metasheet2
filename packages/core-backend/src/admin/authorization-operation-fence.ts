@@ -124,7 +124,8 @@ function belongsToB2Catalog(section: number, row: CatalogRow): boolean {
 // PostgreSQL version/locale was qualified with. On this base path an absent or partial D21
 // addition is refused: this code bumps subject_authorization_versions, so a database that lost
 // D21's triggers or functions is not one it was qualified against. (A database matching one of the
-// pre-B2 exact profiles above has neither addition and is unchanged by this.)
+// pre-B2 exact profiles above has neither addition. Its exact digest is still recognised, and it is
+// refused all the same: `d21Ready` is required on every path, see isSupportedAuthorizationOperationSchema.)
 const D21_CATALOG_ADDITIONS = '829ae23e6dab95d660cb84902adcafe02dc982109568f23b1e0627760f73bb76'
 /**
  * The D21 version table is profiled with the same table-scoped catalog queries as the fenced tables
