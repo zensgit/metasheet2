@@ -379,13 +379,35 @@ test('examples are local, parseable, and provide two distinct hand-authored layo
 
 // R-71 ⑦.4 (A8): the planner may import exactly one module, the material-code leaf, and every module
 // reached from it (the leaf, which must import nothing) is scanned the same way: no import or require
-// of any kind, no network primitive. A new import anywhere in that closure turns this red.
+// of any kind, no network primitive. Three independent counts must each equal the allowlist:
+//   - specifiers of a static import or re-export that starts a line, or follows a statement end (';' or '}'), a
+//     block opening or a block comment on the same line (Y6a verifier LOW-1, mutant MK4:
+//     `function fail(kind) { … }; import { createHash } from 'node:crypto'`);
+//   - import statements at any of those statement starts (a side-effect `import 'x'` has no from-clause);
+//   - from-clauses anywhere in the source: `from`, then whitespace, newlines or block comments, then a quote. This
+//     catches what the line-bound specifier scan cannot see, e.g. a multi-line `export {<newline>} from 'x'` or
+//     `export * from /* c */ 'x'` (Y6 verifier r1, mutants V9g/V9h). It also counts prose in comments, which can
+//     only make the pin stricter (neither scanned file has any).
+// A dynamic import or require is refused with whitespace, a block comment or a line comment before its parenthesis
+// (verifier r2 L3, mutants V9j/V9l). Neither file may name the host's module loader without import syntax:
+// `process` (as a word; `processRule` is another identifier), `getBuiltinModule` and `globalThis` are refused on both
+// (mutants V9k/V9m: `globalThis.process?.getBuiltinModule?.('fs')`). What this static scan still does not see is code
+// that builds such a name at run time (eval, Function, a computed property on another global object). For the leaf,
+// the vm-realm test in yida-material-code.test.cjs runs it in a context that has no process, require, Buffer or
+// module, so a run-time lookup finds nothing to load with; the planner has no such test and relies on review there.
 const PLANNER_IMPORT_ALLOWLIST = ['./yida-material-code.mjs']
 const NETWORK_CALL = /\b(?:fetch|XMLHttpRequest|WebSocket|sendBeacon|EventSource)\s*\(|\bnew\s+(?:XMLHttpRequest|WebSocket|EventSource)\b/
+const STATEMENT_START = String.raw`(?:^|[;{}]|\*\/)\s*`
+const STATIC_IMPORT = new RegExp(STATEMENT_START + String.raw`(?:import|export)\b[^\n]*?\bfrom\s*['"]([^'"]+)['"]|`
+  + STATEMENT_START + String.raw`import\s*['"]([^'"]+)['"]`, 'gm')
+const IMPORT_STATEMENT = new RegExp(STATEMENT_START + String.raw`import\b(?!\s*[(.])`, 'gm')
+const FROM_CLAUSE = /\bfrom(?:\s|\/\*[\s\S]*?\*\/)*['"]/g
+const DYNAMIC_IMPORT = /\b(?:import|require)(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\n]*)*\(/
+const HOST_LOADER = /\b(?:process|getBuiltinModule|globalThis)\b/
 function moduleImports(source) {
-  const statements = [...source.matchAll(/^\s*(?:import|export)\b[^\n]*?\bfrom\s*['"]([^'"]+)['"]|^\s*import\s*['"]([^'"]+)['"]/gm)]
-  return { specifiers: statements.map((match) => match[1] ?? match[2]), dynamic: /\bimport\s*\(|\brequire\s*\(/.test(source),
-    importLines: (source.match(/^\s*import\b/gm) || []).length }
+  const statements = [...source.matchAll(STATIC_IMPORT)]
+  return { specifiers: statements.map((match) => match[1] ?? match[2]), dynamic: DYNAMIC_IMPORT.test(source),
+    importLines: (source.match(IMPORT_STATEMENT) || []).length, fromClauses: (source.match(FROM_CLAUSE) || []).length }
 }
 function importClosure(entryPath, allowlist) {
   const scanned = []
@@ -395,10 +417,13 @@ function importClosure(entryPath, allowlist) {
     if (scanned.includes(file)) continue
     scanned.push(file)
     const source = fs.readFileSync(file, 'utf8')
-    const { specifiers, dynamic, importLines } = moduleImports(source)
+    const { specifiers, dynamic, importLines, fromClauses } = moduleImports(source)
     assert.deepEqual(specifiers, allowed, `imports of ${path.basename(file)}`)
     assert.equal(importLines, allowed.length, `import statements of ${path.basename(file)}`)
+    // Every allowed import is an `import { … } from '…'` statement, so each has exactly one from-clause.
+    assert.equal(fromClauses, allowed.length, `from-clauses of ${path.basename(file)}`)
     assert.equal(dynamic, false, `dynamic import or require in ${path.basename(file)}`)
+    assert.doesNotMatch(source, HOST_LOADER, `host module loader named in ${path.basename(file)}`)
     assert.doesNotMatch(source, NETWORK_CALL, path.basename(file))
     for (const specifier of specifiers) queue.push([path.resolve(path.dirname(file), specifier), []])
   }
@@ -945,4 +970,40 @@ test('source binding (Y4): transformDependencies names the columns ONE entry rea
   }
   assert.throws(() => transformDependencies(copy), { code: 'YIDA_STATIC_CONFIG_INVALID' })
   assert.ok(new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID'))
+})
+
+test('R-71 ⑦.4 (Y6): transformDependencies of a generated entry are the sources of its field parts, hash members and preset inputs', async () => {
+  const { createYidaTransformExample, transformDependencies, generatedTemplateDependencies, validateYidaStaticConfig } = await modulePromise
+  const example = createYidaTransformExample()
+  const preset = example.config.fieldMap.find((entry) => entry.transform === 'generated')
+  // The shipped material template: one preset part reading sourceLineId (idempotencyKey) and project (projectNo).
+  const presetColumns = transformDependencies(preset, example.config)
+  assert.deepEqual(presetColumns, ['idempotencyKey', 'projectNo'])
+  assert.equal(Object.isFrozen(presetColumns), true)
+  // A field part, a literal and a hash over the key: every member resolved through its direct target, sorted by code
+  // point, de-duplicated (materialGrade is both a field part and a hash member), literals read nothing.
+  const layout = structuredClone(example.config)
+  layout.fieldMap.at(-1).template = [{ field: 'materialGrade' }, { literal: '/' }, { hash: [...layout.businessKey, 'materialTypeText'], form: 'uuid-32' }]
+  const normalized = validateYidaStaticConfig(layout).normalized
+  const hashed = transformDependencies(normalized.fieldMap.at(-1), normalized)
+  assert.deepEqual(hashed, ['blankType', 'componentCode', 'componentName', 'componentSpec', 'material', 'parentComponentCode', 'projectNo', 'sourceVersion'])
+  assert.equal(Object.isFrozen(hashed), true)
+  // It is the same answer as the generated reader's own export, and the config's union covers it.
+  assert.deepEqual(hashed, generatedTemplateDependencies(normalized.fieldMap.at(-1), normalized))
+  // A field part on a column that is NOT a hash member or preset input is read too (verifier r2 L2, mutant V5c: the
+  // dependency list without field parts). materialTypeText (blankType) is not a key; the hash covers only the keys.
+  const decorated = structuredClone(example.config)
+  decorated.fieldMap.at(-1).template = [{ field: 'materialTypeText' }, { literal: '/' }, { hash: [...decorated.businessKey], form: 'uuid-36' }]
+  const decoratedNormalized = validateYidaStaticConfig(decorated).normalized
+  const fieldRead = transformDependencies(decoratedNormalized.fieldMap.at(-1), decoratedNormalized)
+  assert.deepEqual(fieldRead, ['blankType', 'componentCode', 'componentName', 'componentSpec', 'material', 'parentComponentCode', 'projectNo', 'sourceVersion'])
+  assert.deepEqual(generatedTemplateDependencies(decoratedNormalized.fieldMap.at(-1), decoratedNormalized), fieldRead)
+  // The same field part next to the preset: the preset reads two columns, the field part a third.
+  decorated.fieldMap.at(-1).template = [{ preset: 'material-code-v1', rowIdOf: 'sourceLineId', projectOf: 'project' }, { literal: '/' }, { field: 'materialTypeText' }]
+  const presetNormalized = validateYidaStaticConfig(decorated).normalized
+  assert.deepEqual(transformDependencies(presetNormalized.fieldMap.at(-1), presetNormalized), ['blankType', 'idempotencyKey', 'projectNo'])
+  // Without its config, or against a config that is not its own, a generated entry is refused (never an empty list).
+  for (const config of [undefined, null, example.config, transformLayout(TRANSFORM_COLUMN_CASES.direct.entry)]) {
+    assert.throws(() => transformDependencies(normalized.fieldMap.at(-1), config), { code: 'YIDA_STATIC_CONFIG_INVALID' })
+  }
 })

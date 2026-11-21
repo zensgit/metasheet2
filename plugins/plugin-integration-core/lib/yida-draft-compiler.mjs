@@ -9,7 +9,9 @@ import { buildYidaProjectAllocationPreview, YidaAllocationError } from './stock-
 const { stableCanonicalStringify, deepCloneFrozenCanonical } = canonical
 const INPUT_BUDGET = Object.freeze({ bytes: 2 * 1024 * 1024, depth: 12, nodes: 20000 })
 const OUTPUT_BUDGET = Object.freeze({ bytes: 4 * 1024 * 1024, depth: 16, nodes: 50000 })
-const ERROR_KINDS = new Set(['INPUT', 'CONFIG', 'PLAN', 'LIMIT'])
+// The four SOURCE_* kinds are the deterministic source-validation refusals of the persistent send entry (ROW_PROBLEM).
+const ERROR_KINDS = new Set(['INPUT', 'CONFIG', 'PLAN', 'LIMIT',
+  'SOURCE_UNBOUND', 'SOURCE_PROJECT_MISMATCH', 'SOURCE_KEY_MISMATCH', 'SOURCE_KEY_FIELD_MISMATCH'])
 const ownErrors = new WeakMap()
 // Source binding (design baseline v2.3 §7.2, decision D1 a′). The host attaches it ONLY when the rows were
 // read by the server from a registered project sheet; a pasted rowsText never carries one. The binding is
@@ -20,6 +22,25 @@ const PER_ROW_BINDING_KEYS = ['sheetId', 'recordId', 'keyFieldId', 'keyValue', '
 const IDENTIFIER = /^[\p{L}\p{N}_-]{1,128}$/u
 const CONTROL = /[\u0000-\u001f\u007f]/u
 const MAX_KEY_VALUE_LENGTH = 4096
+// Row problems of the persistent send entry (addendum 2026-11-06; v2.3 §7.1). Each refuses the WHOLE draft with its own
+// closed, values-free kind (slice YE, external review recommendation 2, coordinator ruling 2026-11-08; before it, all four
+// were the generic PLAN and answered the send authority's retryable-looking 503 UNAVAILABLE). They are deterministic: the
+// same config, rows and binding are refused again, so the send authority answers each with a fixed, non-retryable
+// validation code at draft creation (HTTP 422, YIDA_SEND_APPROVAL_<kind>); yidaDraftPlanErrorKind() is its only reader.
+//   SOURCE_UNBOUND           - a generated entry on a row the server did not read (no source binding).
+//   SOURCE_PROJECT_MISMATCH  - a bound row whose preset projectOf cell is not the project its binding names
+//                              (「同码必同身份」 in original mode, Y4-05 option a; in a split it holds by construction).
+//   SOURCE_KEY_MISMATCH      - a bound row whose preset rowIdOf cell is not the key value its binding names (the
+//                              key the server read): a preset reading another column could give one code to two
+//                              identities (one component under two parents), and no fence would refuse the second.
+//   SOURCE_KEY_FIELD_MISMATCH - a bound draft whose preset rowIdOf does not NAME the bound key field (the direct target
+//                              whose source column the binding maps to keyFieldId): a column that merely holds the key's
+//                              value today may hold another value tomorrow (external review 2026-11-08, hardening).
+//   Reachability (YE): parseSourceBinding refuses a binding whose keyValue is not the row's key cell and the structural
+//   SOURCE_KEY_FIELD_MISMATCH rule runs first, so SOURCE_KEY_MISMATCH fires only if the planner's direct string
+//   projection ever stopped copying the key cell verbatim; it stays as the second, per-row check.
+const ROW_PROBLEM = Object.freeze({ SOURCE_UNBOUND: 'SOURCE_UNBOUND', SOURCE_PROJECT_MISMATCH: 'SOURCE_PROJECT_MISMATCH',
+  SOURCE_KEY_MISMATCH: 'SOURCE_KEY_MISMATCH', SOURCE_KEY_FIELD_MISMATCH: 'SOURCE_KEY_FIELD_MISMATCH' })
 
 export class YidaDraftPlanError extends Error {
   constructor(kind = 'INPUT') {
@@ -29,6 +50,12 @@ export class YidaDraftPlanError extends Error {
     this.code = this.message
     ownErrors.set(this, fixed)
   }
+}
+
+// The fixed kind of this compiler's own error (a WeakMap read: never a message, code property, prototype or Proxy trap
+// of the value), or null for anything else. Consumers classify compile refusals only through this reader.
+export function yidaDraftPlanErrorKind(error) {
+  return ownErrors.get(error) ?? null
 }
 
 function fail(kind) { throw new YidaDraftPlanError(kind) }
@@ -156,7 +183,9 @@ function parseSourceBinding(value, sourceRows) {
   // every record carries that project, so in `original` mode every row's identity project is the sheet's.
   // A binding whose records name different projects is not something the sheet source can produce.
   if (new Set(records.map(record => record.projectNo)).size !== 1) fail('INPUT')
-  return { sheetId, keyFieldId, fieldBindings, records }
+  // keyAlias is the planner column the key field is bound to (unique: field ids are unique per binding); the preset
+  // hook below compares rowIdOf's source column with it. It never enters a row spec or a digest.
+  return { sheetId, keyFieldId, keyAlias, fieldBindings, records }
 }
 
 // Which real field ids each target field depends on: direct sources, copy primaries, concat parts, through
@@ -219,18 +248,36 @@ function compile(input, versions, persistent = false) {
     const allocation = owned.allocation
     if (allocation?.mode === 'original') exactRecord(allocation, ['mode'])
     else {
-      exactRecord(allocation, ['mode', 'projects', 'projectField', 'quantityField'])
+      // Q4 (R-88): quantityRounding is optional; the allocation module owns its values and mode pairing.
+      exactRecord(allocation, Object.hasOwn(allocation ?? {}, 'quantityRounding')
+        ? ['mode', 'projects', 'projectField', 'quantityField', 'quantityRounding']
+        : ['mode', 'projects', 'projectField', 'quantityField'])
       if (!['equal_integer', 'equal_decimal_exact'].includes(allocation.mode)) fail('INPUT')
     }
+    // Only the non-default rounding enters the plan digest: absent and 'exact' are the same rule, so every
+    // stored plan_digest and golden stays byte-identical, while a legacy-1dp plan can never share a digest with
+    // an exact one even when the rounded shares happen to be exact.
+    const legacyRounding = allocation.mode !== 'original' && allocation.quantityRounding === 'legacy-1dp'
     const { plan, sourceRows, origins } = compilePlan(config, owned.rowsText, allocation)
     assertValidPlan(plan, config.intent)
     const binding = hasBinding ? parseSourceBinding(owned.sourceBinding, sourceRows) : null
     // The persistent send entry refuses a generated field on an unbound row, whatever its template (addendum
-    // 2026-11-06; row problem SOURCE_UNBOUND → PLAN). A binding covers every row of a draft or none, so this is per
-    // draft. Main's R-71 ⑦.4 core (#6777) admits the `generated` transform, so this check is live. The local
-    // recompute (compileYidaLocalDraft) needs no binding.
-    if (persistent && binding === null && config.fieldMap.some(entry => entry.transform === 'generated')) fail('PLAN')
+    // 2026-11-06; row problem SOURCE_UNBOUND, its own kind since slice YE). A binding covers every row of a draft or
+    // none, so this is per draft. Main's R-71 ⑦.4 core (#6777) admits the `generated` transform, so this check is
+    // live. The local recompute (compileYidaLocalDraft) needs no binding. This is an extra check, not the uniqueness
+    // guarantee (v2.3 §3.3: the fences are).
+    if (persistent && binding === null && config.fieldMap.some(entry => entry.transform === 'generated')) fail(ROW_PROBLEM.SOURCE_UNBOUND)
     const fieldDependencies = binding ? dependenciesByTarget(config, binding.fieldBindings) : null
+    // The preset parts: rowIdOf and projectOf name the two inputs the code is minted from (G1 makes projectOf a key
+    // target; the hook below ties both to the row's creation identity).
+    const presetParts = config.fieldMap.filter(entry => entry.transform === 'generated')
+      .flatMap(entry => entry.template.filter(part => Object.hasOwn(part, 'preset')))
+    // Structural half of 「同码必同身份」 (hardening, 2026-11-08): on a bound draft every preset's rowIdOf must NAME the bound
+    // key field — the direct target whose source column the binding maps to keyFieldId — not merely a column that holds
+    // the same value in these rows (the per-row value hook below stays as the second check). Per draft: the template and
+    // the binding are draft-wide. G1 already makes rowIdOf a string direct target, so the primary exists.
+    if (binding && presetParts.some(part => config.fieldMap.find(entry => entry.transform === 'direct' && entry.target === part.rowIdOf)?.source
+      !== binding.keyAlias)) fail(ROW_PROBLEM.SOURCE_KEY_FIELD_MISMATCH)
     const source = { config, rowsText: owned.rowsText, allocation, ...(hasBinding ? { sourceBinding: owned.sourceBinding } : {}) }
     const locator = config.target
     const locatorDigest = hashCanonical({ version: 1, kind: 'yida-local-locator', ...locator })
@@ -248,16 +295,36 @@ function compile(input, versions, persistent = false) {
     const keyDefinitionDigest = hashCanonical(keyDefinition)
     // A bound row adds its two digests and its per-row binding (§7.2); an unbound row's spec is byte-identical
     // to the pre-binding shape, so every stored unbound plan_digest and every v2 golden stays as it was.
-    const rowSpecs = plan.rows.map(row => ({
-      index: row.index,
-      businessKeyDigest: hash(row.localBusinessKey),
-      payloadDigest: hashCanonical({
-        intent: config.intent, formUuid: locator.formUuid,
-        data: { ...row.protocolPreview.data,
-          [config.intent === 'create' ? 'formDataJson' : 'updateFormDataJson']: stableCanonicalStringify(row.payload) },
-      }),
-      ...(binding ? bindRow(binding, origins[row.index], fieldDependencies) : {}),
-    }))
+    const rowSpecs = plan.rows.map(row => {
+      const bound = binding ? bindRow(binding, origins[row.index], fieldDependencies) : null
+      // 「同码必同身份」: a bound row's material code is minted from its own rowIdOf and projectOf cells, and its creation
+      // identity is (keyValue, projectNo) of its binding. Both cells must be exactly those two values, so the preset
+      // code is WLBH(identity) and — under the ONE generated layout the send authority seals per target (external review
+      // P1, 2026-11-08: two templates of one target can place decoration around the identity part so that two identities
+      // share one code) — one code always means one identity:
+      //   - projectOf = the identity project (the registry's project in original mode, the allocated one in a split);
+      //     otherwise one identity could carry another project's code;
+      //   - rowIdOf = the key value the server read; otherwise a preset reading another column (e.g. a drawing number
+      //     shared by one component under two parents) gives two identities one code, and no fence applies.
+      // Compared verbatim: both sides refuse padding and control characters (the compiler's text(), the planner's
+      // identity text).
+      if (bound && presetParts.some(part => row.payload[part.projectOf] !== bound.sourceBinding.projectNo)) {
+        fail(ROW_PROBLEM.SOURCE_PROJECT_MISMATCH)
+      }
+      if (bound && presetParts.some(part => row.payload[part.rowIdOf] !== bound.sourceBinding.keyValue)) {
+        fail(ROW_PROBLEM.SOURCE_KEY_MISMATCH)
+      }
+      return {
+        index: row.index,
+        businessKeyDigest: hash(row.localBusinessKey),
+        payloadDigest: hashCanonical({
+          intent: config.intent, formUuid: locator.formUuid,
+          data: { ...row.protocolPreview.data,
+            [config.intent === 'create' ? 'formDataJson' : 'updateFormDataJson']: stableCanonicalStringify(row.payload) },
+        }),
+        ...(bound ?? {}),
+      }
+    })
     // R-71 ⑦.3 (B2): only a v3 plan carries the mapping marker, so the digest covers the mapping
     // version while every v2 digest input (and so every stored v2 plan_digest) stays byte-identical.
     // The key definition and row specs stay version-independent: a v3 draft of a v2 layout keeps
@@ -267,6 +334,7 @@ function compile(input, versions, persistent = false) {
     const planDigest = hashCanonical({
       version: 1, kind: 'yida-local-plan', locator, keyDefinition, intent: config.intent,
       ...(config.version === 3 ? { mapping: 3 } : {}),
+      ...(legacyRounding ? { quantityRounding: 'legacy-1dp' } : {}),
       rows: rowSpecs.map(({ businessKeyDigest, payloadDigest, sourceRecordDigest, creationIdentityDigest }) => ({
         businessKeyDigest, payloadDigest,
         ...(sourceRecordDigest === undefined ? {} : { sourceRecordDigest, creationIdentityDigest }),
@@ -289,7 +357,7 @@ export function compileYidaDraft(input) {
 
 // R-71 ⑦.3: the persistent send path (draft store, send authority, owner send port) compiles v2
 // or v3. A v3 draft can only go to a target whose sealed key definition it matches exactly.
-// It is the one entry that refuses a generated field on an unbound row (SOURCE_UNBOUND → PLAN).
+// It is the one entry that refuses a generated field on an unbound row (kind SOURCE_UNBOUND).
 export function compileYidaSendDraft(input) {
   return compile(input, [2, 3], true)
 }
