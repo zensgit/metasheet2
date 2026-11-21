@@ -2,7 +2,8 @@
 
 // YiDa 发料确认日期回写 core (slice Y9a; design baseline v2.3 §7.3, frozen ⑦.4 plan §2.2 / §3).
 // Module-level tests with doubles: no PostgreSQL, no multitable host, no DingTalk / YiDa. The real-PG
-// versions of the crash tests (and the send-port hook, the owner route, the runtime wiring) are slice Y9.
+// versions of the crash tests (and the post-ACK hook in the host owner runtime, the owner route, the runtime
+// wiring) are slice Y9.
 //
 // The doubles model exactly what the module relies on:
 //   * the trace table: PRIMARY KEY (ledger_id) — a plain INSERT of a taken key throws 23505, the
@@ -79,8 +80,15 @@ function takeFailure(world, name) {
 // ── the world of doubles ─────────────────────────────────────────────────────────────────────────
 
 function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
-  const calls = { ledgerList: 0, rowRead: 0, registry: 0, open: 0, query: 0, patch: [], authority: 0, acquire: [], bump: [], trace: 0 }
+  const withAck = (rows) => rows.map((row) => {
+    const ack = world.audits.find((audit) => audit.ledgerId === row.id && audit.event === 'acknowledgement')
+    return { ...row, acknowledgedAt: ack ? ack.createdAt : null }
+  })
+  const calls = { ledgerList: 0, rowRead: 0, registry: 0, open: 0, query: 0, patch: [], beforeWrite: [], authority: 0, acquire: [], bump: [], trace: 0 }
   const world = { calls, env, authorityAllowed, formPosts: 0, tokenRequests: 0 }
+  // The order of the module's steps around the lease (Y9 r3): acquire, authority, query, traceProbe, beforeWrite, patch,
+  // traceInsert (with whether the lease was held), release; `bump` only if a generation bump ever ran (R-96 Plan A: never).
+  world.events = []
   // One-shot port failures: rowRead, registry, open, query, authority.
   world.failures = { rowRead: null, registry: null, open: null, query: null, authority: null }
 
@@ -127,10 +135,21 @@ function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
     async insertOneIfAbsent(table, row, { conflictColumns } = {}) {
       assert.equal(table, 'integration_yida_issue_confirm_writeback')
       assert.deepEqual(conflictColumns, ['ledger_id'])
+      world.events.push(['traceInsert', world.leases.size > 0])
       if (world.traceGate) await world.traceGate(row)
       if (world.trace.some((existing) => existing.ledger_id === row.ledger_id)) return []
       world.trace.push({ ...row })
+      // The INSERT committed; a hook may still lose its confirmation (throw) afterwards.
+      if (world.afterTraceInsert) await world.afterTraceInsert(row)
       return [{ ...row }]
+    },
+    // The re-check under the lease (createDb.selectOne on the primary key).
+    async selectOne(table, where) {
+      assert.equal(table, 'integration_yida_issue_confirm_writeback')
+      assert.deepEqual(Object.keys(where), ['ledger_id'])
+      world.events.push('traceProbe')
+      const found = world.trace.find((existing) => existing.ledger_id === where.ledger_id)
+      return found ? { ...found } : null
     },
   }
 
@@ -151,9 +170,21 @@ function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
         throw new writeLockModule.StockPreparationProjectWriteLockError(409, 'STOCK_PREP_PROJECT_WRITE_LOCKED', 'busy', {})
       }
       world.leases.add(scopeKey)
+      world.events.push('acquire')
       const guard = {
         beforeWriteCalls: 0,
-        async beforeWrite() { guard.beforeWriteCalls += 1 },
+        // The lease's pre-write holder check (the real lock re-reads the holder row, CAS): recorded with the
+        // number of patches issued so far, and refusable once through world.beforeWriteFailure.
+        async beforeWrite(input) {
+          world.events.push('beforeWrite')
+          guard.beforeWriteCalls += 1
+          calls.beforeWrite.push({ ...input, patchesBefore: calls.patch.length })
+          if (world.beforeWriteFailure) {
+            const failure = world.beforeWriteFailure
+            world.beforeWriteFailure = null
+            throw failure
+          }
+        },
         hostWriteFence() { return { lock: 'integration_stock_prep_project_write_lock', scopeKey, leaseId: 'lease-syn', fencingEpoch: 1, generationToken: 'gen-syn' } },
         async withHostWrite(write) { return write() },
         async hostFenceRefused() {
@@ -164,9 +195,10 @@ function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
         return await fn(guard)
       } finally {
         world.leases.delete(scopeKey)
+        world.events.push('release')
       }
     },
-    async bumpGeneration(scopeKey, options) { calls.bump.push({ scopeKey, ...options }) },
+    async bumpGeneration(scopeKey, options) { world.events.push('bump'); calls.bump.push({ scopeKey, ...options }) },
   }
 
   world.deps = () => ({
@@ -175,18 +207,30 @@ function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
     ledgerReader: {
       async list({ tenantId, ownerId, targetRefs, ledgerIds, limit }) {
         calls.ledgerList += 1
-        // What the Y9 SQL reader does: this tenant + owner, untraced, and either the named rows or the
-        // bounded selector (acknowledged, create, listed target, bound).
-        const rows = world.ledger
+        // What the Y9 SQL reader does for named rows: this tenant + owner, untraced, the named ones.
+        assert.ok(Array.isArray(ledgerIds), 'list is the named path only')
+        return withAck(world.ledger
           .filter((row) => row.tenantId === tenantId && row.ownerId === ownerId)
           .filter((row) => !world.trace.some((entry) => entry.ledger_id === row.id))
-          .filter((row) => ledgerIds ? ledgerIds.includes(row.id)
-            : row.status === 'acknowledged' && row.intent === 'create' && targetRefs.includes(row.targetRef) && row.sourceRecordDigest !== null)
-          .slice(0, limit)
-        return rows.map((row) => {
-          const ack = world.audits.find((audit) => audit.ledgerId === row.id && audit.event === 'acknowledgement')
-          return { ...row, acknowledgedAt: ack ? ack.createdAt : null }
-        })
+          .filter((row) => ledgerIds.includes(row.id))
+          .slice(0, limit))
+      },
+      async sweep({ tenantId, ownerId, targetRefs, after, limit }) {
+        calls.ledgerList += 1
+        // One sweep page: the bounded selector (acknowledged, create, listed target, bound, untraced), the listed
+        // targets in turn, ledger order inside a target, strictly after the cursor's row.
+        const candidates = targetRefs.flatMap((targetRef) => world.ledger
+          .filter((row) => row.tenantId === tenantId && row.ownerId === ownerId && row.targetRef === targetRef)
+          .filter((row) => !world.trace.some((entry) => entry.ledger_id === row.id))
+          .filter((row) => row.status === 'acknowledged' && row.intent === 'create' && row.sourceRecordDigest !== null))
+        // The sweep order over every row of the listed targets (traced or not), so a cursor row traced since is still a position.
+        const ordered = targetRefs.flatMap((targetRef) => world.ledger.filter((row) => row.tenantId === tenantId && row.ownerId === ownerId
+          && row.targetRef === targetRef))
+        const start = after ? ordered.findIndex((row) => row.id === after.id) : -1
+        const rest = after ? candidates.filter((row) => ordered.indexOf(row) > start) : candidates
+        const rows = withAck(rest.slice(0, limit))
+        const last = rows[rows.length - 1]
+        return { rows, next: rest.length > limit ? { targetRef: last.targetRef, at: SWEEP_AT, id: last.id } : null }
       },
     },
     rowSource: {
@@ -213,8 +257,12 @@ function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
         if (openFailure) throw openFailure
         const rows = world.sheets.get(project.sheetId) || []
         return {
+          // The adapter's copy of the host surface's flag (yida-issue-confirm-writeback-ports.mjs); the core refuses an
+          // api without it. world.unfenced drops it for the refusal case.
+          ...(world.unfenced === undefined ? { supportsWriteFence: true } : world.unfenced),
           async queryRecords({ filters, limit, offset }) {
             calls.query += 1
+            world.events.push('query')
             const failure = takeFailure(world, 'query')
             if (failure) throw failure
             assert.equal(limit, 2)
@@ -225,6 +273,7 @@ function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
           },
           async patchRecord(input) {
             calls.patch.push(input)
+            world.events.push('patch')
             if (world.patchFailure) {
               const failure = world.patchFailure
               world.patchFailure = null
@@ -248,6 +297,7 @@ function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
     authority: {
       async recheck() {
         calls.authority += 1
+        world.events.push('authority')
         if (world.onAuthority) world.onAuthority()
         const failure = takeFailure(world, 'authority')
         if (failure) throw failure
@@ -264,6 +314,8 @@ function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
   return world
 }
 
+const SWEEP_AT = '2026-03-01T00:00:00.000000Z'
+
 function sentWorld(options) {
   const world = createWorld(options)
   const row = world.addLedger()
@@ -277,22 +329,27 @@ function sheetReadsAndWrites(calls) {
 
 // ── constants and pure helpers ───────────────────────────────────────────────────────────────────
 
-test('the outcome vocabulary is exactly the twelve baseline values', () => {
+test('the outcome vocabulary is the twelve baseline values plus written_inactive (owner ruling D3-1), appended last', () => {
   assert.deepEqual(ISSUE_CONFIRM_WRITEBACK_OUTCOMES, [
     'written', 'already_set', 'kept_existing', 'row_absent', 'duplicate_key', 'project_absent',
     'project_archived', 'project_mismatch', 'payload_unmapped', 'sheet_mismatch', 'permission_revoked', 'source_unbound',
+    'written_inactive',
   ])
+  assert.deepEqual(writeback.ISSUE_CONFIRM_DATED_OUTCOMES, ['written', 'already_set', 'written_inactive'])
+  assert.ok(Object.isFrozen(writeback.ISSUE_CONFIRM_DATED_OUTCOMES))
+  // Not a skip reason: written_inactive is a traced terminal outcome, never a no-trace skip.
+  assert.ok(!writeback.ISSUE_CONFIRM_SKIP_REASONS.includes('written_inactive'))
   assert.ok(Object.isFrozen(ISSUE_CONFIRM_WRITEBACK_OUTCOMES))
   assert.equal(writeback.ISSUE_CONFIRM_TRACE_TABLE, 'integration_yida_issue_confirm_writeback')
   assert.equal(writeback.ISSUE_CONFIRM_DATE_FIELD_ID, 'issueConfirmDate')
   assert.equal(writeback.ISSUE_CONFIRM_WRITEBACK_MAX_BATCH, 100)
 })
 
-test('the lease purpose and the generation reason are in the write lock vocabularies', () => {
+test('the lease purpose is in the write lock vocabulary; there is no generation reason (Plan A, no bump)', () => {
   assert.equal(writeback.ISSUE_CONFIRM_WRITEBACK_LOCK_PURPOSE, 'issue_confirm_writeback')
-  assert.equal(writeback.ISSUE_CONFIRM_WRITEBACK_GENERATION_REASON, 'issue_confirm_writeback')
   assert.ok(writeLockModule.PROJECT_WRITE_PURPOSES.includes(writeback.ISSUE_CONFIRM_WRITEBACK_LOCK_PURPOSE))
-  assert.ok(writeLockModule.PROJECT_WRITE_GENERATION_REASONS.includes(writeback.ISSUE_CONFIRM_WRITEBACK_GENERATION_REASON))
+  assert.equal(Object.hasOwn(writeback, 'ISSUE_CONFIRM_WRITEBACK_GENERATION_REASON'), false)
+  assert.equal(writeLockModule.PROJECT_WRITE_GENERATION_REASONS.includes('issue_confirm_writeback'), false)
 })
 
 test('the module never reaches a runner, a form transport, a token client or a ledger writer (import scan)', () => {
@@ -405,7 +462,7 @@ test('selector condition 3: a target outside the list (a test copy) is not selec
   assert.deepEqual(sheetReadsAndWrites(world.calls), { open: 0, query: 0, patch: 0, authority: 0, acquire: 0 })
 
   const empty = sentWorld({ env: onEnv({ INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS: '' }) })
-  assert.deepEqual(await empty.world.executor().run({ tenantId: TENANT, ownerId: OWNER }), { enabled: true, results: [] })
+  assert.deepEqual(await empty.world.executor().run({ tenantId: TENANT, ownerId: OWNER }), { enabled: true, results: [], next: null })
   assert.equal(empty.world.calls.ledgerList, 0)
   assert.equal(empty.world.trace.length, 0)
   assert.equal(empty.world.cell(), null)
@@ -488,11 +545,11 @@ test('switch turned off after the records read and before the patch: no patch, n
 
 // ── the decision table, through the executor ─────────────────────────────────────────────────────
 
-test('written: one version-conditional, fenced patch of issueConfirmDate only, under the lease, then a bump and one trace row', async () => {
+test('written: one version-conditional, fenced patch of issueConfirmDate only, under the lease, no generation bump and one trace row', async () => {
   const { world, row } = sentWorld()
   const before = world.snapshot()
   const result = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
-  assert.deepEqual(result, { enabled: true, results: [{ ledgerId: row.id, kind: 'outcome', outcome: 'written', recorded: true, date: ACK_DAY, timeZone: 'Asia/Shanghai' }] })
+  assert.deepEqual(result, { enabled: true, results: [{ ledgerId: row.id, kind: 'outcome', outcome: 'written', recorded: true, date: ACK_DAY, timeZone: 'Asia/Shanghai' }], next: null })
   assert.equal(world.cell(), ACK_DAY)
   assert.equal(world.sheets.get(SHEET)[0].data.warehouseConfirmation, 'human note')
   assert.equal(world.calls.patch.length, 1)
@@ -500,9 +557,16 @@ test('written: one version-conditional, fenced patch of issueConfirmDate only, u
   assert.deepEqual(Object.keys(patch).sort(), ['changes', 'expectedVersion', 'recordId', 'writeFence'])
   assert.deepEqual(patch.changes, { issueConfirmDate: ACK_DAY })
   assert.equal(patch.expectedVersion, 3)
+  // The lease's pre-write holder check runs exactly once, before the only patch.
+  assert.deepEqual(world.calls.beforeWrite, [{ operation: 'patchRecord', subject: 'issue_confirm_writeback', patchesBefore: 0 }])
   assert.deepEqual(world.calls.acquire, [{ scopeKey: writeLockModule.sheetWriteScopeKey(SHEET), purpose: 'issue_confirm_writeback', runId: 'run-syn', tenantId: TENANT }])
-  assert.deepEqual(world.calls.bump, [{ scopeKey: writeLockModule.sheetWriteScopeKey(SHEET), reason: 'issue_confirm_writeback', tenantId: TENANT }])
+  // R-96 Plan A: the lease is the guard; the write-back never bumps the generation (the fake lock still
+  // records bumpGeneration, so a bump would show here).
+  assert.deepEqual(world.calls.bump, [])
   assert.deepEqual(world.trace, [{ ledger_id: row.id, tenant_id: TENANT, owner_id: OWNER, target_ref: TARGET, sheet_id: SHEET, outcome: 'written', written_date: ACK_DAY, time_zone: 'Asia/Shanghai' }])
+  // Y9 r3 (the trace race): the trace is read again under the lease right before the patch, and the trace INSERT runs
+  // while the lease is still held, before its release; nothing follows the release (no generation bump).
+  assert.deepEqual(world.events, ['acquire', 'authority', 'query', 'traceProbe', 'beforeWrite', 'patch', ['traceInsert', true], 'release'])
   assert.deepEqual(world.snapshot(), before, 'ledger and audits untouched')
   // Values-free: no project number, key or human value in the result or the trace.
   for (const text of [JSON.stringify(result), JSON.stringify(world.trace)]) {
@@ -517,6 +581,95 @@ test('the business zone comes from MULTITABLE_BUSINESS_TIMEZONE', async () => {
   assert.equal(world.trace[0].time_zone, 'America/Los_Angeles')
 })
 
+// ── D3-1: the row the key finds is INACTIVE (owner ruling, register R-96 ⑦, 2026-11-17) ────────────────────────────
+
+test('D3-1: the inactive-row column is the stock-prep template\'s lifecycle field, read as the boolean false only', () => {
+  const templates = require('../lib/stock-preparation-templates.cjs')
+  assert.equal(writeback.ISSUE_CONFIRM_ACTIVE_FIELD_ID, 'active')
+  assert.equal(writeback.ISSUE_CONFIRM_ACTIVE_FIELD_ID, templates.STOCK_PREPARATION_FILL_VIEW_ACTIVE_FILTER_FIELD_ID)
+  const field = templates.STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.find((entry) => entry.id === writeback.ISSUE_CONFIRM_ACTIVE_FIELD_ID)
+  assert.ok(field, 'the main template has the active column')
+  assert.equal(field.type, 'boolean')
+})
+
+test('D3-1 written_inactive: an INACTIVE row (active === false) with an empty cell gets the date — the same one fenced, version-conditional patch — and is traced written_inactive with its date; the answer carries the row\'s record id', async () => {
+  const { world, row } = sentWorld()
+  world.sheets.get(SHEET)[0].data.active = false
+  const result = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+  assert.deepEqual(result, { enabled: true, results: [{ ledgerId: row.id, kind: 'outcome', outcome: 'written_inactive', recorded: true,
+    date: ACK_DAY, timeZone: 'Asia/Shanghai', recordId: 'rec_syn_1' }], next: null })
+  assert.equal(world.cell(), ACK_DAY)
+  assert.equal(world.calls.patch.length, 1)
+  assert.deepEqual(world.calls.patch[0].changes, { issueConfirmDate: ACK_DAY })
+  assert.equal(world.calls.patch[0].expectedVersion, 3)
+  assert.equal(world.calls.patch[0].recordId, 'rec_syn_1')
+  // The lifecycle cell is never written: only the date moved.
+  assert.equal(world.sheets.get(SHEET)[0].data.active, false)
+  assert.deepEqual(world.trace, [{ ledger_id: row.id, tenant_id: TENANT, owner_id: OWNER, target_ref: TARGET, sheet_id: SHEET,
+    outcome: 'written_inactive', written_date: ACK_DAY, time_zone: 'Asia/Shanghai' }])
+  // The same steps under the lease as written: re-check, fence, patch, trace, release.
+  assert.deepEqual(world.events, ['acquire', 'authority', 'query', 'traceProbe', 'beforeWrite', 'patch', ['traceInsert', true], 'release'])
+  assert.equal(world.calls.bump.length, 0)
+  // Values-free: the record id is an opaque id; no key, project number or human value.
+  const text = JSON.stringify(result)
+  for (const value of [KEY, PROJECT, 'human note']) assert.equal(text.includes(value), false, value)
+})
+
+test('D3-1: the records read never filters on active — the re-keyed successor (another key) is not found by the ledger row\'s key, the inactive predecessor is', async () => {
+  const { world, row } = sentWorld()
+  const rows = world.sheets.get(SHEET)
+  rows[0].data.active = false
+  rows.push({ id: 'rec_syn_successor', version: 1, data: { idempotencyKey: 'syn-line-key-0001-r1', projectNo: PROJECT, issueConfirmDate: null, active: true } })
+  const result = await world.executor().run({ tenantId: TENANT, ownerId: OWNER, ledgerIds: [row.id] })
+  assert.deepEqual(result.results.map((entry) => [entry.outcome, entry.recordId]), [['written_inactive', 'rec_syn_1']])
+  assert.equal(rows[0].data.issueConfirmDate, ACK_DAY)
+  assert.equal(rows[1].data.issueConfirmDate, null)
+  assert.equal(world.calls.query, 1)
+})
+
+test('D3-1: only the boolean false is inactive — absent, null, true and the string "false" are active rows: written, no record id', async () => {
+  for (const value of [undefined, null, true, 'false', 0]) {
+    const { world, row } = sentWorld()
+    if (value !== undefined) world.sheets.get(SHEET)[0].data.active = value
+    const result = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+    assert.deepEqual(result.results, [{ ledgerId: row.id, kind: 'outcome', outcome: 'written', recorded: true, date: ACK_DAY, timeZone: 'Asia/Shanghai' }], String(value))
+    assert.equal(world.trace[0].outcome, 'written', String(value))
+  }
+})
+
+test('D3-1: the D8 rule is unchanged on an inactive row — the date already there is already_set, any other value kept_existing, no patch, no record id', async () => {
+  assert.equal(writeback.decideIssueConfirmCell(undefined, ACK_DAY), 'patch')
+  assert.equal(writeback.decideIssueConfirmCell(null, ACK_DAY), 'patch')
+  assert.equal(writeback.decideIssueConfirmCell('', ACK_DAY), 'patch')
+  assert.equal(writeback.decideIssueConfirmCell(ACK_DAY, ACK_DAY), 'already_set')
+  assert.equal(writeback.decideIssueConfirmCell('2026-02-27', ACK_DAY), 'kept_existing')
+  for (const [cell, outcome] of [[ACK_DAY, 'already_set'], ['2026-02-27', 'kept_existing']]) {
+    const { world, row } = sentWorld()
+    world.sheets.get(SHEET)[0].data.active = false
+    world.sheets.get(SHEET)[0].data.issueConfirmDate = cell
+    const result = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+    assert.equal(result.results[0].outcome, outcome, cell)
+    assert.equal(Object.hasOwn(result.results[0], 'recordId'), false, cell)
+    assert.equal(world.calls.patch.length, 0)
+    assert.equal(world.cell(), cell)
+    assert.deepEqual(world.trace.map((entry) => [entry.ledger_id, entry.outcome]), [[row.id, outcome]])
+  }
+})
+
+test('D3-1: a version conflict on the inactive row is retryable (no trace); the retry writes it written_inactive once', async () => {
+  const { world, row } = sentWorld()
+  world.sheets.get(SHEET)[0].data.active = false
+  const conflict = new Error('version conflict')
+  conflict.code = 'VERSION_CONFLICT'
+  world.patchFailure = conflict
+  const first = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+  assert.deepEqual(first.results, [{ ledgerId: row.id, kind: 'retryable', code: 'VERSION_CONFLICT' }])
+  assert.equal(world.trace.length, 0)
+  const second = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+  assert.deepEqual(second.results.map((entry) => [entry.outcome, entry.recordId]), [['written_inactive', 'rec_syn_1']])
+  assert.deepEqual(world.trace.map((entry) => entry.outcome), ['written_inactive'])
+})
+
 test('already_set and kept_existing never patch (D8: the first confirmation wins)', async () => {
   for (const [cell, outcome] of [[ACK_DAY, 'already_set'], ['2026-02-27', 'kept_existing'], ['not a date', 'kept_existing']]) {
     const { world, row } = sentWorld()
@@ -529,6 +682,9 @@ test('already_set and kept_existing never patch (D8: the first confirmation wins
     assert.equal(world.trace.length, 1)
     assert.equal(world.trace[0].ledger_id, row.id)
     assert.equal(world.trace[0].written_date, outcome === 'already_set' ? ACK_DAY : null)
+    // Round-3 refuter F2 (stock-prep verdict G9): both are decided under the lease, after the records read, so their
+    // trace INSERT runs while the lease is still held, before its release; no re-check (that guards the patch only).
+    assert.deepEqual(world.events, ['acquire', 'authority', 'query', ['traceInsert', true], 'release'], cell)
   }
 })
 
@@ -560,6 +716,11 @@ test('every terminal non-write outcome records one trace row and patches nothing
     assert.equal(world.trace[0].time_zone, null)
     assert.deepEqual(world.snapshot(), before)
     for (const sheet of world.sheets.values()) for (const record of sheet) assert.equal(record.data.issueConfirmDate, null, outcome)
+    // Decided under the lease → traced before its release; decided before the lease → traced without one. No outcome
+    // but a patch reads the trace again (the re-check guards the only write).
+    const underLease = ['permission_revoked', 'row_absent', 'duplicate_key', 'project_mismatch'].includes(outcome)
+    assert.deepEqual(world.events.filter((event) => Array.isArray(event)), [['traceInsert', underLease]], outcome)
+    assert.equal(world.events.includes('traceProbe'), false, outcome)
   }
 })
 
@@ -583,6 +744,11 @@ test('retryable cases insert no trace row and converge on the next run', async (
     ['STOCK_PREP_PROJECT_WRITE_LOCK_STORE_FAILED', (world) => { world.lockFailure = new writeLockModule.StockPreparationProjectWriteLockError(503, 'STOCK_PREP_PROJECT_WRITE_LOCK_STORE_FAILED', 'store', {}) }],
     ['VERSION_CONFLICT', (world) => { world.patchFailure = Object.assign(new Error('version conflict'), { code: 'VERSION_CONFLICT' }) }],
     ['STOCK_PREP_PROJECT_WRITE_LEASE_LOST', (world) => { world.patchFailure = Object.assign(new Error('fence'), { code: 'PLUGIN_WRITE_FENCE_REJECTED' }) }],
+    // The lease's pre-write holder check refuses (holder row changed): no patch is issued at all.
+    ['STOCK_PREP_PROJECT_WRITE_LEASE_LOST', (world) => {
+      world.beforeWriteFailure = new writeLockModule.StockPreparationProjectWriteLockError(409, 'STOCK_PREP_PROJECT_WRITE_LEASE_LOST', 'lost', {})
+      world.expectNoPatch = true
+    }],
     ['UNAVAILABLE', (world) => { world.patchFailure = Object.assign(new Error('host 5xx'), { status: 503 }) }],
   ]
   for (const [code, arrange] of cases) {
@@ -593,6 +759,10 @@ test('retryable cases insert no trace row and converge on the next run', async (
     assert.equal(world.trace.length, 0, code)
     assert.equal(world.cell(), null, code)
     assert.equal(world.leases.size, 0, 'the lease is released')
+    if (world.expectNoPatch) {
+      assert.equal(world.calls.beforeWrite.length, 1, code)
+      assert.equal(world.calls.patch.length, 0, 'a refused pre-write holder check issues no patch')
+    }
     world.lockFailure = null
     const next = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
     assert.equal(next.results[0].outcome, 'written', code)
@@ -662,7 +832,7 @@ test('D14: the project-sheets switch off skips the row and counts it (no registr
     else env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED = value
     const { world, row } = sentWorld({ env })
     const off = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
-    assert.deepEqual(off, { enabled: true, results: [{ ledgerId: row.id, kind: 'skip', reason: 'project_sheets_disabled' }] }, JSON.stringify(value))
+    assert.deepEqual(off, { enabled: true, results: [{ ledgerId: row.id, kind: 'skip', reason: 'project_sheets_disabled' }], next: null }, JSON.stringify(value))
     assert.equal(world.calls.registry, 0)
     assert.deepEqual(sheetReadsAndWrites(world.calls), { open: 0, query: 0, patch: 0, authority: 0, acquire: 0 })
     assert.equal(world.trace.length, 0)
@@ -692,11 +862,190 @@ test('a ledger reader that returns a row outside the caller scope fails the run 
   const other = world.addLedger({ tenantId: 'tenant-syn-b' })
   world.send(other)
   const deps = world.deps()
-  const original = deps.ledgerReader.list
-  deps.ledgerReader.list = async (input) => [...await original(input), { ...other, acknowledgedAt: ACK_AT }]
+  const original = deps.ledgerReader.sweep
+  deps.ledgerReader.sweep = async (input) => ({ rows: [...(await original(input)).rows, { ...other, acknowledgedAt: ACK_AT }], next: null })
   await assert.rejects(() => createIssueConfirmWritebackExecutor(deps).run({ tenantId: TENANT, ownerId: OWNER }), { code: 'YIDA_ISSUE_CONFIRM_LEDGER_INVALID' })
   assert.equal(world.calls.patch.length, 0)
   assert.equal(world.trace.length, 0)
+})
+
+// ── the sweep cursor (owner recovery entry, batch mode) ─────────────────────────────────────────────
+const { decodeIssueConfirmSweepCursor: decodeCursor, encodeIssueConfirmSweepCursor: encodeCursor } = writeback
+const STALE = writeback.ISSUE_CONFIRM_SWEEP_CURSOR_STALE
+const setOf = (targetRefs) => writeback.issueConfirmSweepTargetSetDigest(targetRefs)
+const AT_US = '2026-03-01T00:00:00.000001Z'
+const cursorOf = (shape) => Buffer.from(JSON.stringify(shape), 'utf8').toString('base64url')
+
+test('sweep cursor: the fixed versioned shape round-trips; it carries only the target set digest, target, exact created_at text and id', () => {
+  const position = { targetRef: TARGET, at: AT_US, id: 'l-1' }
+  const listed = [TEST_COPY_TARGET, TARGET]
+  const text = encodeCursor(position, listed)
+  assert.match(text, /^[A-Za-z0-9_-]+$/)
+  assert.equal(text, cursorOf({ v: 2, s: setOf(listed), t: TARGET, c: AT_US, i: 'l-1' }))
+  assert.match(setOf(listed), /^[0-9a-f]{32}$/)
+  assert.deepEqual(decodeCursor(text, listed), position)
+  assert.ok(Object.isFrozen(decodeCursor(text, listed)))
+  // The microseconds survive (a Date round trip would not), and an opaque non-UUID ledger id is admitted (TEXT key).
+  assert.equal(decodeCursor(encodeCursor({ ...position, at: '2026-12-31T23:59:59.999999Z' }, [TARGET]), [TARGET]).at, '2026-12-31T23:59:59.999999Z')
+  assert.equal(writeback.ISSUE_CONFIRM_SWEEP_CURSOR_VERSION, 2)
+  // The digest is of the ORDERED list: the same targets in another order, one more or one fewer, all differ.
+  assert.notEqual(setOf([TARGET, TEST_COPY_TARGET]), setOf(listed))
+  assert.notEqual(setOf([TARGET]), setOf(listed))
+  assert.equal(setOf(listed), setOf([...listed]))
+  assert.equal(setOf(['not-a-uuid']), null)
+  // What it cannot encode, it does not (the executor fails closed then): bad position, a target not in the list, year 0000.
+  for (const bad of [null, { ...position, targetRef: 'not-a-uuid' }, { ...position, at: '2026-03-01T00:00:00.000Z' }, { ...position, at: new Date(0) },
+    { ...position, id: ' l-1' }, { ...position, id: 'a\u0001b' }, { ...position, id: '' }, { ...position, at: '0000-01-01T00:00:00.000000Z' }]) {
+    assert.equal(encodeCursor(bad, [TARGET]), null, JSON.stringify(bad))
+  }
+  assert.equal(encodeCursor(position, [TEST_COPY_TARGET]), null)
+  assert.equal(encodeCursor(position), null)
+})
+
+test('sweep cursor: every tampered, forged or foreign cursor is refused (null) — wrong shape, version, digest form, target, time, id, encoding', () => {
+  const good = { v: 2, s: setOf([TARGET]), t: TARGET, c: AT_US, i: 'l-1' }
+  const text = cursorOf(good)
+  const flipped = text.slice(0, 10) + (text[10] === 'A' ? 'B' : 'A') + text.slice(11)
+  const refused = [
+    ['not a string', 42], ['empty', ''], ['padding', `${text}=`], ['standard base64', text.replace(/-/g, '+').replace(/_/g, '/') + '+/'],
+    ['whitespace', ` ${text}`], ['too long', 'A'.repeat(2049)], ['one character flipped', flipped],
+    ['not JSON', Buffer.from('not json').toString('base64url')], ['an array', cursorOf([1, TARGET, AT_US, 'l-1'])],
+    ['unknown version', cursorOf({ ...good, v: 3 })], ['version as text', cursorOf({ ...good, v: '2' })],
+    // The v1 shape (no target set digest) is refused, with or without an s.
+    ['the v1 shape', cursorOf({ v: 1, t: TARGET, c: AT_US, i: 'l-1' })], ['v1 with a digest', cursorOf({ ...good, v: 1 })],
+    ['missing key', cursorOf({ v: 2, s: good.s, t: TARGET, c: AT_US })], ['missing digest', cursorOf({ v: 2, t: TARGET, c: AT_US, i: 'l-1' })],
+    ['extra scope key', cursorOf({ ...good, o: 'owner-syn-b' })],
+    ['tenant key', cursorOf({ ...good, tenant: 'tenant-syn-b' })], ['key order', cursorOf({ v: 2, t: TARGET, s: good.s, c: AT_US, i: 'l-1' })],
+    ['digest uppercase', cursorOf({ ...good, s: good.s.toUpperCase() })], ['digest too short', cursorOf({ ...good, s: good.s.slice(0, 31) })],
+    ['digest full length', cursorOf({ ...good, s: `${good.s}${good.s}` })], ['digest as number', cursorOf({ ...good, s: 7 })],
+    // With the CURRENT set's digest, a cursor naming an unlisted target is tampered: refused, never stale.
+    ['unlisted target', cursorOf({ ...good, t: TEST_COPY_TARGET })], ['target not a uuid', cursorOf({ ...good, t: 'target-syn' })],
+    ['uppercase target', cursorOf({ ...good, t: TARGET.toUpperCase() })],
+    ['milliseconds only', cursorOf({ ...good, c: '2026-03-01T00:00:00.000Z' })], ['offset instead of Z', cursorOf({ ...good, c: '2026-03-01T08:00:00.000001+08:00' })],
+    ['impossible day', cursorOf({ ...good, c: '2026-02-30T00:00:00.000001Z' })], ['time as number', cursorOf({ ...good, c: 1772323200000 })],
+    // Year 0000 round-trips through a JS Date, but PostgreSQL's timestamptz rejects it (22008): refused here, never sent.
+    ['year 0000', cursorOf({ ...good, c: '0000-01-01T00:00:00.000000Z' })], ['year 0000 late', cursorOf({ ...good, c: '0000-12-31T23:59:59.999999Z' })],
+    ['empty id', cursorOf({ ...good, i: '' })], ['padded id', cursorOf({ ...good, i: ' l-1' })], ['control id', cursorOf({ ...good, i: 'l\u0000' })],
+    ['id too long', cursorOf({ ...good, i: 'x'.repeat(129) })], ['id as number', cursorOf({ ...good, i: 7 })],
+    ['escaped variant', Buffer.from(JSON.stringify(good).replace('l-1', 'l\\u002d1'), 'utf8').toString('base64url')],
+    ['invalid utf-8', Buffer.from([0x7b, 0xff, 0x7d]).toString('base64url')],
+  ]
+  for (const [name, value] of refused) assert.equal(decodeCursor(value, [TARGET]), null, name)
+  // Years 0001 and 9999 are real PostgreSQL instants: they only move the start.
+  for (const c of ['0001-01-01T00:00:00.000000Z', '9999-12-31T23:59:59.999999Z']) {
+    assert.deepEqual(decodeCursor(cursorOf({ ...good, c }), [TARGET]), { targetRef: TARGET, at: c, id: 'l-1' }, c)
+  }
+  // The same good text once the listed set is another one is STALE (also when its own target was removed), never a position.
+  assert.equal(decodeCursor(text, []), STALE)
+  assert.equal(decodeCursor(text, [TEST_COPY_TARGET]), STALE)
+  assert.equal(decodeCursor(text, [TARGET, TEST_COPY_TARGET]), STALE)
+  assert.equal(decodeCursor(text, [TEST_COPY_TARGET, TARGET]), STALE)
+  // A well-formed digest that is not the current one reads as stale too (the digest detects a change, it authenticates nothing).
+  assert.equal(decodeCursor(cursorOf({ ...good, s: 'f'.repeat(32) }), [TARGET]), STALE)
+  assert.ok(Object.isFrozen(STALE))
+  assert.deepEqual(decodeCursor(text, [TARGET]), { targetRef: TARGET, at: AT_US, id: 'l-1' })
+})
+
+test('run: a cursor it cannot accept, or a cursor together with ledgerIds, is the closed refusal — before ANY read', async () => {
+  const { world, row } = sentWorld()
+  const executor = world.executor()
+  const s = setOf([TARGET])
+  const good = cursorOf({ v: 2, s, t: TARGET, c: AT_US, i: row.id })
+  const refusal = { enabled: true, results: [], refused: 'AFTER' }
+  for (const after of [cursorOf({ v: 3, s, t: TARGET, c: AT_US, i: row.id }), cursorOf({ v: 1, t: TARGET, c: AT_US, i: row.id }),
+    cursorOf({ v: 2, s, t: TEST_COPY_TARGET, c: AT_US, i: row.id }), cursorOf({ v: 2, s, t: TARGET, c: '0000-01-01T00:00:00.000000Z', i: row.id }),
+    `${good}=`, 'not!base64', 7, null, '']) {
+    assert.deepEqual(await executor.run({ tenantId: TENANT, ownerId: OWNER, after }), refusal, JSON.stringify(after))
+  }
+  assert.deepEqual(await executor.run({ tenantId: TENANT, ownerId: OWNER, ledgerIds: [row.id], after: good }), refusal)
+  assert.equal(world.calls.ledgerList + world.calls.rowRead + world.calls.registry, 0)
+  assert.equal(world.calls.patch.length, 0)
+  // Empty target list: the set changed (to nothing) since the cursor was issued — STALE, still before any read.
+  const empty = sentWorld({ env: onEnv({ INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS: '' }) })
+  assert.deepEqual(await empty.world.executor().run({ tenantId: TENANT, ownerId: OWNER, after: good }), { enabled: true, results: [], refused: 'STALE' })
+  assert.equal(empty.world.calls.ledgerList, 0)
+  // OFF still answers before anything (the switch first, even before the cursor).
+  const off = sentWorld({ env: {} })
+  assert.deepEqual(await off.world.executor().run({ tenantId: TENANT, ownerId: OWNER, after: 'x' }), { enabled: false, results: [] })
+  // A valid cursor reaches the reader as the decoded position; the named mode answers no `next`.
+  const seen = []
+  const deps = world.deps()
+  const original = deps.ledgerReader.sweep
+  deps.ledgerReader.sweep = async (input) => { seen.push(input.after); return original(input) }
+  const followed = await createIssueConfirmWritebackExecutor(deps).run({ tenantId: TENANT, ownerId: OWNER, after: good })
+  assert.deepEqual(seen, [{ targetRef: TARGET, at: AT_US, id: row.id }])
+  assert.equal(followed.next, null)
+  assert.equal(Object.hasOwn(await world.executor().run({ tenantId: TENANT, ownerId: OWNER, ledgerIds: [row.id] }), 'next'), false)
+})
+
+test('run: `next` is checked, never trusted — only on a full page, naming its last row on a listed target', async () => {
+  const world = createWorld()
+  const rows = [world.addLedger(), world.addLedger()]
+  for (const row of rows) world.send(row)
+  const bad = [
+    ['next on a short page', (page) => ({ rows: page.rows.slice(0, 1), next: { targetRef: TARGET, at: AT_US, id: page.rows[0].id } })],
+    ['next naming another row', (page) => ({ rows: page.rows, next: { targetRef: TARGET, at: AT_US, id: page.rows[0].id } })],
+    ['next on an unlisted target', (page) => ({ rows: page.rows, next: { targetRef: TEST_COPY_TARGET, at: AT_US, id: page.rows[1].id } })],
+    ['next with a millisecond time', (page) => ({ rows: page.rows, next: { targetRef: TARGET, at: '2026-03-01T00:00:00.000Z', id: page.rows[1].id } })],
+    ['no next key', (page) => ({ rows: page.rows })], ['an array', (page) => page.rows],
+  ]
+  for (const [name, shape] of bad) {
+    const deps = world.deps()
+    const original = deps.ledgerReader.sweep
+    deps.ledgerReader.sweep = async (input) => shape(await original(input))
+    await assert.rejects(() => createIssueConfirmWritebackExecutor(deps).run({ tenantId: TENANT, ownerId: OWNER, limit: 2 }),
+      { code: 'YIDA_ISSUE_CONFIRM_LEDGER_INVALID' }, name)
+  }
+  assert.equal(world.calls.patch.length, 0)
+  assert.equal(world.trace.length, 0)
+  // The control: a full page whose next is its last row is answered as the opaque cursor.
+  const deps = world.deps()
+  const original = deps.ledgerReader.sweep
+  deps.ledgerReader.sweep = async (input) => { const page = await original(input); return { rows: page.rows, next: { targetRef: TARGET, at: AT_US, id: page.rows[1].id } } }
+  const result = await createIssueConfirmWritebackExecutor(deps).run({ tenantId: TENANT, ownerId: OWNER, limit: 2 })
+  assert.equal(result.next, cursorOf({ v: 2, s: setOf([TARGET]), t: TARGET, c: AT_US, i: rows[1].id }))
+})
+
+test('run: a cursor issued under another target set is STALE — added, removed (another or its own target), reordered — before ANY read; a fresh sweep then answers every row once', async () => {
+  const THIRD = '2f2e2d2c-2b2a-4928-8726-252423222120'
+  const sweepFrom = async (world, after) => {
+    const seen = []
+    let cursor = after
+    for (let guard = 0; guard < 50; guard += 1) {
+      const page = await world.executor().run({ tenantId: TENANT, ownerId: OWNER, limit: 1, ...(cursor === undefined ? {} : { after: cursor }) })
+      assert.equal(Object.hasOwn(page, 'refused'), false)
+      seen.push(...page.results.map((entry) => entry.ledgerId))
+      if (page.next === null) return seen
+      cursor = page.next
+    }
+    throw new Error('SWEEP_DID_NOT_TERMINATE')
+  }
+  for (const [name, changed] of [
+    ['added', [TARGET, TEST_COPY_TARGET, THIRD]], ['removed (another target)', [TARGET]], ['removed (its own target)', [TEST_COPY_TARGET]],
+    ['reordered', [TEST_COPY_TARGET, TARGET]], ['emptied', []],
+  ]) {
+    const world = createWorld({ env: onEnv({ INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS: `${TARGET},${TEST_COPY_TARGET}` }) })
+    // Acknowledged rows without an acknowledgement audit: each page skips them (acknowledgement_missing), none is traced.
+    const rows = [world.addLedger(), world.addLedger(), world.addLedger({ targetRef: TEST_COPY_TARGET }), world.addLedger({ targetRef: THIRD })]
+    for (const row of rows) row.status = 'acknowledged'
+    const first = await world.executor().run({ tenantId: TENANT, ownerId: OWNER, limit: 1 })
+    assert.deepEqual(first.results.map((entry) => entry.ledgerId), [rows[0].id], name)
+    assert.equal(typeof first.next, 'string')
+    world.env.INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS = changed.join(',')
+    const reads = world.calls.ledgerList
+    assert.deepEqual(await world.executor().run({ tenantId: TENANT, ownerId: OWNER, limit: 1, after: first.next }),
+      { enabled: true, results: [], refused: 'STALE' }, name)
+    assert.equal(world.calls.ledgerList, reads, `${name}: nothing is read`)
+    // A fresh sweep without `after` completes on the new set and answers every row of it exactly once, in listed order.
+    const expected = changed.flatMap((targetRef) => rows.filter((row) => row.targetRef === targetRef).map((row) => row.id))
+    assert.deepEqual(await sweepFrom(world), expected, name)
+  }
+  // The control: the set unchanged, the same cursor goes on.
+  const world = createWorld({ env: onEnv({ INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS: `${TARGET},${TEST_COPY_TARGET}` }) })
+  const rows = [world.addLedger(), world.addLedger({ targetRef: TEST_COPY_TARGET })]
+  for (const row of rows) row.status = 'acknowledged'
+  const first = await world.executor().run({ tenantId: TENANT, ownerId: OWNER, limit: 1 })
+  assert.deepEqual(await sweepFrom(world, first.next), [rows[1].id])
 })
 
 test('input bounds: tenant and owner required, limit and ledgerIds bounded to 100', async () => {
@@ -709,6 +1058,21 @@ test('input bounds: tenant and owner required, limit and ledgerIds bounded to 10
   assert.equal(world.calls.ledgerList, 0)
   assert.throws(() => createIssueConfirmWritebackExecutor({}), { code: 'YIDA_ISSUE_CONFIRM_UNAVAILABLE' })
   assert.throws(() => createIssueConfirmTraceStore({ db: { insertOne() {} } }), { code: 'YIDA_ISSUE_CONFIRM_UNAVAILABLE' })
+  assert.throws(() => createIssueConfirmTraceStore({ db: { insertOneIfAbsent() {} } }), { code: 'YIDA_ISSUE_CONFIRM_UNAVAILABLE' })
+  // The executor needs the re-check probe as well.
+  const deps = world.deps()
+  assert.throws(() => createIssueConfirmWritebackExecutor({ ...deps, traceStore: { async record() { return { recorded: true } } } }), { code: 'YIDA_ISSUE_CONFIRM_UNAVAILABLE' })
+})
+
+test('Plan A full form: the executor is built, and writes, with a write lock that has no bumpGeneration', async () => {
+  const { world } = sentWorld()
+  const deps = world.deps()
+  const { bumpGeneration, ...leaseOnly } = deps.writeLock
+  assert.equal(typeof bumpGeneration, 'function')
+  const result = await createIssueConfirmWritebackExecutor({ ...deps, writeLock: leaseOnly }).run({ tenantId: TENANT, ownerId: OWNER })
+  assert.deepEqual(result.results.map((entry) => [entry.kind, entry.outcome]), [['outcome', 'written']])
+  assert.equal(world.calls.patch.length, 1)
+  assert.deepEqual(world.calls.bump, [])
 })
 
 test('the pure decision asks for facts in order and never patches before the authority and records are known', () => {
@@ -788,36 +1152,41 @@ test('date committed, confirmation lost: a retry neither changes the date nor wr
     assert.deepEqual(world.snapshot(), before)
     assert.equal(world.formPosts, 1)
   }
-  // (b-2) The first attempt's trace INSERT commits but its confirmation is lost: the owner's retry had
-  // already selected the row (the first attempt was still in flight). The retry decides already_set and its
-  // INSERT meets the primary key. The assertion is that the retry COMPLETES NORMALLY and exactly one row
-  // exists: without ON CONFLICT DO NOTHING the retry fails with 23505.
+  // (b-2) The first attempt's trace INSERT commits under its lease but its confirmation is lost: that run fails closed.
+  // The owner's retry had already read the row as untraced (the first attempt was still in flight) and leases after the
+  // first attempt released. It finds the date set → already_set, and its INSERT meets the primary key. The assertion
+  // is that the retry COMPLETES NORMALLY and exactly one row exists: without ON CONFLICT DO NOTHING it fails with 23505.
   {
     const { world, row } = sentWorld()
     const before = world.snapshot()
-    const arrived = []
-    const release = []
-    world.traceGate = (traceRow) => new Promise((resolve) => {
-      arrived.push(traceRow.outcome)
-      release.push(resolve)
-    })
-    const waitFor = async (count) => { while (arrived.length < count) await new Promise((resolve) => setImmediate(resolve)) }
-    const firstAttempt = world.executor().run({ tenantId: TENANT, ownerId: OWNER })
-    await waitFor(1)
-    const retry = world.executor().run({ tenantId: TENANT, ownerId: OWNER })
-    await waitFor(2)
-    assert.deepEqual(arrived, ['written', 'already_set'])
-    release[0]()
-    const first = await firstAttempt
-    release[1]()
+    let lost = true
+    world.afterTraceInsert = async () => {
+      if (lost) {
+        lost = false
+        throw new Error('synthetic confirmation lost after the trace committed')
+      }
+    }
+    // The retry is parked after its ledger read (at its row-values read), holding the row as untraced.
+    let releaseRetry
+    const parked = new Promise((resolve) => { releaseRetry = resolve })
+    let reached = false
+    const deps = world.deps()
+    const read = deps.rowSource.read
+    deps.rowSource.read = async (input) => { reached = true; await parked; return read(input) }
+    const retry = createIssueConfirmWritebackExecutor(deps).run({ tenantId: TENANT, ownerId: OWNER })
+    while (!reached) await new Promise((resolve) => setImmediate(resolve))
+    await assert.rejects(() => world.executor().run({ tenantId: TENANT, ownerId: OWNER }), /synthetic confirmation lost/)
+    assert.equal(world.leases.size, 0, 'the failed run released its lease')
+    releaseRetry()
     const second = await retry
-    assert.deepEqual(first.results, [{ ledgerId: row.id, kind: 'outcome', outcome: 'written', recorded: true, date: ACK_DAY, timeZone: 'Asia/Shanghai' }])
     assert.deepEqual(second.results, [{ ledgerId: row.id, kind: 'outcome', outcome: 'already_set', recorded: false, date: ACK_DAY, timeZone: 'Asia/Shanghai' }])
     assert.equal(world.trace.length, 1)
     assert.equal(world.trace[0].outcome, 'written')
     assert.equal(world.cell(), ACK_DAY)
     assert.equal(world.version(), 4)
     assert.equal(world.calls.patch.length, 1)
+    // R-96 Plan A: no generation bump, also when the run failed on its trace after the write landed.
+    assert.deepEqual(world.calls.bump, [])
     assert.deepEqual(world.snapshot(), before)
     assert.equal(world.formPosts, 1)
   }
@@ -849,6 +1218,162 @@ test('date committed, confirmation lost: a retry neither changes the date nor wr
   }
 })
 
+// ── the trace race (Y9 r3, refuter finding [1]) ─────────────────────────────────────────────────────
+
+// Run B reads the row as untraced and is parked before its lease (at its row-values read); run A then decides the same
+// row completely; `between` changes the world; B goes on and leases after A released.
+async function raceB(world, input, between) {
+  let releaseB
+  const parked = new Promise((resolve) => { releaseB = resolve })
+  let reached = false
+  const deps = world.deps()
+  const read = deps.rowSource.read
+  deps.rowSource.read = async (request) => { reached = true; await parked; return read(request) }
+  const b = createIssueConfirmWritebackExecutor(deps).run(input)
+  while (!reached) await new Promise((resolve) => setImmediate(resolve))
+  const a = await world.executor().run(input)
+  await between(world)
+  releaseB()
+  return { a, b: await b }
+}
+
+test('the trace race: B read the row before A traced it; A decides it; B leases after A released — the re-check under the lease stops B, limit path and ledgerIds path', async () => {
+  const cases = [
+    // A patches and traces `written`; the cell is emptied without a version bump (an unversioned plugin patch).
+    ['written, cell emptied', (world) => {}, 'written', (world) => { world.sheets.get(SHEET)[0].data.issueConfirmDate = null }],
+    // A traces `permission_revoked`; the permission is granted again (refuter R6: no emptied cell needed for a FIRST patch).
+    ['permission_revoked, re-granted', (world) => { world.authorityAllowed = false }, 'permission_revoked', (world) => { world.authorityAllowed = true }],
+    // A traces `row_absent`; the record is created afterwards.
+    ['row_absent, record created', (world) => { world.sheets.set(SHEET, []) }, 'row_absent', (world) => {
+      world.sheets.get(SHEET).push({ id: 'rec_syn_late', version: 1, data: { idempotencyKey: KEY, projectNo: PROJECT, issueConfirmDate: null } })
+    }],
+  ]
+  for (const [name, arrange, outcome, between] of cases) {
+    for (const mode of ['limit', 'ledgerIds']) {
+      const { world, row } = sentWorld()
+      arrange(world)
+      const input = mode === 'limit' ? { tenantId: TENANT, ownerId: OWNER } : { tenantId: TENANT, ownerId: OWNER, ledgerIds: [row.id] }
+      const { a, b } = await raceB(world, input, between)
+      const label = `${name} (${mode})`
+      assert.equal(a.results[0].outcome, outcome, label)
+      const patchesOfA = outcome === 'written' ? 1 : 0
+      assert.equal(world.calls.patch.length, patchesOfA, `${label}: B never patches`)
+      assert.deepEqual(b.results, [{ ledgerId: row.id, kind: 'skip', reason: 'already_traced' }], label)
+      assert.deepEqual(world.trace.map((entry) => entry.outcome), [outcome], label)
+      assert.deepEqual(world.calls.bump, [], label)
+      assert.equal(world.leases.size, 0, label)
+      for (const record of world.sheets.get(SHEET)) assert.equal(record.data.issueConfirmDate, null, label)
+    }
+  }
+})
+
+test('the trace race, order: while A\'s trace INSERT is in flight its lease is still held — a run that read the row then is WRITE_LOCKED, even with the cell emptied', async () => {
+  for (const mode of ['limit', 'ledgerIds']) {
+    const { world, row } = sentWorld()
+    const input = mode === 'limit' ? { tenantId: TENANT, ownerId: OWNER } : { tenantId: TENANT, ownerId: OWNER, ledgerIds: [row.id] }
+    let releaseA
+    let arrived = false
+    world.traceGate = () => new Promise((resolve) => { arrived = true; releaseA = resolve })
+    const a = world.executor().run(input)
+    while (!arrived) await new Promise((resolve) => setImmediate(resolve))
+    world.traceGate = null
+    // A has patched and not yet traced: the cell is emptied, and B reads the row as untraced.
+    assert.equal(world.calls.patch.length, 1)
+    world.sheets.get(SHEET)[0].data.issueConfirmDate = null
+    const b = await world.executor().run(input)
+    assert.equal(world.calls.patch.length, 1, `${mode}: B never patches`)
+    assert.deepEqual(b.results, [{ ledgerId: row.id, kind: 'retryable', code: 'STOCK_PREP_PROJECT_WRITE_LOCKED' }], mode)
+    releaseA()
+    assert.equal((await a).results[0].outcome, 'written', mode)
+    assert.deepEqual(world.trace.map((entry) => entry.outcome), ['written'], mode)
+    // After A released, B's next run finds the row traced: the batch never selects it, named it is the probe's omission.
+    assert.equal((await world.executor().run(input)).results.length, 0, mode)
+    assert.equal(world.calls.patch.length, 1, mode)
+  }
+})
+
+// Round-3 refuter F2: the same order pin for outcomes that are NOT `written`. Both under-lease decision points trace
+// before the release: the authority step (permission_revoked) and the records step (row_absent). While A is parked at
+// that trace INSERT the fact flips (permission granted again / the record created), so a run that leased then would
+// patch: the lease A still holds is what stops it.
+test('the trace race, order (non-written outcomes): while A\'s trace INSERT of permission_revoked or row_absent is in flight its lease is still held — a run that read the row then is WRITE_LOCKED and patches nothing, though the fact has flipped', async () => {
+  const cases = [
+    ['permission_revoked', (world) => { world.authorityAllowed = false }, (world) => { world.authorityAllowed = true }],
+    ['row_absent', (world) => { world.sheets.set(SHEET, []) }, (world) => {
+      world.sheets.get(SHEET).push({ id: 'rec_syn_late', version: 1, data: { idempotencyKey: KEY, projectNo: PROJECT, issueConfirmDate: null } })
+    }],
+  ]
+  for (const [outcome, arrange, flip] of cases) {
+    for (const mode of ['limit', 'ledgerIds']) {
+      const { world, row } = sentWorld()
+      arrange(world)
+      const label = `${outcome} (${mode})`
+      const input = mode === 'limit' ? { tenantId: TENANT, ownerId: OWNER } : { tenantId: TENANT, ownerId: OWNER, ledgerIds: [row.id] }
+      let releaseA
+      let arrived = false
+      world.traceGate = () => new Promise((resolve) => { arrived = true; releaseA = resolve })
+      const a = world.executor().run(input)
+      while (!arrived) await new Promise((resolve) => setImmediate(resolve))
+      world.traceGate = null
+      assert.equal(world.leases.size, 1, `${label}: A holds its lease at its trace INSERT`)
+      // The fact flips while A is parked: a run that held the lease now would patch.
+      flip(world)
+      const b = await world.executor().run(input)
+      assert.equal(world.calls.patch.length, 0, `${label}: B never patches`)
+      assert.deepEqual(b.results, [{ ledgerId: row.id, kind: 'retryable', code: 'STOCK_PREP_PROJECT_WRITE_LOCKED' }], label)
+      releaseA()
+      assert.deepEqual((await a).results, [{ ledgerId: row.id, kind: 'outcome', outcome, recorded: true }], label)
+      assert.deepEqual(world.trace.map((entry) => entry.outcome), [outcome], label)
+      assert.equal(world.leases.size, 0, label)
+      // Traced now: the next run selects nothing, and nothing is ever patched.
+      assert.equal((await world.executor().run(input)).results.length, 0, label)
+      assert.equal(world.calls.patch.length, 0, label)
+      for (const record of world.sheets.get(SHEET)) assert.equal(record.data.issueConfirmDate, null, label)
+    }
+  }
+})
+
+// Stock-prep B3: the core's own write-fence check, after sheets.open and before the records read.
+test('a records api that does not declare the host write fence is refused before the records read: retryable, no query, no patch, no trace; declared, the next run writes', async () => {
+  for (const unfenced of [{}, { supportsWriteFence: false }, { supportsWriteFence: 'true' }, { supportsWriteFence: 1 }]) {
+    const label = JSON.stringify(unfenced)
+    const { world, row } = sentWorld()
+    world.unfenced = unfenced
+    const result = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+    assert.deepEqual(result.results, [{ ledgerId: row.id, kind: 'retryable', code: 'YIDA_ISSUE_CONFIRM_WRITE_FENCE_UNAVAILABLE' }], label)
+    assert.deepEqual(sheetReadsAndWrites(world.calls), { open: 1, query: 0, patch: 0, authority: 1, acquire: 1 }, label)
+    assert.deepEqual(world.trace, [], label)
+    assert.equal(world.leases.size, 0, label)
+    assert.equal(world.cell(), null, label)
+    // The same row once the api declares it: written once.
+    world.unfenced = undefined
+    assert.deepEqual((await world.executor().run({ tenantId: TENANT, ownerId: OWNER })).results.map((entry) => entry.outcome), ['written'], label)
+    assert.equal(world.calls.patch.length, 1, label)
+  }
+  // An open() that answers nothing at all is refused the same way.
+  const { world, row } = sentWorld()
+  const deps = world.deps()
+  deps.sheets = { async open() { return null } }
+  assert.deepEqual((await createIssueConfirmWritebackExecutor(deps).run({ tenantId: TENANT, ownerId: OWNER })).results,
+    [{ ledgerId: row.id, kind: 'retryable', code: 'YIDA_ISSUE_CONFIRM_WRITE_FENCE_UNAVAILABLE' }])
+  assert.deepEqual(world.trace, [])
+})
+
+test('a traced row whose trace the re-check cannot read is retryable: no patch, no trace', async () => {
+  const { world, row } = sentWorld()
+  const deps = world.deps()
+  deps.traceStore = { record: deps.traceStore.record, async traced() { throw Object.assign(new Error('synthetic probe failure'), { code: 'SYN_TRACE_PROBE_DOWN' }) } }
+  const result = await createIssueConfirmWritebackExecutor(deps).run({ tenantId: TENANT, ownerId: OWNER })
+  assert.deepEqual(result.results, [{ ledgerId: row.id, kind: 'retryable', code: 'SYN_TRACE_PROBE_DOWN' }])
+  const unsure = world.deps()
+  unsure.traceStore = { record: unsure.traceStore.record, async traced() { return 'yes' } }
+  assert.deepEqual((await createIssueConfirmWritebackExecutor(unsure).run({ tenantId: TENANT, ownerId: OWNER })).results,
+    [{ ledgerId: row.id, kind: 'retryable', code: 'YIDA_ISSUE_CONFIRM_UNAVAILABLE' }])
+  assert.equal(world.calls.patch.length, 0)
+  assert.equal(world.trace.length, 0)
+  assert.equal(world.cell(), null)
+})
+
 test('a cross-day recovery keeps the acknowledgement day (never the recovery day)', async () => {
   // Acknowledged at 23:50 in Shanghai on 2026-03-01; the first write-back fails; recovery runs later
   // (any later day, including today) and writes 2026-03-01.
@@ -871,18 +1396,26 @@ test('a cross-day recovery keeps the acknowledgement day (never the recovery day
 
 test('the trace store inserts with ON CONFLICT (ledger_id) DO NOTHING and reports whether this call recorded', async () => {
   const calls = []
+  const probes = []
   const store = createIssueConfirmTraceStore({
     db: {
       async insertOneIfAbsent(table, row, options) {
         calls.push({ table, row, options })
         return calls.length === 1 ? [row] : []
       },
+      async selectOne(table, where) {
+        probes.push({ table, where })
+        return calls.some((call) => call.row.ledger_id === where.ledger_id) ? { ledger_id: where.ledger_id } : null
+      },
     },
   })
   const row = { ledger_id: 'l1', tenant_id: TENANT, owner_id: OWNER, target_ref: TARGET, sheet_id: null, outcome: 'row_absent', written_date: null, time_zone: null }
+  assert.equal(await store.traced('l1'), false)
   assert.deepEqual(await store.record(row), { recorded: true })
   assert.deepEqual(await store.record(row), { recorded: false })
+  assert.equal(await store.traced('l1'), true)
   assert.deepEqual(calls[0], { table: 'integration_yida_issue_confirm_writeback', row, options: { conflictColumns: ['ledger_id'] } })
+  assert.deepEqual(probes[0], { table: 'integration_yida_issue_confirm_writeback', where: { ledger_id: 'l1' } })
   assert.throws(() => writeback.issueConfirmTraceRow({ ledger: ACKED, outcome: 'written', sheetId: SHEET, date: null, timeZone: 'Asia/Shanghai' }), { code: 'YIDA_ISSUE_CONFIRM_INPUT' })
   assert.throws(() => writeback.issueConfirmTraceRow({ ledger: ACKED, outcome: 'bogus', sheetId: SHEET }), { code: 'YIDA_ISSUE_CONFIRM_INPUT' })
 })

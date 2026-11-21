@@ -107,6 +107,34 @@ suite('real authorization operation on the migrated synthetic schema', () => {
     }
   })
 
+  it('refuses a changed, disabled or missing D21 subject-version addition, or a changed Y6 layout guard', async () => {
+    // D21 (Y5a #6786) is hashed as its own catalog addition next to B2; each edit of one of its six
+    // fenced-table triggers or two functions must leave no accepted profile, and rolling the edit back restores it.
+    const query = (sql: string, params?: unknown[]) => control.query(sql, params)
+    await control.query('BEGIN')
+    try {
+      await control.query('SET LOCAL search_path TO pg_catalog, public, pg_temp')
+      await assertAuthorizationOperationSchema(query)
+      await control.query('SAVEPOINT original_profile')
+      for (const ddl of [
+        'ALTER TABLE public.user_roles DISABLE TRIGGER trg_user_roles_zz_authz_subject_version',
+        'DROP TRIGGER trg_users_zz_authz_subject_version_update ON public.users',
+        `CREATE OR REPLACE FUNCTION public.metasheet_authz_bump_sheet_permission_version() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$`,
+        // Y6 (#6797): the generated-layout guard is its own reviewed addition.
+        `CREATE OR REPLACE FUNCTION public.integration_yida_generated_layout_immutable_guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$`,
+      ]) {
+        await control.query(ddl)
+        await expect(assertAuthorizationOperationSchema(query), ddl).rejects.toMatchObject({
+          code: 'AUTHORIZATION_OPERATION_FENCE_UNAVAILABLE',
+        })
+        await control.query('ROLLBACK TO SAVEPOINT original_profile')
+        await assertAuthorizationOperationSchema(query)
+      }
+    } finally {
+      await control.query('ROLLBACK')
+    }
+  })
+
   it('previews, commits and replays using the real fence and current migrated schema', async () => {
     const p=await preview(); expect(p.status,JSON.stringify(p.body)).toBe(200)
     expect(p.body.impact.effectiveAfter).toEqual([{code,sources:[{kind:'role',id:roleId}],effective:true}])
@@ -116,6 +144,29 @@ suite('real authorization operation on the migrated synthetic schema', () => {
     expect((await request(app).get(`${path}/${id}`).auth(token,{type:'bearer'})).body).toEqual(done.body)
     const audit=await control.query('SELECT actor_id,reason_origin FROM authorization_operation_audit WHERE actor_id=$1 AND client_operation_id=$2',[actor,id])
     expect(audit.rows).toEqual([{actor_id:actor,reason_origin:'not_required'}])
+  })
+  it('refuses preview and commit before any business write when only the D21 version table drifts', async () => {
+    // The migration creates subject_authorization_versions IF NOT EXISTS and every D21 trigger upserts it
+    // ON CONFLICT (subject_id): a same-named table without that key must be refused on both paths, before
+    // any role, admission, receipt or audit row is written. Triggers and functions stay unchanged here.
+    const ready=await preview(); expect(ready.status,JSON.stringify(ready.body)).toBe(200)
+    const writes=async()=>(await control.query(`SELECT
+      (SELECT count(*)::int FROM user_roles WHERE user_id=$1) AS roles,
+      (SELECT count(*)::int FROM user_namespace_admissions WHERE user_id=$1) AS admissions,
+      (SELECT count(*)::int FROM authorization_operation_receipts WHERE actor_id=$2) AS receipts,
+      (SELECT count(*)::int FROM authorization_operation_audit WHERE actor_id=$2) AS audit`,[target,actor])).rows[0]
+    const before=await writes()
+    await control.query('ALTER TABLE public.subject_authorization_versions DROP CONSTRAINT subject_authorization_versions_pkey')
+    try {
+      const p=await preview()
+      expect(p.status,JSON.stringify(p.body)).toBe(503); expect(p.body.error.code).toBe('AUTHORIZATION_OPERATION_FENCE_UNAVAILABLE')
+      const c=await commit(ready.body.expectedVersion,randomUUID())
+      expect(c.status,JSON.stringify(c.body)).toBe(503); expect(c.body.error.code).toBe('AUTHORIZATION_OPERATION_FENCE_UNAVAILABLE')
+      expect(await writes()).toEqual(before)
+    } finally {
+      await control.query('ALTER TABLE public.subject_authorization_versions ADD CONSTRAINT subject_authorization_versions_pkey PRIMARY KEY (subject_id)')
+    }
+    expect((await preview()).status).toBe(200)
   })
   it('fails closed for an unrecognized trigger and returns to readiness after rollback', async () => {
     await control.query(`CREATE FUNCTION permission_command_unknown_trigger() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$`)

@@ -1,13 +1,17 @@
+import { EventEmitter } from 'node:events'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { types } from 'node:util'
 import ts from 'typescript'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import type { Request, Response } from 'express'
 import type { Queryable } from '../../src/multitable/automation-durable-dispatcher'
 import type {
   YidaOwnerRuntimeBinding, YidaOwnerRuntimeDependencies,
 } from '../../src/integration/yida-owner-runtime'
+// Y9 phase-2d refuter [1]: the REAL owner router, for the recovery entry's end-to-end report check (writebackThroughRoute).
+import { createIntegrationYidaOwnerRouter, yidaOwnerNoStoreMiddleware, type YidaOwnerHttpPort } from '../../src/routes/integration-yida-owner'
 
 // CONTROL PATH ONLY. The native core import is substituted below to isolate
 // registration, exact switch, cancellation and drain. These green tests do
@@ -19,6 +23,8 @@ type CoreDependencies = {
   security: YidaOwnerRuntimeDependencies['security']
   primitives: unknown
   multiTarget?: boolean
+  // D21 (slice Y5): present only when the host injected a re-authorizer.
+  reauthorizeSourceBinding?: unknown
 }
 type FakeAuthority = {
   prepareDraft(input: unknown): Promise<unknown>
@@ -66,6 +72,12 @@ function loadRuntime(factory: Factory, source = originalSource, ownCoreErrors = 
       createInternalYidaSendExecutionAuthority: factory,
       yidaSendApprovalErrorCode: (error: unknown) => ownCoreErrors.get(error as object),
     }
+    // Y9: the host live re-check of the issue-confirm write-back. The control path never reaches it: only the cursor
+    // refusal mapping and the C2 log-code helper below bind the write-back capability, and their runs answer without
+    // calling the re-check; it refuses if anything ever calls it.
+    if (specifier === './yida-issue-confirm-writeback-authority') return {
+      yidaIssueConfirmLiveRecheck: async () => { throw new Error('UNIT_RECHECK_MUST_NOT_RUN') },
+    }
     throw new Error('Unexpected unit import')
   }, exports)
   return exports as RuntimeModule
@@ -74,6 +86,13 @@ function fixture(options: {
   source?: string; enablement?: unknown; readEnablement?: () => unknown; readMultiTarget?: () => unknown
   factory?: Factory; database?: YidaOwnerRuntimeDependencies['database']
   security?: YidaOwnerRuntimeDependencies['security']; result?: unknown
+  readMultiTarget?: () => unknown
+  // D17 b (R-88): INTEGRATION_YIDA_SHEET_SOURCE_ENABLED as the runtime reads it; handed over only when present.
+  readSheetSource?: () => unknown
+  // D21 (slice Y5): the host's in-transaction re-authorizer; handed to the runtime only when the option is present.
+  reauthorizeSourceBinding?: unknown
+  // Y9: the post-ACK log sink; handed to the runtime only when present.
+  warn?: (code: string) => void
 } = {}) {
   const authority = fakeAuthority()
   const coreFactory = vi.fn(options.factory ?? (() => authority))
@@ -84,7 +103,11 @@ function fixture(options: {
   const fetcher = vi.fn(async () => { throw new Error('No protocol IO in control unit tests') })
   const readEnablement = vi.fn(options.readEnablement ?? (() => Object.hasOwn(options, 'enablement') ? options.enablement : 'true'))
   const runtime = module.createYidaOwnerRuntime({ database, security, fetch: fetcher, readEnablement,
-    ...(options.readMultiTarget ? { readMultiTargetEnablement: options.readMultiTarget } : {}) })
+    ...(options.readMultiTarget ? { readMultiTargetEnablement: options.readMultiTarget } : {}),
+    ...(options.readSheetSource ? { readSheetSourceEnablement: options.readSheetSource } : {}),
+    ...(Object.hasOwn(options, 'reauthorizeSourceBinding')
+      ? { reauthorizeSourceBinding: options.reauthorizeSourceBinding as YidaOwnerRuntimeDependencies['reauthorizeSourceBinding'] } : {}),
+    ...(options.warn ? { warn: options.warn } : {}) })
   const submit = vi.fn(async () => options.result ?? delivered)
   const createPrimitives = vi.fn(() => Object.freeze({}))
   const createSendPort = vi.fn(() => Object.freeze({ submit, inspect: vi.fn() }))
@@ -95,6 +118,318 @@ async function active(options: Parameters<typeof fixture>[0] = {}) {
   const f = fixture(options)
   const registration = await f.runtime.createPluginCapability().activate(f.binding)
   return { ...f, registration }
+}
+
+// Y6 (carry-forward from #6794): a source binding is produced only by the sheet-source route, which exists only
+// while the multi-target switch reads exactly 'true'. If the switch flips OFF during the sheet read, the route
+// still hands prepareDraft a binding; the runtime must refuse it at its input boundary, before any authority work.
+const boundDraft = Object.freeze({ config: {}, rowsText: '[]', sourceBinding: Object.freeze({ sheetId: 'synthetic-sheet' }) })
+const MULTI_TARGET_OFF: ReadonlyArray<[string, (() => unknown) | undefined]> = [['absent', undefined], ["'false'", () => 'false'],
+  ["'TRUE'", () => 'TRUE'], ['boolean true', () => true], ['throwing', () => { throw new Error('synthetic-private-switch') }]]
+async function sourceBindingRefusedWhileOff(source = originalSource, readSheetSource?: () => unknown) {
+  for (const [name, readMultiTarget] of MULTI_TARGET_OFF) {
+    const f = await active({ source, readMultiTarget, readSheetSource })
+    try {
+      await expect(f.runtime.prepareDraft(actor, boundDraft), name).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
+      expect(f.authority.prepareDraft, name).not.toHaveBeenCalled()
+      expect(f.coreFactory, name).not.toHaveBeenCalled()
+      expect(f.database.transaction, name).not.toHaveBeenCalled()
+    } finally { await f.runtime.stop() }
+  }
+}
+
+// D17 b (owner 2026-11-07, R-88): INTEGRATION_YIDA_SHEET_SOURCE_ENABLED. With multi-target OFF, a binding (and the
+// owner proof the route runs before its sheet read) is admitted only while this switch reads exactly 'true'.
+const SHEET_SOURCE_OFF: ReadonlyArray<[string, (() => unknown) | undefined]> = [['absent', undefined], ["'false'", () => 'false'],
+  ["'TRUE'", () => 'TRUE'], ["' true'", () => ' true'], ["'true '", () => 'true '], ['boolean true', () => true], ["'1'", () => '1'],
+  ['throwing', () => { throw new Error('synthetic-private-switch') }]]
+async function sheetSourceRefusedWhileOff(source = originalSource) {
+  for (const [name, readSheetSource] of SHEET_SOURCE_OFF) {
+    const f = await active({ source, readMultiTarget: () => 'false', readSheetSource })
+    try {
+      expect(f.runtime.sheetSourceEnabled(), name).toBe(false)
+      await expect(f.runtime.prepareDraft(actor, boundDraft), name).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
+      await expect(f.runtime.proveDraftOwner(actor, {}), name).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
+      expect(f.authority.prepareDraft, name).not.toHaveBeenCalled()
+      expect(f.authority.proveDraftTarget, name).not.toHaveBeenCalled()
+      expect(f.coreFactory, name).not.toHaveBeenCalled()
+      expect(f.database.transaction, name).not.toHaveBeenCalled()
+    } finally { await f.runtime.stop() }
+  }
+}
+// The run's authority is told about the sheet source only while the switch reads exactly 'true'.
+async function sheetSourceAuthorityBit(source = originalSource) {
+  const { sourceBinding: _binding, ...pasted } = boundDraft
+  for (const [name, readSheetSource, expected] of [['off', () => 'false', false], ['on', () => 'true', true]] as const) {
+    const f = await active({ source, readMultiTarget: () => 'false', readSheetSource })
+    try {
+      await f.runtime.prepareDraft(actor, pasted)
+      const deps = f.coreFactory.mock.calls[0][0] as unknown as Record<string, unknown>
+      expect(Object.hasOwn(deps, 'sheetSource'), name).toBe(expected)
+      if (expected) expect(deps.sheetSource, name).toBe(true)
+      expect(Object.hasOwn(deps, 'multiTarget'), name).toBe(false)
+    } finally { await f.runtime.stop() }
+  }
+}
+// Sheet source without multi-target is slot 1 only: a targetRef stays refused on the draft and on the owner proof.
+async function sheetSourceKeepsSlotOne(source = originalSource) {
+  const f = await active({ source, readMultiTarget: () => 'false', readSheetSource: () => 'true' })
+  try {
+    await expect(f.runtime.prepareDraft(actor, { ...boundDraft, targetRef: TARGET_REF_FIXTURE })).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
+    await expect(f.runtime.proveDraftOwner(actor, { targetRef: TARGET_REF_FIXTURE })).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_INPUT' })
+    expect(f.authority.prepareDraft).not.toHaveBeenCalled()
+    expect(f.authority.proveDraftTarget).not.toHaveBeenCalled()
+  } finally { await f.runtime.stop() }
+}
+const TARGET_REF_FIXTURE = '00000000-0000-4000-8000-0000000000aa'
+// Y9 sweep (round-3 refuter F3): the runtime's own mapping of the core's closed cursor refusal, with the owner proof
+// passing (this harness substitutes the core authority, so proveDraftTarget resolves). A capability that answers
+// { enabled: true, results: [], refused: 'STALE' } is the runtime's own error with the wire code
+// YIDA_ISSUE_CONFIRM_CURSOR_STALE (the plugin core's fixed text; the host never imports the plugin, so the literal is
+// pinned here), 'AFTER' is YIDA_OWNER_RUNTIME_INPUT, and any other refusal is UNAVAILABLE. Each after the live proof,
+// with the run called exactly once.
+const SWEEP_CURSOR_FIXTURE = 'c3ludGhldGljLXN3ZWVwLWN1cnNvcg'
+async function writebackCursorRefusals(source = originalSource) {
+  for (const [refused, code] of [['STALE', 'YIDA_ISSUE_CONFIRM_CURSOR_STALE'], ['AFTER', 'YIDA_OWNER_RUNTIME_INPUT'],
+    ['OTHER', 'YIDA_OWNER_RUNTIME_UNAVAILABLE']] as const) {
+    const f = fixture({ source })
+    const run = vi.fn(async () => Object.freeze({ enabled: true, results: [], refused }))
+    const createIssueConfirmWriteback = vi.fn(() => Object.freeze({ run }))
+    await f.runtime.createPluginCapability().activate({ ...f.binding, createIssueConfirmWriteback,
+      issueConfirmWritebackEnabled: () => true } as unknown as YidaOwnerRuntimeBinding)
+    try {
+      const error = await f.runtime.issueConfirmWriteback(actor, { after: SWEEP_CURSOR_FIXTURE }).then(() => undefined, (caught: unknown) => caught)
+      expect(error, refused).toBeInstanceOf(f.module.YidaOwnerRuntimeError)
+      expect([(error as { code?: unknown }).code, (error as Error).message], refused).toEqual([code, code])
+      expect(f.authority.proveDraftTarget, refused).toHaveBeenCalledWith({})
+      expect(run, refused).toHaveBeenCalledTimes(1)
+      expect(run.mock.calls[0][0], refused).toEqual({ after: SWEEP_CURSOR_FIXTURE })
+    } finally { await f.runtime.stop() }
+  }
+}
+
+// Y9 (stock-prep C2): the post-ACK run's log codes, as the runtime maps the write-back answer of an acknowledged send.
+// A run that finished with a retryable row logs YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED once; a skip or a traced outcome
+// logs nothing; a rejected run logs the failure code alone.
+async function writebackDeferredSignal(source = originalSource) {
+  const ledgerId = delivered.delivery.id
+  for (const [name, answer, expected] of [
+    ['retryable', async () => Object.freeze({ enabled: true, results: [{ ledgerId, kind: 'retryable', code: 'STOCK_PREP_PROJECT_WRITE_LOCKED' }] }),
+      ['YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED']],
+    ['skip project_sheets_disabled', async () => Object.freeze({ enabled: true, results: [{ ledgerId, kind: 'skip', reason: 'project_sheets_disabled' }] }), []],
+    ['outcome written', async () => Object.freeze({ enabled: true, results: [{ ledgerId, kind: 'outcome', outcome: 'written', recorded: true }] }), []],
+    ['rejected', async () => { throw new Error('SYNTHETIC_WRITEBACK_REJECTED') }, ['YIDA_ISSUE_CONFIRM_WRITEBACK_AFTER_ACK_FAILED']],
+    // Once per run, not once per row (stock-prep EX-04): two retryable rows in one (fake, multi-row) answer, one line.
+    ['two retryable rows', async () => Object.freeze({ enabled: true, results: [{ ledgerId, kind: 'retryable', code: 'STOCK_PREP_PROJECT_WRITE_LOCKED' },
+      { ledgerId: 'synthetic-ledger-2', kind: 'retryable', code: 'YIDA_ISSUE_CONFIRM_RECORDS_INVALID' }] }), ['YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED']],
+  ] as const) {
+    const warnings: string[] = []
+    const f = fixture({ source, warn: code => { warnings.push(code) } })
+    const run = vi.fn(answer)
+    const createIssueConfirmWriteback = vi.fn(() => Object.freeze({ run }))
+    await f.runtime.createPluginCapability().activate({ ...f.binding, createIssueConfirmWriteback,
+      issueConfirmWritebackEnabled: () => true } as unknown as YidaOwnerRuntimeBinding)
+    try {
+      await expect(f.runtime.submit(actor, submission), name).resolves.toMatchObject({ status: 'acknowledged' })
+      const deadline = Date.now() + 2000
+      while (run.mock.calls.length === 0 || (expected.length > 0 && warnings.length === 0)) {
+        if (Date.now() > deadline) break
+        await new Promise(resolve => setTimeout(resolve, 5))
+      }
+      await new Promise(resolve => setTimeout(resolve, 20))
+      expect(run.mock.calls, name).toEqual([[{ ledgerIds: [ledgerId] }]])
+      expect(warnings, name).toEqual(expected)
+    } finally { await f.runtime.stop() }
+  }
+}
+
+// Y9 (stock-prep ruling on post-ACK terminal non-write outcomes): a post-ACK run that finished with such an outcome logs
+// YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN plus `outcome=count` pairs (the core's vocabulary order) once; written /
+// already_set / kept_existing, a skip or an unknown outcome string log nothing; with a retryable row as well, DEFERRED
+// comes first. The recovery entry never logs it (its caller sees the rows).
+const UNWRITTEN = 'YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN'
+async function postAckWarnings(source: string, answer: () => Promise<unknown>, name: string, expected: readonly string[]) {
+  const ledgerId = delivered.delivery.id
+  const warnings: string[] = []
+  const f = fixture({ source, warn: code => { warnings.push(code) } })
+  const run = vi.fn(answer)
+  await f.runtime.createPluginCapability().activate({ ...f.binding, createIssueConfirmWriteback: vi.fn(() => Object.freeze({ run })),
+    issueConfirmWritebackEnabled: () => true } as unknown as YidaOwnerRuntimeBinding)
+  try {
+    await expect(f.runtime.submit(actor, submission), name).resolves.toMatchObject({ status: 'acknowledged' })
+    const deadline = Date.now() + 2000
+    while (run.mock.calls.length === 0 || warnings.length < expected.length) {
+      if (Date.now() > deadline) break
+      await new Promise(resolve => setTimeout(resolve, 5))
+    }
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(run.mock.calls, name).toEqual([[{ ledgerIds: [ledgerId] }]])
+    expect(warnings, name).toEqual(expected)
+  } finally { await f.runtime.stop() }
+}
+async function writebackUnwrittenSignal(source = originalSource) {
+  const ledgerId = delivered.delivery.id
+  const row = (outcome: string, id = ledgerId) => ({ ledgerId: id, kind: 'outcome', outcome, recorded: true })
+  const other = (n: number) => `synthetic-ledger-${n}`
+  for (const [name, results, expected] of [
+    ['row_absent', [row('row_absent')], [`${UNWRITTEN} row_absent=1`]],
+    ['already_set', [{ ...row('already_set'), date: '2026-03-02', timeZone: 'Asia/Shanghai' }], []],
+    ['kept_existing', [row('kept_existing')], []],
+    ['an outcome outside the vocabulary is never echoed', [row('synthetic_unknown')], []],
+    ['mixed, with a retryable row', [row('source_unbound', other(1)), { ledgerId: other(2), kind: 'retryable', code: 'STOCK_PREP_PROJECT_WRITE_LOCKED' },
+      row('project_archived', other(3)), { ...row('written', other(4)), date: '2026-03-02', timeZone: 'Asia/Shanghai' }, row('project_archived', other(5))],
+    ['YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED', `${UNWRITTEN} project_archived=2 source_unbound=1`]],
+    // Stock-prep ruling 2026-11-17: only rows THIS run traced are counted — a recorded:false row (another run traced it
+    // first, perhaps as written) logs nothing, alone or next to recorded rows.
+    ['recorded false only', [{ ...row('row_absent'), recorded: false }], []],
+    ['recorded false next to recorded', [{ ...row('project_archived', other(1)), recorded: false }, row('project_archived', other(2)),
+      { ...row('sheet_mismatch', other(3)), recorded: false }], [`${UNWRITTEN} project_archived=1`]],
+  ] as const) {
+    await postAckWarnings(source, async () => Object.freeze({ enabled: true, results }), name, expected)
+  }
+  // The recovery entry (owner proof passing): the same answer reaches its caller, and nothing is logged.
+  const warnings: string[] = []
+  const f = fixture({ source, warn: code => { warnings.push(code) } })
+  const run = vi.fn(async () => Object.freeze({ enabled: true, results: [row('row_absent')], next: null }))
+  await f.runtime.createPluginCapability().activate({ ...f.binding, createIssueConfirmWriteback: vi.fn(() => Object.freeze({ run })),
+    issueConfirmWritebackEnabled: () => true } as unknown as YidaOwnerRuntimeBinding)
+  try {
+    const answer = await f.runtime.issueConfirmWriteback(actor, {})
+    expect((answer as { results: unknown[] }).results).toEqual([row('row_absent')])
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(warnings, 'recovery entry').toEqual([])
+  } finally { await f.runtime.stop() }
+}
+
+// Y9 D3-1 (owner ruling, register R-96 ⑦, 2026-11-17): a post-ACK run that finished with a written_inactive row (the
+// date written onto the inactive row its key found) logs YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE count=<n> once —
+// its own line, never folded into UNWRITTEN, after DEFERRED / UNWRITTEN; a written row or a D14 skip logs nothing; the
+// recovery entry logs nothing (its caller sees the rows and the report).
+const WRITTEN_INACTIVE = 'YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE'
+const ISSUE_DAY = Object.freeze({ date: '2026-03-02', timeZone: 'Asia/Shanghai' })
+async function writebackWrittenInactiveSignal(source = originalSource) {
+  const ledgerId = delivered.delivery.id
+  const inactive = (id = ledgerId, recordId = 'synthetic-record-predecessor') =>
+    ({ ledgerId: id, kind: 'outcome', outcome: 'written_inactive', recorded: true, ...ISSUE_DAY, recordId })
+  const other = (n: number) => `synthetic-ledger-${n}`
+  for (const [name, results, expected] of [
+    ['written_inactive', [inactive()], [`${WRITTEN_INACTIVE} count=1`]],
+    // The count ignores recorded (R-96 ③): the date was patched in THIS run even when another run's trace won the row.
+    ['written_inactive recorded false (another run traced first)', [{ ...inactive(), recorded: false }], [`${WRITTEN_INACTIVE} count=1`]],
+    ['written', [{ ledgerId, kind: 'outcome', outcome: 'written', recorded: true, ...ISSUE_DAY }], []],
+    ['skip project_sheets_disabled (D14)', [{ ledgerId, kind: 'skip', reason: 'project_sheets_disabled' }], []],
+    ['row_absent is UNWRITTEN, never WRITTEN_INACTIVE', [{ ledgerId, kind: 'outcome', outcome: 'row_absent', recorded: true }], [`${UNWRITTEN} row_absent=1`]],
+    ['mixed: retryable, row_absent and two written_inactive', [inactive(other(1), 'synthetic-record-1'),
+      { ledgerId: other(2), kind: 'retryable', code: 'STOCK_PREP_PROJECT_WRITE_LOCKED' },
+      { ledgerId: other(3), kind: 'outcome', outcome: 'row_absent', recorded: true }, inactive(other(4), 'synthetic-record-4')],
+    ['YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED', `${UNWRITTEN} row_absent=1`, `${WRITTEN_INACTIVE} count=2`]],
+  ] as const) {
+    await postAckWarnings(source, async () => Object.freeze({ enabled: true, results }), name, expected)
+  }
+  // The recovery entry (owner proof passing): the answer and its report reach the caller, and nothing is logged.
+  const warnings: string[] = []
+  const f = fixture({ source, warn: code => { warnings.push(code) } })
+  const run = vi.fn(async () => Object.freeze({ enabled: true, results: [inactive()], next: null }))
+  await f.runtime.createPluginCapability().activate({ ...f.binding, createIssueConfirmWriteback: vi.fn(() => Object.freeze({ run })),
+    issueConfirmWritebackEnabled: () => true } as unknown as YidaOwnerRuntimeBinding)
+  try {
+    const answer = await f.runtime.issueConfirmWriteback(actor, {}) as { results: unknown[]; report: unknown }
+    expect(answer.results).toEqual([inactive()])
+    expect(answer.report).toEqual({ counts: { written_inactive: 1, row_absent: 0, duplicate_key: 0, kept_existing: 0 },
+      writtenInactive: [{ ledgerId, recordId: 'synthetic-record-predecessor' }] })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(warnings, 'recovery entry').toEqual([])
+  } finally { await f.runtime.stop() }
+}
+// Y9 D3-1: the run report on the runtime's view (the recovery entry's answer and the post-ACK result): derived from the
+// closed rows, every key present (zeros too), the written_inactive rows listed with their record ids; a record id is
+// admitted on a dated written_inactive row only.
+async function writebackRunReport(source = originalSource) {
+  const answerOf = async (answer: unknown) => {
+    const f = fixture({ source })
+    const run = vi.fn(async () => answer)
+    await f.runtime.createPluginCapability().activate({ ...f.binding, createIssueConfirmWriteback: vi.fn(() => Object.freeze({ run })),
+      issueConfirmWritebackEnabled: () => true } as unknown as YidaOwnerRuntimeBinding)
+    try { return await f.runtime.issueConfirmWriteback(actor, {}).then(value => ({ value }), (error: unknown) => ({ error })) }
+    finally { await f.runtime.stop() }
+  }
+  const results = [
+    { ledgerId: 'synthetic-ledger-1', kind: 'outcome', outcome: 'written_inactive', recorded: true, ...ISSUE_DAY, recordId: 'synthetic-record-1' },
+    { ledgerId: 'synthetic-ledger-2', kind: 'outcome', outcome: 'kept_existing', recorded: true },
+    { ledgerId: 'synthetic-ledger-3', kind: 'outcome', outcome: 'duplicate_key', recorded: false },
+    { ledgerId: 'synthetic-ledger-4', kind: 'outcome', outcome: 'row_absent', recorded: true },
+    { ledgerId: 'synthetic-ledger-5', kind: 'outcome', outcome: 'row_absent', recorded: true },
+    { ledgerId: 'synthetic-ledger-6', kind: 'outcome', outcome: 'written', recorded: true, ...ISSUE_DAY },
+    { ledgerId: 'synthetic-ledger-7', kind: 'skip', reason: 'project_sheets_disabled' },
+  ]
+  expect(await answerOf(Object.freeze({ enabled: true, results, next: null }))).toEqual({ value: { enabled: true, results, next: null,
+    report: { counts: { written_inactive: 1, row_absent: 2, duplicate_key: 1, kept_existing: 1 },
+      writtenInactive: [{ ledgerId: 'synthetic-ledger-1', recordId: 'synthetic-record-1' }] } } })
+  expect(await answerOf(Object.freeze({ enabled: true, results: [] }))).toEqual({ value: { enabled: true, results: [],
+    report: { counts: { written_inactive: 0, row_absent: 0, duplicate_key: 0, kept_existing: 0 }, writtenInactive: [] } } })
+  // A switched-off core's answer (enabled false) carries no report at all (phase-2d refuter [1], fix 3).
+  const off = await answerOf(Object.freeze({ enabled: false, results: [] }))
+  expect(off).toEqual({ value: { enabled: false, results: [] } })
+  expect(Object.hasOwn((off as { value: object }).value, 'report')).toBe(false)
+  for (const [name, row] of [
+    ['a record id on a written row', { ...results[5], recordId: 'synthetic-record-6' }],
+    ['a record id on an undated row', { ...results[1], recordId: 'synthetic-record-2' }],
+    ['written_inactive without its record id', { ledgerId: 'synthetic-ledger-1', kind: 'outcome', outcome: 'written_inactive', recorded: true, ...ISSUE_DAY }],
+    ['written_inactive without its date', { ledgerId: 'synthetic-ledger-1', kind: 'outcome', outcome: 'written_inactive', recorded: true, recordId: 'synthetic-record-1' }],
+    ['written_inactive with a padded record id', { ...results[0], recordId: ' synthetic-record-1' }],
+  ] as const) {
+    const answer = await answerOf(Object.freeze({ enabled: true, results: [row] }))
+    expect(answer, name).toHaveProperty('error')
+    expect(['YIDA_OWNER_RUNTIME_INPUT', 'YIDA_OWNER_RUNTIME_UNAVAILABLE'], name).toContain((answer as { error: { code?: unknown } }).error.code)
+  }
+}
+
+// Phase-2d refuter [1]: the recovery entry END TO END — this runtime source (the core authority substituted, so the owner
+// proof passes) composed with the REAL owner router as its port, a fake write-back capability answering a written_inactive
+// page and an empty page. The route checks the runtime's report against its own recomputation; both sides must agree as
+// data, so a reply is 200 with the report. (200 paths only: the router decodes errors with the real runtime module's
+// brand, which a runtime loaded from source does not carry.)
+async function routeDispatch(port: unknown, body: unknown) {
+  const req = Object.assign(new EventEmitter(), { method: 'POST', url: '/issue-confirm-writeback',
+    originalUrl: '/api/integration/yida-owner-send/issue-confirm-writeback', headers: {}, query: {},
+    body, user: { id: actor.actorId }, authenticatedTenantId: actor.tenantId, aborted: false })
+  let status = 0
+  const router = createIntegrationYidaOwnerRouter(port as YidaOwnerHttpPort)
+  const res = Object.assign(new EventEmitter(), { writableEnded: false, destroyed: false, setHeader() {},
+    status(value: number) { status = value; return this }, json(_body: unknown) {} })
+  const result = await new Promise<unknown>((resolve, reject) => {
+    res.json = (payload: unknown) => { res.writableEnded = true; resolve(payload) }
+    yidaOwnerNoStoreMiddleware(req as unknown as Request, res as unknown as Response, () => {
+      router(req as unknown as Request, res as unknown as Response, reject)
+    })
+  })
+  return { status, result }
+}
+async function writebackThroughRoute(source = originalSource) {
+  const day = Object.freeze({ date: '2026-03-02', timeZone: 'Asia/Shanghai' })
+  const page = [
+    { ledgerId: 'synthetic-ledger-1', kind: 'outcome', outcome: 'written_inactive', recorded: true, ...day, recordId: 'synthetic-record-1' },
+    { ledgerId: 'synthetic-ledger-2', kind: 'outcome', outcome: 'row_absent', recorded: true },
+    { ledgerId: 'synthetic-ledger-3', kind: 'outcome', outcome: 'kept_existing', recorded: false },
+    { ledgerId: 'synthetic-ledger-4', kind: 'outcome', outcome: 'written_inactive', recorded: false, ...day, recordId: 'synthetic-record-4' },
+    { ledgerId: 'synthetic-ledger-5', kind: 'outcome', outcome: 'written', recorded: true, ...day },
+  ]
+  for (const [name, results, report] of [
+    ['a written_inactive page', page, { counts: { written_inactive: 2, row_absent: 1, duplicate_key: 0, kept_existing: 1 },
+      writtenInactive: [{ ledgerId: 'synthetic-ledger-1', recordId: 'synthetic-record-1' }, { ledgerId: 'synthetic-ledger-4', recordId: 'synthetic-record-4' }] }],
+    ['an empty page', [], { counts: { written_inactive: 0, row_absent: 0, duplicate_key: 0, kept_existing: 0 }, writtenInactive: [] }],
+  ] as const) {
+    const f = fixture({ source })
+    const run = vi.fn(async () => Object.freeze({ enabled: true, results, next: null }))
+    await f.runtime.createPluginCapability().activate({ ...f.binding, createIssueConfirmWriteback: vi.fn(() => Object.freeze({ run })),
+      issueConfirmWritebackEnabled: () => true } as unknown as YidaOwnerRuntimeBinding)
+    try {
+      const reply = await routeDispatch(f.runtime, {})
+      expect(reply, name).toEqual({ status: 200, result: { ok: true, data: { enabled: true, results, next: null, report } } })
+      expect(f.authority.proveDraftTarget, name).toHaveBeenCalledWith({})
+      expect(run.mock.calls, name).toEqual([[{}]])
+    } finally { await f.runtime.stop() }
+  }
 }
 
 const networkSpies: ReturnType<typeof vi.spyOn>[] = []
@@ -218,6 +553,29 @@ describe('Yida owner runtime control paths (NOT positive authority proof)', () =
     expect(options.timeoutMs).toBe(10000)
     expect(Object.isFrozen(options)).toBe(true)
     await f.runtime.stop()
+  })
+
+  it('D21 (slice Y5): an injected re-authorizer reaches the core authority factory unchanged on every run; none injected, the factory gets no such key (the core service then refuses every bound row); a non-function or proxy is refused at construction', async () => {
+    const reauthorizeSourceBinding = vi.fn(async () => Object.freeze({ authorized: true }))
+    const f = await active({ reauthorizeSourceBinding })
+    await f.runtime.observe(actor, grant)
+    await f.runtime.preview(actor, selected)
+    expect(f.coreFactory).toHaveBeenCalledTimes(2)
+    for (const [dependencies] of f.coreFactory.mock.calls) {
+      expect(Object.keys(dependencies).sort()).toEqual(['context', 'database', 'primitives', 'reauthorizeSourceBinding', 'security', 'unboundTestTargetRefs'])
+      expect(dependencies.reauthorizeSourceBinding).toBe(reauthorizeSourceBinding)
+    }
+    // The runtime only hands it over: the core service calls it inside its own approval / admission transactions.
+    expect(reauthorizeSourceBinding).not.toHaveBeenCalled()
+    await f.runtime.stop()
+    const g = await active()
+    await g.runtime.observe(actor, grant)
+    expect(Object.keys(g.coreFactory.mock.calls[0][0]).sort()).toEqual(['context', 'database', 'primitives', 'security', 'unboundTestTargetRefs'])
+    expect(Object.hasOwn(g.coreFactory.mock.calls[0][0], 'reauthorizeSourceBinding')).toBe(false)
+    await g.runtime.stop()
+    for (const invalid of [null, 'synthetic', {}, new Proxy(reauthorizeSourceBinding, {})]) {
+      expect(() => fixture({ reauthorizeSourceBinding: invalid })).toThrow('YIDA_OWNER_RUNTIME_INPUT')
+    }
   })
 
   it('rejects caller identity additions, inherited fields, getters, proxies and closed execution/options extras', async () => {
@@ -489,6 +847,102 @@ describe('Yida owner runtime control paths (NOT positive authority proof)', () =
     await runtime.stop()
   })
 
+  it('Y6: prepareDraft refuses a sourceBinding unless the multi-target switch reads exactly true (absent, false, TRUE, true, throwing)', async () => {
+    await sourceBindingRefusedWhileOff()
+    // Positive control: with the switch exactly 'true' the same input reaches the authority unchanged.
+    const on = await active({ readMultiTarget: () => 'true' })
+    try {
+      await expect(on.runtime.prepareDraft(actor, boundDraft)).resolves.toEqual({ operationId: 'synthetic-operation' })
+      expect(on.authority.prepareDraft).toHaveBeenCalledTimes(1)
+      expect(on.authority.prepareDraft.mock.calls[0][0]).toEqual(boundDraft)
+    } finally { await on.runtime.stop() }
+    // A draft without a binding (pasted rows) is not affected by the switch.
+    const off = await active({ readMultiTarget: () => 'false' })
+    try {
+      const { sourceBinding: _binding, ...pasted } = boundDraft
+      await expect(off.runtime.prepareDraft(actor, pasted)).resolves.toEqual({ operationId: 'synthetic-operation' })
+    } finally { await off.runtime.stop() }
+  })
+
+  it('D17 b: with multi-target OFF, a sourceBinding and the owner proof need the sheet-source switch to read exactly true', async () => {
+    await sheetSourceRefusedWhileOff()
+    // The Y6 pin still holds with the new reader absent (above: sourceBindingRefusedWhileOff, no sheet-source reader).
+    await sourceBindingRefusedWhileOff(originalSource, () => 'false')
+    // Positive control: switch exactly 'true' -> the same bound input reaches the authority unchanged; the owner proof
+    // runs (no targetRef); the shape bit reads true; the authority gets sheetSource and never multiTarget.
+    const on = await active({ readMultiTarget: () => 'false', readSheetSource: () => 'true' })
+    try {
+      expect(on.runtime.sheetSourceEnabled()).toBe(true)
+      expect(on.runtime.multiTargetEnabled()).toBe(false)
+      await expect(on.runtime.prepareDraft(actor, boundDraft)).resolves.toEqual({ operationId: 'synthetic-operation' })
+      expect(on.authority.prepareDraft.mock.calls[0][0]).toEqual(boundDraft)
+      await expect(on.runtime.proveDraftOwner(actor, {})).resolves.toEqual({ proven: true })
+      expect(on.authority.proveDraftTarget.mock.calls[0][0]).toEqual({})
+    } finally { await on.runtime.stop() }
+    await sheetSourceAuthorityBit()
+    await sheetSourceKeepsSlotOne()
+    // With multi-target ON the switch changes nothing: a targetRef is still accepted whatever it reads.
+    const multi = await active({ readMultiTarget: () => 'true', readSheetSource: () => 'false' })
+    try {
+      await expect(multi.runtime.proveDraftOwner(actor, { targetRef: TARGET_REF_FIXTURE })).resolves.toEqual({ proven: true })
+      await expect(multi.runtime.prepareDraft(actor, boundDraft)).resolves.toEqual({ operationId: 'synthetic-operation' })
+    } finally { await multi.runtime.stop() }
+  })
+
+  it('Y9 sweep: a cursor refusal of the write-back core is mapped by the runtime itself — STALE is YIDA_ISSUE_CONFIRM_CURSOR_STALE, AFTER is INPUT, anything else UNAVAILABLE (owner proof passing)', async () => {
+    await writebackCursorRefusals()
+  })
+
+  it('Y9 C2: a post-ACK run that finished with a retryable row logs YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED once; a skip or a written outcome logs nothing; a rejected run logs the failure code alone', async () => {
+    await writebackDeferredSignal()
+  })
+
+  it('Y9 UNWRITTEN: a post-ACK run that finished with a terminal non-write outcome logs YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN with outcome=count pairs once (DEFERRED first when a row is retryable too); the recovery entry logs nothing', async () => {
+    await writebackUnwrittenSignal()
+  })
+
+  it('Y9 UNWRITTEN: the counted outcomes are exactly the write-back core\'s closed vocabulary minus written, already_set, kept_existing and (D3-1) written_inactive, in its order', async () => {
+    const core = nativeRequire(fileURLToPath(new URL('../../../../plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs', import.meta.url))) as
+      { ISSUE_CONFIRM_WRITEBACK_OUTCOMES: readonly string[]; ISSUE_CONFIRM_DATED_OUTCOMES: readonly string[] }
+    expect(core.ISSUE_CONFIRM_WRITEBACK_OUTCOMES).toHaveLength(13)
+    const nonWrite = core.ISSUE_CONFIRM_WRITEBACK_OUTCOMES.filter(outcome => !['written', 'already_set', 'kept_existing', 'written_inactive'].includes(outcome))
+    expect(nonWrite).toEqual(['row_absent', 'duplicate_key', 'project_absent', 'project_archived', 'project_mismatch',
+      'payload_unmapped', 'sheet_mismatch', 'permission_revoked', 'source_unbound'])
+    for (const outcome of core.ISSUE_CONFIRM_WRITEBACK_OUTCOMES) {
+      const dated = core.ISSUE_CONFIRM_DATED_OUTCOMES.includes(outcome) ? { date: '2026-03-02', timeZone: 'Asia/Shanghai' } : {}
+      const handle = outcome === 'written_inactive' ? { recordId: 'synthetic-record-predecessor' } : {}
+      await postAckWarnings(originalSource, async () => Object.freeze({ enabled: true,
+        results: [{ ledgerId: delivered.delivery.id, kind: 'outcome', outcome, recorded: true, ...dated, ...handle }] }), outcome,
+      nonWrite.includes(outcome) ? [`${UNWRITTEN} ${outcome}=1`] : outcome === 'written_inactive' ? [`${WRITTEN_INACTIVE} count=1`] : [])
+    }
+    // All nine in one (fake, multi-row) answer: one line, the core's order.
+    await postAckWarnings(originalSource, async () => Object.freeze({ enabled: true,
+      results: [...nonWrite].reverse().map((outcome, index) => ({ ledgerId: `synthetic-ledger-${index}`, kind: 'outcome', outcome, recorded: true })) }),
+    'all nine', [`${UNWRITTEN} ${nonWrite.map(outcome => `${outcome}=1`).join(' ')}`])
+  })
+
+  it('Y9 D3-1 WRITTEN_INACTIVE: a post-ACK run that finished with a written_inactive row logs YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE count=<n> once, its own line after DEFERRED and UNWRITTEN; written, a D14 skip and the recovery entry log nothing', async () => {
+    await writebackWrittenInactiveSignal()
+  })
+
+  it('Y9 D3-1 report: the runtime\'s view carries the run report (counts of written_inactive, row_absent, duplicate_key, kept_existing; the written_inactive rows with their record ids) and admits a record id on a dated written_inactive row only', async () => {
+    await writebackRunReport()
+  })
+
+  it('Y9 D3-1 report end to end (phase-2d refuter [1]): this runtime composed with the real owner router answers a written_inactive page and an empty page with 200 and the report', async () => {
+    await writebackThroughRoute()
+  })
+
+  it('Y9 D3-1 report end to end: the route compares the runtime\'s report as data — a runtime that lists the counted outcomes, or the handle keys, in another order still answers 200 with the same report', async () => {
+    const counted = "const WRITEBACK_REPORT_COUNTED = Object.freeze([WRITTEN_INACTIVE, 'row_absent', 'duplicate_key', 'kept_existing'])"
+    const handle = 'Object.freeze({ ledgerId: entry.ledgerId, recordId: entry.recordId })'
+    expect(originalSource.includes(counted) && originalSource.includes(handle)).toBe(true)
+    const reordered = originalSource
+      .replace(counted, "const WRITEBACK_REPORT_COUNTED = Object.freeze(['kept_existing', 'duplicate_key', 'row_absent', WRITTEN_INACTIVE])")
+      .replace(handle, 'Object.freeze({ recordId: entry.recordId, ledgerId: entry.ledgerId })')
+    await writebackThroughRoute(reordered)
+  })
+
   it('projects a closed submit view and rejects execution authority/material additions', async () => {
     for (const key of ['permit', 'handle', 'credential', 'material', 'token', 'config']) {
       const f = await active({ result: { ...delivered, [key]: 'synthetic-private' } })
@@ -605,6 +1059,14 @@ describe('in-memory guard mutation probes (no repository writes)', () => {
         await runtime.createPluginCapability().activate(f.binding)
         try { await expect(runtime.preview(actor, selected)).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_DISABLED' }) }
         finally { await runtime.stop() }
+      } },
+      { name: 'reauthorization/handed-to-core', from: '...(reauthorizeSourceBinding ? { reauthorizeSourceBinding } : {}) })', to: '})', test: async source => {
+        const reauthorizeSourceBinding = vi.fn()
+        const f = await active({ source, reauthorizeSourceBinding })
+        try {
+          await f.runtime.observe(actor, grant)
+          expect(f.coreFactory.mock.calls[0][0].reauthorizeSourceBinding).toBe(reauthorizeSourceBinding)
+        } finally { await f.runtime.stop() }
       } },
       { name: 'dependencies/bounded-timeout', from: '|| !Number.isInteger(timeoutMs) || timeoutMs < 10 || timeoutMs > 60000', to: '', test: async source => {
         const f = fixture({ source })
@@ -835,6 +1297,86 @@ describe('in-memory guard mutation probes (no repository writes)', () => {
         try { await expect(f.runtime.submit(actor, submission)).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_UNAVAILABLE' }) }
         finally { await f.runtime.stop() }
       } },
+      { name: 'draft/source-binding-switch-gated', from: "if (Object.hasOwn(parsed, 'sourceBinding') && !sourceBindingOn()) fail('INPUT')", to: '',
+        test: source => sourceBindingRefusedWhileOff(source) },
+      // D17 b (R-88): the sheet-source switch is its own exact literal; a folded or trimmed read must not admit a binding.
+      { name: 'draft/sheet-source-exact-literal', from: "try { flag = readSheetSource() } catch { return false }\n    const on = flag === 'true'",
+        to: "try { flag = readSheetSource() } catch { return false }\n    const on = String(flag).trim().toLowerCase() === 'true'",
+        test: source => sheetSourceRefusedWhileOff(source) },
+      { name: 'draft/source-binding-needs-a-switch', from: 'const sourceBindingOn = (): boolean => multiTargetOn() || sheetSourceOn()', to: 'const sourceBindingOn = (): boolean => true',
+        test: source => sheetSourceRefusedWhileOff(source) },
+      { name: 'authority/sheet-source-only-when-on', from: "...(sheetSourceOn() ? { sheetSource: true } : {}),", to: 'sheetSource: true,',
+        test: source => sheetSourceAuthorityBit(source) },
+      { name: 'prove/target-needs-multi-target', from: "if (Object.hasOwn(parsed, 'targetRef') && !multiTargetOn()) fail('INPUT')\n        return Object.hasOwn(parsed, 'targetRef') ? { targetRef: id(parsed.targetRef) } : {}",
+        to: "return Object.hasOwn(parsed, 'targetRef') ? { targetRef: id(parsed.targetRef) } : {}",
+        test: source => sheetSourceKeepsSlotOne(source) },
+      // Y9 sweep (round-3 refuter F3): the two runtime mutants that left the host unit files green, and the wire text.
+      { name: 'writeback/stale-is-cursor-stale', from: "fail(raw.refused === SWEEP_STALE ? 'CURSOR_STALE' : 'INPUT')", to: "fail('INPUT')",
+        test: source => writebackCursorRefusals(source) },
+      { name: 'writeback/stale-recognised', from: '(raw.refused !== SWEEP_REFUSED && raw.refused !== SWEEP_STALE)', to: 'raw.refused !== SWEEP_REFUSED',
+        test: source => writebackCursorRefusals(source) },
+      { name: 'writeback/stale-wire-text', from: "code === 'CURSOR_STALE' ? 'YIDA_ISSUE_CONFIRM_CURSOR_STALE' : `YIDA_OWNER_RUNTIME_${code}`",
+        to: '`YIDA_OWNER_RUNTIME_${code}`', test: source => writebackCursorRefusals(source) },
+      // Y9 C2 (stock-prep hard condition): the DEFERRED log line — never dropped, only for a retryable row, its fixed text.
+      { name: 'writeback/deferred-logged', from: 'if (deferred) warn(YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED)', to: '',
+        test: source => writebackDeferredSignal(source) },
+      { name: 'writeback/deferred-retryable-only', from: ".some(row => row.kind === 'retryable')", to: '.some(() => true)',
+        test: source => writebackDeferredSignal(source) },
+      { name: 'writeback/deferred-wire-text', from: "export const YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED = 'YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED'",
+        to: "export const YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED = 'YIDA_ISSUE_CONFIRM_WRITEBACK_RETRYABLE'", test: source => writebackDeferredSignal(source) },
+      // Y9 UNWRITTEN (stock-prep ruling on post-ACK terminal non-write outcomes): logged, terminal non-write outcomes
+      // only, once per run, with its counts, after DEFERRED, its fixed text, its closed list.
+      { name: 'writeback/unwritten-logged', from: 'if (unwritten !== undefined) warn(unwritten)', to: '',
+        test: source => writebackUnwrittenSignal(source) },
+      { name: 'writeback/unwritten-terminal-only', from: "row.kind === 'outcome' && row.outcome === outcome", to: "row.kind === 'outcome'",
+        test: source => writebackUnwrittenSignal(source) },
+      { name: 'writeback/unwritten-once-per-run', from: 'if (unwritten !== undefined) warn(unwritten)',
+        to: 'if (unwritten !== undefined) { for (const _row of view?.results as unknown[]) warn(unwritten) }', test: source => writebackUnwrittenSignal(source) },
+      { name: 'writeback/unwritten-counts', from: 'counts.push(`${outcome}=${count}`)', to: 'counts.push(outcome)',
+        test: source => writebackUnwrittenSignal(source) },
+      { name: 'writeback/unwritten-after-deferred', from: 'if (deferred) warn(YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED)\n      if (unwritten !== undefined) warn(unwritten)',
+        to: 'if (unwritten !== undefined) warn(unwritten)\n      if (deferred) warn(YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED)', test: source => writebackUnwrittenSignal(source) },
+      { name: 'writeback/unwritten-closed-list', from: "'sheet_mismatch', 'permission_revoked', 'source_unbound'])",
+        to: "'sheet_mismatch', 'permission_revoked'])", test: source => writebackUnwrittenSignal(source) },
+      { name: 'writeback/unwritten-wire-text', from: "export const YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN = 'YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN'",
+        to: "export const YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN = 'YIDA_ISSUE_CONFIRM_WRITEBACK_FINAL'", test: source => writebackUnwrittenSignal(source) },
+      // Y9 D3-1 (owner ruling, R-96 ⑦): the WRITTEN_INACTIVE line — logged, its own code (never folded into UNWRITTEN),
+      // count only, post-ACK only, its fixed text; the run report — derived counts, the record handle, the closed row shape.
+      { name: 'writeback/written-inactive-logged', from: 'if (writtenInactive !== undefined) warn(writtenInactive)', to: '',
+        test: source => writebackWrittenInactiveSignal(source) },
+      { name: 'writeback/written-inactive-not-unwritten', from: "'sheet_mismatch', 'permission_revoked', 'source_unbound'])",
+        to: "'sheet_mismatch', 'permission_revoked', 'source_unbound', 'written_inactive'])", test: source => writebackWrittenInactiveSignal(source) },
+      { name: 'writeback/written-inactive-count', from: '`${YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE} count=${inactiveCount}`',
+        to: 'YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE', test: source => writebackWrittenInactiveSignal(source) },
+      { name: 'writeback/written-inactive-once-per-run', from: 'if (writtenInactive !== undefined) warn(writtenInactive)',
+        to: 'if (writtenInactive !== undefined) { for (const _row of view?.results as unknown[]) warn(writtenInactive) }',
+        test: source => writebackWrittenInactiveSignal(source) },
+      { name: 'writeback/written-inactive-post-ack-only', from: 'return writebackView(await (writeback.run as (input: unknown) => Promise<unknown>)(parsed))',
+        to: '{ const seen = writebackView(await (writeback.run as (input: unknown) => Promise<unknown>)(parsed)); const line = writtenInactiveText(seen.results as ReadonlyArray<Readonly<Row>>); if (line !== undefined) warn(line); return seen }',
+        test: source => writebackWrittenInactiveSignal(source) },
+      { name: 'writeback/written-inactive-wire-text', from: "export const YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE = 'YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE'",
+        to: "export const YIDA_ISSUE_CONFIRM_WRITEBACK_WRITTEN_INACTIVE = 'YIDA_ISSUE_CONFIRM_WRITEBACK_INACTIVE_ROW'", test: source => writebackWrittenInactiveSignal(source) },
+      { name: 'writeback/report-counts-derived', from: 'for (const name of WRITEBACK_REPORT_COUNTED) counts[name] = outcomeRows(results, name).length',
+        to: 'for (const name of WRITEBACK_REPORT_COUNTED) counts[name] = 0', test: source => writebackRunReport(source) },
+      { name: 'writeback/report-record-handle', from: 'Object.freeze({ ledgerId: entry.ledgerId, recordId: entry.recordId })',
+        to: 'Object.freeze({ ledgerId: entry.ledgerId })', test: source => writebackRunReport(source) },
+      { name: 'writeback/report-on-enabled-answers', from: '...(raw.enabled === true ? { report: writebackReport(results) } : {}),', to: '',
+        test: source => writebackRunReport(source) },
+      { name: 'writeback/record-id-written-inactive-only', from: "...(inactive ? ['recordId'] : [])]", to: "'recordId']",
+        test: source => writebackRunReport(source) },
+      // Phase-2e: the stock-prep ruling (2026-11-17) counts only rows THIS run traced; the DEFERRED line is once per run
+      // (stock-prep EX-04); a switched-off answer carries no report; the report's handle reaches the route intact.
+      { name: 'writeback/unwritten-recorded-only', from: ' && row.recorded === true).length', to: ').length',
+        test: source => writebackUnwrittenSignal(source) },
+      { name: 'writeback/deferred-once-per-run', from: 'if (deferred) warn(YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED)',
+        to: 'if (deferred) { for (const entry of view?.results as ReadonlyArray<Readonly<Row>>) if (entry.kind === \'retryable\') warn(YIDA_ISSUE_CONFIRM_WRITEBACK_DEFERRED) }',
+        test: source => writebackDeferredSignal(source) },
+      { name: 'writeback/report-only-on-enabled-answers', from: '...(raw.enabled === true ? { report: writebackReport(results) } : {}),',
+        to: 'report: writebackReport(results),', test: source => writebackRunReport(source) },
+      { name: 'writeback/report-handle-through-route', from: 'Object.freeze({ ledgerId: entry.ledgerId, recordId: entry.recordId })',
+        to: 'Object.freeze({ ledgerId: entry.recordId, recordId: entry.ledgerId })', test: source => writebackThroughRoute(source) },
+      { name: 'writeback/report-counts-through-route', from: 'counts[name] = outcomeRows(results, name).length',
+        to: 'counts[name] = outcomeRows(results, name).filter(entry => entry.recorded === true).length', test: source => writebackThroughRoute(source) },
       { name: 'errors/own-runtime-brand', from: 'if (own) fail(own)', to: '', test: async source => {
         const f = await active({ source, enablement: 'false' })
         try { await expect(f.runtime.preview(actor, selected)).rejects.toMatchObject({ code: 'YIDA_OWNER_RUNTIME_DISABLED' }) }

@@ -120,6 +120,7 @@ const ROLE_UPDATE = /SELECT id::text AS id FROM roles WHERE id = \$1::text FOR U
 const ADMISSION = /SELECT pg_advisory_xact_lock\(hashtextextended\(\$1, 0\)\)/
 const USER_LOCK = /FROM users WHERE id = \$1::text FOR UPDATE/
 const ADMIN_CHILD_READ = /SELECT role_id FROM user_roles WHERE user_id = \$1 AND role_id = 'admin'/
+const SUBJECT_VERSION_BUMP = /^INSERT INTO subject_authorization_versions /
 const ADMIN_SHARE = /SELECT role_id FROM user_roles WHERE user_id = \$1 AND role_id = 'admin' FOR SHARE/
 const ADMISSION_INSERT = /INSERT INTO user_namespace_admissions\b/
 const WORLD_SHARED = 'pg_advisory_xact_lock_shared(20261106, 1)'
@@ -694,7 +695,10 @@ describeWithDatabase('platform namespace admission bulk on the real pool; regist
     const fixture = await world('member')
     const priorGrant = `p1i-grant-${randomUUID()}`
     await seedAdmission(fixture.neighborId, NEIGHBOR, false, priorGrant)
-    beforeMatching(ADMIN_CHILD_READ, async () => {
+    // D21 (Y5a): the access-graph mutex takes the actor's subject version row before the users rows and
+    // holds it to commit, and the membership DELETE's trigger needs that row, so a revocation can no
+    // longer land between the mutex and the admin-child share; it commits just before the mutex.
+    beforeMatching(SUBJECT_VERSION_BUMP, async () => {
       const client = await observer.connect()
       try {
         await client.query("SET lock_timeout = '400ms'")

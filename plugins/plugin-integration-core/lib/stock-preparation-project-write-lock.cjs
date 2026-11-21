@@ -169,12 +169,14 @@ const PROJECT_WRITE_BUMP_BACKOFF_MS = 10
 //     whenever it ATTEMPTED a host write, so every token / approved job planned before a repair that may have written is
 //     superseded. Its continuation `verify_and_close_run` (no host write: it verifies and finishes a run left open) takes
 //     the same lease and bumps after a close. Appended after the recovery's entries (rebaseline B-18).
-//   * `issue_confirm_writeback` (both lists; YiDa 发料确认日期回写, design baseline v2.3 §7.3, slice Y9a): the
-//     write-back holds the lease (purpose) around its one version-conditional, host-fenced patch of the
-//     machine column `issueConfirmDate`, and after release bumps the generation (reason) when it wrote — the
-//     carry-confirm shape (yida-issue-confirm-writeback.cjs). Not wired to a route yet (slice Y9).
+//   * `issue_confirm_writeback` (purpose only; YiDa 发料确认日期回写, design baseline v2.3 §7.3, slice Y9a): the
+//     write-back holds the lease around its one version-conditional, host-fenced patch of the machine column
+//     `issueConfirmDate` and does NOT bump the generation (register R-96, Plan A: the lease is the guard; a
+//     small token minted before the write is refused by its existing-row revision, an expansion and the
+//     export gate by the acquire epoch; an approved large job is deliberately not superseded), so it has no
+//     reason (yida-issue-confirm-writeback.cjs). Wired in slice Y9: the post-ACK run and the owner recovery entry.
 const PROJECT_WRITE_PURPOSES = Object.freeze(['small_apply', 'large_apply_chunk', 'carry_confirm', 'pilot_enable', 'pull_batch_install', 'recovery_verify', 'sheet_repair', 'issue_confirm_writeback'])
-const PROJECT_WRITE_GENERATION_REASONS = Object.freeze(['small_preview', 'large_approval', 'carry_confirm', 'pilot_enable', 'continuation_confirm', 'continuation_end', 'change_plan_confirm', 'pull_batch_install', 'recovery_closed', 'sheet_repair', 'issue_confirm_writeback'])
+const PROJECT_WRITE_GENERATION_REASONS = Object.freeze(['small_preview', 'large_approval', 'carry_confirm', 'pilot_enable', 'continuation_confirm', 'continuation_end', 'change_plan_confirm', 'pull_batch_install', 'recovery_closed', 'sheet_repair'])
 
 const PROJECT_WRITE_ERROR_CODES = Object.freeze({
   WRITE_LOCKED: 'STOCK_PREP_PROJECT_WRITE_LOCKED',

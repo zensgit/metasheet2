@@ -67,9 +67,35 @@ function context(value) {
 
 export function createYidaOwnerRuntimeBinding(options) {
   try {
-    const parsed = record(options, ['db', 'security'])
+    // YiDa 发料确认日期回写 (slice Y9): the plugin MAY hand one more frozen capability (index.cjs builds it from its own
+    // db, project registry, sheet write lock and multitable records; lib/yida-issue-confirm-writeback-ports.mjs).
+    // Absent, the binding keeps its original two members exactly.
+    const withWriteback = Boolean(options) && typeof options === 'object' && !types.isProxy(options)
+      && Object.hasOwn(options, 'issueConfirmWriteback')
+    const parsed = record(options, withWriteback ? ['db', 'security', 'issueConfirmWriteback'] : ['db', 'security'])
     const db = capability(parsed.db, ['transaction', 'selectOne'])
     const security = capability(parsed.security, ['encrypt', 'decrypt'])
+    const writeback = withWriteback ? capability(parsed.issueConfirmWriteback, ['enabled', 'create']) : null
+    // The host's live re-check (owner live integration admin + role-granted stock-prep code + sheet read), supplied per
+    // call by the host runtime and never by a request. The executor calls it under the sheet write lease. The host
+    // creates one per run: the post-ACK run it schedules after an acknowledged send, and the owner recovery entry.
+    function createIssueConfirmWriteback(input) {
+      try {
+        const config = record(input, ['context', 'recheck'])
+        const scope = context(config.context)
+        const check = callable(config.recheck)
+        const created = capability(writeback.create(Object.freeze({
+          context: Object.freeze({ tenantId: scope.tenantId, ownerId: scope.ownerId }),
+          recheck: (request) => Reflect.apply(check, undefined, [request]),
+        })), ['run'])
+        return Object.freeze({ run: (request) => created.run(request) })
+      } catch (error) { closed(error) }
+    }
+    // Display/shape bit for the host route (generic 404 while OFF): the core's own exact-literal predicate. Never
+    // authority: every run reads the same switch again before any dependency is touched.
+    function issueConfirmWritebackEnabled() {
+      try { return writeback.enabled() === true } catch { return false }
+    }
     function createPrimitives(input) {
       try {
         const scope = context(input)
@@ -80,6 +106,8 @@ export function createYidaOwnerRuntimeBinding(options) {
     }
     function createSendPort(input) {
       try {
+        // The send port is the original one with or without the write-back capability (Y9, D5 a): the post-ACK
+        // write-back is the HOST runtime's own tracked run, scheduled only after submit has returned its result.
         const config = record(input, SEND_OPTIONS)
         const scope = context(config.context)
         const authority = capability(config.authority, ['admitForExecution', 'takeExecution', 'observe'])
@@ -89,6 +117,7 @@ export function createYidaOwnerRuntimeBinding(options) {
         return createYidaOwnerSendPort({ db, context: scope, authority, fetch, readEnablement, timeoutMs: config.timeoutMs })
       } catch (error) { closed(error) }
     }
+    if (writeback) return Object.freeze({ createPrimitives, createSendPort, createIssueConfirmWriteback, issueConfirmWritebackEnabled })
     return Object.freeze({ createPrimitives, createSendPort })
   } catch (error) { closed(error) }
 }

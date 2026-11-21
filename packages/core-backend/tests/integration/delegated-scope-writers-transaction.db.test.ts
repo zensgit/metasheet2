@@ -109,6 +109,7 @@ const ROLE_UPDATE = /SELECT id::text AS id FROM roles WHERE id = \$1::text FOR U
 const ADMISSION = /SELECT pg_advisory_xact_lock\(hashtextextended\(\$1, 0\)\)/
 const USER_LOCK = /FROM users WHERE id = \$1::text FOR UPDATE/
 const ADMIN_CHILD_READ = /SELECT role_id FROM user_roles WHERE user_id = \$1 AND role_id = 'admin'/
+const SUBJECT_VERSION_BUMP = /^INSERT INTO subject_authorization_versions /
 const ADMIN_SHARE = /SELECT role_id FROM user_roles WHERE user_id = \$1 AND role_id = 'admin' FOR SHARE/
 const FRESH_ROLES = /SELECT role_id FROM user_roles WHERE user_id = \$1 ORDER BY role_id ASC/
 const releases: Array<() => void> = []
@@ -522,7 +523,10 @@ describeWithDatabase('delegated scope writers on the real pool; registered handl
 
   test('deleting the admin child before its share is 403, restores timeouts, and writes nothing', async () => {
     const fixture = await world('member')
-    beforeMatching(ADMIN_CHILD_READ, async () => {
+    // D21 (Y5a): the access-graph mutex takes the actor's subject version row before the users rows and
+    // holds it to commit, and the membership DELETE's trigger needs that row, so a revocation can no
+    // longer land between the mutex and the admin-child share; it commits just before the mutex.
+    beforeMatching(SUBJECT_VERSION_BUMP, async () => {
       const client = await observer.connect()
       try {
         await client.query("SET lock_timeout = '400ms'")

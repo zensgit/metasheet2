@@ -94,7 +94,12 @@ async function main() {
     // (external-system-pointer-lock.cjs). Same whitelist, same parameterization as
     // selectOneForUpdate; only the locking clause differs.
     'selectOneForKeyShare',
-    'selectOneForUpdate', 'transaction', 'updateRow',
+    'selectOneForUpdate',
+    // selectUnmatched: the same extension form — a select whose WHERE also carries IS NOT NULL columns and ONE
+    // NOT EXISTS anti-join on another integration_* table (the YiDa issue-confirm recovery scan, so traced and
+    // unbound ledger rows never take a slot of the bounded batch). Root surface only, like insertOneIfAbsent.
+    'selectUnmatched',
+    'transaction', 'updateRow',
     // upsertOne is the module header's sanctioned extension form ("added here as a new validated
     // method"), NOT a raw-SQL hook: table, row columns and conflict columns all pass the same
     // identifier whitelist, and every value stays parameterized.
@@ -156,6 +161,112 @@ async function main() {
     })
   } catch (e) { rangeErr = e }
   assert.ok(rangeErr instanceof ScopeViolationError, 'range column injection rejected')
+
+  // --- 5b. selectUnmatched: equality where + IS NOT NULL + ONE NOT EXISTS anti-join, all parameterized/whitelisted
+  const mockDb5u = mockDatabase()
+  const db5u = createDb({ database: mockDb5u })
+  await db5u.selectUnmatched('integration_yida_delivery_ledger', {
+    where: { tenant_id: 't1', workspace_id: null, status: 'acknowledged' },
+    notNull: ['source_record_digest'],
+    unmatched: { table: 'integration_yida_issue_confirm_writeback', on: { ledger_id: 'id' } },
+    orderBy: ['created_at', 'ASC'], limit: 100,
+  })
+  assert.equal(mockDb5u.calls.length, 1)
+  assert.equal(mockDb5u.calls[0].sql,
+    'SELECT * FROM "integration_yida_delivery_ledger" WHERE "tenant_id" = $1 AND "workspace_id" IS NULL AND "status" = $2'
+    + ' AND "source_record_digest" IS NOT NULL'
+    + ' AND NOT EXISTS (SELECT 1 FROM "integration_yida_issue_confirm_writeback" WHERE'
+    + ' "integration_yida_issue_confirm_writeback"."ledger_id" = "integration_yida_delivery_ledger"."id")'
+    + ' ORDER BY "created_at" ASC LIMIT 100 OFFSET 0')
+  assert.deepEqual(mockDb5u.calls[0].params, ['t1', 'acknowledged'])
+  // Without where / notNull, several join columns, DESC, offset; the result is passed through as select's is.
+  const mockDb5u2 = mockDatabase({ nextRows: [[{ id: 'r1' }]] })
+  const rows5u = await createDb({ database: mockDb5u2 }).selectUnmatched('integration_runs', {
+    unmatched: { table: 'integration_run_marks', on: { run_id: 'id', tenant_id: 'tenant_id' } }, orderBy: ['created_at', 'DESC'], limit: 5, offset: 10,
+  })
+  assert.deepEqual(rows5u, [{ id: 'r1' }])
+  assert.equal(mockDb5u2.calls[0].sql,
+    'SELECT * FROM "integration_runs" WHERE NOT EXISTS (SELECT 1 FROM "integration_run_marks" WHERE'
+    + ' "integration_run_marks"."run_id" = "integration_runs"."id" AND "integration_run_marks"."tenant_id" = "integration_runs"."tenant_id")'
+    + ' ORDER BY "created_at" DESC LIMIT 5 OFFSET 10')
+  assert.deepEqual(mockDb5u2.calls[0].params, [])
+  // Refusals: every identifier through the same whitelist, a well-formed anti-join required — nothing reaches SQL.
+  const refusedUnmatched = [
+    ['users', { unmatched: { table: 'integration_runs', on: { id: 'id' } } }],
+    ['integration_runs', { unmatched: { table: 'users', on: { id: 'id' } } }],
+    ['integration_runs', { unmatched: { table: 'integration_runs', on: { id: 'id' } } }],
+    ['integration_runs', {}],
+    ['integration_runs', { unmatched: null }],
+    ['integration_runs', { unmatched: { table: 'integration_run_marks' } }],
+    ['integration_runs', { unmatched: { table: 'integration_run_marks', on: {} } }],
+    ['integration_runs', { unmatched: { table: 'integration_run_marks', on: ['id'] } }],
+    ['integration_runs', { unmatched: { table: 'integration_run_marks', on: { 'id; DROP TABLE users; --': 'id' } } }],
+    ['integration_runs', { unmatched: { table: 'integration_run_marks', on: { id: 'id"; DROP TABLE users; --' } } }],
+    ['integration_runs', { unmatched: { table: 'integration_run_marks', on: { id: 1 } } }],
+    ['integration_runs', { unmatched: { table: 'integration_run_marks', on: { a: 'a', b: 'b', c: 'c', d: 'd', e: 'e' } } }],
+    ['integration_runs', { unmatched: { table: 'integration_run_marks', on: { id: 'id' } }, notNull: 'source_record_digest' }],
+    ['integration_runs', { unmatched: { table: 'integration_run_marks', on: { id: 'id' } }, notNull: ['x; DROP TABLE users; --'] }],
+    ['integration_runs', { unmatched: { table: 'integration_run_marks', on: { id: 'id' } }, where: 'status=active' }],
+    ['integration_runs', { unmatched: { table: 'integration_run_marks', on: { id: 'id' } }, orderBy: ['created_at; --', 'ASC'] }],
+  ]
+  const mockDb5u3 = mockDatabase()
+  const db5u3 = createDb({ database: mockDb5u3 })
+  for (const [table, options] of refusedUnmatched) {
+    let refusal = null
+    try { await db5u3.selectUnmatched(table, options) } catch (error) { refusal = error }
+    assert.ok(refusal instanceof ScopeViolationError, `selectUnmatched refuses ${table} ${JSON.stringify(options)}`)
+  }
+  assert.deepEqual(mockDb5u3.calls, [], 'a refused selectUnmatched issues no statement')
+
+  // --- 5c. selectUnmatched keyset: ORDER BY (at, id), the exact UTC microsecond text of `at` as keyset_at, and with
+  // `after` the row comparison (at, id) > ($n::timestamptz, $m) — the tie-break on id, both values parameters.
+  const KEYSET_SQL_HEAD = 'SELECT *, to_char("integration_yida_delivery_ledger"."created_at" AT TIME ZONE \'UTC\','
+    + ' \'YYYY-MM-DD"T"HH24:MI:SS.US"Z"\') AS "keyset_at" FROM "integration_yida_delivery_ledger" WHERE "tenant_id" = $1'
+    + ' AND "source_record_digest" IS NOT NULL'
+    + ' AND NOT EXISTS (SELECT 1 FROM "integration_yida_issue_confirm_writeback" WHERE'
+    + ' "integration_yida_issue_confirm_writeback"."ledger_id" = "integration_yida_delivery_ledger"."id")'
+  const KEYSET_SQL_ORDER = ' ORDER BY "integration_yida_delivery_ledger"."created_at" ASC, "integration_yida_delivery_ledger"."id" ASC'
+  const keysetBase = {
+    where: { tenant_id: 't1' }, notNull: ['source_record_digest'],
+    unmatched: { table: 'integration_yida_issue_confirm_writeback', on: { ledger_id: 'id' } },
+  }
+  const mockDb5k = mockDatabase()
+  const db5k = createDb({ database: mockDb5k })
+  await db5k.selectUnmatched('integration_yida_delivery_ledger', { ...keysetBase, keyset: { at: 'created_at', id: 'id' }, limit: 101 })
+  assert.equal(mockDb5k.calls[0].sql, KEYSET_SQL_HEAD + KEYSET_SQL_ORDER + ' LIMIT 101 OFFSET 0')
+  assert.deepEqual(mockDb5k.calls[0].params, ['t1'])
+  await db5k.selectUnmatched('integration_yida_delivery_ledger', { ...keysetBase,
+    keyset: { at: 'created_at', id: 'id', after: { at: '2026-03-01T00:00:00.000001Z', id: 'l-1' } }, limit: 3 })
+  assert.equal(mockDb5k.calls[1].sql, KEYSET_SQL_HEAD
+    + ' AND ("integration_yida_delivery_ledger"."created_at", "integration_yida_delivery_ledger"."id") > ($2::timestamptz, $3)'
+    + KEYSET_SQL_ORDER + ' LIMIT 3 OFFSET 0')
+  assert.deepEqual(mockDb5k.calls[1].params, ['t1', '2026-03-01T00:00:00.000001Z', 'l-1'])
+  // Refusals: a keyset orders by itself, its two columns pass the whitelist and differ, `after` is exactly { at, id }
+  // with `at` the fixed UTC microsecond text of a real instant — nothing reaches SQL.
+  const keyed = (keyset, extra = {}) => ['integration_yida_delivery_ledger', { ...keysetBase, keyset, ...extra }]
+  const goodAfter = { at: '2026-03-01T00:00:00.000001Z', id: 'l-1' }
+  const refusedKeyset = [
+    keyed(null), keyed('created_at'), keyed({ at: 'created_at', id: 'id', extra: 1 }),
+    keyed({ at: 'created_at', id: 'id' }, { orderBy: ['created_at', 'ASC'] }), keyed({ at: 'created_at', id: 'id' }, { offset: 5 }),
+    keyed({ at: 'created_at; --', id: 'id' }), keyed({ at: 'created_at', id: 'id"; DROP TABLE users; --' }), keyed({ at: 'id', id: 'id' }),
+    keyed({ at: 'created_at', id: 'id', after: null }), keyed({ at: 'created_at', id: 'id', after: { at: goodAfter.at } }),
+    keyed({ at: 'created_at', id: 'id', after: { ...goodAfter, tenant_id: 't2' } }),
+    keyed({ at: 'created_at', id: 'id', after: { ...goodAfter, at: '2026-03-01T00:00:00.000Z' } }),
+    keyed({ at: 'created_at', id: 'id', after: { ...goodAfter, at: '2026-03-01T00:00:00.000001+08:00' } }),
+    keyed({ at: 'created_at', id: 'id', after: { ...goodAfter, at: '2026-02-30T00:00:00.000001Z' } }),
+    keyed({ at: 'created_at', id: 'id', after: { ...goodAfter, at: "2026-03-01T00:00:00.000001Z'; --" } }),
+    keyed({ at: 'created_at', id: 'id', after: { ...goodAfter, at: new Date('2026-03-01T00:00:00Z') } }),
+    keyed({ at: 'created_at', id: 'id', after: { ...goodAfter, id: '' } }), keyed({ at: 'created_at', id: 'id', after: { ...goodAfter, id: 7 } }),
+    keyed({ at: 'created_at', id: 'id', after: { ...goodAfter, id: 'a\u0000b' } }),
+  ]
+  const mockDb5k2 = mockDatabase()
+  const db5k2 = createDb({ database: mockDb5k2 })
+  for (const [table, options] of refusedKeyset) {
+    let refusal = null
+    try { await db5k2.selectUnmatched(table, options) } catch (error) { refusal = error }
+    assert.ok(refusal instanceof ScopeViolationError, `selectUnmatched keyset refuses ${JSON.stringify(options.keyset)} ${JSON.stringify(options.orderBy || options.offset || '')}`)
+  }
+  assert.deepEqual(mockDb5k2.calls, [], 'a refused keyset issues no statement')
 
   // insertOne
   const mockDb6 = mockDatabase()

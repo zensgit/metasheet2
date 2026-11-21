@@ -231,6 +231,12 @@ async function createOwnedSchema(): Promise<void> {
   assertOwnedSchema(schema)
   await adminPool.query(`CREATE SCHEMA "${schema}"`)
   await adminPool.query(`
+    -- D21 (Y5a): the access-graph mutex bumps the subjects' version rows before the users rows.
+    CREATE TABLE "${schema}".subject_authorization_versions (
+      subject_id text PRIMARY KEY,
+      version bigint NOT NULL DEFAULT 1,
+      updated_at timestamptz NOT NULL DEFAULT now()
+    );
     CREATE TABLE "${schema}".users (
       id text PRIMARY KEY,
       username text,
