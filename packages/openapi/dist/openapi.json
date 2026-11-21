@@ -775,8 +775,71 @@
           },
           "legacy": {
             "type": "object",
-            "description": "Present only for a legacy-governed capability of a registered provider; booleans and fixed strings only",
+            "description": "Present only for a legacy-governed capability of a registered provider; absent for gated DingTalk notification. Booleans and fixed strings only",
             "additionalProperties": true
+          }
+        }
+      },
+      "DirectoryIntegrationNotificationCapability": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "enabled",
+          "governance",
+          "effective",
+          "reason",
+          "anchor"
+        ],
+        "description": "DingTalk notification is gated and never includes legacy details",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "governance": {
+            "nullable": true,
+            "type": "string",
+            "enum": [
+              "gated",
+              "unsupported"
+            ],
+            "description": "Null when the provider is not registered"
+          },
+          "effective": {
+            "nullable": true,
+            "type": "boolean",
+            "description": "Set only where governance is gated; null means the stored state does not govern the capability"
+          },
+          "reason": {
+            "nullable": true,
+            "type": "string",
+            "enum": [
+              "switch_off",
+              "schema_unavailable",
+              "org_mismatch",
+              "state_mismatch",
+              "provider_not_registered",
+              "unsupported",
+              "implementation_missing",
+              "not_enabled",
+              "integration_inactive",
+              "scope_changed"
+            ]
+          },
+          "anchor": {
+            "type": "object",
+            "required": [
+              "bound",
+              "matchesCurrent"
+            ],
+            "properties": {
+              "bound": {
+                "type": "boolean"
+              },
+              "matchesCurrent": {
+                "type": "boolean",
+                "nullable": true
+              }
+            }
           }
         }
       },
@@ -826,7 +889,7 @@
                 "$ref": "#/components/schemas/DirectoryIntegrationCapability"
               },
               "notification": {
-                "$ref": "#/components/schemas/DirectoryIntegrationCapability"
+                "$ref": "#/components/schemas/DirectoryIntegrationNotificationCapability"
               }
             }
           }
@@ -1151,7 +1214,7 @@
           },
           "verified": {
             "type": "boolean",
-            "description": "Connection verification evidence; always false until evidence is stored"
+            "description": "Whether current connection verification evidence is valid"
           },
           "lastVerifiedAt": {
             "type": "string",
@@ -1209,29 +1272,29 @@
         "properties": {
           "delivery": {
             "type": "object",
+            "additionalProperties": false,
             "required": [
               "enabled",
               "testSendAvailable",
               "reason"
             ],
-            "description": "Nothing is sent in this version; delivery is always reported disabled",
+            "description": "Whether delivery is enabled and a usable endpoint is ready for a test send",
             "properties": {
               "enabled": {
-                "type": "boolean",
-                "enum": [
-                  false
-                ]
+                "type": "boolean"
               },
               "testSendAvailable": {
-                "type": "boolean",
-                "enum": [
-                  false
-                ]
+                "type": "boolean"
               },
               "reason": {
                 "type": "string",
+                "nullable": true,
                 "enum": [
-                  "delivery_disabled"
+                  "delivery_disabled",
+                  "capability_off",
+                  "not_verified",
+                  "endpoint_unusable",
+                  null
                 ]
               }
             }
@@ -1311,6 +1374,464 @@
               "directory_link",
               "external_identity"
             ]
+          }
+        }
+      },
+      "NotificationTestSendRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "confirm",
+          "idempotencyKey"
+        ],
+        "properties": {
+          "confirm": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9_-]{8,64}(?![\\s\\S])"
+          }
+        }
+      },
+      "NotificationTestSendResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "outcome",
+          "code",
+          "testSendId"
+        ],
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "failed",
+              "outcome_unknown"
+            ],
+            "description": "Accepted means the provider accepted the request; receipt or reading is not observed"
+          },
+          "code": {
+            "type": "string",
+            "description": "Fixed outcome code without provider text or recipient values"
+          },
+          "testSendId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "NotificationVerificationRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "integrationId",
+          "level"
+        ],
+        "properties": {
+          "integrationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "level": {
+            "type": "string",
+            "enum": [
+              "token",
+              "send"
+            ]
+          },
+          "recipientUserId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[^\\s,]{1,64}$",
+            "description": "One DingTalk user id, required for send; ignored for token and never returned"
+          }
+        }
+      },
+      "NotificationVerificationSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "level",
+          "verifiedUntil",
+          "valid"
+        ],
+        "properties": {
+          "level": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "token",
+              "send",
+              null
+            ]
+          },
+          "verifiedUntil": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "valid": {
+            "type": "boolean"
+          }
+        }
+      },
+      "NotificationVerificationResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "result",
+          "evidence"
+        ],
+        "properties": {
+          "result": {
+            "$ref": "#/components/schemas/NotificationVerificationReport"
+          },
+          "evidence": {
+            "$ref": "#/components/schemas/NotificationVerificationSummary"
+          }
+        }
+      },
+      "NotificationVerificationReport": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "integrationId",
+          "integration",
+          "requestedLevel",
+          "reachedLevel",
+          "passed",
+          "scope",
+          "resolution",
+          "accessToken",
+          "notification",
+          "failure"
+        ],
+        "description": "A verification report, including failed checks; no credentials, recipient values or credential fingerprints",
+        "properties": {
+          "integrationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "integration": {
+            "type": "object",
+            "nullable": true,
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "name",
+              "status",
+              "updatedAt"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              },
+              "updatedAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          },
+          "requestedLevel": {
+            "type": "string",
+            "enum": [
+              "token",
+              "send"
+            ]
+          },
+          "reachedLevel": {
+            "type": "string",
+            "enum": [
+              "none",
+              "config",
+              "token",
+              "send"
+            ]
+          },
+          "passed": {
+            "type": "boolean"
+          },
+          "scope": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "proves",
+              "doesNotProve"
+            ],
+            "properties": {
+              "proves": {
+                "type": "string",
+                "description": "Fixed sentence describing the level reached"
+              },
+              "doesNotProve": {
+                "type": "string",
+                "description": "Fixed sentence describing the limits of the check"
+              }
+            }
+          },
+          "resolution": {
+            "type": "object",
+            "nullable": true,
+            "additionalProperties": false,
+            "required": [
+              "source",
+              "appKey",
+              "appSecret",
+              "agentId",
+              "baseUrl",
+              "environment"
+            ],
+            "properties": {
+              "source": {
+                "type": "string",
+                "enum": [
+                  "env_override",
+                  "integration"
+                ]
+              },
+              "appKey": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "configured",
+                  "length",
+                  "valuePrinted"
+                ],
+                "properties": {
+                  "configured": {
+                    "type": "boolean",
+                    "enum": [
+                      true
+                    ]
+                  },
+                  "length": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "valuePrinted": {
+                    "type": "boolean",
+                    "enum": [
+                      false
+                    ]
+                  }
+                }
+              },
+              "appSecret": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "configured",
+                  "valuePrinted"
+                ],
+                "properties": {
+                  "configured": {
+                    "type": "boolean",
+                    "enum": [
+                      true
+                    ]
+                  },
+                  "valuePrinted": {
+                    "type": "boolean",
+                    "enum": [
+                      false
+                    ]
+                  }
+                }
+              },
+              "agentId": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "configured",
+                  "length",
+                  "valuePrinted"
+                ],
+                "properties": {
+                  "configured": {
+                    "type": "boolean",
+                    "enum": [
+                      true
+                    ]
+                  },
+                  "length": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "valuePrinted": {
+                    "type": "boolean",
+                    "enum": [
+                      false
+                    ]
+                  }
+                }
+              },
+              "baseUrl": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "configured",
+                  "parseable"
+                ],
+                "properties": {
+                  "configured": {
+                    "type": "boolean"
+                  },
+                  "parseable": {
+                    "type": "boolean",
+                    "nullable": true
+                  }
+                }
+              },
+              "environment": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "appKey",
+                  "appSecret",
+                  "agentId",
+                  "baseUrl"
+                ],
+                "properties": {
+                  "appKey": {
+                    "type": "boolean"
+                  },
+                  "appSecret": {
+                    "type": "boolean"
+                  },
+                  "agentId": {
+                    "type": "boolean"
+                  },
+                  "baseUrl": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          },
+          "accessToken": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "verified",
+              "cacheBypassed",
+              "valuePrinted"
+            ],
+            "properties": {
+              "verified": {
+                "type": "boolean"
+              },
+              "cacheBypassed": {
+                "type": "boolean",
+                "nullable": true,
+                "enum": [
+                  true,
+                  null
+                ]
+              },
+              "valuePrinted": {
+                "type": "boolean",
+                "enum": [
+                  false
+                ]
+              }
+            }
+          },
+          "notification": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "attempted",
+              "accepted",
+              "recipientUserIdLength",
+              "verificationRunId"
+            ],
+            "properties": {
+              "attempted": {
+                "type": "boolean"
+              },
+              "accepted": {
+                "oneOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "string",
+                    "enum": [
+                      "unknown"
+                    ]
+                  }
+                ]
+              },
+              "recipientUserIdLength": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 64,
+                "nullable": true
+              },
+              "verificationRunId": {
+                "type": "string",
+                "nullable": true
+              },
+              "taskId": {
+                "type": "string"
+              },
+              "requestId": {
+                "type": "string"
+              }
+            }
+          },
+          "failure": {
+            "type": "object",
+            "nullable": true,
+            "additionalProperties": false,
+            "required": [
+              "level",
+              "code",
+              "message"
+            ],
+            "properties": {
+              "level": {
+                "type": "string",
+                "enum": [
+                  "config",
+                  "token",
+                  "send"
+                ]
+              },
+              "code": {
+                "type": "string",
+                "description": "Fixed verification failure code"
+              },
+              "message": {
+                "type": "string",
+                "description": "Fixed failure sentence"
+              },
+              "providerCode": {
+                "type": "number"
+              },
+              "providerCodeKind": {
+                "type": "string",
+                "enum": [
+                  "errcode",
+                  "http_status"
+                ]
+              }
+            }
           }
         }
       },
@@ -15787,7 +16308,7 @@
     "/api/admin/directory/integration-capabilities/{integrationId}": {
       "get": {
         "summary": "Show the capability state of one directory integration",
-        "description": "Platform administrators only. Answers 404 DIRECTORY_CAPABILITIES_DISABLED while DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED is not the exact string true. Read-only and display only: the response carries no scope value, corp id, application key, environment value or configuration value. `effective` is null where the stored state does not govern the capability (legacy path, unsupported capability, unregistered provider); null does not mean the capability is off.",
+        "description": "Platform administrators only. Answers 404 DIRECTORY_CAPABILITIES_DISABLED while DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED is not the exact string true. Read-only and display only: the response carries no scope value, corp id, application key, environment value or configuration value. `effective` is null where the stored state does not govern the capability (legacy path, unsupported capability, unregistered provider); null does not mean the capability is off. DingTalk notification is gated and its response never includes a legacy block.",
         "operationId": "getDirectoryIntegrationCapabilities",
         "security": [
           {
@@ -15956,7 +16477,7 @@
             }
           },
           "409": {
-            "description": "The stored revision is not the expected one (DIRECTORY_CAPABILITIES_STALE), or a capability may not be turned on (one of the CAPABILITY_ codes; `details.capability` names the capability and, for CAPABILITY_PRECONDITION_FAILED, `details.reason` is the fixed code of the precondition). Nothing was written.",
+            "description": "The stored revision is not the expected one (DIRECTORY_CAPABILITIES_STALE), or a capability may not be turned on (one of the CAPABILITY_ codes; `details.capability` names the capability and, for CAPABILITY_PRECONDITION_FAILED, `details.reason` is the fixed code of the precondition). Notification verification failures use verification_missing, verification_stale, verification_invalidated, verification_anchor_changed or verification_fingerprint_changed. Nothing was written.",
             "content": {
               "application/json": {
                 "schema": {
@@ -15991,6 +16512,106 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/directory/notification-verification": {
+      "post": {
+        "summary": "Verify one connection and record its notification readiness",
+        "description": "Platform administrators only. A token check does not send a notification. A send check requires delivery to be enabled and sends one test to the explicit DingTalk recipient. This is the sole notification endpoint that accepts a recipient value; the response never echoes it. A report answers 200 even when a check fails: read result.passed and result.reachedLevel. Evidence reports its level, expiry and current validity. A new check can replace or invalidate earlier evidence. Provider acceptance does not prove receipt or reading.",
+        "operationId": "verifyDirectoryNotificationConnection",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotificationVerificationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The verification report and the current evidence summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationVerificationResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The integration id is not a UUID (DIRECTORY_INTEGRATION_ID_INVALID), or the verification input is invalid (INVALID_REQUEST)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "The notification surface is switched off, or no such connection belongs to the managed organization (NOT_FOUND)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A send check was requested while delivery is disabled (NOTIFICATION_DELIVERY_DISABLED), or the connection cannot support notification verification (VERIFICATION_TUPLE_UNSUPPORTED). An unsupported connection is refused before any token request or send.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unknown fields or invalid request shape (INVALID_REQUEST)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Verification completed but its evidence could not be recorded (VERIFICATION_EVIDENCE_WRITE_FAILED), or a fixed-sentence failure (INTERNAL). A test message may already have been sent when evidence recording fails; retrying a send check can send another message.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "NOTIFICATION_BUSY (retry), or NOTIFICATION_SCHEMA_UNAVAILABLE",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationError"
                 }
               }
             }
@@ -37981,7 +38602,7 @@
     "/api/me/notification-endpoints": {
       "get": {
         "summary": "List the caller's notification endpoints and the connections that could become one",
-        "description": "Answers 404 while USER_NOTIFICATION_PREFERENCES_ENABLED is not the exact string true (and when the session token carries no organization). The caller and the organization come from the session only. The response carries no recipient identifier, digest or proof id. `capability` is a display state and is not authoritative.",
+        "description": "Answers 404 while USER_NOTIFICATION_PREFERENCES_ENABLED is not the exact string true (and when the session token carries no organization). The caller and the organization come from the session only. The response carries no recipient identifier, digest or proof id. `capability` is a display state and is not authoritative. `delivery` reports whether delivery is enabled, whether a test can be sent now, and a fixed reason when it cannot. Test controls use `delivery.testSendAvailable`.",
         "operationId": "listMyNotificationEndpoints",
         "security": [
           {
@@ -38197,6 +38818,123 @@
           },
           "503": {
             "description": "NOTIFICATION_BUSY (a lock wait, deadlock or cancelled statement; retry), or NOTIFICATION_SCHEMA_UNAVAILABLE (the tables of this surface are not provisioned yet)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/me/notification-endpoints/{id}/test": {
+      "post": {
+        "summary": "Send one fixed test notification to the caller's endpoint",
+        "description": "Requires confirm=true and an idempotency key of 8-64 letters, digits, underscores or hyphens. Unknown fields, including recipient identifiers, are refused. A disabled notification surface answers 404; disabled delivery answers 409. The endpoint must belong to the caller and be usable, and its connection must be ready. Repeating a key returns the stored outcome without sending again or consuming another rate-limit slot. An unfinished request answers TEST_SEND_IN_PROGRESS; after 90 seconds it answers outcome_unknown with code test_send_interrupted and is never resent under that key. Accepted means provider acceptance, not receipt or reading. The message is fixed and contains no caller-supplied content or links.",
+        "operationId": "testMyNotificationEndpoint",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotificationTestSendRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The test outcome, including a previously stored outcome for this key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationTestSendResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "description": "The surface is switched off, or no such endpoint belongs to the caller (NOT_FOUND)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "NOTIFICATION_DELIVERY_DISABLED, ENDPOINT_NOT_USABLE or CONNECTION_NOT_READY (with a fixed reason), or TEST_SEND_IN_PROGRESS. Nothing new was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "CONFIRM_REQUIRED, INVALID_REQUEST (invalid key or unknown fields), or ORG_MISSING",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "TEST_SEND_RATE_LIMITED; wait the number of seconds in Retry-After",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until a test may be attempted again",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Fixed-sentence failure (INTERNAL)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "NOTIFICATION_BUSY (retry), or NOTIFICATION_SCHEMA_UNAVAILABLE",
             "content": {
               "application/json": {
                 "schema": {

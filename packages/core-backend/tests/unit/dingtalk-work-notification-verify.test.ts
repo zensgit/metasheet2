@@ -834,3 +834,28 @@ describe('a token failure whose text carries the gettoken URL (stored baseUrl wi
     expect(fetchMock).not.toHaveBeenCalled()
   })
 })
+
+
+describe('O-1 internal tuple observation', () => {
+  it('observes the one actual tuple without changing the old report or exposing provenance', async () => {
+    const row = { ...storedRow(), corp_id: 'SyntheticCorp', org_id: 'default' }
+    dbMocks.query.mockResolvedValue({ rows: [row] })
+    const previous = await verify('token')
+    dbMocks.query.mockClear()
+    scopedSpy.mockClear()
+    const client = { query: vi.fn().mockResolvedValue({ rows: [row] }) }
+    const observe = vi.fn()
+    const result = await verifyDingTalkWorkNotificationIntegration({ integrationId: INTEGRATION_ID, level: 'token' }, {
+      client, onResolvedTuple: observe,
+    })
+    expect(result).toEqual(previous)
+    expect(scopedSpy).toHaveBeenCalledOnce()
+    expect(observe).toHaveBeenCalledOnce()
+    expect(observe.mock.calls[0][0]).toBe(await scopedSpy.mock.results[0].value)
+    expect(observe.mock.calls[0][0].sourceScope).toEqual({ orgId: 'default', corpId: 'SyntheticCorp', appKey: ROW_KEY })
+    expect(dbMocks.query).not.toHaveBeenCalled()
+    expect(JSON.stringify(result)).not.toContain('sourceScope')
+    expect(JSON.stringify(result)).not.toContain('SyntheticCorp')
+    expectValuesFree(result)
+  })
+})

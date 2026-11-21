@@ -14,3 +14,9 @@ export const USER_NOTIFICATION_PREFERENCES_ENABLED = 'USER_NOTIFICATION_PREFEREN
 export function isUserNotificationPreferencesEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.USER_NOTIFICATION_PREFERENCES_ENABLED === 'true'
 }
+
+export const EXTERNAL_NOTIFICATION_DELIVERY_ENABLED = 'EXTERNAL_NOTIFICATION_DELIVERY_ENABLED' as const
+
+export function isExternalNotificationDeliveryEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.EXTERNAL_NOTIFICATION_DELIVERY_ENABLED === 'true'
+}

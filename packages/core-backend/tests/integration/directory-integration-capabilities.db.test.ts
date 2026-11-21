@@ -392,9 +392,11 @@ describeIfDatabase('directory integration capability tables (real database)', ()
       expect(empty.status).toBe(200)
       expect(empty.body.data.revision).toBe(0)
       expect(empty.body.data.updatedAt).toBeNull()
-      for (const capability of CAPABILITIES) {
+      for (const capability of ['directory', 'login'] as const) {
         expect(empty.body.data.capabilities[capability]).toMatchObject({ enabled: false, governance: 'legacy', effective: null, reason: 'governed_by_legacy_path', anchor: { bound: false, matchesCurrent: null } })
       }
+      expect(empty.body.data.capabilities.notification).toMatchObject({ enabled: false, governance: 'gated', effective: false, reason: 'not_enabled', anchor: { bound: false, matchesCurrent: null } })
+      expect(empty.body.data.capabilities.notification).not.toHaveProperty('legacy')
 
       await insertCapabilityRow(id, 'dingtalk', org, enabledLogin('CorpOne', 'AppOne'))
       const stored = await request(pinned.url()).get(url)

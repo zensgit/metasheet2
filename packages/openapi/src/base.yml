@@ -386,8 +386,44 @@ components:
             matchesCurrent: { type: boolean, nullable: true }
         legacy:
           type: object
-          description: Present only for a legacy-governed capability of a registered provider; booleans and fixed strings only
+          description: Present only for a legacy-governed capability of a registered provider; absent for gated DingTalk notification. Booleans and fixed strings only
           additionalProperties: true
+    DirectoryIntegrationNotificationCapability:
+      type: object
+      additionalProperties: false
+      required: [enabled, governance, effective, reason, anchor]
+      description: DingTalk notification is gated and never includes legacy details
+      properties:
+        enabled: { type: boolean }
+        governance:
+          nullable: true
+          type: string
+          enum: [gated, unsupported]
+          description: Null when the provider is not registered
+        effective:
+          nullable: true
+          type: boolean
+          description: Set only where governance is gated; null means the stored state does not govern the capability
+        reason:
+          nullable: true
+          type: string
+          enum:
+            - switch_off
+            - schema_unavailable
+            - org_mismatch
+            - state_mismatch
+            - provider_not_registered
+            - unsupported
+            - implementation_missing
+            - not_enabled
+            - integration_inactive
+            - scope_changed
+        anchor:
+          type: object
+          required: [bound, matchesCurrent]
+          properties:
+            bound: { type: boolean }
+            matchesCurrent: { type: boolean, nullable: true }
     DirectoryIntegrationCapabilities:
       type: object
       required: [integrationId, provider, integrationStatus, revision, updatedAt, capabilities]
@@ -403,7 +439,7 @@ components:
           properties:
             directory: { $ref: '#/components/schemas/DirectoryIntegrationCapability' }
             login: { $ref: '#/components/schemas/DirectoryIntegrationCapability' }
-            notification: { $ref: '#/components/schemas/DirectoryIntegrationCapability' }
+            notification: { $ref: '#/components/schemas/DirectoryIntegrationNotificationCapability' }
     DirectoryIntegrationCapabilitiesPatch:
       type: object
       additionalProperties: false
@@ -567,7 +603,7 @@ components:
             reason: { type: string, nullable: true }
         verified:
           type: boolean
-          description: Connection verification evidence; always false until evidence is stored
+          description: Whether current connection verification evidence is valid
         lastVerifiedAt: { type: string, format: date-time }
     NotificationEndpointCandidate:
       type: object
@@ -587,12 +623,16 @@ components:
       properties:
         delivery:
           type: object
+          additionalProperties: false
           required: [enabled, testSendAvailable, reason]
-          description: Nothing is sent in this version; delivery is always reported disabled
+          description: Whether delivery is enabled and a usable endpoint is ready for a test send
           properties:
-            enabled: { type: boolean, enum: [false] }
-            testSendAvailable: { type: boolean, enum: [false] }
-            reason: { type: string, enum: [delivery_disabled] }
+            enabled: { type: boolean }
+            testSendAvailable: { type: boolean }
+            reason:
+              type: string
+              nullable: true
+              enum: [delivery_disabled, capability_off, not_verified, endpoint_unusable, null]
         endpoints:
           type: array
           items: { $ref: '#/components/schemas/NotificationEndpoint' }
@@ -622,6 +662,158 @@ components:
       properties:
         connectionId: { type: string, format: uuid }
         proofKind: { type: string, enum: [directory_link, external_identity] }
+    NotificationTestSendRequest:
+      type: object
+      additionalProperties: false
+      required: [confirm, idempotencyKey]
+      properties:
+        confirm: { type: boolean, enum: [true] }
+        idempotencyKey: { type: string, minLength: 8, maxLength: 64, pattern: '^[A-Za-z0-9_-]{8,64}(?![\s\S])' }
+    NotificationTestSendResult:
+      type: object
+      additionalProperties: false
+      required: [outcome, code, testSendId]
+      properties:
+        outcome:
+          type: string
+          enum: [accepted, failed, outcome_unknown]
+          description: Accepted means the provider accepted the request; receipt or reading is not observed
+        code: { type: string, description: Fixed outcome code without provider text or recipient values }
+        testSendId: { type: string, format: uuid }
+    NotificationVerificationRequest:
+      type: object
+      additionalProperties: false
+      required: [integrationId, level]
+      properties:
+        integrationId: { type: string, format: uuid }
+        level: { type: string, enum: [token, send] }
+        recipientUserId:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: '^[^\s,]{1,64}$'
+          description: One DingTalk user id, required for send; ignored for token and never returned
+    NotificationVerificationSummary:
+      type: object
+      additionalProperties: false
+      required: [level, verifiedUntil, valid]
+      properties:
+        level: { type: string, nullable: true, enum: [token, send, null] }
+        verifiedUntil: { type: string, format: date-time, nullable: true }
+        valid: { type: boolean }
+    NotificationVerificationResult:
+      type: object
+      additionalProperties: false
+      required: [result, evidence]
+      properties:
+        result: { $ref: '#/components/schemas/NotificationVerificationReport' }
+        evidence: { $ref: '#/components/schemas/NotificationVerificationSummary' }
+    NotificationVerificationReport:
+      type: object
+      additionalProperties: false
+      required: [integrationId, integration, requestedLevel, reachedLevel, passed, scope, resolution, accessToken, notification, failure]
+      description: A verification report, including failed checks; no credentials, recipient values or credential fingerprints
+      properties:
+        integrationId: { type: string, format: uuid }
+        integration:
+          type: object
+          nullable: true
+          additionalProperties: false
+          required: [id, name, status, updatedAt]
+          properties:
+            id: { type: string, format: uuid }
+            name: { type: string }
+            status: { type: string }
+            updatedAt: { type: string, format: date-time }
+        requestedLevel: { type: string, enum: [token, send] }
+        reachedLevel: { type: string, enum: [none, config, token, send] }
+        passed: { type: boolean }
+        scope:
+          type: object
+          additionalProperties: false
+          required: [proves, doesNotProve]
+          properties:
+            proves: { type: string, description: Fixed sentence describing the level reached }
+            doesNotProve: { type: string, description: Fixed sentence describing the limits of the check }
+        resolution:
+          type: object
+          nullable: true
+          additionalProperties: false
+          required: [source, appKey, appSecret, agentId, baseUrl, environment]
+          properties:
+            source: { type: string, enum: [env_override, integration] }
+            appKey:
+              type: object
+              additionalProperties: false
+              required: [configured, length, valuePrinted]
+              properties:
+                configured: { type: boolean, enum: [true] }
+                length: { type: integer, minimum: 1 }
+                valuePrinted: { type: boolean, enum: [false] }
+            appSecret:
+              type: object
+              additionalProperties: false
+              required: [configured, valuePrinted]
+              properties:
+                configured: { type: boolean, enum: [true] }
+                valuePrinted: { type: boolean, enum: [false] }
+            agentId:
+              type: object
+              additionalProperties: false
+              required: [configured, length, valuePrinted]
+              properties:
+                configured: { type: boolean, enum: [true] }
+                length: { type: integer, minimum: 1 }
+                valuePrinted: { type: boolean, enum: [false] }
+            baseUrl:
+              type: object
+              additionalProperties: false
+              required: [configured, parseable]
+              properties:
+                configured: { type: boolean }
+                parseable: { type: boolean, nullable: true }
+            environment:
+              type: object
+              additionalProperties: false
+              required: [appKey, appSecret, agentId, baseUrl]
+              properties:
+                appKey: { type: boolean }
+                appSecret: { type: boolean }
+                agentId: { type: boolean }
+                baseUrl: { type: boolean }
+        accessToken:
+          type: object
+          additionalProperties: false
+          required: [verified, cacheBypassed, valuePrinted]
+          properties:
+            verified: { type: boolean }
+            cacheBypassed: { type: boolean, nullable: true, enum: [true, null] }
+            valuePrinted: { type: boolean, enum: [false] }
+        notification:
+          type: object
+          additionalProperties: false
+          required: [attempted, accepted, recipientUserIdLength, verificationRunId]
+          properties:
+            attempted: { type: boolean }
+            accepted:
+              oneOf:
+                - { type: boolean }
+                - { type: string, enum: [unknown] }
+            recipientUserIdLength: { type: integer, minimum: 1, maximum: 64, nullable: true }
+            verificationRunId: { type: string, nullable: true }
+            taskId: { type: string }
+            requestId: { type: string }
+        failure:
+          type: object
+          nullable: true
+          additionalProperties: false
+          required: [level, code, message]
+          properties:
+            level: { type: string, enum: [config, token, send] }
+            code: { type: string, description: Fixed verification failure code }
+            message: { type: string, description: Fixed failure sentence }
+            providerCode: { type: number }
+            providerCodeKind: { type: string, enum: [errcode, http_status] }
     NotificationQuietHours:
       type: object
       additionalProperties: false

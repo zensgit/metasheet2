@@ -37,8 +37,8 @@ const SRC_ALLOWLIST: ReadonlyArray<ImportEdge> = [
   ['integrations/directory-integration-capabilities-write-service.ts', './provider-capability-registry'],
   ['routes/admin-directory-capabilities.ts', '../integrations/directory-integration-capabilities-write-service'],
   // The consumer resolver reads the switch, the production registry and implementation table, and the
-  // pure evaluator and table probe of the display module. It has no importer yet: each consumer slice
-  // adds its own edge.
+  // pure evaluator and table probe of the display module. The authenticated notification sender is
+  // its first consumer; its exact wiring edge is listed below.
   ['integrations/integration-capability-resolve.ts', './directory-integration-capabilities-flag'],
   ['integrations/integration-capability-resolve.ts', './integration-capability-evaluate'],
   ['integrations/integration-capability-resolve.ts', './integration-capability-implementations'],
@@ -55,6 +55,11 @@ const SRC_ALLOWLIST: ReadonlyArray<ImportEdge> = [
   ['notifications/endpoints-service.ts', '../integrations/directory-integration-capabilities-flag'],
   ['notifications/endpoints-service.ts', '../integrations/integration-capability-implementations'],
   ['notifications/endpoints-service.ts', '../integrations/provider-capability-registry'],
+  ['notifications/verification-evidence.ts', '../integrations/provider-capability-registry'],
+  ['notifications/verification-service.ts', '../integrations/provider-capability-registry'],
+  ['notifications/notification-precondition.ts', '../integrations/provider-capability-registry'],
+  ['routes/me-notification-wiring.ts', '../integrations/integration-capability-resolve'],
+  ['routes/me-notification-wiring.ts', '../integrations/provider-capability-registry'],
   // Ceremony derives one integration scope from the corp id and app key. No other registry name.
   ['auth/admin-grant-target-ceremony.ts', '../integrations/provider-capability-registry'],
 ]
@@ -120,8 +125,10 @@ describe('importers of the capability modules', () => {
     expect(importSpecifiers('const m = require(name)')).toEqual([NON_LITERAL_SPECIFIER])
   })
 
-  it('give the consumer resolver no importer, and recognise its loads', () => {
-    expect(SRC_ALLOWLIST.filter(([, specifier]) => /integration-capability-resolve/.test(specifier))).toEqual([])
+  it('give the consumer resolver only the authenticated notification wiring importer, and recognise its loads', () => {
+    expect(SRC_ALLOWLIST.filter(([, specifier]) => /integration-capability-resolve/.test(specifier))).toEqual([
+      ['routes/me-notification-wiring.ts', '../integrations/integration-capability-resolve'],
+    ])
     for (const spelling of [
       "import { x } from '../integrations/integration-capability-resolve'",
       "const m = require('../integrations/integration-capability-resolve.js')",

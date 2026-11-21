@@ -116,6 +116,7 @@ export const ADVISORY_FIXED_KEY1_REGISTRY: ReadonlyArray<Readonly<{
 }>> = Object.freeze([
   fixedKey1('attendance-settlement-coordination', { literal: SETTLEMENT_COORDINATION_KEY1 }, 'packages/core-backend/src/attendance/coordination/settlement-coordination-key.ts'),
   fixedKey1('audit-logs-partition', { hashtext: 'audit_logs_partition' }, 'packages/core-backend/src/audit/AuditRepository.ts'),
+  fixedKey1('notif-test-conn', { hashtext: 'notif-test-conn' }, 'packages/core-backend/src/notifications/test-send-service.ts (SQL literal)'),
   fixedKey1('stock-preparation-project', { literal: 0x73700101 }, 'packages/core-backend/src/multitable/stock-preparation-persist-unit-of-work.ts (bind parameter)'),
   fixedKey1('stock-preparation-batch', { literal: 0x73700102 }, 'packages/core-backend/src/multitable/stock-preparation-persist-unit-of-work.ts (bind parameter)'),
   fixedKey1('multitable-pit-recovery', { literal: 0x77303104 }, 'packages/core-backend/src/multitable/canonical-sheet-fence.ts (fixed namespace; documented, no production query site today)'),
