@@ -72,6 +72,7 @@ describe('OpenAPI record-link FormField schemas (generated JSON)', () => {
       'options',
       'props',
       'visibilityRule',
+      'printable',
     ])
     for (const key of Object.keys(rl?.properties || {})) {
       expect(allowed.has(key), `unexpected FormFieldRecordLink property: ${key}`).toBe(true)

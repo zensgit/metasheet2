@@ -269,3 +269,74 @@ describe('templateAuthoring — draftFromTemplate hydrates detail columns (round
     expect(rebuiltColumns?.find((c) => c.id === 'note')?.visibilityRule).toEqual({ fieldId: 'qty', operator: 'notEmpty' })
   })
 })
+
+describe('templateAuthoring — 参与打印 (printable) carrier', () => {
+  const linearGraph = {
+    nodes: [
+      { key: 'start', type: 'start', name: '发起', config: {} },
+      { key: 'approval_1', type: 'approval', name: '审批', config: { assigneeSources: [{ kind: 'requester' }] } },
+      { key: 'end', type: 'end', name: '结束', config: {} },
+    ],
+    edges: [
+      { key: 'e1', source: 'start', target: 'approval_1' },
+      { key: 'e2', source: 'approval_1', target: 'end' },
+    ],
+  }
+  const hydrate = (fields: FormField[]) => draftFromTemplate({
+    id: 't1',
+    key: 'k',
+    name: 'n',
+    description: null,
+    category: null,
+    status: 'draft',
+    version: 1,
+    visibilityScope: { type: 'all', ids: [] },
+    slaHours: null,
+    formSchema: { fields },
+    approvalGraph: linearGraph,
+  } as never)
+
+  it('a fresh field defaults to printable and emits no printable key', () => {
+    expect(createEmptyFieldDraft(1).printable).toBe(true)
+    const schema = buildFormSchema(draftWith([{ ...createEmptyFieldDraft(1), id: 'reason', label: '事由' }]))
+    expect(Object.prototype.hasOwnProperty.call(schema.fields[0], 'printable')).toBe(false)
+  })
+
+  it('an old template without the key hydrates as printable and rebuilds byte-identical', () => {
+    const stored: FormField[] = [{ id: 'reason', type: 'text', label: '事由', required: true }]
+    const draft = hydrate(stored)
+    expect(draft.fields[0].printable).toBe(true)
+    expect(buildFormSchema(draft).fields).toEqual(stored)
+  })
+
+  it('a stored printable: false hydrates as false and round-trips as false', () => {
+    const draft = hydrate([{ id: 'amount', type: 'number', label: '金额', required: false, printable: false }])
+    expect(draft.fields[0].printable).toBe(false)
+    expect(buildFormSchema(draft).fields[0].printable).toBe(false)
+  })
+
+  it('turning printing back on removes the key instead of resurrecting the stored false', () => {
+    const draft = hydrate([{ id: 'amount', type: 'number', label: '金额', required: false, printable: false }])
+    draft.fields[0].printable = true
+    const rebuilt = buildFormSchema(draft).fields[0]
+    expect(Object.prototype.hasOwnProperty.call(rebuilt, 'printable')).toBe(false)
+  })
+
+  it('turning printing off on a field emits printable: false (any authorable type, incl. explanation)', () => {
+    const field = { ...createEmptyFieldDraft(1), id: 'note', type: 'explanation' as const, label: '说明', explanationText: '仅供参考', printable: false }
+    expect(buildFormSchema(draftWith([field])).fields[0]).toEqual({
+      id: 'note',
+      type: 'explanation',
+      label: '说明',
+      required: false,
+      printable: false,
+      props: { text: '仅供参考' },
+    })
+  })
+
+  it('a draft built without the carrier (legacy fixture shape) is treated as printable', () => {
+    const { printable: _omit, ...legacy } = createEmptyFieldDraft(1)
+    const schema = buildFormSchema(draftWith([{ ...legacy, id: 'reason', label: '事由' } as FieldAuthoringDraft]))
+    expect(Object.prototype.hasOwnProperty.call(schema.fields[0], 'printable')).toBe(false)
+  })
+})

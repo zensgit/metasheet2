@@ -141,6 +141,14 @@
           <el-form-item v-if="field.type !== 'explanation'" label="是否必填">
             <el-checkbox v-model="field.required" :disabled="readOnly">必填</el-checkbox>
           </el-form-item>
+          <!-- 参与打印：默认勾选。取消后打印页不输出该字段，屏幕显示不变。 -->
+          <el-form-item label="是否参与打印">
+            <el-checkbox
+              v-model="field.printable"
+              :disabled="readOnly"
+              data-testid="approval-field-printable"
+            >参与打印</el-checkbox>
+          </el-form-item>
           <el-form-item
             v-if="field.type === 'record-link'"
             label="关联目标"

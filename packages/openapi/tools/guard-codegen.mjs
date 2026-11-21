@@ -166,6 +166,7 @@ const rlAllowed = new Set([
   'options',
   'props',
   'visibilityRule',
+  'printable',
 ])
 for (const key of Object.keys(rlField?.properties || {})) {
   if (!rlAllowed.has(key)) {

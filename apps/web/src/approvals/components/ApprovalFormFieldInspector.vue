@@ -66,6 +66,17 @@
         <span class="approval-form-field-inspector__label">必填</span>
       </label>
 
+      <!-- 参与打印：默认勾选。取消后打印页不输出该字段，屏幕显示不变。 -->
+      <label class="approval-form-field-inspector__row approval-form-field-inspector__row--inline">
+        <input
+          type="checkbox"
+          data-testid="approval-form-field-inspector-printable"
+          :checked="field.printable"
+          @change="onPrintableChange($event)"
+        />
+        <span class="approval-form-field-inspector__label">参与打印</span>
+      </label>
+
       <label
         v-if="field.type !== 'explanation'"
         class="approval-form-field-inspector__row"
@@ -1612,6 +1623,15 @@ function onRequiredChange(event: Event): void {
   const checked = (event.target as HTMLInputElement).checked
   if (!commitPatch({ required: checked })) {
     ;(event.target as HTMLInputElement).checked = current.required
+  }
+}
+
+function onPrintableChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const checked = (event.target as HTMLInputElement).checked
+  if (!commitPatch({ printable: checked })) {
+    ;(event.target as HTMLInputElement).checked = current.printable
   }
 }
 

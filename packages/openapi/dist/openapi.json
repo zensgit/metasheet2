@@ -8403,6 +8403,9 @@
           "visibilityRule": {
             "$ref": "#/components/schemas/FormFieldVisibilityRule"
           },
+          "printable": {
+            "type": "boolean"
+          },
           "columns": {
             "type": "array",
             "items": {
@@ -8453,6 +8456,9 @@
           },
           "visibilityRule": {
             "$ref": "#/components/schemas/FormFieldVisibilityRule"
+          },
+          "printable": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -8499,6 +8505,9 @@
           },
           "visibilityRule": {
             "$ref": "#/components/schemas/FormFieldVisibilityRule"
+          },
+          "printable": {
+            "type": "boolean"
           }
         },
         "required": [

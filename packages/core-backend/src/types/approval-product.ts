@@ -824,6 +824,11 @@ export interface FormField {
   options?: FormOption[]
   props?: Record<string, unknown>
   visibilityRule?: FormFieldVisibilityRule
+  /**
+   * 参与打印。缺省即参与（旧模板不变）；只有显式 `false` 让该字段不出现在打印页上。
+   * 只对顶层字段有效；规范化后只保存 `false`，`true` 不落库。不影响屏幕显示与读权限。
+   */
+  printable?: boolean
   // detail / sub-form (明细/子表单) — present only when type === 'detail'. `columns` is the
   // ordered row schema of LEAF sub-fields (no nested `detail`, enforced at author-time);
   // a `detail` value is submitted as an array of row objects keyed by sub-field id.

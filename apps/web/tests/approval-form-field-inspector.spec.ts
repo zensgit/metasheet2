@@ -459,6 +459,25 @@ describe('ApprovalFormFieldInspector — committed edits only (FB-D7)', () => {
     expect(inspector.session().history.undoStack).toHaveLength(1)
   })
 
+  it('参与打印 starts checked and unchecking commits ONE printable:false command', async () => {
+    const inspector = await mountInspector([field(1), field(2)])
+    expect(inspector.input('approval-form-field-inspector-printable').checked).toBe(true)
+    await inspector.toggle('approval-form-field-inspector-printable')
+    expect(inspector.commands).toEqual([
+      { kind: 'update-properties', localId: 'local_1', patch: { printable: false } },
+    ])
+    expect(inspector.session().draft.fields[0].printable).toBe(false)
+    expect(inspector.session().draft.fields[1].printable).toBe(true)
+    expect(inspector.session().history.undoStack).toHaveLength(1)
+  })
+
+  it('参与打印 stays available on an explanation field (说明 can be left off paper)', async () => {
+    const inspector = await mountInspector([
+      field(1, { type: 'explanation', explanationText: '仅供参考' }),
+    ])
+    expect(inspector.input('approval-form-field-inspector-printable').checked).toBe(true)
+  })
+
   it('visibility rule edits: depends-on and operator commit on change; the value text commits on blur', async () => {
     const inspector = await mountInspector([field(1), field(2)])
     await inspector.changeSelect(
