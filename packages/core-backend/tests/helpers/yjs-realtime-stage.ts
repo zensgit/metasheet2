@@ -49,6 +49,8 @@ export interface World {
   readGate: Promise<void> | null
   /** When set, every permission read of these users waits for it; the reads of the others answer. */
   readGateFor: Map<string, Promise<void>>
+  /** Every permission read of these users takes this long (ms). */
+  readDelayFor: Map<string, number>
   /**
    * The field-write check of these users answers 'unknown' the way the start-up closure does when
    * its own read fails: it returns the value, it does not throw. Their record access check answers.
@@ -92,6 +94,7 @@ export function createWorld(): World {
     readFailsFor: new Set(),
     readGate: null,
     readGateFor: new Map(),
+    readDelayFor: new Map(),
     fieldCheckUnknownFor: new Set(),
     permissionReads: [],
     patchFails: false,
@@ -153,6 +156,8 @@ async function permissionRead(world: World, userId: string): Promise<void> {
   world.permissionReads.push(userId)
   const own = world.readGateFor.get(userId)
   if (own) await own
+  const delay = world.readDelayFor.get(userId)
+  if (delay) await new Promise((resolve) => setTimeout(resolve, delay))
   const gate = world.readGate
   if (gate) {
     world.readGate = null

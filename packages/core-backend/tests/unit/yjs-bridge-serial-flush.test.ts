@@ -139,8 +139,8 @@ describe('a write that is put back never overwrites a later value', () => {
 })
 
 describe('a write that was put back waits out its delay', () => {
-  it('it is not re-checked again before its delay has passed, however fast changes of the record arrive', async () => {
-    const s = await open({ bridgeOptions: { deferRetryMinMs: 500, deferRetryMaxMs: 500, deferMaxMs: 20_000 } })
+  it('it is not re-checked again before its delay has passed, however many changes of the record arrive and however often their own timer runs out', async () => {
+    const s = await open({ bridgeOptions: { deferRetryMinMs: 600, deferRetryMaxMs: 600, deferMaxMs: 20_000 } })
     const a = await editor(s, 'a')
     const b = await editor(s, 'b')
     sendUpdate(a, append(a, 'f1', '-A'))
@@ -148,23 +148,21 @@ describe('a write that was put back waits out its delay', () => {
     s.world.readFailsFor.add('a')
     await until(() => s.bridge.getMetrics().deferredFlushCount === 1, 2000, 'the first unanswered re-check')
     const readsOfA = s.world.permissionReads.filter((reader) => reader === 'a').length
-    for (let index = 0; index < 6; index += 1) {
+    // Changes further apart than the merge window: the timer of the waiting write runs out each time.
+    for (let index = 0; index < 4; index += 1) {
       sendUpdate(b, append(b, 'f2', `-${index}`))
-      await settle(40)
+      await settle(100)
     }
-    // Six changes later, well inside the delay: not one more re-check was started.
     expect(s.bridge.getMetrics().deferredFlushCount).toBe(1)
     expect(s.world.permissionReads.filter((reader) => reader === 'a')).toHaveLength(readsOfA)
     expect(written(s)).toEqual([])
     s.world.readFailsFor.delete('a')
     await until(() => written(s).length === 1, 3000, 'the write after the delay')
-    expect(written(s)).toEqual([{ f1: 'one-A', f2: 'two-0-1-2-3-4-5' }])
+    expect(written(s)).toEqual([{ f1: 'one-A', f2: 'two-0-1-2-3' }])
   })
-})
 
-describe('a write that is put back keeps who changed what', () => {
-  it('its contributor loses the field while a change of somebody else is merged over it: the merged write is refused', async () => {
-    const s = await open()
+  it('the same holds when the write was put back under a change that had arrived meanwhile', async () => {
+    const s = await open({ bridgeOptions: { deferRetryMinMs: 600, deferRetryMaxMs: 600, deferMaxMs: 20_000 } })
     const a = await editor(s, 'a')
     const b = await editor(s, 'b')
     sendUpdate(a, append(a, 'f1', '-A'))
@@ -172,44 +170,101 @@ describe('a write that is put back keeps who changed what', () => {
     const hung = gate()
     s.world.readGate = hung.promise
     s.world.readFailsFor.add('a')
-    await settle(120)
-    sendUpdate(b, append(b, 'f2', '-B'))
-    await until(() => shared(s).f2 === 'two-B')
-    await settle(100)
-    hung.open()
-    await settle(30)
-    // a may no longer write f1; its reads answer again.
-    s.world.forbiddenFields.set('a', new Set(['f1']))
+    await settle(120) // the write of a is taken out and its re-check waits
+    sendUpdate(b, append(b, 'f2', '-first'))
+    await until(() => shared(s).f2 === 'two-first')
+    hung.open() // not answered: put back under the change of b
+    await until(() => s.bridge.getMetrics().deferredFlushCount === 1, 2000, 'the unanswered re-check')
+    const readsOfA = s.world.permissionReads.filter((reader) => reader === 'a').length
+    for (let index = 0; index < 3; index += 1) {
+      sendUpdate(b, append(b, 'f2', `-${index}`))
+      await settle(100)
+    }
+    expect(s.bridge.getMetrics().deferredFlushCount).toBe(1)
+    expect(s.world.permissionReads.filter((reader) => reader === 'a')).toHaveLength(readsOfA)
     s.world.readFailsFor.delete('a')
+    await until(() => written(s).length === 1, 3000, 'the write after the delay')
+    expect(written(s)).toEqual([{ f1: 'one-A', f2: 'two-first-0-1-2' }])
+  })
+})
+
+describe('a write that is put back keeps who changed what', () => {
+  // The first contributor of the write is `first`; the contributor that is put to the test is `a`.
+  // A field whose writer were forgotten would be checked against the first contributor instead.
+  async function threeEditors(s: Stage): Promise<{ first: Awaited<ReturnType<typeof editor>>; a: Awaited<ReturnType<typeof editor>>; b: Awaited<ReturnType<typeof editor>> }> {
+    const first = await editor(s, 'first')
+    const a = await editor(s, 'a')
+    const b = await editor(s, 'b')
+    return { first, a, b }
+  }
+
+  it('its contributor loses a field while a change of somebody else is merged over it: the merged write is refused, although the first contributor may write that field', async () => {
+    const s = await open({ mergeWindowMs: 150 })
+    const { first, a, b } = await threeEditors(s)
+    sendUpdate(first, append(first, 'f2', '-first'))
+    await until(() => shared(s).f2 === 'two-first' && a.fields().f2 === 'two-first')
+    sendUpdate(a, append(a, 'f1', '-A')) // same merge window: one write, first contributor `first`
+    await until(() => shared(s).f1 === 'one-A' && b.fields().f1 === 'one-A')
+    const hung = gate()
+    s.world.readGate = hung.promise
+    s.world.readFailsFor.add('first')
+    await settle(250) // taken out; its re-check waits on the read
+    sendUpdate(b, change(b, 'f3', 'by-b'))
+    await until(() => shared(s).f3 === 'by-b')
+    await settle(60)
+    hung.open() // not answered: put back under the change of b
+    await until(() => s.bridge.getMetrics().deferredFlushCount >= 1, 2000, 'the unanswered re-check')
+    s.world.forbiddenFields.set('a', new Set(['f1']))
+    s.world.readFailsFor.delete('first')
     await until(() => a.invalidated.length === 1 && b.invalidated.length === 1, 3000, 'the refusal of the merged write')
     await settle(200)
     expect(written(s)).toEqual([])
     expect(record(s)).toMatchObject({ f1: 'one', f2: 'two' })
-    expect(s.bridge.getMetrics().flushFailureCount).toBe(1)
   })
 
-  it('the same connection changes another field afterwards: the field of the write that was put back is still re-checked for it', async () => {
-    const s = await open()
-    const a = await editor(s, 'a')
+  it('the same connection changes another field meanwhile: the field of the write that is put back is still re-checked for it', async () => {
+    const s = await open({ mergeWindowMs: 150 })
+    const { first, a, b } = await threeEditors(s)
+    sendUpdate(first, append(first, 'f2', '-first'))
+    await until(() => shared(s).f2 === 'two-first' && a.fields().f2 === 'two-first')
     sendUpdate(a, append(a, 'f1', '-A'))
-    await until(() => shared(s).f1 === 'one-A')
+    await until(() => shared(s).f1 === 'one-A' && b.fields().f1 === 'one-A')
     const hung = gate()
     s.world.readGate = hung.promise
-    s.world.readFailsFor.add('a')
-    await settle(120)
-    hung.open()
-    await settle(30) // put back; now the same connection changes f2 before the retry
-    s.world.readFailsFor.delete('a')
-    s.world.fieldCheckUnknownFor.add('a') // keeps the retry undecided while the next change arrives
-    sendUpdate(a, change(a, 'f2', 'two-A'))
+    s.world.readFailsFor.add('first')
+    await settle(250)
+    sendUpdate(a, change(a, 'f3', 'by-a')) // the same connection, another field, while its write is being re-checked
+    await until(() => shared(s).f3 === 'by-a')
     await settle(60)
-    s.world.fieldCheckUnknownFor.delete('a')
-    // By now a may not write f1 any more; f2 it still may.
+    hung.open()
+    await until(() => s.bridge.getMetrics().deferredFlushCount >= 1, 2000, 'the unanswered re-check')
     s.world.forbiddenFields.set('a', new Set(['f1']))
-    await until(() => a.invalidated.length >= 1, 3000, 'the refusal')
+    s.world.readFailsFor.delete('first')
+    await until(() => a.invalidated.length === 1 && b.invalidated.length === 1, 3000, 'the refusal of the merged write')
     await settle(200)
     expect(written(s)).toEqual([])
     expect(record(s)).toMatchObject({ f1: 'one', f2: 'two' })
+  })
+
+  it('control: with nobody losing anything the merged write is written, every field with its latest value', async () => {
+    const s = await open({ mergeWindowMs: 150 })
+    const { first, a, b } = await threeEditors(s)
+    sendUpdate(first, append(first, 'f2', '-first'))
+    await until(() => shared(s).f2 === 'two-first' && a.fields().f2 === 'two-first')
+    sendUpdate(a, append(a, 'f1', '-A'))
+    await until(() => shared(s).f1 === 'one-A' && b.fields().f1 === 'one-A')
+    const hung = gate()
+    s.world.readGate = hung.promise
+    s.world.readFailsFor.add('first')
+    await settle(250)
+    sendUpdate(b, change(b, 'f3', 'by-b'))
+    await until(() => shared(s).f3 === 'by-b')
+    await settle(60)
+    hung.open()
+    await until(() => s.bridge.getMetrics().deferredFlushCount >= 1, 2000, 'the unanswered re-check')
+    s.world.readFailsFor.delete('first')
+    await until(() => written(s).length === 1, 3000, 'the merged write')
+    expect(written(s)).toEqual([{ f1: 'one-A', f2: 'two-first', f3: 'by-b' }])
   })
 })
 
@@ -329,6 +384,9 @@ describe('how long a write may stay un-rechecked', () => {
     sendUpdate(a, append(a, 'f1', '-0'))
     await until(() => shared(s).f1 === 'one-0')
     s.world.readFailsFor.add('a')
+    // Every re-check takes a while, so the changes of the other user arrive while one is running
+    // and the write is put back under them each time.
+    s.world.readDelayFor.set('a', 80)
     const startedAt = Date.now()
     // The other user keeps changing another field the whole time; its own reads answer.
     for (let index = 1; a.invalidated.length === 0 && Date.now() - startedAt < 3000; index += 1) {
