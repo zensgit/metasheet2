@@ -10424,6 +10424,24 @@ describe('DirectoryManagementView', () => {
       })
     }
 
+    function batchAdmitPayload(userId: string, name: string, temporaryPassword: string, username: string) {
+      return createJsonResponse({
+        ok: true,
+        data: {
+          updatedCount: 1,
+          failedCount: 0,
+          items: [],
+          onboardingPackets: [{
+            userId,
+            name,
+            username,
+            temporaryPassword,
+            onboarding: null,
+          }],
+        },
+      })
+    }
+
     it('discards a connectivity result that arrives after another integration is selected', async () => {
       let finishTest: ((value: unknown) => void) | undefined
       apiFetchMock.mockImplementation(async (url: string) => {
@@ -11196,6 +11214,310 @@ describe('DirectoryManagementView', () => {
       accountsTab.dispatchEvent(new MouseEvent('click', { bubbles: true }))
       await flushUi()
       expect(panel ? getComputedStyle(panel).display : '').toBe('none')
+    })
+
+    it('restores background sync controls after a new draft and reselecting the polled integration', async () => {
+      let finishPoll: ((value: unknown) => void) | undefined
+      let dir1RunReads = 0
+      apiFetchMock.mockImplementation(async (url: string, options?: { method?: string; body?: string }) => {
+        const path = String(url)
+        const body = String(options?.body ?? '')
+        if (path === '/api/admin/directory/integrations/dir-1/sync' && options?.method === 'POST' && body.includes('async')) {
+          return createJsonResponse({ ok: true, data: { accepted: true, runId: 'draft-return-run', integrationId: 'dir-1' } }, 202)
+        }
+        if (path.includes('/dir-1/runs')) {
+          dir1RunReads += 1
+          if (dir1RunReads === 2) return new Promise((resolve) => { finishPoll = resolve })
+        }
+        return detailResponse(path)
+      })
+      mountDirectory()
+      await flushUi()
+      clickButton(container!, '后台同步')
+      await flushUi()
+      expect(typeof finishPoll).toBe('function')
+      clickButton(container!, '新建集成')
+      await flushUi()
+      finishPoll!(createJsonResponse({ ok: true, data: { items: [runRecord('draft-return-run', 3)] } }))
+      await flushUi(12)
+      clickIntegration('DingTalk CN')
+      await flushUi(12)
+      const button = findButtonByLabel(container!, '后台同步')
+      expect(container!.textContent).not.toContain('后台同步进行中（运行 draft-return-run）')
+      expect(button?.disabled).toBe(false)
+      expect(button?.textContent?.trim()).toBe('后台同步')
+    })
+
+    it('recovers the load-more control when a queue refresh overtakes a load-more request', async () => {
+      let finishAppend: ((value: unknown) => void) | undefined
+      apiFetchMock.mockImplementation(async (url: string) => {
+        const path = String(url)
+        if (path.includes('/dir-1/review-items')) {
+          if (path.includes('?page=2&')) return new Promise((resolve) => { finishAppend = resolve })
+          return createJsonResponse(createReviewItemsPayload([
+            createManualPendingReviewItem('more-1', 'MoreMemberOne'),
+          ], { total: 3 }))
+        }
+        return detailResponse(path)
+      })
+      mountDirectory()
+      await flushUi()
+      expect(findButtonByLabel(container!, '加载更多')?.textContent?.trim()).toBe('加载更多 (2)')
+      clickButton(container!, '加载更多')
+      await flushUi()
+      expect(typeof finishAppend).toBe('function')
+      clickButton(container!, '刷新队列')
+      await flushUi(8)
+      finishAppend!(createJsonResponse(createReviewItemsPayload([
+        createManualPendingReviewItem('more-2', 'MoreMemberTwo'),
+      ], { total: 3, page: 2 })))
+      await flushUi(8)
+      const loadButtons = Array.from(container!.querySelectorAll('button'))
+        .filter((node) => /^(加载更多|加载中\.\.\.)/.test(node.textContent?.trim() ?? ''))
+        .map((node) => ({ text: node.textContent?.trim(), disabled: node.disabled }))
+      expect(loadButtons).toHaveLength(1)
+      expect(loadButtons[0].text?.startsWith('加载更多')).toBe(true)
+      expect(loadButtons[0].disabled).toBe(false)
+      expect(container!.textContent).toContain('MoreMemberOne')
+      expect(container!.textContent).not.toContain('MoreMemberTwo')
+    })
+
+    it('keeps the created message after creating an integration', async () => {
+      const created = createIntegration({ id: 'dir-new', name: 'OmgateNewIntegration' })
+      let createdDone = false
+      apiFetchMock.mockImplementation(async (url: string, options?: { method?: string }) => {
+        const path = String(url)
+        if (path === '/api/admin/directory/integrations' && options?.method === 'POST') {
+          createdDone = true
+          return createJsonResponse({ ok: true, data: { integration: created } })
+        }
+        if (path === '/api/admin/directory/integrations') {
+          return createJsonResponse({ ok: true, data: { items: createdDone ? [createIntegration(), created] : [createIntegration()] } })
+        }
+        return detailResponse(path)
+      })
+      mountDirectory()
+      await flushUi()
+      clickButton(container!, '新建集成')
+      await flushUi()
+      clickButton(container!, '创建集成')
+      await flushUi(12)
+      const statuses = Array.from(container!.querySelectorAll('.directory-admin__status')).map((node) => node.textContent?.trim())
+      expect(createdDone).toBe(true)
+      expect(statuses).toContain('目录集成已创建')
+    })
+
+    it('shows the missing-integration status for a deep link without a member', async () => {
+      window.history.replaceState({}, '', '/admin/directory?integrationId=dir-missing')
+      apiFetchMock.mockImplementation(async (url: string) => detailResponse(String(url)))
+      mountDirectory()
+      await flushUi(12)
+      const statuses = Array.from(container!.querySelectorAll('.directory-admin__status')).map((node) => node.textContent?.trim())
+      expect(statuses).toContain('未找到目录集成 dir-missing，请确认该集成仍存在或稍后刷新列表重试')
+    })
+
+    it('keeps a created-user credential when only the tab changes after a member deep link', async () => {
+      window.history.replaceState({}, '', '/admin/directory?integrationId=dir-1&accountId=account-deep')
+      let finishAdmit: ((value: unknown) => void) | undefined
+      const account = createAccount({ id: 'account-deep', name: 'DeepLinkMember' })
+      apiFetchMock.mockImplementation(async (url: string, options?: { method?: string }) => {
+        const path = String(url)
+        if (path.endsWith('/admit-user') && options?.method === 'POST') {
+          return new Promise((resolve) => { finishAdmit = resolve })
+        }
+        if (path === '/api/admin/directory/accounts/account-deep') {
+          return createJsonResponse({ ok: true, data: { account } })
+        }
+        return detailResponse(path, [account])
+      })
+      mountDirectory()
+      await flushUi(12)
+      clickButton(container!, '手动创建用户')
+      await flushUi()
+      clickButton(container!, '创建用户并绑定')
+      await flushUi()
+      expect(typeof finishAdmit).toBe('function')
+      const overviewTab = container!.querySelector('#directory-tab-overview')
+      if (!(overviewTab instanceof HTMLButtonElement)) throw new Error('Overview tab not found')
+      overviewTab.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi()
+      finishAdmit!(admitPayload('user-deep', 'DeepLinkMember', 'Deep-Link-Password-33'))
+      await flushUi(12)
+      expect(container!.textContent).toContain('Deep-Link-Password-33')
+      expect(container!.textContent).toContain('目录成员 DeepLinkMember 已创建本地用户并完成绑定')
+    })
+
+    it('keeps batch admission credentials when the same integration is selected again', async () => {
+      apiFetchMock.mockImplementation(async (url: string, options?: { method?: string }) => {
+        const path = String(url)
+        if (path === '/api/admin/directory/accounts/batch-admit-users' && options?.method === 'POST') {
+          return batchAdmitPayload('user-batch-kept', 'KeptBatchMember', 'Kept-Batch-Password-37', 'kept_batch')
+        }
+        if (path.includes('/dir-1/review-items')) {
+          return createJsonResponse(createReviewItemsPayload([batchAdmitMember()]))
+        }
+        return detailResponse(path)
+      })
+      mountDirectory()
+      await flushUi()
+      setReviewChecked(container!, 'BatchAdmitMember', true)
+      await flushUi()
+      clickButton(container!, '批量创建并绑定')
+      await flushUi(12)
+      expect(container!.textContent).toContain('Kept-Batch-Password-37')
+      clickIntegration('DingTalk CN')
+      await flushUi(8)
+      expect(container!.textContent).toContain('Kept-Batch-Password-37')
+      expect(container!.textContent).toContain('批量创建临时凭据')
+    })
+
+    it('clears batch admission credentials when another integration is selected', async () => {
+      apiFetchMock.mockImplementation(async (url: string, options?: { method?: string }) => {
+        const path = String(url)
+        if (path === '/api/admin/directory/accounts/batch-admit-users' && options?.method === 'POST') {
+          return batchAdmitPayload('user-batch-switch', 'SwitchBatchMember', 'Switch-Batch-Password-38', 'switch_batch')
+        }
+        if (path.includes('/dir-1/review-items')) {
+          return createJsonResponse(createReviewItemsPayload([batchAdmitMember()]))
+        }
+        return detailResponse(path)
+      })
+      mountDirectory()
+      await flushUi()
+      setReviewChecked(container!, 'BatchAdmitMember', true)
+      await flushUi()
+      clickButton(container!, '批量创建并绑定')
+      await flushUi(12)
+      expect(container!.textContent).toContain('Switch-Batch-Password-38')
+      clickIntegration('DingTalk US')
+      await flushUi(8)
+      expect(container!.textContent).not.toContain('Switch-Batch-Password-38')
+      expect(container!.textContent).not.toContain('批量创建临时凭据')
+    })
+
+    it('labels a batch admission result with the integration that produced it', async () => {
+      apiFetchMock.mockImplementation(async (url: string, options?: { method?: string }) => {
+        const path = String(url)
+        if (path === '/api/admin/directory/accounts/batch-admit-users' && options?.method === 'POST') {
+          return batchAdmitPayload('user-batch-named', 'NamedBatchMember', 'Named-Batch-Password-55', 'named_batch')
+        }
+        if (path.includes('/dir-1/review-items')) {
+          return createJsonResponse(createReviewItemsPayload([batchAdmitMember()]))
+        }
+        return detailResponse(path)
+      })
+      mountDirectory()
+      await flushUi()
+      setReviewChecked(container!, 'BatchAdmitMember', true)
+      await flushUi()
+      clickButton(container!, '批量创建并绑定')
+      await flushUi(12)
+      const label = container!.querySelector('[data-testid="directory-operation-result-batch-integration"]')
+      expect(label?.textContent).toContain('所属集成：DingTalk CN')
+      expect(container!.textContent).toContain('Named-Batch-Password-55')
+    })
+
+    it('keeps the newer review queue when an older load of the same integration arrives last', async () => {
+      let finishFirstReview: ((value: unknown) => void) | undefined
+      let finishSecondReview: ((value: unknown) => void) | undefined
+      let dir1ReviewReads = 0
+      apiFetchMock.mockImplementation(async (url: string, options?: { method?: string; body?: string }) => {
+        const path = String(url)
+        const body = String(options?.body ?? '')
+        if (path.includes('/dir-1/review-items')) {
+          dir1ReviewReads += 1
+          if (dir1ReviewReads === 1) return new Promise((resolve) => { finishFirstReview = resolve })
+          if (dir1ReviewReads === 2) return new Promise((resolve) => { finishSecondReview = resolve })
+        }
+        if (path === '/api/admin/directory/integrations/dir-1/sync' && options?.method === 'POST' && !body.includes('async')) {
+          return createJsonResponse({
+            ok: true,
+            data: { run: { id: 'run-review-newer', status: 'completed', stats: {} } },
+          })
+        }
+        return detailResponse(path)
+      })
+      mountDirectory()
+      await flushUi()
+      expect(typeof finishFirstReview).toBe('function')
+      clickButton(container!, '手动同步')
+      await flushUi()
+      expect(typeof finishSecondReview).toBe('function')
+      finishSecondReview!(createJsonResponse(createReviewItemsPayload([
+        createManualPendingReviewItem('review-newer', 'NewerQueueMember'),
+      ])))
+      await flushUi(8)
+      expect(container!.textContent).toContain('NewerQueueMember')
+      finishFirstReview!(createJsonResponse(createReviewItemsPayload([
+        createManualPendingReviewItem('review-older', 'OlderQueueMember'),
+      ])))
+      await flushUi(8)
+      expect(container!.textContent).not.toContain('OlderQueueMember')
+      expect(container!.textContent).toContain('NewerQueueMember')
+    })
+
+    it('does not clear the selected review queue when an older load of the same integration fails', async () => {
+      let rejectFirstReview: ((reason: unknown) => void) | undefined
+      let dir1ReviewReads = 0
+      apiFetchMock.mockImplementation(async (url: string, options?: { method?: string; body?: string }) => {
+        const path = String(url)
+        const body = String(options?.body ?? '')
+        if (path.includes('/dir-1/review-items')) {
+          dir1ReviewReads += 1
+          if (dir1ReviewReads === 1) return new Promise((_resolve, reject) => { rejectFirstReview = reject })
+          return createJsonResponse(createReviewItemsPayload([
+            createManualPendingReviewItem('review-same-newer', 'NewerSameIntegrationReview'),
+          ]))
+        }
+        if (path === '/api/admin/directory/integrations/dir-1/sync' && options?.method === 'POST' && !body.includes('async')) {
+          return createJsonResponse({
+            ok: true,
+            data: { run: { id: 'run-review-fail-same', status: 'completed', stats: {} } },
+          })
+        }
+        return detailResponse(path)
+      })
+      mountDirectory()
+      await flushUi()
+      expect(typeof rejectFirstReview).toBe('function')
+      clickButton(container!, '手动同步')
+      await flushUi(8)
+      expect(container!.textContent).toContain('NewerSameIntegrationReview')
+      rejectFirstReview!(new Error('StaleReviewSameIntegrationFailed'))
+      await flushUi(8)
+      expect(container!.textContent).not.toContain('StaleReviewSameIntegrationFailed')
+      expect(container!.textContent).toContain('NewerSameIntegrationReview')
+    })
+
+    it('does not clear the selected run list when an older load of the same integration fails', async () => {
+      let rejectFirstRuns: ((reason: unknown) => void) | undefined
+      let dir1RunReads = 0
+      apiFetchMock.mockImplementation(async (url: string, options?: { method?: string; body?: string }) => {
+        const path = String(url)
+        const body = String(options?.body ?? '')
+        if (path === '/api/admin/directory/integrations/dir-1/runs?page=1&pageSize=10') {
+          dir1RunReads += 1
+          if (dir1RunReads === 1) return new Promise((_resolve, reject) => { rejectFirstRuns = reject })
+          return createJsonResponse({ ok: true, data: { items: [runRecord('run-same-newer', 909090)] } })
+        }
+        if (path === '/api/admin/directory/integrations/dir-1/sync' && options?.method === 'POST' && !body.includes('async')) {
+          return createJsonResponse({
+            ok: true,
+            data: { run: { id: 'run-same-newer', status: 'completed', stats: {} } },
+          })
+        }
+        return detailResponse(path)
+      })
+      mountDirectory()
+      await flushUi()
+      expect(typeof rejectFirstRuns).toBe('function')
+      clickButton(container!, '手动同步')
+      await flushUi(8)
+      expect(container!.textContent).toContain('账号 909090 /')
+      rejectFirstRuns!(new Error('StaleRunsSameIntegrationFailed'))
+      await flushUi(8)
+      expect(container!.textContent).not.toContain('StaleRunsSameIntegrationFailed')
+      expect(container!.textContent).toContain('账号 909090 /')
     })
   })
 

@@ -313,7 +313,6 @@ type AutoAdmissionOnboardingPacket = {
   mobile: string | null
   temporaryPassword: string
   onboarding: OnboardingPacket | null
-  integrationId?: string
   integrationName?: string
 }
 
@@ -399,6 +398,10 @@ const focusedAccountId = ref('')
 const pendingFocusedAccountScroll = ref(false)
 const selectedIntegrationId = ref('')
 let directoryContextVersion = 0
+// One-shot results follow this counter. It moves only when the selected integration changes,
+// a new draft replaces that selection, or the view unmounts. A tab change or a deep-link
+// query update on the same integration leaves an in-flight result in place.
+let directorySelectionVersion = 0
 let directoryViewActive = true
 const directoryTabs = [
   { id: 'overview', label: '概览' },
@@ -533,6 +536,7 @@ let alertLoadVersion = 0
 let scheduleLoadVersion = 0
 let runLoadVersion = 0
 let reviewLoadVersion = 0
+let reviewAppendVersion = 0
 const accountSnapshotIntegrationId = ref('')
 const alertSnapshotIntegrationId = ref('')
 const accountsLoadFailed = ref(false)
@@ -1028,12 +1032,19 @@ function syncDirectoryNavigationFromLocation(): boolean {
 }
 
 function resetDraft() {
+  // Opening a draft leaves the integration context, same as switching integrations.
+  // An in-flight poll must stop here; otherwise its run id keeps the sync actions locked
+  // after the admin returns to that integration, while the poll itself never resumes.
+  stopRunPolling()
   directoryContextVersion += 1
+  directorySelectionVersion += 1
   accountLoadVersion += 1
   alertLoadVersion += 1
   scheduleLoadVersion += 1
   runLoadVersion += 1
   reviewLoadVersion += 1
+  reviewAppendVersion += 1
+  loadingMoreReviewItems.value = false
   setStatus('')
   accountSnapshotIntegrationId.value = ''
   alertSnapshotIntegrationId.value = ''
@@ -1956,16 +1967,18 @@ function describeDepartmentParent(department: DirectoryDepartment): string {
 
 async function selectIntegration(
   integrationId: string,
-  options: { keepDepartments?: boolean } = {},
+  options: { keepDepartments?: boolean; keepStatus?: boolean } = {},
 ): Promise<void> {
   const integration = integrations.value.find((item) => item.id === integrationId)
   if (selectedIntegrationId.value !== integrationId) {
     directoryContextVersion += 1
+    directorySelectionVersion += 1
     accountLoadVersion += 1
     alertLoadVersion += 1
     scheduleLoadVersion += 1
     runLoadVersion += 1
     reviewLoadVersion += 1
+    reviewAppendVersion += 1
     accounts.value = []
     alerts.value = []
     scheduleSnapshot.value = null
@@ -1986,8 +1999,10 @@ async function selectIntegration(
     clearManualAdmissionResult()
     clearAutoAdmissionOnboardingPackets()
     clearBatchAdmissionOnboardingPackets()
-    // An in-flight prompt was valid for the previous integration. Drop it with the selection.
-    setStatus('')
+    // A list click or a navigation-driven switch drops the previous integration's prompt.
+    // An automatic first selection, and the selection that follows a save, keep a status
+    // written immediately before this call.
+    if (!options.keepStatus) setStatus('')
   }
   // A same-integration refresh after a save keeps the loaded tree on screen (pickers stay open,
   // the root-department select does not flip back to a text box) and reloads it in place.
@@ -2117,7 +2132,7 @@ async function loadIntegrations() {
         })
       }
       const targetIntegration = requestedIntegration || integrations.value[0]
-      if (targetIntegration) await selectIntegration(targetIntegration.id)
+      if (targetIntegration) await selectIntegration(targetIntegration.id, { keepStatus: true })
     } else if (hasPendingCrossIntegrationNavigation) {
       const targetIntegration = integrations.value.find((item) => item.id === navigation.integrationId)
       if (targetIntegration) {
@@ -2541,12 +2556,10 @@ function readDirectoryOnboardingPackets(rawPackets: unknown[]): AutoAdmissionOnb
 
 function stampDirectoryOnboardingPackets(
   packets: AutoAdmissionOnboardingPacket[],
-  integrationId: string,
   integrationName: string,
 ): AutoAdmissionOnboardingPacket[] {
   return packets.map((packet) => ({
     ...packet,
-    integrationId,
     integrationName,
   }))
 }
@@ -2600,7 +2613,7 @@ async function saveIntegration() {
     setStatus(selectedIntegration.value ? '目录集成已更新' : '目录集成已创建')
     testResult.value = null
     await loadIntegrations()
-    if (integration?.id) await selectIntegration(integration.id, { keepDepartments: true })
+    if (integration?.id) await selectIntegration(integration.id, { keepDepartments: true, keepStatus: true })
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '保存目录集成失败', 'error')
   } finally {
@@ -2610,7 +2623,7 @@ async function saveIntegration() {
 
 async function testIntegration() {
   const integrationId = selectedIntegrationId.value
-  const contextVersion = directoryContextVersion
+  const contextVersion = directorySelectionVersion
   busy.value = true
   try {
     const response = await apiFetch('/api/admin/directory/integrations/test', {
@@ -2775,7 +2788,7 @@ async function syncIntegration() {
   if (!integration) return
   const integrationId = integration.id
   const integrationName = integration.name
-  const contextVersion = directoryContextVersion
+  const contextVersion = directorySelectionVersion
   busy.value = true
   try {
     clearAutoAdmissionOnboardingPackets()
@@ -2795,7 +2808,6 @@ async function syncIntegration() {
     }
     autoAdmissionOnboardingPackets.value = stampDirectoryOnboardingPackets(
       readAutoAdmissionOnboardingPackets(body?.data as Record<string, unknown> | undefined),
-      integrationId,
       integrationName,
     )
     const autoAdmittedCount = Number(body?.data?.run?.stats?.autoAdmittedCount ?? 0)
@@ -3048,7 +3060,7 @@ async function startAsyncSync() {
   if (!integration) return
   if (pollingRunId.value) return
   const integrationId = integration.id
-  const contextVersion = directoryContextVersion
+  const contextVersion = directorySelectionVersion
   if (
     integration.config.admissionMode === 'auto_for_scoped_departments'
     && !(await confirmAsyncSyncDiscardsOnboardingPackets())
@@ -3322,14 +3334,23 @@ function mergeReviewItems(existingItems: DirectoryReviewItem[], incomingItems: D
 async function loadReviewItems(integrationId: string, options: { append?: boolean } = {}) {
   const append = options.append === true
   if (selectedIntegrationId.value !== integrationId) return
-  const version = ++reviewLoadVersion
+  // A full reload retires an in-flight "load more" and releases its control immediately.
+  // The two requests keep separate versions so the late page cannot merge, and so its
+  // completion cannot clear a newer load-more that started after the reload.
+  if (!append) {
+    reviewAppendVersion += 1
+    loadingMoreReviewItems.value = false
+  }
+  const version = append ? ++reviewAppendVersion : ++reviewLoadVersion
   if (append) loadingMoreReviewItems.value = true
   else loadingReviewItems.value = true
   try {
     const nextPage = append ? reviewPage.value + 1 : 1
     const response = await apiFetch(`/api/admin/directory/integrations/${integrationId}/review-items?page=${nextPage}&pageSize=${reviewPageSize}&filter=all`)
     const body = await readJson(response)
-    if (version !== reviewLoadVersion || selectedIntegrationId.value !== integrationId) return
+    if (append) {
+      if (version !== reviewAppendVersion || selectedIntegrationId.value !== integrationId) return
+    } else if (version !== reviewLoadVersion || selectedIntegrationId.value !== integrationId) return
     if (!response.ok) throw new Error(readApiError(body, '加载待处理队列失败'))
     const items = Array.isArray(body?.data?.items) ? body.data.items : []
     const total = typeof body?.data?.total === 'number'
@@ -3349,7 +3370,9 @@ async function loadReviewItems(integrationId: string, options: { append?: boolea
     }
     syncPendingBindingQueueDefaults()
   } catch (error) {
-    if (version !== reviewLoadVersion || selectedIntegrationId.value !== integrationId) return
+    if (append) {
+      if (version !== reviewAppendVersion || selectedIntegrationId.value !== integrationId) return
+    } else if (version !== reviewLoadVersion || selectedIntegrationId.value !== integrationId) return
     if (!append) {
       reviewItems.value = []
       reviewPage.value = 1
@@ -3358,9 +3381,12 @@ async function loadReviewItems(integrationId: string, options: { append?: boolea
     }
     setStatus(error instanceof Error ? error.message : '加载待处理队列失败', 'error')
   } finally {
-    if (version === reviewLoadVersion && selectedIntegrationId.value === integrationId) {
-      if (append) loadingMoreReviewItems.value = false
-      else loadingReviewItems.value = false
+    if (append) {
+      if (version === reviewAppendVersion && selectedIntegrationId.value === integrationId) {
+        loadingMoreReviewItems.value = false
+      }
+    } else if (version === reviewLoadVersion && selectedIntegrationId.value === integrationId) {
+      loadingReviewItems.value = false
     }
   }
 }
@@ -3594,7 +3620,7 @@ function isCurrentUnbindContext(version: number, integrationId: string): boolean
 // status when that integration is no longer the one on screen.
 function isCurrentDirectoryContext(version: number, integrationId: string): boolean {
   return directoryViewActive
-    && directoryContextVersion === version
+    && directorySelectionVersion === version
     && selectedIntegrationId.value === integrationId
 }
 
@@ -3799,7 +3825,7 @@ async function postReviewBindings(bindings: Array<{
 // rewrite is skipped when this reload no longer belongs to the integration on screen.
 async function refreshAfterReviewBindings(message: string, tone: 'info' | 'error' = 'info'): Promise<void> {
   const integrationId = selectedIntegrationId.value
-  const contextVersion = directoryContextVersion
+  const contextVersion = directorySelectionVersion
   setStatus(message, tone)
   if (!selectedIntegration.value) return
   for (const key of Object.keys(selectedReviewIds)) delete selectedReviewIds[key]
@@ -4011,7 +4037,7 @@ async function createAndBindDirectoryAccountUser(account: DirectoryAccount, cont
 
   const integrationId = selectedIntegrationId.value
   const integrationName = selectedIntegration.value?.name ?? ''
-  const contextVersion = directoryContextVersion
+  const contextVersion = directorySelectionVersion
   if (context === 'review') reviewProcessingAccountId.value = account.id
   else bindingAccountId.value = account.id
   try {
@@ -4092,7 +4118,7 @@ async function batchAdmitReviewItems() {
   if (!integration || selectedReviewAdmissionIds.value.length === 0) return
   const integrationId = integration.id
   const integrationName = integration.name
-  const contextVersion = directoryContextVersion
+  const contextVersion = directorySelectionVersion
   reviewBatchProcessing.value = true
   let appliedCount = 0
   const batchIds = [...selectedReviewAdmissionIds.value]
@@ -4120,7 +4146,6 @@ async function batchAdmitReviewItems() {
     appliedCount = Number(data?.updatedCount ?? processedItems.length)
     batchAdmissionOnboardingPackets.value = stampDirectoryOnboardingPackets(
       readBatchAdmissionOnboardingPackets(data),
-      integrationId,
       integrationName,
     )
     setReviewBatchProgress({
@@ -4428,6 +4453,7 @@ onMounted(() => {
 onUnmounted(() => {
   directoryViewActive = false
   directoryContextVersion += 1
+  directorySelectionVersion += 1
   stopDirectoryLocationSync()
   // Timer hygiene: never leak the background-sync poll past the view's lifetime.
   stopRunPolling()
