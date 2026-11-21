@@ -813,6 +813,94 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
     await adminPool?.end()
   })
 
+  // Keep this before the suite's other job fixtures: a lost ID predicate must
+  // return one legal row, rather than being hidden by the cardinality guard.
+  it('MUT06_CANDIDATE_JOB_ID_NATIVE: an absent legal UUID cannot select the sole legal V1 job', async () => {
+    expect((await pool.query('SELECT count(*)::int AS n FROM attendance_import_jobs')).rows)
+      .toEqual([{ n: 0 }])
+    const orgId = crypto.randomUUID()
+    const batchId = crypto.randomUUID()
+    const absentJobId = crypto.randomUUID()
+    await pool.query(
+      'INSERT INTO user_orgs (user_id, org_id) VALUES ($1, $3), ($2, $3)',
+      [ADMIN_A, TARGET_USER, orgId],
+    )
+    const witness = await loadOrgWitness(pool, orgId)
+    const { input } = strictInput(witness, batchId, ADMIN_A)
+    const reserved = await runSerializable(pool, (client) =>
+      reserveAttendanceLegacyImportPlanJobV1(trx(client), auth(ADMIN_A, orgId), input as Parameters<typeof reserveAttendanceLegacyImportPlanJobV1>[2]),
+    )
+    expect(reserved.kind).toBe('created')
+    expect(reserved.jobId).not.toBe(absentJobId)
+    expect(await residue(pool, batchId)).toEqual({ jobs: 1, manifests: 1, chunks: 1 })
+    expect((await pool.query(
+      'SELECT id, org_id, w4_contract_version, w4_operational_branch, status FROM attendance_import_jobs',
+    )).rows).toEqual([{
+      id: reserved.jobId,
+      org_id: orgId,
+      w4_contract_version: 1,
+      w4_operational_branch: 'strict_targeted',
+      status: 'queued',
+    }])
+
+    const client = await pool.connect()
+    try {
+      const connection = trx(client)
+      const queries: Array<{ SQLSHA256: string; bindingsSHA256: string }> = []
+      const repository = createAttendanceLegacyPlanWorkerRepositoryV1({
+        async query(text, values) {
+          const result = await connection.query(text, values)
+          queries.push({
+            SQLSHA256: crypto.createHash('sha256').update(text).digest('hex'),
+            bindingsSHA256: crypto.createHash('sha256').update(JSON.stringify(values ?? [])).digest('hex'),
+          })
+          return result
+        },
+      })
+      const readState = async () => (await client.query(`
+        SELECT
+          (SELECT jsonb_agg(to_jsonb(j) ORDER BY j.id)
+             FROM attendance_import_jobs j) AS jobs,
+          (SELECT jsonb_agg(to_jsonb(p) ORDER BY p.job_id)
+             FROM attendance_import_legacy_execution_plans p) AS plans,
+          (SELECT jsonb_agg(to_jsonb(c) ORDER BY c.job_id, c.chunk_index)
+             FROM attendance_import_legacy_execution_plan_chunks c) AS chunks,
+          (SELECT jsonb_agg(to_jsonb(r) ORDER BY r.id)
+             FROM attendance_records r WHERE r.org_id = $1) AS records,
+          (SELECT jsonb_agg(to_jsonb(r) ORDER BY r.id)
+             FROM attendance_requests r WHERE r.org_id = $1) AS requests,
+          (SELECT jsonb_agg(to_jsonb(b) ORDER BY b.id)
+             FROM attendance_import_batches b WHERE b.org_id = $1) AS batches
+      `, [orgId])).rows[0]
+      const before = await readState()
+      const own = await repository.readCandidateJob(reserved.jobId)
+      const absent = await repository.readCandidateJob(absentJobId)
+      const after = await readState()
+      const beforeSHA256 = crypto.createHash('sha256').update(JSON.stringify(before)).digest('hex')
+      const afterSHA256 = crypto.createHash('sha256').update(JSON.stringify(after)).digest('hex')
+      console.info('MUT06_CANDIDATE_JOB_ID_NATIVE', JSON.stringify({
+        case: 'MUT06_CANDIDATE_JOB_ID_NATIVE',
+        candidateRows: 1,
+        positiveCandidateMatches: own?.jobId === reserved.jobId && own.orgId === orgId,
+        absentResult: absent === null ? 'not_found' : 'other_legal_job',
+        queries,
+        beforeSHA256,
+        afterSHA256,
+      }))
+      expect(own).toEqual({ jobId: reserved.jobId, orgId })
+      expect(absent).toBeNull()
+      expect(queries).toHaveLength(2)
+      expect(queries.map((query) => query.bindingsSHA256)).toEqual(
+        [reserved.jobId, absentJobId].map((jobId) =>
+          crypto.createHash('sha256').update(JSON.stringify([jobId])).digest('hex'),
+        ),
+      )
+      expect(after).toEqual(before)
+    } finally {
+      client.release()
+    }
+  })
+
   it('commits a valid no-target all-skip job, manifest, and chunk atomically', async () => {
     const batchId = crypto.randomUUID()
     const { input } = noTargetInput(legacyOrgWitness, batchId, ADMIN_A, ADMIN_A)
