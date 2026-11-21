@@ -4,6 +4,7 @@
 > 本文按目标的六条完成条件逐条写：现状、还剩什么、谁做、**计划完成日期**、**完成后怎么验收、留什么证据**、风险。§8 是能直接回填到目标每条完成条件上的版本。
 > 写作基线：origin/main `05f35de0c`，截至 2026-11-20 09:10（UTC+8）。日期都按 UTC+8。
 > values-free：本文不含主机、IP、口令、凭据、客户数据，只写证据放在哪。
+> **2026-11-21 修订（登记册 R-103）**：owner 定月底先交条件 1、5、6，修订后的日期、合并做法和第 3 个包四项默认值见 §12；§1–§9 的日期保留为 11-20 的原计划，与 §12 不一致时以 §12 为准。
 
 配套文档（同一 PR 入库）：
 
@@ -223,3 +224,104 @@ P3 = R85 之后的下一个 main 包，带 D21、v3 发送路径、绑定、对�
 | 计划评审（两份 ADR 的来由） | `E:/Projects/_program-evidence/ipaas-yida-20261106/plan-review-20261116/SUMMARY-zh.md` |
 | 试点手册 | `docs/development/takeover-beiliao-20260821/runbook-stock-prep-batch-refresh-pilot-20261111.md` |
 | 登记册、状态台账 | `docs/development/takeover-beiliao-20260821/decision-register.md`、`beiliao-takeover-status-ledger.md` |
+
+---
+
+## 12. 2026-11-21 修订：月底冲刺（登记册 R-103）
+
+> 起因：owner 2026-11-21 问本目标能否从 12-11 提前到 11-30。核实后的结论是六条全部在 11-30 完成不现实，owner 当天定了三项（§12.1）。§1–§9 的日期保留为 11-20 的原计划，与本节不一致时以本节为准。
+> 基线：origin/main `bac488324`，2026-11-21 13:30（UTC+8）。合并链 head：#6786 `9a8943079`、#6796 `ea73f7e8f`、#6797 `338138696`、#6813 `b397f62dd`、#6819 `15227fa82`、#6812 `8b206f341`。
+> 本节的 `path:line` 都在上述提交上亲读；证据目录的位置相对于 `E:/Projects/_program-evidence/`。
+
+### 12.1 owner 裁定（2026-11-21，三项均取推荐值）
+
+1. **月底目标。** 11-30 前交条件 1、5、6；条件 2、4 争取 11-30；条件 3 排在观察期满之后（12-01～12-04）；整个目标由 12-11 提前到 12-04 前后。
+2. **合并链。** 权限线审过之后只合顶层 #6812，做法见 §12.3。11-20 的「等权限线审完再合」和「每次合并要 owner 点头」两条不变。
+3. **第 3 个包四个待定项。** 都按默认值，见 §12.4。
+
+### 12.2 修订后的日期
+
+| # | 完成条件 | 11-20 计划 | 修订计划 | 最晚 | 取决于 |
+|---|---|---|---|---|---|
+| 1 | R85 签收 | 11-21 | 11-23（现场 11-22 做完第 23–44 步） | 11-30 | 现场续做；owner 重批令牌并说明「本窗口批准」 |
+| 2 | 签收后 5 个工作日 | 11-27 | 11-30（现场 11-22 做完时） | 12-04 | 条件 1 的日期；任一天失败重计 |
+| 3 | 试点走完一轮 | 12-04 | 12-01～12-04 | 12-08 | 观察期满；上游有新批次；owner 选项目并批写入段 |
+| 4 | 宜搭首发 | 12-01 | 11-27（客户 11-26 前交齐、R85 已签收） | 12-04 | 客户；R85 签收 |
+| 5 | 两份 ADR | 12-02 | 11-25 | 11-30 | owner 裁定 |
+| 6a | 合并链 | 11-26 | 权限线审回后当天（约 1 小时），目标 11-24 | 11-27 | 权限线审阅；owner 批合并 |
+| 6b | 第 3 个包可发布候选 | 12-01 | 11-27 | 11-30 | 6a；Windows 回退演练 |
+
+条件 2 的日历（按 §3 的口径：工作日、签收次日起算）：现场 11-21 做完 → 11-22 签收 → 11-27 满；11-22 做完 → 11-23 签收 → 11-30 满；11-23 做完 → 11-24 签收 → 12-01 满。恢复任务后不手动触发，下一次 06:00 才是第 45 步，所以最早签收日是现场做完的次日。
+
+### 12.3 合并操作单（只合顶层 #6812）
+
+**为什么可以这样做（2026-11-21 核实）：**
+
+- 六个 PR 的 base 都是 main，head 严格嵌套：每个下层 head 是上层 head 的祖先（`git merge-base --is-ancestor` 五对全成立），顶层 head 含整条链。
+- main 的分支保护：14 项必需状态检查；不要求分支与 main 同步（`strict=false`）；不要求评审；对管理员同样生效。仓库允许 merge commit。（分支保护接口，2026-11-21 读）
+- 先例：2026-11-14 15:12–15:15，十个 PR（多数逐层叠着）用 merge commit 连续合入（#6764、#6769、#6782、#6789、#6793、#6795、#6880、#6881、#6882、#6883）。
+- 六个 PR 在当前 head 上检查全过（78–93 项）；一轮完整 CI 墙钟 39–47 分钟。
+
+**为什么不逐个合：** 下面五层的绿灯跑在 main `5e5193a2b` 上，逐个合会在 main 上留下没有单独测过的中间状态；连续推 main 时，带并发组的工作流只有最后一次跑完（`.github/workflows/plugin-tests.yml:23-25`）。
+
+**前置（都满足才开始）：**
+
+1. 权限线对 #6786、#6797 改到其文件的部分给出结论。
+2. owner 点头这一次合并。
+3. 五个下层 head 仍是 #6812 head 的祖先。
+
+**步骤：**
+
+1. 通知各线：从第 2 步推送到第 5 步完成（约 1 小时）不往 main 合。
+2. 把当时的 `origin/main` merge 进 #6812 的分支，不 rebase。已知冲突一处：`plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json`（main 的 #6966 改 `pnpmLock`，#6812 改 `pluginIndex`、`pluginDb`），两边都保留，再跑出处钉子的校验。#6964 若已先合入 main，另有两个单测文件冲突：`packages/core-backend/tests/unit/deprovision-effect-provider.test.ts`、`packages/core-backend/tests/unit/dingtalk-login-repair-lock-timeout.test.ts`。
+3. 推送，等 #6812 这一轮 CI：14 项必需检查全过；另看 `authorization-operation (14)` 至 `(17)`、`unit (20.x)` 和四个 `*-db (20.x)`。
+4. 合并前再 fetch 一次：`origin/main` 必须还是第 2 步合进来的那个提交，不是就回到第 2 步。
+5. 先把 #6812 从 Draft 转为可合并（仓库里没有监听 `ready_for_review` 的工作流，转换不会重跑 CI），再用 merge commit 合它（不 squash、不 rebase），并以已测 head 的 SHA 作匹配条件：`gh pr merge 6812 --merge --match-head-commit <sha>`。
+6. 核对：`origin/main^{tree}` 等于已测 head 的 tree；五个下层 head 都是 `origin/main` 的祖先；记下五个下层 PR 在 GitHub 上的状态。
+
+**中止条件：** 第 3 步有必需检查不过；第 4 步 main 变了；权限线的结论要求改 D21 迁移字节（回 owner，见 §12.4 第 ① 项）。
+
+**未核实：** 五个下层 PR 会不会被 GitHub 自动标为 Merged（提交随 merge commit 进入 base 时的通用行为，本仓库没有先例）。没有自动标时不要再点合并，记下现象报 owner；第 6 步的祖先检查就是「已合入」的证据。
+
+**合入不等于部署：** 部署作业只在手动触发并勾选时运行（`.github/workflows/docker-build.yml:205-207`）。
+
+**证据：** #6812 那一轮 CI 的链接、合入 commit、两个 tree 哈希、推 main 后触发的检查结果，写进宜搭验证文档的续篇。
+
+### 12.4 第 3 个包四个待定项的默认值（owner 2026-11-21 定）
+
+| 项 | 定为 | 含义与依据 |
+|---|---|---|
+| ① D21 迁移加不加 `lock_timeout` | 不加，文件字节不改 | `zzzz20261106110500_add_authorization_version_rows.ts`（#6786）全文没有 `lock_timeout` / `statement_timeout`。改字节要重钉 AIS 摘要（`packages/core-backend/tests/helpers/authorization-input-migration-rules.ts:30-57`，#6915 已在 main）并把整条链重新对齐（`p3-install-pack-draft-20261117/ADDENDUM-D21-AIS-20261117.md:22`） |
+| ② 给 `…111300`、`…111500`、`…181500` 三条迁移补 `applyMigrationTimeouts`（草稿 O5，可选项） | 不补，不为此新增 main 提交 | `p3-install-pack-draft-20261117/sheet/P3-install-sheet-DELTA.md:301` |
+| ③ 装机基线（草稿 O1） | 只按 R85 | 不做 R84 → P3 那一套对象清单重派生和回退 B（`p3-install-pack-draft-20261117/probes/README.md:131-133`）。前提是 R85 签收；签不下来时回 owner |
+| ④ D21 装机时停后端，还是开维护窗口 | 停后端 | `p3-install-pack-draft-20261117/ADDENDUM-D21-AIS-20261117.md:26`。装机单第 19–20 步、状态表和回退段按停后端写，并单独演练一次 |
+
+四项定在合并和切包之前，是为了让对着预演树（main 加整条链）先做的探针、迁移演练、暴露审计和 Windows 演练不作废：迁移字节不变，切包点不因补提交后移。
+
+### 12.5 做不到时的后备与切换条件
+
+后备：11-30 交条件 1、5、6；12-04 交条件 2、4；12-08 交条件 3。
+
+| 触发 | 改为 |
+|---|---|
+| 现场到 11-22 晚没做完第 23–44 步 | 条件 2 最早 12-01 |
+| 到 11-23 还没向客户提出，或客户 11-26 没交齐 | 条件 4 改 12-04 |
+| 权限线 11-24 没回，或要求改 D21 迁移字节 | 合并改到 11-27 前后，第 3 个包候选改到 12-02～12-04 |
+| 观察期任一天失败 | 条件 2 从头再计 5 个工作日，期间不排要重启后端的窗口 |
+
+### 12.6 还没有裁定的（不要当成已定）
+
+1. **条件 2 的口径。** §3 写的「后端错误日志无新增 401/422」是本计划加的，目标原文只有「失败数与基线一致、健康检查 200」；宜搭窗口里的操作可能在后端日志留下 401/422。建议收窄到那次定时运行自己的日志。签收当天那次 06:00 是否计入、周末运行是否计入，也未定。
+2. **条件 6「合入后必需检查全绿」的证据。** 推 main 后，14 项必需检查里只有 6 项会跑：`test (20.x)`、`web-tests`、`stock-prep PowerShell 5.1 acceptance`、`integration-guard`、`ssh host-key pin contract (fail-closed known_hosts)`、`observation-kit contract (read-only SQL census + runbook gating)`（`bac488324`、`5e5193a2b` 两个提交的 check-runs 实测）。建议证据 = 顶层 PR 14 项全过 + §12.3 第 6 步的 tree 相等 + 推 main 后触发的检查全绿。
+3. **条件 5。** 客户答不全 4 问时，是否按「默认值 + 待客户确认」裁定（原文是「客户回答」）。
+4. **试点。** 批准是否并成只读段、写入段两次；写入段是否排在观察期满之后（建议是，理由见 §12.7 第 3 条）。
+5. **宜搭。** 两个窗口是否同一天；是否先做一次非现场彩排（往我方自有的宜搭测试表写，属外部写，O 层）。
+6. **R85 续做。** 令牌要 owner 重新批；「本窗口批准」仍待说明。
+
+### 12.7 2026-11-21 核到的事实（位置）
+
+1. **现场。** 11-19 约 16:18 之后没有新回报；第 23–44 步未完成，每日拉取仍暂停（`p2-handoff-20261113/R85-SEND-STATUS.md:63-78`）。
+2. **试点的代码顺序。** 启用前就绪必须全过（`plugins/plugin-integration-core/lib/http-routes.cjs:13010-13017`）。上游没有新批次时，刷新成功但不开批次（`plugins/plugin-integration-core/lib/stock-preparation-pull-batch-lanes.cjs:428`）。
+3. **试点不宜在观察期内启用。** 第一次试点拉取之后不能再回 R 线构建（`runbook-stock-prep-batch-refresh-pilot-20261111.md:539`、`:576`），而 R85 登记的回退底线是 R84（`p2-handoff-20261113/R85-SEND-STATUS.md:72`）。试点项目超小车道上限、或试点状态读不到时，定时拉取记失败（`scripts/ops/stock-preparation-scheduled-pull.mjs:593-595`、`:603-605`）。手册规定每一步批复不同、不能合并（同一手册 `:294`）。
+4. **宜搭。** 两个窗口之间没有代码强制的间隔：测试连接冷却 5 秒（`packages/core-backend/src/integration/yida-connection-test-runtime.ts:61`），一次批准最长 15 分钟（`packages/core-backend/src/integration/yida-send-approval-service.ts:19`）。多目标开关关着时，初始化槽全部署只有一个且不可改（`packages/core-backend/migrations/094_create_integration_yida_approved_target.sql:2-5`），所以不能在客户现场用我方测试应用占槽。证据目录 `ipaas-yida-20261106/` 里没有找到对真宜搭表单写入接口做过端到端调用的记录（2026-11-21 检索）。
+5. **在途 PR 与链的冲突（`git merge-tree`）。** #6964 与 #6786 在两个单测文件冲突；#6952 与链在 `packages/core-backend/src/admin/authorization-operation-fence.ts` 冲突。
