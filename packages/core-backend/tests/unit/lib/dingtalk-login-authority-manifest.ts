@@ -281,6 +281,10 @@ export const loginAuthorityManifest: Record<string, string[]> = {
   "packages/core-backend/src/integrations/dingtalk/interactive-card-stream.ts": [
     "2 × resolveCallbackExecutor > executeDingTalkApprovalCardCallback",
   ],
+  "packages/core-backend/src/multitable/authz-version-protocol.ts": [
+    "2 × module > dynamic insert into [SHEET_PERMISSION_VERSIONS_TABLE]",
+    "2 × module > dynamic insert into [SUBJECT_AUTHORIZATION_VERSIONS_TABLE]",
+  ],
   "packages/core-backend/src/multitable/config-restore.ts": [
     "applyConfigRevert > dynamic update [table, sets.join(', '), params.length]",
   ],
