@@ -20,15 +20,18 @@ import {
 
 const BACKEND = path.resolve(__dirname, '..', '..')
 const ROOT = path.resolve(BACKEND, '..', '..')
-const DB_SPEC = 'tests/integration/notification-endpoints-preferences.db.test.ts'
 const WORKFLOW = path.join(ROOT, '.github', 'workflows', 'plugin-tests.yml')
 const VITEST_CONFIG = path.join(BACKEND, 'vitest.config.ts')
-const PREDECESSOR = 'tests/integration/directory-integration-lifecycle-history-readable.db.test.ts'
 const STEP = REAL_DB_STEP_IDS.approval
 
 const workflow = () => readFileSync(WORKFLOW, 'utf8')
 
-describe('user notification endpoints and preferences real-DB suite wiring', () => {
+describe.each([
+  ['tests/integration/notification-endpoints-preferences.db.test.ts', 'tests/integration/directory-integration-lifecycle-history-readable.db.test.ts'],
+  ['tests/integration/notification-verification-test-send.db.test.ts', 'tests/integration/attendance-role-template-runtime.db.test.ts'],
+  ['tests/integration/notification-verification-production.db.test.ts', 'tests/integration/notification-verification-test-send.db.test.ts'],
+  ['tests/integration/notification-capability-production.db.test.ts', 'tests/integration/notification-verification-production.db.test.ts'],
+])('notification real-DB suite wiring: %s', (DB_SPEC, PREDECESSOR) => {
   it('exists', () => {
     expect(existsSync(path.join(BACKEND, DB_SPEC))).toBe(true)
   })
@@ -43,7 +46,7 @@ describe('user notification endpoints and preferences real-DB suite wiring', () 
     expect(() => requireExecutableRealDbStep(workflow(), STEP)).not.toThrow()
   })
 
-  it('is a whole-file argument of that step, exactly once, right after the lifecycle history suite', () => {
+  it('is a whole-file argument of that step, exactly once, right after its registered predecessor', () => {
     expect(isSuiteWiredInRealDbStep(workflow(), STEP, DB_SPEC)).toBe(true)
     const args = realDbStepWholeFileArgs(workflow(), STEP)
     expect(args.filter((arg) => arg === DB_SPEC)).toHaveLength(1)
@@ -109,3 +112,23 @@ function sentinelPlacement(source: string): 'top-level' | 'nested' | 'missing' {
   visit(file)
   return found ? 'nested' : 'missing'
 }
+
+
+describe('notification delivery production mounts and administrator gate registration', () => {
+  it('mounts the user sender and administrator verifier in the server', () => {
+    const server = readFileSync(path.join(BACKEND, 'src/index.ts'), 'utf8')
+    expect(server).toContain('this.app.use(meNotificationTestSendRouter())')
+    expect(server).toContain("this.app.use('/api/admin/directory', adminNotificationVerificationsRouter())")
+    expect(server).toContain("import './services/notification-adapter-bootstrap'")
+  })
+
+  it('registers the verification mount, write endpoint and count in the administrator guard', () => {
+    const guard = readFileSync(path.join(BACKEND, 'tests/unit/admin-mounts-write-gate-guard.test.ts'), 'utf8')
+    expect(guard).toContain("source: \"this.app.use('/api/admin/directory', adminNotificationVerificationsRouter())\"")
+    expect(guard).toContain("factory: adminNotificationVerificationsRouter,")
+    expect(guard).toContain("build: () => adminNotificationVerificationsRouter(),")
+    expect(guard).toContain("{ mount: 'admin-notification-verifications', method: 'post', path: '/notification-verification', reg: 'routes/admin-notification-verifications.ts', gate: 'routes/admin-notification-verifications.ts ensurePlatformAdmin', family: P }")
+    expect(guard).toContain('expect(REGISTRY).toHaveLength(81)')
+    expect(guard).toContain("expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(72)")
+  })
+})

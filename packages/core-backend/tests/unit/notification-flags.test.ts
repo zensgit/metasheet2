@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   USER_NOTIFICATION_PREFERENCES_ENABLED,
+  EXTERNAL_NOTIFICATION_DELIVERY_ENABLED,
+  isExternalNotificationDeliveryEnabled,
   isUserNotificationPreferencesEnabled,
 } from '../../src/notifications/notification-flags'
 
@@ -36,5 +38,24 @@ describe('user notification preferences switch', () => {
       if (saved === undefined) delete process.env.USER_NOTIFICATION_PREFERENCES_ENABLED
       else process.env.USER_NOTIFICATION_PREFERENCES_ENABLED = saved
     }
+  })
+})
+
+describe('external notification delivery switch', () => {
+  it('uses only the exact literal true and defaults off', () => {
+    expect(EXTERNAL_NOTIFICATION_DELIVERY_ENABLED).toBe('EXTERNAL_NOTIFICATION_DELIVERY_ENABLED')
+    for (const value of [undefined, '', 'false', 'TRUE', 'True', ' true ', 'true ', ' true', '1', 'yes', 'on']) {
+      expect(isExternalNotificationDeliveryEnabled({ EXTERNAL_NOTIFICATION_DELIVERY_ENABLED: value })).toBe(false)
+    }
+    expect(isExternalNotificationDeliveryEnabled({ EXTERNAL_NOTIFICATION_DELIVERY_ENABLED: 'true' })).toBe(true)
+  })
+
+  it('reads the environment on every call', () => {
+    const env: NodeJS.ProcessEnv = {}
+    expect(isExternalNotificationDeliveryEnabled(env)).toBe(false)
+    env.EXTERNAL_NOTIFICATION_DELIVERY_ENABLED = 'true'
+    expect(isExternalNotificationDeliveryEnabled(env)).toBe(true)
+    env.EXTERNAL_NOTIFICATION_DELIVERY_ENABLED = 'false'
+    expect(isExternalNotificationDeliveryEnabled(env)).toBe(false)
   })
 })

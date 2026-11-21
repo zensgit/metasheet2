@@ -65,6 +65,12 @@ export function respondError(res: Response, error: unknown): void {
   const mapped = mapBusy(error)
   if (isNotificationHttpError(mapped)) {
     if (mapped !== error) logger.error(`notification route unavailable: ${failureToken(error)}`)
+    if (mapped.status === 429 && mapped.code === 'TEST_SEND_RATE_LIMITED') {
+      const retryAfter = mapped.details?.retryAfter
+      if (typeof retryAfter === 'number' && Number.isSafeInteger(retryAfter) && retryAfter > 0) {
+        res.setHeader('Retry-After', String(retryAfter))
+      }
+    }
     res.status(mapped.status).json({ error: { code: mapped.code, ...(mapped.details ?? {}) } })
     return
   }

@@ -469,6 +469,10 @@ export default defineConfig({
       // it, and wired as a WHOLE FILE into the approval real-DB step in plugin-tests.yml (pinned by
       // plugin-tests-parallel-contract.test.mjs and tests/unit/notification-ci-wiring.test.ts).
       'tests/integration/notification-endpoints-preferences.db.test.ts',
+      // Notification verification and test-send ledger: whole-file approval real-DB step in plugin-tests.yml.
+      'tests/integration/notification-verification-test-send.db.test.ts',
+      'tests/integration/notification-verification-production.db.test.ts',
+      'tests/integration/notification-capability-production.db.test.ts',
       // Approval routing multi-source rule against real PostgreSQL: the requester resolver's
       // policy-required refusal, its organisation boundary, its read-only probe and the leaf count
       // statement (db file), and the same rule through the HTTP surface of a real server (api file).

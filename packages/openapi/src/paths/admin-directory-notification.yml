@@ -1,0 +1,62 @@
+paths:
+  /api/admin/directory/notification-verification:
+    post:
+      summary: Verify one connection and record its notification readiness
+      description: >-
+        Platform administrators only. A token check does not send a notification. A send check requires
+        delivery to be enabled and sends one test to the explicit DingTalk recipient. This is the sole
+        notification endpoint that accepts a recipient value; the response never echoes it. A report
+        answers 200 even when a check fails: read result.passed and result.reachedLevel. Evidence reports
+        its level, expiry and current validity. A new check can replace or invalidate earlier evidence.
+        Provider acceptance does not prove receipt or reading.
+      operationId: verifyDirectoryNotificationConnection
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NotificationVerificationRequest' }
+      responses:
+        '200':
+          description: The verification report and the current evidence summary
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationVerificationResult' }
+        '400':
+          description: The integration id is not a UUID (DIRECTORY_INTEGRATION_ID_INVALID), or the verification input is invalid (INVALID_REQUEST)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: The notification surface is switched off, or no such connection belongs to the managed organization (NOT_FOUND)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationError' }
+        '409':
+          description: >-
+            A send check was requested while delivery is disabled (NOTIFICATION_DELIVERY_DISABLED),
+            or the connection cannot support notification verification (VERIFICATION_TUPLE_UNSUPPORTED).
+            An unsupported connection is refused before any token request or send.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationError' }
+        '422':
+          description: Unknown fields or invalid request shape (INVALID_REQUEST)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationError' }
+        '500':
+          description: >-
+            Verification completed but its evidence could not be recorded (VERIFICATION_EVIDENCE_WRITE_FAILED),
+            or a fixed-sentence failure (INTERNAL). A test message may already have been sent when evidence
+            recording fails; retrying a send check can send another message.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationError' }
+        '503':
+          description: NOTIFICATION_BUSY (retry), or NOTIFICATION_SCHEMA_UNAVAILABLE
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationError' }

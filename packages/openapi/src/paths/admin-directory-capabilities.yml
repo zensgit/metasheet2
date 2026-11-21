@@ -8,6 +8,7 @@ paths:
         the response carries no scope value, corp id, application key, environment value or configuration
         value. `effective` is null where the stored state does not govern the capability (legacy path,
         unsupported capability, unregistered provider); null does not mean the capability is off.
+        DingTalk notification is gated and its response never includes a legacy block.
       operationId: getDirectoryIntegrationCapabilities
       security: [ { bearerAuth: [] } ]
       parameters:
@@ -103,6 +104,8 @@ paths:
             The stored revision is not the expected one (DIRECTORY_CAPABILITIES_STALE), or a capability may
             not be turned on (one of the CAPABILITY_ codes; `details.capability` names the capability and,
             for CAPABILITY_PRECONDITION_FAILED, `details.reason` is the fixed code of the precondition).
+            Notification verification failures use verification_missing, verification_stale,
+            verification_invalidated, verification_anchor_changed or verification_fingerprint_changed.
             Nothing was written.
           content:
             application/json:

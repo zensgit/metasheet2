@@ -13,6 +13,7 @@ import {
   getDingTalkWorkNotificationRuntimeStatusFromStore,
   normalizeDingTalkWorkNotificationAgentId,
   readDingTalkMessageConfigFromRuntime,
+  readDingTalkIntegrationScopedMessageTuple,
   saveDingTalkWorkNotificationAgentId,
 } from '../../src/integrations/dingtalk/work-notification-settings'
 
@@ -121,5 +122,24 @@ describe('dingtalk work notification settings', () => {
       'dingtalk',
     ])
     expect(String(updateArgs[1][1])).not.toContain('123456789')
+  })
+})
+
+
+describe('O-1 optional tuple executor', () => {
+  it('uses the supplied transaction only and preserves the legacy no-client resolution', async () => {
+    vi.unstubAllEnvs()
+    dbMocks.query.mockReset()
+    const row = { ...directoryRow({ workNotificationAgentId: '123456789' }), corp_id: 'SyntheticCorp', org_id: 'default' }
+    dbMocks.query.mockResolvedValue({ rows: [row] })
+    const previous = await readDingTalkIntegrationScopedMessageTuple('dir-1')
+    dbMocks.query.mockClear()
+    const client = { query: vi.fn().mockResolvedValue({ rows: [row] }) }
+    const supplied = await readDingTalkIntegrationScopedMessageTuple('dir-1', client)
+    expect(supplied).toEqual(previous)
+    expect(supplied.sourceScope).toEqual({ orgId: 'default', corpId: 'SyntheticCorp', appKey: 'dt-app-key' })
+    expect(client.query).toHaveBeenCalledOnce()
+    expect(client.query.mock.calls[0][1]).toEqual(['dir-1', 'dingtalk'])
+    expect(dbMocks.query).not.toHaveBeenCalled()
   })
 })

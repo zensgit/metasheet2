@@ -17,7 +17,7 @@
  * suffix), and cleanup deletes exactly those rows: capability rows first, then the integrations. The
  * resolver never writes history, so the history table is not touched; the suite asserts it holds no row
  * for those integrations. Positive cases use a test-only mock of the provider registry and the
- * implementation table (production governs every dingtalk capability as legacy); the resolver itself
+ * implementation table (production governs dingtalk directory/login as legacy and notification as gated); the resolver itself
  * has no override.
  */
 import { randomUUID } from 'node:crypto'
@@ -340,13 +340,19 @@ describeIfDatabase('directory integration capability resolver (real database)', 
       expect((await resolveFresh(id, org)).effective).toBe(true)
     })
 
-    it('refuses through the production registry: every dingtalk capability is legacy', async () => {
+    it('uses the production registry: directory/login remain legacy and enabled notification is gated', async () => {
       const { id, org } = await insertIntegration()
       await insertCapabilityRow(id, 'dingtalk', org, { ...enabled('directory'), ...enabled('login'), ...enabled('notification') })
       control.testRegistry = false
-      for (const capability of ['directory', 'login', 'notification'] as const) {
+      for (const capability of ['directory', 'login'] as const) {
         expect(await resolveFresh(id, org, capability), capability).toEqual(refused('governed_by_legacy_path'))
       }
+      // The capability resolver reads capability state; delivery evidence is checked by its consumer.
+      expect(await resolveFresh(id, org, 'notification')).toMatchObject({
+        effective: true, capability: 'notification', integrationId: id, orgId: org,
+        provider: 'dingtalk', revision: 1, orgSource: 'authenticated_tenant',
+        witness: expect.stringMatching(/^[0-9a-f]{64}$/),
+      })
     })
 
     it('refuses a foreign organization exactly as a missing integration', async () => {
