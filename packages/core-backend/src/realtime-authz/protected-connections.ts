@@ -3,7 +3,9 @@
  *
  * In protected mode every connection that presented a credential is registered here before it is
  * served. A connection is `pending` until its bound session has been read as current in the present
- * generation; only then is it `serviceable`. Registered connections are part of every sweep, so a
+ * generation; only then is it `serviceable`. While handshakes are held (admission.ts) a pending
+ * connection is kept, connected and unserved, instead of being refused; the services release it
+ * when the instance returns to its baseline, and a sweep admits it when the instance re-checks. Registered connections are part of every sweep, so a
  * session that ends while its connection is idle is closed without waiting for traffic.
  *
  * Every receive and every delivery goes through `ensureCurrent` or `deliver`, and each of them reads
@@ -41,7 +43,8 @@ export type ConnectionPhase = 'pending' | 'serviceable' | 'anonymous' | 'ended'
 export type CurrentAnswer =
   | { readonly state: 'current'; readonly binding: RealtimeSessionBinding }
   | { readonly state: 'ended' }
-  | { readonly state: 'unavailable' }
+  /** `hold`: handshakes were held when the question was asked, so a request may be kept for later. */
+  | { readonly state: 'unavailable'; readonly hold: boolean }
 
 export interface ConnectionHooks {
   /** The connection was admitted (first time or again after a generation change). */
@@ -61,6 +64,8 @@ interface ConnectionState {
   hooks: ConnectionHooks
   /** Accepted before protection became active; it is held, not refused, while traffic is suspended. */
   established: boolean
+  /** Counted once as held; a held connection is not asked about again on every pass. */
+  heldCounted: boolean
 }
 
 export interface DeliveryOptions {
@@ -144,6 +149,11 @@ export class ProtectedConnections {
     return this.states.size
   }
 
+  /** Counts a handshake that is kept waiting outside this registry (a namespace handshake). */
+  noteHeldHandshake(): void {
+    this.diagnostics.recordEvent('handshake-held')
+  }
+
   phaseOf(socket: ProtectedSocket): ConnectionPhase | undefined {
     return this.states.get(socket)?.phase
   }
@@ -172,7 +182,7 @@ export class ProtectedConnections {
     if (this.states.has(socket)) return
     this.states.set(socket, {
       socket, phase: 'pending', binding: null, generation: -1, admitting: null, expiryTimer: null, hooks,
-      established: options.established === true,
+      established: options.established === true, heldCounted: false,
     })
   }
 
@@ -208,6 +218,14 @@ export class ProtectedConnections {
     if (state.established && !state.binding && this.protection.decision().established === 'suspend') {
       return Promise.resolve(null)
     }
+    if (!state.binding && this.protection.decision().ordinaryHandshake === 'hold') {
+      // Held: kept as it is and served nothing. Its credential is not read while nothing can be decided.
+      if (!state.heldCounted) {
+        state.heldCounted = true
+        this.diagnostics.recordEvent('handshake-held')
+      }
+      return Promise.resolve(null)
+    }
     state.admitting = (async () => {
       try {
         const result = await this.protection.admit(tokenOf(socket))
@@ -218,6 +236,8 @@ export class ProtectedConnections {
             state.binding = null
             return null
           }
+          // The decision changed to holding while this was being read: kept, not refused.
+          if (result.refusal.kind === 'unavailable' && result.refusal.hold === true) return null
           this.end(socket, endedPayload(result.refusal))
           return null
         }
@@ -260,6 +280,9 @@ export class ProtectedConnections {
    *                  served on this answer, and nothing about the session may be concluded from it.
    */
   async checkCurrent(socket: ProtectedSocket): Promise<CurrentAnswer> {
+    // Read before anything is awaited: whether a request may be kept is decided by the state the
+    // question was asked in, not by the state the instance has moved to when the answer is there.
+    const hold = this.protection.decision().ordinaryHandshake === 'hold'
     const state = this.states.get(socket)
     if (!state || state.phase === 'ended' || state.phase === 'anonymous') return { state: 'ended' }
     if (state.phase === 'pending' || state.generation !== this.protection.generation() || !state.binding) {
@@ -267,7 +290,7 @@ export class ProtectedConnections {
       if (admitted) return { state: 'current', binding: admitted }
       const after = this.states.get(socket)
       if (!after || after !== state || after.phase === 'ended' || after.phase === 'anonymous') return { state: 'ended' }
-      return { state: 'unavailable' }
+      return { state: 'unavailable', hold }
     }
     const binding = state.binding
     const result = await this.protection.authorize([binding])
@@ -279,7 +302,7 @@ export class ProtectedConnections {
     }
     if (!result.serving || result.generation !== this.protection.generation() || verdict?.state !== 'allowed' || !socket.connected) {
       this.diagnostics.recordEvent('inbound-withheld')
-      return { state: 'unavailable' }
+      return { state: 'unavailable', hold }
     }
     return { state: 'current', binding }
   }

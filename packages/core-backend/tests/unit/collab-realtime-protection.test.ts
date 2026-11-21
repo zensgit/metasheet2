@@ -711,17 +711,25 @@ describe('admission rows on a running instance', () => {
     await s.harness.protection.refresh()
     expect(s.harness.protection.decision()).toMatchObject({ row: 'undetermined', established: 'suspend' })
     await s.eventBus.emit('spreadsheet.cell.updated', { spreadsheetId: 'sheet-1', n: 1 })
-    const refused = client(s, 'token:b')
-    expect(await once<SessionEndedPayload>(refused, SESSION_ENDED_EVENT)).toEqual({ code: 'REALTIME_UNAVAILABLE', retry: true })
+    // Switch off: a connection that arrives meanwhile is kept, unserved, and is told nothing.
+    const late = client(s, 'token:b')
+    const lateTold: string[] = []
+    late.onAny((event: string) => lateTold.push(event))
+    await once(late, 'connect')
     await settle()
     expect(ops).toEqual([])
     expect(a.connected).toBe(true)
+    expect(late.connected).toBe(true)
+    expect(lateTold).toEqual([])
+    expect(await s.collab.getRoomMembers(buildAuthenticatedUserRoom('b'))).toEqual([])
 
     s.harness.facts.installation = healthy
     await until(() => s.harness.protection.decision().row === 'off-baseline', 2000, 'automatic recovery')
     await s.eventBus.emit('spreadsheet.cell.updated', { spreadsheetId: 'sheet-1', n: 2 })
     await until(() => ops.length === 1)
     expect(ops.map((op) => op.data.n)).toEqual([2])
+    await until(async () => (await s.collab.getRoomMembers(buildAuthenticatedUserRoom('b'))).includes('b'), 2000, 'the kept connection to be admitted')
+    expect(late.connected).toBe(true)
   })
 
   it('the configuration conflict alone suspends nothing and is visible in the diagnostics', async () => {

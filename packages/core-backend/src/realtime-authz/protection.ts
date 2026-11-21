@@ -37,7 +37,7 @@ export type RealtimeMode = 'baseline' | 'protected'
 export type AdmitRefusal =
   | { readonly kind: 'no-credential' }
   | { readonly kind: 'denied'; readonly code: 'SESSION_NOT_CURRENT' }
-  | { readonly kind: 'unavailable'; readonly code: 'REALTIME_UNAVAILABLE' }
+  | { readonly kind: 'unavailable'; readonly code: 'REALTIME_UNAVAILABLE'; readonly hold?: boolean }
 
 export type AdmitResult =
   | { readonly ok: true; readonly binding: RealtimeSessionBinding; readonly generation: number }
@@ -243,6 +243,11 @@ export function createRealtimeProtection(deps: RealtimeProtectionDeps): Realtime
     ok: false,
     refusal: Object.freeze({ kind: 'unavailable', code: 'REALTIME_UNAVAILABLE' }),
   })
+  /** Held, not refused: the caller keeps the connection unserved and asks again after the next decision. */
+  const held: AdmitResult = Object.freeze({
+    ok: false,
+    refusal: Object.freeze({ kind: 'unavailable', code: 'REALTIME_UNAVAILABLE', hold: true }),
+  })
   const notCurrent: AdmitResult = Object.freeze({
     ok: false,
     refusal: Object.freeze({ kind: 'denied', code: 'SESSION_NOT_CURRENT' }),
@@ -257,6 +262,9 @@ export function createRealtimeProtection(deps: RealtimeProtectionDeps): Realtime
       if (typeof token !== 'string' || token.length === 0) return { ok: false, refusal: { kind: 'no-credential' } }
       const startedIn = generation
       const decision = current
+      // While handshakes are held nothing is concluded from the credential, not even that it binds:
+      // the row a later read decides judges it.
+      if (decision.ordinaryHandshake === 'hold' && decision.strictHandshake === 'hold') return held
       let binding: RealtimeSessionBinding | null
       try {
         binding = deps.bindCredential(token)

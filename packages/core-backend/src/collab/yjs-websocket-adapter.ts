@@ -66,8 +66,15 @@ export interface YjsWebSocketAdapterOptions {
   heldUpdateMaxQueued?: number
   /** How long the attribution of a closed connection is kept when no write of it is waiting. */
   contributorRetentionMs?: number
+  /** How long a namespace handshake may wait while handshakes are held; then it is refused as transient. */
+  heldHandshakeMaxMs?: number
+  /** How many namespace handshakes may wait at once; further ones are refused as transient. */
+  heldHandshakeMaxWaiting?: number
 }
 
+/** Below the time after which the transport closes a client that has joined no namespace. */
+export const DEFAULT_HELD_HANDSHAKE_MAX_MS = 20_000
+export const DEFAULT_HELD_HANDSHAKE_MAX_WAITING = 1_000
 export const DEFAULT_HELD_UPDATE_RETRY_MS = 250
 export const DEFAULT_HELD_UPDATE_MAX_MS = 30_000
 export const DEFAULT_HELD_UPDATE_MAX_QUEUED = 512
@@ -160,6 +167,10 @@ export class YjsWebSocketAdapter {
   private readonly heldUpdateMaxMs: number
   private readonly heldUpdateMaxQueued: number
   private readonly contributorRetentionMs: number
+  private readonly heldHandshakeMaxMs: number
+  private readonly heldHandshakeMaxWaiting: number
+  /** Namespace handshakes waiting for the next decision; each is settled exactly once. */
+  private readonly heldHandshakes = new Set<(outcome: 'decided' | 'expired' | 'gone') => void>()
 
   /** Per-socket verified userId (from JWT, not from client query) */
   private socketUserId = new Map<string, string>()
@@ -175,6 +186,8 @@ export class YjsWebSocketAdapter {
     this.heldUpdateMaxMs = options.heldUpdateMaxMs ?? DEFAULT_HELD_UPDATE_MAX_MS
     this.heldUpdateMaxQueued = options.heldUpdateMaxQueued ?? DEFAULT_HELD_UPDATE_MAX_QUEUED
     this.contributorRetentionMs = options.contributorRetentionMs ?? DEFAULT_CONTRIBUTOR_RETENTION_MS
+    this.heldHandshakeMaxMs = options.heldHandshakeMaxMs ?? DEFAULT_HELD_HANDSHAKE_MAX_MS
+    this.heldHandshakeMaxWaiting = options.heldHandshakeMaxWaiting ?? DEFAULT_HELD_HANDSHAKE_MAX_WAITING
   }
 
   /** Attach bridge for Y.Text → RecordWriteService patching. */
@@ -202,6 +215,10 @@ export class YjsWebSocketAdapter {
     this.connections = connections
     connections.onSweep(() => this.sweepSubscriptions())
     protection.subscribe((event) => {
+      if (event.type === 'decision' && event.decision.ordinaryHandshake !== 'hold') {
+        // Handshakes are no longer held: every waiting one goes on and is judged by the new decision.
+        for (const settle of [...this.heldHandshakes]) settle('decided')
+      }
       if (event.type !== 'decision' || !this.namespace || !this.connections || !this.isProtected()) return
       for (const socket of this.namespace.sockets.values()) this.adoptSocket(socket, true)
       if (event.decision.established === 'terminate') {
@@ -214,6 +231,39 @@ export class YjsWebSocketAdapter {
 
   private isProtected(): boolean {
     return this.connections !== null && this.protection.mode() !== 'baseline'
+  }
+
+  private handshakesHeld(): boolean {
+    return this.isProtected() && this.protection.decision().ordinaryHandshake === 'hold'
+  }
+
+  /** How many namespace handshakes are waiting right now. */
+  heldHandshakeCount(): number {
+    return this.heldHandshakes.size
+  }
+
+  /**
+   * Keeps a namespace handshake waiting while handshakes are held. The connection is not a member
+   * of the namespace meanwhile, so nothing can be served to it. Resolves `decided` when a decision
+   * that no longer holds handshakes is there, `expired` after the bound or when too many are
+   * waiting, and `gone` when the client went away first.
+   */
+  private waitWhileHandshakesHeld(socket: Socket, remainingMs: number): Promise<'decided' | 'expired' | 'gone'> {
+    if (remainingMs <= 0 || this.heldHandshakes.size >= this.heldHandshakeMaxWaiting) return Promise.resolve('expired')
+    return new Promise((resolve) => {
+      const conn = (socket as unknown as { conn?: { once?: (event: string, handler: () => void) => void; off?: (event: string, handler: () => void) => void } }).conn
+      const onClose = (): void => settle('gone')
+      const timer = setTimeout(() => settle('expired'), remainingMs)
+      timer.unref?.()
+      const settle = (outcome: 'decided' | 'expired' | 'gone'): void => {
+        if (!this.heldHandshakes.delete(settle)) return
+        clearTimeout(timer)
+        conn?.off?.('close', onClose)
+        resolve(outcome)
+      }
+      this.heldHandshakes.add(settle)
+      conn?.once?.('close', onClose)
+    })
   }
 
   /**
@@ -639,6 +689,21 @@ export class YjsWebSocketAdapter {
 
     // Verify JWT at connection time — reject unauthenticated sockets immediately
     nsp.use(async (socket, next) => {
+      const transient = (): Error & { data?: unknown } => {
+        const error = new Error('UNAVAILABLE: realtime unavailable') as Error & { data?: unknown }
+        error.data = { code: 'REALTIME_UNAVAILABLE', retry: true }
+        return error
+      }
+      if (this.handshakesHeld()) {
+        // Held: the handshake waits, unserved, and is judged by whatever is decided next.
+        this.connections?.noteHeldHandshake()
+        const deadline = Date.now() + this.heldHandshakeMaxMs
+        while (this.handshakesHeld()) {
+          const outcome = await this.waitWhileHandshakesHeld(socket as Socket, deadline - Date.now())
+          if (outcome === 'gone') return
+          if (outcome === 'expired') return next(transient())
+        }
+      }
       if (this.isProtected() && this.connections) {
         // Protected: the handshake binds the connection to its session and reads it as current.
         const token = (socket.handshake.auth as { token?: unknown })?.token

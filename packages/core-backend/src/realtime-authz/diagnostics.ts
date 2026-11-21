@@ -10,6 +10,7 @@ import type { AdmissionDecision, AdmissionNotice, AdmissionRow } from './admissi
 export type RealtimeDiagnosticEvent =
   | 'authority-read-unknown'
   | 'handshake-refused'
+  | 'handshake-held'
   | 'connection-terminated'
   | 'delivery-withheld'
   | 'inbound-withheld'

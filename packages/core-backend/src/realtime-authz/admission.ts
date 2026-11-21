@@ -8,8 +8,9 @@
  *
  * Precedence, highest first:
  *   1. an installation generation that cannot be decided, or revalidation ON without a ready
- *      listener: protected handshakes are refused and established protected traffic is suspended
- *      until a later read succeeds;
+ *      listener: established protected traffic is suspended until a later read succeeds. With
+ *      revalidation ON a protected handshake is refused. With revalidation OFF it is held: the
+ *      connection is kept and served nothing, and it is admitted by the row a later read decides;
  *   2. revalidation OFF while the database carries a committed login scope or any enablement
  *      purpose: protected handshakes are refused and established protected connections end;
  *   3. revalidation OFF, both generations decidable, no scope and no enablement purpose: baseline;
@@ -39,7 +40,11 @@ export type AdmissionRow =
   | 'on-without-scope'
   | 'on-with-scope'
 
-export type HandshakePolicy = 'baseline' | 'revalidate' | 'refuse'
+/**
+ * `hold`: the connection is neither refused nor served. It waits, connected and unserved, for the
+ * next decision; nothing about its credential is concluded meanwhile.
+ */
+export type HandshakePolicy = 'baseline' | 'revalidate' | 'refuse' | 'hold'
 export type EstablishedPolicy = 'baseline' | 'revalidate' | 'suspend' | 'terminate'
 
 export type AdmissionNotice =
@@ -82,10 +87,13 @@ export function decideRealtimeAdmission(input: AdmissionInput): AdmissionDecisio
   const notices = configurationNotices(input)
 
   if (facts.strictScope.state === 'unknown' || facts.enablement.state === 'unknown') {
+    // Revalidation OFF: an instance that would run the baseline once the read answers does not
+    // turn new connections away for one read that did not answer; it holds them unserved.
+    const handshake: HandshakePolicy = revalidationOn ? 'refuse' : 'hold'
     return Object.freeze({
       row: 'undetermined',
-      ordinaryHandshake: 'refuse',
-      strictHandshake: 'refuse',
+      ordinaryHandshake: handshake,
+      strictHandshake: handshake,
       established: 'suspend',
       listenerRequired: revalidationOn,
       notices: Object.freeze(['INSTALLATION_UNDETERMINED', ...notices] as AdmissionNotice[]),

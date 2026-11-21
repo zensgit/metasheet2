@@ -62,7 +62,17 @@ export interface ConstrainedPluginSocket {
   disconnect(close?: boolean): void
 }
 
+/** How many room requests of one connection may wait while they cannot be decided. */
+export const MAX_HELD_JOINS_PER_CONNECTION = 32
+
 export class CollabService {
+  /**
+   * Room requests that could not be decided while handshakes are held, per connection and per room,
+   * in the order they were last asked. They are answered when the instance returns to its baseline.
+   */
+  private readonly heldJoins = new Map<Socket, Map<string, () => void>>()
+  /** Connections accepted while protected that have not had their connect-time user room yet. */
+  private readonly unjoinedSockets = new Set<Socket>()
   private io: SocketServer | null = null
   private sheetPresenceBySheet = new Map<string, Map<string, Set<string>>>()
   private sheetMembershipBySocket = new Map<string, Set<string>>()
@@ -124,6 +134,12 @@ export class CollabService {
   }
 
   private onProtectionEvent(event: ProtectionEvent): void {
+    if (event.type === 'decision' && this.io && this.connections && !this.isProtected()) {
+      // Back at the baseline: connections and room requests that were held are served by the
+      // baseline path now, exactly as if they had arrived at this moment.
+      this.releaseHeld()
+      return
+    }
     if (event.type !== 'decision' || !this.io || !this.connections || !this.isProtected()) return
     // Connections accepted before protection became active are registered now; none of them is
     // served again until its session has been read as current.
@@ -145,7 +161,63 @@ export class CollabService {
     }, { established })
   }
 
+  /**
+   * Keeps a room request that cannot be decided while handshakes are held. Nothing is joined and
+   * nothing is answered now; the request is asked again when the instance is back at its baseline.
+   * False when the connection already holds as many requests as it may: the caller answers then.
+   */
+  private holdJoin(socket: Socket, key: string, replay: () => void): boolean {
+    let held = this.heldJoins.get(socket)
+    if (!held) {
+      held = new Map()
+      this.heldJoins.set(socket, held)
+    }
+    if (!held.has(key) && held.size >= MAX_HELD_JOINS_PER_CONNECTION) return false
+    held.delete(key)
+    held.set(key, replay)
+    // The instance may have returned to its baseline while this request was being answered.
+    if (!this.isProtected()) this.releaseHeld()
+    return true
+  }
+
+  private dropHeldJoin(socket: Socket, key: string): void {
+    const held = this.heldJoins.get(socket)
+    if (!held) return
+    held.delete(key)
+    if (held.size === 0) this.heldJoins.delete(socket)
+  }
+
+  private releaseHeld(): void {
+    if (this.isProtected()) return
+    const unjoined = [...this.unjoinedSockets]
+    this.unjoinedSockets.clear()
+    const held = [...this.heldJoins]
+    this.heldJoins.clear()
+    for (const socket of unjoined) {
+      if (socket.connected) void this.joinAuthenticatedUserRoom(socket)
+    }
+    for (const [socket, joins] of held) {
+      if (!socket.connected) continue
+      for (const replay of joins.values()) replay()
+    }
+  }
+
+  /**
+   * Who a connection is for one inbound request: a user, nobody, or not answerable right now.
+   * `held` is set when it is not answerable and handshakes were held when the request arrived.
+   */
+  private async resolveIdentity(socket: Socket): Promise<{ userId: string | null; held: boolean }> {
+    if (this.isProtected() && this.connections) {
+      this.adoptSocket(socket)
+      const answer = await this.connections.checkCurrent(socket)
+      if (answer.state === 'current') return { userId: answer.binding.userId, held: false }
+      return { userId: null, held: answer.state === 'unavailable' && answer.hold && socket.connected }
+    }
+    return { userId: await this.resolveTrustedUserId(socket), held: false }
+  }
+
   private onSocketAdmitted(socket: Socket, binding: RealtimeSessionBinding): void {
+    this.unjoinedSockets.delete(socket)
     if (!socket.connected) return
     this.getSocketData(socket).trustedUserId = binding.userId
     const userRoom = buildAuthenticatedUserRoom(binding.userId)
@@ -483,10 +555,11 @@ export class CollabService {
     const sheetId = this.normalizeSheetId(payload)
     if (!sheetId) return
 
-    const userId = await this.resolveTrustedUserId(socket)
+    const { userId, held } = await this.resolveIdentity(socket)
     if (!socket.connected) return
     if (!userId) {
-      this.denySheetJoin(socket, sheetId, this.isProtected() ? this.protectedDenyReason(socket) : 'unauthorized')
+      if (held && this.holdJoin(socket, `sheet:${sheetId}`, () => void this.handleJoinSheet(socket, payload))) return
+      this.denySheetJoin(socket, sheetId, held ? 'unavailable' : this.isProtected() ? this.protectedDenyReason(socket) : 'unauthorized')
       return
     }
 
@@ -515,11 +588,17 @@ export class CollabService {
   // Shared auth+read gate for comment rooms that expose comment bodies. Record rooms require row-level
   // read access; sheet-wide rooms are delegated to `commentRoomAuthChecker` so row-deny-enabled sheets can
   // fail closed instead of receiving unfilterable full-comment broadcasts.
-  private async authorizeCommentRoomAccess(socket: Socket, spreadsheetId: string, rowId?: string): Promise<boolean> {
-    const userId = await this.resolveTrustedUserId(socket)
+  private async authorizeCommentRoomAccess(
+    socket: Socket,
+    spreadsheetId: string,
+    rowId: string | undefined,
+    whenHeld: { key: string; replay: () => void },
+  ): Promise<boolean> {
+    const { userId, held } = await this.resolveIdentity(socket)
     if (!socket.connected) return false
     if (!userId) {
-      this.denyCommentJoin(socket, spreadsheetId, this.isProtected() ? this.protectedDenyReason(socket) : 'unauthorized')
+      if (held && this.holdJoin(socket, whenHeld.key, whenHeld.replay)) return false
+      this.denyCommentJoin(socket, spreadsheetId, held ? 'unavailable' : this.isProtected() ? this.protectedDenyReason(socket) : 'unauthorized')
       return false
     }
     let allowed = false
@@ -548,7 +627,11 @@ export class CollabService {
   private async handleJoinCommentRecord(socket: Socket, payload: unknown): Promise<void> {
     const scope = this.parseCommentRecordScope(payload)
     if (!scope) return
-    if (!(await this.authorizeCommentRoomAccess(socket, scope.spreadsheetId, scope.rowId))) return
+    const whenHeld = {
+      key: `comment-record:${scope.spreadsheetId}:${scope.rowId}`,
+      replay: () => void this.handleJoinCommentRecord(socket, payload),
+    }
+    if (!(await this.authorizeCommentRoomAccess(socket, scope.spreadsheetId, scope.rowId, whenHeld))) return
     if (!socket.connected) return
     const room = buildCommentRecordRoom(scope)
     if (this.isProtected()) this.roomScopes.set(room, { kind: 'comment', spreadsheetId: scope.spreadsheetId, rowId: scope.rowId })
@@ -560,7 +643,8 @@ export class CollabService {
   private async handleJoinCommentSheet(socket: Socket, payload: unknown): Promise<void> {
     const spreadsheetId = this.parseSheetScope(payload)
     if (!spreadsheetId) return
-    if (!(await this.authorizeCommentRoomAccess(socket, spreadsheetId))) return
+    const whenHeld = { key: `comment-sheet:${spreadsheetId}`, replay: () => void this.handleJoinCommentSheet(socket, payload) }
+    if (!(await this.authorizeCommentRoomAccess(socket, spreadsheetId, undefined, whenHeld))) return
     if (!socket.connected) return
     const room = buildCommentSheetRoom({ spreadsheetId })
     socket.join(room)
@@ -571,10 +655,11 @@ export class CollabService {
     // The comment inbox is a cross-sheet activity stream (metadata: ids/authorId, no bodies). It requires
     // a verified identity and joins a per-user room; publishers still re-check target read access before
     // emitting to that room.
-    const userId = await this.resolveTrustedUserId(socket)
+    const { userId, held } = await this.resolveIdentity(socket)
     if (!socket.connected) return
     if (!userId) {
-      this.denyCommentJoin(socket, 'comment-inbox', this.isProtected() ? this.protectedDenyReason(socket) : 'unauthorized')
+      if (held && this.holdJoin(socket, 'comment-inbox', () => void this.handleJoinCommentInbox(socket))) return
+      this.denyCommentJoin(socket, 'comment-inbox', held ? 'unavailable' : this.isProtected() ? this.protectedDenyReason(socket) : 'unauthorized')
       return
     }
     const room = buildCommentInboxRoom({ userId })
@@ -619,6 +704,7 @@ export class CollabService {
       this.logger.info(`WebSocket client connected: ${socket.id}`)
       if (this.isProtected() && this.connections) {
         // Protected: registered first, served only after its session has been read as current.
+        this.unjoinedSockets.add(socket)
         this.adoptSocket(socket)
         void this.connections.admit(socket)
       } else {
@@ -637,6 +723,8 @@ export class CollabService {
         }
         this.untrackCommentInboxMembership(socket.id)
         this.connections?.unregister(socket)
+        this.heldJoins.delete(socket)
+        this.unjoinedSockets.delete(socket)
         this.rawPluginSockets.delete(socket)
         this.logger.info(`WebSocket client disconnected: ${socket.id}`)
       })
@@ -648,6 +736,7 @@ export class CollabService {
       socket.on('leave-sheet', (payload: unknown) => {
         const sheetId = this.normalizeSheetId(payload)
         if (!sheetId) return
+        this.dropHeldJoin(socket, `sheet:${sheetId}`)
         const room = this.buildSheetRoom(sheetId)
         const userId = this.getTrustedUserId(socket)
         if (userId) this.broadcastCursor(socket, sheetId, userId, null, null)
@@ -685,6 +774,7 @@ export class CollabService {
       socket.on('leave-comment-record', (payload: unknown) => {
         const scope = this.parseCommentRecordScope(payload)
         if (!scope) return
+        this.dropHeldJoin(socket, `comment-record:${scope.spreadsheetId}:${scope.rowId}`)
         const room = buildCommentRecordRoom(scope)
         socket.leave(room)
         this.logger.info(`Client ${socket.id} left ${room}`)
@@ -697,6 +787,7 @@ export class CollabService {
       socket.on('leave-comment-sheet', (payload: unknown) => {
         const spreadsheetId = this.parseSheetScope(payload)
         if (!spreadsheetId) return
+        this.dropHeldJoin(socket, `comment-sheet:${spreadsheetId}`)
         const room = buildCommentSheetRoom({ spreadsheetId })
         socket.leave(room)
         this.logger.info(`Client ${socket.id} left ${room}`)
@@ -707,6 +798,7 @@ export class CollabService {
       })
 
       socket.on('leave-comment-inbox', () => {
+        this.dropHeldJoin(socket, 'comment-inbox')
         const userId = this.untrackCommentInboxMembership(socket.id) ?? this.getTrustedUserId(socket)
         if (!userId) return
         const room = buildCommentInboxRoom({ userId })

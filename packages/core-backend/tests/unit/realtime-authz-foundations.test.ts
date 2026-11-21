@@ -412,7 +412,7 @@ describe('realtime admission table', () => {
     }
   })
 
-  it('row: a generation that cannot be decided -> handshakes refused and established traffic suspended, whatever the switches say', () => {
+  it('row: a generation that cannot be decided -> established traffic suspended whatever the switches say; handshakes refused with the switch on, held with it off', () => {
     const cases: Array<[StrictScopeGeneration, EnablementGeneration]> = [
       [UNKNOWN_SCOPE, NO_RECORD], [NEVER, UNKNOWN_RECORD], [SCOPED, UNKNOWN_RECORD], [UNKNOWN_SCOPE, UNKNOWN_RECORD],
     ]
@@ -420,7 +420,8 @@ describe('realtime admission table', () => {
       for (const revalidation of ['on', 'off', 'near-true'] as const) {
         for (const listener of ['not-started', 'ready', 'not-ready'] as const) {
           const decision = decideRealtimeAdmission(input({ strictScope, enablement, revalidation, listener }))
-          expect(decision).toMatchObject({ row: 'undetermined', ordinaryHandshake: 'refuse', strictHandshake: 'refuse', established: 'suspend' })
+          const handshake = revalidation === 'on' ? 'refuse' : 'hold'
+          expect(decision).toMatchObject({ row: 'undetermined', ordinaryHandshake: handshake, strictHandshake: handshake, established: 'suspend' })
           expect(decision.notices).toContain('INSTALLATION_UNDETERMINED')
           expect(decision.listenerRequired).toBe(revalidation === 'on')
         }
