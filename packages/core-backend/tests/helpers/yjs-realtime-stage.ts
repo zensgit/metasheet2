@@ -45,6 +45,19 @@ export interface World {
   readFailsFor: Set<string>
   /** When set, the next permission read waits for it before answering. */
   readGate: Promise<void> | null
+  /** When set, every permission read of these users waits for it; the reads of the others answer. */
+  readGateFor: Map<string, Promise<void>>
+  /**
+   * The field-write check of these users answers 'unknown' the way the start-up closure does when
+   * its own read fails: it returns the value, it does not throw. Their record access check answers.
+   */
+  fieldCheckUnknownFor: Set<string>
+  /** Every permission read, by user, in order: what a check costs in reads. */
+  permissionReads: string[]
+  /** When true the record write fails. */
+  patchFails: boolean
+  /** When true the write-input builder answers that there is nothing to write. */
+  builderReturnsNothing: boolean
   storeDelay: Promise<void> | null
   loadDelay: Promise<void> | null
   patches: Array<{ actorId: string; fields: Record<string, unknown> }>
@@ -75,6 +88,11 @@ export function createWorld(): World {
     readFails: false,
     readFailsFor: new Set(),
     readGate: null,
+    readGateFor: new Map(),
+    fieldCheckUnknownFor: new Set(),
+    permissionReads: [],
+    patchFails: false,
+    builderReturnsNothing: false,
     storeDelay: null,
     loadDelay: null,
     patches: [],
@@ -129,6 +147,9 @@ export interface StageOptions {
 }
 
 async function permissionRead(world: World, userId: string): Promise<void> {
+  world.permissionReads.push(userId)
+  const own = world.readGateFor.get(userId)
+  if (own) await own
   const gate = world.readGate
   if (gate) {
     world.readGate = null
@@ -143,6 +164,7 @@ export async function stage(options: StageOptions = {}): Promise<Stage> {
   const adapter = new (YjsWebSocketAdapter as unknown as new (sync: YjsSyncService, options?: Record<string, number>) => YjsWebSocketAdapter)(sync, options.adapterOptions)
   const recordWriter = {
     async patchRecords(input: { actorId: string; changesByRecord: Map<string, Array<{ fieldId: string; value: unknown }>> }) {
+      if (world.patchFails) throw new Error('record write failed')
       const updated: string[] = []
       for (const [recordId, changes] of input.changesByRecord) {
         const fields = Object.fromEntries(changes.map((change) => [change.fieldId, change.value]))
@@ -157,6 +179,7 @@ export async function stage(options: StageOptions = {}): Promise<Stage> {
     sync,
     recordWriter as never,
     options.wiring ? (options.wiring.getWriteInput as never) : ((async (recordId: string, patch: Record<string, unknown>, actorId: string, _allActorIds: string[], contributions?: YjsContribution[]) => {
+      if (world.builderReturnsNothing) return null as never
       // The gate of the write-input builder: every field is checked against each actor that changed
       // it; without contribution records, against the primary actor of the merged write.
       const writers = new Map<string, Set<string>>()
@@ -183,6 +206,7 @@ export async function stage(options: StageOptions = {}): Promise<Stage> {
     }
   })
   adapter.setFieldWriteChecker(async (userId, _recordId, fieldIds) => {
+    if (world.fieldCheckUnknownFor.has(userId)) return 'unknown'
     await permissionRead(world, userId)
     return !fieldIds.some((fieldId) => world.forbiddenFields.get(userId)?.has(fieldId))
   })
