@@ -6,6 +6,7 @@ import { enqueueRecordEventIfDurable, emitRecordEventIfLegacy } from './automati
 import type { TransactionalQueryable } from './pg-transaction-guard'
 import type { MultitableCapabilities } from './access'
 import {
+  bindOwnDraftAttachments,
   ensureAttachmentIdsExist as ensureAttachmentIdsExistShared,
   normalizeAttachmentIds as normalizeAttachmentIdsShared,
 } from './attachment-service'
@@ -744,6 +745,8 @@ export class RecordService {
 
       const fieldById = buildCreateFieldGuardMap(fieldRes.rows)
       const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
+      // Attachment fields as stored; the writer's own draft uploads among them are bound after the INSERT.
+      const attachmentWrites = new Map<string, string[]>()
 
       // Native person (人员): #16 per-field allowed-assignee resolver (sheet members ∩ the field's
       // restrictToMemberGroupIds) — shared with RecordWriteService so REST create enforces the group
@@ -887,6 +890,7 @@ export class RecordService {
             throw new RecordValidationError(attachmentError, 'VALIDATION_ERROR', fieldId)
           }
           patch[fieldId] = ids
+          attachmentWrites.set(fieldId, ids)
           continue
         }
 
@@ -1000,6 +1004,12 @@ export class RecordService {
             }
           }
         }
+      }
+
+      // A file uploaded before this record existed is a draft (`record_id` NULL) that the draft sweep deletes after
+      // the retention time; the writer's own drafts stored here are bound to this record (bindOwnDraftAttachments).
+      for (const [fieldId, ids] of attachmentWrites.entries()) {
+        await bindOwnDraftAttachments({ query, sheetId, recordId, fieldId, attachmentIds: ids, actorId })
       }
 
       const version = Number((inserted.rows[0] as { version?: unknown } | undefined)?.version ?? 1)
@@ -1649,6 +1659,8 @@ export class RecordService {
     const fieldErrors: Record<string, string> = {}
     const patch: Record<string, unknown> = {}
     const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
+    // Attachment fields as stored; the writer's own draft uploads among them are bound in the write's transaction.
+    const attachmentWrites = new Map<string, string[]>()
 
     // Native person (人员): #16 per-field allowed-assignee resolver (sheet members ∩ the field's
     // restrictToMemberGroupIds) — shared with RecordWriteService so REST patch enforces the group
@@ -1756,6 +1768,7 @@ export class RecordService {
           continue
         }
         patch[fieldId] = ids
+        attachmentWrites.set(fieldId, ids)
         continue
       }
       if (field.type === 'formula') {
@@ -1972,6 +1985,12 @@ export class RecordService {
         if (ids.length === 0) {
           await query('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [fieldId, recordId])
         }
+      }
+
+      // The writer's own draft uploads (stored with no record) written into this record are bound to it, so the
+      // draft sweep does not delete them (bindOwnDraftAttachments).
+      for (const [fieldId, ids] of attachmentWrites.entries()) {
+        await bindOwnDraftAttachments({ query, sheetId, recordId, fieldId, attachmentIds: ids, actorId: patchActorId })
       }
 
       // OAPI-2a §6: committed token-write audit INSIDE the patch txn (fail-closed); fires on a successful
