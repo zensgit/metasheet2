@@ -165,7 +165,13 @@ function assertParallelWorkflow(doc) {
   assert.equal(digest(metadata), baseline.workflowMetadataSha256, 'Triggers, concurrency and workflow environment stay unchanged')
   assert.deepEqual(Object.keys(doc.jobs).sort(), [...REQUIRED_SUITES, 'test', ...Object.keys(baseline.otherJobs)].sort())
   for (const [id, hash] of Object.entries(baseline.otherJobs)) {
-    assert.equal(digest(doc.jobs[id]), hash, `${id} remains unchanged`)
+    // The LCOV repair updates only the optional coverage job. Keep the historical fixture intact.
+    if (id === 'coverage') {
+      assert.equal(digest(doc.jobs[id]), '3aca32e51ebbe6189ef6b0267d7e8036b77e8c907197743f3da79aa7dad828e6',
+        'coverage must run the V8 reporter and upload the nonempty LCOV artifact')
+    } else {
+      assert.equal(digest(doc.jobs[id]), hash, `${id} remains unchanged`)
+    }
   }
   for (const suite of REQUIRED_SUITES) {
     const job = requiredSuiteJob(doc, suite)
@@ -268,6 +274,10 @@ function assertParallelWorkflow(doc) {
         const capabilityResolveAddition = '  tests/integration/directory-integration-capability-resolve.db.test.ts \\\n'
         assert.equal(step.run.split(capabilityResolveAddition).length - 1, 1, 'Directory integration capability resolver DB suite must run exactly once')
         assert.ok(step.run.includes(goldenParityAddition + capabilityResolveAddition + capabilitiesAddition), 'Keep the capability resolver suite between the directory sync characterization suite and the directory integration capabilities suite')
+        // Exactly once, at any position in this step: no neighbour is asserted, so a later addition
+        // next to it does not have to change this check.
+        const capabilitiesPatchAddition = '  tests/integration/directory-integration-capabilities-patch.db.test.ts \\\n'
+        assert.equal(step.run.split(capabilitiesPatchAddition).length - 1, 1, 'Directory integration capability PATCH DB suite must run exactly once')
         const providerEvidenceAddition = '  tests/integration/directory-deprovision-provider-evidence.db.test.ts \\\n'
         assert.equal(step.run.split(providerEvidenceAddition).length - 1, 1, 'Deprovision provider evidence DB suite must run exactly once')
         assert.ok(step.run.includes(providerSchemaAddition + providerEvidenceAddition), 'Keep the deprovision provider evidence suite right after the provider schema suite')
@@ -316,6 +326,7 @@ function assertParallelWorkflow(doc) {
         step.run = step.run.replace(feishuSmokeAddition, '')
         step.run = step.run.replace(capabilitiesAddition, '')
         step.run = step.run.replace(capabilityResolveAddition, '')
+        step.run = step.run.replace(capabilitiesPatchAddition, '')
         step.run = step.run.replace(providerSchemaAddition, '')
         step.run = step.run.replace(providerEvidenceAddition, '')
         step.run = step.run.replace(deferAddition, '')
@@ -664,6 +675,9 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-integration-capability-resolve.db.test.ts \\\n'; assert.ok(step.run.includes(line)); step.run = step.run.replace(line, '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-integration-capability-resolve.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(line) && step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-integration-capability-resolve.db.test.ts \\\n'; assert.ok(step.run.includes(line)); step.run = step.run.replace(line, line + line) },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-integration-capabilities-patch.db.test.ts \\\n'; assert.ok(step.run.includes(line)); step.run = step.run.replace(line, '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-integration-capabilities-patch.db.test.ts \\\n'; assert.ok(step.run.includes(line)); step.run = step.run.replace(line, ''); const other = doc.jobs['multitable-db'].steps.find(step => step.id === 'multitable-real-db-integration'); const anchor = '  tests/integration/notification-delivery-result.db.test.ts \\\n'; assert.ok(other.run.includes(anchor)); other.run = other.run.replace(anchor, anchor + line) },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-integration-capabilities-patch.db.test.ts \\\n'; assert.ok(step.run.includes(line)); step.run = step.run.replace(line, line + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/attendance-notification-defer.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/attendance-notification-defer.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/feishu-mock-harness-smoke.db.test.ts \\\n', '') },
@@ -739,6 +753,21 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
     const candidate = structuredClone(parseYamlDocument(workflow))
     mutate(candidate)
     assert.throws(() => assertParallelWorkflow(candidate))
+  }
+})
+
+test('the capability PATCH DB suite is accepted at any position of the approval real-DB step', () => {
+  const line = '  tests/integration/directory-integration-capabilities-patch.db.test.ts \\\n'
+  for (const anchor of [
+    '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n',
+    '  tests/integration/approval-comments.db.test.ts \\\n',
+  ]) {
+    const candidate = structuredClone(parseYamlDocument(workflow))
+    const step = candidate.jobs['approval-db'].steps.find(entry => entry.id === 'approval-real-db-integration')
+    assert.ok(step.run.includes(line) && step.run.includes(anchor))
+    step.run = step.run.replace(line, '').replace(anchor, anchor + line)
+    assert.equal(step.run.split(line).length - 1, 1)
+    assert.doesNotThrow(() => assertParallelWorkflow(candidate))
   }
 })
 

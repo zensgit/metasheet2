@@ -21,6 +21,7 @@ function gatedDescriptor(provider = 'acme'): ProviderCapabilityDescriptor {
       return scopeFromValues(row.corp_id, config?.app ?? '')
     },
     enablePreconditions: async () => ({ ok: true }),
+    secretConfigKeys: Object.freeze([]),
   }
 }
 
