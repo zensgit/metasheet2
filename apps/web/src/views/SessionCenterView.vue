@@ -6,6 +6,7 @@
         <p>查看当前账号的登录设备，并按会话结束异常登录。</p>
       </div>
       <div class="session-center__actions">
+        <router-link to="/settings/notifications">通知设置</router-link>
         <span v-if="accountEmail" class="session-center__account">{{ accountEmail }}</span>
         <button class="session-center__button session-center__button--secondary" type="button" :disabled="loading" @click="void loadSessions()">
           {{ loading ? '刷新中...' : '刷新会话' }}
