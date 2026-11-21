@@ -138,6 +138,30 @@ describe('a write that is put back never overwrites a later value', () => {
   })
 })
 
+describe('a write that was put back waits out its delay', () => {
+  it('it is not re-checked again before its delay has passed, however fast changes of the record arrive', async () => {
+    const s = await open({ bridgeOptions: { deferRetryMinMs: 500, deferRetryMaxMs: 500, deferMaxMs: 20_000 } })
+    const a = await editor(s, 'a')
+    const b = await editor(s, 'b')
+    sendUpdate(a, append(a, 'f1', '-A'))
+    await until(() => shared(s).f1 === 'one-A' && b.fields().f1 === 'one-A')
+    s.world.readFailsFor.add('a')
+    await until(() => s.bridge.getMetrics().deferredFlushCount === 1, 2000, 'the first unanswered re-check')
+    const readsOfA = s.world.permissionReads.filter((reader) => reader === 'a').length
+    for (let index = 0; index < 6; index += 1) {
+      sendUpdate(b, append(b, 'f2', `-${index}`))
+      await settle(40)
+    }
+    // Six changes later, well inside the delay: not one more re-check was started.
+    expect(s.bridge.getMetrics().deferredFlushCount).toBe(1)
+    expect(s.world.permissionReads.filter((reader) => reader === 'a')).toHaveLength(readsOfA)
+    expect(written(s)).toEqual([])
+    s.world.readFailsFor.delete('a')
+    await until(() => written(s).length === 1, 3000, 'the write after the delay')
+    expect(written(s)).toEqual([{ f1: 'one-A', f2: 'two-0-1-2-3-4-5' }])
+  })
+})
+
 describe('a write that is put back keeps who changed what', () => {
   it('its contributor loses the field while a change of somebody else is merged over it: the merged write is refused', async () => {
     const s = await open()
