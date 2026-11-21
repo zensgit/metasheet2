@@ -472,6 +472,11 @@ describe('switch off, read undecidable: a plugin connection handler', () => {
     await until(() => told.some(([event]) => event === 'plugin:answer'), 2000, 'the plugin to answer')
     expect(held.connected).toBe(true)
     expect(s.collab.heldConnectionCount()).toBe(0)
+    // It is a connection a handler holds now: the next time the instance leaves its baseline it
+    // is ended with the transient notice like every other such connection.
+    const ended = once<SessionEndedPayload>(held, SESSION_ENDED_EVENT)
+    await undecidable(s)
+    expect(await ended).toEqual({ code: 'REALTIME_UNAVAILABLE', retry: true })
   })
 
   it('a kept connection that goes away is never handed to the handler', async () => {
