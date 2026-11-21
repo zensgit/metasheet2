@@ -338,8 +338,10 @@ describe('switch off, read undecidable, default channel: a new connection is hel
     await once(held, 'connect')
     held.emit('join-sheet', 'sheet-1')
     await settle(100)
+    expect(s.collab.heldConnectionCount()).toBe(1)
     held.close()
-    await settle(100)
+    // Forgotten when it goes, not only when the read answers: a long wait does not pile them up.
+    await until(() => s.collab.heldConnectionCount() === 0, 2000, 'the held connection to be forgotten')
     await decidable(s)
     await settle(150)
     expect(s.baselineVerifierCalls).not.toContain('token:gone')

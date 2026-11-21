@@ -180,6 +180,11 @@ export class CollabService {
     return true
   }
 
+  /** How many connections are kept with something still to be answered (diagnostics, tests). */
+  heldConnectionCount(): number {
+    return new Set<Socket>([...this.heldJoins.keys(), ...this.unjoinedSockets]).size
+  }
+
   private dropHeldJoin(socket: Socket, key: string): void {
     const held = this.heldJoins.get(socket)
     if (!held) return
