@@ -38,6 +38,11 @@ export interface ProtectedSocket {
 
 export type ConnectionPhase = 'pending' | 'serviceable' | 'anonymous' | 'ended'
 
+export type CurrentAnswer =
+  | { readonly state: 'current'; readonly binding: RealtimeSessionBinding }
+  | { readonly state: 'ended' }
+  | { readonly state: 'unavailable' }
+
 export interface ConnectionHooks {
   /** The connection was admitted (first time or again after a generation change). */
   onAdmitted?: (socket: ProtectedSocket, binding: RealtimeSessionBinding) => void
@@ -61,7 +66,8 @@ interface ConnectionState {
 export interface DeliveryOptions {
   /**
    * Resource check of this delivery for one bound session; false withholds the payload from the
-   * connections of that session and reports them through `onResourceDenied`.
+   * connections of that session and reports them through `onResourceDenied`. A check that rejects
+   * could not answer: the payload is withheld from those connections and nothing else happens.
    */
   resourceCheck?: (binding: RealtimeSessionBinding, socket: ProtectedSocket) => Promise<boolean>
   onResourceDenied?: (socket: ProtectedSocket) => void
@@ -241,24 +247,41 @@ export class ProtectedConnections {
    * when it is current now. A session that is no longer current ends the connection.
    */
   async ensureCurrent(socket: ProtectedSocket): Promise<RealtimeSessionBinding | null> {
+    const answer = await this.checkCurrent(socket)
+    return answer.state === 'current' ? answer.binding : null
+  }
+
+  /**
+   * The inbound boundary with its three outcomes kept apart:
+   *   - current:     the session was read as current right now;
+   *   - ended:       it is not current, or the connection never presented a credential, or it was
+   *                  refused; where the connection was ended it has been told and closed;
+   *   - unavailable: no answer could be had and the connection was left as it is. Nothing may be
+   *                  served on this answer, and nothing about the session may be concluded from it.
+   */
+  async checkCurrent(socket: ProtectedSocket): Promise<CurrentAnswer> {
     const state = this.states.get(socket)
-    if (!state || state.phase === 'ended' || state.phase === 'anonymous') return null
+    if (!state || state.phase === 'ended' || state.phase === 'anonymous') return { state: 'ended' }
     if (state.phase === 'pending' || state.generation !== this.protection.generation() || !state.binding) {
-      return this.admit(socket)
+      const admitted = await this.admit(socket)
+      if (admitted) return { state: 'current', binding: admitted }
+      const after = this.states.get(socket)
+      if (!after || after !== state || after.phase === 'ended' || after.phase === 'anonymous') return { state: 'ended' }
+      return { state: 'unavailable' }
     }
     const binding = state.binding
     const result = await this.protection.authorize([binding])
-    if (this.states.get(socket) !== state || state.phase !== 'serviceable' || state.binding !== binding) return null
+    if (this.states.get(socket) !== state || state.phase !== 'serviceable' || state.binding !== binding) return { state: 'ended' }
     const verdict = result.verdicts.get(bindingKey(binding))
     if (verdict?.state === 'denied') {
       this.end(socket, { code: 'SESSION_NOT_CURRENT', retry: false })
-      return null
+      return { state: 'ended' }
     }
     if (!result.serving || result.generation !== this.protection.generation() || verdict?.state !== 'allowed' || !socket.connected) {
       this.diagnostics.recordEvent('inbound-withheld')
-      return null
+      return { state: 'unavailable' }
     }
-    return binding
+    return { state: 'current', binding }
   }
 
   /**
@@ -282,23 +305,27 @@ export class ProtectedConnections {
 
     let eligible = sample
     if (options.resourceCheck) {
-      const perSubject = new Map<string, boolean>()
+      const perSubject = new Map<string, boolean | 'unknown'>()
       for (const entry of sample) {
         const key = bindingKey(entry.binding)
         if (perSubject.has(key)) continue
-        let allowed = false
+        let allowed: boolean | 'unknown'
         try {
           allowed = (await options.resourceCheck(entry.binding, entry.state.socket)) === true
         } catch {
-          allowed = false
+          allowed = 'unknown'
         }
         perSubject.set(key, allowed)
       }
       eligible = []
+      let undecided = 0
       for (const entry of sample) {
-        if (perSubject.get(bindingKey(entry.binding)) === true) eligible.push(entry)
+        const answer = perSubject.get(bindingKey(entry.binding))
+        if (answer === true) eligible.push(entry)
+        else if (answer === 'unknown') undecided += 1
         else options.onResourceDenied?.(entry.state.socket)
       }
+      if (undecided > 0) this.diagnostics.recordEvent('delivery-withheld', undecided)
       if (eligible.length === 0) return 0
     }
 
@@ -353,20 +380,21 @@ export class ProtectedConnections {
       if (state.generation !== startedIn) continue
       sample.push({ state, binding: state.binding })
     }
-    const perSubject = new Map<string, boolean>()
+    const perSubject = new Map<string, boolean | 'unknown'>()
     for (const entry of sample) {
       const key = bindingKey(entry.binding)
       if (perSubject.has(key)) continue
-      let allowed = false
+      let allowed: boolean | 'unknown'
       try {
         allowed = (await options.resourceCheck(entry.binding, entry.state.socket)) === true
       } catch {
-        allowed = false
+        allowed = 'unknown'
       }
       perSubject.set(key, allowed)
     }
     for (const entry of sample) {
-      if (perSubject.get(bindingKey(entry.binding)) === true) continue
+      // Only an answered no removes a subscription; a check that could not answer changes nothing.
+      if (perSubject.get(bindingKey(entry.binding)) !== false) continue
       if (this.states.get(entry.state.socket) !== entry.state || entry.state.phase !== 'serviceable') continue
       options.onResourceDenied(entry.state.socket)
     }

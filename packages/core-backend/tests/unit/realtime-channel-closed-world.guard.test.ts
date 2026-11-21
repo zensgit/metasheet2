@@ -19,6 +19,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -26,7 +27,7 @@ const REPO = join(here, '../../../..')
 const ROOTS = ['packages/core-backend/src', 'plugins']
 const EXTENSIONS = ['.ts', '.mts', '.cts', '.js', '.cjs', '.mjs']
 
-type Category = 'socketIoImport' | 'serverConstruct' | 'namespace' | 'rawServer' | 'connectionHandler' | 'pluginBridge' | 'clusterOrRecovery' | 'otherPushProtocol' | 'emit'
+type Category = 'socketIoImport' | 'serverConstruct' | 'namespace' | 'rawServer' | 'connectionHandler' | 'pluginBridge' | 'clusterOrRecovery' | 'otherPushProtocol' | 'roomSend' | 'serverSend' | 'emit'
 
 const DETECTORS: Record<Exclude<Category, 'emit'>, RegExp> = {
   socketIoImport: /from ['"]socket\.io['"]|require\(['"]socket\.io['"]\)/g,
@@ -37,6 +38,9 @@ const DETECTORS: Record<Exclude<Category, 'emit'>, RegExp> = {
   pluginBridge: /websocket\.(broadcast|broadcastTo|sendTo|join|leave|onConnection)\b/g,
   clusterOrRecovery: /fetchSockets\(|serverSideEmit\(|socketsJoin\(|socketsLeave\(|connectionStateRecovery|@socket\.io\/[a-z-]*adapter|socket\.io-redis|\bio\.adapter\(/g,
   otherPushProtocol: /text\/event-stream|new WebSocketServer\(|from ['"]ws['"]|require\(['"]ws['"]\)/g,
+  // A send to a room or to every connection makes a file a channel bearer whatever object it goes through.
+  roomSend: /\.(to|in)\(\s*[^()]*(\([^()]*\))?[^()]*\)\s*\.emit\(/g,
+  serverSend: /\bio\??\.emit\(/g,
 }
 const EMIT = /\.emit\(/g
 
@@ -92,53 +96,221 @@ function scan(): Record<string, Counts> {
   return found
 }
 
-interface Entry { role: string; counts: Counts }
+/**
+ * Besides the counts, every channel-bearing file lists two things exactly:
+ *   - `inbound`: every `<receiver>.on('<event>')` / `.once(...)` registration with a literal event name;
+ *   - `rooms`:   every `.join(...)`, `.leave(...)`, `.socketsJoin(...)`, `.socketsLeave(...)` call.
+ * Both are read from the syntax tree, so a new inbound handler or a new way into a room changes the
+ * list and fails the guard until it is classified.
+ */
+interface Entry { role: string; counts: Counts; inbound: string[]; rooms: string[] }
+
+interface Sites { inbound: string[]; rooms: string[] }
+
+function squash(text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+function sitesOf(file: string, text: string): Sites {
+  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, /\.[cm]?js$/.test(file) ? ts.ScriptKind.JS : ts.ScriptKind.TS)
+  const inbound: string[] = []
+  const rooms: string[] = []
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+      const method = node.expression.name.text
+      const receiver = squash(node.expression.expression.getText(source))
+      const first = node.arguments[0]
+      if ((method === 'on' || method === 'once') && first && (ts.isStringLiteral(first) || ts.isNoSubstitutionTemplateLiteral(first))) {
+        inbound.push(`${receiver}.${method}('${first.text}')`)
+      }
+      if (method === 'join' || method === 'leave' || method === 'socketsJoin' || method === 'socketsLeave') {
+        rooms.push(`${receiver}.${method}(${node.arguments.map((argument) => squash(argument.getText(source))).join(', ')})`)
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  return { inbound: inbound.sort(), rooms: rooms.sort() }
+}
 
 const B = 'packages/core-backend/src'
 const EXPECTED: Record<string, Entry> = {
   [`${B}/services/CollabService.ts`]: {
-    role: 'PROTECTED BOUNDARY. The default collaboration channel: every send goes through emitToRoom or the delivery boundary of the protected connections; the three cluster-style calls are the baseline room join, room leave and member listing, each with a protected branch in front of it.',
-    counts: { socketIoImport: 2, serverConstruct: 1, connectionHandler: 2, clusterOrRecovery: 3, emit: 16 },
+    role: 'PROTECTED BOUNDARY. The default collaboration channel: every send goes through emitToRoom or the delivery boundary of the protected connections; the three cluster-style calls are the baseline room join, room leave and member listing, each with a protected branch in front of it. Every inbound handler listed here resolves the identity of its connection through resolveTrustedUserId (which re-reads the session in protected mode) before it joins a room, except the leave handlers and ping, which give nothing.',
+    counts: { socketIoImport: 2, serverConstruct: 1, connectionHandler: 2, clusterOrRecovery: 3, roomSend: 4, serverSend: 1, emit: 16 },
+    inbound: [
+      'socket.on(\'disconnect\')',
+      'socket.on(\'join-comment-inbox\')',
+      'socket.on(\'join-comment-record\')',
+      'socket.on(\'join-comment-sheet\')',
+      'socket.on(\'join-sheet\')',
+      'socket.on(\'leave-comment-inbox\')',
+      'socket.on(\'leave-comment-record\')',
+      'socket.on(\'leave-comment-sheet\')',
+      'socket.on(\'leave-sheet\')',
+      'socket.on(\'ping\')',
+      'socket.on(\'sheet:cursor\')',
+      'socket.once(\'disconnect\')',
+      'this.io.on(\'connection\')',
+      'this.io.on(\'connection\')',
+    ],
+    rooms: [
+      '(socket as Socket).join(room)',
+      '(target as Socket).join(room)',
+      'socket.join(binding.userId)',
+      'socket.join(buildAuthenticatedUserRoom(userId))',
+      'socket.join(room)',
+      'socket.join(room)',
+      'socket.join(room)',
+      'socket.join(room)',
+      'socket.join(userId)',
+      'socket.join(userRoom)',
+      'socket.leave(room)',
+      'socket.leave(room)',
+      'socket.leave(room)',
+      'socket.leave(room)',
+      'socket.leave(room)',
+      'socket.leave(room)',
+      'this.io.in(target).socketsJoin(room)',
+      'this.io.in(target).socketsLeave(room)',
+    ],
   },
   [`${B}/collab/yjs-websocket-adapter.ts`]: {
-    role: 'PROTECTED BOUNDARY. The record editing namespace: the handshake, every message and every send to a record room are checked; an incoming change is applied only after its sender was checked.',
-    counts: { socketIoImport: 1, namespace: 1, connectionHandler: 1, emit: 22 },
+    role: 'PROTECTED BOUNDARY. The record editing namespace: the handshake, every message and every send of record content to a record room are checked; an incoming change is applied only after its sender was checked. One send goes outside the delivery boundary on purpose: the invalidation notice, a control message without record content that tells subscribers their copy is no longer the shared one; it is sent to the whole record room also while deliveries are withheld.',
+    counts: { socketIoImport: 1, namespace: 1, connectionHandler: 1, roomSend: 3, emit: 23 },
+    inbound: [
+      'nsp.on(\'connection\')',
+      'socket.on(\'disconnect\')',
+      'socket.on(\'yjs:message\')',
+      'socket.on(\'yjs:presence\')',
+      'socket.on(\'yjs:subscribe\')',
+      'socket.on(\'yjs:unsubscribe\')',
+      'socket.on(\'yjs:update\')',
+      'staging.on(\'afterTransaction\')',
+    ],
+    rooms: [
+      'socket.join(room)',
+      'socket.leave(`yjs:${recordId}`)',
+      'socket.leave(`yjs:${recordId}`)',
+      'socket.leave(`yjs:${recordId}`)',
+    ],
   },
   [`${B}/index.ts`]: {
-    role: 'WIRING. Hands the raw collaboration server to the record editing adapter (the one raw access), defines the plugin bridge on top of the collaboration service, and attaches realtime protection to both channels before either accepts a connection. Its two emit sites are process event-bus emits, not sends to connections.',
+    role: 'WIRING. Hands the raw collaboration server to the record editing adapter (the one raw access), defines the plugin bridge on top of the collaboration service, and attaches realtime protection to both channels before either accepts a connection. Its two emit sites are process event-bus emits, not sends to connections; its on() sites are process and server events, and its join/leave sites are the plugin bridge methods that delegate to the collaboration service.',
     counts: { rawServer: 1, connectionHandler: 1, pluginBridge: 1, emit: 2 },
+    inbound: [
+      'process.on(\'SIGINT\')',
+      'process.on(\'SIGTERM\')',
+      'this.httpServer.once(\'error\')',
+    ],
+    rooms: [
+      'keys.join(\', \')',
+      'this.injector.get(ICollabService).join(room, options)',
+      'this.injector.get(ICollabService).leave(room, options)',
+    ],
   },
   [`${B}/services/MetricsStreamService.ts`]: {
-    role: 'EXCLUDED BY NAME. A second Socket.IO server for runtime metrics on its own path and namespace; it carries no tenant collaboration session or content. Giving it tenant business data requires listing it as a protected boundary first.',
+    role: 'EXCLUDED BY NAME. A second Socket.IO server for runtime metrics; it shares the default transport path with the collaboration server and is separated by its namespace. It carries no tenant collaboration session or content. Giving it tenant business data requires listing it as a protected boundary first.',
     counts: { socketIoImport: 2, serverConstruct: 1, namespace: 1, connectionHandler: 1, clusterOrRecovery: 2, emit: 3 },
+    inbound: [
+      'socket.on(\'disconnect\')',
+      'socket.on(\'metrics:ack\')',
+      'socket.on(\'metrics:subscribe\')',
+      'this.nsp.on(\'connection\')',
+    ],
+    rooms: [
+      '[...state.groups].join(\', \')',
+    ],
   },
   [`${B}/services/WebSocketService.ts`]: {
     role: 'NOT WIRED. A raw-connection plugin service that is constructed only by the plugin service factory, which the production start-up graph does not use (pinned below). Wiring it in must fail this guard until it is put behind the protected boundary.',
     counts: { socketIoImport: 2, connectionHandler: 2, emit: 16 },
+    inbound: [
+      'io.on(\'connection\')',
+      'socket.on(\'disconnect\')',
+      'this.on(\'connection\')',
+      'this.on(\'disconnection\')',
+      'this.on(\'message\')',
+    ],
+    rooms: [
+      'ioSocket.join(room)',
+      'ioSocket.leave(room)',
+      'this.join(id, room)',
+      'this.leave(id, room)',
+    ],
   },
   [`${B}/di/identifiers.ts`]: {
     role: 'TYPES ONLY. Imports the socket type for the collaboration service interface; holds no site that sends or accepts.',
     counts: { socketIoImport: 1 },
+    inbound: [
+    ],
+    rooms: [
+    ],
   },
   [`${B}/types/plugin.ts`]: {
     role: 'TYPES ONLY. Documentation examples of the plugin bridge inside comments; holds no executable site.',
     counts: { pluginBridge: 3 },
+    inbound: [
+    ],
+    rooms: [
+    ],
   },
   'plugins/plugin-view-gantt/src/index.ts': {
-    role: 'PLUGIN BRIDGE CONSUMER. Registers a connection handler and sends through the bridge; in protected mode the handler receives the constrained connection after admission and its sends pass the delivery boundary.',
-    counts: { connectionHandler: 1, pluginBridge: 1, emit: 7 },
+    role: 'PLUGIN BRIDGE CONSUMER. Registers a connection handler and sends through the bridge; in protected mode the handler receives the constrained connection after admission, its inbound handlers run only after the session was re-read, and its sends and room joins pass the delivery boundary.',
+    counts: { connectionHandler: 1, pluginBridge: 1, roomSend: 1, emit: 7 },
+    inbound: [
+      'api.events.on(\'gantt:dependency:created\')',
+      'api.events.on(\'gantt:dependency:deleted\')',
+      'api.events.on(\'gantt:task:created\')',
+      'api.events.on(\'gantt:task:deleted\')',
+      'api.events.on(\'gantt:task:updated\')',
+      'api.events.on(\'view:update\')',
+      'socket.on(\'gantt:subscribe\')',
+      'socket.on(\'gantt:task:update\')',
+      'socket.on(\'gantt:unsubscribe\')',
+    ],
+    rooms: [
+      'fields.join(\', \')',
+      'socket.join(`gantt:${viewId}`)',
+      'socket.leave(`gantt:${viewId}`)',
+    ],
   },
   'plugins/plugin-view-gantt/dist/index-complex.js': {
     role: 'PLUGIN BRIDGE CONSUMER. Built form of the same plugin entry; same constrained connection and delivery boundary apply.',
-    counts: { connectionHandler: 1, pluginBridge: 1, emit: 7 },
+    counts: { connectionHandler: 1, pluginBridge: 1, roomSend: 1, emit: 7 },
+    inbound: [
+      'api.events.on(\'gantt:dependency:created\')',
+      'api.events.on(\'gantt:dependency:deleted\')',
+      'api.events.on(\'gantt:task:created\')',
+      'api.events.on(\'gantt:task:deleted\')',
+      'api.events.on(\'gantt:task:updated\')',
+      'api.events.on(\'view:update\')',
+      'socket.on(\'gantt:subscribe\')',
+      'socket.on(\'gantt:task:update\')',
+      'socket.on(\'gantt:unsubscribe\')',
+    ],
+    rooms: [
+      'fields.join(\', \')',
+      'socket.join(`gantt:${viewId}`)',
+      'socket.leave(`gantt:${viewId}`)',
+    ],
   },
   'plugins/plugin-view-gantt/dist/api.js': {
-    role: 'PLUGIN BRIDGE CONSUMER. Built plugin routes that call the bridge broadcast; the broadcast is filtered by recipient in protected mode.',
+    role: 'PLUGIN BRIDGE CONSUMER. Built plugin routes that call the bridge broadcast; the broadcast is filtered by recipient in protected mode. Its one join site joins strings, not rooms.',
     counts: { pluginBridge: 5 },
+    inbound: [
+    ],
+    rooms: [
+      'fields.join(\', \')',
+    ],
   },
   'plugins/plugin-view-gantt/dist/handlers.js': {
     role: 'PLUGIN BRIDGE CONSUMER. Built plugin handlers that call the bridge broadcast; the broadcast is filtered by recipient in protected mode.',
     counts: { pluginBridge: 8 },
+    inbound: [
+    ],
+    rooms: [
+    ],
   },
 }
 
@@ -148,6 +320,18 @@ describe('closed world of realtime channels', () => {
   it('every file that bears a realtime channel is listed, with its exact sites', () => {
     const actual = Object.fromEntries(Object.entries(found).map(([file, counts]) => [file, counts]))
     const expected = Object.fromEntries(Object.entries(EXPECTED).map(([file, entry]) => [file, entry.counts]))
+    expect(actual).toEqual(expected)
+  })
+
+  it('every inbound handler of a channel-bearing file is listed', () => {
+    const actual = Object.fromEntries(Object.keys(found).map((file) => [file, sitesOf(file, readFileSync(join(REPO, file), 'utf8')).inbound]))
+    const expected = Object.fromEntries(Object.entries(EXPECTED).map(([file, entry]) => [file, entry.inbound]))
+    expect(actual).toEqual(expected)
+  })
+
+  it('every call that puts a connection into a room, or takes it out, is listed', () => {
+    const actual = Object.fromEntries(Object.keys(found).map((file) => [file, sitesOf(file, readFileSync(join(REPO, file), 'utf8')).rooms]))
+    const expected = Object.fromEntries(Object.entries(EXPECTED).map(([file, entry]) => [file, entry.rooms]))
     expect(actual).toEqual(expected)
   })
 
@@ -193,13 +377,24 @@ describe('closed world of realtime channels', () => {
   })
 
   it('an unlisted file with a send, a namespace, a raw server access or another protocol is detected (controls)', () => {
-    expect(analyse("import { Server } from 'socket.io'\nio.emit('x', 1)\nio.to(room).emit('y', 2)")).toEqual({ socketIoImport: 1, emit: 2 })
+    expect(analyse("import { Server } from 'socket.io'\nio.emit('x', 1)\nio.to(room).emit('y', 2)")).toEqual({ socketIoImport: 1, roomSend: 1, serverSend: 1, emit: 2 })
     expect(analyse("const nsp = io.of('/private')\nnsp.emit('x')")).toEqual({ namespace: 1, emit: 1 })
-    expect(analyse('const io = collab.getIO()\nio.emit("x")')).toEqual({ rawServer: 1, emit: 1 })
+    expect(analyse('const io = collab.getIO()\nio.emit("x")')).toEqual({ rawServer: 1, serverSend: 1, emit: 1 })
     expect(analyse("api.websocket.broadcast('x', {})")).toEqual({ pluginBridge: 1 })
     expect(analyse('await io.in(room).fetchSockets(); io.serverSideEmit("x")')).toEqual({ clusterOrRecovery: 2 })
     expect(analyse("res.setHeader('Content-Type', 'text/event-stream')")).toEqual({ otherPushProtocol: 1 })
     expect(analyse("new SocketServer(httpServer, { connectionStateRecovery: {} })")).toEqual({ serverConstruct: 1, clusterOrRecovery: 1 })
     expect(analyse('emitter.emit("plain event emitter")')).toBeNull()
+    // A send to a room, or to every connection, through any object makes the file a channel bearer.
+    expect(analyse('service.io.to(room).emit("x", 1)')).toEqual({ roomSend: 1, emit: 1 })
+    expect(analyse('this.io.in(buildRoom(id)).emit("x")')).toEqual({ roomSend: 1, emit: 1 })
+    expect(analyse('holder.io.emit("x")')).toEqual({ serverSend: 1, emit: 1 })
+  })
+
+  it('a new inbound handler and a new way into a room are both seen by the site scan (controls)', () => {
+    const sites = sitesOf('probe.ts', "socket.on('join-any', (room: string) => socket.join(room))\nsocket.once('x', () => undefined)\nio.in(a).socketsJoin(b)\nsocket.leave(`r:${id}`)\nconst csv = parts.join(',')")
+    expect(sites.inbound).toEqual(["socket.on('join-any')", "socket.once('x')"])
+    expect(sites.rooms).toEqual(['io.in(a).socketsJoin(b)', "parts.join(',')", 'socket.join(room)', 'socket.leave(`r:${id}`)'])
+    expect(sitesOf('probe.js', "socket.on('gantt:subscribe', function (d) { socket.join('gantt:' + d.viewId) })").rooms).toEqual(["socket.join('gantt:' + d.viewId)"])
   })
 })

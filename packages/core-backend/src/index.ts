@@ -5120,6 +5120,7 @@ export class MetaSheetServer {
       const { YjsRecordBridge } = await import('./collab/yjs-record-bridge')
       const { createYjsInvalidator, createFieldSchemaRefusalHandler, createAuthorizationRefusalHandler, composeRefusalHandlers } = await import('./collab/yjs-invalidation')
       const { canReadEveryYjsFieldForUser } = await import('./collab/yjs-field-read-access')
+      const { fieldPermissionsOfWriters } = await import('./collab/yjs-contribution-writers')
       const { RecordWriteService } = await import('./multitable/record-write-service')
       const { loadSheetMemberUserIdSet, loadFieldPermissionScopeMap } = await import('./multitable/permission-service')
       const { createYjsInvalidationPostCommitHook } = await import('./multitable/post-commit-hooks')
@@ -5199,7 +5200,9 @@ export class MetaSheetServer {
             const canWrite = canWriteRecord(capabilities, sheetScope, isAdminRole, userId, createdBy)
             return { canRead: capabilities.canRead, canWrite, canReadAllFields }
           } catch {
-            return null
+            // The facts could not be read: neither a yes nor a no. A subscription is still answered
+            // as before; a write is not refused on it and not let through on it.
+            return 'unknown'
           }
         })
 
@@ -5251,7 +5254,7 @@ export class MetaSheetServer {
         const yjsBridge = new YjsRecordBridge(
           yjsSyncService,
           recordWriteService,
-          async (recordId, patch, actorId, _allActorIds) => {
+          async (recordId, patch, actorId, _allActorIds, contributions) => {
             // Build RecordPatchInput from recordId + patch fields + real actor
             try {
               const recResult = await pool.query(
@@ -5318,6 +5321,16 @@ export class MetaSheetServer {
                 [recordId, Object.entries(patch).map(([fieldId, value]) => ({ fieldId, value }))],
               ])
 
+              // A merged write can carry fields changed by several actors. The layer-3 gate below
+              // checks every field against each actor that changed it; this loads the field
+              // permissions of a further writer the same way they are derived for the flushing actor
+              // (one capability resolution and one indexed scope read per further writer).
+              const loadWriterFieldPermissions = async (writerId: string) => {
+                const writer = await resolveSheetCapabilitiesForUser(pool.query.bind(pool), sheetId, writerId)
+                const writerScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, writerId)
+                return deriveFieldPermissions(visibleFields as any, writer.capabilities, { fieldScopeMap: writerScopeMap })
+              }
+
               // Resolve real user capabilities — same path as REST
               const { capabilities, sheetScope, isAdminRole, permissions: actorPerms } =
                 await resolveSheetCapabilitiesForUser(pool.query.bind(pool), sheetId, actorId)
@@ -5333,7 +5346,8 @@ export class MetaSheetServer {
               // extra indexed `field_permissions` read per debounced flush build, not per keystroke).
               const fieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, actorId)
               const fieldPermissions = deriveFieldPermissions(visibleFields as any, capabilities, { fieldScopeMap })
-              const forbiddenWriteFieldIds = Object.keys(patch).filter((fid) => isFieldWriteForbidden(fieldPermissions[fid]))
+              const writerPermissions = await fieldPermissionsOfWriters(Object.keys(patch), actorId, fieldPermissions, contributions, loadWriterFieldPermissions)
+              const forbiddenWriteFieldIds = Object.keys(patch).filter((fid) => writerPermissions(fid).some((perms) => isFieldWriteForbidden(perms[fid])))
               if (forbiddenWriteFieldIds.length > 0) {
                 // Fail-closed + atomic (F4): THROW a coarse, values-free error rather than returning null.
                 // `executePatch` maps a null input to `return false`, which lands in flushNow's
@@ -5415,7 +5429,8 @@ export class MetaSheetServer {
             const fieldPermissions = deriveFieldPermissions(visibleSheetFields as any, capabilities, { fieldScopeMap })
             return !fieldIds.some((fieldId) => isFieldWriteForbidden(fieldPermissions[fieldId]))
           } catch {
-            return false
+            // The facts could not be read: neither a yes nor a no.
+            return 'unknown'
           }
         })
         // Every contributor of a merged write is checked again, for its own fields, right before the

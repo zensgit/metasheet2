@@ -315,6 +315,26 @@ describe('switch on: every delivery reads the session of each recipient again', 
     expect(ops.map((op) => op.data.n)).toEqual([1, 3])
   })
 
+  it('a handshake whose session cannot be read is not admitted: no identity, no room, nothing delivered', async () => {
+    const s = await open()
+    const kept = await connected(s, 'token:kept')
+    s.harness.facts.authorityDown = true
+    const undecided = client(s, 'token:undecided')
+    const ended = once<SessionEndedPayload>(undecided, SESSION_ENDED_EVENT)
+    const direct = collect(undecided, 'direct')
+    expect(await ended).toMatchObject({ code: 'REALTIME_UNAVAILABLE' })
+    // Whatever the transport does next, the connection was never admitted.
+    const admitted = [...(s.collab.getIO()?.sockets.sockets.values() ?? [])].filter((socket) => socket.data.trustedUserId === 'undecided')
+    expect(admitted).toEqual([])
+    expect(s.collab.getIO()?.sockets.adapter.rooms.get(buildAuthenticatedUserRoom('undecided'))).toBeUndefined()
+    s.harness.facts.authorityDown = false
+    s.collab.sendTo('undecided', 'direct', { n: 1 })
+    const keptDirect = collect(kept, 'direct')
+    s.collab.sendTo('kept', 'direct', { n: 2 })
+    await until(() => keptDirect.length === 1)
+    expect(direct).toEqual([])
+  })
+
   it('reads one batch per delivery, not one read per recipient', async () => {
     const s = await open()
     const sockets = await Promise.all(['u1', 'u2', 'u3', 'u4'].map((user) => connected(s, `token:${user}`)))
