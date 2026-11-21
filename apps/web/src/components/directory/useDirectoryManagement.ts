@@ -532,6 +532,7 @@ let accountLoadVersion = 0
 let alertLoadVersion = 0
 let scheduleLoadVersion = 0
 let runLoadVersion = 0
+let reviewLoadVersion = 0
 const accountSnapshotIntegrationId = ref('')
 const alertSnapshotIntegrationId = ref('')
 const accountsLoadFailed = ref(false)
@@ -1032,6 +1033,8 @@ function resetDraft() {
   alertLoadVersion += 1
   scheduleLoadVersion += 1
   runLoadVersion += 1
+  reviewLoadVersion += 1
+  setStatus('')
   accountSnapshotIntegrationId.value = ''
   alertSnapshotIntegrationId.value = ''
   accountsLoadFailed.value = false
@@ -1962,10 +1965,12 @@ async function selectIntegration(
     alertLoadVersion += 1
     scheduleLoadVersion += 1
     runLoadVersion += 1
+    reviewLoadVersion += 1
     accounts.value = []
     alerts.value = []
     scheduleSnapshot.value = null
     runs.value = []
+    reviewItems.value = []
     accountSnapshotIntegrationId.value = ''
     alertSnapshotIntegrationId.value = ''
     accountsLoadFailed.value = false
@@ -1976,7 +1981,13 @@ async function selectIntegration(
     loadingAlerts.value = Boolean(integration)
     loadingSchedule.value = Boolean(integration)
     loadingRuns.value = Boolean(integration)
+    loadingReviewItems.value = Boolean(integration)
+    loadingMoreReviewItems.value = false
     clearManualAdmissionResult()
+    clearAutoAdmissionOnboardingPackets()
+    clearBatchAdmissionOnboardingPackets()
+    // An in-flight prompt was valid for the previous integration. Drop it with the selection.
+    setStatus('')
   }
   // A same-integration refresh after a save keeps the loaded tree on screen (pickers stay open,
   // the root-department select does not flip back to a text box) and reloads it in place.
@@ -2003,8 +2014,6 @@ async function selectIntegration(
   }
   manualDepartmentId.value = ''
   manualDepartmentName.value = ''
-  clearAutoAdmissionOnboardingPackets()
-  clearBatchAdmissionOnboardingPackets()
   clearFocusedAccount()
   accountPage.value = 1
   accountTotal.value = 0
@@ -3312,12 +3321,15 @@ function mergeReviewItems(existingItems: DirectoryReviewItem[], incomingItems: D
 
 async function loadReviewItems(integrationId: string, options: { append?: boolean } = {}) {
   const append = options.append === true
+  if (selectedIntegrationId.value !== integrationId) return
+  const version = ++reviewLoadVersion
   if (append) loadingMoreReviewItems.value = true
   else loadingReviewItems.value = true
   try {
     const nextPage = append ? reviewPage.value + 1 : 1
     const response = await apiFetch(`/api/admin/directory/integrations/${integrationId}/review-items?page=${nextPage}&pageSize=${reviewPageSize}&filter=all`)
     const body = await readJson(response)
+    if (version !== reviewLoadVersion || selectedIntegrationId.value !== integrationId) return
     if (!response.ok) throw new Error(readApiError(body, '加载待处理队列失败'))
     const items = Array.isArray(body?.data?.items) ? body.data.items : []
     const total = typeof body?.data?.total === 'number'
@@ -3337,6 +3349,7 @@ async function loadReviewItems(integrationId: string, options: { append?: boolea
     }
     syncPendingBindingQueueDefaults()
   } catch (error) {
+    if (version !== reviewLoadVersion || selectedIntegrationId.value !== integrationId) return
     if (!append) {
       reviewItems.value = []
       reviewPage.value = 1
@@ -3345,8 +3358,10 @@ async function loadReviewItems(integrationId: string, options: { append?: boolea
     }
     setStatus(error instanceof Error ? error.message : '加载待处理队列失败', 'error')
   } finally {
-    if (append) loadingMoreReviewItems.value = false
-    else loadingReviewItems.value = false
+    if (version === reviewLoadVersion && selectedIntegrationId.value === integrationId) {
+      if (append) loadingMoreReviewItems.value = false
+      else loadingReviewItems.value = false
+    }
   }
 }
 
@@ -3780,8 +3795,11 @@ async function postReviewBindings(bindings: Array<{
 // Writes the outcome status, then reloads the integration, queue and member list. The status is
 // set before the reload so a failed reload's own error status is not overwritten; a stale
 // integrations-load flag clears the status when the reload starts, so the outcome is written back
-// when the reload left the status empty.
+// when the reload left the status empty. A selection change already cleared that prompt, so the
+// rewrite is skipped when this reload no longer belongs to the integration on screen.
 async function refreshAfterReviewBindings(message: string, tone: 'info' | 'error' = 'info'): Promise<void> {
+  const integrationId = selectedIntegrationId.value
+  const contextVersion = directoryContextVersion
   setStatus(message, tone)
   if (!selectedIntegration.value) return
   for (const key of Object.keys(selectedReviewIds)) delete selectedReviewIds[key]
@@ -3790,6 +3808,7 @@ async function refreshAfterReviewBindings(message: string, tone: 'info' | 'error
     loadReviewItems(selectedIntegration.value.id),
     loadAccounts(selectedIntegration.value.id),
   ])
+  if (!isCurrentDirectoryContext(contextVersion, integrationId)) return
   if (!status.value) setStatus(message, tone)
 }
 
@@ -4094,17 +4113,16 @@ async function batchAdmitReviewItems() {
       }),
     })
     const body = await readJson(response)
+    if (!isCurrentDirectoryContext(contextVersion, integrationId)) return
     if (!response.ok) throw new Error(readApiError(body, '批量创建并绑定失败'))
     const data = body?.data as Record<string, unknown> | undefined
     const processedItems = Array.isArray(data?.items) ? data.items : []
     appliedCount = Number(data?.updatedCount ?? processedItems.length)
-    if (isCurrentDirectoryContext(contextVersion, integrationId)) {
-      batchAdmissionOnboardingPackets.value = stampDirectoryOnboardingPackets(
-        readBatchAdmissionOnboardingPackets(data),
-        integrationId,
-        integrationName,
-      )
-    }
+    batchAdmissionOnboardingPackets.value = stampDirectoryOnboardingPackets(
+      readBatchAdmissionOnboardingPackets(data),
+      integrationId,
+      integrationName,
+    )
     setReviewBatchProgress({
       kind: 'admit',
       phase: 'refreshing',
@@ -4119,6 +4137,7 @@ async function batchAdmitReviewItems() {
       ? `已创建并绑定 ${appliedCount} 个目录成员，另有 ${failedCount} 个失败${failedPreview ? `：${failedPreview}` : '，请重试'}`
       : `已创建并绑定 ${appliedCount} 个目录成员`
     await refreshAfterReviewBindings(message, failedCount > 0 ? 'error' : 'info')
+    if (!isCurrentDirectoryContext(contextVersion, integrationId)) return
     reselectFailedReviewRows(
       batchIds,
       failedItems,
@@ -4139,6 +4158,7 @@ async function batchAdmitReviewItems() {
       message,
     })
   } catch (error) {
+    if (!isCurrentDirectoryContext(contextVersion, integrationId)) return
     setReviewBatchProgress({
       kind: 'admit',
       phase: 'failed',
