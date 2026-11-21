@@ -42,6 +42,7 @@ export const ATTENDANCE_FOCUS_ALLOWED_PATHS: readonly string[] = Object.freeze([
   '/attendance',
   '/p/plugin-attendance/attendance',
   '/settings',
+  '/settings/notifications',
 ])
 
 /**

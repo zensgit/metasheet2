@@ -37,6 +37,7 @@ vi.mock('../src/composables/useLocale', () => {
 
 import NotificationPreferencesView from '../src/views/NotificationPreferencesView.vue'
 import { appRoutes } from '../src/router/appRoutes'
+import { resolveRouteGuardDecision, type RouteGuardPolicyContext } from '../src/router/guardPolicy'
 import { useLocale } from '../src/composables/useLocale'
 
 const CONNECTION = '11111111-1111-4111-8111-111111111111'
@@ -203,6 +204,7 @@ interface PageHandle {
   pendingWrite: boolean
   actionMessage: string
   formErrors: Record<string, string>
+  readGeneration: number
 }
 
 function page(): PageHandle {
@@ -340,7 +342,9 @@ describe('notification preference page states', () => {
     expect(text(el, 'notification-candidate-reason-1')).toBe('该账号已在另一连接上启用')
     expect(shown(el, 'notification-enable-0')).toBeNull()
     expect(shown(el, 'notification-enable-1')).toBeNull()
-    expect(shown(el, 'notification-types')).toBeNull()
+    expect(shown(el, 'notification-types')).toBeTruthy()
+    expect((must(el, 'notification-primary-task_reminder') as HTMLSelectElement).disabled).toBe(true)
+    expect(text(el, 'notification-default-connection')).toBe('将使用管理员设置的默认连接')
     expect((must(el, 'notification-test-0') as HTMLButtonElement).disabled).toBe(true)
   })
 
@@ -372,13 +376,14 @@ describe('notification preference page states', () => {
     const primary = must(el, 'notification-primary-task_reminder') as HTMLSelectElement
     const fallback = must(el, 'notification-fallback-task_reminder') as HTMLSelectElement
     expect(Array.from(primary.options).map((option) => [option.value, option.textContent?.trim()])).toEqual([
+      ['', '将使用管理员设置的默认连接'],
       [ENDPOINT, '钉钉 · Primary'],
       [OTHER_ENDPOINT, 'Feishu · Backup'],
     ])
     expect(Array.from(fallback.options).map((option) => [option.value, option.textContent?.trim()])).toEqual([
       ['', '无备用渠道'],
-      [OTHER_ENDPOINT, 'Feishu · Backup'],
     ])
+    expect(fallback.disabled).toBe(true)
     await select(el, 'notification-primary-task_reminder', OTHER_ENDPOINT)
     expect(Array.from((must(el, 'notification-fallback-task_reminder') as HTMLSelectElement).options).map((option) => option.value)).toEqual(['', ENDPOINT])
     expect(el.textContent).not.toContain(CONNECTION)
@@ -431,6 +436,7 @@ describe('notification channel and preference writes', () => {
     h_.endpointsReply.mockReturnValue(response(200, endpointsListing({ endpoints: [endpoint(), backupEndpoint()] })))
     const el = await mountView()
     await toggle(el, 'notification-enabled-task_reminder')
+    await select(el, 'notification-primary-task_reminder', ENDPOINT)
     await select(el, 'notification-fallback-task_reminder', OTHER_ENDPOINT)
     await toggle(el, 'notification-quiet-enabled-task_reminder')
     await submit(el)
@@ -442,13 +448,13 @@ describe('notification channel and preference writes', () => {
     expect(text(el, 'notification-action-result')).toBe('已保存')
   })
 
-  it('uses the stored revision and sends an explicit null quiet window', async () => {
+  it('uses the stored revision and omits every unchanged field', async () => {
     h_.preferencesReply.mockReturnValue(response(200, preferencesListing({
       topics: [topic({ preference: { enabled: true, primaryEndpointId: ENDPOINT, fallbackEndpointId: null, quietHours: null, revision: 5 } })],
     })))
     const el = await mountView()
     await submit(el)
-    expect(calls('/api/me/notification-preferences', 'PATCH')[0][1]?.body).toBe('{"topic":"task_reminder","expectedRevision":5,"enabled":true,"primaryEndpointId":"33333333-3333-4333-8333-333333333333","fallbackEndpointId":null,"quietHours":null}')
+    expect(calls('/api/me/notification-preferences', 'PATCH')[0][1]?.body).toBe('{"topic":"task_reminder","expectedRevision":5}')
   })
 
   it('enables a candidate with exactly connectionId and proofKind, then rereads', async () => {
@@ -616,7 +622,7 @@ describe('notification test sending', () => {
   })
 })
 
-describe('third-round notification regressions', () => {
+describe('notification state, errors, and accessibility', () => {
   const storedPreference = (over: Record<string, unknown> = {}) => ({
     enabled: true,
     primaryEndpointId: ENDPOINT,
@@ -630,27 +636,27 @@ describe('third-round notification regressions', () => {
     connection: { id: THIRD_CONNECTION, provider: 'dingtalk', label: '钉钉 · Alternate' },
   })
 
-  it('discards an older refresh after a successful save', async () => {
+  it('blocks preference writes while a refresh is in flight and releases them afterward', async () => {
     const el = await mountView()
     const oldEndpoints = deferred<Response>()
     const oldPreferences = deferred<Response>()
     h_.endpointsReply.mockReturnValue(oldEndpoints.promise)
     h_.preferencesReply.mockReturnValue(oldPreferences.promise)
     await click(el, 'notification-refresh')
-    await toggle(el, 'notification-enabled-task_reminder')
+    expect((must(el, 'notification-save-task_reminder') as HTMLButtonElement).disabled).toBe(true)
     await submit(el)
-    expect(text(el, 'notification-action-result')).toBe('已保存')
-    expect((must(el, 'notification-enabled-task_reminder') as HTMLInputElement).checked).toBe(false)
+    expect(calls('/api/me/notification-preferences', 'PATCH')).toHaveLength(0)
+    expect(page().pendingWrite).toBe(false)
 
     oldEndpoints.resolve(response(200, endpointsListing()))
     oldPreferences.resolve(response(200, preferencesListing()))
     await flush()
-    expect((must(el, 'notification-enabled-task_reminder') as HTMLInputElement).checked).toBe(false)
-    expect((page().topics[0].preference as { enabled: boolean; revision: number }).enabled).toBe(false)
-    expect((page().topics[0].preference as { enabled: boolean; revision: number }).revision).toBe(1)
     expect(page().loading).toBe(false)
-    expect((must(el, 'notification-refresh') as HTMLButtonElement).disabled).toBe(false)
+    expect((must(el, 'notification-save-task_reminder') as HTMLButtonElement).disabled).toBe(false)
+    await toggle(el, 'notification-enabled-task_reminder')
+    await submit(el)
     expect(text(el, 'notification-action-result')).toBe('已保存')
+    expect(calls('/api/me/notification-preferences', 'PATCH')[0][1]?.body).toBe('{"topic":"task_reminder","expectedRevision":0,"enabled":false}')
   })
 
   it.each([
@@ -672,17 +678,27 @@ describe('third-round notification regressions', () => {
     expect(text(el, 'notification-action-result')).not.toBe('偏好已在别处更新，已重新读取，请核对后再保存')
   })
 
-  it('preserves stored primary and fallback ids when both are temporarily unusable', async () => {
+  it('omits unchanged stale primary and fallback ids so only the enabled flag changes', async () => {
     h_.endpointsReply.mockReturnValue(response(200, endpointsListing({
       endpoints: [
-        endpoint({ usable: false, unusableReason: 'connection_inactive' }),
-        backupEndpoint({ usable: false, unusableReason: 'endpoint_stale' }),
+        endpoint({ status: 'stale', usable: false, unusableReason: 'endpoint_stale' }),
+        backupEndpoint({ status: 'stale', usable: false, unusableReason: 'endpoint_stale' }),
         alternateEndpoint(),
       ],
     })))
     h_.preferencesReply.mockReturnValue(response(200, preferencesListing({
       topics: [topic({ preference: storedPreference({ fallbackEndpointId: OTHER_ENDPOINT, revision: 9 }) })],
     })))
+    h_.patchReply.mockImplementation((body: string) => {
+      const patch = JSON.parse(body)
+      const suppliedIds = [patch.primaryEndpointId, patch.fallbackEndpointId].filter((id) => typeof id === 'string')
+      if (suppliedIds.some((id) => id === ENDPOINT || id === OTHER_ENDPOINT)) {
+        return response(409, { error: { code: 'ENDPOINT_NOT_USABLE', reason: 'endpoint_stale' } })
+      }
+      return response(200, topic({
+        preference: storedPreference({ enabled: patch.enabled ?? true, fallbackEndpointId: OTHER_ENDPOINT, revision: 10 }),
+      }))
+    })
     const el = await mountView()
     const primary = must(el, 'notification-primary-task_reminder') as HTMLSelectElement
     const fallback = must(el, 'notification-fallback-task_reminder') as HTMLSelectElement
@@ -690,18 +706,14 @@ describe('third-round notification regressions', () => {
     expect(fallback.value).toBe(OTHER_ENDPOINT)
     expect(Array.from(primary.options).find((option) => option.value === ENDPOINT)?.disabled).toBe(true)
     expect(Array.from(fallback.options).find((option) => option.value === OTHER_ENDPOINT)?.disabled).toBe(true)
-    expect(text(el, 'notification-primary-issue-task_reminder')).toBe('连接尚未启用')
+    expect(text(el, 'notification-primary-issue-task_reminder')).toBe('绑定关系需要重新确认')
     expect(text(el, 'notification-fallback-issue-task_reminder')).toBe('绑定关系需要重新确认')
 
     await toggle(el, 'notification-enabled-task_reminder')
     await submit(el)
-    const body = JSON.parse(calls('/api/me/notification-preferences', 'PATCH')[0][1]?.body as string)
-    expect(body).toMatchObject({
-      expectedRevision: 9,
-      enabled: false,
-      primaryEndpointId: ENDPOINT,
-      fallbackEndpointId: OTHER_ENDPOINT,
-    })
+    expect(text(el, 'notification-action-result')).toBe('已保存')
+    expect(calls('/api/me/notification-preferences', 'PATCH')[0][1]?.body).toBe('{"topic":"task_reminder","expectedRevision":9,"enabled":false}')
+    expect(calls('/api/me/notification-preferences')).toHaveLength(1)
   })
 
   it('does not mark a disabled preference effective', async () => {
@@ -802,6 +814,8 @@ describe('third-round notification regressions', () => {
     await submit(el)
     expect(text(el, 'notification-form-error-task_reminder')).toBe('请填写有效的起止时间和时区；起止时间不能相同')
     expect(calls('/api/me/notification-preferences', 'PATCH')).toHaveLength(0)
+    expect(page().pendingWrite).toBe(false)
+    expect((must(el, 'notification-save-task_reminder') as HTMLButtonElement).disabled).toBe(false)
   })
 
   it('keeps the stored quiet-hours time zone instead of replacing it with the browser zone', async () => {
@@ -810,8 +824,9 @@ describe('third-round notification regressions', () => {
     })))
     const el = await mountView()
     expect((must(el, 'notification-time-zone-task_reminder') as HTMLInputElement).value).toBe('Europe/Paris')
+    await fill(el, 'notification-quiet-start-task_reminder', '23:00')
     await submit(el)
-    expect(calls('/api/me/notification-preferences', 'PATCH')[0][1]?.body).toContain('"timeZone":"Europe/Paris"')
+    expect(calls('/api/me/notification-preferences', 'PATCH')[0][1]?.body).toContain('"quietHours":{"start":"23:00","end":"08:00","timeZone":"Europe/Paris"}')
   })
 
   it('marks directly disabled quiet-hours controls and pins their disabled styling', async () => {
@@ -841,12 +856,186 @@ describe('third-round notification regressions', () => {
     expect(calls(`/api/me/notification-endpoints/${ENDPOINT}/test`, 'POST')).toHaveLength(1)
   })
 
-  it('pins the guard runner and installs with an empty npmrc', () => {
+  it('pins the guard runner, empty npmrc, and dependency cache', () => {
     const workflow = readFileSync(resolve('..', '..', '.github', 'workflows', 'notification-preferences-web-guard.yml'), 'utf8')
     expect(workflow).toContain('runs-on: ubuntu-24.04')
     expect(workflow).toContain('echo "" > /tmp/empty-npmrc')
     expect(workflow).toContain('NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc')
+    expect(workflow).toContain('uses: actions/cache@v4')
+    expect(workflow).toContain('Get pnpm store directory')
     expect(workflow.indexOf('Use empty npmrc for pnpm')).toBeLessThan(workflow.indexOf('Install dependencies'))
+  })
+})
+
+describe('notification candidates, writes, and route reachability', () => {
+  it('distinguishes candidates that can be enabled from usable endpoints', async () => {
+    h_.endpointsReply.mockReturnValue(response(200, endpointsListing({
+      endpoints: [],
+      candidates: [candidate({ addressable: true, endpointId: null })],
+    })))
+    const el = await mountView()
+    expect(text(el, 'notification-no-channels')).toBe('还没有启用的渠道，可在下方启用。')
+    expect(text(el, 'notification-candidate-0')).toContain('可启用')
+    expect(text(el, 'notification-candidate-0')).not.toContain('以下候选均不能用于通知')
+    expect(shown(el, 'notification-enable-0')).toBeTruthy()
+  })
+
+  it('wraps Tab and Shift+Tab focus within the confirmation dialog', async () => {
+    const el = await mountView()
+    await click(el, 'notification-revoke-0')
+    const confirm = must(el, 'notification-dialog-confirm') as HTMLButtonElement
+    const cancel = must(el, 'notification-dialog-cancel') as HTMLButtonElement
+    confirm.focus()
+    confirm.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }))
+    await flush()
+    expect(document.activeElement).toBe(cancel)
+    cancel.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true }))
+    await flush()
+    expect(document.activeElement).toBe(confirm)
+    expect(writeCalls()).toHaveLength(0)
+  })
+
+  it('keeps notification types editable after the last channel is revoked', async () => {
+    const el = await mountView()
+    h_.endpointsReply.mockReturnValue(response(200, endpointsListing({ endpoints: [], candidates: [] })))
+    await click(el, 'notification-revoke-0')
+    await click(el, 'notification-dialog-confirm')
+    expect(shown(el, 'notification-types')).toBeTruthy()
+    expect((must(el, 'notification-primary-task_reminder') as HTMLSelectElement).disabled).toBe(true)
+    expect(text(el, 'notification-default-connection')).toBe('将使用管理员设置的默认连接')
+    await toggle(el, 'notification-enabled-task_reminder')
+    await submit(el)
+    expect(calls('/api/me/notification-preferences', 'PATCH')[0][1]?.body).toBe('{"topic":"task_reminder","expectedRevision":0,"enabled":false}')
+    expect(text(el, 'notification-action-result')).toBe('已保存')
+  })
+
+  it('hides candidates whose endpoint is already listed', async () => {
+    h_.endpointsReply.mockReturnValue(response(200, endpointsListing({
+      candidates: [candidate({ addressable: true, endpointId: ENDPOINT })],
+    })))
+    const el = await mountView()
+    expect(shown(el, 'notification-endpoint-0')).toBeTruthy()
+    expect(shown(el, 'notification-candidate-0')).toBeNull()
+    expect(shown(el, 'notification-enable-0')).toBeNull()
+  })
+
+  it('does not invalidate reads after a test-send outcome', async () => {
+    h_.endpointsReply.mockReturnValue(response(200, endpointsListing({ delivery: { enabled: true, testSendAvailable: true, reason: null } })))
+    const el = await mountView()
+    const generation = page().readGeneration
+    await click(el, 'notification-test-0')
+    await click(el, 'notification-dialog-confirm')
+    expect(text(el, 'notification-action-result')).toBe('已被平台接受')
+    expect(page().readGeneration).toBe(generation)
+    await click(el, 'notification-refresh')
+    expect(calls('/api/me/notification-endpoints')).toHaveLength(2)
+    expect(page().readGeneration).toBe(generation + 1)
+  })
+
+  it.each([
+    [500, { error: { code: 'INTERNAL' } }],
+    [502, { error: { code: 'BAD_GATEWAY' } }],
+    [200, { outcome: 'accepted', code: 'TEST', testSendId: 'test-send-1', extra: true }],
+  ])('treats an unclear test-send response at HTTP %s as unknown and retries with the same key', async (status, body) => {
+    h_.endpointsReply.mockReturnValue(response(200, endpointsListing({ delivery: { enabled: true, testSendAvailable: true, reason: null } })))
+    h_.testReply
+      .mockReturnValueOnce(response(status, body))
+      .mockReturnValueOnce(response(200, { outcome: 'accepted', code: 'RETRY_ACCEPTED', testSendId: 'test-send-2' }))
+    const el = await mountView()
+    await click(el, 'notification-test-0')
+    await click(el, 'notification-dialog-confirm')
+    expect(text(el, 'notification-action-result')).toBe('结果未知，请在对应平台确认')
+    expect(shown(el, 'notification-test-retry')).toBeTruthy()
+    const firstBody = calls(`/api/me/notification-endpoints/${ENDPOINT}/test`, 'POST')[0][1]?.body
+    await click(el, 'notification-test-retry')
+    const testCalls = calls(`/api/me/notification-endpoints/${ENDPOINT}/test`, 'POST')
+    expect(testCalls).toHaveLength(2)
+    expect(testCalls[1][1]?.body).toBe(firstBody)
+    expect(text(el, 'notification-action-result')).toBe('已被平台接受')
+  })
+
+  it('uses the neutral cross-account explanation for ADDRESS_ALREADY_BOUND', async () => {
+    h_.endpointsReply.mockReturnValue(response(200, endpointsListing({ candidates: [candidate()] })))
+    h_.establishReply.mockReturnValue(response(409, { error: { code: 'ADDRESS_ALREADY_BOUND' } }))
+    const el = await mountView()
+    await click(el, 'notification-enable-0')
+    expect(text(el, 'notification-action-result')).toBe('该接收地址已被其他账号启用，请联系管理员')
+  })
+
+  it.each([
+    ['not_verified', '连接尚未完成验证'],
+    ['endpoint_unusable', '通知渠道当前不可用'],
+  ])('shows the delivery reason %s', async (reason, copy) => {
+    h_.endpointsReply.mockReturnValue(response(200, endpointsListing({
+      delivery: { enabled: false, testSendAvailable: false, reason },
+    })))
+    const el = await mountView()
+    expect(text(el, 'notification-test-reason-0')).toBe(copy)
+  })
+
+  it('clears the fallback when the primary changes to its provider', async () => {
+    h_.endpointsReply.mockReturnValue(response(200, endpointsListing({ endpoints: [endpoint(), backupEndpoint()] })))
+    h_.preferencesReply.mockReturnValue(response(200, preferencesListing({
+      topics: [topic({
+        preference: {
+          enabled: true,
+          primaryEndpointId: ENDPOINT,
+          fallbackEndpointId: OTHER_ENDPOINT,
+          quietHours: null,
+          revision: 3,
+        },
+      })],
+    })))
+    const el = await mountView()
+    await select(el, 'notification-primary-task_reminder', OTHER_ENDPOINT)
+    expect((must(el, 'notification-fallback-task_reminder') as HTMLSelectElement).value).toBe('')
+  })
+
+  it('renders each connection label once without a duplicate provider', async () => {
+    h_.endpointsReply.mockReturnValue(response(200, endpointsListing({ candidates: [candidate()] })))
+    const el = await mountView()
+    for (const testid of ['notification-endpoint-0', 'notification-candidate-0']) {
+      const title = must(el, testid).querySelector('.notification-card__title')!
+      expect(title.querySelector('strong')?.textContent?.trim()).toBe('钉钉 · Primary')
+      expect(title.querySelectorAll('span')).toHaveLength(1)
+    }
+  })
+
+  it('uses behavior-oriented suite names without process wording', () => {
+    const source = readFileSync(resolve('tests/notificationPreferences.spec.ts'), 'utf8')
+    expect(source).toContain("describe('notification state, errors, and accessibility'")
+    const legacySuitePrefix = ['describe(', "'third", '-round'].join('')
+    expect(source).not.toContain(legacySuitePrefix)
+  })
+
+  it('disables and labels the error retry while a reread is pending', async () => {
+    h_.endpointsReply.mockReturnValueOnce(response(500, null))
+    const el = await mountView()
+    const reply = deferred<Response>()
+    h_.endpointsReply.mockReturnValue(reply.promise)
+    await click(el, 'notification-retry')
+    const retry = must(el, 'notification-retry') as HTMLButtonElement
+    expect(retry.disabled).toBe(true)
+    expect(retry.textContent?.trim()).toBe('刷新中…')
+    reply.resolve(response(200, endpointsListing()))
+    await flush()
+    expect(shown(el, 'notification-channels')).toBeTruthy()
+  })
+
+  it('matches session-route reachability in ordinary and focused shells', () => {
+    const route = appRoutes.find((item) => item.path === '/settings/notifications')!
+    const context = (over: Partial<RouteGuardPolicyContext> = {}): RouteGuardPolicyContext => ({
+      hasFeature: () => true,
+      hasPermission: () => true,
+      attendanceFocused: false,
+      plmWorkbenchFocused: false,
+      resolveHomePath: () => '/HOME',
+      ...over,
+    })
+    expect(resolveRouteGuardDecision({ path: '/settings/notifications', meta: route.meta }, context())).toEqual({ action: 'allow' })
+    expect(resolveRouteGuardDecision({ path: '/settings/notifications', meta: route.meta }, context({ attendanceFocused: true }))).toEqual({ action: 'allow' })
+    expect(resolveRouteGuardDecision({ path: '/settings', meta: route.meta }, context({ attendanceFocused: true }))).toEqual({ action: 'allow' })
+    expect(resolveRouteGuardDecision({ path: '/settings/notifications', meta: route.meta }, context({ plmWorkbenchFocused: true }))).toEqual({ action: 'redirect', target: '/plm' })
   })
 })
 

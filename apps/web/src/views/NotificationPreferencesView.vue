@@ -23,7 +23,7 @@
       v-if="retryAttempt"
       type="button"
       data-testid="notification-test-retry"
-      :disabled="pendingWrite || !endpoints?.delivery.testSendAvailable"
+      :disabled="pendingWrite || loading || !endpoints?.delivery.testSendAvailable"
       @click="void retryTest()"
     >
       {{ t.retryTest }}
@@ -40,7 +40,9 @@
     </p>
     <div v-else-if="loadState === 'error'" data-testid="notification-error" role="alert">
       <p>{{ t.loadFailed }}</p>
-      <button type="button" data-testid="notification-retry" @click="void refresh()">{{ t.refresh }}</button>
+      <button type="button" data-testid="notification-retry" :disabled="loading" @click="void refresh()">
+        {{ loading ? t.refreshing : t.refresh }}
+      </button>
     </div>
 
     <template v-else-if="endpoints">
@@ -50,7 +52,7 @@
         </div>
 
         <p v-if="!hasUsableChannels" class="notification-empty" data-testid="notification-no-channels">
-          {{ t.noUsableChannels }}
+          {{ noChannelsText }}
         </p>
 
         <template v-if="endpoints.endpoints.length > 0">
@@ -64,7 +66,6 @@
             >
               <div class="notification-card__title">
                 <strong>{{ endpoint.connection.label }}</strong>
-                <span>{{ notificationProviderName(endpoint.connection.provider, t) }}</span>
                 <span class="notification-badge" :class="{ 'notification-badge--off': !endpoint.usable }">
                   {{ endpointStatus(endpoint) }}
                 </span>
@@ -77,7 +78,7 @@
                   v-if="endpoint.status === 'stale'"
                   type="button"
                   :data-testid="`notification-reenable-${index}`"
-                  :disabled="pendingWrite"
+                  :disabled="pendingWrite || loading"
                   @click="void reenable(endpoint)"
                 >
                   {{ t.reenable }}
@@ -85,7 +86,7 @@
                 <button
                   type="button"
                   :data-testid="`notification-revoke-${index}`"
-                  :disabled="pendingWrite"
+                  :disabled="pendingWrite || loading"
                   @click="openRevoke(endpoint)"
                 >
                   {{ t.revoke }}
@@ -93,7 +94,7 @@
                 <button
                   type="button"
                   :data-testid="`notification-test-${index}`"
-                  :disabled="pendingWrite || !endpoints.delivery.testSendAvailable"
+                  :disabled="pendingWrite || loading || !endpoints.delivery.testSendAvailable"
                   :aria-describedby="!endpoints.delivery.testSendAvailable ? `notification-test-reason-${index}` : undefined"
                   @click="openTest(endpoint)"
                 >
@@ -113,21 +114,20 @@
         </template>
 
         <h3>{{ t.candidatesHeading }}</h3>
-        <p v-if="endpoints.candidates.length === 0 && !hasUsableChannels" class="notification-empty">
+        <p v-if="visibleCandidates.length === 0 && !hasUsableChannels" class="notification-empty">
           {{ t.noCandidates }}
         </p>
         <div class="notification-list">
           <article
-            v-for="(candidate, index) in endpoints.candidates"
+            v-for="(candidate, index) in visibleCandidates"
             :key="`${candidate.connection.id}:${candidate.proofKind}`"
             class="notification-card"
             :data-testid="`notification-candidate-${index}`"
           >
             <div class="notification-card__title">
               <strong>{{ candidate.connection.label }}</strong>
-              <span>{{ notificationProviderName(candidate.connection.provider, t) }}</span>
               <span class="notification-badge" :class="{ 'notification-badge--off': !candidate.addressable }">
-                {{ candidate.addressable ? t.statusUsable : t.statusUnavailable }}
+                {{ candidate.addressable ? t.statusCandidateEnabled : t.statusUnavailable }}
               </span>
             </div>
             <p v-if="!candidate.addressable" class="notification-reason" :data-testid="`notification-candidate-reason-${index}`">
@@ -137,7 +137,7 @@
               v-if="candidate.addressable"
               type="button"
               :data-testid="`notification-enable-${index}`"
-              :disabled="pendingWrite"
+              :disabled="pendingWrite || loading"
               @click="void establish(candidate)"
             >
               {{ t.enable }}
@@ -146,7 +146,7 @@
         </div>
       </section>
 
-      <section v-if="hasUsableChannels" class="notification-panel" data-testid="notification-types">
+      <section v-if="topics.length > 0" class="notification-panel" data-testid="notification-types">
         <h2>{{ t.typesTitle }}</h2>
         <form
           v-for="topic in topics"
@@ -157,7 +157,7 @@
           @submit.prevent="void save(topic)"
         >
           <h3>{{ topicName(topic.topic) }}</h3>
-          <fieldset :disabled="pendingWrite">
+          <fieldset :disabled="pendingWrite || loading">
             <label class="notification-choice">
               <input
                 v-model="drafts[topic.topic].enabled"
@@ -173,8 +173,10 @@
                 :id="`notification-primary-${topic.topic}`"
                 v-model="drafts[topic.topic].primaryEndpointId"
                 :data-testid="`notification-primary-${topic.topic}`"
+                :disabled="pendingWrite || loading || !hasUsableChannels"
                 @change="onPrimaryChange(topic.topic)"
               >
+                <option value="">{{ t.useOrgDefault }}</option>
                 <option
                   v-for="endpoint in primaryEndpoints(topic.topic)"
                   :key="endpoint.id"
@@ -195,6 +197,7 @@
                 :id="`notification-fallback-${topic.topic}`"
                 v-model="drafts[topic.topic].fallbackEndpointId"
                 :data-testid="`notification-fallback-${topic.topic}`"
+                :disabled="pendingWrite || loading || !hasUsableChannels || !drafts[topic.topic].primaryEndpointId"
               >
                 <option value="">{{ t.noFallback }}</option>
                 <option
@@ -210,6 +213,9 @@
                 {{ endpointIssue(topic.topic, 'fallback') }}
               </p>
             </div>
+            <p v-if="!hasUsableChannels" class="notification-note" data-testid="notification-default-connection">
+              {{ t.useOrgDefault }}
+            </p>
 
             <label class="notification-choice">
               <input
@@ -228,7 +234,7 @@
                   v-model="drafts[topic.topic].quietStart"
                   type="time"
                   :data-testid="`notification-quiet-start-${topic.topic}`"
-                  :disabled="pendingWrite || !drafts[topic.topic].quietEnabled"
+                  :disabled="pendingWrite || loading || !drafts[topic.topic].quietEnabled"
                 />
               </div>
               <div class="notification-field">
@@ -238,7 +244,7 @@
                   v-model="drafts[topic.topic].quietEnd"
                   type="time"
                   :data-testid="`notification-quiet-end-${topic.topic}`"
-                  :disabled="pendingWrite || !drafts[topic.topic].quietEnabled"
+                  :disabled="pendingWrite || loading || !drafts[topic.topic].quietEnabled"
                 />
               </div>
               <div class="notification-field">
@@ -249,7 +255,7 @@
                   type="text"
                   autocomplete="off"
                   :data-testid="`notification-time-zone-${topic.topic}`"
-                  :disabled="pendingWrite || !drafts[topic.topic].quietEnabled"
+                  :disabled="pendingWrite || loading || !drafts[topic.topic].quietEnabled"
                 />
               </div>
             </div>
@@ -267,7 +273,7 @@
           <p v-if="formErrors[topic.topic]" class="notification-error" role="alert" :data-testid="`notification-form-error-${topic.topic}`">
             {{ formErrors[topic.topic] }}
           </p>
-          <button type="submit" :data-testid="`notification-save-${topic.topic}`" :disabled="pendingWrite || !drafts[topic.topic].primaryEndpointId">
+          <button type="submit" :data-testid="`notification-save-${topic.topic}`" :disabled="pendingWrite || loading">
             {{ pendingWrite ? t.saving : t.save }}
           </button>
         </form>
@@ -296,13 +302,13 @@
         </p>
         <p v-else>{{ t.testDialogPrompt }}</p>
         <div class="notification-actions">
-          <button type="button" data-testid="notification-dialog-cancel" :disabled="pendingWrite" @click="closeDialog">
+          <button type="button" data-testid="notification-dialog-cancel" :disabled="pendingWrite || loading" @click="closeDialog">
             {{ t.cancel }}
           </button>
           <button
             type="button"
             data-testid="notification-dialog-confirm"
-            :disabled="pendingWrite"
+            :disabled="pendingWrite || loading"
             @click="void confirmDialog()"
           >
             {{ dialog.kind === 'revoke' ? t.revokeConfirm : t.testConfirm }}
@@ -328,6 +334,8 @@ import {
   type NotificationCandidate,
   type NotificationEndpoint,
   type NotificationEndpointsListing,
+  type NotificationPreferencePatch,
+  type NotificationQuietHours,
   type NotificationTestSendResult,
   type NotificationTopic,
   type NotificationWriteFailure,
@@ -335,7 +343,6 @@ import {
 import {
   NOTIFICATION_EN,
   NOTIFICATION_ZH,
-  notificationProviderName,
   notificationReason,
   type NotificationText,
 } from '../notifications/labels'
@@ -376,6 +383,13 @@ let focusBeforeDialog: HTMLElement | null = null
 
 const usableEndpoints = computed(() => endpoints.value?.endpoints.filter((endpoint) => endpoint.status === 'active' && endpoint.usable) ?? [])
 const hasUsableChannels = computed(() => usableEndpoints.value.length > 0)
+const visibleCandidates = computed(() => {
+  const listing = endpoints.value
+  if (!listing) return []
+  const listed = new Set(listing.endpoints.map((endpoint) => endpoint.id))
+  return listing.candidates.filter((candidate) => candidate.endpointId === null || !listed.has(candidate.endpointId))
+})
+const noChannelsText = computed(() => visibleCandidates.value.some((candidate) => candidate.addressable) ? t.value.noEnabledChannels : t.value.noUsableChannels)
 const deliveryReason = computed(() => endpoints.value?.delivery.reason ? notificationReason(endpoints.value.delivery.reason, t.value) : t.value.testSendUnavailable)
 
 function topicName(topic: NotificationTopic['topic']): string {
@@ -387,11 +401,11 @@ function endpointStatus(endpoint: NotificationEndpoint): string {
   return endpoint.usable ? t.value.statusUsable : t.value.statusUnavailable
 }
 
-function makeDraft(topic: NotificationTopic, usable: NotificationEndpoint[]): TopicDraft {
+function makeDraft(topic: NotificationTopic): TopicDraft {
   const preference = topic.preference
   return {
     enabled: preference?.enabled ?? true,
-    primaryEndpointId: preference?.primaryEndpointId ?? usable[0]?.id ?? '',
+    primaryEndpointId: preference?.primaryEndpointId ?? '',
     fallbackEndpointId: preference?.fallbackEndpointId ?? '',
     quietEnabled: preference?.quietHours !== null && preference?.quietHours !== undefined,
     quietStart: preference?.quietHours?.start ?? '22:00',
@@ -400,9 +414,8 @@ function makeDraft(topic: NotificationTopic, usable: NotificationEndpoint[]): To
   }
 }
 
-function resetDrafts(listing: NotificationPreferencesListingShape, endpointListing: NotificationEndpointsListing): void {
-  const usable = endpointListing.endpoints.filter((endpoint) => endpoint.status === 'active' && endpoint.usable)
-  drafts.value = Object.fromEntries(listing.topics.map((topic) => [topic.topic, makeDraft(topic, usable)]))
+function resetDrafts(listing: NotificationPreferencesListingShape): void {
+  drafts.value = Object.fromEntries(listing.topics.map((topic) => [topic.topic, makeDraft(topic)]))
 }
 
 interface NotificationPreferencesListingShape {
@@ -429,7 +442,7 @@ async function loadData(): Promise<void> {
   }
   endpoints.value = endpointResult.value
   topics.value = preferenceResult.value.topics
-  resetDrafts(preferenceResult.value, endpointResult.value)
+  resetDrafts(preferenceResult.value)
   formErrors.value = {}
   loadState.value = 'ready'
 }
@@ -445,7 +458,7 @@ function invalidateReads(): void {
 }
 
 function beginWrite(): number | null {
-  if (pendingWrite.value || !active) return null
+  if (pendingWrite.value || loading.value || !active) return null
   pendingWrite.value = true
   actionMessage.value = ''
   formErrors.value = {}
@@ -519,8 +532,9 @@ function primaryEndpoints(topic: string): NotificationEndpoint[] {
 }
 
 function fallbackEndpoints(topic: string): NotificationEndpoint[] {
-  const primary = endpointById(drafts.value[topic]?.primaryEndpointId ?? '')
-  const options = usableEndpoints.value.filter((endpoint) => endpoint.connection.provider !== primary?.connection.provider)
+  const primaryId = drafts.value[topic]?.primaryEndpointId ?? ''
+  const primary = endpointById(primaryId)
+  const options = primaryId ? usableEndpoints.value.filter((endpoint) => endpoint.connection.provider !== primary?.connection.provider) : []
   const storedId = topicByName(topic)?.preference?.fallbackEndpointId
   const stored = storedId ? endpointById(storedId) : undefined
   if (stored && !options.some((endpoint) => endpoint.id === stored.id)) options.push(stored)
@@ -565,28 +579,43 @@ function validQuietDraft(draft: TopicDraft): boolean {
   }
 }
 
+function quietHoursOfDraft(draft: TopicDraft): NotificationQuietHours | null {
+  return draft.quietEnabled ? { start: draft.quietStart, end: draft.quietEnd, timeZone: draft.timeZone } : null
+}
+
+function quietHoursEqual(first: NotificationQuietHours | null, second: NotificationQuietHours | null): boolean {
+  if (first === null || second === null) return first === second
+  return first.start === second.start && first.end === second.end && first.timeZone === second.timeZone
+}
+
+function preferencePatchOf(topic: NotificationTopic, draft: TopicDraft): NotificationPreferencePatch {
+  const preference = topic.preference
+  const patch: NotificationPreferencePatch = { topic: topic.topic, expectedRevision: preference?.revision ?? 0 }
+  if (draft.enabled !== (preference?.enabled ?? true)) patch.enabled = draft.enabled
+  const primaryEndpointId = draft.primaryEndpointId || null
+  const fallbackEndpointId = draft.fallbackEndpointId || null
+  if (primaryEndpointId !== (preference?.primaryEndpointId ?? null)) patch.primaryEndpointId = primaryEndpointId
+  if (fallbackEndpointId !== (preference?.fallbackEndpointId ?? null)) patch.fallbackEndpointId = fallbackEndpointId
+  const quietHours = quietHoursOfDraft(draft)
+  if (!quietHoursEqual(quietHours, preference?.quietHours ?? null)) patch.quietHours = quietHours
+  return patch
+}
+
 async function save(topic: NotificationTopic): Promise<void> {
   const token = beginWrite()
   if (token === null) return
   const draft = drafts.value[topic.topic]
-  if (!draft.primaryEndpointId || !validQuietDraft(draft)) {
+  if (!validQuietDraft(draft)) {
     formErrors.value = { ...formErrors.value, [topic.topic]: t.value.quietInvalid }
     endWrite(token)
     return
   }
-  const result = await patchNotificationPreference({
-    topic: topic.topic,
-    expectedRevision: topic.preference?.revision ?? 0,
-    enabled: draft.enabled,
-    primaryEndpointId: draft.primaryEndpointId,
-    fallbackEndpointId: draft.fallbackEndpointId || null,
-    quietHours: draft.quietEnabled ? { start: draft.quietStart, end: draft.quietEnd, timeZone: draft.timeZone } : null,
-  })
+  const result = await patchNotificationPreference(preferencePatchOf(topic, draft))
   if (!writeIsCurrent(token)) return
   if (result.kind === 'ok') {
     invalidateReads()
     topics.value = topics.value.map((item) => item.topic === topic.topic ? result.topic : item)
-    drafts.value = { ...drafts.value, [topic.topic]: makeDraft(result.topic, usableEndpoints.value) }
+    drafts.value = { ...drafts.value, [topic.topic]: makeDraft(result.topic) }
     actionMessage.value = t.value.saved
   } else if (result.kind === 'conflict' && result.code === 'PREFERENCE_STALE') {
     actionMessage.value = t.value.preferenceConflict
@@ -682,8 +711,8 @@ function testResultText(result: NotificationTestSendResult): string {
     case 'accepted':
       return t.value.testAccepted
     case 'failed':
-    case 'error':
       return t.value.testFailed
+    case 'error':
     case 'outcome_unknown':
     case 'network_error':
       return t.value.testUnknown
@@ -709,8 +738,7 @@ function testResultText(result: NotificationTestSendResult): string {
 async function executeTest(endpoint: NotificationEndpoint, idempotencyKey: string, token: number): Promise<void> {
   const result = await testNotificationEndpoint(endpoint.id, idempotencyKey)
   if (!writeIsCurrent(token)) return
-  if (result.kind === 'accepted' || result.kind === 'failed' || result.kind === 'outcome_unknown') invalidateReads()
-  retryAttempt.value = result.kind === 'network_error' ? { endpoint, idempotencyKey } : null
+  retryAttempt.value = result.kind === 'network_error' || result.kind === 'error' ? { endpoint, idempotencyKey } : null
   actionMessage.value = testResultText(result)
   endWrite(token)
 }
@@ -749,7 +777,7 @@ onBeforeUnmount(() => {
   writeGeneration += 1
 })
 
-defineExpose({ loadState, loading, endpoints, topics, drafts, pendingWrite, actionMessage, formErrors, retryAttempt })
+defineExpose({ loadState, loading, endpoints, topics, drafts, pendingWrite, actionMessage, formErrors, retryAttempt, get readGeneration() { return readGeneration } })
 </script>
 
 <style scoped>
