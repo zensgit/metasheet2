@@ -11,6 +11,12 @@ import { db } from '../db/db'
 import { Logger } from '../core/logger'
 import { authenticate } from '../middleware/auth'
 import { isAdmin as isRbacAdmin } from '../rbac/service'
+import {
+  EVENT_WEBHOOK_DEFAULT_TIMEOUT_MS,
+  checkEventWebhookTarget,
+  createEventWebhookHandler,
+  type EventWebhookDeliveryDeps,
+} from '../core/event-webhook-delivery'
 
 const logger = new Logger('EventsRouter')
 
@@ -69,7 +75,11 @@ const MetricsQuerySchema = z.object({
   toTime: z.string().datetime().optional()
 })
 
-export function eventsRouter(): Router {
+/**
+ * `deps` are test seams for the webhook delivery (resolver, pinned transport). Production calls
+ * `eventsRouter()` with none: the system resolver and `pinnedHttpsFetch`.
+ */
+export function eventsRouter(deps: EventWebhookDeliveryDeps = {}): Router {
   const router = Router()
 
   router.use('/api/events', authenticate, async (req: Request, res: Response, next) => {
@@ -152,23 +162,25 @@ export function eventsRouter(): Router {
     try {
       const validated = SubscribeEventSchema.parse(req.body)
 
+      // S0-a egress posture, same as the other webhook paths: https only, no internal name or IP literal,
+      // no URL credentials. Values-free 400 (closed-set token, never the URL). The per-delivery check in
+      // the handler is the boundary; this only makes an unusable target fail at subscribe.
+      const target = checkEventWebhookTarget(validated.webhookUrl)
+      if (!target.ok) {
+        res.status(400).json({ ok: false, error: (target as { error: unknown }).error })
+        return
+      }
+
       const subscriptionId = await eventBus.subscribe(
         validated.subscriberId,
         validated.eventPattern,
-        async (event, _context) => {
-          // Webhook handler - will be called by the event bus
-          try {
-            const response = await fetch(validated.webhookUrl, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(event)
-            })
-            return response.ok
-          } catch (err) {
-            logger.error('Webhook delivery failed', err instanceof Error ? err : undefined)
-            return false
-          }
-        },
+        // Resolve -> refuse internal -> connect to the pin -> refuse 3xx, on every delivery.
+        createEventWebhookHandler(
+          validated.webhookUrl,
+          validated.subscriberId,
+          validated.options?.timeout_ms ?? EVENT_WEBHOOK_DEFAULT_TIMEOUT_MS,
+          deps,
+        ),
         validated.options
       )
 
