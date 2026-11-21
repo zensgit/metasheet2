@@ -1162,6 +1162,7 @@ describeIfDatabase('role editor — admin-level codes and namespace-admin role d
         [userId, `${userId}@example.test`],
       )
     }
+    await query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin')", [ids.platformAdmin])
     await ensureRole(roles.editor, ['roles:read', 'roles:write'])
     await ensureRole(roles.plain, ['attendance:read'])
     await ensureRole(roles.lead, ['attendance:read', 'attendance:admin'])
@@ -1229,8 +1230,9 @@ describeIfDatabase('role editor — admin-level codes and namespace-admin role d
       if (!json?.token) throw new Error('dev-token issuance failed')
       return json.token as string
     }
-    tokens.platformAdmin = await devToken(ids.platformAdmin, true)
+    tokens.platformAdmin = await devToken(ids.platformAdmin, false)
     tokens.editor = await devToken(ids.editor, false)
+    tokens.editorClaimingAdmin = await devToken(ids.editor, true)
     tokens.xAdminOnly = await devToken(ids.xAdminOnly, false)
   })
 
@@ -1262,6 +1264,10 @@ describeIfDatabase('role editor — admin-level codes and namespace-admin role d
       permissions: ['attendance:read', 'attendance:admin'],
     })
     expect({ status: put.status, code: put.json?.error?.code }).toEqual({ status: 403, code: 'PERMISSION_ESCALATION_FORBIDDEN' })
+    const claimedAdmin = await api('PUT', `/api/roles/${encodeURIComponent(roles.plain)}`, tokens.editorClaimingAdmin, {
+      permissions: ['attendance:read', 'attendance:admin'],
+    })
+    expect({ status: claimedAdmin.status, code: claimedAdmin.json?.error?.code }).toEqual({ status: 403, code: 'PERMISSION_ESCALATION_FORBIDDEN' })
     // POST on the existing id (the additive bypass shape).
     const post = await api('POST', '/api/roles', tokens.editor, { id: roles.plain, name: roles.plain, permissions: ['attendance:admin'] })
     expect({ status: post.status, code: post.json?.error?.code }).toEqual({ status: 403, code: 'PERMISSION_ESCALATION_FORBIDDEN' })
