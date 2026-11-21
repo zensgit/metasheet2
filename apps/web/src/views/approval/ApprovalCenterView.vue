@@ -747,11 +747,12 @@ const route = useRoute()
 const store = useApprovalStore()
 const { canWrite, canAct, permissions: approvalAccess } = useApprovalPermissions()
 
-// B2-01 (待办列表关键字段摘要) — lazy per-templateId FormSchema cache + row summary-line lookup,
-// shared by the desktop table below (all four tabs) and ApprovalMobileList (passed the raw
-// `templateSchemas` cache as a prop). See `useApprovalListFieldSummary.ts` for the full rationale
-// (live-template substitute for the list DTO's missing frozen formSchema, the live-label drift
-// tradeoff, and the session-scoped negative caching on fetch failure).
+// B2-01 (待办列表关键字段摘要) — row summary-line lookup shared by the desktop table below (all four
+// tabs) and ApprovalMobileList (passed the raw `templateSchemas` cache as a prop). Platform rows
+// carry `summarySchema` from their own pinned template version; the lazy per-templateId live-template
+// cache is only the fallback for rows without one. See `useApprovalListFieldSummary.ts` for the full
+// rationale (version semantics, the legacy live-label drift caveat, and the session-scoped negative
+// caching on fetch failure).
 const { schemas: templateSchemas, ensureLoadedForRows, summaryLineFor, summaryUserIdsFor } = useApprovalListFieldSummary()
 const allVisibleApprovals = computed<UnifiedApprovalDTO[]>(() => [
   ...store.pendingApprovals,
@@ -858,9 +859,10 @@ const paneSummaryLine = computed(() => (paneDisplayRow.value ? summaryLineFor(pa
 // Test report 2026-10-08 T4b (gate r1 P3-4): the pane's row is not always a list row. A `?detail=`
 // deep link to an instance that is not on the loaded page renders the single-fetch `paneApproval`,
 // which `allVisibleApprovals` (and so `ensureLoadedForRows`' resolve) never sees, so its summary's
-// 人员 ids were never queued. This reads the pane row against the CACHED schema only: it re-fires when
-// a list row sharing the template loads that schema after the pane opened, and it never fetches a
-// template for the pane (the B2-01 summary stays cache-only).
+// 人员 ids were never queued. This reads the pane row against its own frozen schema, or (legacy rows
+// only) the CACHED live schema: it re-fires when a list row sharing the template loads that schema
+// after the pane opened, and it never fetches a template for the pane (the B2-01 summary stays
+// cache-only).
 watch(
   () => summaryUserIdsFor(paneDisplayRow.value),
   (ids) => ensureUserNamesResolved(ids),

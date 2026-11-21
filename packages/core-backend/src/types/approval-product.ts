@@ -845,7 +845,16 @@ export interface FormSchema {
   // fail-closed, before the graph is built. Validated + preserved at template-save (assertFormSchema),
   // so it round-trips with form_schema (no migration / no separate config column).
   amountConsistencyCheck?: AmountConsistencyMapping
+  // 列表摘要字段：审批列表 / 审批中心的行摘要显示哪些字段（按此顺序，最多 FORM_SCHEMA_SUMMARY_FIELD_MAX 个）。
+  // 只能引用顶层字段，且不能是附件、明细、说明。不设或空数组 = 沿用默认的「前 3 个字段」。
+  // 随 form_schema 一起保存与读回（不加列）；摘要只读列表接口已按节点隐藏规则裁剪过的表单数据。
+  summaryFieldIds?: string[]
 }
+
+export const FORM_SCHEMA_SUMMARY_FIELD_MAX = 5
+
+// 不能作为列表摘要的字段类型（附件、明细、说明）。保存校验和列表摘要读取共用这一份。
+export const FORM_SCHEMA_SUMMARY_INELIGIBLE_FIELD_TYPES: ReadonlySet<string> = new Set(['attachment', 'detail', 'explanation'])
 
 export interface ApprovalRequesterSnapshot {
   id?: string
@@ -995,6 +1004,9 @@ export interface UnifiedApprovalDTO {
   // Frozen form schema from the instance's pinned template version (detail `columns` included),
   // so the read renders detail rows from the FROZEN schema, not the live template.
   formSchema?: FormSchema | null
+  // 列表摘要用的表单结构（只在列表接口上出现）：取自单据绑定的模板版本，只保留这一行快照里有值、
+  // 且可作为摘要的字段，以及该版本的摘要字段配置。没有绑定版本的行不带这个键。
+  summarySchema?: FormSchema | null
   currentNodeKey?: string | null
   /**
    * Lock-3 §2.2 — the TYPE of the instance's current node, resolved from the frozen runtime graph.

@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import type { FormField, FormSchema } from '../src/types/approval'
+import { FORM_SCHEMA_SUMMARY_FIELD_MAX } from '../src/types/approval'
 import {
   buildDetailColumns,
   buildDetailRowsForDisplay,
   buildDisplayFields,
   collectFormUserIds,
+  configuredSummaryFieldIds,
   createEmptyDetailColumnDraft,
   createEmptyDetailRow,
   detailColumnDraftsFromField,
@@ -744,6 +746,85 @@ describe('summaryFields (B2-01 list row key-field summary)', () => {
     }
     expect(summaryFields(onlyAttachmentAndDetail, { fld_attachment: ['f1'], items: [] })).toEqual([])
     expect(summaryFields(summarySchema, {})).toEqual([])
+  })
+})
+
+describe('summaryFields — 模板配置的列表摘要字段 (formSchema.summaryFieldIds)', () => {
+  const baseFields: FormField[] = [
+    {
+      id: 'fld_leave_type',
+      type: 'select',
+      label: '请假类型',
+      options: [{ label: '年假', value: 'annual' }, { label: '事假', value: 'personal' }],
+    },
+    { id: 'fld_duration', type: 'number', label: '时长' },
+    { id: 'fld_reason', type: 'textarea', label: '事由' },
+    { id: 'fld_salary', type: 'number', label: '薪资' },
+    { id: 'fld_note', type: 'text', label: '备注' },
+    { id: 'fld_extra', type: 'text', label: '补充' },
+    { id: 'fld_attachment', type: 'attachment', label: '附件' },
+    { id: 'items', type: 'detail', label: '明细', columns: [{ id: 'x', type: 'text', label: 'X' }] },
+    { id: 'fld_tip', type: 'explanation', label: '说明', props: { text: '请如实填写' } },
+  ]
+  const fullSnapshot = {
+    fld_leave_type: 'annual',
+    fld_duration: 2,
+    fld_reason: '出差',
+    fld_salary: 9000,
+    fld_note: 'n',
+    fld_extra: 'e',
+    fld_attachment: ['f1'],
+    items: [{ x: '1' }],
+  }
+  const withConfig = (summaryFieldIds: unknown): FormSchema =>
+    ({ fields: baseFields, summaryFieldIds }) as FormSchema
+
+  it('shows only the configured fields, in the configured order (not schema order)', () => {
+    const fields = summaryFields(withConfig(['fld_reason', 'fld_leave_type']), fullSnapshot)
+    expect(fields.map((f) => f.key)).toEqual(['fld_reason', 'fld_leave_type'])
+    // 取值格式仍来自 buildDisplayFields（选项值显示为标签）。
+    expect(fields[1]).toEqual({ key: 'fld_leave_type', label: '请假类型', value: '年假' })
+    expect(formatSummaryLine(fields)).toBe('事由：出差 · 请假类型：年假')
+  })
+
+  it('a configured field missing from the snapshot (e.g. hidden at the current node) is omitted, never backfilled', () => {
+    // 列表接口返回的快照里已经没有被节点隐藏的字段；摘要不显示它，也不拿别的字段补位。
+    const redacted: Record<string, unknown> = { ...fullSnapshot }
+    delete redacted.fld_salary
+    const fields = summaryFields(withConfig(['fld_salary', 'fld_reason']), redacted)
+    expect(fields.map((f) => f.key)).toEqual(['fld_reason'])
+
+    const onlyHidden = summaryFields(withConfig(['fld_salary']), redacted)
+    expect(onlyHidden).toEqual([])
+    expect(formatSummaryLine(onlyHidden)).toBe('')
+  })
+
+  it('ignores configured ids that are ineligible (attachment / detail / explanation) or unknown to the schema', () => {
+    const schema = withConfig(['fld_attachment', 'items', 'fld_tip', 'legacy_field', 'fld_duration'])
+    const fields = summaryFields(schema, { ...fullSnapshot, legacy_field: 'x' })
+    expect(fields.map((f) => f.key)).toEqual(['fld_duration'])
+  })
+
+  it('caps the configured list at FORM_SCHEMA_SUMMARY_FIELD_MAX and ignores the default limit', () => {
+    const six = ['fld_extra', 'fld_note', 'fld_salary', 'fld_reason', 'fld_duration', 'fld_leave_type']
+    const fields = summaryFields(withConfig(six), fullSnapshot, 3)
+    expect(FORM_SCHEMA_SUMMARY_FIELD_MAX).toBe(5)
+    expect(fields.map((f) => f.key)).toEqual(six.slice(0, FORM_SCHEMA_SUMMARY_FIELD_MAX))
+  })
+
+  it('unset, empty or malformed config keeps the default first-3 behaviour byte-for-byte', () => {
+    const expected = summaryFields({ fields: baseFields }, fullSnapshot).map((f) => f.key)
+    expect(expected).toEqual(['fld_leave_type', 'fld_duration', 'fld_reason'])
+    for (const config of [undefined, [], 'fld_reason', [42], [''], null]) {
+      expect(summaryFields(withConfig(config), fullSnapshot).map((f) => f.key)).toEqual(expected)
+    }
+  })
+
+  it('configuredSummaryFieldIds keeps strings only, de-duplicates and caps', () => {
+    expect(configuredSummaryFieldIds(null)).toEqual([])
+    expect(configuredSummaryFieldIds({ fields: [] })).toEqual([])
+    expect(configuredSummaryFieldIds(withConfig(['a', 'a', 1, '', 'b']))).toEqual(['a', 'b'])
+    expect(configuredSummaryFieldIds(withConfig(['a', 'b', 'c', 'd', 'e', 'f']))).toEqual(['a', 'b', 'c', 'd', 'e'])
   })
 })
 

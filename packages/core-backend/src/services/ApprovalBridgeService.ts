@@ -12,8 +12,12 @@ import {
   toPlatformApprovalBridgeRecord,
   type PlmApprovalBridgeSource,
 } from '../federation/plm-approval-bridge'
-import type { ApprovalNodeType, FormSchema } from '../types/approval-product'
-import { APPROVAL_POLICY_DENIED_ACTION } from '../types/approval-product'
+import type { ApprovalNodeType, FormField, FormSchema } from '../types/approval-product'
+import {
+  APPROVAL_POLICY_DENIED_ACTION,
+  FORM_SCHEMA_SUMMARY_FIELD_MAX,
+  FORM_SCHEMA_SUMMARY_INELIGIBLE_FIELD_TYPES,
+} from '../types/approval-product'
 import {
   resolveEffectiveNodeOperations,
   seatNodeKeysForViewer,
@@ -341,6 +345,79 @@ function resolveCurrentNodeType(
     }
   }
   return null
+}
+
+// 列表摘要里一个字段只带的键：前端显示摘要用到的就这些（字段名、类型、选项名，部门的显示方式，
+// 日期区间的日期类型）。源字段没有的键不写。
+const LIST_SUMMARY_FIELD_PROP_KEYS = ['display', 'dateType'] as const
+
+function listSummaryField(field: FormField): FormField {
+  const out: FormField = { id: field.id, type: field.type, label: field.label }
+  if (Array.isArray(field.options)) out.options = field.options
+  const props = field.props && typeof field.props === 'object' && !Array.isArray(field.props) ? field.props : null
+  if (props) {
+    const kept: Record<string, unknown> = {}
+    for (const key of LIST_SUMMARY_FIELD_PROP_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(props, key)) kept[key] = props[key]
+    }
+    if (Object.keys(kept).length > 0) out.props = kept
+  }
+  return out
+}
+
+/**
+ * 列表摘要用的表单结构（`UnifiedApprovalDTO.summarySchema`）。输入是单据绑定的模板版本的
+ * form_schema 和这一行最终返回的 formSnapshot（已按当前节点隐藏规则裁剪、已做关联记录投影）。
+ *
+ * - 按版本解释：标签、选项和摘要字段配置都来自这一版本，模板之后改名或改配置不影响这一行。
+ * - 只保留快照里有值、且不是附件 / 明细 / 说明的顶层字段，所以不会多给出这一行之外的字段定义。
+ * - 每个字段只带显示摘要所需的键（`listSummaryField`）：id、type、label、options，以及
+ *   props 里的 display / dateType。其余键（必填、占位、显隐规则、其余 props 等）不带。
+ * - 版本配置了摘要字段时：先按前端同样的规则整理（只要字符串、去重、最多
+ *   FORM_SCHEMA_SUMMARY_FIELD_MAX 个），再只留快照里有值的那些，按配置顺序。一个都没有时
+ *   返回空字段列表，这一行不显示摘要，也不拿别的字段补位。
+ * - 版本没配置时：按模式顺序取前 FORM_SCHEMA_SUMMARY_FIELD_MAX 个可用且有值的字段，前端取前 3 个。
+ *
+ * 前端 `summaryFields`（limit 不超过 FORM_SCHEMA_SUMMARY_FIELD_MAX）对这个结构算出的摘要，与对
+ * 完整版本结构算出的相同。版本结构缺失或格式不对时返回 null（调用方不写这个键）。
+ */
+export function buildListSummarySchema(
+  versionSchema: FormSchema | null | undefined,
+  formSnapshot: Record<string, unknown> | null | undefined,
+): FormSchema | null {
+  const fields = versionSchema && typeof versionSchema === 'object' ? versionSchema.fields : undefined
+  if (!Array.isArray(fields)) return null
+  const snapshot = formSnapshot && typeof formSnapshot === 'object' ? formSnapshot : {}
+  const presentEligible = fields
+    .filter((field): field is FormField =>
+      !!field
+      && typeof field === 'object'
+      && typeof field.id === 'string'
+      && !FORM_SCHEMA_SUMMARY_INELIGIBLE_FIELD_TYPES.has(field.type)
+      && Object.prototype.hasOwnProperty.call(snapshot, field.id),
+    )
+    .map(listSummaryField)
+
+  const configured: string[] = []
+  const rawConfigured = versionSchema?.summaryFieldIds
+  if (Array.isArray(rawConfigured)) {
+    for (const id of rawConfigured) {
+      if (typeof id !== 'string' || id.length === 0 || configured.includes(id)) continue
+      configured.push(id)
+      if (configured.length >= FORM_SCHEMA_SUMMARY_FIELD_MAX) break
+    }
+  }
+  if (configured.length === 0) return { fields: presentEligible.slice(0, FORM_SCHEMA_SUMMARY_FIELD_MAX) }
+
+  const byId = new Map(presentEligible.map((field) => [field.id, field]))
+  const picked: FormField[] = []
+  for (const id of configured) {
+    const field = byId.get(id)
+    if (field) picked.push(field)
+  }
+  return picked.length > 0
+    ? { fields: picked, summaryFieldIds: picked.map((field) => field.id) }
+    : { fields: [] }
 }
 
 // Exported ONLY as a no-DB test seam (approval-return-targets-carriers.test.ts proves the detail
@@ -1026,6 +1103,9 @@ export class ApprovalBridgeService {
     // Fail-closed redaction when actorId is absent; authorized viewers keep { recordId }.
     if (data.length > 0) {
       const queryFn = (sql: string, params?: unknown[]) => pool!.query(sql, params)
+      // 列表摘要：版本结构由这次投影一并批量读出（每页一次查询，按去重后的 template_version_id），
+      // 下面按版本生成每行的 summarySchema，不再另查。
+      const formSchemaByVersionId = new Map<string, FormSchema | null>()
       const projected = await projectRecordLinkFormSnapshotsForViewerBatch(
         data.map((dto, index) => ({
           formSnapshot: dto.formSnapshot ?? null,
@@ -1033,9 +1113,16 @@ export class ApprovalBridgeService {
         })),
         options?.actorId ?? null,
         queryFn,
+        formSchemaByVersionId,
       )
       for (let i = 0; i < data.length; i += 1) {
         data[i]!.formSnapshot = projected[i] ?? null
+        const rawVersionId = instancesResult.rows[i]?.template_version_id
+        const versionId = typeof rawVersionId === 'string' ? rawVersionId.trim() : ''
+        const summarySchema = versionId
+          ? buildListSummarySchema(formSchemaByVersionId.get(versionId) ?? null, data[i]!.formSnapshot)
+          : null
+        if (summarySchema) data[i]!.summarySchema = summarySchema
       }
     }
 

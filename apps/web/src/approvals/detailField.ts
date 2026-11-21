@@ -1,4 +1,5 @@
 import type { FormField, FormFieldType, FormOption, FormSchema } from '../types/approval'
+import { FORM_SCHEMA_SUMMARY_FIELD_MAX } from '../types/approval'
 import { getVisibleFormFields, isEmptyValue, pruneHiddenFormData } from './fieldVisibility'
 import { isRowDerivationActive } from './lineDerivation'
 import { formatRecordLinkDisplay } from './recordLinkField'
@@ -761,6 +762,11 @@ export function buildDisplayFields(
  * caller with no schema at all (e.g. a list row whose templateId has no live template, or none)
  * must degrade to NO summary rather than a raw-key dump of unrelated snapshot data. Returns `[]`
  * whenever `formSchema` is missing/empty or has no eligible leaf field.
+ *
+ * 列表摘要字段：模板设置了 `formSchema.summaryFieldIds` 时，按其顺序只取这些字段（最多
+ * FORM_SCHEMA_SUMMARY_FIELD_MAX 个，`limit` 只作用于默认分支）。取值仍走 `buildDisplayFields`，
+ * 只认快照里实际存在的键：列表接口已按节点隐藏规则裁掉的字段不在快照里，就不会出现在摘要里，
+ * 也不会用别的字段补位。未设置或空数组时与原来一致：前 `limit` 个可用字段。
  */
 export function summaryFields(
   formSchema: FormSchema | null | undefined,
@@ -781,9 +787,35 @@ export function summaryFields(
   )
   if (eligibleFieldIds.size === 0) return []
 
-  return buildDisplayFields(formSchema, formSnapshot, { isZh, resolveUserName })
+  const displayFields = buildDisplayFields(formSchema, formSnapshot, { isZh, resolveUserName })
     .filter((field) => eligibleFieldIds.has(field.key))
-    .slice(0, limit)
+
+  const configuredIds = configuredSummaryFieldIds(formSchema)
+  if (configuredIds.length === 0) return displayFields.slice(0, limit)
+
+  const byKey = new Map(displayFields.map((field) => [field.key, field]))
+  const result: DisplayField[] = []
+  for (const id of configuredIds) {
+    const field = eligibleFieldIds.has(id) ? byKey.get(id) : undefined
+    if (field) result.push(field)
+  }
+  return result
+}
+
+/**
+ * The template's configured summary field ids: strings only, de-duplicated, capped at
+ * FORM_SCHEMA_SUMMARY_FIELD_MAX. Returns `[]` when unset / empty / malformed (= default behaviour).
+ */
+export function configuredSummaryFieldIds(formSchema: FormSchema | null | undefined): string[] {
+  const raw = formSchema?.summaryFieldIds
+  if (!Array.isArray(raw)) return []
+  const ids: string[] = []
+  for (const id of raw) {
+    if (typeof id !== 'string' || id.length === 0 || ids.includes(id)) continue
+    ids.push(id)
+    if (ids.length >= FORM_SCHEMA_SUMMARY_FIELD_MAX) break
+  }
+  return ids
 }
 
 /**
