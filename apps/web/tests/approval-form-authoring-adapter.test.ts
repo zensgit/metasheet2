@@ -506,6 +506,7 @@ describe('legacy length-derived helpers - frozen fallback baseline (delta §5 F1
       maxRowsText: '',
       recordLinkBaseId: '',
       recordLinkSheetId: '',
+      recordLinkDisplayFieldIds: [],
       // L8-C (approval-lock8-field-vocabulary-20260817.md §1.3, OD-L8-6): deliberate widening,
       // neutral defaults — a new field always starts as `text`, so these are meaningless until
       // retyped to `number`, exactly like recordLinkBaseId/recordLinkSheetId above.

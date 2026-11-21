@@ -214,6 +214,14 @@ paths:
           schema:
             type: string
           description: Optional case-insensitive search against the effective display label.
+        # Optional configured display columns from the form field props (comma-separated, at
+        # most three; extra / malformed values are ignored). Intersected server-side with the
+        # columns the caller can see; when configured, search also covers each of them.
+        - in: query
+          name: displayFieldIds
+          schema:
+            type: string
+          description: Comma-separated display field ids.
         - in: query
           name: limit
           schema:
@@ -248,6 +256,11 @@ paths:
                         display:
                           type: string
                           description: Human label from visible source fields, or a generic placeholder.
+                        # Present only when display columns are configured and at least two of
+                        # them are visible to the caller with a non-blank value on this row.
+                        subtitle:
+                          type: string
+                          description: Other display column values, joined.
                   page:
                     type: object
                     required: [limit, offset, total, hasMore]

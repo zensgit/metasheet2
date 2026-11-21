@@ -2007,6 +2007,7 @@ vi.mock('../src/approvals/components/ApprovalRecordLinkPicker.vue', () => ({
       baseId: { type: String, default: '' },
       sheetId: { type: String, default: '' },
       currentRecordId: { type: [String, null], default: null },
+      displayFieldIds: { type: Array, default: () => [] },
     },
     emits: ['confirm', 'close'],
     setup(props, { emit }) {
@@ -2014,6 +2015,7 @@ vi.mock('../src/approvals/components/ApprovalRecordLinkPicker.vue', () => ({
         ? h('button', {
             type: 'button',
             'data-testid': 'stub-record-link-confirm',
+            'data-display-field-ids': ((props.displayFieldIds ?? []) as string[]).join(','),
             onClick: () => {
               const display = props.baseId === 'base_a' ? RECORD_LINK_LABEL_A : RECORD_LINK_LABEL_B
               emit('confirm', { recordId: SHARED_RECORD_ID, display })
@@ -2095,6 +2097,47 @@ describe('ApprovalNewView — record-link labels are per-field (same recordId, d
     app.mount(container!)
     await flushUi()
   }
+
+  it('passes each field configured display columns to the picker (none when unconfigured)', async () => {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_numfields',
+      formSchema: {
+        fields: [
+          {
+            id: 'link_a',
+            type: 'record-link',
+            label: '关联物料',
+            required: false,
+            props: { baseId: 'base_a', sheetId: 'sheet_a', displayFieldIds: ['fld_dwg', 'fld_name', 'fld_parent'] },
+          } as FormField,
+          {
+            id: 'link_b',
+            type: 'record-link',
+            label: '关联合同',
+            required: false,
+            props: { baseId: 'base_b', sheetId: 'sheet_b' },
+          } as FormField,
+        ],
+      },
+    })
+    await mountView()
+    const pickButtons = Array.from(
+      container!.querySelectorAll('[data-testid="approval-record-link-pick"]'),
+    ) as HTMLButtonElement[]
+    expect(pickButtons.length).toBe(2)
+
+    pickButtons[0]!.click()
+    await flushUi()
+    const stubA = container!.querySelector('[data-testid="stub-record-link-confirm"]') as HTMLButtonElement
+    expect(stubA.getAttribute('data-display-field-ids')).toBe('fld_dwg,fld_name,fld_parent')
+    stubA.click()
+    await flushUi()
+
+    pickButtons[1]!.click()
+    await flushUi()
+    const stubB = container!.querySelector('[data-testid="stub-record-link-confirm"]') as HTMLButtonElement
+    expect(stubB.getAttribute('data-display-field-ids')).toBe('')
+  })
 
   it('keeps distinct human labels for two fields that share the same recordId', async () => {
     await mountView()

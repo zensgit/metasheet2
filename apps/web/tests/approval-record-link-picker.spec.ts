@@ -127,6 +127,8 @@ async function mountPicker(props: {
   baseId?: string | Ref<string>
   sheetId?: string | Ref<string>
   currentRecordId?: string | null
+  /** Optional configured display columns (Ref allows a live change while open). */
+  displayFieldIds?: string[] | Ref<string[]>
   /** Optional opener element that should regain focus after close (a11y). */
   opener?: HTMLButtonElement
   onConfirm?: (payload: { recordId: string; display: string }) => void
@@ -144,6 +146,9 @@ async function mountPicker(props: {
   const sheetId = typeof props.sheetId === 'object' && props.sheetId && 'value' in props.sheetId
     ? props.sheetId
     : ref(props.sheetId ?? 'sheet_a')
+  const displayFieldIds = props.displayFieldIds === undefined
+    ? null
+    : (Array.isArray(props.displayFieldIds) ? ref(props.displayFieldIds) : props.displayFieldIds)
   const confirms: Array<{ recordId: string; display: string }> = []
   const Host = defineComponent({
     setup() {
@@ -151,6 +156,7 @@ async function mountPicker(props: {
         visible: visible.value,
         baseId: baseId.value,
         sheetId: sheetId.value,
+        ...(displayFieldIds ? { displayFieldIds: displayFieldIds.value } : {}),
         currentRecordId: props.currentRecordId ?? null,
         onClose: () => { visible.value = false },
         onConfirm: (payload: { recordId: string; display: string }) => {
@@ -254,6 +260,57 @@ describe('ApprovalRecordLinkPicker — dedicated sheet contract', () => {
     expect(container!.querySelector('[data-testid="approval-record-link-picker-empty"]')?.textContent)
       .toMatch(/暂无/)
     expect(container!.textContent).not.toMatch(/rec_/)
+  })
+})
+
+describe('ApprovalRecordLinkPicker — configured display columns', () => {
+  it('passes the configured columns and renders a grey second line only when a subtitle exists', async () => {
+    listMock.mockResolvedValue({
+      ok: true,
+      data: {
+        records: [
+          { id: 'rec_1', display: 'DWG-01', subtitle: '支架 · ASM-9' },
+          { id: 'rec_2', display: '底板' },
+        ],
+        page: { limit: 20, offset: 0, total: 2, hasMore: false },
+      },
+    })
+    await mountPicker({ displayFieldIds: ['fld_dwg', 'fld_name', 'fld_parent'] })
+    const arg = listMock.mock.calls[0][0] as { displayFieldIds?: string[] }
+    expect(arg.displayFieldIds).toEqual(['fld_dwg', 'fld_name', 'fld_parent'])
+    const items = [...container!.querySelectorAll('[data-testid="approval-record-link-picker-item"]')]
+    expect(items).toHaveLength(2)
+    expect(items[0]!.querySelector('[data-testid="approval-record-link-picker-item-label"]')?.textContent).toBe('DWG-01')
+    expect(items[0]!.querySelector('[data-testid="approval-record-link-picker-item-subtitle"]')?.textContent).toBe('支架 · ASM-9')
+    expect(items[1]!.querySelector('[data-testid="approval-record-link-picker-item-label"]')?.textContent).toBe('底板')
+    expect(items[1]!.querySelector('[data-testid="approval-record-link-picker-item-subtitle"]')).toBeNull()
+    expect(container!.textContent).not.toContain('rec_1')
+    expect(container!.textContent).not.toContain('fld_')
+  })
+
+  it('unconfigured field sends no displayFieldIds (request unchanged)', async () => {
+    listMock.mockResolvedValue({
+      ok: true,
+      data: { records: [{ id: 'rec_1', display: '客户甲' }], page: { limit: 20, offset: 0, total: 1, hasMore: false } },
+    })
+    await mountPicker({})
+    expect(listMock.mock.calls[0][0]).not.toHaveProperty('displayFieldIds')
+    expect(container!.querySelector('[data-testid="approval-record-link-picker-item-subtitle"]')).toBeNull()
+  })
+
+  it('a different column set on the same sheet reloads the options', async () => {
+    listMock.mockResolvedValue({
+      ok: true,
+      data: { records: [{ id: 'rec_1', display: 'A' }], page: { limit: 20, offset: 0, total: 1, hasMore: false } },
+    })
+    const cols = ref(['fld_a'])
+    await mountPicker({ displayFieldIds: cols })
+    const before = listMock.mock.calls.length
+    cols.value = ['fld_b']
+    await flushUi(12)
+    expect(listMock.mock.calls.length).toBeGreaterThan(before)
+    const last = listMock.mock.calls.at(-1)![0] as { displayFieldIds?: string[] }
+    expect(last.displayFieldIds).toEqual(['fld_b'])
   })
 })
 

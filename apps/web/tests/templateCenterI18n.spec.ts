@@ -1097,6 +1097,11 @@ describe('O-8 / F8-1 — approval member-surface source guard (per changed file)
         { line: "{ endpoint: 'end', label: '结束' },", count: 1 },
         { line: "const label = humanLabel || '该字段'", count: 1 },
         { line: 'return `字段 ${label}（关联记录）目标不可用，请重新选择目标空间与目标表`', count: 2 },
+        // AUTHORING_ONLY: the display-column picker copy, used by ApprovalFormInlineEditor.vue /
+        // ApprovalFormFieldInspector.vue / TemplateAuthoringView.vue only.
+        { line: "export const RECORD_LINK_DISPLAY_FIELDS_LABEL = '选择记录时显示的列（可选，最多 3 列）'", count: 1 },
+        { line: "'第一列作为每条记录的标题，其余列显示在标题下方；搜索也会匹配这些列。填表人看不到的列不会显示；都不可用时按默认规则显示。更换目标表会清空。'", count: 1 },
+        { line: "export const RECORD_LINK_DISPLAY_FIELDS_LOAD_FAILED = '目标表的列加载失败，请重试'", count: 1 },
         // RECORD_LINK_VALUE_HINT has no importer in apps/web/src.
         { line: "'请选择一条关联记录（仅支持单条；提交时服务端按读权限校验）'", count: 1 },
       ],

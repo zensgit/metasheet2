@@ -1539,6 +1539,70 @@ describe('ApprovalProductService', () => {
       expect(Object.keys(field.props as object).sort()).toEqual(['baseId', 'sheetId'])
     })
 
+    it('accepts optional displayFieldIds (1-3 distinct ids) and canonicalizes them trimmed', async () => {
+      pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        const s = normalize(sql)
+        if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (s.startsWith('INSERT INTO approval_templates')) {
+          return { rows: [{
+            id: 'tpl-rl-cols', key: String(params?.[0]), name: String(params?.[1]), description: null, category: null,
+            visibility_scope: JSON.parse(String(params?.[4])), sla_hours: null, status: 'draft',
+            active_version_id: null, latest_version_id: null,
+            created_at: new Date('2026-10-27T00:00:00.000Z'), updated_at: new Date('2026-10-27T00:00:00.000Z'),
+          }], rowCount: 1 }
+        }
+        if (s.startsWith('INSERT INTO approval_template_versions')) {
+          return { rows: [{
+            id: 'ver-rl-cols', template_id: 'tpl-rl-cols', version: 1, status: 'draft',
+            form_schema: JSON.parse(String(params?.[1])),
+            approval_graph: JSON.parse(String(params?.[2])),
+            created_at: new Date('2026-10-27T00:00:00.000Z'), updated_at: new Date('2026-10-27T00:00:00.000Z'),
+          }], rowCount: 1 }
+        }
+        if (s.startsWith('UPDATE approval_templates')) {
+          return { rows: [{
+            id: 'tpl-rl-cols', key: 'rl-cols', name: 'RL', description: null, category: null,
+            visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+            active_version_id: 'ver-rl-cols', latest_version_id: 'ver-rl-cols',
+            created_at: new Date('2026-10-27T00:00:00.000Z'), updated_at: new Date('2026-10-27T00:00:00.000Z'),
+          }], rowCount: 1 }
+        }
+        throw new Error(`Unhandled query: ${s}`)
+      })
+
+      const result = await create(wrap({
+        id: 'linked', type: 'record-link', label: '关联',
+        props: { displayFieldIds: [' fld_dwg ', 'fld_name', 'fld_parent'], sheetId: 'sheet_y', baseId: 'base_x' },
+      }))
+      const field = result.formSchema.fields[0]
+      expect(field.props).toEqual({ baseId: 'base_x', sheetId: 'sheet_y', displayFieldIds: ['fld_dwg', 'fld_name', 'fld_parent'] })
+      // Canonical key order (pins first) regardless of author key order.
+      expect(Object.keys(field.props as object)).toEqual(['baseId', 'sheetId', 'displayFieldIds'])
+    })
+
+    it('rejects malformed displayFieldIds (empty, more than three, duplicate, blank, non-string, non-array)', async () => {
+      const bad: unknown[] = [
+        [],
+        ['a', 'b', 'c', 'd'],
+        ['a', ' a '],
+        ['a', '  '],
+        ['a', 3],
+        'a,b',
+        null,
+      ]
+      for (const displayFieldIds of bad) {
+        await expect(create(wrap({
+          id: 'linked', type: 'record-link', label: '关联',
+          props: { baseId: 'b', sheetId: 's', displayFieldIds },
+        })), JSON.stringify(displayFieldIds)).rejects.toThrow(/record-link props\.displayFieldIds must be 1-3 distinct non-blank field ids/)
+      }
+      // Other unknown keys are still refused next to a valid displayFieldIds.
+      await expect(create(wrap({
+        id: 'linked', type: 'record-link', label: '关联',
+        props: { baseId: 'b', sheetId: 's', displayFieldIds: ['a'], displayField: 'name' },
+      }))).rejects.toThrow(/record-link props may only contain baseId and sheetId, plus optional displayFieldIds \(unknown: displayField\)/)
+    })
+
     it('rejects record-link extra props keys on update (assertFormSchema on request body)', async () => {
       // updateTemplate validates request.formSchema before any write — no DB needed for reject.
       const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')

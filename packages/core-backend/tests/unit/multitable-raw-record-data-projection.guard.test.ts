@@ -173,7 +173,7 @@ const ALLOWLIST: Record<string, Record<string, { disposition: Disposition; reaso
   'services/approval-record-link-options.ts': {
     'data: r.data': {
       disposition: 'INTERNAL',
-      reason: 'record-link picker keeps the cell map only for server-side display fallback over preferredFieldIds already derived from the viewer field-permission scope; the response emits only {id, display}, and real-DB tests pin hidden/denied fields to the generic label',
+      reason: 'record-link picker keeps the cell map only for server-side display fallback / subtitle over field ids already derived from the viewer field-permission scope (configured display columns are intersected with that same scope); the response emits only {id, display, subtitle?}, and real-DB tests pin hidden/denied fields to the generic label, including configured display columns',
     },
   },
 }

@@ -581,6 +581,58 @@
         >
           {{ recordLinkCatalogHint }}
         </p>
+        <!-- Optional display columns (at most three) for the filler's record picker: the first
+             is the option title, the rest a grey subtitle; search covers them too. Columns come
+             from the PARENT-OWNED per-sheet catalog; options are column names, never raw ids. -->
+        <div
+          v-if="field.recordLinkSheetId.trim()"
+          class="approval-form-field-inspector__record-link-display"
+          data-testid="approval-form-field-inspector-record-link-display"
+        >
+          <p class="approval-form-field-inspector__hint">{{ RECORD_LINK_DISPLAY_FIELDS_LABEL }}</p>
+          <div
+            v-if="recordLinkDisplayFieldsEntry?.error"
+            class="approval-form-field-inspector__option-row"
+            role="alert"
+            data-testid="approval-form-field-inspector-record-link-display-error"
+          >
+            <span class="approval-form-field-inspector__error">{{ recordLinkDisplayFieldsEntry?.error }}</span>
+            <button
+              type="button"
+              class="approval-form-field-inspector__minor-action"
+              data-testid="approval-form-field-inspector-record-link-display-retry"
+              :disabled="recordLinkDisplayFieldsEntry?.loading === true"
+              @click="requestRecordLinkDisplayFields"
+            >
+              重试
+            </button>
+          </div>
+          <label
+            v-for="slotIndex in recordLinkDisplaySlots"
+            :key="slotIndex"
+            class="approval-form-field-inspector__row"
+          >
+            <span class="approval-form-field-inspector__hint">显示列 {{ slotIndex + 1 }}</span>
+            <select
+              class="approval-form-field-inspector__control"
+              :data-testid="`approval-form-field-inspector-record-link-display-${slotIndex}`"
+              :value="field.recordLinkDisplayFieldIds[slotIndex] ?? ''"
+              :disabled="recordLinkDisplayFieldsEntry?.loading === true"
+              :aria-busy="recordLinkDisplayFieldsEntry?.loading === true"
+              @change="onRecordLinkDisplayFieldChange(slotIndex, $event)"
+            >
+              <option value="">{{ slotIndex === 0 ? '自动（默认规则）' : '不设置' }}</option>
+              <option
+                v-for="option in recordLinkDisplayFieldOptionsFor(slotIndex)"
+                :key="option.value"
+                :value="option.value"
+              >
+                {{ option.label }}
+              </option>
+            </select>
+          </label>
+          <p class="approval-form-field-inspector__hint">{{ RECORD_LINK_DISPLAY_FIELDS_HINT }}</p>
+        </div>
         <p
           class="approval-form-field-inspector__hint"
           data-testid="approval-form-field-inspector-record-link-summary"
@@ -964,7 +1016,12 @@ import ApprovalDepartmentPicker from './ApprovalDepartmentPicker.vue'
 import { useApprovalDirectory, type DirectoryUserOption } from '../useApprovalDirectory'
 import {
   buildRecordLinkBaseSelectOptions,
+  buildRecordLinkDisplayFieldSelectOptions,
   buildRecordLinkSheetSelectOptions,
+  RECORD_LINK_DISPLAY_FIELDS_HINT,
+  RECORD_LINK_DISPLAY_FIELDS_LABEL,
+  RECORD_LINK_MAX_DISPLAY_FIELDS,
+  recordLinkDisplayFieldIdsAfterSlotChange,
   recordLinkSheetAfterBaseChange,
   validateRecordLinkPinAgainstLoadedCatalog,
   type RecordLinkAuthoringCatalog,
@@ -1015,6 +1072,8 @@ const props = withDefaults(
 const emit = defineEmits<{
   /** Ask the catalog OWNER to (re)load the record-link catalog — never a fetch from here. */
   (e: 'retry-record-link-catalog'): void
+  /** Ask the catalog OWNER to (re)load one target sheet's display columns. */
+  (e: 'retry-record-link-display-fields', sheetId: string): void
 }>()
 
 const VISIBILITY_OPERATOR_LABELS: Record<FieldVisibilityDraft['operator'], string> = {
@@ -1789,7 +1848,16 @@ function onRecordLinkBaseChange(event: Event): void {
     recordLinkBaseId,
     current.recordLinkSheetId,
   )
-  if (!commitPatch({ recordLinkBaseId, recordLinkSheetId })) {
+  // Display columns belong to the sheet: keep them only while the sheet pin survives (the key
+  // rides in the same ONE command only when there is something to clear).
+  const sheetKept = recordLinkSheetId !== '' && recordLinkSheetId === current.recordLinkSheetId.trim()
+  if (!commitPatch({
+    recordLinkBaseId,
+    recordLinkSheetId,
+    ...(!sheetKept && current.recordLinkDisplayFieldIds.length > 0
+      ? { recordLinkDisplayFieldIds: [] }
+      : {}),
+  })) {
     select.value = current.recordLinkBaseId.trim()
   }
 }
@@ -1798,9 +1866,60 @@ function onRecordLinkSheetChange(event: Event): void {
   const current = field.value
   if (!current) return
   const select = event.target as HTMLSelectElement
-  if (!commitPatch({ recordLinkSheetId: select.value.trim() })) {
+  const recordLinkSheetId = select.value.trim()
+  const sheetKept = recordLinkSheetId === current.recordLinkSheetId.trim()
+  if (!commitPatch({
+    recordLinkSheetId,
+    ...(!sheetKept && current.recordLinkDisplayFieldIds.length > 0
+      ? { recordLinkDisplayFieldIds: [] }
+      : {}),
+  })) {
     select.value = current.recordLinkSheetId.trim()
   }
+}
+
+// --- record-link display columns (parent-owned per-sheet catalog) -------------
+
+const recordLinkDisplayFieldsEntry = computed(() => {
+  const sheetId = field.value?.recordLinkSheetId.trim() ?? ''
+  if (!sheetId) return null
+  return props.recordLinkCatalog?.displayFieldsBySheet?.[sheetId] ?? null
+})
+
+/** Slot indexes to render: every filled slot plus one empty slot, up to the maximum. */
+const recordLinkDisplaySlots = computed<number[]>(() => {
+  const count = Math.min(
+    (field.value?.recordLinkDisplayFieldIds.length ?? 0) + 1,
+    RECORD_LINK_MAX_DISPLAY_FIELDS,
+  )
+  return Array.from({ length: count }, (_, index) => index)
+})
+
+function recordLinkDisplayFieldOptionsFor(slot: number) {
+  return buildRecordLinkDisplayFieldSelectOptions(
+    recordLinkDisplayFieldsEntry.value?.fields ?? [],
+    field.value?.recordLinkDisplayFieldIds ?? [],
+    slot,
+  )
+}
+
+function onRecordLinkDisplayFieldChange(slot: number, event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const next = recordLinkDisplayFieldIdsAfterSlotChange(
+    current.recordLinkDisplayFieldIds,
+    slot,
+    select.value,
+  )
+  if (!commitPatch({ recordLinkDisplayFieldIds: next })) {
+    select.value = current.recordLinkDisplayFieldIds[slot] ?? ''
+  }
+}
+
+function requestRecordLinkDisplayFields(): void {
+  const sheetId = field.value?.recordLinkSheetId.trim() ?? ''
+  if (sheetId) emit('retry-record-link-display-fields', sheetId)
 }
 
 function onVisibilityDependsChange(event: Event): void {

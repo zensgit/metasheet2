@@ -320,6 +320,7 @@ export function addFormField(
     maxRowsText: '',
     recordLinkBaseId: '',
     recordLinkSheetId: '',
+    recordLinkDisplayFieldIds: [],
     // L8-C: neutral defaults, same discipline as recordLinkBaseId/recordLinkSheetId above. Both the
     // Canvas V2 inspector and the inline fallback author these display properties through the typed
     // property-update command; precision/min/max/derived formulas remain outside this contract.
@@ -708,6 +709,8 @@ export interface FormFieldPropertyPatch {
   readonly recordLinkBaseId?: string
   /** `record-link` only: target sheet pin (typed picker value; '' clears). */
   readonly recordLinkSheetId?: string
+  /** `record-link` only: ordered display columns of the target sheet ([] clears). */
+  readonly recordLinkDisplayFieldIds?: readonly string[]
 }
 
 /** Typed patch for one detail column (type changes go through `retypeFormDetailColumn`). */
@@ -782,7 +785,8 @@ export function updateFormFieldProperties(
     return rejected('unsupported_field_type')
   if (
     (patch.recordLinkBaseId !== undefined ||
-      patch.recordLinkSheetId !== undefined) &&
+      patch.recordLinkSheetId !== undefined ||
+      patch.recordLinkDisplayFieldIds !== undefined) &&
     current.type !== 'record-link'
   )
     return rejected('unsupported_field_type')
@@ -870,6 +874,9 @@ export function updateFormFieldProperties(
     ...(patch.recordLinkSheetId !== undefined
       ? { recordLinkSheetId: patch.recordLinkSheetId }
       : {}),
+    ...(patch.recordLinkDisplayFieldIds !== undefined
+      ? { recordLinkDisplayFieldIds: [...patch.recordLinkDisplayFieldIds] }
+      : {}),
   }
   const fields = [...draft.fields]
   fields[index] = next
@@ -897,7 +904,8 @@ function recordLinkCarriesConfiguration(field: FieldAuthoringDraft): boolean {
   return Boolean(
     field.original ||
       field.recordLinkBaseId.trim() !== '' ||
-      field.recordLinkSheetId.trim() !== '',
+      field.recordLinkSheetId.trim() !== '' ||
+      field.recordLinkDisplayFieldIds.length > 0,
   )
 }
 

@@ -1486,6 +1486,100 @@ describe('ApprovalFormFieldInspector — record-link target pickers (delta §3.4
     expect(readOnly.root.querySelector(`[data-testid="${BASE_SELECT}"]`)).toBeNull()
     expect(readOnly.root.querySelector('select')).toBeNull()
   })
+
+  it('display columns: names only, one typed command per slot, at most three, cleared with a sheet change', async () => {
+    const DISPLAY_0 = 'approval-form-field-inspector-record-link-display-0'
+    const DISPLAY_1 = 'approval-form-field-inspector-record-link-display-1'
+    const DISPLAY_2 = 'approval-form-field-inspector-record-link-display-2'
+    const withColumns = catalog({
+      displayFieldsBySheet: {
+        sheet_alpha_1: {
+          fields: [
+            { id: 'fld_dwg', name: '图号', type: 'string' },
+            { id: 'fld_name', name: '名称', type: 'string' },
+            { id: 'fld_parent', name: '父组件图号', type: 'string' },
+            { id: 'fld_qty', name: '数量', type: 'number' },
+          ],
+          loading: false,
+          loaded: true,
+          error: '',
+        },
+      },
+    })
+    const inspector = await mountInspector(
+      [
+        field(1, {
+          type: 'record-link',
+          recordLinkBaseId: 'base_alpha',
+          recordLinkSheetId: 'sheet_alpha_1',
+        }),
+        field(2),
+      ],
+      { recordLinkCatalog: withColumns },
+    )
+    expect(optionTexts(inspector.select(DISPLAY_0))).toEqual(['自动（默认规则）', '图号', '名称', '父组件图号', '数量'])
+    expect(inspector.root.querySelector(`[data-testid="${DISPLAY_1}"]`)).toBeNull()
+
+    await inspector.changeSelect(DISPLAY_0, 'fld_dwg')
+    expect(inspector.commands.at(-1)).toEqual({
+      kind: 'update-properties',
+      localId: 'local_1',
+      patch: { recordLinkDisplayFieldIds: ['fld_dwg'] },
+    })
+    // The next slot appears and no longer offers the column already chosen.
+    expect(optionTexts(inspector.select(DISPLAY_1))).toEqual(['不设置', '名称', '父组件图号', '数量'])
+    await inspector.changeSelect(DISPLAY_1, 'fld_name')
+    await inspector.changeSelect(DISPLAY_2, 'fld_parent')
+    expect(inspector.session().draft.fields[0].recordLinkDisplayFieldIds).toEqual(['fld_dwg', 'fld_name', 'fld_parent'])
+    // Three is the maximum: no fourth slot.
+    expect(inspector.root.querySelector('[data-testid="approval-form-field-inspector-record-link-display-3"]')).toBeNull()
+    expect(inspector.root.textContent).not.toMatch(/fld_/)
+
+    // Clearing a middle slot keeps the list dense.
+    await inspector.changeSelect(DISPLAY_1, '')
+    expect(inspector.session().draft.fields[0].recordLinkDisplayFieldIds).toEqual(['fld_dwg', 'fld_parent'])
+
+    // A different sheet drops the columns in the SAME command (one history entry).
+    const before = inspector.session().history.undoStack.length
+    await inspector.changeSelect(SHEET_SELECT, 'sheet_alpha_2')
+    expect(inspector.commands.at(-1)).toEqual({
+      kind: 'update-properties',
+      localId: 'local_1',
+      patch: { recordLinkSheetId: 'sheet_alpha_2', recordLinkDisplayFieldIds: [] },
+    })
+    expect(inspector.session().history.undoStack).toHaveLength(before + 1)
+    expect(inspector.session().draft.fields[0].recordLinkDisplayFieldIds).toEqual([])
+  })
+
+  it('display columns: a column-list failure shows the values-free error; no picker before a sheet is chosen', async () => {
+    const noSheet = await mountInspector(
+      [field(1, { type: 'record-link', recordLinkBaseId: 'base_alpha' }), field(2)],
+      { recordLinkCatalog: catalog() },
+    )
+    expect(noSheet.root.querySelector('[data-testid="approval-form-field-inspector-record-link-display"]')).toBeNull()
+
+    const failed = await mountInspector(
+      [
+        field(1, {
+          type: 'record-link',
+          recordLinkBaseId: 'base_alpha',
+          recordLinkSheetId: 'sheet_alpha_1',
+        }),
+        field(2),
+      ],
+      {
+        recordLinkCatalog: catalog({
+          displayFieldsBySheet: {
+            sheet_alpha_1: { fields: [], loading: false, loaded: false, error: '目标表的列加载失败，请重试' },
+          },
+        }),
+      },
+    )
+    expect(
+      failed.q('[data-testid="approval-form-field-inspector-record-link-display-error"]').textContent,
+    ).toContain('目标表的列加载失败，请重试')
+    expect(failed.root.textContent).not.toMatch(/sheet_alpha_1/)
+  })
 })
 
 // R-43 (B) — condition values by the dependency field's type (Designer 2.0 inspector). The test

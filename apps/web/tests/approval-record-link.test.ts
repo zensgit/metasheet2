@@ -10,13 +10,18 @@ import {
   RECORD_LINK_SELECTED_GENERIC,
   RECORD_LINK_TARGET_UNAVAILABLE,
   buildRecordLinkBaseSelectOptions,
+  buildRecordLinkDisplayFieldSelectOptions,
   buildRecordLinkSheetSelectOptions,
+  filterRecordLinkDisplayFieldOptions,
   formatRecordLinkDisplay,
   hasPinnedRecordLinkTarget,
   isRecordLinkField,
   isValidRecordLinkValue,
   parseRecordLinkValue,
   recordLinkBaseId,
+  recordLinkDisplayFieldIds,
+  recordLinkDisplayFieldIdsAfterSlotChange,
+  recordLinkDisplayFieldIdsFromProps,
   recordLinkSheetAfterBaseChange,
   recordLinkSheetId,
   resolvePinnedTargetLabel,
@@ -29,13 +34,15 @@ import {
   createEmptyFieldDraft,
   createEmptyStepDraft,
   createEmptyTemplateDraft,
+  draftFromTemplate,
   validateTemplateDraft,
   type FieldAuthoringDraft,
   type TemplateAuthoringDraft,
 } from '../src/approvals/templateAuthoring'
 import { DETAIL_LEAF_FIELD_TYPES, buildDisplayFields } from '../src/approvals/detailField'
 import { prefillFromSnapshot } from '../src/approvals/prefillFromSnapshot'
-import type { FormFieldType } from '../src/types/approval'
+import { updateFormFieldProperties } from '../src/approvals/approvalFormCommands'
+import type { ApprovalTemplateDetailDTO, FormField, FormFieldType } from '../src/types/approval'
 
 function draftWith(fields: FieldAuthoringDraft[]): TemplateAuthoringDraft {
   return {
@@ -408,5 +415,146 @@ describe('record-link — sheet pin after a target-base change (Canvas V2 inspec
     expect(recordLinkSheetAfterBaseChange(sheets, 'base_alpha', 'sheet_missing')).toBe('')
     expect(recordLinkSheetAfterBaseChange(sheets, 'base_alpha', '')).toBe('')
     expect(recordLinkSheetAfterBaseChange([], 'base_alpha', 'sheet_alpha_1')).toBe('')
+  })
+})
+
+describe('record-link — optional display columns (props.displayFieldIds)', () => {
+  function templateWith(field: FormField): ApprovalTemplateDetailDTO {
+    return {
+      id: 'tpl-rl-cols',
+      key: 'rl-cols',
+      name: '关联记录显示列',
+      description: null,
+      category: null,
+      visibilityScope: { type: 'all', ids: [] },
+      slaHours: null,
+      status: 'draft',
+      activeVersionId: null,
+      latestVersionId: 'ver-rl-cols',
+      createdAt: '2026-10-27T00:00:00Z',
+      updatedAt: '2026-10-27T00:00:00Z',
+      formSchema: { fields: [field] },
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'approval', type: 'approval', config: { assigneeSources: [{ kind: 'requester' }] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'start-approval', source: 'start', target: 'approval' },
+          { key: 'approval-end', source: 'approval', target: 'end' },
+        ],
+      },
+    }
+  }
+
+  it('buildFormSchema adds displayFieldIds only when configured; unconfigured stays exactly two keys', () => {
+    const configured = buildFormSchema(draftWith([recordLinkDraft({
+      recordLinkDisplayFieldIds: ['fld_dwg', ' fld_name ', 'fld_parent'],
+    })]))
+    expect(configured.fields[0].props).toEqual({
+      baseId: 'base_a',
+      sheetId: 'sheet_a',
+      displayFieldIds: ['fld_dwg', 'fld_name', 'fld_parent'],
+    })
+    const plain = buildFormSchema(draftWith([recordLinkDraft()]))
+    expect(Object.keys(plain.fields[0].props as object).sort()).toEqual(['baseId', 'sheetId'])
+  })
+
+  it('hydrates displayFieldIds and round-trips them; malformed stored values hydrate to none', () => {
+    const draft = draftFromTemplate(templateWith({
+      id: 'linked',
+      type: 'record-link',
+      label: '关联记录',
+      props: { baseId: 'base_a', sheetId: 'sheet_a', displayFieldIds: ['fld_dwg', 'fld_name'] },
+    }))
+    expect(draft.fields[0].recordLinkDisplayFieldIds).toEqual(['fld_dwg', 'fld_name'])
+    expect(buildFormSchema(draft).fields[0].props).toEqual({
+      baseId: 'base_a',
+      sheetId: 'sheet_a',
+      displayFieldIds: ['fld_dwg', 'fld_name'],
+    })
+    const malformed = draftFromTemplate(templateWith({
+      id: 'linked',
+      type: 'record-link',
+      label: '关联记录',
+      props: { baseId: 'base_a', sheetId: 'sheet_a', displayFieldIds: 'fld_dwg' },
+    }))
+    expect(malformed.fields[0].recordLinkDisplayFieldIds).toEqual([])
+  })
+
+  it('retyping away from record-link drops displayFieldIds with the pins', () => {
+    const schema = buildFormSchema(draftWith([{
+      ...recordLinkDraft({ recordLinkDisplayFieldIds: ['fld_dwg'] }),
+      type: 'text' as FormFieldType,
+      original: {
+        id: 'linked',
+        type: 'record-link',
+        label: '关联记录',
+        props: { baseId: 'base_a', sheetId: 'sheet_a', displayFieldIds: ['fld_dwg'] },
+      },
+    }]))
+    expect(schema.fields[0].props).toBeUndefined()
+  })
+
+  it('validateTemplateDraft refuses more than three or duplicate display columns (values-free copy)', () => {
+    const tooMany = validateTemplateDraft(draftWith([recordLinkDraft({
+      recordLinkDisplayFieldIds: ['a', 'b', 'c', 'd'],
+    })]))
+    expect(tooMany.some((e) => e.includes('关联记录') && e.includes('显示列'))).toBe(true)
+    const dup = validateTemplateDraft(draftWith([recordLinkDraft({ recordLinkDisplayFieldIds: ['a', 'a'] })]))
+    expect(dup.some((e) => e.includes('显示列'))).toBe(true)
+    const ok = validateTemplateDraft(draftWith([recordLinkDraft({ recordLinkDisplayFieldIds: ['a', 'b', 'c'] })]))
+    expect(ok.filter((e) => e.includes('显示列'))).toEqual([])
+  })
+
+  it('field-level helpers: sanitize props, filter eligible column types, slot edits stay dense', () => {
+    expect(recordLinkDisplayFieldIdsFromProps({ displayFieldIds: [' a ', 'a', '', 3, 'b', 'c', 'd'] })).toEqual(['a', 'b', 'c'])
+    expect(recordLinkDisplayFieldIdsFromProps({ displayFieldIds: 'a' })).toEqual([])
+    expect(recordLinkDisplayFieldIds({ props: { baseId: 'b', sheetId: 's', displayFieldIds: ['x'] } })).toEqual(['x'])
+    expect(recordLinkDisplayFieldIds({ props: { baseId: 'b', sheetId: 's' } })).toEqual([])
+
+    expect(filterRecordLinkDisplayFieldOptions([
+      { id: 'f_text', name: '图号', type: 'string' },
+      { id: 'f_num', name: '数量', type: 'number' },
+      { id: 'f_sel', name: '状态', type: 'select' },
+      { id: 'f_calc', name: '公式', type: 'formula' },
+      { id: 'f_link', name: '关联', type: 'link' },
+      { id: '', name: '空', type: 'string' },
+    ]).map((f) => f.id)).toEqual(['f_text', 'f_num', 'f_sel'])
+
+    expect(recordLinkDisplayFieldIdsAfterSlotChange(['a', 'b', 'c'], 1, '')).toEqual(['a', 'c'])
+    expect(recordLinkDisplayFieldIdsAfterSlotChange(['a'], 1, 'b')).toEqual(['a', 'b'])
+    expect(recordLinkDisplayFieldIdsAfterSlotChange(['a', 'b'], 0, 'b')).toEqual(['b'])
+    expect(recordLinkDisplayFieldIdsAfterSlotChange(['a', 'b', 'c'], 3, 'd')).toEqual(['a', 'b', 'c'])
+  })
+
+  it('slot options use column names, hide columns taken by other slots, and keep a stale pick values-free', () => {
+    const fields = [
+      { id: 'f_dwg', name: '图号', type: 'string' },
+      { id: 'f_name', name: '名称', type: 'string' },
+      { id: 'f_parent', name: '', type: 'string' },
+    ]
+    const slot1 = buildRecordLinkDisplayFieldSelectOptions(fields, ['f_dwg', 'f_name'], 1)
+    expect(slot1.map((o) => o.value)).toEqual(['f_name', 'f_parent'])
+    expect(slot1.map((o) => o.label)).toEqual(['名称', RECORD_LINK_TARGET_UNAVAILABLE])
+    const stale = buildRecordLinkDisplayFieldSelectOptions(fields, ['f_gone'], 0)
+    expect(stale[0]).toEqual({ value: 'f_gone', label: RECORD_LINK_TARGET_UNAVAILABLE })
+    expect(JSON.stringify(stale.map((o) => o.label))).not.toContain('f_')
+  })
+
+  it('typed property command accepts display columns on record-link only and copies the array', () => {
+    const field = recordLinkDraft()
+    const draft = draftWith([field])
+    const ids = ['fld_dwg']
+    const result = updateFormFieldProperties(draft, field.localId, { recordLinkDisplayFieldIds: ids })
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.draft.fields[0].recordLinkDisplayFieldIds).toEqual(['fld_dwg'])
+      expect(result.draft.fields[0].recordLinkDisplayFieldIds).not.toBe(ids)
+    }
+    const text = { ...createEmptyFieldDraft(2), id: 'note', type: 'text' as FormFieldType }
+    const refused = updateFormFieldProperties(draftWith([text]), text.localId, { recordLinkDisplayFieldIds: ['x'] })
+    expect(refused.ok).toBe(false)
   })
 })

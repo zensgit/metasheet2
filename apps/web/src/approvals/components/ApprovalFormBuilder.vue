@@ -215,6 +215,7 @@
       :execute="runInspectorCommand"
       :record-link-catalog="recordLinkCatalog"
       @retry-record-link-catalog="emit('retry-record-link-catalog')"
+      @retry-record-link-display-fields="(sheetId: string) => emit('retry-record-link-display-fields', sheetId)"
     />
   </div>
 </template>
@@ -345,6 +346,8 @@ const emit = defineEmits<{
   ): void
   /** The inspector asked the catalog owner to (re)load the record-link catalog. */
   (e: 'retry-record-link-catalog'): void
+  /** The inspector asked the catalog owner to (re)load one target sheet's display columns. */
+  (e: 'retry-record-link-display-fields', sheetId: string): void
 }>()
 
 const adapter: FormAuthoringAdapter =

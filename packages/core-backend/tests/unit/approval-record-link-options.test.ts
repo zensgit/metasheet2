@@ -30,11 +30,16 @@ import {
   APPROVAL_RECORD_LINK_DATABASE_UNAVAILABLE_MESSAGE,
   APPROVAL_RECORD_LINK_GENERIC_LABEL,
   APPROVAL_RECORD_LINK_TARGET_UNAVAILABLE,
+  areRecordLinkDisplayFieldIdsVisible,
   buildDisplayLabelSqlExpression,
   clampPageInt,
   formatApprovalRecordLinkDisplay,
+  formatApprovalRecordLinkSubtitle,
+  intersectRecordLinkDisplayFieldIds,
   isComputedOrSystemFieldType,
   listApprovalRecordLinkOptions,
+  parseRecordLinkDisplayFieldIdsQuery,
+  sanitizeRecordLinkDisplayFieldIds,
 } from '../../src/services/approval-record-link-options'
 import {
   RECORD_LINK_TARGET_AUTH_STAGES,
@@ -450,5 +455,204 @@ describe('listApprovalRecordLinkOptions — People system sheet read window (#59
     const wide = await list('ordinary', 100, 0)
     expect(wide.records).toHaveLength(100)
     expect(wide.page).toEqual({ limit: 100, offset: 0, total: ROSTER, hasMore: true })
+  })
+})
+
+describe('configured display columns — pure helpers', () => {
+  it('sanitize keeps strings only, trims, drops blanks/duplicates, caps at three', () => {
+    expect(sanitizeRecordLinkDisplayFieldIds([' a ', 'b', 'a', '', '  ', 7, null, 'c', 'd'])).toEqual(['a', 'b', 'c'])
+    expect(sanitizeRecordLinkDisplayFieldIds('a,b')).toEqual([])
+    expect(sanitizeRecordLinkDisplayFieldIds(undefined)).toEqual([])
+    expect(sanitizeRecordLinkDisplayFieldIds({ 0: 'a' })).toEqual([])
+  })
+
+  it('query parsing: comma-separated string only; repeated/array values count as absent', () => {
+    expect(parseRecordLinkDisplayFieldIdsQuery('f_dwg, f_name ,f_parent,f_extra')).toEqual(['f_dwg', 'f_name', 'f_parent'])
+    expect(parseRecordLinkDisplayFieldIdsQuery(',,f_a,,f_a')).toEqual(['f_a'])
+    expect(parseRecordLinkDisplayFieldIdsQuery(['f_a', 'f_b'])).toEqual([])
+    expect(parseRecordLinkDisplayFieldIdsQuery(undefined)).toEqual([])
+    expect(parseRecordLinkDisplayFieldIdsQuery('')).toEqual([])
+  })
+
+  it('intersection keeps configured order and never adds an unconfigured column', () => {
+    expect(intersectRecordLinkDisplayFieldIds(['c', 'a', 'x'], ['a', 'b', 'c'])).toEqual(['c', 'a'])
+    expect(intersectRecordLinkDisplayFieldIds([], ['a'])).toEqual([])
+    expect(intersectRecordLinkDisplayFieldIds(['x'], ['a'])).toEqual([])
+  })
+
+  it('subtitle = usable values after the first usable one; id-equal and blank values are skipped', () => {
+    const data = { dwg: 'DWG-01', name: '支架', parent: 'ASM-9', blank: '  ', self: 'rec-1', qty: 4 }
+    expect(formatApprovalRecordLinkSubtitle(data, ['dwg', 'name', 'parent'], 'rec-1')).toBe('支架 · ASM-9')
+    // First configured column blank: the label comes from `name`, so only `parent` remains.
+    expect(formatApprovalRecordLinkSubtitle(data, ['blank', 'name', 'parent'], 'rec-1')).toBe('ASM-9')
+    expect(formatApprovalRecordLinkSubtitle(data, ['self', 'dwg', 'qty'], 'rec-1')).toBe('4')
+    expect(formatApprovalRecordLinkSubtitle(data, ['dwg'], 'rec-1')).toBe('')
+    expect(formatApprovalRecordLinkSubtitle(null, ['dwg', 'name'], 'rec-1')).toBe('')
+  })
+})
+
+describe('listApprovalRecordLinkOptions — configured display columns', () => {
+  const FIELDS = [
+    { id: 'f_project', type: 'string', property: {} },
+    { id: 'f_dwg', type: 'string', property: {} },
+    { id: 'f_name', type: 'string', property: {} },
+    { id: 'f_parent', type: 'string', property: {} },
+    { id: 'f_calc', type: 'formula', property: {} },
+  ]
+  const ROWS = [
+    { id: 'rec-1', data: { f_project: 'P-0001', f_dwg: 'DWG-01', f_name: '支架', f_parent: 'ASM-9' } },
+    { id: 'rec-2', data: { f_project: 'P-0001', f_dwg: '', f_name: '底板', f_parent: '' } },
+    { id: 'rec-3', data: { f_project: 'P-0001', f_dwg: '', f_name: '', f_parent: '' } },
+  ]
+  const calls: Array<{ sql: string; params: unknown[] }> = []
+
+  function fixture() {
+    const gate = authorizedDualGateQuery()
+    return async (sql: string, params?: unknown[]) => {
+      const q = sql.replace(/\s+/g, ' ')
+      // Copy: the service appends LIMIT/OFFSET to the same array after COUNT runs.
+      calls.push({ sql: q, params: [...(params ?? [])] })
+      if (q.includes('FROM meta_fields')) return { rows: FIELDS }
+      if (q.includes('COUNT(*)') && q.includes('FROM meta_records')) return { rows: [{ n: ROWS.length }] }
+      if (q.includes('FROM meta_records') && q.includes('LIMIT')) {
+        // display_label left null so the response uses the pure formatter (mirrors the SQL chain).
+        return { rows: ROWS.map((r) => ({ ...r, display_label: null })) }
+      }
+      return gate(sql)
+    }
+  }
+
+  beforeEach(() => {
+    calls.length = 0
+    pgState.query.mockReset()
+    pgState.query.mockImplementation(fixture())
+    permissionState.loadFieldPermissionScopeMap.mockReset()
+    permissionState.loadFieldPermissionScopeMap.mockResolvedValue(new Map())
+    permissionState.loadRowLevelReadDenyEnabledStrict.mockReset()
+    permissionState.loadRowLevelReadDenyEnabledStrict.mockResolvedValue(false)
+    permissionState.loadDeniedRecordIds.mockReset()
+    permissionState.loadDeniedRecordIds.mockResolvedValue(new Set())
+  })
+
+  const selectCall = () => calls.find((c) => c.sql.includes('FROM meta_records') && c.sql.includes('LIMIT'))!
+  const countCall = () => calls.find((c) => c.sql.includes('COUNT(*)'))!
+
+  it('first configured column is the label, the rest form the subtitle (configured order)', async () => {
+    const result = await listApprovalRecordLinkOptions({
+      userId: 'user-1', baseId: 'base-1', sheetId: 'sheet-1',
+      displayFieldIds: ['f_dwg', 'f_name', 'f_parent'],
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.records).toEqual([
+      { id: 'rec-1', display: 'DWG-01', subtitle: '支架 · ASM-9' },
+      // First configured column blank → next configured column becomes the label, no subtitle left.
+      { id: 'rec-2', display: '底板' },
+      // Every configured column blank → today's chain (first visible non-blank column).
+      { id: 'rec-3', display: 'P-0001' },
+    ])
+    // Label chain: configured columns first, then the remaining visible columns, then generic.
+    expect(selectCall().params.slice(1, 6)).toEqual(['f_dwg', 'f_name', 'f_parent', 'f_project', APPROVAL_RECORD_LINK_GENERIC_LABEL])
+  })
+
+  it('configured columns all hidden or ineligible: SQL, binds and response equal the unconfigured call', async () => {
+    // Same actor, same column visibility for both calls; only displayFieldIds differs.
+    permissionState.loadFieldPermissionScopeMap.mockResolvedValue(new Map([
+      ['f_dwg', { visible: false, readOnly: true }],
+      ['f_name', { visible: false, readOnly: true }],
+    ]) as never)
+    const plainResult = await listApprovalRecordLinkOptions({
+      userId: 'user-1', baseId: 'base-1', sheetId: 'sheet-1', search: 'x',
+    })
+    const plain = { select: selectCall(), count: countCall() }
+    // Positive control: the hidden columns really left the label chain.
+    expect(plain.select.params.slice(1, 4)).toEqual(['f_project', 'f_parent', APPROVAL_RECORD_LINK_GENERIC_LABEL])
+    calls.length = 0
+    const configuredResult = await listApprovalRecordLinkOptions({
+      userId: 'user-1', baseId: 'base-1', sheetId: 'sheet-1', search: 'x',
+      displayFieldIds: ['f_dwg', 'f_name', 'f_calc'],
+    })
+    expect(selectCall()).toEqual(plain.select)
+    expect(countCall()).toEqual(plain.count)
+    expect(configuredResult).toEqual(plainResult)
+    expect(configuredResult.ok).toBe(true)
+    if (configuredResult.ok) {
+      for (const rec of configuredResult.records) expect(rec).not.toHaveProperty('subtitle')
+    }
+  })
+
+  it('a configured column hidden from this actor is dropped; empty intersection falls back unchanged', async () => {
+    permissionState.loadFieldPermissionScopeMap.mockResolvedValue(new Map([
+      ['f_dwg', { visible: false, readOnly: true }],
+      ['f_name', { visible: false, readOnly: true }],
+    ]) as never)
+    const result = await listApprovalRecordLinkOptions({
+      userId: 'user-1', baseId: 'base-1', sheetId: 'sheet-1',
+      displayFieldIds: ['f_dwg', 'f_name', 'f_calc'],
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    // f_dwg/f_name hidden, f_calc computed → nothing effective → today's label, no subtitle.
+    expect(result.records.map((r) => r.display)).toEqual(['P-0001', 'P-0001', 'P-0001'])
+    for (const rec of result.records) expect(rec).not.toHaveProperty('subtitle')
+    const serialized = JSON.stringify(result)
+    expect(serialized).not.toContain('DWG-01')
+    expect(serialized).not.toContain('支架')
+    expect(selectCall().params).not.toContain('f_dwg')
+    expect(selectCall().params).not.toContain('f_name')
+  })
+
+  it('search covers every effective column and COUNT shares the SELECT WHERE and binds', async () => {
+    await listApprovalRecordLinkOptions({
+      userId: 'user-1', baseId: 'base-1', sheetId: 'sheet-1',
+      search: 'ASM', displayFieldIds: ['f_dwg', 'f_name', 'f_parent'],
+    })
+    const select = selectCall()
+    const count = countCall()
+    // $2..$4 configured columns, $5 f_project, $6 generic, $7 pattern.
+    expect(select.sql).toContain(
+      "lower(NULLIF(NULLIF(BTRIM(data->>$2), ''), id)) LIKE $7 OR lower(NULLIF(NULLIF(BTRIM(data->>$3), ''), id)) LIKE $7 OR lower(NULLIF(NULLIF(BTRIM(data->>$4), ''), id)) LIKE $7",
+    )
+    expect(select.params[6]).toBe('%asm%')
+    const whereOf = (sql: string) => sql.slice(sql.indexOf('WHERE'), sql.indexOf('ORDER BY') > 0 ? sql.indexOf('ORDER BY') : undefined).trim()
+    expect(whereOf(count.sql)).toBe(whereOf(select.sql))
+    expect(count.params).toEqual(select.params.slice(0, -2))
+  })
+})
+
+describe('areRecordLinkDisplayFieldIdsVisible (publish-time display column check)', () => {
+  const caps = { canEditRecord: false, canCreateRecord: false }
+  const queryFn = vi.fn(async (sql: string) => {
+    if (sql.includes('FROM meta_fields')) {
+      return {
+        rows: [
+          { id: 'f_dwg', type: 'string', property: {} },
+          { id: 'f_name', type: 'string', property: {} },
+          { id: 'f_calc', type: 'formula', property: {} },
+          { id: 'f_when', type: 'date', property: {} },
+        ],
+      }
+    }
+    return { rows: [] }
+  })
+
+  beforeEach(() => {
+    permissionState.loadFieldPermissionScopeMap.mockReset()
+    permissionState.loadFieldPermissionScopeMap.mockResolvedValue(new Map())
+  })
+
+  it('accepts visible display-eligible columns of the sheet', async () => {
+    expect(await areRecordLinkDisplayFieldIdsVisible(queryFn, 'sheet-1', 'user-1', caps, ['f_name', 'f_dwg'])).toBe(true)
+    expect(await areRecordLinkDisplayFieldIdsVisible(queryFn, 'sheet-1', 'user-1', caps, [])).toBe(true)
+  })
+
+  it('rejects a column of another sheet, a computed / ineligible type, or one hidden from the publisher', async () => {
+    expect(await areRecordLinkDisplayFieldIdsVisible(queryFn, 'sheet-1', 'user-1', caps, ['f_other'])).toBe(false)
+    expect(await areRecordLinkDisplayFieldIdsVisible(queryFn, 'sheet-1', 'user-1', caps, ['f_calc'])).toBe(false)
+    expect(await areRecordLinkDisplayFieldIdsVisible(queryFn, 'sheet-1', 'user-1', caps, ['f_when'])).toBe(false)
+    permissionState.loadFieldPermissionScopeMap.mockResolvedValue(new Map([
+      ['f_dwg', { visible: false, readOnly: true }],
+    ]) as never)
+    expect(await areRecordLinkDisplayFieldIdsVisible(queryFn, 'sheet-1', 'user-1', caps, ['f_name', 'f_dwg'])).toBe(false)
   })
 })
