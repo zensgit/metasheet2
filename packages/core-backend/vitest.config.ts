@@ -469,6 +469,10 @@ export default defineConfig({
       // it, and wired as a WHOLE FILE into the approval real-DB step in plugin-tests.yml (pinned by
       // plugin-tests-parallel-contract.test.mjs and tests/unit/notification-ci-wiring.test.ts).
       'tests/integration/notification-endpoints-preferences.db.test.ts',
+      // Notification verification and test-send ledger: whole-file approval real-DB step in plugin-tests.yml.
+      'tests/integration/notification-verification-test-send.db.test.ts',
+      'tests/integration/notification-verification-production.db.test.ts',
+      'tests/integration/notification-capability-production.db.test.ts',
       // Approval routing multi-source rule against real PostgreSQL: the requester resolver's
       // policy-required refusal, its organisation boundary, its read-only probe and the leaf count
       // statement (db file), and the same rule through the HTTP surface of a real server (api file).
@@ -509,6 +513,8 @@ export default defineConfig({
       'tests/integration/strict-login-grant-scope.db.test.ts',
       'tests/integration/admin-login-grant-command.db.test.ts',
       'tests/integration/auth-b2-issuer-provenance.db.test.ts',
+      'tests/integration/ordinary-session-renewal.db.test.ts',
+      'tests/integration/dingtalk-corp-backfill-scope.db.test.ts',
       'tests/integration/strict-credential-chain.db.test.ts',
       'tests/integration/strict-dingtalk-entry.db.test.ts',
       // Realtime revalidation: authority reader, installation probe and the listening session on a
@@ -2173,6 +2179,9 @@ export default defineConfig({
       'tests/integration/task-g2-status-filter.db.test.ts',
       // The todo center's task source under the production wiring: real DB, same lane.
       'tests/integration/task-todo-source.db.test.ts',
+      // Draft attachments bound on write (create-form uploads kept by the draft sweep): real DB, its own step in
+      // tasks-realdb.yml, so a missing DATABASE_URL cannot skip-green it here.
+      'tests/integration/multitable-form-draft-attachment-bind.db.test.ts',
       // E-learning V0.1 M1 media stale-row claim. Requires real PostgreSQL (FOR UPDATE
       // SKIP LOCKED across two connections). Excluded from the no-DB job so a missing
       // DATABASE_URL cannot skip-green it; wired as a WHOLE FILE into plugin-tests.yml

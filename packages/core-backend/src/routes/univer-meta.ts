@@ -1,3 +1,4 @@
+import { legacyGrantAllowsPublicForm } from '../auth/dingtalk-legacy-resource-scope'
 import type { Request, Response } from 'express'
 import { randomUUID, createHash } from 'crypto'
 import * as path from 'path'
@@ -409,6 +410,7 @@ import {
   type LoadedMultitableRecord,
 } from '../multitable/records'
 import {
+  bindOwnDraftAttachments,
   buildAttachmentSummaries as buildAttachmentSummariesShared,
   deleteAttachmentBinary as deleteAttachmentBinaryShared,
   ensureAttachmentIdsExist as ensureAttachmentIdsExistShared,
@@ -1204,6 +1206,17 @@ async function loadDingTalkPublicFormAccessState(query: QueryFn, userId: string)
   }
 }
 
+class PublicFormGrantRefused extends Error {}
+
+async function recheckPublicFormGrant(query: QueryFn, req: Request, accessMode: PublicFormAccessMode | undefined, lock: boolean): Promise<void> {
+  if (accessMode !== 'dingtalk_granted') return
+  const userId = String(req.user?.id ?? req.user?.sub ?? req.user?.userId ?? '')
+  if (!await legacyGrantAllowsPublicForm(query, userId, typeof req.user?.strictSessionOrgId === 'string', lock)) {
+    throw new PublicFormGrantRefused()
+  }
+}
+
+
 async function evaluateProtectedPublicFormAccess(
   query: QueryFn,
   req: Request,
@@ -1237,7 +1250,9 @@ async function evaluateProtectedPublicFormAccess(
     }
   }
 
-  if (accessMode === 'dingtalk_granted' && !dingtalkAccess.grantEnabled) {
+  if (accessMode === 'dingtalk_granted' && (!dingtalkAccess.grantEnabled || !await legacyGrantAllowsPublicForm(
+    query, userId, typeof req.user?.strictSessionOrgId === 'string', false,
+  ))) {
     return {
       allowed: false,
       statusCode: 403,
@@ -18801,6 +18816,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         record.data = filterRecordDataByFieldIds(record.data, readableFieldIds)
       }
 
+      await recheckPublicFormGrant(pool.query.bind(pool), req, protectedPublicAccess?.accessMode, false)
       return res.json({
         ok: true,
         data: {
@@ -18851,6 +18867,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         },
       })
     } catch (err) {
+      if (err instanceof PublicFormGrantRefused) return res.status(403).json({ ok: false, error: { code: 'DINGTALK_GRANT_REQUIRED', message: 'A DingTalk-authorized account is required for this form' } })
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
       }
@@ -18947,6 +18964,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const fieldErrors: Record<string, string> = {}
       const patch: Record<string, unknown> = {}
       const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
+      // Attachment fields as stored: the submitter's own draft uploads among them are bound to the record in the
+      // write's transaction (bindOwnDraftAttachments), so the draft sweep does not delete them.
+      const attachmentWrites = new Map<string, string[]>()
 
       // Native person (人员): #16 per-field allowed-assignee resolver (sheet members ∩ the field's
       // restrictToMemberGroupIds) — shared with RecordService/RecordWriteService so FORM SUBMIT
@@ -19054,6 +19074,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             continue
           }
           patch[fieldId] = ids
+          attachmentWrites.set(fieldId, ids)
           continue
         }
 
@@ -19286,6 +19307,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
               await query('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [fieldId, recordId])
             }
           }
+          for (const [fieldId, ids] of attachmentWrites.entries()) {
+            await bindOwnDraftAttachments({
+              query, sheetId: view.sheetId, recordId, fieldId, attachmentIds: ids, actorId: getRequestActorId(req),
+            })
+          }
           // W0-1 L6-a: seal the operation LAST for the EDIT branch (no-op when inert or a no-field-change edit).
           await sealOperation(query, op)
           // P1#2d REPLACE: same-transaction durable enqueue on the EDIT branch's SUCCESS path (flag ON) —
@@ -19293,6 +19319,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           // rolls the enqueue back with the txn). After the seal: the outbox row is not a record-history event,
           // so it never enters the operation's event count. Flag OFF ⇒ no-op (legacy post-commit emit fires).
           await enqueueRecordEventIfDurable(asProducerTxnQueryable(query), 'multitable.form.submitted', formSubmittedPayload)
+          await recheckPublicFormGrant(query, req, protectedPublicAccess?.accessMode, true)
           return
         }
 
@@ -19325,6 +19352,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             )
           }
         }
+        // A create form uploads before the record exists, so its files are drafts (`record_id` NULL) until bound
+        // here; unbound, the draft sweep deleted them after the retention time. Anonymous: createActorId is null,
+        // nothing is bound.
+        for (const [fieldId, ids] of attachmentWrites.entries()) {
+          await bindOwnDraftAttachments({
+            query, sheetId: view.sheetId, recordId: resultRecordId, fieldId, attachmentIds: ids, actorId: createActorId,
+          })
+        }
 
         // D-1c slice ① (form-submit CREATE = A6, ratified design-lock 2026-07-13, OD-1/OD-3; audit
         // site A6): this INSERT previously created a brand-new meta_records row with NO revision —
@@ -19356,6 +19391,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // atomic with the INSERT + links + create revision. After the seal for the same reason as the EDIT
         // branch (the outbox row is not a record-history event). Flag OFF ⇒ no-op.
         await enqueueRecordEventIfDurable(asProducerTxnQueryable(query), 'multitable.form.submitted', formSubmittedPayload)
+        await recheckPublicFormGrant(query, req, protectedPublicAccess?.accessMode, true)
       })
 
       const recordRes = await pool.query(
@@ -19501,6 +19537,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         },
       })
     } catch (err) {
+      if (err instanceof PublicFormGrantRefused) return res.status(403).json({ ok: false, error: { code: 'DINGTALK_GRANT_REQUIRED', message: 'A DingTalk-authorized account is required for this form' } })
       if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const writerFenceResponse = sendWriterFenceConflict(res, err)
       if (writerFenceResponse) return writerFenceResponse

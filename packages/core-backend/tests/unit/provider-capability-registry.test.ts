@@ -37,13 +37,12 @@ function descriptor(provider: string, governance: Partial<Record<(typeof INTEGRA
 }
 
 describe('production registry', () => {
-  it('registers exactly dingtalk, with every capability governed by the legacy path', () => {
+  it('registers dingtalk notification as gated and preserves directory and login governance', () => {
     const dingtalk = resolveProviderCapabilityDescriptor('dingtalk')
     expect(dingtalk).not.toBeNull()
     expect(dingtalk!.provider).toBe('dingtalk')
-    expect(dingtalk!.governance).toEqual({ directory: 'legacy', login: 'legacy', notification: 'legacy' })
-    for (const capability of INTEGRATION_CAPABILITIES) expect(dingtalk!.governance[capability]).not.toBe('gated')
-    expect(dingtalk!.enablePreconditions).toBeUndefined()
+    expect(dingtalk!.governance).toEqual({ directory: 'legacy', login: 'legacy', notification: 'gated' })
+    expect(dingtalk!.enablePreconditions).toBeTypeOf('function')
   })
 
   it('has no entry for local, wecom, feishu or an unknown provider', () => {
@@ -52,12 +51,13 @@ describe('production registry', () => {
     }
   })
 
-  it('has no gated entry anywhere and none that implements a capability', () => {
+  it('implements only the gated DingTalk notification capability', () => {
     for (const provider of ['dingtalk', 'local', 'wecom']) {
       const entry = resolveProviderCapabilityDescriptor(provider)
       for (const capability of INTEGRATION_CAPABILITIES) {
-        if (entry) expect(entry.governance[capability]).not.toBe('gated')
-        expect(isCapabilityImplementationAvailable(provider, capability)).toBe(false)
+        const available = provider === 'dingtalk' && capability === 'notification'
+        if (entry) expect(entry.governance[capability] === 'gated').toBe(available)
+        expect(isCapabilityImplementationAvailable(provider, capability)).toBe(available)
       }
     }
     expect(isCapabilityImplementationAvailable('dingtalk', 'nope' as never)).toBe(false)

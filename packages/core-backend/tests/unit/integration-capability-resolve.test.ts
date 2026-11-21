@@ -5,8 +5,7 @@
  * the witness.
  *
  * Positive cases use a test-only mock of the provider registry and the implementation table (the
- * production registry governs every dingtalk capability as legacy, so nothing is effective in
- * production). The resolver itself has no override.
+ * production registry gates notification while directory and login remain legacy). The resolver itself has no override.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
@@ -491,10 +490,12 @@ describe('refusal reasons', () => {
     }
   })
 
-  it('refuses through the production registry: every dingtalk capability is legacy, other providers are not registered', async () => {
+  it('uses gated notification and preserves legacy and unregistered provider refusals', async () => {
     control.testRegistry = false
     for (const capability of CAPABILITIES) {
-      expect(await resolveWith({ state: stateRow([capability]) }, { capability }).decision, capability).toEqual(refused('governed_by_legacy_path'))
+      const decision = await resolveWith({ state: stateRow([capability]) }, { capability }).decision
+      if (capability === 'notification') expect(decision).toMatchObject({ effective: true, provider: 'dingtalk', capability })
+      else expect(decision, capability).toEqual(refused('governed_by_legacy_path'))
     }
     const wecom = { integration: integrationRow({ provider: 'wecom' }), state: stateRow(['login'], { bound_provider: 'wecom' }) }
     expect(await resolveWith(wecom).decision).toEqual(refused('provider_not_registered'))

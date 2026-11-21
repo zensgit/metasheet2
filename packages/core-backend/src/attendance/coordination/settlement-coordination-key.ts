@@ -24,6 +24,7 @@
  */
 import { createHash } from 'node:crypto'
 
+import { USER_ACCESS_LOCK_NAMESPACE } from '../../auth/user-access-lock'
 import { parseCanonicalAttendanceRolloutOrgKeyV1 } from '../w4c0-identity'
 
 /** `0x4D533243` ("MS2C"). Reserved: no other caller may use this value as a two-int4 key1. */
@@ -115,7 +116,9 @@ export const ADVISORY_FIXED_KEY1_REGISTRY: ReadonlyArray<Readonly<{
   source: string
 }>> = Object.freeze([
   fixedKey1('attendance-settlement-coordination', { literal: SETTLEMENT_COORDINATION_KEY1 }, 'packages/core-backend/src/attendance/coordination/settlement-coordination-key.ts'),
+  fixedKey1('user-access', { literal: USER_ACCESS_LOCK_NAMESPACE }, 'packages/core-backend/src/auth/user-access-lock.ts (bind parameter)'),
   fixedKey1('audit-logs-partition', { hashtext: 'audit_logs_partition' }, 'packages/core-backend/src/audit/AuditRepository.ts'),
+  fixedKey1('notif-test-conn', { hashtext: 'notif-test-conn' }, 'packages/core-backend/src/notifications/test-send-service.ts (SQL literal)'),
   fixedKey1('stock-preparation-project', { literal: 0x73700101 }, 'packages/core-backend/src/multitable/stock-preparation-persist-unit-of-work.ts (bind parameter)'),
   fixedKey1('stock-preparation-batch', { literal: 0x73700102 }, 'packages/core-backend/src/multitable/stock-preparation-persist-unit-of-work.ts (bind parameter)'),
   fixedKey1('multitable-pit-recovery', { literal: 0x77303104 }, 'packages/core-backend/src/multitable/canonical-sheet-fence.ts (fixed namespace; documented, no production query site today)'),

@@ -4,6 +4,8 @@
  * key1). The population is the repository's source tree, walked from disk — not a hand-kept list
  * — and the walk asserts it actually reached the module that defines the constant, so a scan that
  * silently covers the wrong tree fails instead of passing.
+ * The same walk reserves the user-access namespace to its helper; the shared registry may only
+ * reference that constant as metadata. Tests may exercise either namespace.
  *
  * Guard ④, population half: every two-int4 advisory call in production source must be classified by
  * the census (`tests/helpers/settlement-coordination-advisory-census.ts`), every constant site must
@@ -15,6 +17,7 @@ import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
 
+import { USER_ACCESS_LOCK_NAMESPACE } from '../../src/auth/user-access-lock'
 import {
   ADVISORY_FIXED_KEY1_REGISTRY,
   SETTLEMENT_COORDINATION_KEY1,
@@ -36,6 +39,27 @@ const RESERVED = /1297297987|0x4d533243|0o11524631103|0b100110101010011001100100
 const withoutDigitSeparators = (text: string): string => text.replace(/(?<=[0-9a-fA-F])_(?=[0-9a-fA-F])/g, '')
 
 const DEFINING_MODULE = 'packages/core-backend/src/attendance/coordination/settlement-coordination-key.ts'
+const USER_ACCESS_MODULE = 'packages/core-backend/src/auth/user-access-lock.ts'
+const USER_ACCESS_RESERVED = new RegExp([
+  String(USER_ACCESS_LOCK_NAMESPACE),
+  `0x${USER_ACCESS_LOCK_NAMESPACE.toString(16)}`,
+  `0o${USER_ACCESS_LOCK_NAMESPACE.toString(8)}`,
+  `0b${USER_ACCESS_LOCK_NAMESPACE.toString(2)}`,
+  'USER_ACCESS_LOCK_NAMESPACE',
+].join('|'), 'i')
+
+function userAccessNamespaceProblems(file: string, source: string): string[] {
+  if (file === USER_ACCESS_MODULE || /(?:^|\/)(?:tests|__tests__)\//.test(file) || /\.(?:test|spec)\.[cm]?[jt]s$/.test(file)) return []
+  let text = withoutDigitSeparators(source)
+  if (file === DEFINING_MODULE) {
+    // Only these two metadata references are allowed; moving a lock call here must still fail.
+    text = text
+      .replace("import { USER_ACCESS_LOCK_NAMESPACE } from '../../auth/user-access-lock'", '')
+      .replace("fixedKey1('user-access', { literal: USER_ACCESS_LOCK_NAMESPACE }, 'packages/core-backend/src/auth/user-access-lock.ts (bind parameter)')", '')
+  }
+  return USER_ACCESS_RESERVED.test(text) ? [file] : []
+}
+
 const ALLOWED_FILES = new Set([
   DEFINING_MODULE,
   'packages/core-backend/src/attendance/__tests__/settlement-coordination-key.test.ts',
@@ -73,6 +97,7 @@ describe('settlement coordination key space — guard ①', () => {
 
     // The walk must cover the real tree: every root, the defining module and a known sibling.
     expect(relative).toContain(DEFINING_MODULE)
+    expect(relative).toContain(USER_ACCESS_MODULE)
     expect(relative).toContain('packages/core-backend/src/attendance/w4c0-identity.ts')
     expect(relative).toContain('plugins/plugin-attendance/index.cjs')
     expect(relative).toContain('scripts/ops/attendance-w4c2-ci-wiring.test.mjs')
@@ -80,10 +105,12 @@ describe('settlement coordination key space — guard ①', () => {
     expect(relative.length).toBeGreaterThan(1000)
 
     const offenders: string[] = []
+    const userAccessOffenders: string[] = []
     let definingModuleMatched = false
     for (let i = 0; i < files.length; i += 1) {
       const rel = relative[i]
       const text = withoutDigitSeparators(fs.readFileSync(files[i], 'utf8'))
+      userAccessOffenders.push(...userAccessNamespaceProblems(rel, text))
       if (!RESERVED.test(text)) continue
       if (rel === DEFINING_MODULE) definingModuleMatched = true
       const allowed = ALLOWED_FILES.has(rel) || ALLOWED_PREFIXES.some((prefix) => rel.startsWith(prefix))
@@ -91,6 +118,22 @@ describe('settlement coordination key space — guard ①', () => {
     }
     expect(definingModuleMatched).toBe(true)
     expect(offenders).toEqual([])
+    expect(USER_ACCESS_LOCK_NAMESPACE).toBe(0x4d533241)
+    expect(userAccessOffenders).toEqual([])
+  })
+
+  it('the same user-access key syntax is accepted only in its helper, regardless of numeric spelling', () => {
+    const spellings = [
+      'USER_ACCESS_LOCK_NAMESPACE', String(USER_ACCESS_LOCK_NAMESPACE),
+      `0x${USER_ACCESS_LOCK_NAMESPACE.toString(16)}`, `0o${USER_ACCESS_LOCK_NAMESPACE.toString(8)}`,
+      `0b${USER_ACCESS_LOCK_NAMESPACE.toString(2)}`, '1_297_297_985',
+    ]
+    for (const key of spellings) {
+      const source = `await client.query('SELECT pg_advisory_xact_lock_shared($1::int4, $2::int4)', [${key}, userKey])`
+      expect(userAccessNamespaceProblems(USER_ACCESS_MODULE, source)).toEqual([])
+      expect(userAccessNamespaceProblems('packages/core-backend/src/auth/other.ts', source)).toEqual(['packages/core-backend/src/auth/other.ts'])
+      expect(userAccessNamespaceProblems(DEFINING_MODULE, source)).toEqual([DEFINING_MODULE])
+    }
   })
 })
 

@@ -1996,6 +1996,9 @@ exec npx vitest run \
   multitable-yjs-scalar-cell \
   myDelegationView \
   newTodoPill \
+  notificationApi.spec.ts \
+  notificationLabels.spec.ts \
+  notificationPreferences.spec.ts \
   pageShell \
   parallelBranchRunsView \
   permissionChecker.spec.ts \

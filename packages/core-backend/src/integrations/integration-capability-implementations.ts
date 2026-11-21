@@ -1,7 +1,6 @@
 /**
  * Static table of which (provider, capability) pairs have a registered implementation behind the
- * capability gate. Every entry is false: no capability-gated consumer exists. A change that adds one
- * changes this table together with the registry and the consumer.
+ * capability gate. DingTalk notification delivery is registered by the notification composition root.
  *
  * Pure module: data only, no I/O, not replaceable at runtime.
  */
@@ -10,7 +9,7 @@ import { INTEGRATION_CAPABILITIES, type IntegrationCapability } from './provider
 type ImplementationTable = Readonly<Record<string, Readonly<Record<IntegrationCapability, boolean>>>>
 
 const IMPLEMENTATIONS: ImplementationTable = Object.freeze({
-  dingtalk: Object.freeze({ directory: false, login: false, notification: false }),
+  dingtalk: Object.freeze({ directory: false, login: false, notification: true }),
 })
 
 export function isCapabilityImplementationAvailable(provider: string, capability: IntegrationCapability): boolean {

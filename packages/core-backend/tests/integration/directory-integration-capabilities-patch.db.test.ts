@@ -1,7 +1,7 @@
 /**
  * The administrator PATCH of directory integration capabilities against real PostgreSQL, through the
  * HTTP route and the real write service:
- *   #1  the integration row is never written; under the production registry nothing can be turned on;
+ *   #1  the integration row is never written; legacy capabilities and notification without evidence cannot be turned on;
  *   #2  the revision check under two connections, on a read-committed-default and on a
  *       repeatable-read-default pool, on the update path and on the insert path;
  *   #3  login scope uniqueness on the insert and update paths, case folding, and release on disable;
@@ -22,10 +22,10 @@
  *
  * Every capability row and every history row asserted here was written by the PATCH under test; the
  * suite itself only reads those two tables, and removes the rows of the integrations it inserted. The
- * consumer resolver reads the rows the PATCH wrote. Turning a capability on needs a gated provider, and
- * the production registry has none, so a test-only mock of the provider registry and of the
- * implementation table stands in for one (as the resolver suite does); the registry case in #1 turns
- * that mock off and goes through the production router.
+ * consumer resolver reads the rows the PATCH wrote. A test-only mock of the provider registry and of
+ * the implementation table enables all three capabilities for the write-protocol cases (as the resolver
+ * suite does); the registry case in #1 turns that mock off and goes through the production router.
+ * Production notification is gated; its evidence success cases are in notification-capability-production.db.test.ts.
  *
  * The generic save in #5 and #6 is the application's own: `updateDirectoryIntegration`, the function
  * the administrator PUT handler calls, on the application's pool, with a complete synthetic payload. It
@@ -659,8 +659,9 @@ describeIfDatabase('directory integration capability PATCH (real database)', () 
       for (const value of [CORP, APP, org]) expect(String(stored.rows[0].image)).not.toContain(value)
     })
 
-    it('through the production router and registry: turning any capability on is refused, turning off changes nothing, and both tables keep their rows', async () => {
+    it('through the production router: legacy and unverified notification enables are refused; disabling keeps both tables unchanged', async () => {
       control.testRegistry = false
+      vi.stubEnv('USER_NOTIFICATION_PREFERENCES_ENABLED', 'false')
       const dingtalk = await insertIntegration()
       const wecom = await insertIntegration({ provider: 'wecom' })
       pinned.setApp(appOf(adminDirectoryCapabilitiesRouter()))
@@ -675,7 +676,13 @@ describeIfDatabase('directory integration capability PATCH (real database)', () 
         for (const capability of ['directory', 'login', 'notification'] as const) {
           const response = await patch(id, body(0, { [capability]: true }))
           expect(response.status).toBe(409)
-          expect(response.body.error).toMatchObject({ code, details: { capability } })
+          if (id === dingtalk.id && capability === 'notification') {
+            expect(response.body.error).toMatchObject({
+              code: 'CAPABILITY_PRECONDITION_FAILED', details: { capability, reason: 'verification_missing' },
+            })
+          } else {
+            expect(response.body.error).toMatchObject({ code, details: { capability } })
+          }
         }
         const all = await patch(id, body(0, { directory: true, login: true, notification: true }))
         expect(all.status).toBe(409)
@@ -694,6 +701,10 @@ describeIfDatabase('directory integration capability PATCH (real database)', () 
       expect(audit.events[0]).toMatchObject({
         resourceId: dingtalk.id,
         meta: { provider: 'dingtalk', actorId: ACTOR, code: 'CAPABILITY_GOVERNED_BY_LEGACY_PATH', capability: 'directory' },
+      })
+      expect(audit.events[2]).toMatchObject({
+        resourceId: dingtalk.id,
+        meta: { provider: 'dingtalk', actorId: ACTOR, code: 'CAPABILITY_PRECONDITION_FAILED', capability: 'notification' },
       })
       expect(await resolveFresh(dingtalk.id, dingtalk.org, 'login')).toEqual(refused('governed_by_legacy_path'))
     })

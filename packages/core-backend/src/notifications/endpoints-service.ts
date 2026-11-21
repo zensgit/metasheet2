@@ -35,6 +35,9 @@ export interface EndpointsServiceDeps extends NotificationDbDeps {
   readonly audit: AuditSink
   /** Whether the capability display is on; defaults to the capability switch. */
   readonly capabilitySwitchOn?: () => boolean
+  readonly deliveryEnabled?: () => boolean
+  /** Display only. The sender separately checks capability and evidence in its transaction. */
+  readonly connectionVerified?: (db: Db, input: { orgId: string; connectionId: string; provider: string }) => Promise<boolean>
 }
 
 export type EndpointStatus = 'active' | 'stale'
@@ -50,7 +53,7 @@ export interface EndpointItem {
   usable: boolean
   unusableReason: UnusableReason | null
   capability: { effective: boolean; reason: string | null }
-  /** Connection verification evidence. No evidence is stored yet, so this is false. */
+  /** Whether the connection's current verification evidence is valid. */
   verified: boolean
   lastVerifiedAt: string
 }
@@ -64,8 +67,11 @@ export interface CandidateItem {
 }
 
 export interface EndpointsListing {
-  /** Delivery is not wired in this version: always disabled. */
-  delivery: { enabled: false; testSendAvailable: false; reason: 'delivery_disabled' }
+  delivery: {
+    enabled: boolean
+    testSendAvailable: boolean
+    reason: 'delivery_disabled' | 'capability_off' | 'not_verified' | 'endpoint_unusable' | null
+  }
   endpoints: EndpointItem[]
   candidates: CandidateItem[]
 }
@@ -274,6 +280,20 @@ export function createEndpointsService(deps: EndpointsServiceDeps): EndpointsSer
     const connections = rows.map((row) => text(row.connection_id))
     const names = await connectionNames(db, orgId, connections)
     const capabilities = await capabilityDisplay(db, orgId, connections)
+    const evidence = new Map<string, boolean>()
+    if (deps.deliveryEnabled?.() === true && deps.connectionVerified) {
+      for (const row of rows) {
+        const connectionId = text(row.connection_id)
+        if (!evidence.has(connectionId)) {
+          try {
+            evidence.set(connectionId, await deps.connectionVerified(db, { orgId, connectionId, provider: text(row.provider) }))
+          } catch {
+            // Display failure is local to this connection; authoritative sender checks still fail closed.
+            evidence.set(connectionId, false)
+          }
+        }
+      }
+    }
     return rows.map((row, index) => {
       const result: ResolveResult = verified[index]
       const status = text(row.status) as EndpointStatus
@@ -292,7 +312,7 @@ export function createEndpointsService(deps: EndpointsServiceDeps): EndpointsSer
         usable: live && status === 'active',
         unusableReason,
         capability: capabilities.get(connectionId) ?? { effective: false, reason: 'not_found' },
-        verified: false,
+        verified: evidence.get(connectionId) === true,
         lastVerifiedAt: new Date(row.last_verified_at as string | Date).toISOString(),
       }
     })
@@ -303,8 +323,16 @@ export function createEndpointsService(deps: EndpointsServiceDeps): EndpointsSer
     const candidates = await resolver.listCandidates(deps.db, { orgId, userId })
     const own = await deps.db.query(SELECT_OWN_SQL, [orgId, userId])
     const endpoints = await itemsFor(deps.db, orgId, userId, own.rows)
+    const enabled = deps.deliveryEnabled?.() === true
+    const usable = endpoints.filter((endpoint) => endpoint.usable)
+    const capable = usable.filter((endpoint) => endpoint.capability.effective)
+    const testSendAvailable = enabled && capable.some((endpoint) => endpoint.verified)
+    const reason: EndpointsListing['delivery']['reason'] = !enabled ? 'delivery_disabled'
+      : usable.length === 0 ? 'endpoint_unusable'
+        : capable.length === 0 ? 'capability_off'
+          : !testSendAvailable ? 'not_verified' : null
     return {
-      delivery: { enabled: false, testSendAvailable: false, reason: 'delivery_disabled' },
+      delivery: { enabled, testSendAvailable, reason },
       endpoints,
       candidates: candidates.map(candidateItem),
     }

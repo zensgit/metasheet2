@@ -523,7 +523,7 @@ describe('PATCH answers', () => {
       [integration({ provider: 'wecom' }), 'CAPABILITY_PROVIDER_NOT_REGISTERED', 'The provider of this integration is not registered for capabilities'],
     ]
     for (const [row, code, message] of cases) {
-      for (const capability of CAPABILITY_NAMES) {
+      for (const capability of row.provider === 'dingtalk' ? ['directory', 'login'] : CAPABILITY_NAMES) {
         mocks.audit.mockClear()
         const query = vi.fn(writeAnswers({ integration: row }))
         pinned.setApp(buildApp(routerWith({ switchOn: true, query })))
@@ -769,9 +769,11 @@ describe('production router', () => {
       const response = await request(pinned.url()).get(`${BASE}/${ID}`)
       expect(response.status).toBe(200)
       const { capabilities } = response.body.data
-      for (const capability of ['directory', 'login', 'notification']) {
+      for (const capability of ['directory', 'login']) {
         expect(capabilities[capability]).toMatchObject({ enabled: false, governance: 'legacy', effective: null, reason: 'governed_by_legacy_path' })
       }
+      expect(capabilities.notification).toMatchObject({ enabled: false, governance: 'gated', effective: false, reason: 'not_enabled' })
+      expect(capabilities.notification).not.toHaveProperty('legacy')
       expect(capabilities.login.legacy).toEqual({ covers: 'oauth_scan_login_only', available: true, requireGrant: expect.any(Boolean), autoLinkEmail: expect.any(Boolean), autoProvision: expect.any(Boolean) })
       expect(Object.keys(capabilities.login.legacy).sort()).toEqual(['autoLinkEmail', 'autoProvision', 'available', 'covers', 'requireGrant'])
       for (const value of [CORP, APP_KEY, 'env-client-id-value', 'env-client-secret-value', 'example.invalid', 'env-corp-value', 'other-allowed-corp']) {
@@ -840,10 +842,13 @@ describe('production router', () => {
     })
   })
 
-  it('cannot turn any capability on: dingtalk is legacy and every other provider is unregistered, and nothing is written', async () => {
+  it('refuses legacy directory/login and unregistered providers without writing', async () => {
     process.env[SWITCH] = 'true'
     for (const [provider, code] of [['dingtalk', 'CAPABILITY_GOVERNED_BY_LEGACY_PATH'], ['local', 'CAPABILITY_PROVIDER_NOT_REGISTERED'], ['wecom', 'CAPABILITY_PROVIDER_NOT_REGISTERED'], ['feishu', 'CAPABILITY_PROVIDER_NOT_REGISTERED']]) {
-      for (const capabilities of [{ directory: true }, { login: true }, { notification: true }, { directory: true, login: true, notification: true }, { directory: false, notification: true }]) {
+      const attempts = provider === 'dingtalk'
+        ? [{ directory: true }, { login: true }, { directory: true, login: true, notification: true }]
+        : [{ directory: true }, { login: true }, { notification: true }, { directory: true, login: true, notification: true }, { directory: false, notification: true }]
+      for (const capabilities of attempts) {
         mocks.query.mockReset().mockImplementation(writeAnswers({ integration: integration({ provider }) }))
         pinned.setApp(buildApp(adminDirectoryCapabilitiesRouter()))
         const response = await request(pinned.url()).patch(`${BASE}/${ID}`).send(patchBody(0, capabilities))

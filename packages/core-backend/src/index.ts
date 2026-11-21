@@ -425,6 +425,9 @@ import { adminDirectoryRoutingPolicyRouter } from './routes/admin-directory-rout
 import { adminDirectoryCapabilitiesRouter } from './routes/admin-directory-capabilities'
 import { adminRealtimeDiagnosticsRouter } from './routes/admin-realtime-diagnostics'
 import { meNotificationEndpointsRouter } from './routes/me-notification-endpoints'
+import { meNotificationTestSendRouter } from './routes/me-notification-test-send'
+import { adminNotificationVerificationsRouter } from './routes/admin-notification-verifications'
+import './services/notification-adapter-bootstrap'
 import { meNotificationPreferencesRouter } from './routes/me-notification-preferences'
 import { adminDirectoryOrgTransfersRouter } from './routes/admin-directory-org-transfers'
 import { startDirectorySyncScheduler, stopDirectorySyncScheduler } from './directory/directory-sync-scheduler'
@@ -1890,7 +1893,7 @@ export class MetaSheetServer {
     // "the server honoured my override" from "a hop stripped the header and a same-path POST twin
     // ran instead". Same-origin fetches could read it regardless; cross-origin ones cannot.
     this.app.use(cors({
-      exposedHeaders: ['X-Correlation-ID', 'X-Method-Overridden'],
+      exposedHeaders: ['X-Correlation-ID', 'X-Method-Overridden', 'Retry-After'],
     }))
 
     // API responses should always opt out of MIME sniffing, including early 4xx replies.
@@ -2323,8 +2326,10 @@ export class MetaSheetServer {
     // Realtime admission diagnostics: reason codes and counters, administrator only. The public
     // health endpoint is not involved and keeps its status and fields.
     this.app.use('/api/admin/realtime', adminRealtimeDiagnosticsRouter())
+    this.app.use('/api/admin/directory', adminNotificationVerificationsRouter())
     // User notification endpoints and preferences: the caller's own rows; answers 404 while the switch is off.
     this.app.use(meNotificationEndpointsRouter())
+    this.app.use(meNotificationTestSendRouter())
     this.app.use(meNotificationPreferencesRouter())
 
     // Canary routing (behind ENABLE_CANARY_ROUTING feature flag)

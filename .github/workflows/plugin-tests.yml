@@ -2763,6 +2763,9 @@ jobs:
             tests/integration/authorization-input-census.db.test.ts \
             tests/integration/directory-pull-source-gate.db.test.ts \
             tests/integration/attendance-role-template-runtime.db.test.ts \
+            tests/integration/notification-verification-test-send.db.test.ts \
+            tests/integration/notification-verification-production.db.test.ts \
+            tests/integration/notification-capability-production.db.test.ts \
             tests/integration/direct-permission-writers.db.test.ts \
             tests/integration/platform-role-assign-transaction.db.test.ts \
             tests/integration/attendance-role-writers-transaction.db.test.ts \
@@ -2784,6 +2787,8 @@ jobs:
             tests/integration/strict-login-grant-scope.db.test.ts \
             tests/integration/admin-login-grant-command.db.test.ts \
             tests/integration/auth-b2-issuer-provenance.db.test.ts \
+            tests/integration/ordinary-session-renewal.db.test.ts \
+            tests/integration/dingtalk-corp-backfill-scope.db.test.ts \
             tests/integration/strict-credential-chain.db.test.ts \
             tests/integration/strict-dingtalk-entry.db.test.ts \
             tests/integration/realtime-authority-read.db.test.ts \

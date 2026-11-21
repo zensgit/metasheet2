@@ -6,7 +6,8 @@ paths:
         Answers 404 while USER_NOTIFICATION_PREFERENCES_ENABLED is not the exact string true (and when the
         session token carries no organization). The caller and the organization come from the session only.
         The response carries no recipient identifier, digest or proof id. `capability` is a display state
-        and is not authoritative.
+        and is not authoritative. `delivery` reports whether delivery is enabled, whether a test can be
+        sent now, and a fixed reason when it cannot. Test controls use `delivery.testSendAvailable`.
       operationId: listMyNotificationEndpoints
       security: [ { bearerAuth: [] } ]
       responses:
@@ -130,6 +131,73 @@ paths:
           description: >-
             NOTIFICATION_BUSY (a lock wait, deadlock or cancelled statement; retry), or NOTIFICATION_SCHEMA_UNAVAILABLE
             (the tables of this surface are not provisioned yet)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationError' }
+  /api/me/notification-endpoints/{id}/test:
+    post:
+      summary: Send one fixed test notification to the caller's endpoint
+      description: >-
+        Requires confirm=true and an idempotency key of 8-64 letters, digits, underscores or hyphens.
+        Unknown fields, including recipient identifiers, are refused. A disabled notification surface
+        answers 404; disabled delivery answers 409. The endpoint must belong to the caller and be usable,
+        and its connection must be ready. Repeating a key returns the stored outcome without sending
+        again or consuming another rate-limit slot. An unfinished request answers TEST_SEND_IN_PROGRESS;
+        after 90 seconds it answers outcome_unknown with code test_send_interrupted and is never resent
+        under that key. Accepted means provider acceptance, not receipt or reading. The message is fixed
+        and contains no caller-supplied content or links.
+      operationId: testMyNotificationEndpoint
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NotificationTestSendRequest' }
+      responses:
+        '200':
+          description: The test outcome, including a previously stored outcome for this key
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationTestSendResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: The surface is switched off, or no such endpoint belongs to the caller (NOT_FOUND)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationError' }
+        '409':
+          description: >-
+            NOTIFICATION_DELIVERY_DISABLED, ENDPOINT_NOT_USABLE or CONNECTION_NOT_READY (with a fixed
+            reason), or TEST_SEND_IN_PROGRESS. Nothing new was sent.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationError' }
+        '422':
+          description: CONFIRM_REQUIRED, INVALID_REQUEST (invalid key or unknown fields), or ORG_MISSING
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationError' }
+        '429':
+          description: TEST_SEND_RATE_LIMITED; wait the number of seconds in Retry-After
+          headers:
+            Retry-After:
+              description: Seconds until a test may be attempted again
+              schema: { type: integer, minimum: 1 }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationError' }
+        '500':
+          description: Fixed-sentence failure (INTERNAL)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationError' }
+        '503':
+          description: NOTIFICATION_BUSY (retry), or NOTIFICATION_SCHEMA_UNAVAILABLE
           content:
             application/json:
               schema: { $ref: '#/components/schemas/NotificationError' }

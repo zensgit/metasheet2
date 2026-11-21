@@ -53,6 +53,7 @@ import {
   readDingTalkIntegrationScopedMessageTuple,
   type DingTalkIntegrationScopedMessageTuple,
   type DingTalkMessageEnvPresence,
+  type DingTalkMessageTupleClient,
   type DingTalkMessageTupleSource,
 } from './work-notification-settings'
 
@@ -270,8 +271,15 @@ function buildVerificationContent(integrationId: string, runId: string): string 
   return `This message verifies the work-notification credentials resolved for directory integration ${integrationId} as the integration-scoped send path resolves them. Verification run ${runId}.`
 }
 
+/** Server-only observer of the exact tuple used for this run, outside the public report. */
+export interface DingTalkWorkNotificationVerifyInternalOptions {
+  client?: DingTalkMessageTupleClient
+  onResolvedTuple?(tuple: DingTalkIntegrationScopedMessageTuple): void
+}
+
 export async function verifyDingTalkWorkNotificationIntegration(
   input: DingTalkWorkNotificationVerifyInput,
+  internal: DingTalkWorkNotificationVerifyInternalOptions = {},
 ): Promise<DingTalkWorkNotificationVerifyResult> {
   const integrationId = readIntegrationId(input.integrationId)
   const requestedLevel = readLevel(input.level)
@@ -299,7 +307,9 @@ export async function verifyDingTalkWorkNotificationIntegration(
   // ── level config ──────────────────────────────────────────────────────────────────────────────────────
   let tuple: DingTalkIntegrationScopedMessageTuple
   try {
-    tuple = await readDingTalkIntegrationScopedMessageTuple(integrationId)
+    tuple = internal.client
+      ? await readDingTalkIntegrationScopedMessageTuple(integrationId, internal.client)
+      : await readDingTalkIntegrationScopedMessageTuple(integrationId)
   } catch (error) {
     // Only the resolver's typed verdicts are a report; a decryption or driver failure is the route's 400.
     if (!(error instanceof DingTalkMessageConfigError)) throw error
@@ -307,6 +317,7 @@ export async function verifyDingTalkWorkNotificationIntegration(
     result.failure = { level: 'config', code: error.code, message: text.text }
     return result
   }
+  internal.onResolvedTuple?.(tuple)
   result.integration = tuple.integration
   result.resolution = describeResolution(tuple)
   markReached(result, 'config')
