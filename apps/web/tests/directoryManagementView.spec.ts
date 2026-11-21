@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, ref, type App } from 'vue'
@@ -45,12 +46,31 @@ vi.mock('../src/utils/api', () => ({
   apiFetch: (...args: unknown[]) => apiFetchMock(...args),
 }))
 
+function scopesSharedDirectoryStylesheet(source: string): boolean {
+  return /<style\b[^>]*\sscoped\b[^>]*\bsrc=["'][^"']*directory-admin\.css["']/.test(source)
+}
+
 describe('directory component style isolation', () => {
   it('covers the view and every extracted section', () => {
     expect(Object.keys(directoryStyleSources)).toEqual(expect.arrayContaining([
       '../src/views/DirectoryManagementView.vue',
       '../src/components/directory/DirectoryAccountsSection.vue',
     ]))
+  })
+
+  it('includes every directory block that scopes the shared stylesheet', () => {
+    const webRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
+    const directoryDir = join(webRoot, 'src/components/directory')
+    const componentSources = readdirSync(directoryDir)
+      .filter((name) => name.startsWith('Directory') && name.endsWith('.vue'))
+      .filter((name) => scopesSharedDirectoryStylesheet(readFileSync(join(directoryDir, name), 'utf8')))
+      .map((name) => `../src/components/directory/${name}`)
+    const viewSource = readFileSync(join(webRoot, 'src/views/DirectoryManagementView.vue'), 'utf8')
+    const expected = [
+      ...(scopesSharedDirectoryStylesheet(viewSource) ? ['../src/views/DirectoryManagementView.vue'] : []),
+      ...componentSources,
+    ].sort()
+    expect(Object.keys(directoryStyleSources).sort()).toEqual(expected)
   })
 
   it.each(Object.entries(directoryStyleSources))('keeps shared styles scoped in %s', (filename, source) => {
@@ -859,6 +879,22 @@ describe('DirectoryManagementView', () => {
     expect(container!.querySelector('#directory-tab-organization')?.getAttribute('aria-selected')).toBe('true')
   })
 
+  it('returns to the overview tab when the tab query is not a directory tab', async () => {
+    window.history.replaceState({}, '', '/admin/directory?tab=not-a-directory-tab&keep=1')
+    mockInitialLoad([], [])
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    expect(container!.querySelector('#directory-tab-overview')?.getAttribute('aria-selected')).toBe('true')
+    expect(getComputedStyle(container!.querySelector<HTMLElement>('#directory-panel-overview')!).display).not.toBe('none')
+    expect(getComputedStyle(container!.querySelector<HTMLElement>('#directory-panel-settings')!).display).toBe('none')
+    expect(getComputedStyle(container!.querySelector<HTMLElement>('#directory-panel-accounts')!).display).toBe('none')
+    expect(getComputedStyle(container!.querySelector<HTMLElement>('#directory-panel-sync')!).display).toBe('none')
+    expect(window.location.search).toContain('tab=not-a-directory-tab')
+    expect(window.location.search).toContain('keep=1')
+  })
+
   it('supports keyboard tab navigation and opens settings when creating an integration', async () => {
     mockInitialLoad([], [])
     app = createApp(DirectoryManagementView)
@@ -951,6 +987,31 @@ describe('DirectoryManagementView', () => {
     clickButton(first, '解除绑定')
     await flushUi()
     clickButton(second, '解除绑定')
+    await flushUi()
+    expect(container!.textContent).toContain('已有解绑操作正在处理，请稍后再试')
+    expect(ElMessageBox.confirm).toHaveBeenCalledTimes(1)
+    expect(apiFetchMock.mock.calls.filter(([url]) => String(url).endsWith('/unbind')).map(([url]) => url)).toEqual([
+      '/api/admin/directory/accounts/account-a/unbind',
+    ])
+    finish(createApiErrorResponse('操作结束'))
+    await flushUi()
+  })
+
+  it('explains a review-queue deprovision while another unbind is still pending', async () => {
+    const local = { id: 'user-a', name: 'Member', email: 'member@example.com' }
+    mockInitialLoad(
+      [createInactiveLinkedReviewItem('account-review', 'review member', { ...local, id: 'user-review' })],
+      [createLinkedAccount('account-a', 'first member', local)],
+    )
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    let finish!: (response: unknown) => void
+    apiFetchMock.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+    clickButton(findAccountsSection(container!), '解除绑定')
+    await flushUi()
+    clickButton(container!, '停权处理')
     await flushUi()
     expect(container!.textContent).toContain('已有解绑操作正在处理，请稍后再试')
     expect(ElMessageBox.confirm).toHaveBeenCalledTimes(1)
