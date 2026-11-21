@@ -231,8 +231,8 @@ const EXPECTED: Record<string, Entry> = {
     ],
   },
   [`${B}/collab/yjs-websocket-adapter.ts`]: {
-    role: 'PROTECTED BOUNDARY. The record editing namespace: the handshake, every message and every send of record content to a record room are checked; an incoming change is applied only after its sender was checked. One send goes outside the delivery boundary on purpose: the invalidation notice, a control message without record content that tells subscribers their copy is no longer the shared one; it is sent to the whole record room also while deliveries are withheld.',
-    counts: { socketIoImport: 1, namespace: 1, connectionHandler: 1, roomSend: 3, connectionRoomCall: 4, listenerWithRoomCall: 4, emit: 23 },
+    role: 'PROTECTED BOUNDARY. The record editing namespace: the handshake, every message and every send of record content to a record room are checked; an incoming change is applied only after its sender was checked. One send goes outside the delivery boundary on purpose: the invalidation notice, a control message without record content that tells subscribers their copy is no longer the shared one; it is sent to the whole record room also while deliveries are withheld. The resync notice to one subscriber that a relayed change did not reach is the same kind of control message.',
+    counts: { socketIoImport: 1, namespace: 1, connectionHandler: 1, roomSend: 3, connectionRoomCall: 4, listenerWithRoomCall: 4, emit: 24 },
     inbound: [
       // The transport of a handshake that is kept waiting: its close releases the waiter.
       'conn.once(\'close\')',
