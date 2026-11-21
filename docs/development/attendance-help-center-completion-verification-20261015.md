@@ -52,9 +52,54 @@ Harold 审阅 Draft #6426（当时 head `2ab1b998b`）后暂不合并，指出�
 
 服务端 `ATTENDANCE_ROLE_TEMPLATES` 另有 `importer` 模板：`attendance:read` + `attendance:import`（`packages/core-backend/src/routes/attendance-admin.ts:234-239`）。用户权限页的角色模板下拉只有员工、审批人、管理员：单人 `AttendanceView.vue:3834-3836`，批量 `3916-3918`。操作帮助故意不介绍 `importer`，因为界面没有入口，写进去会让用户找不到操作位置。
 
-### 3. 旧版管理员直接授权回退缺少导入权限（独立兼容性问题）
+### 3. 旧版管理员回退清单与服务端模板的权限集不一致（已对齐）
 
-这与上一款不是同一件事。当前部署优先把 `{ template: role }` 交给 `/api/attendance-admin/users/.../roles/assign`，走服务端管理员模板（含 `attendance:import`，`attendance-admin.ts:240-244`）。仅当该接口被当作旧部署回退时，才使用前端 `provisionRolePermissions`。其中 `admin` 为 `attendance:read`、`attendance:write`、`attendance:approve`、`attendance:admin`，不含 `attendance:import`（`AttendanceView.vue:12828-12832`）。调用点在 `22515`、`22569`、`22705`、`22798`。这是旧版兼容路径上的缺口，本补丁只在维护文档记录，不修改任何授权逻辑。
+这与上一款不是同一件事。当前部署优先把 `{ template: role }` 交给 `/api/attendance-admin/users/.../roles/assign`（撤销 `roles/unassign`，批量 `batch/roles/assign` 与 `batch/roles/unassign`），走服务端管理员模板（含 `attendance:import`，`attendance-admin.ts:240-244`）。
+
+回退门不改。只有平台管理员（`attendanceAdminGlobalUserScope`，`AttendanceView.vue:12866-12868`；`canUseAttendanceAdminLegacyGlobalFallback`，`18403-18406`）并且 `isAttendanceAdminEndpointUnavailable` 判为缺路由 404 时才回退（`attendanceAdminEndpointCompatibility.ts:1-5`：状态是 404，且载荷不是 `ok: false` 的对象）。结构化业务 404（`ok: false`）、403、500 不回退。
+
+四条旧路径共用同一清单：单人授予 `22512`、单人撤销 `22566`、批量授予 `22702`、批量撤销 `22795`。清单在 `attendanceProvisionRolePermissions.ts`，`AttendanceView.vue:12829` 引用。`admin` 现为五键，与服务端管理员模板一致。
+
+根因是权限集不一致（permission-set mismatch），不是缺 `attendance:import` 就一定不能导入。插件把 `attendance:admin` 当作导入权限：`hasAttendanceImportAccess` 在已有管理员访问时为真（`plugins/plugin-attendance/index.cjs:24274-24277`）；`withAttendanceImportPermission` 接受 `attendance:import` 或 `attendance:admin`（`25517-25518`）；`withAnyPermission` 在要求 `attendance:import` 时，持有 `attendance:admin` 也放行（`24236-24243`）。
+
+`POST /api/permissions/grant` 在身份认证和平台管理员授权之后，权限码必须已在目录中，没有额外的硬编码允许名单（`packages/core-backend/src/routes/permissions.ts:133` 认证，`:151` 查数据库管理员，`:158` 查目录）。`attendance:import` 已由迁移 `packages/core-backend/src/db/migrations/zzzz20260117090000_add_attendance_permissions.ts:17` 与 `ensureAttendanceRoleTemplates`（`attendance-admin.ts:512`）写入目录。
+
+后续、本轮不改：`scripts/ops/attendance-provision-user.sh` 对目标用户做真实授权。其 admin 映射仍缺 `attendance:import`（`91-93`），读回期望用的是同一份不完整清单（`verify_access`，`172-193`）。这是已存在的真实运维缺口，不是 token fixture。脚本和夹具权限都不改。
+
+### 4. 2026-11-11 对齐最新 main（#6849）
+
+Harold 同意将 #6849 对齐最新 `origin/main`。分支原基于 `5920de5b2`（#6846）。此前已知 tip `331b87960`（#6847）之后 main 又前进到 `0232a25f220d7fdae7aa42a7d3caa40e82d1844d`（#6842，2026-11-11 17:17:17 +08）。
+
+`331b87960..0232a25f2` 共 10 个提交。其中触及敏感路径的是：`a77016971`（#6809）改 `.github/workflows/plugin-tests.yml` 与 `packages/core-backend/vitest.config.ts`；`b10632007`（#6850）同上两处；`e2823e93b`（#6851）改 `plugin-tests.yml`；`58e1af6ea`（#6853）改 `plugin-tests.yml`；`0232a25f2`（#6842）新增迁移 `packages/core-backend/migrations/107_create_integration_stock_prep_component_ruling.sql`。#6847 本身也改过 `plugin-tests.yml`、`approval-realdb-departure-transfer.yml` 和 `packages/core-backend/vitest.config.ts`。这些都不改 `attendance-web-guard.yml`、`web-tests.yml`、apps/web 的 vitest/vite 配置，或 `run-required-web-tests` 脚本，因此帮助规格与 `attendanceLegacyPermissionPayload` 的跑法不变。本修复文件的行号在对齐后仍指向同一处（回退清单模块与 `AttendanceView.vue:12829`、grant 调用点）。
+
+2026-11-11 再对齐：已审并推送的 `438842a9aeb9a8e7b097226fbbd5bf4c024c827c` 在 CI 结束（31 成功、1 条有条件跳过）时，main 又前进到 `48aaac6b4a3e16ac785ae1aee1bf32e85ef441a7`（#6857，2026-11-11 18:09:17 +0800）。本工作树用 `git merge --no-commit --no-ff` 合入该提交，上文历史记录和四文件修复都保留。此后的核验必须使用含该 main 的新合并结果，不能沿用 `438842a9a` 上已经结束的 CI。
+
+### 5. 2026-11-13 只对齐已授权 main `220bd80`（#6849）
+
+上次已测 main 是 `48aaac6b4a3e16ac785ae1aee1bf32e85ef441a7`。本次只做普通合并，合入 `220bd80ab62fc7e6b3b40b7d4263a712d9a09405`（#6894，2026-11-13 14:21:11 +0800）。合并提交 `2a5ca9ac654542d6c2ecde80c89bb20a05c1a659`，父提交是 `dbe3562b62c2d5fd922e0233647920e87099312f` 与 `220bd80ab62fc7e6b3b40b7d4263a712d9a09405`，树是 `ff6549f0b50b6aae067082e2b03ec19dc4bddaa6`。没有 rebase、amend、reset 或 force-push。本节写在该合并之后、推送之前，所以 CI 必须跑在包含本节的最终 head 上。`48aaac6` 上已经结束的 CI 不能当作这次的证据。之后 main 再前进，也不自动再对齐。
+
+`48aaac6..220bd80` 共 21 个提交、145 个文件。四份修复文件都不在这 21 个提交里，合并没有冲突。相对 `220bd80` 的净差异仍是这四份文件；本节只追加在已有核验文档里，不新开范围。员工、审批人清单不变，没有导入员界面，`scripts/ops/attendance-provision-user.sh` 与夹具权限仍不改。
+
+`attendance:admin` 本身授权导入。旧管理员回退清单漏掉 `attendance:import` 是权限清单漂移，不是「用户因此不能导入」的证明。插件在已有管理员访问时把导入放行：`hasAttendanceImportAccess`（`plugins/plugin-attendance/index.cjs:24274-24277`）、`withAttendanceImportPermission`（`25517-25518`）、`withAnyPermission` 的 `attendance:import` 别名（`24236-24243`）。`attendanceLegacyPermissionPayload.spec.ts` 用文件内字面量数组比较五键（`214-225`），不导入、也不动态比较服务端 `ATTENDANCE_ROLE_TEMPLATES` 模块，也不执行 `AttendanceView.vue` 的四个回退处理函数（单人授予 `22512`、单人撤销 `22566`、批量授予 `22702`、批量撤销 `22795`）。
+
+这次区间对执行条件的影响：
+
+- 工作流只改 `.github/workflows/plugin-tests.yml`。安装前多一道必过合同：`node --test scripts/ops/approval-routing-prerequisite-ci-wiring.test.mjs`。`approval-db` 的真实库步骤整文件加入 `session-token-invite-lifecycle.db.test.ts`、`approval-routing-policy-required.db.test.ts`、`approval-routing-policy-required.api.test.ts`。三份都有 `const EXPECT_DB = process.env.EXPECT_DB === '1'`，不是该值时用例 `it.skip`。`attendance-web-guard.yml` 与 `web-tests.yml` 的 YAML 没改。
+- Vitest 只改 `packages/core-backend/vitest.config.ts` 的 `test.exclude`：上述三份被排除出无库作业（`451-452`、`2319`），避免缺库时 skip 变绿。它们只在 `approval-db` 整文件步骤、并且 `EXPECT_DB=1` 时执行。`apps/web` 的 vitest 配置没改。
+- `apps/web/scripts/run-required-web-tests.sh` 与同名 `.tokens` 增加 `multitable-automation-interval-minutes`。`web-tests.yml` 仍调用该脚本，所以 web-tests 会多跑这一份。考勤权限规格和 `attendanceAdminGuide.spec.ts` 的令牌没改。
+- 新增迁移 `packages/core-backend/migrations/108_create_integration_stock_prep_sheet_repair.sql`（修复运行与一次性占用两张表）。`migration-provider.ts` 加载 `packages/core-backend/migrations` 下的 SQL，所以跑 `pnpm --filter @metasheet/core-backend migrate` 的门都会执行 108。这包括 `approval-db`、`runtime-db`、`multitable-db`、`attendance-db` 的 “Run DB migrations”。checkpoint 作业的 YAML 步骤没改，但默认验收会进 `verify-recovery-manual-checkpoint.mts`，该脚本对 fresh 与 replay 各跑一次 migrate（`83-89`），因此 108 进入这次 checkpoint 验收的数据库。
+- drain 证明 `tests/integration/timemachine-private-db-backend-drain.db.test.ts` 不在这次 diff 里。它自己建临时库，文件里不调用 migrate，所以 108 不改变这份 drain SQL。它仍由 checkpoint 作业的 “Run private-db backend drain proof” 执行；缺 `DATABASE_URL` 直接抛错，不是 `EXPECT_DB` skip。
+- `packages/core-backend/src/index.ts`（`e0b5a3c08`，#6898）把 `initializeDataSourceManager` 改成静态导入（`348`、`4502-4505`），避免 tsx 动态导入装出第二份模块。守卫是 `tests/unit/data-source-manager-single-instance.test.ts`。不改考勤路由。
+- `univer-meta.ts` 不在这次 diff 里。
+- 来源 pin `plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json` 只更新两个哈希：`pluginIndex` = `384652d5c87fc39863b32572decd19255e42e34543edd5245cd419687e3720c3`，`pluginHttpRoutes` = `aa6903b2ff5301c7330a6129b1a9a849e2e7eb1542ad3bffe4f42b2acb11f75c`。`test-chain.txt` 增加四条：`stock-preparation-template-issue-confirm-spec-columns.test.cjs`、`stock-preparation-sheet-repair.test.cjs`、`stock-preparation-sheet-repair-store.test.cjs`、`stock-preparation-sheet-repair-routes.test.cjs`。插件测试链会多跑这四条。
+- `scripts/ops/global-history-flag-manifest.mjs` 登记两个默认关闭的开关：`MULTITABLE_STOCK_PREP_SHEET_REPAIR_WRITE_ENABLED`（只认精确 `'true'`）和 `MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED`（去空格、不分大小写的 `'true'`）。本 PR 不改、也不打开它们。
+
+推送前在合并后的工作树上跑过这些命令。CI 证据仍以包含本节的最终 head 的作业日志为准，不沿用 `dbe3562` 的 32 项检查。
+
+- `pnpm --filter @metasheet/web exec vitest run --watch=false tests/attendanceLegacyPermissionPayload.spec.ts tests/useAttendanceAdminProvisioning.spec.ts`：2 个文件、14 个测试通过（权限载荷 4，开通组合函数 10；Vitest 1.6.1，847ms）。
+- `pnpm --filter @metasheet/web exec vitest run --watch=false tests/attendanceAdminGuide.spec.ts`：1 个文件、9 个测试通过（1.13s）。
+- `pnpm --filter @metasheet/web exec eslint src/views/attendance/attendanceProvisionRolePermissions.ts tests/attendanceLegacyPermissionPayload.spec.ts --max-warnings=0`：退出码 0。
+- `pnpm --filter @metasheet/web exec vue-tsc -b`：默认堆约 2GB 时进程以 `JavaScript heap out of memory` 中止。同一命令加上 `NODE_OPTIONS=--max-old-space-size=8192` 后退出码 0（约 58s）。这是堆上限，不是类型错误。
 
 ## 2026-10-16 第五轮
 
@@ -159,7 +204,7 @@ Harold 审阅 Draft #6426（当时 head `2ab1b998b`）后暂不合并，指出�
 | 考勤组 | 类型创建后锁定 `ATTENDANCE_GROUP_TYPE_LOCKED`；负责人不计入考勤人员 | `index.cjs:47152-47158`；既有考勤组帮助 |
 | 请假类型 / 加班规则 | 「需要审批」只保存 | `attendanceApprovalOptionHint.ts:8-14` |
 | 审批流 | 新申请状态 `pending`；空静态步骤进入管理员队列；动态步骤失败 `APPROVAL_DYNAMIC_ASSIGNEE_UNRESOLVED` 且不回退 | 插入 `'pending'`：`index.cjs:34681-34694`；动态步骤抛出 `24412`；页面警告 `AttendanceView.vue:8065` |
-| 权限 | 五个键。服务端管理员模板含 `attendance:read`、`attendance:write`、`attendance:approve`、`attendance:import`、`attendance:admin`。页面「角色模板」下拉仍是员工、审批人、管理员；分配走该服务端模板。服务端另有 `importer` 模板，操作帮助不介绍（界面无入口）。旧的直接授权回退清单不含 `attendance:import`，记为独立兼容性问题，本次不改授权逻辑 | 管理员模板 `packages/core-backend/src/routes/attendance-admin.ts:240-244`；`importer` 模板 `234-239`；下拉 `AttendanceView.vue:3834-3836`、批量 `3916-3918`；回退清单 `12828-12832`。详见「#6426 合入后的指引补记」第 2、3 条 |
+| 权限 | 五个键。服务端管理员模板含 `attendance:read`、`attendance:write`、`attendance:approve`、`attendance:import`、`attendance:admin`。页面「角色模板」下拉仍是员工、审批人、管理员；分配走该服务端模板。服务端另有 `importer` 模板，操作帮助不介绍（界面无入口）。旧回退清单已含 `attendance:import`，与模板五键一致。缺 import 是权限集不一致，不是必然无法导入（插件接受 `attendance:admin` 作为导入权限）。`scripts/ops/attendance-provision-user.sh` 仍对目标用户做真实授权，admin 映射和读回期望都缺 import，记为后续，本轮不改 | 管理员模板 `packages/core-backend/src/routes/attendance-admin.ts:240-244`；`importer` 模板 `234-239`；下拉 `AttendanceView.vue:3834-3836`、批量 `3916-3918`；回退清单 `attendanceProvisionRolePermissions.ts`，引用 `AttendanceView.vue:12829`；导入权限 `plugins/plugin-attendance/index.cjs:24274-24277`、`25517-25518`、`24236-24243`；运维脚本 `scripts/ops/attendance-provision-user.sh:91-93`、`172-193`。详见「#6426 合入后的指引补记」第 2、3 条 |
 | 年假错误 | `USER_NOT_IN_ORG` 为 404，文案「该用户不是本组织的有效成员。」；与打卡组织错误不是同一个码 | 抛出 `index.cjs:20399`；页面 `AttendanceView.vue:26773`；打卡组织码见 `attendance-punch-org-resolution.cjs` |
 | 时区提示 | 默认规则缺失、冻结上下文、非法时区等固定人话 | `attendanceTimezoneError.ts:3-22` |
 | 导入 | 令牌只在 `ATTENDANCE_IMPORT_REQUIRE_TOKEN === '1'` 时要求，10 分钟；`.xlsx` 浏览器转 CSV（10MB）；`.xls` 拒绝 | `index.cjs:5967-5968`；`importXlsxConvert.ts:8-9`；`useAttendanceAdminImportWorkflow.ts:1368-1398` |

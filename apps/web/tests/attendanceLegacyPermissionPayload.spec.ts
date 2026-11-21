@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { apiFetch } from '../src/utils/api'
 import { readAttendanceLegacyPermissionPayload } from '../src/views/attendance/readAttendanceLegacyPermissionPayload'
 import { useAttendanceAdminProvisioning } from '../src/views/attendance/useAttendanceAdminProvisioning'
+import { ATTENDANCE_PROVISION_ROLE_PERMISSIONS } from '../src/views/attendance/attendanceProvisionRolePermissions'
 
 vi.mock('../src/utils/api', () => ({
   apiFetch: vi.fn(),
@@ -203,5 +204,28 @@ describe('attendance legacy fallback load', () => {
     expect(perms()).toEqual([])
     expect(status()).toContain('network down')
     expect(status()).not.toMatch(/^已加载 \d+ 项权限$/)
+  })
+})
+
+describe('ATTENDANCE_PROVISION_ROLE_PERMISSIONS (AttendanceView legacy fallback)', () => {
+  // Explicit literals. They match ATTENDANCE_ROLE_TEMPLATES.admin.permissions
+  // at packages/core-backend/src/routes/attendance-admin.ts:240-244.
+  // This spec does not import or compare the server template module.
+  const serverAdminTemplatePermissions = [
+    'attendance:read',
+    'attendance:write',
+    'attendance:approve',
+    'attendance:import',
+    'attendance:admin',
+  ]
+
+  it('includes attendance:import on the admin fallback list and matches the server admin template keys', () => {
+    expect(ATTENDANCE_PROVISION_ROLE_PERMISSIONS.admin).toContain('attendance:import')
+    expect([...ATTENDANCE_PROVISION_ROLE_PERMISSIONS.admin]).toEqual(serverAdminTemplatePermissions)
+  })
+
+  it('keeps employee and approver fallback lists aligned with the server templates', () => {
+    expect([...ATTENDANCE_PROVISION_ROLE_PERMISSIONS.employee]).toEqual(['attendance:read', 'attendance:write'])
+    expect([...ATTENDANCE_PROVISION_ROLE_PERMISSIONS.approver]).toEqual(['attendance:read', 'attendance:approve'])
   })
 })
