@@ -24,6 +24,11 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { cleanupOrphanMultitableAttachments } from '../../src/multitable/attachment-orphan-retention'
 
+// The CI lane sets EXPECT_DB=1: there, a missing DATABASE_URL must fail the file instead of skipping it green.
+if (process.env.EXPECT_DB === '1' && !process.env.DATABASE_URL) {
+  throw new Error('multitable-form-draft-attachment-bind.db.test.ts: EXPECT_DB=1 but DATABASE_URL is not set')
+}
+
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
 const TS = Date.now()

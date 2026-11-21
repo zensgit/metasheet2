@@ -364,8 +364,8 @@ export async function ensureAttachmentIdsExist(
  * attachment-orphan-retention.ts) deletes rows with `record_id IS NULL` once they are older than the
  * retention time and does not look at any record's list, so a file saved into a record from a create form
  * was deleted about a day later while the record still listed its id. Bound here, the row is no longer a
- * draft: the sweep leaves it, the attachment delete route strips it from this record's list (it reads the
- * row's record and field), and a download follows this record's row-level read rule.
+ * draft: the sweep leaves it, and the attachment delete route strips it from this record's list (it reads
+ * the row's record and field).
  *
  * Only a row that is still a draft (`record_id` NULL, not deleted), in this sheet, pinned to this field or
  * to none, and uploaded by this writer (`created_by`, the id the upload route stores) is bound. Anything
