@@ -38,7 +38,16 @@ export const unitBaseline = Object.freeze([
   {directory:'unit',file:'authorization-input-lock.test.ts',min:98,required:['ranks are strictly increasing in acquisition order and the order lists every rank'],skipped:[]},
   {directory:'unit',file:'authorization-input-consumers.guard.test.ts',min:7,required:['the authorization command write decision is registered as locked'],skipped:[]},
   {directory:'unit',file:'authorization-operation-validation.test.ts',min:27,required:['normalizes only reason and sorts explicitly chosen admissions'],skipped:[]},
-  {directory:'unit',file:'authorization-operation-fence.test.ts',min:3,required:['locks the closed table set, qualified and without waiting'],skipped:[]},
+  {directory:'unit',file:'authorization-operation-fence.test.ts',min:99,required:[
+    'locks the closed table set, qualified and without waiting',
+    ...[14,15,16,17].flatMap(major => [
+      `accepts measured N78 and B2 additions with the original exact profile (PG${major})`,
+      `preserves original and B2-only historical profiles (PG${major})`,
+      `rejects changed N78 conname despite the registered source (PG${major})`,
+      `rejects an extra inbound foreign key from the registered N78 source (PG${major})`,
+      `rejects an extra inbound foreign key from the unregistered source (PG${major})`,
+    ]),
+  ],skipped:[]},
   {directory:'unit',file:'authorization-operation-snapshot.test.ts',min:4,required:['binds the acting principal, complete input, policy classification, feature value and source rows','invalidates a preview after a disable and re-enable even if the original configured range is unchanged'],skipped:[]},
   {directory:'unit',file:'authorization-schema-mutation.test.ts',min:4,required:['keeps every production schema-gate call inside the registered provider'],skipped:[]},
   {directory:'unit',file:'role-assignment-boundary.test.ts',min:46,required:['every scoped preset declares the capability it grants through roleId + permissions'],skipped:[]},
