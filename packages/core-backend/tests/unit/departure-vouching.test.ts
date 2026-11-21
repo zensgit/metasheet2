@@ -204,6 +204,9 @@ function recordingClient() {
       recorded.push({ sql, params })
       const uninstalled = strictLoginUninstalledRows(sql)
       if (uninstalled !== undefined) return { rows: uninstalled }
+      // D21 (Y5a): the subject authorization version bump the deprovision writer takes before its
+      // users FOR UPDATE — a protocol upsert, no vouching state.
+      if (/^\s*INSERT INTO subject_authorization_versions/.test(sql)) return { rows: [] }
       if (/FROM directory_accounts a\b/.test(sql) && /JOIN directory_account_links l/.test(sql)) {
         return {
           rows: [{ directory_account_id: ACCOUNT_ID, local_user_id: 'user-1', deprovision_policy_override: null }],

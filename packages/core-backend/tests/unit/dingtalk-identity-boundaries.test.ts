@@ -23,7 +23,9 @@ const writes: string[] = []
 const txQuery = vi.fn(async (sql: string) => {
   const uninstalled = strictLoginUninstalledRows(sql)
   if (uninstalled !== undefined) return { rows: uninstalled }
-  if (/^\s*(INSERT|UPDATE|DELETE)\b/i.test(sql)) writes.push(sql)
+  // D21 (Y5a): the access-graph mutex's subject version bump is a lock-taking protocol statement
+  // (rolled back with the refusal), not an identity / grant write.
+  if (/^\s*(INSERT|UPDATE|DELETE)\b/i.test(sql) && !/INSERT INTO subject_authorization_versions/i.test(sql)) writes.push(sql)
   if (/FROM users\b/i.test(sql)) return { rows: [user] }
   if (/FROM directory_account_links\b/i.test(sql)) return { rows: managed ? [{ linked: 1 }] : [] }
   if (/FROM user_external_auth_grants\b/i.test(sql)) {

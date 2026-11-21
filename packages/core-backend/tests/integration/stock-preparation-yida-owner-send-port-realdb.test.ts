@@ -19,6 +19,11 @@ const ADMISSION = 'integration_yida_send_admissions', AUDIT = 'integration_yida_
 const LEDGER = 'integration_yida_delivery_ledger', LEDGER_AUDIT = 'integration_yida_delivery_audit'
 const OP = 'integration_yida_draft_operations', TARGET = 'integration_yida_approved_target'
 const PIN = 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED'
+// D21 (slice Y5): approve and admit first ENSURE the actor's subject authorization version row (an idempotent upsert of
+// a version row, never a grant, admission, audit or ledger row). "No INSERT" below means no business write: only this
+// exact statement is exempt, every other INSERT still fails those assertions.
+const SUBJECT_VERSION_ENSURE = /^INSERT INTO subject_authorization_versions \(subject_id\) VALUES \(\$1\) ON CONFLICT \(subject_id\) DO NOTHING$/
+const businessInsert = (sql: string) => /^INSERT /i.test(sql.trim()) && !SUBJECT_VERSION_ENSURE.test(sql.trim())
 const proofTables = [APPROVAL, REVOCATION, ADMISSION, AUDIT, LEDGER, LEDGER_AUDIT]
 type Row = Record<string, unknown>
 type Context = { tenantId: string; workspaceId: null; ownerId: string }
@@ -68,7 +73,7 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
   let schema = '', ddl = ''
   let createDb: (options: { database: Database }) => unknown
   let createAuthority: (options: { database: { transaction<T>(callback: (trx: Queryable) => Promise<T>): Promise<T> }
-    security: HostSecurity; context: { actorId: string; tenantId: string; workspaceId: null }; primitives: unknown }) => Authority
+    security: HostSecurity; context: { actorId: string; tenantId: string; workspaceId: null }; primitives: unknown; sheetSource?: true }) => Authority
   let createPrimitives: (options: { security: HostSecurity; context: Context }) => unknown
   let createPort: (options: { db: unknown; context: Row; authority: Authority; fetch: FetchDouble['fetch']
     readEnablement?: () => unknown; timeoutMs?: number }) => Port
@@ -188,7 +193,7 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
     doubles.push(value); return value
   }
   // Gate 4: `budget` overrides only the send-budget verdict (null = the real primitive verdict).
-  async function session(scope = context(), budget?: { within: boolean | null; calls: number }): Promise<Session> {
+  async function session(scope = context(), budget?: { within: boolean | null; calls: number }, switches: { sheetSource?: true } = {}): Promise<Session> {
     const client = await pool.connect()
     await client.query(`SET search_path TO ${ident(schema)}`)
     await client.query("SET statement_timeout='10s'")
@@ -231,7 +236,7 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
       return budget.within === null ? verdict : Object.freeze({ withinBudget: budget.within })
     } } : real
     const authority = createAuthority({ database, security, context: { actorId: scope.ownerId, tenantId: scope.tenantId, workspaceId: null },
-      primitives })
+      primitives, ...switches })
     const value: Session = { client, pid, db, authority, statements, draft: createDraft(config), target: createTarget(config),
       material: createMaterial(config), ledger: createLedger({ db }),
       port(fake, enablement = () => 'true', timeoutMs = 10000) {
@@ -294,6 +299,12 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
     ddl += '\n' + ((await import(pathToFileURL(path.join(root,
       'packages/core-backend/src/db/migrations/zzzz20261106110300_add_integration_yida_source_binding.ts')).href)) as
       { YIDA_SOURCE_BINDING_UP_SQL: string }).YIDA_SOURCE_BINDING_UP_SQL
+    // P1 fix r1 (2026-11-08): the generated-layout seal table, exactly what zzzz20261108120000 up() executes (it references
+    // 093 / 094). Since fix r1 the send authority reads the target's seal row for EVERY selection — v2 included — so an
+    // approval in a schema without it fails closed (UNAVAILABLE); this file sends v2 drafts only and never seals.
+    ddl += '\n' + ((await import(pathToFileURL(path.join(root,
+      'packages/core-backend/src/db/migrations/zzzz20261108120000_create_integration_yida_generated_layout.ts')).href)) as
+      { YIDA_GENERATED_LAYOUT_UP_SQL: string }).YIDA_GENERATED_LAYOUT_UP_SQL
     savedEnv = envKeys.map(key => [key, process.env[key]])
     process.env.NODE_ENV = 'production'; process.env.ENCRYPTION_KEY = randomBytes(32).toString('hex'); process.env.ENCRYPTION_SALT = randomBytes(32).toString('hex')
     const { PluginRuntimeSecurityService } = await import(pathToFileURL(path.join(root,
@@ -315,6 +326,9 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
       CREATE TABLE user_permissions (user_id varchar(255),permission_code varchar(255),PRIMARY KEY(user_id,permission_code));
       CREATE TABLE user_orgs (user_id text,org_id text,is_active boolean NOT NULL,PRIMARY KEY(user_id,org_id));
       CREATE TABLE user_namespace_admissions (user_id text,namespace text,enabled boolean NOT NULL DEFAULT false,UNIQUE(user_id,namespace));
+      -- D21 (slice Y5): the subject authorization version row approve/admit hold first (zzzz20261106110500 shape; this
+      -- file sends pasted, unbound rows only, so no trigger, sheet row or record lock is consulted here).
+      CREATE TABLE subject_authorization_versions (subject_id text PRIMARY KEY, version bigint NOT NULL DEFAULT 1, updated_at timestamptz NOT NULL DEFAULT now());
       INSERT INTO users VALUES ('synthetic-owner','user','[]',true,'activated',false,false),
         ('synthetic-other-actor','admin','["role:admin"]',true,'activated',false,true);
       INSERT INTO user_roles VALUES ('synthetic-owner','integration_admin'),('synthetic-other-actor','admin'),('synthetic-other-actor','foreign_admin');
@@ -368,7 +382,7 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
       .toEqual(['acknowledged', true, false, 0])
     expect(observed.delivery?.id === result.delivery?.id && inspected.delivery?.id === result.delivery?.id).toBe(true)
     expect([freshHttp.token, freshHttp.form]).toEqual([0, 0])
-    expect(restarted.statements.some(sql => sql.includes(OP) || sql.includes('integration_yida_credential_materials') || /^INSERT /i.test(sql.trim()))).toBe(false)
+    expect(restarted.statements.some(sql => sql.includes(OP) || sql.includes('integration_yida_credential_materials') || businessInsert(sql))).toBe(false)
     expect(await evidence()).toEqual(before)
     const publicText = JSON.stringify([result, observed, inspected])
     for (const privateValue of [...Object.values(material()), 'synthetic-token', 'synthetic-instance', 'synthetic owner port part', 'synthetic_owner_form'])
@@ -781,7 +795,7 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
     await rejected(port.submit(request), 'YIDA_OWNER_SEND_UNAVAILABLE')
     expect(budget.calls).toBe(2)
     expect([fake.token, fake.form]).toEqual([0, 0])
-    expect(active.statements.some(sql => sql.includes(LEDGER) || /^INSERT /i.test(sql.trim()))).toBe(false)
+    expect(active.statements.some(sql => sql.includes(LEDGER) || businessInsert(sql))).toBe(false)
     expect(await evidence()).toEqual(before)
     const view = await port.inspect({ grantId: grant.grantId })
     expect([view.delivery, view.approval.status, view.approval.remainingAttempts]).toEqual([null, 'approved', 1])
@@ -883,6 +897,28 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
     const within = await first.authority.prepareDraft(liftV3(input(), constants(2)))
     expect(within.reused).toBe(false)
     expect(await draftCounts()).toEqual([before[0], before[1] + 1, before[2] + 1, before[3] + 1])
+  })
+  // D17 b (owner 2026-11-07, R-88): INTEGRATION_YIDA_SHEET_SOURCE_ENABLED. Without multi-target, the run's authority takes the
+  // host's sheet-source binding only when the runtime told it the switch is on (sheetSource: true); the bound draft lands on
+  // slot 1 with both binding digests. Off (today's coupling, D17 a) the same input is refused at the closed key set.
+  it('D17 b: the single-target authority drafts a bound slot-1 draft only with the sheet-source bit; without it the binding key is refused', async () => {
+    await slot()
+    const value = input()
+    const bound = { ...value, sourceBinding: { sheetId: 'synthetic-sheet', keyFieldId: 'fld_line',
+      fieldBindings: { projectNo: 'fld_project', lineId: 'fld_line', parentCode: 'fld_parent', quantity: 'fld_qty', description: 'fld_description' },
+      records: [{ recordId: 'synthetic-record-1', keyValue: 'LINE-1', projectNo: 'DEMO-P1' }] } }
+    const before = await draftCounts()
+    await rejected(first.authority.prepareDraft(bound), 'YIDA_SEND_APPROVAL_INPUT')
+    expect(await draftCounts()).toEqual(before)
+    const switched = await session(context(), undefined, { sheetSource: true })
+    const drafted = await switched.authority.prepareDraft(bound)
+    expect(drafted.reused).toBe(false)
+    const members = (await tableRows('integration_yida_draft_rows')).filter(row => row.operation_id === drafted.operationId)
+    expect(members).toHaveLength(1)
+    expect(/^[0-9a-f]{64}$/.test(String(members[0].source_record_digest)) && /^[0-9a-f]{64}$/.test(String(members[0].creation_identity_digest))).toBe(true)
+    // The same slot as the unbound initialization draft, and still never a targetRef without multi-target.
+    expect(drafted.targetRef).toBe((await tableRows('integration_yida_draft_targets'))[0].target_ref)
+    await rejected(switched.authority.prepareDraft({ ...bound, targetRef: drafted.targetRef }), 'YIDA_SEND_APPROVAL_INPUT')
   })
 
   // R-71 ⑦.5 RC14 (plan §3.7 layer 2): a legacy record registered by the cut-over reconciliation occupies the

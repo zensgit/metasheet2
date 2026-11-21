@@ -11,6 +11,7 @@ import {
   compensateSupersededDenyGrant,
 } from '../../src/directory/deprovision-evidence-api'
 import { applyDirectoryDeprovisionCandidate } from '../../src/directory/deprovision-ledger'
+import { bumpSubjectAuthorizationVersions } from '../../src/multitable/authz-version-protocol'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const PREFIX = `ops01-compensation-${Date.now()}`
@@ -159,15 +160,17 @@ async function waitForCompensationWaiters(
       `SELECT
          count(*) FILTER (
            WHERE wait_event_type = 'Lock'
-             AND query ILIKE '%activation_status%'
-             AND query ILIKE '%FROM users%'
-             AND query ILIKE '%FOR UPDATE%'
+             AND (query ILIKE '%INSERT INTO subject_authorization_versions%'
+                  OR (query ILIKE '%activation_status%'
+                      AND query ILIKE '%FROM users%'
+                      AND query ILIKE '%FOR UPDATE%'))
          )::int AS blocked,
          count(*) FILTER (
            WHERE $1 = ANY(pg_blocking_pids(pid))
-             AND query ILIKE '%activation_status%'
-             AND query ILIKE '%FROM users%'
-             AND query ILIKE '%FOR UPDATE%'
+             AND (query ILIKE '%INSERT INTO subject_authorization_versions%'
+                  OR (query ILIKE '%activation_status%'
+                      AND query ILIKE '%FROM users%'
+                      AND query ILIKE '%FOR UPDATE%'))
          )::int AS rooted
        FROM pg_stat_activity
        WHERE datname = current_database()
@@ -577,6 +580,11 @@ describeIfDatabase('OPS-01 superseded deny-row compensation (real DB)', () => {
     try {
       await holder.query('BEGIN')
       const pid = await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')
+      // D21 (Y5a): the holder stands in for a production access-graph writer, which bumps the
+      // subject authorization version row BEFORE its users FOR UPDATE (the mutex order). Both
+      // compensations then queue on that row — the mutex's first protocol statement — directly
+      // behind the holder, instead of one behind the holder and one behind the other.
+      await bumpSubjectAuthorizationVersions(holder, [seeded.userId])
       await holder.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [seeded.userId])
 
       const calls = Array.from({ length: 2 }, (_, index) =>

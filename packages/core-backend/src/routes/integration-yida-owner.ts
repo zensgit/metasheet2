@@ -16,7 +16,7 @@ import {
  * Preview values belong only to this authorized no-store response, not logs. */
 export type YidaOwnerHttpPort = Pick<ReturnType<typeof createYidaOwnerRuntime>,
   'prepareDraft' | 'preview' | 'approve' | 'revoke' | 'observe' | 'submit' | 'sendEnabled'>
-  & Partial<Pick<ReturnType<typeof createYidaOwnerRuntime>, 'multiTargetEnabled' | 'proveDraftOwner'>>
+  & Partial<Pick<ReturnType<typeof createYidaOwnerRuntime>, 'multiTargetEnabled' | 'sheetSourceEnabled' | 'proveDraftOwner'>>
 export type YidaInitializationHttpPort = Readonly<{
   status(actor: YidaOwnerActor, options: { signal: AbortSignal }): Promise<unknown>
   initialize(actor: YidaOwnerActor, input: YidaInitializationInput, options: { signal: AbortSignal }): Promise<unknown>
@@ -56,6 +56,9 @@ const statuses: Readonly<Record<string, number>> = Object.freeze({
   // Identity fence (design baseline v2.3 §3.3, D16): this material row's logical creation identity (key value +
   // project) was already created under this target; nothing new is created. Refused at approval, before a grant.
   YIDA_SEND_APPROVAL_IDENTITY_RESERVED: 409,
+  // Generated-layout seal (external review P1, 2026-11-08): this target's generated template layout was sealed by an
+  // earlier approval and this draft's layout differs; refused at approval and at admission, nothing new is created.
+  YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT: 409,
   YIDA_CONNECTION_TEST_INPUT: 400, YIDA_CONNECTION_TEST_DISABLED: 403, YIDA_CONNECTION_TEST_DENIED: 403,
   YIDA_CONNECTION_TEST_CONFLICT: 409, YIDA_CONNECTION_TEST_CANCELLED: 409, YIDA_CONNECTION_TEST_THROTTLED: 429,
   YIDA_CONNECTION_TEST_INACTIVE: 503, YIDA_CONNECTION_TEST_UNAVAILABLE: 503,
@@ -235,10 +238,11 @@ function initializationInput(value: unknown) {
   if (config.version !== 2 || config.kind !== 'yida-form-protocol-static' || config.intent !== 'create') fail()
   record(config.target, ['appType', 'formUuid'])
   if (!Array.isArray(config.businessKey) || !Array.isArray(config.fieldMap) || !Array.isArray(config.fieldCatalog) || !Array.isArray(config.emptyKeyFields)) fail()
-  const allocation = record(candidate.allocation, ['mode'], ['projects', 'projectField', 'quantityField'])
+  // Q4 (R-88): quantityRounding is optional on a split; the plugin owns its values and mode pairing.
+  const allocation = record(candidate.allocation, ['mode'], ['projects', 'projectField', 'quantityField', 'quantityRounding'])
   if (allocation.mode === 'original') record(candidate.allocation, ['mode'])
   else if (!['equal_integer', 'equal_decimal_exact'].includes(String(allocation.mode))) fail()
-  else record(candidate.allocation, ['mode', 'projects', 'projectField', 'quantityField'])
+  else record(candidate.allocation, ['mode', 'projects', 'projectField', 'quantityField'], ['quantityRounding'])
   const attestation = record(parsed.attestation, ['kind', 'reviewRef', 'organizationId', 'executionIdentity'])
   if (attestation.kind !== 'owner-reviewed-target') fail()
   for (const key of ['reviewRef', 'organizationId', 'executionIdentity']) literalId(attestation[key])
@@ -366,6 +370,9 @@ export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initia
   // Y2 shape bit, read per request (exact 'true' in the owner runtime). OFF = every body below keeps its
   // original closed key set and the new paths fall through to the same 404 as any unknown path.
   const multiTargetEnabled = () => { try { return port.multiTargetEnabled?.() === true } catch { return false } }
+  // D17 b (R-88) shape bit: INTEGRATION_YIDA_SHEET_SOURCE_ENABLED exact 'true' (read in the owner runtime). ON while
+  // multi-target is OFF = the draft body may name a sheet/view source instead of rowsText, never a targetRef.
+  const sheetSourceEnabled = () => { try { return port.sheetSourceEnabled?.() === true } catch { return false } }
   const route = (status: number, operation: (req: Request, owner: YidaOwnerActor, signal: AbortSignal) => Promise<unknown>) =>
     async (req: Request, res: Response) => {
       const controller = new AbortController()
@@ -382,14 +389,16 @@ export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initia
       finally { req.removeListener('aborted', aborted); res.removeListener('close', closed) }
     }
   router.post('/drafts', route(201, async (req, owner) => {
-    if (!multiTargetEnabled()) {
+    const multi = multiTargetEnabled()
+    if (!multi && !sheetSourceEnabled()) {
       const input = record(req.body, ['config', 'rowsText', 'allocation'])
       if (typeof input.rowsText !== 'string' || Buffer.byteLength(input.rowsText, 'utf8') > 128 * 1024) fail()
       const result = await port.prepareDraft(owner, { config: input.config, rowsText: input.rowsText, allocation: input.allocation })
       return dto(() => draft(result))
     }
     // Y2 (switch ON): a named target, and either pasted rowsText or a sheet/view source (never both).
-    const input = record(req.body, ['config', 'allocation'], ['rowsText', 'source', 'targetRef'])
+    // D17 b (sheet-source switch ON, multi-target OFF): the same, without a targetRef (slot 1).
+    const input = record(req.body, ['config', 'allocation'], multi ? ['rowsText', 'source', 'targetRef'] : ['rowsText', 'source'])
     if (Object.hasOwn(input, 'rowsText') === Object.hasOwn(input, 'source')) fail()
     const targetRef = Object.hasOwn(input, 'targetRef') ? id(input.targetRef) : undefined
     let rowsText: string

@@ -113,6 +113,22 @@ databaseSuite('SA05 owner HTTP — actual JWT, native authority and private Post
     expect(view.payload).not.toEqual(f.compiledPayload(reverse, reused.rows[0].index))
     expect((view.payload as Data).qty).toBe(6)
     noFetch(); expect((await f.proof()).counts).toEqual([0, 0, 0, 0, 0, 0])
+    // SR5 (generated part, R-71 ⑦.4): a pasted body cannot carry a source binding, so a v3 config with a generated
+    // entry is refused at POST /drafts (fixed, values-free) and writes no draft; the same v3 config without it drafts.
+    const v2 = draftInput().config as Data & { fieldMap: Data[]; fieldCatalog: Data[] }
+    const v3 = { ...v2, version: 3, businessKey: ['project', 'line', 'parent'], emptyKeyFields: ['parent'],
+      fieldMap: v2.fieldMap.map(entry => ({ transform: 'direct', ...entry })), fieldCatalog: [...v2.fieldCatalog] }
+    const generated = { ...v3, fieldCatalog: [...v3.fieldCatalog, { id: 'code', control: 'text', required: false }],
+      fieldMap: [...v3.fieldMap, { transform: 'generated', template: [{ literal: 'SYN-' }, { hash: ['project', 'line', 'parent'], form: 'uuid-36' }],
+        target: 'code', type: 'string', required: false }] }
+    const drafts = (await f.rows('integration_yida_draft_operations')).length
+    denial(await f.http('POST', '/drafts', { ...input, config: generated }), 503, 'YIDA_SEND_APPROVAL_UNAVAILABLE')
+    expect((await f.rows('integration_yida_draft_operations')).length).toBe(drafts)
+    const plain = await prepare({ ...input, config: v3 })
+    expect(plain.reused).toBe(false)
+    expect((await f.rows('integration_yida_draft_rows')).filter(row => row.operation_id === plain.operationId)
+      .every(row => row.source_record_digest === null && row.creation_identity_digest === null)).toBe(true)
+    noFetch()
   })
 
   it('the omitted runtime flag defaults OFF before any owner SQL or fetch', async () => {

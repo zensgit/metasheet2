@@ -34,6 +34,8 @@ export interface YidaProtocolBaseConfig {
   fieldMap: YidaStaticFieldMapEntry[]
   fieldCatalog: YidaProtocolCatalogEntry[]
 }
+/** D2 (R-88), a material-code-v1 preset option: 'uuid-36' (default): WLBH- + hyphenated UUIDv5, 41 characters; 'uuid-32': the UUID's hyphens removed, 37. */
+export type YidaMaterialCodeForm = 'uuid-36' | 'uuid-32'
 export type YidaProtocolConfig =
   | (YidaProtocolBaseConfig & { intent: 'create'; instanceIdField?: never })
   | (YidaProtocolBaseConfig & { intent: 'update'; instanceIdField: string })
@@ -42,10 +44,10 @@ export type YidaGeneratedTemplatePart =
   | { literal: string }
   /** A direct target; text verbatim, a number as String(n). */
   | { field: string }
-  /** 1..16 string-typed direct targets covering every business-key target (rule G1). */
+  /** 1..16 string-typed direct targets covering every business-key target (rule G1); hashed as (target, value) pairs sorted by target, so the listed order is not part of the code. */
   | { hash: string[]; form: 'uuid-36' | 'uuid-32' }
   /** The frozen material-code-v1 generator; projectOf is a business-key target. */
-  | { preset: 'material-code-v1'; rowIdOf: string; projectOf: string }
+  | { preset: 'material-code-v1'; rowIdOf: string; projectOf: string; /** D2: this part's option only (no config-level form); absent = 'uuid-36'; normalized to absent unless 'uuid-32'; part of the sealed generated layout. */ form?: YidaMaterialCodeForm }
 /** v3: one direct entry per source column; copy/constant/concat/generated are derived and never key parts. */
 export type YidaTransformFieldMapEntry =
   | { transform: 'direct'; source: string; target: string; type: 'string' | 'number'; required: boolean }
@@ -62,7 +64,7 @@ export type YidaTransformFieldMapEntry =
   }
   | {
     transform: 'generated'
-    /** 1..8 parts, at least one not a literal, exactly one hash or preset (G1). */
+    /** 1..8 parts, at least one not a literal, exactly one hash or preset (G1), field parts on at most one side of it. */
     template: YidaGeneratedTemplatePart[]
     target: string
     type: 'string'
@@ -194,6 +196,17 @@ export function yidaTransformSourceColumns(config: unknown): readonly string[]
 export function transformDependencies(entry: unknown, config?: unknown): readonly string[]
 /** The source columns one generated entry of a valid v3 config reads (field parts, hash members, preset inputs), sorted. Throws YIDA_STATIC_CONFIG_INVALID otherwise. */
 export function generatedTemplateDependencies(entry: unknown, config: unknown): readonly string[]
+/**
+ * P1 (2026-11-08): the canonical, values-free generated layout of a v3 config — every generated entry's target and whole
+ * template (hash members sorted), entries sorted by target — which the send authority seals once per approved target.
+ * null for a v1 / v2 config or a v3 config without a generated entry; throws YIDA_STATIC_CONFIG_INVALID otherwise.
+ */
+export interface YidaGeneratedLayout {
+  version: 1
+  kind: 'yida-generated-layout'
+  entries: ReadonlyArray<{ target: string; template: readonly YidaGeneratedTemplatePart[] }>
+}
+export function yidaGeneratedLayout(config: unknown): YidaGeneratedLayout | null
 /** Explicit configs require unique decoded JSON keys and raw decimal fidelity; v1 keeps its finite Number domain. Omitted config retains legacy parsing. */
 export function parseYidaStaticRows(text: string, config?: YidaStaticConfig): YidaStaticRow[]
 export function buildYidaStaticPlan(input: { config: unknown; rows: unknown }): YidaStaticPlan
