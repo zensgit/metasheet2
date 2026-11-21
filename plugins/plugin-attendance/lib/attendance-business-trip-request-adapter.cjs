@@ -1,6 +1,7 @@
 'use strict'
 
 const { randomUUID } = require('node:crypto')
+const requesterDisplay = require('./attendance-requester-display.cjs')
 
 function createBusinessTripRequestAdapter(deps) {
   const { service, routeSchema, loadFlow, freezeRelations, buildApproval, buildAssignments,
@@ -29,7 +30,8 @@ function createBusinessTripRequestAdapter(deps) {
     const requestId = randomUUID(), approvalId = 'apv_' + randomUUID()
     const orgRelations = await freezeRelations({ orgId: route.orgId, userId: route.input.userId, flowSteps: flow.steps })
     const approvalPayload = buildApproval({ requestId, approvalId, orgId: route.orgId, userId: route.input.userId,
-      requesterName: route.requesterName, draft, orgRelations, requestNamedOrgId: route.orgId })
+      requesterName: await requesterDisplay.forCreate(trx, { userId: route.input.userId, orgId: route.orgId,
+        actorId: route.actorId, actorName: route.requesterName }), draft, orgRelations, requestNamedOrgId: route.orgId })
     approvalPayload.metadata = { ...approvalPayload.metadata, suite: 'attendance' }
     approvalPayload.formSnapshot = { ...approvalPayload.formSnapshot, destinationTimezone: route.input.destinationTimezone }
     const approvalAssignments = buildAssignments(flow.steps, 0, approvalPayload.requesterSnapshot)
