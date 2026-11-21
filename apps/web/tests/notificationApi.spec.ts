@@ -5,6 +5,7 @@ const transport = vi.hoisted(() => ({ apiFetch: vi.fn() }))
 vi.mock('../src/utils/api', () => ({ apiFetch: transport.apiFetch }))
 
 import {
+  createNotificationTestIdempotencyKey,
   establishNotificationEndpoint,
   listNotificationEndpoints,
   listNotificationPreferences,
@@ -248,29 +249,98 @@ describe('notification preference reads and writes', () => {
 })
 
 describe('notification test sends', () => {
-  it('posts without a body and maps an accepted HTTP answer', async () => {
-    transport.apiFetch.mockResolvedValue(response(202, null))
-    expect(await testNotificationEndpoint(ENDPOINT)).toEqual({ kind: 'accepted' })
-    expect(transport.apiFetch).toHaveBeenCalledWith(`/api/me/notification-endpoints/${ENDPOINT}/test-send`, { method: 'POST' })
-    expect(transport.apiFetch.mock.calls[0][1].body).toBeUndefined()
+  const KEY = 'key_ABC123'
+  const success = (outcome: string) => ({ outcome, code: 'TEST_OUTCOME', testSendId: 'test-send-1' })
+
+  it('generates fresh allowed keys with crypto.getRandomValues', () => {
+    let fill = 0
+    const random = vi.spyOn(globalThis.crypto, 'getRandomValues').mockImplementation((target) => {
+      const bytes = target as Uint8Array
+      bytes.fill(fill)
+      fill += 1
+      return target
+    })
+    try {
+      const first = createNotificationTestIdempotencyKey()
+      const second = createNotificationTestIdempotencyKey()
+      expect(first).toMatch(/^[A-Za-z0-9_-]{8,64}$/)
+      expect(first).toHaveLength(24)
+      expect(second).not.toBe(first)
+      expect(random).toHaveBeenCalledTimes(2)
+    } finally {
+      random.mockRestore()
+    }
   })
 
-  it('surfaces the retry delay when rate limited', async () => {
-    transport.apiFetch.mockResolvedValue(response(429, null, { 'retry-after': '17' }))
-    expect(await testNotificationEndpoint(ENDPOINT)).toEqual({ kind: 'rate_limited', retryAfterSeconds: 17 })
+  it('posts confirm and idempotencyKey to /test byte for byte', async () => {
+    transport.apiFetch.mockResolvedValue(response(200, success('accepted')))
+    expect(await testNotificationEndpoint(ENDPOINT, KEY)).toEqual({ kind: 'accepted', code: 'TEST_OUTCOME', testSendId: 'test-send-1' })
+    expect(transport.apiFetch).toHaveBeenCalledWith(`/api/me/notification-endpoints/${ENDPOINT}/test`, {
+      method: 'POST',
+      body: '{"confirm":true,"idempotencyKey":"key_ABC123"}',
+    })
+    const body = transport.apiFetch.mock.calls[0][1].body as string
+    expect(JSON.parse(body).idempotencyKey).toMatch(/^[A-Za-z0-9_-]{8,64}$/)
+    expectNoAccountFields(body)
   })
 
   it.each([
-    ['a transport failure', () => Promise.reject(new TypeError('offline')), 0],
-    ['a bad gateway', () => response(502, null), 502],
-    ['a gateway timeout', () => response(504, null), 504],
-  ])('marks %s as unknown', async (_name, reply, status) => {
-    transport.apiFetch.mockImplementation(reply)
-    expect(await testNotificationEndpoint(ENDPOINT)).toEqual({ kind: 'unknown', status })
+    ['failed', 'failed'],
+    ['outcome_unknown', 'outcome_unknown'],
+  ] as const)('maps the 200 %s outcome with its evidence', async (outcome, kind) => {
+    transport.apiFetch.mockResolvedValue(response(200, success(outcome)))
+    expect(await testNotificationEndpoint(ENDPOINT, KEY)).toEqual({ kind, code: 'TEST_OUTCOME', testSendId: 'test-send-1' })
   })
 
-  it('maps an ordinary unsuccessful response to failure', async () => {
+  it.each([
+    ['a missing key', { outcome: 'accepted', code: 'TEST_OUTCOME' }],
+    ['an extra key', { ...success('accepted'), extra: true }],
+    ['an unknown outcome', success('delivered')],
+    ['a non-string code', { ...success('accepted'), code: 7 }],
+    ['a non-string testSendId', { ...success('accepted'), testSendId: null }],
+    ['a non-object body', null],
+  ])('rejects a 200 response with %s', async (_name, body) => {
+    transport.apiFetch.mockResolvedValue(response(200, body))
+    expect(await testNotificationEndpoint(ENDPOINT, KEY)).toEqual({ kind: 'error', status: 200 })
+  })
+
+  it.each(['short', 'bad key!', 'x'.repeat(65)])('refuses the invalid idempotency key %j before transport', async (key) => {
+    expect(await testNotificationEndpoint(ENDPOINT, key)).toEqual({ kind: 'error', status: 0 })
+    expect(transport.apiFetch).not.toHaveBeenCalled()
+  })
+
+  it('maps 422 CONFIRM_REQUIRED', async () => {
+    transport.apiFetch.mockResolvedValue(response(422, { error: { code: 'CONFIRM_REQUIRED' } }))
+    expect(await testNotificationEndpoint(ENDPOINT, KEY)).toEqual({ kind: 'confirm_required' })
+  })
+
+  it.each([
+    ['NOTIFICATION_DELIVERY_DISABLED', 'delivery_disabled'],
+    ['ENDPOINT_NOT_USABLE', 'endpoint_not_usable'],
+    ['CONNECTION_NOT_READY', 'connection_not_ready'],
+    ['TEST_SEND_IN_PROGRESS', 'in_progress'],
+  ] as const)('maps 409 %s', async (code, kind) => {
+    transport.apiFetch.mockResolvedValue(response(409, { error: { code } }))
+    expect(await testNotificationEndpoint(ENDPOINT, KEY)).toEqual({ kind })
+  })
+
+  it('maps 429 TEST_SEND_RATE_LIMITED and reads Retry-After seconds', async () => {
+    transport.apiFetch.mockResolvedValue(response(429, { error: { code: 'TEST_SEND_RATE_LIMITED' } }, { 'retry-after': '17' }))
+    expect(await testNotificationEndpoint(ENDPOINT, KEY)).toEqual({ kind: 'rate_limited', retryAfterSeconds: 17 })
+  })
+
+  it('maps the 404 error shape', async () => {
+    transport.apiFetch.mockResolvedValue(response(404, { error: { code: 'NOT_FOUND' } }))
+    expect(await testNotificationEndpoint(ENDPOINT, KEY)).toEqual({ kind: 'not_found' })
+  })
+
+  it('distinguishes a transport failure for same-key retry', async () => {
+    transport.apiFetch.mockRejectedValue(new TypeError('offline'))
+    expect(await testNotificationEndpoint(ENDPOINT, KEY)).toEqual({ kind: 'network_error' })
+  })
+
+  it('maps an unspecified HTTP error without inventing an outcome', async () => {
     transport.apiFetch.mockResolvedValue(response(500, null))
-    expect(await testNotificationEndpoint(ENDPOINT)).toEqual({ kind: 'failure', status: 500 })
+    expect(await testNotificationEndpoint(ENDPOINT, KEY)).toEqual({ kind: 'error', status: 500 })
   })
 })

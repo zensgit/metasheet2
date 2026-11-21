@@ -243,15 +243,24 @@ async function toggle(el: HTMLElement, testid: string): Promise<void> {
   await flush()
 }
 
+let randomFill = 0
+
 beforeEach(() => {
   useLocale().setLocale('zh-CN')
+  randomFill = 0
+  vi.spyOn(globalThis.crypto, 'getRandomValues').mockImplementation((target) => {
+    const bytes = target as Uint8Array
+    bytes.fill(randomFill)
+    randomFill = (randomFill + 1) % 256
+    return target
+  })
   h_.browserZone.mockReset().mockReturnValue(BROWSER_ZONE)
   h_.endpointsReply.mockReset().mockImplementation(() => response(200, endpointsListing()))
   h_.preferencesReply.mockReset().mockImplementation(() => response(200, preferencesListing()))
   h_.establishReply.mockReset().mockImplementation(() => response(201, { endpoint: endpoint() }))
   h_.revokeReply.mockReset().mockImplementation(() => response(200, { endpoint: { id: ENDPOINT, status: 'revoked', revision: 2 } }))
   h_.patchReply.mockReset().mockImplementation((body: string) => response(200, updatedTopic(body)))
-  h_.testReply.mockReset().mockImplementation(() => response(202, null))
+  h_.testReply.mockReset().mockImplementation(() => response(200, { outcome: 'accepted', code: 'TEST_ACCEPTED', testSendId: 'test-send-1' }))
   h_.apiFetch.mockReset().mockImplementation(async (path: string, init?: { method?: string; body?: string }) => {
     const method = init?.method ?? 'GET'
     if (path === '/api/me/notification-endpoints' && method === 'GET') return h_.endpointsReply()
@@ -259,7 +268,7 @@ beforeEach(() => {
     if (path === '/api/me/notification-endpoints' && method === 'POST') return h_.establishReply(init?.body)
     if (path === '/api/me/notification-preferences' && method === 'PATCH') return h_.patchReply(init?.body)
     if (/^\/api\/me\/notification-endpoints\/[^/]+$/.test(path) && method === 'DELETE') return h_.revokeReply()
-    if (/^\/api\/me\/notification-endpoints\/[^/]+\/test-send$/.test(path) && method === 'POST') return h_.testReply()
+    if (/^\/api\/me\/notification-endpoints\/[^/]+\/test$/.test(path) && method === 'POST') return h_.testReply()
     return response(500, null)
   })
 })
@@ -270,6 +279,7 @@ afterEach(() => {
   app = null
   container = null
   router = null
+  vi.restoreAllMocks()
 })
 
 describe('notification preference page states', () => {
@@ -519,25 +529,74 @@ describe('notification test sending', () => {
   })
 
   it.each([
-    [202, '已被平台接受'],
-    [500, '失败'],
-    [502, '结果未知，请在对应平台确认'],
-  ])('requires confirmation and maps HTTP %s to the allowed result copy', async (status, copy) => {
-    h_.testReply.mockReturnValue(response(status, null))
+    ['accepted', '已被平台接受'],
+    ['failed', '失败'],
+    ['outcome_unknown', '结果未知，请在对应平台确认'],
+  ])('requires confirmation and maps the %s outcome to the allowed copy', async (outcome, copy) => {
+    h_.testReply.mockReturnValue(response(200, { outcome, code: 'TEST_OUTCOME', testSendId: 'test-send-1' }))
     const el = await mountView()
     expect((must(el, 'notification-test-0') as HTMLButtonElement).disabled).toBe(false)
     await click(el, 'notification-test-0')
     expect(shown(el, 'notification-test-dialog')).toBeTruthy()
     expect(writeCalls()).toHaveLength(0)
     await click(el, 'notification-dialog-confirm')
-    expect(calls(`/api/me/notification-endpoints/${ENDPOINT}/test-send`, 'POST')).toHaveLength(1)
-    expect(calls(`/api/me/notification-endpoints/${ENDPOINT}/test-send`, 'POST')[0][1]?.body).toBeUndefined()
+    const testCalls = calls(`/api/me/notification-endpoints/${ENDPOINT}/test`, 'POST')
+    expect(testCalls).toHaveLength(1)
+    expect(testCalls[0][1]?.body).toBe('{"confirm":true,"idempotencyKey":"AAAAAAAAAAAAAAAAAAAAAAAA"}')
+    const key = JSON.parse(testCalls[0][1]?.body as string).idempotencyKey
+    expect(key).toMatch(/^[A-Za-z0-9_-]{8,64}$/)
     expect(text(el, 'notification-action-result')).toBe(copy)
     expect(text(el, 'notification-action-result')).not.toContain(['已', '送', '达'].join(''))
+    expect(shown(el, 'notification-test-retry')).toBeNull()
   })
 
-  it('shows the retry delay after rate limiting', async () => {
-    h_.testReply.mockReturnValue(response(429, null, { 'retry-after': '17' }))
+  it('reuses one key after a network failure and generates a new key on the next confirmation', async () => {
+    h_.testReply
+      .mockImplementationOnce(() => Promise.reject(new TypeError('offline')))
+      .mockImplementationOnce(() => response(200, { outcome: 'accepted', code: 'RETRY_ACCEPTED', testSendId: 'test-send-2' }))
+      .mockImplementationOnce(() => response(200, { outcome: 'accepted', code: 'NEW_ACCEPTED', testSendId: 'test-send-3' }))
+    const el = await mountView()
+    await click(el, 'notification-test-0')
+    await click(el, 'notification-dialog-confirm')
+    expect(text(el, 'notification-action-result')).toBe('结果未知，请在对应平台确认')
+    expect(shown(el, 'notification-test-retry')).toBeTruthy()
+    const testCalls = () => calls(`/api/me/notification-endpoints/${ENDPOINT}/test`, 'POST')
+    expect(testCalls()).toHaveLength(1)
+    const firstBody = testCalls()[0][1]?.body as string
+
+    await click(el, 'notification-test-retry')
+    expect(testCalls()).toHaveLength(2)
+    expect(testCalls()[1][1]?.body).toBe(firstBody)
+    expect(text(el, 'notification-action-result')).toBe('已被平台接受')
+    expect(shown(el, 'notification-test-retry')).toBeNull()
+
+    await click(el, 'notification-test-0')
+    await click(el, 'notification-dialog-confirm')
+    expect(testCalls()).toHaveLength(3)
+    const nextBody = testCalls()[2][1]?.body as string
+    expect(nextBody).toBe('{"confirm":true,"idempotencyKey":"BBBBBBBBBBBBBBBBBBBBBBBB"}')
+    expect(nextBody).not.toBe(firstBody)
+    expect(vi.mocked(globalThis.crypto.getRandomValues).mock.calls).toHaveLength(2)
+  })
+
+  it.each([
+    [422, 'CONFIRM_REQUIRED', '请先确认测试发送'],
+    [409, 'NOTIFICATION_DELIVERY_DISABLED', '通知发送能力尚未启用'],
+    [409, 'ENDPOINT_NOT_USABLE', '当前渠道不可用，请重新启用后再试'],
+    [409, 'CONNECTION_NOT_READY', '连接尚未就绪，请稍后再试'],
+    [409, 'TEST_SEND_IN_PROGRESS', '上一条测试仍在处理中，请稍后再试'],
+    [404, 'NOT_FOUND', '通知渠道不存在或已移除'],
+  ])('shows the explanation for HTTP %s %s', async (status, code, copy) => {
+    h_.testReply.mockReturnValue(response(status, { error: { code } }))
+    const el = await mountView()
+    await click(el, 'notification-test-0')
+    await click(el, 'notification-dialog-confirm')
+    expect(text(el, 'notification-action-result')).toBe(copy)
+    expect(shown(el, 'notification-test-retry')).toBeNull()
+  })
+
+  it('shows Retry-After seconds after TEST_SEND_RATE_LIMITED', async () => {
+    h_.testReply.mockReturnValue(response(429, { error: { code: 'TEST_SEND_RATE_LIMITED' } }, { 'retry-after': '17' }))
     const el = await mountView()
     await click(el, 'notification-test-0')
     await click(el, 'notification-dialog-confirm')

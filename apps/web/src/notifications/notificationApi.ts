@@ -143,10 +143,18 @@ export type NotificationPreferenceWriteResult =
   | NotificationWriteFailure
 
 export type NotificationTestSendResult =
-  | { kind: 'accepted' }
-  | { kind: 'failure'; status: number }
-  | { kind: 'unknown'; status: number }
+  | { kind: 'accepted'; code: string; testSendId: string }
+  | { kind: 'failed'; code: string; testSendId: string }
+  | { kind: 'outcome_unknown'; code: string; testSendId: string }
+  | { kind: 'confirm_required' }
+  | { kind: 'delivery_disabled' }
+  | { kind: 'endpoint_not_usable' }
+  | { kind: 'connection_not_ready' }
+  | { kind: 'in_progress' }
   | { kind: 'rate_limited'; retryAfterSeconds: number | null }
+  | { kind: 'not_found' }
+  | { kind: 'network_error' }
+  | { kind: 'error'; status: number }
 
 const ENDPOINTS_PATH = '/api/me/notification-endpoints'
 const PREFERENCES_PATH = '/api/me/notification-preferences'
@@ -471,30 +479,57 @@ function header(response: Response, name: string): string | null {
 
 function retryAfterSeconds(response: Response): number | null {
   const raw = header(response, 'Retry-After')
-  if (raw !== null) {
-    if (/^\d+$/.test(raw.trim())) return Number(raw.trim())
-    const instant = Date.parse(raw)
-    if (Number.isFinite(instant)) return Math.max(0, Math.ceil((instant - Date.now()) / 1000))
-  }
-  const reset = header(response, 'X-RateLimit-Reset')
-  if (reset !== null && /^\d+(?:\.\d+)?$/.test(reset.trim())) {
-    return Math.max(0, Math.ceil(Number(reset.trim()) - Date.now() / 1000))
-  }
+  return raw !== null && /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : null
+}
+
+export function isNotificationIdempotencyKey(value: string): boolean {
+  return /^[A-Za-z0-9_-]{8,64}$/.test(value)
+}
+
+export function createNotificationTestIdempotencyKey(): string {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-'
+  const values = new Uint8Array(24)
+  globalThis.crypto.getRandomValues(values)
+  return Array.from(values, (value) => alphabet[value & 63]).join('')
+}
+
+function parseTestSendSuccess(value: unknown): NotificationTestSendResult | null {
+  const record = exactRecord(value, ['outcome', 'code', 'testSendId'])
+  if (!record || typeof record.code !== 'string' || typeof record.testSendId !== 'string') return null
+  if (record.outcome === 'accepted') return { kind: 'accepted', code: record.code, testSendId: record.testSendId }
+  if (record.outcome === 'failed') return { kind: 'failed', code: record.code, testSendId: record.testSendId }
+  if (record.outcome === 'outcome_unknown') return { kind: 'outcome_unknown', code: record.code, testSendId: record.testSendId }
   return null
 }
 
-export async function testNotificationEndpoint(endpointId: string): Promise<NotificationTestSendResult> {
-  if (!isUuid(endpointId)) return { kind: 'failure', status: 0 }
+export async function testNotificationEndpoint(endpointId: string, idempotencyKey: string): Promise<NotificationTestSendResult> {
+  if (!isUuid(endpointId) || !isNotificationIdempotencyKey(idempotencyKey)) return { kind: 'error', status: 0 }
   let response: Response
   try {
-    response = await apiFetch(`${ENDPOINTS_PATH}/${encodeURIComponent(endpointId)}/test-send`, { method: 'POST' })
+    response = await apiFetch(`${ENDPOINTS_PATH}/${encodeURIComponent(endpointId)}/test`, {
+      method: 'POST',
+      body: JSON.stringify({ confirm: true, idempotencyKey }),
+    })
   } catch {
-    return { kind: 'unknown', status: 0 }
+    return { kind: 'network_error' }
   }
-  if (response.status === 200 || response.status === 201 || response.status === 202) return { kind: 'accepted' }
-  if (response.status === 429) return { kind: 'rate_limited', retryAfterSeconds: retryAfterSeconds(response) }
-  if (response.status === 502 || response.status === 504) return { kind: 'unknown', status: response.status }
-  return { kind: 'failure', status: response.status }
+  if (response.status === 200) {
+    const result = parseTestSendSuccess(await safeJson(response))
+    return result ?? { kind: 'error', status: response.status }
+  }
+  const details = errorDetails(await safeJson(response))
+  if (response.status === 404 && details.code === 'NOT_FOUND') return { kind: 'not_found' }
+  if (response.status === 422 && details.code === 'CONFIRM_REQUIRED') return { kind: 'confirm_required' }
+  if (response.status === 409) {
+    if (details.code === 'NOTIFICATION_DELIVERY_DISABLED') return { kind: 'delivery_disabled' }
+    if (details.code === 'ENDPOINT_NOT_USABLE') return { kind: 'endpoint_not_usable' }
+    if (details.code === 'CONNECTION_NOT_READY') return { kind: 'connection_not_ready' }
+    if (details.code === 'TEST_SEND_IN_PROGRESS') return { kind: 'in_progress' }
+  }
+  if (response.status === 429 && details.code === 'TEST_SEND_RATE_LIMITED') {
+    return { kind: 'rate_limited', retryAfterSeconds: retryAfterSeconds(response) }
+  }
+  return { kind: 'error', status: response.status }
 }
 
 export function resolveNotificationBrowserTimeZone(): string {

@@ -19,6 +19,15 @@
     <p class="notification-preferences__live" data-testid="notification-action-result" aria-live="polite">
       {{ actionMessage }}
     </p>
+    <button
+      v-if="retryAttempt"
+      type="button"
+      data-testid="notification-test-retry"
+      :disabled="pendingWrite || !endpoints?.delivery.testSendAvailable"
+      @click="void retryTest()"
+    >
+      {{ t.retryTest }}
+    </button>
 
     <p v-if="loadState === 'loading' && !endpoints" data-testid="notification-loading" role="status">
       {{ t.loading }}
@@ -289,6 +298,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
 import {
+  createNotificationTestIdempotencyKey,
   establishNotificationEndpoint,
   listNotificationEndpoints,
   listNotificationPreferences,
@@ -335,6 +345,7 @@ const drafts = ref<Record<string, TopicDraft>>({})
 const formErrors = ref<Record<string, string>>({})
 const pendingWrite = ref(false)
 const actionMessage = ref('')
+const retryAttempt = ref<{ endpoint: NotificationEndpoint; idempotencyKey: string } | null>(null)
 const dialog = ref<DialogState | null>(null)
 const dialogElement = ref<HTMLElement | null>(null)
 const browserTimeZone = resolveNotificationBrowserTimeZone()
@@ -593,10 +604,24 @@ function testResultText(result: NotificationTestSendResult): string {
   switch (result.kind) {
     case 'accepted':
       return t.value.testAccepted
-    case 'failure':
+    case 'failed':
+    case 'error':
       return t.value.testFailed
-    case 'unknown':
+    case 'outcome_unknown':
+    case 'network_error':
       return t.value.testUnknown
+    case 'confirm_required':
+      return t.value.testConfirmRequired
+    case 'delivery_disabled':
+      return notificationReason('delivery_disabled', t.value)
+    case 'endpoint_not_usable':
+      return t.value.testEndpointUnusable
+    case 'connection_not_ready':
+      return t.value.testConnectionNotReady
+    case 'in_progress':
+      return t.value.testInProgress
+    case 'not_found':
+      return notificationReason('endpoint_not_found', t.value)
     case 'rate_limited':
       return result.retryAfterSeconds === null
         ? t.value.testRateLimitedUnknown
@@ -604,14 +629,36 @@ function testResultText(result: NotificationTestSendResult): string {
   }
 }
 
+async function executeTest(endpoint: NotificationEndpoint, idempotencyKey: string, token: number): Promise<void> {
+  const result = await testNotificationEndpoint(endpoint.id, idempotencyKey)
+  if (!writeIsCurrent(token)) return
+  retryAttempt.value = result.kind === 'network_error' ? { endpoint, idempotencyKey } : null
+  actionMessage.value = testResultText(result)
+  endWrite(token)
+}
+
 async function sendTest(endpoint: NotificationEndpoint): Promise<void> {
   if (!endpoints.value?.delivery.testSendAvailable) return
   const token = beginWrite()
   if (token === null) return
-  const result = await testNotificationEndpoint(endpoint.id)
-  if (!writeIsCurrent(token)) return
-  actionMessage.value = testResultText(result)
-  endWrite(token)
+  retryAttempt.value = null
+  let idempotencyKey: string
+  try {
+    idempotencyKey = createNotificationTestIdempotencyKey()
+  } catch {
+    actionMessage.value = t.value.testFailed
+    endWrite(token)
+    return
+  }
+  await executeTest(endpoint, idempotencyKey, token)
+}
+
+async function retryTest(): Promise<void> {
+  const attempt = retryAttempt.value
+  if (!attempt || pendingWrite.value || !endpoints.value?.delivery.testSendAvailable) return
+  const token = beginWrite()
+  if (token === null) return
+  await executeTest(attempt.endpoint, attempt.idempotencyKey, token)
 }
 
 onMounted(() => {
@@ -624,7 +671,7 @@ onBeforeUnmount(() => {
   writeGeneration += 1
 })
 
-defineExpose({ loadState, loading, endpoints, topics, drafts, pendingWrite, actionMessage, formErrors })
+defineExpose({ loadState, loading, endpoints, topics, drafts, pendingWrite, actionMessage, formErrors, retryAttempt })
 </script>
 
 <style scoped>
