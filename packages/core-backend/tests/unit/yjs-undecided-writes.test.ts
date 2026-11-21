@@ -266,6 +266,23 @@ describe('an edit that cannot be processed is never dropped in silence', () => {
     expect(s.world.patches).toEqual([])
   })
 
+  it('the permission read fails when an edit arrives: the edit is held, not applied and not refused, and processed once the read answers', async () => {
+    const s = await open()
+    const a = await editor(s, 'a')
+    const b = await editor(s, 'b')
+    s.world.readFails = true
+    sendUpdate(a, append(a, 'f1', '-held'))
+    await settle(200)
+    expect(shared(s).f1).toBe('one')
+    expect(b.received).toEqual([])
+    expect(persisted(s)).toBe(0)
+    expect(a.errors).toEqual([])
+    expect(a.invalidated).toEqual([])
+    s.world.readFails = false
+    await until(() => b.fields().f1 === 'one-held' && recordF1(s) === 'one-held')
+    expect(a.errors).toEqual([])
+  })
+
   it('a sender that leaves while its edit is held still has the edit processed once the answer is back', async () => {
     const s = await open({ protectedMode: false })
     const a = await editor(s, 'a')
