@@ -759,6 +759,12 @@ describe('O-8 / F8-1 — ApprovalCenterView English render scan (urge row, filte
 
   // Rendered CJK this slice does not convert (source file:line). None so far.
   const EXCEPTIONS: Array<{ text: string; count: number; source: string }> = []
+  // With the row-reject dialog open: its quick-phrase chips (shared ApprovalQuickPhraseBar). A
+  // phrase is written into the stored opinion as-is, so the presets are not localized.
+  const REJECT_DIALOG_EXCEPTIONS: Array<{ text: string; count: number; source: string }> = [
+    { text: '不符合要求', count: 1, source: 'apps/web/src/approvals/quickPhrases.ts:15 (QUICK_PHRASES.reject[0])' },
+    { text: '请补充材料后重新提交', count: 1, source: 'apps/web/src/approvals/quickPhrases.ts:15 (QUICK_PHRASES.reject[1])' },
+  ]
 
   const q = (testid: string) => container!.querySelector(`[data-testid="${testid}"]`) as HTMLElement | null
 
@@ -793,7 +799,7 @@ describe('O-8 / F8-1 — ApprovalCenterView English render scan (urge row, filte
     ;(q('approval-batch-reject') as HTMLButtonElement).click()
     await flushUi()
     expect(q('approval-batch-reject-dialog'), 'batch-reject dialog open').toBeTruthy()
-    expectNoCjkOutside(renderedTextAndAttributes(container!), EXCEPTIONS, 'center (en, reminded + dialogs open)')
+    expectNoCjkOutside(renderedTextAndAttributes(container!), REJECT_DIALOG_EXCEPTIONS, 'center (en, reminded + dialogs open)')
 
     useLocale().setLocale('zh-CN')
     await flushUi()
@@ -803,7 +809,7 @@ describe('O-8 / F8-1 — ApprovalCenterView English render scan (urge row, filte
     useLocale().setLocale('en')
     await flushUi()
     expect(q('approval-urge-m1')!.textContent?.trim()).toBe('Reminded')
-    expectNoCjkOutside(renderedTextAndAttributes(container!), EXCEPTIONS, 'center (en again)')
+    expectNoCjkOutside(renderedTextAndAttributes(container!), REJECT_DIALOG_EXCEPTIONS, 'center (en again)')
   })
 })
 

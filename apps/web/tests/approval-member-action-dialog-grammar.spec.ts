@@ -567,8 +567,8 @@ describe('O-8 / F8-1 — ApprovalDetailView English render scan with the five me
     reduce_sign: [],
     return: [],
     comment: [
-      { text: '已阅', count: 1, source: 'apps/web/src/approvals/quickPhrases.ts:15 (QUICK_PHRASES.comment[0])' },
-      { text: '请尽快处理', count: 1, source: 'apps/web/src/approvals/quickPhrases.ts:15 (QUICK_PHRASES.comment[1])' },
+      { text: '已阅', count: 1, source: 'apps/web/src/approvals/quickPhrases.ts:16 (QUICK_PHRASES.comment[0])' },
+      { text: '请尽快处理', count: 1, source: 'apps/web/src/approvals/quickPhrases.ts:16 (QUICK_PHRASES.comment[1])' },
     ],
   }
   // `picker`: the DETAIL_EN / DETAIL_ZH key of the placeholder the view passes to the user picker
@@ -641,15 +641,15 @@ describe('O-8 / F8-1 — ApprovalDetailView English render scan with the five me
 // appends after a full-width comma; and the payload the view hands to the approval store's
 // `executeAction` (the store double above) carries exactly the literal. In English each dialog is
 // also scanned with the chips shown: the presets are its only CJK (named exceptions,
-// quickPhrases.ts:13-15).
+// quickPhrases.ts:14-16).
 // ---------------------------------------------------------------------------------------------
 describe('O-8 / F8-1 — quick-phrase chips write the preset text unchanged in both locales', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
   let successSpy: { mockRestore: () => void; mock: { calls: unknown[][] } } | null = null
 
-  // The view remembers a submitted chip per user + action in localStorage and lists remembered
-  // phrases first; clear them so every case starts from the preset order.
+  // Personal phrases (saved per user + action in localStorage) are listed before the presets;
+  // clear them so every case starts from the preset order.
   function forgetRememberedPhrases() {
     for (let i = window.localStorage.length - 1; i >= 0; i -= 1) {
       const key = window.localStorage.key(i)
@@ -695,11 +695,11 @@ describe('O-8 / F8-1 — quick-phrase chips write the preset text unchanged in b
     await flushUi()
   }
 
-  // Literal presets (quickPhrases.ts:13-15), not imported: a change to the constant must red here.
+  // Literal presets (quickPhrases.ts:14-16), not imported: a change to the constant must red here.
   const CASES = [
-    { action: 'approve', open: 'approval-approve-button', dialog: 'approval-action-dialog', submit: 'approval-action-dialog-confirm', presets: ['同意', '情况属实', '已核实无误'], line: 13 },
-    { action: 'reject', open: 'approval-reject-button', dialog: 'approval-action-dialog', submit: 'approval-action-dialog-confirm', presets: ['不符合要求', '请补充材料后重新提交'], line: 14 },
-    { action: 'comment', open: 'approval-comment-button', dialog: 'approval-comment-dialog', submit: 'approval-comment-submit', presets: ['已阅', '请尽快处理'], line: 15 },
+    { action: 'approve', open: 'approval-approve-button', dialog: 'approval-action-dialog', submit: 'approval-action-dialog-confirm', presets: ['同意', '情况属实', '已核实无误'], line: 14 },
+    { action: 'reject', open: 'approval-reject-button', dialog: 'approval-action-dialog', submit: 'approval-action-dialog-confirm', presets: ['不符合要求', '请补充材料后重新提交'], line: 15 },
+    { action: 'comment', open: 'approval-comment-button', dialog: 'approval-comment-dialog', submit: 'approval-comment-submit', presets: ['已阅', '请尽快处理'], line: 16 },
   ] as const
 
   async function dialogTitle(action: 'approve' | 'reject' | 'comment', isZh: boolean): Promise<string> {
@@ -736,6 +736,8 @@ describe('O-8 / F8-1 — quick-phrase chips write the preset text unchanged in b
         expect(root(), `${action} dialog open`).toBeTruthy()
         expect(renderedTextAndAttributes(root()), 'dialog title in the shell locale').toContain(await dialogTitle(action, locale === 'zh-CN'))
         expect(chips().map((chip) => chip.textContent?.trim())).toEqual([...presets])
+        // The view hands the signed-in user (user_1 here) to the bar: without it there is no 「存为常用语」.
+        expect(root().querySelector('[data-testid="approval-phrase-save"]'), 'save-as-phrase control for the signed-in user').toBeTruthy()
         if (locale === 'en') {
           expectNoCjkOutside(
             renderedTextAndAttributes(container!),
