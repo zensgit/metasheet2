@@ -226,8 +226,9 @@ export async function inspectAuthorizationOperationSchema(query: AuthorizationIn
   return { digest, tableCount: tables.length, ordinary, baseDigest, d21Ready }
 }
 
-export function isSupportedAuthorizationOperationSchema(result: { digest: string; ordinary: boolean; baseDigest?: string; d21Ready?: boolean }): boolean {
-  return result.ordinary && result.d21Ready !== false && SUPPORTED_SCHEMA_PROFILES.has(result.baseDigest ?? result.digest)
+/** `d21Ready` is required and only a literal `true` passes: an omitted or non-boolean value refuses. */
+export function isSupportedAuthorizationOperationSchema(result: { digest: string; ordinary: boolean; baseDigest?: string; d21Ready: boolean }): boolean {
+  return result.ordinary === true && result.d21Ready === true && SUPPORTED_SCHEMA_PROFILES.has(result.baseDigest ?? result.digest)
 }
 export async function assertAuthorizationOperationSchema(query: AuthorizationInputQueryable['query']): Promise<void> {
   const result = await inspectAuthorizationOperationSchema(query)

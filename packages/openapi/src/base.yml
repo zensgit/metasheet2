@@ -404,6 +404,89 @@ components:
             directory: { $ref: '#/components/schemas/DirectoryIntegrationCapability' }
             login: { $ref: '#/components/schemas/DirectoryIntegrationCapability' }
             notification: { $ref: '#/components/schemas/DirectoryIntegrationCapability' }
+    DirectoryIntegrationCapabilitiesPatch:
+      type: object
+      additionalProperties: false
+      required: [expectedRevision, capabilities]
+      properties:
+        expectedRevision:
+          type: integer
+          minimum: 0
+          description: The revision the caller last read; zero while the integration has no capability row
+        capabilities:
+          type: object
+          additionalProperties: false
+          minProperties: 1
+          description: Only the capabilities named here are changed
+          properties:
+            directory: { type: boolean }
+            login: { type: boolean }
+            notification: { type: boolean }
+    DirectoryIntegrationCapabilitiesPatchRefusal:
+      type: object
+      required: [ok, error]
+      description: Values-free refusal of a capability change; fixed codes and capability names only.
+      properties:
+        ok: { type: boolean, enum: [false] }
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - DIRECTORY_CAPABILITIES_STALE
+                - CAPABILITY_PROVIDER_NOT_REGISTERED
+                - CAPABILITY_GOVERNED_BY_LEGACY_PATH
+                - CAPABILITY_UNSUPPORTED
+                - CAPABILITY_IMPLEMENTATION_MISSING
+                - CAPABILITY_INTEGRATION_INACTIVE
+                - CAPABILITY_SCOPE_INCOMPLETE
+                - CAPABILITY_PRECONDITION_FAILED
+                - CAPABILITY_LOGIN_SCOPE_TAKEN
+            message: { type: string }
+            details:
+              type: object
+              description: Absent for DIRECTORY_CAPABILITIES_STALE
+              required: [capability]
+              properties:
+                capability:
+                  type: string
+                  enum: [directory, login, notification]
+                reason:
+                  type: string
+                  description: Fixed code of the failed precondition or gate; present only for CAPABILITY_PRECONDITION_FAILED
+    DirectoryIntegrationCapabilitiesPatchInvalid:
+      type: object
+      required: [ok, error]
+      description: Values-free rejection of a capability change body; field tokens only.
+      properties:
+        ok: { type: boolean, enum: [false] }
+        error:
+          type: object
+          required: [code, message, details]
+          properties:
+            code:
+              type: string
+              enum: [DIRECTORY_CAPABILITIES_INVALID_INPUT]
+            message: { type: string }
+            details:
+              type: object
+              required: [fields]
+              properties:
+                fields:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: string
+                    enum:
+                      - body
+                      - expectedRevision
+                      - capabilities
+                      - capabilities.directory
+                      - capabilities.login
+                      - capabilities.notification
+                      - unknown_field
     NotificationError:
       type: object
       required: [error]

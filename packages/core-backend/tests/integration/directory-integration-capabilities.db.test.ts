@@ -20,6 +20,10 @@ import {
   up,
 } from '../../src/db/migrations/zzzz20261106130000_create_directory_integration_capabilities'
 import { createDirectoryIntegrationCapabilitiesService } from '../../src/integrations/directory-integration-capabilities-service'
+import {
+  PRODUCTION_CAPABILITY_ENABLE_GATES,
+  createDirectoryIntegrationCapabilitiesWriteService,
+} from '../../src/integrations/directory-integration-capabilities-write-service'
 import { probeCapabilityTables } from '../../src/integrations/integration-capability-evaluate'
 import { isCapabilityImplementationAvailable } from '../../src/integrations/integration-capability-implementations'
 import { resolveProviderCapabilityDescriptor } from '../../src/integrations/provider-capability-registry'
@@ -320,7 +324,32 @@ describeIfDatabase('directory integration capability tables (real database)', ()
         readLoginRuntime: () => ({ available: false, requireGrant: false, autoLinkEmail: false, autoProvision: false }),
         isIntegrationScopedCredentialsEnabled: () => false,
       })
-      app.use('/api/admin/directory/integration-capabilities', createAdminDirectoryCapabilitiesRouter({ service }))
+      // The router also carries the write route; this suite exercises the read route only (the write is
+      // covered by directory-integration-capabilities-patch.db.test.ts).
+      const writer = createDirectoryIntegrationCapabilitiesWriteService({
+        isEnabled: () => switchOn,
+        resolveDescriptor: resolveProviderCapabilityDescriptor,
+        isImplementationAvailable: isCapabilityImplementationAvailable,
+        readLoginRuntime: () => ({ available: false, requireGrant: false, autoLinkEmail: false, autoProvision: false }),
+        isIntegrationScopedCredentialsEnabled: () => false,
+        transaction: async (work) => {
+          const client = await pool.connect()
+          try {
+            await client.query('BEGIN')
+            const result = await work(client as never)
+            await client.query('COMMIT')
+            return result
+          } catch (error) {
+            await client.query('ROLLBACK').catch(() => undefined)
+            throw error
+          } finally {
+            client.release()
+          }
+        },
+        capabilityGates: PRODUCTION_CAPABILITY_ENABLE_GATES,
+        audit: async () => undefined,
+      })
+      app.use('/api/admin/directory/integration-capabilities', createAdminDirectoryCapabilitiesRouter({ service, writer }))
       return { app, service }
     }
 

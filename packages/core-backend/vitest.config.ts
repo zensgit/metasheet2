@@ -419,6 +419,15 @@ export default defineConfig({
       // plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs and
       // tests/unit/directory-integration-capabilities-wiring.test.ts).
       'tests/integration/directory-integration-capabilities.db.test.ts',
+      // Directory integration capability PATCH against real PostgreSQL: per-capability enable, disable and
+      // re-anchoring, the revision check under two connections on read-committed and
+      // repeatable-read-default pools, login scope uniqueness on the insert and update paths, history in
+      // the same transaction, the busy answer, scope shape, enable preconditions and enable gates, with
+      // the consumer resolver reading the rows the PATCH wrote. DATABASE_URL-gated with the EXPECT_DB
+      // sentinel; excluded here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the
+      // approval real-DB step in plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs and
+      // tests/unit/directory-integration-capabilities-wiring.test.ts).
+      'tests/integration/directory-integration-capabilities-patch.db.test.ts',
       // Deprovision effect provider witness: the provider column migration (isolated schema:
       // triggers, CHECK, replay, down, lock bound) and restore / compensation / writer against the
       // migrated schema. DATABASE_URL-gated with the EXPECT_DB sentinel; excluded here so the
