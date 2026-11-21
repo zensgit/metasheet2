@@ -21,7 +21,11 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        patch?: never;
+        /**
+         * Turn capabilities of one directory integration on or off
+         * @description Platform administrators only. Answers 404 DIRECTORY_CAPABILITIES_DISABLED while DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED is not the exact string true. Answers are given in this order: administrator check, switch, path, integration, body, revision, and then each named capability in the order directory, login, notification. `expectedRevision` is the revision the caller last read (0 while the integration has no capability row); any other stored revision is answered 409 DIRECTORY_CAPABILITIES_STALE whatever the request asks for. A capability that is not named keeps its state. False is always allowed. True is allowed only where the provider registry governs the capability as gated and every check passes; several capabilities in one request are applied together or not at all, and a refusal names the first capability that failed. A request that changes nothing answers 200 without advancing the revision. Every change advances the revision by one and is recorded with the administrator who made it. The response has the shape of the GET response and carries no scope value, corp id, application key or configuration value.
+         */
+        patch: operations["patchDirectoryIntegrationCapabilities"];
         trace?: never;
     };
     "/api/admin/plugins": {
@@ -19473,6 +19477,46 @@ export interface components {
                 notification: components["schemas"]["DirectoryIntegrationCapability"];
             };
         };
+        DirectoryIntegrationCapabilitiesPatch: {
+            /** @description The revision the caller last read; zero while the integration has no capability row */
+            expectedRevision: number;
+            /** @description Only the capabilities named here are changed */
+            capabilities: {
+                directory?: boolean;
+                login?: boolean;
+                notification?: boolean;
+            };
+        };
+        /** @description Values-free refusal of a capability change; fixed codes and capability names only. */
+        DirectoryIntegrationCapabilitiesPatchRefusal: {
+            /** @enum {boolean} */
+            ok: false;
+            error: {
+                /** @enum {string} */
+                code: "DIRECTORY_CAPABILITIES_STALE" | "CAPABILITY_PROVIDER_NOT_REGISTERED" | "CAPABILITY_GOVERNED_BY_LEGACY_PATH" | "CAPABILITY_UNSUPPORTED" | "CAPABILITY_IMPLEMENTATION_MISSING" | "CAPABILITY_INTEGRATION_INACTIVE" | "CAPABILITY_SCOPE_INCOMPLETE" | "CAPABILITY_PRECONDITION_FAILED" | "CAPABILITY_LOGIN_SCOPE_TAKEN";
+                message: string;
+                /** @description Absent for DIRECTORY_CAPABILITIES_STALE */
+                details?: {
+                    /** @enum {string} */
+                    capability: "directory" | "login" | "notification";
+                    /** @description Fixed code of the failed precondition or gate; present only for CAPABILITY_PRECONDITION_FAILED */
+                    reason?: string;
+                };
+            };
+        };
+        /** @description Values-free rejection of a capability change body; field tokens only. */
+        DirectoryIntegrationCapabilitiesPatchInvalid: {
+            /** @enum {boolean} */
+            ok: false;
+            error: {
+                /** @enum {string} */
+                code: "DIRECTORY_CAPABILITIES_INVALID_INPUT";
+                message: string;
+                details: {
+                    fields: ("body" | "expectedRevision" | "capabilities" | "capabilities.directory" | "capabilities.login" | "capabilities.notification" | "unknown_field")[];
+                };
+            };
+        };
         /** @description Values-free error body of the user notification routes. Details are field names, a fixed reason code or a revision number; never an identifier, a digest or provider text. */
         NotificationError: {
             error: {
@@ -23710,6 +23754,91 @@ export interface operations {
                 };
             };
             /** @description The capability tables are not present (DIRECTORY_CAPABILITIES_SCHEMA_UNAVAILABLE) */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    patchDirectoryIntegrationCapabilities: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                integrationId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DirectoryIntegrationCapabilitiesPatch"];
+            };
+        };
+        responses: {
+            /** @description Capability state after the request, also when the request changed nothing */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        ok: boolean;
+                        data: components["schemas"]["DirectoryIntegrationCapabilities"];
+                    };
+                };
+            };
+            /** @description integrationId is not a UUID (DIRECTORY_INTEGRATION_ID_INVALID) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description The surface is switched off (DIRECTORY_CAPABILITIES_DISABLED) or the integration does not exist (DIRECTORY_NOT_FOUND) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The stored revision is not the expected one (DIRECTORY_CAPABILITIES_STALE), or a capability may not be turned on (one of the CAPABILITY_ codes; `details.capability` names the capability and, for CAPABILITY_PRECONDITION_FAILED, `details.reason` is the fixed code of the precondition). Nothing was written. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DirectoryIntegrationCapabilitiesPatchRefusal"];
+                };
+            };
+            /** @description The body is not valid (DIRECTORY_CAPABILITIES_INVALID_INPUT). `details.fields` lists fixed tokens only: `body`, `expectedRevision`, `capabilities`, `capabilities.<name>` for one of the three capabilities, and `unknown_field` for any other field, whose name is not repeated. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DirectoryIntegrationCapabilitiesPatchInvalid"];
+                };
+            };
+            /** @description Fixed-sentence failure (DIRECTORY_CAPABILITIES_INTERNAL). Nothing was written. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The capability tables are not present (DIRECTORY_CAPABILITIES_SCHEMA_UNAVAILABLE), or the write lost a lock race or ran out of time (DIRECTORY_CAPABILITIES_BUSY; nothing was written and the request may be retried). */
             503: {
                 headers: {
                     [name: string]: unknown;

@@ -226,6 +226,7 @@ describe('view with an injected registry (gated capabilities)', () => {
     governance: { directory: 'gated', login: 'gated', notification: 'unsupported' },
     scopeOf: (row) => scopeFromValues(row.corp_id, (row.config as { app?: string }).app ?? ''),
     enablePreconditions: async () => ({ ok: true }),
+    secretConfigKeys: Object.freeze([]),
   }
   const integration = () => integrationRow({ provider: 'acme', corp_id: 'corp-1', config: { app: 'app-1' } })
 
