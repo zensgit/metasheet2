@@ -64,7 +64,7 @@ import { adminUsersRouter } from '../../src/routes/admin-users'
 import { ConnectionPool } from '../../src/integration/db/connection-pool'
 import { withAuthorizationInputTransaction } from '../../src/rbac/authorization-input-lock'
 import { discoverPrivilegeRolePlan, revalidatePrivilegeRolePlan } from '../../src/rbac/authorization-privilege-witness-plan'
-import { lockSharedAccessSubjects } from '../../src/admin/platform-actor-authority'
+import { assertPlatformActorAuthority, lockSharedAccessSubjects } from '../../src/admin/platform-actor-authority'
 import { isLastSignInPlatformAdmin, lockPlatformAdminInvariant } from '../../src/admin/user-recycle'
 import { lockNamespaceAdmissionWrites } from '../../src/rbac/namespace-admission'
 import { unassignUserRoles } from '../../src/rbac/role-assignment'
@@ -625,10 +625,11 @@ describeWithDatabase('unassign whole-file PostgreSQL proof; registered handler e
   it.each(['status-disable', 'recycle-move', 'delegated-demotion', 'protected-role-delete'] as const)('waits behind source-pinned %s lock/write fragment, not a whole HTTP competitor', async mode => {
     const source = readFileSync(new URL(mode === 'recycle-move' ? '../../src/admin/user-recycle.ts' : mode === 'protected-role-delete' ? '../../src/routes/roles.ts' : '../../src/routes/admin-users.ts', import.meta.url), 'utf8')
     const expectedPin = mode === 'recycle-move' ? 'ee591b541b631d09161d528912ff068f4872848db9dd51fe4ca01b1509a222bf'
-      : mode === 'protected-role-delete' ? '74fa55aeeb47b098fdb8ba9ad1ee93d4babfd466a2adfd960aa1ae0395b5e14b' : undefined
+      : mode === 'protected-role-delete' ? 'e482dd1c6807e86c1c7a488c263cab141b52d5c123eb58a7362ee35865acc671' : undefined
     if (expectedPin) expect(createHash('sha256').update(source).digest('hex')).toBe(expectedPin)
     else expect(source).toContain(mode === 'status-disable' ? 'if (isActive === false) await lockPlatformAdminInvariant(client)' : "if (action === 'unassign' && roleId === PLATFORM_ADMIN_ROLE_ID)")
     const fixture = await seed('raw')
+    const deletionActor = mode === 'protected-role-delete' ? (await seed('member')).actorId : null
     if (mode === 'status-disable' || mode === 'recycle-move' || mode === 'delegated-demotion') {
       await observer.query("INSERT INTO user_roles(user_id,role_id) VALUES($1,'admin')", [fixture.userId])
       fixture.roleId = 'admin'
@@ -639,12 +640,15 @@ describeWithDatabase('unassign whole-file PostgreSQL proof; registered handler e
     let acquired = false
     const competitor = outcome(other.transaction(async client => {
       holder = Number((client.__rawClient as PoolClient & { processID: number }).processID)
-      if (mode === 'protected-role-delete') {
-        await client.query('SELECT id FROM roles WHERE id=$1 FOR UPDATE', [fixture.roleId])
-        await lockNamespaceAdmissionWrites(client, fixture.userId)
-        // D21 (Y5a): the role delete bumps its members' subject version rows after their admission locks.
-        await bumpSubjectAuthorizationVersions(client, [fixture.userId])
-
+      if (deletionActor) {
+        await client.query('SELECT id, name FROM roles WHERE id=$1 FOR UPDATE', [fixture.roleId])
+        const membership = await client.query('SELECT user_id FROM user_roles WHERE role_id=$1', [fixture.roleId])
+        const memberIds = membership.rows.map(row => String(row.user_id))
+        expect(memberIds).toEqual([fixture.userId])
+        // D21 (Y5a): this entry takes the admission locks of the actor and the members and then, inside
+        // the access-graph mutex, bumps their subject version rows before it locks their users rows.
+        const locked = await lockSharedAccessSubjects(client, [deletionActor, ...memberIds])
+        await assertPlatformActorAuthority(client, locked.get(deletionActor), { requireLiveRbacAdmin: true })
       } else {
         await lockPlatformAdminInvariant(client)
         if (mode === 'delegated-demotion') {
@@ -661,7 +665,12 @@ describeWithDatabase('unassign whole-file PostgreSQL proof; registered handler e
       else {
         await unassignUserRoles({ userIds: [fixture.userId], roleId: fixture.roleId, scope: { kind: 'platform-admin' }, executor: client })
         if (mode === 'delegated-demotion') await syncLegacyAdminProfile(fixture.userId, false, (sql, params) => client.query(sql, params))
-        else { await client.query('DELETE FROM role_permissions WHERE role_id=$1', [fixture.roleId]); await client.query('DELETE FROM roles WHERE id=$1', [fixture.roleId]) }
+        else {
+          await client.query('DELETE FROM role_permissions WHERE role_id=$1', [fixture.roleId])
+          // D21 (Y5a): the route bumps the members' subject version rows (held since the entry above) before the role row goes.
+          await bumpSubjectAuthorizationVersions(client, [fixture.userId])
+          await client.query('DELETE FROM roles WHERE id=$1', [fixture.roleId])
+        }
       }
     }))
     let pending: ReturnType<typeof outcome> | undefined

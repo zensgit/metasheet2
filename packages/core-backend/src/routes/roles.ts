@@ -1,12 +1,13 @@
 import type { Request, Response} from 'express';
 import { Router } from 'express'
 import { rbacGuard } from '../rbac/rbac'
-import { hasLegacyAdminClaim } from '../rbac/platform-admin'
+import { assertPlatformActorAuthority, lockSharedAccessSubjects, PlatformActorAuthorityLost } from '../admin/platform-actor-authority'
+import type { AccessGraphTransactionClient } from '../directory/access-graph-mutex'
 import { auditLog } from '../audit/audit'
 import { pool, transaction } from '../db/pg'
 import { bumpSubjectAuthorizationVersions } from '../multitable/authz-version-protocol'
-import { invalidateUserPerms, isAdmin, userHasPermission } from '../rbac/service'
-import { deriveDelegatedAdminNamespace, lockNamespaceAdmissionWrites } from '../rbac/namespace-admission'
+import { invalidateUserPerms } from '../rbac/service'
+import { deriveDelegatedAdminNamespace } from '../rbac/namespace-admission'
 import {
   auditDelegatedAdminScopeCleanup,
   isAdminLevelPermissionCode,
@@ -336,72 +337,36 @@ function isElevatedPermissionCode(code: string): boolean {
   return resource === '*' || resource === 'admin'
 }
 
-/**
- * The platform-admin test this route gates elevated grants on. It is deliberately the
- * SAME population `ensurePlatformAdmin` admits for `GET /api/admin/roles` — the read side
- * of this very editor (routes/admin-users.ts) — plus the wildcard holder:
- *
- *   - `hasLegacyAdminClaim(req)`: the shared request-claim predicate (rbac/platform-admin.ts,
- *     imported by admin-users.ts too so the two cannot drift). Without this leg an
- *     administrator whose status comes from the legacy claim — `users.role='admin'`, a
- *     token `roles` claim, or the no-DB fallback user — is refused by the write side
- *     while the read side serves them the editor: the exact "the owner cannot grant a
- *     permission through any UI, it has to be done with SQL" symptom this route exists to
- *     remove;
- *   - `isAdmin(actorId)`: LIVE SQL on user_roles, never the 60s permission memo;
- *   - `userHasPermission(actorId, '*:*')`: also live; holding the all-permissions
- *     wildcard is what makes someone an owner here and does not imply membership in the
- *     seeded `admin` role.
- *
- * Still strictly narrower than `roles:write`, which is all this route demanded before.
- */
-async function actorIsPlatformAdmin(req: Request, actorId?: string): Promise<boolean> {
-  if (hasLegacyAdminClaim(req)) return true
+async function lockRoleCatalogAuthority(
+  client: AccessGraphTransactionClient,
+  actorId: string | undefined,
+  memberIds: string[] = [],
+): Promise<boolean> {
   if (!actorId) return false
-  if (await isAdmin(actorId)) return true
-  return await userHasPermission(actorId, '*:*')
+  const locked = await lockSharedAccessSubjects(client, [actorId, ...memberIds])
+  try {
+    await assertPlatformActorAuthority(client, locked.get(actorId), { requireLiveRbacAdmin: true })
+    return true
+  } catch (error) {
+    if (error instanceof PlatformActorAuthorityLost) return false
+    throw error
+  }
 }
 
-/**
- * The ONE authority gate over role permission writes, applied by BOTH writers.
- *
- * It lives in a helper precisely because a gate on a single verb is not a boundary: PUT
- * refusing `*:*` while POST accepts the same body with `{id: '<existing role>'}` — same
- * router, same rbacGuard, ON CONFLICT DO NOTHING on the role row and an additive grant on
- * the role_permissions row — would be a 403 its own sibling dissolves in one request.
- *
- * SYMMETRIC in both directions. Removing an elevated code is not "less dangerous" than
- * adding one: emptying the seeded `admin` role de-administrates the platform and reads as
- * `ok: true`, and quietly dropping `stock-prep:*` revokes a whole team — with the cache
- * fan-out below making it effective immediately. `added` and `removed` are therefore both
- * examined, and any write that touches the platform-admin role's set at all is reserved
- * for a platform administrator regardless of which codes move.
- *
- * LOCK SHAPE worth recording: on the elevated / platform-admin-role path only, this helper
- * calls `actorIsPlatformAdmin`, i.e. `isAdmin` and `userHasPermission` (rbac/service), which
- * run their own statements through the module pool — a SECOND pool checkout taken while the
- * caller is still holding the `SELECT … FOR UPDATE` row lock inside `transaction()`. Both
- * callers reach it from inside their transaction. It is rare (an ordinary edit short-circuits
- * at the `!elevating.length && !touchesPlatformAdminRole` return, and a legacy-claim admin
- * short-circuits before any query) and short, but it is the lock-held-across-an-independent-
- * checkout shape: with the pool saturated by concurrent elevated edits, the lock holder waits
- * on a client that the waiters are holding. Recorded, not restructured — whether the check is
- * needed at all is only known after `added`/`removed` are computed from the LOCKED snapshot,
- * so hoisting it out of the transaction means running it unconditionally on every write.
- */
+/** Apply the same authority to elevated grants, revocations and protected roles. */
 async function assertRoleGrantAuthority(params: {
-  req: Request
+  client: AccessGraphTransactionClient
   actorId?: string
   roleId: string
   added: readonly string[]
   removed: readonly string[]
 }): Promise<void> {
-  const { req, actorId, roleId, added, removed } = params
+  const { client, actorId, roleId, added, removed } = params
   const elevating = [...added, ...removed].filter(isElevatedPermissionCode)
   const touchesPlatformAdminRole = roleId === PLATFORM_ADMIN_ROLE_ID
     && (added.length > 0 || removed.length > 0)
   if (!elevating.length && !touchesPlatformAdminRole) return
-  if (await actorIsPlatformAdmin(req, actorId)) return
+  if (await lockRoleCatalogAuthority(client, actorId)) return
   if (!elevating.length) {
     throw new RolePermissionRequestError(
       403,
@@ -645,7 +610,7 @@ export function rolesRouter(): Router {
           )
           added = perms.filter((code) => !currentCodes.has(code))
           if (!added.length) return
-          await assertRoleGrantAuthority({ req, actorId, roleId: id, added, removed: [] })
+          await assertRoleGrantAuthority({ client, actorId, roleId: id, added, removed: [] })
           await assertCodesInCatalog(client, added)
           for (const p of added) {
             await client.query('INSERT INTO role_permissions(role_id, permission_code) VALUES ($1,$2) ON CONFLICT DO NOTHING', [id, p])
@@ -798,7 +763,7 @@ export function rolesRouter(): Router {
 
           // Authority BEFORE the catalog probe: a refused caller learns nothing about
           // which of its guessed codes exist.
-          await assertRoleGrantAuthority({ req, actorId, roleId: id, added, removed })
+          await assertRoleGrantAuthority({ client, actorId, roleId: id, added, removed })
           await assertCodesInCatalog(client, added)
 
           await client.query('UPDATE roles SET name=$1, updated_at=now() WHERE id=$2', [name, id])
@@ -891,7 +856,7 @@ export function rolesRouter(): Router {
    * (`unassignUserRoles`, scope `platform-admin` — the caller was just proven one) on THIS
    * transaction's client, which also drops each member's delegated audience for the namespace once
    * no other held role derives it. Before that unassign, the same transaction locks
-   * `namespace-admission:<member>` for the snapshotted members in sorted id order. The role row
+   * `namespace-admission` and user rows for the actor and snapshotted members in sorted id order. The role row
    * lock is already held, matching delegated unassign (role lock, then the user lock). A scope
    * insert that holds the user lock cannot commit an audience row this cleanup did not see.
    * A membership that arrives after the snapshot is not in that lock set. Membership, audience
@@ -940,21 +905,17 @@ export function rolesRouter(): Router {
           // surgical revoke and a delete must not have different admit sets, or the gate is
           // just a detour. The same holds for a main-admin or admin-equivalent role.
           const protection = await readRoleDeleteProtection(client, id)
-          if (protection && !await actorIsPlatformAdmin(req, actorId)) {
-            throw protectedRoleDeleteRefusal(id, protection)
-          }
           // The member snapshot, taken BEFORE the row goes and INSIDE this transaction. Before,
           // because `user_roles.role_id → roles(id)` is ON DELETE CASCADE where that FK exists
           // (migrations/033_create_rbac_core.sql:36) and the rows are gone afterwards. Inside,
           // because it is PRE-commit: a failed read answers the 500 below with nothing deleted.
           memberIds = await readRoleMemberIds(id, client)
+          if (protection && !await lockRoleCatalogAuthority(client, actorId, memberIds)) {
+            throw protectedRoleDeleteRefusal(id, protection)
+          }
           if (protection && protection.kind !== 'platform_admin_role') {
             removesMemberships = true
             if (memberIds.length > 0) {
-              const lockedMemberIds = [...memberIds].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0))
-              for (const memberId of lockedMemberIds) {
-                await lockNamespaceAdmissionWrites(client, memberId)
-              }
               membershipRemoval = await unassignUserRoles({
                 userIds: memberIds,
                 roleId: id,
@@ -975,9 +936,12 @@ export function rolesRouter(): Router {
           // revocation). It sits AFTER the namespace-admission locks above (the writer rule: locks
           // outside the admission holder's set first, then the version row; every
           // lockSharedAccessSubjects caller takes advisory → version row, so a version row taken
-          // before those locks is one half of a writer-vs-writer 40P01). The protected branch's
-          // membership removal already took the same rows, sorted, inside unassignUserRoles, after
-          // those locks and before its DELETE; here they are held, and an ordinary role takes them now.
+          // before those locks is one half of a writer-vs-writer 40P01). A protected role took those
+          // locks and these same rows above, inside lockRoleCatalogAuthority (#6971:
+          // lockSharedAccessSubjects for the actor and every member — admission advisories, then
+          // their version rows in one sorted statement, then the users rows), and its membership
+          // removal took the rows again inside unassignUserRoles; here they are held. An ordinary
+          // role takes no admission lock and takes the version rows now.
           await bumpSubjectAuthorizationVersions(client, memberIds)
           await client.query('DELETE FROM roles WHERE id=$1', [id])
         })

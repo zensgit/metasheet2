@@ -51,6 +51,15 @@ export async function assertPlatformActorAuthority(
   if (!actor || actor.deletedAt || actor.purgedAt || actor.isActive !== true || actor.activationStatus !== 'activated') {
     throw new PlatformActorAuthorityLost()
   }
+  if (options?.requireLiveRbacAdmin === true) {
+    if (actor.role === 'disabled') throw new PlatformActorAuthorityLost()
+    const membership = await client.query(
+      "SELECT role_id FROM user_roles WHERE user_id = $1 AND role_id = 'admin' FOR SHARE",
+      [actor.id],
+    )
+    if (membership.rows[0]?.role_id !== PLATFORM_ADMIN_ROLE_ID) throw new PlatformActorAuthorityLost()
+    return
+  }
   const roles = await client.query(
     `SELECT role_id
      FROM user_roles
@@ -62,10 +71,6 @@ export async function assertPlatformActorAuthority(
     .map((row) => row.role_id)
     .filter((roleId): roleId is string => typeof roleId === 'string' && roleId.length > 0)
   const hasLiveRbacAdmin = roleIds.includes(PLATFORM_ADMIN_ROLE_ID)
-  if (options?.requireLiveRbacAdmin === true) {
-    if (!hasLiveRbacAdmin) throw new PlatformActorAuthorityLost()
-    return
-  }
   if (actor.role !== 'admin' && !hasLiveRbacAdmin) {
     throw new PlatformActorAuthorityLost()
   }

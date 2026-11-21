@@ -53,7 +53,7 @@ function refresh_token_if_needed() {
 function usage() {
   cat >&2 <<'EOF'
 Usage:
-  API_BASE="http://HOST:PORT/api" AUTH_TOKEN="<ADMIN_JWT>" USER_ID="<UUID>" ROLE="employee|approver|admin" \
+  API_BASE="http://HOST:PORT/api" AUTH_TOKEN="<ADMIN_JWT>" USER_ID="<UUID>" ROLE="employee|approver|importer|admin" \
     scripts/ops/attendance-provision-user.sh
 
 Notes:
@@ -88,9 +88,13 @@ case "$ROLE" in
     role_id="attendance_approver"
     permissions=("attendance:read" "attendance:approve")
     ;;
+  importer)
+    role_id="attendance_importer"
+    permissions=("attendance:read" "attendance:import")
+    ;;
   admin)
     role_id="attendance_admin"
-    permissions=("attendance:read" "attendance:write" "attendance:approve" "attendance:admin")
+    permissions=("attendance:read" "attendance:write" "attendance:approve" "attendance:import" "attendance:admin")
     ;;
   *)
     usage

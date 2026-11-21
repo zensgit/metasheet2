@@ -805,11 +805,22 @@ describe('W — writers bump FIRST', () => {
     expect(end).toBeGreaterThan(start)
     const body = roles.slice(start, end + roleDelete.length)
     const bumpAt = body.indexOf('await bumpSubjectAuthorizationVersions(client, memberIds)')
-    const lockAt = body.lastIndexOf('await lockNamespaceAdmissionWrites(client, memberId)')
+    // Since #6971 a protected role's admission locks (the actor's and every member's) are taken by
+    // lockRoleCatalogAuthority, through lockSharedAccessSubjects: admission advisories first, then
+    // the access-graph mutex (version rows, then users rows). The route body takes none on its own.
+    const lockAt = body.lastIndexOf('await lockRoleCatalogAuthority(client, actorId, memberIds)')
     expect(lockAt).toBeGreaterThan(0)
     expect(bumpAt).toBeGreaterThan(lockAt)
     expect(body.indexOf(roleDelete)).toBeGreaterThan(bumpAt)
     expect(body.match(/bumpSubjectAuthorizationVersions\(/g)).toHaveLength(1)
+    expect(body).not.toContain('lockNamespaceAdmissionWrites(')
+    const helper = roles.slice(roles.indexOf('async function lockRoleCatalogAuthority('), roles.indexOf('async function assertRoleGrantAuthority('))
+    expect(helper).toContain('const locked = await lockSharedAccessSubjects(client, [actorId, ...memberIds])')
+    const authority = readFileSync(path.join(SRC, 'admin', 'platform-actor-authority.ts'), 'utf8')
+    const shared = authority.slice(authority.indexOf('export async function lockSharedAccessSubjects('), authority.indexOf('export async function assertPlatformActorAuthority('))
+    const admissionAt = shared.indexOf('await lockNamespaceAdmissionWrites(client, id)')
+    expect(admissionAt).toBeGreaterThan(0)
+    expect(shared.indexOf('return lockUsersForAccessGraphWrite(client, sorted)')).toBeGreaterThan(admissionAt)
   })
 })
 

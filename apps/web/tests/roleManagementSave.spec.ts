@@ -126,6 +126,36 @@ afterEach(() => {
   container = null
 })
 
+it.each([['PUT', 'PERMISSION_ESCALATION_FORBIDDEN'], ['DELETE', 'PROTECTED_ROLE_FORBIDDEN']])(
+  'explains missing current platform authority when %s is refused', async (method, code) => {
+    apiFetchMock.mockImplementation(async (url: string, init?: { method?: string }) => {
+      if (url === '/api/permissions') return jsonResponse({ ok: true, data: PERMISSIONS })
+      if (url === '/api/admin/roles') return jsonResponse(roleCatalog(['stock-prep:read']))
+      if (isRoleMembersGet(url)) return membersResponse()
+      if (init?.method === method) return jsonResponse({ ok: false, error: { code } }, 403)
+      throw new Error(`unexpected call ${url}`)
+    })
+    await mountView()
+    clickRole()
+    await flushUi()
+    if (method === 'PUT') {
+      clickSave()
+    } else {
+      const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+      try {
+        const button = [...(container?.querySelectorAll<HTMLButtonElement>('button') ?? [])]
+          .find(item => item.textContent?.trim() === '删除角色')
+        if (!button) throw new Error('delete button not found')
+        button.click()
+      } finally {
+        confirm.mockRestore()
+      }
+    }
+    await flushUi()
+    expect(statusText()).toBe('此操作要求账号当前持有平台管理员角色。请联系平台管理员处理。')
+  },
+)
+
 describe('RoleManagementView — reserved role name (#6348 follow-up)', () => {
   it('a 400 ROLE_NAME_RESERVED is shown in Chinese, not as the server\'s English message', async () => {
     apiFetchMock.mockImplementation(async (url: string, init?: { method?: string }) => {
