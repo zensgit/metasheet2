@@ -453,6 +453,7 @@ describe('notification channel and preference writes', () => {
       topics: [topic({ preference: { enabled: true, primaryEndpointId: ENDPOINT, fallbackEndpointId: null, quietHours: null, revision: 5 } })],
     })))
     const el = await mountView()
+    expect(shown(el, 'notification-selected-unavailable')).toBeNull()
     await submit(el)
     expect(calls('/api/me/notification-preferences', 'PATCH')[0][1]?.body).toBe('{"topic":"task_reminder","expectedRevision":5}')
   })
@@ -1015,7 +1016,7 @@ describe('notification candidates, writes, and route reachability', () => {
     expect(shown(el, 'notification-channels')).toBeTruthy()
   })
 
-  it('matches session-route reachability in ordinary and focused shells', () => {
+  it('is reachable in the ordinary shell and redirected in attendance- and PLM-focused shells', () => {
     const route = appRoutes.find((item) => item.path === '/settings/notifications')!
     const context = (over: Partial<RouteGuardPolicyContext> = {}): RouteGuardPolicyContext => ({
       hasFeature: () => true,
