@@ -129,8 +129,10 @@ describe('a sender that may not write does not get in the way of one that may', 
     await settle(300)
     expect(e.errors).toEqual([])
     expect(e.invalidated).toEqual([])
-    // Refused once, for the first change; the other eleven are ended without an answer and without a read.
-    expect(codes(r)).toEqual(['FORBIDDEN: No write access'])
+    // Refused once, for the first change. The other eleven are ended without a read: those already
+    // waiting get no answer, those that arrive after the refusal are answered as not subscribed.
+    expect(codes(r).filter((code) => code === 'FORBIDDEN: No write access')).toHaveLength(1)
+    expect(codes(r).filter((code) => code !== 'FORBIDDEN: No write access' && code !== 'FORBIDDEN: Not subscribed')).toEqual([])
     expect(r.invalidated).toHaveLength(1)
     expect(readsOf(s, 'r') - readsBefore).toBe(1)
   })
