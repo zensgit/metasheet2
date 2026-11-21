@@ -11283,7 +11283,7 @@ describe('DirectoryManagementView', () => {
     })
 
     it('keeps the created message after creating an integration', async () => {
-      const created = createIntegration({ id: 'dir-new', name: 'OmgateNewIntegration' })
+      const created = createIntegration({ id: 'dir-new', name: 'CreatedDraftIntegration' })
       let createdDone = false
       apiFetchMock.mockImplementation(async (url: string, options?: { method?: string }) => {
         const path = String(url)
