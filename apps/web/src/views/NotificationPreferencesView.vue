@@ -9,7 +9,7 @@
         v-if="loadState === 'ready'"
         type="button"
         data-testid="notification-refresh"
-        :disabled="pendingWrite || loading"
+        :disabled="pendingWrite"
         @click="void refresh()"
       >
         {{ loading ? t.refreshing : t.refresh }}
@@ -173,7 +173,7 @@
                 :id="`notification-primary-${topic.topic}`"
                 v-model="drafts[topic.topic].primaryEndpointId"
                 :data-testid="`notification-primary-${topic.topic}`"
-                :disabled="pendingWrite || loading || !hasUsableChannels"
+                :disabled="pendingWrite || loading"
                 @change="onPrimaryChange(topic.topic)"
               >
                 <option value="">{{ t.useOrgDefault }}</option>
@@ -213,8 +213,11 @@
                 {{ endpointIssue(topic.topic, 'fallback') }}
               </p>
             </div>
-            <p v-if="!hasUsableChannels" class="notification-note" data-testid="notification-default-connection">
+            <p v-if="!drafts[topic.topic].primaryEndpointId" class="notification-note" data-testid="notification-default-connection">
               {{ t.useOrgDefault }}
+            </p>
+            <p v-else-if="!hasUsableChannels" class="notification-note" data-testid="notification-selected-unavailable">
+              {{ t.selectedChannelUnavailable }}
             </p>
 
             <label class="notification-choice">
@@ -561,6 +564,10 @@ function endpointIssue(topic: string, channel: 'primary' | 'fallback'): string |
 
 function onPrimaryChange(topic: string): void {
   const draft = drafts.value[topic]
+  if (!draft.primaryEndpointId) {
+    draft.fallbackEndpointId = ''
+    return
+  }
   const fallback = endpointById(draft.fallbackEndpointId)
   const primary = endpointById(draft.primaryEndpointId)
   if (fallback && fallback.connection.provider === primary?.connection.provider) draft.fallbackEndpointId = ''

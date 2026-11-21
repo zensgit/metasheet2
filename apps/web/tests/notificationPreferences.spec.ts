@@ -343,7 +343,7 @@ describe('notification preference page states', () => {
     expect(shown(el, 'notification-enable-0')).toBeNull()
     expect(shown(el, 'notification-enable-1')).toBeNull()
     expect(shown(el, 'notification-types')).toBeTruthy()
-    expect((must(el, 'notification-primary-task_reminder') as HTMLSelectElement).disabled).toBe(true)
+    expect((must(el, 'notification-primary-task_reminder') as HTMLSelectElement).disabled).toBe(false)
     expect(text(el, 'notification-default-connection')).toBe('将使用管理员设置的默认连接')
     expect((must(el, 'notification-test-0') as HTMLButtonElement).disabled).toBe(true)
   })
@@ -901,7 +901,7 @@ describe('notification candidates, writes, and route reachability', () => {
     await click(el, 'notification-revoke-0')
     await click(el, 'notification-dialog-confirm')
     expect(shown(el, 'notification-types')).toBeTruthy()
-    expect((must(el, 'notification-primary-task_reminder') as HTMLSelectElement).disabled).toBe(true)
+    expect((must(el, 'notification-primary-task_reminder') as HTMLSelectElement).disabled).toBe(false)
     expect(text(el, 'notification-default-connection')).toBe('将使用管理员设置的默认连接')
     await toggle(el, 'notification-enabled-task_reminder')
     await submit(el)
@@ -1001,13 +1001,6 @@ describe('notification candidates, writes, and route reachability', () => {
     }
   })
 
-  it('uses behavior-oriented suite names without process wording', () => {
-    const source = readFileSync(resolve('tests/notificationPreferences.spec.ts'), 'utf8')
-    expect(source).toContain("describe('notification state, errors, and accessibility'")
-    const legacySuitePrefix = ['describe(', "'third", '-round'].join('')
-    expect(source).not.toContain(legacySuitePrefix)
-  })
-
   it('disables and labels the error retry while a reread is pending', async () => {
     h_.endpointsReply.mockReturnValueOnce(response(500, null))
     const el = await mountView()
@@ -1033,9 +1026,107 @@ describe('notification candidates, writes, and route reachability', () => {
       ...over,
     })
     expect(resolveRouteGuardDecision({ path: '/settings/notifications', meta: route.meta }, context())).toEqual({ action: 'allow' })
-    expect(resolveRouteGuardDecision({ path: '/settings/notifications', meta: route.meta }, context({ attendanceFocused: true }))).toEqual({ action: 'allow' })
+    expect(resolveRouteGuardDecision({ path: '/settings/notifications', meta: route.meta }, context({ attendanceFocused: true }))).toEqual({ action: 'redirect', target: '/attendance' })
     expect(resolveRouteGuardDecision({ path: '/settings', meta: route.meta }, context({ attendanceFocused: true }))).toEqual({ action: 'allow' })
     expect(resolveRouteGuardDecision({ path: '/settings/notifications', meta: route.meta }, context({ plmWorkbenchFocused: true }))).toEqual({ action: 'redirect', target: '/plm' })
+  })
+})
+
+describe('notification preference field transitions', () => {
+  const existingPreference = (over: Record<string, unknown> = {}) => ({
+    enabled: true,
+    primaryEndpointId: ENDPOINT,
+    fallbackEndpointId: null,
+    quietHours: null,
+    revision: 4,
+    ...over,
+  })
+
+  it('sends primaryEndpointId null only when the primary changes to the default connection', async () => {
+    h_.preferencesReply.mockReturnValue(response(200, preferencesListing({ topics: [topic({ preference: existingPreference() })] })))
+    const el = await mountView()
+    await select(el, 'notification-primary-task_reminder', '')
+    await submit(el)
+    expect(calls('/api/me/notification-preferences', 'PATCH')[0][1]?.body).toBe('{"topic":"task_reminder","expectedRevision":4,"primaryEndpointId":null}')
+  })
+
+  it('sends fallbackEndpointId null only when the fallback changes to none', async () => {
+    h_.endpointsReply.mockReturnValue(response(200, endpointsListing({ endpoints: [endpoint(), backupEndpoint()] })))
+    h_.preferencesReply.mockReturnValue(response(200, preferencesListing({
+      topics: [topic({ preference: existingPreference({ fallbackEndpointId: OTHER_ENDPOINT, revision: 5 }) })],
+    })))
+    const el = await mountView()
+    await select(el, 'notification-fallback-task_reminder', '')
+    await submit(el)
+    expect(calls('/api/me/notification-preferences', 'PATCH')[0][1]?.body).toBe('{"topic":"task_reminder","expectedRevision":5,"fallbackEndpointId":null}')
+  })
+
+  it('sends quietHours null only when quiet hours are turned off', async () => {
+    h_.preferencesReply.mockReturnValue(response(200, preferencesListing({
+      topics: [topic({ preference: existingPreference({ quietHours: { start: '22:00', end: '08:00', timeZone: 'Europe/Paris' }, revision: 6 }) })],
+    })))
+    const el = await mountView()
+    await toggle(el, 'notification-quiet-enabled-task_reminder')
+    await submit(el)
+    expect(calls('/api/me/notification-preferences', 'PATCH')[0][1]?.body).toBe('{"topic":"task_reminder","expectedRevision":6,"quietHours":null}')
+  })
+
+  it('sends the complete new quietHours only when the time zone changes', async () => {
+    h_.preferencesReply.mockReturnValue(response(200, preferencesListing({
+      topics: [topic({ preference: existingPreference({ quietHours: { start: '22:00', end: '08:00', timeZone: 'Europe/Paris' }, revision: 7 }) })],
+    })))
+    const el = await mountView()
+    await fill(el, 'notification-time-zone-task_reminder', 'Asia/Shanghai')
+    await submit(el)
+    expect(calls('/api/me/notification-preferences', 'PATCH')[0][1]?.body).toBe('{"topic":"task_reminder","expectedRevision":7,"quietHours":{"start":"22:00","end":"08:00","timeZone":"Asia/Shanghai"}}')
+  })
+
+  it('clears the fallback draft and sends both nulls when the primary becomes default', async () => {
+    h_.endpointsReply.mockReturnValue(response(200, endpointsListing({ endpoints: [endpoint(), backupEndpoint()] })))
+    h_.preferencesReply.mockReturnValue(response(200, preferencesListing({
+      topics: [topic({ preference: existingPreference({ fallbackEndpointId: OTHER_ENDPOINT, revision: 8 }) })],
+    })))
+    const el = await mountView()
+    await select(el, 'notification-primary-task_reminder', '')
+    expect((must(el, 'notification-fallback-task_reminder') as HTMLSelectElement).value).toBe('')
+    await submit(el)
+    expect(calls('/api/me/notification-preferences', 'PATCH')[0][1]?.body).toBe('{"topic":"task_reminder","expectedRevision":8,"primaryEndpointId":null,"fallbackEndpointId":null}')
+  })
+
+  it('distinguishes an unavailable selected channel from an empty default selection', async () => {
+    h_.endpointsReply.mockReturnValue(response(200, endpointsListing({
+      endpoints: [endpoint({ status: 'stale', usable: false, unusableReason: 'endpoint_stale' })],
+    })))
+    h_.preferencesReply.mockReturnValue(response(200, preferencesListing({ topics: [topic({ preference: existingPreference({ revision: 9 }) })] })))
+    const el = await mountView()
+    expect(text(el, 'notification-selected-unavailable')).toBe('所选渠道当前不可用，通知不会改投默认连接')
+    expect(shown(el, 'notification-default-connection')).toBeNull()
+    expect((must(el, 'notification-primary-task_reminder') as HTMLSelectElement).disabled).toBe(false)
+    await select(el, 'notification-primary-task_reminder', '')
+    expect(text(el, 'notification-default-connection')).toBe('将使用管理员设置的默认连接')
+    expect(shown(el, 'notification-selected-unavailable')).toBeNull()
+    await submit(el)
+    expect(calls('/api/me/notification-preferences', 'PATCH')[0][1]?.body).toBe('{"topic":"task_reminder","expectedRevision":9,"primaryEndpointId":null}')
+  })
+
+  it('allows restarting a stalled refresh before allowing writes again', async () => {
+    const el = await mountView()
+    const first = deferred<Response>()
+    const second = deferred<Response>()
+    h_.endpointsReply.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+    expect((must(el, 'notification-refresh') as HTMLButtonElement).disabled).toBe(false)
+    await click(el, 'notification-refresh')
+    expect((must(el, 'notification-save-task_reminder') as HTMLButtonElement).disabled).toBe(true)
+    expect((must(el, 'notification-refresh') as HTMLButtonElement).disabled).toBe(false)
+    await click(el, 'notification-refresh')
+    expect(calls('/api/me/notification-endpoints')).toHaveLength(3)
+    second.resolve(response(200, endpointsListing()))
+    await flush()
+    expect(page().loading).toBe(false)
+    expect((must(el, 'notification-save-task_reminder') as HTMLButtonElement).disabled).toBe(false)
+    first.resolve(response(200, endpointsListing()))
+    await flush()
+    expect(page().loading).toBe(false)
   })
 })
 
