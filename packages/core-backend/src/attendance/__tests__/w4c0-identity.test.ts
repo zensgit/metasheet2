@@ -1237,6 +1237,54 @@ describe('advisory key builders and acquisition helpers', () => {
     ])
   })
 
+  it('MUT06_ADVISORY_LEGACY_ORG: identical retry keys in two orgs acquire distinct pinned class-10 keys and preserve each compatibility org', async () => {
+    const fixtures = [
+      { orgId: ORG, expectedKey: '-9154486069248897383' },
+      { orgId: '77777777-7777-4777-8777-777777777777', expectedKey: '-7523199333298027472' },
+    ]
+    for (const { orgId, expectedKey } of fixtures) {
+      const trx = stubTrx()
+      await acquireAttendanceImportReservationLocksV1(
+        trx,
+        [],
+        parseCanonicalAttendanceLegacyIdempotencyKeyV1({
+          orgId,
+          idempotencyKey: 'retry-1',
+        }),
+      )
+      expect(trx.calls.filter((call) => call.sqlText.includes('pg_advisory'))).toEqual([
+        {
+          sqlText: 'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
+          params: [orgId, 'retry-1'],
+        },
+        {
+          sqlText: 'SELECT pg_advisory_xact_lock($1::bigint)',
+          params: [expectedKey],
+        },
+      ])
+    }
+  })
+
+  it('MUT06_ADVISORY_BULK_ORG: two orgs acquire their distinct pinned class-11 bulk keys', async () => {
+    const fixtures = [
+      { orgId: ORG, expectedKey: '-660753299408040883' },
+      { orgId: '77777777-7777-4777-8777-777777777777', expectedKey: '-1904769968748964791' },
+    ]
+    for (const { orgId, expectedKey } of fixtures) {
+      const trx = stubTrx()
+      await acquireAttendanceOperationalBulkTargetLockV1(
+        trx,
+        parseCanonicalAttendanceRolloutOrgKeyV1(orgId),
+      )
+      expect(trx.calls.filter((call) => call.sqlText.includes('pg_advisory'))).toEqual([
+        {
+          sqlText: 'SELECT pg_advisory_xact_lock($1::bigint)',
+          params: [expectedKey],
+        },
+      ])
+    }
+  })
+
   it('rollout helper is the sole shared/exclusive selector and enum-rejects other modes', async () => {
     const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1('default')
     const trx = stubTrx()
