@@ -25,6 +25,8 @@ export const CREDENTIAL_CHAIN = 'DIRECTORY_DEPROVISION_REVOKE_CREDENTIALS_ENABLE
 export interface FakeFacts {
   /** Users whose sessions are no longer current. */
   revokedUsers: Set<string>
+  /** Users whose session facts cannot be read right now; the others answer. */
+  unreadableUsers: Set<string>
   /** When true every authority read fails. */
   authorityDown: boolean
   /** Installation facts the probe answers; a function may throw to simulate a failed probe. */
@@ -88,6 +90,7 @@ export function createProtectionHarness(options: {
 } = {}): ProtectionHarness {
   const facts: FakeFacts = {
     revokedUsers: new Set(),
+    unreadableUsers: new Set(),
     authorityDown: false,
     installation: options.installation ?? {
       strictScope: { state: 'never-installed' },
@@ -110,7 +113,7 @@ export function createProtectionHarness(options: {
       }
       const verdicts = new Map<string, AuthorityVerdict>()
       for (const binding of bindings) {
-        if (facts.authorityDown) verdicts.set(bindingKey(binding), { state: 'unknown', reason: 'authority-read-failed' })
+        if (facts.authorityDown || facts.unreadableUsers.has(binding.userId)) verdicts.set(bindingKey(binding), { state: 'unknown', reason: 'authority-read-failed' })
         else if (facts.revokedUsers.has(binding.userId)) verdicts.set(bindingKey(binding), { state: 'denied', reason: 'watermark-applies' })
         else verdicts.set(bindingKey(binding), { state: 'allowed' })
       }

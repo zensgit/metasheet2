@@ -73,6 +73,8 @@ export class CollabService {
   private readonly heldJoins = new Map<Socket, Map<string, () => void>>()
   /** Connections accepted while protected that have not had their connect-time user room yet. */
   private readonly unjoinedSockets = new Set<Socket>()
+  /** Plugin connection handlers of connections that were kept waiting; they run at the release. */
+  private readonly heldPluginHandlers = new Map<Socket, Array<(socket: Socket) => void>>()
   private io: SocketServer | null = null
   private sheetPresenceBySheet = new Map<string, Map<string, Set<string>>>()
   private sheetMembershipBySocket = new Map<string, Set<string>>()
@@ -182,7 +184,7 @@ export class CollabService {
 
   /** How many connections are kept with something still to be answered (diagnostics, tests). */
   heldConnectionCount(): number {
-    return new Set<Socket>([...this.heldJoins.keys(), ...this.unjoinedSockets]).size
+    return new Set<Socket>([...this.heldJoins.keys(), ...this.unjoinedSockets, ...this.heldPluginHandlers.keys()]).size
   }
 
   private dropHeldJoin(socket: Socket, key: string): void {
@@ -198,8 +200,14 @@ export class CollabService {
     this.unjoinedSockets.clear()
     const held = [...this.heldJoins]
     this.heldJoins.clear()
+    const pluginHandlers = [...this.heldPluginHandlers]
+    this.heldPluginHandlers.clear()
     for (const socket of unjoined) {
       if (socket.connected) void this.joinAuthenticatedUserRoom(socket)
+    }
+    for (const [socket, handlers] of pluginHandlers) {
+      if (!socket.connected) continue
+      for (const handler of handlers) this.runPluginHandlerAtBaseline(socket, handler)
     }
     for (const [socket, joins] of held) {
       if (!socket.connected) continue
@@ -730,6 +738,7 @@ export class CollabService {
         this.connections?.unregister(socket)
         this.heldJoins.delete(socket)
         this.unjoinedSockets.delete(socket)
+        this.heldPluginHandlers.delete(socket)
         this.rawPluginSockets.delete(socket)
         this.logger.info(`WebSocket client disconnected: ${socket.id}`)
       })
@@ -888,6 +897,17 @@ export class CollabService {
     this.logger.debug(`Left ${target} from room ${room}`)
   }
 
+  /** The baseline way a plugin connection handler meets a connection: it is given the transport. */
+  private runPluginHandlerAtBaseline(socket: Socket, handler: (socket: Socket) => void): void {
+    this.rawPluginSockets.add(socket)
+    socket.once('disconnect', () => this.rawPluginSockets.delete(socket))
+    try {
+      handler(socket)
+    } catch (error) {
+      this.logger.warn('Plugin connection handler failed', error instanceof Error ? error : undefined)
+    }
+  }
+
   onConnection(handler: (socket: Socket) => void): void {
     if (!this.io) return
     this.io.on('connection', (socket: Socket) => {
@@ -899,9 +919,21 @@ export class CollabService {
       }
       // Protected: the handler never sees a connection that has not been admitted, and what it
       // receives is the constrained connection, not the transport.
+      const heldWhenAsked = this.protection.decision().ordinaryHandshake === 'hold'
       this.adoptSocket(socket)
       void this.connections.admit(socket).then((binding) => {
-        if (!binding || !socket.connected) return
+        if (!socket.connected) return
+        if (!binding) {
+          // Kept waiting, not refused: the handler meets this connection when it is released to
+          // the baseline, the way it would have met it had it arrived then.
+          if (!heldWhenAsked) return
+          if (!this.isProtected()) {
+            this.runPluginHandlerAtBaseline(socket, handler)
+            return
+          }
+          this.heldPluginHandlers.set(socket, [...(this.heldPluginHandlers.get(socket) ?? []), handler])
+          return
+        }
         handler(this.constrainedPluginSocket(socket, binding) as unknown as Socket)
       }).catch((error) => {
         this.logger.warn('Plugin connection handler failed', error instanceof Error ? error : undefined)

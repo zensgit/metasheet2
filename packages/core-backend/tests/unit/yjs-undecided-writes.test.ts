@@ -376,6 +376,27 @@ describe('switch on: a subscriber that cannot be given a change is told, not lef
     expect(flaky.errors).toEqual([])
   })
 
+  it('the session of one recipient cannot be read when a change is relayed: the same notice; its question gets no answer and no error until its session can be read again', async () => {
+    const s = await open({ protectedMode: true })
+    const writer = await editor(s, 'writer')
+    const flaky = await editor(s, 'flaky')
+    s.harness!.facts.unreadableUsers.add('flaky')
+    sendUpdate(writer, append(writer, 'f1', '-relayed'))
+    await until(() => flaky.invalidated.length === 1)
+    expect(flaky.invalidated).toEqual([{ recordId: RECORD, reason: 'resync' }])
+    expect(flaky.received).toEqual([])
+    requestMissing(flaky)
+    await settle(150)
+    expect(flaky.fields().f1).toBe('one')
+    expect(flaky.errors).toEqual([])
+    expect(flaky.socket.connected).toBe(true)
+    s.harness!.facts.unreadableUsers.delete('flaky')
+    requestMissing(flaky)
+    await until(() => flaky.fields().f1 === 'one-relayed')
+    expect(flaky.errors).toEqual([])
+    expect(flaky.invalidated).toHaveLength(1)
+  })
+
   it('the document is voided by a write from elsewhere before it resyncs: it is told that too, because it never left the record', async () => {
     const s = await open({ protectedMode: true })
     const writer = await editor(s, 'writer')

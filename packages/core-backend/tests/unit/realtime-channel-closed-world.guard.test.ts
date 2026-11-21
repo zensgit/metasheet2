@@ -206,6 +206,7 @@ const EXPECTED: Record<string, Entry> = {
       // only while the session of the connection is still the one it was admitted with.
       'socket.on(<event>)',
       'socket.once(\'disconnect\')',
+      'socket.once(\'disconnect\')',
       'this.io.on(\'connection\')',
       'this.io.on(\'connection\')',
     ],

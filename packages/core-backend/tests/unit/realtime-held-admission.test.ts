@@ -441,6 +441,67 @@ describe('switch off, read undecidable, default channel: the read answers while 
   })
 })
 
+describe('switch off, read undecidable: a plugin connection handler', () => {
+  it('meets a connection that was kept waiting when it is released, and is given the transport like any baseline connection', async () => {
+    const s = await open()
+    const met: Array<{ id: string; raw: boolean }> = []
+    s.collab.onConnection((socket) => {
+      met.push({ id: socket.id, raw: typeof (socket as { handshake?: unknown }).handshake === 'object' })
+      socket.on('plugin:hello', () => socket.emit('plugin:answer', { ok: true }))
+    })
+    // Control: at the baseline the handler meets a connection as it arrives.
+    const early = await established(s, 'token:early')
+    expect(met).toEqual([{ id: early.id, raw: true }])
+    early.close()
+    await settle(50)
+
+    await undecidable(s)
+    const held = connectClient(s.url, 'token:held')
+    s.clients.push(held)
+    const told = transcript(held)
+    await once(held, 'connect')
+    held.emit('plugin:hello')
+    await settle(150)
+    // Kept waiting: the handler has not met it, so nothing of the plugin answers it.
+    expect(met).toHaveLength(1)
+    expect(told).toEqual([])
+    await decidable(s)
+    await until(() => met.length === 2, 2000, 'the handler to meet the kept connection')
+    expect(met[1]).toEqual({ id: held.id, raw: true })
+    held.emit('plugin:hello')
+    await until(() => told.some(([event]) => event === 'plugin:answer'), 2000, 'the plugin to answer')
+    expect(held.connected).toBe(true)
+    expect(s.collab.heldConnectionCount()).toBe(0)
+  })
+
+  it('a kept connection that goes away is never handed to the handler', async () => {
+    const s = await open()
+    const met: string[] = []
+    s.collab.onConnection((socket) => { met.push(socket.id) })
+    await undecidable(s)
+    const held = connectClient(s.url, 'token:gone')
+    s.clients.push(held)
+    await once(held, 'connect')
+    await settle(100)
+    held.close()
+    await until(() => s.collab.heldConnectionCount() === 0, 2000, 'the kept connection to be forgotten')
+    await decidable(s)
+    await settle(150)
+    expect(met).toEqual([])
+  })
+
+  it('connections a handler already holds are ended with the transient notice when the instance leaves the baseline, as before', async () => {
+    const s = await open()
+    s.collab.onConnection(() => undefined)
+    const a = await established(s, 'token:a', 'sheet-1')
+    const ended = once<SessionEndedPayload>(a, SESSION_ENDED_EVENT)
+    const closed = once<string>(a, 'disconnect')
+    await undecidable(s)
+    expect(await ended).toEqual({ code: 'REALTIME_UNAVAILABLE', retry: true })
+    expect(await closed).toBe('io server disconnect')
+  })
+})
+
 describe('switch off, read undecidable, then the environment turns out to be enabled', () => {
   it('held connections end with the transient notice, like every other protected connection', async () => {
     const s = await open()
