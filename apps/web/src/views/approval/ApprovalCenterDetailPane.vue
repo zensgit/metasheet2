@@ -97,6 +97,15 @@ import { computed, watch } from 'vue'
 import type { ApprovalAssignmentDTO, UnifiedApprovalDTO } from '../../types/approval'
 import StatusTag from '../../components/status/StatusTag.vue'
 import { ensureUserNamesResolved, getResolvedUserName } from '../../approvals/directoryResolve'
+import {
+  canViewRoleSeatNames,
+  ensureRoleSeatNamesLoaded,
+  groupCurrentSeats,
+  hasRoleSeat,
+  roleSeatGroupLabel,
+  userSeatIds,
+} from '../../approvals/roleSeatDisplay'
+import { useApprovalPermissions } from '../../approvals/permissions'
 import { approvalStatusTagProps, isCancelRoundWorkflow, needsCancelRoundCloseReason } from '../../approvals/cancelRound'
 import { resolveStatusDisplay } from '../../utils/statusDomains'
 import { useLocale } from '../../composables/useLocale'
@@ -130,6 +139,9 @@ const props = defineProps<{
 // 「暂时无法读取」 rather than guessing between an approver's rejection and a system closure.
 // O-8 / F8-1: pane chrome follows the shell locale (module-scope `useLocale()` singleton).
 const { isZh } = useLocale()
+// Customer issue 2026-10-27 6a-1: template admins may see a role seat's role NAME (roleSeatDisplay.ts).
+const approvalPermissionsApi = useApprovalPermissions()
+const canSeeRoleSeatNames = computed(() => canViewRoleSeatNames(approvalPermissionsApi))
 const t = computed(() => (isZh.value ? CENTER_PANE_ZH : CENTER_PANE_EN))
 const approveConfirmTitle = computed(() => (isZh.value ? `确认通过「${props.row.title}」？` : `Approve "${props.row.title}"?`))
 function stepProgressText(current: number | string, total: number | string): string {
@@ -156,10 +168,12 @@ defineEmits<{
 // (`getResolvedUserName`, ensured by the watcher below); when still unresolvable, falls back to a
 // values-free, still-distinguishable ordinal (`成员 N`) rather than the raw internal user id —
 // mirrors ApprovalDetailView's own `assignmentDisplayLabel` values-free convention.
+// Customer issue 2026-10-27 6a-1: only a `user` seat's id goes to the users-only resolver; role seats
+// never reach here (one 「指定角色（N 个）」 entry per node, see roleSeatDisplay.ts).
 function assigneeLabel(assignment: ApprovalAssignmentDTO, ordinal: number): string {
   const metaName = assignment.metadata?.assigneeName
   if (typeof metaName === 'string' && metaName.trim()) return metaName.trim()
-  const resolved = getResolvedUserName(assignment.assigneeId)
+  const resolved = assignment.type === 'user' ? getResolvedUserName(assignment.assigneeId) : null
   if (resolved) return resolved
   return isZh.value ? `成员 ${ordinal}` : `Member ${ordinal}`
 }
@@ -177,9 +191,16 @@ const pendingApproverLabels = computed<string[]>(() => {
         : [],
   )
   if (keys.size === 0) return []
-  return detail.assignments
-    .filter((a) => a.isActive && !!a.nodeKey && keys.has(a.nodeKey))
-    .map((a, index) => assigneeLabel(a, index + 1))
+  const active = detail.assignments.filter((a) => a.isActive && !!a.nodeKey && keys.has(a.nodeKey))
+  // Customer issue 2026-10-27 6a-1: role seats at one node collapse into one entry (count, or the
+  // role name(s) for a template admin); the `成员 N` ordinal numbers the person seats only.
+  const showRoleNames = canSeeRoleSeatNames.value
+  let ordinal = 0
+  return groupCurrentSeats(active).map((group) => {
+    if (group.kind === 'role') return roleSeatGroupLabel(group.roleKeys, isZh.value, showRoleNames)
+    ordinal += 1
+    return assigneeLabel(group.assignment, ordinal)
+  })
 })
 const pendingApproversText = computed(() => {
   const names = pendingApproverLabels.value
@@ -194,10 +215,23 @@ const cancelRoundPendingWord = computed<string>(() => {
 })
 
 // member-display-identity (2026-08-19): a `watch` side effect (never inside the `computed` above)
-// kicks off the batch resolve for every pending-approver id this pane has in view.
+// kicks off the batch resolve for every pending-approver id this pane has in view — USER seats only
+// (customer issue 2026-10-27 6a-1: a role seat's id is a role id, never a user id).
 watch(
-  () => props.detail?.assignments.map((a) => a.assigneeId) ?? [],
+  () => userSeatIds(props.detail?.assignments),
   (ids) => ensureUserNamesResolved(ids),
+  { immediate: true },
+)
+
+// Template admins only: load the role-name map once a current role seat is in view (never for an
+// ordinary member, and not in a cancel round, whose pane names no approver).
+watch(
+  () => canSeeRoleSeatNames.value
+    && !isCancelRoundWorkflow(props.detail)
+    && hasRoleSeat((props.detail?.assignments ?? []).filter((a) => a.isActive)),
+  (needed) => {
+    if (needed) ensureRoleSeatNamesLoaded()
+  },
   { immediate: true },
 )
 </script>

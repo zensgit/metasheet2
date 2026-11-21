@@ -272,6 +272,40 @@
             </button>
           </nav>
           <h2>{{ t.flow }}</h2>
+          <!-- 流程进度: one row per step (start, done, open now, ahead), built by approvalProgress.ts
+               from data this page already holds. Its own list and test ids, not timeline items, so
+               the history views below and their counts are unchanged. -->
+          <section
+            v-if="progressSteps.length > 0"
+            class="approval-detail__progress"
+            data-testid="approval-flow-progress"
+            :aria-label="t.progressTitle"
+          >
+            <h3 class="approval-detail__progress-title">{{ t.progressTitle }}</h3>
+            <ol class="approval-detail__progress-list">
+              <li
+                v-for="step in progressSteps"
+                :key="`progress-${step.state}-${step.key}`"
+                class="approval-detail__progress-step"
+                :class="`approval-detail__progress-step--${step.state}`"
+                :data-state="step.state"
+                data-testid="approval-flow-progress-step"
+              >
+                <span class="approval-detail__progress-dot" aria-hidden="true" />
+                <div class="approval-detail__progress-body">
+                  <div class="approval-detail__progress-head">
+                    <strong class="approval-detail__progress-name">{{ step.name }}</strong>
+                    <span class="approval-detail__progress-state" data-testid="approval-flow-progress-state">{{ step.stateLabel }}</span>
+                    <span v-if="step.outcome" class="approval-detail__progress-outcome">{{ step.outcome }}</span>
+                  </div>
+                  <div v-if="step.people" class="approval-detail__progress-people" data-testid="approval-flow-progress-people">{{ step.people }}</div>
+                  <div v-if="step.note" class="approval-detail__progress-note">{{ step.note }}</div>
+                  <div v-if="step.at" class="approval-detail__progress-time">{{ formatDate(step.at) }}</div>
+                </div>
+              </li>
+            </ol>
+            <p v-if="progressHasExpected" class="approval-detail__progress-hint">{{ t.progressHint }}</p>
+          </section>
           <!-- UI-6: 审批记录 view toggle — timeline (default, byte-for-byte the pre-existing
                markup below) vs a compact audit-derived table projection. Both read the SAME
                already-fetched `store.history` array; switching never fetches or dispatches. -->
@@ -1177,6 +1211,14 @@ import {
   isCancelRoundWorkflow,
 } from '../../approvals/cancelRound'
 import { ensureUserNamesResolved, getResolvedUserName } from '../../approvals/directoryResolve'
+import {
+  canViewRoleSeatNames,
+  ensureRoleSeatNamesLoaded,
+  groupCurrentSeats,
+  hasRoleSeat,
+  roleSeatGroupLabel,
+  userSeatIds,
+} from '../../approvals/roleSeatDisplay'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import { unknownUserLabel } from '../../approvals/components/approvalPickerLabels'
 import { useAuth } from '../../composables/useAuth'
@@ -1220,6 +1262,7 @@ import { fetchApprovalAttachmentBlob } from '../../approvals/attachmentDownload'
 import { phrasesForAction, recentPhrases, rememberPhrase } from '../../approvals/quickPhrases'
 import { formatRelativeWait, waitingPhrase, waitSeverity } from '../../approvals/relativeWait'
 import { buildUpcomingNodes, type UpcomingApprovalNode } from '../../approvals/upcomingNodes'
+import { buildApprovalProgress, expectedApproverUserIds, type ApprovalProgressStep } from '../../approvals/approvalProgress'
 import {
   addSignModeHint,
   addSignPlacementCopy,
@@ -1249,7 +1292,11 @@ const grammar = computed(() => memberActionDialogGrammar(isZh.value))
 // F4-S1: the add-sign dialog's placement / after-sign / aggregation copy for the current locale.
 const addSignCopy = computed(() => addSignPlacementCopy(isZh.value))
 const templateStore = useApprovalTemplateStore()
-const { canAct, permissions: approvalAccess } = useApprovalPermissions()
+const approvalPermissionsApi = useApprovalPermissions()
+const { canAct, permissions: approvalAccess } = approvalPermissionsApi
+// Customer issue 2026-10-27 6a-1: template admins may see a role seat's role NAME (roleSeatDisplay.ts).
+// Read defensively — several specs mock `useApprovalPermissions` with `canAct` only.
+const canSeeRoleSeatNames = computed(() => canViewRoleSeatNames(approvalPermissionsApi))
 const actionCommentInputRef = ref<{ focus: () => void } | null>(null)
 const MEMBER_ACTION_DIALOG_WIDTH = 'min(480px, calc(100vw - 32px))'
 const MEMBER_ACTION_FOCUSABLE_SELECTOR = [
@@ -1873,6 +1920,8 @@ const currentActiveNodeKeys = computed<string[]>(() => {
 
 interface CurrentHandlerEntry {
   assignmentId: string
+  /** The open node this line belongs to; `null` for the single cancel-round line. */
+  nodeKey: string | null
   label: string
   wait: string
   /** 撤销轮: the entry carries the V1 word, not a person (撤销锁 §15.6 P-6). */
@@ -1894,9 +1943,14 @@ interface CurrentHandlerEntry {
 // view, so a resolvable assignee now shows their real name instead of "审批人". Still values-free
 // on a miss (deactivated account / unresolved): the SAME generic placeholder as before, never the
 // raw id.
+//
+// Customer issue 2026-10-27 6a-1: only a `user` seat's id is a user id. Role seats never reach this
+// function (`currentHandlerEntries` groups them into one 「指定角色（N 个）」 line per node, see
+// roleSeatDisplay.ts); any other non-user seat keeps the generic placeholder and is never looked up.
 function assignmentDisplayLabel(assignment: ApprovalAssignmentDTO): string {
   const metaName = assignment.metadata.assigneeName
   if (typeof metaName === 'string' && metaName.trim()) return metaName.trim()
+  if (assignment.type !== 'user') return t.value.approverFallback
   const resolved = getResolvedUserName(assignment.assigneeId)
   if (resolved) return resolved
   return t.value.approverFallback
@@ -1922,16 +1976,39 @@ const currentHandlerEntries = computed<CurrentHandlerEntry[]>(() => {
     if (active.length === 0) return []
     return [{
       assignmentId: 'cancel-round-pending',
+      nodeKey: null,
       label: resolveStatusDisplay('cancelRound', 'cancellation_pending_approval', isZh.value).label,
       wait,
       seatNamesWithheld: true,
     }]
   }
-  return active.map((a) => ({ assignmentId: a.id, label: assignmentDisplayLabel(a), wait }))
+  // Customer issue 2026-10-27 6a-1: a 「指定角色」 node holds ONE role seat per role (its id is the
+  // ROLE id). Those collapse into one line per node — the role count, or, for a template admin, the
+  // role name(s) — instead of each reading as a person called 「审批人」.
+  const showRoleNames = canSeeRoleSeatNames.value
+  return groupCurrentSeats(active).map((group) => (
+    group.kind === 'role'
+      ? { assignmentId: group.key, nodeKey: group.nodeKey, label: roleSeatGroupLabel(group.roleKeys, isZh.value, showRoleNames), wait }
+      : { assignmentId: group.assignment.id, nodeKey: group.assignment.nodeKey ?? null, label: assignmentDisplayLabel(group.assignment), wait }
+  ))
 })
 
+// Template admins only (see roleSeatDisplay.ts): load the role-name map once a current role seat is
+// in view. Never fires for an ordinary member, so it adds no request for them.
+watch(
+  () => canSeeRoleSeatNames.value
+    && approval.value?.status === 'pending'
+    && !isCancelRound.value
+    && hasRoleSeat((approval.value?.assignments ?? []).filter((a) => a.isActive)),
+  (needed) => {
+    if (needed) ensureRoleSeatNamesLoaded()
+  },
+  { immediate: true },
+)
+
 // member-display-identity (2026-08-19): kicks off the batch resolve for every member id this view
-// might need to display a name for — every `assignments` row's `assigneeId` (feeds
+// might need to display a name for — every USER `assignments` row's `assigneeId` (customer issue
+// 2026-10-27 6a-1: role / other seat ids are not user ids and are no longer sent; feeds
 // `assignmentDisplayLabel`/`reducibleAssignees` above/below) PLUS every history item's
 // `metadata.aggregateCancelled` id list (feeds `cancelledAssigneesLabel` below) PLUS (test report
 // 2026-10-08 T4cd) the actor id of every history row that stores only that id as its name (feeds
@@ -1943,7 +2020,7 @@ const currentHandlerEntries = computed<CurrentHandlerEntry[]>(() => {
 watch(
   () => {
     const ids: string[] = []
-    for (const a of approval.value?.assignments ?? []) ids.push(a.assigneeId)
+    ids.push(...userSeatIds(approval.value?.assignments))
     for (const item of store.history) {
       const cancelled = item.metadata?.aggregateCancelled
       if (Array.isArray(cancelled)) for (const id of cancelled) ids.push(String(id))
@@ -1990,6 +2067,111 @@ const upcomingTimelineNodes = computed<UpcomingApprovalNode[]>(() => {
   if (!graph) return []
   return buildUpcomingNodes(graph, currentNodeKey, approval.value?.formSchema ?? null, isZh.value)
 })
+
+// ---------------------------------------------------------------------------
+// 流程进度 (approvalProgress.ts): start, done, open now and ahead, in one list.
+// ---------------------------------------------------------------------------
+// The graph it walks: this instance's own frozen version (`pinned`) when that is what the store
+// holds; with no version loaded at all (an ordinary member cannot load one), the live template when
+// it is this instance's template; otherwise none. A version the store holds that is not provably
+// this instance's (the store is app-wide) is never walked, and the live template is not used in its
+// place either: the rows then stop at the open step rather than show a route that may be another.
+const progressGraphSource = computed<{ graph: ApprovalGraph | null; pinned: boolean }>(() => {
+  const detail = approval.value
+  if (!detail) return { graph: null, pinned: false }
+  const version = templateStore.activeVersion
+  if (version) {
+    const versionKey = typeof version.id === 'string' ? version.id : ''
+    const ownVersion = versionKey !== '' && versionKey === detail.templateVersionId
+    return ownVersion && version.approvalGraph ? { graph: version.approvalGraph, pinned: true } : { graph: null, pinned: false }
+  }
+  const template = templateStore.activeTemplate
+  if (template?.approvalGraph && template.id === detail.templateId) return { graph: template.approvalGraph, pinned: false }
+  return { graph: null, pinned: false }
+})
+
+// A node the walked graph does not name: the live template's name when it is this instance's
+// template, else a neutral word. Never the node key, and never 「节点已变更」 (the step may well be
+// unchanged; the page just cannot name it).
+function progressNodeName(nodeKey: string): string {
+  const template = templateStore.activeTemplate
+  const ownTemplate = template && template.id === approval.value?.templateId ? template : null
+  const live = ownTemplate?.approvalGraph.nodes.find((entry) => entry.key === nodeKey)
+  const named = typeof live?.name === 'string' ? live.name.trim() : ''
+  return named !== '' ? named : t.value.progressUnnamedNode
+}
+
+// Steps ahead show user names only on this instance's own frozen version, never on a cancel round.
+const progressNamesAhead = computed(() => progressGraphSource.value.pinned && !isCancelRound.value)
+
+// The fixed user ids a step ahead could be named by — fed to the same users-only resolver the rest
+// of the page uses. Empty unless names may be shown there.
+const progressExpectedUserIds = computed<string[]>(() => {
+  const detail = approval.value
+  const graph = progressGraphSource.value.graph
+  if (!detail || detail.status !== 'pending' || !graph || !progressNamesAhead.value) return []
+  return expectedApproverUserIds({
+    graph,
+    currentNodeKeys: currentActiveNodeKeys.value,
+    inParallelRegion: isInParallelRegion.value,
+    formSchema: detail.formSchema ?? null,
+    isZh: isZh.value,
+  })
+})
+
+watch(
+  () => progressExpectedUserIds.value,
+  (ids) => {
+    if (ids.length > 0) ensureUserNamesResolved(ids)
+  },
+  { immediate: true },
+)
+
+function progressCurrentHandlers(nodeKey: string): string[] {
+  return currentHandlerEntries.value
+    .filter((entry) => entry.seatNamesWithheld || entry.nodeKey === nodeKey)
+    .map((entry) => entry.label)
+}
+
+function progressCurrentNote(nodeKey: string): string {
+  const detail = approval.value
+  if (!detail) return ''
+  const parts = [waitingPhrase(formatRelativeWait(detail.updatedAt, isZh.value), isZh.value)]
+  const node = progressGraphSource.value.graph?.nodes.find((entry) => entry.key === nodeKey)
+  const mode = node?.type === 'approval' ? (node.config as { approvalMode?: unknown }).approvalMode : undefined
+  if (typeof mode === 'string' && mode) parts.push(approvalModeLabel(mode))
+  return parts.join(' · ')
+}
+
+const progressSteps = computed<ApprovalProgressStep[]>(() => {
+  const detail = approval.value
+  if (!detail) return []
+  return buildApprovalProgress({
+    status: detail.status,
+    requesterName: detail.requester?.name ?? '',
+    createdAt: detail.createdAt ?? null,
+    updatedAt: detail.updatedAt ?? null,
+    history: store.history,
+    graph: progressGraphSource.value.graph,
+    formSchema: detail.formSchema ?? null,
+    currentNodeKeys: currentActiveNodeKeys.value,
+    inParallelRegion: isInParallelRegion.value,
+    namesWithheld: isCancelRound.value,
+    isZh: isZh.value,
+    labels: t.value,
+    nodeName: progressNodeName,
+    actorName: historyActorName,
+    actionLabel: (row) => actionLabel(row.action, row.metadata),
+    statusLabel: instanceStatusLabel(detail),
+    currentHandlers: progressCurrentHandlers,
+    currentNote: progressCurrentNote,
+    expectedUserName: progressNamesAhead.value ? getResolvedUserName : null,
+  })
+})
+
+// The 「预计」 hint shows whenever a row ahead is rendered (expected, by condition, parallel).
+const PROGRESS_AHEAD_STATES = new Set(['expected', 'branch', 'parallel'])
+const progressHasExpected = computed(() => progressSteps.value.some((step) => PROGRESS_AHEAD_STATES.has(step.state)))
 
 const actionDialogVisible = ref(false)
 const transferDialogVisible = ref(false)
@@ -3639,6 +3821,100 @@ watch(
 
 .approval-detail__timeline-upcoming-summary {
   margin-left: 6px;
+}
+
+/* 流程进度: a vertical step rail above the record views (the record column is narrow, so the
+   rows stack rather than run left to right). Done = filled, current = primary, ahead = greyed. */
+.approval-detail__progress {
+  margin: 0 0 var(--ms-space-4);
+  padding: var(--ms-space-3);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: var(--ms-radius-lg);
+}
+
+.approval-detail__progress-title {
+  margin: 0 0 var(--ms-space-2);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ms-text-1);
+}
+
+.approval-detail__progress-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.approval-detail__progress-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  min-width: 0;
+}
+
+.approval-detail__progress-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--el-color-success);
+}
+
+.approval-detail__progress-step--current .approval-detail__progress-dot {
+  background: var(--el-color-primary);
+}
+
+.approval-detail__progress-step--expected .approval-detail__progress-dot,
+.approval-detail__progress-step--branch .approval-detail__progress-dot,
+.approval-detail__progress-step--parallel .approval-detail__progress-dot {
+  background: var(--el-text-color-placeholder);
+}
+
+.approval-detail__progress-body {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.approval-detail__progress-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.approval-detail__progress-state,
+.approval-detail__progress-outcome,
+.approval-detail__progress-note,
+.approval-detail__progress-time,
+.approval-detail__progress-hint {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.approval-detail__progress-step--current .approval-detail__progress-state {
+  color: var(--el-color-primary);
+  font-weight: 500;
+}
+
+.approval-detail__progress-people {
+  color: var(--el-text-color-regular);
+}
+
+.approval-detail__progress-step--expected .approval-detail__progress-name,
+.approval-detail__progress-step--expected .approval-detail__progress-people,
+.approval-detail__progress-step--branch .approval-detail__progress-name,
+.approval-detail__progress-step--parallel .approval-detail__progress-name {
+  color: var(--el-text-color-placeholder);
+}
+
+.approval-detail__progress-hint {
+  margin: var(--ms-space-2) 0 0;
 }
 
 /* B1-05: sticky at the viewport bottom so approve/reject/... stay reachable while the form

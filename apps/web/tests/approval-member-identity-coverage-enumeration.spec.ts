@@ -109,6 +109,69 @@ const REGRESSION_GUARDS: RegressionGuard[] = [
       mustContain: ['function assignmentDisplayLabel', 'getResolvedUserName(assignment.assigneeId)'],
     }],
   },
+  // Customer issue 2026-10-27 6a-1: a 「指定角色」 node writes one `role` seat whose id is the ROLE id.
+  // Both current-seat surfaces used to send it to the users-only resolver and render it as a person
+  // (「审批人」 / 「成员 1」). Now: user ids only go to the resolver; role seats collapse to one
+  // 「指定角色（N 个）」 line per node; the role NAME shows only for a template admin, through the
+  // existing authoring role directory (never the role's members).
+  {
+    site: 'ApprovalDetailView.vue / ApprovalCenterDetailPane.vue — role seats (当前处理人 / 待处理人, roleSeatDisplay.ts)',
+    coverage: ['src/approvals/roleSeatDisplay.ts', 'approval-e2e-lifecycle.spec.ts', 'a role seat renders 指定角色（1 个）, never 审批人 or the role id, and its id never reaches the user resolver'],
+    sourceChecks: [
+      {
+        file: 'src/approvals/roleSeatDisplay.ts',
+        mustContain: [
+          'export function groupCurrentSeats',
+          "if (assignment.type === 'user') out.push(assignment.assigneeId)",
+          'return isZh ? `指定角色（${count} 个）` : `Designated role (${count})`',
+          'return permissions?.canManageTemplates?.value === true',
+        ],
+      },
+      {
+        file: 'src/views/approval/ApprovalDetailView.vue',
+        mustContain: ['groupCurrentSeats(active)', 'ids.push(...userSeatIds(approval.value?.assignments))', 'canViewRoleSeatNames(approvalPermissionsApi)'],
+        mustNotContain: ['for (const a of approval.value?.assignments ?? []) ids.push(a.assigneeId)'],
+      },
+      {
+        file: 'src/views/approval/ApprovalCenterDetailPane.vue',
+        mustContain: ['groupCurrentSeats(active)', '() => userSeatIds(props.detail?.assignments)', 'canViewRoleSeatNames(approvalPermissionsApi)'],
+        mustNotContain: ['props.detail?.assignments.map((a) => a.assigneeId)'],
+      },
+    ],
+  },
+  // 流程进度 rows on the detail page (approvalProgress.ts). Done rows name actors through the
+  // timeline's own `historyActorName`; open rows reuse the current-seat labels above (role seats
+  // as a count); rows ahead name fixed approvers only on this instance's own frozen version, only
+  // when EVERY configured user resolves, and never on a cancel round — otherwise the count-only
+  // summary. No id is ever a fallback.
+  {
+    site: 'ApprovalDetailView.vue — 流程进度 rows (approvalProgress.ts: done actors, open-step handlers, names ahead)',
+    coverage: ['src/approvals/approvalProgress.ts', 'approval-e2e-lifecycle.spec.ts', 'a step ahead keeps the count and its user ids are never sent'],
+    sourceChecks: [
+      {
+        file: 'src/approvals/approvalProgress.ts',
+        mustContain: [
+          'if (!lookup || input.namesWithheld) return null',
+          'if (!resolved) return null',
+          "if (source.kind !== 'static_user') return []",
+        ],
+      },
+      {
+        file: 'src/views/approval/ApprovalDetailView.vue',
+        mustContain: [
+          'const progressNamesAhead = computed(() => progressGraphSource.value.pinned && !isCancelRound.value)',
+          'expectedUserName: progressNamesAhead.value ? getResolvedUserName : null',
+          'actorName: historyActorName',
+          'currentHandlers: progressCurrentHandlers',
+        ],
+      },
+    ],
+  },
+  {
+    site: 'ApprovalCenterDetailPane.vue — 待处理人 role seats (pane mount)',
+    coverage: ['src/views/approval/ApprovalCenterDetailPane.vue', 'approval-center-master-detail.spec.ts', 'a role seat renders 指定角色（N 个） (never 成员 N or the role id); the 成员 N ordinal numbers person seats only'],
+    sourceChecks: [],
+  },
   {
     site: 'ApprovalDetailView.vue — 其他审批人已失效 (cancelledAssigneesLabel)',
     coverage: ['src/views/approval/ApprovalDetailView.vue', 'approval-detail-record-table.spec.ts', 'resolves to real names via the directory resolver when no assignment metadata carries them'],
@@ -931,6 +994,13 @@ describe('member-display-identity coverage enumeration — backend companions (u
   // P3-1 CLOSURE (FE mirror of the backend `apps/web` guard above): no FE source file resolves
   // role names any more -- the entire ensureRoleNamesResolved/getResolvedRoleName/
   // resolveApprovalDirectoryRoles plumbing was deleted, not just left unused.
+  //
+  // THE ONE EXCEPTION (customer issue 2026-10-27 6a-1):
+  // `src/approvals/roleSeatDisplay.ts` shows a current role seat's role NAME to a template admin
+  // only. It is not a participant-path role resolver: it reads the existing authoring role
+  // directory (template-admin guarded), never the participant resolve endpoint, never the role's
+  // members, and both callers gate its load on the template-admin capability. The next test pins
+  // that shape; the three files below must stay free of role-name resolution.
   it('no FE source file references role-name resolution -- the plumbing was deleted, not just unused', () => {
     const files = [
       'src/approvals/directoryResolve.ts',
@@ -941,6 +1011,29 @@ describe('member-display-identity coverage enumeration — backend companions (u
       const content = readSrc(file)
       expect(content, `${file} still references role-name resolution`).not.toMatch(
         /ensureRoleNamesResolved|getResolvedRoleName|resolveApprovalDirectoryRoles|resolvedRoleNames/,
+      )
+    }
+  })
+
+  it('the one role-name exception (roleSeatDisplay.ts) reads only the authoring role directory, never the participant resolver, and its load is gated on the template-admin capability', () => {
+    const mod = readSrc('src/approvals/roleSeatDisplay.ts')
+    // Exactly one endpoint, and it is the authoring role directory (template-admin guarded).
+    expect(mod).toContain("fetchFn('/api/approval-templates/directory/roles'")
+    expect(mod.split("'/api/").length - 1).toBe(1)
+    expect(mod).not.toContain('/api/approvals/directory/resolve')
+    // Not wired to the participant resolver plumbing, and never reads a role's members.
+    expect(mod).not.toMatch(/from '\.\/(api|directoryResolve)'/)
+    expect(mod).not.toMatch(/\/members\b|\.members\b/)
+    // The capability check is the template-admin one.
+    expect(mod).toContain('return permissions?.canManageTemplates?.value === true')
+
+    for (const file of ['src/views/approval/ApprovalDetailView.vue', 'src/views/approval/ApprovalCenterDetailPane.vue']) {
+      const src = readSrc(file)
+      expect(src, file).toContain('const canSeeRoleSeatNames = computed(() => canViewRoleSeatNames(approvalPermissionsApi))')
+      // One load call site per surface, inside a watch whose source starts with the capability.
+      expect(src.split('ensureRoleSeatNamesLoaded()').length - 1, file).toBe(1)
+      expect(src, file).toMatch(
+        /watch\(\s*\(\) => canSeeRoleSeatNames\.value\s*&&[^;]*?\(needed\) => \{\s*if \(needed\) ensureRoleSeatNamesLoaded\(\)/,
       )
     }
   })

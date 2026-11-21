@@ -6,7 +6,10 @@ import { ApprovalDirectoryResolveError, resolveApprovalDirectoryUsers } from './
  * stays admin-only) — a shared, session-lifetime, module-singleton cache of resolved member
  * display names, sitting in front of the `/api/approvals/directory/resolve` batch endpoint (USERS
  * ONLY — there is no participant-reachable role resolver; role ids render as a values-free count,
- * never a name, on every viewer-facing surface). Every viewer-facing site that used to render a
+ * never a name, on every viewer-facing surface, with ONE exception: `roleSeatDisplay.ts` shows a
+ * current role seat's role NAME to a template admin only, read from the existing authoring role
+ * directory (template-admin guarded), and never the role's members; every other viewer still sees
+ * the count — customer issue 2026-10-27 6a-1). Every viewer-facing site that used to render a
  * raw assigneeId (or a values-free-but-anonymous ordinal like "成员 N") calls
  * `ensureUserNamesResolved` with the ids it has in view, then reads `getResolvedUserName` from a
  * `computed` — Vue's reactivity on a `reactive()` object tracks a property read even before that
