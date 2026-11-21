@@ -402,13 +402,15 @@ describeDb('installation probe on real structures', () => {
       await target.query('INSERT INTO kysely_migration (name, timestamp) VALUES ($1, $2)', [STRICT_LOGIN_GRANT_MIGRATION_NAME, 'x'])
     }],
     ['no migration ledger at all', async () => undefined],
-  ])('reads %s as unknown, and unknown refuses protected handshakes', async (_label, arrange) => {
+  ])('reads %s as unknown, and unknown suspends protected traffic: handshakes are held with the switch off and refused with it on', async (_label, arrange) => {
     const isolated = await isolatedSchema()
     try {
       await arrange(isolated.pool)
       const facts = await probeWith(isolated.pool)
       expect(facts.strictScope).toEqual({ state: 'unknown' })
       expect(decideRealtimeAdmission({ revalidation: 'off', credentialChain: 'off', facts, listener: 'not-started' }))
+        .toMatchObject({ row: 'undetermined', ordinaryHandshake: 'hold', strictHandshake: 'hold', established: 'suspend' })
+      expect(decideRealtimeAdmission({ revalidation: 'on', credentialChain: 'off', facts, listener: 'ready' }))
         .toMatchObject({ row: 'undetermined', ordinaryHandshake: 'refuse', strictHandshake: 'refuse', established: 'suspend' })
     } finally {
       await isolated.pool.end()
