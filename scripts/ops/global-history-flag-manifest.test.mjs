@@ -500,6 +500,7 @@ function globalHistoryFlagsInSource() {
   const yidaIssueConfirm = grepPluginFlagTokens('INTEGRATION_YIDA_ISSUE_CONFIRM_[A-Z_0-9]+').filter((t) => !t.endsWith('_'))
   const userRecycle = grepFlagTokens('USER_RECYCLE_[A-Z_0-9]+_ENABLED')
   const strictSessionLifetime = grepFlagTokens('EXTERNAL_LOGIN_STRICT_SESSION_MAX_AGE_SECONDS')
+  const externalNotifications = grepFlagTokens('EXTERNAL_NOTIFICATION_[A-Z_0-9]+_ENABLED')
   const directoryDeprovision = grepFlagTokens('DIRECTORY_DEPROVISION_[A-Z_0-9]+_ENABLED')
   // #4196 Class-B outbound two-phase ledger switch (S0-c, AGENTS.md: every new env flag is registered
   // here). One family by name shape, scanned where the executor and retry-eligibility read it.
@@ -513,7 +514,7 @@ function globalHistoryFlagsInSource() {
   // there: the plugin's older env flags go through its lenient parseBoolean and are NOT registered here.
   const attendanceCancelRound = grepFlagTokens('ATTENDANCE_CANCEL_ROUND_[A-Z_0-9]+', { file: ATTENDANCE_PLUGIN_SOURCE })
     .filter((t) => t.endsWith('_ENABLED'))
-  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...stockPrepPullBatch, ...stockPrepSheetRepair, ...stockPrepPilotPath, ...stockPrepTenantClaim, ...yidaOwner, ...yidaIssueConfirm, ...attendanceCancelRound, ...userRecycle, ...strictSessionLifetime, ...directoryDeprovision, ...automationClassB, ...integrationAutomationRun])].sort()
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...stockPrepPullBatch, ...stockPrepSheetRepair, ...stockPrepPilotPath, ...stockPrepTenantClaim, ...yidaOwner, ...yidaIssueConfirm, ...attendanceCancelRound, ...userRecycle, ...strictSessionLifetime, ...externalNotifications, ...directoryDeprovision, ...automationClassB, ...integrationAutomationRun])].sort()
 }
 
 test('directory deprovision credential flag: source-derived discovery requires registration', () => {
@@ -1994,5 +1995,33 @@ test('APPROVAL_ROUTING_REQUIRE_POLICY_ENABLED: the registry entry and both envir
     assert.equal(comment.split(sentence).length - 1, 1, `${template} states the sentence exactly once`)
     // It follows the advice to set policies first and precedes the note on the exact literal.
     assert.ok(comment.includes(`set their policies before turning it on. ${sentence} Exact literal 'true' only.`), template)
+  }
+})
+
+
+test('external notification delivery: read-site registration is complete and non-vacuous', () => {
+  const keys = grepFlagTokens('EXTERNAL_NOTIFICATION_[A-Z_0-9]+').filter((key) => key.endsWith('_ENABLED')).sort()
+  assert.deepEqual(keys, ['EXTERNAL_NOTIFICATION_DELIVERY_ENABLED'])
+  assert.deepEqual(keys.filter((key) => !GLOBAL_HISTORY_FLAG_KEYS.includes(key)), [])
+  const withoutDelivery = GLOBAL_HISTORY_FLAG_KEYS.filter((key) => key !== 'EXTERNAL_NOTIFICATION_DELIVERY_ENABLED')
+  assert.deepEqual(keys.filter((key) => !withoutDelivery.includes(key)), ['EXTERNAL_NOTIFICATION_DELIVERY_ENABLED'])
+})
+
+test('EXTERNAL_NOTIFICATION_DELIVERY_ENABLED: exact literal, high danger and both prerequisites', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.EXTERNAL_NOTIFICATION_DELIVERY_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, ['USER_NOTIFICATION_PREFERENCES_ENABLED', 'DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED'])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.source, 'packages/core-backend/src/notifications/notification-flags.ts#isExternalNotificationDeliveryEnabled')
+  assert.ok(readRepoSource(spec.source.split('#')[0]).includes("env.EXTERNAL_NOTIFICATION_DELIVERY_ENABLED === 'true'"))
+  assert.match(spec.purpose, /Default OFF/)
+  assert.match(spec.purpose, /409 NOTIFICATION_DELIVERY_DISABLED/)
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of [undefined, '', 'false', '0', 'TRUE', 'True', ' true', 'true ', ' true ', '1', 'yes', 'on']) {
+    assert.equal(isActivated(spec, value), false, String(value))
   }
 })

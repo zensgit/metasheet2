@@ -22,7 +22,13 @@ import {
   userOf,
   UUID_SHAPE,
 } from './me-notification-http'
-import { productionAuditSink, productionNotificationDbDeps, productionRecipientResolver } from './me-notification-wiring'
+import {
+  productionAuditSink,
+  productionNotificationDbDeps,
+  productionNotificationDeliveryEnabled,
+  productionNotificationVerificationSummary,
+  productionRecipientResolver,
+} from './me-notification-wiring'
 
 export const ME_NOTIFICATION_ENDPOINTS_PATH = '/api/me/notification-endpoints'
 
@@ -113,6 +119,8 @@ export function meNotificationEndpointsRouter(): ExpressRouter {
     ...productionNotificationDbDeps(),
     resolver: productionRecipientResolver(),
     audit: productionAuditSink,
+    deliveryEnabled: productionNotificationDeliveryEnabled,
+    connectionVerified: async (db, input) => (await productionNotificationVerificationSummary(db, input)).ok,
   })
   return createMeNotificationEndpointsRouter({ isEnabled: () => isUserNotificationPreferencesEnabled(), service })
 }

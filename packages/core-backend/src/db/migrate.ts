@@ -161,7 +161,10 @@ Notes:
   that target from the seal onward), and
   zzzz20261111093417_create_user_notification_endpoints_preferences.ts
   refuses while user_notification_endpoints or
-  user_notification_preferences holds any row.`)
+  user_notification_preferences holds any row, and
+  zzzz20261121130000_create_notification_verifications_test_sends.ts
+  refuses while notification_connection_verifications or
+  notification_test_sends holds any row.`)
 }
 
 async function main(): Promise<void> {

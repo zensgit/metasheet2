@@ -75,6 +75,9 @@ type CapabilityRefusalReason = Extract<CapabilityDecision, { effective: false }>
 /** Upper bound (milliseconds) of the caller's lock wait: the resolver requires 0 < lock_timeout <= this value. */
 export const CAPABILITY_RESOLVE_MAX_LOCK_TIMEOUT_MS = 5000
 
+/** PostgreSQL and application shape of the SHA-256 hexadecimal witness. */
+export const CAPABILITY_WITNESS_SHAPE = '^[0-9a-f]{64}$'
+
 /** The version string that opens every witness encoding. */
 const CAPABILITY_WITNESS_VERSION = 'metasheet.directory-integration-capability-witness.v1'
 

@@ -18,6 +18,10 @@ import {
   up,
   USER_NOTIFICATION_DOWN_BLOCKED_CODE,
 } from '../../src/db/migrations/zzzz20261111093417_create_user_notification_endpoints_preferences'
+import {
+  down as downNotificationSends,
+  up as upNotificationSends,
+} from '../../src/db/migrations/zzzz20261121130000_create_notification_verifications_test_sends'
 import { createRecipientResolver, type Db, type ResolveResult, type ResolvedTarget } from '../../src/notifications/recipient-resolver'
 import { resolveProviderCapabilityDescriptor } from '../../src/integrations/provider-capability-registry'
 import { findActiveOrgMembers } from '../../src/services/task-org-members'
@@ -591,9 +595,16 @@ describeIfDatabase('user notification endpoints and preferences (real database)'
       expect(error.code).toBe(USER_NOTIFICATION_DOWN_BLOCKED_CODE)
       await run(`DELETE FROM ${PREFERENCES} WHERE org_id = $1`, [org])
       try {
-        await migrationDb.transaction().execute((trx) => down(trx))
-        expect(await tablesExist()).toBe(false)
-        await migrationDb.transaction().execute((trx) => up(trx))
+        await migrationDb.transaction().execute(async (trx) => {
+          await downNotificationSends(trx)
+          await down(trx)
+          const absent = await sql<{ e: boolean; p: boolean }>`SELECT
+            to_regclass('user_notification_endpoints') IS NOT NULL AS e,
+            to_regclass('user_notification_preferences') IS NOT NULL AS p`.execute(trx)
+          expect(absent.rows).toEqual([{ e: false, p: false }])
+          await up(trx)
+          await upNotificationSends(trx)
+        })
         expect(await tablesExist()).toBe(true)
       } finally {
         await ensureTables()
@@ -1719,6 +1730,7 @@ describeIfDatabase('user notification endpoints and preferences (real database)'
       const seen: string[][] = []
       const outcome = await pgError(
         migrationDb.transaction().execute(async (trx) => {
+          await downNotificationSends(trx)
           await sql`SELECT set_config('lock_timeout', '7s', true), set_config('statement_timeout', '42s', true)`.execute(trx)
           await down(trx)
           seen.push(await read(trx))

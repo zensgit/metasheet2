@@ -548,6 +548,12 @@ const tasksNotificationDeliveriesTotal = counter({
   labelNames: ['outcome'] as const
 })
 
+const notificationTestSendsTotal = counter({
+  name: 'notification_test_sends_total',
+  help: 'Notification test send results and rate limit refusals, by outcome',
+  labelNames: ['outcome'] as const
+})
+
 // Task scheduler (M4 PR-3b design §4.1, §6.6). The leader gauge holds the result of the last tick
 // (1 = that state, 0 = the others). The backlog gauge is refreshed by the leader once per tick,
 // across orgs (ASSUMPTION(task-m4): [own-3b-31]); the kinds are the closed set of
@@ -643,6 +649,7 @@ registry.registerMetric(recoveryArchiveWorkerDrainTotal)
 registry.registerMetric(dingtalkOAuthStateOperationsTotal)
 registry.registerMetric(dingtalkOAuthStateFallbackTotal)
 registry.registerMetric(tasksNotificationDeliveriesTotal)
+registry.registerMetric(notificationTestSendsTotal)
 registry.registerMetric(tasksSchedulerLeaderGauge)
 registry.registerMetric(tasksNotificationBacklogGauge)
 
@@ -672,6 +679,9 @@ recoveryArchiveWorkerRunning.set(0)
 // Every delivery outcome has a sample line from start-up, so a scrape tells zero rows from no wiring.
 for (const outcome of TASK_DELIVERY_OUTCOMES) {
   tasksNotificationDeliveriesTotal.inc({ outcome }, 0)
+}
+for (const outcome of ['accepted', 'failed', 'outcome_unknown', 'refused', 'rate_limited'] as const) {
+  notificationTestSendsTotal.inc({ outcome }, 0)
 }
 // The scheduler's gauges have a sample line for every label from start-up too: all zero until the
 // first tick (no state yet, no backlog read yet).
@@ -848,6 +858,7 @@ export const metrics = {
   dingtalkOAuthStateFallbackTotal,
   // Task notification delivery worker and task scheduler (M4 PR-3b)
   tasksNotificationDeliveriesTotal,
+  notificationTestSendsTotal,
   tasksSchedulerLeaderGauge,
   tasksNotificationBacklogGauge
 }

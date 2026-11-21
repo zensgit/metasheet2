@@ -12,7 +12,7 @@ const delegated = 'authorization-operation-delegated.db.test.ts'
 const storedPause = 'honors a stored pause on preview, commit, replay, and receipt reads with the original token'
 const resumedPreview = 'refuses a stale preview after pausing and re-enabling the same audience'
 export const baseline = Object.freeze([
-  { file: 'authorization-operation-fence.db.test.ts', min: 26, required: ['rejects a changed body on a known public function', 'holds every attested table in EXCLUSIVE mode and leaves work timeouts active', 'returns retryable busy without waiting when an old writer holds a table'], skipped: [] },
+  { file: 'authorization-operation-fence.db.test.ts', min: 33, required: ['accepts the registered N78 inbound foreign key with the integrated B2 profile', 'refuses unregistered inbound foreign key without weakening the original profile', 'refuses renamed N78 foreign key without weakening the original profile', 'rejects a changed body on a known public function', 'holds every attested table in EXCLUSIVE mode and leaves work timeouts active', 'returns retryable busy without waiting when an old writer holds a table'], skipped: [] },
   { file: 'authorization-operation-fullschema.db.test.ts', min: 15, required: ['refuses changes to either side of the integrated B2 schema profile', 'previews, commits and replays using the real fence and current migrated schema', 'keeps real host HEAD, encoded receipt and ordinary-actor 403 paths read-only across the auth chain'], skipped: ['bounds slow pre-planning reads and never starts a late write', 'returns unknown while COMMIT is pending, then GET observes the late receipt and released locks', 'rolls back injected post-fence write failure on the same client'] },
   { file: delegated, min: 14, required: ['does not disclose whole-profile warnings to a delegated actor', 'does not union an A audience with a B admission and rejects platform or delegated admin roles', 'rechecks current audience for stored receipt reads and replay', storedPause, resumedPreview], skipped: [] },
   { file: 'authorization-operation-activation.db.test.ts', min: 6, required: [
@@ -38,7 +38,16 @@ export const unitBaseline = Object.freeze([
   {directory:'unit',file:'authorization-input-lock.test.ts',min:98,required:['ranks are strictly increasing in acquisition order and the order lists every rank'],skipped:[]},
   {directory:'unit',file:'authorization-input-consumers.guard.test.ts',min:7,required:['the authorization command write decision is registered as locked'],skipped:[]},
   {directory:'unit',file:'authorization-operation-validation.test.ts',min:27,required:['normalizes only reason and sorts explicitly chosen admissions'],skipped:[]},
-  {directory:'unit',file:'authorization-operation-fence.test.ts',min:3,required:['locks the closed table set, qualified and without waiting'],skipped:[]},
+  {directory:'unit',file:'authorization-operation-fence.test.ts',min:99,required:[
+    'locks the closed table set, qualified and without waiting',
+    ...[14,15,16,17].flatMap(major => [
+      `accepts measured N78 and B2 additions with the original exact profile (PG${major})`,
+      `preserves original and B2-only historical profiles (PG${major})`,
+      `rejects changed N78 conname despite the registered source (PG${major})`,
+      `rejects an extra inbound foreign key from the registered N78 source (PG${major})`,
+      `rejects an extra inbound foreign key from the unregistered source (PG${major})`,
+    ]),
+  ],skipped:[]},
   {directory:'unit',file:'authorization-operation-snapshot.test.ts',min:4,required:['binds the acting principal, complete input, policy classification, feature value and source rows','invalidates a preview after a disable and re-enable even if the original configured range is unchanged'],skipped:[]},
   {directory:'unit',file:'authorization-schema-mutation.test.ts',min:4,required:['keeps every production schema-gate call inside the registered provider'],skipped:[]},
   {directory:'unit',file:'role-assignment-boundary.test.ts',min:46,required:['every scoped preset declares the capability it grants through roleId + permissions'],skipped:[]},

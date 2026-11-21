@@ -98,8 +98,17 @@ function dingTalkScopeOf(row: { corp_id: string; config: unknown }): Integration
 
 const DINGTALK: ProviderCapabilityDescriptor = Object.freeze({
   provider: 'dingtalk',
-  governance: Object.freeze({ directory: 'legacy', login: 'legacy', notification: 'legacy' } as const),
+  governance: Object.freeze({ directory: 'legacy', login: 'legacy', notification: 'gated' } as const),
   scopeOf: dingTalkScopeOf,
+  async enablePreconditions(capability: IntegrationCapability, context: EnablePreconditionContext) {
+    // Loading the registry itself remains free of credential reads and external calls.
+    if (capability !== 'notification' || context.provider !== 'dingtalk') return { ok: false as const, code: 'precondition_not_registered' }
+    const { isUserNotificationPreferencesEnabled } = await import('../notifications/notification-flags')
+    if (!isUserNotificationPreferencesEnabled()) return { ok: false as const, code: 'verification_missing' }
+    const { createNotificationEnablePreconditions } = await import('../notifications/notification-precondition')
+    const { readNotificationTupleFingerprint } = await import('./dingtalk/notification-fingerprint')
+    return createNotificationEnablePreconditions(readNotificationTupleFingerprint)(capability, context)
+  },
   secretConfigKeys: Object.freeze([
     'appSecret',
     'appsecret',

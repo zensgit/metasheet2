@@ -2764,6 +2764,9 @@ jobs:
             tests/integration/authorization-input-census.db.test.ts \
             tests/integration/directory-pull-source-gate.db.test.ts \
             tests/integration/attendance-role-template-runtime.db.test.ts \
+            tests/integration/notification-verification-test-send.db.test.ts \
+            tests/integration/notification-verification-production.db.test.ts \
+            tests/integration/notification-capability-production.db.test.ts \
             tests/integration/direct-permission-writers.db.test.ts \
             tests/integration/platform-role-assign-transaction.db.test.ts \
             tests/integration/attendance-role-writers-transaction.db.test.ts \
