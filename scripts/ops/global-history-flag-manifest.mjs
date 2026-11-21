@@ -1190,12 +1190,31 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     key: 'DIRECTORY_DEPROVISION_REVOKE_CREDENTIALS_ENABLED',
     type: 'boolean',
     activationValue: 'true',
+    dependsOn: ['EXTERNAL_LOGIN_REALTIME_REVALIDATION_ENABLED'],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "Default OFF; only the byte-exact literal 'true' enables the credential-chain selector's session and API-token revocation legs. No trim or case folding. The selected legs still depend on the operation's persisted user, grant and remaining-login-method facts; this flag does not enable login or grant issuance. Requires EXTERNAL_LOGIN_REALTIME_REVALIDATION_ENABLED to be exactly 'true' as well: a revoked credential must also stop on connections that are already established. Setting a deployed value is a separate owner decision.",
+    source: 'packages/core-backend/src/auth/strict-credential-chain.ts#credentialRevocationFlagOn',
+    rules: [
+      {
+        kind: 'requires-exact',
+        id: 'credential-chain-without-realtime-revalidation',
+        description:
+          "DIRECTORY_DEPROVISION_REVOKE_CREDENTIALS_ENABLED is active ('true') but EXTERNAL_LOGIN_REALTIME_REVALIDATION_ENABLED is not exactly 'true' — established realtime connections of a revoked credential would not be re-checked. Turn realtime revalidation on first.",
+      },
+    ],
+  },
+  {
+    key: 'EXTERNAL_LOGIN_REALTIME_REVALIDATION_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
     dependsOn: [],
     conflictsWith: [],
     danger: 'high',
     purpose:
-      "Default OFF; only the byte-exact literal 'true' enables the credential-chain selector's session and API-token revocation legs. No trim or case folding. The selected legs still depend on the operation's persisted user, grant and remaining-login-method facts; this flag does not enable login or grant issuance. Setting a deployed value is a separate owner decision.",
-    source: 'packages/core-backend/src/auth/strict-credential-chain.ts#credentialRevocationFlagOn',
+      "Default OFF; only the byte-exact literal 'true' enables continuous authorization of established realtime connections (the default collaboration channel and the /yjs namespace). No trim or case folding. On: every protected receive and delivery is re-checked against the committed session, watermark and membership facts of the session the connection is bound to; a connection whose session is no longer current is closed and a new handshake with the same credential is refused; each serving process holds one dedicated database session for invalidation notices, outside its pool; while that session or the authoritative read is unavailable the instance serves no protected realtime traffic. Off, with no committed login scope and no enablement record in the database: ordinary collaboration behaves as before with no extra statement and no listening session. Off while the database carries a committed login scope: protected realtime handshakes are refused. The switch is not an authorization input and never restores a revoked session. Every process that serves realtime traffic must carry the same value. Setting a deployed value is a separate owner decision.",
+    source: 'packages/core-backend/src/realtime-authz/revalidation-flag.ts#isRealtimeRevalidationEnabled',
   },
 ])
 

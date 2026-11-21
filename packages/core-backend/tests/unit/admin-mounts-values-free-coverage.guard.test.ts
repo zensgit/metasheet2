@@ -80,6 +80,7 @@ const ALLOWLIST: Readonly<Record<string, AllowlistEntry>> = {
   'admin-directory-routing-policy.ts': { since: SINCE, echo: 'none', followUp: ADD_TO_SCAN, reason: `${UNSCANNED} Three 500s, ${FIXED_500S}` },
   'admin-directory-org-transfers.ts': { since: SINCE, echo: 'none', followUp: ADD_TO_SCAN, reason: `${UNSCANNED} Its one 500 (handleOrgTransferError) sends the fixed fallbackMessage and logs fixed metadata only; 4xx carry typed messages; the scanner finds no echo (h).` },
   'admin-directory-capabilities.ts': { since: '2026-11-06', echo: 'none', followUp: ADD_TO_SCAN, reason: `${UNSCANNED} Display route and administrator write route (the write since 2026-11-20). Each handler has one 500, the fixed sentence DIRECTORY_CAPABILITIES_INTERNAL, and its log line carries the error class and SQLSTATE only; the two 503s (DIRECTORY_CAPABILITIES_SCHEMA_UNAVAILABLE, DIRECTORY_CAPABILITIES_BUSY) are literal constants chosen from a typed service result, never from the caught error; the scanner finds no echo (h).` },
+  'admin-realtime-diagnostics.ts': { since: '2026-11-21', echo: 'none', followUp: ADD_TO_SCAN, reason: `${UNSCANNED} One read-only display route; it has no 5xx branch of its own and answers reason codes, counters and timestamps only; the scanner finds no echo (h).` },
   'canary-routes.ts': { since: SINCE, echo: 'none', followUp: ADD_TO_SCAN, reason: `${UNSCANNED} 6 fixed-status 5xx branches with literal bodies; the scanner finds no echo (h).` },
   'permissions.ts': { since: SINCE, echo: 'known', followUp: ADD_TO_SCAN, reason: `${UNSCANNED} Mounted path-less; the scanner treats the dynamic 404/409 status of AccessGraphUserUnavailableError as a possible 5xx. Pin that sole site and its status choices separately.` },
 }
@@ -92,6 +93,7 @@ const EXPECTED_IN_SCOPE: readonly string[] = [
   '/api/admin/directory/department-bindings -> admin-directory-department-bindings.ts',
   '/api/admin/directory/routing-policy -> admin-directory-routing-policy.ts',
   '/api/admin/directory/integration-capabilities -> admin-directory-capabilities.ts',
+  '/api/admin/realtime -> admin-realtime-diagnostics.ts',
 ]
 
 /** Where index.ts hands `this.app` to something else (g): the HTTP server, metrics, and the API gateway (which mounts its own router at '/api'). */

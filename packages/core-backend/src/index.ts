@@ -423,6 +423,7 @@ import { adminDirectoryLocalRouter } from './routes/admin-directory-local'
 import { adminDirectoryDepartmentBindingsRouter } from './routes/admin-directory-department-bindings'
 import { adminDirectoryRoutingPolicyRouter } from './routes/admin-directory-routing-policy'
 import { adminDirectoryCapabilitiesRouter } from './routes/admin-directory-capabilities'
+import { adminRealtimeDiagnosticsRouter } from './routes/admin-realtime-diagnostics'
 import { meNotificationEndpointsRouter } from './routes/me-notification-endpoints'
 import { meNotificationPreferencesRouter } from './routes/me-notification-preferences'
 import { adminDirectoryOrgTransfersRouter } from './routes/admin-directory-org-transfers'
@@ -2318,6 +2319,9 @@ export class MetaSheetServer {
     this.app.use('/api/admin/directory/department-bindings', adminDirectoryDepartmentBindingsRouter())
     this.app.use('/api/admin/directory/routing-policy', adminDirectoryRoutingPolicyRouter())
     this.app.use('/api/admin/directory/integration-capabilities', adminDirectoryCapabilitiesRouter())
+    // Realtime admission diagnostics: reason codes and counters, administrator only. The public
+    // health endpoint is not involved and keeps its status and fields.
+    this.app.use('/api/admin/realtime', adminRealtimeDiagnosticsRouter())
     // User notification endpoints and preferences: the caller's own rows; answers 404 while the switch is off.
     this.app.use(meNotificationEndpointsRouter())
     this.app.use(meNotificationPreferencesRouter())
