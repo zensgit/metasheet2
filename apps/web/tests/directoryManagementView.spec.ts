@@ -10620,6 +10620,32 @@ describe('DirectoryManagementView', () => {
       expect(container!.textContent).toContain('账号 7 /')
     })
 
+    it('renders the connectivity result inside the settings tab panel', async () => {
+      apiFetchMock.mockImplementation(async (url: string) => {
+        const path = String(url)
+        if (path === '/api/admin/directory/integrations/test') {
+          return createJsonResponse(createTestResultPayload({
+            sampledUsers: [{ userId: 'kept-user', name: 'KeptConnectivityUser' }],
+          }))
+        }
+        return detailResponse(path, [createAccount()])
+      })
+      mountDirectory()
+      await flushUi()
+      clickButton(container!, '测试连通性')
+      await flushUi()
+      const panel = container!.querySelector('#directory-panel-settings')
+      const heading = Array.from(panel?.querySelectorAll('h3') ?? []).find((node) => node.textContent === '连通性测试')
+      expect(heading).toBeTruthy()
+      expect(panel?.textContent).toContain('KeptConnectivityUser')
+      const accountsTab = container!.querySelector('#directory-tab-accounts')
+      if (!(accountsTab instanceof HTMLButtonElement)) throw new Error('Accounts tab not found')
+      accountsTab.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi()
+      expect(panel ? getComputedStyle(panel).display : '').toBe('none')
+    })
+  })
+
   describe('Wave 2: 预览同步 / 后台同步 polling / R5 run-card stats', () => {
     function mockInitialLoad(integration: Record<string, unknown>, runsPayload?: unknown): void {
       apiFetchMock
