@@ -16,7 +16,7 @@ export interface ModuleGraph {
   resolutionInputs: Array<{ path: string; sha256: string }>
 }
 export const SOURCE_ROOT = 'packages/core-backend/src/'
-export const GRAPH_ROOTS = ['packages/core-backend/src', 'packages/core-backend/scripts', 'scripts', 'plugins']
+export const GRAPH_ROOTS = ['packages/core-backend/src', 'packages/core-backend/scripts', 'packages/core-backend/plugins', 'scripts', 'plugins']
 const TEST_FILE = /(?:^|\/)(?:__tests__|tests|test)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/
 const sourceFile = (file: string): boolean => SOURCE_EXTENSIONS.includes(path.extname(file)) || file.endsWith('.vue')
 const read = (file: string): string => readFileSync(file, 'utf8')

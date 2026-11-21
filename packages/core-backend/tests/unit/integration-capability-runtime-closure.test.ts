@@ -2,11 +2,18 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import ts from 'typescript'
 import registry from '../fixtures/integration-capability-runtime-closure.json'
-import { moduleLoads } from '../helpers/import-edge-allowlist'
+import { moduleLoads, SOURCE_EXTENSIONS } from '../helpers/import-edge-allowlist'
 import { collectModuleGraph, createModuleGraphCollector, forbiddenPaths, reverseRegistry, runtimePaths, SOURCE_ROOT, type ModuleGraph } from '../helpers/runtime-module-closure'
 
 const ROOT = path.resolve(__dirname, '../../../..')
+// Independent inventory: do not reuse the collector's roots or directory walker.
+const PRODUCTION_ROOTS = ['packages/core-backend/src', 'packages/core-backend/scripts', 'packages/core-backend/plugins', 'scripts', 'plugins']
+const productionFiles = () => PRODUCTION_ROOTS.flatMap((dir) => ts.sys.readDirectory(path.join(ROOT, dir),
+  [...SOURCE_EXTENSIONS, '.vue'], ['**/node_modules/**', '**/.git/**'], ['**/*']))
+  .map((file) => path.relative(ROOT, file))
+  .filter((file) => !/(?:^|\/)(?:__tests__|tests|test)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file))
 const BACKGROUND = SOURCE_ROOT + 'integrations/integration-capability-resolve-background.ts'
 const REQUEST = SOURCE_ROOT + 'integrations/integration-capability-resolve.ts'
 const WORKER = SOURCE_ROOT + 'services/task-notification-delivery-worker.ts'
@@ -38,13 +45,13 @@ beforeAll(() => {
   graph = collect()
 }, 180_000)
 afterAll(() => {
-  expect(completedTests.size, 'runtime closure guard must complete all 26 cases (no pending/skipped cases)').toBe(26)
+  expect(completedTests.size, 'runtime closure guard must complete all 28 cases (no pending/skipped cases)').toBe(28)
 })
 
 describe('capability runtime module boundaries', () => {
   it('registers the complete reverse runtime sets and edge multisets without line-number keys', checked(() => {
-    expect(graph.files.length).toBeGreaterThan(2000)
-    expect(graph.files).toHaveLength(registry.fileCount)
+    // Include followed dependencies (including test helpers), but never pin an unrelated file count.
+    expect(graph.files).toEqual([...new Set([...productionFiles(), ...graph.edges.map((edge) => edge.to)])].sort())
     expect(registry.reverse.map((entry) => entry.root)).toEqual([SCHEDULER, WORKER, BACKGROUND])
     for (const expected of registry.reverse) {
       expect(reverseRegistry(graph.edges, expected.root), expected.root).toEqual(expected)
@@ -60,6 +67,24 @@ describe('capability runtime module boundaries', () => {
   it('checks resolved direct edges including type-only loads across all production roots', checked(() => {
     expect(directEdges(graph)).toEqual(registry.directEdges)
     expect(graph.edges.filter((edge) => edge.to === BACKGROUND)).toEqual([])
+  }))
+
+  it('accepts unrelated source additions in every root without updating the reviewed registry', checked(() => {
+    const added = PRODUCTION_ROOTS.map((dir) => dir + '/boundary-control-unrelated.ts')
+    const changed = collect(new Map(added.map((file) => [file, 'export const unrelated = 1'])))
+    expect(changed.files).toEqual([...graph.files, ...added].sort())
+    expect({ ...changed, files: [] }).toEqual({ ...graph, files: [] })
+  }))
+
+  it('rejects a backend kanban plugin importing the background entry', checked(() => {
+    const plugin = 'packages/core-backend/plugins/plugin-view-kanban/src/index.ts'
+    expect(graph.requestRoots).toContain(plugin)
+    const changed = collect(new Map([[plugin, read(ROOT, plugin)
+      + "\nimport '../../../src/integrations/integration-capability-resolve-background'\n"]]))
+    expect(changed.edges).toContainEqual(expect.objectContaining({ from: plugin, to: BACKGROUND, typeOnly: false }))
+    expect(directEdges(changed)).not.toEqual(registry.directEdges)
+    expect(reverseRegistry(changed.edges, BACKGROUND)).not.toEqual(registry.reverse.find((entry) => entry.root === BACKGROUND))
+    expect(forbiddenPaths(changed.edges, changed.requestRoots, [BACKGROUND])).toEqual([[plugin, BACKGROUND]])
   }))
 
   it('registers each missing, non-literal and parse item exactly, and follows test helpers separately', checked(() => {
