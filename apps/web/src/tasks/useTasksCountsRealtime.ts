@@ -48,6 +48,7 @@
  */
 import { onBeforeUnmount, onMounted } from 'vue'
 import { io, type Socket } from 'socket.io-client'
+import { installRealtimeReconnect, type RealtimeReconnectHandle } from '../utils/realtimeReconnect'
 import { useAuth } from '../composables/useAuth'
 import { getApiBase } from '../utils/api'
 import { shouldAutoConnectRealtime } from './tasksRealtimePolicy'
@@ -90,9 +91,12 @@ export function isCountsInvalidation(_payload: unknown): boolean {
 export function useTasksCountsRealtime(options: UseTasksCountsRealtimeOptions) {
   const auth = useAuth()
   let socket: Socket | null = null
+  let reconnectHandle: RealtimeReconnectHandle | null = null
   let disconnected = false
 
   function cleanupSocket() {
+    reconnectHandle?.stop()
+    reconnectHandle = null
     socket?.disconnect()
     socket = null
   }
@@ -110,6 +114,8 @@ export function useTasksCountsRealtime(options: UseTasksCountsRealtimeOptions) {
       transports: ['websocket', 'polling'],
       auth: { token },
     })
+    // The per-user room is entered by the server at connect, so a reconnect needs nothing more.
+    reconnectHandle = installRealtimeReconnect(nextSocket)
 
     nextSocket.on(TASKS_COUNTS_UPDATED_EVENT, (payload: unknown) => {
       // A real client delivers nothing after `disconnect()`, but the rule must not depend on

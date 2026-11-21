@@ -1,5 +1,6 @@
 import { onBeforeUnmount, onMounted } from 'vue'
 import { io, type Socket } from 'socket.io-client'
+import { installRealtimeReconnect, type RealtimeReconnectHandle } from '../../utils/realtimeReconnect'
 import { useAuth } from '../../composables/useAuth'
 import { resolveMultitableCommentsRealtimeBaseUrl } from '../realtime/comments-realtime'
 
@@ -16,6 +17,7 @@ export function useMultitableCommentInboxRealtime(options: UseMultitableCommentI
   const auth = useAuth()
   let currentUserId: string | null = null
   let socket: Socket | null = null
+  let reconnectHandle: RealtimeReconnectHandle | null = null
   let disconnected = false
   let connectionPromise: Promise<Socket | null> | null = null
   let refreshInFlight = false
@@ -44,6 +46,8 @@ export function useMultitableCommentInboxRealtime(options: UseMultitableCommentI
   }
 
   function cleanupSocket() {
+    reconnectHandle?.stop()
+    reconnectHandle = null
     if (socket?.connected) socket.emit('leave-comment-inbox')
     socket?.disconnect()
     socket = null
@@ -69,6 +73,8 @@ export function useMultitableCommentInboxRealtime(options: UseMultitableCommentI
           query: userId ? { userId } : undefined,
           auth: token ? { token } : undefined,
         })
+        // The inbox room is asked for on every connect below, so a reconnect needs nothing more.
+        reconnectHandle = installRealtimeReconnect(nextSocket)
 
         nextSocket.on('connect', () => {
           emitInboxJoin(nextSocket)
