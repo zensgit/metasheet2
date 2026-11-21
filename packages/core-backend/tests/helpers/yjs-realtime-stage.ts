@@ -36,6 +36,8 @@ export interface World {
   updates: Map<string, Uint8Array[]>
   readOnlyUsers: Set<string>
   noReadUsers: Set<string>
+  /** Users that may read the record but not every field of it. */
+  maskedUsers: Set<string>
   /** userId -> fields that user may not write. */
   forbiddenFields: Map<string, Set<string>>
   purgeFails: boolean
@@ -83,6 +85,7 @@ export function createWorld(): World {
     updates: new Map(),
     readOnlyUsers: new Set(),
     noReadUsers: new Set(),
+    maskedUsers: new Set(),
     forbiddenFields: new Map(),
     purgeFails: false,
     readFails: false,
@@ -202,7 +205,7 @@ export async function stage(options: StageOptions = {}): Promise<Stage> {
     return {
       canRead: !world.noReadUsers.has(userId),
       canWrite: !world.readOnlyUsers.has(userId) && !world.noReadUsers.has(userId),
-      canReadAllFields: true,
+      canReadAllFields: !world.maskedUsers.has(userId),
     }
   })
   adapter.setFieldWriteChecker(async (userId, _recordId, fieldIds) => {

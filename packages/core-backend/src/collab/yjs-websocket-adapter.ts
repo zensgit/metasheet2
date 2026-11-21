@@ -6,7 +6,7 @@ import type { Server as SocketServer, Socket, Namespace } from 'socket.io'
 import type { YjsSyncService } from './yjs-sync-service'
 import type { YjsContribution, YjsRecordBridge } from './yjs-record-bridge'
 import { baselineRealtimeProtection, type RealtimeProtection } from '../realtime-authz/protection'
-import type { ProtectedConnections } from '../realtime-authz/protected-connections'
+import type { CurrentAnswer, ProtectedConnections } from '../realtime-authz/protected-connections'
 import { bindingKey, type RealtimeSessionBinding } from '../realtime-authz/session-binding'
 
 // Message types
@@ -68,8 +68,10 @@ export interface YjsWebSocketAdapterOptions {
   heldUpdateRetryMs?: number
   /** How long an incoming change is held for an answer before it is refused visibly. */
   heldUpdateMaxMs?: number
-  /** How many incoming changes of one record may wait in order; further ones are refused visibly. */
+  /** How many incoming changes of one sender to one record may wait in order; further ones are refused visibly. */
   heldUpdateMaxQueued?: number
+  /** How many incoming changes of all senders to one record may wait at once; the memory bound of a record. */
+  heldUpdateMaxQueuedPerRecord?: number
   /** How long the attribution of a closed connection is kept when no write of it is waiting. */
   contributorRetentionMs?: number
   /** How long a namespace handshake may wait while handshakes are held; then it is refused as transient. */
@@ -81,6 +83,8 @@ export interface YjsWebSocketAdapterOptions {
 /** Below the time after which the transport closes a client that has joined no namespace. */
 export const DEFAULT_HELD_HANDSHAKE_MAX_MS = 20_000
 export const DEFAULT_HELD_HANDSHAKE_MAX_WAITING = 1_000
+/** Eight full sender queues: one record never holds more than this, however many connections send. */
+export const DEFAULT_HELD_UPDATE_MAX_QUEUED_PER_RECORD = 4_096
 export const DEFAULT_HELD_UPDATE_RETRY_MS = 250
 export const DEFAULT_HELD_UPDATE_MAX_MS = 30_000
 export const DEFAULT_HELD_UPDATE_MAX_QUEUED = 512
@@ -163,17 +167,28 @@ export class YjsWebSocketAdapter {
   // paths are the pre-existing ones.
   private protection: RealtimeProtection = baselineRealtimeProtection
   private connections: ProtectedConnections | null = null
-  /** One write at a time per record, in arrival order: a later update may depend on an earlier one. */
+  /** One change at a time per sender and record, in the order the sender sent them. */
   private recordWriteQueues = new Map<string, Promise<void>>()
   /**
    * Who each contributing connection was bound to, kept after the connection closed so a pending
    * write can still be attributed and re-checked when it is persisted.
    */
   private contributors = new Map<string, { userId: string; binding: RealtimeSessionBinding | null; closedAt: number | null }>()
+  /** Changes of all senders to one record that are waiting or being processed, by record. */
   private queuedWrites = new Map<string, number>()
   private readonly heldUpdateRetryMs: number
   private readonly heldUpdateMaxMs: number
   private readonly heldUpdateMaxQueued: number
+  private readonly heldUpdateMaxQueuedPerRecord: number
+  /** Changes of one sender to one record that are waiting or being processed, by queue key. */
+  private queuedBySender = new Map<string, number>()
+  /** The number of the last change put into each sender queue. */
+  private lastQueuedNumber = new Map<string, number>()
+  /**
+   * A sender that was told its copy of a record is void: its changes up to this number are not
+   * processed any more. Changes it sends after it has reopened the record have higher numbers.
+   */
+  private endedUpTo = new Map<string, number>()
   private readonly contributorRetentionMs: number
   private readonly heldHandshakeMaxMs: number
   private readonly heldHandshakeMaxWaiting: number
@@ -193,6 +208,7 @@ export class YjsWebSocketAdapter {
     this.heldUpdateRetryMs = options.heldUpdateRetryMs ?? DEFAULT_HELD_UPDATE_RETRY_MS
     this.heldUpdateMaxMs = options.heldUpdateMaxMs ?? DEFAULT_HELD_UPDATE_MAX_MS
     this.heldUpdateMaxQueued = options.heldUpdateMaxQueued ?? DEFAULT_HELD_UPDATE_MAX_QUEUED
+    this.heldUpdateMaxQueuedPerRecord = options.heldUpdateMaxQueuedPerRecord ?? DEFAULT_HELD_UPDATE_MAX_QUEUED_PER_RECORD
     this.contributorRetentionMs = options.contributorRetentionMs ?? DEFAULT_CONTRIBUTOR_RETENTION_MS
     this.heldHandshakeMaxMs = options.heldHandshakeMaxMs ?? DEFAULT_HELD_HANDSHAKE_MAX_MS
     this.heldHandshakeMaxWaiting = options.heldHandshakeMaxWaiting ?? DEFAULT_HELD_HANDSHAKE_MAX_WAITING
@@ -340,6 +356,7 @@ export class YjsWebSocketAdapter {
   }
 
   private dropSubscription(socket: Socket, recordId: string): void {
+    this.endQueuedChanges(recordId, socket.id)
     socket.leave(`yjs:${recordId}`)
     this.socketPermissions.get(socket.id)?.delete(recordId)
     socket.emit('yjs:error', { recordId, code: 'FORBIDDEN', message: 'No read access' })
@@ -454,20 +471,82 @@ export class YjsWebSocketAdapter {
     }
   }
 
-  /** One write at a time per record, in arrival order; false when too many are already waiting. */
-  private enqueueWrite(recordId: string, work: () => Promise<void>): boolean {
-    const waiting = this.queuedWrites.get(recordId) ?? 0
-    if (waiting >= this.heldUpdateMaxQueued) return false
-    this.queuedWrites.set(recordId, waiting + 1)
-    const previous = this.recordWriteQueues.get(recordId) ?? Promise.resolve()
-    const next = previous.then(work).catch(() => undefined).finally(() => {
-      const left = (this.queuedWrites.get(recordId) ?? 1) - 1
-      if (left > 0) this.queuedWrites.set(recordId, left)
+  private queueKeyOf(recordId: string, socketId: string): string {
+    return `${recordId}\u0000${socketId}`
+  }
+
+  /**
+   * One change at a time per sender and record, in the order that sender sent them. The changes of
+   * different senders do not wait for each other: a change that is held was never relayed, so no
+   * change of anybody else can depend on it. Returns the number of the queued change, or null when
+   * this sender, or the record as a whole, already has as many waiting as it may.
+   */
+  private enqueueWrite(recordId: string, socketId: string, work: (number: number) => Promise<void>): number | null {
+    const key = this.queueKeyOf(recordId, socketId)
+    const ofSender = this.queuedBySender.get(key) ?? 0
+    const ofRecord = this.queuedWrites.get(recordId) ?? 0
+    if (ofSender >= this.heldUpdateMaxQueued || ofRecord >= this.heldUpdateMaxQueuedPerRecord) return null
+    this.queuedBySender.set(key, ofSender + 1)
+    this.queuedWrites.set(recordId, ofRecord + 1)
+    const number = (this.lastQueuedNumber.get(key) ?? 0) + 1
+    this.lastQueuedNumber.set(key, number)
+    const previous = this.recordWriteQueues.get(key) ?? Promise.resolve()
+    const next = previous.then(() => work(number)).catch(() => undefined).finally(() => {
+      const leftOfRecord = (this.queuedWrites.get(recordId) ?? 1) - 1
+      if (leftOfRecord > 0) this.queuedWrites.set(recordId, leftOfRecord)
       else this.queuedWrites.delete(recordId)
-      if (this.recordWriteQueues.get(recordId) === next) this.recordWriteQueues.delete(recordId)
+      const leftOfSender = (this.queuedBySender.get(key) ?? 1) - 1
+      if (leftOfSender > 0) {
+        this.queuedBySender.set(key, leftOfSender)
+      } else {
+        // The queue is empty: nothing of it is left to end, and its numbering can start over.
+        this.queuedBySender.delete(key)
+        this.lastQueuedNumber.delete(key)
+        this.endedUpTo.delete(key)
+      }
+      if (this.recordWriteQueues.get(key) === next) this.recordWriteQueues.delete(key)
     })
-    this.recordWriteQueues.set(recordId, next)
-    return true
+    this.recordWriteQueues.set(key, next)
+    return number
+  }
+
+  /** Ends everything this sender has waiting for this record: it was told its copy is void. */
+  private endQueuedChanges(recordId: string, socketId: string): void {
+    const key = this.queueKeyOf(recordId, socketId)
+    const last = this.lastQueuedNumber.get(key)
+    if (last !== undefined) this.endedUpTo.set(key, last)
+  }
+
+  /** A check of a held change with the time the change has left: past it, the check counts as not answered. */
+  private withinHold<T>(arrival: ArrivalContext, check: Promise<T>, notAnswered: T): Promise<T> {
+    const remaining = arrival.arrivedAt + this.heldUpdateMaxMs - Date.now()
+    if (remaining <= 0) {
+      check.catch(() => undefined)
+      return Promise.resolve(notAnswered)
+    }
+    return new Promise<T>((resolve) => {
+      let settled = false
+      const timer = setTimeout(() => {
+        if (settled) return
+        settled = true
+        resolve(notAnswered)
+      }, remaining)
+      timer.unref?.()
+      check.then(
+        (answer) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          resolve(answer)
+        },
+        () => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          resolve(notAnswered)
+        },
+      )
+    })
   }
 
   private arrivalOf(socket: Socket, recordId: string): ArrivalContext {
@@ -485,6 +564,8 @@ export class YjsWebSocketAdapter {
    * it out of the record. The client leaves the document and reopens it from the shared state.
    */
   private tellInvalidated(socket: Socket, recordId: string): void {
+    // Nothing further is taken from the copy this connection holds now.
+    this.endQueuedChanges(recordId, socket.id)
     socket.leave(`yjs:${recordId}`)
     this.socketPermissions.get(socket.id)?.delete(recordId)
     socket.emit('yjs:invalidated', { recordId, reason: 'rest-write' } satisfies YjsInvalidatedPayload)
@@ -499,9 +580,11 @@ export class YjsWebSocketAdapter {
 
   /**
    * Every incoming change — the update event and the two write forms of the sync message — is queued
-   * here in arrival order. A change whose check cannot be answered is HELD: it is not applied, not
-   * persisted and not relayed, the changes behind it wait, and it is tried again until an answer is
-   * there. A change held longer than the bound is refused visibly. It is never dropped in silence.
+   * here, per sender, in the order that sender sent it. A change whose check cannot be answered is
+   * HELD: it is not applied, not persisted and not relayed, the later changes of the same sender
+   * wait behind it, and it is tried again until an answer is there. A change held longer than the
+   * bound is refused visibly, also when a check of it never returns. A sender that is refused is
+   * told once that its copy is void; what it had waiting is then ended without being read for.
    */
   private acceptIncomingUpdate(socket: Socket, recordId: string, update: Uint8Array, relayData: number[]): void {
     const arrival = this.arrivalOf(socket, recordId)
@@ -509,21 +592,32 @@ export class YjsWebSocketAdapter {
       socket.emit('yjs:error', { recordId, code: 'FORBIDDEN', message: 'Not subscribed' })
       return
     }
-    const queued = this.enqueueWrite(recordId, async () => {
+    const key = this.queueKeyOf(recordId, socket.id)
+    const queued = this.enqueueWrite(recordId, socket.id, async (number) => {
       for (;;) {
+        // An earlier change of this sender was refused and the sender told to reopen the record:
+        // what it sent before that is not processed, and nothing is read for it.
+        if ((this.endedUpTo.get(key) ?? 0) >= number) return
+        // A sender that is still connected and has left the record since: ended without a read.
+        if (socket.connected && this.authChecker && this.socketPermissions.get(socket.id)?.has(recordId) !== true) {
+          socket.emit('yjs:error', { recordId, code: 'FORBIDDEN', message: 'Not subscribed' })
+          return
+        }
         const outcome = await this.applyGuardedUpdate(socket, recordId, update, relayData, arrival)
         if (outcome !== 'hold') return
-        if (Date.now() - arrival.arrivedAt >= this.heldUpdateMaxMs) {
+        if ((this.endedUpTo.get(key) ?? 0) >= number) return
+        const remaining = arrival.arrivedAt + this.heldUpdateMaxMs - Date.now()
+        if (remaining <= 0) {
           this.refuseVisibly(socket, recordId, 'UNAVAILABLE', 'Change could not be checked in time; reopen the record')
           return
         }
         await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, this.heldUpdateRetryMs)
+          const timer = setTimeout(resolve, Math.min(this.heldUpdateRetryMs, remaining))
           timer.unref?.()
         })
       }
     })
-    if (!queued) this.refuseVisibly(socket, recordId, 'UNAVAILABLE', 'Too many changes are waiting for this record; reopen it')
+    if (queued === null) this.refuseVisibly(socket, recordId, 'UNAVAILABLE', 'Too many changes are waiting for this record; reopen it')
   }
 
   /**
@@ -563,7 +657,7 @@ export class YjsWebSocketAdapter {
       return 'done'
     }
     if (baselineUserId) {
-      const write = await this.mayWrite(baselineUserId, recordId, staged.fieldIds)
+      const write = await this.withinHold<YjsWriteVerdict>(arrival, this.mayWrite(baselineUserId, recordId, staged.fieldIds), 'unknown')
       if (write === 'unknown') return 'hold'
       if (write === 'denied') {
         this.refuseVisibly(socket, recordId, 'FORBIDDEN', 'No write access')
@@ -575,7 +669,7 @@ export class YjsWebSocketAdapter {
     if (this.isProtected() && this.connections) {
       if (socket.connected) {
         this.adoptSocket(socket)
-        const current = await this.connections.checkCurrent(socket)
+        const current = await this.withinHold<CurrentAnswer>(arrival, this.connections.checkCurrent(socket), { state: 'unavailable', hold: false })
         if (current.state === 'unavailable') return 'hold'
         // Ended: the connection is not served any more; where it was ended it has been told.
         if (current.state === 'ended') return 'done'
@@ -584,7 +678,7 @@ export class YjsWebSocketAdapter {
         userId = current.binding.userId
       } else {
         // The sender left after sending: its session is read from the binding it had on arrival.
-        const session = await this.sessionVerdict(arrival.binding)
+        const session = await this.withinHold<YjsWriteVerdict>(arrival, this.sessionVerdict(arrival.binding), 'unknown')
         if (session === 'unknown') return 'hold'
         if (session === 'denied') return 'done'
         binding = arrival.binding

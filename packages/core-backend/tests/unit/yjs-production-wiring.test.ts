@@ -71,6 +71,8 @@ interface Facts {
   live: boolean
   recordExists: boolean
   readFails: boolean
+  /** Only the read of the field definitions fails; the record and the capabilities are read. */
+  fieldsReadFails: boolean
   /** The record is denied to non-administrators at row level. */
   rowDenied: boolean
   /** Whether every field of the record may be read by the subject. */
@@ -91,6 +93,7 @@ function facts(overrides: Partial<Facts> = {}): Facts {
     live: true,
     recordExists: true,
     readFails: false,
+    fieldsReadFails: false,
     rowDenied: false,
     everyFieldReadable: true,
     admin: false,
@@ -105,7 +108,10 @@ function bindingsOf(f: Facts): Record<string, unknown> {
     async query(sql: string) {
       if (f.readFails) throw new Error('connection reset')
       if (/FROM meta_records/.test(sql)) return { rows: f.recordExists ? [{ id: RECORD, sheet_id: 'sheet-1', created_by: 'u' }] : [] }
-      if (/FROM meta_fields/.test(sql)) return { rows: f.fields }
+      if (/FROM meta_fields/.test(sql)) {
+        if (f.fieldsReadFails) throw new Error('timeout exceeded when trying to connect')
+        return { rows: f.fields }
+      }
       throw new Error(`unexpected statement: ${sql}`)
     },
   }
@@ -216,6 +222,12 @@ describe('fresh field-write check of the start-up code', () => {
   it('a read that fails is answered as unknown, never as a refusal and never as permission', async () => {
     expect(await fieldWriteCheckerOf(facts({ readFails: true }))('u', RECORD, ['f1'])).toBe('unknown')
     expect(await authCheckerOf(facts({ readFails: true }))('u', RECORD)).toBe('unknown')
+  })
+
+  it('the record is read and the field definitions are not: the record access check answers, the field-write check answers unknown', async () => {
+    const f = facts({ fieldsReadFails: true })
+    expect(await authCheckerOf(f)('u', RECORD)).toEqual({ canRead: true, canWrite: true, canReadAllFields: true })
+    expect(await fieldWriteCheckerOf(f)('u', RECORD, ['f1'])).toBe('unknown')
   })
 })
 
@@ -352,6 +364,41 @@ describe('the closures of the start-up code behind the real adapter, bridge and 
     await until(() => b.fields().f1 === 'written' && recordOf(s)?.f1 === 'written')
     expect(s.world.patches).toHaveLength(1)
     expect(a.errors).toEqual([])
+  })
+
+  it('the field definitions cannot be read when a change arrives, the record can: the change waits, it is not refused, and it is shared and written once they can', async () => {
+    const f = facts({ subjects: new Map([['a', subject()], ['b', subject()]]), fieldsReadFails: true })
+    const s = await open(f)
+    const a = await editor(s, 'a')
+    const b = await editor(s, 'b')
+    sendUpdate(a, change(a, 'f1', 'held'))
+    await settle(200)
+    expect(b.fields().f1).toBe('one')
+    expect(s.world.patches).toEqual([])
+    expect(a.errors).toEqual([])
+    expect(a.invalidated).toEqual([])
+    f.fieldsReadFails = false
+    await until(() => b.fields().f1 === 'held' && recordOf(s)?.f1 === 'held', 2000, 'the change once the field definitions can be read')
+    expect(a.errors).toEqual([])
+  })
+
+  it('the field definitions cannot be read when the write is re-checked, the record can: the write waits, the document stays, nobody is told, and it is written once they can', async () => {
+    const f = facts({ subjects: new Map([['a', subject()], ['b', subject()]]) })
+    const s = await open(f)
+    const a = await editor(s, 'a')
+    const b = await editor(s, 'b')
+    sendUpdate(a, change(a, 'f1', 'written-later'))
+    await until(() => b.fields().f1 === 'written-later')
+    f.fieldsReadFails = true // inside the merge window: the re-check and the builder cannot read them
+    await settle(350)
+    expect(s.world.patches).toEqual([])
+    expect(b.fields().f1).toBe('written-later')
+    expect(a.invalidated).toEqual([])
+    expect(b.invalidated).toEqual([])
+    expect(s.bridge.getMetrics().flushFailureCount).toBe(0)
+    f.fieldsReadFails = false
+    await until(() => recordOf(s)?.f1 === 'written-later', 2000, 'the write once the field definitions can be read')
+    expect(a.invalidated).toEqual([])
   })
 
   it('a change to a field that is read-only for the sender is refused when it arrives: not shared, not written', async () => {
