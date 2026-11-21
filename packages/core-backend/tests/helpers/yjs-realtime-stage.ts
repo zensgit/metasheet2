@@ -297,6 +297,14 @@ export function sendAsSyncMessage(target: Editor, update: Uint8Array, form: 'ste
   target.socket.emit('yjs:message', { recordId: RECORD, data: Array.from(encoding.toUint8Array(encoder)) })
 }
 
+/** Asks the server for everything this editor is missing: the first sync step, with its own state. */
+export function requestMissing(target: Editor): void {
+  const encoder = encoding.createEncoder()
+  encoding.writeVarUint(encoder, 0)
+  syncProtocol.writeSyncStep1(encoder, target.doc)
+  target.socket.emit('yjs:message', { recordId: RECORD, data: Array.from(encoding.toUint8Array(encoder)) })
+}
+
 export function shared(s: Stage): Record<string, unknown> {
   const doc = s.sync.getDoc(RECORD)
   return doc ? fieldsOf(doc) : {}

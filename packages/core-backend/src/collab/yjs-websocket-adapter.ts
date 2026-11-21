@@ -45,7 +45,13 @@ export type YjsPresenceSnapshot = {
 
 export type YjsInvalidatedPayload = {
   recordId: string
-  reason: 'rest-write'
+  /**
+   * `rest-write`: the document of this record is void; drop it and reopen the record.
+   * `resync`: the document is still the shared one, but a change did not reach this subscriber;
+   * it stays subscribed and asks for what it is missing with a first sync step. A client that
+   * does not know this reason treats it like the other one, which is safe.
+   */
+  reason: 'rest-write' | 'resync'
 }
 
 /**
@@ -365,12 +371,13 @@ export class YjsWebSocketAdapter {
       onResourceDenied: (socket) => this.dropSubscription(socket as Socket, recordId),
       stillSubscribed: (socket) => (socket as Socket).rooms.has(room),
     }).catch(() => undefined).then(() => {
-      // A subscriber that did not get a change of the document can no longer follow the shared
-      // document: it is told to reopen the record instead of being left behind in silence.
+      // A subscriber that did not get a change of the document is behind the shared document. It
+      // is told so instead of being left behind in silence. It stays subscribed: whether it may
+      // still read is not known, and what it asks for next is checked like every other request.
       if (event !== 'yjs:update') return
       for (const member of members) {
         if (served.has(member) || !member.connected || !member.rooms.has(room)) continue
-        this.tellInvalidated(member, recordId)
+        member.emit('yjs:invalidated', { recordId, reason: 'resync' } satisfies YjsInvalidatedPayload)
       }
     })
   }

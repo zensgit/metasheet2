@@ -28,6 +28,7 @@ import {
   teardown,
   type Stage,
   type StageOptions,
+  requestMissing,
 } from '../helpers/yjs-realtime-stage'
 
 let current: Stage | null = null
@@ -339,7 +340,7 @@ describe('an edit that cannot be processed is never dropped in silence', () => {
 })
 
 describe('switch on: a subscriber that cannot be given a change is told, not left behind', () => {
-  it('read access of one recipient cannot be read when a change is relayed: it is told to reopen the record and is not refused; the others get the change', async () => {
+  it('read access of one recipient cannot be read when a change is relayed: it is told to resync, stays subscribed and is not refused; the others get the change', async () => {
     const s = await open({ protectedMode: true })
     const writer = await editor(s, 'writer')
     const kept = await editor(s, 'kept')
@@ -348,14 +349,55 @@ describe('switch on: a subscriber that cannot be given a change is told, not lef
     sendUpdate(writer, append(writer, 'f1', '-relayed'))
     await until(() => kept.fields().f1 === 'one-relayed')
     await until(() => flaky.invalidated.length === 1)
+    expect(flaky.invalidated).toEqual([{ recordId: RECORD, reason: 'resync' }])
     expect(flaky.received).toEqual([])
     expect(flaky.errors).toEqual([])
     expect(flaky.socket.connected).toBe(true)
     expect(kept.invalidated).toEqual([])
-    // It reopens the record once its read answers again and continues from the shared state.
+    expect(flaky.fields().f1).toBe('one')
+
+    // Asking while its read still cannot be answered gets no answer and loses nothing.
+    requestMissing(flaky)
+    await settle(150)
+    expect(flaky.fields().f1).toBe('one')
+    expect(flaky.errors).toEqual([])
+
+    // Once its read answers, the same question gets what it is missing, on the same document.
     s.world.readFailsFor.delete('flaky')
-    const reopened = await editor(s, 'flaky')
-    expect(reopened.fields().f1).toBe('one-relayed')
+    requestMissing(flaky)
+    await until(() => flaky.fields().f1 === 'one-relayed')
+    // It never left the record: the next change reaches it like everybody else, and its own change is taken.
+    sendUpdate(writer, append(writer, 'f1', '-next'))
+    await until(() => flaky.fields().f1 === 'one-relayed-next' && kept.fields().f1 === 'one-relayed-next')
+    sendUpdate(flaky, append(flaky, 'f2', '-mine'))
+    await until(() => kept.fields().f2 === 'two-mine' && shared(s).f2 === 'two-mine')
+    expect(flaky.invalidated).toHaveLength(1)
+    expect(flaky.errors).toEqual([])
+  })
+
+  it('the document is voided by a write from elsewhere before it resyncs: it is told that too, because it never left the record', async () => {
+    const s = await open({ protectedMode: true })
+    const writer = await editor(s, 'writer')
+    const flaky = await editor(s, 'flaky')
+    s.world.readFailsFor.add('flaky')
+    sendUpdate(writer, append(writer, 'f1', '-relayed'))
+    await until(() => flaky.invalidated.length === 1)
+    s.world.readFailsFor.delete('flaky')
+    await s.invalidate([RECORD])
+    await until(() => flaky.invalidated.length === 2 && writer.invalidated.length === 1)
+    expect(flaky.invalidated).toEqual([{ recordId: RECORD, reason: 'resync' }, { recordId: RECORD, reason: 'rest-write' }])
+  })
+
+  it('a recipient that may no longer read is refused, not told to resync', async () => {
+    const s = await open({ protectedMode: true })
+    const writer = await editor(s, 'writer')
+    const gone = await editor(s, 'gone')
+    s.world.noReadUsers.add('gone')
+    sendUpdate(writer, append(writer, 'f1', '-relayed'))
+    await until(() => gone.errors.length === 1)
+    expect(gone.errors[0].code).toBe('FORBIDDEN')
+    expect(gone.invalidated).toEqual([])
+    expect(gone.received).toEqual([])
   })
 })
 

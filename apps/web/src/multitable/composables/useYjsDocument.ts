@@ -22,26 +22,31 @@ const MSG_SYNC = 0
 
 /** How many times in a row a record is reopened after a transient refusal before giving up. */
 const MAX_REOPEN_ATTEMPTS = 6
+/** How many times the server is asked again for a change that did not arrive before giving up. */
+const MAX_RESYNC_ATTEMPTS = 6
 
+/** Applies a sync message and answers it; returns the kind of sync message it was, if it was one. */
 function handleSyncMessage(
   doc: Y.Doc,
   socket: Socket,
   recordId: string,
   message: Uint8Array,
-): void {
+): number | null {
   const decoder = decoding.createDecoder(message)
   const messageType = decoding.readVarUint(decoder)
 
   if (messageType === MSG_SYNC) {
     const encoder = encoding.createEncoder()
     encoding.writeVarUint(encoder, MSG_SYNC)
-    syncProtocol.readSyncMessage(decoder, encoder, doc, 'remote')
+    const syncType = syncProtocol.readSyncMessage(decoder, encoder, doc, 'remote')
 
     const reply = encoding.toUint8Array(encoder)
     if (reply.length > 1) {
       socket.emit('yjs:message', { recordId, data: Array.from(reply) })
     }
+    return syncType
   }
+  return null
 }
 
 function sendSyncStep1(doc: Y.Doc, socket: Socket, recordId: string): void {
@@ -101,6 +106,13 @@ export function useYjsDocument(recordId: Ref<string | null>, options: UseYjsDocu
    */
   const reopenBackoff = createReconnectBackoff()
   let reopenTimer: ReturnType<typeof setTimeout> | null = null
+  /**
+   * The server can say that a change did not reach this subscriber (`resync`). The document is
+   * still the shared one and the subscription is still there, so nothing is dropped: the server
+   * is asked for what is missing, again and again with backoff, until it answers.
+   */
+  const resyncBackoff = createReconnectBackoff({ minDelayMs: 500, maxDelayMs: 8_000 })
+  let resyncTimer: ReturnType<typeof setTimeout> | null = null
 
   function normalizePresenceSnapshot(payload: unknown, expectedRecordId: string): YjsRecordPresence | null {
     if (!payload || typeof payload !== 'object') return null
@@ -135,6 +147,27 @@ export function useYjsDocument(recordId: Ref<string | null>, options: UseYjsDocu
     if (reopenTimer) clearTimeout(reopenTimer)
     reopenTimer = null
     reopenBackoff.reset()
+  }
+
+  function cancelResync(): void {
+    if (resyncTimer) clearTimeout(resyncTimer)
+    resyncTimer = null
+    resyncBackoff.reset()
+  }
+
+  function requestMissing(yDoc: Y.Doc, rid: string): void {
+    if (!socket || currentRecordId !== rid || doc.value !== yDoc) return
+    if (resyncBackoff.attempts >= MAX_RESYNC_ATTEMPTS) {
+      // No answer: the document cannot be trusted to be complete. Same outcome as a voided document.
+      error.value = 'INVALIDATED: document invalidated by REST write'
+      disconnect()
+      return
+    }
+    sendSyncStep1(yDoc, socket, rid)
+    resyncTimer = setTimeout(() => {
+      resyncTimer = null
+      requestMissing(yDoc, rid)
+    }, resyncBackoff.next())
   }
 
   function scheduleReopen(rid: string): void {
@@ -207,7 +240,9 @@ export function useYjsDocument(recordId: Ref<string | null>, options: UseYjsDocu
       ({ recordId: rid2, data }: { recordId: string; data: number[] }) => {
         if (rid2 !== currentRecordId) return
         const message = new Uint8Array(data)
-        handleSyncMessage(yDoc, socket!, rid2, message)
+        const syncType = handleSyncMessage(yDoc, socket!, rid2, message)
+        // The second sync step is the answer of the server to a question of this client.
+        if (syncType === syncProtocol.messageYjsSyncStep2) cancelResync()
         if (!requestedServerState) {
           requestedServerState = true
           sendSyncStep1(yDoc, socket!, rid2)
@@ -251,6 +286,10 @@ export function useYjsDocument(recordId: Ref<string | null>, options: UseYjsDocu
       const rid2 = (payload as { recordId?: unknown }).recordId
       if (typeof rid2 !== 'string') return
       if (rid2 !== currentRecordId) return
+      if ((payload as { reason?: unknown }).reason === 'resync') {
+        if (!resyncTimer) requestMissing(yDoc, rid2)
+        return
+      }
       error.value = 'INVALIDATED: document invalidated by REST write'
       disconnect()
     })
@@ -297,6 +336,7 @@ export function useYjsDocument(recordId: Ref<string | null>, options: UseYjsDocu
     // Bump generation so any in-flight connect() await aborts before it
     // creates a socket/doc that nobody is going to watch.
     connectGen += 1
+    cancelResync()
     if (socket) {
       if (currentRecordId) {
         socket.emit('yjs:unsubscribe', { recordId: currentRecordId })
