@@ -81,13 +81,66 @@ describe('ConnectionPool transaction depth', () => {
     expect(detachedDepth).toBe(0)
     expect(probe.currentTransactionDepth()).toBe(0)
   })
+
+  it('returns committed results and releases the confirmed connection once', async () => {
+    const client = fakeClient()
+    const connectionPool = createPoolWithFakeClients(client)
+    const probe = connectionPool.transactionDepthProbe
+
+    await expect(connectionPool.transaction(async () => {
+      expect(probe.currentTransactionDepth()).toBe(1)
+      return 'committed'
+    })).resolves.toBe('committed')
+
+    expect(vi.mocked(client.query).mock.calls.map(([statement]) => statement)).toEqual(['BEGIN', 'COMMIT'])
+    expect(client.release).toHaveBeenCalledTimes(1)
+    expect(client.release).toHaveBeenCalledWith()
+    expect(probe.currentTransactionDepth()).toBe(0)
+  })
+
+  it('preserves the business error after confirmed rollback and releases once', async () => {
+    const client = fakeClient()
+    const connectionPool = createPoolWithFakeClients(client)
+    const probe = connectionPool.transactionDepthProbe
+    const failure = new Error('business operation refused')
+
+    await expect(connectionPool.transaction(async () => {
+      expect(probe.currentTransactionDepth()).toBe(1)
+      throw failure
+    })).rejects.toBe(failure)
+
+    expect(vi.mocked(client.query).mock.calls.map(([statement]) => statement)).toEqual(['BEGIN', 'ROLLBACK'])
+    expect(client.release).toHaveBeenCalledTimes(1)
+    expect(client.release).toHaveBeenCalledWith()
+    expect(probe.currentTransactionDepth()).toBe(0)
+  })
+
+  it.each([
+    ['rejection', new Error('rollback refused')],
+    ['timeout', new Error('Query read timeout')],
+  ] as const)('discards an unconfirmed connection while preserving the business error (%s)', async (_label, rollbackFailure) => {
+    const client = fakeClient(rollbackFailure)
+    const connectionPool = createPoolWithFakeClients(client)
+    const probe = connectionPool.transactionDepthProbe
+    const failure = new Error('business operation refused')
+
+    await expect(connectionPool.transaction(async () => {
+      expect(probe.currentTransactionDepth()).toBe(1)
+      throw failure
+    })).rejects.toBe(failure)
+
+    expect(vi.mocked(client.query).mock.calls.map(([statement]) => statement)).toEqual(['BEGIN', 'ROLLBACK'])
+    expect(client.release).toHaveBeenCalledTimes(1)
+    expect(client.release).toHaveBeenCalledWith(true)
+    expect(probe.currentTransactionDepth()).toBe(0)
+  })
 })
 
-function createPoolWithFakeClients(): ConnectionPool {
+function createPoolWithFakeClients(client?: PoolClient): ConnectionPool {
   const connectionPool = new ConnectionPool({ name: 'transaction-depth-test' })
   const originalPool = connectionPool.getInternalPool()
   const fakePool = {
-    connect: vi.fn(async () => fakeClient()),
+    connect: vi.fn(async () => client ?? fakeClient()),
   }
   Object.defineProperty(connectionPool, 'pool', {
     configurable: true,
@@ -98,7 +151,7 @@ function createPoolWithFakeClients(): ConnectionPool {
   return connectionPool
 }
 
-function fakeClient(): PoolClient {
+function fakeClient(rollbackFailure?: Error): PoolClient {
   const result: QueryResult = {
     command: '',
     rowCount: 0,
@@ -107,7 +160,10 @@ function fakeClient(): PoolClient {
     fields: [],
   }
   return {
-    query: vi.fn(async () => result),
+    query: vi.fn(async (statement: string) => {
+      if (statement === 'ROLLBACK' && rollbackFailure) throw rollbackFailure
+      return result
+    }),
     release: vi.fn(),
   } as unknown as PoolClient
 }

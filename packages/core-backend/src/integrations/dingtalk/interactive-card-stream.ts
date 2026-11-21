@@ -398,6 +398,7 @@ export class DingTalkInteractiveCardStreamWorker {
         ])
         const deps = {
           query: (sql: string, params?: unknown[]) => poolManager.get().query(sql, params),
+          transaction: poolManager.get().transaction.bind(poolManager.get()),
           approvals: new ApprovalProductService(),
         }
         return (payload: unknown) => executeDingTalkApprovalCardCallback(deps, payload)

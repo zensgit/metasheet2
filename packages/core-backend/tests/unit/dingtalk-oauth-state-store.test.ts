@@ -214,7 +214,11 @@ describe('DingTalk OAuth state store', () => {
       redirectUri: 'https://example.com/login/dingtalk/callback', corpId: null,
     })
     vi.mocked(query).mockReset()
-    vi.mocked(transaction).mockReset()
+    vi.mocked(transaction).mockReset().mockImplementation(async (work) => work({
+      query: vi.fn(async (statement: string) => ({
+        rows: strictLoginUninstalledRows(statement) ?? [], rowCount: 0, command: 'SELECT', oid: 0, fields: [],
+      })) as typeof query,
+    }))
     vi.mocked(exchangeCodeForUserAccessToken).mockReset()
     vi.mocked(fetchDingTalkCurrentUser).mockReset()
     await __resetDingTalkOAuthStateStoreForTests()
