@@ -558,6 +558,27 @@ export function recordNotFound(recordId: string, isZh: boolean): string {
   return isZh ? `未找到记录：${recordId}` : `Record not found: ${recordId}`
 }
 
+// 客户问题 2026-10-27（4b）：定位一条记录时，详情已打开，但表格里没能定位到这一行，给一条轻提示说明原因。
+//   capped      — 已按上限追加加载，仍没到这一行（后面还有）
+//   absent      — 当前视图的行已全部加载，没有这一行（多半被筛选或搜索条件隐藏）
+//   unavailable — 当前是分页模式（分组视图或翻到第 2 页以后），不能追加加载
+export type DeepLinkLocateMiss = 'capped' | 'absent' | 'unavailable'
+export function deepLinkLocateHint(kind: DeepLinkLocateMiss, loadedRows: number, isZh: boolean): string {
+  if (kind === 'capped') {
+    return isZh
+      ? `已打开记录详情；表格已加载 ${loadedRows} 行，仍未到这条记录，可用搜索或筛选在表格中找到它`
+      : `Record opened. The grid has loaded ${loadedRows} rows and has not reached it yet — use search or a filter to find it in the grid`
+  }
+  if (kind === 'absent') {
+    return isZh
+      ? '已打开记录详情；这条记录不在当前视图的行中，可能被筛选或搜索条件隐藏'
+      : 'Record opened. It is not among this view\'s rows — a filter or search may be hiding it'
+  }
+  return isZh
+    ? '已打开记录详情；这条记录不在当前页，可翻页或搜索在表格中找到它'
+    : 'Record opened. It is not on the current page — page through or search to find it in the grid'
+}
+
 // Sheet-delete confirm (workbench onDeleteSheet). Names the sheet the user is about to delete and
 // states the consequence honestly: records are hidden with the sheet (soft delete), and only an
 // authorized administrator can bring it back from the sheet recycle bin.

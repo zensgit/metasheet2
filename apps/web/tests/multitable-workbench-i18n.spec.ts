@@ -14,6 +14,7 @@ import {
   duplicateRowsSkipped,
   recordsDeleted,
   recordNotFound,
+  deepLinkLocateHint,
   cardSheets,
   cardFields,
   cardViews,
@@ -219,5 +220,15 @@ describe('workbench-labels interpolation helpers', () => {
   it('recordNotFound localizes surrounding chrome and keeps record id raw', () => {
     expect(recordNotFound('rec_abc123', false)).toBe('Record not found: rec_abc123')
     expect(recordNotFound('rec_abc123', true)).toBe('未找到记录：rec_abc123')
+  })
+
+  // 客户问题 2026-10-27（4b）：定位记录时表格里没能定位到这一行的三种轻提示。
+  it('deepLinkLocateHint names the loaded row count only for the capped case', () => {
+    expect(deepLinkLocateHint('capped', 500, true)).toBe('已打开记录详情；表格已加载 500 行，仍未到这条记录，可用搜索或筛选在表格中找到它')
+    expect(deepLinkLocateHint('capped', 500, false)).toContain('500 rows')
+    expect(deepLinkLocateHint('absent', 120, true)).toBe('已打开记录详情；这条记录不在当前视图的行中，可能被筛选或搜索条件隐藏')
+    expect(deepLinkLocateHint('absent', 120, false)).not.toContain('120')
+    expect(deepLinkLocateHint('unavailable', 50, true)).toBe('已打开记录详情；这条记录不在当前页，可翻页或搜索在表格中找到它')
+    expect(deepLinkLocateHint('unavailable', 50, false)).toContain('current page')
   })
 })
