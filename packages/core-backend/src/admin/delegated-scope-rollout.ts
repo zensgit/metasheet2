@@ -37,8 +37,7 @@ export function describeIncludeChildren(stored: boolean | null): IncludeChildren
 /**
  * Decide the boolean to store for an assign.
  * Explicit false is refused while the rollout is off.
- * An omitted value keeps the historical true default, except a stored false is
- * preserved while the rollout is off so the row is not widened.
+ * An omitted value keeps the stored bit, defaulting to true for a new row.
  */
 export function resolveDelegatedIncludeChildrenWrite(input: {
   intent: Exclude<IncludeChildrenIntent, { kind: 'invalid' }>
@@ -49,8 +48,5 @@ export function resolveDelegatedIncludeChildrenWrite(input: {
     if (input.intent.value === false && !input.exactDepartmentEnabled) return { outcome: 'refuse' }
     return { outcome: 'persist', includeChildren: input.intent.value }
   }
-  if (!input.exactDepartmentEnabled && input.existingIncludeChildren === false) {
-    return { outcome: 'persist', includeChildren: false }
-  }
-  return { outcome: 'persist', includeChildren: true }
+  return { outcome: 'persist', includeChildren: input.existingIncludeChildren ?? true }
 }

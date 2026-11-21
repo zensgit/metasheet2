@@ -41,6 +41,8 @@ const rbacServiceMocks = vi.hoisted(() => ({
   userHasPermission: vi.fn(),
 }))
 
+let liveRoleEditor = false
+
 const auditMocks = vi.hoisted(() => ({
   auditLog: vi.fn(),
 }))
@@ -150,6 +152,13 @@ function makeFakeDb(options: {
     }
     if (/^SELECT pg_advisory_xact_lock\(hashtextextended\(\$1, 0\)\)$/i.test(norm)) {
       return { rows: [{ pg_advisory_xact_lock: '' }], rowCount: 1 }
+    }
+    if (norm.includes('FROM users WHERE id = $1::text FOR UPDATE')) {
+      return { rows: [{ id: String(params[0]), role: 'user', is_active: true, activation_status: 'activated' }], rowCount: 1 }
+    }
+    if (norm === "SELECT role_id FROM user_roles WHERE user_id = $1 AND role_id = 'admin' FOR SHARE") {
+      const rows = liveRoleEditor && params[0] === 'owner-1' ? [{ role_id: 'admin' }] : []
+      return { rows, rowCount: rows.length }
     }
     if (/^SELECT id, name FROM roles WHERE id=/i.test(norm)) {
       const id = String(params[0])
@@ -443,7 +452,7 @@ beforeEach(() => {
   rbacServiceMocks.listUserPermissions.mockReset()
   rbacServiceMocks.invalidateUserPerms.mockReset()
   rbacServiceMocks.userHasPermission.mockReset()
-  rbacServiceMocks.isAdmin.mockResolvedValue(false)
+  liveRoleEditor = false
   rbacServiceMocks.userHasPermission.mockResolvedValue(false)
   auditMocks.auditLog.mockReset()
   auditMocks.auditLog.mockResolvedValue(undefined)
@@ -682,7 +691,7 @@ describe('PUT /api/roles/:id — permission set persistence', () => {
   })
 
   it('ESCALATION: a platform admin may add it (the gate narrows, it does not block the owner)', async () => {
-    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    liveRoleEditor = true
     const db = seed()
     wire(db)
     const res = mockResponse()
@@ -693,8 +702,8 @@ describe('PUT /api/roles/:id — permission set persistence', () => {
     expect(db.permissionsOf('role-1')).toEqual(['*:*', 'roles:read', 'stock-prep:read'])
   })
 
-  it('ESCALATION: a wildcard HOLDER who is not in the admin role may add it too (live check, not the memo)', async () => {
-    rbacServiceMocks.isAdmin.mockResolvedValue(false)
+  it('ESCALATION: a wildcard HOLDER who is not in the admin role cannot add an elevated code', async () => {
+    liveRoleEditor = false
     rbacServiceMocks.userHasPermission.mockImplementation(async (_userId: string, code: string) => code === '*:*')
     const db = seed()
     wire(db)
@@ -702,9 +711,9 @@ describe('PUT /api/roles/:id — permission set persistence', () => {
 
     await putRole({ permissions: ['roles:read', 'stock-prep:read', 'admin:users'] }, res)
 
-    expect(res.statusCode).toBe(200)
-    expect(db.permissionsOf('role-1')).toEqual(['admin:users', 'roles:read', 'stock-prep:read'])
-    expect(rbacServiceMocks.userHasPermission).toHaveBeenCalledWith('owner-1', '*:*')
+    expect(res.statusCode).toBe(403)
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read', 'stock-prep:read'])
+    expect(rbacServiceMocks.userHasPermission).not.toHaveBeenCalled()
   })
 
   it('ESCALATION: keeping an already-granted elevated code is not an escalation (rename must stay possible)', async () => {
@@ -888,7 +897,7 @@ describe('PUT /api/roles/:id — permission set persistence', () => {
   })
 
   it('PROTECTED ROLE: a platform admin may still edit it (the gate narrows, it does not brick)', async () => {
-    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    liveRoleEditor = true
     const db = seed()
     wire(db)
     const res = mockResponse()
@@ -912,7 +921,7 @@ describe('PUT /api/roles/:id — permission set persistence', () => {
     expect(db.statements.some((statement) => /DELETE FROM (roles|user_roles|role_permissions)/i.test(statement.sql))).toBe(false)
     expect(deniedAuditEntries().map((entry) => entry.action)).toEqual(['delete_denied'])
 
-    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    liveRoleEditor = true
     const allowed = mockResponse()
     await deleteRole(allowed, 'admin')
     expect(allowed.statusCode).toBe(409)
@@ -1010,31 +1019,27 @@ describe('PUT /api/roles/:id — permission set persistence', () => {
     expect(JSON.stringify(res.body)).not.toContain('memo backend down')
   })
 
-  it('ADMIT SET: an administrator known only by the legacy claim is NOT refused', async () => {
-    // isAdmin() and userHasPermission() both false — this principal has no user_roles row
-    // and no '*:*' grant. It is exactly the population `ensurePlatformAdmin` admits for
-    // GET /api/admin/roles, i.e. the read side of this very editor; refusing it here would
-    // recreate the "the owner has to do it in SQL" symptom this route exists to remove.
+  it('ADMIT SET: a legacy admin claim cannot replace live membership', async () => {
     const db = seed()
     wire(db)
     const res = mockResponse()
 
     await putRole({ permissions: ['roles:read', 'stock-prep:read', '*:*'] }, res, 'role-1', { id: 'owner-1', role: 'admin' })
 
-    expect(res.statusCode).toBe(200)
-    expect(db.permissionsOf('role-1')).toEqual(['*:*', 'roles:read', 'stock-prep:read'])
+    expect(res.statusCode).toBe(403)
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read', 'stock-prep:read'])
     expect(rbacServiceMocks.isAdmin).not.toHaveBeenCalled()
   })
 
-  it('ADMIT SET: a token `perms` claim of admin:all is admitted too (the same predicate admin-users.ts uses)', async () => {
+  it('ADMIT SET: an admin:all token claim cannot replace live membership', async () => {
     const db = seed()
     wire(db)
     const res = mockResponse()
 
     await putRole({ permissions: ['roles:read', 'admin:users'] }, res, 'role-1', { id: 'owner-1', perms: ['admin:all'] })
 
-    expect(res.statusCode).toBe(200)
-    expect(db.permissionsOf('role-1')).toEqual(['admin:users', 'roles:read'])
+    expect(res.statusCode).toBe(403)
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read', 'stock-prep:read'])
   })
 
   it('POST-COMMIT: a failing cache fan-out still ANSWERS 200 — the write is already committed', async () => {
@@ -1147,7 +1152,7 @@ describe('POST /api/roles — the same authority boundary as PUT', () => {
   })
 
   it('a platform admin may still create an elevated role (the gate narrows, it does not block the owner)', async () => {
-    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    liveRoleEditor = true
     const db = seed()
     wire(db)
     const res = mockResponse()
@@ -1378,7 +1383,7 @@ describe('ADMIN-LEVEL codes in the role editor — only a platform admin adds or
   })
 
   it('EDITOR: a platform administrator still adds `attendance:admin` (the gate narrows, it does not brick)', async () => {
-    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    liveRoleEditor = true
     const db = seedAdminRoles()
     wire(db)
     const res = mockResponse()
@@ -1436,7 +1441,7 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
 
   it('a platform admin deletes `<ns>_admin` on the no-FK schema: memberships gone, that namespace\'s audience gone (another namespace\'s stays), audited, one transaction', async () => {
     vi.stubEnv('DELEGATED_SCOPE_ACTIVATION_ENABLED', 'false')
-    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    liveRoleEditor = true
     const db = seedAdminRoles({ cascade: false })
     wire(db)
     const res = mockResponse()
@@ -1474,7 +1479,7 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
   })
 
   it('a platform admin deletes an admin-equivalent role: its memberships go (no audience DML — the role derives no namespace)', async () => {
-    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    liveRoleEditor = true
     const db = seedAdminRoles({ cascade: false })
     wire(db)
     const res = mockResponse()
@@ -1488,7 +1493,7 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
   })
 
   it('ORDER: the membership removal runs BEFORE the role row goes, so it still finds the members where the FK cascades', async () => {
-    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    liveRoleEditor = true
     const db = seedAdminRoles({ cascade: true })
     wire(db)
     const res = mockResponse()
@@ -1511,6 +1516,7 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
     ))
     const memberRead = statements.findIndex((sql) => /^SELECT user_id FROM user_roles WHERE role_id=/i.test(sql))
     expect(admissionLocks.map((statement) => statement.params)).toEqual([
+      ['namespace-admission:owner-1'],
       ['namespace-admission:user-a'],
       ['namespace-admission:user-b'],
     ])
@@ -1520,7 +1526,7 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
   })
 
   it('LOCK: admission locks follow sorted user id, not the snapshot order, and an ordinary role takes none', async () => {
-    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    liveRoleEditor = true
     const db = makeFakeDb({
       catalog: [...CATALOG, 'crm:read'],
       roleDeleteCascades: false,
@@ -1550,6 +1556,7 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
       /pg_advisory_xact_lock\(hashtextextended\(\$1, 0\)\)/i.test(statement.sql)
     ))
     expect(locks.map((statement) => statement.params)).toEqual([
+      ['namespace-admission:owner-1'],
       ['namespace-admission:user-a'],
       ['namespace-admission:user-b'],
     ])
@@ -1563,7 +1570,7 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
   })
 
   it('ATOMIC: a failure in the audience cleanup rolls back the membership removal and keeps the role', async () => {
-    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    liveRoleEditor = true
     const isFailingDelete = (sql: string) => /^DELETE FROM delegated_role_admin_member_groups/i.test(sql)
     const db = seedAdminRoles({
       cascade: false,
@@ -1587,15 +1594,15 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
   })
 
   it('memberships that outlived an earlier delete of the role row are removed when the id is deleted again (platform admin)', async () => {
-    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    liveRoleEditor = true
     const db = seedAdminRoles({ cascade: false })
     wire(db)
     // The pre-fix state: the `roles` row is gone, the memberships (and so the identity) are not.
     const first = mockResponse()
-    rbacServiceMocks.isAdmin.mockResolvedValue(false)
+    liveRoleEditor = false
     await deleteRole(first, 'crm_admin')
     expect(first.statusCode).toBe(403) // and a non-platform caller still cannot use this path
-    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    liveRoleEditor = true
     await db.run('DELETE FROM roles WHERE id=$1', ['crm_admin'])
     expect(db.nameOf('crm_admin')).toBeUndefined()
     expect(db.membersOf('crm_admin')).toEqual(['user-a', 'user-b'])
@@ -1608,7 +1615,7 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
   })
 
   it('the seeded platform-admin role cannot be deleted, with or without a role_id cascade', async () => {
-    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    liveRoleEditor = true
     for (const cascade of [false, true]) {
       const db = seedAdminRoles({ cascade })
       wire(db)
@@ -1660,7 +1667,7 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
   })
 
   it('GRANTS GO TOO: a platform admin\'s delete of an admin-equivalent role leaves no role_permissions behind, so a roles:write holder cannot resurrect it through POST', async () => {
-    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    liveRoleEditor = true
     const db = seedAdminRoles({ cascade: false })
     wire(db)
     const deleted = mockResponse()
@@ -1671,7 +1678,7 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
     expect(db.permissionsOf('crm_lead')).toEqual([])
     // The resurrection shape: an ordinary editor re-creates the id with NO codes (POST returns
     // before the gate when no codes are sent). It must come back empty, not carrying crm:admin.
-    rbacServiceMocks.isAdmin.mockResolvedValue(false)
+    liveRoleEditor = false
     const resurrected = mockResponse()
     await postRole({ id: 'crm_lead', name: 'Viewer' }, resurrected)
     expect(resurrected.statusCode).toBe(200)
@@ -1682,7 +1689,7 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
   })
 
   it('GRANTS GO TOO for a namespace main-admin role with NO members (the grant removal does not hang off the membership removal)', async () => {
-    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    liveRoleEditor = true
     const db = seedAdminRoles({ cascade: false })
     wire(db)
     // Empty the role's membership first, and give it a code to lose.
@@ -1701,7 +1708,7 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
   })
 
   it('ATOMIC: a failure in the grant removal rolls back the membership removal and keeps the role and its codes', async () => {
-    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    liveRoleEditor = true
     const db = seedAdminRoles({
       cascade: false,
       failOn: (sql) => (/^\s*DELETE FROM role_permissions/i.test(sql)

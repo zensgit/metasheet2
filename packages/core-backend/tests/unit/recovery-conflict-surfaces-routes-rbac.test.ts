@@ -231,6 +231,7 @@ beforeEach(() => {
  * matched on their whitespace-collapsed text).
  */
 function scriptRoleDeleteTransaction(options: {
+  liveRoleEditor?: boolean
   codes: string[]
   members: string[]
   failOn: (sql: string) => Error | null
@@ -244,6 +245,12 @@ function scriptRoleDeleteTransaction(options: {
     if (/^SELECT id, name FROM roles WHERE id=/.test(sql)) return { rows: [{ id: params[0], name: 'Role' }] }
     if (/^SELECT permission_code FROM role_permissions/.test(sql)) return { rows: options.codes.map((permission_code) => ({ permission_code })) }
     if (/^SELECT user_id FROM user_roles WHERE role_id=/.test(sql)) return { rows: options.members.map((user_id) => ({ user_id })) }
+    if (sql.includes('FROM users WHERE id = $1::text FOR UPDATE')) {
+      return { rows: [{ id: params[0], role: 'user', is_active: true, activation_status: 'activated' }] }
+    }
+    if (sql === "SELECT role_id FROM user_roles WHERE user_id = $1 AND role_id = 'admin' FOR SHARE") {
+      return { rows: options.liveRoleEditor && params[0] === 'admin-1' ? [{ role_id: 'admin' }] : [] }
+    }
     if (/^DELETE FROM user_roles/.test(sql)) return { rows: options.members.map((user_id) => ({ user_id })), rowCount: options.members.length }
     return { rows: [], rowCount: 0 }
   }
@@ -332,8 +339,8 @@ describe('routes/roles.ts', () => {
     // A platform admin deleting `<ns>_admin` also removes the role's user_roles rows through the
     // role-assignment boundary, in the same transaction. user_roles carries
     // trg_user_roles_recovery_authority_lock, so a held user lease surfaces the marker there.
-    rbacServiceMocks.isAdmin.mockResolvedValue(true)
     const seen = scriptRoleDeleteTransaction({
+      liveRoleEditor: true,
       codes: [],
       members: ['user-a'],
       failOn: (sql) => (/^DELETE FROM user_roles/.test(sql) ? markerError() : null),
@@ -351,8 +358,8 @@ describe('routes/roles.ts', () => {
   })
 
   it('DELETE of a namespace main-admin role: non-40001 error on the membership removal → values-free 500, not a hang', async () => {
-    rbacServiceMocks.isAdmin.mockResolvedValue(true)
     scriptRoleDeleteTransaction({
+      liveRoleEditor: true,
       codes: [],
       members: ['user-a'],
       failOn: (sql) => (/^DELETE FROM user_roles/.test(sql) ? otherDbError() : null),

@@ -125,6 +125,7 @@ import {
   writeDelegatedAdminMemberGroupsCommand,
   writeDelegatedAdminScopeCommand,
 } from '../admin/delegated-scope-commands'
+import { delegatedScopeTemplateVersion } from '../admin/delegated-scope-template-version'
 import { writePlatformNamespaceAdmissionCommand } from '../admin/platform-namespace-admission-command'
 import { writePlatformNamespaceAdmissionBulkCommand } from '../admin/platform-namespace-admission-bulk-command'
 import {
@@ -653,13 +654,6 @@ function getRequestUserId(req: Request): string {
   const userId = raw?.id ?? raw?.userId ?? raw?.sub
   return typeof userId === 'string' ? userId.trim() : ''
 }
-
-// `hasLegacyAdminClaim` used to be a private copy right here. It moved VERBATIM to
-// ../rbac/platform-admin.ts (and is imported above) when routes/roles.ts needed the same
-// question answered on its write path: a second, independently drifting admin predicate is an
-// auth bug, and the roles editor would have refused a principal that THIS file's
-// `GET /api/admin/roles` serves as an administrator. Behaviour here is unchanged — same
-// function body, same call sites.
 
 // Exported IN PLACE (the sibling `requireOrgMemberAccess` is itself a local function in
 // routes/api-tokens.ts) so the attendance-admin redelivery route can reuse the SAME
@@ -2041,6 +2035,7 @@ async function fetchDelegatedScopeTemplateDetail(templateId: string) {
     memberGroupCount: Number(template.member_group_count || 0),
     departments,
     memberGroups,
+    scopeVersion: delegatedScopeTemplateVersion(template.id, departments, memberGroups),
   }
 }
 
@@ -3455,7 +3450,7 @@ export function adminUsersRouter(): Router {
         if (action === 'assign') {
           const decision = resolveDelegatedIncludeChildrenWrite({
             intent: includeChildrenIntent,
-            existingIncludeChildren: isDelegatedScopeExactDepartmentEnabled() ? null : stored,
+            existingIncludeChildren: stored,
             exactDepartmentEnabled: isDelegatedScopeExactDepartmentEnabled(),
           })
           if (decision.outcome === 'refuse') return { missing: false as const, refused: true as const }
@@ -3934,10 +3929,14 @@ export function adminUsersRouter(): Router {
       const namespace = String(req.body?.namespace || '').trim()
       const templateId = String(req.body?.templateId || '').trim()
       const mode = String(req.body?.mode || 'replace').trim().toLowerCase()
+      const expectedScopeVersion = req.body?.expectedScopeVersion
       if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
       if (!namespace) return jsonError(res, 400, 'NAMESPACE_REQUIRED', 'namespace is required')
       if (!templateId) return jsonError(res, 400, 'TEMPLATE_ID_REQUIRED', 'templateId is required')
       if (mode !== 'replace' && mode !== 'merge') return jsonError(res, 400, 'ROLE_DELEGATION_SCOPE_TEMPLATE_MODE_INVALID', 'mode must be replace or merge')
+      if (expectedScopeVersion !== undefined && (typeof expectedScopeVersion !== 'string' || !/^[a-f0-9]{64}$/.test(expectedScopeVersion))) {
+        return jsonError(res, 400, 'ROLE_DELEGATION_SCOPE_TEMPLATE_VERSION_INVALID', 'Invalid scope template version')
+      }
 
       const [profile, roleIds] = await Promise.all([
         fetchUserProfile(userId),
@@ -3956,12 +3955,16 @@ export function adminUsersRouter(): Router {
         namespace,
         templateId,
         mode,
+        expectedScopeVersion,
       })
       if (locked.refused === 'namespace') {
         return jsonError(res, 409, 'ROLE_DELEGATION_NAMESPACE_NOT_HELD', 'Selected user does not hold that delegated admin namespace')
       }
       if (locked.refused === 'missing-template') {
         return jsonError(res, 404, 'ROLE_DELEGATION_SCOPE_TEMPLATE_NOT_FOUND', 'Scope template not found')
+      }
+      if (locked.refused === 'template-changed') {
+        return jsonError(res, 409, 'ROLE_DELEGATION_SCOPE_TEMPLATE_CHANGED', 'Scope template changed. Reload the template before applying it.')
       }
       if (locked.refused === 'empty') {
         return jsonError(res, 409, 'ROLE_DELEGATION_SCOPE_TEMPLATE_EMPTY', 'Scope template has no departments or member groups to apply')

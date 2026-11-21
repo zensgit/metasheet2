@@ -11,6 +11,7 @@ import type { AuthorizationInputPlan, AuthorizationInputTx } from '../rbac/autho
 import { deriveDelegatedAdminNamespace } from '../rbac/namespace-admission'
 import { assertConfiguredActiveDelegation, initializeDelegationActivation } from './delegated-scope-activation'
 import { PlatformActorAuthorityLost } from './platform-actor-authority'
+import { delegatedScopeTemplateVersion } from './delegated-scope-template-version'
 import {
   isDelegatedScopeExactDepartmentEnabled,
   resolveDelegatedIncludeChildrenWrite,
@@ -56,6 +57,7 @@ export type ApplyDelegatedScopeTemplateCommandInput = {
   namespace: string
   templateId: string
   mode: DelegatedScopeTemplateMode
+  expectedScopeVersion?: string
 }
 
 export type DelegatedScopeTemplateDepartment = {
@@ -70,6 +72,7 @@ export type DelegatedScopeTemplateMemberGroup = {
 export type ApplyDelegatedScopeTemplateCommandResult =
   | { refused: 'namespace'; adminNamespaces: readonly string[] }
   | { refused: 'missing-template'; adminNamespaces: readonly string[] }
+  | { refused: 'template-changed'; adminNamespaces: readonly string[] }
   | { refused: 'empty'; adminNamespaces: readonly string[] }
   | { refused: 'exact'; adminNamespaces: readonly string[] }
   | {
@@ -102,6 +105,7 @@ type TemplateRequest = Readonly<{
   namespace: string
   templateId: string
   mode: DelegatedScopeTemplateMode
+  expectedScopeVersion?: string
 }>
 
 type DelegatedScopeContext = Readonly<{
@@ -186,6 +190,7 @@ function snapshotTemplate(input: ApplyDelegatedScopeTemplateCommandInput): Templ
     namespace: input.namespace,
     templateId: input.templateId,
     mode: input.mode,
+    expectedScopeVersion: input.expectedScopeVersion,
   })
 }
 
@@ -449,7 +454,7 @@ async function writeDelegatedAdminScopeOnTx(
     const exactDepartmentEnabled = isDelegatedScopeExactDepartmentEnabled()
     const decision = resolveDelegatedIncludeChildrenWrite({
       intent: context.includeChildrenIntent,
-      existingIncludeChildren: exactDepartmentEnabled ? null : stored,
+      existingIncludeChildren: stored,
       exactDepartmentEnabled,
     })
     if (decision.outcome === 'refuse') return { refused: 'exact', adminNamespaces }
@@ -536,6 +541,10 @@ async function applyDelegatedScopeTemplateOnTx(
   if (!templateHeld) return { refused: 'missing-template', adminNamespaces }
   const departments = await readTemplateDepartments(tx, context.templateId)
   const memberGroups = await readTemplateMemberGroups(tx, context.templateId)
+  if (context.expectedScopeVersion !== undefined
+    && context.expectedScopeVersion !== delegatedScopeTemplateVersion(context.templateId, departments, memberGroups)) {
+    return { refused: 'template-changed', adminNamespaces }
+  }
   if (departments.length === 0 && memberGroups.length === 0) return { refused: 'empty', adminNamespaces }
   if (
     !isDelegatedScopeExactDepartmentEnabled()
