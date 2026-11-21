@@ -24,6 +24,7 @@ import { jwtAuthMiddleware } from '../../src/auth/jwt-middleware'
 import { query, transaction } from '../../src/db/pg'
 import { adminUsersRouter } from '../../src/routes/admin-users'
 import { rolesRouter } from '../../src/routes/roles'
+import { lockSharedAccessSubjects } from '../../src/admin/platform-actor-authority'
 
 if (process.env.RBAC_BYPASS !== 'false' || process.env.RBAC_TOKEN_TRUST !== 'false') {
   throw new Error('role-delete suite requires RBAC_BYPASS=false and RBAC_TOKEN_TRUST=false')
@@ -183,6 +184,34 @@ describe('permission role delete real database', () => {
       await cleanupOwnedRows()
     } finally {
       restorePermissionLifecycleEnv()
+    }
+  })
+
+  it('uses the current administrator membership after waiting for the actor lock', async () => {
+    const permission = `${namespace}:admin`
+    await query('INSERT INTO permissions (code, name) VALUES ($1, $2)', [permission, 'Synthetic role catalog fixture'])
+    let pending: Promise<HttpResult> | undefined
+    try {
+      await transaction(async (client) => {
+        const pidResult = await client.query('SELECT pg_backend_pid() AS pid')
+        const pid = Number(pidResult.rows[0]?.pid)
+        await lockSharedAccessSubjects(client, [adminId])
+        pending = request(app)
+          .put(`/api/roles/${roleId}`)
+          .set('Authorization', `Bearer ${adminToken}`)
+          .send({ permissions: [permission] })
+          .then(({ status, body }) => ({ status, body }))
+        expect(await waitForAdvisoryLockWaiterPid(pid)).not.toBeNull()
+        await client.query('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [adminId, 'admin'])
+      })
+      const refused = await pending
+      expect(refused).toMatchObject({ status: 403, body: { error: { code: 'PERMISSION_ESCALATION_FORBIDDEN' } } })
+      expect(await count('SELECT count(*) AS n FROM role_permissions WHERE role_id = $1 AND permission_code = $2', [roleId, permission])).toBe(0)
+    } finally {
+      await pending
+      await query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [adminId, 'admin'])
+      await query('DELETE FROM role_permissions WHERE role_id = $1 AND permission_code = $2', [roleId, permission])
+      await query('DELETE FROM permissions WHERE code = $1', [permission])
     }
   })
 

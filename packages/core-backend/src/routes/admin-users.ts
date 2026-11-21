@@ -655,13 +655,6 @@ function getRequestUserId(req: Request): string {
   return typeof userId === 'string' ? userId.trim() : ''
 }
 
-// `hasLegacyAdminClaim` used to be a private copy right here. It moved VERBATIM to
-// ../rbac/platform-admin.ts (and is imported above) when routes/roles.ts needed the same
-// question answered on its write path: a second, independently drifting admin predicate is an
-// auth bug, and the roles editor would have refused a principal that THIS file's
-// `GET /api/admin/roles` serves as an administrator. Behaviour here is unchanged — same
-// function body, same call sites.
-
 // Exported IN PLACE (the sibling `requireOrgMemberAccess` is itself a local function in
 // routes/api-tokens.ts) so the attendance-admin redelivery route can reuse the SAME
 // platform-admin check rather than reimplementing it. Two drifting admin checks would be an auth
