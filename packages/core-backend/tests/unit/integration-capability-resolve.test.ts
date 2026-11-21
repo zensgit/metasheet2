@@ -34,6 +34,7 @@ vi.mock('../../src/integrations/provider-capability-registry', async (importOrig
         governance: { ...control.governance },
         scopeOf: production.scopeOf,
         enablePreconditions: async () => ({ ok: true as const }),
+        secretConfigKeys: production.secretConfigKeys,
       }
     },
   }

@@ -31,6 +31,7 @@ function descriptor(provider: string, governance: Partial<Record<(typeof INTEGRA
     provider,
     governance: { directory: 'unsupported', login: 'unsupported', notification: 'unsupported', ...governance },
     scopeOf: () => null,
+    secretConfigKeys: Object.freeze([]),
     ...extra,
   }
 }
@@ -83,6 +84,38 @@ describe('production registry', () => {
     expect(Object.isFrozen(dingtalk)).toBe(true)
     expect(Object.isFrozen(dingtalk.governance)).toBe(true)
   })
+
+  it('names exactly the six dingtalk configuration keys that hold a secret, as a frozen list of names', () => {
+    const dingtalk = resolveProviderCapabilityDescriptor('dingtalk')!
+    expect([...dingtalk.secretConfigKeys]).toEqual([
+      'appSecret',
+      'appsecret',
+      'app_secret',
+      'workNotificationAgentId',
+      'agentId',
+      'approvalCardLinkSecret',
+    ])
+    expect(Object.isFrozen(dingtalk.secretConfigKeys)).toBe(true)
+    expect(new Set(dingtalk.secretConfigKeys).size).toBe(dingtalk.secretConfigKeys.length)
+    expect(() => assertRegistryWellFormed([dingtalk])).not.toThrow()
+  })
+
+  it('covers every dingtalk key the encrypted-store probe and the secret backfill script read', () => {
+    const backend = path.resolve(__dirname, '..', '..')
+    const keys = resolveProviderCapabilityDescriptor('dingtalk')!.secretConfigKeys
+    const probe = readFileSync(path.join(backend, 'src', 'security', 'encrypted-store-probe.ts'), 'utf8')
+    const probed = new Set<string>()
+    for (const statement of probe.match(/FROM directory_integrations WHERE[^\n]*/g) ?? []) {
+      for (const match of statement.matchAll(/config->>'([A-Za-z_]+)'/g)) probed.add(match[1])
+    }
+    expect([...probed].sort()).toEqual(['agentId', 'appSecret', 'approvalCardLinkSecret', 'workNotificationAgentId'])
+    const script = readFileSync(path.join(backend, 'scripts', 'encrypt-dingtalk-integration-secrets.ts'), 'utf8')
+    const declared = /const SECRET_KEYS = \[([^\]]*)\] as const/.exec(script)
+    expect(declared).not.toBeNull()
+    const backfilled = [...declared![1].matchAll(/'([^']+)'/g)].map((match) => match[1])
+    expect(backfilled.length).toBeGreaterThan(0)
+    expect([...new Set([...probed, ...backfilled])].sort()).toEqual([...keys].sort())
+  })
 })
 
 describe('registry shape checks', () => {
@@ -97,6 +130,20 @@ describe('registry shape checks', () => {
     const one = descriptor('acme', {})
     expect(() => assertRegistryWellFormed([one, one])).not.toThrow()
     expect(() => assertRegistryWellFormed([one, descriptor('acme', {})])).toThrow(/duplicate provider/)
+  })
+
+  it('rejects secret key names that are missing, not a frozen array, blank or repeated', () => {
+    const withKeys = (secretConfigKeys: unknown) =>
+      [{ ...descriptor('acme', {}), secretConfigKeys } as unknown as ProviderCapabilityDescriptor]
+    expect(() => assertRegistryWellFormed(withKeys(undefined))).toThrow(/secret config keys must be a frozen array/)
+    expect(() => assertRegistryWellFormed(withKeys('appSecret'))).toThrow(/secret config keys must be a frozen array/)
+    expect(() => assertRegistryWellFormed(withKeys(['appSecret']))).toThrow(/secret config keys must be a frozen array/)
+    expect(() => assertRegistryWellFormed(withKeys(Object.freeze(['appSecret', ''])))).toThrow(/empty secret config key/)
+    expect(() => assertRegistryWellFormed(withKeys(Object.freeze(['  '])))).toThrow(/empty secret config key/)
+    expect(() => assertRegistryWellFormed(withKeys(Object.freeze([7])))).toThrow(/empty secret config key/)
+    expect(() => assertRegistryWellFormed(withKeys(Object.freeze(['appSecret', 'agentId', 'appSecret'])))).toThrow(/duplicate secret config key/)
+    expect(() => assertRegistryWellFormed(withKeys(Object.freeze(['appSecret', 'appsecret'])))).not.toThrow()
+    expect(() => assertRegistryWellFormed(withKeys(Object.freeze([])))).not.toThrow()
   })
 
   it('looks a provider up in an explicitly passed registry', () => {
