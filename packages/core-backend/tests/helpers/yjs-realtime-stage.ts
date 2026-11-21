@@ -41,6 +41,8 @@ export interface World {
   purgeFails: boolean
   /** When true every permission read fails: the answer is neither yes nor no. */
   readFails: boolean
+  /** Permission reads of these users fail; the others answer. */
+  readFailsFor: Set<string>
   /** When set, the next permission read waits for it before answering. */
   readGate: Promise<void> | null
   storeDelay: Promise<void> | null
@@ -71,6 +73,7 @@ export function createWorld(): World {
     forbiddenFields: new Map(),
     purgeFails: false,
     readFails: false,
+    readFailsFor: new Set(),
     readGate: null,
     storeDelay: null,
     loadDelay: null,
@@ -125,13 +128,13 @@ export interface StageOptions {
   }
 }
 
-async function permissionRead(world: World): Promise<void> {
+async function permissionRead(world: World, userId: string): Promise<void> {
   const gate = world.readGate
   if (gate) {
     world.readGate = null
     await gate
   }
-  if (world.readFails) throw new Error('permission read failed')
+  if (world.readFails || world.readFailsFor.has(userId)) throw new Error('permission read failed')
 }
 
 export async function stage(options: StageOptions = {}): Promise<Stage> {
@@ -172,7 +175,7 @@ export async function stage(options: StageOptions = {}): Promise<Stage> {
   )
   adapter.setTokenVerifier(async (token) => (token.startsWith('token:') ? token.slice('token:'.length) : null))
   adapter.setAuthChecker(async (userId) => {
-    await permissionRead(world)
+    await permissionRead(world, userId)
     return {
       canRead: !world.noReadUsers.has(userId),
       canWrite: !world.readOnlyUsers.has(userId) && !world.noReadUsers.has(userId),
@@ -180,7 +183,7 @@ export async function stage(options: StageOptions = {}): Promise<Stage> {
     }
   })
   adapter.setFieldWriteChecker(async (userId, _recordId, fieldIds) => {
-    await permissionRead(world)
+    await permissionRead(world, userId)
     return !fieldIds.some((fieldId) => world.forbiddenFields.get(userId)?.has(fieldId))
   })
   if (options.wiring) {

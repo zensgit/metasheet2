@@ -301,16 +301,28 @@ export class YjsWebSocketAdapter {
       return
     }
     const members = this.localRoomSockets(room).filter((socket) => socket !== except)
-    void this.connections.deliver(members, (socket) => socket.emit(event, payload), {
+    const served = new Set<Socket>()
+    void this.connections.deliver(members, (socket) => {
+      served.add(socket as Socket)
+      socket.emit(event, payload)
+    }, {
       resourceCheck: async (binding) => {
         const access = await this.readAccess(binding.userId, recordId)
-        // Not answered: withheld from this recipient, and its subscription is left alone.
+        // Not answered: withheld from this recipient; it is not a refusal.
         if (access === 'unknown') throw new Error('read access not answered')
         return Boolean(access && access.canRead && access.canReadAllFields !== false)
       },
       onResourceDenied: (socket) => this.dropSubscription(socket as Socket, recordId),
       stillSubscribed: (socket) => (socket as Socket).rooms.has(room),
-    }).catch(() => undefined)
+    }).catch(() => undefined).then(() => {
+      // A subscriber that did not get a change of the document can no longer follow the shared
+      // document: it is told to reopen the record instead of being left behind in silence.
+      if (event !== 'yjs:update') return
+      for (const member of members) {
+        if (served.has(member) || !member.connected || !member.rooms.has(room)) continue
+        this.tellInvalidated(member, recordId)
+      }
+    })
   }
 
   private retireContributor(socketId: string): void {

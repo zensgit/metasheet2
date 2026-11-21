@@ -321,6 +321,27 @@ describe('an edit that cannot be processed is never dropped in silence', () => {
   })
 })
 
+describe('switch on: a subscriber that cannot be given a change is told, not left behind', () => {
+  it('read access of one recipient cannot be read when a change is relayed: it is told to reopen the record and is not refused; the others get the change', async () => {
+    const s = await open({ protectedMode: true })
+    const writer = await editor(s, 'writer')
+    const kept = await editor(s, 'kept')
+    const flaky = await editor(s, 'flaky')
+    s.world.readFailsFor.add('flaky')
+    sendUpdate(writer, append(writer, 'f1', '-relayed'))
+    await until(() => kept.fields().f1 === 'one-relayed')
+    await until(() => flaky.invalidated.length === 1)
+    expect(flaky.received).toEqual([])
+    expect(flaky.errors).toEqual([])
+    expect(flaky.socket.connected).toBe(true)
+    expect(kept.invalidated).toEqual([])
+    // It reopens the record once its read answers again and continues from the shared state.
+    s.world.readFailsFor.delete('flaky')
+    const reopened = await editor(s, 'flaky')
+    expect(reopened.fields().f1).toBe('one-relayed')
+  })
+})
+
 describe('switch on: a handshake whose session cannot be read is not admitted', () => {
   it('the namespace handshake is refused while the session facts cannot be read, and accepted once they can', async () => {
     const s = await open({ protectedMode: true })
