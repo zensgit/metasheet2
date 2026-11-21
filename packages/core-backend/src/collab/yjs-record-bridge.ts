@@ -34,6 +34,8 @@ export interface YjsRecordBridgeConfig {
   deferRetryMaxMs?: number
   /** How long (ms) one re-check may take before it counts as not answered. */
   recheckTimeoutMs?: number
+  /** How long (ms) a write may stay un-rechecked in all before it is ended like a refused one. */
+  deferMaxMs?: number
 }
 
 /** Resolves a socket.id (Yjs transaction origin) to a verified userId. */
@@ -79,6 +81,18 @@ export class YjsContributionRefusedError extends Error {
   }
 }
 
+/**
+ * A merged write whose re-check could not be answered for longer than a write may stay unchecked.
+ * It is handled like a refused one: nothing of it is persisted and its document generation ends.
+ * Nobody was found unauthorized; the write could not be confirmed in time.
+ */
+export class YjsContributionUndecidedError extends YjsContributionRefusedError {
+  constructor(message = 'A contribution to this write could not be re-checked in time') {
+    super(message)
+    this.name = 'YjsContributionUndecidedError'
+  }
+}
+
 interface PendingWrite {
   fields: Record<string, unknown>
   actorIds: Set<string>
@@ -90,12 +104,22 @@ interface PendingWrite {
   deferrals: number
   /** A write put back after an unanswered re-check is not taken out again before this time. */
   notBefore: number
+  /**
+   * When the first re-check that could not be answered began, for the oldest change in this write.
+   * Later changes merged into the write do not move it.
+   */
+  undecidedSince: number | null
 }
 
 export const DEFAULT_DEFER_RETRY_MIN_MS = 250
 export const DEFAULT_DEFER_RETRY_MAX_MS = 5_000
 /** How long one re-check may take before it counts as not answered. */
 export const DEFAULT_RECHECK_TIMEOUT_MS = 30_000
+/**
+ * How long a change may stay in the shared document and its persisted state without its re-check
+ * having been answered. Past it the write is ended like a refused one.
+ */
+export const DEFAULT_DEFER_MAX_MS = 30_000
 
 /**
  * Bridges Y.Doc field changes → RecordWriteService.patchRecords().
@@ -140,6 +164,8 @@ export class YjsRecordBridge {
   private deferRetryMinMs: number
   private deferRetryMaxMs: number
   private recheckTimeoutMs: number
+  private deferMaxMs: number
+  private _expiredDeferralCount = 0
 
   private actorResolver: ActorResolver
   private refusalHandler: YjsBridgeRefusalHandler | null = null
@@ -158,6 +184,7 @@ export class YjsRecordBridge {
     this.deferRetryMinMs = config?.deferRetryMinMs ?? DEFAULT_DEFER_RETRY_MIN_MS
     this.deferRetryMaxMs = config?.deferRetryMaxMs ?? DEFAULT_DEFER_RETRY_MAX_MS
     this.recheckTimeoutMs = config?.recheckTimeoutMs ?? DEFAULT_RECHECK_TIMEOUT_MS
+    this.deferMaxMs = config?.deferMaxMs ?? DEFAULT_DEFER_MAX_MS
   }
 
   /**
@@ -303,6 +330,7 @@ export class YjsRecordBridge {
       firstSeen: Date.now(),
       deferrals: 0,
       notBefore: 0,
+      undecidedSince: null,
     }
     if (!existing) this.noteContribution(entry, changedFields, actorId, originId)
 
@@ -345,12 +373,22 @@ export class YjsRecordBridge {
       fieldIds: [...contribution.fieldIds],
     }))
 
+    const startedAt = Date.now()
+    const left = pending.undecidedSince === null ? this.deferMaxMs : pending.undecidedSince + this.deferMaxMs - startedAt
+
     // Fire and forget — errors logged, not thrown
-    this.recheckWithinTime(recordId, contributions)
+    this.recheckWithinTime(recordId, contributions, Math.max(0, Math.min(this.recheckTimeoutMs, left)))
       .then((outcome) => {
         // The document was invalidated while the re-check ran: its pending writes are void.
         if (cancelled()) return false
         if (outcome === 'defer') {
+          if (pending.undecidedSince === null) pending.undecidedSince = startedAt
+          if (Date.now() - pending.undecidedSince >= this.deferMaxMs) {
+            // Un-rechecked for as long as a write may be: it is ended like a refused one, so its
+            // content does not stay in the document and its persisted state unconfirmed.
+            this._expiredDeferralCount++
+            throw new YjsContributionUndecidedError()
+          }
           // Neither a yes nor a no: the write is kept and re-checked later. Nothing is written and
           // nothing is refused meanwhile.
           this.deferPending(recordId, pending)
@@ -379,7 +417,7 @@ export class YjsRecordBridge {
    * and whatever it answers afterwards is ignored: the write is put back, and the record is not
    * held up by a read that never returns.
    */
-  private recheckWithinTime(recordId: string, contributions: YjsContribution[]): Promise<'proceed' | 'defer'> {
+  private recheckWithinTime(recordId: string, contributions: YjsContribution[], limitMs: number): Promise<'proceed' | 'defer'> {
     // Nothing is asked without a checker, so there is nothing that could fail to answer.
     if (!this.contributionChecker) return this.recheckContributions(recordId, contributions)
     return new Promise((resolve, reject) => {
@@ -388,7 +426,7 @@ export class YjsRecordBridge {
         if (settled) return
         settled = true
         resolve('defer')
-      }, this.recheckTimeoutMs)
+      }, limitMs)
       timer.unref?.()
       this.recheckContributions(recordId, contributions).then(
         (outcome) => {
@@ -431,6 +469,7 @@ export class YjsRecordBridge {
       }
       newer.firstSeen = older.firstSeen
       newer.deferrals = older.deferrals
+      newer.undecidedSince = older.undecidedSince
       newer.notBefore = Date.now() + delay
       newer.timer = setTimeout(() => this.flushNow(recordId), delay)
       return
@@ -532,7 +571,7 @@ export class YjsRecordBridge {
   }
 
   /** Metrics snapshot for observability */
-  getMetrics(): { pendingWriteCount: number; observedDocCount: number; flushSuccessCount: number; flushFailureCount: number; deferredFlushCount: number } {
+  getMetrics(): { pendingWriteCount: number; observedDocCount: number; flushSuccessCount: number; flushFailureCount: number; deferredFlushCount: number; expiredDeferralCount: number } {
     return {
       pendingWriteCount: this.pendingWrites.size,
       observedDocCount: this.observedDocs.size,
@@ -540,6 +579,8 @@ export class YjsRecordBridge {
       flushFailureCount: this._flushFailureCount,
       // Times a write was kept because its re-check could not be answered (neither written nor refused).
       deferredFlushCount: this._deferredFlushCount,
+      // Writes ended because their re-check stayed unanswered for as long as a write may.
+      expiredDeferralCount: this._expiredDeferralCount,
     }
   }
 

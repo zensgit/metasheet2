@@ -273,3 +273,73 @@ describe('the record is free again after every way a write can end', () => {
     expect(a.invalidated).toEqual([])
   })
 })
+
+describe('how long a write may stay un-rechecked', () => {
+  it('past its time the write is ended like a refused one: nothing is written, the generation ends and every editor is told; before its time nothing of that happens', async () => {
+    const s = await open({ bridgeOptions: { deferRetryMinMs: 30, deferRetryMaxMs: 60, deferMaxMs: 400 } })
+    const a = await editor(s, 'a')
+    const b = await editor(s, 'b')
+    sendUpdate(a, append(a, 'f1', '-unconfirmed'))
+    await until(() => shared(s).f1 === 'one-unconfirmed' && b.fields().f1 === 'one-unconfirmed')
+    s.world.readFailsFor.add('a')
+    await settle(250)
+    expect(a.invalidated).toEqual([])
+    expect(b.invalidated).toEqual([])
+    expect(shared(s).f1).toBe('one-unconfirmed')
+    expect(s.bridge.getMetrics().expiredDeferralCount).toBe(0)
+    await until(() => a.invalidated.length === 1 && b.invalidated.length === 1, 2000, 'the end of the generation')
+    expect(written(s)).toEqual([])
+    expect(record(s).f1).toBe('one')
+    expect(s.sync.getDoc(RECORD)).toBeUndefined()
+    expect(s.bridge.getMetrics()).toMatchObject({ expiredDeferralCount: 1, flushFailureCount: 1 })
+    // The persisted document state went with the generation: a reopened record is the committed one.
+    s.world.readFailsFor.delete('a')
+    const again = await editor(s, 'again')
+    expect(again.fields().f1).toBe('one')
+  })
+
+  it('changes that keep arriving do not move the time: the oldest unconfirmed change decides', async () => {
+    const s = await open({ bridgeOptions: { deferRetryMinMs: 30, deferRetryMaxMs: 60, deferMaxMs: 400 } })
+    const a = await editor(s, 'a')
+    const b = await editor(s, 'b')
+    sendUpdate(a, append(a, 'f1', '-0'))
+    await until(() => shared(s).f1 === 'one-0')
+    s.world.readFailsFor.add('a')
+    const startedAt = Date.now()
+    // The other user keeps changing another field the whole time; its own reads answer.
+    for (let index = 1; a.invalidated.length === 0 && Date.now() - startedAt < 3000; index += 1) {
+      if (s.sync.getDoc(RECORD)) sendUpdate(b, append(b, 'f2', `-${index}`))
+      await settle(50)
+    }
+    expect(a.invalidated).toHaveLength(1)
+    expect(Date.now() - startedAt).toBeLessThan(1500)
+    expect(written(s)).toEqual([])
+  })
+
+  it('answered within its time: written, and nobody is told anything', async () => {
+    const s = await open({ bridgeOptions: { deferRetryMinMs: 30, deferRetryMaxMs: 60, deferMaxMs: 2000 } })
+    const a = await editor(s, 'a')
+    sendUpdate(a, append(a, 'f1', '-confirmed-late'))
+    await until(() => shared(s).f1 === 'one-confirmed-late')
+    s.world.readFailsFor.add('a')
+    await settle(300)
+    s.world.readFailsFor.delete('a')
+    await until(() => written(s).length === 1, 2000, 'the write')
+    expect(written(s)).toEqual([{ f1: 'one-confirmed-late' }])
+    expect(a.invalidated).toEqual([])
+    expect(s.bridge.getMetrics().expiredDeferralCount).toBe(0)
+  })
+
+  it('a re-check that never returns is ended at the same time, not later', async () => {
+    const s = await open({ bridgeOptions: { deferRetryMinMs: 30, deferRetryMaxMs: 60, deferMaxMs: 400, recheckTimeoutMs: 10_000 } })
+    const a = await editor(s, 'a')
+    sendUpdate(a, append(a, 'f1', '-stuck'))
+    await until(() => shared(s).f1 === 'one-stuck')
+    s.world.readGateFor.set('a', new Promise<void>(() => undefined))
+    const startedAt = Date.now()
+    await until(() => a.invalidated.length === 1, 3000, 'the end of the generation')
+    expect(Date.now() - startedAt).toBeLessThan(1500)
+    expect(written(s)).toEqual([])
+  })
+})
+
