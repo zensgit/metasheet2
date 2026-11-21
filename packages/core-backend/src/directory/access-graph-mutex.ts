@@ -14,7 +14,16 @@
  * locks `subject_authorization_versions` FOR SHARE and only then `users` FOR SHARE (the
  * live-authority order); a writer that took `users` first and bumped the subject row later (through
  * a membership trigger) would form the one holder-vs-writer cycle the protocol forbids. Doing it here
- * makes "every caller bumps first" true by construction for all 14 writer files.
+ * makes "every caller bumps first" true by construction for every writer that calls this function.
+ *
+ * The DingTalk identity repair (`auth/dingtalk-identity-repair.ts`) is not one of them since #6964.
+ * It follows its own lock protocol (`auth/user-access-lock.ts`): sorted user admission keys, then
+ * the identity-maintenance mutex, then the users rows. It takes no subject version row and needs
+ * none. On `users` it only advances `access_generation` (its own statements and
+ * `supersedeDeprovisionEvidenceForAccessGraphWrite` below), a column the D21 users trigger does not
+ * watch, and it writes no other table that carries a D21 subject trigger. It asks for the mutex
+ * before any users row, so it never holds a users row while a handover that holds the mutex waits
+ * for a subject version row.
  */
 import { bumpSubjectAuthorizationVersions, lockSubjectAuthorizationVersions, lockSubjectAuthorizationVersionsNowait } from '../multitable/authz-version-protocol'
 

@@ -6,7 +6,7 @@ import { evaluateUserAuthenticationGate } from './user-activation'
 import {
   supersedeDeprovisionEvidenceForAccessGraphWrite,
 } from '../directory/access-graph-mutex'
-import { lockUserAccessExclusive } from './user-access-lock'
+import { lockUserAccessKeysExclusive, lockUserAccessRows } from './user-access-lock'
 import { readDingTalkOauthConfig } from '../integrations/dingtalk/client'
 import { exchangeCodeForDingTalkProfile } from './dingtalk-oauth'
 import {
@@ -384,11 +384,16 @@ async function lock(c: Client, userId: string, actorIds: string[]) {
   // Every statement below is a lock wait, so statement_timeout (57014) here means the same thing:
   // still busy after the per-statement budget. A 57014 on any later statement is not mapped here.
   try {
-    // Wait for existing renewals before holding the maintenance mutex or the table write fences.
-    await lockUserAccessExclusive(c, [userId, ...actorIds])
+    // Admission keys first: wait for renewals already admitted before holding the maintenance mutex
+    // or the table write fences. The users rows come only after the mutex, as in every other holder
+    // of that mutex. A repair that held a users row while it waited for the mutex closed a cycle of
+    // three: a handover holds the mutex and waits for a D21 subject version row, a DingTalk login
+    // updating an identity holds that version row and waits for the same users row.
+    await lockUserAccessKeysExclusive(c, [userId, ...actorIds])
     await c.query(
       "SELECT pg_advisory_xact_lock(hashtext('directory:identity-maintenance'))",
     )
+    await lockUserAccessRows(c, [userId, ...actorIds])
     await c.query(
       'LOCK TABLE users,user_roles,user_permissions,user_namespace_admissions,user_orgs,user_external_auth_grants,directory_account_links,user_external_identities,directory_accounts,directory_integrations,roles,role_permissions,permissions IN SHARE ROW EXCLUSIVE MODE',
     )

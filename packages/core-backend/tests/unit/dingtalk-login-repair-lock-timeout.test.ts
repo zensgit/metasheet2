@@ -22,7 +22,7 @@ vi.mock('../../src/security/encrypted-secrets', async (original) => ({
 }))
 
 import { classifyRepairFailure } from '../../src/auth/dingtalk-identity-repair-cli'
-import { deriveUserAccessLockKey, lockUserAccessExclusive, lockUserAccessShared, USER_ACCESS_LOCK_NAMESPACE } from '../../src/auth/user-access-lock'
+import { deriveUserAccessLockKey, lockUserAccessExclusive, lockUserAccessKeysExclusive, lockUserAccessRows, lockUserAccessShared, USER_ACCESS_LOCK_NAMESPACE } from '../../src/auth/user-access-lock'
 import {
   releaseDingTalkRepair,
   rollbackDingTalkRepair,
@@ -70,6 +70,23 @@ describe('user admission key protocol', () => {
       ['SELECT id FROM users WHERE id = $1 FOR UPDATE', ['用户']],
     ])
   })
+
+  it('the two exclusive steps can be taken apart: keys lock no row, rows take no key', async () => {
+    const client = { query: vi.fn(async () => ({ rows: [] })) }
+    await lockUserAccessKeysExclusive(client, ['synthetic-actor', '用户', 'synthetic-user', 'synthetic-user'])
+    expect(client.query.mock.calls).toEqual([
+      ['SELECT pg_advisory_xact_lock($1::int4, $2::int4)', [USER_ACCESS_LOCK_NAMESPACE, -1903445409]],
+      ['SELECT pg_advisory_xact_lock($1::int4, $2::int4)', [USER_ACCESS_LOCK_NAMESPACE, 497012073]],
+      ['SELECT pg_advisory_xact_lock($1::int4, $2::int4)', [USER_ACCESS_LOCK_NAMESPACE, 889995239]],
+    ])
+    client.query.mockClear()
+    await lockUserAccessRows(client, ['synthetic-user', '用户', 'synthetic-actor', 'synthetic-user'])
+    expect(client.query.mock.calls).toEqual([
+      ['SELECT id FROM users WHERE id = $1 FOR UPDATE', ['synthetic-actor']],
+      ['SELECT id FROM users WHERE id = $1 FOR UPDATE', ['synthetic-user']],
+      ['SELECT id FROM users WHERE id = $1 FOR UPDATE', ['用户']],
+    ])
+  })
 })
 
 describe('57014 classification around the repair lock phase', () => {
@@ -89,11 +106,15 @@ describe('57014 classification around the repair lock phase', () => {
   })
 
   it.each(['rollback', 'release'] as const)('%s: a 57014 on the advisory mutex is REPAIR_LOCK_BUSY too', async (action) => {
-    const { client } = fakeClient((sql) => sql.includes("hashtext('directory:identity-maintenance')"))
+    const { client, seen } = fakeClient((sql) => sql.includes("hashtext('directory:identity-maintenance')"))
     db.transaction.mockImplementation(async (fn: (c: unknown) => unknown) => fn(client))
     await expect(
       run[action]('synthetic-id', 'synthetic-actor', 'synthetic-digest', action, 'synthetic-password'),
     ).rejects.toThrow(/^REPAIR_LOCK_BUSY$/)
+    // The repair waits for the mutex holding its admission keys only: no users row, no table fence.
+    expect(seen.filter(sql => sql === 'SELECT pg_advisory_xact_lock($1::int4, $2::int4)')).toHaveLength(2)
+    expect(seen.some(sql => /FOR UPDATE/.test(sql))).toBe(false)
+    expect(seen.some(sql => sql.startsWith('LOCK TABLE'))).toBe(false)
   })
 
   it.each(['rollback', 'release'] as const)('%s: a 57014 on a user admission key is REPAIR_LOCK_BUSY too', async (action) => {
@@ -116,12 +137,15 @@ describe('57014 classification around the repair lock phase', () => {
       )
       expect(error).toMatchObject({ code: '57014', message: 'canceling statement due to statement timeout' })
       expect(classifyRepairFailure(error)).toEqual({ code: 'REPAIR_STATEMENT_TIMEOUT', exit: 1 })
-      // All user keys precede all rows, then the mutex and table fences, then business work.
+      // All user keys, then the maintenance mutex, then the users rows, then the table fences, then
+      // business work. A users row is never held while the mutex is still to be taken.
       expect(seen.some((s) => s.startsWith('LOCK TABLE '))).toBe(true)
       const keyPositions = seen.flatMap((s, i) => s === 'SELECT pg_advisory_xact_lock($1::int4, $2::int4)' ? [i] : [])
       const rowPositions = seen.flatMap((s, i) => /FOR UPDATE/.test(s) ? [i] : [])
+      const mutexPosition = seen.findIndex(s => s.includes("hashtext('directory:identity-maintenance')"))
       expect(keyPositions).toHaveLength(2)
-      expect(Math.max(...keyPositions)).toBeLessThan(Math.min(...rowPositions))
+      expect(Math.max(...keyPositions)).toBeLessThan(mutexPosition)
+      expect(mutexPosition).toBeLessThan(Math.min(...rowPositions))
       expect(Math.max(...rowPositions)).toBeLessThan(seen.findIndex(s => s.startsWith('LOCK TABLE ')))
       expect(seen.filter((s) => /FOR UPDATE/.test(s)).length).toBeGreaterThan(0)
       expect(seen.at(-1)).not.toMatch(/FOR UPDATE|^LOCK TABLE|pg_advisory_xact_lock/)
