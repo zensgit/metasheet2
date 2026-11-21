@@ -92,6 +92,8 @@ interface ArrivalContext {
   binding: RealtimeSessionBinding | null
   subscribed: boolean
   arrivedAt: number
+  /** The shared document at arrival: the generation this change was made against. */
+  doc: Y.Doc | undefined
 }
 
 /**
@@ -474,6 +476,7 @@ export class YjsWebSocketAdapter {
       binding: this.connections ? this.connections.bindingOf(socket) : null,
       subscribed: !this.authChecker || this.socketPermissions.get(socket.id)?.has(recordId) === true,
       arrivedAt: Date.now(),
+      doc: this.syncService.getDoc(recordId),
     }
   }
 
@@ -541,8 +544,10 @@ export class YjsWebSocketAdapter {
     arrival: ArrivalContext,
   ): Promise<'done' | 'hold'> {
     const doc = this.syncService.getDoc(recordId)
-    if (!doc) {
-      // The document this change was made against is gone (invalidated or released): say so.
+    if (!doc || doc !== arrival.doc) {
+      // The document this change was made against is gone, or is not the shared one any more
+      // (invalidated or released since the change arrived, whether or not the record was reopened
+      // meanwhile): a change is never carried over to another generation of the document. Say so.
       this.tellInvalidated(socket, recordId)
       return 'done'
     }

@@ -29,6 +29,7 @@ import {
   type Stage,
   type StageOptions,
   requestMissing,
+  change,
 } from '../helpers/yjs-realtime-stage'
 
 let current: Stage | null = null
@@ -308,6 +309,51 @@ describe('an edit that cannot be processed is never dropped in silence', () => {
     await until(() => a.invalidated.length === 1)
     expect(a.errors).toEqual([])
     expect(recordF1(s)).toBe('one')
+  })
+
+  it('an edit held across an invalidation is void, also after somebody reopened the record: not applied to the new document, not relayed, not written, and its sender is told', async () => {
+    // A retry interval long enough for the record to be invalidated and reopened between two attempts.
+    const s = await open({ adapterOptions: { heldUpdateRetryMs: 400 } })
+    const a = await editor(s, 'a')
+    // Only the reads of the sender fail; everybody else can reopen the record at once.
+    s.world.readFailsFor.add('a')
+    // A field the document does not hold yet: the change does not depend on anything of the old document.
+    sendUpdate(a, change(a, 'f9', 'made-before-the-invalidation'))
+    await settle(120)
+    expect(shared(s).f9).toBeUndefined()
+    s.world.records.set(RECORD, { f1: 'committed-elsewhere', f2: 'two' })
+    await s.invalidate([RECORD])
+    const b = await editor(s, 'b')
+    expect(b.fields().f1).toBe('committed-elsewhere')
+    expect(a.invalidated).toHaveLength(1)
+    s.world.readFailsFor.delete('a')
+    await until(() => a.invalidated.length === 2, 2000, 'the sender to be told about its held edit')
+    await settle(300)
+    expect(shared(s).f9).toBeUndefined()
+    expect(b.fields().f9).toBeUndefined()
+    expect(b.received).toEqual([])
+    expect(s.world.patches).toEqual([])
+    expect(s.world.records.get(RECORD)).toEqual({ f1: 'committed-elsewhere', f2: 'two' })
+    expect(a.errors).toEqual([])
+  })
+
+  it('an edit that waits behind a slow one is void the same way when the record is invalidated and reopened meanwhile', async () => {
+    const s = await open()
+    const a = await editor(s, 'a')
+    let release: () => void = () => undefined
+    s.world.readGateFor.set('a', new Promise<void>((resolve) => { release = resolve }))
+    sendUpdate(a, change(a, 'f8', 'first'))
+    sendUpdate(a, change(a, 'f9', 'second'))
+    await settle(80)
+    s.world.records.set(RECORD, { f1: 'committed-elsewhere', f2: 'two' })
+    await s.invalidate([RECORD])
+    const b = await editor(s, 'b')
+    s.world.readGateFor.delete('a')
+    release()
+    await settle(300)
+    expect(shared(s)).toEqual({ f1: 'committed-elsewhere', f2: 'two' })
+    expect(b.received).toEqual([])
+    expect(s.world.patches).toEqual([])
   })
 
   it('a document invalidated while an edit was being checked: the edit is not applied to the old generation, not relayed and not written', async () => {
