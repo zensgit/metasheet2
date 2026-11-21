@@ -6,7 +6,7 @@ import type { Server as SocketServer, Socket, Namespace } from 'socket.io'
 import type { YjsSyncService } from './yjs-sync-service'
 import type { YjsContribution, YjsRecordBridge } from './yjs-record-bridge'
 import { baselineRealtimeProtection, type RealtimeProtection } from '../realtime-authz/protection'
-import type { ProtectedConnections, ProtectedSocket } from '../realtime-authz/protected-connections'
+import type { ProtectedConnections } from '../realtime-authz/protected-connections'
 import { bindingKey, type RealtimeSessionBinding } from '../realtime-authz/session-binding'
 
 // Message types
