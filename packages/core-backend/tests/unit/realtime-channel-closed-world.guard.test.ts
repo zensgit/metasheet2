@@ -6,6 +6,12 @@
  * feature of Socket.IO, or speaks another push protocol (server-sent events, a native WebSocket
  * server) must be listed below with its role and with the exact number of such sites it holds.
  *
+ * So must every file that can put a connection into a room, found two ways: a room entered or left
+ * through something named like a connection (socket, client, peer, connection), and, whatever the
+ * names are, an event listener registered in the same file as a call that can be a room entry or exit.
+ * What this does not see: a room call through a receiver with another name, in a file that registers
+ * no listener at all and is handed its connections by a listed file.
+ *
  * A new file with any of these sites, or a new site in a listed file, fails this guard. The fix is
  * never to bump a number alone: classify the new site, route it through the protected delivery
  * boundary (or state why it carries no tenant collaboration data) and add a behaviour assertion for
@@ -27,9 +33,11 @@ const REPO = join(here, '../../../..')
 const ROOTS = ['packages/core-backend/src', 'plugins']
 const EXTENSIONS = ['.ts', '.mts', '.cts', '.js', '.cjs', '.mjs']
 
-type Category = 'socketIoImport' | 'serverConstruct' | 'namespace' | 'rawServer' | 'connectionHandler' | 'pluginBridge' | 'clusterOrRecovery' | 'otherPushProtocol' | 'roomSend' | 'serverSend' | 'emit'
+type Category = 'socketIoImport' | 'serverConstruct' | 'namespace' | 'rawServer' | 'connectionHandler' | 'pluginBridge' | 'clusterOrRecovery' | 'otherPushProtocol' | 'roomSend' | 'serverSend' | 'connectionRoomCall' | 'listenerWithRoomCall' | 'emit'
 
-const DETECTORS: Record<Exclude<Category, 'emit'>, RegExp> = {
+type TextCategory = Exclude<Category, 'emit' | 'listenerWithRoomCall'>
+
+const DETECTORS: Record<TextCategory, RegExp> = {
   socketIoImport: /from ['"]socket\.io['"]|require\(['"]socket\.io['"]\)/g,
   serverConstruct: /new SocketServer\(|new SocketIOServer\(|new Server\(\s*httpServer/g,
   namespace: /\.of\(\s*['"`]\//g,
@@ -41,8 +49,13 @@ const DETECTORS: Record<Exclude<Category, 'emit'>, RegExp> = {
   // A send to a room or to every connection makes a file a channel bearer whatever object it goes through.
   roomSend: /\.(to|in)\(\s*[^()]*(\([^()]*\))?[^()]*\)\s*\.emit\(/g,
   serverSend: /\bio\??\.emit\(/g,
+  // A room entered or left through something named like a connection, in any file.
+  connectionRoomCall: /\b[\w.]*(socket|client|peer|connection)\w*\)?\??\.(join|leave)\(/gi,
 }
 const EMIT = /\.emit\(/g
+const ROOM_METHOD = /\.(join|leave|socketsJoin|socketsLeave)\(/
+const LISTENER_METHODS = new Set(['on', 'once', 'onAny', 'prependAny', 'addListener', 'prependListener', 'prependOnceListener'])
+const PATH_RECEIVER = /^(path|nodePath|posix|win32|path\.posix|path\.win32)$/
 
 type Counts = Partial<Record<Category, number>>
 
@@ -69,12 +82,48 @@ function count(text: string, pattern: RegExp): number {
   return [...text.matchAll(pattern)].length
 }
 
-function analyse(text: string): Counts | null {
+function parse(file: string, text: string): ts.SourceFile {
+  return ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, /\.[cm]?js$/.test(file) ? ts.ScriptKind.JS : ts.ScriptKind.TS)
+}
+
+function isFixedText(node: ts.Node | undefined): boolean {
+  return Boolean(node) && (ts.isStringLiteral(node as ts.Node) || ts.isNoSubstitutionTemplateLiteral(node as ts.Node))
+}
+
+/**
+ * Whatever the names are: a file that registers an event listener and also calls something that can
+ * be a room entry or exit is a channel bearer. A room call here is any `.leave(...)`, any
+ * `.socketsJoin(...)` / `.socketsLeave(...)`, and a `.join(x, ...)` whose first argument is not a fixed
+ * text and whose receiver is not the path module (joining an array with a fixed separator is not one).
+ * Returns the number of such room calls, or 0 when the file registers no listener.
+ */
+function listenerWithRoomCalls(file: string, text: string): number {
+  if (!ROOM_METHOD.test(text)) return 0
+  const source = parse(file, text)
+  let listeners = 0
+  let roomCalls = 0
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+      const method = node.expression.name.text
+      if (LISTENER_METHODS.has(method) && node.arguments.length > 0) listeners += 1
+      if (method === 'leave' || method === 'socketsJoin' || method === 'socketsLeave') roomCalls += 1
+      if (method === 'join' && node.arguments.length >= 1 && !isFixedText(node.arguments[0])
+        && !PATH_RECEIVER.test(node.expression.expression.getText(source))) roomCalls += 1
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  return listeners > 0 ? roomCalls : 0
+}
+
+function analyse(text: string, file = 'probe.ts'): Counts | null {
   const counts: Counts = {}
-  for (const [category, pattern] of Object.entries(DETECTORS) as Array<[Exclude<Category, 'emit'>, RegExp]>) {
+  for (const [category, pattern] of Object.entries(DETECTORS) as Array<[TextCategory, RegExp]>) {
     const found = count(text, pattern)
     if (found > 0) counts[category] = found
   }
+  const roomCalls = listenerWithRoomCalls(file, text)
+  if (roomCalls > 0) counts.listenerWithRoomCall = roomCalls
   if (Object.keys(counts).length === 0) return null
   // Sends are counted only in a file that already bears a channel: plain event emitters elsewhere
   // use the same method name.
@@ -90,7 +139,7 @@ function scan(): Record<string, Counts> {
   for (const file of files.sort()) {
     const rel = relative(REPO, file).split(sep).join('/')
     if (isTestPath(rel)) continue
-    const counts = analyse(readFileSync(file, 'utf8'))
+    const counts = analyse(readFileSync(file, 'utf8'), rel)
     if (counts) found[rel] = counts
   }
   return found
@@ -98,7 +147,8 @@ function scan(): Record<string, Counts> {
 
 /**
  * Besides the counts, every channel-bearing file lists two things exactly:
- *   - `inbound`: every `<receiver>.on('<event>')` / `.once(...)` registration with a literal event name;
+ *   - `inbound`: every listener registration (`.on`, `.once`, `.onAny`, `.addListener` and their
+ *                prepend forms), with the event name when it is a fixed text and the expression otherwise;
  *   - `rooms`:   every `.join(...)`, `.leave(...)`, `.socketsJoin(...)`, `.socketsLeave(...)` call.
  * Both are read from the syntax tree, so a new inbound handler or a new way into a room changes the
  * list and fails the guard until it is classified.
@@ -112,7 +162,7 @@ function squash(text: string): string {
 }
 
 function sitesOf(file: string, text: string): Sites {
-  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, /\.[cm]?js$/.test(file) ? ts.ScriptKind.JS : ts.ScriptKind.TS)
+  const source = parse(file, text)
   const inbound: string[] = []
   const rooms: string[] = []
   const visit = (node: ts.Node): void => {
@@ -120,8 +170,10 @@ function sitesOf(file: string, text: string): Sites {
       const method = node.expression.name.text
       const receiver = squash(node.expression.expression.getText(source))
       const first = node.arguments[0]
-      if ((method === 'on' || method === 'once') && first && (ts.isStringLiteral(first) || ts.isNoSubstitutionTemplateLiteral(first))) {
-        inbound.push(`${receiver}.${method}('${first.text}')`)
+      if (LISTENER_METHODS.has(method) && first) {
+        if (method === 'onAny' || method === 'prependAny') inbound.push(`${receiver}.${method}()`)
+        else if (isFixedText(first)) inbound.push(`${receiver}.${method}('${(first as ts.StringLiteral).text}')`)
+        else inbound.push(`${receiver}.${method}(<${squash(first.getText(source))}>)`)
       }
       if (method === 'join' || method === 'leave' || method === 'socketsJoin' || method === 'socketsLeave') {
         rooms.push(`${receiver}.${method}(${node.arguments.map((argument) => squash(argument.getText(source))).join(', ')})`)
@@ -137,7 +189,7 @@ const B = 'packages/core-backend/src'
 const EXPECTED: Record<string, Entry> = {
   [`${B}/services/CollabService.ts`]: {
     role: 'PROTECTED BOUNDARY. The default collaboration channel: every send goes through emitToRoom or the delivery boundary of the protected connections; the three cluster-style calls are the baseline room join, room leave and member listing, each with a protected branch in front of it. Every inbound handler listed here resolves the identity of its connection through resolveTrustedUserId (which re-reads the session in protected mode) before it joins a room, except the leave handlers and ping, which give nothing.',
-    counts: { socketIoImport: 2, serverConstruct: 1, connectionHandler: 2, clusterOrRecovery: 3, roomSend: 4, serverSend: 1, emit: 16 },
+    counts: { socketIoImport: 2, serverConstruct: 1, connectionHandler: 2, clusterOrRecovery: 3, roomSend: 4, serverSend: 1, connectionRoomCall: 16, listenerWithRoomCall: 18, emit: 16 },
     inbound: [
       'socket.on(\'disconnect\')',
       'socket.on(\'join-comment-inbox\')',
@@ -150,6 +202,9 @@ const EXPECTED: Record<string, Entry> = {
       'socket.on(\'leave-sheet\')',
       'socket.on(\'ping\')',
       'socket.on(\'sheet:cursor\')',
+      // The constrained connection handed to a plugin: the plugin names the event; the listener runs
+      // only while the session of the connection is still the one it was admitted with.
+      'socket.on(<event>)',
       'socket.once(\'disconnect\')',
       'this.io.on(\'connection\')',
       'this.io.on(\'connection\')',
@@ -177,7 +232,7 @@ const EXPECTED: Record<string, Entry> = {
   },
   [`${B}/collab/yjs-websocket-adapter.ts`]: {
     role: 'PROTECTED BOUNDARY. The record editing namespace: the handshake, every message and every send of record content to a record room are checked; an incoming change is applied only after its sender was checked. One send goes outside the delivery boundary on purpose: the invalidation notice, a control message without record content that tells subscribers their copy is no longer the shared one; it is sent to the whole record room also while deliveries are withheld.',
-    counts: { socketIoImport: 1, namespace: 1, connectionHandler: 1, roomSend: 3, emit: 23 },
+    counts: { socketIoImport: 1, namespace: 1, connectionHandler: 1, roomSend: 3, connectionRoomCall: 4, listenerWithRoomCall: 4, emit: 23 },
     inbound: [
       'nsp.on(\'connection\')',
       'socket.on(\'disconnect\')',
@@ -197,8 +252,10 @@ const EXPECTED: Record<string, Entry> = {
   },
   [`${B}/index.ts`]: {
     role: 'WIRING. Hands the raw collaboration server to the record editing adapter (the one raw access), defines the plugin bridge on top of the collaboration service, and attaches realtime protection to both channels before either accepts a connection. Its two emit sites are process event-bus emits, not sends to connections; its on() sites are process and server events, and its join/leave sites are the plugin bridge methods that delegate to the collaboration service.',
-    counts: { rawServer: 1, connectionHandler: 1, pluginBridge: 1, emit: 2 },
+    counts: { rawServer: 1, connectionHandler: 1, pluginBridge: 1, listenerWithRoomCall: 2, emit: 2 },
     inbound: [
+      // The plugin event bus, not a connection.
+      'eventBus.on(<event>)',
       'process.on(\'SIGINT\')',
       'process.on(\'SIGTERM\')',
       'this.httpServer.once(\'error\')',
@@ -224,10 +281,11 @@ const EXPECTED: Record<string, Entry> = {
   },
   [`${B}/services/WebSocketService.ts`]: {
     role: 'NOT WIRED. A raw-connection plugin service that is constructed only by the plugin service factory, which the production start-up graph does not use (pinned below). Wiring it in must fail this guard until it is put behind the protected boundary.',
-    counts: { socketIoImport: 2, connectionHandler: 2, emit: 16 },
+    counts: { socketIoImport: 2, connectionHandler: 2, connectionRoomCall: 2, listenerWithRoomCall: 4, emit: 16 },
     inbound: [
       'io.on(\'connection\')',
       'socket.on(\'disconnect\')',
+      'socket.onAny()',
       'this.on(\'connection\')',
       'this.on(\'disconnection\')',
       'this.on(\'message\')',
@@ -257,7 +315,7 @@ const EXPECTED: Record<string, Entry> = {
   },
   'plugins/plugin-view-gantt/src/index.ts': {
     role: 'PLUGIN BRIDGE CONSUMER. Registers a connection handler and sends through the bridge; in protected mode the handler receives the constrained connection after admission, its inbound handlers run only after the session was re-read, and its sends and room joins pass the delivery boundary.',
-    counts: { connectionHandler: 1, pluginBridge: 1, roomSend: 1, emit: 7 },
+    counts: { connectionHandler: 1, pluginBridge: 1, roomSend: 1, connectionRoomCall: 2, listenerWithRoomCall: 2, emit: 7 },
     inbound: [
       'api.events.on(\'gantt:dependency:created\')',
       'api.events.on(\'gantt:dependency:deleted\')',
@@ -277,7 +335,7 @@ const EXPECTED: Record<string, Entry> = {
   },
   'plugins/plugin-view-gantt/dist/index-complex.js': {
     role: 'PLUGIN BRIDGE CONSUMER. Built form of the same plugin entry; same constrained connection and delivery boundary apply.',
-    counts: { connectionHandler: 1, pluginBridge: 1, roomSend: 1, emit: 7 },
+    counts: { connectionHandler: 1, pluginBridge: 1, roomSend: 1, connectionRoomCall: 2, listenerWithRoomCall: 2, emit: 7 },
     inbound: [
       'api.events.on(\'gantt:dependency:created\')',
       'api.events.on(\'gantt:dependency:deleted\')',
@@ -391,9 +449,23 @@ describe('closed world of realtime channels', () => {
     expect(analyse('holder.io.emit("x")')).toEqual({ serverSend: 1, emit: 1 })
   })
 
+  it('a file that only holds an inbound handler entering a room, or only a room call on a connection, is a channel bearer (controls)', () => {
+    // No send, no namespace, no import of the transport, and no conventional name.
+    expect(analyse("export function attach(s) { s.on('join-any', (room) => s.join(room)) }")).toEqual({ listenerWithRoomCall: 1 })
+    expect(analyse('export function attach(s) { s.on(eventName, (room) => { s.leave(room) }) }')).toEqual({ listenerWithRoomCall: 1 })
+    expect(analyse('export function attach(s) { s.onAny((event, room) => s.join(room, extra)) }')).toEqual({ listenerWithRoomCall: 1 })
+    // No listener in the file: seen through the name of the receiver.
+    expect(analyse('export const put = (socket, room) => socket.join(room)')).toEqual({ connectionRoomCall: 1 })
+    expect(analyse('export const out = (ctx, room) => ctx.clientSocket?.leave(room)')).toEqual({ connectionRoomCall: 1 })
+    // Not room calls: a list joined with a fixed separator, a file path.
+    expect(analyse("emitter.on('x', f)\nconst csv = parts.join(', ')\nconst file = path.join(dir, name)")).toBeNull()
+    expect(analyse('const csv = parts.join(separator)')).toBeNull()
+  })
+
   it('a new inbound handler and a new way into a room are both seen by the site scan (controls)', () => {
     const sites = sitesOf('probe.ts', "socket.on('join-any', (room: string) => socket.join(room))\nsocket.once('x', () => undefined)\nio.in(a).socketsJoin(b)\nsocket.leave(`r:${id}`)\nconst csv = parts.join(',')")
     expect(sites.inbound).toEqual(["socket.on('join-any')", "socket.once('x')"])
+    expect(sitesOf('probe.ts', 'socket.on(name, handler)\nsocket.onAny(handler)\nsocket.addListener("x", handler)').inbound).toEqual(['socket.addListener(\'x\')', 'socket.on(<name>)', 'socket.onAny()'])
     expect(sites.rooms).toEqual(['io.in(a).socketsJoin(b)', "parts.join(',')", 'socket.join(room)', 'socket.leave(`r:${id}`)'])
     expect(sitesOf('probe.js', "socket.on('gantt:subscribe', function (d) { socket.join('gantt:' + d.viewId) })").rooms).toEqual(["socket.join('gantt:' + d.viewId)"])
   })

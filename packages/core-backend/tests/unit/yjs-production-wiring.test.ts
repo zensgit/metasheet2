@@ -65,19 +65,25 @@ function compile<T>(closureText: string, bindings: Record<string, unknown>): T {
 }
 
 interface FieldRow { id: string; name: string; type: string; property: Record<string, unknown>; order: number }
-interface Subject { canEditRecord: boolean; scope: Map<string, { visible?: boolean; readOnly?: boolean }> }
+interface Subject { canRead: boolean; canEditRecord: boolean; scope: Map<string, { visible?: boolean; readOnly?: boolean }> }
 interface Facts {
   fields: FieldRow[]
   live: boolean
   recordExists: boolean
   readFails: boolean
+  /** The record is denied to non-administrators at row level. */
+  rowDenied: boolean
+  /** Whether every field of the record may be read by the subject. */
+  everyFieldReadable: boolean
+  /** Whether the subject holds the administrator role. */
+  admin: boolean
   subjects: Map<string, Subject>
   /** How often capabilities and the per-subject scope were read, per subject. */
   reads: string[]
 }
 
 const field = (id: string, property: Record<string, unknown> = {}, type = 'string'): FieldRow => ({ id, name: id, type, property, order: 0 })
-const subject = (overrides: Partial<Subject> = {}): Subject => ({ canEditRecord: true, scope: new Map(), ...overrides })
+const subject = (overrides: Partial<Subject> = {}): Subject => ({ canRead: true, canEditRecord: true, scope: new Map(), ...overrides })
 
 function facts(overrides: Partial<Facts> = {}): Facts {
   return {
@@ -85,6 +91,9 @@ function facts(overrides: Partial<Facts> = {}): Facts {
     live: true,
     recordExists: true,
     readFails: false,
+    rowDenied: false,
+    everyFieldReadable: true,
+    admin: false,
     subjects: new Map([['u', subject()]]),
     reads: [],
     ...overrides,
@@ -109,9 +118,9 @@ function bindingsOf(f: Facts): Record<string, unknown> {
     resolveSheetCapabilitiesForUser: async (_query: unknown, _sheetId: string, userId: string) => {
       f.reads.push(`capabilities:${userId}`)
       return {
-        capabilities: { canRead: true, canEditRecord: subjectOf(userId).canEditRecord, canCreateRecord: true },
+        capabilities: { canRead: subjectOf(userId).canRead, canEditRecord: subjectOf(userId).canEditRecord, canCreateRecord: true },
         sheetScope: undefined,
-        isAdminRole: false,
+        isAdminRole: f.admin,
         permissions: [],
       }
     },
@@ -119,8 +128,14 @@ function bindingsOf(f: Facts): Record<string, unknown> {
       f.reads.push(`scope:${userId}`)
       return subjectOf(userId).scope
     },
-    isRecordReadDeniedForUser: async () => false,
-    canReadEveryYjsFieldForUser: async () => true,
+    isRecordReadDeniedForUser: async () => {
+      f.reads.push('row-denial')
+      return f.rowDenied
+    },
+    canReadEveryYjsFieldForUser: async () => {
+      f.reads.push('every-field')
+      return f.everyFieldReadable
+    },
     canWriteRecord: (capabilities: { canEditRecord: boolean }) => capabilities.canEditRecord,
     deriveFieldPermissions,
     isFieldReadOnlyForPeople,
@@ -210,6 +225,29 @@ describe('record access check of the start-up code', () => {
     expect(await authCheckerOf(facts({ subjects: new Map([['u', subject({ canEditRecord: false })]]) }))('u', RECORD)).toMatchObject({ canRead: true, canWrite: false })
     expect(await authCheckerOf(facts({ live: false }))('u', RECORD)).toEqual({ canRead: false, canWrite: false })
     expect(await authCheckerOf(facts({ recordExists: false }))('u', RECORD)).toBeNull()
+  })
+
+  it('a record denied at row level is closed to read and write, except for an administrator', async () => {
+    expect(await authCheckerOf(facts({ rowDenied: true }))('u', RECORD)).toEqual({ canRead: false, canWrite: false })
+    expect(await authCheckerOf(facts({ rowDenied: true, admin: true }))('u', RECORD)).toEqual({ canRead: true, canWrite: true, canReadAllFields: true })
+  })
+
+  it('a subject that may not read every field is told so, and still has its own read and write answers', async () => {
+    expect(await authCheckerOf(facts({ everyFieldReadable: false }))('u', RECORD)).toEqual({ canRead: true, canWrite: true, canReadAllFields: false })
+  })
+
+  it('a subject without read access cannot read, cannot read every field, and the field read is not consulted for it', async () => {
+    const f = facts({ subjects: new Map([['u', subject({ canRead: false, canEditRecord: false })]]) })
+    expect(await authCheckerOf(f)('u', RECORD)).toEqual({ canRead: false, canWrite: false, canReadAllFields: false })
+    expect(f.reads).not.toContain('every-field')
+    expect(f.reads).not.toContain('row-denial')
+  })
+
+  it('answers per subject: one subject may write, another only read, on the same record', async () => {
+    const f = facts({ subjects: new Map([['w', subject()], ['r', subject({ canEditRecord: false })]]) })
+    expect(await authCheckerOf(f)('w', RECORD)).toMatchObject({ canRead: true, canWrite: true })
+    expect(await authCheckerOf(f)('r', RECORD)).toMatchObject({ canRead: true, canWrite: false })
+    expect(await authCheckerOf(f)('stranger', RECORD)).toMatchObject({ canWrite: false })
   })
 })
 
