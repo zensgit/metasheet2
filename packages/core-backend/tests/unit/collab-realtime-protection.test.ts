@@ -384,6 +384,49 @@ describe('switch on: every delivery reads the session of each recipient again', 
   })
 })
 
+describe('switch on: the same boundary on every transport the server accepts', () => {
+  it.each([
+    ['long polling only', { transports: ['polling'] }],
+    ['long polling upgraded to websocket', { transports: ['polling', 'websocket'] }],
+    ['websocket only', { transports: ['websocket'] }],
+  ])('%s: an ended session receives nothing more, is closed, and cannot reconnect', async (_label, transport) => {
+    const s = await open()
+    const openOn = async (token: string): Promise<ClientSocket> => {
+      const socket = connectClient(s.url, token, transport)
+      s.clients.push(socket)
+      await once(socket, 'connect')
+      const userId = token.split(':')[1]
+      await until(async () => (await s.collab.getRoomMembers(buildAuthenticatedUserRoom(userId))).includes(userId), 2000, `user room of ${userId}`)
+      return socket
+    }
+    const kept = await openOn('token:kept')
+    const revoked = await openOn('token:revoked')
+    await joinSheet(kept, 'sheet-1')
+    await joinSheet(revoked, 'sheet-1')
+    const keptOps = collect<{ data: { n: number } }>(kept, 'sheet:op')
+    const revokedOps = collect(revoked, 'sheet:op')
+    await s.eventBus.emit('spreadsheet.cell.updated', { spreadsheetId: 'sheet-1', n: 1 })
+    await until(() => keptOps.length === 1 && revokedOps.length === 1)
+
+    const closed = once(revoked, 'disconnect', 4000)
+    s.harness.facts.revokedUsers.add('revoked')
+    await s.eventBus.emit('spreadsheet.cell.updated', { spreadsheetId: 'sheet-1', n: 2 })
+    await s.eventBus.emit('spreadsheet.cell.updated', { spreadsheetId: 'sheet-1', n: 3 })
+    await closed
+    await until(() => keptOps.length === 3, 4000)
+    await settle(150)
+    expect(keptOps.map((op) => op.data.n)).toEqual([1, 2, 3])
+    expect(revokedOps).toHaveLength(1)
+
+    const again = connectClient(s.url, 'token:revoked', transport)
+    s.clients.push(again)
+    const refused = collect<SessionEndedPayload>(again, SESSION_ENDED_EVENT)
+    await once(again, 'disconnect', 4000)
+    expect(refused).toEqual([{ code: 'SESSION_NOT_CURRENT', retry: false }])
+    expect(await s.collab.getRoomMembers(buildAuthenticatedUserRoom('revoked'))).toEqual([])
+  })
+})
+
 describe('switch on: resource narrowing removes the subscription, not the session', () => {
   it('stops delivering a sheet to a user who may no longer read it and keeps the session', async () => {
     const s = await open()
