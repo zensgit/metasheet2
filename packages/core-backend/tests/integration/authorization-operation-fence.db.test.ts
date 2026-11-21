@@ -172,7 +172,7 @@ suite('authorization operation table fence on a migrated synthetic database', ()
     } finally { await other.query('ROLLBACK') }
   })
 
-  it.each([
+  for (const { name, ddl } of [
     { name: 'unregistered inbound foreign key', ddl: 'CREATE TABLE public.permission_command_inbound_dependency(id text REFERENCES public.roles(id))' },
     { name: 'renamed N78 foreign key', ddl: 'ALTER TABLE public.notification_connection_verifications RENAME CONSTRAINT ncv_conn_fk TO ncv_drift_fk' },
     { name: 'deferrable N78 foreign key', ddl: 'ALTER TABLE public.notification_connection_verifications ALTER CONSTRAINT ncv_conn_fk DEFERRABLE INITIALLY DEFERRED' },
@@ -182,7 +182,7 @@ suite('authorization operation table fence on a migrated synthetic database', ()
         ADD CONSTRAINT ncv_conn_fk FOREIGN KEY (connection_id, provider) REFERENCES public.directory_integrations(id, provider) ON UPDATE RESTRICT ON DELETE CASCADE` },
     { name: 'additional foreign key from the registered N78 source', ddl: `ALTER TABLE public.notification_connection_verifications
         ADD CONSTRAINT ncv_extra_fk FOREIGN KEY (connection_id) REFERENCES public.directory_integrations(id)` },
-  ])('refuses $name without weakening the original profile', async ({ ddl }) => {
+  ]) it(`refuses ${name} without weakening the original profile`, async () => {
     const query = (sql: string, params?: unknown[]) => other.query(sql, params)
     await other.query('BEGIN')
     try {
