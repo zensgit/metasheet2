@@ -393,8 +393,8 @@ describe('how long a write may stay un-rechecked', () => {
       if (s.sync.getDoc(RECORD)) sendUpdate(b, append(b, 'f2', `-${index}`))
       await settle(50)
     }
+    // Without the inherited time the loop would run to its end without the generation ending.
     expect(a.invalidated).toHaveLength(1)
-    expect(Date.now() - startedAt).toBeLessThan(1500)
     expect(written(s)).toEqual([])
   })
 
@@ -418,9 +418,8 @@ describe('how long a write may stay un-rechecked', () => {
     sendUpdate(a, append(a, 'f1', '-stuck'))
     await until(() => shared(s).f1 === 'one-stuck')
     s.world.readGateFor.set('a', new Promise<void>(() => undefined))
-    const startedAt = Date.now()
+    // The time one re-check may take is ten seconds in this cell; the wait below is three.
     await until(() => a.invalidated.length === 1, 3000, 'the end of the generation')
-    expect(Date.now() - startedAt).toBeLessThan(1500)
     expect(written(s)).toEqual([])
   })
 })

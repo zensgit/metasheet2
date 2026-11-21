@@ -68,10 +68,12 @@ export interface YjsWebSocketAdapterOptions {
   heldUpdateRetryMs?: number
   /** How long an incoming change is held for an answer before it is refused visibly. */
   heldUpdateMaxMs?: number
-  /** How many incoming changes of one sender to one record may wait in order; further ones are refused visibly. */
+  /**
+   * How many incoming changes of one user to one record may wait, over all connections of that
+   * user; further ones are refused visibly. There is no bound shared between users: whatever one
+   * user has waiting never makes a change of another user be refused.
+   */
   heldUpdateMaxQueued?: number
-  /** How many incoming changes of all senders to one record may wait at once; the memory bound of a record. */
-  heldUpdateMaxQueuedPerRecord?: number
   /** How long the attribution of a closed connection is kept when no write of it is waiting. */
   contributorRetentionMs?: number
   /** How long a namespace handshake may wait while handshakes are held; then it is refused as transient. */
@@ -83,8 +85,6 @@ export interface YjsWebSocketAdapterOptions {
 /** Below the time after which the transport closes a client that has joined no namespace. */
 export const DEFAULT_HELD_HANDSHAKE_MAX_MS = 20_000
 export const DEFAULT_HELD_HANDSHAKE_MAX_WAITING = 1_000
-/** Eight full sender queues: one record never holds more than this, however many connections send. */
-export const DEFAULT_HELD_UPDATE_MAX_QUEUED_PER_RECORD = 4_096
 export const DEFAULT_HELD_UPDATE_RETRY_MS = 250
 export const DEFAULT_HELD_UPDATE_MAX_MS = 30_000
 export const DEFAULT_HELD_UPDATE_MAX_QUEUED = 512
@@ -174,14 +174,13 @@ export class YjsWebSocketAdapter {
    * write can still be attributed and re-checked when it is persisted.
    */
   private contributors = new Map<string, { userId: string; binding: RealtimeSessionBinding | null; closedAt: number | null }>()
-  /** Changes of all senders to one record that are waiting or being processed, by record. */
-  private queuedWrites = new Map<string, number>()
   private readonly heldUpdateRetryMs: number
   private readonly heldUpdateMaxMs: number
   private readonly heldUpdateMaxQueued: number
-  private readonly heldUpdateMaxQueuedPerRecord: number
-  /** Changes of one sender to one record that are waiting or being processed, by queue key. */
+  /** Changes of one connection to one record that are waiting or being processed, by queue key. */
   private queuedBySender = new Map<string, number>()
+  /** Changes of one user to one record that are waiting or being processed, over all its connections. */
+  private queuedByUser = new Map<string, number>()
   /** The number of the last change put into each sender queue. */
   private lastQueuedNumber = new Map<string, number>()
   /**
@@ -208,7 +207,6 @@ export class YjsWebSocketAdapter {
     this.heldUpdateRetryMs = options.heldUpdateRetryMs ?? DEFAULT_HELD_UPDATE_RETRY_MS
     this.heldUpdateMaxMs = options.heldUpdateMaxMs ?? DEFAULT_HELD_UPDATE_MAX_MS
     this.heldUpdateMaxQueued = options.heldUpdateMaxQueued ?? DEFAULT_HELD_UPDATE_MAX_QUEUED
-    this.heldUpdateMaxQueuedPerRecord = options.heldUpdateMaxQueuedPerRecord ?? DEFAULT_HELD_UPDATE_MAX_QUEUED_PER_RECORD
     this.contributorRetentionMs = options.contributorRetentionMs ?? DEFAULT_CONTRIBUTOR_RETENTION_MS
     this.heldHandshakeMaxMs = options.heldHandshakeMaxMs ?? DEFAULT_HELD_HANDSHAKE_MAX_MS
     this.heldHandshakeMaxWaiting = options.heldHandshakeMaxWaiting ?? DEFAULT_HELD_HANDSHAKE_MAX_WAITING
@@ -476,25 +474,26 @@ export class YjsWebSocketAdapter {
   }
 
   /**
-   * One change at a time per sender and record, in the order that sender sent them. The changes of
-   * different senders do not wait for each other: a change that is held was never relayed, so no
-   * change of anybody else can depend on it. Returns the number of the queued change, or null when
-   * this sender, or the record as a whole, already has as many waiting as it may.
+   * One change at a time per connection and record, in the order that connection sent them. The
+   * changes of different connections do not wait for each other: a change that is held was never
+   * relayed, so no change of anybody else can depend on it. How many may wait is counted per user
+   * and record, over all connections of the user, and for nobody else. Returns the number of the
+   * queued change, or null when this user already has as many waiting as it may.
    */
-  private enqueueWrite(recordId: string, socketId: string, work: (number: number) => Promise<void>): number | null {
+  private enqueueWrite(recordId: string, socketId: string, userKey: string, work: (number: number) => Promise<void>): number | null {
     const key = this.queueKeyOf(recordId, socketId)
-    const ofSender = this.queuedBySender.get(key) ?? 0
-    const ofRecord = this.queuedWrites.get(recordId) ?? 0
-    if (ofSender >= this.heldUpdateMaxQueued || ofRecord >= this.heldUpdateMaxQueuedPerRecord) return null
-    this.queuedBySender.set(key, ofSender + 1)
-    this.queuedWrites.set(recordId, ofRecord + 1)
+    const ownerKey = `${recordId}\u0000${userKey}`
+    const ofUser = this.queuedByUser.get(ownerKey) ?? 0
+    if (ofUser >= this.heldUpdateMaxQueued) return null
+    this.queuedByUser.set(ownerKey, ofUser + 1)
+    this.queuedBySender.set(key, (this.queuedBySender.get(key) ?? 0) + 1)
     const number = (this.lastQueuedNumber.get(key) ?? 0) + 1
     this.lastQueuedNumber.set(key, number)
     const previous = this.recordWriteQueues.get(key) ?? Promise.resolve()
     const next = previous.then(() => work(number)).catch(() => undefined).finally(() => {
-      const leftOfRecord = (this.queuedWrites.get(recordId) ?? 1) - 1
-      if (leftOfRecord > 0) this.queuedWrites.set(recordId, leftOfRecord)
-      else this.queuedWrites.delete(recordId)
+      const leftOfUser = (this.queuedByUser.get(ownerKey) ?? 1) - 1
+      if (leftOfUser > 0) this.queuedByUser.set(ownerKey, leftOfUser)
+      else this.queuedByUser.delete(ownerKey)
       const leftOfSender = (this.queuedBySender.get(key) ?? 1) - 1
       if (leftOfSender > 0) {
         this.queuedBySender.set(key, leftOfSender)
@@ -580,9 +579,9 @@ export class YjsWebSocketAdapter {
 
   /**
    * Every incoming change — the update event and the two write forms of the sync message — is queued
-   * here, per sender, in the order that sender sent it. A change whose check cannot be answered is
-   * HELD: it is not applied, not persisted and not relayed, the later changes of the same sender
-   * wait behind it, and it is tried again until an answer is there. A change held longer than the
+   * here, per connection, in the order that connection sent it. A change whose check cannot be
+   * answered is HELD: it is not applied, not persisted and not relayed, the later changes of the
+   * same connection wait behind it, and it is tried again until an answer is there. A change held longer than the
    * bound is refused visibly, also when a check of it never returns. A sender that is refused is
    * told once that its copy is void; what it had waiting is then ended without being read for.
    */
@@ -593,7 +592,9 @@ export class YjsWebSocketAdapter {
       return
     }
     const key = this.queueKeyOf(recordId, socket.id)
-    const queued = this.enqueueWrite(recordId, socket.id, async (number) => {
+    // A connection without a verified user (no checker attached) is its own owner.
+    const owner = arrival.userId ? `user:${arrival.userId}` : `connection:${socket.id}`
+    const queued = this.enqueueWrite(recordId, socket.id, owner, async (number) => {
       for (;;) {
         // An earlier change of this sender was refused and the sender told to reopen the record:
         // what it sent before that is not processed, and nothing is read for it.

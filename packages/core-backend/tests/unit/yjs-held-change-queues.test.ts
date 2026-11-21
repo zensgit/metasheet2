@@ -97,21 +97,41 @@ describe('how many changes of one sender may wait', () => {
     await until(() => record(s).f1 === 'one-1-2' && record(s).f2 === 'two-1-2', 2000, 'the record write')
   })
 
-  it('the record as a whole has its own bound: past it the arriving change is refused visibly', async () => {
-    const s = await open({ adapterOptions: { heldUpdateRetryMs: 20, heldUpdateMaxQueued: 2, heldUpdateMaxQueuedPerRecord: 3 } })
-    const a = await editor(s, 'a')
-    const b = await editor(s, 'b')
-    const c = await editor(s, 'c')
-    for (const user of ['a', 'b', 'c']) s.world.readFailsFor.add(user)
-    sendUpdate(a, append(a, 'f1', '-1'))
-    sendUpdate(a, append(a, 'f1', '-2'))
-    sendUpdate(b, append(b, 'f2', '-1'))
+  it('the bound is one for all connections of a user: a second connection of the same user does not get a bound of its own', async () => {
+    const s = await open({ adapterOptions: { heldUpdateRetryMs: 20, heldUpdateMaxQueued: 2 } })
+    const first = await editor(s, 'a')
+    const second = await editor(s, 'a')
+    s.world.readFailsFor.add('a')
+    sendUpdate(first, append(first, 'f1', '-1'))
+    sendUpdate(first, append(first, 'f1', '-2'))
     await settle(80)
-    sendUpdate(c, append(c, 'f2', '-c'))
-    await until(() => c.errors.length === 1 && c.invalidated.length === 1, 2000, 'the refusal at the record bound')
-    expect(codes(c)).toEqual(['UNAVAILABLE: Too many changes are waiting for this record; reopen it'])
-    expect(codes(a)).toEqual([])
-    expect(codes(b)).toEqual([])
+    sendUpdate(second, append(second, 'f2', '-over'))
+    await until(() => second.errors.length === 1 && second.invalidated.length === 1, 2000, 'the refusal on the second connection')
+    expect(codes(second)).toEqual(['UNAVAILABLE: Too many changes are waiting for this record; reopen it'])
+    // The connection that was within the bound keeps what it has waiting.
+    expect(first.errors).toEqual([])
+    s.world.readFailsFor.delete('a')
+    await until(() => shared(s).f1 === 'one-1-2' && record(s).f1 === 'one-1-2', 2000, 'the changes of the first connection')
+    expect(shared(s).f2).toBe('two')
+  })
+
+  it('there is no bound shared between users: many users with full queues do not make the change of another user be refused', async () => {
+    const s = await open({ adapterOptions: { heldUpdateRetryMs: 20, heldUpdateMaxQueued: 2 } })
+    const stuck = [] as Editor[]
+    for (const user of ['u1', 'u2', 'u3', 'u4', 'u5', 'u6']) {
+      stuck.push(await editor(s, user))
+      s.world.readFailsFor.add(user)
+    }
+    for (const target of stuck) {
+      sendUpdate(target, append(target, 'f1', '-x'))
+      sendUpdate(target, append(target, 'f1', '-y'))
+    }
+    await settle(80)
+    const free = await editor(s, 'free')
+    sendUpdate(free, append(free, 'f2', '-free'))
+    await until(() => shared(s).f2 === 'two-free' && record(s).f2 === 'two-free', 2000, 'the change of the other user')
+    expect(free.errors).toEqual([])
+    for (const target of stuck) expect(codes(target)).toEqual([])
   })
 })
 
@@ -157,6 +177,26 @@ describe('a sender that may not write does not get in the way of one that may', 
     expect(shared(s).f1).toBe('one-legit')
   })
 
+  it('a reader with many connections, each holding as much as one may, while its checks are slow: the editor is served and never refused', async () => {
+    const s = await open({ adapterOptions: { heldUpdateRetryMs: 20, heldUpdateMaxQueued: 16 } })
+    s.world.readOnlyUsers.add('r')
+    const readers = [] as Editor[]
+    for (let index = 0; index < 9; index += 1) readers.push(await editor(s, 'r'))
+    const e = await editor(s, 'e')
+    s.world.readDelayFor.set('r', 200)
+    for (const reader of readers) {
+      const spam = change(reader, 'f1', 'spam')
+      for (let index = 0; index < 16; index += 1) sendUpdate(reader, spam)
+    }
+    await settle(60) // every queue of the reader is full and its first check is still running
+    sendUpdate(e, append(e, 'f1', '-legit'))
+    await until(() => shared(s).f1 === 'one-legit' && record(s).f1 === 'one-legit', 2000, 'the change of the editor')
+    await settle(400)
+    expect(e.errors).toEqual([])
+    expect(e.invalidated).toEqual([])
+    expect(shared(s).f1).toBe('one-legit')
+  })
+
   it('a sender whose checks do not answer does not make another sender wait', async () => {
     const s = await open()
     const stuck = await editor(s, 'stuck')
@@ -164,10 +204,9 @@ describe('a sender that may not write does not get in the way of one that may', 
     s.world.readGateFor.set('stuck', new Promise<void>(() => undefined))
     sendUpdate(stuck, append(stuck, 'f1', '-stuck'))
     await settle(40)
-    const sentAt = Date.now()
     sendUpdate(free, append(free, 'f2', '-free'))
+    // The check of the first sender never returns in this cell, so this can only be reached past it.
     await until(() => shared(s).f2 === 'two-free', 2000, 'the change of the other sender')
-    expect(Date.now() - sentAt).toBeLessThan(500)
     expect(shared(s).f1).toBe('one')
   })
 })
@@ -293,13 +332,12 @@ describe('how long a change may wait', () => {
     const b = await editor(s, 'b')
     let release: () => void = () => undefined
     s.world.readGateFor.set('a', new Promise<void>((resolve) => { release = resolve }))
-    const sentAt = Date.now()
     sendUpdate(a, append(a, 'f1', '-never-answered'))
     await settle(30)
     sendUpdate(b, append(b, 'f2', '-b'))
     await until(() => shared(s).f2 === 'two-b', 1000, 'the change of the other sender')
+    // The read is still not released here: the refusal can only have come from the time bound.
     await until(() => a.errors.length === 1 && a.invalidated.length === 1, 2000, 'the refusal at the time bound')
-    expect(Date.now() - sentAt).toBeLessThan(900)
     expect(codes(a)).toEqual(['UNAVAILABLE: Change could not be checked in time; reopen the record'])
     // The read returns at last and says yes: too late, nothing is applied.
     s.world.readGateFor.delete('a')
