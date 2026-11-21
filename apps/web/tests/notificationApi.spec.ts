@@ -246,6 +246,16 @@ describe('notification preference reads and writes', () => {
     transport.apiFetch.mockResolvedValue(response(409, { error: { code: 'PREFERENCE_STALE', currentRevision: 7 } }))
     expect(await patchNotificationPreference({ topic: 'task_reminder', expectedRevision: 6 })).toEqual({ kind: 'conflict', code: 'PREFERENCE_STALE', currentRevision: 7 })
   })
+
+  it('preserves a non-stale conflict reason for display', async () => {
+    transport.apiFetch.mockResolvedValue(response(409, { error: { code: 'ENDPOINT_NOT_USABLE', reason: 'endpoint_stale' } }))
+    expect(await patchNotificationPreference({ topic: 'task_reminder', expectedRevision: 6 })).toEqual({ kind: 'conflict', code: 'ENDPOINT_NOT_USABLE', reason: 'endpoint_stale' })
+  })
+
+  it('preserves server-provided validation fields for display', async () => {
+    transport.apiFetch.mockResolvedValue(response(422, { error: { code: 'INVALID_REQUEST', fields: ['quietHours.start'] } }))
+    expect(await patchNotificationPreference({ topic: 'task_reminder', expectedRevision: 6 })).toEqual({ kind: 'validation', code: 'INVALID_REQUEST', fields: ['quietHours.start'] })
+  })
 })
 
 describe('notification test sends', () => {

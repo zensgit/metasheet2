@@ -117,8 +117,8 @@ export type NotificationWriteFailure =
   | { kind: 'disabled' }
   | { kind: 'not_found' }
   | { kind: 'forbidden' }
-  | { kind: 'conflict'; code: string; currentRevision?: number }
-  | { kind: 'validation'; code: string; reason?: string }
+  | { kind: 'conflict'; code: string; currentRevision?: number; reason?: string }
+  | { kind: 'validation'; code: string; reason?: string; fields?: string[] }
   | { kind: 'error'; status: number }
 
 export type NotificationEndpointWriteResult =
@@ -369,11 +369,14 @@ async function safeJson(response: Response): Promise<unknown> {
   }
 }
 
-function errorDetails(body: unknown): { code: string | null; reason?: string; currentRevision?: number } {
+function errorDetails(body: unknown): { code: string | null; reason?: string; currentRevision?: number; fields?: string[] } {
   if (!isRecord(body) || !isRecord(body.error) || typeof body.error.code !== 'string') return { code: null }
-  const result: { code: string; reason?: string; currentRevision?: number } = { code: body.error.code }
+  const result: { code: string; reason?: string; currentRevision?: number; fields?: string[] } = { code: body.error.code }
   if (typeof body.error.reason === 'string') result.reason = body.error.reason
   if (isRevision(body.error.currentRevision)) result.currentRevision = body.error.currentRevision
+  if (Array.isArray(body.error.fields) && body.error.fields.every((field) => typeof field === 'string')) {
+    result.fields = [...body.error.fields]
+  }
   return result
 }
 
@@ -397,10 +400,20 @@ async function writeFailure(response: Response): Promise<NotificationWriteFailur
   const body = await safeJson(response)
   const details = errorDetails(body)
   if (response.status === 409 && details.code !== null) {
-    return { kind: 'conflict', code: details.code, ...(details.currentRevision === undefined ? {} : { currentRevision: details.currentRevision }) }
+    return {
+      kind: 'conflict',
+      code: details.code,
+      ...(details.currentRevision === undefined ? {} : { currentRevision: details.currentRevision }),
+      ...(details.reason === undefined ? {} : { reason: details.reason }),
+    }
   }
   if (response.status === 422 && details.code !== null) {
-    return { kind: 'validation', code: details.code, ...(details.reason === undefined ? {} : { reason: details.reason }) }
+    return {
+      kind: 'validation',
+      code: details.code,
+      ...(details.reason === undefined ? {} : { reason: details.reason }),
+      ...(details.fields === undefined ? {} : { fields: details.fields }),
+    }
   }
   return { kind: 'error', status: response.status }
 }

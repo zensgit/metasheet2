@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import { createMemoryHistory, createRouter, RouterView, type Router } from 'vue-router'
@@ -41,6 +43,8 @@ const CONNECTION = '11111111-1111-4111-8111-111111111111'
 const OTHER_CONNECTION = '22222222-2222-4222-8222-222222222222'
 const ENDPOINT = '33333333-3333-4333-8333-333333333333'
 const OTHER_ENDPOINT = '44444444-4444-4444-8444-444444444444'
+const THIRD_CONNECTION = '55555555-5555-4555-8555-555555555555'
+const THIRD_ENDPOINT = '66666666-6666-4666-8666-666666666666'
 const BROWSER_ZONE = 'Pacific/Chatham'
 
 function endpoint(over: Record<string, unknown> = {}): Record<string, unknown> {
@@ -238,6 +242,13 @@ async function select(el: HTMLElement, testid: string, value: string): Promise<v
   await flush()
 }
 
+async function fill(el: HTMLElement, testid: string, value: string): Promise<void> {
+  const field = must(el, testid) as HTMLInputElement
+  field.value = value
+  field.dispatchEvent(new Event('input'))
+  await flush()
+}
+
 async function toggle(el: HTMLElement, testid: string): Promise<void> {
   ;(must(el, testid) as HTMLInputElement).click()
   await flush()
@@ -296,10 +307,11 @@ describe('notification preference page states', () => {
     expect(shown(el, 'notification-types')).toBeTruthy()
   })
 
-  it('renders the exact feature-disabled copy on a 404', async () => {
+  it('renders the exact feature-disabled copy with organization guidance on a 404', async () => {
     h_.endpointsReply.mockReturnValue(response(404, { error: { code: 'NOT_FOUND' } }))
     const el = await mountView()
     expect(text(el, 'notification-disabled')).toBe('管理员尚未启用通知偏好')
+    expect(text(el, 'notification-disabled-org-hint')).toBe('如果功能已启用，请确认已选择组织。')
     expect(shown(el, 'notification-types')).toBeNull()
   })
 
@@ -383,7 +395,7 @@ describe('notification preference page states', () => {
     expect(text(el, 'notification-effective-task_reminder')).toBe('此偏好目前未生效：该通知类型尚未接入发送流程')
   })
 
-  it('marks a preference effective only when both applicability and usability are true', async () => {
+  it('marks a preference effective when enabled, applicable, and usable', async () => {
     h_.preferencesReply.mockReturnValue(response(200, preferencesListing({
       topics: [topic({
         applies: { now: true, reason: null },
@@ -601,6 +613,240 @@ describe('notification test sending', () => {
     await click(el, 'notification-test-0')
     await click(el, 'notification-dialog-confirm')
     expect(text(el, 'notification-action-result')).toBe('请求过于频繁，请在 17 秒后重试')
+  })
+})
+
+describe('third-round notification regressions', () => {
+  const storedPreference = (over: Record<string, unknown> = {}) => ({
+    enabled: true,
+    primaryEndpointId: ENDPOINT,
+    fallbackEndpointId: null,
+    quietHours: null,
+    revision: 4,
+    ...over,
+  })
+  const alternateEndpoint = () => endpoint({
+    id: THIRD_ENDPOINT,
+    connection: { id: THIRD_CONNECTION, provider: 'dingtalk', label: '钉钉 · Alternate' },
+  })
+
+  it('discards an older refresh after a successful save', async () => {
+    const el = await mountView()
+    const oldEndpoints = deferred<Response>()
+    const oldPreferences = deferred<Response>()
+    h_.endpointsReply.mockReturnValue(oldEndpoints.promise)
+    h_.preferencesReply.mockReturnValue(oldPreferences.promise)
+    await click(el, 'notification-refresh')
+    await toggle(el, 'notification-enabled-task_reminder')
+    await submit(el)
+    expect(text(el, 'notification-action-result')).toBe('已保存')
+    expect((must(el, 'notification-enabled-task_reminder') as HTMLInputElement).checked).toBe(false)
+
+    oldEndpoints.resolve(response(200, endpointsListing()))
+    oldPreferences.resolve(response(200, preferencesListing()))
+    await flush()
+    expect((must(el, 'notification-enabled-task_reminder') as HTMLInputElement).checked).toBe(false)
+    expect((page().topics[0].preference as { enabled: boolean; revision: number }).enabled).toBe(false)
+    expect((page().topics[0].preference as { enabled: boolean; revision: number }).revision).toBe(1)
+    expect(page().loading).toBe(false)
+    expect((must(el, 'notification-refresh') as HTMLButtonElement).disabled).toBe(false)
+    expect(text(el, 'notification-action-result')).toBe('已保存')
+  })
+
+  it.each([
+    ['ENDPOINT_NOT_USABLE', 'endpoint_stale', '绑定关系需要重新确认'],
+    ['ENDPOINT_NOT_ALLOWED_FOR_TOPIC', null, '该渠道不能用于此通知类型'],
+    ['FALLBACK_PROVIDER_NOT_ALLOWED', null, '备用渠道必须与主渠道使用不同提供方'],
+  ])('keeps the draft and explains %s instead of reloading', async (code, reason, copy) => {
+    h_.preferencesReply.mockReturnValue(response(200, preferencesListing({ topics: [topic({ preference: storedPreference() })] })))
+    const el = await mountView()
+    await toggle(el, 'notification-quiet-enabled-task_reminder')
+    await fill(el, 'notification-quiet-start-task_reminder', '23:00')
+    h_.patchReply.mockReturnValue(response(409, { error: { code, ...(reason ? { reason } : {}) } }))
+    await submit(el)
+    expect(text(el, 'notification-action-result')).toBe(copy)
+    expect(calls('/api/me/notification-preferences')).toHaveLength(1)
+    expect(calls('/api/me/notification-endpoints')).toHaveLength(1)
+    expect(page().drafts.task_reminder.quietEnabled).toBe(true)
+    expect(page().drafts.task_reminder.quietStart).toBe('23:00')
+    expect(text(el, 'notification-action-result')).not.toBe('偏好已在别处更新，已重新读取，请核对后再保存')
+  })
+
+  it('preserves stored primary and fallback ids when both are temporarily unusable', async () => {
+    h_.endpointsReply.mockReturnValue(response(200, endpointsListing({
+      endpoints: [
+        endpoint({ usable: false, unusableReason: 'connection_inactive' }),
+        backupEndpoint({ usable: false, unusableReason: 'endpoint_stale' }),
+        alternateEndpoint(),
+      ],
+    })))
+    h_.preferencesReply.mockReturnValue(response(200, preferencesListing({
+      topics: [topic({ preference: storedPreference({ fallbackEndpointId: OTHER_ENDPOINT, revision: 9 }) })],
+    })))
+    const el = await mountView()
+    const primary = must(el, 'notification-primary-task_reminder') as HTMLSelectElement
+    const fallback = must(el, 'notification-fallback-task_reminder') as HTMLSelectElement
+    expect(primary.value).toBe(ENDPOINT)
+    expect(fallback.value).toBe(OTHER_ENDPOINT)
+    expect(Array.from(primary.options).find((option) => option.value === ENDPOINT)?.disabled).toBe(true)
+    expect(Array.from(fallback.options).find((option) => option.value === OTHER_ENDPOINT)?.disabled).toBe(true)
+    expect(text(el, 'notification-primary-issue-task_reminder')).toBe('连接尚未启用')
+    expect(text(el, 'notification-fallback-issue-task_reminder')).toBe('绑定关系需要重新确认')
+
+    await toggle(el, 'notification-enabled-task_reminder')
+    await submit(el)
+    const body = JSON.parse(calls('/api/me/notification-preferences', 'PATCH')[0][1]?.body as string)
+    expect(body).toMatchObject({
+      expectedRevision: 9,
+      enabled: false,
+      primaryEndpointId: ENDPOINT,
+      fallbackEndpointId: OTHER_ENDPOINT,
+    })
+  })
+
+  it('does not mark a disabled preference effective', async () => {
+    h_.preferencesReply.mockReturnValue(response(200, preferencesListing({
+      topics: [topic({
+        applies: { now: true, reason: null },
+        preference: storedPreference({ enabled: false }),
+        effective: {
+          source: 'user_primary',
+          connection: { id: CONNECTION, provider: 'dingtalk', label: '钉钉 · Primary' },
+          usable: true,
+          fallback: null,
+        },
+      })],
+    })))
+    const el = await mountView()
+    expect(text(el, 'notification-effective-task_reminder')).toBe('此偏好目前未生效')
+    expect(text(el, 'notification-effective-task_reminder')).not.toContain('通知发送能力尚未启用')
+  })
+
+  it('uses neutral copy when an applicable preference has an unusable endpoint and no reason code', async () => {
+    h_.preferencesReply.mockReturnValue(response(200, preferencesListing({
+      topics: [topic({
+        applies: { now: true, reason: null },
+        preference: storedPreference(),
+        effective: {
+          source: 'user_primary',
+          connection: { id: CONNECTION, provider: 'dingtalk', label: '钉钉 · Primary' },
+          usable: false,
+          fallback: null,
+        },
+      })],
+    })))
+    const el = await mountView()
+    expect(text(el, 'notification-effective-task_reminder')).toBe('此偏好目前未生效')
+    expect(text(el, 'notification-effective-task_reminder')).not.toContain('通知发送能力尚未启用')
+  })
+
+  it('uses an ASCII separator for the English effectiveness explanation', async () => {
+    useLocale().setLocale('en')
+    const el = await mountView()
+    expect(text(el, 'notification-effective-task_reminder')).toBe('This preference is currently not effective: This notification type is not connected to the delivery flow yet')
+    expect(text(el, 'notification-effective-task_reminder')).not.toContain('：')
+  })
+
+  it('shows the specific PROOF_AMBIGUOUS explanation after an enable conflict', async () => {
+    h_.endpointsReply.mockReturnValue(response(200, endpointsListing({ candidates: [candidate()] })))
+    h_.establishReply.mockReturnValue(response(409, { error: { code: 'PROOF_AMBIGUOUS' } }))
+    const el = await mountView()
+    await click(el, 'notification-enable-0')
+    expect(text(el, 'notification-action-result')).toBe('绑定关系不唯一，请联系管理员处理')
+    expect(calls('/api/me/notification-endpoints')).toHaveLength(1)
+  })
+
+  it.each(['test', 'revoke'] as const)('moves focus to the persistent result after confirming %s', async (action) => {
+    const reply = deferred<Response>()
+    if (action === 'test') {
+      h_.endpointsReply.mockReturnValue(response(200, endpointsListing({ delivery: { enabled: true, testSendAvailable: true, reason: null } })))
+      h_.testReply.mockReturnValue(reply.promise)
+    } else {
+      h_.revokeReply.mockReturnValue(reply.promise)
+    }
+    const el = await mountView()
+    if (action === 'revoke') h_.endpointsReply.mockReturnValue(response(200, endpointsListing({ endpoints: [] })))
+    await click(el, action === 'test' ? 'notification-test-0' : 'notification-revoke-0')
+    const confirm = must(el, 'notification-dialog-confirm') as HTMLButtonElement
+    confirm.focus()
+    confirm.click()
+    await flush()
+    expect(document.activeElement).toBe(must(el, 'notification-action-result'))
+    reply.resolve(action === 'test'
+      ? response(200, { outcome: 'accepted', code: 'TEST_ACCEPTED', testSendId: 'test-send-1' })
+      : response(200, { endpoint: { id: ENDPOINT, status: 'revoked', revision: 2 } }))
+    await flush()
+    expect(document.activeElement).toBe(must(el, 'notification-action-result'))
+  })
+
+  it.each([
+    ['fallbackEndpointId', '备用渠道选择无效，请检查主、备渠道'],
+    ['quietHours.start', '静默时段开始时间无效'],
+  ])('shows the server-provided 422 field %s', async (field, copy) => {
+    h_.patchReply.mockReturnValue(response(422, { error: { code: 'INVALID_REQUEST', fields: [field] } }))
+    const el = await mountView()
+    await submit(el)
+    expect(text(el, 'notification-action-result')).toBe(copy)
+    expect(calls('/api/me/notification-preferences')).toHaveLength(1)
+  })
+
+  it.each([
+    ['22:00', '22:00', BROWSER_ZONE],
+    ['22:00', '08:00', 'Nowhere/Land'],
+  ])('rejects an invalid quiet draft before transport: %s %s %s', async (start, end, timeZone) => {
+    const el = await mountView()
+    await toggle(el, 'notification-quiet-enabled-task_reminder')
+    await fill(el, 'notification-quiet-start-task_reminder', start)
+    await fill(el, 'notification-quiet-end-task_reminder', end)
+    await fill(el, 'notification-time-zone-task_reminder', timeZone)
+    await submit(el)
+    expect(text(el, 'notification-form-error-task_reminder')).toBe('请填写有效的起止时间和时区；起止时间不能相同')
+    expect(calls('/api/me/notification-preferences', 'PATCH')).toHaveLength(0)
+  })
+
+  it('keeps the stored quiet-hours time zone instead of replacing it with the browser zone', async () => {
+    h_.preferencesReply.mockReturnValue(response(200, preferencesListing({
+      topics: [topic({ preference: storedPreference({ quietHours: { start: '22:00', end: '08:00', timeZone: 'Europe/Paris' }, revision: 2 }) })],
+    })))
+    const el = await mountView()
+    expect((must(el, 'notification-time-zone-task_reminder') as HTMLInputElement).value).toBe('Europe/Paris')
+    await submit(el)
+    expect(calls('/api/me/notification-preferences', 'PATCH')[0][1]?.body).toContain('"timeZone":"Europe/Paris"')
+  })
+
+  it('marks directly disabled quiet-hours controls and pins their disabled styling', async () => {
+    const el = await mountView()
+    const start = must(el, 'notification-quiet-start-task_reminder') as HTMLInputElement
+    const zone = must(el, 'notification-time-zone-task_reminder') as HTMLInputElement
+    expect(start.disabled).toBe(true)
+    expect(zone.disabled).toBe(true)
+    const source = readFileSync(resolve('src/views/NotificationPreferencesView.vue'), 'utf8')
+    expect(source).toContain('button:disabled,\ninput:disabled,\nselect:disabled,')
+    expect(source).toContain('cursor: not-allowed;\n  opacity: 0.62;')
+    await toggle(el, 'notification-quiet-enabled-task_reminder')
+    expect(start.disabled).toBe(false)
+    expect(zone.disabled).toBe(false)
+  })
+
+  it('clears a pending test retry when another write starts', async () => {
+    h_.endpointsReply.mockReturnValue(response(200, endpointsListing({ delivery: { enabled: true, testSendAvailable: true, reason: null } })))
+    h_.testReply.mockRejectedValue(new TypeError('offline'))
+    const el = await mountView()
+    await click(el, 'notification-test-0')
+    await click(el, 'notification-dialog-confirm')
+    expect(shown(el, 'notification-test-retry')).toBeTruthy()
+    await submit(el)
+    expect(text(el, 'notification-action-result')).toBe('已保存')
+    expect(shown(el, 'notification-test-retry')).toBeNull()
+    expect(calls(`/api/me/notification-endpoints/${ENDPOINT}/test`, 'POST')).toHaveLength(1)
+  })
+
+  it('pins the guard runner and installs with an empty npmrc', () => {
+    const workflow = readFileSync(resolve('..', '..', '.github', 'workflows', 'notification-preferences-web-guard.yml'), 'utf8')
+    expect(workflow).toContain('runs-on: ubuntu-24.04')
+    expect(workflow).toContain('echo "" > /tmp/empty-npmrc')
+    expect(workflow).toContain('NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc')
+    expect(workflow.indexOf('Use empty npmrc for pnpm')).toBeLessThan(workflow.indexOf('Install dependencies'))
   })
 })
 

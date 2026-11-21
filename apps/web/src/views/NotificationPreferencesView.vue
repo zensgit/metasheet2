@@ -16,7 +16,7 @@
       </button>
     </header>
 
-    <p class="notification-preferences__live" data-testid="notification-action-result" aria-live="polite">
+    <p ref="actionResultElement" class="notification-preferences__live" data-testid="notification-action-result" aria-live="polite" tabindex="-1">
       {{ actionMessage }}
     </p>
     <button
@@ -34,6 +34,9 @@
     </p>
     <p v-else-if="loadState === 'disabled'" data-testid="notification-disabled" role="status">
       {{ t.featureDisabled }}
+    </p>
+    <p v-if="loadState === 'disabled'" class="notification-note" data-testid="notification-disabled-org-hint">
+      {{ t.featureDisabledOrgHint }}
     </p>
     <div v-else-if="loadState === 'error'" data-testid="notification-error" role="alert">
       <p>{{ t.loadFailed }}</p>
@@ -172,10 +175,18 @@
                 :data-testid="`notification-primary-${topic.topic}`"
                 @change="onPrimaryChange(topic.topic)"
               >
-                <option v-for="endpoint in usableEndpoints" :key="endpoint.id" :value="endpoint.id">
+                <option
+                  v-for="endpoint in primaryEndpoints(topic.topic)"
+                  :key="endpoint.id"
+                  :value="endpoint.id"
+                  :disabled="!isUsableEndpoint(endpoint)"
+                >
                   {{ endpoint.connection.label }}
                 </option>
               </select>
+              <p v-if="endpointIssue(topic.topic, 'primary')" class="notification-reason" :data-testid="`notification-primary-issue-${topic.topic}`">
+                {{ endpointIssue(topic.topic, 'primary') }}
+              </p>
             </div>
 
             <div class="notification-field">
@@ -186,10 +197,18 @@
                 :data-testid="`notification-fallback-${topic.topic}`"
               >
                 <option value="">{{ t.noFallback }}</option>
-                <option v-for="endpoint in fallbackEndpoints(topic.topic)" :key="endpoint.id" :value="endpoint.id">
+                <option
+                  v-for="endpoint in fallbackEndpoints(topic.topic)"
+                  :key="endpoint.id"
+                  :value="endpoint.id"
+                  :disabled="fallbackOptionDisabled(topic.topic, endpoint)"
+                >
                   {{ endpoint.connection.label }}
                 </option>
               </select>
+              <p v-if="endpointIssue(topic.topic, 'fallback')" class="notification-reason" :data-testid="`notification-fallback-issue-${topic.topic}`">
+                {{ endpointIssue(topic.topic, 'fallback') }}
+              </p>
             </div>
 
             <label class="notification-choice">
@@ -345,6 +364,7 @@ const drafts = ref<Record<string, TopicDraft>>({})
 const formErrors = ref<Record<string, string>>({})
 const pendingWrite = ref(false)
 const actionMessage = ref('')
+const actionResultElement = ref<HTMLElement | null>(null)
 const retryAttempt = ref<{ endpoint: NotificationEndpoint; idempotencyKey: string } | null>(null)
 const dialog = ref<DialogState | null>(null)
 const dialogElement = ref<HTMLElement | null>(null)
@@ -369,14 +389,10 @@ function endpointStatus(endpoint: NotificationEndpoint): string {
 
 function makeDraft(topic: NotificationTopic, usable: NotificationEndpoint[]): TopicDraft {
   const preference = topic.preference
-  const first = usable[0]
-  const storedPrimary = usable.find((endpoint) => endpoint.id === preference?.primaryEndpointId)
-  const primary = storedPrimary ?? first
-  const storedFallback = usable.find((endpoint) => endpoint.id === preference?.fallbackEndpointId && endpoint.connection.provider !== primary?.connection.provider)
   return {
     enabled: preference?.enabled ?? true,
-    primaryEndpointId: primary?.id ?? '',
-    fallbackEndpointId: storedFallback?.id ?? '',
+    primaryEndpointId: preference?.primaryEndpointId ?? usable[0]?.id ?? '',
+    fallbackEndpointId: preference?.fallbackEndpointId ?? '',
     quietEnabled: preference?.quietHours !== null && preference?.quietHours !== undefined,
     quietStart: preference?.quietHours?.start ?? '22:00',
     quietEnd: preference?.quietHours?.end ?? '08:00',
@@ -423,11 +439,17 @@ async function refresh(): Promise<void> {
   await loadData()
 }
 
+function invalidateReads(): void {
+  readGeneration += 1
+  loading.value = false
+}
+
 function beginWrite(): number | null {
   if (pendingWrite.value || !active) return null
   pendingWrite.value = true
   actionMessage.value = ''
   formErrors.value = {}
+  retryAttempt.value = null
   return ++writeGeneration
 }
 
@@ -439,11 +461,21 @@ function endWrite(token: number): void {
   if (writeIsCurrent(token)) pendingWrite.value = false
 }
 
+function validationFieldText(field: string): string {
+  if (field === 'fallbackEndpointId') return t.value.invalidFallback
+  if (field === 'quietHours.start') return t.value.invalidQuietStart
+  if (field === 'quietHours.end') return t.value.invalidQuietEnd
+  if (field === 'quietHours.timeZone') return t.value.invalidQuietTimeZone
+  if (field === 'quietHours') return t.value.quietInvalid
+  return t.value.actionFailed
+}
+
 function writeFailureText(result: NotificationWriteFailure): string {
-  if (result.kind === 'validation' || result.kind === 'conflict') {
-    const code = result.kind === 'validation' ? result.reason ?? result.code : result.code
-    return notificationReason(code, t.value)
+  if (result.kind === 'validation') {
+    if (result.fields && result.fields.length > 0) return validationFieldText(result.fields[0])
+    return notificationReason(result.reason ?? result.code, t.value)
   }
+  if (result.kind === 'conflict') return notificationReason(result.reason ?? result.code, t.value)
   return t.value.actionFailed
 }
 
@@ -453,6 +485,7 @@ async function establish(candidate: Pick<NotificationCandidate, 'connection' | '
   const result = await establishNotificationEndpoint({ connectionId: candidate.connection.id, proofKind: candidate.proofKind })
   if (!writeIsCurrent(token)) return
   if (result.kind === 'ok') {
+    invalidateReads()
     actionMessage.value = t.value.established
     await loadData()
   } else {
@@ -465,15 +498,57 @@ async function reenable(endpoint: NotificationEndpoint): Promise<void> {
   await establish({ connection: endpoint.connection, proofKind: endpoint.proofKind })
 }
 
+function isUsableEndpoint(endpoint: NotificationEndpoint): boolean {
+  return endpoint.status === 'active' && endpoint.usable
+}
+
+function endpointById(id: string): NotificationEndpoint | undefined {
+  return endpoints.value?.endpoints.find((endpoint) => endpoint.id === id)
+}
+
+function topicByName(topic: string): NotificationTopic | undefined {
+  return topics.value.find((item) => item.topic === topic)
+}
+
+function primaryEndpoints(topic: string): NotificationEndpoint[] {
+  const options = [...usableEndpoints.value]
+  const storedId = topicByName(topic)?.preference?.primaryEndpointId
+  const stored = storedId ? endpointById(storedId) : undefined
+  if (stored && !options.some((endpoint) => endpoint.id === stored.id)) options.push(stored)
+  return options
+}
+
 function fallbackEndpoints(topic: string): NotificationEndpoint[] {
-  const primary = usableEndpoints.value.find((endpoint) => endpoint.id === drafts.value[topic]?.primaryEndpointId)
-  return usableEndpoints.value.filter((endpoint) => endpoint.connection.provider !== primary?.connection.provider)
+  const primary = endpointById(drafts.value[topic]?.primaryEndpointId ?? '')
+  const options = usableEndpoints.value.filter((endpoint) => endpoint.connection.provider !== primary?.connection.provider)
+  const storedId = topicByName(topic)?.preference?.fallbackEndpointId
+  const stored = storedId ? endpointById(storedId) : undefined
+  if (stored && !options.some((endpoint) => endpoint.id === stored.id)) options.push(stored)
+  return options
+}
+
+function fallbackOptionDisabled(topic: string, endpoint: NotificationEndpoint): boolean {
+  const primary = endpointById(drafts.value[topic]?.primaryEndpointId ?? '')
+  return !isUsableEndpoint(endpoint) || endpoint.connection.provider === primary?.connection.provider
+}
+
+function endpointIssue(topic: string, channel: 'primary' | 'fallback'): string | null {
+  const preference = topicByName(topic)?.preference
+  const storedId = channel === 'primary' ? preference?.primaryEndpointId : preference?.fallbackEndpointId
+  if (!storedId || drafts.value[topic]?.[`${channel}EndpointId`] !== storedId) return null
+  const endpoint = endpointById(storedId)
+  if (!endpoint) return notificationReason('endpoint_not_found', t.value)
+  if (!isUsableEndpoint(endpoint)) return notificationReason(endpoint.unusableReason, t.value)
+  if (channel === 'fallback' && endpoint.connection.provider === endpointById(drafts.value[topic].primaryEndpointId)?.connection.provider) {
+    return notificationReason('FALLBACK_PROVIDER_NOT_ALLOWED', t.value)
+  }
+  return null
 }
 
 function onPrimaryChange(topic: string): void {
   const draft = drafts.value[topic]
-  const fallback = usableEndpoints.value.find((endpoint) => endpoint.id === draft.fallbackEndpointId)
-  const primary = usableEndpoints.value.find((endpoint) => endpoint.id === draft.primaryEndpointId)
+  const fallback = endpointById(draft.fallbackEndpointId)
+  const primary = endpointById(draft.primaryEndpointId)
   if (fallback && fallback.connection.provider === primary?.connection.provider) draft.fallbackEndpointId = ''
 }
 
@@ -509,10 +584,11 @@ async function save(topic: NotificationTopic): Promise<void> {
   })
   if (!writeIsCurrent(token)) return
   if (result.kind === 'ok') {
+    invalidateReads()
     topics.value = topics.value.map((item) => item.topic === topic.topic ? result.topic : item)
     drafts.value = { ...drafts.value, [topic.topic]: makeDraft(result.topic, usableEndpoints.value) }
     actionMessage.value = t.value.saved
-  } else if (result.kind === 'conflict') {
+  } else if (result.kind === 'conflict' && result.code === 'PREFERENCE_STALE') {
     actionMessage.value = t.value.preferenceConflict
     await loadData()
   } else {
@@ -522,9 +598,9 @@ async function save(topic: NotificationTopic): Promise<void> {
 }
 
 function effectiveText(topic: NotificationTopic): string {
-  if (topic.applies.now && topic.effective.usable) return t.value.effectiveNow
-  const reason = topic.applies.reason ?? (topic.effective.usable ? null : 'delivery_disabled')
-  return `${t.value.effectiveNotNow}：${notificationReason(reason, t.value)}`
+  if ((topic.preference?.enabled ?? true) && topic.applies.now && topic.effective.usable) return t.value.effectiveNow
+  if (topic.applies.reason === null) return t.value.effectiveNotNow
+  return `${t.value.effectiveNotNow}${t.value.effectiveReasonSeparator}${notificationReason(topic.applies.reason, t.value)}`
 }
 
 function rememberFocus(): void {
@@ -581,7 +657,7 @@ async function confirmDialog(): Promise<void> {
   const current = dialog.value
   if (!current || pendingWrite.value) return
   dialog.value = null
-  await nextTick(restoreFocus)
+  await nextTick(() => actionResultElement.value?.focus())
   if (current.kind === 'revoke') await revoke(current.endpoint)
   else await sendTest(current.endpoint)
 }
@@ -592,6 +668,7 @@ async function revoke(endpoint: NotificationEndpoint): Promise<void> {
   const result = await revokeNotificationEndpoint(endpoint.id)
   if (!writeIsCurrent(token)) return
   if (result.kind === 'ok') {
+    invalidateReads()
     actionMessage.value = t.value.revoked
     await loadData()
   } else {
@@ -632,6 +709,7 @@ function testResultText(result: NotificationTestSendResult): string {
 async function executeTest(endpoint: NotificationEndpoint, idempotencyKey: string, token: number): Promise<void> {
   const result = await testNotificationEndpoint(endpoint.id, idempotencyKey)
   if (!writeIsCurrent(token)) return
+  if (result.kind === 'accepted' || result.kind === 'failed' || result.kind === 'outcome_unknown') invalidateReads()
   retryAttempt.value = result.kind === 'network_error' ? { endpoint, idempotencyKey } : null
   actionMessage.value = testResultText(result)
   endWrite(token)
@@ -667,7 +745,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   active = false
-  readGeneration += 1
+  invalidateReads()
   writeGeneration += 1
 })
 
@@ -822,6 +900,8 @@ button {
 }
 
 button:disabled,
+input:disabled,
+select:disabled,
 fieldset:disabled input,
 fieldset:disabled select {
   cursor: not-allowed;
