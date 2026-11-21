@@ -47,6 +47,7 @@ import {
 import { ensureRecordNotLocked } from './record-lock'
 import { insertCommittedAuditInTxn, type OapiWriteAuditContext } from './oapi-write-audit'
 import { isRetryableLiveLinkDatabaseConflict } from './live-link-projection-integrity'
+import { bindOwnDraftAttachments } from './attachment-service'
 import {
   assertLinkWriterFencePlanMatchesFieldGuards,
   enterLinkWriterFencePlan,
@@ -944,6 +945,8 @@ export class RecordWriteService {
         const patch: Record<string, unknown> = {}
         const unsetIds: string[] = []
         const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
+        // Attachment fields as stored; the writer's own draft uploads among them are bound after the UPDATE.
+        const attachmentWrites = new Map<string, string[]>()
         let applied = 0
 
         for (const change of changes) {
@@ -969,7 +972,9 @@ export class RecordWriteService {
           }
 
           if (field.type === 'attachment') {
-            patch[change.fieldId] = h.normalizeAttachmentIds(change.value)
+            const ids = h.normalizeAttachmentIds(change.value)
+            patch[change.fieldId] = ids
+            attachmentWrites.set(change.fieldId, ids)
             applied += 1
             continue
           }
@@ -1115,6 +1120,12 @@ export class RecordWriteService {
           actorId,
           revisionId,
         })
+
+        // The writer's own draft uploads (stored with no record) written into this record are bound to it, so the
+        // draft sweep does not delete them (bindOwnDraftAttachments).
+        for (const [fieldId, ids] of attachmentWrites.entries()) {
+          await bindOwnDraftAttachments({ query, sheetId, recordId, fieldId, attachmentIds: ids, actorId })
+        }
 
         // Sync link table
         if (linkUpdates.size > 0) {

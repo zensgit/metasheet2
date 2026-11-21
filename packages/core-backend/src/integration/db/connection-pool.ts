@@ -207,6 +207,7 @@ export class ConnectionPool {
       parent: this.transactionDepth.getStore(),
     }
     return this.transactionDepth.run(depthContext, async () => {
+      let discard = false
       try {
         await rawClient.query('BEGIN')
         const query: TransactionQuery = async <R extends QueryResultRow = QueryResultRow>(
@@ -227,12 +228,14 @@ export class ConnectionPool {
         try {
           await rawClient.query('ROLLBACK')
         } catch (rollbackErr) {
+          discard = true
           this.logger.error('ROLLBACK failed', rollbackErr instanceof Error ? rollbackErr : undefined)
         }
         throw e
       } finally {
         depthContext.active = false
-        rawClient.release()
+        if (discard) rawClient.release(true)
+        else rawClient.release()
       }
     })
   }

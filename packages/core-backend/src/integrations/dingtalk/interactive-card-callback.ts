@@ -53,6 +53,7 @@
  * throws back into this path and owns no ledger/engine access, so a failed card update can never
  * roll back a committed action (lock §B-4 row 6).
  */
+import { checkCardConnectionBeforeDispatch } from '../../auth/dingtalk-legacy-resource-scope'
 import { createHmac } from 'crypto'
 
 import { Logger } from '../../core/logger'
@@ -133,6 +134,7 @@ export type DingTalkApprovalCardCallbackResult =
         | 'corp_anchor_conflict'
         | 'delivery_corp_unresolved'
         | 'corp_mismatch'
+        | 'source_unavailable'
     }
   | { outcome: 'link_secret_unavailable'; deliveryId: string }
   | { outcome: 'executed'; deliveryId: string; summary: ApprovalCardDeliverySummary }
@@ -370,6 +372,8 @@ export function parseDingTalkApprovalCardCallback(payload: unknown): DingTalkApp
 export type DingTalkApprovalCardCallbackDeps = {
   query: QueryFn
   approvals: Pick<ApprovalProductService, 'dispatchAction'>
+  /** Scope checks and action authorization must use the same backing database. */
+  transaction?: <T>(work: (client: { query: QueryFn }) => Promise<T>) => Promise<T>
   /**
    * B-4 card-update sender override (tests / alternate transports). Omitted → the production
    * sender behind the SAME env gate as the B-2 send (`resolveDingTalkInteractiveCardStreamConfig`);
@@ -585,8 +589,8 @@ async function resolveDingTalkApprovalCardCallbackOutcome(
   }
   const token = createHmac('sha256', linkSecret).update(delivery.id).digest('hex').slice(0, 32)
 
-  const outcome = await executeApprovalActionFromCardDelivery(
-    { query: deps.query, approvals: deps.approvals },
+  const dispatch = (query: QueryFn) => executeApprovalActionFromCardDelivery(
+    { query, approvals: deps.approvals },
     {
       deliveryId: delivery.id,
       token,
@@ -602,6 +606,26 @@ async function resolveDingTalkApprovalCardCallbackOutcome(
       },
     },
   )
+
+  const connectionId = delivery.integration_id
+  const disposition = await checkCardConnectionBeforeDispatch(deps.query, connectionId, false)
+  // On an installed schema, hold the exact connection through the engine's decision and commit.
+  let outcome: Awaited<ReturnType<typeof dispatch>> | null = null
+  if (disposition === 'uninstalled') {
+    outcome = await dispatch(deps.query)
+  } else if (disposition === 'ordinary' && deps.transaction) {
+    outcome = await deps.transaction(async ({ query }) => {
+      if (await checkCardConnectionBeforeDispatch(query, connectionId, true) !== 'ordinary') return null
+      return dispatch(query)
+    })
+  }
+  if (!outcome) {
+    return {
+      result: { outcome: 'operator_unresolved', deliveryId: delivery.id, reason: 'source_unavailable' },
+      operatorDisplayName: null,
+      completionEvidence,
+    }
+  }
 
   const operatorDisplayName = operator.userName
   switch (outcome.status) {

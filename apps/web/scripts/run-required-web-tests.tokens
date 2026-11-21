@@ -486,6 +486,9 @@ multitable-yjs-scalar-cell
 my-apps-landing-view
 myDelegationView
 newTodoPill
+notificationApi.spec.ts
+notificationLabels.spec.ts
+notificationPreferences.spec.ts
 pageShell
 parallelBranchRunsView
 permission-match-parity

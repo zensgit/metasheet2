@@ -7,7 +7,10 @@
  * Lifetime cases share this shell. A second file would only repeat it.
  */
 import { randomBytes, randomUUID } from 'node:crypto'
-import type { Request, Response } from 'express'
+import express, { type Request, type Response } from 'express'
+import request from 'supertest'
+import { generateState } from '../../src/auth/dingtalk-oauth'
+import { createLocalStrictDingTalkAuthRouter } from '../../src/routes/auth'
 import bcrypt from 'bcryptjs'
 import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool } from 'pg'
@@ -258,7 +261,8 @@ async function assertSearchPath(pool: Pool, schema: string): Promise<void> {
   const names = namesOf(seen.rows[0]?.names)
   expect(names[0]).toBe(schema)
   expect(names).toContain('pg_catalog')
-  expect(names).not.toContain('public')
+  if (schema === 'public') expect(names).toEqual(['public', 'pg_catalog'])
+  else expect(names).not.toContain('public')
 }
 
 async function waitForWatermarkSecond(watermarkMs: string): Promise<void> {
@@ -431,6 +435,8 @@ async function install(pool: Pool, db: Kysely<unknown>, schema: string): Promise
       login_enabled boolean,
       login_bound_tenant text,
       login_bound_app_scope text,
+      created_by text NOT NULL,
+      updated_by text NOT NULL,
       revision bigint
     );
     CREATE TABLE user_external_identities (
@@ -614,8 +620,8 @@ async function seed(env: Env): Promise<Seeded> {
   )
   await env.pool.query(
     `INSERT INTO directory_integration_capabilities
-       (integration_id, bound_provider, bound_org_id, login_enabled, login_bound_tenant, login_bound_app_scope, revision)
-     VALUES ($1::uuid, 'dingtalk', $2, true, $3, 'synthetic-app', 4)`,
+       (integration_id, bound_provider, bound_org_id, login_enabled, login_bound_tenant, login_bound_app_scope, revision, created_by, updated_by)
+     VALUES ($1::uuid, 'dingtalk', $2, true, $3, 'synthetic-app', 4, 'suite', 'suite')`,
     [connectionId, orgId, corpId],
   )
   await env.pool.query(
@@ -804,13 +810,18 @@ function ready(): Promise<Opened> {
 }
 
 async function openFixture(): Promise<Opened> {
-  const schema = `slgent${randomBytes(8).toString('hex')}`
-  kept.push(schema)
-  const admin = new Pool({ connectionString: databaseUrl, options: '-c search_path=pg_catalog' })
-  try {
-    await admin.query(`CREATE SCHEMA ${quote(schema)}`)
-  } finally {
-    await admin.end()
+  const snapshot = process.env.STRICT_ENTRY_FIXTURE_DATABASE
+  if (snapshot !== undefined && (!/^strictentry_[a-z0-9]{1,32}$/.test(snapshot)
+    || new URL(databaseUrl).pathname !== '/' + snapshot)) throw new Error('STRICT_ENTRY_FIXTURE_DATABASE_REFUSED')
+  const schema = snapshot ? 'public' : `slgent${randomBytes(8).toString('hex')}`
+  if (!snapshot) {
+    kept.push(schema)
+    const admin = new Pool({ connectionString: databaseUrl, options: '-c search_path=pg_catalog' })
+    try {
+      await admin.query(`CREATE SCHEMA ${quote(schema)}`)
+    } finally {
+      await admin.end()
+    }
   }
   const pool = new Pool({ connectionString: databaseUrl, options: `-c search_path=${schema},pg_catalog` })
   fixturePool = pool
@@ -828,7 +839,14 @@ async function openFixture(): Promise<Opened> {
     },
   }
   await assertSearchPath(pool, schema)
-  await install(pool, db, schema)
+  if (snapshot) {
+    const initial = await pool.query(`SELECT current_database() AS name,
+      (SELECT count(*)::int FROM users) AS users,
+      (SELECT count(*)::int FROM directory_connection_login_scope) AS scopes`)
+    expect(initial.rows).toEqual([{ name: snapshot, users: 0, scopes: 0 }])
+  } else {
+    await install(pool, db, schema)
+  }
   await aimNativePool(schema)
   const seeded = await seed(env)
   const execution = await issueAndEnable(seeded)
@@ -1200,6 +1218,32 @@ describeDb('strict dingtalk entry native', () => {
     })).toBe(false)
     expect(await sessionText(fixture.pool, web.sid)).toEqual(before)
   }, 60_000)
+
+  it('issues the qualified web session and keeps container admission closed', async () => {
+    const { seeded, calls, pool } = await ready()
+    const app = express()
+    app.use(express.json())
+    app.use('/api/auth', await createLocalStrictDingTalkAuthRouter({
+      env: { ...ageEnv('300'), DINGTALK_CLIENT_ID: MATERIAL.appKey },
+      fetchFn: providerFetch(seeded, calls),
+    }))
+    const before = calls.length
+    const response = await request(app).post('/api/auth/dingtalk/callback').send({
+      code: WEB_CODE, state: await generateState({ intent: 'login' }),
+    })
+    expect(response.status).toBe(200)
+    const payload = authService.readTokenPayload(response.body.data.token)
+    expect(classifyVerifiedSessionPayload(payload)).toBe('strict')
+    expect(payload?.userId).toBe(seeded.userId)
+    expect(await countOf(pool, 'SELECT count(*)::int AS count FROM user_sessions WHERE id=$1 AND user_id=$2',
+      [payload?.sid, seeded.userId])).toBe(1)
+    expect(calls.length - before).toBe(2)
+    const after = calls.length
+    const denied = await request(app).post('/api/auth/login/dingtalk/container').send({ authCode: CONTAINER_CODE })
+    expect(denied.status).toBe(403)
+    expect(denied.body).toEqual({ success: false, error: 'DingTalk login is not eligible for this source', code: 'strict_connection' })
+    expect(calls).toHaveLength(after)
+  }, 180_000)
 
   it('current witness revocation removes usability and does not open a legacy session', async () => {
     const fixture = await ready()

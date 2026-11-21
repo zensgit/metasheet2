@@ -2785,6 +2785,8 @@ jobs:
             tests/integration/strict-login-grant-scope.db.test.ts \
             tests/integration/admin-login-grant-command.db.test.ts \
             tests/integration/auth-b2-issuer-provenance.db.test.ts \
+            tests/integration/ordinary-session-renewal.db.test.ts \
+            tests/integration/dingtalk-corp-backfill-scope.db.test.ts \
             tests/integration/strict-credential-chain.db.test.ts \
             tests/integration/strict-dingtalk-entry.db.test.ts \
             tests/integration/authz-version-protocol.db.test.ts \
@@ -3363,7 +3365,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 10
+          version: 10.16.1
 
       - name: Install dependencies (with log)
         run: |
@@ -3378,7 +3380,17 @@ jobs:
 
       - name: Run tests with coverage
         run: |
-          pnpm --filter @metasheet/core-backend test --coverage || true
+          if ! pnpm --filter @metasheet/core-backend exec vitest run --coverage --coverage.reportOnFailure --maxWorkers=3 --minWorkers=1; then
+            echo '::warning::The coverage run returned a nonzero result. Review the test and threshold output.'
+          fi
+          test -s packages/core-backend/coverage/lcov.info
+
+      - name: Upload backend coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-lcov
+          path: packages/core-backend/coverage/lcov.info
+          if-no-files-found: error
 
       - name: Comment coverage on PR
         if: github.event_name == 'pull_request'

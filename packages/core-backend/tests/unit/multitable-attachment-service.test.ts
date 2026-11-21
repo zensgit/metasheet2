@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import {
+  bindOwnDraftAttachments,
   buildAttachmentSummaries,
   deleteAttachmentBinary,
   ensureAttachmentIdsExist,
@@ -183,6 +184,72 @@ describe('attachment-service: ensureAttachmentIdsExist', () => {
         attachmentIds: ['att_a', 'att_b'],
       }),
     ).toBeNull()
+  })
+})
+
+describe('attachment-service: bindOwnDraftAttachments', () => {
+  const base = { sheetId: 's1', recordId: 'rec_new', fieldId: 'fld_me' }
+
+  it('does nothing without a writer or without ids (no DB call)', async () => {
+    const query = createQuery(() => {
+      throw new Error('should not call')
+    })
+    expect(await bindOwnDraftAttachments({ ...base, query, attachmentIds: ['att_a'], actorId: null })).toEqual([])
+    expect(await bindOwnDraftAttachments({ ...base, query, attachmentIds: ['att_a'], actorId: undefined })).toEqual([])
+    expect(await bindOwnDraftAttachments({ ...base, query, attachmentIds: ['att_a'], actorId: '  ' })).toEqual([])
+    expect(await bindOwnDraftAttachments({ ...base, query, attachmentIds: [], actorId: 'u1' })).toEqual([])
+  })
+
+  it('binds only the writer\'s own drafts pinned to this field or to none', async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = []
+    const query = createQuery((sql, params) => {
+      calls.push({ sql, params })
+      if (sql.includes('SELECT id, field_id, record_id, created_by')) {
+        return [
+          { id: 'att_own_pinned', field_id: 'fld_me', record_id: null, created_by: 'u1' },
+          { id: 'att_own_unpinned', field_id: null, record_id: null, created_by: 'u1' },
+          { id: 'att_other_user', field_id: 'fld_me', record_id: null, created_by: 'u2' },
+          { id: 'att_no_uploader', field_id: 'fld_me', record_id: null, created_by: null },
+          { id: 'att_bound', field_id: 'fld_me', record_id: 'rec_old', created_by: 'u1' },
+          { id: 'att_other_field', field_id: 'fld_other', record_id: null, created_by: 'u1' },
+        ]
+      }
+      if (sql.includes('UPDATE multitable_attachments')) {
+        return (params?.[1] as string[]).map((id) => ({ id }))
+      }
+      throw new Error(`unexpected sql: ${sql}`)
+    })
+    const ids = ['att_own_pinned', 'att_own_unpinned', 'att_other_user', 'att_no_uploader', 'att_bound', 'att_other_field']
+    const bound = await bindOwnDraftAttachments({ ...base, query, attachmentIds: ids, actorId: 'u1' })
+
+    expect(bound).toEqual(['att_own_pinned', 'att_own_unpinned'])
+    expect(calls).toHaveLength(2)
+    expect(calls[0].params).toEqual(['s1', ids])
+    expect(calls[0].sql).toContain('deleted_at IS NULL')
+    const update = calls[1]
+    expect(update.params).toEqual(['s1', ['att_own_pinned', 'att_own_unpinned'], 'rec_new', 'fld_me', 'u1'])
+    // The UPDATE repeats every condition, so a row that changed after the SELECT is not bound.
+    for (const condition of [
+      'sheet_id = $1',
+      'id = ANY($2::text[])',
+      'record_id IS NULL',
+      'deleted_at IS NULL',
+      '(field_id IS NULL OR field_id = $4)',
+      'created_by = $5',
+    ]) {
+      expect(update.sql).toContain(condition)
+    }
+    expect(update.sql).toContain('SET record_id = $3')
+    expect(update.sql).toContain('field_id = COALESCE(field_id, $4)')
+  })
+
+  it('issues no UPDATE when none of the rows is the writer\'s own draft', async () => {
+    const query = createQuery((sql) => {
+      if (sql.includes('UPDATE')) throw new Error('should not update')
+      // Rows shaped like the existence check's: no record_id or created_by column at all.
+      return [{ id: 'att_a', field_id: 'fld_me' }]
+    })
+    expect(await bindOwnDraftAttachments({ ...base, query, attachmentIds: ['att_a'], actorId: 'u1' })).toEqual([])
   })
 })
 

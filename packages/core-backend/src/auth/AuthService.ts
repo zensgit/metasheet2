@@ -4,8 +4,10 @@
  */
 
 import * as jwt from 'jsonwebtoken'
+import jwtTimespan from 'jsonwebtoken/lib/timespan'
 import * as bcrypt from 'bcryptjs'
 import * as crypto from 'node:crypto'
+import type { query } from '../db/pg'
 import { poolManager } from '../integration/db/connection-pool'
 import { Logger } from '../core/logger'
 import { secretManager } from '../security/SecretManager'
@@ -33,6 +35,7 @@ import { assignUserRoles } from '../rbac/role-assignment'
 import { lockNamespaceAdmissionWrites } from '../rbac/namespace-admission'
 import { evaluateUserAuthenticationGate } from './user-activation'
 import { isRecoveryAuthorityBusyError } from '../multitable/recovery-authorization-stability'
+import { isSessionRenewalBusyError, lockUserAccessShared } from './user-access-lock'
 
 export interface User {
   id: string
@@ -73,10 +76,13 @@ export interface TokenPayload {
 
 /** Claims of a verified session token. Older session tokens name the user in `id` or `sub`. */
 type SessionTokenClaims = TokenPayload & { id?: string; sub?: string }
+type SessionClient = { query: typeof query }
+type SessionRequestInfo = { ipAddress?: string | null; userAgent?: string | null }
+type SessionRenewal = { kind: 'ok'; token: string; user: User } | { kind: 'changed' } | { kind: 'not_member' }
 
 export interface AuthConfig {
   jwtSecret: string
-  jwtExpiry: string
+  jwtExpiry: string | number
   saltRounds: number
 }
 
@@ -328,10 +334,20 @@ export class AuthService {
     }
   }
 
-  /**
-   * 创建JWT token
-   */
-  createToken(user: User, options: { sid?: string; externalAuth?: boolean } = {}): string {
+  /** Use the same expiry function as jsonwebtoken's signer with the issue time reserved at registration. */
+  sessionExpiresAt(issuedAt: number): number {
+    if (!Number.isSafeInteger(issuedAt) || issuedAt <= 0) throw new Error('Invalid session issue time')
+    const expiry = this.config.jwtExpiry
+    if (typeof expiry === 'string' ? expiry.length === 0 : !Number.isInteger(expiry)) {
+      throw new Error('Invalid session lifetime')
+    }
+    const expiresAt: number | undefined = jwtTimespan(expiry, issuedAt)
+    if (expiresAt === undefined || !Number.isSafeInteger(expiresAt)) throw new Error('Invalid session lifetime')
+    return expiresAt
+  }
+
+  /** 创建JWT token */
+  createToken(user: User, options: { sid?: string; externalAuth?: boolean; issuedAt?: number } = {}): string {
     const externalAuth = options.externalAuth === true
     const sid = typeof options.sid === 'string' && options.sid.trim().length > 0 ? options.sid.trim() : undefined
     if (externalAuth) {
@@ -345,12 +361,16 @@ export class AuthService {
       ;(error as Error & { code?: string }).code = 'STRICT_SESSION_SID_REFUSED'
       throw error
     }
-    const payload: Omit<TokenPayload, 'iat' | 'exp'> & { xa?: true } = {
+    if (options.issuedAt !== undefined && (!Number.isSafeInteger(options.issuedAt) || options.issuedAt <= 0)) {
+      throw new Error('Invalid session issue time')
+    }
+    const payload: Omit<TokenPayload, 'iat' | 'exp'> & { xa?: true; iat?: number } = {
       userId: user.id,
       email: user.email ?? '',
       role: user.role,
       ...(typeof user.tenantId === 'string' && user.tenantId.trim().length > 0 ? { tenantId: user.tenantId.trim() } : {}),
       ...(sid ? { sid } : {}),
+      ...(options.issuedAt === undefined ? {} : { iat: options.issuedAt }),
       ...(externalAuth ? { xa: true as const } : {}),
     }
 
@@ -428,12 +448,12 @@ export class AuthService {
     }
   }
 
-  async resolveSessionTenantId(userId: string, requestedTenantId?: string): Promise<string | undefined> {
+  async resolveSessionTenantId(userId: string, requestedTenantId?: string, client?: SessionClient): Promise<string | undefined> {
     const requested = typeof requestedTenantId === 'string' && requestedTenantId.trim().length > 0
       ? requestedTenantId.trim()
       : undefined
     try {
-      const pool = poolManager.get()
+      const pool = client ?? poolManager.get()
       if (requested) {
         const result = await pool.query(
           `SELECT uo.org_id
@@ -443,7 +463,7 @@ export class AuthService {
              AND uo.org_id = $2
              AND uo.is_active = true
              AND u.is_active = true
-           LIMIT 1`,
+           LIMIT 1${client ? ' FOR SHARE OF uo' : ''}`,
           [userId, requested],
         )
         return result.rows[0]?.org_id === requested ? requested : undefined
@@ -457,13 +477,14 @@ export class AuthService {
            AND uo.is_active = true
            AND u.is_active = true
          ORDER BY uo.org_id ASC
-         LIMIT 2`,
+         LIMIT 2${client ? ' FOR SHARE OF uo' : ''}`,
         [userId],
       )
       return result.rows.length === 1 && typeof result.rows[0]?.org_id === 'string'
         ? result.rows[0].org_id
         : undefined
     } catch (error) {
+      if (client) throw error
       this.logger.warn('Session tenant resolution failed', error instanceof Error ? error : undefined)
       return undefined
     }
@@ -614,7 +635,7 @@ export class AuthService {
   /**
    * 通过ID获取用户
    */
-  private async getUserById(userId: string, readOnlyPermissionCheck = false): Promise<(User & { password_hash: string }) | null> {
+  private async getUserById(userId: string, readOnlyPermissionCheck = false, allowDevelopmentFallback = true): Promise<(User & { password_hash: string }) | null> {
     try {
       // 首先尝试从数据库获取
       try {
@@ -626,6 +647,7 @@ export class AuthService {
 
         if (result.rows.length > 0) {
           const row = result.rows[0] as UserRow
+          if (!allowDevelopmentFallback && evaluateUserAuthenticationGate(row)) return null
           const resolved = await this.resolveRbacProfile(row.id, row.role, Array.isArray(row.permissions) ? row.permissions : [], readOnlyPermissionCheck)
           return {
             id: row.id,
@@ -649,12 +671,12 @@ export class AuthService {
           }
         }
       } catch (dbError) {
-        if (readOnlyPermissionCheck) throw dbError
+        if (readOnlyPermissionCheck || (!allowDevelopmentFallback && isSessionRenewalBusyError(dbError))) throw dbError
         this.logger.warn('Database query failed', dbError instanceof Error ? dbError : undefined)
       }
 
       // 降级：返回mock用户（非生产环境）
-      if (!readOnlyPermissionCheck && process.env.NODE_ENV !== 'production') {
+      if (allowDevelopmentFallback && !readOnlyPermissionCheck && process.env.NODE_ENV !== 'production') {
         return {
           id: userId,
           email: 'dev@metasheet.com',
@@ -675,7 +697,7 @@ export class AuthService {
 
       return null
     } catch (error) {
-      if (readOnlyPermissionCheck) throw error
+      if (readOnlyPermissionCheck || (!allowDevelopmentFallback && isSessionRenewalBusyError(error))) throw error
       this.logger.error('Get user by ID error', error instanceof Error ? error : undefined)
       return null
     }
@@ -1050,51 +1072,94 @@ export class AuthService {
         return null
       }
 
-      // 获取用户最新信息
-      const user = await this.getUserById(userId)
-      if (!user) {
-        return null
-      }
-      if (evaluateUserAuthenticationGate(user)) {
-        return null
-      }
-
-      if (await isUserSessionRevoked(user.id, payload.iat)) {
-        this.logger.warn(`Token refresh failed: session revoked for user ${user.id}`)
-        return null
-      }
-
-      const sessionId = typeof payload.sid === 'string' && payload.sid.trim().length > 0
-        ? payload.sid.trim()
-        : this.createSessionId()
-      if (typeof payload.sid === 'string' && payload.sid.trim().length > 0) {
-        const active = await isUserSessionActive(user.id, sessionId)
-        if (!active) {
-          this.logger.warn(`Token refresh failed: session ${sessionId} inactive for user ${user.id}`)
-          return null
-        }
-      }
-
-      const tenantId = await this.resolveSessionTenantId(user.id, this.normalizeClaimString(payload.tenantId))
-      const refreshedUser = tenantId
-        ? { ...user, tenantId }
-        : user
-      const refreshedToken = this.createToken(refreshedUser, { sid: sessionId, externalAuth: false })
-      const refreshedPayload = this.readTokenPayload(refreshedToken)
-      if (refreshedPayload?.exp) {
-        const session = await createUserSession(user.id, {
-          sessionId,
-          expectedAccessGeneration: Number(user.access_generation ?? 0),
-          expiresAt: new Date(refreshedPayload.exp * 1000).toISOString(),
-        })
-        if (!session) return null
-      }
-
-      return refreshedToken
+      if (!await this.isOrdinarySessionCurrent(payload, userId)) return null
+      const user = await this.getUserById(userId, false, false)
+      if (!user || evaluateUserAuthenticationGate(user)) return null
+      const renewed = await this.renewOrdinarySession(payload, user)
+      return renewed.kind === 'ok' ? renewed.token : null
     } catch (error) {
+      if (isSessionRenewalBusyError(error)) throw error
       this.logger.warn('Token refresh failed', error instanceof Error ? error : undefined)
       return null
     }
+  }
+
+  async switchOrdinarySessionOrg(
+    token: string, user: User, orgId: string, requestInfo: SessionRequestInfo,
+  ): Promise<SessionRenewal> {
+    const payload = this.readTokenPayload(token)
+    if (!payload || classifyVerifiedSessionPayload(payload) !== 'standard' || this.resolveTokenUserId(payload) !== user.id) {
+      return { kind: 'changed' }
+    }
+    if (!await this.isOrdinarySessionCurrent(payload, user.id)) return { kind: 'changed' }
+    return this.renewOrdinarySession(payload, user, orgId, requestInfo)
+  }
+
+  private async isOrdinarySessionCurrent(payload: SessionTokenClaims, userId: string): Promise<boolean> {
+    if (!Number.isSafeInteger(payload.iat)) return false
+    // Expired input JWTs and expired, unrevoked session rows remain refreshable.
+    // Refuse committed revocations before joining the user lock queue; recheck under lock below.
+    const preflight = await poolManager.get().query<{ eligible: boolean }>(
+      `SELECT NOT EXISTS (
+         SELECT 1 FROM user_session_revocations
+         WHERE user_id = $1 AND revoked_after >= to_timestamp($2::double precision)
+       ) AND ($3::text IS NULL OR EXISTS (
+         SELECT 1 FROM user_sessions WHERE id = $3 AND user_id = $1 AND revoked_at IS NULL
+       )) AS eligible`,
+      [userId, payload.iat, this.normalizeClaimString(payload.sid) ?? null],
+    )
+    return preflight.rows[0]?.eligible === true
+  }
+
+  private async renewOrdinarySession(
+    payload: SessionTokenClaims, user: User, targetOrg?: string, requestInfo: SessionRequestInfo = {},
+  ): Promise<SessionRenewal> {
+    const originalSid = this.normalizeClaimString(payload.sid)
+    const sessionId = originalSid ?? this.createSessionId()
+    type Registration = { kind: 'registered'; user: User; sessionId: string; issuedAt: number }
+      | { kind: 'changed' } | { kind: 'not_member' }
+    const result = await poolManager.get().transaction(async (client): Promise<Registration> => {
+      await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+      const locked = await lockUserAccessShared(client, user.id)
+      if (!locked || locked.is_active !== true || evaluateUserAuthenticationGate(locked)
+        || Number(locked.access_generation ?? 0) !== Number(user.access_generation ?? 0)) {
+        return { kind: 'changed' }
+      }
+      // Repair waits up to five seconds for this user lock. Bound each of the three
+      // remaining statements to one second, preserving a stricter deployment timeout.
+      await client.query(`SELECT set_config('statement_timeout', LEAST(1000, NULLIF(setting::int, 0))::text, true)
+        FROM pg_catalog.pg_settings WHERE name = 'statement_timeout'`)
+      const current = await client.query<{ eligible: boolean; issued_at: string | number }>(
+        `SELECT NOT EXISTS (
+           SELECT 1 FROM user_session_revocations
+           WHERE user_id = $1 AND revoked_after >= to_timestamp($2::double precision)
+         ) AND ($3::text IS NULL OR EXISTS (
+           SELECT 1 FROM user_sessions
+           WHERE id = $3 AND user_id = $1 AND revoked_at IS NULL FOR UPDATE
+         )) AS eligible, floor(extract(epoch FROM clock_timestamp()))::bigint AS issued_at`,
+        [user.id, payload.iat, originalSid ?? null],
+      )
+      if (current.rows[0]?.eligible !== true) return { kind: 'changed' }
+      const tenantId = await this.resolveSessionTenantId(user.id, targetOrg ?? this.normalizeClaimString(payload.tenantId), client)
+      if (targetOrg !== undefined && tenantId !== targetOrg) return { kind: 'not_member' }
+      // Only refresh accepts a correctly signed but expired input. Recheck live org-switch input after lock waits.
+      if (targetOrg !== undefined && typeof payload.exp === 'number' && payload.exp <= Date.now() / 1000) {
+        return { kind: 'changed' }
+      }
+      const tokenUser = { ...user }
+      if (tenantId) tokenUser.tenantId = tenantId
+      else delete tokenUser.tenantId
+      const issuedAt = Number(current.rows[0].issued_at)
+      const expiresAt = this.sessionExpiresAt(issuedAt)
+      const registered = await createUserSession(user.id, {
+        sessionId, expectedAccessGeneration: Number(locked.access_generation ?? 0),
+        expiresAt: new Date(expiresAt * 1000).toISOString(), ...requestInfo,
+      }, client)
+      return registered ? { kind: 'registered', user: tokenUser, sessionId, issuedAt } : { kind: 'changed' }
+    })
+    if (result.kind !== 'registered') return result
+    const token = this.createToken(result.user, { sid: result.sessionId, externalAuth: false, issuedAt: result.issuedAt })
+    return { kind: 'ok', token, user: result.user }
   }
 
   /** Claims of a session token, or null for anything that does not verify as one. */

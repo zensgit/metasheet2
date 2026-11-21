@@ -601,6 +601,12 @@ function noProductionConsumerExists() {
       'packages/core-backend/src/rbac',
       'authorization-input-writers.ts',
     ),
+    // A1 test manifest lists the runner path as data and never imports or runs it.
+    path.join(
+      repoRoot,
+      'packages/core-backend/tests/unit/lib',
+      'dingtalk-login-authority-manifest.ts',
+    ),
     __filename,
   ])
   const consumers = files.filter((file) => {

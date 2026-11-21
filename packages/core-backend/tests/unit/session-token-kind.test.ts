@@ -155,6 +155,10 @@ describe('session verification accepts only session tokens', () => {
     pinned.setApp(buildApp())
     poolMocks.query.mockReset()
     poolMocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes("WHERE name = 'lock_timeout'")) return { rows: [{ previous: '0' }] }
+      if (sql.includes('FROM user_session_revocations')) {
+        return { rows: [{ eligible: true, issued_at: Math.floor(Date.now() / 1000) }] }
+      }
       if (String(sql).includes('FROM users')) {
         return {
           rows: [{

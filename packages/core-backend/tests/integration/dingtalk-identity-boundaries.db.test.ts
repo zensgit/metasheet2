@@ -8,9 +8,12 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vites
 const clientMocks = vi.hoisted(() => ({
   exchangeCodeForUserAccessToken: vi.fn(), fetchDingTalkCurrentUser: vi.fn(),
   fetchDingTalkAppAccessToken: vi.fn(), getDingTalkUserDetail: vi.fn(),
-  getDingTalkUserInfoByAuthCode: vi.fn(), readDingTalkOauthConfig: vi.fn(),
+  getDingTalkUserInfoByAuthCode: vi.fn(),
 }))
-vi.mock('../../src/integrations/dingtalk/client', () => clientMocks)
+vi.mock('../../src/integrations/dingtalk/client', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/integrations/dingtalk/client')>(),
+  ...clientMocks,
+}))
 import { query } from '../../src/db/pg'
 import { bindDingTalkIdentityToUser, exchangeCodeForUser, exchangeEnterpriseAuthCodeForUser } from '../../src/auth/dingtalk-oauth'
 import { bumpSubjectAuthorizationVersions } from '../../src/multitable/authz-version-protocol'
@@ -117,10 +120,10 @@ describe('DingTalk identity authorization boundaries (real DB)', () => {
     vi.stubEnv('DINGTALK_AUTH_REQUIRE_GRANT', '1')
     vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '1')
     vi.stubEnv('DINGTALK_AUTH_AUTO_PROVISION', '0')
-    clientMocks.readDingTalkOauthConfig.mockReturnValue({
-      clientId: 'synthetic-client', clientSecret: 'synthetic-secret',
-      redirectUri: 'https://example.test/callback', corpId: CORP,
-    })
+    vi.stubEnv('DINGTALK_CLIENT_ID', 'synthetic-client')
+    vi.stubEnv('DINGTALK_CLIENT_SECRET', 'synthetic-secret')
+    vi.stubEnv('DINGTALK_REDIRECT_URI', 'https://example.test/callback')
+    vi.stubEnv('DINGTALK_CORP_ID', CORP)
     clientMocks.exchangeCodeForUserAccessToken.mockResolvedValue({ accessToken: 'synthetic-token' })
   })
   afterEach(() => vi.unstubAllEnvs())
@@ -149,10 +152,7 @@ describe('DingTalk identity authorization boundaries (real DB)', () => {
   })
 
   function withoutCorp() {
-    clientMocks.readDingTalkOauthConfig.mockReturnValue({
-      clientId: 'synthetic-client', clientSecret: 'synthetic-secret',
-      redirectUri: 'https://example.test/callback', corpId: null,
-    })
+    vi.stubEnv('DINGTALK_CORP_ID', '')
   }
 
   async function duplicatePerson(firstId: string, secondId: string) {
@@ -573,19 +573,19 @@ describe('DingTalk identity authorization boundaries (real DB)', () => {
     expect(await state(id)).toEqual({ ...before, links: [{ directory_account_id: account, link_status: 'linked' }] })
   })
 
-  it('can fill a missing corp column when the existing canonical key proves the current corp', async () => {
+  it('recognizes a missing identity corp when the verified canonical key matches the configured corp', async () => {
     const { id, email } = await seed({ identity: true, grant: true })
     await q(`UPDATE user_external_identities SET corp_id=NULL WHERE provider='dingtalk' AND local_user_id=$1`, [id])
     clientMocks.fetchDingTalkCurrentUser.mockResolvedValue({ openId: `${id}-open-A`, unionId: `${id}-union-A`, nick: 'Synthetic A', email })
     expect((await exchangeCodeForUser('synthetic-code')).localUserId).toBe(id)
-    expect((await state(id)).identity).toEqual([{ corp_id: CORP, provider_union_id: `${id}-union-A`, provider_open_id: `${id}-open-A` }])
+    expect((await state(id)).identity).toEqual([{ corp_id: null, provider_union_id: `${id}-union-A`, provider_open_id: `${id}-open-A` }])
   })
 
   it.each([false, true])('an unset configured corp preserves an established identity scope (known OpenID=%s)', async knownOpenId => {
     const { id, email } = await seed({ identity: true, grant: true })
     if (!knownOpenId) await q(`UPDATE user_external_identities SET provider_open_id=NULL, external_key=$2
       WHERE provider='dingtalk' AND local_user_id=$1`, [id, `${CORP}:${id}-union-A`])
-    clientMocks.readDingTalkOauthConfig.mockReturnValue({ corpId: null })
+    withoutCorp()
     clientMocks.fetchDingTalkCurrentUser.mockResolvedValue({ openId: `${id}-open-B`, unionId: `${id}-union-A`, nick: 'Synthetic A', email })
     expect((await exchangeCodeForUser('synthetic-code')).localUserId).toBe(id)
     expect((await q(`SELECT corp_id, external_key, provider_union_id, provider_open_id FROM user_external_identities
@@ -620,7 +620,7 @@ describe('DingTalk identity authorization boundaries (real DB)', () => {
     await q('UPDATE directory_accounts SET open_id=NULL WHERE id=$1', [account])
     await q(`UPDATE user_external_identities SET provider_open_id=NULL, external_key=$2
       WHERE provider='dingtalk' AND local_user_id=$1`, [id, `${CORP}:${id}-union-A`])
-    clientMocks.readDingTalkOauthConfig.mockReturnValue({ corpId: null })
+    withoutCorp()
     clientMocks.fetchDingTalkCurrentUser.mockResolvedValue({ openId: `${id}-open-A`, unionId: `${id}-union-A`, nick: 'Synthetic A', email })
     const before = await state(id)
     await expect(exchangeCodeForUser('synthetic-code')).rejects.toMatchObject({ statusCode: 403, code: 'grant_required' })
@@ -635,7 +635,7 @@ describe('DingTalk identity authorization boundaries (real DB)', () => {
     const legacyKey = `${CORP}:${id}-${keyKind}-A`
     await q(`UPDATE user_external_identities SET corp_id=NULL, provider_open_id=$3, external_key=$2
       WHERE provider='dingtalk' AND local_user_id=$1`, [id, legacyKey, keyKind === 'open' ? `${id}-open-A` : null])
-    clientMocks.readDingTalkOauthConfig.mockReturnValue({ corpId: null })
+    withoutCorp()
     clientMocks.fetchDingTalkCurrentUser.mockResolvedValue({ openId: `${id}-open-B`, unionId: `${id}-union-A`, nick: 'Synthetic A', email })
     if (grant) expect((await exchangeCodeForUser('synthetic-code')).localUserId).toBe(id)
     else await expect(exchangeCodeForUser('synthetic-code')).rejects.toMatchObject({ statusCode: 403, code: 'grant_required' })
@@ -645,11 +645,62 @@ describe('DingTalk identity authorization boundaries (real DB)', () => {
     }])
     expect((await state(id)).grant).toEqual([{ enabled: grant, granted_by: id }])
     // Restoring the configured corp must still recognize the canonical legacy proof.
-    clientMocks.readDingTalkOauthConfig.mockReturnValue({ corpId: CORP })
+    vi.stubEnv('DINGTALK_CORP_ID', CORP)
     if (!grant) await q(`UPDATE user_external_auth_grants SET enabled=TRUE WHERE provider='dingtalk' AND local_user_id=$1`, [id])
     expect((await exchangeCodeForUser('synthetic-code')).localUserId).toBe(id)
     expect((await q(`SELECT corp_id, external_key FROM user_external_identities WHERE provider='dingtalk' AND local_user_id=$1`, [id])).rows)
-      .toEqual([{ corp_id: CORP, external_key: `${CORP}:${id}-open-B` }])
+      .toEqual([{ corp_id: null, external_key: `${CORP}:${id}-open-B` }])
+  })
+
+  async function useProviderResponseDecoders() {
+    const provider = await vi.importActual<typeof import('../../src/integrations/dingtalk/client')>('../../src/integrations/dingtalk/client')
+    for (const key of Object.keys(clientMocks) as Array<keyof typeof clientMocks>) {
+      clientMocks[key].mockImplementation(provider[key])
+    }
+  }
+
+  it('the web and container entry points enforce the selected source using real provider response decoders', async () => {
+    await useProviderResponseDecoders()
+    const { checkDingTalkLoginSurfaces } = await import('../helpers/dingtalk-login-http')
+    await checkDingTalkLoginSurfaces()
+  })
+
+  for (const mixed of [false, true]) {
+    it.each(['sibling', 'multiple', 'foreign', 'foreign among multiple', 'different directory UnionID', 'verified sole link', 'stored corporate OpenID', 'matching email', 'other email', 'other person'] as const)(
+      `checks %s affiliation on web and container with strict scope ${mixed} and reconciles rejected writes`, async affiliation => {
+        await useProviderResponseDecoders()
+        const { checkDingTalkLoginSurfaces } = await import('../helpers/dingtalk-login-http')
+        await checkDingTalkLoginSurfaces({ mixed, affiliation })
+      },
+    )
+  }
+
+  it.each(['configured bare sibling', 'configured stored corporate OpenID'] as const)(
+    'keeps an unverified %s row closed on both surfaces', async affiliation => {
+      await useProviderResponseDecoders()
+      const { checkDingTalkLoginSurfaces } = await import('../helpers/dingtalk-login-http')
+      await checkDingTalkLoginSurfaces({ mixed: false, affiliation })
+    },
+  )
+
+  it('configured enterprise compatibility keeps corp NULL through grant-denied enrichment and both successful login surfaces', async () => {
+    await useProviderResponseDecoders()
+    const { checkDingTalkLoginSurfaces } = await import('../helpers/dingtalk-login-http')
+    await checkDingTalkLoginSurfaces({ mixed: false, knownOpenId: false, ambiguous: true, grant: false, configured: true })
+  })
+
+  it.each([
+    { mixed: false, knownOpenId: false }, { mixed: false, knownOpenId: true },
+    { mixed: true, knownOpenId: false }, { mixed: true, knownOpenId: true },
+    { mixed: true, knownOpenId: false, grant: false as const },
+    { mixed: true, knownOpenId: false, ambiguous: true as const },
+    { mixed: false, knownOpenId: false, ambiguous: true as const },
+    { mixed: true, knownOpenId: true, ambiguous: true as const, storedCorp: true as const },
+    { mixed: false, knownOpenId: true, ambiguous: true as const, storedCorp: true as const },
+  ])('preserves verified canonical UnionID continuity and refuses ambiguous corporate origins (%j)', async scenario => {
+    await useProviderResponseDecoders()
+    const { checkDingTalkLoginSurfaces } = await import('../helpers/dingtalk-login-http')
+    await checkDingTalkLoginSurfaces(scenario)
   })
 
 })

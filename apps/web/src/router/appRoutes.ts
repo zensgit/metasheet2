@@ -258,6 +258,12 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'My Sessions', titleZh: '我的会话', requiresAuth: true }
   },
   {
+    path: '/settings/notifications',
+    name: 'notification-preferences',
+    component: () => import('../views/NotificationPreferencesView.vue'),
+    meta: { title: 'Notification Settings', titleZh: '通知设置', requiresAuth: true }
+  },
+  {
     path: '/admin/users',
     name: 'user-management',
     component: () => import('../views/UserManagementView.vue'),

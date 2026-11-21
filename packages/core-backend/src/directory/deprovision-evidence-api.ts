@@ -219,6 +219,7 @@ export async function listDeprovisionEffects(eventId: string) {
 }
 
 type RestoreEventRow = {
+  org_id: string
   access_generation_at_apply: string | number
   directory_account_id: string
   id: string
@@ -243,6 +244,29 @@ function restoreError(code: string, message: string): Error {
   const error = new Error(message)
   ;(error as Error & { code?: string }).code = code
   return error
+}
+
+async function checkLegacyRestoreSource(
+  client: Parameters<typeof import('../auth/strict-login-grant-store').readConnectionLoginScope>[0],
+  event: Pick<RestoreEventRow, 'integration_id' | 'directory_account_id' | 'org_id'>,
+): Promise<void> {
+  const integration = await client.query(
+    `SELECT i.id FROM directory_integrations i
+       JOIN directory_accounts account ON account.integration_id = i.id
+      WHERE i.id = $1::uuid AND i.org_id = $2 AND account.id = $3::uuid
+        AND i.provider = 'dingtalk' AND account.provider = i.provider
+      FOR SHARE OF i, account NOWAIT`,
+    [event.integration_id, event.org_id, event.directory_account_id],
+  ).catch((error: unknown) => {
+    if ((error as { code?: string })?.code === '55P03') throw restoreError('DRIFT_CONFLICT', 'Directory source is busy')
+    throw error
+  })
+  if (integration.rows.length !== 1) throw restoreError('DRIFT_CONFLICT', 'Directory source is unavailable')
+  // The connection lock serializes both ordinary and strict ledger reversals with cutover.
+  // Read the scoped state in this transaction; unreadable or inconsistent installations abort.
+  // Only the historical grant is reversed. The strict issuer and resource readers authorize independently.
+  const { readConnectionLoginScope } = await import('../auth/strict-login-grant-store')
+  await readConnectionLoginScope(client, event.integration_id)
 }
 
 type CompensationEventRow = {
@@ -504,6 +528,7 @@ export async function compensateSupersededDenyGrant(options: {
       )
     }
 
+    if (grantProvider === 'dingtalk') await checkLegacyRestoreSource(client, event)
     const removed = await client.query(
       `DELETE FROM user_external_auth_grants
         WHERE provider = $2::text
@@ -658,6 +683,7 @@ export async function restoreDeprovisionEvent(options: {
 
     const eventResult = await client.query(
       `SELECT id::text AS id,
+              org_id,
               integration_id::text AS integration_id,
               directory_account_id::text AS directory_account_id,
               local_user_id,
@@ -824,6 +850,9 @@ export async function restoreDeprovisionEvent(options: {
       )
     }
 
+    if (applied.some((effect) => effect.effect_type === 'grant_changed' && effectGrantProvider(effect) === 'dingtalk')) {
+      await checkLegacyRestoreSource(client, event)
+    }
     for (const effect of applied) {
       if (effect.effect_type === 'user_changed') {
         const changed = await client.query(

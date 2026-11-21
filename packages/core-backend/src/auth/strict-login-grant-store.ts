@@ -422,6 +422,17 @@ function scopeRow(row: Record<string, unknown>): StrictLoginScopeRow {
   return { connectionId, commandId, transitionedAt }
 }
 
+/** Keep the committed empty scope set stable until the legacy transaction completes. */
+export async function lockEmptyConnectionLoginScope(caller: StrictLoginGrantCaller): Promise<boolean> {
+  const state = await readInstallationWithSchema(caller)
+  if (state.installation === 'never-installed') return true
+
+  const scope = qualified(state.schemaName, STRICT_LOGIN_GRANT_SCOPE_TABLE)
+  await caller.query(`LOCK TABLE ${scope} IN SHARE MODE`)
+  const rows = await queryRows(caller, `SELECT 1 FROM ${scope} LIMIT 1`)
+  return rows.length === 0
+}
+
 export async function readConnectionLoginScope(
   caller: StrictLoginGrantCaller,
   connectionId: string,

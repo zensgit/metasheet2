@@ -344,6 +344,8 @@ function recordedClient(answer: (shape: string, params: unknown[] | undefined) =
     recorded,
     query: vi.fn(async (sql: string, params?: unknown[]) => {
       recorded.push({ sql, params })
+      const installation = strictLoginUninstalledRows(sql)
+      if (installation !== undefined) return { rows: installation }
       const shape = evidenceShape(sql)
       // D21 (Y5a): the restore / compensation transactions bump the subject version row before their users lock.
       if (shape === 'bump_subject_version') return { rows: [] }
@@ -354,6 +356,7 @@ function recordedClient(answer: (shape: string, params: unknown[] | undefined) =
 
 function evidenceShape(sql: string): string {
   if (/^\s*INSERT INTO subject_authorization_versions\b/.test(sql)) return 'bump_subject_version'
+  if (strictLoginUninstalledRows(sql) !== undefined) return 'read_installation'
   if (/^\s*SELECT local_user_id\s+FROM directory_deprovision_events/.test(sql)) return 'event_owner'
   if (/FROM users\s+WHERE id = \$1::text\s+FOR UPDATE/.test(sql)) return 'lock_user'
   if (/FROM directory_deprovision_events\s+WHERE id = \$1::uuid\s+FOR UPDATE/.test(sql)) return 'read_event'
@@ -370,6 +373,7 @@ function evidenceShape(sql: string): string {
   if (/^\s*UPDATE directory_deprovision_effects\s+SET status = 'compensated'/.test(sql)) return 'compensate_effect'
   if (/^\s*UPDATE users\s+SET access_generation/.test(sql)) return 'bump_generation'
   if (/^\s*UPDATE directory_deprovision_events\s+SET status = 'fully_resolved'/.test(sql)) return 'resolve_event'
+  if (/SELECT i.id FROM directory_integrations i[\s\S]+FOR SHARE OF i, account NOWAIT$/.test(sql.trim())) return 'scope_integration'
   throw new Error(`Unhandled SQL in evidence fake:\n${sql}`)
 }
 
@@ -382,12 +386,14 @@ describe('restore acts on the provider the effect row witnesses', () => {
   async function restoreWith(effect: { provider: string | null; grantRowCreated: boolean }) {
     const client = recordedClient((shape, params) => {
       switch (shape) {
+        case 'scope_integration':
+          return { rows: [{ id: 'int-1' }] }
         case 'event_owner':
           return { rows: [{ local_user_id: 'user-1' }] }
         case 'lock_user':
           return { rows: [{ id: 'user-1', email: null, username: null, mobile: null, activation_status: 'activated', is_active: true, access_generation: 3 }] }
         case 'read_event':
-          return { rows: [{ id: 'ev-1', integration_id: 'int-1', directory_account_id: 'acct-1', local_user_id: 'user-1', access_generation_at_apply: 3, status: 'applied' }] }
+          return { rows: [{ id: 'ev-1', org_id: 'org-1', integration_id: 'int-1', directory_account_id: 'acct-1', local_user_id: 'user-1', access_generation_at_apply: 3, status: 'applied' }] }
         case 'read_effects':
           return { rows: [{
             id: 'fx-1',
@@ -419,6 +425,15 @@ describe('restore acts on the provider the effect row witnesses', () => {
     await restoreDeprovisionEvent({ eventId: 'ev-1', mode: 'admin_force', adminUserId: 'admin', confirm: true, note: 'owner approved restore' })
     return client.recorded
   }
+
+  it('refuses a restore when the scope catalog cannot be verified', async () => {
+    const store = await import('../../src/auth/strict-login-grant-store')
+    const failed = vi.spyOn(store, 'readConnectionLoginScope').mockRejectedValueOnce(new Error('scope-probe-failed'))
+    try {
+      await expect(restoreWith({ provider: null, grantRowCreated: false })).rejects.toThrow('scope-probe-failed')
+      expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
+    } finally { failed.mockRestore() }
+  })
 
   it('a NULL witness (pre-column row) reads and flips the default provider row', async () => {
     const recorded = await restoreWith({ provider: null, grantRowCreated: false })
@@ -465,6 +480,8 @@ describe('compensation acts on the provider the creation effect witnesses', () =
   async function compensateWith(options: { provider: string | null; status: 'superseded' | 'compensated'; residual?: boolean }) {
     const client = recordedClient((shape, params) => {
       switch (shape) {
+        case 'scope_integration':
+          return { rows: [{ id: 'int-1' }] }
         case 'event_owner':
           return { rows: [{ local_user_id: 'user-1' }] }
         case 'read_event':
@@ -494,6 +511,17 @@ describe('compensation acts on the provider the creation effect witnesses', () =
     const outcome = compensateSupersededDenyGrant({ eventId: 'ev-1', adminUserId: 'admin', confirm: true, note: 'owner approved cleanup' })
     return { outcome, recorded: client.recorded }
   }
+
+  it('refuses a compensation when the scope catalog cannot be verified', async () => {
+    const store = await import('../../src/auth/strict-login-grant-store')
+    const failed = vi.spyOn(store, 'readConnectionLoginScope').mockRejectedValueOnce(new Error('scope-probe-failed'))
+    try {
+      const { outcome, recorded } = await compensateWith({ provider: null, status: 'superseded' })
+      await expect(outcome).rejects.toThrow('scope-probe-failed')
+      expect(recorded.some(entry => evidenceShape(entry.sql) === 'delete_grant')).toBe(false)
+      expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
+    } finally { failed.mockRestore() }
+  })
 
   it('DELETE branch: a NULL witness deletes the default provider row', async () => {
     const { outcome, recorded } = await compensateWith({ provider: null, status: 'superseded' })
