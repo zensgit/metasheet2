@@ -92,6 +92,15 @@ jobs:
           tests/integration/task-todo-source.db.test.ts
           --reporter=verbose
 
+      # Draft attachments bound on write: a create form's uploads are bound to the record it saves, so the draft
+      # sweep keeps them. Multitable, not tasks; run here because this lane has the migrated database.
+      - name: Run multitable draft-attachment binding real-DB file
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/multitable-form-draft-attachment-bind.db.test.ts
+          --reporter=verbose
+
       # The enablement walk: real server, real sign-in, the page's own HTTP calls. Its own config,
       # because tests/setup.integration.ts turns token-claim trust on before any import.
       - name: Run tasks enablement walk (token-claim trust off)
