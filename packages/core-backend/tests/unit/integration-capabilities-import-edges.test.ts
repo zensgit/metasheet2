@@ -22,13 +22,27 @@ const BACKEND_SCRIPTS = path.join(BACKEND, 'scripts')
 
 /** A module specifier that loads one of the capability modules (any directory prefix, with or without a .js/.ts suffix). */
 const CAPABILITY_MODULE =
-  /(?:directory-integration-capabilities-flag|provider-capability-registry|integration-capability-implementations|integration-capability-evaluate|directory-integration-capabilities-service|admin-directory-capabilities)(?:\.[cm]?[jt]s)?$/
+  /(?:directory-integration-capabilities-flag|provider-capability-registry|integration-capability-implementations|integration-capability-evaluate|integration-capability-resolve|directory-integration-capabilities-service|directory-integration-capabilities-write-service|admin-directory-capabilities)(?:\.[cm]?[jt]s)?$/
 
 const SRC_ALLOWLIST: ReadonlyArray<ImportEdge> = [
   ['integrations/integration-capability-evaluate.ts', './provider-capability-registry'],
   ['integrations/integration-capability-implementations.ts', './provider-capability-registry'],
   ['integrations/directory-integration-capabilities-service.ts', './integration-capability-evaluate'],
   ['integrations/directory-integration-capabilities-service.ts', './provider-capability-registry'],
+  // The write service builds its answer with the read service's view builder, reads the table probe
+  // and the row helpers of the display module, and takes its types from the registry. Its one
+  // importer is the route.
+  ['integrations/directory-integration-capabilities-write-service.ts', './directory-integration-capabilities-service'],
+  ['integrations/directory-integration-capabilities-write-service.ts', './integration-capability-evaluate'],
+  ['integrations/directory-integration-capabilities-write-service.ts', './provider-capability-registry'],
+  ['routes/admin-directory-capabilities.ts', '../integrations/directory-integration-capabilities-write-service'],
+  // The consumer resolver reads the switch, the production registry and implementation table, and the
+  // pure evaluator and table probe of the display module. It has no importer yet: each consumer slice
+  // adds its own edge.
+  ['integrations/integration-capability-resolve.ts', './directory-integration-capabilities-flag'],
+  ['integrations/integration-capability-resolve.ts', './integration-capability-evaluate'],
+  ['integrations/integration-capability-resolve.ts', './integration-capability-implementations'],
+  ['integrations/integration-capability-resolve.ts', './provider-capability-registry'],
   ['routes/admin-directory-capabilities.ts', '../integrations/directory-integration-capabilities-flag'],
   ['routes/admin-directory-capabilities.ts', '../integrations/directory-integration-capabilities-service'],
   ['routes/admin-directory-capabilities.ts', '../integrations/integration-capability-implementations'],
@@ -106,6 +120,17 @@ describe('importers of the capability modules', () => {
     expect(importSpecifiers('const m = require(name)')).toEqual([NON_LITERAL_SPECIFIER])
   })
 
+  it('give the consumer resolver no importer, and recognise its loads', () => {
+    expect(SRC_ALLOWLIST.filter(([, specifier]) => /integration-capability-resolve/.test(specifier))).toEqual([])
+    for (const spelling of [
+      "import { x } from '../integrations/integration-capability-resolve'",
+      "const m = require('../integrations/integration-capability-resolve.js')",
+      "type T = import('./integration-capability-resolve').X",
+    ]) {
+      expect(importSpecifiers(spelling).some((specifier) => CAPABILITY_MODULE.test(specifier)), spelling).toBe(true)
+    }
+  })
+
   it('treat a second load of the same module from an allowed file as a violation', () => {
     const doubled: ImportEdge[] = [...SRC_ALLOWLIST, ['routes/admin-directory-capabilities.ts', '../integrations/provider-capability-registry']]
     expect(importEdgeViolations(doubled, SRC_ALLOWLIST)).toEqual([
@@ -125,10 +150,12 @@ describe('source files that name a capability table', () => {
     'packages/core-backend/src/db/migrate.ts',
     'packages/core-backend/src/db/migrations/zzzz20261106130000_create_directory_integration_capabilities.ts',
     'packages/core-backend/src/db/migrations/zzzz20261117183000_admin_grant_receiving_invalidation.ts',
+    'packages/core-backend/src/integrations/directory-integration-capabilities-write-service.ts',
     'packages/core-backend/src/integrations/integration-capability-evaluate.ts',
+    'packages/core-backend/src/integrations/integration-capability-resolve.ts',
   ]
 
-  it('are exactly the audited readers, the two migrations, and the runner help text', () => {
+  it('are exactly the audited readers, the one writer, the two migrations, and the runner help text', () => {
     const named: string[] = []
     for (const root of ROOTS) {
       expect(existsSync(root), root).toBe(true)

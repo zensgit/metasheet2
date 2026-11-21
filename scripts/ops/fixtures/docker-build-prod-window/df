@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Test double for `df -Pk <path>`: one filesystem with $H_DF_FREE_KB available.
+# H_DF_TWO_FS=1: the Docker root ($H_DS/dockerroot) is a second filesystem with
+# $H_DF_ROOT_FREE_KB available. H_DF_RC=124: no answer (as a df that timeout ended).
+if [[ -n "${H_DF_RC:-}" ]]; then exit "${H_DF_RC}"; fi
+path="${*: -1}"
+free="${H_DF_FREE_KB:-104857600}"
+mount="/"
+if [[ "${H_DF_TWO_FS:-0}" == "1" && "$path" == "${H_DS:-/nonexistent}/dockerroot"* ]]; then
+  free="${H_DF_ROOT_FREE_KB:-104857600}"
+  mount="/var/lib/docker"
+fi
+echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+echo "harnessfs 209715200 1000 ${free} 1% ${mount}"

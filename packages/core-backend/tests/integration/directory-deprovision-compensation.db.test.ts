@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import { Client } from 'pg'
-import { afterAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as database from '../../src/db/pg'
+import { insertConnectionLoginScope } from '../../src/auth/strict-login-grant-store'
+import { checkCardConnectionBeforeDispatch } from '../../src/auth/dingtalk-legacy-resource-scope'
 import { __dingtalkOAuthInternalsForTests } from '../../src/auth/dingtalk-oauth'
 import { query, transaction } from '../../src/db/pg'
 import {
@@ -290,6 +293,53 @@ describeIfDatabase('OPS-01 superseded deny-row compensation (real DB)', () => {
       [seeded.userId],
     )
     expect(oauthGrant.rows).toEqual([{ enabled: true }])
+  })
+
+  it('keeps its source lock through commit, then the independently locked scope governs the connection', async () => {
+    const seeded = await seedAppliedCreationEvent()
+    await reactivateAndSupersede(seeded)
+    const writer = new Client({ connectionString: process.env.DATABASE_URL })
+    await writer.connect()
+    let release!: () => void
+    const mayCommit = new Promise<void>(resolve => { release = resolve })
+    let marked!: (pid: number) => void
+    const repairAtCommit = new Promise<number>(resolve => { marked = resolve })
+    const transact = database.transaction
+    const gate = vi.spyOn(database, 'transaction').mockImplementationOnce(handler => transact(async client => {
+      const r = await handler(client)
+      marked((await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      await mayCommit
+      return r
+    }))
+    const repair = compensateSupersededDenyGrant({ eventId: seeded.eventId, adminUserId: 'admin-test', confirm: true, note: 'verified source cleanup' })
+    try {
+      const holder = await Promise.race([repairAtCommit, repair.then(() => { throw new Error('missing repair transaction') })])
+      await writer.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+      await writer.query("SET LOCAL lock_timeout='5s'")
+      const waiter = (await writer.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
+      const transition = insertConnectionLoginScope(writer, { connectionId: seeded.integrationId, commandId: randomUUID() })
+      transition.catch(() => {})
+      try {
+        const deadline = Date.now() + 3000
+        let observed = false
+        while (Date.now() < deadline && !observed) {
+          const check = await query<{blocked: boolean}>('SELECT $1::integer=ANY(pg_blocking_pids($2)) AS blocked', [holder, waiter])
+          observed = check.rows[0].blocked
+          if (!observed) await new Promise(resolve => setTimeout(resolve, 10))
+        }
+        expect(observed).toBe(true)
+        release()
+        await expect(repair).resolves.toMatchObject({ grantRow: 'deleted', alreadyCompensated: false })
+        await transition
+        await expect(checkCardConnectionBeforeDispatch(writer.query.bind(writer), seeded.integrationId, true)).resolves.toBe('refused')
+      } finally { release(); await transition.catch(() => {}) }
+    } finally {
+      release()
+      await repair.catch(() => {})
+      gate.mockRestore()
+      await writer.query('ROLLBACK')
+      await writer.end()
+    }
   })
 
   it('is idempotent after a committed compensation and does not advance generation twice', async () => {

@@ -1,7 +1,11 @@
 /**
  * Read side of the directory integration capabilities: builds the display view of one integration's
  * capability state. Display only: the view comes from the non-locking reads of
- * integration-capability-evaluate.ts and is not an authorization input.
+ * integration-capability-evaluate.ts and is not an authorization input. The write side
+ * (directory-integration-capabilities-write-service.ts) answers with the same view, built by
+ * `buildCapabilitiesView` from the rows it holds locked. The two differ in one case only: a provider
+ * whose scope read throws fails the display read, and is shown as having no current scope in the
+ * write answer.
  *
  * The view is built field by field and carries no scope value, no corp id, no application key, no
  * environment value and no configuration value.
@@ -96,7 +100,43 @@ export class CapabilitiesViewError extends Error {
   }
 }
 
-function revisionOf(state: CapabilityRow | null): number {
+/** The view inputs that do not come from the database; the write path builds the same view with them. */
+export type CapabilitiesViewDeps = Pick<
+  CapabilitiesServiceDeps,
+  'resolveDescriptor' | 'isImplementationAvailable' | 'readLoginRuntime' | 'isIntegrationScopedCredentialsEnabled'
+>
+
+export interface CapabilitiesViewOptions {
+  /**
+   * True: a scope read that throws is shown like a scope that is not complete. A capability with a
+   * stored anchor then reads as `scope_changed`, not effective and not matching. The display read
+   * leaves this off and fails instead; the write answer sets it, because that view is built after the
+   * write it reports.
+   */
+  readonly scopeReadFailureAsNoScope?: boolean
+}
+
+/**
+ * The descriptor as a view reads it, with a scope read that answers null where the provider's would
+ * throw. A view reads the governance and the scope only, so the enable preconditions are not carried.
+ */
+function withNonThrowingScopeRead(descriptor: ProviderCapabilityDescriptor): ProviderCapabilityDescriptor {
+  return {
+    provider: descriptor.provider,
+    governance: descriptor.governance,
+    secretConfigKeys: descriptor.secretConfigKeys,
+    scopeOf: (row) => {
+      try {
+        return descriptor.scopeOf(row)
+      } catch {
+        return null
+      }
+    },
+  }
+}
+
+/** The stored revision as an integer in 0..2^53-1 (0 when there is no row); throws for anything else. */
+export function revisionOf(state: CapabilityRow | null): number {
   if (state === null) return 0
   const raw = state.revision
   const value = typeof raw === 'number' ? raw : Number(raw)
@@ -114,7 +154,7 @@ function updatedAtOf(state: CapabilityRow | null): string | null {
 }
 
 function legacyViewOf(
-  deps: CapabilitiesServiceDeps,
+  deps: CapabilitiesViewDeps,
   integration: PeekedIntegration,
   capability: IntegrationCapability,
 ): DirectoryLegacyView | LoginLegacyView | NotificationLegacyView | undefined {
@@ -143,7 +183,7 @@ function legacyViewOf(
 }
 
 function capabilityViewOf(
-  deps: CapabilitiesServiceDeps,
+  deps: CapabilitiesViewDeps,
   integration: PeekedIntegration,
   state: CapabilityRow | null,
   descriptor: ProviderCapabilityDescriptor | null,
@@ -160,11 +200,13 @@ function capabilityViewOf(
   })
   const governance = descriptor === null ? null : descriptor.governance[capability]
   const anchor = state === null ? null : capabilityAnchor(state, capability)
-  const current = descriptor === null ? null : descriptor.scopeOf(integration)
-  const matchesCurrent =
-    anchor === null || descriptor === null
-      ? null
-      : current !== null && current.tenant === anchor.tenant && current.appScope === anchor.appScope
+  // The current scope is read only to compare it with a stored anchor. A capability without one (never
+  // turned on, or turned off) does not ask the provider for a scope.
+  let matchesCurrent: boolean | null = null
+  if (anchor !== null && descriptor !== null) {
+    const current = descriptor.scopeOf(integration)
+    matchesCurrent = current !== null && current.tenant === anchor.tenant && current.appScope === anchor.appScope
+  }
   const view: CapabilityView = {
     enabled: state !== null && isCapabilityEnabled(state, capability),
     governance,
@@ -179,6 +221,35 @@ function capabilityViewOf(
   return view
 }
 
+/**
+ * The view of one integration row and its capability row (null when there is none). The read route
+ * builds it from a non-locking read and the write route from the rows it holds locked; both answer
+ * with this one shape. Both scope reads of a capability's view (its evaluation and the comparison
+ * with its anchor) go through the one descriptor chosen here.
+ */
+export function buildCapabilitiesView(
+  deps: CapabilitiesViewDeps,
+  integration: PeekedIntegration,
+  state: CapabilityRow | null,
+  options: CapabilitiesViewOptions = {},
+): CapabilitiesView {
+  const resolved = deps.resolveDescriptor(integration.provider)
+  const descriptor =
+    resolved !== null && options.scopeReadFailureAsNoScope === true ? withNonThrowingScopeRead(resolved) : resolved
+  const capabilities = {} as Record<IntegrationCapability, CapabilityView>
+  for (const capability of INTEGRATION_CAPABILITIES) {
+    capabilities[capability] = capabilityViewOf(deps, integration, state, descriptor, capability)
+  }
+  return {
+    integrationId: integration.id,
+    provider: integration.provider,
+    integrationStatus: integration.status,
+    revision: revisionOf(state),
+    updatedAt: updatedAtOf(state),
+    capabilities,
+  }
+}
+
 export function createDirectoryIntegrationCapabilitiesService(
   deps: CapabilitiesServiceDeps,
 ): DirectoryIntegrationCapabilitiesService {
@@ -189,23 +260,7 @@ export function createDirectoryIntegrationCapabilitiesService(
       if (!(await probeCapabilityTables(deps.executor))) return { kind: 'schema_unavailable' }
       const peeked = await peekIntegrationCapabilityState(deps.executor, integrationId)
       if (peeked === null) return { kind: 'not_found' }
-      const { integration, state } = peeked
-      const descriptor = deps.resolveDescriptor(integration.provider)
-      const capabilities = {} as Record<IntegrationCapability, CapabilityView>
-      for (const capability of INTEGRATION_CAPABILITIES) {
-        capabilities[capability] = capabilityViewOf(deps, integration, state, descriptor, capability)
-      }
-      return {
-        kind: 'ok',
-        view: {
-          integrationId: integration.id,
-          provider: integration.provider,
-          integrationStatus: integration.status,
-          revision: revisionOf(state),
-          updatedAt: updatedAtOf(state),
-          capabilities,
-        },
-      }
+      return { kind: 'ok', view: buildCapabilitiesView(deps, peeked.integration, peeked.state) }
     },
   }
 }

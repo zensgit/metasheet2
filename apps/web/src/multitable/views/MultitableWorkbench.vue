@@ -519,6 +519,7 @@
         :duplicate-blocked-reason="recordDuplicateBlockedReason"
         :manual-copy-available="manualRowsCreateAvailable"
         :bom-relations="inspectorBomRelations"
+        :manual-parent="inspectorManualParent"
         :can-submit-approval="canSubmitApproval"
         :can-manage-automation="canOpenWorkflowDesigner"
         :field-permissions="inspectorFieldPermissions"
@@ -557,6 +558,7 @@
         @close="onCloseDrawer" @delete="onDeleteRecord" @duplicate="onDuplicateRecord(selectedRecordId)" @patch="onDrawerPatch"
         @manual-copy="onManualCopyRecord(selectedRecordId)"
         @bom-relations="onBomRelations"
+        @edit-manual-parent="openManualParentDialog"
         @copy-link="onCopyRecordLink"
         @toggle-comments="onToggleComments" @comment-field="onToggleFieldComments" @open-automation="openWorkflowDesigner(selectedRecordId ?? undefined)" @open-link-picker="openLinkPicker" @open-person-picker="openPersonPicker"
         @toggle-lock="onToggleRecordLock"
@@ -608,8 +610,21 @@
       :submitting="manualRowDialog.submitting"
       :error="manualRowDialog.error"
       :field-errors="manualRowDialog.fieldErrors"
+      :parent-field-ids="manualRowParentFieldIds"
+      :own-code-field-id="manualRowCodeFieldId"
+      :search-parent-options="searchManualRowParentOptions"
       @submit="onManualRowDialogSubmit"
       @cancel="closeManualRowDialog"
+    />
+    <MetaManualRowParentDialog
+      :visible="manualParentDialog.visible"
+      :current="manualParentDialog.current"
+      :own-code="manualParentDialog.ownCode"
+      :search="searchManualRowParentOptions"
+      :submitting="manualParentDialog.submitting"
+      :error="manualParentDialog.error"
+      @submit="onManualParentDialogSubmit"
+      @cancel="closeManualParentDialog"
     />
     <MetaImportModal
       :visible="showImportModal"
@@ -919,8 +934,11 @@ import type {
 import type { MultitableRole } from '../composables/useMultitableCapabilities'
 import type { SortRule, FilterConjunction, ManualCellWrite } from '../composables/useMultitableGrid'
 import { manualRowLabel } from '../utils/manual-row-labels'
+import { confirmManualRowParentDependents } from '../utils/manual-row-parent-dependents'
 import {
   isManualSupplementMarked,
+  manualRowCodeChangeNeedsDependentsCheck,
+  manualRowParentCellText,
   manualRowsCreateEnabled,
   manualRowsCreateRefusalKey,
   manualRowsEditEnabled,
@@ -930,6 +948,7 @@ import {
   resolveManualRowEditableFieldIds,
 } from '../utils/manual-rows'
 import MetaManualRowDialog from '../components/MetaManualRowDialog.vue'
+import MetaManualRowParentDialog from '../components/MetaManualRowParentDialog.vue'
 import {
   bomRelationsLabel,
   bomRelationsSourceValue,
@@ -3035,19 +3054,21 @@ async function deleteAttachment(attachmentId: string, context?: MetaAttachmentUp
   await Promise.allSettled(context?.recordId ? drawerSavesOutOf(context.recordId) : [])
   // The deep-linked copy (the reload refreshes the page's rows only) takes the delete as the server does for an
   // attachment bound to that record (the id out of its list, version + 1), also when the drawer has moved on: a
-  // later patch of that record starts from it.
+  // later patch of that record starts from it. The server moves the record only when its stored list holds the
+  // attachment; one the copy's list does not hold (uploaded in a form and removed again before Save) leaves the copy
+  // as it is, as the server leaves the record.
   const linked = deepLinkedRecord.value
   if (context?.recordId && context.fieldId && linked?.id === context.recordId) {
-    const updatedIds = (linked.data[context.fieldId] as unknown[] | undefined)
-      ?.map(String)
-      .filter((id) => id !== attachmentId) ?? []
-    deepLinkedRecord.value = {
-      ...linked,
-      version: linked.version + 1,
-      data: {
-        ...linked.data,
-        [context.fieldId]: updatedIds,
-      },
+    const storedIds = (linked.data[context.fieldId] as unknown[] | undefined)?.map(String) ?? []
+    if (storedIds.includes(attachmentId)) {
+      deepLinkedRecord.value = {
+        ...linked,
+        version: linked.version + 1,
+        data: {
+          ...linked.data,
+          [context.fieldId]: storedIds.filter((id) => id !== attachmentId),
+        },
+      }
     }
     deepLinkedRecordAttachmentSummaries.value = {
       ...deepLinkedRecordAttachmentSummaries.value,
@@ -3260,6 +3281,8 @@ function onSetConjunction(c: FilterConjunction) { grid.filterConjunction.value =
 
 async function onPatchCell(recordId: string, fieldId: string, value: unknown, version: number) {
   if (!ensureCanEditRecord(recordId)) return
+  // ADR §12.7 ①: a manual row's 图号 that other manual rows name as their parent asks first (only then is this awaited).
+  if (manualRowCodeChangeChecked(recordId, fieldId, value) && !(await confirmManualRowDependents([recordId]))) return
   await grid.patchCell(recordId, fieldId, value, version)
 }
 async function onTimelinePatchDates(payload: {
@@ -3337,7 +3360,12 @@ async function onKanbanCreateRecord(data: Record<string, unknown>) {
 async function onDeleteRecord() {
   if (!selectedRecordId.value) return
   if (!ensureCanDeleteRecord(selectedRecordId.value)) return
-  const deleted = await grid.deleteRecord(selectedRecordId.value)
+  const deletingId = selectedRecordId.value
+  // ADR §12.7 ①: deleting a manual row other manual rows name as their parent asks first.
+  const manualIds = manualRowIdsForDependentsCheck([deletingId])
+  if (manualIds.length > 0 && !(await confirmManualRowDependents(manualIds))) return
+  if (selectedRecordId.value !== deletingId) return
+  const deleted = await grid.deleteRecord(deletingId)
   if (deleted) {
     selectedRecordId.value = null
     showComments.value = false
@@ -3499,6 +3527,147 @@ async function onManualCopyRecord(recordId?: string | null): Promise<void> {
   } catch (error: any) {
     showError(error?.message ?? manualRowLabel('toast.copyFailed', isZh.value))
   }
+}
+
+// ── 人工补充行的父组件 (ADR §12.2 / §12.6 / §12.7 ①, slice P2) ────────────────────────────────────────────────────────
+//
+// /context names the pair (`parentFieldIds`) only where a manual-row route accepts it AND this actor may write both
+// columns (rule P7); absent ⇒ no picker in the 新增 dialog and no 「修改父组件」 in the drawer. The pair is never a grid
+// cell editor (it is not in `editableFieldIds`; resolveManualRowEditableFieldIds drops it besides), and there is no grid
+// context menu (customer feedback 2026-10-27). 复制为新行 needs nothing here: the server carries the pair (OQ-P1).
+const manualRowParentFieldIds = computed(() => (capabilitiesStale.value ? null : manualRowsBlock.value?.parentFieldIds ?? null))
+// The row's own 图号 column (`componentCodeFieldId`): the manual-rows block names it beside the pair, and only to an
+// actor who may READ it. The client-side self-parent check (P5) compares with this column; without it the check is
+// skipped in the 新增 dialog (the server still refuses a self-parent, and a new row may still be given a parent) and
+// the drawer offers no 「修改父组件」 — PATCH …/manual-fields would refuse that actor's change of the pair (403).
+const manualRowCodeFieldId = computed(() =>
+  (manualRowParentFieldIds.value ? manualRowsBlock.value?.componentCodeFieldId ?? null : null))
+// The 图号 change warning (ADR §12.7 ①) protects OTHER rows, so it is asked of anyone who edits a manual row's 图号 —
+// also an actor who may not write the pair (no `parentFieldIds`, hence no `componentCodeFieldId`). For them the same
+// physical column comes from the BOM-relations block of the sheet (sent only to an actor who can read it). Without
+// either id no warning is asked; the edit itself is the server's to judge.
+const manualRowDependentsCodeFieldId = computed(() =>
+  manualRowCodeFieldId.value ?? bomRelationsBlock.value?.componentCodeFieldId ?? null)
+
+function searchManualRowParentOptions(q: string): Promise<unknown> {
+  const sheetId = workbench.activeSheetId.value
+  if (!sheetId) return Promise.resolve({ items: [], truncated: false })
+  return workbench.client.listManualRowParentOptions(sheetId, q ? { q } : undefined)
+}
+
+// The drawer's 「修改父组件」: a manual row, on a sheet whose /context names the pair, for an actor who may edit it.
+const inspectorManualParent = computed<{ code: string | null; name: string | null } | null>(() => {
+  const ids = manualRowParentFieldIds.value
+  const record = selectedRecordResolved.value
+  // No `componentCodeFieldId` beside the pair = this actor cannot read the row's own 图号, and the edit route refuses
+  // their change of an existing row's parent (rule P5 would compare with that cell): nothing to offer.
+  if (!ids || !manualRowCodeFieldId.value || !record || !manualRowsEditGate.value || !isManualRowRecord(record.id)) return null
+  return { code: manualRowParentCellText(record.data[ids.code]), name: manualRowParentCellText(record.data[ids.name]) }
+})
+
+const manualParentDialog = ref<{
+  visible: boolean
+  submitting: boolean
+  error: string | null
+  recordId: string | null
+  current: { code: string | null; name: string | null }
+  ownCode: unknown
+}>({ visible: false, submitting: false, error: null, recordId: null, current: { code: null, name: null }, ownCode: null })
+
+function openManualParentDialog(): void {
+  const record = selectedRecordResolved.value
+  const current = inspectorManualParent.value
+  if (!record || !current || !ensureCanEditRecord(record.id)) return
+  const codeFieldId = manualRowCodeFieldId.value
+  if (!codeFieldId) return
+  manualParentDialog.value = {
+    visible: true, submitting: false, error: null, recordId: record.id, current,
+    ownCode: record.data[codeFieldId] ?? null,
+  }
+}
+
+function closeManualParentDialog(): void {
+  if (manualParentDialog.value.submitting) return
+  manualParentDialog.value = { ...manualParentDialog.value, visible: false, error: null, recordId: null }
+}
+
+// Both columns through PATCH …/manual-fields with the row's version, after the drawer's own saves of the row (their
+// versions first); then the row is read again. Not in the grid's undo history (ADR §12.7 ④).
+async function onManualParentDialogSubmit(values: { code: string | null; name: string | null }): Promise<void> {
+  const ids = manualRowParentFieldIds.value
+  const recordId = manualParentDialog.value.recordId
+  if (!ids || !recordId || manualParentDialog.value.submitting) return
+  manualParentDialog.value = { ...manualParentDialog.value, submitting: true, error: null }
+  try {
+    await Promise.allSettled([manualDrawerWriteTails.get(recordId) ?? Promise.resolve(), ...drawerSavesOutOf(recordId)])
+    const record = drawerRecordById(recordId)
+    await workbench.client.patchManualRowFields(recordId, {
+      sheetId: workbench.activeSheetId.value || undefined,
+      ...(typeof record?.version === 'number' ? { expectedVersion: record.version } : {}),
+      data: { [ids.code]: values.code, [ids.name]: values.name },
+    })
+    manualParentDialog.value = { ...manualParentDialog.value, visible: false, submitting: false, error: null, recordId: null }
+    showSuccess(manualRowLabel('parent.edit.saved', isZh.value))
+    await refreshRecordAfterManualParentSave(recordId)
+  } catch (error: any) {
+    manualParentDialog.value = {
+      ...manualParentDialog.value,
+      submitting: false,
+      error: error?.message ?? manualRowLabel('parent.edit.failed', isZh.value),
+    }
+  }
+}
+
+async function refreshRecordAfterManualParentSave(recordId: string): Promise<void> {
+  await grid.loadViewData(grid.page.value.offset)
+  if (deepLinkedRecord.value?.id !== recordId) return
+  try {
+    const ctx = await workbench.client.getRecord(recordId, {
+      sheetId: workbench.activeSheetId.value || undefined,
+      viewId: workbench.activeViewId.value || undefined,
+    })
+    if (deepLinkedRecord.value?.id === recordId && ctx?.record) deepLinkedRecord.value = ctx.record
+  } catch {
+    // The page reload above already shows the row when it is on the page; a copy stays as it was until reopened.
+  }
+}
+
+// ADR §12.7 ①: the count of manual rows that name a manual row's 图号 as their parent, asked before that 图号 changes or
+// the row is deleted. Wherever the manual-row edit route works (the dependents route shares its gate).
+function manualRowDependentsCheckable(): boolean {
+  return !capabilitiesStale.value && manualRowsEditEnabled(manualRowsBlock.value)
+}
+
+function manualRowIdsForDependentsCheck(recordIds: readonly string[]): string[] {
+  if (!manualRowDependentsCheckable()) return []
+  return recordIds.filter((recordId) => isManualRowRecord(recordId))
+}
+
+/** Synchronous, so every other cell write keeps its timing: is this a manual row's 图号 actually changing? */
+function manualRowCodeChangeChecked(recordId: string, fieldId: string, value: unknown): boolean {
+  const codeFieldId = manualRowDependentsCodeFieldId.value
+  if (!codeFieldId || fieldId !== codeFieldId || !manualRowDependentsCheckable() || !isManualRowRecord(recordId)) return false
+  const record = drawerRecordById(recordId)
+  return !!record && manualRowCodeChangeNeedsDependentsCheck(record.data[fieldId], value)
+}
+
+function confirmManualRowDependents(recordIds: readonly string[]): Promise<boolean> {
+  return confirmManualRowParentDependents({
+    recordIds,
+    count: (recordId) => workbench.client.countManualRowParentDependents(recordId),
+    confirm: (message) => window.confirm(message),
+    isZh: isZh.value,
+  })
+}
+
+// A drawer box whose commit was cancelled shows the stored value again: the record it shows is replaced (the page is
+// read again for a row on the page; a copy is renewed), and the box takes the value it did not commit.
+function redrawDrawerRecord(recordId: string): void {
+  if (pageRowFor(recordId)) {
+    void grid.reloadCurrentPage()
+    return
+  }
+  if (deepLinkedRecord.value?.id === recordId) deepLinkedRecord.value = { ...deepLinkedRecord.value }
 }
 
 async function onToggleRecordLock(payload: { recordId: string; locked: boolean }) {
@@ -3773,6 +3942,12 @@ async function onDrawerPatch(fieldId: string, value: unknown, recordId?: string,
     patchValue = next
   }
   if (!ensureCanEditRecord(record.id)) return
+  // ADR §12.7 ①: a manual row's 图号 that other manual rows name as their parent asks first. Cancelled, nothing is
+  // sent and the drawer's box goes back to the stored 图号.
+  if (manualRowCodeChangeChecked(record.id, fieldId, patchValue) && !(await confirmManualRowDependents([record.id]))) {
+    redrawDrawerRecord(record.id)
+    return
+  }
   // Once the server accepts the field, its controls' own edit history ends at this commit, so Cmd+Z there
   // is the grid's again (which undoes this very commit). Marked now, settled only on success: a rejected
   // patch keeps the typing undoable. Only for the record shown: the controls show it, not a record left.
@@ -6173,6 +6348,9 @@ function startDialogMetaRefresh() {
 // --- Bulk delete ---
 async function onBulkDelete(recordIds: string[]) {
   if (recordIds.some((recordId) => !ensureCanDeleteRecord(recordId))) return
+  // ADR §12.7 ①: one question for the whole selection, with the manual rows' dependents summed.
+  const manualIds = manualRowIdsForDependentsCheck(recordIds)
+  if (manualIds.length > 0 && !(await confirmManualRowDependents(manualIds))) return
   const results = await Promise.all(recordIds.map((rid) => grid.deleteRecord(rid)))
   const deletedIds = recordIds.filter((_, i) => results[i])
   const failedIds = recordIds.filter((_, i) => !results[i])

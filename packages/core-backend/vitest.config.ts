@@ -404,6 +404,14 @@ export default defineConfig({
       // wired as a WHOLE FILE into the approval real-DB step in plugin-tests.yml (pinned by
       // plugin-tests-parallel-contract.test.mjs).
       'tests/integration/directory-adapter-golden-parity.db.test.ts',
+      // Directory integration capability consumer resolver against real PostgreSQL: effective and refused
+      // decisions, the read-committed / in-transaction / bounded-lock-wait contract, the two FOR SHARE
+      // locks against a generic PUT and a disable (two-connection barrier), a repeatable-read-default
+      // pool, and several candidates for one scope. DATABASE_URL-gated with the EXPECT_DB sentinel;
+      // excluded here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the approval
+      // real-DB step in plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs and
+      // tests/unit/directory-integration-capabilities-wiring.test.ts).
+      'tests/integration/directory-integration-capability-resolve.db.test.ts',
       // Directory integration capability tables against real PostgreSQL: structure and constraints,
       // update and append-only guards, the guarded down(), the table-existence probe on an open
       // transaction, and the login scope unique index. DATABASE_URL-gated; excluded here so the no-DB
@@ -411,6 +419,15 @@ export default defineConfig({
       // plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs and
       // tests/unit/directory-integration-capabilities-wiring.test.ts).
       'tests/integration/directory-integration-capabilities.db.test.ts',
+      // Directory integration capability PATCH against real PostgreSQL: per-capability enable, disable and
+      // re-anchoring, the revision check under two connections on read-committed and
+      // repeatable-read-default pools, login scope uniqueness on the insert and update paths, history in
+      // the same transaction, the busy answer, scope shape, enable preconditions and enable gates, with
+      // the consumer resolver reading the rows the PATCH wrote. DATABASE_URL-gated with the EXPECT_DB
+      // sentinel; excluded here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the
+      // approval real-DB step in plugin-tests.yml (pinned by plugin-tests-parallel-contract.test.mjs and
+      // tests/unit/directory-integration-capabilities-wiring.test.ts).
+      'tests/integration/directory-integration-capabilities-patch.db.test.ts',
       // Deprovision effect provider witness: the provider column migration (isolated schema:
       // triggers, CHECK, replay, down, lock bound) and restore / compensation / writer against the
       // migrated schema. DATABASE_URL-gated with the EXPECT_DB sentinel; excluded here so the
@@ -492,6 +509,8 @@ export default defineConfig({
       'tests/integration/strict-login-grant-scope.db.test.ts',
       'tests/integration/admin-login-grant-command.db.test.ts',
       'tests/integration/auth-b2-issuer-provenance.db.test.ts',
+      'tests/integration/ordinary-session-renewal.db.test.ts',
+      'tests/integration/dingtalk-corp-backfill-scope.db.test.ts',
       'tests/integration/strict-credential-chain.db.test.ts',
       'tests/integration/strict-dingtalk-entry.db.test.ts',
       // Database-side census of the classifier input tables (triggers, rules, function bodies,

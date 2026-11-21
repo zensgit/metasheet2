@@ -184,6 +184,194 @@ test('ME-06 an env target: its manual: rows are 人工（非补充） (M′ need
   assert.deepEqual(codes(result), ['SYN-O', 'SYN-R', 'SYN-C1', 'SYN-C2', 'SYN-M1'], 'still appended after the tree')
 })
 
+// ── P3 (ADR §12.5 「正式导出」, OQ-P2 owner 2026-11-19): 人工补充行 spliced under their 父组件 ───────────────────────────
+//
+//   ME-08 under a printed PLM parent: at the END of the anchor's subtree (a root, a leaf mid-tree, an orphan root, a
+//         parent with a grandchild); 来源 / counts / 层级 / 沿用说明 unchanged.
+//   ME-09 several rows under one anchor: after every tree row of the subtree, by compareSiblingRows; nested anchors
+//         whose subtrees end on the same row: the deeper anchor's rows first.
+//   ME-10 an anchor 图号 printed twice: the FIRST printed row wins.
+//   ME-11 no anchor (a new parent), an inactive anchor, a collapsed anchor: the tail, today's order.
+//   ME-12 manual → manual: a row follows its 人工补充 parent (spliced or tail) after that row's earlier manual children;
+//         on an equal 图号 a tree row wins; a 人工（非补充） row is never an anchor.
+//   ME-13 a cycle and a self-parent: the tail, today's order; a row hanging off a cycle follows its parent.
+//   ME-14 the degraded part-id tree and the flat comparator: every prefix row in the tail.
+//   ME-15 a 人工（非补充） prefix row with a parent: the tail, while a 人工补充 row with the same parent splices.
+//   ME-16 C09: the sheets on which no row splices answer main's (df83192d9) result byte for byte.
+//   ME-17 the order is a function of the row set (not the arrival order).
+//   ME-18 through the mounted route: the workbook carries the spliced order, the audit row is unchanged in shape.
+
+const ME_QTY = EXPORT_COLUMNS.findIndex((column) => column.id === 'totalQuantity')
+const ME_DEPTH = EXPORT_COLUMNS.findIndex((column) => column.id === 'depth')
+const sortNoed = (id, parentComponentCode, componentCode, sortNo) => {
+  const record = F.hung(id, parentComponentCode, componentCode)
+  record.data.ext_componentSortNo = sortNo
+  return record
+}
+
+test('ME-08 a 人工补充 row prints at the end of its printed PLM parent\'s subtree', async () => {
+  const base = ['SYN-O', 'SYN-R', 'SYN-C1', 'SYN-C2']
+  const underRoot = await exportOf([...F.plmTree(), F.hung('rec_c_r', 'SYN-R', 'SYN-M1')])
+  assert.deepEqual(codes(underRoot), [...base, 'SYN-M1'], 'R\'s subtree ends after C2 (the collapsed twin and the inactive row are not printed)')
+  const underLeaf = await exportOf([...F.plmTree(), F.hung('rec_c_c1', 'SYN-C1', 'SYN-M2')])
+  assert.deepEqual(codes(underLeaf), ['SYN-O', 'SYN-R', 'SYN-C1', 'SYN-M2', 'SYN-C2'], 'mid-tree, before the next sibling')
+  const underOrphan = await exportOf([...F.plmTree(), F.hung('rec_c_o', 'SYN-O', 'SYN-M3')])
+  assert.deepEqual(codes(underOrphan), ['SYN-O', 'SYN-M3', 'SYN-R', 'SYN-C1', 'SYN-C2'], 'under an orphan root')
+  const grandchild = F.plm('rec_6_g', ['P-R', 'P-C1', 'P-C1G'], { parentComponentCode: 'SYN-C1', componentCode: 'SYN-C1G', componentName: 'Grandchild' })
+  const deep = await exportOf([...F.plmTree(), grandchild, F.hung('rec_c_c1', 'SYN-C1', 'SYN-M2'), F.hung('rec_c_r', 'SYN-R', 'SYN-M1')])
+  assert.deepEqual(codes(deep), ['SYN-O', 'SYN-R', 'SYN-C1', 'SYN-C1G', 'SYN-M2', 'SYN-C2', 'SYN-M1'], 'after the whole subtree, grandchildren included')
+
+  // Everything but the position is B1's: 来源, the counts, 层级 blank, the tree facts; a parentless row stays the tail.
+  const mixed = await exportOf([...F.plmTree(), F.hung('rec_c_r', 'SYN-R', 'SYN-M1'), F.person('rec_4_free', { componentCode: 'SYN-A-FREE' })])
+  assert.deepEqual(codes(mixed), [...base, 'SYN-M1', 'SYN-A-FREE'])
+  assert.deepEqual(sourceCells(mixed), ['PLM', 'PLM', 'PLM', 'PLM', '人工补充', '人工补充'])
+  assert.equal(mixed.manualSupplementRowCount, 2)
+  assert.equal(mixed.manualOtherRowCount, 0)
+  assert.equal(mixed.collapsedRowCount, 1)
+  assert.equal(mixed.treeIdentity, 'path')
+  assert.equal(mixed.rows[4][ME_DEPTH], null, '层级 stays blank for a spliced row')
+  assert.equal(mixed.rows[4][EXPORT_COLUMNS.findIndex((column) => column.id === 'parentComponentCode')], 'SYN-R')
+  const continued = await exportOf([...F.plmTree(), F.hung('rec_c_r', 'SYN-R', 'SYN-M1')], { continuation: F.continuationFor() })
+  assert.deepEqual(continued.rows.map((row) => [row[CODE], row[32]]), [
+    ['SYN-O', '由 SYN-R 沿用（父边用量 2，关系 ort_0001）'], ['SYN-R', ''], ['SYN-C1', ''], ['SYN-C2', ''], ['SYN-M1', ''],
+  ])
+})
+
+test('ME-09 several rows under one anchor: after the subtree, by compareSiblingRows; nested anchors ending together: deeper first', async () => {
+  const result = await exportOf([
+    ...F.plmTree(),
+    F.hung('rec_c_z', 'SYN-R', 'SYN-MZ'),
+    F.hung('rec_c_a', 'SYN-R', 'SYN-MA'),
+    sortNoed('rec_c_s', 'SYN-R', 'SYN-MZZ', 1),
+    F.hung('rec_c_c2', 'SYN-C2', 'SYN-MC2'),
+  ])
+  assert.deepEqual(codes(result), ['SYN-O', 'SYN-R', 'SYN-C1', 'SYN-C2', 'SYN-MC2', 'SYN-MZZ', 'SYN-MA', 'SYN-MZ'],
+    'C2 is R\'s last child: C2\'s manual row closes C2\'s subtree, then R\'s rows by 排序号 -> 图号')
+})
+
+test('ME-10 an anchor 图号 printed twice: the first printed row is the anchor', async () => {
+  const sharedUnderOrphan = F.plm('rec_b_c1o', ['P-X', 'P-O', 'P-C1'], { parentComponentCode: 'SYN-O', componentCode: 'SYN-C1', componentName: 'Child one', totalQuantity: 5 })
+  const result = await exportOf([...F.plmTree(), sharedUnderOrphan, F.hung('rec_c_c1', 'SYN-C1', 'SYN-M2')])
+  assert.deepEqual(codes(result), ['SYN-O', 'SYN-C1', 'SYN-M2', 'SYN-R', 'SYN-C1', 'SYN-C2'])
+  assert.equal(result.rows[1][ME_QTY], 5, 'the anchor is the first SYN-C1 (under the orphan)')
+})
+
+test('ME-11 no printed anchor (a new parent, an inactive one, a collapsed one): the tail, in today\'s order', async () => {
+  const result = await exportOf([
+    ...F.plmTreeWithCollapsedChild(),
+    F.hung('rec_c_r', 'SYN-R', 'SYN-M1'),
+    F.hung('rec_c_new', 'SYN-NEW', 'SYN-N1'),
+    F.hung('rec_c_inactive', 'SYN-OLD', 'SYN-N2'),
+    F.hung('rec_c_collapsed', 'SYN-G', 'SYN-N3'),
+  ])
+  assert.equal(result.collapsedRowCount, 2, 'the twin and its child SYN-G collapsed')
+  assert.deepEqual(codes(result), ['SYN-O', 'SYN-R', 'SYN-C1', 'SYN-C2', 'SYN-M1', 'SYN-N3', 'SYN-N1', 'SYN-N2'],
+    'the tail sorts by 父组件图号 (SYN-G < SYN-NEW < SYN-OLD) exactly as B1 did')
+})
+
+test('ME-12 manual -> manual: a row follows its 人工补充 parent; a tree row wins on an equal 图号; 人工（非补充） anchors nothing', async () => {
+  const result = await exportOf([
+    ...F.plmTree(),
+    F.hung('rec_c_m1', 'SYN-R', 'SYN-M1'),
+    F.hung('rec_c_m0', 'SYN-R', 'SYN-M0'),
+    F.hung('rec_c_m2', 'SYN-M1', 'SYN-M2'),
+    F.hung('rec_c_m2b', 'SYN-M1', 'SYN-M2B'),
+    F.hung('rec_c_m3', 'SYN-M2', 'SYN-M3'),
+    // A parentless 人工补充 row with a tree 图号, and a row under that 图号: the tree row is the anchor.
+    F.person('rec_e_dup', { componentCode: 'SYN-C1' }),
+    F.hung('rec_e_w', 'SYN-C1', 'SYN-W'),
+    // Tail: T parentless, U under T (follows T), X under a new parent.
+    F.person('rec_f_t', { componentCode: 'SYN-T' }),
+    F.hung('rec_f_u', 'SYN-T', 'SYN-U'),
+    F.hung('rec_f_x', 'SYN-NEW', 'SYN-X1'),
+    // An unbound prefix row (人工（非补充）) is no anchor: V under it stays at its own tail position.
+    F.person('rec_g_nb', { componentCode: 'SYN-NB' }, { createdBy: null }),
+    F.hung('rec_g_v', 'SYN-NB', 'SYN-V'),
+  ])
+  assert.deepEqual(codes(result), [
+    'SYN-O', 'SYN-R', 'SYN-C1', 'SYN-W', 'SYN-C2', 'SYN-M0', 'SYN-M1', 'SYN-M2', 'SYN-M3', 'SYN-M2B',
+    'SYN-V', 'SYN-X1', 'SYN-C1', 'SYN-NB', 'SYN-T', 'SYN-U',
+  ])
+  assert.equal(result.manualSupplementRowCount, 11)
+  assert.equal(result.manualOtherRowCount, 1)
+})
+
+test('ME-13 a cycle and a self-parent stay in the tail in today\'s order; a row hanging off a cycle follows its parent', async () => {
+  const cycle = [F.hung('rec_d_a', 'SYN-CB', 'SYN-CA'), F.hung('rec_d_b', 'SYN-CA', 'SYN-CB')]
+  const selfRows = [F.hung('rec_d_s', 'SYN-S', 'SYN-S'), F.hung('rec_d_r', 'SYN-R', 'SYN-R')]
+  const plain = await exportOf([...F.plmTree(), ...cycle, ...selfRows])
+  // Today: by 父组件图号 (SYN-CA < SYN-CB < SYN-R < SYN-S). Self-parent stays in the tail even when a tree row has its 图号.
+  assert.deepEqual(codes(plain), ['SYN-O', 'SYN-R', 'SYN-C1', 'SYN-C2', 'SYN-CB', 'SYN-CA', 'SYN-R', 'SYN-S'])
+  const hanging = await exportOf([...F.plmTree(), ...cycle, F.hung('rec_d_c', 'SYN-CA', 'SYN-CC')])
+  // B1 printed CB, CC (both under SYN-CA), CA. Now CC follows CA; the cycle members keep today's order.
+  assert.deepEqual(codes(hanging), ['SYN-O', 'SYN-R', 'SYN-C1', 'SYN-C2', 'SYN-CB', 'SYN-CA', 'SYN-CC'])
+  // A cycle reached from a spliced row: the spliced part is placed, the loop stays in the tail.
+  const reached = await exportOf([...F.plmTree(), ...cycle, F.hung('rec_d_m', 'SYN-R', 'SYN-CM'), F.hung('rec_d_n', 'SYN-CM', 'SYN-CN')])
+  assert.deepEqual(codes(reached), ['SYN-O', 'SYN-R', 'SYN-C1', 'SYN-C2', 'SYN-CM', 'SYN-CN', 'SYN-CB', 'SYN-CA'])
+})
+
+test('ME-14 the degraded part-id tree and the flat comparator: every prefix row stays in the tail', async () => {
+  const degraded = await exportOf([...F.plmTreeWithoutPaths(), F.hung('rec_c_r', 'SYN-R', 'SYN-M1')])
+  assert.equal(degraded.treeDegraded, true)
+  assert.deepEqual(codes(degraded), ['SYN-O', 'SYN-R', 'SYN-C1', 'SYN-C2', 'SYN-M1'])
+  const underLeaf = await exportOf([...F.plmTreeWithoutPaths(), F.hung('rec_c_c1', 'SYN-C1', 'SYN-M2')])
+  assert.deepEqual(codes(underLeaf), ['SYN-O', 'SYN-R', 'SYN-C1', 'SYN-C2', 'SYN-M2'], 'not after C1: no path, no subtree extent')
+  const flat = await exportOf([...F.plmTreeWithoutPaths({ withPartIds: false }), F.hung('rec_c_c1', 'SYN-C1', 'SYN-M2')])
+  assert.equal(flat.treeOrdered, false)
+  assert.equal(codes(flat)[codes(flat).length - 1], 'SYN-M2')
+})
+
+test('ME-15 a 人工（非补充） prefix row with a parent stays in the tail; a 人工补充 row with the same parent splices', async () => {
+  const result = await exportOf([
+    ...F.plmTree(),
+    F.hung('rec_b_unbound', 'SYN-C1', 'SYN-NB1', { createdBy: null }),
+    F.hung('rec_b_other', 'SYN-C1', 'SYN-NB2', { key: 'manual:v1:rec_someone_else' }),
+    F.hung('rec_c_c1', 'SYN-C1', 'SYN-M2'),
+  ])
+  assert.deepEqual(codes(result), ['SYN-O', 'SYN-R', 'SYN-C1', 'SYN-M2', 'SYN-C2', 'SYN-NB1', 'SYN-NB2'])
+  assert.deepEqual(sourceCells(result).slice(-2), ['人工（非补充）', '人工（非补充）'])
+})
+
+// sha256 of JSON.stringify(result), captured from main df83192d9's OWN export module over F.p3UnsplicedCases().
+const P3_UNSPLICED_GOLDENS = {
+  'parentless': '9e261d96871ea1c4987929183ab580240d065b02ccba3a5b11d57e4e21499769',
+  'parentless + 沿用说明': '126a67c2f3c3cc1cd1b2b984ace91b1d269f71c87b606179b0256e2e2540aa09',
+  'unspliceable (人工（非补充）, not found, inactive, collapsed, self, cycle)': '85361da0574816ee7b5d1209dbe561133bf16049f92431fdeda862fcf76af757',
+  'degraded part-id tree': 'e87f44d1efa909aa97ec6694ac219a7cea127c8461bfa5cda280faf932b81026',
+  'flat comparator': 'b3834fbb47e4b0cc18bbfc99b1410e430fcd67b852aefb5dda352b76e408dcc1',
+  'env target': 'e769ad26bbe0b39f1c88823c3511ccaf832de35c67ab46870895f17e45d9b9e2',
+}
+
+test('ME-16 C09: a sheet on which no row splices exports main\'s result byte for byte', async () => {
+  const crypto = require('node:crypto')
+  const cases = F.p3UnsplicedCases()
+  assert.deepEqual(cases.map((entry) => entry.name), Object.keys(P3_UNSPLICED_GOLDENS))
+  for (const entry of cases) {
+    const result = await exportStockPreparationPrepLines({
+      recordsApi: F.recordsApiOver(entry.records), target: F.target(entry.objectId), projectNo: F.PROJECT_NO, permission: 'admin',
+      ...(entry.continuation ? { continuation: entry.continuation } : {}),
+    })
+    assert.equal(crypto.createHash('sha256').update(JSON.stringify(result)).digest('hex'), P3_UNSPLICED_GOLDENS[entry.name], entry.name)
+  }
+  // ME-01 (the pure-PLM goldens) is the other half of C09 and runs unchanged above.
+})
+
+test('ME-17 the spliced order depends on the row set only, not on the order rows arrive in', () => {
+  const rows = [
+    ...F.plmTree(), F.hung('rec_c_m1', 'SYN-R', 'SYN-M1'), F.hung('rec_c_m0', 'SYN-R', 'SYN-M0'), F.hung('rec_c_m2', 'SYN-M1', 'SYN-M2'),
+    F.hung('rec_d_a', 'SYN-CB', 'SYN-CA'), F.hung('rec_d_b', 'SYN-CA', 'SYN-CB'), F.person('rec_f_t', { componentCode: 'SYN-T' }), F.hung('rec_f_u', 'SYN-T', 'SYN-U'),
+  ].map((record) => exportInternals.unmapRow(record, {}, F.PROJECT_OBJECT_ID)).filter((data) => data.active !== false)
+  const split = (list) => {
+    const prefix = list.filter((data) => String(data.idempotencyKey).startsWith('manual:'))
+    return exportInternals.exportPrintOrder(exportInternals.orderRowsAsBomTree(list.filter((data) => !prefix.includes(data))), prefix)
+  }
+  const forward = split(rows).map((data) => data[exportInternals.ROW_IDENTITY_KEY])
+  const backward = split(rows.slice().reverse()).map((data) => data[exportInternals.ROW_IDENTITY_KEY])
+  assert.deepEqual(backward, forward)
+  assert.equal(forward.length, rows.length - 1, 'every active row printed, only the PLM display twin collapsed')
+  assert.equal(new Set(forward).size, forward.length, 'and none twice')
+})
+
 // ── ME-07: through the mounted route ───────────────────────────────────────────────────────────────────
 
 const TENANT_ID = 'tenant-mr-export'
@@ -255,6 +443,17 @@ test('ME-07 the mounted route: 来源 in the workbook, audit columnCount 32 (31 
   assert.equal(workbook.rows[workbook.rows.length - 1][31], '人工补充')
   assert.deepEqual(withManual.auditAppends[0].detail, { operation: 'prep_line_export', totalRowCount: 7, activeRowCount: 6, columnCount: 32 })
   assert.equal(res.headers['X-Stock-Prep-Export-Row-Count'], '6')
+})
+
+test('ME-18 the mounted route: the workbook carries the spliced order; the audit row keeps its shape', async () => {
+  const mounted = mountExport([...F.plmTree(), F.hung('rec_c_c1', 'SYN-C1', 'SYN-M2'), F.person('rec_4_free', { componentCode: 'SYN-A-FREE' })])
+  const res = await mounted.get()
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+  const workbook = mounted.workbooks[0]
+  assert.deepEqual(workbook.rows.map((row) => row[CODE]), ['SYN-O', 'SYN-R', 'SYN-C1', 'SYN-M2', 'SYN-C2', 'SYN-A-FREE'])
+  assert.deepEqual(workbook.rows.map((row) => row[31]), ['PLM', 'PLM', 'PLM', '人工补充', 'PLM', '人工补充'])
+  assert.deepEqual(mounted.auditAppends[0].detail, { operation: 'prep_line_export', totalRowCount: 8, activeRowCount: 7, columnCount: 32 })
+  assert.equal(res.headers['X-Stock-Prep-Export-Row-Count'], '7')
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-manual-rows-export.test.cjs', tests)

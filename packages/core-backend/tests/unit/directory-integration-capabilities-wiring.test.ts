@@ -1,7 +1,8 @@
 /**
- * The real-PostgreSQL suite for the capability tables is excluded from the no-DB run and named whole in
- * the approval real-DB step of the plugin-tests workflow; the suite itself fails when it is asked to run
- * against a database and none is configured.
+ * The real-PostgreSQL suites for the capability tables, for the consumer resolver and for the
+ * administrator PATCH are excluded from the no-DB run and named whole in the approval real-DB step of the
+ * plugin-tests workflow; each suite fails when it is asked to run against a database and none is
+ * configured.
  */
 import { describe, expect, it } from 'vitest'
 import { existsSync, readFileSync } from 'node:fs'
@@ -44,6 +45,88 @@ describe('real-DB suite wiring', () => {
     const text = readFileSync(path.join(BACKEND, DB_SPEC), 'utf8')
     expect(sentinelPlacement(text)).toBe('top-level')
     expect(text).toContain("const EXPECT_DB = process.env.EXPECT_DB === '1'\nconst itIfExpectDb = EXPECT_DB ? it : it.skip\n")
+  })
+
+  describe('the consumer resolver suite', () => {
+    const RESOLVE_SPEC = 'tests/integration/directory-integration-capability-resolve.db.test.ts'
+
+    it('exists', () => {
+      expect(existsSync(path.join(BACKEND, RESOLVE_SPEC))).toBe(true)
+    })
+
+    it('is excluded from the no-DB vitest run, exactly once', () => {
+      const exclude = (config as { test?: { exclude?: string[] } }).test?.exclude ?? []
+      expect(exclude.filter((entry) => entry === RESOLVE_SPEC)).toHaveLength(1)
+    })
+
+    it('is named whole, exactly once, in the approval real-DB step, right before the capability tables suite', () => {
+      const run = approvalRealDbRun()
+      expect(run.split(`  ${RESOLVE_SPEC} \\\n`).length - 1).toBe(1)
+      expect(run.split(RESOLVE_SPEC).length - 1).toBe(1)
+      expect(run).toContain(`  ${RESOLVE_SPEC} \\\n  ${DB_SPEC} \\\n`)
+    })
+
+    it('carries the sentinel that fails a database-expected run without a database', () => {
+      const text = readFileSync(path.join(BACKEND, RESOLVE_SPEC), 'utf8')
+      expect(sentinelPlacement(text)).toBe('top-level')
+      expect(text).toContain("const EXPECT_DB = process.env.EXPECT_DB === '1'\nconst itIfExpectDb = EXPECT_DB ? it : it.skip\n")
+    })
+
+    it('owns no migration and changes no schema: it runs against the already migrated database and only narrows search_path in a reader transaction', () => {
+      const text = readFileSync(path.join(BACKEND, RESOLVE_SPEC), 'utf8')
+      expect(text).not.toMatch(/db\/migrations/)
+      expect(text).not.toMatch(/\bkysely\b/i)
+      expect(text).not.toMatch(/\b(?:up|down)\(\s*trx\b/)
+      expect(text).not.toMatch(/\bTRUNCATE\b/i)
+      expect(text).not.toMatch(/\b(?:CREATE|DROP|ALTER)\s+(?:TABLE|SCHEMA|INDEX|TRIGGER|FUNCTION)\b/i)
+      expect(text).not.toMatch(/\b(?:DELETE\s+FROM|UPDATE|INSERT\s+INTO)\s+\$\{HISTORY\}/)
+      expect(text).not.toMatch(/\bSET\s+(?:SESSION\s+)?search_path\b/i)
+      expect(text.match(/\bSET LOCAL search_path\b/g) ?? []).toHaveLength(1)
+    })
+  })
+
+  describe('the PATCH suite', () => {
+    const PATCH_SPEC = 'tests/integration/directory-integration-capabilities-patch.db.test.ts'
+
+    it('exists', () => {
+      expect(existsSync(path.join(BACKEND, PATCH_SPEC))).toBe(true)
+    })
+
+    it('is excluded from the no-DB vitest run, exactly once', () => {
+      const exclude = (config as { test?: { exclude?: string[] } }).test?.exclude ?? []
+      expect(exclude.filter((entry) => entry === PATCH_SPEC)).toHaveLength(1)
+    })
+
+    it('is named whole, exactly once, in the approval real-DB step, at any position', () => {
+      const run = approvalRealDbRun()
+      expect(run.split(`  ${PATCH_SPEC} \\\n`).length - 1).toBe(1)
+      expect(run.split(PATCH_SPEC).length - 1).toBe(1)
+    })
+
+    it('is named in no other step of the workflow', () => {
+      const doc = yaml.load(readFileSync(WORKFLOW, 'utf8')) as { jobs: Record<string, { steps?: Step[] }> }
+      const naming = Object.entries(doc.jobs).flatMap(([job, body]) =>
+        (body.steps ?? []).filter((step) => (step.run ?? '').includes(PATCH_SPEC)).map((step) => `${job}/${step.id ?? ''}`),
+      )
+      expect(naming).toEqual(['approval-db/approval-real-db-integration'])
+    })
+
+    it('carries the sentinel that fails a database-expected run without a database', () => {
+      const text = readFileSync(path.join(BACKEND, PATCH_SPEC), 'utf8')
+      expect(sentinelPlacement(text)).toBe('top-level')
+      expect(text).toContain("const EXPECT_DB = process.env.EXPECT_DB === '1'\nconst itIfExpectDb = EXPECT_DB ? it : it.skip\n")
+    })
+
+    it('owns no migration and writes capability rows through the PATCH only', () => {
+      const text = readFileSync(path.join(BACKEND, PATCH_SPEC), 'utf8')
+      expect(text).not.toMatch(/db\/migrations/)
+      expect(text).not.toMatch(/\bkysely\b/i)
+      expect(text).not.toMatch(/\b(?:up|down)\(\s*trx\b/)
+      expect(text).not.toMatch(/\b(?:CREATE|DROP|ALTER)\s+(?:TABLE|SCHEMA|INDEX)\b/i)
+      expect(text).not.toMatch(/\bINSERT\s+INTO\s+\$\{(?:CAPS|HISTORY)\}/)
+      expect(text).not.toMatch(/\bUPDATE\s+\$\{(?:CAPS|HISTORY)\}/)
+      expect(text).not.toMatch(/\bSET\s+(?:SESSION\s+)?search_path\b/i)
+    })
   })
 
   it('tells a nested sentinel from a top-level one', () => {
