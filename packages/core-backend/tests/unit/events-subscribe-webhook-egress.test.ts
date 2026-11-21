@@ -239,7 +239,7 @@ describe('POST /api/events/subscribe — S0-a egress guard', () => {
     it('connects to the PINNED address the gate approved, with the event as the JSON body and a bounded timeout', async () => {
       const send = okSend()
       const lookup = lookupReturning([{ address: PUBLIC_A, family: 4 }])
-      const m = await mount({ ssrfLookupFn: lookup, pinnedSendFn: send })
+      const m = await mount({ ssrfLookupFn: lookup, pinnedSendFn: send, now: () => 1_000 })
       const handler = await subscribeOk(m, PUBLIC_NAME_URL)
       await expect(handler(EVENT, {})).resolves.toBe(true)
       expect(lookup).toHaveBeenCalledTimes(1)
@@ -259,7 +259,7 @@ describe('POST /api/events/subscribe — S0-a egress guard', () => {
 
     it('pins an IPv6 answer with family 6 and honours the subscription timeout_ms', async () => {
       const send = okSend()
-      const m = await mount({ ssrfLookupFn: lookupReturning([{ address: PUBLIC_B, family: 6 }]), pinnedSendFn: send })
+      const m = await mount({ ssrfLookupFn: lookupReturning([{ address: PUBLIC_B, family: 6 }]), pinnedSendFn: send, now: () => 1_000 })
       const handler = await subscribeOk(m, PUBLIC_NAME_URL, { timeout_ms: 2500 })
       await handler(EVENT, {})
       const [, pin, family, sendOpts] = send.mock.calls[0] as unknown as [string, string, number, Record<string, unknown>]
@@ -352,6 +352,130 @@ describe('POST /api/events/subscribe — S0-a egress guard', () => {
       expect(logs).toContain('dns-resolved-internal')
       expect(logs).not.toContain('hooks.example.test')
       expect(logs).not.toContain('10.9.9.9')
+    })
+  })
+
+  // Review P2 (2026-11-21): the name resolution used to sit OUTSIDE the transport's timer, and the bus's
+  // `executeWithTimeout` (EventBusService) is a `Promise.race` that books the failure but never cancels the
+  // handler — so a resolver slower than the budget let the bus record `success = false` and the handler then
+  // send anyway. One deadline now covers the resolution and the exchange; a late answer sends nothing.
+  describe('one deadline for the resolution and the exchange', () => {
+    type Answer = Array<{ address: string; family: number }>
+    function deferredLookup() {
+      const pending: Array<(a: Answer) => void> = []
+      const fn = vi.fn((_host: string) => new Promise<Answer>((resolve) => { pending.push(resolve) }))
+      return { fn, release: (a: Answer) => pending.forEach((r) => r(a)) }
+    }
+    function failedLines(m: Mounted) {
+      return m.logCalls.filter((c) => c[1] === '[events.webhook.failed]')
+    }
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('a resolution slower than the budget: rejected at the deadline, and the late answer sends NOTHING', async () => {
+      const send = okSend()
+      const dns = deferredLookup()
+      const m = await mount({ ssrfLookupFn: dns.fn, pinnedSendFn: send })
+      const handler = await subscribeOk(m, PUBLIC_NAME_URL, { timeout_ms: 1000 })
+      vi.useFakeTimers()
+      let outcome: string | undefined
+      void handler(EVENT, {}).then(() => { outcome = 'resolved' }, (e: Error) => { outcome = e.message })
+      await vi.advanceTimersByTimeAsync(999)
+      expect(outcome).toBeUndefined()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(outcome).toBe('EVENT_WEBHOOK_DELIVERY_FAILED:timeout')
+      // The resolver answers late, with a public address the gate would have approved.
+      dns.release([{ address: PUBLIC_A, family: 4 }])
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(dns.fn).toHaveBeenCalledTimes(1)
+      expect(send).not.toHaveBeenCalled()
+      expect(m.fetchSpy).not.toHaveBeenCalled()
+      expect(failedLines(m)).toHaveLength(1)
+      expect(failedLines(m)[0][2]).toEqual({ failureClass: 'timeout', hostFamily: 'name', subscriberId: 'ops-subscriber' })
+      expect(serializedLogs(m)).not.toContain('hooks.example.test')
+    })
+
+    it('under the bus race (handler called first, same timeout_ms): the bus books the handler\'s closed-set timeout and nothing is sent after it', async () => {
+      const send = okSend()
+      const dns = deferredLookup()
+      const m = await mount({ ssrfLookupFn: dns.fn, pinnedSendFn: send })
+      const handler = await subscribeOk(m, PUBLIC_NAME_URL, { timeout_ms: 1000 })
+      vi.useFakeTimers()
+      // Same shape and order as EventBusService.processEvent → executeWithTimeout(handler(event, ctx), timeout_ms):
+      // the handler is called first, then the race timer is armed.
+      const handlerPromise = handler(EVENT, {})
+      const busTimer = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('Handler timeout')), 1000)
+      })
+      let booked: string | undefined
+      void Promise.race([handlerPromise, busTimer]).then(
+        () => { booked = 'success' },
+        (e: Error) => { booked = e.message },
+      )
+      await vi.advanceTimersByTimeAsync(1000)
+      // What the bus would persist as the delivery's error: the handler's closed-set token, not the bus's own.
+      expect(booked).toBe('EVENT_WEBHOOK_DELIVERY_FAILED:timeout')
+      dns.release([{ address: PUBLIC_A, family: 4 }])
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(send).not.toHaveBeenCalled()
+    })
+
+    it('the transport gets only what is left of the one budget', async () => {
+      let clock = 10_000
+      const send = okSend()
+      const lookup = vi.fn(async (_host: string) => {
+        clock += 1_500
+        return [{ address: PUBLIC_A, family: 4 }]
+      })
+      const m = await mount({ ssrfLookupFn: lookup, pinnedSendFn: send, now: () => clock })
+      const handler = await subscribeOk(m, PUBLIC_NAME_URL, { timeout_ms: 5000 })
+      await expect(handler(EVENT, {})).resolves.toBe(true)
+      expect(send).toHaveBeenCalledTimes(1)
+      expect(((send.mock.calls[0] as unknown[])[3] as { timeoutMs: number }).timeoutMs).toBe(3_500)
+    })
+
+    it('a resolution that used up the whole budget sends nothing, even before the deadline timer fires', async () => {
+      let clock = 10_000
+      const send = okSend()
+      const lookup = vi.fn(async (_host: string) => {
+        clock += 5_000
+        return [{ address: PUBLIC_A, family: 4 }]
+      })
+      const m = await mount({ ssrfLookupFn: lookup, pinnedSendFn: send, now: () => clock })
+      const handler = await subscribeOk(m, PUBLIC_NAME_URL, { timeout_ms: 5000 })
+      await expect(handler(EVENT, {})).rejects.toThrow(/^EVENT_WEBHOOK_DELIVERY_FAILED:timeout$/)
+      expect(send).not.toHaveBeenCalled()
+      expect(failedLines(m)).toHaveLength(1)
+    })
+
+    it('a request that started in time but is unanswered at the deadline: rejected at the deadline, one send, one log line', async () => {
+      const pendingSends: Array<(e: Error) => void> = []
+      const send = vi.fn(() => new Promise<{ status: number; ok: boolean }>((_, reject) => { pendingSends.push(reject) }))
+      const m = await mount({ ssrfLookupFn: lookupReturning([{ address: PUBLIC_A, family: 4 }]), pinnedSendFn: send })
+      const handler = await subscribeOk(m, PUBLIC_NAME_URL, { timeout_ms: 1000 })
+      vi.useFakeTimers()
+      let outcome: string | undefined
+      void handler(EVENT, {}).then(() => { outcome = 'resolved' }, (e: Error) => { outcome = e.message })
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(outcome).toBe('EVENT_WEBHOOK_DELIVERY_FAILED:timeout')
+      expect(send).toHaveBeenCalledTimes(1)
+      // The transport's own (equal) deadline then fails it: already given up, so no second line.
+      pendingSends.forEach((reject) => reject(Object.assign(new Error('late'), { name: 'TimeoutError' })))
+      await vi.advanceTimersByTimeAsync(10)
+      expect(failedLines(m)).toHaveLength(1)
+    })
+
+    it('a delivery that settles in time clears its deadline timer', async () => {
+      const send = okSend()
+      const m = await mount({ ssrfLookupFn: lookupReturning([{ address: PUBLIC_A, family: 4 }]), pinnedSendFn: send })
+      const handler = await subscribeOk(m, PUBLIC_NAME_URL, { timeout_ms: 1000 })
+      vi.useFakeTimers()
+      await expect(handler(EVENT, {})).resolves.toBe(true)
+      expect(vi.getTimerCount()).toBe(0)
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(failedLines(m)).toHaveLength(0)
     })
   })
 

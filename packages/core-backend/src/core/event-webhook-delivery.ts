@@ -35,6 +35,25 @@
  * `event_dead_letters` table, which only the legacy SQL migrations create, so on a database built by the
  * default migration set no dead letter is written. A non-2xx answer keeps today's `false` return — that
  * bookkeeping is unchanged here.
+ *
+ * ONE DEADLINE FOR THE WHOLE DELIVERY (review P2, 2026-11-21). The bus bounds a handler with
+ * `executeWithTimeout` (`EventBusService`), a `Promise.race` that records the delivery as failed when it
+ * fires but never cancels the handler. If the name resolution were outside the transport's own timer, a
+ * resolver slower than the budget would let the bus book `success = false` and the handler then go on to
+ * send — a delivery recorded as failed that was in fact made. So the handler owns ONE deadline,
+ * `timeoutMs` from its own start, shared by the resolution and the https exchange:
+ *
+ *  - the deadline timer is armed synchronously, before the handler's first `await`. The bus calls the
+ *    handler BEFORE it arms its own race timer, with the same `timeout_ms` (or a longer default when the
+ *    subscription gave none), so this deadline is never later than the bus's;
+ *  - at the deadline the handler rejects with `EVENT_WEBHOOK_DELIVERY_FAILED:timeout` and the attempt is
+ *    closed: a resolution that arrives later is dropped and ZERO requests are sent;
+ *  - the transport gets only the time that is left (`deadline - now`), so a request that did start ends by
+ *    the same deadline; with no time left nothing is sent.
+ *
+ * A request that started before the deadline and is still unanswered at it may have reached the receiver;
+ * that is the ordinary meaning of a timeout and is unchanged. What can no longer happen is a request that
+ * STARTS after the attempt was given up.
  */
 import { Logger } from './logger'
 import { checkWebhookTargetUrl, checkWebhookTargetUrlShape, type SsrfLookupFn } from '../multitable/webhook-ssrf-guard'
@@ -61,6 +80,8 @@ export const EVENT_WEBHOOK_DELIVERY_FAILED = 'EVENT_WEBHOOK_DELIVERY_FAILED' as 
 export interface EventWebhookDeliveryDeps {
   ssrfLookupFn?: SsrfLookupFn
   pinnedSendFn?: PinnedSendFn
+  /** Clock for the remaining-budget arithmetic. Production: `Date.now`. */
+  now?: () => number
 }
 
 export type EventWebhookTargetCheck =
@@ -87,9 +108,19 @@ export function checkEventWebhookTarget(url: string): EventWebhookTargetCheck {
   return { ok: true }
 }
 
+
+/** One delivery attempt. `closed` flips exactly once: at the deadline, or when the attempt settles. */
+interface DeliveryAttempt {
+  closed: boolean
+}
+
+/** Returned by the attempt when the budget is gone before the request could start (nothing was sent). */
+const DEADLINE_SPENT = Symbol('event-webhook-deadline-spent')
+
 /**
  * The handler the subscribe route registers on the bus. `url` stays in this closure only — it is never
- * logged, thrown, or persisted.
+ * logged, thrown, or persisted. One deadline covers the resolution and the https exchange (header note
+ * "ONE DEADLINE FOR THE WHOLE DELIVERY").
  */
 export function createEventWebhookHandler(
   url: string,
@@ -97,51 +128,106 @@ export function createEventWebhookHandler(
   timeoutMs: number,
   deps: EventWebhookDeliveryDeps = {},
 ): (event: unknown, context: unknown) => Promise<boolean> {
-  return async (event: unknown, _context: unknown): Promise<boolean> => {
-    const ssrf = await checkWebhookTargetUrl(url, deps.ssrfLookupFn)
-    if (!ssrf.ok) {
-      const refusal = classifyWebhookRefusal(url, (ssrf as { reason?: string }).reason)
-      logger.warn('[events.webhook.refused]', {
-        code: refusal.code,
-        refusalClass: refusal.refusalClass,
-        hostFamily: refusal.hostFamily,
-        subscriberId,
-      })
-      throw new Error(`${WEBHOOK_TARGET_REJECTED}:${refusal.refusalClass}`)
-    }
+  return (event: unknown, _context: unknown): Promise<boolean> => {
+    const now = deps.now ?? Date.now
+    const deadlineAt = now() + timeoutMs
+    const attempt: DeliveryAttempt = { closed: false }
 
-    const pinned = (ssrf as { addresses: string[] }).addresses[0]
-    if (typeof pinned !== 'string' || pinned.length === 0) {
-      // Unreachable for an `ok` check (it always carries at least one address); fail closed anyway.
-      throw new Error(`${WEBHOOK_TARGET_REJECTED}:internal-other`)
-    }
+    return new Promise<boolean>((resolve, reject) => {
+      const giveUp = () => {
+        logger.warn('[events.webhook.failed]', { failureClass: 'timeout', hostFamily: webhookHostFamily(url), subscriberId })
+        reject(new Error(`${EVENT_WEBHOOK_DELIVERY_FAILED}:timeout`))
+      }
+      // Armed synchronously, before the first `await`: never later than the bus's own race timer.
+      const deadline = setTimeout(() => {
+        if (attempt.closed) return
+        attempt.closed = true
+        giveUp()
+      }, timeoutMs)
 
-    const send: PinnedSendFn = deps.pinnedSendFn ?? pinnedHttpsFetch
-    let result: { status: number; ok: boolean }
-    try {
-      result = await send(url, pinned, pinnedAddressFamily(pinned), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(event),
-        timeoutMs,
-      })
-    } catch (error) {
-      // `classifyWebhookFailure` reads name/code/cause only — never `message`, which can BE the URL.
-      const failureClass = classifyWebhookFailure({ kind: 'error', error })
-      logger.warn('[events.webhook.failed]', { failureClass, hostFamily: webhookHostFamily(url), subscriberId })
-      throw new Error(`${EVENT_WEBHOOK_DELIVERY_FAILED}:${failureClass}`)
-    }
-
-    if (isRefusedRedirectStatus(result)) {
-      // Decided on the status alone: nothing else of the 3xx response — `Location` above all — is read.
-      logger.warn('[events.webhook.refused]', {
-        code: WEBHOOK_TARGET_REJECTED,
-        refusalClass: REDIRECT_NOT_ALLOWED,
-        hostFamily: webhookHostFamily(url),
-        subscriberId,
-      })
-      throw new Error(`${WEBHOOK_TARGET_REJECTED}:${REDIRECT_NOT_ALLOWED}`)
-    }
-    return result.ok
+      deliverOnce(url, subscriberId, event, deadlineAt, now, attempt, deps).then(
+        (outcome) => {
+          if (attempt.closed) return
+          attempt.closed = true
+          clearTimeout(deadline)
+          if (outcome === DEADLINE_SPENT) giveUp()
+          else resolve(outcome)
+        },
+        (error: unknown) => {
+          if (attempt.closed) return
+          attempt.closed = true
+          clearTimeout(deadline)
+          reject(error)
+        },
+      )
+    })
   }
+}
+
+async function deliverOnce(
+  url: string,
+  subscriberId: string,
+  event: unknown,
+  deadlineAt: number,
+  now: () => number,
+  attempt: DeliveryAttempt,
+  deps: EventWebhookDeliveryDeps,
+): Promise<boolean | typeof DEADLINE_SPENT> {
+  const ssrf = await checkWebhookTargetUrl(url, deps.ssrfLookupFn)
+  // The attempt was given up while the name was resolving: drop the answer, send nothing, log nothing
+  // (the deadline already logged and rejected once).
+  if (attempt.closed) return false
+
+  if (!ssrf.ok) {
+    const refusal = classifyWebhookRefusal(url, (ssrf as { reason?: string }).reason)
+    logger.warn('[events.webhook.refused]', {
+      code: refusal.code,
+      refusalClass: refusal.refusalClass,
+      hostFamily: refusal.hostFamily,
+      subscriberId,
+    })
+    throw new Error(`${WEBHOOK_TARGET_REJECTED}:${refusal.refusalClass}`)
+  }
+
+  const pinned = (ssrf as { addresses: string[] }).addresses[0]
+  if (typeof pinned !== 'string' || pinned.length === 0) {
+    // Unreachable for an `ok` check (it always carries at least one address); fail closed anyway.
+    throw new Error(`${WEBHOOK_TARGET_REJECTED}:internal-other`)
+  }
+
+  // Only what is left of the ONE budget goes to the transport. Nothing left: nothing is sent.
+  const remainingMs = deadlineAt - now()
+  if (!(remainingMs > 0)) return DEADLINE_SPENT
+
+  const send: PinnedSendFn = deps.pinnedSendFn ?? pinnedHttpsFetch
+  let result: { status: number; ok: boolean }
+  try {
+    // No `await` between the closed / remaining checks above and this call: the request starts in
+    // the same turn the checks passed in.
+    result = await send(url, pinned, pinnedAddressFamily(pinned), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(event),
+      timeoutMs: remainingMs,
+    })
+  } catch (error) {
+    if (attempt.closed) return false
+    // `classifyWebhookFailure` reads name/code/cause only — never `message`, which can BE the URL.
+    const failureClass = classifyWebhookFailure({ kind: 'error', error })
+    logger.warn('[events.webhook.failed]', { failureClass, hostFamily: webhookHostFamily(url), subscriberId })
+    throw new Error(`${EVENT_WEBHOOK_DELIVERY_FAILED}:${failureClass}`)
+  }
+  if (attempt.closed) return false
+
+  if (isRefusedRedirectStatus(result)) {
+    // Decided on the status alone: nothing else of the 3xx response — `Location` above all — is read.
+    logger.warn('[events.webhook.refused]', {
+      code: WEBHOOK_TARGET_REJECTED,
+      refusalClass: REDIRECT_NOT_ALLOWED,
+      hostFamily: webhookHostFamily(url),
+      subscriberId,
+    })
+    throw new Error(`${WEBHOOK_TARGET_REJECTED}:${REDIRECT_NOT_ALLOWED}`)
+  }
+  return result.ok
 }
