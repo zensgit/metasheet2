@@ -42,7 +42,7 @@ import { jwtAuthMiddleware } from '../../src/auth/jwt-middleware'
 import { authRouter } from '../../src/routes/auth'
 import { ApiTokenService } from '../../src/multitable/api-token-service'
 import { probeEncryptedStores } from '../../src/security/encrypted-store-probe'
-import { poolManager } from '../../src/integration/db/connection-pool'
+import { ConnectionPool, poolManager } from '../../src/integration/db/connection-pool'
 import { db } from '../../src/db/db'
 import { applyDirectoryHandover } from '../../src/directory/controlled-handover'
 import { isUserSessionRevoked } from '../../src/auth/session-revocation'
@@ -851,18 +851,23 @@ suite('DingTalk controlled login repair', () => {
       while (!condition() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
       expect(condition()).toBe(true)
     }
+    const repairTables = ['users', 'user_roles', 'user_permissions', 'user_namespace_admissions', 'user_orgs',
+      'user_external_auth_grants', 'directory_account_links', 'user_external_identities', 'directory_accounts',
+      'directory_integrations', 'roles', 'role_permissions', 'permissions']
     const sample = async (phase: string, pids: number[]) => ({
       phase,
       locks: (await query(`SELECT a.pid,a.state,a.wait_event_type,a.wait_event,
         pg_blocking_pids(a.pid) AS blockers,l.locktype,l.mode,l.granted,
-        l.transactionid::text,l.classid::text,l.objid::text,l.objsubid,a.query
+        l.transactionid::text,l.classid::text,l.objid::text,l.objsubid,l.relation::regclass::text AS relation,a.query
         FROM pg_stat_activity a JOIN pg_locks l ON l.pid=a.pid
         WHERE a.datname=current_database() AND a.pid=ANY($1::int[])
-          AND l.locktype IN ('advisory','transactionid','tuple')
-        ORDER BY a.pid,l.locktype,l.mode,l.granted`, [pids])).rows,
+          AND (l.locktype IN ('advisory','transactionid','tuple') OR
+            (l.locktype='relation' AND l.relation IN (SELECT oid FROM pg_class WHERE relname=ANY($2::text[]))))
+        ORDER BY a.pid,l.locktype,l.mode,l.granted`, [pids, repairTables])).rows,
     })
     const samples: Awaited<ReturnType<typeof sample>>[] = []
     let elapsed = 0, completed = false
+    let waitedOnUserAdvisory = false, heldRepairTableLocks = -1
     const refreshes: Array<Promise<string | null>> = []
     try {
       refreshes.push(track(auth.refreshToken(login!.token)))
@@ -871,7 +876,16 @@ suite('DingTalk controlled login repair', () => {
       const repair = track(applyDingTalkRepair(proof, preview.digest, 'apply'))
       const repairing = await waitingTransaction(firstReader, ['FOR UPDATE', 'pg_advisory_xact_lock('])
       repairQueued = true
-      samples.push(await sample('repair_waiting', [firstReader, repairing]))
+      const queued = await sample('repair_waiting', [firstReader, repairing])
+      samples.push(queued)
+      const readerAdvisory = queued.locks.filter(lock => lock.pid === firstReader && lock.locktype === 'advisory'
+        && lock.granted && lock.mode === 'ShareLock')
+      waitedOnUserAdvisory = queued.locks.some(lock => lock.pid === repairing && lock.locktype === 'advisory'
+        && !lock.granted && lock.mode === 'ExclusiveLock' && lock.objsubid === 2
+        && readerAdvisory.some(reader => reader.classid === lock.classid && reader.objid === lock.objid
+          && reader.objsubid === lock.objsubid))
+      heldRepairTableLocks = queued.locks.filter(lock => lock.pid === repairing && lock.locktype === 'relation'
+        && lock.granted && lock.mode === 'ShareRowExclusiveLock').length
       // All three requests overlap the first holder and the queued, real repair. The old runtime
       // and a row-only mutation admit them; the shared access lock keeps them behind the repair.
       for (let i = 0; i < 3; i++) {
@@ -898,16 +912,105 @@ suite('DingTalk controlled login repair', () => {
       for (const token of refreshed) if (token) expect(await auth.verifyToken(token)).toBeNull()
       expect(elapsed).toBeLessThan(5000)
       expect(lateAdmissions).toBe(0)
+      // Keep these unconditional, after collecting bypass evidence: the old runtime and a row-only
+      // mutation still exercise every reader, while a fixed runtime cannot skip the lock-order proof.
+      expect(waitedOnUserAdvisory).toBe(true)
+      expect(heldRepairTableLocks).toBe(0)
     } finally {
       releaseReaders()
       await Promise.allSettled(pending)
       spy.mockRestore()
       // Only synthetic fixture metadata and server lock state; the runner keeps this raw output.
       console.info('ordinary-renewal-repair-lock-evidence', JSON.stringify({
-        attempted: attempted.size, admitted: admitted.size, lateAdmissions, elapsed, completed, samples,
+        attempted: attempted.size, admitted: admitted.size, lateAdmissions, elapsed, completed,
+        waitedOnUserAdvisory, heldRepairTableLocks, samples,
       }))
     }
   })
+  it.each(['rollback-timeout', 'healthy-rollback'] as const)(
+    'releases user admission for a queued writer after %s without reusing an unfinished transaction',
+    async mode => {
+      const { lockUserAccessShared, lockUserAccessExclusive } = await import('../../src/auth/user-access-lock')
+      const userId = await bareUser()
+      // Only this test uses the short client timeout. The server keeps pg_sleep active long enough
+      // that both the original query and its queued ROLLBACK hit independent client read timeouts.
+      const isolated = new ConnectionPool({ connectionString: process.env.DATABASE_URL,
+        name: 'synthetic-user-admission-cleanup', max: 1, query_timeout: 250, statement_timeout: 2000 })
+      const isolatedPool = isolated.getInternalPool(), writer = await pool!.connect()
+      const cleanupPoolErrors: string[] = []
+      isolatedPool.on('error', error => cleanupPoolErrors.push(String((error as { code?: unknown }).code ?? 'unknown')))
+      let ready!: () => void, beginFailure!: () => void
+      const readerReady = new Promise<void>(resolve => { ready = resolve })
+      const releaseReader = new Promise<void>(resolve => { beginFailure = resolve })
+      let readerPid = 0, originalError: unknown, backendExited = false, writerAcquired = false
+      const releases: boolean[] = []
+      let reading: Promise<unknown> | undefined, writing: Promise<unknown> | undefined
+      const started = Date.now()
+      try {
+        reading = isolated.transaction(async client => {
+          readerPid = Number((await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+          const release = client.__rawClient.release
+          client.__rawClient.release = error => { releases.push(error === true); release(error) }
+          await lockUserAccessShared(client, userId)
+          ready()
+          await releaseReader
+          try {
+            await client.query(mode === 'rollback-timeout' ? 'SELECT pg_sleep(1)' : 'SELECT 1 / 0')
+          } catch (error) { originalError = error; throw error }
+        })
+        void reading.catch(() => undefined)
+        await Promise.race([readerReady, reading.then(() => { throw new Error('Expected the reader to hold its admission') })])
+        await writer.query('BEGIN')
+        await writer.query("SET LOCAL lock_timeout='5s'")
+        writing = lockUserAccessExclusive(writer, [userId])
+        void writing.catch(() => undefined)
+        const writerPid = await waitingTransaction(readerPid, 'pg_advisory_xact_lock(')
+        const queued = (await query(`SELECT a.pid,a.wait_event_type,a.wait_event,l.mode,l.granted,l.objsubid
+          FROM pg_stat_activity a JOIN pg_locks l ON l.pid=a.pid
+          WHERE a.pid=$1 AND l.locktype='advisory' AND NOT l.granted`, [writerPid])).rows
+        expect(queued).toEqual([expect.objectContaining({ wait_event_type: 'Lock', mode: 'ExclusiveLock', objsubid: 2 })])
+        beginFailure()
+        const failure = await reading.catch(error => error)
+        expect(failure).toBe(originalError)
+        if (mode === 'rollback-timeout') {
+          expect(failure).toMatchObject({ message: 'Query read timeout' })
+          expect(releases).toEqual([true])
+          expect(isolatedPool.totalCount).toBe(0)
+          expect(isolatedPool.idleCount).toBe(0)
+        } else {
+          expect(failure).toMatchObject({ code: '22012' })
+          expect(releases).toEqual([false])
+          expect(isolatedPool.totalCount).toBe(1)
+          expect(isolatedPool.idleCount).toBe(1)
+        }
+        await writing
+        writerAcquired = true
+        expect(Date.now() - started).toBeLessThan(3000)
+        backendExited = (await query('SELECT pid FROM pg_stat_activity WHERE pid=$1', [readerPid])).rows.length === 0
+        expect(backendExited).toBe(mode === 'rollback-timeout')
+        await writer.query('COMMIT')
+        // A destroyed connection is replaced; a clean rollback keeps a usable, idle connection.
+        const reused = await isolated.query('SELECT pg_backend_pid() AS pid, 1 AS healthy')
+        expect(reused.rows[0].healthy).toBe(1)
+        expect(Number(reused.rows[0].pid) === readerPid).toBe(mode === 'healthy-rollback')
+      } finally {
+        beginFailure()
+        // Only this test's reader can be terminated, and only on a failed progress assertion.
+        // This also cleans up the old-wrapper mutation's idle transaction without leaving its lock.
+        if (readerPid && !writerAcquired && mode === 'rollback-timeout') {
+          await query('SELECT pg_terminate_backend($1)', [readerPid]).catch(() => undefined)
+        }
+        await Promise.allSettled([reading, writing].filter((operation): operation is Promise<unknown> => !!operation))
+        await writer.query('ROLLBACK').catch(() => undefined)
+        writer.release()
+        isolated.stopMetricsCollection()
+        await isolatedPool.end()
+        console.info('user-admission-transaction-cleanup-evidence', JSON.stringify({
+          mode, releases, backendExited, writerAcquired, cleanupPoolErrors, elapsed: Date.now() - started,
+        }))
+      }
+    }, 20000,
+  )
   it('verification and preview do not write rows, issue sessions, or return raw identifiers', async () => {
     const f = await fixture(),
       before = await f.graph()

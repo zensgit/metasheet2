@@ -1,5 +1,14 @@
+import { createHash } from 'node:crypto'
+
 type Client = {
   query: (sql: string, args?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }>
+}
+
+/** Two-int4 namespace MS2A; reserved in ADVISORY_FIXED_KEY1_REGISTRY. */
+export const USER_ACCESS_LOCK_NAMESPACE = 0x4d533241
+
+export function deriveUserAccessLockKey(userId: string): number {
+  return createHash('sha256').update('metasheet2:user-access:v1\0').update(userId).digest().readInt32BE(0)
 }
 
 export function isSessionRenewalBusyError(error: unknown): boolean {
@@ -10,7 +19,8 @@ export function isSessionRenewalBusyError(error: unknown): boolean {
 
 /**
  * Transaction-only user admission, held until commit/rollback. Call before any users row lock.
- * The shared key namespace is hashtextextended('user-access:v1:' || userId, 0).
+ * The key is (MS2A, SHA-256("metasheet2:user-access:v1" NUL raw userId)[0:4] as signed int4).
+ * A key collision only serializes unrelated users; it never skips their physical row locks.
  * Batch writers acquire every distinct numeric key in order before taking physical row locks.
  * Do not upgrade or re-enter these locks in the same transaction.
  */
@@ -19,8 +29,8 @@ export async function lockUserAccessShared(client: Client, userId: string) {
     set_config('lock_timeout', LEAST(1000, NULLIF(setting::int, 0))::text, true)
     FROM pg_catalog.pg_settings WHERE name = 'lock_timeout'`)
   await client.query(
-    "SELECT pg_advisory_xact_lock_shared(hashtextextended('user-access:v1:' || $1::text, 0))",
-    [userId],
+    'SELECT pg_advisory_xact_lock_shared($1::int4, $2::int4)',
+    [USER_ACCESS_LOCK_NAMESPACE, deriveUserAccessLockKey(userId)],
   )
   const account = await client.query(
     `SELECT role, is_active, activation_status, access_generation,
@@ -40,13 +50,9 @@ export async function lockUserAccessShared(client: Client, userId: string) {
 }
 
 export async function lockUserAccessExclusive(client: Client, userIds: readonly string[]) {
-  const keys = await client.query(
-    `SELECT DISTINCT hashtextextended('user-access:v1:' || id, 0) AS key
-       FROM unnest($1::text[]) AS ids(id) ORDER BY key`,
-    [userIds],
-  )
-  for (const row of keys.rows) {
-    await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [row.key])
+  const keys = [...new Set(userIds.map(deriveUserAccessLockKey))].sort((a, b) => a - b)
+  for (const key of keys) {
+    await client.query('SELECT pg_advisory_xact_lock($1::int4, $2::int4)', [USER_ACCESS_LOCK_NAMESPACE, key])
   }
   for (const userId of [...new Set(userIds)].sort()) {
     await client.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [userId])
