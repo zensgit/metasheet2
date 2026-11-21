@@ -1,0 +1,71 @@
+name: Notification Preferences Web Guard
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'apps/web/src/notifications/**'
+      - 'apps/web/src/views/NotificationPreferencesView.vue'
+      - 'apps/web/src/views/SessionCenterView.vue'
+      - 'apps/web/src/router/appRoutes.ts'
+      - 'apps/web/src/composables/useLocale.ts'
+      - 'apps/web/src/utils/api.ts'
+      - 'apps/web/tests/notificationApi.spec.ts'
+      - 'apps/web/tests/notificationLabels.spec.ts'
+      - 'apps/web/tests/notificationPreferences.spec.ts'
+      - 'apps/web/scripts/run-required-web-tests.sh'
+      - 'apps/web/scripts/run-required-web-tests.tokens'
+      - 'apps/web/vite.config.ts'
+      - 'apps/web/package.json'
+      - 'packages/core-backend/src/routes/me-notification-*.ts'
+      - 'packages/core-backend/src/notifications/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/notification-preferences-web-guard.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/web/src/notifications/**'
+      - 'apps/web/src/views/NotificationPreferencesView.vue'
+      - 'apps/web/src/views/SessionCenterView.vue'
+      - 'apps/web/src/router/appRoutes.ts'
+      - 'apps/web/src/composables/useLocale.ts'
+      - 'apps/web/src/utils/api.ts'
+      - 'apps/web/tests/notificationApi.spec.ts'
+      - 'apps/web/tests/notificationLabels.spec.ts'
+      - 'apps/web/tests/notificationPreferences.spec.ts'
+      - 'apps/web/scripts/run-required-web-tests.sh'
+      - 'apps/web/scripts/run-required-web-tests.tokens'
+      - 'apps/web/vite.config.ts'
+      - 'apps/web/package.json'
+      - 'packages/core-backend/src/routes/me-notification-*.ts'
+      - 'packages/core-backend/src/notifications/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/notification-preferences-web-guard.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  notification-preferences-web-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Run notification preference specs
+        working-directory: apps/web
+        env:
+          DATABASE_URL: postgres://127.0.0.1:1/none
+        run: pnpm exec vitest run tests/notificationPreferences.spec.ts tests/notificationApi.spec.ts tests/notificationLabels.spec.ts
+      - name: Type-check the web app
+        working-directory: apps/web
+        run: node --max-old-space-size=4096 node_modules/vue-tsc/bin/vue-tsc.js -b
