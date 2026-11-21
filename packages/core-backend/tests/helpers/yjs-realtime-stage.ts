@@ -114,6 +114,15 @@ export interface StageOptions {
   adapterOptions?: Record<string, number>
   /** Passed to the bridge configuration next to the merge window. */
   bridgeOptions?: Record<string, number>
+  /**
+   * Replaces the in-memory permission stand-ins of this stage: the two adapter checkers and the
+   * write-input builder of the bridge. Used to run closures taken from the production start-up code.
+   */
+  wiring?: {
+    authChecker: (userId: string, recordId: string) => Promise<unknown>
+    fieldWriteChecker: (userId: string, recordId: string, fieldIds: string[]) => Promise<unknown>
+    getWriteInput: (recordId: string, patch: Record<string, unknown>, actorId: string, allActorIds: string[], contributions?: YjsContribution[]) => Promise<unknown>
+  }
 }
 
 async function permissionRead(world: World): Promise<void> {
@@ -144,7 +153,7 @@ export async function stage(options: StageOptions = {}): Promise<Stage> {
   const bridge = new YjsRecordBridge(
     sync,
     recordWriter as never,
-    (async (recordId: string, patch: Record<string, unknown>, actorId: string, _allActorIds: string[], contributions?: YjsContribution[]) => {
+    options.wiring ? (options.wiring.getWriteInput as never) : ((async (recordId: string, patch: Record<string, unknown>, actorId: string, _allActorIds: string[], contributions?: YjsContribution[]) => {
       // The gate of the write-input builder: every field is checked against each actor that changed
       // it; without contribution records, against the primary actor of the merged write.
       const writers = new Map<string, Set<string>>()
@@ -157,7 +166,7 @@ export async function stage(options: StageOptions = {}): Promise<Stage> {
         }
       }
       return { actorId, changesByRecord: new Map([[recordId, Object.entries(patch).map(([fieldId, value]) => ({ fieldId, value }))]]) } as never
-    }) as never,
+    }) as never),
     { mergeWindowMs: options.mergeWindowMs ?? 60, maxDelayMs: 400, ...(options.bridgeOptions ?? {}) },
     (socketId) => adapter.getSocketUserId(socketId),
   )
@@ -174,6 +183,10 @@ export async function stage(options: StageOptions = {}): Promise<Stage> {
     await permissionRead(world)
     return !fieldIds.some((fieldId) => world.forbiddenFields.get(userId)?.has(fieldId))
   })
+  if (options.wiring) {
+    adapter.setAuthChecker(options.wiring.authChecker as never)
+    adapter.setFieldWriteChecker(options.wiring.fieldWriteChecker as never)
+  }
   bridge.setContributionChecker((recordId, contribution) => adapter.checkContribution(recordId, contribution))
   const invalidate = createYjsInvalidator({ bridge, syncService: sync, adapter })
   bridge.setRefusalHandler(composeRefusalHandlers(createAuthorizationRefusalHandler(invalidate)))

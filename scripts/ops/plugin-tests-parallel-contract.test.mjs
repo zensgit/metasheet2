@@ -156,6 +156,9 @@ const grantDbFiles = [
   'tests/integration/auth-b2-issuer-provenance.db.test.ts',
   'tests/integration/strict-credential-chain.db.test.ts',
   'tests/integration/strict-dingtalk-entry.db.test.ts',
+  'tests/integration/realtime-authority-read.db.test.ts',
+  'tests/integration/realtime-revalidation.db.test.ts',
+  'tests/integration/realtime-yjs-startup-wiring.db.test.ts',
 ]
 
 function assertParallelWorkflow(doc) {
