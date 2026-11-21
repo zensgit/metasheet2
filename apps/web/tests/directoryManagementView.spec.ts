@@ -10292,6 +10292,334 @@ describe('DirectoryManagementView', () => {
     })
   })
 
+  describe('cross-integration operation results', () => {
+    function secondIntegration() {
+      return createIntegration({
+        id: 'dir-2',
+        name: 'DingTalk US',
+        corpId: 'dingcorp-us',
+        stats: {
+          departmentCount: 2,
+          accountCount: 3,
+          pendingLinkCount: 0,
+          linkedCount: 1,
+          lastRunStatus: 'completed',
+        },
+      })
+    }
+
+    function detailResponse(path: string, accounts: Record<string, unknown>[] = []) {
+      if (path === '/api/admin/directory/integrations') {
+        return createJsonResponse({ ok: true, data: { items: [createIntegration(), secondIntegration()] } })
+      }
+      if (path.includes('/runs')) {
+        return createJsonResponse({ ok: true, data: { items: [] } })
+      }
+      if (path.includes('/schedule')) {
+        return createJsonResponse(createScheduleSnapshotPayload({
+          integrationId: path.includes('/dir-2/') ? 'dir-2' : 'dir-1',
+        }))
+      }
+      if (path.includes('/alerts')) return createJsonResponse(createAlertListPayload([]))
+      if (path.includes('/review-items')) return createJsonResponse(createReviewItemsPayload([]))
+      if (path.includes('/accounts')) {
+        return createJsonResponse(createAccountListPayload(path.includes('/dir-2/') ? [] : accounts))
+      }
+      if (path.includes('/departments')) return createJsonResponse({ ok: true, data: { items: [] } })
+      return createJsonResponse({ ok: true, data: {} })
+    }
+
+    function mountDirectory() {
+      app = createApp(DirectoryManagementView)
+      registerRouterLink(app!)
+      app!.mount(container!)
+    }
+
+    function clickIntegration(name: string) {
+      const button = Array.from(container!.querySelectorAll('.directory-admin__item'))
+        .find((item) => item.textContent?.includes(`用途：${name}`))
+      if (!(button instanceof HTMLButtonElement)) throw new Error(`Integration button not found: ${name}`)
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    }
+
+    function runRecord(id: string, accountsSynced: number) {
+      return {
+        id,
+        status: 'completed',
+        startedAt: '2026-04-08T02:00:00.000Z',
+        finishedAt: '2026-04-08T02:05:00.000Z',
+        stats: {
+          accountsSynced,
+          departmentsSynced: 1,
+          pendingCount: 0,
+          linkedCount: 1,
+        },
+        errorMessage: null,
+      }
+    }
+
+    function admitPayload(userId: string, name: string, temporaryPassword: string) {
+      return createJsonResponse({
+        ok: true,
+        data: {
+          user: {
+            id: userId,
+            email: null,
+            username: null,
+            name,
+            mobile: '13900001234',
+            role: 'user',
+            is_active: true,
+          },
+          temporaryPassword,
+          onboarding: null,
+        },
+      })
+    }
+
+    it('discards a connectivity result that arrives after another integration is selected', async () => {
+      let finishTest: ((value: unknown) => void) | undefined
+      apiFetchMock.mockImplementation(async (url: string) => {
+        const path = String(url)
+        if (path === '/api/admin/directory/integrations/test') {
+          return new Promise((resolve) => { finishTest = resolve })
+        }
+        return detailResponse(path, [createAccount()])
+      })
+      mountDirectory()
+      await flushUi()
+      clickButton(container!, '测试连通性')
+      await flushUi()
+      expect(typeof finishTest).toBe('function')
+      clickIntegration('DingTalk US')
+      await flushUi()
+      finishTest!(createJsonResponse(createTestResultPayload({
+        sampledUsers: [{ userId: 'stale-user', name: 'StaleConnectivityUser' }],
+      })))
+      await flushUi()
+      expect(container!.textContent).not.toContain('StaleConnectivityUser')
+    })
+
+    it('discards automatic admission credentials that arrive after another integration is selected', async () => {
+      let finishSync: ((value: unknown) => void) | undefined
+      apiFetchMock.mockImplementation(async (url: string, options?: { method?: string; body?: string }) => {
+        const path = String(url)
+        const body = String(options?.body ?? '')
+        if (path === '/api/admin/directory/integrations/dir-1/sync' && options?.method === 'POST' && !body.includes('async')) {
+          return new Promise((resolve) => { finishSync = resolve })
+        }
+        return detailResponse(path)
+      })
+      mountDirectory()
+      await flushUi()
+      clickButton(container!, '手动同步')
+      await flushUi()
+      expect(typeof finishSync).toBe('function')
+      clickIntegration('DingTalk US')
+      await flushUi()
+      finishSync!(createJsonResponse({
+        ok: true,
+        data: {
+          integration: { id: 'dir-1' },
+          run: {
+            id: 'run-stale-auto',
+            status: 'completed',
+            stats: { autoAdmittedCount: 1, autoAdmittedNoEmailCount: 1 },
+          },
+          autoAdmissionOnboardingPackets: [{
+            userId: 'user-stale-auto',
+            name: 'StaleAutoMember',
+            email: null,
+            username: 'stale_auto',
+            mobile: null,
+            temporaryPassword: 'Stale-Auto-Password-91',
+            onboarding: null,
+          }],
+        },
+      }))
+      await flushUi(8)
+      expect(container!.textContent).not.toContain('Stale-Auto-Password-91')
+      expect(container!.textContent).not.toContain('StaleAutoMember')
+      expect(container!.textContent).not.toContain('本次自动准入临时凭据')
+      expect(container!.textContent).not.toContain('目录同步已完成，自动准入')
+    })
+
+    it('labels automatic admission credentials with the integration that produced them', async () => {
+      apiFetchMock.mockImplementation(async (url: string, options?: { method?: string; body?: string }) => {
+        const path = String(url)
+        const body = String(options?.body ?? '')
+        if (path === '/api/admin/directory/integrations/dir-1/sync' && options?.method === 'POST' && !body.includes('async')) {
+          return createJsonResponse({
+            ok: true,
+            data: {
+              run: {
+                id: 'run-named-auto',
+                status: 'completed',
+                stats: { autoAdmittedNoEmailCount: 1 },
+              },
+              autoAdmissionOnboardingPackets: [{
+                userId: 'user-named-auto',
+                name: 'NamedAutoMember',
+                email: null,
+                username: 'named_auto',
+                mobile: null,
+                temporaryPassword: 'Named-Auto-Password-11',
+                onboarding: null,
+              }],
+            },
+          })
+        }
+        return detailResponse(path)
+      })
+      mountDirectory()
+      await flushUi()
+      clickButton(container!, '手动同步')
+      await flushUi(8)
+      expect(container!.textContent).toContain('所属集成：DingTalk CN')
+      expect(container!.textContent).toContain('Named-Auto-Password-11')
+    })
+
+    it('does not attach a background sync that is accepted after another integration is selected', async () => {
+      let finishSync: ((value: unknown) => void) | undefined
+      let acceptStaleRuns = false
+      apiFetchMock.mockImplementation(async (url: string, options?: { method?: string; body?: string }) => {
+        const path = String(url)
+        if (path === '/api/admin/directory/integrations/dir-1/sync' && options?.method === 'POST') {
+          return new Promise((resolve) => { finishSync = resolve })
+        }
+        if (path.includes('/dir-1/runs') && acceptStaleRuns) {
+          return createJsonResponse({ ok: true, data: { items: [runRecord('stale-bg-run', 515151)] } })
+        }
+        if (path.includes('/dir-2/runs')) {
+          return createJsonResponse({ ok: true, data: { items: [runRecord('run-us', 7)] } })
+        }
+        return detailResponse(path)
+      })
+      mountDirectory()
+      await flushUi()
+      clickButton(container!, '后台同步')
+      await flushUi()
+      expect(typeof finishSync).toBe('function')
+      clickIntegration('DingTalk US')
+      await flushUi()
+      acceptStaleRuns = true
+      finishSync!(createJsonResponse({
+        ok: true,
+        data: { accepted: true, runId: 'stale-bg-run', integrationId: 'dir-1' },
+      }, 202))
+      await flushUi(8)
+      expect(container!.textContent).not.toContain('stale-bg-run')
+      expect(container!.textContent).not.toContain('515151')
+      expect(container!.textContent).not.toContain('后台同步已启动')
+    })
+
+    it('labels a created-user result with its integration and clears it when another integration is selected', async () => {
+      const account = createAccount({ id: 'account-named-manual', name: 'NamedManualMember' })
+      apiFetchMock.mockImplementation(async (url: string, options?: { method?: string }) => {
+        const path = String(url)
+        if (path.endsWith('/admit-user') && options?.method === 'POST') return admitPayload('user-named-manual', 'NamedManualMember', 'Temp-Keep-Name-42')
+        return detailResponse(path, [account])
+      })
+      mountDirectory()
+      await flushUi()
+      clickButton(container!, '手动创建用户')
+      await flushUi()
+      clickButton(container!, '创建用户并绑定')
+      await flushUi(12)
+      expect(container!.textContent).toContain('所属集成：DingTalk CN')
+      expect(container!.textContent).toContain('Temp-Keep-Name-42')
+      expect(container!.textContent).toContain('最近创建并绑定结果')
+      clickIntegration('DingTalk US')
+      await flushUi()
+      expect(container!.textContent).not.toContain('最近创建并绑定结果')
+      expect(container!.textContent).not.toContain('Temp-Keep-Name-42')
+    })
+
+    it('discards a created-user result that arrives after another integration is selected', async () => {
+      let finishAdmit: ((value: unknown) => void) | undefined
+      const account = createAccount({ id: 'account-stale-manual', name: 'StaleManualMember' })
+      apiFetchMock.mockImplementation(async (url: string, options?: { method?: string }) => {
+        const path = String(url)
+        if (path.endsWith('/admit-user') && options?.method === 'POST') {
+          return new Promise((resolve) => { finishAdmit = resolve })
+        }
+        return detailResponse(path, [account])
+      })
+      mountDirectory()
+      await flushUi()
+      clickButton(container!, '手动创建用户')
+      await flushUi()
+      clickButton(container!, '创建用户并绑定')
+      await flushUi()
+      expect(typeof finishAdmit).toBe('function')
+      clickIntegration('DingTalk US')
+      await flushUi()
+      finishAdmit!(admitPayload('user-stale-manual', 'StaleManualMember', 'Stale-Manual-Password-77'))
+      await flushUi(12)
+      expect(container!.textContent).not.toContain('Stale-Manual-Password-77')
+      expect(container!.textContent).not.toContain('最近创建并绑定结果')
+      expect(container!.textContent).not.toContain('已创建本地用户并完成绑定')
+    })
+
+    it('discards a created-user result when the integration changes before that result is shown', async () => {
+      let finishAccounts: ((value: unknown) => void) | undefined
+      let accountReads = 0
+      const account = createAccount({ id: 'account-refresh-manual', name: 'RefreshManualMember' })
+      apiFetchMock.mockImplementation(async (url: string, options?: { method?: string }) => {
+        const path = String(url)
+        if (path.endsWith('/admit-user') && options?.method === 'POST') {
+          return admitPayload('user-refresh-manual', 'RefreshManualMember', 'Refresh-Manual-Password-55')
+        }
+        if (path.includes('/dir-1/accounts')) {
+          accountReads += 1
+          if (accountReads > 1) {
+            return new Promise((resolve) => { finishAccounts = resolve })
+          }
+        }
+        return detailResponse(path, [account])
+      })
+      mountDirectory()
+      await flushUi()
+      clickButton(container!, '手动创建用户')
+      await flushUi()
+      clickButton(container!, '创建用户并绑定')
+      await flushUi()
+      expect(typeof finishAccounts).toBe('function')
+      expect(container!.textContent).not.toContain('Refresh-Manual-Password-55')
+      clickIntegration('DingTalk US')
+      await flushUi()
+      finishAccounts!(createJsonResponse(createAccountListPayload([account])))
+      await flushUi(12)
+      expect(container!.textContent).not.toContain('Refresh-Manual-Password-55')
+      expect(container!.textContent).not.toContain('最近创建并绑定结果')
+    })
+
+    it('keeps an older integration run list from replacing the selected integration', async () => {
+      let finishRuns: ((value: unknown) => void) | undefined
+      let heldFirstDir1Runs = false
+      apiFetchMock.mockImplementation(async (url: string) => {
+        const path = String(url)
+        if (path === '/api/admin/directory/integrations/dir-1/runs?page=1&pageSize=10' && !heldFirstDir1Runs) {
+          heldFirstDir1Runs = true
+          return new Promise((resolve) => { finishRuns = resolve })
+        }
+        if (path.includes('/dir-2/runs')) {
+          return createJsonResponse({ ok: true, data: { items: [runRecord('run-us', 7)] } })
+        }
+        return detailResponse(path)
+      })
+      mountDirectory()
+      await flushUi()
+      expect(container!.textContent).toContain('用途：DingTalk US')
+      clickIntegration('DingTalk US')
+      await flushUi(8)
+      expect(container!.textContent).toContain('账号 7 /')
+      finishRuns!(createJsonResponse({ ok: true, data: { items: [runRecord('run-stale', 424242)] } }))
+      await flushUi(8)
+      expect(container!.textContent).not.toContain('424242')
+      expect(container!.textContent).toContain('账号 7 /')
+    })
+
   describe('Wave 2: 预览同步 / 后台同步 polling / R5 run-card stats', () => {
     function mockInitialLoad(integration: Record<string, unknown>, runsPayload?: unknown): void {
       apiFetchMock

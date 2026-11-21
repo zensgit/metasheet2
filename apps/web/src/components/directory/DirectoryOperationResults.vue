@@ -9,6 +9,11 @@
       <div>
         <h2>本次操作结果</h2>
         <p class="directory-admin__hint">临时凭据仅保留在本次页面中，关闭或刷新后不再显示。请通过安全渠道交付。</p>
+        <p
+          v-if="operationResultIntegrationName"
+          class="directory-admin__hint"
+          data-testid="directory-operation-result-integration"
+        >所属集成：{{ operationResultIntegrationName }}</p>
       </div>
       <button class="directory-admin__button directory-admin__button--secondary" type="button" @click="dismissResults()">
         关闭全部结果
@@ -191,7 +196,7 @@
 </template>
 
 <script setup lang="ts">
-import { inject } from 'vue'
+import { computed, inject } from 'vue'
 import { directoryManagementKey } from './useDirectoryManagement'
 
 const {
@@ -203,6 +208,14 @@ const {
   clearManualAdmissionResult,
   manualAdmissionResult,
 } = inject(directoryManagementKey)!
+
+const operationResultIntegrationName = computed(() => {
+  const manualName = manualAdmissionResult.value?.integrationName?.trim() ?? ''
+  if (manualName) return manualName
+  const packet = [...autoAdmissionOnboardingPackets.value, ...batchAdmissionOnboardingPackets.value]
+    .find((item) => item.integrationName?.trim())
+  return packet?.integrationName?.trim() ?? ''
+})
 
 function dismissResults() {
   clearManualAdmissionResult()

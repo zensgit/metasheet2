@@ -291,6 +291,7 @@ type ManualAdmissionResult = {
   accountId: string
   accountName: string
   integrationId: string
+  integrationName?: string
   userId: string
   userName: string
   email: string | null
@@ -312,6 +313,8 @@ type AutoAdmissionOnboardingPacket = {
   mobile: string | null
   temporaryPassword: string
   onboarding: OnboardingPacket | null
+  integrationId?: string
+  integrationName?: string
 }
 
 type InitialDirectoryNavigation = {
@@ -528,6 +531,7 @@ const accountQuery = ref('')
 let accountLoadVersion = 0
 let alertLoadVersion = 0
 let scheduleLoadVersion = 0
+let runLoadVersion = 0
 const accountSnapshotIntegrationId = ref('')
 const alertSnapshotIntegrationId = ref('')
 const accountsLoadFailed = ref(false)
@@ -1027,6 +1031,7 @@ function resetDraft() {
   accountLoadVersion += 1
   alertLoadVersion += 1
   scheduleLoadVersion += 1
+  runLoadVersion += 1
   accountSnapshotIntegrationId.value = ''
   alertSnapshotIntegrationId.value = ''
   accountsLoadFailed.value = false
@@ -1072,6 +1077,7 @@ function resetDraft() {
   for (const key of Object.keys(userSearchError)) delete userSearchError[key]
   for (const key of Object.keys(grantToggles)) delete grantToggles[key]
   for (const key of Object.keys(selectedReviewIds)) delete selectedReviewIds[key]
+  clearManualAdmissionResult()
   autoAdmissionOnboardingPackets.value = []
   batchAdmissionOnboardingPackets.value = []
   draft.name = ''
@@ -1955,9 +1961,11 @@ async function selectIntegration(
     accountLoadVersion += 1
     alertLoadVersion += 1
     scheduleLoadVersion += 1
+    runLoadVersion += 1
     accounts.value = []
     alerts.value = []
     scheduleSnapshot.value = null
+    runs.value = []
     accountSnapshotIntegrationId.value = ''
     alertSnapshotIntegrationId.value = ''
     accountsLoadFailed.value = false
@@ -1967,6 +1975,8 @@ async function selectIntegration(
     loadingAccounts.value = Boolean(integration)
     loadingAlerts.value = Boolean(integration)
     loadingSchedule.value = Boolean(integration)
+    loadingRuns.value = Boolean(integration)
+    clearManualAdmissionResult()
   }
   // A same-integration refresh after a save keeps the loaded tree on screen (pickers stay open,
   // the root-department select does not flip back to a text box) and reloads it in place.
@@ -2520,6 +2530,18 @@ function readDirectoryOnboardingPackets(rawPackets: unknown[]): AutoAdmissionOnb
   })
 }
 
+function stampDirectoryOnboardingPackets(
+  packets: AutoAdmissionOnboardingPacket[],
+  integrationId: string,
+  integrationName: string,
+): AutoAdmissionOnboardingPacket[] {
+  return packets.map((packet) => ({
+    ...packet,
+    integrationId,
+    integrationName,
+  }))
+}
+
 function buildPayload() {
   const corpName = draft.corpName.trim()
   const currentCorpName = selectedIntegration.value?.config.corpName ?? ''
@@ -2578,6 +2600,8 @@ async function saveIntegration() {
 }
 
 async function testIntegration() {
+  const integrationId = selectedIntegrationId.value
+  const contextVersion = directoryContextVersion
   busy.value = true
   try {
     const response = await apiFetch('/api/admin/directory/integrations/test', {
@@ -2585,6 +2609,7 @@ async function testIntegration() {
       body: JSON.stringify(buildPayload()),
     })
     const body = await readJson(response)
+    if (!isCurrentDirectoryContext(contextVersion, integrationId)) return
     if (!response.ok) throw new Error(readApiError(body, '目录连通性测试失败'))
     testResult.value = body?.data ?? null
     // The test reads samples only: name what was read, never a blanket pass.
@@ -2592,6 +2617,7 @@ async function testIntegration() {
       ? '目录连通性测试：抽样接口读取成功（未验证全员范围与扫码登录）'
       : '目录连通性测试完成，请查看诊断结论')
   } catch (error) {
+    if (!isCurrentDirectoryContext(contextVersion, integrationId)) return
     // A failed test must not leave an earlier result on screen as if it were current.
     testResult.value = null
     setStatus(error instanceof Error ? error.message : '目录连通性测试失败', 'error')
@@ -2736,14 +2762,19 @@ async function saveApprovalCardPublicAppUrl() {
 }
 
 async function syncIntegration() {
-  if (!selectedIntegration.value) return
+  const integration = selectedIntegration.value
+  if (!integration) return
+  const integrationId = integration.id
+  const integrationName = integration.name
+  const contextVersion = directoryContextVersion
   busy.value = true
   try {
     clearAutoAdmissionOnboardingPackets()
-    const response = await apiFetch(`/api/admin/directory/integrations/${selectedIntegration.value.id}/sync`, {
+    const response = await apiFetch(`/api/admin/directory/integrations/${integrationId}/sync`, {
       method: 'POST',
     })
     const body = await readJson(response)
+    if (!isCurrentDirectoryContext(contextVersion, integrationId)) return
     if (!response.ok) {
       // DT-HARDEN-05 / #4049: another sync already holds the lease — benign, show the
       // active run instead of a generic failure.
@@ -2753,7 +2784,11 @@ async function syncIntegration() {
       }
       throw new Error(readApiError(body, '目录同步失败'))
     }
-    autoAdmissionOnboardingPackets.value = readAutoAdmissionOnboardingPackets(body?.data as Record<string, unknown> | undefined)
+    autoAdmissionOnboardingPackets.value = stampDirectoryOnboardingPackets(
+      readAutoAdmissionOnboardingPackets(body?.data as Record<string, unknown> | undefined),
+      integrationId,
+      integrationName,
+    )
     const autoAdmittedCount = Number(body?.data?.run?.stats?.autoAdmittedCount ?? 0)
     const autoAdmittedNoEmailCount = Number(body?.data?.run?.stats?.autoAdmittedNoEmailCount ?? 0)
     const autoAdmissionSkippedMissingEmailCount = Number(body?.data?.run?.stats?.autoAdmissionSkippedMissingEmailCount ?? 0)
@@ -2797,8 +2832,9 @@ async function syncIntegration() {
     } else {
       setStatus('目录同步已完成')
     }
-    await refreshAfterDirectorySync(selectedIntegration.value.id)
+    await refreshAfterDirectorySync(integrationId)
   } catch (error) {
+    if (!isCurrentDirectoryContext(contextVersion, integrationId)) return
     setStatus(error instanceof Error ? error.message : '目录同步失败', 'error')
   } finally {
     busy.value = false
@@ -2926,7 +2962,7 @@ async function pollAsyncRun(integrationId: string, runId: string, token: number)
   } catch {
     responseOk = false
   }
-  if (token !== runPollToken) return
+  if (token !== runPollToken || selectedIntegrationId.value !== integrationId) return
   if (!responseOk) {
     stopRunPolling()
     setStatus(readApiError(body, '后台同步状态查询失败，已停止轮询，请手动刷新运行记录'), 'error')
@@ -3002,19 +3038,23 @@ async function startAsyncSync() {
   const integration = selectedIntegration.value
   if (!integration) return
   if (pollingRunId.value) return
+  const integrationId = integration.id
+  const contextVersion = directoryContextVersion
   if (
     integration.config.admissionMode === 'auto_for_scoped_departments'
     && !(await confirmAsyncSyncDiscardsOnboardingPackets())
   ) {
     return
   }
+  if (!isCurrentDirectoryContext(contextVersion, integrationId)) return
   asyncSyncBusy.value = true
   try {
-    const response = await apiFetch(`/api/admin/directory/integrations/${integration.id}/sync`, {
+    const response = await apiFetch(`/api/admin/directory/integrations/${integrationId}/sync`, {
       method: 'POST',
       body: JSON.stringify({ async: true }),
     })
     const body = await readJson(response)
+    if (!isCurrentDirectoryContext(contextVersion, integrationId)) return
     if (!response.ok) {
       if (readApiErrorCode(body) === 'DIRECTORY_SYNC_IN_PROGRESS') {
         setStatus(buildSyncInProgressMessage(body), 'error')
@@ -3026,12 +3066,13 @@ async function startAsyncSync() {
     if (!runId) throw new Error('后台同步已受理，但未返回运行 ID')
     stopRunPolling()
     pollingRunId.value = runId
-    pollingIntegrationId = integration.id
+    pollingIntegrationId = integrationId
     runPollStartedAtMs = Date.now()
     const token = runPollToken
     setStatus(`后台同步已启动（运行 ${runId}），正在轮询运行状态...`)
-    void pollAsyncRun(integration.id, runId, token)
+    void pollAsyncRun(integrationId, runId, token)
   } catch (error) {
+    if (!isCurrentDirectoryContext(contextVersion, integrationId)) return
     setStatus(error instanceof Error ? error.message : '启动后台同步失败', 'error')
   } finally {
     asyncSyncBusy.value = false
@@ -3161,17 +3202,21 @@ async function loadDepartments(integrationId: string, options: { force?: boolean
 }
 
 async function loadRuns(integrationId: string) {
+  if (selectedIntegrationId.value !== integrationId) return
+  const version = ++runLoadVersion
   loadingRuns.value = true
   try {
     const response = await apiFetch(`/api/admin/directory/integrations/${integrationId}/runs?page=1&pageSize=10`)
     const body = await readJson(response)
+    if (version !== runLoadVersion || selectedIntegrationId.value !== integrationId) return
     if (!response.ok) throw new Error(readApiError(body, '加载同步记录失败'))
     runs.value = Array.isArray(body?.data?.items) ? body.data.items : []
   } catch (error) {
+    if (version !== runLoadVersion || selectedIntegrationId.value !== integrationId) return
     runs.value = []
     setStatus(error instanceof Error ? error.message : '加载同步记录失败', 'error')
   } finally {
-    loadingRuns.value = false
+    if (version === runLoadVersion && selectedIntegrationId.value === integrationId) loadingRuns.value = false
   }
 }
 
@@ -3528,6 +3573,14 @@ function isCurrentUnbindContext(version: number, integrationId: string): boolean
   if (directoryContextVersion === version && selectedIntegrationId.value === integrationId) return true
   setStatus('操作未提交：页面上下文已变化，请重新选择成员后确认。', 'error')
   return false
+}
+
+// A late read or one-shot result belongs to the integration that started it. Drop it with no
+// status when that integration is no longer the one on screen.
+function isCurrentDirectoryContext(version: number, integrationId: string): boolean {
+  return directoryViewActive
+    && directoryContextVersion === version
+    && selectedIntegrationId.value === integrationId
 }
 
 function updateReviewSelection(accountId: string, checked: boolean) {
@@ -3937,6 +3990,9 @@ async function createAndBindDirectoryAccountUser(account: DirectoryAccount, cont
     return
   }
 
+  const integrationId = selectedIntegrationId.value
+  const integrationName = selectedIntegration.value?.name ?? ''
+  const contextVersion = directoryContextVersion
   if (context === 'review') reviewProcessingAccountId.value = account.id
   else bindingAccountId.value = account.id
   try {
@@ -3951,6 +4007,7 @@ async function createAndBindDirectoryAccountUser(account: DirectoryAccount, cont
       }),
     })
     const body = await readJson(response)
+    if (!isCurrentDirectoryContext(contextVersion, integrationId)) return
     if (!response.ok || body?.ok !== true) {
       // #6259: known input-rule codes render Chinese copy; anything else keeps the server message.
       throw new Error(describeDirectoryAdmissionError(body) ?? readApiError(body, '创建本地用户并绑定失败'))
@@ -3970,10 +4027,12 @@ async function createAndBindDirectoryAccountUser(account: DirectoryAccount, cont
     delete manualAdmissionExpanded[account.id]
     delete manualAdmissionDrafts[account.id]
     await refreshAfterReviewBindings(`${memberLabel} ${account.name} 已创建本地用户并完成绑定`)
+    if (!isCurrentDirectoryContext(contextVersion, integrationId)) return
     manualAdmissionResult.value = {
       accountId: account.id,
       accountName: account.name,
       integrationId: account.integrationId,
+      integrationName,
       userId: createdUser.id,
       userName: createdUser.name || nextDraft.name,
       email: createdUser.email || nextDraft.email || null,
@@ -3987,6 +4046,7 @@ async function createAndBindDirectoryAccountUser(account: DirectoryAccount, cont
       mobileBackfillError: '',
     }
   } catch (error) {
+    if (!isCurrentDirectoryContext(contextVersion, integrationId)) return
     setStatus(error instanceof Error ? error.message : '创建本地用户并绑定失败', 'error')
   } finally {
     if (context === 'review') reviewProcessingAccountId.value = ''
@@ -4009,7 +4069,11 @@ async function retryBackfillUserMobileAndBindReviewItem(item: DirectoryReviewIte
 }
 
 async function batchAdmitReviewItems() {
-  if (!selectedIntegration.value || selectedReviewAdmissionIds.value.length === 0) return
+  const integration = selectedIntegration.value
+  if (!integration || selectedReviewAdmissionIds.value.length === 0) return
+  const integrationId = integration.id
+  const integrationName = integration.name
+  const contextVersion = directoryContextVersion
   reviewBatchProcessing.value = true
   let appliedCount = 0
   const batchIds = [...selectedReviewAdmissionIds.value]
@@ -4034,7 +4098,13 @@ async function batchAdmitReviewItems() {
     const data = body?.data as Record<string, unknown> | undefined
     const processedItems = Array.isArray(data?.items) ? data.items : []
     appliedCount = Number(data?.updatedCount ?? processedItems.length)
-    batchAdmissionOnboardingPackets.value = readBatchAdmissionOnboardingPackets(data)
+    if (isCurrentDirectoryContext(contextVersion, integrationId)) {
+      batchAdmissionOnboardingPackets.value = stampDirectoryOnboardingPackets(
+        readBatchAdmissionOnboardingPackets(data),
+        integrationId,
+        integrationName,
+      )
+    }
     setReviewBatchProgress({
       kind: 'admit',
       phase: 'refreshing',
