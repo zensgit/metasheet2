@@ -728,13 +728,26 @@ describe('W — writers bump FIRST', () => {
     expect(spreadsheet.match(/await assertSheetLiveForUpdate\(query, req\.params\.id\)\s*(?:\/\/[^\n]*\n\s*)?await bumpSheetPermissionVersions\(query, \[req\.params\.id\]\)/g)).toHaveLength(2)
   })
 
-  it('W-04 the controlled handover bumps the subject rows BEFORE its users FOR UPDATE NOWAIT probe, which precedes the mutex', () => {
+  it('W-04 the controlled handover bumps the subject rows BEFORE its table fences and its users FOR UPDATE NOWAIT probe, which precedes the mutex', () => {
     const source = readFileSync(path.join(SRC, 'directory', 'controlled-handover.ts'), 'utf8')
-    const bumpAt = source.indexOf('await bumpSubjectAuthorizationVersions(c, userIds)')
-    const probeAt = source.indexOf("'SELECT id FROM users WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE NOWAIT'")
-    const mutexAt = source.indexOf('await lockUsersForAccessGraphWrite(c, userIds)')
-    expect(bumpAt).toBeGreaterThan(0)
-    expect(probeAt).toBeGreaterThan(bumpAt)
+    const lockPair = source.slice(source.indexOf('async function lockPair('), source.indexOf('async function snapshot('))
+    // Code only: the comments that explain the order name the locks.
+    const code = lockPair.replace(/\/\/[^\n]*/g, '')
+    const maintenanceAt = code.indexOf("hashtext('directory:identity-maintenance')")
+    const bumpAt = code.indexOf('await bumpSubjectAuthorizationVersions(c, versionedUserIds)')
+    const fenceAt = code.indexOf('IN SHARE MODE NOWAIT')
+    const linksHeldAt = code.indexOf('userIds.every((id) => versionedUserIds.includes(id))')
+    const probeAt = code.indexOf("'SELECT id FROM users WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE NOWAIT'")
+    const mutexAt = code.indexOf('await lockUsersForAccessGraphWrite(c, userIds)')
+    expect(maintenanceAt).toBeGreaterThan(0)
+    expect(bumpAt).toBeGreaterThan(maintenanceAt)
+    // The one waiting statement of the lock phase runs before any table fence or row lock is held.
+    expect(code.slice(0, bumpAt)).not.toMatch(/LOCK TABLE|FOR UPDATE|FOR SHARE/)
+    expect(code.match(/bumpSubjectAuthorizationVersions\(/g)).toHaveLength(1)
+    expect(fenceAt).toBeGreaterThan(bumpAt)
+    // Under the fences: every user the handover goes on to lock has its version row held already.
+    expect(linksHeldAt).toBeGreaterThan(fenceAt)
+    expect(probeAt).toBeGreaterThan(linksHeldAt)
     expect(mutexAt).toBeGreaterThan(probeAt)
   })
 

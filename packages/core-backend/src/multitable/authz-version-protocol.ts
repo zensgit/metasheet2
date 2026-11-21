@@ -102,7 +102,10 @@
  *     before (or without) the mutex bump first as well: `deprovision-ledger.ts lockCandidateUser`,
  *     the `deprovision-evidence-api.ts` restore transaction and `controlled-handover.ts` (whose
  *     `FOR UPDATE NOWAIT` probe now runs after the bump — the handover waits on an in-flight holder
- *     instead of failing fast on it, and keeps its fail-fast meaning for every other users-row holder).
+ *     instead of failing fast on it, and keeps its fail-fast meaning for every other users-row holder;
+ *     it bumps before its `LOCK TABLE … IN SHARE MODE NOWAIT` fences, holding only the maintenance
+ *     mutex and the source freeze keys while it waits, so a writer that bumped first and then writes
+ *     a fenced table is never queued on a fence the waiting handover holds).
  *   - `auth/dingtalk-identity-repair.ts`: not a caller of that mutex since #6964. Its own protocol
  *     (`auth/user-access-lock.ts`) is sorted user admission keys, then the identity-maintenance
  *     mutex, then `users … FOR UPDATE`. It takes no subject row and needs none: on `users` it only

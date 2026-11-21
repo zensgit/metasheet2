@@ -2795,6 +2795,9 @@ suite('DingTalk controlled login repair', () => {
           [f.user],
         ).then(async (locked) => {
           expect(locked.has(f.user)).toBe(true)
+          // The table lock of the identity update that login issues next (any INSERT, UPDATE or
+          // DELETE takes it). The handover fences this table, but only after its version rows.
+          await writer.query('LOCK TABLE user_external_identities IN ROW EXCLUSIVE MODE')
           await writer.query('COMMIT')
           finished.push('write')
         })
@@ -2802,8 +2805,8 @@ suite('DingTalk controlled login repair', () => {
         // A failure before the version row is held ends the case with that error instead of a timeout.
         await Promise.race([versionRow, write])
 
-        // The real handover: maintenance mutex, source freeze keys, its table fences, then it waits
-        // for the version row of the linked user.
+        // The real handover: maintenance mutex, source freeze keys, then it waits for the version
+        // row of the linked user. Its table fences come after that wait.
         handover = applyDirectoryHandover(
           { sourceIntegrationId: f.source, targetIntegrationId: target },
           'synthetic-stale-preview',
@@ -2828,20 +2831,18 @@ suite('DingTalk controlled login repair', () => {
         expect(repairLocks.filter((l) => l.locktype !== 'advisory')).toEqual([])
         expect(finished).toEqual([])
 
-        // The writer now asks for the users row. Before, this request closed the cycle.
-        const started = Date.now()
+        // The writer now asks for the users row. Before, this request closed the cycle, and
+        // PostgreSQL ended it by failing one of the three with 40P01; each outcome is checked below.
         openUsersRow()
         await write
-        // The handover took every lock of its lock phase behind the writer. It then ends on its own
-        // preflight (this fixture's target application is unverified), not on a lock error.
+        // The handover took every lock of its lock phase once the writer had committed. It then ends
+        // on its own preflight (this fixture's target application is unverified), not on a lock error.
         await expect(handover).rejects.toMatchObject({
           code: 'DIRECTORY_HANDOVER_CONFLICT',
           message: 'Target application ownership must have current administrator verification',
         })
         await expect(repair).resolves.toMatchObject({ id: expect.any(String) })
         expect(finished).toEqual(['write', 'handover', 'repair'])
-        // Nobody waited for a deadlock check (deadlock_timeout is one second) or a lock timeout.
-        expect(Date.now() - started).toBeLessThan(900)
         expect(await journal(f.user)).toEqual([{ state: 'applied' }])
       } finally {
         openUsersRow()
