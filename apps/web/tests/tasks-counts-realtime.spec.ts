@@ -699,7 +699,9 @@ describe('D. the client listens and never speaks; the event name has one spellin
       auth: { token: 'token-a' },
     })
     const socket = lastSocket()
-    expect([...socket.handlers.keys()]).toEqual([EVENT])
+    // One application event. The other four are transport lifecycle events of the shared
+    // reconnect helper; none of them makes the client speak.
+    expect([...socket.handlers.keys()].sort()).toEqual([EVENT, 'connect', 'connect_error', 'disconnect', 'realtime:session-ended'].sort())
 
     fireEvent({})
     fireEvent({})

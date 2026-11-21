@@ -8,9 +8,20 @@ import { io as socketIO, type Socket } from 'socket.io-client'
 import { useAuth } from '../../composables/useAuth'
 import { useLocale } from '../../composables/useLocale'
 import { metaCoreLabel } from '../utils/meta-core-labels'
+import {
+  SESSION_ENDED_EVENT,
+  classifyConnectError,
+  classifyDisconnect,
+  createReconnectBackoff,
+  readRefusalNotice,
+  type RealtimeRefusalNotice,
+} from '../../utils/realtimeReconnect'
 import type { YjsRecordPresence, YjsPresenceUser } from '../types'
 
 const MSG_SYNC = 0
+
+/** How many times in a row a record is reopened after a transient refusal before giving up. */
+const MAX_REOPEN_ATTEMPTS = 6
 
 function handleSyncMessage(
   doc: Y.Doc,
@@ -83,6 +94,13 @@ export function useYjsDocument(recordId: Ref<string | null>, options: UseYjsDocu
    * create a socket that the caller has already marked stale.
    */
   let connectGen = 0
+  /**
+   * After a refusal the server marked as transient the record is reopened from scratch (new
+   * connection, new document) with capped backoff. A caller that falls back on a disconnect
+   * cancels this by calling disconnect(), exactly as before.
+   */
+  const reopenBackoff = createReconnectBackoff()
+  let reopenTimer: ReturnType<typeof setTimeout> | null = null
 
   function normalizePresenceSnapshot(payload: unknown, expectedRecordId: string): YjsRecordPresence | null {
     if (!payload || typeof payload !== 'object') return null
@@ -113,9 +131,35 @@ export function useYjsDocument(recordId: Ref<string | null>, options: UseYjsDocu
     }
   }
 
+  function cancelReopen(): void {
+    if (reopenTimer) clearTimeout(reopenTimer)
+    reopenTimer = null
+    reopenBackoff.reset()
+  }
+
+  function scheduleReopen(rid: string): void {
+    if (reopenTimer || currentRecordId !== rid) return
+    teardown()
+    if (reopenBackoff.attempts >= MAX_REOPEN_ATTEMPTS) {
+      reopenBackoff.reset()
+      error.value = 'UNAVAILABLE: realtime unavailable'
+      return
+    }
+    reopenTimer = setTimeout(() => {
+      reopenTimer = null
+      if (currentRecordId !== rid) return
+      void open(rid)
+    }, reopenBackoff.next())
+  }
+
   async function connect(rid: string) {
-    disconnect()
-    // Bump generation AFTER disconnect() so any await in a prior
+    cancelReopen()
+    await open(rid)
+  }
+
+  async function open(rid: string) {
+    teardown()
+    // Bump generation AFTER teardown() so any await in a prior
     // connect() sees a different value and bails. Capture locally so
     // we can compare after every await.
     connectGen += 1
@@ -145,6 +189,14 @@ export function useYjsDocument(recordId: Ref<string | null>, options: UseYjsDocu
       auth: { token },
     })
 
+    let lastNotice: RealtimeRefusalNotice | null = null
+    socket.on(SESSION_ENDED_EVENT, (payload: unknown) => {
+      lastNotice = readRefusalNotice(payload)
+    })
+    socket.on('connect_error', (connectError: unknown) => {
+      if (classifyConnectError(connectError, socket?.active) === 'transient') scheduleReopen(rid)
+    })
+
     socket.on('connect', () => {
       connected.value = true
       socket!.emit('yjs:subscribe', { recordId: rid })
@@ -161,6 +213,7 @@ export function useYjsDocument(recordId: Ref<string | null>, options: UseYjsDocu
           sendSyncStep1(yDoc, socket!, rid2)
         }
         synced.value = true
+        reopenBackoff.reset()
       },
     )
 
@@ -202,10 +255,13 @@ export function useYjsDocument(recordId: Ref<string | null>, options: UseYjsDocu
       disconnect()
     })
 
-    socket.on('disconnect', () => {
+    socket.on('disconnect', (reason: unknown) => {
       connected.value = false
       synced.value = false
       presence.value = null
+      const notice = lastNotice
+      lastNotice = null
+      if (classifyDisconnect(reason, notice) === 'transient') scheduleReopen(rid)
     })
   }
 
@@ -236,7 +292,8 @@ export function useYjsDocument(recordId: Ref<string | null>, options: UseYjsDocu
     ))
   }
 
-  function disconnect() {
+  /** Closes the connection and drops the document; the record that is open stays the same. */
+  function teardown() {
     // Bump generation so any in-flight connect() await aborts before it
     // creates a socket/doc that nobody is going to watch.
     connectGen += 1
@@ -251,10 +308,15 @@ export function useYjsDocument(recordId: Ref<string | null>, options: UseYjsDocu
       doc.value.destroy()
       doc.value = null
     }
-    currentRecordId = null
     connected.value = false
     synced.value = false
     presence.value = null
+  }
+
+  function disconnect() {
+    cancelReopen()
+    teardown()
+    currentRecordId = null
   }
 
   // Auto-connect when recordId changes
