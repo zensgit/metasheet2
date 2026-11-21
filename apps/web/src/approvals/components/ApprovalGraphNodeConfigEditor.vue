@@ -1418,10 +1418,12 @@
          server enforcement has not landed cannot render a control (master M7/M8, gate E-2), and a
          registry fixture with no entries renders no tab at all (gate E-1's positive control).
 
-         `returnReviewMode` and `commentRequired` deliberately have NO control here: they are part of
-         the persisted schema (publish validates them) but are not enforced yet — Lock-5 §1.2 ("no
-         `returnReviewMode` control renders") and §1.3 respectively. `signaturePolicy` renders no
-         control anywhere (OD-L5-10(a)). -->
+         Lock-5 §1.3: `commentRequired` renders as ONE three-way 审批意见 select, driven by the
+         registry's `commentRequiredByNodeType` row (approval nodes only; the server checks it at the
+         approve / reject decision). `returnReviewMode` deliberately has NO control here: it is part
+         of the persisted schema (publish validates it) but is not enforced — Lock-5 §1.2 ("no
+         `returnReviewMode` control renders"). `signaturePolicy` renders no control anywhere
+         (OD-L5-10(a)). -->
     <section
       v-if="isTabbed && activeTabId === 'operations'"
       class="template-authoring__approval-node-section"
@@ -1447,6 +1449,40 @@
             class="template-authoring__hint template-authoring__hint--warn"
             :data-testid="`approval-node-operation-policy-mixed-${policy.id}`"
           >{{ OPERATION_POLICY_MIXED_HINT }}</span>
+        </div>
+        <!-- Lock-5 §1.3 — 审批意见: never / reject_only (default ≡ absent) / always. Writes the SAME
+             `nodeOperationPolicy` object the checkboxes above write; siblings survive every pick. -->
+        <div
+          v-if="commentRequiredCapability"
+          class="template-authoring__field-perm-row"
+          data-testid="approval-node-comment-required-row"
+        >
+          <span class="template-authoring__field-perm-label">{{ commentRequiredCapability.label }}</span>
+          <el-select
+            :model-value="commentRequiredSelectValue"
+            :disabled="readOnly || commentRequiredState.kind === 'unknown'"
+            size="small"
+            class="ms-w-160"
+            data-testid="approval-node-comment-required"
+            @update:model-value="(value: string) => setCommentRequired(value)"
+          >
+            <el-option
+              v-if="commentRequiredState.kind === 'unknown'"
+              :label="COMMENT_REQUIRED_UNKNOWN_LABEL"
+              :value="COMMENT_REQUIRED_UNKNOWN_SELECT_VALUE"
+            />
+            <el-option
+              v-for="option in commentRequiredCapability.options"
+              :key="option.value"
+              :label="option.label"
+              :value="option.value"
+            />
+          </el-select>
+          <span
+            v-if="commentRequiredSelectValue === 'always'"
+            class="template-authoring__hint"
+            data-testid="approval-node-comment-required-always-hint"
+          >{{ COMMENT_REQUIRED_ALWAYS_HINT }}</span>
         </div>
         <!-- §1.1 A-4: an in-flight instance pins its own frozen `published_definition_id`, so a flip
              reaches only instances created AFTER the next publish. The authoring copy must say so or
@@ -1533,13 +1569,20 @@ import {
   DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
   assigneeSourceRoster,
   isRegisteredAssigneeSourceKind,
+  commentRequiredCapabilityFor,
   type ApprovalCapabilityRegistry,
   type ApprovalOperationPolicyCapability,
 } from '../approvalCapabilityRegistry'
 import {
+  COMMENT_REQUIRED_ALWAYS_HINT,
+  COMMENT_REQUIRED_UNKNOWN_LABEL,
+  COMMENT_REQUIRED_UNKNOWN_SELECT_VALUE,
   OPERATION_POLICY_MIXED_HINT,
   OPERATION_POLICY_SCOPE_HINT,
+  applyCommentRequiredChoice,
   applyOperationPolicyControl,
+  commentRequiredControlState,
+  isNodeCommentRequired,
   operationPolicyControlState,
 } from '../nodeOperationPolicyEdit'
 import { APPROVAL_CANVAS_INSPECTOR_TABS_KEY } from '../canvasInspectorTabsContext'
@@ -1629,6 +1672,29 @@ function setOperationPolicy(capability: ApprovalOperationPolicyCapability, allow
   // has a programmatic update path, and a mixed pair must never be collapsed by a stray write.
   if (operationPolicyIsMixed(capability)) return
   edit.nodeOperationPolicy = applyOperationPolicyControl(nodeOperationPolicy.value, capability, allowed) ?? null
+}
+
+// ── Lock-5 §1.3 — 审批意见 select (`commentRequired`) ───────────────────────────────────────────
+// Registry-driven like the checkboxes: no row for this node type ⇒ no select (handler nodes carry
+// their own 办理意见 control instead). Projection and write logic live in `nodeOperationPolicyEdit`.
+const commentRequiredCapability = computed(() => commentRequiredCapabilityFor(registry.value, props.node.type))
+const commentRequiredState = computed(() => commentRequiredControlState(nodeOperationPolicy.value))
+const commentRequiredSelectValue = computed(() => {
+  const state = commentRequiredState.value
+  return state.kind === 'editable' ? state.value : COMMENT_REQUIRED_UNKNOWN_SELECT_VALUE
+})
+
+function setCommentRequired(value: unknown): void {
+  const edit = approvalNodeEditFor(props.node.key)
+  if (!edit) return
+  // Fail-closed at the mutator, not only via `:disabled`: an unknown persisted value is never
+  // overwritten, and only one of the three known values may be written.
+  if (readOnly.value || !isNodeCommentRequired(value)) return
+  const current = nodeOperationPolicy.value
+  const next = applyCommentRequiredChoice(current, value)
+  // Same reference ⇒ nothing changed (re-pick or unknown); leave the edit untouched.
+  if (next === current) return
+  edit.nodeOperationPolicy = next ?? null
 }
 
 function unwrap<T>(value: ComputedRef<T> | Ref<T> | T): T {

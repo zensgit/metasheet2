@@ -232,6 +232,10 @@ describe('Lock-3 handler config surface + inspector tabs', () => {
     expect(section.querySelectorAll('[data-testid="approval-node-operation-policy-row"]')).toHaveLength(1)
     expect(section.querySelector('[data-testid="approval-node-operation-policy-add_reduce_sign"]')).toBeNull()
     expect(section.querySelector('[data-testid="approval-node-operation-policy-return"]')).toBeNull()
+    // Lock-5 §1.3 — no 审批意见 select on a handler: it completes by 办理 (not approve / reject), and
+    // its own comment rule is the 办理意见 checkbox in the handler section.
+    expect(section.querySelector('[data-testid="approval-node-comment-required"]')).toBeNull()
+    expect(section.querySelector('[data-testid="approval-node-comment-required-row"]')).toBeNull()
   })
 
   it('renders the handler roster (exactly HANDLER_ASSIGNEE_SOURCE_KINDS); the mode picker (会签/或签) and 办理意见 opt-in; NO approval-only controls (M7)', () => {
