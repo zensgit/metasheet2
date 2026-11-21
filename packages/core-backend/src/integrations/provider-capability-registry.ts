@@ -31,11 +31,30 @@ export const ANCHOR_APP_SCOPE_MAX_LENGTH = 256
 const TENANT_RE = new RegExp(ANCHOR_TENANT_PATTERN)
 const APP_SCOPE_RE = new RegExp(ANCHOR_APP_SCOPE_PATTERN)
 
+/** The statement interface of the transaction a capability write runs in (a type only: this module issues no statement). */
+export interface CapabilityTransactionClient {
+  query(sql: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>>; rowCount: number | null }>
+}
+
+/**
+ * What an enable precondition or an enable gate is given. Every field comes from the rows the write
+ * has locked, never from the request.
+ */
 export type EnablePreconditionContext = Readonly<{
   integrationId: string
   provider: string
+  /** Organization of the locked integration row. */
+  orgId: string
   scope: IntegrationScope
+  /**
+   * The client of the write's own transaction. A precondition reads persisted evidence through this
+   * client only, so that it sees what the write sees; it makes no external call and takes no integration
+   * row lock.
+   */
+  client: CapabilityTransactionClient
 }>
+
+export type EnablePreconditionResult = { ok: true } | { ok: false; code: string }
 
 export interface ProviderCapabilityDescriptor {
   /** Exactly equal to directory_integrations.provider. */
@@ -46,11 +65,19 @@ export interface ProviderCapabilityDescriptor {
    * outside the two anchor patterns) yields null.
    */
   scopeOf(row: { corp_id: string; config: unknown }): IntegrationScope | null
-  /** Persisted-evidence checks run before a capability is enabled; required for every 'gated' capability. */
+  /**
+   * Provider-specific persisted-evidence checks, run inside the write transaction after both row locks
+   * and before the write; required for every 'gated' capability.
+   */
   enablePreconditions?(
     capability: IntegrationCapability,
     context: EnablePreconditionContext,
-  ): Promise<{ ok: true } | { ok: false; code: string }>
+  ): Promise<EnablePreconditionResult>
+  /**
+   * Names of the configuration keys that hold a secret: a closed set of key names, never a value.
+   * A frozen array without an empty or a repeated name.
+   */
+  readonly secretConfigKeys: readonly string[]
 }
 
 /** The scope a value pair would be stored as, or null when it does not satisfy the anchor patterns. */
@@ -73,6 +100,14 @@ const DINGTALK: ProviderCapabilityDescriptor = Object.freeze({
   provider: 'dingtalk',
   governance: Object.freeze({ directory: 'legacy', login: 'legacy', notification: 'legacy' } as const),
   scopeOf: dingTalkScopeOf,
+  secretConfigKeys: Object.freeze([
+    'appSecret',
+    'appsecret',
+    'app_secret',
+    'workNotificationAgentId',
+    'agentId',
+    'approvalCardLinkSecret',
+  ]),
 })
 
 /** The production registry: frozen. 'local' and every other provider are intentionally absent. */
@@ -94,7 +129,10 @@ export function lookupProviderCapabilityDescriptor(
   return null
 }
 
-/** Throws for a duplicate provider (a repeated identical object is ignored) or a 'gated' capability without preconditions. */
+/**
+ * Throws for a duplicate provider (a repeated identical object is ignored), a 'gated' capability without
+ * preconditions, or secret key names that are not a frozen array of distinct, non-blank strings.
+ */
 export function assertRegistryWellFormed(registry: readonly ProviderCapabilityDescriptor[]): void {
   const seen = new Map<string, ProviderCapabilityDescriptor>()
   for (const descriptor of registry) {
@@ -108,6 +146,18 @@ export function assertRegistryWellFormed(registry: readonly ProviderCapabilityDe
       if (descriptor.governance[capability] === 'gated' && typeof descriptor.enablePreconditions !== 'function') {
         throw new Error('provider capability registry: gated capability without enable preconditions')
       }
+    }
+    const keys: unknown = descriptor.secretConfigKeys
+    if (!Array.isArray(keys) || !Object.isFrozen(keys)) {
+      throw new Error('provider capability registry: secret config keys must be a frozen array')
+    }
+    const names = new Set<string>()
+    for (const key of keys as readonly unknown[]) {
+      if (typeof key !== 'string' || key.trim() === '') {
+        throw new Error('provider capability registry: empty secret config key')
+      }
+      if (names.has(key)) throw new Error('provider capability registry: duplicate secret config key')
+      names.add(key)
     }
   }
 }

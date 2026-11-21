@@ -11,12 +11,12 @@ describe('authorization operation schema profile', () => {
       'f29f6b75a23223a5784ea86ad9dac74deeb02ffbe17e89af3dff87ce799f7f02',
       '052c717a45feea6acd4cf5f2711917f4b1e59eef8d1c31aa3bb82c6c1a3e037f',
     ]) {
-      expect(isSupportedAuthorizationOperationSchema({ ordinary: true, digest })).toBe(true)
-      expect(isSupportedAuthorizationOperationSchema({ ordinary: false, digest })).toBe(false)
+      expect(isSupportedAuthorizationOperationSchema({ ordinary: true, digest, d21Ready: true })).toBe(true)
+      expect(isSupportedAuthorizationOperationSchema({ ordinary: false, digest, d21Ready: true })).toBe(false)
     }
-    expect(isSupportedAuthorizationOperationSchema({ ordinary: false, digest: '20f8e9ab60e9a48287fd6c6034629bc0c2f1cf2eb4de7dd2059ec1c7e94ae534' })).toBe(false)
-    expect(isSupportedAuthorizationOperationSchema({ ordinary:true, digest:'unknown' })).toBe(false)
-    expect(isSupportedAuthorizationOperationSchema({ ordinary: true, digest: 'df64c6b5d2f1d1441bd5ce0fde9c63979123af3009cea573753b3b016f3f0925' })).toBe(false)
+    expect(isSupportedAuthorizationOperationSchema({ ordinary: false, digest: '20f8e9ab60e9a48287fd6c6034629bc0c2f1cf2eb4de7dd2059ec1c7e94ae534', d21Ready: true })).toBe(false)
+    expect(isSupportedAuthorizationOperationSchema({ ordinary:true, digest:'unknown', d21Ready: true })).toBe(false)
+    expect(isSupportedAuthorizationOperationSchema({ ordinary: true, digest: 'df64c6b5d2f1d1441bd5ce0fde9c63979123af3009cea573753b3b016f3f0925', d21Ready: true })).toBe(false)
   })
   it('locks the closed table set, qualified and without waiting', () => {
     expect(AUTHORIZATION_OPERATION_FENCE_TABLES).toHaveLength(22)
@@ -106,5 +106,9 @@ describe('authorization operation schema profile', () => {
     // An exact known profile alone no longer suffices: this code needs D21 on every path.
     expect(isSupportedAuthorizationOperationSchema({ ordinary: true, digest: AUTHORIZATION_OPERATION_SCHEMA_PROFILE, d21Ready: false })).toBe(false)
     expect(isSupportedAuthorizationOperationSchema({ ordinary: true, digest: AUTHORIZATION_OPERATION_SCHEMA_PROFILE, d21Ready: true })).toBe(true)
+    // Required, and only a literal true passes: an omitted or non-boolean value refuses at runtime too.
+    for (const loose of [{}, { d21Ready: undefined }, { d21Ready: 'true' }, { d21Ready: 1 }]) {
+      expect(isSupportedAuthorizationOperationSchema({ ordinary: true, digest: AUTHORIZATION_OPERATION_SCHEMA_PROFILE, ...loose } as never), JSON.stringify(loose)).toBe(false)
+    }
   })
 })
