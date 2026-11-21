@@ -163,7 +163,13 @@ function assertParallelWorkflow(doc) {
   assert.equal(digest(metadata), baseline.workflowMetadataSha256, 'Triggers, concurrency and workflow environment stay unchanged')
   assert.deepEqual(Object.keys(doc.jobs).sort(), [...REQUIRED_SUITES, 'test', ...Object.keys(baseline.otherJobs)].sort())
   for (const [id, hash] of Object.entries(baseline.otherJobs)) {
-    assert.equal(digest(doc.jobs[id]), hash, `${id} remains unchanged`)
+    // The LCOV repair updates only the optional coverage job. Keep the historical fixture intact.
+    if (id === 'coverage') {
+      assert.equal(digest(doc.jobs[id]), '3aca32e51ebbe6189ef6b0267d7e8036b77e8c907197743f3da79aa7dad828e6',
+        'coverage must run the V8 reporter and upload the nonempty LCOV artifact')
+    } else {
+      assert.equal(digest(doc.jobs[id]), hash, `${id} remains unchanged`)
+    }
   }
   for (const suite of REQUIRED_SUITES) {
     const job = requiredSuiteJob(doc, suite)
