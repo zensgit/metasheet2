@@ -1,4 +1,5 @@
 import { randomUUID, createHash } from 'node:crypto'
+import { bumpSubjectAuthorizationVersions } from '../../src/multitable/authz-version-protocol'
 import { readFileSync } from 'node:fs'
 import { Pool as PgPool } from 'pg'
 import type { PoolClient } from 'pg'
@@ -624,7 +625,7 @@ describeWithDatabase('unassign whole-file PostgreSQL proof; registered handler e
   it.each(['status-disable', 'recycle-move', 'delegated-demotion', 'protected-role-delete'] as const)('waits behind source-pinned %s lock/write fragment, not a whole HTTP competitor', async mode => {
     const source = readFileSync(new URL(mode === 'recycle-move' ? '../../src/admin/user-recycle.ts' : mode === 'protected-role-delete' ? '../../src/routes/roles.ts' : '../../src/routes/admin-users.ts', import.meta.url), 'utf8')
     const expectedPin = mode === 'recycle-move' ? 'ee591b541b631d09161d528912ff068f4872848db9dd51fe4ca01b1509a222bf'
-      : mode === 'protected-role-delete' ? '144b83d990585cfdfbad609e0d55a305db65b1d3769c7da0347e94d89cf98ba1' : undefined
+      : mode === 'protected-role-delete' ? '74fa55aeeb47b098fdb8ba9ad1ee93d4babfd466a2adfd960aa1ae0395b5e14b' : undefined
     if (expectedPin) expect(createHash('sha256').update(source).digest('hex')).toBe(expectedPin)
     else expect(source).toContain(mode === 'status-disable' ? 'if (isActive === false) await lockPlatformAdminInvariant(client)' : "if (action === 'unassign' && roleId === PLATFORM_ADMIN_ROLE_ID)")
     const fixture = await seed('raw')
@@ -641,6 +642,8 @@ describeWithDatabase('unassign whole-file PostgreSQL proof; registered handler e
       if (mode === 'protected-role-delete') {
         await client.query('SELECT id FROM roles WHERE id=$1 FOR UPDATE', [fixture.roleId])
         await lockNamespaceAdmissionWrites(client, fixture.userId)
+        // D21 (Y5a): the role delete bumps its members' subject version rows after their admission locks.
+        await bumpSubjectAuthorizationVersions(client, [fixture.userId])
 
       } else {
         await lockPlatformAdminInvariant(client)

@@ -489,6 +489,7 @@ import { createYidaInitializationRuntime } from './integration/yida-initializati
 import { createYidaConnectionTestRuntime } from './integration/yida-connection-test-runtime'
 import { createYidaReconciliationRuntime } from './integration/yida-reconciliation-runtime'
 import { createYidaSheetSourceHostDependencies } from './integration/yida-sheet-source-host'
+import { createYidaSourceBindingReauthorizer } from './integration/yida-source-reauthorization-host'
 import { isYidaOwnerHttpObservationPath } from './integration/yida-owner-http-observation'
 import { createIntegrationYidaOwnerRouter, YIDA_OWNER_HTTP_PREFIX, yidaOwnerNoStoreMiddleware,
   yidaOwnerJsonOnlyMiddleware, yidaOwnerParseErrorHandler } from './routes/integration-yida-owner'
@@ -677,6 +678,9 @@ export class MetaSheetServer {
     // D20 (design baseline v2.3): the exact list of target refs that may still take unbound rows besides slot 1.
     // Default empty: every target other than slot 1 requires a source binding.
     readUnboundTestTargetRefs: () => process.env.INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS,
+    // D21 (design baseline v2.3 §7.2): a bound row is re-authorized inside the approval and admission transactions
+    // from the rows the protocol locked there, never from the request or the RBAC cache.
+    reauthorizeSourceBinding: createYidaSourceBindingReauthorizer(),
   })
   // Local initialization is an independent authority, not the send switch or
   // an existing target owner check. The immutable server anchor and live ACL

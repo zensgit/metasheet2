@@ -308,6 +308,11 @@ function assertParallelWorkflow(doc) {
         const attendanceTemplateRuntimeAddition = '  tests/integration/attendance-role-template-runtime.db.test.ts \\\n'
         assert.equal(step.run.split(attendanceTemplateRuntimeAddition).length - 1, 1, 'Attendance template runtime DB suite must run exactly once')
         assert.ok(step.run.includes(pullSourceGateAddition + attendanceTemplateRuntimeAddition), 'Keep the attendance template runtime DB suite right after the pull-source write gate suite')
+        // D21 authorization version protocol (slice Y5a): trigger coverage matrix, barrier and deadlock
+        // cases against real Postgres, whole file, right after the last strict-login suite (the end of main's chain at df83192d9: pull-source gate -> attendance template runtime -> writer suites -> grant suites, #6938/#6939).
+        const authzVersionAddition = '  tests/integration/authz-version-protocol.db.test.ts \\\n'
+        assert.equal(step.run.split(authzVersionAddition).length - 1, 1, 'Authorization version protocol DB suite must run exactly once')
+        assert.ok(step.run.includes('  tests/integration/strict-dingtalk-entry.db.test.ts \\\n' + authzVersionAddition), 'Keep the authorization version protocol suite right after the strict DingTalk entry DB suite')
         step.run = step.run.replace(addition, '')
         step.run = step.run.replace(repairAddition, '')
         step.run = step.run.replace(privilegeAddition, '')
@@ -331,6 +336,7 @@ function assertParallelWorkflow(doc) {
         step.run = step.run.replace(authzSerializationAddition, '')
         step.run = step.run.replace(authzCensusAddition, '')
         step.run = step.run.replace(pullSourceGateAddition, '')
+        step.run = step.run.replace(authzVersionAddition, '')
         step.run = step.run.replace(attendanceTemplateRuntimeAddition, '')
         const directPermissionAddition = '  tests/integration/direct-permission-writers.db.test.ts \\\n'
         assert.equal(step.run.split(directPermissionAddition).length - 1, 1, 'Direct permission writer DB suite must run exactly once')
@@ -648,6 +654,8 @@ test('removed/filtered/reordered steps, disabled suites and a weakened aggregate
     doc => { const step = doc.jobs['multitable-db'].steps.find(step => step.id === 'multitable-real-db-integration'); const line = '  tests/integration/notification-delivery-result.db.test.ts \\\n', anchor = '  tests/integration/multitable-fwb-write-action-realdb.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-sync-membership-local-account-gate.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-sync-membership-local-account-gate.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/authz-version-protocol.db.test.ts \\\n', '') },
+    doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/authz-version-protocol.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-deprovision-effect-provider-schema.db.test.ts \\\n', '') },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); const line = '  tests/integration/directory-deprovision-effect-provider-schema.db.test.ts \\\n', anchor = '  tests/integration/directory-source-freeze-lock-correctness.db.test.ts \\\n'; assert.ok(step.run.includes(anchor)); step.run = step.run.replace(line, '').replace(anchor, anchor + line) },
     doc => { const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration'); step.run = step.run.replace('  tests/integration/directory-deprovision-provider-evidence.db.test.ts \\\n', '') },

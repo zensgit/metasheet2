@@ -23,6 +23,7 @@ import { acquireSourceSyncFreezeLock } from '../../src/directory/source-sync-fre
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { assertAuthorizationInputTx } from '../../src/rbac/authorization-input-brand'
 import { lockNamespaceAdmissionWrites } from '../../src/rbac/namespace-admission'
+import { SUBJECT_AUTHORIZATION_VERSIONS_BUMP_SQL, SUBJECT_AUTHORIZATION_VERSIONS_LOCK_SQL } from '../../src/multitable/authz-version-protocol'
 import { unassignUserRoles } from '../../src/rbac/role-assignment'
 import { applyRoleMatrix } from '../../src/services/PluginRbacProvisioningService'
 import {
@@ -1308,7 +1309,8 @@ describeIfDatabase('authorization-input serialization (real PostgreSQL)', () => 
           expect(await membershipCount(world.actorId, world.roleId!)).toBe(1)
         },
         afterRelease: async (writer) => {
-          expect(writer.issued).toEqual([AUTHORIZATION_INPUT_STATEMENTS.namespaceAdmission, MEMBERSHIP_DELETE])
+          // D21 (Y5a): unassignUserRoles bumps the member's subject version row right before the membership DELETE.
+          expect(writer.issued).toEqual([AUTHORIZATION_INPUT_STATEMENTS.namespaceAdmission, SUBJECT_AUTHORIZATION_VERSIONS_BUMP_SQL, MEMBERSHIP_DELETE])
           expect(writer.issued.some((sql) => sql.includes('FROM users') || sql.includes('FOR UPDATE'))).toBe(false)
           expect(await membershipCount(world.actorId, world.roleId!)).toBe(0)
           const after = await readAssessment(world.actorId)
@@ -1336,7 +1338,8 @@ describeIfDatabase('authorization-input serialization (real PostgreSQL)', () => 
           await unassignUserRoles({ userIds: [world.actorId], roleId: world.roleId!, scope: { kind: 'platform-admin' }, executor: { query } })
         },
         whileHeld: async (writer) => {
-          expect(writer.issued).toEqual([AUTHORIZATION_INPUT_STATEMENTS.namespaceAdmission, MEMBERSHIP_DELETE])
+          // D21 (Y5a): unassignUserRoles bumps the member's subject version row right before the membership DELETE.
+          expect(writer.issued).toEqual([AUTHORIZATION_INPUT_STATEMENTS.namespaceAdmission, SUBJECT_AUTHORIZATION_VERSIONS_BUMP_SQL, MEMBERSHIP_DELETE])
           expect(await relationLocks(writer.pid, 'users')).toBe(0)
           expect(await relationLocks(writer.pid, 'roles')).toBe(0)
           expect(await membershipCount(world.actorId, world.roleId!)).toBe(1)
@@ -1377,7 +1380,7 @@ describeIfDatabase('authorization-input serialization (real PostgreSQL)', () => 
       })
     }, 30_000)
 
-    it('R5 writer-first saves the expectation, the reader waits on the user row, and the committed role change mismatches with the class still standard', async () => {
+    it('R5 writer-first saves the expectation, the reader waits on the subject version row ahead of the user row (D21), and the committed role change mismatches with the class still standard', async () => {
       const world = await seedOrdinaryRole()
       const plan = await discoverWorld(world)
       const before = await readAssessment(world.actorId)
@@ -1387,7 +1390,9 @@ describeIfDatabase('authorization-input serialization (real PostgreSQL)', () => 
         world,
         plan,
         before,
-        blockedSql: USER_ROW_LOCK,
+        // D21 (Y5a): the writer's role UPDATE took the subject version row through its trigger; the read-only
+        // CONSUME reader takes that row lock-only before the users row, so it queues there.
+        blockedSql: SUBJECT_AUTHORIZATION_VERSIONS_LOCK_SQL,
         expectedCode: 'actor_privilege_witness_mismatch',
         sameClass: true,
         mutate: (query) => query(USER_ROLE_UPDATE, [world.actorId, 'clerk']),

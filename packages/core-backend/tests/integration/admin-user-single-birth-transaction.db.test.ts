@@ -178,6 +178,8 @@ function shiftDb(client: PoolClient): ShiftDb {
 }
 
 const SCHEMA_SQL = `
+-- D21 (Y5a): the access-graph mutex bumps the subjects' version rows before the users rows.
+CREATE TABLE subject_authorization_versions (LIKE public.subject_authorization_versions INCLUDING ALL);
 CREATE TABLE users (
   id text PRIMARY KEY,
   email text,

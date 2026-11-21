@@ -107,6 +107,13 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
   let multiTargetEnablement: unknown = 'false', multiTargetUp = '', receiptUnparsedUp = '', sourceBindingUp = '', sheet = defaultSheet()
   // D20: the raw INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS value as the runtime reads it per call (absent = no listed target).
   let unboundTestTargetRefs: unknown
+  // D21 (slice Y5): this lane's sheet source is synthetic (the schema has no meta_* tables, permission tables or version
+  // triggers), so the host's in-transaction re-check of a BOUND row is a synthetic double at the same seam: it answers
+  // `reauthorization` (default: authorized) and counts its calls. An unbound (pasted) row never reaches it. The real
+  // re-check runs on real PG in stock-preparation-yida-send-approvals-realdb.test.ts; production wires
+  // createYidaSourceBindingReauthorizer() (src/index.ts).
+  const REAUTHORIZED = Object.freeze({ authorized: true })
+  let reauthorization: unknown = REAUTHORIZED, reauthorizations = 0
   // Gate 1 proof controls: destroy the in-flight client socket at the first token call (after admission has
   // committed), observe the server-side close, and let the test wait for the host run to settle afterwards.
   let disconnectAtToken = false, inflight: ClientRequest | undefined, closedResponses = 0
@@ -218,6 +225,7 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
   async function startRuntime(useDefault = false) {
     await closeRuntime()
     runtime = createRuntime({ database, security, fetch: syntheticFetch,
+      reauthorizeSourceBinding: async () => { reauthorizations++; return reauthorization },
       ...(useDefault ? {} : { readEnablement: () => enablement }), timeoutMs: 5000,
       ...(options.multiTarget ? { readMultiTargetEnablement: () => multiTargetEnablement,
         readUnboundTestTargetRefs: () => unboundTestTargetRefs } : {}) })
@@ -370,6 +378,7 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
     setEnablement(value: unknown) { enablement = value }, setFormOutcome(value: 'ack' | 'unknown' | 'unparsed') { formOutcome = value },
     setMultiTarget(value: unknown) { multiTargetEnablement = value },
     setUnboundTestTargetRefs(value: unknown) { unboundTestTargetRefs = value },
+    setReauthorization(value: unknown) { reauthorization = value }, get reauthorizations() { return reauthorizations },
     setDisconnectAtToken(value: boolean) { disconnectAtToken = value },
     async settleSubmissions() { await lastSubmission },
     holdNextForm() {
@@ -424,6 +433,10 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
         CREATE TABLE user_sessions(id text PRIMARY KEY,user_id text,issued_at timestamptz,expires_at timestamptz,
           last_seen_at timestamptz,revoked_at timestamptz,revoked_by text,revoke_reason text,ip_address text,user_agent text,
           created_at timestamptz,updated_at timestamptz);
+        -- D21 (slice Y5): the two authorization version rows of zzzz20261106110500 (table shapes only: the lane sends
+        -- pasted, unbound rows, so no trigger and no sheet row is ever consulted; approve/admit hold the actor's subject row).
+        CREATE TABLE sheet_permission_versions(sheet_id text PRIMARY KEY,version bigint NOT NULL DEFAULT 1,updated_at timestamptz NOT NULL DEFAULT now());
+        CREATE TABLE subject_authorization_versions(subject_id text PRIMARY KEY,version bigint NOT NULL DEFAULT 1,updated_at timestamptz NOT NULL DEFAULT now());
       `)
       for (const [key, actorId] of Object.entries(principals)) {
         await admin!.query(`INSERT INTO users(id,email,username,name,role,permissions,password_hash,is_active,
@@ -465,6 +478,7 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
       enablement = 'false'; tokenCommitted = false; validRequests = true; formOutcome = 'ack'
       multiTargetEnablement = 'false'; unboundTestTargetRefs = undefined; sheet = defaultSheet(); sheetReads = 0; projectSheet = null
       disconnectAtToken = false; inflight = undefined; closedResponses = 0; lastSubmission = Promise.resolve()
+      reauthorization = REAUTHORIZED; reauthorizations = 0
       await startRuntime()
     },
   }

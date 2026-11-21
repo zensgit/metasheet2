@@ -624,6 +624,12 @@ async function createBaseTables(): Promise<void> {
   const owned = quoteIdent(schema)
   await adminPool!.query(`CREATE SCHEMA ${owned}`)
   await adminPool!.query(`
+    -- D21 (Y5a): the access-graph mutex bumps the subjects' version rows before the users rows.
+    CREATE TABLE ${owned}.subject_authorization_versions (
+      subject_id text PRIMARY KEY,
+      version bigint NOT NULL DEFAULT 1,
+      updated_at timestamptz NOT NULL DEFAULT now()
+    );
     CREATE TABLE ${owned}.users (
       id text PRIMARY KEY,
       name text,

@@ -74,8 +74,9 @@ describe('57014 classification around the repair lock phase', () => {
   it.each(['rollback', 'release'] as const)(
     '%s: a 57014 on the first statement after the lock phase is not mapped by the module',
     async (action) => {
-      // After LOCK TABLE the lock phase only takes the user row locks; the first other statement is outside it.
-      const { client, seen } = fakeClient((sql, afterLockTable) => afterLockTable && !/FOR UPDATE/.test(sql))
+      // After LOCK TABLE the lock phase only takes the D21 subject version rows and the user row locks
+      // (access-graph mutex); the first other statement is outside it.
+      const { client, seen } = fakeClient((sql, afterLockTable) => afterLockTable && !/FOR UPDATE|INSERT INTO subject_authorization_versions/.test(sql))
       db.transaction.mockImplementation(async (fn: (c: unknown) => unknown) => fn(client))
       const error = await run[action]('synthetic-id', 'synthetic-actor', 'synthetic-digest', action, 'synthetic-password').catch(
         (e) => e,

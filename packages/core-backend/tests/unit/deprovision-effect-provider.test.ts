@@ -73,6 +73,9 @@ function statementShape(sql: string): string {
     if (sql.includes('"kysely_migration"')) return 'scope_ledger'
     return 'scope_catalog'
   }
+  // D21 (Y5a): lockCandidateUser bumps the subject authorization version row as its first statement, before the
+  // users FOR UPDATE (zzzz20261106110500); a lock-taking upsert that returns no row.
+  if (/^\s*INSERT INTO subject_authorization_versions\b/.test(sql)) return 'bump_subject_version'
   if (/^\s*SELECT id FROM users WHERE id = \$1::text\s+FOR UPDATE/.test(sql)) return 'lock_user'
   if (/FROM users candidate_user/.test(sql)) return 'read_state'
   if (/^\s*UPDATE users\s+SET access_generation/.test(sql)) return 'bump_generation'
@@ -99,6 +102,8 @@ function writerClient(options: {
     query: async (sql: string, params?: unknown[]) => {
       recorded.push({ sql, params })
       switch (statementShape(sql)) {
+        case 'bump_subject_version':
+          return { rows: [] }
         case 'scope_schema':
         case 'scope_ledger':
         case 'scope_catalog':
@@ -294,6 +299,8 @@ describe('provider-column probe', () => {
 
 describe('statement sequence', () => {
   const WRITE_SEQUENCE_BEFORE_COLUMN = [
+    // D21 (Y5a): the subject version row first, then the users row lock.
+    'bump_subject_version',
     'lock_user',
     'read_state',
     'bump_generation',
@@ -337,12 +344,16 @@ function recordedClient(answer: (shape: string, params: unknown[] | undefined) =
     recorded,
     query: vi.fn(async (sql: string, params?: unknown[]) => {
       recorded.push({ sql, params })
-      return answer(evidenceShape(sql), params)
+      const shape = evidenceShape(sql)
+      // D21 (Y5a): the restore / compensation transactions bump the subject version row before their users lock.
+      if (shape === 'bump_subject_version') return { rows: [] }
+      return answer(shape, params)
     }),
   }
 }
 
 function evidenceShape(sql: string): string {
+  if (/^\s*INSERT INTO subject_authorization_versions\b/.test(sql)) return 'bump_subject_version'
   if (/^\s*SELECT local_user_id\s+FROM directory_deprovision_events/.test(sql)) return 'event_owner'
   if (/FROM users\s+WHERE id = \$1::text\s+FOR UPDATE/.test(sql)) return 'lock_user'
   if (/FROM directory_deprovision_events\s+WHERE id = \$1::uuid\s+FOR UPDATE/.test(sql)) return 'read_event'
