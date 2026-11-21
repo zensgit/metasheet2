@@ -568,7 +568,7 @@ const {
 } = require('./read-source-composition-runtime.cjs')
 const { K3_REFERENCE_MAPPING_TEMPLATES } = require('./reference-mapping-templates.cjs')
 // R-69 1b-i: the governed entries' optional `{ signal, checkpoint }` (validated once, then handed down).
-const { normalizeGovernedEntryOptions } = require('./governed-entry-checkpoint.cjs')
+const { normalizeGovernedEntryOptions, passGovernedCheckpoint } = require('./governed-entry-checkpoint.cjs')
 const { listReferenceIntegrationTemplates } = require('./reference-integration-templates.cjs')
 // DF-T2c: read-only derive route reuses the DF-T2a helper (no duplication; pure compute, no write).
 const { deriveK3MaterialTemplateDraft, summarizeTemplateForEvidence, TemplateDeriveError } = require('./connector-template-derive.cjs')
@@ -2156,6 +2156,34 @@ const governedPrincipalContextRequests = new WeakMap()
 
 function requestOfGovernedPrincipalContext(principalContext) {
   return principalContext && typeof principalContext === 'object' ? governedPrincipalContextRequests.get(principalContext) : undefined
+}
+
+// iPaaS S1-a (ADR adr-ipaas-steps-s1-s4-20261116.md §3.1): the configured-read entry's two closed key sets.
+// The options set is S1-a's ONLY; every later member (S1-b's `readPurpose` / `rowCap`, the HTTP kind's
+// `transport`) is an explicit widening of this list with its own refusal test.
+const GOVERNED_CONFIGURED_READ_OPTION_KEYS = Object.freeze(['signal', 'checkpoint'])
+const GOVERNED_CONFIGURED_READ_REQUEST_KEYS = Object.freeze(['configId', 'workspaceId', 'inputs', 'rowSource'])
+
+/**
+ * The configured-read entry's options: CLOSED. `normalizeGovernedEntryOptions` (shared with the two older
+ * entries, unchanged) ignores keys it does not know; this entry must not, so every own key — string or symbol,
+ * enumerable or not — is checked first, and a non-plain object is refused outright. The message names no key.
+ * Then the shared normalizer: `null` when neither member is given (no behaviour), a TypeError when one is malformed.
+ */
+function normalizeGovernedConfiguredReadOptions(options) {
+  if (options !== undefined && options !== null) {
+    if (typeof options !== 'object' || Array.isArray(options)) {
+      throw new TypeError('governed entry options must be an object')
+    }
+    const prototype = Object.getPrototypeOf(options)
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new TypeError('governed entry options must be a plain object')
+    }
+    if (!Reflect.ownKeys(options).every((key) => GOVERNED_CONFIGURED_READ_OPTION_KEYS.includes(key))) {
+      throw new TypeError('configured read options accept only signal and checkpoint')
+    }
+  }
+  return normalizeGovernedEntryOptions(options)
 }
 
 const MAX_LIST_LIMIT = 500
@@ -8214,6 +8242,110 @@ function requireStockPreparationAudit() {
     return governedEntry ? runner.runPipeline(pipelineDryRunInput, governedEntry) : runner.runPipeline(pipelineDryRunInput)
   }
 
+  /*
+   * iPaaS S1-a (ADR adr-ipaas-steps-s1-s4-20261116.md §3.1): THE CONFIGURED READ, REQUEST-FREE.
+   *
+   * The moved chain of `readSourceConfigsRead`, every step in the same order: the read tier → the closed request
+   * shape → the approved version only → the read plan → the system loaded with the backend credential context
+   * and its kind compared → execute → the executor's result (`{ evidence, data }`, plus the executor's own
+   * non-enumerable `page`; no member is added here). The HTTP route calls it with the context built from its
+   * request, no `workspaceId` and no options, so its answers are byte-identical
+   * (__tests__/governed-configured-read-entry.test.cjs C-02, against snapshots taken before the move).
+   *
+   * THE SECOND ARGUMENT `{ configId, workspaceId?, inputs, rowSource }` is closed: `configId` is the route's
+   * `:id`, `inputs` / `rowSource` are the route's two body keys, and `workspaceId` is an optional LOOKUP HINT —
+   * it goes in the input position of `scopedInput`, which `resolveWorkspaceId` reads first, and the config row
+   * and the external system are looked up with the same value. `runAs: 'user'` is still stamped inside
+   * (`scopedAdapterInput`); a caller cannot set it.
+   *
+   * THE THIRD ARGUMENT is optional and its key set is CLOSED to `signal` and `checkpoint` (S1-a; S1-b adds
+   * `readPurpose` and `rowCap` as explicit widenings, each with its own refusal tests). Any other key —
+   * `transport`, `readPurpose`, `rowCap` included — is a TypeError before any store read. Given, a checkpoint
+   * runs before the credential load (`load`) and before the outbound read (`read`); neither given => no
+   * checkpoint, not one extra await. The `read` checkpoint runs in front of `executeConfiguredRead` rather than
+   * inside the adapter: the executor turns an adapter failure into a read-level outcome and races its own
+   * timeout, and a refusal must be thrown, never reported as a source fault. It issues exactly one read.
+   *
+   * DORMANT. Nothing in production calls it with a signal or a checkpoint yet; S1-b's connection-call service
+   * is its first request-free caller.
+   */
+  async function runGovernedConfiguredRead(principalContext, request, options) {
+    const governedEntry = normalizeGovernedConfiguredReadOptions(options)
+    const req = principalContext
+    requireAccess(req, 'read')
+    // The closed request shape: the route's own body gate, with the route's code and reasons.
+    if (request !== undefined && request !== null) {
+      if (typeof request !== 'object' || Array.isArray(request)) {
+        throw new HttpRouteError(400, 'READ_SOURCE_READ_CONTRACT_INVALID', 'configured read request is invalid', { reason: 'not_object' })
+      }
+      const unexpected = Object.keys(request).filter((key) => !GOVERNED_CONFIGURED_READ_REQUEST_KEYS.includes(key))
+      if (unexpected.length > 0) {
+        throw new HttpRouteError(400, 'READ_SOURCE_READ_CONTRACT_INVALID', 'configured read request is invalid', { reason: 'unexpected_field' })
+      }
+    }
+    const configId = request ? request.configId : undefined
+    // Attached only when given: an ungoverned caller's lookups get the exact input objects the route built.
+    const workspaceHint = request && request.workspaceId !== undefined ? { workspaceId: request.workspaceId } : {}
+    // #3889: WHICH PLANE the approved config is mapped over. The stock-preparation feeder ingests the
+    // adapter's own record plane (normalized, flattened, paged rows); this route — the only surface that
+    // returns MAPPED VALUES for an approved config, and therefore the only way to see what a config
+    // actually produces — used to be able to run the raw plane only. That made the config an operator
+    // verifies and the config the feeder executes two different things: a fieldMap that resolves
+    // perfectly here could resolve NOWHERE there (a BOM tree's flattened lines, a PLM alias the wrapper
+    // normalizes away) and be written as null on every row. It also left data-source:sql-readonly with no
+    // usable surface at all — that adapter emits no raw payload, so the raw plane can only ever answer
+    // RESPONSE_UNRECOGNIZED. Same closed enum the runtime validates; the default is unchanged.
+    const rowSource = request && request.rowSource !== undefined ? request.rowSource : undefined
+    if (rowSource !== undefined && rowSource !== 'raw_containers' && rowSource !== 'adapter_records') {
+      throw new HttpRouteError(400, 'READ_SOURCE_READ_CONTRACT_INVALID', 'configured read request is invalid', { reason: 'execution_row_source_invalid' })
+    }
+    let row
+    try {
+      row = await readSourceConfigs.getForRuntime(scopedInput(req, { id: configId, ...workspaceHint }))
+    } catch (error) {
+      throw mapReadSourceConfigError(error)
+    }
+    let prepared
+    try {
+      prepared = prepareConfiguredRead({ config: row.config, inputs: request ? request.inputs : undefined })
+    } catch (error) {
+      // Coarse, values-free reason only (never the stored config, key, or values).
+      throw new HttpRouteError(400, 'READ_SOURCE_READ_CONTRACT_INVALID', 'configured read request is invalid', { reason: error && typeof error.reason === 'string' ? error.reason : 'invalid' })
+    }
+    if (governedEntry) await passGovernedCheckpoint(governedEntry, 'load')
+    // Backend credential context via the stored systemId reference — resolution stays dynamic (lock 5).
+    const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
+    const system = await loadSystem(scopedAdapterInput(req, { id: row.systemId, ...workspaceHint }))
+    if (!system || system.kind !== prepared.plan.requiredKind) {
+      throw new HttpRouteError(409, 'READ_SOURCE_READ_KIND_MISMATCH', 'external system kind does not match the approved config')
+    }
+    if (governedEntry) await passGovernedCheckpoint(governedEntry, 'read')
+    try {
+      return await executeConfiguredRead(
+        prepared,
+        {
+          system,
+          createAdapter: (adapterSystem) => adapterRegistry.createAdapter(adapterSystem, { principal: requestPrincipal(req) }),
+        },
+        rowSource === undefined ? undefined : { rowSource },
+      )
+    } catch (error) {
+      // Defense-in-depth only: the entry pre-checks kind above, so the executor's own kind re-check
+      // (same guard, second layer) is unreachable here unless the runtime module changes.
+      if (error instanceof ReadSourceProbeRuntimeError) {
+        throw new HttpRouteError(409, 'READ_SOURCE_READ_KIND_MISMATCH', 'external system kind does not match the approved config')
+      }
+      // The record plane is one flat page of rows: it cannot express the header/lines split of
+      // detail_with_lines, and resolver_lookup owns its own evaluator.
+      if (error instanceof ReadSourceProbeContractError) {
+        throw new HttpRouteError(400, 'READ_SOURCE_READ_CONTRACT_INVALID', 'configured read request is invalid', {
+          reason: typeof error.reason === 'string' ? error.reason : 'invalid',
+        })
+      }
+      throw error
+    }
+  }
+
   const VALID_TABLE_ACTION_DRY_RUN_JOB_QUERY_KEYS = new Set(['tenantId', 'workspaceId', 'projectNo', 'includeMissingComponents'])
 
   const handlers = {
@@ -8564,6 +8696,11 @@ function requireStockPreparationAudit() {
     // authorized caller under the S0 two-tier model; evidence stays values-free. requireAccess('read') IS
     // the designed runtime tier: config-time surfaces (save/approve/probe) stay write-tier, and an
     // approved preset + key-only body is exactly the end-user surface S0 defines.
+    //
+    // iPaaS S1-a: the chain below the body gate is the request-free governed entry `runGovernedConfiguredRead`
+    // (above). The handler keeps the read tier and the body gate because only it can see the request body's own
+    // keys (the entry gets `inputs` / `rowSource` by name); both are synchronous, so the order of refusals is the
+    // one it always was. It passes no `workspaceId` and no options: byte-identical (C-02 / C-04 / C-09).
     async readSourceConfigsRead(req, res) {
       requireAccess(req, 'read')
       const body = requestBody(req)
@@ -8577,63 +8714,12 @@ function requireStockPreparationAudit() {
           throw new HttpRouteError(400, 'READ_SOURCE_READ_CONTRACT_INVALID', 'configured read request is invalid', { reason: 'unexpected_field' })
         }
       }
-      // #3889: WHICH PLANE the approved config is mapped over. The stock-preparation feeder ingests the
-      // adapter's own record plane (normalized, flattened, paged rows); this route — the only surface that
-      // returns MAPPED VALUES for an approved config, and therefore the only way to see what a config
-      // actually produces — used to be able to run the raw plane only. That made the config an operator
-      // verifies and the config the feeder executes two different things: a fieldMap that resolves
-      // perfectly here could resolve NOWHERE there (a BOM tree's flattened lines, a PLM alias the wrapper
-      // normalizes away) and be written as null on every row. It also left data-source:sql-readonly with no
-      // usable surface at all — that adapter emits no raw payload, so the raw plane can only ever answer
-      // RESPONSE_UNRECOGNIZED. Same closed enum the runtime validates; the default is unchanged.
-      const rowSource = body && body.rowSource !== undefined ? body.rowSource : undefined
-      if (rowSource !== undefined && rowSource !== 'raw_containers' && rowSource !== 'adapter_records') {
-        throw new HttpRouteError(400, 'READ_SOURCE_READ_CONTRACT_INVALID', 'configured read request is invalid', { reason: 'execution_row_source_invalid' })
-      }
-      let row
-      try {
-        row = await readSourceConfigs.getForRuntime(scopedInput(req, { id: requestParams(req).id }))
-      } catch (error) {
-        throw mapReadSourceConfigError(error)
-      }
-      let prepared
-      try {
-        prepared = prepareConfiguredRead({ config: row.config, inputs: body ? body.inputs : undefined })
-      } catch (error) {
-        // Coarse, values-free reason only (never the stored config, key, or values).
-        throw new HttpRouteError(400, 'READ_SOURCE_READ_CONTRACT_INVALID', 'configured read request is invalid', { reason: error && typeof error.reason === 'string' ? error.reason : 'invalid' })
-      }
-      // Backend credential context via the stored systemId reference — resolution stays dynamic (lock 5).
-      const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-      const system = await loadSystem(scopedAdapterInput(req, { id: row.systemId }))
-      if (!system || system.kind !== prepared.plan.requiredKind) {
-        throw new HttpRouteError(409, 'READ_SOURCE_READ_KIND_MISMATCH', 'external system kind does not match the approved config')
-      }
-      try {
-        const { evidence, data } = await executeConfiguredRead(
-          prepared,
-          {
-            system,
-            createAdapter: (adapterSystem) => adapterRegistry.createAdapter(adapterSystem, { principal: requestPrincipal(req) }),
-          },
-          rowSource === undefined ? undefined : { rowSource },
-        )
-        return sendOk(res, { evidence, data })
-      } catch (error) {
-        // Defense-in-depth only: the route pre-checks kind above, so the executor's own kind re-check
-        // (same guard, second layer) is unreachable here unless the runtime module changes.
-        if (error instanceof ReadSourceProbeRuntimeError) {
-          throw new HttpRouteError(409, 'READ_SOURCE_READ_KIND_MISMATCH', 'external system kind does not match the approved config')
-        }
-        // The record plane is one flat page of rows: it cannot express the header/lines split of
-        // detail_with_lines, and resolver_lookup owns its own evaluator.
-        if (error instanceof ReadSourceProbeContractError) {
-          throw new HttpRouteError(400, 'READ_SOURCE_READ_CONTRACT_INVALID', 'configured read request is invalid', {
-            reason: typeof error.reason === 'string' ? error.reason : 'invalid',
-          })
-        }
-        throw error
-      }
+      const { evidence, data } = await runGovernedConfiguredRead(governedPrincipalContextFromRequest(req), {
+        configId: requestParams(req).id,
+        inputs: body.inputs,
+        rowSource: body.rowSource,
+      })
+      return sendOk(res, { evidence, data })
     },
 
     // C-R4-1 (#1709 composition): the composition HTTP surface. Authoring routes (save/list/get/audit/
@@ -15984,7 +16070,7 @@ function requireStockPreparationAudit() {
   // R-69 1b-i: the request-free governed entries, for an in-process caller (1b-ii's port). Non-enumerable,
   // so nothing that walks the handler map (route registration, guards) sees an extra entry.
   Object.defineProperty(handlers, 'governedEntries', {
-    value: Object.freeze({ runGovernedStockPrepPull, runGovernedPipeline }),
+    value: Object.freeze({ runGovernedStockPrepPull, runGovernedPipeline, runGovernedConfiguredRead }),
     enumerable: false,
   })
   return handlers
