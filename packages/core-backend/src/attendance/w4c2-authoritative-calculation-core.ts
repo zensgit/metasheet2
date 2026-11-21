@@ -101,6 +101,7 @@ import {
   type AttendanceInputProvenanceRefV1,
 } from './w4c0-fingerprints'
 import { computeAttendanceSourceDefinitionFingerprintV1 } from './w4c1-fingerprints'
+import { applyFrozenManualOverrideSnapshotToDailyProjectionV1 } from './w4c3c-manual-override'
 import {
   isAttendanceProjectionOwnerV1,
   isAttendanceProjectionOwnerWithCalculationPointerV1,
@@ -115,6 +116,7 @@ import type {
   AttendanceAttributionSnapshotV1,
   ApprovedAttendanceFactV1,
   FrozenAttendanceContextV1,
+  ManualAttendanceOverrideV1,
   PreparedDailyProjectionV1,
 } from './w4c0-write-boundary-types'
 
@@ -134,6 +136,7 @@ export const ATTENDANCE_W4_AUTHORITATIVE_CALCULATION_ERROR_CODES_V1 = Object.fre
   COMPLETED_SHAPE_INVALID: 'ATTENDANCE_W4_AUTH_CALC_COMPLETED_SHAPE_INVALID',
   EXPECTED_COUNT_INVALID: 'ATTENDANCE_W4_AUTH_CALC_EXPECTED_COUNT_INVALID',
   REVIEW_SHAPE_INVALID: 'ATTENDANCE_W4_AUTH_CALC_REVIEW_SHAPE_INVALID',
+  MERGE_POLICY_INVALID: 'ATTENDANCE_W4_AUTH_CALC_MERGE_POLICY_INVALID',
   REVERSAL_SUPERSEDES_REQUIRED: 'ATTENDANCE_W4_AUTH_CALC_REVERSAL_SUPERSEDES_REQUIRED',
   REVERSAL_RESTORES_MISMATCH: 'ATTENDANCE_W4_AUTH_CALC_REVERSAL_RESTORES_MISMATCH',
   REVERSAL_EFFECT_INVALID: 'ATTENDANCE_W4_AUTH_CALC_REVERSAL_EFFECT_INVALID',
@@ -579,6 +582,10 @@ export interface WriteAuthoritativeSegmentCalculationInputV1 {
   readonly context: FrozenAttendanceContextV1 | null
   readonly evidence: readonly unknown[]
   readonly approvedFacts: readonly ApprovedAttendanceFactV1[]
+  /** Surviving frozen manual edit; affects daily projection only, never physical segments. */
+  readonly manualOverride?: ManualAttendanceOverrideV1 | null
+  /** Fixed internal caller policy, never a request-body option. Omission preserves append. */
+  readonly mergePolicy?: 'append' | 'merge'
   readonly provenanceRef: AttendanceInputProvenanceRefV1
   readonly inputProvenance: Record<string, unknown>
   /** Deterministic payload identity for the retry-idempotency conflict check (precedent: recompute). */
@@ -684,6 +691,9 @@ export async function writeAuthoritativeSegmentCalculationV1(
   trx: AttendanceW4TransactionClientV1,
   input: WriteAuthoritativeSegmentCalculationInputV1,
 ): Promise<WriteAuthoritativeSegmentCalculationResultV1> {
+  if (input.mergePolicy !== undefined && input.mergePolicy !== 'append' && input.mergePolicy !== 'merge') {
+    fail(ATTENDANCE_W4_AUTHORITATIVE_CALCULATION_ERROR_CODES_V1.MERGE_POLICY_INVALID, 422)
+  }
   const replay = await retryReplayLookup(trx, {
     orgId: input.orgId,
     entrypoint: input.entrypoint,
@@ -705,8 +715,8 @@ export async function writeAuthoritativeSegmentCalculationV1(
     context: input.context,
     evidence: input.evidence,
     approvedFacts: input.approvedFacts,
-    manualOverride: null,
-    mergePolicy: 'append',
+    manualOverride: input.manualOverride ?? null,
+    mergePolicy: input.mergePolicy ?? 'append',
     calculationTier: 'segment_authoritative',
     engineVersion: ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1,
     snapshotSchemaVersion: 1,
@@ -800,9 +810,9 @@ async function writeReviewRow(
     segmentSnapshot: [],
     evidenceSnapshot: [...input.evidence],
     approvedFactsSnapshot: [...input.approvedFacts],
-    manualOverrideSnapshot: null,
+    manualOverrideSnapshot: input.manualOverride ?? null,
     inputProvenance: input.inputProvenance,
-    mergePolicy: 'append',
+    mergePolicy: input.mergePolicy ?? 'append',
     calculationTier: 'segment_authoritative',
     outcome: 'review_required',
     outcomeReasonCode: input.calculation.outcomeReasonCode,
@@ -828,10 +838,10 @@ async function writeCompletedRow(
   parent: LockedParentV1,
   fp: FingerprintTripleV1,
 ): Promise<WriteAuthoritativeSegmentCalculationResultV1> {
-  const projection = input.calculation.dailyProjection
+  const physicalProjection = input.calculation.dailyProjection
   // §7.3 completed shape: resolved_v2 attribution, frozen context, 1..3 segments, dense projection.
   if (
-    projection === null ||
+    physicalProjection === null ||
     input.attribution.posture !== 'resolved_v2' ||
     input.context === null ||
     fp.sourceDefinitionFingerprint === null
@@ -846,9 +856,9 @@ async function writeCompletedRow(
   // baseline (`assertPreimageProjection`) and reversal paths, so a negative-minute projection cannot
   // leak the raw `chk_arc_projected_minutes` SQLSTATE (23514) to the caller.
   if (
-    !Number.isSafeInteger(projection.workedMinutes) || projection.workedMinutes < 0 ||
-    !Number.isSafeInteger(projection.lateMinutes) || projection.lateMinutes < 0 ||
-    !Number.isSafeInteger(projection.earlyLeaveMinutes) || projection.earlyLeaveMinutes < 0
+    !Number.isSafeInteger(physicalProjection.workedMinutes) || physicalProjection.workedMinutes < 0 ||
+    !Number.isSafeInteger(physicalProjection.lateMinutes) || physicalProjection.lateMinutes < 0 ||
+    !Number.isSafeInteger(physicalProjection.earlyLeaveMinutes) || physicalProjection.earlyLeaveMinutes < 0
   ) {
     fail(ATTENDANCE_W4_AUTHORITATIVE_CALCULATION_ERROR_CODES_V1.COMPLETED_SHAPE_INVALID, 422)
   }
@@ -857,7 +867,32 @@ async function writeCompletedRow(
   // status` and surfaced as a raw 23514 — the same leak F2 closed for minutes, on the adjacent
   // field. Same product code, same position: BEFORE the baseline append, so a rejected write
   // leaves zero rows behind rather than an orphan baseline rolled back by the caller's txn.
-  if (!AUTHORITATIVE_PROJECTED_STATUSES_V1.has(projection.status)) {
+  if (!AUTHORITATIVE_PROJECTED_STATUSES_V1.has(physicalProjection.status)) {
+    fail(ATTENDANCE_W4_AUTHORITATIVE_CALCULATION_ERROR_CODES_V1.COMPLETED_SHAPE_INVALID, 422)
+  }
+
+  // Match recompute: validated frozen edits overlay the daily row only; unset
+  // falls back to the physical value. Keep the physical guards above intact.
+  const overlaidDaily = applyFrozenManualOverrideSnapshotToDailyProjectionV1({
+    status: physicalProjection.status,
+    firstInAt: physicalProjection.firstInAt,
+    lastOutAt: physicalProjection.lastOutAt,
+    workMinutes: physicalProjection.workedMinutes,
+    lateMinutes: physicalProjection.lateMinutes,
+    earlyLeaveMinutes: physicalProjection.earlyLeaveMinutes,
+  }, input.manualOverride ?? null)
+  const projection = {
+    ...physicalProjection,
+    status: overlaidDaily.status,
+    workedMinutes: overlaidDaily.workMinutes ?? physicalProjection.workedMinutes,
+    lateMinutes: overlaidDaily.lateMinutes ?? physicalProjection.lateMinutes,
+    earlyLeaveMinutes: overlaidDaily.earlyLeaveMinutes ?? physicalProjection.earlyLeaveMinutes,
+  }
+  if (
+    !Number.isSafeInteger(projection.workedMinutes) ||
+    !Number.isSafeInteger(projection.lateMinutes) ||
+    !Number.isSafeInteger(projection.earlyLeaveMinutes)
+  ) {
     fail(ATTENDANCE_W4_AUTHORITATIVE_CALCULATION_ERROR_CODES_V1.COMPLETED_SHAPE_INVALID, 422)
   }
 
@@ -937,9 +972,9 @@ async function writeCompletedRow(
     segmentSnapshot: (input.context as unknown as { segments?: unknown[] }).segments ?? [],
     evidenceSnapshot: [...input.evidence],
     approvedFactsSnapshot: [...input.approvedFacts],
-    manualOverrideSnapshot: null,
+    manualOverrideSnapshot: input.manualOverride ?? null,
     inputProvenance: input.inputProvenance,
-    mergePolicy: 'append',
+    mergePolicy: input.mergePolicy ?? 'append',
     calculationTier: 'segment_authoritative',
     outcome: 'completed',
     outcomeReasonCode: 'calculated',

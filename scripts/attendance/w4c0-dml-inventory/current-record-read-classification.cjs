@@ -10,6 +10,12 @@ function entry(relPath, enclosingSymbol, count, role) {
 }
 
 const ATTENDANCE_RECORD_BASE_READ_CLASSIFICATIONS = Object.freeze([
+  // Approved OT reads exact locked preimages, including hidden review placeholders.
+  // The plugin's nearest-declaration label is rule: its sole base SELECT is
+  // the org/user/result-id acknowledgement; hidden review records are not served.
+  entry('packages/core-backend/src/attendance/w4c3b-approved-overtime-shadow.ts', 'readShadowParent', 1, 'approved_overtime_write_lock'),
+  entry('packages/core-backend/src/attendance/w4c3b-approved-overtime.ts', 'readParent', 1, 'approved_overtime_write_lock'),
+  entry('plugins/plugin-attendance/index.cjs', 'rule', 1, 'approved_overtime_result_echo'),
   // Reviewed operator archive repair uses the complete original row for readonly
   // planning and apply FOR UPDATE/CAS; it never updates or lists parent records.
   entry('packages/core-backend/src/attendance/attendance-timezone-legacy-repair.ts', 'runRepair', 1, 'reviewed_legacy_repair_row_cas'),
