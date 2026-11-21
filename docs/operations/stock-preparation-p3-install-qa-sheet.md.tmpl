@@ -1,0 +1,127 @@
+# P3 备料离线包 QA 装机单
+
+**切包前模板。组装、复核和签收分别记录。** 适用变更从 {{BASELINE_LABEL}} 到 {{PACKAGE_LABEL}}。负责人填写经批准的基线、回退目标、窗口和构件校验值，现场按此单从头核对。
+
+| 窗口记录 | 现场填写 |
+|---|---|
+| 装机授权记录、操作者、批准的基线及回退目标 | 【待本次批准】 |
+| 窗口起止和时区，现场与协调方确认时间 | 【起始 ISO 8601 带时区】至【结束 ISO 8601 带时区】 |
+| QA 单及附件发布批次、压缩包及 bootstrap SHA-256、包内提交 | 【切包填】 |
+| 数据库身份及 schema 的批准记录、备份和还原验证记录 | 【本次记录】 |
+| D21 隔离方式、最长等待、回退时权限写入隔离及恢复条件 | 【待 owner 本次决定】 |
+| `03`、探针、旧包和辅助脚本的 SHA-256，独立复核记录 | 【切包填】 |
+
+## 一、装前只读检查
+
+0. **重新验窗。** 开工前实际读一次带时区的当前时间（PowerShell `Get-Date -Format o`），记录窗口与当前时刻的关系、批准引用和当前附件批次。未到、已过、剩余时间不足以验收或交接、双方时区不一致、批次已作废、收到新版附件，任一项立即停。窗口改期时先作废旧单及其附件，按新窗口重签文字和构件清单，现场用新单从第 0 步重核。第 20 步前再验一次；中断后只从新确认的窗口继续。归档旧批次标识、停在哪一步和新版校验结果。
+1. `http\h01-health.ps1` 应答 `HEALTH status=200` 且构建为 {{BASELINE_LABEL}}。基线已有签收记录。先核定已签收的回退目标，R85 路径适用 A，R84 路径适用 B。若目标低于 R84，暂停并按既有手册走新的审批与风险复核。
+2. 同一个 Windows 帐号、同一个 `PM2_HOME`，在日后实际装包的 PowerShell 窗口运行以下命令。只抄固定结果行。
+   ```powershell
+   .\ps\02-pm2-owner-check.ps1
+   .\ps\03-live-env-check.ps1 -InstallRoot $installRoot
+   ```
+   `02` 必须为 `owned=true`、`status=complete`。若重新打开终端，先从第 2 步复核。
+3. **开关闸门。** 现场与协调者逐行检查 `LIVEENV`。必须有 `LIVEENV_GATE on=0 review=0 unknown=0`、完整的 `LIVEENV_RESULT`，以及 `LIVEENV_DBURL relation=same` 或 `relation=root_absent`、`LIVEENV_DBURL_PROCESS process=same`。DB 条件和任一开关条件不满足就停。装机窗口、以往窗口的许可都不放行某个开关。布尔 OFF 写法为 `=false`；列表、路径和 JSON 的空白写法依 `03` 各键定义。严格会话时限 `EXTERNAL_LOGIN_STRICT_SESSION_MAX_AGE_SECONDS` 缺失为 OFF，合法整数为 ON，空白或非法配置交 owner。
+   - **第 11 项单列签字** `INTEGRATION_YIDA_CONNECTION_TEST_ENABLED` 必须为 `verdict=off`，并且该行与总闸门均有记录。只要有 `literal-true` 或其它非 OFF 状态，记录停止位置及状态所在列，报 owner。若 owner 本次批准改动，备份每份待改的 `app.env`，把该键明确改为 `false`，依批准的启动流程重启后重跑 `02`、`03`。验证进程为 `literal-false`，文件列为 `literal-false` 或 `absent`；然后才继续。记录初值状态、改动批准、复查结果。租户声明开关按第 4 步维持原状。
+4. 记下 `03` 中 `gate=record` 的行，尤其是租户声明、项目表开关和 Class B 外发。双值、缺列或其它异常另记并交协调者。后续做逐列对照。
+5. 用本次批准的连接设置建立只读核对会话。确认服务、迁移和探针指向同一库及 schema。用 `sql\s05-admin-for-tenant.sql` 核对批准租户有唯一可签令牌的管理员；照抄计数与完成状态。发行与持有令牌只按本次单独批准的时点、期限和次数。令牌放进仅操作者可读的临时文件，用 `.\http\h00-token-check.ps1 -TokenFile $tokenFile` 核 `usable=true expired=false`。过期即停在依赖它的步骤，先清理旧文件，等新的次数批复。窗口审批与令牌可用期各自核对。
+
+### 6 迁移及探针
+
+同一只读连接运行 SQL，用批准的 schema 替换变量 `$schema`。客户端只抄约定的结果行。
+```powershell
+psql -X -w -qAt -v ON_ERROR_STOP=1 -v "schema=$schema" -f .\sql\s06-new-migrations.sql
+```
+必须有 `MIG_SUMMARY names={{MIGRATIONS_NEW}} applied_t=0 applied_f={{MIGRATIONS_NEW}}`、`MIG_COUNT kysely_migration={{MIGRATIONS_BASELINE}}`、`MIG_NAMESET ledger=baseline` 与最后的 `MIG_RESULT … status=complete`。如果之前曾发生状态 C 并覆盖回旧包，仍用这个只读 SQL 核账本。待执行名单由切包生成。
+
+{{MIGRATIONS_NEW_NAMES_MD}}
+
+| 步骤 | 同一批准的库运行的检查 | 通过或处置 |
+|---|---|---|
+| 6a P1 | `sql\p1-check-constraint-names.sql` | `P1_VERDICT pass=t`，`mismatched=0 ambiguous=0 missing=0 widened=0` 且完成。其余停，保留固定行并报告。 |
+| 6b P2 | `sql\p2-lock-holders.sql` | `pass=t` 且完成。只有 owner 已书面接受且同一次的 `waiting=0 hidden_holders=0`、结果完整时，`pass=blind` 才能放行。可见阻挡、隐蔽持有者、P2 失败或缺结果都停，由 owner 处理；保持会话现状。 |
+| 6c P3 | 后端连接角色运行 `sql\p3-object-ownership.sql` | `pass=t`、`not_owned=0 missing=0 privileges_missing=0`，且完成。R84 基线只用该基线重新派生的 P2/P3。 |
+| 6d 迁移环境 | 再跑 `03`，用 `-Keys 'MIGRATION_EXCLUDE,MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL,ALLOW_DB_RESET'` | 三个键所有列都 absent，三个 verdict 都 off，且完整。 |
+| 6e P7 | `sql\p7-admin-census.sql` | 记录权限形态变化的人数与完成状态。人数非零让 owner 先看。 |
+| 6f 运行计数 | 切包填入 R12 计数脚本（T-01） | 记录多活动拉取源的组织数、已有回写日期的单元格数；附件缺失写未取得。 |
+| 6g 拉取基线 | `http\h31-pull-dry-run.ps1`，按已批准项目序号记录响应和 T-02 计划计数 | 默认跳过。须单批真实 PLM 只读及令牌预算。记录序号、HTTP 码、状态和计数。 |
+| 6h P5 | `sql\p5-switch-off-row-counts.sql` | 记录完成状态、计数和 `all_zero`。缺权限或缺结果记未取得。 |
+
+7–11. 用 `s07-stock-prep-pre-counts.sql`、`01-interval-editor-rules-count.sql` 和已签收基线清单记录装前备料、平台及定时规则计数。记录专用测试表。用 `.\ps\09-scheduled-task-read.ps1 -InstallRoot $installRoot` 核到批准的脚本版本和定时任务参数形态，记录最近一次定时结果及失败数；目标错、状态异常或出现未批准的活动任务就停。任何启动批次标识的独立窗口还要先核 `is=package2`。
+12. 由现场和协调者勾选 0–11 步全部阻断项通过、D21 隔离和等待时限获批、工具与基线匹配。任何阻断项证据缺失时停在装前。
+
+## 二、下载、备份和暂停
+
+13–16. 从本次批准的发布记录下载 P3 和已批准回退的旧版 ZIP 与各自的 bootstrap sidecar（BAT 和 PS1）。用 `Get-FileHash -Algorithm SHA256 -LiteralPath $archive` 等方式逐项对照；在现场回报只写相符与否。检查包内提交、前后端构件、三插件、待迁移名单和 `scripts\ops\web-dist-retain-assets.mjs`。核对装后操作文件及旧版本定时脚本已备齐。基线为 R84 且需要补列时，单列两份辅助脚本的来源和哈希。
+17–18. 做完整数据库备份并验证可还原，备份安装树和两份 `app.env`。用 `.pre-p3` 记录现场副本，记录定时脚本的旧版本和哈希。只抄备份、验读和校验结果。任何一项失败就停。
+19. 暂停每日定时拉取，核 `09` 状态，并按获批的 D21 方式隔离。重跑 P2 和第 0、2–3、6d 步；复查本窗口迁移环境。
+```powershell
+"MIGENV exclude=$(Test-Path Env:MIGRATION_EXCLUDE) include_legacy=$(Test-Path Env:MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL) reset=$(Test-Path Env:ALLOW_DB_RESET)"
+```
+只接受三个 `False`。第 11 项、5 列环境、数据库比对与 P2 均重新过关后才执行第 20 步。
+
+## 三、装包和失败分流
+
+20. 在同一窗口将批准的新版包覆盖到已验签安装根目录。
+```powershell
+& $p3BootstrapBat $p3Archive $installRoot 1 1
+$LASTEXITCODE
+```
+记退出码。进程已退出时先跑 `s06` 与 `h01`，再按表分流。记日志是否出现固定标记、迁移文件名及 SQLSTATE；原始错误文本留现场。
+
+| 状态 | 本次结果 | 处置 |
+|---|---|---|
+| A | 退出 0，账本为 total 且 `h01` 确认为 P3 | 继续第 21 步。 |
+| B | 健康检查失败，账本为 total，构建可能是 P3、旧版或暂不可读 | 保持暂停，交 owner 判定修复或回退。 |
+| C | 迁移失败，账本为 baseline，`h01` 显示旧构建或暂不可读 | 盘上可能保留 P3 文件，旧进程也可能仍在内存中。报告账本、健康和 `02`，等待 owner 定覆盖回退或修复。现场保持现状，禁止重启、重复装包和调用 `migrate.js`。 |
+| D | 账本为 baseline，`h01` 显示新构建 | 新构建可能在旧库运行。保持隔离，按 C 采集并立即报告。 |
+| E | 仍运行且超过批准的最长等待 | 保持窗口，暂停其它动作，联系 owner。 |
+| F | 账本为 total，健康仍指旧构建或新版服务未上 | 保持暂停，交 owner 按本次结果处理。在 D21 已落库时执行第十一节的写入隔离。 |
+
+基线和总账本以外的任何结果、两项证据互相矛盾或包内提交不符，一律保持暂停并报告。迁移日志里的逐项成功行需与最终账本核对。
+21–22. 核对 `02`、`03` 与开关闸门，再关闭装前打开的浏览器标签页并重开，Ctrl+F5。记录实际部署路径的缓存处理结果。
+
+## 四、装后核对
+
+23–27. `s06` 应给出 `applied_t={{MIGRATIONS_NEW}} applied_f=0`、`MIG_COUNT kysely_migration={{MIGRATIONS_TOTAL}}`、`MIG_NAMESET ledger=total`，最后有完成行。清单最新迁移为 `{{LAST_MIGRATION}}`。核 `h01` 200、构建 P3、应有插件和健康端点，依次跑 `s25-grants.sql`、`s26-post-counts.sql`、`s27-platform-counts.sql` 和 P5。权限异常、备料或平台计数与基线不一致、预期触发器缺失时暂停并报告；P5 单独记录。核签过程中继续保持任务暂停。
+
+## 五、备料表
+
+28–32. 已签收 R85 基线沿用既有列和绑定。R84 基线的补列先以批准的旧单第五节核对步骤和附件，核对脚本哈希、备份并按单批写入范围操作。重新导出绑定及重启后执行 `h30-env-binding-check.ps1`（`explicit_422=false`），再用 `h31-options-sync.ps1` 核对补列、复跑无新增、部署表缺列数归零。每次实写的目标与输出只记计数。无授权、令牌失效、绑定为空或工具缺失时记录原因并交协调者。第 31.3 步的真实 PLM dry-run 也须单独批准，默认跳过。
+
+## 六、定时试拉
+
+33. 先核 23–32 步中本次必做项通过、最新 `02`/`03` 和健康检查全过。核切包记录里 R85/P3 的定时脚本哈希；核验、备份并切换到批准版，核 `09` 的参数形态和脚本匹配。按本次批准恢复计划任务，核 `state=ready` 和下一次 06:00。任何条件缺失就保持暂停并报告。记录恢复时刻，等待定时运行。
+
+## 七、验收
+
+| 步骤 | 操作及预计结果 |
+|---|---|
+| 34 | 新会话、刷新与退出按测试租户冒烟，记录成功与否。 |
+| 35a–b | RBAC 管理员能开组织与权限、权限管理，具委派角色的帐号能看到管理范围。只有历史管理员标志的帐号权限以新规则为准。浏览器强刷后仍异常就报。 |
+| 35c–d | 授予再撤销仅在单批的合成帐号做，撤销后列表恢复。只读查看仅本部门禁用提示和范围标签。 |
+| 36 | `h36-off-routes.ps1` 核关闭路径；无另批时保持发送、连接测试、试点关闭。 |
+| 37.1–5 | `h37-project-readonly.ps1` 核测试项目的只读入口与关闭状态。父组件候选、修改、移出、改图号或删除前的依赖数提示依父组件验收表，只用获批的合成测试资料。 |
+| 37.6 | 单批后才同步 dry-run。对比第 6g 步同一项目的 HTTP 200、状态和 T-02 计数。默认跳过。 |
+| 37.7 | 单批后才在一个项目执行切包提供的 T-02 后台 dry-run（入队会写作业状态）。HTTP 202 后轮询到结束，与同一项目的同步计划计数对照。默认跳过。 |
+| 37.8 | P3 写入试验只在获批的合成项目做 dry-run → apply → dry-run，第二次应无待写。 |
+| 37.9 | 第 6f 步已有回写日期的单元格数非零，记录第一次拉取可能新增的批次。 |
+| 38 | 在获批的测试表核日期、数字和字段保存。抽屉连续改两格，刷新两次均保留；保存未完成立即跳转，出现离开确认时取消。 |
+| 39–40 | 冒烟自动化、审批、考勤、通讯录页面。目录只读预览另批，记录固定结果码。多活动拉取源的组织按 6f 提醒管理员路由策略的清空限制。 |
+| 41 | 本窗口排除包里的通用部署后冒烟脚本。 |
+
+## 八、开关与令牌清理
+
+42–44. 重跑 `02`、`03`，与第 3、4 步逐列对照并记录有授权的变更；必须保留第 11 项单列复核。记录任务状态、关闭的写回和未执行的试点。结束或提前停止时按本次令牌流程清理临时文件，只记录 `Test-Path` 返回 `False`。
+
+## 九、次日定时验收
+
+45–46. 检查第一次实际 06:00 运行（`09` 的 `last_result`、时点和汇总），对比项目数、`failed` 与基线，记录新增 401/422 及后端错误行数；`h01` 仍为 P3。确认通讯录的自动同步与连接测试状态。任务未启用、没有运行或没有记录时，签收等到真实运行核对完成。
+
+## 十、回报与签收
+
+逐步写通过、阻断或跳过及原因，另附 QA 单、源提交和构件核对结果、第 3 步第 11 项及第 19 步的复核、迁移分流、回退前后 `s06`（如适用）、令牌清理、首次定时及签收决定。回报只放结果码、状态和计数，连接与业务值留在现场。全部必做项有证据且 owner 签收后更新登记。
+
+## 十一、回退
+
+47–49. 保持拉取暂停。获 owner 批准并确定目标后，严格按同目录的 [P3 回退操作](stock-preparation-p3-rollback.md) 执行。两条路径都需要 P4 通过、批次标识台账全零、旧包和启动器校验、迁移参数 0、覆盖前后账本一致和旧端构建确认。R84 还需沿用 R85 第十一节的所有旧构建门槛。如果旧版运行在 D21 已应用的数据库，保持多用户角色写入隔离，按回退手册核状态并报 owner。
