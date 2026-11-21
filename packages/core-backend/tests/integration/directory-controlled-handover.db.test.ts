@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { describe, expect, it, vi } from 'vitest'
+import { afterAll, describe, expect, it, vi } from 'vitest'
 
 const provider = vi.hoisted(() => ({
   token: vi.fn(),
@@ -33,6 +33,20 @@ if (process.env.EXPECT_DB === '1')
     expect(process.env.DATABASE_URL).toBeTruthy())
 const q = (sql: string, args?: unknown[]) => query(sql, args)
 
+// The fixtures live in the shared 'default' organisation, and a handover journal keeps its two
+// integration rows from being deleted. Left active, they stay pull sources of 'default' for every
+// file that runs after this one against the same database: the routing-policy routes, for one,
+// refuse to clear a policy while the organisation has two or more. Vitest orders files by size, so
+// which files those are changes whenever this file grows. They are switched off when it is done.
+const fixtureIntegrationIds: string[] = []
+afterAll(async () => {
+  if (!process.env.DATABASE_URL || fixtureIntegrationIds.length === 0) return
+  await q(
+    "UPDATE directory_integrations SET status='inactive' WHERE id = ANY($1::uuid[])",
+    [fixtureIntegrationIds],
+  )
+})
+
 async function fixture() {
   const tag = `handover_${randomUUID()}`
   const admin = `${tag}_admin`,
@@ -40,6 +54,7 @@ async function fixture() {
   const source = randomUUID(),
     target = randomUUID(),
     corp = `corp_${tag}`
+  fixtureIntegrationIds.push(source, target)
   for (const id of [admin, ...users])
     await q(
       `INSERT INTO users(id,username,name,password_hash,is_active,is_admin) VALUES($1,$1,$1,'synthetic-only',true,$2)`,
