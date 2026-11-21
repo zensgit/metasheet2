@@ -511,10 +511,10 @@
                 placeholder="搜索模板"
                 @keyup.enter="void loadTemplates()"
               />
-              <button class="delegation-page__button delegation-page__button--secondary" type="button" :disabled="scopeBusy" @click="void loadTemplates()">
+              <button class="delegation-page__button delegation-page__button--secondary" type="button" :disabled="scopeBusy" @click="void loadTemplates(true)">
                 查询模板
               </button>
-              <select v-model="selectedTemplateId" class="delegation-page__input" @change="void selectTemplate(selectedTemplateId)">
+              <select v-model="selectedTemplateId" class="delegation-page__input" :disabled="scopeBusy" @change="void selectTemplate(selectedTemplateId)">
                 <option value="">请选择模板</option>
                 <option v-for="template in templates" :key="template.id" :value="template.id">
                   {{ template.name }} ({{ template.departmentCount }})
@@ -523,12 +523,13 @@
               <button
                 class="delegation-page__button"
                 type="button"
-                :disabled="scopeBusy || !memberWritesReady || !selectedTemplateId || !selectedScopeNamespace || !selectedScopeConfig?.adminNamespaces.length || exactDepartmentApplyBlocked"
+                :disabled="scopeBusy || !memberWritesReady || !selectedTemplateScopeVersion || !selectedScopeNamespace || !selectedScopeConfig?.adminNamespaces.length || exactDepartmentApplyBlocked"
                 @click="void applyTemplate()"
               >
                 覆盖应用到当前命名空间
               </button>
             </div>
+            <p v-if="selectedTemplate && !selectedTemplateScopeVersion" class="delegation-page__hint">未读取到模板版本。请重新查询模板后再应用。</p>
             <p v-if="exactDepartmentApplyBlocked" class="delegation-page__hint" data-testid="exact-department-apply-unavailable">{{ exactDepartmentApplyUnavailableText }}</p>
 
             <template v-if="selectedTemplate">
@@ -816,6 +817,7 @@ type ScopeTemplateSummary = {
 }
 
 type ScopeTemplateDetail = ScopeTemplateSummary & {
+  scopeVersion?: string
   departments: DepartmentCatalogItem[]
   memberGroups: MemberGroupSummary[]
 }
@@ -923,6 +925,11 @@ let activationFlight: ScopeActivationAttempt | null = null
 let activationReturnFocus: HTMLElement | null = null
 let activationReadSerial = 0
 const selectedTemplate = ref<ScopeTemplateDetail | null>(null)
+const selectedTemplateScopeVersion = computed(() => {
+  const item = selectedTemplate.value
+  if (!item || item.id !== selectedTemplateId.value) return null
+  return typeof item.scopeVersion === 'string' && /^[a-f0-9]{64}$/.test(item.scopeVersion) ? item.scopeVersion : null
+})
 const selectedMemberGroup = ref<MemberGroupDetail | null>(null)
 
 const hasSelectedMemberGroup = computed(() => (
@@ -1375,7 +1382,7 @@ async function createMemberGroup(): Promise<void> {
   }
 }
 
-async function loadTemplates(): Promise<void> {
+async function loadTemplates(refreshSelected = false): Promise<void> {
   if (!summary.value?.isPlatformAdmin) return
   scopeBusy.value = true
   try {
@@ -1395,9 +1402,8 @@ async function loadTemplates(): Promise<void> {
       selectedTemplateDepartmentId.value = ''
       selectedTemplateMemberGroupId.value = ''
     }
-    if (!selectedTemplateId.value && templates.value.length > 0) {
-      await selectTemplate(templates.value[0].id)
-    }
+    const templateToLoad = selectedTemplateId.value || templates.value[0]?.id
+    if (templateToLoad && (refreshSelected || !selectedTemplate.value)) await selectTemplate(templateToLoad)
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '加载范围模板失败', 'error')
   } finally {
@@ -1410,16 +1416,16 @@ async function selectTemplate(templateId: string): Promise<void> {
   selectedTemplateId.value = templateId
   selectedTemplateDepartmentId.value = ''
   selectedTemplateMemberGroupId.value = ''
-  if (!templateId) {
-    selectedTemplate.value = null
-    return
-  }
+  selectedTemplate.value = null
+  if (!templateId) return
   const response = await apiFetch(`/api/admin/role-delegation/scope-templates/${encodeURIComponent(templateId)}`)
   const payload = await readJson(response)
   if (!response.ok || payload.ok !== true) {
     throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载范围模板详情失败'))
   }
-  selectedTemplate.value = (payload.data as { item: ScopeTemplateDetail }).item
+  if (selectedTemplateId.value === templateId) {
+    selectedTemplate.value = (payload.data as { item: ScopeTemplateDetail }).item
+  }
 }
 
 async function createTemplate(): Promise<void> {
@@ -2652,7 +2658,10 @@ async function updateUserMemberGroup(action: 'assign' | 'unassign', userIdOverri
 async function applyTemplate(): Promise<void> {
   const targetUserId = selectedUserId.value
   const generation = delegationAccessGeneration
-  if (!summary.value?.isPlatformAdmin || !targetUserId || !memberWritesReady.value || !selectedScopeNamespace.value || !selectedTemplateId.value) return
+  const templateId = selectedTemplateId.value
+  const expectedScopeVersion = selectedTemplateScopeVersion.value
+  if (scopeBusy.value || !summary.value?.isPlatformAdmin || !targetUserId || !memberWritesReady.value
+    || !selectedScopeNamespace.value || !expectedScopeVersion) return
   if (!exactDepartmentWritesEnabled.value && templateContainsExactDepartment(selectedTemplate.value)) {
     setStatus(exactDepartmentApplyUnavailableText, 'error')
     return
@@ -2663,7 +2672,8 @@ async function applyTemplate(): Promise<void> {
       method: 'POST',
       body: JSON.stringify({
         namespace: selectedScopeNamespace.value,
-        templateId: selectedTemplateId.value,
+        templateId,
+        expectedScopeVersion,
         mode: 'replace',
       }),
     })
@@ -2673,6 +2683,11 @@ async function applyTemplate(): Promise<void> {
       throw new Error(exactDepartmentApplyUnavailableText)
     }
     if (!delegationReadStillCurrent(generation, targetUserId)) return
+    if (response.status === 409 && (payload.error as { code?: unknown } | undefined)?.code === 'ROLE_DELEGATION_SCOPE_TEMPLATE_CHANGED') {
+      if (selectedTemplateId.value === templateId) selectedTemplate.value = null
+      setStatus('范围模板已变更。请点「查询模板」，核对最新内容后再应用。', 'error')
+      return
+    }
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '应用范围模板失败'))
     }

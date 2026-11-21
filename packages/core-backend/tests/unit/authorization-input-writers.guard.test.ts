@@ -2095,7 +2095,7 @@ const DELEGATED_SCOPE_CALLERS = [
 const DELEGATED_SCOPE_REQUEST_KEYS: Readonly<Record<string, readonly string[]>> = {
   writeDelegatedAdminScopeCommand: ['action', 'actorId', 'directoryDepartmentId', 'includeChildrenIntent', 'namespace', 'userId'],
   writeDelegatedAdminMemberGroupsCommand: ['action', 'actorId', 'groupId', 'namespace', 'userId'],
-  applyDelegatedScopeTemplateCommand: ['actorId', 'mode', 'namespace', 'templateId', 'userId'],
+  applyDelegatedScopeTemplateCommand: ['actorId', 'expectedScopeVersion', 'mode', 'namespace', 'templateId', 'userId'],
 }
 
 function delegatedScopeCallerProblems(file: string, source: string): string[] {

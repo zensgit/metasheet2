@@ -538,13 +538,14 @@ describe('permission UX admin through production routes and real PostgreSQL', ()
 
   it('direct department scope defaults true, persists false, excludes descendants, and rejects malformed booleans', async () => {
     const a = await audience()
+    expectStatus(await assignScope(a.actorId, a.directory.parentId), 200)
+    expect((await allowedIds(a.actorId)).sort()).toEqual([a.parentUserId, a.childUserId].sort())
     await withExactDepartmentEnabled(async () => {
       expectStatus(await assignScope(a.actorId, a.directory.parentId, false), 200)
       expect(await allowedIds(a.actorId)).toEqual([a.parentUserId])
       await expectDeniedTarget(a.actorId, a.childUserId)
-      // Omitted includeChildren widens a stored false only while the flag is on.
-      expectStatus(await assignScope(a.actorId, a.directory.parentId), 200)
     })
+    expectStatus(await assignScope(a.actorId, a.directory.parentId, true), 200)
     expect((await allowedIds(a.actorId)).sort()).toEqual([a.parentUserId, a.childUserId].sort())
     for (const includeChildren of [null, 'false', 0, {}]) {
       expectStatus(await assignScope(a.actorId, a.directory.parentId, includeChildren), 400)
@@ -830,6 +831,36 @@ describe('permission UX admin through production routes and real PostgreSQL', ()
     })))
   })
 
+  it('preserves an exact live scope and template department on omitted writes while the flag is on', async () => {
+    const a = await audience()
+    const templateId = await createTemplateShell()
+    const departmentId = a.directory.parentId
+    const templateDepartments = `/api/admin/role-delegation/scope-templates/${templateId}/departments/assign`
+
+    await withExactDepartmentFlag('true', async () => {
+      expectStatus(await assignScope(a.actorId, departmentId, false), 200)
+      expectStatus(await post(platformId, templateDepartments, { directoryDepartmentId: departmentId, includeChildren: false }), 200)
+
+      expectStatus(await assignScope(a.actorId, departmentId), 200)
+      expect(await scopeBits(a.actorId)).toEqual([{
+        namespace: 'stock-prep',
+        directory_department_id: departmentId,
+        include_children: false,
+      }])
+      await expectDeniedTarget(a.actorId, a.childUserId)
+
+      expectStatus(await post(platformId, templateDepartments, { directoryDepartmentId: departmentId }), 200)
+      expect(await templateDepartmentBits(templateId)).toEqual([{ directory_department_id: departmentId, include_children: false }])
+      expectStatus(await post(platformId, `/api/admin/role-delegation/users/${a.actorId}/scope-templates/apply`, {
+        namespace: 'stock-prep',
+        templateId,
+        mode: 'replace',
+      }), 200)
+      expect(await allowedIds(a.actorId)).toEqual([a.parentUserId])
+      await expectDeniedTarget(a.actorId, a.childUserId)
+    })
+  })
+
   it('keeps a stored false exact after the flag is off, preserves an omitted write, and still allows true and unassign', async () => {
     const a = await audience()
     await query(
@@ -981,6 +1012,57 @@ describe('permission UX admin through production routes and real PostgreSQL', ()
     } finally {
       if (previousExact === undefined) delete process.env[EXACT_DEPARTMENT_FLAG]
       else process.env[EXACT_DEPARTMENT_FLAG] = previousExact
+      await blocker.query('ROLLBACK')
+      if (pending) await pending
+      await blocker.end()
+    }
+  })
+
+  it.each(['replace', 'merge'])('refuses %s with a stale scope version after a queued template edit', async mode => {
+    const a = await audience()
+    const templateId = await template(a.directory.parentId)
+    const templatePath = `/api/admin/role-delegation/scope-templates/${templateId}`
+    const applyPath = `/api/admin/role-delegation/users/${a.actorId}/scope-templates/apply`
+    expectStatus(await assignScope(a.actorId, a.directory.outsideId), 200)
+    const before = await scopeBits(a.actorId)
+    const readVersion = async () => {
+      const detail = await get(platformId, templatePath)
+      expectStatus(detail, 200)
+      return payload<{ item: { scopeVersion: string } }>(detail).item.scopeVersion
+    }
+    const expectedScopeVersion = await readVersion()
+    expect(expectedScopeVersion).toMatch(/^[a-f0-9]{64}$/)
+    const body = { namespace: 'stock-prep', templateId, mode, expectedScopeVersion }
+    expectStatus(await post(platformId, applyPath, { ...body, expectedScopeVersion: null }), 400)
+
+    const blocker = new Client({ connectionString: process.env.DATABASE_URL })
+    let pending: Promise<Response> | undefined
+    await blocker.connect()
+    await blocker.query('BEGIN')
+    try {
+      const pid = (await blocker.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid
+      await blocker.query('SELECT id FROM delegated_role_scope_templates WHERE id = $1 FOR UPDATE', [templateId])
+      await blocker.query(
+        'UPDATE delegated_role_scope_template_departments SET include_children = FALSE WHERE template_id = $1 AND directory_department_id = $2',
+        [templateId, a.directory.parentId],
+      )
+      await withExactDepartmentFlag('true', async () => {
+        pending = Promise.resolve(post(platformId, applyPath, body))
+        await waitUntilBlocked(pid)
+        await blocker.query('COMMIT')
+        const stale = await pending
+        expectStatus(stale, 409)
+        expect(stale.body.error.code).toBe('ROLE_DELEGATION_SCOPE_TEMPLATE_CHANGED')
+        expect(await scopeBits(a.actorId)).toEqual(before)
+
+        const freshVersion = await readVersion()
+        expect(freshVersion).not.toBe(expectedScopeVersion)
+        expectStatus(await post(platformId, applyPath, { ...body, expectedScopeVersion: freshVersion }), 200)
+        const expectedUsers = mode === 'merge' ? [a.parentUserId, a.outsideUserId] : [a.parentUserId]
+        expect((await allowedIds(a.actorId)).sort()).toEqual(expectedUsers.sort())
+        await expectDeniedTarget(a.actorId, a.childUserId)
+      })
+    } finally {
       await blocker.query('ROLLBACK')
       if (pending) await pending
       await blocker.end()

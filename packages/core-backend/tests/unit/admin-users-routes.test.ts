@@ -6787,7 +6787,8 @@ describe('admin-users routes', () => {
     }
   })
 
-  it('preserves a stored exact department when an omitted assign runs with the flag off', async () => {
+  it.each(['false', 'true'])('preserves a stored exact department on both omitted assigns with flag %s', async (flag) => {
+    vi.stubEnv('DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED', flag)
     mockDelegatedScopeReads({ storedScope: false, templateDepartment: false })
 
     const direct = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/scopes/:action(assign|unassign)', {
@@ -6823,24 +6824,13 @@ describe('admin-users routes', () => {
     }))
   })
 
-  it('keeps omitted assigns true when nothing exact is stored, and widens a stored exact row only while the flag is on', async () => {
+  it('keeps omitted assigns true when nothing exact is stored', async () => {
     mockDelegatedScopeReads()
     const created = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/scopes/:action(assign|unassign)', {
       params: { userId: 'user-2', action: 'assign' },
       body: { namespace: 'crm', directoryDepartmentId: 'dept-1' },
     })
     expect(created.statusCode, JSON.stringify(created.body)).toBe(200)
-    expect(pgMocks.query.mock.calls.find((call) => String(call[0]).includes('INSERT INTO delegated_role_admin_scopes'))?.[1]).toEqual([
-      'user-2', 'crm', 'dept-1', true, 'admin-1',
-    ])
-
-    vi.stubEnv('DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED', 'true')
-    mockDelegatedScopeReads({ storedScope: false })
-    const widened = await invokeRoute('post', '/api/admin/role-delegation/users/:userId/scopes/:action(assign|unassign)', {
-      params: { userId: 'user-2', action: 'assign' },
-      body: { namespace: 'crm', directoryDepartmentId: 'dept-1' },
-    })
-    expect(widened.statusCode, JSON.stringify(widened.body)).toBe(200)
     expect(pgMocks.query.mock.calls.find((call) => String(call[0]).includes('INSERT INTO delegated_role_admin_scopes'))?.[1]).toEqual([
       'user-2', 'crm', 'dept-1', true, 'admin-1',
     ])
