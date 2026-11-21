@@ -4,25 +4,23 @@
  * file naming a table makes the test fail until the set is changed on purpose.
  */
 import { describe, expect, it } from 'vitest'
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
   NON_LITERAL_SPECIFIER,
-  collectImportEdges,
   importEdgeViolations,
   importSpecifiers,
   listAllFiles,
   type ImportEdge,
 } from '../helpers/import-edge-allowlist'
 
+import { BACKGROUND_IMPORT_EDGES, BACKGROUND_MODULE, CAPABILITY_MODULE, collectCapabilityImportEdges } from '../helpers/capability-import-boundary'
+
 const BACKEND = path.resolve(__dirname, '..', '..')
 const ROOT = path.resolve(BACKEND, '..', '..')
 const SRC = path.join(BACKEND, 'src')
 const BACKEND_SCRIPTS = path.join(BACKEND, 'scripts')
-
-/** A module specifier that loads one of the capability modules (any directory prefix, with or without a .js/.ts suffix). */
-const CAPABILITY_MODULE =
-  /(?:directory-integration-capabilities-flag|provider-capability-registry|integration-capability-implementations|integration-capability-evaluate|integration-capability-resolve|directory-integration-capabilities-service|directory-integration-capabilities-write-service|admin-directory-capabilities)(?:\.[cm]?[jt]s)?$/
 
 const SRC_ALLOWLIST: ReadonlyArray<ImportEdge> = [
   ['integrations/integration-capability-evaluate.ts', './provider-capability-registry'],
@@ -39,10 +37,16 @@ const SRC_ALLOWLIST: ReadonlyArray<ImportEdge> = [
   // The consumer resolver reads the switch, the production registry and implementation table, and the
   // pure evaluator and table probe of the display module. The authenticated notification sender is
   // its first consumer; its exact wiring edge is listed below.
-  ['integrations/integration-capability-resolve.ts', './directory-integration-capabilities-flag'],
-  ['integrations/integration-capability-resolve.ts', './integration-capability-evaluate'],
-  ['integrations/integration-capability-resolve.ts', './integration-capability-implementations'],
+  ['integrations/integration-capability-resolve-core.ts', './directory-integration-capabilities-flag'],
+  ['integrations/integration-capability-resolve-core.ts', './integration-capability-evaluate'],
+  ['integrations/integration-capability-resolve-core.ts', './integration-capability-implementations'],
   ['integrations/integration-capability-resolve.ts', './provider-capability-registry'],
+  ['integrations/integration-capability-resolve.ts', './integration-capability-resolve-core'],
+  ['integrations/integration-capability-resolve.ts', './integration-capability-witness'],
+  ['integrations/integration-capability-resolve-background.ts', './integration-capability-resolve-core'],
+  ['integrations/integration-capability-resolve-core.ts', './provider-capability-registry'],
+  ['integrations/integration-capability-resolve-core.ts', './integration-capability-witness'],
+  ['integrations/integration-capability-witness.ts', './provider-capability-registry'],
   ['routes/admin-directory-capabilities.ts', '../integrations/directory-integration-capabilities-flag'],
   ['routes/admin-directory-capabilities.ts', '../integrations/directory-integration-capabilities-service'],
   ['routes/admin-directory-capabilities.ts', '../integrations/integration-capability-implementations'],
@@ -78,16 +82,12 @@ function filesBelow(dir: string): string[] {
 
 describe('importers of the capability modules', () => {
   it('are exactly the allowlist under src', () => {
-    const found = collectImportEdges(SRC, /integration-capabilit|provider-capability-registry|admin-directory-capabilities/, read).filter(
-      ([, specifier]) => specifier === NON_LITERAL_SPECIFIER || CAPABILITY_MODULE.test(specifier),
-    )
+    const found = collectCapabilityImportEdges(SRC)
     expect(importEdgeViolations(found, SRC_ALLOWLIST)).toEqual([])
   })
 
   it('include no importer in the backend scripts', () => {
-    const found = collectImportEdges(BACKEND_SCRIPTS, /integration-capabilit|provider-capability-registry|admin-directory-capabilities/, read).filter(
-      ([, specifier]) => specifier === NON_LITERAL_SPECIFIER || CAPABILITY_MODULE.test(specifier),
-    )
+    const found = collectCapabilityImportEdges(BACKEND_SCRIPTS)
     expect(found).toEqual([])
   })
 
@@ -126,7 +126,7 @@ describe('importers of the capability modules', () => {
   })
 
   it('give the consumer resolver only the authenticated notification wiring importer, and recognise its loads', () => {
-    expect(SRC_ALLOWLIST.filter(([, specifier]) => /integration-capability-resolve/.test(specifier))).toEqual([
+    expect(SRC_ALLOWLIST.filter(([, specifier]) => /(?:^|\/)integration-capability-resolve(?:\.[cm]?[jt]s)?$/.test(specifier))).toEqual([
       ['routes/me-notification-wiring.ts', '../integrations/integration-capability-resolve'],
     ])
     for (const spelling of [
@@ -136,6 +136,41 @@ describe('importers of the capability modules', () => {
     ]) {
       expect(importSpecifiers(spelling).some((specifier) => CAPABILITY_MODULE.test(specifier)), spelling).toBe(true)
     }
+  })
+
+  it('registers the same existing background imports as the notification boundary', () => {
+    expect(SRC_ALLOWLIST.filter(([, specifier]) => BACKGROUND_MODULE.test(specifier))).toEqual(BACKGROUND_IMPORT_EDGES)
+  })
+
+  it('runs every new spelling through the real collector in a temporary source mirror', () => {
+    const mirror = mkdtempSync(path.join(tmpdir(), 'capability-imports-'))
+    const modules = ['integration-capability-resolve-background', 'integration-capability-resolve-core', 'integration-capability-witness']
+    const spellings = (name: string): string[] => [
+      `import { value } from '../integrations/${name}'`,
+      `export { value } from '../integrations/${name}.js'`,
+      `export * from '../integrations/${name}.ts'`,
+      `const value = require('../integrations/${name}.cjs')`,
+      `const value = import('../integrations/${name}.mjs')`,
+      'const value = import(`../integrations/' + name + '`)',
+      `import type { Value } from '../integrations/${name}'`,
+      `import { type Value } from '../integrations/${name}'`,
+      `type Value = import('../integrations/${name}').Value`,
+    ]
+    try {
+      mkdirSync(path.join(mirror, 'routes'))
+      mkdirSync(path.join(mirror, 'integrations'))
+      for (const name of modules) for (const source of spellings(name)) {
+        writeFileSync(path.join(mirror, 'routes/request.ts'), source)
+        const found = collectCapabilityImportEdges(mirror)
+        expect(found, source).toHaveLength(1)
+        expect(importEdgeViolations(found, []), source).toHaveLength(1)
+      }
+      rmSync(path.join(mirror, 'routes/request.ts'))
+      writeFileSync(path.join(mirror, 'integrations/integration-capability-resolve.ts'), "export { shape } from './integration-capability-witness'")
+      expect(importEdgeViolations(collectCapabilityImportEdges(mirror), [
+        ['integrations/integration-capability-resolve.ts', './integration-capability-witness'],
+      ])).toEqual([])
+    } finally { rmSync(mirror, { recursive: true, force: true }) }
   })
 
   it('treat a second load of the same module from an allowed file as a violation', () => {
@@ -159,7 +194,7 @@ describe('source files that name a capability table', () => {
     'packages/core-backend/src/db/migrations/zzzz20261117183000_admin_grant_receiving_invalidation.ts',
     'packages/core-backend/src/integrations/directory-integration-capabilities-write-service.ts',
     'packages/core-backend/src/integrations/integration-capability-evaluate.ts',
-    'packages/core-backend/src/integrations/integration-capability-resolve.ts',
+    'packages/core-backend/src/integrations/integration-capability-resolve-core.ts',
   ]
 
   it('are exactly the audited readers, the one writer, the two migrations, and the runner help text', () => {
