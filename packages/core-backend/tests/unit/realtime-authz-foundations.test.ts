@@ -35,6 +35,9 @@ import {
   type SessionClassifier,
 } from '../../src/realtime-authz/session-binding'
 import { adminRealtimeDiagnosticsRouter } from '../../src/routes/admin-realtime-diagnostics'
+import { usePinnedServer } from '../utils/pinned-server'
+
+const pinned = usePinnedServer()
 
 const classify: SessionClassifier = (payload) => {
   const claims = payload as Record<string, unknown>
@@ -593,16 +596,19 @@ describe('administrator diagnostics', () => {
   }
 
   it('refuses an unauthenticated caller and a caller without administrator access before anything is read', async () => {
-    const anonymous = await request(appWith(null, false)).get('/api/admin/realtime/diagnostics')
+    pinned.setApp(appWith(null, false))
+    const anonymous = await request(pinned.url()).get('/api/admin/realtime/diagnostics')
     expect(anonymous.status).toBe(401)
     expect(JSON.stringify(anonymous.body)).not.toMatch(/CREDENTIAL_CHAIN|notices|admission/)
-    const member = await request(appWith({ id: 'u1' }, false)).get('/api/admin/realtime/diagnostics')
+    pinned.setApp(appWith({ id: 'u1' }, false))
+    const member = await request(pinned.url()).get('/api/admin/realtime/diagnostics')
     expect(member.status).toBe(403)
     expect(JSON.stringify(member.body)).not.toMatch(/CREDENTIAL_CHAIN|notices|admission/)
   })
 
   it('shows the decision and notices to an administrator', async () => {
-    const response = await request(appWith({ id: 'admin-1' }, true)).get('/api/admin/realtime/diagnostics')
+    pinned.setApp(appWith({ id: 'admin-1' }, true))
+    const response = await request(pinned.url()).get('/api/admin/realtime/diagnostics')
     expect(response.status).toBe(200)
     expect(response.body.ok).toBe(true)
     expect(response.body.data.admission.row).toBe('off-baseline')
@@ -612,7 +618,8 @@ describe('administrator diagnostics', () => {
   it('the default gate refuses a request that carries no authenticated user', async () => {
     const app = express()
     app.use('/api/admin/realtime', adminRealtimeDiagnosticsRouter())
-    const response = await request(app).get('/api/admin/realtime/diagnostics')
+    pinned.setApp(app)
+    const response = await request(pinned.url()).get('/api/admin/realtime/diagnostics')
     expect(response.status).toBe(401)
     expect(response.body).toEqual({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
   })

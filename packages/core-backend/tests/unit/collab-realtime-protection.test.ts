@@ -490,6 +490,8 @@ describe('switch on: pushes addressed to a user and the plugin bridge pass the s
 
     s.harness.facts.revokedUsers.add('revoked')
     await s.collab.join('plugin:room', { userId: 'revoked' })
+    // The join itself is refused: the room holds the one connection whose session is current.
+    expect(s.collab.getIO()?.sockets.adapter.rooms.get('plugin:room')?.size).toBe(1)
     s.collab.broadcast('all', { n: 1 })
     s.collab.broadcastTo('plugin:room', 'room', { n: 1 })
     await until(() => keptAll.length === 1 && keptRoom.length === 1)
@@ -541,15 +543,21 @@ describe('admission rows on a running instance', () => {
     await joinSheet(kept, 'sheet-1')
     await joinSheet(revokedMeanwhile, 'sheet-1')
     const keptOps = collect<{ data: { n: number } }>(kept, 'sheet:op')
+    const keptDirect = collect(kept, 'direct-while-suspended')
     const meanwhileOps = collect(revokedMeanwhile, 'sheet:op')
 
     s.harness.listener.set('not-ready')
     expect(s.harness.protection.decision()).toMatchObject({ row: 'undetermined', established: 'suspend' })
+    // Let the pass that follows the change of state finish: nothing it reads may make a
+    // connection serviceable while traffic is suspended.
+    await settle(40)
     await s.eventBus.emit('spreadsheet.cell.updated', { spreadsheetId: 'sheet-1', n: 1 })
+    s.collab.sendTo('kept', 'direct-while-suspended', { n: 1 })
     const refused = client(s, 'token:newcomer')
     expect(await once<SessionEndedPayload>(refused, SESSION_ENDED_EVENT)).toEqual({ code: 'REALTIME_UNAVAILABLE', retry: true })
     await settle()
     expect(keptOps).toEqual([])
+    expect(keptDirect).toEqual([])
     expect(kept.connected).toBe(true)
 
     // The session of one established connection ends while the listener is away: no notice arrives.
