@@ -12,6 +12,7 @@ import { HARD_DELETE_CONFIRM_TEXT } from '../../src/admin/user-batch-plan'
 import { countLivePlatformAdmins, isLastSignInPlatformAdmin, lockPlatformAdminInvariant } from '../../src/admin/user-recycle'
 import { PENDING_ACTIVATE_BYPASS_FORBIDDEN_CODE } from '../../src/auth/user-activation'
 import { query } from '../../src/db/pg'
+import { bumpSubjectAuthorizationVersions } from '../../src/multitable/authz-version-protocol'
 import { authenticate } from '../../src/middleware/auth'
 import { lockNamespaceAdmissionWrites } from '../../src/rbac/namespace-admission'
 import { isAdmin } from '../../src/rbac/service'
@@ -740,6 +741,18 @@ describe('phase A last-admin and legacy profile regressions', () => {
   })
 })
 
+/**
+ * D21 (Y5a): a blocker that stands in for a concurrent production writer and then writes an authority
+ * column (users.role / is_admin / activation_status, user_roles) follows the writer rule every production
+ * writer follows through the access-graph mutex: the subject authorization version row first, then the
+ * users row. A raw users-row holder would bump only through the trigger of its later write, after the users
+ * lock, and deadlock (40P01) with a route that already holds that version row and waits for the users row.
+ */
+async function lockUserRowAsCanonicalWriter(client: Client, userId: string): Promise<void> {
+  await bumpSubjectAuthorizationVersions(client, [userId])
+  await client.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [userId])
+}
+
 async function sessionPid(client: Client): Promise<number> {
   const result = await client.query<{ pid: number }>('SELECT pg_backend_pid()::int AS pid')
   return Number(result.rows[0].pid)
@@ -957,7 +970,7 @@ describe('phase B lifecycle, preview budget, and lock order', () => {
       ids.push(actorId, targetId)
       await blocker.connect()
       await blocker.query('BEGIN')
-      await blocker.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [targetId])
+      await lockUserRowAsCanonicalWriter(blocker, targetId)
       const blockerPid = await sessionPid(blocker)
       pending.push(Promise.resolve(
         request(app).post('/api/admin/users/batch/disable')
@@ -1040,7 +1053,7 @@ describe('phase B lifecycle, preview budget, and lock order', () => {
       auditResources.push(targetId)
       await blocker.connect()
       await blocker.query('BEGIN')
-      await blocker.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [targetId])
+      await lockUserRowAsCanonicalWriter(blocker, targetId)
       const blockerPid = await sessionPid(blocker)
       pending.push(Promise.resolve(
         request(app).post('/api/admin/users/batch/update')
@@ -1084,7 +1097,7 @@ describe('phase B lifecycle, preview budget, and lock order', () => {
       const before = await adminProfile(targetId)
       await blocker.connect()
       await blocker.query('BEGIN')
-      await blocker.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [actorId])
+      await lockUserRowAsCanonicalWriter(blocker, actorId)
       const blockerPid = await sessionPid(blocker)
       pending.push(assignAdmin('platform', actorId, targetId))
       await waitForBlockedBy(blockerPid, 1)
@@ -2347,7 +2360,7 @@ describe('locked actor authority on attendance role writes and user status', () 
         await query('INSERT INTO roles(id, name) VALUES ($1, $1) ON CONFLICT DO NOTHING', [roleId])
         await blocker.connect()
         await blocker.query('BEGIN')
-        await blocker.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [actorId])
+        await lockUserRowAsCanonicalWriter(blocker, actorId)
         const blockerPid = await sessionPid(blocker)
         pending.push(attendanceWrite(mode, 'assign', actorId, targetId, roleId))
         await waitForBlockedBy(blockerPid, 1)
@@ -2388,7 +2401,7 @@ describe('locked actor authority on attendance role writes and user status', () 
         )
         await blocker.connect()
         await blocker.query('BEGIN')
-        await blocker.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [actorId])
+        await lockUserRowAsCanonicalWriter(blocker, actorId)
         const blockerPid = await sessionPid(blocker)
         pending.push(attendanceWrite(mode, 'unassign', actorId, targetId, roleId))
         await waitForBlockedBy(blockerPid, 1)
@@ -2430,7 +2443,7 @@ describe('locked actor authority on attendance role writes and user status', () 
       ids.push(actorId, targetId)
       await blocker.connect()
       await blocker.query('BEGIN')
-      await blocker.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [actorId])
+      await lockUserRowAsCanonicalWriter(blocker, actorId)
       const blockerPid = await sessionPid(blocker)
       pending.push(Promise.resolve(
         request(app)

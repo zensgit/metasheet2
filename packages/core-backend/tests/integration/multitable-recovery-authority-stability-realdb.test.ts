@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { RECOVERY_AUTHORITY_TRIGGERS } from '../../src/db/migrations/zzzz20260721121000_add_recovery_authority_locks'
+import { bumpSubjectAuthorizationVersions } from '../../src/multitable/authz-version-protocol'
 import { acquireRecoveryAuthorityLease } from '../../src/multitable/recovery-authorization-stability'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -57,34 +58,32 @@ describeIfDatabase.sequential('exact-anchor recovery authority stability', () =>
     expect(new Set(initialTriggerStates)).toEqual(new Set(['D']))
   })
 
-  test('ordinary cross-subject permission writes remain compatible (shared/shared, no ABBA)', async () => {
+  test('ordinary cross-subject permission writes remain compatible with the recovery leases (shared/shared); under D21 each writer bumps both subject version rows in canonical order first, so opposite-order inserts serialize behind the first writer instead of ABBA', async () => {
     const internal = poolManager.get().getInternalPool()
     expect(internal).toBeTruthy()
     const first = await internal!.connect()
     const second = await internal!.connect()
+    const subjects = [USER_A, USER_B]
+    const insert = (client: { query: (sql: string, params: unknown[]) => Promise<unknown> }, userId: string, code: string) =>
+      client.query('INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,$2)', [userId, code])
     try {
       await first.query('BEGIN')
       await second.query('BEGIN')
-      await first.query(
-        'INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,$2)',
-        [USER_A, 'demo:read'],
-      )
-      await second.query(
-        'INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,$2)',
-        [USER_B, 'demo:read'],
-      )
-      await Promise.all([
-        first.query(
-          'INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,$2)',
-          [USER_B, 'demo:write'],
-        ),
-        second.query(
-          'INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,$2)',
-          [USER_A, 'demo:write'],
-        ),
-      ])
+      // D21 (Y5a, zzzz20261106110500): the canonical sorted bump is every protocol-following writer's
+      // first statement; the second writer's bump waits until the first commits, so the two writers
+      // never take the two subject version rows in two orders. (Two RAW writers that skip the bump
+      // and insert in opposite order now deadlock — one side 40P01 — authz-version-protocol.db.test.ts K-02.)
+      await bumpSubjectAuthorizationVersions(first, subjects)
+      await insert(first, USER_A, 'demo:read')
+      const secondWriter = (async () => {
+        await bumpSubjectAuthorizationVersions(second, subjects)
+        await insert(second, USER_B, 'demo:read')
+        await insert(second, USER_A, 'demo:write')
+        await second.query('COMMIT')
+      })()
+      await insert(first, USER_B, 'demo:write')
       await first.query('COMMIT')
-      await second.query('COMMIT')
+      await secondWriter
       expect(Number(
         ((await q(
           'SELECT count(*)::int AS c FROM user_permissions WHERE user_id = ANY($1::text[])',

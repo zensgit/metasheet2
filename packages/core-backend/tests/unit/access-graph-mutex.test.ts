@@ -34,13 +34,75 @@ describe('access-graph mutex protocol', () => {
       ' user-m ',
     ])
 
-    expect(calls.map((call) => call.params[0])).toEqual([
+    // D21 (Y5a): the FIRST statement bumps every user's subject authorization version row, sorted,
+    // in one statement; only then are the users rows taken FOR UPDATE, one by one, in the same order.
+    expect(calls[0].sql).toMatch(/INSERT INTO subject_authorization_versions/)
+    expect(calls[0].sql).toMatch(/ON CONFLICT \(subject_id\) DO UPDATE/)
+    expect(calls[0].params).toEqual([['user-a', 'user-m', 'user-z']])
+    expect(calls.slice(1).map((call) => call.params[0])).toEqual([
       'user-a',
       'user-m',
       'user-z',
     ])
-    expect(calls.every((call) => /FROM users[\s\S]*FOR UPDATE/i.test(call.sql))).toBe(true)
+    expect(calls.slice(1).every((call) => /FROM users[\s\S]*FOR UPDATE/i.test(call.sql))).toBe(true)
     expect(Array.from(locked.keys())).toEqual(['user-a', 'user-m', 'user-z'])
+  })
+
+  it('D21: the subject version bump precedes the first users FOR UPDATE, and an empty batch issues no statement', async () => {
+    const statements: string[] = []
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        statements.push(sql)
+        return { rows: [] }
+      }),
+    }
+    await lockUsersForAccessGraphWrite(client, ['user-b', 'user-a'])
+    const bumpAt = statements.findIndex((sql) => /INSERT INTO subject_authorization_versions/.test(sql))
+    const firstLockAt = statements.findIndex((sql) => /FROM users[\s\S]*FOR UPDATE/i.test(sql))
+    expect(bumpAt).toBe(0)
+    expect(firstLockAt).toBe(1)
+    expect(statements.filter((sql) => /INSERT INTO subject_authorization_versions/.test(sql))).toHaveLength(1)
+
+    statements.length = 0
+    expect(Array.from((await lockUsersForAccessGraphWrite(client, [' ', ''])).keys())).toEqual([])
+    expect(statements).toEqual([])
+  })
+
+  it('D21 x #6924: under nowait the existing subject version rows are taken FOR UPDATE NOWAIT, lock-only (no upsert), then the users rows NOWAIT; without it, the bump and no pre-lock', async () => {
+    const statements: Array<{ sql: string; params: unknown[] }> = []
+    const client = {
+      query: vi.fn(async (sql: string, params: unknown[] = []) => {
+        statements.push({ sql, params })
+        return { rows: [] }
+      }),
+    }
+    await lockUsersForAccessGraphWrite(client, ['user-b', 'user-a'], { nowait: true })
+    expect(statements[0].sql).toMatch(/FROM subject_authorization_versions[\s\S]*FOR UPDATE NOWAIT/)
+    expect(statements[0].params).toEqual([['user-a', 'user-b']])
+    // #6924's denied operation paths issue no write statement: no upsert under nowait.
+    expect(statements.some((call) => /INSERT INTO|UPDATE subject_authorization_versions/.test(call.sql))).toBe(false)
+    expect(statements.slice(1).map((call) => call.params[0])).toEqual(['user-a', 'user-b'])
+    expect(statements.slice(1).every((call) => /FROM users[\s\S]*FOR UPDATE NOWAIT/.test(call.sql))).toBe(true)
+
+    statements.length = 0
+    await lockUsersForAccessGraphWrite(client, ['user-b', 'user-a'])
+    expect(statements.some((call) => /NOWAIT/.test(call.sql))).toBe(false)
+    expect(statements[0].sql).toMatch(/INSERT INTO subject_authorization_versions/)
+    expect(statements).toHaveLength(3)
+  })
+
+  it('D21 x #6924: a held subject version row under nowait fails with the 55P03 of the pre-lock, before any users row or bump', async () => {
+    const statements: string[] = []
+    const held = Object.assign(new Error('could not obtain lock on row in relation'), { code: '55P03' })
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        statements.push(sql)
+        if (/FOR UPDATE NOWAIT/.test(sql) && /subject_authorization_versions/.test(sql)) throw held
+        return { rows: [] }
+      }),
+    }
+    await expect(lockUsersForAccessGraphWrite(client, ['user-a'], { nowait: true })).rejects.toBe(held)
+    expect(statements).toHaveLength(1)
   })
 
   it('reads the role column with the locked row so writers can apply the shared authentication gate', async () => {
@@ -64,8 +126,10 @@ describe('access-graph mutex protocol', () => {
 
     const locked = await lockUsersForAccessGraphWrite(client, ['user-r'])
 
-    expect(client.query.mock.calls.length).toBe(1)
-    expect(client.query.mock.calls[0][0]).toMatch(/SELECT[\s\S]*\brole\b[\s\S]*FROM users/i)
+    // One D21 subject version bump, then the single locked read.
+    expect(client.query.mock.calls.length).toBe(2)
+    expect(client.query.mock.calls[0][0]).toMatch(/INSERT INTO subject_authorization_versions/)
+    expect(client.query.mock.calls[1][0]).toMatch(/SELECT[\s\S]*\brole\b[\s\S]*FROM users/i)
     expect(locked.get('user-r')).toMatchObject({
       id: 'user-r',
       role: 'disabled',

@@ -196,6 +196,12 @@ async function releaseNativePool(): Promise<void> {
 async function install(pool: Pool, db: Kysely<unknown>, schema: string): Promise<void> {
   await pool.query(`
     -- fixture parents for the native command chain. Not a proof insert.
+    -- D21 (Y5a): the access-graph mutex bumps the subjects' version rows before the users rows.
+    CREATE TABLE subject_authorization_versions (
+      subject_id text PRIMARY KEY,
+      version bigint NOT NULL DEFAULT 1,
+      updated_at timestamptz NOT NULL DEFAULT now()
+    );
     CREATE TABLE users (
       id text PRIMARY KEY,
       username text,

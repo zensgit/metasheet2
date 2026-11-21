@@ -184,6 +184,8 @@ describe('legacy revoke waits for the live actor', () => {
             permissionWrite = params
             return { rows: [{ id: params?.[0] }], rowCount: 1 }
           }
+          // D21 (Y5a): the access-graph mutex's subject authorization version bump (a protocol upsert).
+          if (text.includes('INSERT INTO subject_authorization_versions')) return { rows: [], rowCount: 1 }
           throw new Error(`unexpected sql ${text.slice(0, 120)}`)
         },
       }
@@ -252,6 +254,8 @@ describe('legacy revoke waits for the live actor', () => {
             permissionWrite = params
             throw new Error('legacy revoke wrote after a role-only demotion')
           }
+          // D21 (Y5a): the access-graph mutex's subject authorization version bump (a protocol upsert).
+          if (text.includes('INSERT INTO subject_authorization_versions')) return { rows: [], rowCount: 1 }
           throw new Error(`unexpected sql ${text.slice(0, 120)}`)
         },
       }
@@ -308,6 +312,8 @@ describe('legacy revoke waits for the live actor', () => {
           }
           if (text.includes('directory_deprovision')) return { rows: [] }
           if (text.includes('SET access_generation')) return { rows: [{ access_generation: 5 }] }
+          // D21 (Y5a): the access-graph mutex's subject authorization version bump (a protocol upsert).
+          if (text.includes('INSERT INTO subject_authorization_versions')) return { rows: [], rowCount: 1 }
           throw new Error(`unexpected sql ${text.slice(0, 120)}`)
         },
       }
@@ -345,6 +351,9 @@ describe('legacy revoke waits for the live actor', () => {
         if (text.includes('FOR UPDATE')) return { rows: [{ id: params?.[0], role: 'user', activation_status: 'activated', is_active: true, access_generation: 4, deleted_at: null, purged_at: null }] }
         if (text.includes('pg_typeof')) return { rows: [{ permissions_type: 'jsonb', permissions: ['changed'] }] }
         if (text.includes('to_jsonb(permissions)')) return { rows: [{ permissions: ['workflow:read'] }] }
+        // D21 (Y5a): the access-graph mutex's subject authorization version bump (a protocol upsert,
+        // before the users rows; it rolls back with the refused transaction).
+        if (text.includes('INSERT INTO subject_authorization_versions')) return { rows: [], rowCount: 1 }
         writes.push(text)
         throw new Error('unexpected write after stale before-image')
       },
@@ -416,6 +425,8 @@ describe('legacy revoke waits for the live actor', () => {
             database.generation += 1
             throw new Error('injected legacy generation failure')
           }
+          // D21 (Y5a): the access-graph mutex's subject authorization version bump (a protocol upsert).
+          if (text.includes('INSERT INTO subject_authorization_versions')) return { rows: [], rowCount: 1 }
           throw new Error(`unexpected sql ${text.slice(0, 120)}`)
         },
       }
