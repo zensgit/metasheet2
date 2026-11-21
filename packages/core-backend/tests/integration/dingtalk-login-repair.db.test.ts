@@ -42,7 +42,7 @@ import { jwtAuthMiddleware } from '../../src/auth/jwt-middleware'
 import { authRouter } from '../../src/routes/auth'
 import { ApiTokenService } from '../../src/multitable/api-token-service'
 import { probeEncryptedStores } from '../../src/security/encrypted-store-probe'
-import { poolManager } from '../../src/integration/db/connection-pool'
+import { ConnectionPool, poolManager } from '../../src/integration/db/connection-pool'
 import { db } from '../../src/db/db'
 import { applyDirectoryHandover } from '../../src/directory/controlled-handover'
 import { isUserSessionRevoked } from '../../src/auth/session-revocation'
@@ -724,7 +724,293 @@ const originalIdentityShape = (f: Fixture) => ({
   provider_open_id: 'old-open-' + f.user,
   provider_union_id: 'old-union-' + f.user,
 })
+async function renewalFixture() {
+  const f = await fixture()
+  // The fixture already holds attendance_employee. Complete its admission before login so
+  // profile reads cannot queue a role backfill behind repair before reaching the renewal SQL.
+  await query("INSERT INTO user_namespace_admissions(user_id,namespace,enabled) VALUES($1,'attendance',true)", [f.user])
+  return f
+}
+
+// Identify the exact waiter and the granted transaction lock it is waiting on.
+async function waitingTransaction(holder: number, sqlFragment: string | string[]): Promise<number> {
+  const end = Date.now() + 3500
+  while (Date.now() < end) {
+    const result = await query<{ pid: number }>(
+      `SELECT a.pid FROM pg_stat_activity a
+       JOIN pg_locks w ON w.pid = a.pid AND w.locktype IN ('transactionid', 'advisory') AND NOT w.granted
+       JOIN pg_locks h ON h.locktype = w.locktype AND h.granted AND (
+         (w.locktype = 'transactionid' AND h.transactionid = w.transactionid AND h.mode = 'ExclusiveLock')
+         OR (w.locktype = 'advisory' AND h.database = w.database AND h.classid = w.classid
+           AND h.objid = w.objid AND h.objsubid = w.objsubid))
+       WHERE a.datname = current_database() AND h.pid = $1 AND h.pid = ANY(pg_blocking_pids(a.pid))
+         AND a.query LIKE ANY($2::text[])`,
+      [holder, (Array.isArray(sqlFragment) ? sqlFragment : [sqlFragment]).map(fragment => '%' + fragment + '%')],
+    )
+    if (result.rows.length === 1) return result.rows[0].pid
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error('Missing database lock witness for ' + sqlFragment)
+}
+
+async function renewAcrossRepair<T>(
+  f: Fixture, withSid: boolean, renew: () => Promise<T>,
+): Promise<{ busy: T; afterRepair: T }> {
+  const proof = await f.verify()
+  const preview = await previewDingTalkRepair(proof)
+  const control = await pool!.connect()
+  const pending: Promise<unknown>[] = []
+  const track = <R>(operation: Promise<R>) => {
+    pending.push(operation)
+    void operation.catch(() => undefined) // Join all operations even when a lock assertion fails.
+    return operation
+  }
+  try {
+    await control.query('BEGIN')
+    const sessions = await control.query(
+      'SELECT pg_backend_pid() AS pid, to_jsonb(s) AS row FROM user_sessions s WHERE user_id=$1 FOR UPDATE', [f.user],
+    )
+    expect(sessions.rows).toHaveLength(1)
+    const holder = Number(sessions.rows[0].pid)
+    await control.query('SELECT org_id FROM user_orgs WHERE user_id=$1 FOR UPDATE', [f.user])
+
+    // First renewal holds users FOR SHARE and is blocked inside eligibility or membership lookup.
+    const first = track(renew())
+    const renewing = await waitingTransaction(holder, withSid ? 'AND revoked_at IS NULL FOR UPDATE' : 'FOR SHARE OF uo')
+    const repair = track(applyDingTalkRepair(proof, preview.digest, 'apply'))
+    const repairing = await waitingTransaction(renewing, ['WHERE id = $1::text%FOR UPDATE', 'pg_advisory_xact_lock('])
+    const busy = await Promise.race([
+      first, repair.then(() => { throw new Error('Repair completed before the blocked renewal released users') }),
+    ])
+    // The bounded renewal released its lock without our control releasing either row.
+    expect(await waitingTransaction(holder, 'UPDATE user_sessions SET revoked_at=clock_timestamp()')).toBe(repairing)
+    const original = await control.query('SELECT to_jsonb(s) AS row FROM user_sessions s WHERE user_id=$1', [f.user])
+    expect(original.rows).toEqual([{ row: sessions.rows[0].row }])
+
+    // Cross the watermark second before starting the second renewal, leaving its short lock
+    // budget intact while ensuring an incorrectly issued JWT would have a fresh iat.
+    await query(`SELECT pg_sleep(GREATEST(0, floor(extract(epoch FROM query_start)) + 1
+      - extract(epoch FROM clock_timestamp()))::double precision) FROM pg_stat_activity WHERE pid=$1`, [repairing])
+    // Second renewal completes ordinary authentication against the still-committed old state.
+    // Its authoritative transaction cannot pass the user lock already held by the real repair.
+    const second = track(renew())
+    await waitingTransaction(repairing, ['FROM users WHERE id = $1 FOR SHARE', 'pg_advisory_xact_lock_shared('])
+    await control.query('COMMIT')
+    expect((await repair).targetSessionsRevoked).toBe(true)
+    return { busy, afterRepair: await second }
+  } finally {
+    await control.query('ROLLBACK')
+    control.release()
+    await Promise.allSettled(pending)
+  }
+}
+
 suite('DingTalk controlled login repair', () => {
+  it('completes a real repair within its lock budget under overlapping ordinary refreshes', async () => {
+    const f = await renewalFixture(), auth = new AuthService()
+    const login = await auth.login(f.user, f.password)
+    expect(login?.user.id).toBe(f.user)
+    const proof = await f.verify(), preview = await previewDingTalkRepair(proof)
+    const manager = poolManager.get(), original = manager.transaction.bind(manager)
+    let releaseReaders!: () => void
+    const admittedReaders = new Promise<void>(resolve => { releaseReaders = resolve })
+    const attempted = new Set<number>(), admitted = new Set<number>()
+    let firstReader = 0, repairQueued = false, lateAdmissions = 0
+    const pending: Promise<unknown>[] = []
+    const track = <T>(operation: Promise<T>) => {
+      pending.push(operation)
+      void operation.catch(() => undefined)
+      return operation
+    }
+    const spy = vi.spyOn(manager, 'transaction').mockImplementation(callback => original(async client => {
+      const run = client.query.bind(client)
+      // Pause only after the real SELECT has acquired its row lock. The runtime decides whether
+      // a later request can reach this point; no lock helper or implementation flag is mocked.
+      client.query = (async (...args: Parameters<typeof client.query>) => {
+        const sql = typeof args[0] === 'string' ? args[0] : args[0].text
+        const sharedRow = /FROM users WHERE id\s*=\s*\$1\s+FOR SHARE/i.test(sql)
+        const sharedLock = sharedRow || sql.includes('pg_advisory_xact_lock_shared(')
+        let pid = 0
+        if (sharedLock) {
+          pid = Number((await client.__rawClient.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+          attempted.add(pid)
+        }
+        const result = await run(...args)
+        if (sharedRow) {
+          admitted.add(pid)
+          if (!firstReader) firstReader = pid
+          else if (repairQueued) lateAdmissions++
+          await admittedReaders
+        }
+        return result
+      }) as typeof client.query
+      return callback(client)
+    }))
+    const waitUntil = async (condition: () => boolean) => {
+      const deadline = Date.now() + 3000
+      while (!condition() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
+      expect(condition()).toBe(true)
+    }
+    const repairTables = ['users', 'user_roles', 'user_permissions', 'user_namespace_admissions', 'user_orgs',
+      'user_external_auth_grants', 'directory_account_links', 'user_external_identities', 'directory_accounts',
+      'directory_integrations', 'roles', 'role_permissions', 'permissions']
+    const sample = async (phase: string, pids: number[]) => ({
+      phase,
+      locks: (await query(`SELECT a.pid,a.state,a.wait_event_type,a.wait_event,
+        pg_blocking_pids(a.pid) AS blockers,l.locktype,l.mode,l.granted,
+        l.transactionid::text,l.classid::text,l.objid::text,l.objsubid,l.relation::regclass::text AS relation,a.query
+        FROM pg_stat_activity a JOIN pg_locks l ON l.pid=a.pid
+        WHERE a.datname=current_database() AND a.pid=ANY($1::int[])
+          AND (l.locktype IN ('advisory','transactionid','tuple') OR
+            (l.locktype='relation' AND l.relation IN (SELECT oid FROM pg_class WHERE relname=ANY($2::text[]))))
+        ORDER BY a.pid,l.locktype,l.mode,l.granted`, [pids, repairTables])).rows,
+    })
+    const samples: Awaited<ReturnType<typeof sample>>[] = []
+    let elapsed = 0, completed = false
+    let waitedOnUserAdvisory = false, heldRepairTableLocks = -1
+    const refreshes: Array<Promise<string | null>> = []
+    try {
+      refreshes.push(track(auth.refreshToken(login!.token)))
+      await waitUntil(() => firstReader !== 0)
+      const started = Date.now()
+      const repair = track(applyDingTalkRepair(proof, preview.digest, 'apply'))
+      const repairing = await waitingTransaction(firstReader, ['FOR UPDATE', 'pg_advisory_xact_lock('])
+      repairQueued = true
+      const queued = await sample('repair_waiting', [firstReader, repairing])
+      samples.push(queued)
+      const readerAdvisory = queued.locks.filter(lock => lock.pid === firstReader && lock.locktype === 'advisory'
+        && lock.granted && lock.mode === 'ShareLock')
+      waitedOnUserAdvisory = queued.locks.some(lock => lock.pid === repairing && lock.locktype === 'advisory'
+        && !lock.granted && lock.mode === 'ExclusiveLock' && lock.objsubid === 2
+        && readerAdvisory.some(reader => reader.classid === lock.classid && reader.objid === lock.objid
+          && reader.objsubid === lock.objsubid))
+      heldRepairTableLocks = queued.locks.filter(lock => lock.pid === repairing && lock.locktype === 'relation'
+        && lock.granted && lock.mode === 'ShareRowExclusiveLock').length
+      // All three requests overlap the first holder and the queued, real repair. The old runtime
+      // and a row-only mutation admit them; the shared access lock keeps them behind the repair.
+      for (let i = 0; i < 3; i++) {
+        refreshes.push(track(auth.refreshToken(login!.token)))
+        await waitUntil(() => attempted.size >= i + 2)
+      }
+      // Each late reader must be observed either holding the row or blocked in PostgreSQL.
+      const deadline = Date.now() + 1000
+      let observed = false
+      while (Date.now() < deadline) {
+        const waiting = (await query<{ pid: number }>(`SELECT pid FROM pg_stat_activity
+          WHERE datname=current_database() AND pid=ANY($1::int[]) AND wait_event_type='Lock'`, [[...attempted]])).rows
+        if (new Set([...admitted, ...waiting.map(row => row.pid)]).size === 4) { observed = true; break }
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+      expect(observed).toBe(true)
+      samples.push(await sample('overlapping_refreshes', [...attempted, repairing]))
+      repairQueued = false
+      releaseReaders()
+      expect((await repair).targetSessionsRevoked).toBe(true)
+      elapsed = Date.now() - started
+      completed = true
+      const refreshed = await Promise.all(refreshes)
+      for (const token of refreshed) if (token) expect(await auth.verifyToken(token)).toBeNull()
+      expect(elapsed).toBeLessThan(5000)
+      expect(lateAdmissions).toBe(0)
+      // Keep these unconditional, after collecting bypass evidence: the old runtime and a row-only
+      // mutation still exercise every reader, while a fixed runtime cannot skip the lock-order proof.
+      expect(waitedOnUserAdvisory).toBe(true)
+      expect(heldRepairTableLocks).toBe(0)
+    } finally {
+      releaseReaders()
+      await Promise.allSettled(pending)
+      spy.mockRestore()
+      // Only synthetic fixture metadata and server lock state; the runner keeps this raw output.
+      console.info('ordinary-renewal-repair-lock-evidence', JSON.stringify({
+        attempted: attempted.size, admitted: admitted.size, lateAdmissions, elapsed, completed,
+        waitedOnUserAdvisory, heldRepairTableLocks, samples,
+      }))
+    }
+  })
+  it.each(['rollback-timeout', 'healthy-rollback'] as const)(
+    'releases user admission for a queued writer after %s without reusing an unfinished transaction',
+    async mode => {
+      const { lockUserAccessShared, lockUserAccessExclusive } = await import('../../src/auth/user-access-lock')
+      const userId = await bareUser()
+      // Only this test uses the short client timeout. The server keeps pg_sleep active long enough
+      // that both the original query and its queued ROLLBACK hit independent client read timeouts.
+      const isolated = new ConnectionPool({ connectionString: process.env.DATABASE_URL,
+        name: 'synthetic-user-admission-cleanup', max: 1, query_timeout: 250, statement_timeout: 2000 })
+      const isolatedPool = isolated.getInternalPool(), writer = await pool!.connect()
+      const cleanupPoolErrors: string[] = []
+      isolatedPool.on('error', error => cleanupPoolErrors.push(String((error as { code?: unknown }).code ?? 'unknown')))
+      let ready!: () => void, beginFailure!: () => void
+      const readerReady = new Promise<void>(resolve => { ready = resolve })
+      const releaseReader = new Promise<void>(resolve => { beginFailure = resolve })
+      let readerPid = 0, originalError: unknown, backendExited = false, writerAcquired = false
+      const releases: boolean[] = []
+      let reading: Promise<unknown> | undefined, writing: Promise<unknown> | undefined
+      const started = Date.now()
+      try {
+        reading = isolated.transaction(async client => {
+          readerPid = Number((await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+          const release = client.__rawClient.release
+          client.__rawClient.release = error => { releases.push(error === true); release(error) }
+          await lockUserAccessShared(client, userId)
+          ready()
+          await releaseReader
+          try {
+            await client.query(mode === 'rollback-timeout' ? 'SELECT pg_sleep(1)' : 'SELECT 1 / 0')
+          } catch (error) { originalError = error; throw error }
+        })
+        void reading.catch(() => undefined)
+        await Promise.race([readerReady, reading.then(() => { throw new Error('Expected the reader to hold its admission') })])
+        await writer.query('BEGIN')
+        await writer.query("SET LOCAL lock_timeout='5s'")
+        writing = lockUserAccessExclusive(writer, [userId])
+        void writing.catch(() => undefined)
+        const writerPid = await waitingTransaction(readerPid, 'pg_advisory_xact_lock(')
+        const queued = (await query(`SELECT a.pid,a.wait_event_type,a.wait_event,l.mode,l.granted,l.objsubid
+          FROM pg_stat_activity a JOIN pg_locks l ON l.pid=a.pid
+          WHERE a.pid=$1 AND l.locktype='advisory' AND NOT l.granted`, [writerPid])).rows
+        expect(queued).toEqual([expect.objectContaining({ wait_event_type: 'Lock', mode: 'ExclusiveLock', objsubid: 2 })])
+        beginFailure()
+        const failure = await reading.catch(error => error)
+        expect(failure).toBe(originalError)
+        if (mode === 'rollback-timeout') {
+          expect(failure).toMatchObject({ message: 'Query read timeout' })
+          expect(releases).toEqual([true])
+          expect(isolatedPool.totalCount).toBe(0)
+          expect(isolatedPool.idleCount).toBe(0)
+        } else {
+          expect(failure).toMatchObject({ code: '22012' })
+          expect(releases).toEqual([false])
+          expect(isolatedPool.totalCount).toBe(1)
+          expect(isolatedPool.idleCount).toBe(1)
+        }
+        await writing
+        writerAcquired = true
+        expect(Date.now() - started).toBeLessThan(3000)
+        backendExited = (await query('SELECT pid FROM pg_stat_activity WHERE pid=$1', [readerPid])).rows.length === 0
+        expect(backendExited).toBe(mode === 'rollback-timeout')
+        await writer.query('COMMIT')
+        // A destroyed connection is replaced; a clean rollback keeps a usable, idle connection.
+        const reused = await isolated.query('SELECT pg_backend_pid() AS pid, 1 AS healthy')
+        expect(reused.rows[0].healthy).toBe(1)
+        expect(Number(reused.rows[0].pid) === readerPid).toBe(mode === 'healthy-rollback')
+      } finally {
+        beginFailure()
+        // Only this test's reader can be terminated, and only on a failed progress assertion.
+        // This also cleans up the old-wrapper mutation's idle transaction without leaving its lock.
+        if (readerPid && !writerAcquired && mode === 'rollback-timeout') {
+          await query('SELECT pg_terminate_backend($1)', [readerPid]).catch(() => undefined)
+        }
+        await Promise.allSettled([reading, writing].filter((operation): operation is Promise<unknown> => !!operation))
+        await writer.query('ROLLBACK').catch(() => undefined)
+        writer.release()
+        isolated.stopMetricsCollection()
+        await isolatedPool.end()
+        console.info('user-admission-transaction-cleanup-evidence', JSON.stringify({
+          mode, releases, backendExited, writerAcquired, cleanupPoolErrors, elapsed: Date.now() - started,
+        }))
+      }
+    }, 20000,
+  )
   it('verification and preview do not write rows, issue sessions, or return raw identifiers', async () => {
     const f = await fixture(),
       before = await f.graph()
@@ -1782,47 +2068,18 @@ suite('DingTalk controlled login repair', () => {
     expect((await f.graph()).at(-1).todos).toHaveLength(1)
   })
   it('an in-flight refresh cannot resurrect a session revoked by repair', async () => {
-    const f = await fixture(),
+    const f = await renewalFixture(),
       auth = new AuthService(),
       login = await auth.login(f.user, f.password)
     expect(login?.user.id).toBe(f.user)
-    const proof = await f.verify(),
-      p = await previewDingTalkRepair(proof)
-    let entered!: () => void, resume!: () => void
-    const reached = new Promise<void>((resolve) => {
-        entered = resolve
-      }),
-      released = new Promise<void>((resolve) => {
-        resume = resolve
-      })
-    const real = sessionRegistry.isUserSessionActive
-    const spy = vi
-      .spyOn(sessionRegistry, 'isUserSessionActive')
-      .mockImplementation(async (...args) => {
-        const active = await real(...args)
-        entered()
-        await released
-        return active
-      })
-    const refresh = auth.refreshToken(login!.token)
-    try {
-      await reached
-      await applyDingTalkRepair(proof, p.digest, 'apply')
-      await new Promise((resolve) => setTimeout(resolve, 1100))
-      resume()
-      expect((await refresh) === null).toBe(true)
-      expect(
-        (
-          await query('SELECT revoked_at FROM user_sessions WHERE user_id=$1', [
-            f.user,
-          ])
-        ).rows.every((row) => row.revoked_at),
-      ).toBe(true)
-    } finally {
-      resume()
-      await refresh
-      spy.mockRestore()
-    }
+    const sid = auth.readTokenPayload(login!.token)?.sid
+    expect(sid).toEqual(expect.any(String))
+    const { busy, afterRepair } = await renewAcrossRepair(f, true, () => auth.refreshToken(login!.token).catch(error => error))
+    expect(busy).toMatchObject({ code: '57014' })
+    expect(afterRepair).toBeNull()
+    expect((await query(
+      'SELECT id, revoked_at IS NOT NULL AS revoked FROM user_sessions WHERE user_id=$1', [f.user],
+    )).rows).toEqual([{ id: sid, revoked: true }])
   })
   it('rejects a previously authenticated OAuth result after repair and admits a fresh current-person result', async () => {
     const f = await fixture()
@@ -2020,48 +2277,17 @@ suite('DingTalk controlled login repair', () => {
     },
   )
   it('an in-flight legacy refresh without a sid cannot mint a new post-repair session', async () => {
-    const f = await fixture(),
+    const f = await renewalFixture(),
       auth = new AuthService(),
       login = await auth.login(f.user, f.password)
     const legacy = auth.createToken(login!.user)
-    const proof = await f.verify(),
-      p = await previewDingTalkRepair(proof)
-    let entered!: () => void, resume!: () => void
-    const reached = new Promise<void>((resolve) => {
-        entered = resolve
-      }),
-      released = new Promise<void>((resolve) => {
-        resume = resolve
-      })
-    const real = revocations.isUserSessionRevoked
-    const spy = vi
-      .spyOn(revocations, 'isUserSessionRevoked')
-      .mockImplementation(async (...args) => {
-        const result = await real(...args)
-        entered()
-        await released
-        return result
-      })
-    const refresh = auth.refreshToken(legacy)
-    try {
-      await reached
-      await applyDingTalkRepair(proof, p.digest, 'apply')
-      await new Promise((resolve) => setTimeout(resolve, 1100))
-      resume()
-      expect((await refresh) === null).toBe(true)
-      expect(
-        (
-          await query(
-            'SELECT id FROM user_sessions WHERE user_id=$1 AND revoked_at IS NULL',
-            [f.user],
-          )
-        ).rows,
-      ).toHaveLength(0)
-    } finally {
-      resume()
-      await refresh
-      spy.mockRestore()
-    }
+    expect(auth.readTokenPayload(legacy)?.sid).toBeUndefined()
+    const { busy, afterRepair } = await renewAcrossRepair(f, false, () => auth.refreshToken(legacy).catch(error => error))
+    expect(busy).toMatchObject({ code: '57014' })
+    expect(afterRepair).toBeNull()
+    expect((await query(
+      'SELECT id, revoked_at IS NOT NULL AS revoked FROM user_sessions WHERE user_id=$1', [f.user],
+    )).rows).toEqual([{ id: auth.readTokenPayload(login!.token)?.sid, revoked: true }])
   })
 
   describe('POST /api/auth/session-org across a repair apply', () => {
@@ -2119,7 +2345,7 @@ suite('DingTalk controlled login repair', () => {
       'a credential %s authenticated before apply cannot obtain a new session after apply',
       async (shape) => {
         await withDbTokenVerification(async () => {
-          const f = await fixture(),
+          const f = await renewalFixture(),
             orgB = await secondOrg(f.user)
           const login = await authService.login(f.user, f.password)
           const credential =
@@ -2128,46 +2354,23 @@ suite('DingTalk controlled login repair', () => {
               : authService.createToken(login!.user)
           if (shape === 'without a sid')
             expect(authService.readTokenPayload(credential)?.sid).toBeUndefined()
-          const proof = await f.verify(),
-            p = await previewDingTalkRepair(proof)
-          let entered!: () => void, resume!: () => void
-          const reached = new Promise<void>((resolve) => {
-              entered = resolve
-            }),
-            released = new Promise<void>((resolve) => {
-              resume = resolve
-            })
-          const real = authService.resolveSessionTenantId.bind(authService)
-          // Parks the request after authentication (generation already read) and before the session write.
-          const spy = vi
-            .spyOn(authService, 'resolveSessionTenantId')
-            .mockImplementation(async (...args) => {
-              const result = await real(...args)
-              entered()
-              await released
-              return result
-            })
-          const pending = switchOrg(credential, orgB).then((res) => res)
-          try {
-            await reached
-            await applyDingTalkRepair(proof, p.digest, 'apply')
-            // JWT iat has second precision: a token minted now would postdate the revocation watermark.
-            await new Promise((resolve) => setTimeout(resolve, 1100))
-            resume()
-            const res = await pending
-            expect(res.status).toBe(409)
-            expect(res.body).toEqual({
-              success: false,
-              error: 'Authentication changed; please sign in again',
-              code: 'authentication_changed',
-            })
-            expect(await activeSessions(f.user)).toHaveLength(0)
-            expect(await authService.verifyToken(credential)).toBeNull()
-          } finally {
-            resume()
-            await pending.catch(() => undefined)
-            spy.mockRestore()
-          }
+          const { busy, afterRepair } = await renewAcrossRepair(f, shape === 'with a sid',
+            () => switchOrg(credential, orgB).then(res => res))
+          expect(busy.status).toBe(503)
+          expect(busy.body).toEqual({
+            success: false, error: 'Organization switch unavailable', code: 'SESSION_ORG_SWITCH_UNAVAILABLE',
+          })
+          expect(afterRepair.status).toBe(409)
+          expect(afterRepair.body).toEqual({
+            success: false,
+            error: 'Authentication changed; please sign in again',
+            code: 'authentication_changed',
+          })
+          expect(await activeSessions(f.user)).toHaveLength(0)
+          expect((await query('SELECT id FROM user_sessions WHERE user_id=$1', [f.user])).rows)
+            .toEqual([{ id: authService.readTokenPayload(login!.token)?.sid }])
+          expect(await authService.verifyToken(credential)).toBeNull()
+          expect((await switchOrg(credential, orgB)).status).toBe(401)
           // A fresh post-apply sign-in can still switch organizations.
           const next = await authService.login(f.user, f.password)
           const after = await switchOrg(next!.token, orgB)

@@ -18,6 +18,11 @@
       <div class="directory-admin__section-head">
         <div>
           <h2>最近创建并绑定结果</h2>
+          <p
+            v-if="manualAdmissionResult.integrationName && manualAdmissionResult.integrationName.trim()"
+            class="directory-admin__hint"
+            data-testid="directory-operation-result-manual-integration"
+          >所属集成：{{ manualAdmissionResult.integrationName }}</p>
           <p class="directory-admin__hint">
             {{
               manualAdmissionResult.bound
@@ -97,6 +102,11 @@
         :key="packet.userId"
         class="directory-admin__review-admission"
       >
+        <p
+          v-if="packet.integrationName && packet.integrationName.trim()"
+          class="directory-admin__hint"
+          data-testid="directory-operation-result-auto-integration"
+        >所属集成：{{ packet.integrationName }}</p>
         <div class="directory-admin__account-grid">
           <div>
             <strong>本地用户</strong>
@@ -151,6 +161,11 @@
         :key="packet.userId"
         class="directory-admin__review-admission"
       >
+        <p
+          v-if="packet.integrationName && packet.integrationName.trim()"
+          class="directory-admin__hint"
+          data-testid="directory-operation-result-batch-integration"
+        >所属集成：{{ packet.integrationName }}</p>
         <div class="directory-admin__account-grid">
           <div>
             <strong>本地用户</strong>

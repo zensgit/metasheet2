@@ -199,6 +199,7 @@ export type StrictDingTalkTransport = {
 
 export type StrictDingTalkSignInInput = {
   code: string
+  expectedAppKey?: string
   selector?: { connectionId?: unknown; corpId?: unknown }
   transport?: StrictDingTalkTransport
   transaction?: AuthorizationInputTransactionRunner
@@ -215,6 +216,7 @@ export type StrictDingTalkSignInResult =
   | { readonly status: 'not-strict' }
 
 export type StrictDingTalkLocalBinding = {
+  readonly loginSourceEnv: Readonly<Pick<NodeJS.ProcessEnv, 'DINGTALK_CLIENT_ID' | 'DINGTALK_APP_KEY' | 'DINGTALK_CORP_ID'>>
   readonly gates: typeof STRICT_DINGTALK_ENTRY_GATES
   currentStrictGrantUsable: typeof currentStrictGrantUsable
   signInWeb: (input: Omit<StrictDingTalkSignInInput, 'createToken' | 'readExp' | 'readIssuedAt' | 'transaction'>) => Promise<StrictDingTalkSignInResult>
@@ -1112,6 +1114,7 @@ async function signIn(input: StrictDingTalkSignInInput, kind: 'web' | 'container
     return selectStrictSnapshot({ query: (sql, params) => client.query(sql, params) }, input.selector, env)
   })
   if (!snapshot) return { status: 'not-strict' }
+  if (input.expectedAppKey !== undefined && (snapshot.appKey !== input.expectedAppKey || snapshot.corpId !== input.selector?.corpId)) loginRefused()
   if (maxAge == null) refuse('STRICT_SESSION_UNCONFIGURED', 503)
   const witness = kind === 'web'
     ? await exchangeWeb(snapshot, input.code, input.transport)
@@ -1299,11 +1302,12 @@ export async function switchStrictSessionOrg(
   return { token, user }
 }
 
-function capturedSignInRequest(input: Omit<StrictDingTalkSignInInput, 'createToken' | 'readExp' | 'readIssuedAt' | 'transaction'>): Pick<StrictDingTalkSignInInput, 'code' | 'selector' | 'transport' | 'env' | 'ipAddress' | 'userAgent'> {
+function capturedSignInRequest(input: Omit<StrictDingTalkSignInInput, 'createToken' | 'readExp' | 'readIssuedAt' | 'transaction'>): Pick<StrictDingTalkSignInInput, 'code' | 'selector' | 'expectedAppKey' | 'transport' | 'env' | 'ipAddress' | 'userAgent'> {
   const transport = input.transport
   return {
     code: input.code,
     selector: input.selector,
+    expectedAppKey: input.expectedAppKey,
     env: input.env,
     ipAddress: input.ipAddress,
     userAgent: input.userAgent,
@@ -1354,6 +1358,11 @@ export async function bindStrictDingTalkEntryLocal(options: {
   }
   return {
     gates: STRICT_DINGTALK_ENTRY_GATES,
+    loginSourceEnv: Object.freeze({
+      DINGTALK_CLIENT_ID: (options.env ?? process.env).DINGTALK_CLIENT_ID,
+      DINGTALK_APP_KEY: (options.env ?? process.env).DINGTALK_APP_KEY,
+      DINGTALK_CORP_ID: (options.env ?? process.env).DINGTALK_CORP_ID,
+    }),
     currentStrictGrantUsable,
     signInWeb: (input) => signInBound('web', input),
     signInContainer: (input) => signInBound('container', input),

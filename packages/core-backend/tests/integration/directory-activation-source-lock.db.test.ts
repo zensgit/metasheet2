@@ -2,9 +2,14 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import pg from 'pg'
-import { afterAll, beforeEach, describe, expect, it } from 'vitest'
+import express from 'express'
+import request from 'supertest'
+import jwt from 'jsonwebtoken'
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { query } from '../../src/db/pg'
 import { activatePendingUser } from '../../src/auth/user-activate'
+import { poolManager } from '../../src/integration/db/connection-pool'
+import { runtimeJwtSecret } from '../helpers/runtime-jwt-secret'
 
 // Two-point wiring self-check (feedback: an unwired *.db.test.ts skip-greens forever). This
 // suite must be BOTH excluded from the no-DB job (so it cannot skip-green there) AND listed in
@@ -94,6 +99,133 @@ async function seed(): Promise<Seeded> {
 describeIfDatabase('T3 activation source read serialises against integration deactivation (real DB)', () => {
   beforeEach(cleanup)
   afterAll(cleanup)
+
+  it.each(['release', 'cancel', 'activation-first', 'app-mismatch'] as const)('serializes the source-less OAuth activation and its session with the first cutover (%s)', async decision => {
+    const target = await seed()
+    const admin = `${PREFIX}-admin-${randomUUID()}`
+    const corp = `corp-${target.integrationId}`
+    const openId = `open-${target.accountId}`, unionId = `union-${target.accountId}`
+    const loginApp = `login-${randomUUID()}`
+    await query("INSERT INTO users(id,email,password_hash,role,is_active,activation_status) VALUES($1,$2,'x','admin',true,'activated')", [admin, `${admin}@example.invalid`])
+    await query("INSERT INTO user_roles(user_id,role_id) VALUES($1,'admin')", [admin])
+    await query('UPDATE directory_integrations SET corp_id=$1,config=$2 WHERE id=$3', [corp, { appKey: `directory-${randomUUID()}` }, target.integrationId])
+    await query('UPDATE directory_accounts SET corp_id=$1,open_id=$2,union_id=$3 WHERE id=$4', [corp, openId, unionId, target.accountId])
+    vi.stubEnv('DINGTALK_CORP_ID', corp)
+    vi.stubEnv('DINGTALK_CLIENT_ID', loginApp)
+    vi.stubEnv('DINGTALK_CLIENT_SECRET', 'synthetic')
+    vi.stubEnv('DINGTALK_REDIRECT_URI', 'https://example.invalid/callback')
+    vi.stubEnv('DINGTALK_OAUTH_REQUIRE_SHARED_STATE_STORE', 'false')
+    const holder = new pg.Client({ connectionString: process.env.DATABASE_URL })
+    await holder.connect()
+    let pending: Promise<request.Response> | undefined
+    let unlock!: () => void
+    const commitGate = new Promise<void>(resolve => { unlock = resolve })
+    let atCommit!: () => void
+    const ready = new Promise<void>(resolve => { atCommit = resolve })
+    const appPool = poolManager.get()
+    const transaction = appPool.transaction.bind(appPool)
+    const paused = decision === 'activation-first' ? vi.spyOn(appPool, 'transaction').mockImplementation(work => transaction(async client => {
+      const result = await work(client)
+      if (result && typeof result === 'object' && 'sid' in result) {
+        atCommit()
+        await commitGate
+      }
+      return result
+    })) : undefined
+    const stateOf = async () => (await query(`SELECT u.activation_status,u.is_active,u.access_generation,u.password_hash,u.updated_at,
+      (SELECT count(*)::int FROM user_login_aliases WHERE user_id=u.id) AS aliases,
+      (SELECT count(*)::int FROM user_orgs WHERE user_id=u.id AND is_active) AS memberships,
+      (SELECT count(*)::int FROM user_external_identities WHERE local_user_id=u.id) AS identities,
+      (SELECT count(*)::int FROM user_external_auth_grants WHERE local_user_id=u.id AND enabled) AS grants,
+      (SELECT count(*)::int FROM user_sessions WHERE user_id=u.id) AS sessions
+      FROM users u WHERE id=$1`, [target.userId])).rows[0]
+    const before = await stateOf()
+    try {
+      const { authRouter, createLocalStrictDingTalkAuthRouter } = await import('../../src/routes/auth')
+      const { generateState } = await import('../../src/auth/dingtalk-oauth')
+      const router = decision === 'app-mismatch'
+        ? await createLocalStrictDingTalkAuthRouter({ fetchFn: (...args) => fetch(...args), env: { DINGTALK_CLIENT_ID: `other-${loginApp}`, DINGTALK_CORP_ID: corp } }) : authRouter
+      const app = express().use(express.json()).use('/api/auth', router)
+      let providerCalls = 0
+      vi.stubGlobal('fetch', async (url: string | URL, init?: RequestInit) => {
+        providerCalls++
+        if (decision === 'app-mismatch') throw new Error('Unmatched application reached the provider')
+        const endpoint = new URL(url).pathname
+        if (endpoint.endsWith('/userAccessToken')) {
+          expect(JSON.parse(String(init?.body)).clientId).toBe(loginApp)
+          // Only the already captured environment may be used after the code exchange starts.
+          vi.stubEnv('DINGTALK_CORP_ID', 'changed-after-selection')
+          return Response.json({ accessToken: 'synthetic' })
+        }
+        if (!endpoint.endsWith('/contact/users/me')) throw new Error('Unexpected provider operation')
+        // Selection has finished. The first scope insert is deliberately uncommitted while the
+        // genuine activation writes and its session registration reach the final table fence.
+        if (decision !== 'activation-first') {
+          await holder.query('BEGIN')
+          await holder.query('INSERT INTO directory_connection_login_scope(connection_id,command_id) VALUES($1,$2)', [target.integrationId, randomUUID()])
+        }
+        return Response.json({ openId, unionId, nick: 'Synthetic' })
+      })
+      const state = await generateState({ intent: 'activate', activateUserId: target.userId, activateAdminUserId: admin })
+      const pid = (await holder.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
+      pending = request(app).post('/api/auth/dingtalk/callback').send({ code: 'fixture', state }).then(res => res)
+      if (decision === 'app-mismatch') {
+        const result = await pending
+        expect(result.status).toBe(403)
+        expect(result.body.code).toBe('strict_connection')
+        expect(providerCalls).toBe(0)
+        expect(await stateOf()).toEqual(before)
+        return
+      }
+      let blocked: { pid: number; session_write: boolean } | undefined
+      if (decision === 'activation-first') {
+        await Promise.race([ready, pending.then(() => { throw new Error('Activation finished before the commit witness') })])
+        await holder.query('BEGIN')
+        const insertion = holder.query('INSERT INTO directory_connection_login_scope(connection_id,command_id) VALUES($1,$2)', [target.integrationId, randomUUID()])
+        let waiting = false
+        try {
+          for (let attempt = 0; attempt < 200 && !waiting; attempt++) {
+            waiting = (await query('SELECT cardinality(pg_blocking_pids($1)) > 0 AS waiting', [pid])).rows[0].waiting === true
+            if (!waiting) await new Promise(resolve => setTimeout(resolve, 15))
+          }
+          expect(waiting).toBe(true)
+          expect(await stateOf()).toEqual(before)
+        } finally { unlock(); await insertion }
+      } else {
+        for (let attempt = 0; attempt < 240 && !blocked; attempt++) {
+          const locks = await query<{ pid: number; session_write: boolean }>(`SELECT a.pid, EXISTS(
+              SELECT 1 FROM pg_locks l WHERE l.pid=a.pid AND l.relation='user_sessions'::regclass AND l.mode='RowExclusiveLock' AND l.granted
+            ) AS session_write FROM pg_stat_activity a WHERE $1 = ANY(pg_blocking_pids(a.pid))
+               AND a.query LIKE 'LOCK TABLE %directory_connection_login_scope% IN SHARE MODE'`, [pid])
+          blocked = locks.rows[0]
+          if (!blocked) await new Promise(resolve => setTimeout(resolve, 15))
+        }
+        expect(blocked, 'the final scope fence must conflict with the separate writer').toBeDefined()
+        expect(blocked?.session_write, 'the same uncommitted activation must already own session registration').toBe(true)
+        expect(await stateOf()).toEqual(before)
+      }
+      if (decision === 'cancel') {
+        expect((await query('SELECT pg_cancel_backend($1) AS cancelled', [blocked!.pid])).rows[0].cancelled).toBe(true)
+        const result = await pending
+        expect(result.status).toBe(503)
+        expect(result.body.data?.token).toBeUndefined()
+        expect(await stateOf()).toEqual(before)
+      } else {
+        await holder.query('ROLLBACK')
+        const result = await pending
+        expect(result.status, result.body.code).toBe(200)
+        const claims = jwt.verify(result.body.data.token, runtimeJwtSecret()) as jwt.JwtPayload
+        expect(claims.userId).toBe(target.userId)
+        expect(claims.tenantId).toBe(target.orgId)
+        expect((await query('SELECT id FROM user_sessions WHERE id=$1 AND user_id=$2', [claims.sid, target.userId])).rowCount).toBe(1)
+        expect(await stateOf()).toMatchObject({ activation_status: 'activated', is_active: true, memberships: 1, aliases: 1, grants: 1, sessions: 1 })
+      }
+    } finally {
+      unlock()
+      await holder.query('ROLLBACK')
+      try { await pending } finally { paused?.mockRestore(); await holder.end(); vi.unstubAllGlobals(); vi.unstubAllEnvs() }
+    }
+  }, 15000)
 
   // Both branches of the source read must serialise. The IMPLICIT branch (no directoryAccountId,
   // links-by-user) and the EXPLICIT branch (directoryAccountId, the path the production DingTalk

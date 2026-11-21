@@ -9,11 +9,13 @@ import { randomUUID } from 'node:crypto'
 import * as bcrypt from 'bcryptjs'
 import jwt, { type SignOptions } from 'jsonwebtoken'
 import { authService, type User } from '../auth/AuthService'
+import { isSessionRenewalBusyError } from '../auth/user-access-lock'
 import { buildOnboardingPacket, getAccessPreset } from '../auth/access-presets'
 import {
   buildAuthUrl,
   DingTalkLoginPolicyError,
   exchangeCodeForDingTalkProfile,
+  readDingTalkLoginContext,
   exchangeCodeForUser,
   exchangeEnterpriseAuthCodeForUser,
   getDingTalkRuntimeStatus,
@@ -33,12 +35,17 @@ import { validatePassword } from '../auth/password-policy'
 import { classifyRecoveryConflict, sendIfRecoveryConflict } from '../db/recovery-conflict'
 import { query, transaction } from '../db/pg'
 import {
-  assertOrdinaryIssuerAllowsLegacySession,
   closedPasswordOrigin,
-  StrictCredentialChainError,
   type ClosedExternalOrigin,
 } from '../auth/strict-credential-chain'
-import { StrictLoginGrantError } from '../auth/strict-login-grant-store'
+import {
+  checkEmptyDingTalkScope,
+  checkOrdinaryDingTalkSource,
+  DingTalkSourceError,
+  refuseDingTalkSource,
+  resolveDingTalkLoginSource,
+  type DingTalkLoginSource,
+} from '../auth/dingtalk-login-source'
 import {
   bindStrictDingTalkEntryLocal,
   classifyVerifiedSessionPayload,
@@ -48,7 +55,7 @@ import {
 } from '../auth/strict-dingtalk-entry'
 import type { AuthorizationInputTransactionRunner } from '../rbac/authorization-input-lock'
 import { escapeLikePattern, visibleUserPredicate } from '../admin/user-visibility'
-import { activatePendingUser } from '../auth/user-activate'
+import { activatePendingUser, type RegisteredActivationSession } from '../auth/user-activate'
 import { createUserSession, getUserSession, listUserSessions, revokeUserSession, touchUserSession } from '../auth/session-registry'
 import { revokeUserSessions } from '../auth/session-revocation'
 import { readAuthenticatedSessionContext } from '../auth/security-action-proof'
@@ -743,65 +750,71 @@ function mapDingTalkActivationFailure(error: unknown): DingTalkActivationIntentE
   )
 }
 
-async function issueAuthSessionToken(
-  user: User,
-  req: Request,
-  options: { expectedAccessGeneration?: number; origin: ClosedExternalOrigin | null },
-): Promise<string> {
-  const sessionId = randomUUID()
-  const tenantId = await authService.resolveSessionTenantId(user.id, resolveRequestTenantId(req))
-  const tokenUser = tenantId ? { ...user, tenantId } : user
-  const token = authService.createToken(tokenUser, { sid: sessionId, externalAuth: false })
-  const payload = authService.readTokenPayload(token)
+type SessionRegistrationClient = Parameters<Parameters<typeof transaction>[0]>[0]
 
-  if (payload?.exp) {
-    const sessionOptions = {
-      sessionId,
-      expectedAccessGeneration: options.expectedAccessGeneration,
-      expiresAt: new Date(payload.exp * 1000).toISOString(),
-      ipAddress: getClientIP(req),
-      userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
-    }
-    const origin = options.origin
-    const session = origin !== null && origin.kind !== 'password'
-      ? await transaction(async (client) => {
-        await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-        const subject = await client.query('SELECT id FROM users WHERE id = $1 FOR SHARE', [user.id])
-        if (subject.rows.length !== 1) return null
-        const connection = await client.query(
-          'SELECT id FROM directory_integrations WHERE id = $1::uuid FOR SHARE',
-          [origin.connectionId],
-        )
-        if (connection.rows.length !== 1) return null
-        try {
-          await assertOrdinaryIssuerAllowsLegacySession(client, origin)
-        } catch (error) {
-          if (error instanceof StrictCredentialChainError && error.code === 'strict_connection') {
-            throw new DingTalkLoginPolicyError('DingTalk legacy login is closed for this connection', {
-              statusCode: 403,
-              code: 'strict_connection',
-            })
-          }
-          if (error instanceof StrictCredentialChainError || error instanceof StrictLoginGrantError) {
-            throw new DingTalkLoginPolicyError('DingTalk login authorization is unavailable', {
-              statusCode: 503,
-              code: 'grant_state_unavailable',
-            })
-          }
-          throw error
-        }
-        return createUserSession(user.id, sessionOptions, client)
-      })
-      : await createUserSession(user.id, sessionOptions)
-    if (!session) throw new DingTalkLoginPolicyError('Authentication changed; please sign in again', {statusCode:409,code:'authentication_changed'})
-  }
+async function registerDingTalkSession(client: SessionRegistrationClient, userId: string, req: Request, expectedAccessGeneration?: number) {
+  const sid = randomUUID()
+  const clock = await client.query('SELECT floor(extract(epoch FROM clock_timestamp()))::bigint AS issued_at')
+  const issuedAt = Number(clock.rows[0]?.issued_at)
+  if (!Number.isSafeInteger(issuedAt) || issuedAt <= 0) throw sessionChanged()
+  const registered = await createUserSession(userId, {
+    sessionId: sid, expectedAccessGeneration, expiresAt: new Date(authService.sessionExpiresAt(issuedAt) * 1000).toISOString(),
+    ipAddress: getClientIP(req), userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
+  }, client)
+  if (!registered) throw sessionChanged()
+  return { sid, issuedAt }
+}
 
+function sessionChanged() {
+  return new DingTalkLoginPolicyError('Authentication changed; please sign in again', { statusCode: 409, code: 'authentication_changed' })
+}
+
+async function noteSuccessfulLogin(userId: string) {
   try {
-    await query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id])
+    await query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [userId])
   } catch (error) {
     logger.warn('Failed to update last_login_at after external auth login', error instanceof Error ? error : undefined)
   }
+}
 
+async function issueAuthSessionToken(
+  user: User,
+  req: Request,
+  options: {
+    expectedAccessGeneration?: number
+    origin: ClosedExternalOrigin | null
+    source?: DingTalkLoginSource
+    requiresEmptyScope?: boolean
+  },
+): Promise<string> {
+  const tenantId = await authService.resolveSessionTenantId(user.id, resolveRequestTenantId(req))
+  const tokenUser = tenantId ? { ...user, tenantId } : user
+  let token: string
+  if (options.origin?.kind === 'password') {
+    const sessionId = randomUUID()
+    const sessionOptions = {
+      sessionId, expectedAccessGeneration: options.expectedAccessGeneration, ipAddress: getClientIP(req),
+      userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
+    }
+    token = authService.createToken(tokenUser, { sid: sessionId, externalAuth: false })
+    const payload = authService.readTokenPayload(token)
+    if (payload?.exp && !await createUserSession(user.id, {
+      ...sessionOptions, expiresAt: new Date(payload.exp * 1000).toISOString(),
+    })) throw sessionChanged()
+  } else {
+    const source = options.source
+    if (!source || (source.connectionId && options.origin && options.origin.connectionId !== source.connectionId)) refuseDingTalkSource()
+    const session = await transaction(async (client) => {
+      await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+      const subject = await client.query('SELECT id FROM users WHERE id = $1 FOR SHARE', [user.id])
+      if (subject.rows.length !== 1) throw sessionChanged()
+      await checkOrdinaryDingTalkSource(client, source)
+      if (source.connectionId && (options.requiresEmptyScope || !options.origin)) await checkEmptyDingTalkScope(client)
+      return registerDingTalkSession(client, user.id, req, options.expectedAccessGeneration)
+    })
+    token = authService.createToken(tokenUser, { ...session, externalAuth: false })
+  }
+  await noteSuccessfulLogin(user.id)
   return token
 }
 
@@ -1399,6 +1412,10 @@ authRouter.post('/refresh-token', async (req: Request, res: Response) => {
       }
     })
   } catch (error) {
+    if (isSessionRenewalBusyError(error)) {
+      res.set('Retry-After', '1')
+      return res.status(503).json({ success: false, error: 'Token refresh unavailable', code: 'SESSION_REFRESH_UNAVAILABLE' })
+    }
     logger.error('Token refresh error', error instanceof Error ? error : undefined)
     res.status(500).json({
       success: false,
@@ -1530,29 +1547,16 @@ authRouter.post('/session-org', async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: 'An explicit organization is required', code: 'SESSION_ORG_REQUIRED' })
     }
     const orgId = body.orgId.trim()
-    const chosen = await authService.resolveSessionTenantId(user.id, orgId)
-    if (chosen !== orgId) {
-      return res.status(403).json({ success: false, error: 'Not a member of the requested organization', code: 'SESSION_ORG_NOT_MEMBER' })
-    }
-    const payload = authService.readTokenPayload(token)
-    const sessionId = typeof payload?.sid === 'string' && payload.sid.trim() ? payload.sid : randomUUID()
-    const tokenUser = { ...user, tenantId: chosen }
-    const nextToken = authService.createToken(tokenUser, { sid: sessionId, externalAuth: false })
-    const nextPayload = authService.readTokenPayload(nextToken)
-    if (!nextPayload?.exp) {
-      return res.status(503).json({ success: false, error: 'Organization switch unavailable', code: 'SESSION_ORG_SWITCH_UNAVAILABLE' })
-    }
-    // Fenced like refresh: the session is registered only while the access generation read when this
-    // request authenticated is still current, so a credential verified before a revocation cannot mint one.
-    const session = await createUserSession(user.id, {
-      sessionId, expiresAt: new Date(nextPayload.exp * 1000).toISOString(),
-      expectedAccessGeneration: Number(user.access_generation ?? 0),
+    const switched = await authService.switchOrdinarySessionOrg(token, user, orgId, {
       ipAddress: getClientIP(req), userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
     })
-    if (!session) {
+    if (switched.kind === 'not_member') {
+      return res.status(403).json({ success: false, error: 'Not a member of the requested organization', code: 'SESSION_ORG_NOT_MEMBER' })
+    }
+    if (switched.kind === 'changed') {
       return res.status(409).json({ success: false, error: 'Authentication changed; please sign in again', code: 'authentication_changed' })
     }
-    return res.json({ success: true, data: { token: nextToken, user: tokenUser, currentOrgId: chosen } })
+    return res.json({ success: true, data: { token: switched.token, user: switched.user, currentOrgId: orgId } })
   } catch {
     return res.status(503).json({ success: false, error: 'Organization switch unavailable', code: 'SESSION_ORG_SWITCH_UNAVAILABLE' })
   }
@@ -1897,41 +1901,53 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
         )
       }
 
-      const profile = await exchangeCodeForDingTalkProfile(code)
-      const runtimeStatus = getDingTalkRuntimeStatus()
-      const corpId = String(runtimeStatus.corpId || '').trim()
+      const loginSource = await resolveDingTalkLoginSource({
+        connectionId: req.body?.connectionId, corpId: req.body?.corpId,
+      }, localStrict?.loginSourceEnv)
+      if (loginSource.strict) refuseDingTalkSource()
+      const { config } = await readDingTalkLoginContext(loginSource)
+      const profile = await exchangeCodeForDingTalkProfile(code, config)
+      const corpId = config.corpId ?? ''
       const source = await resolveDingTalkActivationSource({
         corpId,
         openId: profile.openId,
         unionId: profile.unionId,
       })
 
-      let activationOrigin: ClosedExternalOrigin | null = null
+      let session: RegisteredActivationSession | undefined
       try {
         const activated = await activatePendingUser({
           userId: activateUserId,
           mode: 'sso',
           adminUserId: activateAdminUserId,
           directoryAccountId: source.directoryAccountId,
+          loginSource,
           enableDingTalkGrant: true,
           expectedDingTalkIdentity: {
             corpId,
             openId: profile.openId,
             unionId: profile.unionId,
           },
+        }, async (client) => {
+          const tenantId = await authService.resolveSessionTenantId(activateUserId, resolveRequestTenantId(req), client)
+          const registered = await registerDingTalkSession(client, activateUserId, req)
+          return { ...registered, tenantId }
         })
-        activationOrigin = activated.externalOrigin
+        session = activated.session
       } catch (error) {
         // O2-S2: a recovery conflict (named retryable RecoveryConflictError from
         // activatePendingUser) must NOT collapse into the 500 'activate_failed'
         // fallback — rethrow it whole for the outer catch's uniform retryable 409.
         // Every ACTIVATE_* mapping below is unchanged.
-        if (classifyRecoveryConflict(error) === 'recovery_conflict') throw error
+        if (classifyRecoveryConflict(error) === 'recovery_conflict' || error instanceof DingTalkSourceError || error instanceof DingTalkLoginPolicyError) throw error
         throw mapDingTalkActivationFailure(error)
       }
 
+      if (!session) throw sessionChanged()
       const user = await loadActivatedAuthUser(activateUserId)
-      const token = await issueAuthSessionToken(user, req, { origin: activationOrigin })
+      const tokenUser = session.tenantId ? { ...user, tenantId: session.tenantId } : user
+      const token = authService.createToken(tokenUser, { sid: session.sid, issuedAt: session.issuedAt, externalAuth: false })
+      await noteSuccessfulLogin(user.id)
       await auditLog({
         actorId: activateAdminUserId,
         actorType: 'user',
@@ -1962,12 +1978,18 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
       })
     }
 
-    if (localStrict) {
+    const loginSource = await resolveDingTalkLoginSource({
+      connectionId: req.body?.connectionId, corpId: req.body?.corpId,
+    }, localStrict?.loginSourceEnv)
+
+    if (loginSource.strict) {
+      if (!localStrict) refuseDingTalkSource()
       const binding = localStrict
       try {
         const strictOutcome = await binding.signInWeb({
           code,
-          selector: { connectionId: req.body?.connectionId, corpId: req.body?.corpId },
+          selector: { connectionId: loginSource.connectionId, corpId: loginSource.corpId },
+          expectedAppKey: loginSource.appKey,
           ...strictDingTalkRequestFields(req),
         })
         if (strictOutcome.status === 'issued') {
@@ -1987,15 +2009,10 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
         if (error instanceof StrictDingTalkEntryError) return sendStrictDingTalkEntryError(res, error)
         throw error
       }
-      if (!isDingTalkConfigured()) {
-        return res.status(503).json({
-          success: false,
-          error: 'DingTalk login is not configured on this server',
-        })
-      }
+      refuseDingTalkSource()
     }
 
-    const result = await exchangeCodeForUser(code)
+    const result = await exchangeCodeForUser(code, loginSource)
     const permissions = await loadAuthPermissions(result.localUserId)
     const user: User = {
       id: result.localUserId,
@@ -2009,9 +2026,11 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
     const token = await issueAuthSessionToken(user, req, {
       expectedAccessGeneration: result.sessionGeneration,
       origin: result.externalOrigin,
+      source: loginSource,
+      requiresEmptyScope: result.requiresEmptyScope,
     })
 
-    logger.info(`DingTalk login for ${user.email} (openId: ${result.dingtalkUser.openId}, new: ${result.isNewUser})`)
+    logger.info('DingTalk login completed')
 
     return res.json({
       success: true,
@@ -2035,6 +2054,7 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
     // layer) → uniform retryable 409. Every DingTalk policy/request mapping below is
     // unchanged; nothing fail-closed is loosened.
     if (sendIfRecoveryConflict(res, error)) return
+    if (error instanceof DingTalkSourceError) return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code })
     logger.error('DingTalk callback error', error instanceof Error ? error : undefined)
     const statusCode = error instanceof DingTalkActivationIntentError
       ? error.statusCode
@@ -2114,41 +2134,16 @@ authRouter.post('/login/dingtalk/container', async (req: Request, res: Response)
       })
     }
 
-    if (localStrict) {
-      const binding = localStrict
-      try {
-        const strictOutcome = await binding.signInContainer({
-          code: authCode,
-          selector: { connectionId: req.body?.connectionId, corpId: req.body?.corpId },
-          ...strictDingTalkRequestFields(req),
-        })
-        if (strictOutcome.status === 'issued') {
-          resetRateLimit(rateKey)
-          const authUser = strictDingTalkAuthUser(strictOutcome.user)
-          return res.json({
-            success: true,
-            data: {
-              mode: 'login',
-              user: { id: authUser.id, email: authUser.email, name: authUser.name, role: authUser.role, permissions: authUser.permissions },
-              token: strictOutcome.token,
-              features: buildFeaturePayload(authUser),
-            },
-          })
-        }
-      } catch (error) {
-        if (error instanceof StrictDingTalkEntryError) return sendStrictDingTalkEntryError(res, error)
-        throw error
-      }
-      if (!['true', '1', 'yes'].includes(flag)) {
-        return res.status(404).json({
-          success: false,
-          error: 'DingTalk container login is not enabled',
-          code: 'container_login_disabled',
-        })
-      }
+    const loginSource = await resolveDingTalkLoginSource({
+      connectionId: req.body?.connectionId, corpId: req.body?.corpId,
+    }, localStrict?.loginSourceEnv)
+    if (loginSource.strict) refuseDingTalkSource()
+    if (!['true', '1', 'yes'].includes(flag)) {
+      return res.status(404).json({
+        success: false, error: 'DingTalk container login is not enabled', code: 'container_login_disabled',
+      })
     }
-
-    const result = await exchangeEnterpriseAuthCodeForUser(authCode)
+    const result = await exchangeEnterpriseAuthCodeForUser(authCode, loginSource)
     resetRateLimit(rateKey)
     const permissions = await loadAuthPermissions(result.localUserId)
     const user: User = {
@@ -2163,9 +2158,11 @@ authRouter.post('/login/dingtalk/container', async (req: Request, res: Response)
     const token = await issueAuthSessionToken(user, req, {
       expectedAccessGeneration: result.sessionGeneration,
       origin: result.externalOrigin,
+      source: loginSource,
+      requiresEmptyScope: result.requiresEmptyScope,
     })
 
-    logger.info(`DingTalk container login for ${user.email} (unionId: ${result.dingtalkUser.unionId}, new: ${result.isNewUser})`)
+    logger.info('DingTalk container login completed')
 
     return res.json({
       success: true,
@@ -2186,6 +2183,7 @@ authRouter.post('/login/dingtalk/container', async (req: Request, res: Response)
     // O2-S2: container login can JIT-provision a users row — marker 40001 → uniform
     // retryable 409; the mappings below are unchanged.
     if (sendIfRecoveryConflict(res, error)) return
+    if (error instanceof DingTalkSourceError) return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code })
     logger.error('DingTalk container login error', error instanceof Error ? error : undefined)
     // DingTalkBusinessError here is DingTalk refusing the payload (typically an
     // invalid/expired authCode) — the caller's fault, not an upstream outage.
