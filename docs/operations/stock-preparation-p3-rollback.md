@@ -61,4 +61,4 @@ node scripts/ops/stock-preparation-p3/gen-counts.mjs --layout package --root $p3
   --json $countEvidence
 ```
 
-要求 `GENCOUNTS_RESULT status=complete`，两份模板均在计算模式 `hardcoded_lines=0`。从该提交取 `03-live-env-check.ps1` 与 `Invoke-P3Rollback.ps1` 放入 QA 附件 `ps`。离线包仍走既有 verify，审核附件单独核哈希。P1–P7 对最终基线重派生，补齐 T-01、T-02、T-03 和最新构建映射，填写新版窗口、批准记录及附件清单。独立复核应核对这对生成物与包内容、三处 P4/P5/s06 输出契约、R84 额外阻断、状态 C 及新窗口重签。通过目标 Windows 演练和强制状态 C 后记录结果。
+要求 `GENCOUNTS_RESULT status=complete`，两份模板均在计算模式 `hardcoded_lines=0`。从该提交取 `03-live-env-check.ps1` 与 `Invoke-P3Rollback.ps1` 放入 QA 附件 `ps`，将 `r12-install-counts.sql` 放入附件 `sql`，将 `h01-health.ps1`、`h31-pull-dry-run.ps1`、`h32-pull-dry-run-job.ps1`、`_pull-plan-counts.ps1` 和沿用的 `_http.ps1` 放入附件 `http`。健康探针的 `-P3Commit` 取已核验的包内提交。离线包仍走既有 verify，审核附件单独核哈希。P1–P7 对最终基线重派生，核验健康构建映射及两条试算的计划计数，填写新版窗口、批准记录及附件清单。独立复核应核对这对生成物与包内容、三处 P4/P5/s06 输出契约、R84 额外阻断、状态 C 及新窗口重签。通过目标 Windows 演练和强制状态 C 后记录结果。

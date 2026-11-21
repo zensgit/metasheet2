@@ -173,6 +173,8 @@ $Spec = [ordered]@{
   'INTEGRATION_AUTOMATION_RUN_ACTION_ENABLED'        = @('boolean', 'true-stops')
   'INTEGRATION_AUTOMATION_RUN_EVENT_ENABLED'         = @('boolean', 'true-stops')
   # package 3 additions (pre-audit R6; manifest @59876b3d6)
+  # YiDa top-stack extension (R-88): sheet sources require exact true.
+  'INTEGRATION_YIDA_SHEET_SOURCE_ENABLED'            = @('boolean', 'true-stops')
   'INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED'  = @('boolean', 'true-stops')
   'INTEGRATION_YIDA_RECONCILE_READ_ENABLED'          = @('boolean', 'true-stops')
   'AUTOMATION_SYNTHETIC_INTEGRATION_PREVIEW_ENABLED' = @('boolean', 'true-stops')

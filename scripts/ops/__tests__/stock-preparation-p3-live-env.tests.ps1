@@ -41,7 +41,7 @@ $allTestKeys = @('AUTOMATION_CLASSB_OUTBOUND_ENABLED', 'NODE_ENV', 'MULTITABLE_E
   'INTEGRATION_AUTOMATION_RUN_APPLY_ENABLED', 'INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS', 'INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS',
   'INTEGRATION_CORE_STOCK_PREPARATION_PILOT_PATH', 'INTEGRATION_AUTOMATION_RUN_PIPELINE_WRITE_ENABLED',
   'INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED', 'INTEGRATION_CORE_C6_TEST_FAILURE_INJECTION_JSON', 'SOME_OTHER_FLAG', 'ANOTHER_ABSENT_FLAG',
-  'DELEGATED_SCOPE_ACTIVATION_ENABLED', 'EXTERNAL_LOGIN_STRICT_SESSION_MAX_AGE_SECONDS', 'DIRECTORY_DEPROVISION_REVOKE_CREDENTIALS_ENABLED')
+  'DELEGATED_SCOPE_ACTIVATION_ENABLED', 'EXTERNAL_LOGIN_STRICT_SESSION_MAX_AGE_SECONDS', 'DIRECTORY_DEPROVISION_REVOKE_CREDENTIALS_ENABLED', 'INTEGRATION_YIDA_SHEET_SOURCE_ENABLED')
 foreach ($k in $allTestKeys) {
   foreach ($scope in @('Machine', 'User')) {
     if ($null -ne [Environment]::GetEnvironmentVariable($k, $scope)) { 'ABORT ' + $scope + ' env holds a test key'; exit 9 }
@@ -215,11 +215,11 @@ Show 'case 9 (bad key)' $o9
 Check 'case9' $o9 @('LIVEENV_RESULT keys=0 status=incomplete reason=bad_key') @()
 $o10 = Run $script $r2 $homeAlive @()
 Show 'case 10 (default key list)' $o10
-Check 'case10' $o10 @('LIVEENV_RESULT keys=38 status=complete') @()
+Check 'case10' $o10 @('LIVEENV_RESULT keys=39 status=complete') @()
 $keyLines10 = @($o10 | Where-Object { $_ -like 'LIVEENV key=*' })
-if ($keyLines10.Count -eq 38) { $pass++ } else { $fail++; ('  FAIL case10: key lines=' + $keyLines10.Count) }
+if ($keyLines10.Count -eq 39) { $pass++ } else { $fail++; ('  FAIL case10: key lines=' + $keyLines10.Count) }
 $gl = @($o10 | Where-Object { $_ -like 'LIVEENV_GATE *' })
-if ($gl.Count -eq 1 -and $gl[0] -match '^LIVEENV_GATE on=(\d+) review=(\d+) unknown=(\d+) off=(\d+) record=(\d+)$' -and ([int]$matches[1] + [int]$matches[2] + [int]$matches[3] + [int]$matches[4]) -eq 31 -and [int]$matches[5] -eq 7) { $pass++ } else { $fail++; '  FAIL case10: gate sum' }
+if ($gl.Count -eq 1 -and $gl[0] -match '^LIVEENV_GATE on=(\d+) review=(\d+) unknown=(\d+) off=(\d+) record=(\d+)$' -and ([int]$matches[1] + [int]$matches[2] + [int]$matches[3] + [int]$matches[4]) -eq 32 -and [int]$matches[5] -eq 7) { $pass++ } else { $fail++; '  FAIL case10: gate sum' }
 foreach ($nk in @('INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED kind=boolean', 'INTEGRATION_YIDA_RECONCILE_READ_ENABLED kind=boolean', 'AUTOMATION_SYNTHETIC_INTEGRATION_PREVIEW_ENABLED kind=boolean',
     'INTEGRATION_AUTOMATION_RUN_APPLY_ENABLED kind=boolean', 'INTEGRATION_AUTOMATION_RUN_PIPELINE_WRITE_ENABLED kind=boolean', 'DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED kind=boolean',
     'INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS kind=list', 'INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS kind=list')) {
@@ -484,7 +484,8 @@ $keys23 = @('-Keys', ($activationKey, $maxAgeKey, $revocationKey -join ','))
 Check 'case10-new-defaults' $o10 @(
   (L $activationKey 'absent' 'absent' 'absent' 'none' 'none' 'boolean' 'true-stops' 'off'),
   (L $maxAgeKey 'absent' 'absent' 'absent' 'none' 'none' 'numeric' 'numeric-stops' 'off'),
-  (L $revocationKey 'absent' 'absent' 'absent' 'none' 'none' 'boolean' 'true-stops' 'off')
+  (L $revocationKey 'absent' 'absent' 'absent' 'none' 'none' 'boolean' 'true-stops' 'off'),
+  (L 'INTEGRATION_YIDA_SHEET_SOURCE_ENABLED' 'absent' 'absent' 'absent' 'none' 'none' 'boolean' 'true-stops' 'off')
 ) @()
 foreach ($numeric in @(
   @('300', 'valid-integer', 'on'), @('2592000', 'valid-integer', 'on'),
@@ -501,6 +502,15 @@ foreach ($numeric in @(
     (L $revocationKey 'literal-true' 'absent' 'absent' 'none' 'none' 'boolean' 'true-stops' 'on')
   ) @()
 }
+
+$sheetSourceKey = 'INTEGRATION_YIDA_SHEET_SOURCE_ENABLED'
+$sheetSourceOn = '[' + (App 'metasheet-backend' @() @($sheetSourceKey, 'true')) + ']'
+$root24 = New-Root 'root24' $sheetSourceOn $false $null $null 0 $false $true
+$o24 = Run $script $root24 $homeAlive @('-Keys', $sheetSourceKey)
+Check 'case24-sheet-source-after-file-removal' $o24 @(
+  (L $sheetSourceKey 'literal-true' 'absent' 'absent' 'none' 'none' 'boolean' 'true-stops' 'on'),
+  'LIVEENV_GATE on=1 review=0 unknown=0 off=0 record=0'
+) @()
 
 # ---------- Mutants: each must turn a case red ----------
 # GroupOk = the checks a mutant must break. The baseline below proves the unmutated tool passes each one,

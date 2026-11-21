@@ -1,6 +1,6 @@
 # P3 备料离线包 QA 装机单
 
-**切包前模板。组装、复核和签收分别记录。** 适用变更从 {{BASELINE_LABEL}} 到 {{PACKAGE_LABEL}}。负责人填写经批准的基线、回退目标、窗口和构件校验值，现场按此单从头核对。
+**切包前模板。组装、复核和签收分别记录。** R-103 指定 P3 只按已签收 R85 基线组装。适用变更从 {{BASELINE_LABEL}} 到 {{PACKAGE_LABEL}}。负责人填写经批准的基线、回退目标、窗口和构件校验值，现场按此单从头核对。
 
 | 窗口记录 | 现场填写 |
 |---|---|
@@ -14,14 +14,14 @@
 ## 一、装前只读检查
 
 0. **重新验窗。** 开工前实际读一次带时区的当前时间（PowerShell `Get-Date -Format o`），记录窗口与当前时刻的关系、批准引用和当前附件批次。未到、已过、剩余时间不足以验收或交接、双方时区不一致、批次已作废、收到新版附件，任一项立即停。窗口改期时先作废旧单及其附件，按新窗口重签文字和构件清单，现场用新单从第 0 步重核。第 20 步前再验一次；中断后只从新确认的窗口继续。归档旧批次标识、停在哪一步和新版校验结果。
-1. `http\h01-health.ps1` 应答 `HEALTH status=200` 且构建为 {{BASELINE_LABEL}}。基线已有签收记录。先核定已签收的回退目标，R85 路径适用 A，R84 路径适用 B。若目标低于 R84，暂停并按既有手册走新的审批与风险复核。
+1. `.\http\h01-health.ps1 -P3Commit $p3Commit`（从切包时已核验的包内提交取得）应答 `HEALTH status=200` 且构建为 {{BASELINE_LABEL}}。基线已有签收记录。本单回退目标为已签收的 R85。R85 尚未签收或需要其它目标时暂停，交 owner 重新裁定。
 2. 同一个 Windows 帐号、同一个 `PM2_HOME`，在日后实际装包的 PowerShell 窗口运行以下命令。只抄固定结果行。
    ```powershell
    .\ps\02-pm2-owner-check.ps1
    .\ps\03-live-env-check.ps1 -InstallRoot $installRoot
    ```
    `02` 必须为 `owned=true`、`status=complete`。若重新打开终端，先从第 2 步复核。
-3. **开关闸门。** 现场与协调者逐行检查 `LIVEENV`。必须有 `LIVEENV_GATE on=0 review=0 unknown=0`、完整的 `LIVEENV_RESULT`，以及 `LIVEENV_DBURL relation=same` 或 `relation=root_absent`、`LIVEENV_DBURL_PROCESS process=same`。DB 条件和任一开关条件不满足就停。装机窗口、以往窗口的许可都不放行某个开关。布尔 OFF 写法为 `=false`；列表、路径和 JSON 的空白写法依 `03` 各键定义。严格会话时限 `EXTERNAL_LOGIN_STRICT_SESSION_MAX_AGE_SECONDS` 缺失为 OFF，合法整数为 ON，空白或非法配置交 owner。
+3. **开关闸门。** 现场与协调者逐行检查 `LIVEENV`。必须有 `LIVEENV_GATE on=0 review=0 unknown=0`、完整的 `LIVEENV_RESULT`，以及 `LIVEENV_DBURL relation=same` 或 `relation=root_absent`、`LIVEENV_DBURL_PROCESS process=same`。DB 条件和任一开关条件不满足就停。装机窗口、以往窗口的许可都不放行某个开关。宜搭表数据源 `INTEGRATION_YIDA_SHEET_SOURCE_ENABLED` 也必须为 `verdict=off`。布尔 OFF 写法为 `=false`；列表、路径和 JSON 的空白写法依 `03` 各键定义。严格会话时限 `EXTERNAL_LOGIN_STRICT_SESSION_MAX_AGE_SECONDS` 缺失为 OFF，合法整数为 ON，空白或非法配置交 owner。
    - **第 11 项单列签字** `INTEGRATION_YIDA_CONNECTION_TEST_ENABLED` 必须为 `verdict=off`，并且该行与总闸门均有记录。只要有 `literal-true` 或其它非 OFF 状态，记录停止位置及状态所在列，报 owner。若 owner 本次批准改动，备份每份待改的 `app.env`，把该键明确改为 `false`，依批准的启动流程重启后重跑 `02`、`03`。验证进程为 `literal-false`，文件列为 `literal-false` 或 `absent`；然后才继续。记录初值状态、改动批准、复查结果。租户声明开关按第 4 步维持原状。
 4. 记下 `03` 中 `gate=record` 的行，尤其是租户声明、项目表开关和 Class B 外发。双值、缺列或其它异常另记并交协调者。后续做逐列对照。
 5. 用本次批准的连接设置建立只读核对会话。确认服务、迁移和探针指向同一库及 schema。用 `sql\s05-admin-for-tenant.sql` 核对批准租户有唯一可签令牌的管理员；照抄计数与完成状态。发行与持有令牌只按本次单独批准的时点、期限和次数。令牌放进仅操作者可读的临时文件，用 `.\http\h00-token-check.ps1 -TokenFile $tokenFile` 核 `usable=true expired=false`。过期即停在依赖它的步骤，先清理旧文件，等新的次数批复。窗口审批与令牌可用期各自核对。
@@ -40,11 +40,11 @@ psql -X -w -qAt -v ON_ERROR_STOP=1 -v "schema=$schema" -f .\sql\s06-new-migratio
 |---|---|---|
 | 6a P1 | `sql\p1-check-constraint-names.sql` | `P1_VERDICT pass=t`，`mismatched=0 ambiguous=0 missing=0 widened=0` 且完成。其余停，保留固定行并报告。 |
 | 6b P2 | `sql\p2-lock-holders.sql` | `pass=t` 且完成。只有 owner 已书面接受且同一次的 `waiting=0 hidden_holders=0`、结果完整时，`pass=blind` 才能放行。可见阻挡、隐蔽持有者、P2 失败或缺结果都停，由 owner 处理；保持会话现状。 |
-| 6c P3 | 后端连接角色运行 `sql\p3-object-ownership.sql` | `pass=t`、`not_owned=0 missing=0 privileges_missing=0`，且完成。R84 基线只用该基线重新派生的 P2/P3。 |
+| 6c P3 | 后端连接角色运行 `sql\p3-object-ownership.sql` | `pass=t`、`not_owned=0 missing=0 privileges_missing=0`，且完成。本单只用本次 R85 基线派生的 P2/P3。 |
 | 6d 迁移环境 | 再跑 `03`，用 `-Keys 'MIGRATION_EXCLUDE,MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL,ALLOW_DB_RESET'` | 三个键所有列都 absent，三个 verdict 都 off，且完整。 |
 | 6e P7 | `sql\p7-admin-census.sql` | 记录权限形态变化的人数与完成状态。人数非零让 owner 先看。 |
-| 6f 运行计数 | 切包填入 R12 计数脚本（T-01） | 记录多活动拉取源的组织数、已有回写日期的单元格数；附件缺失写未取得。 |
-| 6g 拉取基线 | `http\h31-pull-dry-run.ps1`，按已批准项目序号记录响应和 T-02 计划计数 | 默认跳过。须单批真实 PLM 只读及令牌预算。记录序号、HTTP 码、状态和计数。 |
+| 6f 运行计数 | `sql\r12-install-counts.sql`（T-01） | 记录同次的 `R12COUNT` 两个计数与 `R12COUNT_RESULT` 完成行。缺完成行、报错或附件缺失记未取得。 |
+| 6g 拉取基线 | `http\h31-pull-dry-run.ps1`，按已批准项目序号记录响应和 `PULLDRY_COUNTS` 计划计数 | 默认跳过。须单批真实 PLM 只读及令牌预算。记录序号、HTTP 码、状态和计数。 |
 | 6h P5 | `sql\p5-switch-off-row-counts.sql` | 记录完成状态、计数和 `all_zero`。缺权限或缺结果记未取得。 |
 
 7–11. 用 `s07-stock-prep-pre-counts.sql`、`01-interval-editor-rules-count.sql` 和已签收基线清单记录装前备料、平台及定时规则计数。记录专用测试表。用 `.\ps\09-scheduled-task-read.ps1 -InstallRoot $installRoot` 核到批准的脚本版本和定时任务参数形态，记录最近一次定时结果及失败数；目标错、状态异常或出现未批准的活动任务就停。任何启动批次标识的独立窗口还要先核 `is=package2`。
@@ -87,7 +87,7 @@ $LASTEXITCODE
 
 ## 五、备料表
 
-28–32. 已签收 R85 基线沿用既有列和绑定。R84 基线的补列先以批准的旧单第五节核对步骤和附件，核对脚本哈希、备份并按单批写入范围操作。重新导出绑定及重启后执行 `h30-env-binding-check.ps1`（`explicit_422=false`），再用 `h31-options-sync.ps1` 核对补列、复跑无新增、部署表缺列数归零。每次实写的目标与输出只记计数。无授权、令牌失效、绑定为空或工具缺失时记录原因并交协调者。第 31.3 步的真实 PLM dry-run 也须单独批准，默认跳过。
+28–32. 沿用已签收 R85 的列和绑定。附件须包含 R85 签收证据和装后只读绑定检查。本轮发现缺列、绑定异常或工具缺失时保持任务暂停，交协调者。第 31.3 步如需读真实 PLM 执行 dry-run，单独批准，默认跳过。
 
 ## 六、定时试拉
 
@@ -102,8 +102,8 @@ $LASTEXITCODE
 | 35c–d | 授予再撤销仅在单批的合成帐号做，撤销后列表恢复。只读查看仅本部门禁用提示和范围标签。 |
 | 36 | `h36-off-routes.ps1` 核关闭路径；无另批时保持发送、连接测试、试点关闭。 |
 | 37.1–5 | `h37-project-readonly.ps1` 核测试项目的只读入口与关闭状态。父组件候选、修改、移出、改图号或删除前的依赖数提示依父组件验收表，只用获批的合成测试资料。 |
-| 37.6 | 单批后才同步 dry-run。对比第 6g 步同一项目的 HTTP 200、状态和 T-02 计数。默认跳过。 |
-| 37.7 | 单批后才在一个项目执行切包提供的 T-02 后台 dry-run（入队会写作业状态）。HTTP 202 后轮询到结束，与同一项目的同步计划计数对照。默认跳过。 |
+| 37.6 | 单批后才同步 dry-run。对比第 6g 步同一项目的 HTTP 200、状态和 `PULLDRY_COUNTS`。默认跳过。 |
+| 37.7 | 单批后才在一个项目执行 `http\h32-pull-dry-run-job.ps1`（入队会写作业状态）。HTTP 202 后轮询同一个作业。要有完成行和与同步试算相同的 `PULLDRY_COUNTS`；超时或作业不符立即停，由现场核对，不自动再入队。默认跳过。 |
 | 37.8 | P3 写入试验只在获批的合成项目做 dry-run → apply → dry-run，第二次应无待写。 |
 | 37.9 | 第 6f 步已有回写日期的单元格数非零，记录第一次拉取可能新增的批次。 |
 | 38 | 在获批的测试表核日期、数字和字段保存。抽屉连续改两格，刷新两次均保留；保存未完成立即跳转，出现离开确认时取消。 |
@@ -124,4 +124,4 @@ $LASTEXITCODE
 
 ## 十一、回退
 
-47–49. 保持拉取暂停。获 owner 批准并确定目标后，严格按同目录的 [P3 回退操作](stock-preparation-p3-rollback.md) 执行。两条路径都需要 P4 通过、批次标识台账全零、旧包和启动器校验、迁移参数 0、覆盖前后账本一致和旧端构建确认。R84 还需沿用 R85 第十一节的所有旧构建门槛。如果旧版运行在 D21 已应用的数据库，保持多用户角色写入隔离，按回退手册核状态并报 owner。
+47–49. 保持拉取暂停。获 owner 批准并确定目标后，严格按同目录的 [P3 回退操作](stock-preparation-p3-rollback.md) 执行。回到 R85 要求 P4 通过、批次标识台账全零、旧包和启动器校验、迁移参数 0、覆盖前后账本一致和旧端构建确认。如果旧版运行在 D21 已应用的数据库，保持多用户角色写入隔离，按回退手册核状态并报 owner。
