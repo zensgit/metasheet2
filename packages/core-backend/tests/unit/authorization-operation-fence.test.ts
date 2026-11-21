@@ -144,12 +144,42 @@ const fixtureRoot = new URL('../fixtures/authorization-operation-catalog/', impo
 const manifest: { snapshots: Array<{ major: number; sha256: string }> } = JSON.parse(readFileSync(new URL('manifest.json', fixtureRoot), 'utf8'))
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 
-async function inspectCatalog(database: CatalogRow, rows: CatalogRow[][]) {
+// The captures above predate the YiDa stack. A database this code supports also carries D21 (six
+// triggers on fenced tables, two functions, the version table) and the Y6 generated-layout guard, so
+// every replay below adds those rows as measured; see the fixture README.
+type StackAdditions = {
+  d21: { digest: string; rows: CatalogRow[][]; versionTable: CatalogRow[][] }
+  yidaLayout: { digest: string; rows: CatalogRow[][] }
+}
+const stack: StackAdditions = JSON.parse(readFileSync(new URL('stack-additions.json', fixtureRoot), 'utf8'))
+const D21_DIGEST = '829ae23e6dab95d660cb84902adcafe02dc982109568f23b1e0627760f73bb76'
+const YIDA_LAYOUT_DIGEST = 'bcd3224cc13d9701dc2da0f16b708e7ba012b4c22efc57f73d694b3b0ccf9432'
+
+function withStack(rows: CatalogRow[][], parts: ReadonlyArray<'d21' | 'yidaLayout'> = ['d21', 'yidaLayout']): CatalogRow[][] {
+  return rows.map((section, index) => [...section, ...parts.flatMap(part => stack[part].rows[index])])
+}
+
+async function inspectCatalog(database: CatalogRow, rows: CatalogRow[][], versionTable: CatalogRow[][] = stack.d21.versionTable) {
   let calls = 0
-  const result = await inspectAuthorizationOperationSchema(async () => ({ rows: calls++ === 0 ? [database] : rows[calls - 2] }))
-  expect(calls).toBe(9)
+  const result = await inspectAuthorizationOperationSchema(async () => {
+    const index = calls++
+    return { rows: index === 0 ? [database] : index <= 8 ? rows[index - 1] : versionTable[index - 9] ?? [] }
+  })
+  // The database row, the eight catalog sections, then the seven table-scoped sections again for the D21 version table.
+  expect(calls).toBe(16)
   return result
 }
+
+describe('measured YiDa stack additions', () => {
+  it('carry exactly the pinned D21 and Y6 layout digests', () => {
+    expect(stack.d21.rows.map(section => section.length)).toEqual([0, 0, 0, 0, 6, 0, 0, 2])
+    expect(stack.yidaLayout.rows.map(section => section.length)).toEqual([0, 0, 0, 0, 0, 0, 0, 1])
+    expect(stack.d21.versionTable).toHaveLength(7)
+    expect(authorizationOperationD21AdditionDigest(stack.d21.rows, stack.d21.versionTable)).toBe(D21_DIGEST)
+    expect(authorizationOperationYidaLayoutAdditionDigest(stack.yidaLayout.rows)).toBe(YIDA_LAYOUT_DIGEST)
+    expect([stack.d21.digest, stack.yidaLayout.digest]).toEqual([D21_DIGEST, YIDA_LAYOUT_DIGEST])
+  })
+})
 
 function withoutPartition(snapshot: CatalogSnapshot, partition: CatalogRow[][]): CatalogRow[][] {
   return snapshot.rows.map((rows, section) => {
@@ -172,23 +202,55 @@ describe.each(manifest.snapshots)('measured PostgreSQL $major authorization cata
   })
 
   it(`accepts measured N78 and B2 additions with the original exact profile (PG${major})`, async () => {
-    const result = await inspectCatalog(snapshot.database, snapshot.rows)
-    expect(result.digest).toBe(snapshot.inspection.digest)
+    const result = await inspectCatalog(snapshot.database, withStack(snapshot.rows))
     expect(result.baseDigest).toBe(snapshot.digests.base)
     expect(result.ordinary).toBe(true)
+    expect(result.d21Ready).toBe(true)
     expect(isSupportedAuthorizationOperationSchema(result)).toBe(true)
   })
 
-  it(`preserves original and B2-only historical profiles (PG${major})`, async () => {
-    for (const rows of [snapshot.partitions.base, withoutPartition(snapshot, snapshot.partitions.n78)]) {
-      const result = await inspectCatalog(snapshot.database, rows)
-      expect(result.baseDigest ?? result.digest).toBe(snapshot.digests.base)
-      expect(isSupportedAuthorizationOperationSchema(result)).toBe(true)
-    }
+  it(`replays the capture byte for byte and refuses it without the stack additions (PG${major})`, async () => {
+    const captured = await inspectCatalog(snapshot.database, snapshot.rows, [])
+    expect(captured.digest).toBe(snapshot.inspection.digest)
+    expect(captured.ordinary).toBe(true)
+    expect(captured.d21Ready).toBe(false)
+    expect(isSupportedAuthorizationOperationSchema(captured)).toBe(false)
+  })
+
+  it(`refuses a catalog that lacks the D21 addition, its version table or the Y6 layout guard (PG${major})`, async () => {
+    const noD21 = await inspectCatalog(snapshot.database, withStack(snapshot.rows, ['yidaLayout']))
+    expect(noD21.baseDigest).toBe(snapshot.digests.base)
+    expect(noD21.d21Ready).toBe(false)
+    expect(isSupportedAuthorizationOperationSchema(noD21)).toBe(false)
+    const noVersionTable = await inspectCatalog(snapshot.database, withStack(snapshot.rows), [])
+    expect(noVersionTable.d21Ready).toBe(false)
+    expect(isSupportedAuthorizationOperationSchema(noVersionTable)).toBe(false)
+    const noLayout = await inspectCatalog(snapshot.database, withStack(snapshot.rows, ['d21']))
+    expect(noLayout.d21Ready).toBe(true)
+    expect(noLayout.baseDigest).toBeUndefined()
+    expect(isSupportedAuthorizationOperationSchema(noLayout)).toBe(false)
+  })
+
+  it(`preserves the B2-only historical profile; the pre-B2 profile cannot carry D21 (PG${major})`, async () => {
+    const b2Only = await inspectCatalog(snapshot.database, withStack(withoutPartition(snapshot, snapshot.partitions.n78)))
+    expect(b2Only.baseDigest).toBe(snapshot.digests.base)
+    expect(isSupportedAuthorizationOperationSchema(b2Only)).toBe(true)
+    // The exact pre-B2 profile still hashes to its known digest, but it has no D21, and this code
+    // bumps D21's version rows in every authorization write.
+    const original = await inspectCatalog(snapshot.database, snapshot.partitions.base, [])
+    expect(original.digest).toBe(snapshot.digests.base)
+    expect(original.d21Ready).toBe(false)
+    expect(isSupportedAuthorizationOperationSchema(original)).toBe(false)
+    // With D21 added its digest is no longer the exact one, and the base path keeps B2 mandatory.
+    const originalWithStack = await inspectCatalog(snapshot.database, withStack(snapshot.partitions.base))
+    expect(originalWithStack.d21Ready).toBe(true)
+    expect(originalWithStack.baseDigest).toBeUndefined()
+    expect(isSupportedAuthorizationOperationSchema(originalWithStack)).toBe(false)
   })
 
   it('rejects N78 without the complete B2 addition', async () => {
-    const result = await inspectCatalog(snapshot.database, withoutPartition(snapshot, snapshot.partitions.b2))
+    const result = await inspectCatalog(snapshot.database, withStack(withoutPartition(snapshot, snapshot.partitions.b2)))
+    expect(result.d21Ready).toBe(true)
     expect(isSupportedAuthorizationOperationSchema(result)).toBe(false)
   })
 
@@ -199,7 +261,7 @@ describe.each(manifest.snapshots)('measured PostgreSQL $major authorization cata
     ['target_schema', 'unregistered'], ['target', 'roles'],
     ['definition', 'FOREIGN KEY (connection_id, provider) REFERENCES directory_integrations(id, provider) ON UPDATE RESTRICT ON DELETE CASCADE'],
   ])(`rejects changed N78 %s despite the registered source (PG${major})`, async (field, value) => {
-    const rows = structuredClone(snapshot.rows)
+    const rows = structuredClone(withStack(snapshot.rows))
     const n78 = rows[2].find(row => row.source === 'notification_connection_verifications')!
     n78[String(field)] = value
     expect(isSupportedAuthorizationOperationSchema(await inspectCatalog(snapshot.database, rows))).toBe(false)
@@ -209,13 +271,13 @@ describe.each(manifest.snapshots)('measured PostgreSQL $major authorization cata
     ['registered N78', 'notification_connection_verifications'],
     ['unregistered', 'unregistered_inbound_dependency'],
   ])(`rejects an extra inbound foreign key from the %s source (PG${major})`, async (_name, source) => {
-    const rows = structuredClone(snapshot.rows)
+    const rows = structuredClone(withStack(snapshot.rows))
     rows[2].push({ ...snapshot.partitions.n78[2][0], source, conname: 'ncv_extra_fk' })
     expect(isSupportedAuthorizationOperationSchema(await inspectCatalog(snapshot.database, rows))).toBe(false)
   })
 
   it.each(['base', 'b2'] as const)('still rejects %s drift when N78 is valid', async partition => {
-    const rows = structuredClone(snapshot.rows)
+    const rows = structuredClone(withStack(snapshot.rows))
     const original = snapshot.partitions[partition][2][0]
     const changed = rows[2].find(row => row.source === original.source && row.conname === original.conname)!
     changed.conname = 'unregistered_constraint'
@@ -227,6 +289,6 @@ describe.each(manifest.snapshots)('measured PostgreSQL $major authorization cata
     ['datlocprovider', 'unregistered'], ['schema_create_trusted', false],
   ])('rejects unqualified database %s with valid additions', async (field, value) => {
     const database = { ...snapshot.database, [String(field)]: value }
-    expect(isSupportedAuthorizationOperationSchema(await inspectCatalog(database, snapshot.rows))).toBe(false)
+    expect(isSupportedAuthorizationOperationSchema(await inspectCatalog(database, withStack(snapshot.rows)))).toBe(false)
   })
 })

@@ -19,3 +19,21 @@ and `digests` describe base, B2 and N78 separately. Removing whole captured
 partitions tests historical compatibility; those projections are not separate
 live database captures. All four N78 digests are
 `ebb4eb31cb35209de3785b867c41c17093032eaf2eccc7ebd3912f56f0b3f515`.
+
+## YiDa stack additions (`stack-additions.json`)
+
+The four captures predate the YiDa stack. Its migrations add D21 (six triggers
+on fenced tables, two trigger functions and the `subject_authorization_versions`
+table) and the Y6 generated-layout guard function. A database the current fence
+supports carries both, so the unit suite replays each capture with these rows
+added.
+
+`stack-additions.json` holds exactly those catalog rows and the profile of the
+D21 version table. They were read with the production queries on PostgreSQL
+14.24 (C collation and ctype, UTF8, public schema CREATE revoked from PUBLIC)
+after the full migrations of the stack synced with main `0ae272b52`. Property
+order and row order are as returned. The two digests are the constants pinned in
+`src/admin/authorization-operation-fence.ts` (`D21_CATALOG_ADDITIONS` and
+`YIDA_LAYOUT_CATALOG_ADDITIONS`). The real-database matrix checks the same
+constants on PostgreSQL 14 to 17, which is why one measurement serves all four
+captures; the rows are not a separate live capture of 15, 16 or 17.
