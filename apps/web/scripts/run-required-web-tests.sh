@@ -1697,6 +1697,7 @@ exec npx vitest run \
   attendanceLocaleControls.spec.ts \
   attendanceOverviewRequestReveal \
   attendancePayrollHelp.spec.ts \
+  attendanceProvisionRoleTemplates.spec.ts \
   attendanceRecordRequestPrefill \
   attendanceReportCalendar.spec.ts \
   attendanceRequestReviewEntitlement \
