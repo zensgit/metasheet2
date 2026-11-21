@@ -257,7 +257,8 @@ describe('an edit that cannot be processed is never dropped in silence', () => {
     const a = await editor(s, 'a')
     await pause(s)
     sendUpdate(a, append(a, 'f1', '-too-late'))
-    await until(() => a.errors.length === 1, 2000, 'the visible refusal')
+    // The refusal and the notice are two messages: wait for both.
+    await until(() => a.errors.length === 1 && a.invalidated.length === 1, 2000, 'the visible refusal and the notice')
     expect(a.errors[0]).toMatchObject({ code: 'UNAVAILABLE' })
     expect(a.invalidated).toHaveLength(1)
     expect(shared(s).f1).toBe('one')
