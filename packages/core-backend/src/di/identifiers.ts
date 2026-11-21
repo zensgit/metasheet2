@@ -56,6 +56,11 @@ export interface ICollabService {
   setTokenVerifier(verifier: (token: string) => Promise<string | null>): void;
   setSheetRoomAuthChecker(checker: (input: { sheetId: string; userId: string; socketId: string }) => Promise<boolean>): void;
   setCommentRoomAuthChecker(checker: (input: { spreadsheetId: string; rowId?: string; userId: string; socketId: string }) => Promise<boolean>): void;
+  /** Attaches realtime protection; in baseline mode the service behaves as it does without one. */
+  setRealtimeProtection(
+    protection: import('../realtime-authz/protection').RealtimeProtection,
+    connections: import('../realtime-authz/protected-connections').ProtectedConnections,
+  ): void;
   broadcast(event: string, data: unknown): void;
   broadcastTo(room: string, event: string, data: unknown): void;
   sendTo(userId: string, event: string, data: unknown): void;

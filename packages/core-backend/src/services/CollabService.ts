@@ -4,6 +4,9 @@ import type { Server as HttpServer } from 'http'
 import type { ILogger } from '../di/identifiers'
 import type { EventBus } from '../integration/events/event-bus'
 import { buildCommentInboxRoom, buildCommentRecordRoom, buildCommentSheetRoom } from './commentRooms'
+import { baselineRealtimeProtection, type ProtectionEvent, type RealtimeProtection } from '../realtime-authz/protection'
+import type { ProtectedConnections, ProtectedSocket } from '../realtime-authz/protected-connections'
+import type { RealtimeSessionBinding } from '../realtime-authz/session-binding'
 
 export function buildAuthenticatedUserRoom(userId: string): string {
   return `auth-user:${userId}`
@@ -23,6 +26,42 @@ type AuthenticatedSocketData = {
   authPromise?: Promise<string | null>
 }
 
+/**
+ * What a room carries, for the resource check a protected delivery runs for each recipient.
+ * `closed` is a room of a protected family whose resource cannot be told: nothing is delivered to it.
+ */
+type RoomScope =
+  | { kind: 'sheet'; sheetId: string }
+  | { kind: 'comment'; spreadsheetId: string; rowId?: string }
+  | { kind: 'user'; userId: string }
+  | { kind: 'opaque' }
+  | { kind: 'closed' }
+
+const SHEET_ROOM_PREFIX = 'sheet:'
+const AUTH_USER_ROOM_PREFIX = 'auth-user:'
+const COMMENT_RECORD_ROOM_PREFIX = 'comments:'
+const COMMENT_SHEET_ROOM_PREFIX = 'comments-sheet:'
+const COMMENT_INBOX_ROOM_PREFIX = 'comments-inbox:'
+
+/**
+ * The connection a plugin connection handler receives while realtime protection is active: the
+ * verified user, inbound events that are re-checked before the listener runs, and sends that pass
+ * the same delivery boundary as every other protected send. It exposes neither the credential nor
+ * the raw transport.
+ */
+export interface ConstrainedPluginSocket {
+  readonly id: string
+  readonly userId: string
+  readonly connected: boolean
+  readonly data: { readonly trustedUserId: string }
+  on(event: string, listener: (...args: unknown[]) => void): ConstrainedPluginSocket
+  emit(event: string, ...args: unknown[]): boolean
+  join(room: string): void
+  leave(room: string): void
+  to(room: string): { emit(event: string, payload?: unknown): boolean }
+  disconnect(close?: boolean): void
+}
+
 export class CollabService {
   private io: SocketServer | null = null
   private sheetPresenceBySheet = new Map<string, Map<string, Set<string>>>()
@@ -38,6 +77,14 @@ export class CollabService {
   }
   private sheetRoomAuthChecker: SheetRoomAuthChecker = async () => false
   private commentRoomAuthChecker: CommentRoomAuthChecker | null = null
+  // Realtime protection. With the baseline protection (the default) every path below is the
+  // pre-existing one and none of the protected-mode members is used.
+  private protection: RealtimeProtection = baselineRealtimeProtection
+  private connections: ProtectedConnections | null = null
+  private unsubscribeProtection: (() => void) | null = null
+  private roomScopes = new Map<string, RoomScope>()
+  private roomDeliveryQueues = new Map<string, Promise<void>>()
+  private rawPluginSockets = new Set<Socket>()
 
   constructor(
     private logger: ILogger,
@@ -58,12 +105,191 @@ export class CollabService {
     this.commentRoomAuthChecker = checker
   }
 
+  /**
+   * Attaches realtime protection. While the protection is in baseline mode nothing changes; in
+   * protected mode every connection is registered and admitted before it is served, every inbound
+   * event re-reads the session of its connection, and every send goes through the delivery boundary
+   * of `connections`, which reads the session of each recipient again.
+   */
+  setRealtimeProtection(protection: RealtimeProtection, connections: ProtectedConnections): void {
+    this.unsubscribeProtection?.()
+    this.protection = protection
+    this.connections = connections
+    connections.onSweep(() => this.sweepSubscriptions())
+    this.unsubscribeProtection = protection.subscribe((event) => this.onProtectionEvent(event))
+  }
+
+  private isProtected(): boolean {
+    return this.connections !== null && this.protection.mode() !== 'baseline'
+  }
+
+  private onProtectionEvent(event: ProtectionEvent): void {
+    if (event.type !== 'decision' || !this.io || !this.connections || !this.isProtected()) return
+    // Connections accepted before protection became active are registered now; none of them is
+    // served again until its session has been read as current.
+    for (const socket of this.io.sockets.sockets.values()) {
+      this.adoptSocket(socket, true)
+      // A plugin handler holds the raw transport of this connection: it has to reconnect.
+      if (this.rawPluginSockets.has(socket)) this.connections.end(socket, { code: 'REALTIME_UNAVAILABLE', retry: true })
+    }
+    if (event.decision.established === 'terminate') {
+      this.connections.endAll({ code: 'REALTIME_UNAVAILABLE', retry: true })
+      return
+    }
+    void this.connections.sweep()
+  }
+
+  private adoptSocket(socket: Socket, established = false): void {
+    this.connections?.register(socket, {
+      onAdmitted: (admitted, binding) => this.onSocketAdmitted(admitted as Socket, binding),
+    }, { established })
+  }
+
+  private onSocketAdmitted(socket: Socket, binding: RealtimeSessionBinding): void {
+    if (!socket.connected) return
+    this.getSocketData(socket).trustedUserId = binding.userId
+    const userRoom = buildAuthenticatedUserRoom(binding.userId)
+    this.roomScopes.set(userRoom, { kind: 'user', userId: binding.userId })
+    this.roomScopes.set(binding.userId, { kind: 'user', userId: binding.userId })
+    try {
+      socket.join(userRoom)
+      socket.join(binding.userId)
+    } catch (error) {
+      this.logger.warn('WebSocket authenticated user room join failed', error instanceof Error ? error : undefined)
+    }
+  }
+
+  private scopeOfRoom(room: string): RoomScope {
+    const registered = this.roomScopes.get(room)
+    if (registered) return registered
+    if (room.startsWith(SHEET_ROOM_PREFIX)) return { kind: 'sheet', sheetId: room.slice(SHEET_ROOM_PREFIX.length) }
+    if (room.startsWith(COMMENT_SHEET_ROOM_PREFIX)) {
+      return { kind: 'comment', spreadsheetId: room.slice(COMMENT_SHEET_ROOM_PREFIX.length) }
+    }
+    if (room.startsWith(COMMENT_INBOX_ROOM_PREFIX)) return { kind: 'user', userId: room.slice(COMMENT_INBOX_ROOM_PREFIX.length) }
+    if (room.startsWith(AUTH_USER_ROOM_PREFIX)) return { kind: 'user', userId: room.slice(AUTH_USER_ROOM_PREFIX.length) }
+    // A record comment room is only ever entered through its join handler, which registers its
+    // scope; one that is not registered cannot be checked, so nothing is delivered to it.
+    if (room.startsWith(COMMENT_RECORD_ROOM_PREFIX)) return { kind: 'closed' }
+    return { kind: 'opaque' }
+  }
+
+  private async checkRoomScope(scope: RoomScope, binding: RealtimeSessionBinding, socketId: string): Promise<boolean> {
+    if (scope.kind === 'opaque') return true
+    if (scope.kind === 'closed') return false
+    if (scope.kind === 'user') return binding.userId === scope.userId
+    if (scope.kind === 'sheet') {
+      return (await this.sheetRoomAuthChecker({ sheetId: scope.sheetId, userId: binding.userId, socketId })) === true
+    }
+    if (this.commentRoomAuthChecker) {
+      return (await this.commentRoomAuthChecker({
+        spreadsheetId: scope.spreadsheetId, rowId: scope.rowId, userId: binding.userId, socketId,
+      })) === true
+    }
+    return (await this.sheetRoomAuthChecker({ sheetId: scope.spreadsheetId, userId: binding.userId, socketId })) === true
+  }
+
+  private localRoomSockets(room: string): Socket[] {
+    if (!this.io) return []
+    const ids = this.io.sockets.adapter.rooms.get(room)
+    if (!ids) return []
+    const sockets: Socket[] = []
+    for (const id of ids) {
+      const socket = this.io.sockets.sockets.get(id)
+      if (socket) sockets.push(socket)
+    }
+    return sockets
+  }
+
+  /** Takes a connection out of a room whose resource it may no longer read, and tells it so. */
+  private dropSubscription(socket: Socket, room: string, scope: RoomScope): void {
+    if (!socket.rooms.has(room)) return
+    socket.leave(room)
+    if (scope.kind === 'sheet') {
+      const userId = this.getTrustedUserId(socket)
+      if (userId) this.removeSheetPresence(scope.sheetId, userId, socket.id)
+      this.untrackSocketSheetMembership(socket.id, scope.sheetId)
+      socket.emit('join-denied', { sheetId: scope.sheetId, reason: 'forbidden' })
+      this.emitSheetPresence(scope.sheetId)
+    } else if (scope.kind === 'comment') {
+      socket.emit('comment-join-denied', { scope: scope.spreadsheetId, reason: 'forbidden' })
+    } else if (scope.kind === 'user' && room.startsWith(COMMENT_INBOX_ROOM_PREFIX)) {
+      this.untrackCommentInboxMembership(socket.id)
+    }
+  }
+
+  /**
+   * Sends to a room. Baseline: the pre-existing Socket.IO room emit. Protected: the delivery
+   * boundary, one delivery at a time per room so that the order of events in a room is kept.
+   */
+  private emitToRoom(room: string, event: string, payload: unknown, except?: Socket): void {
+    if (!this.io) return
+    if (!this.isProtected()) {
+      if (except) except.to(room).emit(event, payload)
+      else this.io.to(room).emit(event, payload)
+      return
+    }
+    const previous = this.roomDeliveryQueues.get(room) ?? Promise.resolve()
+    const next = previous
+      .then(() => this.deliverToRoom(room, event, payload, except))
+      .catch((error) => {
+        this.logger.warn('Protected room delivery failed', error instanceof Error ? error : undefined)
+      })
+      .finally(() => {
+        if (this.roomDeliveryQueues.get(room) === next) this.roomDeliveryQueues.delete(room)
+      })
+    this.roomDeliveryQueues.set(room, next)
+  }
+
+  private async deliverToRoom(room: string, event: string, payload: unknown, except?: Socket): Promise<void> {
+    if (!this.io || !this.connections) return
+    if (!this.isProtected()) {
+      // Protection went back to baseline while this delivery waited its turn.
+      if (except) except.to(room).emit(event, payload)
+      else this.io.to(room).emit(event, payload)
+      return
+    }
+    const scope = this.scopeOfRoom(room)
+    const members = this.localRoomSockets(room).filter((socket) => socket !== except)
+    await this.connections.deliver(members, (socket) => socket.emit(event, payload), {
+      resourceCheck: (binding, socket) => this.checkRoomScope(scope, binding, socket.id),
+      onResourceDenied: (socket) => this.dropSubscription(socket as Socket, room, scope),
+      stillSubscribed: (socket) => (socket as Socket).rooms.has(room),
+    })
+  }
+
+  /**
+   * Idle pass over subscriptions: a connection that stays in a sheet or comment room without any
+   * delivery is still taken out of it once its user may no longer read the resource.
+   */
+  private async sweepSubscriptions(): Promise<void> {
+    if (!this.io || !this.connections || !this.isProtected()) return
+    const rooms = [...this.io.sockets.adapter.rooms.keys()]
+    for (const room of [...this.roomScopes.keys()]) {
+      if (!this.io.sockets.adapter.rooms.has(room)) this.roomScopes.delete(room)
+    }
+    for (const room of rooms) {
+      const scope = this.scopeOfRoom(room)
+      if (scope.kind === 'opaque') continue
+      const members = this.localRoomSockets(room)
+      if (members.length === 0 || (members.length === 1 && members[0].id === room)) continue
+      await this.connections.deliver(members, () => undefined, {
+        resourceCheck: (binding, socket) => this.checkRoomScope(scope, binding, socket.id),
+        onResourceDenied: (socket) => this.dropSubscription(socket as Socket, room, scope),
+      })
+    }
+  }
+
+  private protectedDenyReason(socket: Socket): 'unauthorized' | 'unavailable' {
+    return this.connections?.phaseOf(socket) === 'anonymous' ? 'unauthorized' : 'unavailable'
+  }
+
   private setupEventListeners() {
     this.eventBus.subscribe('spreadsheet.cell.updated', (payload) => {
       if (!this.io) return
       const data = payload as { spreadsheetId?: string }
       if (!data?.spreadsheetId) return
-      this.io.to(`sheet:${data.spreadsheetId}`).emit('sheet:op', {
+      this.emitToRoom(`sheet:${data.spreadsheetId}`, 'sheet:op', {
         type: 'cell-update',
         data: payload,
       })
@@ -87,6 +313,12 @@ export class CollabService {
   }
 
   private async resolveTrustedUserId(socket: Socket): Promise<string | null> {
+    if (this.isProtected() && this.connections) {
+      // Protected: the identity of a connection is its bound session, read as current right now.
+      this.adoptSocket(socket)
+      const binding = await this.connections.ensureCurrent(socket)
+      return binding ? binding.userId : null
+    }
     const data = this.getSocketData(socket)
     if (data.trustedUserId !== undefined) return data.trustedUserId
     if (data.authPromise) return data.authPromise
@@ -182,7 +414,7 @@ export class CollabService {
     recordId: string | null,
     fieldId: string | null,
   ): void {
-    socket.to(this.buildSheetRoom(sheetId)).emit('sheet:cursor', { sheetId, userId, recordId, fieldId })
+    this.emitToRoom(this.buildSheetRoom(sheetId), 'sheet:cursor', { sheetId, userId, recordId, fieldId }, socket)
   }
 
   private trackSocketSheetMembership(socketId: string, sheetId: string) {
@@ -233,7 +465,7 @@ export class CollabService {
     const activeUsers = [...(this.sheetPresenceBySheet.get(sheetId)?.keys() ?? [])]
       .sort((left, right) => left.localeCompare(right))
       .map((id) => ({ id }))
-    this.io.to(this.buildSheetRoom(sheetId)).emit('sheet:presence', {
+    this.emitToRoom(this.buildSheetRoom(sheetId), 'sheet:presence', {
       sheetId,
       activeCount: activeUsers.length,
       users: activeUsers,
@@ -252,7 +484,7 @@ export class CollabService {
     const userId = await this.resolveTrustedUserId(socket)
     if (!socket.connected) return
     if (!userId) {
-      this.denySheetJoin(socket, sheetId, 'unauthorized')
+      this.denySheetJoin(socket, sheetId, this.isProtected() ? this.protectedDenyReason(socket) : 'unauthorized')
       return
     }
 
@@ -269,6 +501,7 @@ export class CollabService {
     }
 
     const room = this.buildSheetRoom(sheetId)
+    if (this.isProtected()) this.roomScopes.set(room, { kind: 'sheet', sheetId })
     socket.join(room)
     this.trackSocketSheetMembership(socket.id, sheetId)
     this.addSheetPresence(sheetId, userId, socket.id)
@@ -284,7 +517,7 @@ export class CollabService {
     const userId = await this.resolveTrustedUserId(socket)
     if (!socket.connected) return false
     if (!userId) {
-      this.denyCommentJoin(socket, spreadsheetId, 'unauthorized')
+      this.denyCommentJoin(socket, spreadsheetId, this.isProtected() ? this.protectedDenyReason(socket) : 'unauthorized')
       return false
     }
     let allowed = false
@@ -316,6 +549,7 @@ export class CollabService {
     if (!(await this.authorizeCommentRoomAccess(socket, scope.spreadsheetId, scope.rowId))) return
     if (!socket.connected) return
     const room = buildCommentRecordRoom(scope)
+    if (this.isProtected()) this.roomScopes.set(room, { kind: 'comment', spreadsheetId: scope.spreadsheetId, rowId: scope.rowId })
     socket.join(room)
     this.logger.info(`Client ${socket.id} joined ${room}`)
     socket.emit('joined-comment-record', scope)
@@ -338,10 +572,11 @@ export class CollabService {
     const userId = await this.resolveTrustedUserId(socket)
     if (!socket.connected) return
     if (!userId) {
-      this.denyCommentJoin(socket, 'comment-inbox', 'unauthorized')
+      this.denyCommentJoin(socket, 'comment-inbox', this.isProtected() ? this.protectedDenyReason(socket) : 'unauthorized')
       return
     }
     const room = buildCommentInboxRoom({ userId })
+    if (this.isProtected()) this.roomScopes.set(room, { kind: 'user', userId })
     socket.join(room)
     this.trackCommentInboxMembership(socket.id, userId)
     this.logger.info(`Client ${socket.id} joined ${room}`)
@@ -380,7 +615,13 @@ export class CollabService {
 
     this.io.on('connection', (socket: Socket) => {
       this.logger.info(`WebSocket client connected: ${socket.id}`)
-      void this.joinAuthenticatedUserRoom(socket)
+      if (this.isProtected() && this.connections) {
+        // Protected: registered first, served only after its session has been read as current.
+        this.adoptSocket(socket)
+        void this.connections.admit(socket)
+      } else {
+        void this.joinAuthenticatedUserRoom(socket)
+      }
 
       socket.on('disconnect', () => {
         const userId = this.getTrustedUserId(socket)
@@ -393,6 +634,8 @@ export class CollabService {
           this.emitSheetPresence(sheetId)
         }
         this.untrackCommentInboxMembership(socket.id)
+        this.connections?.unregister(socket)
+        this.rawPluginSockets.delete(socket)
         this.logger.info(`WebSocket client disconnected: ${socket.id}`)
       })
 
@@ -419,6 +662,15 @@ export class CollabService {
         const data = this.normalizeCursorPayload(payload)
         if (!data) return
         if (!this.sheetMembershipBySocket.get(socket.id)?.has(data.sheetId)) return
+        if (this.isProtected()) {
+          // Protected: the sender is re-checked before its cursor is relayed to anyone.
+          void this.resolveTrustedUserId(socket).then((currentUserId) => {
+            if (!currentUserId || !socket.connected) return
+            if (!this.sheetMembershipBySocket.get(socket.id)?.has(data.sheetId)) return
+            this.broadcastCursor(socket, data.sheetId, currentUserId, data.recordId, data.fieldId)
+          })
+          return
+        }
         const userId = this.getTrustedUserId(socket)
         if (!userId) return
         this.broadcastCursor(socket, data.sheetId, userId, data.recordId, data.fieldId)
@@ -477,6 +729,14 @@ export class CollabService {
       this.logger.warn('Attempted to broadcast before initialization')
       return
     }
+    if (this.isProtected() && this.connections) {
+      // Protected: a broadcast reaches only connections whose session is current right now.
+      const everyone = [...this.io.sockets.sockets.values()]
+      void this.connections.deliver(everyone, (socket) => socket.emit(event, data)).catch((error) => {
+        this.logger.warn('Protected broadcast failed', error instanceof Error ? error : undefined)
+      })
+      return
+    }
     this.io.emit(event, data)
   }
 
@@ -485,12 +745,12 @@ export class CollabService {
       this.logger.warn('Attempted to broadcastTo before initialization')
       return
     }
-    this.io.to(room).emit(event, data)
+    this.emitToRoom(room, event, data)
   }
 
   sendTo(userId: string, event: string, data: unknown): void {
     if (!this.io) return
-    this.io.to(userId).emit(event, data)
+    this.emitToRoom(userId, event, data)
   }
 
   async join(room: string, options?: { userId?: string; socketId?: string }): Promise<void> {
@@ -501,6 +761,14 @@ export class CollabService {
     const target = this.resolveTarget(options)
     if (!target) {
       this.logger.warn('join requires userId or socketId')
+      return
+    }
+    if (this.isProtected() && this.connections) {
+      // Protected: only connections whose session is current right now are put into the room.
+      await this.connections.deliver(this.localRoomSockets(target), (socket) => {
+        (socket as Socket).join(room)
+      })
+      this.logger.debug(`Joined ${target} to room ${room}`)
       return
     }
     await this.io.in(target).socketsJoin(room)
@@ -523,7 +791,72 @@ export class CollabService {
 
   onConnection(handler: (socket: Socket) => void): void {
     if (!this.io) return
-    this.io.on('connection', handler)
+    this.io.on('connection', (socket: Socket) => {
+      if (!this.isProtected() || !this.connections) {
+        this.rawPluginSockets.add(socket)
+        socket.once('disconnect', () => this.rawPluginSockets.delete(socket))
+        handler(socket)
+        return
+      }
+      // Protected: the handler never sees a connection that has not been admitted, and what it
+      // receives is the constrained connection, not the transport.
+      this.adoptSocket(socket)
+      void this.connections.admit(socket).then((binding) => {
+        if (!binding || !socket.connected) return
+        handler(this.constrainedPluginSocket(socket, binding) as unknown as Socket)
+      }).catch((error) => {
+        this.logger.warn('Plugin connection handler failed', error instanceof Error ? error : undefined)
+      })
+    })
+  }
+
+  private constrainedPluginSocket(socket: Socket, binding: RealtimeSessionBinding): ConstrainedPluginSocket {
+    const userId = binding.userId
+    const deliverToSelf = (send: (target: ProtectedSocket) => void): void => {
+      if (!this.connections) return
+      void this.connections.deliver([socket], send).catch((error) => {
+        this.logger.warn('Protected plugin send failed', error instanceof Error ? error : undefined)
+      })
+    }
+    const constrained: ConstrainedPluginSocket = {
+      id: socket.id,
+      userId,
+      get connected() {
+        return socket.connected
+      },
+      data: Object.freeze({ trustedUserId: userId }),
+      on: (event, listener) => {
+        socket.on(event, (...args: unknown[]) => {
+          void this.resolveTrustedUserId(socket).then((currentUserId) => {
+            if (!currentUserId || currentUserId !== userId || !socket.connected) return
+            listener(...args)
+          })
+        })
+        return constrained
+      },
+      emit: (event, ...args) => {
+        deliverToSelf((target) => target.emit(event, ...args))
+        return true
+      },
+      join: (room) => {
+        deliverToSelf((target) => {
+          (target as Socket).join(room)
+        })
+      },
+      leave: (room) => {
+        socket.leave(room)
+      },
+      to: (room) => ({
+        emit: (event, payload) => {
+          this.emitToRoom(room, event, payload, socket)
+          return true
+        },
+      }),
+      disconnect: (close) => {
+        socket.disconnect(close)
+      },
+    }
+    return constrained
   }
 
   /**
@@ -534,6 +867,24 @@ export class CollabService {
    */
   async getRoomMembers(room: string): Promise<string[]> {
     if (!this.io) return []
+    if (this.isProtected() && this.connections) {
+      // Protected: a member is listed only when its session is current and it may still read the
+      // resource of the room right now.
+      const scope = this.scopeOfRoom(room)
+      const userIds = new Set<string>()
+      try {
+        await this.connections.deliver(this.localRoomSockets(room), (_socket, binding) => {
+          userIds.add(binding.userId)
+        }, {
+          resourceCheck: (binding, socket) => this.checkRoomScope(scope, binding, socket.id),
+          onResourceDenied: (socket) => this.dropSubscription(socket as Socket, room, scope),
+          stillSubscribed: (socket) => (socket as Socket).rooms.has(room),
+        })
+      } catch {
+        return []
+      }
+      return [...userIds]
+    }
     try {
       const sockets = await this.io.in(room).fetchSockets()
       const userIds = new Set<string>()
@@ -550,6 +901,19 @@ export class CollabService {
   }
 
   getCommentInboxSubscriberIds(): string[] {
+    if (this.isProtected() && this.connections && this.io) {
+      const userIds: string[] = []
+      for (const [userId, socketIds] of this.commentInboxSocketsByUser) {
+        for (const socketId of socketIds) {
+          const socket = this.io.sockets.sockets.get(socketId)
+          if (socket && this.connections.isServiceable(socket)) {
+            userIds.push(userId)
+            break
+          }
+        }
+      }
+      return userIds
+    }
     return [...this.commentInboxSocketsByUser.keys()]
   }
 }

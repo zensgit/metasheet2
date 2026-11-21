@@ -661,6 +661,7 @@ export class MetaSheetServer {
   private automationServiceReady = false
   private apiGateway?: APIGateway
   private yjsCleanupTimer?: NodeJS.Timeout
+  private realtimeProtection?: import('./realtime-authz/production').ProductionRealtimeProtection
   private yjsSyncMetricsSource?: { getMetrics(): { activeDocCount: number; docIds: string[] } }
   private yjsBridgeMetricsSource?: { getMetrics(): { pendingWriteCount: number; observedDocCount: number; flushSuccessCount: number; flushFailureCount: number } }
   private yjsSocketMetricsSource?: { getMetrics(): { activeRecordCount: number; activeSocketCount: number } }
@@ -4149,6 +4150,16 @@ export class MetaSheetServer {
       }
     }))
 
+    // 0a. Stop realtime protection timers and its listener.
+    if (this.realtimeProtection) {
+      const realtimeProtection = this.realtimeProtection
+      this.realtimeProtection = undefined
+      realtimeProtection.connections.dispose()
+      shutdownTasks.push(realtimeProtection.protection.stop().catch((err) => {
+        this.logger.warn(`Realtime protection stop error: ${err instanceof Error ? err.message : String(err)}`)
+      }))
+    }
+
     // 0b. Shut down MetricsStreamService
     if (this.metricsStreamService) {
       shutdownTasks.push(
@@ -5085,6 +5096,13 @@ export class MetaSheetServer {
       setApprovalCommentNotifyChecker(async ({ instanceId, userId }) =>
         canReadApprovalInstance(poolManager.get(), userId, instanceId))
       setApprovalCommentMentionDelivery((userId, event, payload) => collabService.sendTo(userId, event, payload))
+      // Realtime protection. The first read of the local switches and of the installation
+      // generations completes before any connection is accepted; while the result is the baseline
+      // row the collaboration service runs its pre-existing paths.
+      const { createProductionRealtimeProtection } = await import('./realtime-authz/production')
+      this.realtimeProtection = createProductionRealtimeProtection()
+      collabService.setRealtimeProtection(this.realtimeProtection.protection, this.realtimeProtection.connections)
+      await this.realtimeProtection.protection.start()
       collabService.initialize(this.httpServer)
     } catch (e) {
       this.logger.error('Failed to initialize WebSocket service', e as Error)
