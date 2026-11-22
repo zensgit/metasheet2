@@ -73,8 +73,8 @@ async function seed(count = 2, orgId = ORG, takenOver = true, orderPrefix = '') 
     VALUES ($1, 'dingtalk', 'Synthetic routing', 'active', 'FixtureTenant', '{"appKey":"FixtureApplication"}') RETURNING id`, [orgId])
   connectionId = integration.rows[0].id
   await pool.query(`INSERT INTO directory_integration_capabilities(integration_id,bound_provider,bound_org_id,
-    notification_enabled,notification_bound_tenant,notification_bound_app_scope,created_by,updated_by)
-    VALUES ($1,'dingtalk',$2,true,'FixtureTenant','FixtureApplication','fixture-admin','fixture-admin')`, [connectionId, orgId])
+    notification_enabled,notification_bound_tenant,notification_bound_app_scope,revision,created_by,updated_by)
+    VALUES ($1,'dingtalk',$2,true,'FixtureTenant','FixtureApplication',1,'fixture-admin','fixture-admin')`, [connectionId, orgId])
   await pool.query(`INSERT INTO notification_connection_verifications(connection_id,provider,reached_level,tuple_fingerprint,
     bound_tenant,bound_app_scope,verified_by,verified_at)
     VALUES ($1,'dingtalk','token',$2,'FixtureTenant','FixtureApplication','fixture-admin',$3)`, [connectionId, 'f'.repeat(64), NOW])
@@ -368,8 +368,8 @@ describe('N78 routed reminder decisions (real PostgreSQL)', () => {
       VALUES ($1,'dingtalk','Synthetic other','active','OtherTenant','{"appKey":"OtherApplication"}') RETURNING id`, [ORG])
     const second = other.rows[0].id
     await pool.query(`INSERT INTO directory_integration_capabilities(integration_id,bound_provider,bound_org_id,
-      notification_enabled,notification_bound_tenant,notification_bound_app_scope,created_by,updated_by)
-      VALUES ($1,'dingtalk',$2,true,'OtherTenant','OtherApplication','actor','actor')`, [second,ORG])
+      notification_enabled,notification_bound_tenant,notification_bound_app_scope,revision,created_by,updated_by)
+      VALUES ($1,'dingtalk',$2,true,'OtherTenant','OtherApplication',1,'actor','actor')`, [second,ORG])
     await pool.query(`WITH a AS (INSERT INTO directory_accounts(integration_id,provider,corp_id,external_user_id,external_key,name,is_active)
       VALUES ($1,'dingtalk','OtherTenant','other-address','other-external','Synthetic other',true) RETURNING id)
       INSERT INTO directory_account_links(directory_account_id,local_user_id,link_status) SELECT id,$2,'linked' FROM a`, [second,f.user(1)])
