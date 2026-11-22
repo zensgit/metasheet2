@@ -48,6 +48,63 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/directory/notification-topic-policies": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read notification topic takeover policies and verification expiry */
+        get: operations["listNotificationTopicPolicies"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/directory/notification-topic-policies/{topic}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Take over, pause, resume or change the default notification connection
+         * @description Platform administrator only. First takeover requires an integrated topic, both notification switches, readable policy and decision tables, and endpoint and preference tables. There is no delete or return to legacy routing. A missing defaultConnectionId preserves the current default on updates and means null on first takeover. Null first takeover requires explicit confirmation. Every first takeover and every explicit nonnull default selection requires a trusted authenticated tenant equal to default and active membership. Headers and request-body organization values cannot supply that tenant. A malformed nonnull connection selection passes this tenant gate before body validation. State-only updates and clearing an existing default retain the platform-admin boundary. All replicas must run the routing implementation before first takeover.
+         */
+        put: operations["putNotificationTopicPolicy"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/directory/notification-topic-policies/{topic}/takeover-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Preview takeover using bounded batches of active members
+         * @description Read-only, at most 5000 members in batches of 500. Returns counts and fixed warnings only. A supplied default connection uses the authenticated capability entry and the same trusted default-tenant membership gate; no preview witness becomes a persisted routing decision.
+         */
+        get: operations["previewNotificationTopicTakeover"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/plugins": {
         parameters: {
             query?: never;
@@ -19678,6 +19735,28 @@ export interface components {
             /** Format: uuid */
             testSendId: string;
         };
+        NotificationTopicPolicy: {
+            /** @enum {string} */
+            topic: "task_reminder";
+            /** @enum {string} */
+            state: "active" | "paused";
+            /** Format: uuid */
+            defaultConnectionId: string | null;
+            revision: number;
+        };
+        NotificationTakeoverPreview: {
+            counts: {
+                [key: string]: number;
+            };
+            member_count: number;
+            truncated: boolean;
+            no_route_count: number;
+            no_valid_target_count: number;
+            proof_changed_endpoint_count: number;
+            tenant_address_collisions: number;
+            active_dingtalk_integrations: number;
+            warnings: ("multiple_active_integrations" | "default_connection_not_ready" | "no_default_connection")[];
+        };
         NotificationVerificationRequest: {
             /** Format: uuid */
             integrationId: string;
@@ -24100,6 +24179,179 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["NotificationError"];
                 };
+            };
+        };
+    };
+    listNotificationTopicPolicies: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Policy rows and connection verification summaries, without recipient addresses or witnesses */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        topics: {
+                            /** @enum {string} */
+                            topic: "task_reminder";
+                            integrated: boolean;
+                            policy: components["schemas"]["NotificationTopicPolicy"] | null;
+                            verification: components["schemas"]["NotificationVerificationSummary"];
+                        }[];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description Notification preferences surface is disabled */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description NOTIFICATION_SCHEMA_UNAVAILABLE or NOTIFICATION_BUSY */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    putNotificationTopicPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                topic: "task_reminder";
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    expectedRevision: number;
+                    /** @enum {string} */
+                    state: "active" | "paused";
+                    /** Format: uuid */
+                    defaultConnectionId?: string | null;
+                    /** @enum {boolean} */
+                    confirmNoDefaultConnection?: true;
+                };
+            };
+        };
+        responses: {
+            /** @description Persisted policy after revision comparison */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationTopicPolicy"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description Platform administrator required, or ORG_MISMATCH for a non-default trusted tenant or inactive membership; no organization values are returned */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            /** @description Notification preferences surface is disabled */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description POLICY_STALE, TOPIC_NOT_INTEGRATED, NOTIFICATION_DELIVERY_DISABLED, DEFAULT_CONNECTION_NOT_READY or DEFAULT_CONNECTION_CONFIRM_REQUIRED */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            /** @description INVALID_REQUEST or ORG_MISSING when first takeover or an explicit nonnull selection lacks a trusted authenticated tenant */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationError"];
+                };
+            };
+            /** @description NOTIFICATION_SCHEMA_UNAVAILABLE or NOTIFICATION_BUSY */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    previewNotificationTopicTakeover: {
+        parameters: {
+            query?: {
+                defaultConnectionId?: string;
+            };
+            header?: never;
+            path: {
+                topic: "task_reminder";
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Counts and fixed warnings, never addresses or witnesses */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationTakeoverPreview"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description Platform administrator required or ORG_MISMATCH */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Notification preferences surface is disabled */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description INVALID_REQUEST or ORG_MISSING */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description NOTIFICATION_SCHEMA_UNAVAILABLE or NOTIFICATION_BUSY */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

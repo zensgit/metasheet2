@@ -223,6 +223,7 @@ import { adminDirectoryDepartmentBindingsRouter } from '../../src/routes/admin-d
 import { adminDirectoryLocalRouter } from '../../src/routes/admin-directory-local'
 import { adminDirectoryOrgTransfersRouter } from '../../src/routes/admin-directory-org-transfers'
 import { adminDirectoryCapabilitiesRouter } from '../../src/routes/admin-directory-capabilities'
+import { adminDirectoryNotificationRouter } from '../../src/routes/admin-directory-notification'
 import { adminNotificationVerificationsRouter } from '../../src/routes/admin-notification-verifications'
 import { adminDirectoryRoutingPolicyRouter } from '../../src/routes/admin-directory-routing-policy'
 import { adminUsersRouter } from '../../src/routes/admin-users'
@@ -282,6 +283,7 @@ type MountKey =
   | 'admin-directory-routing-policy'
   | 'admin-directory-integration-capabilities'
   | 'admin-notification-verifications'
+  | 'admin-directory-notification'
   | 'canary'
   | 'permissions'
 
@@ -345,6 +347,13 @@ const MOUNTS: Record<MountKey, MountSpec> = {
     factory: adminDirectoryRoutingPolicyRouter,
     routeFile: 'routes/admin-directory-routing-policy.ts',
     build: () => adminDirectoryRoutingPolicyRouter(),
+  },
+  'admin-directory-notification': {
+    mountPath: '/api/admin/directory',
+    source: "this.app.use('/api/admin/directory', adminDirectoryNotificationRouter())",
+    factory: adminDirectoryNotificationRouter,
+    routeFile: 'routes/admin-directory-notification.ts',
+    build: () => adminDirectoryNotificationRouter(),
   },
   'admin-notification-verifications': {
     mountPath: '/api/admin/directory',
@@ -594,6 +603,7 @@ const REGISTRY: readonly WriteRouteEntry[] = [
   // --- routes/admin-directory-routing-policy.ts（1 条） ---
   { mount: 'admin-directory-routing-policy', method: 'patch', path: '/:purpose', reg: 'routes/admin-directory-routing-policy.ts', gate: 'routes/admin-directory-routing-policy.ts ensurePlatformAdmin', family: P },
 
+  { mount: 'admin-directory-notification', method: 'put', path: '/notification-topic-policies/:topic', reg: 'routes/admin-directory-notification.ts', gate: 'routes/admin-directory-notification.ts ensurePlatformAdmin', family: P },
   { mount: 'admin-notification-verifications', method: 'post', path: '/notification-verification', reg: 'routes/admin-notification-verifications.ts', gate: 'routes/admin-notification-verifications.ts ensurePlatformAdmin', family: P },
 
   // --- routes/admin-directory-capabilities.ts（1 条；门是处理器第一条语句，在 try 之外，从 ./admin-directory import） ---
@@ -886,12 +896,12 @@ describe('/api/admin 挂载点写路由守卫 — fixture 自检', () => {
     }
   })
 
-  it('登记表条数与分族口径固定：81 条 / 2 条委派例外 / 4 条中间件门 / 1 条事务门 / 2 条操作门', () => {
-    expect(REGISTRY).toHaveLength(81)
+  it('登记表条数与分族口径固定：82 条 / 2 条委派例外 / 4 条中间件门 / 1 条事务门 / 2 条操作门', () => {
+    expect(REGISTRY).toHaveLength(82)
     expect(REGISTRY.filter((e) => e.family === 'delegation')).toHaveLength(2)
     expect(REGISTRY.filter((e) => e.family === 'middleware')).toHaveLength(4)
     expect(REGISTRY.filter((e) => e.family === 'inline')).toHaveLength(1)
-    expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(72)
+    expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(73)
     expect(REGISTRY.filter((e) => e.family === 'operation')).toHaveLength(2)
     // 每条都必须带来源：reg = 该挂载点的注册文件；gate 可解析，且每条分支链的最后一环是本族的门函数
     for (const entry of REGISTRY) {

@@ -129,6 +129,8 @@ function printHelp(): void {
   --list       Show applied count + pending migration names. Read-only.
   --confirm N  Confirm migration N is applied (exit 0 applied / 1 pending / 2 unknown). Read-only.
   --rollback   Roll back the most recently applied migration (one step).
+               Notification policy/decision migrations refuse rollback while rows exist;
+               confirm the decision migration is last in --list before deployment.
   --reset      Roll back ALL migrations. Requires ALLOW_DB_RESET=true env.
   --help       Show this message.
 

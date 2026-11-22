@@ -425,6 +425,7 @@ import { adminDirectoryRoutingPolicyRouter } from './routes/admin-directory-rout
 import { adminDirectoryCapabilitiesRouter } from './routes/admin-directory-capabilities'
 import { meNotificationEndpointsRouter } from './routes/me-notification-endpoints'
 import { meNotificationTestSendRouter } from './routes/me-notification-test-send'
+import { adminDirectoryNotificationRouter } from './routes/admin-directory-notification'
 import { adminNotificationVerificationsRouter } from './routes/admin-notification-verifications'
 import './services/notification-adapter-bootstrap'
 import { meNotificationPreferencesRouter } from './routes/me-notification-preferences'
@@ -2322,6 +2323,7 @@ export class MetaSheetServer {
     this.app.use('/api/admin/directory/routing-policy', adminDirectoryRoutingPolicyRouter())
     this.app.use('/api/admin/directory/integration-capabilities', adminDirectoryCapabilitiesRouter())
     this.app.use('/api/admin/directory', adminNotificationVerificationsRouter())
+    this.app.use('/api/admin/directory', adminDirectoryNotificationRouter())
     // User notification endpoints and preferences: the caller's own rows; answers 404 while the switch is off.
     this.app.use(meNotificationEndpointsRouter())
     this.app.use(meNotificationTestSendRouter())

@@ -53,6 +53,9 @@
  *
  * Logs carry ids, counts and fixed codes only.
  */
+import { isExternalNotificationDeliveryEnabled, isUserNotificationPreferencesEnabled } from '../notifications/notification-flags'
+import { readTopicTakeover, type TopicTakeover } from './task-notification-takeover'
+import { writeRoutedReminderOrg, type RoutingTransaction } from './task-routed-reminders'
 import { performance } from 'node:perf_hooks'
 import { Logger } from '../core/logger'
 import { pool as defaultPool, query as defaultQuery } from '../db/pg'
@@ -532,6 +535,8 @@ export class TaskScheduler {
 // ── The two scans ────────────────────────────────────────────────────────────────────────────────
 
 export interface TaskScanJobOptions {
+  takeover?: (orgId: string) => Promise<TopicTakeover>
+  transaction?: RoutingTransaction
   /** Statement runner; default `db/pg.ts#query` (autocommit on the pool). */
   query?: TaskDeliveryQuery
   /** Where the pipeline switches are read; default `process.env`. */
@@ -574,6 +579,8 @@ export interface TaskDailyDigestScanResult {
 function dbOf(query: TaskDeliveryQuery): Db {
   return { query: async (sql, params) => ({ rows: (await query(sql, params)).rows }) }
 }
+
+const reminderScanDb = dbOf((sql, params) => defaultQuery(sql, params))
 
 function clampPageSize(value: number | undefined): number {
   if (value === undefined) return TASK_REMINDER_SCAN_BATCH
@@ -633,9 +640,14 @@ export async function runTaskReminderScan(ctx: TaskSchedulerJobContext, options:
   result.ran = true
   const pageSize = clampPageSize(options.pageSize)
   const heartbeatOrgs = clampHeartbeatOrgs(options.heartbeatOrgs)
-  const db = dbOf(options.query ?? ((sql, params) => defaultQuery(sql, params)))
+  const db = options.query ? dbOf(options.query) : reminderScanDb
   const channelsOf = orgChannelCache(db, names)
   const now = ctx.now()
+  const logger = options.logger ?? new Logger('TaskScheduler')
+  let warnedTakeover = false
+  const warnTakeoverUnreadable = () => {
+    if (!warnedTakeover) { logger.warn('notification_takeover_unreadable'); warnedTakeover = true }
+  }
   let cursor: { afterAtParam: Date | string; afterIdParam: string } = { ...TASK_REMINDER_SCAN_CURSOR_START }
   let previousLast: { afterAtParam: string; afterIdParam: string } | null = null
   for (;;) {
@@ -663,7 +675,7 @@ export async function runTaskReminderScan(ctx: TaskSchedulerJobContext, options:
     )).rows
     result.pages += 1
     result.candidates += page.length
-    if (!(await writeReminderPage(ctx, db, page, now, channelsOf, heartbeatOrgs, result))) break
+    if (!(await writeReminderPage(ctx, db, page, now, channelsOf, heartbeatOrgs, result, { ...options, logger }, warnTakeoverUnreadable))) break
     if (page.length < pageSize) break
     const last = page[page.length - 1]
     const next = { afterAtParam: String(last.remind_at_cursor), afterIdParam: String(last.id) }
@@ -686,6 +698,8 @@ async function writeReminderPage(
   channelsOf: (orgId: string) => Promise<TaskNotificationChannel[]>,
   heartbeatOrgs: number,
   result: TaskReminderScanResult,
+  options: TaskScanJobOptions,
+  warnTakeoverUnreadable: () => void,
 ): Promise<boolean> {
   // RULED(2026-10-07): [R06] the floor is judged here, not in SQL: no floor ⇒ not sent.
   const due = page.filter((row) => row.floor !== null && row.floor !== undefined
@@ -694,41 +708,60 @@ async function writeReminderPage(
   // The precondition is asked once per distinct org of the page, in page order, in heartbeat groups.
   const orgIds = [...new Set(due.map((row) => String(row.org_id)))]
   const channelsByOrg = new Map<string, TaskNotificationChannel[]>()
+  const routedOrgs = new Map<string, Extract<TopicTakeover, { state: 'active' }>>()
   for (let index = 0; index < orgIds.length; index += 1) {
     if (!(await beforeOrgGroup(ctx, index, heartbeatOrgs))) return false
-    channelsByOrg.set(orgIds[index], await channelsOf(orgIds[index]))
+    const orgId = orgIds[index]
+    const takeover = await (options.takeover ? options.takeover(orgId) : readTopicTakeover(db, orgId))
+    if (takeover.state === 'none') channelsByOrg.set(orgId, await channelsOf(orgId))
+    else if (takeover.state === 'active' && isUserNotificationPreferencesEnabled(options.env)
+      && isExternalNotificationDeliveryEnabled(options.env)) routedOrgs.set(orgId, takeover)
+    else if (takeover.state === 'unreadable') warnTakeoverUnreadable()
   }
   const eligible: Array<{ row: Row; channels: TaskNotificationChannel[] }> = []
   for (const row of due) {
     const channels = channelsByOrg.get(String(row.org_id)) ?? []
     if (channels.length > 0) eligible.push({ row, channels })
   }
-  if (eligible.length === 0) return true
-  const assignees = await db.query(
-    'SELECT task_id, user_id, completed_at FROM task_assignees WHERE task_id = ANY($1::text[])',
-    [eligible.map(({ row }) => String(row.id))],
-  )
-  const byTask = new Map<string, TaskAssigneeCompletionShape[]>()
-  for (const assignee of assignees.rows) {
-    const list = byTask.get(String(assignee.task_id)) ?? []
-    list.push({
-      userId: String(assignee.user_id),
-      completedAt: assignee.completed_at === null || assignee.completed_at === undefined ? null : toDate(assignee.completed_at),
-    })
-    byTask.set(String(assignee.task_id), list)
+  if (eligible.length > 0) {
+    const assignees = await db.query(
+      'SELECT task_id, user_id, completed_at FROM task_assignees WHERE task_id = ANY($1::text[])',
+      [eligible.map(({ row }) => String(row.id))],
+    )
+    const byTask = new Map<string, TaskAssigneeCompletionShape[]>()
+    for (const assignee of assignees.rows) {
+      const list = byTask.get(String(assignee.task_id)) ?? []
+      list.push({
+        userId: String(assignee.user_id),
+        completedAt: assignee.completed_at === null || assignee.completed_at === undefined ? null : toDate(assignee.completed_at),
+      })
+      byTask.set(String(assignee.task_id), list)
+    }
+    const plans: TaskNotificationDeliveryPlan[] = []
+    for (const { row, channels } of eligible) {
+      plans.push(...planTaskReminderDeliveries({
+        orgId: String(row.org_id),
+        taskId: String(row.id),
+        remindAt: toDate(row.remind_at),
+        creatorId: String(row.created_by),
+        assignees: byTask.get(String(row.id)) ?? [],
+        channels,
+      }))
+    }
+    result.written += await insertTaskNotificationDeliveries(db, plans)
   }
-  const plans: TaskNotificationDeliveryPlan[] = []
-  for (const { row, channels } of eligible) {
-    plans.push(...planTaskReminderDeliveries({
-      orgId: String(row.org_id),
-      taskId: String(row.id),
-      remindAt: toDate(row.remind_at),
-      creatorId: String(row.created_by),
-      assignees: byTask.get(String(row.id)) ?? [],
-      channels,
-    }))
+  for (const [orgId, policy] of routedOrgs) {
+    try {
+      result.written += await writeRoutedReminderOrg({ db, ctx, policy, now,
+        tasks: due.filter(row => String(row.org_id) === orgId), transaction: options.transaction,
+        warn: code => options.logger?.warn(code),
+      })
+    } catch {
+      metrics.notificationRoutingDecisionsTotal.inc({ topic: 'task_reminder', outcome: 'defer', reason: 'routed_branch_error' })
+      options.logger?.warn('routed_branch_error')
+    }
+    if (ctx.stopping() || ctx.leaderLost()) return false
   }
-  result.written += await insertTaskNotificationDeliveries(db, plans)
   return true
 }
 

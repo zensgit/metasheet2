@@ -62,6 +62,8 @@ const SRC_ALLOWLIST: ReadonlyArray<ImportEdge> = [
   ['notifications/verification-evidence.ts', '../integrations/provider-capability-registry'],
   ['notifications/verification-service.ts', '../integrations/provider-capability-registry'],
   ['notifications/notification-precondition.ts', '../integrations/provider-capability-registry'],
+  ['notifications/topic-policy-service.ts', '../integrations/integration-capability-resolve'],
+  ['services/task-routed-reminders.ts', '../integrations/integration-capability-resolve-background'],
   ['routes/me-notification-wiring.ts', '../integrations/integration-capability-resolve'],
   ['routes/me-notification-wiring.ts', '../integrations/provider-capability-registry'],
   // Ceremony derives one integration scope from the corp id and app key. No other registry name.
@@ -125,8 +127,9 @@ describe('importers of the capability modules', () => {
     expect(importSpecifiers('const m = require(name)')).toEqual([NON_LITERAL_SPECIFIER])
   })
 
-  it('give the consumer resolver only the authenticated notification wiring importer, and recognise its loads', () => {
+  it('give the consumer resolver only the authenticated notification wiring and policy importers, and recognise its loads', () => {
     expect(SRC_ALLOWLIST.filter(([, specifier]) => /(?:^|\/)integration-capability-resolve(?:\.[cm]?[jt]s)?$/.test(specifier))).toEqual([
+      ['notifications/topic-policy-service.ts', '../integrations/integration-capability-resolve'],
       ['routes/me-notification-wiring.ts', '../integrations/integration-capability-resolve'],
     ])
     for (const spelling of [

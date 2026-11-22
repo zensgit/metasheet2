@@ -1,7 +1,6 @@
 {
   "note": "Exact reviewed source boundary. File completeness is checked against a live independent inventory, including dot paths and .min.js; symbolic links in the five roots are rejected, including dangling links. Unrelated source additions do not require fixture updates. Maintenance: added/removed routes, HTTP modules or plugin addRoute entry points require boundary review and updating sorted requestRoots from the assertion diff, preserving concurrent additions. Changed package.json/tsconfig contents or added resolution inputs require resolution review and updating resolutionInputs paths and full-file SHA256 values from the diff. Added, removed, changed or newly resolved gaps, including any edit to a gap-bearing file, require per-item review and updating reviewedGaps entries, sourceHash and review reasons from the diff; never auto-accept gaps. Rerun the closure guard after each reviewed update; directEdges, reverse and testEdges still require separate boundary review if changed. Dynamic calls, CJS execution of non-source extensions, and runtime entry loading from test-named paths (including plugin manifest main targets) remain outside this static proof; followed test edges are registered but excluded entry paths and manifest-selected targets are not exhaustively proven.",
   "absentRoots": [
-    "packages/core-backend/src/services/task-routed-reminders.ts",
     "packages/core-backend/src/services/task-routed-delivery-channel.ts"
   ],
   "requestRoots": [
@@ -14,6 +13,7 @@
     "packages/core-backend/src/routes/admin-directory-department-bindings.ts",
     "packages/core-backend/src/routes/admin-directory-feishu.ts",
     "packages/core-backend/src/routes/admin-directory-local.ts",
+    "packages/core-backend/src/routes/admin-directory-notification.ts",
     "packages/core-backend/src/routes/admin-directory-org-transfers.ts",
     "packages/core-backend/src/routes/admin-directory-routing-policy.ts",
     "packages/core-backend/src/routes/admin-directory.ts",
@@ -256,9 +256,144 @@
     {
       "root": "packages/core-backend/src/integrations/integration-capability-resolve-background.ts",
       "members": [
-        "packages/core-backend/src/integrations/integration-capability-resolve-background.ts"
+        "packages/core-backend/scripts/start-recovery-local.mts",
+        "packages/core-backend/scripts/stock-preparation-persist-repair-once.ts",
+        "packages/core-backend/scripts/verify-recovery-archive-server.mts",
+        "packages/core-backend/scripts/verify-recovery-manual-checkpoint.mts",
+        "packages/core-backend/scripts/verify-timemachine-workbench.mts",
+        "packages/core-backend/src/index.ts",
+        "packages/core-backend/src/integrations/integration-capability-resolve-background.ts",
+        "packages/core-backend/src/services/task-routed-reminders.ts",
+        "packages/core-backend/src/services/task-scheduler.ts",
+        "scripts/attendance/acceptance/acp1b-browser-realdb.mts",
+        "scripts/attendance/acceptance/acp1b-full-app-realdb.mts",
+        "scripts/ops/attendance-selfservice-fixture-verify.mts"
       ],
-      "edges": []
+      "edges": [
+        [
+          "packages/core-backend/scripts/start-recovery-local.mts",
+          "packages/core-backend/src/index.ts",
+          "require"
+        ],
+        [
+          "packages/core-backend/scripts/stock-preparation-persist-repair-once.ts",
+          "packages/core-backend/src/index.ts",
+          "dynamic-import"
+        ],
+        [
+          "packages/core-backend/scripts/verify-recovery-archive-server.mts",
+          "packages/core-backend/src/index.ts",
+          "dynamic-import"
+        ],
+        [
+          "packages/core-backend/scripts/verify-recovery-manual-checkpoint.mts",
+          "packages/core-backend/src/index.ts",
+          "require"
+        ],
+        [
+          "packages/core-backend/scripts/verify-timemachine-workbench.mts",
+          "packages/core-backend/src/index.ts",
+          "dynamic-import"
+        ],
+        [
+          "packages/core-backend/src/index.ts",
+          "packages/core-backend/src/services/task-scheduler.ts",
+          "import"
+        ],
+        [
+          "packages/core-backend/src/services/task-routed-reminders.ts",
+          "packages/core-backend/src/integrations/integration-capability-resolve-background.ts",
+          "import"
+        ],
+        [
+          "packages/core-backend/src/services/task-scheduler.ts",
+          "packages/core-backend/src/services/task-routed-reminders.ts",
+          "import"
+        ],
+        [
+          "scripts/attendance/acceptance/acp1b-browser-realdb.mts",
+          "packages/core-backend/src/index.ts",
+          "dynamic-import"
+        ],
+        [
+          "scripts/attendance/acceptance/acp1b-full-app-realdb.mts",
+          "packages/core-backend/src/index.ts",
+          "dynamic-import"
+        ],
+        [
+          "scripts/ops/attendance-selfservice-fixture-verify.mts",
+          "packages/core-backend/src/index.ts",
+          "dynamic-import"
+        ]
+      ]
+    },
+    {
+      "root": "packages/core-backend/src/services/task-routed-reminders.ts",
+      "members": [
+        "packages/core-backend/scripts/start-recovery-local.mts",
+        "packages/core-backend/scripts/stock-preparation-persist-repair-once.ts",
+        "packages/core-backend/scripts/verify-recovery-archive-server.mts",
+        "packages/core-backend/scripts/verify-recovery-manual-checkpoint.mts",
+        "packages/core-backend/scripts/verify-timemachine-workbench.mts",
+        "packages/core-backend/src/index.ts",
+        "packages/core-backend/src/services/task-routed-reminders.ts",
+        "packages/core-backend/src/services/task-scheduler.ts",
+        "scripts/attendance/acceptance/acp1b-browser-realdb.mts",
+        "scripts/attendance/acceptance/acp1b-full-app-realdb.mts",
+        "scripts/ops/attendance-selfservice-fixture-verify.mts"
+      ],
+      "edges": [
+        [
+          "packages/core-backend/scripts/start-recovery-local.mts",
+          "packages/core-backend/src/index.ts",
+          "require"
+        ],
+        [
+          "packages/core-backend/scripts/stock-preparation-persist-repair-once.ts",
+          "packages/core-backend/src/index.ts",
+          "dynamic-import"
+        ],
+        [
+          "packages/core-backend/scripts/verify-recovery-archive-server.mts",
+          "packages/core-backend/src/index.ts",
+          "dynamic-import"
+        ],
+        [
+          "packages/core-backend/scripts/verify-recovery-manual-checkpoint.mts",
+          "packages/core-backend/src/index.ts",
+          "require"
+        ],
+        [
+          "packages/core-backend/scripts/verify-timemachine-workbench.mts",
+          "packages/core-backend/src/index.ts",
+          "dynamic-import"
+        ],
+        [
+          "packages/core-backend/src/index.ts",
+          "packages/core-backend/src/services/task-scheduler.ts",
+          "import"
+        ],
+        [
+          "packages/core-backend/src/services/task-scheduler.ts",
+          "packages/core-backend/src/services/task-routed-reminders.ts",
+          "import"
+        ],
+        [
+          "scripts/attendance/acceptance/acp1b-browser-realdb.mts",
+          "packages/core-backend/src/index.ts",
+          "dynamic-import"
+        ],
+        [
+          "scripts/attendance/acceptance/acp1b-full-app-realdb.mts",
+          "packages/core-backend/src/index.ts",
+          "dynamic-import"
+        ],
+        [
+          "scripts/ops/attendance-selfservice-fixture-verify.mts",
+          "packages/core-backend/src/index.ts",
+          "dynamic-import"
+        ]
+      ]
     }
   ],
   "directEdges": [
@@ -293,8 +428,20 @@
       true
     ],
     [
+      "packages/core-backend/src/notifications/topic-policy-service.ts",
+      "packages/core-backend/src/integrations/integration-capability-resolve.ts",
+      "import",
+      false
+    ],
+    [
       "packages/core-backend/src/routes/me-notification-wiring.ts",
       "packages/core-backend/src/integrations/integration-capability-resolve.ts",
+      "import",
+      false
+    ],
+    [
+      "packages/core-backend/src/services/task-routed-reminders.ts",
+      "packages/core-backend/src/integrations/integration-capability-resolve-background.ts",
       "import",
       false
     ]
