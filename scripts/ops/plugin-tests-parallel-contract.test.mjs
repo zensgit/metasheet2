@@ -276,6 +276,8 @@ function assertParallelWorkflow(doc) {
         assert.ok(step.run.includes(goldenParityAddition + capabilityResolveAddition + capabilitiesAddition), 'Keep the capability resolver suite between the directory sync characterization suite and the directory integration capabilities suite')
         // Exactly once, at any position in this step: no neighbour is asserted, so a later addition
         // next to it does not have to change this check.
+        const notificationLockCapacityAddition = '  tests/integration/notification-authorization-lock-capacity.db.test.ts \\\n'
+        assert.equal(step.run.split(notificationLockCapacityAddition).length - 1, 1, 'Notification lock/capacity DB suite must run exactly once')
         const capabilitiesPatchAddition = '  tests/integration/directory-integration-capabilities-patch.db.test.ts \\\n'
         assert.equal(step.run.split(capabilitiesPatchAddition).length - 1, 1, 'Directory integration capability PATCH DB suite must run exactly once')
         const providerEvidenceAddition = '  tests/integration/directory-deprovision-provider-evidence.db.test.ts \\\n'
@@ -335,6 +337,7 @@ function assertParallelWorkflow(doc) {
         step.run = step.run.replace(feishuSmokeAddition, '')
         step.run = step.run.replace(capabilitiesAddition, '')
         step.run = step.run.replace(capabilityResolveAddition, '')
+        step.run = step.run.replace(notificationLockCapacityAddition, '')
         step.run = step.run.replace(capabilitiesPatchAddition, '')
         step.run = step.run.replace(providerSchemaAddition, '')
         step.run = step.run.replace(providerEvidenceAddition, '')
@@ -849,5 +852,23 @@ test('required-gate executable propagates failure and never prints its input env
     const result = spawnSync(process.execPath, [cli], { encoding: 'utf8', env })
     assert.equal(result.status, expected)
     assert.doesNotMatch(result.stdout + result.stderr, /not-json|private-value|"result"/)
+  }
+})
+
+test('notification lock/capacity suite has whole-file required ownership and exclusion', () => {
+  const file = 'tests/integration/notification-authorization-lock-capacity.db.test.ts'
+  const config = readFileSync(new URL('../../packages/core-backend/vitest.config.ts', import.meta.url), 'utf8')
+  requireExecutableRealDbStep(workflow, 'approval-real-db-integration')
+  assert.equal(realDbStepWholeFileArgs(workflow, 'approval-real-db-integration').filter(arg => arg === file).length, 1)
+  assert.ok(isQuotedInTestExclude(config, file))
+  assert.equal(parseYamlDocument(workflow).jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration').env.EXPECT_DB, '1')
+  for (const mode of ['remove', 'duplicate', 'wrong-lane']) {
+    const doc = JSON.parse(JSON.stringify(parseYamlDocument(workflow)))
+    const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration')
+    const line = step.run.split('\n').find(line => line.includes(file)) + '\n'
+    assert.ok(line.includes(file))
+    step.run = step.run.replace(line, mode === 'duplicate' ? line + line : '')
+    if (mode === 'wrong-lane') doc.jobs['multitable-db'].steps.find(step => step.id === 'multitable-real-db-integration').run += line
+    assert.throws(() => assertParallelWorkflow(doc))
   }
 })
