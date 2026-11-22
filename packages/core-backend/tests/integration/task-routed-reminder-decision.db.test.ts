@@ -4,6 +4,9 @@ import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { Pool } from 'pg'
+import express from 'express'
+import request from 'supertest'
+import { createAdminDirectoryNotificationRouter } from '../../src/routes/admin-directory-notification'
 import { Kysely, PostgresDialect, sql } from 'kysely'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { up as upDirectory } from '../../src/db/migrations/zzzz20260324150000_create_directory_sync_tables'
@@ -449,7 +452,7 @@ it('A-D04 org_default witnesses remain bound to each of two recipients', async (
     const resolved = await resolver.deriveDefaultTarget(pool, { orgId: ORG, userId: row.recipient_user_id, connectionId: f.connectionId })
     expect(resolved.ok).toBe(true)
     if (resolved.ok === false) throw new Error(resolved.code)
-    expect(row).toMatchObject({ route_source: 'org_default', proof_witness: resolved.target.proofWitness, address_witness: resolved.target.addressWitness })
+    expect(row).toMatchObject({ route_source: 'org_default', connection_id: f.connectionId, proof_witness: resolved.target.proofWitness, address_witness: resolved.target.addressWitness })
     proofs.add(row.proof_witness)
   }
   expect(proofs.size).toBe(2)
@@ -474,4 +477,36 @@ it('A-D19 real tuple SELECT 57014 defers, then a healthy tick persists the decis
   failRead = true; await scan(); expect(await counts()).toEqual({ outbox: 0, decisions: 0 })
   failRead = false; await scan(); expect(await counts()).toEqual({ outbox: 1, decisions: 1 })
   expect((await pool.query('SELECT status FROM task_notification_deliveries')).rows).toEqual([{ status: 'pending' }])
+})
+
+it('A-D20 missing and foreign connections have identical PUT and preview HTTP responses', async () => {
+  const own = await seed(1, 'default', false)
+  const foreign = await seed(1, 'foreign-preview-org', false)
+  const missing = randomUUID()
+  expect((await pool.query('SELECT id,org_id FROM directory_integrations WHERE id = ANY($1::uuid[])', [[missing, foreign.connectionId]])).rows)
+    .toEqual([{ id: foreign.connectionId, org_id: 'foreign-preview-org' }])
+  await pool.query("UPDATE users SET role='admin' WHERE id=$1", [own.user(0)])
+  const app = express(); app.use(express.json())
+  // HTTP transport starts at the already-authenticated admin boundary; SQL, R-1 and resolver are real.
+  app.use((req, _res, next) => {
+    req.user = { id: own.user(0), role: 'admin' } as never
+    req.authenticatedTenantId = 'default'
+    next()
+  })
+  app.use('/api/admin/directory', createAdminDirectoryNotificationRouter({ service: policyService(), isEnabled: () => true }))
+  const base = '/api/admin/directory/notification-topic-policies/task_reminder'
+  const put = async (id: string) => request(app).put(base).send({ expectedRevision: 0, state: 'active', defaultConnectionId: id })
+  const missingPut = await put(missing), foreignPut = await put(foreign.connectionId)
+  expect(missingPut.status).toBe(409)
+  expect(missingPut.body).toEqual({ error: { code: 'DEFAULT_CONNECTION_NOT_READY' } })
+  expect(foreignPut.status).toBe(missingPut.status)
+  expect(foreignPut.text).toBe(missingPut.text)
+  const preview = async (id: string) => request(app).get(`${base}/takeover-preview`).query({ defaultConnectionId: id })
+  const missingPreview = await preview(missing), foreignPreview = await preview(foreign.connectionId)
+  expect(missingPreview.status).toBe(200)
+  expect(missingPreview.body).toMatchObject({ counts: { connection_not_found: 1 }, warnings: ['default_connection_not_ready'] })
+  expect(foreignPreview.status).toBe(missingPreview.status)
+  expect(foreignPreview.text).toBe(missingPreview.text)
+  expect((await pool.query('SELECT * FROM org_notification_topic_policies')).rows).toEqual([])
+  expect(await counts()).toEqual({ outbox: 0, decisions: 0 })
 })

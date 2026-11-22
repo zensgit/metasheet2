@@ -104,3 +104,9 @@ it('logs refusal as code and a closed topic without request values', async () =>
     expect(response.headers['cache-control']).toBe('no-store')
   } finally { warn.mockRestore() }
 })
+
+it.each(['', '/task_reminder/takeover-preview'])('prevents caching GET %s responses', async suffix => {
+  const response = await request(app('default')).get(`${BASE}${suffix}`)
+  expect(response.status).toBe(200)
+  expect(response.headers['cache-control']).toBe('no-store')
+})

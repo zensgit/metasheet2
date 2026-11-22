@@ -16922,7 +16922,7 @@
             }
           },
           "422": {
-            "description": "INVALID_REQUEST or ORG_MISSING when first takeover or an explicit nonnull selection lacks a trusted authenticated tenant",
+            "description": "INVALID_REQUEST or ORG_MISSING when first takeover or an explicit nonnull selection lacks a trusted authenticated tenant, including sessions whose default membership was revoked and whose tenant was removed during authentication",
             "content": {
               "application/json": {
                 "schema": {
@@ -16994,7 +16994,7 @@
             "description": "Notification preferences surface is disabled"
           },
           "422": {
-            "description": "INVALID_REQUEST or ORG_MISSING"
+            "description": "INVALID_REQUEST or ORG_MISSING, including sessions whose default membership was revoked and whose tenant was removed during authentication"
           },
           "500": {
             "description": "INTERNAL",

@@ -95,6 +95,7 @@ describe('routed scan atomicity and statement bounds', () => {
     expect(s.log.slice(start, start + 3)).toEqual(['BEGIN ISOLATION LEVEL READ COMMITTED', "SET LOCAL lock_timeout = '2s'", "SET LOCAL statement_timeout = '5s'"])
     expect(JSON.stringify(s.rows())).not.toContain('PRIVATE_ADDRESS')
     expect(s.rows()[0].capability_witness).toBe('c'.repeat(64))
+    for (const row of s.rows()) expect(row).toMatchObject({ route_source: 'org_default', connection_id: args.policy.defaultConnectionId })
     const calls = s.db.query.mock.calls.length
     expect(await writeRoutedReminderOrg(args)).toBe(0)
     expect(s.db.query.mock.calls.length - calls).toBe(2)

@@ -24298,7 +24298,7 @@ export interface operations {
                     "application/json": components["schemas"]["NotificationError"];
                 };
             };
-            /** @description INVALID_REQUEST or ORG_MISSING when first takeover or an explicit nonnull selection lacks a trusted authenticated tenant */
+            /** @description INVALID_REQUEST or ORG_MISSING when first takeover or an explicit nonnull selection lacks a trusted authenticated tenant, including sessions whose default membership was revoked and whose tenant was removed during authentication */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -24360,7 +24360,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description INVALID_REQUEST or ORG_MISSING */
+            /** @description INVALID_REQUEST or ORG_MISSING, including sessions whose default membership was revoked and whose tenant was removed during authentication */
             422: {
                 headers: {
                     [name: string]: unknown;

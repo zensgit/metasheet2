@@ -92,3 +92,15 @@ it('pins the historical witness CHECK independently and does not import the live
   expect(source).toContain('ON task_notification_delivery_decisions (org_id, recipient_user_id, event_key, rank)')
   expect(source).toContain("reason IS NOT NULL AND connection_id IS NULL")
 })
+
+it('checks the parent composite UNIQUE constraint before creating the policy table', async () => {
+  const { db, log } = recordingDb({ lockTimeout: '7s', statementTimeout: '42s' })
+  try {
+    await policy.up(db)
+    const prerequisite = log.findIndex(row => row.sql.includes("AS present"))
+    expect(prerequisite).toBeGreaterThan(-1)
+    expect(log[prerequisite].sql).toContain("conrelid = to_regclass('directory_integrations')")
+    expect(log[prerequisite].sql).toContain("conname = 'uq_directory_integrations_id_org' AND contype = 'u'")
+    expect(prerequisite).toBeLessThan(log.findIndex(row => row.sql.startsWith('CREATE TABLE')))
+  } finally { await db.destroy() }
+})

@@ -1,3 +1,5 @@
+import { createCipheriv } from 'node:crypto'
+import { decryptSecretPayloadWithKey } from '../../src/security/encrypted-secrets'
 import { beforeEach, expect, it, vi } from 'vitest'
 import { writeRoutedReminderOrg } from '../../src/services/task-routed-reminders'
 import { resolveEffectiveNotificationCapabilityForBackground } from '../../src/integrations/integration-capability-resolve-background'
@@ -10,11 +12,13 @@ const CONNECTION = '11111111-1111-4111-8111-111111111111'
 const NOW = new Date('2030-01-01T12:00:00Z')
 let transient = true
 let readError: Error | undefined
+let encryptedPayload: string | undefined
 const realAdapter = new DingTalkWorkNotificationAdapter({
   normalizeBaseUrl: (value: unknown) => String(value ?? 'https://oapi.dingtalk.com'),
   classifySendError: () => { throw new Error('unused') },
-  // A pool/statement failure while reading the stored tuple (for example 57014), not a config defect.
+  // Exercise stored-tuple database failures and deterministic decryption failures without a database.
   readTuple: async () => {
+    if (transient && encryptedPayload !== undefined) decryptSecretPayloadWithKey(encryptedPayload, Buffer.alloc(32, 2))
     if (transient && readError) throw readError
     if (transient) throw Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' })
     return { config: { appKey: 'k', appSecret: 's', agentId: '1', baseUrl: 'https://oapi.dingtalk.com' } } as never
@@ -56,7 +60,7 @@ async function realAdapterFingerprintWhenHealthy() {
   try { const value = await realAdapter.fingerprint(CONNECTION); return value.ok ? value.value : 'unavailable' } finally { transient = saved }
 }
 beforeEach(() => {
-  transient = true; readError = undefined
+  transient = true; readError = undefined; encryptedPayload = undefined
   vi.mocked(resolveEffectiveNotificationCapabilityForBackground).mockResolvedValue({ effective: true, orgId: 'fixture-org', provider: 'dingtalk', revision: 2,
     witness: 'c'.repeat(64), orgSource: 'background_event_row' } as never)
 })
@@ -99,4 +103,26 @@ it('an adapter throwing directly also defers without a permanent decision', asyn
     const h = harness(); await writeRoutedReminderOrg(h.args)
     expect(h.rows()).toEqual([])
   } finally { fingerprint.mockRestore() }
+})
+
+it.each(['wrong-key', 'malformed'] as const)('exports the bounded alert signal for deterministic %s failures on repeated ticks', async failure => {
+  const key = Buffer.alloc(32, 1), iv = Buffer.alloc(16, 3)
+  const cipher = createCipheriv('aes-256-gcm', key, iv)
+  const ciphertext = Buffer.concat([cipher.update('synthetic-secret'), cipher.final()])
+  const payload = Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString('base64')
+  expect(decryptSecretPayloadWithKey(payload, key)).toBe('synthetic-secret')
+  encryptedPayload = failure === 'wrong-key' ? payload : Buffer.alloc(4).toString('base64')
+  expect(() => decryptSecretPayloadWithKey(encryptedPayload!, Buffer.alloc(32, 2))).toThrow()
+  const labels = { topic: 'task_reminder', outcome: 'defer', reason: 'capability_unreadable' }
+  const count = async () => (await metrics.notificationRoutingDecisionsTotal.get()).values
+    .find(value => Object.entries(labels).every(([name, label]) => value.labels[name] === label))?.value ?? 0
+  const before = await count()
+  const h = harness()
+  await writeRoutedReminderOrg(h.args)
+  await writeRoutedReminderOrg(h.args)
+  expect(h.rows()).toEqual([])
+  expect(await count()).toBe(before + 2)
+  // This existing fixed-label signal feeds the delivered persistent-failure alert, without raw crypto errors.
+  expect((await metrics.notificationRoutingDecisionsTotal.get()).values.find(value =>
+    Object.entries(labels).every(([name, label]) => value.labels[name] === label))?.labels).toEqual(labels)
 })
