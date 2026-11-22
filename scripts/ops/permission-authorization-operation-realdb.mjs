@@ -38,7 +38,7 @@ export const unitBaseline = Object.freeze([
   {directory:'unit',file:'authorization-input-lock.test.ts',min:98,required:['ranks are strictly increasing in acquisition order and the order lists every rank'],skipped:[]},
   {directory:'unit',file:'authorization-input-consumers.guard.test.ts',min:7,required:['the authorization command write decision is registered as locked'],skipped:[]},
   {directory:'unit',file:'authorization-operation-validation.test.ts',min:27,required:['normalizes only reason and sorts explicitly chosen admissions'],skipped:[]},
-  {directory:'unit',file:'authorization-operation-fence.test.ts',min:99,required:[
+  {directory:'unit',file:'authorization-operation-fence.test.ts',min:207,required:[
     'locks the closed table set, qualified and without waiting',
     ...[14,15,16,17].flatMap(major => [
       `accepts measured N78 and B2 additions with the original exact profile (PG${major})`,
@@ -46,6 +46,15 @@ export const unitBaseline = Object.freeze([
       `rejects changed N78 conname despite the registered source (PG${major})`,
       `rejects an extra inbound foreign key from the registered N78 source (PG${major})`,
       `rejects an extra inbound foreign key from the unregistered source (PG${major})`,
+      `accepts measured routing with N78 and B2 using the original profile (PG${major})`,
+      `accepts the empty routing partition as pre-M06c history (PG${major})`,
+      `rejects changed routing conname despite the registered source (PG${major})`,
+      `rejects changed routing delete action definition (PG${major})`,
+      `rejects changed routing target table definition (PG${major})`,
+      `rejects changed routing target column definition (PG${major})`,
+      `rejects changed routing missing key column definition (PG${major})`,
+      `rejects an extra routing foreign key from org_notification_topic_policies (PG${major})`,
+      `rejects a missing constraint from users with valid routing (PG${major})`,
     ]),
   ],skipped:[]},
   {directory:'unit',file:'authorization-operation-snapshot.test.ts',min:4,required:['binds the acting principal, complete input, policy classification, feature value and source rows','invalidates a preview after a disable and re-enable even if the original configured range is unchanged'],skipped:[]},

@@ -105,6 +105,10 @@ const B2_FOREIGN_KEY_SOURCES = new Set([
 // rows; the complete N78 addition must match before the original profile is used.
 const N78_CATALOG_ADDITIONS = 'ebb4eb31cb35209de3785b867c41c17093032eaf2eccc7ebd3912f56f0b3f515'
 const N78_FOREIGN_KEY_SOURCES = new Set(['notification_connection_verifications'])
+// M06c routing is a separate optional addition, measured on PostgreSQL 14-17,
+// C/UTF8. Never replace an original profile or the 07b N78 digest with this hash.
+const N78_ROUTING_CATALOG_ADDITIONS = 'c7b4ab678e7c9bc25ecd9a24bef2de5e5f4e21af818d18aba573c9cd367f4564'
+const N78_ROUTING_FOREIGN_KEY_SOURCES = new Set(['org_notification_topic_policies'])
 
 type CatalogRow = Record<string, unknown>
 
@@ -126,16 +130,20 @@ function readBaseProfile(database: CatalogRow | null, rows: CatalogRow[][]): str
   const base = rows.map(() => [] as CatalogRow[])
   const additions = rows.map(() => [] as CatalogRow[])
   const n78 = rows.map(() => [] as CatalogRow[])
+  const routing = rows.map(() => [] as CatalogRow[])
   for (const [section, catalog] of rows.entries()) {
     for (const row of catalog) {
-      const partition = section === 2 && N78_FOREIGN_KEY_SOURCES.has(String(row.source))
-        ? n78 : belongsToB2Catalog(section, row) ? additions : base
+      const partition = section === 2 && N78_ROUTING_FOREIGN_KEY_SOURCES.has(String(row.source))
+        ? routing : section === 2 && N78_FOREIGN_KEY_SOURCES.has(String(row.source))
+          ? n78 : belongsToB2Catalog(section, row) ? additions : base
       partition[section].push(row)
     }
   }
   // Empty N78 preserves B2-only history. B2 remains mandatory on this path;
   // when both additions exist, each must match its own complete digest.
   if (n78[2].length > 0 && schemaDigest(n78) !== N78_CATALOG_ADDITIONS) return undefined
+  // Empty routing preserves pre-M06c history; a nonempty partition must match whole.
+  if (routing[2].length > 0 && schemaDigest(routing) !== N78_ROUTING_CATALOG_ADDITIONS) return undefined
   if (schemaDigest(additions) === B2_CATALOG_ADDITIONS) return schemaDigest({ database, rows: base })
 }
 
