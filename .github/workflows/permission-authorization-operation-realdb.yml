@@ -4,6 +4,10 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
+      - 'packages/core-backend/src/security-events/**'
+      - 'packages/core-backend/tests/integration/security-events-*.db.test.ts'
+      - 'packages/core-backend/tests/unit/security-events-*.test.ts'
+      - 'packages/core-backend/vitest.integration.config.ts'
       - 'packages/core-backend/src/admin/**'
       - 'packages/core-backend/src/auth/**'
       - 'packages/core-backend/src/db/**'
@@ -30,6 +34,10 @@ on:
   push:
     branches: [main]
     paths:
+      - 'packages/core-backend/src/security-events/**'
+      - 'packages/core-backend/tests/integration/security-events-*.db.test.ts'
+      - 'packages/core-backend/tests/unit/security-events-*.test.ts'
+      - 'packages/core-backend/vitest.integration.config.ts'
       - 'packages/core-backend/src/admin/**'
       - 'packages/core-backend/src/auth/**'
       - 'packages/core-backend/src/db/**'
@@ -102,3 +110,16 @@ jobs:
         run: node --test scripts/ops/permission-authorization-operation-realdb.test.mjs
       - name: Migrate isolated databases and run fenced acceptance
         run: node scripts/ops/permission-authorization-operation-realdb.mjs
+      - name: Verify E1-A schema and unchanged authorization fence
+        id: security-events-schema-realdb
+        working-directory: packages/core-backend
+        env:
+          DATABASE_URL: ${{ env.PERMISSION_COMMAND_PG_BASE_URL }}
+          EXPECT_DB: '1'
+          E1A_PG_MAJOR: ${{ matrix.postgres-major }}
+        run: |
+          node node_modules/vitest/vitest.mjs run --config vitest.integration.config.ts \
+            tests/integration/security-events-schema.db.test.ts \
+            --poolOptions.forks.minForks=1 --poolOptions.forks.maxForks=2 --no-cache --retry=0 \
+            --reporter=verbose --reporter=json --outputFile=../../artifacts/e1a-realdb/vitest.json
+          node ../../scripts/ops/vitest-zero-skip.mjs ../../artifacts/e1a-realdb/vitest.json 1

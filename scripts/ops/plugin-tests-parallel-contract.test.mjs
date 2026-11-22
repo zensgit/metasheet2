@@ -158,6 +158,7 @@ const grantDbFiles = [
   'tests/integration/dingtalk-corp-backfill-scope.db.test.ts',
   'tests/integration/strict-credential-chain.db.test.ts',
   'tests/integration/strict-dingtalk-entry.db.test.ts',
+  'tests/integration/security-events-schema.db.test.ts',
 ]
 
 function assertParallelWorkflow(doc) {
