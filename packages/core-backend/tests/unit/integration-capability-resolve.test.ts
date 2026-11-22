@@ -594,18 +594,38 @@ describe('the witness', () => {
 })
 
 describe('module boundaries of the resolver', () => {
-  const SOURCE = path.resolve(__dirname, '..', '..', 'src', 'integrations', 'integration-capability-resolve.ts')
+  const SOURCE = path.resolve(__dirname, '..', '..', 'src', 'integrations', 'integration-capability-resolve-core.ts')
   const source = readFileSync(SOURCE, 'utf8')
+
+  it('keeps both thin entry points free of SQL and pins their dependencies', () => {
+    const request = path.join(path.dirname(SOURCE), 'integration-capability-resolve.ts')
+    const background = path.join(path.dirname(SOURCE), 'integration-capability-resolve-background.ts')
+    expect(importSpecifiers(readFileSync(request, 'utf8'), request)).toEqual([
+      '../multitable/automation-durable-dispatcher',
+      './provider-capability-registry',
+      './integration-capability-resolve-core',
+      './integration-capability-witness',
+    ])
+    expect(importSpecifiers(readFileSync(background, 'utf8'), background)).toEqual([
+      '../multitable/automation-durable-dispatcher',
+      './integration-capability-resolve-core',
+    ])
+    for (const file of [request, background]) {
+      const parsed = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true)
+      // Transaction guidance in comments is not executable SQL.
+      expect(ts.createPrinter({ removeComments: true }).printFile(parsed)).not.toMatch(/\b(?:SELECT|INSERT|UPDATE|DELETE|BEGIN|COMMIT|ROLLBACK)\b/i)
+    }
+  })
 
   it('loads exactly the reviewed modules and no connection lifecycle module', () => {
     expect(importSpecifiers(source, SOURCE)).toEqual([
-      'node:crypto',
       '../multitable/automation-durable-dispatcher',
       '../multitable/pg-transaction-guard',
       './directory-integration-capabilities-flag',
       './integration-capability-evaluate',
       './integration-capability-implementations',
       './provider-capability-registry',
+      './integration-capability-witness',
     ])
     expect(importSpecifiers(source, SOURCE).filter((specifier) => /lifecycle/i.test(specifier))).toEqual([])
   })
@@ -620,7 +640,9 @@ describe('module boundaries of the resolver', () => {
       if (bindings && ts.isNamedImports(bindings)) names.push(...bindings.elements.map((element) => element.name.text))
     }
     expect(names.sort()).toEqual(['CapabilityReason', 'CapabilityRow', 'EvaluatedIntegration', 'capabilityAnchor', 'evaluateIntegrationCapability', 'probeCapabilityTables'])
-    expect(source).not.toMatch(/peekIntegrationCapabilityState/)
+    for (const module of ['integration-capability-resolve-core', 'integration-capability-resolve', 'integration-capability-resolve-background']) {
+      expect(readFileSync(path.join(path.dirname(SOURCE), `${module}.ts`), 'utf8')).not.toMatch(/peekIntegrationCapabilityState/)
+    }
   })
 
   it('names only the integration and capability tables in its statements, never the history or lifecycle tables', () => {
