@@ -46,6 +46,16 @@ const currentCatalog = async () => {
   for (const statement of AUTHORIZATION_OPERATION_SCHEMA_QUERIES) sections.push((await admin.query(statement, statement.includes('$1') ? [[...AUTHORIZATION_OPERATION_FENCE_TABLES]] : undefined)).rows)
   return sections
 }
+// The fence inspects under the search_path it sets itself (acquireAuthorizationOperationFence, before every
+// inspection), and the registered digests were taken that way; the session's default search_path yields another
+// digest. Every inspection here runs alone in a transaction of its own with that search_path.
+async function inspectFence() {
+  await admin.query('BEGIN')
+  try {
+    await admin.query("SELECT pg_catalog.set_config('search_path', 'pg_catalog,public,pg_temp', true)")
+    return await inspectAuthorizationOperationSchema(admin.query.bind(admin))
+  } finally { await admin.query('ROLLBACK') }
+}
 function event(): EventCandidate {
   return { id: randomUUID(), producer: 'directory', event_type: 'directory.sync_failed', source_kind: 'sync_run', source_id: randomUUID(), source_step: 'failed',
     actor_kind: 'system', actor_user_id: null, subject_user_id: null, target_kind: null, target_id: null, reason_code: 'sync_failed', record_origin: 'live', occurred_at: '2026-11-22T00:00:00.000000Z', facts: {} }
@@ -87,7 +97,7 @@ describe.sequential('E1-A PG14–17 migrated baseline, no producer wiring', () =
     const prepared = await migrator.migrateTo(available[index - 1].name)
     expect(prepared.error).toBeUndefined()
     expect((await admin.query("SELECT to_regclass('public.security_events') AS relation")).rows[0].relation).toBeNull()
-    baseline = await inspectAuthorizationOperationSchema(admin.query.bind(admin))
+    baseline = await inspectFence()
     expect(baseline.tableCount).toBe(AUTHORIZATION_OPERATION_FENCE_TABLES.length)
     expect(baseline.ordinary).toBe(true)
     expect(isSupportedAuthorizationOperationSchema(baseline)).toBe(true)
@@ -126,7 +136,7 @@ describe.sequential('E1-A PG14–17 migrated baseline, no producer wiring', () =
     report.futureMigration = { present: true, executed: false, targetApplied: true }
   })
   it('T31 exact eight catalog sections and digest/baseDigest/ordinary remain identical with empty tables', async () => {
-    const after = await inspectAuthorizationOperationSchema(admin.query.bind(admin))
+    const after = await inspectFence()
     expect(after).toEqual(baseline)
     expect(await currentCatalog()).toEqual(rawBaseline)
     report.afterEmpty = { after, sections: await currentCatalog() }
@@ -298,7 +308,7 @@ describe.sequential('E1-A PG14–17 migrated baseline, no producer wiring', () =
     report.capacity = { sampleRows: 1000, sizes, estimates, limitations: 'Sample extrapolation only; page fill, bloat, steady-state p95 and actual sync budget remain unverified.' }
   })
   it('T31/T34 nonempty schema has identical fence and down preserves every row and ledger', async () => {
-    const after = await inspectAuthorizationOperationSchema(admin.query.bind(admin))
+    const after = await inspectFence()
     expect(after).toEqual(baseline); expect(await currentCatalog()).toEqual(rawBaseline)
     report.afterNonempty = { after, sections: await currentCatalog() }
     const before = (await admin.query('SELECT id,source_id,expires_at,delivery_planned_at FROM public.security_events ORDER BY id')).rows
@@ -315,7 +325,7 @@ describe.sequential('E1-A PG14–17 migrated baseline, no producer wiring', () =
     const result = await migrator.migrateDown()
     expect(result.error).toBeUndefined()
     expect(result.results).toEqual([expect.objectContaining({ migrationName, status: 'Success', direction: 'Down' })])
-    expect(await inspectAuthorizationOperationSchema(admin.query.bind(admin))).toEqual(baseline)
+    expect(await inspectFence()).toEqual(baseline)
     expect(await currentCatalog()).toEqual(rawBaseline)
     report.completed = true
   })
