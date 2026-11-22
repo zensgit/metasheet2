@@ -8,7 +8,7 @@ const preference = (userId: string, endpoint: string | null) => ({ user_id: user
   fallback_endpoint_id: null, enabled: true, revision: 2, quiet_start: null, quiet_end: null, quiet_timezone: null })
 const success = (userId: string): ResolveResult => ({ ok: true, target: {
   provider: 'dingtalk', connectionId: 'connection', proofId: userId, addressKind: 'dingtalk_userid',
-  addressWitness: 'a'.repeat(64), proofWitness: 'b'.repeat(64), boundTenant: 'tenant', boundAppScope: 'scope',
+  addressWitness: `address-${userId}`, proofWitness: `proof-${userId}`, boundTenant: 'tenant', boundAppScope: 'scope',
   address: { reveal: () => 'PRIVATE_ADDRESS' },
 } } as unknown as ResolveResult)
 
@@ -25,6 +25,7 @@ describe('shared batched routing inputs', () => {
     expect(db.query.mock.calls[1][1]).toEqual(['org', users])
     expect(deriveDefaultTargets).toHaveBeenCalledOnce(); expect(verifyEndpoints).not.toHaveBeenCalled()
     expect(deriveDefaultTargets.mock.calls[0][1].userIds).toEqual(users)
+    for (const userId of users) expect(result.recipients.get(userId)?.candidates[0].resolution).toMatchObject({ ok: true, target: { proofId: userId, proofWitness: `proof-${userId}`, addressWitness: `address-${userId}` } })
     expect(result.recipients.size).toBe(count); expect([...result.connections]).toEqual(['connection'])
     expect(JSON.stringify([...result.recipients])).not.toContain('PRIVATE_ADDRESS')
     expect(JSON.stringify([...result.recipients])).not.toContain('"address":')

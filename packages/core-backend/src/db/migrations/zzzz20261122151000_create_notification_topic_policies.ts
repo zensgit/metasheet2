@@ -5,7 +5,9 @@ import { applyMigrationTimeouts, readMigrationTimeouts, restoreMigrationTimeouts
 export async function up(db: Kysely<unknown>): Promise<void> {
   const previous = await readMigrationTimeouts(db)
   await applyMigrationTimeouts(db)
-  const prerequisite = await sql<{ present: boolean }>`SELECT to_regclass('directory_integrations') IS NOT NULL AS present`.execute(db)
+  const prerequisite = await sql<{ present: boolean }>`SELECT to_regclass('directory_integrations') IS NOT NULL
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('directory_integrations')
+      AND conname = 'uq_directory_integrations_id_org' AND contype = 'u') AS present`.execute(db)
   if (prerequisite.rows[0]?.present !== true) throw new Error('NOTIFICATION_ROUTING_PREREQUISITE_MISSING')
   await sql`
     CREATE TABLE org_notification_topic_policies (
@@ -33,6 +35,7 @@ export async function down(db: Kysely<unknown>): Promise<void> {
   await applyMigrationTimeouts(db)
   const table = await sql<{ present: boolean }>`SELECT to_regclass('org_notification_topic_policies') IS NOT NULL AS present`.execute(db)
   if (table.rows[0]?.present === true) {
+    await sql`LOCK TABLE org_notification_topic_policies IN ACCESS EXCLUSIVE MODE`.execute(db)
     const held = await sql<{ present: boolean }>`SELECT EXISTS (SELECT 1 FROM org_notification_topic_policies) AS present`.execute(db)
     if (held.rows[0]?.present === true) throw new Error('NOTIFICATION_ROUTING_DOWN_BLOCKED')
   }

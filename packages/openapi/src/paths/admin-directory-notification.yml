@@ -89,6 +89,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { description: Notification preferences surface is disabled }
+        '500': { description: INTERNAL, a fixed-sentence unexpected failure }
         '503': { description: NOTIFICATION_SCHEMA_UNAVAILABLE or NOTIFICATION_BUSY }
   /api/admin/directory/notification-topic-policies/{topic}:
     put:
@@ -99,7 +100,9 @@ paths:
         Platform administrator only. First takeover requires an integrated topic, both notification
         switches, readable policy and decision tables, and endpoint and preference tables. There is no
         delete or return to legacy routing. A missing defaultConnectionId preserves the current default
-        on updates and means null on first takeover. Null first takeover requires explicit confirmation.
+        on updates. First takeover must explicitly provide defaultConnectionId and state active; an omitted
+        default or initial paused state is INVALID_REQUEST (422). Null first takeover requires
+        confirmNoDefaultConnection true; without it the response is DEFAULT_CONNECTION_CONFIRM_REQUIRED (409).
         Every first takeover and every explicit nonnull default selection requires a trusted authenticated
         tenant equal to default and active membership. Headers and request-body organization values cannot
         supply that tenant. A malformed nonnull connection selection passes this tenant gate before body
@@ -115,6 +118,13 @@ paths:
               type: object
               additionalProperties: false
               required: [expectedRevision, state]
+              oneOf:
+                - required: [defaultConnectionId]
+                  properties:
+                    expectedRevision: { enum: [0] }
+                    state: { enum: [active] }
+                - properties:
+                    expectedRevision: { minimum: 1 }
               properties:
                 expectedRevision: { type: integer, minimum: 0 }
                 state: { type: string, enum: [active, paused] }
@@ -143,6 +153,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/NotificationError' }
+        '500': { description: INTERNAL, a fixed-sentence unexpected failure }
         '503': { description: NOTIFICATION_SCHEMA_UNAVAILABLE or NOTIFICATION_BUSY }
   /api/admin/directory/notification-topic-policies/{topic}/takeover-preview:
     get:
@@ -154,6 +165,9 @@ paths:
         Read-only, at most 5000 members in batches of 500. Returns counts and fixed warnings only.
         A supplied default connection uses the authenticated capability entry and the same trusted
         default-tenant membership gate; no preview witness becomes a persisted routing decision.
+        Missing and foreign-organization connections have the same connection_not_found count and
+        default_connection_not_ready warning (200). Malformed input is 422; inactive membership is
+        403 ORG_MISMATCH. An unreadable capability is 503 NOTIFICATION_BUSY.
       operationId: previewNotificationTopicTakeover
       security: [ { bearerAuth: [] } ]
       responses:
@@ -166,4 +180,5 @@ paths:
         '403': { description: Platform administrator required or ORG_MISMATCH }
         '404': { description: Notification preferences surface is disabled }
         '422': { description: INVALID_REQUEST or ORG_MISSING }
+        '500': { description: INTERNAL, a fixed-sentence unexpected failure }
         '503': { description: NOTIFICATION_SCHEMA_UNAVAILABLE or NOTIFICATION_BUSY }

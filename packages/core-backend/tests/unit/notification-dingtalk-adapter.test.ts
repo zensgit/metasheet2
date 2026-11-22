@@ -275,9 +275,18 @@ describe('DingTalk notification credential fingerprint', () => {
   it('returns fixed errors, not credential read details, and refuses blank connections', async () => {
     const { adapter, readTuple } = setup()
     readTuple.mockRejectedValue(new Error(CONFIG.appSecret))
-    expect(await adapter.fingerprint(CONNECTION)).toEqual({ ok: false, code: 'routed_credentials_unavailable' })
+    expect(await adapter.fingerprint(CONNECTION)).toEqual({ ok: false, code: 'routed_credentials_unavailable', failureKind: 'read_failed' })
     readTuple.mockClear()
     expect(await adapter.fingerprint(' ')).toEqual({ ok: false, code: 'routed_credentials_unavailable' })
     expect(readTuple).not.toHaveBeenCalled()
   })
 })
+
+it.each(['integration_tuple_incomplete', 'integration_inactive', 'integration_not_found', 'env_agent_id_invalid'] as const)
+  ('fingerprint keeps deterministic configuration error %s distinct from read failures', async code => {
+    const { adapter, readTuple } = setup()
+    readTuple.mockRejectedValue(new DingTalkMessageConfigError(code, 'Synthetic configuration unavailable'))
+    const result = await adapter.fingerprint(CONNECTION)
+    expect(result).toMatchObject({ ok: false })
+    expect(result).not.toHaveProperty('failureKind')
+  })

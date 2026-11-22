@@ -79,6 +79,7 @@ export async function down(db: Kysely<unknown>): Promise<void> {
   await applyMigrationTimeouts(db)
   const table = await sql<{ present: boolean }>`SELECT to_regclass('task_notification_delivery_decisions') IS NOT NULL AS present`.execute(db)
   if (table.rows[0]?.present === true) {
+    await sql`LOCK TABLE task_notification_delivery_decisions IN ACCESS EXCLUSIVE MODE`.execute(db)
     const held = await sql<{ present: boolean }>`SELECT EXISTS (SELECT 1 FROM task_notification_delivery_decisions) AS present`.execute(db)
     if (held.rows[0]?.present === true) throw new Error('NOTIFICATION_ROUTING_DOWN_BLOCKED')
   }

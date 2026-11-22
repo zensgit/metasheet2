@@ -76,6 +76,10 @@ describe.each([['policy', policy], ['decision', decision]] as const)('%s migrati
     const { db, log } = recordingDb({ lockTimeout: '7s', statementTimeout: '42s', evidenceRows: true })
     await expect(migration.down(db)).rejects.toThrow('NOTIFICATION_ROUTING_DOWN_BLOCKED')
     expect(log.some(row => row.sql.includes('DROP'))).toBe(false)
+    const table = _name === 'policy' ? 'org_notification_topic_policies' : 'task_notification_delivery_decisions'
+    const lock = log.findIndex(row => row.sql === `LOCK TABLE ${table} IN ACCESS EXCLUSIVE MODE`)
+    expect(lock).toBeGreaterThan(-1)
+    expect(lock).toBeLessThan(log.findIndex(row => row.sql.includes('SELECT EXISTS')))
     await db.destroy()
   })
 })

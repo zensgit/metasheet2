@@ -1,6 +1,6 @@
 /** Real routing SQL and resolvers in an owned schema; adapters never send or access the network. */
 import '../helpers/assert-rbac-optional-off'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { Pool } from 'pg'
@@ -15,6 +15,7 @@ import * as policyMigration from '../../src/db/migrations/zzzz20261122151000_cre
 import * as decisionMigration from '../../src/db/migrations/zzzz20261122151100_create_task_notification_decisions'
 import { resolveEffectiveNotificationCapabilityForBackground } from '../../src/integrations/integration-capability-resolve-background'
 import { resolveEffectiveIntegrationCapability } from '../../src/integrations/integration-capability-resolve'
+import { DingTalkWorkNotificationAdapter } from '../../src/notifications/adapters/dingtalk-work-notification-adapter'
 import { __notificationAdapterRegistryForTests } from '../../src/notifications/adapters/notification-adapter'
 import { insertRoutedReminderDeliveries, ROUTED_BRANCH_MAX_STATEMENTS_BETWEEN_HEARTBEATS, type RoutingTransaction } from '../../src/services/task-routed-reminders'
 import { runTaskReminderScan, type TaskSchedulerJobContext } from '../../src/services/task-scheduler'
@@ -24,12 +25,13 @@ import { checkNotificationVerification } from '../../src/notifications/verificat
 import { findActiveOrgMembers } from '../../src/services/task-org-members'
 import { createTopicTakeoverReader } from '../../src/services/task-notification-takeover'
 
+const topicFixture = vi.hoisted(() => ({ integrated: true }))
 // Exercise first-takeover prerequisites with the future integration marker, without enabling it in production.
 vi.mock('../../src/notifications/topic-registry', async importOriginal => {
   const original = await importOriginal<typeof import('../../src/notifications/topic-registry')>()
   return { ...original, resolveNotificationTopic: (topic: string) => {
     const descriptor = original.resolveNotificationTopic(topic)
-    return descriptor ? { ...descriptor, integrated: true } : null
+    return descriptor && topicFixture.integrated ? { ...descriptor, integrated: true } : descriptor
   } }
 })
 
@@ -60,8 +62,8 @@ async function scan(env = FLAGS) {
   const reader = createTopicTakeoverReader()
   return runTaskReminderScan(context(), { env, query: db.query, transaction, takeover: org => reader(db, org), logger: { warn: vi.fn(), info: vi.fn() } })
 }
-async function seed(count = 2, orgId = ORG, takenOver = true) {
-  const key = randomUUID().replaceAll('-', '')
+async function seed(count = 2, orgId = ORG, takenOver = true, orderPrefix = '') {
+  const key = orderPrefix + randomUUID().replaceAll('-', '')
   const user = (index: number) => `${key}-user-${index}`
   const task = (index: number) => `${key}-task-${index}`
   const integration = await pool.query(`INSERT INTO directory_integrations(org_id, provider, name, status, corp_id, config)
@@ -148,6 +150,7 @@ beforeAll(async () => {
   await migrations.transaction().execute(async trx => { await policyMigration.up(trx); await decisionMigration.up(trx) })
 }, 120_000)
 beforeEach(() => {
+  topicFixture.integrated = true
   vi.stubEnv('DIRECTORY_INTEGRATION_CAPABILITIES_ENABLED', 'true')
   __notificationAdapterRegistryForTests.replace(new Map([['dingtalk', { provider: 'dingtalk', transport: 'work_notification',
     fingerprint: async () => ({ ok: true as const, value: 'f'.repeat(64) }), prepare: async () => { throw new Error('scan must never send') } }]]))
@@ -228,6 +231,20 @@ describe('N78 routed reminder decisions (real PostgreSQL)', () => {
     expect(pair[0]).toMatchObject({ effective: true, orgSource: 'background_event_row', witness: row.capability_witness })
     expect(pair[1]).toMatchObject({ effective: true, orgSource: 'authenticated_tenant' })
     expect(pair[1].effective && pair[1].witness).not.toBe(row.capability_witness)
+    const independentWitness = (parts: string[]) => {
+      const hash = createHash('sha256')
+      for (const part of parts) {
+        const bytes = Buffer.from(part, 'utf8'); const size = Buffer.alloc(4)
+        size.writeUInt32BE(bytes.length); hash.update(size); hash.update(bytes)
+      }
+      return hash.digest('hex')
+    }
+    const version = 'metasheet.directory-integration-capability-witness.v1'
+    expect(independentWitness([version, 'background_event_row', '0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d',
+      'org-alpha', 'dingtalk', 'active', 'notification', '17', 'CorpOne', 'AppOne']))
+      .toBe('cfd57e6fd6992de1c6ed9d15df41f047e6872af0a1d14070e449f37359c2f722')
+    expect(row.capability_witness).toBe(independentWitness([version, 'background_event_row', f.connectionId,
+      ORG, 'dingtalk', 'active', 'notification', String(row.capability_revision), 'FixtureTenant', 'FixtureApplication']))
     const addresses = await pool.query('SELECT external_user_id FROM directory_accounts')
     for (const address of addresses.rows) expect(JSON.stringify(row)).not.toContain(address.external_user_id)
   })
@@ -258,7 +275,7 @@ describe('N78 routed reminder decisions (real PostgreSQL)', () => {
     } finally { await pool.query('ALTER TABLE hidden_policy RENAME TO org_notification_topic_policies') }
   })
   it('A-D08 one routed CTE FK failure leaves no half-pair and other organizations still progress', async () => {
-    const f = await seed(1)
+    const f = await seed(1, ORG, true, '00-')
     await pool.query("INSERT INTO user_notification_preferences(org_id,user_id,topic,enabled,updated_by) VALUES ($1,$2,'task_reminder',false,$2)", [ORG, f.user(0)])
     const data = { recipient: { orgId: ORG, userId: f.user(0), taskId: f.task(0), remindAt: NOW.toISOString(), role: 'assignee',
       eventKey: `task_reminder:${f.task(0)}:${NOW.toISOString()}`, legacySourceKey: 'absent' },
@@ -268,7 +285,9 @@ describe('N78 routed reminder decisions (real PostgreSQL)', () => {
     await pool.query('DELETE FROM task_notification_delivery_decisions')
     await expect(insertRoutedReminderDeliveries(pool, [data], NOW)).rejects.toMatchObject({ code: '23503' })
     expect(await counts()).toEqual({ outbox: 1, decisions: 0 })
-    await seed(1, 'fixture-independent'); await seed(1, 'fixture-legacy', false)
+    await seed(1, 'fixture-independent', true, '10-'); await seed(1, 'fixture-legacy', false, '20-')
+    expect((await pool.query('SELECT org_id FROM tasks ORDER BY remind_at,id')).rows.map(row => row.org_id))
+      .toEqual([ORG, 'fixture-independent', 'fixture-legacy'])
     const reader = createTopicTakeoverReader(); const warn = vi.fn()
     expect((await runTaskReminderScan(context(), { env: FLAGS, query: db.query, transaction,
       takeover: org => reader(db, org), logger: { warn, info: vi.fn() } })).written).toBe(2)
@@ -309,19 +328,19 @@ describe('N78 routed reminder decisions (real PostgreSQL)', () => {
       return client.query(text, params)
     } }))
     await expect(policyService(timed).put({ actorId: f.user(0), authenticatedTenantId: 'default' }, 'task_reminder',
-      { expectedRevision: 0, state: 'active', confirmNoDefaultConnection: true })).rejects.toMatchObject({ code: '57014' })
+      { expectedRevision: 0, state: 'active', defaultConnectionId: null, confirmNoDefaultConnection: true })).rejects.toMatchObject({ code: '57014' })
     expect((await pool.query('SELECT * FROM org_notification_topic_policies')).rows).toEqual([])
   })
   it('A-D10 first takeover checks four tables, explicit confirmation, CAS and active membership', async () => {
     const f = await seed(1, 'default', false); const service = policyService()
     const actor = { actorId: f.user(0), authenticatedTenantId: 'default' }
-    await expect(service.put(actor, 'task_reminder', { expectedRevision: 0, state: 'active' })).rejects.toMatchObject({ code: 'DEFAULT_CONNECTION_CONFIRM_REQUIRED' })
+    await expect(service.put(actor, 'task_reminder', { expectedRevision: 0, state: 'active', defaultConnectionId: null })).rejects.toMatchObject({ code: 'DEFAULT_CONNECTION_CONFIRM_REQUIRED' })
     for (const table of ['org_notification_topic_policies', 'task_notification_delivery_decisions', 'user_notification_endpoints', 'user_notification_preferences']) {
       await pool.query(`ALTER TABLE ${table} RENAME TO hidden_relation`)
-      try { await expect(service.put(actor, 'task_reminder', { expectedRevision: 0, state: 'active', confirmNoDefaultConnection: true })).rejects.toMatchObject({ code: 'NOTIFICATION_SCHEMA_UNAVAILABLE' }) }
+      try { await expect(service.put(actor, 'task_reminder', { expectedRevision: 0, state: 'active', defaultConnectionId: null, confirmNoDefaultConnection: true })).rejects.toMatchObject({ code: 'NOTIFICATION_SCHEMA_UNAVAILABLE' }) }
       finally { await pool.query(`ALTER TABLE hidden_relation RENAME TO ${table}`) }
     }
-    expect(await service.put(actor, 'task_reminder', { expectedRevision: 0, state: 'active', confirmNoDefaultConnection: true })).toMatchObject({ revision: 1, defaultConnectionId: null })
+    expect(await service.put(actor, 'task_reminder', { expectedRevision: 0, state: 'active', defaultConnectionId: null, confirmNoDefaultConnection: true })).toMatchObject({ revision: 1, defaultConnectionId: null })
     expect(await service.put(actor, 'task_reminder', { expectedRevision: 1, state: 'paused' })).toMatchObject({ revision: 2, state: 'paused' })
     await expect(service.put(actor, 'task_reminder', { expectedRevision: 1, state: 'active' })).rejects.toMatchObject({ code: 'POLICY_STALE' })
     await pool.query('UPDATE users SET is_active=false')
@@ -411,4 +430,48 @@ describe('N78 routed reminder decisions (real PostgreSQL)', () => {
       expect(await catalog(table)).toEqual(expectedCatalog.get(table))
     }
   })
+})
+
+it('A-D10 production topic marker refuses first takeover without a policy write', async () => {
+  const f = await seed(1, 'default', false); topicFixture.integrated = false
+  await expect(policyService().put({ actorId: f.user(0), authenticatedTenantId: 'default' }, 'task_reminder',
+    { expectedRevision: 0, state: 'active', defaultConnectionId: null, confirmNoDefaultConnection: true }))
+    .rejects.toMatchObject({ status: 409, code: 'TOPIC_NOT_INTEGRATED' })
+  expect((await pool.query('SELECT * FROM org_notification_topic_policies')).rows).toEqual([])
+  expect(await counts()).toEqual({ outbox: 0, decisions: 0 })
+})
+it('A-D04 org_default witnesses remain bound to each of two recipients', async () => {
+  const f = await seed(2); await scan()
+  const rows = (await pool.query('SELECT * FROM task_notification_delivery_decisions ORDER BY recipient_user_id')).rows
+  expect(rows).toHaveLength(2)
+  const proofs = new Set<string>()
+  for (const row of rows) {
+    const resolved = await resolver.deriveDefaultTarget(pool, { orgId: ORG, userId: row.recipient_user_id, connectionId: f.connectionId })
+    expect(resolved.ok).toBe(true)
+    if (resolved.ok === false) throw new Error(resolved.code)
+    expect(row).toMatchObject({ route_source: 'org_default', proof_witness: resolved.target.proofWitness, address_witness: resolved.target.addressWitness })
+    proofs.add(row.proof_witness)
+  }
+  expect(proofs.size).toBe(2)
+})
+it('A-D19 real tuple SELECT 57014 defers, then a healthy tick persists the decision', async () => {
+  await seed(1)
+  let failRead = false
+  const adapter = new DingTalkWorkNotificationAdapter({ normalizeBaseUrl: value => String(value),
+    classifySendError: () => { throw new Error('must not send') },
+    readTuple: async () => {
+      if (failRead) await transaction(async client => {
+        await client.query("SET LOCAL statement_timeout='1ms'")
+        await client.query('SELECT pg_sleep(0.05)')
+      })
+      return { config: { appKey: 'fixture', appSecret: 'synthetic', agentId: '1', baseUrl: 'https://oapi.dingtalk.com' } } as never
+    },
+  })
+  const fingerprint = await adapter.fingerprint(connectionId)
+  if (!fingerprint.ok) throw new Error('healthy tuple required')
+  await pool.query('UPDATE notification_connection_verifications SET tuple_fingerprint=$1', [fingerprint.value])
+  __notificationAdapterRegistryForTests.replace(new Map([['dingtalk', adapter]]))
+  failRead = true; await scan(); expect(await counts()).toEqual({ outbox: 0, decisions: 0 })
+  failRead = false; await scan(); expect(await counts()).toEqual({ outbox: 1, decisions: 1 })
+  expect((await pool.query('SELECT status FROM task_notification_deliveries')).rows).toEqual([{ status: 'pending' }])
 })

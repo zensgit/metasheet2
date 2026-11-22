@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { pool } from '../db/pg'
 import { resolveEffectiveNotificationCapabilityForBackground } from '../integrations/integration-capability-resolve-background'
 import { metrics } from '../metrics/metrics'
-import { resolveNotificationAdapter } from '../notifications/adapters/notification-adapter'
+import { resolveNotificationAdapter, NotificationProviderAdapterUnavailableError } from '../notifications/adapters/notification-adapter'
 import { readRecipientRouteInputs } from '../notifications/route-inputs'
 import { createRecipientResolver, type Db } from '../notifications/recipient-resolver'
 import { decideRoute, ROUTER_VERSION, type RouteCandidate, type RouteDecision } from '../notifications/router'
@@ -23,15 +23,16 @@ export type RoutingTransaction = <T>(fn: (db: Db) => Promise<T>) => Promise<T>
 export const routedCapabilityTransaction: RoutingTransaction = async fn => {
   if (!pool) throw new Error('capability_unreadable')
   const client = await pool.connect()
+  let discard = false
   try {
     await client.query('BEGIN ISOLATION LEVEL READ COMMITTED')
     const value = await fn(client)
     await client.query('COMMIT')
     return value
   } catch (error) {
-    await client.query('ROLLBACK')
+    try { await client.query('ROLLBACK') } catch { discard = true }
     throw error
-  } finally { client.release() }
+  } finally { client.release(discard) }
 }
 
 export interface RoutedRecipient {
@@ -157,7 +158,7 @@ export async function writeRoutedReminderOrg(input: {
   if (!pending.length) return 0
   const userIds = [...new Set(pending.map(recipient => recipient.userId))]
   const active = await findActiveOrgMembers(db, orgId, userIds)
-  const resolver = createRecipientResolver({ isActiveOrgMembers: async (_db, _org, ids) => new Set(ids.filter(id => active.has(id))) })
+  const resolver = createRecipientResolver({ isActiveOrgMembers: async (_db, memberOrg, ids) => new Set(memberOrg === orgId ? ids.filter(id => active.has(id)) : []) })
   const batch = await readRecipientRouteInputs(db, { orgId, userIds, defaultConnectionId: policy.defaultConnectionId,
     topic: resolveNotificationTopic('task_reminder')!, resolver })
   if (!(await heartbeat())) return defer('routed_branch_stopped')
@@ -189,8 +190,12 @@ export async function writeRoutedReminderOrg(input: {
           const adapter = resolveNotificationAdapter(result.provider)
           available = adapter.transport === resolveNotificationTopic('task_reminder')?.profiles[result.provider]?.transport
           const value = await adapter.fingerprint(connectionId)
+          if (value.ok === false && value.failureKind === 'read_failed') throw new Error('capability_unreadable')
           fingerprint = value.ok ? value.value : null
-        } catch { available = false }
+        } catch (error) {
+          if (!(error instanceof NotificationProviderAdapterUnavailableError)) throw error
+          available = false
+        }
       }
     } catch { capability = { effective: false, reason: 'read_failed' } }
     readiness.set(connectionId, { capability, fingerprint, available })

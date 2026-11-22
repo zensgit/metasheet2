@@ -8,9 +8,14 @@ import type { TaskSchedulerJobContext } from '../../src/services/task-scheduler'
 
 vi.mock('../../src/db/pg', () => ({ pool: null, query: vi.fn() }))
 vi.mock('../../src/integrations/integration-capability-resolve-background', () => ({ resolveEffectiveNotificationCapabilityForBackground: vi.fn() }))
-vi.mock('../../src/notifications/adapters/notification-adapter', () => ({ resolveNotificationAdapter: () => ({
-  transport: 'work_notification', fingerprint: async () => ({ ok: true, value: 'f'.repeat(64) }),
-}) }))
+vi.mock('../../src/notifications/adapters/notification-adapter', async importOriginal => ({
+  ...await importOriginal<typeof import('../../src/notifications/adapters/notification-adapter')>(),
+  resolveNotificationAdapter: () => ({ transport: 'work_notification', fingerprint: async () => {
+    fingerprintLog?.push('SELECT fingerprint_tuple')
+    return { ok: true, value: 'f'.repeat(64) }
+  } }),
+}))
+let fingerprintLog: string[] | undefined
 vi.mock('../../src/notifications/recipient-resolver', () => ({ createRecipientResolver: () => ({
   verifyEndpoints: async (_db: unknown, input: { refs: Array<{ userId: string }> }) => input.refs.map(ref => target(ref.userId)),
   deriveDefaultTargets: async (_db: unknown, input: { userIds: string[] }) => input.userIds.map(target),
@@ -29,6 +34,7 @@ const task = (org = 'fixture-other') => ({ id: 'task_fixture', org_id: org, crea
   remind_at_cursor: NOW.toISOString(), floor: new Date(NOW.getTime() - 1000) })
 function setup(count = 2) {
   const log: string[] = []
+  fingerprintLog = log
   let already = false
   let written: Record<string, unknown>[] = []
   const db = { query: vi.fn(async (sql: string, params?: unknown[]) => {
@@ -79,7 +85,7 @@ describe('routed scan atomicity and statement bounds', () => {
     expect(resolveEffectiveNotificationCapabilityForBackground).toHaveBeenCalledWith(expect.anything(), { integrationId: CONNECTION, eventOrgId: 'fixture-other' })
     expect(s.log.find(line => line.includes("'pending' AS outcome"))).toContain(ROUTED_OWNERSHIP_PREDICATE)
     expect(s.log.find(line => line.includes('INSERT INTO task_notification_delivery_decisions'))).toContain(ROUTED_OWNERSHIP_PREDICATE)
-    expect(s.log.filter(line => line !== 'HEARTBEAT')).toHaveLength(17)
+    expect(s.log.filter(line => line !== 'HEARTBEAT')).toHaveLength(18)
     let statements = 0
     for (const entry of [...s.log, 'HEARTBEAT']) {
       if (entry === 'HEARTBEAT') { expect(statements).toBeLessThanOrEqual(ROUTED_BRANCH_MAX_STATEMENTS_BETWEEN_HEARTBEATS); statements = 0 }
@@ -188,3 +194,38 @@ describe('routed scan atomicity and statement bounds', () => {
   })
 
 })
+
+it('keeps a later routed organization and legacy writes after the first routed organization fails', async () => {
+  const entered: string[] = []
+  const rows: Record<string, unknown>[] = []
+  const query = vi.fn(async (sql: string, params?: unknown[]) => {
+    if (sql.includes('FROM tasks')) return { rows: [{ ...task('poison'), id: '0-poison' }, task('healthy'), { ...task('legacy'), id: '2-legacy' }] }
+    if (sql.includes('AS dingtalk_active')) return { rows: [{ dingtalk_active: true }] }
+    if (sql.includes('FROM task_assignees')) {
+      const ids = params![0] as string[]; entered.push(ids[0])
+      if (ids[0] === '0-poison') throw new Error('synthetic routing failure')
+      return { rows: [] }
+    }
+    if (sql.includes("'pending' AS outcome")) return { rows: [{ ordinal: 0, outcome: 'pending' }] }
+    if (sql.includes('FROM user_orgs')) return { rows: [{ user_id: 'user0' }] }
+    if (sql.startsWith('WITH r AS')) { rows.push(...JSON.parse(String(params![0]))); return { rows: [{ id: 'routed' }] } }
+    if (sql.startsWith('INSERT')) return { rows: [{ id: 'legacy' }], rowCount: 1 }
+    return { rows: [] }
+  })
+  const warn = vi.fn()
+  const result = await runTaskReminderScan(ctx(), { env: ENV, query,
+    takeover: async org => org === 'legacy' ? { state: 'none' } : { state: 'active', revision: 1, defaultConnectionId: null },
+    logger: { warn, info: vi.fn() } })
+  expect(entered.indexOf('0-poison')).toBeLessThan(entered.indexOf('task_fixture'))
+  expect(rows).toMatchObject([{ org_id: 'healthy', recipient_user_id: 'user0', status: 'skipped', reason: 'no_route' }])
+  expect(result.written).toBe(2)
+  expect(warn).toHaveBeenCalledWith('routed_branch_error')
+})
+it.each(['USER_NOTIFICATION_PREFERENCES_ENABLED', 'EXTERNAL_NOTIFICATION_DELIVERY_ENABLED'])
+  ('reads the policy exactly once with %s off and never routes or falls back', async flag => {
+    const query = vi.fn(async () => ({ rows: [task(), { ...task(), id: 'second-task' }] }))
+    const takeover = vi.fn(async () => ({ state: 'active' as const, revision: 1, defaultConnectionId: CONNECTION }))
+    expect(await runTaskReminderScan(ctx(), { env: { ...ENV, [flag]: 'false' }, query, takeover })).toMatchObject({ written: 0 })
+    expect(takeover).toHaveBeenCalledOnce(); expect(query).toHaveBeenCalledOnce()
+    expect(resolveEffectiveNotificationCapabilityForBackground).not.toHaveBeenCalled()
+  })

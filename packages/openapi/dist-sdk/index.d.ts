@@ -75,7 +75,7 @@ export interface paths {
         get?: never;
         /**
          * Take over, pause, resume or change the default notification connection
-         * @description Platform administrator only. First takeover requires an integrated topic, both notification switches, readable policy and decision tables, and endpoint and preference tables. There is no delete or return to legacy routing. A missing defaultConnectionId preserves the current default on updates and means null on first takeover. Null first takeover requires explicit confirmation. Every first takeover and every explicit nonnull default selection requires a trusted authenticated tenant equal to default and active membership. Headers and request-body organization values cannot supply that tenant. A malformed nonnull connection selection passes this tenant gate before body validation. State-only updates and clearing an existing default retain the platform-admin boundary. All replicas must run the routing implementation before first takeover.
+         * @description Platform administrator only. First takeover requires an integrated topic, both notification switches, readable policy and decision tables, and endpoint and preference tables. There is no delete or return to legacy routing. A missing defaultConnectionId preserves the current default on updates. First takeover must explicitly provide defaultConnectionId and state active; an omitted default or initial paused state is INVALID_REQUEST (422). Null first takeover requires confirmNoDefaultConnection true; without it the response is DEFAULT_CONNECTION_CONFIRM_REQUIRED (409). Every first takeover and every explicit nonnull default selection requires a trusted authenticated tenant equal to default and active membership. Headers and request-body organization values cannot supply that tenant. A malformed nonnull connection selection passes this tenant gate before body validation. State-only updates and clearing an existing default retain the platform-admin boundary. All replicas must run the routing implementation before first takeover.
          */
         put: operations["putNotificationTopicPolicy"];
         post?: never;
@@ -94,7 +94,7 @@ export interface paths {
         };
         /**
          * Preview takeover using bounded batches of active members
-         * @description Read-only, at most 5000 members in batches of 500. Returns counts and fixed warnings only. A supplied default connection uses the authenticated capability entry and the same trusted default-tenant membership gate; no preview witness becomes a persisted routing decision.
+         * @description Read-only, at most 5000 members in batches of 500. Returns counts and fixed warnings only. A supplied default connection uses the authenticated capability entry and the same trusted default-tenant membership gate; no preview witness becomes a persisted routing decision. Missing and foreign-organization connections have the same connection_not_found count and default_connection_not_ready warning (200). Malformed input is 422; inactive membership is 403 ORG_MISMATCH. An unreadable capability is 503 NOTIFICATION_BUSY.
          */
         get: operations["previewNotificationTopicTakeover"];
         put?: never;
@@ -24217,6 +24217,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description INTERNAL */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description NOTIFICATION_SCHEMA_UNAVAILABLE or NOTIFICATION_BUSY */
             503: {
                 headers: {
@@ -24245,7 +24252,14 @@ export interface operations {
                     defaultConnectionId?: string | null;
                     /** @enum {boolean} */
                     confirmNoDefaultConnection?: true;
-                };
+                } & ({
+                    /** @enum {unknown} */
+                    expectedRevision?: 0;
+                    /** @enum {unknown} */
+                    state?: "active";
+                } | {
+                    expectedRevision?: unknown;
+                });
             };
         };
         responses: {
@@ -24292,6 +24306,13 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["NotificationError"];
                 };
+            };
+            /** @description INTERNAL */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description NOTIFICATION_SCHEMA_UNAVAILABLE or NOTIFICATION_BUSY */
             503: {
@@ -24341,6 +24362,13 @@ export interface operations {
             };
             /** @description INVALID_REQUEST or ORG_MISSING */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description INTERNAL */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };

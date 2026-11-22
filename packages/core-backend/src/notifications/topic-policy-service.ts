@@ -41,7 +41,7 @@ export function createTopicPolicyService(deps: TopicPolicyDeps) {
       await client.query("SET LOCAL statement_timeout = '5s'")
       const result = await resolveEffectiveIntegrationCapability({ query: async (sql, params) => {
         const read = await client.query(sql, params); return { rows: read.rows, rowCount: read.rows.length }
-      } }, { integrationId: connectionId, capability: 'notification', expectedOrgId: trustedOrgId })
+      } }, { integrationId: connectionId.toLowerCase(), capability: 'notification', expectedOrgId: trustedOrgId })
       if (result.effective === false && result.reason === 'read_failed') fail(503, 'NOTIFICATION_BUSY')
       return result
     })
@@ -76,6 +76,7 @@ export function createTopicPolicyService(deps: TopicPolicyDeps) {
       if (!descriptor) fail(422, 'INVALID_REQUEST')
       const first = patch.expectedRevision === 0
       const explicit = Object.hasOwn(patch, 'defaultConnectionId')
+      if (first && (!explicit || patch.state !== 'active')) fail(422, 'INVALID_REQUEST')
       let trustedOrg: string | undefined
       if (first || (explicit && patch.defaultConnectionId !== null)) trustedOrg = await requireMember(actor)
       if (first && !descriptor.integrated) fail(409, 'TOPIC_NOT_INTEGRATED')
@@ -110,7 +111,7 @@ export function createTopicPolicyService(deps: TopicPolicyDeps) {
         return policyView(written.rows[0])
       })
       await deps.audit({ actorId: actor.actorId, actorType: 'user', action: 'notification.topic_policy.update',
-        resourceType: 'notification-topic-policy', resourceId: topic, meta: { state: result.state, revision: result.revision } })
+        resourceType: 'notification-topic-policy', resourceId: topic, meta: { state: result.state, revision: result.revision, defaultConnectionId: result.defaultConnectionId, firstTakeover: first } })
       return result
     },
     async preview(actor: PolicyActor, topic: string, defaultConnectionId: string | null) {

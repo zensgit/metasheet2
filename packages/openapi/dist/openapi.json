@@ -16786,6 +16786,10 @@
           "404": {
             "description": "Notification preferences surface is disabled"
           },
+          "500": {
+            "description": "INTERNAL",
+            "a fixed-sentence unexpected failure": null
+          },
           "503": {
             "description": "NOTIFICATION_SCHEMA_UNAVAILABLE or NOTIFICATION_BUSY"
           }
@@ -16808,7 +16812,7 @@
           }
         ],
         "summary": "Take over, pause, resume or change the default notification connection",
-        "description": "Platform administrator only. First takeover requires an integrated topic, both notification switches, readable policy and decision tables, and endpoint and preference tables. There is no delete or return to legacy routing. A missing defaultConnectionId preserves the current default on updates and means null on first takeover. Null first takeover requires explicit confirmation. Every first takeover and every explicit nonnull default selection requires a trusted authenticated tenant equal to default and active membership. Headers and request-body organization values cannot supply that tenant. A malformed nonnull connection selection passes this tenant gate before body validation. State-only updates and clearing an existing default retain the platform-admin boundary. All replicas must run the routing implementation before first takeover.",
+        "description": "Platform administrator only. First takeover requires an integrated topic, both notification switches, readable policy and decision tables, and endpoint and preference tables. There is no delete or return to legacy routing. A missing defaultConnectionId preserves the current default on updates. First takeover must explicitly provide defaultConnectionId and state active; an omitted default or initial paused state is INVALID_REQUEST (422). Null first takeover requires confirmNoDefaultConnection true; without it the response is DEFAULT_CONNECTION_CONFIRM_REQUIRED (409). Every first takeover and every explicit nonnull default selection requires a trusted authenticated tenant equal to default and active membership. Headers and request-body organization values cannot supply that tenant. A malformed nonnull connection selection passes this tenant gate before body validation. State-only updates and clearing an existing default retain the platform-admin boundary. All replicas must run the routing implementation before first takeover.",
         "operationId": "putNotificationTopicPolicy",
         "security": [
           {
@@ -16825,6 +16829,32 @@
                 "required": [
                   "expectedRevision",
                   "state"
+                ],
+                "oneOf": [
+                  {
+                    "required": [
+                      "defaultConnectionId"
+                    ],
+                    "properties": {
+                      "expectedRevision": {
+                        "enum": [
+                          0
+                        ]
+                      },
+                      "state": {
+                        "enum": [
+                          "active"
+                        ]
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "expectedRevision": {
+                        "minimum": 1
+                      }
+                    }
+                  }
                 ],
                 "properties": {
                   "expectedRevision": {
@@ -16901,6 +16931,10 @@
               }
             }
           },
+          "500": {
+            "description": "INTERNAL",
+            "a fixed-sentence unexpected failure": null
+          },
           "503": {
             "description": "NOTIFICATION_SCHEMA_UNAVAILABLE or NOTIFICATION_BUSY"
           }
@@ -16932,7 +16966,7 @@
           }
         ],
         "summary": "Preview takeover using bounded batches of active members",
-        "description": "Read-only, at most 5000 members in batches of 500. Returns counts and fixed warnings only. A supplied default connection uses the authenticated capability entry and the same trusted default-tenant membership gate; no preview witness becomes a persisted routing decision.",
+        "description": "Read-only, at most 5000 members in batches of 500. Returns counts and fixed warnings only. A supplied default connection uses the authenticated capability entry and the same trusted default-tenant membership gate; no preview witness becomes a persisted routing decision. Missing and foreign-organization connections have the same connection_not_found count and default_connection_not_ready warning (200). Malformed input is 422; inactive membership is 403 ORG_MISMATCH. An unreadable capability is 503 NOTIFICATION_BUSY.",
         "operationId": "previewNotificationTopicTakeover",
         "security": [
           {
@@ -16961,6 +16995,10 @@
           },
           "422": {
             "description": "INVALID_REQUEST or ORG_MISSING"
+          },
+          "500": {
+            "description": "INTERNAL",
+            "a fixed-sentence unexpected failure": null
           },
           "503": {
             "description": "NOTIFICATION_SCHEMA_UNAVAILABLE or NOTIFICATION_BUSY"

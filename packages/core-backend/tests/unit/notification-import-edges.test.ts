@@ -46,6 +46,7 @@ function importersFromOutside(): ImportEdge[] {
 
 const OUTSIDE_ALLOWLIST: ReadonlyArray<ImportEdge> = [
   ['routes/admin-directory-notification.ts', 'notifications/notification-errors'],
+  ['routes/admin-directory-notification.ts', 'notifications/notification-tx'],
   ['routes/admin-directory-notification.ts', 'notifications/notification-flags'],
   ['routes/admin-directory-notification.ts', 'notifications/topic-policy-service'],
   ['services/task-notification-takeover.ts', 'notifications/recipient-resolver'],

@@ -1,14 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createTopicPolicyService } from '../../src/notifications/topic-policy-service'
 import { resolveEffectiveIntegrationCapability } from '../../src/integrations/integration-capability-resolve'
+import { resolveNotificationAdapter } from '../../src/notifications/adapters/notification-adapter'
+import { resolveNotificationTopic } from '../../src/notifications/topic-registry'
+import type { NotificationVerificationCheck } from '../../src/notifications/verification-evidence'
 import type { RecipientResolver } from '../../src/notifications/recipient-resolver'
 
 vi.mock('../../src/integrations/integration-capability-resolve', () => ({ resolveEffectiveIntegrationCapability: vi.fn() }))
-vi.mock('../../src/notifications/adapters/notification-adapter', () => ({ resolveNotificationAdapter: () => ({ transport: 'work_notification' }) }))
-vi.mock('../../src/notifications/topic-registry', () => ({
-  resolveNotificationTopic: (topic: string) => topic === 'task_reminder' ? { topic, integrated: true, profiles: { dingtalk: { transport: 'work_notification' } } } : null,
-  listNotificationTopics: () => [{ topic: 'task_reminder', integrated: true }],
-}))
+vi.mock('../../src/notifications/adapters/notification-adapter', () => ({ resolveNotificationAdapter: vi.fn(() => ({ transport: 'work_notification' })) }))
+vi.mock('../../src/notifications/topic-registry', async importOriginal => {
+  const original = await importOriginal<typeof import('../../src/notifications/topic-registry')>()
+  return { ...original, resolveNotificationTopic: vi.fn((topic: string) => {
+    const descriptor = original.resolveNotificationTopic(topic)
+    return descriptor ? { ...descriptor, integrated: true } : null
+  }) }
+})
 const CONNECTION = '11111111-1111-4111-8111-111111111111'
 const ACTOR = { actorId: 'fixture-user', authenticatedTenantId: 'default' }
 const TOPIC = 'task_reminder'
@@ -26,13 +32,14 @@ function setup(current: Record<string, unknown> | null = null) {
     return { rows: [] }
   }) }
   const audit = vi.fn(async () => {})
-  const verification = vi.fn(async () => ({ ok: true as const, verification: { level: 'token' as const, verifiedUntil: '2026-12-01T00:00:00Z', valid: true } }))
+  const verification = vi.fn(async (): Promise<NotificationVerificationCheck> => ({ ok: true as const, verification: { level: 'token' as const, verifiedUntil: '2026-12-01T00:00:00Z', valid: true } }))
   const transaction = vi.fn(async (fn: (client: typeof db) => Promise<unknown>) => { queries.push('BEGIN ISOLATION LEVEL READ COMMITTED');
     try { const result = await fn(db); queries.push('COMMIT'); return result } catch (error) { queries.push('ROLLBACK'); throw error } })
+  const deliveryEnabled = vi.fn(() => true)
   const service = createTopicPolicyService({ db, transaction: transaction as never, audit, verification,
     isActiveOrgMembers: async (db, orgId, ids) => new Set((await db.query('SELECT user_id FROM user_orgs', [orgId, ids])).rows.map(row => String(row.user_id))),
-    deliveryEnabled: () => true, resolver: {} as RecipientResolver })
-  return { service, db, queries, audit, verification, transaction }
+    deliveryEnabled, resolver: { deriveDefaultTargets: async (_db, input) => input.userIds.map(() => ({ ok: false, code: 'connection_not_found' })), verifyEndpoints: async () => [] } as unknown as RecipientResolver })
+  return { service, db, queries, audit, verification, transaction, deliveryEnabled }
 }
 beforeEach(() => { vi.clearAllMocks(); vi.mocked(resolveEffectiveIntegrationCapability).mockResolvedValue({ effective: true, orgId: 'default', provider: 'dingtalk', revision: 1, witness: 'a'.repeat(64) } as never) })
 
@@ -45,12 +52,12 @@ describe('authenticated management policy contract', () => {
   })
   it('requires explicit no-default confirmation and rolls back', async () => {
     const s = setup()
-    await expect(s.service.put(ACTOR, TOPIC, { expectedRevision: 0, state: 'active' })).rejects.toMatchObject({ code: 'DEFAULT_CONNECTION_CONFIRM_REQUIRED' })
+    await expect(s.service.put(ACTOR, TOPIC, { expectedRevision: 0, state: 'active', defaultConnectionId: null })).rejects.toMatchObject({ code: 'DEFAULT_CONNECTION_CONFIRM_REQUIRED' })
     expect(s.queries.at(-1)).toBe('ROLLBACK'); expect(s.audit).not.toHaveBeenCalled()
   })
   it('takes over with confirmed null and never invents a capability call', async () => {
     const s = setup()
-    expect(await s.service.put(ACTOR, TOPIC, { expectedRevision: 0, state: 'active', confirmNoDefaultConnection: true }))
+    expect(await s.service.put(ACTOR, TOPIC, { expectedRevision: 0, state: 'active', defaultConnectionId: null, confirmNoDefaultConnection: true }))
       .toEqual({ topic: TOPIC, state: 'active', defaultConnectionId: null, revision: 1 })
     expect(resolveEffectiveIntegrationCapability).not.toHaveBeenCalled()
     expect(s.queries.filter(sql => sql.includes('to_regclass'))).toHaveLength(4)
@@ -91,4 +98,88 @@ describe('authenticated management policy contract', () => {
     await expect(s.service.requireMember(ACTOR)).rejects.toMatchObject({ code: 'ORG_MISMATCH' })
     expect(resolveEffectiveIntegrationCapability).not.toHaveBeenCalled()
   })
+})
+
+it('refuses a production topic before transactions, writes or success audit', async () => {
+  const original = await vi.importActual<typeof import('../../src/notifications/topic-registry')>('../../src/notifications/topic-registry')
+  vi.mocked(resolveNotificationTopic).mockImplementationOnce(original.resolveNotificationTopic)
+  const s = setup()
+  await expect(s.service.put(ACTOR, TOPIC, { expectedRevision: 0, state: 'active', defaultConnectionId: null, confirmNoDefaultConnection: true }))
+    .rejects.toMatchObject({ status: 409, code: 'TOPIC_NOT_INTEGRATED' })
+  expect(s.transaction).not.toHaveBeenCalled(); expect(s.audit).not.toHaveBeenCalled()
+})
+it('refuses first takeover with delivery disabled before transactions or writes', async () => {
+  const s = setup(); s.deliveryEnabled.mockReturnValue(false)
+  await expect(s.service.put(ACTOR, TOPIC, { expectedRevision: 0, state: 'active', defaultConnectionId: null, confirmNoDefaultConnection: true }))
+    .rejects.toMatchObject({ status: 409, code: 'NOTIFICATION_DELIVERY_DISABLED' })
+  expect(s.transaction).not.toHaveBeenCalled(); expect(s.audit).not.toHaveBeenCalled()
+})
+it.each(['verification_missing', 'verification_stale', 'verification_invalidated', 'verification_anchor_changed', 'verification_fingerprint_changed'] as const)
+  ('refuses a default with %s evidence before the policy transaction', async code => {
+    const s = setup()
+    s.verification.mockResolvedValue({ ok: false, code, verification: { level: null, verifiedUntil: null, valid: false } })
+    await expect(s.service.put(ACTOR, TOPIC, { expectedRevision: 0, state: 'active', defaultConnectionId: CONNECTION }))
+      .rejects.toMatchObject({ status: 409, code: 'DEFAULT_CONNECTION_NOT_READY' })
+    expect(s.transaction).toHaveBeenCalledOnce(); expect(s.queries.join(' ')).not.toContain('INSERT')
+    expect(s.audit).not.toHaveBeenCalled()
+  })
+it.each([undefined, 'other'])('preview tenant %s is refused before R-1 and any preview query', async authenticatedTenantId => {
+  const s = setup()
+  await expect(s.service.preview({ ...ACTOR, authenticatedTenantId }, TOPIC, CONNECTION))
+    .rejects.toMatchObject({ status: authenticatedTenantId ? 403 : 422, code: authenticatedTenantId ? 'ORG_MISMATCH' : 'ORG_MISSING' })
+  expect(resolveEffectiveIntegrationCapability).not.toHaveBeenCalled(); expect(s.db.query).not.toHaveBeenCalled()
+})
+it.each(['put', 'preview'] as const)('%s refuses an inactive member with a fixed 403', async method => {
+  const s = setup(); s.db.query.mockResolvedValueOnce({ rows: [] })
+  const call = method === 'put'
+    ? s.service.put(ACTOR, TOPIC, { expectedRevision: 0, state: 'active', defaultConnectionId: null, confirmNoDefaultConnection: true })
+    : s.service.preview(ACTOR, TOPIC, CONNECTION)
+  await expect(call).rejects.toMatchObject({ status: 403, code: 'ORG_MISMATCH' })
+  expect(resolveEffectiveIntegrationCapability).not.toHaveBeenCalled(); expect(s.transaction).not.toHaveBeenCalled()
+})
+it.each([
+  { expectedRevision: 0, state: 'paused' as const, defaultConnectionId: CONNECTION },
+  { expectedRevision: 0, state: 'active' as const, confirmNoDefaultConnection: true as const },
+])('rejects an invalid first transition or omitted default', async patch => {
+  const s = setup()
+  await expect(s.service.put(ACTOR, TOPIC, patch)).rejects.toMatchObject({ status: 422, code: 'INVALID_REQUEST' })
+  expect(s.transaction).not.toHaveBeenCalled(); expect(s.audit).not.toHaveBeenCalled()
+})
+it('records the chosen default and first-takeover marker without authority witnesses', async () => {
+  const s = setup()
+  await s.service.put(ACTOR, TOPIC, { expectedRevision: 0, state: 'active', defaultConnectionId: CONNECTION })
+  expect(s.audit).toHaveBeenCalledWith(expect.objectContaining({ meta: {
+    state: 'active', revision: 1, defaultConnectionId: CONNECTION, firstTakeover: true,
+  } }))
+})
+it('refuses a foreign successful capability result before verification and writes', async () => {
+  vi.mocked(resolveEffectiveIntegrationCapability).mockResolvedValue({ effective: true, orgId: 'other', provider: 'dingtalk', revision: 1, witness: 'a'.repeat(64) } as never)
+  const s = setup()
+  await expect(s.service.put(ACTOR, TOPIC, { expectedRevision: 1, state: 'active', defaultConnectionId: CONNECTION }))
+    .rejects.toMatchObject({ status: 409, code: 'DEFAULT_CONNECTION_NOT_READY' })
+  expect(s.verification).not.toHaveBeenCalled(); expect(s.queries.join(' ')).not.toContain('UPDATE')
+})
+it.each([undefined, 'other'])('an explicit selection on an existing policy still requires tenant %s', async authenticatedTenantId => {
+  const s = setup({ topic: TOPIC, revision: 4, state: 'active', default_connection_id: null })
+  await expect(s.service.put({ ...ACTOR, authenticatedTenantId }, TOPIC, { expectedRevision: 4, state: 'active', defaultConnectionId: CONNECTION }))
+    .rejects.toMatchObject({ code: authenticatedTenantId ? 'ORG_MISMATCH' : 'ORG_MISSING' })
+  expect(resolveEffectiveIntegrationCapability).not.toHaveBeenCalled(); expect(s.transaction).not.toHaveBeenCalled()
+})
+
+it.each(['unregistered_profile', 'wrong_transport'])('refuses default %s before verification and policy writes', async mode => {
+  if (mode === 'unregistered_profile') vi.mocked(resolveEffectiveIntegrationCapability).mockResolvedValue({ effective: true, orgId: 'default', provider: 'other', revision: 1, witness: 'a'.repeat(64) } as never)
+  else vi.mocked(resolveNotificationAdapter).mockReturnValueOnce({ transport: 'different' } as never)
+  const s = setup()
+  await expect(s.service.put(ACTOR, TOPIC, { expectedRevision: 0, state: 'active', defaultConnectionId: CONNECTION }))
+    .rejects.toMatchObject({ status: 409, code: 'DEFAULT_CONNECTION_NOT_READY' })
+  expect(s.verification).not.toHaveBeenCalled(); expect(s.queries.join(' ')).not.toContain('INSERT')
+})
+it('preview gives the same fixed counts and warning for missing and foreign connections', async () => {
+  vi.mocked(resolveEffectiveIntegrationCapability).mockResolvedValue({ effective: false, reason: 'integration_missing' })
+  const s = setup()
+  const missing = await s.service.preview(ACTOR, TOPIC, CONNECTION)
+  const foreign = await s.service.preview(ACTOR, TOPIC, '22222222-2222-4222-8222-222222222222')
+  expect(missing).toEqual(foreign)
+  expect(missing).toMatchObject({ counts: { connection_not_found: 1 }, warnings: ['default_connection_not_ready'] })
+  expect(s.queries.join(' ')).not.toMatch(/INSERT|UPDATE|DELETE/)
 })

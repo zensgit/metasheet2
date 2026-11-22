@@ -3,6 +3,7 @@ import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createAdminDirectoryNotificationRouter } from '../../src/routes/admin-directory-notification'
 import { NotificationHttpError } from '../../src/notifications/notification-errors'
+import { Logger } from '../../src/core/logger'
 import type { TopicPolicyService } from '../../src/notifications/topic-policy-service'
 
 vi.mock('../../src/routes/admin-directory', () => ({ ensurePlatformAdmin: async (req, res) => {
@@ -73,4 +74,33 @@ describe('notification policy HTTP boundaries', () => {
   it('has no delete route', async () => {
     expect((await request(app('default')).delete(`${BASE}/task_reminder`)).status).toBe(404)
   })
+})
+
+it.each([undefined, 'other', 'default'])('null first takeover passes only trusted tenant %s to the service', async tenant => {
+  service.put.mockImplementation(async actor => {
+    await service.requireMember(actor)
+    return { state: 'active' }
+  })
+  const response = await request(app(tenant)).put(`${BASE}/task_reminder`).set('x-tenant-id', 'default')
+    .send({ expectedRevision: 0, state: 'active', defaultConnectionId: null, confirmNoDefaultConnection: true })
+  expect(response.status).toBe(tenant === 'default' ? 200 : tenant ? 403 : 422)
+  expect(service.put.mock.calls[0][0]).toEqual({ actorId: 'fixture-user', authenticatedTenantId: tenant })
+})
+it.each([
+  { expectedRevision: 0, state: 'active', confirmNoDefaultConnection: true },
+  { expectedRevision: 0, state: 'paused', defaultConnectionId: null, confirmNoDefaultConnection: true },
+])('refuses malformed first takeover at the HTTP boundary', async body => {
+  const response = await request(app('default')).put(`${BASE}/task_reminder`).send(body)
+  expect(response.status).toBe(422); expect(response.body.error.code).toBe('INVALID_REQUEST')
+  expect(service.put).not.toHaveBeenCalled()
+})
+it('logs refusal as code and a closed topic without request values', async () => {
+  const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => {})
+  try {
+    const response = await request(app()).put(`${BASE}/untrusted-topic`).send({ expectedRevision: 0, state: 'active', defaultConnectionId: 'private-value' })
+    expect(response.status).toBe(422)
+    expect(warn).toHaveBeenCalledWith('notification_topic_policy_rejected', { code: 'ORG_MISSING', topic: 'unknown' })
+    expect(JSON.stringify(warn.mock.calls)).not.toMatch(/private-value|fixture-user|untrusted-topic/)
+    expect(response.headers['cache-control']).toBe('no-store')
+  } finally { warn.mockRestore() }
 })

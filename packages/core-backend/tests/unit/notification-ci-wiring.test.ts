@@ -142,3 +142,10 @@ describe('notification delivery production mounts and administrator gate registr
   })
 
 })
+
+it('runs the real background resolver in the routing DB suite without module mocks', () => {
+  const source = readFileSync(path.join(BACKEND, 'tests/integration/task-routed-reminder-decision.db.test.ts'), 'utf8')
+  const mocks = [...source.matchAll(/vi\.(?:mock|doMock)\(\s*['"]([^'"]+)['"]/g)].map(match => match[1])
+  expect(mocks).toEqual(['../../src/notifications/topic-registry'])
+  expect(source).toContain("from '../../src/integrations/integration-capability-resolve-background'")
+})
