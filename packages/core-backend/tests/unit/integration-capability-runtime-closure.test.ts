@@ -9,18 +9,20 @@ import { collectModuleGraph, createModuleGraphCollector, forbiddenPaths, reverse
 const ROOT = path.resolve(__dirname, '../../../..')
 // Independent inventory: do not reuse the collector's roots or directory walker.
 const PRODUCTION_ROOTS = ['packages/core-backend/src', 'packages/core-backend/scripts', 'packages/core-backend/plugins', 'scripts', 'plugins']
-const productionFiles = (root = ROOT) => PRODUCTION_ROOTS.flatMap((dir) => {
-  const full = path.join(root, dir), info = lstatSync(full, { throwIfNoEntry: false })
-  expect(info?.isSymbolicLink(), `根内存在符号链接: ${dir}`).not.toBe(true)
-  if (!info) return []
-  const entries = readdirSync(full, { recursive: true, withFileTypes: true })
-  expect(entries.filter((entry) => entry.isSymbolicLink()).map((entry) => path.relative(root, path.join(entry.parentPath, entry.name))),
-    `根内存在符号链接: ${dir}`).toEqual([])
-  return entries.filter((entry) => entry.isFile()).map((entry) => path.relative(root, path.join(entry.parentPath, entry.name)))
-})
-  .filter((file) => !/(?:^|\/)(?:node_modules|\.git)(?:\/|$)/.test(file))
-  .filter((file) => [...SOURCE_EXTENSIONS, '.vue'].includes(path.extname(file)))
-  .filter((file) => !/(?:^|\/)(?:__tests__|tests|test)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file))
+const productionFiles = (root = ROOT): string[] => {
+  const walk = (full: string): string[] => {
+    const info = lstatSync(full, { throwIfNoEntry: false })
+    if (!info) return []
+    // Prune dependency/git contents, but never accept a link masquerading as either directory.
+    if (['node_modules', '.git'].includes(path.basename(full)) && !info.isSymbolicLink()) return []
+    expect(info.isSymbolicLink(), `根内存在符号链接: ${path.relative(root, full)}`).toBe(false)
+    if (info.isDirectory()) return readdirSync(full).flatMap((name) => walk(path.join(full, name)))
+    return info.isFile() ? [path.relative(root, full)] : []
+  }
+  return PRODUCTION_ROOTS.flatMap((dir) => walk(path.join(root, dir)))
+    .filter((file) => [...SOURCE_EXTENSIONS, '.vue'].includes(path.extname(file)))
+    .filter((file) => !/(?:^|\/)(?:__tests__|tests|test)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file))
+}
 const BACKGROUND = SOURCE_ROOT + 'integrations/integration-capability-resolve-background.ts'
 const REQUEST = SOURCE_ROOT + 'integrations/integration-capability-resolve.ts'
 const WORKER = SOURCE_ROOT + 'services/task-notification-delivery-worker.ts'
@@ -52,7 +54,7 @@ beforeAll(() => {
   graph = collect()
 }, 180_000)
 afterAll(() => {
-  expect(completedTests.size, 'runtime closure guard must complete all 48 cases (no pending/skipped cases)').toBe(48)
+  expect(completedTests.size, 'runtime closure guard must complete all 60 cases (no pending/skipped cases)').toBe(60)
 })
 
 describe('capability runtime module boundaries', () => {
@@ -101,6 +103,47 @@ describe('capability runtime module boundaries', () => {
       mkdirSync(path.join(isolated, dir), { recursive: true })
       const target = kind === 'directory' ? 'target' : kind === 'file' ? 'target/module.ts' : 'missing.ts'
       symlinkSync(path.join(isolated, target), path.join(isolated, dir, 'alias.ts'))
+      expect(() => productionFiles(isolated)).toThrow('根内存在符号链接')
+      expect(() => collectModuleGraph(isolated)).toThrow('根内存在符号链接')
+    } finally { rmSync(isolated, { recursive: true, force: true }) }
+  }))
+
+  it.each(['node_modules', '.git'])('prunes real plugin %s directories before inspecting their dependency links', checked((name) => {
+    const isolated = mkdtempSync(path.join(tmpdir(), 'capability-dependencies-'))
+    const source = 'plugins/control/src/index.ts'
+    try {
+      write(isolated, source, 'export const unrelated = 1')
+      write(isolated, 'external-dependency/index.ts', "import './unreviewed-target'")
+      const dependencies = path.join(isolated, 'plugins/control', name)
+      mkdirSync(dependencies)
+      symlinkSync(path.join(isolated, 'external-dependency'), path.join(dependencies, 'dependency'))
+      expect(productionFiles(isolated)).toEqual([source])
+      const collected = collectModuleGraph(isolated)
+      expect(collected.files).toEqual([source])
+      expect(collected.gaps).toEqual([])
+    } finally { rmSync(isolated, { recursive: true, force: true }) }
+  }))
+
+  it.each(['.hidden/helper.ts', '.cache/directory', '__tests__/helper.ts', 'node_modules', '.git'])
+  ('rejects plugin links at %s before source or directory-name filtering', checked((name) => {
+    const isolated = mkdtempSync(path.join(tmpdir(), 'capability-hidden-link-'))
+    try {
+      write(isolated, 'target/module.ts', 'export const value = 1')
+      const link = path.join(isolated, 'plugins/control', name)
+      mkdirSync(path.dirname(link), { recursive: true })
+      symlinkSync(path.join(isolated, name.endsWith('.ts') ? 'target/module.ts' : 'target'), link)
+      expect(() => productionFiles(isolated)).toThrow('根内存在符号链接')
+      expect(() => collectModuleGraph(isolated)).toThrow('根内存在符号链接')
+    } finally { rmSync(isolated, { recursive: true, force: true }) }
+  }))
+
+  it.each(PRODUCTION_ROOTS)('rejects a symbolic link replacing the %s root', checked((dir) => {
+    const isolated = mkdtempSync(path.join(tmpdir(), 'capability-root-link-'))
+    try {
+      write(isolated, 'target/module.ts', 'export const value = 1')
+      const link = path.join(isolated, dir)
+      mkdirSync(path.dirname(link), { recursive: true })
+      symlinkSync(path.join(isolated, 'target'), link)
       expect(() => productionFiles(isolated)).toThrow('根内存在符号链接')
       expect(() => collectModuleGraph(isolated)).toThrow('根内存在符号链接')
     } finally { rmSync(isolated, { recursive: true, force: true }) }

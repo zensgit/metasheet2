@@ -30,8 +30,8 @@ export function graphFiles(root: string): string[] {
   if (!info) return []
   return readdirSync(root, { withFileTypes: true }).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0).flatMap((entry) => {
     const full = path.join(root, entry.name)
+    if (['node_modules', '.git'].includes(entry.name) && !entry.isSymbolicLink()) return []
     if (entry.isSymbolicLink()) throw new Error(`根内存在符号链接: ${full}`)
-    if (['node_modules', '.git'].includes(entry.name)) return []
     return entry.isDirectory() ? graphFiles(full) : [full]
   })
 }
