@@ -1,6 +1,6 @@
 /** Static module loads only: aliases of require, generated code, Worker/vm and call-level wiring remain outside this graph. */
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import path from 'node:path'
 import ts from 'typescript'
 import { moduleLoads, NON_LITERAL_SPECIFIER, SOURCE_EXTENSIONS, type ModuleLoad } from './import-edge-allowlist'
@@ -25,11 +25,14 @@ const sorted = <T>(items: T[]): T[] => items.map((item) => ({ item, key: JSON.st
   .sort((a, b) => a.key.localeCompare(b.key)).map(({ item }) => item)
 
 export function graphFiles(root: string): string[] {
-  if (!existsSync(root)) return []
+  const info = lstatSync(root, { throwIfNoEntry: false })
+  if (info?.isSymbolicLink()) throw new Error(`根内存在符号链接: ${root}`)
+  if (!info) return []
   return readdirSync(root, { withFileTypes: true }).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0).flatMap((entry) => {
-    if (['node_modules', '.git'].includes(entry.name)) return []
     const full = path.join(root, entry.name)
-    return (entry.isSymbolicLink() ? statSync(full).isDirectory() : entry.isDirectory()) ? graphFiles(full) : [full]
+    if (entry.isSymbolicLink()) throw new Error(`根内存在符号链接: ${full}`)
+    if (['node_modules', '.git'].includes(entry.name)) return []
+    return entry.isDirectory() ? graphFiles(full) : [full]
   })
 }
 

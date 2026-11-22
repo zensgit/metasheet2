@@ -1,8 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import ts from 'typescript'
 import registry from '../fixtures/integration-capability-runtime-closure.json'
 import { moduleLoads, SOURCE_EXTENSIONS } from '../helpers/import-edge-allowlist'
 import { collectModuleGraph, createModuleGraphCollector, forbiddenPaths, reverseRegistry, runtimePaths, SOURCE_ROOT, type ModuleGraph } from '../helpers/runtime-module-closure'
@@ -10,9 +9,17 @@ import { collectModuleGraph, createModuleGraphCollector, forbiddenPaths, reverse
 const ROOT = path.resolve(__dirname, '../../../..')
 // Independent inventory: do not reuse the collector's roots or directory walker.
 const PRODUCTION_ROOTS = ['packages/core-backend/src', 'packages/core-backend/scripts', 'packages/core-backend/plugins', 'scripts', 'plugins']
-const productionFiles = () => PRODUCTION_ROOTS.flatMap((dir) => ts.sys.readDirectory(path.join(ROOT, dir),
-  [...SOURCE_EXTENSIONS, '.vue'], ['**/node_modules/**', '**/.git/**'], ['**/*']))
-  .map((file) => path.relative(ROOT, file))
+const productionFiles = (root = ROOT) => PRODUCTION_ROOTS.flatMap((dir) => {
+  const full = path.join(root, dir), info = lstatSync(full, { throwIfNoEntry: false })
+  expect(info?.isSymbolicLink(), `根内存在符号链接: ${dir}`).not.toBe(true)
+  if (!info) return []
+  const entries = readdirSync(full, { recursive: true, withFileTypes: true })
+  expect(entries.filter((entry) => entry.isSymbolicLink()).map((entry) => path.relative(root, path.join(entry.parentPath, entry.name))),
+    `根内存在符号链接: ${dir}`).toEqual([])
+  return entries.filter((entry) => entry.isFile()).map((entry) => path.relative(root, path.join(entry.parentPath, entry.name)))
+})
+  .filter((file) => !/(?:^|\/)(?:node_modules|\.git)(?:\/|$)/.test(file))
+  .filter((file) => [...SOURCE_EXTENSIONS, '.vue'].includes(path.extname(file)))
   .filter((file) => !/(?:^|\/)(?:__tests__|tests|test)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file))
 const BACKGROUND = SOURCE_ROOT + 'integrations/integration-capability-resolve-background.ts'
 const REQUEST = SOURCE_ROOT + 'integrations/integration-capability-resolve.ts'
@@ -45,7 +52,7 @@ beforeAll(() => {
   graph = collect()
 }, 180_000)
 afterAll(() => {
-  expect(completedTests.size, 'runtime closure guard must complete all 28 cases (no pending/skipped cases)').toBe(28)
+  expect(completedTests.size, 'runtime closure guard must complete all 48 cases (no pending/skipped cases)').toBe(48)
 })
 
 describe('capability runtime module boundaries', () => {
@@ -76,6 +83,43 @@ describe('capability runtime module boundaries', () => {
     expect({ ...changed, files: [] }).toEqual({ ...graph, files: [] })
   }))
 
+  it.each(['.hidden/control.mjs', '.control.cjs', 'control.min.js'])('includes %s in both disk inventories across all roots', checked((name) => {
+    const isolated = mkdtempSync(path.join(tmpdir(), 'capability-inventory-'))
+    const added = PRODUCTION_ROOTS.map((dir) => dir + '/' + name)
+    try {
+      for (const file of added) write(isolated, file, 'export const unrelated = 1')
+      expect(productionFiles(isolated).sort()).toEqual(added.sort())
+      expect(collectModuleGraph(isolated).files).toEqual(added.sort())
+    } finally { rmSync(isolated, { recursive: true, force: true }) }
+  }))
+
+  it.each(PRODUCTION_ROOTS.flatMap((dir) => ['file', 'directory', 'dangling'].map((kind) => [dir, kind])))
+  ('rejects a %s root containing a %s symbolic link before following it', checked((dir, kind) => {
+    const isolated = mkdtempSync(path.join(tmpdir(), 'capability-symlink-'))
+    try {
+      write(isolated, 'target/module.ts', 'export const value = 1')
+      mkdirSync(path.join(isolated, dir), { recursive: true })
+      const target = kind === 'directory' ? 'target' : kind === 'file' ? 'target/module.ts' : 'missing.ts'
+      symlinkSync(path.join(isolated, target), path.join(isolated, dir, 'alias.ts'))
+      expect(() => productionFiles(isolated)).toThrow('根内存在符号链接')
+      expect(() => collectModuleGraph(isolated)).toThrow('根内存在符号链接')
+    } finally { rmSync(isolated, { recursive: true, force: true }) }
+  }))
+
+  it.each(['packages/core-backend/plugins/plugin-view-kanban', 'plugins/plugin-audit-logger'])
+  ('rejects a background alias with shadow dependency stubs in %s', checked((plugin) => {
+    const isolated = mkdtempSync(path.join(tmpdir(), 'capability-symlink-stubs-'))
+    try {
+      write(isolated, BACKGROUND, read(ROOT, BACKGROUND))
+      write(isolated, plugin + '/src/index.ts', "import './x/helper'")
+      write(isolated, plugin + '/src/x/integration-capability-resolve-core.ts', 'export {}')
+      write(isolated, plugin + '/src/multitable/automation-durable-dispatcher.ts', 'export {}')
+      symlinkSync(path.join(isolated, BACKGROUND), path.join(isolated, plugin, 'src/x/helper.ts'))
+      expect(() => productionFiles(isolated)).toThrow('根内存在符号链接')
+      expect(() => collectModuleGraph(isolated)).toThrow('根内存在符号链接')
+    } finally { rmSync(isolated, { recursive: true, force: true }) }
+  }))
+
   it('rejects a backend kanban plugin importing the background entry', checked(() => {
     const plugin = 'packages/core-backend/plugins/plugin-view-kanban/src/index.ts'
     expect(graph.requestRoots).toContain(plugin)
@@ -88,8 +132,8 @@ describe('capability runtime module boundaries', () => {
   }))
 
   it('registers each missing, non-literal and parse item exactly, and follows test helpers separately', checked(() => {
-    expect(graph.gaps).toEqual(gapEntries)
-    expect(graph.resolutionInputs).toEqual(registry.resolutionInputs)
+    expect(graph.gaps, 'Changed, added, removed or resolved loads, or edits to a gap-bearing file, require review: update reviewedGaps in integration-capability-runtime-closure.json from this diff, including sourceHash and a per-item review reason; do not auto-accept gaps.').toEqual(gapEntries)
+    expect(graph.resolutionInputs, 'Changed package.json/tsconfig contents or added resolution inputs require resolution review: update resolutionInputs in integration-capability-runtime-closure.json with the paths and full-file SHA256 values from this diff, then rerun this guard.').toEqual(registry.resolutionInputs)
     expect(registry.reviewedGaps.every((entry) => entry.review.length > 30)).toBe(true)
     expect(graph.testEdges).toEqual(registry.testEdges)
     expect(graph.gaps.filter((entry) => entry.from.includes('plugin-view-gantt')).map((entry) => entry.specifier)).toEqual(['./api', './handlers'])
@@ -97,7 +141,7 @@ describe('capability runtime module boundaries', () => {
   }))
 
   it('checks both directions, including non-route HTTP modules, dynamic routes and plugins', checked(() => {
-    expect(graph.requestRoots).toEqual(registry.requestRoots)
+    expect(graph.requestRoots, 'Added or removed routes, HTTP modules or plugin addRoute entry points require boundary review: update the sorted requestRoots in integration-capability-runtime-closure.json from this diff, merge concurrent additions, then rerun both reachability checks.').toEqual(registry.requestRoots)
     for (const file of ['services/elearning-pilot-runtime.ts', 'services/approval-attachment-runtime.ts',
       'services/elearning-media-runtime.ts', 'gateway/APIGateway.ts', 'routes/fallback-test.ts']) {
       expect(graph.requestRoots).toContain(SOURCE_ROOT + file)

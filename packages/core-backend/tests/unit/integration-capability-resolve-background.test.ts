@@ -22,6 +22,7 @@ afterEach(() => { vi.unstubAllEnvs() })
 describe('BG-U01/U02: exact input and refusal precedence', () => {
   it.each([
     null, undefined, [], 'input', 1, {}, { integrationId: ID }, { eventOrgId: ORG },
+    { integrationId: ID, orgId: ORG }, { integrationId: ID, eventOrgID: ORG },
     { ...INPUT, integrationId: ID.toUpperCase() }, { ...INPUT, integrationId: 'bad' },
     { ...INPUT, integrationId: 1 }, { ...INPUT, integrationId: null },
     ...['orgId', 'expectedOrgId', 'integrationOrgId', 'orgSource', 'switch', 'descriptor', 'lock'].map((key) => ({ ...INPUT, [key]: true })),

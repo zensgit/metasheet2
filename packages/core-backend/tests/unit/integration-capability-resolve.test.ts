@@ -611,7 +611,9 @@ describe('module boundaries of the resolver', () => {
       './integration-capability-resolve-core',
     ])
     for (const file of [request, background]) {
-      expect(readFileSync(file, 'utf8')).not.toMatch(/\b(?:SELECT|INSERT|UPDATE|DELETE|BEGIN|COMMIT|ROLLBACK)\b/)
+      const parsed = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true)
+      // Transaction guidance in comments is not executable SQL.
+      expect(ts.createPrinter({ removeComments: true }).printFile(parsed)).not.toMatch(/\b(?:SELECT|INSERT|UPDATE|DELETE|BEGIN|COMMIT|ROLLBACK)\b/i)
     }
   })
 
