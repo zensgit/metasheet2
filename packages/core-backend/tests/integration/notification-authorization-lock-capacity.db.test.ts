@@ -120,7 +120,7 @@ suite('notification background and authorization lock evidence', () => {
     }
     for (const [n, connection] of connections.entries()) {
       await pool.query(`INSERT INTO directory_integrations(id,org_id,provider,name,status,corp_id,config)
-        VALUES ($1,$2,'dingtalk','Synthetic','active',$3,$4::jsonb)`, [connection.id, connection.org, prefix, JSON.stringify({ appKey: prefix })])
+        VALUES ($1,$2,'dingtalk',$5,'active',$3,$4::jsonb)`, [connection.id, connection.org, prefix, JSON.stringify({ appKey: prefix }), `Synthetic ${n}`])
       await pool.query(`INSERT INTO directory_integration_capabilities(integration_id,bound_provider,bound_org_id,
         notification_enabled,notification_bound_tenant,notification_bound_app_scope,revision,created_by,updated_by)
         VALUES ($1,'dingtalk',$2,true,$3,$3,1,'synthetic','synthetic')`, [connection.id, connection.org, prefix])

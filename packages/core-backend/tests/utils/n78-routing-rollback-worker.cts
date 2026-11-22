@@ -40,7 +40,7 @@ async function main() {
     if (action === 'empty') {
       const row = await scalar("SELECT count(*)::int AS n FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public'")
       requireTrue(row.n === 0, 'DATABASE_NOT_EMPTY')
-      const settings = await scalar("SELECT current_setting('server_version_num') AS version, current_setting('server_encoding') AS encoding, current_setting('lc_collate') AS collate")
+      const settings = await scalar("SELECT current_setting('server_version_num') AS version, current_setting('server_encoding') AS encoding, (SELECT datcollate FROM pg_database WHERE datname = current_database()) AS collate")
       const major = Number(new URL(process.env.DATABASE_URL!).pathname.match(/pg(\d+)$/)![1])
       requireTrue(Math.floor(Number(settings.version) / 10000) === major && settings.encoding === 'UTF8' && settings.collate === 'C', 'DATABASE_PROFILE_MISMATCH')
       result.settings = settings
