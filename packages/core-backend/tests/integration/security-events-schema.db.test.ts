@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto'
 import { Pool, Client } from 'pg'
 import { Kysely, Migrator, PostgresDialect } from 'kysely'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
-import { createCoreBackendMigrationProvider } from '../../src/db/migration-provider'
+import { createEventTestMigrationProvider, futureMigrationName, migrationName, registerEventMigrationLoaders } from '../fixtures/security-events/migrations'
 import { AUTHORIZATION_OPERATION_FENCE_TABLES, AUTHORIZATION_OPERATION_SCHEMA_QUERIES, inspectAuthorizationOperationSchema, isSupportedAuthorizationOperationSchema } from '../../src/admin/authorization-operation-fence'
 import { EventConnections, W1Capacity, verifyEventReadScope, type EventSql } from '../../src/security-events/runtime'
 import { SecurityEventRepository, readScopedEvent, readScopedDeliveries, estimateSteadyState } from '../../src/security-events/repository'
@@ -26,14 +26,19 @@ const isolated = new URL(baseUrl)
 isolated.pathname = `/${databaseName}`
 const url = isolated.toString()
 const evidenceDir = process.env.E1A_EVIDENCE_DIR ?? '../../artifacts/e1a-realdb'
-const migrationName = 'zzzz20261122140000_security_events'
 let db: Kysely<unknown>, admin: Client, migrator: Migrator
+let unregisterMigrationLoaders: ReturnType<typeof registerEventMigrationLoaders>
 let baseline: Awaited<ReturnType<typeof inspectAuthorizationOperationSchema>>
 let rawBaseline: unknown[]
 let approval: Awaited<ReturnType<typeof inspectEventSchema>>
 const report: Record<string, unknown> = {}
 const rowsOwned: string[] = []
-const connections = new EventConnections({ connectionString: url })
+let readClient: Client
+const connections = new EventConnections({ connectionString: url }, config => {
+  const client = new Client(config)
+  if (config.application_name === 'e1_query') readClient = client
+  return client
+})
 const repo = new SecurityEventRepository(connections, new W1Capacity(20))
 const sqlOf = (client: Client): EventSql => ({ query: (text, values) => client.query(text, values) })
 const currentCatalog = async () => {
@@ -59,6 +64,13 @@ async function rollbackProbe(work: () => Promise<void>) {
 
 describe.sequential('E1-A PG14–17 migrated baseline, no producer wiring', () => {
   beforeAll(async () => {
+    unregisterMigrationLoaders = registerEventMigrationLoaders()
+    const provider = createEventTestMigrationProvider()
+    // Load before connecting; the no-DB regression exercises this same native import path.
+    const names = Object.keys(await provider.getMigrations()).sort()
+    const index = names.indexOf(migrationName)
+    expect(index).toBeGreaterThan(0)
+    expect(names.indexOf(futureMigrationName)).toBeGreaterThan(index)
     const service = new Client({ connectionString: baseUrl, connectionTimeoutMillis: 3000 })
     await service.connect()
     try {
@@ -68,17 +80,10 @@ describe.sequential('E1-A PG14–17 migrated baseline, no producer wiring', () =
     admin = new Client({ connectionString: url }); await admin.connect()
     await admin.query('REVOKE CREATE ON SCHEMA public FROM PUBLIC')
     db = new Kysely({ dialect: new PostgresDialect({ pool: new Pool({ connectionString: url, max: 2 }) }) })
-    const provider = createCoreBackendMigrationProvider()
     // A later migration must neither be required nor executed by this acceptance suite.
-    const futureName = 'zzzz99999999999999_security_events_future_fixture'
-    migrator = new Migrator({ db, provider: { getMigrations: async () => ({
-      ...await provider.getMigrations(),
-      [futureName]: { up: async () => { throw new Error('E1A_FUTURE_MIGRATION_EXECUTED') } },
-    }) } })
+    migrator = new Migrator({ db, provider })
     const available = await migrator.getMigrations()
-    const index = available.findIndex(item => item.name === migrationName)
-    expect(index).toBeGreaterThan(0)
-    expect(available.findIndex(item => item.name === futureName)).toBeGreaterThan(index)
+    expect(available.map(item => item.name)).toEqual(names)
     const prepared = await migrator.migrateTo(available[index - 1].name)
     expect(prepared.error).toBeUndefined()
     expect((await admin.query("SELECT to_regclass('public.security_events') AS relation")).rows[0].relation).toBeNull()
@@ -98,7 +103,7 @@ describe.sequential('E1-A PG14–17 migrated baseline, no producer wiring', () =
     // Preserve test rows and schema on failure. Teardown only disconnects and writes values-free evidence.
     await mkdir(evidenceDir, { recursive: true })
     await writeFile(path.join(evidenceDir, `pg${expectedMajor}-e1a.json`), JSON.stringify(report, null, 2) + '\n')
-    await admin?.end(); await db?.destroy()
+    try { await admin?.end(); await db?.destroy() } finally { await unregisterMigrationLoaders?.() }
   })
 
   it('T32 real provider refuses busy maintenance gate without DDL or ledger; succeeds after release', async () => {
@@ -113,6 +118,12 @@ describe.sequential('E1-A PG14–17 migrated baseline, no producer wiring', () =
     const result = await migrator.migrateTo(migrationName)
     expect(result.error).toBeUndefined()
     expect(result.results).toEqual([expect.objectContaining({ migrationName, status: 'Success' })])
+    const migrations = await migrator.getMigrations()
+    const index = migrations.findIndex(item => item.name === migrationName)
+    expect(migrations.slice(0, index + 1).every(item => item.executedAt !== undefined)).toBe(true)
+    expect(migrations.slice(index + 1).every(item => item.executedAt === undefined)).toBe(true)
+    expect(migrations.find(item => item.name === futureMigrationName)).toMatchObject({ executedAt: undefined })
+    report.futureMigration = { present: true, executed: false, targetApplied: true }
   })
   it('T31 exact eight catalog sections and digest/baseDigest/ordinary remain identical with empty tables', async () => {
     const after = await inspectAuthorizationOperationSchema(admin.query.bind(admin))
@@ -196,11 +207,9 @@ describe.sequential('E1-A PG14–17 migrated baseline, no producer wiring', () =
     })
   })
   it('T20/T43 real server lock/statement budgets and pool identity do not touch the business pool', async () => {
-    let readClient!: Client
-    const observedConnections = new EventConnections({ connectionString: url }, config => { readClient = new Client(config); return readClient })
-    const identity = await observedConnections.readTransaction(performance.now(), async () => (await readClient.query("SELECT current_setting('application_name') AS app,current_setting('transaction_isolation') AS isolation,current_setting('transaction_read_only') AS ro")).rows[0])
+    const identity = await connections.readTransaction(performance.now(), async () => (await readClient.query("SELECT current_setting('application_name') AS app,current_setting('transaction_isolation') AS isolation,current_setting('transaction_read_only') AS ro")).rows[0])
     expect(identity).toEqual({ app: 'e1_query', isolation: 'repeatable read', ro: 'on' })
-    await observedConnections.readTransaction(performance.now(), async snapshot => {
+    await connections.readTransaction(performance.now(), async snapshot => {
       await verifyEventReadScope(snapshot, { scope_kind: 'organization', org_id: 'e1a-org-A' })
       const settings = (await readClient.query("SELECT current_setting('lock_timeout') AS lock, current_setting('statement_timeout') AS statement")).rows[0]
       const milliseconds = (value: string) => parseFloat(value) * (value.endsWith('ms') ? 1 : 1000)
@@ -226,9 +235,15 @@ describe.sequential('E1-A PG14–17 migrated baseline, no producer wiring', () =
       await Promise.race([Promise.all(ready), Promise.all(pending)])
       expect(connections.active.write).toBe(3)
       await expect(connections.writeTransaction('background', async () => true)).rejects.toThrow('E1_WRITE_UNAVAILABLE')
-      const reader = await observedConnections.readTransaction(performance.now(), async () => (await readClient.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      const reader = await connections.readTransaction(performance.now(), async snapshot => {
+        expect(connections.active).toEqual({ write: 3, query: 1 })
+        const scope = await verifyEventReadScope(snapshot, { scope_kind: 'organization', org_id: 'e1a-org-A' })
+        expect(await readScopedEvent(snapshot, scope, rowsOwned[0])).toMatchObject({ id: rowsOwned[0] })
+        return (await readClient.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid
+      })
       const business = (await admin.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
       expect(new Set([...backendIds, reader, business]).size).toBe(5)
+      report.sameInstancePoolIsolation = { writers: 3, readers: 1, distinctBackends: 5, scopedReadSucceeded: true }
     } finally { release(); await Promise.allSettled(pending) }
     const started = performance.now()
     await expect(connections.writeTransaction('foreground', sql => sql.query('SELECT pg_sleep(1)'))).rejects.toThrow('E1_WRITE_UNAVAILABLE')
