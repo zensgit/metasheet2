@@ -183,3 +183,27 @@
 3. 是否要持久证据（决定是否另立探测日志 ADR）。
 4. 是否需要重新初始化路径（决定是否另立 ADR）。
 5. T 层默认可否决：冷却 5 秒、danger high、四类分类、12 秒预算、2 秒起始窗口。
+
+## 12. 补充说明（2026-11-23）：同一次「测试连接」里读一次表单字段
+
+> **来源**：owner 2026-11-23 彩排时要求「测试连接通过后自动拉取该宜搭表单的字段列表，供映射时选择」（事项 T-13；登记册 R-106）。本节把 §9 第 5 条「systemToken / userId / appType / formUuid 的验证」中的**只读表单定义**一项收进来；表单实例的读、任何写，仍不在本 ADR。
+> **基线**：PR 分支 `feat/yida-panel-four-step-20261123` 的 `83caa822d`（叠在 #6812 `ed1cc1869` 上）。下文 `path:line` 在该提交上核过。
+
+**做了什么**
+
+- **新开关** `INTEGRATION_YIDA_FORM_FIELDS_READ_ENABLED`：默认关，只认字面量 `'true'`，`danger: 'high'`，登记在 `scripts/ops/global-history-flag-manifest.mjs`。它**只**放开读字段这一步；测试本身仍要 `INTEGRATION_YIDA_CONNECTION_TEST_ENABLED`；不读、不隐含发送开关。
+- **请求**：测试连接的请求体在开关开时可多一个 `form`：`{ appType, formUuid, systemToken, userId }`（路由 `packages/core-backend/src/routes/integration-yida-owner.ts:266`；开关关时请求体还是原来那几个键，带 `form` 直接 400）。appType / formUuid 会成为 URL 路径段，只收 `[A-Za-z0-9_-]{1,128}`；systemToken 用初始化材料的同一条规则（不裁剪、不收首尾空白和不可见字符）；userId 用执行身份的规则。
+- **顺序不变、多一步**：授权（锚点 owner + 实时集成管理员，RC 事务）→ 提交 → 进程内限流（同时 1 次、5 秒冷却）→ 开关再读一次（两个开关都读，`yida-connection-test-runtime.ts:257`、`:306`）→ 起始窗口 → **一次**换令牌。换到令牌后，插件用这一个令牌对固定端点 `https://api.dingtalk.com/v1.0/yida/forms/definitions/{appType}/{formUuid}`（钉钉「获取表单组件定义列表」，权限「宜搭表单数据读权限」）发**一次** GET，然后丢掉令牌（`plugins/plugin-integration-core/lib/yida-connection-probe.cjs:67`、`:227`）。两次出网共用原来的 12 秒预算，没有重试。
+- **回复**：多一个 `formRead: { outcome, fields }`。`outcome` 五类：`ok`、`upstream_rejected`（非 2xx、重定向、格式不符、过大——权限没开、systemToken/userId 不对、表单号写错都在这一类，系统无法区分）、`unreachable`、`timeout`、`not_attempted`（换令牌没过就不读表单）。`fields` 至多 256 个，每个只有 `fieldId`、`label`、`componentName`、`parentId` 四个键；宿主和路由各自再校验一遍形状（`yida-connection-test-runtime.ts:175`、路由 `formReadView`）。
+- **显示位**：初始化状态回复在开关开时多一个 `formFieldsReadEnabled: true`，关时这个键不出现（与 `connectionTestEnabled`、`multiTargetEnabled` 同一规则），所以旧前端包读新后端不受影响。
+- **插件缺 `probeForm`**（旧插件 + 新宿主）：带 `form` 的请求答 INACTIVE，不出网。
+
+**不变的**
+
+- 不写宜搭、不读表单实例、不落库、不加迁移、不写审计行；令牌不出插件；回复里没有凭据。
+- 凭据仍然只在「保存启用」（初始化）时由服务器封存；测试连接通过不等于有写权限——写入权限要到首次真实发送才验证。
+- 开关切换仍是一次后端重启；在任何已部署机器上打开它、用真实凭据读客户表单，都是 owner 逐项另批（AGENTS.md owner 层第 ① 条）。
+
+**测试**：插件 `__tests__/yida-connection-probe-form.test.cjs`（8 项，端点写死字面量）；宿主与路由 `packages/core-backend/tests/unit/yida-connection-test-form-fields.test.ts`（30 项：两个开关的每个非字面量值都在任何事务和出网之前 DISABLED、授权后开关被关也在出网前停、畸形插件回执一律 UNAVAILABLE、路由在开关关时 400）；前端客户端 `apps/web/tests/yidaInitializationClient.spec.ts` 的读字段一组。
+
+**待确认（彩排时实测）**：官方文档只列出 `label / componentName / fieldId / parentId`，没说返回不返回下拉选项和必填标记；本实现不依赖它们（选项、必填由操作人在映射里确认）。真实应答若多带键，探针只取这四个键，其余丢弃。
