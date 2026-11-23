@@ -1,5 +1,5 @@
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
-import { EventConnections, W1Capacity, type EventClient, type EventSql, type W1Transaction } from '../../src/security-events/runtime'
+import { EventConnections, W1Capacity, verifyEventReadScope, type EventClient, type EventReadSnapshot, type EventSql, type W1Transaction } from '../../src/security-events/runtime'
 import { randomUUID } from 'node:crypto'
 import { validateEvent, type EventCandidate } from '../../src/security-events/validation'
 import { SecurityEventRepository } from '../../src/security-events/repository'
@@ -163,6 +163,96 @@ describe('E1-A a successful run releases its slot before returning; uncertain cl
       expect(resolved).toHaveBeenCalledTimes(2)
       expect(connections.active.write).toBe(1)
     } finally { vi.useRealTimers() }
+  })
+})
+
+describe('E1-A late handles, listener failures and failed runs', () => {
+  // A client that keeps answering after end(): refusal must come from E1 itself, not from the pg client.
+  function permissiveClient() {
+    const closed = deferred(), mock = mockClient()
+    let ended = false
+    mock.client.end = vi.fn(() => { ended = true; return closed.promise })
+    mock.client.query = vi.fn(async <R>(text: string, values?: unknown[]) => {
+      mock.trace.push({ text: ended ? 'AFTER_END ' + text : text, values })
+      return { rows: (text.includes('SELECT EXISTS') ? [{ present: true }] : []) as R[] }
+    }) as EventSql['query']
+    return { ...mock, closed }
+  }
+  it('T22 a read snapshot stored by work is refused by the registry during the close wait and sends nothing', async () => {
+    const { client, trace, closed } = permissiveClient()
+    const connections = new EventConnections({ connectionString: 'postgres://fixture/fixture' }, () => client)
+    let stored!: EventReadSnapshot
+    const read = connections.readTransaction(performance.now(), async snapshot => {
+      await verifyEventReadScope(snapshot, { scope_kind: 'organization', org_id: 'org-A' })
+      stored = snapshot
+      return 'done'
+    })
+    while (!(client.end as ReturnType<typeof vi.fn>).mock.calls.length) await tick()
+    expect(trace.map(x => x.text).at(-1)).toBe('COMMIT')
+    const sent = (client.query as ReturnType<typeof vi.fn>).mock.calls.length
+    // The system scope issues no SQL, so only the registry can refuse it.
+    await expect(verifyEventReadScope(stored, { scope_kind: 'system', org_id: null })).rejects.toMatchObject({ code: 'E1_QUERY_UNAVAILABLE', message: 'E1_QUERY_UNAVAILABLE' })
+    await expect(verifyEventReadScope(stored, { scope_kind: 'organization', org_id: 'org-A' })).rejects.toMatchObject({ code: 'E1_QUERY_UNAVAILABLE' })
+    expect((client.query as ReturnType<typeof vi.fn>).mock.calls.length).toBe(sent)
+    expect(trace.some(x => x.text.startsWith('AFTER_END'))).toBe(false)
+    closed.resolve()
+    expect(await read).toBe('done')
+    await expect(verifyEventReadScope(stored, { scope_kind: 'system', org_id: null })).rejects.toMatchObject({ code: 'E1_QUERY_UNAVAILABLE' })
+    expect((client.query as ReturnType<typeof vi.fn>).mock.calls.length).toBe(sent)
+  })
+  it('T20 a stored write handle is refused after its work settles and never reaches the client', async () => {
+    const { client, trace, closed } = permissiveClient()
+    const connections = new EventConnections({ connectionString: 'postgres://fixture/fixture' }, () => client)
+    let stored!: EventSql
+    const write = connections.writeTransaction('background', async sql => { stored = sql; return 'written' })
+    while (!(client.end as ReturnType<typeof vi.fn>).mock.calls.length) await tick()
+    const sent = (client.query as ReturnType<typeof vi.fn>).mock.calls.length
+    await expect(stored.query('SELECT late')).rejects.toMatchObject({ code: 'E1_WRITE_UNAVAILABLE', message: 'E1_WRITE_UNAVAILABLE' })
+    expect((client.query as ReturnType<typeof vi.fn>).mock.calls.length).toBe(sent)
+    expect(trace.some(x => x.text.includes('SELECT late'))).toBe(false)
+    closed.resolve()
+    expect(await write).toBe('written')
+  })
+  it('T20 a throwing error-listener registration returns a fixed code and releases only after end is confirmed', async () => {
+    const closes = [deferred(), deferred()]
+    let made = 0
+    const connections = new EventConnections({ connectionString: 'postgres://fixture/fixture' }, () => {
+      const index = made++
+      return { ...mockClient().client, end: vi.fn(() => closes[index]?.promise ?? Promise.resolve()), on: () => { throw new Error('private listener detail') } }
+    })
+    await expect(connections.readTransaction(performance.now(), async () => 1)).rejects.toMatchObject({ code: 'E1_QUERY_UNAVAILABLE', message: 'E1_QUERY_UNAVAILABLE' })
+    await expect(connections.writeTransaction('foreground', async () => 1)).rejects.toMatchObject({ code: 'E1_WRITE_UNAVAILABLE', message: 'E1_WRITE_UNAVAILABLE' })
+    await tick()
+    // Not connected, but released only through the confirmed close path.
+    expect(connections.active).toEqual({ write: 1, query: 1 })
+    await expect(connections.readTransaction(performance.now(), async () => 1)).rejects.toMatchObject({ code: 'E1_QUERY_BUSY' })
+    closes[0].resolve(); closes[1].resolve(); await tick()
+    expect(connections.active).toEqual({ write: 0, query: 0 })
+  })
+  it('T20 after a listener failure with a confirmed close, the next run is admitted', async () => {
+    let fail = true
+    const connections = new EventConnections({ connectionString: 'postgres://fixture/fixture' }, () => {
+      const client = mockClient().client
+      if (fail) client.on = () => { throw new Error('private listener detail') }
+      return client
+    })
+    await expect(connections.readTransaction(performance.now(), async () => 1)).rejects.toMatchObject({ code: 'E1_QUERY_UNAVAILABLE' })
+    await tick()
+    expect(connections.active.query).toBe(0)
+    fail = false
+    expect(await connections.readTransaction(performance.now(), async () => 'next')).toBe('next')
+  })
+  it('T42 failed read and write runs return immediately without waiting for a hung close, keeping their slots', async () => {
+    const connections = new EventConnections({ connectionString: 'postgres://fixture/fixture' }, () => ({ ...mockClient().client, end: () => new Promise<void>(() => {}) }))
+    const failedRead = vi.fn(), failedWrite = vi.fn()
+    const read = connections.readTransaction(performance.now(), async () => { throw new Error('private read failure') }).catch(failedRead)
+    const write = connections.writeTransaction('foreground', async () => { throw new Error('private write failure') }).catch(failedWrite)
+    for (let i = 0; i < 5; i++) await tick()
+    expect(failedRead).toHaveBeenCalledWith(expect.objectContaining({ code: 'E1_QUERY_UNAVAILABLE' }))
+    expect(failedWrite).toHaveBeenCalledWith(expect.objectContaining({ code: 'E1_WRITE_UNAVAILABLE' }))
+    await read; await write
+    expect(connections.active).toEqual({ write: 1, query: 1 })
+    await expect(connections.readTransaction(performance.now(), async () => 1)).rejects.toMatchObject({ code: 'E1_QUERY_BUSY', retryable: true })
   })
 })
 

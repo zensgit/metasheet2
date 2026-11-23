@@ -45,7 +45,6 @@ class IsolatedPool {
         application_name: this.readOnly ? 'e1_query' : 'e1_write',
         options: `-c search_path=pg_catalog,public -c lock_timeout=100ms -c statement_timeout=100ms${this.readOnly ? ' -c default_transaction_read_only=on' : ''}` })
     } catch { this.occupied--; throw failure() }
-    client.on('error', () => { /* pg errors never enter diagnostics as raw values */ })
     let closed: Promise<void> | undefined
     const close = () => {
       // A rejected close does not prove termination: quarantine its capacity permanently.
@@ -63,9 +62,14 @@ class IsolatedPool {
       await client.query("SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $1, true)", [`${remaining}ms`])
       left()
     }
+    // Work may issue SQL only until it settles; a stored handle is refused here, never sent to the client.
+    let working = true
+    const open = () => { if (!working) throw failure() }
     const sql: EventSql = {
       async query<R extends QueryResultRow>(text: string, values?: unknown[]) {
+        open()
         await settings()
+        open()
         const result = await client.query<R>(text, values)
         left()
         return result
@@ -76,10 +80,14 @@ class IsolatedPool {
       timer = setTimeout(() => { expired = true; void close(); reject(failure()) }, Math.max(1, Math.floor(budgetMs)))
     })
     const execution = (async () => {
+      // Inside the guarded run: a throwing listener registration takes the same close path,
+      // so the slot is released only after end() is confirmed.
+      client.on('error', () => { /* pg errors never enter diagnostics as raw values */ })
       await client.connect()
       left()
       await client.query(this.readOnly ? 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY' : 'BEGIN')
-      const result = await work(sql)
+      let result: T
+      try { result = await work(sql) } finally { working = false }
       await settings()
       await client.query('COMMIT')
       left()
@@ -128,11 +136,14 @@ export class EventConnections {
     let snapshot: EventReadSnapshot | undefined
     try {
       return await this.read.run(Math.min(2000, 5000 - (now - requestStarted)), async sql => {
-        snapshot = Object.freeze({}) as EventReadSnapshot
-        readSnapshots.set(snapshot, sql)
-        return work(snapshot)
+        const registered = Object.freeze({}) as EventReadSnapshot
+        snapshot = registered
+        readSnapshots.set(registered, sql)
+        // Unregister as soon as work settles, before COMMIT and before any close wait:
+        // a stored snapshot is then refused by this registry, whatever the client would do.
+        try { return await work(registered) } finally { readSnapshots.delete(registered) }
       })
-    } finally { if (snapshot) readSnapshots.delete(snapshot) }
+    } finally { if (snapshot) readSnapshots.delete(snapshot) /* backstop for work that never settles */ }
   }
 }
 
