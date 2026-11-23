@@ -25,6 +25,7 @@ $rollbackArgs = @{
   Bootstrap = $oldBootstrapPs1
   BootstrapSha256 = $approvedBootstrapDigest
   InstallDeps = $approvedInstallDeps
+  LauncherLogDirectory = $privateRollbackLogDirectory
   Schema = $schema
 }
 # R84 路径经旧单核对后设置： $rollbackArgs.LegacyClassBOff = $true
@@ -33,19 +34,20 @@ $rollbackArgs = @{
 
 预检成功应为 `P3_ROLLBACK_RESULT status=preflight_pass`，包含账本、`STOP_PULLBATCH` 和 P4。P4 要有 `blocking=pass`、`false_rows_total=0` 和最后的完成行。两个作用域表的列都没落库（状态 C）时可显示 `columns_present=0`。出现 `unknown`、非零、部分列或读不到结果就停。P5 只记录，非零时将可能留在库里的自动化规则、宜搭台账及 trace 等写入交接，重新开启相关开关前先处理残留规则。
 
-确认本次授权和持续写入隔离后才执行，工具会重跑预检。
+确认本次授权和持续写入隔离后才执行，工具会重跑预检。提前选一个本次专用、仅现场授权人可读的日志目录。工具会对照 `Target` 核已经发布的 ZIP 与启动器的 SHA-256，以及 ZIP 根目录 `BUILD_PROVENANCE.json` 的发布标签和提交。任一不符会在 `stage=release` 停止。
 
 ```powershell
+$rollbackStartedAt = [DateTimeOffset]::UtcNow.ToString('o')
 .\ps\Invoke-P3Rollback.ps1 @rollbackArgs -OwnerApproved -WritesQuiesced -Execute
 ```
 
 工具以 `-RunMigrations 0` 调用已核哈希的旧包独立启动器，覆盖同一根目录。现场保持原根目录和批准的参数，避开新目录、`upgrade-inplace` 和任何迁移命令。状态 C 下，P3 迁移文件可能仍在覆盖后的目录中，账本只用 `s06` 读取。
 
-`status=STOP stage=overlay` 表示覆盖命令失败，`stage=ledger_after` 表示覆盖后未证实账本相同。两种都保持隔离并只读核 `s06` 和 `h01`，报 owner 后按他确认的恢复路径继续。启动器和数据库客户端原始输出留现场。
+`status=STOP stage=overlay` 表示覆盖命令或其日志写入失败，`stage=ledger_after` 表示覆盖后未证实账本相同。两种都保持隔离并只读核 `s06`、`h01` 和后端启动代次，报 owner 后按他确认的恢复路径继续。启动器 stdout 和 stderr 写到 `LauncherLogDirectory\p3-rollback-launcher.log`，已存在的日志保留，重跑时单独准备新目录。该日志可能含路径或连接信息，只供现场排障。数据库客户端只保留脚本输出的固定结果。
 
 ## 完成检查
 
-- `P3_ROLLBACK_RESULT status=overlay_complete`、回退前后 `MIG_COUNT` 相同、`MIG_NAMESET` 相同，并且 `h01` 映射为批准的旧版、HTTP 200。对旧版健康、必要插件和权限入口复核后闭合回退证据。
+- 确认 `P3_ROLLBACK_RESULT status=overlay_complete`、回退前后 `MIG_COUNT` 相同、`MIG_NAMESET` 相同。在本机后端直连端点运行 `h01-health.ps1 -P3Commit $p3Commit`，要求 HTTP 200 和本次批准的 R84 或 R85。再在同一终端运行 `.\ps\03-live-env-check.ps1 -InstallRoot $installRoot -StartedAfterUtc $rollbackStartedAt`，要求 `LIVEENV_BACKEND generation=fresh` 与完整的 `LIVEENV_RESULT`。任一缺失就保持暂停；两项齐全后复核必要插件和权限入口。
 - 关掉 P3 时打开的标签页，重开后 Ctrl+F5。R85 路径比较定时脚本哈希；R84 路径按 R85 装机单换回批准的 R84 副本，再用 `09` 核对命令行形态。
 - 记录 P5、平台和残留规则、D21 写入隔离、须由 owner 批准的权限写入恢复、定时拉取恢复及后续 06:00 核验。回报仅含状态和计数。
 

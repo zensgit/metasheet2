@@ -21,7 +21,7 @@
    .\ps\03-live-env-check.ps1 -InstallRoot $installRoot
    ```
    `02` 必须为 `owned=true`、`status=complete`。若重新打开终端，先从第 2 步复核。
-3. **开关闸门。** 现场与协调者逐行检查 `LIVEENV`。必须有 `LIVEENV_GATE on=0 review=0 unknown=0`、完整的 `LIVEENV_RESULT`，以及 `LIVEENV_DBURL relation=same` 或 `relation=root_absent`、`LIVEENV_DBURL_PROCESS process=same`。DB 条件和任一开关条件不满足就停。装机窗口、以往窗口的许可都不放行某个开关。宜搭表数据源 `INTEGRATION_YIDA_SHEET_SOURCE_ENABLED` 也必须为 `verdict=off`。布尔 OFF 写法为 `=false`；列表、路径和 JSON 的空白写法依 `03` 各键定义。严格会话时限 `EXTERNAL_LOGIN_STRICT_SESSION_MAX_AGE_SECONDS` 缺失为 OFF，合法整数为 ON，空白或非法配置交 owner。
+3. **开关闸门。** 现场与协调者逐行检查 `LIVEENV`。必须有 `LIVEENV_GATE on=0 review=0 unknown=0`、完整的 `LIVEENV_RESULT`，以及 `LIVEENV_DBURL relation=same` 或 `relation=root_absent`、`LIVEENV_DBURL_PROCESS process=same`。`process` 是正在运行的后端，`launch` 是即将启动安装器的 PowerShell 环境。两列都参与闸门。换终端或修改环境后，在实际执行安装的同一终端重跑。DB 条件和任一开关条件不满足就停。装机窗口、以往窗口的许可都不放行某个开关。宜搭表数据源 `INTEGRATION_YIDA_SHEET_SOURCE_ENABLED` 也必须为 `verdict=off`。布尔 OFF 写法为 `=false`；列表、路径和 JSON 的空白写法依 `03` 各键定义。严格会话时限 `EXTERNAL_LOGIN_STRICT_SESSION_MAX_AGE_SECONDS` 缺失为 OFF，合法整数为 ON，空白或非法配置交 owner。
    - **第 11 项单列签字** `INTEGRATION_YIDA_CONNECTION_TEST_ENABLED` 必须为 `verdict=off`，并且该行与总闸门均有记录。只要有 `literal-true` 或其它非 OFF 状态，记录停止位置及状态所在列，报 owner。若 owner 本次批准改动，备份每份待改的 `app.env`，把该键明确改为 `false`，依批准的启动流程重启后重跑 `02`、`03`。验证进程为 `literal-false`，文件列为 `literal-false` 或 `absent`；然后才继续。记录初值状态、改动批准、复查结果。租户声明开关按第 4 步维持原状。
 4. 记下 `03` 中 `gate=record` 的行，尤其是租户声明、项目表开关和 Class B 外发。双值、缺列或其它异常另记并交协调者。后续做逐列对照。
 5. 用本次批准的连接设置建立只读核对会话。确认服务、迁移和探针指向同一库及 schema。用 `sql\s05-admin-for-tenant.sql` 核对批准租户有唯一可签令牌的管理员；照抄计数与完成状态。发行与持有令牌只按本次单独批准的时点、期限和次数。令牌放进仅操作者可读的临时文件，用 `.\http\h00-token-check.ps1 -TokenFile $tokenFile` 核 `usable=true expired=false`。过期即停在依赖它的步骤，先清理旧文件，等新的次数批复。窗口审批与令牌可用期各自核对。
@@ -58,32 +58,37 @@ psql -X -w -qAt -v ON_ERROR_STOP=1 -v "schema=$schema" -f .\sql\s06-new-migratio
 ```powershell
 "MIGENV exclude=$(Test-Path Env:MIGRATION_EXCLUDE) include_legacy=$(Test-Path Env:MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL) reset=$(Test-Path Env:ALLOW_DB_RESET)"
 ```
-只接受三个 `False`。第 11 项、5 列环境、数据库比对与 P2 均重新过关后才执行第 20 步。
+只接受三个 `False`。第 11 项、6 列环境、数据库比对与 P2 均重新过关后才执行第 20 步。
 
 ## 三、装包和失败分流
 
 20. 在同一窗口将批准的新版包覆盖到已验签安装根目录。
 ```powershell
+$applyStartedAt = [DateTimeOffset]::UtcNow.ToString('o')
 & $p3BootstrapBat $p3Archive $installRoot 1 1
 $LASTEXITCODE
 ```
-记退出码。进程已退出时先跑 `s06` 与 `h01`，再按表分流。记日志是否出现固定标记、迁移文件名及 SQLSTATE；原始错误文本留现场。
+记退出码。安装器退出后，用 `s06` 核账本，以 `h01` 直连本机后端核构件标签，再在原终端运行下列只读检查。H01 会读取磁盘的构件信息，签收换版还要看到 `LIVEENV_BACKEND generation=fresh` 和完整的 `LIVEENV_RESULT`。记日志是否出现固定标记、迁移文件名及 SQLSTATE；原始错误文本留现场。
+
+```powershell
+.\ps\03-live-env-check.ps1 -InstallRoot $installRoot -StartedAfterUtc $applyStartedAt
+```
 
 | 状态 | 本次结果 | 处置 |
 |---|---|---|
-| A | 退出 0，账本为 total 且 `h01` 确认为 P3 | 继续第 21 步。 |
+| A | 退出 0、账本为 total、`h01` 为 200/P3，且 `03` 证明后端在本次覆盖开始后启动 | 继续第 21 步。 |
 | B | 健康检查失败，账本为 total，构建可能是 P3、旧版或暂不可读 | 保持暂停，交 owner 判定修复或回退。 |
-| C | 迁移失败，账本为 baseline，`h01` 显示旧构建或暂不可读 | 盘上可能保留 P3 文件，旧进程也可能仍在内存中。报告账本、健康和 `02`，等待 owner 定覆盖回退或修复。现场保持现状，禁止重启、重复装包和调用 `migrate.js`。 |
-| D | 账本为 baseline，`h01` 显示新构建 | 新构建可能在旧库运行。保持隔离，按 C 采集并立即报告。 |
+| C | 迁移失败，账本为 baseline，后端启动代次为 `stale` 或尚无法确认 | 盘上可能保留 P3 文件，旧进程也可能仍在内存中。报告账本、健康和进程代次，等待 owner 定覆盖回退或修复。现场保持现状，禁止重启、重复装包和调用 `migrate.js`。 |
+| D | 账本为 baseline，`h01` 显示 P3 且后端启动代次为 `fresh` | 新构建可能在旧库运行。保持隔离，按 C 采集并立即报告。 |
 | E | 仍运行且超过批准的最长等待 | 保持窗口，暂停其它动作，联系 owner。 |
-| F | 账本为 total，健康仍指旧构建或新版服务未上 | 保持暂停，交 owner 按本次结果处理。在 D21 已落库时执行第十一节的写入隔离。 |
+| F | 账本为 total，但健康仍指旧构建、新版服务未上或后端启动代次未确认 | 保持暂停，交 owner 按本次结果处理。在 D21 已落库时执行第十一节的写入隔离。 |
 
 基线和总账本以外的任何结果、两项证据互相矛盾或包内提交不符，一律保持暂停并报告。迁移日志里的逐项成功行需与最终账本核对。
 21–22. 核对 `02`、`03` 与开关闸门，再关闭装前打开的浏览器标签页并重开，Ctrl+F5。记录实际部署路径的缓存处理结果。
 
 ## 四、装后核对
 
-23–27. `s06` 应给出 `applied_t={{MIGRATIONS_NEW}} applied_f=0`、`MIG_COUNT kysely_migration={{MIGRATIONS_TOTAL}}`、`MIG_NAMESET ledger=total`，最后有完成行。清单最新迁移为 `{{LAST_MIGRATION}}`。核 `h01` 200、构建 P3、应有插件和健康端点，依次跑 `s25-grants.sql`、`s26-post-counts.sql`、`s27-platform-counts.sql` 和 P5。权限异常、备料或平台计数与基线不一致、预期触发器缺失时暂停并报告；P5 单独记录。核签过程中继续保持任务暂停。
+23–27. `s06` 应给出 `applied_t={{MIGRATIONS_NEW}} applied_f=0`、`MIG_COUNT kysely_migration={{MIGRATIONS_TOTAL}}`、`MIG_NAMESET ledger=total`，最后有完成行。清单最新迁移为 `{{LAST_MIGRATION}}`。复核第 20 步的本机 `h01` 200/P3、`03` 后端代次 `fresh` 和完整结果，以及应有插件和健康端点。依次跑 `s25-grants.sql`、`s26-post-counts.sql`、`s27-platform-counts.sql` 和 P5。健康、进程代次、权限或计数不符，以及预期触发器缺失时暂停并报告；P5 单独记录。核签过程中继续保持任务暂停。
 
 ## 五、备料表
 

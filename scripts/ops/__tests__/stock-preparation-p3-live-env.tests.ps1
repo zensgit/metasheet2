@@ -107,7 +107,7 @@ function Check([string]$label, [string[]]$out, [string[]]$want, [string[]]$absen
   foreach ($w in $absentLines) { if ($out -notcontains $w) { $script:pass++ } else { $script:fail++; ('  FAIL ' + $label + ': unexpected line: ' + $w) } }
   $leak = @($out | Where-Object { $_ -match 'SENTINEL|postgres|p3envrun|[A-Za-z]:\\|4242' -or $_ -match [regex]::Escape($zh) })
   if ($leak.Count -eq 0) { $script:pass++ } else { $script:fail++; ('  FAIL ' + $label + ': value leaked') }
-  $bad = @($out | Where-Object { $_ -notmatch '^LIVEENV(_FILE|_DBURL|_DBURL_PROCESS|_PM2|_GATE|_RESULT)? [a-z0-9_]+=[A-Za-z0-9_.-]+( [a-z0-9_]+=[A-Za-z0-9_.-]+)*$' })
+  $bad = @($out | Where-Object { $_ -notmatch '^LIVEENV(_FILE|_DBURL|_DBURL_PROCESS|_PM2|_BACKEND|_GATE|_RESULT)? [a-z0-9_]+=[A-Za-z0-9_.-]+( [a-z0-9_]+=[A-Za-z0-9_.-]+)*$' })
   if ($bad.Count -eq 0) { $script:pass++ } else { $script:fail++; ('  FAIL ' + $label + ': line outside grammar: ' + $bad[0]) }
   $last = if ($out.Count -gt 0) { $out[$out.Count - 1] } else { '' }
   if ($last -like 'LIVEENV_RESULT *') { $script:pass++ } else { $script:fail++; ('  FAIL ' + $label + ': last line is not LIVEENV_RESULT') }
@@ -122,8 +122,8 @@ function Run([string]$scriptPath, [string]$root, [string]$pm2Home, [string[]]$ex
 function Show([string]$title, [string[]]$out) { ('== ' + $title + ' exit=' + $script:lastExit); $out | ForEach-Object { '   ' + $_ } }
 function Invoked([string]$root) { return (Test-Path -LiteralPath (Join-Path $root 'node_modules\.bin\invoked.txt')) }
 # expected key line; machine and user are always absent in this harness
-function L([string]$k, [string]$p, [string]$r, [string]$d, [string]$dup, [string]$pdup, [string]$kind, [string]$gate, [string]$v) {
-  return ('LIVEENV key={0} process={1} root={2} docker={3} machine=absent user=absent dup={4} pdup={5} kind={6} gate={7} verdict={8}' -f $k, $p, $r, $d, $dup, $pdup, $kind, $gate, $v)
+function L([string]$k, [string]$p, [string]$r, [string]$d, [string]$dup, [string]$pdup, [string]$kind, [string]$gate, [string]$v, [string]$launch = 'absent') {
+  return ('LIVEENV key={0} process={1} launch={9} root={2} docker={3} machine=absent user=absent dup={4} pdup={5} kind={6} gate={7} verdict={8}' -f $k, $p, $r, $d, $dup, $pdup, $kind, $gate, $v, $launch)
 }
 
 $classbKeys = @('-Keys', 'AUTOMATION_CLASSB_OUTBOUND_ENABLED,NODE_ENV,MULTITABLE_EMAIL_TRANSPORT,TASKS_ENABLED,RBAC_BYPASS')
@@ -511,6 +511,32 @@ Check 'case24-sheet-source-after-file-removal' $o24 @(
   (L $sheetSourceKey 'literal-true' 'absent' 'absent' 'none' 'none' 'boolean' 'true-stops' 'on'),
   'LIVEENV_GATE on=1 review=0 unknown=0 off=0 record=0'
 ) @()
+
+# The running backend and both files are clear; only the launch environment is on.
+$shellKey = 'INTEGRATION_YIDA_CONNECTION_TEST_ENABLED'
+$previous = [Environment]::GetEnvironmentVariable($shellKey, 'Process')
+try {
+  [Environment]::SetEnvironmentVariable($shellKey, 'true', 'Process')
+  $o25 = Run $script $r2 $homeAlive @('-Keys', $shellKey)
+  Check 'case25-launch-only' $o25 @(
+    (L $shellKey 'absent' 'absent' 'absent' 'none' 'none' 'boolean' 'true-stops' 'on' 'literal-true'),
+    'LIVEENV_GATE on=1 review=0 unknown=0 off=0 record=0'
+  ) @()
+} finally { [Environment]::SetEnvironmentVariable($shellKey, $previous, 'Process') }
+
+# Use the harness's real, synthetic Node process with canned PM2 metadata.
+$genRoot = Join-Path $base 'generation'
+$genExec = Join-Path $genRoot 'packages\core-backend\dist\src\index.js'
+$genJson = '[{"name":"metasheet-backend","pid":' + $dummy.Id +
+  ',"pm2_env":{"PATH":"fixture","status":"online","pm_exec_path":' + (J $genExec) + '}}]'
+$null = New-Root 'generation' $genJson $false $null $null 0 $false $true
+foreach ($case in @(@('fresh', $dummy.StartTime.AddSeconds(-1), 0), @('stale', [DateTime]::UtcNow, 2))) {
+  $cutoff = ([DateTimeOffset]$case[1]).ToUniversalTime().ToString('o')
+  $o26 = Run $script $genRoot $homeAlive @('-Keys', $shellKey, '-StartedAfterUtc', $cutoff)
+  $exit26 = $script:lastExit
+  Check ('case26-' + $case[0]) $o26 @('LIVEENV_BACKEND generation=' + $case[0]) @()
+  if ($exit26 -eq $case[2]) { $pass++ } else { $fail++; '  FAIL case26: wrong generation exit' }
+}
 
 # ---------- Mutants: each must turn a case red ----------
 # GroupOk = the checks a mutant must break. The baseline below proves the unmutated tool passes each one,

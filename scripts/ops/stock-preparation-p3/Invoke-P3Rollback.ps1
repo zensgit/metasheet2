@@ -11,6 +11,7 @@ param(
   [Parameter(Mandatory = $true)][string]$Bootstrap,
   [Parameter(Mandatory = $true)][ValidatePattern('^[0-9A-Fa-f]{64}$')][string]$BootstrapSha256,
   [Parameter(Mandatory = $true)][ValidateSet('0', '1')][string]$InstallDeps,
+  [string]$LauncherLogDirectory,
   [ValidatePattern('^[A-Za-z_][A-Za-z0-9_]*$')][string]$Schema = 'public',
   [switch]$Execute,
   [switch]$OwnerApproved,
@@ -20,6 +21,17 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $stage = 'input'
+$releaseCommits = @{
+  R84 = 'beed2a1e1cd239975d695ce6ce4d7264e38c3a1e'
+  R85 = '220bd80ab62fc7e6b3b40b7d4263a712d9a09405'
+}
+$releaseArchiveSha256 = @{
+  R84 = '22c6c528b2571defe9b722860a0ef885e9b57d3a7a51bc919f331fff5e895bd4'
+  R85 = 'f3f09d87511712f1dbe48f0274d4745c6bba6b4a5fe316c1c82c17dde95bd164'
+}
+# The two published PS1 sidecars have identical bytes. Bind the supplied sidecar
+# to those bytes even if the operator supplies a matching digest for another file.
+$releaseBootstrapSha256 = '0c7f7ce8af5c71cc798f5bab21a1dd9014039c9902d6c82aca4e974f0b00bea7'
 
 function Get-Sha256([string]$Path) {
   $stream = [IO.File]::OpenRead($Path)
@@ -29,6 +41,27 @@ function Get-Sha256([string]$Path) {
       return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '')
     } finally { $sha.Dispose() }
   } finally { $stream.Dispose() }
+}
+
+function Assert-ArchiveRelease([string]$Path) {
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $zip = [IO.Compression.ZipFile]::OpenRead($Path)
+  try {
+    $prefix = 'metasheet-multitable-onprem-v2.5.0-' + $Target.ToLowerInvariant()
+    $provenance = @($zip.Entries | Where-Object { $_.FullName -match '^[^/]+/BUILD_PROVENANCE\.json$' })
+    if ($provenance.Count -ne 1 -or $provenance[0].FullName -cne "$prefix/BUILD_PROVENANCE.json" -or
+        $provenance[0].Length -gt 64KB -or
+        @($zip.Entries | Where-Object { -not $_.FullName.StartsWith("$prefix/", [StringComparison]::Ordinal) }).Count -ne 0) {
+      throw 'archive provenance root mismatch'
+    }
+    $reader = New-Object IO.StreamReader($provenance[0].Open())
+    try { $release = ConvertFrom-Json -InputObject ($reader.ReadToEnd()) } finally { $reader.Dispose() }
+    if ($release.schema -cne 'metasheet-onprem-build-provenance/v1' -or
+        $release.gitCommit -cne $releaseCommits[$Target] -or
+        $release.packageName -cne $prefix -or $release.tag -cne $Target.ToLowerInvariant()) {
+      throw 'archive provenance release mismatch'
+    }
+  } finally { $zip.Dispose() }
 }
 
 function Read-Probe([string]$File) {
@@ -75,6 +108,8 @@ function Write-P5Report {
 
 try {
   if ($Execute -and (-not $OwnerApproved -or -not $WritesQuiesced)) { throw 'authorization or quiet window missing' }
+  if ($Execute -and (-not $LauncherLogDirectory -or
+      -not (Test-Path -LiteralPath $LauncherLogDirectory -PathType Container))) { throw 'launcher log directory missing' }
   if ($Target -eq 'R84' -and -not $LegacyClassBOff) { throw 'legacy switch not verified' }
   $root = (Get-Item -LiteralPath $InstallRoot).FullName
   $sqlRoot = (Get-Item -LiteralPath $SqlDir).FullName
@@ -91,6 +126,10 @@ try {
   $stage = 'hash'
   if ((Get-Sha256 $archiveFile.FullName) -ine $ArchiveSha256 -or
       (Get-Sha256 $bootstrapFile.FullName) -ine $BootstrapSha256) { throw 'hash mismatch' }
+  $stage = 'release'
+  if ($ArchiveSha256 -ine $releaseArchiveSha256[$Target]) { throw 'archive does not match the published release' }
+  Assert-ArchiveRelease $archiveFile.FullName
+  if ($BootstrapSha256 -ine $releaseBootstrapSha256) { throw 'bootstrap does not match the released sidecar' }
 
   $stage = 'ledger_before'
   $expectedLedger = if ($InstallState -in @('C', 'D')) { 'baseline' } else { 'total' }
@@ -136,9 +175,19 @@ try {
 
   $stage = 'overlay'
   $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  $logDirectory = (Get-Item -LiteralPath $LauncherLogDirectory).FullName
+  $logFile = Join-Path $logDirectory 'p3-rollback-launcher.log'
+  $logStream = [IO.File]::Open($logFile, [IO.FileMode]::CreateNew)
+  $logStream.Dispose()
+  # Windows PowerShell 5.1 turns native stderr into error records. Continue long
+  # enough to save them and read the native exit code.
+  $ErrorActionPreference = 'Continue'
   & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $bootstrapFile.FullName `
-    -RootDir $root -PackageArchive $archiveFile.FullName -InstallDeps $InstallDeps -RunMigrations 0 *> $null
-  if ($LASTEXITCODE -ne 0) { throw 'overlay failed' }
+    -RootDir $root -PackageArchive $archiveFile.FullName -InstallDeps $InstallDeps -RunMigrations 0 2>&1 |
+    Out-File -LiteralPath $logFile -Encoding utf8 -Append -ErrorAction Stop
+  $launcherExit = $LASTEXITCODE
+  $ErrorActionPreference = 'Stop'
+  if ($launcherExit -ne 0) { throw 'overlay failed' }
 
   $stage = 'ledger_after'
   $after = @(Read-Ledger)

@@ -46,13 +46,14 @@ if (sql === 's06-new-migrations.sql') {
 }
 `
 
-function run(scenario, { target = 'R85', apply = false, authorized = true, badHash = false } = {}) {
+function run(scenario, { target = 'R85', release = target, apply = false, authorized = true, badHash = false, otherBootstrap = false } = {}) {
   const fixture = mkdtempSync(path.join(tmpdir(), 'p3 rollback '))
   try {
     const install = path.join(fixture, 'install')
     const sql = path.join(fixture, 'sql')
     const archive = path.join(fixture, 'old archive.zip')
     const bootstrap = path.join(fixture, 'old bootstrap.ps1')
+    const launcherLog = path.join(fixture, 'p3-rollback-launcher.log')
     const flag = path.join(fixture, 'overlay-invoked')
     const backend = path.join(install, 'packages/core-backend/dist/src')
     mkdirSync(backend, { recursive: true })
@@ -60,11 +61,24 @@ function run(scenario, { target = 'R85', apply = false, authorized = true, badHa
     mkdirSync(sql)
     writeFileSync(path.join(backend, 'index.js'), '// fixture')
     writeFileSync(path.join(install, 'docker/app.env'), '# fixture')
-    writeFileSync(archive, 'synthetic zip')
+    const packageName = 'metasheet-multitable-onprem-v2.5.0-' + release.toLowerCase()
+    const packageRoot = path.join(fixture, packageName)
+    mkdirSync(packageRoot)
+    writeFileSync(path.join(packageRoot, 'BUILD_PROVENANCE.json'), JSON.stringify({
+      schema: 'metasheet-onprem-build-provenance/v1',
+      gitCommit: release === 'R85' ? '220bd80ab62fc7e6b3b40b7d4263a712d9a09405' : 'beed2a1e1cd239975d695ce6ce4d7264e38c3a1e',
+      packageName,
+      tag: release.toLowerCase(),
+    }))
+    const zip = spawnSync('tar.exe', ['-a', '-cf', archive, packageName], { cwd: fixture, encoding: 'utf8' })
+    assert.equal(zip.status, 0, zip.stderr)
     writeFileSync(bootstrap, [
       'param($RootDir, $PackageArchive, $InstallDeps, $RunMigrations)',
       'if ($RunMigrations -ne "0" -or $RootDir -ne $env:P3_TEST_ROOT -or $InstallDeps -ne "1" -or $PackageArchive -ne $env:P3_TEST_ARCHIVE) { exit 9 }',
       '[IO.File]::WriteAllText($env:P3_TEST_FLAG, "ok")',
+      '[Console]::Out.WriteLine("FIXTURE_STDOUT")',
+      '[Console]::Error.WriteLine("FIXTURE_STDERR")',
+      'if ($env:P3_TEST_SCENARIO -eq "launcher-failed") { exit 8 }',
       'exit 0',
     ].join('\r\n'))
     for (const file of [
@@ -75,11 +89,24 @@ function run(scenario, { target = 'R85', apply = false, authorized = true, badHa
     writeFileSync(path.join(fixture, 'psql.cmd'), '@node "%~dp0psql.cjs" %*\r\n')
 
     const powershell = path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe')
+    // Use the released sidecar check as-is in the mismatch case. For the other
+    // fixtures only its approved digest changes, so no real launcher can run.
+    const fixtureScript = path.join(fixture, 'Invoke-P3Rollback.ps1')
+    const source = readFileSync(script, 'utf8')
+    const releaseDigest = "'0c7f7ce8af5c71cc798f5bab21a1dd9014039c9902d6c82aca4e974f0b00bea7'"
+    const archiveDigest = release === 'R85'
+      ? "'f3f09d87511712f1dbe48f0274d4745c6bba6b4a5fe316c1c82c17dde95bd164'"
+      : "'22c6c528b2571defe9b722860a0ef885e9b57d3a7a51bc919f331fff5e895bd4'"
+    assert.ok(source.includes(releaseDigest))
+    assert.ok(source.includes(archiveDigest))
+    const withArchive = source.replace(archiveDigest, "'" + digest(archive) + "'")
+    writeFileSync(fixtureScript, otherBootstrap ? withArchive : withArchive.replace(releaseDigest, "'" + digest(bootstrap) + "'"))
     const argv = [
-      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script,
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', fixtureScript,
       '-Target', target, '-InstallState', 'C', '-InstallRoot', install, '-SqlDir', sql,
       '-Archive', archive, '-ArchiveSha256', badHash ? '0'.repeat(64) : digest(archive),
       '-Bootstrap', bootstrap, '-BootstrapSha256', digest(bootstrap), '-InstallDeps', '1',
+      '-LauncherLogDirectory', fixture,
     ]
     if (target === 'R84') argv.push('-LegacyClassBOff')
     if (apply) argv.push('-Execute')
@@ -98,7 +125,11 @@ function run(scenario, { target = 'R85', apply = false, authorized = true, badHa
     try { overlaid = readFileSync(flag, 'utf8') === 'ok' } catch (error) {
       if (error.code !== 'ENOENT') throw error
     }
-    return { ...result, overlaid }
+    let log = ''
+    try { log = readFileSync(launcherLog, 'utf8') } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+    }
+    return { ...result, overlaid, log }
   } finally {
     rmSync(fixture, { recursive: true, force: true })
   }
@@ -115,6 +146,8 @@ for (const [scenario, stage, options] of [
   ['missing-p4-result', 'p4', { apply: true }],
   ['unauthorized', 'input', { apply: true, authorized: false }],
   ['bad-hash', 'hash', { apply: true, badHash: true }],
+  ['wrong-release', 'release', { apply: true, target: 'R85', release: 'R84' }],
+  ['other-bootstrap', 'release', { apply: true, otherBootstrap: true }],
 ]) {
   test(`rollback blocks ${scenario} before invoking the old launcher`, { skip: !windows }, () => {
     const result = run(scenario, options)
@@ -137,6 +170,18 @@ test('state C overlay passes exactly RunMigrations=0 and permits report-only cou
   assert.match(result.stdout, /P5_VERDICT all_zero=f/)
   assert.match(result.stdout, /status=overlay_complete/)
   assert.equal(result.overlaid, true)
+  assert.match(result.log, /FIXTURE_STDOUT/)
+  assert.match(result.log, /FIXTURE_STDERR/)
+  assert.doesNotMatch(result.stdout + result.stderr, /FIXTURE_STDOUT|FIXTURE_STDERR/)
+})
+
+test('launcher failure keeps stdout and stderr in the local log', { skip: !windows }, () => {
+  const result = run('launcher-failed', { apply: true })
+  assert.equal(result.status, 2, result.stderr + result.stdout)
+  assert.match(result.stdout, /status=STOP stage=overlay/)
+  assert.match(result.log, /FIXTURE_STDOUT/)
+  assert.match(result.log, /FIXTURE_STDERR/)
+  assert.doesNotMatch(result.stdout + result.stderr, /FIXTURE_STDOUT|FIXTURE_STDERR/)
 })
 
 test('a changed post-overlay ledger cannot report overlay complete', { skip: !windows }, () => {

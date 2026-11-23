@@ -78,7 +78,7 @@
 #   valid-integer   only for the strict session max age, when within the runtime bounds
 #   unknown         (process only) the process environment was not read; see LIVEENV_RESULT
 #
-# GATE (per key; columns process, root, docker, machine, user; the worst column wins: on > review >
+# GATE (per key; columns process, launch, root, docker, machine, user; the worst column wins: on > review >
 # unknown > off). The kind and gate of each default key are in $Spec below.
 #   gate=true-stops      (booleans) on = literal-true. off = absent or literal-false. Anything else
 #                        (loose-true, empty, blank, exists) = review: code with an exact test reads it as
@@ -124,7 +124,10 @@
 #       unknown = docker\app.env has no DATABASE_URL line (LIVEENV_DBURL then says docker_absent)
 #       same    = one value across every process occurrence and every docker line
 #       differs = otherwise, even only in case. The gate stops (review +1).
-#   LIVEENV key=<KEY> process=<w> root=<w> docker=<w> machine=<w> user=<w> dup=none|same|differs pdup=none|same|differs kind=<k> gate=<g> verdict=off|on|review|unknown|-
+#   LIVEENV_BACKEND generation=fresh|stale|wrong_app|unknown (only with -StartedAfterUtc)
+#       fresh = the named online app from this root has an OS start time after the caller's UTC cutoff.
+#   LIVEENV key=<KEY> process=<w> launch=<w> root=<w> docker=<w> machine=<w> user=<w> dup=none|same|differs pdup=none|same|differs kind=<k> gate=<g> verdict=off|on|review|unknown|-
+#       launch = this shell's inherited process environment, separate from the live PM2 app.
 #       dup  = several lines for the key in one file (same / differing state words); root= and
 #              docker= then show the line with the worst verdict
 #       pdup = the key found more than once in the process env (case variants, or both pm2_env bags);
@@ -136,12 +139,14 @@
 #   LIVEENV_RESULT keys=<n> status=incomplete reason=<word>
 # A run with no LIVEENV_RESULT line did not finish. Never read a missing line as absent.
 # reasons: install_root_not_found, bad_key, no_daemon, daemon_not_owned, owner_unreadable, pm2_not_found,
-# pm2_timeout, pm2_failed, parse_failed, app_count, env_not_visible, parser_unavailable, read_error.
+# pm2_timeout, pm2_failed, parse_failed, app_count, env_not_visible, parser_unavailable,
+# invalid_start_cutoff, backend_generation_unconfirmed, read_error.
 param(
   [Parameter(Mandatory = $true)][string]$InstallRoot,
   [string[]]$Keys = @(),
   [string]$AppName = 'metasheet-backend',
-  [int]$TimeoutSeconds = 60
+  [int]$TimeoutSeconds = 60,
+  [string]$StartedAfterUtc
 )
 
 $ErrorActionPreference = 'Stop'
@@ -327,6 +332,22 @@ function Get-ProcessById([int]$ProcessId) {
   return (Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId=' + $ProcessId) | Select-Object -First 1)
 }
 
+function Get-BackendGeneration($App, [DateTimeOffset]$After) {
+  if ($null -eq $App -or $App['pm2_env']['status'] -cne 'online') { return 'unknown' }
+  $processId = 0
+  if (-not [int]::TryParse([string]$App['pid'], [ref]$processId) -or $processId -le 0) { return 'unknown' }
+  try {
+    $expected = [IO.Path]::GetFullPath((Join-Path $InstallRoot 'packages\core-backend\dist\src\index.js'))
+    $scriptPath = [string]$App['pm2_env']['pm_exec_path']
+    if (-not [IO.Path]::IsPathRooted($scriptPath)) { return 'wrong_app' }
+    $actual = [IO.Path]::GetFullPath($scriptPath)
+    if ($actual -ine $expected) { return 'wrong_app' }
+    $started = (Get-Process -Id $processId -ErrorAction Stop).StartTime.ToUniversalTime()
+    if ($started -gt $After.UtcDateTime) { return 'fresh' }
+    return 'stale'
+  } catch { return 'unknown' }
+}
+
 function Get-OwnerIsCurrent($proc, [string]$me) {
   if ($null -eq $proc) { return 'false' }
   try { $o = Invoke-CimMethod -InputObject $proc -MethodName GetOwner } catch { return 'unknown' }
@@ -495,7 +516,7 @@ try {
               $cb = @(); $cb += , $cand
               if ($cand.ContainsKey('env') -and $cand['env'] -is [System.Collections.IDictionary]) { $cb += , $cand['env'] }
               foreach ($bag in $cb) { foreach ($bk in @($bag.Keys)) { if ([string]::Equals([string]$bk, 'PATH', [System.StringComparison]::OrdinalIgnoreCase)) { $visible = $true } } }
-              if ($visible) { $pm2Env = $cand; $readState = 'ok' } else { $resultLine = 'env_not_visible' }
+              if ($visible) { $pm2Env = $cand; $pm2App = $hits[0]; $readState = 'ok' } else { $resultLine = 'env_not_visible' }
               $cand = $null; $cb = $null
             }
             $parsed = $null; $hits = $null
@@ -513,6 +534,17 @@ try {
   }
   $dbProc = Get-DbUrlProcess $readState $bags $dockerMap
   'LIVEENV_DBURL_PROCESS process=' + $dbProc
+  if ($PSBoundParameters.ContainsKey('StartedAfterUtc')) {
+    $after = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParseExact($StartedAfterUtc, 'o', [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::None, [ref]$after) -or $after.Offset -ne [TimeSpan]::Zero) {
+      $resultLine = 'invalid_start_cutoff'
+    } else {
+      $generation = Get-BackendGeneration $pm2App $after
+      'LIVEENV_BACKEND generation=' + $generation
+      if ($generation -ne 'fresh' -and $null -eq $resultLine) { $resultLine = 'backend_generation_unconfirmed' }
+    }
+  }
 
   $gateCount = @{ 'off' = 0; 'on' = 0; 'review' = 0; 'unknown' = 0; 'record' = 0 }
   foreach ($name in $keyList) {
@@ -566,10 +598,11 @@ try {
     }
     $mach = Get-State ([Environment]::GetEnvironmentVariable($name, 'Machine')) $name
     $usr = Get-State ([Environment]::GetEnvironmentVariable($name, 'User')) $name
+    $launch = Get-State ([Environment]::GetEnvironmentVariable($name, 'Process')) $name
     if ($gate -eq 'record') { $verdict = '-'; $gateCount['record']++ }
     else {
       $verdict = 'off'
-      foreach ($st in @($pstate, $states['root'], $states['docker'])) { $verdict = Get-WorseVerdict $verdict (Get-Verdict $st $gate) }
+      foreach ($st in @($pstate, $launch, $states['root'], $states['docker'])) { $verdict = Get-WorseVerdict $verdict (Get-Verdict $st $gate) }
       foreach ($st in @($mach, $usr)) {
         $v = Get-Verdict $st $gate
         if ($st -ne 'absent') { $v = Get-WorseVerdict $v 'review' }
@@ -577,7 +610,7 @@ try {
       }
       $gateCount[$verdict]++
     }
-    'LIVEENV key={0} process={1} root={2} docker={3} machine={4} user={5} dup={6} pdup={7} kind={8} gate={9} verdict={10}' -f $name, $pstate, $states['root'], $states['docker'], $mach, $usr, $dup, $pdup, $kind, $gate, $verdict
+    'LIVEENV key={0} process={1} launch={2} root={3} docker={4} machine={5} user={6} dup={7} pdup={8} kind={9} gate={10} verdict={11}' -f $name, $pstate, $launch, $states['root'], $states['docker'], $mach, $usr, $dup, $pdup, $kind, $gate, $verdict
   }
   $pm2Env = $null; $bags = $null
   # root and docker DATABASE_URL differ: migrate and the backend may use two databases; the owner decides

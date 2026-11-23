@@ -52,6 +52,20 @@ jobs:
         with:
           node-version: 20.x
 
+      - name: Run P3 installation and rollback regressions
+        shell: powershell
+        run: |
+          $powershell51 = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+          $envProbe = (Resolve-Path scripts/ops/stock-preparation-p3/03-live-env-check.ps1).Path
+          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File scripts/ops/__tests__/stock-preparation-p3-live-env.tests.ps1 -Script $envProbe -Mutants
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $tap = @(node --test --test-reporter=tap scripts/ops/__tests__/stock-preparation-p3-http.windows.mjs scripts/ops/__tests__/stock-preparation-p3-rollback.windows.mjs)
+          $testCode = $LASTEXITCODE
+          $tap
+          if ($testCode -ne 0 -or $tap -notcontains '# pass 18' -or $tap -notcontains '# skipped 0') {
+            throw 'P3 requires all 18 Windows subtests to execute and pass'
+          }
+
       # The release package runs this acceptance boundary under Windows PowerShell 5.1. pwsh 7 has
       # different native-stderr semantics and cannot stand in for the target shell contract.
       - name: Run target-shell smoke capture regression

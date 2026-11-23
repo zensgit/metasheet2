@@ -9,7 +9,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $r85 = '220bd80ab62fc7e6b3b40b7d4263a712d9a09405'
-if ($P3Commit -eq $r85) {
+$r84 = 'beed2a1e1cd239975d695ce6ce4d7264e38c3a1e'
+if ($P3Commit -in @($r85, $r84)) {
   'HEALTH_RESULT file=h01-health.ps1 status=incomplete reason=ambiguous_build'
   exit 2
 }
@@ -36,6 +37,7 @@ try {
     }
   }
   $build = if ($commit -ceq $r85) { 'R85' }
+    elseif ($commit -ceq $r84) { 'R84' }
     elseif ($commit -ceq $P3Commit.ToLowerInvariant()) { 'P3' }
     elseif ([string]::IsNullOrEmpty($commit)) { 'absent' }
     else { 'other' }
