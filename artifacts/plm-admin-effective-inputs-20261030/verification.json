@@ -1,0 +1,103 @@
+{
+  "schema": "plm-admin-effective-input-validation/v1",
+  "at_utc": "2026-10-29T21:15:11.649756+00:00",
+  "base_main": "a03d804d60d83717feaedce099e5ff14216afc58",
+  "source_commit": "3d788082dbfc0797abc395de2dc6e7e8d5a47697",
+  "files": [
+    {
+      "path": "scripts/ops/attendance-onprem-bootstrap-admin.sh",
+      "sha256": "8cb61cf772a01e0d8deab0b2868f500e1a669668777bc151ae83d240ba7da503",
+      "bytes": 19516,
+      "mode": "0o755"
+    },
+    {
+      "path": "scripts/ops/attendance-onprem-bootstrap-admin-local-org.test.mjs",
+      "sha256": "fb51efa382cbc2acebc34e53cb4c16b6fd7b7cbddd5a3be1c8b47b7ad556acf3",
+      "bytes": 36136,
+      "mode": "0o644"
+    }
+  ],
+  "runtime": {
+    "Node": "24.14.1",
+    "Bash": "3.2.57",
+    "PATH": "/usr/bin:/bin",
+    "pwsh_probe": "ENOENT under bound PATH; no PS1 callback selected",
+    "bcrypt": "existing PATH stub with opt-in actual argv comparison",
+    "database": "existing psql PATH stub with actual v_email argv comparison",
+    "UUID": "actual Node builtin crypto.randomUUID in the existing fallback"
+  },
+  "results": [
+    {
+      "phase": "original_main_baseline",
+      "pass": 5,
+      "fail": 3,
+      "seconds": 5.6902,
+      "timed_out": false,
+      "fixture_tmp_empty": true,
+      "stdout_sha256": "1eaa17ace7b2750dcbfc6a2b1dfc57c0a56d875a67f84d4726766d26d96c60be"
+    },
+    {
+      "phase": "green",
+      "pass": 8,
+      "fail": 0,
+      "seconds": 3.2442,
+      "timed_out": false,
+      "fixture_tmp_empty": true,
+      "admin_sha256": "8cb61cf772a01e0d8deab0b2868f500e1a669668777bc151ae83d240ba7da503",
+      "stdout_sha256": "f709d3c5d19524b5e02346359a61a3a259781c2ed1b5d886d259716f72c2f47e"
+    },
+    {
+      "phase": "remove-postsource",
+      "pass": 0,
+      "fail": 3,
+      "seconds": 2.5167,
+      "timed_out": false,
+      "fixture_tmp_empty": true,
+      "admin_sha256": "54d41bf52985e9b397f367721c169ca0aedade6ebd3a8ff12a83cc6a308f968d",
+      "stdout_sha256": "25cf9960533027a1d6364670b7f3781f69482cbeab4873a9735ece9c5b943808"
+    },
+    {
+      "phase": "remove-early",
+      "pass": 0,
+      "fail": 3,
+      "seconds": 2.3946,
+      "timed_out": false,
+      "fixture_tmp_empty": true,
+      "admin_sha256": "fcbf667ef56b8aba52c33d770c306b179482dd186ad5f53e2d20e2c84535cd78",
+      "stdout_sha256": "c7605281d10958cc28cb1511093d09875f0d96e65f8f0979878a04a466212a7f"
+    }
+  ],
+  "selected_new_cases": 8,
+  "original_target_red_reason": "Three invalid post-source inputs reached bcrypt+email witnesses and two fake SQL statements; original script returned0 while guard tests require1.",
+  "fixed_behavior": "Invalid file credentials refuse with existing diagnostic before hash/SQL; original early refusal and exact valid file bytes including12-character whitespace/apostrophe control preserved.",
+  "mutations": "Each deletes exactly one guard call in a private copy; product files never mutated. Three relevant tests each, no unrelated suite replay.",
+  "independent_reviews": {
+    "Sol-admin-input-fixture-v2-source-review.json": "feca04c2252cb6a322dbda97a96df758d429c69964ffed8bd6d52b3f754511f7",
+    "Sol-admin-input-product-v2-source-review.json": "5ddb31dab8ce2ca9513af7d44e345cb8ef194589c7419b60d58fa6ee70820515",
+    "Sol-admin-input-actual-results-final-review.json": "53cfcf767ca616b52b20b233e341e16c305edf352270eac498a3915818e08156"
+  },
+  "review_profile": {
+    "requested": "Sol6.1 high",
+    "actual_model": null,
+    "actual_effort": null,
+    "note": "Tool did not independently return actual profile; request is not treated as actual."
+  },
+  "ci": {
+    "workflow": ".github/workflows/attendance-onprem-encryption-material-contracts.yml",
+    "Node_version": 20,
+    "workflow_changed": false,
+    "current_PR_results": "Recorded separately in PR after publication; localNode24 is not Node20 CI proof."
+  },
+  "qualification": {
+    "source_unit": true,
+    "actual_HTTP": false,
+    "actual_PG": false,
+    "static_build": false,
+    "image": false,
+    "installation": false,
+    "browser": false,
+    "business_acceptance": false
+  },
+  "HOLDs_preserved": true,
+  "whole_goal_complete": false
+}
