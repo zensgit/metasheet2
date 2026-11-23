@@ -1,182 +1,202 @@
 import { existsSync, readFileSync } from 'node:fs'
+import { isDeepStrictEqual } from 'node:util'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { APPLICATION_SCHEMA_FINGERPRINT, eventSchemaDigest } from '../../src/security-events/schema'
 
 // Reviewed per-major approvals that the real-database T31 compares the migrated catalog against.
-// Every expectation below is written from the design lock section 2 tables, independently of the
-// migration, the registry and the fixture itself.
+// Every expected row below is written from the design lock section 2 tables (2.1 to 2.4),
+// independently of the migration, the registry and the fixtures, and compared for exact equality.
 let assertionCount = 0
 afterEach(() => { assertionCount += expect.getState().assertionCalls; expect(expect.getState().assertionCalls).toBeGreaterThan(0) })
 afterAll(() => { console.info('E1_ASSERTIONS_SCHEMA_APPROVALS=' + assertionCount) })
 
 type Row = Record<string, unknown>
 type Fixture = { major: number; digest: string; applicationFingerprint: string; sections: Row[][] }
+const MAJORS = [14, 15, 16, 17]
 const fixtureUrl = (major: number) => new URL(`../fixtures/security-events/schema-approvals/pg${major}.json`, import.meta.url)
 const EVENTS = 'security_events', DELIVERIES = 'security_event_deliveries'
 const TZ = 'timestamp with time zone'
 
-// Lock 2.1 and 2.3: column, type, NOT NULL.
-const LOCK_COLUMNS: Record<string, [string, string, boolean][]> = {
+/** Whitespace only: runs collapse to one space, no space inside parentheses; an escaped dot equals [.] in regexes. */
+const normalize = (text: string) => text.replace(/\s+/g, ' ').replace(/\(\s+/g, '(').replace(/\s+\)/g, ')').replace(/\\\./g, '[.]').trim()
+
+// Section 0: two ordinary, permanent, non-partitioned tables, no row security (lock I02).
+const TABLES: Row[] = [DELIVERIES, EVENTS].map(relname => ({ relname, relkind: 'r', relpersistence: 'p', relispartition: false, relrowsecurity: false, relforcerowsecurity: false, reloptions: null, owner_trusted: true }))
+
+// Section 1: lock 2.1 and 2.3 columns in order: name, type, NOT NULL, default.
+const COLUMNS: Record<string, [string, string, boolean, string | null][]> = {
   [EVENTS]: [
-    ['id', 'uuid', true], ['schema_version', 'smallint', true], ['scope_kind', 'text', true], ['org_id', 'text', false],
-    ['producer', 'text', true], ['event_type', 'text', true], ['severity', 'text', true], ['outcome', 'text', true],
-    ['reason_code', 'text', false], ['actor_kind', 'text', true], ['actor_user_id', 'text', false], ['subject_user_id', 'text', false],
-    ['target_kind', 'text', false], ['target_id', 'text', false], ['source_kind', 'text', true], ['source_id', 'text', true],
-    ['source_step', 'text', true], ['record_origin', 'text', true], ['occurred_at', TZ, true], ['recorded_at', TZ, true],
-    ['facts', 'jsonb', true], ['expires_at', TZ, true], ['delivery_planned_at', TZ, false],
+    ['id', 'uuid', true, null], ['schema_version', 'smallint', true, '1'], ['scope_kind', 'text', true, null], ['org_id', 'text', false, null],
+    ['producer', 'text', true, null], ['event_type', 'text', true, null], ['severity', 'text', true, null], ['outcome', 'text', true, null],
+    ['reason_code', 'text', false, null], ['actor_kind', 'text', true, null], ['actor_user_id', 'text', false, null], ['subject_user_id', 'text', false, null],
+    ['target_kind', 'text', false, null], ['target_id', 'text', false, null], ['source_kind', 'text', true, null], ['source_id', 'text', true, null],
+    ['source_step', 'text', true, null], ['record_origin', 'text', true, null], ['occurred_at', TZ, true, null],
+    // recorded_at: DB now default (lock 2.1); facts: default {} (lock 2.1).
+    ['recorded_at', TZ, true, 'now()'], ['facts', 'jsonb', true, "'{}'::jsonb"], ['expires_at', TZ, true, null], ['delivery_planned_at', TZ, false, null],
   ],
   [DELIVERIES]: [
-    ['id', 'uuid', true], ['event_id', 'uuid', true], ['channel', 'text', true], ['route_ref', 'text', true],
-    ['attempt_no', 'integer', true], ['status', 'text', true], ['result_code', 'text', false], ['created_at', TZ, true],
-    ['due_at', TZ, true], ['started_at', TZ, false], ['finished_at', TZ, false], ['lease_id', 'uuid', false],
-    ['lease_until', TZ, false], ['retry_safety', 'text', true], ['next_attempt_at', TZ, false], ['expires_at', TZ, true],
+    ['id', 'uuid', true, null], ['event_id', 'uuid', true, null], ['channel', 'text', true, null], ['route_ref', 'text', true, null],
+    ['attempt_no', 'integer', true, null], ['status', 'text', true, null], ['result_code', 'text', false, null], ['created_at', TZ, true, 'now()'],
+    ['due_at', TZ, true, null], ['started_at', TZ, false, null], ['finished_at', TZ, false, null], ['lease_id', 'uuid', false, null],
+    ['lease_until', TZ, false, null], ['retry_safety', 'text', true, null], ['next_attempt_at', TZ, false, null], ['expires_at', TZ, true, null],
   ],
 }
-// Lock closed sets.
-const SETS = {
-  scope_kind: ['organization', 'system'],
-  producer: ['directory', 'auth', 'security_action', 'authorization', 'admin_grant', 'deprovision', 'platform'],
-  severity: ['info', 'warning', 'error', 'critical'],
-  outcome: ['succeeded', 'denied', 'failed', 'observed'],
-  actor_kind: ['user', 'system', 'anonymous'],
-  target_kind: ['integration', 'user', 'membership', 'grant', 'operation', 'run', 'component'],
-  source_kind: ['sync_run', 'deprovision_effect', 'auth_operation', 'admin_grant_command', 'request', 'runtime_probe', 'request_window'],
-  record_origin: ['live', 'backfill', 'reconcile'],
-  channel: ['none', 'legacy_directory_webhook', 'group_extension'],
-  status: ['queued', 'sending', 'succeeded', 'failed', 'unknown', 'skipped'],
-  retry_safety: ['not_started', 'definitive_failure', 'unknown', 'not_applicable'],
-}
-// Lock 2.3 lists these result codes as examples; delivered is the succeeded result and is not in that list.
-const RESULT_EXAMPLES = ['channel_unconfigured', 'plugin_unavailable', 'source_not_eligible', 'transport_not_started', 'provider_rejected', 'send_outcome_unknown', 'legacy_sent_observed', 'legacy_outcome_unknown', 'attempt_limit']
-// Lock 2.2 generic facts keys.
+const columnRows = (): Row[] => [DELIVERIES, EVENTS].flatMap(relname => COLUMNS[relname].map(([attname, type, attnotnull, defaultExpression], index) => ({
+  relname, attnum: index + 1, attname, type, attnotnull, attidentity: '', attgenerated: '', collation: type === 'text' ? 'default' : null, default_expression: defaultExpression,
+})))
+
+// Closed sets and limits from the lock.
+const SCOPES = ['organization', 'system']
+const PRODUCERS = ['directory', 'auth', 'security_action', 'authorization', 'admin_grant', 'deprovision', 'platform']
+const SEVERITIES = ['info', 'warning', 'error', 'critical']
+const OUTCOMES = ['succeeded', 'denied', 'failed', 'observed']
+// Lock 2.1 fixes reason_code as a closed set of fixed internal codes; the members are the codes the lock text names.
+const REASONS = ['sync_failed', 'refusal_window', 'startup_tail_unverified', 'aggregation_overflow', 'source_missing', 'event_store_unavailable', 'scan_interrupted', 'empty_directory_fetch', 'batch_exceeds_max', 'redirect_refused']
+const ACTORS = ['user', 'system', 'anonymous']
+const TARGET_KINDS = ['integration', 'user', 'membership', 'grant', 'operation', 'run', 'component']
+const SOURCE_KINDS = ['sync_run', 'deprovision_effect', 'auth_operation', 'admin_grant_command', 'request', 'runtime_probe', 'request_window']
+const ORIGINS = ['live', 'backfill', 'reconcile']
+const CHANNELS = ['none', 'legacy_directory_webhook', 'group_extension']
+const STATUSES = ['queued', 'sending', 'succeeded', 'failed', 'unknown', 'skipped']
+// Lock 2.3 lists these result codes; delivered is the result of a succeeded attempt (platform accepted, lock 5.2).
+const RESULTS = ['channel_unconfigured', 'plugin_unavailable', 'source_not_eligible', 'transport_not_started', 'provider_rejected', 'send_outcome_unknown', 'legacy_sent_observed', 'legacy_outcome_unknown', 'attempt_limit', 'delivered']
+const SKIP_RESULTS = ['channel_unconfigured', 'plugin_unavailable', 'source_not_eligible', 'legacy_sent_observed', 'legacy_outcome_unknown', 'attempt_limit']
+const RETRY = ['not_started', 'definitive_failure', 'unknown', 'not_applicable']
 const COUNT_KEYS = ['affected_count', 'failed_count', 'pending_count', 'attempt_count', 'threshold_days']
 const BOOLEAN_KEYS = ['membership_changed', 'grant_revoked', 'user_deactivated', 'source_missing', 'count_unknown', 'sampled', 'truncated']
 const FACT_KEYS = [...COUNT_KEYS, 'duration_ms', ...BOOLEAN_KEYS]
 
-const sorted = (values: readonly string[]) => [...values].sort()
-const literals = (text: string) => [...text.matchAll(/'((?:[^']|'')*)'/g)].map(match => match[1].replace(/''/g, "'"))
-const has = (text: string, ...patterns: RegExp[]) => patterns.every(pattern => pattern.test(text))
-const sameSet = (a: readonly string[], b: readonly string[]) => JSON.stringify(sorted([...new Set(a)])) === JSON.stringify(sorted(b))
-const closedSet = (column: string, values: readonly string[]) => (text: string) =>
-  has(text, new RegExp(`\\b${column}\\s*=\\s*ANY\\s*\\(`)) && sameSet(literals(text), values)
-const bounded = (column: string, max: number) => new RegExp(`char_length\\(${column}\\)\\s*<=\\s*${max}\\b`)
-const atLeastOne = (column: string) => new RegExp(`char_length\\(${column}\\)\\s*>=\\s*1\\b`)
-function regexLiteral(text: string, column: string): RegExp | null {
-  const match = new RegExp(`\\b${column}\\s*~\\s*'((?:[^']|'')*)'`).exec(text)
-  return match ? new RegExp(match[1].replace(/''/g, "'")) : null
+const array = (values: readonly string[]) => `ARRAY[${values.map(value => `'${value}'::text`).join(', ')}]`
+const oneOf = (column: string, values: readonly string[]) => `CHECK (${column} = ANY (${array(values)}))`
+const length = (column: string, max: number) => `char_length(${column}) >= 1 AND char_length(${column}) <= ${max}`
+const when = (condition: string, then: string, otherwise = 'true') => `CHECK (CASE WHEN ${condition} THEN ${then} ELSE ${otherwise} END)`
+const numberFact = (key: string, max: string) => {
+  const value = `((facts ->> '${key}'::text)::numeric)`
+  return when(`facts ? '${key}'::text`, `jsonb_typeof(facts -> '${key}'::text) = 'number'::text AND ${value} >= 0::numeric AND ${value} <= ${max} AND trunc((facts ->> '${key}'::text)::numeric) = ${value}`)
 }
-function behaves(pattern: RegExp | null, accepted: string[], rejected: string[]) {
-  return !!pattern && accepted.every(value => pattern.test(value)) && rejected.every(value => !pattern.test(value))
-}
-const countFact = (key: string, max: string) => (text: string) =>
-  has(text, new RegExp(`facts \\? '${key}'`), new RegExp(`jsonb_typeof\\(facts -> '${key}'(?:::text)?\\)\\s*=\\s*'number'`),
-    new RegExp(`>=\\s*\\(?'?0'?(?:::numeric)?\\)?`), new RegExp(`<=\\s*\\(?'?${max}'?`), /\btrunc\(/)
-const booleanFact = (key: string) => (text: string) =>
-  has(text, new RegExp(`facts \\? '${key}'`), new RegExp(`jsonb_typeof\\(facts -> '${key}'(?:::text)?\\)\\s*=\\s*'boolean'`))
+const booleanFact = (key: string) => when(`facts ? '${key}'::text`, `jsonb_typeof(facts -> '${key}'::text) = 'boolean'::text`)
 
-// Closed world over CHECK constraints: each one carries a semantic required by the lock.
-const CHECKS: Record<string, Record<string, (text: string) => boolean>> = {
+// Section 2: every constraint, exactly.
+const CHECKS: Record<string, Record<string, string>> = {
   [EVENTS]: {
-    se_version: text => has(text, /\bschema_version\s*=\s*1\b/),
-    se_scope: closedSet('scope_kind', SETS.scope_kind),
-    se_org: text => has(text, /'organization'/, /org_id IS NOT NULL/, atLeastOne('org_id'), bounded('org_id', 128), /ELSE org_id IS NULL/),
-    se_producer: closedSet('producer', SETS.producer),
-    se_type: text => has(text, atLeastOne('event_type'), bounded('event_type', 96))
-      && behaves(regexLiteral(text, 'event_type'), ['auth.session_registered', 'a.b', 'future_type.valid_name'], ['BAD.type', 'a.b.c', 'nodot', 'a.', '.b', 'a-b.c', 'a.b1', ' a.b']),
-    se_severity: closedSet('severity', SETS.severity),
-    se_outcome: closedSet('outcome', SETS.outcome),
-    se_reason: text => has(text, /\breason_code\s*=\s*ANY\s*\(/) && literals(text).length > 0
-      && literals(text).every(value => /^[a-z_]{1,64}$/.test(value)),
-    se_actor_kind: closedSet('actor_kind', SETS.actor_kind),
-    se_actor: text => has(text, /actor_kind = 'user'/, /actor_user_id IS NOT NULL/, atLeastOne('actor_user_id'), bounded('actor_user_id', 128), /ELSE actor_user_id IS NULL/),
-    se_subject: text => has(text, /subject_user_id IS NULL OR/, atLeastOne('subject_user_id'), bounded('subject_user_id', 128)),
-    se_target_kind: closedSet('target_kind', SETS.target_kind),
-    se_target: text => has(text, /target_kind IS NULL THEN target_id IS NULL/, /target_id IS NOT NULL/, atLeastOne('target_id'), bounded('target_id', 128)),
-    se_source_kind: closedSet('source_kind', SETS.source_kind),
-    se_source_id: text => has(text, atLeastOne('source_id'), bounded('source_id', 512), /octet_length\(source_id\)\s*<=\s*2048\b/),
-    se_source_step: text => has(text, atLeastOne('source_step'), bounded('source_step', 64))
-      && behaves(regexLiteral(text, 'source_step'), ['failed', 'window_closed'], ['Free text', 'free text', 'a.b', '']),
-    se_origin: closedSet('record_origin', SETS.record_origin),
-    se_times: text => has(text, /isfinite\(occurred_at\)/, /isfinite\(recorded_at\)/, /isfinite\(expires_at\)/, /expires_at > recorded_at/),
-    se_facts: text => has(text, /jsonb_typeof\(facts\)\s*=\s*'object'/, /octet_length\(facts::text\)\s*<=\s*2048\b/, /= '\{\}'::jsonb/)
-      && sameSet(literals(/facts - ARRAY\[([^\]]*)\]/.exec(text)?.[1] ?? ''), FACT_KEYS),
-    ...Object.fromEntries(COUNT_KEYS.map(key => [`se_fact_${key}`, countFact(key, '2147483647')])),
-    se_fact_duration_ms: countFact('duration_ms', '9007199254740991'),
+    se_version: 'CHECK (schema_version = 1)',
+    se_scope: oneOf('scope_kind', SCOPES),
+    se_org: when(`scope_kind = 'organization'::text`, `org_id IS NOT NULL AND ${length('org_id', 128)}`, 'org_id IS NULL'),
+    se_producer: oneOf('producer', PRODUCERS),
+    se_type: `CHECK (${length('event_type', 96)} AND event_type ~ '^[a-z_]+\\.[a-z_]+$'::text)`,
+    se_severity: oneOf('severity', SEVERITIES),
+    se_outcome: oneOf('outcome', OUTCOMES),
+    se_reason: oneOf('reason_code', REASONS),
+    se_actor_kind: oneOf('actor_kind', ACTORS),
+    se_actor: when(`actor_kind = 'user'::text`, `actor_user_id IS NOT NULL AND ${length('actor_user_id', 128)}`, 'actor_user_id IS NULL'),
+    se_subject: `CHECK (subject_user_id IS NULL OR ${length('subject_user_id', 128)})`,
+    se_target_kind: oneOf('target_kind', TARGET_KINDS),
+    se_target: when('target_kind IS NULL', 'target_id IS NULL', `target_id IS NOT NULL AND ${length('target_id', 128)}`),
+    se_source_kind: oneOf('source_kind', SOURCE_KINDS),
+    se_source_id: `CHECK (${length('source_id', 512)} AND octet_length(source_id) <= 2048)`,
+    se_source_step: `CHECK (${length('source_step', 64)} AND source_step ~ '^[a-z_]+$'::text)`,
+    se_origin: oneOf('record_origin', ORIGINS),
+    se_times: 'CHECK (isfinite(occurred_at) AND isfinite(recorded_at) AND isfinite(expires_at) AND expires_at > recorded_at AND (delivery_planned_at IS NULL OR isfinite(delivery_planned_at)))',
+    se_facts: `CHECK (jsonb_typeof(facts) = 'object'::text AND octet_length(facts::text) <= 2048 AND (facts - ${array(FACT_KEYS)}) = '{}'::jsonb)`,
+    ...Object.fromEntries(COUNT_KEYS.map(key => [`se_fact_${key}`, numberFact(key, '2147483647::numeric')])),
+    se_fact_duration_ms: numberFact('duration_ms', "'9007199254740991'::bigint::numeric"),
     ...Object.fromEntries(BOOLEAN_KEYS.map(key => [`se_fact_${key}`, booleanFact(key)])),
   },
+  // Lock 2.3: closed sets, the route key, and the state, time, lease and attempt combinations.
   [DELIVERIES]: {
-    sed_channel: closedSet('channel', SETS.channel),
-    sed_status: closedSet('status', SETS.status),
-    sed_retry: closedSet('retry_safety', SETS.retry_safety),
-    sed_result: text => has(text, /\bresult_code\s*=\s*ANY\s*\(/) && RESULT_EXAMPLES.every(code => literals(text).includes(code))
-      && literals(text).every(code => [...RESULT_EXAMPLES, 'delivered'].includes(code)),
-    sed_attempt: text => has(text, /attempt_no >= 0/, /attempt_no <= 5\b/),
-    sed_route: text => has(text, atLeastOne('route_ref'), bounded('route_ref', 128)),
-    sed_channel_shape: text => has(text, /channel = 'none'(?:::text)? THEN route_ref = 'none'/, /channel = 'legacy_directory_webhook'(?:::text)? THEN route_ref = 'legacy\.directory_sync'/),
-    sed_zero: text => has(text, /WHEN attempt_no = 0 THEN status = 'skipped'/),
-    sed_queued: text => has(text, /WHEN status = 'queued'/, /attempt_no > 0/, /lease_id IS NULL/),
-    sed_sending: text => has(text, /WHEN status = 'sending'/, /attempt_no > 0/, /lease_id IS NOT NULL/, /started_at IS NOT NULL/),
-    sed_success: text => has(text, /WHEN status = 'succeeded'/, /attempt_no > 0/, /started_at IS NOT NULL/),
-    sed_unknown: text => has(text, /WHEN status = 'unknown'/, /attempt_no > 0/, /retry_safety = 'unknown'/),
-    sed_failed: text => has(text, /WHEN status = 'failed'/, /attempt_no > 0/, /'not_started'/, /'definitive_failure'/),
-    sed_skipped: text => has(text, /WHEN status = 'skipped'/, /retry_safety = 'not_applicable'/),
-    sed_finish: text => has(text, /'queued'/, /'sending'/, /finished_at IS NULL/, /finished_at IS NOT NULL/),
-    sed_lease: text => has(text, /\(lease_id IS NULL\) = \(lease_until IS NULL\)/),
-    sed_next: text => has(text, /next_attempt_at IS NULL OR/, /status = 'failed'/),
-    sed_order: text => has(text, /started_at >= created_at/, /finished_at >= started_at/),
-    sed_times: text => has(text, /isfinite\(created_at\)/, /isfinite\(due_at\)/, /isfinite\(expires_at\)/, /expires_at > created_at/),
+    sed_attempt: 'CHECK (attempt_no >= 0 AND attempt_no <= 5)',
+    sed_channel: oneOf('channel', CHANNELS),
+    sed_status: oneOf('status', STATUSES),
+    sed_result: oneOf('result_code', RESULTS),
+    sed_retry: oneOf('retry_safety', RETRY),
+    sed_route: `CHECK (${length('route_ref', 128)} AND route_ref ~ '^[a-z_]+([.][a-z_]+)*$'::text)`,
+    // First version: none or legacy.directory_sync; legacy has a single attempt and never queues.
+    sed_channel_shape: `CHECK (CASE WHEN channel = 'none'::text THEN route_ref = 'none'::text AND status = 'skipped'::text WHEN channel = 'legacy_directory_webhook'::text THEN route_ref = 'legacy.directory_sync'::text AND attempt_no <= 1 AND status <> 'queued'::text ELSE true END)`,
+    sed_zero: when('attempt_no = 0', `status = 'skipped'::text AND started_at IS NULL AND lease_id IS NULL AND lease_until IS NULL AND retry_safety = 'not_applicable'::text`, `status <> 'skipped'::text OR started_at IS NULL`),
+    sed_queued: when(`status = 'queued'::text`, `attempt_no > 0 AND started_at IS NULL AND lease_id IS NULL AND retry_safety = 'not_started'::text`),
+    sed_sending: when(`status = 'sending'::text`, `attempt_no > 0 AND started_at IS NOT NULL AND lease_id IS NOT NULL AND lease_until > started_at AND retry_safety = 'unknown'::text`),
+    sed_success: when(`status = 'succeeded'::text`, `attempt_no > 0 AND started_at IS NOT NULL AND lease_id IS NOT NULL AND retry_safety = 'not_applicable'::text AND result_code = 'delivered'::text`),
+    sed_unknown: when(`status = 'unknown'::text`, `attempt_no > 0 AND started_at IS NOT NULL AND lease_id IS NOT NULL AND retry_safety = 'unknown'::text AND result_code = 'send_outcome_unknown'::text`),
+    sed_failed: when(`status = 'failed'::text`, `attempt_no > 0 AND CASE WHEN retry_safety = 'not_started'::text THEN started_at IS NULL AND lease_id IS NULL AND result_code = 'transport_not_started'::text WHEN retry_safety = 'definitive_failure'::text THEN started_at IS NOT NULL AND lease_id IS NOT NULL AND result_code = 'provider_rejected'::text ELSE false END`),
+    sed_skipped: when(`status = 'skipped'::text`, `started_at IS NULL AND lease_id IS NULL AND retry_safety = 'not_applicable'::text AND (result_code = ANY (${array(SKIP_RESULTS)}))`),
+    sed_finish: `CHECK (CASE WHEN status = ANY (${array(['queued', 'sending'])}) THEN finished_at IS NULL AND result_code IS NULL ELSE finished_at IS NOT NULL AND finished_at >= created_at AND result_code IS NOT NULL END)`,
+    sed_lease: 'CHECK ((lease_id IS NULL) = (lease_until IS NULL) AND (lease_id IS NULL OR started_at IS NOT NULL AND lease_until > started_at))',
+    sed_next: `CHECK (next_attempt_at IS NULL OR status = 'failed'::text AND (retry_safety = ANY (${array(['not_started', 'definitive_failure'])})) AND attempt_no < 5 AND next_attempt_at >= finished_at)`,
+    sed_order: 'CHECK (started_at IS NULL OR started_at >= created_at AND (finished_at IS NULL OR finished_at >= started_at))',
+    sed_times: 'CHECK (isfinite(created_at) AND isfinite(due_at) AND isfinite(expires_at) AND expires_at > created_at AND due_at >= created_at AND (started_at IS NULL OR isfinite(started_at)) AND (finished_at IS NULL OR isfinite(finished_at)) AND (lease_until IS NULL OR isfinite(lease_until)) AND (next_attempt_at IS NULL OR isfinite(next_attempt_at)))',
   },
 }
-const KEYS: Record<string, { primary: string; unique: [string, string] }> = {
-  [EVENTS]: { primary: 'id', unique: ['se_source_unique', 'producer, source_kind, source_id, source_step, event_type'] },
-  [DELIVERIES]: { primary: 'id', unique: ['sed_unique', 'event_id, channel, route_ref, attempt_no'] },
-}
+const constraint = (source: string, conname: string, contype: string, definition: string, target: string | null = null): Row => ({
+  source_schema: 'public', source, conname, contype, convalidated: true, condeferrable: false, condeferred: false,
+  target_schema: target ? 'public' : null, target, definition,
+})
+const constraintRows = (): Row[] => [
+  ...Object.entries(CHECKS).flatMap(([table, checks]) => Object.entries(checks).map(([name, definition]) => constraint(table, name, 'c', definition))),
+  constraint(EVENTS, 'security_events_pkey', 'p', 'PRIMARY KEY (id)'),
+  // Lock 2.1 :68 idempotency key; lock 2.3 :111 attempt key; the only FK, between the new tables (lock 2.3 :94).
+  constraint(EVENTS, 'se_source_unique', 'u', 'UNIQUE (producer, source_kind, source_id, source_step, event_type)'),
+  constraint(DELIVERIES, 'security_event_deliveries_pkey', 'p', 'PRIMARY KEY (id)'),
+  constraint(DELIVERIES, 'sed_unique', 'u', 'UNIQUE (event_id, channel, route_ref, attempt_no)'),
+  constraint(DELIVERIES, 'security_event_deliveries_event_id_fkey', 'f', 'FOREIGN KEY (event_id) REFERENCES security_events(id) ON DELETE RESTRICT', EVENTS),
+]
 
-/** Problems of one fixture against the lock; empty means it conforms. */
+// Section 3: every index, exactly.
+const index = (table: string, name: string, unique: boolean, columns: string, where?: string, primary = false): Row => ({
+  table_name: table, index_name: name, indisunique: unique, indisprimary: primary, indisvalid: true, indisready: true, indislive: true,
+  definition: `CREATE ${unique ? 'UNIQUE ' : ''}INDEX ${name} ON public.${table} USING btree (${columns})${where ? ` WHERE (${where})` : ''}`,
+})
+const indexRows = (): Row[] => [
+  // Lock 2.1 :78: organization and system time indexes, the unique key and the expiry cleanup index.
+  index(EVENTS, 'security_events_pkey', true, 'id', undefined, true),
+  index(EVENTS, 'se_org_time', false, 'org_id, recorded_at DESC, id DESC', "scope_kind = 'organization'::text"),
+  index(EVENTS, 'se_system_time', false, 'recorded_at DESC, id DESC', "scope_kind = 'system'::text"),
+  index(EVENTS, 'se_source_unique', true, 'producer, source_kind, source_id, source_step, event_type'),
+  index(EVENTS, 'se_expiry', false, 'expires_at, id'),
+  // DEVIATION from lock 2.1 :78 (composite indexes only after a measured need): present in the migration,
+  // recorded here exactly as they are, and awaiting an owner or lock-author ruling.
+  index(EVENTS, 'se_org_type_time', false, 'org_id, event_type, recorded_at DESC, id DESC', "scope_kind = 'organization'::text"),
+  index(EVENTS, 'se_system_type_time', false, 'event_type, recorded_at DESC, id DESC', "scope_kind = 'system'::text"),
+  // Lock 2.3 :111: attempt key, one queued or sending per event/channel/route, claim queue and detail order;
+  // lock 2.4 cleanup of terminal deliveries by expiry.
+  index(DELIVERIES, 'security_event_deliveries_pkey', true, 'id', undefined, true),
+  index(DELIVERIES, 'sed_unique', true, 'event_id, channel, route_ref, attempt_no'),
+  index(DELIVERIES, 'sed_active', true, 'event_id, channel, route_ref', `status = ANY (${array(['queued', 'sending'])})`),
+  index(DELIVERIES, 'sed_queue', false, 'status, due_at'),
+  index(DELIVERIES, 'sed_event_time', false, 'event_id, created_at, id'),
+  index(DELIVERIES, 'sed_expiry', false, 'expires_at, id'),
+]
+
+const normalizedRows = (rows: Row[] | undefined, key: (row: Row) => string) => [...(rows ?? [])]
+  .map(row => ({ ...row, ...(typeof row.definition === 'string' ? { definition: normalize(row.definition) } : {}) }))
+  .sort((a, b) => key(a).localeCompare(key(b)))
+const constraintKey = (row: Row) => `${row.source}/${row.conname}`
+const indexKey = (row: Row) => `${row.table_name}/${row.index_name}`
+
+/** Problems of one fixture against the lock; empty means it conforms exactly. */
 function lockProblems(fixture: Fixture, major: number): string[] {
   const problems: string[] = []
-  const fail = (message: string) => { problems.push(message) }
-  if (JSON.stringify(Object.keys(fixture).sort()) !== JSON.stringify(['applicationFingerprint', 'digest', 'major', 'sections'])) fail('fixture fields')
-  if (fixture.major !== major) fail('major')
-  if (fixture.applicationFingerprint !== APPLICATION_SCHEMA_FINGERPRINT) fail('application fingerprint')
-  if (fixture.digest !== eventSchemaDigest(fixture.major, fixture.sections)) fail('digest is not recomputed from sections')
-  const [tables, columns, constraints, , triggers, rules, policies] = fixture.sections ?? []
-  if (fixture.sections?.length !== 7) fail('seven sections')
-  if (JSON.stringify((tables ?? []).map(row => row.relname).sort()) !== JSON.stringify([DELIVERIES, EVENTS])
-    || (tables ?? []).some(row => row.relkind !== 'r' || row.relpersistence !== 'p' || row.relispartition !== false
-      || row.relrowsecurity !== false || row.relforcerowsecurity !== false || row.owner_trusted !== true)) fail('tables')
-  for (const [table, expected] of Object.entries(LOCK_COLUMNS)) {
-    const actual = (columns ?? []).filter(row => row.relname === table)
-    if (JSON.stringify(actual.map(row => [row.attname, row.type, row.attnotnull])) !== JSON.stringify(expected)) fail(`${table} columns`)
-    if (actual.some(row => row.attidentity !== '' || row.attgenerated !== '')) fail(`${table} identity or generated columns`)
+  const same = (actual: unknown, expected: unknown) => isDeepStrictEqual(actual, expected)
+  if (!same(Object.keys(fixture).sort(), ['applicationFingerprint', 'digest', 'major', 'sections'])) problems.push('fixture fields')
+  if (fixture.major !== major) problems.push('major')
+  if (fixture.applicationFingerprint !== APPLICATION_SCHEMA_FINGERPRINT) problems.push('application fingerprint')
+  if (fixture.digest !== eventSchemaDigest(fixture.major, fixture.sections)) problems.push('digest is not recomputed from sections')
+  const sections = fixture.sections ?? []
+  if (sections.length !== 7) problems.push('seven sections')
+  if (!same(sections[0], TABLES)) problems.push('tables')
+  if (!same(sections[1], columnRows())) problems.push('columns')
+  const constraints = normalizedRows(sections[2], constraintKey), expectedConstraints = normalizedRows(constraintRows(), constraintKey)
+  if (!same(constraints.map(constraintKey), expectedConstraints.map(constraintKey))) problems.push('constraint set')
+  for (const row of constraints) {
+    const expected = expectedConstraints.find(item => constraintKey(item) === constraintKey(row))
+    if (expected && !same(row, expected)) problems.push(`constraint ${constraintKey(row)}`)
   }
-  const column = (table: string, name: string) => (columns ?? []).find(row => row.relname === table && row.attname === name)
-  if (!/^now\(\)$|^CURRENT_TIMESTAMP$/i.test(String(column(EVENTS, 'recorded_at')?.default_expression))) fail('recorded_at default')
-  if (!/^'\{\}'::jsonb$/.test(String(column(EVENTS, 'facts')?.default_expression))) fail('facts default')
-  const all = constraints ?? []
-  if (all.some(row => row.source_schema !== 'public' || row.convalidated !== true || row.condeferrable !== false || !['c', 'f', 'p', 'u'].includes(String(row.contype)))) fail('constraint kinds')
-  const foreign = all.filter(row => row.contype === 'f')
-  if (foreign.length !== 1 || foreign[0].source !== DELIVERIES || foreign[0].target_schema !== 'public' || foreign[0].target !== EVENTS
-    || !/^FOREIGN KEY \(event_id\) REFERENCES (?:public\.)?security_events\s*\(id\) ON DELETE RESTRICT$/.test(String(foreign[0].definition))) fail('foreign key')
-  for (const [table, keys] of Object.entries(KEYS)) {
-    const own = all.filter(row => row.source === table)
-    const primary = own.filter(row => row.contype === 'p'), unique = own.filter(row => row.contype === 'u')
-    if (primary.length !== 1 || primary[0].definition !== `PRIMARY KEY (${keys.primary})`) fail(`${table} primary key`)
-    if (unique.length !== 1 || unique[0].conname !== keys.unique[0] || unique[0].definition !== `UNIQUE (${keys.unique[1]})`) fail(`${table} unique key`)
-    const checks = own.filter(row => row.contype === 'c')
-    const names = checks.map(row => String(row.conname))
-    if (JSON.stringify(sorted(names)) !== JSON.stringify(sorted(Object.keys(CHECKS[table])))) fail(`${table} CHECK set`)
-    const columnNames = LOCK_COLUMNS[table].map(([name]) => name)
-    for (const row of checks) {
-      const text = String(row.definition)
-      const body = /^CHECK \(([\s\S]*)\)$/.exec(text)?.[1] ?? ''
-      // A constant, a disjunction with true, or a CHECK that names no column of its table constrains nothing.
-      if (!body || /^[\s()]*(?:true|false|null|\d+\s*=\s*\d+)[\s()]*$/i.test(body) || /\bOR\s*\(?\s*true\b/i.test(body)
-        || !columnNames.some(name => new RegExp(`\\b${name}\\b`).test(body))) fail(`${table} ${row.conname} is trivial`)
-      else if (!CHECKS[table][String(row.conname)]?.(text)) fail(`${table} ${row.conname} lacks the locked semantic`)
-    }
+  const indexes = normalizedRows(sections[3], indexKey), expectedIndexes = normalizedRows(indexRows(), indexKey)
+  if (!same(indexes.map(indexKey), expectedIndexes.map(indexKey))) problems.push('index set')
+  for (const row of indexes) {
+    const expected = expectedIndexes.find(item => indexKey(item) === indexKey(row))
+    if (expected && !same(row, expected)) problems.push(`index ${indexKey(row)}`)
   }
-  if ((triggers ?? []).length || (rules ?? []).length || (policies ?? []).length) fail('triggers, rules or policies')
+  for (const [position, name] of [[4, 'triggers'], [5, 'rules'], [6, 'policies']] as const) if (!same(sections[position], [])) problems.push(name)
   return problems
 }
 
@@ -185,52 +205,92 @@ function loadFixture(major: number): Fixture {
   if (!existsSync(url)) throw new Error(`E1A_REVIEWED_SCHEMA_APPROVAL_MISSING: pg${major}.json`)
   return JSON.parse(readFileSync(url, 'utf8'))
 }
-const redigested = (fixture: Fixture, sections: Row[][]): Fixture => ({ ...fixture, sections, digest: eventSchemaDigest(fixture.major, sections) })
-function withConstraint(fixture: Fixture, name: string, definition: string): Fixture {
+/** Every control is re-digested, so only the content comparison can catch it. */
+function altered(fixture: Fixture, change: (sections: Row[][]) => void): Fixture {
   const sections = structuredClone(fixture.sections)
-  const row = sections[2].find(item => item.conname === name)
-  if (!row) throw new Error('unknown constraint ' + name)
-  row.definition = definition
-  return redigested(fixture, sections)
+  change(sections)
+  return { ...fixture, sections, digest: eventSchemaDigest(fixture.major, sections) }
 }
+function setConstraint(fixture: Fixture, name: string, rewrite: (definition: string) => string): Fixture {
+  return altered(fixture, sections => {
+    const row = sections[2].find(item => item.conname === name)
+    if (!row) throw new Error('unknown constraint ' + name)
+    const next = rewrite(String(row.definition))
+    if (next === row.definition) throw new Error('control did not change ' + name)
+    row.definition = next
+  })
+}
+const body = (definition: string) => /^CHECK \(([\s\S]*)\)$/.exec(definition)![1]
 
-describe('E1-A reviewed PG14-17 schema approvals match the design lock', () => {
-  for (const major of [14, 15, 16, 17]) {
-    it(`T31 pg${major}: the checked-in approval exists, recomputes its digest and conforms to the lock tables`, () => {
+describe('E1-A reviewed PG14-17 schema approvals match the design lock exactly', () => {
+  for (const major of MAJORS) {
+    it(`T31 pg${major}: the checked-in approval exists, recomputes its digest and equals the lock tables`, () => {
       expect(existsSync(fixtureUrl(major)), `reviewed approval fixture pg${major}.json is missing`).toBe(true)
       const fixture = loadFixture(major)
       expect(fixture.digest).toBe(eventSchemaDigest(fixture.major, fixture.sections))
       expect(lockProblems(fixture, major)).toEqual([])
     })
   }
-  it('T31 negative control: CHECK (true) or a weakened lock semantic in any approval is detected', () => {
+  it('T31 the four approvals have identical sections; only the major differs', () => {
+    const [first, ...rest] = MAJORS.map(loadFixture)
+    for (const fixture of rest) expect(fixture.sections).toEqual(first.sections)
+    expect(new Set(MAJORS.map(major => loadFixture(major).digest)).size).toBe(4)
+  })
+  it('T31 negative control: every weakening of a constraint or index is reported even with a recomputed digest', () => {
     const fixture = loadFixture(14)
     expect(lockProblems(fixture, 14)).toEqual([])
     const checks = fixture.sections[2].filter(row => row.contype === 'c')
-    expect(checks.length).toBeGreaterThan(40)
+    expect(checks).toHaveLength(Object.keys(CHECKS[EVENTS]).length + Object.keys(CHECKS[DELIVERIES]).length)
     for (const row of checks) {
-      const name = String(row.conname)
-      expect(lockProblems(withConstraint(fixture, name, 'CHECK (true)'), 14), name).toContain(`${row.source} ${name} is trivial`)
-      expect(lockProblems(withConstraint(fixture, name, `CHECK (${String(row.definition).slice(7, -1)} OR true)`), 14), name).toContain(`${row.source} ${name} is trivial`)
+      const name = String(row.conname), reported = `constraint ${row.source}/${name}`
+      for (const rewrite of [
+        () => 'CHECK (true)',
+        (definition: string) => `CHECK (true OR ${body(definition)})`,
+        (definition: string) => `CHECK (${body(definition)} OR true)`,
+        (definition: string) => `CHECK (${body(definition)} OR 1 = 1)`,
+        (definition: string) => `CHECK (CASE WHEN false THEN ${body(definition)} ELSE true END)`,
+      ]) expect(lockProblems(setConstraint(fixture, name, rewrite), 14), name).toEqual([reported])
     }
-    const weakened: [string, string][] = [
-      ['se_scope', "CHECK (scope_kind = ANY (ARRAY['organization'::text, 'system'::text, 'tenant'::text]))"],
-      ['se_type', "CHECK (char_length(event_type) >= 1 AND char_length(event_type) <= 96 AND event_type ~ '^.+$'::text)"],
-      ['se_fact_affected_count', "CHECK (CASE WHEN facts ? 'affected_count'::text THEN jsonb_typeof(facts -> 'affected_count'::text) = 'number'::text ELSE true END)"],
-      ['se_facts', "CHECK (jsonb_typeof(facts) = 'object'::text AND octet_length(facts::text) <= 2048 AND (facts - ARRAY['affected_count'::text, 'raw'::text]) = '{}'::jsonb)"],
-      ['sed_retry', "CHECK (retry_safety = ANY (ARRAY['not_started'::text, 'unknown'::text, 'not_applicable'::text]))"],
-      ['se_org', "CHECK (CASE WHEN scope_kind = 'organization'::text THEN org_id IS NOT NULL AND char_length(org_id) >= 1 AND char_length(org_id) <= 4096 ELSE org_id IS NULL END)"],
+    const weakened: [string, (definition: string) => string][] = [
+      ['se_fact_affected_count', definition => definition.replace('<= 2147483647::numeric', '<= 21474836470::numeric')],
+      ['se_fact_duration_ms', definition => definition.replace("'9007199254740991'", "'90071992547409910'")],
+      ['sed_route', () => 'CHECK (char_length(route_ref) >= 1 AND char_length(route_ref) <= 128)'],
+      ['sed_channel_shape', definition => definition.replace(" AND attempt_no <= 1 AND status <> 'queued'::text", '')],
+      ['se_reason', definition => definition.replace("'redirect_refused'::text", "'redirect_refused'::text, 'exception_text'::text")],
+      ['se_scope', definition => definition.replace("'system'::text", "'system'::text, 'tenant'::text")],
+      ['se_type', definition => definition.replace('^[a-z_]+[.][a-z_]+$', '^.+$')],
+      ['se_facts', definition => definition.replace("'truncated'::text", "'truncated'::text, 'raw'::text")],
+      ['se_org', definition => definition.replace('char_length(org_id) <= 128', 'char_length(org_id) <= 4096')],
+      ['security_event_deliveries_event_id_fkey', definition => definition.replace('RESTRICT', 'CASCADE')],
     ]
-    for (const [name, definition] of weakened) expect(lockProblems(withConstraint(fixture, name, definition), 14), name).toEqual([expect.stringContaining(`${name} lacks the locked semantic`)])
-    const sections = structuredClone(fixture.sections)
-    sections[2] = sections[2].filter(row => row.conname !== 'sed_zero')
-    expect(lockProblems(redigested(fixture, sections), 14)).toContain(`${DELIVERIES} CHECK set`)
-    const columns = structuredClone(fixture.sections)
-    columns[1].find(row => row.attname === 'source_id')!.attnotnull = false
-    expect(lockProblems(redigested(fixture, columns), 14)).toContain(`${EVENTS} columns`)
-    const trigger = structuredClone(fixture.sections)
-    trigger[4] = [{ relname: EVENTS, tgname: 'late', definition: 'CREATE TRIGGER late' }]
-    expect(lockProblems(redigested(fixture, trigger), 14)).toContain('triggers, rules or policies')
-    expect(lockProblems({ ...withConstraint(fixture, 'se_scope', 'CHECK (true)'), digest: fixture.digest }, 14)).toContain('digest is not recomputed from sections')
+    for (const [name, rewrite] of weakened) {
+      const row = fixture.sections[2].find(item => item.conname === name)!
+      expect(lockProblems(setConstraint(fixture, name, rewrite), 14), name).toEqual([`constraint ${row.source}/${name}`])
+    }
+    const indexControls: [string, (sections: Row[][]) => void, string][] = [
+      ['drop sed_active', sections => { sections[3] = sections[3].filter(row => row.index_name !== 'sed_active') }, 'index set'],
+      ['drop se_org_time', sections => { sections[3] = sections[3].filter(row => row.index_name !== 'se_org_time') }, 'index set'],
+      ['sed_active not unique', sections => { const row = sections[3].find(item => item.index_name === 'sed_active')!; row.indisunique = false; row.definition = String(row.definition).replace('UNIQUE ', '') }, `index ${DELIVERIES}/sed_active`],
+      ['sed_active without its predicate', sections => { const row = sections[3].find(item => item.index_name === 'sed_active')!; row.definition = String(row.definition).replace(/ WHERE .*$/, '') }, `index ${DELIVERIES}/sed_active`],
+      ['se_org_time on other columns', sections => { const row = sections[3].find(item => item.index_name === 'se_org_time')!; row.definition = String(row.definition).replace('org_id, recorded_at DESC', 'recorded_at DESC') }, `index ${EVENTS}/se_org_time`],
+      ['invalid index', sections => { sections[3].find(item => item.index_name === 'sed_queue')!.indisvalid = false }, `index ${DELIVERIES}/sed_queue`],
+      ['extra index', sections => { sections[3].push({ ...sections[3][0], index_name: 'extra', definition: 'CREATE INDEX extra ON public.security_events USING btree (severity)' }) }, 'index set'],
+    ]
+    for (const [label, change, reported] of indexControls) expect(lockProblems(altered(fixture, change), 14), label).toEqual([reported])
+    const otherControls: [string, (sections: Row[][]) => void, string][] = [
+      ['drop sed_zero', sections => { sections[2] = sections[2].filter(row => row.conname !== 'sed_zero') }, 'constraint set'],
+      ['source_id nullable', sections => { sections[1].find(row => row.attname === 'source_id')!.attnotnull = false }, 'columns'],
+      ['org_id collation', sections => { sections[1].find(row => row.attname === 'org_id')!.collation = 'C' }, 'columns'],
+      ['schema_version default', sections => { sections[1].find(row => row.attname === 'schema_version')!.default_expression = '2' }, 'columns'],
+      ['reloptions', sections => { sections[0][1].reloptions = ['fillfactor=50'] }, 'tables'],
+      ['trigger', sections => { sections[4] = [{ relname: EVENTS, tgname: 'late', definition: 'CREATE TRIGGER late' }] }, 'triggers'],
+    ]
+    for (const [label, change, reported] of otherControls) expect(lockProblems(altered(fixture, change), 14), label).toEqual([reported])
+    expect(lockProblems({ ...setConstraint(fixture, 'se_scope', () => 'CHECK (true)'), digest: fixture.digest }, 14)).toContain('digest is not recomputed from sections')
+  })
+  it('T31 normalization changes whitespace and the regex dot spelling only', () => {
+    expect(normalize('CHECK (\nCASE\n    WHEN a THEN b\n    ELSE true\nEND)')).toBe('CHECK (CASE WHEN a THEN b ELSE true END)')
+    expect(normalize("x ~ '^a\\.b$'")).toBe(normalize("x ~ '^a[.]b$'"))
+    expect(normalize('CHECK (a OR 1 = 1)')).not.toBe(normalize('CHECK (a)'))
   })
 })
