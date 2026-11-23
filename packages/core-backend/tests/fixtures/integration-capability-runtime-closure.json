@@ -1,0 +1,1209 @@
+{
+  "note": "Exact reviewed source boundary. File completeness is checked against a live independent inventory, including dot paths and .min.js; symbolic links in the five roots are rejected, including dangling links. Unrelated source additions do not require fixture updates. Maintenance: added/removed routes, HTTP modules or plugin addRoute entry points require boundary review and updating sorted requestRoots from the assertion diff, preserving concurrent additions. Changed package.json/tsconfig contents or added resolution inputs require resolution review and updating resolutionInputs paths and full-file SHA256 values from the diff. Added, removed, changed or newly resolved gaps, including any edit to a gap-bearing file, require per-item review and updating reviewedGaps entries, sourceHash and review reasons from the diff; never auto-accept gaps. Rerun the closure guard after each reviewed update; directEdges, reverse and testEdges still require separate boundary review if changed. Dynamic calls, CJS execution of non-source extensions, and runtime entry loading from test-named paths (including plugin manifest main targets) remain outside this static proof; followed test edges are registered but excluded entry paths and manifest-selected targets are not exhaustively proven.",
+  "absentRoots": [
+    "packages/core-backend/src/services/task-routed-reminders.ts",
+    "packages/core-backend/src/services/task-routed-delivery-channel.ts"
+  ],
+  "requestRoots": [
+    "packages/core-backend/plugins/plugin-view-kanban/src/index.ts",
+    "packages/core-backend/src/core/plugin-manager.ts",
+    "packages/core-backend/src/gateway/APIGateway.ts",
+    "packages/core-backend/src/plugins/event-example-plugin.example.ts",
+    "packages/core-backend/src/plugins/event-example-plugin.ts",
+    "packages/core-backend/src/routes/admin-directory-capabilities.ts",
+    "packages/core-backend/src/routes/admin-directory-department-bindings.ts",
+    "packages/core-backend/src/routes/admin-directory-feishu.ts",
+    "packages/core-backend/src/routes/admin-directory-local.ts",
+    "packages/core-backend/src/routes/admin-directory-org-transfers.ts",
+    "packages/core-backend/src/routes/admin-directory-routing-policy.ts",
+    "packages/core-backend/src/routes/admin-directory.ts",
+    "packages/core-backend/src/routes/admin-failure-envelope.ts",
+    "packages/core-backend/src/routes/admin-grant-proofs.ts",
+    "packages/core-backend/src/routes/admin-notification-verifications.ts",
+    "packages/core-backend/src/routes/admin-role-members.ts",
+    "packages/core-backend/src/routes/admin-routes.ts",
+    "packages/core-backend/src/routes/admin-user-batch.ts",
+    "packages/core-backend/src/routes/admin-user-recycle.ts",
+    "packages/core-backend/src/routes/admin-users.ts",
+    "packages/core-backend/src/routes/api-tokens.ts",
+    "packages/core-backend/src/routes/approval-attachments.ts",
+    "packages/core-backend/src/routes/approval-comments.ts",
+    "packages/core-backend/src/routes/approval-form-drafts.ts",
+    "packages/core-backend/src/routes/approval-history.ts",
+    "packages/core-backend/src/routes/approval-metrics.ts",
+    "packages/core-backend/src/routes/approvals.ts",
+    "packages/core-backend/src/routes/attendance-admin.ts",
+    "packages/core-backend/src/routes/audit-logs.ts",
+    "packages/core-backend/src/routes/auth.ts",
+    "packages/core-backend/src/routes/automation-test-run-sample.ts",
+    "packages/core-backend/src/routes/automation.ts",
+    "packages/core-backend/src/routes/cache-test.ts",
+    "packages/core-backend/src/routes/canary-routes.ts",
+    "packages/core-backend/src/routes/change-management.ts",
+    "packages/core-backend/src/routes/comments.ts",
+    "packages/core-backend/src/routes/dashboard.ts",
+    "packages/core-backend/src/routes/data-sources.ts",
+    "packages/core-backend/src/routes/elearning-admin-access.ts",
+    "packages/core-backend/src/routes/elearning-analytics.ts",
+    "packages/core-backend/src/routes/elearning-app-installation.ts",
+    "packages/core-backend/src/routes/elearning-assessment-admin.ts",
+    "packages/core-backend/src/routes/elearning-content.ts",
+    "packages/core-backend/src/routes/elearning-credit.ts",
+    "packages/core-backend/src/routes/elearning-enrollment.ts",
+    "packages/core-backend/src/routes/elearning-manual-grading-read.ts",
+    "packages/core-backend/src/routes/elearning-manual-grading.ts",
+    "packages/core-backend/src/routes/elearning-media-playback.ts",
+    "packages/core-backend/src/routes/elearning-media.ts",
+    "packages/core-backend/src/routes/elearning-pilot.ts",
+    "packages/core-backend/src/routes/elearning-portal.ts",
+    "packages/core-backend/src/routes/elearning-profile.ts",
+    "packages/core-backend/src/routes/elearning-question-practice.ts",
+    "packages/core-backend/src/routes/events.ts",
+    "packages/core-backend/src/routes/fallback-test.ts",
+    "packages/core-backend/src/routes/federation.ts",
+    "packages/core-backend/src/routes/files.ts",
+    "packages/core-backend/src/routes/integration-yida-owner.ts",
+    "packages/core-backend/src/routes/internal.ts",
+    "packages/core-backend/src/routes/kanban.ts",
+    "packages/core-backend/src/routes/me-notification-endpoints.ts",
+    "packages/core-backend/src/routes/me-notification-http.ts",
+    "packages/core-backend/src/routes/me-notification-preferences.ts",
+    "packages/core-backend/src/routes/me-notification-test-send.ts",
+    "packages/core-backend/src/routes/me-notification-wiring.ts",
+    "packages/core-backend/src/routes/method-probe.ts",
+    "packages/core-backend/src/routes/metrics-demo.ts",
+    "packages/core-backend/src/routes/multitable-ai.ts",
+    "packages/core-backend/src/routes/multitable-button.ts",
+    "packages/core-backend/src/routes/multitable-copy-sheet.ts",
+    "packages/core-backend/src/routes/multitable-record-approvals.ts",
+    "packages/core-backend/src/routes/multitable-record-tasks.ts",
+    "packages/core-backend/src/routes/permissions.ts",
+    "packages/core-backend/src/routes/platform-apps.ts",
+    "packages/core-backend/src/routes/plm-embed-discussion-read.ts",
+    "packages/core-backend/src/routes/plm-embed-discussion.ts",
+    "packages/core-backend/src/routes/plm-embed.ts",
+    "packages/core-backend/src/routes/plm-workbench.ts",
+    "packages/core-backend/src/routes/protection-rules.ts",
+    "packages/core-backend/src/routes/recovery-archive-restore-owner.ts",
+    "packages/core-backend/src/routes/roles.ts",
+    "packages/core-backend/src/routes/security-actions.ts",
+    "packages/core-backend/src/routes/snapshot-labels.ts",
+    "packages/core-backend/src/routes/snapshots.ts",
+    "packages/core-backend/src/routes/spreadsheet-permissions.ts",
+    "packages/core-backend/src/routes/spreadsheets.ts",
+    "packages/core-backend/src/routes/tasks-http.ts",
+    "packages/core-backend/src/routes/tasks-lists.ts",
+    "packages/core-backend/src/routes/tasks-settings.ts",
+    "packages/core-backend/src/routes/tasks.ts",
+    "packages/core-backend/src/routes/todo.ts",
+    "packages/core-backend/src/routes/univer-meta.ts",
+    "packages/core-backend/src/routes/univer-mock.ts",
+    "packages/core-backend/src/routes/views.ts",
+    "packages/core-backend/src/routes/workflow-designer.ts",
+    "packages/core-backend/src/routes/workflow.ts",
+    "packages/core-backend/src/services/approval-attachment-runtime.ts",
+    "packages/core-backend/src/services/elearning-media-runtime.ts",
+    "packages/core-backend/src/services/elearning-pilot-runtime.ts",
+    "packages/core-backend/src/types/plugin.ts",
+    "plugins/hello-world/dist/index.js",
+    "plugins/hello-world/src/index.js",
+    "plugins/plugin-after-sales/index.cjs",
+    "plugins/plugin-attendance/index.cjs",
+    "plugins/plugin-attendance/lib/attendance-timezone-policy-routes.cjs",
+    "plugins/plugin-attendance/lib/attendance-timezone-target-routes.cjs",
+    "plugins/plugin-audit-logger/dist/index.js",
+    "plugins/plugin-audit-logger/src/index.ts",
+    "plugins/plugin-elearning/index.cjs",
+    "plugins/plugin-integration-core/index.cjs",
+    "plugins/plugin-integration-core/lib/http-routes.cjs",
+    "plugins/plugin-test-b/index.js",
+    "plugins/plugin-view-gantt/dist/index-complex.js",
+    "plugins/plugin-view-gantt/dist/index.js",
+    "plugins/plugin-view-gantt/src/index.ts",
+    "plugins/sample-basic/index.cjs"
+  ],
+  "reverse": [
+    {
+      "root": "packages/core-backend/src/services/task-scheduler.ts",
+      "members": [
+        "packages/core-backend/scripts/start-recovery-local.mts",
+        "packages/core-backend/scripts/stock-preparation-persist-repair-once.ts",
+        "packages/core-backend/scripts/verify-recovery-archive-server.mts",
+        "packages/core-backend/scripts/verify-recovery-manual-checkpoint.mts",
+        "packages/core-backend/scripts/verify-timemachine-workbench.mts",
+        "packages/core-backend/src/index.ts",
+        "packages/core-backend/src/services/task-scheduler.ts",
+        "scripts/attendance/acceptance/acp1b-browser-realdb.mts",
+        "scripts/attendance/acceptance/acp1b-full-app-realdb.mts",
+        "scripts/ops/attendance-selfservice-fixture-verify.mts"
+      ],
+      "edges": [
+        [
+          "packages/core-backend/scripts/start-recovery-local.mts",
+          "packages/core-backend/src/index.ts",
+          "require"
+        ],
+        [
+          "packages/core-backend/scripts/stock-preparation-persist-repair-once.ts",
+          "packages/core-backend/src/index.ts",
+          "dynamic-import"
+        ],
+        [
+          "packages/core-backend/scripts/verify-recovery-archive-server.mts",
+          "packages/core-backend/src/index.ts",
+          "dynamic-import"
+        ],
+        [
+          "packages/core-backend/scripts/verify-recovery-manual-checkpoint.mts",
+          "packages/core-backend/src/index.ts",
+          "require"
+        ],
+        [
+          "packages/core-backend/scripts/verify-timemachine-workbench.mts",
+          "packages/core-backend/src/index.ts",
+          "dynamic-import"
+        ],
+        [
+          "packages/core-backend/src/index.ts",
+          "packages/core-backend/src/services/task-scheduler.ts",
+          "import"
+        ],
+        [
+          "scripts/attendance/acceptance/acp1b-browser-realdb.mts",
+          "packages/core-backend/src/index.ts",
+          "dynamic-import"
+        ],
+        [
+          "scripts/attendance/acceptance/acp1b-full-app-realdb.mts",
+          "packages/core-backend/src/index.ts",
+          "dynamic-import"
+        ],
+        [
+          "scripts/ops/attendance-selfservice-fixture-verify.mts",
+          "packages/core-backend/src/index.ts",
+          "dynamic-import"
+        ]
+      ]
+    },
+    {
+      "root": "packages/core-backend/src/services/task-notification-delivery-worker.ts",
+      "members": [
+        "packages/core-backend/scripts/start-recovery-local.mts",
+        "packages/core-backend/scripts/stock-preparation-persist-repair-once.ts",
+        "packages/core-backend/scripts/verify-recovery-archive-server.mts",
+        "packages/core-backend/scripts/verify-recovery-manual-checkpoint.mts",
+        "packages/core-backend/scripts/verify-timemachine-workbench.mts",
+        "packages/core-backend/src/index.ts",
+        "packages/core-backend/src/services/task-notification-delivery-worker.ts",
+        "packages/core-backend/src/services/task-scheduler.ts",
+        "scripts/attendance/acceptance/acp1b-browser-realdb.mts",
+        "scripts/attendance/acceptance/acp1b-full-app-realdb.mts",
+        "scripts/ops/attendance-selfservice-fixture-verify.mts"
+      ],
+      "edges": [
+        [
+          "packages/core-backend/scripts/start-recovery-local.mts",
+          "packages/core-backend/src/index.ts",
+          "require"
+        ],
+        [
+          "packages/core-backend/scripts/stock-preparation-persist-repair-once.ts",
+          "packages/core-backend/src/index.ts",
+          "dynamic-import"
+        ],
+        [
+          "packages/core-backend/scripts/verify-recovery-archive-server.mts",
+          "packages/core-backend/src/index.ts",
+          "dynamic-import"
+        ],
+        [
+          "packages/core-backend/scripts/verify-recovery-manual-checkpoint.mts",
+          "packages/core-backend/src/index.ts",
+          "require"
+        ],
+        [
+          "packages/core-backend/scripts/verify-timemachine-workbench.mts",
+          "packages/core-backend/src/index.ts",
+          "dynamic-import"
+        ],
+        [
+          "packages/core-backend/src/index.ts",
+          "packages/core-backend/src/services/task-scheduler.ts",
+          "import"
+        ],
+        [
+          "packages/core-backend/src/services/task-scheduler.ts",
+          "packages/core-backend/src/services/task-notification-delivery-worker.ts",
+          "import"
+        ],
+        [
+          "scripts/attendance/acceptance/acp1b-browser-realdb.mts",
+          "packages/core-backend/src/index.ts",
+          "dynamic-import"
+        ],
+        [
+          "scripts/attendance/acceptance/acp1b-full-app-realdb.mts",
+          "packages/core-backend/src/index.ts",
+          "dynamic-import"
+        ],
+        [
+          "scripts/ops/attendance-selfservice-fixture-verify.mts",
+          "packages/core-backend/src/index.ts",
+          "dynamic-import"
+        ]
+      ]
+    },
+    {
+      "root": "packages/core-backend/src/integrations/integration-capability-resolve-background.ts",
+      "members": [
+        "packages/core-backend/src/integrations/integration-capability-resolve-background.ts"
+      ],
+      "edges": []
+    }
+  ],
+  "directEdges": [
+    [
+      "packages/core-backend/src/integrations/integration-capability-resolve-background.ts",
+      "packages/core-backend/src/integrations/integration-capability-resolve-core.ts",
+      "import",
+      false
+    ],
+    [
+      "packages/core-backend/src/integrations/integration-capability-resolve-core.ts",
+      "packages/core-backend/src/integrations/integration-capability-witness.ts",
+      "import",
+      false
+    ],
+    [
+      "packages/core-backend/src/integrations/integration-capability-resolve.ts",
+      "packages/core-backend/src/integrations/integration-capability-resolve-core.ts",
+      "import",
+      false
+    ],
+    [
+      "packages/core-backend/src/integrations/integration-capability-resolve.ts",
+      "packages/core-backend/src/integrations/integration-capability-witness.ts",
+      "export-from",
+      false
+    ],
+    [
+      "packages/core-backend/src/integrations/integration-capability-witness.ts",
+      "packages/core-backend/src/integrations/provider-capability-registry.ts",
+      "import",
+      true
+    ],
+    [
+      "packages/core-backend/src/routes/me-notification-wiring.ts",
+      "packages/core-backend/src/integrations/integration-capability-resolve.ts",
+      "import",
+      false
+    ]
+  ],
+  "testEdges": [
+    {
+      "from": "packages/core-backend/scripts/verify-recovery-archive-server.mts",
+      "to": "packages/core-backend/tests/utils/recovery-archive-durable-fixture.ts",
+      "specifier": "../tests/utils/recovery-archive-durable-fixture",
+      "typeOnly": false,
+      "kind": "dynamic-import"
+    },
+    {
+      "from": "packages/core-backend/scripts/verify-recovery-archive-server.mts",
+      "to": "packages/core-backend/tests/utils/recovery-archive-durable-fixture.ts",
+      "specifier": "../tests/utils/recovery-archive-durable-fixture",
+      "typeOnly": true,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/scripts/verify-recovery-archive-server.mts",
+      "to": "packages/core-backend/tests/utils/recovery-archive-verified-fixture.ts",
+      "specifier": "../tests/utils/recovery-archive-verified-fixture",
+      "typeOnly": false,
+      "kind": "dynamic-import"
+    },
+    {
+      "from": "packages/core-backend/scripts/verify-recovery-local-backup.mts",
+      "to": "packages/core-backend/tests/utils/recovery-archive-local-backup-fixture.ts",
+      "specifier": "../tests/utils/recovery-archive-local-backup-fixture.ts",
+      "typeOnly": false,
+      "kind": "require"
+    },
+    {
+      "from": "packages/core-backend/scripts/verify-recovery-local-backup.mts",
+      "to": "packages/core-backend/tests/utils/recovery-archive-local-backup-fixture.ts",
+      "specifier": "../tests/utils/recovery-archive-local-backup-fixture",
+      "typeOnly": true,
+      "kind": "import-type"
+    },
+    {
+      "from": "packages/core-backend/scripts/verify-recovery-local-backup.mts",
+      "to": "packages/core-backend/tests/utils/recovery-archive-local-backup-fixture.ts",
+      "specifier": "../tests/utils/recovery-archive-local-backup-fixture",
+      "typeOnly": true,
+      "kind": "import-type"
+    },
+    {
+      "from": "packages/core-backend/scripts/verify-recovery-local-backup.mts",
+      "to": "packages/core-backend/tests/utils/recovery-archive-local-backup-fixture.ts",
+      "specifier": "../tests/utils/recovery-archive-local-backup-fixture",
+      "typeOnly": true,
+      "kind": "import-type"
+    },
+    {
+      "from": "packages/core-backend/scripts/verify-recovery-local-backup.mts",
+      "to": "packages/core-backend/tests/utils/recovery-archive-local-backup-fixture.ts",
+      "specifier": "../tests/utils/recovery-archive-local-backup-fixture",
+      "typeOnly": true,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/scripts/verify-recovery-local-backup.mts",
+      "to": "packages/core-backend/tests/utils/recovery-archive-process-worker.ts",
+      "specifier": "../tests/utils/recovery-archive-process-worker",
+      "typeOnly": true,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/scripts/verify-recovery-local-backup.mts",
+      "to": "packages/core-backend/tests/utils/recovery-local-backup-driver-safety.ts",
+      "specifier": "../tests/utils/recovery-local-backup-driver-safety.ts",
+      "typeOnly": false,
+      "kind": "require"
+    },
+    {
+      "from": "packages/core-backend/scripts/verify-recovery-local-backup.mts",
+      "to": "packages/core-backend/tests/utils/recovery-local-backup-driver-safety.ts",
+      "specifier": "../tests/utils/recovery-local-backup-driver-safety",
+      "typeOnly": true,
+      "kind": "import-type"
+    },
+    {
+      "from": "packages/core-backend/scripts/verify-recovery-local-startup.mts",
+      "to": "packages/core-backend/tests/utils/recovery-archive-durable-fixture.ts",
+      "specifier": "../tests/utils/recovery-archive-durable-fixture.ts",
+      "typeOnly": false,
+      "kind": "require"
+    },
+    {
+      "from": "packages/core-backend/scripts/verify-recovery-local-startup.mts",
+      "to": "packages/core-backend/tests/utils/recovery-archive-durable-fixture.ts",
+      "specifier": "../tests/utils/recovery-archive-durable-fixture",
+      "typeOnly": true,
+      "kind": "import-type"
+    },
+    {
+      "from": "packages/core-backend/scripts/verify-recovery-local-startup.mts",
+      "to": "packages/core-backend/tests/utils/recovery-archive-durable-fixture.ts",
+      "specifier": "../tests/utils/recovery-archive-durable-fixture",
+      "typeOnly": true,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/scripts/verify-recovery-local-startup.mts",
+      "to": "packages/core-backend/tests/utils/recovery-archive-verified-fixture.ts",
+      "specifier": "../tests/utils/recovery-archive-verified-fixture.ts",
+      "typeOnly": false,
+      "kind": "require"
+    },
+    {
+      "from": "packages/core-backend/scripts/verify-recovery-local-startup.mts",
+      "to": "packages/core-backend/tests/utils/recovery-archive-verified-fixture.ts",
+      "specifier": "../tests/utils/recovery-archive-verified-fixture",
+      "typeOnly": true,
+      "kind": "import-type"
+    },
+    {
+      "from": "packages/core-backend/scripts/verify-recovery-local-startup.mts",
+      "to": "packages/core-backend/tests/utils/recovery-local-backup-driver-safety.ts",
+      "specifier": "../tests/utils/recovery-local-backup-driver-safety.ts",
+      "typeOnly": false,
+      "kind": "require"
+    },
+    {
+      "from": "packages/core-backend/scripts/verify-recovery-local-startup.mts",
+      "to": "packages/core-backend/tests/utils/recovery-local-backup-driver-safety.ts",
+      "specifier": "../tests/utils/recovery-local-backup-driver-safety",
+      "typeOnly": true,
+      "kind": "import-type"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-durable-fixture.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-authenticated-manifest.ts",
+      "specifier": "../../src/multitable/recovery-archive-authenticated-manifest",
+      "typeOnly": false,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-durable-fixture.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-contract.ts",
+      "specifier": "../../src/multitable/recovery-archive-contract",
+      "typeOnly": false,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-durable-fixture.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-crypto.ts",
+      "specifier": "../../src/multitable/recovery-archive-crypto",
+      "typeOnly": false,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-durable-fixture.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-manifest.ts",
+      "specifier": "../../src/multitable/recovery-archive-manifest",
+      "typeOnly": true,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-durable-fixture.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-object-store.ts",
+      "specifier": "../../src/multitable/recovery-archive-object-store",
+      "typeOnly": true,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-durable-fixture.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-sealed-snapshot-manifest.ts",
+      "specifier": "../../src/multitable/recovery-archive-sealed-snapshot-manifest",
+      "typeOnly": false,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-durable-fixture.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-snapshot-plan.ts",
+      "specifier": "../../src/multitable/recovery-archive-snapshot-plan",
+      "typeOnly": false,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-local-backup-fixture.ts",
+      "to": "packages/core-backend/src/db/migrations/zzzz20260721121000_add_recovery_authority_locks.ts",
+      "specifier": "../../src/db/migrations/zzzz20260721121000_add_recovery_authority_locks",
+      "typeOnly": false,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-local-backup-fixture.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-async-plan.ts",
+      "specifier": "../../src/multitable/recovery-archive-async-plan",
+      "typeOnly": false,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-local-backup-fixture.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-crypto.ts",
+      "specifier": "../../src/multitable/recovery-archive-crypto",
+      "typeOnly": true,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-local-backup-fixture.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-object-store.ts",
+      "specifier": "../../src/multitable/recovery-archive-object-store",
+      "typeOnly": false,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-local-backup-fixture.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-object-store.ts",
+      "specifier": "../../src/multitable/recovery-archive-object-store",
+      "typeOnly": true,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-local-backup-fixture.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-restore-jobs.ts",
+      "specifier": "../../src/multitable/recovery-archive-restore-jobs",
+      "typeOnly": false,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-local-backup-fixture.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-restore-jobs.ts",
+      "specifier": "../../src/multitable/recovery-archive-restore-jobs",
+      "typeOnly": true,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-local-backup-fixture.ts",
+      "to": "packages/core-backend/src/multitable/recovery-local-custody.ts",
+      "specifier": "../../src/multitable/recovery-local-custody",
+      "typeOnly": true,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-local-backup-fixture.ts",
+      "to": "packages/core-backend/src/multitable/restore-preview-identity.ts",
+      "specifier": "../../src/multitable/restore-preview-identity",
+      "typeOnly": false,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-local-backup-fixture.ts",
+      "to": "packages/core-backend/tests/utils/recovery-archive-durable-fixture.ts",
+      "specifier": "./recovery-archive-durable-fixture",
+      "typeOnly": false,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-local-backup-fixture.ts",
+      "to": "packages/core-backend/tests/utils/recovery-archive-verified-fixture.ts",
+      "specifier": "./recovery-archive-verified-fixture",
+      "typeOnly": false,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-process-worker.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-application.ts",
+      "specifier": "../../src/multitable/recovery-archive-application",
+      "typeOnly": false,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-process-worker.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-async-restore.ts",
+      "specifier": "../../src/multitable/recovery-archive-async-restore",
+      "typeOnly": false,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-process-worker.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-crypto.ts",
+      "specifier": "../../src/multitable/recovery-archive-crypto",
+      "typeOnly": true,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-process-worker.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-derived-effects.ts",
+      "specifier": "../../src/multitable/recovery-archive-derived-effects",
+      "typeOnly": true,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-process-worker.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-file-store.ts",
+      "specifier": "../../src/multitable/recovery-archive-file-store",
+      "typeOnly": false,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-process-worker.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-object-store.ts",
+      "specifier": "../../src/multitable/recovery-archive-object-store",
+      "typeOnly": true,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-process-worker.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-observability.ts",
+      "specifier": "../../src/multitable/recovery-archive-observability",
+      "typeOnly": true,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-process-worker.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-restore-jobs.ts",
+      "specifier": "../../src/multitable/recovery-archive-restore-jobs",
+      "typeOnly": false,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-process-worker.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-restore-worker.ts",
+      "specifier": "../../src/multitable/recovery-archive-restore-worker",
+      "typeOnly": true,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-process-worker.ts",
+      "to": "packages/core-backend/src/multitable/recovery-local-custody-store.ts",
+      "specifier": "../../src/multitable/recovery-local-custody-store",
+      "typeOnly": false,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-process-worker.ts",
+      "to": "packages/core-backend/src/multitable/recovery-local-custody.ts",
+      "specifier": "../../src/multitable/recovery-local-custody",
+      "typeOnly": false,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-process-worker.ts",
+      "to": "packages/core-backend/src/routes/univer-meta.ts",
+      "specifier": "../../src/routes/univer-meta",
+      "typeOnly": false,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-process-worker.ts",
+      "to": "packages/core-backend/tests/utils/recovery-archive-durable-fixture.ts",
+      "specifier": "./recovery-archive-durable-fixture",
+      "typeOnly": false,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-v2-claim-fixture.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-seals.ts",
+      "specifier": "../../src/multitable/recovery-archive-seals",
+      "typeOnly": false,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-v2-claim-fixture.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-section-bootstrap.ts",
+      "specifier": "../../src/multitable/recovery-archive-section-bootstrap",
+      "typeOnly": false,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-v2-claim-fixture.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-source-vector.ts",
+      "specifier": "../../src/multitable/recovery-archive-source-vector",
+      "typeOnly": false,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-verified-fixture.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-contract.ts",
+      "specifier": "../../src/multitable/recovery-archive-contract",
+      "typeOnly": false,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-verified-fixture.ts",
+      "to": "packages/core-backend/src/multitable/recovery-archive-restore-jobs.ts",
+      "specifier": "../../src/multitable/recovery-archive-restore-jobs",
+      "typeOnly": true,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-verified-fixture.ts",
+      "to": "packages/core-backend/tests/utils/recovery-archive-durable-fixture.ts",
+      "specifier": "./recovery-archive-durable-fixture",
+      "typeOnly": true,
+      "kind": "import"
+    },
+    {
+      "from": "packages/core-backend/tests/utils/recovery-archive-verified-fixture.ts",
+      "to": "packages/core-backend/tests/utils/recovery-archive-v2-claim-fixture.ts",
+      "specifier": "./recovery-archive-v2-claim-fixture",
+      "typeOnly": false,
+      "kind": "import"
+    },
+    {
+      "from": "plugins/plugin-integration-core/__tests__/support/sealed-export-signer-authority-memory-db.cjs",
+      "to": "plugins/plugin-integration-core/lib/sealed-export/failure-vocabulary.cjs",
+      "specifier": "../../lib/sealed-export/failure-vocabulary.cjs",
+      "typeOnly": false,
+      "kind": "require"
+    },
+    {
+      "from": "plugins/plugin-integration-core/__tests__/support/sealed-export-signer-authority-memory-db.cjs",
+      "to": "plugins/plugin-integration-core/lib/sealed-export/sealed-export-signer-authority-store.cjs",
+      "specifier": "../../lib/sealed-export/sealed-export-signer-authority-store.cjs",
+      "typeOnly": false,
+      "kind": "require"
+    },
+    {
+      "from": "scripts/ops/run-sealed-export-s5-sqlserver-evidence.cjs",
+      "to": "plugins/plugin-integration-core/__tests__/support/sealed-export-signer-authority-memory-db.cjs",
+      "specifier": "../../plugins/plugin-integration-core/__tests__/support/sealed-export-signer-authority-memory-db.cjs",
+      "typeOnly": false,
+      "kind": "require"
+    }
+  ],
+  "reviewedGaps": [
+    {
+      "from": "packages/core-backend/scripts/smoke-plugins.ts",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "dynamic-import",
+      "sourceHash": "e18417d998af4c6fb524647eaed01e4dff120f17d20c709db2e2ff022e4288bd",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "packages/core-backend/scripts/smoke-sqlserver.ts",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "dynamic-import",
+      "sourceHash": "66db5c4862e7c044ca46d23ad3119230713c61a3adcac4fb82ecabf8585bbbb2",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "packages/core-backend/scripts/verify-recovery-archive-server.mts",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "dynamic-import",
+      "sourceHash": "42973525ce6a9c3ff2b780033cdf0d5ea5310b5154974d33ed0f999fd6cb02bd",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "packages/core-backend/scripts/verify-recovery-manual-browser.mjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "dynamic-import",
+      "sourceHash": "48d46c04907dc44ceb7b0811f01c77d868065ef958813fea7142d0d77bdc2d3c",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "packages/core-backend/scripts/verify-timemachine-browser.mts",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "dynamic-import",
+      "sourceHash": "b73bb6c151fbe038f60b32c64466c3ba514e299f296476c961d3d688dd74a768",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "packages/core-backend/scripts/verify-timemachine-browser.mts",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "dynamic-import",
+      "sourceHash": "b73bb6c151fbe038f60b32c64466c3ba514e299f296476c961d3d688dd74a768",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "packages/core-backend/scripts/verify-timemachine-workbench.mts",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "dynamic-import",
+      "sourceHash": "e3a4df14d8c5de58c5bfe22615cab0ce5dd6e01697c240371a127bada7c66c9d",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "packages/core-backend/src/attendance/attendance-timezone-legacy-repair.ts",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "require",
+      "sourceHash": "b7974f50f848de1f1296b22f5294f408c003b7adea48b22ab3cbd6d4c4b81b16",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "packages/core-backend/src/core/plugin-loader.ts",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "require",
+      "sourceHash": "8b5f4453b3239925afdd5eb30b9dfe0d2340d40b595bdd0fcb651a60e97be261",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "packages/core-backend/src/integration/yida-automation-preview.ts",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "dynamic-import",
+      "sourceHash": "55b6e25c298e3f13f965c2f1deec4b9101e1f11d094d98ed1dab3fb5ab030cad",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "packages/core-backend/src/util/resolve-plugin-attendance-lib.ts",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "require",
+      "sourceHash": "0a1f0216cad5389423a0d28f431388ebac15eeed97bb233a6b689132df4442f3",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "plugins/plugin-attendance/engine/sample-config.cjs",
+      "specifier": "1109: Expression expected.",
+      "kind": "parse",
+      "typeOnly": false,
+      "sourceHash": "7567d7578305904b42ad3c92fa31d110f035fcf221891c93b5d113fcdf0276e1",
+      "review": "Existing sample configuration has trailing invalid syntax. The full source digest and all three diagnostics are pinned; its parsed template-library load remains in the graph."
+    },
+    {
+      "from": "plugins/plugin-attendance/engine/sample-config.cjs",
+      "specifier": "1128: Declaration or statement expected.",
+      "kind": "parse",
+      "typeOnly": false,
+      "sourceHash": "7567d7578305904b42ad3c92fa31d110f035fcf221891c93b5d113fcdf0276e1",
+      "review": "Existing sample configuration has trailing invalid syntax. The full source digest and all three diagnostics are pinned; its parsed template-library load remains in the graph."
+    },
+    {
+      "from": "plugins/plugin-attendance/engine/sample-config.cjs",
+      "specifier": "1128: Declaration or statement expected.",
+      "kind": "parse",
+      "typeOnly": false,
+      "sourceHash": "7567d7578305904b42ad3c92fa31d110f035fcf221891c93b5d113fcdf0276e1",
+      "review": "Existing sample configuration has trailing invalid syntax. The full source digest and all three diagnostics are pinned; its parsed template-library load remains in the graph."
+    },
+    {
+      "from": "plugins/plugin-integration-core/lib/stock-preparation-remnant-acknowledgement.cjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "require",
+      "sourceHash": "5daf2a77411de3dae164a6204d199ee01f235f1663cf2442e1fa55c9a324b140",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "plugins/plugin-integration-core/lib/stock-preparation-remnant-acknowledgement.cjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "require",
+      "sourceHash": "5daf2a77411de3dae164a6204d199ee01f235f1663cf2442e1fa55c9a324b140",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "plugins/plugin-integration-core/lib/stock-preparation-remnant-acknowledgement.cjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "require",
+      "sourceHash": "5daf2a77411de3dae164a6204d199ee01f235f1663cf2442e1fa55c9a324b140",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "plugins/plugin-integration-core/lib/stock-preparation-remnant-acknowledgement.cjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "require",
+      "sourceHash": "5daf2a77411de3dae164a6204d199ee01f235f1663cf2442e1fa55c9a324b140",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "plugins/plugin-integration-core/lib/stock-preparation-sheet-census.cjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "require",
+      "sourceHash": "b52bc64f399f26075645536321c9f8e6ca46aaa14d5423f15041392d2bf09cbe",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "plugins/plugin-integration-core/lib/stock-preparation-sheet-census.cjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "require",
+      "sourceHash": "b52bc64f399f26075645536321c9f8e6ca46aaa14d5423f15041392d2bf09cbe",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "plugins/plugin-integration-core/lib/stock-preparation-sheet-census.cjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "require",
+      "sourceHash": "b52bc64f399f26075645536321c9f8e6ca46aaa14d5423f15041392d2bf09cbe",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "plugins/plugin-intelligent-restore/src/index.ts",
+      "specifier": "./CompressionService",
+      "typeOnly": false,
+      "kind": "import",
+      "sourceHash": "f7819f01746814d588a891db524c9d615e6dc8d5e55524ceb99fe051818863a2",
+      "review": "The view plugin references an unimplemented compression service. Retain this exact load; this does not approve plugin activation."
+    },
+    {
+      "from": "plugins/plugin-intelligent-restore/src/index.ts",
+      "specifier": "./IntelligentStorageService",
+      "typeOnly": false,
+      "kind": "import",
+      "sourceHash": "f7819f01746814d588a891db524c9d615e6dc8d5e55524ceb99fe051818863a2",
+      "review": "The view plugin references an unimplemented storage service, including its Vue type import. Each load is separately registered."
+    },
+    {
+      "from": "plugins/plugin-intelligent-restore/src/index.ts",
+      "specifier": "./OperationClassifier",
+      "typeOnly": false,
+      "kind": "import",
+      "sourceHash": "f7819f01746814d588a891db524c9d615e6dc8d5e55524ceb99fe051818863a2",
+      "review": "The view plugin references an unimplemented classifier. Retain this exact load; this does not approve plugin activation."
+    },
+    {
+      "from": "plugins/plugin-intelligent-restore/src/IntelligentRestoreView.vue",
+      "specifier": "./IntelligentStorageService",
+      "typeOnly": true,
+      "kind": "import",
+      "sourceHash": "8597164111b5a31673f823e36a5bbcdffded1f80b7220bbe7e7b2b55e2f94cc0",
+      "review": "The view plugin references an unimplemented storage service, including its Vue type import. Each load is separately registered."
+    },
+    {
+      "from": "plugins/plugin-view-gantt/src/index.ts",
+      "specifier": "./api",
+      "typeOnly": false,
+      "kind": "import",
+      "sourceHash": "038181ac3fd9c2a18858af2ff6b32ba163bdeb106d7808faab2927d9918e7786",
+      "review": "The plugin imports an API implementation absent from its source tree. Retain the exact unresolved load; adding any target forces re-review."
+    },
+    {
+      "from": "plugins/plugin-view-gantt/src/index.ts",
+      "specifier": "./handlers",
+      "typeOnly": false,
+      "kind": "import",
+      "sourceHash": "038181ac3fd9c2a18858af2ff6b32ba163bdeb106d7808faab2927d9918e7786",
+      "review": "The plugin imports event handlers absent from its source tree. Retain the exact unresolved load; adding any target forces re-review."
+    },
+    {
+      "from": "scripts/attendance/acceptance/acp1b-browser-realdb.mts",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "dynamic-import",
+      "sourceHash": "87eccb21b57ebcd34fab2cf01c3526245ba7e8430fe4dd6425ff8b88a9fdacab",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "scripts/attendance/acceptance/acp1b-full-app-realdb.mts",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "dynamic-import",
+      "sourceHash": "9b18a690a71d72d4f0dfb9a869d14e5d3cddc39ae85151232a85ba45d6d22a49",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "scripts/dev/probe-group-name-rule.mjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "dynamic-import",
+      "sourceHash": "4a102cb31280d7040e06c6466f620e70e556f4b83b0568bdf186b659ea2c8fc7",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "scripts/ops/attendance-validate-gate-summary-schema.mjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "require",
+      "sourceHash": "0f0b35b264eba618ee8070603f1a1b60a25e48e9c2237e85d6f85b62c74099ea",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "scripts/ops/lib/stock-preparation-yida-browser-ci-preload.cjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "require",
+      "sourceHash": "ec1b5e508f2a26141daf046e892ce31788ecf435ef78a788b27fbfe09fa8fb80",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "scripts/ops/staging-attendance-auto-shift-a2-smoke.mjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "require",
+      "sourceHash": "6bd547a07b78125c22bb63a615a41c3b8f02f9fcf3a98419e61df596bc9baa66",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "scripts/ops/staging-attendance-c5-delivery-smoke.ts",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "dynamic-import",
+      "sourceHash": "85253d07597c144cf13456b361a5e65cbfd101a5138f88d5a4ff3a0fdfd84935",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "scripts/ops/staging-attendance-report-sync-a2-smoke.mjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "require",
+      "sourceHash": "0839feddde5661410d7e6d83cbc2d98a704cfa66db52c2fa909e74151767282f",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "scripts/ops/stock-preparation-derive-target-binding.mjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "require",
+      "sourceHash": "bce6e9ba2efc2753350ab26a8eba72224a2f724c0891e1f128a1df6f8e203829",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "scripts/ops/stock-preparation-derive-target-binding.mjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "require",
+      "sourceHash": "bce6e9ba2efc2753350ab26a8eba72224a2f724c0891e1f128a1df6f8e203829",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "scripts/ops/stock-preparation-derive-target-binding.mjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "require",
+      "sourceHash": "bce6e9ba2efc2753350ab26a8eba72224a2f724c0891e1f128a1df6f8e203829",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "scripts/ops/stock-preparation-erp-material-sync-realdb-smoke.mjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "dynamic-import",
+      "sourceHash": "c537b646d7ec07b7ab64ce05d6f2547c49da4a9ba4a6d75e8b9741fd3941ae9c",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "scripts/ops/stock-preparation-erp-material-sync-realdb-smoke.mjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "dynamic-import",
+      "sourceHash": "c537b646d7ec07b7ab64ce05d6f2547c49da4a9ba4a6d75e8b9741fd3941ae9c",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "scripts/ops/stock-preparation-erp-material-sync-realdb-smoke.mjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "dynamic-import",
+      "sourceHash": "c537b646d7ec07b7ab64ce05d6f2547c49da4a9ba4a6d75e8b9741fd3941ae9c",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "scripts/ops/stock-preparation-erp-material-sync-realdb-smoke.mjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "dynamic-import",
+      "sourceHash": "c537b646d7ec07b7ab64ce05d6f2547c49da4a9ba4a6d75e8b9741fd3941ae9c",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "scripts/ops/stock-preparation-erp-material-sync-realdb-smoke.mjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "dynamic-import",
+      "sourceHash": "c537b646d7ec07b7ab64ce05d6f2547c49da4a9ba4a6d75e8b9741fd3941ae9c",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "scripts/ops/stock-preparation-lab0-inventory.mjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "require",
+      "sourceHash": "f49f96a6c026534df73f756e497f8f2725effaffacfedbdba5abe77a98d4689d",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "scripts/ops/stock-preparation-rca-abort-provenance.mjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "dynamic-import",
+      "sourceHash": "58170607bab1e8dd31b87ea6bf8ccddb5e9c6ce9dde286863fead8fd1af9dedc",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "scripts/ops/stock-preparation-s6a-operator-preflight.mjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "require",
+      "sourceHash": "087258512ce37c23fff77e31b63debbe669f8ff57c53c270b015e9ffcf118f10",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "scripts/ops/stock-preparation-s6a-operator-preflight.mjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "require",
+      "sourceHash": "087258512ce37c23fff77e31b63debbe669f8ff57c53c270b015e9ffcf118f10",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "scripts/ops/stock-preparation-s6a-operator-preflight.mjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "require",
+      "sourceHash": "087258512ce37c23fff77e31b63debbe669f8ff57c53c270b015e9ffcf118f10",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "scripts/ops/stock-preparation-s6a-operator-preflight.mjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "require",
+      "sourceHash": "087258512ce37c23fff77e31b63debbe669f8ff57c53c270b015e9ffcf118f10",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "scripts/ops/stock-preparation-sandbox-add-missing-template-fields.cjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "require",
+      "sourceHash": "626b77471e5221d187e2caffc84a1febde5b756f4ceb4097d54dd7adece63aff",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "scripts/ops/stock-preparation-sandbox-add-missing-template-fields.cjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "require",
+      "sourceHash": "626b77471e5221d187e2caffc84a1febde5b756f4ceb4097d54dd7adece63aff",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "scripts/ops/stock-preparation-sandbox-add-missing-template-fields.cjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "require",
+      "sourceHash": "626b77471e5221d187e2caffc84a1febde5b756f4ceb4097d54dd7adece63aff",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    },
+    {
+      "from": "scripts/verify-multitable-live-smoke.mjs",
+      "specifier": "<non-literal>",
+      "typeOnly": false,
+      "kind": "dynamic-import",
+      "sourceHash": "09dfd4d7716edde8d793fc3e2db33b9e7cae1568130760b88b2b0e9efa418008",
+      "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
+    }
+  ],
+  "resolutionInputs": [
+    {
+      "path": "packages/core-backend/package.json",
+      "sha256": "47e9ab7af977aabeb717fed6363d7f3f3a118ef22a972acdedbf68ef944ab4e9"
+    },
+    {
+      "path": "packages/core-backend/tsconfig.json",
+      "sha256": "cb6055e7f00c71357a7f7adb30669ca99d3ceb5b0f57bd95fa53cdbdded086b6"
+    },
+    {
+      "path": "packages/mssql-readonly-utils/package.json",
+      "sha256": "da385d2e7b0e02b836c489b268c2d3ac8b6bc6300ccc5e1eaef61cf3ff112c29"
+    },
+    {
+      "path": "packages/openapi/package.json",
+      "sha256": "90b44085c8fde3b086a11b3ae88e869d19952b45503767e817fa15a0a15cbbff"
+    },
+    {
+      "path": "plugins/plugin-attendance/package.json",
+      "sha256": "490e3785f40e3ce733c9301a593572a58a96eb043d6fb9abcd4208c420336484"
+    },
+    {
+      "path": "plugins/plugin-audit-logger/package.json",
+      "sha256": "f79bcb22b8afb7399cc379611a26545f5bd91777c0de024068561e4b7b014261"
+    },
+    {
+      "path": "plugins/plugin-elearning/package.json",
+      "sha256": "e61561fabd8fdedec3dfd19e094d3fbaf5e7e27ee6e52d053a6fd6627ed9f5a6"
+    },
+    {
+      "path": "plugins/plugin-integration-core/package.json",
+      "sha256": "4cd227957910381d06701bdbd95a33b2276c4c735f364ab415efdf8d4d113dc9"
+    },
+    {
+      "path": "plugins/plugin-intelligent-restore/package.json",
+      "sha256": "ef1eb087988e7f7eac30bcdf457b47a5eef9359b0f4d18f6aac01dab0b4f731e"
+    },
+    {
+      "path": "plugins/plugin-intelligent-restore/tsconfig.json",
+      "sha256": "8865a6b0d0fb5c431bef1a82e58da74617f00f1d2b0031131213e19ca090dab2"
+    },
+    {
+      "path": "plugins/plugin-telemetry-otel/package.json",
+      "sha256": "ea7a3350274cde5045c3b6beab894db3ead3c910739abb150042964022614efb"
+    },
+    {
+      "path": "plugins/plugin-telemetry-otel/tsconfig.json",
+      "sha256": "d548e7b445229371c83c0706122367e458fcdbd46bf258438fba48f81bb30a21"
+    },
+    {
+      "path": "plugins/plugin-view-gantt/package.json",
+      "sha256": "4389c3ce1b0c6218bc09a992ebbee6307eb0a937fc55288276dfa2bee72c5244"
+    },
+    {
+      "path": "plugins/plugin-view-gantt/tsconfig.json",
+      "sha256": "d3313c81b9df3c9eadcf74956de2e1dd5d2d7133019926249e4e1f6a4c0af107"
+    },
+    {
+      "path": "tsconfig.base.json",
+      "sha256": "c0510bed3c0ca9cf6d8589189b1d4391e3d0171139f63e9f1a1971ccecee9438"
+    },
+    {
+      "path": "tsconfig.json",
+      "sha256": "bd8e9e3f57032dcb4d14de1449f01fc29d6989f85f33e858ab188d599154d12c"
+    }
+  ]
+}

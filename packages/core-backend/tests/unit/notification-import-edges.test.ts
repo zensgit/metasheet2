@@ -14,6 +14,8 @@ import {
   type ImportEdge,
 } from '../helpers/import-edge-allowlist'
 
+import { BACKGROUND_IMPORT_EDGES, BACKGROUND_MODULE, collectCapabilityImportEdges } from '../helpers/capability-import-boundary'
+
 const BACKEND = path.resolve(__dirname, '..', '..')
 const SRC = path.join(BACKEND, 'src')
 const NOTIFICATIONS = path.join(SRC, 'notifications') + path.sep
@@ -76,6 +78,12 @@ const OUTSIDE_ALLOWLIST: ReadonlyArray<ImportEdge> = [
 describe('importers of the notification modules', () => {
   it('are exactly the notification routes, production wiring, fingerprint helper and capability precondition', () => {
     expect(importEdgeViolations(importersFromOutside(), OUTSIDE_ALLOWLIST)).toEqual([])
+  })
+
+  it('uses exactly the same existing background-entry imports as the capability boundary', () => {
+    const notificationBackgroundEdges: ReadonlyArray<ImportEdge> = []
+    expect(notificationBackgroundEdges).toEqual(BACKGROUND_IMPORT_EDGES)
+    expect(importEdgeViolations(collectCapabilityImportEdges(SRC).filter(([, specifier]) => BACKGROUND_MODULE.test(specifier)), notificationBackgroundEdges)).toEqual([])
   })
 
   it('exclude the legacy senders, the task pipeline, the credential and verification code and the index', () => {
