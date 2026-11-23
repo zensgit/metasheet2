@@ -8,8 +8,9 @@
  * capability row are read by two statements that may come from different snapshots. It serves the
  * display route and tests and must not be used to decide whether something may happen.
  *
- * Consumers obtain authorization only through `resolveEffectiveIntegrationCapability`
- * (`./integration-capability-resolve`), which locks the rows and then runs this evaluator over them.
+ * Consumers obtain authority through the approved authenticated or background entry point
+ * (`./integration-capability-resolve` or `./integration-capability-resolve-background`). Their shared
+ * core locks the rows before evaluating them; this display module grants no authority on its own.
  */
 import type { Queryable } from '../multitable/automation-durable-dispatcher'
 import type {

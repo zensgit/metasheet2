@@ -1366,7 +1366,7 @@ export const attendanceGuideTopics: GuideTopic[] = [
     steps: [
       {
         path: ['Admin → User access', '管理 → 用户权限'],
-        detail: ['Search by email, name, or id, select the person, and assign a role template. Employee is read plus write. Approver is read plus approve. Administrator is read, write, approve, import, and admin: attendance:read, attendance:write, attendance:approve, attendance:import, and attendance:admin. Remove role takes the template back. Batch provisioning applies the same templates to many people.', '按邮箱、姓名或 ID 搜索，选中人员，再分配角色模板。员工是读加写。审批人是读加审批。管理员是读、写、审批、导入和管理，即 attendance:read、attendance:write、attendance:approve、attendance:import、attendance:admin。移除角色收回该模板。批量授权用同一套模板处理多人。'],
+        detail: ['Search by email, name, or id, select the person, and assign a role template. Employee is read plus write. Approver is read plus approve. Importer is read plus import. Administrator is read, write, approve, import, and admin: attendance:read, attendance:write, attendance:approve, attendance:import, and attendance:admin. Remove role unassigns the template. Batch provisioning uses the same templates. On older deployments, the global fallback grants or revokes direct permissions one at a time.', '按邮箱、姓名或 ID 搜索，选中人员，再分配角色模板。员工是读加写。审批人是读加审批。导入员是读加导入。管理员是读、写、审批、导入和管理，即 attendance:read、attendance:write、attendance:approve、attendance:import、attendance:admin。移除角色会解除模板分配。批量授权使用同一套模板。使用旧版全局兼容入口时，页面会逐条授予或撤销直接权限。'],
       },
       {
         path: ['Group owners and scheduler scopes sit beside these keys', '考勤组负责人和排班范围在这些权限旁边'],
@@ -1384,6 +1384,7 @@ export const attendanceGuideTopics: GuideTopic[] = [
     figureRows: [
       ['Employee: read + write', '员工：读 + 写'],
       ['Approver: read + approve', '审批人：读 + 审批'],
+      ['Importer: read + import', '导入员：读 + 导入'],
       ['Administrator: read + write + approve + import + admin', '管理员：读 + 写 + 审批 + 导入 + 管理'],
     ],
   },

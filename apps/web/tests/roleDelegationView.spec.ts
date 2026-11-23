@@ -3180,7 +3180,8 @@ describe('RoleDelegationView', () => {
     await waitForCondition(() => statusText().includes('模板部门已移除'))
   })
 
-  it('still applies a template that has no exact department while availability is off', async () => {
+  it('requires an explicit retry after a stale template while exact-department availability is off', async () => {
+    let scopeVersion: string | undefined
     const posts: Array<Record<string, unknown>> = []
     apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string, body?: string }) => {
       const rawUrl = String(input)
@@ -3199,7 +3200,7 @@ describe('RoleDelegationView', () => {
           ok: true,
           data: {
             item: {
-              id: 'template-true', name: '含下级模板', description: '', departmentCount: 1, memberGroupCount: 0,
+              id: 'template-true', scopeVersion, name: '含下级模板', description: '', departmentCount: 1, memberGroupCount: 0,
               departments: [catalogDepartment({ includeChildren: true, departmentName: '模板下级', departmentFullPath: '模板下级' })],
               memberGroups: [],
             },
@@ -3224,6 +3225,10 @@ describe('RoleDelegationView', () => {
       }
       if (pathname.endsWith('/scope-templates/apply')) {
         posts.push(JSON.parse(String(init?.body || '{}')) as Record<string, unknown>)
+        if (posts.length === 1) {
+          scopeVersion = 'b'.repeat(64)
+          return createJsonResponse({ ok: false, error: { code: 'ROLE_DELEGATION_SCOPE_TEMPLATE_CHANGED' } }, 409)
+        }
         return createJsonResponse({
           ok: true,
           data: {
@@ -3245,10 +3250,23 @@ describe('RoleDelegationView', () => {
     selectControl('含下级模板').dispatchEvent(new Event('change'))
     await waitForCondition(() => (container?.textContent || '').includes('模板下级'))
     const applyButton = findButtonByText(container!, '覆盖应用到当前命名空间')
-    expect(applyButton.disabled).toBe(false)
+    expect(applyButton.disabled).toBe(true)
+    applyButton.click()
+    expect(posts).toHaveLength(0)
+    scopeVersion = 'a'.repeat(64)
+    findButtonByText(container!, '查询模板').click()
+    await waitForCondition(() => !applyButton.disabled)
     applyButton.click()
     await waitForCondition(() => posts.length === 1)
-    expect(posts[0]).toEqual({ namespace: 'crm', templateId: 'template-true', mode: 'replace' })
+    expect(posts[0]).toEqual({ namespace: 'crm', templateId: 'template-true', mode: 'replace', expectedScopeVersion: 'a'.repeat(64) })
+    await waitForCondition(() => statusText().includes('范围模板已变更'))
+    expect(applyButton.disabled).toBe(true)
+    findButtonByText(container!, '查询模板').click()
+    await waitForCondition(() => !applyButton.disabled)
+    expect(posts).toHaveLength(1)
+    applyButton.click()
+    await waitForCondition(() => posts.length === 2)
+    expect(posts[1]).toEqual({ ...posts[0], expectedScopeVersion: 'b'.repeat(64) })
     expect(posts[0]).not.toHaveProperty('includeChildren')
     await waitForCondition(() => statusText().includes('范围模板已覆盖应用到该插件管理员命名空间'))
   })
@@ -4208,7 +4226,7 @@ describe('RoleDelegationView', () => {
           ok: true,
           data: {
             item: {
-              id: 'template-1', name: '华东销售', description: '华东销售模板', departmentCount: 0, memberGroupCount: 0,
+              id: 'template-1', scopeVersion: 'a'.repeat(64), name: '华东销售', description: '华东销售模板', departmentCount: 0, memberGroupCount: 0,
               departments: [], memberGroups: [],
             },
           },
@@ -4641,7 +4659,7 @@ describe('RoleDelegationView', () => {
     const getsBefore = scopeGetCount()
     findButtonByText(container!, '覆盖应用到当前命名空间').click()
     await waitForCondition(() => (container?.textContent || '').includes('范围模板已覆盖应用'))
-    expect(applyBodies).toEqual([{ namespace: 'crm', templateId: 'template-1', mode: 'replace' }])
+    expect(applyBodies).toEqual([{ namespace: 'crm', templateId: 'template-1', mode: 'replace', expectedScopeVersion: 'a'.repeat(64) }])
     expect(activationPostCount()).toBe(0)
     expect(scopeGetCount()).toBe(getsBefore + 1)
     expect(container?.querySelector('[data-testid="scope-activation"]')).toBeTruthy()

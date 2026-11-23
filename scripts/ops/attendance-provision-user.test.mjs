@@ -7,7 +7,7 @@ const userId = '11111111-1111-4111-8111-111111111111'
 const permissions = ['attendance:read', 'attendance:write']
 const script = new URL('./attendance-provision-user.sh', import.meta.url)
 
-async function runCase({ assignCode = 200, assignBody = { ok: true }, missingRoute = false, accessBody, legacyReadback, expectedTenant = '', authMeBody, refreshBody } = {}) {
+async function runCase({ role = 'employee', assignCode = 200, assignBody = { ok: true }, missingRoute = false, accessBody, legacyReadback, expectedTenant = '', authMeBody, refreshBody } = {}) {
   const calls = []
   const server = createServer(async (req, res) => {
     let body = ''
@@ -38,7 +38,7 @@ async function runCase({ assignCode = 200, assignBody = { ok: true }, missingRou
   try {
     const result = await new Promise((resolve, reject) => {
       const child = spawn('bash', [script.pathname], {
-        env: { ...process.env, API_BASE: `http://127.0.0.1:${server.address().port}/api`, AUTH_TOKEN: 'synthetic.token.only', AUTH_EXPECTED_TENANT_ID: expectedTenant, USER_ID: userId, ROLE: 'employee', CURL_RETRY_ATTEMPTS: '0' },
+        env: { ...process.env, API_BASE: `http://127.0.0.1:${server.address().port}/api`, AUTH_TOKEN: 'synthetic.token.only', AUTH_EXPECTED_TENANT_ID: expectedTenant, USER_ID: userId, ROLE: role, CURL_RETRY_ATTEMPTS: '0' },
         stdio: ['ignore', 'pipe', 'pipe'],
       })
       let output = ''
@@ -99,6 +99,27 @@ for (const data of [
     const result = await runCase({ accessBody: { ok: true, data } })
     assert.notEqual(result.code, 0)
     assert.match(result.output, /PROVISION_READBACK_FAILED/)
+  })
+}
+
+for (const [role, expected] of Object.entries({
+  importer: ['attendance:read', 'attendance:import'],
+  admin: ['attendance:read', 'attendance:write', 'attendance:approve', 'attendance:import', 'attendance:admin'],
+})) {
+  test(`modern and legacy provisioning use the full ${role} template`, async () => {
+    const roleId = `attendance_${role}`
+    const modern = await runCase({ role, accessBody: { ok: true, data: { user: { id: userId }, roles: [roleId], permissions: expected } } })
+    assert.equal(modern.code, 0, modern.output)
+    assert.deepEqual(JSON.parse(modern.calls.find(call => call.url.endsWith('/roles/assign')).body), { roleId })
+    assert.equal(modern.calls.filter(call => call.url.endsWith('/grant')).length, 0)
+
+    const legacy = await runCase({ role, missingRoute: true, legacyReadback: { userId, permissions: expected } })
+    assert.equal(legacy.code, 0, legacy.output)
+    assert.deepEqual(legacy.calls.filter(call => call.url.endsWith('/grant')).map(call => JSON.parse(call.body)), expected.map(permission => ({ userId, permission })))
+
+    const incomplete = await runCase({ role, missingRoute: true, legacyReadback: { userId, permissions: expected.filter(code => code !== 'attendance:import') } })
+    assert.notEqual(incomplete.code, 0)
+    assert.match(incomplete.output, /PROVISION_READBACK_FAILED/)
   })
 }
 

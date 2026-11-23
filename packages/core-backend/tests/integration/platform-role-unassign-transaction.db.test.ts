@@ -63,7 +63,7 @@ import { adminUsersRouter } from '../../src/routes/admin-users'
 import { ConnectionPool } from '../../src/integration/db/connection-pool'
 import { withAuthorizationInputTransaction } from '../../src/rbac/authorization-input-lock'
 import { discoverPrivilegeRolePlan, revalidatePrivilegeRolePlan } from '../../src/rbac/authorization-privilege-witness-plan'
-import { lockSharedAccessSubjects } from '../../src/admin/platform-actor-authority'
+import { assertPlatformActorAuthority, lockSharedAccessSubjects } from '../../src/admin/platform-actor-authority'
 import { isLastSignInPlatformAdmin, lockPlatformAdminInvariant } from '../../src/admin/user-recycle'
 import { lockNamespaceAdmissionWrites } from '../../src/rbac/namespace-admission'
 import { unassignUserRoles } from '../../src/rbac/role-assignment'
@@ -624,10 +624,11 @@ describeWithDatabase('unassign whole-file PostgreSQL proof; registered handler e
   it.each(['status-disable', 'recycle-move', 'delegated-demotion', 'protected-role-delete'] as const)('waits behind source-pinned %s lock/write fragment, not a whole HTTP competitor', async mode => {
     const source = readFileSync(new URL(mode === 'recycle-move' ? '../../src/admin/user-recycle.ts' : mode === 'protected-role-delete' ? '../../src/routes/roles.ts' : '../../src/routes/admin-users.ts', import.meta.url), 'utf8')
     const expectedPin = mode === 'recycle-move' ? 'ee591b541b631d09161d528912ff068f4872848db9dd51fe4ca01b1509a222bf'
-      : mode === 'protected-role-delete' ? '144b83d990585cfdfbad609e0d55a305db65b1d3769c7da0347e94d89cf98ba1' : undefined
+      : mode === 'protected-role-delete' ? '1bf7fba1a7157a3666209e8aeef8d335c1c6f01da39e4d82873831b5483d4ea2' : undefined
     if (expectedPin) expect(createHash('sha256').update(source).digest('hex')).toBe(expectedPin)
     else expect(source).toContain(mode === 'status-disable' ? 'if (isActive === false) await lockPlatformAdminInvariant(client)' : "if (action === 'unassign' && roleId === PLATFORM_ADMIN_ROLE_ID)")
     const fixture = await seed('raw')
+    const deletionActor = mode === 'protected-role-delete' ? (await seed('member')).actorId : null
     if (mode === 'status-disable' || mode === 'recycle-move' || mode === 'delegated-demotion') {
       await observer.query("INSERT INTO user_roles(user_id,role_id) VALUES($1,'admin')", [fixture.userId])
       fixture.roleId = 'admin'
@@ -638,10 +639,13 @@ describeWithDatabase('unassign whole-file PostgreSQL proof; registered handler e
     let acquired = false
     const competitor = outcome(other.transaction(async client => {
       holder = Number((client.__rawClient as PoolClient & { processID: number }).processID)
-      if (mode === 'protected-role-delete') {
-        await client.query('SELECT id FROM roles WHERE id=$1 FOR UPDATE', [fixture.roleId])
-        await lockNamespaceAdmissionWrites(client, fixture.userId)
-
+      if (deletionActor) {
+        await client.query('SELECT id, name FROM roles WHERE id=$1 FOR UPDATE', [fixture.roleId])
+        const membership = await client.query('SELECT user_id FROM user_roles WHERE role_id=$1', [fixture.roleId])
+        const memberIds = membership.rows.map(row => String(row.user_id))
+        expect(memberIds).toEqual([fixture.userId])
+        const locked = await lockSharedAccessSubjects(client, [deletionActor, ...memberIds])
+        await assertPlatformActorAuthority(client, locked.get(deletionActor), { requireLiveRbacAdmin: true })
       } else {
         await lockPlatformAdminInvariant(client)
         if (mode === 'delegated-demotion') {

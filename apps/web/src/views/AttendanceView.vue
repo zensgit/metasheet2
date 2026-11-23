@@ -3831,9 +3831,11 @@
                     name="provisionRole"
                     v-model="provisionForm.role"
                   >
-                    <option value="employee">{{ tr('employee', '员工') }}</option>
-                    <option value="approver">{{ tr('approver', '审批人') }}</option>
-                    <option value="admin">{{ tr('admin', '管理员') }}</option>
+                    <option
+                      v-for="role in attendanceProvisionRoles"
+                      :key="role"
+                      :value="role"
+                    >{{ provisionRoleOptionLabel(role) }}</option>
                   </select>
                 </label>
               </div>
@@ -3913,9 +3915,11 @@
                     name="provisionBatchRole"
                     v-model="provisionBatchRole"
                   >
-                    <option value="employee">{{ tr('employee', '员工') }}</option>
-                    <option value="approver">{{ tr('approver', '审批人') }}</option>
-                    <option value="admin">{{ tr('admin', '管理员') }}</option>
+                    <option
+                      v-for="role in attendanceProvisionRoles"
+                      :key="role"
+                      :value="role"
+                    >{{ provisionRoleOptionLabel(role) }}</option>
                   </select>
                 </label>
               </div>
@@ -10767,6 +10771,11 @@ import { usePlugins } from '../composables/usePlugins'
 import { apiFetch as sendApiFetch } from '../utils/api'
 import { permissionUserPayloadUnavailable } from './adminPermissionGrantDisplay'
 import { readAttendanceLegacyPermissionPayload } from './attendance/readAttendanceLegacyPermissionPayload'
+import {
+  ATTENDANCE_PROVISION_ROLES,
+  ATTENDANCE_PROVISION_ROLE_PERMISSIONS,
+  type AttendanceProvisionRole,
+} from './attendance/attendanceProvisionRolePermissions'
 import { provideAttendanceSessionGuard } from '../composables/useAttendanceSessionGuard'
 import { readErrorMessage } from '../utils/error'
 import { buildTimezoneOptions, formatTimezoneLabel } from '../utils/timezones'
@@ -10788,7 +10797,7 @@ import { parseAttendanceCurrentTimeContext, currentAttendanceTimezone } from './
 import { attendanceDayTimezoneLabel, parseAttendanceDayTimeContext, type AttendanceDayTimeContext } from './attendance/attendanceDayTimeContext'
 
 type AttendancePageMode = 'overview' | 'reports' | 'admin'
-type ProvisionRole = 'employee' | 'approver' | 'admin'
+type ProvisionRole = AttendanceProvisionRole
 const ATTENDANCE_OVERVIEW_SECTION_IDS = {
   requests: 'attendance-overview-requests',
   anomalies: 'attendance-overview-anomalies',
@@ -12825,10 +12834,20 @@ const payrollCycleValidationHint = computed(() => {
 const rotationRuleTimezoneLabel = computed(() => displayTimezone(rotationRuleForm.timezone))
 const shiftTimezoneLabel = computed(() => displayTimezone(shiftForm.timezone))
 
-const provisionRolePermissions: Record<ProvisionRole, string[]> = {
-  employee: ['attendance:read', 'attendance:write'],
-  approver: ['attendance:read', 'attendance:approve'],
-  admin: ['attendance:read', 'attendance:write', 'attendance:approve', 'attendance:admin'],
+const attendanceProvisionRoles = ATTENDANCE_PROVISION_ROLES
+const provisionRolePermissions = ATTENDANCE_PROVISION_ROLE_PERMISSIONS
+
+function provisionRoleOptionLabel(role: ProvisionRole): string {
+  switch (role) {
+    case 'employee':
+      return tr('employee', '员工')
+    case 'approver':
+      return tr('approver', '审批人')
+    case 'importer':
+      return tr('importer', '导入员')
+    case 'admin':
+      return tr('admin', '管理员')
+  }
 }
 
 const shifts = ref<AttendanceShift[]>([])

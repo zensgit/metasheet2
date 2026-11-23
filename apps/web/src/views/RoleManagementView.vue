@@ -436,7 +436,11 @@ const ROLE_WRITE_ERROR_COPY: Record<string, { zh: string; en: string }> = {
 
 function roleWriteErrorMessage(error: unknown, fallback: string): string {
   const record = (error ?? {}) as Record<string, unknown>
-  const copy = ROLE_WRITE_ERROR_COPY[String(record.code || '')]
+  const code = String(record.code || '')
+  if (code === 'PERMISSION_ESCALATION_FORBIDDEN' || code === 'PROTECTED_ROLE_FORBIDDEN') {
+    return '此操作要求账号当前持有平台管理员角色。请联系平台管理员处理。'
+  }
+  const copy = ROLE_WRITE_ERROR_COPY[code]
   return copy ? copy.zh : String(record.message || fallback)
 }
 
@@ -784,7 +788,7 @@ async function deleteRole(): Promise<void> {
     })
     const body = await readJson(response)
     if (!response.ok || body.ok !== true) {
-      throw new Error(String((body.error as Record<string, unknown> | undefined)?.message || '删除角色失败'))
+      throw new Error(roleWriteErrorMessage(body.error, '删除角色失败'))
     }
 
     resetForm()

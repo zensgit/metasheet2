@@ -13,6 +13,11 @@ import path from 'node:path'
 import ts from 'typescript'
 
 export type ImportEdge = readonly [file: string, specifier: string]
+export interface ModuleLoad {
+  specifier: string
+  typeOnly: boolean
+  kind: 'import' | 'export-from' | 'import-equals' | 'require' | 'dynamic-import' | 'import-type'
+}
 
 /** The specifier recorded for a `require(…)` or `import(…)` whose argument is not a literal. */
 export const NON_LITERAL_SPECIFIER = '<non-literal>'
@@ -29,28 +34,43 @@ function literalText(node: ts.Node | undefined): string | null {
  * Module specifiers of every module load in `source`, in source order, anywhere in the file: static
  * imports and re-exports, `import x = require(…)`, `require(…)`, dynamic `import(…)` and `import(…)`
  * types. `fileName` selects how the text is parsed (TypeScript or JavaScript) by its extension.
+ * A caller that already parsed the source can reuse that AST, including its parse diagnostics.
  */
-export function importSpecifiers(source: string, fileName = 'm.ts'): string[] {
-  const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true)
-  const specifiers: string[] = []
+export function moduleLoads(source: string | ts.SourceFile, fileName = 'm.ts'): ModuleLoad[] {
+  const file = typeof source === 'string' ? ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true) : source
+  const loads: ModuleLoad[] = []
+  const add = (node: ts.Node | undefined, typeOnly: boolean, kind: ModuleLoad['kind']): void => {
+    loads.push({ specifier: literalText(node) ?? NON_LITERAL_SPECIFIER, typeOnly, kind })
+  }
   const visit = (node: ts.Node): void => {
-    if (ts.isImportDeclaration(node) || (ts.isExportDeclaration(node) && node.moduleSpecifier)) {
-      specifiers.push(literalText(node.moduleSpecifier) ?? NON_LITERAL_SPECIFIER)
+    if (ts.isImportDeclaration(node)) {
+      const clause = node.importClause
+      const named = clause?.namedBindings
+      const typeOnly = !!clause && (clause.isTypeOnly || (!clause.name && !!named && ts.isNamedImports(named)
+        && named.elements.length > 0 && named.elements.every((item) => item.isTypeOnly)))
+      add(node.moduleSpecifier, typeOnly, 'import')
+    } else if (ts.isExportDeclaration(node) && node.moduleSpecifier) {
+      const named = node.exportClause
+      const typeOnly = node.isTypeOnly || (!!named && ts.isNamedExports(named)
+        && named.elements.length > 0 && named.elements.every((item) => item.isTypeOnly))
+      add(node.moduleSpecifier, typeOnly, 'export-from')
     } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
-      specifiers.push(literalText(node.moduleReference.expression) ?? NON_LITERAL_SPECIFIER)
+      add(node.moduleReference.expression, node.isTypeOnly, 'import-equals')
     } else if (ts.isCallExpression(node)) {
       const callee = node.expression
-      const isRequire = ts.isIdentifier(callee) && callee.text === 'require'
-      const isDynamicImport = callee.kind === ts.SyntaxKind.ImportKeyword
-      if (isRequire || isDynamicImport) specifiers.push(literalText(node.arguments[0]) ?? NON_LITERAL_SPECIFIER)
+      if (ts.isIdentifier(callee) && callee.text === 'require') add(node.arguments[0], false, 'require')
+      else if (callee.kind === ts.SyntaxKind.ImportKeyword) add(node.arguments[0], false, 'dynamic-import')
     } else if (ts.isImportTypeNode(node)) {
-      const argument = ts.isLiteralTypeNode(node.argument) ? node.argument.literal : undefined
-      specifiers.push(literalText(argument) ?? NON_LITERAL_SPECIFIER)
+      add(ts.isLiteralTypeNode(node.argument) ? node.argument.literal : undefined, true, 'import-type')
     }
     ts.forEachChild(node, visit)
   }
   visit(file)
-  return specifiers
+  return loads
+}
+
+export function importSpecifiers(source: string, fileName = 'm.ts'): string[] {
+  return moduleLoads(source, fileName).map((load) => load.specifier)
 }
 
 /** Every repository file below `dir`, excluding installed dependencies. */
