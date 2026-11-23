@@ -11,10 +11,12 @@ export class EventRetryBuffer {
   }
   offer(input: EventCandidate, authority: ScopeAuthority): { retained: boolean; count_unknown: boolean } {
     try {
-      validateEvent(input, authority)
+      // Retain the validated snapshot, frozen, never the caller objects.
+      const scope: ScopeAuthority = Object.freeze({ ...authority })
+      const { scope_kind: _scope, org_id: _org, schema_version: _version, outcome: _outcome, severity: _severity, ...checked } = validateEvent(input, scope)
       this.expire()
       if (this.entries.length >= 1000) return { retained: false, count_unknown: true }
-      this.entries.push({ input: structuredClone(input), authority: { ...authority }, expires: this.now() + 60000 })
+      this.entries.push({ input: Object.freeze({ ...checked, facts: Object.freeze({ ...checked.facts }) }), authority: scope, expires: this.now() + 60000 })
       return { retained: true, count_unknown: true }
     } catch { return { retained: false, count_unknown: true } }
   }

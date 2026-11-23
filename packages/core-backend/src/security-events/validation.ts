@@ -122,8 +122,10 @@ export type ValidatedEvent = Readonly<EventCandidate & EventScope & {
 const CANDIDATE_KEYS = ['id', 'producer', 'event_type', 'source_kind', 'source_id', 'source_step', 'actor_kind', 'actor_user_id', 'subject_user_id', 'target_kind', 'target_id', 'reason_code', 'record_origin', 'occurred_at', 'facts']
 const TARGETS = ['integration', 'user', 'membership', 'grant', 'operation', 'run', 'component']
 
-export function validateEvent(candidate: EventCandidate, authority: ScopeAuthority): ValidatedEvent {
-  if (!candidate || Object.keys(candidate).some(key => !CANDIDATE_KEYS.includes(key))) return unavailable()
+export function validateEvent(input: EventCandidate, authority: ScopeAuthority): ValidatedEvent {
+  if (!input || Object.keys(input).some(key => !CANDIDATE_KEYS.includes(key))) return unavailable()
+  // Every caller value is read once; the checked values are exactly the returned values.
+  const candidate: EventCandidate = { ...input }
   const rule = eventRule(candidate.event_type)
   const autoGrant = candidate.event_type === 'admin.login_grant_changed' && candidate.source_step === 'auto_grant'
   if (!rule || candidate.producer !== (autoGrant ? 'directory' : rule.producer)
@@ -144,14 +146,17 @@ export function validateEvent(candidate: EventCandidate, authority: ScopeAuthori
         : candidate.event_type === 'webhook.redirect_refused' ? ['redirect_refused', null]
           : candidate.event_type === 'system.event_store_gap' ? ['startup_tail_unverified', 'aggregation_overflow', 'scan_interrupted', 'event_store_unavailable', 'source_missing'] : [null]
   if (!reasons.includes(candidate.reason_code)) return unavailable()
-  const facts = candidate.facts
-  if (!facts || Object.getPrototypeOf(facts) !== Object.prototype || Buffer.byteLength(JSON.stringify(facts)) > 2048) return unavailable()
-  for (const [key, value] of Object.entries(facts)) {
+  if (!candidate.facts || Object.getPrototypeOf(candidate.facts) !== Object.prototype) return unavailable()
+  const facts: Record<string, number | boolean> = {}
+  for (const [key, value] of Object.entries(candidate.facts)) {
     if (!rule.facts.includes(key)) return unavailable()
     if (BOOLEAN_FACTS.includes(key as never)) { if (typeof value !== 'boolean') return unavailable() }
     else if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0
       || (COUNT_FACTS.includes(key as never) && value > 2147483647)) return unavailable()
+    // Negative zero is stored as 0, so it is compared as 0 as well.
+    facts[key] = value === 0 ? 0 : value
   }
+  if (Buffer.byteLength(JSON.stringify(facts)) > 2048) return unavailable()
   const scope = resolveEventScope(candidate.event_type, candidate.source_step, authority)
   if (candidate.source_kind === 'request_window' && candidate.event_type !== 'system.event_store_gap') {
     if (candidate.reason_code !== 'refusal_window' || candidate.actor_kind !== 'anonymous'
@@ -187,7 +192,7 @@ export function validateEvent(candidate: EventCandidate, authority: ScopeAuthori
   }
   if (candidate.event_type === 'authorization.operation_committed' && [...candidate.source_id].length > 192) return unavailable()
   if (candidate.event_type === 'system.event_store_gap' && facts.count_unknown !== true) return unavailable()
-  return Object.freeze({ ...candidate, facts: Object.freeze({ ...facts }), ...scope, schema_version: 1, outcome: rule.outcome, severity: rule.severity })
+  return Object.freeze({ ...candidate, facts: Object.freeze(facts), ...scope, schema_version: 1, outcome: rule.outcome, severity: rule.severity })
 }
 
 /** Replays freeze the first fact time, origin and retention, including current-state observations. */

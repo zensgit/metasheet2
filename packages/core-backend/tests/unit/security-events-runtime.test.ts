@@ -312,7 +312,12 @@ it('T26 cleanup enforces a total 1000-row batch and reports expired active work 
   const result = await repo.cleanup(true, 1000)
   expect(result).toEqual({ enabled: true, deliveries: 1000, events: 0, activeExpired: true, diagnostic: 'active_delivery_expired' })
   expect(trace.some(item => item.text.includes('DELETE FROM public.security_events '))).toBe(false)
-  expect(trace.find(item => item.text.includes('DELETE FROM public.security_event_deliveries'))?.values).toEqual([1000])
+  const deletion = trace.find(item => item.text.includes('DELETE FROM public.security_event_deliveries'))!
+  expect(deletion.values).toEqual([1000])
+  // Only terminal deliveries are deleted: the exact terminal set, and no active status.
+  const statuses = /\bstatus IN \(([^)]*)\)/.exec(deletion.text)
+  expect(statuses?.[1].split(',').map(item => item.trim()).sort()).toEqual(["'failed'", "'skipped'", "'succeeded'", "'unknown'"])
+  expect(deletion.text).not.toMatch(/queued|sending/)
   await expect(repo.cleanup(true, 1001)).rejects.toThrow('E1_WRITE_UNAVAILABLE')
 })
 
@@ -323,4 +328,32 @@ it('T04 committed identity conflicts retain diagnostics through the isolated poo
   client.query = vi.fn(async (text: string) => ({ rows: text.includes('FROM public.security_events') ? [row] : [] })) as EventSql['query']
   const repo = new SecurityEventRepository(new EventConnections({ connectionString: 'postgres://fixture/fixture' }, () => client), new W1Capacity(20))
   expect(await repo.appendCommitted(input, { kind: 'session', orgId: 'A' })).toEqual({ recorded: false, code: 'E1_WRITE_UNAVAILABLE', count_unknown: true, diagnostic: 'event_identity_conflict' })
+})
+
+it('T04 a retried negative zero count is the same fact as a stored 0, not an identity conflict', async () => {
+  const input: EventCandidate = { id: randomUUID(), producer: 'auth', event_type: 'auth.password_changed', source_kind: 'auth_operation', source_id: randomUUID(), source_step: 'password_changed', actor_kind: 'system', actor_user_id: null, subject_user_id: null, target_kind: null, target_id: null, reason_code: null, record_origin: 'live', occurred_at: '2026-11-22T00:00:00Z', facts: { affected_count: 0 } }
+  const authority = { kind: 'platform' as const, orgId: null }
+  // The row as the database returns it after the first write: a literal 0.
+  const stored = { ...input, scope_kind: 'system', org_id: null, schema_version: 1, outcome: 'succeeded', severity: 'info', facts: { affected_count: 0 } }
+  const { client, trace } = mockClient()
+  let conflict = false
+  client.query = vi.fn(async <R>(text: string, values?: unknown[]) => {
+    trace.push({ text, values })
+    if (text.includes('INSERT INTO public.security_events')) return { rows: (conflict ? [] : [{ id: input.id }]) as R[] }
+    return { rows: (text.includes('FROM public.security_events') ? [stored] : []) as R[] }
+  }) as EventSql['query']
+  const repo = new SecurityEventRepository(new EventConnections({ connectionString: 'postgres://fixture/fixture' }, () => client), new W1Capacity(20))
+  expect(await repo.appendCommitted(input, authority)).toEqual({ recorded: true, eventId: input.id })
+  conflict = true
+  const retried = { ...input, id: randomUUID(), facts: { affected_count: -0 } }
+  expect(await repo.appendCommitted(retried, authority)).toEqual({ recorded: true, eventId: input.id })
+  const inserted = trace.filter(item => item.text.includes('INSERT INTO public.security_events')).map(item => item.values!.find(value => value && typeof value === 'object') as Record<string, number>)
+  expect(inserted).toHaveLength(2)
+  for (const facts of inserted) expect(Object.is(facts.affected_count, 0)).toBe(true)
+  const { tx } = transaction()
+  const w1Sql: EventSql = { query: vi.fn(async <R>(text: string, values?: unknown[]) => {
+    if (text.includes('current_setting')) return { rows: [{ lock_timeout: '5ms', statement_timeout: '25ms' }] as R[] }
+    return client.query<R>(text, values)
+  }) as EventSql['query'] }
+  expect(await repo.appendW1({ ...tx, sql: w1Sql }, { ...retried, id: randomUUID() }, authority)).toBe(input.id)
 })
