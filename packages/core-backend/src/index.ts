@@ -716,6 +716,8 @@ export class MetaSheetServer {
     database: { transaction: yidaOwnerTransaction },
     fetch: globalThis.fetch.bind(globalThis),
     readEnablement: () => process.env.INTEGRATION_YIDA_CONNECTION_TEST_ENABLED,
+    // ADR addendum 2026-11-23: the one form-definition read inside the same test click; its own default-OFF switch.
+    readFormFieldsEnablement: () => process.env.INTEGRATION_YIDA_FORM_FIELDS_READ_ENABLED,
   })
   // R-71 ⑦.5 cut-over reconciliation: read-only paginated search + local insert-only evidence. Its own
   // default-OFF switch (exact 'true'), never the send switch; anchor owner + live admin re-proved per call.

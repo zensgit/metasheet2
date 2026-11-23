@@ -21,12 +21,12 @@ function harness(respond) {
   return { calls, probe }
 }
 
-test('binding is closed and frozen: exactly createConnectionProbe; probe exposes only probe()', () => {
+test('binding is closed and frozen: exactly createConnectionProbe; probe exposes only probe() and probeForm()', () => {
   const binding = createYidaConnectionProbeBinding()
   assert.deepEqual(Object.keys(binding), ['createConnectionProbe'])
   assert.equal(Object.isFrozen(binding), true)
   const probe = binding.createConnectionProbe({ fetch: async () => new Response(tokenBody()) })
-  assert.deepEqual(Object.keys(probe), ['probe'])
+  assert.deepEqual(Object.keys(probe), ['probe', 'probeForm'])
   assert.equal(Object.isFrozen(probe), true)
   for (const bad of [undefined, {}, { fetch: 'x' }, { fetch() {}, extra: 1 }, new Proxy({ fetch() {} }, {})]) {
     assert.throws(() => binding.createConnectionProbe(bad), YidaConnectionProbeError)

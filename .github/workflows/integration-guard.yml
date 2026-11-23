@@ -318,6 +318,7 @@ on:
       - 'packages/core-backend/tests/unit/automation-synthetic-preview-runtime.test.ts'
       - 'packages/core-backend/tests/unit/automation-synthetic-preview-yida-parity.test.ts'
       - 'packages/core-backend/tests/unit/integration/automation-live-authority.test.ts'
+      - 'packages/core-backend/tests/unit/yida-connection-test-form-fields.test.ts'
       - 'packages/core-backend/tests/unit/yida-connection-test-http-boundary.test.ts'
       - 'packages/core-backend/tests/unit/yida-connection-test-runtime.test.ts'
       - 'packages/core-backend/tests/unit/yida-host-capability-injection.test.ts'
