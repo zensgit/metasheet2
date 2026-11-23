@@ -4,8 +4,9 @@ import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { APPLICATION_SCHEMA_FINGERPRINT, eventSchemaDigest } from '../../src/security-events/schema'
 
 // Reviewed per-major approvals that the real-database T31 compares the migrated catalog against.
-// Every expected row below is written from the design lock section 2 tables (2.1 to 2.4),
-// independently of the migration, the registry and the fixtures, and compared for exact equality.
+// Every expected row below is a reviewed transcription of the design's section 2 tables (2.1 to 2.4), plus the
+// reviewed values the design leaves to the implementation (such as the individual reason codes). It does not import
+// the migration, the registry or the fixtures, and every row is compared for exact equality.
 let assertionCount = 0
 afterEach(() => { assertionCount += expect.getState().assertionCalls; expect(expect.getState().assertionCalls).toBeGreaterThan(0) })
 afterAll(() => { console.info('E1_ASSERTIONS_SCHEMA_APPROVALS=' + assertionCount) })
@@ -50,7 +51,7 @@ const SCOPES = ['organization', 'system']
 const PRODUCERS = ['directory', 'auth', 'security_action', 'authorization', 'admin_grant', 'deprovision', 'platform']
 const SEVERITIES = ['info', 'warning', 'error', 'critical']
 const OUTCOMES = ['succeeded', 'denied', 'failed', 'observed']
-// Lock 2.1 fixes reason_code as a closed set of fixed internal codes; the members are the codes the lock text names.
+// Section 2.1 fixes reason_code as a closed set of fixed internal codes; the members are this slice's reviewed codes.
 const REASONS = ['sync_failed', 'refusal_window', 'startup_tail_unverified', 'aggregation_overflow', 'source_missing', 'event_store_unavailable', 'scan_interrupted', 'empty_directory_fetch', 'batch_exceeds_max', 'redirect_refused']
 const ACTORS = ['user', 'system', 'anonymous']
 const TARGET_KINDS = ['integration', 'user', 'membership', 'grant', 'operation', 'run', 'component']
@@ -133,7 +134,7 @@ const constraint = (source: string, conname: string, contype: string, definition
 const constraintRows = (): Row[] => [
   ...Object.entries(CHECKS).flatMap(([table, checks]) => Object.entries(checks).map(([name, definition]) => constraint(table, name, 'c', definition))),
   constraint(EVENTS, 'security_events_pkey', 'p', 'PRIMARY KEY (id)'),
-  // Lock 2.1 :68 idempotency key; lock 2.3 :111 attempt key; the only FK, between the new tables (lock 2.3 :94).
+  // Section 2.1 idempotency key; section 2.3 attempt key; the only FK, between the new tables (section 2.3).
   constraint(EVENTS, 'se_source_unique', 'u', 'UNIQUE (producer, source_kind, source_id, source_step, event_type)'),
   constraint(DELIVERIES, 'security_event_deliveries_pkey', 'p', 'PRIMARY KEY (id)'),
   constraint(DELIVERIES, 'sed_unique', 'u', 'UNIQUE (event_id, channel, route_ref, attempt_no)'),
@@ -146,17 +147,17 @@ const index = (table: string, name: string, unique: boolean, columns: string, wh
   definition: `CREATE ${unique ? 'UNIQUE ' : ''}INDEX ${name} ON public.${table} USING btree (${columns})${where ? ` WHERE (${where})` : ''}`,
 })
 const indexRows = (): Row[] => [
-  // Lock 2.1 :78: organization and system time indexes, the unique key and the expiry cleanup index.
+  // Section 2.1: organization and system time indexes, the unique key and the expiry cleanup index.
   index(EVENTS, 'security_events_pkey', true, 'id', undefined, true),
   index(EVENTS, 'se_org_time', false, 'org_id, recorded_at DESC, id DESC', "scope_kind = 'organization'::text"),
   index(EVENTS, 'se_system_time', false, 'recorded_at DESC, id DESC', "scope_kind = 'system'::text"),
   index(EVENTS, 'se_source_unique', true, 'producer, source_kind, source_id, source_step, event_type'),
   index(EVENTS, 'se_expiry', false, 'expires_at, id'),
-  // DEVIATION from lock 2.1 :78 (composite indexes only after a measured need): present in the migration,
-  // recorded here exactly as they are, and awaiting an owner or lock-author ruling.
+  // Composite type-and-time indexes: section 2.1 adds composite indexes only after a measured need. They are present
+  // in the migration and recorded here exactly as they are while that is reviewed.
   index(EVENTS, 'se_org_type_time', false, 'org_id, event_type, recorded_at DESC, id DESC', "scope_kind = 'organization'::text"),
   index(EVENTS, 'se_system_type_time', false, 'event_type, recorded_at DESC, id DESC', "scope_kind = 'system'::text"),
-  // Lock 2.3 :111: attempt key, one queued or sending per event/channel/route, claim queue and detail order;
+  // Section 2.3: attempt key, one queued or sending per event/channel/route, claim queue and detail order;
   // lock 2.4 cleanup of terminal deliveries by expiry.
   index(DELIVERIES, 'security_event_deliveries_pkey', true, 'id', undefined, true),
   index(DELIVERIES, 'sed_unique', true, 'event_id, channel, route_ref, attempt_no'),

@@ -46,5 +46,6 @@ describe('E1-A required whole-file DB registration', () => {
     expect(db).toContain('expect(after).toEqual(baseline)')
     expect(db).toContain('expect(await currentCatalog()).toEqual(rawBaseline)')
     expect(source.match(/packages\/core-backend\/src\/security-events\/\*\*/g)).toHaveLength(2)
+    expect(source.match(/packages\/core-backend\/tests\/fixtures\/security-events\/\*\*/g)).toHaveLength(2)
   })
 })
