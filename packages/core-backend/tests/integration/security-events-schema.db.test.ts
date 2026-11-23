@@ -255,11 +255,14 @@ describe.sequential('E1-A PG14–17 migrated baseline, no producer wiring', () =
       expect(new Set([...backendIds, reader, business]).size).toBe(5)
       report.sameInstancePoolIsolation = { writers: 3, readers: 1, distinctBackends: 5, scopedReadSucceeded: true }
     } finally { release(); await Promise.allSettled(pending) }
+    // Every background slot is confirmed closed, so the next rejection is the budget path, not a full pool.
+    expect(connections.active.write).toBe(0)
     const started = performance.now()
     await expect(connections.writeTransaction('foreground', sql => sql.query('SELECT pg_sleep(1)'))).rejects.toThrow('E1_WRITE_UNAVAILABLE')
     expect(performance.now() - started).toBeLessThan(500)
     await admin.query('BEGIN'); await admin.query('LOCK TABLE public.security_events IN ACCESS EXCLUSIVE MODE')
     try {
+      expect(connections.active.write).toBeLessThan(3)
       const result = await repo.appendCommitted(event(), { kind: 'integration', orgId: 'e1a-org-A' })
       expect(result.recorded).toBe(false)
     } finally { await admin.query('ROLLBACK') }
