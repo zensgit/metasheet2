@@ -110,3 +110,41 @@ it.each(['', '/task_reminder/takeover-preview'])('prevents caching GET %s respon
   expect(response.status).toBe(200)
   expect(response.headers['cache-control']).toBe('no-store')
 })
+
+describe.each(['list', 'put', 'preview'] as const)('%s failure responses', method => {
+  const send = () => {
+    const client = request(app('default'))
+    if (method === 'put') return client.put(`${BASE}/task_reminder`).send({ expectedRevision: 1, state: 'paused' })
+    return client.get(method === 'list' ? BASE : `${BASE}/task_reminder/takeover-preview`)
+  }
+  const details = { code: 'synthetic-private-code', message: 'synthetic-private-message', nested: { value: 'synthetic-private-value' } }
+  it.each([
+    [new NotificationHttpError(503, 'NOTIFICATION_BUSY', details), 503, 'NOTIFICATION_BUSY'],
+    [new NotificationHttpError(503, 'NOTIFICATION_SCHEMA_UNAVAILABLE', details), 503, 'NOTIFICATION_SCHEMA_UNAVAILABLE'],
+    [new NotificationHttpError(503, 'synthetic-private-code', details), 500, 'INTERNAL'],
+    [new NotificationHttpError(500, 'NOTIFICATION_BUSY', details), 500, 'INTERNAL'],
+    [new NotificationHttpError(502, 'NOTIFICATION_SCHEMA_UNAVAILABLE', details), 500, 'INTERNAL'],
+    [new Error('synthetic-private-message'), 500, 'INTERNAL'],
+    [{ code: '55P03', message: 'synthetic-private-message' }, 503, 'NOTIFICATION_BUSY'],
+    [{ code: '42P01', message: 'synthetic-private-message' }, 503, 'NOTIFICATION_SCHEMA_UNAVAILABLE'],
+  ])('returns a literal body for failure %#', async (error, status, code) => {
+    service[method].mockRejectedValue(error)
+    const response = await send()
+    expect(service[method]).toHaveBeenCalledOnce()
+    expect(response.status).toBe(status)
+    expect(response.body).toEqual({ error: { code } })
+    expect(response.headers['cache-control']).toBe('no-store')
+  })
+  it.each([
+    [409, 'REVISION_CONFLICT', { revision: 3 }],
+    [422, 'INVALID_REQUEST', { fields: ['state'] }],
+    [429, 'TEST_SEND_RATE_LIMITED', { retryAfter: 7 }],
+  ] as const)('preserves typed %s details and headers', async (status, code, fields) => {
+    service[method].mockRejectedValue(new NotificationHttpError(status, code, fields))
+    const response = await send()
+    expect(service[method]).toHaveBeenCalledOnce()
+    expect(response.status).toBe(status)
+    expect(response.body).toEqual({ error: { code, ...fields } })
+    expect(response.headers['retry-after']).toBe(status === 429 ? '7' : undefined)
+  })
+})

@@ -2302,3 +2302,33 @@ describe('structural guard: routes/admin-notification-verifications.ts (mounted 
     ])
   })
 })
+
+const ADMIN_DIRECTORY_NOTIFICATION = 'admin-directory-notification.ts'
+
+function directoryNotificationScan(source: string) {
+  return scanResponseErrorEcho(ADMIN_DIRECTORY_NOTIFICATION, source)
+}
+
+describe('structural guard: routes/admin-directory-notification.ts (mounted outside the /api/admin tree)', () => {
+  it('scans all three literal 5xx exits and finds no caught-error text', () => {
+    const scan = directoryNotificationScan(readRoute(ADMIN_DIRECTORY_NOTIFICATION))
+    expect(scan.sinks.map(sink => sink.status).sort()).toEqual([500, 503, 503])
+    expect(scan.offenders).toEqual([])
+  })
+
+  it.each([
+    [503, 'NOTIFICATION_BUSY'],
+    [503, 'NOTIFICATION_SCHEMA_UNAVAILABLE'],
+    [500, 'INTERNAL'],
+  ])('flags a caught-error echo injected into %s %s', (status, code) => {
+    const source = readRoute(ADMIN_DIRECTORY_NOTIFICATION)
+    const injected = source.replace(
+      `res.status(${status}).json({ error: { code: '${code}' } })`,
+      `res.status(${status}).json({ error: { code: '${code}', message: (error as Error).message } })`,
+    )
+    expect(injected).not.toBe(source)
+    expect(directoryNotificationScan(injected).offenders).toEqual([
+      expect.objectContaining({ file: ADMIN_DIRECTORY_NOTIFICATION, status, reason: 'reads .message' }),
+    ])
+  })
+})

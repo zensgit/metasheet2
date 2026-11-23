@@ -16,7 +16,15 @@ function policyError(req: Request, res: Response, error: unknown): void {
   if (mapped instanceof NotificationHttpError) {
     logger.warn('notification_topic_policy_rejected', { code: mapped.code, topic: req.params.topic === 'task_reminder' ? 'task_reminder' : 'unknown' })
   }
-  respondError(res, error)
+  if (mapped instanceof NotificationHttpError && mapped.status >= 400 && mapped.status < 500) {
+    respondError(res, error)
+  } else if (mapped instanceof NotificationHttpError && mapped.status === 503 && mapped.code === 'NOTIFICATION_BUSY') {
+    res.status(503).json({ error: { code: 'NOTIFICATION_BUSY' } })
+  } else if (mapped instanceof NotificationHttpError && mapped.status === 503 && mapped.code === 'NOTIFICATION_SCHEMA_UNAVAILABLE') {
+    res.status(503).json({ error: { code: 'NOTIFICATION_SCHEMA_UNAVAILABLE' } })
+  } else {
+    res.status(500).json({ error: { code: 'INTERNAL' } })
+  }
 }
 const actorOf = (req: Request, actorId: string) => ({ actorId, authenticatedTenantId: req.authenticatedTenantId })
 const invalid = () => { throw new NotificationHttpError(422, 'INVALID_REQUEST') }
