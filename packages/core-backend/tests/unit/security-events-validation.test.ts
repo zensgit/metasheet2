@@ -158,3 +158,20 @@ it('T03 rejects leading-zero length prefixes for an otherwise identical source',
   expect(validateEvent({ ...summary, source_id: '1:B10:2026-11-22' }, authority).source_id).toBe('1:B10:2026-11-22')
   expect(() => validateEvent({ ...summary, source_id: '01:B010:2026-11-22' }, authority)).toThrow('E1_WRITE_UNAVAILABLE')
 })
+describe('E1-A one snapshot of each event', () => {
+  it('T03 each top-level value is read once and the returned value is the checked one', () => {
+    const [input, authority] = valid('auth.password_changed', null)
+    const reads: Record<string, number> = {}
+    const later = { source_step: 'free text', source_id: 'not a source', actor_kind: 'user' }
+    const candidate = {} as EventCandidate
+    for (const [key, value] of Object.entries(input)) {
+      Object.defineProperty(candidate, key, { enumerable: true, get: () => { reads[key] = (reads[key] ?? 0) + 1; return reads[key] === 1 ? value : (later as Record<string, unknown>)[key] ?? value } })
+    }
+    const row = validateEvent(candidate, authority)
+    expect(row.source_step).toBe(input.source_step)
+    expect(row.source_id).toBe(input.source_id)
+    expect(row.actor_kind).toBe('system')
+    expect(Object.values(reads).every(count => count === 1)).toBe(true)
+    expect(Object.keys(reads).sort()).toEqual(Object.keys(input).sort())
+  })
+})

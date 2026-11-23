@@ -213,6 +213,17 @@ describe('E1-A late handles, listener failures and failed runs', () => {
     closed.resolve()
     expect(await write).toBe('written')
   })
+  it('T20 a write handle stored by work that then fails is refused as well and never reaches the client', async () => {
+    const { client, trace } = permissiveClient()
+    const connections = new EventConnections({ connectionString: 'postgres://fixture/fixture' }, () => client)
+    let stored!: EventSql
+    await expect(connections.writeTransaction('foreground', async sql => { stored = sql; throw new Error('private work failure') })).rejects.toMatchObject({ code: 'E1_WRITE_UNAVAILABLE' })
+    expect(client.end).toHaveBeenCalledOnce()
+    const sent = (client.query as ReturnType<typeof vi.fn>).mock.calls.length
+    await expect(stored.query('SELECT late')).rejects.toMatchObject({ code: 'E1_WRITE_UNAVAILABLE', message: 'E1_WRITE_UNAVAILABLE' })
+    expect((client.query as ReturnType<typeof vi.fn>).mock.calls.length).toBe(sent)
+    expect(trace.some(x => x.text.startsWith('AFTER_END'))).toBe(false)
+  })
   it('T20 a throwing error-listener registration returns a fixed code and releases only after end is confirmed', async () => {
     const closes = [deferred(), deferred()]
     let made = 0
