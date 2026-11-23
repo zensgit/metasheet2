@@ -2,6 +2,7 @@
 import express from 'express'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
+import { usePinnedServer } from '../utils/pinned-server'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 const fixture = vi.hoisted(() => ({
@@ -35,6 +36,10 @@ import { createAdminDirectoryNotificationRouter } from '../../src/routes/admin-d
 import { createTopicPolicyService } from '../../src/notifications/topic-policy-service'
 import { resolveEffectiveIntegrationCapability } from '../../src/integrations/integration-capability-resolve'
 import type { RecipientResolver } from '../../src/notifications/recipient-resolver'
+
+// One listener per suite file: every request goes through it, and the app is swapped in just before each request.
+const pinned = usePinnedServer()
+const via = (app: Parameters<typeof pinned.setApp>[0]) => { pinned.setApp(app); return request(pinned.url()) }
 
 const ID = 'synthetic-policy-admin'
 const CONNECTION = '11111111-1111-4111-8111-111111111111'
@@ -78,24 +83,24 @@ afterEach(() => vi.unstubAllEnvs())
 
 it.each([CONNECTION, null])('A-U07/A-U08 signed default member succeeds for default %s', async connection => {
   const s = setup()
-  expect((await request(s.app).put(PATH).set('Authorization', `Bearer ${token('default')}`).send(body(connection))).status).toBe(200)
+  expect((await via(s.app).put(PATH).set('Authorization', `Bearer ${token('default')}`).send(body(connection))).status).toBe(200)
   expect(s.members).toHaveBeenCalledWith(expect.anything(), 'default', [ID])
   if (connection) expect(resolveEffectiveIntegrationCapability).toHaveBeenCalledWith(expect.anything(), { integrationId: connection, expectedOrgId: 'default', capability: 'notification' })
   else expect(resolveEffectiveIntegrationCapability).not.toHaveBeenCalled()
 })
 it.each([CONNECTION, null])('A-U07-c/A-U08 header cannot create a trusted tenant for %s', async connection => {
   const s = setup()
-  const r = await request(s.app).put(PATH).set('Authorization', `Bearer ${token()}`).set('x-tenant-id', 'default').send(body(connection))
+  const r = await via(s.app).put(PATH).set('Authorization', `Bearer ${token()}`).set('x-tenant-id', 'default').send(body(connection))
   expect(r.status).toBe(422); expect(r.body.error.code).toBe('ORG_MISSING')
   expect(s.query).not.toHaveBeenCalled(); expect(resolveEffectiveIntegrationCapability).not.toHaveBeenCalled()
 })
 it('A-U07-i normal verification removes a revoked membership tenant; trusted claims still cannot bypass the service member gate', async () => {
   member = false
   const s = setup()
-  let r = await request(s.app).put(PATH).set('Authorization', `Bearer ${token('default')}`).send(body())
+  let r = await via(s.app).put(PATH).set('Authorization', `Bearer ${token('default')}`).send(body())
   expect(r.status).toBe(422); expect(r.body.error.code).toBe('ORG_MISSING')
   vi.stubEnv('RBAC_TOKEN_TRUST', 'true')
-  r = await request(s.app).put(PATH).set('Authorization', `Bearer ${token('default')}`).send(body())
+  r = await via(s.app).put(PATH).set('Authorization', `Bearer ${token('default')}`).send(body())
   expect(r.status).toBe(403); expect(r.body.error.code).toBe('ORG_MISMATCH')
   expect(s.query).not.toHaveBeenCalled(); expect(resolveEffectiveIntegrationCapability).not.toHaveBeenCalled()
 })
@@ -103,7 +108,7 @@ it.each(['inactive', 'revoked'])('ordinary %s sessions fail before policy access
   if (mode === 'inactive') active = false
   else fixture.revoked.mockResolvedValue(true)
   const s = setup()
-  expect((await request(s.app).put(PATH).set('Authorization', `Bearer ${token('default')}`).send(body())).status).toBe(401)
+  expect((await via(s.app).put(PATH).set('Authorization', `Bearer ${token('default')}`).send(body())).status).toBe(401)
   expect(s.members).not.toHaveBeenCalled(); expect(s.query).not.toHaveBeenCalled()
 })
 it.each([
@@ -114,7 +119,7 @@ it.each([
   // Boundary fixture: eligibility of a persisted strict principal is separately tested by strict-dingtalk-entry.
   fixture.strict.mockResolvedValue({ ...user(), tenantId: tenant, strictSessionOrgId: tenant })
   const s = setup()
-  let r = request(s.app).put(PATH).set('Authorization', `Bearer ${token(tenant, true)}`)
+  let r = via(s.app).put(PATH).set('Authorization', `Bearer ${token(tenant, true)}`)
   if (header) r = r.set('x-tenant-id', header)
   const response = await r.send(body())
   expect(response.status).toBe(status)
@@ -124,6 +129,6 @@ it.each([
 it('A-U07-g a refused strict continuation never enters the management route', async () => {
   fixture.strict.mockResolvedValue(null)
   const s = setup()
-  expect((await request(s.app).put(PATH).set('Authorization', `Bearer ${token('default', true)}`).send(body())).status).toBe(401)
+  expect((await via(s.app).put(PATH).set('Authorization', `Bearer ${token('default', true)}`).send(body())).status).toBe(401)
   expect(s.members).not.toHaveBeenCalled(); expect(s.query).not.toHaveBeenCalled()
 })

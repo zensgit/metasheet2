@@ -1,10 +1,15 @@
 import express from 'express'
 import request from 'supertest'
+import { usePinnedServer } from '../utils/pinned-server'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createAdminDirectoryNotificationRouter } from '../../src/routes/admin-directory-notification'
 import { NotificationHttpError } from '../../src/notifications/notification-errors'
 import { Logger } from '../../src/core/logger'
 import type { TopicPolicyService } from '../../src/notifications/topic-policy-service'
+
+// One listener per suite file: every request goes through it, and the app is swapped in just before each request.
+const pinned = usePinnedServer()
+const via = (app: Parameters<typeof pinned.setApp>[0]) => { pinned.setApp(app); return request(pinned.url()) }
 
 vi.mock('../../src/routes/admin-directory', () => ({ ensurePlatformAdmin: async (req, res) => {
   if (req.user?.role !== 'admin') { res.status(403).json({ error: { code: 'FORBIDDEN' } }); return null }
@@ -36,18 +41,18 @@ beforeEach(() => {
 })
 describe('notification policy HTTP boundaries', () => {
   it('checks administrator before switch and data access', async () => {
-    expect((await request(app(undefined, false, false)).put(`${BASE}/task_reminder`).send({})).status).toBe(403)
+    expect((await via(app(undefined, false, false)).put(`${BASE}/task_reminder`).send({})).status).toBe(403)
     expect(service.put).not.toHaveBeenCalled(); expect(service.requireMember).not.toHaveBeenCalled()
   })
   it('keeps all three routes query-free when disabled', async () => {
     const server = app('default', false)
-    expect((await request(server).get(BASE)).status).toBe(404)
-    expect((await request(server).put(`${BASE}/task_reminder`).send({})).status).toBe(404)
-    expect((await request(server).get(`${BASE}/task_reminder/takeover-preview`)).status).toBe(404)
+    expect((await via(server).get(BASE)).status).toBe(404)
+    expect((await via(server).put(`${BASE}/task_reminder`).send({})).status).toBe(404)
+    expect((await via(server).get(`${BASE}/task_reminder/takeover-preview`)).status).toBe(404)
     for (const method of Object.values(service)) expect(method).not.toHaveBeenCalled()
   })
   it.each([undefined, 'other'])('refuses tenant %s before validating a malformed nonnull default', async tenant => {
-    const response = await request(app(tenant)).put(`${BASE}/task_reminder`).set('x-tenant-id', 'default')
+    const response = await via(app(tenant)).put(`${BASE}/task_reminder`).set('x-tenant-id', 'default')
       .send({ expectedRevision: 0, state: 'active', defaultConnectionId: 'bad' })
     expect(response.status).toBe(tenant ? 403 : 422)
     expect(response.body).toEqual({ error: { code: tenant ? 'ORG_MISMATCH' : 'ORG_MISSING' } })
@@ -55,24 +60,24 @@ describe('notification policy HTTP boundaries', () => {
     expect(service.requireMember.mock.calls[0][0].authenticatedTenantId).toBe(tenant)
   })
   it('uses only authenticatedTenantId rather than a body or header tenant', async () => {
-    const response = await request(app()).put(`${BASE}/task_reminder`).set('x-tenant-id', 'default')
+    const response = await via(app()).put(`${BASE}/task_reminder`).set('x-tenant-id', 'default')
       .send({ expectedRevision: 0, state: 'active', defaultConnectionId: '11111111-1111-4111-8111-111111111111', orgId: 'default' })
     expect(response.body).toEqual({ error: { code: 'ORG_MISSING' } }); expect(service.put).not.toHaveBeenCalled()
   })
   it.each(['orgId', 'userId', 'userid', 'email', 'mobile', 'url', 'webhook', 'address'])('rejects the unknown field %s', async key => {
-    expect((await request(app('default')).put(`${BASE}/task_reminder`).send({ expectedRevision: 1, state: 'paused', [key]: 'fixture' })).status).toBe(422)
+    expect((await via(app('default')).put(`${BASE}/task_reminder`).send({ expectedRevision: 1, state: 'paused', [key]: 'fixture' })).status).toBe(422)
     expect(service.put).not.toHaveBeenCalled()
   })
   it('passes omitted and explicit-null defaults distinctly to the service', async () => {
     const server = app()
-    expect((await request(server).put(`${BASE}/task_reminder`).send({ expectedRevision: 1, state: 'paused' })).status).toBe(200)
+    expect((await via(server).put(`${BASE}/task_reminder`).send({ expectedRevision: 1, state: 'paused' })).status).toBe(200)
     expect(Object.hasOwn(service.put.mock.calls[0][2], 'defaultConnectionId')).toBe(false)
-    expect((await request(server).put(`${BASE}/task_reminder`).send({ expectedRevision: 1, state: 'paused', defaultConnectionId: null })).status).toBe(200)
+    expect((await via(server).put(`${BASE}/task_reminder`).send({ expectedRevision: 1, state: 'paused', defaultConnectionId: null })).status).toBe(200)
     expect(service.put.mock.calls[1][2].defaultConnectionId).toBeNull()
     expect(service.requireMember).not.toHaveBeenCalled()
   })
   it('has no delete route', async () => {
-    expect((await request(app('default')).delete(`${BASE}/task_reminder`)).status).toBe(404)
+    expect((await via(app('default')).delete(`${BASE}/task_reminder`)).status).toBe(404)
   })
 })
 
@@ -81,7 +86,7 @@ it.each([undefined, 'other', 'default'])('null first takeover passes only truste
     await service.requireMember(actor)
     return { state: 'active' }
   })
-  const response = await request(app(tenant)).put(`${BASE}/task_reminder`).set('x-tenant-id', 'default')
+  const response = await via(app(tenant)).put(`${BASE}/task_reminder`).set('x-tenant-id', 'default')
     .send({ expectedRevision: 0, state: 'active', defaultConnectionId: null, confirmNoDefaultConnection: true })
   expect(response.status).toBe(tenant === 'default' ? 200 : tenant ? 403 : 422)
   expect(service.put.mock.calls[0][0]).toEqual({ actorId: 'fixture-user', authenticatedTenantId: tenant })
@@ -90,14 +95,14 @@ it.each([
   { expectedRevision: 0, state: 'active', confirmNoDefaultConnection: true },
   { expectedRevision: 0, state: 'paused', defaultConnectionId: null, confirmNoDefaultConnection: true },
 ])('refuses malformed first takeover at the HTTP boundary', async body => {
-  const response = await request(app('default')).put(`${BASE}/task_reminder`).send(body)
+  const response = await via(app('default')).put(`${BASE}/task_reminder`).send(body)
   expect(response.status).toBe(422); expect(response.body.error.code).toBe('INVALID_REQUEST')
   expect(service.put).not.toHaveBeenCalled()
 })
 it('logs refusal as code and a closed topic without request values', async () => {
   const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => {})
   try {
-    const response = await request(app()).put(`${BASE}/untrusted-topic`).send({ expectedRevision: 0, state: 'active', defaultConnectionId: 'private-value' })
+    const response = await via(app()).put(`${BASE}/untrusted-topic`).send({ expectedRevision: 0, state: 'active', defaultConnectionId: 'private-value' })
     expect(response.status).toBe(422)
     expect(warn).toHaveBeenCalledWith('notification_topic_policy_rejected', { code: 'ORG_MISSING', topic: 'unknown' })
     expect(JSON.stringify(warn.mock.calls)).not.toMatch(/private-value|fixture-user|untrusted-topic/)
@@ -106,14 +111,14 @@ it('logs refusal as code and a closed topic without request values', async () =>
 })
 
 it.each(['', '/task_reminder/takeover-preview'])('prevents caching GET %s responses', async suffix => {
-  const response = await request(app('default')).get(`${BASE}${suffix}`)
+  const response = await via(app('default')).get(`${BASE}${suffix}`)
   expect(response.status).toBe(200)
   expect(response.headers['cache-control']).toBe('no-store')
 })
 
 describe.each(['list', 'put', 'preview'] as const)('%s failure responses', method => {
   const send = () => {
-    const client = request(app('default'))
+    const client = via(app('default'))
     if (method === 'put') return client.put(`${BASE}/task_reminder`).send({ expectedRevision: 1, state: 'paused' })
     return client.get(method === 'list' ? BASE : `${BASE}/task_reminder/takeover-preview`)
   }
