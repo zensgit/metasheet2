@@ -39,6 +39,11 @@ async function waitForCondition(predicate: () => boolean, attempts = 40): Promis
   throw new Error('Condition not reached in time')
 }
 
+async function settleRendered(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  await nextTick()
+}
+
 function clearAuthorizationRecovery(): void {
   sessionStorage.removeItem(AUTHORIZATION_PENDING_KEY)
 }
@@ -2656,6 +2661,93 @@ describe('UserManagementView', () => {
     })
   })
 
+  it('keeps the current member session refresh spinning when an older read finishes', async () => {
+    let releaseAlpha: () => void = () => {}
+    let releaseBravo: () => void = () => {}
+    const alphaGate = new Promise<void>((resolve) => {
+      releaseAlpha = resolve
+    })
+    const bravoGate = new Promise<void>((resolve) => {
+      releaseBravo = resolve
+    })
+    let alphaReads = 0
+    let bravoReads = 0
+    let alphaSettled = false
+    const sessionItem = (id: string) => ({
+      id,
+      issuedAt: '2026-04-09T00:00:00.000Z',
+      expiresAt: '2026-04-10T00:00:00.000Z',
+      lastSeenAt: '2026-04-09T01:00:00.000Z',
+    })
+    const base = createApiImplementation(callLog)
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const pathname = new URL(String(input), 'http://localhost').pathname
+      const sessions = pathname.match(/^\/api\/admin\/users\/([^/]+)\/sessions$/)
+      if (sessions) {
+        const userId = decodeURIComponent(sessions[1] ?? '')
+        if (userId === 'user-1') {
+          alphaReads += 1
+          await alphaGate
+          return {
+            ok: true,
+            status: 200,
+            json: async () => {
+              setTimeout(() => {
+                alphaSettled = true
+              }, 0)
+              return { ok: true, data: { items: [sessionItem('stale-alpha')] } }
+            },
+          }
+        }
+        if (userId === 'user-2') {
+          bravoReads += 1
+          await bravoGate
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ ok: true, data: { items: [sessionItem('bravo-live')] } }),
+          }
+        }
+      }
+      return base(input, init)
+    })
+
+    function sessionRefreshButton(): HTMLButtonElement {
+      const section = Array.from(container!.querySelectorAll('.user-admin__section')).find((node) => node.querySelector('h3')?.textContent?.trim() === '会话')
+      const button = section?.querySelector('button')
+      if (!(button instanceof HTMLButtonElement)) throw new Error('session refresh missing')
+      return button
+    }
+
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(20)
+    await openListedUser(container!, 'Alpha')
+    await waitForCondition(() => alphaReads >= 1)
+    await openListedUser(container!, 'Bravo')
+    await waitForCondition(() => (
+      bravoReads >= 1
+      && sessionRefreshButton().textContent?.includes('刷新中...') === true
+    ))
+    releaseAlpha()
+    await waitForCondition(() => alphaSettled)
+    await settleRendered()
+    expect(container!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Bravo')
+    expect(sessionRefreshButton().textContent).toContain('刷新中...')
+    expect(container!.textContent).not.toContain('stale-alpha')
+
+    releaseBravo()
+    await waitForCondition(() => (
+      container!.textContent?.includes('bravo-live') === true
+      && sessionRefreshButton().textContent?.includes('刷新会话') === true
+    ))
+    await settleRendered()
+    expect(container!.textContent).toContain('bravo-live')
+    expect(container!.textContent).not.toContain('stale-alpha')
+    expect(sessionRefreshButton().textContent).toContain('刷新会话')
+  })
+
   describe('slice C: 加入默认组织 for a zero-org user (owner 2026-10-13)', () => {
     const JOIN_PATH = '/api/admin/directory/local/accounts'
     const ADMISSION_PATH = '/api/admin/users/user-1/member-admission'
@@ -2941,12 +3033,21 @@ describe('UserManagementView', () => {
       expect(container!.querySelector('[data-testid="member-admission-load-failure"]')).toBeNull()
     })
 
-    it('an admission whose userId is not the selected user never offers a join', async () => {
+    it('a member-admission success for another user clears the panel and records a load failure', async () => {
       installJoin(ZERO_ORG_CLEAR, { admissionUserId: 'user-other' })
-      await mountPage()
-      await waitForCondition(() => container!.querySelector('[data-testid="member-admission-org-none"]') !== null)
+      app = createApp(UserManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi(20)
+      await openListedUser(container!, 'Alpha')
+      await waitForCondition(() => container!.querySelector('[data-testid="member-admission-load-failure"]') !== null)
+      await settleRendered()
 
+      expect(container!.querySelector('[data-testid="member-admission-org-none"]')).toBeNull()
+      expect(container!.querySelector('[data-testid="member-admission-organizations"]')).toBeNull()
       expect(joinButton()).toBeNull()
+      expect(container!.textContent).not.toContain('user-other')
+      expect(container!.querySelector('[data-testid="member-admission-load-failure"]')!.textContent).toContain('成员准入信息暂时无法加载')
     })
 
     it('a confirm clicked after the selection moved (before the page re-rendered) posts nothing and says so', async () => {

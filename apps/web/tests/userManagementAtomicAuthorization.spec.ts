@@ -37,6 +37,13 @@ let statusGate: Promise<void> | null = null
 let statusMode: 'ok' | 'fail' = 'ok'
 let statusUserName = ''
 let statusBodyRead = false
+let statusContinuationSettled = false
+let committedTargetByOperation: Record<string, string> | null = null
+let holdAccessCall: { userId: string; index: number } | null = null
+let releaseHeldAccess: (() => void) | null = null
+let heldAccessEntered = false
+let heldAccessSettled = false
+let accessReadCounts: Record<string, number> = {}
 let applyRoleOnCommit = true
 let retainedGrants: unknown[] = []
 let richImpact = false
@@ -189,11 +196,12 @@ function installApi(): void {
           },
         })
       }
+      const committedTarget = committedTargetByOperation?.[clientOperationId] ?? 'user-1'
       return jsonResponse({
         status: 'committed',
         clientOperationId,
         receipt: {
-          targetUserId: 'user-1',
+          targetUserId: committedTarget,
           action: { kind: 'role.assign', roleId: 'finance_admin' },
           impact: emptyImpact([]),
           resultVersion: 'member-version-2',
@@ -227,6 +235,9 @@ function installApi(): void {
         status: statusMode === 'fail' ? 500 : 200,
         json: async () => {
           statusBodyRead = true
+          setTimeout(() => {
+            statusContinuationSettled = true
+          }, 0)
           return payload
         },
       }
@@ -235,7 +246,26 @@ function installApi(): void {
     if (accessMatch) {
       const userId = decodeURIComponent(accessMatch[1] ?? '')
       const user = users.find((item) => item.id === userId) ?? { id: userId, name: userId, role: 'user', is_active: true, is_admin: false }
-      return jsonResponse({ ok: true, data: { user, roles: rolesByUser[userId] ?? [], permissions: [], isAdmin: false } })
+      const accessIndex = accessReadCounts[userId] ?? 0
+      accessReadCounts[userId] = accessIndex + 1
+      const payload = { ok: true, data: { user, roles: rolesByUser[userId] ?? [], permissions: [], isAdmin: false } }
+      if (holdAccessCall && holdAccessCall.userId === userId && holdAccessCall.index === accessIndex) {
+        heldAccessEntered = true
+        await new Promise<void>((resolve) => {
+          releaseHeldAccess = resolve
+        })
+        return {
+          ok: true,
+          status: 200,
+          json: async () => {
+            setTimeout(() => {
+              heldAccessSettled = true
+            }, 0)
+            return payload
+          },
+        }
+      }
+      return jsonResponse(payload)
     }
     if (pathname.endsWith('/dingtalk-access')) {
       return jsonResponse({
@@ -283,6 +313,11 @@ async function flushUi(cycles = 8): Promise<void> {
     await Promise.resolve()
     await nextTick()
   }
+}
+
+async function settleRendered(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  await nextTick()
 }
 
 async function waitFor(predicate: () => boolean, attempts = 40): Promise<void> {
@@ -376,6 +411,13 @@ describe('member page atomic authorization', () => {
     statusMode = 'ok'
     statusUserName = ''
     statusBodyRead = false
+    statusContinuationSettled = false
+    committedTargetByOperation = null
+    holdAccessCall = null
+    releaseHeldAccess = null
+    heldAccessEntered = false
+    heldAccessSettled = false
+    accessReadCounts = {}
     applyRoleOnCommit = true
     retainedGrants = []
     richImpact = false
@@ -724,7 +766,8 @@ describe('member page atomic authorization', () => {
     expect(root!.querySelector('[data-testid="authorization-foreign-receipt"]')).toBeNull()
     sessionStorage.removeItem(PENDING_KEY)
     await openUser(root!, 'Alpha')
-    await flushUi(12)
+    await settleRendered()
+    expect(root!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Alpha')
     expect(root!.querySelector('[data-testid="authorization-foreign-receipt"]')).toBeNull()
     expect(root!.textContent).not.toContain('这次回执不是成员页的角色或准入变更')
     expect(commits()).toEqual([])
@@ -742,6 +785,7 @@ describe('member page atomic authorization', () => {
   function holdAccountStatus(): () => void {
     let release: () => void = () => {}
     statusBodyRead = false
+    statusContinuationSettled = false
     statusGate = new Promise<void>((resolve) => {
       release = () => {
         statusGate = null
@@ -761,7 +805,8 @@ describe('member page atomic authorization', () => {
 
     await openUser(root!, 'Bravo')
     release()
-    await waitFor(() => statusBodyRead)
+    await waitFor(() => statusContinuationSettled)
+    await settleRendered()
 
     expect(root!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Bravo')
     expect(root!.querySelector('[data-testid="selected-user-heading"]')?.textContent).not.toContain('Stale')
@@ -780,7 +825,8 @@ describe('member page atomic authorization', () => {
 
     await openUser(root!, 'Bravo')
     release()
-    await waitFor(() => statusBodyRead)
+    await waitFor(() => statusContinuationSettled)
+    await settleRendered()
 
     expect(root!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Bravo')
     expect(pageStatusText(root!)).not.toContain('更新用户状态失败')
@@ -802,11 +848,56 @@ describe('member page atomic authorization', () => {
     expect(root!.querySelector('[data-testid="selected-user-heading"]')?.textContent).not.toContain('Stale')
 
     release()
-    await waitFor(() => statusBodyRead)
+    await waitFor(() => statusContinuationSettled)
+    await settleRendered()
 
     expect(root!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Alpha')
     expect(root!.querySelector('[data-testid="selected-user-heading"]')?.textContent).not.toContain('Stale')
     expect(pageStatusText(root!)).not.toContain('账号已停用')
     expect(accountStatusButton(root!).textContent?.trim()).toBe('停用账号')
+  })
+
+  it('verifies the next member after the previous verification releases its latch', async () => {
+    const alphaOperationId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const bravoOperationId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+    lookupMode = 'committed'
+    committedTargetByOperation = {
+      [alphaOperationId]: 'user-1',
+      [bravoOperationId]: 'user-2',
+    }
+    rolesByUser['user-2'] = ['finance_admin']
+    holdAccessCall = { userId: 'user-1', index: 1 }
+    sessionStorage.setItem(PENDING_KEY, JSON.stringify({
+      formatVersion: 1,
+      entries: [
+        { principalId: 'admin-actor', targetId: 'user-1', clientOperationId: alphaOperationId },
+        { principalId: 'admin-actor', targetId: 'user-2', clientOperationId: bravoOperationId },
+      ],
+    }))
+    ;({ app, root } = await mountView())
+    try {
+      await openUser(root!, 'Alpha')
+      await waitFor(() => heldAccessEntered && Boolean(root!.querySelector('[data-testid="admin-authorization-dialog"]')))
+      const close = root!.querySelector('[data-testid="admin-authorization-close"]')
+      if (!(close instanceof HTMLButtonElement) || close.disabled) throw new Error('close missing')
+      close.click()
+      await waitFor(() => root!.querySelector('[data-testid="admin-authorization-dialog"]') === null)
+
+      await openUser(root!, 'Bravo')
+      await waitFor(() => calls.some((call) => call.url.includes(bravoOperationId)))
+      await settleRendered()
+      expect(root!.querySelector('[data-testid="admin-authorization-dialog"]')).toBeTruthy()
+      expect(root!.querySelector('[data-testid="admin-authorization-read-again"]')).toBeTruthy()
+      expect(root!.textContent).not.toContain('角色已分配，准入未开')
+
+      releaseHeldAccess?.()
+      await waitFor(() => heldAccessSettled && root!.textContent?.includes('角色已分配，准入未开') === true)
+      await settleRendered()
+      expect(root!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Bravo')
+      expect(root!.textContent).toContain('角色已分配，准入未开')
+      expect(root!.querySelector('[data-testid="admin-authorization-read-again"]')).toBeNull()
+    } finally {
+      releaseHeldAccess?.()
+    }
   })
 })

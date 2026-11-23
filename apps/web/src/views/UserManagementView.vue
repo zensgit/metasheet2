@@ -1993,7 +1993,7 @@ const suppressRecovery = ref(false)
 const foreignAuthorizationReceipt = ref(false)
 const submittedRequest = ref<AdminAuthorizationRequest | null>(null)
 let authorizationFaultCode = ''
-let authorizationVerifying = false
+let authorizationVerifyingToken: MemberToken | null = null
 
 function currentPrincipalId(): string {
   const reader = auth.getCurrentUser
@@ -2819,6 +2819,33 @@ function setMemberStatus(token: MemberToken, message: string, tone: 'info' | 'er
   statusMemberId = token.userId
 }
 
+let inviteReadSerial = 0
+let sessionReadSerial = 0
+let dingTalkReadSerial = 0
+let admissionReadSerial = 0
+
+function releaseOwnedLoading(
+  flag: { value: boolean },
+  ownedSerial: number,
+  currentSerial: number,
+  token: MemberToken | null,
+): void {
+  if (ownedSerial !== currentSerial) return
+  if (token && !memberTokenCurrent(token)) return
+  flag.value = false
+}
+
+function resetMemberLoadingFlags(): void {
+  inviteReadSerial += 1
+  sessionReadSerial += 1
+  dingTalkReadSerial += 1
+  admissionReadSerial += 1
+  loadingInvites.value = false
+  loadingSessions.value = false
+  loadingDingTalk.value = false
+  loadingAdmission.value = false
+}
+
 function assignAccessSnapshot(token: MemberToken, snapshot: UserAccess): boolean {
   if (!memberTokenCurrent(token) || !userAccessSnapshotMatches(snapshot, token.userId)) return false
   access.value = snapshot
@@ -2833,6 +2860,7 @@ function dingTalkPayloadMatches(value: unknown, userId: string): boolean {
 }
 
 function resetMemberScopedState(): void {
+  resetMemberLoadingFlags()
   userAccessReadGeneration.value = nextAccessReadGeneration(userAccessReadGeneration.value)
   if (busyToken && !memberTokenCurrent(busyToken)) {
     busy.value = false
@@ -3577,6 +3605,7 @@ async function loadInviteRecords(userId?: string): Promise<void> {
   const token: MemberToken | null = userId
     ? { userId, generation: userAccessReadGeneration.value }
     : null
+  const ownedSerial = ++inviteReadSerial
   loadingInvites.value = true
   try {
     const params = new URLSearchParams({ page: '1', pageSize: '10' })
@@ -3613,7 +3642,7 @@ async function loadInviteRecords(userId?: string): Promise<void> {
     if (token) setMemberStatus(token, message, 'error')
     else setStatus(message, 'error')
   } finally {
-    loadingInvites.value = false
+    releaseOwnedLoading(loadingInvites, ownedSerial, inviteReadSerial, token)
   }
 }
 
@@ -3623,6 +3652,7 @@ async function loadUserSessions(userId?: string): Promise<void> {
     return
   }
   const token: MemberToken = { userId, generation: userAccessReadGeneration.value }
+  const ownedSerial = ++sessionReadSerial
 
   loadingSessions.value = true
   try {
@@ -3652,7 +3682,7 @@ async function loadUserSessions(userId?: string): Promise<void> {
     if (!memberTokenCurrent(token)) return
     setMemberStatus(token, error instanceof Error ? error.message : '加载用户会话失败', 'error')
   } finally {
-    loadingSessions.value = false
+    releaseOwnedLoading(loadingSessions, ownedSerial, sessionReadSerial, token)
   }
 }
 
@@ -3744,6 +3774,7 @@ async function loadDingTalkAccess(userId?: string): Promise<void> {
     return
   }
   const token: MemberToken = { userId, generation: userAccessReadGeneration.value }
+  const ownedSerial = ++dingTalkReadSerial
 
   loadingDingTalk.value = true
   try {
@@ -3764,7 +3795,7 @@ async function loadDingTalkAccess(userId?: string): Promise<void> {
     dingtalkAccess.value = null
     dingtalkAccessLoadFailure.value = { correlationId: null }
   } finally {
-    loadingDingTalk.value = false
+    releaseOwnedLoading(loadingDingTalk, ownedSerial, dingTalkReadSerial, token)
   }
 }
 
@@ -3775,6 +3806,7 @@ async function loadMemberAdmission(userId?: string): Promise<void> {
     return
   }
   const token: MemberToken = { userId, generation: userAccessReadGeneration.value }
+  const ownedSerial = ++admissionReadSerial
 
   loadingAdmission.value = true
   try {
@@ -3788,19 +3820,20 @@ async function loadMemberAdmission(userId?: string): Promise<void> {
       return
     }
 
-    const data = payload.data as Record<string, unknown> | undefined
-    memberAdmission.value = {
-      ...(data as MemberAdmission),
-      namespaceAdmissions: normalizeNamespaceAdmissions(data?.namespaceAdmissions),
-      organizations: normalizeMemberOrganizations(data?.organizations),
+    const admission = memberAdmissionFromData(payload.data as Record<string, unknown> | undefined)
+    if (admission.userId !== token.userId) {
+      memberAdmission.value = null
+      memberAdmissionLoadFailure.value = { correlationId: null }
+      return
     }
+    memberAdmission.value = admission
     memberAdmissionLoadFailure.value = null
   } catch {
     if (!memberTokenCurrent(token)) return
     memberAdmission.value = null
     memberAdmissionLoadFailure.value = { correlationId: null }
   } finally {
-    loadingAdmission.value = false
+    releaseOwnedLoading(loadingAdmission, ownedSerial, admissionReadSerial, token)
   }
 }
 
@@ -4849,14 +4882,23 @@ async function previewAtomic(request: AdminAuthorizationRequest): Promise<void> 
 }
 
 async function finishCommittedAuthorization(token: MemberToken): Promise<void> {
-  if (!memberTokenCurrent(token) || authorizationVerifying || authorizationDetached.value) return
+  if (!memberTokenCurrent(token) || authorizationDetached.value) return
   if (authorizationOperation.phase.value !== 'committed') return
-  authorizationVerifying = true
+  if (authorizationVerifyingToken) return
+  authorizationVerifyingToken = token
   try {
     await authorizationOperation.verify()
     await authorizationOperation.whenSettled()
   } finally {
-    authorizationVerifying = false
+    const owner = authorizationVerifyingToken
+    const ownerStale = owner !== null && !memberTokenCurrent(owner)
+    if (owner && owner.generation === token.generation && owner.userId === token.userId) {
+      authorizationVerifyingToken = null
+    }
+    if (ownerStale) {
+      const next = currentMemberToken()
+      if (memberTokenCurrent(next)) void finishCommittedAuthorization(next)
+    }
   }
   if (!memberTokenCurrent(token) || authorizationDetached.value) return
   const settledReceipt = authorizationOperation.receipt.value
@@ -5008,9 +5050,16 @@ function closeAuthorizationPanel(): void {
 }
 
 function presentRecoveredAuthorization(): void {
-  if (suppressRecovery.value || authorizationPanelHeld.value || authorizationDetached.value) return
-  if (authorizationDraft.value) return
+  if (suppressRecovery.value || authorizationDetached.value) return
   const phase = authorizationOperation.phase.value
+  // The panel opens while the stored lookup is still pending. When that lookup
+  // later commits, the panel is already held, so the committed read-back has to
+  // start from here. A verification already in flight keeps the latch and returns.
+  if (authorizationPanelHeld.value) {
+    if (phase === 'committed') void finishCommittedAuthorization(currentMemberToken())
+    return
+  }
+  if (authorizationDraft.value) return
   if (phase !== 'pending' && phase !== 'committed' && phase !== 'unverified_no_read') return
   const receipt = authorizationOperation.receipt.value
   foreignAuthorizationReceipt.value = Boolean(

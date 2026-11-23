@@ -39,6 +39,11 @@ async function waitForCondition(predicate: () => boolean, attempts = 40): Promis
   throw new Error('Condition not reached in time')
 }
 
+async function settleRendered(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  await nextTick()
+}
+
 function createJsonResponse(payload: unknown, status = 200) {
   return {
     ok: status >= 200 && status < 300,
@@ -5104,9 +5109,15 @@ describe('RoleDelegationView', () => {
     await waitForCondition(() => container?.querySelector('.delegation-page__panel--detail h2')?.textContent?.includes('Bravo') === true)
     expect(statusText()).not.toContain('还不能确认这次授权是否已经提交')
     sessionStorage.removeItem(ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY)
+    const alphaAccessReads = () => callLog.filter((url) => url.includes('/api/admin/role-delegation/users/user-1/access')).length
+    const readsBeforeReturn = alphaAccessReads()
     clickListedUser('alpha@example.com')
-    await waitForCondition(() => container?.querySelector('.delegation-page__panel--detail h2')?.textContent?.includes('Alpha') === true)
-    await flushUi(8)
+    await waitForCondition(() => (
+      alphaAccessReads() > readsBeforeReturn
+      && container?.querySelector('.delegation-page__panel--detail h2')?.textContent?.includes('Alpha') === true
+    ))
+    await settleRendered()
+    expect(container?.querySelector('.delegation-page__panel--detail h2')?.textContent).toContain('Alpha')
     expect(statusText()).not.toContain('还不能确认这次授权是否已经提交')
     expect(container?.querySelector('[data-testid="delegation-restored-read-again"]')).toBeNull()
     expect(container?.querySelector('[data-testid="delegation-confirmation-read-again"]')).toBeNull()
@@ -5210,6 +5221,8 @@ describe('RoleDelegationView', () => {
 
     releaseAlphaCommit()
     await waitForCondition(() => alphaCommitRead && statusText().includes('角色已分配，准入未开'))
+    await settleRendered()
+    expect(container?.querySelector('.delegation-page__panel--detail h2')?.textContent).toContain('Bravo')
     expect(statusText()).not.toContain('还不能确认这次授权是否已经提交')
     expect(statusText()).not.toContain('lost')
     expect(container?.querySelector('.delegation-page__panel--detail h2')?.textContent).toContain('Bravo')
@@ -5227,6 +5240,7 @@ describe('RoleDelegationView', () => {
       releaseAlphaCommit = resolve
     })
     let alphaCommitRead = false
+    let alphaCommitSettled = false
     apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string; body?: string }) => {
       const rawUrl = String(input)
       callLog.push(rawUrl)
@@ -5265,6 +5279,9 @@ describe('RoleDelegationView', () => {
           },
         }, 200, () => {
           alphaCommitRead = true
+          setTimeout(() => {
+            alphaCommitSettled = true
+          }, 0)
         })
       }
       if (pathname.startsWith(`${ADMIN_AUTHORIZATION_OPERATIONS_PATH}/`)) {
@@ -5295,10 +5312,266 @@ describe('RoleDelegationView', () => {
     expect(container?.querySelector('.delegation-page__panel--detail h2')?.textContent).toContain('Bravo')
 
     releaseAlphaCommit()
-    await waitForCondition(() => alphaCommitRead)
+    await waitForCondition(() => alphaCommitSettled)
+    await settleRendered()
+    expect(container?.querySelector('.delegation-page__panel--detail h2')?.textContent).toContain('Bravo')
     expect(statusText()).toContain('还不能确认这次授权是否已经提交')
     expect(statusText()).not.toContain('角色已分配，准入未开')
     expect(container?.querySelector('[data-testid="delegation-restored-read-again"]')).toBeTruthy()
     expect(container?.querySelector('.delegation-page__panel--detail h2')?.textContent).toContain('Bravo')
+  })
+
+  function detailHeading(): string {
+    return container?.querySelector('.delegation-page__panel--detail h2')?.textContent || ''
+  }
+
+  it('keeps a selected member group completion off the page after the selection moves', async () => {
+    const alpha = { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true }
+    const bravo = { id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true }
+    let releaseAssign: () => void = () => {}
+    const assignGate = new Promise<void>((resolve) => {
+      releaseAssign = resolve
+    })
+    let assignSettled = false
+    const detailReads = () => callLog.filter((url) => {
+      try {
+        return new URL(url, 'http://localhost').pathname === '/api/admin/role-delegation/member-groups/group-1'
+      } catch {
+        return false
+      }
+    }).length
+    const scopeFor = (user: typeof alpha) => ({
+      ok: true,
+      data: {
+        actorId: 'admin-1',
+        user,
+        adminNamespaces: ['crm'],
+        scopeAssignments: [],
+        groupAssignments: [],
+      },
+    })
+    apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string; body?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: [], roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/departments') return createJsonResponse({ ok: true, data: { items: [] } })
+      if (pathname === '/api/admin/role-delegation/scope-templates') return createJsonResponse({ ok: true, data: { items: [] } })
+      if (pathname === '/api/admin/role-delegation/member-groups') {
+        return createJsonResponse({
+          ok: true,
+          data: { items: [{ id: 'group-1', name: '制造中心', description: '制造中心成员集', memberCount: 1 }] },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/member-groups/group-1') {
+        return createJsonResponse({
+          ok: true,
+          data: { item: { id: 'group-1', name: '制造中心', description: '制造中心成员集', memberCount: 1, members: [] } },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({ ok: true, data: { items: [alpha, bravo] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        return createJsonResponse({ ok: true, data: delegationAccess('user-1', 'Alpha', 'alpha@example.com', []) })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-2/access') {
+        return createJsonResponse({ ok: true, data: delegationAccess('user-2', 'Bravo', 'bravo@example.com', []) })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/scopes') return createJsonResponse(scopeFor(alpha))
+      if (pathname === '/api/admin/role-delegation/users/user-2/scopes') return createJsonResponse(scopeFor(bravo))
+      if (pathname === '/api/admin/role-delegation/users/user-1/member-groups/assign' && init?.method === 'POST') {
+        await assignGate
+        return deferredJsonResponse({
+          ok: true,
+          data: {
+            user: alpha,
+            roles: [],
+            memberGroups: [{ id: 'group-1', name: '制造中心' }],
+          },
+        }, 200, () => {
+          setTimeout(() => {
+            assignSettled = true
+          }, 0)
+        })
+      }
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    await mountDelegation()
+    await waitForCondition(() => {
+      const button = Array.from(container!.querySelectorAll('button')).find((item) => item.textContent?.includes('将当前成员加入成员集'))
+      return button instanceof HTMLButtonElement && !button.disabled
+    })
+    const detailsBefore = detailReads()
+    findButtonByText(container!, '将当前成员加入成员集').click()
+    await waitForCondition(() => callLog.some((url) => url.includes('/member-groups/assign')))
+    clickListedUser('bravo@example.com')
+    await waitForCondition(() => detailHeading().includes('Bravo'))
+    releaseAssign()
+    await waitForCondition(() => assignSettled && detailReads() >= detailsBefore + 1)
+    await settleRendered()
+    expect(detailReads()).toBeGreaterThanOrEqual(detailsBefore + 1)
+    expect(detailHeading()).toContain('Bravo')
+    expect(container?.textContent).not.toContain('成员已加入平台成员集')
+    expect(container?.textContent).not.toContain('保存成员集成员失败')
+    expect(statusText()).not.toContain('成员已加入平台成员集')
+  })
+
+  function installHeldScopeReload(reloadItems: Array<Record<string, unknown>>) {
+    let releaseReload: () => void = () => {}
+    const reloadGate = new Promise<void>((resolve) => {
+      releaseReload = resolve
+    })
+    let usersReads = 0
+    let usersReloadSettled = false
+    const alpha = { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true }
+    const bravo = { id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true }
+    const department = {
+      directoryDepartmentId: 'dept-1', integrationId: 'ding', integrationName: '目录', provider: 'dingtalk',
+      corpId: null, externalDepartmentId: 'ext-1', departmentName: '可选部门', departmentFullPath: '可选部门', departmentActive: true,
+    }
+    const scopeFor = (user: { id: string; email: string; name: string }) => ({
+      ok: true,
+      data: {
+        actorId: 'admin-1',
+        user: { ...user, role: 'user', is_active: true },
+        adminNamespaces: ['crm'],
+        scopeAssignments: [{
+          ...department,
+          id: 'scope-saved',
+          namespace: 'crm',
+          departmentName: '已保存部门',
+          departmentFullPath: '已保存部门',
+          includeChildren: true,
+        }],
+        groupAssignments: [],
+      },
+    })
+    apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string; body?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: [], roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/departments') return createJsonResponse({ ok: true, data: { items: [department] } })
+      if (pathname === '/api/admin/role-delegation/member-groups' || pathname === '/api/admin/role-delegation/scope-templates') {
+        return createJsonResponse({ ok: true, data: { items: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        usersReads += 1
+        const reload = usersReads > 1
+        if (reload) await reloadGate
+        return {
+          ok: true,
+          status: 200,
+          json: async () => {
+            if (reload) {
+              setTimeout(() => {
+                usersReloadSettled = true
+              }, 0)
+            }
+            return { ok: true, data: { items: reload ? reloadItems : [alpha, bravo] } }
+          },
+        }
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        return createJsonResponse({ ok: true, data: delegationAccess('user-1', 'Alpha', 'alpha@example.com', []) })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-2/access') {
+        return createJsonResponse({ ok: true, data: delegationAccess('user-2', 'Bravo', 'bravo@example.com', []) })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/scopes') return createJsonResponse(scopeFor(alpha))
+      if (pathname === '/api/admin/role-delegation/users/user-2/scopes') return createJsonResponse(scopeFor(bravo))
+      if (pathname.endsWith('/scopes/assign') && init?.method === 'POST') return createJsonResponse(scopeFor(alpha))
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    return {
+      release: () => releaseReload(),
+      reads: () => usersReads,
+      settled: () => usersReloadSettled,
+    }
+  }
+
+  async function saveDepartmentScope(): Promise<void> {
+    await waitForCondition(() => (container?.textContent || '').includes('可选部门'))
+    const departmentSelect = Array.from(container!.querySelectorAll('select')).find((select) => select.textContent?.includes('可选部门')) as HTMLSelectElement
+    departmentSelect.value = 'dept-1'
+    departmentSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    await waitForCondition(() => {
+      const button = Array.from(container!.querySelectorAll('button')).find((item) => item.textContent?.includes('添加部门范围'))
+      return button instanceof HTMLButtonElement && !button.disabled
+    })
+    findButtonByText(container!, '添加部门范围').click()
+  }
+
+  it('notes that an unpinned member left scope when the reload omits them', async () => {
+    const harness = installHeldScopeReload([
+      { id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true },
+    ])
+    await mountDelegation()
+    await saveDepartmentScope()
+    await waitForCondition(() => harness.reads() > 1)
+    harness.release()
+    await waitForCondition(() => harness.settled())
+    await settleRendered()
+    expect(harness.settled()).toBe(true)
+    expect(statusText()).toContain('该成员已不在可管理范围内')
+    expect(container?.textContent).toContain('请选择一个成员')
+    expect(detailHeading()).toBe('')
+  })
+
+  it('notes that a disabled member left scope after the reload', async () => {
+    const harness = installHeldScopeReload([
+      { id: 'user-1', name: 'Alpha', selectable: false, disabledReason: '不在管理范围' },
+      { id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true },
+    ])
+    await mountDelegation()
+    await saveDepartmentScope()
+    await waitForCondition(() => harness.reads() > 1)
+    harness.release()
+    await waitForCondition(() => harness.settled())
+    await settleRendered()
+    expect(harness.settled()).toBe(true)
+    expect(statusText()).toContain('该成员已不在可管理范围内')
+    expect(container?.textContent).toContain('请选择一个成员')
+    expect(detailHeading()).toBe('')
+  })
+
+  it('keeps a pinned member who disappears from the reloaded page', async () => {
+    window.history.replaceState({}, '', '/admin/role-delegation?userId=user-1')
+    const harness = installHeldScopeReload([
+      { id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true },
+    ])
+    await mountDelegation()
+    await waitForCondition(() => detailHeading().includes('Alpha'))
+    await saveDepartmentScope()
+    await waitForCondition(() => harness.reads() > 1)
+    harness.release()
+    await waitForCondition(() => harness.settled() && statusText().includes('插件管理员部门范围已添加'))
+    await settleRendered()
+    expect(detailHeading()).toContain('Alpha')
+    expect(statusText()).toContain('插件管理员部门范围已添加')
+    expect(statusText()).not.toContain('该成员已不在可管理范围内')
+  })
+
+  it('does not note that the previous member left scope after a real switch', async () => {
+    const harness = installHeldScopeReload([
+      { id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true },
+    ])
+    await mountDelegation()
+    await saveDepartmentScope()
+    await waitForCondition(() => harness.reads() > 1)
+    clickListedUser('bravo@example.com')
+    await waitForCondition(() => detailHeading().includes('Bravo'))
+    harness.release()
+    await waitForCondition(() => harness.settled() && !container?.textContent?.includes('alpha@example.com'))
+    await settleRendered()
+    expect(detailHeading()).toContain('Bravo')
+    expect(container?.textContent).not.toContain('alpha@example.com')
+    expect(statusText()).not.toContain('该成员已不在可管理范围内')
   })
 })

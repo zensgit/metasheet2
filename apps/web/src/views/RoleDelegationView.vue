@@ -2582,18 +2582,13 @@ async function refreshAfterScopeWrite(targetUserId: string, successMessage: stri
   await loadUsers({ reselectPinned: false })
   if (usersForbidden.value) return
   const candidate = users.value.find((user) => user.id === targetUserId)
-  // Disabled is a denial. A linked member missing from this search page is not.
-  // loadUsers may already have cleared the selection. The note still applies when
-  // that clear advanced this operation's generation by exactly one.
-  if (candidate?.selectable === false) {
+  // Disabled is a denial. An unpinned member missing from this search page is too.
+  // A pinned member missing from the page is not. loadUsers may already have cleared
+  // the selection. The note still applies only when that clear advanced this
+  // operation's generation by exactly one, so a real switch to someone else stays quiet.
+  if (candidate?.selectable === false || (!candidate && targetUserId !== initialPinnedUserId)) {
     const stillCurrent = memberTokenCurrent(token)
     if (stillCurrent) invalidateSelection()
-    noteMemberLeftScope(token, '该成员已不在可管理范围内')
-    return
-  }
-  if (!memberTokenCurrent(token)) return
-  if (!candidate && targetUserId !== initialPinnedUserId) {
-    invalidateSelection()
     noteMemberLeftScope(token, '该成员已不在可管理范围内')
     return
   }
@@ -2752,9 +2747,13 @@ async function updateUserMemberGroup(action: 'assign' | 'unassign', userIdOverri
     if (selectedMemberGroupId.value) {
       await selectMemberGroup(selectedMemberGroupId.value)
     }
-    setStatus(action === 'assign' ? '成员已加入平台成员集' : '成员已移出平台成员集')
+    const message = action === 'assign' ? '成员已加入平台成员集' : '成员已移出平台成员集'
+    if (accessToken) setMemberStatus(accessToken, message)
+    else setStatus(message)
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '保存成员集成员失败', 'error')
+    const message = error instanceof Error ? error.message : '保存成员集成员失败'
+    if (accessToken) setMemberStatus(accessToken, message, 'error')
+    else setStatus(message, 'error')
   } finally {
     groupBusy.value = false
   }
