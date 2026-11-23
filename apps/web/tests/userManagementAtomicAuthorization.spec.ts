@@ -33,6 +33,10 @@ let commitMode: 'ok' | 'conflict' | 'last-admin' | 'throw' | 'malformed' | 'hold
 let previewMode: 'ok' | 'missing' | 'unavailable' | 'last-admin' = 'ok'
 let lookupMode: 'committed' | 'unknown' | 'direct' = 'unknown'
 let releaseCommit: (() => void) | null = null
+let statusGate: Promise<void> | null = null
+let statusMode: 'ok' | 'fail' = 'ok'
+let statusUserName = ''
+let statusBodyRead = false
 let applyRoleOnCommit = true
 let retainedGrants: unknown[] = []
 let richImpact = false
@@ -196,6 +200,37 @@ function installApi(): void {
         },
       })
     }
+    const statusMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/status$/)
+    if (statusMatch && method === 'PATCH') {
+      const userId = decodeURIComponent(statusMatch[1] ?? '')
+      const gate = statusGate
+      if (gate) await gate
+      const listed = users.find((item) => item.id === userId)
+      const payload = statusMode === 'fail'
+        ? { ok: false, error: { message: 'status failed' } }
+        : {
+            ok: true,
+            data: {
+              user: {
+                ...(listed ?? { id: userId, email: '', role: 'user', is_admin: false }),
+                id: userId,
+                name: statusUserName || listed?.name || userId,
+                is_active: body?.isActive === true,
+              },
+              roles: [...(rolesByUser[userId] ?? [])],
+              permissions: [],
+              isAdmin: false,
+            },
+          }
+      return {
+        ok: statusMode !== 'fail',
+        status: statusMode === 'fail' ? 500 : 200,
+        json: async () => {
+          statusBodyRead = true
+          return payload
+        },
+      }
+    }
     const accessMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/access$/)
     if (accessMatch) {
       const userId = decodeURIComponent(accessMatch[1] ?? '')
@@ -337,6 +372,10 @@ describe('member page atomic authorization', () => {
     previewMode = 'ok'
     lookupMode = 'unknown'
     releaseCommit = null
+    statusGate = null
+    statusMode = 'ok'
+    statusUserName = ''
+    statusBodyRead = false
     applyRoleOnCommit = true
     retainedGrants = []
     richImpact = false
@@ -689,5 +728,85 @@ describe('member page atomic authorization', () => {
     expect(root!.querySelector('[data-testid="authorization-foreign-receipt"]')).toBeNull()
     expect(root!.textContent).not.toContain('这次回执不是成员页的角色或准入变更')
     expect(commits()).toEqual([])
+  })
+
+  function accountStatusButton(root: HTMLElement): HTMLButtonElement {
+    const button = Array.from(root.querySelectorAll('button')).find((item) => {
+      const label = item.textContent?.trim()
+      return label === '停用账号' || label === '启用账号'
+    })
+    if (!(button instanceof HTMLButtonElement)) throw new Error('account status button missing')
+    return button
+  }
+
+  function holdAccountStatus(): () => void {
+    let release: () => void = () => {}
+    statusBodyRead = false
+    statusGate = new Promise<void>((resolve) => {
+      release = () => {
+        statusGate = null
+        resolve()
+      }
+    })
+    return release
+  }
+
+  it('ignores a late account-status success for the previous member', async () => {
+    statusUserName = 'Stale Alpha'
+    ;({ app, root } = await mountView())
+    await openUser(root!, 'Alpha')
+    const release = holdAccountStatus()
+    accountStatusButton(root!).click()
+    await waitFor(() => calls.some((call) => call.method === 'PATCH' && call.url.includes('/users/user-1/status')))
+
+    await openUser(root!, 'Bravo')
+    release()
+    await waitFor(() => statusBodyRead)
+
+    expect(root!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Bravo')
+    expect(root!.querySelector('[data-testid="selected-user-heading"]')?.textContent).not.toContain('Stale')
+    expect(pageStatusText(root!)).not.toContain('账号已停用')
+    expect(pageStatusText(root!)).not.toContain('账号已启用')
+    expect(accountStatusButton(root!).textContent?.trim()).toBe('停用账号')
+  })
+
+  it('ignores a late account-status failure for the previous member', async () => {
+    statusMode = 'fail'
+    ;({ app, root } = await mountView())
+    await openUser(root!, 'Alpha')
+    const release = holdAccountStatus()
+    accountStatusButton(root!).click()
+    await waitFor(() => calls.some((call) => call.method === 'PATCH' && call.url.includes('/users/user-1/status')))
+
+    await openUser(root!, 'Bravo')
+    release()
+    await waitFor(() => statusBodyRead)
+
+    expect(root!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Bravo')
+    expect(pageStatusText(root!)).not.toContain('更新用户状态失败')
+    expect(pageStatusText(root!)).not.toContain('status failed')
+    expect(accountStatusButton(root!).textContent?.trim()).toBe('停用账号')
+  })
+
+  it('ignores the first account-status response when that member is selected again', async () => {
+    statusUserName = 'Stale Alpha'
+    ;({ app, root } = await mountView())
+    await openUser(root!, 'Alpha')
+    const release = holdAccountStatus()
+    accountStatusButton(root!).click()
+    await waitFor(() => calls.some((call) => call.method === 'PATCH' && call.url.includes('/users/user-1/status')))
+
+    await openUser(root!, 'Bravo')
+    await openUser(root!, 'Alpha')
+    expect(root!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Alpha')
+    expect(root!.querySelector('[data-testid="selected-user-heading"]')?.textContent).not.toContain('Stale')
+
+    release()
+    await waitFor(() => statusBodyRead)
+
+    expect(root!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Alpha')
+    expect(root!.querySelector('[data-testid="selected-user-heading"]')?.textContent).not.toContain('Stale')
+    expect(pageStatusText(root!)).not.toContain('账号已停用')
+    expect(accountStatusButton(root!).textContent?.trim()).toBe('停用账号')
   })
 })

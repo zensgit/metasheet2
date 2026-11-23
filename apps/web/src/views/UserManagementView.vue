@@ -2009,6 +2009,7 @@ let authorizationPrincipalSeen = ''
 async function authorizationTransport(
   request: AdminAuthorizationTransportRequest,
 ): Promise<AdminAuthorizationTransportResponse> {
+  const token = currentMemberToken()
   const response = await apiFetch(request.path, {
     method: request.method,
     body: request.body === undefined ? undefined : JSON.stringify(request.body),
@@ -2018,6 +2019,7 @@ async function authorizationTransport(
   if (
     request.method === 'POST'
     && (response.status === 400 || response.status === 403 || response.status === 404 || response.status === 409 || response.status >= 500)
+    && memberTokenCurrent(token)
   ) {
     authorizationFaultCode = readErrorCode(body)
   }
@@ -2774,6 +2776,33 @@ const directoryNavigationNotice = computed(() => {
 
 let statusScope: 'page' | 'member' = 'page'
 let statusMemberId = ''
+let busyToken: MemberToken | null = null
+
+type MemberToken = { userId: string; generation: number }
+
+function currentMemberToken(): MemberToken {
+  return { userId: selectedUserId.value, generation: userAccessReadGeneration.value }
+}
+
+function memberTokenCurrent(token: MemberToken): boolean {
+  return token.userId.length > 0 && accessReadStillCurrent(
+    token.generation,
+    userAccessReadGeneration.value,
+    token.userId,
+    selectedUserId.value,
+  )
+}
+
+function claimMemberBusy(token: MemberToken): void {
+  busyToken = token
+  busy.value = true
+}
+
+function releaseMemberBusy(token: MemberToken): void {
+  if (!busyToken || busyToken.generation !== token.generation || busyToken.userId !== token.userId) return
+  busy.value = false
+  busyToken = null
+}
 
 function setStatus(message: string, tone: 'info' | 'error' = 'info'): void {
   status.value = message
@@ -2782,14 +2811,33 @@ function setStatus(message: string, tone: 'info' | 'error' = 'info'): void {
   statusMemberId = ''
 }
 
-function setMemberStatus(message: string, tone: 'info' | 'error' = 'info'): void {
+function setMemberStatus(token: MemberToken, message: string, tone: 'info' | 'error' = 'info'): void {
+  if (!memberTokenCurrent(token)) return
   status.value = message
   statusTone.value = tone
   statusScope = 'member'
-  statusMemberId = selectedUserId.value
+  statusMemberId = token.userId
+}
+
+function assignAccessSnapshot(token: MemberToken, snapshot: UserAccess): boolean {
+  if (!memberTokenCurrent(token) || !userAccessSnapshotMatches(snapshot, token.userId)) return false
+  access.value = snapshot
+  syncProfileDraftFromAccess()
+  return true
+}
+
+function dingTalkPayloadMatches(value: unknown, userId: string): boolean {
+  if (!value || typeof value !== 'object') return false
+  const ownerId = (value as { userId?: unknown }).userId
+  return typeof ownerId !== 'string' || ownerId === userId
 }
 
 function resetMemberScopedState(): void {
+  userAccessReadGeneration.value = nextAccessReadGeneration(userAccessReadGeneration.value)
+  if (busyToken && !memberTokenCurrent(busyToken)) {
+    busy.value = false
+    busyToken = null
+  }
   if (statusScope === 'member' && statusMemberId !== selectedUserId.value) {
     status.value = ''
     statusTone.value = 'info'
@@ -3526,6 +3574,9 @@ async function loadAccessPresets(): Promise<void> {
 }
 
 async function loadInviteRecords(userId?: string): Promise<void> {
+  const token: MemberToken | null = userId
+    ? { userId, generation: userAccessReadGeneration.value }
+    : null
   loadingInvites.value = true
   try {
     const params = new URLSearchParams({ page: '1', pageSize: '10' })
@@ -3537,7 +3588,7 @@ async function loadInviteRecords(userId?: string): Promise<void> {
     }
 
     const data = payload.data as { items?: Array<Record<string, unknown>> } | undefined
-    if (userId && userId !== selectedUserId.value) return
+    if (token && !memberTokenCurrent(token)) return
     inviteRecords.value = Array.isArray(data?.items)
       ? data.items.map((item) => ({
           id: String(item.id || ''),
@@ -3557,9 +3608,9 @@ async function loadInviteRecords(userId?: string): Promise<void> {
         }))
       : []
   } catch (error) {
-    if (userId && userId !== selectedUserId.value) return
+    if (token && !memberTokenCurrent(token)) return
     const message = error instanceof Error ? error.message : '加载邀请记录失败'
-    if (userId) setMemberStatus(message, 'error')
+    if (token) setMemberStatus(token, message, 'error')
     else setStatus(message, 'error')
   } finally {
     loadingInvites.value = false
@@ -3571,6 +3622,7 @@ async function loadUserSessions(userId?: string): Promise<void> {
     userSessions.value = []
     return
   }
+  const token: MemberToken = { userId, generation: userAccessReadGeneration.value }
 
   loadingSessions.value = true
   try {
@@ -3581,7 +3633,7 @@ async function loadUserSessions(userId?: string): Promise<void> {
     }
 
     const data = payload.data as { items?: Array<Record<string, unknown>> } | undefined
-    if (userId !== selectedUserId.value) return
+    if (!memberTokenCurrent(token)) return
     userSessions.value = Array.isArray(data?.items)
       ? data.items.map((item) => ({
           id: String(item.id || ''),
@@ -3597,8 +3649,8 @@ async function loadUserSessions(userId?: string): Promise<void> {
         }))
       : []
   } catch (error) {
-    if (userId !== selectedUserId.value) return
-    setMemberStatus(error instanceof Error ? error.message : '加载用户会话失败', 'error')
+    if (!memberTokenCurrent(token)) return
+    setMemberStatus(token, error instanceof Error ? error.message : '加载用户会话失败', 'error')
   } finally {
     loadingSessions.value = false
   }
@@ -3620,9 +3672,10 @@ async function selectUser(userId: string): Promise<void> {
     suppressRecovery.value = false
     clearAuthorization()
   }
-  const generation = nextAccessReadGeneration(userAccessReadGeneration.value)
-  userAccessReadGeneration.value = generation
-  selectedUserId.value = userId
+  const switching = selectedUserId.value.length > 0 && selectedUserId.value !== userId
+  if (!switching) {
+    userAccessReadGeneration.value = nextAccessReadGeneration(userAccessReadGeneration.value)
+  }
   selectedRoleId.value = ''
   roleActionFeedback.value = null
   manualPassword.value = ''
@@ -3634,28 +3687,28 @@ async function selectUser(userId: string): Promise<void> {
   dingtalkAccessLoadFailure.value = null
   memberAdmissionLoadFailure.value = null
   access.value = null
+  selectedUserId.value = userId
+  const token = currentMemberToken()
   try {
     const snapshot = await fetchUserAccessOrThrow(userId)
-    if (!accessReadStillCurrent(generation, userAccessReadGeneration.value, userId, selectedUserId.value)) return
-    if (!userAccessSnapshotMatches(snapshot, userId)) {
-      setMemberStatus('用户访问快照与当前选择不一致，未覆盖角色状态', 'error')
+    if (!memberTokenCurrent(token)) return
+    if (!assignAccessSnapshot(token, snapshot)) {
+      setMemberStatus(token, '用户访问快照与当前选择不一致，未覆盖角色状态', 'error')
       return
     }
-    access.value = snapshot
-    syncProfileDraftFromAccess()
     const navigationKey = buildUserNavigationKey(userNavigation.value)
     if (userNavigation.value.userId === userId && appliedUserNavigationKey.value !== navigationKey) {
       if (userNavigation.value.source === 'directory-sync') {
-        setMemberStatus(`已从目录同步定位到用户 ${formatManagedUserLabel(access.value.user)}`)
+        setMemberStatus(token, `已从目录同步定位到用户 ${formatManagedUserLabel(access.value.user)}`)
       }
       appliedUserNavigationKey.value = navigationKey
     }
-    if (!accessReadStillCurrent(generation, userAccessReadGeneration.value, userId, selectedUserId.value)) return
+    if (!memberTokenCurrent(token)) return
     await Promise.all([loadInviteRecords(userId), loadUserSessions(userId), loadDingTalkAccess(userId), loadMemberAdmission(userId)])
   } catch (error) {
-    if (!accessReadStillCurrent(generation, userAccessReadGeneration.value, userId, selectedUserId.value)) return
+    if (!memberTokenCurrent(token)) return
     access.value = null
-    setMemberStatus(error instanceof Error ? error.message : '加载用户权限失败', 'error')
+    setMemberStatus(token, error instanceof Error ? error.message : '加载用户权限失败', 'error')
   }
 }
 
@@ -3690,22 +3743,24 @@ async function loadDingTalkAccess(userId?: string): Promise<void> {
     dingtalkAccessLoadFailure.value = null
     return
   }
+  const token: MemberToken = { userId, generation: userAccessReadGeneration.value }
 
   loadingDingTalk.value = true
   try {
     const response = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}/dingtalk-access`)
     const payload = await readJson(response)
-    if (userId !== selectedUserId.value) return
+    if (!memberTokenCurrent(token)) return
     if (!response.ok || payload.ok !== true) {
       dingtalkAccess.value = null
       dingtalkAccessLoadFailure.value = readSidePanelLoadFailure(payload)
       return
     }
+    if (!dingTalkPayloadMatches(payload.data, token.userId)) return
 
     dingtalkAccess.value = payload.data as DingTalkAccess
     dingtalkAccessLoadFailure.value = null
   } catch {
-    if (userId !== selectedUserId.value) return
+    if (!memberTokenCurrent(token)) return
     dingtalkAccess.value = null
     dingtalkAccessLoadFailure.value = { correlationId: null }
   } finally {
@@ -3719,13 +3774,14 @@ async function loadMemberAdmission(userId?: string): Promise<void> {
     memberAdmissionLoadFailure.value = null
     return
   }
+  const token: MemberToken = { userId, generation: userAccessReadGeneration.value }
 
   loadingAdmission.value = true
   try {
     const response = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}/member-admission`)
     const payload = await readJson(response)
-    // A late answer for a user who is no longer selected must not overwrite the selected user's panel.
-    if (userId !== selectedUserId.value) return
+    // A late answer, including one from the first visit in A → B → A, must not overwrite the panel.
+    if (!memberTokenCurrent(token)) return
     if (!response.ok || payload.ok !== true) {
       memberAdmission.value = null
       memberAdmissionLoadFailure.value = readSidePanelLoadFailure(payload)
@@ -3740,7 +3796,7 @@ async function loadMemberAdmission(userId?: string): Promise<void> {
     }
     memberAdmissionLoadFailure.value = null
   } catch {
-    if (userId !== selectedUserId.value) return
+    if (!memberTokenCurrent(token)) return
     memberAdmission.value = null
     memberAdmissionLoadFailure.value = { correlationId: null }
   } finally {
@@ -3803,25 +3859,27 @@ function closeJoinDefaultOrgConfirm(): void {
 async function confirmJoinDefaultOrg(): Promise<void> {
   const confirmedUserId = joinDefaultOrgConfirmUserId.value
   closeJoinDefaultOrgConfirm()
-  const userId = selectedUserId.value
+  const token = currentMemberToken()
+  const userId = token.userId
   // Only the selected user, and only when the confirmed panel and the admission on screen are that user's.
-  if (!userId || userId !== confirmedUserId || userId !== memberAdmission.value?.userId) {
-    setMemberStatus(JOIN_DEFAULT_ORG_FAILURE, 'error')
+  if (!memberTokenCurrent(token) || userId !== confirmedUserId || userId !== memberAdmission.value?.userId) {
+    setMemberStatus(token, JOIN_DEFAULT_ORG_FAILURE, 'error')
     return
   }
   joiningDefaultOrgUserIds.value = [...joiningDefaultOrgUserIds.value, userId]
   try {
     const result = await postJoinDefaultOrg(userId)
+    if (!memberTokenCurrent(token)) return
     if (!result.ok) {
-      setMemberStatus(describeJoinDefaultOrgFailure(result), 'error')
+      setMemberStatus(token, describeJoinDefaultOrgFailure(result), 'error')
       return
     }
-    // The admin moved on to another user: that user's panel is not reloaded or told 已加入.
-    if (selectedUserId.value !== userId) return
     await refreshCurrentDetailMemberAdmissionIfNeeded([userId])
-    setMemberStatus('已加入默认组织')
+    if (!memberTokenCurrent(token)) return
+    setMemberStatus(token, '已加入默认组织')
   } catch {
-    setMemberStatus(JOIN_DEFAULT_ORG_FAILURE, 'error')
+    if (!memberTokenCurrent(token)) return
+    setMemberStatus(token, JOIN_DEFAULT_ORG_FAILURE, 'error')
   } finally {
     joiningDefaultOrgUserIds.value = joiningDefaultOrgUserIds.value.filter((id) => id !== userId)
   }
@@ -4017,7 +4075,6 @@ function cancelAuthorization(): void {
 }
 
 function clearStaleUserSelection(): void {
-  userAccessReadGeneration.value = nextAccessReadGeneration(userAccessReadGeneration.value)
   if (authorizationPanelHeld.value && selectedUserId.value) markAuthorizationDetached('member')
   selectedUserId.value = ''
   access.value = null
@@ -4186,34 +4243,41 @@ function updateNamespaceAdmission(admission: NamespaceAdmission, enabled: boolea
 }
 
 async function updateDingTalkGrant(enabled: boolean): Promise<void> {
-  if (!access.value) return
+  if (!access.value || access.value.user.id !== selectedUserId.value) return
+  const token = currentMemberToken()
   if (enabled && !canEnableDingTalkGrant(dingtalkAccess.value)) {
-    setMemberStatus('当前钉钉身份缺少 openId：暂时拿不到该成员的 openId，暂不能开通钉钉扫码。', 'error')
+    setMemberStatus(token, '当前钉钉身份缺少 openId：暂时拿不到该成员的 openId，暂不能开通钉钉扫码。', 'error')
     return
   }
-  busy.value = true
+  claimMemberBusy(token)
   try {
-    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(access.value.user.id)}/dingtalk-grant`, {
+    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(token.userId)}/dingtalk-grant`, {
       method: 'PATCH',
       body: JSON.stringify({ enabled }),
     })
     const payload = await readJson(response)
+    if (!memberTokenCurrent(token)) return
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '更新钉钉登录状态失败'))
     }
+    if (!dingTalkPayloadMatches(payload.data, token.userId)) {
+      setMemberStatus(token, '更新钉钉登录状态失败', 'error')
+      return
+    }
 
     dingtalkAccess.value = payload.data as DingTalkAccess
-    if (memberAdmission.value) {
+    if (memberAdmission.value?.userId === token.userId) {
       memberAdmission.value = {
         ...memberAdmission.value,
         dingtalk: dingtalkAccess.value,
       }
     }
-    setMemberStatus(enabled ? '已开通该用户的钉钉扫码登录' : '已关闭该用户的钉钉扫码登录')
+    setMemberStatus(token, enabled ? '已开通该用户的钉钉扫码登录' : '已关闭该用户的钉钉扫码登录')
   } catch (error) {
-    setMemberStatus(error instanceof Error ? error.message : '更新钉钉登录状态失败', 'error')
+    if (!memberTokenCurrent(token)) return
+    setMemberStatus(token, error instanceof Error ? error.message : '更新钉钉登录状态失败', 'error')
   } finally {
-    busy.value = false
+    releaseMemberBusy(token)
   }
 }
 
@@ -4341,33 +4405,35 @@ async function submitBulkNamespaceEnable(): Promise<void> {
     }
     const mismatches: string[] = []
     let detailAdmission: MemberAdmission | null = null
+    let detailToken: MemberToken | null = null
     for (const userId of userIds) {
       const admission = await readMemberAdmissionOrThrow(userId)
       const enabled = admission.userId === userId
         && admission.namespaceAdmissions.some((item) => item.namespace === namespace && item.enabled === true)
       if (!enabled) mismatches.push(userId)
-      if (userId === selectedUserId.value) detailAdmission = admission
+      if (userId === selectedUserId.value && admission.userId === userId) {
+        detailAdmission = admission
+        detailToken = currentMemberToken()
+      }
     }
     if (mismatches.length > 0) {
-      if (detailAdmission && detailAdmission.userId === selectedUserId.value) memberAdmission.value = detailAdmission
+      if (detailAdmission && detailToken && memberTokenCurrent(detailToken) && detailAdmission.userId === detailToken.userId) {
+        memberAdmission.value = detailAdmission
+      }
       setStatus(`插件使用回读未显示「${namespace}」已对所选用户开通，本次未记为成功。`, 'error')
       return
     }
-    if (detailAdmission && selectedUserId.value === detailAdmission.userId) {
-      const detailUserId = selectedUserId.value
-      const detailGeneration = userAccessReadGeneration.value
-      const snapshot = await fetchUserAccessOrThrow(detailUserId)
+    if (detailAdmission && detailToken && memberTokenCurrent(detailToken) && detailAdmission.userId === detailToken.userId) {
+      const snapshot = await fetchUserAccessOrThrow(detailToken.userId)
       // A late read must not land on a newer selection, including A → B → A.
-      if (accessReadStillCurrent(detailGeneration, userAccessReadGeneration.value, detailUserId, selectedUserId.value)) {
-        if (!userAccessSnapshotMatches(snapshot, detailUserId)) {
+      if (memberTokenCurrent(detailToken)) {
+        if (!assignAccessSnapshot(detailToken, snapshot)) {
           memberAdmission.value = detailAdmission
           access.value = null
           setStatus('生效权限回读与当前用户不一致，本次插件使用未记为成功。', 'error')
           return
         }
         memberAdmission.value = detailAdmission
-        access.value = snapshot
-        syncProfileDraftFromAccess()
       }
     }
     await loadUsers()
@@ -4578,40 +4644,50 @@ watch(namespaceOptions, (options) => {
 }, { immediate: true })
 
 async function toggleUserStatus(): Promise<void> {
-  if (!access.value) return
-  busy.value = true
+  if (!access.value || access.value.user.id !== selectedUserId.value) return
+  const token = currentMemberToken()
+  const nextActive = !access.value.user.is_active
+  claimMemberBusy(token)
   try {
-    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(access.value.user.id)}/status`, {
+    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(token.userId)}/status`, {
       method: 'PATCH',
-      body: JSON.stringify({ isActive: !access.value.user.is_active }),
+      body: JSON.stringify({ isActive: nextActive }),
     })
     const payload = await readJson(response)
+    if (!memberTokenCurrent(token)) return
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '更新用户状态失败'))
     }
 
-    access.value = payload.data as UserAccess
-    syncProfileDraftFromAccess()
+    const snapshot = payload.data as UserAccess
+    if (!assignAccessSnapshot(token, snapshot)) {
+      setMemberStatus(token, '更新用户状态失败', 'error')
+      return
+    }
     await loadUsers()
-    await loadMemberAdmission(access.value.user.id)
-    setMemberStatus(access.value.user.is_active ? '账号已启用' : '账号已停用')
+    if (!memberTokenCurrent(token)) return
+    await loadMemberAdmission(token.userId)
+    if (!memberTokenCurrent(token)) return
+    setMemberStatus(token, snapshot.user.is_active ? '账号已启用' : '账号已停用')
   } catch (error) {
-    setMemberStatus(error instanceof Error ? error.message : '更新用户状态失败', 'error')
+    if (!memberTokenCurrent(token)) return
+    setMemberStatus(token, error instanceof Error ? error.message : '更新用户状态失败', 'error')
   } finally {
-    busy.value = false
+    releaseMemberBusy(token)
   }
 }
 
 async function resetPassword(): Promise<void> {
-  if (!access.value) return
-  const requestedUserId = access.value.user.id
+  if (!access.value || access.value.user.id !== selectedUserId.value) return
+  const token = currentMemberToken()
+  const requestedUserId = token.userId
   const intent = classifyManualTemporaryPassword(manualPassword.value)
   if (intent.kind === 'too-short') {
     passwordResetInlineError.value = ADMIN_TEMPORARY_PASSWORD_TOO_SHORT
     return
   }
   passwordResetInlineError.value = ''
-  busy.value = true
+  claimMemberBusy(token)
   try {
     const response = await apiFetch(`/api/admin/users/${encodeURIComponent(requestedUserId)}/reset-password`, {
       method: 'POST',
@@ -4620,7 +4696,7 @@ async function resetPassword(): Promise<void> {
       }),
     })
     const payload = await readJson(response)
-    if (selectedUserId.value !== requestedUserId) return
+    if (!memberTokenCurrent(token)) return
     if (!response.ok || payload.ok !== true) {
       const errorPayload = payload.error as { code?: unknown; message?: unknown } | undefined
       const inlineError = describeAdminResetPasswordInlineError(errorPayload)
@@ -4634,62 +4710,70 @@ async function resetPassword(): Promise<void> {
     temporaryPassword.value = String((payload.data as Record<string, unknown> | undefined)?.temporaryPassword || '')
     manualPassword.value = ''
     passwordResetInlineError.value = ''
-    setMemberStatus('密码已重置')
+    setMemberStatus(token, '密码已重置')
   } catch (error) {
-    if (selectedUserId.value !== requestedUserId) return
-    setMemberStatus(error instanceof Error ? error.message : '重置密码失败', 'error')
+    if (!memberTokenCurrent(token)) return
+    setMemberStatus(token, error instanceof Error ? error.message : '重置密码失败', 'error')
   } finally {
-    busy.value = false
+    releaseMemberBusy(token)
   }
 }
 
 async function revokeSessions(): Promise<void> {
-  if (!access.value) return
-  busy.value = true
+  if (!access.value || access.value.user.id !== selectedUserId.value) return
+  const token = currentMemberToken()
+  claimMemberBusy(token)
   try {
-    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(access.value.user.id)}/revoke-sessions`, {
+    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(token.userId)}/revoke-sessions`, {
       method: 'POST',
       body: JSON.stringify({ reason: 'admin-console-force-logout' }),
     })
     const payload = await readJson(response)
+    if (!memberTokenCurrent(token)) return
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '强制下线失败'))
     }
 
-    setMemberStatus('该用户现有会话已失效')
+    setMemberStatus(token, '该用户现有会话已失效')
   } catch (error) {
-    setMemberStatus(error instanceof Error ? error.message : '强制下线失败', 'error')
+    if (!memberTokenCurrent(token)) return
+    setMemberStatus(token, error instanceof Error ? error.message : '强制下线失败', 'error')
   } finally {
-    busy.value = false
+    releaseMemberBusy(token)
   }
 }
 
 async function revokeSingleSession(sessionId: string): Promise<void> {
-  if (!access.value) return
-  busy.value = true
+  if (!access.value || access.value.user.id !== selectedUserId.value) return
+  const token = currentMemberToken()
+  claimMemberBusy(token)
   try {
-    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(access.value.user.id)}/sessions/${encodeURIComponent(sessionId)}/revoke`, {
+    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(token.userId)}/sessions/${encodeURIComponent(sessionId)}/revoke`, {
       method: 'POST',
       body: JSON.stringify({ reason: 'admin-console-force-single-session-logout' }),
     })
     const payload = await readJson(response)
+    if (!memberTokenCurrent(token)) return
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '踢下线失败'))
     }
 
-    await loadUserSessions(access.value.user.id)
-    setMemberStatus('会话已踢下线')
+    await loadUserSessions(token.userId)
+    if (!memberTokenCurrent(token)) return
+    setMemberStatus(token, '会话已踢下线')
   } catch (error) {
-    setMemberStatus(error instanceof Error ? error.message : '踢下线失败', 'error')
+    if (!memberTokenCurrent(token)) return
+    setMemberStatus(token, error instanceof Error ? error.message : '踢下线失败', 'error')
   } finally {
-    busy.value = false
+    releaseMemberBusy(token)
   }
 }
 
-function publishAuthorizationMessage(message: string, tone: 'info' | 'error'): void {
+function publishAuthorizationMessage(token: MemberToken, message: string, tone: 'info' | 'error'): void {
+  if (!memberTokenCurrent(token)) return
   authorizationOutcomeText.value = message
   roleActionFeedback.value = { tone, message }
-  setMemberStatus(message, tone)
+  setMemberStatus(token, message, tone)
 }
 
 function markAuthorizationDetached(reason: 'member' | 'principal'): void {
@@ -4733,6 +4817,8 @@ async function verifyAuthorizationLive(): Promise<boolean> {
 }
 
 async function previewAtomic(request: AdminAuthorizationRequest): Promise<void> {
+  const token: MemberToken = { userId: request.targetUserId, generation: userAccessReadGeneration.value }
+  if (!memberTokenCurrent(token)) return
   if (!currentPrincipalId()) {
     setStatus(AUTHORIZATION_PRINCIPAL_MISSING_MESSAGE, 'error')
     return
@@ -4740,30 +4826,30 @@ async function previewAtomic(request: AdminAuthorizationRequest): Promise<void> 
   authorizationFaultCode = ''
   await authorizationOperation.preview(request)
   await authorizationOperation.whenSettled()
+  if (!memberTokenCurrent(token)) return
   if (authorizationDetached.value || authorizationPanelHeld.value) return
-  if (selectedUserId.value !== request.targetUserId) return
   const phase = authorizationOperation.phase.value
   const detail = authorizationOperation.detail.value
   if (phase === 'awaiting_confirmation' || phase === 'previewing') return
   if (phase === 'forbidden' || detail === 'no_access') {
-    setMemberStatus(AUTHORIZATION_FORBIDDEN_MESSAGE, 'error')
+    setMemberStatus(token, AUTHORIZATION_FORBIDDEN_MESSAGE, 'error')
     return
   }
   if (authorizationFaultCode === 'LAST_PLATFORM_ADMIN') {
-    setMemberStatus(LAST_PLATFORM_ADMIN_MESSAGE, 'error')
+    setMemberStatus(token, LAST_PLATFORM_ADMIN_MESSAGE, 'error')
     return
   }
   if (phase === 'validation_failed' && authorizationFaultCode) {
-    setMemberStatus(ROLE_VERSION_MISMATCH_MESSAGE, 'error')
+    setMemberStatus(token, ROLE_VERSION_MISMATCH_MESSAGE, 'error')
     return
   }
   if (detail === 'preview_failed' || phase === 'idle' || phase === 'validation_failed') {
-    setMemberStatus(AUTHORIZATION_PREVIEW_FAILED_MESSAGE, 'error')
+    setMemberStatus(token, AUTHORIZATION_PREVIEW_FAILED_MESSAGE, 'error')
   }
 }
 
-async function finishCommittedAuthorization(): Promise<void> {
-  if (authorizationVerifying || authorizationDetached.value) return
+async function finishCommittedAuthorization(token: MemberToken): Promise<void> {
+  if (!memberTokenCurrent(token) || authorizationVerifying || authorizationDetached.value) return
   if (authorizationOperation.phase.value !== 'committed') return
   authorizationVerifying = true
   try {
@@ -4772,12 +4858,12 @@ async function finishCommittedAuthorization(): Promise<void> {
   } finally {
     authorizationVerifying = false
   }
-  if (authorizationDetached.value) return
+  if (!memberTokenCurrent(token) || authorizationDetached.value) return
   const settledReceipt = authorizationOperation.receipt.value
-  if (settledReceipt && settledReceipt.targetUserId !== selectedUserId.value) return
+  if (settledReceipt && settledReceipt.targetUserId !== token.userId) return
   if (settledReceipt && !memberPageCanVerifyAction(settledReceipt.action)) {
     foreignAuthorizationReceipt.value = true
-    publishAuthorizationMessage(AUTHORIZATION_FOREIGN_RECEIPT_MESSAGE, 'error')
+    publishAuthorizationMessage(token, AUTHORIZATION_FOREIGN_RECEIPT_MESSAGE, 'error')
     return
   }
   if (authorizationOperation.verified.value) {
@@ -4791,64 +4877,61 @@ async function finishCommittedAuthorization(): Promise<void> {
           : null,
       })
       : AUTHORIZATION_NOT_CHECKED_MESSAGE
-    publishAuthorizationMessage(message, 'info')
+    publishAuthorizationMessage(token, message, 'info')
     await loadRoles()
+    if (!memberTokenCurrent(token)) return
     await loadUsers()
     return
   }
-  publishAuthorizationMessage(AUTHORIZATION_NOT_CHECKED_MESSAGE, 'error')
+  publishAuthorizationMessage(token, AUTHORIZATION_NOT_CHECKED_MESSAGE, 'error')
 }
 
-async function refreshRejectedAuthorizationReads(userId: string): Promise<void> {
-  const generation = userAccessReadGeneration.value
+async function refreshRejectedAuthorizationReads(token: MemberToken): Promise<void> {
   try {
     const response = await apiFetch('/api/admin/roles')
     const payload = await readJson(response)
-    if (response.ok && payload.ok === true && !authorizationDetached.value && selectedUserId.value === userId) {
+    if (response.ok && payload.ok === true && !authorizationDetached.value && memberTokenCurrent(token)) {
       const data = payload.data as { items?: RoleCatalogItem[] } | undefined
       roleCatalog.value = Array.isArray(data?.items) ? data.items : []
     }
   } catch {
     // A failed catalog read must not replace the rejected outcome.
   }
-  if (authorizationDetached.value || selectedUserId.value !== userId) return
+  if (authorizationDetached.value || !memberTokenCurrent(token)) return
   try {
-    const snapshot = await fetchUserAccessOrThrow(userId)
-    if (authorizationDetached.value || selectedUserId.value !== userId) return
-    if (userAccessReadGeneration.value !== generation) return
-    if (!userAccessSnapshotMatches(snapshot, userId)) return
-    access.value = snapshot
-    syncProfileDraftFromAccess()
+    const snapshot = await fetchUserAccessOrThrow(token.userId)
+    if (authorizationDetached.value || !memberTokenCurrent(token)) return
+    assignAccessSnapshot(token, snapshot)
   } catch {
     // Keep the snapshot already on screen. The rejected outcome stays frozen.
   }
 }
 
-async function settleAfterConfirm(): Promise<void> {
-  if (authorizationDetached.value) return
+async function settleAfterConfirm(token: MemberToken): Promise<void> {
+  if (!memberTokenCurrent(token) || authorizationDetached.value) return
   const phase = authorizationOperation.phase.value
   if (phase === 'validation_failed') {
     if (authorizationFaultCode === 'LAST_PLATFORM_ADMIN') {
       access.value = null
-      publishAuthorizationMessage(LAST_PLATFORM_ADMIN_MESSAGE, 'error')
+      publishAuthorizationMessage(token, LAST_PLATFORM_ADMIN_MESSAGE, 'error')
       return
     }
     // The panel stays held. A rejected 409 does not open a new clickable preview.
-    publishAuthorizationMessage(ROLE_VERSION_MISMATCH_MESSAGE, 'error')
-    const userId = selectedUserId.value
-    if (userId) await refreshRejectedAuthorizationReads(userId)
-    if (!authorizationDetached.value) publishAuthorizationMessage(ROLE_VERSION_MISMATCH_MESSAGE, 'error')
+    publishAuthorizationMessage(token, ROLE_VERSION_MISMATCH_MESSAGE, 'error')
+    await refreshRejectedAuthorizationReads(token)
+    if (!memberTokenCurrent(token) || authorizationDetached.value) return
+    publishAuthorizationMessage(token, ROLE_VERSION_MISMATCH_MESSAGE, 'error')
     return
   }
   if (phase === 'forbidden') {
-    publishAuthorizationMessage(AUTHORIZATION_FORBIDDEN_MESSAGE, 'error')
+    publishAuthorizationMessage(token, AUTHORIZATION_FORBIDDEN_MESSAGE, 'error')
     return
   }
   if (phase === 'pending' || phase === 'unverified_no_read') {
-    publishAuthorizationMessage(AUTHORIZATION_PENDING_MESSAGE, 'error')
+    publishAuthorizationMessage(token, AUTHORIZATION_PENDING_MESSAGE, 'error')
     return
   }
-  if (phase === 'committed') await finishCommittedAuthorization()
+  if (phase === 'committed') await finishCommittedAuthorization(token)
 }
 
 async function confirmAuthorization(): Promise<void> {
@@ -4878,35 +4961,40 @@ async function confirmAuthorization(): Promise<void> {
   }
   if (authorizationOperation.phase.value !== 'awaiting_confirmation') return
   const request = atomicRequestForDraft(draft)
-  if (!request) return
+  if (!request || request.targetUserId !== selectedUserId.value) return
+  const token: MemberToken = { userId: request.targetUserId, generation: userAccessReadGeneration.value }
+  if (!memberTokenCurrent(token)) return
   // Synchronous latch. The dialog stays mounted so a second click cannot pass through.
   authorizationBusy.value = true
   authorizationPanelHeld.value = true
-  busy.value = true
+  claimMemberBusy(token)
   submittedRequest.value = request
   authorizationFaultCode = ''
   try {
     await authorizationOperation.confirm()
     await authorizationOperation.whenSettled()
-    await settleAfterConfirm()
+    if (!memberTokenCurrent(token)) return
+    await settleAfterConfirm(token)
   } finally {
     authorizationBusy.value = false
-    busy.value = false
+    releaseMemberBusy(token)
   }
 }
 
 async function rereadAuthorization(): Promise<void> {
-  if (authorizationDetached.value) return
+  const token = currentMemberToken()
+  if (!memberTokenCurrent(token) || authorizationDetached.value) return
   const phase = authorizationOperation.phase.value
   if (phase === 'pending' || phase === 'unverified_no_read') {
     await authorizationOperation.lookup()
     await authorizationOperation.whenSettled()
-    if (!authorizationDetached.value && authorizationOperation.phase.value === 'committed') {
-      await finishCommittedAuthorization()
+    if (!memberTokenCurrent(token) || authorizationDetached.value) return
+    if (authorizationOperation.phase.value === 'committed') {
+      await finishCommittedAuthorization(token)
     }
     return
   }
-  if (phase === 'committed') await finishCommittedAuthorization()
+  if (phase === 'committed') await finishCommittedAuthorization(token)
 }
 
 function closeAuthorizationPanel(): void {
@@ -4946,7 +5034,7 @@ function presentRecoveredAuthorization(): void {
   if (phase === 'pending' || phase === 'unverified_no_read') {
     authorizationOutcomeText.value = AUTHORIZATION_PENDING_MESSAGE
   }
-  if (phase === 'committed') void finishCommittedAuthorization()
+  if (phase === 'committed') void finishCommittedAuthorization(currentMemberToken())
 }
 
 function syncAuthorizationIdentity(): void {
@@ -4991,12 +5079,13 @@ function toggleRoleAssignAdmission(namespace: string, event: Event): void {
 }
 
 async function saveUserProfile(): Promise<void> {
-  if (!access.value) return
-  busy.value = true
+  if (!access.value || access.value.user.id !== selectedUserId.value) return
+  const token = currentMemberToken()
+  claimMemberBusy(token)
   // Snapshot the mobile we believed the server held when we rendered the
   // form; the backend uses this as a CAS witness on UPDATE so a concurrent
   // edit can't get silently overwritten.
-  const baselineUserId = access.value.user.id
+  const baselineUserId = token.userId
   const baselineMobile = access.value.user.mobile ?? null
   try {
     const response = await apiFetch(`/api/admin/users/${encodeURIComponent(baselineUserId)}/profile`, {
@@ -5012,21 +5101,26 @@ async function saveUserProfile(): Promise<void> {
       }),
     })
     const payload = await readJson(response)
+    if (!memberTokenCurrent(token)) return
     if (response.status === 409) {
       const errorCode = (payload.error as Record<string, unknown> | undefined)?.code
       if (errorCode === 'PROFILE_MOBILE_CONFLICT') {
         try {
           const latestAccess = await fetchUserAccessOrThrow(baselineUserId)
-          access.value = latestAccess
-          syncProfileDraftFromAccess()
+          if (!memberTokenCurrent(token)) return
+          if (!assignAccessSnapshot(token, latestAccess)) {
+            setMemberStatus(token, '用户手机号已被其他操作更新，请刷新后重试', 'error')
+            return
+          }
           const latest = latestAccess.user.mobile ?? null
           const latestLabel = latest === null || latest === '' ? '（空）' : latest
-          setMemberStatus(`用户手机号已被其他操作更新为 ${latestLabel}，请确认最新值后重新保存`, 'error')
+          setMemberStatus(token, `用户手机号已被其他操作更新为 ${latestLabel}，请确认最新值后重新保存`, 'error')
         } catch {
           // If the refresh itself failed we must not advertise a stale value
           // as the "latest" — it would mislead the admin about what the
           // backend currently holds.
-          setMemberStatus('用户手机号已被其他操作更新，请刷新后重试', 'error')
+          if (!memberTokenCurrent(token)) return
+          setMemberStatus(token, '用户手机号已被其他操作更新，请刷新后重试', 'error')
         }
         return
       }
@@ -5035,14 +5129,18 @@ async function saveUserProfile(): Promise<void> {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '更新用户资料失败'))
     }
 
-    access.value = payload.data as UserAccess
-    syncProfileDraftFromAccess()
+    if (!assignAccessSnapshot(token, payload.data as UserAccess)) {
+      setMemberStatus(token, '更新用户资料失败', 'error')
+      return
+    }
     await loadUsers()
-    setMemberStatus('用户资料已更新')
+    if (!memberTokenCurrent(token)) return
+    setMemberStatus(token, '用户资料已更新')
   } catch (error) {
-    setMemberStatus(error instanceof Error ? error.message : '更新用户资料失败', 'error')
+    if (!memberTokenCurrent(token)) return
+    setMemberStatus(token, error instanceof Error ? error.message : '更新用户资料失败', 'error')
   } finally {
-    busy.value = false
+    releaseMemberBusy(token)
   }
 }
 
@@ -5842,7 +5940,7 @@ watch(selectedUserId, (userId, previous) => {
     resetMemberScopedState()
   }
   authorizationOperation.syncContext()
-})
+}, { flush: 'sync' })
 
 watch(() => authorizationOperation.phase.value, () => {
   presentRecoveredAuthorization()

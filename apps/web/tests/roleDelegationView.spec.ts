@@ -5111,4 +5111,194 @@ describe('RoleDelegationView', () => {
     expect(container?.querySelector('[data-testid="delegation-restored-read-again"]')).toBeNull()
     expect(container?.querySelector('[data-testid="delegation-confirmation-read-again"]')).toBeNull()
   })
+
+  function deferredJsonResponse(payload: unknown, status: number, markRead: () => void) {
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => {
+        markRead()
+        return payload
+      },
+    }
+  }
+
+  it('presents the next member stored commit while the previous commit is still in flight', async () => {
+    const bravoOperationId = '55555555-5555-4555-8555-555555555555'
+    sessionStorage.setItem(ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY, JSON.stringify({
+      formatVersion: 1,
+      entries: [{ principalId: 'admin-1', targetId: 'user-2', clientOperationId: bravoOperationId }],
+    }))
+    let releaseAlphaCommit: () => void = () => {}
+    const alphaCommitGate = new Promise<void>((resolve) => {
+      releaseAlphaCommit = resolve
+    })
+    let alphaCommitRead = false
+    apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string; body?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            items: [
+              { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+              { id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true },
+            ],
+          },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        return createJsonResponse({ ok: true, data: delegationAccess('user-1', 'Alpha', 'alpha@example.com', []) })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-2/access') {
+        return createJsonResponse({ ok: true, data: delegationAccess('user-2', 'Bravo', 'bravo@example.com', ['crm_admin']) })
+      }
+      if (isAuthorizationPreview(pathname) && init?.method === 'POST') return authorizationPreviewResponse()
+      if (isAuthorizationCommit(pathname) && init?.method === 'POST') {
+        await alphaCommitGate
+        return deferredJsonResponse({ ok: false, error: { message: 'lost' } }, 500, () => {
+          alphaCommitRead = true
+        })
+      }
+      if (pathname === `${ADMIN_AUTHORIZATION_OPERATIONS_PATH}/${bravoOperationId}`) {
+        return createJsonResponse({
+          status: 'committed',
+          clientOperationId: bravoOperationId,
+          receipt: {
+            targetUserId: 'user-2',
+            action: { kind: 'role.assign', roleId: 'crm_admin' },
+            impact: blankImpact(),
+            resultVersion: 'result-1',
+          },
+        })
+      }
+      if (pathname.startsWith(`${ADMIN_AUTHORIZATION_OPERATIONS_PATH}/`)) {
+        const id = pathname.split('/').pop()
+        return createJsonResponse({ status: 'unknown_or_pending', clientOperationId: id })
+      }
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    await mountDelegation()
+    await waitForCondition(() => Boolean(container?.querySelector('[data-testid="delegation-assign-role"]')))
+    const assignSelect = container!.querySelector('[data-testid="delegation-assign-role"]') as HTMLSelectElement
+    assignSelect.value = 'crm_admin'
+    assignSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    findButtonByText(container!, '分配角色').click()
+    await flushUi()
+    const confirm = container!.querySelector('[data-testid="delegation-confirmation-confirm"]') as HTMLButtonElement
+    await waitForCondition(() => confirm.disabled === false)
+    confirm.click()
+    await waitForCondition(() => callLog.some((url) => {
+      const pathname = new URL(url, 'http://localhost').pathname
+      return isAuthorizationCommit(pathname)
+    }))
+
+    clickListedUser('bravo@example.com')
+    await waitForCondition(() => (
+      statusText().includes('还不能确认这次授权是否已经提交')
+      && Boolean(container?.querySelector('[data-testid="delegation-restored-read-again"]'))
+    ))
+    expect(alphaCommitRead).toBe(false)
+    expect(container?.querySelector('.delegation-page__panel--detail h2')?.textContent).toContain('Bravo')
+    expect(container?.querySelector('[data-testid="delegation-confirmation"]')).toBeNull()
+
+    releaseAlphaCommit()
+    await waitForCondition(() => alphaCommitRead && statusText().includes('角色已分配，准入未开'))
+    expect(statusText()).not.toContain('还不能确认这次授权是否已经提交')
+    expect(statusText()).not.toContain('lost')
+    expect(container?.querySelector('.delegation-page__panel--detail h2')?.textContent).toContain('Bravo')
+    expect(container?.querySelector('[data-testid="delegation-restored-read-again"]')).toBeNull()
+  })
+
+  it('presents the next member pending read-back while the previous commit is still in flight', async () => {
+    const bravoOperationId = '66666666-6666-4666-8666-666666666666'
+    sessionStorage.setItem(ADMIN_AUTHORIZATION_PENDING_STORAGE_KEY, JSON.stringify({
+      formatVersion: 1,
+      entries: [{ principalId: 'admin-1', targetId: 'user-2', clientOperationId: bravoOperationId }],
+    }))
+    let releaseAlphaCommit: () => void = () => {}
+    const alphaCommitGate = new Promise<void>((resolve) => {
+      releaseAlphaCommit = resolve
+    })
+    let alphaCommitRead = false
+    apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string; body?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            items: [
+              { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+              { id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true },
+            ],
+          },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        return createJsonResponse({ ok: true, data: delegationAccess('user-1', 'Alpha', 'alpha@example.com', []) })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-2/access') {
+        return createJsonResponse({ ok: true, data: delegationAccess('user-2', 'Bravo', 'bravo@example.com', []) })
+      }
+      if (isAuthorizationPreview(pathname) && init?.method === 'POST') return authorizationPreviewResponse()
+      if (isAuthorizationCommit(pathname) && init?.method === 'POST') {
+        await alphaCommitGate
+        return deferredJsonResponse({
+          status: 'committed',
+          clientOperationId: '77777777-7777-4777-8777-777777777777',
+          receipt: {
+            targetUserId: 'user-1',
+            action: { kind: 'role.assign', roleId: 'crm_admin' },
+            impact: blankImpact(),
+            resultVersion: 'result-1',
+          },
+        }, 200, () => {
+          alphaCommitRead = true
+        })
+      }
+      if (pathname.startsWith(`${ADMIN_AUTHORIZATION_OPERATIONS_PATH}/`)) {
+        const id = pathname.split('/').pop()
+        return createJsonResponse({ status: 'unknown_or_pending', clientOperationId: id })
+      }
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    await mountDelegation()
+    await waitForCondition(() => Boolean(container?.querySelector('[data-testid="delegation-assign-role"]')))
+    const assignSelect = container!.querySelector('[data-testid="delegation-assign-role"]') as HTMLSelectElement
+    assignSelect.value = 'crm_admin'
+    assignSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    findButtonByText(container!, '分配角色').click()
+    await flushUi()
+    const confirm = container!.querySelector('[data-testid="delegation-confirmation-confirm"]') as HTMLButtonElement
+    await waitForCondition(() => confirm.disabled === false)
+    confirm.click()
+    await waitForCondition(() => callLog.some((url) => {
+      const pathname = new URL(url, 'http://localhost').pathname
+      return isAuthorizationCommit(pathname)
+    }))
+
+    clickListedUser('bravo@example.com')
+    await waitForCondition(() => statusText().includes('还不能确认这次授权是否已经提交') && Boolean(container?.querySelector('[data-testid="delegation-restored-read-again"]')))
+    expect(alphaCommitRead).toBe(false)
+    expect(container?.querySelector('.delegation-page__panel--detail h2')?.textContent).toContain('Bravo')
+
+    releaseAlphaCommit()
+    await waitForCondition(() => alphaCommitRead)
+    expect(statusText()).toContain('还不能确认这次授权是否已经提交')
+    expect(statusText()).not.toContain('角色已分配，准入未开')
+    expect(container?.querySelector('[data-testid="delegation-restored-read-again"]')).toBeTruthy()
+    expect(container?.querySelector('.delegation-page__panel--detail h2')?.textContent).toContain('Bravo')
+  })
 })

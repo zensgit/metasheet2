@@ -873,13 +873,14 @@ function currentPrincipalId(): string {
 async function authorizationTransport(
   request: AdminAuthorizationTransportRequest,
 ): Promise<AdminAuthorizationTransportResponse> {
+  const token = currentMemberToken()
   const response = await apiFetch(request.path, {
     method: request.method,
     body: request.body === undefined ? undefined : JSON.stringify(request.body),
     signal: request.signal,
   })
   const body = await readJson(response)
-  if (request.method === 'POST' && response.status >= 400) {
+  if (request.method === 'POST' && response.status >= 400 && memberTokenCurrent(token)) {
     authorizationFaultCode = readErrorCode(body)
     authorizationFaultMessage = readErrorMessage(body)
   }
@@ -977,6 +978,11 @@ watch(selectedUserId, (userId, previous) => {
     confirmationReadAgain.value = false
   }
   authorizationOperation.syncContext()
+  presentAdoptedDelegation()
+}, { flush: 'sync' })
+
+watch(busy, (isBusy) => {
+  if (!isBusy) presentAdoptedDelegation()
 })
 
 watch(selectedScopeNamespace, () => {
@@ -986,19 +992,7 @@ watch(selectedScopeNamespace, () => {
 })
 
 watch(() => authorizationOperation.phase.value, () => {
-  if (confirmationSubmission.value || pendingConfirmation.value || busy.value) return
-  const phase = currentAuthorizationPhase()
-  if (phase !== 'pending' && phase !== 'unverified_no_read' && phase !== 'committed') return
-  if (!authorizationOperation.clientOperationId.value) return
-  if (phase === 'committed' && authorizationOperation.verified.value) return
-  const receipt = authorizationOperation.receipt.value
-  if (receipt && receipt.targetUserId !== selectedUserId.value) return
-  if (phase === 'committed' && receipt) {
-    void publishVerifiedDelegation(delegationAccessGeneration, receipt.targetUserId)
-    return
-  }
-  restoredReadAgain.value = true
-  setMemberStatus(AUTHORIZATION_PENDING_MESSAGE, 'error')
+  presentAdoptedDelegation()
 })
 
 watch(delegationPermissionFingerprint, (next, previous) => {
@@ -1030,6 +1024,48 @@ watch(selectedRevokeRoleId, (roleId) => {
 
 let statusScope: 'page' | 'member' = 'page'
 let statusMemberId = ''
+let busyToken: MemberToken | null = null
+
+type MemberToken = { userId: string; generation: number }
+
+function currentMemberToken(): MemberToken {
+  return { userId: selectedUserId.value, generation: delegationAccessGeneration }
+}
+
+function memberTokenCurrent(token: MemberToken): boolean {
+  return token.userId.length > 0 && delegationReadStillCurrent(token.generation, token.userId)
+}
+
+function claimMemberBusy(token: MemberToken): void {
+  busyToken = token
+  busy.value = true
+}
+
+function releaseMemberBusy(token: MemberToken): void {
+  if (!busyToken || busyToken.generation !== token.generation || busyToken.userId !== token.userId) return
+  busy.value = false
+  busyToken = null
+}
+
+function memberBusyBlocksRecovery(): boolean {
+  return busy.value && busyToken !== null && memberTokenCurrent(busyToken)
+}
+
+function presentAdoptedDelegation(): void {
+  if (confirmationSubmission.value || pendingConfirmation.value || memberBusyBlocksRecovery()) return
+  const phase = currentAuthorizationPhase()
+  if (phase !== 'pending' && phase !== 'unverified_no_read' && phase !== 'committed') return
+  if (!authorizationOperation.clientOperationId.value) return
+  if (phase === 'committed' && authorizationOperation.verified.value) return
+  const receipt = authorizationOperation.receipt.value
+  if (receipt && receipt.targetUserId !== selectedUserId.value) return
+  if (phase === 'committed' && receipt) {
+    void publishVerifiedDelegation(delegationAccessGeneration, receipt.targetUserId)
+    return
+  }
+  restoredReadAgain.value = true
+  setMemberStatus(currentMemberToken(), AUTHORIZATION_PENDING_MESSAGE, 'error')
+}
 
 function setStatus(message: string, tone: 'info' | 'error' = 'info'): void {
   status.value = message
@@ -1038,14 +1074,29 @@ function setStatus(message: string, tone: 'info' | 'error' = 'info'): void {
   statusMemberId = ''
 }
 
-function setMemberStatus(message: string, tone: 'info' | 'error' = 'info'): void {
+function setMemberStatus(token: MemberToken, message: string, tone: 'info' | 'error' = 'info'): void {
+  if (!memberTokenCurrent(token)) return
   status.value = message
   statusTone.value = tone
   statusScope = 'member'
-  statusMemberId = selectedUserId.value
+  statusMemberId = token.userId
+}
+
+function noteMemberLeftScope(token: MemberToken, message: string): void {
+  if (token.userId.length === 0 || selectedUserId.value !== '') return
+  if (delegationAccessGeneration !== token.generation + 1) return
+  status.value = message
+  statusTone.value = 'error'
+  statusScope = 'member'
+  statusMemberId = token.userId
 }
 
 function resetMemberScopedState(): void {
+  delegationAccessGeneration += 1
+  if (busyToken && !memberTokenCurrent(busyToken)) {
+    busy.value = false
+    busyToken = null
+  }
   if (statusScope === 'member' && statusMemberId !== selectedUserId.value) {
     status.value = ''
     statusTone.value = 'info'
@@ -1229,7 +1280,6 @@ function targetLabelFor(user: ManagedUser): string {
 }
 
 function invalidateSelection(): void {
-  delegationAccessGeneration += 1
   selectedUserId.value = ''
   selectedAccess.value = null
   selectedScopeConfig.value = null
@@ -1644,7 +1694,8 @@ type OwnedSelection = { applied: boolean, generation: number | null }
 
 async function selectUser(userId: string): Promise<OwnedSelection> {
   if (listedCandidateDisabled(userId)) return { applied: false, generation: null }
-  const generation = ++delegationAccessGeneration
+  const sameMember = selectedUserId.value === userId
+  if (sameMember) delegationAccessGeneration += 1
   if (confirmationPhase.value === 'review' || pendingConfirmation.value?.targetUserId !== userId) {
     pendingConfirmation.value = null
   }
@@ -1655,52 +1706,54 @@ async function selectUser(userId: string): Promise<OwnedSelection> {
   selectedDepartmentId.value = ''
   selectedAudienceGroupId.value = ''
   selectedUserId.value = userId
+  const token = currentMemberToken()
   try {
     const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(userId)}/access`)
     const payload = await readJson(response)
-    if (!delegationReadStillCurrent(generation, userId)) return { applied: false, generation }
+    if (!memberTokenCurrent(token)) return { applied: false, generation: token.generation }
     if (listedCandidateDisabled(userId)) {
       selectedAccess.value = null
       selectedScopeConfig.value = null
       if (selectedUserId.value === userId) selectedUserId.value = ''
-      return { applied: false, generation }
+      return { applied: false, generation: token.generation }
     }
     if (response.status === 403) {
       selectedAccess.value = null
       selectedScopeConfig.value = null
       const deniedMessage = (payload.error as Record<string, unknown> | undefined)?.message
-      setMemberStatus(typeof deniedMessage === 'string' && deniedMessage ? deniedMessage : '无权查看该成员的委派权限', 'error')
-      return { applied: false, generation }
+      setMemberStatus(token, typeof deniedMessage === 'string' && deniedMessage ? deniedMessage : '无权查看该成员的委派权限', 'error')
+      return { applied: false, generation: token.generation }
     }
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载成员委派权限失败'))
     }
-    if (!readSubjectMatches(payload, userId)) {
-      setMemberStatus('加载成员委派权限失败', 'error')
-      return { applied: false, generation }
+    const accessData = payload.data as DelegatedUserAccess
+    if (!readSubjectMatches(payload, token.userId) || accessData?.user?.id !== token.userId) {
+      setMemberStatus(token, '加载成员委派权限失败', 'error')
+      return { applied: false, generation: token.generation }
     }
 
-    selectedAccess.value = payload.data as DelegatedUserAccess
-    if (listedCandidateDisabled(userId) || !delegationReadStillCurrent(generation, userId)) {
+    selectedAccess.value = accessData
+    if (listedCandidateDisabled(userId) || !memberTokenCurrent(token)) {
       selectedAccess.value = null
       selectedScopeConfig.value = null
       if (selectedUserId.value === userId) selectedUserId.value = ''
-      return { applied: false, generation }
+      return { applied: false, generation: token.generation }
     }
     if (summary.value?.isPlatformAdmin) {
       const scopeResult = await loadScopeConfig(userId)
-      if (!delegationReadStillCurrent(generation, userId)) return { applied: false, generation }
-      return { applied: scopeResult.status === 'ok', generation }
+      if (!memberTokenCurrent(token)) return { applied: false, generation: token.generation }
+      return { applied: scopeResult.status === 'ok', generation: token.generation }
     }
-    if (!delegationReadStillCurrent(generation, userId)) return { applied: false, generation }
+    if (!memberTokenCurrent(token)) return { applied: false, generation: token.generation }
     selectedScopeConfig.value = null
-    return { applied: true, generation }
+    return { applied: true, generation: token.generation }
   } catch (error) {
-    if (!delegationReadStillCurrent(generation, userId)) return { applied: false, generation }
+    if (!memberTokenCurrent(token)) return { applied: false, generation: token.generation }
     selectedAccess.value = null
     selectedScopeConfig.value = null
-    setMemberStatus(error instanceof Error ? error.message : '加载成员委派权限失败', 'error')
-    return { applied: false, generation }
+    setMemberStatus(token, error instanceof Error ? error.message : '加载成员委派权限失败', 'error')
+    return { applied: false, generation: token.generation }
   }
 }
 
@@ -1877,7 +1930,7 @@ async function verifyDelegationAuthorization(): Promise<boolean> {
   } catch {
     return false
   }
-  if (!access || !delegationLiveAgrees(access, request, receipt.impact)) return false
+  if (!access || access.user?.id !== targetUserId || !delegationLiveAgrees(access, request, receipt.impact)) return false
   if (!sameDelegationActor(actorId, generation, targetUserId)) return false
   selectedAccess.value = access
   if (!access.delegableRoles.includes(selectedRevokeRoleId.value)) selectedRevokeRoleId.value = ''
@@ -1885,6 +1938,8 @@ async function verifyDelegationAuthorization(): Promise<boolean> {
 }
 
 async function previewDelegationRequest(request: AdminAuthorizationRequest): Promise<void> {
+  const token = currentMemberToken()
+  if (token.userId !== request.targetUserId) return
   if (!currentPrincipalId()) {
     setStatus(AUTHORIZATION_PRINCIPAL_MISSING_MESSAGE, 'error')
     return
@@ -1893,23 +1948,23 @@ async function previewDelegationRequest(request: AdminAuthorizationRequest): Pro
   authorizationFaultMessage = ''
   await authorizationOperation.preview(request)
   await authorizationOperation.whenSettled()
+  if (!memberTokenCurrent(token)) return
   if (!pendingConfirmation.value || confirmationPhase.value !== 'review') return
-  if (selectedUserId.value !== request.targetUserId) return
   const phase = authorizationOperation.phase.value
   if (phase === 'awaiting_confirmation' || phase === 'previewing') return
   if (phase === 'forbidden') {
-    setMemberStatus(AUTHORIZATION_FORBIDDEN_MESSAGE, 'error')
+    setMemberStatus(token, AUTHORIZATION_FORBIDDEN_MESSAGE, 'error')
     return
   }
   if (authorizationFaultCode === 'LAST_PLATFORM_ADMIN') {
-    setMemberStatus(LAST_PLATFORM_ADMIN_MESSAGE, 'error')
+    setMemberStatus(token, LAST_PLATFORM_ADMIN_MESSAGE, 'error')
     return
   }
   if (authorizationFaultMessage) {
-    setMemberStatus(authorizationFaultMessage, 'error')
+    setMemberStatus(token, authorizationFaultMessage, 'error')
     return
   }
-  setMemberStatus(AUTHORIZATION_PREVIEW_FAILED_MESSAGE, 'error')
+  setMemberStatus(token, AUTHORIZATION_PREVIEW_FAILED_MESSAGE, 'error')
 }
 
 function beginDelegationPreview(confirmation: DelegationConfirmation): void {
@@ -1921,6 +1976,7 @@ function beginDelegationPreview(confirmation: DelegationConfirmation): void {
 }
 
 async function publishVerifiedDelegation(generation: number, targetUserId: string): Promise<void> {
+  const token: MemberToken = { userId: targetUserId, generation }
   const actorId = currentPrincipalId()
   const initialReceipt = authorizationOperation.receipt.value
   if (
@@ -1928,15 +1984,15 @@ async function publishVerifiedDelegation(generation: number, targetUserId: strin
     && initialReceipt.targetUserId === targetUserId
     && !delegationCanVerifyAction(initialReceipt.action)
   ) {
-    if (!sameDelegationActor(actorId, generation, targetUserId)) return
+    if (!memberTokenCurrent(token) || currentPrincipalId() !== actorId) return
     confirmationReadAgain.value = false
     restoredReadAgain.value = true
-    setMemberStatus(`回执是${delegationActionLabel(initialReceipt.action)}。本页只重新读取角色和插件使用准入，不能确认这个回执。请不要再次提交。`, 'error')
+    setMemberStatus(token, `回执是${delegationActionLabel(initialReceipt.action)}。本页只重新读取角色和插件使用准入，不能确认这个回执。请不要再次提交。`, 'error')
     return
   }
   await authorizationOperation.verify()
   await authorizationOperation.whenSettled()
-  if (!sameDelegationActor(actorId, generation, targetUserId)) return
+  if (!memberTokenCurrent(token) || currentPrincipalId() !== actorId) return
   const receipt = authorizationOperation.receipt.value
   const request = submittedAuthorization.value
   const statusRequest = request && request.targetUserId === targetUserId
@@ -1945,10 +2001,10 @@ async function publishVerifiedDelegation(generation: number, targetUserId: strin
       ? requestForReceiptReadback(receipt)
       : null
   if (!authorizationOperation.verified.value || !receipt || receipt.targetUserId !== targetUserId || !statusRequest) {
-    if (!sameDelegationActor(actorId, generation, targetUserId)) return
+    if (!memberTokenCurrent(token) || currentPrincipalId() !== actorId) return
     confirmationReadAgain.value = currentAuthorizationPhase() === 'committed'
     restoredReadAgain.value = confirmationReadAgain.value && !pendingConfirmation.value
-    setMemberStatus(AUTHORIZATION_NOT_CHECKED_MESSAGE, 'error')
+    setMemberStatus(token, AUTHORIZATION_NOT_CHECKED_MESSAGE, 'error')
     return
   }
   let scopeChecked = false
@@ -1961,42 +2017,43 @@ async function publishVerifiedDelegation(generation: number, targetUserId: strin
     selectedScopeConfig.value = null
     try {
       const scopeResult = await loadScopeConfig(targetUserId)
-      if (!delegationReadStillCurrent(generation, targetUserId) || scopeResult.status !== 'ok') return
+      if (!memberTokenCurrent(token) || scopeResult.status !== 'ok') return
       scopeChecked = scopeResult.scope?.user.id === targetUserId
     } catch (scopeError) {
-      if (!delegationReadStillCurrent(generation, targetUserId)) return
+      if (!memberTokenCurrent(token)) return
       selectedScopeConfig.value = null
-      setMemberStatus(scopeError instanceof Error ? scopeError.message : '加载管理员范围失败', 'error')
+      setMemberStatus(token, scopeError instanceof Error ? scopeError.message : '加载管理员范围失败', 'error')
       return
     }
   }
-  if (!sameDelegationActor(actorId, generation, targetUserId)) return
+  if (!memberTokenCurrent(token) || currentPrincipalId() !== actorId) return
   restoredReadAgain.value = false
-  setMemberStatus(delegationVerifiedStatus(receipt, statusRequest, scopeChecked))
+  setMemberStatus(token, delegationVerifiedStatus(receipt, statusRequest, scopeChecked))
 }
 
 async function settleDelegationAuthorization(generation: number, targetUserId: string): Promise<void> {
-  if (!delegationReadStillCurrent(generation, targetUserId)) return
+  const token: MemberToken = { userId: targetUserId, generation }
+  if (!memberTokenCurrent(token)) return
   const phase = authorizationOperation.phase.value
   if (phase === 'validation_failed') {
-    if (authorizationFaultCode === 'LAST_PLATFORM_ADMIN') setMemberStatus(LAST_PLATFORM_ADMIN_MESSAGE, 'error')
-    else setMemberStatus(authorizationFaultMessage || ROLE_VERSION_MISMATCH_MESSAGE, 'error')
+    if (authorizationFaultCode === 'LAST_PLATFORM_ADMIN') setMemberStatus(token, LAST_PLATFORM_ADMIN_MESSAGE, 'error')
+    else setMemberStatus(token, authorizationFaultMessage || ROLE_VERSION_MISMATCH_MESSAGE, 'error')
     return
   }
   if (phase === 'forbidden') {
-    setMemberStatus(authorizationFaultMessage || AUTHORIZATION_FORBIDDEN_MESSAGE, 'error')
+    setMemberStatus(token, authorizationFaultMessage || AUTHORIZATION_FORBIDDEN_MESSAGE, 'error')
     return
   }
   if (phase === 'pending' || phase === 'unverified_no_read') {
     await authorizationOperation.lookup()
     await authorizationOperation.whenSettled()
-    if (!delegationReadStillCurrent(generation, targetUserId)) return
+    if (!memberTokenCurrent(token)) return
     if (currentAuthorizationPhase() === 'committed') {
       await publishVerifiedDelegation(generation, targetUserId)
       return
     }
     confirmationReadAgain.value = true
-    setMemberStatus(AUTHORIZATION_PENDING_MESSAGE, 'error')
+    setMemberStatus(token, AUTHORIZATION_PENDING_MESSAGE, 'error')
     return
   }
   if (phase === 'committed') await publishVerifiedDelegation(generation, targetUserId)
@@ -2007,23 +2064,24 @@ async function loadScopeConfig(userId: string): Promise<
   | { status: 'denied' | 'stale' | 'mismatch' }
 > {
   if (!summary.value?.isPlatformAdmin) return { status: 'ok', scope: null }
-  const generation = delegationAccessGeneration
+  const token: MemberToken = { userId, generation: delegationAccessGeneration }
 
   const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(userId)}/scopes`)
   const payload = await readJson(response)
-  if (!delegationReadStillCurrent(generation, userId)) return { status: 'stale' }
+  if (!memberTokenCurrent(token)) return { status: 'stale' }
   if (response.status === 403) {
     selectedScopeConfig.value = null
-    setMemberStatus('无权查看该成员的管理范围', 'error')
+    setMemberStatus(token, '无权查看该成员的管理范围', 'error')
     return { status: 'denied' }
   }
   if (!response.ok || payload.ok !== true) {
     throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载管理员范围失败'))
   }
-  if (!delegationReadStillCurrent(generation, userId)) return { status: 'stale' }
-  if (!readSubjectMatches(payload, userId)) {
+  if (!memberTokenCurrent(token)) return { status: 'stale' }
+  const scopeUserId = (payload.data as { user?: { id?: unknown } } | undefined)?.user?.id
+  if (!readSubjectMatches(payload, token.userId) || scopeUserId !== token.userId) {
     selectedScopeConfig.value = null
-    setMemberStatus('加载管理员范围失败', 'error')
+    setMemberStatus(token, '加载管理员范围失败', 'error')
     return { status: 'mismatch' }
   }
 
@@ -2115,10 +2173,15 @@ function dismissActivationConfirmation(): void {
   if (hadDialog) back?.focus()
 }
 
+function activationToken(attempt: ScopeActivationAttempt): MemberToken {
+  return { userId: attempt.userId, generation: attempt.accessGeneration }
+}
+
 function markActivationPending(attempt: ScopeActivationAttempt): void {
-  if (!activationAttemptCurrent(attempt)) return
+  const token = activationToken(attempt)
+  if (!activationAttemptCurrent(attempt) || !memberTokenCurrent(token)) return
   activationPendingAttempt.value = attempt
-  setMemberStatus(activationPendingMessage, 'error')
+  setMemberStatus(token, activationPendingMessage, 'error')
 }
 
 function activationEchoMatches(payload: Record<string, unknown>, attempt: ScopeActivationAttempt): boolean {
@@ -2244,10 +2307,11 @@ async function submitScopeActivation(): Promise<void> {
     }
     dismissActivationConfirmation()
   }
-  if (serial !== activationReadSerial || !activationAttemptCurrent(attempt)) return
+  const token = activationToken(attempt)
+  if (serial !== activationReadSerial || !activationAttemptCurrent(attempt) || !memberTokenCurrent(token)) return
   if (outcome === 'error') {
     activationPendingAttempt.value = null
-    setMemberStatus(errorMessage, 'error')
+    setMemberStatus(token, errorMessage, 'error')
     return
   }
   if (outcome === 'pending') {
@@ -2256,12 +2320,12 @@ async function submitScopeActivation(): Promise<void> {
   }
   if (outcome === 'different') {
     activationPendingAttempt.value = null
-    setMemberStatus('已重新读取。当前命名空间的委派启停尚未确认与提交一致。', 'error')
+    setMemberStatus(token, '已重新读取。当前命名空间的委派启停尚未确认与提交一致。', 'error')
     return
   }
   if (outcome === 'success') {
     activationPendingAttempt.value = null
-    setMemberStatus(activationCopy(attempt.enabled))
+    setMemberStatus(token, activationCopy(attempt.enabled))
   }
 }
 
@@ -2272,28 +2336,29 @@ async function rereadScopeActivation(): Promise<void> {
     activationPendingAttempt.value = null
     return
   }
+  const token = activationToken(attempt)
   const serial = ++activationReadSerial
   activationWriting.value = true
   try {
     const read = await fetchActivationScope(attempt, serial)
-    if (read === 'stale' || serial !== activationReadSerial || !activationAttemptCurrent(attempt)) return
+    if (read === 'stale' || serial !== activationReadSerial || !activationAttemptCurrent(attempt) || !memberTokenCurrent(token)) return
     if (!read) {
-      setMemberStatus(activationPendingMessage, 'error')
+      setMemberStatus(token, activationPendingMessage, 'error')
       return
     }
     const outcome = applyActivationScope(attempt, read)
-    if (serial !== activationReadSerial || !activationAttemptCurrent(attempt)) return
+    if (serial !== activationReadSerial || !activationAttemptCurrent(attempt) || !memberTokenCurrent(token)) return
     if (outcome === 'drop' || outcome === 'pending') {
-      if (outcome === 'pending') setMemberStatus(activationPendingMessage, 'error')
+      if (outcome === 'pending') setMemberStatus(token, activationPendingMessage, 'error')
       return
     }
     activationPendingAttempt.value = null
-    setMemberStatus(outcome === 'success'
+    setMemberStatus(token, outcome === 'success'
       ? activationCopy(attempt.enabled)
       : '已重新读取。当前命名空间的委派启停尚未确认与提交一致。', outcome === 'success' ? 'info' : 'error')
   } catch {
-    if (serial !== activationReadSerial || !activationAttemptCurrent(attempt)) return
-    setMemberStatus(activationPendingMessage, 'error')
+    if (serial !== activationReadSerial || !activationAttemptCurrent(attempt) || !memberTokenCurrent(token)) return
+    setMemberStatus(token, activationPendingMessage, 'error')
   } finally {
     if (serial === activationReadSerial) activationWriting.value = false
   }
@@ -2328,7 +2393,7 @@ function openGrantConfirmation(): void {
   if (!roleActionAllowed(roleId, 'assign')) return
   const role = access.roleCatalog.find((candidate) => candidate.id === roleId)
   if (!role) {
-    setMemberStatus('角色目录中没有该角色，不能分配', 'error')
+    setMemberStatus(currentMemberToken(), '角色目录中没有该角色，不能分配', 'error')
     return
   }
   if (sameOpenConfirmation('grant', role.id, null, null)) return
@@ -2412,42 +2477,40 @@ function cancelDelegationConfirmation(): void {
 }
 
 async function rereadRestoredAuthorization(): Promise<void> {
-  if (busy.value || pendingConfirmation.value) return
-  const generation = delegationAccessGeneration
-  const targetUserId = selectedUserId.value
-  if (!targetUserId) return
+  if (memberBusyBlocksRecovery() || pendingConfirmation.value) return
+  const token = currentMemberToken()
+  if (!token.userId) return
   await authorizationOperation.lookup()
   await authorizationOperation.whenSettled()
-  if (!delegationReadStillCurrent(generation, targetUserId)) return
+  if (!memberTokenCurrent(token)) return
   if (currentAuthorizationPhase() === 'committed') {
-    await publishVerifiedDelegation(generation, targetUserId)
+    await publishVerifiedDelegation(token.generation, token.userId)
     return
   }
   restoredReadAgain.value = true
-  setMemberStatus(AUTHORIZATION_PENDING_MESSAGE, 'error')
+  setMemberStatus(token, AUTHORIZATION_PENDING_MESSAGE, 'error')
 }
 
 async function rereadDelegationAuthorization(): Promise<void> {
   const confirmation = pendingConfirmation.value
   if (!confirmation || confirmationPhase.value !== 'pending' || !confirmationReadAgain.value) return
-  const generation = delegationAccessGeneration
-  const targetUserId = confirmation.targetUserId
-  if (selectedUserId.value !== targetUserId) return
+  const token: MemberToken = { userId: confirmation.targetUserId, generation: delegationAccessGeneration }
+  if (!memberTokenCurrent(token)) return
   if (currentAuthorizationPhase() !== 'committed') {
     await authorizationOperation.lookup()
     await authorizationOperation.whenSettled()
-    if (!delegationReadStillCurrent(generation, targetUserId)) return
+    if (!memberTokenCurrent(token)) return
   }
   if (currentAuthorizationPhase() === 'committed') {
-    await publishVerifiedDelegation(generation, targetUserId)
-    if (confirmationSubmission.value?.token === confirmation.token && authorizationOperation.verified.value) {
+    await publishVerifiedDelegation(token.generation, token.userId)
+    if (memberTokenCurrent(token) && confirmationSubmission.value?.token === confirmation.token && authorizationOperation.verified.value) {
       confirmationReadAgain.value = false
       confirmationSubmission.value = { token: confirmation.token, phase: 'completed' }
     }
     return
   }
   confirmationReadAgain.value = true
-  setMemberStatus(AUTHORIZATION_PENDING_MESSAGE, 'error')
+  setMemberStatus(token, AUTHORIZATION_PENDING_MESSAGE, 'error')
 }
 
 async function submitDelegationConfirmation(typedText: string): Promise<void> {
@@ -2485,22 +2548,21 @@ async function submitDelegationConfirmation(typedText: string): Promise<void> {
     pendingConfirmation.value = null
     return
   }
-  const generation = delegationAccessGeneration
-  const targetUserId = confirmation.targetUserId
+  const token: MemberToken = { userId: confirmation.targetUserId, generation: delegationAccessGeneration }
   confirmationSubmission.value = { token: confirmation.token, phase: 'pending' }
   confirmationReadAgain.value = false
   submittedAuthorization.value = request
   authorizationFaultCode = ''
   authorizationFaultMessage = ''
-  busy.value = true
+  claimMemberBusy(token)
   try {
     await authorizationOperation.confirm()
     await authorizationOperation.whenSettled()
-    if (!delegationReadStillCurrent(generation, targetUserId)) return
-    await settleDelegationAuthorization(generation, targetUserId)
+    if (!memberTokenCurrent(token)) return
+    await settleDelegationAuthorization(token.generation, token.userId)
   } finally {
-    busy.value = false
-    if (confirmationSubmission.value?.token === confirmation.token) {
+    releaseMemberBusy(token)
+    if (memberTokenCurrent(token) && confirmationSubmission.value?.token === confirmation.token) {
       const phase = currentAuthorizationPhase()
       const unresolved = phase === 'pending'
         || phase === 'committing'
@@ -2512,45 +2574,48 @@ async function submitDelegationConfirmation(typedText: string): Promise<void> {
 }
 
 async function refreshAfterScopeWrite(targetUserId: string, successMessage: string, operationGeneration: number): Promise<void> {
-  if (!delegationReadStillCurrent(operationGeneration, targetUserId)) return
+  const token: MemberToken = { userId: targetUserId, generation: operationGeneration }
+  if (!memberTokenCurrent(token)) return
   await loadSummary()
-  if (!delegationReadStillCurrent(operationGeneration, targetUserId)) return
+  if (!memberTokenCurrent(token)) return
   // The list reload must not spend the access read this write owns.
   await loadUsers({ reselectPinned: false })
   if (usersForbidden.value) return
   const candidate = users.value.find((user) => user.id === targetUserId)
   // Disabled is a denial. A linked member missing from this search page is not.
+  // loadUsers may already have cleared the selection. The note still applies when
+  // that clear advanced this operation's generation by exactly one.
   if (candidate?.selectable === false) {
-    const stillCurrent = delegationReadStillCurrent(operationGeneration, targetUserId)
+    const stillCurrent = memberTokenCurrent(token)
     if (stillCurrent) invalidateSelection()
-    const clearedWithoutReplacement = selectedUserId.value === '' && delegationAccessGeneration === operationGeneration + 1
-    if (stillCurrent || clearedWithoutReplacement) setMemberStatus('该成员已不在可管理范围内', 'error')
+    noteMemberLeftScope(token, '该成员已不在可管理范围内')
     return
   }
-  if (!delegationReadStillCurrent(operationGeneration, targetUserId)) return
+  if (!memberTokenCurrent(token)) return
   if (!candidate && targetUserId !== initialPinnedUserId) {
     invalidateSelection()
-    setMemberStatus('该成员已不在可管理范围内', 'error')
+    noteMemberLeftScope(token, '该成员已不在可管理范围内')
     return
   }
-  if (!delegationReadStillCurrent(operationGeneration, targetUserId)) return
+  if (!memberTokenCurrent(token)) return
   const ownedGeneration = operationGeneration + 1
   const selected = await selectUser(targetUserId)
-  if (!selected.applied || selected.generation !== ownedGeneration) return
-  if (usersForbidden.value || selectedUserId.value !== targetUserId || !selectedAccess.value) return
+  if (!selected.applied || selected.generation !== ownedGeneration || selected.generation === null) return
+  const refreshed: MemberToken = { userId: targetUserId, generation: selected.generation }
+  if (!memberTokenCurrent(refreshed) || !selectedAccess.value || selectedAccess.value.user.id !== targetUserId) return
   if (summary.value?.isPlatformAdmin && selectedScopeConfig.value?.user.id !== targetUserId) return
-  setMemberStatus(successMessage)
+  setMemberStatus(refreshed, successMessage)
 }
 
 async function updateScope(action: 'assign' | 'unassign', scope?: ScopeAssignment): Promise<void> {
   const targetUserId = selectedUserId.value
-  const generation = delegationAccessGeneration
-  if (!summary.value?.isPlatformAdmin || !targetUserId || !memberWritesReady.value) return
+  const token: MemberToken = { userId: targetUserId, generation: delegationAccessGeneration }
+  if (!summary.value?.isPlatformAdmin || !memberTokenCurrent(token) || !memberWritesReady.value) return
   const namespace = action === 'assign' ? selectedScopeNamespace.value : scope?.namespace || ''
   const directoryDepartmentId = action === 'assign' ? selectedDepartmentId.value : scope?.directoryDepartmentId || ''
   if (!namespace || !directoryDepartmentId) return
   if (action === 'assign' && includeChildren.value !== true && !exactDepartmentWritesEnabled.value) {
-    setMemberStatus(exactDepartmentUnavailableText, 'error')
+    setMemberStatus(token, exactDepartmentUnavailableText, 'error')
     return
   }
 
@@ -2562,22 +2627,23 @@ async function updateScope(action: 'assign' | 'unassign', scope?: ScopeAssignmen
       directoryDepartmentId,
     }
     if (action === 'assign') scopeBody.includeChildren = requestedIncludeChildren
-    const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(targetUserId)}/scopes/${action}`, {
+    const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(token.userId)}/scopes/${action}`, {
       method: 'POST',
       body: JSON.stringify(scopeBody),
     })
     const payload = await readJson(response)
     if (isExactDepartmentDisabledResponse(response, payload)) {
       noteExactDepartmentDisabledByServer()
-      if (!delegationReadStillCurrent(generation, targetUserId)) return
+      if (!memberTokenCurrent(token)) return
       throw new Error(exactDepartmentUnavailableText)
     }
-    if (!delegationReadStillCurrent(generation, targetUserId)) return
+    if (!memberTokenCurrent(token)) return
     if (response.status === 403 || !response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存管理员范围失败'))
     }
-    if (!readSubjectMatches(payload, targetUserId)) {
-      setMemberStatus('保存管理员范围失败', 'error')
+    const scopeUserId = (payload.data as { user?: { id?: unknown } } | undefined)?.user?.id
+    if (!readSubjectMatches(payload, token.userId) || scopeUserId !== token.userId) {
+      setMemberStatus(token, '保存管理员范围失败', 'error')
       return
     }
     if (
@@ -2589,20 +2655,21 @@ async function updateScope(action: 'assign' | 'unassign', scope?: ScopeAssignmen
         namespace,
       )
     ) {
-      setMemberStatus('返回的是否包含下级与提交不一致', 'error')
+      setMemberStatus(token, '返回的是否包含下级与提交不一致', 'error')
       return
     }
 
+    if (!memberTokenCurrent(token)) return
     selectedScopeConfig.value = scopeConfigKeepingActivation(payload.data as DelegatedAdminScopeConfig, selectedScopeConfig.value)
     if (action === 'assign') selectedDepartmentId.value = ''
     await refreshAfterScopeWrite(
-      targetUserId,
+      token.userId,
       action === 'assign' ? '插件管理员部门范围已添加' : '插件管理员部门范围已移除',
-      generation,
+      token.generation,
     )
   } catch (error) {
-    if (!delegationReadStillCurrent(generation, targetUserId)) return
-    setMemberStatus(error instanceof Error ? error.message : '保存管理员范围失败', 'error')
+    if (!memberTokenCurrent(token)) return
+    setMemberStatus(token, error instanceof Error ? error.message : '保存管理员范围失败', 'error')
   } finally {
     scopeBusy.value = false
   }
@@ -2610,37 +2677,38 @@ async function updateScope(action: 'assign' | 'unassign', scope?: ScopeAssignmen
 
 async function updateScopeGroup(action: 'assign' | 'unassign', assignment?: GroupAssignment): Promise<void> {
   const targetUserId = selectedUserId.value
-  const generation = delegationAccessGeneration
-  if (!summary.value?.isPlatformAdmin || !targetUserId || !memberWritesReady.value) return
+  const token: MemberToken = { userId: targetUserId, generation: delegationAccessGeneration }
+  if (!summary.value?.isPlatformAdmin || !memberTokenCurrent(token) || !memberWritesReady.value) return
   const namespace = action === 'assign' ? selectedScopeNamespace.value : assignment?.namespace || ''
   const groupId = action === 'assign' ? selectedAudienceGroupId.value : assignment?.groupId || ''
   if (!namespace || !groupId) return
 
   scopeBusy.value = true
   try {
-    const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(targetUserId)}/scope-groups/${action}`, {
+    const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(token.userId)}/scope-groups/${action}`, {
       method: 'POST',
       body: JSON.stringify({ namespace, groupId }),
     })
     const payload = await readJson(response)
-    if (!delegationReadStillCurrent(generation, targetUserId)) return
+    if (!memberTokenCurrent(token)) return
     if (response.status === 403 || !response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存成员集范围失败'))
     }
-    if (!readSubjectMatches(payload, targetUserId)) {
-      setMemberStatus('保存成员集范围失败', 'error')
+    const scopeUserId = (payload.data as { user?: { id?: unknown } } | undefined)?.user?.id
+    if (!readSubjectMatches(payload, token.userId) || scopeUserId !== token.userId) {
+      setMemberStatus(token, '保存成员集范围失败', 'error')
       return
     }
     selectedScopeConfig.value = scopeConfigKeepingActivation(payload.data as DelegatedAdminScopeConfig, selectedScopeConfig.value)
     if (action === 'assign') selectedAudienceGroupId.value = ''
     await refreshAfterScopeWrite(
-      targetUserId,
+      token.userId,
       action === 'assign' ? '插件管理员成员集范围已添加' : '插件管理员成员集范围已移除',
-      generation,
+      token.generation,
     )
   } catch (error) {
-    if (!delegationReadStillCurrent(generation, targetUserId)) return
-    setMemberStatus(error instanceof Error ? error.message : '保存成员集范围失败', 'error')
+    if (!memberTokenCurrent(token)) return
+    setMemberStatus(token, error instanceof Error ? error.message : '保存成员集范围失败', 'error')
   } finally {
     scopeBusy.value = false
   }
@@ -2649,27 +2717,33 @@ async function updateScopeGroup(action: 'assign' | 'unassign', assignment?: Grou
 async function updateUserMemberGroup(action: 'assign' | 'unassign', userIdOverride?: string): Promise<void> {
   const targetUserId = userIdOverride || selectedUserId.value
   const writesSelectedMember = !userIdOverride || userIdOverride === selectedUserId.value
+  const accessToken: MemberToken | null = writesSelectedMember
+    ? { userId: targetUserId, generation: delegationAccessGeneration }
+    : null
   if (!summary.value?.isPlatformAdmin || !targetUserId || !selectedMemberGroupId.value || !hasSelectedMemberGroup.value) return
   if (writesSelectedMember && !memberWritesReady.value) return
+  const groupId = selectedMemberGroupId.value
   groupBusy.value = true
   try {
     const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(targetUserId)}/member-groups/${action}`, {
       method: 'POST',
-      body: JSON.stringify({ groupId: selectedMemberGroupId.value }),
+      body: JSON.stringify({ groupId }),
     })
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存成员集成员失败'))
     }
+    const nextUser = (payload.data as { user?: ManagedUser } | undefined)?.user
     if (
-      writesSelectedMember
+      accessToken
+      && memberTokenCurrent(accessToken)
       && selectedAccess.value
-      && selectedUserId.value === targetUserId
-      && readSubjectMatches(payload, targetUserId)
+      && nextUser?.id === accessToken.userId
+      && readSubjectMatches(payload, accessToken.userId)
     ) {
       selectedAccess.value = {
         ...selectedAccess.value,
-        user: (payload.data as { user: ManagedUser }).user,
+        user: nextUser,
         roles: (payload.data as { roles: string[] }).roles,
         memberGroups: (payload.data as { memberGroups: MemberGroupSummary[] }).memberGroups,
       }
@@ -2678,9 +2752,9 @@ async function updateUserMemberGroup(action: 'assign' | 'unassign', userIdOverri
     if (selectedMemberGroupId.value) {
       await selectMemberGroup(selectedMemberGroupId.value)
     }
-    setMemberStatus(action === 'assign' ? '成员已加入平台成员集' : '成员已移出平台成员集')
+    setStatus(action === 'assign' ? '成员已加入平台成员集' : '成员已移出平台成员集')
   } catch (error) {
-    setMemberStatus(error instanceof Error ? error.message : '保存成员集成员失败', 'error')
+    setStatus(error instanceof Error ? error.message : '保存成员集成员失败', 'error')
   } finally {
     groupBusy.value = false
   }
@@ -2688,18 +2762,18 @@ async function updateUserMemberGroup(action: 'assign' | 'unassign', userIdOverri
 
 async function applyTemplate(): Promise<void> {
   const targetUserId = selectedUserId.value
-  const generation = delegationAccessGeneration
+  const token: MemberToken = { userId: targetUserId, generation: delegationAccessGeneration }
   const templateId = selectedTemplateId.value
   const expectedScopeVersion = selectedTemplateScopeVersion.value
-  if (scopeBusy.value || !summary.value?.isPlatformAdmin || !targetUserId || !memberWritesReady.value
+  if (scopeBusy.value || !summary.value?.isPlatformAdmin || !memberTokenCurrent(token) || !memberWritesReady.value
     || !selectedScopeNamespace.value || !expectedScopeVersion) return
   if (!exactDepartmentWritesEnabled.value && templateContainsExactDepartment(selectedTemplate.value)) {
-    setMemberStatus(exactDepartmentApplyUnavailableText, 'error')
+    setMemberStatus(token, exactDepartmentApplyUnavailableText, 'error')
     return
   }
   scopeBusy.value = true
   try {
-    const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(targetUserId)}/scope-templates/apply`, {
+    const response = await apiFetch(`/api/admin/role-delegation/users/${encodeURIComponent(token.userId)}/scope-templates/apply`, {
       method: 'POST',
       body: JSON.stringify({
         namespace: selectedScopeNamespace.value,
@@ -2713,31 +2787,33 @@ async function applyTemplate(): Promise<void> {
       noteExactDepartmentDisabledByServer()
       throw new Error(exactDepartmentApplyUnavailableText)
     }
-    if (!delegationReadStillCurrent(generation, targetUserId)) return
+    if (!memberTokenCurrent(token)) return
     if (response.status === 409 && (payload.error as { code?: unknown } | undefined)?.code === 'ROLE_DELEGATION_SCOPE_TEMPLATE_CHANGED') {
       if (selectedTemplateId.value === templateId) selectedTemplate.value = null
-      setMemberStatus('范围模板已变更。请点「查询模板」，核对最新内容后再应用。', 'error')
+      setMemberStatus(token, '范围模板已变更。请点「查询模板」，核对最新内容后再应用。', 'error')
       return
     }
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '应用范围模板失败'))
     }
-    if (!readSubjectMatches(payload, targetUserId)) {
-      setMemberStatus('应用范围模板失败', 'error')
+    const scopeUserId = (payload.data as { user?: { id?: unknown } } | undefined)?.user?.id
+    if (!readSubjectMatches(payload, token.userId) || scopeUserId !== token.userId) {
+      setMemberStatus(token, '应用范围模板失败', 'error')
       return
     }
 
     const merged = scopeConfigKeepingActivation(payload.data as DelegatedAdminScopeConfig, selectedScopeConfig.value)
+    if (!memberTokenCurrent(token) || merged?.user?.id !== token.userId) return
     selectedScopeConfig.value = merged
     if (scopeActivationFieldPresentFor(merged)) {
-      await refreshAfterScopeWrite(targetUserId, '范围模板已覆盖应用到该插件管理员命名空间', generation)
+      await refreshAfterScopeWrite(token.userId, '范围模板已覆盖应用到该插件管理员命名空间', token.generation)
       return
     }
-    setMemberStatus('范围模板已覆盖应用到该插件管理员命名空间')
+    setMemberStatus(token, '范围模板已覆盖应用到该插件管理员命名空间')
     await loadSummary()
   } catch (error) {
-    if (!delegationReadStillCurrent(generation, targetUserId)) return
-    setMemberStatus(error instanceof Error ? error.message : '应用范围模板失败', 'error')
+    if (!memberTokenCurrent(token)) return
+    setMemberStatus(token, error instanceof Error ? error.message : '应用范围模板失败', 'error')
   } finally {
     scopeBusy.value = false
   }
