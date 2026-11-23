@@ -2772,9 +2772,37 @@ const directoryNavigationNotice = computed(() => {
   return '已从目录同步返回用户管理，可继续查看用户授权、钉钉身份和 openId 治理状态。'
 })
 
+let statusScope: 'page' | 'member' = 'page'
+let statusMemberId = ''
+
 function setStatus(message: string, tone: 'info' | 'error' = 'info'): void {
   status.value = message
   statusTone.value = tone
+  statusScope = 'page'
+  statusMemberId = ''
+}
+
+function setMemberStatus(message: string, tone: 'info' | 'error' = 'info'): void {
+  status.value = message
+  statusTone.value = tone
+  statusScope = 'member'
+  statusMemberId = selectedUserId.value
+}
+
+function resetMemberScopedState(): void {
+  if (statusScope === 'member' && statusMemberId !== selectedUserId.value) {
+    status.value = ''
+    statusTone.value = 'info'
+    statusScope = 'page'
+    statusMemberId = ''
+  }
+  foreignAuthorizationReceipt.value = false
+  roleActionFeedback.value = null
+  if (!authorizationPanelHeld.value) {
+    submittedRequest.value = null
+    authorizationOutcomeText.value = ''
+    authorizationFaultCode = ''
+  }
 }
 
 function normalizeUserListFilter(value: string | null | undefined): UserListFilter {
@@ -3530,7 +3558,9 @@ async function loadInviteRecords(userId?: string): Promise<void> {
       : []
   } catch (error) {
     if (userId && userId !== selectedUserId.value) return
-    setStatus(error instanceof Error ? error.message : '加载邀请记录失败', 'error')
+    const message = error instanceof Error ? error.message : '加载邀请记录失败'
+    if (userId) setMemberStatus(message, 'error')
+    else setStatus(message, 'error')
   } finally {
     loadingInvites.value = false
   }
@@ -3568,7 +3598,7 @@ async function loadUserSessions(userId?: string): Promise<void> {
       : []
   } catch (error) {
     if (userId !== selectedUserId.value) return
-    setStatus(error instanceof Error ? error.message : '加载用户会话失败', 'error')
+    setMemberStatus(error instanceof Error ? error.message : '加载用户会话失败', 'error')
   } finally {
     loadingSessions.value = false
   }
@@ -3608,7 +3638,7 @@ async function selectUser(userId: string): Promise<void> {
     const snapshot = await fetchUserAccessOrThrow(userId)
     if (!accessReadStillCurrent(generation, userAccessReadGeneration.value, userId, selectedUserId.value)) return
     if (!userAccessSnapshotMatches(snapshot, userId)) {
-      setStatus('用户访问快照与当前选择不一致，未覆盖角色状态', 'error')
+      setMemberStatus('用户访问快照与当前选择不一致，未覆盖角色状态', 'error')
       return
     }
     access.value = snapshot
@@ -3616,7 +3646,7 @@ async function selectUser(userId: string): Promise<void> {
     const navigationKey = buildUserNavigationKey(userNavigation.value)
     if (userNavigation.value.userId === userId && appliedUserNavigationKey.value !== navigationKey) {
       if (userNavigation.value.source === 'directory-sync') {
-        setStatus(`已从目录同步定位到用户 ${formatManagedUserLabel(access.value.user)}`)
+        setMemberStatus(`已从目录同步定位到用户 ${formatManagedUserLabel(access.value.user)}`)
       }
       appliedUserNavigationKey.value = navigationKey
     }
@@ -3625,7 +3655,7 @@ async function selectUser(userId: string): Promise<void> {
   } catch (error) {
     if (!accessReadStillCurrent(generation, userAccessReadGeneration.value, userId, selectedUserId.value)) return
     access.value = null
-    setStatus(error instanceof Error ? error.message : '加载用户权限失败', 'error')
+    setMemberStatus(error instanceof Error ? error.message : '加载用户权限失败', 'error')
   }
 }
 
@@ -3776,22 +3806,22 @@ async function confirmJoinDefaultOrg(): Promise<void> {
   const userId = selectedUserId.value
   // Only the selected user, and only when the confirmed panel and the admission on screen are that user's.
   if (!userId || userId !== confirmedUserId || userId !== memberAdmission.value?.userId) {
-    setStatus(JOIN_DEFAULT_ORG_FAILURE, 'error')
+    setMemberStatus(JOIN_DEFAULT_ORG_FAILURE, 'error')
     return
   }
   joiningDefaultOrgUserIds.value = [...joiningDefaultOrgUserIds.value, userId]
   try {
     const result = await postJoinDefaultOrg(userId)
     if (!result.ok) {
-      setStatus(describeJoinDefaultOrgFailure(result), 'error')
+      setMemberStatus(describeJoinDefaultOrgFailure(result), 'error')
       return
     }
     // The admin moved on to another user: that user's panel is not reloaded or told 已加入.
     if (selectedUserId.value !== userId) return
     await refreshCurrentDetailMemberAdmissionIfNeeded([userId])
-    setStatus('已加入默认组织')
+    setMemberStatus('已加入默认组织')
   } catch {
-    setStatus(JOIN_DEFAULT_ORG_FAILURE, 'error')
+    setMemberStatus(JOIN_DEFAULT_ORG_FAILURE, 'error')
   } finally {
     joiningDefaultOrgUserIds.value = joiningDefaultOrgUserIds.value.filter((id) => id !== userId)
   }
@@ -4158,7 +4188,7 @@ function updateNamespaceAdmission(admission: NamespaceAdmission, enabled: boolea
 async function updateDingTalkGrant(enabled: boolean): Promise<void> {
   if (!access.value) return
   if (enabled && !canEnableDingTalkGrant(dingtalkAccess.value)) {
-    setStatus('当前钉钉身份缺少 openId：暂时拿不到该成员的 openId，暂不能开通钉钉扫码。', 'error')
+    setMemberStatus('当前钉钉身份缺少 openId：暂时拿不到该成员的 openId，暂不能开通钉钉扫码。', 'error')
     return
   }
   busy.value = true
@@ -4179,9 +4209,9 @@ async function updateDingTalkGrant(enabled: boolean): Promise<void> {
         dingtalk: dingtalkAccess.value,
       }
     }
-    setStatus(enabled ? '已开通该用户的钉钉扫码登录' : '已关闭该用户的钉钉扫码登录')
+    setMemberStatus(enabled ? '已开通该用户的钉钉扫码登录' : '已关闭该用户的钉钉扫码登录')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '更新钉钉登录状态失败', 'error')
+    setMemberStatus(error instanceof Error ? error.message : '更新钉钉登录状态失败', 'error')
   } finally {
     busy.value = false
   }
@@ -4564,9 +4594,9 @@ async function toggleUserStatus(): Promise<void> {
     syncProfileDraftFromAccess()
     await loadUsers()
     await loadMemberAdmission(access.value.user.id)
-    setStatus(access.value.user.is_active ? '账号已启用' : '账号已停用')
+    setMemberStatus(access.value.user.is_active ? '账号已启用' : '账号已停用')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '更新用户状态失败', 'error')
+    setMemberStatus(error instanceof Error ? error.message : '更新用户状态失败', 'error')
   } finally {
     busy.value = false
   }
@@ -4604,10 +4634,10 @@ async function resetPassword(): Promise<void> {
     temporaryPassword.value = String((payload.data as Record<string, unknown> | undefined)?.temporaryPassword || '')
     manualPassword.value = ''
     passwordResetInlineError.value = ''
-    setStatus('密码已重置')
+    setMemberStatus('密码已重置')
   } catch (error) {
     if (selectedUserId.value !== requestedUserId) return
-    setStatus(error instanceof Error ? error.message : '重置密码失败', 'error')
+    setMemberStatus(error instanceof Error ? error.message : '重置密码失败', 'error')
   } finally {
     busy.value = false
   }
@@ -4626,9 +4656,9 @@ async function revokeSessions(): Promise<void> {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '强制下线失败'))
     }
 
-    setStatus('该用户现有会话已失效')
+    setMemberStatus('该用户现有会话已失效')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '强制下线失败', 'error')
+    setMemberStatus(error instanceof Error ? error.message : '强制下线失败', 'error')
   } finally {
     busy.value = false
   }
@@ -4648,9 +4678,9 @@ async function revokeSingleSession(sessionId: string): Promise<void> {
     }
 
     await loadUserSessions(access.value.user.id)
-    setStatus('会话已踢下线')
+    setMemberStatus('会话已踢下线')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '踢下线失败', 'error')
+    setMemberStatus(error instanceof Error ? error.message : '踢下线失败', 'error')
   } finally {
     busy.value = false
   }
@@ -4659,7 +4689,7 @@ async function revokeSingleSession(sessionId: string): Promise<void> {
 function publishAuthorizationMessage(message: string, tone: 'info' | 'error'): void {
   authorizationOutcomeText.value = message
   roleActionFeedback.value = { tone, message }
-  setStatus(message, tone)
+  setMemberStatus(message, tone)
 }
 
 function markAuthorizationDetached(reason: 'member' | 'principal'): void {
@@ -4711,23 +4741,24 @@ async function previewAtomic(request: AdminAuthorizationRequest): Promise<void> 
   await authorizationOperation.preview(request)
   await authorizationOperation.whenSettled()
   if (authorizationDetached.value || authorizationPanelHeld.value) return
+  if (selectedUserId.value !== request.targetUserId) return
   const phase = authorizationOperation.phase.value
   const detail = authorizationOperation.detail.value
   if (phase === 'awaiting_confirmation' || phase === 'previewing') return
   if (phase === 'forbidden' || detail === 'no_access') {
-    setStatus(AUTHORIZATION_FORBIDDEN_MESSAGE, 'error')
+    setMemberStatus(AUTHORIZATION_FORBIDDEN_MESSAGE, 'error')
     return
   }
   if (authorizationFaultCode === 'LAST_PLATFORM_ADMIN') {
-    setStatus(LAST_PLATFORM_ADMIN_MESSAGE, 'error')
+    setMemberStatus(LAST_PLATFORM_ADMIN_MESSAGE, 'error')
     return
   }
   if (phase === 'validation_failed' && authorizationFaultCode) {
-    setStatus(ROLE_VERSION_MISMATCH_MESSAGE, 'error')
+    setMemberStatus(ROLE_VERSION_MISMATCH_MESSAGE, 'error')
     return
   }
   if (detail === 'preview_failed' || phase === 'idle' || phase === 'validation_failed') {
-    setStatus(AUTHORIZATION_PREVIEW_FAILED_MESSAGE, 'error')
+    setMemberStatus(AUTHORIZATION_PREVIEW_FAILED_MESSAGE, 'error')
   }
 }
 
@@ -4743,6 +4774,7 @@ async function finishCommittedAuthorization(): Promise<void> {
   }
   if (authorizationDetached.value) return
   const settledReceipt = authorizationOperation.receipt.value
+  if (settledReceipt && settledReceipt.targetUserId !== selectedUserId.value) return
   if (settledReceipt && !memberPageCanVerifyAction(settledReceipt.action)) {
     foreignAuthorizationReceipt.value = true
     publishAuthorizationMessage(AUTHORIZATION_FOREIGN_RECEIPT_MESSAGE, 'error')
@@ -4893,7 +4925,11 @@ function presentRecoveredAuthorization(): void {
   const phase = authorizationOperation.phase.value
   if (phase !== 'pending' && phase !== 'committed' && phase !== 'unverified_no_read') return
   const receipt = authorizationOperation.receipt.value
-  foreignAuthorizationReceipt.value = Boolean(receipt && !memberPageCanVerifyAction(receipt.action))
+  foreignAuthorizationReceipt.value = Boolean(
+    receipt
+    && receipt.targetUserId === selectedUserId.value
+    && !memberPageCanVerifyAction(receipt.action),
+  )
   const targetId = receipt?.targetUserId || selectedUserId.value
   if (!targetId || targetId !== selectedUserId.value) return
   const draft = buildRecoveredAuthorizationDraft({
@@ -4985,12 +5021,12 @@ async function saveUserProfile(): Promise<void> {
           syncProfileDraftFromAccess()
           const latest = latestAccess.user.mobile ?? null
           const latestLabel = latest === null || latest === '' ? '（空）' : latest
-          setStatus(`用户手机号已被其他操作更新为 ${latestLabel}，请确认最新值后重新保存`, 'error')
+          setMemberStatus(`用户手机号已被其他操作更新为 ${latestLabel}，请确认最新值后重新保存`, 'error')
         } catch {
           // If the refresh itself failed we must not advertise a stale value
           // as the "latest" — it would mislead the admin about what the
           // backend currently holds.
-          setStatus('用户手机号已被其他操作更新，请刷新后重试', 'error')
+          setMemberStatus('用户手机号已被其他操作更新，请刷新后重试', 'error')
         }
         return
       }
@@ -5002,9 +5038,9 @@ async function saveUserProfile(): Promise<void> {
     access.value = payload.data as UserAccess
     syncProfileDraftFromAccess()
     await loadUsers()
-    setStatus('用户资料已更新')
+    setMemberStatus('用户资料已更新')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '更新用户资料失败', 'error')
+    setMemberStatus(error instanceof Error ? error.message : '更新用户资料失败', 'error')
   } finally {
     busy.value = false
   }
@@ -5801,7 +5837,10 @@ watch(selectedRoleId, (roleId, previous) => {
 })
 
 watch(selectedUserId, (userId, previous) => {
-  if (previous && userId !== previous && authorizationPanelHeld.value) markAuthorizationDetached('member')
+  if (previous && userId !== previous) {
+    if (authorizationPanelHeld.value) markAuthorizationDetached('member')
+    resetMemberScopedState()
+  }
   authorizationOperation.syncContext()
 })
 

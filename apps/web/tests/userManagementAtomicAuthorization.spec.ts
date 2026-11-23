@@ -30,7 +30,7 @@ let calls: Call[] = []
 let rolesByUser: Record<string, string[]> = {}
 let admissionsByUser: Record<string, AdmissionRow[]> = {}
 let commitMode: 'ok' | 'conflict' | 'last-admin' | 'throw' | 'malformed' | 'hold' = 'ok'
-let previewMode: 'ok' | 'missing' | 'unavailable' = 'ok'
+let previewMode: 'ok' | 'missing' | 'unavailable' | 'last-admin' = 'ok'
 let lookupMode: 'committed' | 'unknown' | 'direct' = 'unknown'
 let releaseCommit: (() => void) | null = null
 let applyRoleOnCommit = true
@@ -123,6 +123,7 @@ function installApi(): void {
     if (pathname === '/api/admin/authorization-operations/preview' && method === 'POST') {
       if (previewMode === 'missing') return jsonResponse({ ok: false, error: { message: 'missing' } }, 404)
       if (previewMode === 'unavailable') return jsonResponse({ ok: false, error: { message: 'unavailable' } }, 503)
+      if (previewMode === 'last-admin') return jsonResponse({ ok: false, error: { code: 'LAST_PLATFORM_ADMIN' } }, 409)
       return jsonResponse({ expectedVersion: 'member-version-1', impact: emptyImpact(Array.isArray(body?.admissionChanges) ? body.admissionChanges : []) })
     }
     if (pathname === '/api/admin/authorization-operations' && method === 'POST') {
@@ -630,6 +631,63 @@ describe('member page atomic authorization', () => {
     apply?.click()
     await waitFor(() => Boolean(root!.querySelector('[data-testid="bulk-independent-flow"]')))
     expect(root!.querySelector('[data-testid="bulk-independent-flow"]')?.textContent).toContain('这是独立的批量流程，不会生成成员页单次授权的回执。')
+    expect(commits()).toEqual([])
+  })
+
+  function pageStatusText(root: HTMLElement): string {
+    const nodes = Array.from(root.querySelectorAll('section.user-admin > p.user-admin__status'))
+    const status = nodes.find((node) => node.getAttribute('data-testid') !== 'authorization-foreign-receipt')
+    return status?.textContent?.trim() || ''
+  }
+
+  it('drops a preview refusal when the selected member changes and does not restore it', async () => {
+    previewMode = 'last-admin'
+    ;({ app, root } = await mountView())
+    await openUser(root!, 'Alpha')
+    await chooseRole(root!, 'finance_admin')
+    ;(root!.querySelector('[data-testid="assign-role-button"]') as HTMLButtonElement).click()
+    await waitFor(() => pageStatusText(root!).includes('不能取消最后一名平台管理员'))
+    expect(root!.querySelector('[data-testid="role-action-feedback"]')).toBeNull()
+
+    await openUser(root!, 'Bravo')
+    expect(pageStatusText(root!)).not.toContain('不能取消最后一名平台管理员')
+    expect(root!.querySelector('[data-testid="role-action-feedback"]')?.textContent || '').not.toContain('不能取消最后一名平台管理员')
+    expect(root!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Bravo')
+
+    await openUser(root!, 'Alpha')
+    expect(pageStatusText(root!)).not.toContain('不能取消最后一名平台管理员')
+    expect(root!.querySelector('[data-testid="admin-authorization-dialog"]')).toBeNull()
+    expect(commits()).toEqual([])
+  })
+
+  it('drops another page receipt when the selected member has none, and reads it again only from storage', async () => {
+    const operationId = '22222222-2222-4222-8222-222222222222'
+    lookupMode = 'direct'
+    sessionStorage.setItem(PENDING_KEY, JSON.stringify({
+      formatVersion: 1,
+      entries: [{ principalId: 'admin-actor', targetId: 'user-1', clientOperationId: operationId }],
+    }))
+    ;({ app, root } = await mountView())
+    await openUser(root!, 'Alpha')
+    await waitFor(() => Boolean(root!.querySelector('[data-testid="authorization-foreign-receipt"]')))
+    expect(root!.querySelector('[data-testid="authorization-foreign-receipt-link"]')?.getAttribute('href')).toBe('/admin/permissions?userId=user-1')
+
+    await openUser(root!, 'Bravo')
+    expect(root!.querySelector('[data-testid="authorization-foreign-receipt"]')).toBeNull()
+    expect(root!.textContent).not.toContain('这次回执不是成员页的角色或准入变更')
+    expect(root!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Bravo')
+
+    await openUser(root!, 'Alpha')
+    await waitFor(() => Boolean(root!.querySelector('[data-testid="authorization-foreign-receipt"]')))
+    expect(root!.querySelector('[data-testid="authorization-foreign-receipt-link"]')?.getAttribute('href')).toBe('/admin/permissions?userId=user-1')
+
+    await openUser(root!, 'Bravo')
+    expect(root!.querySelector('[data-testid="authorization-foreign-receipt"]')).toBeNull()
+    sessionStorage.removeItem(PENDING_KEY)
+    await openUser(root!, 'Alpha')
+    await flushUi(12)
+    expect(root!.querySelector('[data-testid="authorization-foreign-receipt"]')).toBeNull()
+    expect(root!.textContent).not.toContain('这次回执不是成员页的角色或准入变更')
     expect(commits()).toEqual([])
   })
 })

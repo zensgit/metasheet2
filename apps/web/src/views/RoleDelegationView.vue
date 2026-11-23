@@ -969,15 +969,14 @@ const exactDepartmentApplyBlocked = computed(() => (
   !exactDepartmentWritesEnabled.value && templateContainsExactDepartment(selectedTemplate.value)
 ))
 
-watch(selectedUserId, (userId) => {
+watch(selectedUserId, (userId, previous) => {
+  if (previous !== userId) resetMemberScopedState()
   const pending = pendingConfirmation.value
   if (pending && pending.targetUserId !== userId && confirmationPhase.value !== 'pending') {
     pendingConfirmation.value = null
     confirmationReadAgain.value = false
   }
   authorizationOperation.syncContext()
-  activationPendingAttempt.value = null
-  dismissActivationConfirmation()
 })
 
 watch(selectedScopeNamespace, () => {
@@ -999,7 +998,7 @@ watch(() => authorizationOperation.phase.value, () => {
     return
   }
   restoredReadAgain.value = true
-  setStatus(AUTHORIZATION_PENDING_MESSAGE, 'error')
+  setMemberStatus(AUTHORIZATION_PENDING_MESSAGE, 'error')
 })
 
 watch(delegationPermissionFingerprint, (next, previous) => {
@@ -1029,9 +1028,40 @@ watch(selectedRevokeRoleId, (roleId) => {
   if (confirmationPhase.value === 'review' && pending?.kind === 'revoke' && pending.roleId !== roleId) pendingConfirmation.value = null
 })
 
-function setStatus(message: string, tone: 'info' | 'error' = 'info') {
+let statusScope: 'page' | 'member' = 'page'
+let statusMemberId = ''
+
+function setStatus(message: string, tone: 'info' | 'error' = 'info'): void {
   status.value = message
   statusTone.value = tone
+  statusScope = 'page'
+  statusMemberId = ''
+}
+
+function setMemberStatus(message: string, tone: 'info' | 'error' = 'info'): void {
+  status.value = message
+  statusTone.value = tone
+  statusScope = 'member'
+  statusMemberId = selectedUserId.value
+}
+
+function resetMemberScopedState(): void {
+  if (statusScope === 'member' && statusMemberId !== selectedUserId.value) {
+    status.value = ''
+    statusTone.value = 'info'
+    statusScope = 'page'
+    statusMemberId = ''
+  }
+  submittedAuthorization.value = null
+  confirmationReadAgain.value = false
+  restoredReadAgain.value = false
+  authorizationFaultCode = ''
+  authorizationFaultMessage = ''
+  if (!pendingConfirmation.value || pendingConfirmation.value.targetUserId !== selectedUserId.value) {
+    confirmationSubmission.value = null
+  }
+  activationPendingAttempt.value = null
+  dismissActivationConfirmation()
 }
 
 function readLocationUserId(): string {
@@ -1639,14 +1669,14 @@ async function selectUser(userId: string): Promise<OwnedSelection> {
       selectedAccess.value = null
       selectedScopeConfig.value = null
       const deniedMessage = (payload.error as Record<string, unknown> | undefined)?.message
-      setStatus(typeof deniedMessage === 'string' && deniedMessage ? deniedMessage : '无权查看该成员的委派权限', 'error')
+      setMemberStatus(typeof deniedMessage === 'string' && deniedMessage ? deniedMessage : '无权查看该成员的委派权限', 'error')
       return { applied: false, generation }
     }
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载成员委派权限失败'))
     }
     if (!readSubjectMatches(payload, userId)) {
-      setStatus('加载成员委派权限失败', 'error')
+      setMemberStatus('加载成员委派权限失败', 'error')
       return { applied: false, generation }
     }
 
@@ -1669,7 +1699,7 @@ async function selectUser(userId: string): Promise<OwnedSelection> {
     if (!delegationReadStillCurrent(generation, userId)) return { applied: false, generation }
     selectedAccess.value = null
     selectedScopeConfig.value = null
-    setStatus(error instanceof Error ? error.message : '加载成员委派权限失败', 'error')
+    setMemberStatus(error instanceof Error ? error.message : '加载成员委派权限失败', 'error')
     return { applied: false, generation }
   }
 }
@@ -1868,18 +1898,18 @@ async function previewDelegationRequest(request: AdminAuthorizationRequest): Pro
   const phase = authorizationOperation.phase.value
   if (phase === 'awaiting_confirmation' || phase === 'previewing') return
   if (phase === 'forbidden') {
-    setStatus(AUTHORIZATION_FORBIDDEN_MESSAGE, 'error')
+    setMemberStatus(AUTHORIZATION_FORBIDDEN_MESSAGE, 'error')
     return
   }
   if (authorizationFaultCode === 'LAST_PLATFORM_ADMIN') {
-    setStatus(LAST_PLATFORM_ADMIN_MESSAGE, 'error')
+    setMemberStatus(LAST_PLATFORM_ADMIN_MESSAGE, 'error')
     return
   }
   if (authorizationFaultMessage) {
-    setStatus(authorizationFaultMessage, 'error')
+    setMemberStatus(authorizationFaultMessage, 'error')
     return
   }
-  setStatus(AUTHORIZATION_PREVIEW_FAILED_MESSAGE, 'error')
+  setMemberStatus(AUTHORIZATION_PREVIEW_FAILED_MESSAGE, 'error')
 }
 
 function beginDelegationPreview(confirmation: DelegationConfirmation): void {
@@ -1901,7 +1931,7 @@ async function publishVerifiedDelegation(generation: number, targetUserId: strin
     if (!sameDelegationActor(actorId, generation, targetUserId)) return
     confirmationReadAgain.value = false
     restoredReadAgain.value = true
-    setStatus(`回执是${delegationActionLabel(initialReceipt.action)}。本页只重新读取角色和插件使用准入，不能确认这个回执。请不要再次提交。`, 'error')
+    setMemberStatus(`回执是${delegationActionLabel(initialReceipt.action)}。本页只重新读取角色和插件使用准入，不能确认这个回执。请不要再次提交。`, 'error')
     return
   }
   await authorizationOperation.verify()
@@ -1918,7 +1948,7 @@ async function publishVerifiedDelegation(generation: number, targetUserId: strin
     if (!sameDelegationActor(actorId, generation, targetUserId)) return
     confirmationReadAgain.value = currentAuthorizationPhase() === 'committed'
     restoredReadAgain.value = confirmationReadAgain.value && !pendingConfirmation.value
-    setStatus(AUTHORIZATION_NOT_CHECKED_MESSAGE, 'error')
+    setMemberStatus(AUTHORIZATION_NOT_CHECKED_MESSAGE, 'error')
     return
   }
   let scopeChecked = false
@@ -1936,25 +1966,25 @@ async function publishVerifiedDelegation(generation: number, targetUserId: strin
     } catch (scopeError) {
       if (!delegationReadStillCurrent(generation, targetUserId)) return
       selectedScopeConfig.value = null
-      setStatus(scopeError instanceof Error ? scopeError.message : '加载管理员范围失败', 'error')
+      setMemberStatus(scopeError instanceof Error ? scopeError.message : '加载管理员范围失败', 'error')
       return
     }
   }
   if (!sameDelegationActor(actorId, generation, targetUserId)) return
   restoredReadAgain.value = false
-  setStatus(delegationVerifiedStatus(receipt, statusRequest, scopeChecked))
+  setMemberStatus(delegationVerifiedStatus(receipt, statusRequest, scopeChecked))
 }
 
 async function settleDelegationAuthorization(generation: number, targetUserId: string): Promise<void> {
   if (!delegationReadStillCurrent(generation, targetUserId)) return
   const phase = authorizationOperation.phase.value
   if (phase === 'validation_failed') {
-    if (authorizationFaultCode === 'LAST_PLATFORM_ADMIN') setStatus(LAST_PLATFORM_ADMIN_MESSAGE, 'error')
-    else setStatus(authorizationFaultMessage || ROLE_VERSION_MISMATCH_MESSAGE, 'error')
+    if (authorizationFaultCode === 'LAST_PLATFORM_ADMIN') setMemberStatus(LAST_PLATFORM_ADMIN_MESSAGE, 'error')
+    else setMemberStatus(authorizationFaultMessage || ROLE_VERSION_MISMATCH_MESSAGE, 'error')
     return
   }
   if (phase === 'forbidden') {
-    setStatus(authorizationFaultMessage || AUTHORIZATION_FORBIDDEN_MESSAGE, 'error')
+    setMemberStatus(authorizationFaultMessage || AUTHORIZATION_FORBIDDEN_MESSAGE, 'error')
     return
   }
   if (phase === 'pending' || phase === 'unverified_no_read') {
@@ -1966,7 +1996,7 @@ async function settleDelegationAuthorization(generation: number, targetUserId: s
       return
     }
     confirmationReadAgain.value = true
-    setStatus(AUTHORIZATION_PENDING_MESSAGE, 'error')
+    setMemberStatus(AUTHORIZATION_PENDING_MESSAGE, 'error')
     return
   }
   if (phase === 'committed') await publishVerifiedDelegation(generation, targetUserId)
@@ -1984,7 +2014,7 @@ async function loadScopeConfig(userId: string): Promise<
   if (!delegationReadStillCurrent(generation, userId)) return { status: 'stale' }
   if (response.status === 403) {
     selectedScopeConfig.value = null
-    setStatus('无权查看该成员的管理范围', 'error')
+    setMemberStatus('无权查看该成员的管理范围', 'error')
     return { status: 'denied' }
   }
   if (!response.ok || payload.ok !== true) {
@@ -1993,7 +2023,7 @@ async function loadScopeConfig(userId: string): Promise<
   if (!delegationReadStillCurrent(generation, userId)) return { status: 'stale' }
   if (!readSubjectMatches(payload, userId)) {
     selectedScopeConfig.value = null
-    setStatus('加载管理员范围失败', 'error')
+    setMemberStatus('加载管理员范围失败', 'error')
     return { status: 'mismatch' }
   }
 
@@ -2088,7 +2118,7 @@ function dismissActivationConfirmation(): void {
 function markActivationPending(attempt: ScopeActivationAttempt): void {
   if (!activationAttemptCurrent(attempt)) return
   activationPendingAttempt.value = attempt
-  setStatus(activationPendingMessage, 'error')
+  setMemberStatus(activationPendingMessage, 'error')
 }
 
 function activationEchoMatches(payload: Record<string, unknown>, attempt: ScopeActivationAttempt): boolean {
@@ -2217,7 +2247,7 @@ async function submitScopeActivation(): Promise<void> {
   if (serial !== activationReadSerial || !activationAttemptCurrent(attempt)) return
   if (outcome === 'error') {
     activationPendingAttempt.value = null
-    setStatus(errorMessage, 'error')
+    setMemberStatus(errorMessage, 'error')
     return
   }
   if (outcome === 'pending') {
@@ -2226,12 +2256,12 @@ async function submitScopeActivation(): Promise<void> {
   }
   if (outcome === 'different') {
     activationPendingAttempt.value = null
-    setStatus('已重新读取。当前命名空间的委派启停尚未确认与提交一致。', 'error')
+    setMemberStatus('已重新读取。当前命名空间的委派启停尚未确认与提交一致。', 'error')
     return
   }
   if (outcome === 'success') {
     activationPendingAttempt.value = null
-    setStatus(activationCopy(attempt.enabled))
+    setMemberStatus(activationCopy(attempt.enabled))
   }
 }
 
@@ -2248,22 +2278,22 @@ async function rereadScopeActivation(): Promise<void> {
     const read = await fetchActivationScope(attempt, serial)
     if (read === 'stale' || serial !== activationReadSerial || !activationAttemptCurrent(attempt)) return
     if (!read) {
-      setStatus(activationPendingMessage, 'error')
+      setMemberStatus(activationPendingMessage, 'error')
       return
     }
     const outcome = applyActivationScope(attempt, read)
     if (serial !== activationReadSerial || !activationAttemptCurrent(attempt)) return
     if (outcome === 'drop' || outcome === 'pending') {
-      if (outcome === 'pending') setStatus(activationPendingMessage, 'error')
+      if (outcome === 'pending') setMemberStatus(activationPendingMessage, 'error')
       return
     }
     activationPendingAttempt.value = null
-    setStatus(outcome === 'success'
+    setMemberStatus(outcome === 'success'
       ? activationCopy(attempt.enabled)
       : '已重新读取。当前命名空间的委派启停尚未确认与提交一致。', outcome === 'success' ? 'info' : 'error')
   } catch {
     if (serial !== activationReadSerial || !activationAttemptCurrent(attempt)) return
-    setStatus(activationPendingMessage, 'error')
+    setMemberStatus(activationPendingMessage, 'error')
   } finally {
     if (serial === activationReadSerial) activationWriting.value = false
   }
@@ -2298,7 +2328,7 @@ function openGrantConfirmation(): void {
   if (!roleActionAllowed(roleId, 'assign')) return
   const role = access.roleCatalog.find((candidate) => candidate.id === roleId)
   if (!role) {
-    setStatus('角色目录中没有该角色，不能分配', 'error')
+    setMemberStatus('角色目录中没有该角色，不能分配', 'error')
     return
   }
   if (sameOpenConfirmation('grant', role.id, null, null)) return
@@ -2378,6 +2408,7 @@ function cancelDelegationConfirmation(): void {
   pendingConfirmation.value = null
   confirmationReadAgain.value = false
   confirmationSubmission.value = null
+  submittedAuthorization.value = null
 }
 
 async function rereadRestoredAuthorization(): Promise<void> {
@@ -2393,7 +2424,7 @@ async function rereadRestoredAuthorization(): Promise<void> {
     return
   }
   restoredReadAgain.value = true
-  setStatus(AUTHORIZATION_PENDING_MESSAGE, 'error')
+  setMemberStatus(AUTHORIZATION_PENDING_MESSAGE, 'error')
 }
 
 async function rereadDelegationAuthorization(): Promise<void> {
@@ -2416,7 +2447,7 @@ async function rereadDelegationAuthorization(): Promise<void> {
     return
   }
   confirmationReadAgain.value = true
-  setStatus(AUTHORIZATION_PENDING_MESSAGE, 'error')
+  setMemberStatus(AUTHORIZATION_PENDING_MESSAGE, 'error')
 }
 
 async function submitDelegationConfirmation(typedText: string): Promise<void> {
@@ -2493,13 +2524,13 @@ async function refreshAfterScopeWrite(targetUserId: string, successMessage: stri
     const stillCurrent = delegationReadStillCurrent(operationGeneration, targetUserId)
     if (stillCurrent) invalidateSelection()
     const clearedWithoutReplacement = selectedUserId.value === '' && delegationAccessGeneration === operationGeneration + 1
-    if (stillCurrent || clearedWithoutReplacement) setStatus('该成员已不在可管理范围内', 'error')
+    if (stillCurrent || clearedWithoutReplacement) setMemberStatus('该成员已不在可管理范围内', 'error')
     return
   }
   if (!delegationReadStillCurrent(operationGeneration, targetUserId)) return
   if (!candidate && targetUserId !== initialPinnedUserId) {
     invalidateSelection()
-    setStatus('该成员已不在可管理范围内', 'error')
+    setMemberStatus('该成员已不在可管理范围内', 'error')
     return
   }
   if (!delegationReadStillCurrent(operationGeneration, targetUserId)) return
@@ -2508,7 +2539,7 @@ async function refreshAfterScopeWrite(targetUserId: string, successMessage: stri
   if (!selected.applied || selected.generation !== ownedGeneration) return
   if (usersForbidden.value || selectedUserId.value !== targetUserId || !selectedAccess.value) return
   if (summary.value?.isPlatformAdmin && selectedScopeConfig.value?.user.id !== targetUserId) return
-  setStatus(successMessage)
+  setMemberStatus(successMessage)
 }
 
 async function updateScope(action: 'assign' | 'unassign', scope?: ScopeAssignment): Promise<void> {
@@ -2519,7 +2550,7 @@ async function updateScope(action: 'assign' | 'unassign', scope?: ScopeAssignmen
   const directoryDepartmentId = action === 'assign' ? selectedDepartmentId.value : scope?.directoryDepartmentId || ''
   if (!namespace || !directoryDepartmentId) return
   if (action === 'assign' && includeChildren.value !== true && !exactDepartmentWritesEnabled.value) {
-    setStatus(exactDepartmentUnavailableText, 'error')
+    setMemberStatus(exactDepartmentUnavailableText, 'error')
     return
   }
 
@@ -2546,7 +2577,7 @@ async function updateScope(action: 'assign' | 'unassign', scope?: ScopeAssignmen
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存管理员范围失败'))
     }
     if (!readSubjectMatches(payload, targetUserId)) {
-      setStatus('保存管理员范围失败', 'error')
+      setMemberStatus('保存管理员范围失败', 'error')
       return
     }
     if (
@@ -2558,7 +2589,7 @@ async function updateScope(action: 'assign' | 'unassign', scope?: ScopeAssignmen
         namespace,
       )
     ) {
-      setStatus('返回的是否包含下级与提交不一致', 'error')
+      setMemberStatus('返回的是否包含下级与提交不一致', 'error')
       return
     }
 
@@ -2571,7 +2602,7 @@ async function updateScope(action: 'assign' | 'unassign', scope?: ScopeAssignmen
     )
   } catch (error) {
     if (!delegationReadStillCurrent(generation, targetUserId)) return
-    setStatus(error instanceof Error ? error.message : '保存管理员范围失败', 'error')
+    setMemberStatus(error instanceof Error ? error.message : '保存管理员范围失败', 'error')
   } finally {
     scopeBusy.value = false
   }
@@ -2597,7 +2628,7 @@ async function updateScopeGroup(action: 'assign' | 'unassign', assignment?: Grou
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存成员集范围失败'))
     }
     if (!readSubjectMatches(payload, targetUserId)) {
-      setStatus('保存成员集范围失败', 'error')
+      setMemberStatus('保存成员集范围失败', 'error')
       return
     }
     selectedScopeConfig.value = scopeConfigKeepingActivation(payload.data as DelegatedAdminScopeConfig, selectedScopeConfig.value)
@@ -2609,7 +2640,7 @@ async function updateScopeGroup(action: 'assign' | 'unassign', assignment?: Grou
     )
   } catch (error) {
     if (!delegationReadStillCurrent(generation, targetUserId)) return
-    setStatus(error instanceof Error ? error.message : '保存成员集范围失败', 'error')
+    setMemberStatus(error instanceof Error ? error.message : '保存成员集范围失败', 'error')
   } finally {
     scopeBusy.value = false
   }
@@ -2647,9 +2678,9 @@ async function updateUserMemberGroup(action: 'assign' | 'unassign', userIdOverri
     if (selectedMemberGroupId.value) {
       await selectMemberGroup(selectedMemberGroupId.value)
     }
-    setStatus(action === 'assign' ? '成员已加入平台成员集' : '成员已移出平台成员集')
+    setMemberStatus(action === 'assign' ? '成员已加入平台成员集' : '成员已移出平台成员集')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '保存成员集成员失败', 'error')
+    setMemberStatus(error instanceof Error ? error.message : '保存成员集成员失败', 'error')
   } finally {
     groupBusy.value = false
   }
@@ -2663,7 +2694,7 @@ async function applyTemplate(): Promise<void> {
   if (scopeBusy.value || !summary.value?.isPlatformAdmin || !targetUserId || !memberWritesReady.value
     || !selectedScopeNamespace.value || !expectedScopeVersion) return
   if (!exactDepartmentWritesEnabled.value && templateContainsExactDepartment(selectedTemplate.value)) {
-    setStatus(exactDepartmentApplyUnavailableText, 'error')
+    setMemberStatus(exactDepartmentApplyUnavailableText, 'error')
     return
   }
   scopeBusy.value = true
@@ -2685,14 +2716,14 @@ async function applyTemplate(): Promise<void> {
     if (!delegationReadStillCurrent(generation, targetUserId)) return
     if (response.status === 409 && (payload.error as { code?: unknown } | undefined)?.code === 'ROLE_DELEGATION_SCOPE_TEMPLATE_CHANGED') {
       if (selectedTemplateId.value === templateId) selectedTemplate.value = null
-      setStatus('范围模板已变更。请点「查询模板」，核对最新内容后再应用。', 'error')
+      setMemberStatus('范围模板已变更。请点「查询模板」，核对最新内容后再应用。', 'error')
       return
     }
     if (!response.ok || payload.ok !== true) {
       throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '应用范围模板失败'))
     }
     if (!readSubjectMatches(payload, targetUserId)) {
-      setStatus('应用范围模板失败', 'error')
+      setMemberStatus('应用范围模板失败', 'error')
       return
     }
 
@@ -2702,11 +2733,11 @@ async function applyTemplate(): Promise<void> {
       await refreshAfterScopeWrite(targetUserId, '范围模板已覆盖应用到该插件管理员命名空间', generation)
       return
     }
-    setStatus('范围模板已覆盖应用到该插件管理员命名空间')
+    setMemberStatus('范围模板已覆盖应用到该插件管理员命名空间')
     await loadSummary()
   } catch (error) {
     if (!delegationReadStillCurrent(generation, targetUserId)) return
-    setStatus(error instanceof Error ? error.message : '应用范围模板失败', 'error')
+    setMemberStatus(error instanceof Error ? error.message : '应用范围模板失败', 'error')
   } finally {
     scopeBusy.value = false
   }
