@@ -53,4 +53,14 @@
 
 ## 5. 整链复跑结果
 
-见 PR 描述；本节在 Linux 克隆跑完后补。
+2026-11-23，在 WSL Linux 克隆（Ubuntu 24.04、Node 20）上跑，代码提交为 `83caa822d`（本文所在的文档提交只改文档）：
+
+| 项 | 结果 |
+|---|---|
+| 插件完整测试链 `node scripts/test-chain.cjs` | 退出码 0（351 个套件） |
+| 后端全部宜搭单测（`tests/unit/yida-*`，共 18 个文件） | 593/593 |
+| 前端五份 spec（预演面板、客户端、单行确认、看板、权限矩阵） | 269/269 |
+| 前端 `vue-tsc -b` | 退出码 0 |
+| 后端 `tsc --noEmit` | 退出码 0 |
+
+Windows 工作树上，插件链停在 `stock-preparation-permission-matrix.test.cjs` 的 M-08（迁移文本比对，与本改动无关）。同一用例在 Linux 克隆里通过，判断是 Windows 换行符造成的。
