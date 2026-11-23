@@ -1,4 +1,5 @@
 /** Required CI (EXPECT_DB=1, including local integration runs): isolated synthetic database, original provider, no skip-green. */
+import { existsSync, readFileSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -9,7 +10,7 @@ import { createEventTestMigrationProvider, futureMigrationName, migrationName, r
 import { AUTHORIZATION_OPERATION_FENCE_TABLES, AUTHORIZATION_OPERATION_SCHEMA_QUERIES, inspectAuthorizationOperationSchema, isSupportedAuthorizationOperationSchema } from '../../src/admin/authorization-operation-fence'
 import { EventConnections, W1Capacity, verifyEventReadScope, type EventSql } from '../../src/security-events/runtime'
 import { SecurityEventRepository, readScopedEvent, readScopedDeliveries, estimateSteadyState } from '../../src/security-events/repository'
-import { inspectEventSchema, assertEventSchema } from '../../src/security-events/schema'
+import { inspectEventSchema, assertEventSchema, type EventSchemaApproval } from '../../src/security-events/schema'
 import type { EventCandidate } from '../../src/security-events/validation'
 
 // CI provides an explicitly armed, loopback-only synthetic service. Each run creates
@@ -30,7 +31,12 @@ let db: Kysely<unknown>, admin: Client, migrator: Migrator
 let unregisterMigrationLoaders: ReturnType<typeof registerEventMigrationLoaders>
 let baseline: Awaited<ReturnType<typeof inspectAuthorizationOperationSchema>>
 let rawBaseline: unknown[]
-let approval: Awaited<ReturnType<typeof inspectEventSchema>>
+// The approval is the reviewed, checked-in fixture for this major, never the digest observed here.
+const approvalFixture = new URL(`../fixtures/security-events/schema-approvals/pg${expectedMajor}.json`, import.meta.url)
+function reviewedApproval(): EventSchemaApproval & { sections: unknown[] } {
+  if (!existsSync(approvalFixture)) throw new Error(`E1A_REVIEWED_SCHEMA_APPROVAL_MISSING: pg${expectedMajor}.json`)
+  return JSON.parse(readFileSync(approvalFixture, 'utf8'))
+}
 const report: Record<string, unknown> = {}
 const rowsOwned: string[] = []
 let readClient: Client
@@ -140,14 +146,17 @@ describe.sequential('E1-A PG14–17 migrated baseline, no producer wiring', () =
     expect(after).toEqual(baseline)
     expect(await currentCatalog()).toEqual(rawBaseline)
     report.afterEmpty = { after, sections: await currentCatalog() }
-    approval = await inspectEventSchema(sqlOf(admin))
-    expect(approval.sections[1]).toHaveLength(39)
-    expect(approval.sections[2].filter(row => row.contype === 'f')).toHaveLength(1)
-    expect(approval.sections[2].find(row => row.contype === 'f')?.target).toBe('security_events')
-    report.reviewCandidateSchemaApproval = approval
+    const observed = await inspectEventSchema(sqlOf(admin))
+    report.reviewCandidateSchemaApproval = observed
+    expect(observed.sections[1]).toHaveLength(39)
+    expect(observed.sections[2].filter(row => row.contype === 'f')).toHaveLength(1)
+    expect(observed.sections[2].find(row => row.contype === 'f')?.target).toBe('security_events')
+    const approval = reviewedApproval()
+    expect(observed).toEqual(approval)
     await assertEventSchema(sqlOf(admin), [approval])
   })
   it('T38 missing CHECK/column/index or changed enum/facts definitions invalidate the reviewed catalog', async () => {
+    const approval = reviewedApproval()
     for (const statement of [
       'ALTER TABLE public.security_events DROP CONSTRAINT se_facts',
       'ALTER TABLE public.security_events DROP CONSTRAINT se_producer',

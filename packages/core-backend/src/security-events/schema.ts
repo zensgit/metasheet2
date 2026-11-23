@@ -8,6 +8,8 @@ export class EventSchemaUnavailable extends Error {
 }
 export const SCHEMA_TABLES = ['security_event_deliveries', 'security_events']
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+/** The same digest, exported only so reviewed fixtures can be recomputed from their sections. */
+export const eventSchemaDigest = (major: number, sections: unknown) => digest({ major, sections })
 export const APPLICATION_SCHEMA_FINGERPRINT = digest({ version: 1, EVENT_REGISTRY, BOOLEAN_FACTS, COUNT_FACTS, PRODUCERS, REASON_CODES, RESULT_CODES, SOURCE_KINDS })
 
 /** Exact catalog, including every CHECK expression, rather than just event_type or CHECK names. */
@@ -51,7 +53,7 @@ export async function inspectEventSchema(sql: EventSql) {
   for (const text of EVENT_SCHEMA_QUERIES) sections.push((await sql.query(text, [SCHEMA_TABLES])).rows)
   if (sections[0].length !== 2 || sections[0].some(row => row.relkind !== 'r' || row.relpersistence !== 'p' || row.owner_trusted !== true
     || row.relispartition !== false || row.relrowsecurity !== false || row.relforcerowsecurity !== false)) throw new EventSchemaUnavailable()
-  return { major: meta.major, sections, digest: digest({ major: meta.major, sections }), applicationFingerprint: APPLICATION_SCHEMA_FINGERPRINT }
+  return { major: meta.major, sections, digest: eventSchemaDigest(meta.major, sections), applicationFingerprint: APPLICATION_SCHEMA_FINGERPRINT }
 }
 
 /**
