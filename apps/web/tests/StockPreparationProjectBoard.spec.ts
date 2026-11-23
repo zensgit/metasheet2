@@ -1698,15 +1698,13 @@ describe('项目备料页 — the operator project board', () => {
       expect(root.querySelector('[data-testid="stock-prep-yida-owner-send-panel"]')).toBeNull()
       yida.click(); await flush()
       expect(root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')).toBe(panel)
-      // A clean protocol preview makes the L4 entry openable (it is always rendered, so enabled + no blocked line is the proof);
-      // with no owner-authorized ON reply the CREATE entry stays absent.
-      const mode = panel!.querySelector('[data-testid="sp-yida-preview-mode"]') as HTMLSelectElement
-      mode.value = 'protocol'
-      mode.dispatchEvent(new Event('change')); await flush()
-      ;(panel!.querySelector('[data-testid="sp-yida-protocol-example-primary"]') as HTMLButtonElement).click(); await flush()
-      ;(panel!.querySelector('[data-testid="sp-yida-run"]') as HTMLButtonElement).click(); await flush()
-      expect((panel!.querySelector('[data-testid="sp-yida-initialization-open"]') as HTMLButtonElement).disabled).toBe(false)
-      expect(panel!.querySelector('[data-testid="sp-yida-initialization-blocked"]')).toBeNull()
+      // 四步配置 (T-13): the four steps render; the contract picker and the separate initialization entry are gone.
+      // With no valid session token the panel makes no request at all, and the CREATE entry stays absent.
+      expect(panel!.querySelector('[data-testid="sp-yida-steps"]')?.textContent).toContain('保存启用')
+      expect(panel!.querySelector('[data-testid="sp-yida-preview-mode"]')).toBeNull()
+      expect(panel!.querySelector('[data-testid="sp-yida-initialization-open"]')).toBeNull()
+      ;(panel!.querySelector('[data-testid="sp-yida-example-primary"]') as HTMLButtonElement).click(); await flush()
+      expect((panel!.querySelector('[data-testid="sp-yida-rows"]') as HTMLTextAreaElement).value).not.toBe('')
       expect(panel!.querySelector('[data-testid="sp-yida-owner-open"]')).toBeNull()
       expect(fetchSpy).not.toHaveBeenCalled()
       expect(h.apiFetch.mock.calls).toHaveLength(callsBefore)
@@ -1730,9 +1728,7 @@ describe('项目备料页 — the operator project board', () => {
     expect(panel).not.toBeNull()
     ;(panel.querySelector('[data-testid="sp-yida-example-primary"]') as HTMLButtonElement).click()
     await flush()
-    ;(panel.querySelector('[data-testid="sp-yida-run"]') as HTMLButtonElement).click()
-    await flush()
-    expect(panel.querySelector('[data-testid="sp-yida-result"]')).not.toBeNull()
+    expect((panel.querySelector('[data-testid="sp-yida-rows"]') as HTMLTextAreaElement).value).not.toBe('')
     expect(h.apiFetch.mock.calls).toHaveLength(callsBefore)
     expect(entry.disabled).toBe(false)
     expect(root.querySelector('[data-testid="stock-prep-yida-owner-send-panel"]')).toBeNull()
@@ -1755,9 +1751,7 @@ describe('项目备料页 — the operator project board', () => {
     expect(root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')).not.toBeNull()
     ;(root.querySelector('[data-testid="sp-yida-example-primary"]') as HTMLButtonElement).click()
     await flush()
-    ;(root.querySelector('[data-testid="sp-yida-run"]') as HTMLButtonElement).click()
-    await flush()
-    expect(root.querySelector('[data-testid="sp-yida-result"]')).not.toBeNull()
+    expect((root.querySelector('[data-testid="sp-yida-rows"]') as HTMLTextAreaElement).value).not.toBe('')
 
     liveScope.tenantId = 'tenant-b'
     await flush()
@@ -1766,7 +1760,7 @@ describe('项目备料页 — the operator project board', () => {
     await flush()
     expect(root.querySelector('[data-testid="stock-prep-yida-preview-panel"]')).not.toBeNull()
     expect((root.querySelector('[data-testid="sp-yida-rows"]') as HTMLTextAreaElement).value).toBe('')
-    expect(root.querySelector('[data-testid="sp-yida-result"]')).toBeNull()
+    expect((root.querySelector('[data-testid="sp-yida-rows"]') as HTMLTextAreaElement).value).toBe('')
 
     liveScope.workspaceId = 'workspace-other'
     await flush()
@@ -1805,11 +1799,9 @@ describe('项目备料页 — the operator project board', () => {
       await flush()
       ;(root.querySelector('[data-testid="sp-yida-example-primary"]') as HTMLButtonElement).click()
       await flush()
-      ;(root.querySelector('[data-testid="sp-yida-run"]') as HTMLButtonElement).click()
-      await flush()
       const rows = (root.querySelector('[data-testid="sp-yida-rows"]') as HTMLTextAreaElement).value
       expect(rows).not.toBe('')
-      expect(root.querySelector('[data-testid="sp-yida-result"]')).not.toBeNull()
+      expect((root.querySelector('[data-testid="sp-yida-rows"]') as HTMLTextAreaElement).value).not.toBe('')
       return rows
     }
 
@@ -1819,7 +1811,7 @@ describe('项目备料页 — the operator project board', () => {
       await flush()
       expect((root.querySelector('[data-testid="sp-yida-rows"]') as HTMLTextAreaElement).value).toBe('')
       expect((root.querySelector('[data-testid="sp-yida-app-type"]') as HTMLInputElement).value).toBe('')
-      expect(root.querySelector('[data-testid="sp-yida-result"]')).toBeNull()
+      expect((root.querySelector('[data-testid="sp-yida-rows"]') as HTMLTextAreaElement).value).toBe('')
     }
 
     it('unmounts the populated panel when account B takes the same project and scope', async () => {
@@ -1897,7 +1889,7 @@ describe('项目备料页 — the operator project board', () => {
       notifyAuthPrincipalChange()
       await flush()
       expect((root.querySelector('[data-testid="sp-yida-rows"]') as HTMLTextAreaElement).value).toBe(rows)
-      expect(root.querySelector('[data-testid="sp-yida-result"]')).not.toBeNull()
+      expect((root.querySelector('[data-testid="sp-yida-rows"]') as HTMLTextAreaElement).value).not.toBe('')
     })
 
     it('removes its storage and focus listeners on board unmount', async () => {

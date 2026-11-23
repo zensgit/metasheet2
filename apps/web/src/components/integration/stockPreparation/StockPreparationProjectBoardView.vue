@@ -714,7 +714,7 @@
               class="sp-board__button"
               data-testid="stock-prep-project-board-yida-preview-toggle"
               @click="toggleYidaPreview"
-            >宜搭静态预演（不发送）</button>
+            >宜搭表单配置（不发送）</button>
           </template>
           <button
             v-else

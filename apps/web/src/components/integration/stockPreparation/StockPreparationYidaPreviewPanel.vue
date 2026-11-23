@@ -1,449 +1,542 @@
 <template>
-  <section class="sp-yida-preview" data-testid="stock-prep-yida-preview-panel">
-    <h3>宜搭静态预演（不发送）</h3>
-    <!-- Display only: every marker is derived from state this panel (and the opened initialization panel) already holds; no read. -->
-    <ol class="sp-yida-preview__steps" data-testid="sp-yida-steps" aria-label="本地初始化操作步骤">
-      <li v-for="step in stepGuide" :key="step.number" :data-testid="`sp-yida-step-${step.number}`" :data-state="step.state" :aria-current="step.state === 'current' || step.state === 'blocked' ? 'step' : undefined">{{ step.number }} {{ step.label }}<span v-if="step.state === 'done'">（已完成）</span><span v-else-if="step.state === 'current'">（当前）</span><span v-else-if="step.state === 'blocked'">（待开启）</span></li>
+  <section class="sp-yida-setup" data-testid="stock-prep-yida-preview-panel">
+    <h3>宜搭表单配置（不发送）</h3>
+    <!-- Four operator steps (T-13, owner 2026-11-23). The contract version, the status read and the rule-draft
+         archive are done by the page itself and are not steps. Display only: every server gate is unchanged. -->
+    <ol class="sp-yida-setup__steps" data-testid="sp-yida-steps" aria-label="宜搭配置步骤">
+      <li v-for="step in stepGuide" :key="step.number" :data-testid="`sp-yida-step-${step.number}`" :data-state="step.state"
+        :aria-current="step.state === 'current' ? 'step' : undefined">{{ step.number }} {{ step.label }}<span v-if="step.state === 'done'">（已完成）</span><span v-else-if="step.state === 'current'">（当前）</span></li>
     </ol>
-    <p data-testid="sp-yida-steps-note">第 4 步「生成规则草稿 JSON」会清空预演结果，并关掉已打开的本地初始化：请在第 5 步之前存档，存档后再点一次「只在本地预演」。</p>
-    <p>仅在本页处理粘贴的本地 JSON；请勿填写凭据。目标标识和远端状态均未核验。</p>
-    <p>预演不会查询或推送。项目分配是用户选择的本地候选，尚非获批准的生产数量政策。</p>
-    <fieldset class="sp-yida-preview__editor" :disabled="ownerSendLocked || initializationLocked">
-    <label>预演合同<select v-model="previewMode" data-testid="sp-yida-preview-mode"><option value="mapping">字段映射 v1（默认）</option><option value="protocol">表单字段目录与协议 v2（仅本地）</option><option value="transforms">字段目录与派生映射 v3（仅本地）</option></select></label>
-    <div class="sp-yida-preview__examples">
-      <button type="button" data-testid="sp-yida-example-primary" @click="loadExample('primary')">填入合成样例 A（创建）</button>
-      <button type="button" data-testid="sp-yida-example-renamed" @click="loadExample('renamed')">填入合成样例 B（另一布局）</button>
-      <span data-testid="sp-yida-example-v1-note">以上是字段映射 v1 样例：v1 不支持本地初始化；本地初始化请选 v2 合同并用「填入七项身份合成样例 A」。</span>
-    </div>
-    <div v-if="previewMode === 'protocol'" class="sp-yida-preview__examples">
-      <button type="button" data-testid="sp-yida-protocol-example-primary" @click="loadProtocolExample('primary')">填入七项身份合成样例 A</button>
-      <button type="button" data-testid="sp-yida-protocol-example-renamed" @click="loadProtocolExample('renamed')">填入七项身份合成样例 B（另一布局）</button>
-    </div>
-    <div v-if="previewMode === 'transforms'" class="sp-yida-preview__examples">
-      <button type="button" data-testid="sp-yida-transform-example" @click="loadTransformExample">填入派生映射合成样例（物料表）</button>
-    </div>
-    <div class="sp-yida-preview__fields">
-      <label>appType（本地未核验）<input v-model="appType" data-testid="sp-yida-app-type" autocomplete="off"></label>
-      <label>formUuid（本地未核验）<input v-model="formUuid" data-testid="sp-yida-form-uuid" autocomplete="off"></label>
-      <label>意图<select v-model="intent" data-testid="sp-yida-intent"><option value="create">计划创建</option><option value="update">计划更新</option></select></label>
-      <label v-if="intent === 'update'">instanceIdField（本地行中的实例 ID 字段）<input v-model="instanceIdField" data-testid="sp-yida-instance-id-field" autocomplete="off"></label>
-    </div>
-    <section v-if="previewMode !== 'mapping'" class="sp-yida-preview__catalog" data-testid="sp-yida-catalog">
-      <h4>本地表单字段目录</h4>
-      <p>字段目录由你明确填写，未向宜搭查询；控件标识、类型、选项和必填要求均未获远端核验。映射须引用目录中已有的字段。</p>
-      <div v-for="(entry, index) in fieldCatalog" :key="index" class="sp-yida-preview__map-row" :data-testid="`sp-yida-catalog-row-${index}`">
-        <label>字段 ID<input v-model="entry.id" :data-testid="`sp-yida-catalog-id-${index}`" autocomplete="off"></label>
-        <label>控件<select v-model="entry.control" :data-testid="`sp-yida-catalog-control-${index}`"><option value="text">文本</option><option value="number">数字</option><option value="select">单选</option><option value="radio">单选按钮</option></select></label>
-        <label><input v-model="entry.required" type="checkbox" :data-testid="`sp-yida-catalog-required-${index}`">目录必填</label>
-        <template v-if="entry.control === 'select' || entry.control === 'radio'">
-          <label>选项表示<select v-model="entry.optionsMode" :data-testid="`sp-yida-catalog-options-mode-${index}`"><option value="lines">逐行文本（一行一项）</option><option value="json">JSON 字符串数组（保留选项内换行）</option></select></label>
-          <label>选项（精确匹配；切换表示后请核对格式）<textarea v-model="entry.optionsText" :data-testid="`sp-yida-catalog-options-${index}`" rows="3" spellcheck="false"></textarea></label>
-        </template>
-        <button type="button" :data-testid="`sp-yida-catalog-remove-${index}`" @click="fieldCatalog.splice(index, 1)">移除目录字段</button>
+    <p data-testid="sp-yida-status">{{ statusText }}</p>
+    <button v-if="showStatusRetry" type="button" data-testid="sp-yida-status-retry" :disabled="busy" @click="refresh()">重新读取状态</button>
+    <p v-if="errorCode" role="alert" class="sp-yida-setup__error" data-testid="sp-yida-error">{{ errorCode }}</p>
+    <p v-if="errorHint" data-testid="sp-yida-error-hint">{{ errorHint }}</p>
+
+    <!-- ── 第 1 步：表单信息与测试连接 ── -->
+    <fieldset class="sp-yida-setup__step" data-testid="sp-yida-form-info" :disabled="formLocked">
+      <legend>1 表单信息与测试连接</legend>
+      <p>凭据只在本页内存里，不保存到文件、不写日志；离开本页即清空。测试连接只换一次令牌、读一次表单字段，不写宜搭。</p>
+      <div class="sp-yida-setup__grid">
+        <label>appType（宜搭应用编码）<span class="sp-yida-setup__req" aria-hidden="true">*</span><input v-model="appType" data-testid="sp-yida-app-type" autocomplete="off" required aria-required="true"></label>
+        <label>formUuid（表单 ID）<span class="sp-yida-setup__req" aria-hidden="true">*</span><input v-model="formUuid" data-testid="sp-yida-form-uuid" autocomplete="off" required aria-required="true"></label>
+        <label>organizationId（钉钉组织 ID）<span class="sp-yida-setup__req" aria-hidden="true">*</span><input :value="organizationId" data-testid="sp-yida-organization" autocomplete="off" required aria-required="true" @input="setText('organization', $event)"></label>
+        <label v-for="field in secretFields" :key="field">{{ field }}<span class="sp-yida-setup__req" aria-hidden="true">*</span><input type="password" :value="material[field]" :data-testid="`sp-yida-${field}`" autocomplete="off" spellcheck="false" required aria-required="true" @input="setMaterial(field, $event)" @paste="pasteMaterial(field, $event)"></label>
+        <label>userId（执行人钉钉 userId）<span class="sp-yida-setup__req" aria-hidden="true">*</span><input :value="material.userId" data-testid="sp-yida-userId" autocomplete="off" spellcheck="false" required aria-required="true" @input="setMaterial('userId', $event)"></label>
       </div>
-      <button type="button" data-testid="sp-yida-catalog-add" @click="fieldCatalog.push(blankCatalogEntry())">添加目录字段</button>
-      <p data-testid="sp-yida-empty-key-hint">允许空键仅用于本地身份比较：勾选的可选字符串业务键将缺失、null、空字符串视为同一身份；空白字符串不属于这个规则。不会往候选表单写入空值或清空字段。</p>
-    </section>
-    <div class="sp-yida-preview__mapping">
-      <h4>字段映射</h4>
-      <p>source 是本地 JSON 字段；target 是目标表单字段。业务键仅作本地重复检查，不能验证远端状态。</p>
-      <p v-if="previewMode === 'transforms'" data-testid="sp-yida-transform-hint">v3：业务键和允许空键勾选的是「直接映射」行的 target，复制、常量、拼接永不参与业务键。复制取所指直接映射行的同一列；拼接按列出顺序用分隔符连接，数字按 String() 书写，空部分按所选规则跳过或拒绝，全部为空则视为缺失。查表不在这里：所需的值须先由获批的只读备成列。生成按模板部件 JSON 顺序拼接（字面量、字段、哈希、物料编码预置），恰好一个哈希（覆盖全部业务键目标）或一个预置，在拆分之后逐行计算；任一部分为空即拒绝，同批两行得到同一个值时两行都拒绝。</p>
-      <div v-for="(entry, index) in fieldMap" :key="index" class="sp-yida-preview__map-row" :data-testid="`sp-yida-map-row-${index}`">
-        <label v-if="previewMode === 'transforms'">变换<select v-model="entry.transform" :data-testid="`sp-yida-map-transform-${index}`"><option value="direct">直接映射</option><option value="copy">复制</option><option value="constant">常量</option><option value="concat">拼接</option><option value="generated">生成</option></select></label>
-        <label v-if="previewMode !== 'transforms' || entry.transform === 'direct'">source<input v-model="entry.source" :data-testid="`sp-yida-map-source-${index}`" autocomplete="off"></label>
-        <label v-if="previewMode === 'transforms' && entry.transform === 'copy'">复制自（直接映射行的 target）<input v-model="entry.copyOf" :data-testid="`sp-yida-map-copy-of-${index}`" autocomplete="off"></label>
-        <label v-if="previewMode === 'transforms' && entry.transform === 'constant'">常量值（数字按 JSON 数字原样书写）<input v-model="entry.constantText" :data-testid="`sp-yida-map-constant-${index}`" autocomplete="off"></label>
-        <template v-if="previewMode === 'transforms' && entry.transform === 'concat'">
-          <label>拼接部分 JSON（按顺序；每项 {"source": 列} 或 {"literal": 文字}）<textarea v-model="entry.partsText" :data-testid="`sp-yida-map-concat-parts-${index}`" rows="2" spellcheck="false"></textarea></label>
-          <label>分隔符<input v-model="entry.separator" :data-testid="`sp-yida-map-concat-separator-${index}`" autocomplete="off"></label>
-          <label>空部分<select v-model="entry.blank" :data-testid="`sp-yida-map-concat-blank-${index}`"><option value="refuse">部分为空即拒绝</option><option value="skip">跳过空部分</option></select></label>
-        </template>
-        <label v-if="previewMode === 'transforms' && entry.transform === 'generated'">生成模板 JSON（按顺序；每项 {"literal": 文字}、{"field": 直接映射 target}、{"hash": [直接映射 target…], "form": "uuid-36" 或 "uuid-32"} 或 {"preset": "material-code-v1", "rowIdOf": target, "projectOf": target}）<textarea v-model="entry.templateText" :data-testid="`sp-yida-map-generated-template-${index}`" rows="2" spellcheck="false"></textarea></label>
-        <label>target<input v-model="entry.target" :data-testid="`sp-yida-map-target-${index}`" autocomplete="off"></label>
-        <label>type<select v-model="entry.type" :data-testid="`sp-yida-map-type-${index}`"><option value="string">string</option><option value="number">number</option><option value="boolean">boolean</option></select></label>
-        <label><input v-model="entry.required" type="checkbox" :data-testid="`sp-yida-map-required-${index}`">必填</label>
-        <label><input v-model="entry.businessKey" type="checkbox" :data-testid="`sp-yida-map-key-${index}`">业务键</label>
-        <label v-if="previewMode !== 'mapping'"><input v-model="entry.emptyKey" type="checkbox" :data-testid="`sp-yida-map-empty-key-${index}`">允许空键（仅可选字符串业务键）</label>
-        <button type="button" :data-testid="`sp-yida-map-remove-${index}`" @click="fieldMap.splice(index, 1)">移除</button>
-      </div>
-      <button type="button" data-testid="sp-yida-map-add" @click="fieldMap.push(blankFieldMap())">添加映射行</button>
-    </div>
-    <div class="sp-yida-preview__allocation">
-      <h4>项目数量分配（本地候选）</h4>
-      <p>不从看板、范围或斜杠语法推断项目。整数模式必须整除；小数模式至多六位且默认不舍入（可选沿用旧系统的 1 位小数取整，会改变总量）。单位可否拆分、余数归属和旧复合键仍需生产政策批准。</p>
-      <p>项目字段由明确项目列表覆盖，原值可缺省；其它映射字段仍须满足校验。项目列表不接受空行或制表符。</p>
-      <label>模式<select v-model="allocationMode" data-testid="sp-yida-allocation-mode"><option value="original">原已整理逐表单（默认）</option><option value="equal_integer">整数精确均分</option><option value="equal_decimal_exact">小数精确均分（最多 6 位，不舍入）</option></select></label>
-      <div v-if="allocationMode !== 'original'" class="sp-yida-preview__allocation-fields" data-testid="sp-yida-allocation-fields">
-        <label>明确项目列表（一行一个完整项目号）<textarea v-model="allocationProjectsText" data-testid="sp-yida-allocation-projects" rows="4" spellcheck="false" placeholder="SYN-PROJECT-01&#10;SYN-PROJECT-02"></textarea></label>
-        <label>源项目字段<select v-model="allocationProjectField" data-testid="sp-yida-allocation-project-field"><option value="">请选择</option><option v-for="source in mappedSources" :key="source" :value="source">{{ source }}</option></select></label>
-        <label>源数量字段<select v-model="allocationQuantityField" data-testid="sp-yida-allocation-quantity-field"><option value="">请选择</option><option v-for="source in mappedSources" :key="source" :value="source">{{ source }}</option></select></label>
-        <label v-if="allocationMode === 'equal_decimal_exact'">数量取整<select v-model="allocationRounding" data-testid="sp-yida-allocation-rounding"><option value="exact">精确均分，除不尽拒绝（默认）</option><option value="legacy-1dp">沿用旧系统：每份四舍五入保留 1 位小数</option></select></label>
-      </div>
-      <p v-if="allocationMode === 'equal_decimal_exact' && allocationRounding === 'legacy-1dp'" class="sp-yida-preview__error" data-testid="sp-yida-allocation-rounding-warning">注意：沿用旧系统的取整会改变总量。每个项目的数量四舍五入到 1 位小数，各项目之和可能不等于原数量，差额见下方分配结果。是否采用由 owner 决定。</p>
-      <p v-if="allocationMode !== 'original' && intent === 'update'" class="sp-yida-preview__error" data-testid="sp-yida-allocation-update-blocked">禁止更新扇出：项目分配只能计划创建，不能将一个 update instanceId 扇出到多个项目。</p>
-    </div>
-    <section class="sp-yida-preview__rule-template" data-testid="sp-yida-rule-template">
-      <h4>复用本地规则草稿</h4>
-      <p>仅导出字段规则和分配角色，不含目标、项目清单、行数据或授权。字段标识和选项可能含敏感业务配置，请人工核对文本及自行保存的位置；这不是凭据清洗器，也不是服务器保存或发布。</p>
-      <button type="button" data-testid="sp-yida-rule-export" @click="exportRuleTemplate">生成规则草稿 JSON</button>
-      <label>生成的规则草稿（只读，可自行保存文本）<textarea :value="ruleExportText" readonly data-testid="sp-yida-rule-export-text" rows="8" spellcheck="false"></textarea></label>
-      <label>粘贴规则草稿 JSON（最多 2 MiB；与输出区独立）<textarea v-model="ruleImportText" data-testid="sp-yida-rule-import-text" rows="8" spellcheck="false"></textarea></label>
-      <button type="button" data-testid="sp-yida-rule-import" @click="importRuleTemplate">加载粘贴的规则草稿 JSON</button>
-      <p v-if="ruleImportNotice" data-testid="sp-yida-rule-import-notice">{{ ruleImportNotice }}</p>
-    </section>
-    <label class="sp-yida-preview__rows-label">本地 rows JSON（最大 128 KiB / 100 行）<textarea v-model="rowsText" data-testid="sp-yida-rows" rows="9" spellcheck="false" placeholder='[{"itemCode":"SYN-001","quantity":0,"active":false}]'></textarea></label>
-    <button type="button" class="sp-yida-preview__run" data-testid="sp-yida-run" @click="runPreview">只在本地预演</button>
+      <p class="sp-yida-setup__note">带 * 的七项都必填。appKey、appSecret、systemToken 会自动去掉首尾空白和换行；中间含空白或不可见字符时不发送。</p>
+      <p v-if="blockedFields.length > 0" data-testid="sp-yida-material-hint">{{ blockedFields.join('、') }} 去掉首尾空白后仍含空白、换行或不可见字符，本页不会发送；请从原处重新复制。</p>
+      <button type="button" data-testid="sp-yida-connection-test" :disabled="!mayTestConnection" @click="testConnection">测试连接{{ formFieldsReadOn ? '并读取表单字段' : '' }}</button>
+      <p v-if="connectionTestBlockedReason" data-testid="sp-yida-connection-blocked">暂不能测试：{{ connectionTestBlockedReason }}</p>
+      <p v-if="shownOutcome" data-testid="sp-yida-connection-result">{{ outcomeCopy[shownOutcome] }}</p>
+      <p v-if="shownFormOutcome" data-testid="sp-yida-form-read-result">{{ formReadCopy }}</p>
+      <p v-if="testedPairMismatch" data-testid="sp-yida-connection-mismatch">已测试的 appKey/appSecret 与当前输入不一致，请重新测试。</p>
+      <p v-if="fieldsStale" data-testid="sp-yida-fields-stale">appType 或 formUuid 已改，字段列表属于上一张表单，请重新测试连接。</p>
+      <p v-if="state && !formFieldsReadOn && state.status === 'ready'" data-testid="sp-yida-fields-manual">服务器未开启「读取表单字段」：第 2 步请手动填写宜搭组件 ID。</p>
     </fieldset>
-    <p v-if="errorCode" class="sp-yida-preview__error" data-testid="sp-yida-error">{{ errorCode }}</p>
-    <ul v-if="configIssues.length" data-testid="sp-yida-config-issues"><li v-for="(issue, index) in configIssues" :key="index">{{ issue.field }}: {{ issue.code }}</li></ul>
-    <section v-if="allocationPreview" class="sp-yida-preview__allocation-result" data-testid="sp-yida-allocation-result">
-      <h4>分配分析（仅本地候选）</h4>
-      <p data-testid="sp-yida-allocation-evidence">来源行 {{ allocationPreview.evidence.sourceRows }}；项目 {{ allocationPreview.evidence.projectCount }}；展开 {{ allocationPreview.evidence.expandedRows }}；无效来源 {{ allocationPreview.evidence.invalidSourceRows }}。</p>
-      <ol><li v-for="item in allocationPreview.analysis" :key="item.sourceIndex" :data-testid="`sp-yida-allocation-analysis-${item.sourceIndex}`">源行 {{ item.sourceIndex + 1 }}；原总量 {{ displayNumber(item.sourceTotal) }}；项目数 {{ item.projectCount }}；每项目 {{ displayNumber(item.perProjectQuantity) }}；分配合计 {{ displayNumber(item.allocatedTotal) }}；差额 {{ displayNumber(item.difference) }}<span v-if="item.issues.length">；拒因 {{ item.issues.join(', ') }}</span><ul v-if="item.candidates.length"><li v-for="candidate in item.candidates" :key="candidate.expandedIndex" :data-testid="`sp-yida-allocation-candidate-${candidate.expandedIndex}`">源行 {{ item.sourceIndex + 1 }}；{{ candidateProjectLabel(candidate.expandedIndex, candidate.project) }}；候选 {{ candidate.expandedIndex + 1 }}：{{ rowStatus(candidate.status) }}<span v-if="candidate.issues.length">；拒因 {{ candidateReasons(candidate.expandedIndex) }}</span></li></ul></li></ol>
-      <p v-if="allocationPreview.issues.length" data-testid="sp-yida-allocation-issues">{{ allocationPreview.issues.map((issue) => `${issue.index === null ? '整体' : `源行 ${issue.index + 1}`}: ${issue.code}`).join('；') }}</p>
+
+    <!-- ── 第 2 步：字段映射 ── -->
+    <fieldset class="sp-yida-setup__step" data-testid="sp-yida-mapping" :disabled="localLocked">
+      <legend>2 字段映射</legend>
+      <p>左边选备料字段，右边选宜搭字段。七项身份字段（项目号、图号、名称、规格、材质、版本、父组件图号）和数量必须映射，系统自动把七项身份作为业务键。</p>
+      <div v-for="(row, index) in mappingRows" :key="index" class="sp-yida-setup__map-row" :data-testid="`sp-yida-map-row-${index}`">
+        <label>备料字段<select v-model="row.source" :data-testid="`sp-yida-map-source-${index}`" @change="sourceChanged(row)"><option value="">请选择</option><option v-for="field in sourceOptions(index)" :key="field.source" :value="field.source">{{ field.label }}{{ field.identity || field.required ? '（必映射）' : '' }}</option></select></label>
+        <label v-if="!manualTargets">宜搭字段<select :value="row.target" :data-testid="`sp-yida-map-target-${index}`" @change="targetChanged(row, $event)"><option value="">请选择</option><option v-for="field in targetOptions(index)" :key="field.fieldId" :value="field.fieldId">{{ field.label || field.fieldId }} · {{ componentLabel(field.componentName) }} · {{ field.fieldId }}</option></select></label>
+        <template v-else>
+          <label>宜搭组件 ID<input v-model="row.target" :data-testid="`sp-yida-map-target-${index}`" autocomplete="off"></label>
+          <label>控件<select v-model="row.control" :data-testid="`sp-yida-map-control-${index}`"><option value="text">文本</option><option value="number">数字</option><option value="select">下拉单选</option><option value="radio">单选</option></select></label>
+        </template>
+        <label v-if="row.control === 'select' || row.control === 'radio'">选项（一行一项，与宜搭里完全一致）<textarea v-model="row.optionsText" :data-testid="`sp-yida-map-options-${index}`" rows="2" spellcheck="false"></textarea></label>
+        <label><input v-model="row.yidaRequired" type="checkbox" :data-testid="`sp-yida-map-required-${index}`">宜搭里是必填</label>
+        <button type="button" :data-testid="`sp-yida-map-remove-${index}`" @click="mappingRows.splice(index, 1)">移除</button>
+      </div>
+      <button v-if="mappingRows.length < sourceFields.length" type="button" data-testid="sp-yida-map-add" @click="mappingRows.push(blankMappingRow())">添加映射行</button>
+      <ul v-if="mappingIssues.length > 0" data-testid="sp-yida-map-issues"><li v-for="(issue, index) in mappingIssues" :key="index">{{ issue.row === null ? '' : `第 ${issue.row + 1} 行：` }}{{ issue.message }}</li></ul>
+    </fieldset>
+
+    <!-- ── 第 3 步：预演 ── -->
+    <fieldset class="sp-yida-setup__step" data-testid="sp-yida-preview" :disabled="localLocked">
+      <legend>3 预演（只在本页，不发送）</legend>
+      <details data-testid="sp-yida-rows-details" :open="rowsText.length === 0">
+        <summary>预演数据（默认用合成样例）</summary>
+        <button type="button" data-testid="sp-yida-example-primary" @click="loadExample">填入合成样例</button>
+        <label class="sp-yida-setup__wide">本地 rows JSON（最大 128 KiB / 100 行；字段名同左侧备料字段）<textarea v-model="rowsText" data-testid="sp-yida-rows" rows="6" spellcheck="false" placeholder='[{"projectNo":"SYN-P1","componentCode":"SYN-001","quantity":1}]'></textarea></label>
+      </details>
+      <details data-testid="sp-yida-allocation">
+        <summary>项目数量分配（可选，默认不分配）</summary>
+        <p>整数模式必须整除；小数模式至多六位且不舍入。项目列表一行一个完整项目号。</p>
+        <label>模式<select v-model="allocationMode" data-testid="sp-yida-allocation-mode"><option value="original">不分配（默认）</option><option value="equal_integer">整数精确均分</option><option value="equal_decimal_exact">小数精确均分（最多 6 位）</option></select></label>
+        <label v-if="allocationMode !== 'original'" class="sp-yida-setup__wide">明确项目列表<textarea v-model="allocationProjectsText" data-testid="sp-yida-allocation-projects" rows="3" spellcheck="false"></textarea></label>
+      </details>
+      <button type="button" data-testid="sp-yida-run" :disabled="!buildResult.ok" @click="runPreview">预演</button>
+      <p v-if="previewError" class="sp-yida-setup__error" data-testid="sp-yida-preview-error">{{ previewError }}</p>
+      <section v-if="plan" data-testid="sp-yida-result">
+        <p data-testid="sp-yida-summary">共 {{ plan.evidence.rowCount }} 行；计划创建 {{ plan.evidence.plannedCreate }}；无效 {{ plan.evidence.invalid }}；本地重复键 {{ plan.evidence.duplicateKeyCount }}。远端未核验，不会写入宜搭。</p>
+        <p v-if="previewBlockedReason" data-testid="sp-yida-preview-blocked">还不能保存：{{ previewBlockedReason }}</p>
+        <details>
+          <summary>逐行结果</summary>
+          <ol><li v-for="row in plan.rows" :key="row.index" :data-testid="`sp-yida-result-row-${row.index}`">{{ row.index + 1 }}. {{ row.status === 'planned_create' ? '计划创建' : '无效' }}<span v-if="row.issues.length">：{{ row.issues.map(rowIssueReason).join('；') }}</span></li></ol>
+        </details>
+      </section>
+    </fieldset>
+
+    <!-- ── 第 4 步：保存启用 ── -->
+    <fieldset v-if="state?.status !== 'initialized'" class="sp-yida-setup__step" data-testid="sp-yida-save" :disabled="busy || invalidated || uncertain">
+      <legend>4 保存启用</legend>
+      <p>保存后，凭据由服务器加密封存，这张表单占用一个永久槽位（不能改、删或换表单）；保存不发送任何数据。规则草稿会同时自动存档（下载一份 JSON）。</p>
+      <label>人工审核编号<span class="sp-yida-setup__req" aria-hidden="true">*</span><input :value="reviewRef" data-testid="sp-yida-review" autocomplete="off" @input="setText('review', $event)"></label>
+      <label v-if="testedPairMismatch"><input :checked="overrideTested" type="checkbox" data-testid="sp-yida-connection-override" @change="setOverride">不重新测试，仍按当前 appKey/appSecret 保存（owner 明确决定）</label>
+      <label><input :checked="acknowledged" type="checkbox" data-testid="sp-yida-ack" @change="setAcknowledgement">我已人工核对表单与执行身份，确认这张表单永久占用一个槽位；此操作不发送。</label>
+      <button type="button" class="sp-yida-setup__primary" data-testid="sp-yida-save-submit" :disabled="!maySave" @click="save">保存启用</button>
+      <p v-if="saveBlockedReason" data-testid="sp-yida-save-blocked">暂不能保存：{{ saveBlockedReason }}</p>
+    </fieldset>
+    <section v-else-if="state.draft" data-testid="sp-yida-initialized">
+      <h4>已保存启用</h4>
+      <p>本地配置已初始化；canSend=false，未签发令牌，未写宜搭。目标：{{ state.draft.targetRef }}；草稿 {{ state.draft.rowCount }} 行。</p>
+      <p v-if="archivedName" data-testid="sp-yida-archived">规则草稿已自动存档：{{ archivedName }}</p>
     </section>
-    <section v-if="plan" class="sp-yida-preview__result" data-testid="sp-yida-result">
-      <h4>仅本地计划；远端状态未核验</h4>
-      <p data-testid="sp-yida-summary">共 {{ plan.evidence.rowCount }} 行；计划创建 {{ plan.evidence.plannedCreate }}；计划更新 {{ plan.evidence.plannedUpdate }}；无效 {{ plan.evidence.invalid }}；本地重复键 {{ plan.evidence.duplicateKeyCount }}。</p>
-      <p data-testid="sp-yida-no-apply">不可执行：canApply={{ plan.canApply }}，不会生成执行令牌、查询远端或写入外部系统。</p>
-      <p v-if="previewMode !== 'mapping'" data-testid="sp-yida-protocol-warning">以下仅为 SDK 数据字段 DTO，不含认证、令牌或执行用户，不能作为完整请求发送。远端表单和实例均未核验；本地重复检查不证明远端幂等。</p>
-      <ol><li v-for="row in plan.rows" :key="row.index" :data-testid="`sp-yida-result-row-${row.index}`"><strong>{{ row.index + 1 }}. {{ rowStatus(row.status) }}</strong> · 远端未核验<span v-if="candidateOrigins.has(row.index)"> · {{ candidateOrigins.get(row.index) }}</span><span v-if="row.status !== 'invalid' && row.localBusinessKey"> · 本地业务键：{{ row.localBusinessKey }}</span><span v-if="row.instanceId"> · 本地 instanceId：{{ row.instanceId }}</span><ul v-if="row.issues.length"><li v-for="(issue, issueIndex) in row.issues" :key="issueIndex" :data-testid="`sp-yida-row-issue-${row.index}-${issueIndex}`">{{ rowIssueReason(issue) }}</li></ul><pre v-if="row.payload" :data-testid="`sp-yida-payload-${row.index}`">{{ JSON.stringify(row.payload, null, 2) }}</pre><div v-if="row.status !== 'invalid' && row.protocolPreview" :data-testid="`sp-yida-protocol-${row.index}`"><p>协议 {{ row.protocolPreview.contract }}；完整性 {{ row.protocolPreview.completeness }}（仅数据字段）</p><pre :data-testid="`sp-yida-protocol-data-${row.index}`">{{ JSON.stringify(row.protocolPreview.data, null, 2) }}</pre></div></li></ol>
-    </section>
-    <section class="sp-yida-preview__owner-entry" data-testid="sp-yida-owner-entry">
-      <p>独立本地初始化可在发送开关 OFF 下使用；只由服务器预指定 owner 管理永久单槽，不交换令牌或授权发送。</p>
-      <!-- Always rendered; greyed with the one missing condition until a clean v2 or v3 create preview exists. -->
-      <button v-if="!initializationOpen" type="button" data-testid="sp-yida-initialization-open" :disabled="ownerSendLocked || !persistentInput" @click="initializationOpen = true">打开本地初始化（不发送）</button>
-      <p v-if="!initializationOpen && initializationBlockedReason" data-testid="sp-yida-initialization-blocked">暂不能打开：{{ initializationBlockedReason }}</p>
-      <template v-if="persistentInput">
-      <StockPreparationYidaInitializationPanel v-if="initializationOpen" :draft-input="persistentInput" @locked-change="initializationLocked = $event" @send-enabled-change="ownerSendEnabled = $event" @multi-target-change="ownerMultiTarget = $event" @progress-change="initializationProgress = $event" />
-      <!-- Switch off means not visible: the entry appears only after the owner-authorized initialization GET
-           reported the server send switch ON. An already open panel stays mounted (never abort its request). -->
-      <p v-if="ownerSendEnabled || ownerSendOpen">以下是独立服务器确认流程；仅当前人工登记目标的 owner 且具备集成管理员权限可用。它不会把上面的本地预演当发送许可。</p>
-      <button v-if="ownerSendEnabled && !ownerSendOpen" type="button" data-testid="sp-yida-owner-open" :disabled="initializationLocked" @click="ownerSendOpen = true">打开单行 CREATE 确认（服务器已开通）</button>
-      <StockPreparationYidaOwnerSendPanel v-if="ownerSendOpen" :draft-input="persistentInput" :multi-target="ownerMultiTarget" @locked-change="ownerSendLocked = $event" />
-      </template>
+    <details v-if="ruleArchiveText" data-testid="sp-yida-rule-archive">
+      <summary>规则草稿（只读，自动存档的内容）</summary>
+      <textarea :value="ruleArchiveText" readonly rows="6" spellcheck="false" data-testid="sp-yida-rule-archive-text"></textarea>
+    </details>
+
+    <section v-if="state?.status === 'initialized' && (state.sendEnabled || ownerSendOpen)" data-testid="sp-yida-owner-entry">
+      <p>以下是独立的服务器确认流程，仅当前目标的 owner 且具备集成管理员权限可用；本页预演不是发送许可。</p>
+      <p v-if="!persistentInput" data-testid="sp-yida-owner-needs-preview">单行发送确认需要本页的预演结果：请先在第 3 步预演一次。</p>
+      <button v-if="!ownerSendOpen" type="button" data-testid="sp-yida-owner-open" :disabled="!persistentInput" @click="ownerSendOpen = true">打开单行 CREATE 确认（服务器已开通）</button>
+      <StockPreparationYidaOwnerSendPanel v-if="ownerSendOpen" :draft-input="persistentInput" :multi-target="state.multiTargetEnabled" @locked-change="ownerSendLocked = $event" />
     </section>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
-import { buildYidaStaticPlan, createYidaStaticExample, createYidaProtocolExample, createYidaTransformExample, parseYidaStaticRows, validateYidaStaticConfig, YidaStaticPlanError, type YidaProtocolCatalogEntry, type YidaProtocolExample, type YidaStaticConfig, type YidaStaticExample, type YidaStaticPlan, type YidaStaticRowIssue, type YidaStaticRowIssueCode, type YidaTransformConfig, type YidaTransformExample, type YidaTransformFieldMapEntry, type YidaTransformName } from '../../../../../../plugins/plugin-integration-core/lib/yida-static-plan.mjs'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue'
+import { buildYidaStaticPlan, createYidaProtocolExample, parseYidaStaticRows, validateYidaStaticConfig, YidaStaticPlanError, type YidaProtocolConfig, type YidaStaticPlan, type YidaStaticRowIssue } from '../../../../../../plugins/plugin-integration-core/lib/yida-static-plan.mjs'
 import { buildYidaProjectAllocationPreview, YidaAllocationError, type YidaProjectAllocationPreview } from '../../../../../../plugins/plugin-integration-core/lib/stock-preparation-yida-allocation.mjs'
-import { exportYidaRuleTemplate, parseYidaRuleTemplate, YidaRuleTemplateError, type YidaRuleTemplateRules, type YidaRuleTemplateAllocation } from '../../../../../../plugins/plugin-integration-core/lib/yida-rule-template.mjs'
+import { exportYidaRuleTemplate } from '../../../../../../plugins/plugin-integration-core/lib/yida-rule-template.mjs'
 import StockPreparationYidaOwnerSendPanel from './StockPreparationYidaOwnerSendPanel.vue'
-import StockPreparationYidaInitializationPanel from './StockPreparationYidaInitializationPanel.vue'
+import { createYidaInitializationClient, YidaInitializationClientError, yidaCredentialHasInnerBlank,
+  type YidaConnectionTestOutcome, type YidaConnectionTestResult, type YidaFormFieldDefinition, type YidaInitializationMaterial, type YidaInitializationState } from '../../../services/integration/yidaInitialization'
 import type { YidaOwnerDraftInput } from '../../../services/integration/yidaOwner'
+import { blankMappingRow, buildYidaSetupConfig, defaultMappingRows, mappableYidaFields, STOCK_PREP_YIDA_SOURCE_FIELDS,
+  stockPrepYidaSourceField, yidaComponentLabel, yidaControlOf, type YidaSetupMappingRow } from '../../../services/integration/yidaSetupMapping'
 
-// One editor row for every contract; the v3-only fields (transform, copyOf, constantText,
-// partsText, separator, blank, templateText) are rendered and read only in the v3 contract.
-type FieldMapEntry = { source: string; target: string; type: 'string' | 'number' | 'boolean'; required: boolean; businessKey: boolean; emptyKey: boolean
-  transform: YidaTransformName; copyOf: string; constantText: string; partsText: string; separator: string; blank: 'skip' | 'refuse'; templateText: string }
-type CatalogEntry = { id: string; control: 'text' | 'number' | 'select' | 'radio'; required: boolean; optionsText: string; optionsMode: 'lines' | 'json' }
 type AllocationMode = 'original' | 'equal_integer' | 'equal_decimal_exact'
-type PreviewMode = 'mapping' | 'protocol' | 'transforms'
-function blankFieldMap(): FieldMapEntry { return { source: '', target: '', type: 'string', required: false, businessKey: false, emptyKey: false, transform: 'direct', copyOf: '', constantText: '', partsText: '', separator: '', blank: 'refuse', templateText: '' } }
-function blankCatalogEntry(): CatalogEntry { return { id: '', control: 'text', required: false, optionsText: '', optionsMode: 'lines' } }
-function modeOf(version: 1 | 2 | 3): PreviewMode { return version === 3 ? 'transforms' : version === 2 ? 'protocol' : 'mapping' }
-const previewMode = ref<PreviewMode>('mapping')
-const persistentInput = ref<YidaOwnerDraftInput | null>(null)
-const ownerSendOpen = ref(false)
-// Y2: shown only while the server reports its multi-target switch ON on an owner-authorized reply.
-const ownerMultiTarget = ref(false)
-const ownerSendLocked = ref(false)
-const ownerSendEnabled = ref(false)
-const initializationOpen = ref(false)
-const initializationLocked = ref(false)
-const fieldCatalog = reactive<CatalogEntry[]>([])
-const appType = ref('')
-const formUuid = ref('')
-const intent = ref<YidaStaticConfig['intent']>('create')
-const instanceIdField = ref('')
-const fieldMap = reactive<FieldMapEntry[]>([blankFieldMap()])
-const businessKeyOrder = ref<string[]>([])
-const emptyKeyOrder = ref<string[]>([])
-const rowsText = ref('')
-const allocationMode = ref<AllocationMode>('original')
-// Q4 (owner 2026-11-07, R-88): 'exact' is today's rule and is never sent; 'legacy-1dp' only with the decimal mode.
-const allocationRounding = ref<'exact' | 'legacy-1dp'>('exact')
-const allocationProjectsText = ref('')
-const allocationProjectField = ref('')
-const allocationQuantityField = ref('')
-const plan = ref<YidaStaticPlan | null>(null)
-const allocationPreview = ref<YidaProjectAllocationPreview | null>(null)
-const errorCode = ref('')
-const configIssues = ref<Array<{ code: string; field: string }>>([])
-const ruleExportText = ref('')
-const ruleImportText = ref('')
-const ruleImportNotice = ref('')
-const mappedSources = computed(() => [...new Set(fieldMap.filter((entry) => previewMode.value !== 'transforms' || entry.transform === 'direct').map((entry) => entry.source).filter((source) => source.length > 0))])
-const candidateOrigins = computed(() => new Map(allocationPreview.value?.analysis.flatMap((item) =>
-  item.candidates.map((candidate) => [candidate.expandedIndex, `源行 ${item.sourceIndex + 1}；${candidateProjectLabel(candidate.expandedIndex, candidate.project)}`] as const)) ?? []))
-function candidateProjectLabel(expandedIndex: number, project: string): string {
-  const projectRejected = plan.value?.rows.find((row) => row.index === expandedIndex)?.issues.some((issue) =>
-    issue.fields?.some((field) => field.source === allocationProjectField.value))
-  if (projectRejected) return '项目字段未通过校验'
-  return `项目 ${project}`
+const sourceFields = STOCK_PREP_YIDA_SOURCE_FIELDS
+const secretFields = ['appKey', 'appSecret', 'systemToken'] as const
+type SecretField = typeof secretFields[number]
+
+// ── form info and credentials (browser memory only) ────────────────────────────────────────────────
+const appType = ref(''), formUuid = ref(''), organizationId = ref(''), reviewRef = ref(''), acknowledged = ref(false)
+const material = reactive<Record<keyof YidaInitializationMaterial, string>>({ appKey: '', appSecret: '', systemToken: '', userId: '' })
+// appKey/appSecret/systemToken go out without surrounding whitespace (a paste often brings a hidden line break; the
+// server refuses padding). The inner text is never changed: whitespace or an invisible character inside blocks sending.
+function sendable(field: SecretField): string { return material[field].trim() }
+const blockedFields = computed(() => secretFields.filter(field => yidaCredentialHasInnerBlank(material[field])))
+function clearPrivate(): void {
+  for (const field of Object.keys(material) as Array<keyof YidaInitializationMaterial>) material[field] = ''
+  reviewRef.value = ''; acknowledged.value = false
+  forgetTestedPair()
 }
-function candidateReason(code: YidaStaticRowIssueCode): string {
-  const labels: Record<YidaStaticRowIssueCode, string> = {
-    KEY_MISSING: 'KEY_MISSING（业务键缺失）',
-    FIELD_REQUIRED: 'FIELD_REQUIRED（必填字段缺失）',
-    FIELD_TYPE: 'FIELD_TYPE（字段类型不符）',
-    INSTANCE_ID_MISSING: 'INSTANCE_ID_MISSING（实例标识缺失）',
-    DUPLICATE_LOCAL_KEY: 'DUPLICATE_LOCAL_KEY（本地业务键重复）',
-    FIELD_OPTION_INVALID: 'FIELD_OPTION_INVALID（选项不符，须使用配置的合法选项）',
-    FIELD_NUMBER_INVALID: 'FIELD_NUMBER_INVALID（数字须有限且不是负零，整数须在安全范围内）',
-    FIELD_PART_MISSING: 'FIELD_PART_MISSING（拼接有部分为空，规则为拒绝）',
-    FIELD_VALUE_TOO_LONG: 'FIELD_VALUE_TOO_LONG（拼接结果超过 4096 字符）',
-    DUPLICATE_GENERATED_VALUE: 'DUPLICATE_GENERATED_VALUE（同批另一行生成了同一个值）',
+
+// ── server status: read automatically, never a step ─────────────────────────────────────────────────
+const state = shallowRef<YidaInitializationState | null>(null)
+const commandId = ref<string | null>(null)
+const busy = ref(false), uncertain = ref(false), invalidated = ref(false), errorCode = ref(''), probeErrorCode = ref('')
+const retriesLeft = ref(0)
+let retryTimer: ReturnType<typeof setTimeout> | null = null
+let generation = 0
+let client: ReturnType<typeof createYidaInitializationClient> | null = null
+const formFieldsReadOn = computed(() => state.value?.formFieldsReadEnabled === true)
+const formLocked = computed(() => busy.value || invalidated.value || uncertain.value || state.value?.status === 'initialized' || ownerSendLocked.value)
+// Steps 2 and 3 are local only (no request, no credential): they stay editable while the status is being read.
+const localLocked = computed(() => state.value?.status === 'initialized' || ownerSendLocked.value)
+
+function invalidateSession(code?: string): void {
+  generation += 1; client?.dispose(); client = null; clearRetry()
+  clearPrivate(); state.value = null; commandId.value = null
+  busy.value = false; uncertain.value = false; invalidated.value = true; probeErrorCode.value = ''
+  errorCode.value = code ?? 'YIDA_INITIALIZATION_SESSION_CHANGED'
+}
+function sessionClient(): ReturnType<typeof createYidaInitializationClient> {
+  if (invalidated.value) throw new YidaInitializationClientError('YIDA_INITIALIZATION_SESSION_CHANGED')
+  if (!client) client = createYidaInitializationClient({ onInvalidated: invalidateSession })
+  client.assertCurrentSession()
+  return client
+}
+function editAllowed(): boolean {
+  if (busy.value || uncertain.value || invalidated.value || state.value?.status === 'initialized') return false
+  try { sessionClient(); return true } catch { clearPrivate(); return false }
+}
+function setMaterial(field: keyof YidaInitializationMaterial, event: Event): void {
+  if (editAllowed()) material[field] = (event.target as HTMLInputElement).value
+}
+function pasteMaterial(field: keyof YidaInitializationMaterial, event: ClipboardEvent): void {
+  event.preventDefault()
+  if (editAllowed() && event.clipboardData) material[field] = event.clipboardData.getData('text')
+}
+function setText(field: 'review' | 'organization', event: Event): void {
+  if (!editAllowed()) return
+  const value = (event.target as HTMLInputElement).value
+  if (field === 'review') reviewRef.value = value
+  else organizationId.value = value
+}
+function setAcknowledgement(event: Event): void { if (editAllowed()) acknowledged.value = (event.target as HTMLInputElement).checked }
+function clearRetry(): void { if (retryTimer !== null) { clearTimeout(retryTimer); retryTimer = null } }
+// After an unconfirmed POST or a failed read the page re-reads by itself (2 s, 5 s, 10 s); only then does it
+// offer one 「重新读取状态」 button. A read never allocates a new command and never infers absence.
+const RETRY_DELAYS = [2000, 5000, 10000]
+function scheduleRetry(): void {
+  clearRetry()
+  if (invalidated.value || retriesLeft.value <= 0) return
+  const delay = RETRY_DELAYS[RETRY_DELAYS.length - retriesLeft.value]
+  retriesLeft.value -= 1
+  retryTimer = setTimeout(() => { retryTimer = null; void refresh(false) }, delay)
+}
+async function refresh(manual = true): Promise<void> {
+  if (busy.value || invalidated.value) return
+  if (manual) retriesLeft.value = 0
+  clearRetry()
+  const active = generation
+  busy.value = true; errorCode.value = ''; probeErrorCode.value = ''
+  const wasUncertain = uncertain.value
+  uncertain.value = true
+  try {
+    const result = await sessionClient().observe()
+    if (active !== generation) return
+    // A different command means a different slot state: what was typed for the old one is dropped.
+    if (commandId.value !== null && result.commandId !== commandId.value) clearPrivate()
+    commandId.value = result.commandId; state.value = result; uncertain.value = false; retriesLeft.value = 0
+    if (result.status === 'initialized') clearPrivate()
+  } catch (error) {
+    if (active !== generation) return
+    errorCode.value = error instanceof YidaInitializationClientError ? error.code : 'YIDA_INITIALIZATION_UNAVAILABLE'
+    // A read that never answered leaves the earlier knowledge as it was (unknown stays unknown).
+    uncertain.value = wasUncertain || state.value === null
+    scheduleRetry()
+  } finally { if (active === generation) busy.value = false }
+}
+const showStatusRetry = computed(() => !invalidated.value && !busy.value && retriesLeft.value === 0 && retryTimer === null
+  && (uncertain.value || state.value === null) && errorCode.value !== '')
+const statusText = computed(() => {
+  if (invalidated.value) return errorCode.value.endsWith('_DENIED') ? '当前登录账号不是宜搭锚点 owner 或没有权限；请用锚点 owner 账号登录。' : '登录会话已变化；请刷新页面。'
+  if (busy.value && state.value === null) return '正在读取服务器状态…'
+  if (uncertain.value) return '服务器状态未确认，系统正在自动重新读取；确认之前不能保存。'
+  if (!state.value) return '尚未读到服务器状态。'
+  if (state.value.status === 'initialized') return '这张表单已保存启用。'
+  return '服务器已就绪：可以填写表单信息并测试连接。'
+})
+
+// ── 测试连接 (+ form fields) ────────────────────────────────────────────────────────────────────────
+const outcomeCopy: Readonly<Record<YidaConnectionTestOutcome, string>> = Object.freeze({
+  ok: 'appKey/appSecret 有效：钉钉发了令牌（令牌已在服务器丢弃）。',
+  upstream_rejected: '钉钉有应答但没有发令牌：最常见是 appKey/appSecret 不匹配，也可能是限流或网络中间设备拦截，系统无法区分。',
+  unreachable: '连不上钉钉：DNS、TLS、建立连接或重定向失败；出网被防火墙丢弃也显示为这一类。与凭据无关。',
+  timeout: '已连上但 12 秒内钉钉没有应答：可能是钉钉或中间网络慢；与凭据无关。',
+})
+const refusalHints: Readonly<Record<string, string>> = Object.freeze({
+  YIDA_CONNECTION_TEST_DISABLED: '服务器的测试连接（或读取表单字段）开关现在是关的；系统已重新读取状态。未向钉钉发出请求。',
+  YIDA_CONNECTION_TEST_DENIED: '服务器拒绝：当前登录不是部署指定的 owner、租户不符或已无管理员权限；本页材料已清空。未向钉钉发出请求。',
+  YIDA_CONNECTION_TEST_CONFLICT: '另一次测试正在进行，或这张表单已保存启用；系统已重新读取状态。未向钉钉发出请求。',
+  YIDA_CONNECTION_TEST_THROTTLED: '两次测试至少间隔约 5 秒，请稍候再点。未向钉钉发出请求。',
+  YIDA_CONNECTION_TEST_INPUT: '服务器拒绝了请求格式（appType/formUuid 只能含字母、数字、下划线、连字符；userId 不能有首尾空白）。未向钉钉发出请求。',
+  YIDA_CONNECTION_TEST_INACTIVE: '服务器上的测试连接组件没有启用（插件未加载，或安装包缺少探针组件）。请稍后重试一次，仍然出现再请服务器操作员检查。',
+  YIDA_CONNECTION_TEST_CANCELLED: '服务器中途取消了本次测试；无法确定钉钉是否已收到请求，令牌不会被保留。可稍后重试。',
+  YIDA_CONNECTION_TEST_UNAVAILABLE: '服务器未能完成本次测试；无法确定钉钉是否已收到请求，令牌不会被保留。请稍后重试一次。',
+  YIDA_INITIALIZATION_CANCELLED: '页面 15 秒内没有收到服务器答复，已停止等待；无法确定钉钉是否已收到请求。可稍后重试。',
+  YIDA_INITIALIZATION_UNAVAILABLE: '没有收到服务器的有效答复（网络或服务器故障）。可稍后重试。',
+})
+const saveHints: Readonly<Record<string, string>> = Object.freeze({
+  YIDA_INITIALIZATION_ENCRYPTION_NOT_READY: '本次保存未写入数据：服务器的 ENCRYPTION_KEY / ENCRYPTION_SALT 未正确配置（为空、相同或用了默认值）。请服务器操作员按安装手册配置并重启后端，然后重新填写并保存。',
+})
+const errorHint = computed(() => {
+  if (errorCode.value === '') return ''
+  if (errorCode.value.startsWith('YIDA_CONNECTION_TEST_') || errorCode.value === probeErrorCode.value) return refusalHints[errorCode.value] ?? ''
+  return saveHints[errorCode.value] ?? ''
+})
+// The pair sent for the shown outcome and the pair that got 'ok' are NON-reactive copies, never exposed to the
+// template or devtools state; only a version counter is reactive.
+const connectionOutcome = ref<YidaConnectionTestOutcome | ''>(''), overrideTested = ref(false), testedVersion = ref(0)
+let testedPair: { appKey: string; appSecret: string } | null = null
+let outcomePair: { appKey: string; appSecret: string } | null = null
+const formRead = shallowRef<NonNullable<YidaConnectionTestResult['formRead']> | null>(null)
+const fieldsFor = ref<{ appType: string; formUuid: string } | null>(null)
+const yidaFields = shallowRef<readonly YidaFormFieldDefinition[]>([])
+function forgetTestedPair(): void { testedPair = null; outcomePair = null; testedVersion.value += 1; overrideTested.value = false; connectionOutcome.value = ''; formRead.value = null }
+const testedPairMismatch = computed(() => testedVersion.value >= 0 && testedPair !== null
+  && (testedPair.appKey !== sendable('appKey') || testedPair.appSecret !== sendable('appSecret')))
+const shownOutcome = computed(() => testedVersion.value >= 0 && outcomePair !== null
+  && outcomePair.appKey === sendable('appKey') && outcomePair.appSecret === sendable('appSecret') ? connectionOutcome.value : '')
+const shownFormOutcome = computed(() => shownOutcome.value !== '' && formRead.value !== null ? formRead.value.outcome : '')
+const fieldsStale = computed(() => fieldsFor.value !== null && (fieldsFor.value.appType !== appType.value.trim() || fieldsFor.value.formUuid !== formUuid.value.trim()))
+const formReadCopy = computed(() => {
+  const read = formRead.value
+  if (!read) return ''
+  if (read.outcome === 'ok') {
+    const usable = mappableYidaFields(read.fields).length
+    return `已读到这张表单的 ${read.fields.length} 个字段（可映射 ${usable} 个），第 2 步可直接选择。这也说明 systemToken、userId、appType、formUuid 能读取这张表单；写入权限要到首次发送才验证。`
   }
-  return labels[code] ?? '候选校验失败'
+  if (read.outcome === 'not_attempted') return 'appKey/appSecret 没通过，未读取表单字段。'
+  if (read.outcome === 'upstream_rejected') return '钉钉拒绝了读取表单字段：常见原因是钉钉应用没有开通「宜搭表单数据读权限」、systemToken 或 userId 不对、appType/formUuid 填错，或 userId 没有这个宜搭应用的权限；系统无法区分。'
+  if (read.outcome === 'unreachable') return '读取表单字段时连不上钉钉；与凭据无关，可稍后重试。'
+  return '读取表单字段超时（12 秒内没有应答）；可稍后重试。'
+})
+watch([() => material.appKey, () => material.appSecret], () => { overrideTested.value = false }, { flush: 'sync' })
+const formTargetReady = computed(() => /^[A-Za-z0-9_-]{1,128}$/u.test(appType.value.trim()) && /^[A-Za-z0-9_-]{1,128}$/u.test(formUuid.value.trim())
+  && sendable('systemToken').length > 0 && material.userId.length > 0 && material.userId.trim() === material.userId)
+const connectionTestBlockedReason = computed(() => {
+  if (state.value?.status === 'initialized') return '这张表单已保存启用；测试连接只在保存之前可用。'
+  if (invalidated.value) return ''
+  if (busy.value) return '请求进行中，请稍候。'
+  if (uncertain.value || !state.value || !commandId.value) return '服务器状态还没确认，系统正在读取。'
+  if (state.value.connectionTestEnabled !== true) return '服务器未开启测试连接：请服务器管理员在 docker\\app.env 打开测试开关并用包内脚本重启后端，本页会在重新打开时读到新状态。'
+  if (material.appKey.trim().length === 0 || material.appSecret.trim().length === 0) return '请先填写 appKey 和 appSecret。'
+  if (blockedFields.value.some(field => field === 'appKey' || field === 'appSecret')) return 'appKey 或 appSecret 含不可发送的字符。'
+  if (formFieldsReadOn.value && !formTargetReady.value) return '读取表单字段还需要 appType、formUuid、systemToken 和 userId（userId 不能有首尾空白）。'
+  if (formFieldsReadOn.value && blockedFields.value.includes('systemToken')) return 'systemToken 含不可发送的字符。'
+  return ''
+})
+const mayTestConnection = computed(() => connectionTestBlockedReason.value === '' && !invalidated.value)
+async function testConnection(): Promise<void> {
+  if (!mayTestConnection.value || !commandId.value) return
+  const active = generation
+  const sent = { appKey: sendable('appKey'), appSecret: sendable('appSecret') }
+  const target = formFieldsReadOn.value ? { appType: appType.value.trim(), formUuid: formUuid.value.trim(), systemToken: sendable('systemToken'), userId: material.userId } : null
+  busy.value = true; errorCode.value = ''; probeErrorCode.value = ''; forgetTestedPair()
+  let refreshAfter = false
+  try {
+    const tested = await sessionClient().testConnection({ commandId: commandId.value, mode: 'candidate', material: { ...sent }, ...(target ? { form: { ...target } } : {}) })
+    if (active !== generation) return
+    connectionOutcome.value = tested.outcome; outcomePair = { ...sent }
+    if (tested.outcome === 'ok') testedPair = { ...sent }
+    if (tested.formRead && target) {
+      formRead.value = tested.formRead
+      if (tested.formRead.outcome === 'ok') {
+        yidaFields.value = tested.formRead.fields; fieldsFor.value = { appType: target.appType, formUuid: target.formUuid }
+        adoptFields(tested.formRead.fields)
+      }
+    }
+    testedVersion.value += 1
+  } catch (error) {
+    if (active === generation) {
+      errorCode.value = error instanceof YidaInitializationClientError ? error.code : 'YIDA_INITIALIZATION_UNAVAILABLE'
+      probeErrorCode.value = errorCode.value
+      refreshAfter = errorCode.value === 'YIDA_CONNECTION_TEST_DISABLED' || errorCode.value === 'YIDA_CONNECTION_TEST_CONFLICT'
+    }
+  } finally { if (active === generation) busy.value = false }
+  // The page re-reads the status itself where the old flow said 「请手动 GET」; typed values are kept.
+  if (refreshAfter && active === generation) { const code = errorCode.value; await refresh(false); if (!errorCode.value) { errorCode.value = code; probeErrorCode.value = code } }
 }
-function rowIssueReason(issue: YidaStaticRowIssue): string {
-  const types = { string: '文本', number: '数字', boolean: '布尔值' }
-  const derived: Record<YidaTransformName, string> = { direct: '直接映射', copy: '复制', constant: '常量', concat: '拼接', generated: '生成' }
-  return [candidateReason(issue.code), ...(issue.fields ?? []).map((field) =>
-    `${field.source ?? derived[field.transform ?? 'direct']} → ${field.target}（期望${types[field.type]}）`)].join('；')
-}
-function candidateReasons(expandedIndex: number): string {
-  // Allocation candidates keep their code-only contract; details belong to the actual planner row.
-  return plan.value?.rows.find((row) => row.index === expandedIndex)?.issues.map(rowIssueReason).join(', ') ?? ''
-}
-function clearResults(): void {
-  persistentInput.value = null; ownerSendOpen.value = false; ownerSendLocked.value = false; ownerSendEnabled.value = false; ownerMultiTarget.value = false
-  initializationOpen.value = false; initializationLocked.value = false
-  plan.value = null; allocationPreview.value = null; errorCode.value = ''; configIssues.value = []
-}
-function invalidateOutputs(): void { clearResults(); ruleExportText.value = ''; ruleImportNotice.value = '' }
-watch([previewMode, fieldCatalog, appType, formUuid, intent, instanceIdField, fieldMap, businessKeyOrder, emptyKeyOrder, rowsText, allocationMode, allocationRounding, allocationProjectsText, allocationProjectField, allocationQuantityField, ruleImportText], invalidateOutputs, { deep: true, flush: 'sync' })
-function loadExample(kind: 'primary' | 'renamed'): void {
-  applyExample(createYidaStaticExample(kind))
-}
-function loadProtocolExample(kind: 'primary' | 'renamed'): void {
-  applyExample(createYidaProtocolExample(kind))
-}
-function loadTransformExample(): void {
-  applyExample(createYidaTransformExample())
-}
-// The allocation roles are source columns; in v3 they are the columns of direct entries.
-function allocationDefaults(config: YidaStaticConfig): { projectField: string; quantityField: string } {
-  if (config.version !== 3) return { projectField: config.businessKey[0] ?? '', quantityField: config.fieldMap.find((entry) => entry.type === 'number')?.source ?? '' }
-  const direct = config.fieldMap.flatMap((entry) => entry.transform === 'direct' ? [entry] : [])
-  return { projectField: direct.find((entry) => entry.target === config.businessKey[0])?.source ?? '', quantityField: direct.find((entry) => entry.type === 'number')?.source ?? '' }
-}
-function applyExample(example: YidaStaticExample | YidaProtocolExample | YidaTransformExample): void {
-  const config = example.config
-  previewMode.value = modeOf(config.version)
-  appType.value = example.config.target.appType; formUuid.value = example.config.target.formUuid; intent.value = example.config.intent; instanceIdField.value = example.config.instanceIdField ?? ''
-  fieldMap.splice(0, fieldMap.length, ...mapEditorEntries(config))
-  fieldCatalog.splice(0, fieldCatalog.length, ...catalogEditorEntries(config, 'lines'))
-  businessKeyOrder.value = [...config.businessKey]; emptyKeyOrder.value = config.version !== 1 ? [...config.emptyKeyFields] : []
-  const roles = allocationDefaults(config)
-  rowsText.value = example.text; allocationMode.value = 'original'; allocationRounding.value = 'exact'; allocationProjectsText.value = 'SYN-PROJECT-01\nSYN-PROJECT-02'; allocationProjectField.value = roles.projectField; allocationQuantityField.value = roles.quantityField; invalidateOutputs()
-}
-function mapEditorEntries(config: YidaRuleTemplateRules): FieldMapEntry[] {
-  // v3 keys name direct targets, so each checkbox is bound to its own row, never "first row with that source".
-  if (config.version === 3) {
-    return config.fieldMap.map((entry) => ({
-      ...blankFieldMap(), target: entry.target, type: entry.type, required: entry.required, transform: entry.transform,
-      source: entry.transform === 'direct' ? entry.source : '',
-      copyOf: entry.transform === 'copy' ? entry.copyOf : '',
-      constantText: entry.transform === 'constant' ? String(entry.value) : '',
-      partsText: entry.transform === 'concat' ? JSON.stringify(entry.parts) : '',
-      separator: entry.transform === 'concat' ? entry.separator : '',
-      blank: entry.transform === 'concat' ? entry.blank : 'refuse',
-      templateText: entry.transform === 'generated' ? JSON.stringify(entry.template) : '',
-      businessKey: entry.transform === 'direct' && config.businessKey.includes(entry.target),
-      emptyKey: entry.transform === 'direct' && config.emptyKeyFields.includes(entry.target),
-    }))
+function setOverride(event: Event): void { if (editAllowed()) overrideTested.value = (event.target as HTMLInputElement).checked }
+
+// ── 字段映射 ───────────────────────────────────────────────────────────────────────────────────────
+const mappingRows = reactive<YidaSetupMappingRow[]>(defaultMappingRows([]))
+const manualTargets = computed(() => yidaFields.value.length === 0 || fieldsStale.value)
+const mappable = computed(() => mappableYidaFields(yidaFields.value))
+function componentLabel(name: string): string { return yidaComponentLabel(name) }
+// A fresh field list fills in only the rows the operator has not chosen yet, and drops a choice that is not on this form.
+function adoptFields(fields: readonly YidaFormFieldDefinition[]): void {
+  const ids = new Set(mappableYidaFields(fields).map(field => field.fieldId))
+  const defaults = defaultMappingRows(fields)
+  for (const row of mappingRows) {
+    if (row.target && !ids.has(row.target)) row.target = ''
+    if (!row.target) {
+      const match = defaults.find(candidate => candidate.source === row.source && candidate.target && !mappingRows.some(other => other.target === candidate.target))
+      if (match) { row.target = match.target; row.control = match.control }
+    } else {
+      const field = fields.find(candidate => candidate.fieldId === row.target)
+      const control = field ? yidaControlOf(field.componentName) : null
+      if (control) row.control = control
+    }
   }
-  const marked = new Set<string>()
-  return config.fieldMap.map((entry) => {
-    const first = !marked.has(entry.source); marked.add(entry.source)
-    return { ...blankFieldMap(), ...entry, businessKey: first && config.businessKey.includes(entry.source), emptyKey: first && config.version === 2 && config.emptyKeyFields.includes(entry.source) }
+}
+function sourceOptions(index: number) {
+  return sourceFields.filter(field => field.source === mappingRows[index]?.source || !mappingRows.some(row => row.source === field.source))
+}
+function targetOptions(index: number) {
+  const own = mappingRows[index]
+  const source = own ? stockPrepYidaSourceField(own.source) : undefined
+  return mappable.value.filter(field => {
+    const control = yidaControlOf(field.componentName)
+    if (source && (control === 'number') !== (source.type === 'number')) return false
+    return field.fieldId === own?.target || !mappingRows.some(row => row.target === field.fieldId)
   })
 }
-const NUMBER_TEXT = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$/
-// Builds the v3 entry exactly as typed; the shared validator owns every refusal.
-function transformConfigEntry(entry: FieldMapEntry): YidaTransformFieldMapEntry {
-  const common = { target: entry.target, type: entry.type as 'string' | 'number', required: entry.required }
-  if (entry.transform === 'direct') return { transform: 'direct', source: entry.source, ...common }
-  if (entry.transform === 'copy') return { transform: 'copy', copyOf: entry.copyOf, ...common }
-  if (entry.transform === 'constant') {
-    // A number constant is read only in its exact spelling, like the template parser does.
-    if (entry.type === 'number' && !(NUMBER_TEXT.test(entry.constantText) && String(Number(entry.constantText)) === entry.constantText)) throw new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID')
-    return { transform: 'constant', value: entry.type === 'number' ? Number(entry.constantText) : entry.constantText, ...common }
+function sourceChanged(row: YidaSetupMappingRow): void {
+  const field = stockPrepYidaSourceField(row.source)
+  if (field) row.yidaRequired = row.yidaRequired || field.required
+  if (manualTargets.value && field) row.control = field.type === 'number' ? 'number' : row.control === 'number' ? 'text' : row.control
+}
+function targetChanged(row: YidaSetupMappingRow, event: Event): void {
+  row.target = (event.target as HTMLSelectElement).value
+  const field = yidaFields.value.find(candidate => candidate.fieldId === row.target)
+  const control = field ? yidaControlOf(field.componentName) : null
+  if (control) row.control = control
+}
+const buildResult = computed(() => buildYidaSetupConfig({ appType: appType.value, formUuid: formUuid.value, rows: mappingRows }))
+const mappingIssues = computed(() => buildResult.value.ok ? [] : buildResult.value.issues)
+
+// ── 预演 ───────────────────────────────────────────────────────────────────────────────────────────
+const rowsText = ref('')
+const allocationMode = ref<AllocationMode>('original')
+const allocationProjectsText = ref('')
+const plan = ref<YidaStaticPlan | null>(null)
+const allocationPreview = ref<YidaProjectAllocationPreview | null>(null)
+const previewError = ref('')
+const persistentInput = ref<YidaOwnerDraftInput | null>(null)
+const ownerSendOpen = ref(false), ownerSendLocked = ref(false)
+function clearPreview(): void {
+  plan.value = null; allocationPreview.value = null; previewError.value = ''; persistentInput.value = null
+  if (!ownerSendLocked.value) ownerSendOpen.value = false
+}
+watch([appType, formUuid, mappingRows, rowsText, allocationMode, allocationProjectsText], clearPreview, { deep: true, flush: 'sync' })
+function loadExample(): void { rowsText.value = createYidaProtocolExample('primary').text }
+function rowIssueReason(issue: YidaStaticRowIssue): string {
+  const labels: Record<string, string> = {
+    KEY_MISSING: '业务键缺失', FIELD_REQUIRED: '必填字段缺失', FIELD_TYPE: '字段类型不符', DUPLICATE_LOCAL_KEY: '本地业务键重复',
+    FIELD_OPTION_INVALID: '选项不在宜搭选项里', FIELD_NUMBER_INVALID: '数字无效',
   }
-  if (entry.transform === 'generated') {
-    const template: unknown = JSON.parse(entry.templateText)
-    return { transform: 'generated', template: template as Extract<YidaTransformFieldMapEntry, { transform: 'generated' }>['template'], target: entry.target, type: entry.type as 'string', required: entry.required }
-  }
-  const parts: unknown = JSON.parse(entry.partsText)
-  return { transform: 'concat', parts: parts as Extract<YidaTransformFieldMapEntry, { transform: 'concat' }>['parts'], separator: entry.separator, blank: entry.blank, target: entry.target, type: entry.type as 'string', required: entry.required }
+  const fields = (issue.fields ?? []).map(field => stockPrepYidaSourceField(field.source ?? '')?.label ?? field.source ?? field.target)
+  return [labels[issue.code] ?? issue.code, ...fields].join('：')
 }
-function catalogEditorEntries(config: YidaRuleTemplateRules, optionsMode: CatalogEntry['optionsMode']): CatalogEntry[] {
-  return config.version !== 1 ? config.fieldCatalog.map((entry) => ({
-    id: entry.id, control: entry.control, required: entry.required, optionsMode,
-    optionsText: entry.options ? optionsMode === 'json' ? JSON.stringify(entry.options, null, 2) : entry.options.join('\n') : '',
-  })) : []
+function allocationSettings() {
+  return { mode: allocationMode.value as Exclude<AllocationMode, 'original'>, projects: allocationProjectsText.value.split(/\r?\n/u),
+    projectField: 'projectNo', quantityField: 'quantity' }
 }
-function selectedKeys(role: 'businessKey' | 'emptyKey', order: string[]): string[] {
-  // v1/v2 keys are source columns; v3 keys are the target of the checked direct row.
-  const selected = fieldMap.filter((entry) => entry[role]).map((entry) => previewMode.value === 'transforms' ? entry.target : entry.source)
-  return [...order.filter((source) => selected.includes(source)), ...selected.filter((source) => !order.includes(source))]
-}
-function currentTransformConfig(): YidaTransformConfig {
-  const base = { version: 3 as const, kind: 'yida-form-protocol-static' as const, target: { appType: appType.value, formUuid: formUuid.value },
-    businessKey: selectedKeys('businessKey', businessKeyOrder.value), emptyKeyFields: selectedKeys('emptyKey', emptyKeyOrder.value),
-    fieldCatalog: fieldCatalog.map(catalogConfig), fieldMap: fieldMap.map(transformConfigEntry) }
-  return intent.value === 'update' ? { ...base, intent: 'update', instanceIdField: instanceIdField.value } : { ...base, intent: 'create' }
-}
-function currentConfig(): YidaStaticConfig {
-  if (previewMode.value === 'transforms') return currentTransformConfig()
-  const common = { target: { appType: appType.value, formUuid: formUuid.value }, businessKey: selectedKeys('businessKey', businessKeyOrder.value), fieldMap: fieldMap.map(({ source, target, type, required }) => ({ source, target, type, required })) }
-  const base = previewMode.value === 'protocol'
-    ? { ...common, version: 2 as const, kind: 'yida-form-protocol-static' as const,
-      emptyKeyFields: selectedKeys('emptyKey', emptyKeyOrder.value),
-      fieldCatalog: fieldCatalog.map(catalogConfig),
-    }
-    : { ...common, version: 1 as const, kind: 'yida-form-static' as const }
-  return intent.value === 'update' ? { ...base, intent: 'update', instanceIdField: instanceIdField.value } : { ...base, intent: 'create' }
-}
-function catalogConfig({ id, control, required, optionsText, optionsMode }: CatalogEntry): YidaProtocolCatalogEntry {
-  if (control !== 'select' && control !== 'radio') return { id, control, required }
-  const options: unknown = optionsMode === 'json' ? JSON.parse(optionsText) : optionsText.split(/\r?\n/)
-  if (!Array.isArray(options) || !options.every((option) => typeof option === 'string')) throw new YidaStaticPlanError('YIDA_STATIC_CONFIG_INVALID')
-  return { id, control, required, options }
-}
-function exportRuleTemplate(): void {
-  invalidateOutputs()
-  try {
-    const allocation: YidaRuleTemplateAllocation = allocationMode.value === 'original' ? { mode: 'original' }
-      : { mode: allocationMode.value, projectField: allocationProjectField.value, quantityField: allocationQuantityField.value, ...roundingSetting() }
-    if (previewMode.value === 'transforms') {
-      // The exporter normalizes v3 rules itself; only the target is left out.
-      const { target: _target, ...transformRules } = currentTransformConfig()
-      ruleExportText.value = exportYidaRuleTemplate({ rules: transformRules, allocation })
-      return
-    }
-    const config = currentConfig()
-    if (config.version === 3) return
-    const common = { fieldMap: config.fieldMap, businessKey: config.businessKey }
-    const base = config.version === 2
-      ? { ...common, version: 2 as const, kind: 'yida-form-protocol-static' as const, fieldCatalog: config.fieldCatalog, emptyKeyFields: config.emptyKeyFields }
-      : { ...common, version: 1 as const, kind: 'yida-form-static' as const }
-    const rules = config.intent === 'update' ? { ...base, intent: 'update' as const, instanceIdField: config.instanceIdField } : { ...base, intent: 'create' as const }
-    ruleExportText.value = exportYidaRuleTemplate({ rules, allocation })
-  } catch (error) { errorCode.value = error instanceof YidaRuleTemplateError ? error.code : 'YIDA_RULE_TEMPLATE_CONFIG' }
-}
-function importRuleTemplate(): void {
-  invalidateOutputs()
-  try {
-    const { rules, allocation } = parseYidaRuleTemplate(ruleImportText.value)
-    // Stage the entire editor representation before changing any current input.
-    const nextMap = mapEditorEntries(rules)
-    const nextCatalog = catalogEditorEntries(rules, 'json')
-    previewMode.value = modeOf(rules.version); intent.value = rules.intent; instanceIdField.value = rules.instanceIdField ?? ''
-    fieldMap.splice(0, fieldMap.length, ...nextMap); fieldCatalog.splice(0, fieldCatalog.length, ...nextCatalog)
-    businessKeyOrder.value = [...rules.businessKey]; emptyKeyOrder.value = rules.version !== 1 ? [...rules.emptyKeyFields] : []
-    allocationMode.value = allocation.mode
-    allocationProjectField.value = allocation.mode === 'original' ? '' : allocation.projectField
-    allocationQuantityField.value = allocation.mode === 'original' ? '' : allocation.quantityField
-    allocationRounding.value = allocation.mode !== 'original' && allocation.quantityRounding === 'legacy-1dp' ? 'legacy-1dp' : 'exact'
-    appType.value = ''; formUuid.value = ''; rowsText.value = ''; allocationProjectsText.value = ''
-    ruleImportNotice.value = '仅本地规则，目标和数据待填写；未保存到服务器，未发布或授权。'
-  } catch (error) { errorCode.value = error instanceof YidaRuleTemplateError ? error.code : 'YIDA_RULE_TEMPLATE_INPUT' }
-}
-// Only the non-default rounding is sent, and only with the decimal mode: an exact split stays byte-identical to today.
-function roundingSetting(): { quantityRounding?: 'legacy-1dp' } { return allocationMode.value === 'equal_decimal_exact' && allocationRounding.value === 'legacy-1dp' ? { quantityRounding: 'legacy-1dp' } : {} }
-function allocationSettings(): { mode: Exclude<AllocationMode, 'original'>; projects: string[]; projectField: string; quantityField: string; quantityRounding?: 'legacy-1dp' } { return { mode: allocationMode.value as Exclude<AllocationMode, 'original'>, projects: allocationProjectsText.value.split(/\r?\n/), projectField: allocationProjectField.value, quantityField: allocationQuantityField.value, ...roundingSetting() } }
-function capturePersistentInput(config: YidaStaticConfig): void {
+function capture(config: YidaProtocolConfig): void {
   const current = plan.value
-  // R-71 ⑦.3: a clean v2 or v3 create preview. Initialization still takes v2 only (its panel says why);
-  // a v3 draft can go only to the owner send path of an already initialized target.
-  if ((config.version !== 2 && config.version !== 3) || config.intent !== 'create' || !current || current.evidence.invalid !== 0
-    || current.evidence.duplicateKeyCount !== 0 || current.rows.length === 0
+  // R-71 ⑦.3: only a clean v2 create preview may become the initialization draft.
+  if (!current || current.evidence.invalid !== 0 || current.evidence.duplicateKeyCount !== 0 || current.rows.length === 0
     || current.rows.some(row => row.status !== 'planned_create') || (allocationPreview.value?.issues.length ?? 0) !== 0) return
-  // No transport or storage here. The server recompiles and returns its own
-  // immutable member identities; never zip these browser rows with rowKey.
   persistentInput.value = JSON.parse(JSON.stringify({ config, rowsText: rowsText.value,
     allocation: allocationMode.value === 'original' ? { mode: 'original' } : allocationSettings() })) as YidaOwnerDraftInput
 }
 function runPreview(): void {
-  clearResults()
-  let config: YidaStaticConfig
-  try { config = currentConfig() } catch { errorCode.value = 'YIDA_STATIC_CONFIG_INVALID'; return }
-  if (allocationMode.value !== 'original') {
-    try { const preview = buildYidaProjectAllocationPreview({ config, rowsText: rowsText.value, allocation: allocationSettings() }); allocationPreview.value = preview; plan.value = preview.plan; capturePersistentInput(config) } catch (error) { errorCode.value = error instanceof YidaAllocationError ? error.code : 'YIDA_ALLOCATION_INPUT_INVALID' }
-    return
+  clearPreview()
+  const built = buildResult.value
+  if (!built.ok) { previewError.value = '字段映射还没完成（见第 2 步）。'; return }
+  if (rowsText.value.trim().length === 0) loadExample()
+  const checked = validateYidaStaticConfig(built.config)
+  if (!checked.valid) { previewError.value = `映射没有通过合同校验：${checked.issues.map(issue => issue.code).join('、')}`; return }
+  const config = checked.normalized as YidaProtocolConfig
+  try {
+    if (allocationMode.value !== 'original') {
+      const preview = buildYidaProjectAllocationPreview({ config, rowsText: rowsText.value, allocation: allocationSettings() })
+      allocationPreview.value = preview; plan.value = preview.plan
+    } else {
+      plan.value = buildYidaStaticPlan({ config, rows: parseYidaStaticRows(rowsText.value, config) })
+    }
+    capture(config)
+  } catch (error) {
+    previewError.value = error instanceof YidaStaticPlanError || error instanceof YidaAllocationError ? `预演数据没有通过：${error.code}` : '预演数据没有通过：请检查 rows JSON。'
   }
-  const checked = validateYidaStaticConfig(config)
-  if (!checked.valid) { errorCode.value = 'YIDA_STATIC_CONFIG_INVALID'; configIssues.value = checked.issues; return }
-  try { plan.value = buildYidaStaticPlan({ config: checked.normalized, rows: parseYidaStaticRows(rowsText.value, checked.normalized) }); capturePersistentInput(checked.normalized) } catch (error) { errorCode.value = error instanceof YidaStaticPlanError ? error.code : 'YIDA_STATIC_INPUT_INVALID' }
 }
-function rowStatus(status: YidaStaticPlan['rows'][number]['status']): string { return status === 'planned_create' ? '计划创建' : status === 'planned_update' ? '计划更新' : '无效' }
-function displayNumber(value: number | null | undefined): string { return value === null || value === undefined ? '—' : String(value) }
-// Step guide and the L4 entry reason (issue #6687 items 1–3). Display only: they read state this panel
-// already holds plus what the opened initialization panel reports; capturePersistentInput stays the gate.
-type InitializationProgress = { statusRead: boolean; tested: boolean; initialized: boolean; connectionTestEnabled: boolean }
-const initializationProgress = ref<InitializationProgress>({ statusRead: false, tested: false, initialized: false, connectionTestEnabled: false })
-const stepLabels = ['选合同（v2）', '填样例或规则', '只在本地预演', '生成并存档规则草稿 JSON', '打开本地初始化', '手动 GET 本地初始化状态', '测试连接', '本地初始化'] as const
-const stepGuide = computed(() => {
-  const open = initializationOpen.value && persistentInput.value !== null
-  const progress = open ? initializationProgress.value : { statusRead: false, tested: false, initialized: false, connectionTestEnabled: false }
-  const done = [
-    previewMode.value === 'protocol',
-    rowsText.value.trim().length > 0 && fieldMap.some((entry) => entry.source.length > 0 && entry.target.length > 0),
-    persistentInput.value !== null,
-    ruleExportText.value.length > 0,
-    open,
-    progress.statusRead,
-    progress.tested || progress.initialized,
-    progress.initialized,
-  ]
-  // Before opening: the first missing of steps 1–4 (archive before step 5). Once open: the first missing of 6–8.
-  const current = progress.initialized ? -1 : open ? done.indexOf(false, 5) : done.slice(0, 5).indexOf(false)
-  // Step 7 waiting on the server test switch is shown as blocked (待开启), not as a step the operator can do now.
-  const blocked = current === 6 && progress.statusRead && !progress.connectionTestEnabled
-  return stepLabels.map((label, index) => ({ number: index + 1, label, state: done[index] ? 'done' : index === current ? (blocked ? 'blocked' : 'current') : 'todo' }))
-})
-const initializationBlockedReason = computed(() => {
-  if (persistentInput.value) return ownerSendLocked.value ? '单行确认请求进行中，完成后才能打开。' : ''
-  if (previewMode.value === 'mapping') return '预演合同须选「表单字段目录与协议 v2（仅本地）」或「字段目录与派生映射 v3（仅本地）」；字段映射 v1 不支持本地初始化。'
-  if (intent.value !== 'create') return '意图须为「计划创建」；计划更新不能本地初始化。'
-  // An allocation rejection leaves no plan at all, so it is checked before the not-run case.
-  if ((allocationPreview.value?.issues.length ?? 0) !== 0) return '项目数量分配有拒因（见分配分析）；须先消除。'
+const previewBlockedReason = computed(() => {
   const current = plan.value
-  // A failed rule-draft export/import also leaves an error code with no plan: name that action, not the preview.
-  if (!current && errorCode.value.startsWith('YIDA_RULE_TEMPLATE_')) return '规则草稿 JSON 的生成或导入没有通过（见上方错误代码），本地预演尚未运行；修正后再点「只在本地预演」。'
-  if (!current) return errorCode.value ? '本地预演没有通过（见上方错误代码）；修正后再点「只在本地预演」。' : '尚未运行本地预演：请先点「只在本地预演」。'
-  // The planner also marks every duplicate-key row invalid, so duplicates are named first.
-  const { invalid, duplicateKeyCount } = current.evidence
-  if (duplicateKeyCount !== 0) return `有 ${duplicateKeyCount} 行本地业务键重复${invalid > duplicateKeyCount ? `，另有 ${invalid - duplicateKeyCount} 行因其它原因无效` : ''}；须 0 行重复、0 行无效。`
-  if (invalid !== 0) return `有 ${invalid} 行无效；须 0 行无效、每行都是「计划创建」。`
-  if (current.rows.length === 0) return '预演结果没有任何行。'
-  return '每一行都须是「计划创建」。'
+  if (!current || persistentInput.value) return ''
+  if ((allocationPreview.value?.issues.length ?? 0) !== 0) return '项目数量分配有拒因。'
+  if (current.evidence.duplicateKeyCount !== 0) return `有 ${current.evidence.duplicateKeyCount} 行本地业务键重复。`
+  if (current.evidence.invalid !== 0) return `有 ${current.evidence.invalid} 行无效（展开「逐行结果」查看原因）。`
+  return '预演结果没有可创建的行。'
 })
+
+// ── 保存启用 (initialization; the rule draft is archived automatically) ───────────────────────────────
+const ruleArchiveText = ref(''), archivedName = ref('')
+const saveBlockedReason = computed(() => {
+  if (!state.value || uncertain.value) return '服务器状态还没确认。'
+  if (state.value.status !== 'ready') return ''
+  if (!appType.value.trim() || !formUuid.value.trim() || !organizationId.value) return '第 1 步的表单信息没有填完。'
+  if (!(['appKey', 'appSecret', 'systemToken', 'userId'] as const).every(field => material[field].trim().length > 0)) return '第 1 步的四项凭据没有填完。'
+  if (blockedFields.value.length > 0) return '有凭据含不可发送的字符。'
+  if (shownOutcome.value !== 'ok' && !(testedPairMismatch.value && overrideTested.value)) return '第 1 步的测试连接还没有通过。'
+  if (!persistentInput.value) return '第 3 步的预演还没有通过。'
+  if (!reviewRef.value) return '请填写人工审核编号。'
+  if (!acknowledged.value) return '请勾选确认。'
+  return ''
+})
+const maySave = computed(() => !busy.value && !invalidated.value && !uncertain.value && state.value?.status === 'ready'
+  && !!commandId.value && saveBlockedReason.value === '' && (!testedPairMismatch.value || overrideTested.value))
+function archiveRuleDraft(input: YidaOwnerDraftInput): void {
+  // 「规则草稿在保存时自动存档」: the rules only (no target, rows or credential), downloaded once.
+  try {
+    const { target: _target, ...rules } = input.config as YidaProtocolConfig
+    const chosen = input.allocation as { mode: AllocationMode; projectField?: string; quantityField?: string }
+    // The rule template keeps the allocation roles, never the project list.
+    const allocation = chosen.mode === 'original' ? { mode: 'original' as const }
+      : { mode: chosen.mode, projectField: chosen.projectField, quantityField: chosen.quantityField }
+    ruleArchiveText.value = exportYidaRuleTemplate({ rules, allocation })
+    const stamp = new Date().toISOString().slice(0, 10).replace(/-/gu, '')
+    const name = `yida-rule-draft-${formUuid.value.trim()}-${stamp}.json`
+    if (typeof URL.createObjectURL === 'function') {
+      const url = URL.createObjectURL(new Blob([ruleArchiveText.value], { type: 'application/json' }))
+      const anchor = document.createElement('a'); anchor.href = url; anchor.download = name; anchor.click()
+      URL.revokeObjectURL(url)
+    }
+    archivedName.value = name
+  } catch { archivedName.value = '' }
+}
+async function save(): Promise<void> {
+  if (!maySave.value || !persistentInput.value || !commandId.value) return
+  const active = generation
+  const draft = JSON.parse(JSON.stringify(persistentInput.value)) as YidaOwnerDraftInput
+  archiveRuleDraft(draft)
+  busy.value = true; uncertain.value = true; errorCode.value = ''; probeErrorCode.value = ''
+  try {
+    const pending = sessionClient().initialize({ commandId: commandId.value, material: { appKey: sendable('appKey'),
+      appSecret: sendable('appSecret'), systemToken: sendable('systemToken'), userId: material.userId }, draft,
+      attestation: { kind: 'owner-reviewed-target', reviewRef: reviewRef.value, organizationId: organizationId.value, executionIdentity: material.userId } })
+    // The request owns its detached strings; the inputs no longer hold them.
+    clearPrivate()
+    const result = await pending
+    if (active !== generation) return
+    state.value = result; uncertain.value = false
+  } catch (error) {
+    if (active === generation) {
+      errorCode.value = error instanceof YidaInitializationClientError ? error.code : 'YIDA_INITIALIZATION_UNAVAILABLE'
+      // Unknown outcome: never retried as a POST; the status is re-read until it is known.
+      retriesLeft.value = RETRY_DELAYS.length
+    }
+  } finally { if (active === generation) { clearPrivate(); busy.value = false } }
+  if (active === generation && uncertain.value) { const code = errorCode.value; await refresh(false); if (code && !errorCode.value && state.value?.status !== 'initialized') errorCode.value = code }
+}
+
+// ── step guide (display only) ───────────────────────────────────────────────────────────────────────
+const stepGuide = computed(() => {
+  const initialized = state.value?.status === 'initialized'
+  const tested = shownOutcome.value === 'ok' && (!formFieldsReadOn.value || (formRead.value?.outcome === 'ok' && !fieldsStale.value))
+  const done = [initialized || tested, initialized || buildResult.value.ok, initialized || persistentInput.value !== null, initialized]
+  const current = done.indexOf(false)
+  return ['表单信息与测试连接', '字段映射', '预演', '保存启用'].map((label, index) => ({ number: index + 1, label,
+    state: done[index] ? 'done' : index === current ? 'current' : 'todo' }))
+})
+
+onMounted(() => {
+  // Capture a real session now, so a principal change clears typed secrets even before the first read.
+  try { sessionClient() } catch (error) { invalidated.value = true; errorCode.value = error instanceof YidaInitializationClientError ? error.code : 'YIDA_INITIALIZATION_UNAVAILABLE'; return }
+  retriesLeft.value = RETRY_DELAYS.length
+  void refresh(false)
+})
+onBeforeUnmount(() => { generation += 1; clearRetry(); client?.dispose(); client = null; clearPrivate(); state.value = null; commandId.value = null })
 </script>
 
 <style scoped>
-.sp-yida-preview { display: grid; gap: var(--ms-space-3); min-width: 0; padding: var(--ms-space-4); border: 1px solid var(--ms-border-light); border-radius: 8px; background: var(--ms-bg-page); }
-.sp-yida-preview h3, .sp-yida-preview h4, .sp-yida-preview p { margin: 0; }
-.sp-yida-preview__editor { display: grid; gap: var(--ms-space-3); margin: 0; padding: 0; border: 0; min-width: 0; }
-.sp-yida-preview__owner-entry { display: grid; gap: var(--ms-space-3); }
-.sp-yida-preview__steps { display: flex; flex-wrap: wrap; gap: var(--ms-space-2); margin: 0; padding: 0; list-style: none; }
-.sp-yida-preview__steps li { padding: 2px 8px; border: 1px solid var(--ms-border-light); border-radius: 6px; color: var(--ms-text-3); }
-.sp-yida-preview__steps li[data-state="done"] { color: var(--ms-text-2); }
-.sp-yida-preview__steps li[data-state="current"] { color: var(--ms-text-1); border-color: var(--ms-color-primary); font-weight: 600; }
-.sp-yida-preview__steps li[data-state="blocked"] { color: var(--ms-text-1); border-color: var(--ms-color-warning); border-style: dashed; font-weight: 600; }
-.sp-yida-preview__examples, .sp-yida-preview__fields, .sp-yida-preview__map-row, .sp-yida-preview__allocation-fields { display: flex; flex-wrap: wrap; gap: var(--ms-space-3); }
-.sp-yida-preview label, .sp-yida-preview__mapping, .sp-yida-preview__catalog, .sp-yida-preview__allocation, .sp-yida-preview__rule-template { display: grid; gap: var(--ms-space-2); }
-.sp-yida-preview input, .sp-yida-preview select, .sp-yida-preview textarea, .sp-yida-preview button { font: inherit; }
-.sp-yida-preview input, .sp-yida-preview select, .sp-yida-preview textarea { padding: 6px; border: 1px solid var(--ms-border-light); border-radius: 6px; }
-.sp-yida-preview__rows-label textarea, .sp-yida-preview__allocation textarea, .sp-yida-preview__rule-template textarea { width: 100%; box-sizing: border-box; }
-.sp-yida-preview button { justify-self: start; padding: 6px 12px; border: 1px solid var(--ms-border-light); border-radius: 6px; background: var(--ms-bg-page); cursor: pointer; }
-.sp-yida-preview__error { color: var(--ms-danger, #b42318); }
-.sp-yida-preview__result, .sp-yida-preview__result li, .sp-yida-preview__allocation-result { min-width: 0; overflow-wrap: anywhere; }
-.sp-yida-preview__result pre { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.sp-yida-setup { display: grid; gap: var(--ms-space-3); min-width: 0; padding: var(--ms-space-4); border: 1px solid var(--ms-border-light); border-radius: 8px; background: var(--ms-bg-page); }
+.sp-yida-setup h3, .sp-yida-setup h4, .sp-yida-setup p { margin: 0; overflow-wrap: anywhere; }
+.sp-yida-setup__steps { display: flex; flex-wrap: wrap; gap: var(--ms-space-2); margin: 0; padding: 0; list-style: none; }
+.sp-yida-setup__steps li { padding: 2px 8px; border: 1px solid var(--ms-border-light); border-radius: 6px; color: var(--ms-text-3); }
+.sp-yida-setup__steps li[data-state="done"] { color: var(--ms-text-2); }
+.sp-yida-setup__steps li[data-state="current"] { color: var(--ms-text-1); border-color: var(--ms-color-primary); font-weight: 600; }
+.sp-yida-setup__step { display: grid; gap: var(--ms-space-3); min-width: 0; margin: 0; padding: var(--ms-space-3); border: 1px solid var(--ms-border-light); border-radius: 6px; }
+.sp-yida-setup__step legend { font-weight: 600; padding: 0 4px; }
+.sp-yida-setup__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--ms-space-3); }
+.sp-yida-setup__map-row { display: flex; flex-wrap: wrap; gap: var(--ms-space-3); align-items: end; }
+.sp-yida-setup label { display: grid; gap: var(--ms-space-2); min-width: 0; }
+.sp-yida-setup__wide, .sp-yida-setup textarea { width: 100%; box-sizing: border-box; }
+.sp-yida-setup input, .sp-yida-setup select, .sp-yida-setup textarea, .sp-yida-setup button { font: inherit; }
+.sp-yida-setup input, .sp-yida-setup select, .sp-yida-setup textarea { padding: 6px; border: 1px solid var(--ms-border-light); border-radius: 6px; }
+.sp-yida-setup button { justify-self: start; padding: 6px 12px; border: 1px solid var(--ms-border-light); border-radius: 6px; background: var(--ms-bg-page); cursor: pointer; }
+.sp-yida-setup__primary { border-color: var(--ms-color-primary); font-weight: 600; }
+.sp-yida-setup__req { color: var(--ms-danger); margin-left: 2px; }
+.sp-yida-setup__note { color: var(--ms-text-3); }
+.sp-yida-setup__error { color: var(--ms-danger); }
+.sp-yida-setup details { display: grid; gap: var(--ms-space-2); }
 </style>

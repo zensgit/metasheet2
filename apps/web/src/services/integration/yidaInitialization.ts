@@ -27,14 +27,31 @@ export interface YidaInitializationState {
   readonly connectionTestEnabled: boolean
   /** Y2: server's exact multi-target switch, same rule: shows the target picker / sheet source only. */
   readonly multiTargetEnabled: boolean
+  /** Server's exact form-field read switch (ADR addendum 2026-11-23), same rule: display only. */
+  readonly formFieldsReadEnabled: boolean
 }
 /** Owner-run token-only connection test before initialization (ADR adr-yida-connection-test-20261028). */
+export interface YidaConnectionTestForm {
+  readonly appType: string
+  readonly formUuid: string
+  readonly systemToken: string
+  readonly userId: string
+}
 export interface YidaConnectionTestRequest {
   readonly commandId: string
   readonly mode: 'candidate'
   readonly material: Readonly<{ appKey: string; appSecret: string }>
+  /** Only while the server reports formFieldsReadEnabled: read this form's component definitions once. */
+  readonly form?: YidaConnectionTestForm
 }
 export type YidaConnectionTestOutcome = 'ok' | 'upstream_rejected' | 'unreachable' | 'timeout'
+export type YidaFormReadOutcome = YidaConnectionTestOutcome | 'not_attempted'
+export interface YidaFormFieldDefinition {
+  readonly fieldId: string
+  readonly label: string
+  readonly componentName: string
+  readonly parentId: string | null
+}
 export interface YidaConnectionTestResult {
   readonly commandId: string
   readonly mode: 'candidate'
@@ -43,6 +60,8 @@ export interface YidaConnectionTestResult {
   readonly tokenRetained: false
   readonly externalWriteAttempted: false
   readonly canSend: false
+  /** Present exactly when the request named a form. */
+  readonly formRead?: Readonly<{ outcome: YidaFormReadOutcome; fields: readonly YidaFormFieldDefinition[] }>
 }
 
 const endpoint = '/api/integration/yida-owner-send/initialization'
@@ -107,39 +126,72 @@ function state(value: unknown, expectedCommand: string | null): YidaInitializati
   // The server sends connectionTestEnabled only while its switch is on (absent = off), so this
   // bundle also reads an older backend; the key set stays closed either way.
   const probeBit = !!value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, 'connectionTestEnabled')
-  // Y2: multiTargetEnabled follows the same absent-while-off rule.
-  const multiBit = !!value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, 'multiTargetEnabled')
-  const baseKeys = probeBit ? [...stateKeys, 'connectionTestEnabled'] : stateKeys
-  const row = object(value, multiBit ? [...baseKeys, 'multiTargetEnabled'] : baseKeys)
+  // Y2: multiTargetEnabled follows the same absent-while-off rule, and so does formFieldsReadEnabled.
+  const has = (key: string) => !!value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, key)
+  const multiBit = has('multiTargetEnabled'), formBit = has('formFieldsReadEnabled')
+  const keys = [...stateKeys, ...(probeBit ? ['connectionTestEnabled'] : []), ...(multiBit ? ['multiTargetEnabled'] : []),
+    ...(formBit ? ['formFieldsReadEnabled'] : [])]
+  const row = object(value, keys)
   const commandId = uuid(row.commandId)
   if (expectedCommand !== null && commandId !== expectedCommand) invalid()
   if (row.canSend !== false || row.tokenIssued !== false || row.externalWriteAttempted !== false || typeof row.sendEnabled !== 'boolean'
     || (row.status !== 'ready' && row.status !== 'initialized') || (row.status === 'ready') !== (row.draft === null)) invalid()
   if (probeBit && typeof row.connectionTestEnabled !== 'boolean') invalid()
   if (multiBit && typeof row.multiTargetEnabled !== 'boolean') invalid()
+  if (formBit && typeof row.formFieldsReadEnabled !== 'boolean') invalid()
   return Object.freeze({ commandId, status: row.status, draft: row.draft === null ? null : draft(row.draft),
     canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled: row.sendEnabled,
-    connectionTestEnabled: row.connectionTestEnabled === true, multiTargetEnabled: row.multiTargetEnabled === true })
+    connectionTestEnabled: row.connectionTestEnabled === true, multiTargetEnabled: row.multiTargetEnabled === true,
+    formFieldsReadEnabled: row.formFieldsReadEnabled === true })
 }
-function connectionTestResult(value: unknown, expectedCommand: string | null): YidaConnectionTestResult {
-  const row = object(value, ['commandId', 'mode', 'outcome', 'tokenIssued', 'tokenRetained', 'externalWriteAttempted', 'canSend'])
+const formReadOutcomes: readonly string[] = [...connectionTestOutcomes, 'not_attempted']
+const fieldIdPattern = /^[A-Za-z0-9_-]{1,128}$/u, componentPattern = /^[A-Za-z][A-Za-z0-9]{0,63}$/u
+function formRead(value: unknown, pairOutcome: unknown): NonNullable<YidaConnectionTestResult['formRead']> {
+  const row = object(value, ['outcome', 'fields'])
+  if (typeof row.outcome !== 'string' || !formReadOutcomes.includes(row.outcome) || !Array.isArray(row.fields)
+    || row.fields.length > 256 || (row.outcome !== 'ok' && row.fields.length !== 0)
+    || (pairOutcome !== 'ok') !== (row.outcome === 'not_attempted')) invalid()
+  const seen = new Set<string>()
+  const fields = row.fields.map((item) => {
+    const field = object(item, ['fieldId', 'label', 'componentName', 'parentId'])
+    if (typeof field.fieldId !== 'string' || !fieldIdPattern.test(field.fieldId) || seen.has(field.fieldId)
+      || typeof field.componentName !== 'string' || !componentPattern.test(field.componentName)
+      || typeof field.label !== 'string' || field.label.length > 256
+      || (field.parentId !== null && (typeof field.parentId !== 'string' || !fieldIdPattern.test(field.parentId)))) invalid()
+    seen.add(field.fieldId)
+    return Object.freeze({ fieldId: field.fieldId, label: field.label, componentName: field.componentName, parentId: field.parentId as string | null })
+  })
+  return Object.freeze({ outcome: row.outcome as YidaFormReadOutcome, fields: Object.freeze(fields) })
+}
+function connectionTestResult(value: unknown, expectedCommand: string | null, formRequested = false): YidaConnectionTestResult {
+  const row = object(value, ['commandId', 'mode', 'outcome', 'tokenIssued', 'tokenRetained', 'externalWriteAttempted', 'canSend',
+    ...(formRequested ? ['formRead'] : [])])
   const commandId = uuid(row.commandId)
   if (expectedCommand === null || commandId !== expectedCommand || row.mode !== 'candidate') invalid()
   if (typeof row.outcome !== 'string' || !connectionTestOutcomes.includes(row.outcome)) invalid()
   if (row.tokenIssued !== (row.outcome === 'ok')) invalid()
   if (row.tokenRetained !== false || row.externalWriteAttempted !== false || row.canSend !== false) invalid()
   return Object.freeze({ commandId, mode: 'candidate', outcome: row.outcome as YidaConnectionTestOutcome, tokenIssued: row.outcome === 'ok',
-    tokenRetained: false, externalWriteAttempted: false, canSend: false })
+    tokenRetained: false, externalWriteAttempted: false, canSend: false, ...(formRequested ? { formRead: formRead(row.formRead, row.outcome) } : {}) })
 }
 function connectionTestInput(value: unknown): YidaConnectionTestRequest {
   try {
-    const row = object(value, ['commandId', 'mode', 'material'])
+    const withForm = !!value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, 'form')
+    const row = object(value, withForm ? ['commandId', 'mode', 'material', 'form'] : ['commandId', 'mode', 'material'])
     const material = object(row.material, ['appKey', 'appSecret'])
     if (row.mode !== 'candidate') invalid()
     for (const key of ['appKey', 'appSecret']) credential(material[key], 4096)
+    let form: YidaConnectionTestForm | undefined
+    if (withForm) {
+      const target = object(row.form, ['appType', 'formUuid', 'systemToken', 'userId'])
+      if (typeof target.appType !== 'string' || !fieldIdPattern.test(target.appType)
+        || typeof target.formUuid !== 'string' || !fieldIdPattern.test(target.formUuid)) invalid()
+      credential(target.systemToken, 4096)
+      form = { appType: target.appType, formUuid: target.formUuid, systemToken: target.systemToken as string, userId: canonical(target.userId) }
+    }
     // Detach, never trim or normalize: the server tests exactly these bytes.
     return JSON.parse(JSON.stringify({ commandId: uuid(row.commandId), mode: 'candidate',
-      material: { appKey: material.appKey, appSecret: material.appSecret } })) as YidaConnectionTestRequest
+      material: { appKey: material.appKey, appSecret: material.appSecret }, ...(form ? { form } : {}) })) as YidaConnectionTestRequest
   } catch { throw new YidaInitializationClientError('YIDA_INITIALIZATION_INPUT_INVALID') }
 }
 function input(value: unknown): YidaInitializationInput {
@@ -195,7 +247,7 @@ export function createYidaInitializationClient(options: { onInvalidated?: (code?
   window.addEventListener('storage', onStorage); window.addEventListener('focus', checkSession)
   const assertCurrentSession = () => { checkSession(); if (disposed) throw new YidaInitializationClientError('YIDA_INITIALIZATION_SESSION_CHANGED') }
   async function request(method: 'GET' | 'POST', expectedCommand: string | null, body?: YidaInitializationInput | YidaConnectionTestRequest,
-    signal?: AbortSignal, probe = false): Promise<YidaInitializationState | YidaConnectionTestResult> {
+    signal?: AbortSignal, probe = false, formRequested = false): Promise<YidaInitializationState | YidaConnectionTestResult> {
     assertCurrentSession()
     if (pending) throw new YidaInitializationClientError('YIDA_INITIALIZATION_STATE_UNCONFIRMED')
     pending = true
@@ -246,7 +298,7 @@ export function createYidaInitializationClient(options: { onInvalidated?: (code?
       }
       if (probe) {
         if (response.status !== 200) invalid()
-        const tested = connectionTestResult(envelope.data, expectedCommand)
+        const tested = connectionTestResult(envelope.data, expectedCommand, formRequested)
         current()
         return tested
       }
@@ -280,7 +332,7 @@ export function createYidaInitializationClient(options: { onInvalidated?: (code?
       // Same observed-ready admission as initialize(), written separately so each guard is its own anchor.
       if (commandId === null || !ready || value.commandId !== commandId) throw new YidaInitializationClientError('YIDA_INITIALIZATION_STATE_UNCONFIRMED')
       const body = connectionTestInput(value)
-      return await request('POST', commandId, body, signal, true) as YidaConnectionTestResult
+      return await request('POST', commandId, body, signal, true, body.form !== undefined) as YidaConnectionTestResult
     },
   }
 }

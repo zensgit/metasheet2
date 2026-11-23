@@ -2073,7 +2073,7 @@ exec npx vitest run \
   StockPreparationUnconfirmableHold \
   StockPreparationUnitConfirmView \
   StockPreparationWorkspace \
-  StockPreparationYidaInitialization \
+  yidaInitializationClient \
   StockPreparationYidaOwnerSend \
   StockPreparationYidaPreview \
   stockPrepPermissionMatrix \
