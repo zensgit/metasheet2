@@ -2001,7 +2001,7 @@ describe('attendance UUID route validation', () => {
       buildRequestCalculationPayloadFromRequestRow: buildPayload,
     })
 
-    db.query.mockImplementation(async (sql: string) => {
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
       if (sql === "SELECT org_id FROM attendance_requests WHERE id=$1 AND request_type='business_trip'") return []
       if (sql.includes('FROM user_roles') && sql.includes('role_id = $2')) return [{ ok: 1 }]
       if (sql.includes('SELECT role_id FROM user_roles')) return []
@@ -2020,6 +2020,10 @@ describe('attendance UUID route validation', () => {
           request_type: 'time_correction',
           metadata: {},
         })]
+      }
+      if (sql === 'SELECT requester_snapshot, org_id FROM approval_instances WHERE id = $1') {
+        expect(params).toEqual([approvalInstanceId])
+        return [{ requester_snapshot: { id: 'worker-1', name: 'Frozen requester' }, org_id: 'default' }]
       }
       if (sql.includes('FROM attendance_approval_flows')) return []
       if (sql.includes('pg_advisory_xact_lock')) return []
@@ -2045,6 +2049,8 @@ describe('attendance UUID route validation', () => {
     })
     expect(buildPayload).toHaveBeenCalledTimes(1)
     expect(appendEdit).toHaveBeenCalledTimes(1)
+    expect(db.query.mock.calls.filter(([sql]) => sql === 'SELECT requester_snapshot, org_id FROM approval_instances WHERE id = $1'))
+      .toEqual([['SELECT requester_snapshot, org_id FROM approval_instances WHERE id = $1', [approvalInstanceId]]])
     const statements = db.query.mock.calls.map(([sql]) => String(sql))
     expect(statements.some(sql => sql.includes('INSERT INTO approval_instances'))).toBe(false)
     expect(statements.some(sql => sql.includes('UPDATE attendance_requests'))).toBe(false)
