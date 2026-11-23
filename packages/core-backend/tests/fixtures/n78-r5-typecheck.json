@@ -5,7 +5,7 @@
     "incremental": false
   },
   "files": [
-    "../integration/notification-authorization-lock-capacity.db.test.ts",
+    "../integration/authorization-operation-notification-lock-capacity.db.test.ts",
     "../utils/notification-lock-evidence.ts",
     "../utils/n78-routing-rollback-worker.cts",
     "../unit/notification-lock-evidence.test.ts"

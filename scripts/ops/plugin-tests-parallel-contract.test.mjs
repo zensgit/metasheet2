@@ -276,8 +276,6 @@ function assertParallelWorkflow(doc) {
         assert.ok(step.run.includes(goldenParityAddition + capabilityResolveAddition + capabilitiesAddition), 'Keep the capability resolver suite between the directory sync characterization suite and the directory integration capabilities suite')
         // Exactly once, at any position in this step: no neighbour is asserted, so a later addition
         // next to it does not have to change this check.
-        const notificationLockCapacityAddition = '  tests/integration/notification-authorization-lock-capacity.db.test.ts \\\n'
-        assert.equal(step.run.split(notificationLockCapacityAddition).length - 1, 1, 'Notification lock/capacity DB suite must run exactly once')
         const capabilitiesPatchAddition = '  tests/integration/directory-integration-capabilities-patch.db.test.ts \\\n'
         assert.equal(step.run.split(capabilitiesPatchAddition).length - 1, 1, 'Directory integration capability PATCH DB suite must run exactly once')
         const providerEvidenceAddition = '  tests/integration/directory-deprovision-provider-evidence.db.test.ts \\\n'
@@ -337,7 +335,6 @@ function assertParallelWorkflow(doc) {
         step.run = step.run.replace(feishuSmokeAddition, '')
         step.run = step.run.replace(capabilitiesAddition, '')
         step.run = step.run.replace(capabilityResolveAddition, '')
-        step.run = step.run.replace(notificationLockCapacityAddition, '')
         step.run = step.run.replace(capabilitiesPatchAddition, '')
         step.run = step.run.replace(providerSchemaAddition, '')
         step.run = step.run.replace(providerEvidenceAddition, '')
@@ -855,20 +852,32 @@ test('required-gate executable propagates failure and never prints its input env
   }
 })
 
-test('notification lock/capacity suite has whole-file required ownership and exclusion', () => {
-  const file = 'tests/integration/notification-authorization-lock-capacity.db.test.ts'
+test('notification lock/capacity suite is owned by the fenced authorization-operation lane, not plugin-tests', async () => {
+  // Its cases need the real authorization fence to admit an operation, which needs the fenced database
+  // profile. The plugin-tests real-DB databases do not have it, so no step there may carry the suite.
+  const { baseline, notificationLockCapacity } = await import('./permission-authorization-operation-realdb.mjs')
+  const file = `tests/integration/${notificationLockCapacity}`
+  const retired = 'notification-authorization-lock-capacity.db.test.ts'
   const config = readFileSync(new URL('../../packages/core-backend/vitest.config.ts', import.meta.url), 'utf8')
-  requireExecutableRealDbStep(workflow, 'approval-real-db-integration')
-  assert.equal(realDbStepWholeFileArgs(workflow, 'approval-real-db-integration').filter(arg => arg === file).length, 1)
+  assert.equal(baseline.filter(item => item.file === notificationLockCapacity).length, 1)
   assert.ok(isQuotedInTestExclude(config, file))
-  assert.equal(parseYamlDocument(workflow).jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration').env.EXPECT_DB, '1')
-  for (const mode of ['remove', 'duplicate', 'wrong-lane']) {
+  assert.ok(!config.includes(retired))
+  assert.ok(!workflow.includes(notificationLockCapacity))
+  assert.ok(!workflow.includes(retired))
+  assertParallelWorkflow(parseYamlDocument(workflow))
+  // Negative controls: carrying it in either required real-DB step is refused.
+  const anchor = '  tests/integration/directory-integration-capabilities-patch.db.test.ts \\\n'
+  for (const [job, id] of [['approval-db', 'approval-real-db-integration'], ['multitable-db', 'multitable-real-db-integration']]) {
     const doc = JSON.parse(JSON.stringify(parseYamlDocument(workflow)))
-    const step = doc.jobs['approval-db'].steps.find(step => step.id === 'approval-real-db-integration')
-    const line = step.run.split('\n').find(line => line.includes(file)) + '\n'
-    assert.ok(line.includes(file))
-    step.run = step.run.replace(line, mode === 'duplicate' ? line + line : '')
-    if (mode === 'wrong-lane') doc.jobs['multitable-db'].steps.find(step => step.id === 'multitable-real-db-integration').run += line
-    assert.throws(() => assertParallelWorkflow(doc))
+    const step = doc.jobs[job].steps.find(step => step.id === id)
+    const line = `  ${file} \\\n`
+    if (job === 'approval-db') {
+      assert.equal(step.run.split(anchor).length - 1, 1)
+      step.run = step.run.replace(anchor, anchor + line)
+    } else {
+      step.run += line
+    }
+    assert.ok(step.run.includes(line))
+    assert.throws(() => assertParallelWorkflow(doc), new RegExp(`${job} must preserve every original step`), `${job} must not carry ${file}`)
   }
 })

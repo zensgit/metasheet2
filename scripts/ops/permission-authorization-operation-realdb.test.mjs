@@ -70,3 +70,21 @@ test('unit reports are verified against the unit directory',()=>{
   validateReport(r,[{...spec,directory:'unit'}])
   assert.throws(()=>validateReport(r,[spec]))
 })
+
+test('the notification lock-capacity suite is a fenced baseline member with every case required', async () => {
+  const { baseline, notificationLockCapacity } = await import('./permission-authorization-operation-realdb.mjs')
+  const { readFileSync } = await import('node:fs')
+  const entries = baseline.filter(item => item.file === notificationLockCapacity)
+  assert.equal(entries.length, 1)
+  const [entry] = entries
+  assert.deepEqual(entry.skipped, [])
+  const source = readFileSync(new URL(`../../packages/core-backend/tests/integration/${notificationLockCapacity}`, import.meta.url), 'utf8')
+  const titles = [...source.matchAll(/\bit\('([^']+)'/g)].map(match => match[1])
+  assert.equal(titles.length, 4)
+  assert.equal(entry.min, titles.length)
+  assert.deepEqual([...entry.required].sort(), [...titles].sort())
+  // The config that runs the baseline must collect this name, or a file argument would match nothing.
+  const config = readFileSync(new URL('../../packages/core-backend/vitest.authorization-operation-realdb.config.ts', import.meta.url), 'utf8')
+  assert.match(notificationLockCapacity, /^authorization-operation-.+\.db\.test\.ts$/)
+  assert.ok(config.includes("'tests/integration/authorization-operation-*.db.test.ts'"))
+})

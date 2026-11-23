@@ -2754,7 +2754,6 @@ jobs:
             tests/integration/directory-departure-vouching.db.test.ts \
             tests/integration/feishu-mock-harness-smoke.db.test.ts \
             tests/integration/directory-integration-capabilities-patch.db.test.ts \
-            tests/integration/notification-authorization-lock-capacity.db.test.ts \
             tests/integration/directory-integration-lifecycle-history-readable.db.test.ts \
             tests/integration/notification-endpoints-preferences.db.test.ts \
             tests/integration/session-token-invite-lifecycle.db.test.ts \
