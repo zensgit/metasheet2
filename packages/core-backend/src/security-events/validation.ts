@@ -35,12 +35,15 @@ export function uuid(value: unknown): value is string {
 
 export function resolveEventScope(type: EventType, step: string, authority: ScopeAuthority): EventScope {
   const rule = eventRule(type)
-  if (!rule || authority.kind !== rule.authority) return unavailable()
-  let org = authority.orgId
-  if (authority.kind === 'deprovision' && type !== 'deprovision.strict_grant_revoked') {
+  if (!rule || !authority || typeof authority !== 'object') return unavailable()
+  // Each authority field is read exactly once into a frozen copy; the scope is resolved from that copy only.
+  const copy: ScopeAuthority = Object.freeze({ kind: authority.kind, orgId: authority.orgId, parentOrgId: authority.parentOrgId })
+  if (copy.kind !== rule.authority) return unavailable()
+  let org = copy.orgId
+  if (copy.kind === 'deprovision' && type !== 'deprovision.strict_grant_revoked') {
     // A NULL child inherits its verified parent; disagreement is a gap.
-    if (!internalId(authority.parentOrgId) || (org !== null && org !== authority.parentOrgId)) return unavailable()
-    org = authority.parentOrgId
+    if (!internalId(copy.parentOrgId) || (org !== null && org !== copy.parentOrgId)) return unavailable()
+    org = copy.parentOrgId
   }
   const scope: ScopeKind = org === null ? 'system' : 'organization'
   if (!rule.scopes.includes(scope) || (org !== null && !internalId(org))) return unavailable()
@@ -123,9 +126,11 @@ const CANDIDATE_KEYS = ['id', 'producer', 'event_type', 'source_kind', 'source_i
 const TARGETS = ['integration', 'user', 'membership', 'grant', 'operation', 'run', 'component']
 
 export function validateEvent(input: EventCandidate, authority: ScopeAuthority): ValidatedEvent {
-  if (!input || Object.keys(input).some(key => !CANDIDATE_KEYS.includes(key))) return unavailable()
-  // Every caller value is read once; the checked values are exactly the returned values.
-  const candidate: EventCandidate = { ...input }
+  // One plain snapshot of the own enumerable string keys and values, each read exactly once.
+  // Keys and values are checked on this snapshot only, and only it is returned and stored.
+  const snapshot: Record<string, unknown> | null = input && typeof input === 'object' ? Object.fromEntries(Object.entries(input)) : null
+  if (!snapshot || Object.keys(snapshot).length !== CANDIDATE_KEYS.length || CANDIDATE_KEYS.some(key => !Object.hasOwn(snapshot, key))) return unavailable()
+  const candidate = Object.fromEntries(CANDIDATE_KEYS.map(key => [key, snapshot[key]])) as EventCandidate
   const rule = eventRule(candidate.event_type)
   const autoGrant = candidate.event_type === 'admin.login_grant_changed' && candidate.source_step === 'auto_grant'
   if (!rule || candidate.producer !== (autoGrant ? 'directory' : rule.producer)

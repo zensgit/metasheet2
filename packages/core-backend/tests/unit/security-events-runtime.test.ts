@@ -368,3 +368,18 @@ it('T04 a retried negative zero count is the same fact as a stored 0, not an ide
   }) as EventSql['query'] }
   expect(await repo.appendW1({ ...tx, sql: w1Sql }, { ...retried, id: randomUUID() }, authority)).toBe(input.id)
 })
+
+it('T02 the INSERT column list comes from the single validated snapshot, not a later key enumeration', async () => {
+  const input: EventCandidate = { id: randomUUID(), producer: 'auth', event_type: 'auth.password_changed', source_kind: 'auth_operation', source_id: randomUUID(), source_step: 'password_changed', actor_kind: 'system', actor_user_id: null, subject_user_id: null, target_kind: null, target_id: null, reason_code: null, record_origin: 'live', occurred_at: '2026-11-22T00:00:00Z', facts: {} }
+  const target: Record<string, unknown> = { ...input, injected_column: 'later' }
+  let enumerations = 0
+  const proxy = new Proxy(target, { ownKeys: () => (++enumerations === 1 ? Reflect.ownKeys(target).filter(key => key !== 'injected_column') : Reflect.ownKeys(target)) })
+  const { client, trace } = mockClient()
+  client.query = vi.fn(async <R>(text: string, values?: unknown[]) => { trace.push({ text, values }); return { rows: (text.includes('INSERT') ? [{ id: input.id }] : []) as R[] } }) as EventSql['query']
+  const repo = new SecurityEventRepository(new EventConnections({ connectionString: 'postgres://fixture/fixture' }, () => client), new W1Capacity(20))
+  expect(await repo.appendCommitted(proxy as unknown as EventCandidate, { kind: 'platform', orgId: null })).toEqual({ recorded: true, eventId: input.id })
+  const insert = trace.find(item => item.text.includes('INSERT INTO public.security_events'))!
+  expect(insert.text).not.toContain('injected_column')
+  expect(insert.values).not.toContain('later')
+  expect(enumerations).toBe(1)
+})

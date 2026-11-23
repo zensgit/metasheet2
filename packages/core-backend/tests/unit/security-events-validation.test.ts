@@ -158,7 +158,20 @@ it('T03 rejects leading-zero length prefixes for an otherwise identical source',
   expect(validateEvent({ ...summary, source_id: '1:B10:2026-11-22' }, authority).source_id).toBe('1:B10:2026-11-22')
   expect(() => validateEvent({ ...summary, source_id: '01:B010:2026-11-22' }, authority)).toThrow('E1_WRITE_UNAVAILABLE')
 })
-describe('E1-A one snapshot of each event', () => {
+describe('E1-A one snapshot of each event and its authority', () => {
+  it('T02 the key set is enumerated once: a key that appears on a later enumeration is neither checked nor returned', () => {
+    const [input, authority] = valid('auth.password_changed', null)
+    const target: Record<string, unknown> = { ...input, injected_column: 'later' }
+    let enumerations = 0
+    const proxy = new Proxy(target, { ownKeys: () => (++enumerations === 1 ? Reflect.ownKeys(target).filter(key => key !== 'injected_column') : Reflect.ownKeys(target)) })
+    const row = validateEvent(proxy as unknown as EventCandidate, authority)
+    expect(enumerations).toBe(1)
+    expect(Object.keys(row)).not.toContain('injected_column')
+    expect(Object.keys(row).sort()).toEqual([...Object.keys(input), 'scope_kind', 'org_id', 'schema_version', 'outcome', 'severity'].sort())
+    expect(() => validateEvent({ ...input, injected_column: 'x' } as EventCandidate, authority)).toThrow('E1_WRITE_UNAVAILABLE')
+    const { facts: _facts, ...missing } = input
+    expect(() => validateEvent(missing as EventCandidate, authority)).toThrow('E1_WRITE_UNAVAILABLE')
+  })
   it('T03 each top-level value is read once and the returned value is the checked one', () => {
     const [input, authority] = valid('auth.password_changed', null)
     const reads: Record<string, number> = {}
@@ -173,5 +186,20 @@ describe('E1-A one snapshot of each event', () => {
     expect(row.actor_kind).toBe('system')
     expect(Object.values(reads).every(count => count === 1)).toBe(true)
     expect(Object.keys(reads).sort()).toEqual(Object.keys(input).sort())
+  })
+  it('T22 each authority field is read once: a parent organization that changes on a later read cannot move the event', () => {
+    const [input] = valid('deprovision.restored', 'org-A')
+    const reads = { kind: 0, orgId: 0, parentOrgId: 0 }
+    const authority = {
+      get kind() { reads.kind++; return 'deprovision' as const },
+      get orgId() { reads.orgId++; return 'org-A' },
+      get parentOrgId() { reads.parentOrgId++; return reads.parentOrgId === 1 ? 'org-A' : 'org-B' },
+    } as ScopeAuthority
+    const row = validateEvent(input, authority)
+    expect(row).toMatchObject({ scope_kind: 'organization', org_id: 'org-A' })
+    expect(reads).toEqual({ kind: 1, orgId: 1, parentOrgId: 1 })
+    const scope = resolveEventScope('deprovision.restored', 'restored', { kind: 'deprovision', orgId: null, get parentOrgId() { reads.parentOrgId++; return reads.parentOrgId === 2 ? 'org-A' : 'org-B' } } as ScopeAuthority)
+    expect(scope).toEqual({ scope_kind: 'organization', org_id: 'org-A' })
+    expect(() => validateEvent(input, null as unknown as ScopeAuthority)).toThrow('E1_WRITE_UNAVAILABLE')
   })
 })
