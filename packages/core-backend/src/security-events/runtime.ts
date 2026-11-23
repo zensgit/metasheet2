@@ -18,6 +18,14 @@ export class EventQueryUnavailable extends Error {
 export type EventClient = EventSql & { connect(): Promise<void>; end(): Promise<void>; on(event: 'error', handler: () => void): unknown }
 export type ClientFactory = (config: ClientConfig) => EventClient
 const clock = () => performance.now()
+/** Upper bound for awaiting the close of a successful run; it never extends past the deadline of that run. */
+const CLOSE_WAIT_MS = 100
+const settleWithin = async (settling: Promise<void>, ms: number) => {
+  if (!(ms >= 1)) return
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try { await Promise.race([settling, new Promise<void>(resolve => { timer = setTimeout(resolve, Math.floor(ms)) })]) }
+  finally { if (timer) clearTimeout(timer) }
+}
 
 /** Non-waiting pool with no idle clients: connecting/closing/uncertain clients retain their slot. */
 class IsolatedPool {
@@ -77,12 +85,17 @@ class IsolatedPool {
       left()
       return result
     })()
-    try { return await Promise.race([execution, timeout]) }
+    let succeeded = false
+    try { const result = await Promise.race([execution, timeout]); succeeded = true; return result }
     catch (error) { throw this.readOnly ? failure() : writeFailure(error) }
     finally {
       if (timer) clearTimeout(timer)
       // end() aborts an uncommitted transaction. A timed-out COMMIT remains unknown; no retry here.
-      void close()
+      const closing = close()
+      // Success returns after its own slot is released, so the next run in the same flow is admitted.
+      // The wait is bounded and never releases the slot itself: a hung or rejected close stays occupied.
+      // Timed-out and failed runs do not wait.
+      if (succeeded) await settleWithin(closing, Math.min(CLOSE_WAIT_MS, deadline - clock()))
     }
   }
 }

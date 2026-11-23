@@ -108,6 +108,64 @@ describe('E1-A isolated capacity and server-side budgets', () => {
   })
 })
 
+describe('E1-A a successful run releases its slot before returning; uncertain closes keep it', () => {
+  const later = () => new Promise<void>(resolve => setTimeout(resolve, 5))
+  it('T20 a second read and write in the same flow are admitted after the first returns', async () => {
+    const connections = new EventConnections({ connectionString: 'postgres://fixture/fixture' }, () => ({ ...mockClient().client, end: later }))
+    expect(await connections.readTransaction(performance.now(), async () => 'first')).toBe('first')
+    expect(connections.active.query).toBe(0)
+    expect(await connections.readTransaction(performance.now(), async () => 'second')).toBe('second')
+    expect(connections.active.query).toBe(0)
+    expect(await connections.writeTransaction('foreground', async () => 'write')).toBe('write')
+    expect(connections.active.write).toBe(0)
+  })
+  it('T42 a timed-out read rejects without waiting for close and keeps its slot until termination is confirmed', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    const hold = deferred(), closed = deferred(), rejected = vi.fn()
+    const connections = new EventConnections({ connectionString: 'postgres://fixture/fixture' }, () => ({ ...mockClient().client, end: () => closed.promise }))
+    const pending = connections.readTransaction(performance.now(), () => hold.promise).catch(rejected)
+    try {
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(rejected).toHaveBeenCalledWith(expect.objectContaining({ code: 'E1_QUERY_UNAVAILABLE' }))
+      expect(connections.active.query).toBe(1)
+      await expect(connections.readTransaction(performance.now(), async () => 1)).rejects.toMatchObject({ code: 'E1_QUERY_BUSY' })
+      closed.resolve(); await vi.advanceTimersByTimeAsync(0)
+      expect(connections.active.query).toBe(0)
+    } finally { hold.resolve(); closed.resolve(); await pending; vi.useRealTimers() }
+  })
+  it('T42 a rejected close quarantines the read slot permanently even after a successful read', async () => {
+    const connections = new EventConnections({ connectionString: 'postgres://fixture/fixture' }, () => ({ ...mockClient().client, end: () => Promise.reject(new Error('private close detail')) }))
+    expect(await connections.readTransaction(performance.now(), async () => 'done')).toBe('done')
+    await later(); await tick()
+    expect(connections.active.query).toBe(1)
+    await expect(connections.readTransaction(performance.now(), async () => 1)).rejects.toMatchObject({ code: 'E1_QUERY_BUSY', retryable: true })
+    expect(connections.active.query).toBe(1)
+  })
+  it('T43 a hung close bounds the wait within the run budget and keeps the slot occupied', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    const resolved = vi.fn()
+    const connections = new EventConnections({ connectionString: 'postgres://fixture/fixture' }, () => ({ ...mockClient().client, end: () => new Promise<void>(() => {}) }))
+    try {
+      const read = connections.readTransaction(performance.now(), async () => 'read').then(resolved)
+      await vi.advanceTimersByTimeAsync(99)
+      expect(resolved).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(resolved).toHaveBeenCalledWith('read')
+      await read
+      expect(connections.active.query).toBe(1)
+      await expect(connections.readTransaction(performance.now(), async () => 1)).rejects.toMatchObject({ code: 'E1_QUERY_BUSY' })
+      // A foreground write that used most of its 100ms budget waits only for what is left of it.
+      const started = performance.now()
+      const write = connections.writeTransaction('foreground', () => new Promise(resolve => setTimeout(resolve, 90))).then(resolved)
+      await vi.advanceTimersByTimeAsync(100)
+      await write
+      expect(performance.now() - started).toBeLessThanOrEqual(100)
+      expect(resolved).toHaveBeenCalledTimes(2)
+      expect(connections.active.write).toBe(1)
+    } finally { vi.useRealTimers() }
+  })
+})
+
 describe('E1-A W1 admission follows the outer transaction lifecycle', () => {
   it('T43 holds through append/savepoint boundaries, shares proof-user capacity and rejects only at E1 entry', async () => {
     const capacity = new W1Capacity(20)
