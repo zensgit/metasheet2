@@ -39,6 +39,12 @@ let statusUserName = ''
 let statusBodyRead = false
 let statusContinuationSettled = false
 let committedTargetByOperation: Record<string, string> | null = null
+let previewModeByUser: Record<string, 'ok' | 'last-admin' | 'version'> | null = null
+let previewHoldUserId: string | null = null
+let releaseHeldPreview: (() => void) | null = null
+let heldPreviewEntered = false
+let heldPreviewSettled = false
+let secondaryPreviewSettled = false
 let holdAccessCall: { userId: string; index: number } | null = null
 let releaseHeldAccess: (() => void) | null = null
 let heldAccessEntered = false
@@ -132,10 +138,46 @@ function installApi(): void {
       return jsonResponse({ ok: true, data: { items: users, total: users.length } })
     }
     if (pathname === '/api/admin/authorization-operations/preview' && method === 'POST') {
-      if (previewMode === 'missing') return jsonResponse({ ok: false, error: { message: 'missing' } }, 404)
-      if (previewMode === 'unavailable') return jsonResponse({ ok: false, error: { message: 'unavailable' } }, 503)
-      if (previewMode === 'last-admin') return jsonResponse({ ok: false, error: { code: 'LAST_PLATFORM_ADMIN' } }, 409)
-      return jsonResponse({ expectedVersion: 'member-version-1', impact: emptyImpact(Array.isArray(body?.admissionChanges) ? body.admissionChanges : []) })
+      const targetUserId = typeof body?.targetUserId === 'string' ? body.targetUserId : ''
+      const mode = previewModeByUser?.[targetUserId] ?? previewMode
+      const previewPayload = () => {
+        if (mode === 'missing') return { status: 404, body: { ok: false, error: { message: 'missing' } } }
+        if (mode === 'unavailable') return { status: 503, body: { ok: false, error: { message: 'unavailable' } } }
+        if (mode === 'last-admin') return { status: 409, body: { ok: false, error: { code: 'LAST_PLATFORM_ADMIN' } } }
+        if (mode === 'version') return { status: 409, body: { ok: false, error: { code: 'ROLE_MODIFIED', message: 'bravo version changed' } } }
+        return { status: 200, body: { expectedVersion: 'member-version-1', impact: emptyImpact(Array.isArray(body?.admissionChanges) ? body.admissionChanges : []) } }
+      }
+      if (previewHoldUserId && targetUserId === previewHoldUserId) {
+        heldPreviewEntered = true
+        await new Promise<void>((resolve) => {
+          releaseHeldPreview = resolve
+        })
+        const preview = previewPayload()
+        return {
+          ok: preview.status >= 200 && preview.status < 300,
+          status: preview.status,
+          json: async () => {
+            setTimeout(() => {
+              heldPreviewSettled = true
+            }, 0)
+            return preview.body
+          },
+        }
+      }
+      const preview = previewPayload()
+      if (previewModeByUser && targetUserId && targetUserId !== previewHoldUserId) {
+        return {
+          ok: preview.status >= 200 && preview.status < 300,
+          status: preview.status,
+          json: async () => {
+            setTimeout(() => {
+              secondaryPreviewSettled = true
+            }, 0)
+            return preview.body
+          },
+        }
+      }
+      return jsonResponse(preview.body, preview.status)
     }
     if (pathname === '/api/admin/authorization-operations' && method === 'POST') {
       if (commitMode === 'hold') {
@@ -413,6 +455,12 @@ describe('member page atomic authorization', () => {
     statusBodyRead = false
     statusContinuationSettled = false
     committedTargetByOperation = null
+    previewModeByUser = null
+    previewHoldUserId = null
+    releaseHeldPreview = null
+    heldPreviewEntered = false
+    heldPreviewSettled = false
+    secondaryPreviewSettled = false
     holdAccessCall = null
     releaseHeldAccess = null
     heldAccessEntered = false
@@ -857,16 +905,16 @@ describe('member page atomic authorization', () => {
     expect(accountStatusButton(root!).textContent?.trim()).toBe('停用账号')
   })
 
-  it('verifies the next member after the previous verification releases its latch', async () => {
-    const alphaOperationId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
-    const bravoOperationId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+  function admissionReads(userId: string): number {
+    return calls.filter((call) => call.method === 'GET' && call.url.includes(`/api/admin/users/${userId}/member-admission`)).length
+  }
+
+  function storeCommittedOperations(alphaOperationId: string, bravoOperationId: string): void {
     lookupMode = 'committed'
     committedTargetByOperation = {
       [alphaOperationId]: 'user-1',
       [bravoOperationId]: 'user-2',
     }
-    rolesByUser['user-2'] = ['finance_admin']
-    holdAccessCall = { userId: 'user-1', index: 1 }
     sessionStorage.setItem(PENDING_KEY, JSON.stringify({
       formatVersion: 1,
       entries: [
@@ -874,30 +922,112 @@ describe('member page atomic authorization', () => {
         { principalId: 'admin-actor', targetId: 'user-2', clientOperationId: bravoOperationId },
       ],
     }))
+  }
+
+  it('reads one access snapshot and one member admission when a stored committed operation is selected', async () => {
+    const alphaOperationId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const bravoOperationId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+    storeCommittedOperations(alphaOperationId, bravoOperationId)
+    ;({ app, root } = await mountView())
+    await openUser(root!, 'Alpha')
+    await waitFor(() => (
+      Boolean(root!.querySelector('[data-testid="admin-authorization-dialog"]'))
+      && Boolean(root!.querySelector('[data-testid="admin-authorization-read-again"]'))
+      && calls.some((call) => call.url.includes(alphaOperationId))
+    ))
+    await settleRendered()
+    expect(accessReadCounts['user-1']).toBe(1)
+    expect(admissionReads('user-1')).toBe(1)
+    expect(root!.querySelector('[data-testid="admin-authorization-read-again"]')).toBeTruthy()
+    expect(root!.textContent).not.toContain('角色已分配，准入未开')
+
+    await openUser(root!, 'Bravo')
+    await waitFor(() => (
+      root!.querySelector('[data-testid="selected-user-heading"]')?.textContent?.includes('Bravo') === true
+      && Boolean(root!.querySelector('[data-testid="admin-authorization-read-again"]'))
+      && calls.some((call) => call.url.includes(bravoOperationId))
+    ))
+    await settleRendered()
+    expect(root!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Bravo')
+    expect(accessReadCounts['user-2']).toBe(1)
+    expect(admissionReads('user-2')).toBe(1)
+    expect(root!.querySelector('[data-testid="admin-authorization-read-again"]')).toBeTruthy()
+    expect(root!.textContent).not.toContain('角色已分配，准入未开')
+  })
+
+  it('lets the current member re-read once the previous verification releases its latch', async () => {
+    const alphaOperationId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const bravoOperationId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+    storeCommittedOperations(alphaOperationId, bravoOperationId)
+    rolesByUser['user-2'] = ['finance_admin']
+    holdAccessCall = { userId: 'user-1', index: 1 }
     ;({ app, root } = await mountView())
     try {
       await openUser(root!, 'Alpha')
-      await waitFor(() => heldAccessEntered && Boolean(root!.querySelector('[data-testid="admin-authorization-dialog"]')))
+      await waitFor(() => Boolean(root!.querySelector('[data-testid="admin-authorization-read-again"]')))
+      ;(root!.querySelector('[data-testid="admin-authorization-read-again"]') as HTMLButtonElement).click()
+      await waitFor(() => heldAccessEntered)
       const close = root!.querySelector('[data-testid="admin-authorization-close"]')
       if (!(close instanceof HTMLButtonElement) || close.disabled) throw new Error('close missing')
       close.click()
       await waitFor(() => root!.querySelector('[data-testid="admin-authorization-dialog"]') === null)
 
       await openUser(root!, 'Bravo')
-      await waitFor(() => calls.some((call) => call.url.includes(bravoOperationId)))
+      await waitFor(() => (
+        Boolean(root!.querySelector('[data-testid="admin-authorization-read-again"]'))
+        && accessReadCounts['user-2'] === 1
+      ))
+      ;(root!.querySelector('[data-testid="admin-authorization-read-again"]') as HTMLButtonElement).click()
       await settleRendered()
-      expect(root!.querySelector('[data-testid="admin-authorization-dialog"]')).toBeTruthy()
-      expect(root!.querySelector('[data-testid="admin-authorization-read-again"]')).toBeTruthy()
+      expect(accessReadCounts['user-2']).toBe(1)
       expect(root!.textContent).not.toContain('角色已分配，准入未开')
+      expect(root!.textContent).not.toContain('还没有核对成功')
 
       releaseHeldAccess?.()
-      await waitFor(() => heldAccessSettled && root!.textContent?.includes('角色已分配，准入未开') === true)
+      await waitFor(() => heldAccessSettled && admissionReads('user-1') >= 2)
+      await settleRendered()
+      expect(root!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Bravo')
+      expect(accessReadCounts['user-2']).toBe(1)
+      expect(root!.textContent).not.toContain('角色已分配，准入未开')
+
+      ;(root!.querySelector('[data-testid="admin-authorization-read-again"]') as HTMLButtonElement).click()
+      await waitFor(() => root!.textContent?.includes('角色已分配，准入未开') === true)
       await settleRendered()
       expect(root!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Bravo')
       expect(root!.textContent).toContain('角色已分配，准入未开')
+      expect(root!.textContent).not.toContain('还没有核对成功')
       expect(root!.querySelector('[data-testid="admin-authorization-read-again"]')).toBeNull()
     } finally {
       releaseHeldAccess?.()
+    }
+  })
+
+  it('keeps the previous member last-admin refusal off the member selected now', async () => {
+    previewModeByUser = { 'user-1': 'last-admin', 'user-2': 'version' }
+    previewHoldUserId = 'user-1'
+    ;({ app, root } = await mountView())
+    try {
+      await openUser(root!, 'Alpha')
+      await chooseRole(root!, 'finance_admin')
+      ;(root!.querySelector('[data-testid="assign-role-button"]') as HTMLButtonElement).click()
+      await waitFor(() => heldPreviewEntered)
+
+      await openUser(root!, 'Bravo')
+      await chooseRole(root!, 'finance_admin')
+      ;(root!.querySelector('[data-testid="assign-role-button"]') as HTMLButtonElement).click()
+      await waitFor(() => secondaryPreviewSettled)
+      releaseHeldPreview?.()
+      await waitFor(() => (
+        heldPreviewSettled
+        && pageStatusText(root!).includes('角色目录已变化，本次未写入。请刷新角色后再确认。')
+      ))
+      await settleRendered()
+      expect(root!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Bravo')
+      expect(pageStatusText(root!)).toContain('角色目录已变化，本次未写入。请刷新角色后再确认。')
+      expect(pageStatusText(root!)).not.toContain('不能取消最后一名平台管理员')
+      expect(root!.textContent).not.toContain('不能取消最后一名平台管理员')
+    } finally {
+      releaseHeldPreview?.()
     }
   })
 })

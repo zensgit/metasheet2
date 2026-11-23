@@ -5574,4 +5574,307 @@ describe('RoleDelegationView', () => {
     expect(container?.textContent).not.toContain('alpha@example.com')
     expect(statusText()).not.toContain('该成员已不在可管理范围内')
   })
+
+  it('keeps a rejected confirmation closable when the selected member is clicked again', async () => {
+    let releaseCommit: () => void = () => {}
+    const commitGate = new Promise<void>((resolve) => {
+      releaseCommit = resolve
+    })
+    let commitSettled = false
+    apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string; body?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({
+          ok: true,
+          data: { items: [{ id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true }] },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        return createJsonResponse({ ok: true, data: delegationAccess('user-1', 'Alpha', 'alpha@example.com', []) })
+      }
+      if (isAuthorizationPreview(pathname) && init?.method === 'POST') return authorizationPreviewResponse()
+      if (isAuthorizationCommit(pathname) && init?.method === 'POST') {
+        await commitGate
+        return deferredJsonResponse({ ok: false, error: { code: 'ROLE_MODIFIED', message: 'rejected' } }, 409, () => {
+          setTimeout(() => {
+            commitSettled = true
+          }, 0)
+        })
+      }
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    await mountDelegation()
+    await waitForCondition(() => Boolean(container?.querySelector('[data-testid="delegation-assign-role"]')))
+    const assignSelect = container!.querySelector('[data-testid="delegation-assign-role"]') as HTMLSelectElement
+    assignSelect.value = 'crm_admin'
+    assignSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    findButtonByText(container!, '分配角色').click()
+    await flushUi()
+    const confirm = container!.querySelector('[data-testid="delegation-confirmation-confirm"]') as HTMLButtonElement
+    await waitForCondition(() => confirm.disabled === false)
+    confirm.click()
+    await waitForCondition(() => callLog.some((url) => isAuthorizationCommit(new URL(url, 'http://localhost').pathname)))
+    const accessReads = () => callLog.filter((url) => url.includes('/api/admin/role-delegation/users/user-1/access')).length
+    const readsBeforeReselect = accessReads()
+    clickListedUser('alpha@example.com')
+    await waitForCondition(() => accessReads() > readsBeforeReselect && detailHeading().includes('Alpha'))
+    releaseCommit()
+    await waitForCondition(() => commitSettled)
+    await settleRendered()
+    const close = container!.querySelector('[data-testid="delegation-confirmation-cancel"]')
+    expect(close).toBeTruthy()
+    expect(close?.textContent?.trim()).toBe('关闭')
+    expect((close as HTMLButtonElement).disabled).toBe(false)
+    expect(detailHeading()).toContain('Alpha')
+  })
+
+  it('keeps the previous member last-admin refusal off the member selected now', async () => {
+    let releaseAlphaPreview: () => void = () => {}
+    const alphaPreviewGate = new Promise<void>((resolve) => {
+      releaseAlphaPreview = resolve
+    })
+    let alphaPreviewSettled = false
+    let bravoPreviewSettled = false
+    apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string; body?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: false, delegableNamespaces: ['crm'], roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({
+          ok: true,
+          data: {
+            items: [
+              { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+              { id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true },
+            ],
+          },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        return createJsonResponse({ ok: true, data: delegationAccess('user-1', 'Alpha', 'alpha@example.com', []) })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-2/access') {
+        return createJsonResponse({ ok: true, data: delegationAccess('user-2', 'Bravo', 'bravo@example.com', []) })
+      }
+      if (isAuthorizationPreview(pathname) && init?.method === 'POST') {
+        const request = readAuthorizationBody(init.body)
+        if (request.targetUserId === 'user-1') {
+          await alphaPreviewGate
+          return deferredJsonResponse({ ok: false, error: { code: 'LAST_PLATFORM_ADMIN' } }, 409, () => {
+            setTimeout(() => {
+              alphaPreviewSettled = true
+            }, 0)
+          })
+        }
+        return deferredJsonResponse({ ok: false, error: { message: 'bravo version changed' } }, 409, () => {
+          setTimeout(() => {
+            bravoPreviewSettled = true
+          }, 0)
+        })
+      }
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+    await mountDelegation()
+    await waitForCondition(() => Boolean(container?.querySelector('[data-testid="delegation-assign-role"]')))
+    const chooseRole = async () => {
+      const assignSelect = container!.querySelector('[data-testid="delegation-assign-role"]') as HTMLSelectElement
+      assignSelect.value = 'crm_admin'
+      assignSelect.dispatchEvent(new Event('change'))
+      await flushUi()
+      findButtonByText(container!, '分配角色').click()
+    }
+    await chooseRole()
+    await waitForCondition(() => callLog.some((url) => isAuthorizationPreview(new URL(url, 'http://localhost').pathname)))
+    clickListedUser('bravo@example.com')
+    await waitForCondition(() => detailHeading().includes('Bravo') && Boolean(container?.querySelector('[data-testid="delegation-assign-role"]')))
+    await chooseRole()
+    await waitForCondition(() => bravoPreviewSettled)
+    releaseAlphaPreview()
+    await waitForCondition(() => alphaPreviewSettled && statusText().includes('bravo version changed'))
+    await settleRendered()
+    expect(detailHeading()).toContain('Bravo')
+    expect(statusText()).toContain('bravo version changed')
+    expect(statusText()).not.toContain('不能取消最后一名平台管理员')
+    expect(container?.textContent).not.toContain('不能取消最后一名平台管理员')
+  })
+
+  function groupMember(id: string, name: string, email: string) {
+    return {
+      id,
+      name,
+      email,
+      role: 'user',
+      isActive: true,
+      platformAdminEnabled: false,
+      attendanceAdminEnabled: false,
+      dingtalkLoginEnabled: false,
+      directoryLinked: false,
+      businessRoleIds: [] as string[],
+    }
+  }
+
+  function installMemberGroupWrite(members: ReturnType<typeof groupMember>[], write: () => ReturnType<typeof deferredJsonResponse>): void {
+    const alpha = { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true }
+    const bravo = { id: 'user-2', email: 'bravo@example.com', name: 'Bravo', role: 'user', is_active: true }
+    const scopeFor = (user: typeof alpha) => ({
+      ok: true,
+      data: {
+        actorId: 'admin-1',
+        user,
+        adminNamespaces: ['crm'],
+        scopeAssignments: [],
+        groupAssignments: [],
+      },
+    })
+    apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string; body?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({ ok: true, data: { actorId: 'admin-1', isPlatformAdmin: true, delegableNamespaces: [], roleCatalog: [], scopeAssignments: [], groupAssignments: [] } })
+      }
+      if (pathname === '/api/admin/role-delegation/departments') return createJsonResponse({ ok: true, data: { items: [] } })
+      if (pathname === '/api/admin/role-delegation/scope-templates') return createJsonResponse({ ok: true, data: { items: [] } })
+      if (pathname === '/api/admin/role-delegation/member-groups') {
+        return createJsonResponse({
+          ok: true,
+          data: { items: [{ id: 'group-1', name: '制造中心', description: '制造中心成员集', memberCount: members.length }] },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/member-groups/group-1') {
+        return createJsonResponse({
+          ok: true,
+          data: { item: { id: 'group-1', name: '制造中心', description: '制造中心成员集', memberCount: members.length, members } },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({ ok: true, data: { items: [alpha, bravo] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        return createJsonResponse({ ok: true, data: delegationAccess('user-1', 'Alpha', 'alpha@example.com', []) })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-2/access') {
+        return createJsonResponse({ ok: true, data: delegationAccess('user-2', 'Bravo', 'bravo@example.com', []) })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/scopes') return createJsonResponse(scopeFor(alpha))
+      if (pathname === '/api/admin/role-delegation/users/user-2/scopes') return createJsonResponse(scopeFor(bravo))
+      if (pathname.includes('/member-groups/') && init?.method === 'POST') return write()
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+  }
+
+  it('keeps a selected member group failure off the page after the selection moves', async () => {
+    let releaseWrite: () => void = () => {}
+    const writeGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve
+    })
+    let writeSettled = false
+    installMemberGroupWrite([], async () => {
+      await writeGate
+      return deferredJsonResponse({ ok: false, error: { message: '保存成员集成员失败' } }, 500, () => {
+        setTimeout(() => {
+          writeSettled = true
+        }, 0)
+      })
+    })
+    await mountDelegation()
+    await waitForCondition(() => {
+      const button = Array.from(container!.querySelectorAll('button')).find((item) => item.textContent?.includes('将当前成员加入成员集'))
+      return button instanceof HTMLButtonElement && !button.disabled
+    })
+    findButtonByText(container!, '将当前成员加入成员集').click()
+    await waitForCondition(() => callLog.some((url) => url.includes('/member-groups/assign')))
+    clickListedUser('bravo@example.com')
+    await waitForCondition(() => detailHeading().includes('Bravo'))
+    releaseWrite()
+    await waitForCondition(() => writeSettled)
+    await settleRendered()
+    expect(detailHeading()).toContain('Bravo')
+    expect(statusText()).not.toContain('保存成员集成员失败')
+    expect(container?.textContent).not.toContain('保存成员集成员失败')
+  })
+
+  it('keeps a different member group removal on the page after the selection moves', async () => {
+    let releaseWrite: () => void = () => {}
+    const writeGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve
+    })
+    let writeSettled = false
+    installMemberGroupWrite([groupMember('user-9', 'Other', 'other@example.com')], async () => {
+      await writeGate
+      return deferredJsonResponse({
+        ok: true,
+        data: {
+          user: { id: 'user-9', email: 'other@example.com', name: 'Other', role: 'user', is_active: true },
+          roles: [],
+          memberGroups: [],
+        },
+      }, 200, () => {
+        setTimeout(() => {
+          writeSettled = true
+        }, 0)
+      })
+    })
+    await mountDelegation()
+    await waitForCondition(() => Boolean(container?.textContent?.includes('other@example.com')))
+    findButtonByText(container!, '移出成员集').click()
+    await waitForCondition(() => callLog.some((url) => url.includes('/users/user-9/member-groups/unassign')))
+    clickListedUser('bravo@example.com')
+    await waitForCondition(() => detailHeading().includes('Bravo'))
+    releaseWrite()
+    await waitForCondition(() => writeSettled && statusText().includes('成员已移出平台成员集'))
+    await settleRendered()
+    clickListedUser('alpha@example.com')
+    await waitForCondition(() => detailHeading().includes('Alpha'))
+    await settleRendered()
+    expect(detailHeading()).toContain('Alpha')
+    expect(statusText()).toContain('成员已移出平台成员集')
+  })
+
+  it('keeps a selected member group removal off the page after the selection moves', async () => {
+    let releaseWrite: () => void = () => {}
+    const writeGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve
+    })
+    let writeSettled = false
+    installMemberGroupWrite([groupMember('user-1', 'Alpha', 'alpha@example.com')], async () => {
+      await writeGate
+      return deferredJsonResponse({
+        ok: true,
+        data: {
+          user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+          roles: [],
+          memberGroups: [],
+        },
+      }, 200, () => {
+        setTimeout(() => {
+          writeSettled = true
+        }, 0)
+      })
+    })
+    await mountDelegation()
+    await waitForCondition(() => {
+      const button = Array.from(container!.querySelectorAll('button')).find((item) => item.textContent?.includes('将当前成员加入成员集'))
+      return button instanceof HTMLButtonElement && !button.disabled && (container?.textContent || '').includes('移出成员集')
+    })
+    findButtonByText(container!, '移出成员集').click()
+    await waitForCondition(() => callLog.some((url) => url.includes('/users/user-1/member-groups/unassign')))
+    clickListedUser('bravo@example.com')
+    await waitForCondition(() => detailHeading().includes('Bravo'))
+    releaseWrite()
+    await waitForCondition(() => writeSettled)
+    await settleRendered()
+    expect(detailHeading()).toContain('Bravo')
+    expect(statusText()).not.toContain('成员已移出平台成员集')
+    expect(container?.textContent).not.toContain('成员已移出平台成员集')
+  })
 })

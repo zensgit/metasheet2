@@ -2861,6 +2861,8 @@ function dingTalkPayloadMatches(value: unknown, userId: string): boolean {
 
 function resetMemberScopedState(): void {
   resetMemberLoadingFlags()
+  userSessions.value = []
+  inviteRecords.value = []
   userAccessReadGeneration.value = nextAccessReadGeneration(userAccessReadGeneration.value)
   if (busyToken && !memberTokenCurrent(busyToken)) {
     busy.value = false
@@ -3729,7 +3731,7 @@ async function selectUser(userId: string): Promise<void> {
     const navigationKey = buildUserNavigationKey(userNavigation.value)
     if (userNavigation.value.userId === userId && appliedUserNavigationKey.value !== navigationKey) {
       if (userNavigation.value.source === 'directory-sync') {
-        setMemberStatus(token, `已从目录同步定位到用户 ${formatManagedUserLabel(access.value.user)}`)
+        setMemberStatus(token, `已从目录同步定位到用户 ${formatManagedUserLabel(snapshot.user)}`)
       }
       appliedUserNavigationKey.value = navigationKey
     }
@@ -4891,13 +4893,8 @@ async function finishCommittedAuthorization(token: MemberToken): Promise<void> {
     await authorizationOperation.whenSettled()
   } finally {
     const owner = authorizationVerifyingToken
-    const ownerStale = owner !== null && !memberTokenCurrent(owner)
     if (owner && owner.generation === token.generation && owner.userId === token.userId) {
       authorizationVerifyingToken = null
-    }
-    if (ownerStale) {
-      const next = currentMemberToken()
-      if (memberTokenCurrent(next)) void finishCommittedAuthorization(next)
     }
   }
   if (!memberTokenCurrent(token) || authorizationDetached.value) return
@@ -5050,16 +5047,9 @@ function closeAuthorizationPanel(): void {
 }
 
 function presentRecoveredAuthorization(): void {
-  if (suppressRecovery.value || authorizationDetached.value) return
-  const phase = authorizationOperation.phase.value
-  // The panel opens while the stored lookup is still pending. When that lookup
-  // later commits, the panel is already held, so the committed read-back has to
-  // start from here. A verification already in flight keeps the latch and returns.
-  if (authorizationPanelHeld.value) {
-    if (phase === 'committed') void finishCommittedAuthorization(currentMemberToken())
-    return
-  }
+  if (suppressRecovery.value || authorizationPanelHeld.value || authorizationDetached.value) return
   if (authorizationDraft.value) return
+  const phase = authorizationOperation.phase.value
   if (phase !== 'pending' && phase !== 'committed' && phase !== 'unverified_no_read') return
   const receipt = authorizationOperation.receipt.value
   foreignAuthorizationReceipt.value = Boolean(

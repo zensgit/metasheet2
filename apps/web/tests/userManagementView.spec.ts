@@ -2748,6 +2748,239 @@ describe('UserManagementView', () => {
     expect(sessionRefreshButton().textContent).toContain('刷新会话')
   })
 
+  it('drops the previous member sessions when the next member session read fails', async () => {
+    let bravoSessionSettled = false
+    const sessionItem = (id: string) => ({
+      id,
+      issuedAt: '2026-04-09T00:00:00.000Z',
+      expiresAt: '2026-04-10T00:00:00.000Z',
+      lastSeenAt: '2026-04-09T01:00:00.000Z',
+    })
+    const base = createApiImplementation(callLog)
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const pathname = new URL(String(input), 'http://localhost').pathname
+      const sessions = pathname.match(/^\/api\/admin\/users\/([^/]+)\/sessions$/)
+      if (sessions) {
+        const userId = decodeURIComponent(sessions[1] ?? '')
+        if (userId === 'user-1') {
+          return { ok: true, status: 200, json: async () => ({ ok: true, data: { items: [sessionItem('alpha-sess-1')] } }) }
+        }
+        if (userId === 'user-2') {
+          return {
+            ok: false,
+            status: 500,
+            json: async () => {
+              setTimeout(() => {
+                bravoSessionSettled = true
+              }, 0)
+              return { ok: false, error: { message: 'sessions failed' } }
+            },
+          }
+        }
+      }
+      return base(input, init)
+    })
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(20)
+    await openListedUser(container!, 'Alpha')
+    await waitForCondition(() => (container!.textContent || '').includes('alpha-sess-1'))
+    expect(Array.from(container!.querySelectorAll('button')).some((button) => button.textContent?.trim() === '踢下线')).toBe(true)
+
+    await openListedUser(container!, 'Bravo')
+    await waitForCondition(() => (
+      bravoSessionSettled
+      && container!.querySelector('[data-testid="selected-user-heading"]')?.textContent?.includes('Bravo') === true
+    ))
+    await settleRendered()
+    expect(container!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Bravo')
+    expect(container!.textContent).not.toContain('alpha-sess-1')
+    expect(Array.from(container!.querySelectorAll('button')).some((button) => button.textContent?.trim() === '踢下线')).toBe(false)
+  })
+
+  function lateDingTalkPayload(openId: string, enabled: boolean) {
+    return {
+      provider: 'dingtalk',
+      userId: 'user-1',
+      requireGrant: true,
+      server: {
+        configured: true,
+        available: true,
+        corpId: 'dingcorp',
+        allowedCorpIds: ['dingcorp'],
+        requireGrant: true,
+        autoLinkEmail: false,
+        autoProvision: false,
+        unavailableReason: null,
+      },
+      grant: { exists: true, enabled, grantedBy: 'admin-1', createdAt: '2026-04-09T00:00:00.000Z', updatedAt: '2026-04-10T00:00:00.000Z' },
+      identity: {
+        exists: true,
+        corpId: 'dingcorp',
+        unionId: 'user-1-union',
+        openId,
+        hasUnionId: true,
+        hasOpenId: true,
+        lastLoginAt: null,
+        createdAt: '2026-04-09T00:00:00.000Z',
+        updatedAt: '2026-04-10T00:00:00.000Z',
+      },
+    }
+  }
+
+  it('keeps a late DingTalk grant from the previous member off the member selected now', async () => {
+    let releaseGrant: () => void = () => {}
+    const grantGate = new Promise<void>((resolve) => {
+      releaseGrant = resolve
+    })
+    let grantSettled = false
+    let grantEntered = false
+    const base = createApiImplementation(callLog)
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const pathname = new URL(String(input), 'http://localhost').pathname
+      if (/^\/api\/admin\/users\/user-1\/dingtalk-grant$/.test(pathname) && (init?.method || 'GET').toUpperCase() === 'PATCH') {
+        grantEntered = true
+        await grantGate
+        return {
+          ok: true,
+          status: 200,
+          json: async () => {
+            setTimeout(() => {
+              grantSettled = true
+            }, 0)
+            return { ok: true, data: lateDingTalkPayload('alpha-grant-openid', false) }
+          },
+        }
+      }
+      return base(input, init)
+    })
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(20)
+    await openListedUser(container!, 'Alpha')
+    await waitForCondition(() => {
+      const button = Array.from(container!.querySelectorAll('button')).find((item) => item.textContent?.trim() === '关闭钉钉扫码')
+      return button instanceof HTMLButtonElement && !button.disabled
+    })
+    const disableGrant = Array.from(container!.querySelectorAll('button')).find((item) => item.textContent?.trim() === '关闭钉钉扫码')
+    if (!(disableGrant instanceof HTMLButtonElement)) throw new Error('disable DingTalk grant missing')
+    disableGrant.click()
+    await waitForCondition(() => grantEntered)
+    await openListedUser(container!, 'Bravo')
+    await waitForCondition(() => (container!.textContent || '').includes('Open ID：user-2-open'))
+    releaseGrant()
+    await waitForCondition(() => grantSettled)
+    await settleRendered()
+    expect(container!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Bravo')
+    expect(container!.textContent).toContain('Open ID：user-2-open')
+    expect(container!.textContent).not.toContain('alpha-grant-openid')
+    expect(container!.textContent).toContain('未开通钉钉扫码')
+  })
+
+  it('keeps a late DingTalk read from the previous member off the member selected now', async () => {
+    let releaseRead: () => void = () => {}
+    const readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve
+    })
+    let readSettled = false
+    let alphaReads = 0
+    const base = createApiImplementation(callLog)
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const pathname = new URL(String(input), 'http://localhost').pathname
+      if (pathname === '/api/admin/users/user-1/dingtalk-access') {
+        alphaReads += 1
+        await readGate
+        return {
+          ok: true,
+          status: 200,
+          json: async () => {
+            setTimeout(() => {
+              readSettled = true
+            }, 0)
+            return { ok: true, data: lateDingTalkPayload('alpha-late-openid', true) }
+          },
+        }
+      }
+      return base(input, init)
+    })
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(20)
+    await openListedUser(container!, 'Alpha')
+    await waitForCondition(() => alphaReads >= 1)
+    await openListedUser(container!, 'Bravo')
+    await waitForCondition(() => (container!.textContent || '').includes('Open ID：user-2-open'))
+    releaseRead()
+    await waitForCondition(() => readSettled)
+    await settleRendered()
+    expect(container!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Bravo')
+    expect(container!.textContent).toContain('Open ID：user-2-open')
+    expect(container!.textContent).not.toContain('alpha-late-openid')
+    expect(container!.textContent).toContain('未开通钉钉扫码')
+  })
+
+  it('keeps a late invite list from the previous member off the member selected now', async () => {
+    let releaseInvites: () => void = () => {}
+    const inviteGate = new Promise<void>((resolve) => {
+      releaseInvites = resolve
+    })
+    let alphaInviteSettled = false
+    let alphaInviteReads = 0
+    const inviteItem = (id: string, email: string) => ({
+      id,
+      email,
+      user_name: email,
+      status: 'pending',
+      product_mode: 'platform',
+      created_at: '2026-04-09T00:00:00.000Z',
+      last_sent_at: '2026-04-09T00:00:00.000Z',
+      invite_token: id,
+    })
+    const base = createApiImplementation(callLog)
+    apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = new URL(String(input), 'http://localhost')
+      if (url.pathname === '/api/admin/invites' && url.searchParams.get('userId') === 'user-1') {
+        alphaInviteReads += 1
+        await inviteGate
+        return {
+          ok: true,
+          status: 200,
+          json: async () => {
+            setTimeout(() => {
+              alphaInviteSettled = true
+            }, 0)
+            return { ok: true, data: { items: [inviteItem('invite-alpha', 'alpha-invite@example.com')] } }
+          },
+        }
+      }
+      if (url.pathname === '/api/admin/invites' && url.searchParams.get('userId') === 'user-2') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, data: { items: [inviteItem('invite-bravo', 'bravo-invite@example.com')] } }),
+        }
+      }
+      return base(input, init)
+    })
+    app = createApp(UserManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi(20)
+    await openListedUser(container!, 'Alpha')
+    await waitForCondition(() => alphaInviteReads >= 1)
+    await openListedUser(container!, 'Bravo')
+    await waitForCondition(() => (container!.textContent || '').includes('bravo-invite@example.com'))
+    releaseInvites()
+    await waitForCondition(() => alphaInviteSettled)
+    await settleRendered()
+    expect(container!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Bravo')
+    expect(container!.textContent).toContain('bravo-invite@example.com')
+    expect(container!.textContent).not.toContain('alpha-invite@example.com')
+  })
+
   describe('slice C: 加入默认组织 for a zero-org user (owner 2026-10-13)', () => {
     const JOIN_PATH = '/api/admin/directory/local/accounts'
     const ADMISSION_PATH = '/api/admin/users/user-1/member-admission'

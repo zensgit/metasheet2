@@ -2562,7 +2562,7 @@ async function submitDelegationConfirmation(typedText: string): Promise<void> {
     await settleDelegationAuthorization(token.generation, token.userId)
   } finally {
     releaseMemberBusy(token)
-    if (memberTokenCurrent(token) && confirmationSubmission.value?.token === confirmation.token) {
+    if (confirmationSubmission.value?.token === confirmation.token) {
       const phase = currentAuthorizationPhase()
       const unresolved = phase === 'pending'
         || phase === 'committing'
