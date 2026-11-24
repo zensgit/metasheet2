@@ -25,6 +25,7 @@ run-name: "Attendance Staging Window Runner: ${{ inputs.action }}${{ inputs.acti
 #                    sweep (that input is a closed 5-field ae4/rd45/otbank/mp6/hmr5 contract) —
 #                    the tasks smoke proves and reports its own zero-residue instead.
 #   status         — read-only staging snapshot
+#   authorization-fence-status — catalog-only probe through the live staging backend connection
 #   migrate        — pull the exact deploy_sha backend image WITHOUT switching the running app,
 #                    then backup + clone-rehearsal + apply its migration universe, per
 #                    docs/operations/staging-migration-
@@ -284,6 +285,7 @@ jobs:
           node --check scripts/ops/staging-attendance-tooling-teardown.mjs
           node --check scripts/ops/staging-tasks-smoke.mjs
           node -e "JSON.parse(require('fs').readFileSync('scripts/ops/attendance-w4w7-soak-config.template.json','utf8'))"
+          node --check scripts/ops/staging-authorization-fence-probe.cjs
           echo "inputs and embedded scripts OK"
 
       - name: Run pipeline self-test (same shape as the remote invocation)

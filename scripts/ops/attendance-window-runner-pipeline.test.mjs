@@ -2079,7 +2079,7 @@ test('residue-sweep is wired into the remote-script dispatcher and the workflow 
   const yaml = readFileSync(WORKFLOW, 'utf8')
   assert.match(
     yaml,
-    /options:\s*\[deploy,\s*smoke,\s*status,\s*migrate,\s*residue-sweep,\s*soak-baseline,\s*soak-seed,\s*soak-flags,\s*soak-run,\s*soak-status\]/,
+    /options:\s*\[deploy,\s*smoke,\s*status,\s*authorization-fence-status,\s*migrate,\s*residue-sweep,\s*soak-baseline,\s*soak-seed,\s*soak-flags,\s*soak-run,\s*soak-status\]/,
     'expected the workflow action input to list residue-sweep (and the soak actions) as choices',
   )
   assert.match(yaml, /stamps:/, 'expected a `stamps` workflow_dispatch input for action=residue-sweep')
@@ -2530,7 +2530,7 @@ function assertSoakContract({ remote, workflow }) {
   }
   assert.match(
     workflow,
-    /case "\$ACTION" in deploy\|smoke\|status\|migrate\|residue-sweep\|soak-baseline\|soak-seed\|soak-flags\|soak-run\|soak-status\)/,
+    /case "\$ACTION" in deploy\|smoke\|status\|authorization-fence-status\|migrate\|residue-sweep\|soak-baseline\|soak-seed\|soak-flags\|soak-run\|soak-status\)/,
     'workflow input validation must accept exactly the dispatcherʼs action set',
   )
   assert.match(
