@@ -43,7 +43,7 @@ $rollbackStartedAt = [DateTimeOffset]::UtcNow.ToString('o')
 
 工具以 `-RunMigrations 0` 调用已核哈希的旧包独立启动器，覆盖同一根目录。现场保持原根目录和批准的参数，避开新目录、`upgrade-inplace` 和任何迁移命令。状态 C 下，P3 迁移文件可能仍在覆盖后的目录中，账本只用 `s06` 读取。
 
-`status=STOP stage=overlay` 表示覆盖命令或其日志写入失败，`stage=ledger_after` 表示覆盖后未证实账本相同。两种都保持隔离并只读核 `s06`、`h01` 和后端启动代次，报 owner 后按他确认的恢复路径继续。启动器 stdout 和 stderr 写到 `LauncherLogDirectory\p3-rollback-launcher.log`，已存在的日志保留，重跑时单独准备新目录。该日志可能含路径或连接信息，只供现场排障。数据库客户端只保留脚本输出的固定结果。
+`status=STOP stage=overlay` 的 `reason` 区分日志无法创建、启动器无法启动、日志采集失败与启动器退出非零。`stage=ledger_after` 表示覆盖后未证实账本相同。两种都保持隔离并只读核 `s06`、`h01` 和后端启动代次，报 owner 后按他确认的恢复路径继续。启动器分别写入 `LauncherLogDirectory\p3-rollback-launcher.stdout.log` 与 `LauncherLogDirectory\p3-rollback-launcher.stderr.log`。已存在的日志保留，重跑时单独准备新目录。这两份日志可能含路径或连接信息，只供现场排障。数据库客户端只保留脚本输出的固定结果。
 
 ## 完成检查
 

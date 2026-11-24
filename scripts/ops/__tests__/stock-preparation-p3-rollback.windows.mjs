@@ -53,7 +53,8 @@ function run(scenario, { target = 'R85', release = target, apply = false, author
     const sql = path.join(fixture, 'sql')
     const archive = path.join(fixture, 'old archive.zip')
     const bootstrap = path.join(fixture, 'old bootstrap.ps1')
-    const launcherLog = path.join(fixture, 'p3-rollback-launcher.log')
+    const stdoutLog = path.join(fixture, 'p3-rollback-launcher.stdout.log')
+    const stderrLog = path.join(fixture, 'p3-rollback-launcher.stderr.log')
     const flag = path.join(fixture, 'overlay-invoked')
     const backend = path.join(install, 'packages/core-backend/dist/src')
     mkdirSync(backend, { recursive: true })
@@ -74,7 +75,7 @@ function run(scenario, { target = 'R85', release = target, apply = false, author
     assert.equal(zip.status, 0, zip.stderr)
     writeFileSync(bootstrap, [
       'param($RootDir, $PackageArchive, $InstallDeps, $RunMigrations)',
-      'if ($RunMigrations -ne "0" -or $RootDir -ne $env:P3_TEST_ROOT -or $InstallDeps -ne "1" -or $PackageArchive -ne $env:P3_TEST_ARCHIVE) { exit 9 }',
+      'if ($RunMigrations -ne "0" -or $RootDir -ne $env:P3_TEST_ROOT -or $InstallDeps -ne "1" -or $PackageArchive -ne $env:P3_TEST_ARCHIVE) { [Console]::Error.WriteLine("FIXTURE_ARGUMENT_MISMATCH"); exit 9 }',
       '[IO.File]::WriteAllText($env:P3_TEST_FLAG, "ok")',
       '[Console]::Out.WriteLine("FIXTURE_STDOUT")',
       '[Console]::Error.WriteLine("FIXTURE_STDERR")',
@@ -125,11 +126,13 @@ function run(scenario, { target = 'R85', release = target, apply = false, author
     try { overlaid = readFileSync(flag, 'utf8') === 'ok' } catch (error) {
       if (error.code !== 'ENOENT') throw error
     }
-    let log = ''
-    try { log = readFileSync(launcherLog, 'utf8') } catch (error) {
-      if (error.code !== 'ENOENT') throw error
+    function readLog(file) {
+      try { return readFileSync(file, 'utf8') } catch (error) {
+        if (error.code !== 'ENOENT') throw error
+        return ''
+      }
     }
-    return { ...result, overlaid, log }
+    return { ...result, overlaid, stdoutLog: readLog(stdoutLog), stderrLog: readLog(stderrLog) }
   } finally {
     rmSync(fixture, { recursive: true, force: true })
   }
@@ -166,21 +169,21 @@ test('rollback preflight never invokes the old launcher', { skip: !windows }, ()
 
 test('state C overlay passes exactly RunMigrations=0 and permits report-only counts', { skip: !windows }, () => {
   const result = run('legacy-102', { apply: true })
-  assert.equal(result.status, 0, result.stderr + result.stdout)
+  assert.equal(result.status, 0, result.stderr + result.stdout + result.stderrLog)
   assert.match(result.stdout, /P5_VERDICT all_zero=f/)
   assert.match(result.stdout, /status=overlay_complete/)
   assert.equal(result.overlaid, true)
-  assert.match(result.log, /FIXTURE_STDOUT/)
-  assert.match(result.log, /FIXTURE_STDERR/)
+  assert.match(result.stdoutLog, /FIXTURE_STDOUT/)
+  assert.match(result.stderrLog, /FIXTURE_STDERR/)
   assert.doesNotMatch(result.stdout + result.stderr, /FIXTURE_STDOUT|FIXTURE_STDERR/)
 })
 
-test('launcher failure keeps stdout and stderr in the local log', { skip: !windows }, () => {
+test('launcher failure keeps separate stdout and stderr logs', { skip: !windows }, () => {
   const result = run('launcher-failed', { apply: true })
   assert.equal(result.status, 2, result.stderr + result.stdout)
-  assert.match(result.stdout, /status=STOP stage=overlay/)
-  assert.match(result.log, /FIXTURE_STDOUT/)
-  assert.match(result.log, /FIXTURE_STDERR/)
+  assert.match(result.stdout, /status=STOP stage=overlay reason=launcher_nonzero/, result.stderrLog)
+  assert.match(result.stdoutLog, /FIXTURE_STDOUT/)
+  assert.match(result.stderrLog, /FIXTURE_STDERR/)
   assert.doesNotMatch(result.stdout + result.stderr, /FIXTURE_STDOUT|FIXTURE_STDERR/)
 })
 

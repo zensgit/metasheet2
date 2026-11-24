@@ -43,6 +43,46 @@ function Get-Sha256([string]$Path) {
   } finally { $stream.Dispose() }
 }
 
+function Quote-LauncherPath([string]$Path) {
+  # Windows paths cannot contain double quotes. Double any terminal backslashes
+  # so they cannot escape the closing command-line quote.
+  return '"' + [regex]::Replace($Path, '\\+$', { param($match) $match.Value + $match.Value }) + '"'
+}
+
+function Invoke-ReleaseLauncher {
+  $script:overlayReason = 'log_open_failed'
+  $directory = (Get-Item -LiteralPath $LauncherLogDirectory).FullName
+  $stdout = $null
+  $stderr = $null
+  $child = $null
+  try {
+    $stdout = [IO.File]::Open((Join-Path $directory 'p3-rollback-launcher.stdout.log'), [IO.FileMode]::CreateNew)
+    $stderr = [IO.File]::Open((Join-Path $directory 'p3-rollback-launcher.stderr.log'), [IO.FileMode]::CreateNew)
+    $script:overlayReason = 'launcher_start_failed'
+    $info = New-Object System.Diagnostics.ProcessStartInfo
+    $info.FileName = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
+    $info.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' + (Quote-LauncherPath $bootstrapFile.FullName) +
+      ' -RootDir ' + (Quote-LauncherPath $root) + ' -PackageArchive ' + (Quote-LauncherPath $archiveFile.FullName) +
+      " -InstallDeps $InstallDeps -RunMigrations 0"
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $child = [Diagnostics.Process]::Start($info)
+    $script:overlayReason = 'launcher_capture_failed'
+    $output = $child.StandardOutput.BaseStream.CopyToAsync($stdout)
+    $errors = $child.StandardError.BaseStream.CopyToAsync($stderr)
+    $child.WaitForExit()
+    [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($output, $errors))
+    $script:overlayReason = 'launcher_nonzero'
+    if ($child.ExitCode -ne 0) { throw 'overlay failed' }
+  } finally {
+    if ($null -ne $child) { $child.Dispose() }
+    if ($null -ne $stderr) { $stderr.Dispose() }
+    if ($null -ne $stdout) { $stdout.Dispose() }
+  }
+}
+
 function Assert-ArchiveRelease([string]$Path) {
   Add-Type -AssemblyName System.IO.Compression.FileSystem
   $zip = [IO.Compression.ZipFile]::OpenRead($Path)
@@ -174,20 +214,7 @@ try {
   }
 
   $stage = 'overlay'
-  $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-  $logDirectory = (Get-Item -LiteralPath $LauncherLogDirectory).FullName
-  $logFile = Join-Path $logDirectory 'p3-rollback-launcher.log'
-  $logStream = [IO.File]::Open($logFile, [IO.FileMode]::CreateNew)
-  $logStream.Dispose()
-  # Windows PowerShell 5.1 turns native stderr into error records. Continue long
-  # enough to save them and read the native exit code.
-  $ErrorActionPreference = 'Continue'
-  & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $bootstrapFile.FullName `
-    -RootDir $root -PackageArchive $archiveFile.FullName -InstallDeps $InstallDeps -RunMigrations 0 2>&1 |
-    Out-File -LiteralPath $logFile -Encoding utf8 -Append -ErrorAction Stop
-  $launcherExit = $LASTEXITCODE
-  $ErrorActionPreference = 'Stop'
-  if ($launcherExit -ne 0) { throw 'overlay failed' }
+  Invoke-ReleaseLauncher
 
   $stage = 'ledger_after'
   $after = @(Read-Ledger)
@@ -196,6 +223,7 @@ try {
   "P3_ROLLBACK_RESULT status=overlay_complete target=$Target install_state=$InstallState"
   exit 0
 } catch {
-  "P3_ROLLBACK_RESULT status=STOP stage=$stage"
+  if ($stage -eq 'overlay') { "P3_ROLLBACK_RESULT status=STOP stage=overlay reason=$overlayReason" }
+  else { "P3_ROLLBACK_RESULT status=STOP stage=$stage" }
   exit 2
 }
