@@ -27,6 +27,7 @@
  */
 import { onBeforeUnmount, onMounted } from 'vue'
 import { io, type Socket } from 'socket.io-client'
+import { installRealtimeReconnect, type RealtimeReconnectHandle } from '../utils/realtimeReconnect'
 import { useAuth } from '../composables/useAuth'
 import { TASKS_COUNTS_UPDATED_EVENT } from '../tasks/useTasksCountsRealtime'
 import { getApiBase } from '../utils/api'
@@ -105,10 +106,13 @@ function normalizePayload(payload: unknown): TodoCountsUpdatedPayload | null {
 export function useTodoCountsRealtime(options: UseTodoCountsRealtimeOptions) {
   const auth = useAuth()
   let socket: Socket | null = null
+  let reconnectHandle: RealtimeReconnectHandle | null = null
   let disconnected = false
   let connectionPromise: Promise<Socket | null> | null = null
 
   function cleanupSocket() {
+    reconnectHandle?.stop()
+    reconnectHandle = null
     socket?.disconnect()
     socket = null
     connectionPromise = null
@@ -128,6 +132,8 @@ export function useTodoCountsRealtime(options: UseTodoCountsRealtimeOptions) {
           transports: ['websocket', 'polling'],
           auth: { token },
         })
+        // The per-user room is entered by the server at connect, so a reconnect needs nothing more.
+        reconnectHandle = installRealtimeReconnect(nextSocket)
 
         nextSocket.on('todo:counts-updated', (payload: unknown) => {
           const normalized = normalizePayload(payload)

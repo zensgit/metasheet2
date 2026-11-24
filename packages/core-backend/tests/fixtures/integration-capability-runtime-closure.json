@@ -20,6 +20,7 @@
     "packages/core-backend/src/routes/admin-failure-envelope.ts",
     "packages/core-backend/src/routes/admin-grant-proofs.ts",
     "packages/core-backend/src/routes/admin-notification-verifications.ts",
+    "packages/core-backend/src/routes/admin-realtime-diagnostics.ts",
     "packages/core-backend/src/routes/admin-role-members.ts",
     "packages/core-backend/src/routes/admin-routes.ts",
     "packages/core-backend/src/routes/admin-user-batch.ts",

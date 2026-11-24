@@ -1,4 +1,5 @@
 import { io } from 'socket.io-client'
+import { installRealtimeReconnect } from '../../utils/realtimeReconnect'
 import { getApiBase } from '../../utils/api'
 import { useAuth } from '../../composables/useAuth'
 import {
@@ -167,6 +168,8 @@ export const subscribeToMultitableCommentSheetRealtime: MultitableCommentSheetRe
     transports: ['websocket', 'polling'],
     auth: token ? { token } : undefined,
   })
+  // The room is asked for on every connect below, so a reconnect needs nothing more.
+  const reconnectHandle = installRealtimeReconnect(socket)
   const handleConnect = () => {
     socket.emit('join-comment-sheet', { spreadsheetId })
   }
@@ -179,6 +182,7 @@ export const subscribeToMultitableCommentSheetRealtime: MultitableCommentSheetRe
   if (socket.connected) handleConnect()
 
   return () => {
+    reconnectHandle.stop()
     if (socket.connected) {
       socket.emit('leave-comment-sheet', { spreadsheetId })
     }
@@ -201,6 +205,8 @@ export const subscribeToMultitableCommentsRealtime: MultitableCommentsRealtimeSu
     transports: ['websocket', 'polling'],
     auth: token ? { token } : undefined,
   })
+  // The room is asked for on every connect below, so a reconnect needs nothing more.
+  const reconnectHandle = installRealtimeReconnect(socket)
   const handleConnect = () => {
     emitRoomSubscription(socket, 'join-comment-record', scope)
   }
@@ -213,6 +219,7 @@ export const subscribeToMultitableCommentsRealtime: MultitableCommentsRealtimeSu
   if (socket.connected) handleConnect()
 
   return () => {
+    reconnectHandle.stop()
     if (socket.connected) {
       emitRoomSubscription(socket, 'leave-comment-record', scope)
     }
