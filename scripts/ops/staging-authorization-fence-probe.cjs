@@ -61,6 +61,26 @@ function compareSection(live, reference, fields) {
   }
 }
 
+function webhookHoldFunctionShape(definition) {
+  const body = definition.match(/\bAS (\$\w*\$)([\s\S]*?)\1/)?.[2]
+  if (!body) return null
+  const allowed = new Set(['and', 'active', 'begin', 'coalesce', 'else', 'end', 'enabled',
+    'errcode', 'exception', 'false', 'if', 'insert', 'is', 'message', 'new', 'not', 'null',
+    'old', 'or', 'raise', 'return', 'tg_op', 'then', 'true', 'update', 'using'])
+  const tokens = body.match(/--[^\n]*|\/\*[\s\S]*?\*\/|'(?:[^']|'')*'|"(?:""|[^"])*"|[a-zA-Z_][a-zA-Z0-9_]*|[^\s]/g) ?? []
+  return tokens
+    .filter(token => !token.startsWith('--') && !token.startsWith('/*'))
+    .map(token => {
+      const lower = token.toLowerCase()
+      if (token === "'INSERT'" || token === "'UPDATE'") return token
+      if (token.startsWith("'")) return '<literal>'
+      if (allowed.has(lower) || /^[().,;=:<>!+-]$/.test(token)) return lower
+      return '<redacted>'
+    })
+    .slice(0, 100)
+    .join(' ')
+}
+
 async function run() {
   const connectionString = process.env.DATABASE_URL
   if (!connectionString) throw new Error('DATABASE_URL_MISSING')
@@ -131,6 +151,24 @@ async function run() {
           definitionDigest: sha(row.definition),
           ...data.rows[0],
         })
+        if (row.proname === 'ops_hold_webhook_active') {
+          const triggers = await client.query(`
+            SELECT n.nspname AS schema, c.relname AS relation, t.tgname AS trigger,
+                   t.tgenabled AS mode, t.tgtype AS type,
+                   t.tgnargs AS argument_count, t.tgqual IS NOT NULL AS has_when_clause
+              FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+              JOIN pg_catalog.pg_proc p ON p.oid = t.tgfoid
+              JOIN pg_catalog.pg_namespace pn ON pn.oid = p.pronamespace
+             WHERE pn.nspname = 'public' AND p.proname = $1
+               AND pg_catalog.pg_get_function_identity_arguments(p.oid) = $2
+          `, [row.proname, row.arguments])
+          extraFunctions.at(-1).webhookHold = {
+            bodyShape: webhookHoldFunctionShape(row.definition),
+            fixedSearchPath: row.proconfig?.some(item => item.startsWith('search_path=')) === true,
+            triggers: triggers.rows,
+          }
+        }
       }
     }
     const fence = initialSchemaPublic && supported
