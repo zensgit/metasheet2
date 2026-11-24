@@ -6706,7 +6706,8 @@ const NOT_UPLOADED_OUTPUT_NAMES = new Map([
 const MIGRATION_REPORT_FILES = ['migration-report/report.json', 'migration-report/report.md', 'migration-report/schema-probes.sql']
 
 test('workflow upload: every output file the runner writes is either on the allowlist or deliberately excluded, and every allowlist entry is used', () => {
-  const remote = readFileSync(REMOTE_SH, 'utf8')
+  const remote = [REMOTE_SH, join(dirname(REMOTE_SH), 'staging-authorization-fence-repair.sh')]
+    .map(file => readFileSync(file, 'utf8')).join('\n')
   const { paths } = workflowUploadPaths(readFileSync(WORKFLOW, 'utf8'))
   const raw = new Set([...remote.matchAll(/\$\{OUTPUT_DIR\}\/([A-Za-z0-9_.${}-]+)/g)].map((m) => m[1]))
   assert.ok(raw.size > 40, `expected the runner's output file names, found ${raw.size}`)
