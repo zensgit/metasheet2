@@ -28,7 +28,8 @@ import {
   FieldSchemaChangedError,
   isFieldSchemaFenceRecheckEnabled,
 } from '../multitable/field-schema-fence-recheck'
-import type { YjsBridgeRefusalHandler } from './yjs-record-bridge'
+import { FieldWritePermissionDeniedError } from '../multitable/permission-derivation'
+import { YjsContributionRefusedError, type YjsBridgeRefusalHandler } from './yjs-record-bridge'
 
 export type YjsInvalidate = (recordIds: string[]) => Promise<void>
 
@@ -60,5 +61,36 @@ export function createFieldSchemaRefusalHandler(invalidate: YjsInvalidate): YjsB
     if (!isFieldSchemaFenceRecheckEnabled()) return
     if (!(error instanceof FieldSchemaChangedError)) return
     await invalidate([recordId])
+  }
+}
+
+/**
+ * A realtime write that was refused for an authorization reason leaves its change in the shared
+ * document and in the persisted document state although it never reached the record. The handler
+ * invalidates that generation of the document through the invalidator above: pending writes are
+ * cancelled, the in-memory document and its persisted state are dropped, the editors are told with
+ * the message they already handle, and a reopened document is built from the committed record.
+ *
+ * Authorization reasons are: a contribution that is no longer authorized or cannot be attributed,
+ * and a field the writer may not write. Always active while realtime editing is served; it does not
+ * depend on any switch.
+ */
+export function createAuthorizationRefusalHandler(invalidate: YjsInvalidate): YjsBridgeRefusalHandler {
+  return async (recordId: string, error: unknown) => {
+    if (!(error instanceof YjsContributionRefusedError) && !(error instanceof FieldWritePermissionDeniedError)) return
+    await invalidate([recordId])
+  }
+}
+
+/** Runs each handler in turn; one that fails does not stop the others. */
+export function composeRefusalHandlers(...handlers: YjsBridgeRefusalHandler[]): YjsBridgeRefusalHandler {
+  return async (recordId: string, error: unknown) => {
+    for (const handler of handlers) {
+      try {
+        await handler(recordId, error)
+      } catch (handlerError) {
+        console.error(`[yjs] refusal handler failed for record ${recordId}:`, handlerError)
+      }
+    }
   }
 }

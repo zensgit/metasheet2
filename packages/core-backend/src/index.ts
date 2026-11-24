@@ -424,6 +424,7 @@ import { adminDirectoryLocalRouter } from './routes/admin-directory-local'
 import { adminDirectoryDepartmentBindingsRouter } from './routes/admin-directory-department-bindings'
 import { adminDirectoryRoutingPolicyRouter } from './routes/admin-directory-routing-policy'
 import { adminDirectoryCapabilitiesRouter } from './routes/admin-directory-capabilities'
+import { adminRealtimeDiagnosticsRouter } from './routes/admin-realtime-diagnostics'
 import { meNotificationEndpointsRouter } from './routes/me-notification-endpoints'
 import { meNotificationTestSendRouter } from './routes/me-notification-test-send'
 import { adminNotificationVerificationsRouter } from './routes/admin-notification-verifications'
@@ -675,6 +676,7 @@ export class MetaSheetServer {
   private automationServiceReady = false
   private apiGateway?: APIGateway
   private yjsCleanupTimer?: NodeJS.Timeout
+  private realtimeProtection?: import('./realtime-authz/production').ProductionRealtimeProtection
   private yjsSyncMetricsSource?: { getMetrics(): { activeDocCount: number; docIds: string[] } }
   private yjsBridgeMetricsSource?: { getMetrics(): { pendingWriteCount: number; observedDocCount: number; flushSuccessCount: number; flushFailureCount: number } }
   private yjsSocketMetricsSource?: { getMetrics(): { activeRecordCount: number; activeSocketCount: number } }
@@ -2339,6 +2341,9 @@ export class MetaSheetServer {
     this.app.use('/api/admin/directory/department-bindings', adminDirectoryDepartmentBindingsRouter())
     this.app.use('/api/admin/directory/routing-policy', adminDirectoryRoutingPolicyRouter())
     this.app.use('/api/admin/directory/integration-capabilities', adminDirectoryCapabilitiesRouter())
+    // Realtime admission diagnostics: reason codes and counters, administrator only. The public
+    // health endpoint is not involved and keeps its status and fields.
+    this.app.use('/api/admin/realtime', adminRealtimeDiagnosticsRouter())
     this.app.use('/api/admin/directory', adminNotificationVerificationsRouter())
     // User notification endpoints and preferences: the caller's own rows; answers 404 while the switch is off.
     this.app.use(meNotificationEndpointsRouter())
@@ -4168,6 +4173,16 @@ export class MetaSheetServer {
       }
     }))
 
+    // 0a. Stop realtime protection timers and its listener.
+    if (this.realtimeProtection) {
+      const realtimeProtection = this.realtimeProtection
+      this.realtimeProtection = undefined
+      realtimeProtection.connections.dispose()
+      shutdownTasks.push(realtimeProtection.protection.stop().catch((err) => {
+        this.logger.warn(`Realtime protection stop error: ${err instanceof Error ? err.message : String(err)}`)
+      }))
+    }
+
     // 0b. Shut down MetricsStreamService
     if (this.metricsStreamService) {
       shutdownTasks.push(
@@ -5104,6 +5119,13 @@ export class MetaSheetServer {
       setApprovalCommentNotifyChecker(async ({ instanceId, userId }) =>
         canReadApprovalInstance(poolManager.get(), userId, instanceId))
       setApprovalCommentMentionDelivery((userId, event, payload) => collabService.sendTo(userId, event, payload))
+      // Realtime protection. The first read of the local switches and of the installation
+      // generations completes before any connection is accepted; while the result is the baseline
+      // row the collaboration service runs its pre-existing paths.
+      const { createProductionRealtimeProtection } = await import('./realtime-authz/production')
+      this.realtimeProtection = createProductionRealtimeProtection()
+      collabService.setRealtimeProtection(this.realtimeProtection.protection, this.realtimeProtection.connections)
+      await this.realtimeProtection.protection.start()
       collabService.initialize(this.httpServer)
     } catch (e) {
       this.logger.error('Failed to initialize WebSocket service', e as Error)
@@ -5119,8 +5141,9 @@ export class MetaSheetServer {
       const { YjsSyncService } = await import('./collab/yjs-sync-service')
       const { YjsWebSocketAdapter } = await import('./collab/yjs-websocket-adapter')
       const { YjsRecordBridge } = await import('./collab/yjs-record-bridge')
-      const { createYjsInvalidator, createFieldSchemaRefusalHandler } = await import('./collab/yjs-invalidation')
+      const { createYjsInvalidator, createFieldSchemaRefusalHandler, createAuthorizationRefusalHandler, composeRefusalHandlers } = await import('./collab/yjs-invalidation')
       const { canReadEveryYjsFieldForUser } = await import('./collab/yjs-field-read-access')
+      const { fieldPermissionsOfWriters } = await import('./collab/yjs-contribution-writers')
       const { RecordWriteService } = await import('./multitable/record-write-service')
       const { loadSheetMemberUserIdSet, loadFieldPermissionScopeMap } = await import('./multitable/permission-service')
       const { createYjsInvalidationPostCommitHook } = await import('./multitable/post-commit-hooks')
@@ -5200,7 +5223,9 @@ export class MetaSheetServer {
             const canWrite = canWriteRecord(capabilities, sheetScope, isAdminRole, userId, createdBy)
             return { canRead: capabilities.canRead, canWrite, canReadAllFields }
           } catch {
-            return null
+            // The facts could not be read: neither a yes nor a no. A subscription is still answered
+            // as before; a write is not refused on it and not let through on it.
+            return 'unknown'
           }
         })
 
@@ -5252,7 +5277,7 @@ export class MetaSheetServer {
         const yjsBridge = new YjsRecordBridge(
           yjsSyncService,
           recordWriteService,
-          async (recordId, patch, actorId, _allActorIds) => {
+          async (recordId, patch, actorId, _allActorIds, contributions) => {
             // Build RecordPatchInput from recordId + patch fields + real actor
             try {
               const recResult = await pool.query(
@@ -5319,6 +5344,16 @@ export class MetaSheetServer {
                 [recordId, Object.entries(patch).map(([fieldId, value]) => ({ fieldId, value }))],
               ])
 
+              // A merged write can carry fields changed by several actors. The layer-3 gate below
+              // checks every field against each actor that changed it; this loads the field
+              // permissions of a further writer the same way they are derived for the flushing actor
+              // (one capability resolution and one indexed scope read per further writer).
+              const loadWriterFieldPermissions = async (writerId: string) => {
+                const writer = await resolveSheetCapabilitiesForUser(pool.query.bind(pool), sheetId, writerId)
+                const writerScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, writerId)
+                return deriveFieldPermissions(visibleFields as any, writer.capabilities, { fieldScopeMap: writerScopeMap })
+              }
+
               // Resolve real user capabilities — same path as REST
               const { capabilities, sheetScope, isAdminRole, permissions: actorPerms } =
                 await resolveSheetCapabilitiesForUser(pool.query.bind(pool), sheetId, actorId)
@@ -5334,7 +5369,8 @@ export class MetaSheetServer {
               // extra indexed `field_permissions` read per debounced flush build, not per keystroke).
               const fieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, actorId)
               const fieldPermissions = deriveFieldPermissions(visibleFields as any, capabilities, { fieldScopeMap })
-              const forbiddenWriteFieldIds = Object.keys(patch).filter((fid) => isFieldWriteForbidden(fieldPermissions[fid]))
+              const writerPermissions = await fieldPermissionsOfWriters(Object.keys(patch), actorId, fieldPermissions, contributions, loadWriterFieldPermissions)
+              const forbiddenWriteFieldIds = Object.keys(patch).filter((fid) => writerPermissions(fid).some((perms) => isFieldWriteForbidden(perms[fid])))
               if (forbiddenWriteFieldIds.length > 0) {
                 // Fail-closed + atomic (F4): THROW a coarse, values-free error rather than returning null.
                 // `executePatch` maps a null input to `return false`, which lands in flushNow's
@@ -5382,6 +5418,50 @@ export class MetaSheetServer {
           (socketId) => yjsWsAdapter.getSocketUserId(socketId),
         )
 
+        // Fresh write check for every realtime change, before it reaches the shared document: the
+        // record write decision comes from the auth checker above; this one answers for the fields
+        // the change touches, with the same property guards and per-subject field permissions the
+        // flush below applies. A field that is not a field of the record's sheet is refused.
+        yjsWsAdapter.setFieldWriteChecker(async (userId, recordId, fieldIds) => {
+          try {
+            const query = pool.query.bind(pool)
+            const recResult = await query('SELECT sheet_id FROM meta_records WHERE id = $1', [recordId])
+            if (recResult.rows.length === 0) return false
+            const sheetId = String((recResult.rows[0] as { sheet_id: unknown }).sheet_id)
+            // Soft delete: a deleted sheet takes no realtime write.
+            const liveness = await loadSheetLiveness(query, sheetId)
+            if (liveness !== 'live') return false
+            const fieldResult = await query(
+              'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC',
+              [sheetId],
+            )
+            const sheetFields = (fieldResult.rows as any[]).map((f: any) => {
+              const prop = f.property && typeof f.property === 'object' ? f.property : {}
+              return { id: String(f.id), name: String(f.name), type: f.type, property: prop, options: prop.options, order: Number(f.order ?? 0) }
+            })
+            const byId = new Map(sheetFields.map((f) => [f.id, f] as const))
+            for (const fieldId of fieldIds) {
+              const field = byId.get(fieldId)
+              if (!field) return false
+              if (isFieldReadOnlyForPeople(field as any)) return false
+              if (field.property.hidden === true || field.property.permissionHidden === true) return false
+            }
+            const visibleSheetFields = sheetFields.filter((f) => !(f.property.hidden === true || f.property.permissionHidden === true))
+            const { capabilities } = await resolveSheetCapabilitiesForUser(query, sheetId, userId)
+            const fieldScopeMap = await loadFieldPermissionScopeMap(query, sheetId, userId)
+            const fieldPermissions = deriveFieldPermissions(visibleSheetFields as any, capabilities, { fieldScopeMap })
+            return !fieldIds.some((fieldId) => isFieldWriteForbidden(fieldPermissions[fieldId]))
+          } catch {
+            // The facts could not be read: neither a yes nor a no.
+            return 'unknown'
+          }
+        })
+        // Every contributor of a merged write is checked again, for its own fields, right before the
+        // write is persisted.
+        yjsBridge.setContributionChecker((recordId, contribution) => yjsWsAdapter.checkContribution(recordId, contribution))
+        if (this.realtimeProtection) {
+          yjsWsAdapter.setRealtimeProtection(this.realtimeProtection.protection, this.realtimeProtection.connections)
+        }
         yjsWsAdapter.setBridge(yjsBridge)
         yjsWsAdapter.register(collabIO)
 
@@ -5396,7 +5476,12 @@ export class MetaSheetServer {
         // (409 FIELD_SCHEMA_CHANGED) is no longer dropped in silence — the record's document is invalidated, so
         // its editors are told with the message they already handle. Inert unless the conversion flag AND the
         // writer fence are on; every other refusal on the bridge is left as it was.
-        yjsBridge.setRefusalHandler(createFieldSchemaRefusalHandler(yjsInvalidate))
+        // A write refused for an authorization reason (a contribution that is no longer authorized, a
+        // field the writer may not write) invalidates the document generation the same way, always.
+        yjsBridge.setRefusalHandler(composeRefusalHandlers(
+          createFieldSchemaRefusalHandler(yjsInvalidate),
+          createAuthorizationRefusalHandler(yjsInvalidate),
+        ))
         recordWriteService.setPostCommitHooks([
           createYjsInvalidationPostCommitHook(yjsInvalidate),
         ])

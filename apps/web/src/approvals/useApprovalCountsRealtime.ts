@@ -1,5 +1,6 @@
 import { onBeforeUnmount, onMounted } from 'vue'
 import { io, type Socket } from 'socket.io-client'
+import { installRealtimeReconnect, type RealtimeReconnectHandle } from '../utils/realtimeReconnect'
 import { useAuth } from '../composables/useAuth'
 import { getApiBase } from '../utils/api'
 
@@ -71,10 +72,13 @@ function normalizePayload(payload: unknown): ApprovalCountsUpdatedPayload | null
 export function useApprovalCountsRealtime(options: UseApprovalCountsRealtimeOptions) {
   const auth = useAuth()
   let socket: Socket | null = null
+  let reconnectHandle: RealtimeReconnectHandle | null = null
   let disconnected = false
   let connectionPromise: Promise<Socket | null> | null = null
 
   function cleanupSocket() {
+    reconnectHandle?.stop()
+    reconnectHandle = null
     socket?.disconnect()
     socket = null
     connectionPromise = null
@@ -94,6 +98,8 @@ export function useApprovalCountsRealtime(options: UseApprovalCountsRealtimeOpti
           transports: ['websocket', 'polling'],
           auth: { token },
         })
+        // The per-user room is entered by the server at connect, so a reconnect needs nothing more.
+        reconnectHandle = installRealtimeReconnect(nextSocket)
 
         nextSocket.on('approval:counts-updated', (payload: unknown) => {
           const normalized = normalizePayload(payload)

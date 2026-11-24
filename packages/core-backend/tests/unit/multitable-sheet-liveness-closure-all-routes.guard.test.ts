@@ -1360,6 +1360,7 @@ const CHECKER_REFUSALS: Record<string, { refusal: string; why: string }> = {
     refusal: '{ canRead: false, canWrite: false }',
     why: 'null means "record not found" (NOT_FOUND) to the adapter; a caller without read gets this object (FORBIDDEN)',
   },
+  'index.ts yjsWsAdapter.setFieldWriteChecker': { refusal: 'false', why: 'boolean: false = this realtime change is not written' },
 }
 
 function checkerFindings(rel: string, sf: ScannedRouteFile['sourceFile'], refusals = CHECKER_REFUSALS): { found: string[]; keys: string[]; problems: string[] } {
@@ -3082,12 +3083,13 @@ describe('sheet-liveness closure over EVERY route file', () => {
       if (!keys.has(key)) problems.push(`CHECKER_REFUSALS ${key}: no such checker (dead entry)`)
     }
     expect(problems, problems.join('\n')).toEqual([])
-    // Population: the four index.ts seams (sheet room, comment room, comment-mention notify, Yjs subscribe).
+    // Population: the five index.ts seams (sheet room, comment room, comment-mention notify, Yjs subscribe, Yjs field write).
     expect(found.filter((f) => f.startsWith('src/index.ts:')).map((f) => f.replace(/^src\/index\.ts:\d+ /, ''))).toEqual([
       'collabService.setSheetRoomAuthChecker',
       'collabService.setCommentRoomAuthChecker',
       'commentService.setCommentTargetReadChecker',
       'yjsWsAdapter.setAuthChecker',
+      'yjsWsAdapter.setFieldWriteChecker',
     ])
   })
 })

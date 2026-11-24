@@ -25,8 +25,28 @@ export type YjsRecordSeedFn = (
   recordId: string,
 ) => Promise<Record<string, unknown> | null>
 
+/**
+ * A record document that cannot be served: its earlier generation was invalidated and its persisted
+ * state could not be removed, or it kept being invalidated while it was loading.
+ */
+export class YjsDocUnavailableError extends Error {
+  constructor(message = 'Record document is not available') {
+    super(message)
+    this.name = 'YjsDocUnavailableError'
+  }
+}
+
 export class YjsSyncService {
   private docs = new Map<string, { doc: Y.Doc; lastAccess: number }>()
+  /**
+   * Generation of each record document. Invalidation starts a new generation: a document that was
+   * still loading in the old one is discarded instead of being published, and persistence writes of
+   * the old one are settled before its persisted state is removed.
+   */
+  private generations = new Map<string, number>()
+  private pendingPersistence = new Map<string, Set<Promise<void>>>()
+  /** Records whose invalidated state could not be removed: not served until a removal succeeds. */
+  private quarantined = new Set<string>()
   private persistence: YjsPersistenceAdapter
   private cleanupTimer: NodeJS.Timeout
   private recordSeed: YjsRecordSeedFn | null
@@ -88,13 +108,52 @@ export class YjsSyncService {
     }, 'seed')
   }
 
-  async getOrCreateDoc(recordId: string): Promise<Y.Doc> {
-    const existing = this.docs.get(recordId)
-    if (existing) {
-      existing.lastAccess = Date.now()
-      return existing.doc
-    }
+  private generationOf(recordId: string): number {
+    return this.generations.get(recordId) ?? 0
+  }
 
+  private purgeAdapter(): ((ids: string[]) => Promise<void>) | null {
+    const adapter = this.persistence as YjsPersistenceAdapter & { purgeRecords?: (ids: string[]) => Promise<void> }
+    return typeof adapter.purgeRecords === 'function' ? adapter.purgeRecords.bind(adapter) : null
+  }
+
+  private trackPersistence(recordId: string, work: Promise<void>): void {
+    const pending = this.pendingPersistence.get(recordId) ?? new Set<Promise<void>>()
+    pending.add(work)
+    this.pendingPersistence.set(recordId, pending)
+    void work.then(undefined, () => undefined).then(() => {
+      pending.delete(work)
+      if (pending.size === 0 && this.pendingPersistence.get(recordId) === pending) this.pendingPersistence.delete(recordId)
+    })
+  }
+
+  async getOrCreateDoc(recordId: string): Promise<Y.Doc> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const existing = this.docs.get(recordId)
+      if (existing) {
+        existing.lastAccess = Date.now()
+        return existing.doc
+      }
+      if (this.quarantined.has(recordId)) {
+        // The state of an invalidated generation may still be persisted; it must not be loaded.
+        const purge = this.purgeAdapter()
+        if (!purge) throw new YjsDocUnavailableError()
+        try {
+          await purge([recordId])
+        } catch {
+          throw new YjsDocUnavailableError()
+        }
+        this.quarantined.delete(recordId)
+      }
+      const generation = this.generationOf(recordId)
+      const doc = await this.loadDocForGeneration(recordId, generation)
+      if (doc) return doc
+    }
+    throw new YjsDocUnavailableError()
+  }
+
+  /** Null when the record was invalidated while this document was loading: it is not published. */
+  private async loadDocForGeneration(recordId: string, generation: number): Promise<Y.Doc | null> {
     const doc = new Y.Doc()
 
     // Load persisted state
@@ -110,9 +169,11 @@ export class YjsSyncService {
     // user edit lands on top of it.
     doc.on('update', (update: Uint8Array, origin: unknown) => {
       if (origin === 'persistence' || origin === 'seed') return
-      this.persistence.storeUpdate(recordId, update).catch((err) =>
+      // A document of an invalidated generation persists nothing more.
+      if (this.generationOf(recordId) !== generation) return
+      this.trackPersistence(recordId, this.persistence.storeUpdate(recordId, update).catch((err) =>
         console.error(`Failed to persist yjs update for ${recordId}:`, err),
-      )
+      ))
     })
 
     // Only seed from meta_records if nothing had been persisted yet.
@@ -122,6 +183,17 @@ export class YjsSyncService {
       await this.seedFreshDoc(recordId, doc)
     }
 
+    if (this.generationOf(recordId) !== generation || this.quarantined.has(recordId)) {
+      doc.destroy()
+      return null
+    }
+    const raced = this.docs.get(recordId)
+    if (raced) {
+      // Another loader of the same generation published first; this copy is dropped.
+      doc.destroy()
+      raced.lastAccess = Date.now()
+      return raced.doc
+    }
     this.docs.set(recordId, { doc, lastAccess: Date.now() })
     return doc
   }
@@ -152,18 +224,28 @@ export class YjsSyncService {
    */
   async invalidateDocs(recordIds: string[]): Promise<void> {
     if (recordIds.length === 0) return
+    const settling: Promise<void>[] = []
     for (const recordId of recordIds) {
+      // New generation first: a concurrent loader of the old one will not publish its document.
+      this.generations.set(recordId, this.generationOf(recordId) + 1)
       const entry = this.docs.get(recordId)
       if (entry) {
         entry.doc.destroy()
         this.docs.delete(recordId)
       }
+      for (const work of this.pendingPersistence.get(recordId) ?? []) settling.push(work)
     }
-    const adapter = this.persistence as YjsPersistenceAdapter & {
-      purgeRecords?: (ids: string[]) => Promise<void>
-    }
-    if (typeof adapter.purgeRecords === 'function') {
-      await adapter.purgeRecords(recordIds)
+    // Writes of the old generation that are already on their way are settled before the removal,
+    // so none of them can land after it.
+    await Promise.allSettled(settling)
+    const purge = this.purgeAdapter()
+    if (purge) {
+      try {
+        await purge(recordIds)
+      } catch (error) {
+        for (const recordId of recordIds) this.quarantined.add(recordId)
+        throw error
+      }
     }
   }
 

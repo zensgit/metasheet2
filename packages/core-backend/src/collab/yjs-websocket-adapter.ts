@@ -4,20 +4,27 @@ import * as encoding from 'lib0/encoding'
 import * as decoding from 'lib0/decoding'
 import type { Server as SocketServer, Socket, Namespace } from 'socket.io'
 import type { YjsSyncService } from './yjs-sync-service'
-import type { YjsRecordBridge } from './yjs-record-bridge'
+import type { YjsContribution, YjsRecordBridge } from './yjs-record-bridge'
+import { baselineRealtimeProtection, type RealtimeProtection } from '../realtime-authz/protection'
+import type { CurrentAnswer, ProtectedConnections } from '../realtime-authz/protected-connections'
+import { bindingKey, type RealtimeSessionBinding } from '../realtime-authz/session-binding'
 
 // Message types
 const MSG_SYNC = 0
 // const MSG_AWARENESS = 1  // Not used in POC
 
+export type YjsRecordAccess = { canRead: boolean; canWrite: boolean; canReadAllFields?: boolean }
+
 /**
  * Callback to check if a user has access to a record.
- * Returns { canRead, canWrite } or null if record doesn't exist.
+ * Returns { canRead, canWrite }, or null if record doesn't exist, or 'unknown' when the facts could
+ * not be read. 'unknown' (and a checker that rejects) is neither a yes nor a no: nothing is served on
+ * it, and nothing is concluded from it.
  */
 export type YjsAuthChecker = (
   userId: string,
   recordId: string,
-) => Promise<{ canRead: boolean; canWrite: boolean; canReadAllFields?: boolean } | null>
+) => Promise<YjsRecordAccess | null | 'unknown'>
 
 /**
  * Callback to verify a JWT token and return the trusted userId.
@@ -38,7 +45,111 @@ export type YjsPresenceSnapshot = {
 
 export type YjsInvalidatedPayload = {
   recordId: string
-  reason: 'rest-write'
+  /**
+   * `rest-write`: the document of this record is void; drop it and reopen the record.
+   * `resync`: the document is still the shared one, but a change did not reach this subscriber;
+   * it stays subscribed and asks for what it is missing with a first sync step. A client that
+   * does not know this reason treats it like the other one, which is safe.
+   */
+  reason: 'rest-write' | 'resync'
+}
+
+/**
+ * Fresh write check for one user on one record: may this user write the record and every one of
+ * these fields right now? Called for every write, never answered from a value cached at subscribe.
+ */
+export type YjsFieldWriteChecker = (userId: string, recordId: string, fieldIds: string[]) => Promise<boolean | 'unknown'>
+
+/** allowed / denied by an authoritative fact / unknown: the facts could not be read or nothing is served. */
+export type YjsWriteVerdict = 'allowed' | 'denied' | 'unknown'
+
+export interface YjsWebSocketAdapterOptions {
+  /** Delay between two attempts to process an incoming change whose check could not be answered. */
+  heldUpdateRetryMs?: number
+  /** How long an incoming change is held for an answer before it is refused visibly. */
+  heldUpdateMaxMs?: number
+  /**
+   * How many incoming changes of one user to one record may wait, over all connections of that
+   * user; further ones are refused visibly. There is no bound shared between users: whatever one
+   * user has waiting never makes a change of another user be refused.
+   */
+  heldUpdateMaxQueued?: number
+  /** How long the attribution of a closed connection is kept when no write of it is waiting. */
+  contributorRetentionMs?: number
+  /** How long a namespace handshake may wait while handshakes are held; then it is refused as transient. */
+  heldHandshakeMaxMs?: number
+  /** How many namespace handshakes may wait at once; further ones are refused as transient. */
+  heldHandshakeMaxWaiting?: number
+}
+
+/** Below the time after which the transport closes a client that has joined no namespace. */
+export const DEFAULT_HELD_HANDSHAKE_MAX_MS = 20_000
+export const DEFAULT_HELD_HANDSHAKE_MAX_WAITING = 1_000
+export const DEFAULT_HELD_UPDATE_RETRY_MS = 250
+export const DEFAULT_HELD_UPDATE_MAX_MS = 30_000
+export const DEFAULT_HELD_UPDATE_MAX_QUEUED = 512
+export const DEFAULT_CONTRIBUTOR_RETENTION_MS = 60_000
+
+/** What is known about the sender of an incoming change at the moment the change arrives. */
+interface ArrivalContext {
+  userId: string | undefined
+  binding: RealtimeSessionBinding | null
+  subscribed: boolean
+  arrivedAt: number
+  /** The shared document at arrival: the generation this change was made against. */
+  doc: Y.Doc | undefined
+}
+
+/**
+ * What an incoming update would change, found by applying it to an isolated copy of the shared
+ * document. `fields` lists the record fields it touches; `undeterminable` is an update whose
+ * effect cannot be attributed to record fields (it depends on state the document does not have, or
+ * it changes something other than the fields of the record).
+ */
+export type StagedYjsUpdate =
+  | { kind: 'noop' }
+  | { kind: 'fields'; fieldIds: string[] }
+  | { kind: 'undeterminable' }
+
+export function stageYjsUpdate(doc: Y.Doc, update: Uint8Array): StagedYjsUpdate {
+  const staging = new Y.Doc()
+  try {
+    Y.applyUpdate(staging, Y.encodeStateAsUpdate(doc), 'staging-base')
+    const fields = staging.getMap('fields')
+    const fieldIds = new Set<string>()
+    let changed = false
+    let determinable = true
+    staging.on('afterTransaction', (transaction: Y.Transaction) => {
+      if (transaction.origin !== 'staged-update') return
+      for (const [type, keys] of transaction.changed) {
+        changed = true
+        if ((type as unknown) === fields) {
+          for (const key of keys) {
+            if (typeof key === 'string') fieldIds.add(key)
+            else determinable = false
+          }
+          continue
+        }
+        // A text value stored directly under a field key; anything nested deeper is not a field.
+        const item = (type as unknown as { _item?: { parentSub?: string | null } | null })._item
+        if (type instanceof Y.Text && (type.parent as unknown) === fields && typeof item?.parentSub === 'string') {
+          fieldIds.add(item.parentSub)
+          continue
+        }
+        determinable = false
+      }
+    })
+    Y.applyUpdate(staging, update, 'staged-update')
+    const store = staging.store as unknown as { pendingStructs?: unknown; pendingDs?: unknown }
+    if (store.pendingStructs || store.pendingDs) return { kind: 'undeterminable' }
+    if (!determinable) return { kind: 'undeterminable' }
+    if (!changed) return { kind: 'noop' }
+    return { kind: 'fields', fieldIds: [...fieldIds].sort() }
+  } catch {
+    return { kind: 'undeterminable' }
+  } finally {
+    staging.destroy()
+  }
 }
 
 type SocketPresenceState = {
@@ -51,6 +162,37 @@ export class YjsWebSocketAdapter {
   private authChecker: YjsAuthChecker | null = null
   private tokenVerifier: YjsTokenVerifier | null = null
   private namespace: Namespace | null = null
+  private fieldWriteChecker: YjsFieldWriteChecker | null = null
+  // Realtime protection. With the baseline protection (the default) the handshake and the read
+  // paths are the pre-existing ones.
+  private protection: RealtimeProtection = baselineRealtimeProtection
+  private connections: ProtectedConnections | null = null
+  /** One change at a time per sender and record, in the order the sender sent them. */
+  private recordWriteQueues = new Map<string, Promise<void>>()
+  /**
+   * Who each contributing connection was bound to, kept after the connection closed so a pending
+   * write can still be attributed and re-checked when it is persisted.
+   */
+  private contributors = new Map<string, { userId: string; binding: RealtimeSessionBinding | null; closedAt: number | null }>()
+  private readonly heldUpdateRetryMs: number
+  private readonly heldUpdateMaxMs: number
+  private readonly heldUpdateMaxQueued: number
+  /** Changes of one connection to one record that are waiting or being processed, by queue key. */
+  private queuedBySender = new Map<string, number>()
+  /** Changes of one user to one record that are waiting or being processed, over all its connections. */
+  private queuedByUser = new Map<string, number>()
+  /** The number of the last change put into each sender queue. */
+  private lastQueuedNumber = new Map<string, number>()
+  /**
+   * A sender that was told its copy of a record is void: its changes up to this number are not
+   * processed any more. Changes it sends after it has reopened the record have higher numbers.
+   */
+  private endedUpTo = new Map<string, number>()
+  private readonly contributorRetentionMs: number
+  private readonly heldHandshakeMaxMs: number
+  private readonly heldHandshakeMaxWaiting: number
+  /** Namespace handshakes waiting for the next decision; each is settled exactly once. */
+  private readonly heldHandshakes = new Set<(outcome: 'decided' | 'expired' | 'gone') => void>()
 
   /** Per-socket verified userId (from JWT, not from client query) */
   private socketUserId = new Map<string, string>()
@@ -61,7 +203,14 @@ export class YjsWebSocketAdapter {
   /** Per-record presence state: recordId → socketId → { userId, fieldId } */
   private recordPresence = new Map<string, Map<string, SocketPresenceState>>()
 
-  constructor(private syncService: YjsSyncService) {}
+  constructor(private syncService: YjsSyncService, options: YjsWebSocketAdapterOptions = {}) {
+    this.heldUpdateRetryMs = options.heldUpdateRetryMs ?? DEFAULT_HELD_UPDATE_RETRY_MS
+    this.heldUpdateMaxMs = options.heldUpdateMaxMs ?? DEFAULT_HELD_UPDATE_MAX_MS
+    this.heldUpdateMaxQueued = options.heldUpdateMaxQueued ?? DEFAULT_HELD_UPDATE_MAX_QUEUED
+    this.contributorRetentionMs = options.contributorRetentionMs ?? DEFAULT_CONTRIBUTOR_RETENTION_MS
+    this.heldHandshakeMaxMs = options.heldHandshakeMaxMs ?? DEFAULT_HELD_HANDSHAKE_MAX_MS
+    this.heldHandshakeMaxWaiting = options.heldHandshakeMaxWaiting ?? DEFAULT_HELD_HANDSHAKE_MAX_WAITING
+  }
 
   /** Attach bridge for Y.Text → RecordWriteService patching. */
   setBridge(bridge: YjsRecordBridge): void {
@@ -73,6 +222,484 @@ export class YjsWebSocketAdapter {
     this.authChecker = checker
   }
 
+  /** Attach the fresh per-write check of record and field write access. */
+  setFieldWriteChecker(checker: YjsFieldWriteChecker): void {
+    this.fieldWriteChecker = checker
+  }
+
+  /**
+   * Attaches realtime protection. In protected mode the namespace handshake binds the connection to
+   * its session, every message re-reads that session, and every send to a record room passes the
+   * delivery boundary of `connections`.
+   */
+  setRealtimeProtection(protection: RealtimeProtection, connections: ProtectedConnections): void {
+    this.protection = protection
+    this.connections = connections
+    connections.onSweep(() => this.sweepSubscriptions())
+    protection.subscribe((event) => {
+      if (event.type === 'decision' && event.decision.ordinaryHandshake !== 'hold') {
+        // Handshakes are no longer held: every waiting one goes on and is judged by the new decision.
+        for (const settle of [...this.heldHandshakes]) settle('decided')
+      }
+      if (event.type !== 'decision' || !this.namespace || !this.connections || !this.isProtected()) return
+      for (const socket of this.namespace.sockets.values()) this.adoptSocket(socket, true)
+      if (event.decision.established === 'terminate') {
+        this.connections.endAll({ code: 'REALTIME_UNAVAILABLE', retry: true })
+        return
+      }
+      void this.connections.sweep()
+    })
+  }
+
+  private isProtected(): boolean {
+    return this.connections !== null && this.protection.mode() !== 'baseline'
+  }
+
+  private handshakesHeld(): boolean {
+    return this.isProtected() && this.protection.decision().ordinaryHandshake === 'hold'
+  }
+
+  /** How many namespace handshakes are waiting right now. */
+  heldHandshakeCount(): number {
+    return this.heldHandshakes.size
+  }
+
+  /**
+   * Keeps a namespace handshake waiting while handshakes are held. The connection is not a member
+   * of the namespace meanwhile, so nothing can be served to it. Resolves `decided` when a decision
+   * that no longer holds handshakes is there, `expired` after the bound or when too many are
+   * waiting, and `gone` when the client went away first.
+   */
+  private waitWhileHandshakesHeld(socket: Socket, remainingMs: number): Promise<'decided' | 'expired' | 'gone'> {
+    if (remainingMs <= 0 || this.heldHandshakes.size >= this.heldHandshakeMaxWaiting) return Promise.resolve('expired')
+    return new Promise((resolve) => {
+      const conn = (socket as unknown as { conn?: { once?: (event: string, handler: () => void) => void; off?: (event: string, handler: () => void) => void } }).conn
+      const onClose = (): void => settle('gone')
+      const timer = setTimeout(() => settle('expired'), remainingMs)
+      timer.unref?.()
+      const settle = (outcome: 'decided' | 'expired' | 'gone'): void => {
+        if (!this.heldHandshakes.delete(settle)) return
+        clearTimeout(timer)
+        conn?.off?.('close', onClose)
+        resolve(outcome)
+      }
+      this.heldHandshakes.add(settle)
+      conn?.once?.('close', onClose)
+    })
+  }
+
+  /**
+   * Idle pass over record subscriptions: a connection that stays subscribed without any traffic is
+   * still taken out of the record once its user may no longer read it.
+   */
+  private async sweepSubscriptions(): Promise<void> {
+    if (!this.namespace || !this.connections || !this.isProtected() || !this.authChecker) return
+    for (const room of [...this.namespace.adapter.rooms.keys()]) {
+      if (!room.startsWith('yjs:')) continue
+      const recordId = room.slice('yjs:'.length)
+      const members = this.localRoomSockets(room)
+      if (members.length === 0) continue
+      await this.connections.sweepResources(members, {
+        resourceCheck: async (binding) => {
+          const access = await this.readAccess(binding.userId, recordId)
+          if (access === 'unknown') throw new Error('read access not answered')
+          return Boolean(access && access.canRead && access.canReadAllFields !== false)
+        },
+        onResourceDenied: (socket) => this.dropSubscription(socket as Socket, recordId),
+      })
+    }
+  }
+
+  private adoptSocket(socket: Socket, established = false): void {
+    this.connections?.register(socket, {
+      onAdmitted: (admitted, binding) => {
+        this.socketUserId.set(admitted.id, binding.userId)
+      },
+    }, { established })
+  }
+
+  /** The verified user of a connection for this message; in protected mode its session is read again. */
+  private async currentUser(socket: Socket): Promise<{ userId: string; binding: RealtimeSessionBinding | null } | null> {
+    if (this.isProtected() && this.connections) {
+      this.adoptSocket(socket)
+      const binding = await this.connections.ensureCurrent(socket)
+      return binding ? { userId: binding.userId, binding } : null
+    }
+    const userId = this.socketUserId.get(socket.id)
+    return userId ? { userId, binding: null } : null
+  }
+
+  /**
+   * Read access of one user to one record, read now. 'unknown' when the facts could not be read.
+   */
+  private async readAccess(userId: string, recordId: string): Promise<YjsRecordAccess | null | 'unknown'> {
+    if (!this.authChecker) return { canRead: true, canWrite: true }
+    try {
+      return await this.authChecker(userId, recordId)
+    } catch {
+      return 'unknown'
+    }
+  }
+
+  private localRoomSockets(room: string): Socket[] {
+    if (!this.namespace) return []
+    const ids = this.namespace.adapter.rooms.get(room)
+    if (!ids) return []
+    const sockets: Socket[] = []
+    for (const id of ids) {
+      const socket = this.namespace.sockets.get(id)
+      if (socket) sockets.push(socket)
+    }
+    return sockets
+  }
+
+  private dropSubscription(socket: Socket, recordId: string): void {
+    this.endQueuedChanges(recordId, socket.id)
+    socket.leave(`yjs:${recordId}`)
+    this.socketPermissions.get(socket.id)?.delete(recordId)
+    socket.emit('yjs:error', { recordId, code: 'FORBIDDEN', message: 'No read access' })
+    if (this.removePresence(recordId, socket.id)) this.emitPresence(recordId)
+  }
+
+  /**
+   * Sends to the room of a record. Baseline: the pre-existing room emit. Protected: every recipient
+   * is checked again for the session it is bound to and for read access to the record.
+   */
+  private emitToRecordRoom(recordId: string, event: string, payload: unknown, except?: Socket): void {
+    if (!this.namespace) return
+    const room = `yjs:${recordId}`
+    if (!this.isProtected() || !this.connections) {
+      if (except) except.to(room).emit(event, payload)
+      else this.namespace.to(room).emit(event, payload)
+      return
+    }
+    const members = this.localRoomSockets(room).filter((socket) => socket !== except)
+    const served = new Set<Socket>()
+    void this.connections.deliver(members, (socket) => {
+      served.add(socket as Socket)
+      socket.emit(event, payload)
+    }, {
+      resourceCheck: async (binding) => {
+        const access = await this.readAccess(binding.userId, recordId)
+        // Not answered: withheld from this recipient; it is not a refusal.
+        if (access === 'unknown') throw new Error('read access not answered')
+        return Boolean(access && access.canRead && access.canReadAllFields !== false)
+      },
+      onResourceDenied: (socket) => this.dropSubscription(socket as Socket, recordId),
+      stillSubscribed: (socket) => (socket as Socket).rooms.has(room),
+    }).catch(() => undefined).then(() => {
+      // A subscriber that did not get a change of the document is behind the shared document. It
+      // is told so instead of being left behind in silence. It stays subscribed: whether it may
+      // still read is not known, and what it asks for next is checked like every other request.
+      if (event !== 'yjs:update') return
+      for (const member of members) {
+        if (served.has(member) || !member.connected || !member.rooms.has(room)) continue
+        member.emit('yjs:invalidated', { recordId, reason: 'resync' } satisfies YjsInvalidatedPayload)
+      }
+    })
+  }
+
+  private retireContributor(socketId: string): void {
+    const now = Date.now()
+    const entry = this.contributors.get(socketId)
+    if (entry) entry.closedAt = now
+    for (const [id, contributor] of this.contributors) {
+      if (contributor.closedAt === null || now - contributor.closedAt <= this.contributorRetentionMs) continue
+      // A write this connection contributed to may still be waiting for its re-check: the
+      // attribution is kept until that write has been written or refused.
+      if (this.bridge?.hasPendingOrigin(id)) continue
+      this.contributors.delete(id)
+    }
+  }
+
+  /**
+   * Re-check of one contribution right before a merged write is persisted (attach it to the bridge
+   * with `setContributionChecker`). The contributor must still be attributable to the connection the
+   * changes arrived on, must still be allowed to write the record and each field it changed, and in
+   * protected mode the session it was bound to must still be current.
+   *
+   * The answer is three-valued. `denied` is returned only for an authoritative fact; a read that
+   * failed, an instance that is not serving and a session that could not be read are `unknown`.
+   */
+  async checkContribution(recordId: string, contribution: YjsContribution): Promise<YjsWriteVerdict> {
+    if (contribution.originId === null) return 'denied'
+    const contributor = this.contributors.get(contribution.originId)
+    if (!contributor || contributor.userId !== contribution.actorId) return 'denied'
+    const write = await this.mayWrite(contributor.userId, recordId, contribution.fieldIds)
+    if (write !== 'allowed') return write
+    if (!this.isProtected()) return 'allowed'
+    return this.sessionVerdict(contributor.binding ?? this.liveBinding(contribution.originId))
+  }
+
+  private liveBinding(socketId: string): RealtimeSessionBinding | null {
+    const socket = this.namespace?.sockets.get(socketId)
+    return socket && this.connections ? this.connections.bindingOf(socket) : null
+  }
+
+  /** Session facts of a binding, read now, without touching any connection. */
+  private async sessionVerdict(binding: RealtimeSessionBinding | null): Promise<YjsWriteVerdict> {
+    // Not serving, or no session to read yet: nothing can be told either way.
+    if (this.protection.decision().established !== 'revalidate' || !binding) return 'unknown'
+    let result
+    try {
+      result = await this.protection.authorize([binding])
+    } catch {
+      return 'unknown'
+    }
+    const verdict = result.verdicts.get(bindingKey(binding))
+    if (verdict?.state === 'denied') return 'denied'
+    return result.serving && verdict?.state === 'allowed' ? 'allowed' : 'unknown'
+  }
+
+  /** Fresh record and field write check; with no checker attached there is nothing to refuse. */
+  private async mayWrite(userId: string, recordId: string, fieldIds: string[]): Promise<YjsWriteVerdict> {
+    if (!this.authChecker) return 'allowed'
+    try {
+      const access = await this.authChecker(userId, recordId)
+      if (access === 'unknown') return 'unknown'
+      if (!access || !access.canWrite) return 'denied'
+      if (this.fieldWriteChecker) {
+        const fields = await this.fieldWriteChecker(userId, recordId, fieldIds)
+        if (fields === 'unknown') return 'unknown'
+        if (fields !== true) return 'denied'
+      }
+      return 'allowed'
+    } catch {
+      return 'unknown'
+    }
+  }
+
+  private queueKeyOf(recordId: string, socketId: string): string {
+    return `${recordId}\u0000${socketId}`
+  }
+
+  /**
+   * One change at a time per connection and record, in the order that connection sent them. The
+   * changes of different connections do not wait for each other: a change that is held was never
+   * relayed, so no change of anybody else can depend on it. How many may wait is counted per user
+   * and record, over all connections of the user, and for nobody else. Returns the number of the
+   * queued change, or null when this user already has as many waiting as it may.
+   */
+  private enqueueWrite(recordId: string, socketId: string, userKey: string, work: (number: number) => Promise<void>): number | null {
+    const key = this.queueKeyOf(recordId, socketId)
+    const ownerKey = `${recordId}\u0000${userKey}`
+    const ofUser = this.queuedByUser.get(ownerKey) ?? 0
+    if (ofUser >= this.heldUpdateMaxQueued) return null
+    this.queuedByUser.set(ownerKey, ofUser + 1)
+    this.queuedBySender.set(key, (this.queuedBySender.get(key) ?? 0) + 1)
+    const number = (this.lastQueuedNumber.get(key) ?? 0) + 1
+    this.lastQueuedNumber.set(key, number)
+    const previous = this.recordWriteQueues.get(key) ?? Promise.resolve()
+    const next = previous.then(() => work(number)).catch(() => undefined).finally(() => {
+      const leftOfUser = (this.queuedByUser.get(ownerKey) ?? 1) - 1
+      if (leftOfUser > 0) this.queuedByUser.set(ownerKey, leftOfUser)
+      else this.queuedByUser.delete(ownerKey)
+      const leftOfSender = (this.queuedBySender.get(key) ?? 1) - 1
+      if (leftOfSender > 0) {
+        this.queuedBySender.set(key, leftOfSender)
+      } else {
+        // The queue is empty: nothing of it is left to end, and its numbering can start over.
+        this.queuedBySender.delete(key)
+        this.lastQueuedNumber.delete(key)
+        this.endedUpTo.delete(key)
+      }
+      if (this.recordWriteQueues.get(key) === next) this.recordWriteQueues.delete(key)
+    })
+    this.recordWriteQueues.set(key, next)
+    return number
+  }
+
+  /** Ends everything this sender has waiting for this record: it was told its copy is void. */
+  private endQueuedChanges(recordId: string, socketId: string): void {
+    const key = this.queueKeyOf(recordId, socketId)
+    const last = this.lastQueuedNumber.get(key)
+    if (last !== undefined) this.endedUpTo.set(key, last)
+  }
+
+  /** A check of a held change with the time the change has left: past it, the check counts as not answered. */
+  private withinHold<T>(arrival: ArrivalContext, check: Promise<T>, notAnswered: T): Promise<T> {
+    const remaining = arrival.arrivedAt + this.heldUpdateMaxMs - Date.now()
+    if (remaining <= 0) {
+      check.catch(() => undefined)
+      return Promise.resolve(notAnswered)
+    }
+    return new Promise<T>((resolve) => {
+      let settled = false
+      const timer = setTimeout(() => {
+        if (settled) return
+        settled = true
+        resolve(notAnswered)
+      }, remaining)
+      timer.unref?.()
+      check.then(
+        (answer) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          resolve(answer)
+        },
+        () => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          resolve(notAnswered)
+        },
+      )
+    })
+  }
+
+  private arrivalOf(socket: Socket, recordId: string): ArrivalContext {
+    return {
+      userId: this.socketUserId.get(socket.id),
+      binding: this.connections ? this.connections.bindingOf(socket) : null,
+      subscribed: !this.authChecker || this.socketPermissions.get(socket.id)?.has(recordId) === true,
+      arrivedAt: Date.now(),
+      doc: this.syncService.getDoc(recordId),
+    }
+  }
+
+  /**
+   * Tells one connection that its copy of a record document is no longer the shared one, and takes
+   * it out of the record. The client leaves the document and reopens it from the shared state.
+   */
+  private tellInvalidated(socket: Socket, recordId: string): void {
+    // Nothing further is taken from the copy this connection holds now.
+    this.endQueuedChanges(recordId, socket.id)
+    socket.leave(`yjs:${recordId}`)
+    this.socketPermissions.get(socket.id)?.delete(recordId)
+    socket.emit('yjs:invalidated', { recordId, reason: 'rest-write' } satisfies YjsInvalidatedPayload)
+    if (this.removePresence(recordId, socket.id)) this.emitPresence(recordId)
+  }
+
+  private refuseVisibly(socket: Socket, recordId: string, code: 'FORBIDDEN' | 'UNAVAILABLE', message: string): void {
+    socket.emit('yjs:error', { recordId, code, message })
+    // The local document of this client now holds a change the server did not take.
+    this.tellInvalidated(socket, recordId)
+  }
+
+  /**
+   * Every incoming change — the update event and the two write forms of the sync message — is queued
+   * here, per connection, in the order that connection sent it. A change whose check cannot be
+   * answered is HELD: it is not applied, not persisted and not relayed, the later changes of the
+   * same connection wait behind it, and it is tried again until an answer is there. A change held longer than the
+   * bound is refused visibly, also when a check of it never returns. A sender that is refused is
+   * told once that its copy is void; what it had waiting is then ended without being read for.
+   */
+  private acceptIncomingUpdate(socket: Socket, recordId: string, update: Uint8Array, relayData: number[]): void {
+    const arrival = this.arrivalOf(socket, recordId)
+    if (!arrival.subscribed) {
+      socket.emit('yjs:error', { recordId, code: 'FORBIDDEN', message: 'Not subscribed' })
+      return
+    }
+    const key = this.queueKeyOf(recordId, socket.id)
+    // A connection without a verified user (no checker attached) is its own owner.
+    const owner = arrival.userId ? `user:${arrival.userId}` : `connection:${socket.id}`
+    const queued = this.enqueueWrite(recordId, socket.id, owner, async (number) => {
+      for (;;) {
+        // An earlier change of this sender was refused and the sender told to reopen the record:
+        // what it sent before that is not processed, and nothing is read for it.
+        if ((this.endedUpTo.get(key) ?? 0) >= number) return
+        // A sender that is still connected and has left the record since: ended without a read.
+        if (socket.connected && this.authChecker && this.socketPermissions.get(socket.id)?.has(recordId) !== true) {
+          socket.emit('yjs:error', { recordId, code: 'FORBIDDEN', message: 'Not subscribed' })
+          return
+        }
+        const outcome = await this.applyGuardedUpdate(socket, recordId, update, relayData, arrival)
+        if (outcome !== 'hold') return
+        if ((this.endedUpTo.get(key) ?? 0) >= number) return
+        const remaining = arrival.arrivedAt + this.heldUpdateMaxMs - Date.now()
+        if (remaining <= 0) {
+          this.refuseVisibly(socket, recordId, 'UNAVAILABLE', 'Change could not be checked in time; reopen the record')
+          return
+        }
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, Math.min(this.heldUpdateRetryMs, remaining))
+          timer.unref?.()
+        })
+      }
+    })
+    if (queued === null) this.refuseVisibly(socket, recordId, 'UNAVAILABLE', 'Too many changes are waiting for this record; reopen it')
+  }
+
+  /**
+   * One attempt to process an incoming change. The update is first applied to an isolated copy to
+   * find the fields it touches; the sender is then checked for the record and for each of those
+   * fields, and in protected mode its session is read again last. Only then is the update applied to
+   * the shared document, which is what persists it and what the record write is derived from, and
+   * relayed. Until that point neither the shared document, its persisted state nor any other client
+   * has seen it.
+   *
+   * Returns 'hold' when a check could not be answered: nothing was applied and nothing was refused.
+   */
+  private async applyGuardedUpdate(
+    socket: Socket,
+    recordId: string,
+    update: Uint8Array,
+    relayData: number[],
+    arrival: ArrivalContext,
+  ): Promise<'done' | 'hold'> {
+    const doc = this.syncService.getDoc(recordId)
+    if (!doc || doc !== arrival.doc) {
+      // The document this change was made against is gone, or is not the shared one any more
+      // (invalidated or released since the change arrived, whether or not the record was reopened
+      // meanwhile): a change is never carried over to another generation of the document. Say so.
+      this.tellInvalidated(socket, recordId)
+      return 'done'
+    }
+    const staged = stageYjsUpdate(doc, update)
+    if (staged.kind === 'noop') return 'done'
+    if (staged.kind === 'undeterminable') {
+      this.refuseVisibly(socket, recordId, 'FORBIDDEN', 'Update cannot be attributed to record fields')
+      return 'done'
+    }
+    const baselineUserId = arrival.userId
+    if (this.authChecker && !baselineUserId) {
+      socket.emit('yjs:error', { recordId, code: 'UNAUTHENTICATED', message: 'Not authenticated' })
+      return 'done'
+    }
+    if (baselineUserId) {
+      const write = await this.withinHold<YjsWriteVerdict>(arrival, this.mayWrite(baselineUserId, recordId, staged.fieldIds), 'unknown')
+      if (write === 'unknown') return 'hold'
+      if (write === 'denied') {
+        this.refuseVisibly(socket, recordId, 'FORBIDDEN', 'No write access')
+        return 'done'
+      }
+    }
+    let binding: RealtimeSessionBinding | null = null
+    let userId = baselineUserId
+    if (this.isProtected() && this.connections) {
+      if (socket.connected) {
+        this.adoptSocket(socket)
+        const current = await this.withinHold<CurrentAnswer>(arrival, this.connections.checkCurrent(socket), { state: 'unavailable', hold: false })
+        if (current.state === 'unavailable') return 'hold'
+        // Ended: the connection is not served any more; where it was ended it has been told.
+        if (current.state === 'ended') return 'done'
+        if (baselineUserId && current.binding.userId !== baselineUserId) return 'done'
+        binding = current.binding
+        userId = current.binding.userId
+      } else {
+        // The sender left after sending: its session is read from the binding it had on arrival.
+        const session = await this.withinHold<YjsWriteVerdict>(arrival, this.sessionVerdict(arrival.binding), 'unknown')
+        if (session === 'unknown') return 'hold'
+        if (session === 'denied') return 'done'
+        binding = arrival.binding
+      }
+    }
+    // The document may have been invalidated while the checks ran: nothing is applied to the old
+    // generation, and the sender is told.
+    if (this.syncService.getDoc(recordId) !== doc) {
+      this.tellInvalidated(socket, recordId)
+      return 'done'
+    }
+    if (userId) {
+      const known = this.contributors.get(socket.id)
+      this.contributors.set(socket.id, { userId, binding, closedAt: socket.connected ? null : (known?.closedAt ?? Date.now()) })
+    }
+    Y.applyUpdate(doc, update, socket.id)
+    this.emitToRecordRoom(recordId, 'yjs:update', { recordId, data: relayData }, socket)
+    return 'done'
+  }
+
   /** Attach JWT token verifier. */
   setTokenVerifier(verifier: YjsTokenVerifier): void {
     this.tokenVerifier = verifier
@@ -80,7 +707,8 @@ export class YjsWebSocketAdapter {
 
   /** Get verified userId for a socket (set at connection time via JWT). */
   getSocketUserId(socketId: string): string | undefined {
-    return this.socketUserId.get(socketId)
+    // A change of a connection that has closed since it sent it is still attributed to its user.
+    return this.socketUserId.get(socketId) ?? this.contributors.get(socketId)?.userId
   }
 
   getPresenceSnapshot(recordId: string): YjsPresenceSnapshot {
@@ -123,6 +751,9 @@ export class YjsWebSocketAdapter {
   notifyInvalidated(recordIds: string[]): void {
     if (!this.namespace) return
     for (const recordId of [...new Set(recordIds.filter((id) => typeof id === 'string' && id.length > 0))]) {
+      // A control message without record content: it only says "your copy is no longer the shared
+      // one". It is sent to every subscriber directly, also while deliveries are withheld, because
+      // an editor that is not told keeps typing into a document that no longer exists.
       this.namespace.to(`yjs:${recordId}`).emit('yjs:invalidated', {
         recordId,
         reason: 'rest-write',
@@ -156,7 +787,7 @@ export class YjsWebSocketAdapter {
 
   private emitPresence(recordId: string) {
     if (!this.namespace) return
-    this.namespace.to(`yjs:${recordId}`).emit('yjs:presence', this.getPresenceSnapshot(recordId))
+    this.emitToRecordRoom(recordId, 'yjs:presence', this.getPresenceSnapshot(recordId))
   }
 
   register(io: SocketServer): void {
@@ -165,6 +796,36 @@ export class YjsWebSocketAdapter {
 
     // Verify JWT at connection time — reject unauthenticated sockets immediately
     nsp.use(async (socket, next) => {
+      const transient = (): Error & { data?: unknown } => {
+        const error = new Error('UNAVAILABLE: realtime unavailable') as Error & { data?: unknown }
+        error.data = { code: 'REALTIME_UNAVAILABLE', retry: true }
+        return error
+      }
+      if (this.handshakesHeld()) {
+        // Held: the handshake waits, unserved, and is judged by whatever is decided next.
+        this.connections?.noteHeldHandshake()
+        const deadline = Date.now() + this.heldHandshakeMaxMs
+        while (this.handshakesHeld()) {
+          const outcome = await this.waitWhileHandshakesHeld(socket as Socket, deadline - Date.now())
+          if (outcome === 'gone') return
+          if (outcome === 'expired') return next(transient())
+        }
+      }
+      if (this.isProtected() && this.connections) {
+        // Protected: the handshake binds the connection to its session and reads it as current.
+        const token = (socket.handshake.auth as { token?: unknown })?.token
+        const result = await this.protection.admit(typeof token === 'string' ? token.trim() : undefined)
+        if ('refusal' in result) {
+          const denied = result.refusal.kind !== 'unavailable'
+          const error = new Error(denied ? 'UNAUTHENTICATED: session not current' : 'UNAVAILABLE: realtime unavailable') as Error & { data?: unknown }
+          error.data = denied ? { code: 'SESSION_NOT_CURRENT', retry: false } : { code: 'REALTIME_UNAVAILABLE', retry: true }
+          return next(error)
+        }
+        this.adoptSocket(socket)
+        this.connections.adoptAdmitted(socket, result.binding, result.generation)
+        this.socketUserId.set(socket.id, result.binding.userId)
+        return next()
+      }
       if (!this.tokenVerifier) return next()
 
       const token = (socket.handshake.auth as { token?: string })?.token
@@ -186,15 +847,16 @@ export class YjsWebSocketAdapter {
         if (!recordId || typeof recordId !== 'string') return
 
         // ── Auth gate: userId is already verified by JWT middleware ──
-        const userId = this.socketUserId.get(socket.id)
+        const userId = (await this.currentUser(socket))?.userId
         if (!userId) {
           socket.emit('yjs:error', { recordId, code: 'UNAUTHENTICATED', message: 'Not authenticated' })
           return
         }
 
         if (this.authChecker) {
-          const access = await this.authChecker(userId, recordId)
-          if (!access) {
+          // A read that could not be answered is answered to the subscriber the way it always was.
+          const access = await this.readAccess(userId, recordId)
+          if (!access || access === 'unknown') {
             socket.emit('yjs:error', { recordId, code: 'NOT_FOUND', message: 'Record not found' })
             return
           }
@@ -218,7 +880,16 @@ export class YjsWebSocketAdapter {
           perms.set(recordId, access.canWrite)
         }
 
-        const doc = await this.syncService.getOrCreateDoc(recordId)
+        let doc: Y.Doc
+        try {
+          doc = await this.syncService.getOrCreateDoc(recordId)
+        } catch {
+          // The document of this record cannot be served right now.
+          this.socketPermissions.get(socket.id)?.delete(recordId)
+          socket.emit('yjs:error', { recordId, code: 'UNAVAILABLE', message: 'Record document unavailable' })
+          return
+        }
+        if (!socket.connected) return
         const room = `yjs:${recordId}`
         socket.join(room)
         this.upsertPresence(recordId, socket.id, userId, null)
@@ -251,18 +922,57 @@ export class YjsWebSocketAdapter {
             return
           }
 
+          // The message is classified before anything is applied: the first sync step is a read,
+          // the second sync step and the update form are writes. Anything else is refused.
+          let syncType: number
+          let body: Uint8Array | null = null
+          let decoder: decoding.Decoder
+          try {
+            decoder = decoding.createDecoder(new Uint8Array(data))
+            if (decoding.readVarUint(decoder) !== MSG_SYNC) return
+            syncType = decoding.readVarUint(decoder)
+            if (syncType === syncProtocol.messageYjsSyncStep2 || syncType === syncProtocol.messageYjsUpdate) {
+              body = decoding.readVarUint8Array(decoder)
+            }
+          } catch {
+            socket.emit('yjs:error', { recordId, code: 'FORBIDDEN', message: 'Message not understood' })
+            return
+          }
+
+          if (body) {
+            // A write form. A change for a document that is gone is answered there, not dropped.
+            this.acceptIncomingUpdate(socket, recordId, body, Array.from(body))
+            return
+          }
+
           const doc = this.syncService.getDoc(recordId)
           if (!doc) return
 
-          const message = new Uint8Array(data)
-          const decoder = decoding.createDecoder(message)
-          const messageType = decoding.readVarUint(decoder)
-
-          if (messageType === MSG_SYNC) {
+          if (syncType === syncProtocol.messageYjsSyncStep1) {
+            if (this.isProtected()) {
+              // Protected: the session and the read access of the requester are read again before
+              // any document state is returned.
+              const current = await this.currentUser(socket)
+              if (!current) return
+              if (this.authChecker) {
+                const access = await this.readAccess(current.userId, recordId)
+                // Not answered: no document state is returned, and the subscription is left alone.
+                if (access === 'unknown') return
+                if (!access || !access.canRead || access.canReadAllFields === false) {
+                  this.dropSubscription(socket, recordId)
+                  return
+                }
+              }
+              if (this.syncService.getDoc(recordId) !== doc || !socket.connected) return
+            }
             const encoder = encoding.createEncoder()
             encoding.writeVarUint(encoder, MSG_SYNC)
-            syncProtocol.readSyncMessage(decoder, encoder, doc, socket.id)
-
+            try {
+              syncProtocol.readSyncStep1(decoder, encoder, doc)
+            } catch {
+              socket.emit('yjs:error', { recordId, code: 'FORBIDDEN', message: 'Message not understood' })
+              return
+            }
             const reply = encoding.toUint8Array(encoder)
             if (reply.length > 1) {
               socket.emit('yjs:message', {
@@ -270,7 +980,10 @@ export class YjsWebSocketAdapter {
                 data: Array.from(reply),
               })
             }
+            return
           }
+
+          socket.emit('yjs:error', { recordId, code: 'FORBIDDEN', message: 'Message not understood' })
         },
       )
 
@@ -279,39 +992,29 @@ export class YjsWebSocketAdapter {
         async ({ recordId, data }: { recordId: string; data: number[] }) => {
           if (!recordId || !data) return
 
-          // ── Auth gate: check write permission ──
-          if (this.authChecker) {
-            const perms = this.socketPermissions.get(socket.id)
-            const canWrite = perms?.get(recordId)
-            if (canWrite === false) {
-              socket.emit('yjs:error', { recordId, code: 'FORBIDDEN', message: 'No write access' })
-              return
-            }
-            if (canWrite === undefined) {
-              // Not subscribed to this record — reject
-              socket.emit('yjs:error', { recordId, code: 'FORBIDDEN', message: 'Not subscribed' })
-              return
-            }
+          // ── Auth gate: must be subscribed; write access is checked afresh for every update ──
+          if (this.authChecker && !this.socketPermissions.get(socket.id)?.has(recordId)) {
+            socket.emit('yjs:error', { recordId, code: 'FORBIDDEN', message: 'Not subscribed' })
+            return
           }
-
-          const doc = this.syncService.getDoc(recordId)
-          if (!doc) return
-
-          const update = new Uint8Array(data)
-          Y.applyUpdate(doc, update, socket.id)
-
-          // Broadcast to all OTHER clients in the room
-          const room = `yjs:${recordId}`
-          socket.to(room).emit('yjs:update', { recordId, data })
+          let update: Uint8Array
+          try {
+            update = new Uint8Array(data)
+          } catch {
+            return
+          }
+          // Applied to the shared document, and relayed to the other clients of the room, only
+          // after the sender was checked for the fields this update touches.
+          this.acceptIncomingUpdate(socket, recordId, update, data)
         },
       )
 
       socket.on(
         'yjs:presence',
-        ({ recordId, fieldId }: { recordId: string; fieldId?: string | null }) => {
+        async ({ recordId, fieldId }: { recordId: string; fieldId?: string | null }) => {
           if (!recordId || typeof recordId !== 'string') return
 
-          const userId = this.socketUserId.get(socket.id)
+          const userId = (await this.currentUser(socket))?.userId
           if (!userId) {
             socket.emit('yjs:error', { recordId, code: 'UNAUTHENTICATED', message: 'Not authenticated' })
             return
@@ -340,6 +1043,8 @@ export class YjsWebSocketAdapter {
       })
 
       socket.on('disconnect', () => {
+        this.connections?.unregister(socket)
+        this.retireContributor(socket.id)
         this.socketPermissions.delete(socket.id)
         this.socketUserId.delete(socket.id)
         for (const [recordId] of this.recordPresence) {
