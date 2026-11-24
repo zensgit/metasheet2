@@ -11,16 +11,19 @@ action_authorization_fence_repair() (
   local base_image_id=sha256:1505a2b97422ad85131d787328473d2d4d784375978ab8fde98b3883399e029b
   local catalog_digest=49ffece37de8bb24ce108156bb1803170fe96c6ccf64a7c8b3ea3183add50d34
   local base_image="ghcr.io/${IMAGE_OWNER}/metasheet2-backend:$baseline"
+  local rollback_image="metasheet-staging-fence-rollback:$baseline"
   local repaired_image="ghcr.io/${IMAGE_OWNER}/metasheet2-backend:$DEPLOY_SHA"
   local new_sha="$DEPLOY_SHA"
   [[ "$new_sha" != "$baseline" ]] || fail "repair commit equals staging baseline"
   [[ -r "$OVERRIDE_FILE" ]] || fail "existing staging override is missing"
-  [[ "$(docker inspect -f '{{.Config.Image}}' "$BACKEND_CONTAINER")" == "$base_image" ]] \
-    || fail "staging backend image tag changed after the read-only probe"
+  local running_image
+  running_image="$(docker inspect -f '{{.Config.Image}}' "$BACKEND_CONTAINER")"
+  [[ "$running_image" == "$base_image" || "$running_image" == "$rollback_image" ]] \
+    || fail "staging backend image reference is neither the baseline nor its rollback pin"
   [[ "$(docker inspect -f '{{.Image}}' "$BACKEND_CONTAINER")" == "$base_image_id" ]] \
     || fail "staging backend image ID changed after the read-only probe"
-  [[ "$(docker image inspect -f '{{.Id}}' "$base_image")" == "$base_image_id" ]] \
-    || fail "local rollback tag no longer names the original image"
+  [[ "$(docker image inspect -f '{{.Id}}' "$base_image_id")" == "$base_image_id" ]] \
+    || fail "original staging image is not available locally"
   [[ "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.config_files"}}' "$BACKEND_CONTAINER")" == "$STAGING_COMPOSE_FILE,$OVERRIDE_FILE" ]] \
     || fail "running staging backend is managed by different compose files"
 
@@ -52,8 +55,16 @@ PY
   local image_dir="${HERE}/authorization-fence-image"
   [[ -s "$image_dir/authorization-operation-fence.js" ]] || fail "compiled repair is missing"
   [[ -s "$image_dir/authorization-operation-fence.ts" ]] || fail "repair source is missing"
+  local prior_rollback_id
+  if prior_rollback_id="$(docker image inspect -f '{{.Id}}' "$rollback_image" 2>/dev/null)"; then
+    [[ "$prior_rollback_id" == "$base_image_id" ]] || fail "staging rollback tag already refers to another image"
+  else
+    docker image tag "$base_image_id" "$rollback_image"
+  fi
+  [[ "$(docker image inspect -f '{{.Id}}' "$rollback_image")" == "$base_image_id" ]] \
+    || fail "staging rollback tag did not retain the original image"
   docker build --pull=false --network=none \
-    --build-arg "FENCE_BASE_IMAGE=$base_image" \
+    --build-arg "FENCE_BASE_IMAGE=$rollback_image" \
     --build-arg "FENCE_REPAIR_COMMIT=$new_sha" \
     --tag "$repaired_image" "$image_dir" > "${OUTPUT_DIR}/authorization-fence-build.log" 2>&1
   [[ "$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$repaired_image")" == "$new_sha" ]] \
@@ -69,52 +80,56 @@ PY
 
   # Preserve existing permissions and every unrelated line. The copy lives beside
   # the deployed override so replacement and rollback are atomic.
-  local saved candidate
+  local saved candidate rollback
   saved="$(mktemp "${RUNNER_PERSIST_DIR}/.fence-rollback.XXXXXX")"
   candidate="$(mktemp "${RUNNER_PERSIST_DIR}/.fence-candidate.XXXXXX")"
+  rollback="$(mktemp "${RUNNER_PERSIST_DIR}/.fence-pinned-rollback.XXXXXX")"
   cp -p "$OVERRIDE_FILE" "$saved"
   cp -p "$OVERRIDE_FILE" "$candidate"
+  cp -p "$OVERRIDE_FILE" "$rollback"
   local installed=false completed=false
   finish_repair() {
     local rc=$?
     if [[ "$completed" != true && "$installed" == true ]]; then
-      cp -p "$saved" "$candidate"
-      mv -f "$candidate" "$OVERRIDE_FILE"
+      mv -f "$rollback" "$OVERRIDE_FILE"
       DEPLOY_SHA="$baseline"
       if compose_staging up -d --no-deps --pull never backend >/dev/null 2>&1 \
-          && wait_for_health_commit "$baseline" 15 3; then
+          && wait_for_health_commit "$baseline" 15 3 \
+          && [[ "$(docker inspect -f '{{.Config.Image}}' "$BACKEND_CONTAINER")" == "$rollback_image" ]] \
+          && [[ "$(docker inspect -f '{{.Image}}' "$BACKEND_CONTAINER")" == "$base_image_id" ]]; then
         echo 'rollback=verified' >> "${OUTPUT_DIR}/summary.txt"
       else
         echo 'rollback=failed' >> "${OUTPUT_DIR}/summary.txt"
       fi
     fi
-    rm -f -- "$candidate"
+    rm -f -- "$candidate" "$rollback"
     if [[ "$installed" != true || "$completed" == true ]]; then
       rm -f -- "$saved"
     fi
     return "$rc"
   }
   trap finish_repair EXIT
-  python3 - "$candidate" "$base_image" "$repaired_image" <<'PY'
+  python3 - "$candidate" "$rollback" "$running_image" "$repaired_image" "$rollback_image" <<'PY'
 from pathlib import Path
 import sys
 
-path, baseline, repaired = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+candidate, rollback, baseline, repaired, rollback_image = sys.argv[1:]
 old = '    image: ' + baseline + '\n'
-new = '    image: ' + repaired + '\n'
-data = path.read_text()
-assert data.count(old) == 1, 'expected exactly one pinned staging backend override'
-path.write_text(data.replace(old, new))
+for filename, image in [(candidate, repaired), (rollback, rollback_image)]:
+    path = Path(filename)
+    data = path.read_text()
+    assert data.count(old) == 1, 'expected exactly one pinned staging backend override'
+    path.write_text(data.replace(old, '    image: ' + image + '\n'))
 PY
   (
     cd "$STAGING_DIR"
-    python3 - "$STAGING_COMPOSE_FILE" "$OVERRIDE_FILE" "$candidate" "$IMAGE_OWNER" "$baseline" "$new_sha" "$repaired_image" <<'PY'
+    python3 - "$STAGING_COMPOSE_FILE" "$OVERRIDE_FILE" "$candidate" "$rollback" "$IMAGE_OWNER" "$baseline" "$new_sha" "$repaired_image" "$rollback_image" <<'PY'
 import json
 import os
 import subprocess
 import sys
 
-compose, old, new, owner, baseline, candidate, image = sys.argv[1:]
+compose, old, new, rollback, owner, baseline, candidate, image, rollback_image = sys.argv[1:]
 def resolved(override, sha):
     env = dict(os.environ, IMAGE_OWNER=owner, IMAGE_TAG=sha)
     cmd = ['docker', 'compose', '--project-directory', os.getcwd(), '-f', compose,
@@ -123,18 +138,19 @@ def resolved(override, sha):
     assert run.returncode == 0, 'compose config failed'
     return json.loads(run.stdout)
 
-before, after = resolved(old, baseline), resolved(new, candidate)
-backend = after['services']['backend']
-assert backend['container_name'] == 'metasheet-staging-backend' and backend['image'] == image
-for key in ['DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED', 'DELEGATED_SCOPE_ACTIVATION_ENABLED']:
-    assert backend['environment'].get(key) != 'true', 'scope switch would be live'
-assert backend['environment']['METASHEET_BUILD_COMMIT'] == candidate
-assert backend['environment']['METASHEET_BUILD_IMAGE_TAG'] == candidate
+before = resolved(old, baseline)
 before_backend = before['services']['backend']
-backend['image'] = before_backend['image']
-for key in ['METASHEET_BUILD_COMMIT', 'METASHEET_BUILD_IMAGE_TAG']:
-    backend['environment'][key] = before_backend['environment'][key]
-assert before == after, 'staging compose changed outside backend image and build identity'
+for override, revision, expected_image in [(new, candidate, image), (rollback, baseline, rollback_image)]:
+    after = resolved(override, revision)
+    backend = after['services']['backend']
+    assert backend['container_name'] == 'metasheet-staging-backend' and backend['image'] == expected_image
+    for key in ['DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED', 'DELEGATED_SCOPE_ACTIVATION_ENABLED']:
+        assert backend['environment'].get(key) != 'true', 'scope switch would be live'
+    backend['image'] = before_backend['image']
+    for key in ['METASHEET_BUILD_COMMIT', 'METASHEET_BUILD_IMAGE_TAG']:
+        assert backend['environment'][key] == revision
+        backend['environment'][key] = before_backend['environment'][key]
+    assert before == after, 'staging compose changed outside backend image and build identity'
 PY
   )
   mv -f "$candidate" "$OVERRIDE_FILE"
