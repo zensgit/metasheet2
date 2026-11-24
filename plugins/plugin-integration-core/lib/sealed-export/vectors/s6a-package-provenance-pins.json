@@ -87,6 +87,6 @@
     "s6aAcceptancePs51Test": "835c7c6ce943d82e0378a40a27c7fd1e8b79b526faa8ca4c8066e4231a4bfb0f",
     "s6aProductRuntimeTest": "1bd015f35eb30e4bc59894abab8d226d871eb06d4838c5d602ddf9af1eae1330",
     "multitableOnpremPackageBuild": "02437eb5bc1192aa4532f34e86ae73174ae9c0a74b34b3c478daf68a443cde13",
-    "s6aPowershell51Workflow": "492ddb644df75af1e9c7e5b7bdd5a909133bc1834bf9c5e50c43b6b22ca76cd0"
+    "s6aPowershell51Workflow": "ee4279aa3a71af317d27a8d8b26f33ade082e67410284f1f2807decf1f0076da"
   }
 }

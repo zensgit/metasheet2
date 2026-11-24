@@ -33,14 +33,24 @@ $releaseArchiveSha256 = @{
 # to those bytes even if the operator supplies a matching digest for another file.
 $releaseBootstrapSha256 = '0c7f7ce8af5c71cc798f5bab21a1dd9014039c9902d6c82aca4e974f0b00bea7'
 
-function Get-Sha256([string]$Path) {
-  $stream = [IO.File]::OpenRead($Path)
+function Get-Sha256([IO.Stream]$Stream) {
+  $sha = [Security.Cryptography.SHA256]::Create()
   try {
-    $sha = [Security.Cryptography.SHA256]::Create()
-    try {
-      return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '')
-    } finally { $sha.Dispose() }
-  } finally { $stream.Dispose() }
+    return [BitConverter]::ToString($sha.ComputeHash($Stream)).Replace('-', '')
+  } finally { $sha.Dispose() }
+}
+
+function New-ReleaseStagingDirectory {
+  $directory = Join-Path ([IO.Path]::GetTempPath()) ('p3-release-' + [guid]::NewGuid().ToString('N'))
+  $acl = New-Object Security.AccessControl.DirectorySecurity
+  $acl.SetAccessRuleProtection($true, $false)
+  $owner = [Security.Principal.WindowsIdentity]::GetCurrent().User
+  $acl.SetOwner($owner)
+  foreach ($identity in @($owner, [Security.Principal.SecurityIdentifier]::new('S-1-5-18'))) {
+    $rule = [Security.AccessControl.FileSystemAccessRule]::new($identity, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+    $acl.AddAccessRule($rule)
+  }
+  return [IO.Directory]::CreateDirectory($directory, $acl)
 }
 
 function Quote-LauncherPath([string]$Path) {
@@ -61,8 +71,8 @@ function Invoke-ReleaseLauncher {
     $script:overlayReason = 'launcher_start_failed'
     $info = New-Object System.Diagnostics.ProcessStartInfo
     $info.FileName = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
-    $info.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' + (Quote-LauncherPath $bootstrapFile.FullName) +
-      ' -RootDir ' + (Quote-LauncherPath $root) + ' -PackageArchive ' + (Quote-LauncherPath $archiveFile.FullName) +
+    $info.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' + (Quote-LauncherPath $verifiedBootstrap) +
+      ' -RootDir ' + (Quote-LauncherPath $root) + ' -PackageArchive ' + (Quote-LauncherPath $verifiedArchive) +
       " -InstallDeps $InstallDeps -RunMigrations 0"
     $info.UseShellExecute = $false
     $info.CreateNoWindow = $true
@@ -146,6 +156,9 @@ function Write-P5Report {
   }
 }
 
+$releaseStage = $null
+$archiveLock = $null
+$bootstrapLock = $null
 try {
   if ($Execute -and (-not $OwnerApproved -or -not $WritesQuiesced)) { throw 'authorization or quiet window missing' }
   if ($Execute -and (-not $LauncherLogDirectory -or
@@ -164,11 +177,20 @@ try {
   $psql = (Get-Command psql -CommandType Application | Select-Object -First 1).Source
 
   $stage = 'hash'
-  if ((Get-Sha256 $archiveFile.FullName) -ine $ArchiveSha256 -or
-      (Get-Sha256 $bootstrapFile.FullName) -ine $BootstrapSha256) { throw 'hash mismatch' }
+  # Copy first, then hold both verified copies open without write/delete sharing
+  # until the released launcher has finished reading them.
+  $releaseStage = New-ReleaseStagingDirectory
+  $verifiedArchive = Join-Path $releaseStage.FullName 'release.zip'
+  $verifiedBootstrap = Join-Path $releaseStage.FullName 'deploy-bootstrap.ps1'
+  [IO.File]::Copy($archiveFile.FullName, $verifiedArchive)
+  [IO.File]::Copy($bootstrapFile.FullName, $verifiedBootstrap)
+  $archiveLock = [IO.File]::OpenRead($verifiedArchive)
+  $bootstrapLock = [IO.File]::OpenRead($verifiedBootstrap)
+  if ((Get-Sha256 $archiveLock) -ine $ArchiveSha256 -or
+      (Get-Sha256 $bootstrapLock) -ine $BootstrapSha256) { throw 'hash mismatch' }
   $stage = 'release'
   if ($ArchiveSha256 -ine $releaseArchiveSha256[$Target]) { throw 'archive does not match the published release' }
-  Assert-ArchiveRelease $archiveFile.FullName
+  Assert-ArchiveRelease $verifiedArchive
   if ($BootstrapSha256 -ine $releaseBootstrapSha256) { throw 'bootstrap does not match the released sidecar' }
 
   $stage = 'ledger_before'
@@ -215,15 +237,26 @@ try {
 
   $stage = 'overlay'
   Invoke-ReleaseLauncher
+  $overlayCompletedUtc = [DateTimeOffset]::UtcNow.ToString('o')
 
   $stage = 'ledger_after'
   $after = @(Read-Ledger)
   if ($before[0] -cne $after[0] -or $before[1] -cne $after[1]) { throw 'ledger changed' }
   $after
+  "P3_ROLLBACK_OVERLAY completed_utc=$overlayCompletedUtc"
   "P3_ROLLBACK_RESULT status=overlay_complete target=$Target install_state=$InstallState"
   exit 0
 } catch {
   if ($stage -eq 'overlay') { "P3_ROLLBACK_RESULT status=STOP stage=overlay reason=$overlayReason" }
   else { "P3_ROLLBACK_RESULT status=STOP stage=$stage" }
   exit 2
+} finally {
+  if ($null -ne $bootstrapLock) { $bootstrapLock.Dispose() }
+  if ($null -ne $archiveLock) { $archiveLock.Dispose() }
+  if ($null -ne $releaseStage) {
+    foreach ($file in @($verifiedBootstrap, $verifiedArchive)) {
+      if ($file) { Remove-Item -LiteralPath $file -ErrorAction SilentlyContinue }
+    }
+    try { [IO.Directory]::Delete($releaseStage.FullName, $false) } catch { }
+  }
 }

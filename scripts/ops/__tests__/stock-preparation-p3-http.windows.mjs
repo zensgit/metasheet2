@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
-import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { once } from 'node:events'
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -40,6 +41,83 @@ function Invoke-Http([string]$Method, [string]$Path, [object]$Body = $null, [swi
 const sync = 'h31-pull-dry-run.ps1'
 const job = 'h32-pull-dry-run-job.ps1'
 const expected = 'PULLDRY_COUNTS project=1 add=1 update=2 skip=3 inactive=4 manual_confirm=5'
+
+const healthServer = `
+const http = require('node:http')
+const fs = require('node:fs')
+const server = http.createServer((req, res) => {
+  if (req.url !== '/api/health') { res.writeHead(404).end(); return }
+  const body = JSON.stringify({ build: { commit: fs.readFileSync(process.argv[2], 'utf8') } })
+  res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) })
+  res.end(body)
+})
+server.listen(0, '127.0.0.1', () => process.send(server.address().port))
+`
+
+test('H01 refuses old health listeners after the disk label changes', { skip: process.platform !== 'win32' }, async () => {
+  const fixture = mkdtempSync(path.join(tmpdir(), 'p3-health-bind-'))
+  const servers = []
+  try {
+    const http = path.join(fixture, 'http')
+    const ps = path.join(fixture, 'ps')
+    const bin = path.join(fixture, 'node_modules/.bin')
+    const pm2 = path.join(fixture, 'pm2')
+    for (const directory of [http, ps, bin, pm2]) mkdirSync(directory, { recursive: true })
+    copyFileSync(path.join(ops, 'h01-health.ps1'), path.join(http, 'h01-health.ps1'))
+    copyFileSync(path.join(ops, '03-live-env-check.ps1'), path.join(ps, '03-live-env-check.ps1'))
+    const serverFile = path.join(fixture, 'health.cjs')
+    const diskLabel = path.join(fixture, 'disk-label')
+    const pm2App = path.join(fixture, 'pm2-app.json')
+    const p3 = '1'.repeat(40)
+    writeFileSync(serverFile, healthServer)
+    writeFileSync(diskLabel, '220bd80ab62fc7e6b3b40b7d4263a712d9a09405')
+    writeFileSync(path.join(bin, 'pm2.cmd'), '@type "%P3_TEST_PM2_DATA%"\r\n')
+    async function startHealthServer() {
+      const child = spawn(process.execPath, [serverFile, diskLabel], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true })
+      servers.push(child)
+      const [port] = await Promise.race([
+        once(child, 'message'),
+        once(child, 'exit').then(() => { throw new Error('fixture listener exited early') }),
+      ])
+      return { pid: child.pid, port }
+    }
+    const old = await startHealthServer()
+    writeFileSync(path.join(pm2, 'pm2.pid'), String(old.pid))
+    writeFileSync(diskLabel, p3)
+    const overlayCompleted = new Date().toISOString().replace('Z', '0000+00:00')
+    const fresh = await startHealthServer()
+
+    function signoff(listener, app) {
+      writeFileSync(pm2App, JSON.stringify([{
+        name: 'metasheet-backend',
+        pid: app.pid,
+        pm2_env: { PATH: 'fixture', status: 'online', pm_exec_path: path.join(fixture, 'packages/core-backend/dist/src/index.js') },
+      }]))
+      return spawnSync('powershell.exe', [
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(http, 'h01-health.ps1'),
+        '-P3Commit', p3, '-InstallRoot', fixture, '-OverlayCompletedUtc', overlayCompleted, '-ExpectedBuild', 'P3',
+      ], {
+        env: { ...process.env, PM2_HOME: pm2, P3_TEST_PM2_DATA: pm2App, MS_API: `http://127.0.0.1:${listener.port}` },
+        encoding: 'utf8',
+        timeout: 90000,
+      })
+    }
+    for (const app of [old, fresh]) {
+      const refused = signoff(old, app)
+      assert.equal(refused.status, 3, refused.stdout + refused.stderr)
+      assert.match(refused.stdout, /HEALTH status=200 build=P3/)
+      assert.match(refused.stdout, /reason=backend_not_bound_or_fresh/)
+      assert.doesNotMatch(refused.stdout, /HEALTH_RUNTIME/)
+    }
+    const accepted = signoff(fresh, fresh)
+    assert.equal(accepted.status, 0, accepted.stdout + accepted.stderr)
+    assert.match(accepted.stdout, /HEALTH_RUNTIME peer=verified generation=post_overlay/)
+    assert.match(accepted.stdout, /HEALTH_RESULT file=h01-health.ps1 status=complete/)
+  } finally {
+    for (const child of servers) child.kill()
+    rmSync(fixture, { recursive: true, force: true })
+  }
+})
 
 test('H01 maps both approved rollback builds and rejects an ambiguous P3 identity', { skip: process.platform !== 'win32' }, () => {
   const fixture = mkdtempSync(path.join(tmpdir(), 'p3-health-'))

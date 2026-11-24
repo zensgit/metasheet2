@@ -124,8 +124,9 @@
 #       unknown = docker\app.env has no DATABASE_URL line (LIVEENV_DBURL then says docker_absent)
 #       same    = one value across every process occurrence and every docker line
 #       differs = otherwise, even only in case. The gate stops (review +1).
-#   LIVEENV_BACKEND generation=fresh|stale|wrong_app|unknown (only with -StartedAfterUtc)
+#   LIVEENV_BACKEND generation=fresh|stale|wrong_app|wrong_peer|unknown (only with -StartedAfterUtc)
 #       fresh = the named online app from this root has an OS start time after the caller's UTC cutoff.
+#       -HealthPeerPid is an internal input from H01 for the direct connection's owner.
 #   LIVEENV key=<KEY> process=<w> launch=<w> root=<w> docker=<w> machine=<w> user=<w> dup=none|same|differs pdup=none|same|differs kind=<k> gate=<g> verdict=off|on|review|unknown|-
 #       launch = this shell's inherited process environment, separate from the live PM2 app.
 #       dup  = several lines for the key in one file (same / differing state words); root= and
@@ -146,7 +147,8 @@ param(
   [string[]]$Keys = @(),
   [string]$AppName = 'metasheet-backend',
   [int]$TimeoutSeconds = 60,
-  [string]$StartedAfterUtc
+  [string]$StartedAfterUtc,
+  [ValidateRange(1, 2147483647)][int]$HealthPeerPid
 )
 
 $ErrorActionPreference = 'Stop'
@@ -336,6 +338,7 @@ function Get-BackendGeneration($App, [DateTimeOffset]$After) {
   if ($null -eq $App -or $App['pm2_env']['status'] -cne 'online') { return 'unknown' }
   $processId = 0
   if (-not [int]::TryParse([string]$App['pid'], [ref]$processId) -or $processId -le 0) { return 'unknown' }
+  if ($HealthPeerPid -gt 0 -and $processId -ne $HealthPeerPid) { return 'wrong_peer' }
   try {
     $expected = [IO.Path]::GetFullPath((Join-Path $InstallRoot 'packages\core-backend\dist\src\index.js'))
     $scriptPath = [string]$App['pm2_env']['pm_exec_path']

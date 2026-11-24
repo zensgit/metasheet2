@@ -21,6 +21,15 @@ const overlaid = fs.existsSync(process.env.P3_TEST_FLAG)
 const requireReadOnly = args.join(' ').includes('SET default_transaction_read_only = on; SET row_security = off;')
 if (!requireReadOnly || !args.includes('-X') || !args.includes('-w')) process.exit(7)
 if (sql === 's06-new-migrations.sql') {
+  if (!overlaid && scenario === 'replace-verified-inputs') {
+    for (const [file, replacement] of [
+      [process.env.P3_TEST_ARCHIVE, 'replacement archive'],
+      [process.env.P3_TEST_ORIGINAL_BOOTSTRAP, '[Console]::Out.WriteLine("UNVERIFIED_LAUNCHER"); exit 0'],
+    ]) {
+      fs.writeFileSync(file + '.new', replacement)
+      fs.renameSync(file + '.new', file)
+    }
+  }
   console.log('MIG_COUNT kysely_migration=' + (overlaid && scenario === 'ledger-changed' ? 8 : 7))
   console.log('MIG_NAMESET ledger=' + (scenario === 'wrong-ledger' ? 'other' : 'baseline'))
   console.log('MIG_RESULT file=s06-new-migrations.sql status=complete')
@@ -87,7 +96,11 @@ function run(scenario, { target = 'R85', release = target, apply = false, author
       'if ($RunMigrations -ne "0") { Stop-Fixture "RunMigrations" }',
       'if ($InstallDeps -ne "1") { Stop-Fixture "InstallDeps" }',
       'Assert-FixturePath "RootDir" $RootDir $env:P3_TEST_ROOT',
-      'Assert-FixturePath "PackageArchive" $PackageArchive $env:P3_TEST_ARCHIVE',
+      '$sha = [Security.Cryptography.SHA256]::Create()',
+      '$archiveStream = [IO.File]::OpenRead($PackageArchive)',
+      'try { $actualDigest = [BitConverter]::ToString($sha.ComputeHash($archiveStream)).Replace("-", "") }',
+      'finally { $archiveStream.Dispose(); $sha.Dispose() }',
+      'if ($actualDigest -ine $env:P3_TEST_ARCHIVE_SHA256) { Stop-Fixture "PackageArchive" }',
       '[IO.File]::WriteAllText($env:P3_TEST_FLAG, "ok")',
       '[Console]::Out.WriteLine("FIXTURE_STDOUT")',
       '[Console]::Error.WriteLine("FIXTURE_STDERR")',
@@ -132,6 +145,8 @@ function run(scenario, { target = 'R85', release = target, apply = false, author
       P3_TEST_FLAG: flag,
       P3_TEST_ROOT: install.split(path.sep).join('/'),
       P3_TEST_ARCHIVE: archive.split(path.sep).join('/'),
+      P3_TEST_ARCHIVE_SHA256: digest(archive),
+      P3_TEST_ORIGINAL_BOOTSTRAP: bootstrap,
     }
     const result = spawnSync(powershell, argv, { env, encoding: 'utf8' })
     let overlaid = false
@@ -144,7 +159,9 @@ function run(scenario, { target = 'R85', release = target, apply = false, author
         return ''
       }
     }
-    return { ...result, overlaid, stdoutLog: readLog(stdoutLog), stderrLog: readLog(stderrLog) }
+    const originalsReplaced = readFileSync(archive, 'utf8') === 'replacement archive' &&
+      readFileSync(bootstrap, 'utf8').includes('UNVERIFIED_LAUNCHER')
+    return { ...result, overlaid, originalsReplaced, stdoutLog: readLog(stdoutLog), stderrLog: readLog(stderrLog) }
   } finally {
     rmSync(fixture, { recursive: true, force: true })
   }
@@ -204,4 +221,14 @@ test('a changed post-overlay ledger cannot report overlay complete', { skip: !wi
   assert.equal(result.status, 2, result.stderr + result.stdout)
   assert.match(result.stdout, /status=STOP stage=ledger_after/)
   assert.equal(result.overlaid, true)
+})
+
+test('replacing the original ZIP and sidecar after hash verification cannot change the bytes used', { skip: !windows }, () => {
+  const result = run('replace-verified-inputs', { apply: true })
+  assert.equal(result.status, 0, result.stdout + result.stderrLog)
+  assert.equal(result.originalsReplaced, true)
+  assert.equal(result.overlaid, true)
+  assert.match(result.stdoutLog, /FIXTURE_STDOUT/)
+  assert.doesNotMatch(result.stdoutLog, /UNVERIFIED_LAUNCHER/)
+  assert.match(result.stdout, /P3_ROLLBACK_OVERLAY completed_utc=\S+/)
 })

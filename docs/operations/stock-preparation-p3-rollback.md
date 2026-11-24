@@ -37,17 +37,23 @@ $rollbackArgs = @{
 确认本次授权和持续写入隔离后才执行，工具会重跑预检。提前选一个本次专用、仅现场授权人可读的日志目录。工具会对照 `Target` 核已经发布的 ZIP 与启动器的 SHA-256，以及 ZIP 根目录 `BUILD_PROVENANCE.json` 的发布标签和提交。任一不符会在 `stage=release` 停止。
 
 ```powershell
-$rollbackStartedAt = [DateTimeOffset]::UtcNow.ToString('o')
 .\ps\Invoke-P3Rollback.ps1 @rollbackArgs -OwnerApproved -WritesQuiesced -Execute
 ```
 
-工具以 `-RunMigrations 0` 调用已核哈希的旧包独立启动器，覆盖同一根目录。现场保持原根目录和批准的参数，避开新目录、`upgrade-inplace` 和任何迁移命令。状态 C 下，P3 迁移文件可能仍在覆盖后的目录中，账本只用 `s06` 读取。
+工具将旧 ZIP 和启动器复制到本机的受限临时目录，核验副本并锁住这两份文件的写入和删除。它以 `-RunMigrations 0` 从该副本启动，覆盖同一根目录，结束后清理临时副本。现场保持原根目录和批准的参数，避开新安装目录、`upgrade-inplace` 和任何迁移命令。状态 C 下，P3 迁移文件可能仍在覆盖后的目录中，账本只用 `s06` 读取。
 
 `status=STOP stage=overlay` 的 `reason` 区分日志无法创建、启动器无法启动、日志采集失败与启动器退出非零。`stage=ledger_after` 表示覆盖后未证实账本相同。两种都保持隔离并只读核 `s06`、`h01` 和后端启动代次，报 owner 后按他确认的恢复路径继续。启动器分别写入 `LauncherLogDirectory\p3-rollback-launcher.stdout.log` 与 `LauncherLogDirectory\p3-rollback-launcher.stderr.log`。已存在的日志保留，重跑时单独准备新目录。这两份日志可能含路径或连接信息，只供现场排障。数据库客户端只保留脚本输出的固定结果。
 
 ## 完成检查
 
-- 确认 `P3_ROLLBACK_RESULT status=overlay_complete`、回退前后 `MIG_COUNT` 相同、`MIG_NAMESET` 相同。在本机后端直连端点运行 `h01-health.ps1 -P3Commit $p3Commit`，要求 HTTP 200 和本次批准的 R84 或 R85。再在同一终端运行 `.\ps\03-live-env-check.ps1 -InstallRoot $installRoot -StartedAfterUtc $rollbackStartedAt`，要求 `LIVEENV_BACKEND generation=fresh` 与完整的 `LIVEENV_RESULT`。任一缺失就保持暂停；两项齐全后复核必要插件和权限入口。
+- 确认 `P3_ROLLBACK_RESULT status=overlay_complete`、回退前后 `MIG_COUNT` 相同、`MIG_NAMESET` 相同。记下本次工具返回的 `P3_ROLLBACK_OVERLAY completed_utc=`，作为 `$rollbackCompletedAt`。按窗口批准用已覆盖回去的启动脚本再重启一次 PM2，保持定时任务和写入暂停。将 `MS_API` 指到后端字面环回 IP 的直连 HTTP 端口，运行以下命令。要求 200、批准的 R84 或 R85、`HEALTH_RUNTIME peer=verified generation=post_overlay` 和完整结果，之后复核必要插件和权限入口。证据缺失时保持暂停。
+
+  ```powershell
+  $startScript = Join-Path $installRoot 'scripts\ops\attendance-onprem-start-pm2.ps1'
+  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $startScript -RootDir $installRoot
+  if ($LASTEXITCODE -ne 0) { throw 'PM2 重启失败，保持暂停并报告现场负责人' }
+  .\http\h01-health.ps1 -P3Commit $p3Commit -InstallRoot $installRoot -OverlayCompletedUtc $rollbackCompletedAt -ExpectedBuild $approvedRollbackTarget
+  ```
 - 关掉 P3 时打开的标签页，重开后 Ctrl+F5。R85 路径比较定时脚本哈希；R84 路径按 R85 装机单换回批准的 R84 副本，再用 `09` 核对命令行形态。
 - 记录 P5、平台和残留规则、D21 写入隔离、须由 owner 批准的权限写入恢复、定时拉取恢复及后续 06:00 核验。回报仅含状态和计数。
 

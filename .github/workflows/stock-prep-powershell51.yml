@@ -62,8 +62,8 @@ jobs:
           $tap = @(node --test --test-reporter=tap scripts/ops/__tests__/stock-preparation-p3-http.windows.mjs scripts/ops/__tests__/stock-preparation-p3-rollback.windows.mjs)
           $testCode = $LASTEXITCODE
           $tap
-          if ($testCode -ne 0 -or $tap -notcontains '# pass 18' -or $tap -notcontains '# skipped 0') {
-            throw 'P3 requires all 18 Windows subtests to execute and pass'
+          if ($testCode -ne 0 -or $tap -notcontains '# pass 20' -or $tap -notcontains '# skipped 0') {
+            throw 'P3 requires all 20 Windows subtests to execute and pass'
           }
 
       # The release package runs this acceptance boundary under Windows PowerShell 5.1. pwsh 7 has
