@@ -1807,6 +1807,19 @@ classify_runner_override() {
   return 0
 }
 
+action_authorization_fence_status() {
+  local backend_project postgres_project addresses probe
+  backend_project="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$BACKEND_CONTAINER")"
+  postgres_project="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$POSTGRES_CONTAINER")"
+  [[ -n "$backend_project" && "$backend_project" == "$postgres_project" ]] \
+    || fail "staging backend and postgres compose project mismatch"
+  addresses="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{if .IPAddress}}{{.IPAddress}},{{end}}{{if .GlobalIPv6Address}}{{.GlobalIPv6Address}},{{end}}{{end}}' "$POSTGRES_CONTAINER")"
+  [[ -n "$addresses" ]] || fail "staging postgres has no running network address"
+  probe="$(cat "${HERE}/staging-authorization-fence-probe.cjs")"
+  staging_exec_env -e "STAGING_FENCE_EXPECTED_DB_ADDRESSES=$addresses" -- \
+    node --input-type=commonjs -e "$probe" | tee "${OUTPUT_DIR}/authorization-fence-status.json"
+}
+
 action_status() {
   snapshot_staging_ps
   curl -sS --max-time 10 "$STAGING_WEB_HEALTH_URL" > "${OUTPUT_DIR}/health-web.json" 2>&1 \
@@ -4120,6 +4133,7 @@ case "$ACTION" in
   deploy) action_deploy ;;
   smoke) action_smoke ;;
   status) action_status ;;
+  authorization-fence-status) action_authorization_fence_status ;;
   migrate) action_migrate ;;
   residue-sweep) action_residue_sweep ;;
   soak-baseline) action_soak_baseline ;;
