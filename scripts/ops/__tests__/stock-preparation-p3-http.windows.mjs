@@ -54,7 +54,30 @@ const server = http.createServer((req, res) => {
 server.listen(0, '127.0.0.1', () => process.send(server.address().port))
 `
 
-test('H01 refuses old health listeners after the disk label changes', { skip: process.platform !== 'win32' }, async () => {
+const peerLookupFixture = String.raw`
+$script:firstTuple = $null
+$script:attempts = 0
+function Get-NetTCPConnection {
+  [CmdletBinding()]
+  param([int]$LocalPort, [int]$RemotePort, [string]$State)
+  $tuple = "$LocalPort/$RemotePort/$State"
+  if ($script:firstTuple -and $tuple -cne $script:firstTuple) { throw 'lookup changed sockets' }
+  $script:firstTuple = $tuple
+  $script:attempts++
+  if ($env:P3_TEST_PEER_MODE -eq 'missing' -or $script:attempts -eq 1) {
+    Write-Error -Message 'synthetic delayed peer' -Category ObjectNotFound
+    return
+  }
+  $record = [pscustomobject]@{ LocalAddress='127.0.0.1'; RemoteAddress='127.0.0.1'; OwningProcess=[int]$env:P3_TEST_PEER_PID }
+  if ($env:P3_TEST_PEER_MODE -eq 'ambiguous') { return $record, $record }
+  if ($env:P3_TEST_PEER_MODE -eq 'ownerless') { $record.OwningProcess = 0 }
+  return $record
+}
+& $env:P3_TEST_H01 @args
+exit $LASTEXITCODE
+`
+
+test('H01 retries the same socket and refuses stale, missing, ambiguous and mismatched owners', { skip: process.platform !== 'win32' }, async () => {
   const fixture = mkdtempSync(path.join(tmpdir(), 'p3-health-bind-'))
   const servers = []
   try {
@@ -62,16 +85,21 @@ test('H01 refuses old health listeners after the disk label changes', { skip: pr
     const ps = path.join(fixture, 'ps')
     const bin = path.join(fixture, 'node_modules/.bin')
     const pm2 = path.join(fixture, 'pm2')
-    for (const directory of [http, ps, bin, pm2]) mkdirSync(directory, { recursive: true })
+    const backend = path.join(fixture, 'packages/core-backend/dist/src/index.js')
+    for (const directory of [http, ps, bin, pm2, path.dirname(backend)]) mkdirSync(directory, { recursive: true })
+    writeFileSync(backend, '// fixture')
     copyFileSync(path.join(ops, 'h01-health.ps1'), path.join(http, 'h01-health.ps1'))
     copyFileSync(path.join(ops, '03-live-env-check.ps1'), path.join(ps, '03-live-env-check.ps1'))
     const serverFile = path.join(fixture, 'health.cjs')
     const diskLabel = path.join(fixture, 'disk-label')
     const pm2App = path.join(fixture, 'pm2-app.json')
+    const probe = path.join(http, 'h01-health.ps1')
+    const peerFixture = path.join(fixture, 'peer-fixture.ps1')
     const p3 = '1'.repeat(40)
     writeFileSync(serverFile, healthServer)
     writeFileSync(diskLabel, '220bd80ab62fc7e6b3b40b7d4263a712d9a09405')
     writeFileSync(path.join(bin, 'pm2.cmd'), '@type "%P3_TEST_PM2_DATA%"\r\n')
+    writeFileSync(peerFixture, peerLookupFixture)
     async function startHealthServer() {
       const child = spawn(process.execPath, [serverFile, diskLabel], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true })
       servers.push(child)
@@ -87,17 +115,20 @@ test('H01 refuses old health listeners after the disk label changes', { skip: pr
     const overlayCompleted = new Date().toISOString().replace('Z', '0000+00:00')
     const fresh = await startHealthServer()
 
-    function signoff(listener, app) {
+    function signoff(listener, app, peerMode) {
       writeFileSync(pm2App, JSON.stringify([{
         name: 'metasheet-backend',
         pid: app.pid,
-        pm2_env: { PATH: 'fixture', status: 'online', pm_exec_path: path.join(fixture, 'packages/core-backend/dist/src/index.js') },
+        pm2_env: { PATH: 'fixture', status: 'online', pm_exec_path: backend },
       }]))
       return spawnSync('powershell.exe', [
-        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(http, 'h01-health.ps1'),
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', peerMode ? peerFixture : probe,
         '-P3Commit', p3, '-InstallRoot', fixture, '-OverlayCompletedUtc', overlayCompleted, '-ExpectedBuild', 'P3',
       ], {
-        env: { ...process.env, PM2_HOME: pm2, P3_TEST_PM2_DATA: pm2App, MS_API: `http://127.0.0.1:${listener.port}` },
+        env: {
+          ...process.env, PM2_HOME: pm2, P3_TEST_PM2_DATA: pm2App, MS_API: `http://127.0.0.1:${listener.port}`,
+          P3_TEST_H01: probe, P3_TEST_PEER_MODE: peerMode, P3_TEST_PEER_PID: String(listener.pid),
+        },
         encoding: 'utf8',
         timeout: 90000,
       })
@@ -113,6 +144,17 @@ test('H01 refuses old health listeners after the disk label changes', { skip: pr
     assert.equal(accepted.status, 0, accepted.stdout + accepted.stderr)
     assert.match(accepted.stdout, /HEALTH_RUNTIME peer=verified generation=post_overlay/)
     assert.match(accepted.stdout, /HEALTH_RESULT file=h01-health.ps1 status=complete/)
+    const delayed = signoff(fresh, fresh, 'delayed')
+    assert.equal(delayed.status, 0, delayed.stdout + delayed.stderr)
+    assert.match(delayed.stdout, /HEALTH_RUNTIME peer=verified generation=post_overlay/)
+    for (const [mode, reason] of [
+      ['missing', 'peer_lookup_timeout'], ['ambiguous', 'peer_owner_unconfirmed'], ['ownerless', 'peer_owner_unconfirmed'],
+    ]) {
+      const refused = signoff(fresh, fresh, mode)
+      assert.equal(refused.status, 3, refused.stdout + refused.stderr)
+      assert.match(refused.stdout, new RegExp(`reason=${reason}\\r?\\n`))
+      assert.doesNotMatch(refused.stdout, /HEALTH_RUNTIME|HEALTH status=/)
+    }
   } finally {
     for (const child of servers) child.kill()
     rmSync(fixture, { recursive: true, force: true })

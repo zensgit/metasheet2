@@ -530,6 +530,8 @@ $genExec = Join-Path $genRoot 'packages\core-backend\dist\src\index.js'
 $genJson = '[{"name":"metasheet-backend","pid":' + $dummy.Id +
   ',"pm2_env":{"PATH":"fixture","status":"online","pm_exec_path":' + (J $genExec) + '}}]'
 $null = New-Root 'generation' $genJson $false $null $null 0 $false $true
+New-Item -ItemType Directory -Path (Split-Path -Parent $genExec) -Force | Out-Null
+[IO.File]::WriteAllText($genExec, '// fixture')
 foreach ($case in @(@('fresh', $dummy.StartTime.AddSeconds(-1), 0), @('stale', [DateTime]::UtcNow, 2))) {
   $cutoff = ([DateTimeOffset]$case[1]).ToUniversalTime().ToString('o')
   $o26 = Run $script $genRoot $homeAlive @('-Keys', $shellKey, '-StartedAfterUtc', $cutoff)

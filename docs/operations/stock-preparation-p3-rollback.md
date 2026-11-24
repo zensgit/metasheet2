@@ -46,11 +46,10 @@ $rollbackArgs = @{
 
 ## 完成检查
 
-- 确认 `P3_ROLLBACK_RESULT status=overlay_complete`、回退前后 `MIG_COUNT` 相同、`MIG_NAMESET` 相同。记下本次工具返回的 `P3_ROLLBACK_OVERLAY completed_utc=`，作为 `$rollbackCompletedAt`。按窗口批准用已覆盖回去的启动脚本再重启一次 PM2，保持定时任务和写入暂停。将 `MS_API` 指到后端字面环回 IP 的直连 HTTP 端口，运行以下命令。要求 200、批准的 R84 或 R85、`HEALTH_RUNTIME peer=verified generation=post_overlay` 和完整结果，之后复核必要插件和权限入口。证据缺失时保持暂停。
+- 确认 `P3_ROLLBACK_RESULT status=overlay_complete`、回退前后 `MIG_COUNT` 相同、`MIG_NAMESET` 相同。记下本次工具返回的 `P3_ROLLBACK_OVERLAY completed_utc=`，作为 `$rollbackCompletedAt`。按窗口批准用同一账号和 `PM2_HOME` 运行签收重启，保留回退安装器保存的后端环境。保持定时任务和写入暂停。将 `MS_API` 指到后端字面环回 IP 的直连 HTTP 端口，运行以下命令。要求重启为 `status=complete`、H01 为 200、批准的 R84 或 R85、有 `HEALTH_RUNTIME peer=verified generation=post_overlay` 和完整结果，之后复核必要插件和权限入口。归属查询超时或证据缺失时保持暂停。
 
   ```powershell
-  $startScript = Join-Path $installRoot 'scripts\ops\attendance-onprem-start-pm2.ps1'
-  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $startScript -RootDir $installRoot
+  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\ps\Restart-P3BackendForSignoff.ps1 -InstallRoot $installRoot
   if ($LASTEXITCODE -ne 0) { throw 'PM2 重启失败，保持暂停并报告现场负责人' }
   .\http\h01-health.ps1 -P3Commit $p3Commit -InstallRoot $installRoot -OverlayCompletedUtc $rollbackCompletedAt -ExpectedBuild $approvedRollbackTarget
   ```
@@ -69,4 +68,4 @@ node scripts/ops/stock-preparation-p3/gen-counts.mjs --layout package --root $p3
   --json $countEvidence
 ```
 
-要求 `GENCOUNTS_RESULT status=complete`，两份模板均在计算模式 `hardcoded_lines=0`。从该提交取 `03-live-env-check.ps1` 与 `Invoke-P3Rollback.ps1` 放入 QA 附件 `ps`，将 `r12-install-counts.sql` 放入附件 `sql`，将 `h01-health.ps1`、`h31-pull-dry-run.ps1`、`h32-pull-dry-run-job.ps1`、`_pull-plan-counts.ps1` 和沿用的 `_http.ps1` 放入附件 `http`。健康探针的 `-P3Commit` 取已核验的包内提交。离线包仍走既有 verify，审核附件单独核哈希。P1–P7 对最终基线重派生，核验健康构建映射及两条试算的计划计数，填写新版窗口、批准记录及附件清单。独立复核应核对这对生成物与包内容、三处 P4/P5/s06 输出契约、R84 额外阻断、状态 C 及新窗口重签。通过目标 Windows 演练和强制状态 C 后记录结果。
+要求 `GENCOUNTS_RESULT status=complete`，两份模板均在计算模式 `hardcoded_lines=0`。从该提交取 `03-live-env-check.ps1`、`Invoke-P3Rollback.ps1` 与 `Restart-P3BackendForSignoff.ps1` 放入 QA 附件 `ps`，将 `r12-install-counts.sql` 放入附件 `sql`，将 `h01-health.ps1`、`h31-pull-dry-run.ps1`、`h32-pull-dry-run-job.ps1`、`_pull-plan-counts.ps1` 和沿用的 `_http.ps1` 放入附件 `http`。健康探针的 `-P3Commit` 取已核验的包内提交。离线包仍走既有 verify，审核附件单独核哈希。P1–P7 对最终基线重派生，核验健康构建映射及两条试算的计划计数，填写新版窗口、批准记录及附件清单。独立复核应核对这对生成物与包内容、三处 P4/P5/s06 输出契约、R84 额外阻断、状态 C 及新窗口重签。通过目标 Windows 演练和强制状态 C 后记录结果。

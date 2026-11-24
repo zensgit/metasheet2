@@ -27,6 +27,34 @@ function Get-LoopbackAddress([string]$Address) {
   return $ip
 }
 
+function Wait-HealthPeer([Net.IPEndPoint]$Listener, [Net.IPEndPoint]$Local) {
+  $script:healthFailure = 'peer_lookup_timeout'
+  $elapsed = [Diagnostics.Stopwatch]::StartNew()
+  for ($attempt = 0; $attempt -lt 12 -and $elapsed.ElapsedMilliseconds -lt 3000; $attempt++) {
+    try {
+      $peers = @(Get-NetTCPConnection -LocalPort $Listener.Port -RemotePort $Local.Port -State Established -ErrorAction Stop |
+        Where-Object { (Get-LoopbackAddress $_.LocalAddress) -eq $Listener.Address -and
+          (Get-LoopbackAddress $_.RemoteAddress) -eq $Local.Address })
+    } catch {
+      if ($_.CategoryInfo.Category -ne 'ObjectNotFound') {
+        $script:healthFailure = 'peer_lookup_failed'
+        throw
+      }
+      $peers = @()
+    }
+    if ($peers.Count -gt 1 -or ($peers.Count -eq 1 -and $peers[0].OwningProcess -le 0)) {
+      $script:healthFailure = 'peer_owner_unconfirmed'
+      throw 'ambiguous health peer'
+    }
+    if ($peers.Count -eq 1 -and $elapsed.ElapsedMilliseconds -lt 3000) {
+      $script:healthFailure = 'script_error'
+      return [int]$peers[0].OwningProcess
+    }
+    if ($attempt -lt 11 -and $elapsed.ElapsedMilliseconds -lt 3000) { Start-Sleep -Milliseconds 100 }
+  }
+  throw 'health peer not found before deadline'
+}
+
 function Invoke-BoundHealth {
   # Open a direct local connection and ask the OS which process owns its server
   # endpoint before sending any HTTP bytes. Read the response from that socket.
@@ -34,19 +62,15 @@ function Invoke-BoundHealth {
   $ip = Get-LoopbackAddress $uri.DnsSafeHost
   if ($null -eq $ip -or $uri.Scheme -cne 'http' -or $uri.AbsolutePath -ne '/' -or
       $uri.UserInfo -or $uri.Query -or $uri.Fragment) { throw 'direct loopback required' }
+  # Resolve the system cmdlet before starting the peer lookup budget.
+  $null = Get-Command Get-NetTCPConnection -ErrorAction Stop
 
   $client = [Net.Sockets.TcpClient]::new($ip.AddressFamily)
   $bytes = [IO.MemoryStream]::new()
   try {
     $connect = $client.ConnectAsync($ip, $uri.Port)
     if (-not $connect.Wait(8000)) { throw 'connect timeout' }
-    $listener = $client.Client.RemoteEndPoint
-    $local = $client.Client.LocalEndPoint
-    $peers = @(Get-NetTCPConnection -LocalPort $listener.Port -RemotePort $local.Port -State Established |
-      Where-Object { (Get-LoopbackAddress $_.LocalAddress) -eq $listener.Address -and
-        (Get-LoopbackAddress $_.RemoteAddress) -eq $local.Address })
-    if ($peers.Count -ne 1 -or $peers[0].OwningProcess -le 0) { throw 'ambiguous health peer' }
-    $peerId = [int]$peers[0].OwningProcess
+    $peerId = Wait-HealthPeer $client.Client.RemoteEndPoint $client.Client.LocalEndPoint
     $peerStarted = (Get-Process -Id $peerId).StartTime.ToUniversalTime()
     $stream = $client.GetStream()
     $stream.ReadTimeout = 8000
@@ -75,6 +99,7 @@ function Invoke-BoundHealth {
   }
 }
 
+$healthFailure = 'script_error'
 try {
   if ($PSCmdlet.ParameterSetName -eq 'Signoff') {
     $response = Invoke-BoundHealth
@@ -124,6 +149,6 @@ try {
   }
   'HEALTH_RESULT file=h01-health.ps1 status=complete'
 } catch {
-  'HEALTH_RESULT file=h01-health.ps1 status=incomplete reason=script_error'
+  'HEALTH_RESULT file=h01-health.ps1 status=incomplete reason=' + $healthFailure
   exit 3
 }

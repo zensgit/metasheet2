@@ -69,11 +69,10 @@ $applyExit = $LASTEXITCODE
 $applyCompletedAt = if ($applyExit -eq 0) { [DateTimeOffset]::UtcNow.ToString('o') } else { $null }
 $applyExit
 ```
-记退出码。安装器退出后先用 `s06` 核账本。只在安装器退出 0 且账本为 `total` 时，按窗口批准在同一 PowerShell 再执行一次明确的 PM2 重启。这样可以证明应答进程在覆盖成功退出之后启动。设置 `MS_API` 为 PM2 后端的本机直连 HTTP 地址，使用字面环回 IP 和后端监听端口。H01 会核对同一条 TCP 连接的应答、Windows 查到的连接归属进程、PM2 管理的后端及其启动时间。记固定结果行、迁移文件名及 SQLSTATE；原始错误文本留现场。
+记退出码。安装器退出后先用 `s06` 核账本。只在安装器退出 0 且账本为 `total` 时，按窗口批准用同一 Windows 账号和 `PM2_HOME` 运行签收重启。工具先用 `03` 核 PM2 和后端入口，再让 PM2 沿用安装器保存的环境重启。设置 `MS_API` 为 PM2 后端的本机直连 HTTP 地址，使用字面环回 IP 和后端监听端口。H01 会短时重查同一条 TCP 连接上尚未出现的归属记录，再核对实际应答进程与 PM2 后端的身份及启动时间。记固定结果行、迁移文件名及 SQLSTATE；原始错误文本留现场。
 
 ```powershell
-$startScript = Join-Path $installRoot 'scripts\ops\attendance-onprem-start-pm2.ps1'
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $startScript -RootDir $installRoot
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\ps\Restart-P3BackendForSignoff.ps1 -InstallRoot $installRoot
 if ($LASTEXITCODE -ne 0) { throw 'PM2 重启失败，保持暂停并报告现场负责人' }
 .\http\h01-health.ps1 -P3Commit $p3Commit -InstallRoot $installRoot -OverlayCompletedUtc $applyCompletedAt -ExpectedBuild P3
 ```

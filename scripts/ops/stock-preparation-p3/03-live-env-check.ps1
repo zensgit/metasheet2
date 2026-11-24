@@ -127,6 +127,7 @@
 #   LIVEENV_BACKEND generation=fresh|stale|wrong_app|wrong_peer|unknown (only with -StartedAfterUtc)
 #       fresh = the named online app from this root has an OS start time after the caller's UTC cutoff.
 #       -HealthPeerPid is an internal input from H01 for the direct connection's owner.
+#   LIVEENV_BACKEND target=verified|unconfirmed (only with -ExpectedPm2Command)
 #   LIVEENV key=<KEY> process=<w> launch=<w> root=<w> docker=<w> machine=<w> user=<w> dup=none|same|differs pdup=none|same|differs kind=<k> gate=<g> verdict=off|on|review|unknown|-
 #       launch = this shell's inherited process environment, separate from the live PM2 app.
 #       dup  = several lines for the key in one file (same / differing state words); root= and
@@ -141,14 +142,15 @@
 # A run with no LIVEENV_RESULT line did not finish. Never read a missing line as absent.
 # reasons: install_root_not_found, bad_key, no_daemon, daemon_not_owned, owner_unreadable, pm2_not_found,
 # pm2_timeout, pm2_failed, parse_failed, app_count, env_not_visible, parser_unavailable,
-# invalid_start_cutoff, backend_generation_unconfirmed, read_error.
+# invalid_start_cutoff, backend_generation_unconfirmed, pm2_command_mismatch, backend_target_unconfirmed, read_error.
 param(
   [Parameter(Mandatory = $true)][string]$InstallRoot,
   [string[]]$Keys = @(),
   [string]$AppName = 'metasheet-backend',
   [int]$TimeoutSeconds = 60,
   [string]$StartedAfterUtc,
-  [ValidateRange(1, 2147483647)][int]$HealthPeerPid
+  [ValidateRange(1, 2147483647)][int]$HealthPeerPid,
+  [string]$ExpectedPm2Command
 )
 
 $ErrorActionPreference = 'Stop'
@@ -343,7 +345,8 @@ function Get-BackendGeneration($App, [DateTimeOffset]$After) {
     $expected = [IO.Path]::GetFullPath((Join-Path $InstallRoot 'packages\core-backend\dist\src\index.js'))
     $scriptPath = [string]$App['pm2_env']['pm_exec_path']
     if (-not [IO.Path]::IsPathRooted($scriptPath)) { return 'wrong_app' }
-    $actual = [IO.Path]::GetFullPath($scriptPath)
+    $expected = (Get-Item -LiteralPath $expected).FullName
+    $actual = (Get-Item -LiteralPath $scriptPath).FullName
     if ($actual -ine $expected) { return 'wrong_app' }
     $started = (Get-Process -Id $processId -ErrorAction Stop).StartTime.ToUniversalTime()
     if ($started -gt $After.UtcDateTime) { return 'fresh' }
@@ -460,6 +463,10 @@ try {
   elseif ($daemonOwner -eq 'unknown') { $resultLine = 'owner_unreadable' }
   elseif ($daemonOwner -ne 'true') { $resultLine = 'daemon_not_owned' }
   elseif ($null -eq $pm2Path) { $resultLine = 'pm2_not_found' }
+  elseif ($PSBoundParameters.ContainsKey('ExpectedPm2Command') -and
+      (Get-Item -LiteralPath $pm2Path).FullName -ine (Get-Item -LiteralPath $ExpectedPm2Command).FullName) {
+    $resultLine = 'pm2_command_mismatch'
+  }
   else {
     $readState = 'failed'
     $parserOk = $true
@@ -505,11 +512,16 @@ try {
           if ($null -eq $parsed -or -not ($parsed -is [System.Array])) { $resultLine = 'parse_failed' }
           else {
             $hits = @()
+            $namespaceCollision = $false
             foreach ($a in $parsed) {
               if ($a -is [System.Collections.IDictionary] -and $a.ContainsKey('name') -and ([string]$a['name']) -ceq $AppName) { $hits += , $a }
+              if ($PSBoundParameters.ContainsKey('ExpectedPm2Command') -and $a -is [System.Collections.IDictionary] -and
+                  $a['pm2_env'] -is [System.Collections.IDictionary] -and $a['pm2_env']['namespace'] -ceq $AppName) {
+                $namespaceCollision = $true
+              }
             }
             $appMatches = [string]$hits.Count
-            if ($hits.Count -ne 1) { $resultLine = 'app_count' }
+            if ($hits.Count -ne 1 -or $namespaceCollision) { $resultLine = 'app_count' }
             elseif (-not ($hits[0].ContainsKey('pm2_env') -and $hits[0]['pm2_env'] -is [System.Collections.IDictionary])) { $resultLine = 'parse_failed' }
             else {
               # canary: every Windows process has PATH. If neither bag carries it, the env is not where this
@@ -537,6 +549,18 @@ try {
   }
   $dbProc = Get-DbUrlProcess $readState $bags $dockerMap
   'LIVEENV_DBURL_PROCESS process=' + $dbProc
+  if ($PSBoundParameters.ContainsKey('ExpectedPm2Command')) {
+    $target = 'unconfirmed'
+    if ($readState -eq 'ok' -and (Get-BackendGeneration $pm2App ([DateTimeOffset]::MinValue)) -eq 'fresh') {
+      $cwd = [string]$pm2App['pm2_env']['pm_cwd']
+      if ([IO.Path]::IsPathRooted($cwd) -and
+          (Get-Item -LiteralPath $cwd).FullName -ieq (Get-Item -LiteralPath $InstallRoot).FullName) {
+        $target = 'verified'
+      }
+    }
+    'LIVEENV_BACKEND target=' + $target
+    if ($target -ne 'verified' -and $null -eq $resultLine) { $resultLine = 'backend_target_unconfirmed' }
+  }
   if ($PSBoundParameters.ContainsKey('StartedAfterUtc')) {
     $after = [DateTimeOffset]::MinValue
     if (-not [DateTimeOffset]::TryParseExact($StartedAfterUtc, 'o', [Globalization.CultureInfo]::InvariantCulture,
