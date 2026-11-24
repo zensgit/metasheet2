@@ -1816,6 +1816,30 @@ action_authorization_fence_status() {
   addresses="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{if .IPAddress}}{{.IPAddress}},{{end}}{{if .GlobalIPv6Address}}{{.GlobalIPv6Address}},{{end}}{{end}}' "$POSTGRES_CONTAINER")"
   [[ -n "$addresses" ]] || fail "staging postgres has no running network address"
   probe="$(cat "${HERE}/staging-authorization-fence-probe.cjs")"
+  local backend_image backend_running_id by_tag by_id
+  backend_image="$(docker inspect -f '{{.Config.Image}}' "$BACKEND_CONTAINER")"
+  backend_running_id="$(docker inspect -f '{{.Image}}' "$BACKEND_CONTAINER")"
+  [[ "$backend_image" =~ ^ghcr\.io/[a-z0-9._-]+/metasheet2-backend:[a-f0-9]{40}$ ]] \
+    || fail "unexpected staging image tag format"
+  by_tag="$(docker image inspect -f '{{json .}}' "$backend_image" 2>/dev/null || echo null)"
+  by_id="$(docker image inspect -f '{{json .}}' "$backend_running_id" 2>/dev/null || echo null)"
+  printf '%s\n%s\n' "$by_tag" "$by_id" | python3 -c '
+import json, sys
+tag, running_id = sys.argv[1:]
+values = [json.loads(s) for s in sys.stdin if s.strip()]
+def identity(value):
+    if value is None:
+        return None
+    return {
+        "id": value.get("Id"),
+        "repoDigests": [x for x in value.get("RepoDigests") or [] if x.startswith("ghcr.io/zensgit/metasheet2-backend@sha256:")],
+        "tagMatches": tag in (value.get("RepoTags") or []),
+        "revision": (value.get("Config", {}).get("Labels") or {}).get("org.opencontainers.image.revision"),
+        "descriptorDigest": (value.get("Descriptor") or {}).get("digest"),
+        "platform": [value.get("Os"), value.get("Architecture"), value.get("Variant")],
+    }
+print(json.dumps({"stagingTag": tag, "containerImageId": running_id, "tagLookup": identity(values[0]), "runningIdLookup": identity(values[1])}))
+' "$backend_image" "$backend_running_id" | tee "${OUTPUT_DIR}/authorization-fence-image-identity.json"
   staging_exec_env -e "STAGING_FENCE_EXPECTED_DB_ADDRESSES=$addresses" -- \
     node --input-type=commonjs -e "$probe" | tee "${OUTPUT_DIR}/authorization-fence-status.json"
 }

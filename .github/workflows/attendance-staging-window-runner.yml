@@ -517,6 +517,7 @@ jobs:
             output/window-runner/ssh.log
             output/window-runner/summary.txt
             output/window-runner/authorization-fence-status.json
+            output/window-runner/authorization-fence-image-identity.json
             output/window-runner/auth-me.summary.txt
             output/window-runner/settings-*.summary.txt
             output/window-runner/env-flags.txt
