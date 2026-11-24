@@ -98,6 +98,41 @@ async function run() {
     const reference = [14, 15, 16, 17].includes(major)
       ? JSON.parse(gunzipSync(readFileSync(`${backend}/tests/fixtures/authorization-operation-catalog/pg${major}.json.gz`)))
       : null
+    const changedTriggerModes = []
+    const extraFunctions = []
+    if (reference) {
+      const triggerKeys = sections[4][1]
+      const installedModes = new Map(catalog[4].map(row => [rowKey(row, triggerKeys), row.tgenabled]))
+      for (const ref of reference.rows[4]) {
+        const key = rowKey(ref, triggerKeys)
+        const actual = installedModes.get(key)
+        if (actual && actual !== ref.tgenabled) changedTriggerModes.push({ key, expected: ref.tgenabled, actual })
+      }
+      const functionKeys = sections[7][1]
+      const known = new Set(reference.rows[7].map(row => rowKey(row, functionKeys)))
+      for (const row of catalog[7].filter(item => !known.has(rowKey(item, functionKeys))).slice(0, 8)) {
+        const data = await client.query(`
+          SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
+                   WHERE d.classid = 'pg_catalog.pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e') AS extension_member,
+                 (SELECT count(*)::int FROM pg_catalog.pg_depend d
+                   WHERE d.refclassid = 'pg_catalog.pg_proc'::regclass AND d.refobjid = p.oid) AS dependent_count,
+                 (SELECT count(*)::int FROM pg_catalog.pg_trigger t WHERE t.tgfoid = p.oid) AS triggering_count
+            FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+           WHERE n.nspname = 'public' AND p.proname = $1
+             AND pg_catalog.pg_get_function_identity_arguments(p.oid) = $2
+        `, [row.proname, row.arguments])
+        extraFunctions.push({
+          name: /^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/.test(row.proname) ? row.proname : null,
+          language: row.lanname,
+          securityDefiner: row.prosecdef,
+          ownerTrusted: row.owner_trusted,
+          volatile: row.provolatile,
+          argsDigest: sha(row.arguments),
+          definitionDigest: sha(row.definition),
+          ...data.rows[0],
+        })
+      }
+    }
     const fence = initialSchemaPublic && supported
     const output = {
       buildCommit: /^[0-9a-f]{40}$/.test(process.env.METASHEET_BUILD_COMMIT ?? '')
@@ -112,6 +147,8 @@ async function run() {
       previewFenceReady: fence,
       exactDepartmentEnabled: process.env.DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED === 'true',
       activationEnabled: process.env.DELEGATED_SCOPE_ACTIVATION_ENABLED === 'true',
+      changedTriggerModes,
+      extraFunctions,
       differences: reference && Object.fromEntries(sections.map(([section, fields], index) =>
         [section, compareSection(catalog[index], reference.rows[index], fields)])),
     }
