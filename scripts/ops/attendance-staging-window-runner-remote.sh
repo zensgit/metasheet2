@@ -4134,6 +4134,11 @@ case "$ACTION" in
   smoke) action_smoke ;;
   status) action_status ;;
   authorization-fence-status) action_authorization_fence_status ;;
+  authorization-fence-repair)
+    # shellcheck source=scripts/ops/staging-authorization-fence-repair.sh
+    source "${HERE}/staging-authorization-fence-repair.sh"
+    action_authorization_fence_repair
+    ;;
   migrate) action_migrate ;;
   residue-sweep) action_residue_sweep ;;
   soak-baseline) action_soak_baseline ;;

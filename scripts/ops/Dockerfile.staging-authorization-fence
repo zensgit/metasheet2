@@ -1,0 +1,8 @@
+ARG FENCE_BASE_IMAGE
+FROM ${FENCE_BASE_IMAGE}
+ARG FENCE_REPAIR_COMMIT
+LABEL org.opencontainers.image.revision=${FENCE_REPAIR_COMMIT}
+ENV METASHEET_BUILD_COMMIT=${FENCE_REPAIR_COMMIT}
+ENV METASHEET_BUILD_IMAGE_TAG=${FENCE_REPAIR_COMMIT}
+COPY authorization-operation-fence.ts /app/packages/core-backend/src/admin/authorization-operation-fence.ts
+COPY authorization-operation-fence.js /app/packages/core-backend/dist/src/admin/authorization-operation-fence.js

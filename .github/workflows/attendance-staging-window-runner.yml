@@ -26,6 +26,7 @@ run-name: "Attendance Staging Window Runner: ${{ inputs.action }}${{ inputs.acti
 #                    the tasks smoke proves and reports its own zero-residue instead.
 #   status         — read-only staging snapshot
 #   authorization-fence-status — catalog-only probe through the live staging backend connection
+#   authorization-fence-repair — backend-only repair for the pinned staging catalog and image
 #   migrate        — pull the exact deploy_sha backend image WITHOUT switching the running app,
 #                    then backup + clone-rehearsal + apply its migration universe, per
 #                    docs/operations/staging-migration-
@@ -91,7 +92,7 @@ on:
         description: 'What to run against the STAGING stack'
         required: true
         type: choice
-        options: [deploy, smoke, status, authorization-fence-status, migrate, residue-sweep, soak-baseline, soak-seed, soak-flags, soak-run, soak-status]
+        options: [deploy, smoke, status, authorization-fence-status, authorization-fence-repair, migrate, residue-sweep, soak-baseline, soak-seed, soak-flags, soak-run, soak-status]
         default: status
       deploy_sha:
         description: 'FULL 40-char commit SHA (GHCR tags are full-SHA). Required for deploy, migrate, smoke, and soak-flags. Migrate runs that exact image migration universe without switching the app; soak-flags must equal the RUNNING image tags.'
@@ -167,7 +168,11 @@ jobs:
           SOAK_OPTS: ${{ inputs.soak_opts }}
         run: |
           set -euo pipefail
-          case "$ACTION" in deploy|smoke|status|authorization-fence-status|migrate|residue-sweep|soak-baseline|soak-seed|soak-flags|soak-run|soak-status) ;; *) echo "invalid action: $ACTION" >&2; exit 2 ;; esac
+          case "$ACTION" in deploy|smoke|status|authorization-fence-status|authorization-fence-repair|migrate|residue-sweep|soak-baseline|soak-seed|soak-flags|soak-run|soak-status) ;; *) echo "invalid action: $ACTION" >&2; exit 2 ;; esac
+          if [[ "$ACTION" == "authorization-fence-repair" && "$DEPLOY_SHA" != "$GITHUB_SHA" ]]; then
+            echo "authorization-fence-repair requires deploy_sha to equal the checked-out commit" >&2
+            exit 2
+          fi
           if [[ "$ACTION" == "deploy" || "$ACTION" == "migrate" || "$ACTION" == "smoke" || "$ACTION" == "soak-flags" ]]; then
             if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
               echo "deploy_sha must be the FULL 40-char lowercase commit SHA for action=$ACTION (GHCR tags are full-SHA; short prefixes fail with manifest unknown), got: '$DEPLOY_SHA'" >&2
@@ -286,10 +291,36 @@ jobs:
           node --check scripts/ops/staging-tasks-smoke.mjs
           node -e "JSON.parse(require('fs').readFileSync('scripts/ops/attendance-w4w7-soak-config.template.json','utf8'))"
           node --check scripts/ops/staging-authorization-fence-probe.cjs
+          bash -n scripts/ops/staging-authorization-fence-repair.sh
           echo "inputs and embedded scripts OK"
 
       - name: Run pipeline self-test (same shape as the remote invocation)
         run: node --test scripts/ops/attendance-window-runner-pipeline.test.mjs scripts/ops/staging-tasks-smoke.test.mjs
+
+      - name: Compile the exact staging repair module
+        if: inputs.action == 'authorization-fence-repair'
+        run: |
+          set -euo pipefail
+          npm install --prefix "$RUNNER_TEMP/fence-build-tools" --no-save --ignore-scripts --package-lock=false --no-audit --no-fund typescript@5.8.3
+          dir="$RUNNER_TEMP/authorization-fence-image"
+          mkdir -p "$dir"
+          cp scripts/ops/Dockerfile.staging-authorization-fence "$dir/Dockerfile"
+          cp packages/core-backend/src/admin/authorization-operation-fence.ts "$dir/"
+          node - "$RUNNER_TEMP/fence-build-tools/node_modules/typescript" "$dir" <<'JS'
+          const fs = require('node:fs')
+          const path = require('node:path')
+          const ts = require(process.argv[2])
+          const dir = process.argv[3]
+          const fileName = 'authorization-operation-fence.ts'
+          const result = ts.transpileModule(fs.readFileSync(path.join(dir, fileName), 'utf8'), {
+            fileName,
+            compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+            reportDiagnostics: true,
+          })
+          if (result.diagnostics.length !== 0) process.exit(1)
+          fs.writeFileSync(path.join(dir, 'authorization-operation-fence.js'), result.outputText)
+          JS
+          node --check "$dir/authorization-operation-fence.js"
 
       - name: Sync runner scripts to deploy host
         id: sync
@@ -298,6 +329,7 @@ jobs:
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          ACTION: ${{ inputs.action }}
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
@@ -319,6 +351,7 @@ jobs:
           tar -czf - \
             scripts/ops/attendance-staging-window-runner-remote.sh \
             scripts/ops/staging-authorization-fence-probe.cjs \
+            scripts/ops/staging-authorization-fence-repair.sh \
             scripts/ops/attendance-window-runner-pipeline.lib.sh \
             scripts/ops/attendance-window-runner-mint-token.mjs \
             scripts/ops/attendance-w4w7-soak-load-generator.mjs \
@@ -335,6 +368,10 @@ jobs:
           scp -o StrictHostKeyChecking=yes -o UserKnownHostsFile=~/.ssh/known_hosts -o IdentitiesOnly=yes -i ~/.ssh/deploy_key \
             docker-compose.app.staging.yml \
             "$DEPLOY_USER@$DEPLOY_HOST:${runner_dir}/docker-compose.app.staging.yml"
+          if [[ "$ACTION" == "authorization-fence-repair" ]]; then
+            scp -o StrictHostKeyChecking=yes -o UserKnownHostsFile=~/.ssh/known_hosts -o IdentitiesOnly=yes -i ~/.ssh/deploy_key \
+              -r "$RUNNER_TEMP/authorization-fence-image" "$DEPLOY_USER@$DEPLOY_HOST:${runner_dir}/"
+          fi
 
       - name: Run remote action
         id: remote
@@ -517,6 +554,9 @@ jobs:
             output/window-runner/ssh.log
             output/window-runner/summary.txt
             output/window-runner/authorization-fence-status.json
+            output/window-runner/authorization-fence-before.json
+            output/window-runner/authorization-fence-build.log
+            output/window-runner/authorization-fence-compose.log
             output/window-runner/auth-me.summary.txt
             output/window-runner/settings-*.summary.txt
             output/window-runner/env-flags.txt
