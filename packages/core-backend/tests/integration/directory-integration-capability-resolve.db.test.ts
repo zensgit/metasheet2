@@ -15,8 +15,9 @@
  * Rows a test needs "enabled" are written directly: nothing in the product writes them. Every row the
  * suite writes belongs to an integration it inserted (fresh ids, fresh organizations, a per-run scope
  * suffix), and cleanup deletes exactly those rows: capability rows first, then the integrations. The
- * resolver never writes history, so the history table is not touched; the suite asserts it holds no row
- * for those integrations. Positive cases use a test-only mock of the provider registry and the
+ * resolver never writes history. The background lock case invokes the real disable service, verifies
+ * its history inside the writing transaction, then rolls it back; no history for the fixtures remains.
+ * Positive cases use a test-only mock of the provider registry and the
  * implementation table (production governs dingtalk directory/login as legacy and notification as gated); the resolver itself
  * has no override.
  */
@@ -65,6 +66,10 @@ import {
   resolveEffectiveIntegrationCapability,
   type CapabilityDecision,
 } from '../../src/integrations/integration-capability-resolve'
+import { resolveEffectiveNotificationCapabilityForBackground } from '../../src/integrations/integration-capability-resolve-background'
+import { createDirectoryIntegrationCapabilitiesWriteService } from '../../src/integrations/directory-integration-capabilities-write-service'
+import { isCapabilityImplementationAvailable } from '../../src/integrations/integration-capability-implementations'
+import { resolveProviderCapabilityDescriptor } from '../../src/integrations/provider-capability-registry'
 import type { Queryable } from '../../src/multitable/automation-durable-dispatcher'
 
 const dbUrl = process.env.DATABASE_URL
@@ -186,6 +191,85 @@ describeIfDatabase('directory integration capability resolver (real database)', 
   const resolveFresh = (integrationId: string, expectedOrgId: string, capability: Capability = 'login'): Promise<CapabilityDecision> =>
     inConsumer((client) => resolveOn(client, integrationId, expectedOrgId, capability))
 
+  const resolveBackgroundOn = (client: PoolClient | Pool, integrationId: string, eventOrgId: string) =>
+    resolveEffectiveNotificationCapabilityForBackground(executorOf(client), { integrationId, eventOrgId })
+
+  const resolveBackgroundFresh = (integrationId: string, eventOrgId: string) =>
+    inConsumer((client) => resolveBackgroundOn(client, integrationId, eventOrgId))
+
+  function recordQueries(client: PoolClient) {
+    const statements: string[] = []
+    const errors: string[] = []
+    const executor: Queryable = {
+      query: async (text: string, values?: unknown[]) => {
+        statements.push(text)
+        try {
+          return await client.query(text, values) as never
+        } catch (error) {
+          errors.push((error as PgError).code ?? 'unknown')
+          throw error
+        }
+      },
+    }
+    return { executor, statements, errors }
+  }
+
+  const capabilityReads = (statements: string[]) => statements.filter((text) => /FROM directory_integration_capabilities\b/.test(text))
+
+  function barrier() {
+    let open!: () => void
+    const promise = new Promise<void>((resolve) => { open = resolve })
+    return { promise, open }
+  }
+
+  async function within<T>(promise: Promise<T>, timeoutMs = 10_000): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error('database test barrier timed out')), timeoutMs)
+        }),
+      ])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /** Every installed FK referencing this integration id must have no child row, including 07b evidence. */
+  async function assertNoIntegrationDependents(integrationId: string): Promise<void> {
+    const references = await run(`
+      SELECT c.conname, format('%I.%I', n.nspname, t.relname) AS relation,
+             quote_ident(child.attname) AS column_name
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        JOIN LATERAL unnest(c.conkey, c.confkey) AS k(child_num, parent_num) ON true
+        JOIN pg_attribute child ON child.attrelid = c.conrelid AND child.attnum = k.child_num
+        JOIN pg_attribute parent ON parent.attrelid = c.confrelid AND parent.attnum = k.parent_num
+       WHERE c.contype = 'f' AND c.confrelid = '${INTEGRATIONS}'::regclass AND parent.attname = 'id'
+       ORDER BY c.conname`)
+    expect(references.rows.some((row) => row.conname === 'ncv_conn_fk')).toBe(true)
+    for (const reference of references.rows) {
+      const children = await run(`SELECT count(*)::int AS n FROM ${reference.relation} WHERE ${reference.column_name} = $1::uuid`, [integrationId])
+      expect(children.rows[0].n, reference.conname).toBe(0)
+    }
+  }
+
+  /** Observe the application's pool by the actual blocking backend, without replacing its SQL. */
+  async function waitUntilBlockedBy(holderPid: number, operation: { settled: () => boolean }): Promise<string[]> {
+    const deadline = Date.now() + 4_000
+    while (Date.now() < deadline) {
+      const result = await run(`SELECT query FROM pg_stat_activity
+        WHERE datname = current_database() AND wait_event_type = 'Lock'
+          AND $1::int = ANY(pg_blocking_pids(pid))`, [holderPid])
+      if (result.rows.length > 0) return result.rows.map((row) => String(row.query))
+      if (operation.settled()) throw new Error('writer settled before reaching the consumer lock')
+      await sleep(25)
+    }
+    throw new Error('writer never waited on the consumer lock')
+  }
+
   async function backendPid(client: PoolClient): Promise<number> {
     return Number((await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
   }
@@ -226,7 +310,7 @@ describeIfDatabase('directory integration capability resolver (real database)', 
     await run(`DELETE FROM ${CAPS} WHERE integration_id = ANY($1::uuid[])`, [ids])
     await run(`DELETE FROM ${INTEGRATIONS} WHERE id = ANY($1::uuid[])`, [ids])
     const history = await run(`SELECT count(*)::int AS n FROM ${HISTORY} WHERE integration_id = ANY($1::uuid[])`, [ids])
-    expect(history.rows[0].n, 'the resolver and this suite write no capability history').toBe(0)
+    expect(history.rows[0].n, 'the resolver and this suite retain no capability history').toBe(0)
   }
 
   beforeAll(async () => {
@@ -376,15 +460,18 @@ describeIfDatabase('directory integration capability resolver (real database)', 
 
     it('refuses with schema_unavailable when the reader transaction cannot see the tables, and leaves that transaction usable', async () => {
       const { id, org } = await insertIntegration()
-      await insertCapabilityRow(id, 'dingtalk', org, enabled('login'))
+      await insertCapabilityRow(id, 'dingtalk', org, { ...enabled('login'), ...enabled('notification') })
       await inConsumer(async (client) => {
         // Only this reader's transaction loses sight of the tables; the schema itself is not touched.
         await client.query('SET LOCAL search_path = pg_catalog')
         expect(await resolveOn(client, id, org)).toEqual(refused('schema_unavailable'))
+        // BG-D08 shares this one reader-local visibility change with the original request case.
+        expect(await resolveBackgroundOn(client, id, org)).toEqual(refused('schema_unavailable'))
         expect((await client.query('SELECT 1 AS one')).rows[0].one).toBe(1)
       })
       expect(await missingTables()).toEqual([])
       expect((await resolveFresh(id, org)).effective).toBe(true)
+      expect((await resolveBackgroundFresh(id, org)).effective).toBe(true)
     })
   })
 
@@ -627,6 +714,437 @@ describeIfDatabase('directory integration capability resolver (real database)', 
       expect(notification.map((decision) => decision.effective)).toEqual([true, true])
       const witnesses = notification.map((decision) => (decision.effective ? decision.witness : ''))
       expect(new Set(witnesses).size).toBe(2)
+    })
+  })
+
+  describe('background event capability resolver', () => {
+    const DISABLE_NOTIFICATION_SQL = `UPDATE ${CAPS} SET notification_enabled = false,
+      notification_bound_tenant = NULL, notification_bound_app_scope = NULL,
+      revision = revision + 1, updated_by = 'admin-2' WHERE integration_id = $1`
+    const MOVE_ORG_SQL = `UPDATE ${INTEGRATIONS} SET org_id = $2 WHERE id = $1`
+    const DELETE_INTEGRATION_SQL = `DELETE FROM ${INTEGRATIONS} WHERE id = $1`
+
+    it('BG-D01: reads only the requested integration and leaves every stored row and version unchanged', async () => {
+      const first = await insertIntegration()
+      const absent = await insertIntegration({ orgId: first.org })
+      const disabled = await insertIntegration({ orgId: first.org })
+      await insertCapabilityRow(first.id, 'dingtalk', first.org, enabled('notification'))
+      await insertCapabilityRow(disabled.id, 'dingtalk', first.org)
+      const ids = [first.id, absent.id, disabled.id]
+      const images = async () => ({
+        integrations: (await run(`SELECT to_jsonb(i) AS image, xmin::text AS version FROM ${INTEGRATIONS} i WHERE id = ANY($1::uuid[]) ORDER BY id`, [ids])).rows,
+        capabilities: (await run(`SELECT to_jsonb(c) AS image, xmin::text AS version FROM ${CAPS} c WHERE integration_id = ANY($1::uuid[]) ORDER BY integration_id`, [ids])).rows,
+        history: (await run(`SELECT * FROM ${HISTORY} WHERE integration_id = ANY($1::uuid[]) ORDER BY id`, [ids])).rows,
+      })
+      const before = await images()
+      expect(await resolveBackgroundFresh(first.id, first.org)).toEqual({
+        effective: true, capability: 'notification', integrationId: first.id, orgId: first.org,
+        provider: 'dingtalk', status: 'active', revision: 1, orgSource: 'background_event_row',
+        witness: expect.stringMatching(/^[0-9a-f]{64}$/),
+      })
+      for (const fixture of [absent, disabled]) {
+        expect(await resolveBackgroundFresh(fixture.id, fixture.org)).toEqual(refused('not_enabled'))
+      }
+      expect(await images()).toEqual(before)
+    })
+
+    it.each(['REPEATABLE READ', 'SERIALIZABLE'])('BG-D02: rejects %s before any integration or capability lock', async (isolation) => {
+      const { id, org } = await insertIntegration()
+      await inConsumer(async (client) => {
+        const trace = recordQueries(client)
+        expect(await resolveEffectiveNotificationCapabilityForBackground(trace.executor, { integrationId: id, eventOrgId: org })).toEqual(refused('transaction_required'))
+        expect(trace.statements).toHaveLength(1)
+        expect(capabilityReads(trace.statements)).toEqual([])
+        const locks = await client.query(`SELECT count(*)::int AS n FROM pg_locks WHERE pid = pg_backend_pid()
+          AND relation IN ('${INTEGRATIONS}'::regclass, '${CAPS}'::regclass)`)
+        expect(locks.rows[0].n).toBe(0)
+      }, { isolation })
+    })
+
+    it('BG-D02: rejects an unbound transaction and transaction probes sent over different connections', async () => {
+      const { id, org } = await insertIntegration()
+      const client = await pool.connect()
+      try {
+        await client.query("SET lock_timeout = '2s'")
+        const trace = recordQueries(client)
+        expect(await resolveEffectiveNotificationCapabilityForBackground(trace.executor, { integrationId: id, eventOrgId: org })).toEqual(refused('transaction_required'))
+        expect(trace.statements).toHaveLength(3)
+      } finally {
+        await client.query('RESET lock_timeout')
+        client.release()
+      }
+      await inConsumer((first) => inConsumer(async (second) => {
+        let count = 0
+        const split: Queryable = {
+          query: (text: string, values?: unknown[]) => {
+            count += 1
+            return (count === 3 ? second : first).query(text, values) as never
+          },
+        }
+        expect(await resolveEffectiveNotificationCapabilityForBackground(split, { integrationId: id, eventOrgId: org })).toEqual(refused('transaction_required'))
+        expect(count).toBe(3)
+      }))
+    })
+
+    it.each(['0', '6s'])('BG-D02: rejects lock_timeout=%s without taking either row lock', async (lockTimeout) => {
+      const { id, org } = await insertIntegration()
+      await inConsumer(async (client) => {
+        const trace = recordQueries(client)
+        expect(await resolveEffectiveNotificationCapabilityForBackground(trace.executor, { integrationId: id, eventOrgId: org })).toEqual(refused('transaction_required'))
+        expect(trace.statements).toHaveLength(1)
+        const locks = await client.query(`SELECT count(*)::int AS n FROM pg_locks WHERE pid = pg_backend_pid()
+          AND relation IN ('${INTEGRATIONS}'::regclass, '${CAPS}'::regclass)`)
+        expect(locks.rows[0].n).toBe(0)
+        expect((await client.query('SELECT 1 AS one')).rows[0].one).toBe(1)
+      }, { lockTimeout })
+    })
+
+    it('BG-D02: explicitly selects RC on an RR-default pool, with the two local bounds first', async () => {
+      const { id, org } = await insertIntegration()
+      await insertCapabilityRow(id, 'dingtalk', org, enabled('notification'))
+      const source = repeatableReadDefaultPool()
+      expect((await source.query('SHOW default_transaction_isolation')).rows[0].default_transaction_isolation).toBe('repeatable read')
+      const client = await source.connect()
+      const trace = recordQueries(client)
+      try {
+        await trace.executor.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+        await trace.executor.query("SET LOCAL lock_timeout = '2s'")
+        await trace.executor.query("SET LOCAL statement_timeout = '5s'")
+        expect(await resolveEffectiveNotificationCapabilityForBackground(trace.executor, { integrationId: id, eventOrgId: org })).toMatchObject({ effective: true })
+        expect(trace.statements.slice(0, 3)).toEqual([
+          'BEGIN ISOLATION LEVEL READ COMMITTED', "SET LOCAL lock_timeout = '2s'", "SET LOCAL statement_timeout = '5s'",
+        ])
+        expect(trace.statements).toHaveLength(9)
+      } finally {
+        await client.query('ROLLBACK')
+        client.release()
+      }
+    })
+
+    it('BG-D02: preserves a real setting failure and requires rollback of the aborted caller', async () => {
+      const { id, org } = await insertIntegration()
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+        expect((await pgError(client.query("SET LOCAL lock_timeout = 'invalid'"))).code).toBe('22023')
+        expect(await resolveBackgroundOn(client, id, org)).toEqual(refused('read_failed'))
+        expect((await pgError(client.query('SELECT 1'))).code).toBe('25P02')
+        await client.query('ROLLBACK')
+        expect((await client.query('SELECT 1 AS one')).rows[0].one).toBe(1)
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined)
+        client.release()
+      }
+    })
+
+    it('BG-D03: blocks the real generic save and 01c disable service until the background reader ends', async () => {
+      const { updateDirectoryIntegration } = await import('../../src/directory/directory-sync')
+      const { id, org } = await insertIntegration()
+      await insertCapabilityRow(id, 'dingtalk', org, enabled('notification'))
+      const reader = await pool.connect()
+      const disabler = await pool.connect()
+      let save: ReturnType<typeof tracked<unknown>> | undefined
+      let disable: ReturnType<typeof tracked<unknown>> | undefined
+      try {
+        await reader.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+        await reader.query("SET LOCAL lock_timeout = '2s'")
+        expect((await resolveBackgroundOn(reader, id, org)).effective).toBe(true)
+        const readerPid = await backendPid(reader)
+        const disablerPid = await backendPid(disabler)
+        const writer = createDirectoryIntegrationCapabilitiesWriteService({
+          isEnabled: () => true,
+          resolveDescriptor: resolveProviderCapabilityDescriptor,
+          isImplementationAvailable: isCapabilityImplementationAvailable,
+          readLoginRuntime: () => ({ available: false, requireGrant: false, autoLinkEmail: false, autoProvision: false }),
+          isIntegrationScopedCredentialsEnabled: () => false,
+          capabilityGates: {},
+          audit: async () => undefined,
+          transaction: async (work) => {
+            await disabler.query('BEGIN')
+            try {
+              const result = await work(executorOf(disabler))
+              expect((await disabler.query(`SELECT notification_enabled, revision::text AS revision FROM ${CAPS} WHERE integration_id = $1`, [id])).rows[0])
+                .toEqual({ notification_enabled: false, revision: '2' })
+              expect((await disabler.query(`SELECT revision::text AS revision, notification_enabled FROM ${HISTORY} WHERE integration_id = $1`, [id])).rows)
+                .toEqual([{ revision: '2', notification_enabled: false }])
+              return result
+            } finally {
+              // Exercise the real writer, but do not retain immutable history in the resolver suite.
+              await disabler.query('ROLLBACK')
+            }
+          },
+        })
+        save = tracked(updateDirectoryIntegration(id, {
+          name: `background-saved-${RUN}`, corpId: CORP, appKey: APP_TWO, appSecret: `synthetic-secret-${RUN}`,
+        }, { actorId: 'background-test-admin' }))
+        const waiting = await waitUntilBlockedBy(readerPid, save)
+        expect(waiting).toHaveLength(1)
+        expect(waiting[0]).toMatch(/UPDATE directory_integrations\b|FROM directory_integrations\b[\s\S]*FOR UPDATE/)
+        disable = tracked(writer.patch(id, { expectedRevision: 1, capabilities: { notification: false } }, 'background-test-admin'))
+        await waitUntilLockWait(disablerPid)
+        expect(save.settled()).toBe(false)
+        expect(disable.settled()).toBe(false)
+        await reader.query('COMMIT')
+        await expect(within(save.promise)).resolves.toMatchObject({ id, config: { appKey: APP_TWO } })
+        await expect(within(disable.promise)).resolves.toMatchObject({ kind: 'ok', changed: true })
+      } finally {
+        await reader.query('ROLLBACK').catch(() => undefined)
+        await Promise.all([save?.promise, disable?.promise].map((operation) => operation?.catch(() => undefined)))
+        await disabler.query('ROLLBACK').catch(() => undefined)
+        reader.release()
+        disabler.release()
+      }
+      expect(await resolveBackgroundFresh(id, org)).toEqual(refused('scope_changed'))
+      expect((await run(`SELECT notification_enabled, revision::text AS revision FROM ${CAPS} WHERE integration_id = $1`, [id])).rows[0])
+        .toEqual({ notification_enabled: true, revision: '1' })
+      expect((await run(`SELECT count(*)::int AS n FROM ${HISTORY} WHERE integration_id = $1`, [id])).rows[0].n).toBe(0)
+    })
+
+    it.each(['unchanged', 'move organization', 'delete'])('BG-D04/D05: a paired read after a committed %s uses the original event organization', async (change) => {
+      const { id, org } = await insertIntegration()
+      await assertNoIntegrationDependents(id)
+      await inConsumer(async (client) => {
+        const reached = barrier()
+        const release = barrier()
+        const trace = recordQueries(client)
+        const paused: Queryable = {
+          query: async (text: string, values?: unknown[]) => {
+            if (/FROM directory_integrations\b[\s\S]*FOR SHARE/.test(text)) {
+              expect(values).toEqual([id, org])
+              reached.open()
+              await release.promise
+            }
+            return trace.executor.query(text, values)
+          },
+        }
+        const reading = tracked(resolveEffectiveNotificationCapabilityForBackground(paused, { integrationId: id, eventOrgId: org }))
+        try {
+          await within(Promise.race([reached.promise, reading.promise.then(() => { throw new Error('resolver ended before the paired-read barrier') })]))
+          if (change === 'move organization') expect((await run(MOVE_ORG_SQL, [id, `background-moved-${randomUUID()}`])).rowCount).toBe(1)
+          if (change === 'delete') expect((await run(DELETE_INTEGRATION_SQL, [id])).rowCount).toBe(1)
+          release.open()
+          expect(await within(reading.promise)).toEqual(refused(change === 'unchanged' ? 'not_enabled' : 'integration_missing'))
+          expect(capabilityReads(trace.statements)).toHaveLength(change === 'unchanged' ? 1 : 0)
+        } finally {
+          release.open()
+          await reading.promise.catch(() => undefined)
+        }
+      })
+    })
+
+    it('BG-D05: deletion of an empty integration waits for the already acquired share lock', async () => {
+      const { id, org } = await insertIntegration()
+      await assertNoIntegrationDependents(id)
+      const reader = await pool.connect()
+      const writer = await pool.connect()
+      let deleting: ReturnType<typeof tracked<unknown>> | undefined
+      try {
+        await reader.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+        await reader.query("SET LOCAL lock_timeout = '2s'")
+        expect(await resolveBackgroundOn(reader, id, org)).toEqual(refused('not_enabled'))
+        await writer.query('BEGIN')
+        await writer.query("SET LOCAL lock_timeout = '5s'")
+        const pid = await backendPid(writer)
+        deleting = tracked(writer.query(DELETE_INTEGRATION_SQL, [id]))
+        await waitUntilLockWait(pid)
+        expect(deleting.settled()).toBe(false)
+        await reader.query('COMMIT')
+        await expect(deleting.promise).resolves.toMatchObject({ rowCount: 1 })
+        await writer.query('COMMIT')
+      } finally {
+        await reader.query('ROLLBACK').catch(() => undefined)
+        await deleting?.promise.catch(() => undefined)
+        await writer.query('ROLLBACK').catch(() => undefined)
+        reader.release()
+        writer.release()
+      }
+      expect(await resolveBackgroundFresh(id, org)).toEqual(refused('integration_missing'))
+    })
+
+    it.each([
+      ['capability', 'delete'], ['capability', 'move organization'],
+      ['endpoint', 'delete'], ['endpoint', 'move organization'],
+      ['policy', 'delete'], ['policy', 'move organization'], ['verification', 'delete'],
+    ])('BG-D05: the existing %s FK refuses %s with 23503', async (dependency, change) => {
+      const { id, org } = await insertIntegration()
+      await assertNoIntegrationDependents(id)
+      await inConsumer(async (client) => {
+        if (dependency === 'capability') await insertCapabilityRow(id, 'dingtalk', org, enabled('notification'), client)
+        if (dependency === 'endpoint') {
+          await client.query(`INSERT INTO user_notification_endpoints
+            (org_id, user_id, connection_id, provider, address_kind, proof_kind, proof_id,
+             proof_witness, address_witness, tenant_address_witness, bound_tenant, bound_app_scope)
+            VALUES ($1, $2, $3, 'dingtalk', 'userid', 'directory_link', $4, $5, $5, $5, $6, $7)`,
+          [org, `background-user-${randomUUID()}`, id, randomUUID(), 'a'.repeat(64), CORP, APP])
+        }
+        if (dependency === 'policy') {
+          await client.query(`INSERT INTO org_directory_routing_policy (org_id, purpose, canonical_integration_id)
+            VALUES ($1, 'approval_routing', $2)`, [org, id])
+        }
+        if (dependency === 'verification') {
+          await client.query(`INSERT INTO notification_connection_verifications
+            (connection_id, provider, reached_level, tuple_fingerprint, bound_tenant, bound_app_scope, verified_by, verified_at)
+            VALUES ($1, 'dingtalk', 'token', $2, $3, $4, 'background-test-admin', now())`, [id, 'b'.repeat(64), CORP, APP])
+        }
+        const failed = change === 'delete'
+          ? client.query(DELETE_INTEGRATION_SQL, [id])
+          : client.query(MOVE_ORG_SQL, [id, `background-moved-${randomUUID()}`])
+        expect((await pgError(failed)).code).toBe('23503')
+      })
+      await assertNoIntegrationDependents(id)
+    })
+
+    it('BG-D06: a committed disable is visible, and the reverse-order disable waits for the consumer', async () => {
+      const { id, org } = await insertIntegration()
+      await insertCapabilityRow(id, 'dingtalk', org, enabled('notification'))
+      const reader = await pool.connect()
+      const writer = await pool.connect()
+      let disabling: ReturnType<typeof tracked<unknown>> | undefined
+      try {
+        await reader.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+        await reader.query("SET LOCAL lock_timeout = '2s'")
+        expect((await resolveBackgroundOn(reader, id, org)).effective).toBe(true)
+        await writer.query('BEGIN')
+        await writer.query("SET LOCAL lock_timeout = '5s'")
+        const pid = await backendPid(writer)
+        disabling = tracked(writer.query(DISABLE_NOTIFICATION_SQL, [id]))
+        await waitUntilLockWait(pid)
+        expect(disabling.settled()).toBe(false)
+        await reader.query('COMMIT')
+        await expect(disabling.promise).resolves.toMatchObject({ rowCount: 1 })
+        await writer.query('COMMIT')
+      } finally {
+        await reader.query('ROLLBACK').catch(() => undefined)
+        await disabling?.promise.catch(() => undefined)
+        await writer.query('ROLLBACK').catch(() => undefined)
+        reader.release()
+        writer.release()
+      }
+      expect(await resolveBackgroundFresh(id, org)).toEqual(refused('not_enabled'))
+      expect((await run(`SELECT notification_enabled, revision::text AS revision FROM ${CAPS} WHERE integration_id = $1`, [id])).rows[0])
+        .toEqual({ notification_enabled: false, revision: '2' })
+    })
+
+    it('BG-D06: inserting a capability after a missing-row decision cannot retroactively enable it', async () => {
+      const { id, org } = await insertIntegration()
+      await inConsumer(async (client) => {
+        const decision = await resolveBackgroundOn(client, id, org)
+        expect(decision).toEqual(refused('not_enabled'))
+        await insertCapabilityRow(id, 'dingtalk', org, enabled('notification'))
+        expect(decision).toEqual(refused('not_enabled'))
+      })
+      expect((await resolveBackgroundFresh(id, org)).effective).toBe(true)
+    })
+
+    it.each([
+      ['integration', 'timeout'], ['capability', 'timeout'], ['integration', 'cancel'], ['capability', 'cancel'],
+    ])('BG-D07: a real %s lock %s returns read_failed and leaves 25P02 until rollback', async (target, failure) => {
+      const { id, org } = await insertIntegration()
+      await insertCapabilityRow(id, 'dingtalk', org, enabled('notification'))
+      const holder = await pool.connect()
+      try {
+        await holder.query('BEGIN')
+        await holder.query(target === 'integration'
+          ? `SELECT 1 FROM ${INTEGRATIONS} WHERE id = $1 FOR UPDATE`
+          : `SELECT 1 FROM ${CAPS} WHERE integration_id = $1 FOR UPDATE`, [id])
+        await inConsumer(async (client) => {
+          const trace = recordQueries(client)
+          const pid = await backendPid(client)
+          const started = Date.now()
+          const reading = tracked(resolveEffectiveNotificationCapabilityForBackground(trace.executor, { integrationId: id, eventOrgId: org }))
+          await waitUntilLockWait(pid)
+          expect(reading.settled()).toBe(false)
+          if (failure === 'cancel') expect((await run('SELECT pg_cancel_backend($1) AS cancelled', [pid])).rows[0].cancelled).toBe(true)
+          expect(await reading.promise).toEqual(refused('read_failed'))
+          expect(trace.errors).toEqual([failure === 'cancel' ? '57014' : '55P03'])
+          expect(Date.now() - started).toBeLessThan(CAPABILITY_RESOLVE_MAX_LOCK_TIMEOUT_MS)
+          expect((await pgError(client.query('SELECT 1'))).code).toBe('25P02')
+        }, { lockTimeout: '1s' })
+      } finally {
+        await holder.query('ROLLBACK').catch(() => undefined)
+        holder.release()
+      }
+      expect((await resolveBackgroundFresh(id, org)).effective).toBe(true)
+    })
+
+    it('BG-D07: a real statement timeout cancels the settings read with 57014 and aborts the transaction', async () => {
+      const { id, org } = await insertIntegration()
+      await inConsumer(async (client) => {
+        await client.query("SET LOCAL statement_timeout = '200ms'")
+        const trace = recordQueries(client)
+        const slowed: Queryable = {
+          query: (text: string, values?: unknown[]) => trace.executor.query(
+            text.replace("current_setting('transaction_isolation') AS isolation", "current_setting('transaction_isolation') AS isolation, pg_sleep(5) AS slept"), values,
+          ),
+        }
+        expect(await resolveEffectiveNotificationCapabilityForBackground(slowed, { integrationId: id, eventOrgId: org })).toEqual(refused('read_failed'))
+        expect(trace.statements).toHaveLength(1)
+        expect(trace.errors).toEqual(['57014'])
+        expect((await pgError(client.query('SELECT 1'))).code).toBe('25P02')
+      })
+    })
+
+    it('BG-D09: production notification keeps revision 17 and stable witnesses separated by source', async () => {
+      const { id, org } = await insertIntegration()
+      await insertCapabilityRow(id, 'dingtalk', org, { ...enabled('notification'), revision: 17 })
+      control.testRegistry = false
+      const request = await resolveFresh(id, org, 'notification')
+      const background = await resolveBackgroundFresh(id, org)
+      expect(request).toMatchObject({ effective: true, revision: 17, orgSource: 'authenticated_tenant' })
+      expect(background).toMatchObject({ effective: true, revision: 17, orgSource: 'background_event_row' })
+      if (!request.effective || !background.effective) throw new Error('expected both production notification decisions effective')
+      expect(background.witness).not.toBe(request.witness)
+      expect(await resolveBackgroundFresh(id, org)).toEqual(background)
+      expect(background.witness).toBe(computeIntegrationCapabilityWitness({
+        orgSource: 'background_event_row', integrationId: id, orgId: org, provider: 'dingtalk', status: 'active',
+        capability: 'notification', revision: 17, anchor: { tenant: CORP, appScope: APP },
+      }))
+      await run(DISABLE_NOTIFICATION_SQL, [id])
+      expect(await resolveBackgroundFresh(id, org)).toEqual(refused('not_enabled'))
+    })
+
+    it.each([true, false])('BG-D10: a foreign organization returns only integration_missing when notification enabled=%s', async (notificationEnabled) => {
+      const event = await insertIntegration()
+      const foreign = await insertIntegration()
+      await insertCapabilityRow(foreign.id, 'dingtalk', foreign.org, notificationEnabled ? enabled('notification') : {})
+      await inConsumer(async (client) => {
+        const trace = recordQueries(client)
+        expect(await resolveEffectiveNotificationCapabilityForBackground(trace.executor, { integrationId: foreign.id, eventOrgId: event.org }))
+          .toEqual(refused('integration_missing'))
+        expect(capabilityReads(trace.statements)).toEqual([])
+        expect(trace.statements).toHaveLength(5)
+      })
+      expect(await resolveBackgroundFresh(event.id, event.org)).toEqual(refused('not_enabled'))
+      const correct = await resolveBackgroundFresh(foreign.id, foreign.org)
+      if (notificationEnabled) expect(correct).toMatchObject({ effective: true, integrationId: foreign.id, orgId: foreign.org })
+      else expect(correct).toEqual(refused('not_enabled'))
+    })
+
+    it.each([
+      ['move organization', 'COMMIT'], ['move organization', 'ROLLBACK'], ['delete', 'COMMIT'], ['delete', 'ROLLBACK'],
+    ])('BG-D11: RC rechecks the paired predicate after waiting for %s and %s', async (change, finish) => {
+      const { id, org } = await insertIntegration()
+      await assertNoIntegrationDependents(id)
+      const writer = await pool.connect()
+      try {
+        await writer.query('BEGIN')
+        expect((await writer.query(change === 'delete' ? DELETE_INTEGRATION_SQL : MOVE_ORG_SQL,
+          change === 'delete' ? [id] : [id, `background-moved-${randomUUID()}`])).rowCount).toBe(1)
+        await inConsumer(async (client) => {
+          const trace = recordQueries(client)
+          const pid = await backendPid(client)
+          const reading = tracked(resolveEffectiveNotificationCapabilityForBackground(trace.executor, { integrationId: id, eventOrgId: org }))
+          await waitUntilLockWait(pid)
+          expect(reading.settled()).toBe(false)
+          await writer.query(finish)
+          expect(await reading.promise).toEqual(refused(finish === 'COMMIT' ? 'integration_missing' : 'not_enabled'))
+          expect(capabilityReads(trace.statements)).toHaveLength(finish === 'COMMIT' ? 0 : 1)
+          expect(trace.errors).toEqual([])
+        })
+      } finally {
+        await writer.query('ROLLBACK').catch(() => undefined)
+        writer.release()
+      }
     })
   })
 })

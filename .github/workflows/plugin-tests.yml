@@ -2791,6 +2791,9 @@ jobs:
             tests/integration/dingtalk-corp-backfill-scope.db.test.ts \
             tests/integration/strict-credential-chain.db.test.ts \
             tests/integration/strict-dingtalk-entry.db.test.ts \
+            tests/integration/realtime-authority-read.db.test.ts \
+            tests/integration/realtime-revalidation.db.test.ts \
+            tests/integration/realtime-yjs-startup-wiring.db.test.ts \
             tests/integration/security-events-schema.db.test.ts \
             tests/integration/directory-source-freeze-lock-correctness.db.test.ts \
             tests/integration/invite-accept-concurrency-rollback.db.test.ts \

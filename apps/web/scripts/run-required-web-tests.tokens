@@ -502,6 +502,8 @@ platform-app-launcher
 platform-app-shell
 platform-shell-nav.spec.ts
 public-multitable-form
+realtime-clients-reconnect.spec.ts
+realtime-reconnect.spec.ts
 recordReportPresentation.spec.ts
 requesterPreviewFields
 roleDelegationView
@@ -663,3 +665,5 @@ view-manager-multitable-contract
 webhook-target-hint
 workflowHubView
 xlsx-mapping
+yjs-document-reopen.spec.ts
+yjs-document-resync.spec.ts

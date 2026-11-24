@@ -2008,6 +2008,8 @@ exec npx vitest run \
   personal-view-client \
   platform-shell-nav.spec.ts \
   public-multitable-form \
+  realtime-clients-reconnect.spec.ts \
+  realtime-reconnect.spec.ts \
   recordReportPresentation.spec.ts \
   requesterPreviewFields \
   roleDelegationView \
@@ -2127,4 +2129,6 @@ exec npx vitest run \
   webhook-target-hint \
   workflowHubView \
   xlsx-mapping \
+  yjs-document-reopen.spec.ts \
+  yjs-document-resync.spec.ts \
   --reporter=dot

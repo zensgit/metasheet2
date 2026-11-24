@@ -502,6 +502,8 @@ function globalHistoryFlagsInSource() {
   const strictSessionLifetime = grepFlagTokens('EXTERNAL_LOGIN_STRICT_SESSION_MAX_AGE_SECONDS')
   const externalNotifications = grepFlagTokens('EXTERNAL_NOTIFICATION_[A-Z_0-9]+_ENABLED')
   const directoryDeprovision = grepFlagTokens('DIRECTORY_DEPROVISION_[A-Z_0-9]+_ENABLED')
+  // Continuous authorization of established realtime connections: one family by name shape.
+  const realtimeRevalidation = grepFlagTokens('EXTERNAL_LOGIN_REALTIME_[A-Z_0-9]+_ENABLED')
   // #4196 Class-B outbound two-phase ledger switch (S0-c, AGENTS.md: every new env flag is registered
   // here). One family by name shape, scanned where the executor and retry-eligibility read it.
   const automationClassB = grepFlagTokens('AUTOMATION_CLASSB_[A-Z_0-9]+_ENABLED')
@@ -514,8 +516,56 @@ function globalHistoryFlagsInSource() {
   // there: the plugin's older env flags go through its lenient parseBoolean and are NOT registered here.
   const attendanceCancelRound = grepFlagTokens('ATTENDANCE_CANCEL_ROUND_[A-Z_0-9]+', { file: ATTENDANCE_PLUGIN_SOURCE })
     .filter((t) => t.endsWith('_ENABLED'))
-  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...stockPrepPullBatch, ...stockPrepSheetRepair, ...stockPrepPilotPath, ...stockPrepTenantClaim, ...yidaOwner, ...yidaIssueConfirm, ...attendanceCancelRound, ...userRecycle, ...strictSessionLifetime, ...externalNotifications, ...directoryDeprovision, ...automationClassB, ...integrationAutomationRun])].sort()
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...stockPrepPullBatch, ...stockPrepSheetRepair, ...stockPrepPilotPath, ...stockPrepTenantClaim, ...yidaOwner, ...yidaIssueConfirm, ...attendanceCancelRound, ...userRecycle, ...strictSessionLifetime, ...externalNotifications, ...directoryDeprovision, ...realtimeRevalidation, ...automationClassB, ...integrationAutomationRun])].sort()
 }
+
+test('realtime revalidation flag: source-derived discovery requires registration', () => {
+  const key = 'EXTERNAL_LOGIN_REALTIME_REVALIDATION_ENABLED'
+  assert.deepEqual(grepFlagTokens('EXTERNAL_LOGIN_REALTIME_[A-Z_0-9]+_ENABLED'), [key])
+  const discovered = globalHistoryFlagsInSource()
+  assert.ok(discovered.includes(key))
+  assert.ok(GLOBAL_HISTORY_FLAG_BY_KEY[key])
+  const without = new Set(GLOBAL_HISTORY_FLAG_KEYS.filter((name) => name !== key))
+  assert.deepEqual(discovered.filter((name) => !without.has(name)), [key])
+})
+
+test('realtime revalidation flag: manifest agrees with the actual exact-literal reader', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.EXTERNAL_LOGIN_REALTIME_REVALIDATION_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.source, 'packages/core-backend/src/realtime-authz/revalidation-flag.ts#isRealtimeRevalidationEnabled')
+  assert.match(spec.purpose, /Default OFF/)
+  const source = readRepoSource(spec.source.split('#')[0])
+  const key = source.match(/export const REALTIME_REVALIDATION_FLAG = '([^']+)' as const/)?.[1]
+  assert.equal(key, spec.key)
+  const expression = source.match(/export function isRealtimeRevalidationEnabled\([^)]*\): boolean \{\s*return ([^\n]+)\n\}/)?.[1]
+  assert.equal(expression, "env.EXTERNAL_LOGIN_REALTIME_REVALIDATION_ENABLED === 'true'")
+  const runtime = new Function('env', `return ${expression}`)
+  const matrix = ['true', undefined, '', 'false', '0', 'TRUE', 'True', ' true', 'true ', '1', 'yes', 'on']
+  assert.deepEqual(matrix.map((value) => runtime({ [key]: value })), [true, ...Array(11).fill(false)])
+  for (const value of matrix) assert.equal(isActivated(spec, value), runtime({ [key]: value }))
+})
+
+test('credential-chain flag requires realtime revalidation to be exactly true', () => {
+  const chain = 'DIRECTORY_DEPROVISION_REVOKE_CREDENTIALS_ENABLED'
+  const realtime = 'EXTERNAL_LOGIN_REALTIME_REVALIDATION_ENABLED'
+  const violationIds = (flags) => evaluateFlagRules(flags).map((violation) => violation.id)
+  const id = 'credential-chain-without-realtime-revalidation'
+  assert.deepEqual(GLOBAL_HISTORY_FLAG_BY_KEY[chain].dependsOn, [realtime])
+  assert.ok(violationIds({ [chain]: 'true' }).includes(id))
+  for (const value of ['', 'false', 'TRUE', ' true', 'true ', '1', 'yes']) {
+    assert.ok(violationIds({ [chain]: 'true', [realtime]: value }).includes(id), `realtime=${JSON.stringify(value)}`)
+  }
+  assert.ok(!violationIds({ [chain]: 'true', [realtime]: 'true' }).includes(id))
+  assert.ok(!violationIds({ [realtime]: 'true' }).includes(id))
+  assert.ok(!violationIds({ [chain]: 'TRUE' }).includes(id))
+  assert.ok(!violationIds({}).includes(id))
+})
 
 test('directory deprovision credential flag: source-derived discovery requires registration', () => {
   const key = 'DIRECTORY_DEPROVISION_REVOKE_CREDENTIALS_ENABLED'
@@ -534,7 +584,7 @@ test('directory deprovision credential flag: manifest agrees with the actual exa
   assert.equal(spec.activationValue, 'true')
   assert.equal(spec.caseInsensitive, undefined)
   assert.equal(spec.danger, 'high')
-  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.dependsOn, ['EXTERNAL_LOGIN_REALTIME_REVALIDATION_ENABLED'])
   assert.deepEqual(spec.conflictsWith, [])
   assert.equal(spec.source, 'packages/core-backend/src/auth/strict-credential-chain.ts#credentialRevocationFlagOn')
   assert.match(spec.purpose, /Default OFF/)
@@ -1036,7 +1086,7 @@ test('mutation guard: every FlagSpec.rules[] entry is reachable by evaluateFlagR
   const allRuleIds = GLOBAL_HISTORY_FLAG_MANIFEST.flatMap((spec) => (spec.rules || []).map((r) => r.id))
   assert.deepEqual(
     [...allRuleIds].sort(),
-    ['archive-without-exact-writer-fence', 'field-retype-convert-with-legacy-manage-schema', 'lossy-without-base', 'pit-reset-intent-with-retention-on', 'sheet-revert-intent-with-retention-on', 'side-door-without-capture', 'undelete-without-revert-gate'].sort(),
+    ['archive-without-exact-writer-fence', 'credential-chain-without-realtime-revalidation', 'field-retype-convert-with-legacy-manage-schema', 'lossy-without-base', 'pit-reset-intent-with-retention-on', 'sheet-revert-intent-with-retention-on', 'side-door-without-capture', 'undelete-without-revert-gate'].sort(),
     'manifest rule set changed — update this test deliberately if a rule was intentionally added/removed',
   )
 })
