@@ -2122,6 +2122,7 @@ exec npx vitest run \
   useAutoSumTotal \
   useDingTalkPersonRecipientStatus \
   usePlmExportActions \
+  userManagementAtomicAuthorization \
   userManagementRoleMembership \
   userManagementView \
   uuid-no-bare-randomuuid \
