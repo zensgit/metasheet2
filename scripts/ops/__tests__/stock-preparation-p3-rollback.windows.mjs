@@ -75,7 +75,19 @@ function run(scenario, { target = 'R85', release = target, apply = false, author
     assert.equal(zip.status, 0, zip.stderr)
     writeFileSync(bootstrap, [
       'param($RootDir, $PackageArchive, $InstallDeps, $RunMigrations)',
-      'if ($RunMigrations -ne "0" -or $RootDir -ne $env:P3_TEST_ROOT -or $InstallDeps -ne "1" -or $PackageArchive -ne $env:P3_TEST_ARCHIVE) { [Console]::Error.WriteLine("FIXTURE_ARGUMENT_MISMATCH"); exit 9 }',
+      'function Stop-Fixture([string]$Field) { [Console]::Error.WriteLine("FIXTURE_ARGUMENT_MISMATCH field=" + $Field); exit 9 }',
+      'function Assert-FixturePath([string]$Field, [string]$Actual, [string]$Expected) {',
+      '  if ([string]::IsNullOrWhiteSpace($Actual)) { Stop-Fixture $Field }',
+      '  try {',
+      '    $actualPath = (Get-Item -LiteralPath $Actual -ErrorAction Stop).FullName',
+      '    $expectedPath = (Get-Item -LiteralPath $Expected -ErrorAction Stop).FullName',
+      '  } catch { Stop-Fixture $Field }',
+      '  if ($actualPath -ine $expectedPath) { Stop-Fixture $Field }',
+      '}',
+      'if ($RunMigrations -ne "0") { Stop-Fixture "RunMigrations" }',
+      'if ($InstallDeps -ne "1") { Stop-Fixture "InstallDeps" }',
+      'Assert-FixturePath "RootDir" $RootDir $env:P3_TEST_ROOT',
+      'Assert-FixturePath "PackageArchive" $PackageArchive $env:P3_TEST_ARCHIVE',
       '[IO.File]::WriteAllText($env:P3_TEST_FLAG, "ok")',
       '[Console]::Out.WriteLine("FIXTURE_STDOUT")',
       '[Console]::Error.WriteLine("FIXTURE_STDERR")',
@@ -118,8 +130,8 @@ function run(scenario, { target = 'R85', release = target, apply = false, author
       PGDATABASE: 'synthetic-only',
       P3_TEST_SCENARIO: scenario,
       P3_TEST_FLAG: flag,
-      P3_TEST_ROOT: install,
-      P3_TEST_ARCHIVE: archive,
+      P3_TEST_ROOT: install.split(path.sep).join('/'),
+      P3_TEST_ARCHIVE: archive.split(path.sep).join('/'),
     }
     const result = spawnSync(powershell, argv, { env, encoding: 'utf8' })
     let overlaid = false
