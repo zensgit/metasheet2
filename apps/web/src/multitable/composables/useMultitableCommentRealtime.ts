@@ -1,5 +1,6 @@
 import { onBeforeUnmount, watch } from 'vue'
 import { io, type Socket } from 'socket.io-client'
+import { installRealtimeReconnect, type RealtimeReconnectHandle } from '../../utils/realtimeReconnect'
 import { useAuth } from '../../composables/useAuth'
 import { getApiBase } from '../../utils/api'
 import type { MultitableComment } from '../types'
@@ -61,6 +62,7 @@ function resolveRealtimeTargetId(payload: CommentEventPayload): string | null {
 export function useMultitableCommentRealtime(options: UseMultitableCommentRealtimeOptions) {
   const auth = useAuth()
   let socket: Socket | null = null
+  let reconnectHandle: RealtimeReconnectHandle | null = null
   let activeSheetId: string | null = null
   let currentUserId: string | null = null
   let disconnected = false
@@ -86,6 +88,8 @@ export function useMultitableCommentRealtime(options: UseMultitableCommentRealti
   }
 
   function cleanupSocket() {
+    reconnectHandle?.stop()
+    reconnectHandle = null
     if (socket) {
       if (activeSheetId) {
         socket.emit('leave-sheet', activeSheetId)
@@ -113,6 +117,12 @@ export function useMultitableCommentRealtime(options: UseMultitableCommentRealti
           autoConnect: true,
           transports: ['websocket'],
           auth: token ? { token } : undefined,
+        })
+        // After a reconnect the server knows nothing of the rooms of the old connection.
+        reconnectHandle = installRealtimeReconnect(nextSocket, {
+          onReconnected: () => {
+            if (activeSheetId) nextSocket.emit('join-sheet', activeSheetId)
+          },
         })
 
         nextSocket.on('comment:created', (payload: CommentEventPayload) => {

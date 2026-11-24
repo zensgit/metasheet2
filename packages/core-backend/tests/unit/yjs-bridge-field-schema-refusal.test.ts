@@ -271,11 +271,19 @@ describe('src/index.ts wires it (text pin — the start-up code cannot be execut
   })
 
   it('the refusal handler is attached to the live bridge, with that same invalidator, after the bridge is built', () => {
-    const attach = 'yjsBridge.setRefusalHandler(createFieldSchemaRefusalHandler(yjsInvalidate))'
+    // The field-schema handler is attached together with the authorization-refusal handler; both get the
+    // same invalidator.
+    const attach = [
+      'yjsBridge.setRefusalHandler(composeRefusalHandlers(',
+      '          createFieldSchemaRefusalHandler(yjsInvalidate),',
+      '          createAuthorizationRefusalHandler(yjsInvalidate),',
+      '        ))',
+    ].join('\n')
     expect(source.split(attach)).toHaveLength(2)
+    expect(source.split('yjsBridge.setRefusalHandler(')).toHaveLength(2)
     expect(source.indexOf('const yjsBridge = new YjsRecordBridge(')).toBeGreaterThan(-1)
     expect(source.indexOf(attach)).toBeGreaterThan(source.indexOf('const yjsBridge = new YjsRecordBridge('))
     expect(source.indexOf(attach)).toBeGreaterThan(source.indexOf('const yjsInvalidate = createYjsInvalidator('))
-    expect(source).toContain("const { createYjsInvalidator, createFieldSchemaRefusalHandler } = await import('./collab/yjs-invalidation')")
+    expect(source).toContain("const { createYjsInvalidator, createFieldSchemaRefusalHandler, createAuthorizationRefusalHandler, composeRefusalHandlers } = await import('./collab/yjs-invalidation')")
   })
 })

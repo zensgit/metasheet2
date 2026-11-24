@@ -28,6 +28,14 @@ export interface YjsRecordBridgeConfig {
   mergeWindowMs?: number
   /** Maximum delay (ms) before a forced flush. */
   maxDelayMs?: number
+  /** First delay (ms) before a write whose re-check could not be answered is re-checked. */
+  deferRetryMinMs?: number
+  /** Upper bound (ms) of the delay between two re-checks of a deferred write. */
+  deferRetryMaxMs?: number
+  /** How long (ms) one re-check may take before it counts as not answered. */
+  recheckTimeoutMs?: number
+  /** How long (ms) a write may stay un-rechecked in all before it is ended like a refused one. */
+  deferMaxMs?: number
 }
 
 /** Resolves a socket.id (Yjs transaction origin) to a verified userId. */
@@ -40,12 +48,78 @@ export type ActorResolver = (socketId: string) => string | undefined
  */
 export type YjsBridgeRefusalHandler = (recordId: string, error: unknown) => void | Promise<void>
 
+/** What one connection contributed to a pending write: who it was bound to and which fields it changed. */
+export interface YjsContribution {
+  /** Connection the changes arrived on; null when the origin of a change could not be told. */
+  originId: string | null
+  actorId: string
+  fieldIds: string[]
+}
+
+/**
+ * Answer of the re-check of one contribution:
+ *   - allowed: the contributor may still write every field it changed;
+ *   - denied:  an authoritative fact says it may not;
+ *   - unknown: the facts could not be read, or the instance is not serving. Neither a yes nor a no.
+ */
+export type YjsContributionVerdict = 'allowed' | 'denied' | 'unknown'
+
+/**
+ * Re-checks one contribution right before the merged write is persisted. A checker that rejects is
+ * read as `unknown`.
+ */
+export type YjsContributionChecker = (recordId: string, contribution: YjsContribution) => Promise<YjsContributionVerdict>
+
+/**
+ * A merged write was refused because one of its contributions is no longer authorized or cannot
+ * be attributed. The whole batch is refused: no contribution of it is persisted.
+ */
+export class YjsContributionRefusedError extends Error {
+  constructor(message = 'A contribution to this write is not authorized') {
+    super(message)
+    this.name = 'YjsContributionRefusedError'
+  }
+}
+
+/**
+ * A merged write whose re-check could not be answered for longer than a write may stay unchecked.
+ * It is handled like a refused one: nothing of it is persisted and its document generation ends.
+ * Nobody was found unauthorized; the write could not be confirmed in time.
+ */
+export class YjsContributionUndecidedError extends YjsContributionRefusedError {
+  constructor(message = 'A contribution to this write could not be re-checked in time') {
+    super(message)
+    this.name = 'YjsContributionUndecidedError'
+  }
+}
+
 interface PendingWrite {
   fields: Record<string, unknown>
   actorIds: Set<string>
+  /** Keyed by origin connection ('' for an unattributable change). */
+  contributions: Map<string, { originId: string | null; actorId: string; fieldIds: Set<string> }>
   timer: NodeJS.Timeout
   firstSeen: number
+  /** How many times the re-check of this write could not be answered so far. */
+  deferrals: number
+  /** A write put back after an unanswered re-check is not taken out again before this time. */
+  notBefore: number
+  /**
+   * When the first re-check that could not be answered began, for the oldest change in this write.
+   * Later changes merged into the write do not move it.
+   */
+  undecidedSince: number | null
 }
+
+export const DEFAULT_DEFER_RETRY_MIN_MS = 250
+export const DEFAULT_DEFER_RETRY_MAX_MS = 5_000
+/** How long one re-check may take before it counts as not answered. */
+export const DEFAULT_RECHECK_TIMEOUT_MS = 30_000
+/**
+ * How long a change may stay in the shared document and its persisted state without its re-check
+ * having been answered. Past it the write is ended like a refused one.
+ */
+export const DEFAULT_DEFER_MAX_MS = 30_000
 
 /**
  * Bridges Y.Doc field changes → RecordWriteService.patchRecords().
@@ -70,23 +144,56 @@ export class YjsRecordBridge {
   private observedDocs = new Map<string, { doc: Y.Doc; cleanup: () => void }>()
   private _flushSuccessCount = 0
   private _flushFailureCount = 0
+  private _deferredFlushCount = 0
+  /**
+   * The one write of each record whose re-check or persistence is running right now. Writes of a
+   * record are taken out one at a time: a change that arrives meanwhile waits in `pendingWrites`
+   * and is taken out only after the earlier write has been written, refused or put back. A write
+   * that is put back is therefore always older than whatever waits, and a retried write can never
+   * overwrite a later value that was already written.
+   */
+  private flushing = new Map<string, PendingWrite>()
+  /** Records whose waiting write is to be taken out as soon as the running one is done. */
+  private wantFlush = new Set<string>()
+  /** Advanced by `cancelPending`: a write taken out before the cancellation is void afterwards. */
+  private cancelEpochs = new Map<string, number>()
+  private destroyed = false
 
   private mergeWindowMs: number
   private maxDelayMs: number
+  private deferRetryMinMs: number
+  private deferRetryMaxMs: number
+  private recheckTimeoutMs: number
+  private deferMaxMs: number
+  private _expiredDeferralCount = 0
 
   private actorResolver: ActorResolver
   private refusalHandler: YjsBridgeRefusalHandler | null = null
+  private contributionChecker: YjsContributionChecker | null = null
 
   constructor(
     private syncService: YjsSyncService,
     private recordWriteService: RecordWriteService,
-    private getWriteInput: (recordId: string, patch: Record<string, unknown>, primaryActorId: string, allActorIds: string[]) => Promise<RecordPatchInput | null>,
+    private getWriteInput: (recordId: string, patch: Record<string, unknown>, primaryActorId: string, allActorIds: string[], contributions?: YjsContribution[]) => Promise<RecordPatchInput | null>,
     config?: YjsRecordBridgeConfig,
     actorResolver?: ActorResolver,
   ) {
     this.actorResolver = actorResolver ?? (() => undefined)
     this.mergeWindowMs = config?.mergeWindowMs ?? 200
     this.maxDelayMs = config?.maxDelayMs ?? 500
+    this.deferRetryMinMs = config?.deferRetryMinMs ?? DEFAULT_DEFER_RETRY_MIN_MS
+    this.deferRetryMaxMs = config?.deferRetryMaxMs ?? DEFAULT_DEFER_RETRY_MAX_MS
+    this.recheckTimeoutMs = config?.recheckTimeoutMs ?? DEFAULT_RECHECK_TIMEOUT_MS
+    this.deferMaxMs = config?.deferMaxMs ?? DEFAULT_DEFER_MAX_MS
+  }
+
+  /**
+   * Attach (or detach, with null) the per-contributor re-check. With a checker attached, every
+   * contributor of a merged write is checked against the fields it changed before anything is
+   * persisted, and an unattributable or refused contribution refuses the whole write.
+   */
+  setContributionChecker(checker: YjsContributionChecker | null): void {
+    this.contributionChecker = checker
   }
 
   /** Attach (or detach, with null) the handler told about refused flushes. */
@@ -153,7 +260,7 @@ export class YjsRecordBridge {
       }
 
       if (Object.keys(changedFields).length > 0) {
-        this.scheduleFlush(recordId, changedFields, actorId)
+        this.scheduleFlush(recordId, changedFields, actorId, originSocketId ?? null)
       }
     }
 
@@ -180,12 +287,32 @@ export class YjsRecordBridge {
     this.flushNow(recordId)
   }
 
-  private scheduleFlush(recordId: string, changedFields: Record<string, unknown>, actorId: string): void {
+  private noteContribution(
+    pending: PendingWrite,
+    changedFields: Record<string, unknown>,
+    actorId: string,
+    originId: string | null,
+  ): void {
+    const key = originId ?? ''
+    const contribution = pending.contributions.get(key) ?? { originId, actorId, fieldIds: new Set<string>() }
+    // One connection is bound to one actor; a different actor on the same origin is not attributable.
+    if (contribution.actorId !== actorId) contribution.actorId = 'unknown'
+    for (const fieldId of Object.keys(changedFields)) contribution.fieldIds.add(fieldId)
+    pending.contributions.set(key, contribution)
+  }
+
+  private scheduleFlush(
+    recordId: string,
+    changedFields: Record<string, unknown>,
+    actorId: string,
+    originId: string | null = null,
+  ): void {
     const existing = this.pendingWrites.get(recordId)
 
     if (existing) {
       Object.assign(existing.fields, changedFields)
       existing.actorIds.add(actorId)
+      this.noteContribution(existing, changedFields, actorId, originId)
       clearTimeout(existing.timer)
 
       // Check if we've exceeded max delay — force flush
@@ -198,9 +325,14 @@ export class YjsRecordBridge {
     const entry: PendingWrite = existing ?? {
       fields: { ...changedFields },
       actorIds: new Set([actorId]),
+      contributions: new Map(),
       timer: null!,
       firstSeen: Date.now(),
+      deferrals: 0,
+      notBefore: 0,
+      undecidedSince: null,
     }
+    if (!existing) this.noteContribution(entry, changedFields, actorId, originId)
 
     entry.timer = setTimeout(() => this.flushNow(recordId), this.mergeWindowMs)
 
@@ -214,15 +346,56 @@ export class YjsRecordBridge {
     if (!pending) return
 
     clearTimeout(pending.timer)
+    if (this.flushing.has(recordId)) {
+      // One write of a record at a time: this one is taken out when the running one is done.
+      this.wantFlush.add(recordId)
+      return
+    }
+    const wait = pending.notBefore - Date.now()
+    if (wait > 0) {
+      // Put back after an unanswered re-check: not asked again before its delay has passed.
+      pending.timer = setTimeout(() => this.flushNow(recordId), wait)
+      return
+    }
     this.pendingWrites.delete(recordId)
+    this.wantFlush.delete(recordId)
+    this.flushing.set(recordId, pending)
+    const epoch = this.cancelEpochs.get(recordId) ?? 0
+    const cancelled = (): boolean => (this.cancelEpochs.get(recordId) ?? 0) !== epoch
 
     const fields = { ...pending.fields }
     const actorIds = [...pending.actorIds]
     // Primary actor = first contributor in the window; all contributors tracked
     const primaryActorId = actorIds[0] ?? 'unknown'
+    const contributions: YjsContribution[] = [...pending.contributions.values()].map((contribution) => ({
+      originId: contribution.originId,
+      actorId: contribution.actorId,
+      fieldIds: [...contribution.fieldIds],
+    }))
+
+    const startedAt = Date.now()
+    const left = pending.undecidedSince === null ? this.deferMaxMs : pending.undecidedSince + this.deferMaxMs - startedAt
 
     // Fire and forget — errors logged, not thrown
-    this.executePatch(recordId, fields, primaryActorId, actorIds)
+    this.recheckWithinTime(recordId, contributions, Math.max(0, Math.min(this.recheckTimeoutMs, left)))
+      .then((outcome) => {
+        // The document was invalidated while the re-check ran: its pending writes are void.
+        if (cancelled()) return false
+        if (outcome === 'defer') {
+          if (pending.undecidedSince === null) pending.undecidedSince = startedAt
+          if (Date.now() - pending.undecidedSince >= this.deferMaxMs) {
+            // Un-rechecked for as long as a write may be: it is ended like a refused one, so its
+            // content does not stay in the document and its persisted state unconfirmed.
+            this._expiredDeferralCount++
+            throw new YjsContributionUndecidedError()
+          }
+          // Neither a yes nor a no: the write is kept and re-checked later. Nothing is written and
+          // nothing is refused meanwhile.
+          this.deferPending(recordId, pending)
+          return false
+        }
+        return this.executePatch(recordId, fields, primaryActorId, actorIds, contributions)
+      })
       .then((applied) => {
         if (applied) this._flushSuccessCount++
       })
@@ -231,6 +404,86 @@ export class YjsRecordBridge {
         console.error(`[yjs-bridge] Failed to flush patch for record ${recordId}:`, err)
         this.tellRefusal(recordId, err)
       })
+      .finally(() => {
+        // Whatever the outcome — written, refused, put back, void, nothing to write — the record
+        // is free again and the write that waited behind this one is taken out.
+        if (this.flushing.get(recordId) === pending) this.flushing.delete(recordId)
+        if (this.wantFlush.delete(recordId) && this.pendingWrites.has(recordId)) this.flushNow(recordId)
+      })
+  }
+
+  /**
+   * The re-check with a time limit. A re-check that does not answer in time counts as not answered,
+   * and whatever it answers afterwards is ignored: the write is put back, and the record is not
+   * held up by a read that never returns.
+   */
+  private recheckWithinTime(recordId: string, contributions: YjsContribution[], limitMs: number): Promise<'proceed' | 'defer'> {
+    // Nothing is asked without a checker, so there is nothing that could fail to answer.
+    if (!this.contributionChecker) return this.recheckContributions(recordId, contributions)
+    return new Promise((resolve, reject) => {
+      let settled = false
+      const timer = setTimeout(() => {
+        if (settled) return
+        settled = true
+        resolve('defer')
+      }, limitMs)
+      timer.unref?.()
+      this.recheckContributions(recordId, contributions).then(
+        (outcome) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          resolve(outcome)
+        },
+        (error) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          reject(error)
+        },
+      )
+    })
+  }
+
+  /** Puts a write whose re-check could not be answered back, to be re-checked after a bounded delay. */
+  private deferPending(recordId: string, older: PendingWrite): void {
+    if (this.destroyed) return
+    this._deferredFlushCount++
+    older.deferrals += 1
+    const delay = Math.min(this.deferRetryMinMs * 2 ** Math.min(older.deferrals - 1, 16), this.deferRetryMaxMs)
+    const newer = this.pendingWrites.get(recordId)
+    if (newer) {
+      // Whatever waits arrived after this write was taken out, because writes of a record are taken
+      // out one at a time: field by field the waiting values are the later ones and win.
+      clearTimeout(newer.timer)
+      newer.fields = { ...older.fields, ...newer.fields }
+      newer.actorIds = new Set([...older.actorIds, ...newer.actorIds])
+      for (const [key, contribution] of older.contributions) {
+        const later = newer.contributions.get(key)
+        if (!later) {
+          newer.contributions.set(key, contribution)
+          continue
+        }
+        if (later.actorId !== contribution.actorId) later.actorId = 'unknown'
+        for (const fieldId of contribution.fieldIds) later.fieldIds.add(fieldId)
+      }
+      newer.firstSeen = older.firstSeen
+      newer.deferrals = older.deferrals
+      newer.undecidedSince = older.undecidedSince
+      newer.notBefore = Date.now() + delay
+      newer.timer = setTimeout(() => this.flushNow(recordId), delay)
+      return
+    }
+    older.notBefore = Date.now() + delay
+    older.timer = setTimeout(() => this.flushNow(recordId), delay)
+    this.pendingWrites.set(recordId, older)
+  }
+
+  /** True while a write that this connection contributed to is waiting or being persisted. */
+  hasPendingOrigin(originId: string): boolean {
+    for (const pending of this.pendingWrites.values()) if (pending.contributions.has(originId)) return true
+    for (const pending of this.flushing.values()) if (pending.contributions.has(originId)) return true
+    return false
   }
 
   /** Never throws and never rejects: a handler that fails is logged, the flush outcome stands. */
@@ -244,8 +497,43 @@ export class YjsRecordBridge {
       })
   }
 
-  private async executePatch(recordId: string, fields: Record<string, unknown>, primaryActorId: string, allActorIds: string[]): Promise<boolean> {
-    const input = await this.getWriteInput(recordId, fields, primaryActorId, allActorIds)
+  /**
+   * Every contributor of the merged write is checked against its own fields, whatever the order the
+   * contributions arrived in. One refused or unattributable contribution refuses the whole write.
+   * When nobody is refused but an answer is missing, the write is deferred: a missing answer is
+   * never read as a refusal, and never as permission.
+   */
+  private async recheckContributions(recordId: string, contributions: YjsContribution[]): Promise<'proceed' | 'defer'> {
+    const checker = this.contributionChecker
+    if (!checker) return 'proceed'
+    if (contributions.length === 0) throw new YjsContributionRefusedError()
+    let undecided = false
+    for (const contribution of contributions) {
+      if (contribution.originId === null || contribution.actorId === 'unknown') throw new YjsContributionRefusedError()
+      let verdict: YjsContributionVerdict
+      try {
+        verdict = await checker(recordId, contribution)
+      } catch {
+        verdict = 'unknown'
+      }
+      if (verdict === 'denied') throw new YjsContributionRefusedError()
+      if (verdict !== 'allowed') undecided = true
+    }
+    return undecided ? 'defer' : 'proceed'
+  }
+
+  private async executePatch(
+    recordId: string,
+    fields: Record<string, unknown>,
+    primaryActorId: string,
+    allActorIds: string[],
+    contributions: YjsContribution[] = [],
+  ): Promise<boolean> {
+    // The contribution records are handed to the builder only where they are re-checked: without a
+    // contribution checker the builder is called exactly as before.
+    const input = this.contributionChecker
+      ? await this.getWriteInput(recordId, fields, primaryActorId, allActorIds, contributions)
+      : await this.getWriteInput(recordId, fields, primaryActorId, allActorIds)
     if (!input) return false // record context not available (e.g., deleted)
 
     const result = await this.recordWriteService.patchRecords(input)
@@ -262,6 +550,9 @@ export class YjsRecordBridge {
    */
   cancelPending(recordIds: string[]): void {
     for (const recordId of recordIds) {
+      // A write of this record whose re-check is running right now is void as well.
+      this.cancelEpochs.set(recordId, (this.cancelEpochs.get(recordId) ?? 0) + 1)
+      this.wantFlush.delete(recordId)
       const pending = this.pendingWrites.get(recordId)
       if (!pending) continue
       clearTimeout(pending.timer)
@@ -280,16 +571,21 @@ export class YjsRecordBridge {
   }
 
   /** Metrics snapshot for observability */
-  getMetrics(): { pendingWriteCount: number; observedDocCount: number; flushSuccessCount: number; flushFailureCount: number } {
+  getMetrics(): { pendingWriteCount: number; observedDocCount: number; flushSuccessCount: number; flushFailureCount: number; deferredFlushCount: number; expiredDeferralCount: number } {
     return {
       pendingWriteCount: this.pendingWrites.size,
       observedDocCount: this.observedDocs.size,
       flushSuccessCount: this._flushSuccessCount,
       flushFailureCount: this._flushFailureCount,
+      // Times a write was kept because its re-check could not be answered (neither written nor refused).
+      deferredFlushCount: this._deferredFlushCount,
+      // Writes ended because their re-check stayed unanswered for as long as a write may.
+      expiredDeferralCount: this._expiredDeferralCount,
     }
   }
 
   destroy(): void {
+    this.destroyed = true
     // Unobserve all docs
     for (const [recordId] of this.observedDocs) {
       this.unobserve(recordId)
