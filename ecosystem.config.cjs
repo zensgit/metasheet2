@@ -71,6 +71,7 @@ module.exports = {
       out_file: 'output/logs/metasheet-backend.out.log',
       error_file: 'output/logs/metasheet-backend.err.log',
       time: true,
+      kill_timeout: 30000,
     },
   ],
 }

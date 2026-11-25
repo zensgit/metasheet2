@@ -43,6 +43,7 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    stop_grace_period: 30s
 
   web:
     image: ghcr.io/${IMAGE_OWNER:-zensgit}/metasheet2-web:${IMAGE_TAG:-latest}
