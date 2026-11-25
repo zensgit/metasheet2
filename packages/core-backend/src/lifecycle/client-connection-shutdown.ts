@@ -69,6 +69,11 @@ export interface ClientConnectionShutdown {
   arm(httpServer: unknown): void
   /** Called by the stop right after the listener closed. */
   begin(options: ClientConnectionStopOptions): ClientConnectionStop
+  /**
+   * Clears every timer of the stop of this instance. Does nothing before `begin`; safe to call any
+   * number of times; never throws (it only clears the timers it holds). `begin` returns this function.
+   */
+  finish(): void
   /** Whether the stop of this instance has begun. */
   isStopping(): boolean
 }
@@ -80,6 +85,20 @@ export function createClientConnectionShutdown(): ClientConnectionShutdown {
   let armed = false
   let transportsClosed = false
   const upgraded = new Set<Duplex>()
+  // The state of the stop is held by the instance, so finish() reaches every timer whatever happens
+  // inside begin() after it was armed.
+  let finished = false
+  let capTimer: ReturnType<typeof setTimeout> | null = null
+  let lastCloseTimer: ReturnType<typeof setTimeout> | null = null
+
+  const finish = (): void => {
+    if (!stopping) return
+    finished = true
+    if (capTimer) clearTimeout(capTimer)
+    if (lastCloseTimer) clearTimeout(lastCloseTimer)
+    capTimer = null
+    lastCloseTimer = null
+  }
 
   const fence = (_request: IncomingMessage, response: ServerResponse, next: () => void): void => {
     if (!stopping) {
@@ -119,9 +138,6 @@ export function createClientConnectionShutdown(): ClientConnectionShutdown {
     const server = (httpServer ?? {}) as StopHttpServer
     if (typeof server.keepAliveTimeout === 'number') server.keepAliveTimeout = IDLE_KEEP_ALIVE_MS
     const startedAt = Date.now()
-    let finished = false
-    let capTimer: ReturnType<typeof setTimeout> | null = null
-    let lastCloseTimer: ReturnType<typeof setTimeout> | null = null
 
     const closeTransportsOnce = (): void => {
       try {
@@ -168,16 +184,8 @@ export function createClientConnectionShutdown(): ClientConnectionShutdown {
       precondition.then(closeClients, closeClients)
     }
 
-    return {
-      finish: () => {
-        finished = true
-        if (capTimer) clearTimeout(capTimer)
-        if (lastCloseTimer) clearTimeout(lastCloseTimer)
-        capTimer = null
-        lastCloseTimer = null
-      },
-    }
+    return { finish }
   }
 
-  return { fence, arm, begin, isStopping: () => stopping }
+  return { fence, arm, begin, finish, isStopping: () => stopping }
 }

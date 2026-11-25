@@ -1903,7 +1903,7 @@ export class MetaSheetServer {
     // Once the stop has begun, a request that arrives on a connection kept open is answered 503
     // SERVER_STOPPING and its connection is closed; requests admitted before go on. After CORS, so a
     // cross-origin page can read the answer.
-    this.app.use(this.clientConnectionShutdown.fence)
+    this.app.use((request, response, next) => this.clientConnectionShutdown.fence(request, response, next))
 
     // API responses should always opt out of MIME sniffing, including early 4xx replies.
     this.app.use('/api', (_req: Request, res: Response, next: NextFunction) => {
@@ -3920,7 +3920,7 @@ export class MetaSheetServer {
    * 停止服务器
    */
   stop(signal = 'SIGTERM'): Promise<void> {
-    this.stopPromise ??= this.stopOnce(signal)
+    this.stopPromise ??= this.stopOnce(signal).finally(() => this.clientConnectionShutdown.finish())
     return this.stopPromise
   }
 
