@@ -1,7 +1,8 @@
+import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import ts from 'typescript'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { authoritySites, collectAuthoritySites, residues } from './lib/dingtalk-login-authority-scan'
 import { loginAuthorityManifest } from './lib/dingtalk-login-authority-manifest'
 
@@ -15,6 +16,41 @@ function expand(rows: string[]): string[] {
     const count = /^(\d+) × (.+)$/.exec(row)
     return count ? Array(Number(count[1])).fill(count[2]) : [row]
   }).sort()
+}
+
+// Same git blob id collectAuthoritySites stores for a residue file. Mode 0644 is the `data` label.
+function residueBlobLine(text: string): string {
+  const bytes = Buffer.from(text)
+  const blob = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex')
+  return `data blob ${blob}`
+}
+
+// The scanner lists files with git and then reads them. A fresh import sees one in-memory file.
+// `scripts/` is required: paths outside the scanner's roots are dropped before the .insyncdl rule.
+async function scanInMemoryResidue(file: string, text: string): Promise<string[] | undefined> {
+  vi.resetModules()
+  vi.doMock('node:child_process', async () => {
+    const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process')
+    return { ...actual, execFileSync: (() => `${file}\0`) as typeof actual.execFileSync }
+  })
+  vi.doMock('node:fs', async () => {
+    const actual = await vi.importActual<typeof import('node:fs')>('node:fs')
+    const isProbe = (target: unknown) => String(target).replace(/\\/g, '/').endsWith(file)
+    const fakeStat = { isFile: () => true, mode: 0o100644 } as ReturnType<typeof actual.lstatSync>
+    return {
+      ...actual,
+      lstatSync: ((target: Parameters<typeof actual.lstatSync>[0]) => isProbe(target) ? fakeStat : actual.lstatSync(target)) as typeof actual.lstatSync,
+      readFileSync: ((target: Parameters<typeof actual.readFileSync>[0]) => isProbe(target) ? Buffer.from(text) : actual.readFileSync(target)) as typeof actual.readFileSync,
+    }
+  })
+  try {
+    const loaded = await import('./lib/dingtalk-login-authority-scan')
+    return loaded.collectAuthoritySites('/in-memory')[file]
+  } finally {
+    vi.doUnmock('node:child_process')
+    vi.doUnmock('node:fs')
+    vi.resetModules()
+  }
 }
 
 // Each marker belongs to a named source or sink. The multisets above check callers as well,
@@ -94,7 +130,18 @@ describe('DingTalk session issuers, identity writers and grant consumers', () =>
     const fourth = src + 'routes/admin-directory.ts'
     const admin = read(fourth)
     expect(authoritySites(fourth, admin.replace('await compensateSupersededDenyGrantForRequest(req, res)', 'return'))).not.toEqual(authoritySites(fourth, admin))
-    const residue = Object.keys(residues)[0]
-    expect(authoritySites('plugin.cjs', `require('${residue}')`)).toEqual([`reference to ${residue}`])
+    const probe = 'probe/.~sync-residue-name-only.insyncdl'
+    residues[probe] = 'not-a-blob'
+    try {
+      expect(authoritySites('plugin.cjs', `require('${probe}')`)).toEqual([`reference to ${probe}`])
+    } finally {
+      delete residues[probe]
+    }
+  })
+
+  it('reports an in-memory sync residue when its text names an issuer or table, and ignores harmless text', async () => {
+    const file = 'scripts/probe/.~sync-residue.insyncdl'
+    expect(await scanInMemoryResidue(file, 'directory_accounts')).toEqual([residueBlobLine('directory_accounts')])
+    expect(await scanInMemoryResidue(file, 'harmless leftover')).toBeUndefined()
   })
 })
