@@ -668,3 +668,22 @@ export async function unassignUserRoles(options: {
     delegatedAdminScopeCleanup,
   }
 }
+
+export async function unassignOrdinaryRoleMembers(
+  executor: RoleAssignmentExecutor,
+  roleId: string,
+): Promise<RoleAssignmentResult> {
+  if (!roleId || roleId === 'admin' || deriveDelegatedAdminNamespace(roleId) !== null) {
+    throw new Error('Invalid ordinary role deletion target')
+  }
+  const result = await executor.query(
+    'DELETE FROM user_roles WHERE role_id = $1 RETURNING user_id',
+    [roleId],
+  )
+  const affectedUserIds = readAffectedUserIds(result.rows)
+  return {
+    affectedUserIds,
+    rowCount: result.rowCount ?? affectedUserIds.length,
+    delegatedAdminScopeCleanup: [],
+  }
+}

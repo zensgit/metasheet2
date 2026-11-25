@@ -197,6 +197,12 @@ function makeFakeDb(options: {
       return { rows: [], rowCount: existed ? 1 : 0 }
     }
     // The membership writer (rbac/role-assignment.ts unassignUserRoles) and its audience cleanup.
+    if (/^DELETE FROM user_roles WHERE role_id = \$1 RETURNING user_id$/i.test(norm)) {
+      const roleId = String(params[0])
+      const removed = state.members.get(roleId) || []
+      state.members.delete(roleId)
+      return { rows: removed.map((user_id) => ({ user_id })), rowCount: removed.length }
+    }
     if (/^DELETE FROM user_roles WHERE role_id = \$2 AND user_id = ANY\(\$1::text\[\]\) RETURNING user_id$/i.test(norm)) {
       const [userIds, roleId] = [(params[0] as string[]) || [], String(params[1])]
       const current = state.members.get(roleId) || []
@@ -1705,7 +1711,7 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
     }
   })
 
-  it('POSITIVE CONTROL — an ordinary role is still deleted by any roles:write holder, with no membership statement', async () => {
+  it('deletes an ordinary role and clears only that role for a roles:write holder', async () => {
     const db = seedAdminRoles({ cascade: false })
     wire(db)
     const res = mockResponse()
@@ -1713,11 +1719,41 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
     await deleteRole(res, 'role-1')
 
     expect(res.statusCode).toBe(200)
+    expect(res.body).toEqual({ ok: true, data: { id: 'role-1' } })
     expect(db.nameOf('role-1')).toBeUndefined()
-    expect(membershipWrites(db)).toEqual([])
-    // …and no grant statement either: an ordinary delete stays a `roles`-only write (the
-    // `roles:delete` recovery-census premise in the L1 battery ledger).
-    expect(db.statements.some((s) => /^\s*DELETE FROM role_permissions/i.test(s.sql))).toBe(false)
+    expect(db.membersOf('role-1')).toEqual([])
+    expect(db.permissionsOf('role-1')).toEqual([])
+    expect(db.membersOf('attendance_lead')).toEqual(['user-c'])
+    expect(db.permissionsOf('attendance_lead')).toEqual(['attendance:admin', 'attendance:read'])
+  })
+
+  it.each(['user_roles', 'role_permissions', 'roles'])('rolls back an ordinary role delete when %s fails', async (table) => {
+    const db = seedAdminRoles({
+      cascade: false,
+      failOn: (sql) => sql.trim().startsWith(`DELETE FROM ${table} `) ? new Error('test write failure') : null,
+    })
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'role-1')
+
+    expect(res.statusCode).toBe(500)
+    expect(res.body).toEqual({ ok: false, error: { code: 'ROLE_WRITE_FAILED', message: 'Role write failed' } })
+    expect(db.nameOf('role-1')).toBe('备料角色')
+    expect(db.membersOf('role-1')).toEqual(['user-a', 'user-b'])
+    expect(db.permissionsOf('role-1')).toEqual(['attendance:read', 'roles:read'])
+    expect(rbacServiceMocks.invalidateUserPerms).not.toHaveBeenCalled()
+  })
+
+  it('leaves unrelated cleanup untouched when the ordinary role does not exist', async () => {
+    const db = seedAdminRoles({ cascade: false })
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'missing-role')
+
+    expect(res.statusCode).toBe(200)
+    expect(db.statements.filter(({ sql }) => /^\s*DELETE FROM (user_roles|role_permissions|roles)\b/i.test(sql))).toEqual([])
   })
 
   it('LOCK: the classification read takes the role row FOR UPDATE as the FIRST statement inside the transaction', async () => {

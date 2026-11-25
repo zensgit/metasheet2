@@ -1357,15 +1357,14 @@ test('surface execution order is a real total order (destructive surfaces sort l
 // 8. The NOT-DRIVEN excuses are themselves gated
 // ---------------------------------------------------------------------------
 
-test('roles:delete is excused only while its schema premise holds — and the premise is re-checked', () => {
-  // The route COMMENTS claim a roles → role_permissions ON DELETE CASCADE. On a schema built by
-  // this repo's migration chain that FK does not exist, so the DELETE reaches no triggered table.
-  // The exemption is therefore conditional, and the condition is a live query, not a belief.
+test('roles:delete has explicit child writes and still checks for additional FK-mediated writes', () => {
   const excused = NOT_DRIVEN_SITES.find((entry) => entry.site === 'roles:delete')
   assert.ok(excused, 'roles:delete must be accounted for')
-  assert.equal(excused.reason, 'no-trigger-on-target-table')
+  assert.equal(excused.reason, 'orthogonal-fixture-cost')
+  assert.match(excused.detail, /explicitly removing its memberships and grants/)
+  assert.match(excused.detail, /not by an end-to-end battery result/)
 
-  // Absent ⇒ excuse holds.
+  // Absence only rules out the FK-mediated write.
   assert.equal(roleDeleteCascadeExists([]), false)
 
   // EXHAUSTIVE over pg's parent-delete action alphabet, not a spot check: every letter
@@ -1595,7 +1594,7 @@ test('the battery pairs the witness query with the SAME canonical binding, fail-
   assert.match(guard, /return \{ exitCode: 2, evidence, lines \}/)
 })
 
-test('the widened premise check is WIRED, so the battery expires the excuse in the new situations too', () => {
+test('the schema check records additional FK-mediated writes without crediting the ordinary cleanup path', () => {
   // Guards the consequence, not just the predicate: widening the predicate makes the battery
   // STRICTER (it now fails on user_roles cascades and on SET NULL / SET DEFAULT actions, not only
   // on a role_permissions CASCADE). A run that computed the wider answer but reported the narrower
@@ -1604,16 +1603,16 @@ test('the widened premise check is WIRED, so the battery expires the excuse in t
   assert.match(BATTERY_SOURCE, /evidence\.posture\.role_delete_triggered_children/, 'the observed rows are no longer recorded as evidence')
   assert.match(
     BATTERY_SOURCE,
-    /THIS PREMISE CHECK IS STRICTER THAN IT USED TO BE/,
-    'the behaviour change is no longer disclosed at the site that makes it',
+    /NO-FK-MEDIATED-WRITE - explicit ordinary-role cleanup can still encounter recovery conflicts and is not driven by this battery/,
+    'an absent FK must not be presented as proof of the explicit cleanup path',
   )
 })
 
-test('the battery acts on the expired-exemption verdict rather than only computing it', () => {
+test('the battery still exits nonzero for additional FK-mediated writes', () => {
   // Guards the wiring, not the predicate: a run that computed `cascadePresent` and ignored it
   // would satisfy the predicate test above while shipping a stale exemption.
   assert.match(BATTERY_SOURCE, /not_driven_reason_expired/, 'the expired-exemption failure class is gone')
-  assert.match(BATTERY_SOURCE, /if \(cascadePresent\) \{/, 'the cascade witness result is no longer branched on')
+  assert.match(BATTERY_SOURCE, /if \(cascadePresent\) \{[\s\S]*?return \{ exitCode: 1, evidence, lines \}/)
 })
 
 
