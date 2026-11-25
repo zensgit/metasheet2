@@ -4,23 +4,27 @@
     <p>查看账户、角色和权限变更，包含新的授权操作记录。</p>
     <div class="authorization-audit__filters">
       <input v-model.trim="query" type="search" aria-label="搜索操作人或对象" placeholder="搜索操作人或对象">
-      <select v-model="resourceType" aria-label="资源类型">
-        <option value="">全部资源</option>
+      <select v-model="resourceType" aria-label="资源类型" @change="onResourceTypeChange">
+        <option value="">默认账户与权限资源</option>
         <option value="permission">直接权限</option>
         <option value="legacy-permission">旧权限</option>
         <option value="permission-template">权限模板</option>
         <option value="user-role">用户角色</option>
         <option value="user-namespace-admission">命名空间准入</option>
         <option value="user">用户</option>
+        <option value="user-security-action">安全动作验证</option>
+        <option value="admin_login_grant_command">管理员登录许可命令</option>
       </select>
       <select v-model="action" aria-label="动作">
-        <option value="">全部动作</option><option value="grant">grant</option><option value="revoke">revoke</option><option value="update">update</option>
+        <option value="">全部动作</option>
+        <option v-for="item in actionOptions" :key="item" :value="item">{{ item }}</option>
       </select>
       <input v-model="from" type="date" aria-label="开始日期">
       <input v-model="to" type="date" aria-label="结束日期">
       <button type="button" :disabled="loading" @click="load(1)">查询权限审计</button>
       <button type="button" :disabled="loading" @click="exportCsv">导出权限审计 CSV</button>
     </div>
+    <p>安全动作验证和管理员登录许可命令需在资源类型中单独选择。结果为空不代表没有发生。</p>
     <p v-if="error" role="alert">{{ error }}</p>
     <div class="authorization-audit__table">
       <table v-if="items.length">
@@ -29,7 +33,7 @@
           <td>{{ item.created_at }}</td><td>{{ item.actor_id || '—' }}</td><td>{{ item.resource_type }}</td><td>{{ item.action }}</td><td>{{ item.resource_id || '—' }}</td><td><details><summary>查看详情</summary><pre>{{ JSON.stringify(item.action_details, null, 2) }}</pre></details></td>
         </tr></tbody>
       </table>
-      <p v-else>{{ loading ? '正在加载权限审计…' : '暂无权限审计记录。' }}</p>
+      <p v-else-if="!error">{{ loading ? '正在加载权限审计…' : '暂无权限审计记录。' }}</p>
     </div>
     <div><button type="button" :disabled="loading || page <= 1" @click="load(page - 1)">上一页</button> 第 {{ page }} / {{ totalPages }} 页（{{ total }} 条） <button type="button" :disabled="loading || page >= totalPages" @click="load(page + 1)">下一页</button></div>
   </details>
@@ -43,6 +47,20 @@ type Item = { created_at: string; actor_id: string | null; resource_type: string
 const query = ref(''), resourceType = ref(''), action = ref(''), from = ref(''), to = ref('')
 const items = ref<Item[]>([]), page = ref(1), total = ref(0), loading = ref(false), error = ref('')
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / 20)))
+const ORIGINAL_ACTIONS: readonly string[] = ['grant', 'revoke', 'update']
+const RESOURCE_ACTIONS: Record<string, readonly string[]> = {
+  'user-security-action': ['security_action_verify'],
+  admin_login_grant_command: ['admin_login_grant_enable'],
+}
+function actionsFor(resource: string): readonly string[] {
+  return RESOURCE_ACTIONS[resource] ?? ORIGINAL_ACTIONS
+}
+const actionOptions = computed(() => actionsFor(resourceType.value))
+function onResourceTypeChange(event: Event): void {
+  const next = (event.target as HTMLSelectElement).value
+  resourceType.value = next
+  if (action.value && !actionsFor(next).includes(action.value)) action.value = ''
+}
 let opened = false
 function params(extra: Record<string, string> = {}): URLSearchParams {
   const result = new URLSearchParams()
@@ -57,7 +75,10 @@ async function load(nextPage: number): Promise<void> {
     if (!response.ok || payload.ok !== true) throw new Error(payload.error?.message || '加载权限审计失败')
     items.value = Array.isArray(payload.data?.items) ? payload.data.items : []
     total.value = Number(payload.data?.total || 0); page.value = Number(payload.data?.page || nextPage)
-  } catch (reason) { error.value = reason instanceof Error ? reason.message : '加载权限审计失败' }
+  } catch (reason) {
+    items.value = []
+    error.value = reason instanceof Error ? reason.message : '加载权限审计失败'
+  }
   finally { loading.value = false }
 }
 function onToggle(event: Event): void {
