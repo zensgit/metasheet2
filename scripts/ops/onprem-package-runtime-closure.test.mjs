@@ -8,6 +8,23 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 const repo = path.resolve(fileURLToPath(new URL('../..', import.meta.url)))
+function readSource(file) {
+  return fs.readFileSync(path.join(repo, file), 'utf8').replaceAll('\r\n', '\n')
+}
+
+function runBash(script, root) {
+  return spawnSync('bash', ['-s'], {
+    env: {
+      ...process.env,
+      pkg_root: root.split(path.sep).join('/'),
+      // Git Bash must pass literals like /manual-fields to Windows rg unchanged.
+      ...(process.platform === 'win32' ? { MSYS2_ARG_CONV_EXCL: '*' } : {}),
+    },
+    encoding: 'utf8',
+    input: script,
+  })
+}
+
 const closures = {
   multitable: [
     'packages/core-backend/dist/scripts/bootstrap-yida-initialization-owner.js',
@@ -15,6 +32,7 @@ const closures = {
     'plugins/plugin-integration-core/lib/yida-connection-probe.cjs',
     'packages/core-backend/dist/src/multitable/stock-preparation-manual-rows.js',
     'packages/core-backend/dist/src/multitable/stock-preparation-manual-rows-gate.js',
+    'packages/core-backend/dist/src/multitable/stock-preparation-manual-row-parent-options.js',
     'plugins/plugin-integration-core/lib/stock-preparation-manual-rows.cjs',
     'packages/core-backend/src/db/migrations/20250925_create_view_tables.sql',
     'packages/core-backend/src/db/migrations/20250926_create_audit_tables.sql',
@@ -33,8 +51,8 @@ const closures = {
 }
 
 for (const [kind, requiredFiles] of Object.entries(closures)) {
-  const builder = fs.readFileSync(path.join(repo, `scripts/ops/${kind}-onprem-package-build.sh`), 'utf8')
-  const verifier = fs.readFileSync(path.join(repo, `scripts/ops/${kind}-onprem-package-verify.sh`), 'utf8')
+  const builder = readSource(`scripts/ops/${kind}-onprem-package-build.sh`)
+  const verifier = readSource(`scripts/ops/${kind}-onprem-package-verify.sh`)
   const payload = [...builder.match(/\nREQUIRED_PATHS=\(\n([\s\S]*?)\n\)/)[1].matchAll(/^  "([^"]+)"$/gm)].map(match => match[1])
   // Execute the verifier's real required-file loop, before its unrelated
   // Windows/content contracts. Full archives are exercised in the Mac rehearsal.
@@ -56,9 +74,7 @@ for (const [kind, requiredFiles] of Object.entries(closures)) {
         fs.mkdirSync(path.dirname(target), { recursive: true })
         fs.writeFileSync(target, 'fixture\n')
       }
-      return spawnSync('bash', ['-c', 'set -eu\ndie() { echo "$*" >&2; exit 1; }\n' + guard], {
-        env: { ...process.env, pkg_root: root }, encoding: 'utf8',
-      })
+      return runBash('set -eu\ndie() { echo "$*" >&2; exit 1; }\n' + guard, root)
     } finally {
       fs.rmSync(root, { recursive: true, force: true })
     }
@@ -79,14 +95,14 @@ for (const [kind, requiredFiles] of Object.entries(closures)) {
 }
 
 test('runtime closure regression executes in the required Node 20 job', () => {
-  const workflow = fs.readFileSync(path.join(repo, '.github/workflows/plugin-tests.yml'), 'utf8')
+  const workflow = readSource('.github/workflows/plugin-tests.yml')
   const requiredJob = requiredSuiteJobBody(workflow, 'contracts')
   assert.match(requiredJob, /node-version: \[20\.x\]/)
   assert.match(requiredJob, /run: node --test scripts\/ops\/attendance-onprem-package-verify-migrations\.test\.mjs scripts\/ops\/onprem-package-runtime-closure\.test\.mjs/)
 })
 
 test('compiled YiDa bootstrap CLI smoke runs after a core-backend build in the required Node 20 job', () => {
-  const workflow = fs.readFileSync(path.join(repo, '.github/workflows/plugin-tests.yml'), 'utf8')
+  const workflow = readSource('.github/workflows/plugin-tests.yml')
   const requiredJob = requiredSuiteJobBody(workflow, 'unit')
   const steps = requiredJob.split('\n      - name: ').filter(step => step.includes('scripts/ops/yida-bootstrap-cli-compiled-smoke.test.mjs'))
   assert.equal(steps.length, 1, 'exactly one required step runs the compiled CLI smoke')
@@ -111,6 +127,10 @@ const manualRowsMarkers = [
   ['packages/core-backend/dist/src/routes/univer-meta.js', 'resolveGenericCreateRefusal', 'generic create on stock-prep project sheets (manual rows B3)'],
   ['apps/web/dist/assets/manual-fields.js', '/manual-fields', 'manual-row edit route (manual rows B3)'],
   ['apps/web/dist/assets/target-manual-rows.js', '/target/manual-rows', 'manual-rows switch route (manual rows B4)'],
+  ['packages/core-backend/dist/src/routes/univer-meta.js', "router.get('/sheets/:sheetId/manual-rows/parent-options',", 'must register the manual-row parent options route'],
+  ['packages/core-backend/dist/src/routes/univer-meta.js', "router.get('/records/:recordId/manual-parent-dependents',", 'must register the manual-row parent dependents route'],
+  ['apps/web/dist/assets/parent-options.js', '/manual-rows/parent-options', 'must call the manual-row parent options route'],
+  ['apps/web/dist/assets/parent-dependents.js', '/manual-parent-dependents', 'must call the manual-row parent dependents route'],
 ]
 const manualRowsDecoys = [
   ['plugins/plugin-integration-core/lib/http-routes.cjs', '//   GET  /api/integration/stock-preparation/projects/:projectNo/target/manual-rows   PULL tier'],
@@ -122,11 +142,19 @@ const manualRowsDecoys = [
   ['scripts/ops/multitable-onprem-package-verify.sh', "search_fixed_string \"'/api/integration/stock-preparation/projects/:projectNo/target/manual-rows'\" \"$plugin_routes\""],
   ['scripts/ops/multitable-onprem-package-verify.sh', "search_fixed_string 'resolveGenericCreateRefusal' \"$host_routes\""],
   ['apps/web/dist/stray.txt', 'PATCH /manual-fields and GET /target/manual-rows'],
+  ['packages/core-backend/dist/src/routes/univer-meta.js', '// GET /sheets/:sheetId/manual-rows/parent-options; GET /records/:recordId/manual-parent-dependents'],
+  ['packages/core-backend/dist/src/routes/univer-meta.js', "// router.get('/sheets/:sheetId/manual-rows/parent-options', handler)"],
+  ['packages/core-backend/dist/src/routes/univer-meta.js', "// router.get('/records/:recordId/manual-parent-dependents', handler)"],
+  ['packages/core-backend/dist/src/multitable/stock-preparation-manual-row-parent-options.js', "router.get('/sheets/:sheetId/manual-rows/parent-options',"],
+  ['packages/core-backend/dist/src/multitable/stock-preparation-manual-row-parent-options.js', "router.get('/records/:recordId/manual-parent-dependents',"],
+  ['apps/web/dist/stray.txt', '/manual-rows/parent-options /manual-parent-dependents'],
+  ['apps/web/dist/assets/parents.js.map', '{"sourcesContent":["/manual-rows/parent-options /manual-parent-dependents"]}'],
   ['apps/web/dist/assets/index.js.map', '{"sourcesContent":["// GET /target/manual-rows, PATCH /manual-fields"]}'],
 ]
-const multitableVerifier = fs.readFileSync(path.join(repo, 'scripts/ops/multitable-onprem-package-verify.sh'), 'utf8')
+const multitableVerifier = readSource('scripts/ops/multitable-onprem-package-verify.sh')
 const manualRowsCheck = [
   multitableVerifier.match(/\nfunction search_fixed_string\(\) \{\n[\s\S]*?\n\}\n/)[0],
+  multitableVerifier.match(/\nfunction search_extended_regex\(\) \{\n[\s\S]*?\n\}\n/)[0],
   multitableVerifier.match(/\nfunction verify_stock_preparation_manual_rows_contract\(\) \{\n[\s\S]*?\n\}\n/)[0],
 ].join('')
 
@@ -146,7 +174,7 @@ function runManualRowsCheck(omitted) {
     }
     const script = 'set -eu\ndie() { echo "$*" >&2; exit 1; }\nmanual_rows_status=SKIPPED\n' + manualRowsCheck
       + 'verify_stock_preparation_manual_rows_contract "$pkg_root"\necho "manual_rows_status=$manual_rows_status"\n'
-    return spawnSync('bash', ['-c', script], { env: { ...process.env, pkg_root: root }, encoding: 'utf8' })
+    return runBash(script, root)
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
