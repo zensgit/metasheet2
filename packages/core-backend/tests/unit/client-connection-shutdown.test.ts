@@ -970,8 +970,13 @@ describe('U4c the fence and its mount, read from the syntax tree', () => {
 /**
  * Closed world of the instance: every statement in the deployable backend sources (src, core, types,
  * scripts) that mentions `clientConnectionShutdown` — as a name or inside a text — is one of these six,
- * compared whole and through the syntax tree (comments and layout aside). Anything that wraps, swaps
- * or aliases the instance, at any moment, adds a statement or changes one of these and fails here.
+ * compared whole and through the syntax tree. The printer drops comments, spacing, semicolons and line
+ * breaks inside argument lists, but it keeps a line break before `.`, so reformatting a statement that
+ * way also fails here (on the strict side: the list is then updated on purpose).
+ *
+ * Together with the two checks on the factory name below, this catches a wrapper, a swap or an alias of
+ * the instance installed by mistake, at construction, at start or at the stop. It is not a proof against
+ * deliberate disguise; that is left to review.
  */
 const INSTANCE_STATEMENTS = [
   { file: 'src/index.ts', text: 'private readonly clientConnectionShutdown: ClientConnectionShutdown;' },
@@ -1015,6 +1020,60 @@ describe('closed world: every statement that mentions the instance', () => {
     // Control: the scan sees the real declaration.
     expect(found.length).toBeGreaterThan(0)
     expect(found).toEqual(INSTANCE_STATEMENTS)
+  })
+})
+
+/** Every statement outside the module that names the factory: the import and the constructor assignment. */
+const FACTORY_STATEMENTS = [
+  { file: 'src/index.ts', text: "import { createClientConnectionShutdown, type ClientConnectionShutdown, type ClientConnectionStop } from './lifecycle/client-connection-shutdown';" },
+  { file: 'src/index.ts', text: 'this.clientConnectionShutdown = createClientConnectionShutdown();' },
+]
+
+describe('closed world: the name of the factory, on both sides of the module boundary', () => {
+  const root = join(__dirname, '..', '..')
+  const factory = 'createClientConnectionShutdown'
+  const modulePath = 'src/lifecycle/client-connection-shutdown.ts'
+  const mentions = (node: ts.Node): boolean => (ts.isIdentifier(node) && node.text === factory)
+    || (ts.isStringLiteralLike(node) && node.text.includes(factory))
+
+  it('outside the module only the import and the constructor assignment name it (the name cannot be redirected locally)', () => {
+    const found: Array<{ file: string; text: string }> = []
+    const scanDir = (dir: string): void => {
+      for (const entry of readdirSync(dir)) {
+        if (entry === 'node_modules' || entry === 'dist') continue
+        const full = join(dir, entry)
+        if (statSync(full).isDirectory()) { scanDir(full); continue }
+        if (!/\.(ts|mts|cts|js|mjs|cjs)$/.test(entry)) continue
+        const file = relative(root, full).split(sep).join('/')
+        if (file === modulePath) continue
+        const text = readFileSync(full, 'utf8')
+        if (!text.includes(factory)) continue
+        const source = ts.createSourceFile(full, text, ts.ScriptTarget.ES2022, true)
+        const seen = new Set<number>()
+        walk(source, (node) => {
+          if (!mentions(node)) return
+          let statement: ts.Node = node
+          while (statement.parent && !(ts.isStatement(statement) || ts.isClassElement(statement))) statement = statement.parent
+          if (seen.has(statement.pos)) return
+          seen.add(statement.pos)
+          found.push({ file, text: printed(statement, source) })
+        })
+      }
+    }
+    for (const top of ['src', 'core', 'types', 'scripts']) if (existsSync(join(root, top))) scanDir(join(root, top))
+    expect(found).toEqual(FACTORY_STATEMENTS)
+  })
+
+  it('inside the module the name appears exactly once, as the exported function declaration that U4c checks', () => {
+    const source = sourceOf(modulePath)
+    const uses: ts.Node[] = []
+    walk(source, (node) => { if (mentions(node)) uses.push(node) })
+    expect(uses).toHaveLength(1)
+    const declaration = uses[0].parent
+    expect(ts.isFunctionDeclaration(declaration) && declaration.name === uses[0]).toBe(true)
+    const modifiers = ts.canHaveModifiers(declaration) ? ts.getModifiers(declaration) ?? [] : []
+    expect(modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)).toBe(true)
+    expect(declaration.parent).toBe(source)
   })
 })
 
