@@ -16,7 +16,8 @@
  *   U6   a stop that fails clears the timers of the module;
  *   U6b  a synchronous throw after the module began: same reason, timers back to their baseline;
  *   U6c  a synchronous throw before the module began: same reason, nothing opened;
- *   U7   finish() never throws, whenever it is called.
+ *   U7   finish() never throws, whenever it is called;
+ *   U1s+ a client whose close throws does not keep the others open (both services).
  */
 import { EventEmitter } from 'node:events'
 import { readFileSync } from 'node:fs'
@@ -348,6 +349,40 @@ describe('U1s both services close every transport with the standard close', () =
     expect(clients.b.close).toHaveBeenCalledWith()
   })
 
+  const throwingEngine = () => {
+    const clients = {
+      a: { close: vi.fn(() => { throw new Error('disconnect listener sentinel') }) },
+      b: { close: vi.fn() },
+      c: { close: vi.fn() },
+    }
+    return { io: { engine: { clients } }, clients }
+  }
+
+  it('CollabService: one client whose close throws does not keep the others open; logged once, without values', () => {
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }
+    const service = new CollabService(logger, { subscribe: () => undefined } as never)
+    const { io, clients } = throwingEngine()
+    ;(service as unknown as { io: unknown }).io = io
+    expect(service.closeTransportsForShutdown()).toBe(2)
+    expect(clients.a.close).toHaveBeenCalledTimes(1)
+    expect(clients.b.close).toHaveBeenCalledTimes(1)
+    expect(clients.c.close).toHaveBeenCalledTimes(1)
+    expect(logger.warn).toHaveBeenCalledTimes(1)
+    expect(logger.warn).toHaveBeenCalledWith('Transport close at shutdown failed for a client')
+  })
+
+  it('MetricsStreamService: one client whose close throws does not keep the others open; logged once, without values', () => {
+    const service = new MetricsStreamService()
+    const warn = vi.spyOn((service as unknown as { logger: { warn(message: string): void } }).logger, 'warn').mockImplementation(() => undefined)
+    const { io, clients } = throwingEngine()
+    ;(service as unknown as { io: unknown }).io = io
+    expect(service.closeTransportsForShutdown()).toBe(2)
+    expect(clients.b.close).toHaveBeenCalledTimes(1)
+    expect(clients.c.close).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalledWith('Transport close at shutdown failed for a client')
+  })
+
   it('MetricsStreamService.closeTransportsForShutdown: close() without an argument on every client; 0 without a server', () => {
     const service = new MetricsStreamService()
     expect(service.closeTransportsForShutdown()).toBe(0)
@@ -468,7 +503,11 @@ describe('MetaSheetServer with connections open at the stop', () => {
     await vi.advanceTimersByTimeAsync(CLIENT_CLOSE_GRACE_MS)
     expect(fake.has('websocket')).toBe(false)
     expect(fake.has('upgraded')).toBe(false)
-    await vi.advanceTimersByTimeAsync(12_000)
+    // Bound: with the idle time lowered to 1 the keep-alive connection ends at 4 500 + 1 001 ms, so
+    // the stop has settled by 6 000 ms. Left at 5 000 it would end at 10 500 ms, past the 10 s barrier.
+    await vi.advanceTimersByTimeAsync(6_000 - CLIENT_CLOSE_GRACE_MS)
+    expect(outcome).toBe('resolved')
+    await vi.advanceTimersByTimeAsync(6_000)
     expect(outcome).toBe('resolved')
     expect(fake.has('keep-alive')).toBe(false)
     expect(poolEnd).toHaveBeenCalledTimes(1)
@@ -722,6 +761,10 @@ describe('U4 the fence on the real app, after the stop began, on every kind of p
         expect(answer.headers['x-content-type-options']).toBe('nosniff')
         expect(answer.headers['access-control-allow-origin']).toBeTruthy()
         expect(Object.keys(answer.headers).filter((name) => !allowed.has(name))).toEqual([])
+        // Values too, not only names: nothing of the request may be echoed into an allowed header.
+        expect(answer.headers['content-type']).toBe('application/json; charset=utf-8')
+        expect(answer.headers['x-powered-by']).toBe('Express')
+        expect(answer.headers['x-correlation-id']).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
       }
       expect(downstream).toBe(0)
       await new Promise((resolve) => setTimeout(resolve, 250))
@@ -867,7 +910,24 @@ describe('U4c the fence and its mount, read from the syntax tree', () => {
     })
     expect(returned).toBeDefined()
     expect(returned!.properties.map((property) => property.name?.getText(module))).toEqual(['fence', 'arm', 'begin', 'finish', 'isStopping'])
+    // The instance hands out the very functions declared under these names (shorthand), so the
+    // fence pinned above is the fence that is served.
+    const [fenceProperty, armProperty, beginProperty, finishProperty, stoppingProperty] = returned!.properties
+    for (const property of [fenceProperty, armProperty, beginProperty, finishProperty]) {
+      expect(ts.isShorthandPropertyAssignment(property)).toBe(true)
+    }
+    expect(ts.isPropertyAssignment(stoppingProperty) && printed(stoppingProperty.initializer, module)).toBe('() => stopping')
     expect(Object.keys(createClientConnectionShutdown()).sort()).toEqual(['arm', 'begin', 'fence', 'finish', 'isStopping'])
+  })
+
+  it('check 9b: exactly one declaration in the module is named fence', () => {
+    const declarations: ts.Node[] = []
+    walk(module, (node) => {
+      const named = (ts.isVariableDeclaration(node) || ts.isFunctionDeclaration(node) || ts.isParameter(node) || ts.isBindingElement(node))
+        && node.name && ts.isIdentifier(node.name) && node.name.text === 'fence'
+      if (named) declarations.push(node)
+    })
+    expect(declarations).toHaveLength(1)
   })
 
   it('the mount: the statement right after `this.app.use(cors(...))` in setupMiddleware is the delegating mount, and only forwards', () => {

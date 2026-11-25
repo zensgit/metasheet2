@@ -113,8 +113,11 @@ describe('loopback: realtime connections', () => {
     const disconnect = disconnected(socket)
     const stop = first.stop()
     for (let index = 0; index < 5; index += 1) first.broadcast('m', index)
-    await within(disconnect, 3_000)
-    await within(stop.closed, 3_000)
+    const ended = await within(disconnect, 3_000)
+    expect(ended).not.toBeNull()
+    // Which of the two depends on whether the next poll was already outstanding (L-2).
+    expect(['transport close', 'transport error']).toContain(ended!.reason)
+    expect(await within(stop.closed, 3_000)).not.toBeNull()
     stop.finish()
     await stack(first.port)
     await within(connected(socket), 6_000)
@@ -336,10 +339,17 @@ describe('loopback: HTTP connections', () => {
     const answered = await response
     expect(answered.status).toBe(200)
     expect(answered.body.toString()).toBe('slow:600')
+    // Still inside the idle tail (finish + 1 001 ms) and well before the last close (T0 + 1 000 ms):
+    // the connection is open when the upgrade arrives, so only the immediate destroy can close it.
+    await sleep(200)
+    expect(connection.isClosed()).toBe(false)
     const sentAt = Date.now()
     connection.write(rawWebSocketUpgrade())
+    // The realtime server answers the upgrade in the same dispatch (a 101 may arrive); the module's
+    // listener destroys the socket right after it, long before the idle tail or the last close.
     const closedAt = await within(connection.closed, 3_000)
     expect(closedAt).not.toBeNull()
+    expect(closedAt!).toBeGreaterThanOrEqual(sentAt)
     expect(closedAt! - sentAt).toBeLessThan(100)
     stop.finish()
   }, 10_000)
