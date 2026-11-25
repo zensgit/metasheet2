@@ -1,0 +1,66 @@
+name: Production permission recovery inventory read-only
+
+on:
+  push:
+    branches: [codex/permission-prod-readonly-20261125-a3]
+    paths: ['.github/workflows/permission-prod-recovery-inventory-20261125.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    if: github.repository == 'zensgit/metasheet2' && github.actor == 'zensgit'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the read-only inventory
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Verify inventory integrity
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ATTEMPT" == 1 ]]
+          printf '%s\n' 'c1ee7bd8f1eacfdd5aa72d1fcdedcf40e32c3c5ae51420b4a2fcdcff9cc9584a  scripts/ops/tmp-permission-prod-recovery-inventory-20261125.sh' | sha256sum -c --strict
+      - name: Inspect the production Compose project and recovery artifacts
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
+        run: |
+          set -euo pipefail
+          umask 077
+          tmp=$(mktemp -d)
+          trap 'rm -f -- "$tmp/key" "$tmp/known_hosts" "$tmp/stdout" "$tmp/stderr"; rmdir -- "$tmp"' EXIT
+          [[ "$DEPLOY_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.:-]*$ && "$DEPLOY_USER" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$ ]]
+          [[ -n "$DEPLOY_KNOWN_HOSTS" && -n "$DEPLOY_SSH_KEY_B64" ]]
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > "$tmp/key"
+          if ! decoded=$(printf '%s' "$DEPLOY_KNOWN_HOSTS" | base64 -d 2>/dev/null) || ! grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2' <<< "$decoded"; then
+            decoded=$DEPLOY_KNOWN_HOSTS
+          fi
+          grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2' <<< "$decoded"
+          printf '%s\n' "$decoded" > "$tmp/known_hosts"
+          path=$(printf '%s' "${DEPLOY_PATH:-metasheet2}" | base64 -w0)
+          compose=$(printf '%s' "${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}" | base64 -w0)
+          unset DEPLOY_PATH DEPLOY_COMPOSE_FILE DEPLOY_SSH_KEY_B64 DEPLOY_KNOWN_HOSTS decoded
+
+          rc=0
+          {
+            printf 'export PROBE_PATH_B64=%s PROBE_COMPOSE_B64=%s\n' "$path" "$compose"
+            cat scripts/ops/tmp-permission-prod-recovery-inventory-20261125.sh
+          } | timeout 80s ssh -T -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=yes \
+              -o UserKnownHostsFile="$tmp/known_hosts" -o GlobalKnownHostsFile=/dev/null \
+              -o IdentitiesOnly=yes -o ConnectTimeout=15 -o ServerAliveInterval=10 -o ServerAliveCountMax=2 \
+              -i "$tmp/key" "$DEPLOY_USER@$DEPLOY_HOST" 'timeout 55s bash -s' > "$tmp/stdout" 2> "$tmp/stderr" || rc=$?
+
+          grep -E '^(INVENTORY_STARTED|deploy_directory=(accessible|unavailable)|(compose_file|app_env|prior_backup|prior_backup_catalog)=(present|unavailable)|release_image_(backend|web)=(matches|revision_mismatch|unavailable)|compose_project=(identified|unavailable)|compose_(services|volumes)=unavailable|project_service=(backend|web|postgres|redis) total=[0-9]+ running=[0-9]+|project_volume=(metasheet-postgres-data|metasheet-redis-data|metasheet-attendance-import-data) count=[0-9]+)$' "$tmp/stdout" || true
+          if [[ "$rc" != 0 ]]; then
+            echo 'The authorized production recovery inventory did not complete'
+            exit "$rc"
+          fi
