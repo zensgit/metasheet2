@@ -1019,14 +1019,15 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
   // write condition re-decides it under row locks before the UPDATE: nothing is written, the row is retryable with the
   // host's fixed code and NO trace; the next run then records the terminal outcome without a patch.
   const FENCE_STATEMENT = /^SELECT 1 FROM integration_stock_prep_project_write_lock WHERE scope_key = \$1 AND lease_id = \$2/
-  // `outcome` null: the recovery entry's own live owner proof refuses the deactivated owner before any row is read.
+  // `outcome` null: the recovery entry's own live owner proof refuses that owner (deactivated, or no longer holding the
+  // integration admin role) before any row is read.
   const flips: Record<string, { sql: string; params: () => unknown[]; code: string; outcome: string | null }> = {
     'role grant revoked': { sql: `DELETE FROM role_permissions WHERE role_id = 'integration_admin' AND permission_code = 'stock-prep:operate'`,
       params: () => [], code: 'YIDA_ISSUE_CONFIRM_WRITE_AUTHORITY_REVOKED', outcome: 'permission_revoked' },
     'owner deactivated': { sql: `UPDATE users SET is_active = false WHERE id = 'synthetic-owner'`,
       params: () => [], code: 'YIDA_ISSUE_CONFIRM_WRITE_AUTHORITY_REVOKED', outcome: null },
     'owner role removed': { sql: `DELETE FROM user_roles WHERE user_id = 'synthetic-owner' AND role_id = 'integration_admin'`,
-      params: () => [], code: 'YIDA_ISSUE_CONFIRM_WRITE_AUTHORITY_REVOKED', outcome: 'permission_revoked' },
+      params: () => [], code: 'YIDA_ISSUE_CONFIRM_WRITE_AUTHORITY_REVOKED', outcome: null },
     'project archived': { sql: `UPDATE ${REGISTRY} SET status = 'archived', archived_at = now() WHERE tenant_id = $1 AND project_no = $2`,
       params: () => [TENANT, PROJECT], code: 'YIDA_ISSUE_CONFIRM_WRITE_PROJECT_INACTIVE', outcome: 'project_archived' },
   }
