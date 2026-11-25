@@ -94,7 +94,12 @@ describe('DingTalk session issuers, identity writers and grant consumers', () =>
     const fourth = src + 'routes/admin-directory.ts'
     const admin = read(fourth)
     expect(authoritySites(fourth, admin.replace('await compensateSupersededDenyGrantForRequest(req, res)', 'return'))).not.toEqual(authoritySites(fourth, admin))
-    const residue = Object.keys(residues)[0]
-    expect(authoritySites('plugin.cjs', `require('${residue}')`)).toEqual([`reference to ${residue}`])
+    const probe = 'probe/.~sync-residue-name-only.insyncdl'
+    residues[probe] = 'not-a-blob'
+    try {
+      expect(authoritySites('plugin.cjs', `require('${probe}')`)).toEqual([`reference to ${probe}`])
+    } finally {
+      delete residues[probe]
+    }
   })
 })
