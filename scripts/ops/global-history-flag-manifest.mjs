@@ -48,6 +48,16 @@
 /** @type {FlagSpec[]} */
 export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
   {
+    key: 'ACCOUNT_CENTER_READ_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose: 'Default OFF; exact true enables the read-only account center.',
+    source: 'packages/core-backend/src/account-center/read-flag.ts#isAccountCenterReadEnabled',
+  },
+  {
     key: 'INTEGRATION_YIDA_OWNER_SEND_ENABLED',
     type: 'boolean',
     activationValue: 'true',

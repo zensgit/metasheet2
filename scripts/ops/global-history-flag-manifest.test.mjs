@@ -750,7 +750,7 @@ test('DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED: exact true, danger high, indepen
 })
 
 test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src, plus plugins/plugin-attendance/index.cjs for the ATTENDANCE_CANCEL_ROUND_ family', () => {
-  const sourceGH = [...new Set([...globalHistoryFlagsInSource(), ...automationFlagsInSource(), ...dingtalkIntegrationScopedFlagsInSource(), ...securityActionFlagsInSource(), ...directoryIntegrationCapabilitiesFlagsInSource(), ...userNotificationFlagsInSource(), ...approvalRoutingFlagsInSource(), ...delegatedScopeFlagsInSource()])].sort()
+  const sourceGH = [...new Set([...globalHistoryFlagsInSource(), ...automationFlagsInSource(), ...dingtalkIntegrationScopedFlagsInSource(), ...securityActionFlagsInSource(), ...directoryIntegrationCapabilitiesFlagsInSource(), ...userNotificationFlagsInSource(), ...approvalRoutingFlagsInSource(), ...delegatedScopeFlagsInSource(), ...grepFlagTokens('ACCOUNT_CENTER_READ_ENABLED')])].sort()
   assert.ok(
     sourceGH.length >= 20,
     `expected >=20 Global-History flags derived from source, got ${sourceGH.length} — the denylist is too broad or grep broke`,
@@ -2053,4 +2053,18 @@ test('EXTERNAL_NOTIFICATION_DELIVERY_ENABLED: exact literal, high danger and bot
   for (const value of [undefined, '', 'false', '0', 'TRUE', 'True', ' true', 'true ', ' true ', '1', 'yes', 'on']) {
     assert.equal(isActivated(spec, value), false, String(value))
   }
+})
+
+test('account center read flag is independent and exact true', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.ACCOUNT_CENTER_READ_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.danger, 'low')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.source, 'packages/core-backend/src/account-center/read-flag.ts#isAccountCenterReadEnabled')
+  assert.match(readFileSync(path.join(REPO_ROOT, spec.source.split('#')[0]), 'utf8'), /export function isAccountCenterReadEnabled\(/)
+  for (const value of [undefined, '', 'false', 'TRUE', ' true', 'true ', '1', 'yes']) assert.equal(isActivated(spec, value), false)
+  assert.equal(isActivated(spec, 'true'), true)
 })
