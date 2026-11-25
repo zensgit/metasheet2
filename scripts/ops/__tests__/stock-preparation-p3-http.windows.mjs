@@ -90,6 +90,7 @@ test('H01 retries the same socket and refuses stale, missing, ambiguous and mism
     writeFileSync(backend, '// fixture')
     copyFileSync(path.join(ops, 'h01-health.ps1'), path.join(http, 'h01-health.ps1'))
     copyFileSync(path.join(ops, '03-live-env-check.ps1'), path.join(ps, '03-live-env-check.ps1'))
+    copyFileSync(path.join(ops, 'P3-Pm2Resolution.ps1'), path.join(ps, 'P3-Pm2Resolution.ps1'))
     const serverFile = path.join(fixture, 'health.cjs')
     const diskLabel = path.join(fixture, 'disk-label')
     const pm2App = path.join(fixture, 'pm2-app.json')

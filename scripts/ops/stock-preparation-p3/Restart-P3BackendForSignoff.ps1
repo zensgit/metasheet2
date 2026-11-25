@@ -9,33 +9,13 @@ param(
 $ErrorActionPreference = 'Stop'
 try {
   $root = (Get-Item -LiteralPath $InstallRoot).FullName
-  if (-not $Pm2Command) {
-    $localPm2 = Join-Path $root 'node_modules\.bin\pm2.cmd'
-    if (Test-Path -LiteralPath $localPm2 -PathType Leaf) {
-      $Pm2Command = $localPm2
-    } else {
-      $candidates = @()
-      $programFiles = [Environment]::GetEnvironmentVariable('ProgramFiles')
-      $programFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
-      foreach ($base in @($programFiles, $programFilesX86, 'C:\Program Files', 'C:\Program Files (x86)')) {
-        if ($base) { $candidates += Join-Path $base 'nodejs' }
-      }
-      foreach ($base in @($env:APPDATA, 'C:\Users\Administrator\AppData\Roaming',
-          (Join-Path $env:USERPROFILE 'AppData\Roaming'))) {
-        if ($base) { $candidates += Join-Path $base 'npm' }
-      }
-      $systemRoot = if ($env:SystemRoot) { $env:SystemRoot } else { 'C:\Windows' }
-      $candidates += Join-Path $systemRoot 'System32'
-      foreach ($dir in $candidates | Select-Object -Unique) {
-        $candidate = if ([IO.Path]::GetExtension($dir) -ieq '.cmd') { $dir } else { Join-Path $dir 'pm2.cmd' }
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) { $Pm2Command = $candidate; break }
-      }
-      if (-not $Pm2Command) {
-        $Pm2Command = (Get-Command pm2.cmd -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
-      }
-    }
+  . (Join-Path $PSScriptRoot 'P3-Pm2Resolution.ps1')
+  $resolution = Resolve-P3Pm2 $root
+  if (-not $resolution.Command) {
+    'P3_SIGNOFF_RESTART status=STOP reason=pm2_not_found'
+    exit 2
   }
-  $pm2 = (Get-Item -LiteralPath $Pm2Command).FullName
+  $pm2 = if ($Pm2Command) { (Get-Item -LiteralPath $Pm2Command).FullName } else { $resolution.Command }
   $proof = @(& (Join-Path $PSScriptRoot '03-live-env-check.ps1') -InstallRoot $root -Keys NODE_ENV -ExpectedPm2Command $pm2)
   if ($LASTEXITCODE -ne 0 -or $proof -cnotcontains 'LIVEENV_BACKEND target=verified') {
     'P3_SIGNOFF_RESTART status=STOP reason=backend_target_unconfirmed'
@@ -46,7 +26,13 @@ try {
   # starting the ecosystem file here would import the operator's shell again.
   $ErrorActionPreference = 'Continue'
   $LASTEXITCODE = $null
-  & $pm2 restart metasheet-backend *> $null
+  $previousPath = $env:PATH
+  try {
+    $env:PATH = $resolution.ToolPath
+    & $pm2 restart metasheet-backend *> $null
+  } finally {
+    $env:PATH = $previousPath
+  }
   if ($LASTEXITCODE -ne 0) {
     'P3_SIGNOFF_RESTART status=STOP reason=pm2_restart_failed'
     exit 3

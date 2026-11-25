@@ -28,6 +28,7 @@ const pm2Fixture = String.raw`
 const fs = require('node:fs')
 const [command, target, ...flags] = process.argv.slice(2)
 const stateFile = process.env.P3_FIXTURE_STATE
+fs.appendFileSync(process.env.P3_FIXTURE_CALLS, launcher + ':' + command + '\n')
 const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'))
 if (command === 'jlist') {
   const app = structuredClone(state.app)
@@ -46,17 +47,21 @@ if (command === 'jlist') {
 }
 `
 
-test('P3 signoff restart preserves the installer-saved environment when both app.env files exist', { skip: process.platform !== 'win32' }, () => {
+function verifyRestart(layout) {
   const fixture = mkdtempSync(path.join(tmpdir(), 'p3 restart fixture '))
   try {
     const bin = path.join(fixture, 'node_modules/.bin')
-    const appdataNpm = path.join(fixture, 'appdata/Roaming/npm')
+    const appData = path.join(fixture, 'appdata')
+    const userProfile = path.join(fixture, 'profile')
+    const appdataNpm = path.join(appData, 'npm')
+    const profileNpm = path.join(userProfile, 'AppData/Roaming/npm')
     const pm2Home = path.join(fixture, 'pm2')
     const startup = path.join(fixture, 'scripts/ops/attendance-onprem-start-pm2.ps1')
     const boot = path.join(fixture, 'bootstrap-fixture.ps1')
     const stateFile = path.join(fixture, 'pm2-state.json')
+    const callsFile = path.join(fixture, 'pm2-calls.log')
     const backend = path.join(fixture, 'packages/core-backend/dist/src/index.js')
-    for (const dir of [bin, appdataNpm, pm2Home, path.dirname(startup), path.dirname(backend), path.join(fixture, 'docker')]) {
+    for (const dir of [pm2Home, path.dirname(startup), path.dirname(backend), path.join(fixture, 'docker')]) {
       mkdirSync(dir, { recursive: true })
     }
     copyFileSync(path.join(ops, 'attendance-onprem-start-pm2.ps1'), startup)
@@ -64,11 +69,13 @@ test('P3 signoff restart preserves the installer-saved environment when both app
     writeFileSync(path.join(fixture, 'ecosystem.config.cjs'), '// fixture')
     writeFileSync(backend, '// fixture')
     writeFileSync(path.join(pm2Home, 'pm2.pid'), String(process.pid))
-    writeFileSync(path.join(bin, 'pm2.cmd'), '@node "%~dp0pm2-fixture.cjs" %*\r\n')
-    writeFileSync(path.join(bin, 'pm2-fixture.cjs'), pm2Fixture)
-    writeFileSync(path.join(appdataNpm, 'pm2.cmd'), '@node "%~dp0pm2-fixture.cjs" %*\r\n')
-    writeFileSync(path.join(appdataNpm, 'pm2-fixture.cjs'), pm2Fixture)
-    writeFileSync(path.join(appdataNpm, 'pm2-fixture.cjs'), pm2Fixture)
+    const candidates = { local: bin, appdata: appdataNpm, profile: profileNpm }
+    for (const name of layout.candidates) {
+      const dir = candidates[name]
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(path.join(dir, 'pm2.cmd'), '@node "%~dp0pm2-fixture.cjs" %*\r\n')
+      writeFileSync(path.join(dir, 'pm2-fixture.cjs'), "const launcher = '" + name + "'\n" + pm2Fixture)
+    }
     writeFileSync(path.join(fixture, 'docker/app.env'), "PORT = '4012'\r\nP3_SHARED=docker\r\nP3_DOCKER_ONLY=\"left=right\"\r\n")
     writeFileSync(path.join(fixture, 'app.env'), 'P3_SHARED=root\r\nP3_ROOT_ONLY=root\r\n')
     writeFileSync(stateFile, JSON.stringify({
@@ -81,15 +88,19 @@ test('P3 signoff restart preserves the installer-saved environment when both app
     }))
 
     function run(script, args, extraEnv) {
-      return spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, ...args], {
+      const powershell = path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe')
+      const result = spawnSync(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, ...args], {
         env: {
-          ...process.env, PM2_HOME: pm2Home, APPDATA: path.join(fixture, 'appdata'),
-          Path: path.dirname(process.execPath) + path.delimiter + process.env.Path.replace(appdataNpm, ''),
-          P3_FIXTURE_STATE: stateFile, PORT: '3900', P3_AMBIENT: 'installer', ...extraEnv,
+          ...process.env, PM2_HOME: pm2Home, APPDATA: appData, USERPROFILE: userProfile,
+          Path: [...(layout.path || []).map(name => candidates[name]), path.dirname(process.execPath),
+            path.join(process.env.SystemRoot, 'System32'), process.env.SystemRoot].join(path.delimiter),
+          P3_FIXTURE_STATE: stateFile, P3_FIXTURE_CALLS: callsFile, PORT: '3900', P3_AMBIENT: 'installer', ...extraEnv,
         },
         encoding: 'utf8',
         timeout: 40000,
       })
+      if (result.error) throw result.error
+      return result
     }
     const applied = run(boot, ['-RootDir', fixture, '-ApplyScript', path.join(ops, 'multitable-onprem-apply-package.ps1')], {})
     assert.equal(applied.status, 0, applied.stdout + applied.stderr)
@@ -104,6 +115,10 @@ test('P3 signoff restart preserves the installer-saved environment when both app
     const after = JSON.parse(readFileSync(stateFile, 'utf8'))
     assert.equal(after.restarts, 2)
     assert.deepEqual(after.effective, saved)
+    assert.deepEqual(
+      readFileSync(callsFile, 'utf8').trim().split(/\r?\n/),
+      ['jlist', 'restart', 'save', 'jlist', 'restart'].map(action => layout.expected + ':' + action),
+    )
 
     const refused = run(restart, ['-InstallRoot', fixture], { P3_FIXTURE_WRONG_CWD: 'true' })
     assert.equal(refused.status, 2, refused.stdout + refused.stderr)
@@ -111,5 +126,20 @@ test('P3 signoff restart preserves the installer-saved environment when both app
     assert.equal(JSON.parse(readFileSync(stateFile, 'utf8')).restarts, 2)
   } finally {
     rmSync(fixture, { recursive: true, force: true })
+  }
+}
+
+test('P3 signoff restart uses the installer PM2 precedence and preserves its saved environment', { skip: process.platform !== 'win32' }, t => {
+  // Keep a single top-level TAP test: the Windows workflow counts all subtests.
+  for (const layout of [
+    { candidates: ['local', 'appdata', 'profile'], expected: 'local' },
+    { candidates: ['appdata'], expected: 'appdata' },
+    { candidates: ['appdata', 'profile'], expected: 'profile' },
+    { candidates: ['appdata', 'profile'], path: ['profile', 'appdata'], expected: 'profile' },
+    { candidates: ['appdata', 'profile'], path: ['profile'], expected: 'appdata' },
+  ]) {
+    verifyRestart(layout)
+    t.diagnostic('selected ' + layout.expected + ' with candidates ' + layout.candidates.join(',') +
+      ' and original PATH candidates ' + (layout.path || []).join(','))
   }
 })

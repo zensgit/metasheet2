@@ -426,38 +426,13 @@ try {
     }
   }
 
-  $pm2Kind = 'none'
-  $pm2Path = $null
+  . (Join-Path $PSScriptRoot 'P3-Pm2Resolution.ps1')
+  $pm2 = Resolve-P3Pm2 $InstallRoot
+  $pm2Kind = $pm2.Kind
+  $pm2Path = $pm2.Command
   $readState = 'skipped'
   $appMatches = '-'
   $pm2Env = $null
-  $localPm2 = Join-Path $InstallRoot 'node_modules\.bin\pm2.cmd'
-  if (Test-Path -LiteralPath $localPm2 -PathType Leaf) { $pm2Kind = 'local'; $pm2Path = $localPm2 }
-  else {
-    # the start script first prepends these folders to PATH when they exist (Initialize-WindowsSystemToolPath,
-    # :112-177, called at :354 before pm2 is resolved at :364), so search the same PATH it would have
-    $pathEntries = New-Object System.Collections.ArrayList
-    foreach ($e in ([string][Environment]::GetEnvironmentVariable('PATH', 'Process') -split ';')) { if (-not [string]::IsNullOrWhiteSpace($e)) { [void]$pathEntries.Add($e) } }
-    $cands = @()
-    foreach ($b in @([Environment]::GetEnvironmentVariable('ProgramFiles'), [Environment]::GetEnvironmentVariable('ProgramFiles(x86)'), 'C:\Program Files', 'C:\Program Files (x86)')) {
-      if (-not [string]::IsNullOrWhiteSpace($b)) { $cands += (Join-Path $b 'nodejs') }
-    }
-    $npmBases = @($env:APPDATA, 'C:\Users\Administrator\AppData\Roaming')
-    if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) { $npmBases += (Join-Path $env:USERPROFILE 'AppData\Roaming') }
-    foreach ($b in $npmBases) { if (-not [string]::IsNullOrWhiteSpace($b)) { $cands += (Join-Path $b 'npm') } }
-    $sr = if ([string]::IsNullOrWhiteSpace($env:SystemRoot)) { 'C:\Windows' } else { $env:SystemRoot }
-    $cands += @((Join-Path $sr 'System32'), $sr)
-    foreach ($cand in ($cands | Select-Object -Unique)) {
-      if ([string]::IsNullOrWhiteSpace($cand) -or -not (Test-Path -LiteralPath $cand)) { continue }
-      $present = $false
-      foreach ($e in $pathEntries) { if ($e.TrimEnd('\') -ieq $cand.TrimEnd('\')) { $present = $true; break } }
-      if (-not $present) { $pathEntries.Insert(0, $cand) }
-    }
-    foreach ($e in $pathEntries) {
-      $try = Join-Path $e.Trim().Trim('"') 'pm2.cmd'
-      if (Test-Path -LiteralPath $try -PathType Leaf) { $pm2Kind = 'path'; $pm2Path = $try; break }
-    }
-  }
 
   if (-not $daemonAlive) { $resultLine = 'no_daemon' }
   elseif ($daemonOwner -eq 'unknown') { $resultLine = 'owner_unreadable' }
@@ -477,6 +452,7 @@ try {
       $psi.FileName = if ([string]::IsNullOrWhiteSpace($env:ComSpec)) { 'cmd.exe' } else { $env:ComSpec }
       $psi.Arguments = '/d /s /c ""' + $pm2Path + '" jlist"'
       $psi.UseShellExecute = $false
+      $psi.EnvironmentVariables['PATH'] = $pm2.ToolPath
       $psi.CreateNoWindow = $true
       $psi.RedirectStandardOutput = $true
       $psi.RedirectStandardError = $true

@@ -647,6 +647,8 @@ function GroupOk([string]$scriptUnderTest, [string]$g) {
 
 if ($Mutants) {
   $src = [System.IO.File]::ReadAllText($script)
+  $pm2Resolver = Join-Path (Split-Path -Parent (Resolve-Path -LiteralPath $script).Path) 'P3-Pm2Resolution.ps1'
+  $resolverSource = [System.IO.File]::ReadAllText($pm2Resolver)
   $oldEarly = '  if ($null -eq $dockerFile -or -not $dockerFile.ContainsKey($dk)) { return ''docker_absent'' }' + "`n" +
     '  if ($null -eq $rootFile -or -not $rootFile.ContainsKey($dk)) { return ''root_absent'' }' + "`n" +
     '  $cmp = [System.StringComparer]::Ordinal'
@@ -657,7 +659,7 @@ if ($Mutants) {
     @('M4 no daemon guard', 'if (-not $daemonAlive) { $resultLine = ''no_daemon'' }', 'if ($false) { }', 'r3'),
     @('M5 files only (old method)', 'if ($readState -eq ''ok'') {', 'if ($false) {', 'r1'),
     @('M6 no PATH canary', 'if ($visible) { $pm2Env = $cand', 'if ($true) { $pm2Env = $cand', 'r15'),
-    @('M7 no start-script folders', 'if (-not $present) { $pathEntries.Insert(0, $cand) }', '$null = $present', 'r14'),
+    @('M7 no start-script folders', 'if (-not $alreadyPresent) { $toolPath.Insert(0, $dir) }', '$null = $alreadyPresent', 'r14', 'resolver'),
     @('M8 no blank state (R85 behaviour)', 'if ($s.Trim().Length -eq 0) { return ''blank'' }', '$null = 0', 'r16a'),
     @('M9 no literal-false state (R85 behaviour)', 'if ($s -ceq ''false'') { return ''literal-false'' }', '$null = 0', 'r16a'),
     @('M10 kind lookup broken', 'OrdinalIgnoreCase)) { return $Spec[$k] }', 'OrdinalIgnoreCase)) { $null = $k }', 'r16a'),
@@ -686,10 +688,16 @@ if ($Mutants) {
     if (GroupOk $script $g) { $pass++; ('BASELINE ' + $g + ' ok') } else { $fail++; ('  FAIL BASELINE ' + $g + ': the unmutated tool fails this mutant check') }
   }
   foreach ($m in $mut) {
-    $n = ([regex]::Matches($src, [regex]::Escape($m[1]))).Count
+    $mutateResolver = $m.Count -eq 5 -and $m[4] -eq 'resolver'
+    $source = if ($mutateResolver) { $resolverSource } else { $src }
+    $n = ([regex]::Matches($source, [regex]::Escape($m[1]))).Count
     if ($n -ne 1) { ('MUTANT ' + $m[0] + ' anchor_count=' + $n + ' (not applied)'); $fail++; continue }
-    $mp = Join-Path $base ('mutant-' + [guid]::NewGuid().ToString('N') + '.ps1')
-    [System.IO.File]::WriteAllText($mp, $src.Replace($m[1], $m[2]), $utf8)
+    $directory = Join-Path $base ('mutant-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $directory | Out-Null
+    $mp = Join-Path $directory '03-live-env-check.ps1'
+    $resolverCopy = Join-Path $directory 'P3-Pm2Resolution.ps1'
+    [System.IO.File]::WriteAllText($mp, $(if ($mutateResolver) { $src } else { $src.Replace($m[1], $m[2]) }), $utf8)
+    [System.IO.File]::WriteAllText($resolverCopy, $(if ($mutateResolver) { $resolverSource.Replace($m[1], $m[2]) } else { $resolverSource }), $utf8)
     $ok = GroupOk $mp $m[3]
     $verdict = if ($ok) { 'SURVIVED' } else { 'KILLED' }
     ('MUTANT ' + $m[0] + ' -> ' + $verdict)
