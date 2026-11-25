@@ -6,7 +6,9 @@ import {
   type YidaSendExecutionPrimitives,
   type YidaSourceBindingReauthorizer,
 } from './yida-send-approval-service'
-import { yidaIssueConfirmLiveRecheck, type YidaIssueConfirmRecheck } from './yida-issue-confirm-writeback-authority'
+import {
+  createYidaIssueConfirmWriteCondition, yidaIssueConfirmLiveRecheck, type YidaIssueConfirmRecheck,
+} from './yida-issue-confirm-writeback-authority'
 
 // Host private: authentication supplies actor, and the actual core authority
 // independently proves live ACL and the permanent target owner in PostgreSQL.
@@ -22,7 +24,10 @@ export type YidaOwnerRuntimeBinding = Readonly<{
     readEnablement: () => unknown; timeoutMs: number
   }>): { submit: Send; inspect?(input: unknown): Promise<unknown> }
   // YiDa 发料确认日期回写 (design baseline v2.3 §7.3, slice Y9): optional, both or neither.
-  createIssueConfirmWriteback?(options: Readonly<{ context: YidaOwnerActor; recheck: IssueConfirmRecheckPort }>): { run(input: unknown): Promise<unknown> }
+  // #6812 review P2: `writeCondition` mints the host write condition the executor's one patch carries; the host
+  // re-decides it inside the record write's own transaction (yida-issue-confirm-writeback-authority.ts).
+  createIssueConfirmWriteback?(options: Readonly<{ context: YidaOwnerActor; recheck: IssueConfirmRecheckPort
+    writeCondition: (input: unknown) => unknown }>): { run(input: unknown): Promise<unknown> }
   issueConfirmWritebackEnabled?(): boolean
 }>
 export type YidaOwnerRuntimeDependencies = {
@@ -512,7 +517,8 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
     const pending = execute(owner, {}, false, async (_authority, state, fixed, _checkpoint, _signal, _tracked, database) => {
       if (!state.createIssueConfirmWriteback) return undefined
       const writeback = record(state.createIssueConfirmWriteback(Object.freeze({ context: fixed,
-        recheck: (request: unknown) => issueConfirmRecheck(database, fixed, request) })), ['run'])
+        recheck: (request: unknown) => issueConfirmRecheck(database, fixed, request),
+        writeCondition: (request: unknown) => createYidaIssueConfirmWriteCondition(fixed, request) })), ['run'])
       if (typeof writeback.run !== 'function' || types.isProxy(writeback.run)) fail('UNAVAILABLE')
       return writebackView(await (writeback.run as (input: unknown) => Promise<unknown>)({ ledgerIds: [ledgerId] }))
     })
@@ -702,7 +708,8 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
           // the sheet lease follows inside the run.
           await authority.proveDraftTarget({})
           const writeback = record(state.createIssueConfirmWriteback(Object.freeze({ context: fixed,
-            recheck: (request: unknown) => issueConfirmRecheck(database, fixed, request) })), ['run'])
+            recheck: (request: unknown) => issueConfirmRecheck(database, fixed, request),
+            writeCondition: (request: unknown) => createYidaIssueConfirmWriteCondition(fixed, request) })), ['run'])
           if (typeof writeback.run !== 'function' || types.isProxy(writeback.run)) fail('UNAVAILABLE')
           return writebackView(await (writeback.run as (input: unknown) => Promise<unknown>)(parsed))
         }))

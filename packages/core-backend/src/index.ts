@@ -137,6 +137,7 @@ import {
 } from './multitable/plugin-scope'
 import { resolvePluginSheetScopeMode } from './multitable/pluginSheetScopeMode'
 import { assertPluginWriteFence, refusePluginWriteFenceOnUnfencedSurface } from './multitable/plugin-write-fence'
+import { assertYidaIssueConfirmWriteCondition } from './integration/yida-issue-confirm-writeback-authority'
 import { assertSheetNotCopiedFromPluginManaged } from './multitable/copied-sheet-plugin-scope'
 import {
   acquireStockPreparationPersistUnitOfWorkLocks,
@@ -1426,7 +1427,7 @@ export class MetaSheetServer {
               recordId,
             })
           },
-          patchRecord: async ({ sheetId, recordId, changes, expectedVersion, writeFence }) => {
+          patchRecord: async ({ sheetId, recordId, changes, expectedVersion, writeFence, writeCondition }) => {
             return poolManager.get().transaction(async ({ query }) => {
               const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
                 const result = await query(sql, params)
@@ -1439,7 +1440,12 @@ export class MetaSheetServer {
                     : undefined,
                 }
               }
+              // #6812 review P2: a write condition (the YiDa issue-confirm write-back's) re-decides the project state and
+              // the owner's live authority in THIS transaction, under their row locks, before the UPDATE. Its D21 helper
+              // needs READ COMMITTED, so that is the transaction's first statement; absent, the write is unchanged.
+              if (writeCondition !== undefined) await txQuery('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
               await assertPluginWriteFence(txQuery, writeFence)
+              await assertYidaIssueConfirmWriteCondition(txQuery, writeCondition, { sheetId, fenced: writeFence !== undefined })
               return patchMultitableRecord({
                 query: txQuery,
                 sheetId,

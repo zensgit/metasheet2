@@ -325,7 +325,7 @@ test('binding pair: the sheets port binds the registry row\'s sheetId and object
   for (const tenantId of [TENANT, OTHER_TENANT]) {
     const row = registry[tenantId]
     assert.notEqual(row.objectId, deriveProjectSheetObjectId(tenantId, PROJECT))
-    const calls = { store: [], resolve: [], records: [] }
+    const calls = { store: [], resolve: [], records: [], minted: [], conditions: [] }
     const projectTargetStore = { async get(input) {
       calls.store.push({ ...input })
       const found = registry[input.tenantId]
@@ -343,8 +343,9 @@ test('binding pair: the sheets port binds the registry row\'s sheetId and object
         return filters && filters.fld_idempotencyKey === KEY ? [{ ...stored, data: { ...stored.data } }] : []
       },
       async createRecord() { throw new Error('NO_CREATE') },
-      async patchRecord({ sheetId, recordId, changes, expectedVersion }) {
+      async patchRecord({ sheetId, recordId, changes, expectedVersion, writeCondition }) {
         calls.records.push(['patch', sheetId, recordId, changes, expectedVersion])
+        calls.conditions.push(writeCondition)
         Object.assign(stored.data, changes); stored.version += 1
         return { id: recordId, version: stored.version, data: { ...stored.data } }
       },
@@ -359,7 +360,7 @@ test('binding pair: the sheets port binds the registry row\'s sheetId and object
       rowSource: { async read() { return { boundSheetId: row.sheetId, config: CONFIG, payload: { sourceLineId: KEY, project: PROJECT } } } },
       projectRegistry: createIssueConfirmProjectRegistry({ projectTargetStore }),
       sheets: createIssueConfirmSheets({ multitable: () => ({ records, provisioning }) }),
-      authority: { async recheck() { return true } },
+      authority: { async recheck() { return true }, writeCondition: (scope) => { const minted = Object.freeze({ ...scope }); calls.minted.push(minted); return minted } },
       writeLock: {
         scopeKeyFor: writeLockModule.sheetWriteScopeKey,
         async withProjectWriteLease(scopeKey, _options, fn) {
@@ -381,6 +382,11 @@ test('binding pair: the sheets port binds the registry row\'s sheetId and object
       ['patch', row.sheetId, 'rec-pair', { fld_issueConfirmDate: ACK_DAY }, 2],
     ], tenantId)
     assert.deepEqual(trace.map((entry) => [entry.tenant_id, entry.sheet_id, entry.outcome]), [[tenantId, row.sheetId, 'written']], tenantId)
+    // #6812 review P2: one condition, minted for THIS tenant, the registry row's sheet and the payload's project, reaches
+    // the host patch through the scoped records api as the same object.
+    assert.deepEqual(calls.minted.map((entry) => ({ ...entry })), [{ tenantId, ownerId: OWNER, sheetId: row.sheetId, projectNo: PROJECT }], tenantId)
+    assert.equal(calls.conditions.length, 1)
+    assert.equal(calls.conditions[0], calls.minted[0])
   }
 })
 
@@ -397,21 +403,23 @@ test('capability: enabled() is the core exact-literal predicate; create() binds 
   assert.deepEqual(Object.keys(capability).sort(), ['create', 'enabled'])
   assert.equal(Object.isFrozen(capability), true)
   for (const input of [undefined, null, {}, { context: { tenantId: TENANT, ownerId: OWNER } }, { context: { tenantId: ' x', ownerId: OWNER }, recheck() {} },
-    { context: { tenantId: TENANT }, recheck() {} }]) {
+    { context: { tenantId: TENANT }, recheck() {} },
+    // #6812 review P2: the host's write-condition minter is required next to the re-check.
+    { context: { tenantId: TENANT, ownerId: OWNER }, recheck() {} }, { context: { tenantId: TENANT, ownerId: OWNER }, recheck() {}, writeCondition: 'x' }]) {
     assert.throws(() => capability.create(input), (error) => error.code === 'YIDA_ISSUE_CONFIRM_UNAVAILABLE')
   }
-  const bound = capability.create({ context: { tenantId: TENANT, ownerId: OWNER }, recheck: async () => true })
+  const bound = capability.create({ context: { tenantId: TENANT, ownerId: OWNER }, recheck: async () => true, writeCondition: (scope) => Object.freeze({ ...scope }) })
   assert.deepEqual(Object.keys(bound), ['run'])
   // ON: the run forwards `after` to the core, which refuses a bad cursor (or one with ledgerIds) before any read.
   const onDb = memoryDb({})
-  const on = createIssueConfirmWritebackCapability({ ...base, db: onDb, env: { ...ON } }).create({ context: { tenantId: TENANT, ownerId: OWNER }, recheck: async () => true })
+  const on = createIssueConfirmWritebackCapability({ ...base, db: onDb, env: { ...ON } }).create({ context: { tenantId: TENANT, ownerId: OWNER }, recheck: async () => true, writeCondition: (scope) => Object.freeze({ ...scope }) })
   assert.deepEqual(await on.run({ after: 'not-a-cursor' }), { enabled: true, results: [], refused: 'AFTER' })
   assert.deepEqual(await on.run({ ledgerIds: ['l-1'], after: 'eyJ2IjoxfQ' }), { enabled: true, results: [], refused: 'AFTER' })
   assert.deepEqual(onDb.calls, [])
   // OFF: run() returns before any dependency is touched.
   const off = createIssueConfirmWritebackCapability({ ...base, db: memoryDb({}), env: {} })
   const offDb = off
-  const result = await offDb.create({ context: { tenantId: TENANT, ownerId: OWNER }, recheck: async () => true }).run({})
+  const result = await offDb.create({ context: { tenantId: TENANT, ownerId: OWNER }, recheck: async () => true, writeCondition: (scope) => Object.freeze({ ...scope }) }).run({})
   assert.deepEqual(result, { enabled: false, results: [] })
 })
 
@@ -423,7 +431,7 @@ test('Plan A full form: the capability is built, and create() builds its executo
   const db = memoryDb({})
   const capability = createIssueConfirmWritebackCapability({ db, security: { async encrypt() {}, async decrypt() {} },
     projectTargetStore: { async get() { return null } }, projectWriteLock: leaseOnly, multitable: () => null, env: { ...ON } })
-  const bound = capability.create({ context: { tenantId: TENANT, ownerId: OWNER }, recheck: async () => true })
+  const bound = capability.create({ context: { tenantId: TENANT, ownerId: OWNER }, recheck: async () => true, writeCondition: (scope) => Object.freeze({ ...scope }) })
   assert.deepEqual(Object.keys(bound), ['run'])
   // The executor answers (a cursor it cannot accept is refused before any read) — it was built.
   assert.deepEqual(await bound.run({ after: 'not-a-cursor' }), { enabled: true, results: [], refused: 'AFTER' })
@@ -470,15 +478,16 @@ test('factory: with the capability the binding gains exactly two members; withou
   const plain = create({ db, security })
   assert.deepEqual(Object.keys(plain).sort(), ['createPrimitives', 'createSendPort'])
   let created = 0
-  const capability = { enabled: () => true, create(input) { created += 1; assert.deepEqual(Object.keys(input).sort(), ['context', 'recheck']); return { run: async () => ({ enabled: true, results: [] }) } } }
+  const capability = { enabled: () => true, create(input) { created += 1; assert.deepEqual(Object.keys(input).sort(), ['context', 'recheck', 'writeCondition']); return { run: async () => ({ enabled: true, results: [] }) } } }
   const binding = create({ db, security, issueConfirmWriteback: capability })
   assert.deepEqual(Object.keys(binding).sort(), ['createIssueConfirmWriteback', 'createPrimitives', 'createSendPort', 'issueConfirmWritebackEnabled'])
   assert.equal(binding.issueConfirmWritebackEnabled(), true)
   const actor = { actorId: OWNER, tenantId: TENANT, workspaceId: null }
-  const bound = binding.createIssueConfirmWriteback({ context: actor, recheck: async () => true })
+  const bound = binding.createIssueConfirmWriteback({ context: actor, recheck: async () => true, writeCondition: (scope) => Object.freeze({ ...scope }) })
   assert.deepEqual(Object.keys(bound), ['run'])
   assert.deepEqual(await bound.run({}), { enabled: true, results: [] })
-  for (const input of [{ context: actor }, { context: actor, recheck: 'x' }, { context: { ...actor, workspaceId: 'w' }, recheck() {} }, { context: actor, recheck() {}, extra: 1 }]) {
+  for (const input of [{ context: actor }, { context: actor, recheck: 'x' }, { context: { ...actor, workspaceId: 'w' }, recheck() {} }, { context: actor, recheck() {}, extra: 1 },
+    { context: actor, recheck() {} }, { context: actor, recheck() {}, writeCondition: 'x' }, { context: actor, recheck() {}, writeCondition() {}, extra: 1 }]) {
     assert.throws(() => binding.createIssueConfirmWriteback(input), (error) => error.code === 'YIDA_OWNER_RUNTIME_INPUT')
   }
   const send = { context: actor, authority: { async admitForExecution() {}, takeExecution() {}, async observe() {} },
@@ -493,7 +502,7 @@ test('factory: with the capability the binding gains exactly two members; withou
   // the binding and its send port are unaffected.
   const broken = create({ db, security, issueConfirmWriteback: { enabled: () => { throw new Error('X') }, create() { throw new Error('BROKEN') } } })
   assert.equal(broken.issueConfirmWritebackEnabled(), false)
-  assert.throws(() => broken.createIssueConfirmWriteback({ context: actor, recheck: async () => true }), (error) => error.code === 'YIDA_OWNER_RUNTIME_UNAVAILABLE')
+  assert.throws(() => broken.createIssueConfirmWriteback({ context: actor, recheck: async () => true, writeCondition: (scope) => Object.freeze({ ...scope }) }), (error) => error.code === 'YIDA_OWNER_RUNTIME_UNAVAILABLE')
   assert.deepEqual(Object.keys(broken.createSendPort(send)).sort(), ['inspect', 'submit'])
   assert.ok(created >= 1)
 })
@@ -552,7 +561,7 @@ async function sweepWorld({ rows, ackless = [], stuck = [], traced = [], env = O
         },
       }
     } },
-    authority: { async recheck() { return true } },
+    authority: { async recheck() { return true }, writeCondition: (scope) => Object.freeze({ ...scope }) },
     writeLock: {
       scopeKeyFor: writeLockModule.sheetWriteScopeKey,
       async withProjectWriteLease(scopeKey, _options, fn) {
@@ -826,7 +835,7 @@ function hostFaithfulWorld({ withVersion }) {
         },
       }
     } },
-    authority: { async recheck() { return true } },
+    authority: { async recheck() { return true }, writeCondition: (scope) => Object.freeze({ ...scope }) },
     writeLock: {
       scopeKeyFor: writeLockModule.sheetWriteScopeKey,
       async withProjectWriteLease(scopeKey, _options, fn) {

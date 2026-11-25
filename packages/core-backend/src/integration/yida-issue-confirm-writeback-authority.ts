@@ -22,10 +22,14 @@ import { AutomationActorAuthorityError, assertAutomationIntegrationActor } from 
  * throws (the executor reports the row retryable and records nothing). Values-free: no error carries a value.
  *
  * The write itself is the plugin's SDK machine write under its lease and host fence (the carry-confirm precedent),
- * not the actor's own multitable write permission; this check decides only whether the actor may still cause it.
+ * not the actor's own multitable write permission; this check decides only whether the actor may still cause it. The
+ * same verdict is decided once more INSIDE that write's own transaction (the WRITE CONDITION, below), so a revocation
+ * or a project archive that commits after this answer and before the date's COMMIT can no longer let the date in.
  */
 export type YidaIssueConfirmRecheckActor = Readonly<{ actorId: string; tenantId: string; workspaceId: null }>
 export type YidaIssueConfirmRecheckDatabase = { transaction<T>(callback: (trx: Queryable) => Promise<T>): Promise<T> }
+export type YidaIssueConfirmWriteCondition = Readonly<{ tenantId: string; ownerId: string; sheetId: string; projectNo: string }>
+export type YidaIssueConfirmWriteConditionFactory = (actor: YidaIssueConfirmRecheckActor, input: unknown) => YidaIssueConfirmWriteCondition
 export type YidaIssueConfirmRecheck = (database: YidaIssueConfirmRecheckDatabase, actor: YidaIssueConfirmRecheckActor,
   input: unknown) => Promise<boolean>
 
@@ -53,6 +57,34 @@ export function issueConfirmRoleGrantSatisfied(roleCodes: Iterable<string>): boo
   return codes.has('stock-prep:admin') || (codes.has('stock-prep:operate') && codes.has('stock-prep:read'))
 }
 
+/**
+ * THE VERDICT on an open READ COMMITTED transaction `trx` (checks 1–3 above; the D21 helper's FOR SHARE locks stay held
+ * until that transaction ends). Shared by the standalone re-check (its own transaction, below) and the write condition
+ * (the record write's own transaction, {@link assertYidaIssueConfirmWriteCondition}). false = a verdict (revoked); a
+ * throw = no verdict.
+ */
+async function issueConfirmAuthorityVerdict(trx: Queryable,
+  scope: Readonly<{ tenantId: string; ownerId: string; sheetId: string }>): Promise<boolean> {
+  const { tenantId, ownerId, sheetId } = scope
+  // The D21 helper's locked rows (sheet + subject version rows, then the live-authority rows, FOR SHARE).
+  const locked = await lockAuthorizationVersionsForAdmission(trx, { sheetIds: [sheetId], actorId: ownerId, tenantId })
+  try {
+    await assertAutomationIntegrationActor(trx, { actorId: ownerId, tenantId, workspaceId: null })
+  } catch (error) {
+    if (error instanceof AutomationActorAuthorityError && error.code === 'AUTOMATION_ACTOR_AUTHORITY_DENIED') return false
+    throw error
+  }
+  const roleCodes = locked.authority.rolePermissions.map(row => row.permissionCode.trim())
+  if (!issueConfirmRoleGrantSatisfied(roleCodes)) return false
+  const query = (sql: string, params?: unknown[]) => trx.query(sql, params)
+  const { capabilities, sheetLiveness } = await resolveSheetCapabilitiesForAccess(query, sheetId, {
+    userId: ownerId, permissions: [...locked.authority.permissionCodes], isAdminRole: locked.authority.isAdmin === true,
+    authenticatedTenantId: tenantId,
+  })
+  if (sheetLiveness !== 'live') unavailable()
+  return capabilities.canRead === true
+}
+
 export const yidaIssueConfirmLiveRecheck: YidaIssueConfirmRecheck = async (database, actor, input) => {
   const record = (input && typeof input === 'object' && !Array.isArray(input) ? input : null) as Record<string, unknown> | null
   if (!record) unavailable()
@@ -62,26 +94,117 @@ export const yidaIssueConfirmLiveRecheck: YidaIssueConfirmRecheck = async (datab
   try {
     return await database.transaction(async trx => {
       await trx.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-      // The D21 helper's locked rows (sheet + subject version rows, then the live-authority rows, FOR SHARE).
-      const locked = await lockAuthorizationVersionsForAdmission(trx, { sheetIds: [sheetId], actorId: ownerId, tenantId })
-      try {
-        await assertAutomationIntegrationActor(trx, { actorId: ownerId, tenantId, workspaceId: null })
-      } catch (error) {
-        if (error instanceof AutomationActorAuthorityError && error.code === 'AUTOMATION_ACTOR_AUTHORITY_DENIED') return false
-        throw error
-      }
-      const roleCodes = locked.authority.rolePermissions.map(row => row.permissionCode.trim())
-      if (!issueConfirmRoleGrantSatisfied(roleCodes)) return false
-      const query = (sql: string, params?: unknown[]) => trx.query(sql, params)
-      const { capabilities, sheetLiveness } = await resolveSheetCapabilitiesForAccess(query, sheetId, {
-        userId: ownerId, permissions: [...locked.authority.permissionCodes], isAdminRole: locked.authority.isAdmin === true,
-        authenticatedTenantId: tenantId,
-      })
-      if (sheetLiveness !== 'live') unavailable()
-      return capabilities.canRead === true
+      return issueConfirmAuthorityVerdict(trx, { tenantId, ownerId, sheetId })
     })
   } catch (error) {
     if (error instanceof YidaIssueConfirmRecheckError) throw error
     unavailable()
   }
+}
+
+// ── THE WRITE CONDITION (#6812 review P2: the date never lands on lapsed authority or a lapsed project state) ─────────
+//
+// The re-check above answers in a transaction of its own; the date is written later, in the host's record write
+// transaction (index.ts `records.patchRecord`, behind the plugin write fence). A revocation or a project archive that
+// committed between the two would still have let the date in: the fence proves only the sheet lease, the
+// version-conditional patch only the record. So the executor carries a WRITE CONDITION on its one patch, and the host
+// decides both facts again INSIDE THE WRITE TRANSACTION, after the fence and before the record UPDATE, holding their row
+// locks until COMMIT:
+//   1. the project registry row (integration_stock_prep_project_target, by tenant + project number) FOR SHARE: exactly
+//      one row, `active`, registered on the sheet being written — else YIDA_ISSUE_CONFIRM_WRITE_PROJECT_INACTIVE (409);
+//   2. the full live verdict above (the D21 helper's version and authority rows FOR SHARE, the live actor, the
+//      role-granted operator tier, sheet read) — false → YIDA_ISSUE_CONFIRM_WRITE_AUTHORITY_REVOKED (409).
+// Any failure while deciding them (a lock conflict, a missing protocol, a sheet no longer live, a query fault) is
+// YIDA_ISSUE_CONFIRM_WRITE_CONDITION_UNAVAILABLE (503). On every refusal nothing is written (the transaction rolls back)
+// and the executor reports the row retryable with that code and no trace; the next run decides it again and records
+// the terminal outcome (project_archived / project_absent / sheet_mismatch before the lease, permission_revoked under it).
+// WHY ROW LOCKS ARE ENOUGH (PostgreSQL, READ COMMITTED; the plugin-write-fence argument). The archive (the
+// project-target store's transition) takes that registry row FOR UPDATE; a revocation deletes or updates a user_roles /
+// role_permissions / user_permissions / users / user_orgs / user_namespace_admissions row the verdict locked FOR SHARE
+// (and, through the D21 triggers, bumps the subject or sheet version row the verdict also locked FOR SHARE). Either
+// conflicts with FOR SHARE. Committed first → this transaction waits for it, reads the committed state, refuses.
+// This transaction first → the archive or revocation waits until the date has committed: the date landed while both
+// facts still held.
+// LOCK ORDER: the fence's lease row, the registry row, then the D21 admission order (sheet + subject version rows, the
+// live-authority rows) and meta_records last (the UPDATE). The two plugin rows in front are touched by no access-graph
+// writer, and the archive touches only its registry row: no waits-for cycle.
+// The condition is host-minted (frozen, branded) for the authenticated owner only — the plugin cannot name another actor
+// — and it binds the sheet: handed to a write of another sheet, or to a write without a fence, it is refused (403).
+
+export const YIDA_ISSUE_CONFIRM_WRITE_CONDITION_CODES = Object.freeze({
+  NOT_ALLOWED: 'YIDA_ISSUE_CONFIRM_WRITE_CONDITION_NOT_ALLOWED',
+  AUTHORITY_REVOKED: 'YIDA_ISSUE_CONFIRM_WRITE_AUTHORITY_REVOKED',
+  PROJECT_INACTIVE: 'YIDA_ISSUE_CONFIRM_WRITE_PROJECT_INACTIVE',
+  UNAVAILABLE: 'YIDA_ISSUE_CONFIRM_WRITE_CONDITION_UNAVAILABLE',
+})
+
+// The registry read: fixed SQL on the plugin's own registry table (migration 087) — the plugin-write-fence precedent.
+export const YIDA_ISSUE_CONFIRM_WRITE_PROJECT_SQL = 'SELECT status, sheet_id FROM integration_stock_prep_project_target'
+  + ' WHERE tenant_id = $1 AND project_no = $2 FOR SHARE'
+
+export class YidaIssueConfirmWriteConditionError extends Error {
+  readonly status: number
+  readonly code: string
+  constructor(status: number, code: string) {
+    super(code)
+    this.name = 'YidaIssueConfirmWriteConditionError'
+    this.status = status
+    this.code = code
+  }
+}
+
+const writeConditions = new WeakSet<object>()
+
+/**
+ * Mint the write condition for the authenticated owner `actor` (the host owner runtime hands this to the executor next
+ * to the re-check). `input` = { tenantId, ownerId, sheetId, projectNo }; a scope that is not the owner's is a wiring
+ * fault (YIDA_ISSUE_CONFIRM_AUTHORITY_UNAVAILABLE), never a condition.
+ */
+export const createYidaIssueConfirmWriteCondition: YidaIssueConfirmWriteConditionFactory = (actor, input) => {
+  const record = (input && typeof input === 'object' && !Array.isArray(input) ? input : null) as Record<string, unknown> | null
+  if (!record) unavailable()
+  const tenantId = opaque(record.tenantId), ownerId = opaque(record.ownerId), sheetId = opaque(record.sheetId)
+  const projectNo = opaque(record.projectNo)
+  if (tenantId !== actor.tenantId || ownerId !== actor.actorId || actor.workspaceId !== null) unavailable()
+  const condition = Object.freeze({ tenantId, ownerId, sheetId, projectNo })
+  writeConditions.add(condition)
+  return condition
+}
+
+type WriteQuery = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
+
+/**
+ * The record write's half: inside the host write transaction, after the plugin write fence and before the UPDATE.
+ * `undefined` → no condition (the write is exactly what it was). The transaction must be READ COMMITTED (index.ts sets
+ * it as the first statement when a condition is present; the D21 helper probes it).
+ */
+export async function assertYidaIssueConfirmWriteCondition(query: WriteQuery, condition: unknown,
+  binding: Readonly<{ sheetId: unknown; fenced: boolean }>): Promise<void> {
+  if (condition === undefined) return
+  const codes = YIDA_ISSUE_CONFIRM_WRITE_CONDITION_CODES
+  if (!condition || typeof condition !== 'object' || !writeConditions.has(condition)) {
+    throw new YidaIssueConfirmWriteConditionError(403, codes.NOT_ALLOWED)
+  }
+  const bound = condition as YidaIssueConfirmWriteCondition
+  if (binding.fenced !== true || binding.sheetId !== bound.sheetId) throw new YidaIssueConfirmWriteConditionError(403, codes.NOT_ALLOWED)
+  let verdict: 'held' | 'project' | 'authority'
+  try {
+    const projects = (await query(YIDA_ISSUE_CONFIRM_WRITE_PROJECT_SQL, [bound.tenantId, bound.projectNo]))?.rows
+    const project = Array.isArray(projects) && projects.length === 1 ? projects[0] as Record<string, unknown> : null
+    if (!project || project.status !== 'active' || project.sheet_id !== bound.sheetId) {
+      verdict = 'project'
+    } else {
+      const trx: Queryable = {
+        query: async (sql, params) => {
+          const result = await query(sql, params)
+          return { rows: (Array.isArray(result?.rows) ? result.rows : []) as Array<Record<string, unknown>>, rowCount: result?.rowCount ?? null }
+        },
+      }
+      verdict = (await issueConfirmAuthorityVerdict(trx, bound)) ? 'held' : 'authority'
+    }
+  } catch {
+    throw new YidaIssueConfirmWriteConditionError(503, codes.UNAVAILABLE)
+  }
+  if (verdict === 'project') throw new YidaIssueConfirmWriteConditionError(409, codes.PROJECT_INACTIVE)
+  if (verdict === 'authority') throw new YidaIssueConfirmWriteConditionError(409, codes.AUTHORITY_REVOKED)
 }

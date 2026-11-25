@@ -239,8 +239,8 @@ export function createIssueConfirmSheets({ multitable }) {
 }
 
 /**
- * THE CAPABILITY handed to the host runtime (frozen, closed). `create({ context, recheck })` binds one owner scope and
- * the host's live re-check to a fresh executor; `enabled()` is the core's exact-literal switch predicate.
+ * THE CAPABILITY handed to the host runtime (frozen, closed). `create({ context, recheck, writeCondition })` binds one
+ * owner scope, the host's live re-check and its write-condition minter to a fresh executor; `enabled()` is the core's exact-literal switch predicate.
  */
 export function createIssueConfirmWritebackCapability(options = {}) {
   const { db, security, projectTargetStore, projectWriteLock, multitable } = options
@@ -261,16 +261,22 @@ export function createIssueConfirmWritebackCapability(options = {}) {
   })
   function enabled() { return issueConfirmWritebackEnabled(env) }
   function create(input) {
-    if (!input || typeof input !== 'object' || types.isProxy(input)) throw unavailable('create needs { context, recheck }')
-    const { context, recheck } = input
+    if (!input || typeof input !== 'object' || types.isProxy(input)) throw unavailable('create needs { context, recheck, writeCondition }')
+    const { context, recheck, writeCondition } = input
     const tenantId = opaque(context && context.tenantId)
     const ownerId = opaque(context && context.ownerId)
-    if (!tenantId || !ownerId || typeof recheck !== 'function' || types.isProxy(recheck)) throw unavailable('create needs { context, recheck }')
+    if (!tenantId || !ownerId || typeof recheck !== 'function' || types.isProxy(recheck)
+      || typeof writeCondition !== 'function' || types.isProxy(writeCondition)) throw unavailable('create needs { context, recheck, writeCondition }')
     const executor = createIssueConfirmWritebackExecutor({
       env, ledgerReader, rowSource, projectRegistry, sheets, writeLock, traceStore,
       // The host's live re-check (owner live integration admin, role-granted stock-prep code, sheet read) — the
       // executor calls it under the sheet write lease, right before the records read and the patch.
-      authority: Object.freeze({ recheck: (scope) => recheck(Object.freeze({ ...scope })) }),
+      // #6812 review P2: and the host's write-condition minter — the opaque condition the one patch carries, which the
+      // host re-decides (project registry row + the same live verdict) INSIDE the record write's own transaction.
+      authority: Object.freeze({
+        recheck: (scope) => recheck(Object.freeze({ ...scope })),
+        writeCondition: (scope) => writeCondition(Object.freeze({ ...scope })),
+      }),
     })
     // The scope is the host's authenticated owner, never the caller's: a run names only ledger ids, a limit and (batch
     // mode) the sweep cursor `after`, which the core decodes against the listed targets: a tampered cursor, or one that

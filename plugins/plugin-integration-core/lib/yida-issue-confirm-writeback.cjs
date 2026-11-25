@@ -77,6 +77,16 @@
 // recovery run decides it again.
 // A failure of the TRACE INSERT itself is not swallowed: it fails the run (fail closed — evidence that
 // could not be written is never reported as written).
+// THE WRITE CONDITION (#6812 review P2). The live re-check answers in a host transaction of its own and the patch commits
+// in another one (the host's record write behind the fence): a revocation or a project archive committed in between would
+// otherwise still let the date in. So the ONE patch carries `writeCondition` — an opaque value the host mints for the
+// authenticated owner (authority.writeCondition({ tenantId, ownerId, sheetId, projectNo })) — and the host decides the
+// registry row (one row, active, registered on this sheet) and the same live verdict AGAIN inside the write transaction,
+// under their row locks, before the UPDATE (packages/core-backend/src/integration/yida-issue-confirm-writeback-authority.ts).
+// Refused → nothing written, the row is retryable with the host's fixed code (YIDA_ISSUE_CONFIRM_WRITE_AUTHORITY_REVOKED,
+// YIDA_ISSUE_CONFIRM_WRITE_PROJECT_INACTIVE, YIDA_ISSUE_CONFIRM_WRITE_CONDITION_UNAVAILABLE), no trace; the next run decides
+// it again and records the terminal outcome (permission_revoked under the lease; project_archived / project_absent /
+// sheet_mismatch before it).
 // THE TRACE UNDER THE LEASE (Y9 r3, the trace race). The trace INSERT runs before the lease is released, and
 // the trace is read once more right before the patch. A run that read the row as untraced before another run
 // traced it, that leases after that run released and that decides under its lease to patch, therefore finds the
@@ -590,6 +600,8 @@ function requireFunction(holder, name, label) {
  *       adapter): one that does not is refused with YIDA_ISSUE_CONFIRM_WRITE_FENCE_UNAVAILABLE before any read
  *       (retryable), so the patch can never run unfenced.
  *   authority.recheck({ tenantId, ownerId, sheetId, objectId }) → true | false (live, under the lease)
+ *   authority.writeCondition({ tenantId, ownerId, sheetId, projectNo }) → the host's opaque write condition, handed
+ *       unchanged to the one patchRecord (the host re-decides it inside the write transaction; see THE WRITE CONDITION)
  *   writeLock — createStockPreparationProjectWriteLock(): scopeKeyFor, withProjectWriteLease (never a
  *       generation bump: register R-96, Plan A)
  *   traceStore — createIssueConfirmTraceStore({ db }): record(row) → { recorded }, traced(ledgerId) → true | false
@@ -605,6 +617,7 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
   requireFunction(projectRegistry, 'resolve', 'projectRegistry')
   requireFunction(sheets, 'open', 'sheets')
   requireFunction(authority, 'recheck', 'authority')
+  requireFunction(authority, 'writeCondition', 'authority')
   requireFunction(writeLock, 'scopeKeyFor', 'writeLock')
   requireFunction(writeLock, 'withProjectWriteLease', 'writeLock')
   requireFunction(traceStore, 'record', 'traceStore')
@@ -635,8 +648,10 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
       facts.rowValues = await rowSource.read({ tenantId: scope.tenantId, ownerId: scope.ownerId, ledger })
       decision = decideIssueConfirmWriteback(facts)
     }
+    let projectNo = null
     if (decision.kind === 'need' && decision.need === 'project') {
-      facts.project = await projectRegistry.resolve({ tenantId: scope.tenantId, projectNo: decision.projectNo })
+      projectNo = decision.projectNo
+      facts.project = await projectRegistry.resolve({ tenantId: scope.tenantId, projectNo })
       decision = decideIssueConfirmWriteback(facts)
     }
     // Decided before the lease: a skip, or an outcome traced without one (no sheet is touched).
@@ -680,6 +695,14 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
       const already = await traceStore.traced(ledger.id)
       if (already !== true && already !== false) fail('YIDA_ISSUE_CONFIRM_UNAVAILABLE', 'trace re-check did not answer')
       if (already) return { kind: 'skip', reason: 'already_traced' }
+      // THE WRITE CONDITION (#6812 review P2): minted by the host for this owner, sheet and project; the host decides the
+      // registry row and the live verdict once more inside the patch's own transaction, before the UPDATE.
+      const writeCondition = await authority.writeCondition({
+        tenantId: scope.tenantId, ownerId: scope.ownerId, sheetId: project.sheetId, projectNo,
+      })
+      if (!writeCondition || typeof writeCondition !== 'object') {
+        fail('YIDA_ISSUE_CONFIRM_AUTHORITY_UNAVAILABLE', 'the host did not mint a write condition')
+      }
       await guard.beforeWrite({ operation: 'patchRecord', subject: 'issue_confirm_writeback' })
       try {
         await guard.withHostWrite(() => records.patchRecord({
@@ -687,6 +710,7 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
           changes: inner.changes,
           expectedVersion: inner.expectedVersion,
           writeFence: guard.hostWriteFence(),
+          writeCondition,
         }))
       } catch (error) {
         if (error && typeof error.code === 'string' && error.code.startsWith('PLUGIN_WRITE_FENCE_')) {

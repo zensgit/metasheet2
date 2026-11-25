@@ -13,7 +13,10 @@ import type { Request, Response } from 'express'
 import { describe, expect, it } from 'vitest'
 import { createIntegrationYidaOwnerRouter, yidaOwnerNoStoreMiddleware, type YidaOwnerHttpPort } from '../../src/routes/integration-yida-owner'
 import { createYidaOwnerRuntime, YidaOwnerRuntimeError } from '../../src/integration/yida-owner-runtime'
-import { issueConfirmRoleGrantSatisfied, yidaIssueConfirmLiveRecheck } from '../../src/integration/yida-issue-confirm-writeback-authority'
+import {
+  YIDA_ISSUE_CONFIRM_WRITE_CONDITION_CODES, YIDA_ISSUE_CONFIRM_WRITE_PROJECT_SQL, assertYidaIssueConfirmWriteCondition,
+  createYidaIssueConfirmWriteCondition, issueConfirmRoleGrantSatisfied, yidaIssueConfirmLiveRecheck,
+} from '../../src/integration/yida-issue-confirm-writeback-authority'
 
 const actor = Object.freeze({ actorId: 'synthetic-wb-owner', tenantId: 'synthetic-wb-tenant', workspaceId: null })
 const LEDGER = '55555555-5555-4555-8555-555555555555'
@@ -564,5 +567,57 @@ describe('D13 a live re-check', () => {
     await expect(yidaIssueConfirmLiveRecheck(database, actor, { tenantId: actor.tenantId, ownerId: actor.actorId, sheetId: 's' }))
       .rejects.toMatchObject({ code: 'YIDA_ISSUE_CONFIRM_AUTHORITY_UNAVAILABLE' })
     expect(transactions).toBe(1)
+  })
+})
+
+// #6812 review P2: the write condition the one patch carries, re-decided by the host inside the record write.
+describe('the write condition (re-decided inside the record write transaction)', () => {
+  const scope = { tenantId: actor.tenantId, ownerId: actor.actorId, sheetId: 'sheet_syn_wc', projectNo: 'SYN-WC-1' }
+  const codes = YIDA_ISSUE_CONFIRM_WRITE_CONDITION_CODES
+  it('is minted only for the authenticated owner, frozen, with exactly the four scope fields', () => {
+    const condition = createYidaIssueConfirmWriteCondition(actor, scope)
+    expect(Object.isFrozen(condition)).toBe(true)
+    expect({ ...condition }).toEqual(scope)
+    for (const input of [null, {}, { ...scope, tenantId: 'other' }, { ...scope, ownerId: 'other' }, { ...scope, sheetId: ' s' }, { ...scope, projectNo: '' }]) {
+      expect(() => createYidaIssueConfirmWriteCondition(actor, input)).toThrow(expect.objectContaining({ code: 'YIDA_ISSUE_CONFIRM_AUTHORITY_UNAVAILABLE' }))
+    }
+    expect(() => createYidaIssueConfirmWriteCondition({ ...actor, workspaceId: 'w' as never }, scope))
+      .toThrow(expect.objectContaining({ code: 'YIDA_ISSUE_CONFIRM_AUTHORITY_UNAVAILABLE' }))
+  })
+  it('absent → no statement; a value the host did not mint, another sheet or a write without a fence → NOT_ALLOWED before any statement', async () => {
+    const statements: string[] = []
+    const query = async (sql: string) => { statements.push(sql); return { rows: [] } }
+    await assertYidaIssueConfirmWriteCondition(query, undefined, { sheetId: scope.sheetId, fenced: false })
+    const minted = createYidaIssueConfirmWriteCondition(actor, scope)
+    for (const [condition, binding] of [[{ ...scope }, { sheetId: scope.sheetId, fenced: true }], [null, { sheetId: scope.sheetId, fenced: true }],
+      [minted, { sheetId: 'sheet_other', fenced: true }], [minted, { sheetId: scope.sheetId, fenced: false }]] as const) {
+      await expect(assertYidaIssueConfirmWriteCondition(query, condition, binding)).rejects.toMatchObject({ code: codes.NOT_ALLOWED, status: 403 })
+    }
+    expect(statements).toEqual([])
+  })
+  it('the registry row FIRST, FOR SHARE: absent, archived, two rows or another sheet → PROJECT_INACTIVE, no authority statement', async () => {
+    const minted = createYidaIssueConfirmWriteCondition(actor, scope)
+    for (const rows of [[], [{ status: 'archived', sheet_id: scope.sheetId }], [{ status: 'active', sheet_id: 'sheet_moved' }],
+      [{ status: 'active', sheet_id: scope.sheetId }, { status: 'active', sheet_id: scope.sheetId }]]) {
+      const statements: Array<[string, unknown[] | undefined]> = []
+      const query = async (sql: string, params?: unknown[]) => { statements.push([sql, params]); return { rows } }
+      await expect(assertYidaIssueConfirmWriteCondition(query, minted, { sheetId: scope.sheetId, fenced: true }))
+        .rejects.toMatchObject({ code: codes.PROJECT_INACTIVE, status: 409 })
+      expect(statements).toEqual([[YIDA_ISSUE_CONFIRM_WRITE_PROJECT_SQL, [scope.tenantId, scope.projectNo]]])
+    }
+    expect(YIDA_ISSUE_CONFIRM_WRITE_PROJECT_SQL).toMatch(/ FOR SHARE$/)
+  })
+  it('an active registry row hands on to the live verdict on the SAME transaction; a fault there is UNAVAILABLE (503), never a pass', async () => {
+    const minted = createYidaIssueConfirmWriteCondition(actor, scope)
+    const statements: string[] = []
+    const query = async (sql: string) => {
+      statements.push(sql)
+      if (sql === YIDA_ISSUE_CONFIRM_WRITE_PROJECT_SQL) return { rows: [{ status: 'active', sheet_id: scope.sheetId }] }
+      throw new Error('SYNTHETIC_QUERY_FAILURE')
+    }
+    await expect(assertYidaIssueConfirmWriteCondition(query, minted, { sheetId: scope.sheetId, fenced: true }))
+      .rejects.toMatchObject({ code: codes.UNAVAILABLE, status: 503 })
+    expect(statements[0]).toBe(YIDA_ISSUE_CONFIRM_WRITE_PROJECT_SQL)
+    expect(statements.length).toBeGreaterThan(1)
   })
 })

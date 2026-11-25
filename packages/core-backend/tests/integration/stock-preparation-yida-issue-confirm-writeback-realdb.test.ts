@@ -77,6 +77,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
   let patchRecord: (input: Row) => Promise<Row>
   let resolveFence: (pluginName: string, fence: unknown) => unknown
   let assertFence: (query: unknown, fence: unknown) => Promise<void>
+  let assertCondition: (query: unknown, condition: unknown, binding: { sheetId: unknown; fenced: boolean }) => Promise<void>
   const envKeys = ['NODE_ENV', 'ENCRYPTION_KEY', 'ENCRYPTION_SALT'] as const
   let savedEnv: Array<[typeof envKeys[number], string | undefined]> = []
   // Every statement of every connection of the test, in order (SQL shapes only, never values).
@@ -166,11 +167,14 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
         queryRecords({ query, sheetId, filters, search, orderBy, limit, offset }),
       // Present on the host surface; the write-back never creates a record (counted, and it would fail loudly).
       createRecord: async () => { creates++; throw new Error('SYNTHETIC_CREATE_MUST_NOT_RUN') },
-      patchRecord: async ({ sheetId, recordId, changes, expectedVersion, writeFence }: Row) => {
+      patchRecord: async ({ sheetId, recordId, changes, expectedVersion, writeFence, writeCondition }: Row) => {
         const resolved = resolveFence('plugin-integration-core', writeFence)
-        patches.push({ recordId, expectedVersion, fenced: resolved !== undefined })
+        patches.push({ recordId, expectedVersion, fenced: resolved !== undefined, conditioned: writeCondition !== undefined })
+        // #6812 review P2: the write condition, decided in the write's own transaction exactly as index.ts does it.
         return inTransaction(async txQuery => {
+          if (writeCondition !== undefined) await txQuery('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
           await assertFence(txQuery, resolved)
+          await assertCondition(txQuery, writeCondition, { sheetId, fenced: resolved !== undefined })
           return patchRecord({ query: txQuery, sheetId, recordId, changes, expectedVersion })
         }, 'wb')
       },
@@ -382,6 +386,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     queryRecords = records.queryRecords; patchRecord = records.patchRecord
     const fence = await src('multitable/plugin-write-fence.ts')
     resolveFence = fence.resolvePluginWriteFence; assertFence = fence.assertPluginWriteFence
+    assertCondition = (await src('integration/yida-issue-confirm-writeback-authority.ts')).assertYidaIssueConfirmWriteCondition
     const migrations = path.join(root, 'packages/core-backend/migrations')
     const migrationSql = async (name: string, key: string) => ((await src(`db/migrations/${name}.ts`)) as Record<string, string>)[key]
     ddl = ['090_create_integration_yida_delivery_ledger.sql', '091_create_integration_yida_create_fence.sql',
@@ -465,7 +470,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     expect({ ...after.data, [fld().issueConfirmDate]: undefined }).toEqual({ ...before.data, [fld().issueConfirmDate]: undefined })
     expect(after.data[fld().warehouseConfirmation]).toBe(HUMAN_NOTE)
     expect(after.version).toBe(before.version + 1)
-    expect(patches).toEqual([{ recordId: recordId(0), expectedVersion: before.version, fenced: true }])
+    expect(patches).toEqual([{ recordId: recordId(0), expectedVersion: before.version, fenced: true, conditioned: true }])
     const trace = await tableRows(TRACE)
     expect(trace.map(row => [row.ledger_id, row.outcome, row.sheet_id, row.time_zone])).toEqual([[ledgerId, 'written', sheetId(), 'Asia/Shanghai']])
     expect(await auditsOf(ledgerId)).toEqual(['acknowledgement', 'claim', 'prepare'])
@@ -855,7 +860,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     expect(world!.warnings).toEqual([])
     expect((await tableRows(TRACE)).map(row => [row.ledger_id, row.outcome])).toEqual([[ledgerId, 'written']])
     expect([(await cell()).date, (await cell()).version]).toEqual([day, before.version + 1])
-    expect(patches).toEqual([{ recordId: recordId(0), expectedVersion: before.version, fenced: true }])
+    expect(patches).toEqual([{ recordId: recordId(0), expectedVersion: before.version, fenced: true, conditioned: true }])
     expect([world!.fake.token, world!.fake.form]).toEqual([1, 1])
   })
 
@@ -895,7 +900,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     // unchanged; the successor (another key) is untouched.
     const after = await cell(0)
     expect([after.date, after.data[f.active], after.data[f.warehouseConfirmation], after.version]).toEqual([day, active, HUMAN_NOTE, before.version + 2])
-    expect(patches).toEqual([{ recordId: recordId(0), expectedVersion: before.version + 1, fenced: true }])
+    expect(patches).toEqual([{ recordId: recordId(0), expectedVersion: before.version + 1, fenced: true, conditioned: true }])
     const next = (await owner.query('SELECT data FROM public.meta_records WHERE id = $1', [successor])).rows[0].data as Row
     expect(next[f.issueConfirmDate] ?? null).toBe(null)
     expect((await tableRows(TRACE)).map(row => [row.ledger_id, row.outcome, row.sheet_id, row.time_zone, row.written_date !== null]))
@@ -1006,6 +1011,143 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     expect((await cell()).date).toBe(businessDay(await ackAt(ledgerId)))
     expect((await tableRows(TRACE)).map(row => [row.ledger_id, row.outcome])).toEqual([[ledgerId, 'written']])
     expect(world!.fake.form).toBe(0)
+  })
+
+  // ── #6812 review P2: the write condition — authority and project state re-decided INSIDE the date's own transaction ──
+  // The re-check under the lease answered `true` in a host transaction of its own; the patch's transaction is parked at
+  // its fence statement (after BEGIN, before any lock of its own). The fact flips and COMMITS there; on release the
+  // write condition re-decides it under row locks before the UPDATE: nothing is written, the row is retryable with the
+  // host's fixed code and NO trace; the next run then records the terminal outcome without a patch.
+  const FENCE_STATEMENT = /^SELECT 1 FROM integration_stock_prep_project_write_lock WHERE scope_key = \$1 AND lease_id = \$2/
+  // `outcome` null: the recovery entry's own live owner proof refuses the deactivated owner before any row is read.
+  const flips: Record<string, { sql: string; params: () => unknown[]; code: string; outcome: string | null }> = {
+    'role grant revoked': { sql: `DELETE FROM role_permissions WHERE role_id = 'integration_admin' AND permission_code = 'stock-prep:operate'`,
+      params: () => [], code: 'YIDA_ISSUE_CONFIRM_WRITE_AUTHORITY_REVOKED', outcome: 'permission_revoked' },
+    'owner deactivated': { sql: `UPDATE users SET is_active = false WHERE id = 'synthetic-owner'`,
+      params: () => [], code: 'YIDA_ISSUE_CONFIRM_WRITE_AUTHORITY_REVOKED', outcome: null },
+    'owner role removed': { sql: `DELETE FROM user_roles WHERE user_id = 'synthetic-owner' AND role_id = 'integration_admin'`,
+      params: () => [], code: 'YIDA_ISSUE_CONFIRM_WRITE_AUTHORITY_REVOKED', outcome: 'permission_revoked' },
+    'project archived': { sql: `UPDATE ${REGISTRY} SET status = 'archived', archived_at = now() WHERE tenant_id = $1 AND project_no = $2`,
+      params: () => [TENANT, PROJECT], code: 'YIDA_ISSUE_CONFIRM_WRITE_PROJECT_INACTIVE', outcome: 'project_archived' },
+  }
+  it.each(Object.keys(flips))('P2 on real PostgreSQL (%s after the re-check, before the write): the date is NOT written — retryable with the host code, no trace; the next run records the terminal outcome and patches nothing', async (name) => {
+    const flip = flips[name]
+    await compose({ crashHookOnce: true })
+    const before = await cell()
+    const { grant, result } = await sendOne(boundInput(0))
+    const ledgerId = String(grant.ledgerId ?? result.delivery!.id)
+    const parked = { ...latch(), pattern: FENCE_STATEMENT, tag: 'wb' as const }
+    gateOnce = parked
+    const first = world!.runtime.issueConfirmWriteback(actor, {})
+    await waitFor(parked)
+    // The re-check has answered (allowed) and the patch transaction is open: the fact flips and commits now.
+    expect(patches).toHaveLength(1)
+    await owner.query(flip.sql, flip.params())
+    parked.release()
+    expect((await first).results).toEqual([{ ledgerId, kind: 'retryable', code: flip.code }])
+    expect([(await cell()).date, (await cell()).version]).toEqual([null, before.version])
+    expect(await tableRows(TRACE)).toEqual([])
+    expect((await tableRows(LOCK)).map(row => row.lease_id ?? null)).toEqual([null])
+    // The next run sees the committed fact before any patch: the terminal outcome, traced once, still no date (or, for
+    // a deactivated owner, the entry's own live proof refuses the run before any row is read).
+    if (flip.outcome === null) {
+      await expect(world!.runtime.issueConfirmWriteback(actor, {})).rejects.toBeTruthy()
+      expect(await tableRows(TRACE)).toEqual([])
+    } else {
+      expect(outcomeOf(await world!.runtime.issueConfirmWriteback(actor, {}))).toEqual([flip.outcome])
+      expect((await tableRows(TRACE)).map(row => [row.ledger_id, row.outcome])).toEqual([[ledgerId, flip.outcome]])
+    }
+    expect(patches).toHaveLength(1)
+    expect([(await cell()).date, (await cell()).version]).toEqual([null, before.version])
+    expect([world!.fake.token, world!.fake.form]).toEqual([1, 1])
+  })
+
+  // The concurrent window itself: the revocation / archive is IN FLIGHT (its row lock held, not committed) when the
+  // date's transaction reaches its write condition. The write condition WAITS on that row lock (observed in
+  // pg_stat_activity), and once the other transaction commits it reads the committed state and refuses.
+  async function lockWaiters() {
+    const rows = (await owner.query(`SELECT count(*)::int AS n FROM pg_stat_activity
+      WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()`)).rows as Array<{ n: number }>
+    return rows[0].n
+  }
+  async function waitForLockWaiter() {
+    const deadline = Date.now() + 8000
+    while (await lockWaiters() < 1) {
+      if (Date.now() > deadline) throw new Error('SYNTHETIC_LOCK_WAIT_NEVER_SEEN')
+      await new Promise(resolve => setTimeout(resolve, 20))
+    }
+  }
+  it.each(['role grant revoked', 'project archived'])('P2 concurrent on real PostgreSQL (%s in flight when the write condition runs): the write waits on its row lock, then refuses once it commits — nothing written, no trace', async (name) => {
+    const flip = flips[name]
+    await compose({ crashHookOnce: true })
+    const before = await cell()
+    const { grant, result } = await sendOne(boundInput(0))
+    const ledgerId = String(grant.ledgerId ?? result.delivery!.id)
+    const parked = { ...latch(), pattern: FENCE_STATEMENT, tag: 'wb' as const }
+    gateOnce = parked
+    const first = world!.runtime.issueConfirmWriteback(actor, {})
+    await waitFor(parked)
+    const other = await admin.connect()
+    try {
+      await other.query(`SET search_path TO ${ident(schema)}, public`)
+      await other.query('BEGIN')
+      await other.query(flip.sql, flip.params())
+      // Uncommitted: the write proceeds into its write condition and blocks on the row the other transaction holds.
+      parked.release()
+      await waitForLockWaiter()
+      let settled = false
+      void first.then(() => { settled = true }, () => { settled = true })
+      await new Promise(resolve => setTimeout(resolve, 100))
+      expect(settled).toBe(false)
+      await other.query('COMMIT')
+    } catch (error) {
+      await other.query('ROLLBACK').catch(() => {})
+      throw error
+    } finally { other.release() }
+    expect((await first).results).toEqual([{ ledgerId, kind: 'retryable', code: flip.code }])
+    expect([(await cell()).date, (await cell()).version]).toEqual([null, before.version])
+    expect(await tableRows(TRACE)).toEqual([])
+    expect(outcomeOf(await world!.runtime.issueConfirmWriteback(actor, {}))).toEqual([flip.outcome])
+    expect(patches).toHaveLength(1)
+    expect((await cell()).date).toBe(null)
+  })
+
+  // The other order: the date's transaction has passed its write condition and holds those row locks (parked at the
+  // record's FOR UPDATE read, before the UPDATE). A revocation / archive that starts now WAITS until the date has
+  // committed — the date lands while both facts still held, and the change applies after it.
+  it.each(['role grant revoked', 'project archived'])('P2 concurrent on real PostgreSQL (%s arriving after the write condition): the change waits for the date\'s COMMIT — written once, then the change applies', async (name) => {
+    const flip = flips[name]
+    await compose({ crashHookOnce: true })
+    const { grant, result } = await sendOne(boundInput(0))
+    const ledgerId = String(grant.ledgerId ?? result.delivery!.id)
+    // Parked at the first statement after the write condition that names meta_records (the patch's own record read).
+    const parked = { ...latch(), pattern: /\bmeta_records\b/, tag: 'wb' as const }
+    let conditionPassed = false
+    const original = assertCondition
+    assertCondition = async (query, condition, binding) => {
+      await original(query, condition, binding)
+      if (condition !== undefined) { conditionPassed = true; gateOnce = parked }
+    }
+    try {
+      const first = world!.runtime.issueConfirmWriteback(actor, {})
+      await waitFor(parked)
+      expect(conditionPassed).toBe(true)
+      const other = await admin.connect()
+      let changed = false
+      try {
+        await other.query(`SET search_path TO ${ident(schema)}, public`)
+        const change = other.query(flip.sql, flip.params()).then(() => { changed = true })
+        await waitForLockWaiter()
+        expect(changed).toBe(false)
+        parked.release()
+        expect(outcomeOf(await first)).toEqual(['written'])
+        await change
+        expect(changed).toBe(true)
+      } finally { other.release() }
+    } finally { assertCondition = original }
+    expect((await cell()).date).toBe(businessDay(await ackAt(ledgerId)))
+    expect((await tableRows(TRACE)).map(row => [row.ledger_id, row.outcome])).toEqual([[ledgerId, 'written']])
+    expect(patches).toHaveLength(1)
   })
 
   it('the trace table is append-only on real PostgreSQL: UPDATE, DELETE and TRUNCATE are refused, the row stays', async () => {

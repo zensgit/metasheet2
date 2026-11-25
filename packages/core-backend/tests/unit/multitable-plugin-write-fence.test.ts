@@ -2,10 +2,13 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { createPluginScopedMultitableApi } from '../../src/multitable/plugin-scope'
 import {
+  PLUGIN_WRITE_CONDITION_PLUGINS,
   PLUGIN_WRITE_FENCE_ALLOW_LIST,
   PLUGIN_WRITE_FENCE_CODES,
   PluginWriteFenceError,
   assertPluginWriteFence,
+  readPluginWriteCondition,
+  refusePluginWriteConditionOnSurface,
   refusePluginWriteFenceOnUnfencedSurface,
   resolvePluginWriteFence,
 } from '../../src/multitable/plugin-write-fence'
@@ -322,6 +325,32 @@ describe('plugin-scope forwards only host-resolved fences', () => {
       expect(records.patchRecord).not.toHaveBeenCalled()
     }
   })
+
+  // #6812 review P2: the write condition — patchRecord only, listed plugins only, forwarded as the same value.
+  it('patchRecord forwards a write condition unchanged for plugin-integration-core; no key without one', async () => {
+    const { records, scoped } = build()
+    const condition = Object.freeze({ synthetic: true })
+    await scoped.records.patchRecord({ sheetId: 'sheet_syn', recordId: 'rec_1', changes: {}, writeFence: fence(), writeCondition: condition } as never)
+    expect((records.patchRecord.mock.calls[0][0] as { writeCondition?: unknown }).writeCondition).toBe(condition)
+    await scoped.records.patchRecord({ sheetId: 'sheet_syn', recordId: 'rec_1', changes: {}, writeFence: fence() } as never)
+    expect(Object.prototype.hasOwnProperty.call(records.patchRecord.mock.calls[1][0], 'writeCondition')).toBe(false)
+  })
+
+  it('a write condition from another plugin, or on createRecord / deleteRecord, is refused before any scope or host work', async () => {
+    const other = build('plugin-after-sales')
+    await other.scoped.records.patchRecord({ sheetId: 'sheet_syn', recordId: 'rec_1', changes: {}, writeCondition: {} } as never)
+      .then(() => { throw new Error('expected a refusal') }, (error) => { expectFenceError(error, PLUGIN_WRITE_FENCE_CODES.NOT_ALLOWED, 403) })
+    expect(other.assertSheetScope).not.toHaveBeenCalled()
+    expect(other.records.patchRecord).not.toHaveBeenCalled()
+    const own = build()
+    await own.scoped.records.createRecord({ sheetId: 'sheet_syn', data: {}, writeCondition: {} } as never)
+      .then(() => { throw new Error('expected a refusal') }, (error) => { expectFenceError(error, PLUGIN_WRITE_FENCE_CODES.UNSUPPORTED, 501) })
+    expect(own.records.createRecord).not.toHaveBeenCalled()
+    expect(() => refusePluginWriteConditionOnSurface({ writeCondition: null }, 'records.deleteRecord')).toThrow(PluginWriteFenceError)
+    expect(() => refusePluginWriteConditionOnSurface({}, 'records.deleteRecord')).not.toThrow()
+    expect(readPluginWriteCondition(PLUGIN, {})).toBeUndefined()
+    expect(PLUGIN_WRITE_CONDITION_PLUGINS).toEqual(['plugin-integration-core'])
+  })
 })
 
 describe('the core records API checks the fence FIRST inside the write transaction (src/index.ts)', () => {
@@ -334,11 +363,24 @@ describe('the core records API checks the fence FIRST inside the write transacti
       const start = source.indexOf(`          ${hook}: async ({`)
       expect(start).toBeGreaterThan(-1)
       const body = source.slice(start, source.indexOf(`${write}({`, start))
-      expect(body).toMatch(/writeFence \}\) => \{/)
+      expect(body).toMatch(hook === 'patchRecord' ? /writeFence, writeCondition \}\) => \{/ : /writeFence \}\) => \{/)
       expect(body).toContain('poolManager.get().transaction(async ({ query }) => {')
       expect(body).toContain('await assertPluginWriteFence(txQuery, writeFence)')
-      // nothing between the fence and the record write
-      expect(body.trimEnd().endsWith('await assertPluginWriteFence(txQuery, writeFence)\n              return')).toBe(true)
+      if (hook === 'createRecord') {
+        // nothing between the fence and the record write
+        expect(body.trimEnd().endsWith('await assertPluginWriteFence(txQuery, writeFence)\n              return')).toBe(true)
+      } else {
+        // #6812 review P2: patch alone carries the write condition. Before the fence only the READ COMMITTED statement a
+        // condition needs (the transaction's first, and only with a condition); between the fence and the record write
+        // only the condition, which is a no-op without one.
+        const fenceAt = body.indexOf('await assertPluginWriteFence(txQuery, writeFence)')
+        const beforeFence = body.slice(body.indexOf('poolManager.get().transaction'), fenceAt)
+        expect(beforeFence.match(/await /g)).toEqual(['await ', 'await '])
+        expect(beforeFence).toContain("if (writeCondition !== undefined) await txQuery('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')")
+        expect(body.slice(fenceAt).trimEnd().endsWith('await assertPluginWriteFence(txQuery, writeFence)\n'
+          + '              await assertYidaIssueConfirmWriteCondition(txQuery, writeCondition, { sheetId, fenced: writeFence !== undefined })\n'
+          + '              return')).toBe(true)
+      }
     }
   })
 })

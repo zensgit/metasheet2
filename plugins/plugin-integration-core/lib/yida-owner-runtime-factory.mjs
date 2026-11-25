@@ -79,14 +79,18 @@ export function createYidaOwnerRuntimeBinding(options) {
     // The host's live re-check (owner live integration admin + role-granted stock-prep code + sheet read), supplied per
     // call by the host runtime and never by a request. The executor calls it under the sheet write lease. The host
     // creates one per run: the post-ACK run it schedules after an acknowledged send, and the owner recovery entry.
+    // #6812 review P2: with it, the host's write-condition minter (the condition the one patch carries, re-decided by the
+    // host inside the record write's own transaction), also supplied per run by the host runtime and never by a request.
     function createIssueConfirmWriteback(input) {
       try {
-        const config = record(input, ['context', 'recheck'])
+        const config = record(input, ['context', 'recheck', 'writeCondition'])
         const scope = context(config.context)
         const check = callable(config.recheck)
+        const mint = callable(config.writeCondition)
         const created = capability(writeback.create(Object.freeze({
           context: Object.freeze({ tenantId: scope.tenantId, ownerId: scope.ownerId }),
           recheck: (request) => Reflect.apply(check, undefined, [request]),
+          writeCondition: (request) => Reflect.apply(mint, undefined, [request]),
         })), ['run'])
         return Object.freeze({ run: (request) => created.run(request) })
       } catch (error) { closed(error) }

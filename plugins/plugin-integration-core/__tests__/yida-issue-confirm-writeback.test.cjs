@@ -84,8 +84,8 @@ function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
     const ack = world.audits.find((audit) => audit.ledgerId === row.id && audit.event === 'acknowledgement')
     return { ...row, acknowledgedAt: ack ? ack.createdAt : null }
   })
-  const calls = { ledgerList: 0, rowRead: 0, registry: 0, open: 0, query: 0, patch: [], beforeWrite: [], authority: 0, acquire: [], bump: [], trace: 0 }
-  const world = { calls, env, authorityAllowed, formPosts: 0, tokenRequests: 0 }
+  const calls = { ledgerList: 0, rowRead: 0, registry: 0, open: 0, query: 0, patch: [], beforeWrite: [], authority: 0, acquire: [], bump: [], trace: 0, writeCondition: [] }
+  const world = { calls, env, authorityAllowed, formPosts: 0, tokenRequests: 0, conditions: [], writeConditionRefusal: null }
   // The order of the module's steps around the lease (Y9 r3): acquire, authority, query, traceProbe, beforeWrite, patch,
   // traceInsert (with whether the lease was held), release; `bump` only if a generation bump ever ran (R-96 Plan A: never).
   world.events = []
@@ -280,6 +280,16 @@ function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
               throw failure
             }
             assert.ok(input.writeFence && input.writeFence.leaseId, 'every patch is host fenced')
+            // #6812 review P2: every patch carries the condition the host minted for it, unchanged.
+            assert.ok(world.conditions.includes(input.writeCondition), 'every patch carries the host-minted write condition')
+            // The host decides the condition INSIDE the write transaction: refused → nothing is written.
+            if (world.writeConditionRefusal) {
+              const code = world.writeConditionRefusal
+              world.writeConditionRefusal = null
+              const refused = new Error(code)
+              refused.code = code
+              throw refused
+            }
             const row = rows.find((entry) => entry.id === input.recordId)
             if (!row || row.version !== input.expectedVersion) {
               const conflict = new Error('version conflict')
@@ -302,6 +312,13 @@ function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
         const failure = takeFailure(world, 'authority')
         if (failure) throw failure
         return world.authorityAllowed
+      },
+      // #6812 review P2: the host's minter (an opaque frozen object); recorded so the patch can be matched to it.
+      writeCondition(scope) {
+        const condition = Object.freeze({ syntheticCondition: world.conditions.length + 1, ...scope })
+        world.conditions.push(condition)
+        calls.writeCondition.push({ ...scope })
+        return condition
       },
     },
     writeLock,
@@ -554,9 +571,13 @@ test('written: one version-conditional, fenced patch of issueConfirmDate only, u
   assert.equal(world.sheets.get(SHEET)[0].data.warehouseConfirmation, 'human note')
   assert.equal(world.calls.patch.length, 1)
   const patch = world.calls.patch[0]
-  assert.deepEqual(Object.keys(patch).sort(), ['changes', 'expectedVersion', 'recordId', 'writeFence'])
+  assert.deepEqual(Object.keys(patch).sort(), ['changes', 'expectedVersion', 'recordId', 'writeCondition', 'writeFence'])
   assert.deepEqual(patch.changes, { issueConfirmDate: ACK_DAY })
   assert.equal(patch.expectedVersion, 3)
+  // #6812 review P2: ONE write condition, minted for this owner, the registered sheet and the payload's project, and
+  // handed to the patch unchanged (the host re-decides it inside the write transaction).
+  assert.deepEqual(world.calls.writeCondition, [{ tenantId: TENANT, ownerId: OWNER, sheetId: SHEET, projectNo: PROJECT }])
+  assert.equal(patch.writeCondition, world.conditions[0])
   // The lease's pre-write holder check runs exactly once, before the only patch.
   assert.deepEqual(world.calls.beforeWrite, [{ operation: 'patchRecord', subject: 'issue_confirm_writeback', patchesBefore: 0 }])
   assert.deepEqual(world.calls.acquire, [{ scopeKey: writeLockModule.sheetWriteScopeKey(SHEET), purpose: 'issue_confirm_writeback', runId: 'run-syn', tenantId: TENANT }])
@@ -572,6 +593,70 @@ test('written: one version-conditional, fenced patch of issueConfirmDate only, u
   for (const text of [JSON.stringify(result), JSON.stringify(world.trace)]) {
     for (const secret of [PROJECT, KEY, 'human note']) assert.equal(text.includes(secret), false)
   }
+})
+
+// ── #6812 review P2: the write condition (re-decided by the host inside the write transaction) ───────────────────────
+
+for (const code of ['YIDA_ISSUE_CONFIRM_WRITE_AUTHORITY_REVOKED', 'YIDA_ISSUE_CONFIRM_WRITE_PROJECT_INACTIVE', 'YIDA_ISSUE_CONFIRM_WRITE_CONDITION_UNAVAILABLE']) {
+  test(`write condition refused inside the write (${code}): nothing written, retryable with that code, NO trace; the next run decides the row again`, async () => {
+    const { world, row } = sentWorld()
+    const before = world.snapshot()
+    world.writeConditionRefusal = code
+    const refused = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+    assert.deepEqual(refused, { enabled: true, results: [{ ledgerId: row.id, kind: 'retryable', code }], next: null })
+    assert.equal(world.cell(), null)
+    assert.equal(world.version(), 3)
+    assert.deepEqual(world.trace, [])
+    // The refusal came from the one patch call: the lease was held, the trace never inserted, the lease released.
+    assert.deepEqual(world.events, ['acquire', 'authority', 'query', 'traceProbe', 'beforeWrite', 'patch', 'release'])
+    // The revocation is now visible to the re-check: the next run records the terminal outcome and patches nothing.
+    if (code === 'YIDA_ISSUE_CONFIRM_WRITE_AUTHORITY_REVOKED') {
+      world.authorityAllowed = false
+      const next = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+      assert.deepEqual(next.results, [{ ledgerId: row.id, kind: 'outcome', outcome: 'permission_revoked', recorded: true }])
+      assert.equal(world.calls.patch.length, 1)
+    } else if (code === 'YIDA_ISSUE_CONFIRM_WRITE_PROJECT_INACTIVE') {
+      world.projects.set(PROJECT, { sheetId: SHEET, objectId: OBJECT, status: 'archived' })
+      const next = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+      assert.deepEqual(next.results, [{ ledgerId: row.id, kind: 'outcome', outcome: 'project_archived', recorded: true }])
+      assert.equal(world.calls.patch.length, 1)
+    } else {
+      // A fault, not a verdict: the facts still hold, so the next run writes the date once.
+      const next = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+      assert.deepEqual(next.results.map((entry) => entry.outcome), ['written'])
+      assert.equal(world.cell(), ACK_DAY)
+    }
+    assert.deepEqual(world.snapshot(), before, 'ledger and audits untouched')
+  })
+}
+
+test('write condition: a minter that answers no object is retryable YIDA_ISSUE_CONFIRM_AUTHORITY_UNAVAILABLE before the pre-write check — no patch, no trace', async () => {
+  const { world, row } = sentWorld()
+  const deps = world.deps()
+  const executor = createIssueConfirmWritebackExecutor({ ...deps, authority: { recheck: deps.authority.recheck, writeCondition: () => null } })
+  const result = await executor.run({ tenantId: TENANT, ownerId: OWNER })
+  assert.deepEqual(result.results, [{ ledgerId: row.id, kind: 'retryable', code: 'YIDA_ISSUE_CONFIRM_AUTHORITY_UNAVAILABLE' }])
+  assert.deepEqual(world.calls.patch, [])
+  assert.deepEqual(world.calls.beforeWrite, [])
+  assert.deepEqual(world.trace, [])
+})
+
+test('write condition: an authority port without writeCondition cannot build an executor', () => {
+  const { world } = sentWorld()
+  const deps = world.deps()
+  assert.throws(() => createIssueConfirmWritebackExecutor({ ...deps, authority: { recheck: deps.authority.recheck } }),
+    (error) => error.code === 'YIDA_ISSUE_CONFIRM_UNAVAILABLE')
+})
+
+test('write condition: an outcome decided without a patch mints none', async () => {
+  const { world } = sentWorld({ authorityAllowed: false })
+  await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+  assert.deepEqual(world.calls.writeCondition, [])
+  world.authorityAllowed = true
+  const kept = sentWorld()
+  kept.world.sheets.get(SHEET)[0].data.issueConfirmDate = ACK_DAY
+  await kept.world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+  assert.deepEqual(kept.world.calls.writeCondition, [])
 })
 
 test('the business zone comes from MULTITABLE_BUSINESS_TIMEZONE', async () => {
