@@ -475,8 +475,8 @@ function verify_stock_preparation_mvp_contract() {
 }
 
 # 人工补充行 (stock-prep manual supplementary rows, ADR adr-stock-prep-manual-rows-20261030; #6663 B1, #6664 B2,
-# #6671 B3, #6672 B4). The new runtime modules are in the required list; these markers prove that files which
-# existed before the feature carry it. Route paths and identifiers only, no UI copy. The host markers matter
+# #6671 B3, #6672 B4, #6949/#6950 parent options and dependents). The required file list covers new modules.
+# These markers cover files that existed before the feature, using route paths and identifiers. The host markers matter
 # because tsc never cleans dist: a dist rebuilt from an older tree can keep a stale manual-rows .js beside an
 # older univer-meta.js, which the required list alone would accept. Each search is bound to the one file (or the
 # built JS chunks) that carries the code: the same strings also sit in comments, in the gate's own definitions,
@@ -490,9 +490,13 @@ function verify_stock_preparation_manual_rows_contract() {
   search_fixed_string "'/api/integration/stock-preparation/projects/:projectNo/target/manual-rows'" "$plugin_routes" || die "plugin http-routes.cjs must register the stock-prep manual-rows switch route (manual rows B4)"
   search_fixed_string "'/sheets/:sheetId/manual-rows'" "$host_routes" || die "core-backend dist/src/routes/univer-meta.js must register the manual-row create route (manual rows B2)"
   search_fixed_string 'resolveGenericCreateRefusal' "$host_routes" || die "core-backend dist/src/routes/univer-meta.js must refuse generic create on stock-prep project sheets (manual rows B3)"
+  search_extended_regex "^[[:space:]]*router\.get\('/sheets/:sheetId/manual-rows/parent-options'," "$host_routes" || die "core-backend dist/src/routes/univer-meta.js must register the manual-row parent options route"
+  search_extended_regex "^[[:space:]]*router\.get\('/records/:recordId/manual-parent-dependents'," "$host_routes" || die "core-backend dist/src/routes/univer-meta.js must register the manual-row parent dependents route"
   [[ -f "${web_chunks[0]}" ]] || die "web dist has no built JS chunks under apps/web/dist/assets"
   search_fixed_string '/manual-fields' "${web_chunks[@]}" || die "web dist JS chunks must call the manual-row edit route (manual rows B3)"
   search_fixed_string '/target/manual-rows' "${web_chunks[@]}" || die "web dist JS chunks must call the stock-prep manual-rows switch route (manual rows B4)"
+  search_fixed_string '/manual-rows/parent-options' "${web_chunks[@]}" || die "web dist JS chunks must call the manual-row parent options route"
+  search_fixed_string '/manual-parent-dependents' "${web_chunks[@]}" || die "web dist JS chunks must call the manual-row parent dependents route"
 
   manual_rows_status="PASS"
 }
@@ -1068,6 +1072,7 @@ required=(
   "packages/core-backend/dist/src/integration/yida-initialization-bootstrap.js"
   "packages/core-backend/dist/src/multitable/stock-preparation-manual-rows.js"
   "packages/core-backend/dist/src/multitable/stock-preparation-manual-rows-gate.js"
+  "packages/core-backend/dist/src/multitable/stock-preparation-manual-row-parent-options.js"
   "packages/core-backend/dist/scripts/attendance-timezone-legacy-repair.js"
   "packages/core-backend/dist/src/attendance/attendance-timezone-legacy-repair.js"
   "packages/core-backend/dist/src/db/migration-provider.js"
