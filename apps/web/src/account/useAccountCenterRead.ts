@@ -1,5 +1,5 @@
 import { computed, shallowRef, type ComputedRef } from 'vue'
-import { onAuthSessionSwitch, readAuthSessionSignature } from '../composables/authPrincipal'
+import { onAuthSessionSwitch, readAuthSessionSignature, readStoredToken } from '../composables/authPrincipal'
 import { useAuth } from '../composables/useAuth'
 import { apiFetch } from '../utils/api'
 import { normalizePreLoginRedirect, shouldSkipPreLoginRedirectQuery } from '../utils/authRedirect'
@@ -15,7 +15,8 @@ export interface AccountCenterRead {
 }
 
 // Construction is idle with no IO. Each host refreshes on mount and disposes on
-// unmount; instances do not share snapshots. Session changes clear data without polling.
+// unmount; instances do not share snapshots. Session changes clear data and read once
+// when a token is present, unless disposed. No polling is scheduled.
 // Error bodies may be { error: { code } } or { ok: false, error: { code, message } }.
 export function useAccountCenterRead(parse: AccountCenterResponseParser): AccountCenterRead {
   const state = shallowRef<AccountCenterReadState>('idle')
@@ -36,7 +37,9 @@ export function useAccountCenterRead(parse: AccountCenterResponseParser): Accoun
   }
 
   function sessionChanged(): void {
-    if (!disposed && session !== readAuthSessionSignature()) invalidate()
+    if (disposed || session === readAuthSessionSignature()) return
+    invalidate()
+    if (readStoredToken()) void refresh()
   }
 
   const unsubscribe = onAuthSessionSwitch(sessionChanged)

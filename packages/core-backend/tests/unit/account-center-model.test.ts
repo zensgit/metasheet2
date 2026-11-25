@@ -35,6 +35,8 @@ describe('account center model', () => {
     [{ source: 'legacy', grantMode: 'legacy_default', activeGrants: [{ enabled: false }] }, 'disabled'],
     [{ source: 'legacy', grantMode: 'legacy_default', hasRevokedHistory: true }, 'revoked'],
     [{ binding: 'not_bound', boundAt: null }, 'absent'],
+    [{ binding: 'not_bound', boundAt: null, activeGrants: [{ enabled: true }] }, 'absent'],
+    [{ binding: 'not_bound', boundAt: null, hasRevokedHistory: true }, 'absent'],
   ] as [Partial<AccountCenterRecordFact>, string][])('projects grant case %j', (fact, grant) => {
     expect(map(record(fact)).data.cards[0]).toMatchObject({ kind: 'record', grant })
   })

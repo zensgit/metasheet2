@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { watch } from 'vue'
 import { notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
 import { EXPLICIT_SESSION_ORG_KEY } from '../src/utils/explicitSessionOrg'
 import type { AccountCenterResponse } from '../src/account/accountCenterContract'
@@ -28,6 +29,9 @@ const parse = vi.fn((value: unknown): AccountCenterResponse | null => {
 })
 function reply(status = 200, value: unknown = first): Response {
   return { status, json: async () => value } as Response
+}
+function flushPromises(): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, 0))
 }
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -60,18 +64,19 @@ beforeEach(() => {
     removeEventListener: removeListener,
     dispatchEvent: originalWindow.dispatchEvent.bind(originalWindow),
   })
-  mocks.apiFetch.mockResolvedValue(reply())
+  mocks.apiFetch.mockReset().mockResolvedValue(reply())
 })
 afterEach(() => {
   assertions += expect.getState().assertionCalls
   for (const instance of instances.splice(0)) instance.dispose()
+  vi.useRealTimers()
   vi.unstubAllGlobals()
   localStorage.clear()
 })
 afterAll(() => console.info('account-center-read assertions', assertions))
 
 describe('account center read lifecycle', () => {
-  it('starts idle, requests only on refresh, and keeps instances separate', async () => {
+  it('starts idle without a request and keeps instances separate', async () => {
     const a = create()
     const b = create()
     expect(a.state.value).toBe('idle')
@@ -140,30 +145,115 @@ describe('account center read lifecycle', () => {
     expect(read.state.value).toBe('ready')
     expect(read.snapshot.value).toEqual(first)
   })
-  it.each(['token', 'organization', 'storage'])('clears ready data after a %s change', async kind => {
+  it.each(['token', 'organization', 'storage'])('clears ready data and reads once after a %s change', async kind => {
     const read = create()
     await read.refresh()
+    const next = deferred<Response>()
+    mocks.apiFetch.mockReturnValueOnce(next.promise)
     localStorage.setItem('auth_token', token(kind === 'token' ? 'account-b' : 'account-a', kind === 'organization' ? 'org-b' : 'org-a'))
     if (kind === 'storage') localStorage.setItem('auth_token', token('account-c'))
     if (kind === 'storage') window.dispatchEvent(new StorageEvent('storage', { key: 'auth_token' }))
     else notifyAuthPrincipalChange()
     await Promise.resolve()
     expect(read.snapshot.value).toBeNull()
-    expect(read.state.value).toBe('idle')
-    expect(mocks.apiFetch).toHaveBeenCalledTimes(1)
+    expect(read.state.value).toBe('loading')
+    expect(mocks.apiFetch).toHaveBeenCalledTimes(2)
+    notifyAuthPrincipalChange()
+    window.dispatchEvent(new StorageEvent('storage', { key: 'auth_token' }))
+    await Promise.resolve()
+    expect(mocks.apiFetch).toHaveBeenCalledTimes(2)
+    next.resolve(reply(200, second))
+    await flushPromises()
+    expect(read.snapshot.value).toEqual(second)
+    expect(read.state.value).toBe('ready')
   })
-  it('detects an explicit organization epoch with unchanged token text', async () => {
+  it.each(['notification', 'storage'])('reads once for an organization epoch with unchanged token text via %s', async kind => {
     const current = token('account-a')
     localStorage.setItem('jwt', current)
     const marker = { state: 'ready', token: current, actor: 'account-a', tenantId: 'org-a', exp: 4102444800, epoch: 'first' }
     localStorage.setItem(EXPLICIT_SESSION_ORG_KEY, JSON.stringify(marker))
     const read = create()
     await read.refresh()
+    const next = deferred<Response>()
+    mocks.apiFetch.mockReturnValueOnce(next.promise)
     localStorage.setItem(EXPLICIT_SESSION_ORG_KEY, JSON.stringify({ ...marker, epoch: 'second' }))
-    notifyAuthPrincipalChange()
+    if (kind === 'storage') window.dispatchEvent(new StorageEvent('storage', { key: EXPLICIT_SESSION_ORG_KEY }))
+    else notifyAuthPrincipalChange()
     await Promise.resolve()
     expect(read.snapshot.value).toBeNull()
+    expect(read.state.value).toBe('loading')
+    notifyAuthPrincipalChange()
+    window.dispatchEvent(new StorageEvent('storage', { key: EXPLICIT_SESSION_ORG_KEY }))
+    await Promise.resolve()
+    expect(mocks.apiFetch).toHaveBeenCalledTimes(2)
+    next.resolve(reply(200, second))
+    await flushPromises()
+    expect(read.snapshot.value).toEqual(second)
+    expect(read.state.value).toBe('ready')
+  })
+  it('does not read for unchanged sessions or elapsed time', async () => {
+    vi.useFakeTimers()
+    const read = create()
+    await read.refresh()
+    notifyAuthPrincipalChange()
+    window.dispatchEvent(new StorageEvent('storage', { key: 'auth_token' }))
+    window.dispatchEvent(new StorageEvent('storage', { key: 'unrelated' }))
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(mocks.apiFetch).toHaveBeenCalledTimes(1)
+    expect(read.snapshot.value).toEqual(first)
+    expect(read.state.value).toBe('ready')
+  })
+  it.each(['notification', 'storage'])('stays idle without a token after %s and discards pending data', async kind => {
+    const read = create()
+    await read.refresh()
+    const old = deferred<Response>()
+    mocks.apiFetch.mockReturnValueOnce(old.promise)
+    const pending = read.refresh()
+    const signal = mocks.apiFetch.mock.calls[1][1].signal as AbortSignal
+    localStorage.removeItem('auth_token')
+    if (kind === 'storage') window.dispatchEvent(new StorageEvent('storage', { key: 'auth_token' }))
+    else notifyAuthPrincipalChange()
+    await Promise.resolve()
+    expect(signal.aborted).toBe(true)
+    expect(read.snapshot.value).toBeNull()
     expect(read.state.value).toBe('idle')
+    old.resolve(reply())
+    await pending
+    expect(read.snapshot.value).toBeNull()
+    expect(read.state.value).toBe('idle')
+    expect(mocks.apiFetch).toHaveBeenCalledTimes(2)
+  })
+  it.each(['old-first', 'new-first'])('keeps the new session response when pending responses arrive %s', async order => {
+    const old = deferred<Response>()
+    const next = deferred<Response>()
+    mocks.apiFetch.mockReturnValueOnce(old.promise).mockReturnValueOnce(next.promise)
+    const read = create()
+    const pending = read.refresh()
+    const signal = mocks.apiFetch.mock.calls[0][1].signal as AbortSignal
+    localStorage.setItem('auth_token', token('account-b'))
+    notifyAuthPrincipalChange()
+    await Promise.resolve()
+    expect(signal.aborted).toBe(true)
+    expect(read.snapshot.value).toBeNull()
+    expect(read.state.value).toBe('loading')
+    expect(mocks.apiFetch).toHaveBeenCalledTimes(2)
+    if (order === 'new-first') {
+      next.resolve(reply(200, second))
+      await flushPromises()
+      expect(read.snapshot.value).toEqual(second)
+    }
+    old.resolve(reply(200, first))
+    await pending
+    if (order === 'old-first') {
+      expect(read.snapshot.value).toBeNull()
+      expect(read.state.value).toBe('loading')
+      next.resolve(reply(200, second))
+    }
+    await flushPromises()
+    expect(read.snapshot.value).toEqual(second)
+    expect(read.state.value).toBe('ready')
+    expect(parse).not.toHaveBeenCalledWith(first)
+    expect(mocks.apiFetch).toHaveBeenCalledTimes(2)
   })
   it.each([200, 401, 403])('ignores pending status %s after a session change without notification', async status => {
     const old = deferred<Response>()
@@ -173,10 +263,43 @@ describe('account center read lifecycle', () => {
     localStorage.setItem('auth_token', token('account-b'))
     old.resolve(reply(status, status === 200 ? first : { error: { code: 'PASSWORD_CHANGE_REQUIRED' } }))
     await pending
-    expect(read.snapshot.value).toBeNull()
-    expect(read.state.value).toBe('idle')
+    await flushPromises()
+    expect(read.snapshot.value).toEqual(first)
+    expect(read.state.value).toBe('ready')
+    expect(mocks.apiFetch).toHaveBeenCalledTimes(2)
     expect(replace).not.toHaveBeenCalled()
     expect(mocks.clearToken).not.toHaveBeenCalled()
+  })
+  it('does not read for queued or subsequent session notifications after disposal', async () => {
+    const read = create()
+    await read.refresh()
+    localStorage.setItem('auth_token', token('account-b'))
+    notifyAuthPrincipalChange()
+    read.dispose()
+    await flushPromises()
+    localStorage.setItem('auth_token', token('account-c'))
+    notifyAuthPrincipalChange()
+    window.dispatchEvent(new StorageEvent('storage', { key: 'auth_token' }))
+    await flushPromises()
+    expect(mocks.apiFetch).toHaveBeenCalledTimes(1)
+    expect(read.snapshot.value).toBeNull()
+    expect(read.state.value).toBe('idle')
+  })
+  it('does not reread when clearing the snapshot synchronously disposes the host', async () => {
+    const read = create()
+    await read.refresh()
+    const stop = watch(read.snapshot, () => read.dispose(), { flush: 'sync' })
+    try {
+      localStorage.setItem('auth_token', token('account-b'))
+      notifyAuthPrincipalChange()
+      await flushPromises()
+      expect(mocks.unsubscribe).toHaveBeenCalledTimes(1)
+      expect(mocks.apiFetch).toHaveBeenCalledTimes(1)
+      expect(read.snapshot.value).toBeNull()
+      expect(read.state.value).toBe('idle')
+    } finally {
+      stop()
+    }
   })
   it('disposes once, cancels subscriptions and ignores pending data', async () => {
     const old = deferred<Response>()
