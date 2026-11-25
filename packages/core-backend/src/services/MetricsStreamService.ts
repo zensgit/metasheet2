@@ -152,13 +152,24 @@ export class MetricsStreamService {
   /**
    * Stop of the server only: closes the transport of every connection of this server with its
    * standard close, which writes the packets already queued first. Sends nothing else; `shutdown()`
-   * is unchanged. Returns how many transports were closed.
+   * is unchanged. Returns how many transports were closed; a client whose close throws is
+   * skipped and logged without values.
    */
   closeTransportsForShutdown(): number {
     const engine = this.io?.engine as unknown as { clients?: Record<string, { close(): unknown }> } | undefined
-    const clients = Object.values(engine?.clients ?? {})
-    for (const client of clients) client.close()
-    return clients.length
+    let closed = 0
+    let failed = false
+    for (const client of Object.values(engine?.clients ?? {})) {
+      // One client whose close throws (a throwing disconnect listener) must not keep the others open.
+      try {
+        client.close()
+        closed += 1
+      } catch {
+        failed = true
+      }
+    }
+    if (failed) this.logger.warn('Transport close at shutdown failed for a client')
+    return closed
   }
 
   // -----------------------------------------------------------------------
