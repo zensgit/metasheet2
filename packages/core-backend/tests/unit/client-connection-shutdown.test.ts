@@ -11,11 +11,19 @@
  *   U4   the fence answers 503 SERVER_STOPPING after the stop began, and only then;
  *   U4b  the stopping state belongs to one instance;
  *   U5   the stop closes the transports of both services (twice when the last close runs);
- *   U6   a stop that fails clears the timers of the module.
+ *   U4c  the fence and its mount, read from the syntax tree: a snapshot of the whole fence, nine
+ *        targeted checks, and the delegating mount right after cors();
+ *   U6   a stop that fails clears the timers of the module;
+ *   U6b  a synchronous throw after the module began: same reason, timers back to their baseline;
+ *   U6c  a synchronous throw before the module began: same reason, nothing opened;
+ *   U7   finish() never throws, whenever it is called.
  */
 import { EventEmitter } from 'node:events'
+import { readFileSync } from 'node:fs'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
+import { join } from 'node:path'
+import ts from 'typescript'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { pool as pgPool } from '../../src/db/pg'
@@ -287,6 +295,41 @@ describe('U1 the module', () => {
   })
 })
 
+describe('U7 finish() never throws', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('before begin, twice after begin, and after its timers fired: no throw, no timer left', async () => {
+    const instance = createClientConnectionShutdown()
+    expect(() => instance.finish()).not.toThrow()
+    expect(instance.isStopping()).toBe(false)
+    const stop = instance.begin({ httpServer: fakeHttpServer({ connections: 1 }), closeTransports: () => 0, precondition: new Promise(() => undefined) })
+    expect(stop.finish).toBe(instance.finish)
+    expect(() => instance.finish()).not.toThrow()
+    expect(() => instance.finish()).not.toThrow()
+    expect(vi.getTimerCount()).toBe(0)
+
+    const fired = createClientConnectionShutdown()
+    fired.begin({ httpServer: fakeHttpServer({ connections: 1 }), closeTransports: () => 0 })
+    await vi.advanceTimersByTimeAsync(CLIENT_CLOSE_GRACE_MS)
+    expect(vi.getTimerCount()).toBe(0)
+    expect(() => fired.finish()).not.toThrow()
+  })
+
+  it('a begin that throws after it armed the cap (a precondition whose then throws): finish() still clears the cap', () => {
+    const instance = createClientConnectionShutdown()
+    const precondition = { then: () => { throw new Error('then sentinel') } } as unknown as Promise<unknown>
+    expect(() => instance.begin({ httpServer: fakeHttpServer({ connections: 1 }), closeTransports: () => 0, precondition })).toThrow('then sentinel')
+    expect(vi.getTimerCount()).toBe(1)
+    expect(() => instance.finish()).not.toThrow()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+})
+
 describe('U1s both services close every transport with the standard close', () => {
   const fakeEngine = () => {
     const clients = { a: { close: vi.fn() }, b: { close: vi.fn() } }
@@ -537,6 +580,306 @@ describe('MetaSheetServer with connections open at the stop', () => {
     await expect(server.stop()).rejects.toThrow('APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED')
     expect(vi.getTimerCount()).toBe(baseline)
     expect(poolEnd).not.toHaveBeenCalled()
+  })
+})
+
+describe('MetaSheetServer: synchronous throws around the start of the stop', () => {
+  beforeEach(() => {
+    vi.stubEnv('NODE_ENV', 'test')
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllEnvs()
+    vi.restoreAllMocks()
+  })
+
+  it('U6b: a synchronous throw after the module began rejects with the same error and leaves no timer of the module', async () => {
+    expect(pgPool).not.toBeNull()
+    const poolEnd = vi.spyOn(pgPool!, 'end').mockResolvedValue(undefined)
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+    const host = server as unknown as {
+      httpServer: unknown
+      automationService: { stopProducerAdmissions(): Promise<void> }
+      clientConnectionShutdown: { isStopping(): boolean }
+    }
+    // The connection count says one is left, so the last close is armed at once by begin().
+    host.httpServer = {
+      listening: false,
+      keepAliveTimeout: 5_000,
+      getConnections: (callback: (error: Error | null, count: number) => void) => callback(null, 1),
+    }
+    const thrown = new Error('producer admission sentinel')
+    host.automationService = { stopProducerAdmissions: () => { throw thrown } }
+    const baseline = vi.getTimerCount()
+    const stop = server.stop()
+    let reason: unknown = null
+    await stop.catch((error: unknown) => { reason = error })
+    expect(reason).toBe(thrown)
+    expect(host.clientConnectionShutdown.isStopping()).toBe(true)
+    expect(vi.getTimerCount()).toBe(baseline)
+    expect(poolEnd).not.toHaveBeenCalled()
+  })
+
+  it('U6c: a synchronous throw before the module began rejects with the same error, opens nothing, and stop() stays latched', async () => {
+    expect(pgPool).not.toBeNull()
+    vi.spyOn(pgPool!, 'end').mockResolvedValue(undefined)
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+    const host = server as unknown as {
+      app: http.RequestListener
+      yidaOwnerRuntime: { stop(): Promise<void> }
+      clientConnectionShutdown: { isStopping(): boolean }
+    }
+    const thrown = new Error('owner runtime sentinel')
+    host.yidaOwnerRuntime = { stop: () => { throw thrown } }
+    const baseline = vi.getTimerCount()
+    const stop = server.stop()
+    let reason: unknown = null
+    await stop.catch((error: unknown) => { reason = error })
+    expect(reason).toBe(thrown)
+    expect(vi.getTimerCount()).toBe(baseline)
+    expect(host.clientConnectionShutdown.isStopping()).toBe(false)
+    expect(server.stop()).toBe(stop)
+    vi.useRealTimers()
+    const temporary = http.createServer(host.app)
+    await new Promise<void>((resolve) => temporary.listen(0, '127.0.0.1', resolve))
+    try {
+      const { port } = temporary.address() as AddressInfo
+      const answer = await get(port, '/stop-barrier-probe')
+      expect(answer.status).not.toBe(503)
+      expect(answer.body).not.toContain('SERVER_STOPPING')
+    } finally {
+      temporary.closeAllConnections()
+      await new Promise<void>((resolve) => temporary.close(() => resolve()))
+    }
+  })
+})
+
+describe('U4 the fence on the real app, after the stop began, on every kind of path', () => {
+  beforeEach(() => {
+    vi.stubEnv('NODE_ENV', 'test')
+  })
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.restoreAllMocks()
+  })
+
+  /** One request on a connection of its own, any method and headers. */
+  function send(port: number, method: string, path: string, headers: Record<string, string> = {}, body = '') {
+    return new Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }>((resolve, reject) => {
+      const request = http.request({ host: '127.0.0.1', port, path, method, headers, agent: false }, (response) => {
+        let text = ''
+        response.setEncoding('utf8')
+        response.on('data', (chunk) => { text += chunk })
+        response.on('end', () => resolve({ status: response.statusCode ?? 0, headers: response.headers, body: text }))
+      })
+      request.on('error', reject)
+      request.end(body)
+    })
+  }
+
+  it('GET /health, GET /api/health, GET /api/admin/users without credentials, POST /api/attendance/import and an unknown path with headers: each 503 SERVER_STOPPING with only the fixed headers, and nothing downstream, also 250 ms later', async () => {
+    expect(pgPool).not.toBeNull()
+    vi.spyOn(pgPool!, 'end').mockResolvedValue(undefined)
+    const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+    const app = (server as unknown as { app: { use(handler: unknown): void; _router: { stack: Array<{ handle: unknown }> } } }).app
+    // A counter placed right behind the fence: everything the fence lets through passes it first.
+    let downstream = 0
+    app.use((_request: unknown, _response: unknown, next: () => void) => {
+      downstream += 1
+      next()
+    })
+    const stack = app._router.stack
+    const counter = stack.pop()!
+    const fenceAt = stack.findIndex((layer) => String(layer.handle).includes('clientConnectionShutdown.fence'))
+    expect(fenceAt).toBeGreaterThan(0)
+    stack.splice(fenceAt + 1, 0, counter)
+
+    await server.stop()
+    const temporary = http.createServer(app as unknown as http.RequestListener)
+    await new Promise<void>((resolve) => temporary.listen(0, '127.0.0.1', resolve))
+    try {
+      const { port } = temporary.address() as AddressInfo
+      const origin = { Origin: 'http://cross-origin.example' }
+      const answers = [
+        await send(port, 'GET', '/health', origin),
+        await send(port, 'GET', '/api/health', origin),
+        await send(port, 'GET', '/api/admin/users', origin),
+        await send(port, 'POST', '/api/attendance/import', { ...origin, 'Content-Type': 'application/json' }, '{"rows":[]}'),
+        await send(port, 'GET', '/stop-barrier/unknown', { ...origin, 'x-internal': '1', Authorization: 'Bearer x' }),
+      ]
+      // Set by the fence, by CORS, and before the fence by Node, Express and the correlation-id middleware.
+      const allowed = new Set([
+        'connection', 'x-content-type-options', 'content-type', 'content-length',
+        'access-control-allow-origin', 'access-control-expose-headers', 'vary',
+        'date', 'x-powered-by', 'x-correlation-id',
+      ])
+      for (const answer of answers) {
+        expect(answer.status).toBe(503)
+        expect(JSON.parse(answer.body)).toEqual({ ok: false, error: { code: 'SERVER_STOPPING', message: 'Server is stopping' } })
+        expect(answer.headers.connection).toBe('close')
+        expect(answer.headers['x-content-type-options']).toBe('nosniff')
+        expect(answer.headers['access-control-allow-origin']).toBeTruthy()
+        expect(Object.keys(answer.headers).filter((name) => !allowed.has(name))).toEqual([])
+      }
+      expect(downstream).toBe(0)
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      expect(downstream).toBe(0)
+    } finally {
+      temporary.closeAllConnections()
+      await new Promise<void>((resolve) => temporary.close(() => resolve()))
+    }
+  })
+})
+
+/** The syntax tree of a source file of the backend. */
+function sourceOf(relative: string): ts.SourceFile {
+  const path = join(__dirname, '..', '..', relative)
+  return ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.ES2022, true)
+}
+
+function walk(node: ts.Node, visit: (node: ts.Node) => void): void {
+  visit(node)
+  ts.forEachChild(node, (child) => walk(child, visit))
+}
+
+const printer = ts.createPrinter({ removeComments: true })
+const printed = (node: ts.Node, source: ts.SourceFile): string => printer.printNode(ts.EmitHint.Unspecified, node, source)
+
+const FENCE_SNAPSHOT = "(_request: IncomingMessage, response: ServerResponse, next: () => void): void => {\n    if (!stopping) {\n        next();\n        return;\n    }\n    response.statusCode = 503;\n    response.setHeader('Connection', 'close');\n    response.setHeader('X-Content-Type-Options', 'nosniff');\n    response.setHeader('Content-Type', 'application/json; charset=utf-8');\n    response.setHeader('Content-Length', Buffer.byteLength(STOPPING_BODY));\n    response.end(STOPPING_BODY);\n}"
+const DELEGATE = 'this.app.use((request, response, next) => this.clientConnectionShutdown.fence(request, response, next))'
+
+describe('U4c the fence and its mount, read from the syntax tree', () => {
+  const module = sourceOf('src/lifecycle/client-connection-shutdown.ts')
+  let fence: ts.ArrowFunction | undefined
+  let begin: ts.Node | undefined
+  walk(module, (node) => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+      if (node.name.text === 'fence' && ts.isArrowFunction(node.initializer)) fence = node.initializer
+      if (node.name.text === 'begin') begin = node.initializer
+    }
+  })
+  const fenceNodes: ts.Node[] = []
+  if (fence) walk(fence.body, (node) => fenceNodes.push(node))
+  const identifiers = (name: string) => fenceNodes.filter((node): node is ts.Identifier => ts.isIdentifier(node) && node.text === name)
+  const calls = (method: string) => fenceNodes.filter((node): node is ts.CallExpression =>
+    ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === method)
+
+  it('layer 1: the whole fence equals its snapshot (comments and spacing aside)', () => {
+    expect(fence).toBeDefined()
+    expect(printer.printNode(ts.EmitHint.Expression, fence!, module)).toBe(FENCE_SNAPSHOT)
+  })
+
+  it('the request parameter is never used in the body of the fence', () => {
+    const requestName = (fence!.parameters[0].name as ts.Identifier).text
+    expect(identifiers(requestName)).toHaveLength(0)
+  })
+
+  it('check 1: no `arguments` in the fence', () => {
+    expect(identifiers('arguments')).toHaveLength(0)
+  })
+
+  it('check 2: no member access .req, .socket or .connection in the fence', () => {
+    const reached = fenceNodes.filter((node) => ts.isPropertyAccessExpression(node) && ['req', 'socket', 'connection'].includes(node.name.text))
+    expect(reached).toHaveLength(0)
+  })
+
+  it('check 3: the response is used only through statusCode, setHeader and end', () => {
+    const responseName = (fence!.parameters[1].name as ts.Identifier).text
+    const uses = identifiers(responseName)
+    expect(uses.length).toBeGreaterThan(0)
+    for (const use of uses) {
+      expect(ts.isPropertyAccessExpression(use.parent) && use.parent.expression === use).toBe(true)
+      expect(['statusCode', 'setHeader', 'end']).toContain((use.parent as ts.PropertyAccessExpression).name.text)
+    }
+  })
+
+  it('check 4: setHeader names come from a fixed set of literals; values are literals or the length of the fixed body', () => {
+    const names = new Set(['Connection', 'X-Content-Type-Options', 'Content-Type', 'Content-Length'])
+    const headers = calls('setHeader')
+    expect(headers.length).toBe(4)
+    for (const call of headers) {
+      expect(call.arguments).toHaveLength(2)
+      const [name, value] = call.arguments
+      expect(ts.isStringLiteral(name) && names.has(name.text)).toBe(true)
+      const literal = ts.isStringLiteral(value) || ts.isNumericLiteral(value)
+      expect(literal || value.getText(module) === 'Buffer.byteLength(STOPPING_BODY)').toBe(true)
+    }
+  })
+
+  it('check 5: end is called only with STOPPING_BODY as its only argument', () => {
+    const ends = calls('end')
+    expect(ends).toHaveLength(1)
+    expect(ends[0].arguments.map((argument) => argument.getText(module))).toEqual(['STOPPING_BODY'])
+  })
+
+  it('check 6: next appears exactly once, as the call in `if (!stopping) { next(); return }`', () => {
+    const nextName = (fence!.parameters[2].name as ts.Identifier).text
+    const uses = identifiers(nextName)
+    expect(uses).toHaveLength(1)
+    const call = uses[0].parent
+    expect(ts.isCallExpression(call) && call.expression === uses[0] && call.arguments.length === 0).toBe(true)
+    const block = call.parent.parent
+    expect(ts.isBlock(block) && block.statements.length === 2 && ts.isReturnStatement(block.statements[1])).toBe(true)
+    const branch = block.parent
+    expect(ts.isIfStatement(branch) && branch.expression.getText(module) === '!stopping').toBe(true)
+  })
+
+  it('check 7: nothing deferred in the fence (no timers, microtasks, promises, await or then)', () => {
+    for (const name of ['setTimeout', 'setImmediate', 'queueMicrotask', 'Promise']) expect(identifiers(name)).toHaveLength(0)
+    expect(fenceNodes.filter((node) => ts.isAwaitExpression(node))).toHaveLength(0)
+    expect(fenceNodes.filter((node) => ts.isPropertyAccessExpression(node) && ['then', 'nextTick'].includes(node.name.text))).toHaveLength(0)
+  })
+
+  it('check 8: in the whole module `stopping` is written twice only: its initial false, and `stopping = true` inside begin', () => {
+    const writes: Array<{ text: string; inBegin: boolean }> = []
+    const inBegin = (node: ts.Node): boolean => {
+      for (let current: ts.Node | undefined = node; current; current = current.parent) if (current === begin) return true
+      return false
+    }
+    const isStopping = (node: ts.Node) => ts.isIdentifier(node) && node.text === 'stopping'
+    walk(module, (node) => {
+      if (ts.isVariableDeclaration(node) && isStopping(node.name)) writes.push({ text: printed(node, module), inBegin: inBegin(node) })
+      if (ts.isBinaryExpression(node) && isStopping(node.left)
+        && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
+        writes.push({ text: printed(node, module), inBegin: inBegin(node) })
+      }
+      if ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) && isStopping(node.operand)
+        && (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken)) {
+        writes.push({ text: printed(node, module), inBegin: inBegin(node) })
+      }
+    })
+    expect(begin).toBeDefined()
+    expect(writes).toEqual([
+      { text: 'stopping = false', inBegin: false },
+      { text: 'stopping = true', inBegin: true },
+    ])
+  })
+
+  it('check 9: the instance has exactly the keys fence, arm, begin, finish and isStopping', () => {
+    let returned: ts.ObjectLiteralExpression | undefined
+    walk(module, (node) => {
+      if (ts.isFunctionDeclaration(node) && node.name?.text === 'createClientConnectionShutdown' && node.body) {
+        const last = node.body.statements[node.body.statements.length - 1]
+        if (ts.isReturnStatement(last) && last.expression && ts.isObjectLiteralExpression(last.expression)) returned = last.expression
+      }
+    })
+    expect(returned).toBeDefined()
+    expect(returned!.properties.map((property) => property.name?.getText(module))).toEqual(['fence', 'arm', 'begin', 'finish', 'isStopping'])
+    expect(Object.keys(createClientConnectionShutdown()).sort()).toEqual(['arm', 'begin', 'fence', 'finish', 'isStopping'])
+  })
+
+  it('the mount: the statement right after `this.app.use(cors(...))` in setupMiddleware is the delegating mount, and only forwards', () => {
+    const index = sourceOf('src/index.ts')
+    let statements: readonly ts.Statement[] = []
+    walk(index, (node) => {
+      if (ts.isMethodDeclaration(node) && node.name.getText(index) === 'setupMiddleware' && node.body) statements = node.body.statements
+    })
+    const corsAt = statements.findIndex((statement) => /^this\.app\.use\(cors\(/.test(statement.getText(index)))
+    expect(corsAt).toBeGreaterThanOrEqual(0)
+    const expected = ts.createSourceFile('expected.ts', DELEGATE, ts.ScriptTarget.ES2022, true)
+    expect(printed(statements[corsAt + 1], index)).toBe(printed(expected.statements[0], expected))
   })
 })
 

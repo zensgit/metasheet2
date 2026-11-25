@@ -567,7 +567,7 @@ describe('org-identity derivation: each source (leg) is independently DB-free un
  *  - Beyond `setupMiddleware`: nothing can call an instance method on
  *    `MetaSheetServer` before its constructor has returned, and the
  *    constructor calls `setupMiddleware()` — unconditionally, as its own
- *    12th (of 15) statement — before doing anything else that could reach
+ *    18th (of 20) statement — before doing anything else that could reach
  *    `this.app` (asserted below: zero `this.app.<verb>` sites anywhere in
  *    the constructor). So every OTHER place `this.app` is ever registered
  *    on (`installGlobalErrorHandler`, `start`, and the plugin runtime's
@@ -664,12 +664,13 @@ describe('the real app assembly (index.ts) registers this route behind the globa
     ])
   })
 
-  it('A5 — pre-gate prefix: the 17 sites that run before the gate, inside setupMiddleware, are exactly this frozen list (the pre-authentication surface)', () => {
+  it('A5 — pre-gate prefix: the 18 sites that run before the gate, inside setupMiddleware, are exactly this frozen list (the pre-authentication surface)', () => {
     const gateOrdinal = inSetup.findIndex((s) => s.start === subjectState(model, 'jwtAuthMiddleware').sites[0].start)
     const prefix = inSetup.slice(0, gateOrdinal).map((s) => ({ verb: s.verb, unconditional: s.unconditional, args: s.argProjection }))
     expect(prefix).toEqual([
       { verb: 'use', unconditional: true, args: ['correlationIdMiddleware'] },
       { verb: 'use', unconditional: true, args: ['cors()'] },
+      { verb: 'use', unconditional: true, args: ['<inline>'] },
       { verb: 'use', unconditional: true, args: ['"/api"', '<inline>'] },
       { verb: 'use', unconditional: true, args: ['<inline>'] },
       { verb: 'use', unconditional: true, args: ['"/api/attendance/import"', '<inline>'] },
@@ -1112,8 +1113,8 @@ describe('the real app assembly (index.ts) registers this route behind the globa
  */
 describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', () => {
   const SCOPE = new Set(['setupMiddleware', 'constructor'])
-  const FROZEN_SAFE_COUNT = 54
-  const FROZEN_SAFE_HASH = 'f6baf6beeb49a255ad26ba6f43204022bf86ad5394ec27c742a8d90d793a648f'
+  const FROZEN_SAFE_COUNT = 56
+  const FROZEN_SAFE_HASH = '2776371a57464fb8515bd192e8dc979f068a3253d4bdcfe2cfc52f4b9127a9f3'
   // Frozen census as a LITERAL (owner + gate P2): deriving it live from the
   // same source it partitions makes UNKNOWN-empty vacuous (a novel this-use is
   // auto-added to SAFE). With the literal, a novel this-use lands in UNKNOWN.
@@ -1121,6 +1122,7 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
       "constructor//Block>ExpressionStatement>BinaryExpression>NewExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>Block>ExpressionStatement>AwaitExpression>CallExpression>PropertyAccessExpression//.handleAfterSalesApprovalDecisionCallback//#0",
       "constructor//Block>ExpressionStatement>BinaryExpression>NewExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>Block>ExpressionStatement>AwaitExpression>CallExpression>PropertyAccessExpression//.handleAfterSalesApprovalDecisionCallback//#1",
       "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.afterSalesApprovalBridgeService//#0",
+      "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.clientConnectionShutdown//#0",
       "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.eventBus//#0",
       "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.host//#0",
       "constructor//Block>ExpressionStatement>BinaryExpression>PropertyAccessExpression//.httpServer//#0",
@@ -1141,6 +1143,7 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
       "setupMiddleware//Block>ExpressionStatement>CallExpression>ArrowFunction>Block>TryStatement>Block>FirstStatement>VariableDeclarationList>VariableDeclaration>BinaryExpression>CallExpression>PropertyAccessExpression>ParenthesizedExpression>AsExpression>AsExpression>PropertyAccessExpression//.pluginLoader//#0",
       "setupMiddleware//Block>ExpressionStatement>CallExpression>ArrowFunction>Block>TryStatement>Block>FirstStatement>VariableDeclarationList>VariableDeclaration>CallExpression>ArrowFunction>Block>FirstStatement>VariableDeclarationList>VariableDeclaration>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.pluginStatus//#0",
       "setupMiddleware//Block>ExpressionStatement>CallExpression>ArrowFunction>Block>TryStatement>Block>FirstStatement>VariableDeclarationList>VariableDeclaration>CallExpression>PropertyAccessExpression>CallExpression>CallExpression>PropertyAccessExpression>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.pluginLoader//#0",
+      "setupMiddleware//Block>ExpressionStatement>CallExpression>ArrowFunction>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.clientConnectionShutdown//#0",
       "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ArrowFunction>PropertyAccessExpression//.automationService//#0",
       "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>ParenthesizedExpression>ObjectLiteralExpression>PropertyAssignment>BinaryExpression>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.yjsBridgeMetricsSource//#0",
       "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>ParenthesizedExpression>ObjectLiteralExpression>PropertyAssignment>BinaryExpression>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.yjsSocketMetricsSource//#0",
@@ -1216,7 +1219,7 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
       assertValidPartition(part, independentThisStarts(source, SCOPE))
     })
 
-    it('every SAFE occurrence is a member of the FROZEN literal census (occurrence-level, count 54, sha256 pin) — a novel this-use is NOT auto-admitted', () => {
+    it('every SAFE occurrence is a member of the FROZEN literal census (occurrence-level, count 56, sha256 pin) — a novel this-use is NOT auto-admitted', () => {
       expect(part.safe.length).toBe(FROZEN_SAFE_COUNT)
       for (const o of part.safe) expect(FROZEN_SAFE_KEYS.has(o.key)).toBe(true)
       const hash = createHash('sha256').update(part.safe.map((o) => o.key).sort().join('\n')).digest('hex')
