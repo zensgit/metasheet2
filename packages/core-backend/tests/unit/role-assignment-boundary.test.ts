@@ -90,6 +90,7 @@ import {
   RoleAssignmentError,
   RoleAssignmentForbiddenError,
   sendIfRoleAssignmentRefused,
+  unassignOrdinaryRoleMembers,
   unassignUserRoles,
   type RoleAssignmentScope,
 } from '../../src/rbac/role-assignment'
@@ -401,6 +402,61 @@ describe('rbac/role-assignment — scope is required and the bounded arm is deri
     expect(statements).toHaveLength(2)
     expect(statements[0]).toMatch(/INSERT INTO subject_authorization_versions/)
     expect(statements[1]).toMatch(/INSERT INTO user_roles/)
+  })
+})
+
+describe('rbac/role-assignment — unassignOrdinaryRoleMembers removes exactly one ordinary role\'s memberships', () => {
+  function recordingExecutor(rows: Array<Record<string, unknown>> = [], rowCount?: number) {
+    const calls: Array<{ sql: string; params: unknown[] }> = []
+    const executor = {
+      query: async (sql: string, params?: unknown[]) => {
+        calls.push({ sql, params: params ?? [] })
+        return { rows, rowCount: rowCount ?? rows.length }
+      },
+    }
+    return { calls, executor }
+  }
+
+  it('refuses an empty id, the platform administrator role and a namespace main-admin role before issuing any statement', async () => {
+    const { calls, executor } = recordingExecutor()
+    for (const roleId of ['', PLATFORM_ADMIN_ROLE_ID, 'crm_admin', 'attendance_admin']) {
+      await expect(unassignOrdinaryRoleMembers(executor, roleId), JSON.stringify(roleId))
+        .rejects.toThrow('Invalid ordinary role deletion target')
+    }
+    expect(calls).toEqual([])
+
+    // POSITIVE CONTROL — an ordinary id reaches the executor, so "no statements" above is a refusal.
+    await unassignOrdinaryRoleMembers(executor, 'role-1')
+    expect(calls).toHaveLength(1)
+  })
+
+  it('deletes by the id exactly as given, with one statement on the executor it was handed', async () => {
+    const { calls, executor } = recordingExecutor()
+
+    await unassignOrdinaryRoleMembers(executor, ' role-1 ')
+
+    expect(calls).toEqual([
+      { sql: 'DELETE FROM user_roles WHERE role_id = $1 RETURNING user_id', params: [' role-1 '] },
+    ])
+  })
+
+  it('reports the users and the row count the removal returned', async () => {
+    const { executor } = recordingExecutor([{ user_id: 'user-a' }, { user_id: 'user-b' }], 2)
+
+    const result = await unassignOrdinaryRoleMembers(executor, 'role-1')
+
+    expect(result).toEqual({ affectedUserIds: ['user-a', 'user-b'], rowCount: 2, delegatedAdminScopeCleanup: [] })
+  })
+
+  it('falls back to the returned users when the driver reports no row count', async () => {
+    const executor = {
+      query: async () => ({ rows: [{ user_id: 'user-a' }, { user_id: 'user-b' }, { user_id: 'user-c' }] }),
+    }
+
+    const result = await unassignOrdinaryRoleMembers(executor, 'role-1')
+
+    expect(result.affectedUserIds).toEqual(['user-a', 'user-b', 'user-c'])
+    expect(result.rowCount).toBe(3)
   })
 })
 

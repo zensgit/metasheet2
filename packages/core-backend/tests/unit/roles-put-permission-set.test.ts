@@ -21,7 +21,8 @@
  *     400 has to come from the route, not from luck).
  * Both pool.query and the transaction client route through the SAME interpreter, so a
  * mutation that moves a statement between those two seams still executes and is still
- * observed.
+ * observed. Each recorded statement also carries the seam that issued it (`via`), so a leg
+ * can assert that a write ran on the transaction client and not on the pool.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -79,6 +80,9 @@ import { ELEARNING_ROLE_TEMPLATES } from '../../src/db/migrations/zzzz2026082614
 
 type Rows = { rows: Array<Record<string, unknown>>; rowCount: number }
 
+/** Which seam issued a statement: the pool, or the client of an open `transaction()`. */
+type StatementSeam = 'pool' | 'client'
+
 interface FakeDbState {
   roleNames: Map<string, string>
   roleUpdatedAt: Map<string, string>
@@ -127,11 +131,11 @@ function makeFakeDb(options: {
   roleDeleteCascades?: boolean
 }) {
   const catalog = new Set(options.catalog)
-  const statements: Array<{ sql: string; params: unknown[] }> = []
+  const statements: Array<{ sql: string; params: unknown[]; via: StatementSeam }> = []
   let state = options.state
 
-  const run = async (sql: string, params: unknown[] = []): Promise<Rows> => {
-    statements.push({ sql, params })
+  const interpret = async (via: StatementSeam, sql: string, params: unknown[] = []): Promise<Rows> => {
+    statements.push({ sql, params, via })
     const injected = options.failOn?.(sql, params)
     if (injected) throw injected
 
@@ -291,6 +295,10 @@ function makeFakeDb(options: {
     }
     throw new Error(`fake db: unhandled statement: ${norm}`)
   }
+  /** `pool.query` and direct setup calls. */
+  const run = (sql: string, params: unknown[] = []): Promise<Rows> => interpret('pool', sql, params)
+  /** The client a `transaction()` callback receives. */
+  const clientQuery = (sql: string, params: unknown[] = []): Promise<Rows> => interpret('client', sql, params)
 
   return {
     run,
@@ -310,7 +318,7 @@ function makeFakeDb(options: {
     transaction: async <T>(handler: (client: { query: typeof run }) => Promise<T>): Promise<T> => {
       const snapshot = cloneState(state)
       try {
-        return await handler({ query: run })
+        return await handler({ query: clientQuery })
       } catch (error) {
         state = snapshot
         throw error
@@ -1745,7 +1753,7 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
     expect(rbacServiceMocks.invalidateUserPerms).not.toHaveBeenCalled()
   })
 
-  it('leaves unrelated cleanup untouched when the ordinary role does not exist', async () => {
+  it('writes nothing when the ordinary role does not exist', async () => {
     const db = seedAdminRoles({ cascade: false })
     wire(db)
     const res = mockResponse()
@@ -1754,6 +1762,93 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
 
     expect(res.statusCode).toBe(200)
     expect(db.statements.filter(({ sql }) => /^\s*DELETE FROM (user_roles|role_permissions|roles)\b/i.test(sql))).toEqual([])
+  })
+
+  it('issues the membership, grant and role deletes of an ordinary role on the transaction client', async () => {
+    const db = seedAdminRoles({ cascade: false })
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'role-1')
+
+    expect(res.statusCode).toBe(200)
+    const cleanup = db.statements.flatMap(({ sql, via }) => {
+      const table = /^\s*DELETE FROM (user_roles|role_permissions|roles)\b/i.exec(sql)?.[1]
+      return table === undefined ? [] : [`${table} via ${via}`]
+    })
+    expect(cleanup).toEqual(['user_roles via client', 'role_permissions via client', 'roles via client'])
+    // One transaction: a nested transaction() would take its own connection and commit separately.
+    expect(pgMocks.transaction).toHaveBeenCalledTimes(1)
+  })
+
+  it('records the removed membership count in the ordinary delete audit entry', async () => {
+    const db = seedAdminRoles({ cascade: false })
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'role-1')
+
+    expect(res.statusCode).toBe(200)
+    const entries = writeAuditEntries() as Array<{ action: string; resourceId?: string; meta?: Record<string, unknown> }>
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({ action: 'delete', resourceType: 'role', resourceId: 'role-1' })
+    expect(entries[0].meta?.membershipsRemoved).toBe(2)
+    expect(entries[0].meta).toEqual({
+      before: { id: 'role-1', name: '备料角色' },
+      membersInvalidated: 2,
+      membershipsRemoved: 2,
+    })
+  })
+
+  it('invalidates and counts every membership the removal returns, including one the member snapshot did not list', async () => {
+    const db = seedAdminRoles({ cascade: false })
+    wire(db)
+    // The snapshot read sees only the first member; the removal itself returns both.
+    pgMocks.transaction.mockImplementation((handler: Parameters<typeof db.transaction>[0]) => db.transaction((client) => handler({
+      query: async (sql: string, params?: unknown[]) => {
+        const result = await client.query(sql, params)
+        if (sql.replace(/\s+/g, ' ').trim() === 'SELECT user_id FROM user_roles WHERE role_id=$1') {
+          return { rows: result.rows.slice(0, 1), rowCount: Math.min(1, result.rowCount) }
+        }
+        return result
+      },
+    })))
+    const res = mockResponse()
+
+    await deleteRole(res, 'role-1')
+
+    expect(res.statusCode).toBe(200)
+    expect(db.membersOf('role-1')).toEqual([])
+    expect(rbacServiceMocks.invalidateUserPerms.mock.calls.map((call) => call[0]).sort()).toEqual(['user-a', 'user-b'])
+    const entries = writeAuditEntries() as Array<{ meta?: Record<string, unknown> }>
+    expect(entries).toHaveLength(1)
+    expect(entries[0].meta).toMatchObject({ membersInvalidated: 2, membershipsRemoved: 2 })
+  })
+
+  it('deletes the memberships of exactly the requested id, not of a role whose id differs only by padding', async () => {
+    const db = makeFakeDb({
+      catalog: CATALOG,
+      roleDeleteCascades: false,
+      state: {
+        roleNames: new Map([['role-1', '备料角色'], ['role-1 ', '备料角色（旧）']]),
+        roleUpdatedAt: new Map([['role-1', SEEDED_UPDATED_AT], ['role-1 ', SEEDED_UPDATED_AT]]),
+        rolePermissions: new Map([['role-1', ['roles:read']], ['role-1 ', ['stock-prep:read']]]),
+        members: new Map([['role-1', ['user-a', 'user-b']], ['role-1 ', ['user-p']]]),
+      },
+    })
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'role-1 ')
+
+    expect(res.statusCode).toBe(200)
+    expect(db.nameOf('role-1 ')).toBeUndefined()
+    expect(db.membersOf('role-1 ')).toEqual([])
+    expect(db.permissionsOf('role-1 ')).toEqual([])
+    expect(db.nameOf('role-1')).toBe('备料角色')
+    expect(db.membersOf('role-1')).toEqual(['user-a', 'user-b'])
+    expect(db.permissionsOf('role-1')).toEqual(['roles:read'])
+    expect(rbacServiceMocks.invalidateUserPerms.mock.calls.map((call) => call[0])).toEqual(['user-p'])
   })
 
   it('LOCK: the classification read takes the role row FOR UPDATE as the FIRST statement inside the transaction', async () => {
