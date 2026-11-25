@@ -1,0 +1,81 @@
+name: Production permission release read-only diagnostic
+
+on:
+  push:
+    branches: [codex/permission-prod-readonly-20261125-a2]
+    paths: ['.github/workflows/permission-prod-diagnostic-20261125.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    if: github.repository == 'zensgit/metasheet2' && github.actor == 'zensgit'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the diagnostic commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Verify the approved one-time probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ATTEMPT" == 1 ]]
+          printf '%s\n' \
+            'c9b2b685bbfe2f70ae67a844fc4c4b7b4946d172cb0b0fe60667674577c634e7  scripts/ops/tmp-permission-prod-diagnostic-20261125.sh' \
+            '18f835ed326f21525718f2960c85d760935bd7a23684b17dc224fc1f6791cb88  scripts/ops/tmp-permission-prod-backend-readonly-20261125.sh' \
+            'ccd9681b806241e554c0e50014165a0f52d6f6a97c09bdd9d54418aa17f08ae7  scripts/ops/tmp-permission-prod-web-readonly-20261125.sh' \
+            | sha256sum -c --strict
+      - name: Inspect production Docker with read-only commands
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          tmp=$(mktemp -d)
+          trap 'rm -f -- "$tmp/key" "$tmp/known_hosts" "$tmp/stdout" "$tmp/stderr"; rmdir -- "$tmp"' EXIT
+          [[ -n "$DEPLOY_HOST" && "$DEPLOY_USER" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$ && -n "$DEPLOY_KNOWN_HOSTS" && -n "$DEPLOY_SSH_KEY_B64" ]]
+          [[ "$DEPLOY_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.:-]*$ ]]
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > "$tmp/key"
+          if ! decoded=$(printf '%s' "$DEPLOY_KNOWN_HOSTS" | base64 -d 2>/dev/null) || ! grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2' <<< "$decoded"; then
+            decoded=$DEPLOY_KNOWN_HOSTS
+          fi
+          grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2' <<< "$decoded"
+          printf '%s\n' "$decoded" > "$tmp/known_hosts"
+          unset DEPLOY_SSH_KEY_B64 DEPLOY_KNOWN_HOSTS decoded
+
+          rc=0
+          {
+            printf '%s\n' 'echo PROBE_STARTED' 'diagnostic=0' 'backend=0' 'web=0' 'bash -s <<'"'DOCKER_DIAGNOSTIC'"' || diagnostic=$?'
+            cat scripts/ops/tmp-permission-prod-diagnostic-20261125.sh
+            printf '%s\n' 'DOCKER_DIAGNOSTIC' 'if [[ "$diagnostic" == 2 ]]; then echo "PROBE_RESULTS diagnostic=2 backend=skipped web=skipped"; exit 1; fi' \
+              'bash -s <<'"'BACKEND_CHECK'"' || backend=$?'
+            cat scripts/ops/tmp-permission-prod-backend-readonly-20261125.sh
+            printf '%s\n' 'BACKEND_CHECK' 'bash -s <<'"'WEB_CHECK'"' || web=$?'
+            cat scripts/ops/tmp-permission-prod-web-readonly-20261125.sh
+            printf '%s\n' 'WEB_CHECK' 'printf "PROBE_RESULTS diagnostic=%s backend=%s web=%s\n" "$diagnostic" "$backend" "$web"' '[[ "$diagnostic" == 0 && "$backend" == 0 && "$web" == 0 ]]'
+          } | timeout 80s ssh -T -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=yes \
+              -o UserKnownHostsFile="$tmp/known_hosts" -o GlobalKnownHostsFile=/dev/null \
+              -o IdentitiesOnly=yes -o ConnectTimeout=15 -o ServerAliveInterval=10 -o ServerAliveCountMax=2 \
+              -i "$tmp/key" "$DEPLOY_USER@$DEPLOY_HOST" 'timeout 55s bash -s' > "$tmp/stdout" 2> "$tmp/stderr" || rc=$?
+
+          grep -E '^(docker=(cli_missing|reachable|version_unrecognized|timeout|access_denied|context_unavailable|daemon_unreachable|query_failed)|docker_context=(default|nondefault|unavailable)|docker_environment_override=(present|absent)|container=metasheet-(backend|web|postgres|redis) (state=(running|created|restarting|removing|paused|exited|dead)|error=(state_unrecognized|timeout|access_denied|container_absent|context_unavailable|daemon_unreachable|query_failed)))$' "$tmp/stdout" || true
+          grep -E '^(PROBE_STARTED|PROBE_RESULTS diagnostic=[0-9]+ backend=([0-9]+|skipped) web=([0-9]+|skipped)|metasheet-(backend|web|postgres|redis)=(unavailable|[a-z]+ health=[a-z]+)|\{"http":([0-9]+|null),"backendHealthy":(true|false),"commit":("[0-9a-f]{40}"|null),"imageMatchesBackend":(true|false),"exactDepartmentEnabled":(true|false),"activationEnabled":(true|false)\}|\{"proxyHttp":([0-9]+|null),"webHttp":([0-9]+|null),"webHealthy":(true|false),"webCommit":("[0-9a-f]{40}"|null),"proxyBackendCommit":("[0-9a-f]{40}"|null)\})$' "$tmp/stdout" || true
+          if [[ "$rc" != 0 ]]; then
+            if grep -Eq 'REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed' "$tmp/stderr"; then
+              echo 'Production SSH host key verification failed'
+            elif grep -Eq 'Permission denied' "$tmp/stderr"; then
+              echo 'Production SSH authentication was denied'
+            elif ! grep -Fxq 'PROBE_STARTED' "$tmp/stdout"; then
+              echo 'Production SSH connection did not start the probe'
+            else
+              echo 'One or more production read-only checks did not pass'
+            fi
+            exit "$rc"
+          fi
