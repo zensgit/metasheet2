@@ -266,7 +266,7 @@ Get-Content -LiteralPath $envFile -Tail 3
 
 **删键**：`--update-env` 不会撤掉已从 `app.env` 删掉的键（`design-large-bom-worker-20260906.md:350`），进程环境里旧值还在。所以 §5 回退（字节级还原会让追加的键消失）必须走计划任务：在 `PM2_HOME` 指向 `.pm2-runtime` 的会话里停应用 → 等 `MetaSheet-PM2` 任务离开 `Running` 状态（`Get-ScheduledTask … | Select-Object State`）→ 确认 pm2 命名管道上已没有守护进程（任务停掉后还在的是多余的 `node …\pm2\lib\Daemon.js` 进程：**不要 `pm2 kill`**——Windows 上管道名是整机共用的，`pm2 kill` 会打到占着管道的任何守护进程；用 `Get-CimInstance Win32_Process` 按 CommandLine 过滤出它，再按 pid `Stop-Process -Id`，做法见 `runbook-backend-log-rotation-20261012.md` §3.8；为什么会冒出这样的多余进程见 `handoff-r59-two-machine-20260924.md:39`）→ `Start-ScheduledTask -TaskName 'MetaSheet-PM2' -TaskPath '<任务所在文件夹>'` → 确认进程已重新拉起（后端进程的父进程是 pm2-runtime，不是 `Daemon.js`，`handoff-r59-two-machine-20260924.md:52`）→ 查 health。
 
-**是否真的生效，以 §3.1 的接口状态为准**，不以 `app.env` 内容为准；也**不要**为了看环境去跑 `pm2 env`——pm2-runtime 不在守护模式下时，会话里的 pm2 命令会另起一个空守护进程（`handoff-r59-two-machine-20260924.md:50`）。
+**是否真的生效，以 §3.1 的接口状态为准**，不以 `app.env` 内容为准。要看进程里的开关，用官方只读检查，不要裸跑 `pm2 env` 或 `pm2 jlist`：pm2-runtime 不在听管道时，会话里的 pm2 命令会另起一个空守护进程（`handoff-r59-two-machine-20260924.md:50`）。同一窗口先跑 `scripts/ops/02-pm2-owner-check.ps1`，末行必须是 `PM2OWNER_RESULT owned=true status=complete`，再跑 `scripts/ops/03-live-env-check.ps1 -InstallRoot <安装根目录>`。03 只在已经能证明 `\\.\pipe\rpc.sock` 上有本账号的宿主时才跑一次 `pm2 jlist`。宿主有两种：`<PM2_HOME>\pm2.pid` 指向本账号活着的 `node.exe`（God）；或者没有 `pm2.pid`，但恰好一个本账号的计划任务 `MetaSheet-PM2`（Running 或 Ready）拉着 pm2-runtime，且 `metasheet-backend` 的父进程就是它。管道不在、对不上、或旁边还有一个 `pm2\lib\Daemon.js` 时，03 停在 `status=incomplete`，一条 pm2 命令都不跑。不要另起空守护进程，不要手写 `pm2.pid`。演示机上 `PM2_HOME` 不设时，02 和 03 会用 `<用户目录>\.pm2-runtime`（该目录存在且任务恰好一个）。
 
 ## 3. 开后核对
 

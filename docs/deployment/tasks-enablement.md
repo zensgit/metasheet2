@@ -81,7 +81,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\ops\attendance-onpre
 - 在 PowerShell 里直接运行 `pm2 restart metasheet-backend --update-env`，不会读入 `app.env`，新值不会生效。
 - 这个脚本先找部署目录下的 `app.env`，找不到才用 `docker\app.env`。如果两个文件都有，脚本只读部署目录下的那个，请在两个文件里都加上这一行。
 - PM2 里已有的进程定义和当前部署目录对不上时，脚本会删掉它，按 `ecosystem.config.cjs` 重新创建。
-- 如果这台机器的后端是由计划任务启动的（pm2-runtime），先在这台主机上确认这个脚本适用再运行：在 PM2 后台进程已经退出时运行 pm2 命令，可能另起一个只属于当前会话的 PM2 后台进程。
+- 如果这台机器的后端是由计划任务启动的（pm2-runtime），先在这台主机上确认这个脚本适用再运行：在 PM2 后台进程已经退出时运行 pm2 命令，可能另起一个只属于当前会话的 PM2 后台进程。要核对正在运行的后端读到了哪个开关，用 `scripts/ops/02-pm2-owner-check.ps1` 然后 `scripts/ops/03-live-env-check.ps1`（02 末行 `owned=true` 之后才跑 03）。这种主机没有 `pm2.pid` 也能被 03 接受：计划任务 `MetaSheet-PM2` 拉着 pm2-runtime，并且命名管道上已经有它。管道不在时 03 不会去跑 pm2。
 
 如果你的服务名或目录不同，以你实际的部署为准。
 
