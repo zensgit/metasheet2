@@ -50,12 +50,13 @@ test('P3 signoff restart preserves the installer-saved environment when both app
   const fixture = mkdtempSync(path.join(tmpdir(), 'p3 restart fixture '))
   try {
     const bin = path.join(fixture, 'node_modules/.bin')
+    const appdataNpm = path.join(fixture, 'appdata/Roaming/npm')
     const pm2Home = path.join(fixture, 'pm2')
     const startup = path.join(fixture, 'scripts/ops/attendance-onprem-start-pm2.ps1')
     const boot = path.join(fixture, 'bootstrap-fixture.ps1')
     const stateFile = path.join(fixture, 'pm2-state.json')
     const backend = path.join(fixture, 'packages/core-backend/dist/src/index.js')
-    for (const dir of [bin, pm2Home, path.dirname(startup), path.dirname(backend), path.join(fixture, 'docker')]) {
+    for (const dir of [bin, appdataNpm, pm2Home, path.dirname(startup), path.dirname(backend), path.join(fixture, 'docker')]) {
       mkdirSync(dir, { recursive: true })
     }
     copyFileSync(path.join(ops, 'attendance-onprem-start-pm2.ps1'), startup)
@@ -65,6 +66,9 @@ test('P3 signoff restart preserves the installer-saved environment when both app
     writeFileSync(path.join(pm2Home, 'pm2.pid'), String(process.pid))
     writeFileSync(path.join(bin, 'pm2.cmd'), '@node "%~dp0pm2-fixture.cjs" %*\r\n')
     writeFileSync(path.join(bin, 'pm2-fixture.cjs'), pm2Fixture)
+    writeFileSync(path.join(appdataNpm, 'pm2.cmd'), '@node "%~dp0pm2-fixture.cjs" %*\r\n')
+    writeFileSync(path.join(appdataNpm, 'pm2-fixture.cjs'), pm2Fixture)
+    writeFileSync(path.join(appdataNpm, 'pm2-fixture.cjs'), pm2Fixture)
     writeFileSync(path.join(fixture, 'docker/app.env'), "PORT = '4012'\r\nP3_SHARED=docker\r\nP3_DOCKER_ONLY=\"left=right\"\r\n")
     writeFileSync(path.join(fixture, 'app.env'), 'P3_SHARED=root\r\nP3_ROOT_ONLY=root\r\n')
     writeFileSync(stateFile, JSON.stringify({
@@ -79,7 +83,8 @@ test('P3 signoff restart preserves the installer-saved environment when both app
     function run(script, args, extraEnv) {
       return spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, ...args], {
         env: {
-          ...process.env, PM2_HOME: pm2Home, Path: path.dirname(process.execPath) + path.delimiter + process.env.Path,
+          ...process.env, PM2_HOME: pm2Home, APPDATA: path.join(fixture, 'appdata'),
+          Path: path.dirname(process.execPath) + path.delimiter + process.env.Path.replace(appdataNpm, ''),
           P3_FIXTURE_STATE: stateFile, PORT: '3900', P3_AMBIENT: 'installer', ...extraEnv,
         },
         encoding: 'utf8',

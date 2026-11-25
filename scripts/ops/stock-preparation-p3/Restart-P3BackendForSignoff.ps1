@@ -11,8 +11,29 @@ try {
   $root = (Get-Item -LiteralPath $InstallRoot).FullName
   if (-not $Pm2Command) {
     $localPm2 = Join-Path $root 'node_modules\.bin\pm2.cmd'
-    $Pm2Command = if (Test-Path -LiteralPath $localPm2 -PathType Leaf) { $localPm2 }
-      else { (Get-Command pm2.cmd -CommandType Application | Select-Object -First 1).Source }
+    if (Test-Path -LiteralPath $localPm2 -PathType Leaf) {
+      $Pm2Command = $localPm2
+    } else {
+      $candidates = @()
+      $programFiles = [Environment]::GetEnvironmentVariable('ProgramFiles')
+      $programFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+      foreach ($base in @($programFiles, $programFilesX86, 'C:\Program Files', 'C:\Program Files (x86)')) {
+        if ($base) { $candidates += Join-Path $base 'nodejs' }
+      }
+      foreach ($base in @($env:APPDATA, 'C:\Users\Administrator\AppData\Roaming',
+          (Join-Path $env:USERPROFILE 'AppData\Roaming'))) {
+        if ($base) { $candidates += Join-Path $base 'npm' }
+      }
+      $systemRoot = if ($env:SystemRoot) { $env:SystemRoot } else { 'C:\Windows' }
+      $candidates += Join-Path $systemRoot 'System32'
+      foreach ($dir in $candidates | Select-Object -Unique) {
+        $candidate = if ([IO.Path]::GetExtension($dir) -ieq '.cmd') { $dir } else { Join-Path $dir 'pm2.cmd' }
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { $Pm2Command = $candidate; break }
+      }
+      if (-not $Pm2Command) {
+        $Pm2Command = (Get-Command pm2.cmd -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+      }
+    }
   }
   $pm2 = (Get-Item -LiteralPath $Pm2Command).FullName
   $proof = @(& (Join-Path $PSScriptRoot '03-live-env-check.ps1') -InstallRoot $root -Keys NODE_ENV -ExpectedPm2Command $pm2)

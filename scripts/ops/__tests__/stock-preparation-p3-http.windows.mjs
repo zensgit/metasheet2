@@ -73,7 +73,7 @@ function Get-NetTCPConnection {
   if ($env:P3_TEST_PEER_MODE -eq 'ownerless') { $record.OwningProcess = 0 }
   return $record
 }
-& $env:P3_TEST_H01 @args
+. $env:P3_TEST_H01 @args
 exit $LASTEXITCODE
 `
 
