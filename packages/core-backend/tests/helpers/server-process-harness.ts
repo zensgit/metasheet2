@@ -32,6 +32,8 @@ export interface ServerProcess {
   stopOutcome(): { outcome: 'ok' | 'failed'; reason: string | null } | null
   /** Whether the process said the database pool was closed. */
   poolEnded(): boolean
+  /** Whether the fence its started server serves has the source of the fence the module hands out. */
+  fenceSource(): Promise<boolean>
   kill(): Promise<ProcessExit>
 }
 
@@ -96,6 +98,18 @@ export async function startServerProcess(options: { env?: Record<string, string>
     },
     stopOutcome: () => outcome,
     poolEnded: () => poolEnded,
+    fenceSource: () => new Promise<boolean>((resolve, reject) => {
+      const id = Math.floor(Math.random() * 1e9)
+      const timer = setTimeout(() => reject(new Error('timed out waiting for the fence source')), 10_000)
+      const onMessage = (message: { type?: string; id?: number; sameSource?: boolean }): void => {
+        if (message.type !== 'fence-source' || message.id !== id) return
+        clearTimeout(timer)
+        child.off('message', onMessage)
+        resolve(message.sameSource === true)
+      }
+      child.on('message', onMessage)
+      child.send({ type: 'fence-source', id })
+    }),
     kill: () => {
       if (!exit) child.kill('SIGKILL')
       return exited

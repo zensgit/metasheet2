@@ -369,11 +369,17 @@ describe('U1s both services close every transport with the standard close', () =
     expect(clients.c.close).toHaveBeenCalledTimes(1)
     expect(logger.warn).toHaveBeenCalledTimes(1)
     expect(logger.warn).toHaveBeenCalledWith('Transport close at shutdown failed for a client')
+    // Nothing else is logged: no error object through any other method.
+    expect(logger.error).not.toHaveBeenCalled()
+    expect(logger.info).not.toHaveBeenCalled()
+    expect(logger.debug).not.toHaveBeenCalled()
   })
 
   it('MetricsStreamService: one client whose close throws does not keep the others open; logged once, without values', () => {
     const service = new MetricsStreamService()
-    const warn = vi.spyOn((service as unknown as { logger: { warn(message: string): void } }).logger, 'warn').mockImplementation(() => undefined)
+    const serviceLogger = (service as unknown as { logger: { warn(message: string): void; error(message: string): void; info(message: string): void; debug(message: string): void } }).logger
+    const warn = vi.spyOn(serviceLogger, 'warn').mockImplementation(() => undefined)
+    const others = (['error', 'info', 'debug'] as const).map((name) => vi.spyOn(serviceLogger, name).mockImplementation(() => undefined))
     const { io, clients } = throwingEngine()
     ;(service as unknown as { io: unknown }).io = io
     expect(service.closeTransportsForShutdown()).toBe(2)
@@ -381,6 +387,7 @@ describe('U1s both services close every transport with the standard close', () =
     expect(clients.c.close).toHaveBeenCalledTimes(1)
     expect(warn).toHaveBeenCalledTimes(1)
     expect(warn).toHaveBeenCalledWith('Transport close at shutdown failed for a client')
+    for (const other of others) expect(other).not.toHaveBeenCalled()
   })
 
   it('MetricsStreamService.closeTransportsForShutdown: close() without an argument on every client; 0 without a server', () => {
@@ -920,7 +927,24 @@ describe('U4c the fence and its mount, read from the syntax tree', () => {
     expect(Object.keys(createClientConnectionShutdown()).sort()).toEqual(['arm', 'begin', 'fence', 'finish', 'isStopping'])
   })
 
-  it('check 9b: exactly one declaration in the module is named fence', () => {
+  it('check 9c: fence is declared const and never assigned anywhere in the module', () => {
+    const declarations: ts.VariableDeclaration[] = []
+    const assignments: string[] = []
+    walk(module, (node) => {
+      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === 'fence') declarations.push(node)
+      if (ts.isBinaryExpression(node) && ts.isIdentifier(node.left) && node.left.text === 'fence'
+        && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
+        assignments.push(printed(node, module))
+      }
+    })
+    expect(declarations.length).toBeGreaterThan(0)
+    for (const declaration of declarations) {
+      expect(ts.isVariableDeclarationList(declaration.parent) && (declaration.parent.flags & ts.NodeFlags.Const) !== 0).toBe(true)
+    }
+    expect(assignments).toEqual([])
+  })
+
+  it('check 9b: exactly one declaration in the module is named fence (a second one could carry the snapshot while another is served)', () => {
     const declarations: ts.Node[] = []
     walk(module, (node) => {
       const named = (ts.isVariableDeclaration(node) || ts.isFunctionDeclaration(node) || ts.isParameter(node) || ts.isBindingElement(node))

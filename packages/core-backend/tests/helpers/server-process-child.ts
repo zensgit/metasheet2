@@ -7,6 +7,9 @@
  * type assertion), after first observing the latched stop promise, so the outcome is said before
  * the process exits. It says `pool-ended` once the database pool has been closed.
  *
+ * On the command `fence-source` it says whether the fence its started server serves has the same
+ * source as the fence a fresh instance of the module hands out.
+ *
  * It prints nothing, never sends its settings, and never outlives its parent.
  */
 import type { Application, Request, Response } from 'express'
@@ -57,6 +60,15 @@ async function main(): Promise<void> {
       (error: unknown) => tell({ type: 'stop-outcome', outcome: 'failed', reason: reasonOf(error) }),
     )
     ;(server as unknown as { stopForSignal(signal: 'SIGTERM' | 'SIGINT'): void }).stopForSignal('SIGTERM')
+  })
+  // For the check that the fence served by the started server is the declaration the unit tests pin:
+  // its source, compared with the fence a fresh instance of the module hands out.
+  const { createClientConnectionShutdown } = await import('../../src/lifecycle/client-connection-shutdown')
+  process.on('message', (message: { type?: string; id?: number }) => {
+    if (message?.type !== 'fence-source') return
+    const served = (server as unknown as { clientConnectionShutdown: { fence: unknown } }).clientConnectionShutdown.fence
+    const pinned = createClientConnectionShutdown().fence
+    tell({ type: 'fence-source', id: message.id, sameSource: typeof served === 'function' && String(served) === String(pinned) })
   })
   tell({ type: 'ready', port: address.port })
 }
