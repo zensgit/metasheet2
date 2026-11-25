@@ -26,6 +26,7 @@
     </div>
     <p>安全动作验证和管理员登录许可命令需在资源类型中单独选择。结果为空不代表没有发生。</p>
     <p v-if="error" role="alert">{{ error }}</p>
+    <p v-if="exportError" role="alert">{{ exportError }}</p>
     <div class="authorization-audit__table">
       <table v-if="items.length">
         <thead><tr><th>时间</th><th>操作人</th><th>资源</th><th>动作</th><th>对象</th><th>详情</th></tr></thead>
@@ -33,7 +34,8 @@
           <td>{{ item.created_at }}</td><td>{{ item.actor_id || '—' }}</td><td>{{ item.resource_type }}</td><td>{{ item.action }}</td><td>{{ item.resource_id || '—' }}</td><td><details><summary>查看详情</summary><pre>{{ JSON.stringify(item.action_details, null, 2) }}</pre></details></td>
         </tr></tbody>
       </table>
-      <p v-else-if="!error">{{ loading ? '正在加载权限审计…' : '暂无权限审计记录。' }}</p>
+      <p v-else-if="loading && !error">正在加载权限审计…</p>
+      <p v-else-if="loaded && !error">暂无权限审计记录。</p>
     </div>
     <div><button type="button" :disabled="loading || page <= 1" @click="load(page - 1)">上一页</button> 第 {{ page }} / {{ totalPages }} 页（{{ total }} 条） <button type="button" :disabled="loading || page >= totalPages" @click="load(page + 1)">下一页</button></div>
   </details>
@@ -45,7 +47,7 @@ import { apiFetch } from '../utils/api'
 
 type Item = { created_at: string; actor_id: string | null; resource_type: string; action: string; resource_id: string | null; action_details: unknown; source: string; source_id: string }
 const query = ref(''), resourceType = ref(''), action = ref(''), from = ref(''), to = ref('')
-const items = ref<Item[]>([]), page = ref(1), total = ref(0), loading = ref(false), error = ref('')
+const items = ref<Item[]>([]), page = ref(1), total = ref(0), loading = ref(false), error = ref(''), loaded = ref(false), exportError = ref('')
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / 20)))
 const ORIGINAL_ACTIONS: readonly string[] = ['grant', 'revoke', 'update']
 const RESOURCE_ACTIONS: Record<string, readonly string[]> = {
@@ -75,8 +77,10 @@ async function load(nextPage: number): Promise<void> {
     if (!response.ok || payload.ok !== true) throw new Error(payload.error?.message || '加载权限审计失败')
     items.value = Array.isArray(payload.data?.items) ? payload.data.items : []
     total.value = Number(payload.data?.total || 0); page.value = Number(payload.data?.page || nextPage)
+    loaded.value = true
   } catch (reason) {
     items.value = []
+    loaded.value = false
     error.value = reason instanceof Error ? reason.message : '加载权限审计失败'
   }
   finally { loading.value = false }
@@ -85,13 +89,13 @@ function onToggle(event: Event): void {
   if ((event.target as HTMLDetailsElement).open && !opened) { opened = true; void load(1) }
 }
 async function exportCsv(): Promise<void> {
-  loading.value = true; error.value = ''
+  loading.value = true; exportError.value = ''
   try {
     const response = await apiFetch(`/api/admin/audit-activity/export.csv?${params({ limit: '5000' })}`)
     if (!response.ok) throw new Error('导出权限审计失败')
     const url = URL.createObjectURL(await response.blob())
     const link = document.createElement('a'); link.href = url; link.download = 'admin-authorization-audit.csv'; document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url)
-  } catch (reason) { error.value = reason instanceof Error ? reason.message : '导出权限审计失败' }
+  } catch (reason) { exportError.value = reason instanceof Error ? reason.message : '导出权限审计失败' }
   finally { loading.value = false }
 }
 </script>

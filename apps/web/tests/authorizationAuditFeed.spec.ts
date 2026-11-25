@@ -93,6 +93,43 @@ function setField(selector: string, value: string) {
   input.value = value
   input.dispatchEvent(new Event('input'))
 }
+
+async function withCsvDownload(run: () => Promise<void>) {
+  const create = URL.createObjectURL
+  const revoke = URL.revokeObjectURL
+  URL.createObjectURL = vi.fn(() => 'blob:test')
+  URL.revokeObjectURL = vi.fn()
+  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  try {
+    await run()
+  } finally {
+    click.mockRestore()
+    URL.createObjectURL = create
+    URL.revokeObjectURL = revoke
+  }
+}
+
+async function chooseResourceAndAction(resourceValue: string, actionValue: string) {
+  setSelect(resourceSelect(), resourceValue)
+  await flush()
+  setSelect(actionSelect(), actionValue)
+  await flush()
+}
+
+async function queryListAndCsv() {
+  const listIndex = fetchMock.mock.calls.length
+  clickText('查询权限审计')
+  await flush()
+  const listUrl = String(fetchMock.mock.calls[listIndex][0])
+  fetchMock.mockResolvedValueOnce({ ok: true, blob: async () => new Blob(['csv']) })
+  const csvIndex = fetchMock.mock.calls.length
+  await withCsvDownload(async () => {
+    clickText('导出权限审计 CSV')
+    await flush()
+  })
+  const csvUrl = String(fetchMock.mock.calls[csvIndex][0])
+  return { listUrl, csvUrl, list: paramsOf(listUrl), csv: paramsOf(csvUrl) }
+}
 let host: HTMLDivElement | undefined
 let app: ReturnType<typeof createApp> | undefined
 afterEach(() => { app?.unmount(); host?.remove(); fetchMock.mockReset() })
@@ -380,5 +417,202 @@ describe('authorization audit panel', () => {
     expect(host!.querySelectorAll('tbody tr')).toHaveLength(0)
     expect(host!.textContent).not.toContain('fixture-page-one-actor')
     expect(host!.textContent).not.toContain('暂无权限审计记录')
+  })
+
+  it('leaves the action parameter off the list and CSV when the resource changes from user-security-action to legacy-permission', async () => {
+    fetchMock.mockResolvedValue(feedOk([]))
+    mountFeed()
+    await openFeed()
+    await chooseResourceAndAction('user-security-action', 'security_action_verify')
+    setSelect(resourceSelect(), 'legacy-permission')
+    await flush()
+    const { listUrl, csvUrl, list, csv } = await queryListAndCsv()
+    expect(listUrl.startsWith('/api/admin/audit-activity?')).toBe(true)
+    expect(csvUrl.startsWith('/api/admin/audit-activity/export.csv?')).toBe(true)
+    expect(list.get('resourceType')).toBe('legacy-permission')
+    expect(list.has('action')).toBe(false)
+    expect(csv.get('resourceType')).toBe('legacy-permission')
+    expect(csv.has('action')).toBe(false)
+  })
+
+  it('leaves the action parameter off the list and CSV when the resource changes from user-security-action to the empty resource', async () => {
+    fetchMock.mockResolvedValue(feedOk([]))
+    mountFeed()
+    await openFeed()
+    await chooseResourceAndAction('user-security-action', 'security_action_verify')
+    setSelect(resourceSelect(), '')
+    await flush()
+    const { listUrl, csvUrl, list, csv } = await queryListAndCsv()
+    expect(listUrl.startsWith('/api/admin/audit-activity?')).toBe(true)
+    expect(csvUrl.startsWith('/api/admin/audit-activity/export.csv?')).toBe(true)
+    expect(list.has('resourceType')).toBe(false)
+    expect(list.has('action')).toBe(false)
+    expect(csv.has('resourceType')).toBe(false)
+    expect(csv.has('action')).toBe(false)
+  })
+
+  it('leaves the action parameter off the list and CSV when the resource changes from user-security-action to admin_login_grant_command', async () => {
+    fetchMock.mockResolvedValue(feedOk([]))
+    mountFeed()
+    await openFeed()
+    await chooseResourceAndAction('user-security-action', 'security_action_verify')
+    setSelect(resourceSelect(), 'admin_login_grant_command')
+    await flush()
+    const { listUrl, csvUrl, list, csv } = await queryListAndCsv()
+    expect(listUrl.startsWith('/api/admin/audit-activity?')).toBe(true)
+    expect(csvUrl.startsWith('/api/admin/audit-activity/export.csv?')).toBe(true)
+    expect(list.get('resourceType')).toBe('admin_login_grant_command')
+    expect(list.has('action')).toBe(false)
+    expect(csv.get('resourceType')).toBe('admin_login_grant_command')
+    expect(csv.has('action')).toBe(false)
+  })
+
+  it('leaves the action parameter off the list and CSV when the resource changes from admin_login_grant_command to user-security-action', async () => {
+    fetchMock.mockResolvedValue(feedOk([]))
+    mountFeed()
+    await openFeed()
+    await chooseResourceAndAction('admin_login_grant_command', 'admin_login_grant_enable')
+    setSelect(resourceSelect(), 'user-security-action')
+    await flush()
+    const { listUrl, csvUrl, list, csv } = await queryListAndCsv()
+    expect(listUrl.startsWith('/api/admin/audit-activity?')).toBe(true)
+    expect(csvUrl.startsWith('/api/admin/audit-activity/export.csv?')).toBe(true)
+    expect(list.get('resourceType')).toBe('user-security-action')
+    expect(list.has('action')).toBe(false)
+    expect(csv.get('resourceType')).toBe('user-security-action')
+    expect(csv.has('action')).toBe(false)
+  })
+
+  it('sends admin_login_grant_command and admin_login_grant_enable for the list and the CSV', async () => {
+    fetchMock.mockResolvedValue(feedOk([]))
+    mountFeed()
+    await openFeed()
+    await chooseResourceAndAction('admin_login_grant_command', 'admin_login_grant_enable')
+    const { listUrl, csvUrl, list, csv } = await queryListAndCsv()
+    expect(listUrl.startsWith('/api/admin/audit-activity?')).toBe(true)
+    expect(csvUrl.startsWith('/api/admin/audit-activity/export.csv?')).toBe(true)
+    expect(list.get('resourceType')).toBe('admin_login_grant_command')
+    expect(list.get('action')).toBe('admin_login_grant_enable')
+    expect(csv.get('resourceType')).toBe('admin_login_grant_command')
+    expect(csv.get('action')).toBe('admin_login_grant_enable')
+  })
+
+  it('keeps the list alert without the empty state after a failed read and a successful CSV export', async () => {
+    fetchMock.mockResolvedValueOnce(feedFail(503, 'fixture read unavailable'))
+    mountFeed()
+    await openFeed()
+    expect(host!.querySelector('[role="alert"]')?.textContent?.trim()).toBe('fixture read unavailable')
+    expect(host!.textContent).not.toContain('暂无权限审计记录')
+    fetchMock.mockResolvedValueOnce({ ok: true, blob: async () => new Blob(['csv']) })
+    await withCsvDownload(async () => {
+      clickText('导出权限审计 CSV')
+      await flush()
+    })
+    expect(String(fetchMock.mock.calls[1][0]).startsWith('/api/admin/audit-activity/export.csv?')).toBe(true)
+    expect(host!.textContent).not.toContain('暂无权限审计记录')
+    const alerts = [...host!.querySelectorAll('[role="alert"]')]
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0]?.textContent?.trim()).toBe('fixture read unavailable')
+  })
+
+  it('shows an export alert and keeps the rows without the empty state when the CSV export returns 500', async () => {
+    fetchMock.mockResolvedValueOnce(feedOk([
+      feedItem({ actor_id: 'fixture-export-row-actor', source_id: 'fixture-export-row' }),
+    ]))
+    mountFeed()
+    await openFeed()
+    expect(host!.querySelectorAll('tbody tr')).toHaveLength(1)
+    expect(host!.textContent).toContain('fixture-export-row-actor')
+    expect(host!.querySelector('[role="alert"]')).toBeNull()
+
+    fetchMock.mockResolvedValueOnce(feedFail(500, 'fixture csv export rejected'))
+    clickText('导出权限审计 CSV')
+    await flush()
+    expect(String(fetchMock.mock.calls[1][0]).startsWith('/api/admin/audit-activity/export.csv?')).toBe(true)
+    const alerts = [...host!.querySelectorAll('[role="alert"]')]
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0]?.textContent?.trim()).toBe('导出权限审计失败')
+    expect(host!.querySelectorAll('tbody tr')).toHaveLength(1)
+    expect(host!.textContent).toContain('fixture-export-row-actor')
+    expect(host!.textContent).not.toContain('暂无权限审计记录。')
+    expect(host!.textContent).not.toContain('fixture csv export rejected')
+    expect(host!.textContent).not.toContain('fixture-should-not-render')
+  })
+
+  it('shows only the export alert when the CSV export returns 500 after an empty successful read', async () => {
+    fetchMock.mockResolvedValueOnce(feedOk([], { total: 0 }))
+    mountFeed()
+    await openFeed()
+    expect(host!.querySelector('[role="alert"]')).toBeNull()
+    expect(host!.querySelectorAll('tbody tr')).toHaveLength(0)
+    expect(host!.textContent).toContain('暂无权限审计记录。')
+
+    fetchMock.mockResolvedValueOnce(feedFail(500, 'fixture csv export rejected'))
+    clickText('导出权限审计 CSV')
+    await flush()
+    expect(String(fetchMock.mock.calls[1][0]).startsWith('/api/admin/audit-activity/export.csv?')).toBe(true)
+    const alerts = [...host!.querySelectorAll('[role="alert"]')]
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0]?.textContent?.trim()).toBe('导出权限审计失败')
+    expect(alerts[0]?.textContent).not.toContain('fixture csv export rejected')
+    expect(alerts[0]?.textContent).not.toContain('加载权限审计失败')
+    const empty = [...host!.querySelectorAll('p')].find((el) => el.textContent?.includes('暂无权限审计记录。'))
+    expect(empty).toBeTruthy()
+    expect(empty).not.toBe(alerts[0])
+    expect(host!.querySelectorAll('tbody tr')).toHaveLength(0)
+    expect(host!.textContent).not.toContain('fixture-should-not-render')
+  })
+
+  it('shows separate list and export alerts without the empty state when the read returns 503 and the CSV export returns 500', async () => {
+    fetchMock.mockResolvedValueOnce(feedFail(503, 'fixture read unavailable'))
+    mountFeed()
+    await openFeed()
+    expect(host!.querySelector('[role="alert"]')?.textContent?.trim()).toBe('fixture read unavailable')
+    expect(host!.textContent).not.toContain('暂无权限审计记录。')
+
+    fetchMock.mockResolvedValueOnce(feedFail(500, 'fixture csv export rejected'))
+    clickText('导出权限审计 CSV')
+    await flush()
+    expect(String(fetchMock.mock.calls[1][0]).startsWith('/api/admin/audit-activity/export.csv?')).toBe(true)
+    const alerts = [...host!.querySelectorAll('[role="alert"]')]
+    expect(alerts).toHaveLength(2)
+    const listAlert = alerts.find((el) => el.textContent?.trim() === 'fixture read unavailable')
+    const exportAlert = alerts.find((el) => el.textContent?.trim() === '导出权限审计失败')
+    expect(listAlert).toBeTruthy()
+    expect(exportAlert).toBeTruthy()
+    expect(listAlert).not.toBe(exportAlert)
+    expect(host!.querySelectorAll('tbody tr')).toHaveLength(0)
+    expect(host!.textContent).not.toContain('暂无权限审计记录。')
+    expect(host!.textContent).not.toContain('fixture csv export rejected')
+    expect(host!.textContent).not.toContain('fixture-should-not-render')
+  })
+
+  it('clears the export alert after a later successful CSV export and keeps the list alert', async () => {
+    fetchMock.mockResolvedValueOnce(feedFail(503, 'fixture read unavailable'))
+    mountFeed()
+    await openFeed()
+    fetchMock.mockResolvedValueOnce(feedFail(500, 'fixture csv export rejected'))
+    clickText('导出权限审计 CSV')
+    await flush()
+    const during = [...host!.querySelectorAll('[role="alert"]')]
+    expect(during).toHaveLength(2)
+    const listAlert = during.find((el) => el.textContent?.trim() === 'fixture read unavailable')
+    const exportAlert = during.find((el) => el.textContent?.trim() === '导出权限审计失败')
+    expect(listAlert).toBeTruthy()
+    expect(exportAlert).toBeTruthy()
+    expect(listAlert).not.toBe(exportAlert)
+
+    fetchMock.mockResolvedValueOnce({ ok: true, blob: async () => new Blob(['csv']) })
+    await withCsvDownload(async () => {
+      clickText('导出权限审计 CSV')
+      await flush()
+    })
+    expect(String(fetchMock.mock.calls[2][0]).startsWith('/api/admin/audit-activity/export.csv?')).toBe(true)
+    const after = [...host!.querySelectorAll('[role="alert"]')]
+    expect(after).toHaveLength(1)
+    expect(after[0]?.textContent?.trim()).toBe('fixture read unavailable')
+    expect(host!.textContent).not.toContain('导出权限审计失败')
+    expect(host!.textContent).not.toContain('暂无权限审计记录。')
+    expect(host!.querySelectorAll('tbody tr')).toHaveLength(0)
   })
 })
