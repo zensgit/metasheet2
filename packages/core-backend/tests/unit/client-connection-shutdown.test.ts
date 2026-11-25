@@ -20,10 +20,10 @@
  *   U1s+ a client whose close throws does not keep the others open (both services).
  */
 import { EventEmitter } from 'node:events'
-import { readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { join } from 'node:path'
+import { join, relative, sep } from 'node:path'
 import ts from 'typescript'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -964,6 +964,57 @@ describe('U4c the fence and its mount, read from the syntax tree', () => {
     expect(corsAt).toBeGreaterThanOrEqual(0)
     const expected = ts.createSourceFile('expected.ts', DELEGATE, ts.ScriptTarget.ES2022, true)
     expect(printed(statements[corsAt + 1], index)).toBe(printed(expected.statements[0], expected))
+  })
+})
+
+/**
+ * Closed world of the instance: every statement in the deployable backend sources (src, core, types,
+ * scripts) that mentions `clientConnectionShutdown` — as a name or inside a text — is one of these six,
+ * compared whole and through the syntax tree (comments and layout aside). Anything that wraps, swaps
+ * or aliases the instance, at any moment, adds a statement or changes one of these and fails here.
+ */
+const INSTANCE_STATEMENTS = [
+  { file: 'src/index.ts', text: 'private readonly clientConnectionShutdown: ClientConnectionShutdown;' },
+  { file: 'src/index.ts', text: 'this.clientConnectionShutdown = createClientConnectionShutdown();' },
+  { file: 'src/index.ts', text: 'this.app.use((request, response, next) => this.clientConnectionShutdown.fence(request, response, next));' },
+  { file: 'src/index.ts', text: 'this.stopPromise ??= this.stopOnce(signal).finally(() => this.clientConnectionShutdown.finish());' },
+  { file: 'src/index.ts', text: 'return this.clientConnectionShutdown.begin({\n    httpServer: this.httpServer,\n    closeTransports: () => this.closeRealtimeTransportsForShutdown(),\n});' },
+  { file: 'src/index.ts', text: 'this.clientConnectionShutdown.arm(this.httpServer);' },
+]
+
+describe('closed world: every statement that mentions the instance', () => {
+  it('is exactly one of the six pinned statements, whole, in src/index.ts', () => {
+    const root = join(__dirname, '..', '..')
+    const name = 'clientConnectionShutdown'
+    const found: Array<{ file: string; text: string }> = []
+    const scanFile = (full: string): void => {
+      const text = readFileSync(full, 'utf8')
+      if (!text.includes(name)) return
+      const source = ts.createSourceFile(full, text, ts.ScriptTarget.ES2022, true)
+      const seen = new Set<number>()
+      walk(source, (node) => {
+        const hit = ts.isIdentifier(node) || ts.isPrivateIdentifier(node) ? node.text === name
+          : ts.isStringLiteralLike(node) && node.text.includes(name)
+        if (!hit) return
+        let statement: ts.Node = node
+        while (statement.parent && !(ts.isStatement(statement) || ts.isClassElement(statement))) statement = statement.parent
+        if (seen.has(statement.pos)) return
+        seen.add(statement.pos)
+        found.push({ file: relative(root, full).split(sep).join('/'), text: printed(statement, source) })
+      })
+    }
+    const scanDir = (dir: string): void => {
+      for (const entry of readdirSync(dir)) {
+        if (entry === 'node_modules' || entry === 'dist') continue
+        const full = join(dir, entry)
+        if (statSync(full).isDirectory()) scanDir(full)
+        else if (/\.(ts|mts|cts|js|mjs|cjs)$/.test(entry)) scanFile(full)
+      }
+    }
+    for (const top of ['src', 'core', 'types', 'scripts']) if (existsSync(join(root, top))) scanDir(join(root, top))
+    // Control: the scan sees the real declaration.
+    expect(found.length).toBeGreaterThan(0)
+    expect(found).toEqual(INSTANCE_STATEMENTS)
   })
 })
 

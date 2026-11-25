@@ -68,7 +68,9 @@ async function main(): Promise<void> {
     if (message?.type !== 'fence-source') return
     const served = (server as unknown as { clientConnectionShutdown: { fence: unknown } }).clientConnectionShutdown.fence
     const pinned = createClientConnectionShutdown().fence
-    tell({ type: 'fence-source', id: message.id, sameSource: typeof served === 'function' && String(served) === String(pinned) })
+    // Function.prototype.toString, not String(): a toString of the function's own or a Proxy trap cannot answer.
+    const source = (fn: unknown) => Function.prototype.toString.call(fn)
+    tell({ type: 'fence-source', id: message.id, sameSource: typeof served === 'function' && source(served) === source(pinned) })
   })
   tell({ type: 'ready', port: address.port })
 }
