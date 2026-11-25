@@ -16,6 +16,7 @@ import { createContainer } from './di/container'
 import { IConfigService, ILogger, ICollabService, ICoreAPI, IPluginLoader, ICollectionManager, IPLMAdapter, IAthenaAdapter, IDedupCADAdapter, ICADMLAdapter, IVisionAdapter, IFormulaService, ICommentService } from './di/identifiers'
 import { PluginLoader, type LoadedPlugin } from './core/plugin-loader'
 import { Logger, setLogContext } from './core/logger'
+import { createClientConnectionShutdown, type ClientConnectionShutdown, type ClientConnectionStop } from './lifecycle/client-connection-shutdown'
 import { dispatchElearningNotification, isElearningNotificationDispatchEnabled } from './services/elearning-notification-dispatch'
 import { collectElearningNotificationEvents, checkElearningEventNotificationEligibility } from './services/elearning-notification-events'
 import {
@@ -639,6 +640,8 @@ export class MetaSheetServer {
   private host?: string
   private portLocked: boolean
   private stopPromise: Promise<void> | null = null
+  // Client connections still open at the stop: one instance per server (lifecycle/client-connection-shutdown.ts).
+  private readonly clientConnectionShutdown: ClientConnectionShutdown
   private snapshotService: SnapshotService
   private observabilityShutdown?: () => Promise<void>
   private observabilityEnabled = false
@@ -753,6 +756,7 @@ export class MetaSheetServer {
     
     this.app = express()
     this.httpServer = createServer(this.app)
+    this.clientConnectionShutdown = createClientConnectionShutdown()
     this.eventBus = new EventEmitter()
     this.logger = new Logger('MetaSheetServer')
     this.portLocked = typeof options.port === 'number'
@@ -1895,6 +1899,11 @@ export class MetaSheetServer {
     this.app.use(cors({
       exposedHeaders: ['X-Correlation-ID', 'X-Method-Overridden', 'Retry-After'],
     }))
+
+    // Once the stop has begun, a request that arrives on a connection kept open is answered 503
+    // SERVER_STOPPING and its connection is closed; requests admitted before go on. After CORS, so a
+    // cross-origin page can read the answer.
+    this.app.use(this.clientConnectionShutdown.fence)
 
     // API responses should always opt out of MIME sniffing, including early 4xx replies.
     this.app.use('/api', (_req: Request, res: Response, next: NextFunction) => {
@@ -3990,6 +3999,34 @@ export class MetaSheetServer {
     return service.drainIntegrationJobs()
   }
 
+  /**
+   * The client connections still open at the stop (lifecycle/client-connection-shutdown.ts). Called
+   * right after the listener closed, in the same synchronous step; the server is read at this time
+   * because tests replace it. Without a precondition the transports are closed at once.
+   */
+  private closeClientConnectionsForShutdown(): ClientConnectionStop {
+    return this.clientConnectionShutdown.begin({
+      httpServer: this.httpServer,
+      closeTransports: () => this.closeRealtimeTransportsForShutdown(),
+    })
+  }
+
+  /** Both realtime servers: every transport gets its standard close. A failure is logged without values. */
+  private closeRealtimeTransportsForShutdown(): number {
+    let closed = 0
+    try {
+      closed += this.injector.get(ICollabService).closeTransportsForShutdown()
+    } catch {
+      this.logger.warn('Collaboration transport close at shutdown failed')
+    }
+    try {
+      closed += this.metricsStreamService?.closeTransportsForShutdown() ?? 0
+    } catch {
+      this.logger.warn('Metrics stream transport close at shutdown failed')
+    }
+    return closed
+  }
+
   private async stopOnce(signal: string): Promise<void> {
     // Latch/abort synchronously, then await below before DB teardown. PluginLoader
     // unloadAll does not await its hooks and is not an adequate draining barrier.
@@ -4003,6 +4040,9 @@ export class MetaSheetServer {
     // completion listeners remain attached, so a terminal event emitted by already-admitted work is not lost.
     const approvalProducerDrains: Array<Promise<unknown>> = []
     approvalProducerDrains.push(this.observeShutdownTask(this.closeHttpServerForShutdown()))
+    // Right after the listener closed: the client connections still open are ended, so they cannot
+    // hold the producer barrier. Its timers are cleared on every exit below.
+    const clientConnections = this.closeClientConnectionsForShutdown()
     approvalProducerDrains.push(this.observeShutdownTask(stopApprovalSlaScheduler()))
     if (this.automationService) {
       approvalProducerDrains.push(this.observeShutdownTask(this.automationService.stopProducerAdmissions()))
@@ -4308,7 +4348,12 @@ export class MetaSheetServer {
       shutdownTasks,
       'SHUTDOWN_TIMEOUT',
       'Shutdown timeout; database pool left open',
-    )
+    ).catch((error: unknown) => {
+      clientConnections.finish()
+      throw error
+    })
+    // Every later exit, thrown or not, comes after this point.
+    clientConnections.finish()
 
     if (recoveryArchiveWorkerStopFailed) {
       throw new Error('RECOVERY_ARCHIVE_RESTORE_WORKER_STOP_FAILED')
@@ -5501,6 +5546,11 @@ export class MetaSheetServer {
     } catch (e) {
       this.logger.error('Failed to initialize MetricsStreamService', e as Error)
     }
+
+    // Both realtime servers are attached: from here on every connection they take over is tracked, so
+    // the stop can end one that does not answer the close of its transport. When neither took the
+    // upgrade (its start failed), nothing is tracked and such a request keeps its present answer.
+    this.clientConnectionShutdown.arm(this.httpServer)
 
     // Initialize optional DingTalk interactive-card Stream worker (B-1 skeleton; default disabled).
     try {

@@ -149,6 +149,18 @@ export class MetricsStreamService {
     this.logger.info('MetricsStreamService shut down')
   }
 
+  /**
+   * Stop of the server only: closes the transport of every connection of this server with its
+   * standard close, which writes the packets already queued first. Sends nothing else; `shutdown()`
+   * is unchanged. Returns how many transports were closed.
+   */
+  closeTransportsForShutdown(): number {
+    const engine = this.io?.engine as unknown as { clients?: Record<string, { close(): unknown }> } | undefined
+    const clients = Object.values(engine?.clients ?? {})
+    for (const client of clients) client.close()
+    return clients.length
+  }
+
   // -----------------------------------------------------------------------
   // Connection handling
   // -----------------------------------------------------------------------

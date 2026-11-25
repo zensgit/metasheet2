@@ -71,6 +71,8 @@ export interface ICollabService {
   getRoomMembers(room: string): Promise<string[]>;
   /** Return user IDs that currently joined the comment inbox stream. */
   getCommentInboxSubscriberIds(): string[];
+  /** Stop of the server only: closes every transport with its standard close; returns how many. */
+  closeTransportsForShutdown(): number;
 }
 
 export interface ICollectionManager {
