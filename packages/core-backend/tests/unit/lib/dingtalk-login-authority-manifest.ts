@@ -60,9 +60,6 @@ export const loginAuthorityManifest: Record<string, string[]> = {
   "packages/core-backend/scripts/verify-timemachine-workbench.mts": [
     "module > dynamic delete from [table]",
   ],
-  "packages/core-backend/src/.~76fad745edcab853-76FAD745EDCAB853!s9731e18f396d4a8782e5735ca099c4ee-f78bbb.insyncdl": [
-    "data blob 86b8cc584e07a18002663f618937d1798a31a14b",
-  ],
   "packages/core-backend/src/admin/user-recycle.ts": [
     "applyRecyclePurge > delete user_external_identities",
     "applyRecyclePurge > scrubPurgedUserIdentity",
@@ -502,9 +499,6 @@ export const loginAuthorityManifest: Record<string, string[]> = {
   ],
   "plugins/plugin-integration-core/scripts/run-gip-sqlserver-snapshot-page-sequence-executor.cjs": [
     "prepareFixture > dynamic insert into [TABLE, TABLE]",
-  ],
-  "scripts/.~76fad745edcab853-76FAD745EDCAB853!sf9d263dcd5a04d8396a0912a9c54e0ec-5e53c7.insyncdl": [
-    "data blob 0ec5f9862d1e2f1fc9b68f1b6f78bba708176dc0",
   ],
   "scripts/auto-checkpoints-scheduler.sh": [
     "script > load JWT library",
