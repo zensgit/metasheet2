@@ -1,0 +1,81 @@
+-- ============================================================================
+-- s06-new-migrations.sql - have the {{MIGRATIONS_NEW}} package-3 migrations run? (install
+-- sheet steps 6, 20 failure state, 23.3, 23.4 and rollback; read-only)
+-- DRAFT TEMPLATE - not approved, not for sending. Filled at cut time by gen-counts.mjs:
+--   package {{PACKAGE_LABEL}} over baseline {{BASELINE_LABEL}}; names sha256 {{MIGRATIONS_NAMES_SHA256}}
+-- ============================================================================
+-- Same shape as the R85 file (qa-visit-2/send/sql/s06-new-migrations.sql): the name ARRAY and
+-- the EXISTS predicate, one closed line per name, BEGIN READ ONLY ... ROLLBACK, and the
+-- kysely_migration row count. Only the names and the expected numbers come from the generator.
+--
+-- RUN (the same contract as the A1-A3 packs; see _preamble.sql):
+--   psql "$READONLY_DATABASE_URL" -X -q -v schema=public -f s06-new-migrations.sql
+--
+-- OUTPUT (names are fixed migration file names from the repository, never a site value):
+--   MIG_NEW migration=<name> applied=t|f            {{MIGRATIONS_NEW}} lines, sorted by name
+--   MIG_SUMMARY names={{MIGRATIONS_NEW}} applied_t=<n> applied_f=<n>
+--   MIG_COUNT kysely_migration=<n>
+--   MIG_NAMESET ledger=baseline|total|other        (RECOMMENDED line, judge count-mechanism ruling)
+--   then the LAST line
+--   MIG_RESULT file=s06-new-migrations.sql status=complete
+-- Before the install ({{BASELINE_LABEL}}): applied_t=0, applied_f={{MIGRATIONS_NEW}}, count {{MIGRATIONS_BASELINE}}.
+-- After the install: applied_t={{MIGRATIONS_NEW}}, applied_f=0, count {{MIGRATIONS_TOTAL}}.
+-- After a failed migration step (sheet step 20, state C): applied_t=0, count {{MIGRATIONS_BASELINE}}.
+-- MIG_NAMESET (RECOMMENDED; the coordinator decides whether the sheet stops on it): the md5 of the
+-- ledger's whole name set (sorted with COLLATE "C", LF-joined) compared IN THE DATABASE with two
+-- cut-time tokens; only a word is printed, never the digest. ledger=baseline: the ledger holds exactly
+-- the {{BASELINE_LABEL}} names; ledger=total: exactly the {{PACKAGE_LABEL}} names; ledger=other: an
+-- extra, renamed or missing row. MIG_COUNT alone misses an extra row and a missing row that cancel out:
+-- an extra or renamed row aborts step 20 before anything runs (kysely migrator.js:439-440 and migrator.js:484-490,
+-- state C); a missing baseline name runs silently inside the batch (migrate.ts:34
+-- allowUnorderedMigrations: true).
+-- Expect: before the install ledger=baseline; after a good install ledger=total; after state C
+-- ledger=baseline; after a rollback the same word as the last s06 run before the rollback.
+-- A run with no MIG_RESULT line did not finish. Never read a missing line as
+-- "nothing to report".
+-- ============================================================================
+
+\ir _preamble.sql
+\pset tuples_only on
+\pset format unaligned
+
+SELECT to_regclass('kysely_migration') IS NOT NULL AS mig_has_table \gset
+\if :mig_has_table
+\else
+  SELECT 'MIG_RESULT file=s06-new-migrations.sql status=incomplete reason=table_missing';
+  \quit
+\endif
+SELECT has_table_privilege(to_regclass('kysely_migration'), 'SELECT') AS mig_can_select \gset
+\if :mig_can_select
+\else
+  SELECT 'MIG_RESULT file=s06-new-migrations.sql status=incomplete reason=no_select';
+  \quit
+\endif
+
+BEGIN READ ONLY;
+WITH q AS (
+  SELECT n AS migration, EXISTS (SELECT 1 FROM kysely_migration k WHERE k.name = n) AS applied
+    FROM unnest(ARRAY[
+{{MIGRATIONS_NEW_SQL_ARRAY}}
+    ]) AS n
+), lines AS (
+  SELECT 1 AS ord, migration AS k,
+         format('MIG_NEW migration=%s applied=%s', migration, CASE WHEN applied THEN 't' ELSE 'f' END) AS line
+    FROM q
+  UNION ALL
+  SELECT 2, '',
+         format('MIG_SUMMARY names=%s applied_t=%s applied_f=%s',
+                count(*), count(*) FILTER (WHERE applied), count(*) FILTER (WHERE NOT applied))
+    FROM q
+)
+SELECT line FROM lines ORDER BY ord, k;
+SELECT format('MIG_COUNT kysely_migration=%s', (SELECT count(*) FROM kysely_migration));
+SELECT format('MIG_NAMESET ledger=%s',
+       CASE md5(coalesce(string_agg(name, E'\n' ORDER BY name COLLATE "C"), ''))
+         WHEN '{{MIGRATIONS_BASELINE_NAMES_MD5}}' THEN 'baseline'
+         WHEN '{{MIGRATIONS_TOTAL_NAMES_MD5}}' THEN 'total'
+         ELSE 'other' END)
+  FROM kysely_migration;
+ROLLBACK;
+
+SELECT 'MIG_RESULT file=s06-new-migrations.sql status=complete';
