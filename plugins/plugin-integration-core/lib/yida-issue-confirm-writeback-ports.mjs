@@ -262,7 +262,11 @@ export function createIssueConfirmWritebackCapability(options = {}) {
       return guard.withHostWrite(() => db.transaction(async (trx) => {
         await trx.setTransactionIsolationLevel('read committed')
         await projectWriteLock.assertHolderWithin(trx, fence.scopeKey, fence)
-        return createIssueConfirmTraceStore({ db: trx }).record(row)
+        // The locked lease row excludes every other project-dependent outcome for this bound sheet.
+        if (await trx.selectOne(ISSUE_CONFIRM_TRACE_TABLE, { ledger_id: row.ledger_id })) return { recorded: false }
+        const [inserted] = rowsOf(await trx.insertOne(ISSUE_CONFIRM_TRACE_TABLE, row))
+        if (inserted?.ledger_id !== row.ledger_id) throw unavailable('the trace insert did not return its ledger id')
+        return { recorded: true }
       }))
     },
   })

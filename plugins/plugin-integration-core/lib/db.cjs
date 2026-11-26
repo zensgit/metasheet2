@@ -663,7 +663,6 @@ function createDb({ database, logger } = {}) {
         selectOneForUpdate: scoped.selectOneForUpdate,
         selectOneForKeyShare: scoped.selectOneForKeyShare,
         insertOne: scoped.insertOne,
-        insertOneIfAbsent: scoped.insertOneIfAbsent,
         upsertOne: scoped.upsertOne,
         insertMany: scoped.insertMany,
         updateRow: scoped.updateRow,
