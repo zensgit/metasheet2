@@ -250,7 +250,8 @@ function makeFakeDb(options: {
       state[key] = rows.filter((row) => !removed.includes(row))
       return { rows: removed.map((row) => ({ admin_user_id: row.admin_user_id })), rowCount: removed.length }
     }
-    if (/^SELECT user_id FROM user_roles WHERE role_id=/i.test(norm)) {
+    // The route's member snapshot (`role_id=$1`) and the ordinary role writer's own read (`role_id = $1`).
+    if (/^SELECT user_id FROM user_roles WHERE role_id ?= ?\$1$/i.test(norm)) {
       const members = state.members.get(String(params[0])) || []
       return { rows: members.map((user_id) => ({ user_id })), rowCount: members.length }
     }
@@ -1654,6 +1655,13 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
     expect(bump).toBeGreaterThan(memberRead)
     expect(bump).toBeLessThan(roleDelete)
     expect(db.statements[bump]?.params).toEqual([['user-a', 'user-b']])
+    // One version-row statement on this path, and it precedes the membership DELETE: the DELETE's
+    // trigger then retakes rows the transaction already holds.
+    const memberDelete = statements.findIndex((sql) => /^DELETE FROM user_roles/i.test(sql))
+    expect(statements.filter((sql) => /^INSERT INTO subject_authorization_versions/i.test(sql))).toHaveLength(1)
+    expect(memberDelete).toBeGreaterThan(0)
+    expect(bump).toBeLessThan(memberDelete)
+    expect(db.statements[bump]?.via).toBe('client')
   })
 
   it('ATOMIC: a failure in the audience cleanup rolls back the membership removal and keeps the role', async () => {
@@ -1819,6 +1827,10 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
 
     expect(res.statusCode).toBe(200)
     expect(db.membersOf('role-1')).toEqual([])
+    // The writer's own read sees both members, so its one sorted version-row statement covers both.
+    expect(db.statements
+      .filter(({ sql }) => /^INSERT INTO subject_authorization_versions/i.test(sql.replace(/\s+/g, ' ').trim()))
+      .map(({ params }) => params)).toEqual([[['user-a', 'user-b']]])
     expect(rbacServiceMocks.invalidateUserPerms.mock.calls.map((call) => call[0]).sort()).toEqual(['user-a', 'user-b'])
     const entries = writeAuditEntries() as Array<{ meta?: Record<string, unknown> }>
     expect(entries).toHaveLength(1)

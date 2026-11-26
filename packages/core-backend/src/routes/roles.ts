@@ -926,15 +926,14 @@ export function rolesRouter(): Router {
           const removesOrdinaryRole = !protection && before !== null
           // D21 (Y5a): every member's subject authorization version row, in one sorted statement,
           // before the role row goes and with it the `roles → user_roles` cascade where that FK
-          // exists, and before an ordinary role's membership rows go (the member delete below
-          // would otherwise take the rows in scan order through the trigger). It sits AFTER the
-          // namespace-admission locks above (the writer rule: locks outside the admission
-          // holder's set first, then the version row). A protected role took those locks and
-          // these same rows inside lockRoleCatalogAuthority, and its membership removal took the
-          // rows again inside unassignUserRoles; here they are held. An ordinary role takes no
-          // admission lock and takes the version rows now. Only on the path that deletes the
-          // role: a request for a role that is not there writes nothing.
-          if (removesProtectedMemberships || removesOrdinaryRole) {
+          // exists. It sits AFTER the namespace-admission locks above (the writer rule: locks
+          // outside the admission holder's set first, then the version row). A protected role took
+          // those locks and these same rows inside lockRoleCatalogAuthority, and its membership
+          // removal took the rows again inside unassignUserRoles; here they are held. An ordinary
+          // role takes no admission lock; unassignOrdinaryRoleMembers takes its members' version
+          // rows, sorted, in one statement before its membership DELETE, so that is the ordinary
+          // path's only version-row statement. A request for a role that is not there writes nothing.
+          if (removesProtectedMemberships) {
             await bumpSubjectAuthorizationVersions(client, memberIds)
           }
           if (removesOrdinaryRole) {

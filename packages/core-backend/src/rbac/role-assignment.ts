@@ -676,6 +676,14 @@ export async function unassignOrdinaryRoleMembers(
   if (!roleId || roleId === 'admin' || deriveDelegatedAdminNamespace(roleId) !== null) {
     throw new Error('Invalid ordinary role deletion target')
   }
+  // D21 (Y5a): the subject version rows of the role's current members, sorted, in one statement,
+  // before the membership DELETE, so the DELETE's trigger retakes rows this transaction holds. The
+  // DELETE below still removes every membership of the role, including one committed after this read.
+  const members = await executor.query(
+    'SELECT user_id FROM user_roles WHERE role_id = $1',
+    [roleId],
+  )
+  await bumpSubjectAuthorizationVersions(executor, readAffectedUserIds(members.rows))
   const result = await executor.query(
     'DELETE FROM user_roles WHERE role_id = $1 RETURNING user_id',
     [roleId],

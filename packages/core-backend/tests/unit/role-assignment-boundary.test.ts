@@ -426,18 +426,32 @@ describe('rbac/role-assignment — unassignOrdinaryRoleMembers removes exactly o
     expect(calls).toEqual([])
 
     // POSITIVE CONTROL — an ordinary id reaches the executor, so "no statements" above is a refusal.
+    // With no member read back there is no version row to take: the member read, then the DELETE.
     await unassignOrdinaryRoleMembers(executor, 'role-1')
-    expect(calls).toHaveLength(1)
+    expect(calls.map(({ sql }) => sql)).toEqual([
+      'SELECT user_id FROM user_roles WHERE role_id = $1',
+      'DELETE FROM user_roles WHERE role_id = $1 RETURNING user_id',
+    ])
   })
 
-  it('deletes by the id exactly as given, with one statement on the executor it was handed', async () => {
-    const { calls, executor } = recordingExecutor()
+  it('reads the members, takes their version rows sorted in one statement, then deletes, by the id exactly as given, on the executor it was handed', async () => {
+    const calls: Array<{ sql: string; params: unknown[] }> = []
+    const executor = {
+      query: async (sql: string, params?: unknown[]) => {
+        calls.push({ sql, params: params ?? [] })
+        return /^SELECT user_id FROM user_roles/.test(sql)
+          ? { rows: [{ user_id: 'user-b' }, { user_id: 'user-a' }], rowCount: 2 }
+          : { rows: [], rowCount: 0 }
+      },
+    }
 
     await unassignOrdinaryRoleMembers(executor, ' role-1 ')
 
-    expect(calls).toEqual([
-      { sql: 'DELETE FROM user_roles WHERE role_id = $1 RETURNING user_id', params: [' role-1 '] },
-    ])
+    expect(calls).toHaveLength(3)
+    expect(calls[0]).toEqual({ sql: 'SELECT user_id FROM user_roles WHERE role_id = $1', params: [' role-1 '] })
+    expect(calls[1].sql).toMatch(/^INSERT INTO subject_authorization_versions\b/)
+    expect(calls[1].params).toEqual([['user-a', 'user-b']])
+    expect(calls[2]).toEqual({ sql: 'DELETE FROM user_roles WHERE role_id = $1 RETURNING user_id', params: [' role-1 '] })
   })
 
   it('reports the users and the row count the removal returned', async () => {
