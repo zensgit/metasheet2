@@ -6,10 +6,12 @@
 #   optional: -Keys 'KEY_A,KEY_B'   (default: the 27 keys of install sheet steps 3 and 4)
 #   optional: -ScheduledTaskName 'MetaSheet-PM2'
 #
-# On the demo host, leave PM2_HOME unset. 02 and 03 then use <profile>\.pm2-runtime
-# when that directory exists and exactly one MetaSheet-PM2 task exists. Or set
-# PM2_HOME to that same runtime home before both scripts. Do not create pm2.pid.
-# Do not start pm2. Re-running attendance-onprem-start-pm2.ps1 does not create a God.
+# On the demo host, leave PM2_HOME unset. 02 and 03 keep <profile>\.pm2 when that
+# tree already holds pm2.pid, dump.pm2, or an app pid file. They use
+# <profile>\.pm2-runtime only when that confirmed default tree is absent and
+# exactly one MetaSheet-PM2 task exists. Or set PM2_HOME before both scripts.
+# Do not create pm2.pid. Do not start pm2. A live node.exe named by pm2.pid is
+# not a God unless its command line is pm2\lib\Daemon.js.
 #
 # WHY: a key deleted from app.env can stay in the running backend. pm2 restart --update-env
 # merges the variables present at restart time and does not drop a variable that is no
@@ -17,13 +19,16 @@
 # alone does not tell what the backend reads.
 #
 # HOW process env is read:
-#   god          <PM2_HOME>\pm2.pid names a live node.exe owned by this account AND
-#                \\.\pipe\rpc.sock is already present. Then ONE `pm2 jlist`.
-#   pm2-runtime  no live owned pm2.pid, but the MetaSheet-PM2 task + pm2-runtime process
-#                described in 02-pm2-owner-check.ps1 are live and owned, the app's parent
-#                is that pm2-runtime, the pipe is already present, and the home is already
-#                initialized (so the pm2 client creates no directory or file). Then ONE
-#                `pm2 jlist`, with PM2_HOME set to that home for the child only.
+#   god          pm2.pid names this account's live Daemon.js, the app pid is live and
+#                owned and is not a child of pm2-runtime, and the pipe is already
+#                present. Then ONE `pm2 jlist`. A non-God node in pm2.pid does not
+#                qualify, and jlist is not run for a God that does not own the app.
+#   pm2-runtime  the MetaSheet-PM2 task and pm2-runtime process in 02 are live and
+#                owned, the app's parent is that pm2-runtime, the pipe is already
+#                present, and the home is already initialized (so the pm2 client
+#                creates no directory or file). Then ONE `pm2 jlist`, with PM2_HOME
+#                set to that home for the child only. A non-God pm2.pid does not
+#                hide this path.
 #   otherwise    NO pm2 command. A pm2 command with nobody listening starts an empty God.
 # pm2 is <install root>\node_modules\.bin\pm2.cmd when present, else pm2.cmd on PATH,
 # searched after the same Windows folders the start script prepends. `pm2 jlist` is read
@@ -47,7 +52,7 @@
 # OUTPUT (closed lines only; never a path, account, PID, command line or value):
 #   LIVEENV_FILE root=found|absent docker=found|absent start_script_uses=root|docker|none
 #   LIVEENV_DBURL relation=same|differs|root_absent|docker_absent
-#   LIVEENV_PM2 pm2_home_set=true|false daemon_alive=true|false daemon_owner_is_current_user=true|false|unknown pm2_cmd=local|path|none read=ok|skipped|failed app_matches=<n>|- hosting=god|pm2-runtime|none rpc_pipe=present|absent|unknown
+#   LIVEENV_PM2 pm2_home_set=true|false daemon_alive=true|false daemon_class=god|other|unknown|none daemon_owner_is_current_user=true|false|unknown pm2_cmd=local|path|none read=ok|skipped|failed app_matches=<n>|- hosting=god|pm2-runtime|none rpc_pipe=present|absent|unknown
 #       daemon_alive is the pm2.pid fact. On pm2-runtime it stays false while hosting=pm2-runtime and read=ok.
 #   LIVEENV_DBURL_PROCESS process=same|differs|absent|unknown
 #   LIVEENV key=<KEY> process=<w> root=<w> docker=<w> machine=<w> user=<w> dup=none|same|differs pdup=none|same|differs
@@ -58,7 +63,7 @@
 # reasons: install_root_not_found, bad_key, no_daemon, daemon_not_owned, owner_unreadable,
 # pm2_not_found, pm2_timeout, pm2_failed, parse_failed, app_count, env_not_visible,
 # parser_unavailable, read_error, pipe_unknown, stray_daemon, host_ambiguous,
-# task_not_running, app_not_under_runtime, pm2_home_not_initialized.
+# task_not_running, app_not_under_runtime, app_not_under_god, pm2_home_not_initialized.
 #
 # -CiProbe (CI only, never on site): JSON fixture for the process table, the task and the
 # pipe. The first line is then LIVEENV_PROBE ci=true. A log that contains LIVEENV_PROBE
@@ -222,7 +227,7 @@ function Invoke-LiveEnvCheck {
       }
     }
 
-    'LIVEENV_PM2 pm2_home_set={0} daemon_alive={1} daemon_owner_is_current_user={2} pm2_cmd={3} read={4} app_matches={5} hosting={6} rpc_pipe={7}' -f (Format-LiveEnvBool ([bool]$facts.HomeSet)), (Format-LiveEnvBool ([bool]$facts.DaemonAlive)), [string]$facts.DaemonOwner, [string]$pm2Cmd.Kind, $readState, $appMatches, [string]$decision.Hosting, [string]$facts.Pipe
+    'LIVEENV_PM2 pm2_home_set={0} daemon_alive={1} daemon_class={2} daemon_owner_is_current_user={3} pm2_cmd={4} read={5} app_matches={6} hosting={7} rpc_pipe={8}' -f (Format-LiveEnvBool ([bool]$facts.HomeSet)), (Format-LiveEnvBool ([bool]$facts.DaemonAlive)), [string]$facts.DaemonClass, [string]$facts.DaemonOwner, [string]$pm2Cmd.Kind, $readState, $appMatches, [string]$decision.Hosting, [string]$facts.Pipe
 
     $bags = @()
     if ($null -ne $pm2Env) {

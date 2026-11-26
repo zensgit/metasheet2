@@ -7,24 +7,28 @@
 # owned=true covers two supported hosts. Both are checked from files, the process
 # table and the scheduled task. This script never runs pm2: a pm2 command with
 # nobody listening starts a new empty God.
-#   god          <PM2_HOME>\pm2.pid names a live node.exe owned by this account,
-#                the app pid is live and owned, and \\.\pipe\rpc.sock is present.
-#   pm2-runtime  the demo host. No pm2.pid. Exactly one scheduled task
-#                -ScheduledTaskName (default MetaSheet-PM2) is owned by this
-#                account and is Running or Ready; exactly one node.exe owned by
-#                this account has a pm2-runtime / Runtime4Docker command line; the
-#                live app pid's parent is that process; the pipe is present; no
-#                other node.exe is pm2\lib\Daemon.js; the home already has logs\,
-#                pids\, modules\ and module_conf.json.
-# PM2_HOME when set is the home. When unset, <profile>\.pm2-runtime is used if
-# that directory exists and the one task exists; otherwise <profile>\.pm2.
-# Run 03 only after this script prints owned=true status=complete.
+#   god          <PM2_HOME>\pm2.pid names a live node.exe whose command line is
+#                pm2\lib\Daemon.js, owned by this account; the app pid is live
+#                and owned and is not a child of pm2-runtime; the pipe is present.
+#                Any other live node.exe is not a God.
+#   pm2-runtime  exactly one scheduled task -ScheduledTaskName (default
+#                MetaSheet-PM2) is owned by this account and Running or Ready;
+#                exactly one node.exe owned by this account has a pm2-runtime /
+#                Runtime4Docker command line; the live app pid's parent is that
+#                process; the pipe is present; no Daemon.js is in the way; the
+#                home already has logs\, pids\, modules\ and module_conf.json.
+# PM2_HOME when set is the home. When unset, <profile>\.pm2 is kept if it already
+# holds pm2.pid, dump.pm2, or an app pid file. <profile>\.pm2-runtime is used only
+# when that confirmed default tree is absent and the one task exists.
+# A non-God pm2.pid does not hide the pm2-runtime path. This script never runs
+# pm2. Run 03 only after owned=true status=complete. 03 runs jlist only then.
 #
 # OUTPUT: closed lines only. Never a path, account, PID, command line or value.
 #   PM2OWNER pm2_home_set=true|false
 #   PM2OWNER pm2_home_exists=true|false
 #   PM2OWNER daemon_pid_file=true|false
-#   PM2OWNER daemon_alive=true|false          pm2.pid only; false on pm2-runtime
+#   PM2OWNER daemon_alive=true|false          pm2.pid names a live node.exe
+#   PM2OWNER daemon_class=god|other|unknown|none
 #   PM2OWNER daemon_owner_is_current_user=true|false|unknown
 #   PM2OWNER app_pid_file=true|false
 #   PM2OWNER app_alive=true|false
@@ -42,7 +46,7 @@
 # A run with no PM2OWNER_RESULT line did not finish. Never read a missing line as true.
 # status=incomplete reasons: owner_unreadable, no_pm2_process, read_error, no_daemon,
 # pipe_unknown, stray_daemon, host_ambiguous, task_not_running, app_not_under_runtime,
-# pm2_home_not_initialized.
+# app_not_under_god, pm2_home_not_initialized.
 # status=complete owned=false means the check was read and this account is not the
 # owner (historical). Do not run 03 unless owned=true.
 #
@@ -73,6 +77,7 @@ function Invoke-Pm2OwnerCheck {
     'PM2OWNER pm2_home_exists=' + (Format-LiveEnvBool ([bool]$facts.HomeExists))
     'PM2OWNER daemon_pid_file=' + (Format-LiveEnvBool ([bool]$facts.DaemonPidFile))
     'PM2OWNER daemon_alive=' + (Format-LiveEnvBool ([bool]$facts.DaemonAlive))
+    'PM2OWNER daemon_class=' + [string]$facts.DaemonClass
     'PM2OWNER daemon_owner_is_current_user=' + [string]$facts.DaemonOwner
     'PM2OWNER app_pid_file=' + (Format-LiveEnvBool ([bool]$facts.AppPidFile))
     'PM2OWNER app_alive=' + (Format-LiveEnvBool ([bool]$facts.AppAlive))

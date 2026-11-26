@@ -243,6 +243,7 @@ function runtimeFacts(overrides = {}) {
     HomeInitialized: true,
     DaemonPidFile: false,
     DaemonAlive: false,
+    DaemonClass: 'none',
     DaemonOwner: 'false',
     AppPidFile: true,
     AppAlive: true,
@@ -268,6 +269,7 @@ function godFacts(overrides = {}) {
     HomeInitialized: false,
     DaemonPidFile: true,
     DaemonAlive: true,
+    DaemonClass: 'god',
     DaemonOwner: 'true',
     AppPidFile: true,
     AppAlive: true,
@@ -285,6 +287,34 @@ function godFacts(overrides = {}) {
     ...overrides,
   }
 }
+
+test('hosting decision: a live non-God pid does not hide pm2-runtime and does not run jlist by itself', () => {
+  const hidden = decide(runtimeFacts({
+    DaemonPidFile: true,
+    DaemonAlive: true,
+    DaemonClass: 'other',
+    DaemonOwner: 'true',
+  }))
+  assert.equal(hidden.hosting, 'pm2-runtime')
+  assert.equal(hidden.runJlist, true)
+  assert.equal(hidden.owned, true)
+  const alone = decide(godFacts({
+    DaemonClass: 'other',
+    AppAlive: false,
+    AppPidFile: false,
+    AppOwner: 'false',
+    RuntimeTask: 'absent',
+    RuntimeProcessCount: 0,
+    RuntimeProcessOwner: 'none',
+  }))
+  assert.notEqual(alone.hosting, 'god')
+  assert.equal(alone.runJlist, false)
+  assert.equal(alone.owned, false)
+  const realGodWithoutApp = decide(godFacts({ AppAlive: false, AppPidFile: false, AppOwner: 'false' }))
+  assert.notEqual(realGodWithoutApp.hosting, 'god')
+  assert.equal(realGodWithoutApp.runJlist, false)
+  assert.equal(realGodWithoutApp.reason, 'app_not_under_god')
+})
 
 test('hosting decision: God with a live pid and a present pipe may jlist; a missing pipe may not', () => {
   const ready = decide(godFacts())
@@ -458,6 +488,106 @@ scenario('(b) a stale pm2.pid that names no live process does not hide the runti
   assert.match(line(live.stdout, 'LIVEENV_PM2'), /daemon_alive=false/)
   assert.match(line(live.stdout, 'LIVEENV_PM2'), /hosting=pm2-runtime/)
   assert.equal(resultLine(live.stdout, 'LIVEENV_RESULT'), 'LIVEENV_RESULT keys=1 status=complete')
+})
+
+scenario('a live non-God pm2.pid does not classify as god and still accepts pm2-runtime', (scratch) => {
+  const home = path.join(scratch, 'profile', '.pm2-runtime')
+  const root = path.join(scratch, 'install')
+  initHome(home, { godPid: PID_STRAY, appPid: PID_APP, initialized: true })
+  writeInstall(root)
+  const probe = runtimeProbe()
+  probe.processes.push(processRow({
+    processId: PID_STRAY,
+    parentProcessId: 4,
+    commandLine: 'node.exe CMDLINE_SHOULD_NOT_PRINT worker.js',
+  }))
+  writeProbe(path.join(scratch, 'probe.json'), probe)
+  const env = baseEnv(scratch, { pm2Home: home })
+  const owner = runFile(ownerPath, ['-CiProbe', path.join(scratch, 'probe.json')], env)
+  assert.equal(owner.status, 0, owner.stderr + owner.stdout)
+  assert.match(line(owner.stdout, 'PM2OWNER daemon_alive='), /daemon_alive=true/)
+  assert.match(line(owner.stdout, 'PM2OWNER daemon_class='), /daemon_class=other/)
+  assert.match(line(owner.stdout, 'PM2OWNER hosting='), /hosting=pm2-runtime/)
+  assert.equal(resultLine(owner.stdout, 'PM2OWNER_RESULT'), 'PM2OWNER_RESULT owned=true status=complete')
+  const live = runFile(livePath, ['-InstallRoot', root, '-CiProbe', path.join(scratch, 'probe.json'), '-Keys', 'NODE_ENV'], env)
+  assert.equal(live.status, 0, live.stderr + live.stdout)
+  assert.match(line(live.stdout, 'LIVEENV_PM2'), /daemon_class=other/)
+  assert.match(line(live.stdout, 'LIVEENV_PM2'), /hosting=pm2-runtime/)
+  assert.match(line(live.stdout, 'LIVEENV_PM2'), /read=ok/)
+  assert.deepEqual(readLog(env.LIVEENV_TEST_LOG).filter((item) => item.startsWith('argv=')), ['argv=jlist'])
+  assertNoLeaks(owner.stdout + live.stdout, 'non-god pid')
+})
+
+scenario('a live non-God pm2.pid with no runtime host does not run jlist', (scratch) => {
+  const home = path.join(scratch, 'profile', '.pm2')
+  const root = path.join(scratch, 'install')
+  initHome(home, { godPid: PID_STRAY, initialized: true })
+  writeInstall(root)
+  writeProbe(path.join(scratch, 'probe.json'), {
+    currentUser: ME,
+    pipe: 'present',
+    processes: [processRow({
+      processId: PID_STRAY,
+      parentProcessId: 4,
+      commandLine: 'node.exe CMDLINE_SHOULD_NOT_PRINT worker.js',
+    })],
+    tasks: [],
+  })
+  const env = baseEnv(scratch, { pm2Home: home })
+  const live = runFile(livePath, ['-InstallRoot', root, '-CiProbe', path.join(scratch, 'probe.json'), '-Keys', 'NODE_ENV'], env)
+  assert.equal(live.status, 2, live.stdout)
+  assert.doesNotMatch(line(live.stdout, 'LIVEENV_PM2'), /hosting=god/)
+  assert.match(line(live.stdout, 'LIVEENV_PM2'), /read=skipped/)
+  assert.match(keyLine(live.stdout, 'NODE_ENV'), /process=unknown/)
+  assert.deepEqual(readLog(env.LIVEENV_TEST_LOG), [])
+  assertNoLeaks(live.stdout, 'non-god alone')
+})
+
+scenario('PM2_HOME unset keeps a confirmed .pm2 tree when .pm2-runtime also exists', (scratch) => {
+  const profile = path.join(scratch, 'profile')
+  const dotPm2 = path.join(profile, '.pm2')
+  const runtime = path.join(profile, '.pm2-runtime')
+  const root = path.join(scratch, 'install')
+  initHome(dotPm2, { appPid: PID_APP, initialized: true })
+  fs.writeFileSync(path.join(dotPm2, 'dump.pm2'), '{}\n')
+  fs.mkdirSync(runtime, { recursive: true })
+  fs.writeFileSync(path.join(runtime, 'pm2.pid'), `${PID_STRAY}\n`)
+  writeInstall(root)
+  const probe = runtimeProbe()
+  probe.processes.push(processRow({
+    processId: PID_STRAY,
+    parentProcessId: 4,
+    commandLine: 'node.exe CMDLINE_SHOULD_NOT_PRINT worker.js',
+  }))
+  writeProbe(path.join(scratch, 'probe.json'), probe)
+  const env = baseEnv(scratch, { expectHome: dotPm2 })
+  const owner = runFile(ownerPath, ['-CiProbe', path.join(scratch, 'probe.json')], env)
+  assert.equal(owner.status, 0, owner.stderr + owner.stdout)
+  assert.match(line(owner.stdout, 'PM2OWNER pm2_home_set='), /pm2_home_set=false/)
+  assert.match(line(owner.stdout, 'PM2OWNER daemon_pid_file='), /daemon_pid_file=false/)
+  assert.match(line(owner.stdout, 'PM2OWNER hosting='), /hosting=pm2-runtime/)
+  assert.equal(resultLine(owner.stdout, 'PM2OWNER_RESULT'), 'PM2OWNER_RESULT owned=true status=complete')
+  const live = runFile(livePath, ['-InstallRoot', root, '-CiProbe', path.join(scratch, 'probe.json'), '-Keys', 'NODE_ENV'], env)
+  assert.equal(live.status, 0, live.stderr + live.stdout)
+  assert.match(line(live.stdout, 'LIVEENV_PM2'), /hosting=pm2-runtime/)
+  const log = readLog(env.LIVEENV_TEST_LOG)
+  assert.deepEqual(log.filter((item) => item.startsWith('argv=')), ['argv=jlist'])
+  assert.ok(log.includes('home_match=true'), log.join('\n'))
+  assertNoLeaks(owner.stdout + live.stdout, 'both homes')
+})
+
+scenario('an empty default .pm2 directory still allows the .pm2-runtime home', (scratch) => {
+  const home = path.join(scratch, 'profile', '.pm2-runtime')
+  fs.mkdirSync(path.join(scratch, 'profile', '.pm2'), { recursive: true })
+  const root = path.join(scratch, 'install')
+  initHome(home, { appPid: PID_APP, initialized: true })
+  writeInstall(root)
+  writeProbe(path.join(scratch, 'probe.json'), runtimeProbe())
+  const env = baseEnv(scratch, { expectHome: home })
+  const live = runFile(livePath, ['-InstallRoot', root, '-CiProbe', path.join(scratch, 'probe.json'), '-Keys', 'NODE_ENV'], env)
+  assert.equal(live.status, 0, live.stderr + live.stdout)
+  assert.match(line(live.stdout, 'LIVEENV_PM2'), /hosting=pm2-runtime/)
+  assert.ok(readLog(env.LIVEENV_TEST_LOG).includes('home_match=true'))
 })
 
 scenario('(c) no listener: official 03 is no_daemon and the shim is not started', (scratch) => {

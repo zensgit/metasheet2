@@ -3,17 +3,22 @@
 # Windows PowerShell 5.1. Dot-sourced. Running this file by itself does nothing.
 #
 # A pm2 CLI command that finds nobody listening starts a new empty God daemon.
-# Resolve-LiveEnvHosting therefore sets RunJlist only when one of these is already true:
-#   god          <PM2_HOME>\pm2.pid names a live node.exe owned by this account, and
-#                \\.\pipe\rpc.sock is already present (the God is the listener)
-#   pm2-runtime  there is no such pid, and exactly one scheduled task (default
-#                MetaSheet-PM2) is owned by this account and Running or Ready, and
-#                exactly one node.exe owned by this account has a pm2-runtime command
-#                line, and the live metasheet-backend pid's parent is that process, and
-#                the pipe is already present, and no other node.exe has pm2\lib\Daemon.js
-#                on its command line, and PM2_HOME already contains the directories and
-#                module_conf.json a pm2 client would otherwise create
-# Anything else leaves RunJlist false. Callers must not start pm2 in that case.
+# Resolve-LiveEnvHosting sets RunJlist only when the same facts make Owned true:
+#   god          <PM2_HOME>\pm2.pid names a live node.exe whose command line is
+#                pm2\lib\Daemon.js, owned by this account, the app pid is live and
+#                owned and is not a child of pm2-runtime, no other Daemon.js exists,
+#                and \\.\pipe\rpc.sock is already present.
+#                A live node.exe that is not Daemon.js is not a God. It must not
+#                set hosting=god and must not by itself run jlist.
+#   pm2-runtime  exactly one scheduled task (default MetaSheet-PM2) is owned by this
+#                account and Running or Ready, exactly one node.exe owned by this
+#                account has a pm2-runtime command line, the live app pid's parent
+#                is that process, the pipe is already present, no Daemon.js is in
+#                the way, and the chosen home already contains the directories and
+#                module_conf.json a pm2 client would otherwise create.
+# When PM2_HOME is unset, <profile>\.pm2 is kept when that tree is already confirmed
+# (pm2.pid, dump.pm2, or an app pid file). A .pm2-runtime directory is used only
+# when that confirmed default tree is absent. Anything else leaves RunJlist false.
 
 function New-LiveEnvDecision {
   param(
@@ -55,24 +60,39 @@ function Resolve-LiveEnvHosting {
   param($Facts)
 
   $pipe = [string]$Facts.Pipe
-  $daemonAlive = [bool]$Facts.DaemonAlive
   $daemonOwner = [string]$Facts.DaemonOwner
   if ([string]::IsNullOrEmpty($daemonOwner)) { $daemonOwner = 'false' }
+  $daemonClass = [string]$Facts.DaemonClass
+  if ([string]::IsNullOrEmpty($daemonClass)) {
+    # A live pid-file node is not a God until its command line says Daemon.js.
+    if ([bool]$Facts.DaemonAlive) { $daemonClass = 'other' } else { $daemonClass = 'none' }
+  }
+  $appUnderGod = [bool]$Facts.AppAlive -and ([string]$Facts.AppOwner -eq 'true') -and (-not [bool]$Facts.AppParentIsRuntime)
+  $godOwned = ($daemonClass -eq 'god') -and ($daemonOwner -eq 'true') -and ($pipe -eq 'present') -and ([string]$Facts.StrayGod -eq 'false') -and $appUnderGod
+  if ($godOwned) {
+    return New-LiveEnvDecision -Hosting 'god' -RunJlist $true -Owned $true -OwnerStatus 'complete'
+  }
 
-  if ($daemonAlive) {
-    if ($daemonOwner -eq 'unknown') { return New-LiveEnvStop -Reason 'owner_unreadable' }
-    if ($daemonOwner -ne 'true') { return New-LiveEnvNotOurs -Reason 'daemon_not_owned' }
+  # A pid-file node whose command line cannot be read might still be Daemon.js.
+  # Do not guess, and do not run jlist.
+  if ($daemonClass -eq 'unknown') { return New-LiveEnvStop -Reason 'owner_unreadable' }
+  if ($daemonClass -eq 'god' -and $daemonOwner -eq 'unknown') { return New-LiveEnvStop -Reason 'owner_unreadable' }
+  if ($daemonClass -eq 'god' -and $daemonOwner -ne 'true') { return New-LiveEnvNotOurs -Reason 'daemon_not_owned' }
+  if ($daemonClass -eq 'god') {
+    # Real Daemon.js, but it does not own the app. hosting=god would hide a
+    # pm2-runtime host, and jlist would attach to this God (or spawn one if the
+    # pipe is not actually its). Never set RunJlist here.
     if ([string]$Facts.StrayGod -eq 'unknown') { return New-LiveEnvStop -Reason 'owner_unreadable' }
     if ([string]$Facts.StrayGod -eq 'true') { return New-LiveEnvStop -Reason 'stray_daemon' }
     if ($pipe -eq 'unknown') { return New-LiveEnvStop -Reason 'pipe_unknown' }
     if ($pipe -ne 'present') { return New-LiveEnvStop -Reason 'no_daemon' }
-    $owned = [bool]$Facts.AppAlive -and ([string]$Facts.AppOwner -eq 'true')
-    if ([string]$Facts.AppOwner -eq 'unknown') {
-      return New-LiveEnvDecision -Hosting 'god' -RunJlist $true -Owned $false -OwnerStatus 'incomplete' -OwnerReason 'owner_unreadable'
-    }
-    return New-LiveEnvDecision -Hosting 'god' -RunJlist $true -Owned $owned -OwnerStatus 'complete'
+    if ([string]$Facts.AppOwner -eq 'unknown') { return New-LiveEnvStop -Reason 'owner_unreadable' }
+    $runtimeWouldOwn = ([string]$Facts.RuntimeTask -eq 'present') -and (([string]$Facts.RuntimeTaskState -eq 'running') -or ([string]$Facts.RuntimeTaskState -eq 'ready')) -and ([string]$Facts.RuntimeTaskOwner -eq 'true') -and ([int]$Facts.RuntimeProcessCount -eq 1) -and ([string]$Facts.RuntimeProcessOwner -eq 'true') -and [bool]$Facts.AppAlive -and ([string]$Facts.AppOwner -eq 'true') -and [bool]$Facts.AppParentIsRuntime -and [bool]$Facts.HomeExists -and [bool]$Facts.HomeInitialized
+    if ($runtimeWouldOwn) { return New-LiveEnvStop -Reason 'stray_daemon' }
+    return New-LiveEnvStop -Reason 'app_not_under_god'
   }
 
+  # none or other: a non-God pid must not hide the runtime path below.
   if ($pipe -eq 'unknown') { return New-LiveEnvStop -Reason 'pipe_unknown' }
   if ($pipe -ne 'present') {
     $queryOk = [string]$Facts.ProcessQuery -eq 'ok'
@@ -212,8 +232,24 @@ function Get-LiveEnvTaskFacts {
   return @{ Task = 'present'; State = $stateWord; Owner = (Convert-LiveEnvAccountWord -Candidate $userId -Me $Me) }
 }
 
+function Test-LiveEnvHomeConfirmed {
+  param([string]$HomePath, [string]$AppName)
+  if ([string]::IsNullOrWhiteSpace($HomePath)) { return $false }
+  if (-not (Test-Path -LiteralPath $HomePath -PathType Container)) { return $false }
+  if (Test-Path -LiteralPath (Join-Path $HomePath 'pm2.pid') -PathType Leaf) { return $true }
+  if (Test-Path -LiteralPath (Join-Path $HomePath 'dump.pm2') -PathType Leaf) { return $true }
+  $pidsDir = Join-Path $HomePath 'pids'
+  if (-not (Test-Path -LiteralPath $pidsDir -PathType Container)) { return $false }
+  $prefix = $AppName + '-'
+  $appFiles = @(Get-ChildItem -LiteralPath $pidsDir -File -Filter '*.pid' | Where-Object {
+      $_.Name.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase) -and
+      ($_.Name.Substring($prefix.Length) -match '^\d+\.pid$')
+    })
+  return ($appFiles.Count -gt 0)
+}
+
 function Resolve-LiveEnvHomePath {
-  param([string]$TaskWord)
+  param([string]$TaskWord, [string]$AppName = 'metasheet-backend')
   $set = -not [string]::IsNullOrWhiteSpace($env:PM2_HOME)
   if ($set) { return @{ Path = $env:PM2_HOME; Set = $true } }
   $profileRoot = $env:USERPROFILE
@@ -221,13 +257,13 @@ function Resolve-LiveEnvHomePath {
     $sysRoot = if ([string]::IsNullOrWhiteSpace($env:SystemRoot)) { 'C:\Windows' } else { $env:SystemRoot }
     $profileRoot = Join-Path $sysRoot 'System32\config\systemprofile'
   }
-  if ($TaskWord -eq 'present') {
-    $runtimeHome = Join-Path $profileRoot '.pm2-runtime'
-    if (Test-Path -LiteralPath $runtimeHome -PathType Container) {
-      return @{ Path = $runtimeHome; Set = $false }
-    }
+  $defaultHome = Join-Path $profileRoot '.pm2'
+  $runtimeHome = Join-Path $profileRoot '.pm2-runtime'
+  # A confirmed default tree wins. An empty .pm2 directory does not.
+  if (($TaskWord -eq 'present') -and (Test-Path -LiteralPath $runtimeHome -PathType Container) -and -not (Test-LiveEnvHomeConfirmed -HomePath $defaultHome -AppName $AppName)) {
+    return @{ Path = $runtimeHome; Set = $false }
   }
-  return @{ Path = (Join-Path $profileRoot '.pm2'); Set = $false }
+  return @{ Path = $defaultHome; Set = $false }
 }
 
 function Test-LiveEnvHomeInitialized {
@@ -352,7 +388,7 @@ function Get-LiveEnvHostingFacts {
   $me = Get-LiveEnvCurrentUser
   $pipe = Get-LiveEnvPipeState
   $taskFacts = Get-LiveEnvTaskFacts -TaskName $ScheduledTaskName -Me $me
-  $homeInfo = Resolve-LiveEnvHomePath -TaskWord ([string]$taskFacts.Task)
+  $homeInfo = Resolve-LiveEnvHomePath -TaskWord ([string]$taskFacts.Task) -AppName $AppName
   $homePath = [string]$homeInfo.Path
   $homeExists = $false
   if (-not [string]::IsNullOrWhiteSpace($homePath)) {
@@ -372,9 +408,14 @@ function Get-LiveEnvHostingFacts {
   $daemonRow = Get-LiveEnvProcessByPid -Rows $rows -ProcessId $daemonPid
   $daemonAlive = $false
   $daemonOwner = 'false'
+  $daemonClass = 'none'
   if ($null -ne $daemonRow -and [bool]$daemonRow.IsNode) {
     $daemonAlive = $true
     $daemonOwner = [string]$daemonRow.OwnerWord
+    $daemonCommand = [string]$daemonRow.CommandLine
+    if ([string]::IsNullOrEmpty($daemonCommand)) { $daemonClass = 'unknown' }
+    elseif (Test-LiveEnvGodCommandLine -CommandLine $daemonCommand) { $daemonClass = 'god' }
+    else { $daemonClass = 'other' }
   }
 
   $appFiles = @()
@@ -460,6 +501,7 @@ function Get-LiveEnvHostingFacts {
     ResolvedHome         = $homePath
     DaemonPidFile        = [bool]$daemonPidFile
     DaemonAlive          = [bool]$daemonAlive
+    DaemonClass          = [string]$daemonClass
     DaemonOwner          = [string]$daemonOwner
     AppPidFile           = ($appFiles.Count -gt 0)
     AppAlive             = [bool]$appAlive
