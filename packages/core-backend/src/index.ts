@@ -137,7 +137,7 @@ import {
 } from './multitable/plugin-scope'
 import { resolvePluginSheetScopeMode } from './multitable/pluginSheetScopeMode'
 import { assertPluginWriteFence, refusePluginWriteFenceOnUnfencedSurface } from './multitable/plugin-write-fence'
-import { assertYidaIssueConfirmWriteCondition } from './integration/yida-issue-confirm-writeback-authority'
+import { prepareYidaIssueConfirmWriteCondition } from './integration/yida-issue-confirm-writeback-authority'
 import { assertSheetNotCopiedFromPluginManaged } from './multitable/copied-sheet-plugin-scope'
 import {
   acquireStockPreparationPersistUnitOfWorkLocks,
@@ -1440,18 +1440,21 @@ export class MetaSheetServer {
                     : undefined,
                 }
               }
-              // #6812 review P2: a write condition (the YiDa issue-confirm write-back's) re-decides the project state and
-              // the owner's live authority in THIS transaction, under their row locks, before the UPDATE. Its D21 helper
-              // needs READ COMMITTED, so that is the transaction's first statement; absent, the write is unchanged.
+              // Prepare the YiDa condition under the registry lock. patchRecord takes the platform
+              // writer fences before the returned check locks authority rows.
               if (writeCondition !== undefined) await txQuery('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
               await assertPluginWriteFence(txQuery, writeFence)
-              await assertYidaIssueConfirmWriteCondition(txQuery, writeCondition, { sheetId, fenced: writeFence !== undefined })
+              const assertWriteCondition = await prepareYidaIssueConfirmWriteCondition(txQuery, writeCondition, {
+                sheetId,
+                fenced: writeFence !== undefined,
+              })
               return patchMultitableRecord({
                 query: txQuery,
                 sheetId,
                 recordId,
                 changes,
                 expectedVersion,
+                assertWriteCondition,
               })
             })
           },

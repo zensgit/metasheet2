@@ -60,7 +60,7 @@ export function issueConfirmRoleGrantSatisfied(roleCodes: Iterable<string>): boo
 /**
  * THE VERDICT on an open READ COMMITTED transaction `trx` (checks 1–3 above; the D21 helper's FOR SHARE locks stay held
  * until that transaction ends). Shared by the standalone re-check (its own transaction, below) and the write condition
- * (the record write's own transaction, {@link assertYidaIssueConfirmWriteCondition}). false = a verdict (revoked); a
+ * (the record write's own transaction, {@link prepareYidaIssueConfirmWriteCondition}). false = a verdict (revoked); a
  * throw = no verdict.
  */
 async function issueConfirmAuthorityVerdict(trx: Queryable,
@@ -108,8 +108,8 @@ export const yidaIssueConfirmLiveRecheck: YidaIssueConfirmRecheck = async (datab
 // transaction (index.ts `records.patchRecord`, behind the plugin write fence). A revocation or a project archive that
 // committed between the two would still have let the date in: the fence proves only the sheet lease, the
 // version-conditional patch only the record. So the executor carries a WRITE CONDITION on its one patch, and the host
-// decides both facts again INSIDE THE WRITE TRANSACTION, after the fence and before the record UPDATE, holding their row
-// locks until COMMIT:
+// decides both facts again INSIDE THE WRITE TRANSACTION, after the lease fence and before the record UPDATE,
+// holding their row locks until COMMIT:
 //   1. the project registry row (integration_stock_prep_project_target, by tenant + project number) FOR SHARE: exactly
 //      one row, `active`, registered on the sheet being written — else YIDA_ISSUE_CONFIRM_WRITE_PROJECT_INACTIVE (409);
 //   2. the full live verdict above (the D21 helper's version and authority rows FOR SHARE, the live actor, the
@@ -125,9 +125,9 @@ export const yidaIssueConfirmLiveRecheck: YidaIssueConfirmRecheck = async (datab
 // conflicts with FOR SHARE. Committed first → this transaction waits for it, reads the committed state, refuses.
 // This transaction first → the archive or revocation waits until the date has committed: the date landed while both
 // facts still held.
-// LOCK ORDER: the fence's lease row, the registry row, then the D21 admission order (sheet + subject version rows, the
-// live-authority rows) and meta_records last (the UPDATE). The two plugin rows in front are touched by no access-graph
-// writer, and the archive touches only its registry row: no waits-for cycle.
+// LOCK ORDER: lease row → registry row → platform sheet writer fences → D21 version/authority rows → record.
+// Project template repair holds the registry row while taking the platform fence. Sheet permission configuration
+// writers take the platform fence before bumping the sheet version, so the live verdict runs after that fence.
 // The condition is host-minted (frozen, branded) for the authenticated owner only — the plugin cannot name another actor
 // — and it binds the sheet: handed to a write of another sheet, or to a write without a fence, it is refused (403).
 
@@ -174,12 +174,11 @@ export const createYidaIssueConfirmWriteCondition: YidaIssueConfirmWriteConditio
 type WriteQuery = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
 
 /**
- * The record write's half: inside the host write transaction, after the plugin write fence and before the UPDATE.
- * `undefined` → no condition (the write is exactly what it was). The transaction must be READ COMMITTED (index.ts sets
- * it as the first statement when a condition is present; the D21 helper probes it).
+ * Lock and check the project after the plugin lease fence. The caller must run the returned authority check
+ * on this same READ COMMITTED transaction after taking the platform writer fences and before changing the record.
  */
-export async function assertYidaIssueConfirmWriteCondition(query: WriteQuery, condition: unknown,
-  binding: Readonly<{ sheetId: unknown; fenced: boolean }>): Promise<void> {
+export async function prepareYidaIssueConfirmWriteCondition(query: WriteQuery, condition: unknown,
+  binding: Readonly<{ sheetId: unknown; fenced: boolean }>): Promise<(() => Promise<void>) | undefined> {
   if (condition === undefined) return
   const codes = YIDA_ISSUE_CONFIRM_WRITE_CONDITION_CODES
   if (!condition || typeof condition !== 'object' || !writeConditions.has(condition)) {
@@ -187,24 +186,30 @@ export async function assertYidaIssueConfirmWriteCondition(query: WriteQuery, co
   }
   const bound = condition as YidaIssueConfirmWriteCondition
   if (binding.fenced !== true || binding.sheetId !== bound.sheetId) throw new YidaIssueConfirmWriteConditionError(403, codes.NOT_ALLOWED)
-  let verdict: 'held' | 'project' | 'authority'
+  let projects: unknown
   try {
-    const projects = (await query(YIDA_ISSUE_CONFIRM_WRITE_PROJECT_SQL, [bound.tenantId, bound.projectNo]))?.rows
-    const project = Array.isArray(projects) && projects.length === 1 ? projects[0] as Record<string, unknown> : null
-    if (!project || project.status !== 'active' || project.sheet_id !== bound.sheetId) {
-      verdict = 'project'
-    } else {
-      const trx: Queryable = {
-        query: async (sql, params) => {
-          const result = await query(sql, params)
-          return { rows: (Array.isArray(result?.rows) ? result.rows : []) as Array<Record<string, unknown>>, rowCount: result?.rowCount ?? null }
-        },
-      }
-      verdict = (await issueConfirmAuthorityVerdict(trx, bound)) ? 'held' : 'authority'
-    }
+    projects = (await query(YIDA_ISSUE_CONFIRM_WRITE_PROJECT_SQL, [bound.tenantId, bound.projectNo]))?.rows
   } catch {
     throw new YidaIssueConfirmWriteConditionError(503, codes.UNAVAILABLE)
   }
-  if (verdict === 'project') throw new YidaIssueConfirmWriteConditionError(409, codes.PROJECT_INACTIVE)
-  if (verdict === 'authority') throw new YidaIssueConfirmWriteConditionError(409, codes.AUTHORITY_REVOKED)
+  const project = Array.isArray(projects) && projects.length === 1 ? projects[0] as Record<string, unknown> : null
+  if (!project || project.status !== 'active' || project.sheet_id !== bound.sheetId) {
+    throw new YidaIssueConfirmWriteConditionError(409, codes.PROJECT_INACTIVE)
+  }
+
+  return async () => {
+    const trx: Queryable = {
+      query: async (sql, params) => {
+        const result = await query(sql, params)
+        return { rows: (Array.isArray(result?.rows) ? result.rows : []) as Array<Record<string, unknown>>, rowCount: result?.rowCount ?? null }
+      },
+    }
+    let allowed: boolean
+    try {
+      allowed = await issueConfirmAuthorityVerdict(trx, bound)
+    } catch {
+      throw new YidaIssueConfirmWriteConditionError(503, codes.UNAVAILABLE)
+    }
+    if (!allowed) throw new YidaIssueConfirmWriteConditionError(409, codes.AUTHORITY_REVOKED)
+  }
 }

@@ -112,6 +112,8 @@ export type PatchMultitableRecordInput = {
   recordId: string
   changes: Record<string, unknown>
   expectedVersion?: number
+  /** Host guard on this transaction, after platform writer fences and before record mutation. */
+  assertWriteCondition?: () => Promise<void>
 }
 
 export type CreatedMultitableRecord = {
@@ -584,6 +586,9 @@ export async function patchRecord(
   } else {
     await fenceWriterEntry(query, input.sheetId)
   }
+  // Permission config writers take the platform fence before locking the authorization version.
+  // Keep the same order when a host condition needs to lock that version through commit.
+  if (input.assertWriteCondition) await input.assertWriteCondition()
   // W0-1 L6-a: mint the sealed operation after the fence; inert ⇒ byte-identical to L4cov.
   const op = await mintOperation(query, input.sheetId)
   const { fields } = await loadSheetAndFields(query, input.sheetId)

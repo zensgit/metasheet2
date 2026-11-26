@@ -14,9 +14,13 @@ import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
+import express from 'express'
 import { Pool, type PoolClient } from 'pg'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import request, { type Response as TestResponse } from 'supertest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Queryable } from '../../src/multitable/automation-durable-dispatcher'
+import { canonicalSheetFenceKey } from '../../src/multitable/canonical-sheet-fence'
+import { YIDA_ISSUE_CONFIRM_WRITE_PROJECT_SQL, type prepareYidaIssueConfirmWriteCondition } from '../../src/integration/yida-issue-confirm-writeback-authority'
 
 const root = path.resolve(__dirname, '..', '..', '..', '..')
 const requireCjs = createRequire(import.meta.url)
@@ -47,6 +51,7 @@ type Runtime = {
 type Capability = { enabled(): boolean; create(input: unknown): { run(input?: unknown): Promise<Result> } }
 type FetchDouble = { fetch(url: string, init: RequestInit): Promise<Response>; token: number; form: number }
 type Gate = { reached: Promise<void>; release(): void; enter(): void; open: Promise<void> }
+type QueryTag = 'wb' | 'config'
 
 it('sentinel: the issue-confirm write-back proof requires EXPECT_DB=1 and a dedicated DATABASE_URL', () => {
   expect(process.env.EXPECT_DB).toBe('1')
@@ -67,7 +72,9 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     recordAcknowledgement(input: unknown): Promise<unknown>; markUnknown(input: unknown): Promise<unknown>; cancelPrepared(input: unknown): Promise<unknown> }
   let createBinding: (options: Row) => unknown
   let createCapability: (options: Row) => Capability
-  let createRegistryStore: (options: Row) => unknown
+  let createRegistryStore: (options: Row) => {
+    withActiveRowLocked<T>(scope: { tenantId: string; projectNo: string }, operation: () => Promise<T>): Promise<T>
+  }
   let createWriteLock: (options: Row) => unknown
   let deriveObjectId: (tenantId: string, projectNo: string) => string
   let createRuntime: (dependencies: Row) => Runtime
@@ -77,7 +84,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
   let patchRecord: (input: Row) => Promise<Row>
   let resolveFence: (pluginName: string, fence: unknown) => unknown
   let assertFence: (query: unknown, fence: unknown) => Promise<void>
-  let assertCondition: (query: unknown, condition: unknown, binding: { sheetId: unknown; fenced: boolean }) => Promise<void>
+  let prepareCondition: typeof prepareYidaIssueConfirmWriteCondition
   const envKeys = ['NODE_ENV', 'ENCRYPTION_KEY', 'ENCRYPTION_SALT'] as const
   let savedEnv: Array<[typeof envKeys[number], string | undefined]> = []
   // Every statement of every connection of the test, in order (SQL shapes only, never values).
@@ -85,8 +92,8 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
   // ... and the subset issued by the write-back's own ports (its plugin db and the records surface it is handed).
   const wbStatements: string[] = []
   let failOnce: { pattern: RegExp; error: Error } | undefined
-  // A gate with `tag: 'wb'` parks only a statement of the write-back's own ports (never the send's).
-  let gateOnce: (Gate & { pattern: RegExp; tag?: 'wb' }) | undefined
+  // Tagged gates park only a statement from the named surface.
+  let gateOnce: (Gate & { pattern: RegExp; tag?: QueryTag }) | undefined
   const parkedGates: Gate[] = []
   const actor: Actor = Object.freeze({ actorId: OWNER, tenantId: TENANT, workspaceId: null })
   const ident = (value: string) => {
@@ -119,7 +126,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
       timer = setTimeout(() => reject(new Error('SYNTHETIC_GATE_TIMEOUT')), 8000)
     })]) } finally { clearTimeout(timer) }
   }
-  async function run(client: PoolClient, sql: string, params?: unknown[], tag?: 'wb') {
+  async function run(client: PoolClient, sql: string, params?: unknown[], tag?: QueryTag) {
     statements.push(sql)
     if (tag === 'wb') wbStatements.push(sql)
     if (gateOnce && gateOnce.pattern.test(sql) && (gateOnce.tag === undefined || gateOnce.tag === tag)) { const held = gateOnce; gateOnce = undefined; parkedGates.push(held); held.enter(); await held.open }
@@ -127,7 +134,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     return client.query(sql, params)
   }
   async function inTransaction<T>(callback: (query: (sql: string, params?: unknown[]) => Promise<{ rows: Row[]; rowCount: number | null }>) => Promise<T>,
-    tag?: 'wb') {
+    tag?: QueryTag) {
     const client = await pool!.connect()
     try {
       await run(client, 'BEGIN', undefined, tag)
@@ -142,7 +149,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
       throw error
     } finally { client.release() }
   }
-  async function autocommit(sql: string, params?: unknown[], tag?: 'wb') {
+  async function autocommit(sql: string, params?: unknown[], tag?: QueryTag) {
     const client = await pool!.connect()
     try { const done = await run(client, sql, params, tag); return { rows: done.rows as Row[], rowCount: done.rowCount } } finally { client.release() }
   }
@@ -174,8 +181,10 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
         return inTransaction(async txQuery => {
           if (writeCondition !== undefined) await txQuery('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
           await assertFence(txQuery, resolved)
-          await assertCondition(txQuery, writeCondition, { sheetId, fenced: resolved !== undefined })
-          return patchRecord({ query: txQuery, sheetId, recordId, changes, expectedVersion })
+          const assertWriteCondition = await prepareCondition(txQuery, writeCondition, {
+            sheetId, fenced: resolved !== undefined,
+          })
+          return patchRecord({ query: txQuery, sheetId, recordId, changes, expectedVersion, assertWriteCondition })
         }, 'wb')
       },
     }
@@ -261,6 +270,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
   }
   async function cleanSheet() {
     const prefix = `${schema}%`
+    await owner.query('DELETE FROM public.meta_config_revisions WHERE sheet_id LIKE $1', [prefix])
     await owner.query('DELETE FROM public.meta_record_revisions WHERE sheet_id LIKE $1', [prefix]).catch(() => {})
     await owner.query('DELETE FROM public.meta_sheets WHERE id LIKE $1', [prefix])
     await owner.query('DELETE FROM public.sheet_permission_versions WHERE sheet_id LIKE $1', [prefix])
@@ -386,7 +396,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     queryRecords = records.queryRecords; patchRecord = records.patchRecord
     const fence = await src('multitable/plugin-write-fence.ts')
     resolveFence = fence.resolvePluginWriteFence; assertFence = fence.assertPluginWriteFence
-    assertCondition = (await src('integration/yida-issue-confirm-writeback-authority.ts')).assertYidaIssueConfirmWriteCondition
+    prepareCondition = (await src('integration/yida-issue-confirm-writeback-authority.ts')).prepareYidaIssueConfirmWriteCondition
     const migrations = path.join(root, 'packages/core-backend/migrations')
     const migrationSql = async (name: string, key: string) => ((await src(`db/migrations/${name}.ts`)) as Record<string, string>)[key]
     ddl = ['090_create_integration_yida_delivery_ledger.sql', '091_create_integration_yida_create_fence.sql',
@@ -1071,9 +1081,9 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
       WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()`)).rows as Array<{ n: number }>
     return rows[0].n
   }
-  async function waitForLockWaiter() {
-    const deadline = Date.now() + 8000
-    while (await lockWaiters() < 1) {
+  async function waitForLockWaiter(waiters = lockWaiters, timeoutMs = 8000) {
+    const deadline = Date.now() + timeoutMs
+    while (await waiters() < 1) {
       if (Date.now() > deadline) throw new Error('SYNTHETIC_LOCK_WAIT_NEVER_SEEN')
       await new Promise(resolve => setTimeout(resolve, 20))
     }
@@ -1124,10 +1134,15 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     // Parked at the first statement after the write condition that names meta_records (the patch's own record read).
     const parked = { ...latch(), pattern: /\bmeta_records\b/, tag: 'wb' as const }
     let conditionPassed = false
-    const original = assertCondition
-    assertCondition = async (query, condition, binding) => {
-      await original(query, condition, binding)
-      if (condition !== undefined) { conditionPassed = true; gateOnce = parked }
+    const original = prepareCondition
+    prepareCondition = async (query, condition, binding) => {
+      const assertWriteCondition = await original(query, condition, binding)
+      if (!assertWriteCondition) return
+      return async () => {
+        await assertWriteCondition()
+        conditionPassed = true
+        gateOnce = parked
+      }
     }
     try {
       const first = world!.runtime.issueConfirmWriteback(actor, {})
@@ -1145,10 +1160,121 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
         await change
         expect(changed).toBe(true)
       } finally { other.release() }
-    } finally { assertCondition = original }
+    } finally { prepareCondition = original }
     expect((await cell()).date).toBe(businessDay(await ackAt(ledgerId)))
     expect((await tableRows(TRACE)).map(row => [row.ledger_id, row.outcome])).toEqual([[ledgerId, 'written']])
     expect(patches).toHaveLength(1)
+  })
+
+  it.each(['date write-back', 'permission config'] as const)('platform writer fence serializes the date and row-read permission config (%s takes the fence first)', async (firstWriter) => {
+    const { poolManager } = await import('../../src/integration/db/connection-pool')
+    const { univerMetaRouter } = await import('../../src/routes/univer-meta')
+    await compose({ crashHookOnce: true })
+    const before = await cell()
+    const { grant, result } = await sendOne(boundInput(0))
+    const ledgerId = String(grant.ledgerId ?? result.delivery!.id)
+
+    const app = express()
+    app.use(express.json())
+    app.use((req, _res, next) => {
+      const perms = ['multitable:read', 'multitable:share']
+      Object.assign(req, { user: { id: OWNER, roles: ['member'], perms, permissions: perms } })
+      next()
+    })
+    app.use('/api/multitable', univerMetaRouter())
+    // Use the real route and PostgreSQL transactions, with an isolated search path and SQL gates.
+    const configPool = vi.spyOn(poolManager, 'get').mockReturnValue({
+      query: (sql: string, params?: unknown[]) => autocommit(sql, params, 'config'),
+      transaction: <T>(callback: (trx: Queryable) => Promise<T>) =>
+        inTransaction(query => callback({ query }), 'config'),
+    } as ReturnType<typeof poolManager.get>)
+    const configure = () => request(app).put(`/api/multitable/sheets/${sheetId()}/row-level-read-deny`)
+      .send({ enabled: true }).then(response => response)
+    const writebackFirst = firstWriter === 'date write-back'
+    // In the first order, pause after the write-back has locked the sheet authorization version.
+    // In the second order, let the write-back finish its pre-check before the route takes its fence.
+    const writebackGate = { ...latch(), pattern: writebackFirst ? /^INSERT INTO subject_authorization_versions/ : FENCE_STATEMENT, tag: 'wb' as const }
+    const configGate = { ...latch(), pattern: /^INSERT INTO sheet_permission_versions AS v/, tag: 'config' as const }
+    vi.stubEnv('MULTITABLE_ENABLE_WRITER_FENCE', 'true')
+    gateOnce = writebackGate
+    const writeback = world!.runtime.issueConfirmWriteback(actor, {})
+    let config: PromiseLike<TestResponse> | undefined
+    try {
+      await waitFor(writebackGate)
+      if (!writebackFirst) gateOnce = configGate
+      config = configure()
+      if (!writebackFirst) {
+        await waitFor(configGate)
+        writebackGate.release()
+      }
+      // Observe the waiting transaction on this sheet's advisory lock before letting the holder commit.
+      await waitForLockWaiter(async () => {
+        const { rows } = await owner.query(`SELECT count(*)::int AS n FROM pg_locks
+          WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+            AND objsubid = 1 AND objid::bigint = (hashtext($1)::bigint & 4294967295) AND NOT granted`,
+        [canonicalSheetFenceKey(sheetId())])
+        return rows[0].n
+      }, 4000)
+      if (writebackFirst) writebackGate.release()
+      else configGate.release()
+
+      const [written, configured] = await Promise.all([writeback, config])
+      expect(outcomeOf(written)).toEqual(['written'])
+      expect(configured.status).toBe(200)
+      expect((await owner.query('SELECT row_level_read_permissions_enabled FROM meta_sheets WHERE id = $1', [sheetId()])).rows)
+        .toEqual([{ row_level_read_permissions_enabled: true }])
+      const after = await cell()
+      expect([after.date, after.version]).toEqual([businessDay(await ackAt(ledgerId)), before.version + 1])
+      expect((await tableRows(TRACE)).map(row => [row.ledger_id, row.outcome])).toEqual([[ledgerId, 'written']])
+    } finally {
+      writebackGate.release()
+      configGate.release()
+      await Promise.allSettled([writeback, config])
+      configPool.mockRestore()
+      vi.unstubAllEnvs()
+    }
+  })
+
+  it('project column repair can take the writer fence while the date waits on its registry row', async () => {
+    const { ensureFields } = await import('../../src/multitable/provisioning')
+    await compose({ crashHookOnce: true })
+    await sendOne(boundInput(0))
+    const registry = createRegistryStore({ db: createDb({ database: pluginDatabase }) })
+    const writebackGate = { ...latch(), pattern: FENCE_STATEMENT, tag: 'wb' as const }
+    const repairGate = latch()
+    vi.stubEnv('MULTITABLE_ENABLE_WRITER_FENCE', 'true')
+    gateOnce = writebackGate
+    const writeback = world!.runtime.issueConfirmWriteback(actor, {})
+    let repair: ReturnType<typeof ensureFields> | undefined
+    try {
+      await waitFor(writebackGate)
+      repair = registry.withActiveRowLocked({ tenantId: TENANT, projectNo: PROJECT }, async () => {
+        repairGate.enter()
+        await repairGate.open
+        return inTransaction(query => ensureFields({
+          query,
+          sheetId: sheetId(),
+          fields: [{ id: `${sheetId()}_extra`, name: 'Synthetic repaired column', type: 'text' }],
+        }))
+      })
+      await waitFor(repairGate)
+      writebackGate.release()
+      await waitForLockWaiter(async () => {
+        const { rows } = await owner.query(`SELECT count(*)::int AS n FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock' AND query = $1`,
+        [YIDA_ISSUE_CONFIRM_WRITE_PROJECT_SQL])
+        return rows[0].n
+      }, 4000)
+      repairGate.release()
+      const [written, fields] = await Promise.all([writeback, repair])
+      expect(outcomeOf(written)).toEqual(['written'])
+      expect(fields).toEqual(expect.arrayContaining([expect.objectContaining({ id: `${sheetId()}_extra` })]))
+    } finally {
+      writebackGate.release()
+      repairGate.release()
+      await Promise.allSettled([writeback, repair])
+      vi.unstubAllEnvs()
+    }
   })
 
   it('the trace table is append-only on real PostgreSQL: UPDATE, DELETE and TRUNCATE are refused, the row stays', async () => {

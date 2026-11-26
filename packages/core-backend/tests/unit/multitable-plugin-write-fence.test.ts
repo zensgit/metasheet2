@@ -370,16 +370,15 @@ describe('the core records API checks the fence FIRST inside the write transacti
         // nothing between the fence and the record write
         expect(body.trimEnd().endsWith('await assertPluginWriteFence(txQuery, writeFence)\n              return')).toBe(true)
       } else {
-        // #6812 review P2: patch alone carries the write condition. Before the fence only the READ COMMITTED statement a
-        // condition needs (the transaction's first, and only with a condition); between the fence and the record write
-        // only the condition, which is a no-op without one.
+        // The lease and project are checked before entering patchRecord. The returned authority check
+        // runs after the platform writer fences on the same transaction.
         const fenceAt = body.indexOf('await assertPluginWriteFence(txQuery, writeFence)')
         const beforeFence = body.slice(body.indexOf('poolManager.get().transaction'), fenceAt)
         expect(beforeFence.match(/await /g)).toEqual(['await ', 'await '])
         expect(beforeFence).toContain("if (writeCondition !== undefined) await txQuery('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')")
-        expect(body.slice(fenceAt).trimEnd().endsWith('await assertPluginWriteFence(txQuery, writeFence)\n'
-          + '              await assertYidaIssueConfirmWriteCondition(txQuery, writeCondition, { sheetId, fenced: writeFence !== undefined })\n'
-          + '              return')).toBe(true)
+        expect(body.slice(fenceAt)).toMatch(/await assertPluginWriteFence\(txQuery, writeFence\)\s+const assertWriteCondition = await prepareYidaIssueConfirmWriteCondition\(txQuery, writeCondition, \{\s+sheetId,\s+fenced: writeFence !== undefined,\s+\}\)\s+return\s*$/)
+        const call = source.slice(start + body.length, source.indexOf('          deleteRecord: async', start))
+        expect(call).toContain('assertWriteCondition,')
       }
     }
   })
