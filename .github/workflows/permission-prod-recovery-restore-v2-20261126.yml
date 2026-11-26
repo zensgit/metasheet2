@@ -1,0 +1,66 @@
+name: Production Docker recovery restore approved backup
+
+on:
+  push:
+    branches: [codex/permission-prod-recovery-20261126-restore-v2]
+    paths: ['.github/workflows/permission-prod-recovery-restore-v2-20261126.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    if: github.repository == 'zensgit/metasheet2' && github.actor == 'zensgit'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - name: Check out the scoped recovery entry point
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Verify recovery script integrity
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ATTEMPT" == 1 ]]
+          printf '%s\n' '716e12a295f8c1ddbc887a6e723c1b8e04226ab6297e0cfcf4bf01cd6b836c74  scripts/ops/tmp-permission-prod-recovery-restore-v2-20261126.sh' | sha256sum -c --strict
+      - name: Restore approved archive to a new production volume in isolation
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
+        run: |
+          set -euo pipefail
+          umask 077
+          tmp=$(mktemp -d)
+          trap 'rm -f -- "$tmp/key" "$tmp/known_hosts" "$tmp/stdout" "$tmp/stderr"; rmdir -- "$tmp"' EXIT
+          [[ "$DEPLOY_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.:-]*$ && "$DEPLOY_USER" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$ ]]
+          [[ -n "$DEPLOY_KNOWN_HOSTS" && -n "$DEPLOY_SSH_KEY_B64" ]]
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > "$tmp/key"
+          if ! decoded=$(printf '%s' "$DEPLOY_KNOWN_HOSTS" | base64 -d 2>/dev/null) || ! grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2' <<< "$decoded"; then
+            decoded=$DEPLOY_KNOWN_HOSTS
+          fi
+          grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2' <<< "$decoded"
+          printf '%s\n' "$decoded" > "$tmp/known_hosts"
+          path=$(printf '%s' "${DEPLOY_PATH:-metasheet2}" | base64 -w0)
+          compose=$(printf '%s' "${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}" | base64 -w0)
+          unset DEPLOY_PATH DEPLOY_COMPOSE_FILE DEPLOY_SSH_KEY_B64 DEPLOY_KNOWN_HOSTS decoded
+
+          rc=0
+          {
+            printf 'export PROBE_PATH_B64=%s PROBE_COMPOSE_B64=%s\n' "$path" "$compose"
+            cat scripts/ops/tmp-permission-prod-recovery-restore-v2-20261126.sh
+          } | timeout 3700s ssh -T -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=yes \
+              -o UserKnownHostsFile="$tmp/known_hosts" -o GlobalKnownHostsFile=/dev/null \
+              -o IdentitiesOnly=yes -o ConnectTimeout=15 -o ServerAliveInterval=10 -o ServerAliveCountMax=2 \
+              -i "$tmp/key" "$DEPLOY_USER@$DEPLOY_HOST" 'timeout 3600s bash -s' > "$tmp/stdout" 2> "$tmp/stderr" || rc=$?
+
+          grep -E '^(RECOVERY_STAGE_(STARTED|COMPLETE)|recovery_(inputs|stage|stage_failed)=[a-z_]+|target_database=(verified|isolated)|(roles|pre_data|data|post_data)_restore=passed|before_ledger=335_verified)$' "$tmp/stdout" || true
+          if [[ "$rc" != 0 ]]; then
+            echo 'The approved restore phase did not reach completion'
+            exit "$rc"
+          fi
