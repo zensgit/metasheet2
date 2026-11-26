@@ -178,7 +178,7 @@ export function createIssueConfirmLedgerReader({ db }) {
 /**
  * The row values (§2.2 step 2): the ledger's (operation_id, row_key) unsealed and RE-COMPILED by the draft store's own
  * verified transaction reader (owner + scope lock, digest checks), then the planned row's payload, the compiled config
- * and the bound sheet of that row's source binding. A row whose recompiled source_record_digest is not the ledger's,
+ * and the bound sheet and record IDs. A row whose recompiled source_record_digest is not the ledger's,
  * or that the operation no longer holds, answers null — the core treats that as retryable, never as source_unbound.
  */
 export function createIssueConfirmRowSource({ db, security }) {
@@ -194,7 +194,12 @@ export function createIssueConfirmRowSource({ db, security }) {
       const spec = compiled.rowSpecs[member.ordinal]
       const planned = compiled.plan.rows[member.ordinal]
       if (!spec || !planned || !spec.sourceBinding || spec.sourceRecordDigest !== ledger.sourceRecordDigest) return null
-      return { boundSheetId: spec.sourceBinding.sheetId, config: compiled.source.config, payload: planned.payload }
+      return {
+        boundSheetId: spec.sourceBinding.sheetId,
+        boundRecordId: spec.sourceBinding.recordId,
+        config: compiled.source.config,
+        payload: planned.payload,
+      }
     })
   }
   return Object.freeze({ read })

@@ -874,6 +874,39 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     expect([world!.fake.token, world!.fake.form]).toEqual([1, 1])
   })
 
+  it.each(['mapped alias', 'reused business key'] as const)('a different record matching the ACK (%s) receives no date', async (scenario) => {
+    await compose({ crashHookOnce: true })
+    const fields = fld()
+    const bound = boundInput(0)
+    const alias = scenario === 'mapped alias'
+    if (alias) {
+      await owner.query('UPDATE public.meta_records SET data = data || $1::jsonb WHERE id = $2',
+        [JSON.stringify({ [fields.warehouseConfirmation]: LINES[1] }), recordId(0)])
+      bound.rowsText = JSON.stringify([{ canonicalKey: LINES[0], idempotencyKey: LINES[1], projectNo: PROJECT }])
+      const fieldBindings = {
+        ...bound.sourceBinding.fieldBindings,
+        idempotencyKey: fields.warehouseConfirmation,
+        canonicalKey: fields.idempotencyKey,
+      }
+      bound.sourceBinding.fieldBindings = fieldBindings
+    }
+    const { grant, result } = await sendOne(bound)
+    expect(result.status).toBe('acknowledged')
+    const ledgerId = String(grant.ledgerId ?? result.delivery!.id)
+    if (!alias) {
+      await owner.query('DELETE FROM public.meta_records WHERE id = $1', [recordId(0)])
+      await owner.query('UPDATE public.meta_records SET data = data || $1::jsonb WHERE id = $2',
+        [JSON.stringify({ [fields.idempotencyKey]: LINES[0] }), recordId(1)])
+    }
+    const indexes = alias ? [0, 1] : [1]
+    const before = await Promise.all(indexes.map(cell))
+
+    expect(outcomeOf(await world!.runtime.issueConfirmWriteback(actor, { ledgerIds: [ledgerId] }))).toEqual(['row_absent'])
+    expect(await Promise.all(indexes.map(cell))).toEqual(before)
+    expect(patches).toEqual([])
+    expect((await tableRows(TRACE)).map(row => [row.ledger_id, row.outcome])).toEqual([[ledgerId, 'row_absent']])
+  })
+
   // Owner ruling D3-1 (register R-96 ⑦, 2026-11-17): the sheet is re-keyed after the send — the bound row keeps its key
   // and is marked INACTIVE (`active: false`, the boolean, as a refresh or a sheet-repair retire writes it) and a successor
   // under a NEW key is added — while the post-ACK run is parked at its own first registry statement. The run finds the

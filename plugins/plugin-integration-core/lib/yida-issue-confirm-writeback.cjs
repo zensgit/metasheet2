@@ -435,7 +435,7 @@ function decideIssueConfirmCell(cellValue, date) {
  *   targetRefs    parsed switch list
  *   timeZone      resolved business zone
  *   projectSheetsEnabled  true only when MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED is 'true' (D14)
- *   rowValues     { boundSheetId, config, payload } — null / no bound sheet throws ROW_SOURCE_UNAVAILABLE
+ *   rowValues     { boundSheetId, boundRecordId, config, payload } — null or missing bound IDs throws ROW_SOURCE_UNAVAILABLE
  *   project       null (unregistered) | { sheetId, objectId, status: 'active' | 'archived' }
  *   authority     true | false — the LIVE re-check, under the lease
  *   records       array of { id, version, data } matched by idempotencyKey (limit 2), under the lease
@@ -454,7 +454,8 @@ function decideIssueConfirmWriteback(facts) {
   // fact-gathering failure, never `source_unbound` (SR5 defines that by the NULL digest): retryable.
   if (rowValues === null || rowValues === undefined) fail(ROW_SOURCE_UNAVAILABLE_CODE, 'bound row values could not be read')
   const boundSheetId = isPlainObject(rowValues) ? opaqueId(rowValues.boundSheetId) : null
-  if (!boundSheetId) fail(ROW_SOURCE_UNAVAILABLE_CODE, 'bound row values carry no bound sheet')
+  const boundRecordId = isPlainObject(rowValues) ? opaqueId(rowValues.boundRecordId) : null
+  if (!boundSheetId || !boundRecordId) fail(ROW_SOURCE_UNAVAILABLE_CODE, 'bound row values lack sheet or record identity')
   const key = extractIssueConfirmRowKey(rowValues.config, rowValues.payload)
   if (!key) return { kind: 'record', outcome: 'payload_unmapped', sheetId: null }
 
@@ -483,6 +484,8 @@ function decideIssueConfirmWriteback(facts) {
   if (!isPlainObject(record) || !opaqueId(record.id) || !isPlainObject(record.data)) {
     fail('YIDA_ISSUE_CONFIRM_RECORDS_INVALID', 'records read returned a malformed record')
   }
+  // A different record can now carry the sent key. The date belongs to the record that was bound at send time.
+  if (record.id !== boundRecordId) return { kind: 'record', outcome: 'row_absent', sheetId }
   // ONE VERSION-CONDITIONAL PATCH (Y9a review r2 MEDIUM, slice Y9): the host's patchRecord treats an absent
   // expectedVersion as an UNCONDITIONAL write (packages/core-backend/src/multitable/records.ts patchRecord), so a
   // records row without a positive safe-integer `version` would turn the only write into a blind overwrite of

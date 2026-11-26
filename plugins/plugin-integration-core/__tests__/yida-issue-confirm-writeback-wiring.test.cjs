@@ -357,7 +357,7 @@ test('binding pair: the sheets port binds the registry row\'s sheetId and object
       env: { ...ON },
       runId: () => 'run-syn-pair',
       ledgerReader: { async list() { return [ledger] }, async sweep() { return { rows: [ledger], next: null } } },
-      rowSource: { async read() { return { boundSheetId: row.sheetId, config: CONFIG, payload: { sourceLineId: KEY, project: PROJECT } } } },
+      rowSource: { async read() { return { boundSheetId: row.sheetId, boundRecordId: stored.id, config: CONFIG, payload: { sourceLineId: KEY, project: PROJECT } } } },
       projectRegistry: createIssueConfirmProjectRegistry({ projectTargetStore }),
       sheets: createIssueConfirmSheets({ multitable: () => ({ records, provisioning }) }),
       authority: { async recheck() { return true }, writeCondition: (scope) => { const minted = Object.freeze({ ...scope }); calls.minted.push(minted); return minted } },
@@ -540,7 +540,7 @@ async function sweepWorld({ rows, ackless = [], stuck = [], traced = [], env = O
     runId: () => 'run-syn-sweep',
     ledgerReader: createIssueConfirmLedgerReader({ db }),
     rowSource: { async read({ ledger: row }) {
-      return stuck.includes(row.id) ? null : { boundSheetId: SHEET, config: CONFIG, payload: { sourceLineId: row.id, project: PROJECT } }
+      return stuck.includes(row.id) ? null : { boundSheetId: SHEET, boundRecordId: `rec-${row.id}`, config: CONFIG, payload: { sourceLineId: row.id, project: PROJECT } }
     } },
     projectRegistry: { async resolve() { return { sheetId: SHEET, objectId: 'obj-syn-w', status: 'active' } } },
     sheets: { async open() {
@@ -815,7 +815,7 @@ function hostFaithfulWorld({ withVersion }) {
       async list() { return [only()] },
       async sweep() { return { rows: [only()], next: null } },
     },
-    rowSource: { async read() { return { boundSheetId: SHEET, config: CONFIG, payload: { sourceLineId: KEY, project: PROJECT } } } },
+    rowSource: { async read() { return { boundSheetId: SHEET, boundRecordId: 'rec-syn-w', config: CONFIG, payload: { sourceLineId: KEY, project: PROJECT } } } },
     projectRegistry: { async resolve() { return { sheetId: SHEET, objectId: 'obj-syn-w', status: 'active' } } },
     sheets: { async open() {
       return {
@@ -867,7 +867,7 @@ test('Y9a r2 MEDIUM, host-faithful port: a records row WITHOUT version is refuse
     const decision = () => writeback.decideIssueConfirmWriteback({
       ledger: { id: 'l', tenantId: TENANT, ownerId: OWNER, targetRef: TARGET, status: 'acknowledged', intent: 'create', sourceRecordDigest: DIGEST, acknowledgedAt: ACK_AT },
       targetRefs: [TARGET], timeZone: 'Asia/Shanghai', projectSheetsEnabled: true,
-      rowValues: { boundSheetId: SHEET, config: CONFIG, payload: { sourceLineId: KEY, project: PROJECT } },
+      rowValues: { boundSheetId: SHEET, boundRecordId: 'rec', config: CONFIG, payload: { sourceLineId: KEY, project: PROJECT } },
       project: { sheetId: SHEET, objectId: 'o', status: 'active' }, authority: true,
       records: [{ id: 'rec', version, data: { idempotencyKey: KEY, projectNo: PROJECT } }],
     })

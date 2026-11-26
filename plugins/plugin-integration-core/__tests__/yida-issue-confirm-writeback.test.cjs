@@ -104,7 +104,7 @@ function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
     }
     world.ledger.push(row)
     world.audits.push({ ledgerId: row.id, event: 'prepare', createdAt: '2026-03-01T16:29:58.000Z' })
-    world.rowValues.set(row.id, { boundSheetId: SHEET, config: CONFIG, payload: PAYLOAD })
+    world.rowValues.set(row.id, { boundSheetId: SHEET, boundRecordId: 'rec_syn_1', config: CONFIG, payload: PAYLOAD })
     return row
   }
   // The one send of a ledger row: one token request + one form POST, then claim + acknowledgement.
@@ -538,7 +538,7 @@ test('switch turned off mid-run: the rest of the batch stays unrecorded for a la
   world.send(first)
   const second = world.addLedger()
   world.send(second)
-  world.rowValues.set(second.id, { boundSheetId: SHEET, config: CONFIG, payload: { sourceLineId: 'syn-line-key-0002', project: PROJECT } })
+  world.rowValues.set(second.id, { boundSheetId: SHEET, boundRecordId: 'rec_syn_2', config: CONFIG, payload: { sourceLineId: 'syn-line-key-0002', project: PROJECT } })
   world.sheets.get(SHEET).push({ id: 'rec_syn_2', version: 1, data: { idempotencyKey: 'syn-line-key-0002', projectNo: PROJECT, issueConfirmDate: null } })
   world.afterPatch = () => { world.env.INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED = 'false' }
   const result = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
@@ -775,7 +775,7 @@ test('already_set and kept_existing never patch (D8: the first confirmation wins
 
 test('every terminal non-write outcome records one trace row and patches nothing', async () => {
   const cases = [
-    ['payload_unmapped', (world, row) => world.rowValues.set(row.id, { boundSheetId: SHEET, config: CONFIG, payload: { sourceLineId: KEY } })],
+    ['payload_unmapped', (world, row) => world.rowValues.set(row.id, { ...world.rowValues.get(row.id), payload: { sourceLineId: KEY } })],
     // source_unbound comes from the NULL digest only (selector condition 4); null row values are retryable.
     ['project_absent', (world) => world.projects.clear()],
     ['project_archived', (world) => world.projects.set(PROJECT, { sheetId: SHEET, objectId: OBJECT, status: 'archived' })],
@@ -890,10 +890,11 @@ test('a port that throws while gathering facts is retryable with its code: no tr
   assert.equal(world.trace.length, 0)
 })
 
-test('a bound row whose row values come back null or without a bound sheet is retryable, never source_unbound', async () => {
+test('a bound row whose row values come back null or without a bound identity is retryable', async () => {
   for (const [label, arrange] of [
     ['null', (world, row) => world.rowValues.set(row.id, null)],
-    ['no bound sheet', (world, row) => world.rowValues.set(row.id, { boundSheetId: null, config: CONFIG, payload: PAYLOAD })],
+    ['no bound sheet', (world, row) => world.rowValues.set(row.id, { ...world.rowValues.get(row.id), boundSheetId: null })],
+    ['no bound record', (world, row) => world.rowValues.set(row.id, { ...world.rowValues.get(row.id), boundRecordId: null })],
   ]) {
     const { world, row } = sentWorld()
     arrange(world, row)
@@ -903,7 +904,7 @@ test('a bound row whose row values come back null or without a bound sheet is re
     assert.equal(world.calls.registry, 0, label)
     assert.equal(world.calls.patch.length, 0, label)
     // The source comes back: the next run decides the row again and writes it.
-    world.rowValues.set(row.id, { boundSheetId: SHEET, config: CONFIG, payload: PAYLOAD })
+    world.rowValues.set(row.id, { boundSheetId: SHEET, boundRecordId: 'rec_syn_1', config: CONFIG, payload: PAYLOAD })
     const next = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
     assert.equal(next.results[0].outcome, 'written', label)
     assert.equal(world.cell(), ACK_DAY, label)
@@ -1164,7 +1165,7 @@ test('the pure decision asks for facts in order and never patches before the aut
   const facts = { ledger: ACKED, targetRefs: [TARGET], timeZone: 'Asia/Shanghai' }
   assert.deepEqual(decideIssueConfirmWriteback(facts), { kind: 'need', need: 'rowValues' })
   assert.throws(() => decideIssueConfirmWriteback({ ...facts, rowValues: null }), { code: 'YIDA_ISSUE_CONFIRM_ROW_SOURCE_UNAVAILABLE' })
-  facts.rowValues = { boundSheetId: SHEET, config: CONFIG, payload: PAYLOAD }
+  facts.rowValues = { boundSheetId: SHEET, boundRecordId: 'rec_syn_1', config: CONFIG, payload: PAYLOAD }
   // D14 fails closed: the fact absent or anything but true is a skip before the registry is asked.
   assert.deepEqual(decideIssueConfirmWriteback(facts), { kind: 'skip', reason: 'project_sheets_disabled' })
   assert.deepEqual(decideIssueConfirmWriteback({ ...facts, projectSheetsEnabled: 'true' }), { kind: 'skip', reason: 'project_sheets_disabled' })
@@ -1178,6 +1179,8 @@ test('the pure decision asks for facts in order and never patches before the aut
   const decision = decideIssueConfirmWriteback(facts)
   assert.equal(decision.kind, 'patch')
   assert.deepEqual(decision.changes, { issueConfirmDate: ACK_DAY })
+  assert.deepEqual(decideIssueConfirmWriteback({ ...facts, records: [{ ...facts.records[0], id: 'rec_syn_reused_key' }] }),
+    { kind: 'record', outcome: 'row_absent', sheetId: SHEET })
   assert.throws(() => decideIssueConfirmWriteback({ ...facts, project: { sheetId: SHEET, status: 'paused' } }), { code: 'YIDA_ISSUE_CONFIRM_REGISTRY_INVALID' })
 })
 
@@ -1328,9 +1331,9 @@ test('the trace race: B read the row before A traced it; A decides it; B leases 
     ['written, cell emptied', (world) => {}, 'written', (world) => { world.sheets.get(SHEET)[0].data.issueConfirmDate = null }],
     // A traces `permission_revoked`; the permission is granted again (refuter R6: no emptied cell needed for a FIRST patch).
     ['permission_revoked, re-granted', (world) => { world.authorityAllowed = false }, 'permission_revoked', (world) => { world.authorityAllowed = true }],
-    // A traces `row_absent`; the record is created afterwards.
-    ['row_absent, record created', (world) => { world.sheets.set(SHEET, []) }, 'row_absent', (world) => {
-      world.sheets.get(SHEET).push({ id: 'rec_syn_late', version: 1, data: { idempotencyKey: KEY, projectNo: PROJECT, issueConfirmDate: null } })
+    // A traces `row_absent`; the bound record is restored afterwards.
+    ['row_absent, bound record restored', (world) => { world.sheets.set(SHEET, []) }, 'row_absent', (world) => {
+      world.sheets.get(SHEET).push({ id: 'rec_syn_1', version: 1, data: { idempotencyKey: KEY, projectNo: PROJECT, issueConfirmDate: null } })
     }],
   ]
   for (const [name, arrange, outcome, between] of cases) {
