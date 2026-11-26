@@ -341,4 +341,148 @@ describe('AdminAuditView', () => {
     expect(container?.textContent).toContain('最近 7 天收口结果')
     expect(container?.textContent).toContain('当前场景已应用')
   })
+
+  it('keeps the ordinary audit log on /api/audit-logs while the account feed stays mounted', async () => {
+    apiFetchMock.mockResolvedValue(createJsonResponse(createListPayload([
+      createLogItem({ action: 'grant', resource_type: 'user-role', actor_id: 'ordinary-actor' }),
+    ], { total: 1 })))
+
+    app = createApp(AdminAuditView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const first = String(apiFetchMock.mock.calls[0]?.[0] || '')
+    expect(first.startsWith('/api/audit-logs?')).toBe(true)
+    expect(first).not.toContain('/api/admin/audit-activity')
+    const ordinary = new URL(first, 'http://localhost').searchParams
+    expect(ordinary.get('page')).toBe('1')
+    expect(ordinary.get('pageSize')).toBe('20')
+    expect(ordinary.get('resourceType')).toBeNull()
+    expect(ordinary.get('action')).toBeNull()
+
+    const feed = container!.querySelector('details.authorization-audit')
+    expect(feed).toBeTruthy()
+    expect(container?.textContent).toContain('权限和账户变更审计')
+    expect(container?.textContent).toContain('操作审计日志')
+    expect(container?.textContent).toContain('ordinary-actor')
+
+    const pageResource = container!.querySelector('select.admin-audit__select') as HTMLSelectElement
+    const pageValues = [...pageResource.options].map((option) => option.value)
+    expect(pageValues).not.toContain('user-security-action')
+    expect(pageValues).not.toContain('admin_login_grant_command')
+    expect([...pageResource.options].find((option) => option.value === '')?.textContent?.trim()).toBe('全部资源')
+
+    const header = container!.querySelector('.admin-audit__actions') as HTMLElement
+    const pageSelects = header.querySelectorAll('select')
+    const pageAction = pageSelects[1] as HTMLSelectElement
+    const actorInput = header.querySelectorAll('input[type="search"]')[1] as HTMLInputElement
+    pageResource.value = 'user-role'
+    pageResource.dispatchEvent(new Event('change'))
+    pageAction.value = 'grant'
+    pageAction.dispatchEvent(new Event('change'))
+    actorInput.value = 'admin-42'
+    actorInput.dispatchEvent(new Event('input'))
+    await flushUi(2)
+    findButtonByText(container!, '刷新')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+
+    const refreshed = getLastFetchUrl()
+    expect(refreshed.startsWith('/api/audit-logs?')).toBe(true)
+    expect(refreshed).not.toContain('/api/admin/audit-activity')
+    expect(refreshed).toContain('resourceType=user-role')
+    expect(refreshed).toContain('action=grant')
+    expect(refreshed).toContain('actorId=admin-42')
+    expect(refreshed).toContain('page=1')
+    expect(refreshed).toContain('pageSize=20')
+    expect(refreshed).not.toContain('user-security-action')
+    expect(refreshed).not.toContain('security_action_verify')
+  })
+
+  it('shows both account-feed source fixtures without changing the ordinary log request', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse(createListPayload([
+        createLogItem({ actor_id: 'ordinary-actor', action: 'grant', resource_type: 'user-role' }),
+      ], { total: 1 })))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          total: 2,
+          page: 1,
+          pageSize: 20,
+          items: [
+            {
+              created_at: '2026-03-01T00:00:00.000Z',
+              actor_id: 'fixture-audit-logs-actor',
+              resource_type: 'user-security-action',
+              action: 'security_action_verify',
+              resource_id: 'user:fixture-security-target',
+              action_details: { operationKind: 'fixture.security' },
+              source: 'audit_logs',
+              source_id: 'fixture-audit-1',
+            },
+            {
+              created_at: '2026-03-02T00:00:00.000Z',
+              actor_id: null,
+              resource_type: 'admin_login_grant_command',
+              action: 'admin_login_grant_enable',
+              resource_id: 'user:fixture-grant-target',
+              action_details: { userId: 'meta-user-77', operationKind: 'fixture.grant' },
+              meta: { userId: 'meta-user-77' },
+              source: 'authorization_operation',
+              source_id: 'fixture-op-1',
+            },
+          ],
+        },
+      }))
+      .mockResolvedValue(createJsonResponse(createListPayload([
+        createLogItem({ actor_id: 'ordinary-actor' }),
+      ], { total: 1 })))
+
+    app = createApp(AdminAuditView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+    const ordinaryUrl = String(apiFetchMock.mock.calls[0]?.[0] || '')
+    expect(ordinaryUrl.startsWith('/api/audit-logs?')).toBe(true)
+
+    const feed = container!.querySelector('details.authorization-audit') as HTMLDetailsElement
+    expect(feed.querySelector('select[aria-label="资源类型"] option[value=""]')?.textContent?.trim()).toBe('默认账户与权限资源')
+    feed.open = true
+    feed.dispatchEvent(new Event('toggle'))
+    await flushUi(8)
+
+    const opened = String(apiFetchMock.mock.calls[1]?.[0] || '')
+    expect(opened.startsWith('/api/admin/audit-activity?')).toBe(true)
+    expect(opened).not.toContain('/api/audit-logs')
+    const rows = feed.querySelectorAll('tbody tr')
+    expect(rows).toHaveLength(2)
+    expect(rows[0].children[1]?.textContent?.trim()).toBe('fixture-audit-logs-actor')
+    expect(rows[1].children[1]?.textContent?.trim()).toBe('\u2014')
+    expect(rows[1].children[1]?.textContent).not.toContain('meta-user-77')
+    expect(rows[1].children[1]?.textContent).not.toContain('fixture-grant-target')
+    expect(feed.textContent).toContain('fixture.security')
+    expect(feed.textContent).toContain('fixture.grant')
+    expect(container?.textContent).toContain('ordinary-actor')
+
+    const feedResource = feed.querySelector('select[aria-label="资源类型"]') as HTMLSelectElement
+    const feedAction = feed.querySelector('select[aria-label="动作"]') as HTMLSelectElement
+    feedResource.value = 'user-security-action'
+    feedResource.dispatchEvent(new Event('change'))
+    await flushUi(8)
+    feedAction.value = 'security_action_verify'
+    feedAction.dispatchEvent(new Event('change'))
+    const query = [...feed.querySelectorAll('button')].find((button) => button.textContent?.includes('查询权限审计'))
+    query?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(8)
+
+    const filtered = getLastFetchUrl()
+    expect(filtered.startsWith('/api/admin/audit-activity?')).toBe(true)
+    expect(filtered).toContain('resourceType=user-security-action')
+    expect(filtered).toContain('action=security_action_verify')
+    const ordinaryCalls = apiFetchMock.mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.startsWith('/api/audit-logs'))
+    expect(ordinaryCalls).toEqual([ordinaryUrl])
+  })
 })

@@ -603,11 +603,13 @@ templateArchiveConfirm
 templateCenterI18n
 templateDetailI18n
 templateGalleryFilter
+tests/adminAuditView.spec.ts
 tests/api.spec.ts
 tests/App.spec.ts
 tests/attendance-rules-me-contract-sync.spec.ts
 tests/AttendanceReportFieldsSection.spec.ts
 tests/AttendanceSessionOrgSwitcher.spec.ts
+tests/authorizationAuditFeed.spec.ts
 tests/delete-fallback.spec.ts
 tests/elearning-admin-view.spec.ts
 tests/elearning-analytics-admin.spec.ts

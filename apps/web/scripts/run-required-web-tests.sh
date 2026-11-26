@@ -2108,6 +2108,8 @@ exec npx vitest run \
   templateCenterI18n \
   templateDetailI18n \
   templateGalleryFilter \
+  tests/adminAuditView.spec.ts \
+  tests/authorizationAuditFeed.spec.ts \
   todoApi \
   TodoCenterView \
   todoCountsRealtime \
