@@ -678,7 +678,8 @@ export async function unassignOrdinaryRoleMembers(
   }
   // D21 (Y5a): the subject version rows of the role's current members, sorted, in one statement,
   // before the membership DELETE, so the DELETE's trigger retakes rows this transaction holds. The
-  // DELETE below still removes every membership of the role, including one committed after this read.
+  // DELETE below removes every membership of the role that it sees, including one committed after this
+  // read and before the DELETE starts.
   const members = await executor.query(
     'SELECT user_id FROM user_roles WHERE role_id = $1',
     [roleId],

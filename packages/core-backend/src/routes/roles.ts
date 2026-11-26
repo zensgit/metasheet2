@@ -932,7 +932,8 @@ export function rolesRouter(): Router {
           // removal took the rows again inside unassignUserRoles; here they are held. An ordinary
           // role takes no admission lock; unassignOrdinaryRoleMembers takes its members' version
           // rows, sorted, in one statement before its membership DELETE, so that is the ordinary
-          // path's only version-row statement. A request for a role that is not there writes nothing.
+          // path's only version-row statement. A request for a role that is not there and has no
+          // protection writes nothing.
           if (removesProtectedMemberships) {
             await bumpSubjectAuthorizationVersions(client, memberIds)
           }
