@@ -50,6 +50,7 @@ export const GUARDED_PATH_ENTRIES = Object.freeze([
   'packages/core-backend/src/db/migrations/zzzz20261103130000_add_integration_yida_multi_target_slots.ts',
   'packages/core-backend/src/db/migrations/zzzz20261105033000_add_integration_yida_delivery_audit_receipt_unparsed.ts',
   'packages/core-backend/src/db/migrations/zzzz20261106093100_create_integration_yida_issue_confirm_writeback.ts',
+  'packages/core-backend/src/db/migrations/zzzz20261126202000_pin_yida_ack_business_timezone.ts',
   'packages/core-backend/src/db/migrations/zzzz20261106110300_add_integration_yida_source_binding.ts',
   'packages/core-backend/src/db/migrations/zzzz20261106110700_add_integration_yida_delivery_reconciled_existing.ts',
   'packages/core-backend/src/db/migrations/zzzz20261108120000_create_integration_yida_generated_layout.ts',

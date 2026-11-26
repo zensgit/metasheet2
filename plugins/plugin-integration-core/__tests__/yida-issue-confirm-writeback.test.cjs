@@ -82,7 +82,7 @@ function takeFailure(world, name) {
 function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
   const withAck = (rows) => rows.map((row) => {
     const ack = world.audits.find((audit) => audit.ledgerId === row.id && audit.event === 'acknowledgement')
-    return { ...row, acknowledgedAt: ack ? ack.createdAt : null }
+    return { ...row, acknowledgedAt: ack ? ack.createdAt : null, acknowledgedTimeZone: ack ? ack.timeZone : null }
   })
   const calls = { ledgerList: 0, rowRead: 0, registry: 0, open: 0, query: 0, patch: [], beforeWrite: [], authority: 0, acquire: [], bump: [], trace: 0, writeCondition: [] }
   const world = { calls, env, authorityAllowed, formPosts: 0, tokenRequests: 0, conditions: [], writeConditionRefusal: null }
@@ -108,12 +108,12 @@ function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
     return row
   }
   // The one send of a ledger row: one token request + one form POST, then claim + acknowledgement.
-  world.send = (row, { ackAt = ACK_AT } = {}) => {
+  world.send = (row, { ackAt = ACK_AT, timeZone = resolveIssueConfirmBusinessTimeZone(world.env) } = {}) => {
     world.tokenRequests += 1
     world.formPosts += 1
     row.status = 'acknowledged'
     world.audits.push({ ledgerId: row.id, event: 'claim', createdAt: '2026-03-01T16:29:59.000Z' })
-    world.audits.push({ ledgerId: row.id, event: 'acknowledgement', createdAt: ackAt })
+    world.audits.push({ ledgerId: row.id, event: 'acknowledgement', createdAt: ackAt, timeZone })
   }
 
   // trace table: PRIMARY KEY (ledger_id), append-only
@@ -203,6 +203,7 @@ function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
 
   world.deps = () => ({
     env: world.env,
+    async validateTargets() {},
     runId: () => 'run-syn',
     ledgerReader: {
       async list({ tenantId, ownerId, targetRefs, ledgerIds, limit }) {
@@ -296,8 +297,20 @@ function createWorld({ env = onEnv(), authorityAllowed = true } = {}) {
               conflict.code = 'VERSION_CONFLICT'
               throw conflict
             }
+            const condition = input.writeCondition
+            const trace = writeback.issueConfirmTraceRow({
+              ledger: { id: condition.ledgerId, tenantId: condition.tenantId, ownerId: condition.ownerId, targetRef: condition.targetRef },
+              outcome: condition.outcome, sheetId: condition.sheetId, date: condition.date, timeZone: condition.timeZone,
+            })
+            world.events.push(['traceInsert', world.leases.size > 0])
+            if (world.traceGate) await world.traceGate(trace)
+            if (world.trace.some((existing) => existing.ledger_id === trace.ledger_id)) {
+              throw Object.assign(new Error('trace conflict'), { code: 'YIDA_ISSUE_CONFIRM_TRACE_CONFLICT' })
+            }
             Object.assign(row.data, input.changes)
             row.version += 1
+            world.trace.push(trace)
+            if (world.afterTraceInsert) await world.afterTraceInsert(trace)
             if (world.afterPatch) await world.afterPatch()
             return { id: row.id, version: row.version }
           },
@@ -372,7 +385,7 @@ test('the lease purpose is in the write lock vocabulary; there is no generation 
 test('the module never reaches a runner, a form transport, a token client or a ledger writer (import scan)', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'lib', 'yida-issue-confirm-writeback.cjs'), 'utf8')
   const required = [...source.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)].map((match) => match[1])
-  assert.deepEqual(required, ['node:crypto'])
+  assert.deepEqual(required, ['node:crypto', './yida-business-timezone.cjs'])
   // Every require call is a literal-string one (a require of a variable or a template would escape the
   // list above), and no indirect loader is used. The count also sees comments and strings: keep the word
   // 'require' directly followed by an opening parenthesis out of the module's prose.
@@ -576,7 +589,8 @@ test('written: one version-conditional, fenced patch of issueConfirmDate only, u
   assert.equal(patch.expectedVersion, 3)
   // #6812 review P2: ONE write condition, minted for this owner, the registered sheet and the payload's project, and
   // handed to the patch unchanged (the host re-decides it inside the write transaction).
-  assert.deepEqual(world.calls.writeCondition, [{ tenantId: TENANT, ownerId: OWNER, sheetId: SHEET, projectNo: PROJECT }])
+  assert.deepEqual(world.calls.writeCondition, [{ tenantId: TENANT, ownerId: OWNER, sheetId: SHEET, projectNo: PROJECT,
+    recordId: 'rec_syn_1', targetRef: TARGET, ledgerId: row.id, outcome: 'written', date: ACK_DAY, timeZone: 'Asia/Shanghai' }])
   assert.equal(patch.writeCondition, world.conditions[0])
   // The lease's pre-write holder check runs exactly once, before the only patch.
   assert.deepEqual(world.calls.beforeWrite, [{ operation: 'patchRecord', subject: 'issue_confirm_writeback', patchesBefore: 0 }])
@@ -587,7 +601,7 @@ test('written: one version-conditional, fenced patch of issueConfirmDate only, u
   assert.deepEqual(world.trace, [{ ledger_id: row.id, tenant_id: TENANT, owner_id: OWNER, target_ref: TARGET, sheet_id: SHEET, outcome: 'written', written_date: ACK_DAY, time_zone: 'Asia/Shanghai' }])
   // Y9 r3 (the trace race): the trace is read again under the lease right before the patch, and the trace INSERT runs
   // while the lease is still held, before its release; nothing follows the release (no generation bump).
-  assert.deepEqual(world.events, ['acquire', 'authority', 'query', 'traceProbe', 'beforeWrite', 'patch', ['traceInsert', true], 'release'])
+  assert.deepEqual(world.events, ['acquire', 'traceProbe', 'authority', 'query', 'beforeWrite', 'patch', ['traceInsert', true], 'release'])
   assert.deepEqual(world.snapshot(), before, 'ledger and audits untouched')
   // Values-free: no project number, key or human value in the result or the trace.
   for (const text of [JSON.stringify(result), JSON.stringify(world.trace)]) {
@@ -608,7 +622,7 @@ for (const code of ['YIDA_ISSUE_CONFIRM_WRITE_AUTHORITY_REVOKED', 'YIDA_ISSUE_CO
     assert.equal(world.version(), 3)
     assert.deepEqual(world.trace, [])
     // The refusal came from the one patch call: the lease was held, the trace never inserted, the lease released.
-    assert.deepEqual(world.events, ['acquire', 'authority', 'query', 'traceProbe', 'beforeWrite', 'patch', 'release'])
+    assert.deepEqual(world.events, ['acquire', 'traceProbe', 'authority', 'query', 'beforeWrite', 'patch', 'release'])
     // The revocation is now visible to the re-check: the next run records the terminal outcome and patches nothing.
     if (code === 'YIDA_ISSUE_CONFIRM_WRITE_AUTHORITY_REVOKED') {
       world.authorityAllowed = false
@@ -659,8 +673,9 @@ test('write condition: an outcome decided without a patch mints none', async () 
   assert.deepEqual(kept.world.calls.writeCondition, [])
 })
 
-test('the business zone comes from MULTITABLE_BUSINESS_TIMEZONE', async () => {
+test('the business zone is captured from MULTITABLE_BUSINESS_TIMEZONE at acknowledgement', async () => {
   const { world } = sentWorld({ env: onEnv({ MULTITABLE_BUSINESS_TIMEZONE: 'America/Los_Angeles' }) })
+  world.env.MULTITABLE_BUSINESS_TIMEZONE = 'Asia/Shanghai'
   await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
   assert.equal(world.cell(), '2026-03-01')
   assert.equal(world.trace[0].time_zone, 'America/Los_Angeles')
@@ -693,7 +708,7 @@ test('D3-1 written_inactive: an INACTIVE row (active === false) with an empty ce
   assert.deepEqual(world.trace, [{ ledger_id: row.id, tenant_id: TENANT, owner_id: OWNER, target_ref: TARGET, sheet_id: SHEET,
     outcome: 'written_inactive', written_date: ACK_DAY, time_zone: 'Asia/Shanghai' }])
   // The same steps under the lease as written: re-check, fence, patch, trace, release.
-  assert.deepEqual(world.events, ['acquire', 'authority', 'query', 'traceProbe', 'beforeWrite', 'patch', ['traceInsert', true], 'release'])
+  assert.deepEqual(world.events, ['acquire', 'traceProbe', 'authority', 'query', 'beforeWrite', 'patch', ['traceInsert', true], 'release'])
   assert.equal(world.calls.bump.length, 0)
   // Values-free: the record id is an opaque id; no key, project number or human value.
   const text = JSON.stringify(result)
@@ -769,7 +784,7 @@ test('already_set and kept_existing never patch (D8: the first confirmation wins
     assert.equal(world.trace[0].written_date, outcome === 'already_set' ? ACK_DAY : null)
     // Round-3 refuter F2 (stock-prep verdict G9): both are decided under the lease, after the records read, so their
     // trace INSERT runs while the lease is still held, before its release; no re-check (that guards the patch only).
-    assert.deepEqual(world.events, ['acquire', 'authority', 'query', ['traceInsert', true], 'release'], cell)
+    assert.deepEqual(world.events, ['acquire', 'traceProbe', 'authority', 'query', ['traceInsert', true], 'release'], cell)
   }
 })
 
@@ -801,11 +816,10 @@ test('every terminal non-write outcome records one trace row and patches nothing
     assert.equal(world.trace[0].time_zone, null)
     assert.deepEqual(world.snapshot(), before)
     for (const sheet of world.sheets.values()) for (const record of sheet) assert.equal(record.data.issueConfirmDate, null, outcome)
-    // Decided under the lease → traced before its release; decided before the lease → traced without one. No outcome
-    // but a patch reads the trace again (the re-check guards the only write).
-    const underLease = ['permission_revoked', 'row_absent', 'duplicate_key', 'project_mismatch'].includes(outcome)
+    // Project-dependent decisions are serialized with writes to the bound sheet.
+    const underLease = outcome !== 'payload_unmapped'
     assert.deepEqual(world.events.filter((event) => Array.isArray(event)), [['traceInsert', underLease]], outcome)
-    assert.equal(world.events.includes('traceProbe'), false, outcome)
+    assert.equal(world.events.includes('traceProbe'), underLease, outcome)
   }
 })
 
@@ -1216,7 +1230,7 @@ test('ack persisted, crash before write-back: recovery fills only the local date
 })
 
 test('date committed, confirmation lost: a retry neither changes the date nor writes a second success record; the form submission count stays 1', async () => {
-  // (b-1) The process dies after the patch committed and before the trace INSERT.
+  // (b-1) The transaction dies before the trace INSERT, rolling back the patch.
   {
     const { world, row } = sentWorld()
     const before = world.snapshot()
@@ -1224,18 +1238,19 @@ test('date committed, confirmation lost: a retry neither changes the date nor wr
     world.traceGate = async () => {
       if (dies) {
         dies = false
-        throw new Error('synthetic process death after the patch committed')
+        throw new Error('synthetic process death before commit')
       }
     }
-    await assert.rejects(() => world.executor().run({ tenantId: TENANT, ownerId: OWNER }), /synthetic process death/)
-    assert.equal(world.cell(), ACK_DAY)
-    assert.equal(world.version(), 4)
+    const interrupted = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
+    assert.deepEqual(interrupted.results, [{ ledgerId: row.id, kind: 'retryable', code: 'UNAVAILABLE' }])
+    assert.equal(world.cell(), null)
+    assert.equal(world.version(), 3)
     assert.equal(world.trace.length, 0)
     const retry = await world.executor().run({ tenantId: TENANT, ownerId: OWNER })
-    assert.deepEqual(retry.results, [{ ledgerId: row.id, kind: 'outcome', outcome: 'already_set', recorded: true, date: ACK_DAY, timeZone: 'Asia/Shanghai' }])
+    assert.deepEqual(retry.results, [{ ledgerId: row.id, kind: 'outcome', outcome: 'written', recorded: true, date: ACK_DAY, timeZone: 'Asia/Shanghai' }])
     assert.equal(world.cell(), ACK_DAY)
-    assert.equal(world.version(), 4, 'one patch only: the record version moved exactly once')
-    assert.equal(world.calls.patch.length, 1)
+    assert.equal(world.version(), 4, 'the record version moved exactly once')
+    assert.equal(world.calls.patch.length, 2)
     assert.equal(world.trace.length, 1)
     assert.deepEqual(world.snapshot(), before)
     assert.equal(world.formPosts, 1)
@@ -1263,11 +1278,11 @@ test('date committed, confirmation lost: a retry neither changes the date nor wr
     deps.rowSource.read = async (input) => { reached = true; await parked; return read(input) }
     const retry = createIssueConfirmWritebackExecutor(deps).run({ tenantId: TENANT, ownerId: OWNER })
     while (!reached) await new Promise((resolve) => setImmediate(resolve))
-    await assert.rejects(() => world.executor().run({ tenantId: TENANT, ownerId: OWNER }), /synthetic confirmation lost/)
+    assert.equal((await world.executor().run({ tenantId: TENANT, ownerId: OWNER })).results[0].kind, 'retryable')
     assert.equal(world.leases.size, 0, 'the failed run released its lease')
     releaseRetry()
     const second = await retry
-    assert.deepEqual(second.results, [{ ledgerId: row.id, kind: 'outcome', outcome: 'already_set', recorded: false, date: ACK_DAY, timeZone: 'Asia/Shanghai' }])
+    assert.deepEqual(second.results, [{ ledgerId: row.id, kind: 'skip', reason: 'already_traced' }])
     assert.equal(world.trace.length, 1)
     assert.equal(world.trace[0].outcome, 'written')
     assert.equal(world.cell(), ACK_DAY)

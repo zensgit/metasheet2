@@ -1,6 +1,7 @@
 // Actual native core authority + private material/readers + token client/exchange,
 // runner, form transport and 088-093. Only the explicit fetch returns synthetic
 // native Responses: it cannot access a network. No HTTP/JWT/full-app claim.
+import { YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL } from '../../src/db/migrations/zzzz20261126202000_pin_yida_ack_business_timezone'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -321,7 +322,7 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
   beforeEach(async () => {
     schema = 'yida_owner_port_' + randomUUID().replaceAll('-', '')
     await owner.query(`CREATE SCHEMA ${ident(schema)}`); await owner.query(`SET search_path TO ${ident(schema)}`)
-    await owner.query(ddl)
+    await owner.query(ddl + '\n' + YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL)
     // Only the six consumed ACL table shapes, not all user/auth migrations.
     await owner.query(`
       CREATE TABLE users (id text PRIMARY KEY, role text, permissions jsonb, is_active boolean,

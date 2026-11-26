@@ -28,7 +28,20 @@ import { AutomationActorAuthorityError, assertAutomationIntegrationActor } from 
  */
 export type YidaIssueConfirmRecheckActor = Readonly<{ actorId: string; tenantId: string; workspaceId: null }>
 export type YidaIssueConfirmRecheckDatabase = { transaction<T>(callback: (trx: Queryable) => Promise<T>): Promise<T> }
-export type YidaIssueConfirmWriteCondition = Readonly<{ tenantId: string; ownerId: string; sheetId: string; projectNo: string }>
+export type YidaIssueConfirmWriteCondition = Readonly<{
+  tenantId: string
+  ownerId: string
+  sheetId: string
+  projectNo: string
+  trace: Readonly<{
+    recordId: string
+    targetRef: string
+    ledgerId: string
+    outcome: 'written' | 'written_inactive'
+    date: string
+    timeZone: string
+  }>
+}>
 export type YidaIssueConfirmWriteConditionFactory = (actor: YidaIssueConfirmRecheckActor, input: unknown) => YidaIssueConfirmWriteCondition
 export type YidaIssueConfirmRecheck = (database: YidaIssueConfirmRecheckDatabase, actor: YidaIssueConfirmRecheckActor,
   input: unknown) => Promise<boolean>
@@ -157,7 +170,7 @@ const writeConditions = new WeakSet<object>()
 
 /**
  * Mint the write condition for the authenticated owner `actor` (the host owner runtime hands this to the executor next
- * to the re-check). `input` = { tenantId, ownerId, sheetId, projectNo }; a scope that is not the owner's is a wiring
+ * to the re-check). The scope includes the bound record and the success trace. A scope outside the owner's is a wiring
  * fault (YIDA_ISSUE_CONFIRM_AUTHORITY_UNAVAILABLE), never a condition.
  */
 export const createYidaIssueConfirmWriteCondition: YidaIssueConfirmWriteConditionFactory = (actor, input) => {
@@ -166,7 +179,18 @@ export const createYidaIssueConfirmWriteCondition: YidaIssueConfirmWriteConditio
   const tenantId = opaque(record.tenantId), ownerId = opaque(record.ownerId), sheetId = opaque(record.sheetId)
   const projectNo = opaque(record.projectNo)
   if (tenantId !== actor.tenantId || ownerId !== actor.actorId || actor.workspaceId !== null) unavailable()
-  const condition = Object.freeze({ tenantId, ownerId, sheetId, projectNo })
+  const { outcome } = record
+  const date = opaque(record.date)
+  if ((outcome !== 'written' && outcome !== 'written_inactive') || !/^\d{4}-\d{2}-\d{2}$/.test(date)) unavailable()
+  const trace = Object.freeze({
+    recordId: opaque(record.recordId),
+    targetRef: opaque(record.targetRef),
+    ledgerId: opaque(record.ledgerId),
+    outcome,
+    date,
+    timeZone: opaque(record.timeZone),
+  })
+  const condition = Object.freeze({ tenantId, ownerId, sheetId, projectNo, trace })
   writeConditions.add(condition)
   return condition
 }
@@ -212,4 +236,29 @@ export async function prepareYidaIssueConfirmWriteCondition(query: WriteQuery, c
     }
     if (!allowed) throw new YidaIssueConfirmWriteConditionError(409, codes.AUTHORITY_REVOKED)
   }
+}
+
+/** Append the success trace in the record transaction. A conflicting terminal outcome rolls the patch back. */
+export async function recordYidaIssueConfirmWriteTrace(query: WriteQuery, condition: unknown, recordId: string): Promise<void> {
+  if (condition === undefined) return
+  const codes = YIDA_ISSUE_CONFIRM_WRITE_CONDITION_CODES
+  if (!condition || typeof condition !== 'object' || !writeConditions.has(condition)) {
+    throw new YidaIssueConfirmWriteConditionError(403, codes.NOT_ALLOWED)
+  }
+  const { tenantId, ownerId, sheetId, trace } = condition as YidaIssueConfirmWriteCondition
+  if (recordId !== trace.recordId) throw new YidaIssueConfirmWriteConditionError(403, codes.NOT_ALLOWED)
+
+  const result = await query(
+    `INSERT INTO "integration_yida_issue_confirm_writeback"
+      (ledger_id, tenant_id, owner_id, target_ref, sheet_id, outcome, written_date, time_zone)
+     SELECT id, tenant_id, owner_id, target_ref, $5, $6, $7, $8
+     FROM integration_yida_delivery_ledger
+     WHERE id = $1 AND tenant_id = $2 AND owner_id = $3 AND target_ref = $4
+       AND workspace_id IS NULL AND status = 'acknowledged' AND intent = 'create'
+       AND source_record_digest IS NOT NULL
+     ON CONFLICT (ledger_id) DO NOTHING
+     RETURNING ledger_id`,
+    [trace.ledgerId, tenantId, ownerId, trace.targetRef, sheetId, trace.outcome, trace.date, trace.timeZone],
+  )
+  if (result.rows.length !== 1) throw new YidaIssueConfirmWriteConditionError(409, 'YIDA_ISSUE_CONFIRM_TRACE_CONFLICT')
 }

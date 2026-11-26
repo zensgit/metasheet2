@@ -1,5 +1,6 @@
 // Real native JWT/AuthService, owner runtime, plugin binding and PostgreSQL.
 // Only the YiDa fetch dependency is synthetic; it never opens a socket.
+import { YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL } from '../../src/db/migrations/zzzz20261126202000_pin_yida_ack_business_timezone'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { createServer, request, type ClientRequest, type Server } from 'node:http'
@@ -429,7 +430,7 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
       if (schemaCreated) { await admin!.query(`DROP SCHEMA ${ident(schema)} CASCADE`); schemaCreated = false }
       await admin!.query(`CREATE SCHEMA ${ident(schema)}`); schemaCreated = true
       await admin!.query(`SET search_path TO ${ident(schema)}`)
-      await admin!.query(ddl)
+      await admin!.query(ddl + '\n' + YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL)
       // Exact consumed auth/RBAC/session shapes: no absent-table fallback.
       await admin!.query(`
         CREATE TABLE users(id text PRIMARY KEY,email text,username text,mobile text,name text,role text,permissions jsonb,

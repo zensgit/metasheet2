@@ -572,12 +572,15 @@ describe('D13 a live re-check', () => {
 
 // #6812 review P2: the write condition the one patch carries, re-decided by the host inside the record write.
 describe('the write condition (re-decided inside the record write transaction)', () => {
-  const scope = { tenantId: actor.tenantId, ownerId: actor.actorId, sheetId: 'sheet_syn_wc', projectNo: 'SYN-WC-1' }
+  const bindingScope = { tenantId: actor.tenantId, ownerId: actor.actorId, sheetId: 'sheet_syn_wc', projectNo: 'SYN-WC-1' }
+  const trace = { recordId: 'synthetic-record', targetRef: 'synthetic-target', ledgerId: 'synthetic-ledger',
+    outcome: 'written', date: '2026-11-26', timeZone: 'Asia/Shanghai' }
+  const scope = { ...bindingScope, ...trace }
   const codes = YIDA_ISSUE_CONFIRM_WRITE_CONDITION_CODES
   it('is minted only for the authenticated owner, frozen, with exactly the four scope fields', () => {
     const condition = createYidaIssueConfirmWriteCondition(actor, scope)
     expect(Object.isFrozen(condition)).toBe(true)
-    expect({ ...condition }).toEqual(scope)
+    expect({ ...condition }).toEqual({ ...bindingScope, trace })
     for (const input of [null, {}, { ...scope, tenantId: 'other' }, { ...scope, ownerId: 'other' }, { ...scope, sheetId: ' s' }, { ...scope, projectNo: '' }]) {
       expect(() => createYidaIssueConfirmWriteCondition(actor, input)).toThrow(expect.objectContaining({ code: 'YIDA_ISSUE_CONFIRM_AUTHORITY_UNAVAILABLE' }))
     }

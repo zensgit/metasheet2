@@ -56,11 +56,7 @@ export const ISSUE_CONFIRM_LEDGER_AUDIT_TABLE = 'integration_yida_delivery_audit
 // A FUTURE DURABLE "DEFERRED" MARKER (a row known retryable, to be left out or ordered last) must be its own table with
 // its own validated db method and its own pluginDb provenance re-pin — never a row of the trace table: the anti-join here,
 // the named path's probe and the core's re-check under the sheet lease (right before the patch) all treat a trace row as
-// final, and the trace table is append-only (migration zzzz20261106093100). What "final" covers: a trace that exists when
-// a run reads the row, or when it re-checks under the lease, stops that run from patching; the core header says which
-// interleaving the lease does not serialize (a trace INSERT that no currently held lease covers — an outcome decided
-// before the lease, or one inserted by a holder whose lease was taken over — landing between another run's re-check
-// and that run's own trace INSERT).
+// final. The named path, the lease re-check, and the host transaction all honor the same ledger key.
 const TRACE_ANTI_JOIN = Object.freeze({ table: ISSUE_CONFIRM_TRACE_TABLE, on: Object.freeze({ ledger_id: 'id' }) })
 const LEDGER_KEYSET = Object.freeze({ at: 'created_at', id: 'id' })
 const ID_RE = /^[^\u0000-\u001f\u007f]{1,128}$/u
@@ -108,13 +104,15 @@ export function createIssueConfirmLedgerReader({ db }) {
   async function project(row, targetRefs) {
     const admitted = row.status === 'acknowledged' && row.intent === 'create' && targetRefs.includes(row.target_ref)
     let acknowledgedAt = null
+    let acknowledgedTimeZone = null
     if (admitted) {
       const audit = await db.selectOne(ISSUE_CONFIRM_LEDGER_AUDIT_TABLE, { ledger_id: row.id, event: 'acknowledgement' })
       acknowledgedAt = audit ? iso(audit.created_at) : null
+      acknowledgedTimeZone = audit?.ack_time_zone ?? null
     }
     return Object.freeze({
       id: row.id, tenantId: row.tenant_id, ownerId: row.owner_id, targetRef: row.target_ref, status: row.status,
-      intent: row.intent, sourceRecordDigest: row.source_record_digest ?? null, acknowledgedAt,
+      intent: row.intent, sourceRecordDigest: row.source_record_digest ?? null, acknowledgedAt, acknowledgedTimeZone,
       operationId: row.operation_id, rowKey: row.row_key,
     })
   }
@@ -254,11 +252,24 @@ export function createIssueConfirmWritebackCapability(options = {}) {
   const rowSource = createIssueConfirmRowSource({ db, security })
   const projectRegistry = createIssueConfirmProjectRegistry({ projectTargetStore })
   const sheets = createIssueConfirmSheets({ multitable })
-  const traceStore = createIssueConfirmTraceStore({ db })
+  const baseTraceStore = createIssueConfirmTraceStore({ db })
+  if (!plainFunction(projectWriteLock, 'assertHolderWithin')) throw unavailable('the trace lease assertion is required')
+  const traceStore = Object.freeze({
+    traced: baseTraceStore.traced,
+    async record(row, guard) {
+      if (!guard) return baseTraceStore.record(row)
+      const fence = guard.hostWriteFence()
+      return guard.withHostWrite(() => db.transaction(async (trx) => {
+        await trx.setTransactionIsolationLevel('read committed')
+        await projectWriteLock.assertHolderWithin(trx, fence.scopeKey, fence)
+        return createIssueConfirmTraceStore({ db: trx }).record(row)
+      }))
+    },
+  })
   // The lease only (register R-96, Plan A): the write-back never bumps the generation, so bumpGeneration is neither
   // required nor handed on (the executor is built per run, below: a lock without it must build).
   if (!plainFunction(projectWriteLock, 'withProjectWriteLease') || !plainFunction(projectWriteLock, 'scopeKeyFor')) {
-    throw unavailable('the sheet write lock is required')
+    throw unavailable('the sheet write lease is required')
   }
   const writeLock = Object.freeze({
     scopeKeyFor: (sheetId) => projectWriteLock.scopeKeyFor(sheetId),
@@ -267,13 +278,21 @@ export function createIssueConfirmWritebackCapability(options = {}) {
   function enabled() { return issueConfirmWritebackEnabled(env) }
   function create(input) {
     if (!input || typeof input !== 'object' || types.isProxy(input)) throw unavailable('create needs { context, recheck, writeCondition }')
-    const { context, recheck, writeCondition } = input
+    const { context, recheck, writeCondition, testTargetRefs = [] } = input
     const tenantId = opaque(context && context.tenantId)
     const ownerId = opaque(context && context.ownerId)
-    if (!tenantId || !ownerId || typeof recheck !== 'function' || types.isProxy(recheck)
+    if (!tenantId || !ownerId || !Array.isArray(testTargetRefs) || typeof recheck !== 'function' || types.isProxy(recheck)
       || typeof writeCondition !== 'function' || types.isProxy(writeCondition)) throw unavailable('create needs { context, recheck, writeCondition }')
     const executor = createIssueConfirmWritebackExecutor({
       env, ledgerReader, rowSource, projectRegistry, sheets, writeLock, traceStore,
+      async validateTargets({ tenantId, ownerId, targetRefs }) {
+        const slotOne = await db.selectOne('integration_yida_approved_target', {
+          tenant_id: tenantId, owner_id: ownerId, workspace_id: null, slot: 1,
+        })
+        if (targetRefs.includes(slotOne?.target_ref) || targetRefs.some(ref => testTargetRefs.includes(ref))) {
+          throw new YidaIssueConfirmWritebackError('YIDA_ISSUE_CONFIRM_TEST_TARGET_LISTED', 'write-back list contains a test target')
+        }
+      },
       // The host's live re-check (owner live integration admin, role-granted stock-prep code, sheet read) — the
       // executor calls it under the sheet write lease, right before the records read and the patch.
       // #6812 review P2: and the host's write-condition minter — the opaque condition the one patch carries, which the

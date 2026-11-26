@@ -34,25 +34,14 @@
 // the patch) is checked before the project registry is asked: off → skip `project_sheets_disabled`, no
 // trace, no registry read, so the row is decided again once the switch is on.
 //
-// THE DATE (D15). The calendar day, in MULTITABLE_BUSINESS_TIMEZONE (default Asia/Shanghai; the same rule
-// as the host's resolveMultitableBusinessTimezone, pinned by a host-equivalence test), of the ledger row's
-// `acknowledgement` AUDIT row's created_at (the database clock). Never "now": a recovery run days later
-// writes the same date, which is what makes a retry idempotent.
+// THE DATE (D15). The calendar day of the acknowledgement audit's created_at in the business time zone
+// captured when the ACK committed. Older ACKs with no recorded zone use Asia/Shanghai.
+// A later recovery uses the same audit fields even if the process configuration has changed.
 //
-// ONE ROW, IN ORDER (each step is the pure decision below; the executor only gathers the next fact):
-//   selector → row values (bound sheet + the payload's idempotencyKey / projectNo through the mapping's
-//   direct entries; missing → payload_unmapped; unreadable → retryable) → the project-sheets switch (off →
-//   skip project_sheets_disabled) → project registry by (tenant, projectNo) (absent →
-//   project_absent, archived → project_archived, registered sheet ≠ bound sheet → sheet_mismatch) →
-//   UNDER THE SHEET WRITE LEASE (purpose issue_confirm_writeback): live authority re-check (revoked →
-//   permission_revoked) → the row by idempotencyKey, limit 2 (0 → row_absent, 2 → duplicate_key, its
-//   projectNo ≠ the payload's → project_mismatch) → the cell: empty → THE TRACE RE-CHECK (a trace row for
-//   this ledger row exists by now → skip `already_traced`: no patch, no trace) → ONE version-conditional,
-//   host-fenced patch of `issueConfirmDate` only (written; written_inactive when that row is INACTIVE, see D3-1 below);
-//   equal → already_set; any other value →
-//   kept_existing (D8: the first confirmation wins, never overwritten) → the trace INSERT … ON CONFLICT
-//   (ledger_id) DO NOTHING, STILL UNDER THE LEASE → release. An outcome decided before the lease
-//   (source_unbound, payload_unmapped, project_absent, project_archived, sheet_mismatch) is traced without one.
+// After the selector and bound-draft checks, acquire the bound sheet's lease before reading the project registry.
+// Under the lease: check for an existing trace, resolve the project, recheck authority and read the bound record.
+// The host atomically commits the one version-conditional, fenced date patch and its success trace. Every terminal
+// project-dependent outcome is recorded while the current lease holder is locked in the trace transaction.
 //   NO GENERATION BUMP (register R-96, Plan A): the lease is the guard. A row that finds the sheet's lease
 //   held is refused STOCK_PREP_PROJECT_WRITE_LOCKED: contention, nothing written, no trace, decided again by
 //   a later run. A token minted before the write is already refused without a bump (small lane: the
@@ -75,34 +64,15 @@
 // registry, authority, sheet open / query / patch), a bound row whose row values come back null, the switch
 // turned off mid-run: the row is reported `retryable` with a fixed code and nothing is recorded; the next
 // recovery run decides it again.
-// A failure of the TRACE INSERT itself is not swallowed: it fails the run (fail closed — evidence that
-// could not be written is never reported as written).
-// THE WRITE CONDITION (#6812 review P2). The live re-check answers in a host transaction of its own and the patch commits
-// in another one (the host's record write behind the fence): a revocation or a project archive committed in between would
-// otherwise still let the date in. So the ONE patch carries `writeCondition` — an opaque value the host mints for the
-// authenticated owner (authority.writeCondition({ tenantId, ownerId, sheetId, projectNo })) — and the host decides the
-// registry row (one row, active, registered on this sheet) and the same live verdict AGAIN inside the write transaction,
-// under their row locks, before the UPDATE (packages/core-backend/src/integration/yida-issue-confirm-writeback-authority.ts).
-// Refused → nothing written, the row is retryable with the host's fixed code (YIDA_ISSUE_CONFIRM_WRITE_AUTHORITY_REVOKED,
-// YIDA_ISSUE_CONFIRM_WRITE_PROJECT_INACTIVE, YIDA_ISSUE_CONFIRM_WRITE_CONDITION_UNAVAILABLE), no trace; the next run decides
-// it again and records the terminal outcome (permission_revoked under the lease; project_archived / project_absent /
-// sheet_mismatch before it).
-// THE TRACE UNDER THE LEASE (Y9 r3, the trace race). The trace INSERT runs before the lease is released, and
-// the trace is read once more right before the patch. A run that read the row as untraced before another run
-// traced it, that leases after that run released and that decides under its lease to patch, therefore finds the
-// trace and patches nothing (already_traced) — also when the cell was emptied in between; a run that decides any
-// other outcome under its lease returns that outcome as usual (its trace INSERT does nothing: recorded false). A crash between the patch and the trace
-// INSERT (two statements, both under the lease) leaves the date in the cell and no trace: the next run that
-// holds the lease finds no trace, reads the date → already_set, one trace, no second patch (if the process
-// died, its lease stays held until it expires or is taken over: a retry before that is
-// STOCK_PREP_PROJECT_WRITE_LOCKED). Two runs that both decided the same row without a patch converge on the
-// primary key: the second INSERT does nothing and that run completes normally (recorded: false). Not
-// serialized by the lease: a trace INSERT that no currently held lease covers — an outcome decided BEFORE the
-// lease (above), or one inserted by a holder whose lease was taken over (it decided under its lease, then stalled
-// past the lease TTL plus the takeover grace; nothing re-asserts the lease before that INSERT) — can land between
-// another run's re-check and that other run's own trace INSERT: that run patches once (a first patch; no emptied
-// cell is needed) and the row ends traced with the earlier outcome (that run answers written, recorded false). A
-// trace that exists when a run re-checks under the lease is final for that run.
+// A failure recording a standalone terminal outcome fails the run. A failure appending the success trace
+// rolls back the record transaction and leaves the ledger row eligible for recovery.
+// THE WRITE CONDITION binds the owner, project, sheet and record. Inside the record transaction, the host
+// rechecks the active project and the live authority before writing, then appends the success trace.
+// If a trace already exists, its unique ledger key makes the pending date patch roll back.
+//
+// A run that read the ledger before the winner committed checks the trace again after acquiring the lease.
+// Committed date writes always have their original outcome, including written_inactive. Before commit, a crash
+// rolls back both writes. A retry after commit finds the trace and skips the row.
 //
 // D3-1 (owner ruling, register R-96 ⑦, 2026-11-17: 「按建议」 relayed by the stock-prep line, owner 「agree」). The row the
 // idempotencyKey finds may be INACTIVE (`active === false`: a BOM re-key or a sheet-repair retire left the predecessor
@@ -126,11 +96,12 @@
 // ---------------------------------------------------------------------------------------------------
 
 const crypto = require('node:crypto')
+const {
+  BUSINESS_TIMEZONE_ENV_KEY, DEFAULT_BUSINESS_TIMEZONE, isValidIanaTimeZone, resolveIssueConfirmBusinessTimeZone,
+} = require('./yida-business-timezone.cjs')
 
 const ISSUE_CONFIRM_WRITEBACK_ENABLED_ENV = 'INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED'
 const ISSUE_CONFIRM_TARGET_REFS_ENV = 'INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS'
-const BUSINESS_TIMEZONE_ENV_KEY = 'MULTITABLE_BUSINESS_TIMEZONE'
-const DEFAULT_BUSINESS_TIMEZONE = 'Asia/Shanghai'
 
 const ISSUE_CONFIRM_TRACE_TABLE = 'integration_yida_issue_confirm_writeback'
 const ISSUE_CONFIRM_DATE_FIELD_ID = 'issueConfirmDate'
@@ -253,28 +224,6 @@ function parseIssueConfirmTargetRefs(env = process.env) {
 }
 
 // ── the business day ───────────────────────────────────────────────────────────────────────────────
-
-// Mirror of packages/core-backend/src/multitable/automation-timezone.ts isValidIanaTimeZone.
-function isValidIanaTimeZone(timeZone) {
-  if (typeof timeZone !== 'string' || !timeZone.trim()) return false
-  try {
-    new Intl.DateTimeFormat('en-US', { timeZone: timeZone.trim() }).format(0)
-    return true
-  } catch {
-    return false
-  }
-}
-
-// Mirror of packages/core-backend/src/multitable/business-timezone.ts resolveMultitableBusinessTimezone
-// (trim; unset / blank / rejected by Intl → Asia/Shanghai). Equivalence is pinned by
-// packages/core-backend/tests/unit/yida-issue-confirm-writeback-migration.test.ts.
-function resolveIssueConfirmBusinessTimeZone(env = process.env) {
-  const raw = env ? env[BUSINESS_TIMEZONE_ENV_KEY] : undefined
-  const trimmed = typeof raw === 'string' ? raw.trim() : ''
-  if (!trimmed) return DEFAULT_BUSINESS_TIMEZONE
-  if (isValidIanaTimeZone(trimmed)) return trimmed
-  return DEFAULT_BUSINESS_TIMEZONE
-}
 
 // ── the sweep cursor ───────────────────────────────────────────────────────────────────────────────
 //
@@ -592,7 +541,7 @@ function requireFunction(holder, name, label) {
  *       at most `limit` candidate rows of this tenant + owner strictly after `after` ({ targetRef, at, id } | null) in
  *       the sweep order; next = { targetRef, at, id } of the LAST row when the page is full and the sweep may go on,
  *       null when it is exhausted.
- *   rowSource.read({ tenantId, ownerId, ledger }) → { boundSheetId, config, payload }; THROWS on any
+ *   rowSource.read({ tenantId, ownerId, ledger }) → { boundSheetId, boundRecordId, config, payload }; THROWS on any
  *       failure (a null answer is retryable too, never a trace)
  *   projectRegistry.resolve({ tenantId, projectNo }) → null (no registration) | { sheetId, objectId, status };
  *       THROWS on any failure; never called while the project-sheets switch is off (D14)
@@ -604,16 +553,18 @@ function requireFunction(holder, name, label) {
  *       (retryable), so the patch can never run unfenced.
  *   authority.recheck({ tenantId, ownerId, sheetId, objectId }) → true | false (live, under the lease)
  *   authority.writeCondition({ tenantId, ownerId, sheetId, projectNo }) → the host's opaque write condition, handed
- *       unchanged to the one patchRecord (the host re-decides it inside the write transaction; see THE WRITE CONDITION)
+ *       unchanged to the one patchRecord (including the success trace, committed with the patch)
  *   writeLock — createStockPreparationProjectWriteLock(): scopeKeyFor, withProjectWriteLease (never a
  *       generation bump: register R-96, Plan A)
- *   traceStore — createIssueConfirmTraceStore({ db }): record(row) → { recorded }, traced(ledgerId) → true | false
+ *   traceStore — record(row, guard) → { recorded } and traced(ledgerId) → true | false
+ *   validateTargets({ tenantId, ownerId, targetRefs }) throws if the write-back list contains a test target
  *   env (default process.env), runId (default crypto.randomUUID)
  */
 function createIssueConfirmWritebackExecutor(deps = {}) {
-  const { ledgerReader, rowSource, projectRegistry, sheets, authority, writeLock, traceStore } = deps
+  const { ledgerReader, rowSource, projectRegistry, sheets, authority, writeLock, traceStore, validateTargets } = deps
   const env = deps.env || process.env
   const runId = typeof deps.runId === 'function' ? deps.runId : () => crypto.randomUUID()
+  if (typeof validateTargets !== 'function') fail('YIDA_ISSUE_CONFIRM_UNAVAILABLE', 'target validation is required')
   requireFunction(ledgerReader, 'list', 'ledgerReader')
   requireFunction(ledgerReader, 'sweep', 'ledgerReader')
   requireFunction(rowSource, 'read', 'rowSource')
@@ -628,15 +579,16 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
 
   // The trace row of one terminal decision. Any failure (the row's own validation or the INSERT) is TraceWriteFailed,
   // which the run rethrows: fail closed.
-  async function writeTrace(ledger, decision, timeZone) {
+  async function writeTrace(ledger, decision, timeZone, guard) {
     try {
       const row = issueConfirmTraceRow({ ledger, outcome: decision.outcome, sheetId: decision.sheetId, date: decision.date, timeZone })
-      const { recorded } = await traceStore.record(row)
+      const { recorded } = await traceStore.record(row, guard)
       // written_inactive carries the handle of the inactive row it wrote (its record id, an opaque id) to the run's
       // answer only; the trace keeps its values-free columns.
       return { kind: 'traced', outcome: decision.outcome, recorded, date: row.written_date,
         ...(decision.outcome === 'written_inactive' ? { recordId: decision.recordId } : {}) }
     } catch (error) {
+      if (RETRYABLE_LOCK_CODES.includes(error?.code)) throw error
       throw new TraceWriteFailed(error)
     }
   }
@@ -644,39 +596,45 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
   // Decide one row. Returns { kind: 'skip' | 'traced', ... } or throws (retryable / SWITCH_OFF / TraceWriteFailed).
   // Facts are gathered only when the pure decision asks for them; the lease is held around authority, records, the
   // trace re-check, the patch and the trace INSERT of every outcome decided under it.
-  async function decideRow(scope, ledger, targetRefs, timeZone) {
+  async function decideRow(scope, ledger, targetRefs) {
+    const timeZone = ledger.acknowledgedTimeZone ?? DEFAULT_BUSINESS_TIMEZONE
     const facts = { ledger, targetRefs, timeZone, projectSheetsEnabled: issueConfirmProjectSheetsEnabled(env) }
     let decision = decideIssueConfirmWriteback(facts)
     if (decision.kind === 'need' && decision.need === 'rowValues') {
       facts.rowValues = await rowSource.read({ tenantId: scope.tenantId, ownerId: scope.ownerId, ledger })
       decision = decideIssueConfirmWriteback(facts)
     }
-    let projectNo = null
-    if (decision.kind === 'need' && decision.need === 'project') {
-      projectNo = decision.projectNo
-      facts.project = await projectRegistry.resolve({ tenantId: scope.tenantId, projectNo })
-      decision = decideIssueConfirmWriteback(facts)
-    }
-    // Decided before the lease: a skip, or an outcome traced without one (no sheet is touched).
+    // These outcomes depend only on the immutable send, so they need no sheet lease.
     if (decision.kind === 'record') return writeTrace(ledger, decision, timeZone)
     if (decision.kind !== 'need') return decision
-    if (decision.need !== 'authority') fail('YIDA_ISSUE_CONFIRM_STATE', 'unexpected decision step')
+    if (decision.need !== 'project') fail('YIDA_ISSUE_CONFIRM_STATE', 'unexpected decision step')
 
-    const project = facts.project
-    const scopeKey = writeLock.scopeKeyFor(project.sheetId)
+    // Scope the lease to the bound sheet even if the project is archived, absent or registered elsewhere.
+    const projectNo = decision.projectNo
+    const scopeKey = writeLock.scopeKeyFor(facts.rowValues.boundSheetId)
     return writeLock.withProjectWriteLease(scopeKey, {
       purpose: ISSUE_CONFIRM_WRITEBACK_LOCK_PURPOSE,
       runId: runId(),
       tenantId: scope.tenantId,
     }, async (guard) => {
+      const already = await traceStore.traced(ledger.id)
+      if (already !== true && already !== false) fail('YIDA_ISSUE_CONFIRM_UNAVAILABLE', 'trace re-check did not answer')
+      if (already) return { kind: 'skip', reason: 'already_traced' }
+
+      facts.project = await projectRegistry.resolve({ tenantId: scope.tenantId, projectNo })
+      let inner = decideIssueConfirmWriteback(facts)
+      if (inner.kind === 'record') return writeTrace(ledger, inner, timeZone, guard)
+      if (inner.kind !== 'need' || inner.need !== 'authority') fail('YIDA_ISSUE_CONFIRM_STATE', 'unexpected project decision')
+
+      const project = facts.project
       const allowed = await authority.recheck({
         tenantId: scope.tenantId, ownerId: scope.ownerId, sheetId: project.sheetId, objectId: project.objectId,
       })
       if (allowed !== true && allowed !== false) fail('YIDA_ISSUE_CONFIRM_AUTHORITY_UNAVAILABLE', 'authority re-check did not answer')
       facts.authority = allowed
-      let inner = decideIssueConfirmWriteback(facts)
+      inner = decideIssueConfirmWriteback(facts)
       // Every outcome decided under the lease is traced before the lease is released.
-      if (inner.kind === 'record') return writeTrace(ledger, inner, timeZone)
+      if (inner.kind === 'record') return writeTrace(ledger, inner, timeZone, guard)
       if (inner.kind !== 'need') return inner
       const records = await sheets.open({ tenantId: scope.tenantId, project })
       // The host write fence, checked here as well as in the adapter: an api that does not declare it is refused before
@@ -687,21 +645,18 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
       const rows = await records.queryRecords({ filters: { [ISSUE_CONFIRM_KEY_FIELD_ID]: inner.idempotencyKey }, limit: 2, offset: 0 })
       facts.records = rows
       inner = decideIssueConfirmWriteback(facts)
-      if (inner.kind === 'record') return writeTrace(ledger, inner, timeZone)
+      if (inner.kind === 'record') return writeTrace(ledger, inner, timeZone, guard)
       if (inner.kind !== 'patch') return inner
       // The switch is read once more right before the only write (a switch turned off mid-run stops here).
       if (!issueConfirmWritebackEnabled(env)) throw SWITCH_OFF
       // D14 once more as well: the project-sheets switch turned off mid-row → skip and count, no patch.
       if (!issueConfirmProjectSheetsEnabled(env)) return { kind: 'skip', reason: 'project_sheets_disabled' }
-      // THE TRACE RE-CHECK, right before the only write: a run that read this row as untraced before another run
-      // traced it (and leased after that run released) finds the trace here and patches nothing.
-      const already = await traceStore.traced(ledger.id)
-      if (already !== true && already !== false) fail('YIDA_ISSUE_CONFIRM_UNAVAILABLE', 'trace re-check did not answer')
-      if (already) return { kind: 'skip', reason: 'already_traced' }
       // THE WRITE CONDITION (#6812 review P2): minted by the host for this owner, sheet and project; the host decides the
       // registry row and the live verdict once more inside the patch's own transaction, before the UPDATE.
+      const outcome = inner.inactive ? 'written_inactive' : 'written'
       const writeCondition = await authority.writeCondition({
         tenantId: scope.tenantId, ownerId: scope.ownerId, sheetId: project.sheetId, projectNo,
+        recordId: inner.recordId, targetRef: ledger.targetRef, ledgerId: ledger.id, outcome, date: inner.date, timeZone,
       })
       if (!writeCondition || typeof writeCondition !== 'object') {
         fail('YIDA_ISSUE_CONFIRM_AUTHORITY_UNAVAILABLE', 'the host did not mint a write condition')
@@ -721,11 +676,9 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
         }
         throw error
       }
-      // The trace of the write, before the lease is released (a failure here still fails the run closed). D3-1: the row
-      // the key found is inactive → written_inactive, with the record's handle for the run's answer.
-      return writeTrace(ledger, inner.inactive
-        ? { outcome: 'written_inactive', sheetId: inner.sheetId, date: inner.date, recordId: inner.recordId }
-        : { outcome: 'written', sheetId: inner.sheetId, date: inner.date }, timeZone)
+      // The host commits the patch and its success trace together.
+      return { kind: 'traced', outcome, recorded: true, date: inner.date,
+        ...(inner.inactive ? { recordId: inner.recordId } : {}) }
     })
   }
 
@@ -766,8 +719,8 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
     }
     // An empty list selects nothing: zero reads, zero writes (attack point 9). A sweep over nothing is exhausted.
     if (targetRefs.length === 0) return ledgerIds ? { enabled: true, results: [] } : { enabled: true, results: [], next: null }
-    const timeZone = resolveIssueConfirmBusinessTimeZone(env)
     const scope = Object.freeze({ tenantId, ownerId })
+    await validateTargets({ ...scope, targetRefs })
 
     let ledgerRows
     let next = null
@@ -816,7 +769,7 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
       }
       let decision
       try {
-        decision = await decideRow(scope, ledger, targetRefs, timeZone)
+        decision = await decideRow(scope, ledger, targetRefs)
       } catch (error) {
         // The trace could not be written: not a retryable row — the run fails closed with the original error.
         if (error instanceof TraceWriteFailed) throw error.error
@@ -838,7 +791,7 @@ function createIssueConfirmWritebackExecutor(deps = {}) {
         kind: 'outcome',
         outcome: decision.outcome,
         recorded: decision.recorded,
-        ...(decision.date ? { date: decision.date, timeZone } : {}),
+        ...(decision.date ? { date: decision.date, timeZone: ledger.acknowledgedTimeZone ?? DEFAULT_BUSINESS_TIMEZONE } : {}),
         ...(decision.outcome === 'written_inactive' ? { recordId: decision.recordId } : {}),
       })
     }

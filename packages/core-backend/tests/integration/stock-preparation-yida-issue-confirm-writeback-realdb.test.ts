@@ -9,6 +9,7 @@
 // The YiDa side is a synthetic fetch double that cannot reach any network; it counts token requests and form POSTs.
 // The YiDa tables, the ACL rows, the registry and the lease live in a private schema; the multitable sheet, its fields
 // and records, and the D21 version rows live in the migrated PUBLIC schema (the send-approvals real-DB precedent).
+import { YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL } from '../../src/db/migrations/zzzz20261126202000_pin_yida_ack_business_timezone'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -20,7 +21,7 @@ import request, { type Response as TestResponse } from 'supertest'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Queryable } from '../../src/multitable/automation-durable-dispatcher'
 import { canonicalSheetFenceKey } from '../../src/multitable/canonical-sheet-fence'
-import { YIDA_ISSUE_CONFIRM_WRITE_PROJECT_SQL, type prepareYidaIssueConfirmWriteCondition } from '../../src/integration/yida-issue-confirm-writeback-authority'
+import { YIDA_ISSUE_CONFIRM_WRITE_PROJECT_SQL, recordYidaIssueConfirmWriteTrace, type prepareYidaIssueConfirmWriteCondition } from '../../src/integration/yida-issue-confirm-writeback-authority'
 
 const root = path.resolve(__dirname, '..', '..', '..', '..')
 const requireCjs = createRequire(import.meta.url)
@@ -68,6 +69,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
   let createMaterial: (options: Row) => { create(input: unknown): Promise<{ credentialRef: string; credentialGeneration: number }> }
   let createDraft: (options: Row) => { createDraft(input: unknown): Promise<{ operationId: string; rows: Array<{ rowKey: string }> }> }
   let createTarget: (options: Row) => { register(input: unknown): Promise<{ targetRef: string }> }
+  let createAdditionalTarget: (options: Row) => (trx: unknown, input: unknown) => Promise<{ targetRef: string }>
   let createLedger: (options: Row) => Row & { prepare(input: unknown): Promise<{ record: Row }>; claim(input: unknown): Promise<{ claimToken: string }>
     recordAcknowledgement(input: unknown): Promise<unknown>; markUnknown(input: unknown): Promise<unknown>; cancelPrepared(input: unknown): Promise<unknown> }
   let createBinding: (options: Row) => unknown
@@ -85,7 +87,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
   let resolveFence: (pluginName: string, fence: unknown) => unknown
   let assertFence: (query: unknown, fence: unknown) => Promise<void>
   let prepareCondition: typeof prepareYidaIssueConfirmWriteCondition
-  const envKeys = ['NODE_ENV', 'ENCRYPTION_KEY', 'ENCRYPTION_SALT'] as const
+  const envKeys = ['NODE_ENV', 'ENCRYPTION_KEY', 'ENCRYPTION_SALT', 'MULTITABLE_BUSINESS_TIMEZONE'] as const
   let savedEnv: Array<[typeof envKeys[number], string | undefined]> = []
   // Every statement of every connection of the test, in order (SQL shapes only, never values).
   const statements: string[] = []
@@ -184,7 +186,9 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
           const assertWriteCondition = await prepareCondition(txQuery, writeCondition, {
             sheetId, fenced: resolved !== undefined,
           })
-          return patchRecord({ query: txQuery, sheetId, recordId, changes, expectedVersion, assertWriteCondition })
+          const record = await patchRecord({ query: txQuery, sheetId, recordId, changes, expectedVersion, assertWriteCondition })
+          await recordYidaIssueConfirmWriteTrace(txQuery, writeCondition, String(recordId))
+          return record
         }, 'wb')
       },
     }
@@ -206,7 +210,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
       } }
     return value
   }
-  type World = { runtime: Runtime; fake: FetchDouble; env: Record<string, string | undefined>; targetRef: string
+  type World = { runtime: Runtime; fake: FetchDouble; env: Record<string, string | undefined>; targetRef: string; testTargetRef: string
     crashHookOnce: boolean; capability: Capability; runs: Promise<Result>[]; warnings: string[]; stop(): Promise<void> }
   let world: World | undefined
   async function compose(options: { crashHookOnce?: boolean; env?: Record<string, string | undefined> } = {}): Promise<World> {
@@ -242,12 +246,13 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     const fake = http()
     const warnings: string[] = []
     const runtime = createRuntime({ database: hostDatabase, security, fetch: fake.fetch, readEnablement: () => 'true',
+      readMultiTargetEnablement: () => 'true', readUnboundTestTargetRefs: () => env.INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS,
       reauthorizeSourceBinding: reauthorizer(), timeoutMs: 10000, warn: (code: string) => { warnings.push(code) } })
     // index.cjs hands the binding a frozen, bound security pair (own data properties only).
     const bound = Object.freeze({ encrypt: security.encrypt.bind(security), decrypt: security.decrypt.bind(security) })
     const binding = createBinding({ db, security: bound, issueConfirmWriteback: wrapped })
     const handle = await runtime.createPluginCapability().activate(binding)
-    world = { runtime, fake, env, targetRef: '', crashHookOnce: Boolean(options.crashHookOnce), capability, runs, warnings,
+    world = { runtime, fake, env, targetRef: '', testTargetRef: '', crashHookOnce: Boolean(options.crashHookOnce), capability, runs, warnings,
       async stop() { await handle.stop(); await runtime.stop() } }
     return world
   }
@@ -302,17 +307,27 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
   }
   const pluginStores = () => {
     const db = createDb({ database: pluginDatabase }), context = { tenantId: TENANT, workspaceId: null, ownerId: OWNER }
-    return { db, draft: createDraft({ db, security, context }), material: createMaterial({ db, security, context }),
+    return { db, context, draft: createDraft({ db, security, context }), material: createMaterial({ db, security, context }),
       target: createTarget({ db, security, context }), ledger: createLedger({ db }) }
   }
-  // One draft per call; the first call also registers slot 1 for that draft's locator and lists it for the write-back.
+  // Register the permanent test anchor and a distinct formal target on the first draft.
   async function draft(input: unknown) {
     const stores = pluginStores(), made = await stores.draft.createDraft(input)
     if (!world!.targetRef) {
+      const testDraft = boundInput(0)
+      testDraft.config.target = { appType: 'synthetic_issue_app', formUuid: 'synthetic_test_form' }
+      const anchor = await stores.draft.createDraft(testDraft)
       const secret = await stores.material.create({ material: material() })
-      const target = await stores.target.register({ operationId: made.operationId, credentialRef: secret.credentialRef,
-        credentialGeneration: secret.credentialGeneration, attestation: { kind: 'owner-reviewed-target', reviewRef: 'synthetic-review',
-          organizationId: 'synthetic-organization', executionIdentity: 'synthetic-executor' } })
+      const formalSecret = await stores.material.create({ material: { ...material(), appKey: 'synthetic-formal-app' } })
+      const attestation = { kind: 'owner-reviewed-target', reviewRef: 'synthetic-review',
+        organizationId: 'synthetic-organization', executionIdentity: 'synthetic-executor' }
+      const testTarget = await stores.target.register({ operationId: anchor.operationId, credentialRef: secret.credentialRef,
+        credentialGeneration: secret.credentialGeneration, attestation })
+      const register = createAdditionalTarget({ security, context: stores.context })
+      const transaction = stores.db.transaction as (fn: (trx: unknown) => Promise<{ targetRef: string }>) => Promise<{ targetRef: string }>
+      const target = await transaction(trx => register(trx, { operationId: made.operationId,
+        credentialRef: formalSecret.credentialRef, credentialGeneration: formalSecret.credentialGeneration, attestation }))
+      world!.testTargetRef = testTarget.targetRef
       world!.targetRef = target.targetRef
       if (!Object.hasOwn(world!.env, 'INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS')) world!.env.INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS = target.targetRef
     }
@@ -322,7 +337,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
   // detached run to start and settle, so the assertions that follow see its effects (settle: false leaves it running).
   async function sendOne(input: unknown, submissionId = 'synthetic-submission', options: { settle?: boolean } = {}) {
     const made = await draft(input)
-    const grant = await world!.runtime.approve(actor, { operationId: made.operationId, rowKey: made.rows[0].rowKey, confirmationId: 'synthetic-confirmation' })
+    const grant = await world!.runtime.approve(actor, { operationId: made.operationId, rowKey: made.rows[0].rowKey, confirmationId: 'synthetic-confirmation', targetRef: world!.targetRef })
     const started = world!.runs.length
     const result = await world!.runtime.submit(actor, { grantId: grant.grantId, submissionId })
     if (options.settle !== false && result.status === 'acknowledged' && result.reused === false) await settleAfterAck(started)
@@ -385,7 +400,9 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     createWriteLock = requireCjs(path.join(lib, 'stock-preparation-project-write-lock.cjs')).createStockPreparationProjectWriteLock
     deriveObjectId = requireCjs(path.join(lib, 'stock-preparation-project-targets.cjs')).deriveProjectSheetObjectId
     createDraft = (await native('yida-draft-plan-store.mjs')).createYidaDraftPlanStore
-    createTarget = (await native('yida-approved-target-store.mjs')).createYidaApprovedTargetStore
+    const targetStore = await native('yida-approved-target-store.mjs')
+    createTarget = targetStore.createYidaApprovedTargetStore
+    createAdditionalTarget = targetStore.createInternalYidaAdditionalTargetTransactionWriter
     createBinding = (await native('yida-owner-runtime-factory.mjs')).createYidaOwnerRuntimeBinding
     createCapability = (await native('yida-issue-confirm-writeback-ports.mjs')).createIssueConfirmWritebackCapability
     const src = (relative: string) => import(pathToFileURL(path.join(root, 'packages/core-backend/src', relative)).href)
@@ -403,6 +420,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
       '092_create_integration_yida_credential_materials.sql', '093_create_integration_yida_draft_plans.sql',
       '094_create_integration_yida_approved_target.sql', '095_create_integration_yida_send_approvals.sql']
       .map(name => readFileSync(path.join(migrations, name), 'utf8')).join('\n')
+      + '\n' + await migrationSql('zzzz20261103130000_add_integration_yida_multi_target_slots', 'YIDA_MULTI_TARGET_UP_SQL')
       + '\n' + await migrationSql('zzzz20261106110300_add_integration_yida_source_binding', 'YIDA_SOURCE_BINDING_UP_SQL')
       + '\n' + readFileSync(path.join(migrations, '087_create_integration_stock_prep_project_target.sql'), 'utf8')
       + '\n' + readFileSync(path.join(migrations, '100_create_integration_stock_prep_project_write_lock.sql'), 'utf8')
@@ -414,6 +432,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     writtenInactiveUp = await migrationSql('zzzz20261117090000_add_integration_yida_issue_confirm_written_inactive', 'YIDA_ISSUE_CONFIRM_WRITTEN_INACTIVE_UP_SQL')
     savedEnv = envKeys.map(key => [key, process.env[key]])
     process.env.NODE_ENV = 'production'
+    process.env.MULTITABLE_BUSINESS_TIMEZONE = 'Asia/Shanghai'
     process.env.ENCRYPTION_KEY = randomBytes(32).toString('hex')
     process.env.ENCRYPTION_SALT = randomBytes(32).toString('hex')
     const { PluginRuntimeSecurityService } = await src('security/plugin-runtime-security-service.ts') as { PluginRuntimeSecurityService: new () => HostSecurity }
@@ -427,7 +446,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     // The private DDL runs with ONLY the private schema on the path (a migration's own existence probe must not find the
     // migrated PUBLIC copy); afterwards the path falls back to PUBLIC for meta_* and the D21 version rows.
     await owner.query(`CREATE SCHEMA ${ident(schema)}`); await owner.query(`SET search_path TO ${ident(schema)}`)
-    await owner.query(ddl)
+    await owner.query(ddl + '\n' + YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL)
     await owner.query(`
       CREATE TABLE users (id text PRIMARY KEY, role text, permissions jsonb, is_active boolean,
         activation_status text, local_password_set boolean, is_admin boolean);
@@ -540,7 +559,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     expect(await tableRows(TRACE)).toHaveLength(1)
   })
 
-  it('date committed, confirmation lost: a retry neither changes the date nor writes a second success record; the form submission count stays 1', async () => {
+  it('a trace insert failure rolls back the inactive row patch and recovery preserves written_inactive across a timezone change', async () => {
     await compose({ crashHookOnce: true })
     const before = await cell()
     const { grant, result } = await sendOne(boundInput(0))
@@ -548,25 +567,35 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     // The acknowledgement happened on a PAST business day; the recovery runs "the next day" (today).
     await backdateAck(ledgerId, PAST_ACK)
     const proof = await evidence()
-    // Crash point: after the patch transaction committed, before the trace INSERT.
-    failOnce = { pattern: new RegExp(`^INSERT INTO "${TRACE}"`), error: new Error('SYNTHETIC_CRASH_AFTER_PATCH') }
-    await expect(world!.runtime.issueConfirmWriteback(actor, {})).rejects.toBeTruthy()
-    expect((await cell()).date).toBe(PAST_DAY)
+    await owner.query('UPDATE public.meta_records SET data = data || jsonb_build_object($1::text, false) WHERE id = $2',
+      [fld().active, recordId(0)])
+    failOnce = { pattern: new RegExp(`^INSERT INTO "${TRACE}"`), error: new Error('SYNTHETIC_TRACE_INSERT_FAILURE') }
+    expect(outcomeOf(await world!.runtime.issueConfirmWriteback(actor, {}))).toEqual(['retryable:UNAVAILABLE'])
+    expect(await cell()).toMatchObject({ date: null, version: before.version })
     expect(await tableRows(TRACE)).toEqual([])
-    // The retry COMPLETES NORMALLY (no throw) and converges on exactly one trace row.
-    const retried = await world!.runtime.issueConfirmWriteback(actor, {})
-    expect(outcomeOf(retried)).toEqual(['already_set'])
+    const targetRef = world!.targetRef
+    const priorZone = process.env.MULTITABLE_BUSINESS_TIMEZONE
+    try {
+      await world!.stop()
+      process.env.MULTITABLE_BUSINESS_TIMEZONE = 'America/Los_Angeles'
+      await compose({ env: { INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS: targetRef,
+        MULTITABLE_BUSINESS_TIMEZONE: 'America/Los_Angeles' } })
+      const retried = await world!.runtime.issueConfirmWriteback(actor, {})
+      expect(outcomeOf(retried)).toEqual(['written_inactive'])
+    } finally {
+      process.env.MULTITABLE_BUSINESS_TIMEZONE = priorZone
+    }
     const after = await cell()
     expect(after.date).toBe(PAST_DAY) // the audit's day, not today's
     expect(after.version).toBe(before.version + 1) // no second patch
-    expect(patches).toHaveLength(1)
+    expect(patches).toHaveLength(2)
     const trace = await tableRows(TRACE)
-    expect(trace.map(row => [row.ledger_id, row.outcome, String(row.time_zone)])).toEqual([[ledgerId, 'already_set', 'Asia/Shanghai']])
+    expect(trace.map(row => [row.ledger_id, row.outcome, String(row.time_zone)])).toEqual([[ledgerId, 'written_inactive', 'Asia/Shanghai']])
     expect((await owner.query(`SELECT written_date::text AS day FROM ${ident(TRACE)}`)).rows[0].day).toBe(PAST_DAY)
     expect(await auditsOf(ledgerId)).toEqual(['acknowledgement', 'claim', 'prepare'])
     expect((await tableRows(APPROVAL_AUDIT)).map(row => String(row.event)).sort()).toEqual(['admit', 'approve'])
     expect(await evidence()).toEqual(proof)
-    expect([world!.fake.token, world!.fake.form]).toEqual([1, 1])
+    expect([world!.fake.token, world!.fake.form]).toEqual([0, 0])
   })
 
   it('date committed, confirmation lost (concurrent): two recovery runs that both decided the row converge on ONE trace and both complete normally', async () => {
@@ -584,16 +613,55 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     const firstRun = await world!.runtime.issueConfirmWriteback(actor, {})
     expect(outcomeOf(firstRun)).toEqual(['written'])
     parked.release()
-    // Run 2 now finds the date set and INSERTs a trace for a ledger row that already has one: ON CONFLICT DO NOTHING
-    // lets it complete normally (recorded: false) instead of failing with 23505.
+    // Run 2 kept the ledger row, but the trace re-check sees run 1's committed outcome.
     const secondRun = await second
-    expect(outcomeOf(secondRun)).toEqual(['already_set'])
-    expect(secondRun.results[0].recorded).toBe(false)
+    expect(outcomeOf(secondRun)).toEqual(['skip:already_traced'])
     const trace = await tableRows(TRACE)
     expect(trace.map(row => [row.ledger_id, row.outcome])).toEqual([[ledgerId, 'written']])
     const after = await cell()
     expect([after.date, after.version]).toEqual([PAST_DAY, before.version + 1])
     expect([world!.fake.token, world!.fake.form]).toEqual([1, 1])
+  })
+
+  it.each(['slot 1', 'explicit test target'])('refuses a mixed write-back list containing %s in the automatic and recovery paths', async (kind) => {
+    await compose()
+    await draft(boundInput(0))
+    const { targetRef, testTargetRef, env } = world!
+    if (kind === 'slot 1') env.INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS = `${targetRef},${testTargetRef}`
+    else env.INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS = targetRef
+    const { result } = await sendOne(boundInput(0))
+    expect(result.status).toBe('acknowledged')
+    expect(world!.warnings).toContain('YIDA_ISSUE_CONFIRM_WRITEBACK_AFTER_ACK_FAILED')
+    await expect(world!.runtime.issueConfirmWriteback(actor, {})).rejects.toBeTruthy()
+    expect((await cell()).date).toBeNull()
+    expect(await tableRows(TRACE)).toEqual([])
+    expect(patches).toHaveLength(0)
+
+    env.INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS = targetRef
+    delete env.INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS
+    expect(outcomeOf(await world!.runtime.issueConfirmWriteback(actor, {}))).toEqual(['written'])
+  })
+
+  it('an archive decision and a recovery after restore cannot commit conflicting outcomes', async () => {
+    await compose({ crashHookOnce: true })
+    const { result } = await sendOne(boundInput(0))
+    const ledgerId = String(result.delivery!.id)
+    await owner.query(`UPDATE ${ident(REGISTRY)} SET status = 'archived', archived_at = now() WHERE project_no = $1`, [PROJECT])
+    const parked = { ...latch(), pattern: new RegExp(`^INSERT INTO "${TRACE}"`) }
+    gateOnce = parked
+    const archived = world!.runtime.issueConfirmWriteback(actor, {})
+    try {
+      await waitFor(parked)
+      await owner.query(`UPDATE ${ident(REGISTRY)} SET status = 'active', archived_at = NULL WHERE project_no = $1`, [PROJECT])
+      const restored = await world!.runtime.issueConfirmWriteback(actor, { ledgerIds: [ledgerId] })
+      expect(outcomeOf(restored)).toEqual(['retryable:STOCK_PREP_PROJECT_WRITE_LOCKED'])
+      expect((await cell()).date).toBeNull()
+    } finally { parked.release() }
+    expect(outcomeOf(await archived)).toEqual(['project_archived'])
+    expect((await tableRows(TRACE)).map(row => [row.ledger_id, row.outcome])).toEqual([[ledgerId, 'project_archived']])
+    expect(outcomeOf(await world!.runtime.issueConfirmWriteback(actor, {}))).toEqual([])
+    expect((await cell()).date).toBeNull()
+    expect(patches).toHaveLength(0)
   })
 
   it.each([
@@ -606,7 +674,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
   ])('selector counter-example %s: never written, never read beyond the ledger, nothing traced in a batch', async (_name, mode) => {
     await compose()
     const stores = pluginStores()
-    // A listed slot-1 target first (the list must name a real target_ref for "unlisted" to mean something).
+    // A listed formal target first (the list must name a real target_ref for "unlisted" to mean something).
     await draft(boundInput(1))
     const listed = world!.targetRef
     const identity = { tenantId: TENANT, workspaceId: null, ownerId: OWNER, operationId: `synthetic-operation-${mode}`,
@@ -628,9 +696,8 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     wbStatements.length = 0
     const batch = await world!.runtime.issueConfirmWriteback(actor, {})
     expect(batch).toEqual({ enabled: true, results: [], next: null, report: EMPTY_REPORT })
-    // No row source, registry, lease, trace or sheet read for it: the write-back read the ledger page (the trace table
-    // only inside that query's NOT EXISTS) and nothing else.
-    expect(wbStatements.length > 0 && wbStatements.every(sql => /^SELECT \*, to_char\("integration_yida_delivery_ledger"\."created_at" AT TIME ZONE 'UTC', '[^']*'\) AS "keyset_at" FROM "integration_yida_delivery_ledger" WHERE/.test(sql))).toBe(true)
+    // No row source, registry, lease, trace or sheet read for it: the write-back validates the target list and reads the ledger page.
+    expect(wbStatements.length > 0 && wbStatements.every(sql => sql.startsWith('SELECT * FROM "integration_yida_approved_target" WHERE') || /^SELECT \*, to_char\("integration_yida_delivery_ledger"\."created_at" AT TIME ZONE 'UTC', '[^']*'\) AS "keyset_at" FROM "integration_yida_delivery_ledger" WHERE/.test(sql))).toBe(true)
     wbStatements.length = 0
     expect(await tableRows(TRACE)).toEqual([])
     // Named explicitly, the first three conditions skip (no trace); a NULL digest is the terminal source_unbound.
@@ -660,7 +727,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
       $5, $6, 'synthetic-credential', 1, 'create', 'reconciled_existing')`, [id, TENANT, OWNER, world!.targetRef, 'e'.repeat(64), 'f'.repeat(64)])
     wbStatements.length = 0
     expect(await world!.runtime.issueConfirmWriteback(actor, {})).toEqual({ enabled: true, results: [], next: null, report: EMPTY_REPORT })
-    expect(wbStatements.every(sql => /^SELECT \*, to_char\("integration_yida_delivery_ledger"\."created_at" AT TIME ZONE 'UTC', '[^']*'\) AS "keyset_at" FROM "integration_yida_delivery_ledger" WHERE/.test(sql))).toBe(true)
+    expect(wbStatements.every(sql => sql.startsWith('SELECT * FROM "integration_yida_approved_target" WHERE') || /^SELECT \*, to_char\("integration_yida_delivery_ledger"\."created_at" AT TIME ZONE 'UTC', '[^']*'\) AS "keyset_at" FROM "integration_yida_delivery_ledger" WHERE/.test(sql))).toBe(true)
     wbStatements.length = 0
     expect(outcomeOf(await world!.runtime.issueConfirmWriteback(actor, { ledgerIds: [id] }))).toEqual(['skip:not_acknowledged'])
     expect(wbStatements.some(sql => sql.includes(OP) || sql.includes(REGISTRY) || sql.includes(LOCK) || sql.includes('meta_records')
@@ -792,12 +859,7 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
   // sweep lists it again; the recovery entry (its caller sees the rows) logs nothing. The send itself reads the project
   // registry, so a registry fact is changed while the post-ACK run is parked at its own first registry statement (after
   // the send settled); the owner's role grant (decided under the lease) is removed before the send.
-  it.each([
-    ['project_archived', 'before the lease'],
-    ['project_absent', 'before the lease'],
-    ['sheet_mismatch', 'before the lease'],
-    ['permission_revoked', 'under the lease'],
-  ])('UNWRITTEN on real PostgreSQL (%s, decided %s): the post-ACK run traces the outcome, patches nothing and logs YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN with its count once; a later sweep lists nothing and logs nothing', async (outcome) => {
+  it.each(['project_archived', 'project_absent', 'sheet_mismatch', 'permission_revoked'])('UNWRITTEN on real PostgreSQL (%s): the post-ACK run traces the outcome, patches nothing and logs YIDA_ISSUE_CONFIRM_WRITEBACK_UNWRITTEN with its count once; a later sweep lists nothing and logs nothing', async (outcome) => {
     await compose()
     const before = await cell()
     const registryFact = outcome !== 'permission_revoked'
@@ -829,10 +891,8 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     expect((await tableRows(TRACE)).map(row => [row.ledger_id, row.outcome])).toEqual([[ledgerId, outcome]])
     expect(patches).toEqual([])
     expect([(await cell()).date, (await cell()).version]).toEqual([null, before.version])
-    // Before the lease: no lock row was ever made. Under it: the lease was taken and released (no bump, R-96).
-    const lock = await tableRows(LOCK)
-    if (outcome === 'permission_revoked') expect(lock.map(row => [row.lease_id ?? null, row.generation_reason])).toEqual([[null, null]])
-    else expect(lock).toEqual([])
+    // These outcomes all hold the bound sheet lease through the trace transaction, without bumping generation.
+    expect((await tableRows(LOCK)).map(row => [row.lease_id ?? null, row.generation_reason])).toEqual([[null, null]])
     // Final: a sweep (and the row named) lists nothing for it again, and the recovery entry logs nothing.
     expect(await world!.runtime.issueConfirmWriteback(actor, {})).toEqual({ enabled: true, results: [], next: null, report: EMPTY_REPORT })
     expect((await world!.runtime.issueConfirmWriteback(actor, { ledgerIds: [ledgerId] })).results).toEqual([])
@@ -841,14 +901,10 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     expect([world!.fake.token, world!.fake.form]).toEqual([1, 1])
   })
 
-  // Stock-prep ruling 2026-11-17 (UNWRITTEN counts only rows THIS run traced; the phase-2c refuter's T2): the post-ACK run
-  // P is parked at its own first registry statement; meanwhile the owner recovery entry R writes the date and traces
-  // `written`; then the project is archived. P resumes, decides project_archived, and cannot trace it (R's trace stands:
-  // recorded false). P logs nothing: the date is on the sheet and the stored trace says written.
-  it('UNWRITTEN on real PostgreSQL, recorded false: a post-ACK run that decides project_archived after a recovery run already wrote and traced the row logs nothing — the cell holds the date, the stored trace stays written', async () => {
+  it('a post-ACK run awaiting the lease skips a trace that recovery committed before the project was archived', async () => {
     await compose()
     const before = await cell()
-    const parked = { ...latch(), pattern: new RegExp(`\\b${REGISTRY}\\b`), tag: 'wb' as const }
+    const parked = { ...latch(), pattern: new RegExp(`\\b${LOCK}\\b`), tag: 'wb' as const }
     gateOnce = parked
     const started = world!.runs.length
     const { grant, result } = await sendOne(boundInput(0), 'synthetic-submission', { settle: false })
@@ -862,9 +918,9 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     await owner.query(`UPDATE ${ident(REGISTRY)} SET status = 'archived', archived_at = now() WHERE tenant_id = $1 AND project_no = $2`, [TENANT, PROJECT])
     parked.release()
     await settleAfterAck(started)
-    // P's answer (the first run): project_archived, NOT traced by P.
+    // P sees R's trace before looking up the archived project.
     const answers = await Promise.all(world!.runs)
-    expect(answers[0].results).toEqual([{ ledgerId, kind: 'outcome', outcome: 'project_archived', recorded: false }])
+    expect(answers[0].results).toEqual([{ ledgerId, kind: 'skip', reason: 'already_traced' }])
     // Long enough for a line of P's to show up if one were ever logged (warned() waits 50 ms after a line too).
     await new Promise(resolve => setTimeout(resolve, 100))
     expect(world!.warnings).toEqual([])
@@ -1442,19 +1498,19 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     expect([world!.fake.token, world!.fake.form]).toEqual([1, 1])
   })
 
-  it('trace before release on real PostgreSQL: while A\'s trace INSERT is in flight A still holds the sheet lease — a run that read the row then is STOCK_PREP_PROJECT_WRITE_LOCKED and patches nothing, even with the cell emptied', async () => {
+  it('while the success trace is uncommitted a second run cannot take the sheet lease', async () => {
     await compose({ crashHookOnce: true })
     const before = await cell()
     const { grant, result } = await sendOne(boundInput(0))
     const ledgerId = String(grant.ledgerId ?? result.delivery!.id)
-    // Run A is parked at its trace INSERT, after its patch committed.
+    // Run A is parked at its trace INSERT, before its transaction commits.
     const parked = { ...latch(), pattern: new RegExp(`^INSERT INTO "${TRACE}"`) }
     gateOnce = parked
     const first = world!.runtime.issueConfirmWriteback(actor, {})
     await waitFor(parked)
     expect(patches).toHaveLength(1)
     expect((await tableRows(LOCK)).map(row => row.lease_id !== null && row.lease_id !== undefined)).toEqual([true])
-    await owner.query('UPDATE public.meta_records SET data = data - $1::text WHERE id = $2', [fld().issueConfirmDate, recordId(0)])
+    expect(await cell()).toMatchObject({ date: null, version: before.version })
     // Run B reads the row as untraced (A's trace is not written yet) and meets A's live lease.
     const busy = await world!.runtime.issueConfirmWriteback(actor, {})
     expect(patches).toHaveLength(1)
@@ -1463,11 +1519,11 @@ databaseSuite('Y9 issue-confirm write-back wiring — real host runtime, send po
     expect(outcomeOf(await first)).toEqual(['written'])
     expect((await tableRows(TRACE)).map(row => [row.ledger_id, row.outcome])).toEqual([[ledgerId, 'written']])
     expect((await tableRows(LOCK)).map(row => row.lease_id ?? null)).toEqual([null])
-    // Traced now: the next run selects nothing, and the emptied cell stays empty.
+    // After the transaction commits, the next run has nothing to do.
     expect((await world!.runtime.issueConfirmWriteback(actor, {})).results).toEqual([])
     expect(patches).toHaveLength(1)
     const after = await cell()
-    expect([after.date, after.version]).toEqual([null, before.version + 1])
+    expect([after.date, after.version]).toEqual([businessDay(await ackAt(ledgerId)), before.version + 1])
   })
 
   // Round-3 refuter F2: the same pin for outcomes that are NOT `written`, at both under-lease decision points — the

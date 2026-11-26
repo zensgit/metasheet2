@@ -137,7 +137,7 @@ import {
 } from './multitable/plugin-scope'
 import { resolvePluginSheetScopeMode } from './multitable/pluginSheetScopeMode'
 import { assertPluginWriteFence, refusePluginWriteFenceOnUnfencedSurface } from './multitable/plugin-write-fence'
-import { prepareYidaIssueConfirmWriteCondition } from './integration/yida-issue-confirm-writeback-authority'
+import { prepareYidaIssueConfirmWriteCondition, recordYidaIssueConfirmWriteTrace } from './integration/yida-issue-confirm-writeback-authority'
 import { assertSheetNotCopiedFromPluginManaged } from './multitable/copied-sheet-plugin-scope'
 import {
   acquireStockPreparationPersistUnitOfWorkLocks,
@@ -1448,7 +1448,7 @@ export class MetaSheetServer {
                 sheetId,
                 fenced: writeFence !== undefined,
               })
-              return patchMultitableRecord({
+              const record = await patchMultitableRecord({
                 query: txQuery,
                 sheetId,
                 recordId,
@@ -1456,6 +1456,8 @@ export class MetaSheetServer {
                 expectedVersion,
                 assertWriteCondition,
               })
+              await recordYidaIssueConfirmWriteTrace(txQuery, writeCondition, recordId)
+              return record
             })
           },
           deleteRecord: async (input) => {

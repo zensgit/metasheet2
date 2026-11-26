@@ -376,7 +376,7 @@ describe('the core records API checks the fence FIRST inside the write transacti
         const beforeFence = body.slice(body.indexOf('poolManager.get().transaction'), fenceAt)
         expect(beforeFence.match(/await /g)).toEqual(['await ', 'await '])
         expect(beforeFence).toContain("if (writeCondition !== undefined) await txQuery('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')")
-        expect(body.slice(fenceAt)).toMatch(/await assertPluginWriteFence\(txQuery, writeFence\)\s+const assertWriteCondition = await prepareYidaIssueConfirmWriteCondition\(txQuery, writeCondition, \{\s+sheetId,\s+fenced: writeFence !== undefined,\s+\}\)\s+return\s*$/)
+        expect(body.slice(fenceAt)).toMatch(/await assertPluginWriteFence\(txQuery, writeFence\)\s+const assertWriteCondition = await prepareYidaIssueConfirmWriteCondition\(txQuery, writeCondition, \{\s+sheetId,\s+fenced: writeFence !== undefined,\s+\}\)\s+const record = await\s*$/)
         const call = source.slice(start + body.length, source.indexOf('          deleteRecord: async', start))
         expect(call).toContain('assertWriteCondition,')
       }

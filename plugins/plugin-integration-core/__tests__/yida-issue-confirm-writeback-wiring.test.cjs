@@ -346,6 +346,8 @@ test('binding pair: the sheets port binds the registry row\'s sheetId and object
       async patchRecord({ sheetId, recordId, changes, expectedVersion, writeCondition }) {
         calls.records.push(['patch', sheetId, recordId, changes, expectedVersion])
         calls.conditions.push(writeCondition)
+        trace.push(writeback.issueConfirmTraceRow({ ledger, outcome: writeCondition.outcome,
+          sheetId, date: writeCondition.date, timeZone: writeCondition.timeZone }))
         Object.assign(stored.data, changes); stored.version += 1
         return { id: recordId, version: stored.version, data: { ...stored.data } }
       },
@@ -355,6 +357,7 @@ test('binding pair: the sheets port binds the registry row\'s sheetId and object
     const trace = []
     const executor = writeback.createIssueConfirmWritebackExecutor({
       env: { ...ON },
+      async validateTargets() {},
       runId: () => 'run-syn-pair',
       ledgerReader: { async list() { return [ledger] }, async sweep() { return { rows: [ledger], next: null } } },
       rowSource: { async read() { return { boundSheetId: row.sheetId, boundRecordId: stored.id, config: CONFIG, payload: { sourceLineId: KEY, project: PROJECT } } } },
@@ -384,7 +387,8 @@ test('binding pair: the sheets port binds the registry row\'s sheetId and object
     assert.deepEqual(trace.map((entry) => [entry.tenant_id, entry.sheet_id, entry.outcome]), [[tenantId, row.sheetId, 'written']], tenantId)
     // #6812 review P2: one condition, minted for THIS tenant, the registry row's sheet and the payload's project, reaches
     // the host patch through the scoped records api as the same object.
-    assert.deepEqual(calls.minted.map((entry) => ({ ...entry })), [{ tenantId, ownerId: OWNER, sheetId: row.sheetId, projectNo: PROJECT }], tenantId)
+    assert.deepEqual(calls.minted.map((entry) => ({ ...entry })), [{ tenantId, ownerId: OWNER, sheetId: row.sheetId, projectNo: PROJECT, recordId: 'rec-pair',
+      targetRef: TARGET, ledgerId: ledger.id, outcome: 'written', date: ACK_DAY, timeZone: 'Asia/Shanghai' }], tenantId)
     assert.equal(calls.conditions.length, 1)
     assert.equal(calls.conditions[0], calls.minted[0])
   }
@@ -392,7 +396,7 @@ test('binding pair: the sheets port binds the registry row\'s sheetId and object
 
 test('capability: enabled() is the core exact-literal predicate; create() binds the authenticated scope and refuses a missing re-check', async () => {
   const { createIssueConfirmWritebackCapability } = await portsPromise
-  const lock = { scopeKeyFor: writeLockModule.sheetWriteScopeKey, async withProjectWriteLease() { throw new Error('NO') }, async bumpGeneration() {} }
+  const lock = { scopeKeyFor: writeLockModule.sheetWriteScopeKey, async assertHolderWithin() {}, async withProjectWriteLease() { throw new Error('NO') }, async bumpGeneration() {} }
   const base = { db: memoryDb({}), security: { async encrypt() {}, async decrypt() {} }, projectTargetStore: { async get() { return null } },
     projectWriteLock: lock, multitable: () => null }
   for (const [value, expected] of [['true', true], ['TRUE', false], [' true', false], ['1', false], [undefined, false], ['false', false]]) {
@@ -423,11 +427,35 @@ test('capability: enabled() is the core exact-literal predicate; create() binds 
   assert.deepEqual(result, { enabled: false, results: [] })
 })
 
+test('write-back refuses the whole list before a ledger read when it contains a test target', async () => {
+  const { createIssueConfirmWritebackCapability } = await portsPromise
+  for (const [slotOne, testTargetRefs] of [[TARGET, []], [OTHER_TARGET, [TARGET]]]) {
+    const db = memoryDb({ integration_yida_approved_target: [
+      { tenant_id: TENANT, owner_id: OWNER, workspace_id: null, slot: 1, target_ref: slotOne },
+    ] })
+    const capability = createIssueConfirmWritebackCapability({
+      db, env: { ...ON }, security: { async encrypt() {}, async decrypt() {} },
+      projectTargetStore: { async get() { throw new Error('NO_PROJECT_READ') } },
+      projectWriteLock: { scopeKeyFor: writeLockModule.sheetWriteScopeKey, async assertHolderWithin() {},
+        async withProjectWriteLease() { throw new Error('NO_LEASE') } },
+      multitable: () => { throw new Error('NO_SHEET') },
+    })
+    const run = capability.create({ context: { tenantId: TENANT, ownerId: OWNER }, testTargetRefs,
+      recheck: async () => true, writeCondition: () => { throw new Error('NO_PATCH') } })
+    for (const input of [{}, { ledgerIds: ['l-ack'] }]) {
+      await assert.rejects(() => run.run(input), { code: 'YIDA_ISSUE_CONFIRM_TEST_TARGET_LISTED' })
+    }
+    assert.deepEqual(db.calls.map(call => call.slice(0, 2)), [
+      ['selectOne', 'integration_yida_approved_target'], ['selectOne', 'integration_yida_approved_target'],
+    ])
+  }
+})
+
 test('Plan A full form: the capability is built, and create() builds its executor, with a sheet write lock that has no bumpGeneration', async () => {
   const { createIssueConfirmWritebackCapability } = await portsPromise
   // R-96 Plan A: the write-back never bumps the generation, so the ports neither require nor hand on bumpGeneration and
   // the core does not require it. The executor is built per run in create(): both halves must accept a lease-only lock.
-  const leaseOnly = { scopeKeyFor: writeLockModule.sheetWriteScopeKey, async withProjectWriteLease() { throw new Error('NO') } }
+  const leaseOnly = { scopeKeyFor: writeLockModule.sheetWriteScopeKey, async assertHolderWithin() {}, async withProjectWriteLease() { throw new Error('NO') } }
   const db = memoryDb({})
   const capability = createIssueConfirmWritebackCapability({ db, security: { async encrypt() {}, async decrypt() {} },
     projectTargetStore: { async get() { return null } }, projectWriteLock: leaseOnly, multitable: () => null, env: { ...ON } })
@@ -478,12 +506,12 @@ test('factory: with the capability the binding gains exactly two members; withou
   const plain = create({ db, security })
   assert.deepEqual(Object.keys(plain).sort(), ['createPrimitives', 'createSendPort'])
   let created = 0
-  const capability = { enabled: () => true, create(input) { created += 1; assert.deepEqual(Object.keys(input).sort(), ['context', 'recheck', 'writeCondition']); return { run: async () => ({ enabled: true, results: [] }) } } }
+  const capability = { enabled: () => true, create(input) { created += 1; assert.deepEqual(Object.keys(input).sort(), ['context', 'recheck', 'testTargetRefs', 'writeCondition']); return { run: async () => ({ enabled: true, results: [] }) } } }
   const binding = create({ db, security, issueConfirmWriteback: capability })
   assert.deepEqual(Object.keys(binding).sort(), ['createIssueConfirmWriteback', 'createPrimitives', 'createSendPort', 'issueConfirmWritebackEnabled'])
   assert.equal(binding.issueConfirmWritebackEnabled(), true)
   const actor = { actorId: OWNER, tenantId: TENANT, workspaceId: null }
-  const bound = binding.createIssueConfirmWriteback({ context: actor, recheck: async () => true, writeCondition: (scope) => Object.freeze({ ...scope }) })
+  const bound = binding.createIssueConfirmWriteback({ context: actor, testTargetRefs: [], recheck: async () => true, writeCondition: (scope) => Object.freeze({ ...scope }) })
   assert.deepEqual(Object.keys(bound), ['run'])
   assert.deepEqual(await bound.run({}), { enabled: true, results: [] })
   for (const input of [{ context: actor }, { context: actor, recheck: 'x' }, { context: { ...actor, workspaceId: 'w' }, recheck() {} }, { context: actor, recheck() {}, extra: 1 },
@@ -502,7 +530,7 @@ test('factory: with the capability the binding gains exactly two members; withou
   // the binding and its send port are unaffected.
   const broken = create({ db, security, issueConfirmWriteback: { enabled: () => { throw new Error('X') }, create() { throw new Error('BROKEN') } } })
   assert.equal(broken.issueConfirmWritebackEnabled(), false)
-  assert.throws(() => broken.createIssueConfirmWriteback({ context: actor, recheck: async () => true, writeCondition: (scope) => Object.freeze({ ...scope }) }), (error) => error.code === 'YIDA_OWNER_RUNTIME_UNAVAILABLE')
+  assert.throws(() => broken.createIssueConfirmWriteback({ context: actor, testTargetRefs: [], recheck: async () => true, writeCondition: (scope) => Object.freeze({ ...scope }) }), (error) => error.code === 'YIDA_OWNER_RUNTIME_UNAVAILABLE')
   assert.deepEqual(Object.keys(broken.createSendPort(send)).sort(), ['inspect', 'submit'])
   assert.ok(created >= 1)
 })
@@ -537,6 +565,7 @@ async function sweepWorld({ rows, ackless = [], stuck = [], traced = [], env = O
   const runEnv = { ...env, INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS: targets.join(',') }
   const executor = writeback.createIssueConfirmWritebackExecutor({
     env: runEnv,
+    async validateTargets() {},
     runId: () => 'run-syn-sweep',
     ledgerReader: createIssueConfirmLedgerReader({ db }),
     rowSource: { async read({ ledger: row }) {
@@ -550,12 +579,17 @@ async function sweepWorld({ rows, ackless = [], stuck = [], traced = [], env = O
           return [...records.values()].filter((record) => record.data.idempotencyKey === filters.idempotencyKey)
             .map((record) => ({ id: record.id, version: record.version, data: { ...record.data } }))
         },
-        async patchRecord({ recordId, changes, expectedVersion }) {
+        async patchRecord({ recordId, changes, expectedVersion, writeCondition }) {
           patches.push(recordId)
           const record = records.get(recordId)
           if (expectedVersion !== undefined && record.version !== expectedVersion) {
             const error = new Error('version conflict'); error.code = 'VERSION_CONFLICT'; throw error
           }
+          const condition = writeCondition
+          await db.insertOneIfAbsent(TRACE_TABLE, writeback.issueConfirmTraceRow({
+            ledger: { id: condition.ledgerId, tenantId: condition.tenantId, ownerId: condition.ownerId, targetRef: condition.targetRef },
+            outcome: condition.outcome, sheetId: condition.sheetId, date: condition.date, timeZone: condition.timeZone,
+          }), { conflictColumns: ['ledger_id'] })
           Object.assign(record.data, changes); record.version += 1
           return { id: record.id, version: record.version }
         },
@@ -810,6 +844,7 @@ function hostFaithfulWorld({ withVersion }) {
   const trace = []
   const deps = {
     env: { ...ON },
+    async validateTargets() {},
     runId: () => 'run-syn-w',
     ledgerReader: {
       async list() { return [only()] },

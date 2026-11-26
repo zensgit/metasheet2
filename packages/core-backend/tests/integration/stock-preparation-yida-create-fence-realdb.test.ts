@@ -1,5 +1,6 @@
 // Internal persistence proof only: real 090+091 DDL, production db/store and
 // distinct PostgreSQL sessions. No runner, sender, authority or external-service client.
+import { YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL } from '../../src/db/migrations/zzzz20261126202000_pin_yida_ack_business_timezone'
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -183,7 +184,7 @@ databaseSuite('SA05 inert CREATE tuple fence — real PostgreSQL without deliver
     schema = 'yida_create_fence_' + randomUUID().replaceAll('-', '')
     await owner.query(`CREATE SCHEMA ${ident(schema)}`)
     await owner.query(`SET search_path TO ${ident(schema)}`)
-    await owner.query(ddl090)
+    await owner.query(ddl090 + '\n' + YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL)
     await owner.query(ddl091)
     await owner.query(ddlBinding)
     first = await session(); second = await session()
@@ -205,7 +206,7 @@ databaseSuite('SA05 inert CREATE tuple fence — real PostgreSQL without deliver
   it.each(states)('090+091 replay and restart preserve %s evidence and its CREATE reservation', async status => {
     await setState(status)
     const before = await evidence()
-    await owner.query(ddl090); await owner.query(ddl091); await owner.query(ddl091); await owner.query(ddlBinding)
+    await owner.query(ddl090 + '\n' + YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL); await owner.query(ddl091); await owner.query(ddl091); await owner.query(ddlBinding)
     expect(await evidence()).toEqual(before)
     expect((await owner.query('SHOW search_path')).rows[0].search_path).toBe(schema)
     const restarted = await session()
@@ -766,7 +767,7 @@ databaseSuite('SA05 inert CREATE tuple fence — real PostgreSQL without deliver
     await owner.query(`DROP SCHEMA ${ident(schema)} CASCADE`)
     await owner.query(`CREATE SCHEMA ${ident(schema)}`)
     await owner.query(`SET search_path TO ${ident(schema)}`)
-    await owner.query(ddl090); await owner.query(ddl091); await owner.query(ddlBinding); await owner.query(YIDA_RECONCILED_EXISTING_UP_SQL)
+    await owner.query(ddl090 + '\n' + YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL); await owner.query(ddl091); await owner.query(ddlBinding); await owner.query(YIDA_RECONCILED_EXISTING_UP_SQL)
     await reconcileOnce([['FINST-legacy-1', 'b'.repeat(64)]], 'count')
     expect((await rows(LEDGER)).length).toBe(0)
     expect(await pgFailure(owner.query(YIDA_RECONCILED_EXISTING_DOWN_SQL)))
@@ -829,7 +830,7 @@ databaseSuite('SA05 inert CREATE tuple fence — real PostgreSQL without deliver
     await owner.query(`DROP SCHEMA ${ident(schema)} CASCADE`)
     await owner.query(`CREATE SCHEMA ${ident(schema)}`)
     await owner.query(`SET search_path TO ${ident(schema)}`)
-    await owner.query(ddl090); await owner.query(ddl091)
+    await owner.query(ddl090 + '\n' + YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL); await owner.query(ddl091)
     expect(await pgFailure(owner.query(YIDA_RECONCILED_EXISTING_UP_SQL)))
       .toEqual({ ok: false, code: '55000', message: 'YIDA_DELIVERY_RECONCILE_BINDING_MISSING' })
     expect((await owner.query("SELECT to_regclass('integration_yida_reconciliation_runs') AS rel")).rows[0].rel).toBeNull()

@@ -1,6 +1,7 @@
 // Actual 088-093, host encryption, live ACL and native private plugin composition.
 // Synthetic trusted future-host context only: no HTTP/JWT authentication, token,
 // transport, remote identity verification or external send is exercised here.
+import { YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL } from '../../src/db/migrations/zzzz20261126202000_pin_yida_ack_business_timezone'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -339,7 +340,7 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     // The private DDL runs with ONLY the private schema on the path: a migration's own existence probe (the identity
     // fence's `to_regclass(…)` in zzzz20261106110300) must not find the migrated PUBLIC copy and skip the private one.
     await owner.query(`CREATE SCHEMA ${ident(schema)}`); await owner.query(`SET search_path TO ${ident(schema)}`)
-    await owner.query(ddl)
+    await owner.query(ddl + '\n' + YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL)
     // Schema fixture of the six tables/columns actually consumed by live ACL.
     // This is intentionally NOT evidence for the complete user/auth migrations.
     await owner.query(`

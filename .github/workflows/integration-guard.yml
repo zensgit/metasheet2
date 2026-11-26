@@ -301,6 +301,7 @@ on:
       - 'packages/core-backend/tests/integration/stock-preparation-yida-initialization-browser-realdb.test.ts'
       - 'packages/core-backend/tests/integration/stock-preparation-yida-initialization-http-realdb.test.ts'
       - 'packages/core-backend/tests/integration/stock-preparation-yida-issue-confirm-writeback-realdb.test.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20261126202000_pin_yida_ack_business_timezone.ts'
       - 'packages/core-backend/tests/integration/stock-preparation-yida-owner-browser-realdb.test.ts'
       - 'packages/core-backend/tests/integration/stock-preparation-yida-owner-http-realdb.test.ts'
       - 'packages/core-backend/tests/integration/stock-preparation-yida-owner-send-port-realdb.test.ts'

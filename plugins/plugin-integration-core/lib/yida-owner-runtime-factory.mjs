@@ -83,12 +83,13 @@ export function createYidaOwnerRuntimeBinding(options) {
     // host inside the record write's own transaction), also supplied per run by the host runtime and never by a request.
     function createIssueConfirmWriteback(input) {
       try {
-        const config = record(input, ['context', 'recheck', 'writeCondition'])
+        const config = record(input, ['context', 'recheck', 'writeCondition', 'testTargetRefs'])
         const scope = context(config.context)
         const check = callable(config.recheck)
         const mint = callable(config.writeCondition)
         const created = capability(writeback.create(Object.freeze({
           context: Object.freeze({ tenantId: scope.tenantId, ownerId: scope.ownerId }),
+          testTargetRefs: config.testTargetRefs,
           recheck: (request) => Reflect.apply(check, undefined, [request]),
           writeCondition: (request) => Reflect.apply(mint, undefined, [request]),
         })), ['run'])

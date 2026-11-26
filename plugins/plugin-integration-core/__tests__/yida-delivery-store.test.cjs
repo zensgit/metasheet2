@@ -392,6 +392,7 @@ test('create ACK records protocol acknowledgement, never success, without projec
   await rejectsCode(() => store.markUnknown(unknown(claimToken)), 'STATE')
   for (const entry of db.rows(AUDIT)) {
     assert.deepEqual(Object.keys(entry).filter((key) => key !== 'updated_at').sort(), [
+      ...(entry.event === 'acknowledgement' ? ['ack_time_zone'] : []),
       'created_at', 'event', 'id', 'ledger_id', 'reason', 'status',
     ])
     assert.ok(!JSON.stringify(entry).includes('private-instance-a'))

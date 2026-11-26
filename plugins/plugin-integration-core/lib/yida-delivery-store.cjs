@@ -4,6 +4,7 @@
 // All scope and operation identities must come from a future trusted authority.
 const crypto = require('node:crypto')
 const { types: { isProxy } } = require('node:util')
+const { resolveIssueConfirmBusinessTimeZone } = require('./yida-business-timezone.cjs')
 
 const LEDGER = 'integration_yida_delivery_ledger'
 const AUDIT = 'integration_yida_delivery_audit'
@@ -189,6 +190,7 @@ function uniqueConstraint(error) {
 async function audit(trx, ledgerId, event, status, reason = null) {
   const row = first(await trx.insertOne(AUDIT, {
     id: crypto.randomUUID(), ledger_id: ledgerId, event, status, reason,
+    ...(event === 'acknowledgement' ? { ack_time_zone: resolveIssueConfirmBusinessTimeZone() } : {}),
   }))
   if (!row || row.ledger_id !== ledgerId || row.event !== event || row.status !== status) fail('UNAVAILABLE')
 }

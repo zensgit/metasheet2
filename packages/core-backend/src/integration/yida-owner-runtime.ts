@@ -27,7 +27,7 @@ export type YidaOwnerRuntimeBinding = Readonly<{
   // #6812 review P2: `writeCondition` mints the host write condition the executor's one patch carries; the host
   // re-decides it inside the record write's own transaction (yida-issue-confirm-writeback-authority.ts).
   createIssueConfirmWriteback?(options: Readonly<{ context: YidaOwnerActor; recheck: IssueConfirmRecheckPort
-    writeCondition: (input: unknown) => unknown }>): { run(input: unknown): Promise<unknown> }
+    writeCondition: (input: unknown) => unknown; testTargetRefs: readonly string[] }>): { run(input: unknown): Promise<unknown> }
   issueConfirmWritebackEnabled?(): boolean
 }>
 export type YidaOwnerRuntimeDependencies = {
@@ -518,7 +518,8 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
       if (!state.createIssueConfirmWriteback) return undefined
       const writeback = record(state.createIssueConfirmWriteback(Object.freeze({ context: fixed,
         recheck: (request: unknown) => issueConfirmRecheck(database, fixed, request),
-        writeCondition: (request: unknown) => createYidaIssueConfirmWriteCondition(fixed, request) })), ['run'])
+        writeCondition: (request: unknown) => createYidaIssueConfirmWriteCondition(fixed, request),
+        testTargetRefs: Object.freeze([...unboundTestTargetRefs()]) })), ['run'])
       if (typeof writeback.run !== 'function' || types.isProxy(writeback.run)) fail('UNAVAILABLE')
       return writebackView(await (writeback.run as (input: unknown) => Promise<unknown>)({ ledgerIds: [ledgerId] }))
     })
@@ -709,7 +710,8 @@ export function createYidaOwnerRuntime(dependencies: YidaOwnerRuntimeDependencie
           await authority.proveDraftTarget({})
           const writeback = record(state.createIssueConfirmWriteback(Object.freeze({ context: fixed,
             recheck: (request: unknown) => issueConfirmRecheck(database, fixed, request),
-            writeCondition: (request: unknown) => createYidaIssueConfirmWriteCondition(fixed, request) })), ['run'])
+            writeCondition: (request: unknown) => createYidaIssueConfirmWriteCondition(fixed, request),
+            testTargetRefs: Object.freeze([...unboundTestTargetRefs()]) })), ['run'])
           if (typeof writeback.run !== 'function' || types.isProxy(writeback.run)) fail('UNAVAILABLE')
           return writebackView(await (writeback.run as (input: unknown) => Promise<unknown>)(parsed))
         }))
