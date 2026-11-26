@@ -97,7 +97,7 @@ async function main() {
     'selectOneForUpdate',
     // selectUnmatched: the same extension form — a select whose WHERE also carries IS NOT NULL columns and ONE
     // NOT EXISTS anti-join on another integration_* table (the YiDa issue-confirm recovery scan, so traced and
-    // unbound ledger rows never take a slot of the bounded batch). Root surface only, like insertOneIfAbsent.
+    // unbound ledger rows never take a slot of the bounded batch). Root surface only.
     'selectUnmatched',
     'transaction', 'updateRow',
     // upsertOne is the module header's sanctioned extension form ("added here as a new validated
@@ -500,7 +500,7 @@ async function main() {
         // advisoryXactLock: HANDLE-ONLY (asserted absent from the root surface in 7c.), the
         // per-tenant "count then insert under a cap" mutex (stock-preparation-project-target-store.cjs).
         'advisoryXactLock',
-        'commit', 'countRows', 'deleteRows', 'insertMany', 'insertOne', 'rollback', 'select', 'selectOne', 'selectOneForKeyShare', 'selectOneForUpdate',
+        'commit', 'countRows', 'deleteRows', 'insertMany', 'insertOne', 'insertOneIfAbsent', 'rollback', 'select', 'selectOne', 'selectOneForKeyShare', 'selectOneForUpdate',
         // setLocalLockTimeout: HANDLE-ONLY (asserted absent from the root surface in 7e.), the stock-prep
         // sheet write lock's bound on how long its takeover / abandoned-lease clear / release may wait for
         // a row a stalled fenced write holds FOR SHARE (stock-preparation-project-write-lock.cjs, PR #6501 S1).
@@ -515,8 +515,16 @@ async function main() {
       'transaction exposes scoped surface only, no rawQuery',
     )
     await trx.insertOne('integration_runs', { id: 'rtx', status: 'running' })
+    await trx.insertOneIfAbsent(
+      'integration_yida_issue_confirm_writeback', { ledger_id: 'synthetic-ledger' }, { conflictColumns: ['ledger_id'] },
+    )
   })
   assert.ok(mockDb9.calls.some((c) => c.tx && /INSERT INTO "integration_runs"/.test(c.sql)))
+  assert.deepEqual(mockDb9.calls.find((c) => c.sql.includes('ON CONFLICT')), {
+    tx: true,
+    sql: 'INSERT INTO "integration_yida_issue_confirm_writeback" ("ledger_id") VALUES ($1) ON CONFLICT ("ledger_id") DO NOTHING RETURNING *',
+    params: ['synthetic-ledger'],
+  })
 
   // --- 7c. advisoryXactLock (E1): ONE fixed literal, the key as its ONE parameter, on the tx connection
   assert.equal(typeof db9.advisoryXactLock, 'undefined',
