@@ -167,6 +167,35 @@ describe('account center read lifecycle', () => {
     expect(read.snapshot.value).toEqual(second)
     expect(read.state.value).toBe('ready')
   })
+  it('discards a pending response and reads once when the token rotates for the same account and organization', async () => {
+    const old = deferred<Response>()
+    const next = deferred<Response>()
+    mocks.apiFetch.mockReturnValueOnce(old.promise).mockReturnValueOnce(next.promise)
+    const read = create()
+    const pending = read.refresh()
+    const signal = mocks.apiFetch.mock.calls[0][1].signal as AbortSignal
+
+    localStorage.setItem('auth_token', `${token('account-a', 'org-a')}-rotated`)
+    notifyAuthPrincipalChange()
+    await Promise.resolve()
+    expect(signal.aborted).toBe(true)
+    expect(mocks.apiFetch).toHaveBeenCalledTimes(2)
+
+    old.resolve(reply(200, first))
+    await pending
+    expect(read.state.value).toBe('loading')
+    expect(read.snapshot.value).toBeNull()
+    expect(parse).not.toHaveBeenCalled()
+
+    notifyAuthPrincipalChange()
+    window.dispatchEvent(new StorageEvent('storage', { key: 'auth_token' }))
+    next.resolve(reply(200, second))
+    await flushPromises()
+    expect(read.state.value).toBe('ready')
+    expect(read.snapshot.value).toEqual(second)
+    expect(parse.mock.calls).toEqual([[second]])
+    expect(mocks.apiFetch).toHaveBeenCalledTimes(2)
+  })
   it.each(['notification', 'storage'])('reads once for an organization epoch with unchanged token text via %s', async kind => {
     const current = token('account-a')
     localStorage.setItem('jwt', current)
