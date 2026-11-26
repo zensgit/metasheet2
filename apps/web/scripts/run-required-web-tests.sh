@@ -1572,6 +1572,7 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # registered in the domain guard (.github/workflows/attendance-web-guard.yml). The manifest was regenerated with the
 # same command.
 exec npx vitest run \
+  accountCenterRead.spec.ts \
   adminAccess.spec.ts \
   adminAuthorizationConfirm.spec.ts \
   adminPageContentSearch.spec.ts \

@@ -135,7 +135,7 @@ const STAGES = {
   M: { specs: M_SPECS, paths: M_PATHS },
   A: { specs: A_SPECS, paths: A_PATHS },
 }
-const CURRENT_STAGE: keyof typeof STAGES = 'F'
+const CURRENT_STAGE: keyof typeof STAGES = 'M'
 const STAGE = STAGES[CURRENT_STAGE]
 const APPROVED_GLOBS = ['apps/web/src/account/**']
 const COMMON_PATHS = [

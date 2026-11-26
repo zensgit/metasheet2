@@ -24,6 +24,9 @@ on:
       - 'package.json'
       - 'pnpm-lock.yaml'
       - '.github/workflows/account-center-web-guard.yml'
+      - 'apps/web/src/account/accountCenterContract.ts'
+      - 'apps/web/src/account/useAccountCenterRead.ts'
+      - 'apps/web/tests/accountCenterRead.spec.ts'
   push:
     branches: [main]
     paths:
@@ -45,6 +48,9 @@ on:
       - 'package.json'
       - 'pnpm-lock.yaml'
       - '.github/workflows/account-center-web-guard.yml'
+      - 'apps/web/src/account/accountCenterContract.ts'
+      - 'apps/web/src/account/useAccountCenterRead.ts'
+      - 'apps/web/tests/accountCenterRead.spec.ts'
 
 permissions:
   contents: read
@@ -82,7 +88,7 @@ jobs:
         working-directory: apps/web
         env:
           DATABASE_URL: postgres://127.0.0.1:1/none
-        run: pnpm exec vitest run tests/authorizationAuditFeed.spec.ts tests/adminAuditView.spec.ts tests/public-multitable-form.spec.ts
+        run: pnpm exec vitest run tests/authorizationAuditFeed.spec.ts tests/adminAuditView.spec.ts tests/public-multitable-form.spec.ts tests/accountCenterRead.spec.ts
       - name: Type-check the web app
         working-directory: apps/web
         run: node --max-old-space-size=4096 node_modules/vue-tsc/bin/vue-tsc.js -b

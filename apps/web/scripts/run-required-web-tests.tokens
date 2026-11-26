@@ -4,6 +4,7 @@
 # scope (round 2, 2026-09-22): the union of the positional filter tokens of every gating
 # `vitest run` logical line in apps/web/scripts/run-required-web-tests.sh — not only its final `exec` line.
 # See docs/development/required-web-lane-token-manifest-guard-design-20260922.md §1.
+accountCenterRead.spec.ts
 accountIdentityDisplay
 adminAccess.spec.ts
 adminAuthorizationConfirm.spec.ts
