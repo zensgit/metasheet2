@@ -342,9 +342,8 @@ const KNOWN_SITES: KnownSite[] = [
     kind: 'display',
   },
   {
-    // yida-issue-confirm-writeback.cjs `isValidIanaTimeZone()` (slice Y9a) — the plugin mirror of the
-    // automation-timezone.ts probe above: `.format(0)` discarded, RangeError on an unknown zone. No hour option.
-    file: 'plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs',
+    // The YiDa business time-zone validator mirrors the probe above. The formatted value is discarded.
+    file: 'plugins/plugin-integration-core/lib/yida-business-timezone.cjs',
     lineText: "new Intl.DateTimeFormat('en-US', { timeZone: timeZone.trim() }).format(0)",
     kind: 'display',
   },

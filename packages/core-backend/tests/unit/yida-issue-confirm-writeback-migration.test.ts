@@ -10,6 +10,9 @@
  *        outcomes match), so the module can never record an outcome the table refuses, or the reverse.
  *   M-04 down() issues exactly the exported DOWN statement; that statement refuses with the fixed code while any row
  *        exists, BEFORE any DROP.
+ *   W-01..W-03 migration zzzz20261117090000 (owner ruling D3-1, register R-96 ⑦): the outcome CHECK becomes the module
+ *        vocabulary with `written_inactive` appended, the date shape treats it as dated, up() is one replayable ALTER of
+ *        the two checks only, and down() refuses while a written_inactive row exists, BEFORE restoring the baseline checks.
  *   TZ   the plugin's resolveIssueConfirmBusinessTimeZone equals the host's resolveMultitableBusinessTimezone on a
  *        matrix of values (the plugin cannot import the host module, so it keeps a mirror).
  *
@@ -39,6 +42,15 @@ import {
   down,
   up,
 } from '../../src/db/migrations/zzzz20261106093100_create_integration_yida_issue_confirm_writeback'
+import {
+  YIDA_ISSUE_CONFIRM_WRITEBACK_DATED_OUTCOMES_V2,
+  YIDA_ISSUE_CONFIRM_WRITEBACK_OUTCOMES_V2,
+  YIDA_ISSUE_CONFIRM_WRITTEN_INACTIVE_DOWN_REFUSED_CODE,
+  YIDA_ISSUE_CONFIRM_WRITTEN_INACTIVE_DOWN_SQL,
+  YIDA_ISSUE_CONFIRM_WRITTEN_INACTIVE_UP_SQL,
+  down as downWrittenInactive,
+  up as upWrittenInactive,
+} from '../../src/db/migrations/zzzz20261117090000_add_integration_yida_issue_confirm_written_inactive'
 import { resolveMultitableBusinessTimezone } from '../../src/multitable/business-timezone'
 
 const require_ = createRequire(__filename)
@@ -122,11 +134,11 @@ describe('migration zzzz20261106093100 — YiDa issue-confirm write-back trace',
     expect(columns).toEqual(['ledger_id', 'tenant_id', 'owner_id', 'target_ref', 'sheet_id', 'outcome', 'written_date', 'time_zone', 'created_at'])
   })
 
-  it('M-03 the outcome CHECK is exactly the plugin module vocabulary', () => {
-    expect(outcomeCheckList(YIDA_ISSUE_CONFIRM_WRITEBACK_UP_SQL)).toEqual([...plugin.ISSUE_CONFIRM_WRITEBACK_OUTCOMES])
-    expect([...YIDA_ISSUE_CONFIRM_WRITEBACK_OUTCOMES]).toEqual([...plugin.ISSUE_CONFIRM_WRITEBACK_OUTCOMES])
-    expect([...YIDA_ISSUE_CONFIRM_WRITEBACK_DATED_OUTCOMES]).toEqual([...plugin.ISSUE_CONFIRM_DATED_OUTCOMES])
-    expect(plugin.ISSUE_CONFIRM_WRITEBACK_OUTCOMES).toHaveLength(12)
+  it('M-03 the baseline outcome CHECK is the plugin module vocabulary as it stood before written_inactive (its first twelve)', () => {
+    expect(outcomeCheckList(YIDA_ISSUE_CONFIRM_WRITEBACK_UP_SQL)).toEqual([...plugin.ISSUE_CONFIRM_WRITEBACK_OUTCOMES].slice(0, 12))
+    expect([...YIDA_ISSUE_CONFIRM_WRITEBACK_OUTCOMES]).toEqual([...plugin.ISSUE_CONFIRM_WRITEBACK_OUTCOMES].slice(0, 12))
+    expect([...YIDA_ISSUE_CONFIRM_WRITEBACK_DATED_OUTCOMES]).toEqual(['written', 'already_set'])
+    expect(YIDA_ISSUE_CONFIRM_WRITEBACK_OUTCOMES).toHaveLength(12)
   })
 
   it('M-04 down() refuses with the fixed code while any row exists, before any DROP', async () => {
@@ -141,6 +153,51 @@ describe('migration zzzz20261106093100 — YiDa issue-confirm write-back trace',
     expect(text).toContain('DROP TABLE integration_yida_issue_confirm_writeback;')
     expect(text).toContain('DROP FUNCTION IF EXISTS integration_yida_issue_confirm_writeback_guard();')
     expect(text).toContain('DROP FUNCTION IF EXISTS integration_yida_issue_confirm_writeback_truncate_guard();')
+  })
+})
+
+describe('migration zzzz20261117090000 — written_inactive (owner ruling D3-1)', () => {
+  const datedList = (sqlText: string) => {
+    const match = /CONSTRAINT integration_yida_issue_confirm_writeback_date_shape CHECK \( \(outcome IN \(([^)]*)\)\) = \(written_date IS NOT NULL\)/.exec(norm(sqlText))
+    expect(match).not.toBeNull()
+    return match![1].split(',').map(value => value.trim().replace(/^'|'$/g, ''))
+  }
+
+  it('W-01 THE LIST: the widened outcome CHECK and the dated outcomes are exactly the plugin module vocabulary, written_inactive appended last', () => {
+    expect(outcomeCheckList(YIDA_ISSUE_CONFIRM_WRITTEN_INACTIVE_UP_SQL)).toEqual([...plugin.ISSUE_CONFIRM_WRITEBACK_OUTCOMES])
+    expect([...YIDA_ISSUE_CONFIRM_WRITEBACK_OUTCOMES_V2]).toEqual([...plugin.ISSUE_CONFIRM_WRITEBACK_OUTCOMES])
+    expect(datedList(YIDA_ISSUE_CONFIRM_WRITTEN_INACTIVE_UP_SQL)).toEqual([...plugin.ISSUE_CONFIRM_DATED_OUTCOMES])
+    expect([...YIDA_ISSUE_CONFIRM_WRITEBACK_DATED_OUTCOMES_V2]).toEqual([...plugin.ISSUE_CONFIRM_DATED_OUTCOMES])
+    expect(plugin.ISSUE_CONFIRM_WRITEBACK_OUTCOMES).toHaveLength(13)
+    expect(plugin.ISSUE_CONFIRM_WRITEBACK_OUTCOMES[12]).toBe('written_inactive')
+    expect([...plugin.ISSUE_CONFIRM_DATED_OUTCOMES]).toEqual(['written', 'already_set', 'written_inactive'])
+  })
+
+  it('W-02 up() is one unparameterized, replayable ALTER of the two checks only (no column, row or trigger)', async () => {
+    const recorded: CompiledQuery[] = []
+    const db = createFakeDb(recorded)
+    await upWrittenInactive(db)
+    await upWrittenInactive(db)
+    expect(recorded.map(query => query.sql)).toEqual([YIDA_ISSUE_CONFIRM_WRITTEN_INACTIVE_UP_SQL, YIDA_ISSUE_CONFIRM_WRITTEN_INACTIVE_UP_SQL])
+    expect(recorded.every(query => query.parameters.length === 0)).toBe(true)
+    const text = norm(YIDA_ISSUE_CONFIRM_WRITTEN_INACTIVE_UP_SQL)
+    expect(text.startsWith('ALTER TABLE integration_yida_issue_confirm_writeback DROP CONSTRAINT IF EXISTS integration_yida_issue_confirm_writeback_outcome_check, DROP CONSTRAINT IF EXISTS integration_yida_issue_confirm_writeback_date_shape, ADD CONSTRAINT integration_yida_issue_confirm_writeback_outcome_check')).toBe(true)
+    expect(text.split(';').filter(part => part.trim()).length).toBe(1)
+    expect(text).toContain('AND (written_date IS NULL) = (time_zone IS NULL)')
+    expect(text).not.toMatch(/ADD COLUMN|DROP COLUMN|TRIGGER|INSERT|UPDATE|DELETE/)
+  })
+
+  it('W-03 down() refuses with its fixed code while a written_inactive row exists, BEFORE restoring the baseline checks exactly', async () => {
+    const recorded: CompiledQuery[] = []
+    await downWrittenInactive(createFakeDb(recorded))
+    expect(recorded.map(query => query.sql)).toEqual([YIDA_ISSUE_CONFIRM_WRITTEN_INACTIVE_DOWN_SQL])
+    const text = norm(YIDA_ISSUE_CONFIRM_WRITTEN_INACTIVE_DOWN_SQL)
+    const refusal = text.indexOf(`IF EXISTS (SELECT 1 FROM integration_yida_issue_confirm_writeback WHERE outcome = 'written_inactive') THEN RAISE EXCEPTION '${YIDA_ISSUE_CONFIRM_WRITTEN_INACTIVE_DOWN_REFUSED_CODE}'`)
+    expect(refusal).toBeGreaterThan(0)
+    expect(text.indexOf('ALTER TABLE')).toBeGreaterThan(refusal)
+    expect(outcomeCheckList(YIDA_ISSUE_CONFIRM_WRITTEN_INACTIVE_DOWN_SQL)).toEqual([...YIDA_ISSUE_CONFIRM_WRITEBACK_OUTCOMES])
+    expect(datedList(YIDA_ISSUE_CONFIRM_WRITTEN_INACTIVE_DOWN_SQL)).toEqual([...YIDA_ISSUE_CONFIRM_WRITEBACK_DATED_OUTCOMES])
+    expect(text).not.toMatch(/DROP TABLE|DROP TRIGGER|DROP FUNCTION/)
   })
 })
 

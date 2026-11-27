@@ -277,6 +277,12 @@ function makeFakeDb(options: {
       if (!current.includes(code)) state.rolePermissions.set(id, [...current, code])
       return { rows: [], rowCount: 1 }
     }
+    // D21 (Y5a): the subject authorization version bump the delete route and unassignUserRoles issue
+    // in front of membership writes — a lock-taking upsert on a protocol table, no role state.
+    if (/^INSERT INTO subject_authorization_versions/i.test(norm)) {
+      const userIds = Array.isArray(params[0]) ? (params[0] as string[]) : []
+      return { rows: [], rowCount: userIds.length }
+    }
     throw new Error(`fake db: unhandled statement: ${norm}`)
   }
 
@@ -1567,6 +1573,73 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
     expect(db.statements.slice(beforeOrdinary).some((statement) => (
       /pg_advisory_xact_lock/i.test(statement.sql)
     ))).toBe(false)
+  })
+
+  // D21 (Y5a) writer rule, subject layer: the subject version row comes AFTER the locks outside the
+  // admission holder's set (the `roles` row, the namespace-admission advisory) and BEFORE any
+  // membership row goes. Every lockSharedAccessSubjects caller takes advisory → version row; a delete
+  // that took version row → advisory would be the other half of a writer-vs-writer 40P01.
+  it('D21: the members\' subject version rows follow every namespace-admission lock and precede the membership removal and the role row delete (protected role)', async () => {
+    liveRoleEditor = true
+    const db = seedAdminRoles({ cascade: true })
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'crm_admin')
+
+    expect(res.statusCode).toBe(200)
+    const statements = db.statements.map((statement) => statement.sql.replace(/\s+/g, ' ').trim())
+    const bumps = statements.flatMap((sql, index) => (/^INSERT INTO subject_authorization_versions/i.test(sql) ? [index] : []))
+    const admissionLocks = statements.flatMap((sql, index) => (
+      /pg_advisory_xact_lock\(hashtextextended\(\$1, 0\)\)/i.test(sql)
+        && String(db.statements[index]?.params?.[0] ?? '').startsWith('namespace-admission:')
+        ? [index]
+        : []
+    ))
+    const removal = statements.findIndex((sql) => /^DELETE FROM user_roles/i.test(sql))
+    const roleDelete = statements.findIndex((sql) => /^DELETE FROM roles WHERE id=/i.test(sql))
+    // #6971: the actor's and the members' admission locks are taken together by lockRoleCatalogAuthority
+    // (lockSharedAccessSubjects), which then enters the access-graph mutex: one sorted bump for the
+    // actor and the members, before their users rows.
+    expect(admissionLocks.map((index) => db.statements[index]?.params)).toEqual([
+      ['namespace-admission:owner-1'],
+      ['namespace-admission:user-a'],
+      ['namespace-admission:user-b'],
+    ])
+    expect(Math.min(...bumps)).toBeGreaterThan(Math.max(...admissionLocks))
+    const firstUsersRow = statements.findIndex((sql) => sql.includes('FROM users WHERE id = $1::text FOR UPDATE'))
+    expect(firstUsersRow).toBeGreaterThan(bumps[0])
+    expect(removal).toBeGreaterThan(0)
+    expect(roleDelete).toBeGreaterThan(removal)
+    // In order: the authority entry (actor and members), the membership removal, the route's own
+    // bump before the role row goes. The last two retake rows this transaction already holds.
+    expect(bumps.map((index) => db.statements[index]?.params)).toEqual([
+      [['owner-1', 'user-a', 'user-b']],
+      [['user-a', 'user-b']],
+      [['user-a', 'user-b']],
+    ])
+    expect(bumps[1]).toBeLessThan(removal)
+    expect(bumps[2]).toBeGreaterThan(removal)
+    expect(bumps[2]).toBeLessThan(roleDelete)
+  })
+
+  it('D21: an ordinary role takes no admission lock, and its members\' subject version rows (sorted) still come before the role row delete', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const db = seedAdminRoles({ cascade: true })
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'role-1')
+
+    expect(res.statusCode).toBe(200)
+    const statements = db.statements.map((statement) => statement.sql.replace(/\s+/g, ' ').trim())
+    const bump = statements.findIndex((sql) => /^INSERT INTO subject_authorization_versions/i.test(sql))
+    const memberRead = statements.findIndex((sql) => /^SELECT user_id FROM user_roles WHERE role_id=/i.test(sql))
+    const roleDelete = statements.findIndex((sql) => /^DELETE FROM roles WHERE id=/i.test(sql))
+    expect(statements.some((sql) => /pg_advisory_xact_lock/i.test(sql))).toBe(false)
+    expect(bump).toBeGreaterThan(memberRead)
+    expect(bump).toBeLessThan(roleDelete)
+    expect(db.statements[bump]?.params).toEqual([['user-a', 'user-b']])
   })
 
   it('ATOMIC: a failure in the audience cleanup rolls back the membership removal and keeps the role', async () => {

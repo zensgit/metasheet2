@@ -8,8 +8,8 @@ import executionDigest from './yida-execution-digest.cjs'
 import sendBudgetModule from './yida-send-budget.cjs'
 import { createInternalYidaApprovedTargetTransactionReader } from './yida-approved-target-store.mjs'
 import { createInternalYidaDraftTransactionReader, createInternalYidaDraftTransactionWriter } from './yida-draft-plan-store.mjs'
-import { compileYidaSendDraft } from './yida-draft-plan.mjs'
-import { buildYidaStaticPlan, parseYidaStaticRows, yidaTransformSourceColumns } from './yida-static-plan.mjs'
+import { compileYidaSendDraft, yidaDraftPlanErrorKind } from './yida-draft-plan.mjs'
+import { buildYidaStaticPlan, parseYidaStaticRows, yidaGeneratedLayout, yidaTransformSourceColumns } from './yida-static-plan.mjs'
 import { expandYidaProjectAllocationRows } from './stock-preparation-yida-allocation.mjs'
 
 // Host-private composition, never a plugin API/route/authority callback. The
@@ -26,6 +26,16 @@ const ROW_BINDING = ['sheetId', 'recordId', 'keyFieldId', 'keyValue', 'projectNo
 const DRAFT_INPUT = ['config', 'rowsText', 'allocation']
 // The project-sheet registry (migration 087): one active row per (tenant, project number) names the sheet.
 const PROJECT_REGISTRY = 'integration_stock_prep_project_target'
+// P1 (external review 2026-11-08; migration zzzz20261108120000): one sealed generated layout per approved target.
+const GENERATED_LAYOUT = 'integration_yida_generated_layout'
+const GENERATED_LAYOUT_EVENTS = new Set(['approve', 'admit'])
+const GENERATED_LAYOUT_PKEY = 'integration_yida_generated_layout_pkey'
+const LAYOUT_CONFLICT = Object.freeze({ admissible: false, code: 'GENERATED_LAYOUT_CONFLICT' })
+const layoutAdmissible = sealed => Object.freeze({ admissible: true, sealed })
+// Slice YE (external review recommendation 2, 2026-11-08): the compiler's four deterministic source-validation kinds.
+// validateDraftSource answers exactly these as a verdict; every other compile failure keeps its closed UNAVAILABLE.
+const SOURCE_PROBLEMS = new Set(['SOURCE_UNBOUND', 'SOURCE_PROJECT_MISMATCH', 'SOURCE_KEY_MISMATCH', 'SOURCE_KEY_FIELD_MISMATCH'])
+const SOURCE_VALID = Object.freeze({ valid: true })
 const DIGEST_RE = /^[0-9a-f]{64}$/
 const ERROR_CODES = new Set(['INPUT', 'UNAVAILABLE', 'NOT_FOUND', 'CONFLICT'])
 const ownErrors = new WeakMap()
@@ -73,6 +83,18 @@ function crud(trx) {
   return database.createDb({ database: { query: async (sql, params) => rows(await trx.query(sql, params)) } })
 }
 const same = (left, right) => stableCanonicalStringify(left) === stableCanonicalStringify(right)
+// The seal's digest: sha256 of the planner's canonical generated layout (null without a generated entry).
+function generatedLayoutDigest(config) {
+  const layout = yidaGeneratedLayout(config)
+  return layout === null ? null : createHash('sha256').update(stableCanonicalStringify(layout), 'utf8').digest('hex')
+}
+function layoutRace(error) {
+  if (!error || typeof error !== 'object' || types.isProxy(error)) return false
+  // PG's own data fields identify the one INSERT race on the seal's primary key (two first uses without the
+  // approved-target row lock the host transaction always holds); nothing else of the rejection is inspected.
+  return Object.getOwnPropertyDescriptor(error, 'code')?.value === '23505'
+    && Object.getOwnPropertyDescriptor(error, 'constraint')?.value === GENERATED_LAYOUT_PKEY
+}
 // Y2 multi-target: the host passes `targetRef` ONLY while its multi-target switch reads exact 'true'.
 // Absent, every primitive keeps the original closed input and the permanent slot-1 read unchanged.
 const hasTarget = input => Boolean(input) && typeof input === 'object' && !types.isProxy(input)
@@ -285,6 +307,51 @@ function createPrimitives(options) {
       return Object.freeze({ withinBudget: within })
     } catch (error) { closed(error) }
   }
+  // Slice YE (external review recommendation 2, 2026-11-08): the deterministic source-validation refusals of the persisted
+  // compile, answered BEFORE draftSendBudget (which compiles too and would close them to UNAVAILABLE). Pure and synchronous,
+  // like draftSendBudget: one frozen verdict, { valid: true } or { valid: false, code } with code one of the compiler's four
+  // SOURCE_* kinds (read through its own WeakMap reader, never a message or code property). Any other compile failure, and
+  // any malformed input, stays the closed UNAVAILABLE / INPUT it was; the host maps the verdict to its own fixed codes.
+  function validateDraftSource(input) {
+    try {
+      const source = record(input, draftKeys(input))
+      try { compileYidaSendDraft(source) } catch (error) {
+        const kind = yidaDraftPlanErrorKind(error)
+        if (SOURCE_PROBLEMS.has(kind)) return Object.freeze({ valid: false, code: kind })
+        throw error
+      }
+      return SOURCE_VALID
+    } catch (error) { closed(error) }
+  }
+  // Slice YE (coordinator, Y6 P1 addendum): a draft whose generated layout signature differs from its target's SEALED
+  // layout is refused already at draft creation, not first at approval. Read-only: the same signature rule as
+  // sealGeneratedLayoutInTransaction (a selection without a generated entry has the null signature, which never matches a
+  // seal), but no FOR UPDATE and no INSERT: an unsealed target stays unsealed until the first approval / admission seals it.
+  // The host's draft transaction already holds the approved-target row FOR UPDATE (the same slot lock the sealer's
+  // transaction holds), so a concurrent first seal is serialized there and this read sees it committed. The draft must
+  // first be one this target can take (create intent, its locator and key definition), exactly as prepareDraftInTransaction
+  // checks: otherwise the closed CONFLICT it always was. Answers { admissible: true, sealed: false } or
+  // { admissible: false, code: 'GENERATED_LAYOUT_CONFLICT' }, the sealer's verdict shape (sealed is always false here).
+  async function checkGeneratedLayoutInTransaction(trx, input) {
+    try {
+      const db = crud(trx)
+      const { parsed: source, targetRef } = targeted(input, draftKeys(input))
+      const approved = await readTarget(db, targetRef)
+      const compiled = compileYidaSendDraft(source)
+      if (compiled.source.config.intent !== 'create') fail('CONFLICT')
+      if (approved.target.locator_digest !== compiled.locatorDigest
+        || approved.target.key_definition_digest !== compiled.keyDefinitionDigest
+        || !same(approved.envelope.locator, compiled.locator)
+        || !same(approved.envelope.keyDefinition, compiled.keyDefinition)) fail('CONFLICT')
+      const target = approved.target.target_ref
+      const existing = await db.selectOne(GENERATED_LAYOUT, { target_ref: target })
+      if (!existing) return layoutAdmissible(false)
+      if (existing.target_ref !== target || existing.tenant_id !== fixed.tenantId || existing.workspace_id !== null
+        || existing.owner_id !== fixed.ownerId || typeof existing.layout_digest !== 'string' || !DIGEST_RE.test(existing.layout_digest)) fail('UNAVAILABLE')
+      const layoutDigest = generatedLayoutDigest(compiled.source.config)
+      return layoutDigest !== null && existing.layout_digest === layoutDigest ? layoutAdmissible(false) : LAYOUT_CONFLICT
+    } catch (error) { closed(error) }
+  }
   // Admission of a bound row (design baseline v2.3 §7.2): the project-sheet registry must still name the
   // bound sheet for the row's project, active, inside the SAME admission transaction; the two digests then
   // enter the ledger row, where the identity fence (D16) is the final guarantee. The three binding keys come
@@ -311,6 +378,53 @@ function createPrimitives(options) {
       }
       const prepared = await delivery.prepareYidaDeliveryInTransaction(db, prepareInput)
       return Object.freeze({ record: Object.freeze(prepared.record), reused: prepared.reused })
+    } catch (error) { closed(error) }
+  }
+  // P1 (external review 2026-11-08): seal-or-match the target's GENERATED LAYOUT inside the host's approval or admission
+  // transaction, after its own checks and before its first write. Rule G1 holds per template, so two legal templates of
+  // one target ([identity, field] with the field cell P_B and [field, identity] with the field cell P_A) give two
+  // identities one code P_A + P_B, and neither ledger fence compares a code. The first selection with a generated entry
+  // therefore seals the target's canonical layout signature (yidaGeneratedLayout: targets, part kinds and order,
+  // literals, field / hash member targets, hash form, preset id and options) in integration_yida_generated_layout;
+  // every later selection of that target with another signature is refused. Under one sealed layout the identity part
+  // sits at one fixed offset for every code of the target, so equal codes carry equal identity parts, which the two
+  // fences refuse. Race-safe: the host transaction already holds the approved-target row FOR UPDATE (the slot lock), so
+  // two concurrent first uses serialize there and the second sees the committed seal; the seal row's primary key is the
+  // belt behind it. A selection WITHOUT a generated entry (a v2 layout, or a v3 config with none: its signature is null)
+  // reads the seal row too (verifier r1 of the P1 fix, 2026-11-08): on a SEALED target it is refused — null is another
+  // signature, and a cell mapped directly onto the sealed code target could otherwise carry another identity's generated
+  // code (same code, two identities, one target; the guarantee would hold for generated codes only) — while on an
+  // unsealed target it is admissible and writes nothing: a target is sealed by generated entries only, so sends before
+  // the first generated approval stay invisible to the seal (the guarantee holds from that approval onward). Every
+  // selection here is intent 'create' (reconstructRows refuses any other intent). Answers a frozen verdict the host maps
+  // to its own code: { admissible: true, sealed } or { admissible: false, code: 'GENERATED_LAYOUT_CONFLICT' }. The host's
+  // transaction rolls back a refused verdict, so a seal written here never outlives a refused approval or admission.
+  async function sealGeneratedLayoutInTransaction(trx, selection, input) {
+    try {
+      if (!selections.has(selection)) fail('INPUT')
+      const { event } = record(input, ['event'])
+      if (!GENERATED_LAYOUT_EVENTS.has(event)) fail('INPUT')
+      const layoutDigest = generatedLayoutDigest(selection.config)
+      const db = crud(trx)
+      const existing = await db.selectOneForUpdate(GENERATED_LAYOUT, { target_ref: selection.targetRef })
+      if (existing) {
+        if (existing.target_ref !== selection.targetRef || existing.tenant_id !== fixed.tenantId || existing.workspace_id !== null
+          || existing.owner_id !== fixed.ownerId || typeof existing.layout_digest !== 'string' || !DIGEST_RE.test(existing.layout_digest)) fail('UNAVAILABLE')
+        // The null signature never matches a seal: a selection without a generated entry is refused on a sealed target.
+        return layoutDigest !== null && existing.layout_digest === layoutDigest ? layoutAdmissible(false) : LAYOUT_CONFLICT
+      }
+      // Unsealed target, no generated entry: admissible, nothing written (the seal is for generated layouts only).
+      if (layoutDigest === null) return layoutAdmissible(false)
+      const row = { target_ref: selection.targetRef, tenant_id: fixed.tenantId, workspace_id: null, owner_id: fixed.ownerId,
+        layout_digest: layoutDigest, operation_id: selection.operationId, event, actor_id: fixed.ownerId }
+      let inserted
+      try { inserted = rows(await db.insertOne(GENERATED_LAYOUT, row))[0] ?? null }
+      catch (error) {
+        if (layoutRace(error)) return LAYOUT_CONFLICT
+        throw error
+      }
+      if (!inserted || Object.entries(row).some(([key, value]) => inserted[key] !== value)) fail('UNAVAILABLE')
+      return layoutAdmissible(true)
     } catch (error) { closed(error) }
   }
   async function loadExecutionMaterialInTransaction(trx, input) {
@@ -367,7 +481,9 @@ function createPrimitives(options) {
     } catch (error) { closed(error) }
   }
   return Object.freeze({ prepareDraftInTransaction, previewInTransaction, resolveSelectionInTransaction,
-    executionPayloadDigest, sendBudget, draftSendBudget, prepareInTransaction, loadExecutionMaterialInTransaction })
+    executionPayloadDigest, sendBudget, draftSendBudget, validateDraftSource, checkGeneratedLayoutInTransaction,
+    sealGeneratedLayoutInTransaction, prepareInTransaction,
+    loadExecutionMaterialInTransaction })
 }
 
 export function createYidaSendAuthorityPrimitives(options) {

@@ -38,6 +38,7 @@ vi.mock('../../src/integrations/dingtalk/client', () => ({
 import { activatePendingUser } from '../../src/auth/user-activate'
 import { query } from '../../src/db/pg'
 import { restoreDeprovisionEvent } from '../../src/directory/deprovision-evidence-api'
+import { bumpSubjectAuthorizationVersions } from '../../src/multitable/authz-version-protocol'
 import { createDirectoryIntegration, syncDirectoryIntegration } from '../../src/directory/directory-sync'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -261,7 +262,8 @@ async function waitForAnyUserLockWaiter(inspector: Pool, holderPid: number, time
         WHERE activity.pid <> $1::int
           AND activity.wait_event_type = 'Lock'
           AND $1::int = ANY(pg_blocking_pids(activity.pid))
-          AND activity.query LIKE '%FROM users%'
+          AND (activity.query LIKE '%FROM users%'
+               OR activity.query LIKE '%INSERT INTO subject_authorization_versions%')
         ORDER BY activity.pid
         LIMIT 1`,
       [holderPid],
@@ -666,10 +668,15 @@ describeIfDatabase('directory sync and the local account — a deactivation comm
     try {
       await holder.query('BEGIN')
       const holderPid = Number((await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      // D21 (Y5a): the holder stands in for the production deactivation writer (the status route
+      // goes through the access-graph mutex), which bumps the subject authorization version row
+      // BEFORE its users FOR UPDATE; the sync's mutex then waits on that row, not on a deadlock.
+      await bumpSubjectAuthorizationVersions(holder, [fixture.userId])
       await holder.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [fixture.userId])
 
       syncPromise = syncDirectoryIntegration(fixture.integrationId, 'system:gate-concurrent', 'manual')
-      // Barrier: the sync's access-graph lock must actually be waiting on the holder before the
+      // Barrier: the sync's access-graph lock (its first protocol statement, the subject version
+      // bump, or the users row itself) must actually be waiting on the holder before the
       // deactivation commits. Timing out here fails the test; it never falls through.
       const waiterPid = await waitForAnyUserLockWaiter(pool, holderPid)
       expect(waiterPid).toBeGreaterThan(0)

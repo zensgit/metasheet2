@@ -16,7 +16,8 @@ import {
  * Preview values belong only to this authorized no-store response, not logs. */
 export type YidaOwnerHttpPort = Pick<ReturnType<typeof createYidaOwnerRuntime>,
   'prepareDraft' | 'preview' | 'approve' | 'revoke' | 'observe' | 'submit' | 'sendEnabled'>
-  & Partial<Pick<ReturnType<typeof createYidaOwnerRuntime>, 'multiTargetEnabled' | 'proveDraftOwner'>>
+  & Partial<Pick<ReturnType<typeof createYidaOwnerRuntime>, 'multiTargetEnabled' | 'sheetSourceEnabled' | 'proveDraftOwner'
+    | 'issueConfirmWritebackEnabled' | 'issueConfirmWriteback'>>
 export type YidaInitializationHttpPort = Readonly<{
   status(actor: YidaOwnerActor, options: { signal: AbortSignal }): Promise<unknown>
   initialize(actor: YidaOwnerActor, input: YidaInitializationInput, options: { signal: AbortSignal }): Promise<unknown>
@@ -48,6 +49,8 @@ const statuses: Readonly<Record<string, number>> = Object.freeze({
   UNAUTHORIZED: 401, YIDA_OWNER_HTTP_INPUT: 400, YIDA_OWNER_HTTP_DENIED: 403, YIDA_OWNER_HTTP_UNAVAILABLE: 503,
   YIDA_OWNER_RUNTIME_INPUT: 400, YIDA_OWNER_RUNTIME_DISABLED: 403, YIDA_OWNER_RUNTIME_INACTIVE: 503,
   YIDA_OWNER_RUNTIME_UNAVAILABLE: 503, YIDA_OWNER_RUNTIME_CANCELLED: 409,
+  // Y9 sweep: the cursor was issued under another listed target set — restart the sweep without `after`.
+  YIDA_ISSUE_CONFIRM_CURSOR_STALE: 409,
   YIDA_SEND_APPROVAL_INPUT: 400, YIDA_SEND_APPROVAL_NOT_FOUND: 404, YIDA_SEND_APPROVAL_CONFLICT: 409,
   YIDA_SEND_APPROVAL_EXPIRED: 409, YIDA_SEND_APPROVAL_REVOKED: 409,
   YIDA_SEND_APPROVAL_CANCELLED: 409, YIDA_SEND_APPROVAL_UNAVAILABLE: 503,
@@ -56,6 +59,14 @@ const statuses: Readonly<Record<string, number>> = Object.freeze({
   // Identity fence (design baseline v2.3 §3.3, D16): this material row's logical creation identity (key value +
   // project) was already created under this target; nothing new is created. Refused at approval, before a grant.
   YIDA_SEND_APPROVAL_IDENTITY_RESERVED: 409,
+  // Generated-layout seal (external review P1, 2026-11-08): this target's generated template layout was sealed by an
+  // earlier approval and this draft's layout differs; refused at approval and at admission, nothing new is created.
+  YIDA_SEND_APPROVAL_GENERATED_LAYOUT_CONFLICT: 409,
+  // Source validation (slice YE, external review recommendation 2, 2026-11-08): the draft's rows, binding and generated
+  // template are deterministically refused at draft creation; the same request is refused again, so a fixed 422 (never a
+  // 503 that would read as "retry"). Values-free: no field, row, project or key value.
+  YIDA_SEND_APPROVAL_SOURCE_UNBOUND: 422, YIDA_SEND_APPROVAL_SOURCE_PROJECT_MISMATCH: 422,
+  YIDA_SEND_APPROVAL_SOURCE_KEY_MISMATCH: 422, YIDA_SEND_APPROVAL_SOURCE_KEY_FIELD_MISMATCH: 422,
   YIDA_CONNECTION_TEST_INPUT: 400, YIDA_CONNECTION_TEST_DISABLED: 403, YIDA_CONNECTION_TEST_DENIED: 403,
   YIDA_CONNECTION_TEST_CONFLICT: 409, YIDA_CONNECTION_TEST_CANCELLED: 409, YIDA_CONNECTION_TEST_THROTTLED: 429,
   YIDA_CONNECTION_TEST_INACTIVE: 503, YIDA_CONNECTION_TEST_UNAVAILABLE: 503,
@@ -235,10 +246,11 @@ function initializationInput(value: unknown) {
   if (config.version !== 2 || config.kind !== 'yida-form-protocol-static' || config.intent !== 'create') fail()
   record(config.target, ['appType', 'formUuid'])
   if (!Array.isArray(config.businessKey) || !Array.isArray(config.fieldMap) || !Array.isArray(config.fieldCatalog) || !Array.isArray(config.emptyKeyFields)) fail()
-  const allocation = record(candidate.allocation, ['mode'], ['projects', 'projectField', 'quantityField'])
+  // Q4 (R-88): quantityRounding is optional on a split; the plugin owns its values and mode pairing.
+  const allocation = record(candidate.allocation, ['mode'], ['projects', 'projectField', 'quantityField', 'quantityRounding'])
   if (allocation.mode === 'original') record(candidate.allocation, ['mode'])
   else if (!['equal_integer', 'equal_decimal_exact'].includes(String(allocation.mode))) fail()
-  else record(candidate.allocation, ['mode', 'projects', 'projectField', 'quantityField'])
+  else record(candidate.allocation, ['mode', 'projects', 'projectField', 'quantityField'], ['quantityRounding'])
   const attestation = record(parsed.attestation, ['kind', 'reviewRef', 'organizationId', 'executionIdentity'])
   if (attestation.kind !== 'owner-reviewed-target') fail()
   for (const key of ['reviewRef', 'organizationId', 'executionIdentity']) literalId(attestation[key])
@@ -278,6 +290,74 @@ function initialization(value: unknown, sendEnabled: boolean, connectionTestEnab
     ...(connectionTestEnabled ? { connectionTestEnabled: true as const } : {}),
     // Y2: same absent-while-OFF rule, so an older bundle keeps its closed key set while the switch is off.
     ...(multiTargetEnabled ? { multiTargetEnabled: true as const } : {}) }
+}
+// YiDa 发料确认日期回写 recovery reply (slice Y9): ledger ids, closed kinds and fixed codes, the written day and zone.
+const writebackKinds = ['skip', 'retryable', 'outcome']
+function writebackResult(value: unknown) {
+  const row = record(value, ['ledgerId', 'kind'], ['reason', 'code', 'outcome', 'recorded', 'date', 'timeZone', 'recordId'])
+  if (typeof row.kind !== 'string' || !writebackKinds.includes(row.kind)) fail()
+  const ledgerId = literalId(row.ledgerId)
+  if (row.kind === 'skip') {
+    const skip = record(value, ['ledgerId', 'kind', 'reason'])
+    if (typeof skip.reason !== 'string' || !/^[a-z_]{1,64}$/u.test(skip.reason)) fail()
+    return { ledgerId, kind: 'skip', reason: skip.reason }
+  }
+  if (row.kind === 'retryable') {
+    const retry = record(value, ['ledgerId', 'kind', 'code'])
+    if (typeof retry.code !== 'string' || !/^[A-Z][A-Z0-9_]{0,95}$/u.test(retry.code)) fail()
+    return { ledgerId, kind: 'retryable', code: retry.code }
+  }
+  const dated = Object.hasOwn(row, 'date')
+  // D3-1 (register R-96 ⑦): a written_inactive row is dated and carries the inactive row's record id (an opaque id);
+  // no other row carries one.
+  const inactive = row.outcome === 'written_inactive'
+  const done = record(value, dated ? ['ledgerId', 'kind', 'outcome', 'recorded', 'date', 'timeZone', ...(inactive ? ['recordId'] : [])]
+    : ['ledgerId', 'kind', 'outcome', 'recorded'])
+  if (typeof done.outcome !== 'string' || !/^[a-z_]{1,64}$/u.test(done.outcome) || typeof done.recorded !== 'boolean'
+    || (dated && (typeof done.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/u.test(done.date) || typeof done.timeZone !== 'string'
+      || !done.timeZone || done.timeZone.length > 64)) || (inactive && !dated)) fail()
+  return { ledgerId, kind: 'outcome', outcome: done.outcome, recorded: done.recorded,
+    ...(dated ? { date: done.date, timeZone: done.timeZone } : {}), ...(inactive ? { recordId: literalId(done.recordId) } : {}) }
+}
+// D3-1 run report: the counts of written_inactive, row_absent, duplicate_key and kept_existing (every key, zero included)
+// and the written_inactive rows with their record ids — recomputed here from the closed result rows. The runtime's own
+// report, when present, must equal it as DATA (sameWritebackReport: closed keys, per-key counts, element-wise handles —
+// never key order or serialization, so a runtime that lists the counted outcomes in another order still answers); the
+// DTO carries the recomputed one on every enabled answer.
+const writebackReportCounted = ['written_inactive', 'row_absent', 'duplicate_key', 'kept_existing']
+function sameWritebackReport(value: unknown, expected: ReturnType<typeof writebackReport>): boolean {
+  const report = record(value, ['counts', 'writtenInactive'])
+  const counts = record(report.counts, writebackReportCounted)
+  if (writebackReportCounted.some(outcome => counts[outcome] !== expected.counts[outcome])) return false
+  const handles = report.writtenInactive
+  if (!Array.isArray(handles) || types.isProxy(handles) || handles.length !== expected.writtenInactive.length) return false
+  return handles.every((handle: unknown, index: number) => {
+    const entry = record(handle, ['ledgerId', 'recordId'])
+    return entry.ledgerId === expected.writtenInactive[index].ledgerId && entry.recordId === expected.writtenInactive[index].recordId
+  })
+}
+function writebackReport(results: Array<Record<string, unknown>>) {
+  const outcomes = results.filter(result => result.kind === 'outcome')
+  return {
+    counts: Object.fromEntries(writebackReportCounted.map(outcome => [outcome, outcomes.filter(result => result.outcome === outcome).length])),
+    writtenInactive: outcomes.filter(result => result.outcome === 'written_inactive')
+      .map(result => ({ ledgerId: result.ledgerId, recordId: result.recordId })),
+  }
+}
+// Y9 sweep cursor: base64url text, at most 2048 characters (the core decodes and judges it; the route bounds it).
+const writebackCursor = /^[A-Za-z0-9_-]{1,2048}$/u
+function writebackRun(value: unknown) {
+  const row = record(value, ['enabled', 'results'], ['stopped', 'next', 'report'])
+  if (typeof row.enabled !== 'boolean' || !Array.isArray(row.results) || row.results.length > 100
+    || (Object.hasOwn(row, 'stopped') && row.stopped !== 'SWITCH_OFF')
+    || (Object.hasOwn(row, 'next') && row.next !== null && (typeof row.next !== 'string' || !writebackCursor.test(row.next)))
+    || (Object.hasOwn(row, 'report') && row.enabled !== true)) fail()
+  const results = row.results.map(writebackResult)
+  const report = row.enabled === true ? writebackReport(results) : undefined
+  // A runtime report that is not the one its own rows give is not an answer at all (compared as data, never by key order).
+  if (Object.hasOwn(row, 'report') && (report === undefined || !sameWritebackReport(row.report, report))) fail()
+  return { enabled: row.enabled, results, ...(report ? { report } : {}), ...(Object.hasOwn(row, 'next') ? { next: row.next } : {}),
+    ...(Object.hasOwn(row, 'stopped') ? { stopped: 'SWITCH_OFF' } : {}) }
 }
 const reconcileCountKeys = ['scanned', 'registered', 'would_register', 'already_reconciled', 'duplicate_remote',
   'own_acknowledged', 'duplicate_with_own', 'own_in_flight', 'observed_for_unknown', 'own_not_sent', 'project_mismatch',
@@ -366,6 +446,9 @@ export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initia
   // Y2 shape bit, read per request (exact 'true' in the owner runtime). OFF = every body below keeps its
   // original closed key set and the new paths fall through to the same 404 as any unknown path.
   const multiTargetEnabled = () => { try { return port.multiTargetEnabled?.() === true } catch { return false } }
+  // D17 b (R-88) shape bit: INTEGRATION_YIDA_SHEET_SOURCE_ENABLED exact 'true' (read in the owner runtime). ON while
+  // multi-target is OFF = the draft body may name a sheet/view source instead of rowsText, never a targetRef.
+  const sheetSourceEnabled = () => { try { return port.sheetSourceEnabled?.() === true } catch { return false } }
   const route = (status: number, operation: (req: Request, owner: YidaOwnerActor, signal: AbortSignal) => Promise<unknown>) =>
     async (req: Request, res: Response) => {
       const controller = new AbortController()
@@ -382,14 +465,16 @@ export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initia
       finally { req.removeListener('aborted', aborted); res.removeListener('close', closed) }
     }
   router.post('/drafts', route(201, async (req, owner) => {
-    if (!multiTargetEnabled()) {
+    const multi = multiTargetEnabled()
+    if (!multi && !sheetSourceEnabled()) {
       const input = record(req.body, ['config', 'rowsText', 'allocation'])
       if (typeof input.rowsText !== 'string' || Buffer.byteLength(input.rowsText, 'utf8') > 128 * 1024) fail()
       const result = await port.prepareDraft(owner, { config: input.config, rowsText: input.rowsText, allocation: input.allocation })
       return dto(() => draft(result))
     }
     // Y2 (switch ON): a named target, and either pasted rowsText or a sheet/view source (never both).
-    const input = record(req.body, ['config', 'allocation'], ['rowsText', 'source', 'targetRef'])
+    // D17 b (sheet-source switch ON, multi-target OFF): the same, without a targetRef (slot 1).
+    const input = record(req.body, ['config', 'allocation'], multi ? ['rowsText', 'source', 'targetRef'] : ['rowsText', 'source'])
     if (Object.hasOwn(input, 'rowsText') === Object.hasOwn(input, 'source')) fail()
     const targetRef = Object.hasOwn(input, 'targetRef') ? id(input.targetRef) : undefined
     let rowsText: string
@@ -484,6 +569,41 @@ export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initia
     if (!initializationPort?.registerTarget) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
     const result = await initializationPort.registerTarget(owner, input, { signal })
     return dto(() => targetsView(result))
+  })))
+  // YiDa 发料确认日期回写 owner recovery entry (design baseline v2.3 §7.3, D5 b / D9; slice Y9). While the write-back
+  // switch is OFF (exact 'true' only, read by the plugin core's own predicate through the runtime) the path falls
+  // through to the same generic 404 as any unknown path. ON: a closed body — optional `ledgerIds` (1..100 of this
+  // owner's ledger rows), optional `limit` (1..100) and, without ledgerIds only, optional `after` (the previous
+  // answer's `next`: a batch run is one page of a sweep — start without `after`, follow `next` until it is null) — and
+  // one bounded, idempotent run; the runtime proves the live owner first and every row is re-checked under its sheet
+  // lease. A tampered cursor, or one that carries the CURRENT target set's digest but names an unlisted target, gets
+  // 400; a cursor issued under another target set gets 409 (YIDA_ISSUE_CONFIRM_CURSOR_STALE: restart without `after`) —
+  // that includes a cursor whose own target was removed from the list (the list changed); a well-formed cursor on a
+  // listed target only moves the start. Never the send switch, never a send.
+  const issueConfirmWritebackEnabled = () => { try { return port.issueConfirmWritebackEnabled?.() === true } catch { return false } }
+  const whenIssueConfirmWriteback = (handler: RequestHandler): RequestHandler => (req, res, next) => {
+    if (!issueConfirmWritebackEnabled()) { next(); return }
+    return handler(req, res, next)
+  }
+  router.post('/issue-confirm-writeback', whenIssueConfirmWriteback(route(200, async (request, owner) => {
+      const input = record(request.body, [], ['ledgerIds', 'limit', 'after'])
+      let ledgerIds: string[] | undefined
+      if (Object.hasOwn(input, 'ledgerIds')) {
+        if (!Array.isArray(input.ledgerIds) || types.isProxy(input.ledgerIds) || input.ledgerIds.length < 1 || input.ledgerIds.length > 100) fail()
+        ledgerIds = input.ledgerIds.map(value => literalId(value))
+        if (new Set(ledgerIds).size !== ledgerIds.length) fail()
+      }
+      const limit = Object.hasOwn(input, 'limit') ? integer(input.limit, 1, 100) : undefined
+      let after: string | undefined
+      if (Object.hasOwn(input, 'after')) {
+        // Batch mode only: a cursor together with named rows is refused, never one of them ignored.
+        if (typeof input.after !== 'string' || !writebackCursor.test(input.after) || ledgerIds) fail()
+        after = input.after
+      }
+      if (!port.issueConfirmWriteback) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
+      const result = await port.issueConfirmWriteback(owner, { ...(ledgerIds ? { ledgerIds } : {}), ...(limit === undefined ? {} : { limit }),
+        ...(after === undefined ? {} : { after }) })
+      return dto(() => writebackRun(result))
   })))
   // Owner-run token-only connection test before initialization. The runtime authorizes; the route
   // only closes the body and the DTO. No send authority, no form IO, nothing persisted.

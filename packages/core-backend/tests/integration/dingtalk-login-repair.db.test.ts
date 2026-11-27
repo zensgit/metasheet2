@@ -2732,6 +2732,127 @@ suite('DingTalk controlled login repair', () => {
       expect(await journal(f.user)).toEqual(journalBefore)
       expect(await identityRows(f.user)).toEqual(identityBefore)
     })
+
+    // With D21 every access-graph writer bumps the subject's version row before it locks the users
+    // row, and a directory handover waits for that version row while it holds the maintenance mutex.
+    // A repair that locked the users row before it asked for the mutex closed a cycle of three on one
+    // user: writer (holds the version row, wants the users row), repair (holds the users row, wants
+    // the mutex), handover (holds the mutex, wants the version row). The repair now asks for the mutex
+    // holding its admission keys only.
+    it('a same-subject access-graph write, a directory handover and a repair that overlap on one user finish in that order', async () => {
+      const f = await fixture(),
+        proof = await f.verify(),
+        p = await previewDingTalkRepair(proof)
+      const target = await addIntegration(f, 'synthetic-handover-target')
+      const { lockUsersForAccessGraphWrite } = await import('../../src/directory/access-graph-mutex')
+      const blockedBy = async (pid: number): Promise<number> => {
+        for (let i = 0; i < 300; i++) {
+          const rows = (
+            await query(
+              'SELECT pid FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))',
+              [pid],
+            )
+          ).rows
+          if (rows.length > 0) return Number(rows[0].pid)
+          await new Promise((resolve) => setTimeout(resolve, 10))
+        }
+        throw new Error('no backend waited on the expected holder')
+      }
+      const heldBy = async (pid: number) =>
+        (
+          await query(
+            `SELECT l.locktype, l.mode, l.granted, c.relname
+               FROM pg_locks l LEFT JOIN pg_class c ON l.locktype='relation' AND c.oid=l.relation
+              WHERE l.pid=$1 AND l.locktype IN ('advisory','relation','tuple','transactionid')
+              ORDER BY l.locktype, l.granted, c.relname`,
+            [pid],
+          )
+        ).rows
+      const finished: string[] = []
+      const writer = await pool!.connect()
+      let openUsersRow!: () => void
+      const usersRowGate = new Promise<void>((resolve) => { openUsersRow = resolve })
+      let versionRowHeld!: () => void
+      const versionRow = new Promise<void>((resolve) => { versionRowHeld = resolve })
+      let write: Promise<unknown> | undefined
+      let handover: Promise<unknown> | undefined
+      let repair: Promise<unknown> | undefined
+      try {
+        await writer.query('BEGIN')
+        const writerPid = Number((await writer.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+        // The real protocol entry of every access-graph writer (an ordinary DingTalk login updating an
+        // existing identity enters here). Only its second statement is delayed; nothing is mocked.
+        write = lockUsersForAccessGraphWrite(
+          {
+            query: async (statement: string, params?: unknown[]) => {
+              if (statement.includes('FROM users')) {
+                versionRowHeld()
+                await usersRowGate
+              }
+              return writer.query(statement, params)
+            },
+          },
+          [f.user],
+        ).then(async (locked) => {
+          expect(locked.has(f.user)).toBe(true)
+          // The table lock of the identity update that login issues next (any INSERT, UPDATE or
+          // DELETE takes it). The handover fences this table, but only after its version rows.
+          await writer.query('LOCK TABLE user_external_identities IN ROW EXCLUSIVE MODE')
+          await writer.query('COMMIT')
+          finished.push('write')
+        })
+        write.catch(() => undefined)
+        // A failure before the version row is held ends the case with that error instead of a timeout.
+        await Promise.race([versionRow, write])
+
+        // The real handover: maintenance mutex, source freeze keys, then it waits for the version
+        // row of the linked user. Its table fences come after that wait.
+        handover = applyDirectoryHandover(
+          { sourceIntegrationId: f.source, targetIntegrationId: target },
+          'synthetic-stale-preview',
+          f.admin,
+        ).finally(() => finished.push('handover'))
+        handover.catch(() => undefined)
+        // If either waiter ends before it queues, the case ends with that waiter's own error.
+        const early = (name: string) => () => { throw new Error(`${name} ended before it queued`) }
+        const handoverPid = await Promise.race([blockedBy(writerPid), handover.then(early('the handover'))])
+
+        // The real repair: its two admission keys, then it waits for the mutex the handover holds.
+        repair = applyDingTalkRepair(proof, p.digest, 'apply').finally(() => finished.push('repair'))
+        repair.catch(() => undefined)
+        const repairPid = await Promise.race([blockedBy(handoverPid), repair.then(early('the repair'))])
+        const repairLocks = await heldBy(repairPid)
+        expect(repairLocks.filter((l) => l.locktype === 'advisory')).toEqual([
+          { locktype: 'advisory', mode: 'ExclusiveLock', granted: false, relname: null },
+          { locktype: 'advisory', mode: 'ExclusiveLock', granted: true, relname: null },
+          { locktype: 'advisory', mode: 'ExclusiveLock', granted: true, relname: null },
+        ])
+        // It waits holding no users row: a row lock would show as its RowShareLock on the relation.
+        expect(repairLocks.filter((l) => l.locktype !== 'advisory')).toEqual([])
+        expect(finished).toEqual([])
+
+        // The writer now asks for the users row. Before, this request closed the cycle, and
+        // PostgreSQL ended it by failing one of the three with 40P01; each outcome is checked below.
+        openUsersRow()
+        await write
+        // The handover took every lock of its lock phase once the writer had committed. It then ends
+        // on its own preflight (this fixture's target application is unverified), not on a lock error.
+        await expect(handover).rejects.toMatchObject({
+          code: 'DIRECTORY_HANDOVER_CONFLICT',
+          message: 'Target application ownership must have current administrator verification',
+        })
+        await expect(repair).resolves.toMatchObject({ id: expect.any(String) })
+        expect(finished).toEqual(['write', 'handover', 'repair'])
+        expect(await journal(f.user)).toEqual([{ state: 'applied' }])
+      } finally {
+        openUsersRow()
+        await write?.catch(() => undefined)
+        await writer.query('ROLLBACK').catch(() => undefined)
+        writer.release()
+        await handover?.catch(() => undefined)
+        await repair?.catch(() => undefined)
+      }
+    })
   })
 
   it('rejects a scan whose OpenID matches but whose stored directory UnionID names another person', async () => {

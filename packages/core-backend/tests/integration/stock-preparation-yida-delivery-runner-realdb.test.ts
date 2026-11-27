@@ -1,6 +1,7 @@
 // SA05C1: actual runner/planner/db/store/token/exchange/form transport over an
 // isolated PostgreSQL schema. Authority and both fetches are SYNTHETIC. This is
 // neither a real customer send nor proof that a runtime authorization port exists.
+import { YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL } from '../../src/db/migrations/zzzz20261126202000_pin_yida_ack_business_timezone'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -310,7 +311,7 @@ describeDatabase('SA05C1 single-row delivery composition — real PG, synthetic 
     schema = `yida_runner_${randomUUID().replaceAll('-', '')}`
     await owner.query(`CREATE SCHEMA ${ident(schema)}`)
     await owner.query(`SET search_path TO ${ident(schema)}`)
-    await owner.query(migrationSql)
+    await owner.query(migrationSql + '\n' + YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL)
     // Real DB CHECK faults target only the named completion event. Other writes,
     // including the runner's subsequent unknown quarantine, remain real SQL.
     await owner.query(`ALTER TABLE "${AUDIT}" ADD CONSTRAINT synthetic_reject_event CHECK (
@@ -620,7 +621,7 @@ describeDatabase('SA05C1 single-row delivery composition — real PG, synthetic 
       expect(await evidence()).toEqual(before)
       // Replaying both migrations retains even a not_sent tombstone. Restart
       // does not erase or reissue the original CREATE business reservation.
-      await owner.query(migrationSql)
+      await owner.query(migrationSql + '\n' + YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL)
       await rejected(b.restart().run({ operationId: b.snapshot.operationId, rowKey: b.snapshot.rowKey }), 'PREPARE_FAILED')
       expect(b.tokenCalls + b.businessCalls.length).toBe(0)
       expect(await evidence()).toEqual(before)

@@ -176,6 +176,12 @@ function installTransaction(options: {
       call.lockKeys.push(String(params?.[0] ?? ''))
       return { rows: [], rowCount: 1 }
     }
+    // D21 (Y5a): unassignUserRoles bumps the targets' subject authorization version rows (sorted,
+    // one statement) immediately before the membership DELETE, on the same transaction client.
+    if (/INSERT INTO subject_authorization_versions/.test(text)) {
+      call.events.push('authz-version')
+      return { rows: [], rowCount: 1 }
+    }
     if (/FROM roles WHERE id = \$1(?:::text)? FOR SHARE/.test(text)) {
       call.events.push('role-lock')
       call.roleLockIds.push(String(params?.[0] ?? ''))
@@ -291,7 +297,7 @@ function installTransaction(options: {
   })
   pgMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
     call.poolSql.push(sql)
-    if (/pg_advisory_xact_lock|DELETE FROM user_roles|INSERT INTO user_namespace_admissions|FROM role_permissions|SELECT TRUE AS allowed|FOR SHARE|FOR UPDATE|SET TRANSACTION|current_setting|set_config/.test(sql)) {
+    if (/pg_advisory_xact_lock|DELETE FROM user_roles|INSERT INTO user_namespace_admissions|FROM role_permissions|SELECT TRUE AS allowed|FOR SHARE|FOR UPDATE|SET TRANSACTION|current_setting|set_config|INSERT INTO subject_authorization_versions/.test(sql)) {
       throw new Error('transaction statement reached the pool')
     }
     if (/uo\.user_id = \$1|u\.id = ANY\(\$1::text\[\]\)/.test(sql)) return clientQuery(sql, params)
@@ -452,6 +458,7 @@ describe('attendance-admin unassign rechecks the locked actor and targets after 
       'world-lock',
       'role-lock',
       ...subjects.map(() => 'lock'),
+      'authz-version',
       ...subjects.map(() => 'user-lock'),
       'actor-roles',
       'resolve-targets',
@@ -460,6 +467,9 @@ describe('attendance-admin unassign rechecks the locked actor and targets after 
     expect(call.resolveLocked).toEqual([false, true])
     expect(call.events.indexOf('role-lock')).toBeLessThan(call.events.indexOf('lock'))
     expect(call.events.indexOf('lock')).toBeLessThan(call.events.indexOf('user-lock'))
+    // D21 (Y5a): the access-graph mutex bumps the subject version rows after the admission locks and before users FOR UPDATE.
+    expect(call.events.indexOf('authz-version')).toBeGreaterThan(call.events.lastIndexOf('lock'))
+    expect(call.events.indexOf('authz-version')).toBeLessThan(call.events.indexOf('user-lock'))
     expect(call.events.lastIndexOf('user-lock')).toBeLessThan(call.events.indexOf('actor-roles'))
     expect(call.events.indexOf('actor-roles')).toBeLessThan(call.events.lastIndexOf('resolve-targets'))
     expect(call.roleLockIds).toEqual(['attendance_employee'])
@@ -492,6 +502,7 @@ describe('attendance-admin unassign rechecks the locked actor and targets after 
       'world-lock',
       'role-lock',
       ...subjects.map(() => 'lock'),
+      'authz-version',
       ...subjects.map(() => 'user-lock'),
       'actor-roles',
       'rollback',
@@ -499,6 +510,9 @@ describe('attendance-admin unassign rechecks the locked actor and targets after 
     expect(call.resolveLocked).toEqual([false])
     expect(call.events.indexOf('role-lock')).toBeLessThan(call.events.indexOf('lock'))
     expect(call.events.indexOf('lock')).toBeLessThan(call.events.indexOf('user-lock'))
+    // D21 (Y5a): the access-graph mutex bumps the subject version rows after the admission locks and before users FOR UPDATE.
+    expect(call.events.indexOf('authz-version')).toBeGreaterThan(call.events.lastIndexOf('lock'))
+    expect(call.events.indexOf('authz-version')).toBeLessThan(call.events.indexOf('user-lock'))
     expect(call.events.lastIndexOf('user-lock')).toBeLessThan(call.events.indexOf('actor-roles'))
     expect(call.roleLockIds).toEqual(['attendance_employee'])
     expect(call.lockKeys).toEqual(subjects.map((id) => `namespace-admission:${id}`))
@@ -540,10 +554,12 @@ describe('attendance-admin unassign lock, DELETE and witness share one transacti
       'role-lock',
       'lock',
       'lock',
+      'authz-version',
       'user-lock',
       'user-lock',
       'actor-roles',
       'resolve-targets',
+      'authz-version',
       'delete',
       'list-namespaces',
       'remaining-role',
@@ -601,12 +617,14 @@ describe('attendance-admin unassign lock, DELETE and witness share one transacti
       'lock',
       'lock',
       'lock',
+      'authz-version',
       'user-lock',
       'user-lock',
       'user-lock',
       'user-lock',
       'actor-roles',
       'resolve-targets',
+      'authz-version',
       'delete',
       'list-namespaces',
       'remaining-role',
