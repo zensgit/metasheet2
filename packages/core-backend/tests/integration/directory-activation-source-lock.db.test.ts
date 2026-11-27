@@ -5,7 +5,7 @@ import pg from 'pg'
 import express from 'express'
 import request from 'supertest'
 import jwt from 'jsonwebtoken'
-import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { query } from '../../src/db/pg'
 import { activatePendingUser } from '../../src/auth/user-activate'
 import { poolManager } from '../../src/integration/db/connection-pool'
@@ -43,6 +43,9 @@ describe('directory-activation-source-lock wiring', () => {
  * 'inactive' status and the activation refuses ACTIVATE_INTEGRATION_INACTIVE, writing nothing.
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
+if (process.env.EXPECT_DB === '1')
+  it('DB lane must not skip', () =>
+    expect(process.env.DATABASE_URL).toBeTruthy())
 const TS = Date.now()
 const PREFIX = `t3-src-lock-${TS}`
 
@@ -407,4 +410,141 @@ describeIfDatabase('T3 activation source read serialises against integration dea
       `SELECT activation_status FROM users WHERE id = $1`, [seeded.userId])
     expect(user.rows[0]?.activation_status).toBe('pending_activation')
   }, 30_000)
+})
+
+describeIfDatabase('DingTalk activation admission', () => {
+  let target: Seeded
+  let admin: string, corp: string, appKey: string, openId: string, unionId: string
+  let loginConnection: string | undefined
+  let providerCalls: number
+  let profileReady: () => Promise<void>
+
+  async function snapshot() {
+    const rows: Record<string, unknown> = {}
+    for (const [table, column] of [
+      ['users', 'id'], ['user_login_aliases', 'user_id'], ['user_orgs', 'user_id'],
+      ['user_external_identities', 'local_user_id'], ['user_external_auth_grants', 'local_user_id'],
+      ['user_sessions', 'user_id'], ['user_session_revocations', 'user_id'], ['subject_authorization_versions', 'subject_id'],
+      ['directory_account_links', 'local_user_id'],
+    ]) rows[table] = (await query(`SELECT to_jsonb(t) AS row FROM ${table} t WHERE ${column}=$1 ORDER BY to_jsonb(t)::text`, [target.userId])).rows
+    rows.account = (await query('SELECT to_jsonb(t) AS row FROM directory_accounts t WHERE id=$1', [target.accountId])).rows
+    return rows
+  }
+
+  async function addLoginConnection(status: string, org = target.orgId) {
+    loginConnection = randomUUID()
+    await query(`INSERT INTO directory_integrations(id,name,provider,org_id,corp_id,status,config)
+      VALUES($1,$2,'dingtalk',$3,$4,$5,$6)`, [loginConnection, `Activation fixture ${loginConnection}`, org, corp, status, { appKey }])
+  }
+
+  async function activate(selector: Record<string, string> = {}) {
+    const { authRouter } = await import('../../src/routes/auth')
+    const { generateState } = await import('../../src/auth/dingtalk-oauth')
+    const state = await generateState({ intent: 'activate', activateUserId: target.userId, activateAdminUserId: admin })
+    const app = express().use(express.json()).use('/api/auth', authRouter)
+    return request(app).post('/api/auth/dingtalk/callback').send({ code: 'synthetic', state, ...selector })
+  }
+
+  function denied(response: request.Response) {
+    expect(response.status, JSON.stringify(response.body)).toBe(403)
+    expect(response.body).toEqual({ success: false, code: 'strict_connection', error: 'DingTalk login is not eligible for this source' })
+    expect(response.body.data?.token).toBeUndefined()
+  }
+
+  beforeEach(async () => {
+    target = await seed()
+    admin = `${PREFIX}-admin-${randomUUID()}`
+    corp = `corp-${target.integrationId}`; appKey = `app-${randomUUID()}`
+    openId = `open-${target.accountId}`; unionId = `union-${target.accountId}`
+    loginConnection = undefined; providerCalls = 0; profileReady = async () => {}
+    await query("INSERT INTO users(id,email,password_hash,role,is_active,activation_status) VALUES($1,$2,'x','admin',true,'activated')", [admin, `${admin}@example.invalid`])
+    await query("INSERT INTO user_roles(user_id,role_id) VALUES($1,'admin')", [admin])
+    await query('UPDATE directory_integrations SET corp_id=$1,config=$2 WHERE id=$3', [corp, { appKey: `directory-${randomUUID()}` }, target.integrationId])
+    await query('UPDATE directory_accounts SET corp_id=$1,open_id=$2,union_id=$3 WHERE id=$4', [corp, openId, unionId, target.accountId])
+    for (const [key, value] of Object.entries({
+      DINGTALK_CLIENT_ID: appKey, DINGTALK_CLIENT_SECRET: 'synthetic', DINGTALK_CORP_ID: corp,
+      DINGTALK_REDIRECT_URI: 'https://example.invalid/callback', DINGTALK_OAUTH_REQUIRE_SHARED_STATE_STORE: 'false',
+      DINGTALK_ALLOWED_CORP_IDS: corp, AUTH_LOGIN_MAX_ATTEMPTS: '10000',
+    })) vi.stubEnv(key, value)
+    vi.stubGlobal('fetch', async (url: string | URL) => {
+      providerCalls++
+      const endpoint = new URL(url).pathname
+      if (endpoint.endsWith('/userAccessToken')) return Response.json({ accessToken: 'synthetic' })
+      if (!endpoint.endsWith('/contact/' + 'users/me')) throw new Error('Unexpected provider operation')
+      await profileReady()
+      return Response.json({ openId, unionId, nick: 'Fixture' })
+    })
+  })
+
+  afterEach(async () => {
+    try {
+      if (loginConnection) await query('DELETE FROM directory_integrations WHERE id=$1', [loginConnection])
+      await cleanup()
+      await query('DELETE FROM subject_authorization_versions WHERE subject_id LIKE $1', [`${PREFIX}%`])
+    } finally { vi.unstubAllGlobals(); vi.unstubAllEnvs() }
+  })
+
+  it.each(['implicit', 'id', 'corp', 'both'] as const)('checks activation source eligibility (%s)', async selector => {
+    await addLoginConnection('paused')
+    const before = await snapshot()
+    denied(await activate({ ...(['id', 'both'].includes(selector) ? { connectionId: loginConnection! } : {}),
+      ...(['corp', 'both'].includes(selector) ? { corpId: corp } : {}) }))
+    expect(providerCalls).toBe(0)
+    expect(await snapshot()).toEqual(before)
+  })
+
+  it.each(['inactive', 'disabled', 'deactivated', 'Active', ''])('requires an active activation source (%s)', async status => {
+    await addLoginConnection(status)
+    const before = await snapshot()
+    denied(await activate())
+    expect(providerCalls).toBe(0)
+    expect(await snapshot()).toEqual(before)
+  })
+
+  it('requires activation source organization fields', async () => {
+    await addLoginConnection('active', '')
+    const before = await snapshot()
+    denied(await activate())
+    expect(providerCalls).toBe(0)
+    expect(await snapshot()).toEqual(before)
+  })
+
+  it.each(['active', 'unconfigured', 'separate-app'] as const)('activates eligible directory identities (%s)', async shape => {
+    if (shape !== 'unconfigured') await query('UPDATE directory_integrations SET config=$1 WHERE id=$2', [{ appKey }, target.integrationId])
+    if (shape === 'separate-app') {
+      await addLoginConnection('paused')
+      await query('UPDATE directory_integrations SET config=$1 WHERE id=$2', [{ appKey: `other-${appKey}` }, loginConnection])
+    }
+    const response = await activate()
+    expect(response.status, JSON.stringify(response.body)).toBe(200)
+    const claims = jwt.verify(response.body.data.token, runtimeJwtSecret()) as jwt.JwtPayload
+    expect(claims.userId).toBe(target.userId)
+    expect(claims.tenantId).toBe(target.orgId)
+    expect((await query('SELECT id FROM user_sessions WHERE id=$1 AND user_id=$2', [claims.sid, target.userId])).rowCount).toBe(1)
+    expect(providerCalls).toBe(2)
+  })
+
+  it('requires current eligibility for the activation transaction', async () => {
+    const before = await snapshot()
+    profileReady = async () => {
+      await addLoginConnection('paused')
+      vi.stubEnv('DINGTALK_CLIENT_ID', `changed-${appKey}`)
+      vi.stubEnv('DINGTALK_CORP_ID', `changed-${corp}`)
+    }
+    denied(await activate())
+    expect(providerCalls).toBe(2)
+    expect(await snapshot()).toEqual(before)
+  })
+
+  it('requires an active directory source before activation writes', async () => {
+    await query('UPDATE directory_integrations SET config=$1 WHERE id=$2', [{ appKey }, target.integrationId])
+    const before = await snapshot()
+    profileReady = async () => { await query("UPDATE directory_integrations SET status='paused' WHERE id=$1", [target.integrationId]) }
+    const response = await activate()
+    expect(response.status).toBe(409)
+    expect(response.body.code).toBe('activate_source_ineligible')
+    expect(providerCalls).toBe(2)
+    expect(response.body.data?.token).toBeUndefined()
+    expect(await snapshot()).toEqual(before)
+  })
 })
