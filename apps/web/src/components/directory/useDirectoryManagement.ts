@@ -1038,6 +1038,8 @@ function resetDraft() {
   stopRunPolling()
   directoryContextVersion += 1
   directorySelectionVersion += 1
+  previewBusy.value = false
+  previewResult.value = null
   accountLoadVersion += 1
   alertLoadVersion += 1
   scheduleLoadVersion += 1
@@ -1973,6 +1975,8 @@ async function selectIntegration(
   if (selectedIntegrationId.value !== integrationId) {
     directoryContextVersion += 1
     directorySelectionVersion += 1
+    previewBusy.value = false
+    previewResult.value = null
     accountLoadVersion += 1
     alertLoadVersion += 1
     scheduleLoadVersion += 1
@@ -2010,11 +2014,8 @@ async function selectIntegration(
     && selectedIntegrationId.value === integrationId
     && departmentsLoaded.value
     && !departmentLoadError.value
-  // Poll + preview are integration-scoped: kill them only when actually SWITCHING integration
-  // (selectIntegration also runs as a same-integration refresh after saves — an active
-  // background-sync poll must survive those).
+  // A same-integration refresh after saving must keep its background sync poll.
   if (pollingRunId.value && pollingIntegrationId !== integrationId) stopRunPolling()
-  if (previewResult.value && previewResult.value.integrationId !== integrationId) previewResult.value = null
   selectedIntegrationId.value = integrationId
   approvalCardLinkSecretEnvOverrideActive.value = false
   testResult.value = null
@@ -2896,13 +2897,17 @@ function buildSyncInProgressMessage(payload: unknown): string {
 // hence its own busy flag and the same 409 lease refusal handling as the sync triggers.
 async function previewSync() {
   const integration = selectedIntegration.value
-  if (!integration) return
+  if (!integration || previewBusy.value) return
+  const contextVersion = directorySelectionVersion
   previewBusy.value = true
+  previewResult.value = null
+  setStatus('')
   try {
     const response = await apiFetch(`/api/admin/directory/integrations/${integration.id}/sync/preview`, {
       method: 'POST',
     })
     const body = await readJson(response)
+    if (!isCurrentDirectoryContext(contextVersion, integration.id)) return
     if (!response.ok) {
       if (readApiErrorCode(body) === 'DIRECTORY_SYNC_IN_PROGRESS') {
         setStatus(buildSyncInProgressMessage(body), 'error')
@@ -2915,9 +2920,10 @@ async function previewSync() {
     previewResult.value = preview
     setStatus('同步预览已生成（未写入任何数据）')
   } catch (error) {
+    if (!isCurrentDirectoryContext(contextVersion, integration.id)) return
     setStatus(error instanceof Error ? error.message : '同步预览失败', 'error')
   } finally {
-    previewBusy.value = false
+    if (isCurrentDirectoryContext(contextVersion, integration.id)) previewBusy.value = false
   }
 }
 
