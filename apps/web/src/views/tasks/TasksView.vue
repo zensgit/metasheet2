@@ -587,6 +587,27 @@
                 <option value="all">{{ t.modeAll }}</option>
                 <option value="any">{{ t.modeAny }}</option>
               </select>
+              <fieldset class="tasks-view__create-assignees" :disabled="creating">
+                <legend>{{ t.createAssigneesLabel }}</legend>
+                <label>
+                  <input v-model="newCreatorAssigned" type="checkbox" data-testid="tasks-create-assign-self" />
+                  {{ t.createAssignSelf }}
+                </label>
+                <ul v-if="newAssignees.size" class="tasks-view__create-people">
+                  <li v-for="[id, name] in newAssignees" :key="id" data-testid="tasks-create-assignee" :data-person-id="id">
+                    <span>{{ name || id }}</span>
+                    <button type="button" data-testid="tasks-create-assignee-remove" :aria-label="`${t.remove} ${name || id}`" @click="newAssignees.delete(id)">{{ t.remove }}</button>
+                  </li>
+                </ul>
+                <button
+                  type="button"
+                  data-testid="tasks-create-pick-assignees"
+                  :disabled="currentUserStatus !== 'known'"
+                  @click="openCreatePeoplePicker"
+                >{{ t.pickAssignee }}</button>
+                <p v-if="currentUserStatus === 'pending'" role="status">{{ t.loading }}</p>
+                <p v-else-if="currentUserStatus === 'unavailable'" role="status">{{ t.createPeopleUnavailable }}</p>
+              </fieldset>
               <!-- The optional due date: with one, the create request carries the date (and the time
                    when set) with the browser's zone, the same zone the detail editor fills in, and
                    no reminder key, so the server sets the default reminder on create. A later
@@ -616,6 +637,13 @@
                 :disabled="creating || newTitle.trim().length === 0"
               >{{ t.create }}</button>
             </form>
+            <TaskPeoplePicker
+              :visible="createPeoplePickerOpen"
+              mode="assignee"
+              :before-request="canPickCreatePeople"
+              @confirm="onCreatePeoplePicked"
+              @close="createPeoplePickerOpen = false"
+            />
             <p v-if="newDueDate !== ''" id="tasks-create-due-note" class="tasks-view__note" data-testid="tasks-create-due-note">
               {{ t.createDueRemindNote }}
             </p>
@@ -625,16 +653,13 @@
             <p v-if="createErrorVisible" class="tasks-view__message" data-testid="tasks-create-error" role="alert">
               {{ createErrorInvalidTitle ? t.createInvalidTitle : createErrorCode ? codeMessage(createErrorCode, t) : t.createFailed }}
             </p>
-            <!-- A create the server took while 已完成 is on: the new task is not completed, so the
-                 reloaded list leaves it out. Say so inline, without switching the filter for the
-                 viewer (it is their remembered choice). The new task's page is always offered.
-                 The 未完成 switch is offered only in a view that lists the new task; in 关注中 /
-                 我委派的 the view leaves it out under any status, so the copy does not put it down
-                 to the filter alone. The search is named only when the view and status would
-                 otherwise list the new task, with the task's page only; when the view or status also
-                 leaves it out, their copy stands. Cleared by the next create, a status or view
-                 switch, and a route change. A search change drops only the search's reason, so a
-                 task the status or view still leaves out keeps its notice.
+            <!-- Explain why the new task is outside the current list without changing the viewer's
+                 choices. Always offer its page. Offer 未完成 only when the submitted assignees make
+                 the task belong to this view: 我委派的 includes it when another person was chosen,
+                 while 关注中 leaves it out. Name only the view when no status or search excludes it.
+                 Name the search alone only when the view and status otherwise include it.
+                 The next create, status or view switch, and route change clear the notice. A search
+                 change drops only the search reason, retaining any remaining view or status reason.
                  The role="status" region is always mounted and only its content comes and goes: a
                  polite live region that enters the page together with its text is not reliably
                  announced, while a change inside an existing one is. Empty, it takes no space. -->
@@ -647,7 +672,8 @@
                 <span data-testid="tasks-create-hidden-text">{{
                   createdHidden.bySearch && createdHidden.viewLists && !createdHidden.byStatus
                     ? t.createdHiddenBySearch
-                    : createdHidden.viewLists ? t.createdHiddenByFilter : t.createdHiddenByViewAndFilter
+                    : createdHidden.viewLists ? t.createdHiddenByFilter
+                      : createdHidden.byStatus || createdHidden.bySearch ? t.createdHiddenByViewAndFilter : t.createdHiddenByView
                 }}</span>
                 <button
                   v-if="createdHidden.viewLists && createdHidden.byStatus"
@@ -958,6 +984,9 @@ const orgMissingFromAction = ref(false)
 
 const newTitle = ref('')
 const newCompletionMode = ref<CompletionMode>('all')
+const newCreatorAssigned = ref(true)
+const newAssignees = ref(new Map<string, string>())
+const createPeoplePickerOpen = ref(false)
 // The create form's due date and time, as their controls report them (`''` when empty). Clearing
 // the date clears the time too: the time control is off without a date.
 const newDueDate = ref('')
@@ -974,15 +1003,10 @@ watch([newDueDate, newDueTime], () => {
 const creating = ref(false)
 const createErrorVisible = ref(false)
 const createErrorInvalidTitle = ref(false)
-// M4: the contract code of a `validation` create failure (the allowlist of `createTask`), shown
-// through `codeMessage` like every inline code here.
-// RULED(2026-10-07): [R17] [N2] — an assignee who is not an active member of the org is 422
-// `INACTIVE_ORG_MEMBER`. The form sends no `assignees` (the creator alone, whom the server never
-// looks up), so no form input reaches that code; the date codes can come back for a due date the
-// pre-check let through.
+// Creation errors follow the current locale, including errors about the chosen people.
 const createErrorCode = ref<string | null>(null)
-// The task the last create made when the status filter it was made under leaves it out of the
-// list (`statusFilterHidesNewTask`), shown as an inline notice; `null` otherwise. `viewLists` is
+// The task the last create made when its view, status or search leaves it out of the list, shown
+// as an inline notice; `null` otherwise. `viewLists` is
 // whether the view it was made under lists it at all (`viewListsNewTask`), fixed at create time:
 // only then does switching the status filter reach it.
 // `byStatus`: the status filter leaves it out. `bySearch`: the new title does not hold the active
@@ -1063,6 +1087,11 @@ function peopleIdentityHolds(): boolean {
   pickerMode.value = null
   parentPickerOpen.value = false
   setParentByIdOpen.value = false
+  resetCreatePeople()
+  currentUserId.value = null
+  currentUserStatus.value = 'pending'
+  currentUserFetchStarted = false
+  void ensureCurrentUser()
   return false
 }
 
@@ -1110,15 +1139,9 @@ const editingCommentId = ref<string | null>(null)
 const editingCommentBody = ref('')
 const editCommentError = ref<string | null>(null)
 
-// The viewer's own id — resolved ONCE (not re-fetched per task navigation) via `useAuth`, and
-// used for two gates the M3 contract leaves entirely to the client: which comments show
-// edit/delete (own-comment only), and whether the Leave button should render at all (only once a
-// followers response has confirmed the viewer IS one — §3.5's `leave` ability is follower-only;
-// a non-follower calling it gets a plain 404, so showing it unconditionally would invite that).
-// `'unavailable'` (the id itself could not be resolved) falls back to showing edit/delete on
-// EVERY comment — documented in the M3 frontend design doc — but does NOT extend to the Leave
-// button: an unresolvable id can never prove "the viewer is this follower", so Leave stays hidden
-// rather than guessing.
+// Re-read the viewer once per identity for the creator checkbox, comment controls and Leave.
+// An unavailable identity keeps the existing comment fallback, but cannot identify a follower
+// or combine Me with other assignees in the create form.
 const currentUserId = ref<string | null>(null)
 const currentUserStatus = ref<'pending' | 'known' | 'unavailable'>('pending')
 let currentUserFetchStarted = false
@@ -1126,12 +1149,14 @@ let currentUserFetchStarted = false
 async function ensureCurrentUser(): Promise<void> {
   if (currentUserFetchStarted) return
   currentUserFetchStarted = true
+  const switches = peopleIdentitySwitches
   let id: string | null = null
   try {
-    id = await useAuth().getCurrentUserId()
+    id = await useAuth().getCurrentUserId(true)
   } catch {
     id = null
   }
+  if (!peopleIdentityHolds() || switches !== peopleIdentitySwitches) return
   currentUserId.value = id
   currentUserStatus.value = id ? 'known' : 'unavailable'
 }
@@ -1395,11 +1420,40 @@ function onShowOpenFromNotice(): void {
   void focusAfterSwap(() => statusSwitcherRef.value, 'tasks-status-switch-open')
 }
 
-/** After a create the server took: the title and the due fields are emptied (the mode stays). */
+function resetCreatePeople(): void {
+  newCreatorAssigned.value = true
+  newAssignees.value = new Map()
+  createPeoplePickerOpen.value = false
+}
+
+function canPickCreatePeople(): boolean {
+  return peopleIdentityHolds() && !taskId.value && contextState.value?.state === 'ready'
+    && !creating.value && currentUserStatus.value === 'known'
+}
+
+function openCreatePeoplePicker(event: MouseEvent): void {
+  if (!canPickCreatePeople()) return
+  if (event.currentTarget instanceof HTMLElement) event.currentTarget.focus()
+  createPeoplePickerOpen.value = true
+}
+
+function onCreatePeoplePicked(picked: TaskPeoplePicked): void {
+  if (!canPickCreatePeople()) return
+  const next = new Map(newAssignees.value)
+  for (const id of picked.ids) {
+    if (id === currentUserId.value) newCreatorAssigned.value = true
+    else next.set(id, picked.names[id] || '')
+  }
+  newAssignees.value = next
+  createPeoplePickerOpen.value = false
+}
+
+/** A successful create resets the draft, keeping the completion mode. */
 function clearCreateForm(): void {
   newTitle.value = ''
   newDueDate.value = ''
   newDueTime.value = ''
+  resetCreatePeople()
 }
 
 async function onCreate(): Promise<void> {
@@ -1410,6 +1464,10 @@ async function onCreate(): Promise<void> {
   createErrorInvalidTitle.value = false
   createErrorCode.value = null
   createDueError.value = null
+  if (!peopleIdentityHolds()) {
+    createErrorVisible.value = true
+    return
+  }
   // The zone is read only when a date is set: no date, no zone key and no zone read.
   const due = buildCreateDue(newDueDate.value, newDueTime.value, newDueDate.value === '' ? '' : usableViewerTimeZone())
   if (!due.ok) {
@@ -1418,8 +1476,18 @@ async function onCreate(): Promise<void> {
   }
   creating.value = true
   const page = listPageToken
+  const otherAssignees = [...newAssignees.value.keys()]
+  const viewLists = viewListsNewTask(currentView.value, newCreatorAssigned.value, otherAssignees.length > 0)
+  const assignees = newCreatorAssigned.value
+    ? otherAssignees.length === 0 ? undefined : [currentUserId.value!, ...otherAssignees]
+    : otherAssignees
   try {
-    const result = await createTask({ title, completionMode: newCompletionMode.value, ...due.keys })
+    const result = await createTask({
+      title,
+      completionMode: newCompletionMode.value,
+      ...(assignees === undefined ? {} : { assignees }),
+      ...due.keys,
+    })
     // Same page-moved-on guard as `onComplete`/`onReopen` below — a late org_missing here would
     // otherwise flip `orgMissingFromAction`, which the detail-page template checks FIRST (before
     // its own states), painting the guidance block over whatever the viewer navigated to. A late
@@ -1436,12 +1504,11 @@ async function onCreate(): Promise<void> {
     if (result.kind === 'ok') {
       clearCreateForm()
       notifyTasksChanged()
-      // Decided from the filter and the search text alone (a new task is never completed), not from
-      // the reloaded rows.
+      // Use the submitted people, status and search, even when the new row is outside the loaded page.
       const bySearch = activeSearch.value !== '' && !titleHoldsTaskSearch(title, activeSearch.value)
       const byStatus = statusFilterHidesNewTask(currentStatus.value)
-      if (bySearch || byStatus) {
-        createdHidden.value = { id: result.id, viewLists: viewListsNewTask(currentView.value), byStatus, bySearch }
+      if (bySearch || byStatus || !viewLists) {
+        createdHidden.value = { id: result.id, viewLists, byStatus, bySearch }
       }
       await loadList()
     } else if (result.kind === 'org_missing') {
@@ -2403,6 +2470,7 @@ async function onRemoveTaskFromList(listId: string): Promise<void> {
 // looking at before — it belongs to that stale id, not the one now showing.
 watch(taskId, (id) => {
   if (contextState.value?.state !== 'ready') return
+  createPeoplePickerOpen.value = false
   actionErrorKind.value = null
   // A navigation away invalidates whatever detail action was in flight for the PREVIOUS id — bump
   // the token so that request's own `finally` (see `onDetailComplete`/`onDetailReopen`) can no
@@ -2472,6 +2540,7 @@ watch(taskId, (id) => {
 onMounted(async () => {
   contextState.value = await loadTasksContext()
   if (contextState.value.state !== 'ready') return
+  void ensureCurrentUser()
   if (taskId.value) {
     await enterDetail(taskId.value)
   } else {
@@ -2590,8 +2659,28 @@ onMounted(async () => {
 
 .tasks-view__create {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 16px;
+}
+
+.tasks-view__create-assignees {
+  flex-basis: 100%;
+  min-width: 0;
+  margin: 0;
+  border: 1px solid var(--el-border-color-lighter, #eee);
+}
+
+.tasks-view__create-people {
+  list-style: none;
+  padding: 0;
+}
+
+.tasks-view__create-people li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-wrap: anywhere;
 }
 
 .tasks-view__list {

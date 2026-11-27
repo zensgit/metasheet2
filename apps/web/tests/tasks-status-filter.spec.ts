@@ -1232,7 +1232,9 @@ describe('title search on the list page', () => {
       expect(shown(el, 'tasks-create-hidden-show-open')).toBeNull()
       await type(el, '')
       expect(h.listTasks.mock.calls.at(-1)).toEqual(['delegated', undefined, status])
-      expect(shown(el, 'tasks-create-hidden-text')?.textContent?.trim()).toBe('任务已创建。当前视图和筛选下，列表中不显示它。')
+      expect(shown(el, 'tasks-create-hidden-text')?.textContent?.trim()).toBe(status === 'open'
+        ? '任务已创建。当前视图下，列表中不显示它。'
+        : '任务已创建。当前视图和筛选下，列表中不显示它。')
       expect(shown(el, 'tasks-create-hidden-show-open')).toBeNull()
       expect(shown(el, 'tasks-create-hidden-open-task')?.getAttribute('to')).toBe('/tasks/n1')
     })
