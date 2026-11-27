@@ -11522,24 +11522,22 @@ describe('DirectoryManagementView', () => {
   })
 
   describe('Wave 2: 预览同步 / 后台同步 polling / R5 run-card stats', () => {
-    function mockInitialLoad(integration: Record<string, unknown>, runsPayload?: unknown): void {
+    function mockIntegrationDetails(runsPayload: unknown = createRunsPayload([])): void {
       apiFetchMock
-        .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [integration] } }))
-        .mockResolvedValueOnce(createJsonResponse(runsPayload ?? { ok: true, data: { items: [] } }))
+        .mockResolvedValueOnce(createJsonResponse(runsPayload))
         .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
         .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
         .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
         .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([])))
     }
 
+    function mockInitialLoad(integration: Record<string, unknown>, runsPayload?: unknown): void {
+      apiFetchMock.mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [integration] } }))
+      mockIntegrationDetails(runsPayload)
+    }
+
     function mockPostSyncRefresh(runsPayload: unknown): void {
-      apiFetchMock
-        .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [createIntegration()] } }))
-        .mockResolvedValueOnce(createJsonResponse(runsPayload))
-        .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
-        .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
-        .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
-        .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([])))
+      mockInitialLoad(createIntegration(), runsPayload)
     }
 
     function createPreviewPayload(overrides: Record<string, unknown> = {}) {
@@ -11644,6 +11642,77 @@ describe('DirectoryManagementView', () => {
       expect(container?.textContent).toContain('新成员甲 (ext-new-1) 等 3 人')
       expect(container?.textContent).toContain('离职乙 (ext-gone-1，已绑定本地用户) 等 2 人')
       expect(container?.textContent).toContain('同步预览已生成（未写入任何数据）')
+    })
+
+    it('replaces the previous preview when a retry fails and displays fresh counts on the next success', async () => {
+      mockInitialLoad(createIntegration())
+      mountView()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('#directory-tab-sync')!.click()
+      await flushUi()
+      apiFetchMock.mockResolvedValueOnce(createJsonResponse(createPreviewPayload()))
+      findButton('预览同步')!.click()
+      await flushUi()
+      expect(container!.textContent).toContain('将新增账号 3')
+
+      let finishRetry!: (response: ReturnType<typeof createJsonResponse>) => void
+      apiFetchMock.mockReturnValueOnce(new Promise(resolve => { finishRetry = resolve }))
+      findButton('重新预览')!.click()
+      await flushUi()
+      expect(container!.textContent).toContain('同步预览生成中')
+      expect.soft(container!.textContent).not.toContain('同步预览已生成')
+      finishRetry(createSyncInProgressResponse('run-retry'))
+      await flushUi()
+      expect(container!.textContent).toContain('已有同步在进行中（运行 run-retry）')
+      expect(container!.textContent).not.toContain('将新增账号 3')
+
+      apiFetchMock.mockResolvedValueOnce(createJsonResponse(createPreviewPayload({ wouldCreateAccounts: 7 })))
+      findButton('预览同步')!.click()
+      await flushUi()
+      expect(container!.textContent).toContain('将新增账号 7')
+      expect(container!.textContent).not.toContain('run-retry')
+    })
+
+    it.each([
+      { navigation: 'switching integration', previous: 'success' },
+      { navigation: 'reopening the same integration', previous: 'failure' },
+    ])('ignores a late preview $previous after $navigation', async ({ navigation, previous }) => {
+      const initial = createIntegration()
+      const other = createIntegration({ id: 'dir-2', name: 'Second directory' })
+      apiFetchMock.mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [initial, other] } }))
+      mockIntegrationDetails()
+      mountView()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('#directory-tab-sync')!.click()
+      await flushUi()
+      let finishOld!: (response: ReturnType<typeof createJsonResponse>) => void
+      apiFetchMock.mockReturnValueOnce(new Promise(resolve => { finishOld = resolve }))
+      findButton('预览同步')!.click()
+      await flushUi()
+      const next = navigation === 'switching integration' ? other : initial
+      if (next === initial) {
+        findButton('新建集成')!.click()
+        await flushUi()
+      }
+      mockIntegrationDetails()
+      findIntegrationButton(next.name)!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('#directory-tab-sync')!.click()
+      await flushUi()
+
+      let finishCurrent!: (response: ReturnType<typeof createJsonResponse>) => void
+      apiFetchMock.mockReturnValueOnce(new Promise(resolve => { finishCurrent = resolve }))
+      expect(findButton('预览同步')?.disabled).toBe(false)
+      findButton('预览同步')!.click()
+      await flushUi()
+      finishOld(previous === 'success' ? createJsonResponse(createPreviewPayload()) : createApiErrorResponse('先前预览失败'))
+      await flushUi()
+      expect(container!.textContent).toContain('同步预览生成中')
+      expect(container!.textContent).not.toContain('先前预览失败')
+      expect(container!.textContent).not.toContain('同步预览已生成')
+      finishCurrent(createJsonResponse(createPreviewPayload({ integrationId: next.id, integrationName: next.name, wouldCreateAccounts: 8 })))
+      await flushUi()
+      expect(container!.textContent).toContain('将新增账号 8')
     })
 
     it('preview 409 (DIRECTORY_SYNC_IN_PROGRESS, #4049) shows 已有同步在进行中 with the active runId, not the raw error', async () => {
