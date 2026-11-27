@@ -115,6 +115,19 @@ test('project cleanup checks current platform authority and tenant independently
   assert.equal(calls.filter(([action]) => action === 'confirm').length, 1)
 })
 
+test('disabled MVP persistence preserves its feature refusal before checking tenant scope', async t => {
+  const flag = 'MULTITABLE_STOCK_PREP_TABLE_ACTION_MVP_PERSIST_ENABLED'
+  const previous = process.env[flag]
+  process.env[flag] = 'false'
+  t.after(() => { if (previous === undefined) delete process.env[flag]; else process.env[flag] = previous })
+  const { routes } = mount()
+  const reply = await call(routes, 'POST', '/api/integration/table-actions/:actionId/mvp-persist', {
+    user: { id: 'synthetic', role: 'admin' }, params: { actionId: ACTION }, body: {},
+  })
+  assert.equal(reply.statusCode, 403)
+  assert.equal(reply.body.error.code, 'STOCK_PREPARATION_TABLE_ACTION_MVP_PERSIST_DISABLED')
+})
+
 test('a committed deletion still stops the legacy scheduler after the cleanup switch is turned off', async t => {
   const { routes, calls, failSource } = mount({ legacy: true })
   const { PROJECT_SHEETS_ENABLED_ENV } = require('../lib/stock-preparation-project-targets.cjs')

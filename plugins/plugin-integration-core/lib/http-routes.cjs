@@ -3149,6 +3149,7 @@ const VALID_STOCK_PREPARATION_OPERATOR_PROJECT_DIRECTORY_QUERY_KEYS = new Set([
   'workspaceId',
   'includePendingCounts',
   'includePullTargets',
+  'recentProjectNos',
 ])
 // 通知下一步: the status READ. `projectNo` for the same reason the export uses it — the business
 // project number, which is what a person means by "this project".
@@ -4956,6 +4957,20 @@ function createHandlers(services, options = {}) {
   // by an already-proved-own sheet id; the module that owns it explains why that is safe. Only the
   // `?includePullTargets=1` path ever puts anything in it, because that is the only path that scans.
   const pullTargetScanCache = createPullTargetScanCache()
+  async function projectDirectoryScanContext(tenantId, projectNos = [], boundTarget = null) {
+    const deletion = services.stockPreparationProjectDelete
+    if (!deletion?.deletionSnapshot) {
+      return { cache: projectWriterActivityRequired() ? null : pullTargetScanCache, deleted: [] }
+    }
+    try {
+      const { version, deleted } = await deletion.deletionSnapshot({ tenantId, projectNos, boundTarget })
+      return { cache: { resolve: (key, run) => pullTargetScanCache.resolve(JSON.stringify([tenantId, version, key]), run) }, deleted }
+    } catch {
+      // An unreadable audit or ambiguous project must neither erase local history nor serve a stale scan.
+      return { cache: null, deleted: [] }
+    }
+  }
+
   // NO ROUTE FORWARDS A CALLER'S RAW `?workspaceId` INTO THE AUDIT TRAIL.
 //
 // `workspace_id` is a plain nullable TEXT column on that table, and the store cannot shape-gate it
@@ -12139,7 +12154,7 @@ function requireStockPreparationAudit() {
       let rowFacts = null
       try {
         const binding = await buildProjectTargetBinding({ provisioning, projectId: targetProjectId, target: row })
-        const scan = await scanPullTargetProjects(getMultitableRecordsApi(), { sheetId: row.sheetId, objectId: row.objectId }, binding, projectNo, { cache: projectWriterActivityRequired() ? null : pullTargetScanCache })
+        const scan = await scanPullTargetProjects(getMultitableRecordsApi(), { sheetId: row.sheetId, objectId: row.objectId }, binding, projectNo, { cache: (await projectDirectoryScanContext(scope.tenantId)).cache })
         rowFacts = scan && scan.ready ? scan : null
       } catch (error) {
         rowFacts = null
@@ -14502,6 +14517,16 @@ function requireStockPreparationAudit() {
       // scan, no audit window, and a response and audit row whose key sets are unchanged. See the
       // query-key allowlist above for the cost argument the owner ruled on.
       const includePullTargets = firstString(input.includePullTargets) === '1'
+      let recent = []
+      if (input.recentProjectNos !== undefined) {
+        if (!includePullTargets || typeof input.recentProjectNos !== 'string') {
+          throw new HttpRouteError(400, 'STOCK_PREPARATION_OPERATOR_PROJECT_DIRECTORY_REQUEST_INVALID', 'Invalid recent projects')
+        }
+        recent = input.recentProjectNos.split(',')
+        if (recent.length > 30 || !recent.every(isValidStockPrepProjectNo)) {
+          throw new HttpRouteError(400, 'STOCK_PREPARATION_OPERATOR_PROJECT_DIRECTORY_REQUEST_INVALID', 'Invalid recent projects')
+        }
+      }
       // THE BOUND TABLE-ACTION TARGET — the sheet `apply` actually writes to, and the SECOND store
       // this directory is a union over (设计稿 N1). Without it the directory reads only the MVP
       // project ledger, which `mvp-persist` writes and `mvp-persist` is platform-admin: a project a
@@ -14551,6 +14576,9 @@ function requireStockPreparationAudit() {
           projectTargetRows = null
         }
       }
+      const scanContext = includePullTargets && (boundTarget || recent.length)
+        ? await projectDirectoryScanContext(scope.tenantId, recent, boundTarget)
+        : { cache: pullTargetScanCache, deleted: [] }
       const result = await listOperatorProjectDirectory({
         recordsApi: getMultitableRecordsApi(),
         provisioning: getMultitableProvisioning(),
@@ -14569,7 +14597,7 @@ function requireStockPreparationAudit() {
         // proved-own sheet; concurrent refreshes share one in-flight scan instead of starting one
         // each. The window lowers FREQUENCY only — it does not make a single scan cheaper, and it
         // does not lift the 50,000-row cap.
-        pullTargetScanCache: projectWriterActivityRequired() ? null : pullTargetScanCache,
+        pullTargetScanCache: scanContext.cache,
         // For `lastExportAt` only, and read through ONE bounded descending window rather than one
         // query per project — see `lastExportAtByProjectNo`. This route's own audit APPEND below is
         // unrelated and unchanged.
@@ -14618,6 +14646,10 @@ function requireStockPreparationAudit() {
           tenantClaimVerified: scope.tenantClaimVerified,
         },
       })
+      if (recent.length) {
+        res.setHeader?.('Cache-Control', 'private, no-store')
+        return sendOk(res, { ...result, deletedRecentProjectNos: scanContext.deleted })
+      }
       return sendOk(res, result)
     },
 
@@ -16052,6 +16084,7 @@ function requireStockPreparationAudit() {
     required: projectWriterActivityRequired,
     activity: projectWriterActivity,
     projectSheetsEnabled: () => stockPreparationProjectSheetsEnabled(process.env),
+    mvpPersistEnabled: stockPreparationTableActionMvpPersistEnabled,
     authorize: requireAccess,
     authorizeAction: (req, tier) => requireTableActionAccess(req,
       firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID, tier, tenantPrincipalDirectory),

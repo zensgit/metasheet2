@@ -48,7 +48,11 @@ export function defineStockPreparationProjectDeleteAuthorityRealDbCases() {
           expect(await canDelete()).toBe(false) // The token claims admin, but the live row does not.
           expect((await submit()).statusCode).toBe(403)
           await client.query("INSERT INTO user_roles VALUES ('project-cleanup-actor','admin')")
+          const actorVersion = () => tx.query('SELECT version::text FROM subject_authorization_versions WHERE subject_id=$1', [req.user.id])
+          const beforeProbe = await actorVersion()
           expect(await canDelete()).toBe(true)
+          expect((await call(routes, 'POST', confirm, { ...req, body: {} })).statusCode).toBe(422)
+          expect(await actorVersion()).toEqual(beforeProbe)
           expect((await call(routes, 'POST', preview, req)).statusCode).toBe(200)
           const headerOnly = { ...req, user: { ...req.user, tenantId: 'other' }, headers: { 'x-tenant-id': 'other' }, authenticatedTenantId: undefined }
           expect((await call(routes, 'GET', access, headerOnly)).body.data.mayDelete).toBe(false)

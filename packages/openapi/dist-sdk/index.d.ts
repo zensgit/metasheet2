@@ -27829,6 +27829,20 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            /** @description Cleanup authority is busy */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Tenant membership verification unavailable */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Cleanup authority unavailable */
             503: {
                 headers: {

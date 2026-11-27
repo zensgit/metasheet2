@@ -18,7 +18,7 @@
 NODE_ENV=test METASHEET_REAL_DB_TEST_STEP=1 pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/stock-preparation-p4-repair-once-realdb.test.ts -t 'a pending remnant decision'
 ```
 
-真实数据库和升级、回退演练均须使用合成环境。发布前同时复核旧绑定审批、其他浏览器的目录缓存、权限探测和 API 契约。
+新增验证覆盖专表替换后恢复历史键绑定、重新审批、目录缓存复用和跨副本失效、权限探测及无效确认前后的权限版本比较、MVP 保存开关关闭时的既有 403，以及独立浏览器保存旧卡片后刷新。浏览器演练使用合成 API，数据库演练独立验证实际事务。当前提交的执行状态见 [PR 检查](https://github.com/zensgit/metasheet2/pull/7004/checks)。升级与回退文档已修订，生产操作由环境负责人执行。
 
 ## 修复版真库结论
 

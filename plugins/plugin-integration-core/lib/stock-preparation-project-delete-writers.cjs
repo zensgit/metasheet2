@@ -38,6 +38,7 @@ function fenceProjectWriters(handlers, policy) {
     const handler = handlers[name]
     handlers[name] = async function guardedProjectWrite(req, res) {
       if (!policy.required()) return handler(req, res)
+      if (name === 'tableActionMvpPersist' && !policy.mvpPersistEnabled()) return handler(req, res)
       if (scope === 'action') await policy.authorizeAction(req, tier)
       else await policy.authorize(req, tier)
       const tenantId = scope === 'auth' ? policy.authTenant(req) : policy.routeTenant(req)

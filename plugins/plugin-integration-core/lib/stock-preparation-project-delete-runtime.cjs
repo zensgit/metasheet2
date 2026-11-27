@@ -1,7 +1,7 @@
 'use strict'
 
 const { createHash } = require('node:crypto')
-const { __internals: { STORAGE_PREFIX: POLICY_PREFIX, conflictPolicyStoreKey, targetScopeFingerprint } } = require('./stock-preparation-conflict-policies.cjs')
+const { __internals: { STORAGE_PREFIX: POLICY_PREFIX, conflictPolicyStoreKey, targetScopeFingerprint, policyGenerationKey } } = require('./stock-preparation-conflict-policies.cjs')
 const { deriveStockPreparationProjectSheetObjectId } = require('./stock-preparation-own-base.cjs')
 const { projectDeleteDedicatedSheetId } = require('./stock-preparation-project-delete-sheets.cjs')
 const { sheetWriteScopeKey } = require('./stock-preparation-project-write-lock.cjs')
@@ -181,10 +181,17 @@ async function planRuntime(tx, scope, sheets, confirming = false) {
   }
 }
 
-async function deleteRuntime(tx, _scope, plan) {
-  if (!plan.keys.length) return
-  const removed = await tx.query('DELETE FROM plugin_kv WHERE plugin = $1 AND key = ANY($2::text[]) RETURNING 1', [PLUGIN, plan.keys])
-  if (removed.length !== plan.keys.length) throw refused('STALE')
+async function deleteRuntime(tx, _scope, plan, dedicatedSheetId) {
+  if (plan.keys.length) {
+    const removed = await tx.query('DELETE FROM plugin_kv WHERE plugin = $1 AND key = ANY($2::text[]) RETURNING 1', [PLUGIN, plan.keys])
+    if (removed.length !== plan.keys.length) throw refused('STALE')
+  }
+  if (dedicatedSheetId) {
+    await tx.query(`INSERT INTO plugin_kv (plugin, key, value)
+      VALUES ($1, $2, jsonb_build_object('generation', gen_random_uuid()))
+      ON CONFLICT (plugin, key) DO UPDATE SET value = excluded.value, updated_at = clock_timestamp()`,
+    [PLUGIN, policyGenerationKey(dedicatedSheetId)])
+  }
 }
 
 module.exports = { planRuntime, deleteRuntime, runtimeFenceKeys }

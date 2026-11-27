@@ -14,7 +14,7 @@ export async function authorizeStockPreparationProjectDeleteWithin(
     query: async (sql, params) => ({ rows: await tx.query(sql, params) }),
   }
   try {
-    const subjects = await lockSharedAccessSubjects(client, [actor])
+    const subjects = await lockSharedAccessSubjects(client, [actor], { lockOnly: true })
     const user = subjects.get(actor)
     if (user?.role === 'disabled') throw new PlatformActorAuthorityLost()
     await assertPlatformActorAuthority(client, user)

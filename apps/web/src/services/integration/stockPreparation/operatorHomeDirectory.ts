@@ -25,6 +25,8 @@
 // The throttle key is the SCOPE, not the principal, and entries outlive the components that made them
 // (module-level Map). That is fine for a 5-second window on a page one person is looking at; it is not
 // a session cache and must not grow into one.
+import { getAuthPrincipalKey } from '../../../composables/authPrincipal'
+import { forgetDeletedStockPrepProject, readStockPrepRecentProjects } from './operatorHomeMemory'
 import type { IntegrationScope } from '../workbench'
 import {
   readStockPreparationOperatorDirectory,
@@ -44,7 +46,7 @@ interface ThrottleEntry {
 const cache = new Map<string, ThrottleEntry>()
 
 function scopeKey(scope: IntegrationScope): string {
-  return `${scope.tenantId ?? ''}::${scope.workspaceId ?? ''}`
+  return JSON.stringify([scope.tenantId ?? '', scope.workspaceId ?? '', getAuthPrincipalKey()])
 }
 
 /**
@@ -67,8 +69,22 @@ export function readStockPreparationOperatorHomeDirectory(
   const now = Date.now()
   const hit = cache.get(key)
   if (hit && now - hit.at < THROTTLE_WINDOW_MS) return hit.promise
+  const principal = getAuthPrincipalKey()
+  const memory = readStockPrepRecentProjects(scope).filter(entry => /^[A-Za-z0-9][A-Za-z0-9._\-/]{0,79}$/.test(entry.projectNo))
+  const recent = new Map(memory.map(entry => [entry.projectNo, entry.updatedAt]))
   const promise = readStockPreparationOperatorDirectory(scope, {
     includePullTargets: true,
+    ...(recent.size ? { recentProjectNos: [...recent.keys()] } : {}),
+  }).then(directory => {
+    if (directory.tenantId === scope.tenantId && getAuthPrincipalKey() === principal && Array.isArray(directory.deletedRecentProjectNos)) {
+      const deleted = new Set(directory.deletedRecentProjectNos)
+      for (const entry of readStockPrepRecentProjects(scope)) {
+        if (deleted.has(entry.projectNo) && recent.get(entry.projectNo) === entry.updatedAt) {
+          forgetDeletedStockPrepProject(entry.projectNo, scope)
+        }
+      }
+    }
+    return directory
   })
   cache.set(key, { tenantId: scope.tenantId, at: now, promise })
   promise.catch(() => {

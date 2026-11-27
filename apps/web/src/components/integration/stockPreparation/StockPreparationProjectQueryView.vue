@@ -453,6 +453,7 @@ const memory = ref(readStockPrepRecentProjects(props.scope))
 async function loadDirectory(): Promise<void> {
   try {
     directory.value = await readStockPreparationOperatorHomeDirectory(props.scope)
+    if (directory.value.deletedRecentProjectNos?.length) memory.value = readStockPrepRecentProjects(props.scope)
   } catch {
     // G3: a predread nobody asked for degrades to an empty state, never to a red banner. The
     // `directory_unavailable` state below is that degradation, and it says 「读不到」, not 「没有」.

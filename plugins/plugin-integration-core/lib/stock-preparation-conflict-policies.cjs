@@ -286,10 +286,26 @@ function normalizeStoredPolicies(rows) {
   return policies
 }
 
+function policyGenerationKey(sheetId) {
+  return 'integration:table-action:conflict-generation:' + hashJson(sheetId)
+}
+
+// Old policy keys hash the entire binding. A retired key-field alias cannot be enumerated,
+// but it can never authorize a new incarnation of the sheet.
+async function currentPolicyRecord(action, store) {
+  const key = conflictPolicyStoreKey(action)
+  const [record, marker] = await Promise.all([store.get(key), store.get(policyGenerationKey(action.target.sheetId))])
+  if (marker != null && (typeof marker.generation !== 'string' || !marker.generation)) {
+    throw new StockPreparationConflictPolicyError(409, 'CONFLICT_POLICY_SCOPE_INVALID', 'Table policy generation unavailable')
+  }
+  const generation = marker?.generation
+  const stored = isPlainObject(record) && record.generation === generation ? record : emptyStoredPolicies(action)
+  return { key, stored, generation }
+}
+
 async function loadTableScopeConflictPolicies({ action, policyStore }) {
   const store = requirePolicyStore(policyStore)
-  const stored = await store.get(conflictPolicyStoreKey(action))
-  if (!isPlainObject(stored)) return publicTableScopePolicies(emptyStoredPolicies(action))
+  const { stored } = await currentPolicyRecord(action, store)
   return publicTableScopePolicies({
     ...emptyStoredPolicies(action),
     policies: normalizeStoredPolicies(stored.policies),
@@ -299,10 +315,8 @@ async function loadTableScopeConflictPolicies({ action, policyStore }) {
 async function saveTableScopeConflictPolicies({ action, policyStore, request, approver }) {
   const store = requirePolicyStore(policyStore)
   const normalized = normalizeTableScopePolicyRequest(request)
-  const key = conflictPolicyStoreKey(action)
+  const { key, stored, generation } = await currentPolicyRecord(action, store)
   const now = new Date().toISOString()
-  const storedValue = await store.get(key)
-  const stored = isPlainObject(storedValue) ? storedValue : emptyStoredPolicies(action)
   const byFingerprint = new Map()
   for (const row of normalizeStoredPolicies(stored.policies)) {
     byFingerprint.set(row.fingerprint, row)
@@ -316,6 +330,7 @@ async function saveTableScopeConflictPolicies({ action, policyStore, request, ap
   }
   const next = {
     ...emptyStoredPolicies(action),
+    ...(generation ? { generation } : {}),
     policies: Array.from(byFingerprint.values()).sort((left, right) => left.fingerprint.localeCompare(right.fingerprint)),
   }
   await store.set(key, next)
@@ -325,9 +340,7 @@ async function saveTableScopeConflictPolicies({ action, policyStore, request, ap
 async function deleteTableScopeConflictPolicies({ action, policyStore, request }) {
   const store = requirePolicyStore(policyStore)
   const normalized = normalizeDeletePolicyRequest(request)
-  const key = conflictPolicyStoreKey(action)
-  const storedValue = await store.get(key)
-  const stored = isPlainObject(storedValue) ? storedValue : emptyStoredPolicies(action)
+  const { key, stored, generation } = await currentPolicyRecord(action, store)
   if (normalized.fingerprints.length === 0) {
     throw new StockPreparationConflictPolicyError(400, 'CONFLICT_POLICY_DELETE_EMPTY', 'fingerprints array must not be empty', {
       field: 'fingerprints',
@@ -336,6 +349,7 @@ async function deleteTableScopeConflictPolicies({ action, policyStore, request }
   const remove = new Set(normalized.fingerprints)
   const next = {
     ...emptyStoredPolicies(action),
+    ...(generation ? { generation } : {}),
     policies: normalizeStoredPolicies(stored.policies)
       .filter((row) => row && !remove.has(row.fingerprint))
   }
@@ -420,6 +434,7 @@ module.exports = {
   __internals: {
     STORAGE_PREFIX,
     conflictPolicyStoreKey,
+    policyGenerationKey,
     normalizePolicyRows,
     normalizeTableScopePolicyRequest,
     publicTableScopePolicies,

@@ -53,6 +53,7 @@ export async function checkProjectDeleteRuntime(scope: Scope, service: Service, 
   const objectId = deriveStockPreparationProjectSheetObjectId(scope.tenantId, scope.projectNo)
   const policyAction = (sheetId: string, object: string) => ({ actionId, target: { sheetId, objectId: object, keyField: 'idempotencyKey' } })
   const currentAction = policyAction(dedicatedId, objectId)
+  const historical = { ...currentAction, target: { ...currentAction.target, keyField: 'retiredKey' } }
   const sharedAction = policyAction(sharedId, 'shared-synthetic')
   const neighborAction = policyAction('neighbor-' + dedicatedId, 'neighbor-synthetic')
   const policyKey = policies.__internals.conflictPolicyStoreKey
@@ -70,14 +71,14 @@ export async function checkProjectDeleteRuntime(scope: Scope, service: Service, 
     diagnostics, tableScopeReview: await policies.loadTableScopeConflictPolicies({ action: policyAction(sheetId, objectId), policyStore: store }),
   }).selectedPolicies.map((r: { scope: string, policy: string }) => [r.scope, r.policy])
   const policyKeys = [currentAction, sharedAction, neighborAction].map(policyKey)
-  const keys = [...owned, ...controls].map(([key]) => key).concat(policyKeys, orphanedKey)
+  const keys = [...owned, ...controls].map(([key]) => key).concat(policyKeys, orphanedKey, policyKey(historical), policies.__internals.policyGenerationKey(dedicatedId))
   const rows = async (subset: string[]) => (await q('SELECT * FROM plugin_kv WHERE plugin = $1 AND key = ANY($2::text[]) ORDER BY key', [kvPlugin, subset])).rows
   const terminal = (key: string, status: string) => q("UPDATE plugin_kv SET value = jsonb_set(value, '{status}', to_jsonb($3::text)), updated_at = now() WHERE plugin = $1 AND key = $2", [kvPlugin, key, status])
   try {
     for (const [key, value] of [...owned, ...controls]) {
       await q('INSERT INTO plugin_kv (plugin, key, value) VALUES ($1,$2,$3::jsonb)', [kvPlugin, key, JSON.stringify(value)])
     }
-    for (const action of [currentAction, sharedAction, neighborAction]) {
+    for (const action of [currentAction, sharedAction, neighborAction, historical]) {
       await policies.saveTableScopeConflictPolicies({ action, policyStore: store, approver: scope.actor,
         request: { policies: [{ fingerprint, policy: 'keep_multiple_rows' }] } })
     }
@@ -110,6 +111,11 @@ export async function checkProjectDeleteRuntime(scope: Scope, service: Service, 
     const rebuilt = await recreate()
     expect(rebuilt).toBe(dedicatedId)
     expect(await review(rebuilt)).toEqual([['default', 'hold']])
+    expect((await policies.loadTableScopeConflictPolicies({ action: historical, policyStore: store })).policies).toEqual([])
+    const replacement = await policies.saveTableScopeConflictPolicies({ action: historical, policyStore: store, approver: scope.actor,
+      request: { policies: [{ fingerprint, policy: 'keep_multiple_rows' }] } })
+    expect(replacement.policyCount).toBe(1)
+    expect(await policies.loadTableScopeConflictPolicies({ action: historical, policyStore: store })).toEqual(replacement)
   } finally {
     await q('DELETE FROM plugin_kv WHERE plugin = $1 AND key = ANY($2::text[])', [kvPlugin, keys])
   }

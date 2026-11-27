@@ -22,7 +22,7 @@ import StockPreparationProjectBoardView from '../src/components/integration/stoc
 import StockPreparationProjectDelete from '../src/components/integration/stockPreparation/StockPreparationProjectDelete.vue'
 import StockPreparationWorkspace from '../src/components/integration/stockPreparation/StockPreparationWorkspace.vue'
 import { readStockPrepRecentProjects, recordStockPrepProjectVisit } from '../src/services/integration/stockPreparation/operatorHomeMemory'
-import { resetStockPreparationOperatorHomeDirectoryThrottle } from '../src/services/integration/stockPreparation/operatorHomeDirectory'
+import { readStockPreparationOperatorHomeDirectory, resetStockPreparationOperatorHomeDirectoryThrottle } from '../src/services/integration/stockPreparation/operatorHomeDirectory'
 
 const PROJECT = 'SYN-DELETE-01'
 const NEIGHBOR = 'SYN-KEEP-02'
@@ -151,6 +151,19 @@ afterEach(() => {
 })
 
 describe('备料项目交付清理工作台', () => {
+  it('reconciles previously saved cards after a deletion in another browser', async () => {
+    recordStockPrepProjectVisit(PROJECT, 'ready', scope)
+    recordStockPrepProjectVisit(NEIGHBOR, 'ready', scope)
+    mock.apiFetch.mockImplementation(async (path: string) => {
+      const requested = new URL(path, 'https://example.test').searchParams.get('recentProjectNos')
+      expect(requested?.split(',').sort()).toEqual([PROJECT, NEIGHBOR].sort())
+      return ok({ ...scope, directoryReady: true, ledgerReady: true, projects: [], projectCount: 0,
+        pendingProjectCount: 0, deletedRecentProjectNos: [PROJECT] })
+    })
+    await readStockPreparationOperatorHomeDirectory(scope)
+    expect(readStockPrepRecentProjects(scope).map(entry => entry.projectNo)).toEqual([NEIGHBOR])
+  })
+
   it('requires both live platform administration and the stock-prep access grant', async () => {
     mock.admin = false
     mockRoutes()

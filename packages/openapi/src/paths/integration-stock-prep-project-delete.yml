@@ -20,6 +20,8 @@ paths:
                     properties:
                       mayDelete: { type: boolean }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { description: Cleanup authority is busy }
+        '501': { description: Tenant membership verification unavailable }
         '503': { description: Cleanup authority unavailable }
   /api/integration/stock-preparation/projects/{projectNo}/delete/preview:
     post:

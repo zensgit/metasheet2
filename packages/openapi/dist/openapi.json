@@ -37999,6 +37999,12 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "409": {
+            "description": "Cleanup authority is busy"
+          },
+          "501": {
+            "description": "Tenant membership verification unavailable"
+          },
           "503": {
             "description": "Cleanup authority unavailable"
           }

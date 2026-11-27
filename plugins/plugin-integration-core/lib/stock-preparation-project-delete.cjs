@@ -208,7 +208,7 @@ function createStockPreparationProjectDelete({ database, auditStore, authorizeWi
         await tx.query('ROLLBACK TO SAVEPOINT project_delete_sheet_versions')
         return { refused: 'stale' }
       }
-      await deleteRuntime(tx, scope, plan.runtime)
+      await deleteRuntime(tx, scope, plan.runtime, plan.sheets.dedicatedSheetId)
       await deleteBusiness(tx, scope, plan.business)
       await deleteSheets(tx, scope, plan.sheets, plan.sheetWrites)
       const scopedDb = createDb({ database: tx })
@@ -229,7 +229,24 @@ function createStockPreparationProjectDelete({ database, auditStore, authorizeWi
     return answer
   }
 
-  return { preview, confirm, isDeleted: scope => isProjectDeleted(database, scope) }
+  async function deletionSnapshot({ tenantId, projectNos = [], boundTarget }) {
+    return database.transaction(async client => {
+      const tx = transactionHandle(client, performance.now() + TRANSACTION_BUDGET_MS)
+      await tx.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
+      await tx.query("SET LOCAL statement_timeout = '15s'")
+      await tx.query('SET LOCAL row_security = off')
+      const [snapshot] = await tx.query(`SELECT count(*)::text AS version,
+          array_agg(DISTINCT project_id) FILTER (WHERE project_id = ANY($2::text[])) AS candidates
+        FROM integration_stock_prep_audit WHERE tenant_id = $1 AND action = 'project_delete'`, [tenantId, projectNos])
+      const deleted = []
+      for (const projectNo of snapshot.candidates || []) {
+        if (!(await existsProjectRoot(tx, { tenantId, projectNo, boundTarget }))) deleted.push(projectNo)
+      }
+      return { version: snapshot.version, deleted }
+    })
+  }
+
+  return { preview, confirm, deletionSnapshot, isDeleted: scope => isProjectDeleted(database, scope) }
 }
 
 // A scheduled legacy pull used to accept even an unregistered project. Only an actual deletion

@@ -1777,7 +1777,10 @@ async function loadDirectory(): Promise<void> {
     const next = home
       ? await readStockPreparationOperatorHomeDirectory(props.scope)
       : await readStockPreparationOperatorDirectory(props.scope)
-    if (mine === directoryGeneration) directory.value = next
+    if (mine === directoryGeneration) {
+      directory.value = next
+      if (home && next.deletedRecentProjectNos?.length) recentProjects.value = readStockPrepRecentProjects(props.scope)
+    }
   } catch {
     if (mine === directoryGeneration) directory.value = null
   } finally {
