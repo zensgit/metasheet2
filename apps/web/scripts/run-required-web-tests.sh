@@ -2087,6 +2087,7 @@ exec npx vitest run \
   tasks-create-assignees.spec.ts \
   tasks-detail-m3.spec.ts \
   tasks-detail-m4.spec.ts \
+  tasks-detail-people-access.spec.ts \
   tasks-detail-view.spec.ts \
   tasks-dispatch-key.spec.ts \
   tasks-groups.spec.ts \

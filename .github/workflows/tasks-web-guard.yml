@@ -207,6 +207,11 @@
 # status and search, overlapping pages, retry and restart controls, sorting after all rows load,
 # account changes, refreshes, navigation, ignored late answers and translated paging messages.
 #
+# Task member access marks (one new file, so thirty-two whole-file args):
+# `tasks-detail-people-access.spec.ts` added — assignee and follower marks shown to editors,
+# translated labels, lookup requests for changed members and larger groups, marks kept on refresh,
+# and marks cleared or late answers ignored after permission, account or task changes and page exit.
+#
 # Scope: deliberately TARGETED (same convention as elearning/approval/attendance/multitable/
 # plm-embed web-guards). NOT a required check: it cannot hang a PR, but it turns a silent FE
 # regression on the /tasks skeleton surface into a visible red.
@@ -315,7 +320,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run tasks web guard specs (targeted)
-        # Thirty-one whole-file args, listed explicitly. Do not replace with a name filter, glob, skip, or
+        # Thirty-two whole-file args, listed explicitly. Do not replace with a name filter, glob, skip, or
         # continue-on-error — a filter matching zero tests exits green.
         run: |
           pnpm --filter @metasheet/web exec vitest run \
@@ -330,6 +335,7 @@ jobs:
             tests/tasks-create-assignees.spec.ts \
             tests/tasks-detail-m3.spec.ts \
             tests/tasks-detail-m4.spec.ts \
+            tests/tasks-detail-people-access.spec.ts \
             tests/tasks-detail-view.spec.ts \
             tests/tasks-dispatch-key.spec.ts \
             tests/tasks-groups.spec.ts \

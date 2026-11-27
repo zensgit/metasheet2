@@ -34,6 +34,7 @@ const h_ = vi.hoisted(() => ({
   /** `GET /api/tasks/:id` (the decoded id) -> the response, or a promise of it. */
   detailReply: vi.fn(),
   peopleReply: vi.fn(),
+  peopleResolveReply: vi.fn(),
   peopleSearchReply: vi.fn(),
   /** `GET /api/tasks/:id/comments?…` (decoded id, query) -> the response; an empty thread by default. */
   commentsReply: vi.fn(),
@@ -203,9 +204,11 @@ async function fakeFetch(path: string, init?: FetchInit): Promise<Response> {
   const [pathname, query = ''] = path.split('?')
   let match: RegExpExecArray | null
   if (method === 'GET' && pathname === '/api/tasks') return jsonResponse(200, { items: [], total: 0 })
-  // Package 1b: the people picker's search (`h_.peopleSearchReply`; the "type a name" marker by default).
+  // Keep member lookups separate from the people picker's searches.
   // Answered before the task-id pattern below, which `/api/tasks/people` would otherwise match.
-  if (method === 'GET' && pathname === '/api/tasks/people') return h_.peopleSearchReply(query)
+  if (method === 'GET' && pathname === '/api/tasks/people') {
+    return new URLSearchParams(query).has('ids') ? h_.peopleResolveReply(query) : h_.peopleSearchReply(query)
+  }
   if ((match = /^\/api\/tasks\/([^/]+)$/.exec(pathname))) {
     const id = decodeURIComponent(match[1])
     if (method === 'GET') return h_.detailReply(id)
@@ -369,6 +372,7 @@ beforeEach(() => {
   h_.getCurrentUserId.mockReset().mockResolvedValue('u1')
   h_.detailReply.mockReset().mockImplementation((id: string) => jsonResponse(200, detailBody({ id, title: id === 't1' ? 'Plan' : `Title-${id}` })))
   h_.peopleReply.mockReset().mockImplementation(() => jsonResponse(200, { people: {} }))
+  h_.peopleResolveReply.mockReset().mockImplementation(() => jsonResponse(200, { items: [], truncated: false }))
   h_.peopleSearchReply.mockReset().mockImplementation(() => jsonResponse(200, { items: [], hasMore: false, requiresQuery: true, limit: 20, minQueryLength: 1 }))
   h_.commentsReply.mockReset().mockImplementation(() => jsonResponse(200, { items: [], total: 0 }))
   h_.myListsReply.mockReset().mockImplementation((query: string) => {
@@ -2195,7 +2199,7 @@ describe('package 1b — the names on the task', () => {
   const thread = (...items: Array<Record<string, unknown>>) => () => jsonResponse(200, { items, total: items.length })
   const authorTexts = (el: HTMLElement) => shownAll(el, 'tasks-detail-comment-author').map((node) => node.textContent?.trim())
 
-  it('comment authors are named from the names on the task, a tombstone too; an author the names leave out stays an id, and nothing more is read', async () => {
+  it('comment authors use task names, including tombstones; only assignees and followers are looked up for access', async () => {
     h_.detailReply.mockImplementation(() => jsonResponse(200, body()))
     h_.peopleReply.mockImplementation(() => jsonResponse(200, { people: {
       u1: { name: '张三', status: 'active' },
@@ -2211,6 +2215,29 @@ describe('package 1b — the names on the task', () => {
     expect(shownAll(el, 'tasks-detail-comment-author').map((node) => node.getAttribute('data-author-id'))).toEqual(['u1', 'u5', 'u8'])
     expect(shownAll(el, 'tasks-detail-comment-author-inactive')).toEqual([])
     expect(requests('GET', '/api/tasks/t1/people')).toHaveLength(1)
+    expect(h_.peopleSearchReply).not.toHaveBeenCalled()
+    expect(h_.peopleResolveReply.mock.calls.map(([query]) => new URLSearchParams(query as string).get('ids')?.split(','))).toEqual([['u1', 'u2', 'u3', 'u5']])
+    expect(fetchCalls().filter(([path]) => path.startsWith('/api/tasks/people')).map(([path]) => path)).toEqual(['/api/tasks/people?ids=u1,u2,u3,u5'])
+  })
+
+  it('a read-only viewer sees comment authors from task names without any people search or access lookup', async () => {
+    h_.detailReply.mockImplementation(() => jsonResponse(200, { ...body(), canEdit: false }))
+    h_.peopleReply.mockImplementation(() => jsonResponse(200, { people: {
+      u1: { name: '张三', status: 'active' },
+      u5: { name: '王五', status: 'active' },
+    } }))
+    h_.commentsReply.mockImplementation(thread(
+      commentRow('c1', 'u1'),
+      commentRow('c2', 'u5', { body: null, deleted: true }),
+      commentRow('c3', 'u8'),
+    ))
+    const el = await mountAt('/tasks/t1')
+    expect(authorTexts(el)).toEqual(['张三', '王五', 'u8'])
+    expect(shownAll(el, 'tasks-detail-comment-author').map((node) => node.getAttribute('data-author-id'))).toEqual(['u1', 'u5', 'u8'])
+    expect(shownAll(el, 'tasks-detail-comment-author-inactive')).toEqual([])
+    expect(requests('GET', '/api/tasks/t1/people')).toHaveLength(1)
+    expect(h_.peopleSearchReply).not.toHaveBeenCalled()
+    expect(h_.peopleResolveReply).not.toHaveBeenCalled()
     expect(fetchCalls().filter(([path]) => path.startsWith('/api/tasks/people'))).toEqual([])
   })
 

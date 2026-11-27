@@ -1,9 +1,11 @@
 /**
  * Names for the user ids a task page shows without a name of its own: the actors of the list page's
  * activity and the roster of the list members dialog. Each page or dialog holds its own instance.
+ * Task details also use the answered task-access status, independently of these names.
  *
  * Names come only from the people lookup (`resolvePeople`, `GET /api/tasks/people?ids=`). An id the
- * lookup gives no name stays as it is, and nothing is read into the missing name.
+ * lookup gives no name stays as it is, and nothing is read into the missing name. Access status is
+ * kept only for answered ids; an unanswered id has no known status.
  *
  * `request(ids)` asks only for ids not asked yet under the identity held (until `clear()`) that are
  * printable ASCII, 1 to 255 characters long, not `.` or `..`, and hold no comma. They go out in parts
@@ -20,7 +22,7 @@
  * identity takes it and asks nothing. A token refresh for the same user and org is not a change.
  * The identity is derived on the client and only compared for equality.
  *
- * `clear()` drops the names and the asked ids, and an answer still out; it keeps the 403 stop.
+ * `clear()` drops the names, access status and asked ids, and an answer still out; it keeps the 403 stop.
  * `dispose()` stops listening; nothing is sent after it and no answer is kept.
  */
 import { shallowRef, type ShallowRef } from 'vue'
@@ -38,6 +40,8 @@ const PRINTABLE_ID = /^[!-~]+$/
 export interface TaskPeopleNames {
   /** Id to name for the ids the lookups named under the identity held; a new map on each change. */
   readonly names: Readonly<ShallowRef<ReadonlyMap<string, string>>>
+  /** Task access for the ids answered by the lookup; an absent id has no known status. */
+  readonly taskAccess: Readonly<ShallowRef<ReadonlyMap<string, boolean>>>
   /** The name of `id`, or `''` when there is none. */
   nameOf(id: string): string
   /** Looks up the ids that may still be asked (see the header); resolves once its parts are done. */
@@ -46,7 +50,7 @@ export interface TaskPeopleNames {
   identityHolds(): boolean
   /** Distinguish an observed switch away and back during a list action. */
   identitySwitches(): number
-  /** Drops the names and the asked ids; an answer still out is dropped. */
+  /** Drops the names, access status and asked ids; an answer still out is dropped. */
   clear(): void
   /** Stops listening; nothing is sent after it and no answer is kept. */
   dispose(): void
@@ -82,6 +86,7 @@ function lookupParts(ids: readonly string[]): string[][] {
 
 export function createTaskPeopleNames(options: { onSwitch?: () => void } = {}): TaskPeopleNames {
   const names = shallowRef<ReadonlyMap<string, string>>(new Map())
+  const taskAccess = shallowRef<ReadonlyMap<string, boolean>>(new Map())
   let identity = readDispatchIdentity()
   let switches = 0
   let generation = 0
@@ -98,6 +103,7 @@ export function createTaskPeopleNames(options: { onSwitch?: () => void } = {}): 
     asked = new Set()
     forbidden = false
     names.value = new Map()
+    taskAccess.value = new Map()
     options.onSwitch?.()
     return false
   }
@@ -132,10 +138,13 @@ export function createTaskPeopleNames(options: { onSwitch?: () => void } = {}): 
       completed += part.length
       const inPart = new Set(part)
       const next = new Map(names.value)
+      const nextAccess = new Map(taskAccess.value)
       for (const person of result.items) {
         if (person.name && inPart.has(person.id)) next.set(person.id, person.name)
+        if (inPart.has(person.id)) nextAccess.set(person.id, person.canUseTasks)
       }
       names.value = next
+      taskAccess.value = nextAccess
     }
   }
 
@@ -143,6 +152,7 @@ export function createTaskPeopleNames(options: { onSwitch?: () => void } = {}): 
     generation += 1
     asked = new Set()
     names.value = new Map()
+    taskAccess.value = new Map()
   }
 
   const stopSessionSwitch = onAuthSessionSwitch(() => { identityHolds() })
@@ -159,6 +169,7 @@ export function createTaskPeopleNames(options: { onSwitch?: () => void } = {}): 
 
   return {
     names,
+    taskAccess,
     nameOf: (id) => names.value.get(id) ?? '',
     request,
     identityHolds,

@@ -76,6 +76,11 @@
                   class="tasks-view__person-inactive"
                   data-testid="tasks-detail-person-inactive"
                 >{{ t.memberInactiveMark }}</span>
+                <span
+                  v-if="cannotUseTasks(assignee.userId)"
+                  class="tasks-view__person-no-access"
+                  data-testid="tasks-detail-person-no-access"
+                >{{ t.peopleCannotUseTasks }}</span>
                 <span class="tasks-view__detail-assignee-status" data-testid="tasks-detail-assignee-status">
                   {{ assignee.completedAt ? fmt.completedAt(formatViewerInstant(assignee.completedAt, undefined, viewerLocale)) : t.assigneeNotDone }}
                 </span>
@@ -323,6 +328,11 @@
                     class="tasks-view__person-inactive"
                     data-testid="tasks-detail-person-inactive"
                   >{{ t.memberInactiveMark }}</span>
+                  <span
+                    v-if="cannotUseTasks(followerId)"
+                    class="tasks-view__person-no-access"
+                    data-testid="tasks-detail-person-no-access"
+                  >{{ t.peopleCannotUseTasks }}</span>
                   <button
                     v-if="canManageTaskMembers"
                     type="button"
@@ -872,6 +882,7 @@ import {
   type WriteFailure,
 } from '../../tasks/tasksApi'
 import { readDispatchIdentity } from '../../tasks/recordTaskDispatchIdentity'
+import { createTaskPeopleNames } from '../../tasks/taskPeopleNames'
 import { notifyTasksChanged } from '../../tasks/tasksBadgeBus'
 import { taskSourceRecordPath } from '../../tasks/taskSourceLink'
 import { formatDueDisplay, formatStartDisplay, formatViewerInstant } from '../../tasks/tasksDateDisplay'
@@ -1115,6 +1126,35 @@ function detailAbility(flag: 'canEdit' | 'canDelete' | 'canComment'): boolean {
   return state.kind === 'ok' && state.task[flag] !== false
 }
 const canEditTask = computed(() => detailAbility('canEdit'))
+const memberPeople = createTaskPeopleNames()
+const canViewTaskAccess = computed(() => detailResult.value.kind === 'ok' && detailResult.value.task.canEdit === true)
+let memberTaskId: string | undefined
+let memberCanEdit = false
+
+watch([taskId, detailResult, followersState], ([id, state, followers]) => {
+  if (id !== memberTaskId) {
+    memberPeople.clear()
+    memberTaskId = id
+    memberCanEdit = false
+  }
+  // A refresh's loading state does not change the last known edit permission.
+  if (!id || state.kind !== 'ok' || state.task.id !== id) return
+  const canEdit = state.task.canEdit === true
+  if (canEdit !== memberCanEdit) {
+    memberPeople.clear()
+    memberCanEdit = canEdit
+  }
+  if (!canEdit) return
+  void memberPeople.request([
+    ...state.task.assignees.map((person) => person.userId),
+    ...(followers ?? []),
+  ])
+})
+
+function cannotUseTasks(userId: string): boolean {
+  return canViewTaskAccess.value && memberPeople.taskAccess.value.get(userId) === false
+}
+
 const canDeleteTask = computed(() => detailAbility('canDelete'))
 const canCommentTask = computed(() => detailAbility('canComment'))
 // [fe-45] ruled 2026-10-07: adding or removing an assignee or a follower takes a
@@ -2473,6 +2513,7 @@ if (typeof window !== 'undefined') window.addEventListener('storage', onPeopleSt
 
 onBeforeUnmount(() => {
   listGeneration += 1
+  memberPeople.dispose()
   unsubscribeLists()
   stopPeopleSessionSwitch()
   if (typeof window !== 'undefined') window.removeEventListener('storage', onPeopleStorage)
@@ -2652,6 +2693,12 @@ onMounted(async () => {
   margin-left: 4px;
   font-size: 12px;
   color: #909399;
+}
+
+.tasks-view__person-no-access {
+  margin-left: 4px;
+  font-size: 12px;
+  color: #b26b00;
 }
 
 .tasks-view {
