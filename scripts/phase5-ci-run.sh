@@ -1,217 +1,169 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
-# Unified CI runner: starts backend (if local), warms up traffic,
-# populates metrics, runs validation, and emits artifacts.
-
-API_BASE=${API_BASE:-"http://127.0.0.1:8900"}
-METRICS_URL=${METRICS_URL:-"${API_BASE}/metrics/prom"}
-ARTIFACT_JSON=${ARTIFACT_JSON:-"/tmp/phase5.json"}
-ARTIFACT_MD=${ARTIFACT_MD:-"/tmp/phase5.md"}
-SERVER_LOG=${SERVER_LOG:-"/tmp/server.log"}
-
+# Local-only runner. A dedicated migrated fixture database and test admin are prerequisites.
+API_BASE=${API_BASE:-http://127.0.0.1:8900}
+METRICS_URL=${METRICS_URL:-${API_BASE}/metrics/prom}
 FEATURE_CACHE=${FEATURE_CACHE:-true}
 ENABLE_FALLBACK_TEST=${ENABLE_FALLBACK_TEST:-true}
 COUNT_CACHE_MISS_AS_FALLBACK=${COUNT_CACHE_MISS_AS_FALLBACK:-false}
-ALLOW_UNSAFE_ADMIN=${ALLOW_UNSAFE_ADMIN:-true}
+export API_BASE METRICS_URL FEATURE_CACHE ENABLE_FALLBACK_TEST COUNT_CACHE_MISS_AS_FALLBACK
+fail() { echo "[CI] $1" >&2; exit 1; }
+for command in curl jq node pnpm lsof ps; do command -v "$command" >/dev/null || fail 'Missing required command'; done
+[[ "$API_BASE" == http://127.0.0.1:8900 && "$METRICS_URL" == "$API_BASE/metrics/prom" ]] || fail 'Local endpoint contract required'
+[[ -n "${TOKEN:-}" ]] || fail 'Dedicated test admin token required'
+export TOKEN
+node scripts/ops/phase5-snapshot-fixture.mjs --check
 
-echo "[CI] Starting unified Phase 5 run"
-
-start_local_backend() {
-  echo "[CI] Starting local backend with flags"
-  export FEATURE_CACHE ENABLE_FALLBACK_TEST COUNT_CACHE_MISS_AS_FALLBACK ALLOW_UNSAFE_ADMIN
-  # Attempt to stop any existing server on 8900 to ensure env flags take effect
-  if command -v lsof >/dev/null 2>&1; then
-    local pids
-    pids=$(lsof -ti tcp:8900 || true)
-    if [ -n "$pids" ]; then
-      echo "[CI] Found existing process on :8900 ($pids); terminating"
-      kill $pids || true
-      sleep 2
-    fi
-  fi
-  # Use pnpm dev if available; fallback to npm
-  if command -v pnpm >/dev/null 2>&1; then
-    pnpm --filter @metasheet/core-backend dev >"${SERVER_LOG}" 2>&1 &
-  else
-    npm run -w packages/core-backend dev >"${SERVER_LOG}" 2>&1 &
-  fi
+RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/phase5-run.XXXXXX")
+ARTIFACT_JSON=${ARTIFACT_JSON:-$RUN_DIR/phase5.json}
+ARTIFACT_MD=${ARTIFACT_MD:-$RUN_DIR/phase5.md}
+SERVER_LOG=${SERVER_LOG:-$RUN_DIR/server.log}
+artifact_path() {
+  local directory
+  directory=$(cd -- "$(dirname -- "$1")" 2>/dev/null && pwd -P) || fail 'Artifact directory unavailable'
+  printf '%s/%s' "$directory" "$(basename -- "$1")"
 }
-
-wait_for_health() {
-  echo "[CI] Probing health at ${API_BASE}"
-  local tries=0
-  local max_tries=${HEALTH_MAX_TRIES:-180}
-  local delay=${HEALTH_DELAY_SECS:-1}
-  while [ "$tries" -lt "$max_tries" ]; do
-    if curl -s "${API_BASE}/metrics/prom" >/dev/null; then
-      echo "[CI] Backend is up (after ${tries}s)"
-      return 0
-    fi
-    tries=$((tries+delay))
-    sleep "$delay"
-  done
-  echo "[CI] Backend failed to start after ${max_tries}s" >&2
-  return 1
-}
-
-verify_features() {
-  echo "[CI] Verifying feature flags via /internal/cache"
-  local resp
-  resp=$(curl -s "${API_BASE}/internal/cache" || echo "{}")
-  local enabled
-  enabled=$(echo "$resp" | jq -r '.enabled // false' 2>/dev/null || echo "false")
-  if [ "$enabled" != "true" ]; then
-    echo "[CI] Cache appears disabled. Ensure backend started with FEATURE_CACHE=true" >&2
-    return 1
-  fi
-  echo "[CI] Cache enabled confirmed"
-}
-
-precheck_metrics() {
-  echo "[CI] Pre-checking presence of required metrics"
-  local text
-  text=$(curl -s "${METRICS_URL}" || echo "")
-  local has_hits has_miss has_reload has_snapshot
-  has_hits=$(echo "$text" | grep -c '^cache_hits_total' || true)
-  has_miss=$(echo "$text" | grep -c '^cache_miss_total' || true)
-  has_reload=$(echo "$text" | grep -c '^metasheet_plugin_reload_duration_seconds_' || true)
-  has_snapshot=$(echo "$text" | grep -c '^metasheet_snapshot_operation_duration_seconds_' || true)
-  if [ "$has_hits" -eq 0 ] || [ "$has_miss" -eq 0 ]; then
-    echo "[CI] Cache counters not found (hits=${has_hits}, miss=${has_miss}). Warm cache and ensure MemoryCache is active." >&2
-    return 1
-  fi
-  if [ "$has_reload" -eq 0 ]; then
-    echo "[CI] Plugin reload histogram not found; ensure unsafe reloads executed and instrumentation is active." >&2
-    return 1
-  fi
-  if [ "$has_snapshot" -eq 0 ]; then
-    echo "[CI] Snapshot histogram not found; ensure create/restore endpoints emit metrics and were exercised." >&2
-    return 1
-  fi
-  echo "[CI] Required metrics present"
-}
-populate_metrics() {
-  echo "[CI] Warming HTTP, cache, plugin reload, snapshot, fallback"
-  local http_iters=${HTTP_WARM_ITERS:-75}
-  local cache_warm=${CACHE_WARM_COUNT:-200}
-  local snapshot_count=${SNAPSHOT_COUNT:-6}
-  # HTTP warm-up & traffic
-  for i in $(seq 1 "$http_iters"); do
-    # Cache simulate (miss->set->hit internally)
-    curl -s "${API_BASE}/api/cache-test/simulate" >/dev/null || true
-    # Optional explicit warm endpoint if present
-    curl -s "${API_BASE}/api/cache-test/warm" >/dev/null || true
-    curl -s "${API_BASE}/api/health" >/dev/null || true
-    curl -s "${API_BASE}/metrics/prom" >/dev/null || true
-    curl -s "${API_BASE}/internal/cache" >/dev/null || true
-    # Hit a few generic API routes to increase http_requests_total
-    curl -s "${API_BASE}/api/version" >/dev/null || true
-    curl -s -X GET "${API_BASE}/api/plugins" >/dev/null || true
-  done
-
-  # Extra cache warm cycles to build hit/miss ratio
-  for i in $(seq 1 "$cache_warm"); do
-    curl -s "${API_BASE}/api/cache-test/simulate" >/dev/null || true
-    curl -s "${API_BASE}/api/cache-test/warm" >/dev/null || true
-  done
-
-  # JWT for admin routes
-  if [ -x ./scripts/phase5-dev-jwt.sh ]; then
-    TOKEN=$(./scripts/phase5-dev-jwt.sh)
-  else
-    TOKEN=""
-  fi
-
-  # Plugin reloads via unsafe route (dev/CI only)
-  local reload_count=${RELOAD_COUNT:-12}
-  if [ -n "$TOKEN" ]; then
-    for i in $(seq 1 "$reload_count"); do
-      curl -s -H "Authorization: Bearer $TOKEN" -X POST \
-        "${API_BASE}/api/admin/plugins/example-plugin/reload-unsafe" >/dev/null || true
-      sleep 0.2
+ARTIFACT_JSON=$(artifact_path "$ARTIFACT_JSON")
+ARTIFACT_MD=$(artifact_path "$ARTIFACT_MD")
+SERVER_LOG=$(artifact_path "$SERVER_LOG")
+[[ "$ARTIFACT_JSON" != "$ARTIFACT_MD" && "$ARTIFACT_JSON" != "$SERVER_LOG" && "$ARTIFACT_MD" != "$SERVER_LOG" ]] || fail 'Artifact destinations must be distinct'
+for file in "$ARTIFACT_JSON" "$ARTIFACT_MD" "$SERVER_LOG"; do
+  [[ ! -e "$file" && ! -L "$file" ]] || fail 'Artifact destination already exists'
+done
+BACKEND_PID=''
+SNAPSHOT_PID=''
+PASSED=false
+cleanup() {
+  local status=$?
+  trap - EXIT
+  trap 'status=130' INT
+  trap 'status=143' TERM
+  if [[ -n "$SNAPSHOT_PID" ]]; then
+    kill -TERM "$SNAPSHOT_PID" 2>/dev/null || true
+    for ((wait_try=0; wait_try<400; wait_try++)); do
+      kill -0 "$SNAPSHOT_PID" 2>/dev/null || break
+      /bin/sleep 0.05
     done
-  fi
-
-  # Cache simulate cycles
-  if [ -x ./scripts/phase5-populate-cache.sh ]; then
-    bash ./scripts/phase5-populate-cache.sh "$API_BASE" || true
-  fi
-
-  # Fallback triggers (dev-only route)
-  curl -s -X POST "${API_BASE}/internal/test/fallback" \
-    -H 'Content-Type: application/json' -d '{"mode":"http_error"}' >/dev/null || true
-  curl -s -X POST "${API_BASE}/internal/test/fallback" \
-    -H 'Content-Type: application/json' -d '{"mode":"cache_miss"}' >/dev/null || true
-
-  # Snapshot operations: use authenticated routes to create and restore
-  if [ -n "$TOKEN" ]; then
-    for i in $(seq 1 "$snapshot_count"); do
-      # Create snapshot
-      SNAP_JSON=$(curl -s -X POST "${API_BASE}/api/snapshots" \
-        -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-        -d '{"labels": ["ci","phase5"], "note": "ci-run"}' || echo '{}')
-      SNAP_ID=$(echo "$SNAP_JSON" | jq -r '.id // .snapshot?.id // empty')
-      if [ -n "$SNAP_ID" ]; then
-        # Restore snapshot
-        curl -s -X POST "${API_BASE}/api/snapshots/${SNAP_ID}/restore" \
-          -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-          -d '{}' >/dev/null || true
-      fi
-      sleep 0.1
-    done
-  fi
-}
-
-run_validation() {
-  echo "[CI] Running validation to ${ARTIFACT_JSON}"
-  echo "[CI] Diagnostic: sampling key metrics prior to validation"
-  curl -s "${METRICS_URL}" | grep -E '^(cache_hits_total|cache_miss_total|metasheet_snapshot_operation_duration_seconds|metasheet_plugin_reload_duration_seconds)' | head -n 20 || true
-  if [ -x ./scripts/phase5-full-validate.sh ]; then
-    ./scripts/phase5-full-validate.sh "${METRICS_URL}" "${ARTIFACT_JSON}" || true
-  else
-    echo "{}" >"${ARTIFACT_JSON}"
-  fi
-  if [ -x ./scripts/phase5-generate-report.sh ]; then
-    ./scripts/phase5-generate-report.sh "${ARTIFACT_JSON}" "${ARTIFACT_MD}" || true
-  fi
-  echo "[CI] Validation complete"
-}
-
-ensure_artifacts() {
-  echo "[CI] Ensuring artifacts exist"
-  [ -f "${ARTIFACT_JSON}" ] || echo '{"summary":{}}' >"${ARTIFACT_JSON}"
-  [ -f "${ARTIFACT_MD}" ] || echo '# Phase 5 Report (CI)' >"${ARTIFACT_MD}"
-  [ -f "${SERVER_LOG}" ] || touch "${SERVER_LOG}"
-}
-
-judge_outcome() {
-  echo "[CI] Judging validation outcome"
-  if command -v jq >/dev/null 2>&1; then
-    STATUS=$(jq -r '.summary.overall_status // "unknown"' "${ARTIFACT_JSON}")
-    PASSED=$(jq -r '.summary.passed // 0' "${ARTIFACT_JSON}")
-    FAILED=$(jq -r '.summary.failed // 0' "${ARTIFACT_JSON}")
-    NA=$(jq -r '.summary.na // 0' "${ARTIFACT_JSON}")
-    if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-      echo "[CI] Summary: passed=${PASSED} failed=${FAILED} na=${NA} status=${STATUS}" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+    if kill -0 "$SNAPSHOT_PID" 2>/dev/null; then
+      echo '[CI] Fixture cleanup timeout' >&2
+      kill -KILL "$SNAPSHOT_PID" 2>/dev/null || true
+      status=1
     fi
-  else
-    STATUS="unknown"
+    wait "$SNAPSHOT_PID" 2>/dev/null || true
   fi
-  echo "[CI] overall_status=${STATUS}"
-  if [ "${STATUS}" != "pass" ]; then
-    echo "[CI] Validation did not pass" >&2
-    return 2
+  if [[ -n "$BACKEND_PID" ]]; then
+    kill -TERM -- "-$BACKEND_PID" 2>/dev/null || true
+    for ((wait_try=0; wait_try<100; wait_try++)); do
+      kill -0 -- "-$BACKEND_PID" 2>/dev/null || break
+      /bin/sleep 0.05
+    done
+    kill -KILL -- "-$BACKEND_PID" 2>/dev/null || true
+    wait "$BACKEND_PID" 2>/dev/null || true
   fi
+  rm -f "$RUN_DIR/response"
+  if [[ "$status" == 0 && "$PASSED" == true ]]; then
+    echo '[CI] Completed with PASS'
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Never adopt or terminate an existing listener. Job control isolates children.
+node --input-type=module -e 'import net from "node:net";const s=net.createServer();s.once("error",()=>process.exit(1));s.listen(8900,"127.0.0.1",()=>s.close());' || fail 'Local backend port occupied'
+set -m
+NODE_ENV=development ALLOW_UNSAFE_ADMIN=false PORT=8900 pnpm --filter @metasheet/core-backend dev >"$SERVER_LOG" 2>&1 &
+BACKEND_PID=$!
+request() {
+  local expected=$1
+  shift
+  local status
+  kill -0 "$BACKEND_PID" 2>/dev/null || fail 'Owned backend exited'
+  status=$(curl -sS --connect-timeout 3 --max-time 15 -o "$RUN_DIR/response" -w '%{http_code}' "$@" 2>/dev/null) || fail 'HTTP transport failed'
+  [[ "$status" == "$expected" ]] || fail 'Unexpected HTTP status'
+}
+json_success() {
+  request 200 "$@"
+  jq -e '.success == true' "$RUN_DIR/response" >/dev/null 2>&1 || fail 'Operation failed'
 }
 
-# Main flow
-start_local_backend || true
-wait_for_health || true
-verify_features || true
-precheck_metrics || true
-populate_metrics || true
-run_validation || true
-ensure_artifacts
-judge_outcome || exit 0
-echo "[CI] Completed with PASS"
+echo '[CI] Waiting for owned backend'
+HEALTH_MAX_TRIES=${HEALTH_MAX_TRIES:-180}
+HEALTH_DELAY_SECS=${HEALTH_DELAY_SECS:-1}
+[[ "$HEALTH_MAX_TRIES" =~ ^[1-9][0-9]*$ && "$HEALTH_DELAY_SECS" =~ ^[0-9]+$ ]] || fail 'Invalid health limits'
+ready=false
+for ((try=0; try<HEALTH_MAX_TRIES; try++)); do
+  kill -0 "$BACKEND_PID" 2>/dev/null || fail 'Owned backend exited'
+  if health_status=$(curl -sS --connect-timeout 3 --max-time 5 -o "$RUN_DIR/response" -w '%{http_code}' "$METRICS_URL" 2>/dev/null) && [[ "$health_status" == 200 ]]; then ready=true; break; fi
+  sleep "$HEALTH_DELAY_SECS"
+done
+[[ "$ready" == true ]] || fail 'Backend health failed'
+# A watcher may survive a failed bind. Prove that the actual listener belongs
+# to the launcher group before sending any population writes.
+listener=$(lsof -nP -iTCP:8900 -sTCP:LISTEN -t 2>/dev/null) || fail 'Backend listener ownership unavailable'
+[[ "$listener" =~ ^[1-9][0-9]*$ ]] || fail 'Backend listener ownership ambiguous'
+listener_group=$(ps -o pgid= -p "$listener" 2>/dev/null) || fail 'Backend listener ownership unavailable'
+listener_group=${listener_group//[[:space:]]/}
+[[ "$listener_group" == "$BACKEND_PID" ]] || fail 'Backend listener is not owned'
+request 200 "$API_BASE/internal/cache"
+jq -e '.enabled == true' "$RUN_DIR/response" >/dev/null 2>&1 || fail 'Cache disabled'
+
+echo '[CI] Populating required samples'
+for name in HTTP_WARM_ITERS CACHE_WARM_COUNT RELOAD_COUNT SNAPSHOT_COUNT; do
+  value=${!name:-}
+  [[ -z "$value" || "$value" =~ ^[1-9][0-9]*$ ]] || fail 'Invalid population count'
+done
+for ((i=0; i<${HTTP_WARM_ITERS:-75}; i++)); do
+  json_success -X POST "$API_BASE/api/cache-test/simulate"
+  # Generic routes are optional HTTP traffic only.
+  curl -fsS --connect-timeout 3 --max-time 5 "$API_BASE/api/version" >/dev/null 2>&1 || true
+  curl -fsS --connect-timeout 3 --max-time 5 "$API_BASE/api/plugins" >/dev/null 2>&1 || true
+done
+for ((i=0; i<${CACHE_WARM_COUNT:-200}; i++)); do
+  json_success -X POST "$API_BASE/api/cache-test/warm?count=100"
+done
+for ((i=0; i<${RELOAD_COUNT:-12}; i++)); do
+  reload_url="$API_BASE/api/admin/plugins/example-plugin/reload"
+  request 403 -H "Authorization: Bearer $TOKEN" -X POST "$reload_url"
+  jq -e '.code == "SAFETY_CHECK_REQUIRED" and (.confirmation.token | type == "string" and length > 0)' "$RUN_DIR/response" >/dev/null 2>&1 || fail 'Reload safety challenge required'
+  reload_token=$(jq -r '.confirmation.token' "$RUN_DIR/response")
+  confirmation=$(jq -cn --arg token "$reload_token" '{token:$token,acknowledged:true}')
+  json_success -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -X POST "$API_BASE/api/admin/safety/confirm" -d "$confirmation"
+  json_success -H "Authorization: Bearer $TOKEN" -H "X-Safety-Token: $reload_token" -X POST "$reload_url"
+  jq -e '.pluginId == "example-plugin" and .runtime.status == "active"' "$RUN_DIR/response" >/dev/null 2>&1 || fail 'Reload activation failed'
+done
+# http_error deliberately returns 500; an unrelated 500 cannot satisfy this.
+request 500 -X POST "$API_BASE/internal/test/fallback" -H 'Content-Type: application/json' -d '{"mode":"http_error"}'
+jq -e '.ok == false and .error == "simulated http error"' "$RUN_DIR/response" >/dev/null 2>&1 || fail 'Fallback trigger failed'
+request 200 -X POST "$API_BASE/internal/test/fallback" -H 'Content-Type: application/json' -d '{"mode":"cache_miss"}'
+jq -e '.ok == true and .note == "simulated cache miss (raw only)"' "$RUN_DIR/response" >/dev/null 2>&1 || fail 'Fallback trigger failed'
+bash scripts/phase5-populate-snapshots.sh &
+SNAPSHOT_PID=$!
+wait "$SNAPSHOT_PID"
+SNAPSHOT_PID=''
+request 200 "$METRICS_URL"
+for metric in '^cache_hits_total' '^cache_miss_total' '^metasheet_plugin_reload_duration_seconds_' '^metasheet_snapshot_operation_duration_seconds_'; do
+  grep -q "$metric" "$RUN_DIR/response" || fail 'Required metrics missing'
+done
+echo '[CI] Running validation'
+if scripts/phase5-full-validate.sh "$METRICS_URL" "$ARTIFACT_JSON" >"$RUN_DIR/validation.log" 2>&1; then
+  :
+else
+  status=$?
+  echo '[CI] Validation failed' >&2
+  exit "$status"
+fi
+[[ -s "$ARTIFACT_JSON" ]] || fail 'Validation artifact missing'
+jq -e '.summary.overall_status == "pass" and .summary.failed == 0 and .summary.na == 0 and (.summary.passed | type == "number" and floor == . and . > 0)' "$ARTIFACT_JSON" >/dev/null 2>&1 || fail 'Validation did not pass'
+if scripts/phase5-generate-report.sh "$ARTIFACT_JSON" "$ARTIFACT_MD" >"$RUN_DIR/report.log" 2>&1; then
+  :
+else
+  status=$?
+  echo '[CI] Report failed' >&2
+  exit "$status"
+fi
+[[ -s "$ARTIFACT_MD" ]] || fail 'Report artifact missing'
+PASSED=true
