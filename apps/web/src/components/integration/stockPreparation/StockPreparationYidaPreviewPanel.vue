@@ -19,9 +19,9 @@
       <div class="sp-yida-setup__grid">
         <label>appType（宜搭应用编码）<span class="sp-yida-setup__req" aria-hidden="true">*</span><input v-model="appType" data-testid="sp-yida-app-type" autocomplete="off" required aria-required="true"></label>
         <label>formUuid（表单 ID）<span class="sp-yida-setup__req" aria-hidden="true">*</span><input v-model="formUuid" data-testid="sp-yida-form-uuid" autocomplete="off" required aria-required="true"></label>
-        <label>organizationId（钉钉组织 ID）<span class="sp-yida-setup__req" aria-hidden="true">*</span><input :value="organizationId" data-testid="sp-yida-organization" autocomplete="off" required aria-required="true" @input="setText('organization', $event)"></label>
-        <label v-for="field in secretFields" :key="field">{{ field }}<span class="sp-yida-setup__req" aria-hidden="true">*</span><input type="password" :value="material[field]" :data-testid="`sp-yida-${field}`" autocomplete="off" spellcheck="false" required aria-required="true" @input="setMaterial(field, $event)" @paste="pasteMaterial(field, $event)"></label>
-        <label>userId（执行人钉钉 userId）<span class="sp-yida-setup__req" aria-hidden="true">*</span><input :value="material.userId" data-testid="sp-yida-userId" autocomplete="off" spellcheck="false" required aria-required="true" @input="setMaterial('userId', $event)"></label>
+        <label>organizationId（钉钉组织 ID）<span class="sp-yida-setup__req" aria-hidden="true">*</span><input :value="organizationId" data-testid="sp-yida-organization" :disabled="initialized" autocomplete="off" required aria-required="true" @input="setText('organization', $event)"></label>
+        <label v-for="field in secretFields" :key="field">{{ field }}<span class="sp-yida-setup__req" aria-hidden="true">*</span><input type="password" :value="material[field]" :data-testid="`sp-yida-${field}`" :disabled="initialized" autocomplete="off" spellcheck="false" required aria-required="true" @input="setMaterial(field, $event)" @paste="pasteMaterial(field, $event)"></label>
+        <label>userId（执行人钉钉 userId）<span class="sp-yida-setup__req" aria-hidden="true">*</span><input :value="material.userId" data-testid="sp-yida-userId" :disabled="initialized" autocomplete="off" spellcheck="false" required aria-required="true" @input="setMaterial('userId', $event)"></label>
       </div>
       <p class="sp-yida-setup__note">带 * 的七项都必填。appKey、appSecret、systemToken 会自动去掉首尾空白和换行；中间含空白或不可见字符时不发送。</p>
       <p v-if="blockedFields.length > 0" data-testid="sp-yida-material-hint">{{ blockedFields.join('、') }} 去掉首尾空白后仍含空白、换行或不可见字符，本页不会发送；请从原处重新复制。</p>
@@ -134,7 +134,7 @@ function sendable(field: SecretField): string { return material[field].trim() }
 const blockedFields = computed(() => secretFields.filter(field => yidaCredentialHasInnerBlank(material[field])))
 function clearPrivate(): void {
   for (const field of Object.keys(material) as Array<keyof YidaInitializationMaterial>) material[field] = ''
-  reviewRef.value = ''; acknowledged.value = false
+  organizationId.value = ''; reviewRef.value = ''; acknowledged.value = false
   forgetTestedPair()
 }
 
@@ -147,9 +147,10 @@ let retryTimer: ReturnType<typeof setTimeout> | null = null
 let generation = 0
 let client: ReturnType<typeof createYidaInitializationClient> | null = null
 const formFieldsReadOn = computed(() => state.value?.formFieldsReadEnabled === true)
-const formLocked = computed(() => busy.value || invalidated.value || uncertain.value || state.value?.status === 'initialized' || ownerSendLocked.value)
+const initialized = computed(() => state.value?.status === 'initialized')
+const formLocked = computed(() => busy.value || invalidated.value || uncertain.value || ownerSendLocked.value)
 // Steps 2 and 3 are local only (no request, no credential): they stay editable while the status is being read.
-const localLocked = computed(() => state.value?.status === 'initialized' || ownerSendLocked.value)
+const localLocked = computed(() => ownerSendLocked.value)
 
 function invalidateSession(code?: string): void {
   generation += 1; client?.dispose(); client = null; clearRetry()

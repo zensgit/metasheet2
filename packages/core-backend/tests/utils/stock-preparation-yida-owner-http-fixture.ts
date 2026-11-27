@@ -14,6 +14,7 @@ import type { Queryable } from '../../src/multitable/automation-durable-dispatch
 import type { createYidaOwnerRuntime, YidaOwnerRuntimeBinding } from '../../src/integration/yida-owner-runtime'
 import type { createIntegrationYidaOwnerRouter } from '../../src/routes/integration-yida-owner'
 import type { createYidaInitializationRuntime, YidaInitializationRuntimeBinding } from '../../src/integration/yida-initialization-runtime'
+import type { createYidaConnectionTestRuntime, YidaConnectionTestRuntimeBinding } from '../../src/integration/yida-connection-test-runtime'
 import type { provisionYidaInitializationAnchor } from '../../src/integration/yida-initialization-bootstrap'
 
 const root = path.resolve(__dirname, '..', '..', '..', '..')
@@ -67,6 +68,32 @@ export function draftInput(mode = 'original', quantity = 6): Input {
     : { mode, projects: ['SYN-P1', 'SYN-P2', 'SYN-P3'], projectField: 'projectNo', quantityField: 'quantity' } }
 }
 
+const setupFields = [
+  ['projectNo', 'project', '项目号', 'text', true],
+  ['componentCode', 'part_code', '图号', 'text', true],
+  ['componentName', 'part_name', '名称', 'text', true],
+  ['specification', 'spec', '规格', 'text', true],
+  ['material', 'material', '材质', 'text', true],
+  ['version', 'revision', '版本', 'text', true],
+  ['parentCode', 'parent', '父组件图号', 'text', false],
+  ['quantity', 'qty', '数量', 'number', true],
+  ['priority', 'priority', '优先级', 'text', false],
+] as const
+
+export function fourStepDraftInput(): Input {
+  const legacy = draftInput('equal_integer')
+  return { ...legacy,
+    config: { ...legacy.config, businessKey: setupFields.slice(0, 7).map(([source]) => source),
+      fieldMap: setupFields.map(([source, target, , control, required]) => ({
+        source, target, type: control === 'number' ? 'number' : 'string', required,
+      })),
+      fieldCatalog: setupFields.map(([, id, , control, required]) => ({ id, control, required })),
+    },
+    rowsText: JSON.stringify([{ projectNo: 'SYN-P1', componentCode: 'SYN-L1', componentName: 'synthetic HTTP part',
+      specification: 'SYN-SPEC', material: 'SYN-MATERIAL', version: 'A', parentCode: null, quantity: 6 }]),
+  }
+}
+
 // Y2 synthetic sheet (in memory, never a customer record): the HTTP proofs drive the sheet-source route
 // branch with these; the permission logic itself is proved in tests/unit/yida-sheet-source.test.ts.
 export const sheetColumns = Object.freeze([{ fieldId: 'fld_project', source: 'projectNo' }, { fieldId: 'fld_line', source: 'lineId' },
@@ -78,7 +105,7 @@ type SheetState = { access: Data; records: Array<{ id: string; data: Data }>; re
 const defaultSheet = (): SheetState => ({ access: {}, records: [{ id: 'rec_synthetic_1',
   data: { fld_project: 'SYN-P1', fld_line: 'SYN-L1', fld_qty: 6, fld_desc: 'synthetic HTTP part' } }] })
 
-export async function createYidaOwnerHttpRealdbFixture(options: { initialization?: boolean; bootstrap?: boolean; multiTarget?: boolean } = {}) {
+export async function createYidaOwnerHttpRealdbFixture(options: { initialization?: boolean; bootstrap?: boolean; multiTarget?: boolean; connectionTest?: boolean } = {}) {
   const databaseUrl = process.env.DATABASE_URL
   if (process.env.EXPECT_DB !== '1' || !databaseUrl) throw new Error('SYNTHETIC_DATABASE_REQUIRED')
   const schema = 'yida_owner_http_' + randomUUID().replaceAll('-', '')
@@ -92,6 +119,9 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
   let runtime: Runtime | undefined, registration: { stop(): Promise<void> } | undefined, server: Server | undefined
   let initializationRuntime: ReturnType<typeof createYidaInitializationRuntime> | undefined
   let initializationRegistration: { stop(): Promise<void> } | undefined
+  let probeRuntime: ReturnType<typeof createYidaConnectionTestRuntime> | undefined
+  let probeRegistration: { stop(): Promise<void> } | undefined
+  const connectionCalls: string[] = []
   let createInitialization: typeof createYidaInitializationRuntime, provisionInitialization: typeof provisionYidaInitializationAnchor
   let createInitializationBinding: (input: { security: Security }) => YidaInitializationRuntimeBinding
   let correlation: RequestHandler, privateLogger: { info(message: string): void; winston: { close(): void } } | undefined
@@ -214,7 +244,32 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
     }
     throw new Error('SYNTHETIC_UNEXPECTED_FETCH')
   }
+  const connectionFetch: typeof fetch = async (input, init) => {
+    const url = new URL(String(input))
+    const material = syntheticMaterial()
+    if (url.href === 'https://api.dingtalk.com/v1.0/oauth2/accessToken' && init?.method === 'POST' && init.redirect === 'error') {
+      const body = JSON.parse(String(init.body)) as Data
+      if (body.appKey !== material.appKey || body.appSecret !== material.appSecret) throw new Error('SYNTHETIC_PROBE_MATERIAL')
+      connectionCalls.push('token')
+      return Response.json({ accessToken: 'synthetic-probe-access-token', expireIn: 7200 })
+    }
+    if (url.origin === 'https://api.dingtalk.com' && url.pathname === '/v1.0/yida/forms/definitions/synthetic_http_app/synthetic_http_form'
+      && url.searchParams.get('systemToken') === material.systemToken && url.searchParams.get('userId') === material.userId
+      && url.searchParams.get('language') === 'zh_CN' && init?.method === 'GET' && init.redirect === 'error'
+      && new Headers(init.headers).get('x-acs-dingtalk-access-token') === 'synthetic-probe-access-token') {
+      connectionCalls.push('definitions')
+      return Response.json({ result: setupFields.map(([, fieldId, label, control]) => ({
+        fieldId, label, componentName: control === 'number' ? 'NumberField' : 'TextField',
+      })) })
+    }
+    throw new Error('SYNTHETIC_PROBE_ROUTE')
+  }
+
   async function closeRuntime() {
+    await probeRuntime?.stop()
+    await probeRegistration?.stop()
+    probeRuntime = undefined
+    probeRegistration = undefined
     formHold = undefined
     for (const release of formReleases.splice(0)) release()
     const initializationDrain = initializationRuntime?.stop()
@@ -247,6 +302,15 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
         ...(options.multiTarget ? { readMultiTargetEnablement: () => multiTargetEnablement } : {}) })
       initializationRegistration = await initializationRuntime.createPluginCapability().activate(createInitializationBinding({ security: pluginSecurity }))
     }
+    if (options.connectionTest) {
+      const createProbe = (await load('packages/core-backend/src/integration/yida-connection-test-runtime.ts'))
+        .createYidaConnectionTestRuntime as typeof createYidaConnectionTestRuntime
+      const createProbeBinding = (await load('plugins/plugin-integration-core/lib/yida-connection-probe.cjs'))
+        .createYidaConnectionProbeBinding as () => YidaConnectionTestRuntimeBinding
+      probeRuntime = createProbe({ database, fetch: connectionFetch,
+        readEnablement: () => 'true', readFormFieldsEnablement: () => 'true' })
+      probeRegistration = await probeRuntime.createPluginCapability().activate(createProbeBinding())
+    }
     const app = express()
     // Counts server-side response closes (a destroyed client socket included) for the gate 1 proof.
     app.use((_req, res, next) => { res.once('close', () => { closedResponses++ }); next() })
@@ -269,7 +333,7 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
     } } as Runtime
     app.use(prefix, options.multiTarget
       ? createRouter(observedRuntime, initializationRuntime, undefined, sheetSource as Parameters<typeof createRouter>[3])
-      : createRouter(observedRuntime, initializationRuntime))
+      : createRouter(observedRuntime, initializationRuntime, probeRuntime))
     server = createServer(app)
     await new Promise<void>((resolve, reject) => {
       server!.once('error', reject)
@@ -388,7 +452,7 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
     + '\n' + receiptUnparsedUp + '\n' + sourceBindingUp + '\n' + generatedLayoutUp
     + (options.multiTarget ? '\n' + multiTargetUp : '')
   return {
-    sql, tokens, sessions, tokenPayloads, formPayloads, rows, proof, http, tokenFor, startRuntime, closeRuntime, cleanup,
+    sql, tokens, sessions, tokenPayloads, formPayloads, connectionCalls, rows, proof, http, tokenFor, startRuntime, closeRuntime, cleanup,
     setEnablement(value: unknown) { enablement = value }, setFormOutcome(value: 'ack' | 'unknown' | 'unparsed') { formOutcome = value },
     setMultiTarget(value: unknown) { multiTargetEnablement = value },
     setUnboundTestTargetRefs(value: unknown) { unboundTestTargetRefs = value },
@@ -488,7 +552,7 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
       }
       const current = await hostPool!.query('SELECT current_schema() AS schema')
       if (current.rows[0]?.schema !== schema) throw new Error('SYNTHETIC_NATIVE_AUTH_POOL_SCHEMA_REQUIRED')
-      tokenPayloads.length = 0; formPayloads.length = 0; sql.length = 0
+      tokenPayloads.length = 0; formPayloads.length = 0; connectionCalls.length = 0; sql.length = 0
       enablement = 'false'; tokenCommitted = false; validRequests = true; formOutcome = 'ack'
       multiTargetEnablement = 'false'; unboundTestTargetRefs = undefined; sheet = defaultSheet(); sheetReads = 0; projectSheet = null
       disconnectAtToken = false; inflight = undefined; closedResponses = 0; lastSubmission = Promise.resolve()

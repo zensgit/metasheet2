@@ -34,8 +34,8 @@ type CapturedApiResponse = { request: BrowserRequest; status: number; headers: I
 type ApiObservation = Promise<BrowserResponse> & { cancel(): void; readonly bound: boolean }
 type ApiDiagnostic = {
   ordinal: number
-  operation: 'draft' | 'preview' | 'approval' | 'submission' | 'observation' | 'revocation' | 'initialization' | 'other'
-  pathTemplate: '/drafts' | '/preview' | '/approvals' | '/submissions' | '/approvals/:grant' | '/approvals/:grant/revoke' | '/initialization' | 'other'
+  operation: 'draft' | 'preview' | 'approval' | 'submission' | 'observation' | 'revocation' | 'initialization' | 'connectionTest' | 'other'
+  pathTemplate: '/drafts' | '/preview' | '/approvals' | '/submissions' | '/approvals/:grant' | '/approvals/:grant/revoke' | '/initialization' | '/initialization/connection-test' | 'other'
   method: 'GET' | 'POST' | 'other'; requestObserved: boolean; nativeConfirmed: boolean
   upstreamStatus: number | null; upstreamBodyBytes: number | null; upstreamContentLength: number | 'invalid' | null
   upstreamContentTypeJson: boolean | null; upstreamComplete: boolean | null
@@ -50,7 +50,7 @@ type ApiDiagnostic = {
 }
 const diagnosticPathTemplates: Record<ApiDiagnostic['operation'], ApiDiagnostic['pathTemplate']> = {
   draft: '/drafts', preview: '/preview', approval: '/approvals', submission: '/submissions', observation: '/approvals/:grant',
-  revocation: '/approvals/:grant/revoke', initialization: '/initialization', other: 'other',
+  revocation: '/approvals/:grant/revoke', initialization: '/initialization', connectionTest: '/initialization/connection-test', other: 'other',
 }
 const responseBodies = new WeakMap<BrowserResponse, CapturedApiResponse>()
 function check(value: unknown, code: string): asserts value {
@@ -63,6 +63,7 @@ function gate(): Gate {
 }
 function diagnosticOperation(fullPath: string): ApiDiagnostic['operation'] {
   if (fullPath === prefix + '/initialization') return 'initialization'
+  if (fullPath === prefix + '/initialization/connection-test') return 'connectionTest'
   if (fullPath === prefix + '/drafts') return 'draft'
   if (fullPath === prefix + '/preview') return 'preview'
   if (fullPath === prefix + '/approvals') return 'approval'
@@ -443,11 +444,12 @@ export async function createYidaOwnerBrowserFixture(input: {
     context.on('requestfinished', request => captures.finished(request))
     page = await context.newPage()
     page.on('pageerror', () => { pageErrors++ })
+    const initializationRead = parent ? captures.observe('GET', prefix + '/initialization') : undefined
     await page.goto(origin + htmlPath, { waitUntil: 'networkidle' })
     await page.getByTestId(parent ? 'stock-prep-yida-preview-panel' : 'stock-prep-yida-owner-send-panel').waitFor()
     await page.waitForFunction(() => document.body.dataset.ownerHarnessReady === '1')
     return {
-      page, requests, violations, cleanup, cacheDir,
+      page, requests, violations, cleanup, cacheDir, initializationRead,
       responseDiagnostics: () => captures.diagnostics(),
       async pageDiagnostic() {
         try {

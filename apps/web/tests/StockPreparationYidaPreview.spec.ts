@@ -173,7 +173,7 @@ describe('宜搭表单配置 — four operator steps', () => {
     expect(q('initialized').textContent).toContain('canSend=false')
     expect(q('step-4').textContent).toContain('已完成')
     // Inputs no longer hold the credentials.
-    for (const key of Object.keys(secrets)) expect(q<HTMLInputElement>(key).value).toBe('')
+    for (const key of ['organization', ...Object.keys(secrets)]) expect(q<HTMLInputElement>(key).value).toBe('')
     expect(fetchSpy).toHaveBeenCalledTimes(3)
   })
 
@@ -215,19 +215,25 @@ describe('宜搭表单配置 — four operator steps', () => {
     expect(fetchSpy.mock.calls.filter(call => call[1].method === 'POST' && call[0] === endpoint)).toHaveLength(1)
   })
 
-  it('an already initialized slot opens as done; nothing can be typed or tested', async () => {
-    await mount(json(initialized()))
+  it('an initialized slot permits a fresh local preview without reopening credentials or saving again', async () => {
+    await mount(json(initialized({ send: true })))
     expect(q('initialized')).toBeTruthy()
-    expect(q<HTMLFieldSetElement>('form-info').disabled).toBe(true)
+    for (const key of ['organization', ...Object.keys(secrets)]) expect(q<HTMLInputElement>(key).disabled).toBe(true)
     expect(q<HTMLButtonElement>('connection-test').disabled).toBe(true)
     expect(absent('save')).toBe(true)
-    expect([1, 2, 3, 4].every(n => q(`step-${n}`).textContent?.includes('已完成'))).toBe(true)
+    expect(q<HTMLButtonElement>('owner-open').disabled).toBe(true)
+    await type('app-type', 'APP_SYN01'); await type('form-uuid', 'FORM-SYN-01')
+    for (const index of STOCK_PREP_YIDA_SOURCE_FIELDS.keys()) await type(`map-target-${index}`, `manual-${index}`)
+    await click('run')
+    expect(q('summary').textContent).toContain('计划创建 2')
+    expect(q<HTMLButtonElement>('owner-open').disabled).toBe(false)
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
   })
 
   it('a DENIED test clears every private input and closes the session', async () => {
     await mount(); await fillStep1()
     fetchSpy.mockResolvedValueOnce(failure('YIDA_CONNECTION_TEST_DENIED', 403)); await click('connection-test')
-    for (const key of Object.keys(secrets)) expect(q<HTMLInputElement>(key).value).toBe('')
+    for (const key of ['organization', ...Object.keys(secrets)]) expect(q<HTMLInputElement>(key).value).toBe('')
     expect(q('status').textContent).toContain('不是宜搭锚点 owner')
   })
 

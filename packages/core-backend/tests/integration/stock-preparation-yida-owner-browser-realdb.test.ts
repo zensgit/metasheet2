@@ -168,69 +168,29 @@ databaseSuite('SA05 owner browser — isolated real panel and actual HTTP/PG aut
     expect([host.tokenPayloads.length, host.formPayloads.length]).toEqual([0, 0])
   }, 45000)
 
-  it('real parent DOM shows no single-row CREATE entry while no owner-authorized read reported the switch ON', async () => {
-    // Keep the previous six owner-only cases unchanged. This case mounts the
-    // actual parent with no props; only its public DOM config controls are used.
-    // The parent -> owner send chain (input capture, locked editor, one send) runs where the
-    // initialization GET is real: stock-preparation-yida-initialization-browser-realdb.test.ts.
+  it('real parent DOM keeps single-row CREATE closed when the initialization status is unavailable', async () => {
+    // No initialization port is installed in this host. The real JWT/API response must fail closed
+    // even with the runtime switch on, including every automatic status retry.
     await ui!.cleanup(); ui = undefined
+    const before = await host.proof()
+    host.setEnablement('true')
     ui = await createYidaOwnerBrowserFixture({ apiOrigin: host.origin, ownerToken: host.tokens.owner,
       otherToken: host.tokens.otherOwner, draftInput: input(), mode: 'parent' })
-    host.setEnablement('true')
-    const page = ui.page, expected = input(), beforeLocal = await host.proof()
-    await ui.settled()
-    expect(ui.requests).toEqual([])
-    expect(await page.getByTestId('stock-prep-yida-owner-send-panel').count()).toBe(0)
-    expect(await page.getByTestId('sp-yida-owner-open').count()).toBe(0)
-    await page.getByTestId('sp-yida-preview-mode').selectOption('protocol')
-    await page.getByTestId('sp-yida-app-type').fill('synthetic_http_app')
-    await page.getByTestId('sp-yida-form-uuid').fill('synthetic_http_form')
-    await page.getByTestId('sp-yida-intent').selectOption('create')
-    const mappings = expected.config.fieldMap as Array<{ source: string; target: string; type: string; required: boolean }>
-    const catalog = expected.config.fieldCatalog as Array<{ id: string; control: string; required: boolean }>
-    const businessKey = expected.config.businessKey as string[], emptyKey = expected.config.emptyKeyFields as string[]
-    for (let index = 0; index < mappings.length; index++) {
-      if (index > 0) await page.getByTestId('sp-yida-map-add').click()
-      const mapping = mappings[index]
-      await page.getByTestId(`sp-yida-map-source-${index}`).fill(mapping.source)
-      await page.getByTestId(`sp-yida-map-target-${index}`).fill(mapping.target)
-      await page.getByTestId(`sp-yida-map-type-${index}`).selectOption(mapping.type)
-      await page.getByTestId(`sp-yida-map-required-${index}`).setChecked(mapping.required)
-      await page.getByTestId(`sp-yida-map-key-${index}`).setChecked(businessKey.includes(mapping.source))
-      await page.getByTestId(`sp-yida-map-empty-key-${index}`).setChecked(emptyKey.includes(mapping.source))
-      await page.getByTestId('sp-yida-catalog-add').click()
-      await page.getByTestId(`sp-yida-catalog-id-${index}`).fill(catalog[index].id)
-      await page.getByTestId(`sp-yida-catalog-control-${index}`).selectOption(catalog[index].control)
-      await page.getByTestId(`sp-yida-catalog-required-${index}`).setChecked(catalog[index].required)
-    }
-    await page.getByTestId('sp-yida-rows').fill(expected.rowsText)
-    await page.getByTestId('sp-yida-allocation-mode').selectOption('equal_integer')
-    await page.getByTestId('sp-yida-allocation-projects').fill('SYN-P1\nSYN-P2\nSYN-P3')
-    await page.getByTestId('sp-yida-allocation-project-field').selectOption('projectNo')
-    await page.getByTestId('sp-yida-allocation-quantity-field').selectOption('quantity')
-    await page.getByTestId('sp-yida-run').click()
-    await page.locator('[data-testid="sp-yida-initialization-open"]:enabled').waitFor()
-    expect(await page.getByTestId('sp-yida-summary').innerText()).toBe('共 3 行；计划创建 3；计划更新 0；无效 0；本地重复键 0。')
-    expect(JSON.parse(await page.getByTestId('sp-yida-payload-2').innerText())).toEqual(host.compiledPayload(expected, 2))
-    await ui.settled()
-    expect(ui.requests).toEqual([]); expect(await host.proof()).toEqual(beforeLocal)
-    // The host switch is ON, but the client has not been told: no entry without a server read.
-    expect(await page.getByTestId('sp-yida-owner-open').count()).toBe(0)
-    await page.getByTestId('sp-yida-initialization-open').click()
-    await page.getByTestId('stock-prep-yida-initialization-panel').waitFor()
-    // This host serves no initialization port, so the only switch read fails closed.
-    const unavailable = ui.waitApi('GET', '/initialization')
-    await page.getByTestId('sp-yida-init-refresh').click()
-    expect(await realBrowserJson(await unavailable, 503)).toEqual({ ok: false, error: { code: 'YIDA_OWNER_HTTP_UNAVAILABLE' } })
-    await page.getByTestId('sp-yida-init-error').filter({ hasText: 'YIDA_OWNER_HTTP_UNAVAILABLE' }).waitFor()
-    await ui.settled()
+    const page = ui.page
+    expect(await realBrowserJson(await ui.initializationRead!, 503)).toEqual({ ok: false, error: { code: 'YIDA_OWNER_HTTP_UNAVAILABLE' } })
+    await page.getByTestId('sp-yida-error').filter({ hasText: 'YIDA_OWNER_HTTP_UNAVAILABLE' }).waitFor()
+    await page.getByTestId('sp-yida-status').filter({ hasText: '服务器状态未确认' }).waitFor()
+    expect(await page.getByTestId('sp-yida-save-submit').isDisabled()).toBe(true)
+    expect(await page.getByTestId('sp-yida-appSecret').isDisabled()).toBe(true)
     expect(await page.getByTestId('sp-yida-owner-open').count()).toBe(0)
     expect(await page.getByTestId('stock-prep-yida-owner-send-panel').count()).toBe(0)
-    // A failed read is never an answer: the state stays unconfirmed and the parent editor stays locked.
-    expect(await page.getByTestId('sp-yida-init-uncertain').count()).toBe(1)
-    expect(await page.locator('fieldset.sp-yida-preview__editor').evaluate(element => (element as HTMLFieldSetElement).disabled)).toBe(true)
-    expect(ui.requests.map(request => [request.method, request.path])).toEqual([['GET', prefix + '/initialization']])
-    expect(await host.proof()).toEqual(beforeLocal)
+    await page.getByTestId('sp-yida-status-retry').waitFor()
+    await ui.settled()
+    expect(ui.responseDiagnostics()).toMatchObject([{ operation: 'initialization', method: 'GET',
+      nativeConfirmed: true, upstreamStatus: 503, requestFinished: true }])
+    expect(ui.requests.map(request => [request.method, request.path])).toEqual(Array.from({ length: 4 },
+      () => ['GET', prefix + '/initialization']))
+    expect(await host.proof()).toEqual(before)
     expect([host.tokenPayloads.length, host.formPayloads.length]).toEqual([0, 0])
   }, 60000)
 
