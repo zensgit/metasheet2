@@ -11,6 +11,7 @@ defineOptions({ inheritAttrs: false })
 
 const props = defineProps<{
   id?: string
+  ariaLabel?: string
   name?: string
   modelValue?: string
 }>()
@@ -77,6 +78,7 @@ function commitDraft(event?: Event): void {
       :name="name"
       :value="modelValue || ''"
       v-bind="attrs"
+      :aria-hidden="ariaLabel ? 'true' : undefined"
       tabindex="-1"
       autocomplete="off"
       @input="onCanonicalInput"
@@ -89,7 +91,7 @@ function commitDraft(event?: Event): void {
       :list="listId"
       :value="draft"
       placeholder="09:00"
-      :aria-label="isZh ? '时间（24 小时，例如 09:00）' : 'Time (24-hour, for example 09:00)'"
+      :aria-label="ariaLabel || (isZh ? '时间（24 小时，例如 09:00）' : 'Time (24-hour, for example 09:00)')"
       autocomplete="off"
       @focus="focused = true"
       @input="draft = ($event.target as HTMLInputElement).value"
