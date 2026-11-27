@@ -23,6 +23,7 @@ export async function checkProjectDeleteYjs(
   // Independent caches simulate a browser's worker holding a document across a deletion from another worker.
   const first = new YjsSyncService(persistence)
   const second = new YjsSyncService(persistence)
+  const retrying = new YjsSyncService(persistence)
   const retired = vi.fn()
   first.setRetiredListener(retired)
   const seed = new Y.Doc()
@@ -42,6 +43,13 @@ export async function checkProjectDeleteYjs(
     const old = await first.getOrCreateDoc(targetId)
     const otherOld = await second.getOrCreateDoc(targetId)
     expect(old.getText('field').toString()).toBe('old project')
+    await retrying.getOrCreateDoc(targetId)
+    const failOnce = vi.spyOn(persistence, 'purgeRecords').mockRejectedValueOnce(new Error('synthetic transient persistence failure'))
+    try {
+      await expect(retrying.invalidateDocs([targetId])).rejects.toThrow('synthetic transient persistence failure')
+    } finally {
+      failOnce.mockRestore()
+    }
     const plan = await service.preview(scope)
     await service.confirm({ ...scope, ...plan })
     expect(await counts(targetId)).toEqual({ states: 0, updates: 0 })
@@ -61,6 +69,12 @@ export async function checkProjectDeleteYjs(
     // Compaction of the old document must neither replace the new snapshot nor delete its update.
     await second.releaseDoc(targetId)
     expect(await counts(targetId)).toEqual({ states: 1, updates: 1 })
+    // The business row is still empty. Reconnecting the quarantined replica must preserve
+    // the new generation's persisted edit, including its incremental update.
+    const [retryA, retryB] = await Promise.all([retrying.getOrCreateDoc(targetId), retrying.getOrCreateDoc(targetId)])
+    expect(retryA).toBe(retryB)
+    expect(retryA.getText('field').toString()).toBe('replacement')
+    expect(await counts(targetId)).toEqual({ states: 1, updates: 1 })
     const reopened = await first.getOrCreateDoc(targetId)
     expect(reopened).not.toBe(otherOld)
     expect(reopened.getText('field').toString()).toBe('replacement')
@@ -75,6 +89,7 @@ export async function checkProjectDeleteYjs(
   } finally {
     await first.destroy()
     await second.destroy()
+    await retrying.destroy()
     for (const doc of [seed, control, fresh]) doc.destroy()
   }
 }

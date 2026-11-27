@@ -56,6 +56,42 @@ function createTransactionalMockDb() {
 }
 
 describe('Yjs persistence hardening', () => {
+  it.each([false, true])('a failed purge keeps its original row identity across retries (cached=%s)', async (cached) => {
+    const recordId = 'same-id'
+    let live = { recordId, incarnation: 'before' }
+    const source = new Y.Doc()
+    let state: Uint8Array | null = null
+    const purge = vi.fn(async (_ids: string[], owners: { incarnation: string }[]) => {
+      if (owners.some(owner => owner.incarnation === live.incarnation)) state = null
+    })
+    const persistence = {
+      ...createMockPersistenceWithCompaction(),
+      getRecordIncarnation: vi.fn(async () => live),
+      getRecordIncarnations: vi.fn(async () => [live]),
+      loadDoc: vi.fn(async () => state),
+      purgeRecords: purge,
+    }
+    const service = new YjsSyncService(persistence as unknown as YjsPersistenceAdapter)
+    try {
+      if (cached) await service.getOrCreateDoc(recordId)
+      purge.mockRejectedValueOnce(new Error('synthetic outage'))
+      await expect(service.invalidateDocs([recordId])).rejects.toThrow('synthetic outage')
+      live = { recordId, incarnation: 'after' }
+      source.getText('field').insert(0, 'replacement')
+      state = Y.encodeStateAsUpdate(source)
+      const doc = await service.getOrCreateDoc(recordId)
+      expect(doc.getText('field').toString()).toBe('replacement')
+      expect(purge.mock.calls).toEqual([
+        [[recordId], [{ recordId, incarnation: 'before' }]],
+        [[recordId], [{ recordId, incarnation: 'before' }]],
+      ])
+      expect(persistence.getRecordIncarnations).toHaveBeenCalledTimes(cached ? 0 : 1)
+    } finally {
+      await service.destroy()
+      source.destroy()
+    }
+  })
+
   describe('YjsSyncService compaction path', () => {
     let persistence: ReturnType<typeof createMockPersistenceWithCompaction>
     let service: YjsSyncService

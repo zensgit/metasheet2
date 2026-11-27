@@ -1,6 +1,6 @@
 import * as Y from 'yjs'
 import type { YjsPersistenceAdapter } from './yjs-persistence-adapter'
-import { bindYjsRecord, getYjsRecordOwner, YjsRecordRetiredError } from './yjs-record-incarnation'
+import { bindYjsRecord, getYjsRecordOwner, YjsRecordRetiredError, type YjsRecordIncarnation } from './yjs-record-incarnation'
 
 /**
  * Seeds a fresh Y.Doc's `fields` Y.Map from the record's current value in
@@ -37,6 +37,12 @@ export class YjsDocUnavailableError extends Error {
   }
 }
 
+interface PendingPurge {
+  recordId: string
+  owner: Promise<YjsRecordIncarnation | undefined>
+  running?: Promise<void>
+}
+
 export class YjsSyncService {
   private docs = new Map<string, { doc: Y.Doc; lastAccess: number }>()
   /**
@@ -47,7 +53,7 @@ export class YjsSyncService {
   private generations = new Map<string, number>()
   private pendingPersistence = new Map<string, Set<Promise<void>>>()
   /** Records whose invalidated state could not be removed: not served until a removal succeeds. */
-  private quarantined = new Set<string>()
+  private quarantined = new Map<string, PendingPurge>()
   private persistence: YjsPersistenceAdapter
   private retiredListener?: (recordId: string) => void
   private cleanupTimer: NodeJS.Timeout
@@ -114,9 +120,26 @@ export class YjsSyncService {
     return this.generations.get(recordId) ?? 0
   }
 
-  private purgeAdapter(): ((ids: string[]) => Promise<void>) | null {
-    const adapter = this.persistence as YjsPersistenceAdapter & { purgeRecords?: (ids: string[]) => Promise<void> }
-    return typeof adapter.purgeRecords === 'function' ? adapter.purgeRecords.bind(adapter) : null
+  private startPurge(targets: PendingPurge[], settling: Promise<void>[] = []): Promise<void> {
+    const work = (async () => {
+      // Resolve owner promises immediately so a failed cold lookup is also observed.
+      const owners = await Promise.all(targets.map(target => target.owner))
+      await Promise.allSettled(settling)
+      const ids = targets.map(target => target.recordId)
+      if (typeof this.persistence.getRecordIncarnations === 'function') {
+        await this.persistence.purgeRecords(ids, owners.filter((owner): owner is YjsRecordIncarnation => owner != null))
+      } else {
+        // Persistence implementations without record generations retain the one-argument contract.
+        await this.persistence.purgeRecords(ids)
+      }
+      for (const target of targets) {
+        if (this.quarantined.get(target.recordId) === target) this.quarantined.delete(target.recordId)
+      }
+    })().finally(() => {
+      for (const target of targets) target.running = undefined
+    })
+    for (const target of targets) target.running = work
+    return work
   }
 
   private trackPersistence(recordId: string, work: Promise<void>): void {
@@ -162,16 +185,14 @@ export class YjsSyncService {
         existing.lastAccess = Date.now()
         return existing.doc
       }
-      if (this.quarantined.has(recordId)) {
-        // The state of an invalidated generation may still be persisted; it must not be loaded.
-        const purge = this.purgeAdapter()
-        if (!purge) throw new YjsDocUnavailableError()
+      const pending = this.quarantined.get(recordId)
+      if (pending) {
         try {
-          await purge([recordId])
+          await (pending.running ?? this.startPurge([pending]))
         } catch {
           throw new YjsDocUnavailableError()
         }
-        this.quarantined.delete(recordId)
+        if (this.quarantined.has(recordId)) continue
       }
       const generation = this.generationOf(recordId)
       const doc = await this.loadDocForGeneration(recordId, generation)
@@ -262,29 +283,37 @@ export class YjsSyncService {
    */
   async invalidateDocs(recordIds: string[]): Promise<void> {
     if (recordIds.length === 0) return
+    const ids = [...new Set(recordIds)]
+    const cached = new Map<string, YjsRecordIncarnation>()
     const settling: Promise<void>[] = []
-    for (const recordId of recordIds) {
-      // New generation first: a concurrent loader of the old one will not publish its document.
+    for (const recordId of ids) {
       this.generations.set(recordId, this.generationOf(recordId) + 1)
       const entry = this.docs.get(recordId)
       if (entry) {
+        const owner = getYjsRecordOwner(entry.doc)
+        if (owner) cached.set(recordId, owner)
         entry.doc.destroy()
         this.docs.delete(recordId)
       }
+      const previous = this.quarantined.get(recordId)?.running
+      if (previous) settling.push(previous)
       for (const work of this.pendingPersistence.get(recordId) ?? []) settling.push(work)
     }
-    // Writes of the old generation that are already on their way are settled before the removal,
-    // so none of them can land after it.
-    await Promise.allSettled(settling)
-    const purge = this.purgeAdapter()
-    if (purge) {
-      try {
-        await purge(recordIds)
-      } catch (error) {
-        for (const recordId of recordIds) this.quarantined.add(recordId)
-        throw error
-      }
+    if (typeof this.persistence.purgeRecords !== 'function') {
+      await Promise.allSettled(settling)
+      return
     }
+    const cold = ids.filter(id => !cached.has(id))
+    const lookup = cold.length && typeof this.persistence.getRecordIncarnations === 'function'
+      ? this.persistence.getRecordIncarnations(cold).then(rows => new Map(rows.map(row => [row.recordId, row])))
+      : Promise.resolve(new Map<string, YjsRecordIncarnation>())
+    const targets = ids.map(recordId => {
+      const known = cached.get(recordId)
+      const target: PendingPurge = { recordId, owner: known ? Promise.resolve(known) : lookup.then(rows => rows.get(recordId)) }
+      this.quarantined.set(recordId, target)
+      return target
+    })
+    await this.startPurge(targets, settling)
   }
 
   async releaseDoc(recordId: string): Promise<void> {

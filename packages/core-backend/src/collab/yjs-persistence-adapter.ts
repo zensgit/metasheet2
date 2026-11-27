@@ -14,6 +14,13 @@ export class YjsPersistenceAdapter {
     return row ? { recordId, incarnation: row.yjs_incarnation } : null
   }
 
+  async getRecordIncarnations(recordIds: string[]): Promise<YjsRecordIncarnation[]> {
+    if (!recordIds.length) return []
+    const rows = await this.db.selectFrom('meta_records').select(['id', 'yjs_incarnation'])
+      .where('id', 'in', recordIds).execute()
+    return rows.map(row => ({ recordId: row.id, incarnation: row.yjs_incarnation }))
+  }
+
   private async lockOwner(tx: Kysely<Database>, recordId: string, owner: YjsRecordIncarnation): Promise<void> {
     if (recordId !== owner.recordId) throw new YjsRecordRetiredError()
     const row = await tx.selectFrom('meta_records')
@@ -142,17 +149,24 @@ export class YjsPersistenceAdapter {
    * No-op for record IDs that have no rows. Best-effort — callers do
    * not fail their REST write on purge failure (see `index.ts`).
    */
-  async purgeRecords(recordIds: string[]): Promise<void> {
+  async purgeRecords(recordIds: string[], owners?: YjsRecordIncarnation[]): Promise<void> {
     if (recordIds.length === 0) return
     await this.db.transaction().execute(async (trx) => {
-      await trx
-        .deleteFrom('meta_record_yjs_states')
-        .where('record_id', 'in', recordIds)
-        .execute()
-      await trx
-        .deleteFrom('meta_record_yjs_updates')
-        .where('record_id', 'in', recordIds)
-        .execute()
+      let selected = recordIds
+      if (owners) {
+        // An old invalidation may retry after another process recreates the same ID. Lock
+        // matching live rows in this transaction before touching either persistence table.
+        const { rows } = await sql<{ id: string }>`
+          SELECT r.id FROM meta_records r
+          JOIN unnest(${owners.map(o => o.recordId)}::text[], ${owners.map(o => o.incarnation)}::uuid[]) AS target(id, incarnation)
+            ON r.id = target.id AND r.yjs_incarnation IS NOT DISTINCT FROM target.incarnation
+          WHERE r.id = ANY(${recordIds}::text[]) ORDER BY r.id FOR KEY SHARE OF r
+        `.execute(trx)
+        selected = rows.map(row => row.id)
+        if (!selected.length) return
+      }
+      await trx.deleteFrom('meta_record_yjs_states').where('record_id', 'in', selected).execute()
+      await trx.deleteFrom('meta_record_yjs_updates').where('record_id', 'in', selected).execute()
     })
   }
 
