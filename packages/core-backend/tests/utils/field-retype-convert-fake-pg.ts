@@ -517,4 +517,4 @@ export class FieldRetypeConvertFakePg {
  * own with {@link isFakeSheetVersionBump}.
  */
 export const FAKE_WRITE_RE = /^\s*(?!INSERT\s+INTO\s+sheet_permission_versions\b)(INSERT|UPDATE|DELETE|TRUNCATE)\b/i
-export const FAKE_LOCK_RE = /\b(FOR\s+UPDATE|FOR\s+SHARE|pg_advisory\w*|LOCK\s+TABLE)\b/i
+export const FAKE_LOCK_RE = /\b(FOR\s+(?:NO\s+KEY\s+)?UPDATE|FOR\s+(?:KEY\s+)?SHARE|pg_advisory\w*|LOCK\s+TABLE)\b/i

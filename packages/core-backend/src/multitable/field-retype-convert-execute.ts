@@ -347,7 +347,7 @@ export async function executeFieldRetypeConvert(
 
   // D21 field-row writer rule（authz-version-protocol.ts）：表版本行在本事务第一把行锁（下面的字段行 FOR UPDATE）之前取，
   // 无条件。旧式 jsonb 字符串 property 会被 normalizeProperty 解析成对象，下面改字段的 UPDATE 因此会翻转可见性触发器的
-  // 标志位（字符串读作 false，对象读作 true）；若等触发器在字段行与每个 live 行的行锁 之后才取版本行，就与持有该行
+  // 标志位（字符串读作 false，对象读作 true）；若等触发器在字段与 live 记录上锁之后才取版本行，就与持有该行
   // FOR SHARE、再要被绑定记录 FOR SHARE 的准入事务成环（核验 r1 F2：40P01）。放在门之后，被门拒绝的调用方不碰版本行。
   // 本事务此后不插入 meta_sheets 的 FK 子行、也不更新 meta_sheets，所以不必先取表行的 KEY SHARE。
   await bumpSheetPermissionVersions(query, [sheetId])
@@ -618,7 +618,7 @@ export async function undoFieldRetypeConvert(
   if (counted.live + counted.trash > cap) return { ok: false, failure: fieldRetypeConvertTooLarge(counted.live + counted.trash, cap) }
 
   // D21 field-row writer rule（authz-version-protocol.ts）：表版本行在本事务第一把行锁（作业行 FOR UPDATE，其后是前镜像、
-  // 字段行与每个 live 行的行锁）之前取，无条件。撤销把作业行里原样存的 source_property 写回字段——旧式 jsonb 字符串
+  // 字段与 live 记录的行锁）之前取，无条件。撤销把作业行里原样存的 source_property 写回字段——旧式 jsonb 字符串
   // 会盖掉转换写进去的对象，翻转可见性触发器的标志位；若等触发器在这些行锁之后才取版本行，就与准入事务成环（核验 r1 F2）。
   // 本事务此后不插入 meta_sheets 的 FK 子行、也不更新 meta_sheets，所以不必先取表行的 KEY SHARE。
   await bumpSheetPermissionVersions(query, [sheetId])
