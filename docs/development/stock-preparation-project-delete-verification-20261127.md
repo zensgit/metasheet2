@@ -1,8 +1,14 @@
 # #6991 备料项目交付清理 · 验证记录
 
-首版基线为 `6babc578ec`，复审修订已对齐主线 `e33d447552`。测试均使用合成项目。删除专项已在 GitHub PostgreSQL 14 通过 25/25。开关默认关闭，生产启用由业主决定。[开发说明](./stock-preparation-project-delete-development-20261127.md) · [设计锁](./stock-preparation-project-delete-design-lock-20261127.md)
+首版基线为 `6babc578ec`，复审修订已对齐主线 `e33d447552`。测试均使用合成项目。删除专项已在 GitHub PostgreSQL 14 通过 26/26。开关默认关闭，生产启用由业主决定。[开发说明](./stock-preparation-project-delete-development-20261127.md) · [设计锁](./stock-preparation-project-delete-design-lock-20261127.md)
 
 ## 修复版真库结论
+
+最新代码提交 `88b4fda6` 的 PostgreSQL 14 删除专项为 **26/26**。第 26 项在数据库上交错执行权限准入、临界撤权与项目确认：过期或撤权时版本变化回滚，成功时仅为受影响的表推进权限版本，同表兄弟项目和另一租户的权限记录保留。整个备料文件 267/267，字段转换和 Yjs 竞态 74/74。多维表总计 271 个文件全部通过，**3664 过、2 跳过、0 失败**；两项跳过均来自独立的权限管理用例。[最终多维表真库任务](https://github.com/zensgit/metasheet2/actions/runs/45991405101/job/140482840785)
+
+同一代码提交通过后端全量单测、插件系统汇总门槛和 Chromium 工作台验收。审批、运行时、多维表和考勤分别在真实数据库上运行。[后端全量单测](https://github.com/zensgit/metasheet2/actions/runs/45991405101/job/140482840792) · [汇总门槛](https://github.com/zensgit/metasheet2/actions/runs/45991405101/job/140492895215) · [标准 Chromium 验收](https://github.com/zensgit/metasheet2/actions/runs/45991405220/job/140479854115) · [权限目录矩阵](https://github.com/zensgit/metasheet2/actions/runs/45991405489)
+
+**前一轮对照**
 
 提交 `7f15d279` 的 PostgreSQL 14 任务通过了全部 **25/25** 个项目删除场景。承载这些场景的备料文件共 266 项，全数通过；字段转换与撤销的 74 项也全部通过，包括两条真实 Yjs 竞态。多维表任务 271 个文件全部通过，合计 **3663 项通过、2 项跳过、0 项失败**。两项跳过均属于独立的多维表权限管理矩阵文件。[PostgreSQL 实跑日志](https://github.com/zensgit/metasheet2/actions/runs/45983477943/job/140455764018)
 
