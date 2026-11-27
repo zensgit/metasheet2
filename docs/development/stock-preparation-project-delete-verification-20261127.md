@@ -20,6 +20,16 @@
 
 [11 月 28 日新增评审](https://github.com/zensgit/metasheet2/pull/7004#pullrequestreview-6091702985) 要求在此基础上补齐第 7–9 条验收。新增的用例暂停真实建表路由、在同号重建后重放令牌和队列消息、从原下载入口读取附件、在恢复子系统实际创建档案/作业/保全记录，并在真实确认事务提交后切断 HTTP 响应，再按预览编号取回成功审计。执行结果见本分支的 [PR 检查](https://github.com/zensgit/metasheet2/pull/7004/checks)。
 
+### 第 7–9 项验收证据
+
+| 验收条件 | 实际检查位置 |
+|---|---|
+| 建表与删除互斥；旧操作重放 | [正式建表入口的双向交错](../../packages/core-backend/tests/integration/stock-preparation-project-delete-create-order-realdb.cases.ts) · [从 apply、作业 run 和删除确认入口重放](../../packages/core-backend/tests/integration/stock-preparation-project-delete-delivery-realdb.cases.ts) |
+| 保留依赖 | [真实附件在预览前及确认前加入，并从下载接口读回原字节](../../packages/core-backend/tests/integration/stock-preparation-project-delete-retention-realdb.cases.ts) · [已验证档案、已受理恢复作业及保全记录逐项阻断](../../packages/core-backend/tests/integration/multitable-recovery-archive-restore-jobs-realdb.test.ts) |
+| 响应丢失 | [成功提交后断开 HTTP 连接，用预览编号读回原数量](../../packages/core-backend/tests/integration/stock-preparation-project-delete-delivery-realdb.cases.ts) · [原操作者、租户与项目隔离](../../packages/core-backend/tests/integration/stock-preparation-project-delete-realdb.cases.ts) · [只读查询的界面行为](../../apps/web/tests/StockPreparationProjectDelete.spec.ts) |
+
+`1afa9340` 的 PostgreSQL 14 多维表任务首次实跑新增用例，3,668 项通过、1 项失败、2 项原有跳过。两种附件时点以及恢复档案、作业、保全阻断均通过。唯一失败来自旧拉取令牌重放：替代项目业务行完整，但其登记的最近拉取结果被记成“拒绝”，更新时间随之改变。修订在获取新项目的写租约及记录结果前核对已清理项目的令牌。保留原始快照断言，并检查重放期间没有读取数据源。[发现问题的真库实跑](https://github.com/zensgit/metasheet2/actions/runs/46046909270/job/140670850899)
+
 ### 复验本轮用例
 
 真库命令须在专用测试库完成仓库迁移后执行。下面的名称过滤匹配各组项目删除用例；同一文件去掉名称过滤即可运行整个备料套件。

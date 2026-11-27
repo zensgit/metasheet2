@@ -177,12 +177,14 @@ export async function exerciseProjectDeleteDelivery(pinned: PinnedServer, fixtur
     const snapshot = () => Promise.all([records.queryRecords({ sheetId: rebuilt.sheetId }), records.queryRecords({ sheetId: control.sheetId }),
       registry.get(scope), registry.get(controlScope)])
     const beforeReplay = await snapshot()
+    const sourceReadsBeforeReplay = source.calls.length
     const retryToken = await post(tableAction + '/apply').send({ parameters, confirm: oldToken }).expect(409)
     expect(retryToken.body.error.code).toBe('TABLE_ACTION_DRY_RUN_TOKEN_INVALID')
     const retryJob = await post(jobs + '/' + oldJob + '/run').send({}).expect(404)
     expect(retryJob.body.error.code).toMatch(/JOB_NOT_FOUND$/)
     const retryDelete = await post(prefix + '/delete/confirm').send(confirmation).expect(409)
     expect(retryDelete.body.error.code).toBe('STOCK_PREPARATION_PROJECT_DELETE_CHALLENGE_INVALID')
+    expect(source.calls).toHaveLength(sourceReadsBeforeReplay)
     expect(await snapshot()).toEqual(beforeReplay)
     expect((await readReceipt().expect(200)).body.data).toEqual(receipt)
     const audit = await auditStore.list({ tenantId: scope.tenantId, projectId: scope.projectNo, action: 'project_delete' })

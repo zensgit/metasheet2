@@ -612,6 +612,7 @@ const {
   PLM_STOCK_PREPARATION_ACTION_ID,
   StockPreparationTableActionError,
   __internals: tableActionInternals,
+  hasIssuedDryRunToken,
   applyStockPreparationAction,
   assertProductionCleanRowsWithinBound,
   assertStockPrepApplyAllowed,
@@ -9828,6 +9829,17 @@ function requireStockPreparationAudit() {
       const applyTenantId = resolveTenantId(req, {})
       // S1 (ADR §3 「租户墙」): a resolved project sheet must be the caller's own — no-op otherwise.
       await assertResolvedProjectTargetTenancy(action, applyTenantId)
+      // A pre-cleanup token is removed by the deletion transaction. A duplicate delivery must
+      // stop before it acquires a new generation's write lease or publishes a refusal on its board.
+      // A live token still has to be atomically claimed and validated under the ordinary lease.
+      const replayProject = action.projectTarget?.projectNo || firstString(body.parameters?.projectNo)
+      const replayToken = firstString(body.confirm?.dryRunToken)
+      const cleanup = services.stockPreparationProjectDelete
+      if (replayToken && replayProject && typeof cleanup?.wasDeleted === 'function'
+        && !(await hasIssuedDryRunToken(context.storage, replayToken))
+        && await cleanup.wasDeleted({ tenantId: applyTenantId, projectNo: replayProject })) {
+        throw new HttpRouteError(409, 'TABLE_ACTION_DRY_RUN_TOKEN_INVALID', 'dry-run token unavailable')
+      }
       // Batch-refresh phase 0 step 1 — THE SHEET WRITE LEASE (S2/S3). One writer per target sheet (R-52)
       // across processes, held around everything below: the B2a claim, the credential load,
       // the token claim, the re-plan and every write. Acquired BEFORE all of them, so a busy refusal

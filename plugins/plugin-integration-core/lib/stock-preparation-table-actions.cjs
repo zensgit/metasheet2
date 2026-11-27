@@ -2042,6 +2042,10 @@ function tokenStoreKey(token) {
   return `${DRY_RUN_TOKEN_PREFIX}${token}`
 }
 
+async function hasIssuedDryRunToken(tokenStore, token) {
+  return isPlainObject(await requireTokenStore(tokenStore).get(tokenStoreKey(token)))
+}
+
 function requireTokenStore(tokenStore) {
   if (!tokenStore || typeof tokenStore.get !== 'function' || typeof tokenStore.set !== 'function') {
     throw new StockPreparationTableActionError(501, 'TABLE_ACTION_TOKEN_STORE_UNAVAILABLE', 'table action requires plugin storage for dry-run tokens')
@@ -3847,6 +3851,7 @@ async function readStockPreparationSheetRepairSource(input = {}) {
 }
 
 module.exports = {
+  hasIssuedDryRunToken,
   DEFAULT_DRY_RUN_TOKEN_TTL_MS,
   GENERIC_TABLE_ACTION_KIND,
   LARGE_BOM_BACKGROUND_CAP_CEILINGS,

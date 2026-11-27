@@ -260,12 +260,18 @@ function createStockPreparationProjectDelete({ database, auditStore, authorizeWi
     })
   }
 
-  return { preview, confirm, receipt, deletionSnapshot, isDeleted: scope => isProjectDeleted(database, scope) }
+  return { preview, confirm, receipt, deletionSnapshot,
+    wasDeleted: scope => withDeletionMarker(database, scope, async () => true),
+    isDeleted: scope => isProjectDeleted(database, scope) }
 }
 
 // A scheduled legacy pull used to accept even an unregistered project. Only an actual deletion
 // changes that rule. A current registry, project ledger or shared pull root proves recreation.
-async function isProjectDeleted(database, { tenantId, projectNo, boundTarget }) {
+async function isProjectDeleted(database, scope) {
+  return withDeletionMarker(database, scope, async tx => !(await existsProjectRoot(tx, scope)))
+}
+
+async function withDeletionMarker(database, { tenantId, projectNo }, whenPresent) {
   try {
     return await database.transaction(async client => {
       const tx = transactionHandle(client, performance.now() + TRANSACTION_BUDGET_MS)
@@ -287,7 +293,7 @@ async function isProjectDeleted(database, { tenantId, projectNo, boundTarget }) 
         WHERE tenant_id = $1 AND project_id = $2 AND action = 'project_delete') AS present`, [tenantId, projectNo])
       if (marker?.present === false) return false
       if (marker?.present !== true) throw refusal('failed')
-      return !(await existsProjectRoot(tx, { tenantId, projectNo, boundTarget }))
+      return whenPresent(tx)
     })
   } catch (error) { throw mapError(error) }
 }
