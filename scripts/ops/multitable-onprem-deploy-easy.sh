@@ -27,7 +27,8 @@ function info() {
 }
 
 function run() {
-  info "+ $*"
+  # Environment arguments include credentials; log only the executable.
+  info "+ $1"
   "$@"
 }
 
@@ -47,6 +48,17 @@ function verify_prebuilt_dist() {
 function require_cmd() {
   local name="$1"
   command -v "$name" >/dev/null 2>&1 || die "Missing required command: ${name}"
+}
+
+function wait_for_api() {
+  local attempt code
+  for ((attempt = 0; attempt < 30; attempt++)); do
+    if code="$(curl -sS --connect-timeout 1 --max-time 1 -o /dev/null -w '%{http_code}' "${api_base}/health")" && [[ "$code" == "200" ]]; then
+      return
+    fi
+    sleep 1
+  done
+  die "API did not become ready after service startup; admin bootstrap was not attempted"
 }
 
 function to_web_base() {
@@ -81,6 +93,7 @@ run env \
   "${ROOT_DIR}/scripts/ops/attendance-onprem-bootstrap.sh"
 
 verify_prebuilt_dist
+wait_for_api
 
 run env \
   ENV_FILE="$ENV_FILE" \
@@ -109,18 +122,22 @@ if [[ "$curl_rc" -eq 0 && "$login_code" == "200" ]] && command -v node >/dev/nul
       let parsed = {};
       try { parsed = JSON.parse(raw); } catch {}
       const token = parsed?.data?.token || parsed?.token || "";
-      process.stdout.write(String(token));
+      process.stdout.write(typeof token === "string" && token.trim() ? token : "");
     ' "$(cat "$tmp_login_file")"
   )"
 fi
 rm -f "$tmp_login_file"
+
+if [[ "$VERIFY_LOGIN" == "1" && -z "$auth_token" ]]; then
+  die "Fresh admin login token required before healthcheck"
+fi
 
 if [[ -n "$auth_token" ]]; then
   run env \
     BASE_URL="$web_base" \
     API_BASE="$api_base" \
     CHECK_NGINX="$CHECK_NGINX" \
-    SERVICE_MANAGER=auto \
+    SERVICE_MANAGER="$SERVICE_MANAGER" \
     AUTH_TOKEN="$auth_token" \
     EXPECT_PRODUCT_MODE="$EXPECT_PRODUCT_MODE" \
     "${ROOT_DIR}/scripts/ops/multitable-onprem-healthcheck.sh"
@@ -130,7 +147,7 @@ else
     BASE_URL="$web_base" \
     API_BASE="$api_base" \
     CHECK_NGINX="$CHECK_NGINX" \
-    SERVICE_MANAGER=auto \
+    SERVICE_MANAGER="$SERVICE_MANAGER" \
     "${ROOT_DIR}/scripts/ops/multitable-onprem-healthcheck.sh"
 fi
 
