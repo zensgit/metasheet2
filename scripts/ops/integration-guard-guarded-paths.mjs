@@ -33,6 +33,7 @@ export const GUARDED_PATH_ENTRIES = Object.freeze([
   'apps/web/src/services/integration/yidaInitialization.ts',
   'apps/web/src/services/integration/yidaOwner.ts',
   'apps/web/src/services/integration/yidaSendBudget.ts',
+  'apps/web/src/services/integration/yidaSetupMapping.ts',
   'apps/web/tests/StockPreparationProjectBoard.spec.ts',
   'apps/web/tests/StockPreparationYidaOwnerSend.spec.ts',
   'apps/web/tests/StockPreparationYidaPreview.spec.ts',
