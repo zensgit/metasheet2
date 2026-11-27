@@ -250,7 +250,7 @@
             </span>
             <MetaAttachmentList
               :attachments="attachmentItems(field.id)"
-              :removable="!isFieldReadOnly(field.id)"
+              :removable="!isFieldReadOnly(field.id) && !attachmentActivity[field.id]"
               empty-label=""
               @remove="onRemoveAttachment(field.id, $event)"
             />
@@ -933,16 +933,20 @@ async function onClearAttachments(fieldId: string) {
   const same = () => props.record?.id === recordId
   if (props.deleteAttachmentFn) {
     setAttachmentActivity(fieldId, 'clearing')
+    const cleared: string[] = []
     try {
       for (const attachmentId of existingIds) {
         await props.deleteAttachmentFn(attachmentId, {
           recordId,
           fieldId,
         })
+        cleared.push(attachmentId)
         if (same()) forgetLocalAttachment(fieldId, attachmentId)
       }
     } catch (error: any) {
       if (same()) {
+        // The files whose delete was answered leave the list as the form holds it now, as a removed file does; the rest stay.
+        if (cleared.length) formData[fieldId] = attachmentList(fieldId).filter((id) => !cleared.includes(id))
         setAttachmentOperationError(fieldId, error?.message ?? lc('cell.clearFailed'))
         setAttachmentActivity(fieldId)
       }
