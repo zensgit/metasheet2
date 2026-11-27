@@ -861,14 +861,27 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
         })
         const cleanupWriter = await pool.connect()
         let racingCleanup: Promise<JsonResponse> | undefined
+        let cleanupResponseBeforeLock: { status: number; code: string } | undefined
         try {
           await cleanupWriter.query('BEGIN')
           await cleanupWriter.query('SELECT id FROM meta_records WHERE id = $1 FOR UPDATE', [projectionId])
           const writerPid = (await cleanupWriter.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
-          racingCleanup = retry(1)
+          racingCleanup = retry(1).then((result) => {
+            const code = result.body?.error?.code
+            cleanupResponseBeforeLock = {
+              status: result.status,
+              code: typeof code === 'string' && ['ATTENDANCE_CLEANING_BUSY', 'ATTENDANCE_CLEANING_CONFLICT',
+                'ATTENDANCE_CLEANING_DISABLED', 'ATTENDANCE_CLEANING_FORBIDDEN', 'ATTENDANCE_CLEANING_PROPOSAL_INVALID',
+                'ATTENDANCE_CLEANING_REQUEST_INVALID', 'ATTENDANCE_CLEANING_UNAUTHORIZED', 'ATTENDANCE_CLEANING_UNAVAILABLE',
+                'FORBIDDEN', 'UNAUTHORIZED'].includes(code) ? code : 'UNKNOWN',
+            }
+            return result
+          })
           await vi.waitFor(async () => {
             const blocked = await pool.query(`SELECT pid FROM pg_stat_activity
               WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid))`, [writerPid])
+            // A pre-lock HTTP refusal must not be hidden behind a lock-wait timeout.
+            expect(cleanupResponseBeforeLock, 'cleanup retry returned before the held projection lock: ' + JSON.stringify(cleanupResponseBeforeLock)).toBeUndefined()
             expect(blocked.rows.length).toBeGreaterThan(0)
           }, { timeout: 3000, interval: 20 })
           await cleanupWriter.query(`UPDATE meta_records SET data = data || '{"custom_keep":"concurrent user edit"}'::jsonb,
