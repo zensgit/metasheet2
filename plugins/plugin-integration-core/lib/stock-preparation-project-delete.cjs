@@ -3,11 +3,12 @@
 const { createHash, randomBytes, randomUUID, timingSafeEqual } = require('node:crypto')
 const { performance } = require('node:perf_hooks')
 const { createDb } = require('./db.cjs')
+const { deriveStockPreparationBaseId } = require('./stock-preparation-own-base.cjs')
 const { PROJECT_OVERVIEW_LOCK_PREFIX } = require('./stock-preparation-project-target-store.cjs')
 const { lockProjectActivity, projectBusy } = require('./stock-preparation-project-delete-activity.cjs')
-const { planSheets, deleteSheets, existsProjectRoot, SHEET_LOCK_TABLES } = require('./stock-preparation-project-delete-sheets.cjs')
-const { planBusiness, deleteBusiness, BUSINESS_LOCK_TABLES } = require('./stock-preparation-project-delete-business.cjs')
-const { planRuntime, deleteRuntime } = require('./stock-preparation-project-delete-runtime.cjs')
+const { planSheets, deleteSheets, existsProjectRoot, discoverProjectDeleteSheetScope } = require('./stock-preparation-project-delete-sheets.cjs')
+const { planBusiness, deleteBusiness, businessDeleteFenceKeys } = require('./stock-preparation-project-delete-business.cjs')
+const { planRuntime, deleteRuntime, runtimeFenceKeys } = require('./stock-preparation-project-delete-runtime.cjs')
 
 const CHALLENGES = 'integration_stock_prep_project_delete_challenges'
 const TTL_SECONDS = 300
@@ -51,24 +52,40 @@ function transactionHandle(client, deadline) {
   }
 }
 
-async function lockData(tx, scope) {
-  await lockProjectActivity(tx, scope, false)
+async function excludeProjectActivities(tx, scope) {
+  await lockProjectActivity(tx, scope)
   const [overview] = await tx.query('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked', [PROJECT_OVERVIEW_LOCK_PREFIX + scope.tenantId])
   if (overview?.locked !== true) throw projectBusy()
-  // Writers through the ordinary grid or older plugin entry points do not acquire our advisory
-  // lock. Prevent writes, including phantoms in initially empty tables, for the check/delete window.
-  // EXCLUSIVE admits ordinary reads but also refuses locking reads (FOR UPDATE/SHARE) that have
-  // not issued their first DML yet. NOWAIT never queues behind an active writer. All names are static.
-  const tables = [...new Set([...SHEET_LOCK_TABLES, ...BUSINESS_LOCK_TABLES, 'plugin_kv'])].sort()
-  if (!tables.every(t => /^[a-z][a-z0-9_]*$/.test(t))) throw refusal('failed')
-  await tx.query(`LOCK TABLE ${tables.map(t => `"${t}"`).join(', ')} IN EXCLUSIVE MODE NOWAIT`)
 }
 
-async function planProject(tx, scope) {
-  const sheets = await planSheets(tx, scope)
+async function lockData(tx, scope) {
+  await excludeProjectActivities(tx, scope)
+  // Registry writes hold the shared stage key. Freeze membership before discovering adopted and
+  // empty shared sheets; they must be fenced even if today's targeted row count is zero.
+  const fence = 'SELECT public.stock_prep_project_delete_fence($1::text[], false)'
+  await tx.query(fence, [['stage:' + scope.tenantId + ':integration-core', 'registry-target:' + JSON.stringify([scope.tenantId, scope.projectNo])]])
+  await tx.query('SELECT id FROM meta_bases WHERE id = $1 FOR SHARE NOWAIT', [deriveStockPreparationBaseId(scope.tenantId)])
+  const sheets = await discoverProjectDeleteSheetScope(tx, scope)
+  await tx.query(fence, [[...sheets.map(id => 'sheet:' + id), ...businessDeleteFenceKeys(scope, sheets), ...runtimeFenceKeys(scope, sheets)]])
+  // The following inventory gets a fresh READ COMMITTED snapshot after the writer keys have
+  // been acquired. Prior commits are included; in-flight writers refused the try-lock.
+}
+
+async function planProject(tx, scope, confirming = false) {
+  let sheets = await planSheets(tx, scope)
+  if (confirming) {
+    // Yjs persistence and host FK writers pin record incarnations with FOR KEY SHARE. Take their
+    // conflicting row locks before the final dependency count, without touching sibling records.
+    const liveIds = [...sheets.selected.values()].flatMap(selection => selection.live)
+    if (liveIds.length) {
+      const held = await tx.query('SELECT id FROM meta_records WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE NOWAIT', [liveIds])
+      if (held.length !== liveIds.length) throw refusal('stale')
+      sheets = await planSheets(tx, scope)
+    }
+  }
   const business = await planBusiness(tx, scope, sheets)
   if (!sheets.identityPresent && !business.identityPresent) return null
-  const runtime = await planRuntime(tx, scope, sheets)
+  const runtime = await planRuntime(tx, scope, sheets, confirming)
   const counts = {}
   for (const plan of [sheets, business, runtime]) {
     if (typeof plan.fingerprint !== 'string' || !plan.fingerprint) throw refusal('failed')
@@ -85,7 +102,7 @@ async function planProject(tx, scope) {
 }
 
 function mapError(error) {
-  if (['42501', '42P01', '42703'].includes(error?.code)) return refusal('unavailable')
+  if (['42501', '42P01', '42703', '42883'].includes(error?.code)) return refusal('unavailable')
   if (error?.code === 'STOCK_PREPARATION_PROJECT_DELETE_DEPENDENCY') {
     const reason = error.details?.reason
     if (!['external_binding', 'attachment', 'recovery', 'independent_workflow'].includes(reason)) return refusal('failed')
@@ -104,20 +121,26 @@ function mapError(error) {
 function createStockPreparationProjectDelete({ database, auditStore, authorizeWithin } = {}) {
   if (!database?.transaction || !auditStore?.appendWithin || typeof authorizeWithin !== 'function') throw refusal('failed')
 
-  async function transact(scope, operation) {
+  async function transact(scope, operation, snapshot = false) {
     try {
       const deadline = performance.now() + TRANSACTION_BUDGET_MS
       return await database.transaction(async (client) => {
         const tx = transactionHandle(client, deadline)
-        // READ COMMITTED sees every writer that committed before we acquired the table locks, even
-        // when this database normally uses a transaction-wide snapshot.
-        await tx.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+        await tx.query(snapshot ? 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ' : 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
         await tx.query("SET LOCAL lock_timeout = '500ms'")
         await tx.query("SET LOCAL statement_timeout = '15s'")
         // PostgreSQL errors if a policy would filter any query with this setting. A restricted
         // host role must never undercount hidden records before a potentially cascading delete.
         await tx.query('SET LOCAL row_security = off')
         await authorizeWithin(tx, scope)
+        // Deployments can roll code and Kysely migrations separately. Every fence migration
+        // installs its triggers atomically. A partial rollout cannot issue or consume a challenge.
+        const [schema] = await tx.query(`SELECT count(*) = 3 AS ready FROM pg_catalog.pg_trigger
+          WHERE tgenabled IN ('O', 'A') AND (tgrelid, tgname) IN (
+            (to_regclass('public.meta_records'), 'stock_prep_project_delete_scoped_write'),
+            (to_regclass('public.integration_stock_prep_handoff'), 'stock_prep_project_delete_business_write'),
+            (to_regclass('public.plugin_kv'), 'stock_prep_project_delete_kv_insert'))`)
+        if (!schema?.ready) throw refusal('unavailable')
         const answer = await operation(tx)
         if (performance.now() >= deadline) throw projectBusy()
         return answer
@@ -129,7 +152,7 @@ function createStockPreparationProjectDelete({ database, auditStore, authorizeWi
     const scope = requireScope(input)
     const { tenantId, projectNo, actor } = scope
     return transact(scope, async (tx) => {
-      await lockData(tx, scope)
+      await excludeProjectActivities(tx, scope)
       const plan = await planProject(tx, scope)
       if (!plan) throw refusal('absent')
       const challengeId = randomUUID()
@@ -145,7 +168,7 @@ function createStockPreparationProjectDelete({ database, auditStore, authorizeWi
           fingerprint = EXCLUDED.fingerprint, code_digest = EXCLUDED.code_digest, expires_at = EXCLUDED.expires_at
         RETURNING expires_at`, [challengeId, tenantId, projectNo, actor, plan.fingerprint, digest([challengeId, verificationCode]), TTL_SECONDS])
       return { tenantId, projectNo, tables: plan.tables, counts: plan.counts, challengeId, verificationCode, expiresAt: new Date(row.expires_at).toISOString() }
-    })
+    }, true)
   }
 
   async function confirm(input) {
@@ -163,7 +186,7 @@ function createStockPreparationProjectDelete({ database, auditStore, authorizeWi
       if (!claim || typeof verificationCode !== 'string' || !/^[0-9A-F]{8}$/.test(verificationCode)
         || !timingSafeEqual(Buffer.from(claim.code_digest, 'hex'), Buffer.from(digest([challengeId, verificationCode]), 'hex'))) return { refused: 'challenge' }
       await lockData(tx, scope)
-      const plan = await planProject(tx, scope)
+      const plan = await planProject(tx, scope, true)
       if (!plan || plan.fingerprint !== claim.fingerprint) return { refused: 'stale' }
       await deleteRuntime(tx, scope, plan.runtime)
       await deleteBusiness(tx, scope, plan.business)

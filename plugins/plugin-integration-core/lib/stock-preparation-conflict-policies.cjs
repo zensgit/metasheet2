@@ -418,6 +418,7 @@ module.exports = {
   normalizeRunOnlyConflictPolicyReview,
   saveTableScopeConflictPolicies,
   __internals: {
+    STORAGE_PREFIX,
     conflictPolicyStoreKey,
     normalizePolicyRows,
     normalizeTableScopePolicyRequest,

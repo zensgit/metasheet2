@@ -176,3 +176,46 @@ test('shared MVP proof visits the blocked generation run even with no prep lines
   registry[1][1].push({ projectId: 'other', snapshotBatchId: 'batch' })
   await assert.rejects(planSheets(tx, scope), ambiguous)
 })
+
+test('runbook-adopted sandbox keeps the managed claim, drops only A rows and releases the project registry', async () => {
+  const actualObject = 'plm_stock_preparation_sandbox_legacy'
+  const actual = { ...owner, id: physical('sheet', stage, actualObject), object_id: actualObject }
+  const registered = { ...target, sheet_id: actual.id, object_id: actualObject }
+  const neighbor = { ...pulled, id: 'other-row', record_id: 'other-row', projectNo: 'two', idempotencyKey: '{"projectNo":"two"}' }
+  const data = { registry: [registered], owners: [actual], live: [pulled, neighbor], trash: [] }
+  const { tx, writes } = sheetFixture(data)
+  const plan = await planSheets(tx, scope)
+  assert.equal(plan.identityPresent, true)
+  assert.deepEqual([plan.dedicatedSheetId, plan.counts.dedicatedSheets, plan.counts.managedRegistrations, plan.counts.projectTargets, plan.counts.sharedPullRows], [null, 0, 0, 1, 1])
+  assert.deepEqual(plan.tables, [{ sheetId: actual.id, name: actual.name, kind: 'shared', rowCount: 1 }])
+  assert.equal(await existsProjectRoot(tx, scope), true)
+  await deleteSheets(tx, scope, plan)
+  assert.deepEqual(writes.map(({ sql, params }) => [sql.split(' ')[2], params]), [
+    ['meta_records', [actual.id, ['pulled']]], ['integration_stock_prep_project_target', [scope.tenantId, scope.projectNo, actual.id]],
+  ])
+  const empty = await planSheets(sheetFixture({ ...data, live: [] }).tx, scope)
+  assert.deepEqual(empty.tables, [{ sheetId: actual.id, name: actual.name, kind: 'shared', rowCount: 0 }])
+  const scoped = { ...scope, boundTarget: { sheetId: actual.id, objectId: actualObject } }
+  for (const change of [
+    { owners: [] }, { owners: [{ ...actual, object_id: actualObject + '_other' }] },
+    { owners: [{ ...actual, project_id: 'another:integration-core' }] }, { owners: [{ ...actual, plugin_name: 'foreign' }] },
+    { owners: [{ ...actual, object_id: null, project_id: null, plugin_name: null }] },
+    { live: [{ ...pulled, projectNo: null }] },
+    { live: [{ ...neighbor, idempotencyKey: '{"projectNo":"one"}' }] },
+  ]) await assert.rejects(planSheets(sheetFixture({ ...data, ...change }).tx, scoped), ambiguous)
+})
+
+test('a member of a shared checkpoint blocks cleanup even when only the other project has a sealed event', async () => {
+  const selected = new Map([['shared', { recordIds: ['A'], live: ['A'], trash: [] }]])
+  const tx = { async query(sql, params) {
+    if (sql.includes('NOT id = ANY')) return []
+    assert.deepEqual(params, [null, ['shared'], ['A']])
+    const branch = sql.split('UNION ALL').find(s => s.includes('FROM meta_history_baselines r WHERE'))
+    assert.match(branch, /true AS deny/)
+    assert.match(branch, /\(r.sheet_id, r.record_id\) IN \(SELECT \* FROM affected\)/)
+    return [{ rule: Number(branch.match(/SELECT (\d+) AS rule/)[1]), n: 1, blocked: true, hash: '' }]
+  } }
+  await assert.rejects(planSheetDependencies(tx, null, selected), {
+    status: 409, code: 'STOCK_PREPARATION_PROJECT_DELETE_DEPENDENCY', details: { reason: 'recovery' },
+  })
+})

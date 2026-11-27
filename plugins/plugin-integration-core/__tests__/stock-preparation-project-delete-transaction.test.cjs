@@ -15,10 +15,10 @@ function loadService() {
     require.cache[path] = { exports: {
       [`plan${key}`]: async tx => {
         const [row] = await tx.query('plan ' + part)
-        return { identityPresent: !!row, fingerprint: row?.fingerprint || 'empty', tables: [], counts: { [part]: row ? 1 : 0 } }
+        return { identityPresent: !!row, selected: new Map(), fingerprint: row?.fingerprint || 'empty', tables: [], counts: { [part]: row ? 1 : 0 } }
       },
       [`delete${key}`]: async tx => tx.query('delete ' + part),
-      SHEET_LOCK_TABLES: ['meta_records'], BUSINESS_LOCK_TABLES: ['integration_stock_prep_handoff'],
+      discoverProjectDeleteSheetScope: async () => ['scoped-sheet'], businessDeleteFenceKeys: () => [], runtimeFenceKeys: () => [],
       existsProjectRoot: async tx => (await tx.query('plan sheets')).length > 0,
     } }
   }
@@ -46,8 +46,10 @@ function fixture() {
           throw Object.assign(new Error('sensitive role details'), { code: '42501' })
         }
         if (sql.startsWith('SELECT pg_try')) return [{ locked: !h.locked }]
-        if (sql.startsWith('LOCK TABLE')) {
-          assert.match(sql, /"plugin_kv" IN EXCLUSIVE MODE NOWAIT$/)
+        if (sql.startsWith('SELECT count(*) = 3 AS ready')) return [{ ready: !h.partialRollout }]
+        if (sql.startsWith('SELECT id FROM meta_bases')) return []
+        if (sql.startsWith('SELECT public.stock_prep_project_delete_fence')) {
+          assert.ok(params[0].every(k => ['stage:T:integration-core', 'registry-target:["T","P"]', 'sheet:scoped-sheet'].includes(k)))
           if (h.sqlBusy) throw Object.assign(new Error('SQL values must be hidden'), { code: '55P03' })
           return []
         }
@@ -123,11 +125,15 @@ test('enforces DB expiry, live role, and both lock refusals before writes', asyn
   h.mayDelete = false
   await reject(h.service.confirm(confirmation(p)), 'FORBIDDEN', 403)
   h.mayDelete = true
+  h.partialRollout = true
+  await reject(h.service.confirm(confirmation(p)), 'STOCK_PREPARATION_PROJECT_DELETE_UNAVAILABLE', 503)
+  await reject(h.service.preview(scope), 'STOCK_PREPARATION_PROJECT_DELETE_UNAVAILABLE', 503)
+  h.partialRollout = false
   h.locked = true
   await reject(h.service.confirm(confirmation(p)), codes.busy)
   h.locked = false
   h.sqlBusy = true
-  await reject(h.service.preview(scope), codes.busy)
+  await reject(h.service.confirm(confirmation(p)), codes.busy)
   h.sqlBusy = false
   h.now = Date.parse(p.expiresAt)
   await reject(h.service.confirm(confirmation(p)), codes.challenge)
@@ -190,12 +196,16 @@ test('mid-purge, audit failure, and a suppressed audit insert each roll back all
 
 test('activity holds shared project/tenant fallback keys across work and refuses a conflicting deletion before entering it', async () => {
   const events = []
-  const tx = { query: async (sql, values) => { events.push([sql.includes('_shared'), ...values]); return [{ locked: true }] } }
-  const database = { transaction: async work => { events.push('begin'); await work(tx); events.push('commit') } }
+  const tx = { query: async (sql, values) => { events.push([sql.match(/pg_(\w+)\(/)[1], ...values]); return [{ locked: true, released: true }] } }
+  const database = { withConnection: async work => { events.push('checkout'); await work(tx); events.push('release') } }
   await withProjectDeleteActivity(database, scope, async () => events.push('work'))
   await withProjectDeleteActivity(database, { tenantId: 'T', projectNo: null }, async () => events.push('legacy_work'))
-  await lockProjectActivity(tx, scope, false)
-  assert.deepEqual(events, ['begin', [true, 6991, '["T","P"]'], 'work', 'commit', 'begin', [true, 6991, '["T",null]'], 'legacy_work', 'commit', [false, 6991, '["T",null]'], [false, 6991, '["T","P"]']])
-  const unavailable = { transaction: work => work({ query: async () => [{ locked: false }] }) }
+  await lockProjectActivity(tx, scope)
+  assert.deepEqual(events, [
+    'checkout', ['try_advisory_lock_shared', 6991, '["T","P"]'], 'work', ['advisory_unlock_shared', 6991, '["T","P"]'], 'release',
+    'checkout', ['try_advisory_lock_shared', 6991, '["T",null]'], 'legacy_work', ['advisory_unlock_shared', 6991, '["T",null]'], 'release',
+    ['try_advisory_xact_lock', 6991, '["T",null]'], ['try_advisory_xact_lock', 6991, '["T","P"]'],
+  ])
+  const unavailable = { withConnection: work => work({ query: async () => [{ locked: false }] }) }
   await reject(withProjectDeleteActivity(unavailable, scope, () => assert.fail('busy operation ran')), codes.busy)
 })

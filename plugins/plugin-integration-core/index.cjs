@@ -610,6 +610,7 @@ module.exports = {
           ? scope => isProjectDeleted(context.api.database, scope) : null,
         stockPreparationProjectDeleteAuthority: context.services?.stockPreparationProjectDeleteAuthority,
         stockPreparationProjectDelete: context.api.database?.transaction && context.services?.stockPreparationProjectDeleteAuthority
+          && context.services?.stockPreparationProjectWriterActivity?.withConnection
           ? createStockPreparationProjectDelete({
               database: context.api.database,
               auditStore: stockPreparationAuditStore,

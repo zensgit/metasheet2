@@ -6,7 +6,11 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { exerciseProjectDeleteDelivery } from './stock-preparation-project-delete-delivery-realdb.cases'
 import { usePinnedServer } from '../utils/pinned-server'
 import { checkProjectDeleteRuntime } from './stock-preparation-project-delete-runtime-realdb.cases'
+import { registerProjectDeleteAdoptionCases } from './stock-preparation-project-delete-adoption-realdb.cases'
 import { defineStockPreparationProjectDeleteAuthorityRealDbCases } from './stock-preparation-project-delete-authority-realdb.cases'
+import { defineProjectDeleteConcurrencyRealDbCases } from './stock-preparation-project-delete-concurrency-realdb.cases'
+import { defineStockPreparationProjectDeleteWriterActivityRealDbCases } from './stock-preparation-project-delete-writer-activity-realdb.cases'
+import { checkProjectDeleteYjs } from './stock-preparation-project-delete-yjs-realdb.cases'
 import { MetaSheetServer } from '../../src/index'
 import { authorizeStockPreparationProjectDeleteWithin } from '../../src/services/stock-preparation-project-delete-authority'
 import { poolManager } from '../../src/integration/db/connection-pool'
@@ -18,7 +22,8 @@ const require = createRequire(import.meta.url)
 const lib = (name: string) => require(`../../../../plugins/plugin-integration-core/lib/${name}.cjs`)
 const targets = lib('stock-preparation-project-targets')
 const templates = lib('stock-preparation-templates')
-const { buildMvpTargetDescriptor } = lib('stock-preparation-mvp-provisioning')
+const { deriveStockPreparationBaseId } = lib('stock-preparation-own-base')
+const { ensureConfirmationDecisionTarget } = lib('stock-preparation-confirmation-decisions')
 const { listOperatorProjectDirectory } = lib('stock-preparation-operator-project-directory')
 const { sheetWriteScopeKey, createStockPreparationProjectWriteLock } = lib('stock-preparation-project-write-lock')
 const q = (sql: string, values: unknown[] = []) => poolManager.get().query(sql, values)
@@ -120,7 +125,6 @@ function stack() {
       confirmation_decision: { projectNo: scope.projectNo, decisionId: id('decision') },
       project_overview: { projectNo: scope.projectNo },
     }
-    const supported = [...templates.STOCK_PREPARATION_MVP_TABLE_TEMPLATES, templates.STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE, templates.STOCK_PREPARATION_PROJECT_OVERVIEW_TABLE_TEMPLATE]
     const mvpIds = templates.STOCK_PREPARATION_MVP_TABLE_TEMPLATES.map((t: { objectId: string }) => t.objectId)
       .filter((objectId: string) => Object.keys(sharedData).some(kind => suffix(kind) === objectId))
     const ready = await lib('stock-preparation-mvp-provisioning').ensureStockPreparationMvpTargets({ context, projectId, permission: 'admin', objectIds: mvpIds })
@@ -128,12 +132,14 @@ function stack() {
     const result: { kind: string; sheetId: string; recordId: string }[] = []
     for (const [kind, logicalData] of Object.entries(sharedData)) {
       const objectId = suffix(kind)
-      const template = supported.find(template => template.objectId === objectId)
       const isOverview = kind === 'project_overview'
       if (isOverview) {
         await lib('stock-preparation-project-overview').ensureProjectOverviewSheet({ provisioning, projectId, tenantId: scope.tenantId, env: {} })
-      } else if (!mvpIds.includes(objectId)) {
-        await provisioning.ensureObject({ projectId, descriptor: buildMvpTargetDescriptor(template) })
+      } else if (kind === 'confirmation_decision') {
+        // The registered ensure route places this anchor in the tenant's stock-preparation base.
+        await ensureConfirmationDecisionTarget({
+          context, projectId, permission: 'admin', tenantId: scope.tenantId, resolveOwnBase: true, env: {},
+        })
       }
       const sheet = await provisioning.findObjectSheet({ projectId, objectId })
       if (!sheet?.id) throw new Error('shared fixture provisioning failed')
@@ -193,8 +199,12 @@ async function snapshot(scope: Scope, sheetId: string, ids: string[]) {
 export function defineStockPreparationProjectDeleteRealDbCases() {
   describe.skipIf(!process.env.DATABASE_URL)('stock preparation project deletion on PostgreSQL', () => {
     const pinned = usePinnedServer()
-    defineStockPreparationProjectDeleteAuthorityRealDbCases()
     let fixture: ReturnType<typeof stack>
+    const newScope = (projectNo: string) => project(tenant(), projectNo)
+    registerProjectDeleteAdoptionCases(() => fixture, newScope)
+    defineStockPreparationProjectDeleteAuthorityRealDbCases()
+    defineStockPreparationProjectDeleteWriterActivityRealDbCases()
+    defineProjectDeleteConcurrencyRealDbCases(() => fixture, newScope)
     const flag = 'STOCK_PREPARATION_PROJECT_DELETE_ENABLED'
     const original = process.env[flag]
     beforeAll(async () => {
@@ -221,7 +231,7 @@ export function defineStockPreparationProjectDeleteRealDbCases() {
           await query(`DELETE FROM ${table} WHERE sheet_id = ANY($1::text[])`, [sheets])
         }
         await query('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [sheets])
-        const baseIds = own.map(id => lib('stock-preparation-own-base').deriveStockPreparationBaseId(id))
+        const baseIds = own.map(id => deriveStockPreparationBaseId(id))
         await query('DELETE FROM meta_bases WHERE id = ANY($1::text[])', [baseIds])
         await query('DELETE FROM user_orgs WHERE user_id = ANY($1::text[])', [[actor, otherAdmin]])
         await query('DELETE FROM users WHERE id = ANY($1::text[])', [[actor, otherAdmin]])
@@ -260,6 +270,11 @@ export function defineStockPreparationProjectDeleteRealDbCases() {
         expect(warm.body.data.fields).toContainEqual(expect.objectContaining({ id: ownSheet.fields.notes, name: oldLabel }))
         const guarded = await api.delete(`/api/multitable/sheets/${ownSheet.sheetId}`)
         expect([guarded.status, guarded.body.error.code]).toEqual([409, 'SHEET_PLUGIN_MANAGED'])
+        const localSheetBases = await q('SELECT base_id FROM meta_sheets WHERE id = ANY($1::text[])', [
+          [ownSheet.sheetId, controlFacts[0].sheet.sheetId],
+        ])
+        const baseId = deriveStockPreparationBaseId(local)
+        expect(localSheetBases.rows).toEqual([{ base_id: baseId }, { base_id: baseId }])
         expect(await siblingIds()).toContain(ownSheet.sheetId)
         expect((await contextOf(ownSheet.sheetId)).status).toBe(200)
       }
@@ -322,6 +337,22 @@ export function defineStockPreparationProjectDeleteRealDbCases() {
       await exerciseProjectDeleteDelivery(pinned, fixture, project(tenant(), 'delivery'))
     }, 120000)
 
+    test('deletes rich-text history and fences stale sessions after same-sheet recreation while preserving a control record', async () => {
+      const scope = project(tenant(), 'rich-text-target')
+      const target = await fixture.dedicated(scope)
+      const control = await fixture.dedicated(project(scope.tenantId, 'rich-text-control'))
+      const recycleAndRestore = async (recordId: string) => {
+        const api = request(genericApp())
+        expect((await api.delete(`/api/multitable/records/${recordId}`)).status).toBe(200)
+        expect((await api.post(`/api/multitable/records/${recordId}/restore`).send({})).status).toBe(200)
+      }
+      await checkProjectDeleteYjs(scope, fixture.service, target.ids[0], control.ids[1], control.sheetId, async () => {
+        const rebuilt = await fixture.dedicated(scope, false)
+        expect(rebuilt.sheetId).toBe(target.sheetId)
+        return rebuilt
+      }, recycleAndRestore)
+    }, 60000)
+
     test('purges scoped legacy and current job results and tokens, refusing both unfinished parent and checkpoint', async () => {
       const scope = project(tenant(), 'runtime')
       const own = await fixture.dedicated(scope)
@@ -333,7 +364,11 @@ export function defineStockPreparationProjectDeleteRealDbCases() {
       const create = (projectNo: string) => fixture.records.createRecord({ sheetId, data: { [fieldIdMap.projectNo]: projectNo } })
       const mine = await create(scope.projectNo)
       const theirs = await create('another-project')
-      await checkProjectDeleteRuntime(scope, fixture.service, own.sheetId, sheetId)
+      await checkProjectDeleteRuntime(scope, fixture.service, own.sheetId, sheetId, async () => {
+        const rebuilt = await fixture.dedicated(scope, false)
+        expect(rebuilt.sheetId).toBe(own.sheetId)
+        return rebuilt.sheetId
+      })
       expect((await fixture.records.queryRecords({ sheetId })).map(row => row.id)).toEqual([theirs.id])
       expect((await q('SELECT id FROM meta_records WHERE id = $1', [mine.id])).rows).toEqual([])
     }, 60000)

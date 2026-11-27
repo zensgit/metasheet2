@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
 import { YjsPersistenceAdapter } from '../../src/collab/yjs-persistence-adapter'
+import { bindYjsRecord, getYjsRecordOwner, YjsRecordRetiredError } from '../../src/collab/yjs-record-incarnation'
+import { YjsRecordBridge } from '../../src/collab/yjs-record-bridge'
+import type { RecordPatchInput } from '../../src/multitable/record-write-service'
 import { YjsSyncService } from '../../src/collab/yjs-sync-service'
 
 function createMockPersistenceWithCompaction() {
@@ -91,6 +94,75 @@ describe('Yjs persistence hardening', () => {
     })
   })
 
+  it('evicts only the retired worker copy and reopens a reused id from the new record', async () => {
+    const recordId = 'test-record'
+    let live: { recordId: string; incarnation: string | null } | null = { recordId, incarnation: null }
+    const persistence = {
+      ...createMockPersistenceWithCompaction(),
+      getRecordIncarnation: vi.fn(async () => live),
+      purgeRecords: vi.fn(),
+    }
+    const service = new YjsSyncService(persistence as unknown as YjsPersistenceAdapter)
+    const retired = vi.fn()
+    service.setRetiredListener(retired)
+    try {
+      const first = await service.getOrCreateDoc(recordId)
+      const owner = getYjsRecordOwner(first)
+      expect(owner).toEqual({ recordId, incarnation: null })
+      first.getText('field').insert(0, 'old')
+      expect(persistence.storeUpdate).toHaveBeenCalledWith(recordId, expect.any(Uint8Array), owner)
+      live = null
+      await expect(service.getOrCreateDoc(recordId)).rejects.toThrow('Record document is not available')
+      expect(retired).toHaveBeenCalledTimes(1)
+      expect(retired).toHaveBeenCalledWith(recordId)
+      expect(service.getDoc(recordId)).toBeUndefined()
+      expect(persistence.purgeRecords).not.toHaveBeenCalled()
+      live = { recordId, incarnation: 'new-row' }
+      const replacement = await service.getOrCreateDoc(recordId)
+      expect(replacement.getText('field').toString()).toBe('')
+      expect(getYjsRecordOwner(replacement)).toEqual(live)
+      expect(await service.isCurrentDocument(recordId, first)).toBe(false)
+      expect(service.getDoc(recordId)).toBe(replacement)
+      // A disconnected, stale worker learns about deletion from its final snapshot transaction.
+      persistence.compactDoc.mockRejectedValueOnce(new YjsRecordRetiredError())
+      await service.releaseDoc(recordId)
+      expect(retired).toHaveBeenCalledTimes(2)
+      expect(persistence.purgeRecords).not.toHaveBeenCalled()
+    } finally {
+      await service.destroy()
+    }
+  })
+
+  it('binds a queued record patch to the observed document inside the business write transaction', async () => {
+    const doc = new Y.Doc()
+    const recordId = 'record-with-reused-id'
+    const owner = { recordId, incarnation: 'run-1' }
+    bindYjsRecord(doc, owner)
+    const captured: RecordPatchInput[] = []
+    const writer = { patchRecords: async (input: RecordPatchInput) => {
+      captured.push(input)
+      return { updated: [] }
+    } }
+    const originalGuard = vi.fn(async () => undefined)
+    const bridge = new YjsRecordBridge({} as never, writer as never,
+      async () => ({ preWriteGuard: originalGuard }) as unknown as RecordPatchInput,
+      { mergeWindowMs: 1, maxDelayMs: 10 })
+    try {
+      bridge.observe(recordId, doc)
+      doc.getMap('fields').set('field', 'queued')
+      await vi.waitFor(() => expect(captured).toHaveLength(1))
+      const check = captured[0].preWriteGuard!
+      const gone = vi.fn(async () => ({ rows: [] }))
+      await expect(check(gone)).rejects.toBeInstanceOf(YjsRecordRetiredError)
+      expect(gone).toHaveBeenCalledWith(expect.stringContaining('FOR KEY SHARE'), [recordId, owner.incarnation])
+      await expect(check(async () => ({ rows: [{}] }))).resolves.toBeUndefined()
+      expect(originalGuard).toHaveBeenCalledTimes(2)
+    } finally {
+      bridge.destroy()
+      doc.destroy()
+    }
+  })
+
   describe('YjsPersistenceAdapter compaction + recovery', () => {
     it('compactDoc upserts snapshot and clears incremental updates in one transaction', async () => {
       const mockDb = createTransactionalMockDb()
@@ -105,6 +177,50 @@ describe('Yjs persistence hardening', () => {
       expect(mockDb._trx.deleteFrom).toHaveBeenCalledWith('meta_record_yjs_updates')
       expect(mockDb._deleteChain.where).toHaveBeenCalledWith('record_id', '=', 'rec_compact_tx')
       doc.destroy()
+    })
+
+    it('rejects an owner for a different record before writing or removing any state', async () => {
+      const mockDb = createTransactionalMockDb()
+      const selectFrom = vi.fn()
+      Object.assign(mockDb._trx, { selectFrom })
+      const adapter = new YjsPersistenceAdapter(mockDb as never)
+      const owner = { recordId: 'control', incarnation: null }
+      const doc = new Y.Doc()
+      bindYjsRecord(doc, owner)
+      try {
+        await expect(adapter.storeUpdate('target', new Uint8Array(), owner)).rejects.toBeInstanceOf(YjsRecordRetiredError)
+        await expect(adapter.storeSnapshot('target', doc)).rejects.toBeInstanceOf(YjsRecordRetiredError)
+        await expect(adapter.compactDoc('target', doc)).rejects.toBeInstanceOf(YjsRecordRetiredError)
+        expect(selectFrom).not.toHaveBeenCalled()
+        expect(mockDb._trx.insertInto).not.toHaveBeenCalled()
+        expect(mockDb._trx.deleteFrom).not.toHaveBeenCalled()
+      } finally {
+        doc.destroy()
+      }
+    })
+
+    it('refuses late updates and compaction before touching the new incarnation’s rows', async () => {
+      const mockDb = createTransactionalMockDb()
+      const lookup = {
+        select: vi.fn().mockReturnThis(),
+        where: vi.fn().mockReturnThis(),
+        forKeyShare: vi.fn().mockReturnThis(),
+        executeTakeFirst: vi.fn(async () => undefined),
+      }
+      Object.assign(mockDb._trx, { selectFrom: vi.fn(() => lookup) })
+      const owner = { recordId: 'reused-record', incarnation: null }
+      const adapter = new YjsPersistenceAdapter(mockDb as never)
+      const doc = new Y.Doc()
+      bindYjsRecord(doc, owner)
+      try {
+        await expect(adapter.storeUpdate(owner.recordId, new Uint8Array(), owner)).rejects.toBeInstanceOf(YjsRecordRetiredError)
+        await expect(adapter.compactDoc(owner.recordId, doc)).rejects.toBeInstanceOf(YjsRecordRetiredError)
+        expect(lookup.forKeyShare).toHaveBeenCalledTimes(2)
+        expect(mockDb._trx.insertInto).not.toHaveBeenCalled()
+        expect(mockDb._trx.deleteFrom).not.toHaveBeenCalled()
+      } finally {
+        doc.destroy()
+      }
     })
 
     it('loadDoc recovers from updates-only persistence when snapshot is missing', async () => {

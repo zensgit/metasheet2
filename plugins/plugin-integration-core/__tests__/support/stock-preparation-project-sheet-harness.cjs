@@ -507,6 +507,7 @@ function mountProjectSheetRoutes({
   sourceBindingStore = null,
   configExtras = {},
   serviceExtras = {},
+  writerActivity,
   // PR-4: options for the refresh governance wiring (e.g. `{ lockOnRefreshDb: true }`: one fake db for the store
   // and the REAL lock, so the decision routes' in-transaction bump runs on the store's handle).
   refreshOptions = {},
@@ -520,6 +521,7 @@ function mountProjectSheetRoutes({
   const source = makeSourceAdapter(projectNo)
   const db = makeMemoryDb()
   const context = {
+    services: { stockPreparationProjectWriterActivity: writerActivity },
     api: {
       http: { addRoute(method, routePath, handler) { routes.set(`${method.toUpperCase()} ${routePath}`, handler) } },
       // P1-a: the fake host declares + enforces the write fence, as the real host does.

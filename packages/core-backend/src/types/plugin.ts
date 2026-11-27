@@ -2277,6 +2277,9 @@ export interface PluginServices {
       tenantId: string
     }): Promise<{ member: boolean }>
   }
+  stockPreparationProjectWriterActivity?: {
+    withConnection<T>(operation: (session: Pick<DatabaseTransaction, 'query'>) => Promise<T>): Promise<T>
+  }
   stockPreparationProjectDeleteAuthority?: (
     tx: Pick<DatabaseTransaction, 'query'>,
     scope: { actor: string; tenantId: string },

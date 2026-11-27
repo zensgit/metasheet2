@@ -1,5 +1,6 @@
 import * as Y from 'yjs'
 import type { YjsPersistenceAdapter } from './yjs-persistence-adapter'
+import { bindYjsRecord, getYjsRecordOwner, YjsRecordRetiredError } from './yjs-record-incarnation'
 
 /**
  * Seeds a fresh Y.Doc's `fields` Y.Map from the record's current value in
@@ -48,6 +49,7 @@ export class YjsSyncService {
   /** Records whose invalidated state could not be removed: not served until a removal succeeds. */
   private quarantined = new Set<string>()
   private persistence: YjsPersistenceAdapter
+  private retiredListener?: (recordId: string) => void
   private cleanupTimer: NodeJS.Timeout
   private recordSeed: YjsRecordSeedFn | null
 
@@ -127,10 +129,36 @@ export class YjsSyncService {
     })
   }
 
+  setRetiredListener(listener: (recordId: string) => void): void {
+    this.retiredListener = listener
+  }
+
+  /** A remote deletion can retire a cached document without a notification reaching this worker. */
+  async isCurrentDocument(recordId: string, doc: Y.Doc): Promise<boolean> {
+    const owner = getYjsRecordOwner(doc)
+    if (owner) {
+      const live = await this.persistence.getRecordIncarnation(recordId)
+      if (!live || live.incarnation !== owner.incarnation) {
+        this.retireDocument(recordId, doc)
+        return false
+      }
+    }
+    return this.docs.get(recordId)?.doc === doc
+  }
+
+  private retireDocument(recordId: string, doc: Y.Doc): void {
+    if (this.docs.get(recordId)?.doc !== doc) return
+    this.generations.set(recordId, this.generationOf(recordId) + 1)
+    this.docs.delete(recordId)
+    doc.destroy()
+    // The database cleanup already committed. Purging by record id here could erase a new doc.
+    this.retiredListener?.(recordId)
+  }
+
   async getOrCreateDoc(recordId: string): Promise<Y.Doc> {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const existing = this.docs.get(recordId)
-      if (existing) {
+      if (existing && await this.isCurrentDocument(recordId, existing.doc)) {
         existing.lastAccess = Date.now()
         return existing.doc
       }
@@ -154,7 +182,11 @@ export class YjsSyncService {
 
   /** Null when the record was invalidated while this document was loading: it is not published. */
   private async loadDocForGeneration(recordId: string, generation: number): Promise<Y.Doc | null> {
+    const getOwner = this.persistence.getRecordIncarnation?.bind(this.persistence)
+    const owner = await getOwner?.(recordId)
+    if (owner === null) throw new YjsDocUnavailableError()
     const doc = new Y.Doc()
+    if (owner) bindYjsRecord(doc, owner)
 
     // Load persisted state
     const state = await this.persistence.loadDoc(recordId)
@@ -171,9 +203,11 @@ export class YjsSyncService {
       if (origin === 'persistence' || origin === 'seed') return
       // A document of an invalidated generation persists nothing more.
       if (this.generationOf(recordId) !== generation) return
-      this.trackPersistence(recordId, this.persistence.storeUpdate(recordId, update).catch((err) =>
-        console.error(`Failed to persist yjs update for ${recordId}:`, err),
-      ))
+      const write = owner ? this.persistence.storeUpdate(recordId, update, owner) : this.persistence.storeUpdate(recordId, update)
+      this.trackPersistence(recordId, write.catch((err) => {
+        if (err instanceof YjsRecordRetiredError) this.retireDocument(recordId, doc)
+        else console.error('Failed to persist collaborative update', err)
+      }))
     })
 
     // Only seed from meta_records if nothing had been persisted yet.
@@ -183,7 +217,11 @@ export class YjsSyncService {
       await this.seedFreshDoc(recordId, doc)
     }
 
-    if (this.generationOf(recordId) !== generation || this.quarantined.has(recordId)) {
+    // The snapshot and seed are independent reads. Never publish them if their owner disappeared
+    // between these reads. An unbound persistence double has no database identity to verify.
+    const latest = owner && await this.persistence.getRecordIncarnation(recordId)
+    if ((owner && (!latest || latest.incarnation !== owner.incarnation)) ||
+        this.generationOf(recordId) !== generation || this.quarantined.has(recordId)) {
       doc.destroy()
       return null
     }
@@ -257,10 +295,13 @@ export class YjsSyncService {
       try {
         await this.persistSnapshot(recordId, entry.doc)
       } catch (err) {
-        console.error(`[yjs] Failed to snapshot doc ${recordId} on release:`, err)
+        if (err instanceof YjsRecordRetiredError) this.retireDocument(recordId, entry.doc)
+        else console.error('[yjs] Failed to snapshot document on release', err)
       }
-      entry.doc.destroy()
-      this.docs.delete(recordId)
+      if (this.docs.get(recordId) === entry) {
+        entry.doc.destroy()
+        this.docs.delete(recordId)
+      }
     }
   }
 
@@ -271,10 +312,13 @@ export class YjsSyncService {
         try {
           await this.persistSnapshot(recordId, entry.doc)
         } catch (err) {
-          console.error(`[yjs] Failed to snapshot idle doc ${recordId}:`, err)
+          if (err instanceof YjsRecordRetiredError) this.retireDocument(recordId, entry.doc)
+          else console.error('[yjs] Failed to snapshot idle document', err)
         }
-        entry.doc.destroy()
-        this.docs.delete(recordId)
+        if (this.docs.get(recordId) === entry) {
+          entry.doc.destroy()
+          this.docs.delete(recordId)
+        }
       }
     }
   }
@@ -285,7 +329,7 @@ export class YjsSyncService {
       try {
         await this.persistSnapshot(recordId, entry.doc)
       } catch (err) {
-        console.error(`[yjs] Failed to snapshot doc ${recordId} on destroy:`, err)
+        if (!(err instanceof YjsRecordRetiredError)) console.error('[yjs] Failed to snapshot document on shutdown', err)
       }
       entry.doc.destroy()
     }

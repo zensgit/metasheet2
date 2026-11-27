@@ -5448,6 +5448,10 @@ function requireStockPreparationAudit() {
   const stockPreparationSqlServerRuntime =
     services && services.stockPreparationSqlServerRuntime
   const context = options.context || {}
+  const projectWriterActivity = context.services?.stockPreparationProjectWriterActivity
+  // Updated SQL hosts participate even before their local administrator enables deletion.
+  // A host that can observe durable deletions must refuse writes if its coordination port is lost.
+  const projectWriterActivityRequired = () => Boolean(projectWriterActivity || services.stockPreparationProjectDeletionStatus || isProjectDeleteEnabled())
   // Values-free warnings only (the pack read-back seam's degrade-to-legacy notice).
   const routeLogger = options.logger || (context && context.logger) || null
   const configuredTableActions = context && context.config
@@ -7980,13 +7984,13 @@ function requireStockPreparationAudit() {
     await requireTableActionAccess(req, actionId, 'read', tenantPrincipalDirectory)
     const body = normalizeTableActionBody(requestBody(req))
     const run = () => runAuthorizedStockPrepPull(req, actionId, governedEntry, body)
-    if (!isProjectDeleteEnabled()) return run()
+    if (!projectWriterActivityRequired()) return run()
     const { projectNo } = normalizeActionParameters(body.parameters)
     const scope = { tenantId: resolveTenantId(req, {}), projectNo }
     // The HTTP background route answers as soon as it has persisted the running job. Its DB
     // activity lock must outlive that response, including the final durable result write.
     return new Promise((resolve, reject) => {
-      withProjectDeleteActivity(context.api.database, scope, async () => {
+      withProjectDeleteActivity(projectWriterActivity, scope, async () => {
         const answer = await run()
         if (answer.background) {
           resolve(answer)
@@ -12136,7 +12140,7 @@ function requireStockPreparationAudit() {
       let rowFacts = null
       try {
         const binding = await buildProjectTargetBinding({ provisioning, projectId: targetProjectId, target: row })
-        const scan = await scanPullTargetProjects(getMultitableRecordsApi(), { sheetId: row.sheetId, objectId: row.objectId }, binding, projectNo, { cache: isProjectDeleteEnabled() ? null : pullTargetScanCache })
+        const scan = await scanPullTargetProjects(getMultitableRecordsApi(), { sheetId: row.sheetId, objectId: row.objectId }, binding, projectNo, { cache: projectWriterActivityRequired() ? null : pullTargetScanCache })
         rowFacts = scan && scan.ready ? scan : null
       } catch (error) {
         rowFacts = null
@@ -14562,7 +14566,7 @@ function requireStockPreparationAudit() {
         // proved-own sheet; concurrent refreshes share one in-flight scan instead of starting one
         // each. The window lowers FREQUENCY only — it does not make a single scan cheaper, and it
         // does not lift the 50,000-row cap.
-        pullTargetScanCache: isProjectDeleteEnabled() ? null : pullTargetScanCache,
+        pullTargetScanCache: projectWriterActivityRequired() ? null : pullTargetScanCache,
         // For `lastExportAt` only, and read through ONE bounded descending window rather than one
         // query per project — see `lastExportAtByProjectNo`. This route's own audit APPEND below is
         // unrelated and unchanged.
@@ -16042,8 +16046,9 @@ function requireStockPreparationAudit() {
   }
 
   fenceProjectWriters(handlers, {
-    enabled: isProjectDeleteEnabled,
-    database: () => context.api.database,
+    required: projectWriterActivityRequired,
+    activity: projectWriterActivity,
+    projectSheetsEnabled: () => stockPreparationProjectSheetsEnabled(process.env),
     authorize: requireAccess,
     authorizeAction: (req, tier) => requireTableActionAccess(req,
       firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID, tier, tenantPrincipalDirectory),

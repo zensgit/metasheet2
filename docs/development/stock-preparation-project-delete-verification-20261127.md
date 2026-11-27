@@ -1,6 +1,20 @@
 # #6991 备料项目交付清理 · 验证记录
 
-**结论：本地专项测试和浏览器交互通过，真实 PostgreSQL 验收待执行。** 生产启用及合并须等真库结果。验证使用合成项目。主线基线为 `6babc578ec`。[开发说明](./stock-preparation-project-delete-development-20261127.md) · [设计锁](./stock-preparation-project-delete-design-lock-20261127.md)
+首版基线为 `6babc578ec`，复审修订已对齐主线 `e33d447552`。测试均使用合成项目。生产启用及合并须等修复版真库验证。[开发说明](./stock-preparation-project-delete-development-20261127.md) · [设计锁](./stock-preparation-project-delete-design-lock-20261127.md)
+
+## PR #7004 复审验证
+
+评审者在全新 PostgreSQL 16 上运行首版的 14 项删除专项，13 项通过。失败用例从另一张表查询侧栏，目标和对照夹具实际落在不同的库，断言在确认删除之前停止。修订版通过正式建表路径创建确认台账，并先断言两张表所在的库，再检查侧栏、隔离和重建。[评审记录](https://github.com/zensgit/metasheet2/pull/7004#pullrequestreview-6085845653)
+
+主线冲突解除后，修复前提交 `c4263d3289` 的完整多维表 CI 实跑得到 270 个文件通过、1 个文件失败，其中 10 个失败均在删除验收入口。这是共享 CI 数据库中的结果，与评审者的独立空库结果分开记录。[修复前的数据库任务](https://github.com/zensgit/metasheet2/actions/runs/45975431022/job/140427894987)
+
+复审在原 14 项上新增了真库场景，包括预览和普通写入的两种顺序、确认期间的并发写入、批量编辑的锁数量、受限写入角色、旧沙箱和共享检查点、跨副本旧拉取、小连接池、协同记录 ID 复用及业务台账直接写入。原有运行状态用例也增加了专表冲突审批与共享对照的断言。定向命令如下。
+
+```sh
+NODE_ENV=test METASHEET_REAL_DB_TEST_STEP=1 pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/stock-preparation-p4-repair-once-realdb.test.ts -t 'project deletion'
+```
+
+本地专项覆盖写入活动协调、会写凭据的 GET、共享历史拒绝、旧沙箱归属、冲突审批范围和协同写入代次。分别移除关键守卫后，对应断言失败；恢复代码后重跑通过。以下浏览器截图及工作台测试记录来自首版，复审修改集中在服务端、数据库和测试夹具。
 
 ## 按需求验收
 

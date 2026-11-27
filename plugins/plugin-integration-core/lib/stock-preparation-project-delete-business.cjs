@@ -111,12 +111,25 @@ const INVENTORY_SQL = `WITH targets AS (SELECT * FROM unnest($3::text[], $5::tex
     FROM ${RECONCILE_LEASE_TABLE} r WHERE scope_key = $8`
 const INVALID_REFERENCES_SQL = `SELECT EXISTS (${PARENT_REFERENCES.map(invalidReferenceSql).join('\nUNION ALL\n')}) AS invalid`
 
+function identifiers({ tenantId, projectNo }) {
+  const staging = tenantId + ':integration-core'
+  return {
+    staging,
+    objectId: deriveStockPreparationProjectSheetObjectId(tenantId, projectNo),
+    reconcileKey: stableHash('reconcile-lock', { targetProjectId: staging, projectNo }),
+  }
+}
+
+function businessDeleteFenceKeys(scope, candidateSheetIds) {
+  const { objectId, reconcileKey } = identifiers(scope)
+  return [...new Set(candidateSheetIds)].map(id => 'write:' + sheetWriteScopeKey(id))
+    .concat('lease:' + reconcileKey, 'pack:' + objectId)
+}
+
 async function planBusiness(trx, scope, sheetPlan) {
   const { tenantId, projectNo } = scope
   const targets = [...new Set(sheetPlan.ownedTargetSheetIds)]
-  const staging = tenantId + ':integration-core'
-  const objectId = deriveStockPreparationProjectSheetObjectId(tenantId, projectNo)
-  const reconcileKey = stableHash('reconcile-lock', { targetProjectId: staging, projectNo })
+  const { staging, objectId, reconcileKey } = identifiers(scope)
   const rows = await trx.query(INVENTORY_SQL, [
     tenantId, projectNo, targets, sheetPlan.dedicatedSheetId, targets.map(sheetWriteScopeKey), staging, objectId, reconcileKey,
   ])
@@ -178,4 +191,4 @@ async function deleteBusiness(trx, { tenantId, projectNo }, plan) {
   }
 }
 
-module.exports = { BUSINESS_LOCK_TABLES, planBusiness, deleteBusiness }
+module.exports = { BUSINESS_LOCK_TABLES, businessDeleteFenceKeys, planBusiness, deleteBusiness }

@@ -1,6 +1,9 @@
 'use strict'
 
 const { createHash } = require('node:crypto')
+const { __internals: { STORAGE_PREFIX: POLICY_PREFIX, conflictPolicyStoreKey, targetScopeFingerprint } } = require('./stock-preparation-conflict-policies.cjs')
+const { deriveStockPreparationProjectSheetObjectId } = require('./stock-preparation-own-base.cjs')
+const { projectDeleteDedicatedSheetId } = require('./stock-preparation-project-delete-sheets.cjs')
 const { sheetWriteScopeKey } = require('./stock-preparation-project-write-lock.cjs')
 const { PLM_STOCK_PREPARATION_ACTION_ID } = require('./stock-preparation-table-actions.cjs')
 const { READ_RECEIPT_KEY_PREFIX } = require('./stock-preparation-refresh-decisions.cjs')
@@ -60,10 +63,42 @@ async function legacyTrialKeys(tx, scope) {
   return matches.filter(row => row.mine).map(row => row.key)
 }
 
-async function planRuntime(tx, scope, sheets) {
+function policyOwners(scope, dedicatedId) {
+  const policies = new Map()
+  if (!dedicatedId) return policies
+  // Only the canonical dedicated target and a deployment binding to that very sheet
+  // can hold exclusively owned table reviews. Shared sheets retain all table reviews.
+  const objectId = deriveStockPreparationProjectSheetObjectId(scope.tenantId, scope.projectNo)
+  const targets = [{ sheetId: dedicatedId, objectId, keyField: 'idempotencyKey' }]
+  if (scope.boundTarget?.sheetId === dedicatedId) targets.push(scope.boundTarget)
+  for (const target of targets) {
+    const action = { actionId: PLM_STOCK_PREPARATION_ACTION_ID, target }
+    policies.set(conflictPolicyStoreKey(action), targetScopeFingerprint(action))
+  }
+  return policies
+}
+
+function runtimeFenceKeys(scope, candidateSheetIds) {
+  const dedicated = projectDeleteDedicatedSheetId(scope)
+  const parametersHash = digest({ projectNo: scope.projectNo })
+  const target = dryJobs.dryRunJobTargetKey({ ...scope, actionId: PLM_STOCK_PREPARATION_ACTION_ID })
+  const keys = ['trial-target:' + target, 'runtime-project:' + JSON.stringify([scope.tenantId, scope.projectNo])]
+  for (const sheetId of new Set(candidateSheetIds)) {
+    const writeScope = sheetWriteScopeKey(sheetId)
+    keys.push('trial-token:' + writeScope + ':' + parametersHash)
+    if (sheetId === dedicated) {
+      keys.push('trial-token-sheet:' + writeScope)
+      for (const [key, stamp] of policyOwners(scope, dedicated)) keys.push('policy:' + key, 'policy-fp:' + stamp)
+    }
+  }
+  return keys
+}
+
+async function planRuntime(tx, scope, sheets, confirming = false) {
   const { tenantId, projectNo } = scope
   const dedicated = sheets.dedicatedSheetId ? [sheets.dedicatedSheetId] : []
   const shared = sheets.ownedTargetSheetIds.filter(id => id !== sheets.dedicatedSheetId)
+  const policies = policyOwners(scope, sheets.dedicatedSheetId)
   const legacyKeys = await legacyTrialKeys(tx, scope)
   const targetKey = dryJobs.dryRunJobTargetKey({ ...scope, actionId: PLM_STOCK_PREPARATION_ACTION_ID })
   // Job payloads can contain the entire BOM. Do the ownership join and hash inside PostgreSQL.
@@ -79,6 +114,7 @@ async function planRuntime(tx, scope, sheets) {
           WHEN starts_with(kv.key, $5) THEN 'checkpoint'
           WHEN starts_with(kv.key, $6) THEN 'trial'
           WHEN starts_with(kv.key, $7) THEN 'token'
+          WHEN starts_with(kv.key, $17) THEN 'policy'
           ELSE 'other'
         END AS kind,
         parent.value AS parent
@@ -100,7 +136,9 @@ async function planRuntime(tx, scope, sheets) {
           OR (kv.value->>'writeScope' = ANY($13::text[]) AND kv.value->>'parametersHash' = $14)))
         OR (starts_with(kv.key, $15) AND kv.value->>'tenantId' = $2 AND kv.value->>'projectNo' = $3)
         OR kv.key = ANY($16::text[])
+        OR (starts_with(kv.key, $17) AND (kv.key = ANY($18::text[]) OR kv.value->>'targetScopeFingerprint' = ANY($19::text[])))
       )
+      ${confirming ? 'FOR UPDATE OF kv NOWAIT' : ''}
     )
     SELECT key, encode(sha256(convert_to(value::text, 'UTF8')), 'hex') AS fingerprint,
       version, kind, value->>'status' AS status,
@@ -113,12 +151,22 @@ async function planRuntime(tx, scope, sheets) {
           OR (parent IS NOT NULL AND (parent#>>'{parameters,projectNo}' IS DISTINCT FROM $3
             OR parent#>>'{actionSnapshot,target,sheetId}' IS DISTINCT FROM value#>>'{target,sheetId}'))
         WHEN kind = 'token' THEN value->>'parametersHash' IS DISTINCT FROM $14
-        ELSE false END AS ambiguous
+        ELSE false END AS ambiguous,
+      CASE WHEN kind = 'policy' THEN jsonb_typeof(value) = 'object' AND jsonb_typeof(value->'policies') = 'array'
+        AND (NOT (value ? 'actionId') OR value->>'actionId' IS NOT DISTINCT FROM $20)
+        AND (NOT (value ? 'targetScopeFingerprint') OR value->>'targetScopeFingerprint' IS NOT DISTINCT FROM
+          ($19::text[])[array_position($18::text[], key)])
+      END AS policy_payload_matches
     FROM candidates ORDER BY key`, [
     PLUGIN, tenantId, projectNo, BACKGROUND, APPLY, dryJobs.DRY_RUN_JOB_KEY_PREFIX, TOKEN,
     dedicated, shared, targetKey, legacyKeys, dedicated.map(sheetWriteScopeKey), shared.map(sheetWriteScopeKey),
     digest({ projectNo }), READ_RECEIPT_KEY_PREFIX, dedicated.map(id => MANUAL_ROWS_LAST_PULL_KEY_PREFIX + id),
+    POLICY_PREFIX, [...policies.keys()], [...policies.values()], PLM_STOCK_PREPARATION_ACTION_ID,
   ])
+  // A supported old envelope can omit the scope metadata. Its full 256-bit key still
+  // establishes ownership. A record carrying our fingerprint under a different key, or a
+  // conflicting envelope on our exact key, is never deleted.
+  if (rows.some(row => row.kind === 'policy' && (!policies.has(row.key) || row.policy_payload_matches !== true))) throw refused('AMBIGUOUS')
   if (rows.some(row => row.ambiguous)) throw refused('AMBIGUOUS')
   const terminal = {
     background: ['completed', 'failed', 'cancelled', 'expired'],
@@ -139,4 +187,4 @@ async function deleteRuntime(tx, _scope, plan) {
   if (removed.length !== plan.keys.length) throw refused('STALE')
 }
 
-module.exports = { planRuntime, deleteRuntime }
+module.exports = { planRuntime, deleteRuntime, runtimeFenceKeys }

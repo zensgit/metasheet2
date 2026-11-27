@@ -14,6 +14,10 @@ const WRITERS = [
   ['tableActionLargeBomApplyJobRun', 'action', 'write'],
   ['tableActionDryRunJobGet', 'action', 'read', 'query'],
   ['stockPreparationRefreshHolds', 'route', 'stock-prep:pull', 'path'],
+  ['stockPreparationRefreshChangePlanCurrent', 'route', 'stock-prep:pull', 'path'],
+  // Legacy conflict policy targets ignore ?projectNo and are shared. Hold the tenant fallback there.
+  ['tableActionConflictPoliciesSave', 'route', 'admin', 'policyQuery'],
+  ['tableActionConflictPoliciesDelete', 'route', 'admin', 'policyQuery'],
   ['tableActionApply', 'action', 'write', 'parameters'],
   ['tableActionConfirmationDecisionsReconcile', 'action', 'admin'],
   ['tableActionMvpPersist', 'auth', 'admin', 'parameters'],
@@ -33,13 +37,15 @@ function fenceProjectWriters(handlers, policy) {
   for (const [name, scope, tier, selector] of WRITERS) {
     const handler = handlers[name]
     handlers[name] = async function guardedProjectWrite(req, res) {
-      if (!policy.enabled()) return handler(req, res)
+      if (!policy.required()) return handler(req, res)
       if (scope === 'action') await policy.authorizeAction(req, tier)
       else await policy.authorize(req, tier)
       const tenantId = scope === 'auth' ? policy.authTenant(req) : policy.routeTenant(req)
-      const selected = { path: req.params?.projectNo, parameters: req.body?.parameters?.projectNo, query: req.query?.projectNo }[selector]
+      const selected = selector === 'policyQuery'
+        ? (policy.projectSheetsEnabled() ? req.query?.projectNo : null)
+        : { path: req.params?.projectNo, parameters: req.body?.parameters?.projectNo, query: req.query?.projectNo }[selector]
       const projectNo = typeof selected === 'string' && selected.trim() ? selected.trim() : null
-      return withProjectDeleteActivity(policy.database(), { tenantId, projectNo }, () => handler(req, res))
+      return withProjectDeleteActivity(policy.activity, { tenantId, projectNo }, () => handler(req, res))
     }
   }
 }

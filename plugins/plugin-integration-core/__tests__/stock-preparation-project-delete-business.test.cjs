@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict')
 const test = require('node:test')
-const { planBusiness, deleteBusiness } = require('../lib/stock-preparation-project-delete-business.cjs')
+const { planBusiness, deleteBusiness, businessDeleteFenceKeys } = require('../lib/stock-preparation-project-delete-business.cjs')
 const { sheetWriteScopeKey } = require('../lib/stock-preparation-project-write-lock.cjs')
 
 const scope = { tenantId: 'business-fixture', projectNo: 'synthetic' }
@@ -51,6 +51,19 @@ test('binds business contents, write generation and only affected targets to the
     tables: [{ sheetId: 'dedicated' }, { sheetId: 'affected' }, { sheetId: 'overview' }],
   })
   assert.deepEqual(targets.fenceKeys, ['affected', 'dedicated'].map(sheetWriteScopeKey).sort())
+})
+
+test('acquires the producer identifiers for empty sheets, reconcile and pack before inventory', async () => {
+  const plan = await planBusiness(snapshot(), scope, sheets)
+  assert.deepEqual(businessDeleteFenceKeys(scope, ['second', 'first', 'second']), [
+    'write:' + sheetWriteScopeKey('second'), 'write:' + sheetWriteScopeKey('first'),
+    'lease:' + plan.reconcileKey, 'pack:' + plan.objectId,
+  ])
+  for (const neighbor of [{ ...scope, tenantId: 'other' }, { ...scope, projectNo: 'other' }]) {
+    const keys = businessDeleteFenceKeys(neighbor, [])
+    assert.equal(keys.length, 2)
+    assert.ok(keys.every(key => !businessDeleteFenceKeys(scope, []).includes(key)))
+  }
 })
 
 test('refuses divergence between planned and physically deleted counts', async () => {

@@ -2,7 +2,7 @@
 
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { planRuntime, deleteRuntime } = require('../lib/stock-preparation-project-delete-runtime.cjs')
+const { planRuntime, deleteRuntime, runtimeFenceKeys } = require('../lib/stock-preparation-project-delete-runtime.cjs')
 const { sheetWriteScopeKey } = require('../lib/stock-preparation-project-write-lock.cjs')
 
 const scope = { tenantId: 'tenant-synthetic', projectNo: 'DEMO' }
@@ -45,5 +45,67 @@ test('ambiguous legacy keys, contradictory jobs, unknown and resumable states al
   await fails(reader([{ kind: 'background', status: 'completed', ambiguous: true }]), 'AMBIGUOUS')
   for (const [kind, status] of [['trial', 'running'], ['checkpoint', 'failed'], ['checkpoint', 'new_state'], ['background', 'paused']]) {
     await fails(reader([{ kind, status }]), 'BUSY')
+  }
+})
+
+test('confirmation pins exactly the selected KV rows, including old trial envelopes', async () => {
+  for (const confirming of [false, true]) {
+    await planRuntime({ query: async (sql) => {
+      if (sql.startsWith('SELECT EXISTS')) return [{ present: false }]
+      assert.equal(sql.includes('FOR UPDATE OF kv NOWAIT'), confirming)
+      return []
+    } }, scope, sheets, confirming)
+  }
+})
+
+test('runtime keys use producer encodings and isolate shared policy and token writers', () => {
+  const { createHash } = require('node:crypto')
+  const { projectDeleteDedicatedSheetId } = require('../lib/stock-preparation-project-delete-sheets.cjs')
+  const { __internals: policy } = require('../lib/stock-preparation-conflict-policies.cjs')
+  const { __internals: jobs } = require('../lib/stock-preparation-dry-run-jobs.cjs')
+  const { deriveStockPreparationProjectSheetObjectId } = require('../lib/stock-preparation-own-base.cjs')
+  const { PLM_STOCK_PREPARATION_ACTION_ID: actionId } = require('../lib/stock-preparation-table-actions.cjs')
+  const exclusive = projectDeleteDedicatedSheetId(scope)
+  const target = { sheetId: exclusive, objectId: deriveStockPreparationProjectSheetObjectId(scope.tenantId, scope.projectNo), keyField: 'idempotencyKey' }
+  const boundTarget = { sheetId: exclusive, objectId: 'another-config', keyField: 'old-field' }
+  const params = createHash('sha256').update(JSON.stringify({ projectNo: scope.projectNo })).digest('hex')
+  const common = ['trial-target:' + jobs.dryRunJobTargetKey({ ...scope, actionId }), 'runtime-project:' + JSON.stringify([scope.tenantId, scope.projectNo])]
+  const shared = 'trial-token:' + sheetWriteScopeKey('shared') + ':' + params
+  assert.deepEqual(runtimeFenceKeys({ ...scope, boundTarget }, ['shared', exclusive]), [
+    ...common, shared, 'trial-token:' + sheetWriteScopeKey(exclusive) + ':' + params, 'trial-token-sheet:' + sheetWriteScopeKey(exclusive),
+    ...[target, boundTarget].flatMap(target => [
+      'policy:' + policy.conflictPolicyStoreKey({ actionId, target }), 'policy-fp:' + policy.targetScopeFingerprint({ actionId, target }),
+    ]),
+  ])
+  assert.deepEqual(runtimeFenceKeys({ ...scope, boundTarget: { ...boundTarget, sheetId: 'shared' } }, ['shared']), [...common, shared])
+})
+
+test('table-scope reviews use only the exact dedicated target keys and reject a contradictory envelope', async () => {
+  const { __internals: policy } = require('../lib/stock-preparation-conflict-policies.cjs')
+  const { PLM_STOCK_PREPARATION_ACTION_ID: actionId } = require('../lib/stock-preparation-table-actions.cjs')
+  const { deriveStockPreparationProjectSheetObjectId } = require('../lib/stock-preparation-own-base.cjs')
+  const objectId = deriveStockPreparationProjectSheetObjectId(scope.tenantId, scope.projectNo)
+  const active = { sheetId: 'own', objectId, keyField: 'idempotencyKey' }
+  const alias = { sheetId: 'own', objectId: 'former-binding', keyField: 'alternateKey' }
+  const key = target => policy.conflictPolicyStoreKey({ actionId, target })
+  const stamp = target => policy.targetScopeFingerprint({ actionId, target })
+  async function plan(boundTarget, targets, selected, dedicated = sheets) {
+    return planRuntime({ query: async (sql, params) => {
+      if (sql.startsWith('SELECT EXISTS')) return [{ present: false }]
+      assert.equal(params[16], policy.STORAGE_PREFIX)
+      assert.deepEqual(params[17], targets.map(key))
+      assert.deepEqual(params[18], targets.map(stamp))
+      return selected
+    } }, { ...scope, boundTarget }, dedicated)
+  }
+  const owned = { kind: 'policy', key: key(active), policy_payload_matches: true, fingerprint: '1' }
+  const before = await plan(alias, [active, alias], [owned])
+  const changed = await plan(alias, [active, alias], [{ ...owned, fingerprint: '2' }])
+  assert.notEqual(before.fingerprint, changed.fingerprint)
+  assert.deepEqual(before.keys, [key(active)])
+  assert.deepEqual((await plan({ ...alias, sheetId: 'shared' }, [active], [owned])).counts, { runtimeRecords: 1 })
+  assert.deepEqual((await plan(alias, [], [], { dedicatedSheetId: null, ownedTargetSheetIds: ['shared'] })).keys, [])
+  for (const row of [{ ...owned, policy_payload_matches: false }, { ...owned, key: key({ ...active, sheetId: 'neighbor' }) }]) {
+    await assert.rejects(plan(alias, [active, alias], [row]), { status: 409, code: 'STOCK_PREPARATION_PROJECT_DELETE_AMBIGUOUS' })
   }
 })

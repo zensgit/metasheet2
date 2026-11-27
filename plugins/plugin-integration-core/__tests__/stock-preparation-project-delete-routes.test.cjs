@@ -47,7 +47,7 @@ function mount({ legacy = false } = {}) {
   }
   registerIntegrationRoutes({
     services,
-    context: { config: legacy ? { stockPreparationTableActions: [{
+    context: { services: { stockPreparationProjectWriterActivity: { withConnection: fn => fn({ query: async () => [{ locked: true, released: true }] }) } }, config: legacy ? { stockPreparationTableActions: [{
       actionId: ACTION,
       source: { externalSystemId: 'synthetic-source', kind: 'data-source:sql-readonly' },
       target: { sheetId: 'synthetic-sheet', objectId: 'plm_stock_preparation_sandbox_legacy', fieldIdMap: {} },

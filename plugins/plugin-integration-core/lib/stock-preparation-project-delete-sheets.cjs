@@ -53,13 +53,17 @@ function physical(prefix, ...parts) {
   return prefix + '_' + createHash('sha1').update(parts.join(':')).digest('hex').slice(0, 24)
 }
 
+function projectDeleteDedicatedSheetId({ tenantId, projectNo }) {
+  return physical('sheet', tenantId + ':integration-core', deriveStockPreparationProjectSheetObjectId(tenantId, projectNo))
+}
+
 const digest = (row) => `encode(sha256(convert_to(${row}.xmin::text || ':' || to_jsonb(${row})::text, 'UTF8')), 'hex')`
 const unique = (rows, key) => [...new Set(rows.map(row => row[key]).filter(Boolean))]
 
 async function discover(tx, { tenantId, projectNo, boundTarget }) {
   const stage = tenantId + ':integration-core'
   const dedicatedObject = deriveStockPreparationProjectSheetObjectId(tenantId, projectNo)
-  const dedicatedId = physical('sheet', stage, dedicatedObject)
+  const dedicatedId = projectDeleteDedicatedSheetId({ tenantId, projectNo })
   const scopeObjects = [...shared.keys(), dedicatedObject]
   const expected = new Set(scopeObjects.map(object => physical('sheet', stage, object)))
   const candidates = new Set(expected)
@@ -68,7 +72,16 @@ async function discover(tx, { tenantId, projectNo, boundTarget }) {
     `SELECT sheet_id, object_id, ${digest('t')} AS hash FROM ${TARGETS} t WHERE tenant_id = $1 AND project_no = $2`,
     [tenantId, projectNo],
   )
-  if (registry.length > 1 || registry.some(t => t.object_id !== dedicatedObject || t.sheet_id !== dedicatedId)) refuse()
+  if (registry.length > 1) refuse()
+  const registered = registry[0]
+  if (registered) {
+    if (registered.object_id === dedicatedObject) {
+      if (registered.sheet_id !== dedicatedId) refuse()
+    } else if (!isSandboxNamespaceObjectId(registered.object_id) || isStockPreparationProjectSheetObjectId(registered.object_id)) {
+      refuse()
+    }
+    candidates.add(registered.sheet_id)
+  }
 
   const rows = await tx.query(
     `SELECT s.id, s.name, s.deleted_at, b.id AS base_id, b.owner_id, b.workspace_id, b.deleted_at AS base_deleted_at, to_jsonb(s)->>'system_kind' AS system_kind, to_jsonb(s)->>'recovery_writer_state' AS writer_state,
@@ -84,6 +97,12 @@ async function discover(tx, { tenantId, projectNo, boundTarget }) {
   const sheets = []
   for (const row of rows) {
     const bound = row.id === boundTarget?.sheetId
+    const isRegistered = row.id === registered?.sheet_id
+    const adopted = isRegistered && registered.object_id !== dedicatedObject
+    // The runbook may register an existing sandbox. Only its actual server-owned tuple
+    // proves the registration. Its physical sheet and managed claim remain shared.
+    if (adopted && row.deleted_at) refuse()
+    if (isRegistered && (row.object_id !== registered.object_id || row.project_id !== stage || row.plugin_name !== PLUGIN)) refuse()
     // A deployment-wide legacy binding can designate another tenant. Never read its contents.
     if (bound && row.project_id && row.project_id !== stage && !expected.has(row.id)) continue
     // Before the object registry existed, a deterministic id alone could also be supplied by a
@@ -105,22 +124,23 @@ async function discover(tx, { tenantId, projectNo, boundTarget }) {
     const isDedicated = row.object_id === dedicatedObject
     let descriptor = shared.get(row.object_id)
     if (isDedicated) descriptor = ['dedicatedRows', 'projectNo', 'idempotencyKey']
+    else if (adopted) descriptor = ['sharedPullRows', 'projectNo', 'idempotencyKey']
     else if (!descriptor && (bound || isSandboxNamespaceObjectId(row.object_id))) descriptor = ['sharedPullRows', 'projectNo']
     if (!descriptor) continue
     if (bound && !isDedicated && isReferenceObject(row.object_id)) refuse()
-    if (physical('sheet', stage, row.object_id) !== row.id && !bound) refuse()
-    if (isDedicated && (!registry.length || row.id !== dedicatedId || row.system_kind)) refuse()
+    if (physical('sheet', stage, row.object_id) !== row.id && !bound && !adopted) refuse()
+    if (isDedicated && (!isRegistered || row.id !== dedicatedId || row.system_kind)) refuse()
     const [category, ...fields] = descriptor
     if (row.system_kind && !(category === 'overviewRows' && row.system_kind === 'stock_prep_overview')) refuse()
     const keyMap = Object.fromEntries(fields.map(key => [key, physical('fld', stage, row.object_id, key)]))
-    if (bound && category === 'sharedPullRows') {
+    if (bound && !adopted && category === 'sharedPullRows') {
       const map = boundTarget.fieldIdMap || {}
       keyMap.projectNo = Object.keys(map).length ? map.projectNo : 'projectNo'
       if (typeof keyMap.projectNo !== 'string' || !keyMap.projectNo.trim()) refuse()
     }
-    sheets.push({ ...row, category, fields: keyMap })
+    sheets.push({ ...row, category, adopted, fields: keyMap })
   }
-  if (registry.length && !sheets.some(s => s.category === 'dedicatedRows')) refuse()
+  if (registered && !sheets.some(s => s.id === registered.sheet_id)) refuse()
   if (sheets.length) {
     const metadata = await tx.query(
       `SELECT f.sheet_id, f.id, ${digest('f')} AS hash FROM meta_fields f
@@ -134,7 +154,7 @@ async function discover(tx, { tenantId, projectNo, boundTarget }) {
       sheet.columnHashes = Object.values(sheet.fields).map(id => columns.get(id)?.hash || 'absent')
     }
   }
-  return { registry, sheets }
+  return { registry, sheets, expected }
 }
 
 // SQL returns only scoped navigation keys and a content digest, including every column of a
@@ -179,7 +199,9 @@ async function planSheets(tx, scope) {
   const { sheets, registry } = await discover(tx, scope)
   const ownedTargetSheetIds = sheets.filter(s => ['dedicatedRows', 'sharedPullRows'].includes(s.category)).map(s => s.id)
   const counts = Object.fromEntries([...new Set([...shared.values()].map(v => v[0]))].map(key => [key, 0]))
-  Object.assign(counts, { dedicatedRows: 0, dedicatedSheets: registry.length, managedRegistrations: registry.length,
+  const dedicatedSheetId = sheets.find(s => s.category === 'dedicatedRows')?.id || null
+  const registeredSheetId = registry[0]?.sheet_id || null
+  Object.assign(counts, { dedicatedRows: 0, dedicatedSheets: Number(dedicatedSheetId !== null), managedRegistrations: Number(dedicatedSheetId !== null),
     projectTargets: registry.length, trashRows: 0, sheetDependencies: 0 })
   const selected = new Map()
   const selectedBySheet = new Map(sheets.map(s => [s.id, new Map()]))
@@ -196,17 +218,17 @@ async function planSheets(tx, scope) {
 
   const projectNo = scope.projectNo
   for (const sheet of sheets.filter(s => direct.has(s.category))) {
-    if (sheet.category === 'dedicatedRows') {
+    if (sheet.category === 'dedicatedRows' || sheet.adopted) {
       const rows = await readRows(tx, sheet, {}, 'projectNo', true)
-      if (rows.some(row => row.projectNo && row.projectNo !== projectNo)) refuse()
+      if (sheet.adopted ? rows.some(row => !row.projectNo) : rows.some(row => row.projectNo && row.projectNo !== projectNo)) refuse()
       for (const row of rows) {
         if (row.idempotencyKey?.startsWith('{')) {
           let identity
           try { identity = JSON.parse(row.idempotencyKey) } catch { refuse() }
-          if (identity.projectNo !== projectNo) refuse()
+          if (identity.projectNo !== (sheet.adopted ? row.projectNo : projectNo)) refuse()
         }
       }
-      select(sheet, rows)
+      select(sheet, sheet.adopted ? rows.filter(row => row.projectNo === projectNo) : rows)
     } else {
       select(sheet, await readRows(tx, sheet, { projectNo: [projectNo] }, 'projectNo'))
     }
@@ -244,10 +266,9 @@ async function planSheets(tx, scope) {
 
   const tables = []
   const evidence = registry.map(r => r.hash)
-  const dedicatedSheetId = sheets.find(s => s.category === 'dedicatedRows')?.id || null
   for (const sheet of sheets) {
     const rows = [...selectedBySheet.get(sheet.id).values()].sort((a, b) => a.id.localeCompare(b.id))
-    if (!rows.length && sheet.id !== dedicatedSheetId) continue
+    if (!rows.length && sheet.id !== registeredSheetId) continue
     if (sheet.writer_state) refuse('BUSY')
     const live = rows.filter(r => !r.trash)
     const trash = rows.filter(r => r.trash)
@@ -264,7 +285,7 @@ async function planSheets(tx, scope) {
   if (!identityPresent && selected.size) refuse()
   const fingerprint = createHash('sha256')
   for (const value of [...evidence, dependencies.hash]) fingerprint.update(value).update('\n')
-  return { counts, tables, fingerprint: fingerprint.digest('hex'), identityPresent, ownedTargetSheetIds, dedicatedSheetId, selected, dependencies }
+  return { counts, tables, fingerprint: fingerprint.digest('hex'), identityPresent, ownedTargetSheetIds, dedicatedSheetId, registeredSheetId, selected, dependencies }
 }
 
 async function deleteSheets(tx, { tenantId, projectNo }, plan) {
@@ -276,12 +297,15 @@ async function deleteSheets(tx, { tenantId, projectNo }, plan) {
       if (removed.length !== ids.length) refuse('STALE')
     }
   }
-  if (!plan.dedicatedSheetId) return
+  if (plan.registeredSheetId) {
+    const target = await tx.query(`DELETE FROM ${TARGETS} WHERE tenant_id = $1 AND project_no = $2 AND sheet_id = $3 RETURNING 1`, [tenantId, projectNo, plan.registeredSheetId])
+    if (target.length !== 1) refuse('STALE')
+  }
   const sheetId = plan.dedicatedSheetId
-  const target = await tx.query(`DELETE FROM ${TARGETS} WHERE tenant_id = $1 AND project_no = $2 AND sheet_id = $3 RETURNING 1`, [tenantId, projectNo, sheetId])
+  if (!sheetId) return
   const owner = await tx.query(`DELETE FROM ${OWNERS} WHERE project_id = $1 AND object_id = $2 AND plugin_name = $3 AND sheet_id = $4 RETURNING 1`,
     [tenantId + ':integration-core', deriveStockPreparationProjectSheetObjectId(tenantId, projectNo), PLUGIN, sheetId])
-  if (target.length !== 1 || owner.length !== 1) refuse('STALE')
+  if (owner.length !== 1) refuse('STALE')
   const removed = await tx.query('DELETE FROM meta_sheets WHERE id = $1 RETURNING 1', [sheetId])
   if (removed.length !== 1) refuse('STALE')
 }
@@ -301,4 +325,9 @@ async function existsProjectRoot(tx, scope) {
   return false
 }
 
-module.exports = { planSheets, deleteSheets, existsProjectRoot, SHEET_LOCK_TABLES }
+async function discoverProjectDeleteSheetScope(tx, scope) {
+  const { expected, sheets } = await discover(tx, scope)
+  return [...new Set([...expected, ...sheets.map(sheet => sheet.id)])].sort()
+}
+
+module.exports = { planSheets, deleteSheets, existsProjectRoot, discoverProjectDeleteSheetScope, projectDeleteDedicatedSheetId, SHEET_LOCK_TABLES }

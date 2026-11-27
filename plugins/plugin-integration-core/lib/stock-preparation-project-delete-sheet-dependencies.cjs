@@ -39,6 +39,8 @@ const rules = [
   ['meta_comment_reactions', commentChild],
   ['meta_comments', comments],
   ['record_permissions', record],
+  ['meta_record_yjs_states', `r.record_id IN (${targetIds})`],
+  ['meta_record_yjs_updates', `r.record_id IN (${targetIds})`],
   ['meta_record_subscription_notifications', record],
   ['meta_record_subscriptions', record],
   ['multitable_attachments', record],
@@ -49,8 +51,10 @@ const rules = [
   ['meta_field_value_tombstones', record, 'history'],
   ['meta_link_tombstones', record, 'history'],
   ['meta_config_revisions', dedicated, 'history'],
-  ['meta_history_baselines', record],
-  ['meta_history_trust_checkpoints', dedicated],
+  // A sibling project's later operation can recover the entire sheet from this checkpoint.
+  // Removing even one member would silently change the state reconstructed at that anchor.
+  ['meta_history_baselines', record, 'recovery'],
+  ['meta_history_trust_checkpoints', dedicated, 'recovery'],
   ['meta_field_retype_conversions', dedicated],
   ['meta_links', `r.record_id IN (${targetIds})`],
   ['formula_dependencies', dedicated],
