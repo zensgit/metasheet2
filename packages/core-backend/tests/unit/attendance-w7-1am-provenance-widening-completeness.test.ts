@@ -648,3 +648,47 @@ describe('W7-1a-M provenance widening — domain semantics', () => {
     expect(webMembers.length).toBeGreaterThanOrEqual(7)
   })
 })
+
+
+describe('approved OT provenance registration', () => {
+  const files = [
+    'packages/core-backend/src/attendance/w4c3b-approved-overtime-shadow.ts',
+    'packages/core-backend/src/attendance/w4c3b-approved-overtime.ts',
+  ]
+  const entries = W7_PROVENANCE_WIDENING_LEDGER_V1.filter(entry => files.includes(entry.file))
+
+  it('approved OT provenance pins all five actual source sites and their machine-checked rules', () => {
+    expect(entries).toHaveLength(5)
+    expect(entries.map(entry => entry.rule).sort()).toEqual([
+      'closed_set_member_list', 'legacy_polarity', 'legacy_polarity', 'legacy_polarity', 'widened_predicate',
+    ])
+    const sites = derivation.sites.filter(site => files.includes(site.file))
+    expect(sites).toHaveLength(5)
+    expect(diffProvenanceWideningV1({ ...derivation, sites }, entries)).toEqual([])
+    for (const entry of entries) {
+      expect(sites.some(site => site.file === entry.file && site.text === entry.text)).toBe(true)
+    }
+  })
+
+  it('approved OT provenance refuses each missing entry and each unsatisfied rule', () => {
+    expect(entries).toHaveLength(5)
+    for (const entry of entries) {
+      const site = derivation.sites.find(item => item.file === entry.file && item.text === entry.text)
+      expect(site).toBeDefined()
+      const missing = diffProvenanceWideningV1(derivation, W7_PROVENANCE_WIDENING_LEDGER_V1.filter(item => item !== entry))
+      expect(missing.some(item => item.kind === 'unledgered_site' && item.detail.includes(entry.file))).toBe(true)
+      // Counterfactual input to the unchanged rule verifier, not a claim of a new source scan.
+      const changed = {
+        ...site!,
+        text: site!.text.replace(/'legacy_untracked'/g, "'w4'"),
+        hasNewValue: false,
+        hasWideningSymbol: false,
+        declarationHasNewValue: false,
+        declarationHasWideningSymbol: false,
+      }
+      const violations = diffProvenanceWideningV1({ ...derivation, sites: [changed] }, [entry])
+      const expected = entry.rule === 'legacy_polarity' ? 'rule_predicate_failed' : 'not_widened'
+      expect(violations.some(item => item.kind === expected && item.detail.includes(entry.file))).toBe(true)
+    }
+  })
+})
