@@ -416,6 +416,10 @@ export function defineStockPreparationProjectDeleteRealDbCases() {
       expect(attempts.filter(result => result.status === 'fulfilled')).toHaveLength(1)
       expect(attempts.filter(result => result.status === 'rejected')).toHaveLength(1)
       await expect(fixture.service.confirm(current)).rejects.toMatchObject(badCode)
+      for (const changed of [{ actor: otherAdmin }, { tenantId: otherTenant }, { projectNo: 'another-project' }]) {
+        await expect(fixture.service.receipt({ ...current, ...changed })).rejects.toMatchObject({ status: 404, code: 'STOCK_PREPARATION_PROJECT_DELETE_RECEIPT_ABSENT' })
+      }
+      expect(await fixture.service.receipt(current)).toMatchObject({ tenantId: scope.tenantId, projectNo: scope.projectNo })
       expect((await q("SELECT action FROM integration_stock_prep_audit WHERE tenant_id = $1 AND action = 'project_delete'", [scope.tenantId])).rows).toEqual([{ action: 'project_delete' }])
     }, 60000)
 

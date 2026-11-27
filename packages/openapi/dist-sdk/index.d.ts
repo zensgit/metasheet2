@@ -28022,7 +28022,6 @@ export interface operations {
             header?: never;
             path: {
                 projectNo: string;
-                /** Format: uuid */
                 challengeId: string;
             };
             cookie?: never;

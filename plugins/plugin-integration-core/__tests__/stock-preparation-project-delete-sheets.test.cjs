@@ -123,23 +123,32 @@ test('shared pull ownership checks both projects and the configured PLM key in l
 test('cross-sheet dependencies block cleanup and ordinary side-table deletes must match the preview', async () => {
   const selected = new Map([[id, { live: ['pulled'], trash: [], recordIds: ['pulled'] }]])
   const inventory = []
-  let commentsRule
+  let blockedTable = 'meta_record_history_operations'
+  const ruleIds = new Map()
   const tx = { query: async sql => {
     if (sql.includes('NOT id = ANY')) return []
-    const comments = sql.split('\nUNION ALL\n').find(branch => branch.includes('AS deny FROM meta_comments r WHERE'))
-    commentsRule = Number(comments.match(/SELECT (\d+) AS rule/)[1])
+    for (const branch of sql.split('\nUNION ALL\n')) {
+      const match = branch.match(/SELECT (\d+) AS rule[\s\S]*?AS deny FROM (\w+) r WHERE/)
+      if (match && !ruleIds.has(match[2])) ruleIds.set(match[2], Number(match[1]))
+    }
+    if (blockedTable) return [{ rule: ruleIds.get(blockedTable), n: 1, blocked: true, hash: 'protected' }]
     return inventory
   } }
-  inventory.push({ rule: 0, n: 1, blocked: true, hash: 'sealed' })
-  await assert.rejects(planSheetDependencies(tx, id, selected), {
-    code: 'STOCK_PREPARATION_PROJECT_DELETE_DEPENDENCY', status: 409, details: { reason: 'recovery' },
-  })
+  for (const [table, recoveryKind] of [['meta_record_history_operations', null], ['meta_recovery_archives', 'archive'],
+    ['meta_recovery_archive_legal_holds', 'hold'], ['meta_recovery_archive_jobs', 'job']]) {
+    blockedTable = table
+    await assert.rejects(planSheetDependencies(tx, id, selected), {
+      code: 'STOCK_PREPARATION_PROJECT_DELETE_DEPENDENCY', status: 409,
+      details: { reason: 'recovery', ...(recoveryKind ? { recoveryKind } : {}) },
+    })
+  }
   const stale = { code: 'STOCK_PREPARATION_PROJECT_DELETE_STALE', status: 409 }
-  for (const rule of [0, 3, -1, 99999]) {
+  for (const rule of [...['meta_recovery_archives', 'meta_recovery_archive_legal_holds', 'meta_recovery_archive_jobs', 'meta_record_history_operations', 'meta_links'].map(table => ruleIds.get(table)), -1, 99999]) {
     const refuseWrite = { query: async () => assert.fail('A refusal-only or unknown dependency cannot be written') }
     await assert.rejects(deleteSheetDependencies(refuseWrite, id, selected, { present: [{ rule, count: 1 }] }), stale)
   }
-  inventory[0] = { rule: commentsRule, n: 1, blocked: false, hash: 'metadata' }
+  blockedTable = null
+  inventory.push({ rule: ruleIds.get('meta_comments'), n: 1, blocked: false, hash: 'metadata' })
   const plan = await planSheetDependencies(tx, id, selected)
   assert.equal(plan.count, 1)
   let writes = 0
