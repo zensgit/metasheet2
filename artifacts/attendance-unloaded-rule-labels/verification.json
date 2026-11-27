@@ -1,0 +1,173 @@
+{
+  "state": "passed-scoped-display-qualification-not-universal-parent-acceptance",
+  "base": "9bcaf4b8197eb9752f7eb5010bc0e0ba3cd6d651",
+  "sourcePathsBeforeDocsProof": {
+    "apps/web/src/views/AttendanceView.vue": "5826d3e5c26c2c0b3a798393be16b6924507a7f5601c37b2512db15545328e45",
+    "apps/web/tests/attendance-admin-regressions.spec.ts": "1c1888592755749982237a3ce25054f6a468f60c21c0b43ebc2fed4b14fecef9",
+    "docs/development/attendance-unloaded-rule-labels-design-lock-20261026.md": "73969050b16c95a99bde0c8e67c5ecebe0244dc06b5fee9c54020d99bb86c4b1"
+  },
+  "baselineBrowser": {
+    "fixture": "private17 integration",
+    "head": "e74d103654916dec76d2b1d1fb9f9837e052f191",
+    "freshMainTargetFunctionsByteEqual": {
+      "function buildAttendanceGroupRulePolicyLines()": {
+        "matches": true,
+        "sha256": "82cabc6b104acd1f7bbbb3d44d1dd4719a6eb947c6def4cc39d7c5c5e7bcae90"
+      },
+      "function resolveRuleSetName(": {
+        "matches": true,
+        "sha256": "7c2959bfd5376fa39209e12fb181db2946dae1aa06d19e3550a20ca5e777936a"
+      }
+    }
+  },
+  "freshMainMountedRed": {
+    "failed": 2,
+    "passedControls": 2,
+    "excluded": 146,
+    "matchedFailures": [
+      "Default versus unloaded neutral",
+      "raw ID versus unloaded neutral"
+    ]
+  },
+  "candidateMountedPhases": [
+    {
+      "actualPassed": 5,
+      "excluded": 145,
+      "scope": "four new card/drawer/no-link/loaded plus existing group-manager neighbor"
+    },
+    {
+      "actualPassed": 1,
+      "excluded": 150,
+      "scope": "additional local-search and exact9-column CSV row; no server calls"
+    }
+  ],
+  "notFreshSixCaseOrFull151Run": true,
+  "matchingMutations": [
+    {
+      "name": "misleading Default helper fallback",
+      "failed": 1,
+      "passed": 0,
+      "excluded": 150
+    },
+    {
+      "name": "raw ID primary drawer line",
+      "failed": 1,
+      "passed": 0,
+      "excluded": 150
+    }
+  ],
+  "retiredMutationAttempt": "first unscoped identical import formatter replacement was no-op; its1pass not negative proof; corrected only the failed mutation, no original five-case green rerun",
+  "quality": {
+    "validateAllExit": 0,
+    "changedTestEslintExit": 0,
+    "fullMegaVueEslintClaimed": false
+  },
+  "browser": [
+    {
+      "case": "candidate1440-en",
+      "width": 1440,
+      "locale": "en",
+      "postures": [
+        "neutralCard",
+        "neutralDrawerWithLabelledTechnicalID"
+      ],
+      "display": {
+        "neutralPrimary": "Linked rule set is not loaded",
+        "technicalIdLabel": "Rule set ID",
+        "cardPrimaryIsNotDefault": true,
+        "drawerPrimaryIsNotId": true
+      }
+    },
+    {
+      "case": "candidate768-zh",
+      "width": 768,
+      "locale": "zh-CN",
+      "postures": [
+        "neutralCard",
+        "neutralDrawerWithLabelledTechnicalID"
+      ],
+      "display": {
+        "neutralPrimary": "关联规则集尚未加载",
+        "technicalIdLabel": "规则集 ID",
+        "cardPrimaryIsNotDefault": true,
+        "drawerPrimaryIsNotId": true
+      }
+    },
+    {
+      "case": "candidate375-en",
+      "width": 375,
+      "locale": "en",
+      "postures": [
+        "neutralCard",
+        "neutralDrawerWithLabelledTechnicalID"
+      ],
+      "display": {
+        "neutralPrimary": "Linked rule set is not loaded",
+        "technicalIdLabel": "Rule set ID",
+        "cardPrimaryIsNotDefault": true,
+        "drawerPrimaryIsNotId": true
+      }
+    }
+  ],
+  "screenshots": [
+    {
+      "path": "artifacts/attendance-unloaded-rule-labels/screenshots/candidate1440-en-card.png",
+      "sha256": "853a259e52e5441f783a6a43c802d2048f2920d680d819f1cd85a12cbebc3d80",
+      "case": "candidate1440-en",
+      "posture": "card"
+    },
+    {
+      "path": "artifacts/attendance-unloaded-rule-labels/screenshots/candidate1440-en-drawer.png",
+      "sha256": "b54df12b6380c6853103498e9db8613f525dc13f6a3f6f0796b86afeccae8d44",
+      "case": "candidate1440-en",
+      "posture": "drawer"
+    },
+    {
+      "path": "artifacts/attendance-unloaded-rule-labels/screenshots/candidate768-zh-card.png",
+      "sha256": "b2e1ca245bc7a4815d2346b8ec15403600fd29d79f26d496e999e79f05f992de",
+      "case": "candidate768-zh",
+      "posture": "card"
+    },
+    {
+      "path": "artifacts/attendance-unloaded-rule-labels/screenshots/candidate768-zh-drawer.png",
+      "sha256": "bc086bfe5fbba226e3f640eddb00a724f81e674e504e60d3f939f7117d03bca8",
+      "case": "candidate768-zh",
+      "posture": "drawer"
+    },
+    {
+      "path": "artifacts/attendance-unloaded-rule-labels/screenshots/candidate375-en-card.png",
+      "sha256": "2db55d1b807bd6f816dda06868a1aad3e6f670df768ce3a760e9c35609f8024f",
+      "case": "candidate375-en",
+      "posture": "card"
+    },
+    {
+      "path": "artifacts/attendance-unloaded-rule-labels/screenshots/candidate375-en-drawer.png",
+      "sha256": "ed10108a654f6fdadb0a138ba1f75e02671c6040105f997932a6e304ac49e459",
+      "case": "candidate375-en",
+      "posture": "drawer"
+    }
+  ],
+  "mainVisualReview": {
+    "images": 6,
+    "result": "readable neutral name and separately labelled technical ID; wrapping at375/768/1440; no introduced clipping/overlap"
+  },
+  "applicationWriteAttempts": 0,
+  "externalForwarded": 0,
+  "pageErrors": 0,
+  "expectedBootstrap405": 3,
+  "independentReview": {
+    "model": "gpt-6.1-sol",
+    "effort": "medium",
+    "confirmedNewP1P2": 0,
+    "productHashMatchedProposal": true,
+    "laterCsvTestAuditedByMain": true
+  },
+  "scopeNotes": [
+    "Shared display helper also changes local search text, group CSV policy cell and import-batch labels; no server-query change",
+    "No API/schema/writer/auth/calculation/flag change",
+    "Unloaded does not imply deleted, unauthorized or default effective",
+    "Configuration ID is not actor identity/R7 privacy claim",
+    "Universal policy-summary state crosswalk and Return/history defect remain separate",
+    "All PRDraft/HOLD; no merge/deploy/R71; real UAT/business50004excluded"
+  ]
+}
