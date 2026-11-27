@@ -648,6 +648,7 @@ async function call(routes, method, routePath, req = {}) {
   assert.ok(handler, `route ${method} ${routePath} is registered`)
   const res = createResponse()
   const request = { user: req.user, body: req.body || {}, query: req.query || {}, params: req.params || {} }
+  if (req.headers !== undefined) request.headers = req.headers
   if (req.authenticatedTenantId !== undefined) request.authenticatedTenantId = req.authenticatedTenantId
   await handler(request, res)
   return res

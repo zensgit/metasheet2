@@ -2270,6 +2270,10 @@ export interface PluginServices {
       tenantId: string
     }): Promise<{ member: boolean }>
   }
+  stockPreparationProjectDeleteAuthority?: (
+    tx: Pick<DatabaseTransaction, 'query'>,
+    scope: { actor: string; tenantId: string },
+  ) => Promise<void>
   notification: NotificationService // Notification service instance
   automationRegistry: PluginAutomationRegistryService
   rbacProvisioning: PluginRbacProvisioningService

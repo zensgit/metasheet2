@@ -45,7 +45,12 @@ function governedEntrySourceFor(src, handler) {
     handlerSlice(src, handler).includes(`await ${entryName}(governedPrincipalContextFromRequest(req), `),
     `${handler} delegates to ${entryName} with a context built from its request`,
   )
-  return `\n${governedEntryBody(src, entryName)}`
+  const body = governedEntryBody(src, entryName)
+  if (handler === 'tableActionDryRun') {
+    assert.ok(body.includes('() => runAuthorizedStockPrepPull(req, actionId, governedEntry, body)'))
+    return `\n${body}\n${governedEntryBody(src, 'runAuthorizedStockPrepPull')}`
+  }
+  return `\n${body}`
 }
 
 module.exports = {

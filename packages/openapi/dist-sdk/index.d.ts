@@ -12010,6 +12010,63 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/integration/stock-preparation/project-delete/access": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Check the current tenant's project cleanup permission */
+        get: operations["getStockPreparationProjectDeleteAccess"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/stock-preparation/projects/{projectNo}/delete/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview local cleanup of one project and issue a five-minute verification code
+         * @description Requires a verified tenant on the authenticated principal, active membership in that tenant, and live platform administrator authority. The preview includes both trial and production rows.
+         */
+        post: operations["previewStockPreparationProjectDelete"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/stock-preparation/projects/{projectNo}/delete/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Confirm permanent cleanup of all stock-preparation data for one project
+         * @description Rechecks the verified tenant, membership and live administrator authority before applying the one-time challenge.
+         */
+        post: operations["confirmStockPreparationProjectDelete"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/integration/stock-preparation/snapshot-batches": {
         parameters: {
             query?: never;
@@ -27746,6 +27803,186 @@ export interface operations {
             409: components["responses"]["ElearningError"];
             410: components["responses"]["ElearningError"];
             503: components["responses"]["ElearningError"];
+        };
+    };
+    getStockPreparationProjectDeleteAccess: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Whether the current administrator may request a cleanup preview */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        ok: boolean;
+                        data: {
+                            mayDelete: boolean;
+                        };
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description Cleanup authority unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    previewStockPreparationProjectDelete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectNo: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description Project impact and one-time challenge */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        ok: boolean;
+                        data: {
+                            tenantId: string;
+                            projectNo: string;
+                            tables: {
+                                sheetId: string;
+                                name: string;
+                                /** @enum {string} */
+                                kind: "dedicated" | "shared";
+                                rowCount: number;
+                            }[];
+                            counts: {
+                                [key: string]: number;
+                            };
+                            /** Format: uuid */
+                            challengeId: string;
+                            verificationCode: string;
+                            /** Format: date-time */
+                            expiresAt: string;
+                        };
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description Feature disabled or project absent */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Concurrent work or ambiguous ownership */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid request */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Cleanup authority unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    confirmStockPreparationProjectDelete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectNo: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Format: uuid */
+                    challengeId: string;
+                    code: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Committed cleanup and audit reference */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        ok: boolean;
+                        data: {
+                            tenantId: string;
+                            projectNo: string;
+                            counts: {
+                                [key: string]: number;
+                            };
+                            auditId: string;
+                        };
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description Feature disabled */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid or expired verification */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid request */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Cleanup authority unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     listMyNotificationEndpoints: {

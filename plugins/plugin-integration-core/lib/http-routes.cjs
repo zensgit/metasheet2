@@ -241,6 +241,9 @@ const ROUTES = [
   //                  `project_target_restore` once; restoring an active project is a typed 409. The
   //                  200 cap is not re-checked (an archived row already counts against it).
   // The static `project-targets` segment cannot collide with `projects/:projectNo/...`.
+  ['GET', '/api/integration/stock-preparation/project-delete/access', 'stockPreparationProjectDeleteAccess'],
+  ['POST', '/api/integration/stock-preparation/projects/:projectNo/delete/preview', 'stockPreparationProjectDeletePreview'],
+  ['POST', '/api/integration/stock-preparation/projects/:projectNo/delete/confirm', 'stockPreparationProjectDeleteConfirm'],
   ['GET', '/api/integration/stock-preparation/project-targets', 'stockPreparationProjectTargetList'],
   ['GET', '/api/integration/stock-preparation/projects/:projectNo/target', 'stockPreparationProjectTargetGet'],
   ['POST', '/api/integration/stock-preparation/projects/:projectNo/target', 'stockPreparationProjectTargetCreate'],
@@ -1105,7 +1108,10 @@ const {
 // The shared shape rule for a 备料 business project number. See stock-preparation-common.cjs for why
 // this is a HANDLE and not free text: the same string reaches a record filter, an append-only audit
 // row, a durable cursor row and a DingTalk markdown body.
+const { withProjectDeleteActivity } = require('./stock-preparation-project-delete-activity.cjs')
+const { fenceProjectWriters } = require('./stock-preparation-project-delete-writers.cjs')
 const { isValidStockPrepProjectNo } = require('./stock-preparation-common.cjs')
+const { createProjectDeleteHandlers, isProjectDeleteEnabled } = require('./stock-preparation-project-delete-routes.cjs')
 // FOS-2: generic field-option-sync route — resolve a FOS preset (FOS-1 catalog), validate operator
 // option sets against the preset's source keys, and patch each mapped field's options + generic
 // `fieldOptionSync` metadata through the SAME kernel stock-prep uses (no parallel write path).
@@ -2477,6 +2483,9 @@ const STOCK_PREPARATION_VALUES_FREE_HANDLERS = new Set([
   'stockPreparationOperatorProjectBoard',
   'stockPreparationProjectTargetList',
   'stockPreparationProjectTargetGet',
+  'stockPreparationProjectDeleteAccess',
+  'stockPreparationProjectDeletePreview',
+  'stockPreparationProjectDeleteConfirm',
   'stockPreparationProjectTargetCreate',
   'stockPreparationProjectTargetArchive',
   'stockPreparationProjectTargetRestore',
@@ -5955,18 +5964,29 @@ function requireStockPreparationAudit() {
           return binding ? binding.externalSystemId : null
         }
       : null,
+    checkDeletedProject: async ({ tenantId, projectNo, targetPurpose, boundTarget }) => {
+      if (stockPreparationProjectSheetsEnabled(process.env)) return
+      const enabled = isProjectDeleteEnabled()
+      if (targetPurpose !== 'write' && !(enabled && targetPurpose === 'read')) return
+      const status = services.stockPreparationProjectDeletionStatus || services.stockPreparationProjectDelete?.isDeleted
+      if (typeof status !== 'function') {
+        // Legacy hosts without a DB cleanup capability cannot have issued a deletion. The enabled
+        // feature on an incompletely wired host still fails closed.
+        if (enabled) throw new HttpRouteError(503, 'STOCK_PREPARATION_PROJECT_DELETE_UNAVAILABLE', 'Project cleanup status is unavailable')
+        return
+      }
+      if (await status({ tenantId, projectNo, boundTarget })) {
+        throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ABSENT', 'This project must be created before it can be pulled')
+      }
+    },
     resolveProjectTarget: stockPreparationProjectTargets
       ? async ({ tenantId, projectNo, targetPurpose, extensionFieldIds }) => resolveProjectTargetForAction({
           store: stockPreparationProjectTargets,
           provisioning: context && context.api && context.api.multitable && context.api.multitable.provisioning,
-          // The caller's OWN staging project — the tenant the registry is keyed by. Never a request
-          // projectId: the registry answers for the tenant the lookup was scoped to and nothing else.
           projectId: resolveIntegrationStagingProjectId(tenantId, undefined),
           tenantId,
           projectNo,
           targetPurpose,
-          // S2: the looked-up action's own declared `ext_` band (server config, threaded by the
-          // registry from the normalized action) — never a request field.
           extensionFieldIds,
           env: process.env,
         })
@@ -7884,6 +7904,11 @@ function requireStockPreparationAudit() {
     return mark.ticket
   }
 
+  function backgroundTrialCompletion(req) {
+    const mark = dryRunJobRequests.get(req) || dryRunJobRequests.get(requestOfGovernedPrincipalContext(req))
+    return mark.ticket.settled
+  }
+
   /** Launch the guarded closure detached; the stored failure is the synchronous route's own answer. */
   function launchTableActionDryRunJob(ticket, run) {
     return launchDryRunJob({
@@ -7954,6 +7979,25 @@ function requireStockPreparationAudit() {
     const req = principalContext
     await requireTableActionAccess(req, actionId, 'read', tenantPrincipalDirectory)
     const body = normalizeTableActionBody(requestBody(req))
+    const run = () => runAuthorizedStockPrepPull(req, actionId, governedEntry, body)
+    if (!isProjectDeleteEnabled()) return run()
+    const { projectNo } = normalizeActionParameters(body.parameters)
+    const scope = { tenantId: resolveTenantId(req, {}), projectNo }
+    // The HTTP background route answers as soon as it has persisted the running job. Its DB
+    // activity lock must outlive that response, including the final durable result write.
+    return new Promise((resolve, reject) => {
+      withProjectDeleteActivity(context.api.database, scope, async () => {
+        const answer = await run()
+        if (answer.background) {
+          resolve(answer)
+          await backgroundTrialCompletion(req)
+        }
+        return answer
+      }).then(resolve, reject)
+    })
+  }
+
+  async function runAuthorizedStockPrepPull(req, actionId, governedEntry, body) {
     /*
      * W3a — THE OPT-IN FOR THE MISSING-COMPONENT LIST, AND WHY IT NEEDS ITS OWN GATE.
      *
@@ -8217,6 +8261,22 @@ function requireStockPreparationAudit() {
   const VALID_TABLE_ACTION_DRY_RUN_JOB_QUERY_KEYS = new Set(['tenantId', 'workspaceId', 'projectNo', 'includeMissingComponents'])
 
   const handlers = {
+    ...createProjectDeleteHandlers({
+      database: context.api?.database,
+      authorizeWithin: services.stockPreparationProjectDeleteAuthority,
+      service: services.stockPreparationProjectDelete,
+      tenantPrincipalDirectory,
+      resolveBoundTarget: async tenantId => {
+        try {
+          const action = await tableActions.getTableAction({ tenantId, actionId: PLM_STOCK_PREPARATION_ACTION_ID, targetPurpose: 'readiness' })
+          return action.target
+        } catch (error) {
+          if (error.code === 'TABLE_ACTION_NOT_CONFIGURED' || error.code === 'TABLE_ACTION_NOT_FOUND') return null
+          throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_DELETE_AMBIGUOUS', 'The configured stock-preparation target could not be verified')
+        }
+      },
+      sendOk,
+    }),
     async status(req, res) {
       requireAccess(req, 'read')
       return sendOk(res, {
@@ -12076,7 +12136,7 @@ function requireStockPreparationAudit() {
       let rowFacts = null
       try {
         const binding = await buildProjectTargetBinding({ provisioning, projectId: targetProjectId, target: row })
-        const scan = await scanPullTargetProjects(getMultitableRecordsApi(), { sheetId: row.sheetId, objectId: row.objectId }, binding, projectNo, { cache: pullTargetScanCache })
+        const scan = await scanPullTargetProjects(getMultitableRecordsApi(), { sheetId: row.sheetId, objectId: row.objectId }, binding, projectNo, { cache: isProjectDeleteEnabled() ? null : pullTargetScanCache })
         rowFacts = scan && scan.ready ? scan : null
       } catch (error) {
         rowFacts = null
@@ -14502,7 +14562,7 @@ function requireStockPreparationAudit() {
         // proved-own sheet; concurrent refreshes share one in-flight scan instead of starting one
         // each. The window lowers FREQUENCY only — it does not make a single scan cheaper, and it
         // does not lift the 50,000-row cap.
-        pullTargetScanCache,
+        pullTargetScanCache: isProjectDeleteEnabled() ? null : pullTargetScanCache,
         // For `lastExportAt` only, and read through ONE bounded descending window rather than one
         // query per project — see `lastExportAtByProjectNo`. This route's own audit APPEND below is
         // unrelated and unchanged.
@@ -15980,6 +16040,16 @@ function requireStockPreparationAudit() {
       return sendOk(res, await runner.replayDeadLetter(replayInput), 202)
     },
   }
+
+  fenceProjectWriters(handlers, {
+    enabled: isProjectDeleteEnabled,
+    database: () => context.api.database,
+    authorize: requireAccess,
+    authorizeAction: (req, tier) => requireTableActionAccess(req,
+      firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID, tier, tenantPrincipalDirectory),
+    authTenant: resolveAuthUserTenantId,
+    routeTenant: req => resolveTenantId(req, {}),
+  })
 
   // R-69 1b-i: the request-free governed entries, for an in-process caller (1b-ii's port). Non-enumerable,
   // so nothing that walks the handler map (route registration, guards) sees an extra entry.

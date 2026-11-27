@@ -114,6 +114,7 @@ const STOCK_PREP_AUDIT_ACTIONS = Object.freeze([
   // second row). Values-free: `project_id` the project NUMBER, `subject_id` the sheet id, `mode` the
   // enum `enabled`, `detail` the readiness version, the objectId handle and booleans about the stamp.
   'project_pilot_enable',
+  'project_delete',
 ])
 const ACTION_SET = new Set(STOCK_PREP_AUDIT_ACTIONS)
 

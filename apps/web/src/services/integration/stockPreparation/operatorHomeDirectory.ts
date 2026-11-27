@@ -35,6 +35,7 @@ import {
 const THROTTLE_WINDOW_MS = 5000
 
 interface ThrottleEntry {
+  tenantId: IntegrationScope['tenantId']
   /** `Date.now()` at the moment the live request was ISSUED — not when it settled. */
   at: number
   promise: Promise<StockPreparationOperatorDirectory>
@@ -69,11 +70,17 @@ export function readStockPreparationOperatorHomeDirectory(
   const promise = readStockPreparationOperatorDirectory(scope, {
     includePullTargets: true,
   })
-  cache.set(key, { at: now, promise })
+  cache.set(key, { tenantId: scope.tenantId, at: now, promise })
   promise.catch(() => {
     if (cache.get(key)?.promise === promise) cache.delete(key)
   })
   return promise
+}
+
+export function invalidateStockPreparationOperatorHomeDirectory(scope: IntegrationScope): void {
+  for (const [key, entry] of cache) {
+    if ((entry.tenantId ?? '') === (scope.tenantId ?? '')) cache.delete(key)
+  }
 }
 
 /**

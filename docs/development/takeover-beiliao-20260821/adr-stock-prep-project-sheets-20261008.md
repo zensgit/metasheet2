@@ -307,7 +307,7 @@ UNIQUE (tenant_id, project_no);  UNIQUE (sheet_id);  CHECK ((status='archived') 
 
 **已知代价（默认 (ii)，owner 可否决）**：归档的表仍出现在多维表左侧的表列表里，对有授权的人可见；0924 #1b 说的「删不掉」在多维表那一侧不会消失。宿主没有「隐藏表」开关：`meta_sheets` 只有 `deleted_at`（`db/types.ts:628-636`），列表里会隐藏的只有 People 目录表（`system-sheet-predicate.ts:55-60`）。要真正消失只能软删（和「一线可看归档表」矛盾），或给宿主加隐藏标记（新的宿主改动，§9 不做）。
 
-**保留期**：永不删除，没有清理任务。表回收站照旧不显示托管表（`univer-meta.ts:8349`）。
+**日常归档的保留期**为永久。交付清理另设平台管理员专用入口，须预览全项目影响并用一次性验证码确认；详见 [#6991 交付清理设计锁](../stock-preparation-project-delete-design-lock-20261127.md)。表回收站照旧不显示托管表（`univer-meta.ts:8349`）。
 
 **两个按钮的文案要区分**：「从列表移除（只在这台电脑上，不删数据）」和「归档项目（拉取人员操作，可以恢复）」。
 

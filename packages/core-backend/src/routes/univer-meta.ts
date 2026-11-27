@@ -372,6 +372,7 @@ import {
   tryResolveView as tryResolveViewShared,
   type MultitableViewConfig as SharedMultitableViewConfig,
 } from '../multitable/loaders'
+import { currentSheetMetadataEntry } from '../multitable/stock-preparation-metadata-cache'
 import { parseAggregations, aggregateField, groupRowsByFields, isNumericFieldType, type AggregateGroupBucket, type AggregationFn } from '../multitable/aggregation-helpers'
 import { ensureLegacyBase as ensureLegacyBaseShared } from '../multitable/provisioning'
 import {
@@ -4901,8 +4902,8 @@ async function loadSheetSummary(
   pool: { query: QueryFn },
   sheetId: string,
 ): Promise<{ id: string; name: string } | null> {
-  const cached = metaSheetSummaryCache.get(sheetId)
-  if (cached) return cached
+  const entry = await currentSheetMetadataEntry(pool.query.bind(pool), sheetId, metaSheetSummaryCache, sheetId)
+  if (entry.cached) return entry.cached
 
   const result = await pool.query(
     'SELECT id, name FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
@@ -4915,7 +4916,7 @@ async function loadSheetSummary(
     id: String(row.id),
     name: String(row.name),
   }
-  metaSheetSummaryCache.set(sheetId, sheet)
+  entry.store(sheet)
   return sheet
 }
 
@@ -4923,15 +4924,15 @@ async function loadSheetFields(
   pool: { query: QueryFn },
   sheetId: string,
 ): Promise<UniverMetaField[]> {
-  const cached = metaFieldCache.get(sheetId)
-  if (cached) return cached
+  const entry = await currentSheetMetadataEntry(pool.query.bind(pool), sheetId, metaFieldCache, sheetId)
+  if (entry.cached) return entry.cached
 
   const fieldRes = await pool.query(
     'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC',
     [sheetId],
   )
   const fields = fieldRes.rows.map((f: any) => serializeFieldRow(f))
-  metaFieldCache.set(sheetId, fields)
+  entry.store(fields)
   return fields
 }
 

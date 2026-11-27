@@ -65,6 +65,7 @@ import { buildXlsxBuffer, type XlsxModule } from './multitable/xlsx-service'
 // header onto that field when the token carried no claim), and the plugin's first value-bearing
 // tenant-scoped read must not be built on a caller-supplied string.
 import { createTenantPrincipalDirectoryBoundaryV1 } from './services/tenant-principal-directory-boundary'
+import { authorizeStockPreparationProjectDeleteWithin } from './services/stock-preparation-project-delete-authority'
 // 备料按部门列写权限: the per-column WRITE-scope port, injected into plugin-integration-core ONLY,
 // same per-plugin-injected-service shape as GovernedAiService above. It writes `field_permissions`
 // — the ONE table the grid's write gate reads — and is structurally write-only (it cannot hide a
@@ -3653,6 +3654,9 @@ export class MetaSheetServer {
         // absent for every other plugin.
         stockPreparationXlsxExport: manifest.name === 'plugin-integration-core'
           ? { buildWorkbookBuffer: buildStockPreparationExportWorkbookBuffer }
+          : undefined,
+        stockPreparationProjectDeleteAuthority: manifest.name === 'plugin-integration-core'
+          ? authorizeStockPreparationProjectDeleteWithin
           : undefined,
         // 一线看得见自己工厂的项目: the tenant PRINCIPAL DIRECTORY for plugin-integration-core ONLY.
         // The plugin's first tenant-scoped VALUE-BEARING read (the operator project directory, which

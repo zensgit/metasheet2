@@ -463,6 +463,7 @@ function globalHistoryFlagsInSource() {
   // other MULTITABLE_STOCK_PREP_* the plugin reads predates this registry and stays out of scope.
   // 人工补充行 B2 (ADR adr-stock-prep-manual-rows-20261030 §3.2 condition 5, §8 「B2 主机」 7): the HOST now reads the
   // switch too (multitable/stock-preparation-manual-rows-gate.ts), so both trees are scanned — the members-page precedent.
+  const stockPrepProjectDelete = grepPluginFlagTokens('STOCK_PREPARATION_PROJECT_DELETE_[A-Z_0-9]*ENABLED')
   const stockPrepProjectSheets = [
     ...grepPluginFlagTokens('MULTITABLE_STOCK_PREP_PROJECT_SHEET[A-Z_0-9]*'),
     ...grepFlagTokens('MULTITABLE_STOCK_PREP_PROJECT_SHEET[A-Z_0-9]*'),
@@ -516,7 +517,7 @@ function globalHistoryFlagsInSource() {
   // there: the plugin's older env flags go through its lenient parseBoolean and are NOT registered here.
   const attendanceCancelRound = grepFlagTokens('ATTENDANCE_CANCEL_ROUND_[A-Z_0-9]+', { file: ATTENDANCE_PLUGIN_SOURCE })
     .filter((t) => t.endsWith('_ENABLED'))
-  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...stockPrepPullBatch, ...stockPrepSheetRepair, ...stockPrepPilotPath, ...stockPrepTenantClaim, ...yidaOwner, ...yidaIssueConfirm, ...attendanceCancelRound, ...userRecycle, ...strictSessionLifetime, ...externalNotifications, ...directoryDeprovision, ...realtimeRevalidation, ...automationClassB, ...integrationAutomationRun])].sort()
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepProjectDelete, ...stockPrepMembersPage, ...stockPrepPullBatch, ...stockPrepSheetRepair, ...stockPrepPilotPath, ...stockPrepTenantClaim, ...yidaOwner, ...yidaIssueConfirm, ...attendanceCancelRound, ...userRecycle, ...strictSessionLifetime, ...externalNotifications, ...directoryDeprovision, ...realtimeRevalidation, ...automationClassB, ...integrationAutomationRun])].sort()
 }
 
 test('realtime revalidation flag: source-derived discovery requires registration', () => {
