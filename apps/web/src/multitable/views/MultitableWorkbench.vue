@@ -897,7 +897,7 @@ import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo, isWo
 import { resolveMentionDisplayField, resolvePrimaryField } from '../utils/recordDisplay'
 import { DEFAULT_GRID_PAGE_SIZE, GRID_PAGE_SIZE_OPTIONS, clampGridPageSize, readGridPageSize, writeGridPageSize } from '../utils/grid-page-size'
 import type { MetaRecordInspectorFieldLayout } from '../utils/recordDisplay'
-import { resolveButtonFieldProperty } from '../utils/field-config'
+import { attachmentLimitError, resolveButtonFieldProperty } from '../utils/field-config'
 import { DIALOG_META_REFRESH_INTERVAL_MS } from '../utils/dialog-meta-refresh'
 import {
   bulkFailure as fmtBulkFailure,
@@ -3933,7 +3933,16 @@ async function onDrawerPatch(fieldId: string, value: unknown, recordId?: string,
     // during an upload too. An upload that replaces the list names none, and is written as given.
     const raw = record.data[fieldId]
     const next = Array.isArray(raw) ? raw.map(String) : raw ? [String(raw)] : []
+    const before = next.length
     pushUniqueIds(next, added)
+    // The field's file limit was checked when the files were chosen; a file that reached the field meanwhile can
+    // make the merged list exceed it.
+    const field = grid.fields.value.find((item) => item.id === fieldId)
+    const overLimit = field && next.length > before ? attachmentLimitError(field, next.length, isZh.value) : null
+    if (overLimit) {
+      showError(overLimit)
+      return
+    }
     patchValue = next
   } else if (removed && !shown) {
     const raw = record.data[fieldId]

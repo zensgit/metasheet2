@@ -6805,6 +6805,71 @@ describe('MultitableWorkbench view wiring', () => {
       expect(firstFourArgs(gridMock.patchCell.mock.calls)).toEqual([['rec_remote', 'fld_files', ['att_1', 'att_2', 'att_new'], 4]])
     })
 
+    // An upload names the ids it added, and the field's file limit was checked when its files were chosen. When those
+    // ids lengthen the record's list as it is now past the limit, nothing is written and the limit text is toasted.
+    // gridMock.fields has no fld_files by default, so the cells above write with no limit known.
+    function withFilesField(maxFiles: number) {
+      gridMock.fields.value = [...gridMock.fields.value, { id: 'fld_files', name: 'Files', type: 'attachment', order: 3, property: { maxFiles } }]
+    }
+
+    it('an upload naming rec_1 (no longer shown) whose list reached the field\'s limit while it ran: nothing is written, and the limit text is toasted', async () => {
+      await openRec1ThenRec2()
+      withFilesField(2)
+      gridMock.rows.value[0].data = { ...gridMock.rows.value[0].data, fld_files: ['att_1', 'att_x'] }
+      gridMock.rows.value[0].version = 7
+      acceptNextPatch()
+      await patchAddedFor('rec_1')
+      expect(gridMock.patchCell).not.toHaveBeenCalled()
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).toHaveBeenCalledWith('This field allows up to 2 attachments.')
+      expect(showSuccessSpy).not.toHaveBeenCalled()
+    })
+
+    it('an upload naming the record shown (rec_2) into a one-file field that was empty when the file was chosen and now holds a file: nothing is written, and the one-file text is toasted', async () => {
+      await openRec1ThenRec2()
+      withFilesField(1)
+      gridMock.rows.value[1].data = { ...gridMock.rows.value[1].data, fld_files: ['att_y'] }
+      acceptNextPatch()
+      await patchAddedFor('rec_2')
+      expect(gridMock.patchCell).not.toHaveBeenCalled()
+      expect(showErrorSpy).toHaveBeenCalledTimes(1)
+      expect(showErrorSpy).toHaveBeenCalledWith('This field only allows one attachment. Clear the current file before adding another.')
+      expect(showSuccessSpy).not.toHaveBeenCalled()
+    })
+
+    it('an upload naming the deep-linked rec_remote (no longer shown) whose copy\'s list is at the field\'s limit: nothing is written, and the limit text is toasted', async () => {
+      await openRemoteThenRec2(['att_1', 'att_2'])
+      withFilesField(2)
+      acceptNextPatch()
+      await patchAddedFor('rec_remote')
+      expect(gridMock.patchCell).not.toHaveBeenCalled()
+      expect(showErrorSpy).toHaveBeenCalledWith('This field allows up to 2 attachments.')
+      expect(showSuccessSpy).not.toHaveBeenCalled()
+    })
+
+    // Controls: these pass before the change too.
+    it('an upload that brings rec_1\'s list exactly to the field\'s limit is written as before', async () => {
+      await openRec1ThenRec2()
+      withFilesField(3)
+      gridMock.rows.value[0].data = { ...gridMock.rows.value[0].data, fld_files: ['att_1', 'att_x'] }
+      gridMock.rows.value[0].version = 7
+      acceptNextPatch()
+      await patchAddedFor('rec_1')
+      expect(firstFourArgs(gridMock.patchCell.mock.calls)).toEqual([['rec_1', 'fld_files', ['att_1', 'att_x', 'att_new'], 7]])
+      expect(showErrorSpy).not.toHaveBeenCalled()
+    })
+
+    it('an upload whose ids rec_1\'s list already holds is written as before, also when that list is over the field\'s limit', async () => {
+      await openRec1ThenRec2()
+      withFilesField(1)
+      gridMock.rows.value[0].data = { ...gridMock.rows.value[0].data, fld_files: ['att_1', 'att_new'] }
+      gridMock.rows.value[0].version = 7
+      acceptNextPatch()
+      await patchAddedFor('rec_1')
+      expect(firstFourArgs(gridMock.patchCell.mock.calls)).toEqual([['rec_1', 'fld_files', ['att_1', 'att_new'], 7]])
+      expect(showErrorSpy).not.toHaveBeenCalled()
+    })
+
     // --- the drawer's upload or delete request itself fails after the drawer moved on: a toast, since the panel's
     // error line is the shown record's ---
 
