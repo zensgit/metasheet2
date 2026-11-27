@@ -94,6 +94,32 @@ test('uses the server-bound shared ownership column and keeps the legacy sheet a
   assert.equal(await existsProjectRoot(foreign.tx, scoped), false)
 })
 
+test('shared pull ownership checks both projects and the configured PLM key in live and recycled rows', async () => {
+  const legacy = { ...owner, id: 'mapped-shared', object_id: 'bound' }
+  const scoped = { ...scope, boundTarget: { sheetId: legacy.id, keyField: 'configuredKey',
+    fieldIdMap: { projectNo: 'mapped-owner', configuredKey: 'mapped-key' } } }
+  const fixture = (live, trash) => sheetFixture({ registry: [], owners: [legacy], live, trash })
+  for (const [column, embedded] of [['one', 'two'], ['two', 'one']]) {
+    const row = { ...pulled, projectNo: column, idempotencyKey: JSON.stringify({ projectNo: embedded }) }
+    for (const f of [fixture([row], []), fixture([], [row])]) {
+      await assert.rejects(planSheets(f.tx, scoped), ambiguous)
+      assert.deepEqual(f.writes, [])
+    }
+  }
+  const base = JSON.stringify({ projectNo: 'one', componentSourceId: 'part::duplicate:detail' })
+  const split = { ...pulled, idempotencyKey: base + '::duplicate:sourceDetail:sha16:1234567890abcdef' }
+  const control = { ...pulled, id: 'other', record_id: 'other', projectNo: 'two', idempotencyKey: '{"projectNo":"two"}' }
+  const f = fixture([split, control], [])
+  const plan = await planSheets(f.tx, scoped)
+  assert.deepEqual(plan.selected.get(legacy.id), { live: ['pulled'], trash: [], recordIds: ['pulled'] })
+  for (const relation of ['meta_records', 'meta_records_trash']) {
+    const read = f.reads.find(r => r.sql.includes('FROM ' + relation + ' r WHERE r.sheet_id'))
+    assert.deepEqual(read.params, [legacy.id, 'mapped-owner', 'mapped-key', ['one'], '"one"'])
+    assert.ok(read.sql.includes('strpos(r.data->>$3::text, $5::text)'))
+  }
+  await assert.rejects(planSheets(fixture([{ ...split, idempotencyKey: base + '::duplicate:broken' }], []).tx, scoped), ambiguous)
+})
+
 test('cross-sheet dependencies block cleanup and ordinary side-table deletes must match the preview', async () => {
   const selected = new Map([[id, { live: ['pulled'], trash: [], recordIds: ['pulled'] }]])
   const inventory = []

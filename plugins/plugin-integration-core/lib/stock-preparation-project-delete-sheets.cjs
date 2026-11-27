@@ -35,7 +35,7 @@ const roles = {
 const shared = new Map(STOCK_PREPARATION_MVP_TABLE_TEMPLATES.filter(t => roles[t.role]).map(t => [t.objectId, roles[t.role]]))
 shared.set(STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE.objectId, ['confirmationDecisions', 'projectNo'])
 shared.set(STOCK_PREPARATION_PROJECT_OVERVIEW_TABLE_TEMPLATE.objectId, ['overviewRows', 'projectNo'])
-shared.set(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId, ['sharedPullRows', 'projectNo'])
+shared.set(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId, ['sharedPullRows', 'projectNo', 'idempotencyKey'])
 const direct = new Set(['dedicatedRows', 'sharedPullRows', 'overviewRows', 'confirmationDecisions'])
 
 function refuse(code = 'AMBIGUOUS') {
@@ -125,7 +125,7 @@ async function discover(tx, { tenantId, projectNo, boundTarget }) {
     let descriptor = shared.get(row.object_id)
     if (isDedicated) descriptor = ['dedicatedRows', 'projectNo', 'idempotencyKey']
     else if (adopted) descriptor = ['sharedPullRows', 'projectNo', 'idempotencyKey']
-    else if (!descriptor && (bound || isSandboxNamespaceObjectId(row.object_id))) descriptor = ['sharedPullRows', 'projectNo']
+    else if (!descriptor && (bound || isSandboxNamespaceObjectId(row.object_id))) descriptor = ['sharedPullRows', 'projectNo', 'idempotencyKey']
     if (!descriptor) continue
     if (bound && !isDedicated && isReferenceObject(row.object_id)) refuse()
     if (physical('sheet', stage, row.object_id) !== row.id && !bound && !adopted) refuse()
@@ -136,6 +136,9 @@ async function discover(tx, { tenantId, projectNo, boundTarget }) {
     if (bound && !adopted && category === 'sharedPullRows') {
       const map = boundTarget.fieldIdMap || {}
       keyMap.projectNo = Object.keys(map).length ? map.projectNo : 'projectNo'
+      const logicalKey = boundTarget.keyField || 'idempotencyKey'
+      keyMap.idempotencyKey = map[logicalKey] || logicalKey
+      if (typeof keyMap.idempotencyKey !== 'string' || !keyMap.idempotencyKey.trim() || keyMap.idempotencyKey === keyMap.projectNo) refuse()
       if (typeof keyMap.projectNo !== 'string' || !keyMap.projectNo.trim()) refuse()
     }
     sheets.push({ ...row, category, adopted, fields: keyMap })
@@ -161,7 +164,7 @@ async function discover(tx, { tenantId, projectNo, boundTarget }) {
 // record. Reading the recycle bin prevents a previously deleted manual row from reappearing
 // when the same deterministic sheet id is recreated. An incomplete ownership key on a shared
 // table is a refusal, never an implicit match. Read scope is always the verified sheet id.
-async function readRows(tx, sheet, filters, ownerKey, allowBlank = false) {
+async function readRows(tx, sheet, filters, ownerKey, allowBlank = false, keyProject = null) {
   const keys = Object.keys(sheet.fields)
   const params = [sheet.id, ...Object.values(sheet.fields)]
   const fieldParam = key => '$' + (2 + keys.indexOf(key)) + '::text'
@@ -170,6 +173,12 @@ async function readRows(tx, sheet, filters, ownerKey, allowBlank = false) {
     if (!ids.length) continue
     params.push(ids)
     clauses.push(`btrim(r.data->>${fieldParam(key)}) = ANY($${params.length}::text[])`)
+  }
+  if (keyProject !== null) {
+    // The PLM producer uses JSON.stringify. A row moved under a sibling's project column
+    // still needs inspection when its key contains this project's quoted identifier.
+    params.push(JSON.stringify(keyProject))
+    clauses.push(`strpos(r.data->>${fieldParam('idempotencyKey')}, $${params.length}::text) > 0`)
   }
   if (ownerKey && !allowBlank) {
     const key = fieldParam(ownerKey)
@@ -195,6 +204,18 @@ async function readRows(tx, sheet, filters, ownerKey, allowBlank = false) {
   return result
 }
 
+// Manual rows may use a non-PLM key. A PLM key supplies a second ownership claim.
+function verifyPullRowIdentity(key, expectedProject) {
+  if (!key?.startsWith('{')) return
+  // Strip only a suffix the conflict planner emits. Plain JSON may itself contain
+  // the separator in a component identifier.
+  const suffix = /::duplicate:(?:sourceDetail|pathParent|sortLine):sha16:[a-f0-9]{16}$/.exec(key)
+  const base = suffix ? key.slice(0, suffix.index) : key
+  let identity
+  try { identity = JSON.parse(base) } catch { refuse() }
+  if (identity.projectNo !== expectedProject) refuse()
+}
+
 async function planSheets(tx, scope) {
   const { sheets, registry } = await discover(tx, scope)
   const ownedTargetSheetIds = sheets.filter(s => ['dedicatedRows', 'sharedPullRows'].includes(s.category)).map(s => s.id)
@@ -218,17 +239,18 @@ async function planSheets(tx, scope) {
 
   const projectNo = scope.projectNo
   for (const sheet of sheets.filter(s => direct.has(s.category))) {
-    if (sheet.category === 'dedicatedRows' || sheet.adopted) {
-      const rows = await readRows(tx, sheet, {}, 'projectNo', true)
-      if (sheet.adopted ? rows.some(row => !row.projectNo) : rows.some(row => row.projectNo && row.projectNo !== projectNo)) refuse()
+    if (sheet.category === 'dedicatedRows' || sheet.category === 'sharedPullRows') {
+      const dedicated = sheet.category === 'dedicatedRows'
+      // Read both ownership signals in both directions, including the recycle bin.
+      // A key naming this project under another project's column is also ambiguous.
+      const rows = dedicated || sheet.adopted
+        ? await readRows(tx, sheet, {}, 'projectNo', true)
+        : await readRows(tx, sheet, { projectNo: [projectNo] }, 'projectNo', false, projectNo)
       for (const row of rows) {
-        if (row.idempotencyKey?.startsWith('{')) {
-          let identity
-          try { identity = JSON.parse(row.idempotencyKey) } catch { refuse() }
-          if (identity.projectNo !== (sheet.adopted ? row.projectNo : projectNo)) refuse()
-        }
+        if (dedicated ? row.projectNo && row.projectNo !== projectNo : !row.projectNo) refuse()
+        verifyPullRowIdentity(row.idempotencyKey, dedicated ? projectNo : row.projectNo)
       }
-      select(sheet, sheet.adopted ? rows.filter(row => row.projectNo === projectNo) : rows)
+      select(sheet, dedicated ? rows : rows.filter(row => row.projectNo === projectNo))
     } else {
       select(sheet, await readRows(tx, sheet, { projectNo: [projectNo] }, 'projectNo'))
     }

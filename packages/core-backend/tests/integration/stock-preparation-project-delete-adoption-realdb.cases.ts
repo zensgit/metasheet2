@@ -50,6 +50,37 @@ export function registerProjectDeleteAdoptionCases(getFixture: () => ProjectDele
     expect((await q('SELECT id FROM meta_records WHERE sheet_id = $1', [rebuilt.sheetId])).rows).toEqual([])
   }, 60000)
 
+  test('ordinary shared pull rows must agree with their mapped PLM key before preview and confirmation', async () => {
+    const fixture = getFixture()
+    const scope = newScope('shared-key')
+    await fixture.admitAdmins(scope.tenantId)
+    const objectId = 'plm_stock_preparation_sandbox_shared_key'
+    const projectId = scope.tenantId + ':integration-core'
+    const { target } = await ensureStockPreparationSandboxTarget({ context: fixture.context, projectId, objectId, permission: 'admin' })
+    const sheetId: string = target.sheetId
+    const owner = fixture.provisioning.getFieldId(projectId, objectId, 'projectNo')
+    const key = fixture.provisioning.getFieldId(projectId, objectId, 'idempotencyKey')
+    const bound = { ...scope, boundTarget: { sheetId, objectId, keyField: 'externalKey', fieldIdMap: { projectNo: owner, externalKey: key } } }
+    const current = JSON.stringify({ projectNo: scope.projectNo })
+    const other = JSON.stringify({ projectNo: 'CONTROL' })
+    const mine = await fixture.records.createRecord({ sheetId, data: { [owner]: scope.projectNo, [key]: current } })
+    const neighbor = await fixture.records.createRecord({ sheetId, data: { [owner]: 'CONTROL', [key]: other } })
+    const plan = await fixture.service.preview(bound)
+    const refusal = { status: 409, code: 'STOCK_PREPARATION_PROJECT_DELETE_AMBIGUOUS' }
+    const setKey = (id: string, value: string) => q('UPDATE meta_records SET data = data || jsonb_build_object($3::text,$4::text) WHERE sheet_id=$1 AND id=$2', [sheetId, id, key, value])
+    await setKey(mine.id, other)
+    await expect(fixture.service.confirm({ ...bound, challengeId: plan.challengeId, verificationCode: plan.verificationCode })).rejects.toMatchObject(refusal)
+    await setKey(mine.id, current)
+    await setKey(neighbor.id, current)
+    await expect(fixture.service.preview(bound)).rejects.toMatchObject(refusal)
+    await setKey(neighbor.id, other)
+    const verified = await fixture.service.preview(bound)
+    expect(verified.counts.sharedPullRows).toBe(1)
+    await fixture.service.confirm({ ...bound, challengeId: verified.challengeId, verificationCode: verified.verificationCode })
+    expect((await q('SELECT id, data FROM meta_records WHERE sheet_id=$1', [sheetId])).rows)
+      .toEqual([{ id: neighbor.id, data: expect.objectContaining({ [owner]: 'CONTROL', [key]: other }) }])
+  }, 60000)
+
   test('shared baseline preserves both projects at the later operation of the surviving project', async () => {
     const fixture = getFixture()
     const scope = newScope('checkpoint')
