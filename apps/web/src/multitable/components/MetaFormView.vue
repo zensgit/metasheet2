@@ -128,7 +128,7 @@
             :aria-required="fieldIsRequired(field) ? 'true' : undefined"
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
             :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
-            :value="formData[field.id] ?? ''"
+            v-field-value="[textControlValue(formData[field.id]), String(formLoads)]"
             @input="onNumberInput(field.id, $event)"
           />
           <label v-else-if="field.type === 'boolean'" class="meta-form-view__check">
@@ -266,7 +266,7 @@
             :disabled="isFieldReadOnly(field.id)"
             :aria-required="fieldIsRequired(field) ? 'true' : undefined"
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
-            :value="formData[field.id] ?? ''"
+            v-field-value="[textControlValue(formData[field.id]), String(formLoads)]"
             @input="onNumberInput(field.id, $event)"
           />
           <div v-else-if="field.type === 'rating'" class="meta-form-view__rating">
@@ -430,6 +430,7 @@ import { isSystemField } from '../utils/system-fields'
 import { isFieldAlwaysReadOnly } from '../utils/field-permissions'
 import { isFieldConditionallyRequired, isFieldVisible } from '../utils/field-visibility'
 import { resolveFormPages } from '../utils/form-layout'
+import { vFieldValue } from '../utils/field-value-directive'
 import { MtButton } from '../ui'
 
 const props = defineProps<{
@@ -479,6 +480,10 @@ const validationErrors = ref<Record<string, string>>({})
 const attachmentActivity = ref<Record<string, 'uploading' | 'removing' | 'clearing'>>({})
 const attachmentOperationErrors = ref<Record<string, string>>({})
 const localAttachmentSummaries = ref<Record<string, Record<string, MetaAttachment>>>({})
+// Counts the loads of the form's values: from the record or the prefill, and Reset. The number boxes' `v-field-value`
+// is keyed on it, where the drawer's is keyed on the record id: a load always writes the box, also a new copy of the
+// same record, while a redraw leaves a focused box's own typing alone.
+const formLoads = ref(0)
 
 const fieldsById = computed<Record<string, MetaField | undefined>>(() => {
   const map: Record<string, MetaField | undefined> = {}
@@ -578,7 +583,9 @@ function textControlValue(value: unknown): string {
 /** A number box (number, currency, percent) holding a draft it cannot read ("-", "1e": `validity.badInput`, whose
  *  value then reads "") leaves the form's value as it is: the stored number, or the last number the box could
  *  read. Held as empty, it would clear the stored number on Save, also from a page of the form no longer shown.
- *  An empty box still clears. The same rule as the drawer's number box (MetaRecordFieldsPanel.vue). */
+ *  An empty box still clears. The same rule as the drawer's number box (MetaRecordFieldsPanel.vue). The box is
+ *  bound with the drawer's `v-field-value` too, so a redraw of the form does not write into a focused box that
+ *  holds a draft of its own, an unreadable one included. */
 function onNumberInput(fieldId: string, event: Event) {
   const input = event.target as HTMLInputElement
   if (input.validity.badInput) return
@@ -596,6 +603,7 @@ function multiSelectEventValue(event: Event): string[] {
 }
 
 function syncFromRecord(record: MetaRecord | null | undefined) {
+  formLoads.value += 1
   Object.keys(formData).forEach((k) => delete formData[k])
   if (record) {
     // Existing record ⇒ load its data. Prefill NEVER applies over a loaded

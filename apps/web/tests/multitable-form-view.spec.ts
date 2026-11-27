@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, nextTick, ref } from 'vue'
+import { createApp, defineComponent, h, nextTick, ref, shallowRef } from 'vue'
 import MetaFormView from '../src/multitable/components/MetaFormView.vue'
 
 async function flushUi(cycles = 4) {
@@ -1316,6 +1316,13 @@ describe('MetaFormView number boxes: a draft the box cannot read', () => {
     const submitSpy = vi.fn()
     const container = document.createElement('div')
     document.body.appendChild(container)
+    // Held outside the render, so that the form can be drawn again with the same record, or be handed a new copy of it.
+    const record = shallowRef<{ id: string; version: number; data: Record<string, unknown> }>({
+      id: 'rec_1',
+      version: 1,
+      data: { fld_qty: 5, fld_note: 'kept' },
+    })
+    const message = ref<string | null>(null)
     const app = createApp({
       render() {
         return h(MetaFormView, {
@@ -1323,9 +1330,10 @@ describe('MetaFormView number boxes: a draft the box cannot read', () => {
             { id: 'fld_qty', name: 'Quantity', type: options.type ?? 'number' },
             { id: 'fld_note', name: 'Note', type: 'string' },
           ],
-          record: { id: 'rec_1', version: 1, data: { fld_qty: 5, fld_note: 'kept' } },
+          record: record.value,
           loading: false,
           readOnly: false,
+          successMessage: message.value,
           ...(options.pages
             ? { formLayout: { pages: [{ id: 'p1', title: 'First', fieldIds: ['fld_qty'] }, { id: 'p2', title: 'Second', fieldIds: ['fld_note'] }] } }
             : {}),
@@ -1348,11 +1356,25 @@ describe('MetaFormView number boxes: a draft the box cannot read', () => {
       container.querySelector('form')!.dispatchEvent(new Event('submit'))
       await flushUi()
     }
+    /** The focus goes into the box, as before typing in it. */
+    function focus() {
+      box().focus()
+    }
+    /** The form is drawn again with nothing it holds changed: a success line comes or goes. */
+    async function redraw() {
+      message.value = message.value ? null : 'Saved'
+      await flushUi()
+    }
+    /** The form gets a new copy of the same record, with these values: a load of the form's values. */
+    async function replaceRecord(data: Record<string, unknown>) {
+      record.value = { id: 'rec_1', version: record.value.version + 1, data }
+      await flushUi()
+    }
     function unmount() {
       app.unmount()
       container.remove()
     }
-    return { container, submitSpy, box, type, submit, unmount }
+    return { container, submitSpy, box, type, submit, focus, redraw, replaceRecord, unmount }
   }
 
   it.each(['number', 'currency', 'percent'])('a %s box left on a draft it cannot read keeps the stored number: Save sends it as it was', async (type) => {
@@ -1407,5 +1429,93 @@ describe('MetaFormView number boxes: a draft the box cannot read', () => {
     await form.submit()
     expect(form.submitSpy).toHaveBeenCalledWith({ fld_qty: -3, fld_note: 'kept' })
     form.unmount()
+  })
+
+  // A focused box that holds typing of its own keeps it when the form is drawn again.
+  it.each(['number', 'currency', 'percent'])('a focused %s box holding a draft it cannot read keeps it through a redraw of the form', async (type) => {
+    const form = mountNumberForm({ type })
+    try {
+      await flushUi()
+      form.focus()
+      expect(document.activeElement).toBe(form.box())
+      await form.type('', true) // "-"
+      await form.redraw()
+      expect(form.box().value).toBe('')
+    } finally {
+      form.unmount()
+    }
+  })
+
+  it.each(['number', 'currency', 'percent'])('a focused %s box typed to "-0" (on the way to "-0.5") keeps "-0"', async (type) => {
+    const form = mountNumberForm({ type })
+    try {
+      await flushUi()
+      form.focus()
+      expect(document.activeElement).toBe(form.box())
+      await form.type('-0')
+      expect(form.box().value).toBe('-0')
+      await form.type('-0.5')
+      await form.submit()
+      expect(form.submitSpy).toHaveBeenCalledWith({ fld_qty: -0.5, fld_note: 'kept' })
+    } finally {
+      form.unmount()
+    }
+  })
+
+  // Controls (pass before the change too): leaving the box, typing in another field, and a load of the form's values
+  // still show the form's value.
+  it.each(['number', 'currency', 'percent'])('a focused %s box typed away from its number and back, then left, shows that number (what Save sends)', async (type) => {
+    const form = mountNumberForm({ type })
+    try {
+      await flushUi()
+      form.focus()
+      expect(document.activeElement).toBe(form.box())
+      await form.type('50') // a "0" typed after the 5
+      await form.type('5') // and taken back
+      form.box().blur()
+      await flushUi()
+      expect(form.box().value).toBe('5')
+      await form.submit()
+      expect(form.submitSpy).toHaveBeenCalledWith({ fld_qty: 5, fld_note: 'kept' })
+    } finally {
+      form.unmount()
+    }
+  })
+
+  it('a box left holding a draft it cannot read shows the stored number again when typing in another field redraws the form, and Save sends it', async () => {
+    const form = mountNumberForm()
+    try {
+      await flushUi()
+      form.focus()
+      expect(document.activeElement).toBe(form.box())
+      await form.type('', true) // "-"
+      const note = form.container.querySelector('#field_fld_note') as HTMLInputElement
+      note.focus()
+      expect(document.activeElement).toBe(note)
+      note.value = 'kept 2'
+      note.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushUi()
+      expect(form.box().value).toBe('5')
+      await form.submit()
+      expect(form.submitSpy).toHaveBeenCalledWith({ fld_qty: 5, fld_note: 'kept 2' })
+    } finally {
+      form.unmount()
+    }
+  })
+
+  it.each(['number', 'currency', 'percent'])('a new copy of the same record loaded while the focused %s box holds typing: the box shows the loaded number, which is what Save sends', async (type) => {
+    const form = mountNumberForm({ type })
+    try {
+      await flushUi()
+      form.focus()
+      expect(document.activeElement).toBe(form.box())
+      await form.type('12')
+      await form.replaceRecord({ fld_qty: 7, fld_note: 'kept' })
+      expect(form.box().value).toBe('7')
+      await form.submit()
+      expect(form.submitSpy).toHaveBeenCalledWith({ fld_qty: 7, fld_note: 'kept' })
+    } finally {
+      form.unmount()
+    }
   })
 })

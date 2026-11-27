@@ -6,8 +6,8 @@ type ValueBox = HTMLInputElement | HTMLTextAreaElement
  *  line breaks, a textarea turns CRLF into LF, a number box keeps only what it can read), and from what value;
  *  or what the box last committed. */
 const written = new WeakMap<ValueBox, { held: string; from: string }>()
-/** A value that arrived while the box held typing of its own: shown once the box is left with no net typing (or
- *  dropped by its commit). */
+/** A value that arrived while the box held typing of its own: shown once the box is left with no net typing, or
+ *  dropped by its commit or by an update that finds the box with no typing already showing the current value. */
 const pending = new WeakMap<ValueBox, string>()
 
 function write(el: ValueBox, text: string) {
@@ -53,7 +53,8 @@ export function revertFieldValue(el: ValueBox) {
 }
 
 /**
- * `v-field-value="[value, record id]"` on the record drawer's editable boxes, in place of `:value`.
+ * `v-field-value="[value, load key]"` on editable boxes, in place of `:value`. The load key marks a new load: the
+ *   record id in the record drawer, a load count in the form view.
  * - A value that arrives while the box is focused and holds typing of its own (the box's own commit, still in
  *   flight then and accepted now, or someone else's change) does not overwrite the typing: the next blur commits
  *   the typing, which wins, as in the rich text editor. Left with no net typing (typed, then undone), the box shows
@@ -81,7 +82,10 @@ export const vFieldValue: Directive<ValueBox, readonly [string, string | undefin
       if (!oldValue || text !== oldValue[0]) pending.set(el, text)
       return
     }
+    // A box that already shows this value and holds no typing of its own drops a value that arrived while it held
+    // typing: that value is older, and leaving the box must not bring it back.
     if (heldTyping(el) || written.get(el)?.from !== text) write(el, text)
+    else pending.delete(el)
   },
   beforeUnmount(el) {
     el.removeEventListener('change', onChange)
