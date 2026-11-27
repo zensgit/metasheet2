@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { describe, expect, it, vi } from 'vitest'
+import { afterAll, describe, expect, it, vi } from 'vitest'
 
 const provider = vi.hoisted(() => ({
   token: vi.fn(),
@@ -33,6 +33,20 @@ if (process.env.EXPECT_DB === '1')
     expect(process.env.DATABASE_URL).toBeTruthy())
 const q = (sql: string, args?: unknown[]) => query(sql, args)
 
+// The fixtures live in the shared 'default' organisation, and a handover journal keeps its two
+// integration rows from being deleted. Left active, they stay pull sources of 'default' for every
+// file that runs after this one against the same database: the routing-policy routes, for one,
+// refuse to clear a policy while the organisation has two or more. Vitest orders files by size, so
+// which files those are changes whenever this file grows. They are switched off when it is done.
+const fixtureIntegrationIds: string[] = []
+afterAll(async () => {
+  if (!process.env.DATABASE_URL || fixtureIntegrationIds.length === 0) return
+  await q(
+    "UPDATE directory_integrations SET status='inactive' WHERE id = ANY($1::uuid[])",
+    [fixtureIntegrationIds],
+  )
+})
+
 async function fixture() {
   const tag = `handover_${randomUUID()}`
   const admin = `${tag}_admin`,
@@ -40,6 +54,7 @@ async function fixture() {
   const source = randomUUID(),
     target = randomUUID(),
     corp = `corp_${tag}`
+  fixtureIntegrationIds.push(source, target)
   for (const id of [admin, ...users])
     await q(
       `INSERT INTO users(id,username,name,password_hash,is_active,is_admin) VALUES($1,$1,$1,'synthetic-only',true,$2)`,
@@ -659,6 +674,144 @@ db(
       const outcomes = await competing
       expect(outcomes.filter((o) => o.status === 'fulfilled')).toHaveLength(1)
       expect(outcomes.filter((o) => o.status === 'rejected')).toHaveLength(1)
+    })
+  },
+)
+
+// D21: the handover's bump of the subject version rows is the one statement of its lock phase that
+// waits behind an in-flight admission or access-graph writer. It runs before the table fences, so the
+// writer it waits for can still write the tables the handover is about to fence.
+db(
+  'controlled handover lock order against an in-flight access-graph writer (real database)',
+  () => {
+    const backendPid = async (client: { query: (sql: string) => Promise<{ rows: Array<Record<string, unknown>> }> }) =>
+      Number((await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+    const blockedBy = async (pid: number): Promise<number> => {
+      for (let i = 0; i < 300; i++) {
+        const rows = (
+          await q(
+            'SELECT pid FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))',
+            [pid],
+          )
+        ).rows
+        if (rows.length > 0) return Number(rows[0].pid)
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      throw new Error('no backend waited on the expected holder')
+    }
+    const relationLocks = async (pid: number) =>
+      (
+        await q(
+          `SELECT c.relname, l.mode FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
+            WHERE l.pid=$1 AND l.locktype='relation' AND l.granted AND c.relkind='r' AND l.mode <> 'AccessShareLock'
+            ORDER BY c.relname, l.mode`,
+          [pid],
+        )
+      ).rows
+    const early = (name: string) => () => {
+      throw new Error(`${name} ended before it queued`)
+    }
+
+    it('waits for the writer holding no table fence: the writer writes a fenced table and commits, then the handover applies', async () => {
+      const { lockUsersForAccessGraphWrite } = await import('../../src/directory/access-graph-mutex')
+      const f = await fixture(),
+        before = await f.stable(),
+        preview = await previewDirectoryHandover(f.pair, f.admin)
+      const writer = await pool!.connect()
+      const finished: string[] = []
+      let handover: Promise<{ id: string; digest: string }> | undefined
+      try {
+        await writer.query('BEGIN')
+        const writerPid = await backendPid(writer)
+        // An ordinary DingTalk login updating an existing identity is here after its lock entry: the
+        // subject version row bumped, the users row held, its identity write still to come.
+        expect((await lockUsersForAccessGraphWrite(writer, [f.users[0]])).has(f.users[0])).toBe(true)
+        handover = applyDirectoryHandover(f.pair, preview.digest, f.admin).finally(() => finished.push('handover'))
+        handover.catch(() => undefined)
+        const handoverPid = await Promise.race([blockedBy(writerPid), handover.then(early('the handover'))])
+        // It waits for the version row holding its own version rows only: no fence on any table.
+        expect(await relationLocks(handoverPid)).toEqual([
+          { relname: 'subject_authorization_versions', mode: 'RowExclusiveLock' },
+        ])
+        // The table lock of that identity write (any INSERT, UPDATE or DELETE takes it). Under a
+        // SHARE fence it would queue behind the handover, which waits for this transaction, and
+        // PostgreSQL would fail one of the two with 40P01.
+        await writer.query('LOCK TABLE user_external_identities IN ROW EXCLUSIVE MODE')
+        await writer.query('COMMIT')
+        finished.push('write')
+        const moved = await handover
+        expect(finished).toEqual(['write', 'handover'])
+        expect(await f.stable()).toEqual(before)
+        expect(
+          (
+            await q(
+              'SELECT integration_id FROM directory_accounts WHERE id=ANY($1::uuid[])',
+              [f.accounts],
+            )
+          ).rows.every((r) => r.integration_id === f.target),
+        ).toBe(true)
+        await finishDirectoryHandover(moved.id, moved.digest, f.admin, 'rollback')
+      } finally {
+        await writer.query('ROLLBACK').catch(() => undefined)
+        writer.release()
+        await handover?.catch(() => undefined)
+      }
+    })
+
+    it('refuses when a user was linked while it waited, instead of fencing a user whose version row it does not hold', async () => {
+      const { lockUsersForAccessGraphWrite } = await import('../../src/directory/access-graph-mutex')
+      const f = await fixture(),
+        preview = await previewDirectoryHandover(f.pair, f.admin)
+      const late = `${f.tag}_late`,
+        lateAccount = randomUUID()
+      const writer = await pool!.connect()
+      let handover: Promise<unknown> | undefined
+      try {
+        await writer.query('BEGIN')
+        const writerPid = await backendPid(writer)
+        await lockUsersForAccessGraphWrite(writer, [f.users[0]])
+        handover = applyDirectoryHandover(f.pair, preview.digest, f.admin)
+        handover.catch(() => undefined)
+        await Promise.race([blockedBy(writerPid), handover.then(early('the handover'))])
+        // Committed while the handover waits: one more local user linked to a source account.
+        await q(
+          `INSERT INTO users(id,username,name,password_hash,is_active,is_admin) VALUES($1,$1,$1,'synthetic-only',true,false)`,
+          [late],
+        )
+        await q(
+          `INSERT INTO directory_accounts(id,integration_id,corp_id,external_user_id,external_key,name) VALUES($1,$2,$3,$4,$4,'Late member')`,
+          [lateAccount, f.source, f.corp, late],
+        )
+        await q(
+          `INSERT INTO directory_account_links(directory_account_id,local_user_id,link_status,match_strategy) VALUES($1,$2,'linked','manual_admin')`,
+          [lateAccount, late],
+        )
+        await writer.query('COMMIT')
+        await expect(handover).rejects.toMatchObject({
+          code: 'DIRECTORY_HANDOVER_CONFLICT',
+          message: 'Directory links changed while the handover waited',
+        })
+        expect(
+          (
+            await q(
+              'SELECT count(*)::int AS n FROM directory_handovers WHERE source_integration_id=$1',
+              [f.source],
+            )
+          ).rows[0].n,
+        ).toBe(0)
+        expect(
+          (
+            await q(
+              'SELECT integration_id FROM directory_accounts WHERE id=ANY($1::uuid[])',
+              [[...f.accounts, lateAccount]],
+            )
+          ).rows.every((r) => r.integration_id === f.source),
+        ).toBe(true)
+      } finally {
+        await writer.query('ROLLBACK').catch(() => undefined)
+        writer.release()
+        await handover?.catch(() => undefined)
+      }
     })
   },
 )

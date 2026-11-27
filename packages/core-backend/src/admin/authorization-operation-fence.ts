@@ -118,29 +118,98 @@ function belongsToB2Catalog(section: number, row: CatalogRow): boolean {
   }
 }
 
+// D21 (zzzz20261106110500, Y5a #6786) only adds catalog rows too: one subject authorization
+// version trigger on each of five fenced tables (two on users) and the two public trigger functions.
+// It is hashed as its own addition, exactly like B2, so the base profile stays the one each
+// PostgreSQL version/locale was qualified with. On this base path an absent or partial D21
+// addition is refused: this code bumps subject_authorization_versions, so a database that lost
+// D21's triggers or functions is not one it was qualified against. (A database matching one of the
+// pre-B2 exact profiles above has neither addition. Its exact digest is still recognised, and it is
+// refused all the same: `d21Ready` is required on every path, see isSupportedAuthorizationOperationSchema.)
+const D21_CATALOG_ADDITIONS = '829ae23e6dab95d660cb84902adcafe02dc982109568f23b1e0627760f73bb76'
+/**
+ * The D21 version table is profiled with the same table-scoped catalog queries as the fenced tables
+ * (relation, columns, constraints, indexes, triggers, rules, policies) but is not locked: every D21
+ * trigger upserts it with `ON CONFLICT (subject_id)`, and the migration creates it `IF NOT EXISTS`,
+ * so a pre-existing table of that name with another shape (no primary key, other column types) would
+ * otherwise pass the fence and fail inside the operation's DML.
+ */
+export const AUTHORIZATION_OPERATION_D21_PROFILE_TABLES = Object.freeze(['subject_authorization_versions'] as const)
+const D21_TRIGGERS = new Set([
+  'trg_platform_member_group_members_zz_authz_subject_version', 'trg_user_namespace_admissions_zz_authz_subject_version',
+  'trg_user_permissions_zz_authz_subject_version', 'trg_user_roles_zz_authz_subject_version',
+  'trg_users_zz_authz_subject_version_lifecycle', 'trg_users_zz_authz_subject_version_update',
+])
+const D21_FUNCTIONS = new Set(['metasheet_authz_bump_sheet_permission_version', 'metasheet_authz_bump_subject_authorization_version'])
+
+function belongsToD21Catalog(section: number, row: CatalogRow): boolean {
+  switch (section) {
+    case 4: return D21_TRIGGERS.has(String(row.tgname))
+    case 7: return D21_FUNCTIONS.has(String(row.proname))
+    default: return false
+  }
+}
+
+// Y6 (zzzz20261108120000, #6797) adds one public function, the generated-layout immutability guard.
+// It touches no fenced table, but the fence pins every public function, so it is a reviewed addition
+// of its own, hashed and required on the base path like D21.
+const YIDA_LAYOUT_CATALOG_ADDITIONS = 'bcd3224cc13d9701dc2da0f16b708e7ba012b4c22efc57f73d694b3b0ccf9432'
+const YIDA_LAYOUT_FUNCTIONS = new Set(['integration_yida_generated_layout_immutable_guard'])
+
+function belongsToYidaLayoutCatalog(section: number, row: CatalogRow): boolean {
+  return section === 7 && YIDA_LAYOUT_FUNCTIONS.has(String(row.proname))
+}
+
 function schemaDigest(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex')
+}
+
+function d21Addition(rows: CatalogRow[][], versionTable: CatalogRow[][]): string {
+  return schemaDigest({
+    catalog: rows.map((catalog, section) => catalog.filter(row => !belongsToB2Catalog(section, row) && belongsToD21Catalog(section, row))),
+    versionTable,
+  })
 }
 
 function readBaseProfile(database: CatalogRow | null, rows: CatalogRow[][]): string | undefined {
   const base = rows.map(() => [] as CatalogRow[])
   const additions = rows.map(() => [] as CatalogRow[])
   const n78 = rows.map(() => [] as CatalogRow[])
+  const d21 = rows.map(() => [] as CatalogRow[])
+  const yidaLayout = rows.map(() => [] as CatalogRow[])
   for (const [section, catalog] of rows.entries()) {
     for (const row of catalog) {
-      const partition = section === 2 && N78_FOREIGN_KEY_SOURCES.has(String(row.source))
-        ? n78 : belongsToB2Catalog(section, row) ? additions : base
+      const partition = section === 2 && N78_FOREIGN_KEY_SOURCES.has(String(row.source)) ? n78
+        : belongsToB2Catalog(section, row) ? additions
+          : belongsToD21Catalog(section, row) ? d21
+            : belongsToYidaLayoutCatalog(section, row) ? yidaLayout
+              : base
       partition[section].push(row)
     }
   }
   // Empty N78 preserves B2-only history. B2 remains mandatory on this path;
   // when both additions exist, each must match its own complete digest.
   if (n78[2].length > 0 && schemaDigest(n78) !== N78_CATALOG_ADDITIONS) return undefined
-  if (schemaDigest(additions) === B2_CATALOG_ADDITIONS) return schemaDigest({ database, rows: base })
+  if (schemaDigest(additions) === B2_CATALOG_ADDITIONS
+    && schemaDigest(yidaLayout) === YIDA_LAYOUT_CATALOG_ADDITIONS) return schemaDigest({ database, rows: base })
+}
+
+/** The Y6 generated-layout addition's digest over raw catalog rows; used to measure and pin YIDA_LAYOUT_CATALOG_ADDITIONS. */
+export function authorizationOperationYidaLayoutAdditionDigest(rows: CatalogRow[][]): string {
+  return schemaDigest(rows.map((catalog, section) => catalog.filter(row => belongsToYidaLayoutCatalog(section, row))))
+}
+
+/**
+ * The D21 addition's digest: its catalog rows on the fenced tables (section order as in the schema
+ * queries) plus the version table's own profile (the table-scoped queries run for
+ * AUTHORIZATION_OPERATION_D21_PROFILE_TABLES). Used to measure and pin D21_CATALOG_ADDITIONS.
+ */
+export function authorizationOperationD21AdditionDigest(rows: CatalogRow[][], versionTable: CatalogRow[][]): string {
+  return d21Addition(rows, versionTable)
 }
 
 /** Compute only structural metadata. Never reads customer rows or emits SQL values. */
-export async function inspectAuthorizationOperationSchema(query: AuthorizationInputQueryable['query']): Promise<{ digest: string; tableCount: number; ordinary: boolean; baseDigest?: string }> {
+export async function inspectAuthorizationOperationSchema(query: AuthorizationInputQueryable['query']): Promise<{ digest: string; tableCount: number; ordinary: boolean; baseDigest?: string; d21Ready: boolean }> {
   const version = await query(`SELECT pg_catalog.current_setting('server_version_num')::int / 10000 AS version, pg_catalog.current_schema() AS schema, d.datcollate,d.datctype,
     pg_catalog.to_jsonb(d)->>'datlocprovider' AS datlocprovider,
     pg_catalog.to_jsonb(d)->>'datcollversion' AS datcollversion,
@@ -149,6 +218,10 @@ export async function inspectAuthorizationOperationSchema(query: AuthorizationIn
     FROM pg_catalog.pg_database d JOIN pg_catalog.pg_namespace n ON n.nspname='public' WHERE d.datname=pg_catalog.current_database()`)
   const rows: CatalogRow[][] = []
   for (const statement of AUTHORIZATION_OPERATION_SCHEMA_QUERIES) rows.push((await query(statement, statement.includes('$1') ? [TABLES] : undefined)).rows)
+  const versionTable: CatalogRow[][] = []
+  for (const statement of AUTHORIZATION_OPERATION_SCHEMA_QUERIES) {
+    if (statement.includes('$1')) versionTable.push((await query(statement, [[...AUTHORIZATION_OPERATION_D21_PROFILE_TABLES]])).rows)
+  }
   const tables = rows[0] as Array<Record<string, unknown>>
   const ordinary = tables.length === TABLES.length && tables.every(row => row.relkind === 'r' && row.relpersistence === 'p' && row.relispartition === false && row.relhassubclass === false && row.relrowsecurity === false && row.relforcerowsecurity === false && row.owner_trusted === true)
     && version.rows[0]?.schema_create_trusted === true
@@ -156,11 +229,16 @@ export async function inspectAuthorizationOperationSchema(query: AuthorizationIn
   const database = version.rows[0] ?? null
   const digest = schemaDigest({ database, rows })
   const baseDigest = ordinary && !SUPPORTED_SCHEMA_PROFILES.has(digest) ? readBaseProfile(database, rows) : undefined
-  return { digest, tableCount: tables.length, ordinary, baseDigest }
+  // This code bumps D21's version rows in every authorization write, so the D21 addition (its rows on
+  // the fenced tables and the version table's profile) must match on every path, including a
+  // database that matches one of the exact pre-B2 profiles above (which has no D21 at all).
+  const d21Ready = d21Addition(rows, versionTable) === D21_CATALOG_ADDITIONS
+  return { digest, tableCount: tables.length, ordinary, baseDigest, d21Ready }
 }
 
-export function isSupportedAuthorizationOperationSchema(result: { digest: string; ordinary: boolean; baseDigest?: string }): boolean {
-  return result.ordinary && SUPPORTED_SCHEMA_PROFILES.has(result.baseDigest ?? result.digest)
+/** `d21Ready` is required and only a literal `true` passes: an omitted or non-boolean value refuses. */
+export function isSupportedAuthorizationOperationSchema(result: { digest: string; ordinary: boolean; baseDigest?: string; d21Ready: boolean }): boolean {
+  return result.ordinary === true && result.d21Ready === true && SUPPORTED_SCHEMA_PROFILES.has(result.baseDigest ?? result.digest)
 }
 export async function assertAuthorizationOperationSchema(query: AuthorizationInputQueryable['query']): Promise<void> {
   const result = await inspectAuthorizationOperationSchema(query)

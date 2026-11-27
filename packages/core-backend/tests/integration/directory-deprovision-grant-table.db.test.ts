@@ -182,19 +182,25 @@ async function waitForRestoreWaiters(
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
+    // D21 (Y5a): the restore transaction bumps the subject authorization version row BEFORE its
+    // `users FOR UPDATE` (zzzz20261106110500). Behind a raw users-row holder the queue therefore has
+    // two shapes: the first restore waits on the users row (rooted at the holder), the second waits
+    // on the subject version row the first restore already holds — both count as blocked restores.
     const waiting = await query<{ blocked: number; rooted: number }>(
       `SELECT
          count(*) FILTER (
            WHERE wait_event_type = 'Lock'
-             AND query ILIKE '%activation_status%'
-             AND query ILIKE '%FROM users%'
-             AND query ILIKE '%FOR UPDATE%'
+             AND (query ILIKE '%INSERT INTO subject_authorization_versions%'
+                  OR (query ILIKE '%activation_status%'
+                      AND query ILIKE '%FROM users%'
+                      AND query ILIKE '%FOR UPDATE%'))
          )::int AS blocked,
          count(*) FILTER (
            WHERE $1 = ANY(pg_blocking_pids(pid))
-             AND query ILIKE '%activation_status%'
-             AND query ILIKE '%FROM users%'
-             AND query ILIKE '%FOR UPDATE%'
+             AND (query ILIKE '%INSERT INTO subject_authorization_versions%'
+                  OR (query ILIKE '%activation_status%'
+                      AND query ILIKE '%FROM users%'
+                      AND query ILIKE '%FOR UPDATE%'))
          )::int AS rooted
        FROM pg_stat_activity
        WHERE datname = current_database()

@@ -158,6 +158,31 @@ export function refusePluginWriteFenceOnUnfencedSurface(input: unknown, surface:
 }
 
 /**
+ * THE WRITE CONDITION (#6812 review P2). `records.patchRecord` alone may carry an opaque, host-minted `writeCondition`
+ * (integration/yida-issue-confirm-writeback-authority.ts) that the core write path re-decides inside its transaction,
+ * next to the fence. Only the plugins listed here may hand one on; the core refuses any value the host did not mint.
+ */
+export const PLUGIN_WRITE_CONDITION_PLUGINS: readonly string[] = Object.freeze(['plugin-integration-core'])
+
+/**
+ * plugin-scope's half for `patchRecord`: read `writeCondition` ONCE off the raw input; `undefined` → `undefined`; a
+ * plugin not listed above → PLUGIN_WRITE_FENCE_NOT_ALLOWED (nothing is written). The value is forwarded as is.
+ */
+export function readPluginWriteCondition(pluginName: string, input: unknown): unknown {
+  const condition = input && typeof input === 'object' ? (input as { writeCondition?: unknown }).writeCondition : undefined
+  if (condition === undefined) return undefined
+  if (!PLUGIN_WRITE_CONDITION_PLUGINS.includes(pluginName)) throw notAllowed('write_condition_not_allowed')
+  return condition
+}
+
+/** Every other write surface refuses a `writeCondition` (501), never drops it — the S2 rule for fences. */
+export function refusePluginWriteConditionOnSurface(input: unknown, surface: string): void {
+  const condition = input && typeof input === 'object' ? (input as { writeCondition?: unknown }).writeCondition : undefined
+  if (condition === undefined) return
+  throw new PluginWriteFenceError(501, PLUGIN_WRITE_FENCE_CODES.UNSUPPORTED, 'this write surface does not accept a write condition; nothing was written', { surface })
+}
+
+/**
  * The core write path's half: inside the write transaction, BEFORE the insert / update. `undefined` ->
  * no fence (an unfenced write, unchanged). Anything not resolved by `resolvePluginWriteFence` is refused.
  */

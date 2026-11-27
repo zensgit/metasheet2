@@ -1160,9 +1160,11 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
     // The wiring window in index.ts: from the plugin-SDK patchRecord method head to the records.ts call.
     // PR #6501: the head also takes the plugin's optional `writeFence` (the host fenced write — a LEASE
     // check, not a per-subject column gate; tests/unit/multitable-plugin-write-fence.test.ts pins the
-    // same head shape, so the two needles must stay identical).
+    // same head shape, so the two needles must stay identical). #6812 review P2: and the optional host
+    // `writeCondition` (the YiDa issue-confirm write-back's project-registry + live-authority re-decision —
+    // row locks, NOT a per-subject column gate; the vocabulary loop below still proves no gate token).
     const indexTs = read('index.ts')
-    const head = indexTs.indexOf('patchRecord: async ({ sheetId, recordId, changes, expectedVersion, writeFence }) => {')
+    const head = indexTs.indexOf('patchRecord: async ({ sheetId, recordId, changes, expectedVersion, writeFence, writeCondition }) => {')
     expect(head, 'index.ts no longer wires the plugin-SDK patchRecord in the shape this characterization reads').toBeGreaterThan(-1)
     const call = indexTs.indexOf('return patchMultitableRecord({', head)
     expect(call, 'index.ts plugin-SDK patchRecord no longer reaches records.ts patchRecord').toBeGreaterThan(head)

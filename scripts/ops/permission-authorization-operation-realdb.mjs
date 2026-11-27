@@ -38,11 +38,18 @@ export const unitBaseline = Object.freeze([
   {directory:'unit',file:'authorization-input-lock.test.ts',min:98,required:['ranks are strictly increasing in acquisition order and the order lists every rank'],skipped:[]},
   {directory:'unit',file:'authorization-input-consumers.guard.test.ts',min:7,required:['the authorization command write decision is registered as locked'],skipped:[]},
   {directory:'unit',file:'authorization-operation-validation.test.ts',min:27,required:['normalizes only reason and sorts explicitly chosen admissions'],skipped:[]},
-  {directory:'unit',file:'authorization-operation-fence.test.ts',min:99,required:[
+  {directory:'unit',file:'authorization-operation-fence.test.ts',min:171,required:[
     'locks the closed table set, qualified and without waiting',
+    'carry exactly the pinned D21 and Y6 layout digests',
     ...[14,15,16,17].flatMap(major => [
       `accepts measured N78 and B2 additions with the original exact profile (PG${major})`,
-      `preserves original and B2-only historical profiles (PG${major})`,
+      `replays the capture byte for byte and refuses it without the stack additions (PG${major})`,
+      `refuses a catalog that lacks the D21 addition, its version table or the Y6 layout guard (PG${major})`,
+      `preserves the B2-only historical profile; the pre-B2 profile cannot carry D21 (PG${major})`,
+      `refuses a disabled D21 trigger (PG${major})`,
+      `refuses a D21 version table with no primary key (PG${major})`,
+      `refuses a changed Y6 guard body although D21 is intact (PG${major})`,
+      `refuses a trigger that only resembles D21 although D21 is intact (PG${major})`,
       `rejects changed N78 conname despite the registered source (PG${major})`,
       `rejects an extra inbound foreign key from the registered N78 source (PG${major})`,
       `rejects an extra inbound foreign key from the unregistered source (PG${major})`,
