@@ -288,12 +288,16 @@ async function planSheets(tx, scope) {
   return { counts, tables, fingerprint: fingerprint.digest('hex'), identityPresent, ownedTargetSheetIds, dedicatedSheetId, registeredSheetId, selected, dependencies }
 }
 
-async function deleteSheets(tx, { tenantId, projectNo }, plan) {
-  await deleteSheetDependencies(tx, plan.dedicatedSheetId, plan.selected, plan.dependencies)
+async function deleteSheets(tx, { tenantId, projectNo }, plan, sheetWrites) {
+  await deleteSheetDependencies(tx, plan.dedicatedSheetId, plan.selected, plan.dependencies, sheetWrites)
   for (const [sheetId, selection] of plan.selected) {
-    for (const [table, ids] of [['meta_records_trash', selection.trash], ['meta_records', selection.live]]) {
+    const rows = [
+      ['DELETE FROM meta_records_trash WHERE sheet_id = $1 AND id = ANY($2::uuid[]) RETURNING 1', selection.trash],
+      ['DELETE FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[]) RETURNING 1', selection.live],
+    ]
+    for (const [statement, ids] of rows) {
       if (!ids.length) continue
-      const removed = await tx.query(`DELETE FROM ${table} WHERE sheet_id = $1 AND id = ANY($2::${table === 'meta_records_trash' ? 'uuid' : 'text'}[]) RETURNING 1`, [sheetId, ids])
+      const removed = await tx.query(statement, [sheetId, ids])
       if (removed.length !== ids.length) refuse('STALE')
     }
   }
@@ -306,8 +310,7 @@ async function deleteSheets(tx, { tenantId, projectNo }, plan) {
   const owner = await tx.query(`DELETE FROM ${OWNERS} WHERE project_id = $1 AND object_id = $2 AND plugin_name = $3 AND sheet_id = $4 RETURNING 1`,
     [tenantId + ':integration-core', deriveStockPreparationProjectSheetObjectId(tenantId, projectNo), PLUGIN, sheetId])
   if (owner.length !== 1) refuse('STALE')
-  const removed = await tx.query('DELETE FROM meta_sheets WHERE id = $1 RETURNING 1', [sheetId])
-  if (removed.length !== 1) refuse('STALE')
+  if (await sheetWrites.deleteDedicatedSheet() !== 1) refuse('STALE')
 }
 
 async function existsProjectRoot(tx, scope) {

@@ -1,3 +1,4 @@
+import { prepareProjectDeleteSheetWrites, type ProjectDeleteSheetSelection } from './stock-preparation-project-delete-sheet-writes'
 import { assertPlatformActorAuthority, lockSharedAccessSubjects, PlatformActorAuthorityLost } from '../admin/platform-actor-authority'
 import type { AccessGraphTransactionClient } from '../directory/access-graph-mutex'
 
@@ -7,8 +8,8 @@ type RowTransaction = {
 
 export async function authorizeStockPreparationProjectDeleteWithin(
   tx: RowTransaction,
-  { actor, tenantId }: { actor: string; tenantId: string },
-): Promise<void> {
+  { actor, tenantId, projectNo }: { actor: string; tenantId: string; projectNo?: string },
+) {
   const client: AccessGraphTransactionClient = {
     query: async (sql, params) => ({ rows: await tx.query(sql, params) }),
   }
@@ -22,6 +23,7 @@ export async function authorizeStockPreparationProjectDeleteWithin(
       [actor, tenantId],
     )
     if (!membership.length) throw new PlatformActorAuthorityLost()
+    if (projectNo) return (selection: ProjectDeleteSheetSelection) => prepareProjectDeleteSheetWrites(tx, tenantId, projectNo, selection)
   } catch (error) {
     if (error instanceof PlatformActorAuthorityLost) throw Object.assign(error, { status: 403 })
     throw error

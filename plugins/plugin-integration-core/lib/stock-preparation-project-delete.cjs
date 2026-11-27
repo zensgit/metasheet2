@@ -71,9 +71,12 @@ async function lockData(tx, scope) {
   // been acquired. Prior commits are included; in-flight writers refused the try-lock.
 }
 
-async function planProject(tx, scope, confirming = false) {
+async function planProject(tx, scope, confirming = false, prepareSheetWrites) {
   let sheets = await planSheets(tx, scope)
+  let sheetWrites
   if (confirming) {
+    if (typeof prepareSheetWrites !== 'function') throw refusal('unavailable')
+    sheetWrites = await prepareSheetWrites(sheets)
     // Yjs persistence and host FK writers pin record incarnations with FOR KEY SHARE. Take their
     // conflicting row locks before the final dependency count, without touching sibling records.
     const liveIds = [...sheets.selected.values()].flatMap(selection => selection.live)
@@ -95,7 +98,7 @@ async function planProject(tx, scope, confirming = false) {
     }
   }
   return {
-    sheets, business, runtime, counts,
+    sheets, sheetWrites, business, runtime, counts,
     fingerprint: digest([scope.tenantId, scope.projectNo, sheets.fingerprint, business.fingerprint, runtime.fingerprint]),
     tables: [...sheets.tables, ...(business.tables || [])].map(({ sheetId, name, kind, rowCount }) => ({ sheetId, name, kind, rowCount })),
   }
@@ -132,7 +135,19 @@ function createStockPreparationProjectDelete({ database, auditStore, authorizeWi
         // PostgreSQL errors if a policy would filter any query with this setting. A restricted
         // host role must never undercount hidden records before a potentially cascading delete.
         await tx.query('SET LOCAL row_security = off')
-        await authorizeWithin(tx, scope)
+        await tx.query('SET LOCAL search_path = pg_catalog, public, pg_temp')
+        // The shared platform-authority helper locks the subject version and user rows. Screen
+        // before reading the project, then release those locks (and its tentative subject bump).
+        // Confirmation reacquires live authority after taking its sheet versions, in D21 order.
+        if (!snapshot) await tx.query('SAVEPOINT project_delete_initial_authority')
+        const prepare = await authorizeWithin(tx, scope)
+        if (!snapshot) await tx.query('ROLLBACK TO SAVEPOINT project_delete_initial_authority')
+        const prepareSheetWrites = async sheets => {
+          if (typeof prepare !== 'function') throw refusal('unavailable')
+          const writes = await prepare(sheets)
+          await authorizeWithin(tx, scope)
+          return writes
+        }
         // Deployments can roll code and Kysely migrations separately. Every fence migration
         // installs its triggers atomically. A partial rollout cannot issue or consume a challenge.
         const [schema] = await tx.query(`SELECT count(*) = 3 AS ready FROM pg_catalog.pg_trigger
@@ -141,7 +156,7 @@ function createStockPreparationProjectDelete({ database, auditStore, authorizeWi
             (to_regclass('public.integration_stock_prep_handoff'), 'stock_prep_project_delete_business_write'),
             (to_regclass('public.plugin_kv'), 'stock_prep_project_delete_kv_insert'))`)
         if (!schema?.ready) throw refusal('unavailable')
-        const answer = await operation(tx)
+        const answer = await operation(tx, prepareSheetWrites)
         if (performance.now() >= deadline) throw projectBusy()
         return answer
       })
@@ -176,7 +191,7 @@ function createStockPreparationProjectDelete({ database, auditStore, authorizeWi
     const { tenantId, projectNo, actor } = scope
     const { challengeId, verificationCode } = input
     if (typeof challengeId !== 'string' || !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(challengeId)) throw refusal('challenge')
-    const answer = await transact(scope, async (tx) => {
+    const answer = await transact(scope, async (tx, prepareSheetWrites) => {
       // DELETE ... RETURNING is the atomic claim. A miss discloses nothing about another caller's
       // confirmation. Wrong codes and obsolete previews commit the claim, business/audit failures
       // roll the entire transaction back and can safely be retried.
@@ -186,11 +201,16 @@ function createStockPreparationProjectDelete({ database, auditStore, authorizeWi
       if (!claim || typeof verificationCode !== 'string' || !/^[0-9A-F]{8}$/.test(verificationCode)
         || !timingSafeEqual(Buffer.from(claim.code_digest, 'hex'), Buffer.from(digest([challengeId, verificationCode]), 'hex'))) return { refused: 'challenge' }
       await lockData(tx, scope)
-      const plan = await planProject(tx, scope, true)
-      if (!plan || plan.fingerprint !== claim.fingerprint) return { refused: 'stale' }
+      // A stale confirmation consumes its challenge, but commits no D21 version bumps.
+      await tx.query('SAVEPOINT project_delete_sheet_versions')
+      const plan = await planProject(tx, scope, true, prepareSheetWrites)
+      if (!plan || plan.fingerprint !== claim.fingerprint) {
+        await tx.query('ROLLBACK TO SAVEPOINT project_delete_sheet_versions')
+        return { refused: 'stale' }
+      }
       await deleteRuntime(tx, scope, plan.runtime)
       await deleteBusiness(tx, scope, plan.business)
-      await deleteSheets(tx, scope, plan.sheets)
+      await deleteSheets(tx, scope, plan.sheets, plan.sheetWrites)
       const scopedDb = createDb({ database: tx })
       const auditTransaction = {
         async insertOne(table, row) {

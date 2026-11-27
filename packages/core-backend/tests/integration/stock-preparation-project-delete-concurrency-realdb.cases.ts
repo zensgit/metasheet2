@@ -103,6 +103,58 @@ export function defineProjectDeleteConcurrencyRealDbCases(getFixture: () => Proj
       expect((await query('SELECT id FROM meta_records WHERE sheet_id = $1', [sheet.sheetId])).rowCount).toBe(0)
     })
 
+    test('a D21 admission holder fences cleanup and committed versions only advance for affected sheets', async () => {
+      const f = getFixture(), target = newScope('d21'), other = newScope('d21')
+      const adjacent = { ...target, projectNo: 'neighbor' }
+      const owned = await f.dedicated(target)
+      const shared = (await f.shared(target))[0], sibling = (await f.shared(adjacent))[0], foreign = (await f.shared(other))[0]
+      const subjects = [shared, sibling, foreign]
+      for (const row of subjects) {
+        await query(`INSERT INTO record_permissions (sheet_id, record_id, subject_type, subject_id, access_level)
+          VALUES ($1,$2,'user',$3,'read')`, [row.sheetId, row.recordId, target.actor])
+      }
+      const version = async (id: string) => Number((await query('SELECT version FROM sheet_permission_versions WHERE sheet_id = $1', [id])).rows[0]?.version || 0)
+      const grants = async () => (await query('SELECT record_id FROM record_permissions WHERE record_id = ANY($1::text[]) ORDER BY record_id',
+        [subjects.map(s => s.recordId)])).rows.map(r => r.record_id)
+      try {
+        const before = await Promise.all([owned.sheetId, shared.sheetId, foreign.sheetId].map(version))
+        const old = await f.service.preview(target)
+        await query('UPDATE meta_records SET version = version + 1 WHERE id = $1', [owned.ids[0]])
+        await expect(f.service.confirm({ ...target, ...old })).rejects.toMatchObject({ code: 'STOCK_PREPARATION_PROJECT_DELETE_STALE' })
+        expect(await Promise.all([owned.sheetId, shared.sheetId, foreign.sheetId].map(version))).toEqual(before)
+        const current = await f.service.preview(target)
+        await poolManager.get().transaction(async tx => {
+          await tx.query('SELECT version FROM sheet_permission_versions WHERE sheet_id = $1 FOR SHARE', [shared.sheetId])
+          // The deletion reached its sheet lock but hasn't acquired the sheet version. A D21
+          // admission holder must still acquire its next subject and user rows immediately.
+          await expect(whilePaused(f, 'SELECT s.id FROM public.meta_sheets s', service => service.confirm({ ...target, ...current }), async () => {
+            const subject = await tx.query('SELECT subject_id FROM subject_authorization_versions WHERE subject_id = $1 FOR SHARE NOWAIT', [target.actor])
+            const user = await tx.query('SELECT id FROM users WHERE id = $1 FOR SHARE NOWAIT', [target.actor])
+            expect(subject.rowCount).toBe(1)
+            expect(user.rowCount).toBe(1)
+          })).rejects.toMatchObject(busy)
+          expect(await grants()).toEqual(subjects.map(s => s.recordId).sort())
+        })
+        // Revocation after initial authorization wins the final subject-locked recheck. Its
+        // tentative version changes roll back and the same challenge remains retryable.
+        try {
+          await expect(whilePaused(f, 'SELECT s.id FROM public.meta_sheets s', service => service.confirm({ ...target, ...current }), async () => {
+            await query('UPDATE user_orgs SET is_active = FALSE WHERE user_id = $1 AND org_id = $2', [target.actor, target.tenantId])
+          })).rejects.toMatchObject({ status: 403, code: 'FORBIDDEN' })
+          expect(await Promise.all([owned.sheetId, shared.sheetId, foreign.sheetId].map(version))).toEqual(before)
+        } finally {
+          await query('UPDATE user_orgs SET is_active = TRUE WHERE user_id = $1 AND org_id = $2', [target.actor, target.tenantId])
+        }
+        await f.service.confirm({ ...target, ...current })
+        expect(await grants()).toEqual([sibling.recordId, foreign.recordId].sort())
+        expect(await version(shared.sheetId)).toBeGreaterThanOrEqual(before[1] + 2)
+        expect(await version(owned.sheetId)).toBeGreaterThanOrEqual(before[0] + 2)
+        expect(await version(foreign.sheetId)).toBe(before[2])
+      } finally {
+        await query('DELETE FROM record_permissions WHERE record_id = ANY($1::text[])', [subjects.map(s => s.recordId)])
+      }
+    })
+
     test('a multi-row grid edit takes one shared scope lock and permits a simultaneous edit on the same sheet', async () => {
       const f = getFixture(), scope = newScope('ordinary-edit'), sheet = await f.dedicated(scope)
       await poolManager.get().transaction(async tx => {

@@ -82,3 +82,39 @@ test('refuses divergence between planned and physically deleted counts', async (
   }
   await assert.rejects(deleteBusiness(tx, scope, { ...plan, counts }), { code: 'STOCK_PREPARATION_PROJECT_DELETE_STALE' })
 })
+
+test('each inventoried business ledger deletes exactly its own scoped rows', async () => {
+  const targets = new Map()
+  const plan = await planBusiness({ async query(sql) {
+    if (sql.startsWith('WITH targets AS')) {
+      for (const branch of sql.split('UNION ALL')) {
+        const category = branch.match(/SELECT '([A-Za-z]+)'/)[1]
+        const table = branch.match(/FROM (integration_stock_prep_\w+) r\b/)[1]
+        targets.set(category, table)
+      }
+      return [...targets.keys()].map(category => ({ category, n: 1, digest: 'one-row' }))
+    }
+    return sql.includes(' AS invalid') ? [{ invalid: false }] : [{ digest: 'no-locks' }]
+  } }, scope, sheets)
+  assert.equal(targets.size, 17)
+  for (const [category, table] of targets) {
+    const counts = Object.fromEntries([...targets.keys()].map(name => [name, name === category ? 1 : 0]))
+    let writes = 0
+    await deleteBusiness({ async query(sql, params) {
+      writes++
+      const statement = sql.match(/WITH removed AS \((DELETE FROM .*?) RETURNING 1\)/)[1]
+      if (category === 'reconcileLeases') {
+        assert.equal(statement, 'DELETE FROM ' + table + ' WHERE scope_key = $1 AND expires_at <= clock_timestamp()')
+        assert.deepEqual(params, [plan.reconcileKey])
+      } else if (category === 'packInstalls') {
+        assert.equal(statement, 'DELETE FROM ' + table + ' WHERE tenant_id = $1 AND project_id = $2 AND object_id = $3')
+        assert.deepEqual(params, [scope.tenantId, plan.staging, plan.objectId])
+      } else {
+        assert.equal(statement, 'DELETE FROM ' + table + ' WHERE tenant_id = $1 AND project_no = $2')
+        assert.deepEqual(params, [scope.tenantId, scope.projectNo])
+      }
+      return [{ n: 1 }]
+    } }, scope, { ...plan, counts })
+    assert.equal(writes, 1, category)
+  }
+})

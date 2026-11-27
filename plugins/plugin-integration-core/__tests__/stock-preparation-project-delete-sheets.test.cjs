@@ -51,7 +51,7 @@ test('dedicated sheet covers manual and recycled rows; same-count content edits 
   assert.deepEqual(writes, [])
   const changed = await planSheets(sheetFixture({ live: [pulled, { ...manual, hash: 'changed' }] }).tx, scope)
   assert.notEqual(changed.fingerprint, plan.fingerprint)
-  await deleteSheets(tx, scope, plan)
+  await deleteSheets(tx, scope, plan, { deleteDedicatedSheet: async () => { writes.push({ sql: 'host delete meta_sheets' }); return 1 } })
   assert.deepEqual(writes.map(({ sql }) => sql.split(' ')[2]), ['meta_records_trash', 'meta_records', 'integration_stock_prep_project_target', 'plugin_multitable_object_registry', 'meta_sheets'])
   assert.deepEqual(writes[2].params, ['synthetic', 'one', id])
   assert.deepEqual(writes[3].params, [stage, object, 'plugin-integration-core', id])
@@ -97,17 +97,33 @@ test('uses the server-bound shared ownership column and keeps the legacy sheet a
 test('cross-sheet dependencies block cleanup and ordinary side-table deletes must match the preview', async () => {
   const selected = new Map([[id, { live: ['pulled'], trash: [], recordIds: ['pulled'] }]])
   const inventory = []
-  const tx = { query: async sql => sql.includes('NOT id = ANY') ? [] : inventory }
+  let commentsRule
+  const tx = { query: async sql => {
+    if (sql.includes('NOT id = ANY')) return []
+    const comments = sql.split('\nUNION ALL\n').find(branch => branch.includes('AS deny FROM meta_comments r WHERE'))
+    commentsRule = Number(comments.match(/SELECT (\d+) AS rule/)[1])
+    return inventory
+  } }
   inventory.push({ rule: 0, n: 1, blocked: true, hash: 'sealed' })
   await assert.rejects(planSheetDependencies(tx, id, selected), {
     code: 'STOCK_PREPARATION_PROJECT_DELETE_DEPENDENCY', status: 409, details: { reason: 'recovery' },
   })
-  inventory[0] = { rule: 3, n: 1, blocked: false, hash: 'metadata' }
+  const stale = { code: 'STOCK_PREPARATION_PROJECT_DELETE_STALE', status: 409 }
+  for (const rule of [0, 3, -1, 99999]) {
+    const refuseWrite = { query: async () => assert.fail('A refusal-only or unknown dependency cannot be written') }
+    await assert.rejects(deleteSheetDependencies(refuseWrite, id, selected, { present: [{ rule, count: 1 }] }), stale)
+  }
+  inventory[0] = { rule: commentsRule, n: 1, blocked: false, hash: 'metadata' }
   const plan = await planSheetDependencies(tx, id, selected)
   assert.equal(plan.count, 1)
-  await assert.rejects(deleteSheetDependencies({ query: async () => [{ n: 0 }] }, id, selected, plan), {
-    code: 'STOCK_PREPARATION_PROJECT_DELETE_STALE', status: 409,
-  })
+  let writes = 0
+  await assert.rejects(deleteSheetDependencies({ query: async (sql, params) => {
+    writes++
+    assert.match(sql, /DELETE FROM meta_comments r WHERE/)
+    assert.deepEqual(params, [id, [id], ['pulled']])
+    return [{ n: 0 }]
+  } }, id, selected, plan), stale)
+  assert.equal(writes, 1)
 })
 
 

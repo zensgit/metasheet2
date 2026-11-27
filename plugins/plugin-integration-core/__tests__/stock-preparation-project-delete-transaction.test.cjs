@@ -40,7 +40,7 @@ function fixture() {
       const data = structuredClone(h.data)
       const result = await run({ async query(sql, params) {
         h.events.push(sql)
-        if (sql.startsWith('SET ')) return []
+        if (sql.startsWith('SET ') || sql.startsWith('SAVEPOINT ') || sql.startsWith('ROLLBACK TO SAVEPOINT ')) return []
         if (h.dbDenied) {
           assert.ok(h.events.includes('SET LOCAL row_security = off'))
           throw Object.assign(new Error('sensitive role details'), { code: '42501' })
@@ -93,7 +93,9 @@ function fixture() {
   const auditStore = createStockPreparationAuditStore({ db: { insertOne() { assert.fail('outside transaction') }, select() {} }, idGenerator: () => 'audit-1' })
   h.service = createService({ database, auditStore, authorizeWithin: async (_tx, current) => {
     assert.equal(typeof current.actor, 'string')
-    if (!h.mayDelete) throw Object.assign(new Error('secret'), { code: 'FORBIDDEN', status: 403 })
+    h.events.push('check live authority')
+    if (!h.mayDelete || (h.revokeDuringPreparation && h.prepared)) throw Object.assign(new Error('secret'), { code: 'FORBIDDEN', status: 403 })
+    return async () => { h.events.push('take sheet versions'); h.prepared = true; return {} }
   } })
   return h
 }
@@ -141,6 +143,20 @@ test('enforces DB expiry, live role, and both lock refusals before writes', asyn
   assert.equal(h.data.sheets, 'one')
 })
 
+test('confirmation releases the initial authority locks and rechecks live authority between sheet and record work', async () => {
+  const h = fixture()
+  const preview = await h.service.preview(scope)
+  const before = structuredClone(h.data)
+  h.events.length = 0
+  h.revokeDuringPreparation = true
+  await reject(h.service.confirm(confirmation(preview)), 'FORBIDDEN', 403)
+  assert.deepEqual(h.events.filter(event => event === 'check live authority' || event === 'take sheet versions' || event.includes('project_delete_initial_authority')), [
+    'SAVEPOINT project_delete_initial_authority', 'check live authority',
+    'ROLLBACK TO SAVEPOINT project_delete_initial_authority', 'take sheet versions', 'check live authority',
+  ])
+  assert.deepEqual(h.data, before)
+})
+
 test('pre-migration scheduled pulls skip private-table reads and projects with no removal marker skip the root lookup', async () => {
   const h = fixture()
   h.preMigration = true
@@ -170,6 +186,7 @@ test('an equal-count content change invalidates and consumes the prior preview',
   const p = await h.service.preview(scope)
   h.data.business = 'same count, different content'
   await reject(h.service.confirm(confirmation(p)), codes.stale)
+  assert.ok(h.events.includes('ROLLBACK TO SAVEPOINT project_delete_sheet_versions'))
   h.data.business = 'two'
   await reject(h.service.confirm(confirmation(p)), codes.challenge)
   assert.deepEqual(h.data.audit, [])

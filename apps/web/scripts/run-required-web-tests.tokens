@@ -545,6 +545,7 @@ StockPreparationPosturePlainLanguage
 StockPreparationPrepLineView
 StockPreparationProjectArchive
 StockPreparationProjectBoard
+StockPreparationProjectDelete
 StockPreparationProjectOverview
 StockPreparationProjectQuery
 StockPreparationProjectSync.spec.ts

@@ -16,21 +16,64 @@ const HANDOFF_TABLE = PREFIX + 'handoff'
 // Physical deletion order. Only the two ledger FKs currently enforced in PostgreSQL
 // need it, but logical references (repair claim, execution intent, reviewed cell)
 // also lose their children first. The per-tenant defaults are intentionally absent.
+const projectFilter = 'WHERE tenant_id = $1 AND project_no = $2'
 const LEDGERS = [
-  { table: 'sheet_repair_claim', count: 'sheetRepairClaims', key: 'claim_key' },
-  { table: 'sheet_repair_run', count: 'sheetRepairRuns', fence: true, busy: "r.status = 'running'" },
-  { table: 'refresh_execution_intent', count: 'refreshIntents', fence: true },
-  { table: 'pull_batch_execution', count: 'pullBatchExecutions', busy: 'r.finished_at IS NULL' },
-  { table: 'pull_batch', count: 'pullBatches' },
-  { table: 'pull_batch_sheet', count: 'pullBatchSheets', busy: "r.history_status = 'installing'" },
-  { table: 'reviewed_cell', count: 'reviewedCells', fence: true },
-  { table: 'change_plan', count: 'changePlans', fence: true },
-  { table: 'refresh_hold', count: 'refreshHolds', fence: true },
-  { table: 'refresh_state', count: 'refreshStates', fence: true },
-  { table: 'refresh_execution', count: 'refreshExecutions', fence: true, busy: "r.status = 'running'" },
-  { table: 'continuation_member', count: 'continuationMembers', fence: true },
-  { table: 'continuation', count: 'continuations', fence: true },
-  { table: 'component_ruling', count: 'componentRulings' },
+  {
+    table: 'sheet_repair_claim', count: 'sheetRepairClaims', key: 'claim_key',
+    remove: `DELETE FROM integration_stock_prep_sheet_repair_claim ${projectFilter}`,
+  },
+  {
+    table: 'sheet_repair_run', count: 'sheetRepairRuns', fence: true, busy: "r.status = 'running'",
+    remove: `DELETE FROM integration_stock_prep_sheet_repair_run ${projectFilter}`,
+  },
+  {
+    table: 'refresh_execution_intent', count: 'refreshIntents', fence: true,
+    remove: `DELETE FROM integration_stock_prep_refresh_execution_intent ${projectFilter}`,
+  },
+  {
+    table: 'pull_batch_execution', count: 'pullBatchExecutions', busy: 'r.finished_at IS NULL',
+    remove: `DELETE FROM integration_stock_prep_pull_batch_execution ${projectFilter}`,
+  },
+  {
+    table: 'pull_batch', count: 'pullBatches',
+    remove: `DELETE FROM integration_stock_prep_pull_batch ${projectFilter}`,
+  },
+  {
+    table: 'pull_batch_sheet', count: 'pullBatchSheets', busy: "r.history_status = 'installing'",
+    remove: `DELETE FROM integration_stock_prep_pull_batch_sheet ${projectFilter}`,
+  },
+  {
+    table: 'reviewed_cell', count: 'reviewedCells', fence: true,
+    remove: `DELETE FROM integration_stock_prep_reviewed_cell ${projectFilter}`,
+  },
+  {
+    table: 'change_plan', count: 'changePlans', fence: true,
+    remove: `DELETE FROM integration_stock_prep_change_plan ${projectFilter}`,
+  },
+  {
+    table: 'refresh_hold', count: 'refreshHolds', fence: true,
+    remove: `DELETE FROM integration_stock_prep_refresh_hold ${projectFilter}`,
+  },
+  {
+    table: 'refresh_state', count: 'refreshStates', fence: true,
+    remove: `DELETE FROM integration_stock_prep_refresh_state ${projectFilter}`,
+  },
+  {
+    table: 'refresh_execution', count: 'refreshExecutions', fence: true, busy: "r.status = 'running'",
+    remove: `DELETE FROM integration_stock_prep_refresh_execution ${projectFilter}`,
+  },
+  {
+    table: 'continuation_member', count: 'continuationMembers', fence: true,
+    remove: `DELETE FROM integration_stock_prep_continuation_member ${projectFilter}`,
+  },
+  {
+    table: 'continuation', count: 'continuations', fence: true,
+    remove: `DELETE FROM integration_stock_prep_continuation ${projectFilter}`,
+  },
+  {
+    table: 'component_ruling', count: 'componentRulings',
+    remove: 'DELETE FROM integration_stock_prep_component_ruling WHERE tenant_id = $1 AND project_no = $2',
+  },
 ]
 const BUSINESS_LOCK_TABLES = Object.freeze([
   ...LEDGERS.map(({ table }) => PREFIX + table), HANDOFF_TABLE, PACK_TABLE, RECONCILE_LEASE_TABLE, PROJECT_WRITE_LOCK_TABLE,
@@ -165,9 +208,9 @@ async function planBusiness(trx, scope, sheetPlan) {
   }
 }
 
-async function deleteCount(trx, table, where, params, expected) {
+async function deleteCount(trx, statement, params, expected) {
   if (expected === 0) return
-  const [row] = await trx.query(`WITH removed AS (DELETE FROM ${table} WHERE ${where} RETURNING 1)
+  const [row] = await trx.query(`WITH removed AS (${statement} RETURNING 1)
     SELECT count(*)::int AS n FROM removed`, params)
   if (row.n !== expected) refuse('STALE')
 }
@@ -175,11 +218,11 @@ async function deleteCount(trx, table, where, params, expected) {
 async function deleteBusiness(trx, { tenantId, projectNo }, plan) {
   const { counts } = plan
   for (const ledger of LEDGERS) {
-    await deleteCount(trx, PREFIX + ledger.table, 'tenant_id = $1 AND project_no = $2', [tenantId, projectNo], counts[ledger.count])
+    await deleteCount(trx, ledger.remove, [tenantId, projectNo], counts[ledger.count])
   }
-  await deleteCount(trx, HANDOFF_TABLE, 'tenant_id = $1 AND project_no = $2', [tenantId, projectNo], counts.handoffs)
-  await deleteCount(trx, PACK_TABLE, 'tenant_id = $1 AND project_id = $2 AND object_id = $3', [tenantId, plan.staging, plan.objectId], counts.packInstalls)
-  await deleteCount(trx, RECONCILE_LEASE_TABLE, 'scope_key = $1 AND expires_at <= clock_timestamp()', [plan.reconcileKey], counts.reconcileLeases)
+  await deleteCount(trx, `DELETE FROM integration_stock_prep_handoff ${projectFilter}`, [tenantId, projectNo], counts.handoffs)
+  await deleteCount(trx, 'DELETE FROM integration_stock_prep_pack_installs WHERE tenant_id = $1 AND project_id = $2 AND object_id = $3', [tenantId, plan.staging, plan.objectId], counts.packInstalls)
+  await deleteCount(trx, 'DELETE FROM integration_stock_prep_confirmation_reconcile_lease WHERE scope_key = $1 AND expires_at <= clock_timestamp()', [plan.reconcileKey], counts.reconcileLeases)
   // Retain the sheet's monotonic generation across same-number recreation. This
   // also fences old expansion observations taken before the first lock existed.
   if (plan.fenceKeys.length) {

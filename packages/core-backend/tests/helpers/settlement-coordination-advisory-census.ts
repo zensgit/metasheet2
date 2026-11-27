@@ -233,6 +233,9 @@ export type AdvisoryTwoInt4CensusEntryV1 = Readonly<{
 
 const CORE = 'packages/core-backend/src'
 const ATT = 'plugins/plugin-attendance/index.cjs'
+const STOCK_DELETE_SCOPE = `${CORE}/db/migrations/zzzz20261128090000_stock_prep_project_delete_scoped_fences.ts`
+const STOCK_DELETE_BUSINESS = `${CORE}/db/migrations/zzzz20261128090100_stock_prep_project_delete_business_fences.ts`
+export const STOCK_DELETE_ACTIVITY = 'plugins/plugin-integration-core/lib/stock-preparation-project-delete-activity.cjs'
 
 export const ADVISORY_TWO_INT4_CENSUS_V1: readonly AdvisoryTwoInt4CensusEntryV1[] = Object.freeze([
   // The coordination module itself.
@@ -247,6 +250,15 @@ export const ADVISORY_TWO_INT4_CENSUS_V1: readonly AdvisoryTwoInt4CensusEntryV1[
   // (the only form the writer guard admits there); the population grows with the migration tree.
   { file: `${CORE}/db/migrations/`, fileMatch: 'prefix', key1: '20261106', window: 'pg_try_advisory_xact_lock(20261106, 1)', count: 'any', kind: 'constant', registry: ['authorization-input-world'], binding: 'SQL literal (20261106, 1) in the bounded exclusive try block of a migration' },
   { file: 'packages/core-backend/migrations/', fileMatch: 'prefix', key1: '20261106', window: 'pg_try_advisory_xact_lock(20261106, 1)', count: 'any', kind: 'constant', registry: ['authorization-input-world'], binding: 'SQL literal (20261106, 1) in the bounded exclusive try block of a SQL-stream migration' },
+  // Project deletion has two fixed namespaces. Pin the exact operation and argument shape
+  // at each site, including the PL/pgSQL migration builders and the CommonJS session unlock.
+  { file: STOCK_DELETE_SCOPE, key1: '16991', window: 'pg_try_advisory_xact_lock_shared(16991, hashtext(k))', kind: 'constant', registry: ['stock-preparation-delete-scope'], binding: 'scoped writer holds a shared transaction lock on the tagged key' },
+  { file: STOCK_DELETE_SCOPE, key1: '16991', window: 'pg_try_advisory_xact_lock(16991, hashtext(k))', kind: 'constant', registry: ['stock-preparation-delete-scope'], binding: 'confirmation holds the exclusive transaction lock on the same tagged key' },
+  { file: STOCK_DELETE_SCOPE, key1: '16991', window: "pg_try_advisory_xact_lock_shared(16991, hashtext('sheet:' || sheet_id))", kind: 'constant', registry: ['stock-preparation-delete-scope'], binding: 'sheet update fast path takes the same tagged sheet key as the generic trigger' },
+  { file: STOCK_DELETE_BUSINESS, key1: '6991', window: 'pg_try_advisory_xact_lock_shared(6991, hashtext(${project}))', kind: 'constant', registry: ['stock-preparation-delete-activity'], binding: 'ledger writer hashes the JSON tenant/project tuple generated from the stored row' },
+  { file: STOCK_DELETE_ACTIVITY, key1: '$1::int', window: "pg_try_advisory_xact_lock($1::int, hashtext($2)) AS locked',\n      [PROJECT_ACTIVITY_NAMESPACE, JSON.stringify([tenantId, project])]", kind: 'constant', registry: ['stock-preparation-delete-activity'], binding: 'deleter binds the activity namespace and tenant/project tuple, including the unnumbered fallback' },
+  { file: STOCK_DELETE_ACTIVITY, key1: '$1::int', window: "pg_try_advisory_lock_shared($1::int, hashtext($2)) AS locked', key)", kind: 'constant', registry: ['stock-preparation-delete-activity'], binding: 'writer session acquisition uses the local activity key tuple checked by the key-space guard' },
+  { file: STOCK_DELETE_ACTIVITY, key1: '$1::int', window: "pg_advisory_unlock_shared($1::int, hashtext($2)) AS released', key)", kind: 'constant', registry: ['stock-preparation-delete-activity'], binding: 'writer session release uses that same key tuple' },
   // Constant key1 passed as a bind parameter.
   { file: `${CORE}/auth/user-access-lock.ts`, key1: '$1::int4', window: 'USER_ACCESS_LOCK_NAMESPACE', count: 2, kind: 'constant', registry: ['user-access'], boundConstants: [{ name: 'USER_ACCESS_LOCK_NAMESPACE', registry: 'user-access' }], binding: 'shared and exclusive params [USER_ACCESS_LOCK_NAMESPACE, derived user int4]' },
   { file: `${CORE}/multitable/stock-preparation-persist-unit-of-work.ts`, key1: '$1::int', window: 'STOCK_PREPARATION_PROJECT_LOCK_NS', kind: 'constant', registry: ['stock-preparation-project'], boundConstants: [{ name: 'STOCK_PREPARATION_PROJECT_LOCK_NS', registry: 'stock-preparation-project' }], binding: 'params [STOCK_PREPARATION_PROJECT_LOCK_NS, …]' },

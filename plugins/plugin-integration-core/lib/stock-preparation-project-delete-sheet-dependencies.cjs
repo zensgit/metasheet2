@@ -70,6 +70,35 @@ const rules = [
 ]
 const DEPENDENCY_TABLES = [...new Set(rules.map(([table]) => table))]
 
+// The ordinary cleanup path has one fixed write target per deletable companion.
+// Refusal-only dependencies have no delete statement.
+const dependencyDeleteStatements = Object.freeze({
+  meta_comment_reads: 'DELETE FROM meta_comment_reads r',
+  meta_comment_reactions: 'DELETE FROM meta_comment_reactions r',
+  meta_comments: 'DELETE FROM meta_comments r',
+  meta_record_yjs_states: 'DELETE FROM meta_record_yjs_states r',
+  meta_record_yjs_updates: 'DELETE FROM meta_record_yjs_updates r',
+  meta_record_subscription_notifications: 'DELETE FROM meta_record_subscription_notifications r',
+  meta_record_subscriptions: 'DELETE FROM meta_record_subscriptions r',
+  multitable_attachments: 'DELETE FROM multitable_attachments r',
+  multitable_ai_bulk_preview_cache: 'DELETE FROM multitable_ai_bulk_preview_cache r',
+  multitable_button_run_dedup: 'DELETE FROM multitable_button_run_dedup r',
+  meta_record_revisions: 'DELETE FROM meta_record_revisions r',
+  meta_record_version_markers: 'DELETE FROM meta_record_version_markers r',
+  meta_field_value_tombstones: 'DELETE FROM meta_field_value_tombstones r',
+  meta_link_tombstones: 'DELETE FROM meta_link_tombstones r',
+  meta_config_revisions: 'DELETE FROM meta_config_revisions r',
+  meta_field_retype_conversions: 'DELETE FROM meta_field_retype_conversions r',
+  meta_links: 'DELETE FROM meta_links r',
+  formula_dependencies: 'DELETE FROM formula_dependencies r',
+  meta_field_auto_number_sequences: 'DELETE FROM meta_field_auto_number_sequences r',
+  multitable_charts: 'DELETE FROM multitable_charts r',
+  multitable_dashboards: 'DELETE FROM multitable_dashboards r',
+  meta_view_permissions: 'DELETE FROM meta_view_permissions r',
+  meta_view_personal_configs: 'DELETE FROM meta_view_personal_configs r',
+  meta_views: 'DELETE FROM meta_views r',
+})
+
 function dependencyParams(dedicatedId, selected) {
   const sheetIds = []
   const recordIds = []
@@ -132,11 +161,25 @@ async function planSheetDependencies(tx, dedicatedId, selected) {
   return { count, present, hash: fingerprint.digest('hex') }
 }
 
-async function deleteSheetDependencies(tx, dedicatedId, selected, plan) {
+async function deleteSheetDependencies(tx, dedicatedId, selected, plan, sheetWrites) {
   const params = dependencyParams(dedicatedId, selected)
   for (const { rule, count } of plan.present) {
-    const [table, where] = rules[rule]
-    const [deleted] = await tx.query(`${scope}, removed AS (DELETE FROM ${table} r WHERE ${where} RETURNING 1)
+    const [table, where, mode] = rules[rule] || []
+    if (!table || (mode && mode !== 'history')) throw Object.assign(new Error('Sheet dependencies changed.'), {
+      code: 'STOCK_PREPARATION_PROJECT_DELETE_STALE', status: 409,
+    })
+    if (['record_permissions', 'field_permissions', 'spreadsheet_permissions', 'meta_fields'].includes(table)) {
+      if (await sheetWrites.deleteDependency(table) !== count) throw Object.assign(new Error('Sheet dependencies changed.'), {
+        code: 'STOCK_PREPARATION_PROJECT_DELETE_STALE', status: 409,
+      })
+      continue
+    }
+    const statement = dependencyDeleteStatements[table]
+    if (!statement) throw Object.assign(new Error('Sheet dependencies changed.'), {
+      code: 'STOCK_PREPARATION_PROJECT_DELETE_STALE', status: 409,
+    })
+    const historyFilter = mode === 'history' ? " AND to_jsonb(r)->>'operation_id' IS NULL" : ''
+    const [deleted] = await tx.query(`${scope}, removed AS (${statement} WHERE (${where})${historyFilter} RETURNING 1)
       SELECT count(*)::integer AS n FROM removed`, params)
     if (deleted.n !== count) throw Object.assign(new Error('Sheet dependencies changed.'), {
       code: 'STOCK_PREPARATION_PROJECT_DELETE_STALE', status: 409,

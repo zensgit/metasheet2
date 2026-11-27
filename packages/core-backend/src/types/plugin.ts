@@ -2282,8 +2282,9 @@ export interface PluginServices {
   }
   stockPreparationProjectDeleteAuthority?: (
     tx: Pick<DatabaseTransaction, 'query'>,
-    scope: { actor: string; tenantId: string },
-  ) => Promise<void>
+    scope: { actor: string; tenantId: string; projectNo?: string },
+  ) => Promise<undefined | ((selection: import('../services/stock-preparation-project-delete-sheet-writes').ProjectDeleteSheetSelection) =>
+    Promise<import('../services/stock-preparation-project-delete-sheet-writes').ProjectDeleteSheetWrites>)>
   notification: NotificationService // Notification service instance
   automationRegistry: PluginAutomationRegistryService
   rbacProvisioning: PluginRbacProvisioningService

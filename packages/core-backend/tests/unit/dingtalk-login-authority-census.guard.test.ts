@@ -74,6 +74,29 @@ describe('DingTalk session issuers, identity writers and grant consumers', () =>
     for (const [file, blob] of Object.entries(residues)) expect(actual[file]).toEqual([`data blob ${blob}`])
   })
 
+  it('binds every reviewed project-cleanup SQL operand to its literal data table', () => {
+    const files: Record<string, Record<string, string>> = {
+      'stock-preparation-project-delete.cjs': { CHALLENGES: 'integration_stock_prep_project_delete_challenges' },
+      'stock-preparation-project-delete-sheets.cjs': { OWNERS: 'plugin_multitable_object_registry', TARGETS: 'integration_stock_prep_project_target' },
+    }
+    for (const [file, expected] of Object.entries(files)) {
+      const source = ts.createSourceFile(file, read('plugins/plugin-integration-core/lib/' + file), ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
+      const declarations: string[] = []
+      function visit(node: ts.Node) {
+        if ((ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isBindingElement(node)) && ts.isIdentifier(node.name)
+          && Object.hasOwn(expected, node.name.text)) {
+          expect(node.parent.parent.parent, node.name.text).toBe(source)
+          expect(node.parent.flags & ts.NodeFlags.Const, node.name.text).toBeTruthy()
+          expect(node.initializer && ts.isStringLiteral(node.initializer) && node.initializer.text, node.name.text).toBe(expected[node.name.text])
+          declarations.push(node.name.text)
+        }
+        ts.forEachChild(node, visit)
+      }
+      visit(source)
+      expect(declarations.sort(), file).toEqual(Object.keys(expected).sort())
+    }
+  })
+
   it('keeps the accepted gate predicates at their named sites and the reviewed repair CLI single-purpose', () => {
     for (const [file, markers] of fences) for (const marker of markers) expect(read(file), `${file} ${marker}`).toContain(marker)
     expect(read('scripts/ops/backfill-dingtalk-corp-identities.sh')).toMatch(/^\s*exec node [^\n]+\/scripts\/dingtalk-corp-backfill\.ts"[^\n]+"\$\{REVIEWED_PLAN\}"$/m)
