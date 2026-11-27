@@ -805,30 +805,6 @@
       "review": "Computed loader target is outside the literal-load proof. Pin this occurrence and full source digest; do not infer that its runtime destination is safe."
     },
     {
-      "from": "plugins/plugin-attendance/engine/sample-config.cjs",
-      "specifier": "1109: Expression expected.",
-      "kind": "parse",
-      "typeOnly": false,
-      "sourceHash": "7567d7578305904b42ad3c92fa31d110f035fcf221891c93b5d113fcdf0276e1",
-      "review": "Existing sample configuration has trailing invalid syntax. The full source digest and all three diagnostics are pinned; its parsed template-library load remains in the graph."
-    },
-    {
-      "from": "plugins/plugin-attendance/engine/sample-config.cjs",
-      "specifier": "1128: Declaration or statement expected.",
-      "kind": "parse",
-      "typeOnly": false,
-      "sourceHash": "7567d7578305904b42ad3c92fa31d110f035fcf221891c93b5d113fcdf0276e1",
-      "review": "Existing sample configuration has trailing invalid syntax. The full source digest and all three diagnostics are pinned; its parsed template-library load remains in the graph."
-    },
-    {
-      "from": "plugins/plugin-attendance/engine/sample-config.cjs",
-      "specifier": "1128: Declaration or statement expected.",
-      "kind": "parse",
-      "typeOnly": false,
-      "sourceHash": "7567d7578305904b42ad3c92fa31d110f035fcf221891c93b5d113fcdf0276e1",
-      "review": "Existing sample configuration has trailing invalid syntax. The full source digest and all three diagnostics are pinned; its parsed template-library load remains in the graph."
-    },
-    {
       "from": "plugins/plugin-integration-core/lib/stock-preparation-remnant-acknowledgement.cjs",
       "specifier": "<non-literal>",
       "typeOnly": false,
