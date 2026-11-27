@@ -5,7 +5,9 @@ import type {
   StockPreparationPersistUnitOfWorkInput,
 } from '../types/plugin'
 import { validateStockPreparationPersistUnitOfWorkInput } from './stock-preparation-persist-unit-of-work'
-import { refusePluginWriteFenceOnUnfencedSurface, resolvePluginWriteFence } from './plugin-write-fence'
+import {
+  readPluginWriteCondition, refusePluginWriteConditionOnSurface, refusePluginWriteFenceOnUnfencedSurface, resolvePluginWriteFence,
+} from './plugin-write-fence'
 import {
   StockPreparationProjectSheetGrantError,
   isStockPreparationProjectSheetObjectId,
@@ -1142,6 +1144,8 @@ export function createPluginScopedMultitableApi(
       // otherwise, before any scope work) and forwarded only in its host-resolved form — the core write path
       // honours nothing else. Absent -> the write is exactly what it was.
       createRecord: async (input) => {
+        // #6812 review P2: only patchRecord takes a write condition; here it is refused, never dropped.
+        refusePluginWriteConditionOnSurface(input, 'records.createRecord')
         const writeFence = resolvePluginWriteFence(pluginName, (input as { writeFence?: unknown }).writeFence)
         const sheetId = input.sheetId
         await assertSheetScopeOnce(sheetId)
@@ -1155,14 +1159,21 @@ export function createPluginScopedMultitableApi(
       },
       patchRecord: async (input) => {
         const writeFence = resolvePluginWriteFence(pluginName, (input as { writeFence?: unknown }).writeFence)
+        // #6812 review P2: the host-minted write condition, read once, listed plugins only; the core re-decides it inside
+        // the write transaction and refuses anything the host did not mint.
+        const writeCondition = readPluginWriteCondition(pluginName, input)
         const sheetId = input.sheetId
         await assertSheetScopeOnce(sheetId)
         await refuseGenericOverviewRecordWrite(sheetId)
-        return multitable.records.patchRecord({ ...copyInputValuesExcept(input, ['sheetId', 'writeFence']), sheetId, ...(writeFence ? { writeFence } : {}) } as unknown as typeof input)
+        return multitable.records.patchRecord({
+          ...copyInputValuesExcept(input, ['sheetId', 'writeFence', 'writeCondition']), sheetId,
+          ...(writeFence ? { writeFence } : {}), ...(writeCondition !== undefined ? { writeCondition } : {}),
+        } as unknown as typeof input)
       },
       deleteRecord: async (input) => {
         // PR #6501 round 6 (S2): delete implements no fence — a `writeFence` here is refused, never dropped.
         refusePluginWriteFenceOnUnfencedSurface(input, 'records.deleteRecord')
+        refusePluginWriteConditionOnSurface(input, 'records.deleteRecord')
         const sheetId = input.sheetId
         await assertSheetScopeOnce(sheetId)
         await refuseGenericOverviewRecordWrite(sheetId)
@@ -1187,11 +1198,13 @@ export function createPluginScopedMultitableApi(
             stockPreparationOverview: {
               createRecord: async (input: { projectId: string; data: Record<string, unknown> }) => {
                 refusePluginWriteFenceOnUnfencedSurface(input, 'records.stockPreparationOverview.createRecord')
+                refusePluginWriteConditionOnSurface(input, 'records.stockPreparationOverview.createRecord')
                 const sheetId = await resolveOverviewRecordsSheet(input?.projectId)
                 return multitable.records.createRecord({ sheetId, data: input.data })
               },
               patchRecord: async (input: { projectId: string; recordId: string; changes: Record<string, unknown>; expectedVersion?: number }) => {
                 refusePluginWriteFenceOnUnfencedSurface(input, 'records.stockPreparationOverview.patchRecord')
+                refusePluginWriteConditionOnSurface(input, 'records.stockPreparationOverview.patchRecord')
                 const sheetId = await resolveOverviewRecordsSheet(input?.projectId)
                 return multitable.records.patchRecord({
                   sheetId,
@@ -1202,6 +1215,7 @@ export function createPluginScopedMultitableApi(
               },
               deleteRecord: async (input: { projectId: string; recordId: string }) => {
                 refusePluginWriteFenceOnUnfencedSurface(input, 'records.stockPreparationOverview.deleteRecord')
+                refusePluginWriteConditionOnSurface(input, 'records.stockPreparationOverview.deleteRecord')
                 const sheetId = await resolveOverviewRecordsSheet(input?.projectId)
                 return multitable.records.deleteRecord({ sheetId, recordId: input.recordId })
               },

@@ -26,6 +26,8 @@ suite('authorization exception writes on isolated PostgreSQL', () => {
     await client.connect()
     await client.query(`CREATE SCHEMA "${schema}"`)
     await client.query(`SET search_path TO "${schema}"`)
+    // D21 (Y5a): the access-graph mutex bumps the subjects' version rows before the users rows.
+    await client.query('CREATE TABLE subject_authorization_versions (subject_id text PRIMARY KEY, version bigint NOT NULL DEFAULT 1, updated_at timestamptz NOT NULL DEFAULT now())')
     await client.query(`CREATE TABLE users (id text PRIMARY KEY, name text, email text, username text, mobile text,
       activation_status text DEFAULT 'activated', role text DEFAULT 'user', is_active boolean DEFAULT TRUE, permissions jsonb, access_generation bigint DEFAULT 0, updated_at timestamptz DEFAULT now());
       CREATE TABLE user_roles (user_id text, role_id text, PRIMARY KEY(user_id, role_id));

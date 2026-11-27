@@ -1,0 +1,213 @@
+{
+  "note": "Catalog rows the YiDa stack adds on top of the captures in this directory. See README.md.",
+  "measuredOn": "PostgreSQL 14.24, C collation and ctype, UTF8, public schema CREATE revoked from PUBLIC",
+  "d21": {
+    "digest": "829ae23e6dab95d660cb84902adcafe02dc982109568f23b1e0627760f73bb76",
+    "rows": [
+      [],
+      [],
+      [],
+      [],
+      [
+        {
+          "relname": "platform_member_group_members",
+          "tgname": "trg_platform_member_group_members_zz_authz_subject_version",
+          "tgenabled": "O",
+          "tgtype": 31,
+          "definition": "CREATE TRIGGER trg_platform_member_group_members_zz_authz_subject_version BEFORE INSERT OR DELETE OR UPDATE ON platform_member_group_members FOR EACH ROW EXECUTE FUNCTION metasheet_authz_bump_subject_authorization_version('user_id')",
+          "function_schema": "public",
+          "proname": "metasheet_authz_bump_subject_authorization_version",
+          "arguments": ""
+        },
+        {
+          "relname": "user_namespace_admissions",
+          "tgname": "trg_user_namespace_admissions_zz_authz_subject_version",
+          "tgenabled": "O",
+          "tgtype": 31,
+          "definition": "CREATE TRIGGER trg_user_namespace_admissions_zz_authz_subject_version BEFORE INSERT OR DELETE OR UPDATE ON user_namespace_admissions FOR EACH ROW EXECUTE FUNCTION metasheet_authz_bump_subject_authorization_version('user_id')",
+          "function_schema": "public",
+          "proname": "metasheet_authz_bump_subject_authorization_version",
+          "arguments": ""
+        },
+        {
+          "relname": "user_permissions",
+          "tgname": "trg_user_permissions_zz_authz_subject_version",
+          "tgenabled": "O",
+          "tgtype": 31,
+          "definition": "CREATE TRIGGER trg_user_permissions_zz_authz_subject_version BEFORE INSERT OR DELETE OR UPDATE ON user_permissions FOR EACH ROW EXECUTE FUNCTION metasheet_authz_bump_subject_authorization_version('user_id')",
+          "function_schema": "public",
+          "proname": "metasheet_authz_bump_subject_authorization_version",
+          "arguments": ""
+        },
+        {
+          "relname": "user_roles",
+          "tgname": "trg_user_roles_zz_authz_subject_version",
+          "tgenabled": "O",
+          "tgtype": 31,
+          "definition": "CREATE TRIGGER trg_user_roles_zz_authz_subject_version BEFORE INSERT OR DELETE OR UPDATE ON user_roles FOR EACH ROW EXECUTE FUNCTION metasheet_authz_bump_subject_authorization_version('user_id')",
+          "function_schema": "public",
+          "proname": "metasheet_authz_bump_subject_authorization_version",
+          "arguments": ""
+        },
+        {
+          "relname": "users",
+          "tgname": "trg_users_zz_authz_subject_version_lifecycle",
+          "tgenabled": "O",
+          "tgtype": 15,
+          "definition": "CREATE TRIGGER trg_users_zz_authz_subject_version_lifecycle BEFORE INSERT OR DELETE ON users FOR EACH ROW EXECUTE FUNCTION metasheet_authz_bump_subject_authorization_version('id')",
+          "function_schema": "public",
+          "proname": "metasheet_authz_bump_subject_authorization_version",
+          "arguments": ""
+        },
+        {
+          "relname": "users",
+          "tgname": "trg_users_zz_authz_subject_version_update",
+          "tgenabled": "O",
+          "tgtype": 19,
+          "definition": "CREATE TRIGGER trg_users_zz_authz_subject_version_update BEFORE UPDATE ON users FOR EACH ROW EXECUTE FUNCTION metasheet_authz_bump_subject_authorization_version('id', 'role,is_active,activation_status,permissions,is_admin')",
+          "function_schema": "public",
+          "proname": "metasheet_authz_bump_subject_authorization_version",
+          "arguments": ""
+        }
+      ],
+      [],
+      [],
+      [
+        {
+          "nspname": "public",
+          "proname": "metasheet_authz_bump_sheet_permission_version",
+          "arguments": "",
+          "lanname": "plpgsql",
+          "prosecdef": false,
+          "provolatile": "v",
+          "proparallel": "u",
+          "proconfig": [
+            "search_path=pg_catalog, public"
+          ],
+          "definition": "CREATE OR REPLACE FUNCTION public.metasheet_authz_bump_sheet_permission_version()\n RETURNS trigger\n LANGUAGE plpgsql\n SET search_path TO 'pg_catalog', 'public'\nAS $function$\n    DECLARE\n      key_value text;\n      old_row jsonb;\n      new_row jsonb;\n      watched text;\n      watched_column text;\n      changed boolean;\n    BEGIN\n      IF TG_OP = 'UPDATE' AND TG_NARGS >= 2 THEN\n        old_row := to_jsonb(OLD);\n        new_row := to_jsonb(NEW);\n        watched := TG_ARGV[1];\n        changed := FALSE;\n        IF watched = 'field-visibility' THEN\n          changed := COALESCE((old_row -> 'property' -> 'hidden') = 'true'::jsonb, FALSE)\n              IS DISTINCT FROM COALESCE((new_row -> 'property' -> 'hidden') = 'true'::jsonb, FALSE)\n            OR COALESCE((old_row -> 'property' -> 'visible') = 'false'::jsonb, FALSE)\n              IS DISTINCT FROM COALESCE((new_row -> 'property' -> 'visible') = 'false'::jsonb, FALSE);\n        ELSE\n          FOREACH watched_column IN ARRAY string_to_array(watched, ',') LOOP\n            IF (old_row -> btrim(watched_column)) IS DISTINCT FROM (new_row -> btrim(watched_column)) THEN\n              changed := TRUE;\n              EXIT;\n            END IF;\n          END LOOP;\n        END IF;\n        IF NOT changed THEN\n          RETURN NEW;\n        END IF;\n      END IF;\n      FOR key_value IN\n        SELECT DISTINCT btrim(candidate)\n          FROM unnest(ARRAY[\n            CASE WHEN TG_OP <> 'DELETE' THEN to_jsonb(NEW) ->> TG_ARGV[0] END,\n            CASE WHEN TG_OP <> 'INSERT' THEN to_jsonb(OLD) ->> TG_ARGV[0] END\n          ]) AS candidates(candidate)\n         WHERE candidate IS NOT NULL AND btrim(candidate) <> ''\n         ORDER BY 1\n      LOOP\n        INSERT INTO public.sheet_permission_versions AS v (sheet_id, version, updated_at)\n        VALUES (key_value, 1, now())\n        ON CONFLICT (sheet_id) DO UPDATE\n          SET version = v.version + 1,\n              updated_at = now();\n      END LOOP;\n      IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;\n      RETURN NEW;\n    END;\n    $function$\n",
+          "owner_trusted": true
+        },
+        {
+          "nspname": "public",
+          "proname": "metasheet_authz_bump_subject_authorization_version",
+          "arguments": "",
+          "lanname": "plpgsql",
+          "prosecdef": false,
+          "provolatile": "v",
+          "proparallel": "u",
+          "proconfig": [
+            "search_path=pg_catalog, public"
+          ],
+          "definition": "CREATE OR REPLACE FUNCTION public.metasheet_authz_bump_subject_authorization_version()\n RETURNS trigger\n LANGUAGE plpgsql\n SET search_path TO 'pg_catalog', 'public'\nAS $function$\n    DECLARE\n      key_value text;\n      old_row jsonb;\n      new_row jsonb;\n      watched text;\n      watched_column text;\n      changed boolean;\n    BEGIN\n      IF TG_OP = 'UPDATE' AND TG_NARGS >= 2 THEN\n        old_row := to_jsonb(OLD);\n        new_row := to_jsonb(NEW);\n        watched := TG_ARGV[1];\n        changed := FALSE;\n        IF watched = 'field-visibility' THEN\n          changed := COALESCE((old_row -> 'property' -> 'hidden') = 'true'::jsonb, FALSE)\n              IS DISTINCT FROM COALESCE((new_row -> 'property' -> 'hidden') = 'true'::jsonb, FALSE)\n            OR COALESCE((old_row -> 'property' -> 'visible') = 'false'::jsonb, FALSE)\n              IS DISTINCT FROM COALESCE((new_row -> 'property' -> 'visible') = 'false'::jsonb, FALSE);\n        ELSE\n          FOREACH watched_column IN ARRAY string_to_array(watched, ',') LOOP\n            IF (old_row -> btrim(watched_column)) IS DISTINCT FROM (new_row -> btrim(watched_column)) THEN\n              changed := TRUE;\n              EXIT;\n            END IF;\n          END LOOP;\n        END IF;\n        IF NOT changed THEN\n          RETURN NEW;\n        END IF;\n      END IF;\n      FOR key_value IN\n        SELECT DISTINCT btrim(candidate)\n          FROM unnest(ARRAY[\n            CASE WHEN TG_OP <> 'DELETE' THEN to_jsonb(NEW) ->> TG_ARGV[0] END,\n            CASE WHEN TG_OP <> 'INSERT' THEN to_jsonb(OLD) ->> TG_ARGV[0] END\n          ]) AS candidates(candidate)\n         WHERE candidate IS NOT NULL AND btrim(candidate) <> ''\n         ORDER BY 1\n      LOOP\n        INSERT INTO public.subject_authorization_versions AS v (subject_id, version, updated_at)\n        VALUES (key_value, 1, now())\n        ON CONFLICT (subject_id) DO UPDATE\n          SET version = v.version + 1,\n              updated_at = now();\n      END LOOP;\n      IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;\n      RETURN NEW;\n    END;\n    $function$\n",
+          "owner_trusted": true
+        }
+      ]
+    ],
+    "versionTable": [
+      [
+        {
+          "relname": "subject_authorization_versions",
+          "relkind": "r",
+          "relpersistence": "p",
+          "relispartition": false,
+          "relhassubclass": false,
+          "relrowsecurity": false,
+          "relforcerowsecurity": false,
+          "reloptions": null,
+          "owner_trusted": true
+        }
+      ],
+      [
+        {
+          "relname": "subject_authorization_versions",
+          "attnum": 1,
+          "attname": "subject_id",
+          "type": "text",
+          "attnotnull": true,
+          "attidentity": "",
+          "attgenerated": "",
+          "collation": "default",
+          "default_expression": null
+        },
+        {
+          "relname": "subject_authorization_versions",
+          "attnum": 2,
+          "attname": "version",
+          "type": "bigint",
+          "attnotnull": true,
+          "attidentity": "",
+          "attgenerated": "",
+          "collation": null,
+          "default_expression": "1"
+        },
+        {
+          "relname": "subject_authorization_versions",
+          "attnum": 3,
+          "attname": "updated_at",
+          "type": "timestamp with time zone",
+          "attnotnull": true,
+          "attidentity": "",
+          "attgenerated": "",
+          "collation": null,
+          "default_expression": "now()"
+        }
+      ],
+      [
+        {
+          "source_schema": "public",
+          "source": "subject_authorization_versions",
+          "conname": "subject_authorization_versions_pkey",
+          "contype": "p",
+          "convalidated": true,
+          "condeferrable": false,
+          "condeferred": false,
+          "connoinherit": true,
+          "target_schema": null,
+          "target": null,
+          "definition": "PRIMARY KEY (subject_id)"
+        }
+      ],
+      [
+        {
+          "table_name": "subject_authorization_versions",
+          "index_name": "subject_authorization_versions_pkey",
+          "indisunique": true,
+          "indisprimary": true,
+          "indisvalid": true,
+          "indisready": true,
+          "indislive": true,
+          "definition": "CREATE UNIQUE INDEX subject_authorization_versions_pkey ON public.subject_authorization_versions USING btree (subject_id)"
+        }
+      ],
+      [],
+      [],
+      []
+    ]
+  },
+  "yidaLayout": {
+    "digest": "bcd3224cc13d9701dc2da0f16b708e7ba012b4c22efc57f73d694b3b0ccf9432",
+    "rows": [
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      [
+        {
+          "nspname": "public",
+          "proname": "integration_yida_generated_layout_immutable_guard",
+          "arguments": "",
+          "lanname": "plpgsql",
+          "prosecdef": false,
+          "provolatile": "v",
+          "proparallel": "u",
+          "proconfig": null,
+          "definition": "CREATE OR REPLACE FUNCTION public.integration_yida_generated_layout_immutable_guard()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$\nBEGIN\n  IF TG_OP = 'INSERT' THEN\n    NEW.created_at := clock_timestamp();\n    RETURN NEW;\n  END IF;\n  RAISE EXCEPTION 'YIDA_GENERATED_LAYOUT_IMMUTABLE';\nEND;\n$function$\n",
+          "owner_trusted": true
+        }
+      ]
+    ]
+  }
+}

@@ -880,6 +880,13 @@ export interface MultitableRecordsAPI {
     expectedVersion?: number
     /** OPTIONAL host fenced write — same contract as on `createRecord`. */
     writeFence?: PluginRecordWriteFence
+    /**
+     * OPTIONAL host write condition (#6812 review P2): an opaque, host-minted value
+     * (integration/yida-issue-confirm-writeback-authority.ts createYidaIssueConfirmWriteCondition) that the host
+     * re-decides inside this write's transaction. plugin-integration-core only, and only together with `writeFence`;
+     * anything the host did not mint is refused. No other write surface accepts it.
+     */
+    writeCondition?: unknown
   }): Promise<{
     id: string
     sheetId: string

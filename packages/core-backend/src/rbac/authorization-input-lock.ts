@@ -724,7 +724,7 @@ async function acquireLocks(client: AuthorizationInputQueryable, normalized: Nor
       if (operation && result.rows[0]?.acquired !== true) throw new AuthorizationInputBusyError('lock_timeout')
       highestRank = ranks.R3_NAMESPACE_ADMISSION
     }
-    const locked = normalized.userIds.length > 0 ? await lockUsersForAccessGraphWrite({ query }, [...normalized.userIds], { nowait: operation !== undefined }) : new Map<string, LockedAccessGraphUser>()
+    const locked = normalized.userIds.length > 0 ? await lockUsersForAccessGraphWrite({ query }, [...normalized.userIds], { nowait: operation !== undefined, lockOnly: normalized.plan.intent === 'CONSUME_CLASS_DECISION' }) : new Map<string, LockedAccessGraphUser>()
     if (locked.size > 0) highestRank = ranks.R5_USER_ROW
     if (normalized.identityRead) {
       if (normalized.userIds.some((id) => !locked.has(id))) throw contractError('AUTHORIZATION_INPUT_PLAN_INVALID', 'user_row_not_held')

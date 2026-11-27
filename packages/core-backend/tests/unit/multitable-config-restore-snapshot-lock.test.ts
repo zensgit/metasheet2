@@ -18,9 +18,11 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi 
 import {
   FIELD_CONFIG_SNAPSHOT_LOCKED_SQL,
   FIELD_CONFIG_SNAPSHOT_SQL,
+  configRevertCanTripFieldVisibility,
   loadEntityConfigSnapshot,
   type ConfigRevisionRow,
 } from '../../src/multitable/config-restore'
+import { SHEET_PERMISSION_VERSIONS_BUMP_SQL } from '../../src/multitable/authz-version-protocol'
 import { dbUser, emptyWorld, FieldRetypeConvertFakePg, type FakeWorld } from '../utils/field-retype-convert-fake-pg'
 import { usePinnedServer } from '../utils/pinned-server'
 
@@ -34,6 +36,8 @@ const LOCK_RE = /\bFOR\s+(?:NO\s+KEY\s+)?UPDATE\b|\bFOR\s+(?:KEY\s+)?SHARE\b|pg_
 
 const normalize = (sql: string) => sql.replace(/\s+/g, ' ').trim()
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
+/** The D21 explicit sheet-version bump (authz-version-protocol.ts, the field-row writer rule), normalized. */
+const SHEET_VERSION_BUMP = normalize(SHEET_PERMISSION_VERSIONS_BUMP_SQL)
 
 function revision(over: Partial<ConfigRevisionRow> = {}): ConfigRevisionRow {
   return {
@@ -164,6 +168,41 @@ describe('config-restore routes: the field snapshot lock is execute-only', () =>
     expect(snapshot, 'the execute snapshot is locked').toBeGreaterThanOrEqual(0)
     expect(write).toBeGreaterThan(snapshot)
     expect(tx).not.toContain(FIELD_CONFIG_SNAPSHOT_SQL)
+    // D21: a name revert never writes the property, so it cannot trip the visibility trigger: no version row.
+    expect(tx, 'a name revert takes no sheet version row').not.toContain(SHEET_VERSION_BUMP)
+  })
+
+  test('D21 field-row writer rule: a revert that writes the property takes the sheet version row BEFORE the locked snapshot', async () => {
+    vi.stubEnv('MULTITABLE_ENABLE_FIELD_RETYPE_REVERT', 'true')
+    // Tier-2 scalar retype revert (type + property); the live field sits at the revision's `after`, so no drift.
+    const rev = seedRevision({
+      before: { type: 'number', property: {} }, after: { type: 'string', property: {} }, changed_keys: ['type', 'property'],
+    })
+    const previewed = await post(`/sheets/${SHEET}/config-restore-preview`, { revisionId: rev })
+    expect(previewed.status, JSON.stringify(previewed.body)).toBe(200)
+    expect(state.pg.statements.map((s) => normalize(s.sql)), 'the preview takes no version row').not.toContain(SHEET_VERSION_BUMP)
+    const n = state.pg.statements.length
+    const executed = await post(`/sheets/${SHEET}/config-restore-execute`, { revisionId: rev, previewToken: previewed.body.data.previewToken })
+    expect(executed.status, JSON.stringify(executed.body)).toBe(200)
+    const txStatements = state.pg.statements.slice(n).filter((s) => s.inTransaction)
+    const tx = txStatements.map((s) => normalize(s.sql))
+    const bump = tx.indexOf(SHEET_VERSION_BUMP)
+    const firstFieldRow = tx.findIndex((sql) => /\bmeta_fields\b/.test(sql))
+    expect(bump, 'the revert bumps the sheet version row in its transaction').toBeGreaterThanOrEqual(0)
+    expect(tx.filter((sql) => sql === SHEET_VERSION_BUMP)).toHaveLength(1)
+    expect(txStatements[bump]?.params).toEqual([[SHEET]])
+    expect(tx[firstFieldRow], 'the first field-row statement is the locked snapshot').toBe(FIELD_CONFIG_SNAPSHOT_LOCKED_SQL)
+    expect(firstFieldRow, 'the version row precedes the field-row lock').toBeGreaterThan(bump)
+  })
+
+  test('configRevertCanTripFieldVisibility: a field revert that writes property, nothing else', () => {
+    expect(configRevertCanTripFieldVisibility(revision({ changed_keys: ['property'] }))).toBe(true)
+    expect(configRevertCanTripFieldVisibility(revision({ changed_keys: ['type', 'property'] }))).toBe(true)
+    expect(configRevertCanTripFieldVisibility(revision({ changed_keys: ['name'] }))).toBe(false)
+    expect(configRevertCanTripFieldVisibility(revision({ changed_keys: ['order', 'type'] }))).toBe(false)
+    expect(configRevertCanTripFieldVisibility(revision({ entity_type: 'view', changed_keys: ['property'] }))).toBe(false)
+    expect(configRevertCanTripFieldVisibility(revision({ entity_type: 'sheet_config', changed_keys: ['rowLevelReadPermissionsEnabled'] }))).toBe(false)
+    expect(configRevertCanTripFieldVisibility({ entity_type: 'field', changed_keys: null as never })).toBe(false)
   })
 
   test('a view revert: the execute snapshot stays unlocked (the lock is field-only)', async () => {

@@ -49,12 +49,28 @@ export async function lockUserAccessShared(client: Client, userId: string) {
   } | undefined
 }
 
-export async function lockUserAccessExclusive(client: Client, userIds: readonly string[]) {
+/**
+ * Exclusive admission, step one: every distinct numeric key in order, and no row lock. A writer that
+ * must take another lock before its users rows (the identity repair takes the maintenance mutex)
+ * calls this, then that lock, then `lockUserAccessRows`, so it never holds a users row while it waits
+ * for the other lock.
+ */
+export async function lockUserAccessKeysExclusive(client: Client, userIds: readonly string[]) {
   const keys = [...new Set(userIds.map(deriveUserAccessLockKey))].sort((a, b) => a - b)
   for (const key of keys) {
     await client.query('SELECT pg_advisory_xact_lock($1::int4, $2::int4)', [USER_ACCESS_LOCK_NAMESPACE, key])
   }
+}
+
+/** Exclusive admission, step two: the physical users rows in id order. Only after step one for the same users. */
+export async function lockUserAccessRows(client: Client, userIds: readonly string[]) {
   for (const userId of [...new Set(userIds)].sort()) {
     await client.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [userId])
   }
+}
+
+/** Both steps back to back, for a writer that takes no other lock between its keys and its rows. */
+export async function lockUserAccessExclusive(client: Client, userIds: readonly string[]) {
+  await lockUserAccessKeysExclusive(client, userIds)
+  await lockUserAccessRows(client, userIds)
 }
