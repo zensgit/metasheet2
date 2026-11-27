@@ -3369,6 +3369,50 @@ describe('MultitableWorkbench view wiring', () => {
     expect(formStubSeen.record).toBe(before)
   })
 
+  // A form view shows and submits its own record, also when the grid's page holds that record at another version:
+  // a link or person pick made there saves on the form's record, so the next Save carries the version the pick returned.
+  it.each(['link', 'person'] as const)('a form view, a %s pick on a record that is also on the grid\'s page saves on the form\'s record at its version, and the next Save sends the version the pick returned', async (kind) => {
+    const fieldId = kind === 'link' ? 'fld_parts' : 'fld_owner'
+    const ids = kind === 'link' ? ['rec_part_1'] : ['user_jamie']
+    workbenchMock.views.value = [
+      { id: 'view_form', sheetId: 'sheet_orders', name: 'Form', type: 'form' },
+    ]
+    workbenchMock.activeViewId.value = 'view_form'
+    workbenchMock.client.loadFormContext.mockResolvedValue({
+      fields: [{ id: 'fld_title', name: 'Title', type: 'text' }],
+      record: { id: 'rec_1', version: 9, data: { fld_title: 'Form record', fld_parts: [], fld_owner: [] } },
+      rowActions: { canEdit: true, canDelete: true, canComment: true },
+    })
+    workbenchMock.client.patchRecords.mockResolvedValue({ updated: [{ recordId: 'rec_1', version: 10 }] })
+    workbenchMock.client.submitForm.mockResolvedValue({ mode: 'update', record: { id: 'rec_1', version: 11, data: {} }, attachmentSummaries: {} })
+    mountWorkbench({ viewId: 'view_form', recordId: 'rec_1' })
+    await flushUi(8)
+    // The grid's page holds rec_1 too, at another version; the form shows its own record.
+    expect(gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')).toMatchObject({ version: 1 })
+    expect(formStubSeen.record).toMatchObject({ id: 'rec_1', version: 9 })
+    showErrorSpy.mockClear()
+    showSuccessSpy.mockClear()
+
+    container!.querySelector<HTMLButtonElement>(`[data-form-open-${kind}-picker]`)!.click()
+    await flushUi()
+    container!.querySelector<HTMLButtonElement>(`[data-${kind}-picker-confirm="true"]`)!.click()
+    await flushUi()
+
+    expect(gridMock.patchCell).not.toHaveBeenCalled()
+    expect(workbenchMock.client.patchRecords).toHaveBeenCalledTimes(1)
+    expect(workbenchMock.client.patchRecords).toHaveBeenCalledWith(expect.objectContaining({
+      changes: [{ recordId: 'rec_1', fieldId, value: ids, expectedVersion: 9 }],
+    }))
+    expect(showErrorSpy).not.toHaveBeenCalled()
+    expect(showSuccessSpy).toHaveBeenCalledWith('Linked records updated', undefined)
+    expect(formStubSeen.record).toMatchObject({ id: 'rec_1', version: 10, data: { [fieldId]: ids } })
+
+    container!.querySelector<HTMLButtonElement>('[data-form-submit="true"]')!.click()
+    await flushUi()
+    expect(workbenchMock.client.submitForm).toHaveBeenCalledTimes(1)
+    expect(workbenchMock.client.submitForm).toHaveBeenCalledWith('view_form', expect.objectContaining({ recordId: 'rec_1', expectedVersion: 10 }))
+  })
+
   it('blocks form submit updates when scoped rowActions disallow edits', async () => {
     workbenchMock.views.value = [
       { id: 'view_form', sheetId: 'sheet_orders', name: 'Form', type: 'form' },
