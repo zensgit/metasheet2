@@ -606,3 +606,21 @@ test('R-71 ⑦.3: changing the sealed mapping version fails the recompile check 
     await rejected(f.store.inspect({ operationId: made.operationId }), 'UNAVAILABLE')
   }
 })
+
+// D2 (owner 2026-11-07, R-88; reworked after verify-YD-r1 F1 under ruling Y6 P1): the material-code form is an option of
+// the material-code-v1 preset part only and is sealed through the send authority's generated-layout signature, never
+// through the key definition. So there is no config-level form for a slot's (v2) initialization draft to declare: a root
+// materialCodeForm is a config error before any write, whatever its value, and the slot keeps today's key definition
+// (the draft-plan suite pins that a uuid-32 preset draft has that same key definition).
+test('D2 has no key-definition seal: a root materialCodeForm is refused as config with nothing written, before and after the slot exists', async () => {
+  const withForm = (input, form) => ({ ...input, config: { ...input.config, materialCodeForm: form } })
+  const f = await fixture(), input = await example()
+  for (const form of ['uuid-36', 'uuid-32']) await rejected(f.store.createDraft(withForm(input, form)), 'CONFIG')
+  assert.deepEqual(f.snapshot()[TARGET], [])
+  const made = await f.store.createDraft(input), before = f.snapshot()
+  assert.equal(before[TARGET].length, 1)
+  for (const form of ['uuid-36', 'uuid-32']) await rejected(f.store.createDraft(withForm(input, form)), 'CONFIG')
+  assert.equal(JSON.stringify(f.snapshot()) === JSON.stringify(before), true)
+  const again = await f.store.createDraft(input)
+  assert.equal(again.operationId, made.operationId)
+})

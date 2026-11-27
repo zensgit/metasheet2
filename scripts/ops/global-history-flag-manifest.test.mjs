@@ -750,7 +750,7 @@ test('DELEGATED_SCOPE_EXACT_DEPARTMENT_ENABLED: exact true, danger high, indepen
 })
 
 test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src, plus plugins/plugin-attendance/index.cjs for the ATTENDANCE_CANCEL_ROUND_ family', () => {
-  const sourceGH = [...new Set([...globalHistoryFlagsInSource(), ...automationFlagsInSource(), ...dingtalkIntegrationScopedFlagsInSource(), ...securityActionFlagsInSource(), ...directoryIntegrationCapabilitiesFlagsInSource(), ...userNotificationFlagsInSource(), ...approvalRoutingFlagsInSource(), ...delegatedScopeFlagsInSource()])].sort()
+  const sourceGH = [...new Set([...globalHistoryFlagsInSource(), ...automationFlagsInSource(), ...dingtalkIntegrationScopedFlagsInSource(), ...securityActionFlagsInSource(), ...directoryIntegrationCapabilitiesFlagsInSource(), ...userNotificationFlagsInSource(), ...approvalRoutingFlagsInSource(), ...delegatedScopeFlagsInSource(), ...grepFlagTokens('ACCOUNT_CENTER_READ_ENABLED')])].sort()
   assert.ok(
     sourceGH.length >= 20,
     `expected >=20 Global-History flags derived from source, got ${sourceGH.length} — the denylist is too broad or grep broke`,
@@ -1175,6 +1175,27 @@ test('YiDa unbound test-target list (design baseline v2.3 D20): a list, danger h
   assert.match(readFileSync(path.join(root, 'packages/core-backend/src/index.ts'), 'utf8'), /process\.env\.INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS/)
   assert.match(readFileSync(path.join(root, 'packages/core-backend/src/integration/yida-send-approval-service.ts'), 'utf8'),
     /if \(slot === 1 \|\| unboundTargets\.has\(targetRef\)\) return/)
+})
+
+test('YiDa sheet-source switch (design baseline v2.3 D17 b, R-88): boolean, exact true, danger high, no dependsOn, every cited file real, the host index reads this exact env name', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.INTEGRATION_YIDA_SHEET_SOURCE_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const near of ['TRUE', ' true', 'true ', '1', 'yes', '']) assert.equal(isActivated(spec, near), false, JSON.stringify(near))
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+  for (const cited of spec.source.split('; ').map((entry) => entry.split('#')[0])) {
+    assert.ok(readFileSync(path.join(root, cited), 'utf8').length > 0, cited)
+  }
+  assert.match(readFileSync(path.join(root, 'packages/core-backend/src/index.ts'), 'utf8'),
+    /readSheetSourceEnablement: \(\) => process\.env\.INTEGRATION_YIDA_SHEET_SOURCE_ENABLED,/)
+  const runtime = readFileSync(path.join(root, 'packages/core-backend/src/integration/yida-owner-runtime.ts'), 'utf8')
+  assert.match(runtime, /function sheetSourceOn\(\): boolean \{/)
+  assert.match(runtime, /const on = flag === 'true'/)
 })
 
 test('stock-prep members page switch (ADR §11.4-11.6 S5b, R-39): boolean, exact true, danger high, sourced from the plugin predicate, same literal in the host port', () => {
@@ -2053,4 +2074,18 @@ test('EXTERNAL_NOTIFICATION_DELIVERY_ENABLED: exact literal, high danger and bot
   for (const value of [undefined, '', 'false', '0', 'TRUE', 'True', ' true', 'true ', ' true ', '1', 'yes', 'on']) {
     assert.equal(isActivated(spec, value), false, String(value))
   }
+})
+
+test('account center read flag is independent and exact true', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.ACCOUNT_CENTER_READ_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.danger, 'low')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.source, 'packages/core-backend/src/account-center/read-flag.ts#isAccountCenterReadEnabled')
+  assert.match(readFileSync(path.join(REPO_ROOT, spec.source.split('#')[0]), 'utf8'), /export function isAccountCenterReadEnabled\(/)
+  for (const value of [undefined, '', 'false', 'TRUE', ' true', 'true ', '1', 'yes']) assert.equal(isActivated(spec, value), false)
+  assert.equal(isActivated(spec, 'true'), true)
 })

@@ -1,5 +1,6 @@
 // Internal persistence proof only: real 090+091 DDL, production db/store and
 // distinct PostgreSQL sessions. No runner, sender, authority or external-service client.
+import { YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL } from '../../src/db/migrations/zzzz20261126202000_pin_yida_ack_business_timezone'
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -183,7 +184,7 @@ databaseSuite('SA05 inert CREATE tuple fence — real PostgreSQL without deliver
     schema = 'yida_create_fence_' + randomUUID().replaceAll('-', '')
     await owner.query(`CREATE SCHEMA ${ident(schema)}`)
     await owner.query(`SET search_path TO ${ident(schema)}`)
-    await owner.query(ddl090)
+    await owner.query(ddl090 + '\n' + YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL)
     await owner.query(ddl091)
     await owner.query(ddlBinding)
     first = await session(); second = await session()
@@ -205,7 +206,7 @@ databaseSuite('SA05 inert CREATE tuple fence — real PostgreSQL without deliver
   it.each(states)('090+091 replay and restart preserve %s evidence and its CREATE reservation', async status => {
     await setState(status)
     const before = await evidence()
-    await owner.query(ddl090); await owner.query(ddl091); await owner.query(ddl091); await owner.query(ddlBinding)
+    await owner.query(ddl090 + '\n' + YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL); await owner.query(ddl091); await owner.query(ddl091); await owner.query(ddlBinding)
     expect(await evidence()).toEqual(before)
     expect((await owner.query('SHOW search_path')).rows[0].search_path).toBe(schema)
     const restarted = await session()
@@ -766,7 +767,7 @@ databaseSuite('SA05 inert CREATE tuple fence — real PostgreSQL without deliver
     await owner.query(`DROP SCHEMA ${ident(schema)} CASCADE`)
     await owner.query(`CREATE SCHEMA ${ident(schema)}`)
     await owner.query(`SET search_path TO ${ident(schema)}`)
-    await owner.query(ddl090); await owner.query(ddl091); await owner.query(ddlBinding); await owner.query(YIDA_RECONCILED_EXISTING_UP_SQL)
+    await owner.query(ddl090 + '\n' + YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL); await owner.query(ddl091); await owner.query(ddlBinding); await owner.query(YIDA_RECONCILED_EXISTING_UP_SQL)
     await reconcileOnce([['FINST-legacy-1', 'b'.repeat(64)]], 'count')
     expect((await rows(LEDGER)).length).toBe(0)
     expect(await pgFailure(owner.query(YIDA_RECONCILED_EXISTING_DOWN_SQL)))
@@ -829,7 +830,7 @@ databaseSuite('SA05 inert CREATE tuple fence — real PostgreSQL without deliver
     await owner.query(`DROP SCHEMA ${ident(schema)} CASCADE`)
     await owner.query(`CREATE SCHEMA ${ident(schema)}`)
     await owner.query(`SET search_path TO ${ident(schema)}`)
-    await owner.query(ddl090); await owner.query(ddl091)
+    await owner.query(ddl090 + '\n' + YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL); await owner.query(ddl091)
     expect(await pgFailure(owner.query(YIDA_RECONCILED_EXISTING_UP_SQL)))
       .toEqual({ ok: false, code: '55000', message: 'YIDA_DELIVERY_RECONCILE_BINDING_MISSING' })
     expect((await owner.query("SELECT to_regclass('integration_yida_reconciliation_runs') AS rel")).rows[0].rel).toBeNull()
@@ -880,6 +881,182 @@ databaseSuite('SA05 inert CREATE tuple fence — real PostgreSQL without deliver
     expect((await guardBody()).includes('creation_identity_digest')).toBe(true)
     const bound = await second.store.prepare(identity({ operationId: 'synthetic-operation-b', rowKey: 'synthetic-row-b', businessKeyDigest: 'c'.repeat(64) }))
     expect(bound.reused).toBe(false)
+    expect((await rows(LEDGER)).length).toBe(2)
+  })
+
+  // ---- R-71 ⑦.4 PR-2 (Y6): the generated code against the two fences (design B acceptance A9 / A10) ----
+  // The digests come from the real compiler (bound drafts of the shipped v3 example, whose material template is one
+  // preset part reading sourceLineId and project); the code is never stored and never compared by any fence.
+  type CompiledSpec = { businessKeyDigest: string; payloadDigest: string; sourceRecordDigest: string; creationIdentityDigest: string }
+  type Compiled = { planDigest: string; rowSpecs: CompiledSpec[]; plan: { rows: Array<{ payload: Row }> } }
+  const lib = (name: string) => pathToFileURL(path.join(root, 'plugins/plugin-integration-core/lib', name)).href
+  async function generatedDraft(template?: Row[], patchRow: Row = {}): Promise<Compiled> {
+    const { compileYidaSendDraft } = await import(lib('yida-draft-compiler.mjs')) as { compileYidaSendDraft(input: unknown): Compiled }
+    const { createYidaTransformExample, transformDependencies } = await import(lib('yida-static-plan.mjs')) as {
+      createYidaTransformExample(): { config: Row & { fieldMap: Row[] }; rows: Row[] }
+      transformDependencies(entry: unknown, config: unknown): string[] }
+    const example = createYidaTransformExample()
+    const config = structuredClone(example.config)
+    if (template) config.fieldMap[config.fieldMap.length - 1] = { ...config.fieldMap[config.fieldMap.length - 1], template }
+    const row = { ...example.rows[0], ...patchRow }
+    const columns = [...new Set(config.fieldMap.flatMap(entry => transformDependencies(entry, config)))]
+    const fieldBindings = Object.fromEntries(columns.map(column => [column, 'fld_' + column]))
+    return compileYidaSendDraft({ config, rowsText: JSON.stringify([row]), allocation: { mode: 'original' },
+      sourceBinding: { sheetId: 'sheet_generated', keyFieldId: 'fld_idempotencyKey', fieldBindings,
+        records: [{ recordId: 'rec_generated', keyValue: String(row.idempotencyKey), projectNo: String(row.projectNo) }] } })
+  }
+  const PRESET = { preset: 'material-code-v1', rowIdOf: 'sourceLineId', projectOf: 'project' }
+  const KEY_HASH = { hash: ['project', 'drawingNo', 'partName', 'specification', 'materialGrade', 'versionNo', 'parentDrawingNo'], form: 'uuid-36' }
+  const reservation = (compiled: Compiled, patch: Row): Row => {
+    const { businessKeyDigest, payloadDigest, sourceRecordDigest, creationIdentityDigest } = compiled.rowSpecs[0]
+    return fixture({ businessKeyDigest, payloadDigest, sourceRecordDigest, creationIdentityDigest, ...patch })
+  }
+
+  it('A9 (generated): a second bound draft with the same seven keys and a changed template literal is a new operation that the fences refuse; the ACKed row and its audits stay', async () => {
+    const one = await generatedDraft([{ literal: 'SYN-A-' }, PRESET])
+    const two = await generatedDraft([{ literal: 'SYN-B-' }, PRESET])
+    await setState('acknowledged', reservation(one, {}))
+    const before = await evidence()
+    expect(before.ledger[0].business_key_digest).toBe(one.rowSpecs[0].businessKeyDigest)
+    // Both fences cover this row; PostgreSQL reports the first unique index it checks, the 091 seven-key fence.
+    await rejectStore(second.store.prepare(reservation(two, { operationId: 'synthetic-operation-a9', rowKey: 'synthetic-row-a9' })),
+      'YIDA_DELIVERY_BUSINESS_CONFLICT')
+    expect(second.uniqueErrors).toEqual([FENCE])
+    expect(await evidence()).toEqual(before)
+    // Without the seven-key fence the identity fence still refuses it: the code never creates a second identity.
+    await dropFence()
+    await rejectStore(second.store.prepare(reservation(two, { operationId: 'synthetic-operation-a9b', rowKey: 'synthetic-row-a9b' })),
+      'YIDA_DELIVERY_IDENTITY_CONFLICT')
+    expect(second.uniqueErrors).toEqual([FENCE, IDENTITY_FENCE])
+    expect(await evidence()).toEqual(before)
+    // Why: a new operation (another code, payload and plan digest) whose seven keys, identity and source record are the same.
+    expect(two.plan.rows[0].payload.materialCodeText).not.toBe(one.plan.rows[0].payload.materialCodeText)
+    expect(two.planDigest).not.toBe(one.planDigest)
+    expect(two.rowSpecs[0].payloadDigest).not.toBe(one.rowSpecs[0].payloadDigest)
+    expect(two.rowSpecs[0].businessKeyDigest).toBe(one.rowSpecs[0].businessKeyDigest)
+    expect(two.rowSpecs[0].creationIdentityDigest).toBe(one.rowSpecs[0].creationIdentityDigest)
+    expect(two.rowSpecs[0].sourceRecordDigest).toBe(one.rowSpecs[0].sourceRecordDigest)
+  })
+
+  it('A10 (generated): the identity digest is independent of the template; equal codes never stand in for a fence; for a key-tied template each refusal is the fence that applies', async () => {
+    // Two templates over one row: one identity, one seven-key digest, two codes.
+    const preset = await generatedDraft([PRESET]), hashed = await generatedDraft([{ literal: 'SYN-' }, KEY_HASH])
+    await setState('acknowledged', reservation(preset, {}))
+    const before = await evidence()
+    // Same identity, corrected seven keys (K2), another template and code: refused by the IDENTITY fence only.
+    const corrected = await generatedDraft([{ literal: 'SYN-' }, KEY_HASH], { componentName: '示例部件（改）' })
+    await rejectStore(second.store.prepare(reservation(corrected, { operationId: 'synthetic-operation-k2', rowKey: 'synthetic-row-k2' })),
+      'YIDA_DELIVERY_IDENTITY_CONFLICT')
+    expect(second.uniqueErrors).toEqual([IDENTITY_FENCE])
+    expect(await evidence()).toEqual(before)
+    expect(hashed.plan.rows[0].payload.materialCodeText).not.toBe(preset.plan.rows[0].payload.materialCodeText)
+    expect(hashed.rowSpecs[0].creationIdentityDigest).toBe(preset.rowSpecs[0].creationIdentityDigest)
+    expect(hashed.rowSpecs[0].businessKeyDigest).toBe(preset.rowSpecs[0].businessKeyDigest)
+    expect(corrected.rowSpecs[0].businessKeyDigest).not.toBe(preset.rowSpecs[0].businessKeyDigest)
+    expect(corrected.rowSpecs[0].creationIdentityDigest).toBe(preset.rowSpecs[0].creationIdentityDigest)
+    // Equal codes under two identities (a hash over the seven keys, another idempotency key): refused by the SEVEN-KEY
+    // fence because the keys are equal, not because the codes are.
+    const sameKeys = await generatedDraft([{ literal: 'SYN-' }, KEY_HASH], { idempotencyKey: 'SYN-LINE-9' })
+    expect(sameKeys.plan.rows[0].payload.materialCodeText).toBe(hashed.plan.rows[0].payload.materialCodeText)
+    expect(sameKeys.rowSpecs[0].creationIdentityDigest).not.toBe(preset.rowSpecs[0].creationIdentityDigest)
+    await rejectStore(second.store.prepare(reservation(sameKeys, { operationId: 'synthetic-operation-l9', rowKey: 'synthetic-row-l9' })),
+      'YIDA_DELIVERY_BUSINESS_CONFLICT')
+    expect(second.uniqueErrors).toEqual([IDENTITY_FENCE, FENCE])
+    expect(await evidence()).toEqual(before)
+    // Another identity and other seven keys reserve, whatever its code: no fence compares codes.
+    const other = await generatedDraft([PRESET], { idempotencyKey: 'SYN-LINE-7', componentCode: 'DEMO-DRW-7' })
+    expect((await second.store.prepare(reservation(other, { operationId: 'synthetic-operation-o', rowKey: 'synthetic-row-o' }))).reused).toBe(false)
+    expect((await rows(LEDGER)).length).toBe(2)
+  })
+
+  it('A10 (generated, off-key preset): one code under two identities passes both fences, so the persisted compile refuses a preset whose rowIdOf is not the key column', async () => {
+    // One component (DEMO-DRW-1) under two parents: two source lines, two identities, two seven-key tuples.
+    const lineA: Row = { idempotencyKey: 'SYN-LINE-1' }, lineB: Row = { idempotencyKey: 'SYN-LINE-5', parentComponentCode: 'DEMO-DRW-9' }
+    const OFF_KEY = { preset: 'material-code-v1', rowIdOf: 'drawingNo', projectOf: 'project' }
+    // The fences see only the identity and seven-key digests, and both are independent of the template (A10 above):
+    // the two lines' reservations both commit, so no fence would refuse a second draft carrying the first one's code.
+    const a = await generatedDraft([PRESET], lineA), b = await generatedDraft([PRESET], lineB)
+    expect(b.rowSpecs[0].creationIdentityDigest).not.toBe(a.rowSpecs[0].creationIdentityDigest)
+    expect(b.rowSpecs[0].businessKeyDigest).not.toBe(a.rowSpecs[0].businessKeyDigest)
+    await setState('acknowledged', reservation(a, {}))
+    expect((await second.store.prepare(reservation(b, { operationId: 'synthetic-operation-b5', rowKey: 'synthetic-row-b5' }))).reused).toBe(false)
+    expect(second.uniqueErrors).toEqual([])
+    expect((await rows(LEDGER)).length).toBe(2)
+    // Under an off-key preset (valid for the planner: rowIdOf only has to be a string direct target) both lines would
+    // carry the SAME code, WLBH(drawing number, project) — the never-persisted local recompute shows it ...
+    const { compileYidaLocalDraft } = await import(lib('yida-draft-compiler.mjs')) as { compileYidaLocalDraft(input: unknown): Compiled }
+    const { createYidaTransformExample } = await import(lib('yida-static-plan.mjs')) as {
+      createYidaTransformExample(): { config: Row & { fieldMap: Row[] }; rows: Row[] } }
+    const localCode = (patchRow: Row) => {
+      const example = createYidaTransformExample(), config = structuredClone(example.config)
+      config.fieldMap[config.fieldMap.length - 1] = { ...config.fieldMap[config.fieldMap.length - 1], template: [OFF_KEY] }
+      return compileYidaLocalDraft({ config, rowsText: JSON.stringify([{ ...example.rows[0], ...patchRow }]), allocation: { mode: 'original' } })
+        .plan.rows[0].payload.materialCodeText
+    }
+    expect(localCode(lineB)).toBe(localCode(lineA))
+    // ... so the persisted compile refuses both bound drafts (kind SOURCE_KEY_FIELD_MISMATCH: rowIdOf names drawingNo, not the bound key field) before any
+    // reservation is attempted: one code never names two identities.
+    const before = await evidence()
+    for (const line of [lineA, lineB]) {
+      await expect(generatedDraft([OFF_KEY], line)).rejects.toMatchObject({ code: 'YIDA_DRAFT_SOURCE_KEY_FIELD_MISMATCH' })
+    }
+    expect(await evidence()).toEqual(before)
+  })
+
+  it('A10 (generated, hash member order; ruling L1): two templates listing one member set in two orders give one code per tuple; two tuples whose nullable values swap members keep two codes after both creates commit', async () => {
+    const ORDER_A = { hash: ['project', 'drawingNo', 'partName', 'specification', 'materialGrade', 'versionNo', 'parentDrawingNo'], form: 'uuid-36' }
+    const ORDER_B = { hash: ['project', 'drawingNo', 'partName', 'parentDrawingNo', 'materialGrade', 'versionNo', 'specification'], form: 'uuid-36' }
+    // Two source lines whose only difference is which nullable key member holds DEMO-DRW-0 (verifier r2 probe PA).
+    const lineA: Row = { idempotencyKey: 'SYN-LINE-21', componentSpec: 'DEMO-DRW-0', parentComponentCode: null, parentComponentName: null }
+    const lineB: Row = { idempotencyKey: 'SYN-LINE-22', componentSpec: '', parentComponentCode: 'DEMO-DRW-0', parentComponentName: 'SYN-PARENT-0' }
+    const a = await generatedDraft([{ literal: 'SYN-' }, ORDER_A], lineA)
+    const b = await generatedDraft([{ literal: 'SYN-' }, ORDER_B], lineB)
+    const aReordered = await generatedDraft([{ literal: 'SYN-' }, ORDER_B], lineA)
+    const code = (compiled: Compiled) => String(compiled.plan.rows[0].payload.materialCodeText)
+    // One tuple, either order: one code. Two tuples: two codes, also across the two orders.
+    expect(code(aReordered)).toBe(code(a))
+    expect(code(b)).not.toBe(code(a))
+    expect(b.rowSpecs[0].businessKeyDigest).not.toBe(a.rowSpecs[0].businessKeyDigest)
+    expect(b.rowSpecs[0].creationIdentityDigest).not.toBe(a.rowSpecs[0].creationIdentityDigest)
+    // Both creates commit (two identities, two seven-key tuples), and no two committed identities share a code.
+    await setState('acknowledged', reservation(a, {}))
+    const inputB = reservation(b, { operationId: 'synthetic-operation-l1b', rowKey: 'synthetic-row-l1b' })
+    expect((await second.store.prepare(inputB)).reused).toBe(false)
+    const { claimToken } = await second.store.claim(actor(inputB))
+    await second.store.recordAcknowledgement({ ...actor(inputB), claimToken, ack: { statusCode: 200, instanceId: 'synthetic-instance-l1b' } })
+    expect(second.uniqueErrors).toEqual([])
+    const ledger = await rows(LEDGER)
+    expect(ledger.map(row => row.status)).toEqual(['acknowledged', 'acknowledged'])
+    const codeByIdentity = new Map([[a.rowSpecs[0].creationIdentityDigest, code(a)], [b.rowSpecs[0].creationIdentityDigest, code(b)]])
+    expect(new Set(ledger.map(row => String(row.creation_identity_digest)))).toEqual(new Set(codeByIdentity.keys()))
+    expect(new Set(ledger.map(row => codeByIdentity.get(String(row.creation_identity_digest)))).size).toBe(ledger.length)
+    // The same tuple under the other order is the same seven keys: the 091 fence refuses it, evidence unchanged.
+    const before = await evidence()
+    await rejectStore(second.store.prepare(reservation(aReordered, { operationId: 'synthetic-operation-l1c', rowKey: 'synthetic-row-l1c' })),
+      'YIDA_DELIVERY_BUSINESS_CONFLICT')
+    expect(second.uniqueErrors).toEqual([FENCE])
+    expect(await evidence()).toEqual(before)
+  })
+
+  // ---- P1 (external review 2026-11-08), pinned at the FENCE level: this stays true after the fix. The red→green regression
+  // lives in stock-preparation-yida-send-approvals-realdb.test.ts (the seal is in the send authority, not in a fence). ----
+  it.each(['preset', 'hash'] as const)('P1 pin (fence level, %s): two legal templates with opposite layouts and crafted decoration cells give two identities one code; both reservations commit and no fence objects — the fences compare digests, never codes', async kind => {
+    const identity = kind === 'preset' ? PRESET : KEY_HASH
+    // Record B carries another key value and (for the hash) another drawing number: two identities, two seven-key tuples.
+    const lineA: Row = {}, lineB: Row = { idempotencyKey: 'SYN-LINE-5', componentCode: 'DEMO-DRW-5' }
+    const code = (compiled: Compiled) => String(compiled.plan.rows[0].payload.materialCodeText)
+    const partA = code(await generatedDraft([identity], lineA)), partB = code(await generatedDraft([identity], lineB))
+    expect(partA).not.toBe(partB)
+    // The decoration cell is blankType (target materialTypeText, a non-key text): A = [identity, field] with the cell P_B,
+    // B = [field, identity] with the cell P_A. Both templates satisfy G1; both codes read P_A + P_B.
+    const a = await generatedDraft([identity, { field: 'materialTypeText' }], { ...lineA, blankType: partB })
+    const b = await generatedDraft([{ field: 'materialTypeText' }, identity], { ...lineB, blankType: partA })
+    expect([code(a), code(b)]).toEqual([partA + partB, partA + partB])
+    expect(b.rowSpecs[0].creationIdentityDigest).not.toBe(a.rowSpecs[0].creationIdentityDigest)
+    expect(b.rowSpecs[0].businessKeyDigest).not.toBe(a.rowSpecs[0].businessKeyDigest)
+    await setState('acknowledged', reservation(a, {}))
+    expect((await second.store.prepare(reservation(b, { operationId: 'synthetic-operation-p1b', rowKey: 'synthetic-row-p1b' }))).reused).toBe(false)
+    expect(second.uniqueErrors).toEqual([])
     expect((await rows(LEDGER)).length).toBe(2)
   })
 })

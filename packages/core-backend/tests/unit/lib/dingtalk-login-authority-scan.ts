@@ -15,10 +15,7 @@ const sqlVerb = /\b(insert\s+into|update|delete\s+from|merge\s+into|truncate(?:\
 const candidate = new RegExp(`\\b(?:${[...authority].join('|')}|login|authService|insertInto|deleteFrom|updateTable|mergeInto|replaceInto|user_sessions|user_external_identities|user_external_auth_grants|directory_accounts|jsonwebtoken|HS256|SignJWT|dingtalk-corp-backfill|compensate-orphan-deny|/dingtalk/launch)\\b`, 'i')
 const js = /\.[cm]?[jt]sx?$/
 const routes = /^\/(?:dev-token|login(?:\/dingtalk\/container)?|register|refresh-token|session-org|password\/change|invite\/accept|dingtalk\/(?:access|callback|launch|unbind)|deprovision(?:-events|\/events)\/:eventId\/(?:restore|reactivate|force-reactivate|compensate-orphan-deny))$/
-export const residues = {
-  'packages/core-backend/src/.~76fad745edcab853-76FAD745EDCAB853!s9731e18f396d4a8782e5735ca099c4ee-f78bbb.insyncdl': '86b8cc584e07a18002663f618937d1798a31a14b',
-  'scripts/.~76fad745edcab853-76FAD745EDCAB853!sf9d263dcd5a04d8396a0912a9c54e0ec-5e53c7.insyncdl': '0ec5f9862d1e2f1fc9b68f1b6f78bba708176dc0',
-}
+export const residues: Record<string, string> = {}
 
 function scope(node: ts.Node): string {
   for (let n: ts.Node | undefined = node.parent; n; n = n.parent) {

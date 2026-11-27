@@ -1135,14 +1135,15 @@ jobs:
       # stock-preparation-synth-large-bom.test.mjs (11) + attendance-window-runner-mint-token.test.mjs
       # (6) + stock-preparation-migrate-legacy-operator-role.test.mjs (46) +
       # multitable-onprem-package-range-fill.test.mjs (39) + stock-preparation-pull-batch-install.test.mjs
-      # (8; 批次标识 BI-2, register R-65) = 150. Get each file's own
+      # (8; 批次标识 BI-2, register R-65) + stock-preparation-p3-counts.test.mjs (1) = 151.
+      # P3 Windows suites run in stock-prep-powershell51.yml. Get each Linux file's own
       # count locally with
       # `node --test --test-reporter=tap scripts/ops/__tests__/<file>.test.mjs 2>&1 | grep '^# tests'`.
       - name: Run scripts/ops/__tests__ node:test suites
         shell: bash
         run: |
           set -euo pipefail
-          EXPECTED_OPS_TESTS_COUNT=150
+          EXPECTED_OPS_TESTS_COUNT=151
           if ! ops_out="$(node --test --test-reporter=tap scripts/ops/__tests__/*.test.mjs 2>&1)"; then
             printf '%s\n' "$ops_out"
             echo "scripts/ops/__tests__ suites: node --test exited non-zero (output above)" >&2
@@ -1806,7 +1807,7 @@ jobs:
       # the no-DB default run in vitest.config.ts and wired here as a WHOLE FILE.
       # #6315 host boundaries (yida-host-*-realdb) boot the actual MetaSheetServer against this
       # migrated database; each file stops its own server, so each needs its own fork (the default).
-      # R-71 gate 10: the JSON report must show all 14 files and every case passed, with zero
+      # R-71 gate 10: the JSON report must show all 15 files and every case passed, with zero
       # skip/todo/pending (scripts/ops/vitest-zero-skip.mjs); vitest's exit code alone is not that proof.
       - name: Run external-system delete x pointer-write lock protocol real-DB proof
         id: external-system-delete-bind-lock-protocol-real-db
@@ -1826,13 +1827,14 @@ jobs:
             tests/integration/stock-preparation-yida-send-approvals-realdb.test.ts \
             tests/integration/stock-preparation-yida-owner-send-port-realdb.test.ts \
             tests/integration/stock-preparation-yida-delivery-runner-realdb.test.ts \
+            tests/integration/stock-preparation-yida-issue-confirm-writeback-realdb.test.ts \
             tests/integration/automation-live-authority-realdb.test.ts \
             tests/integration/yida-host-boundaries-realdb.test.ts \
             tests/integration/yida-host-initialization-barrier-realdb.test.ts \
             tests/integration/yida-host-connection-test-realdb.test.ts \
             tests/integration/yida-connection-test-http-realdb.test.ts \
             --reporter=verbose --reporter=json --outputFile.json=../../artifacts/yida-realdb/lock-protocol-vitest.json
-          node scripts/ops/vitest-zero-skip.mjs artifacts/yida-realdb/lock-protocol-vitest.json 14
+          node scripts/ops/vitest-zero-skip.mjs artifacts/yida-realdb/lock-protocol-vitest.json 15
 
       # C1/S2 synthetic integration preview (default OFF): two-connection admission/revocation proofs on an
       # owned schema, and the actual-MetaSheetServer acceptance on this migrated database. Whole files with
@@ -2791,6 +2793,7 @@ jobs:
             tests/integration/dingtalk-corp-backfill-scope.db.test.ts \
             tests/integration/strict-credential-chain.db.test.ts \
             tests/integration/strict-dingtalk-entry.db.test.ts \
+            tests/integration/authz-version-protocol.db.test.ts \
             tests/integration/realtime-authority-read.db.test.ts \
             tests/integration/realtime-revalidation.db.test.ts \
             tests/integration/realtime-yjs-startup-wiring.db.test.ts \

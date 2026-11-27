@@ -28,7 +28,7 @@
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
@@ -184,13 +184,14 @@ describeIfDatabase('webhook event bridge real chain (real DB)', () => {
 
     // The loopback sink received the POST with the HMAC X-Webhook-Signature header
     // computed over the body with the webhook secret.
-    expect(captured.length).toBeGreaterThanOrEqual(1)
-    const sentToSubscribed = captured.find((c) => c.url === 'https://sink.test/subscribed')
-    expect(sentToSubscribed).toBeDefined()
-    expect(sentToSubscribed!.headers['X-Webhook-Id']).toBe(WH_SUBSCRIBED)
-    expect(sentToSubscribed!.headers['X-Webhook-Event']).toBe('record.updated')
-    const expectedSig = WebhookService.signPayload(sentToSubscribed!.body, WH_SECRET)
-    expect(sentToSubscribed!.headers['X-Webhook-Signature']).toBe(expectedSig)
+    const sentToSubscribed = await vi.waitUntil(
+      () => captured.find((request) => request.url === 'https://sink.test/subscribed'),
+      { timeout: 5000 },
+    )
+    expect(sentToSubscribed.headers['X-Webhook-Id']).toBe(WH_SUBSCRIBED)
+    expect(sentToSubscribed.headers['X-Webhook-Event']).toBe('record.updated')
+    const expectedSig = WebhookService.signPayload(sentToSubscribed.body, WH_SECRET)
+    expect(sentToSubscribed.headers['X-Webhook-Signature']).toBe(expectedSig)
   })
 
   test('negative: an unsubscribed webhook (comment.created only) receives no delivery for record.updated', async () => {

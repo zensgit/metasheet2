@@ -48,6 +48,16 @@
 /** @type {FlagSpec[]} */
 export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
   {
+    key: 'ACCOUNT_CENTER_READ_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose: 'Default OFF; exact true enables the read-only account center.',
+    source: 'packages/core-backend/src/account-center/read-flag.ts#isAccountCenterReadEnabled',
+  },
+  {
     key: 'INTEGRATION_YIDA_OWNER_SEND_ENABLED',
     type: 'boolean',
     activationValue: 'true',
@@ -81,6 +91,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/index.ts#yidaOwnerRuntime+yidaInitializationRuntime; packages/core-backend/src/integration/yida-send-approval-service.ts; packages/core-backend/src/integration/yida-sheet-source.ts; packages/core-backend/src/routes/integration-yida-owner.ts',
   },
   {
+    key: 'INTEGRATION_YIDA_SHEET_SOURCE_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      'D17 b of the YiDa standardization design baseline v2.3 (owner 2026-11-07, R-88: an open question gets a configurable default). Default OFF = D17 a, today\'s coupling: a draft can come from a multitable sheet or view (and so carry a server-read source binding) only while INTEGRATION_YIDA_MULTI_TARGET_ENABLED is ON. Byte-exact true makes the same owner-run sheet/view source available on the single-target path too, for slot 1 only: no targetRef, no second target, no slot registration. The read keeps every existing rule (the owner\'s own read and export permissions, 2000 scanned records, 100 rows, 128 KiB; plain stored scalar columns only), the D21 re-authorization at approval and admission, and the creation-identity fence. Not a grant and never the send switch: sending still requires INTEGRATION_YIDA_OWNER_SEND_ENABLED and the unchanged owner/live-admin/one-attempt rules; with multi-target ON this switch changes nothing. Danger=high because ON lets customer sheet rows enter a YiDa draft without the multi-target decision: enabling it on any deployed machine is a separate owner decision (AGENTS.md owner-only steps).',
+    source: 'packages/core-backend/src/index.ts#yidaOwnerRuntime; packages/core-backend/src/integration/yida-owner-runtime.ts#sheetSourceOn; packages/core-backend/src/integration/yida-send-approval-service.ts#sheetSource; packages/core-backend/src/routes/integration-yida-owner.ts',
+  },
+  {
     key: 'INTEGRATION_YIDA_ISSUE_CONFIRM_WRITEBACK_ENABLED',
     type: 'boolean',
     activationValue: 'true',
@@ -88,7 +109,7 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     conflictsWith: [],
     danger: 'high',
     purpose:
-      "YiDa 发料确认日期回写 (design baseline v2.3 §7.3, frozen ⑦.4 plan §2.2, slice Y9a). Default OFF; exact literal 'true' only (no trim, no case folding), read on EVERY call before any dependency is touched. On: after a YiDa issue-confirm CREATE is acknowledged (2xx + instance id; never outcome_unknown, prepared, dispatching or not_sent), the write-back fills the registered project sheet's machine column issueConfirmDate with the acknowledgement audit's calendar day in MULTITABLE_BUSINESS_TIMEZONE, only for rows whose target_ref is listed in INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS and whose source_record_digest is bound; an existing date is never overwritten; decision D14: it writes only registered project sheets and also reads MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED (exact 'true', per row and again right before the patch) — off, every selected row is skipped and counted as project_sheets_disabled with no registry read and no trace row, so it is decided again once that switch is on (not modeled as dependsOn: the project-sheets switch is the 備料 line's own, and this skip is the D14 behaviour, not a requires rule); one version-conditional, host-fenced patch under the sheet write lease (purpose issue_confirm_writeback); one append-only trace row per ledger row (migration zzzz20261106093100). It never constructs a runner, transport or token client, so it can never cause a second form submission. WRITES THE CUSTOMER'S PRODUCTION SHEET: an O-level owner decision. Turning it on on a deployed machine, filling the target list and running the backfill are each separately approved. Not wired to any route in this slice (the send-port hook and the owner recovery entry are slice Y9).",
+      "YiDa 发料确认日期回写 (design baseline v2.3 §7.3, frozen ⑦.4 plan §2.2, slice Y9a). Default OFF; exact literal 'true' only (no trim, no case folding), read on EVERY call before any dependency is touched. On: after a YiDa issue-confirm CREATE is acknowledged (2xx + instance id; never outcome_unknown, prepared, dispatching or not_sent), the write-back fills the registered project sheet's machine column issueConfirmDate with the acknowledgement audit's calendar day in the MULTITABLE_BUSINESS_TIMEZONE captured at ACK (older ACKs default to Asia/Shanghai), only for rows whose target_ref is listed in INTEGRATION_YIDA_ISSUE_CONFIRM_TARGET_REFS and whose source_record_digest is bound; an existing date is never overwritten; decision D14: it writes only registered project sheets and also reads MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED (exact 'true', per row and again right before the patch) — off, every selected row is skipped and counted as project_sheets_disabled with no registry read and no trace row, so it is decided again once that switch is on (not modeled as dependsOn: the project-sheets switch is the 備料 line's own, and this skip is the D14 behaviour, not a requires rule); one version-conditional, host-fenced patch under the sheet write lease (purpose issue_confirm_writeback); one append-only trace row per ledger row (migration zzzz20261106093100). It never constructs a runner, transport or token client, so it can never cause a second form submission. WRITES THE CUSTOMER'S PRODUCTION SHEET: an O-level owner decision. Turning it on on a deployed machine, filling the target list and running the backfill are each separately approved. Wired in slice Y9: the host owner runtime calls it best-effort once, as a run of its own after an acknowledged CREATE's submit has returned (never in the send transaction), and the owner recovery entry POST /api/integration/yida-owner-send/issue-confirm-writeback runs it on demand; that route answers the generic 404 while this switch is off, through this same predicate (no second reader of the variable).",
     source: 'plugins/plugin-integration-core/lib/yida-issue-confirm-writeback.cjs#issueConfirmWritebackEnabled',
   },
   {
