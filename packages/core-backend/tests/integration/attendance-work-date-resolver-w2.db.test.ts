@@ -543,3 +543,95 @@ describeIfDatabase('W2 AttendanceWorkDateResolver (real DB)', () => {
     expect(beyond.kind).toBe('unresolved')
   })
 })
+
+describe('MUT06 W2-08 global settings read (real PostgreSQL)', () => {
+  const settingsPool = new Pool({ connectionString: dbUrl })
+  beforeAll(() => {
+    if (!dbUrl) throw new Error('MUT06_W208_REQUIRES_DATABASE_URL')
+  })
+  afterAll(async () => { await settingsPool.end() })
+
+  it.each([
+    { name: 'camel case and fractional floor', value: { workDateAttribution: { postShiftTailMinutes: 37.9 } }, tail: 37 },
+    { name: 'snake case alias', value: { work_date_attribution: { post_shift_tail_minutes: 61 } }, tail: 61 },
+    { name: 'negative lower bound', value: { workDateAttribution: { postShiftTailMinutes: -1 } }, tail: 0 },
+    { name: 'upper bound', value: { workDateAttribution: { postShiftTailMinutes: 999 } }, tail: 360 },
+    { name: 'invalid scalar fallback', value: { workDateAttribution: { postShiftTailMinutes: 'invalid' } }, tail: 120 },
+    { name: 'missing global row fallback', value: null, tail: 120 },
+    { name: 'invalid source array rejects', value: [], tail: null },
+  ])('$name', async ({ value, tail }) => {
+    const original = await settingsPool.query("SELECT row_to_json(s)::text AS row FROM system_configs s WHERE key = 'attendance.settings'")
+    const client = await settingsPool.connect()
+    try {
+      await client.query('BEGIN')
+      // All fixture writes and the real resolver reads share this physical transaction.
+      // ROLLBACK restores even the missing-row case; no deployment setting is retained.
+      await client.query('DELETE FROM system_configs WHERE key = $1', ['attendance.settings'])
+      const decoyKey = 'w208-decoy-' + randomUUID()
+      await client.query('INSERT INTO system_configs (key, value) VALUES ($1, $2)', [
+        decoyKey, JSON.stringify({ workDateAttribution: { postShiftTailMinutes: 3 } }),
+      ])
+      if (value !== null) {
+        await client.query('INSERT INTO system_configs (key, value) VALUES ($1, $2)', ['attendance.settings', JSON.stringify(value)])
+      }
+      const actors = []
+      for (let index = 0; index < 2; index++) {
+        const orgId = 'w208-org-' + randomUUID()
+        const actorId = randomUUID()
+        const shiftId = randomUUID()
+        await client.query("INSERT INTO users (id, password_hash, is_active) VALUES ($1, 'fixture', true)", [actorId])
+        await client.query('INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)', [actorId, orgId])
+        await client.query(
+          `INSERT INTO attendance_shifts (id, org_id, name, timezone, work_start_time, work_end_time, is_overnight, working_days)
+           VALUES ($1, $2, 'W208 synthetic', 'UTC', '09:00', '14:00', false, '[0,1,2,3,4,5,6]'::jsonb)`,
+          [shiftId, orgId],
+        )
+        await client.query(
+          `INSERT INTO attendance_shift_assignments (id, org_id, user_id, shift_id, start_date, end_date, is_active, publish_status, slot_index)
+           VALUES ($1, $2, $3, $4, '2026-07-16', '2026-07-16', true, 'published', 0)`,
+          [randomUUID(), orgId, actorId, shiftId],
+        )
+        actors.push({ orgId, userId: actorId, shiftId })
+      }
+      const reads: { sql: string; params: unknown[] }[] = []
+      const nativeDb = {
+        async query(sql: string, params: unknown[] = []) {
+          reads.push({ sql, params })
+          return (await client.query(sql, params)).rows
+        },
+      }
+      const { resolver } = helpers.createPluginAttendanceWorkDateResolver(nativeDb, {
+        activeCurrent: { listOpenForWorkDateResolver: listActiveCurrentOpenRecordsForWorkDateResolverV1 },
+      })
+      for (const actor of actors) {
+        const input = { orgId: actor.orgId, userId: actor.userId, timezone: 'UTC', channel: 'live', calendarWorkDate: '2026-07-16' }
+        if (tail === null) {
+          await expect(resolver.resolve({ ...input, occurredAt: new Date('2026-07-16T10:00:00Z') }))
+            .rejects.toThrow('ATTENDANCE_SETTINGS_SOURCE_INVALID')
+        } else {
+          const inside = await resolver.resolve({ ...input, occurredAt: new Date('2026-07-16T10:00:00Z') })
+          expect(inside).toMatchObject({
+            kind: 'resolved', shiftId: actor.shiftId, workDate: '2026-07-16',
+            evidenceSnapshot: { attributionTailMinutes: tail },
+          })
+          const outside = await resolver.resolve({
+            ...input, occurredAt: new Date(Date.parse('2026-07-16T14:00:00Z') + (tail + 1) * 60_000),
+          })
+          expect(outside.kind).toBe('unresolved')
+        }
+      }
+      const settingsReads = reads.filter(row => /\bsystem_configs\b/i.test(row.sql))
+      expect(settingsReads).toHaveLength(tail === null ? 2 : 4)
+      for (const read of settingsReads) {
+        expect(read.sql.replace(/\s+/g, ' ').trim()).toBe('SELECT value FROM system_configs WHERE key = $1')
+        expect(read.params).toEqual(['attendance.settings'])
+      }
+      expect(reads.every(row => /^\s*SELECT\b/i.test(row.sql))).toBe(true)
+      if (tail !== null) expect(reads.some(row => /\battendance_shift_assignments\b/.test(row.sql))).toBe(true)
+    } finally {
+      try { await client.query('ROLLBACK') } finally { client.release() }
+    }
+    const restored = await settingsPool.query("SELECT row_to_json(s)::text AS row FROM system_configs s WHERE key = 'attendance.settings'")
+    expect(restored.rows).toEqual(original.rows)
+  })
+})
