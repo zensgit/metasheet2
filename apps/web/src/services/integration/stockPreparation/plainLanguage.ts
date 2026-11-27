@@ -5092,8 +5092,8 @@ export const STOCK_PREP_AUDIT_ACTOR_UNKNOWN_ACTOR: StockPrepPlainText = Object.f
  * branch rather than inside any one of them.
  */
 export const STOCK_PREP_AUDIT_CAVEAT_SCOPE: StockPrepPlainText = Object.freeze({
-  zh: '按项目号查关联的审计记录。确认、对账、导出、通知下一步和项目删除可以按动作筛选。试算和拉取写入请查运行记录。',
-  en: 'Look up audit entries by project number. You can filter by confirmation, reconciliation, export, handoff, and project deletion. For trial runs and pull writes, check the run records.',
+  zh: '按项目号查关联的审计记录。确认、对账、导出、通知下一步和项目删除可以按动作筛选。查不到审计时，仍可能有过操作。试算和拉取写入请查运行记录。',
+  en: 'Look up audit entries by project number. You can filter by confirmation, reconciliation, export, handoff, and project deletion. A project may have activity even when this search returns no audit entries. For trial runs and pull writes, check the run records.',
 })
 export const STOCK_PREP_AUDIT_CAVEAT_LIMIT: StockPrepPlainText = Object.freeze({
   zh: '只看了最近 100 条(最多 500,没有翻页)。项目多的时候,更早的动作会落在范围之外。',

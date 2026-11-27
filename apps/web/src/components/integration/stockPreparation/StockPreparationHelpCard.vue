@@ -145,11 +145,11 @@ const flows: StockPrepHelpFlow[] = [
     zhWho: '给管理员:被问到「这个项目怎么回事」的时候。',
     enWho: 'For the administrator being asked what happened to a project.',
     zhBody: '「记录与排查」里有两块:上面是这套部署现在好不好(没检查过的项会明说「未检查」,不会涂成绿的);'
-      + '下面按项目号查审计记录，可以筛选确认、对账、导出、通知下一步和项目删除。试算和拉取写入有各自的运行记录。',
+      + '下面按项目号查审计记录，可以筛选确认、对账、导出、通知下一步和项目删除。查不到审计时，仍可能有过操作。试算和拉取写入有各自的运行记录。',
     enBody: 'Records & Diagnostics has two halves. The top one says whether this deployment is healthy right now — anything that'
       + ' has never been checked says so rather than being painted green. The bottom one looks up who touched a'
       + ' project and when. You can filter by confirmation, reconciliation, export, handoff, and project deletion.'
-      + ' Trial runs and pull writes have their own run records.',
+      + ' A project may have activity even when this search returns no audit entries. Trial runs and pull writes have their own run records.',
     target: 'ops',
     zhLink: '去「记录与排查」',
     enLink: 'Go to Records & Diagnostics',

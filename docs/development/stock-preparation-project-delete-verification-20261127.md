@@ -1,6 +1,10 @@
 # #6991 备料项目交付清理 · 验证记录
 
-首版基线为 `6babc578ec`，复审修订已对齐主线 `e33d447552`。测试均使用合成项目。生产启用及合并须等修复版真库验证。[开发说明](./stock-preparation-project-delete-development-20261127.md) · [设计锁](./stock-preparation-project-delete-design-lock-20261127.md)
+首版基线为 `6babc578ec`，复审修订已对齐主线 `e33d447552`。测试均使用合成项目。删除专项已在 GitHub PostgreSQL 14 通过 25/25。开关默认关闭，生产启用由业主决定。[开发说明](./stock-preparation-project-delete-development-20261127.md) · [设计锁](./stock-preparation-project-delete-design-lock-20261127.md)
+
+## 修复版真库结论
+
+提交 `7f15d279` 的 PostgreSQL 14 任务通过了全部 **25/25** 个项目删除场景。承载这些场景的备料文件共 266 项，全数通过；字段转换与撤销的 74 项也全部通过，包括两条真实 Yjs 竞态。多维表任务 271 个文件全部通过，合计 **3663 项通过、2 项跳过、0 项失败**。两项跳过均属于独立的多维表权限管理矩阵文件。[PostgreSQL 实跑日志](https://github.com/zensgit/metasheet2/actions/runs/45983477943/job/140455764018)
 
 ## PR #7004 复审验证
 
@@ -27,20 +31,24 @@ NODE_ENV=test METASHEET_REAL_DB_TEST_STEP=1 pnpm --filter @metasheet/core-backen
 | 审批与工作台 | 审批测试启动器固定了主连接池源码，确认使用的查询和事务路径后更新其文件摘要，63 项定向测试通过。备料审计动作加入 `project_delete` 中英文名称和筛选项，客户端与服务端的 22 项词表逐项比较。工作台操作面板及相邻文件 334 项通过。 |
 | 历史迁移与检查点 | 历史迁移回滚会重建八张挂有新触发器的表。回放按依赖顺序先拆除、后恢复三个协调迁移，并比较触发器定义。CI 配置专项 43 项通过。三个迁移实际生成的函数声明逐项验证了搜索路径，与相邻迁移测试合计 7 项通过。 |
 
+提交 `7f15d279` 已在 GitHub 验证迁移回放：36 项迁移回滚再应用后，1,094 个目录对象指纹一致。注入一次回滚失败后，恢复并重跑得到相同指纹。权限目录在 PostgreSQL 14、15、16、17 四个版本全部通过。SQL Server 2019、2022 的离线交付验收和集成插件守卫也已通过。[迁移回放](https://github.com/zensgit/metasheet2/actions/runs/45983478261/job/140453063134) · [权限矩阵](https://github.com/zensgit/metasheet2/actions/runs/45983477945) · [离线交付验收](https://github.com/zensgit/metasheet2/actions/runs/45983477897) · [集成守卫](https://github.com/zensgit/metasheet2/actions/runs/45983478046)
+
+同一提交还通过了完整 Web Tests，以及使用已还原触发器的隔离检查点验收。[Web Tests](https://github.com/zensgit/metasheet2/actions/runs/45983478223/job/140453006125) · [隔离检查点](https://github.com/zensgit/metasheet2/actions/runs/45983477943/job/140455764093)
+
 复审后的本地工作台回归为 5 个文件 306 项通过，Yjs 持久化及关闭回写回归为 6 个文件 48 项通过，插件删除与后台试算专项为 27 项通过。后端构建与仓库 lint 通过。
 
-本地专项覆盖写入活动协调、会写凭据的 GET、共享历史拒绝、旧沙箱归属、冲突审批范围和协同写入代次。分别移除关键守卫后，对应断言失败；恢复代码后重跑通过。以下浏览器截图及工作台测试记录来自首版，复审修改集中在服务端、数据库和测试夹具。
+本地专项覆盖写入活动协调、会写凭据的 GET、共享历史拒绝、旧沙箱归属、冲突审批范围和协同写入代次。分别移除关键守卫后，对应断言失败；恢复代码后重跑通过。预览与删除后目录截图来自首版，审计筛选截图来自复审修订。
 
 ## 按需求验收
 
-| 门槛 | 本地得到的证据 | 仍需真库验证 |
+| 门槛 | 已验证的行为 | 结果 |
 |---|---|---|
-| G1 预览与归属 | 盘点器覆盖专表、手填与回收站、共享表正反向关联；归属冲突会拒绝，内容改变会使相同数量的预览失效。 | 在真实 schema 分别执行只拉取、只登记和二者兼有的预览及确认。 |
-| G2 管理员与验证码 | 路由覆盖伪造租户头、无当前租户凭据、权限降级和拒绝访问；服务覆盖错误、过期、换租户／操作者／项目、重放。 | 验证真实权限行锁与两个数据库连接并发确认时只提交一次。 |
-| G3 同事务与审计 | 模拟清理中途失败、审计异常、审计未实际插入，均未提交；迁移动作词表与存储词表通过一致性检查。 | 运行 PostgreSQL 故障触发器，逐项比对项目、登记、表、字段、明细与审计快照。 |
-| G4 工作台与隔离 | Chromium 走通预览、取消、输入、提交与刷新；前端测试覆盖切换租户、切换项目和迟到响应。缓存测试覆盖旧读回填及同号重建。 | 从真实接口检查旧链接、总览、侧栏、同租户其他项目与另一租户同号项目，并验证通用接口的托管保护。 |
-| G5 调度与重建 | 已删除且未重建时，关闭清理开关后旧拉取入口仍返回 ABSENT；调度器专项测试只发起 dry-run，并把该轮记为跳过。 | 沿正常接口以同号重建，验证空表及旧批次、待办、权限和缓存均未回流。 |
-| G6 名额与设置 | 真实数据库用例包含 200 个登记（含归档），检查满额拒绝、释放一个名额和租户设置前后一致。 | 在隔离库运行该用例。 |
+| G1 预览与归属 | 只拉取、只登记和二者兼有的项目均可清理。共享基线或归属不明时拒绝；旧沙箱保留其他项目；内容变更使原预览失效。 | PostgreSQL 通过 |
+| G2 身份与验证码 | 权限或租户不匹配、错误或过期验证码、重放均被拒绝。两个连接并发确认最多提交一次。 | PostgreSQL 通过 |
+| G3 原子性与审计 | 中途删除或写审计失败均完整回滚。目标项目与其他项目同时编辑、直接写台账及跨副本在途拉取均按作用范围处理。 | PostgreSQL 通过 |
+| G4 工作台与隔离 | Chromium 覆盖预览、取消、提交、返回目录。真实 HTTP 与数据库验证双登记项目的侧栏和旧表、同租户其他项目、另一租户同号以及通用删除保护。 | 浏览器与 PostgreSQL 通过 |
+| G5 调度与同号重建 | 原调度收到 ABSENT 后跳过；以同号重建为空表，旧审批、作业和协同文档不能沿用，对照项目仍可正常回收与恢复。 | PostgreSQL 通过 |
+| G6 名额与配置 | 200 个登记含归档时限制生效，清理后释放名额，租户数据源绑定及批次设置逐项保持一致。 | PostgreSQL 通过 |
 
 ## 已运行
 
@@ -70,7 +78,7 @@ pnpm openapi:build
 pnpm openapi:guard
 ```
 
-双登记交付演练会在独立测试库中通过调度器对合成 PLM 适配器执行试拉和写入，通过多维表 HTTP 接口手填一行，再经专用接口预览、确认。它复用原调度配置重跑，核对只收到一次 ABSENT、源读取次数未增加，并以同号重建空表。三种项目状态的矩阵另用固定夹具逐项比较前后数据。该演练已编写，本次未运行。
+双登记交付演练会在独立测试库中通过调度器对合成 PLM 适配器执行试拉和写入，通过多维表 HTTP 接口手填一行，再经专用接口预览、确认。它复用原调度配置重跑，核对只收到一次 ABSENT、源读取次数未增加，并以同号重建空表。三种项目状态的矩阵另用固定夹具逐项比较前后数据。该演练在上述 PostgreSQL 14 任务中已通过。
 
 真实 PostgreSQL 用例已注册在 `plugin-tests.yml` 现有的 real-DB 步骤。在**专用空测试库**设置 `DATABASE_URL` 并使用同一 CI 的迁移和数据库初始化步骤后运行以下命令。环境标记能让缺少数据库 URL 的任务失败，避免把跳过当作通过。
 
@@ -78,12 +86,14 @@ pnpm openapi:guard
 NODE_ENV=test METASHEET_REAL_DB_TEST_STEP=1 pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/stock-preparation-p4-repair-once-realdb.test.ts
 ```
 
-本地 PostgreSQL 15 的 `initdb` 在创建共享内存时收到 `EPERM`，Docker 套接字也不可用。数据库用例仅确认已注册并可被 Vitest 收集。迁移实际应用／回滚、安装库权限、并发锁行为、额满释放、大数据量下的占锁时间均需要真实数据库证据。
+本地 PostgreSQL 15 的 `initdb` 在创建共享内存时收到 `EPERM`，Docker 套接字也不可用。本地仅用 Vitest 收集数据库用例。实际迁移应用、历史回放、权限、并发和额满释放见上述 GitHub 任务。生产数据规模下的占锁时长尚未测量。
 
 仓库级 `pnpm validate:all` 在 `tsx` CLI 建立本地 IPC 时被沙箱阻止。使用 `node --import tsx scripts/validate-plugin-manifests.ts` 单独验证了同一清单脚本。继续单独运行 `pnpm type-check`，停在 `apps/web/vite.config.ts` 的 Vite 5/7 插件类型冲突；从上述主线基线提取原配置，配合同一组本地依赖可独立复现。前端应用类型检查和备料专项类型检查均已单独运行。
 
 ## 浏览器证据
 
-[预览界面](./assets/stock-preparation-project-delete-20261127/preview.png) · [删除后返回目录](./assets/stock-preparation-project-delete-20261127/success.png)
+[预览界面](./assets/stock-preparation-project-delete-20261127/preview.png) · [删除后返回目录](./assets/stock-preparation-project-delete-20261127/success.png) · [按项目号筛选删除审计](./assets/stock-preparation-project-delete-20261127/audit.png)
+
+审计截图使用已有的合成工作台和一条按项目号、删除动作筛出的虚构审计记录。Chromium 验证了搜索前后常驻的三条范围说明。 提交 7f15d279 的浏览器 CI 中，38 项通过，1 项指出审计搜索缺少范围提示。恢复这句话并加强对应断言后，本地用三个原始 Playwright 文件逐项启动 Chromium，39/39 通过。因沙箱限制本地端口监听，浏览器通过测试路由读取同一份前端构建产物。[修订前的浏览器验收](https://github.com/zensgit/metasheet2/actions/runs/45983478361/job/140453024260)
 
 **指纹边界。** 确认时比较范围、内容及可用的行版本。某条记录在两个请求之间新建又被物理移除，并且所有持久痕迹都消失时，当前方案无法从两次盘点区分这种历史；未把这类瞬时变化作为已通过项。

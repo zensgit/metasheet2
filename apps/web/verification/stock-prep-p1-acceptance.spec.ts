@@ -371,7 +371,8 @@ test.describe('设计稿 §6.2 —— P1 验收', () => {
     const caveats = page.locator('[data-testid="stock-prep-ops-audit-caveat"]')
     await expect(caveats).toHaveCount(3)
     for (let index = 0; index < 3; index += 1) await expect(caveats.nth(index)).toBeVisible()
-    await expect(caveats.nth(0)).toContainText('不等于')
+    await expect(caveats.nth(0)).toContainText('查不到审计时，仍可能有过操作')
+    await expect(caveats.nth(0)).toContainText('项目删除')
 
     // 「常驻」的另一半:不可关闭。既不是 <details>(那样默认可收),也没有自己的关闭按钮,而且它
     // 不是被塞在某个可折叠祖先里的。只断言「在」的话,把三行包进一个 <details> 也照样绿。
@@ -387,6 +388,8 @@ test.describe('设计稿 §6.2 —— P1 验收', () => {
 
     // 查完之后三行还在(它是每个分支的兄弟节点,不是某一支里面的)。
     await expect(caveats).toHaveCount(3)
+    await expect(caveats.nth(0)).toBeVisible()
+    await expect(caveats.nth(0)).toContainText('查不到审计时，仍可能有过操作')
 
     const rows = page.locator('[data-testid="stock-prep-ops-audit-row"]')
     await expect(rows).toHaveCount(3)
