@@ -81,6 +81,15 @@ function createProjectDeleteHandlers({ database, authorizeWithin, service, tenan
         throw error
       }
     },
+    async stockPreparationProjectDeleteReceipt(req, res) {
+      const scope = await principal(req)
+      await checkAuthority(scope)
+      const { projectNo, challengeId } = req.params || {}
+      if (!isValidStockPrepProjectNo(projectNo) || Object.keys(req.query || {}).length) throw refusal(422, 'STOCK_PREPARATION_PROJECT_DELETE_INVALID')
+      if (!service?.receipt) throw refusal(503, 'STOCK_PREPARATION_PROJECT_DELETE_UNAVAILABLE')
+      res.setHeader?.('Cache-Control', 'no-store')
+      return sendOk(res, await service.receipt({ tenantId: scope.tenantId, actor: scope.actorId, projectNo, challengeId }))
+    },
     stockPreparationProjectDeletePreview: (req, res) => run(req, res, false),
     stockPreparationProjectDeleteConfirm: (req, res) => run(req, res, true),
   }

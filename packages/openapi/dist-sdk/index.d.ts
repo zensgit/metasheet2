@@ -12067,6 +12067,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/integration/stock-preparation/projects/{projectNo}/delete/receipt/{challengeId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read the original counts for a committed project cleanup */
+        get: operations["readStockPreparationProjectDeleteReceipt"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/integration/stock-preparation/snapshot-batches": {
         parameters: {
             query?: never;
@@ -27977,6 +27994,70 @@ export interface operations {
                 content?: never;
             };
             /** @description Invalid or expired verification */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid request */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Cleanup authority unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readStockPreparationProjectDeleteReceipt: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectNo: string;
+                /** Format: uuid */
+                challengeId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Committed cleanup and audit reference */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        ok: boolean;
+                        data: {
+                            tenantId: string;
+                            projectNo: string;
+                            counts: {
+                                [key: string]: number;
+                            };
+                            auditId: string;
+                        };
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description No receipt for this administrator and operation */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Cleanup authority is busy */
             409: {
                 headers: {
                     [name: string]: unknown;

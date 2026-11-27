@@ -1,28 +1,37 @@
 # #6991 备料项目交付清理 · 验证记录
 
-首版基线为 `6babc578ec`，复审修订已对齐主线 `e33d447552`。测试均使用合成项目。删除专项已在 GitHub PostgreSQL 14 通过 26/26。开关默认关闭，生产启用由业主决定。[开发说明](./stock-preparation-project-delete-development-20261127.md) · [设计锁](./stock-preparation-project-delete-design-lock-20261127.md)
+[开发说明与模型规划](./stock-preparation-project-delete-development-20261127.md) · [设计与验收条件](./stock-preparation-project-delete-design-lock-20261127.md) · [PR 检查](https://github.com/zensgit/metasheet2/pull/7004/checks)
 
-## 11 月 28 日复审补充（台北时间）
+## 11 月 28 日复审与回归（台北时间）
 
-提交 `676c252a` 的 GitHub Actions 有 39 个工作流成功，1 个按条件跳过。其 PostgreSQL 删除专项已有 26 个通过场景。随后独立复审报告记录了三个当时未覆盖的阻塞项。
+本轮从前次验证提交 `676c252a` 继续开发，使用合成租户、项目和协同记录。删前归属、活动写入和同号重建分别设置了对照组。
 
-| 项目 | 本次验证 | 仍需验收 |
-|---|---|---|
-| 余项确认与撤销 | 用相同的合成请求分别运行原版与本次更改的生产处理器函数。原版的两个入口在查询目标和写入裁定时都未持有活动锁；新版在两个位置都持有已核实租户及项目的锁，且均在答复之前释放。此试验使用会话与存储替身。 | 新增 PostgreSQL 双连接用例，暂停真实确认路由的裁定写入，检查目标项目清理报忙、同租户其他项目和其他租户同号项目仍可加锁、写完可清理。等待本提交的真库运行。 |
-| 普通共享拉取表归属 | 新用例用合成事务覆盖实时行和回收站行的双向矛盾、非默认物理键列、合法拆分键、非法后缀和对照行保留。在同一用例上原版未拒绝，新版通过。 | 新增普通共享拉取表的 PostgreSQL 用例，验证预览后篡改、反向矛盾及对照行保留。等待此提交的真库运行。 |
-| 同号重建后的协同编辑 | 重试保留原记录代次。新增有缓存与无缓存两种单测；真实数据库演练增加一次清理故障、另一个副本同 ID 重建及旧副本的两个并发重连。 | 在当前提交验证重连读到新编辑且 PostgreSQL 中的新快照及增量数量不变。 |
+| 验证项 | 用例与判定 |
+|---|---|
+| 余项确认和撤销 | 同一合成请求分别通过修复前后的生产处理器。修复后，两个入口从目标查询直到写入裁定均持有当前租户及项目的活动锁。另以 PostgreSQL 两条连接和实际确认路由暂停一次写入，验证同项目清理报忙、两个对照范围可加锁、写完后释放。该用例的裁定台账使用测试替身。 |
+| 普通共享表 | 插件测试覆盖实时行与回收站行、双向归属冲突、非默认键列和拆分键。真库用例先预览，再改变映射列中的 PLM 键，验证确认拒绝；还把对照行的键指向目标，验证预览拒绝。恢复数据后只删除目标行。 |
+| Yjs 记录 ID 复用 | 缓存命中和冷启动两条单测都注入一次清理失败。真库中另一副本重建同 ID 并保存编辑，旧副本两个并发重连都读到新文档，新快照及增量仍各有一条，对照项目可继续恢复。 |
+| 权限、重建与目录 | 验证权限探测及无效请求保留权限版本；专表同号重建后，历史绑定须重新审批。两个独立 Chromium 上下文使用合成 HTTP 验证，删除者操作后，另一端刷新才清除自己的旧卡片，对照卡片保留。 |
+| 发布与回退 | 已复核开关、旧副本排空、旧定时任务暂停和数据库回退顺序。生产环境启停、恢复演练和生产规模锁时长未实测。 |
 
-运行上述新用例：
+### 可复验的运行结果
 
-```bash
-NODE_ENV=test METASHEET_REAL_DB_TEST_STEP=1 pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/stock-preparation-p4-repair-once-realdb.test.ts -t 'a pending remnant decision'
+提交 `915bd3f8` 已通过 PostgreSQL 14 的 269 个备料用例，多维表真库总计 3,666 过、2 跳过。集成插件 355 个套件和 1,838 个前端用例通过；备料 Chromium 40/40。CI 对应的测试合并版本为 `11ea23edc`（主线 `166e1271`）。[多维表与备料真库](https://github.com/zensgit/metasheet2/actions/runs/46042362135/job/140657504462) · [插件及集成前端](https://github.com/zensgit/metasheet2/actions/runs/46042361770/job/140653029012) · [Chromium](https://github.com/zensgit/metasheet2/actions/runs/46042362228/job/140653031437)
+
+[11 月 28 日新增评审](https://github.com/zensgit/metasheet2/pull/7004#pullrequestreview-6091702985) 要求在此基础上补齐第 7–9 条验收。新增的用例暂停真实建表路由、在同号重建后重放令牌和队列消息、从原下载入口读取附件、在恢复子系统实际创建档案/作业/保全记录，并在真实确认事务提交后切断 HTTP 响应，再按预览编号取回成功审计。执行结果见本分支的 [PR 检查](https://github.com/zensgit/metasheet2/pull/7004/checks)。
+
+### 复验本轮用例
+
+真库命令须在专用测试库完成仓库迁移后执行。下面的名称过滤匹配各组项目删除用例；同一文件去掉名称过滤即可运行整个备料套件。
+
+```sh
+NODE_ENV=test METASHEET_REAL_DB_TEST_STEP=1 pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/stock-preparation-p4-repair-once-realdb.test.ts -t 'project deletion'
+pnpm --filter @metasheet/core-backend exec vitest run tests/unit/yjs-persistence-hardening.test.ts
 ```
 
-新增验证覆盖专表替换后恢复历史键绑定、重新审批、目录缓存复用和跨副本失效、权限探测及无效确认前后的权限版本比较、MVP 保存开关关闭时的既有 403，以及独立浏览器保存旧卡片后刷新。浏览器演练使用合成 API，数据库演练独立验证实际事务。当前提交的执行状态见 [PR 检查](https://github.com/zensgit/metasheet2/pull/7004/checks)。升级与回退文档已修订，生产操作由环境负责人执行。
+## 前轮真库结果（`88b4fda6`）
 
-## 修复版真库结论
-
-最新代码提交 `88b4fda6` 的 PostgreSQL 14 删除专项为 **26/26**。第 26 项在数据库上交错执行权限准入、临界撤权与项目确认：过期或撤权时版本变化回滚，成功时仅为受影响的表推进权限版本，同表兄弟项目和另一租户的权限记录保留。整个备料文件 267/267，字段转换和 Yjs 竞态 74/74。多维表总计 271 个文件全部通过，**3664 过、2 跳过、0 失败**；两项跳过均来自独立的权限管理用例。[最终多维表真库任务](https://github.com/zensgit/metasheet2/actions/runs/45991405101/job/140482840785)
+前轮代码提交 `88b4fda6` 的 PostgreSQL 14 删除专项为 **26/26**。第 26 项在数据库上交错执行权限准入、临界撤权与项目确认：过期或撤权时版本变化回滚，成功时仅为受影响的表推进权限版本，同表兄弟项目和另一租户的权限记录保留。整个备料文件 267/267，字段转换和 Yjs 竞态 74/74。多维表总计 271 个文件全部通过，**3664 过、2 跳过、0 失败**；两项跳过均来自独立的权限管理用例。[该提交多维表真库任务](https://github.com/zensgit/metasheet2/actions/runs/45991405101/job/140482840785)
 
 同一代码提交通过后端全量单测、插件系统汇总门槛和 Chromium 工作台验收。审批、运行时、多维表和考勤分别在真实数据库上运行。[后端全量单测](https://github.com/zensgit/metasheet2/actions/runs/45991405101/job/140482840792) · [汇总门槛](https://github.com/zensgit/metasheet2/actions/runs/45991405101/job/140492895215) · [标准 Chromium 验收](https://github.com/zensgit/metasheet2/actions/runs/45991405220/job/140479854115) · [权限目录矩阵](https://github.com/zensgit/metasheet2/actions/runs/45991405489)
 

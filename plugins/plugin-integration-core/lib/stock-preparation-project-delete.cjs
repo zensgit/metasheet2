@@ -15,6 +15,7 @@ const TTL_SECONDS = 300
 const TRANSACTION_BUDGET_MS = 30000
 const ERRORS = Object.freeze({
   invalid: [422, 'STOCK_PREPARATION_PROJECT_DELETE_INVALID'],
+  receiptMissing: [404, 'STOCK_PREPARATION_PROJECT_DELETE_RECEIPT_ABSENT'],
   absent: [404, 'STOCK_PREPARATION_PROJECT_ABSENT'],
   stale: [409, 'STOCK_PREPARATION_PROJECT_DELETE_STALE'],
   challenge: [409, 'STOCK_PREPARATION_PROJECT_DELETE_CHALLENGE_INVALID'],
@@ -109,7 +110,8 @@ function mapError(error) {
   if (error?.code === 'STOCK_PREPARATION_PROJECT_DELETE_DEPENDENCY') {
     const reason = error.details?.reason
     if (!['external_binding', 'attachment', 'recovery', 'independent_workflow'].includes(reason)) return refusal('failed')
-    return Object.assign(new Error(error.code), { status: 409, code: error.code, details: { reason } })
+    const recoveryKind = reason === 'recovery' && ['hold', 'job', 'archive'].includes(error.details?.recoveryKind) ? error.details.recoveryKind : null
+    return Object.assign(new Error(error.code), { status: 409, code: error.code, details: recoveryKind ? { reason, recoveryKind } : { reason } })
   }
   if (['55P03', '40P01', '40001', '57014'].includes(error?.code)) return projectBusy()
   if (error?.code === 'FORBIDDEN' && error.status === 403) return Object.assign(new Error('FORBIDDEN'), { code: 'FORBIDDEN', status: 403 })
@@ -220,13 +222,25 @@ function createStockPreparationProjectDelete({ database, auditStore, authorizeWi
         },
       }
       const audit = await auditStore.appendWithin(auditTransaction, {
-        tenantId, projectId: projectNo, actor, action: 'project_delete', mode: 'confirmed', detail: { counts: plan.counts },
+        tenantId, projectId: projectNo, actor, action: 'project_delete', subjectId: challengeId, mode: 'confirmed', detail: { counts: plan.counts },
       })
       if (!audit?.id) throw refusal('failed')
       return { tenantId, projectNo, counts: plan.counts, auditId: audit.id }
     })
     if (answer.refused) throw refusal(answer.refused)
     return answer
+  }
+
+  async function receipt(input) {
+    const scope = requireScope(input)
+    if (typeof input.challengeId !== 'string' || !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(input.challengeId)) throw refusal('invalid')
+    return transact(scope, async tx => {
+      const [entry] = await tx.query(`SELECT id, detail FROM integration_stock_prep_audit
+        WHERE tenant_id = $1 AND project_id = $2 AND actor = $3 AND subject_id = $4 AND action = 'project_delete'`,
+      [scope.tenantId, scope.projectNo, scope.actor, input.challengeId])
+      if (!entry) throw refusal('receiptMissing')
+      return { tenantId: scope.tenantId, projectNo: scope.projectNo, counts: entry.detail.counts, auditId: entry.id }
+    }, true)
   }
 
   async function deletionSnapshot({ tenantId, projectNos = [], boundTarget }) {
@@ -246,7 +260,7 @@ function createStockPreparationProjectDelete({ database, auditStore, authorizeWi
     })
   }
 
-  return { preview, confirm, deletionSnapshot, isDeleted: scope => isProjectDeleted(database, scope) }
+  return { preview, confirm, receipt, deletionSnapshot, isDeleted: scope => isProjectDeleted(database, scope) }
 }
 
 // A scheduled legacy pull used to accept even an unregistered project. Only an actual deletion

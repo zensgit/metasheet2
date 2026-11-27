@@ -14,8 +14,10 @@ const targetIds = 'SELECT record_id FROM affected'
 const rules = [
   // Children first. Count exact contents before deletion and preserve any history/authority
   // whose owning subsystem forbids partial removal.
-  ['meta_record_history_operations', dedicated, 'recovery'],
+  ['meta_recovery_archive_legal_holds', dedicated, 'recovery'],
+  ['meta_recovery_archive_jobs', dedicated, 'recovery'],
   ['meta_recovery_archives', dedicated, 'recovery'],
+  ['meta_record_history_operations', dedicated, 'recovery'],
   ['formula_dependencies', 'r.depends_on_sheet_id = $1 AND r.sheet_id <> $1', 'refuse'],
   ['meta_links', `r.foreign_record_id IN (${targetIds}) AND r.record_id NOT IN (${targetIds})`, 'refuse'],
   ['meta_link_tombstones', `r.foreign_record_id IN (${targetIds}) AND r.record_id NOT IN (${targetIds})`, 'refuse'],
@@ -146,11 +148,12 @@ async function planSheetDependencies(tx, dedicatedId, selected) {
       if (row.blocked) {
         const mode = rules[row.rule][2]
         const reason = mode === 'history' ? 'recovery' : mode
+        const recoveryKind = { meta_recovery_archive_legal_holds: 'hold', meta_recovery_archive_jobs: 'job', meta_recovery_archives: 'archive' }[rules[row.rule][0]]
         if (mode === 'refuse') throw Object.assign(new Error('The dependency crosses project boundaries.'), {
           code: 'STOCK_PREPARATION_PROJECT_DELETE_AMBIGUOUS', status: 409,
         })
         throw Object.assign(new Error('A sheet dependency requires independent handling.'), {
-          code: 'STOCK_PREPARATION_PROJECT_DELETE_DEPENDENCY', status: 409, details: { reason },
+          code: 'STOCK_PREPARATION_PROJECT_DELETE_DEPENDENCY', status: 409, details: recoveryKind ? { reason, recoveryKind } : { reason },
         })
       }
       count += row.n

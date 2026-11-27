@@ -63,6 +63,7 @@ type Fixture = {
   allowed?: boolean
   preview?: () => Response | Promise<Response>
   confirm?: () => Response | Promise<Response>
+  receipt?: () => Response | Promise<Response>
   state?: 'pulled-only' | 'registered-only' | 'pulled-and-registered'
 }
 
@@ -73,6 +74,7 @@ function mockRoutes(fixture: Fixture = {}) {
     const pathname = path.split('?')[0]
     if (pathname.endsWith('/project-delete/access')) return ok({ mayDelete: fixture.allowed ?? true })
     if (pathname === `${ACTION_BASE}/preview`) return fixture.preview?.() ?? preview()
+    if (pathname.startsWith(`${ACTION_BASE}/receipt/`) && fixture.receipt) return fixture.receipt()
     if (pathname === `${ACTION_BASE}/confirm`) {
       if (fixture.confirm) {
         const result = await fixture.confirm()
@@ -228,6 +230,34 @@ describe('备料项目交付清理工作台', () => {
     await typeCode(CODE)
     expect(find<HTMLButtonElement>('confirm')?.disabled).toBe(true)
     expect(callsFor('/delete/confirm')).toHaveLength(1)
+  })
+
+  it.each([['attachment', '未清理的附件'], ['recovery', '恢复档案']])('explains the %s retention blocker before issuing a code', async (reason, label) => {
+    mockRoutes({ preview: () => new Response(JSON.stringify({ ok: false, error: {
+      code: 'STOCK_PREPARATION_PROJECT_DELETE_DEPENDENCY', details: { reason },
+    } }), { status: 409 }) })
+    mount(() => h(StockPreparationProjectDelete, { projectNo: PROJECT, scope }))
+    await vi.waitFor(() => expect(find('open')).not.toBeNull())
+    await click('open')
+    await vi.waitFor(() => expect(find('error')?.textContent).toContain(label))
+    expect(find('confirm')).toBeNull()
+  })
+
+  it('reads the original audit counts after a lost response without submitting a second confirmation', async () => {
+    mockRoutes({ confirm: () => Promise.reject(new TypeError('connection lost')),
+      receipt: () => ok({ ...scope, projectNo: PROJECT, counts: { dedicatedRows: 17 }, auditId: 'synthetic-receipt' }) })
+    mount(() => h(StockPreparationProjectDelete, { projectNo: PROJECT, scope }))
+    await vi.waitFor(() => expect(find('open')).not.toBeNull())
+    await click('open')
+    await vi.waitFor(() => expect(find('code')?.textContent).toBe(CODE))
+    await typeCode(CODE)
+    await click('confirm')
+    await vi.waitFor(() => expect(find('receipt')).not.toBeNull())
+    await click('receipt')
+    await vi.waitFor(() => expect(find('dialog')?.textContent).toContain('synthetic-receipt'))
+    expect(find('dialog')?.textContent).toContain('17')
+    expect(callsFor('/delete/confirm')).toHaveLength(1)
+    expect(callsFor('/receipt/synthetic-first-challenge')).toHaveLength(1)
   })
 
   it('fails closed on a preview for the wrong project or with an expired code', async () => {

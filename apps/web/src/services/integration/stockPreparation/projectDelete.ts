@@ -108,6 +108,14 @@ export async function previewStockPrepProjectDelete(projectNo: string): Promise<
   return data
 }
 
+export async function readStockPrepProjectDeleteReceipt(projectNo: string, tenantId: string, challengeId: string) {
+  const path = `${BASE}/projects/${encodeURIComponent(projectNo)}/delete/receipt/${encodeURIComponent(challengeId)}`
+  const data = await readDeleteResponse(await apiFetch(path, { cache: 'no-store', suppressUnauthorizedRedirect: true }))
+  if (!isObject(data) || data.projectNo !== projectNo || data.tenantId !== tenantId
+    || !isCounts(data.counts) || typeof data.auditId !== 'string' || !data.auditId) throw new Error(INVALID_RESPONSE)
+  return { auditId: data.auditId, counts: data.counts }
+}
+
 export async function confirmStockPrepProjectDelete(preview: StockPrepDeletePreview, code: string, scope: IntegrationScope): Promise<void> {
   const session = stockPrepProjectDeleteSession(scope)
   if (session === null) throw new Error(INVALID_RESPONSE)

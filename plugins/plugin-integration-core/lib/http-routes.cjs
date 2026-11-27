@@ -241,6 +241,7 @@ const ROUTES = [
   //                  `project_target_restore` once; restoring an active project is a typed 409. The
   //                  200 cap is not re-checked (an archived row already counts against it).
   // The static `project-targets` segment cannot collide with `projects/:projectNo/...`.
+  ['GET', '/api/integration/stock-preparation/projects/:projectNo/delete/receipt/:challengeId', 'stockPreparationProjectDeleteReceipt'],
   ['GET', '/api/integration/stock-preparation/project-delete/access', 'stockPreparationProjectDeleteAccess'],
   ['POST', '/api/integration/stock-preparation/projects/:projectNo/delete/preview', 'stockPreparationProjectDeletePreview'],
   ['POST', '/api/integration/stock-preparation/projects/:projectNo/delete/confirm', 'stockPreparationProjectDeleteConfirm'],
@@ -2484,6 +2485,7 @@ const STOCK_PREPARATION_VALUES_FREE_HANDLERS = new Set([
   'stockPreparationProjectTargetList',
   'stockPreparationProjectTargetGet',
   'stockPreparationProjectDeleteAccess',
+  'stockPreparationProjectDeleteReceipt',
   'stockPreparationProjectDeletePreview',
   'stockPreparationProjectDeleteConfirm',
   'stockPreparationProjectTargetCreate',

@@ -204,7 +204,7 @@ test('mid-purge, audit failure, and a suppressed audit insert each roll back all
   h.failAt = null
   const counts = { sheets: 1, business: 1, runtime: 1 }
   assert.deepEqual(await h.service.confirm(confirmation(p)), { tenantId: 'T', projectNo: 'P', counts, auditId: 'audit-1' })
-  assert.deepEqual(h.data.audit, [['audit-1', 'T', null, 'P', 'project_delete', null, 'confirmed', 'A', JSON.stringify({ counts })]])
+  assert.deepEqual(h.data.audit, [['audit-1', 'T', null, 'P', 'project_delete', p.challengeId, 'confirmed', 'A', JSON.stringify({ counts })]])
   assert.equal(await h.service.isDeleted(scope), true)
   h.data.sheets = 'recreated empty sheet'
   assert.equal(await h.service.isDeleted(scope), false)

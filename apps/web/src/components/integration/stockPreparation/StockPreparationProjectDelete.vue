@@ -54,7 +54,16 @@
         <p v-if="error" class="sp-delete__error" role="alert" data-testid="stock-prep-project-delete-error">
           {{ bi(...error) }}
         </p>
+        <p v-if="preview || receiptKey">{{ bi('本次操作编号', 'Operation reference') }} <code>{{ (preview || receiptKey)?.challengeId }}</code></p>
+        <section v-if="receipt" role="status">
+          <h3>{{ bi('已核实删除成功', 'Deletion confirmed') }}</h3>
+          <p>{{ bi('审计编号', 'Audit reference') }} {{ receipt.auditId }}</p>
+          <dl class="sp-delete__counts">
+            <div v-for="(count, key) in receipt.counts" :key="key"><dt>{{ countLabel(key) }}</dt><dd>{{ count }}</dd></div>
+          </dl>
+        </section>
         <div class="sp-delete__actions">
+          <button v-if="mayDelete && receiptKey && !receipt" type="button" :disabled="readingReceipt" @click="checkReceipt" data-testid="stock-prep-project-delete-receipt">{{ bi('核实本次删除结果', 'Check this deletion') }}</button>
           <button type="button" autofocus :disabled="phase === 'confirm'" @click="close">
             {{ bi('取消', 'Cancel') }}
           </button>
@@ -83,6 +92,7 @@ import {
   confirmStockPrepProjectDelete,
   previewStockPrepProjectDelete,
   readStockPrepProjectDeleteAccess,
+  readStockPrepProjectDeleteReceipt,
   stockPrepProjectDeleteSession,
   type StockPrepDeletePreview,
 } from '../../../services/integration/stockPreparation/projectDelete'
@@ -142,6 +152,9 @@ const phase = ref<'idle' | 'preview' | 'confirm'>('idle')
 const preview = ref<StockPrepDeletePreview | null>(null)
 const code = ref('')
 const error = ref<Message | null>(null)
+const receiptKey = ref<{ projectNo: string; tenantId: string; challengeId: string } | null>(null)
+const receipt = ref<Awaited<ReturnType<typeof readStockPrepProjectDeleteReceipt>> | null>(null)
+const readingReceipt = ref(false)
 const retryAllowed = ref(true)
 let generation = 0
 let accessGeneration = 0
@@ -159,6 +172,9 @@ function clearPreview(): void {
 function close(): void {
   if (phase.value === 'confirm') return
   generation += 1
+  receiptKey.value = null
+  receipt.value = null
+  readingReceipt.value = false
   clearPreview()
   error.value = null
   phase.value = 'idle'
@@ -182,6 +198,14 @@ function failure(cause: unknown, submitted: boolean): void {
         error.value = ['记录归属不明确，无法删除项目。', 'Deletion was blocked because ownership of some records could not be established.']
         return
       case 'STOCK_PREPARATION_PROJECT_DELETE_DEPENDENCY':
+        if (cause.reason === 'attachment') {
+          error.value = ['项目含有未清理的附件。请先在附件管理中处理，再重新预览。', 'The project has retained attachment files. Resolve them before previewing again.']
+          return
+        }
+        if (cause.reason === 'recovery') {
+          error.value = ['项目有恢复档案、保全记录或恢复作业，当前不能删除。', 'Recovery archives, holds or recovery work prevent deletion.']
+          return
+        }
         error.value = ['项目有关联资料或订阅受到保护。处理后请重新预览。', 'The project has protected related records or subscriptions. Resolve them before previewing again.']
         return
       case 'STOCK_PREPARATION_PROJECT_DELETE_BUSY':
@@ -199,7 +223,7 @@ function failure(cause: unknown, submitted: boolean): void {
     }
   }
   error.value = submitted
-    ? ['无法确认删除结果。请重新预览。', 'The deletion result could not be confirmed. Preview again.']
+    ? ['未收到可核实的删除结果。请查询本次操作的审计回执。', 'The deletion outcome is unknown. Check the audit receipt for this operation.']
     : ['读取影响范围失败。请重新预览。', 'Could not load deletion impact. Preview again.']
 }
 
@@ -258,8 +282,29 @@ async function confirm(): Promise<void> {
   } catch (cause) {
     if (isCurrent(request)) {
       phase.value = 'idle'
+      if (!(cause instanceof StockPreparationConfirmApiError) || cause.status >= 500) {
+        receiptKey.value = { projectNo: current.projectNo, tenantId: current.tenantId, challengeId: current.challengeId }
+        retryAllowed.value = false
+      }
       failure(cause, true)
     }
+  }
+}
+
+async function checkReceipt(): Promise<void> {
+  const key = receiptKey.value
+  if (!key || readingReceipt.value || !mayDelete.value || !isCurrent(generation)) return
+  const request = generation
+  readingReceipt.value = true
+  try {
+    const result = await readStockPrepProjectDeleteReceipt(key.projectNo, key.tenantId, key.challengeId)
+    if (isCurrent(request)) { receipt.value = result; error.value = null }
+  } catch (cause) {
+    if (!isCurrent(request)) return
+    if (cause instanceof StockPreparationConfirmApiError && [401, 403].includes(cause.status)) revokeAccess()
+    else error.value = ['暂未查到本次成功回执，可稍后再次核实。', 'No success receipt is available yet. You can check again.']
+  } finally {
+    if (isCurrent(request)) readingReceipt.value = false
   }
 }
 

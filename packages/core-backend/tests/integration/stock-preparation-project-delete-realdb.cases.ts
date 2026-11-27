@@ -3,6 +3,7 @@ import { createRequire } from 'node:module'
 import express from 'express'
 import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
+import { registerProjectDeleteRetentionCases } from './stock-preparation-project-delete-retention-realdb.cases'
 import { exerciseProjectDeleteDelivery } from './stock-preparation-project-delete-delivery-realdb.cases'
 import { usePinnedServer } from '../utils/pinned-server'
 import { checkProjectDeleteRuntime } from './stock-preparation-project-delete-runtime-realdb.cases'
@@ -202,6 +203,7 @@ export function defineStockPreparationProjectDeleteRealDbCases() {
     let fixture: ReturnType<typeof stack>
     const newScope = (projectNo: string) => project(tenant(), projectNo)
     registerProjectDeleteAdoptionCases(() => fixture, newScope)
+    registerProjectDeleteRetentionCases(() => fixture, newScope, genericApp, snapshot)
     defineStockPreparationProjectDeleteAuthorityRealDbCases()
     defineStockPreparationProjectDeleteWriterActivityRealDbCases()
     defineProjectDeleteConcurrencyRealDbCases(() => fixture, newScope)

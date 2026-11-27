@@ -38267,6 +38267,103 @@
         }
       }
     },
+    "/api/integration/stock-preparation/projects/{projectNo}/delete/receipt/{challengeId}": {
+      "get": {
+        "operationId": "readStockPreparationProjectDeleteReceipt",
+        "summary": "Read the original counts for a committed project cleanup",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectNo",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 80
+            }
+          },
+          {
+            "in": "path",
+            "name": "challengeId",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Committed cleanup and audit reference",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "object",
+                      "required": [
+                        "tenantId",
+                        "projectNo",
+                        "counts",
+                        "auditId"
+                      ],
+                      "properties": {
+                        "tenantId": {
+                          "type": "string"
+                        },
+                        "projectNo": {
+                          "type": "string"
+                        },
+                        "counts": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        },
+                        "auditId": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "No receipt for this administrator and operation"
+          },
+          "409": {
+            "description": "Cleanup authority is busy"
+          },
+          "422": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Cleanup authority unavailable"
+          }
+        }
+      }
+    },
     "/api/integration/stock-preparation/snapshot-batches": {
       "get": {
         "summary": "List a project's immutable BOM snapshot batches (stock-prep view 2)",

@@ -1749,6 +1749,33 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     await derivedEffectsMigration.up(migrationDb)
   })
 
+  test('stock preparation cleanup refuses a verified archive, an accepted restore job and a legal hold', async () => {
+    const fixture = await seedVerifiedArchive('project_delete_retention')
+    const { planSheetDependencies } = createRequire(import.meta.url)('../../../../plugins/plugin-integration-core/lib/stock-preparation-project-delete-sheet-dependencies.cjs')
+    const selected = new Map([[fixture.sheetId, { live: [], trash: [], recordIds: [] }]])
+    const tx = { query: async (sql: string, args: unknown[]) => (await q(sql, args)).rows }
+    const refused = async (recoveryKind: string) => {
+      const snapshots = () => Promise.all(['meta_recovery_archives', 'meta_recovery_archive_jobs', 'meta_recovery_archive_legal_holds'].map(
+        async table => (await q('SELECT * FROM ' + table + ' WHERE sheet_id = $1', [fixture.sheetId])).rows))
+      const before = await snapshots()
+      await expect(planSheetDependencies(tx, fixture.sheetId, selected)).rejects.toMatchObject({
+        status: 409, code: 'STOCK_PREPARATION_PROJECT_DELETE_DEPENDENCY', details: { reason: 'recovery', recoveryKind },
+      })
+      expect(await snapshots()).toEqual(before)
+    }
+    await refused('archive')
+    const plan = compilePlan(fixture)
+    const token = mintToken(fixture, plan)
+    await preparePlan(fixture, plan, token)
+    await acceptRecoveryArchiveRestoreJob(transaction, { token, plan, identity: restoreRequestIdentity(fixture),
+      resumeDeadline: future(60_000), recheckAuthority: async () => true })
+    await refused('job')
+    await transaction(query => placeRecoveryArchiveLegalHold(query, { holdId: randomUUID(), workspaceId: fixture.workspaceId,
+      baseId: fixture.baseId, sheetId: fixture.sheetId, generationId: fixture.generationId, reasonCode: 'PROJECT_DELETE',
+      placedByActorId: fixture.actorId }))
+    await refused('hold')
+  })
+
   test('derived effects migration refuses populated down and preserves pending work', async () => {
     const fixture = await seedVerifiedArchive('derived_effects_down')
     const plan = compilePlan(fixture)

@@ -20,7 +20,7 @@ function deferred() {
 
 // Stop a real pinned service transaction immediately after its chosen statement. Race the
 // callback against the service result so a failed prerequisite cannot leave the fixture hanging.
-async function whilePaused<T>(fixture: ProjectDeleteTestStack, startsWith: string,
+export async function whilePaused<T>(fixture: ProjectDeleteTestStack, startsWith: string,
   run: (service: ProjectDeleteTestStack['service']) => Promise<T>, act: () => Promise<void>): Promise<T> {
   const held = deferred()
   const resume = deferred()
