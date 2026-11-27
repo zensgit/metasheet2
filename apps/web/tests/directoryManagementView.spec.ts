@@ -11676,6 +11676,7 @@ describe('DirectoryManagementView', () => {
     it.each([
       { navigation: 'switching integration', previous: 'success' },
       { navigation: 'reopening the same integration', previous: 'failure' },
+      { navigation: 'switching integration', previous: 'network error' },
     ])('ignores a late preview $previous after $navigation', async ({ navigation, previous }) => {
       const initial = createIntegration()
       const other = createIntegration({ id: 'dir-2', name: 'Second directory' })
@@ -11686,7 +11687,11 @@ describe('DirectoryManagementView', () => {
       container!.querySelector<HTMLButtonElement>('#directory-tab-sync')!.click()
       await flushUi()
       let finishOld!: (response: ReturnType<typeof createJsonResponse>) => void
-      apiFetchMock.mockReturnValueOnce(new Promise(resolve => { finishOld = resolve }))
+      let rejectOld!: (error: Error) => void
+      apiFetchMock.mockReturnValueOnce(new Promise((resolve, reject) => {
+        finishOld = resolve
+        rejectOld = reject
+      }))
       findButton('预览同步')!.click()
       await flushUi()
       const next = navigation === 'switching integration' ? other : initial
@@ -11705,7 +11710,8 @@ describe('DirectoryManagementView', () => {
       expect(findButton('预览同步')?.disabled).toBe(false)
       findButton('预览同步')!.click()
       await flushUi()
-      finishOld(previous === 'success' ? createJsonResponse(createPreviewPayload()) : createApiErrorResponse('先前预览失败'))
+      if (previous === 'network error') rejectOld(new Error('先前预览失败'))
+      else finishOld(previous === 'success' ? createJsonResponse(createPreviewPayload()) : createApiErrorResponse('先前预览失败'))
       await flushUi()
       expect(container!.textContent).toContain('同步预览生成中')
       expect(container!.textContent).not.toContain('先前预览失败')
@@ -11835,6 +11841,58 @@ describe('DirectoryManagementView', () => {
       expect(container?.textContent).toContain('后台同步进行中（运行 run-bg-1）')
 
       confirmSpy.mockRestore()
+    })
+
+    it('continues polling the accepted run after saving the same integration', async () => {
+      vi.useFakeTimers()
+      try {
+        const integrationsPath = '/api/admin/directory/integrations'
+        const runsPath = `${integrationsPath}/dir-1/runs?page=1&pageSize=10`
+        const integration = createIntegration()
+        const saved = createIntegration({ name: 'Updated directory' })
+        const running = createRunsPayload([createBackgroundRun('running')])
+        const completed = createRunsPayload([createBackgroundRun('completed')])
+        mockInitialLoad(integration)
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse({ ok: true, data: { accepted: true, runId: 'run-bg-1', integrationId: integration.id } }, 202))
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(running))
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse({ ok: true, data: { integration: saved } }))
+        mockInitialLoad(saved, running)
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(completed))
+        mockInitialLoad(saved, completed)
+
+        mountView()
+        await flushUi()
+        container!.querySelector<HTMLButtonElement>('#directory-tab-sync')!.click()
+        await flushUi()
+        findButton('后台同步')!.click()
+        await flushUi()
+        expect(container!.textContent).toContain('后台同步进行中（运行 run-bg-1）')
+
+        container!.querySelector<HTMLButtonElement>('#directory-tab-settings')!.click()
+        await flushUi()
+        const input = container!.querySelector<HTMLInputElement>('input[placeholder="例如 DingTalk CN"]')!
+        input.value = saved.name
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+        const saveIndex = apiFetchMock.mock.calls.length
+        findButton('保存变更')!.click()
+        await flushUi(16)
+        expect(apiFetchMock.mock.calls.slice(saveIndex, saveIndex + 3)).toEqual([
+          [`${integrationsPath}/dir-1`, expect.objectContaining({ method: 'PUT' })],
+          [integrationsPath],
+          [runsPath],
+        ])
+        expect(findIntegrationButton(saved.name)?.classList.contains('directory-admin__item--active')).toBe(true)
+        container!.querySelector<HTMLButtonElement>('#directory-tab-sync')!.click()
+        await flushUi()
+        expect(container!.textContent).toContain('后台同步进行中（运行 run-bg-1）')
+        const nextPoll = apiFetchMock.mock.calls.length
+        await vi.advanceTimersByTimeAsync(5000)
+        await flushUi(8)
+        expect(apiFetchMock.mock.calls[nextPoll]).toEqual([runsPath])
+        expect(container!.textContent).toContain('后台同步已完成（运行 run-bg-1）')
+      } finally {
+        vi.useRealTimers()
+      }
     })
 
     it('polls every 5s while running, stops at terminal completed, renders the summary, refreshes panels, and leaks no timer', async () => {
