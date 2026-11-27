@@ -216,6 +216,7 @@ interface FactLike {
   readonly approvalVersion: number
   readonly approvalRecordId: string
   readonly occurredAt?: string
+  readonly direction?: string
   readonly coverage?: { readonly kind: string; readonly startAt?: string }
 }
 
@@ -257,7 +258,18 @@ export function compareApprovedAttendanceFactV1(a: unknown, b: unknown): number 
   if (left.approvalVersion !== right.approvalVersion) return left.approvalVersion - right.approvalVersion
   const byTime = factBusinessTime(left).localeCompare(factBusinessTime(right))
   if (byTime !== 0) return byTime
-  return left.approvalRecordId.localeCompare(right.approvalRecordId)
+  const byApprovalRecord = left.approvalRecordId.localeCompare(right.approvalRecordId)
+  if (
+    byApprovalRecord !== 0 ||
+    left.kind !== 'correction' ||
+    left.requestId !== right.requestId ||
+    left.requestSnapshotFingerprint !== right.requestSnapshotFingerprint ||
+    left.approvalRecordId !== right.approvalRecordId
+  ) return byApprovalRecord
+  // A newly admitted same-request pair may share an instant at adjacent segment boundaries.
+  const leftDirection = typeof left.direction === 'string' ? left.direction : ''
+  const rightDirection = typeof right.direction === 'string' ? right.direction : ''
+  return leftDirection.localeCompare(rightDirection)
 }
 
 export function sortAttendanceEvidenceV1<T>(evidence: readonly T[]): T[] {
