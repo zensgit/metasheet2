@@ -5614,6 +5614,11 @@ function requireStockPreparationAudit() {
     }
     return store
   }
+  // The ledger transaction alone cannot protect a census read made before it begins.
+  function withRulingActivity(tenantId, projectNo, operation) {
+    if (!projectWriterActivityRequired()) return operation()
+    return withProjectDeleteActivity(projectWriterActivity, { tenantId, projectNo }, operation)
+  }
   // THE ONE project-scoped read of the census (both forms) and the acknowledgement's re-proof: the sheet is proven the
   // caller's own first (the table-action wall, unconditionally — the readSheetRows posture), then the planner's own reader
   // with the server-held band (RS-1). `progress.stage` names what failed for the tenant-wide census row. `afterWall`
@@ -12717,28 +12722,30 @@ function requireStockPreparationAudit() {
         requiredTier: STOCK_PREP_ADMIN,
       })
       const tenantId = scope.tenantId
-      await requireStockPreparationAuditVocabulary(audit, audits.decisionAction, audits.decisionMigration, tenantId)
-      const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
-        tenantId,
-        actionId: PLM_STOCK_PREPARATION_ACTION_ID,
-        projectNo,
-        targetPurpose: 'write',
-      }))
-      await assertResolvedProjectTargetTenancy(action, tenantId)
-      // S6-5b (review of #6886): the re-proof runs behind the same key-column guard — a sheet that lost a key column is
-      // refused before its rows are read and before anything is recorded.
-      const rows = await readStockPreparationCensusRows(tenantId, action, projectNo, {}, stockPreparationCensusKeyFieldsGuard(tenantId, action))
-      const census = stockPreparationRemnantAcknowledgement.projectCensusOf(rows, { tenantId, projectNo })
-      stockPreparationRemnantAcknowledgement.assertRemnantPresent(census, body.componentHandle)
-      const row = await store.recordRemnantAcknowledgement({
-        tenantId,
-        sheetId: action.target.sheetId,
-        projectNo,
-        componentDigest: body.componentHandle,
-        basis: body.basis,
-        runbookRef: body.runbookRef,
-        recordedBy: scope.actorId,
-        auditWithin: remnantAcknowledgementAuditWithin(audit, scope),
+      const row = await withRulingActivity(tenantId, projectNo, async () => {
+        await requireStockPreparationAuditVocabulary(audit, audits.decisionAction, audits.decisionMigration, tenantId)
+        const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
+          tenantId,
+          actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+          projectNo,
+          targetPurpose: 'write',
+        }))
+        await assertResolvedProjectTargetTenancy(action, tenantId)
+        // S6-5b (review of #6886): the re-proof runs behind the same key-column guard — a sheet that lost a key column is
+        // refused before its rows are read and before anything is recorded.
+        const rows = await readStockPreparationCensusRows(tenantId, action, projectNo, {}, stockPreparationCensusKeyFieldsGuard(tenantId, action))
+        const census = stockPreparationRemnantAcknowledgement.projectCensusOf(rows, { tenantId, projectNo })
+        stockPreparationRemnantAcknowledgement.assertRemnantPresent(census, body.componentHandle)
+        return store.recordRemnantAcknowledgement({
+          tenantId,
+          sheetId: action.target.sheetId,
+          projectNo,
+          componentDigest: body.componentHandle,
+          basis: body.basis,
+          runbookRef: body.runbookRef,
+          recordedBy: scope.actorId,
+          auditWithin: remnantAcknowledgementAuditWithin(audit, scope),
+        })
       })
       return sendOk(res, stockPreparationRemnantAcknowledgement.acknowledgementAnswer(row, { created: true }), 201)
     },
@@ -12766,22 +12773,24 @@ function requireStockPreparationAudit() {
         requiredTier: STOCK_PREP_ADMIN,
       })
       const tenantId = scope.tenantId
-      await requireStockPreparationAuditVocabulary(audit, audits.decisionAction, audits.decisionMigration, tenantId)
-      const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
-        tenantId,
-        actionId: PLM_STOCK_PREPARATION_ACTION_ID,
-        projectNo,
-        targetPurpose: 'write',
-      }))
-      await assertResolvedProjectTargetTenancy(action, tenantId)
-      const row = await store.revokeRemnantAcknowledgement({
-        tenantId,
-        sheetId: action.target.sheetId,
-        projectNo,
-        rulingId: body.acknowledgementId,
-        runbookRef: body.runbookRef,
-        revokedBy: scope.actorId,
-        auditWithin: remnantAcknowledgementAuditWithin(audit, scope),
+      const row = await withRulingActivity(tenantId, projectNo, async () => {
+        await requireStockPreparationAuditVocabulary(audit, audits.decisionAction, audits.decisionMigration, tenantId)
+        const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
+          tenantId,
+          actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+          projectNo,
+          targetPurpose: 'write',
+        }))
+        await assertResolvedProjectTargetTenancy(action, tenantId)
+        return store.revokeRemnantAcknowledgement({
+          tenantId,
+          sheetId: action.target.sheetId,
+          projectNo,
+          rulingId: body.acknowledgementId,
+          runbookRef: body.runbookRef,
+          revokedBy: scope.actorId,
+          auditWithin: remnantAcknowledgementAuditWithin(audit, scope),
+        })
       })
       return sendOk(res, stockPreparationRemnantAcknowledgement.acknowledgementAnswer(row, { created: false }))
     },

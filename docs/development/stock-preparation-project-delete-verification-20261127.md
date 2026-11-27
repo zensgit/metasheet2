@@ -2,6 +2,24 @@
 
 首版基线为 `6babc578ec`，复审修订已对齐主线 `e33d447552`。测试均使用合成项目。删除专项已在 GitHub PostgreSQL 14 通过 26/26。开关默认关闭，生产启用由业主决定。[开发说明](./stock-preparation-project-delete-development-20261127.md) · [设计锁](./stock-preparation-project-delete-design-lock-20261127.md)
 
+## 11 月 28 日复审补充（台北时间）
+
+提交 `676c252a` 的 GitHub Actions 有 39 个工作流成功，1 个按条件跳过。其 PostgreSQL 删除专项已有 26 个通过场景。随后独立复审报告记录了三个当时未覆盖的阻塞项。
+
+| 项目 | 本次验证 | 仍需验收 |
+|---|---|---|
+| 余项确认与撤销 | 用相同的合成请求分别运行原版与本次更改的生产处理器函数。原版的两个入口在查询目标和写入裁定时都未持有活动锁；新版在两个位置都持有已核实租户及项目的锁，且均在答复之前释放。此试验使用会话与存储替身。 | 新增 PostgreSQL 双连接用例，暂停真实确认路由的裁定写入，检查目标项目清理报忙、同租户其他项目和其他租户同号项目仍可加锁、写完可清理。等待本提交的真库运行。 |
+| 普通共享拉取表归属 | 核对了 `planSheets` 的普通共享拉取表分支，其选行逻辑没有比对项目号与 PLM 幂等键。 | 对照有可信来源的实时行和回收站行，验证矛盾时整笔拒绝。 |
+| 同号重建后的协同编辑 | 核对了 `YjsSyncService` 对隔离记录按 ID 重试清除，以及持久层 `purgeRecords` 的删除条件。现有真库用例覆盖旧文档压缩与释放；隔离重试属于另一条路径。 | 旧副本一次清理失败后，新副本同 ID 重建并编辑，再由旧副本重连。新编辑及其持久状态须完整保留。 |
+
+运行上述新用例：
+
+```bash
+NODE_ENV=test METASHEET_REAL_DB_TEST_STEP=1 pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/stock-preparation-p4-repair-once-realdb.test.ts -t 'a pending remnant decision'
+```
+
+真实数据库和升级、回退演练均须使用合成环境。发布前同时复核旧绑定审批、其他浏览器的目录缓存、权限探测和 API 契约。
+
 ## 修复版真库结论
 
 最新代码提交 `88b4fda6` 的 PostgreSQL 14 删除专项为 **26/26**。第 26 项在数据库上交错执行权限准入、临界撤权与项目确认：过期或撤权时版本变化回滚，成功时仅为受影响的表推进权限版本，同表兄弟项目和另一租户的权限记录保留。整个备料文件 267/267，字段转换和 Yjs 竞态 74/74。多维表总计 271 个文件全部通过，**3664 过、2 跳过、0 失败**；两项跳过均来自独立的权限管理用例。[最终多维表真库任务](https://github.com/zensgit/metasheet2/actions/runs/45991405101/job/140482840785)
