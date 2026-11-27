@@ -1408,10 +1408,16 @@ describeIfDatabase('role editor — admin-level codes and namespace-admin role d
   })
 
   it('a platform admin is not offered a revoke for a membership whose role row is gone (the unassign route answers it 404)', async () => {
-    // An ORDINARY delete keeps its memberships (a roles-only write), so the member is left holding
-    // a role id that no longer exists.
+    // Ordinary deletion leaves no memberships.
     const deleted = await api('DELETE', `/api/roles/${encodeURIComponent(roles.orphan)}`, tokens.editor)
     expect(deleted.status).toBe(200)
+    expect(await membersOf(roles.orphan)).toEqual([])
+
+    // Seed a pre-existing orphan membership from before that cleanup behavior.
+    await query(
+      'INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)',
+      [ids.orphanMember, roles.orphan],
+    )
     expect(await membersOf(roles.orphan)).toEqual([ids.orphanMember])
 
     const access = await api('GET', `/api/admin/role-delegation/users/${encodeURIComponent(ids.orphanMember)}/access`, tokens.platformAdmin)
