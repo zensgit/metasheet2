@@ -703,7 +703,7 @@
                  ([fe-33]). A row of an "all" mode task offers its complete / reopen on the task
                  detail instead: a list row carries no assignee state, and in that mode a click
                  can succeed and change nothing (the detail turns such a click off and says why). -->
-            <!-- The read returns the latest-updated page only: say so when it stopped short of its total. -->
+            <!-- Keep the loaded rows visible while another page is requested. -->
             <p
               v-if="listResult.kind === 'ok' && listResult.truncated && listResult.total !== null"
               class="tasks-view__message"
@@ -779,6 +779,17 @@
             <p v-else-if="listResult.kind === 'loading'" class="tasks-view__message" data-testid="tasks-list-loading">
               {{ t.loading }}
             </p>
+            <div v-if="listResult.kind === 'ok' && listResult.truncated" class="tasks-view__pagination" :aria-busy="loadingMore">
+              <button
+                type="button"
+                data-testid="tasks-list-load-more"
+                :disabled="loadingMore || refreshingList"
+                @click="loadMoreTasks"
+              >{{ loadingMore ? t.loading : t.loadMore }}</button>
+              <p v-if="loadMoreFailed" class="tasks-view__message" data-testid="tasks-list-load-more-error" role="alert">
+                {{ t.listLoadMoreFailed }}
+              </p>
+            </div>
             <!-- The empty line, including the search's no-match text, is said in an always-mounted
                  polite region, for the same reason as the created-task notice above. -->
             <div data-testid="tasks-list-empty-live" role="status">
@@ -954,10 +965,8 @@ function clearSearchTimer(): void {
 
 type ListRenderState =
   | { kind: 'loading' }
-  // `truncated`: the read stopped short of its `total` (G2-core: handed to the assigned view's
-  // board, which under a status filter can no longer tell a row cut off by the page from a row the
-  // filter leaves out).
-  | { kind: 'ok'; items: TaskListItem[]; truncated: boolean; total: number | null }
+  // More task pages remain; personal sorting stays off until they have loaded.
+  | { kind: 'ok'; items: TaskListItem[]; truncated: boolean; total: number | null; nextOffset: number }
   | { kind: 'empty' }
   // `invalidSearch`: the server refused the search text (only text the box cannot rule out itself,
   // such as a paste that normalizes to more than the limit), so the viewer can act on it unlike a
@@ -965,6 +974,9 @@ type ListRenderState =
   | { kind: 'error'; invalidSearch?: boolean }
 
 const listResult = ref<ListRenderState>({ kind: 'loading' })
+const loadingMore = ref(false)
+const loadMoreFailed = ref(false)
+const refreshingList = ref(false)
 
 type DetailRenderState =
   | { kind: 'loading' }
@@ -1225,6 +1237,11 @@ const actionErrorMessage = computed(() => {
 // Guards against a slow response for a superseded view (or a superseded reload) painting over a
 // newer one's result — the same shape as this codebase's other transition-safe reads.
 let listGeneration = 0
+let listIdentitySwitches = peopleIdentitySwitches
+
+function listIdentityHolds(): boolean {
+  return peopleIdentityHolds() && listIdentitySwitches === peopleIdentitySwitches
+}
 
 // Identifies "the list page" a row action (complete/reopen) — or the create form — started from,
 // mirroring the detail page's own `taskId.value !== id` guard (see `onDetailComplete`/
@@ -1234,13 +1251,12 @@ let listGeneration = 0
 // an await means the response belongs to a page the viewer isn't looking at anymore.
 let listPageToken = 0
 
-/** The list read both loaders make. Without search text the call keeps its three arguments, so the
- *  request is the one the page sent before search existed. */
-function readList(): ReturnType<typeof listTasks> {
+/** Every page uses the current view, status and title search. */
+function readList(page?: { offset: number }): ReturnType<typeof listTasks> {
   const q = activeSearch.value
   return q === ''
-    ? listTasks(currentView.value, undefined, currentStatus.value)
-    : listTasks(currentView.value, undefined, currentStatus.value, q)
+    ? listTasks(currentView.value, page, currentStatus.value)
+    : listTasks(currentView.value, page, currentStatus.value, q)
 }
 
 function failedListState(result: { kind: string; status?: number }): ListRenderState {
@@ -1250,6 +1266,11 @@ function failedListState(result: { kind: string; status?: number }): ListRenderS
 async function loadList(): Promise<void> {
   listGeneration += 1
   const mine = listGeneration
+  peopleIdentityHolds()
+  listIdentitySwitches = peopleIdentitySwitches
+  loadingMore.value = false
+  loadMoreFailed.value = false
+  refreshingList.value = false
   listResult.value = { kind: 'loading' }
   const result = await readList()
   if (mine !== listGeneration) return
@@ -1258,7 +1279,7 @@ async function loadList(): Promise<void> {
     listResult.value =
       result.items.length === 0
         ? { kind: 'empty' }
-        : { kind: 'ok', items: result.items, truncated: result.total !== undefined && result.items.length < result.total, total: result.total ?? null }
+        : { kind: 'ok', items: result.items, truncated: result.total !== undefined && result.items.length < result.total, total: result.total ?? null, nextOffset: result.items.length }
     return
   }
   if (result.kind === 'org_missing') {
@@ -1278,13 +1299,19 @@ async function loadList(): Promise<void> {
 async function reloadListQuietly(): Promise<void> {
   listGeneration += 1
   const mine = listGeneration
+  peopleIdentityHolds()
+  listIdentitySwitches = peopleIdentitySwitches
+  loadingMore.value = false
+  loadMoreFailed.value = false
+  refreshingList.value = true
   const result = await readList()
   if (mine !== listGeneration) return
+  refreshingList.value = false
   if (result.kind === 'ok') {
     listResult.value =
       result.items.length === 0
         ? { kind: 'empty' }
-        : { kind: 'ok', items: result.items, truncated: result.total !== undefined && result.items.length < result.total, total: result.total ?? null }
+        : { kind: 'ok', items: result.items, truncated: result.total !== undefined && result.items.length < result.total, total: result.total ?? null, nextOffset: result.items.length }
     return
   }
   if (result.kind === 'org_missing') {
@@ -1292,6 +1319,59 @@ async function reloadListQuietly(): Promise<void> {
     return
   }
   listResult.value = failedListState(result)
+}
+
+async function loadMoreTasks(): Promise<void> {
+  const state = listResult.value
+  if (state.kind !== 'ok' || !state.truncated || loadingMore.value || refreshingList.value || taskId.value || orgMissingFromAction.value) return
+  const mine = ++listGeneration
+  loadingMore.value = true
+  loadMoreFailed.value = false
+  try {
+    if (!listIdentityHolds()) {
+      await loadList()
+      return
+    }
+    const result = await readList({ offset: state.nextOffset })
+    if (mine !== listGeneration) return
+    if (!listIdentityHolds()) {
+      await loadList()
+      return
+    }
+    if (result.kind === 'org_missing') {
+      orgMissingFromAction.value = true
+      return
+    }
+    if (result.kind !== 'ok') {
+      loadMoreFailed.value = true
+      return
+    }
+    const itemsById = new Map(state.items.map((item) => [item.id, item]))
+    for (const item of result.items) itemsById.set(item.id, item)
+    const items = [...itemsById.values()]
+    const total = result.total ?? state.total
+    const truncated = total !== null && items.length < total
+    if (result.items.length === 0 && truncated) {
+      await loadList()
+      return
+    }
+    listResult.value = {
+      kind: 'ok',
+      items,
+      truncated,
+      total,
+      nextOffset: state.nextOffset + result.items.length,
+    }
+  } catch {
+    if (mine !== listGeneration) return
+    if (!listIdentityHolds()) {
+      await loadList()
+      return
+    }
+    loadMoreFailed.value = true
+  } finally {
+    if (mine === listGeneration) loadingMore.value = false
+  }
 }
 
 // Same out-of-order-resolution discipline as `listGeneration` above, for the detail read: a
@@ -2392,6 +2472,7 @@ const onPeopleStorage = () => { peopleIdentityHolds() }
 if (typeof window !== 'undefined') window.addEventListener('storage', onPeopleStorage)
 
 onBeforeUnmount(() => {
+  listGeneration += 1
   unsubscribeLists()
   stopPeopleSessionSwitch()
   if (typeof window !== 'undefined') window.removeEventListener('storage', onPeopleStorage)

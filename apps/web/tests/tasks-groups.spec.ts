@@ -930,7 +930,7 @@ describe('/tasks — the assigned view\'s states (design §2.4)', () => {
     h_.tasksReply.mockImplementation(() => jsonResponse(200, { items, total: items.length + 150 }))
     const el = await mountAt('/tasks')
     if (view !== 'assigned') await click(el, `tasks-view-switch-${view}`)
-    expect(must(el, 'tasks-list-truncated').textContent).toBe(`共 ${items.length + 150} 条任务，只显示最近更新的 ${items.length} 条；可按标题搜索查找其余任务`)
+    expect(must(el, 'tasks-list-truncated').textContent).toBe(`共 ${items.length + 150} 条任务，已加载 ${items.length} 条；可加载更多或按标题搜索`)
     h_.tasksReply.mockImplementation(() => jsonResponse(200, { items, total: items.length }))
     await click(el, view === 'assigned' ? 'tasks-view-switch-following' : 'tasks-view-switch-assigned')
     expect(shown(el, 'tasks-list-truncated')).toBeNull()
