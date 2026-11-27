@@ -1779,6 +1779,7 @@ const EDIT_CONTROLS = [
   'tasks-detail-completion-mode-select',
   'tasks-detail-set-parent-form',
   'tasks-detail-make-independent',
+  'tasks-detail-pick-parent',
   'tasks-detail-editor',
 ] as const
 
@@ -2791,4 +2792,100 @@ describe('package 1b — account switches on the detail page', () => {
       expect(h_.notifyTasksChanged).toHaveBeenCalledTimes(1)
     })
   }
+})
+
+describe('the parent picked by title — nothing is read before the picker opens', () => {
+  it('an editable task page sends no parent-candidates request', async () => {
+    h_.detailReply.mockImplementation(() => jsonResponse(200, memberBody({ canEdit: true, canManageMembers: true })))
+    const el = await mountAt('/tasks/t1')
+    must(el, 'tasks-detail-pick-parent')
+    expect(fetchCalls().filter(([path]) => path.includes('/parent-candidates'))).toEqual([])
+  })
+})
+
+describe('the parent picked by title — account switches', () => {
+  /** A JWT-shaped token the app's own payload reader understands (header and signature are not read). */
+  const fakeToken = (payload: Record<string, unknown>) => `h.${btoa(JSON.stringify(payload)).replace(/=+$/, '')}.s`
+  const TOKEN_A = fakeToken({ sub: 'u1', exp: 4102444800 })
+  const TOKEN_B = fakeToken({ sub: 'u9', exp: 4102444800 })
+
+  const signIn = (token: string) => localStorage.setItem('auth_token', token)
+  /** Another tab signs in: the shared storage changes and this tab is told nothing. */
+  const signInSilently = (token: string) => signIn(token)
+  /** The same, plus the `storage` event a browser delivers to the other tabs. */
+  const signInElsewhereWithEvent = (token: string) => {
+    signIn(token)
+    window.dispatchEvent(new StorageEvent('storage', { key: 'auth_token', newValue: token }))
+  }
+  /** A sign-in in this tab: the session switch `useAuth` announces. */
+  const signInHere = (token: string) => {
+    signIn(token)
+    notifyAuthPrincipalChange()
+  }
+
+  /** `GET /api/tasks/:id/parent-candidates` (the decoded id) -> the response, or a promise of it. */
+  const candidatesReply = vi.fn()
+
+  const parentRows = (el: HTMLElement) => shownAll(el, 'task-picker-row').map((row) => row.dataset.taskId)
+
+  async function searchParents(el: HTMLElement, value: string): Promise<void> {
+    const input = must(el, 'task-picker-search') as HTMLInputElement
+    input.value = value
+    input.dispatchEvent(new Event('input'))
+    await flush()
+  }
+
+  beforeEach(() => {
+    localStorage.removeItem('auth_token')
+    signIn(TOKEN_A)
+    h_.detailReply.mockImplementation(() => jsonResponse(200, memberBody({ canEdit: true, canManageMembers: true })))
+    candidatesReply.mockReset().mockImplementation(() => jsonResponse(200, { items: [{ id: 'p7', title: 'Launch plan' }] }))
+    // The candidates read is answered here; every other request goes to the file's fake backend.
+    h_.apiFetch.mockImplementation((path: string, init?: FetchInit) => {
+      const match = /^\/api\/tasks\/([^/]+)\/parent-candidates$/.exec(path)
+      return match ? candidatesReply(decodeURIComponent(match[1])) : fakeFetch(path, init)
+    })
+  })
+
+  afterEach(() => {
+    localStorage.removeItem('auth_token')
+  })
+
+  for (const [how, switchTo] of [
+    ['another tab (a storage change)', signInElsewhereWithEvent],
+    ['this tab (a session switch)', signInHere],
+  ] as Array<[string, (token: string) => void]>) {
+    it(`a switch to another account from ${how} closes the picker, drops its rows and folds the task-id form`, async () => {
+      const el = await mountAt('/tasks/t1')
+      await click(el, 'tasks-detail-set-parent-by-id-toggle')
+      expect(must(el, 'tasks-detail-set-parent-form').style.display).toBe('')
+      await click(el, 'tasks-detail-pick-parent')
+      await searchParents(el, 'Launch')
+      expect(parentRows(el)).toEqual(['p7'])
+      switchTo(TOKEN_B)
+      await flush()
+      expect(shown(el, 'task-picker')).toBeNull()
+      expect(el.textContent).not.toContain('Launch plan')
+      expect(must(el, 'tasks-detail-set-parent-form').style.display).toBe('none')
+    })
+  }
+
+  it('a candidates answer asked under one account that lands after a silent switch is not shown', async () => {
+    const late = deferred<Response>()
+    candidatesReply.mockImplementationOnce(() => late.promise)
+    const el = await mountAt('/tasks/t1')
+    await click(el, 'tasks-detail-pick-parent')
+    expect(candidatesReply.mock.calls).toEqual([['t1']])
+    await searchParents(el, 'Launch')
+    signInSilently(TOKEN_B)
+    late.resolve(jsonResponse(200, { items: [{ id: 'p7', title: 'Launch plan' }] }))
+    await flush()
+    expect(shown(el, 'task-picker')).toBeNull()
+    expect(parentRows(el)).toEqual([])
+    expect(el.textContent).not.toContain('Launch plan')
+    candidatesReply.mockImplementationOnce(() => jsonResponse(200, { items: [{ id: 'p8', title: 'New plan' }] }))
+    await click(el, 'tasks-detail-pick-parent')
+    await searchParents(el, 'plan')
+    expect(parentRows(el)).toEqual(['p8'])
+  })
 })

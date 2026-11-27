@@ -260,7 +260,24 @@
                 class="tasks-view__message"
                 data-testid="tasks-detail-children-empty"
               >{{ t.noChildren }}</p>
-              <form v-if="canEditTask" class="tasks-view__set-parent" data-testid="tasks-detail-set-parent-form" @submit.prevent="onSetParent">
+              <!-- The parent is picked by title; the task-id form stays as the secondary entry, folded
+                   until it is asked for. -->
+              <div v-if="canEditTask" class="tasks-view__parent-pick">
+                <button
+                  type="button"
+                  data-testid="tasks-detail-pick-parent"
+                  :disabled="detailActionPending"
+                  @click="openParentPicker"
+                >{{ t.pickParent }}</button>
+                <button
+                  type="button"
+                  class="tasks-view__link-button"
+                  data-testid="tasks-detail-set-parent-by-id-toggle"
+                  :aria-expanded="setParentByIdOpen ? 'true' : 'false'"
+                  @click="setParentByIdOpen = !setParentByIdOpen"
+                >{{ t.setParentByIdToggle }}</button>
+              </div>
+              <form v-if="canEditTask" v-show="setParentByIdOpen" class="tasks-view__set-parent" data-testid="tasks-detail-set-parent-form" @submit.prevent="onSetParent">
                 <input
                   v-model="parentInput"
                   type="text"
@@ -283,6 +300,15 @@
               <p v-if="parentError" class="tasks-view__message" data-testid="tasks-detail-parent-error" role="alert">
                 {{ codeMessage(parentError, t) }}
               </p>
+              <TaskPicker
+                v-if="canEditTask"
+                :visible="parentPickerOpen"
+                mode="parent"
+                :task-id="taskId ?? ''"
+                :before-request="peopleIdentityHolds"
+                @confirm="onParentPicked"
+                @close="closeParentPicker"
+              />
             </section>
 
             <!-- M3 §3.5: followers. §3.5's `GET /api/tasks/:id` never carries this list — see
@@ -839,6 +865,7 @@ import {
   type TaskDraft,
 } from '../../tasks/tasksDraft'
 import TaskPeoplePicker, { type TaskPeoplePicked, type TaskPeoplePickerMode } from '../../tasks/TaskPeoplePicker.vue'
+import TaskPicker, { type TaskPicked } from '../../tasks/TaskPicker.vue'
 import TaskDetailEditor from './TaskDetailEditor.vue'
 import TaskDetailLists, { type DetailListsError, type MyListsState } from './TaskDetailLists.vue'
 import TaskListsSidebar from './TaskListsSidebar.vue'
@@ -977,6 +1004,9 @@ const statusSwitcherRef = ref<HTMLElement | null>(null)
 // Subtasks / parent.
 const parentInput = ref('')
 const parentError = ref<string | null>(null)
+// The parent picked by title, and the task-id form folded until it is asked for.
+const parentPickerOpen = ref(false)
+const setParentByIdOpen = ref(false)
 
 // Assignees / completion mode. Both reuse `detailResult.task.assignees` for rendering — neither
 // keeps a separate local copy — because a successful mutation always reloads via `loadDetail`
@@ -1031,6 +1061,8 @@ function peopleIdentityHolds(): boolean {
   taskPeople.value = null
   taskPeopleGeneration += 1
   pickerMode.value = null
+  parentPickerOpen.value = false
+  setParentByIdOpen.value = false
   return false
 }
 
@@ -1583,23 +1615,29 @@ function applyDetailFailure(
 }
 
 async function onSetParent(): Promise<void> {
-  const id = taskId.value
-  if (!id || detailActionPending.value) return
   const raw = parentInput.value.trim()
   if (!raw) return
+  await setParentTo(raw, { clearInput: true })
+}
+
+/** Sets the parent to `parentId`: from the task-id form (which is emptied on success) or from the
+ *  parent picker (which leaves the form as it is). */
+async function setParentTo(parentId: string, options: { clearInput: boolean }): Promise<void> {
+  const id = taskId.value
+  if (!id || detailActionPending.value) return
   parentError.value = null
   actionErrorKind.value = null
   const token = ++detailActionToken
   detailActionPending.value = true
   try {
-    const result = await setParent(id, raw)
+    const result = await setParent(id, parentId)
     if (token !== detailActionToken) {
       if (result.kind === 'ok') notifyTasksChanged()
       return
     }
     if (result.kind === 'ok') {
       orgMissingFromAction.value = false
-      parentInput.value = ''
+      if (options.clearInput) parentInput.value = ''
       notifyTasksChanged()
       await loadDetail(id)
       return
@@ -1608,6 +1646,23 @@ async function onSetParent(): Promise<void> {
   } finally {
     if (token === detailActionToken) detailActionPending.value = false
   }
+}
+
+/** The parent pick button: focused first (a click does not focus a button in macOS Safari), so the
+ *  picker hands focus back to it on close. */
+function openParentPicker(event: MouseEvent): void {
+  if (event.currentTarget instanceof HTMLElement) event.currentTarget.focus()
+  parentPickerOpen.value = true
+}
+
+function closeParentPicker(): void {
+  parentPickerOpen.value = false
+  peopleIdentityHolds()
+}
+
+function onParentPicked(picked: TaskPicked): void {
+  parentPickerOpen.value = false
+  void setParentTo(picked.id, { clearInput: false })
 }
 
 async function onMakeIndependent(): Promise<void> {
@@ -2387,6 +2442,8 @@ watch(taskId, (id) => {
   pickerMode.value = null
   addAssigneeByIdOpen.value = false
   addFollowerByIdOpen.value = false
+  parentPickerOpen.value = false
+  setParentByIdOpen.value = false
   taskPeople.value = null
   taskPeopleGeneration += 1
   newCommentBody.value = ''
@@ -2424,7 +2481,8 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.tasks-view__member-pick {
+.tasks-view__member-pick,
+.tasks-view__parent-pick {
   display: flex;
   flex-wrap: wrap;
   align-items: center;

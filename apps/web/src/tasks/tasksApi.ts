@@ -740,6 +740,46 @@ export async function setParent(id: string, parentId: string | null): Promise<Se
   return { kind: 'error', status: response.status }
 }
 
+// ---- the parent picker: GET /api/tasks/:id/parent-candidates ------------------------------
+
+export interface ParentCandidate {
+  id: string
+  title: string
+}
+
+export type ParentCandidatesResult =
+  | { kind: 'ok'; items: ParentCandidate[] }
+  | { kind: 'not_found' }
+  | { kind: 'forbidden' }
+  | { kind: 'error'; status: number }
+
+function isParentCandidate(value: unknown): value is ParentCandidate {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return typeof record.id === 'string' && isPathSafeSegment(record.id) && typeof record.title === 'string'
+}
+
+/** The parent candidates of a task, each with its title. Strict: `ok` only for a 200 of exactly
+ *  `{ items: [{ id, title }] }`; other fields of a row are left out, and one malformed row makes the
+ *  whole answer an error. An id that cannot be placed in a request path reads as not found and sends
+ *  nothing. Never throws. */
+export async function getParentCandidates(id: string): Promise<ParentCandidatesResult> {
+  if (!isPathSafeSegment(id)) return { kind: 'not_found' }
+  let response: Response
+  try {
+    response = await apiFetch(`/api/tasks/${encodeURIComponent(id)}/parent-candidates`)
+  } catch {
+    return { kind: 'error', status: 0 }
+  }
+  if (response.status === 403) return { kind: 'forbidden' }
+  if (response.status === 404) return { kind: 'not_found' }
+  if (response.status !== 200) return { kind: 'error', status: response.status }
+  const body = await safeJson(response)
+  const rows = body && typeof body === 'object' ? (body as Record<string, unknown>).items : undefined
+  if (!Array.isArray(rows) || !rows.every(isParentCandidate)) return { kind: 'error', status: 200 }
+  return { kind: 'ok', items: (rows as ParentCandidate[]).map((row) => ({ id: row.id, title: row.title })) }
+}
+
 // ---- 3.3 assignees, 3.4 completion-mode ------------------------------------------------------
 
 /** The shared success shape of `addAssignee`/`removeAssignee`/`setCompletionMode` (§3.3/§3.4):

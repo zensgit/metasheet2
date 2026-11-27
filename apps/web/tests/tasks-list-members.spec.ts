@@ -349,6 +349,7 @@ function pageControlsDisabled(el: HTMLElement): Record<string, boolean> {
     'tasks-list-detail-rename',
     'tasks-list-detail-archive',
     'tasks-list-detail-add-task-input',
+    'tasks-list-detail-pick-task',
     'tasks-list-detail-item-remove',
   ]) {
     out[id] = disabled(el, id)
@@ -1133,6 +1134,7 @@ describe('members dialog — one write at a time with the page', () => {
       'tasks-list-detail-rename': true,
       'tasks-list-detail-archive': true,
       'tasks-list-detail-add-task-input': true,
+      'tasks-list-detail-pick-task': true,
       'tasks-list-detail-item-remove': true,
     })
     expect(must(el, 'tasks-list-detail').getAttribute('aria-busy')).toBe('true')
@@ -1154,6 +1156,7 @@ describe('members dialog — one write at a time with the page', () => {
       'tasks-list-detail-rename': false,
       'tasks-list-detail-archive': false,
       'tasks-list-detail-add-task-input': false,
+      'tasks-list-detail-pick-task': false,
       'tasks-list-detail-item-remove': false,
     })
     expect(must(el, 'tasks-list-detail').getAttribute('aria-busy')).toBe('false')
