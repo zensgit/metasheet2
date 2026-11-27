@@ -2,7 +2,26 @@
 
 [开发说明与模型规划](./stock-preparation-project-delete-development-20261127.md) · [设计与验收条件](./stock-preparation-project-delete-design-lock-20261127.md) · [PR 检查](https://github.com/zensgit/metasheet2/pull/7004/checks)
 
-## 11 月 28 日复审与回归（台北时间）
+## 本轮最终验证
+
+受测代码为 [`41b187b9`](https://github.com/zensgit/metasheet2/commit/41b187b91fcc6bfb60bbb99d9835c4917a29db48)。GitHub Actions 实际检出它与主线 `71c22b92` 的临时合并提交 `ab1a460c`。本轮使用合成项目、真实 PostgreSQL 14、真实插件路由及文件存储，浏览器工作台另用合成 HTTP 响应。以下各行分别引用该代码提交的执行记录。
+
+| 检查 | 结果 |
+|---|---|
+| PostgreSQL 14 备料与多维表 | 备料套件 **271/271**，恢复档案与作业 **48/48**。整个真库任务 **271 个文件通过，3,669 项通过，2 项既有跳过，0 失败**。跳过项均在独立权限管理矩阵中；备料与恢复专项已包含在总数内。[真库日志](https://github.com/zensgit/metasheet2/actions/runs/46049536604/job/140679830921) |
+| 插件与前端集成 | **355 个插件套件全部通过**。前端 **71 个文件，1,841 项全部通过**，其中备料删除界面 19 项。[集成日志](https://github.com/zensgit/metasheet2/actions/runs/46049537122/job/140677122479) |
+| Chromium 工作台 | **40/40**，包含预览、确认、审计，以及第二个浏览器刷新后的项目目录。[浏览器日志](https://github.com/zensgit/metasheet2/actions/runs/46049536840/job/140677121957) |
+| 迁移 | 36 项迁移回放后，1,094 个数据库目录对象的指纹一致。[迁移日志](https://github.com/zensgit/metasheet2/actions/runs/46049537204/job/140677122840) |
+| 后端全量与必需汇总 | 后端全量单测与插件系统必需汇总均通过。[后端单测](https://github.com/zensgit/metasheet2/actions/runs/46049536604/job/140679830976) · [必需汇总](https://github.com/zensgit/metasheet2/actions/runs/46049536604/job/140688441081) |
+| 契约与宿主兼容 | OpenAPI/SDK 生成一致性、仓库 Web Tests、PostgreSQL 14–17 权限矩阵和 PowerShell 5.1 验收均通过。[OpenAPI/SDK](https://github.com/zensgit/metasheet2/actions/runs/46049537194/job/140677123241) · [Web Tests](https://github.com/zensgit/metasheet2/actions/runs/46049537214) · [权限矩阵](https://github.com/zensgit/metasheet2/actions/runs/46049537039) · [PowerShell](https://github.com/zensgit/metasheet2/actions/runs/46049537041) |
+
+第 7 项在建表已完成且登记尚未写入时发起清理，反向也在删除持锁时发起建表。两个冲突均被拒绝，表、托管登记和项目登记完整对应。随后从真实消费入口重放旧拉取令牌、已撤销作业的排队消息、旧删除确认，新项目及对照项目的业务行、版本、登记和最近拉取字段全部保持原样；数据源调用次数没有增加。
+
+第 8 项分别在预览前、预览后上传合成附件，检查拒绝原因和整项状态，再从原下载入口读取目标及对照文件的原始内容。目标无成功删除审计，无依赖对照可正常删除。恢复子系统还创建了已验证档案、已受理作业和保全记录，分别验证共用删除依赖检查拒绝，并逐项比较持久数据。
+
+第 9 项在删除事务提交后、返回 JSON 前主动切断客户端套接字。原管理员只凭预览取得的操作编号查回原审计 ID 及全部分类数量。替代项目建立后，原确认被拒，回执仍是同一条；同租户另一管理员、其他租户及其他项目不能读取该次回执。
+
+## 前轮复审与定位过程（11 月 28 日，台北时间）
 
 本轮从前次验证提交 `676c252a` 继续开发，使用合成租户、项目和协同记录。删前归属、活动写入和同号重建分别设置了对照组。
 
@@ -18,7 +37,7 @@
 
 提交 `915bd3f8` 已通过 PostgreSQL 14 的 269 个备料用例，多维表真库总计 3,666 过、2 跳过。集成插件 355 个套件和 1,838 个前端用例通过；备料 Chromium 40/40。CI 对应的测试合并版本为 `11ea23edc`（主线 `166e1271`）。[多维表与备料真库](https://github.com/zensgit/metasheet2/actions/runs/46042362135/job/140657504462) · [插件及集成前端](https://github.com/zensgit/metasheet2/actions/runs/46042361770/job/140653029012) · [Chromium](https://github.com/zensgit/metasheet2/actions/runs/46042362228/job/140653031437)
 
-[11 月 28 日新增评审](https://github.com/zensgit/metasheet2/pull/7004#pullrequestreview-6091702985) 要求在此基础上补齐第 7–9 条验收。新增的用例暂停真实建表路由、在同号重建后重放令牌和队列消息、从原下载入口读取附件、在恢复子系统实际创建档案/作业/保全记录，并在真实确认事务提交后切断 HTTP 响应，再按预览编号取回成功审计。执行结果见本分支的 [PR 检查](https://github.com/zensgit/metasheet2/pull/7004/checks)。
+[11 月 28 日新增评审](https://github.com/zensgit/metasheet2/pull/7004#pullrequestreview-6091702985) 要求在此基础上补齐第 7–9 条验收。新增的用例暂停真实建表路由、在同号重建后重放令牌和队列消息、从原下载入口读取附件、在恢复子系统实际创建档案/作业/保全记录，并在真实确认事务提交后切断 HTTP 响应，再按预览编号取回成功审计。最终执行结果见本文首节。
 
 ### 第 7–9 项验收证据
 
@@ -36,6 +55,7 @@
 
 ```sh
 NODE_ENV=test METASHEET_REAL_DB_TEST_STEP=1 pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/stock-preparation-p4-repair-once-realdb.test.ts -t 'project deletion'
+NODE_ENV=test METASHEET_REAL_DB_TEST_STEP=1 pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/multitable-recovery-archive-restore-jobs-realdb.test.ts -t 'stock preparation cleanup refuses'
 pnpm --filter @metasheet/core-backend exec vitest run tests/unit/yjs-persistence-hardening.test.ts
 ```
 

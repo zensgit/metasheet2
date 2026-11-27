@@ -1,6 +1,6 @@
 # #6991 备料项目交付清理 · 开发说明
 
-复审修订基于主线 `e33d447552`，分支为 `codex/6991-stock-preparation-project-delete`。本切片落实 R-38 的交付清理例外，日常操作继续使用归档和恢复。[需求与业主补充](https://github.com/zensgit/metasheet2/issues/6991) · [验收约定](./stock-preparation-project-delete-design-lock-20261127.md) · [验证记录](./stock-preparation-project-delete-verification-20261127.md)
+分支从主线 `e33d447552` 继续开发。交付代码 `41b187b9` 已在包含主线 `71c22b92` 的合并测试版本上验证，分支为 `codex/6991-stock-preparation-project-delete`。本切片落实 R-38 的交付清理例外，日常操作继续使用归档和恢复。[需求与业主补充](https://github.com/zensgit/metasheet2/issues/6991) · [验收约定](./stock-preparation-project-delete-design-lock-20261127.md) · [验证记录](./stock-preparation-project-delete-verification-20261127.md)
 
 ## 操作与影响
 
