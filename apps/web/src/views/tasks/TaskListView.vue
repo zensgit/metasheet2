@@ -175,6 +175,16 @@
             role="status"
           >{{ t.listItemsTruncated }}</p>
 
+          <TaskListCreateForm
+            v-if="canCreateInList"
+            :key="listId"
+            ref="createForm"
+            :pending="pending"
+            :run-write="runListTaskCreation"
+            @add-failed="banner = { kind: $event }"
+            @org-missing="orgMissing = true"
+          />
+
           <!-- A task is picked by title; the task-id form stays as the secondary entry, folded until it
                is asked for. The add error sits below both, so a failed pick shows too. -->
           <div v-if="canManage && itemsResult.kind === 'ok'" class="tasks-list-page__pick-task">
@@ -368,6 +378,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import TaskGroupBoard from './TaskGroupBoard.vue'
+import TaskListCreateForm from './TaskListCreateForm.vue'
 import TaskListMembersDialog from './TaskListMembersDialog.vue'
 import TaskPicker, { type TaskPicked } from '../../tasks/TaskPicker.vue'
 import { useAuth } from '../../composables/useAuth'
@@ -444,7 +455,7 @@ type PlacementsState =
   | { kind: 'ok'; placements: TaskPlacement[]; truncated: boolean }
   | { kind: 'unavailable' }
 
-type Banner = { kind: 'forbidden' } | { kind: 'not_found' } | { kind: 'error' } | { kind: 'code'; code: string }
+type Banner = { kind: 'org_missing' } | { kind: 'forbidden' } | { kind: 'not_found' } | { kind: 'error' } | { kind: 'code'; code: string }
 
 type AddTaskError = { kind: 'not_found' } | { kind: 'code'; code: string }
 
@@ -481,9 +492,10 @@ const eventsTotal = ref(0)
 const eventsLastPageEmpty = ref(false)
 const eventsLoadingMore = ref(false)
 const eventsMoreFailed = ref(false)
+const createForm = ref<InstanceType<typeof TaskListCreateForm> | null>(null)
 // The activity's actors by name: the actors of each page that lands are looked up; an actor the
 // lookup gives no name is shown by id. Dropped on a route edge and when another account or org is seen.
-const actorNames = createTaskPeopleNames()
+const actorNames = createTaskPeopleNames({ onSwitch: () => createForm.value?.reset() })
 
 const membersOpen = ref(false)
 const membersButton = ref<HTMLButtonElement | null>(null)
@@ -525,6 +537,8 @@ const canManage = computed(() => {
   return state.kind === 'ok' && (state.list.myRole === 'edit' || state.list.myRole === 'owner')
 })
 
+const canCreateInList = computed(() => canManage.value && itemsResult.value.kind === 'ok' && !orgMissing.value)
+
 // [fe-26] the creator half of archive / unarchive waits for the viewer's own id: hidden while the
 // id is pending, and when it could not be resolved.
 const canArchive = computed(() => {
@@ -544,6 +558,8 @@ const bannerMessage = computed<string | null>(() => {
   const current = banner.value
   if (!current) return null
   switch (current.kind) {
+    case 'org_missing':
+      return t.value.orgMissing
     case 'forbidden':
       return t.value.listWriteForbidden
     case 'not_found':
@@ -868,7 +884,7 @@ async function addTaskById(taskId: string, options: { clearInput: boolean }): Pr
     if (token !== writeToken) return
     if (result.kind === 'ok') {
       if (options.clearInput) addTaskId.value = ''
-      await Promise.all([loadItems({ quiet: true }), loadPlacements({ quiet: true })])
+      await refreshListItems()
       return
     }
     if (result.kind === 'not_found') {
@@ -895,6 +911,30 @@ function onTaskPicked(picked: TaskPicked): void {
   void addTaskById(picked.id, { clearInput: false })
 }
 
+async function refreshListItems(): Promise<void> {
+  await Promise.all([loadItems({ quiet: true }), loadPlacements({ quiet: true })])
+}
+
+async function runListTaskCreation(
+  action: (id: string, isCurrent: () => boolean) => Promise<boolean>,
+): Promise<void> {
+  if (pending.value || !canCreateInList.value || !actorNames.identityHolds()) return
+  const id = listId.value
+  banner.value = null
+  addTaskError.value = null
+  const identity = actorNames.identitySwitches()
+  const token = ++writeToken
+  const isCurrent = () => token === writeToken && id === listId.value && canCreateInList.value
+    && actorNames.identityHolds() && identity === actorNames.identitySwitches()
+  pending.value = true
+  try {
+    const added = await action(id, isCurrent)
+    if (added && isCurrent()) await refreshListItems()
+  } finally {
+    if (token === writeToken) pending.value = false
+  }
+}
+
 async function onRemoveTask(taskId: string): Promise<void> {
   const id = listId.value
   if (pending.value) return
@@ -906,7 +946,7 @@ async function onRemoveTask(taskId: string): Promise<void> {
     if (token !== writeToken) return
     confirmingRemoveId.value = null
     if (result.kind === 'ok') {
-      await Promise.all([loadItems({ quiet: true }), loadPlacements({ quiet: true })])
+      await refreshListItems()
       return
     }
     applyWriteFailure(result, (code) => {

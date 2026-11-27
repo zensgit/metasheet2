@@ -43,6 +43,7 @@ const h_ = vi.hoisted(() => ({
   eventsReply: vi.fn(),
   /** `GET /api/tasks?view=&status=&q=` (view, status, q) -> the response; an empty page by default. */
   tasksReply: vi.fn(),
+  createReply: vi.fn(),
   /** `GET /api/tasks/people?…` (query): the people lookup that names the activity's actors. */
   peopleReply: vi.fn(),
 }))
@@ -165,6 +166,7 @@ async function fakeFetch(path: string, init?: FetchInit): Promise<Response> {
   }
   if (method === 'GET' && /^\/api\/task-lists\/[^/]+\/group-items$/.test(pathname)) return page([], query)
   // The task picker's search.
+  if (method === 'POST' && pathname === '/api/tasks') return h_.createReply(init?.body)
   if (method === 'GET' && pathname === '/api/tasks') {
     const params = new URLSearchParams(query)
     return h_.tasksReply(params.get('view'), params.get('status'), params.get('q'))
@@ -331,6 +333,7 @@ beforeEach(() => {
   h_.apiFetch.mockReset().mockImplementation(fakeFetch)
   h_.loadTasksContext.mockReset().mockResolvedValue({ state: 'ready', orgId: 'org1' })
   h_.notifyTasksChanged.mockReset()
+  h_.createReply.mockReset().mockImplementation(() => jsonResponse(200, { id: 'fresh-task' }))
   h_.getCurrentUserId.mockReset().mockResolvedValue('u1')
   h_.listReply.mockReset().mockImplementation((id: string) => (lists[id] ? jsonResponse(200, lists[id]) : NOT_FOUND()))
   h_.renameReply.mockReset().mockImplementation((id: string, body: string) => {
@@ -980,11 +983,15 @@ describe('list page — one write at a time', () => {
       'tasks-list-detail-add-task-input',
       'tasks-list-detail-add-task-submit',
       'tasks-list-detail-pick-task',
+      'list-create-title',
+      'list-create-submit',
       'tasks-list-detail-item-remove',
     ]) {
       expect(disabled(el, id), id).toBe(true)
     }
     await submit(el, 'tasks-list-detail-rename-form')
+    await typeInto(el, 'list-create-title', 'Second write')
+    await submit(el, 'list-create-form')
     await typeInto(el, 'tasks-list-detail-add-task-input', 't9')
     await submit(el, 'tasks-list-detail-add-task-form')
     expect(writes()).toHaveLength(1)
@@ -1962,6 +1969,217 @@ describe('list page — a task picked by title', () => {
       ;(must(el, 'task-picker-confirm') as HTMLButtonElement).disabled = false
       await click(el, 'task-picker-confirm')
       expect(requests('POST', '/api/task-lists/tl_1/items')).toEqual([])
+    })
+  })
+})
+
+describe('creating a task in the current list', () => {
+  const titleInput = (el: HTMLElement) => must(el, 'list-create-title') as HTMLInputElement
+  const writeBodies = () => writes().map(([path, init]) => [path, JSON.parse(init?.body ?? '{}')])
+  const createWrite = ['/api/tasks', { title: 'Plan' }]
+  const addWrite = ['/api/task-lists/tl_1/items', { taskId: 'fresh-task' }]
+
+  async function start(el: HTMLElement): Promise<void> {
+    await typeInto(el, 'list-create-title', '  Plan  ')
+    await submit(el, 'list-create-form')
+  }
+
+  it('waits for creation, adds the returned task once, and keeps write controls busy until the refreshed rows arrive', async () => {
+    lists.tl_1.myRole = 'edit'
+    const create = deferred<Response>()
+    const add = deferred<Response>()
+    const rows = deferred<Response>()
+    h_.createReply.mockReturnValueOnce(create.promise)
+    h_.addItemReply.mockReturnValueOnce(add.promise)
+    const el = await mountAt('/task-lists/tl_1')
+    h_.itemsReply.mockReturnValueOnce(rows.promise)
+    await typeInto(el, 'list-create-title', '  ')
+    expect(disabled(el, 'list-create-submit')).toBe(true)
+    await submit(el, 'list-create-form')
+    expect(writeBodies()).toEqual([])
+    await start(el)
+    await submit(el, 'list-create-form')
+    expect(writeBodies()).toEqual([createWrite])
+    expect(titleInput(el).disabled).toBe(true)
+    expect(disabled(el, 'tasks-list-detail-pick-task')).toBe(true)
+    create.resolve(jsonResponse(200, { id: 'fresh-task' }))
+    await flush()
+    expect(writeBodies()).toEqual([createWrite, addWrite])
+    expect(h_.notifyTasksChanged).toHaveBeenCalledTimes(1)
+    await submit(el, 'list-create-form')
+    expect(writeBodies()).toEqual([createWrite, addWrite])
+    add.resolve(jsonResponse(200, { listId: 'tl_1', taskId: 'fresh-task' }))
+    await flush()
+    expect(itemReads()).toBe(2)
+    expect(fetchCalls().filter(([path]) => path.startsWith('/api/task-lists/tl_1/group-items?'))).toHaveLength(2)
+    expect(must(el, 'tasks-list-detail').getAttribute('aria-busy')).toBe('true')
+    rows.resolve(page([...items.tl_1, item('fresh-task', 'Plan')], 'offset=0'))
+    await flush()
+    expect(itemRows(el)).toEqual([['t1', 'Task One'], ['t2', 'Task Two'], ['fresh-task', 'Plan']])
+    expect(titleInput(el).value).toBe('')
+    expect(titleInput(el).disabled).toBe(false)
+    expect(shown(el, 'list-create-message')).toBeNull()
+  })
+
+  it('keeps the created task after repeated add failures and retries the same ID until the add succeeds', async () => {
+    h_.addItemReply.mockResolvedValueOnce(jsonResponse(422, { error: { code: 'ORG_MISSING' } }))
+      .mockResolvedValueOnce(jsonResponse(500, {}))
+    const el = await mountAt('/task-lists/tl_1')
+    await start(el)
+    expect(writeBodies()).toEqual([createWrite, addWrite])
+    expect(text(el, 'list-create-message')).toBe('任务已创建，加入清单失败。')
+    expect(text(el, 'list-create-submit')).toBe('重试加入')
+    expect(titleInput(el).readOnly).toBe(true)
+    expect(text(el, 'tasks-list-detail-banner')).toBe('请先选择一个组织后再查看任务')
+    expect(itemRows(el).map(([id]) => id)).toEqual(['t1', 't2'])
+    expect(itemReads()).toBe(1)
+    await click(el, 'list-create-submit')
+    expect(writeBodies()).toEqual([createWrite, addWrite, addWrite])
+    expect(shown(el, 'tasks-list-detail-banner')).toBeNull()
+    expect(text(el, 'list-create-message')).toBe('任务已创建，加入清单失败。')
+    await click(el, 'list-create-submit')
+    expect(writeBodies()).toEqual([createWrite, addWrite, addWrite, addWrite])
+    expect(h_.notifyTasksChanged).toHaveBeenCalledTimes(1)
+    expect(itemReads()).toBe(2)
+    expect(itemRows(el).map(([id]) => id)).toEqual(['t1', 't2', 'fresh-task'])
+    expect(shown(el, 'list-create-message')).toBeNull()
+    expect(titleInput(el).readOnly).toBe(false)
+    expect(text(el, 'list-create-submit')).toBe('创建并加入清单')
+  })
+
+  it.each([
+    [422, { error: { code: 'INVALID_TITLE' } }, '标题为空或包含无法保存的字符'],
+    [503, {}, '创建任务失败，请稍后重试'],
+  ] as const)('keeps the editable title after an unsuccessful creation (%s) and sends no add', async (status, body, copy) => {
+    h_.createReply.mockResolvedValueOnce(jsonResponse(status, body))
+    const el = await mountAt('/task-lists/tl_1')
+    await start(el)
+    expect(writeBodies()).toEqual([createWrite])
+    expect(text(el, 'list-create-message')).toBe(copy)
+    expect(titleInput(el).value).toBe('  Plan  ')
+    expect(titleInput(el).readOnly).toBe(false)
+    expect(h_.notifyTasksChanged).not.toHaveBeenCalled()
+    await typeInto(el, 'list-create-title', 'Revised')
+    expect(shown(el, 'list-create-message')).toBeNull()
+    await click(el, 'list-create-submit')
+    expect(writeBodies()).toEqual([createWrite, ['/api/tasks', { title: 'Revised' }], addWrite])
+  })
+
+  it.each([
+    [403, '您没有权限修改此清单'],
+    [404, '清单不可用或你已不是成员'],
+  ] as const)('clears old errors when creation starts and shows the list message with the retry after add returns %s', async (status, copy) => {
+    const create = deferred<Response>()
+    h_.addItemReply.mockImplementationOnce(NOT_FOUND)
+    h_.renameReply.mockResolvedValueOnce(jsonResponse(403, {}))
+    h_.createReply.mockReturnValueOnce(create.promise)
+    const el = await mountAt('/task-lists/tl_1')
+    await addTask(el, 'missing')
+    await rename(el, 'Renamed')
+    must(el, 'tasks-list-detail-add-task-error')
+    must(el, 'tasks-list-detail-banner')
+    h_.addItemReply.mockResolvedValueOnce(jsonResponse(status, {}))
+    await start(el)
+    expect(shown(el, 'tasks-list-detail-add-task-error')).toBeNull()
+    expect(shown(el, 'tasks-list-detail-banner')).toBeNull()
+    create.resolve(jsonResponse(200, { id: 'fresh-task' }))
+    await flush()
+    expect(text(el, 'tasks-list-detail-banner')).toBe(copy)
+    expect(text(el, 'list-create-message')).toBe('任务已创建，加入清单失败。')
+    expect(text(el, 'list-create-submit')).toBe('重试加入')
+    await click(el, 'list-create-submit')
+    expect(requests('POST', '/api/tasks')).toHaveLength(1)
+    expect(h_.addItemReply.mock.calls.slice(1)).toEqual([
+      ['tl_1', JSON.stringify({ taskId: 'fresh-task' })],
+      ['tl_1', JSON.stringify({ taskId: 'fresh-task' })],
+    ])
+    expect(shown(el, 'tasks-list-detail-banner')).toBeNull()
+    expect(shown(el, 'list-create-message')).toBeNull()
+  })
+
+  it('shows organization guidance when task creation needs an organization', async () => {
+    h_.createReply.mockResolvedValueOnce(jsonResponse(422, { error: { code: 'ORG_MISSING' } }))
+    const el = await mountAt('/task-lists/tl_1')
+    await start(el)
+    expect(writeBodies()).toEqual([createWrite])
+    expect(text(el, 'tasks-view-org-missing')).toBe('请先选择一个组织后再查看任务')
+  })
+
+  it('hides creation alongside the other add controls for a reader or when items are unavailable', async () => {
+    lists.tl_1.myRole = 'read'
+    const el = await mountAt('/task-lists/tl_1')
+    expect(shown(el, 'list-create-form')).toBeNull()
+    h_.itemsReply.mockImplementation(NOT_FOUND)
+    await go('/task-lists/tl_2')
+    must(el, 'tasks-list-detail-items-unavailable')
+    expect(shown(el, 'list-create-form')).toBeNull()
+    expect(writeBodies()).toEqual([])
+  })
+
+  it('a creation that finishes after moving to another list sends no add and preserves the new draft', async () => {
+    const create = deferred<Response>()
+    h_.createReply.mockReturnValueOnce(create.promise)
+    const el = await mountAt('/task-lists/tl_1')
+    await start(el)
+    await go('/task-lists/tl_2')
+    await typeInto(el, 'list-create-title', 'Other draft')
+    create.resolve(jsonResponse(200, { id: 'fresh-task' }))
+    await flush()
+    expect(writeBodies()).toEqual([createWrite])
+    expect(h_.notifyTasksChanged).toHaveBeenCalledTimes(1)
+    expect(titleInput(el).value).toBe('Other draft')
+    expect(text(el, 'list-create-submit')).toBe('创建并加入清单')
+  })
+
+  it('a retry finishing on another list cannot offer another retry there', async () => {
+    const add = deferred<Response>()
+    h_.addItemReply.mockImplementationOnce(NOT_FOUND).mockReturnValueOnce(add.promise)
+    const el = await mountAt('/task-lists/tl_1')
+    await start(el)
+    await click(el, 'list-create-submit')
+    await go('/task-lists/tl_2')
+    add.resolve(jsonResponse(503, {}))
+    await flush()
+    expect(writeBodies()).toEqual([createWrite, addWrite, addWrite])
+    expect(shown(el, 'list-create-message')).toBeNull()
+    expect(titleInput(el).value).toBe('')
+    expect(text(el, 'list-create-submit')).toBe('创建并加入清单')
+  })
+
+  describe('account changes', () => {
+    const signIn = (sub: string) => localStorage.setItem('auth_token', 'h.' + btoa(JSON.stringify({ sub, exp: 4102444800 })) + '.s')
+
+    beforeEach(() => { signIn('viewer') })
+    afterEach(() => { localStorage.removeItem('auth_token') })
+
+    it('drops an in-flight creation after switching away and back before the answer', async () => {
+      const create = deferred<Response>()
+      h_.createReply.mockReturnValueOnce(create.promise)
+      const el = await mountAt('/task-lists/tl_1')
+      await start(el)
+      signIn('other')
+      notifyAuthPrincipalChange()
+      await flush()
+      signIn('viewer')
+      notifyAuthPrincipalChange()
+      await flush()
+      create.resolve(jsonResponse(200, { id: 'fresh-task' }))
+      await flush()
+      expect(writeBodies()).toEqual([createWrite])
+      expect(titleInput(el).value).toBe('')
+      expect(shown(el, 'list-create-message')).toBeNull()
+    })
+
+    it('a silent account change before retry clears the previous title and sends nothing', async () => {
+      h_.addItemReply.mockImplementationOnce(NOT_FOUND)
+      const el = await mountAt('/task-lists/tl_1')
+      await start(el)
+      expect(text(el, 'list-create-submit')).toBe('重试加入')
+      signIn('other')
+      await click(el, 'list-create-submit')
+      expect(writeBodies()).toEqual([createWrite, addWrite])
+      expect(titleInput(el).value).toBe('')
+      expect(shown(el, 'list-create-message')).toBeNull()
     })
   })
 })

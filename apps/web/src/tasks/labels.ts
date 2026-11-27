@@ -284,6 +284,9 @@ export const TASKS_ZH = {
   listAddTaskPlaceholder: '任务 ID',
   listAddTask: '加入任务',
   listPickTask: '选择任务',
+  listCreateAndAdd: '创建并加入清单',
+  listCreatedAddFailed: '任务已创建，加入清单失败。',
+  listRetryAdd: '重试加入',
   listAddTaskByIdToggle: '按任务 ID 加入',
   // RULED(2026-10-07): [own-25] (PR-3a, R12 (a1)) — adding needs a direct role on the task
   // (creator or assignee; an edit right that comes only from a list does not count), and the 404
@@ -641,6 +644,9 @@ export const TASKS_EN: Record<keyof typeof TASKS_ZH, string> = {
   listAddTaskPlaceholder: 'Task ID',
   listAddTask: 'Add task',
   listPickTask: 'Choose a task',
+  listCreateAndAdd: 'Create and add to list',
+  listCreatedAddFailed: 'Task created. Could not add it to this list.',
+  listRetryAdd: 'Retry adding to list',
   listAddTaskByIdToggle: 'Add by task ID',
   listAddTaskNotFound: 'The task does not exist, you are not its creator or an assignee, or the list is not available',
   listRemoveTask: 'Remove from list',

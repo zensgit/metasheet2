@@ -2609,3 +2609,23 @@ describe('ZH locale — the task pickers render CJK (positive control)', () => {
     expect(renderedTextAndAttributes(must(list, 'task-picker'))).toMatch(CJK)
   })
 })
+
+describe('creating a task in a list — locale changes', () => {
+  it('shows the title, action and partial-success recovery in the current language', async () => {
+    setLocale('en')
+    h_.addTaskToList.mockResolvedValueOnce({ kind: 'not_found' })
+    const el = await mountListPage()
+    const form = must(el, 'list-create-form')
+    expect(form.querySelector('label')?.textContent).toBe('New task title')
+    expect(must(el, 'list-create-submit').textContent?.trim()).toBe('Create and add to list')
+    typeInto(el, 'list-create-title', 'One')
+    await submitForm(el, 'list-create-form')
+    expect(must(el, 'list-create-message').textContent?.trim()).toBe('Task created. Could not add it to this list.')
+    expect(must(el, 'list-create-submit').textContent?.trim()).toBe('Retry adding to list')
+    setLocale('zh-CN')
+    await flush()
+    expect(form.querySelector('label')?.textContent).toBe('新建任务标题')
+    expect(must(el, 'list-create-message').textContent?.trim()).toBe('任务已创建，加入清单失败。')
+    expect(must(el, 'list-create-submit').textContent?.trim()).toBe('重试加入')
+  })
+})

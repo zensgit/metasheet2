@@ -42,6 +42,10 @@ export interface TaskPeopleNames {
   nameOf(id: string): string
   /** Looks up the ids that may still be asked (see the header); resolves once its parts are done. */
   request(ids: readonly string[]): Promise<void>
+  /** Check the current account before a list action. */
+  identityHolds(): boolean
+  /** Distinguish an observed switch away and back during a list action. */
+  identitySwitches(): number
   /** Drops the names and the asked ids; an answer still out is dropped. */
   clear(): void
   /** Stops listening; nothing is sent after it and no answer is kept. */
@@ -76,9 +80,10 @@ function lookupParts(ids: readonly string[]): string[][] {
   return parts
 }
 
-export function createTaskPeopleNames(): TaskPeopleNames {
+export function createTaskPeopleNames(options: { onSwitch?: () => void } = {}): TaskPeopleNames {
   const names = shallowRef<ReadonlyMap<string, string>>(new Map())
   let identity = readDispatchIdentity()
+  let switches = 0
   let generation = 0
   let asked = new Set<string>()
   let forbidden = false
@@ -88,10 +93,12 @@ export function createTaskPeopleNames(): TaskPeopleNames {
     const current = readDispatchIdentity()
     if (current === identity) return true
     identity = current
+    switches += 1
     generation += 1
     asked = new Set()
     forbidden = false
     names.value = new Map()
+    options.onSwitch?.()
     return false
   }
 
@@ -154,6 +161,8 @@ export function createTaskPeopleNames(): TaskPeopleNames {
     names,
     nameOf: (id) => names.value.get(id) ?? '',
     request,
+    identityHolds,
+    identitySwitches: () => switches,
     clear,
     dispose,
   }
