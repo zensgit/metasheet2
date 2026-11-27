@@ -17,6 +17,14 @@ function entry(relPath, enclosingSymbol, table, count, posture, role, requiredPr
 }
 
 const ATTENDANCE_CALCULATION_READ_CLASSIFICATIONS = Object.freeze([
+  // Immutable input lineage and same-transaction result verification, never a
+  // public active-current projection. Keep each path/symbol/table/count closed.
+  entry('packages/core-backend/src/attendance/w4c2-preserved-calculation-inputs.ts', 'readPreservedAuthoritativeCalculationInputsV1', 'attendance_record_calculations', 2, 'history', 'approved_overtime_frozen_input_preservation'),
+  entry('packages/core-backend/src/attendance/w4c2-preserved-calculation-inputs.ts', 'readPreservedAuthoritativeCalculationInputsV1', 'attendance_record_segments', 1, 'history', 'approved_overtime_frozen_input_preservation'),
+  entry('packages/core-backend/src/attendance/w4c3b-approved-overtime-shadow.ts', 'readNonCurrentApprovedOvertimeInputsV1', 'attendance_record_calculations', 2, 'history', 'approved_overtime_frozen_history_recovery'),
+  entry('packages/core-backend/src/attendance/w4c3b-approved-overtime-shadow.ts', 'readNonCurrentApprovedOvertimeInputsV1', 'attendance_record_segments', 1, 'history', 'approved_overtime_frozen_history_recovery'),
+  entry('packages/core-backend/src/attendance/w4c3b-approved-overtime-shadow.ts', 'appendApprovedOvertimeShadowV1', 'attendance_record_calculations', 3, 'history', 'approved_overtime_shadow_result_verification'),
+  entry('packages/core-backend/src/attendance/w4c3b-approved-overtime.ts', 'appendApprovedOvertimeCalculationV1', 'attendance_record_calculations', 1, 'history', 'approved_overtime_result_verification'),
   // Org-scoped readonly upgrade preflight identifies old V2 candidates through
   // the parent's calculation pointer. Labels remain REVIEW_REQUIRED evidence,
   // never validated/current authoritative output or a public calculation list.
