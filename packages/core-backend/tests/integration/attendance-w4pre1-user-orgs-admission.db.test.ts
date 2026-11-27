@@ -1413,7 +1413,7 @@ describeIfDatabase('role editor — admin-level codes and namespace-admin role d
     expect(deleted.status).toBe(200)
     expect(await membersOf(roles.orphan)).toEqual([])
 
-    // Seed a pre-existing orphan membership from before that cleanup behavior.
+    // A membership row whose role row is absent.
     await query(
       'INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)',
       [ids.orphanMember, roles.orphan],
