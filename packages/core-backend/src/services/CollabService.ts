@@ -832,6 +832,29 @@ export class CollabService {
     return this.io
   }
 
+  /**
+   * Stop of the server only: closes the transport of every connection with its standard close, which
+   * writes the packets already queued first and then ends the transport; the client sees a transport
+   * close and reconnects by itself. Sends nothing else. Returns how many transports were closed; a
+   * client whose close throws is skipped and logged without values.
+   */
+  closeTransportsForShutdown(): number {
+    const engine = this.io?.engine as unknown as { clients?: Record<string, { close(): unknown }> } | undefined
+    let closed = 0
+    let failed = false
+    for (const client of Object.values(engine?.clients ?? {})) {
+      // One client whose close throws (a throwing disconnect listener) must not keep the others open.
+      try {
+        client.close()
+        closed += 1
+      } catch {
+        failed = true
+      }
+    }
+    if (failed) this.logger.warn('Transport close at shutdown failed for a client')
+    return closed
+  }
+
   broadcast(event: string, data: unknown): void {
     if (!this.io) {
       this.logger.warn('Attempted to broadcast before initialization')

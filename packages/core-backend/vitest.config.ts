@@ -524,6 +524,10 @@ export default defineConfig({
       'tests/integration/realtime-authority-read.db.test.ts',
       'tests/integration/realtime-revalidation.db.test.ts',
       'tests/integration/realtime-yjs-startup-wiring.db.test.ts',
+      // The stop of the whole server with client connections open: one server process per case on a
+      // real PostgreSQL, started by the file itself. Excluded from the no-DB job so describe.skip cannot
+      // report it green.
+      'tests/integration/server-stop-open-connections.db.test.ts',
       // Database-side census of the classifier input tables (triggers, rules, function bodies,
       // users-locking functions, cascading foreign keys, the default expressions of the three
       // users columns the classifier reads, views and materialized views over an input table, the
