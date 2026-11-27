@@ -1312,7 +1312,11 @@ describe('MetaFormView A4 form logic', () => {
 // A number box holding a draft it cannot read ("-", "1e") reports `validity.badInput`, and its value reads "".
 // jsdom never reports it, so the cells set it on the box.
 describe('MetaFormView number boxes: a draft the box cannot read', () => {
-  function mountNumberForm(options: { type?: string; pages?: boolean } = {}) {
+  function mountNumberForm(options: {
+    type?: string
+    pages?: boolean
+    initialValues?: { value: Record<string, unknown> | null }
+  } = {}) {
     const submitSpy = vi.fn()
     const container = document.createElement('div')
     document.body.appendChild(container)
@@ -1330,7 +1334,9 @@ describe('MetaFormView number boxes: a draft the box cannot read', () => {
             { id: 'fld_qty', name: 'Quantity', type: options.type ?? 'number' },
             { id: 'fld_note', name: 'Note', type: 'string' },
           ],
-          record: record.value,
+          ...(options.initialValues
+            ? { record: null, initialValues: options.initialValues.value }
+            : { record: record.value }),
           loading: false,
           readOnly: false,
           successMessage: message.value,
@@ -1515,6 +1521,52 @@ describe('MetaFormView number boxes: a draft the box cannot read', () => {
       await form.submit()
       expect(form.submitSpy).toHaveBeenCalledWith({ fld_qty: 7, fld_note: 'kept' })
     } finally {
+      form.unmount()
+    }
+  })
+
+  it.each(['number', 'currency', 'percent'])('prefill arriving after typing in a focused %s box replaces the typing, and Save sends the prefilled number', async (type) => {
+    const initialValues = shallowRef<Record<string, unknown> | null>(null)
+    const form = mountNumberForm({ type, initialValues })
+    try {
+      await flushUi()
+      expect(form.box().value).toBe('')
+      form.focus()
+      expect(document.activeElement).toBe(form.box())
+      await form.type('12')
+      expect(form.box().value).toBe('12')
+      initialValues.value = { fld_qty: 4 }
+      await flushUi()
+      expect(document.activeElement).toBe(form.box())
+      expect(form.box().value).toBe('4')
+      await form.submit()
+      expect(form.submitSpy).toHaveBeenCalledTimes(1)
+      expect(form.submitSpy).toHaveBeenCalledWith({ fld_qty: 4 })
+    } finally {
+      form.unmount()
+    }
+  })
+
+  it.each(['number', 'currency', 'percent'])('Reset replaces typing in a focused %s box with the stored number, and Save sends that number', async (type) => {
+    const form = mountNumberForm({ type })
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    try {
+      await flushUi()
+      expect(form.box().value).toBe('5')
+      form.focus()
+      expect(document.activeElement).toBe(form.box())
+      await form.type('12')
+      expect(form.box().value).toBe('12')
+      form.container.querySelector<HTMLButtonElement>('.meta-form-view__reset')!.click()
+      await flushUi()
+      expect(confirmSpy).toHaveBeenCalledTimes(1)
+      expect(document.activeElement).toBe(form.box())
+      expect(form.box().value).toBe('5')
+      await form.submit()
+      expect(form.submitSpy).toHaveBeenCalledTimes(1)
+      expect(form.submitSpy).toHaveBeenCalledWith({ fld_qty: 5, fld_note: 'kept' })
+    } finally {
+      confirmSpy.mockRestore()
       form.unmount()
     }
   })
