@@ -41,10 +41,14 @@ const h_ = vi.hoisted(() => ({
   removeItemReply: vi.fn(),
   /** `GET /api/task-lists/:id/events?…` (id, query). */
   eventsReply: vi.fn(),
+  /** `GET /api/tasks/people?…` (query): the people lookup that names the activity's actors. */
+  peopleReply: vi.fn(),
 }))
 
 vi.mock('../src/utils/api', () => ({
   apiFetch: h_.apiFetch,
+  // No org header: the account-switch cells compare the token's subject.
+  authHeaders: () => ({}),
 }))
 
 vi.mock('../src/tasks/tasksContext', () => ({
@@ -71,6 +75,7 @@ vi.mock('../src/composables/useLocale', () => ({
 import TaskListView from '../src/views/tasks/TaskListView.vue'
 import { onListsChanged } from '../src/tasks/tasksListsBus'
 import { formatViewerInstant } from '../src/tasks/tasksDateDisplay'
+import { notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
 
 // ---------------------------------------------------------------------------------------------
 // Fixtures and the fake backend
@@ -149,6 +154,8 @@ async function fakeFetch(path: string, init?: FetchInit): Promise<Response> {
     return h_.removeItemReply(decodeURIComponent(match[1]), decodeURIComponent(match[2]))
   }
   if (method === 'GET' && (match = /^\/api\/task-lists\/([^/]+)\/events$/.exec(pathname))) return h_.eventsReply(decodeURIComponent(match[1]), query)
+  // The people lookup that names the activity's actors (`h_.peopleReply`; names nobody by default).
+  if (method === 'GET' && pathname === '/api/tasks/people') return h_.peopleReply(query)
   // M4 FE-7: the grouping board's two reads — a list with no custom groups and no placements yet
   // (tasks-groups.spec.ts covers the board itself).
   if (method === 'GET' && (match = /^\/api\/task-lists\/([^/]+)\/groups$/.exec(pathname))) {
@@ -342,6 +349,7 @@ beforeEach(() => {
     return jsonResponse(200, { listId: id, taskId })
   })
   h_.eventsReply.mockReset().mockImplementation((id: string, query: string) => page(events[id] ?? [], query))
+  h_.peopleReply.mockReset().mockImplementation(() => jsonResponse(200, { items: [], truncated: false }))
 })
 
 afterEach(() => {
@@ -1366,5 +1374,274 @@ describe('list page — activity', () => {
     const el = await mountAt('/task-lists/tl_1')
     await click(el, 'tasks-list-detail-events-toggle')
     must(el, 'tasks-view-org-missing')
+  })
+})
+
+describe('list page — activity — names', () => {
+  /** The ids of each people lookup, in the order they were sent. */
+  const lookups = () => h_.peopleReply.mock.calls.map(([query]) => (new URLSearchParams(query as string).get('ids') ?? '').split(','))
+  const actorTexts = (el: HTMLElement) => shownAll(el, 'tasks-list-detail-event-actor').map((node) => node.textContent?.trim())
+  /** A lookup answer naming each `[id, name]`. */
+  const named = (people: Array<[string, string]>) =>
+    jsonResponse(200, { items: people.map(([id, name]) => ({ id, name, detail: '', canUseTasks: true })), truncated: false })
+  /** 150 events: the first page by u1 only, the second by u1 and u2. */
+  const twoPages = () =>
+    Array.from({ length: 150 }, (_, i) => event(`ev${String(i).padStart(3, '0')}`, 'renamed', { actorId: i < 100 || i % 2 === 0 ? 'u1' : 'u2' }))
+  /** `count` events, each by its own actor u0, u1, …, in that order. */
+  const ownActors = (count: number) =>
+    Array.from({ length: count }, (_, i) => event(`ev${String(i).padStart(2, '0')}`, 'renamed', { actorId: `u${i}` }))
+
+  it('names replace the actor ids, one lookup for the distinct actors of the page; an actor it leaves out, or whose id holds a comma, stays an id', async () => {
+    events.tl_1 = [
+      event('ev5', 'archived', { actorId: 'u2' }),
+      event('ev4', 'renamed'),
+      event('ev3', 'renamed'),
+      event('ev2', 'created', { actorId: 'u3' }),
+      event('ev1', 'created', { actorId: 'u,9' }),
+    ]
+    h_.peopleReply.mockImplementation(() => named([['u1', 'Ann'], ['u2', 'Bo'], ['u,9', 'Cy']]))
+    const el = await mountAt('/task-lists/tl_1')
+    expect(lookups()).toEqual([])
+    await click(el, 'tasks-list-detail-events-toggle')
+    await flush()
+    expect(lookups()).toEqual([['u2', 'u1', 'u3']])
+    expect(actorTexts(el)).toEqual(['Bo', 'Ann', 'Ann', 'u3', 'u,9'])
+  })
+
+  it('a page that lands after the panel closed is not looked up; reopening looks up the page it reads', async () => {
+    events.tl_1 = [event('ev1', 'renamed', { actorId: 'u2' })]
+    const first = deferred<Response>()
+    h_.eventsReply.mockImplementationOnce(() => first.promise)
+    const el = await mountAt('/task-lists/tl_1')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await click(el, 'tasks-list-detail-events-toggle')
+    first.resolve(jsonResponse(200, { items: [event('ev_old', 'created', { actorId: 'u9' })], total: 1 }))
+    await flush()
+    expect(lookups()).toEqual([])
+    await click(el, 'tasks-list-detail-events-toggle')
+    await flush()
+    expect(lookups()).toEqual([['u2']])
+  })
+
+  it('load more looks up only the actors not asked yet', async () => {
+    events.tl_1 = twoPages()
+    const el = await mountAt('/task-lists/tl_1')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await flush()
+    expect(lookups()).toEqual([['u1']])
+    await click(el, 'tasks-list-detail-events-more')
+    await flush()
+    expect(lookups()).toEqual([['u1'], ['u2']])
+  })
+
+  it('sixty actors are looked up as fifty, then ten once the first answer is in', async () => {
+    events.tl_1 = ownActors(60)
+    const firstLookup = deferred<Response>()
+    h_.peopleReply.mockImplementationOnce(() => firstLookup.promise)
+    const el = await mountAt('/task-lists/tl_1')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await flush()
+    expect(lookups().map((ids) => ids.length)).toEqual([50])
+    expect(lookups()[0]).toEqual(Array.from({ length: 50 }, (_, i) => `u${i}`))
+    firstLookup.resolve(named([['u0', 'Ann']]))
+    await flush()
+    expect(lookups().map((ids) => ids.length)).toEqual([50, 10])
+    expect(lookups()[1]).toEqual(Array.from({ length: 10 }, (_, i) => `u${50 + i}`))
+    expect(actorTexts(el).slice(0, 2)).toEqual(['Ann', 'u1'])
+  })
+
+  it('twenty actors with 255-character ids are looked up as sixteen and four, each part at most 4096 characters', async () => {
+    const longId = (i: number) => `${'a'.repeat(253)}${String(i).padStart(2, '0')}`
+    events.tl_1 = Array.from({ length: 20 }, (_, i) => event(`ev${String(i).padStart(2, '0')}`, 'renamed', { actorId: longId(i) }))
+    const el = await mountAt('/task-lists/tl_1')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await flush()
+    expect(lookups().map((ids) => ids.length)).toEqual([16, 4])
+    expect(lookups().map((ids) => ids.join(',').length)).toEqual([4095, 1023])
+    expect(actorTexts(el)[0]).toBe(longId(0))
+  })
+
+  it('a 403 lookup leaves the ids, and nothing is looked up again: not on reopening, not for the new actor of the next page', async () => {
+    events.tl_1 = twoPages()
+    h_.peopleReply.mockImplementation(() => jsonResponse(403, { error: 'Insufficient permissions' }))
+    const el = await mountAt('/task-lists/tl_1')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await flush()
+    expect(lookups()).toEqual([['u1']])
+    expect(actorTexts(el)[0]).toBe('u1')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await click(el, 'tasks-list-detail-events-more')
+    await flush()
+    expect(lookups()).toEqual([['u1']])
+    expect(actorTexts(el)).toContain('u2')
+  })
+
+  it.each([
+    ['a 429', () => jsonResponse(429, { error: { code: 'RATE_LIMITED' } })],
+    ['a 500', () => jsonResponse(500, {})],
+    ['a malformed 200', () => jsonResponse(200, { items: [{ id: 'u1' }], truncated: false })],
+    ['a transport failure', () => Promise.reject(new TypeError('network down'))],
+  ] as const)("%s leaves the IDs visible until reopening retries the lookup", async (_label, reply) => {
+    events.tl_1 = twoPages()
+    h_.peopleReply.mockImplementationOnce(reply).mockImplementation(() => named([['u1', 'Ann'], ['u2', 'Bo']]))
+    const el = await mountAt('/task-lists/tl_1')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await flush()
+    expect(actorTexts(el)[0]).toBe('u1')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await click(el, 'tasks-list-detail-events-more')
+    await flush()
+    expect(lookups()).toEqual([['u1'], ['u1'], ['u2']])
+    expect(new Set(actorTexts(el))).toEqual(new Set(['Ann', 'Bo']))
+  })
+
+  it('reopening retries the failed and unsent batches while keeping successful names', async () => {
+    const ids = Array.from({ length: 34 }, (_, i) => 'a'.repeat(253) + String(i).padStart(2, '0'))
+    events.tl_1 = ids.map((id, i) => event(String(i), 'renamed', { actorId: id }))
+    h_.peopleReply.mockImplementationOnce(() => named([[ids[0], 'Ann']]))
+      .mockImplementationOnce(() => jsonResponse(500, {}))
+      .mockImplementationOnce(() => named([[ids[16], 'Bo']]))
+      .mockImplementationOnce(() => named([[ids[32], 'Cy']]))
+    const el = await mountAt('/task-lists/tl_1')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await flush()
+    expect(lookups()).toEqual([ids.slice(0, 16), ids.slice(16, 32)])
+    expect(actorTexts(el)[16]).toBe(ids[16])
+    await click(el, 'tasks-list-detail-events-toggle')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await flush()
+    expect(lookups()).toEqual([ids.slice(0, 16), ids.slice(16, 32), ids.slice(16, 32), ids.slice(32)])
+    expect([0, 16, 32].map((index) => actorTexts(el)[index])).toEqual(['Ann', 'Bo', 'Cy'])
+  })
+
+  it("a route edge drops the old list's names: the new list's actor is asked again, and shows its id until the answer", async () => {
+    events.tl_1 = [event('ev1', 'renamed', { actorId: 'u2' })]
+    events.tl_2 = [event('ev_b', 'created', { listId: 'tl_2', actorId: 'u2' })]
+    h_.peopleReply.mockImplementationOnce(() => named([['u2', 'Bo']]))
+    const el = await mountAt('/task-lists/tl_1')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await flush()
+    expect(actorTexts(el)).toEqual(['Bo'])
+    const second = deferred<Response>()
+    h_.peopleReply.mockImplementationOnce(() => second.promise)
+    await go('/task-lists/tl_2')
+    await click(el, 'tasks-list-detail-events-toggle')
+    expect(lookups()).toEqual([['u2'], ['u2']])
+    expect(actorTexts(el)).toEqual(['u2'])
+    second.resolve(named([['u2', 'Bo']]))
+    await flush()
+    expect(actorTexts(el)).toEqual(['Bo'])
+  })
+
+  it('a lookup answered after the route moved on names nothing on the new list', async () => {
+    events.tl_1 = [event('ev1', 'renamed', { actorId: 'u2' })]
+    events.tl_2 = [event('ev_b', 'created', { listId: 'tl_2', actorId: 'u2' })]
+    const late = deferred<Response>()
+    h_.peopleReply.mockImplementationOnce(() => late.promise)
+    const el = await mountAt('/task-lists/tl_1')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await go('/task-lists/tl_2')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await flush()
+    late.resolve(named([['u2', 'Bo']]))
+    await flush()
+    expect(lookups()).toEqual([['u2'], ['u2']])
+    expect(actorTexts(el)).toEqual(['u2'])
+  })
+
+  it('nothing is looked up once the page is left: the rest of a split lookup is not sent', async () => {
+    events.tl_1 = ownActors(60)
+    const firstLookup = deferred<Response>()
+    h_.peopleReply.mockImplementationOnce(() => firstLookup.promise)
+    const el = await mountAt('/task-lists/tl_1')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await go('/tasks')
+    must(el, 'other-page')
+    firstLookup.resolve(named([['u0', 'Ann']]))
+    await flush()
+    expect(lookups().map((ids) => ids.length)).toEqual([50])
+  })
+
+  describe('account switches', () => {
+    const fakeToken = (payload: Record<string, unknown>) => `h.${btoa(JSON.stringify(payload)).replace(/=+$/, '')}.s`
+    const TOKEN_A = fakeToken({ sub: 'u1', exp: 4102444800 })
+    const TOKEN_A_REFRESHED = fakeToken({ sub: 'u1', exp: 4102448400 })
+    const TOKEN_B = fakeToken({ sub: 'u9', exp: 4102444800 })
+    /** Another tab signs in: the shared storage changes and this tab is told nothing. */
+    const signIn = (token: string) => localStorage.setItem('auth_token', token)
+    /** The same, plus the `storage` event a browser delivers to the other tabs. */
+    const signInElsewhereWithEvent = (token: string) => {
+      signIn(token)
+      window.dispatchEvent(new StorageEvent('storage', { key: 'auth_token', newValue: token }))
+    }
+    /** A sign-in in this tab: the session switch `useAuth` announces. */
+    const signInHere = (token: string) => {
+      signIn(token)
+      notifyAuthPrincipalChange()
+    }
+
+    beforeEach(() => {
+      localStorage.removeItem('auth_token')
+      signIn(TOKEN_A)
+      events.tl_1 = [event('ev1', 'renamed', { actorId: 'u2' })]
+      h_.peopleReply.mockImplementation(() => named([['u2', 'Bo']]))
+    })
+
+    afterEach(() => {
+      localStorage.removeItem('auth_token')
+    })
+
+    for (const [how, switchTo] of [
+      ['another tab (a storage change)', signInElsewhereWithEvent],
+      ['this tab (a session switch)', signInHere],
+    ] as Array<[string, (token: string) => void]>) {
+      it(`a switch to another account from ${how} drops the names`, async () => {
+        const el = await mountAt('/task-lists/tl_1')
+        await click(el, 'tasks-list-detail-events-toggle')
+        await flush()
+        expect(actorTexts(el)).toEqual(['Bo'])
+        switchTo(TOKEN_B)
+        await flush()
+        expect(actorTexts(el)).toEqual(['u2'])
+      })
+
+      it(`a lookup asked before a switch seen from ${how} that lands after it is dropped`, async () => {
+        const late = deferred<Response>()
+        h_.peopleReply.mockImplementationOnce(() => late.promise)
+        const el = await mountAt('/task-lists/tl_1')
+        await click(el, 'tasks-list-detail-events-toggle')
+        expect(lookups()).toEqual([['u2']])
+        switchTo(TOKEN_B)
+        await flush()
+        late.resolve(named([['u2', 'Bo']]))
+        await flush()
+        expect(actorTexts(el)).toEqual(['u2'])
+      })
+    }
+
+    it('a lookup that lands after a silent switch to another account is dropped', async () => {
+      const late = deferred<Response>()
+      h_.peopleReply.mockImplementationOnce(() => late.promise)
+      const el = await mountAt('/task-lists/tl_1')
+      await click(el, 'tasks-list-detail-events-toggle')
+      expect(lookups()).toEqual([['u2']])
+      signIn(TOKEN_B)
+      late.resolve(named([['u2', 'Bo']]))
+      await flush()
+      expect(actorTexts(el)).toEqual(['u2'])
+    })
+
+    it('negative control: a token refresh for the same person keeps the names', async () => {
+      const el = await mountAt('/task-lists/tl_1')
+      await click(el, 'tasks-list-detail-events-toggle')
+      await flush()
+      expect(actorTexts(el)).toEqual(['Bo'])
+      signInElsewhereWithEvent(TOKEN_A_REFRESHED)
+      notifyAuthPrincipalChange()
+      await flush()
+      expect(actorTexts(el)).toEqual(['Bo'])
+    })
   })
 })

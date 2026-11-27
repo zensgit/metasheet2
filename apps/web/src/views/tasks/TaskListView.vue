@@ -237,7 +237,7 @@
                 data-testid="tasks-list-detail-event"
                 :data-event-type="event.eventType"
               >
-                <span data-testid="tasks-list-detail-event-actor">{{ event.actorId }}</span>
+                <span data-testid="tasks-list-detail-event-actor">{{ actorNames.nameOf(event.actorId) || event.actorId }}</span>
                 <span data-testid="tasks-list-detail-event-type">{{ listEventLabel(event.eventType, t) }}</span>
                 <time data-testid="tasks-list-detail-event-time" :datetime="event.occurredAt">
                   {{ formatViewerInstant(event.occurredAt, undefined, viewerLocale) }}
@@ -378,6 +378,7 @@ import { formatViewerInstant } from '../../tasks/tasksDateDisplay'
 import { notifyListsChanged } from '../../tasks/tasksListsBus'
 import { checkListName, normalizeUserText } from '../../tasks/tasksDraft'
 import { focusAfterSwap } from '../../tasks/tasksFocus'
+import { createTaskPeopleNames } from '../../tasks/taskPeopleNames'
 
 const route = useRoute()
 const router = useRouter()
@@ -445,6 +446,9 @@ const eventsTotal = ref(0)
 const eventsLastPageEmpty = ref(false)
 const eventsLoadingMore = ref(false)
 const eventsMoreFailed = ref(false)
+// The activity's actors by name: the actors of each page that lands are looked up; an actor the
+// lookup gives no name is shown by id. Dropped on a route edge and when another account or org is seen.
+const actorNames = createTaskPeopleNames()
 
 const membersOpen = ref(false)
 const membersButton = ref<HTMLButtonElement | null>(null)
@@ -644,6 +648,7 @@ async function loadEventsFirstPage(): Promise<void> {
     eventsTotal.value = result.total
     eventsLastPageEmpty.value = result.items.length === 0
     eventsResult.value = { kind: 'ok', items: result.items }
+    void actorNames.request(result.items.map((event) => event.actorId))
     return
   }
   if (result.kind === 'org_missing') {
@@ -669,6 +674,7 @@ async function onLoadMoreEvents(): Promise<void> {
     if (state.kind === 'ok') {
       const seen = new Set(state.items.map((event) => event.id))
       eventsResult.value = { kind: 'ok', items: [...state.items, ...result.items.filter((event) => !seen.has(event.id))] }
+      void actorNames.request(result.items.map((event) => event.actorId))
     }
     return
   }
@@ -897,6 +903,7 @@ function resetPage(): void {
   eventsResult.value = { kind: 'loading' }
   eventsMoreFailed.value = false
   eventsLoadingMore.value = false
+  actorNames.clear()
   membersOpen.value = false
 }
 
@@ -925,6 +932,7 @@ onBeforeUnmount(() => {
   placementsGeneration += 1
   eventsGeneration += 1
   writeToken += 1
+  actorNames.dispose()
 })
 </script>
 
