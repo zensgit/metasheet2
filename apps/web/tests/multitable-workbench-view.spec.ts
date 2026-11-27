@@ -6620,6 +6620,30 @@ describe('MultitableWorkbench view wiring', () => {
       expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_files', ['att_2'], 4, COPY_SAVE]])
     })
 
+    it('an attachment delete on the shown deep-linked copy whose field holds one id as a plain string, not a list: the delete resolves, the copy moves one version on with that field emptied, and its next patch carries the new version', async () => {
+      workbenchMock.client.getRecord.mockResolvedValueOnce({
+        record: { id: 'rec_remote', version: 4, data: { fld_title: 'Remote', fld_files: 'att_1' } },
+        commentsScope: { containerType: 'meta_sheet', containerId: 'sheet_orders', targetType: 'meta_record', targetId: 'rec_remote' },
+        linkSummaries: {},
+        attachmentSummaries: { fld_files: [{ id: 'att_1', filename: 'att_1.txt' }] },
+      })
+      mountWorkbench({ recordId: 'rec_remote' })
+      await flushUi(8)
+      // The drawer stays on the copy, which holds the single id as a plain string.
+      expect(container!.querySelector('[data-record-drawer="rec_remote"]')).toBeTruthy()
+      expect(inspectorStubSeen.record).toMatchObject({ id: 'rec_remote', version: 4, data: { fld_files: 'att_1' } })
+      workbenchMock.client.deleteAttachment = vi.fn().mockResolvedValue({ deleted: 'att_1' })
+      // Awaited directly, so a rejected delete fails here as an assertion.
+      await expect(inspectorStubSeen.deleteAttachmentFn!('att_1', { recordId: 'rec_remote', fieldId: 'fld_files' })).resolves.toBeUndefined()
+      await flushUi()
+      expect(workbenchMock.client.deleteAttachment).toHaveBeenCalledWith('att_1')
+      expect(inspectorStubSeen.record).toMatchObject({ id: 'rec_remote', version: 5, data: { fld_files: [] } })
+      expect(container!.querySelector('[data-record-drawer="rec_remote"]')).toBeTruthy()
+      acceptNextPatch()
+      await patchFor('rec_remote')
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_files', ['att_2'], 5, COPY_SAVE]])
+    })
+
     // --- a remove that ended after the drawer moved on also names the ids it took out ---
 
     async function patchRemovedFor(recordId: string) {
