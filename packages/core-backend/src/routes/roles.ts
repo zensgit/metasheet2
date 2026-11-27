@@ -5,6 +5,7 @@ import { assertPlatformActorAuthority, lockSharedAccessSubjects, PlatformActorAu
 import type { AccessGraphTransactionClient } from '../directory/access-graph-mutex'
 import { auditLog } from '../audit/audit'
 import { pool, transaction } from '../db/pg'
+import { bumpSubjectAuthorizationVersions } from '../multitable/authz-version-protocol'
 import { invalidateUserPerms } from '../rbac/service'
 import { deriveDelegatedAdminNamespace } from '../rbac/namespace-admission'
 import {
@@ -929,6 +930,19 @@ export function rolesRouter(): Router {
             // any surviving membership keeps them. Same transaction, so it commits with the rest.
             await client.query('DELETE FROM role_permissions WHERE role_id=$1', [id])
           }
+          // D21 (Y5a): every member's subject authorization version row, sorted, before the role row
+          // goes and with it the `roles → user_roles` cascade where that FK exists (the cascade's
+          // trigger bumps would otherwise land in scan order, racing a concurrent multi-user
+          // revocation). It sits AFTER the namespace-admission locks above (the writer rule: locks
+          // outside the admission holder's set first, then the version row; every
+          // lockSharedAccessSubjects caller takes advisory → version row, so a version row taken
+          // before those locks is one half of a writer-vs-writer 40P01). A protected role took those
+          // locks and these same rows above, inside lockRoleCatalogAuthority (#6971:
+          // lockSharedAccessSubjects for the actor and every member — admission advisories, then
+          // their version rows in one sorted statement, then the users rows), and its membership
+          // removal took the rows again inside unassignUserRoles; here they are held. An ordinary
+          // role takes no admission lock and takes the version rows now.
+          await bumpSubjectAuthorizationVersions(client, memberIds)
           await client.query('DELETE FROM roles WHERE id=$1', [id])
         })
       } catch (error) {

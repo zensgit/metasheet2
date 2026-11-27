@@ -6,7 +6,29 @@
  * keep one global lock order. A successful access-graph override invalidates
  * open deprovision evidence and advances the same user's generation in the
  * caller's transaction.
+ *
+ * D21 (slice Y5a): the FIRST statement bumps the D21 subject authorization version row of every
+ * locked user, sorted, BEFORE the `users … FOR UPDATE` rows are taken (under `nowait`, #6924's
+ * authorization operation, it instead takes the existing version rows FOR UPDATE NOWAIT and writes
+ * nothing; the operation's DML triggers then advance them). An admission transaction
+ * locks `subject_authorization_versions` FOR SHARE and only then `users` FOR SHARE (the
+ * live-authority order); a writer that took `users` first and bumped the subject row later (through
+ * a membership trigger) would form the one holder-vs-writer cycle the protocol forbids. Doing it here
+ * makes "the version rows before the users rows" true by construction for every caller of this
+ * function. A caller that passes neither option bumps them. `nowait` and `lockOnly` take the
+ * existing rows without a write (below), so a subject that has no version row yet is not locked
+ * here on those two paths.
+ *
+ * The DingTalk identity repair (`auth/dingtalk-identity-repair.ts`) is not a caller since #6964.
+ * It follows its own lock protocol (`auth/user-access-lock.ts`): sorted user admission keys, then
+ * the identity-maintenance mutex, then the users rows. It takes no subject version row and needs
+ * none. On `users` it changes only `access_generation` and `updated_at` (its own statements and
+ * `supersedeDeprovisionEvidenceForAccessGraphWrite` below), columns the D21 users trigger does not
+ * watch, and it writes no other table that carries a D21 subject trigger. It asks for the mutex
+ * before any users row, so it never holds a users row while a handover that holds the mutex waits
+ * for a subject version row.
  */
+import { bumpSubjectAuthorizationVersions, lockSubjectAuthorizationVersions, lockSubjectAuthorizationVersionsNowait } from '../multitable/authz-version-protocol'
 
 export type AccessGraphTransactionClient = {
   query: (
@@ -39,10 +61,18 @@ function normalizeUserIds(userIds: string[]): string[] {
 export async function lockUsersForAccessGraphWrite(
   client: AccessGraphTransactionClient,
   userIds: string[],
-  options: Readonly<{ nowait?: boolean }> = {},
+  options: Readonly<{ nowait?: boolean; lockOnly?: boolean }> = {},
 ): Promise<Map<string, LockedAccessGraphUser>> {
   const normalizedUserIds = normalizeUserIds(userIds)
   const lockedUsers = new Map<string, LockedAccessGraphUser>()
+
+  // D21: subject version rows first (sorted, one statement), then the users rows. Under `nowait`
+  // (#6924's authorization operation) the existing version rows are taken NOWAIT and lock-only,
+  // like the users rows below; the operation's DML triggers advance them. Under `lockOnly` (a
+  // CONSUME_CLASS_DECISION plan, which writes no D21-covered table) they are taken lock-only and waiting.
+  if (options.nowait === true) await lockSubjectAuthorizationVersionsNowait(client, normalizedUserIds)
+  else if (options.lockOnly === true) await lockSubjectAuthorizationVersions(client, normalizedUserIds)
+  else await bumpSubjectAuthorizationVersions(client, normalizedUserIds)
 
   for (const userId of normalizedUserIds) {
     const result = await client.query(

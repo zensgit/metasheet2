@@ -4,6 +4,7 @@
 // database-observed blocking, and database-raised audit failures are deliberate.
 // Run only in the EXPECT_DB lane / a freshly-created disposable synthetic DB.
 
+import { YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL } from '../../src/db/migrations/zzzz20261126202000_pin_yida_ack_business_timezone'
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
@@ -275,8 +276,8 @@ describeIfDatabase('SA05B1 Yida delivery ledger — real PostgreSQL, no transpor
     schema = `yida_delivery_${randomUUID().replaceAll('-', '')}`
     await owner.query(`CREATE SCHEMA ${ident(schema)}`)
     await owner.query(`SET search_path TO ${ident(schema)}`)
-    await owner.query(migrationSql)
-    await owner.query(migrationSql) // Migration replay must preserve the actual contract.
+    await owner.query(migrationSql + '\n' + YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL)
+    await owner.query(migrationSql + '\n' + YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL) // Migration replay must preserve the actual contract.
     first = await openSession()
     second = await openSession()
   }, 30000)
@@ -322,7 +323,7 @@ describeIfDatabase('SA05B1 Yida delivery ledger — real PostgreSQL, no transpor
     await first.store.cancelPrepared(actor(inputs[4]))
     const ledger = await rows(LEDGER)
     const audit = await rows(AUDIT)
-    await owner.query(migrationSql)
+    await owner.query(migrationSql + '\n' + YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL)
     expect(await rows(LEDGER)).toEqual(ledger)
     expect(await rows(AUDIT)).toEqual(audit)
     for (const input of inputs.slice(1)) await rejected(second.store.claim(actor(input)), 'YIDA_DELIVERY_STATE')
@@ -865,7 +866,7 @@ describeIfDatabase('SA05B1 Yida delivery ledger — real PostgreSQL, no transpor
     expect(audit).toHaveLength(3)
     expect(audit.map((row) => row.event).sort()).toEqual(['claim', 'prepare', 'unknown'])
     for (const row of audit) {
-      expect(Object.keys(row).sort()).toEqual(['created_at', 'event', 'id', 'ledger_id', 'reason', 'status'])
+      expect(Object.keys(row).sort()).toEqual(['ack_time_zone', 'created_at', 'event', 'id', 'ledger_id', 'reason', 'status'])
       expect(row.ledger_id).toBe(prepared.record.id)
       expect(JSON.stringify(row)).not.toMatch(/synthetic-tenant|synthetic-owner|synthetic-credential|synthetic-target|synthetic-instance/)
       expect(JSON.stringify(row)).not.toContain(claimed.claimToken)

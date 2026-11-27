@@ -1,5 +1,6 @@
 // Real native JWT/AuthService, owner runtime, plugin binding and PostgreSQL.
 // Only the YiDa fetch dependency is synthetic; it never opens a socket.
+import { YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL } from '../../src/db/migrations/zzzz20261126202000_pin_yida_ack_business_timezone'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { createServer, request, type ClientRequest, type Server } from 'node:http'
@@ -70,7 +71,10 @@ export function draftInput(mode = 'original', quantity = 6): Input {
 // branch with these; the permission logic itself is proved in tests/unit/yida-sheet-source.test.ts.
 export const sheetColumns = Object.freeze([{ fieldId: 'fld_project', source: 'projectNo' }, { fieldId: 'fld_line', source: 'lineId' },
   { fieldId: 'fld_parent', source: 'parentCode' }, { fieldId: 'fld_qty', source: 'quantity' }, { fieldId: 'fld_desc', source: 'description' }])
-type SheetState = { access: Data; records: Array<{ id: string; data: Data }> }
+// `registeredProject` (slice YE): when set, the synthetic sheet is a REGISTERED project sheet of that project (the
+// host's resolveProjectSheet answers it) and fld_line is its key column, so the sheet read yields a source binding.
+// Absent (the default), every read stays unbound exactly as before.
+type SheetState = { access: Data; records: Array<{ id: string; data: Data }>; registeredProject?: string }
 const defaultSheet = (): SheetState => ({ access: {}, records: [{ id: 'rec_synthetic_1',
   data: { fld_project: 'SYN-P1', fld_line: 'SYN-L1', fld_qty: 6, fld_desc: 'synthetic HTTP part' } }] })
 
@@ -104,9 +108,16 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
   const sql: string[] = [], tokenPayloads: Data[] = [], formPayloads: Data[] = []
   const sessions: Record<string, string> = {}, tokens: Record<string, string> = {}
   let enablement: unknown = 'false', tokenCommitted = false, validRequests = true, formOutcome: 'ack' | 'unknown' | 'unparsed' = 'ack'
-  let multiTargetEnablement: unknown = 'false', multiTargetUp = '', receiptUnparsedUp = '', sourceBindingUp = '', sheet = defaultSheet()
+  let multiTargetEnablement: unknown = 'false', multiTargetUp = '', receiptUnparsedUp = '', sourceBindingUp = '', generatedLayoutUp = '', sheet = defaultSheet()
   // D20: the raw INTEGRATION_YIDA_UNBOUND_TEST_TARGET_REFS value as the runtime reads it per call (absent = no listed target).
   let unboundTestTargetRefs: unknown
+  // D21 (slice Y5): this lane's sheet source is synthetic (the schema has no meta_* tables, permission tables or version
+  // triggers), so the host's in-transaction re-check of a BOUND row is a synthetic double at the same seam: it answers
+  // `reauthorization` (default: authorized) and counts its calls. An unbound (pasted) row never reaches it. The real
+  // re-check runs on real PG in stock-preparation-yida-send-approvals-realdb.test.ts; production wires
+  // createYidaSourceBindingReauthorizer() (src/index.ts).
+  const REAUTHORIZED = Object.freeze({ authorized: true })
+  let reauthorization: unknown = REAUTHORIZED, reauthorizations = 0
   // Gate 1 proof controls: destroy the in-flight client socket at the first token call (after admission has
   // committed), observe the server-side close, and let the test wait for the host run to settle afterwards.
   let disconnectAtToken = false, inflight: ClientRequest | undefined, closedResponses = 0
@@ -125,7 +136,12 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
   const sheetFields = [{ id: 'fld_project', type: 'string' }, { id: 'fld_line', type: 'string', property: { stockPreparation: { key: true } } },
     { id: 'fld_parent', type: 'string' }, { id: 'fld_qty', type: 'number' }, { id: 'fld_desc', type: 'string' }]
   const sheetSource = {
-    async resolveProjectSheet() { sheetReads++; return projectSheet },
+    // One registry lookup, counted like every other sheet read: setProjectSheet (persists until reset) wins, else the
+    // current sheet state's `registeredProject` (slice YE; reset by every setSheet), else unregistered.
+    async resolveProjectSheet() {
+      sheetReads++
+      return projectSheet ?? (sheet.registeredProject === undefined ? null : { projectNo: sheet.registeredProject })
+    },
     async resolveAccess() {
       sheetReads++
       return { userId: principals.owner, isAdminRole: false, canRead: true, canExport: true, live: true, bounded: false,
@@ -218,6 +234,7 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
   async function startRuntime(useDefault = false) {
     await closeRuntime()
     runtime = createRuntime({ database, security, fetch: syntheticFetch,
+      reauthorizeSourceBinding: async () => { reauthorizations++; return reauthorization },
       ...(useDefault ? {} : { readEnablement: () => enablement }), timeoutMs: 5000,
       ...(options.multiTarget ? { readMultiTargetEnablement: () => multiTargetEnablement,
         readUnboundTestTargetRefs: () => unboundTestTargetRefs } : {}) })
@@ -350,6 +367,11 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
     // Source binding (design baseline v2.3 §7.2): the two digest columns and the identity fence, as production migrates them.
     sourceBindingUp = (await load('packages/core-backend/src/db/migrations/zzzz20261106110300_add_integration_yida_source_binding.ts'))
       .YIDA_SOURCE_BINDING_UP_SQL as string
+    // P1 fix r1 (2026-11-08): the generated-layout seal table, as production migrates it (zzzz20261108120000; it references
+    // 093 / 094). The send authority reads the target's seal row for EVERY approval and admission — v2 included — so a
+    // schema without it answers 503 UNAVAILABLE to every approval; these lanes send v2 drafts and never seal.
+    generatedLayoutUp = (await load('packages/core-backend/src/db/migrations/zzzz20261108120000_create_integration_yida_generated_layout.ts'))
+      .YIDA_GENERATED_LAYOUT_UP_SQL as string
     const route = await load('packages/core-backend/src/routes/integration-yida-owner.ts')
     createRouter = route.createIntegrationYidaOwnerRouter as typeof createRouter
     noStore = route.yidaOwnerNoStoreMiddleware as RequestHandler; jsonOnly = route.yidaOwnerJsonOnlyMiddleware as RequestHandler
@@ -363,13 +385,14 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
     '094_create_integration_yida_approved_target.sql', '095_create_integration_yida_send_approvals.sql',
     ...(options.initialization ? ['096_create_integration_yida_initialization.sql'] : [])]
     .map(name => readFileSync(path.join(root, 'packages/core-backend/migrations', name), 'utf8')).join('\n')
-    + '\n' + receiptUnparsedUp + '\n' + sourceBindingUp
+    + '\n' + receiptUnparsedUp + '\n' + sourceBindingUp + '\n' + generatedLayoutUp
     + (options.multiTarget ? '\n' + multiTargetUp : '')
   return {
     sql, tokens, sessions, tokenPayloads, formPayloads, rows, proof, http, tokenFor, startRuntime, closeRuntime, cleanup,
     setEnablement(value: unknown) { enablement = value }, setFormOutcome(value: 'ack' | 'unknown' | 'unparsed') { formOutcome = value },
     setMultiTarget(value: unknown) { multiTargetEnablement = value },
     setUnboundTestTargetRefs(value: unknown) { unboundTestTargetRefs = value },
+    setReauthorization(value: unknown) { reauthorization = value }, get reauthorizations() { return reauthorizations },
     setDisconnectAtToken(value: boolean) { disconnectAtToken = value },
     async settleSubmissions() { await lastSubmission },
     holdNextForm() {
@@ -407,7 +430,7 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
       if (schemaCreated) { await admin!.query(`DROP SCHEMA ${ident(schema)} CASCADE`); schemaCreated = false }
       await admin!.query(`CREATE SCHEMA ${ident(schema)}`); schemaCreated = true
       await admin!.query(`SET search_path TO ${ident(schema)}`)
-      await admin!.query(ddl)
+      await admin!.query(ddl + '\n' + YIDA_ACK_BUSINESS_TIMEZONE_UP_SQL)
       // Exact consumed auth/RBAC/session shapes: no absent-table fallback.
       await admin!.query(`
         CREATE TABLE users(id text PRIMARY KEY,email text,username text,mobile text,name text,role text,permissions jsonb,
@@ -424,6 +447,10 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
         CREATE TABLE user_sessions(id text PRIMARY KEY,user_id text,issued_at timestamptz,expires_at timestamptz,
           last_seen_at timestamptz,revoked_at timestamptz,revoked_by text,revoke_reason text,ip_address text,user_agent text,
           created_at timestamptz,updated_at timestamptz);
+        -- D21 (slice Y5): the two authorization version rows of zzzz20261106110500 (table shapes only: the lane sends
+        -- pasted, unbound rows, so no trigger and no sheet row is ever consulted; approve/admit hold the actor's subject row).
+        CREATE TABLE sheet_permission_versions(sheet_id text PRIMARY KEY,version bigint NOT NULL DEFAULT 1,updated_at timestamptz NOT NULL DEFAULT now());
+        CREATE TABLE subject_authorization_versions(subject_id text PRIMARY KEY,version bigint NOT NULL DEFAULT 1,updated_at timestamptz NOT NULL DEFAULT now());
       `)
       for (const [key, actorId] of Object.entries(principals)) {
         await admin!.query(`INSERT INTO users(id,email,username,name,role,permissions,password_hash,is_active,
@@ -465,6 +492,7 @@ export async function createYidaOwnerHttpRealdbFixture(options: { initialization
       enablement = 'false'; tokenCommitted = false; validRequests = true; formOutcome = 'ack'
       multiTargetEnablement = 'false'; unboundTestTargetRefs = undefined; sheet = defaultSheet(); sheetReads = 0; projectSheet = null
       disconnectAtToken = false; inflight = undefined; closedResponses = 0; lastSubmission = Promise.resolve()
+      reauthorization = REAUTHORIZED; reauthorizations = 0
       await startRuntime()
     },
   }

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { transaction } from '../db/pg'
 import { acquireSourceSyncFreezeLock } from './source-sync-freeze-lock'
 import { lockUsersForAccessGraphWrite } from './access-graph-mutex'
+import { bumpSubjectAuthorizationVersions } from '../multitable/authz-version-protocol'
 
 type Row = Record<string, unknown>
 type Client = {
@@ -72,24 +73,61 @@ async function lockPair(c: Client, p: Pair, actorId: string): Promise<void> {
   // Same order as sync: freeze key before local apply. Both ends prevent a late target sync.
   for (const id of [p.sourceIntegrationId, p.targetIntegrationId].sort())
     await acquireSourceSyncFreezeLock(c, id)
+  const linkedUsers = () =>
+    c.query(
+      `SELECT DISTINCT l.local_user_id FROM directory_account_links l
+    JOIN directory_accounts a ON a.id = l.directory_account_id
+    WHERE a.integration_id = ANY($1::uuid[]) AND l.local_user_id IS NOT NULL ORDER BY l.local_user_id`,
+      [[p.sourceIntegrationId, p.targetIntegrationId]],
+    )
+  // D21 (Y5a): the subject authorization version rows FIRST (sorted): before any users-row lock, as
+  // every access-graph writer and every admission takes them (subject → users), and before the
+  // table fences below. The handover WAITS here behind an in-flight admission or bump-first writer,
+  // so it holds no table fence yet. With the fences already held, a login that had bumped its
+  // version row and went on to update its identity row waited for the fence while the handover
+  // waited for the version row; PostgreSQL ended that with 40P01 in one of the two. While it waits
+  // here the handover holds the maintenance mutex, the source freeze keys and the version rows this
+  // same statement has already taken (it takes them in sorted order). A writer that reaches version
+  // rows in another order through triggers alone can therefore still meet it, as it can meet any
+  // admission.
+  //
+  // This is not the only wait of the lock phase. The three `FOR UPDATE` statements on directory
+  // rows at the end of this function wait as well, under the fences: a transaction that holds one of
+  // those rows (a login holds its source integration row FOR SHARE) and then writes a fenced table
+  // meets the handover there: PostgreSQL fails one of the two with 40P01, unless the handover's
+  // lock_timeout ends its wait first. Main has the same order; it is not changed here.
+  const versionedUserIds = [
+    ...(await linkedUsers()).rows.map((r) => String(r.local_user_id)),
+    actorId,
+  ].sort()
+  await bumpSubjectAuthorizationVersions(c, versionedUserIds)
   // Existing permission writers do not all use the user mutex. This rare operator transaction
   // refuses concurrent authority writes rather than certifying a stale permission snapshot.
   await c.query(`LOCK TABLE users, user_roles, user_permissions, role_permissions, roles,
     user_orgs, user_external_identities, user_external_auth_grants, directory_account_links, directory_account_departments,
     delegated_role_admin_scopes, delegated_role_scope_template_departments, directory_department_bindings,
     elearning_admin_scopes, elearning_stats_daily, elearning_export_jobs, org_directory_routing_policy IN SHARE MODE NOWAIT`)
-  const users = await c.query(
-    `SELECT DISTINCT l.local_user_id FROM directory_account_links l
-    JOIN directory_accounts a ON a.id = l.directory_account_id
-    WHERE a.integration_id = ANY($1::uuid[]) AND l.local_user_id IS NOT NULL ORDER BY l.local_user_id`,
-    [[p.sourceIntegrationId, p.targetIntegrationId]],
-  )
+  // The links are fenced from here on; this read is the one the rest of the handover relies on.
+  const users = await linkedUsers()
   const repairs=await c.query(`SELECT r.id FROM dingtalk_login_repairs r WHERE r.state='applied' AND (r.user_id=ANY($1::text[]) OR r.source_integration_ids && $2::uuid[]) LIMIT 1`,[users.rows.map(r=>String(r.local_user_id)),[p.sourceIntegrationId,p.targetIntegrationId]])
   requireCondition(!repairs.rows.length,'Active login repair blocks handover')
   const userIds = [
     ...users.rows.map((r) => String(r.local_user_id)),
     actorId,
   ].sort()
+  // A user linked while the handover waited for the version rows has a version row this transaction
+  // does not hold. Taking it now would be the wait under the fences that the order above avoids, so
+  // the handover refuses and the operator runs it again. A user unlinked meanwhile only leaves one
+  // version row held and bumped for nothing.
+  requireCondition(
+    userIds.every((id) => versionedUserIds.includes(id)),
+    'Directory links changed while the handover waited',
+  )
+  // The access-graph mutex below bumps the version rows too, but only AFTER the NOWAIT probe has
+  // taken the users rows — users → subject, the reverse of an admission's subject → users — which is
+  // the one holder-vs-writer cycle the protocol forbids. They are already held from the bump above,
+  // so the probe runs against users rows that protocol-following transactions have released and
+  // keeps its fail-fast meaning for every other concurrent users-row holder.
   await c.query(
     'SELECT id FROM users WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE NOWAIT',
     [userIds],

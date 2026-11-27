@@ -103,13 +103,17 @@ function lockKinds(roleIds: readonly string[], subjects: readonly string[]): str
     'isolation', 'read-timeouts', 'set-timeouts', 'world',
     ...roleIds.map(() => 'parent'),
     ...subjects.map(() => 'admission'),
+    // D21 (Y5a): the access-graph mutex bumps the sorted subjects' version rows before the users rows.
+    ...(subjects.length > 0 ? ['authz-version'] : []),
     ...subjects.map(() => 'user-row'),
     'set-timeouts',
   ]
 }
 
 function expectPrefix(roleIds: readonly string[], subjects: readonly string[], tail: readonly string[]) {
-  expect(kinds()).toEqual([...lockKinds(roleIds, subjects), 'member-list', ...tail])
+  // D21 (Y5a): role-assignment bumps the written subjects again right before each membership DML.
+  const withBumps = tail.flatMap((kind) => (kind === 'assign-dml' || kind === 'revoke-dml' ? ['authz-version', kind] : [kind]))
+  expect(kinds()).toEqual([...lockKinds(roleIds, subjects), 'member-list', ...withBumps])
 }
 
 function expectPlan(intent: 'GRANT_ROLE' | 'REVOKE_ROLE', roleIds: readonly string[], subjects: readonly string[]) {
@@ -127,6 +131,12 @@ function expectPlan(intent: 'GRANT_ROLE' | 'REVOKE_ROLE', roleIds: readonly stri
 function expectSubjectLocks(subjects: readonly string[]) {
   expect(paramsOf('admission')).toEqual(subjects.map((id) => [`namespace-admission:${id}`]))
   expect(paramsOf('user-row')).toEqual(subjects.map((id) => [id]))
+  // D21 (Y5a): the mutex bumps every locked subject's version row in one sorted statement, after the
+  // admission advisories and before the first users-row lock.
+  const kinds = state.calls.map((call) => call.kind)
+  expect(paramsOf('authz-version')[0]).toEqual([[...subjects].sort()])
+  expect(kinds.indexOf('authz-version')).toBeGreaterThan(kinds.lastIndexOf('admission'))
+  expect(kinds.indexOf('authz-version')).toBeLessThan(kinds.indexOf('user-row'))
 }
 
 function expectRoot(closed: 'COMMIT' | 'ROLLBACK') {
@@ -149,6 +159,8 @@ function classify(sql: string): string {
   if (text === 'SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = $2 LIMIT 1') return 'is-admin'
   if (text.includes('FOR SHARE OF u') && text.includes('FROM users u') && text.includes('employee_no AS "employeeNo"') && !text.includes('is_admin')) return 'targets'
   if (text.includes('last_login_at') && text.includes('is_admin') && text.includes('FROM users') && !text.includes('FOR UPDATE') && !text.includes('FOR SHARE')) return 'profile'
+  // D21 (Y5a): the subject authorization version bump, one sorted statement (a protocol upsert, no command state).
+  if (text.startsWith('INSERT INTO subject_authorization_versions ')) return 'authz-version'
   if (text.startsWith('INSERT INTO user_roles ')) return 'assign-dml'
   if (text.startsWith('DELETE FROM user_roles ')) return 'revoke-dml'
   if (text === 'SELECT permission_code FROM role_permissions WHERE role_id = $1') return 'role-permissions'
@@ -161,6 +173,7 @@ function rowsOf(rows: Array<Record<string, unknown>>) {
 
 function answer(kind: string, params: unknown[]) {
   if (kind === 'read-timeouts') return rowsOf([{ ...savedTimeouts }])
+  if (kind === 'authz-version') return { rows: [], rowCount: (params[0] as unknown[]).length }
   if (kind === 'parent') return state.heldRoles.has(String(params[0])) ? rowsOf([{ id: params[0] }]) : rowsOf([])
   if (kind === 'admission') {
     if (!String(params[0]).startsWith('namespace-admission:')) throw new Error(`UNCLASSIFIED_ADMISSION ${String(params[0])}`)

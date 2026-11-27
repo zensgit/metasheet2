@@ -24,6 +24,7 @@ vi.mock('../../src/admin/authorization-operation-fence', () => ({
 import { ADVISORY_FIXED_KEY1_REGISTRY } from '../../src/attendance/coordination/settlement-coordination-key'
 import { isInsidePullSourceGate, runInsidePullSourceGate } from '../../src/directory/pull-source-gate-context'
 import { isRecoveryAuthorityBusyError, RECOVERY_AUTHORITY_BUSY_MARKER } from '../../src/multitable/recovery-authorization-stability'
+import { SUBJECT_AUTHORIZATION_VERSIONS_LOCK_SQL } from '../../src/multitable/authz-version-protocol'
 import { lockNamespaceAdmissionWrites } from '../../src/rbac/namespace-admission'
 import {
   assertAuthorizationInputTx,
@@ -1658,6 +1659,8 @@ describe('identity-read central slot', () => {
         { sql: freezeSql, params: [`directory:source-sync-freeze:${first}`] },
         { sql: freezeSql, params: [`directory:source-sync-freeze:${second}`] },
         { sql: S.roleRowShared, params: ['r'] }, { sql: S.namespaceAdmission, params: ['namespace-admission:u'] },
+        // D21 (Y5a): a read-only CONSUME plan takes the subject version rows lock-only (no bump) before the users rows.
+        { sql: SUBJECT_AUTHORIZATION_VERSIONS_LOCK_SQL, params: [['u']] },
         { sql: fake.statements.find(({ sql }) => /FROM users\s+WHERE/.test(sql))!.sql, params: ['u'] },
         { sql: sourceSql, params: [[first, second]] },
       ])

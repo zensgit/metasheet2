@@ -333,6 +333,12 @@ async function installShells(pool: PgPool, schema: string): Promise<void> {
   const users = ident(schema, 'users')
   const sessions = ident(schema, 'user_sessions')
   const revocations = ident(schema, 'user_session_revocations')
+  // D21 (Y5a): the access-graph mutex bumps the subject's version row before it locks the users row.
+  await pool.query(`CREATE TABLE ${ident(schema, 'subject_authorization_versions')} (
+    subject_id text PRIMARY KEY,
+    version bigint NOT NULL DEFAULT 1,
+    updated_at timestamptz NOT NULL DEFAULT now()
+  )`)
   await pool.query(`CREATE TABLE ${users} (
     id text PRIMARY KEY,
     email text,
