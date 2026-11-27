@@ -11,6 +11,7 @@ const prefix = 'tests/integration/'
 const delegated = 'authorization-operation-delegated.db.test.ts'
 const storedPause = 'honors a stored pause on preview, commit, replay, and receipt reads with the original token'
 const resumedPreview = 'refuses a stale preview after pausing and re-enabling the same audience'
+export const notificationLockCapacity = 'authorization-operation-notification-lock-capacity.db.test.ts'
 export const baseline = Object.freeze([
   { file: 'authorization-operation-fence.db.test.ts', min: 33, required: ['accepts the registered N78 inbound foreign key with the integrated B2 profile', 'refuses unregistered inbound foreign key without weakening the original profile', 'refuses renamed N78 foreign key without weakening the original profile', 'rejects a changed body on a known public function', 'holds every attested table in EXCLUSIVE mode and leaves work timeouts active', 'returns retryable busy without waiting when an old writer holds a table'], skipped: [] },
   { file: 'authorization-operation-fullschema.db.test.ts', min: 15, required: ['refuses changes to either side of the integrated B2 schema profile', 'previews, commits and replays using the real fence and current migrated schema', 'keeps real host HEAD, encoded receipt and ordinary-actor 403 paths read-only across the auth chain'], skipped: ['bounds slow pre-planning reads and never starts a late write', 'returns unknown while COMMIT is pending, then GET observes the late receipt and released locks', 'rolls back injected post-fence write failure on the same client'] },
@@ -33,12 +34,19 @@ export const baseline = Object.freeze([
   { file: 'authorization-operation-provenance-migration.db.test.ts', min: 1, required: ['leaves old records unknown, constrains new values and refuses lossy down'], skipped: ['holds a table lock through the down evidence check and excludes a concurrent insert'] },
   { file: 'authorization-operation-admission-list.db.test.ts', min: 5, required: ['combines namespace filter with search, account status and pagination beyond 20', 'summarizes only requested page IDs and makes no permission writes'], skipped: [] },
   { file: 'authorization-operation-audit-feed.db.test.ts', min: 4, required: ['lists both sources once, with stable pagination, text actor and matching CSV filters', 'denies delegated actor both global surfaces'], skipped: [] },
+  // Needs the real fence to admit AUTHORIZATION_OPERATION, so it runs only on these fenced databases.
+  { file: notificationLockCapacity, min: 4, required: [
+    'N78-L00: required database lane is armed',
+    'N78-L01: real background FOR SHARE makes authorization NOWAIT busy, witnessed and recoverable',
+    'N78-L02: real authorization fence blocks background, bounded read_failed then recovery',
+    'N78-L03: organization and connection scans overlap real role batch and record capacity',
+  ], skipped: [] },
 ])
 export const unitBaseline = Object.freeze([
   {directory:'unit',file:'authorization-input-lock.test.ts',min:98,required:['ranks are strictly increasing in acquisition order and the order lists every rank'],skipped:[]},
   {directory:'unit',file:'authorization-input-consumers.guard.test.ts',min:7,required:['the authorization command write decision is registered as locked'],skipped:[]},
   {directory:'unit',file:'authorization-operation-validation.test.ts',min:27,required:['normalizes only reason and sorts explicitly chosen admissions'],skipped:[]},
-  {directory:'unit',file:'authorization-operation-fence.test.ts',min:99,required:[
+  {directory:'unit',file:'authorization-operation-fence.test.ts',min:207,required:[
     'locks the closed table set, qualified and without waiting',
     ...[14,15,16,17].flatMap(major => [
       `accepts measured N78 and B2 additions with the original exact profile (PG${major})`,
@@ -46,6 +54,15 @@ export const unitBaseline = Object.freeze([
       `rejects changed N78 conname despite the registered source (PG${major})`,
       `rejects an extra inbound foreign key from the registered N78 source (PG${major})`,
       `rejects an extra inbound foreign key from the unregistered source (PG${major})`,
+      `accepts measured routing with N78 and B2 using the original profile (PG${major})`,
+      `accepts the empty routing partition as pre-M06c history (PG${major})`,
+      `rejects changed routing conname despite the registered source (PG${major})`,
+      `rejects changed routing delete action definition (PG${major})`,
+      `rejects changed routing target table definition (PG${major})`,
+      `rejects changed routing target column definition (PG${major})`,
+      `rejects changed routing missing key column definition (PG${major})`,
+      `rejects an extra routing foreign key from org_notification_topic_policies (PG${major})`,
+      `rejects a missing constraint from users with valid routing (PG${major})`,
     ]),
   ],skipped:[]},
   {directory:'unit',file:'authorization-operation-snapshot.test.ts',min:4,required:['binds the acting principal, complete input, policy classification, feature value and source rows','invalidates a preview after a disable and re-enable even if the original configured range is unchanged'],skipped:[]},
@@ -195,7 +212,8 @@ export async function main(env=process.env) {
   const temp=path.join(root,'tmp','permission-authorization-operation-ci')
   await mkdir(temp,{recursive:true})
   const dir=await mkdtemp(path.join(temp,'run-'))
-  await runTests(dir,clean,'baseline',baseline)
+  // The lock-capacity suite refuses to run unarmed; its DATABASE_URL is the fenced test database above.
+  await runTests(dir,{...clean,EXPECT_DB:'1'},'baseline',baseline)
   const unitReport=path.join(dir,'unit-baseline.json')
   run('pnpm',['exec','vitest','run','--config','vitest.config.ts',...unitBaseline.map(item=>`tests/unit/${item.file}`),'--retry','0','--maxWorkers','3','--minWorkers','1','--reporter=json','--outputFile',unitReport],clean,backend)
   validateReport(JSON.parse(await readFile(unitReport,'utf8')),unitBaseline)

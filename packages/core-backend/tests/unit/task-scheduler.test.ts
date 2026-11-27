@@ -20,7 +20,7 @@ import {
   resolveTaskNotificationDeliveryJob,
   resolveTaskReminderJob,
   runTaskDailyDigestScan,
-  runTaskReminderScan,
+  runTaskReminderScan as runReminderScan,
   startTaskScheduler,
   stopTaskScheduler,
   TASK_NOTIFICATION_BACKLOG_KINDS,
@@ -55,6 +55,11 @@ import {
  * and the stop signal, the start-up switches, and the scans' statement texts, paging and
  * membership filter. The database behaviour is tests/integration/task-m4-scheduler.db.test.ts.
  */
+
+// Existing scan goldens explicitly model organizations that have never been taken over.
+const runTaskReminderScan: typeof runReminderScan = (ctx, options) => runReminderScan(ctx, {
+  ...options, takeover: async () => ({ state: 'none' }),
+})
 
 const DB_NOW = new Date('2026-10-08T01:30:00.000Z')
 const PIPELINE_ON: NodeJS.ProcessEnv = {

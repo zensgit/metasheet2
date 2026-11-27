@@ -45,6 +45,19 @@ function importersFromOutside(): ImportEdge[] {
 }
 
 const OUTSIDE_ALLOWLIST: ReadonlyArray<ImportEdge> = [
+  ['routes/admin-directory-notification.ts', 'notifications/notification-errors'],
+  ['routes/admin-directory-notification.ts', 'notifications/notification-tx'],
+  ['routes/admin-directory-notification.ts', 'notifications/notification-flags'],
+  ['routes/admin-directory-notification.ts', 'notifications/topic-policy-service'],
+  ['services/task-notification-takeover.ts', 'notifications/recipient-resolver'],
+  ['services/task-scheduler.ts', 'notifications/notification-flags'],
+  ['services/task-routed-reminders.ts', 'notifications/adapters/notification-adapter'],
+  ['services/task-routed-reminders.ts', 'notifications/route-inputs'],
+  ['services/task-routed-reminders.ts', 'notifications/recipient-resolver'],
+  ['services/task-routed-reminders.ts', 'notifications/router'],
+  ['services/task-routed-reminders.ts', 'notifications/topic-registry'],
+  ['services/task-routed-reminders.ts', 'notifications/verification-evidence'],
+  ['services/task-routed-reminders.ts', 'notifications/witness'],
   ['integrations/dingtalk/notification-fingerprint.ts', 'notifications/witness'],
   ['integrations/provider-capability-registry.ts', 'notifications/notification-precondition'],
   ['integrations/provider-capability-registry.ts', 'notifications/notification-flags'],
@@ -81,7 +94,9 @@ describe('importers of the notification modules', () => {
   })
 
   it('uses exactly the same existing background-entry imports as the capability boundary', () => {
-    const notificationBackgroundEdges: ReadonlyArray<ImportEdge> = []
+    const notificationBackgroundEdges: ReadonlyArray<ImportEdge> = [
+      ['services/task-routed-reminders.ts', '../integrations/integration-capability-resolve-background'],
+    ]
     expect(notificationBackgroundEdges).toEqual(BACKGROUND_IMPORT_EDGES)
     expect(importEdgeViolations(collectCapabilityImportEdges(SRC).filter(([, specifier]) => BACKGROUND_MODULE.test(specifier)), notificationBackgroundEdges)).toEqual([])
   })
@@ -95,7 +110,6 @@ describe('importers of the notification modules', () => {
       'services/elearning-notification-dispatch.ts',
       'services/task-notification-delivery-worker.ts',
       'services/task-notification-dingtalk.ts',
-      'services/task-scheduler.ts',
       'integrations/dingtalk/work-notification-settings.ts',
       'integrations/dingtalk/work-notification-verify.ts',
       'index.ts',
@@ -110,6 +124,11 @@ describe('importers of the notification modules', () => {
   it('reach the resolver and the provider registry only from the routes, the services and the wiring', () => {
     const found = collectImportEdges(SRC, /recipient-resolver|provider-notification-registry/, read)
     expect(importEdgeViolations(found, [
+      ['notifications/route-inputs.ts', './recipient-resolver'],
+      ['notifications/router.ts', './recipient-resolver'],
+      ['notifications/topic-policy-service.ts', './recipient-resolver'],
+      ['services/task-notification-takeover.ts', '../notifications/recipient-resolver'],
+      ['services/task-routed-reminders.ts', '../notifications/recipient-resolver'],
       ['notifications/endpoints-service.ts', './provider-notification-registry'],
       ['notifications/endpoints-service.ts', './recipient-resolver'],
       ['notifications/adapters/notification-adapter.ts', '../recipient-resolver'],

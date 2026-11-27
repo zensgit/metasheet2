@@ -67,7 +67,7 @@ async function inspectCatalog(database: CatalogRow, rows: CatalogRow[][]) {
   return result
 }
 
-function withoutPartition(snapshot: CatalogSnapshot, partition: CatalogRow[][]): CatalogRow[][] {
+function withoutPartition(snapshot: { rows: CatalogRow[][] }, partition: CatalogRow[][]): CatalogRow[][] {
   return snapshot.rows.map((rows, section) => {
     const removed = new Set(partition[section].map(row => JSON.stringify(row)))
     return rows.filter(row => !removed.has(JSON.stringify(row)))
@@ -144,5 +144,100 @@ describe.each(manifest.snapshots)('measured PostgreSQL $major authorization cata
   ])('rejects unqualified database %s with valid additions', async (field, value) => {
     const database = { ...snapshot.database, [String(field)]: value }
     expect(isSupportedAuthorizationOperationSchema(await inspectCatalog(database, snapshot.rows))).toBe(false)
+  })
+})
+
+type RoutingCatalogSnapshot = {
+  database: CatalogRow
+  rows: CatalogRow[][]
+  status: string
+  errors: unknown[]
+  actual: { digest: string }
+  actualSupported: boolean
+  routingAddition: CatalogRow[][]
+  routingAdditionDigest: string
+  withoutRouting: { digest: string; baseDigest: string }
+  withoutRoutingSupported: boolean
+}
+const routingFixtureRoot = new URL('routing/', fixtureRoot)
+const routingManifest: typeof manifest = JSON.parse(readFileSync(new URL('manifest.json', routingFixtureRoot), 'utf8'))
+
+describe.each(routingManifest.snapshots)('measured PostgreSQL $major routing catalog', ({ major, sha256 }) => {
+  const bytes = gunzipSync(readFileSync(new URL(`pg${major}.json.gz`, routingFixtureRoot)))
+  const snapshot: RoutingCatalogSnapshot = JSON.parse(bytes.toString('utf8'))
+  const routingSource = 'org_notification_topic_policies'
+  const definition = 'FOREIGN KEY (default_connection_id, org_id) REFERENCES directory_integrations(id, org_id) ON UPDATE RESTRICT ON DELETE RESTRICT'
+
+  it('preserves the original measured routing capture and digest', () => {
+    expect(createHash('sha256').update(bytes).digest('hex')).toBe(sha256)
+    expect(snapshot.status).toBe('passed')
+    expect(snapshot.errors).toEqual([])
+    expect(snapshot.database.version).toBe(major)
+    expect(snapshot.actualSupported).toBe(false)
+    expect(snapshot.withoutRoutingSupported).toBe(true)
+    expect(digest({ database: snapshot.database, rows: snapshot.rows })).toBe(snapshot.actual.digest)
+    expect(snapshot.routingAddition.map(rows => rows.length)).toEqual([0, 0, 1, 0, 0, 0, 0, 0])
+    expect(snapshot.routingAddition[2][0].definition).toBe(definition)
+    expect(digest(snapshot.routingAddition)).toBe(snapshot.routingAdditionDigest)
+    expect(snapshot.routingAdditionDigest).toBe('c7b4ab678e7c9bc25ecd9a24bef2de5e5f4e21af818d18aba573c9cd367f4564')
+  })
+
+  it(`accepts measured routing with N78 and B2 using the original profile (PG${major})`, async () => {
+    const result = await inspectCatalog(snapshot.database, snapshot.rows)
+    expect(result.digest).toBe(snapshot.actual.digest)
+    expect(result.baseDigest).toBe(snapshot.withoutRouting.baseDigest)
+    expect(isSupportedAuthorizationOperationSchema(result)).toBe(true)
+  })
+
+  it(`accepts the empty routing partition as pre-M06c history (PG${major})`, async () => {
+    // The sole FK being deleted is indistinguishable from M06c never having run.
+    const result = await inspectCatalog(snapshot.database, withoutPartition(snapshot, snapshot.routingAddition))
+    expect(result.digest).toBe(snapshot.withoutRouting.digest)
+    expect(result.baseDigest).toBe(snapshot.withoutRouting.baseDigest)
+    expect(isSupportedAuthorizationOperationSchema(result)).toBe(true)
+  })
+
+  it.each([
+    ['source_schema', 'unregistered'], ['source', 'unregistered_inbound_dependency'],
+    ['conname', 'ontp_drift_fk'], ['contype', 'c'], ['convalidated', false],
+    ['condeferrable', true], ['condeferred', true], ['connoinherit', false],
+    ['target_schema', 'unregistered'], ['target', 'roles'],
+  ])(`rejects changed routing %s despite the registered source (PG${major})`, async (field, value) => {
+    const rows = structuredClone(snapshot.rows)
+    rows[2].find(row => row.source === routingSource)![String(field)] = value
+    expect(isSupportedAuthorizationOperationSchema(await inspectCatalog(snapshot.database, rows))).toBe(false)
+  })
+
+  it.each([
+    ['delete action', definition.replace('ON DELETE RESTRICT', 'ON DELETE CASCADE')],
+    ['update action', definition.replace('ON UPDATE RESTRICT', 'ON UPDATE CASCADE')],
+    ['target table', definition.replace('directory_integrations', 'roles')],
+    ['target column', definition.replace('REFERENCES directory_integrations(id, org_id)', 'REFERENCES directory_integrations(id, provider)')],
+    ['source column', definition.replace('default_connection_id', 'other_connection_id')],
+    ['missing key column', 'FOREIGN KEY (default_connection_id) REFERENCES directory_integrations(id) ON UPDATE RESTRICT ON DELETE RESTRICT'],
+  ])(`rejects changed routing %s definition (PG${major})`, async (_name, value) => {
+    const rows = structuredClone(snapshot.rows)
+    rows[2].find(row => row.source === routingSource)!.definition = value
+    expect(isSupportedAuthorizationOperationSchema(await inspectCatalog(snapshot.database, rows))).toBe(false)
+  })
+
+  it.each([routingSource, 'unregistered_inbound_dependency'])(`rejects an extra routing foreign key from %s (PG${major})`, async source => {
+    const rows = structuredClone(snapshot.rows)
+    rows[2].push({ ...snapshot.routingAddition[2][0], source, conname: 'ontp_extra_fk' })
+    expect(isSupportedAuthorizationOperationSchema(await inspectCatalog(snapshot.database, rows))).toBe(false)
+  })
+
+  it.each(['users', 'user_external_identity_evidence', 'directory_connection_login_scope'])(`rejects a missing constraint from %s with valid routing (PG${major})`, async source => {
+    const rows = structuredClone(snapshot.rows)
+    const index = rows[2].findIndex(row => row.source === source)
+    expect(index).toBeGreaterThanOrEqual(0)
+    rows[2].splice(index, 1)
+    expect(isSupportedAuthorizationOperationSchema(await inspectCatalog(snapshot.database, rows))).toBe(false)
+  })
+
+  it.each(['users', 'user_external_identity_evidence', 'notification_connection_verifications'])(`rejects changed constraint from %s with valid routing (PG${major})`, async source => {
+    const rows = structuredClone(snapshot.rows)
+    rows[2].find(row => row.source === source)!.conname = 'unregistered_constraint'
+    expect(isSupportedAuthorizationOperationSchema(await inspectCatalog(snapshot.database, rows))).toBe(false)
   })
 })

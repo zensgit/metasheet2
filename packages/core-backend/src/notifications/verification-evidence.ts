@@ -86,7 +86,11 @@ export async function writeNotificationVerification(db: Db, input: WriteNotifica
 /** Ordinary SELECT only: this check never takes another lock inside a capability PATCH. */
 export async function checkNotificationVerification(db: Db, input: VerificationIdentity): Promise<NotificationVerificationCheck> {
   const result = await db.query(SELECT_EVIDENCE, [input.connectionId])
-  const row = result.rows[0]
+  return checkNotificationVerificationRow(result.rows[0], input)
+}
+
+/** Same evidence predicate for a batch read; no I/O or credential caching. */
+export function checkNotificationVerificationRow(row: Record<string, unknown> | undefined, input: VerificationIdentity): NotificationVerificationCheck {
   const verification: NotificationVerificationSummary = { level: null, verifiedUntil: null, valid: false }
   const fail = (code: NotificationVerificationFailureCode): NotificationVerificationCheck => ({ ok: false, code, verification })
   if (!row) return fail('verification_missing')

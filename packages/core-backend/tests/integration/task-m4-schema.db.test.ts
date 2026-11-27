@@ -5,9 +5,10 @@
  * `tasks_id_org_id_key` against the design, exercises every CHECK / unique / FK behaviour the
  * design names (including the composite org FKs, ASSUMPTION(task-m4): [own-37]), and runs the
  * migration's own down() then up() inside one transaction on one connection, compares the catalog
- * snapshots, and rolls back (§2.3). That round trip takes `task_source_links` down first and brings it
- * back last, because its FK depends on `tasks_id_org_id_key`: the runner rolls back in reverse order
- * of execution, and the later migration always goes first. The shape of `task_source_links` is pinned
+ * snapshots, and rolls back (§2.3). That round trip takes the later tables with an FK into M4 down first
+ * and brings them back last — the routing decisions (FK on task_notification_deliveries), then
+ * `task_source_links` (FK on `tasks_id_org_id_key`): the runner rolls back in reverse order of
+ * execution, and the later migration always goes first. The shape of `task_source_links` is pinned
  * with the rest, and the last describe pins its rollback rules. This file does not start MetaSheetServer.
  */
 import '../helpers/assert-rbac-optional-off'
@@ -22,6 +23,7 @@ import {
   down as sourceLinksDown,
   up as sourceLinksUp,
 } from '../../src/db/migrations/zzzz20261104150000_create_task_source_links'
+import { down as decisionsDown, up as decisionsUp } from '../../src/db/migrations/zzzz20261122151100_create_task_notification_decisions'
 import { newTaskGroupId, newTaskId, newTaskListEventId, newTaskListId } from '../../src/services/task-ids-runtime'
 import { dropTaskM4Fixtures } from '../helpers/task-m4-fixtures'
 
@@ -913,7 +915,11 @@ describe('task M4 schema (real db)', () => {
           const before = await snapshot(run)
           expect(byKey(before.columns)).toEqual(byKey(EXPECTED_COLUMNS))
 
-          // The later migration's table holds an FK on tasks_id_org_id_key, so it goes first.
+          // Later migrations whose tables hold an FK into the M4 tables go first, in reverse order of
+          // execution, as the runner rolls back: the routing decisions (FK on task_notification_deliveries),
+          // then task_source_links (FK on tasks_id_org_id_key).
+          await run('DELETE FROM task_notification_delivery_decisions')
+          await decisionsDown(trx)
           await run('DELETE FROM task_source_links')
           await sourceLinksDown(trx)
           await m4Down(trx)
@@ -932,6 +938,7 @@ describe('task M4 schema (real db)', () => {
 
           await m4Up(trx)
           await sourceLinksUp(trx)
+          await decisionsUp(trx)
           const links = await run<{ r: string | null }>(`SELECT to_regclass('public.task_source_links')::text AS r`)
           expect(links[0].r).toBe('task_source_links')
           expect(await linkCatalog(run)).toEqual(EXPECTED_LINK_CATALOG)

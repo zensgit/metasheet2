@@ -4,7 +4,7 @@ export interface NotificationAdapter {
   readonly provider: string
   readonly transport: string
   prepare(context: AdapterPrepareContext): Promise<AdapterPrepared>
-  fingerprint(connectionId: string): Promise<{ ok: true; value: string } | { ok: false; code: string }>
+  fingerprint(connectionId: string): Promise<{ ok: true; value: string } | { ok: false; code: string; failureKind?: 'read_failed' }>
 }
 
 export interface AdapterPrepareContext {

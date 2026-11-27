@@ -27,6 +27,7 @@ const BACKGROUND = SOURCE_ROOT + 'integrations/integration-capability-resolve-ba
 const REQUEST = SOURCE_ROOT + 'integrations/integration-capability-resolve.ts'
 const WORKER = SOURCE_ROOT + 'services/task-notification-delivery-worker.ts'
 const SCHEDULER = SOURCE_ROOT + 'services/task-scheduler.ts'
+const SCAN = SOURCE_ROOT + 'services/task-routed-reminders.ts'
 const WITNESS = SOURCE_ROOT + 'integrations/integration-capability-witness.ts'
 const PROVIDER_REGISTRY = SOURCE_ROOT + 'integrations/provider-capability-registry.ts'
 const NEW_MODULE = /\/integrations\/(?:integration-capability-resolve(?:-background|-core)?|integration-capability-witness)\.ts$/
@@ -61,21 +62,29 @@ describe('capability runtime module boundaries', () => {
   it('registers the complete reverse runtime sets and edge multisets without line-number keys', checked(() => {
     // Include followed dependencies (including test helpers), but never pin an unrelated file count.
     expect(graph.files).toEqual([...new Set([...productionFiles(), ...graph.edges.map((edge) => edge.to)])].sort())
-    expect(registry.reverse.map((entry) => entry.root)).toEqual([SCHEDULER, WORKER, BACKGROUND])
+    expect(registry.reverse.map((entry) => entry.root)).toEqual([SCHEDULER, WORKER, BACKGROUND, SCAN])
     for (const expected of registry.reverse) {
       expect(reverseRegistry(graph.edges, expected.root), expected.root).toEqual(expected)
       expect(graph.files).toContain(expected.root)
     }
     for (const root of registry.absentRoots) expect(existsSync(path.join(ROOT, root)), root).toBe(false)
     expect(registry.absentRoots).toEqual([
-      SOURCE_ROOT + 'services/task-routed-reminders.ts', SOURCE_ROOT + 'services/task-routed-delivery-channel.ts',
+      SOURCE_ROOT + 'services/task-routed-delivery-channel.ts',
     ])
     expect(registry.reverse.find((entry) => entry.root === WORKER)?.members).toContain(SOURCE_ROOT + 'index.ts')
   }))
 
   it('checks resolved direct edges including type-only loads across all production roots', checked(() => {
     expect(directEdges(graph)).toEqual(registry.directEdges)
-    expect(graph.edges.filter((edge) => edge.to === BACKGROUND)).toEqual([])
+    expect(graph.edges.filter((edge) => edge.to === BACKGROUND)).toEqual([
+  {
+    "from": "packages/core-backend/src/services/task-routed-reminders.ts",
+    "to": "packages/core-backend/src/integrations/integration-capability-resolve-background.ts",
+    "specifier": "../integrations/integration-capability-resolve-background",
+    "typeOnly": false,
+    "kind": "import"
+  }
+])
   }))
 
   it('accepts unrelated source additions in every root without updating the reviewed registry', checked(() => {
@@ -190,8 +199,8 @@ describe('capability runtime module boundaries', () => {
       expect(graph.requestRoots).toContain(SOURCE_ROOT + file)
     }
     expect(graph.requestRoots).toContain('plugins/plugin-view-gantt/src/index.ts')
-    expect(forbiddenPaths(graph.edges, graph.requestRoots, [BACKGROUND, ...registry.absentRoots])).toEqual([])
-    expect(forbiddenPaths(graph.edges, [BACKGROUND, WORKER, SCHEDULER], [REQUEST])).toEqual([])
+    expect(forbiddenPaths(graph.edges, graph.requestRoots, [BACKGROUND, SCAN, ...registry.absentRoots])).toEqual([])
+    expect(forbiddenPaths(graph.edges, [BACKGROUND, WORKER, SCHEDULER, SCAN], [REQUEST])).toEqual([])
   }))
 
   it.each([
@@ -269,7 +278,7 @@ describe('capability runtime module boundaries', () => {
   it('keeps the real sender type-only edge non-transitive, then exposes its value mutation in a temporary future-consumer overlay', checked(() => {
     const sender = SOURCE_ROOT + 'services/task-notification-dingtalk.ts'
     const original = read(ROOT, sender), scheduler = read(ROOT, SCHEDULER), worker = read(ROOT, WORKER)
-    const [scan, delivery] = registry.absentRoots
+    const scan = SCAN, delivery = registry.absentRoots[0]
     const overrides = new Map([
       [scan, "import '../integrations/integration-capability-resolve-background'"],
       [delivery, "import '../integrations/integration-capability-resolve-background'"],

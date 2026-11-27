@@ -128,7 +128,24 @@ describe('notification delivery production mounts and administrator gate registr
     expect(guard).toContain("factory: adminNotificationVerificationsRouter,")
     expect(guard).toContain("build: () => adminNotificationVerificationsRouter(),")
     expect(guard).toContain("{ mount: 'admin-notification-verifications', method: 'post', path: '/notification-verification', reg: 'routes/admin-notification-verifications.ts', gate: 'routes/admin-notification-verifications.ts ensurePlatformAdmin', family: P }")
-    expect(guard).toContain('expect(REGISTRY).toHaveLength(81)')
-    expect(guard).toContain("expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(72)")
+    expect(guard).toContain('expect(REGISTRY).toHaveLength(82)')
+    expect(guard).toContain("expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(73)")
   })
+  it('registers the topic-policy mount and PUT without weakening the administrator guard', () => {
+    const server = readFileSync(path.join(BACKEND, 'src/index.ts'), 'utf8')
+    const guard = readFileSync(path.join(BACKEND, 'tests/unit/admin-mounts-write-gate-guard.test.ts'), 'utf8')
+    expect(server).toContain("this.app.use('/api/admin/directory', adminDirectoryNotificationRouter())")
+    expect(guard).toContain("source: \"this.app.use('/api/admin/directory', adminDirectoryNotificationRouter())\"")
+    expect(guard).toContain('factory: adminDirectoryNotificationRouter,')
+    expect(guard).toContain('build: () => adminDirectoryNotificationRouter(),')
+    expect(guard).toContain("{ mount: 'admin-directory-notification', method: 'put', path: '/notification-topic-policies/:topic', reg: 'routes/admin-directory-notification.ts', gate: 'routes/admin-directory-notification.ts ensurePlatformAdmin', family: P }")
+  })
+
+})
+
+it('runs the real background resolver in the routing DB suite without module mocks', () => {
+  const source = readFileSync(path.join(BACKEND, 'tests/integration/task-routed-reminder-decision.db.test.ts'), 'utf8')
+  const mocks = [...source.matchAll(/vi\.(?:mock|doMock)\(\s*['"]([^'"]+)['"]/g)].map(match => match[1])
+  expect(mocks).toEqual(['../../src/notifications/topic-registry'])
+  expect(source).toContain("from '../../src/integrations/integration-capability-resolve-background'")
 })

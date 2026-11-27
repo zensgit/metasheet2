@@ -426,6 +426,7 @@ import { adminDirectoryCapabilitiesRouter } from './routes/admin-directory-capab
 import { adminRealtimeDiagnosticsRouter } from './routes/admin-realtime-diagnostics'
 import { meNotificationEndpointsRouter } from './routes/me-notification-endpoints'
 import { meNotificationTestSendRouter } from './routes/me-notification-test-send'
+import { adminDirectoryNotificationRouter } from './routes/admin-directory-notification'
 import { adminNotificationVerificationsRouter } from './routes/admin-notification-verifications'
 import './services/notification-adapter-bootstrap'
 import { meNotificationPreferencesRouter } from './routes/me-notification-preferences'
@@ -2327,6 +2328,7 @@ export class MetaSheetServer {
     // health endpoint is not involved and keeps its status and fields.
     this.app.use('/api/admin/realtime', adminRealtimeDiagnosticsRouter())
     this.app.use('/api/admin/directory', adminNotificationVerificationsRouter())
+    this.app.use('/api/admin/directory', adminDirectoryNotificationRouter())
     // User notification endpoints and preferences: the caller's own rows; answers 404 while the switch is off.
     this.app.use(meNotificationEndpointsRouter())
     this.app.use(meNotificationTestSendRouter())

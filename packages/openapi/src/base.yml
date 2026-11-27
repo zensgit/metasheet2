@@ -680,6 +680,33 @@ components:
           description: Accepted means the provider accepted the request; receipt or reading is not observed
         code: { type: string, description: Fixed outcome code without provider text or recipient values }
         testSendId: { type: string, format: uuid }
+    NotificationTopicPolicy:
+      type: object
+      additionalProperties: false
+      required: [topic, state, defaultConnectionId, revision]
+      properties:
+        topic: { type: string, enum: [task_reminder] }
+        state: { type: string, enum: [active, paused] }
+        defaultConnectionId: { type: string, format: uuid, nullable: true }
+        revision: { type: integer, minimum: 1 }
+    NotificationTakeoverPreview:
+      type: object
+      additionalProperties: false
+      required: [counts, member_count, truncated, no_route_count, no_valid_target_count, proof_changed_endpoint_count, tenant_address_collisions, active_dingtalk_integrations, warnings]
+      properties:
+        counts:
+          type: object
+          additionalProperties: { type: integer, minimum: 0 }
+        member_count: { type: integer, minimum: 0, maximum: 5000 }
+        truncated: { type: boolean }
+        no_route_count: { type: integer, minimum: 0 }
+        no_valid_target_count: { type: integer, minimum: 0 }
+        proof_changed_endpoint_count: { type: integer, minimum: 0 }
+        tenant_address_collisions: { type: integer, minimum: 0 }
+        active_dingtalk_integrations: { type: integer, minimum: 0 }
+        warnings:
+          type: array
+          items: { type: string, enum: [multiple_active_integrations, default_connection_not_ready, no_default_connection] }
     NotificationVerificationRequest:
       type: object
       additionalProperties: false

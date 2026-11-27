@@ -92,7 +92,7 @@ export class DingTalkWorkNotificationAdapter implements NotificationAdapter {
     return { ...config, baseUrl: this.normalizeBaseUrl(config.baseUrl) }
   }
 
-  async fingerprint(connectionId: string): Promise<{ ok: true; value: string } | { ok: false; code: string }> {
+  async fingerprint(connectionId: string): Promise<{ ok: true; value: string } | { ok: false; code: string; failureKind?: 'read_failed' }> {
     if (!connectionId.trim()) return { ok: false, code: 'routed_credentials_unavailable' }
     try {
       const config = await this.config(connectionId)
@@ -105,7 +105,8 @@ export class DingTalkWorkNotificationAdapter implements NotificationAdapter {
         }),
       }
     } catch (error) {
-      return { ok: false, code: unavailable(error).code }
+      return { ok: false, code: unavailable(error).code,
+        ...(error instanceof DingTalkMessageConfigError ? {} : { failureKind: 'read_failed' as const }) }
     }
   }
 

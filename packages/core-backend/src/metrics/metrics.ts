@@ -554,6 +554,17 @@ const notificationTestSendsTotal = counter({
   labelNames: ['outcome'] as const
 })
 
+const notificationRoutingDecisionsTotal = counter({
+  name: 'notification_routing_decisions_total',
+  help: 'Notification routing decisions by topic, fixed outcome and reason',
+  labelNames: ['topic', 'outcome', 'reason'] as const
+})
+const notificationTakeoverReadTotal = counter({
+  name: 'notification_takeover_read_total',
+  help: 'Notification takeover reads by fixed outcome',
+  labelNames: ['outcome'] as const
+})
+
 // Task scheduler (M4 PR-3b design §4.1, §6.6). The leader gauge holds the result of the last tick
 // (1 = that state, 0 = the others). The backlog gauge is refreshed by the leader once per tick,
 // across orgs (ASSUMPTION(task-m4): [own-3b-31]); the kinds are the closed set of
@@ -650,6 +661,8 @@ registry.registerMetric(dingtalkOAuthStateOperationsTotal)
 registry.registerMetric(dingtalkOAuthStateFallbackTotal)
 registry.registerMetric(tasksNotificationDeliveriesTotal)
 registry.registerMetric(notificationTestSendsTotal)
+registry.registerMetric(notificationRoutingDecisionsTotal)
+registry.registerMetric(notificationTakeoverReadTotal)
 registry.registerMetric(tasksSchedulerLeaderGauge)
 registry.registerMetric(tasksNotificationBacklogGauge)
 
@@ -859,6 +872,8 @@ export const metrics = {
   // Task notification delivery worker and task scheduler (M4 PR-3b)
   tasksNotificationDeliveriesTotal,
   notificationTestSendsTotal,
+  notificationRoutingDecisionsTotal,
+  notificationTakeoverReadTotal,
   tasksSchedulerLeaderGauge,
   tasksNotificationBacklogGauge
 }

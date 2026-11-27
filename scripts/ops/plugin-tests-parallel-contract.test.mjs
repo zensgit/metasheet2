@@ -854,3 +854,33 @@ test('required-gate executable propagates failure and never prints its input env
     assert.doesNotMatch(result.stdout + result.stderr, /not-json|private-value|"result"/)
   }
 })
+
+test('notification lock/capacity suite is owned by the fenced authorization-operation lane, not plugin-tests', async () => {
+  // Its cases need the real authorization fence to admit an operation, which needs the fenced database
+  // profile. The plugin-tests real-DB databases do not have it, so no step there may carry the suite.
+  const { baseline, notificationLockCapacity } = await import('./permission-authorization-operation-realdb.mjs')
+  const file = `tests/integration/${notificationLockCapacity}`
+  const retired = 'notification-authorization-lock-capacity.db.test.ts'
+  const config = readFileSync(new URL('../../packages/core-backend/vitest.config.ts', import.meta.url), 'utf8')
+  assert.equal(baseline.filter(item => item.file === notificationLockCapacity).length, 1)
+  assert.ok(isQuotedInTestExclude(config, file))
+  assert.ok(!config.includes(retired))
+  assert.ok(!workflow.includes(notificationLockCapacity))
+  assert.ok(!workflow.includes(retired))
+  assertParallelWorkflow(parseYamlDocument(workflow))
+  // Negative controls: carrying it in either required real-DB step is refused.
+  const anchor = '  tests/integration/directory-integration-capabilities-patch.db.test.ts \\\n'
+  for (const [job, id] of [['approval-db', 'approval-real-db-integration'], ['multitable-db', 'multitable-real-db-integration']]) {
+    const doc = JSON.parse(JSON.stringify(parseYamlDocument(workflow)))
+    const step = doc.jobs[job].steps.find(step => step.id === id)
+    const line = `  ${file} \\\n`
+    if (job === 'approval-db') {
+      assert.equal(step.run.split(anchor).length - 1, 1)
+      step.run = step.run.replace(anchor, anchor + line)
+    } else {
+      step.run += line
+    }
+    assert.ok(step.run.includes(line))
+    assert.throws(() => assertParallelWorkflow(doc), new RegExp(`${job} must preserve every original step`), `${job} must not carry ${file}`)
+  }
+})

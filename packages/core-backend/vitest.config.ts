@@ -29,6 +29,7 @@ export default defineConfig({
     // Most integration tests require database/external services and custom PluginLoader API.
     // Mock-DB integration tests (comment-flow, collab-ux-flow) can run without a live DB.
     exclude: [
+      'tests/integration/authorization-operation-notification-lock-capacity.db.test.ts',
       'tests/integration/admin-user-batch-review.db.test.ts',
       'tests/integration/admin-user-recycle-review.db.test.ts',
       // This suite has a dedicated isolated-PG runner with trust-on/off sentinels.
@@ -2173,6 +2174,7 @@ export default defineConfig({
       'tests/integration/task-m4-outbox.db.test.ts',
       'tests/integration/task-m4-delivery.db.test.ts',
       'tests/integration/task-m4-scheduler.db.test.ts',
+      'tests/integration/task-routed-reminder-decision.db.test.ts',
       'tests/integration/task-m4-dingtalk.db.test.ts',
       'tests/integration/task-m4-realtime.db.test.ts',
       // G2-core status filter on GET /api/tasks: real DB, same lane as the files above.
