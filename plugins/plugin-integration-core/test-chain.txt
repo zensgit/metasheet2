@@ -93,6 +93,8 @@ node __tests__/stock-preparation-audit-store.test.cjs
 node __tests__/stock-preparation-audit-migration.test.cjs
 node __tests__/stock-preparation-project-delete-transaction.test.cjs
 node __tests__/stock-preparation-project-delete-runtime.test.cjs
+node __tests__/stock-preparation-project-delete-business.test.cjs
+node __tests__/stock-preparation-project-delete-sheets.test.cjs
 node __tests__/stock-preparation-option-sync.test.cjs
 node __tests__/stock-preparation-bom-expansion.test.cjs
 node __tests__/stock-preparation-bom-read-concurrency.test.cjs
@@ -387,5 +389,3 @@ node __tests__/sealed-export-s6a-runtime-config.test.cjs
 node __tests__/sealed-export-s6a-runtime-persist.test.cjs
 node __tests__/sealed-export-s6a-runtime-core.test.cjs
 node __tests__/sealed-export-s6a-product-runtime.test.cjs
-node __tests__/stock-preparation-project-delete-business.test.cjs
-node __tests__/stock-preparation-project-delete-sheets.test.cjs

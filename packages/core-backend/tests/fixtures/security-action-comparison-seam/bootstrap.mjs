@@ -11,7 +11,7 @@ const repo = resolve(root, '../../../../..')
 const pins = {
   'packages/core-backend/src/auth/security-action-attempt-admission.ts': '95190b7079a8b8d36eb6a68ed5bcf04432ad04087a241c96141938e17a8e4247',
   'packages/core-backend/src/db/pg.ts': '1810088e95b8e5c8d3156a89908652de1a9165c6d3290bf5835f97aeecaaa4bb',
-  'packages/core-backend/src/integration/db/connection-pool.ts': '80f32e2ec3695e96cc76ad2adfb6cd28cfd7901c89c4636c17e42ce2db8e34b3',
+  'packages/core-backend/src/integration/db/connection-pool.ts': '8d83d93ca00812c00f907348c515bded8381618844211122fab13c9ceb4e31c8',
   'docs/development/security-action-attempt-coordination-design-lock-20261117.md': 'aecb64b7d141c21c144e796d994f5f10e4d5207b53320a715d50bbce34b87c71',
 }
 let context

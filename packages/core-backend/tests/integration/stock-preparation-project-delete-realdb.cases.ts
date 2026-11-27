@@ -337,16 +337,32 @@ export function defineStockPreparationProjectDeleteRealDbCases() {
       await exerciseProjectDeleteDelivery(pinned, fixture, project(tenant(), 'delivery'))
     }, 120000)
 
-    test('deletes rich-text history and fences stale sessions after same-sheet recreation while preserving a control record', async () => {
+    test('deletes rich-text history and fences stale sessions after same-sheet recreation while preserving a control record', async ({ onTestFinished }) => {
       const scope = project(tenant(), 'rich-text-target')
       const target = await fixture.dedicated(scope)
-      const control = await fixture.dedicated(project(scope.tenantId, 'rich-text-control'))
+      const control = await fixture.dedicated(project(scope.tenantId, 'rich-text-control'), false)
+      pinned.setApp(genericApp())
+      const api = request(pinned.url())
+      const switchName = 'MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED'
+      const previous = process.env[switchName]
+      onTestFinished(() => {
+        if (previous === undefined) delete process.env[switchName]
+        else process.env[switchName] = previous
+      })
+      process.env[switchName] = 'true'
+      // The manual-row endpoint stamps the creator and the per-record key required by the ordinary DELETE guard.
+      const manual = await api.post(`/api/multitable/sheets/${control.sheetId}/manual-rows`).send({ data: {
+        [control.fields.componentCode]: 'SYN-YJS', [control.fields.componentName]: 'Synthetic control', [control.fields.totalQuantity]: 1,
+      } }).expect(200)
+      const controlId = manual.body.data.record.id as string
+      const stamped = await q('SELECT created_by, data ->> $2::text AS key FROM meta_records WHERE id = $1', [controlId, control.fields.idempotencyKey])
+      expect(stamped.rows).toEqual([{ created_by: actor, key: `manual:v1:${controlId}` }])
       const recycleAndRestore = async (recordId: string) => {
-        const api = request(genericApp())
-        expect((await api.delete(`/api/multitable/records/${recordId}`)).status).toBe(200)
-        expect((await api.post(`/api/multitable/records/${recordId}/restore`).send({})).status).toBe(200)
+        await api.delete(`/api/multitable/records/${recordId}`).expect(200, { ok: true, data: { deleted: recordId } })
+        const restored = await api.post(`/api/multitable/records/${recordId}/restore`).send({}).expect(200)
+        expect(restored.body).toMatchObject({ ok: true, data: { restored: recordId, sheetId: control.sheetId } })
       }
-      await checkProjectDeleteYjs(scope, fixture.service, target.ids[0], control.ids[1], control.sheetId, async () => {
+      await checkProjectDeleteYjs(scope, fixture.service, target.ids[0], controlId, control.sheetId, async () => {
         const rebuilt = await fixture.dedicated(scope, false)
         expect(rebuilt.sheetId).toBe(target.sheetId)
         return rebuilt

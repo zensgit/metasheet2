@@ -59,7 +59,7 @@ const events = [
 
 export async function up(db: Kysely<unknown>): Promise<void> {
   await sql.raw(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path = pg_catalog SET row_security = off AS $fn$
+    SET search_path = pg_catalog, pg_temp SET row_security = off AS $fn$
     DECLARE keys text[];
     BEGIN
       IF TG_TABLE_SCHEMA <> 'public' OR TG_TABLE_NAME <> 'plugin_kv' THEN

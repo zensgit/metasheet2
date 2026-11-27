@@ -7983,25 +7983,6 @@ function requireStockPreparationAudit() {
     const req = principalContext
     await requireTableActionAccess(req, actionId, 'read', tenantPrincipalDirectory)
     const body = normalizeTableActionBody(requestBody(req))
-    const run = () => runAuthorizedStockPrepPull(req, actionId, governedEntry, body)
-    if (!projectWriterActivityRequired()) return run()
-    const { projectNo } = normalizeActionParameters(body.parameters)
-    const scope = { tenantId: resolveTenantId(req, {}), projectNo }
-    // The HTTP background route answers as soon as it has persisted the running job. Its DB
-    // activity lock must outlive that response, including the final durable result write.
-    return new Promise((resolve, reject) => {
-      withProjectDeleteActivity(projectWriterActivity, scope, async () => {
-        const answer = await run()
-        if (answer.background) {
-          resolve(answer)
-          await backgroundTrialCompletion(req)
-        }
-        return answer
-      }).then(resolve, reject)
-    })
-  }
-
-  async function runAuthorizedStockPrepPull(req, actionId, governedEntry, body) {
     /*
      * W3a — THE OPT-IN FOR THE MISSING-COMPONENT LIST, AND WHY IT NEEDS ITS OWN GATE.
      *
@@ -8037,24 +8018,37 @@ function requireStockPreparationAudit() {
         tenantPrincipalDirectory,
       })
       : null
+    // The activity lock, target lookup, source read and job result must use the same tenant.
+    const dryRunTenantId = valueScope ? valueScope.tenantId : resolveTenantId(req, {})
+    const run = () => runAuthorizedStockPrepPull(req, actionId, governedEntry, body, dryRunTenantId, includeMissingComponents)
+    if (!projectWriterActivityRequired()) return run()
+    const { projectNo } = normalizeActionParameters(body.parameters)
+    const scope = { tenantId: dryRunTenantId, projectNo }
+    // The HTTP background route answers as soon as it has persisted the running job. Its DB
+    // activity lock must outlive that response, including the final durable result write.
+    return new Promise((resolve, reject) => {
+      withProjectDeleteActivity(projectWriterActivity, scope, async () => {
+        const answer = await run()
+        if (answer.background) {
+          resolve(answer)
+          await backgroundTrialCompletion(req)
+        }
+        return answer
+      }).then(resolve, reject)
+    })
+  }
+
+  async function runAuthorizedStockPrepPull(req, actionId, governedEntry, body, dryRunTenantId, includeMissingComponents) {
     // S1: the project number rides into the lookup so the registry overlay can resolve THIS
     // project's sheet (switch on) — a pure read of the same body field `normalizeActionParameters`
     // validates a few lines down; with the switch off the registry ignores it.
-    const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, {
+    const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
       actionId,
+      tenantId: dryRunTenantId,
+      workspaceId: resolveWorkspaceId(req, {}),
       projectNo: firstString(isPlainObject(body.parameters) ? body.parameters.projectNo : undefined),
       targetPurpose: 'write',
-    })))
-    // ON THE VALUE PATH THE TENANT IS THE PROVEN ONE. `resolveTenantId` is right for the
-    // values-free trial and stays exactly where it was for it — but it accepts `user.tenantId`,
-    // which is header-fillable, and lets a tenantless platform admin steer `?tenantId=`. Since the
-    // tenant chosen here is the tenant whose PLM binding is opened, and the part numbers in the
-    // response come out of that PLM, the value path must not derive it from anything the request
-    // can move. `scope.tenantId` cannot differ from what `resolveTenantId` would have returned for
-    // any caller who reached this line — the scope has already refused every input that could make
-    // them differ — so this is not a behaviour change; it is the derivation being made unable to
-    // drift from the proof.
-    const dryRunTenantId = valueScope ? valueScope.tenantId : resolveTenantId(req, {})
+    }))
     // S1 (ADR §3 「租户墙」): a resolved project sheet must be the caller's own — no-op otherwise.
     await assertResolvedProjectTargetTenancy(action, dryRunTenantId)
     // R67 ④: the background lane claims the project's one in-flight slot HERE — every guard above

@@ -75,7 +75,7 @@ function fence(table: string, row: 'OLD' | 'NEW') {
 export async function up(db: Kysely<unknown>): Promise<void> {
   for (const table of tables) {
     await sql.raw(`CREATE FUNCTION ${fn(table)}() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
-      SET search_path = pg_catalog SET row_security = off AS $fn$
+      SET search_path = pg_catalog, pg_temp SET row_security = off AS $fn$
       BEGIN
         IF TG_TABLE_SCHEMA <> 'public' OR TG_TABLE_NAME <> 'integration_stock_prep_${table}' THEN
           RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'invalid project fence trigger context';

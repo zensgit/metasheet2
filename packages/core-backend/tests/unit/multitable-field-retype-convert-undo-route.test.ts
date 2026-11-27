@@ -242,7 +242,7 @@ describe('POST /fields/:fieldId/retype-undo (ADR §3 撤销)', () => {
       const { issued } = await expectRefused(arranged, () => undo({ convertRevisionId: arranged.id, confirm: CONFIRM }), { status, code, newTransactions: 1 })
       expect(state.perms).toEqual(ADMIN_PERMS)
       expect([label, issued[0]]).toEqual([label, 'SELECT pg_advisory_xact_lock(hashtext($1))'])
-      expect([label, issued.filter((sql) => /FOR UPDATE/.test(sql))]).toEqual([label, []])
+      expect([label, issued.filter((sql) => /FOR (?:NO KEY )?UPDATE/.test(sql))]).toEqual([label, []])
       // D21: the in-transaction gate precedes the sheet version bump — a refused caller never touches the version row
       expect([label, issued.filter(isFakeSheetVersionBump)]).toEqual([label, []])
       // granted again ⇒ the same request undoes
@@ -266,7 +266,7 @@ describe('POST /fields/:fieldId/retype-undo (ADR §3 撤销)', () => {
       }
       const { issued } = await expectRefused(arranged, () => undo({ convertRevisionId: arranged.id, confirm: CONFIRM }), { status, code, newTransactions: 1 })
       state.hook = undefined
-      expect([label, issued.filter((sql) => /FOR UPDATE/.test(sql))]).toEqual([label, []])
+      expect([label, issued.filter((sql) => /FOR (?:NO KEY )?UPDATE/.test(sql))]).toEqual([label, []])
       expect([label, issued.filter(isFakeSheetVersionBump)]).toEqual([label, []])
     }
   })
@@ -290,7 +290,7 @@ describe('POST /fields/:fieldId/retype-undo (ADR §3 撤销)', () => {
         status: 422, code: 'FIELD_RETYPE_CONVERT_NOT_SUPPORTED', details: { reason }, newTransactions: 1,
       })
       state.hook = undefined
-      expect([reason, issued.filter((sql) => /FOR UPDATE/.test(sql))]).toEqual([reason, []])
+      expect([reason, issued.filter((sql) => /FOR (?:NO KEY )?UPDATE/.test(sql))]).toEqual([reason, []])
       // the managed-sheet re-check precedes the D21 sheet version bump as well
       expect([reason, issued.filter(isFakeSheetVersionBump)]).toEqual([reason, []])
       expect([reason, arranged.pg.world.fields[0].type]).toEqual([reason, 'multiSelect'])
@@ -346,7 +346,7 @@ describe('POST /fields/:fieldId/retype-undo (ADR §3 撤销)', () => {
       arranged.pg.world.sheets[0].recovery_writer_state = blocked
       const { issued } = await expectRefused(arranged, () => undo({ convertRevisionId: arranged.id, confirm: CONFIRM }), { status: 409, code: 'RECOVERY_IN_PROGRESS', newTransactions: 1 })
       expect(issued[0]).toContain('pg_advisory_xact_lock')
-      expect(issued.filter((sql) => /FOR UPDATE/.test(sql))).toEqual([])
+      expect(issued.filter((sql) => /FOR (?:NO KEY )?UPDATE/.test(sql))).toEqual([])
     }
   })
 
@@ -368,7 +368,7 @@ describe('POST /fields/:fieldId/retype-undo (ADR §3 撤销)', () => {
       expect([label, res.body.error.details]).toEqual([label, undefined])
       expect(JSON.stringify(res.body)).not.toContain(id)
       // the job row is the only row lock taken
-      expect(issued.filter((sql) => /FOR UPDATE/.test(sql)).map((sql) => sql.includes('meta_field_retype_conversions'))).toEqual([true])
+      expect(issued.filter((sql) => /FOR (?:NO KEY )?UPDATE/.test(sql)).map((sql) => sql.includes('meta_field_retype_conversions'))).toEqual([true])
     }
     // each id still undoes its own column
     expect((await undo({ convertRevisionId: otherId, confirm: CONFIRM }, OTHER_FIELD)).status).toBe(200)
@@ -393,7 +393,7 @@ describe('POST /fields/:fieldId/retype-undo (ADR §3 撤销)', () => {
       expect([keep, res.body.error.details]).toEqual([keep, undefined])
       // decided BEFORE the field row or any record is looked at
       expect(issued.some((sql) => sql.includes('FROM meta_fields WHERE id = $1 FOR UPDATE'))).toBe(false)
-      expect(issued.some((sql) => sql.includes('FROM meta_records WHERE sheet_id = $1 FOR UPDATE'))).toBe(false)
+      expect(issued.some((sql) => sql.includes('FROM meta_records WHERE sheet_id = $1 FOR NO KEY UPDATE'))).toBe(false)
       // the pre-image rows were locked (FOR UPDATE) — that is what holds the retention sweep off
       expect(issued.some((sql) => sql.includes('FROM meta_field_value_tombstones') && sql.endsWith('FOR UPDATE'))).toBe(true)
     }
@@ -418,7 +418,7 @@ describe('POST /fields/:fieldId/retype-undo (ADR §3 撤销)', () => {
       change(arranged.pg.world)
       const { res, issued } = await expectRefused(arranged, () => undo({ convertRevisionId: arranged.id, confirm: CONFIRM }), { status: 409, code: 'UNDO_PRECONDITION_FAILED', details: { reason: 'field_config_changed' }, newTransactions: 1 })
       expect([label, res.body.error.message]).toEqual([label, expect.not.stringContaining(FIELD)])
-      expect(issued.some((sql) => sql.includes('FROM meta_records WHERE sheet_id = $1 FOR UPDATE'))).toBe(false)
+      expect(issued.some((sql) => sql.includes('FROM meta_records WHERE sheet_id = $1 FOR NO KEY UPDATE'))).toBe(false)
     }
     // jsonb equality is key-order independent
     const arranged = await converted()
@@ -533,7 +533,7 @@ describe('POST /fields/:fieldId/retype-undo (ADR §3 撤销)', () => {
     vi.stubEnv('MULTITABLE_SHEET_REVERT_MAX_RECORDS', String(SEED.length))
     arranged.pg.world.trash.push({ record_id: 't1', sheet_id: SHEET, data: {} })
     const { issued } = await expectRefused(arranged, () => undo({ convertRevisionId: arranged.id, confirm: CONFIRM }), { status: 413, code: 'SHEET_TOO_LARGE', newTransactions: 1 })
-    expect(issued.filter((sql) => /FOR UPDATE/.test(sql))).toEqual([])
+    expect(issued.filter((sql) => /FOR (?:NO KEY )?UPDATE/.test(sql))).toEqual([])
     expect(issued.filter(isFakeSheetVersionBump)).toEqual([])
   })
 
@@ -572,7 +572,7 @@ describe('POST /fields/:fieldId/retype-undo (ADR §3 撤销)', () => {
       at('FROM meta_field_retype_conversions WHERE convert_revision_id = $1::uuid AND field_id = $2 AND sheet_id = $3 FOR UPDATE'),
       at('SELECT record_id, value FROM meta_field_value_tombstones'),
       at('AS matches_target FROM meta_fields WHERE id = $1 FOR UPDATE'),
-      at('FROM meta_records WHERE sheet_id = $1 FOR UPDATE'),
+      at('FROM meta_records WHERE sheet_id = $1 FOR NO KEY UPDATE'),
       at('AS blocking FROM meta_records_trash WHERE sheet_id = $1 FOR UPDATE'),
       at("IS DISTINCT FROM (t.value -> 'post')"),
       at('UPDATE meta_fields SET type'),

@@ -59,7 +59,7 @@ const functionName = (kind: string) => 'public.stock_prep_project_delete_write_'
 
 export async function up(db: Kysely<unknown>): Promise<void> {
   await sql.raw(`CREATE FUNCTION ${lockFn}(keys text[], shared boolean) RETURNS void
-    LANGUAGE plpgsql SET search_path = pg_catalog AS $fn$
+    LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $fn$
     DECLARE k text; acquired boolean;
     BEGIN
       FOR k IN SELECT DISTINCT v FROM unnest(keys) v WHERE v IS NOT NULL ORDER BY v LOOP
@@ -90,7 +90,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
         RAISE EXCEPTION USING ERRCODE = '55P03', MESSAGE = 'stock preparation project busy';
       END IF;` : `PERFORM ${lockFn}(ARRAY(SELECT 'sheet:' || s FROM unnest(${sheets[kind]}) s)${extraKeys}, true);`
     await sql.raw(`CREATE FUNCTION ${functionName(kind)}() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
-      SET search_path = pg_catalog SET row_security = off AS $fn$
+      SET search_path = pg_catalog, pg_temp SET row_security = off AS $fn$
       ${kind === 'sheet' ? 'DECLARE sheet_id text;' : ''}
       BEGIN
         IF TG_TABLE_SCHEMA <> 'public' OR TG_TABLE_NAME NOT IN (${tables.map(t => `'${t}'`).join(', ')}) THEN

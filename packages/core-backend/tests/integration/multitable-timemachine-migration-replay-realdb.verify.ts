@@ -37,6 +37,10 @@ import * as nonceObjectIdentity from '../../src/db/migrations/zzzz20260919130000
 import * as attachmentRestoreStages from '../../src/db/migrations/zzzz20260919160000_create_archive_attachment_restore_stages'
 import * as retypeConvertTombstoneReason from '../../src/db/migrations/zzzz20260928150000_relax_field_value_tombstone_reason_for_retype_convert'
 
+import * as projectDeleteScopedFences from '../../src/db/migrations/zzzz20261128090000_stock_prep_project_delete_scoped_fences'
+import * as projectDeleteBusinessFences from '../../src/db/migrations/zzzz20261128090100_stock_prep_project_delete_business_fences'
+import * as projectDeleteRuntimeFences from '../../src/db/migrations/zzzz20261128090200_stock_prep_project_delete_runtime_fences'
+
 type MigrationModule = {
   up(db: Kysely<unknown>): Promise<void>
   down(db: Kysely<unknown>): Promise<void>
@@ -229,6 +233,29 @@ const MIGRATIONS: NamedMigration[] = [
     module: {
       up: (db) => db.transaction().execute(retypeConvertTombstoneReason.up),
       down: (db) => db.transaction().execute(retypeConvertTombstoneReason.down),
+    },
+  },
+  // The scoped fence installs triggers on eight tables recreated by this replay. Its business
+  // and KV callers share the lock helper, so unwind those migrations first and restore last.
+  {
+    name: 'zzzz20261128090000_stock_prep_project_delete_scoped_fences',
+    module: {
+      up: (db) => db.transaction().execute(projectDeleteScopedFences.up),
+      down: (db) => db.transaction().execute(projectDeleteScopedFences.down),
+    },
+  },
+  {
+    name: 'zzzz20261128090100_stock_prep_project_delete_business_fences',
+    module: {
+      up: (db) => db.transaction().execute(projectDeleteBusinessFences.up),
+      down: (db) => db.transaction().execute(projectDeleteBusinessFences.down),
+    },
+  },
+  {
+    name: 'zzzz20261128090200_stock_prep_project_delete_runtime_fences',
+    module: {
+      up: (db) => db.transaction().execute(projectDeleteRuntimeFences.up),
+      down: (db) => db.transaction().execute(projectDeleteRuntimeFences.down),
     },
   },
 ]
@@ -647,7 +674,19 @@ const ARCHIVE_RESTORE_JOB_TRIGGERS = [
   'trg_meta_recovery_archive_restore_plans_reject_truncate',
   'trg_meta_recovery_archive_sync_receipts_reject_truncate',
 ]
+const PROJECT_DELETE_FENCE_TRIGGERS = [
+  'stock_prep_project_delete_scoped_write',
+  'stock_prep_project_delete_business_write',
+  'stock_prep_project_delete_kv_insert',
+  'stock_prep_project_delete_kv_update',
+  'stock_prep_project_delete_kv_delete',
+]
+const REBUILT_PROJECT_FENCE_RELATIONS = [
+  'meta_field_value_tombstones', 'meta_link_tombstones', 'meta_history_baselines', 'meta_history_trust_checkpoints',
+  'meta_record_history_operations', 'meta_record_version_markers', 'meta_recovery_archive_attachment_refs', 'meta_recovery_archives',
+]
 const OWNED_TRIGGERS = [
+  ...PROJECT_DELETE_FENCE_TRIGGERS,
   'trg_mrapc_row',
   'trg_mrapc_truncate',
   ...OPERATION_TRIGGERS,
@@ -731,7 +770,8 @@ async function catalogSnapshot(db: Kysely<unknown>): Promise<CatalogRow[]> {
       JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
      WHERE namespace.nspname = 'public'
        AND NOT trigger_row.tgisinternal
-       AND relation.relname = ANY(${TOUCHED_RELATIONS}::text[])
+       AND (relation.relname = ANY(${TOUCHED_RELATIONS}::text[])
+         OR trigger_row.tgname = ANY(${PROJECT_DELETE_FENCE_TRIGGERS}::text[]))
   `.execute(db)
 
   const functions = await sql<CatalogRow>`
@@ -908,7 +948,7 @@ function knownSafeChangedCatalogKeys(changedKeys: string[]): string[] {
     if (kind === 'column') return ownedColumns.has(`${objectName}:${memberName}`)
     if (kind === 'constraint') return ownedConstraints.has(`${objectName}:${memberName}`)
     if (kind === 'index') return ownedIndexes.has(`${objectName}:${memberName}`)
-    if (kind === 'trigger') return OWNED_TRIGGERS.includes(memberName)
+    if (kind === 'trigger') return OWNED_TRIGGERS.includes(memberName) && TOUCHED_RELATIONS.includes(objectName)
     if (kind === 'function') return OWNED_FUNCTIONS.includes(objectName)
     return kind === 'sequence' && objectName === 'meta_record_chain_seq'
   })
@@ -954,6 +994,15 @@ async function main(): Promise<void> {
     requireCondition(
       before.length > 0,
       new ReplayFailure('precondition', 'catalog_surface_absent', 'catalog', 0),
+    )
+
+    // A replay after a partial restore must fail before touching the catalog. Two equally
+    // incomplete snapshots would otherwise pass the equality check below.
+    const fences = new Set(before.filter(row => row.kind === 'trigger' && row.member_name === 'stock_prep_project_delete_scoped_write').map(row => row.object_name))
+    const missingFences = REBUILT_PROJECT_FENCE_RELATIONS.filter(relation => !fences.has(relation))
+    requireCondition(
+      missingFences.length === 0,
+      new ReplayFailure('precondition', 'project_delete_fence_missing', 'trigger', missingFences.length),
     )
 
     activePhase = 'down'

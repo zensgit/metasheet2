@@ -47,7 +47,7 @@ function governedEntrySourceFor(src, handler) {
   )
   const body = governedEntryBody(src, entryName)
   if (handler === 'tableActionDryRun') {
-    assert.ok(body.includes('() => runAuthorizedStockPrepPull(req, actionId, governedEntry, body)'))
+    assert.ok(body.includes('() => runAuthorizedStockPrepPull(req, actionId, governedEntry, body, dryRunTenantId, includeMissingComponents)'))
     return `\n${body}\n${governedEntryBody(src, 'runAuthorizedStockPrepPull')}`
   }
   return `\n${body}`

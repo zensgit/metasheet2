@@ -97,7 +97,7 @@ const LOSSY_CELLS_LOCKED_SQL = 'SELECT id, data FROM meta_records WHERE sheet_id
 const PATCH_SHIFT_LEFT_SQL = 'UPDATE meta_fields SET "order" = "order" - 1 WHERE sheet_id = $1 AND "order" > $2 AND "order" <= $3 AND id <> $4 RETURNING id, "order"'
 // The retype convert's and undo's lock of every live row (field-retype-convert-execute.ts lockLiveRows), taken after the
 // field row: the hold point of FO-R1 / FO-R2. Built from the exported cell columns, so a drift leaves the hold unreached.
-const CONVERT_LIVE_ROWS_LOCKED_SQL = `SELECT id, version, data, ${FIELD_RETYPE_CONVERT_CELL_COLUMNS} FROM meta_records WHERE sheet_id = $1 FOR UPDATE`
+const CONVERT_LIVE_ROWS_LOCKED_SQL = `SELECT id, version, data, ${FIELD_RETYPE_CONVERT_CELL_COLUMNS} FROM meta_records WHERE sheet_id = $1 FOR NO KEY UPDATE`
 const CONVERT_FLAG = 'MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT'
 
 type Response = { status: number; body: { ok?: boolean; error?: { code?: string }; data?: Record<string, unknown> } }
@@ -771,7 +771,7 @@ export function defineAuthzVersionFieldRowOrderRealDbCases(): void {
       }
 
       /**
-       * A whole-column writer (`write`: the convert or the undo) is held right after it locked every live row FOR UPDATE —
+       * A whole-column writer (`write`: the convert or the undo) is held right after it locked every live row FOR NO KEY UPDATE —
        * it already holds the field row — and an admission holder that binds one of those records starts. The writer
        * must already hold the sheet version row (bumped before its first row lock), so the holder waits at the version
        * row, its FIRST lock. With the trigger-only order the holder took the version row FOR SHARE, waited on the bound
@@ -787,7 +787,12 @@ export function defineAuthzVersionFieldRowOrderRealDbCases(): void {
         try {
           writing = tracked(write)
           const writerPid = await hold.reached()
-          const atHold = { fieldRow: await fieldRowProbe(fieldId), versionRow: await versionRowProbe(sheetId) }
+          const atHold = {
+            fieldRow: await fieldRowProbe(fieldId),
+            versionRow: await versionRowProbe(sheetId),
+            recordWriter: await probe('SELECT 1 FROM meta_records WHERE id = $1 FOR NO KEY UPDATE NOWAIT', [recordId]),
+            recordIdentityReader: await probe('SELECT 1 FROM meta_records WHERE id = $1 FOR KEY SHARE NOWAIT', [recordId]),
+          }
           holder = await openHolder(sheetId, recordId)
           const opened = holder
           const locking = tracked(() => opened.lock())
@@ -815,7 +820,7 @@ export function defineAuthzVersionFieldRowOrderRealDbCases(): void {
         }
       }
       const SERIALIZED = {
-        atHold: { fieldRow: 'held', versionRow: 'held' },
+        atHold: { fieldRow: 'held', versionRow: 'held', recordWriter: 'held', recordIdentityReader: 'free' },
         holderParkedBehindWriter: 'parked',
         holderWaitsAt: 'version row',
         writer: 'ok',

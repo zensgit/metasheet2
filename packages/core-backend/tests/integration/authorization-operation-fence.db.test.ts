@@ -173,6 +173,10 @@ suite('authorization operation table fence on a migrated synthetic database', ()
   })
 
   for (const { name, ddl } of [
+    { name: 'additional project cleanup function', ddl: "CREATE FUNCTION public.sp_delete_business_unregistered() RETURNS integer LANGUAGE sql AS 'SELECT 1'" },
+    { name: 'changed project cleanup helper body', ddl: `CREATE OR REPLACE FUNCTION public.stock_prep_project_delete_fence(keys text[], shared boolean) RETURNS void
+        LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$ BEGIN RETURN; END $$` },
+    { name: 'changed project cleanup function security', ddl: 'ALTER FUNCTION public.stock_prep_project_delete_runtime_write() SECURITY INVOKER' },
     { name: 'unregistered inbound foreign key', ddl: 'CREATE TABLE public.permission_command_inbound_dependency(id text REFERENCES public.roles(id))' },
     { name: 'renamed N78 foreign key', ddl: 'ALTER TABLE public.notification_connection_verifications RENAME CONSTRAINT ncv_conn_fk TO ncv_drift_fk' },
     { name: 'deferrable N78 foreign key', ddl: 'ALTER TABLE public.notification_connection_verifications ALTER CONSTRAINT ncv_conn_fk DEFERRABLE INITIALLY DEFERRED' },

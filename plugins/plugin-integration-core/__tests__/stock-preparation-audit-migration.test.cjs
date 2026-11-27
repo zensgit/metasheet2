@@ -74,7 +74,7 @@ assert.ok(checkMatch, `${priorVocabularyMigration} installs the expanded closed 
 const checkActions = [...checkMatch[1].matchAll(/'([a-z_]+)'/g)].map((entry) => entry[1]).sort()
 // The live migration stream continues with Kysely after the SQL stream. Compile its actual
 // up and down statements. A migration that keeps the action names only in a comment fails.
-async function verifyLiveCheck() {
+async function main() {
   const liveDir = path.join(repoRoot, 'packages/core-backend/src/db/migrations')
   const file = fs.readdirSync(liveDir).sort().filter(name => name.endsWith('.ts')
     && VOCABULARY_CONSTRAINT_RE.test(fs.readFileSync(path.join(liveDir, name), 'utf8'))).pop()
@@ -117,7 +117,4 @@ for (const forbidden of ['drawing', 'quantity', 'qty', 'unit_symbol', 'message',
 assert.match(sql, new RegExp(`CREATE INDEX IF NOT EXISTS \\S+\\s+ON ${AUDIT_TABLE} \\(tenant_id, created_at DESC\\)`), 'tenant+time index exists')
 assert.match(sql, new RegExp(`CREATE INDEX IF NOT EXISTS \\S+\\s+ON ${AUDIT_TABLE} \\(tenant_id, action, created_at DESC\\)`), 'tenant+action index exists')
 
-verifyLiveCheck().then(() => console.log('✓ stock-preparation-audit-migration')).catch(error => {
-  console.error(error)
-  process.exitCode = 1
-})
+require('./support/fail-closed-suite-runner.cjs').runFailClosedMain('stock-preparation-audit-migration.test.cjs', main)

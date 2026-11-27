@@ -156,6 +156,10 @@ function belongsToD21Catalog(section: number, row: CatalogRow): boolean {
 const YIDA_LAYOUT_CATALOG_ADDITIONS = 'bcd3224cc13d9701dc2da0f16b708e7ba012b4c22efc57f73d694b3b0ccf9432'
 const YIDA_LAYOUT_FUNCTIONS = new Set(['integration_yida_generated_layout_immutable_guard'])
 
+// The three project-cleanup migrations add 37 public functions and no triggers on the fenced
+// authorization tables. Pin the entire ordered pg_proc projection, including bodies and settings.
+const PROJECT_DELETE_FUNCTION_PROFILE = '2704da5fa9cf8526d653851a30faef18a7df8971524ff9fa072cd0e2045b062f'
+
 function belongsToYidaLayoutCatalog(section: number, row: CatalogRow): boolean {
   return section === 7 && YIDA_LAYOUT_FUNCTIONS.has(String(row.proname))
 }
@@ -177,8 +181,13 @@ function readBaseProfile(database: CatalogRow | null, rows: CatalogRow[][]): str
   const n78 = rows.map(() => [] as CatalogRow[])
   const d21 = rows.map(() => [] as CatalogRow[])
   const yidaLayout = rows.map(() => [] as CatalogRow[])
+  const projectDeleteFunctions: CatalogRow[] = []
   for (const [section, catalog] of rows.entries()) {
     for (const row of catalog) {
+      if (section === 7 && /^(?:stock_prep_project_delete_|sp_delete_business_)/.test(String(row.proname))) {
+        projectDeleteFunctions.push(row)
+        continue
+      }
       const partition = section === 2 && N78_FOREIGN_KEY_SOURCES.has(String(row.source)) ? n78
         : belongsToB2Catalog(section, row) ? additions
           : belongsToD21Catalog(section, row) ? d21
@@ -190,6 +199,7 @@ function readBaseProfile(database: CatalogRow | null, rows: CatalogRow[][]): str
   // Empty N78 preserves B2-only history. B2 remains mandatory on this path;
   // when both additions exist, each must match its own complete digest.
   if (n78[2].length > 0 && schemaDigest(n78) !== N78_CATALOG_ADDITIONS) return undefined
+  if (projectDeleteFunctions.length > 0 && schemaDigest(projectDeleteFunctions) !== PROJECT_DELETE_FUNCTION_PROFILE) return undefined
   if (schemaDigest(additions) === B2_CATALOG_ADDITIONS
     && schemaDigest(yidaLayout) === YIDA_LAYOUT_CATALOG_ADDITIONS) return schemaDigest({ database, rows: base })
 }

@@ -53,7 +53,8 @@
 1. `confirm` 不符 ⇒ 400 `CONFIRM_REQUIRED`（镜像 `:11251-11252`）。
 2. **信任门（fail-closed）**：`!isWriterFenceEnabled()`（`canonical-sheet-fence.ts:160-162`，直接调它、不自写比较；关时 `fenceWriterEntry` 首行 return `:209`，账本惰性 `operation-ledger.ts:142-143`）⇒ 409 `FIELD_RETYPE_TRUST_REQUIRED`（形状照 `exact-anchor-recovery-route.ts:637-644`）。**前镜像捕获在本路径内无条件执行**（自有函数，不受 `MULTITABLE_TOMBSTONE_CAPTURE_ENABLED` 门控，也不改变删字段 / 删记录路径的行为）；仍 fail-closed：行数 > `resolveTombstoneCaptureMaxRows()`（`tombstone-capture.ts:48-51`）⇒ 422，捕获失败 ⇒ 整体回滚。**不得**进入「跳过捕获、照常改写」分支。`MULTITABLE_HISTORY_CONTIGUITY_STRICT` 首批**不**要求。
 3. **凭证逐 claim 校验**（镜像 `:11345-11353`、`restore-preview-identity.ts:293-303`）：`type`、`fieldId === :fieldId`、`sheetId ===` 字段当前 `sheet_id`（`:13944` 口径）、`actorId ===` 请求者、`sourceType` / `targetType` 任一不符 ⇒ 401 `PREVIEW_IDENTITY_INVALID`；`planHash` 不符 ⇒ 409 `PLAN_DRIFT`。
-4. `fenceWriterEntry` → `SheetWriterBlockedError` ⇒ 409 `RECOVERY_IN_PROGRESS`（`:14256-14257`；阻塞态含 `archiving`，`WRITER_BLOCK_STATES` `canonical-sheet-fence.ts:137`）→ 字段行、范围内 live 行、本表回收站行 **`FOR UPDATE`** → **重算 `planHash`** ⇒ 不符 409 `PLAN_DRIFT`。
+4. `fenceWriterEntry` → `SheetWriterBlockedError` ⇒ 409 `RECOVERY_IN_PROGRESS`（`:14256-14257`；阻塞态含 `archiving`，`WRITER_BLOCK_STATES` `canonical-sheet-fence.ts:137`）→ 字段行和本表回收站行 **`FOR UPDATE`**，范围内 live 行 **`FOR NO KEY UPDATE`** → **重算 `planHash`** ⇒ 不符 409 `PLAN_DRIFT`。
+   2026-11-27（#6991）补充：执行与撤销只改 live 记录的 `data`、`version` 和 `updated_at`。`FOR NO KEY UPDATE` 会挡住并发改行和删行，允许 Yjs 持久化事务用 `FOR KEY SHARE` 核对同一条记录的身份。这样即使字段转换停在另一条记录上，实时编辑也能先写入 Yjs 更新表，随后由字段类型冲突处理清理。
 5. 预铸 `convertRevisionId = randomUUID()`（照 `:11254` / `:11316`）；`mintOperation`。
 6. **写前镜像（live 每行一条，含空格、含未变格）**：新函数 `captureRetypeConvertPreImageRows`（`captureLossyRetypePreImageRows` 的兄弟，`tombstone-capture.ts:225-238` 一字不动），`reason = 'retype_convert'`（一次迁移放宽 CHECK，`zzzz20260708090000_create_meta_tombstone_tables.ts:34`），`config_revision_id = convertRevisionId`（索引 `(config_revision_id, field_id)`，`:44-47`），**`operation_id` 恒 NULL**。`value jsonb NOT NULL`（`:33`）装不下缺键 / JSON null，故 value 存信封 **`{"k":<hasKey>,"v":<原始 JSON>,"post":<写入值>}`**（v2.1 §1 候选 (c)；无 version 轴，见撤销 ③；不混入 R1 的 `reason='field_delete'` 过滤 `:7768`）。
 7. `UPDATE meta_fields SET type, property`（§4）→ **一条**原生 jsonb 批量 `UPDATE meta_records`，**只碰 `data->F IS DISTINCT FROM post` 的行**（`string→select` 下 `'A'→'A'` 不碰、不 bump、不写 revision——同 4c-1 排除 `unchanged`，`:11308`），形状照 `:7646-7655`，`RETURNING` 计数 == 预期变更行数否则抛（`:7656-7660`），声明 lock-exempt 并写理由（`:7644`）→ 每个被碰行**恰一条** record revision 在新 version 上（连续性要求 `:7745-7749`）：`patch={F:post}`、`snapshot=` 写后整行、`changedFieldIds=[F]`，走 `recordRecordRevisionsBatch`（`:7800`）传 `ledger`（`record-history-service.ts:55-64`），**`batchId = convertRevisionId`**；转换从不删键，故 revision `patch` 的 `null` 删键哨兵（`record-write-service.ts:1069-1077`）在此不出现 → `recordConfigRevision({ id: convertRevisionId, batchId: convertRevisionId, changedKeys:['type','property'], source:'mutation' })`（`config-revision-recorder.ts:40, :44`；`operation_id` NULL）→ 写作业行 → `sealOperation` → COMMIT。
@@ -128,7 +129,7 @@
 | 1 | `undone_at` 非空 | 409 `ALREADY_UNDONE` |
 | 2 | 前镜像 `SELECT … WHERE config_revision_id=$1 AND reason='retype_convert' FOR UPDATE`（挡住保留期清理的整组 DELETE，`meta-revision-retention.ts:257-267`），行数 < `record_count` | 409 **`PRE_IMAGE_EXPIRED`**，明确报错、不部分恢复。必须先于 ①②③，否则整组被清后会得到一串「新增」recordId 的 ③ |
 | ① | 字段行 `FOR UPDATE`；当前 `{type, property}` 与作业行 `target_*` **jsonb `=`**（键序无关），含选项集与颜色 | 409 `UNDO_PRECONDITION_FAILED` |
-| ② | 范围内 live 行 `FOR UPDATE`；`meta_records.id`（`sheet_id` 内）集合 == 前镜像 `record_id` 集合 | 同上。删除 = 硬删 + 回收站行（`record-service.ts:965-968`），恢复 = 重新 INSERT（`:1233-1238`）；`meta_records` 无 `deleted_at`（迁移全搜无）；插件 SDK 删除 `records.ts:1017-1021` 按设计不写回收站（`:1007-1012`）——三者都改变集合 |
+| ② | 范围内 live 行 `FOR NO KEY UPDATE`；`meta_records.id`（`sheet_id` 内）集合 == 前镜像 `record_id` 集合 | 同上。删除 = 硬删 + 回收站行（`record-service.ts:965-968`），恢复 = 重新 INSERT（`:1233-1238`）；`meta_records` 无 `deleted_at`（迁移全搜无）；插件 SDK 删除 `records.ts:1017-1021` 按设计不写回收站（`:1007-1012`）——三者都改变集合 |
 | ②b | 本表回收站 `meta_records_trash WHERE sheet_id=$1 FOR UPDATE`；任一行 `data ? F` 且 `jsonb_typeof(data->F) NOT IN ('string','null')` 且 `data->F <> '[]'::jsonb`（多选目标下的 `["X"]` 即命中） | 409 `UNDO_PRECONDITION_FAILED`，`details.reason='trashed_rows_with_post_state'`，recordIds 完整。B2 的镜像（r3 B3）：撤销把类型翻回 `string` 后，转换后新建又删除的行仍在回收站带后态，恢复时原样 INSERT、无类型校验（`record-service.ts:1233-1238`），会把 `["X"]` 落进文本列。放行的形：缺键 / null / `''` / `[]`（文本列的四态空形，见撤销段的四态回写）与字符串（单选目标的后态恢复到文本列是合法字符串格）。恢复路径持同一栅栏（`:1195`），与撤销串行，无窥探窗口 |
 | ③ | 每行 `data->F` jsonb `=` 信封 `post`；**不比 `version`** | 同上。撤销只写这一个键，比值即够；后果：转换后改本列任一格 ⇒ 整列撤销不可用（整次拒绝），改其它列不影响——写给 owner / 客户 |
 
@@ -333,7 +334,7 @@ git grep -n -E 'meta_recovery_archive_legal_hold_release_authorize|meta_recovery
 
 执行在栅栏与行锁之下重算计划；计划不是 `ok` 即 409 `PLAN_DRIFT`、零写入——**即使 planHash 没变**（一行的 `data` 从 `{}` 变成 `[]`，单元格照样读成缺键、哈希相同）。撤销不需要另加判定：非对象行的 `data -> F` 为 NULL，必然不等于信封 `post`，落在既有的 ③ `cells_changed` 上。
 
-预览与执行读每一行用的是**同一份列表达式文本**（`field-retype-convert-preview.ts` `FIELD_RETYPE_CONVERT_CELL_COLUMNS`：`is_object` / `has_key` / `cell`），执行只多一个 `FOR UPDATE`。
+预览与执行读每一行用的是**同一份列表达式文本**（`field-retype-convert-preview.ts` `FIELD_RETYPE_CONVERT_CELL_COLUMNS`：`is_object` / `has_key` / `cell`），执行对 live 行多取 `FOR NO KEY UPDATE`，对本表回收站行多取 `FOR UPDATE`。
 
 ### B4 真库验收必须走真路由
 

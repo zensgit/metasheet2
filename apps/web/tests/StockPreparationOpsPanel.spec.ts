@@ -27,7 +27,7 @@ import { createRequire } from 'node:module'
 //   OP-06 三行免责常驻 — present before a search, mid-search, and after one (every branch).
 //   OP-07 空态措辞 — "这不等于没人动过", not a generic "暂无数据".
 //   OP-08 403 措辞 — "这一格看不了:需要平台管理员" (BOTH halves, every tile).
-//   OP-09 词表防漏 — STOCK_PREP_AUDIT_ACTION_PLAIN carries all 21 actions the .cjs store declares,
+//   OP-09 词表防漏 — STOCK_PREP_AUDIT_ACTION_PLAIN carries every action the .cjs store declares,
 //         read from that module directly (anti-vacuity, same discipline as
 //         StockPreparationPosturePlainLanguage.spec.ts's manifest read).
 //   OP-10 目标表一致性 — installs 与 readiness 问同一个 objectId, and WHICH readiness route is used
@@ -72,6 +72,7 @@ vi.mock('../src/utils/api', async () => {
 })
 
 import StockPreparationOpsPanel from '../src/components/integration/stockPreparation/StockPreparationOpsPanel.vue'
+import { STOCK_PREP_AUDIT_ACTIONS } from '../src/services/integration/stockPreparation/audit'
 import {
   STOCK_PREP_AUDIT_ACTION_MODE_PLAIN,
   STOCK_PREP_AUDIT_ACTION_PLAIN,
@@ -786,7 +787,7 @@ describe('BOM备料 记录与排查面板 (P1-4/P1-5)', () => {
     expect(auditUrl).not.toContain('workspaceId')
   })
 
-  it('OP-11: rows written the way the four project-scoped actions really write them (workspace_id NULL) are actually found', async () => {
+  it('OP-11: project-scoped rows with workspace_id NULL are found', async () => {
     // This is the production shape: `http-routes.cjs` never passes a workspaceId to `audit.append`.
     // A panel that forwarded `scope.workspaceId` would get zero rows here and then explain the empty
     // result away with three caveats, none of which would be the reason.
@@ -807,6 +808,31 @@ describe('BOM备料 记录与排查面板 (P1-4/P1-5)', () => {
 
     expect(queryOf(urlsMatching('/stock-preparation/audit')[0]).get('action')).toBe('handoff_advance')
     expect(nodes(root, 'stock-prep-ops-audit-row').length).toBe(1)
+  })
+
+  it('finds the project deletion audit by project number and action', async () => {
+    const deletion: AuditRow = {
+      ...auditRows()[0],
+      id: 'row-project-delete',
+      action: 'project_delete',
+      subjectId: null,
+      mode: 'confirmed',
+      detail: { counts: { dedicatedSheets: 1 } },
+    }
+    installRoutes({ audit: (url) => auditResponse(url, [deletion, ...auditRows()]) })
+    const root = await mountPanel()
+    const select = node(root, 'stock-prep-ops-audit-action-select') as HTMLSelectElement
+    select.value = 'project_delete'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+    await search(root, deletion.projectId!)
+
+    const query = queryOf(urlsMatching('/stock-preparation/audit')[0])
+    expect(query.get('projectId')).toBe(deletion.projectId)
+    expect(query.get('action')).toBe('project_delete')
+    const rows = nodes(root, 'stock-prep-ops-audit-row')
+    expect(rows).toHaveLength(1)
+    expect(text(rows[0], 'stock-prep-ops-audit-row-action')).toBe('删除了项目及全部备料数据')
   })
 
   // -------------------------------------------------------------------------
@@ -932,8 +958,9 @@ describe('STOCK_PREP_AUDIT_ACTION_PLAIN (anti-vacuity)', () => {
     STOCK_PREP_AUDIT_ACTIONS: readonly string[]
   }
 
-  it('reads the shipped 21-action vocabulary (anti-vacuity: the actions really are declared there)', () => {
-    expect(storeModule.STOCK_PREP_AUDIT_ACTIONS.length).toBe(21)
+  it('mirrors the shipped 22-action vocabulary in the audit client', () => {
+    expect(storeModule.STOCK_PREP_AUDIT_ACTIONS).toHaveLength(22)
+    expect(STOCK_PREP_AUDIT_ACTIONS).toEqual(storeModule.STOCK_PREP_AUDIT_ACTIONS)
   })
 
   it('carries a plain-language line for EVERY audit action the store vocabulary declares — 词表 key 数 = 动作数', () => {
