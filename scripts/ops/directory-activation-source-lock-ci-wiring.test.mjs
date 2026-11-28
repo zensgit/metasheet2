@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path'
 import {
   REAL_DB_STEP_IDS,
   isSuiteWiredInRealDbStep,
+  isQuotedInTestExclude,
   realDbStepWholeFileArgs,
 } from './ci-realdb-step-contract.mjs'
 
@@ -18,30 +19,37 @@ import {
 // (2) plugin-tests.yml approval real-DB whole-file step — required 20.x + DATABASE_URL
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(__dirname, '..', '..')
-const FILE = 'tests/integration/directory-activation-source-lock.db.test.ts'
+const FILES = [
+  'tests/integration/directory-activation-source-lock.db.test.ts',
+  'tests/integration/dingtalk-container-login.db.test.ts',
+]
 const STEP_ID = REAL_DB_STEP_IDS.approval
 
-test('vitest.config.ts excludes the activation-source-lock suite from the no-DB job', () => {
+test('vitest.config.ts excludes the activation and sign-in suites from the no-DB job', () => {
   const cfg = readFileSync(join(repoRoot, 'packages/core-backend/vitest.config.ts'), 'utf8')
-  assert.ok(cfg.includes(`'${FILE}'`), `vitest.config.ts must exclude ${FILE}`)
+  for (const file of FILES) assert.ok(isQuotedInTestExclude(cfg, file), `vitest.config.ts must exclude ${file}`)
 })
 
-test('plugin-tests.yml runs the activation-source-lock suite as a whole file in the approval real-DB step', () => {
+test('plugin-tests.yml runs the activation and sign-in suites as whole files in the approval real-DB step', () => {
   const wf = readFileSync(join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
-  assert.ok(
-    isSuiteWiredInRealDbStep(wf, STEP_ID, FILE),
-    `plugin-tests.yml real-DB step id "${STEP_ID}" must run ${FILE} as a whole-file vitest arg`,
-  )
-  assert.equal(
-    realDbStepWholeFileArgs(wf, REAL_DB_STEP_IDS.multitable).includes(FILE),
-    false,
-    `${FILE} must not be wired into the multitable real-DB step`,
-  )
+  for (const file of FILES) {
+    assert.ok(
+      isSuiteWiredInRealDbStep(wf, STEP_ID, file),
+      `plugin-tests.yml real-DB step id "${STEP_ID}" must run ${file} as a whole-file vitest arg`,
+    )
+    assert.equal(
+      realDbStepWholeFileArgs(wf, REAL_DB_STEP_IDS.multitable).includes(file),
+      false,
+      `${file} must not be wired into the multitable real-DB step`,
+    )
+  }
 })
 
-test('the activation-source-lock suite file exists on disk', () => {
-  assert.ok(
-    existsSync(join(repoRoot, 'packages/core-backend', FILE)),
-    `wired suite packages/core-backend/${FILE} must exist on disk`,
-  )
+test('the activation and sign-in suite files exist on disk', () => {
+  for (const file of FILES) {
+    assert.ok(
+      existsSync(join(repoRoot, 'packages/core-backend', file)),
+      `wired suite packages/core-backend/${file} must exist on disk`,
+    )
+  }
 })

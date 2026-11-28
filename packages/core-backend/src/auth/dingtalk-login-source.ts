@@ -72,6 +72,7 @@ export function resolveDingTalkLoginSource(
     const rows = result.rows
     const explicit = id !== undefined || corp !== undefined
     const row = rows.length === 1 ? rows[0] : undefined
+    if (row && appKey && (row.status !== 'active' || !row.corp_id || !row.org_id)) refuseDingTalkSource()
     if (!row || row.status !== 'active' || !row.corp_id || !row.org_id || !appKey) {
       if (explicit) refuseDingTalkSource()
       await checkEmptyDingTalkScope(client)
@@ -86,7 +87,18 @@ export function resolveDingTalkLoginSource(
 
 export async function checkOrdinaryDingTalkSource(client: StrictLoginGrantCaller, source: DingTalkLoginSource): Promise<void> {
   if (source.strict) refuseDingTalkSource()
-  if (source.connectionId === null) return checkEmptyDingTalkScope(client)
+  if (source.connectionId === null) return readSource(async () => {
+    const result = await client.query(
+      `SELECT id::text, org_id, corp_id, status FROM directory_integrations
+        WHERE provider = 'dingtalk' AND config->>'appKey' = $1
+          AND ($2::text IS NULL OR corp_id = $2)
+        ORDER BY id LIMIT 2`,
+      [source.appKey, source.configuredCorp],
+    )
+    const row = result.rows.length === 1 ? result.rows[0] : undefined
+    if (row && source.appKey && (row.status !== 'active' || !row.corp_id || !row.org_id)) refuseDingTalkSource()
+    await checkEmptyDingTalkScope(client)
+  })
   await readSource(async () => {
     const current = await client.query(
       `SELECT id FROM directory_integrations WHERE id = $1::uuid AND provider = 'dingtalk'

@@ -57,7 +57,7 @@ async function scanInMemoryResidue(file: string, text: string): Promise<string[]
 // including duplicated sites; these pins cover internal checks that remove no caller edge.
 const fences: Array<[string, string[]]> = [
   [src + 'routes/auth.ts', ["stateCheck.intent === 'bind'", "stateCheck.intent === 'activate'", "code: 'self_service_disabled'", 'if (loginSource.strict) refuseDingTalkSource()', 'options.requiresEmptyScope || !options.origin']],
-  [src + 'auth/dingtalk-login-source.ts', ['if (!await lockEmptyConnectionLoginScope(client)) refuseDingTalkSource()', 'if (current.rows.length !== 1) refuseDingTalkSource()', 'if ((await readConnectionLoginScope(client, source.connectionId)).scope) refuseDingTalkSource()']],
+  [src + 'auth/dingtalk-login-source.ts', ["if (row && appKey && (row.status !== 'active' || !row.corp_id || !row.org_id)) refuseDingTalkSource()", "if (row && source.appKey && (row.status !== 'active' || !row.corp_id || !row.org_id)) refuseDingTalkSource()", 'if (!await lockEmptyConnectionLoginScope(client)) refuseDingTalkSource()', 'if (current.rows.length !== 1) refuseDingTalkSource()', 'if ((await readConnectionLoginScope(client, source.connectionId)).scope) refuseDingTalkSource()']],
   [src + 'auth/dingtalk-oauth.ts', ['if (storedCorp !== source.corpId) refuseDingTalkSource()', 'if (linked?.corp_id && linked.corp_id !== source.corpId) refuseDingTalkSource()', 'links.rows.length > 1 || linked.integration_id !== source.connectionId', 'if (source.explicit || !describesSameDingTalkPerson(identity, profile, null))', 'if (foreignKey) refuseDingTalkSource()', 'if (canonicalHere) return identityCorpRequiresEmptyScope(client, source)', 'if (emptyScope) await checkEmptyDingTalkScope(client)']],
   [src + 'auth/AuthService.ts', ['Number.isSafeInteger(payload.iat)', 'revoked_after >= to_timestamp($2::double precision)', 'revoked_at IS NULL FOR UPDATE', 'issuedAt: result.issuedAt']],
   [src + 'auth/dingtalk-legacy-resource-scope.ts', ['if (strictSession) return false', "return state.scope ? 'refused' : 'ordinary'", 'return !lock || await store.lockEmptyConnectionLoginScope(caller)', "return state.installation === 'installed' && !state.scope"]],
@@ -96,6 +96,27 @@ describe('DingTalk session issuers, identity writers and grant consumers', () =>
       expect(next, check).toBeGreaterThan(position)
       position = next
     }
+  })
+
+  it('defines source eligibility inputs independently of account privileges', () => {
+    const text = read(src + 'auth/dingtalk-login-source.ts')
+    const file = ts.createSourceFile('source.ts', text, ts.ScriptTarget.Latest, true)
+    const fields = (name: string) => {
+      const alias = file.statements.find((node): node is ts.TypeAliasDeclaration => ts.isTypeAliasDeclaration(node) && node.name.text === name)!
+      const type = ts.isTypeReferenceNode(alias.type) ? alias.type.typeArguments![0] : alias.type
+      expect(ts.isTypeLiteralNode(type)).toBe(true)
+      return (type as ts.TypeLiteralNode).members.map(member => member.name!.getText(file)).sort()
+    }
+    expect(fields('Selector')).toEqual(['connectionId', 'corpId'])
+    expect(fields('DingTalkLoginSource')).toEqual(['appKey', 'configuredCorp', 'connectionId', 'corpId', 'explicit', 'orgId', 'strict'])
+    for (const [name, parameters] of [
+      ['resolveDingTalkLoginSource', ['selector: Selector', 'env: Environment']],
+      ['checkOrdinaryDingTalkSource', ['client: StrictLoginGrantCaller', 'source: DingTalkLoginSource']],
+    ] as const) {
+      const fn = file.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === name)!
+      expect(fn.parameters.map(parameter => `${parameter.name.getText(file)}: ${parameter.type!.getText(file)}`)).toEqual(parameters)
+    }
+    expect(text).not.toMatch(/\b(?:INSERT\s+INTO|UPDATE\s+|DELETE\s+FROM|revokeUserSessions)\b/)
   })
 
   it('the backend entrypoint and TypeScript build do not load the two sync files', () => {
