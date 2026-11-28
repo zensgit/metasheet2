@@ -37956,6 +37956,414 @@
         }
       }
     },
+    "/api/integration/stock-preparation/project-delete/access": {
+      "get": {
+        "operationId": "getStockPreparationProjectDeleteAccess",
+        "summary": "Check the current tenant's project cleanup permission",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Whether the current administrator may request a cleanup preview",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "object",
+                      "required": [
+                        "mayDelete"
+                      ],
+                      "properties": {
+                        "mayDelete": {
+                          "type": "boolean"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "description": "Cleanup authority is busy"
+          },
+          "501": {
+            "description": "Tenant membership verification unavailable"
+          },
+          "503": {
+            "description": "Cleanup authority unavailable"
+          }
+        }
+      }
+    },
+    "/api/integration/stock-preparation/projects/{projectNo}/delete/preview": {
+      "post": {
+        "operationId": "previewStockPreparationProjectDelete",
+        "summary": "Preview local cleanup of one project and issue a five-minute verification code",
+        "description": "Requires a verified tenant on the authenticated principal, active membership in that tenant, and live platform administrator authority. The preview includes both trial and production rows.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectNo",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 80
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Project impact and one-time challenge",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "object",
+                      "required": [
+                        "tenantId",
+                        "projectNo",
+                        "tables",
+                        "counts",
+                        "challengeId",
+                        "verificationCode",
+                        "expiresAt"
+                      ],
+                      "properties": {
+                        "tenantId": {
+                          "type": "string"
+                        },
+                        "projectNo": {
+                          "type": "string"
+                        },
+                        "tables": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "required": [
+                              "sheetId",
+                              "name",
+                              "kind",
+                              "rowCount"
+                            ],
+                            "properties": {
+                              "sheetId": {
+                                "type": "string"
+                              },
+                              "name": {
+                                "type": "string"
+                              },
+                              "kind": {
+                                "type": "string",
+                                "enum": [
+                                  "dedicated",
+                                  "shared"
+                                ]
+                              },
+                              "rowCount": {
+                                "type": "integer",
+                                "minimum": 0
+                              }
+                            }
+                          }
+                        },
+                        "counts": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        },
+                        "challengeId": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "verificationCode": {
+                          "type": "string"
+                        },
+                        "expiresAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "Feature disabled or project absent"
+          },
+          "409": {
+            "description": "Concurrent work or ambiguous ownership"
+          },
+          "422": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Cleanup authority unavailable"
+          }
+        }
+      }
+    },
+    "/api/integration/stock-preparation/projects/{projectNo}/delete/confirm": {
+      "post": {
+        "operationId": "confirmStockPreparationProjectDelete",
+        "summary": "Confirm permanent cleanup of all stock-preparation data for one project",
+        "description": "Rechecks the verified tenant, membership and live administrator authority before applying the one-time challenge.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectNo",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 80
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "challengeId",
+                  "code"
+                ],
+                "properties": {
+                  "challengeId": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "code": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Committed cleanup and audit reference",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "object",
+                      "required": [
+                        "tenantId",
+                        "projectNo",
+                        "counts",
+                        "auditId"
+                      ],
+                      "properties": {
+                        "tenantId": {
+                          "type": "string"
+                        },
+                        "projectNo": {
+                          "type": "string"
+                        },
+                        "counts": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        },
+                        "auditId": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "Feature disabled"
+          },
+          "409": {
+            "description": "Invalid or expired verification",
+            "stale preview": null,
+            "concurrent work or ambiguous ownership": null
+          },
+          "422": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Cleanup authority unavailable"
+          }
+        }
+      }
+    },
+    "/api/integration/stock-preparation/projects/{projectNo}/delete/receipt/{challengeId}": {
+      "get": {
+        "operationId": "readStockPreparationProjectDeleteReceipt",
+        "summary": "Read the original counts for a committed project cleanup",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectNo",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 80
+            }
+          },
+          {
+            "in": "path",
+            "name": "challengeId",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Committed cleanup and audit reference",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "object",
+                      "required": [
+                        "tenantId",
+                        "projectNo",
+                        "counts",
+                        "auditId"
+                      ],
+                      "properties": {
+                        "tenantId": {
+                          "type": "string"
+                        },
+                        "projectNo": {
+                          "type": "string"
+                        },
+                        "counts": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        },
+                        "auditId": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "No receipt for this administrator and operation"
+          },
+          "409": {
+            "description": "Cleanup authority is busy"
+          },
+          "422": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Cleanup authority unavailable"
+          }
+        }
+      }
+    },
     "/api/integration/stock-preparation/snapshot-batches": {
       "get": {
         "summary": "List a project's immutable BOM snapshot batches (stock-prep view 2)",

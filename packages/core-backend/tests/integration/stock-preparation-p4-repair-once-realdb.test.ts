@@ -28,6 +28,8 @@ import { defineStockPreparationPullBatchBandRealDbCases } from './stock-preparat
 import { defineStockPreparationExecutionIntentRealDbCases } from './stock-preparation-execution-intent-realdb.cases'
 import { defineStockPreparationExecutionRecoveryRealDbCases } from './stock-preparation-execution-recovery-realdb.cases'
 import { defineStockPreparationComponentRulingRealDbCases } from './stock-preparation-component-ruling-realdb.cases'
+import { defineStockPreparationProjectDeleteRealDbCases } from './stock-preparation-project-delete-realdb.cases'
+import { defineProjectDeleteBusinessRealDbCases } from './stock-preparation-project-delete-business-realdb.cases'
 import { defineStockPreparationSheetRepairRealDbCases } from './stock-preparation-sheet-repair-realdb.cases'
 
 const require = createRequire(import.meta.url)
@@ -534,3 +536,6 @@ defineStockPreparationExecutionRecoveryRealDbCases()
 defineStockPreparationComponentRulingRealDbCases()
 // Batch-refresh step 6d-2a (S6-6, R-91): migration 108 and the doubled-sheet repair on real PG — the boolean retire, the byte-identical restore, the digest, one writer per sheet (a pull / a recovery / an install), takeover and zombie, the one-shot claim on real row locks (S9D-108/11..18).
 defineStockPreparationSheetRepairRealDbCases()
+
+defineStockPreparationProjectDeleteRealDbCases()
+defineProjectDeleteBusinessRealDbCases()

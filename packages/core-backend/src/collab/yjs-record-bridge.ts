@@ -1,3 +1,4 @@
+import { getYjsRecordOwner, lockYjsRecordSql, YjsRecordRetiredError, type YjsRecordIncarnation } from './yjs-record-incarnation'
 /**
  * Yjs → RecordWriteService bridge.
  *
@@ -94,6 +95,7 @@ export class YjsContributionUndecidedError extends YjsContributionRefusedError {
 }
 
 interface PendingWrite {
+  owner?: YjsRecordIncarnation
   fields: Record<string, unknown>
   actorIds: Set<string>
   /** Keyed by origin connection ('' for an unattributable change). */
@@ -218,6 +220,9 @@ export class YjsRecordBridge {
       this.observedDocs.delete(recordId)
     }
 
+    const owner = getYjsRecordOwner(doc)
+    const previousOwner = existing && getYjsRecordOwner(existing.doc)
+    if (previousOwner && previousOwner.incarnation !== owner?.incarnation) this.cancelPending([recordId])
     const fields = doc.getMap('fields')
 
     const handler = (events: Y.YEvent<any>[], transaction: Y.Transaction) => {
@@ -260,7 +265,7 @@ export class YjsRecordBridge {
       }
 
       if (Object.keys(changedFields).length > 0) {
-        this.scheduleFlush(recordId, changedFields, actorId, originSocketId ?? null)
+        this.scheduleFlush(recordId, changedFields, actorId, originSocketId ?? null, owner)
       }
     }
 
@@ -306,6 +311,7 @@ export class YjsRecordBridge {
     changedFields: Record<string, unknown>,
     actorId: string,
     originId: string | null = null,
+    owner?: YjsRecordIncarnation,
   ): void {
     const existing = this.pendingWrites.get(recordId)
 
@@ -323,6 +329,7 @@ export class YjsRecordBridge {
     }
 
     const entry: PendingWrite = existing ?? {
+      owner,
       fields: { ...changedFields },
       actorIds: new Set([actorId]),
       contributions: new Map(),
@@ -394,7 +401,7 @@ export class YjsRecordBridge {
           this.deferPending(recordId, pending)
           return false
         }
-        return this.executePatch(recordId, fields, primaryActorId, actorIds, contributions)
+        return this.executePatch(recordId, fields, primaryActorId, actorIds, contributions, pending.owner)
       })
       .then((applied) => {
         if (applied) this._flushSuccessCount++
@@ -453,6 +460,7 @@ export class YjsRecordBridge {
     const delay = Math.min(this.deferRetryMinMs * 2 ** Math.min(older.deferrals - 1, 16), this.deferRetryMaxMs)
     const newer = this.pendingWrites.get(recordId)
     if (newer) {
+      if (older.owner?.incarnation !== newer.owner?.incarnation) return
       // Whatever waits arrived after this write was taken out, because writes of a record are taken
       // out one at a time: field by field the waiting values are the later ones and win.
       clearTimeout(newer.timer)
@@ -528,6 +536,7 @@ export class YjsRecordBridge {
     primaryActorId: string,
     allActorIds: string[],
     contributions: YjsContribution[] = [],
+    owner?: YjsRecordIncarnation,
   ): Promise<boolean> {
     // The contribution records are handed to the builder only where they are re-checked: without a
     // contribution checker the builder is called exactly as before.
@@ -536,6 +545,16 @@ export class YjsRecordBridge {
       : await this.getWriteInput(recordId, fields, primaryActorId, allActorIds)
     if (!input) return false // record context not available (e.g., deleted)
 
+    // The record may have been recreated since the debounce started or while the write waited
+    // for a sheet lock. Bind the row in the transaction that actually writes the patch.
+    if (owner) {
+      const existingGuard = input.preWriteGuard
+      input.preWriteGuard = async (query) => {
+        await existingGuard?.(query)
+        const row = await query(lockYjsRecordSql, [owner.recordId, owner.incarnation])
+        if (!row.rows.length) throw new YjsRecordRetiredError()
+      }
+    }
     const result = await this.recordWriteService.patchRecords(input)
     return result.updated.length > 0
   }

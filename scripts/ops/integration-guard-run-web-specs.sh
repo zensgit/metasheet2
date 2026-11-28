@@ -205,6 +205,7 @@ pnpm --filter @metasheet/web exec vitest run \
   StockPreparationPrepLineView \
   StockPreparationProjectArchive \
   StockPreparationProjectBoard \
+  StockPreparationProjectDelete \
   StockPreparationProjectOverview \
   StockPreparationProjectQuery \
   StockPreparationProjectSync.spec.ts \

@@ -121,6 +121,8 @@ export const ADVISORY_FIXED_KEY1_REGISTRY: ReadonlyArray<Readonly<{
   fixedKey1('notif-test-conn', { hashtext: 'notif-test-conn' }, 'packages/core-backend/src/notifications/test-send-service.ts (SQL literal)'),
   fixedKey1('stock-preparation-project', { literal: 0x73700101 }, 'packages/core-backend/src/multitable/stock-preparation-persist-unit-of-work.ts (bind parameter)'),
   fixedKey1('stock-preparation-batch', { literal: 0x73700102 }, 'packages/core-backend/src/multitable/stock-preparation-persist-unit-of-work.ts (bind parameter)'),
+  fixedKey1('stock-preparation-delete-activity', { literal: 6991 }, 'plugin-integration-core project-delete-activity and stock_prep_project_delete_business_fences migration (tenant/project tuple)'),
+  fixedKey1('stock-preparation-delete-scope', { literal: 16991 }, 'stock_prep_project_delete_scoped_fences migration (tagged inventory scope)'),
   fixedKey1('multitable-pit-recovery', { literal: 0x77303104 }, 'packages/core-backend/src/multitable/canonical-sheet-fence.ts (fixed namespace; documented, no production query site today)'),
   fixedKey1('yida-initialization-slot', { literal: 0x59494441 }, 'packages/core-backend/src/integration/yida-initialization-bootstrap.ts (bind parameter)'),
   fixedKey1('authorization-input-world', { literal: 20261106 }, 'packages/core-backend/src/rbac/authorization-input-lock.ts (SQL literal)'),

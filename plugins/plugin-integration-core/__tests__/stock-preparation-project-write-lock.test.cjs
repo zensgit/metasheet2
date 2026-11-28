@@ -538,7 +538,7 @@ test('L11 constants and vocabularies are pinned', () => {
   // (bumpGenerationWithin) — reasons only, never a purpose (a decision never holds the lease).
   // Batch-refresh step 5 PR-8: the change-plan confirm bumps INSIDE its transaction the same way (a reason, never a purpose).
   // 批次标识 BI-2 (R-65): the install's post-release bump.
-  assert.deepEqual(PROJECT_WRITE_GENERATION_REASONS, ['small_preview', 'large_approval', 'carry_confirm', 'pilot_enable', 'continuation_confirm', 'continuation_end', 'change_plan_confirm', 'pull_batch_install', 'recovery_closed', 'sheet_repair'])
+  assert.deepEqual(PROJECT_WRITE_GENERATION_REASONS, ['small_preview', 'large_approval', 'carry_confirm', 'pilot_enable', 'continuation_confirm', 'continuation_end', 'change_plan_confirm', 'pull_batch_install', 'recovery_closed', 'sheet_repair', 'project_delete'])
   assert.deepEqual(PROJECT_WRITE_ERROR_CODES, {
     WRITE_LOCKED: 'STOCK_PREP_PROJECT_WRITE_LOCKED',
     PLAN_SUPERSEDED: 'STOCK_PREP_PROJECT_PLAN_SUPERSEDED',

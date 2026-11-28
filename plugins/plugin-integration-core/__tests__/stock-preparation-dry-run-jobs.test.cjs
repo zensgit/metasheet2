@@ -378,6 +378,54 @@ test('J-03 the guard sequence, enumerated from the source, is the same list on b
   assert.ok(dryRun.indexOf('launchTableActionDryRunJob(') > dryRun.indexOf('const runDryRun = async () => {'), 'and launches the one shared closure')
 })
 
+test('project deletion sees a busy project even after the enqueue returned 202 and until the terminal record is saved', async () => {
+  const previous = process.env.STOCK_PREPARATION_PROJECT_DELETE_ENABLED
+  let held = false
+  let terminalStatusAtUnlock
+  let finish
+  const released = new Promise(resolve => { finish = resolve })
+  const writerActivity = {
+    withConnection: operation => operation({ async query(sql, [namespace, key]) {
+      assert.equal(namespace, 6991)
+      assert.deepEqual(JSON.parse(key), [TENANT, PROJECT])
+      if (sql.includes('pg_try_advisory_lock_shared(')) {
+        assert.equal(held, false)
+        held = true
+        return [{ locked: true }]
+      }
+      assert.match(sql, /pg_advisory_unlock_shared\(/)
+      assert.equal(held, true)
+      const [recordKey] = jobKeysIn(h.context.storage)
+      terminalStatusAtUnlock = (await h.context.storage.get(recordKey))?.status
+      held = false
+      finish()
+      return [{ released: true }]
+    } }),
+  }
+  const h = mount({ writerActivity })
+  const gate = blockSource(h)
+  try {
+    process.env.STOCK_PREPARATION_PROJECT_DELETE_ENABLED = 'true'
+    h.seedRegistryRow(PROJECT)
+    const started = await startJob(h, PULLER)
+    assert.equal(started.statusCode, 202, JSON.stringify(started.body))
+    assert.equal(held, true)
+    gate.release()
+    await released
+    assert.equal(terminalStatusAtUnlock, 'succeeded')
+    assert.equal(held, false)
+    const keys = jobKeysIn(h.context.storage)
+    const result = await h.context.storage.get(keys[0])
+    assert.equal(result.status, 'succeeded')
+    assert.equal(result.targetKey, dryRunJobs.__internals.dryRunJobTargetKey({ tenantId: TENANT, projectNo: PROJECT, actionId: ACTION_ID }))
+  } finally {
+    gate.release()
+    if (previous === undefined) delete process.env.STOCK_PREPARATION_PROJECT_DELETE_ENABLED
+    else process.env.STOCK_PREPARATION_PROJECT_DELETE_ENABLED = previous
+    h.restore()
+  }
+})
+
 // ── J-04 ─────────────────────────────────────────────────────────────────────────────────────────
 test('J-04 floor / foreign action / tenant mismatch are refused on enqueue AND poll; a job is read back only by its starter', async () => {
   const h = mount()

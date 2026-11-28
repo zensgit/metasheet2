@@ -24,7 +24,9 @@ import {
 } from '../../src/attendance/coordination/settlement-coordination-key'
 import {
   ADVISORY_TWO_INT4_CENSUS_V1,
+  STOCK_DELETE_ACTIVITY,
   censusEntryOwns,
+  stripCodeComments,
   scanTwoInt4AdvisorySites,
   type AdvisoryTwoInt4CensusEntryV1,
 } from '../helpers/settlement-coordination-advisory-census'
@@ -157,6 +159,20 @@ function registryValue(name: string): number | string | undefined {
   return 'literal' in entry.key1 ? entry.key1.literal : entry.key1.hashtext
 }
 
+// The acquire and unlock SQL both receive a local array outside their census windows.
+// Account for every use of that array and of its private namespace constant so neither
+// reassignment, a different bind, nor a comment standing in for a real bind can pass.
+function stockDeleteActivityBindingMatches(source: string): boolean {
+  const text = stripCodeComments(source)
+  const value = registryValue('stock-preparation-delete-activity')
+  return typeof value === 'number'
+    && text.split('\n').some(line => line.trim() === `const PROJECT_ACTIVITY_NAMESPACE = ${value}`)
+    && text.split('\n').some(line => line.trim() === 'const key = [PROJECT_ACTIVITY_NAMESPACE, JSON.stringify([tenantId, projectNo])]')
+    && text.includes('[PROJECT_ACTIVITY_NAMESPACE, JSON.stringify([tenantId, project])]')
+    && (text.match(/\bPROJECT_ACTIVITY_NAMESPACE\b/g) ?? []).length === 3
+    && (text.match(/\bkey\b/g) ?? []).length === 3
+}
+
 /** Arguments of every call `name(` in `text` that is not the function's own definition. */
 function helperCallArguments(text: string, name: string): string[][] {
   const calls: string[][] = []
@@ -225,6 +241,36 @@ describe('settlement coordination key space — guard ④ population (closed wor
     expect(censusEntryOwns(prefix, site('packages/core-backend/src/rbac/x.ts', prefix.key1, prefix.window))).toBe(false)
   })
 
+  it('binds every project-deletion advisory site to its own key space and argument', () => {
+    const source = readSource(STOCK_DELETE_ACTIVITY)
+    expect(stockDeleteActivityBindingMatches(source)).toBe(true)
+    for (const mutant of [
+      source.replace('NAMESPACE = 6991', 'NAMESPACE = 16991'),
+      source.replace('NAMESPACE = 6991', 'NAMESPACE = 6991 + 10000'),
+      source.replace('const key = [PROJECT_ACTIVITY_NAMESPACE,', 'const key = [16991,'),
+      source.replace('return activity.withConnection', 'key[0] = 16991\n  return activity.withConnection'),
+    ]) expect(stockDeleteActivityBindingMatches(mutant)).toBe(false)
+
+    const entries = ADVISORY_TWO_INT4_CENSUS_V1.filter(entry =>
+      entry.registry?.some(name => name.startsWith('stock-preparation-delete-')))
+    expect(entries).toHaveLength(7)
+    for (const entry of entries) {
+      const sites = scan.sites.filter(site => censusEntryOwns(entry, site))
+      expect(sites).toHaveLength(1)
+      const [site] = sites
+      const changed = entry.key1 === '16991' ? '6991' : '16991'
+      const mutations = [
+        { ...site, key1: changed, code: site.code.replace(entry.key1, changed) },
+        { ...site, code: site.code.replace('hashtext(', 'other_hash(') },
+        { ...site, file: 'plugins/plugin-integration-core/lib/other.cjs' },
+      ]
+      if (entry.file === STOCK_DELETE_ACTIVITY) mutations.push({
+        ...site, code: site.code.replace(/, key\)|\[PROJECT_ACTIVITY_NAMESPACE,/, ', wrongBinding)'),
+      })
+      for (const mutation of mutations) expect(ADVISORY_TWO_INT4_CENSUS_V1.filter(row => censusEntryOwns(row, mutation))).toEqual([])
+    }
+  })
+
   it('constant census entries name registry entries and are still tied to the code that binds key1', () => {
     const problems: string[] = []
     for (const entry of ADVISORY_TWO_INT4_CENSUS_V1) {
@@ -258,6 +304,9 @@ describe('settlement coordination key space — guard ④ population (closed wor
         if ([...set].sort().join('|') !== [...(entry.boundLiterals ?? [])].sort().join('|')) problems.push(`${entry.file}: ${entry.helper.name} namespaces ${[...set].join(', ')} differ from the census`)
       }
       // Literal-form key1 must agree with the registry value it names.
+      if (/^-?\d+$/.test(entry.key1) && !(entry.registry ?? []).every((name) => registryValue(name) === Number(entry.key1))) {
+        problems.push(`${entry.file}: literal key1 ${entry.key1} disagrees with its registry entries`)
+      }
       const literalHashtext = /^hashtext\('([^']*)'\)$/.exec(entry.key1)
       if (literalHashtext && !(entry.registry ?? []).every((name) => registryValue(name) === literalHashtext[1])) {
         problems.push(`${entry.file}: key1 ${entry.key1} disagrees with its registry entries`)

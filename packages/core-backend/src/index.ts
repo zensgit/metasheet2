@@ -66,6 +66,8 @@ import { buildXlsxBuffer, type XlsxModule } from './multitable/xlsx-service'
 // header onto that field when the token carried no claim), and the plugin's first value-bearing
 // tenant-scoped read must not be built on a caller-supplied string.
 import { createTenantPrincipalDirectoryBoundaryV1 } from './services/tenant-principal-directory-boundary'
+import { createStockPreparationProjectWriterActivity } from './services/stock-preparation-project-writer-activity'
+import { authorizeStockPreparationProjectDeleteWithin } from './services/stock-preparation-project-delete-authority'
 // 备料按部门列写权限: the per-column WRITE-scope port, injected into plugin-integration-core ONLY,
 // same per-plugin-injected-service shape as GovernedAiService above. It writes `field_permissions`
 // — the ONE table the grid's write gate reads — and is structurally write-only (it cannot hide a
@@ -3683,6 +3685,12 @@ export class MetaSheetServer {
         stockPreparationXlsxExport: manifest.name === 'plugin-integration-core'
           ? { buildWorkbookBuffer: buildStockPreparationExportWorkbookBuffer }
           : undefined,
+        stockPreparationProjectWriterActivity: manifest.name === 'plugin-integration-core'
+          ? createStockPreparationProjectWriterActivity(() => poolManager.getStockPreparationActivityPool().getInternalPool())
+          : undefined,
+        stockPreparationProjectDeleteAuthority: manifest.name === 'plugin-integration-core'
+          ? authorizeStockPreparationProjectDeleteWithin
+          : undefined,
         // 一线看得见自己工厂的项目: the tenant PRINCIPAL DIRECTORY for plugin-integration-core ONLY.
         // The plugin's first tenant-scoped VALUE-BEARING read (the operator project directory, which
         // carries the caller's own project numbers and names) must not accept `req.user.tenantId` as
@@ -5204,7 +5212,7 @@ export class MetaSheetServer {
           try {
             const pool = poolManager.get()
             const recResult = await pool.query(
-              'SELECT id, sheet_id, created_by FROM meta_records WHERE id = $1',
+              'SELECT id, sheet_id, created_by, yjs_incarnation FROM meta_records WHERE id = $1',
               [recordId],
             )
             if (recResult.rows.length === 0) return null
@@ -5232,7 +5240,7 @@ export class MetaSheetServer {
               ? await canReadEveryYjsFieldForUser(pool.query.bind(pool), sheetId, userId, capabilities)
               : false
             const canWrite = canWriteRecord(capabilities, sheetScope, isAdminRole, userId, createdBy)
-            return { canRead: capabilities.canRead, canWrite, canReadAllFields }
+            return { canRead: capabilities.canRead, canWrite, canReadAllFields, recordIncarnation: recResult.rows[0].yjs_incarnation }
           } catch {
             // The facts could not be read: neither a yes nor a no. A subscription is still answered
             // as before; a write is not refused on it and not let through on it.
@@ -5473,6 +5481,11 @@ export class MetaSheetServer {
         if (this.realtimeProtection) {
           yjsWsAdapter.setRealtimeProtection(this.realtimeProtection.protection, this.realtimeProtection.connections)
         }
+        yjsSyncService.setRetiredListener((recordId) => {
+          yjsBridge.cancelPending([recordId])
+          yjsBridge.unobserve(recordId)
+          yjsWsAdapter.retireSubscriptions(recordId)
+        })
         yjsWsAdapter.setBridge(yjsBridge)
         yjsWsAdapter.register(collabIO)
 

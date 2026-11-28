@@ -2,11 +2,73 @@
  * Yjs POC hardening tests — JWT/auth integration + write-own e2e.
  */
 import { describe, it, expect, vi } from 'vitest'
+import { EventEmitter } from 'node:events'
+import { createServer } from 'node:http'
+import { Server, type Socket } from 'socket.io'
+import * as encoding from 'lib0/encoding'
+import * as syncProtocol from 'y-protocols/sync'
+import * as Y from 'yjs'
+import { bindYjsRecord } from '../../src/collab/yjs-record-incarnation'
+import type { YjsSyncService } from '../../src/collab/yjs-sync-service'
+import { YjsWebSocketAdapter } from '../../src/collab/yjs-websocket-adapter'
 
 // ═══════════════════════════════════════════════════════════════════
 // JWT/Auth socket integration
 // ═══════════════════════════════════════════════════════════════════
 describe('YjsWebSocketAdapter auth integration', () => {
+  it('replies only to the requester with UNAVAILABLE when a sync read cannot verify the record incarnation, then accepts a retry', async () => {
+    const recordId = 'synthetic-record'
+    const serverDoc = new Y.Doc()
+    const clientDoc = new Y.Doc()
+    const io = new Server(createServer())
+    try {
+      serverDoc.getText('body').insert(0, 'synthetic record text')
+      bindYjsRecord(serverDoc, { recordId, incarnation: 'synthetic-incarnation' })
+      const isCurrentDocument = vi.fn().mockRejectedValueOnce(new Error('synthetic lookup failure')).mockResolvedValue(true)
+      const sync = { getOrCreateDoc: async () => serverDoc, getDoc: () => serverDoc, isCurrentDocument }
+      const adapter = new YjsWebSocketAdapter(sync as unknown as YjsSyncService)
+      adapter.setTokenVerifier(async () => 'synthetic-reader')
+      adapter.setAuthChecker(async () => ({ canRead: true, canWrite: false }))
+
+      const namespace = io.of('/yjs')
+      const middleware = vi.spyOn(namespace, 'use')
+      adapter.register(io)
+      const inbound = new EventEmitter()
+      const send = vi.fn()
+      const socket = { id: 'requester', connected: true, handshake: { auth: { token: 'synthetic-token' } },
+        on: inbound.on.bind(inbound), emit: send, join: vi.fn() } as unknown as Socket
+      const next = vi.fn()
+      await middleware.mock.calls[0][0](socket, next)
+      expect(next.mock.calls).toEqual([[]])
+      namespace.listeners('connection')[0](socket)
+      await inbound.listeners('yjs:subscribe')[0]({ recordId })
+      expect(send.mock.calls.map(([event]) => event)).toEqual(['yjs:message'])
+      send.mockClear()
+      const broadcast = vi.spyOn(namespace, 'to')
+
+      const encoder = encoding.createEncoder()
+      encoding.writeVarUint(encoder, 0)
+      syncProtocol.writeSyncStep1(encoder, clientDoc)
+      const request = { recordId, data: Array.from(encoding.toUint8Array(encoder)) }
+      const syncStep = inbound.listeners('yjs:message')[0]
+      await syncStep(request)
+      expect(send.mock.calls).toEqual([['yjs:error', { recordId, code: 'UNAVAILABLE', message: 'Record document unavailable' }]])
+      expect(broadcast).not.toHaveBeenCalled()
+      expect(isCurrentDocument).toHaveBeenCalledWith(recordId, serverDoc)
+
+      send.mockClear()
+      await syncStep(request)
+      const reply = encoding.createEncoder()
+      encoding.writeVarUint(reply, 0)
+      syncProtocol.writeSyncStep2(reply, serverDoc, Y.encodeStateVector(clientDoc))
+      expect(send.mock.calls).toEqual([['yjs:message', { recordId, data: Array.from(encoding.toUint8Array(reply)) }]])
+    } finally {
+      clientDoc.destroy()
+      serverDoc.destroy()
+      await io.close()
+    }
+  })
+
   it('rejects connection without token', async () => {
     const { YjsWebSocketAdapter } = await import('../../src/collab/yjs-websocket-adapter')
     const { YjsSyncService } = await import('../../src/collab/yjs-sync-service')

@@ -1,3 +1,4 @@
+import { getYjsRecordOwner, type YjsRecordIncarnation } from './yjs-record-incarnation'
 import * as Y from 'yjs'
 import * as syncProtocol from 'y-protocols/sync'
 import * as encoding from 'lib0/encoding'
@@ -13,7 +14,7 @@ import { bindingKey, type RealtimeSessionBinding } from '../realtime-authz/sessi
 const MSG_SYNC = 0
 // const MSG_AWARENESS = 1  // Not used in POC
 
-export type YjsRecordAccess = { canRead: boolean; canWrite: boolean; canReadAllFields?: boolean }
+export type YjsRecordAccess = { canRead: boolean; canWrite: boolean; canReadAllFields?: boolean; recordIncarnation?: string | null }
 
 /**
  * Callback to check if a user has access to a record.
@@ -356,6 +357,7 @@ export class YjsWebSocketAdapter {
   private dropSubscription(socket: Socket, recordId: string): void {
     this.endQueuedChanges(recordId, socket.id)
     socket.leave(`yjs:${recordId}`)
+    this.subscriptionOwners.get(socket)?.delete(recordId)
     this.socketPermissions.get(socket.id)?.delete(recordId)
     socket.emit('yjs:error', { recordId, code: 'FORBIDDEN', message: 'No read access' })
     if (this.removePresence(recordId, socket.id)) this.emitPresence(recordId)
@@ -548,13 +550,27 @@ export class YjsWebSocketAdapter {
     })
   }
 
+  private readonly subscriptionOwners = new WeakMap<Socket, Map<string, YjsRecordIncarnation>>()
+
+  private subscribedToDoc(socket: Socket, recordId: string, doc?: Y.Doc): boolean {
+    if (!doc) return false
+    const owner = getYjsRecordOwner(doc)
+    const subscribed = this.subscriptionOwners.get(socket)?.get(recordId)
+    return !owner || (subscribed !== undefined && subscribed.incarnation === owner.incarnation)
+  }
+
+  retireSubscriptions(recordId: string): void {
+    for (const socket of this.localRoomSockets(`yjs:${recordId}`)) this.tellInvalidated(socket, recordId)
+  }
+
   private arrivalOf(socket: Socket, recordId: string): ArrivalContext {
+    const doc = this.syncService.getDoc(recordId)
     return {
       userId: this.socketUserId.get(socket.id),
       binding: this.connections ? this.connections.bindingOf(socket) : null,
       subscribed: !this.authChecker || this.socketPermissions.get(socket.id)?.has(recordId) === true,
       arrivedAt: Date.now(),
-      doc: this.syncService.getDoc(recordId),
+      doc: this.subscribedToDoc(socket, recordId, doc) ? doc : undefined,
     }
   }
 
@@ -566,6 +582,7 @@ export class YjsWebSocketAdapter {
     // Nothing further is taken from the copy this connection holds now.
     this.endQueuedChanges(recordId, socket.id)
     socket.leave(`yjs:${recordId}`)
+    this.subscriptionOwners.get(socket)?.delete(recordId)
     this.socketPermissions.get(socket.id)?.delete(recordId)
     socket.emit('yjs:invalidated', { recordId, reason: 'rest-write' } satisfies YjsInvalidatedPayload)
     if (this.removePresence(recordId, socket.id)) this.emitPresence(recordId)
@@ -687,6 +704,14 @@ export class YjsWebSocketAdapter {
     }
     // The document may have been invalidated while the checks ran: nothing is applied to the old
     // generation, and the sender is told.
+    if (getYjsRecordOwner(doc)) {
+      const current = await this.withinHold<boolean | null>(arrival, this.syncService.isCurrentDocument(recordId, doc), null)
+      if (current === null) return 'hold'
+      if (!current) {
+        this.tellInvalidated(socket, recordId)
+        return 'done'
+      }
+    }
     if (this.syncService.getDoc(recordId) !== doc) {
       this.tellInvalidated(socket, recordId)
       return 'done'
@@ -853,6 +878,7 @@ export class YjsWebSocketAdapter {
           return
         }
 
+        let checkedAccess: YjsRecordAccess | undefined
         if (this.authChecker) {
           // A read that could not be answered is answered to the subscriber the way it always was.
           const access = await this.readAccess(userId, recordId)
@@ -871,13 +897,7 @@ export class YjsWebSocketAdapter {
             socket.emit('yjs:error', { recordId, code: 'FORBIDDEN', message: 'No read access' })
             return
           }
-          // Cache write permission for this socket+record
-          let perms = this.socketPermissions.get(socket.id)
-          if (!perms) {
-            perms = new Map()
-            this.socketPermissions.set(socket.id, perms)
-          }
-          perms.set(recordId, access.canWrite)
+          checkedAccess = access
         }
 
         let doc: Y.Doc
@@ -891,6 +911,24 @@ export class YjsWebSocketAdapter {
         }
         if (!socket.connected) return
         const room = `yjs:${recordId}`
+        const owner = getYjsRecordOwner(doc)
+        if (checkedAccess) {
+          if (checkedAccess.recordIncarnation !== undefined && checkedAccess.recordIncarnation !== owner?.incarnation) {
+            this.tellInvalidated(socket, recordId)
+            return
+          }
+          const perms = this.socketPermissions.get(socket.id) ?? new Map<string, boolean>()
+          perms.set(recordId, checkedAccess.canWrite)
+          this.socketPermissions.set(socket.id, perms)
+        }
+        if (owner) {
+          for (const member of this.localRoomSockets(room)) {
+            if (member !== socket && !this.subscribedToDoc(member, recordId, doc)) this.tellInvalidated(member, recordId)
+          }
+          const owners = this.subscriptionOwners.get(socket) ?? new Map<string, YjsRecordIncarnation>()
+          owners.set(recordId, owner)
+          this.subscriptionOwners.set(socket, owners)
+        }
         socket.join(room)
         this.upsertPresence(recordId, socket.id, userId, null)
 
@@ -949,6 +987,18 @@ export class YjsWebSocketAdapter {
           if (!doc) return
 
           if (syncType === syncProtocol.messageYjsSyncStep1) {
+            if (!this.subscribedToDoc(socket, recordId, doc)) {
+              this.tellInvalidated(socket, recordId)
+              return
+            }
+            if (getYjsRecordOwner(doc)) {
+              try {
+                if (!await this.syncService.isCurrentDocument(recordId, doc)) return
+              } catch {
+                socket.emit('yjs:error', { recordId, code: 'UNAVAILABLE', message: 'Record document unavailable' })
+                return
+              }
+            }
             if (this.isProtected()) {
               // Protected: the session and the read access of the requester are read again before
               // any document state is returned.
@@ -1034,6 +1084,7 @@ export class YjsWebSocketAdapter {
       socket.on('yjs:unsubscribe', ({ recordId }: { recordId: string }) => {
         if (!recordId) return
         socket.leave(`yjs:${recordId}`)
+        this.subscriptionOwners.get(socket)?.delete(recordId)
         // Clean up cached permission for this record
         const perms = this.socketPermissions.get(socket.id)
         if (perms) perms.delete(recordId)

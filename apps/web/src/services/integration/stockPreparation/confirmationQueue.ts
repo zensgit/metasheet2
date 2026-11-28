@@ -232,6 +232,8 @@ export interface StockPreparationOperatorProject {
  * been created yet" and "your project is fine and has nothing pending" are the same blank screen.
  */
 export interface StockPreparationOperatorDirectory {
+  /** Requested recent projects with a committed deletion and no current local project root. */
+  deletedRecentProjectNos?: string[]
   /** Echo of the tenant the server actually scoped to — a handle, never a business value. */
   tenantId: string
   /** False when the project table itself is not provisioned: nothing has ever been synced here. */
@@ -373,11 +375,12 @@ export async function exportStockPreparationPrepLines(
  */
 export async function readStockPreparationOperatorDirectory(
   scope: IntegrationScope,
-  options?: { includePullTargets?: boolean },
+  options?: { includePullTargets?: boolean; recentProjectNos?: string[] },
 ): Promise<StockPreparationOperatorDirectory> {
   const query = buildQuerySuffix({
     tenantId: scope.tenantId,
     workspaceId: scope.workspaceId,
+    ...(options?.recentProjectNos?.length ? { recentProjectNos: options.recentProjectNos.join(',') } : {}),
     ...(options?.includePullTargets ? { includePullTargets: '1' } : {}),
   })
   const response = await apiFetch(`/api/integration/stock-preparation/operator/projects${query}`)

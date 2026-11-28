@@ -4,6 +4,10 @@ import { fileURLToPath } from 'node:url'
 import { expect, test, type Page } from '@playwright/test'
 import {
   SYN_PROJECT_A,
+  SYN_PROJECT_B,
+  SYN_TENANT_ID,
+  STOCK_PREP_HARNESS,
+  installStockPrepRoutes,
   openStockPrepHarness,
   primaryFilledButtonCount,
   type StockPrepRouteLog,
@@ -63,6 +67,64 @@ async function tokenRgb(page: Page, token: string): Promise<string> {
 // ---------------------------------------------------------------------------
 
 test.describe('设计稿 §6.2 —— P1 验收', () => {
+  test('delivery cleanup removes the deleted project from a second browser after a fresh directory read', async ({ page, browser, baseURL }) => {
+    const peer = await browser.newPage({ baseURL })
+    let deleted = false
+    const code = 'A0B1C2D3'
+    const counts = { dedicatedSheets: 1, dedicatedRows: 2 }
+    const envelope = (data: unknown) => ({ ok: true, data })
+    const card = (p: Page, project: string) => p.locator(`[data-testid="stock-prep-operator-home-card"][data-project-no="${project}"]`)
+    try {
+      for (const p of [page, peer]) {
+        await installStockPrepRoutes(p, 'ready')
+        await p.route('**/api/integration/stock-preparation/operator/projects*', async route => {
+          const recent = new URL(route.request().url()).searchParams.get('recentProjectNos')?.split(',') ?? []
+          const projects = (deleted ? [SYN_PROJECT_B] : [SYN_PROJECT_A, SYN_PROJECT_B]).map(projectNo =>
+            ({ projectNo, projectName: projectNo, pendingDecisionCount: 0, pulledRowCount: 1 }))
+          await route.fulfill({ json: envelope({ tenantId: SYN_TENANT_ID, directoryReady: true, ledgerReady: true,
+            pullTargetReady: true, directoryMayBeIncomplete: false, projects, projectCount: projects.length, pendingProjectCount: 0,
+            ...(recent.length ? { deletedRecentProjectNos: deleted && recent.includes(SYN_PROJECT_A) ? [SYN_PROJECT_A] : [] } : {}),
+          }) })
+        })
+      }
+      await page.route('**/api/admin/access-capabilities', route => route.fulfill({ json: envelope({
+        isPlatformAdmin: true, canManageScope: false, delegableNamespaces: [],
+      }) }))
+      await page.route('**/project-delete/access', route => route.fulfill({ json: envelope({ mayDelete: true }) }))
+      await page.route('**/delete/preview', route => route.fulfill({ json: envelope({
+        tenantId: SYN_TENANT_ID, projectNo: SYN_PROJECT_A, counts, tables: [
+          { sheetId: 'synthetic-sheet', name: '合成项目备料表', kind: 'dedicated', rowCount: 2 },
+        ], verificationCode: code, challengeId: 'synthetic-challenge', expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }) }))
+      await page.route('**/delete/confirm', async route => {
+        expect(route.request().postDataJSON()).toEqual({ challengeId: 'synthetic-challenge', code })
+        deleted = true
+        await route.fulfill({ json: envelope({ tenantId: SYN_TENANT_ID, projectNo: SYN_PROJECT_A, counts, auditId: 'synthetic-audit' }) })
+      })
+      await peer.goto(`${STOCK_PREP_HARNESS}?actor=operator&scenario=ready&tab=project-board&projectNo=${SYN_PROJECT_A}`)
+      const saved = () => peer.evaluate(project => Object.keys(localStorage).some(key =>
+        key.startsWith('metasheet.stockPrep.operatorHomeMemory.v2:') && (localStorage.getItem(key) ?? '').includes(project)), SYN_PROJECT_A)
+      await expect.poll(saved).toBe(true)
+      await page.goto(`${STOCK_PREP_HARNESS}?actor=platform&scenario=ready&tab=project-board&projectNo=${SYN_PROJECT_A}`)
+      await expect(page.getByTestId('stock-prep-tabs')).toBeVisible()
+      await page.evaluate(() => { localStorage.setItem('auth_token', 'synthetic-browser-session'); window.dispatchEvent(new Event('focus')) })
+      await page.getByTestId('stock-prep-project-delete-open').click()
+      await expect(page.getByTestId('stock-prep-project-delete-code')).toHaveText(code)
+      await expect(page.getByTestId('stock-prep-project-delete-confirm')).toBeDisabled()
+      await page.getByTestId('stock-prep-project-delete-code-input').fill(code)
+      await page.getByTestId('stock-prep-project-delete-confirm').click()
+      await expect(page.getByTestId('stock-prep-project-delete-success')).toBeVisible()
+      expect(deleted).toBe(true)
+      expect(await saved()).toBe(true)
+      await peer.goto(`${STOCK_PREP_HARNESS}?actor=operator&scenario=ready&tab=home`)
+      await expect(card(peer, SYN_PROJECT_B)).toBeVisible()
+      await expect(card(peer, SYN_PROJECT_A)).toHaveCount(0)
+      await expect.poll(saved).toBe(false)
+    } finally {
+      await peer.close()
+    }
+  })
+
   test('P1-01 rail 仍是一个 tablist、条目 testid 原名、三组齐全,深度工具默认收起(display:none 且不在 Tab 序)', async ({ page }) => {
     const log = await openStockPrepHarness(page, { actor: 'platform', scenario: 'ready' })
 
@@ -371,7 +433,8 @@ test.describe('设计稿 §6.2 —— P1 验收', () => {
     const caveats = page.locator('[data-testid="stock-prep-ops-audit-caveat"]')
     await expect(caveats).toHaveCount(3)
     for (let index = 0; index < 3; index += 1) await expect(caveats.nth(index)).toBeVisible()
-    await expect(caveats.nth(0)).toContainText('不等于')
+    await expect(caveats.nth(0)).toContainText('查不到审计时，仍可能有过操作')
+    await expect(caveats.nth(0)).toContainText('项目删除')
 
     // 「常驻」的另一半:不可关闭。既不是 <details>(那样默认可收),也没有自己的关闭按钮,而且它
     // 不是被塞在某个可折叠祖先里的。只断言「在」的话,把三行包进一个 <details> 也照样绿。
@@ -387,6 +450,8 @@ test.describe('设计稿 §6.2 —— P1 验收', () => {
 
     // 查完之后三行还在(它是每个分支的兄弟节点,不是某一支里面的)。
     await expect(caveats).toHaveCount(3)
+    await expect(caveats.nth(0)).toBeVisible()
+    await expect(caveats.nth(0)).toContainText('查不到审计时，仍可能有过操作')
 
     const rows = page.locator('[data-testid="stock-prep-ops-audit-row"]')
     await expect(rows).toHaveCount(3)

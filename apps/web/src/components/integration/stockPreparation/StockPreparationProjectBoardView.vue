@@ -7,6 +7,10 @@
       ) }}
     </p>
 
+    <p v-if="showHome && projectDeleteSucceeded" class="sp-board__delete-success" role="status" data-testid="stock-prep-project-delete-success">
+      {{ bi('项目及全部备料数据已删除。', 'The project and all its stock-preparation data were deleted.') }}
+    </p>
+
     <!-- P0-2 (§2.3 寄生): `?projectNo=` empty renders the task-oriented home page, right here inside
          the SAME `project-board` tab — zero tab-structure change, zero landing-page change. Once a
          project is opened (below, or from a home card) this gives way to the existing workspace,
@@ -42,6 +46,12 @@
       >
         {{ bi('‹ 返回今天要处理', '‹ Back to what needs you today') }}
       </button>
+      <StockPreparationProjectDelete
+        :key="openedProjectNo"
+        :project-no="openedProjectNo"
+        :scope="scope"
+        :disabled="busy || refreshing"
+      />
     </div>
 
     <!-- The clamped enum code stays on screen — it is what a person quotes when they ask for help —
@@ -818,6 +828,7 @@ import { useLocale } from '../../../composables/useLocale'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import StockPreparationProjectSyncPanel from './StockPreparationProjectSyncPanel.vue'
 import StockPreparationOperatorHome from './StockPreparationOperatorHome.vue'
+import StockPreparationProjectDelete from './StockPreparationProjectDelete.vue'
 import StockPreparationConfirmationQueueView from './StockPreparationConfirmationQueueView.vue'
 import StockPreparationYidaPreviewPanel from './StockPreparationYidaPreviewPanel.vue'
 import {
@@ -834,6 +845,7 @@ import {
   type StockPreparationOperatorProject,
 } from '../../../services/integration/stockPreparation/confirmationQueue'
 import { readStockPreparationOperatorHomeDirectory } from '../../../services/integration/stockPreparation/operatorHomeDirectory'
+import { onStockPrepProjectDeleteCommitted } from '../../../services/integration/stockPreparation/projectDelete'
 import {
   readStockPreparationHandoff,
   readStockPreparationProjectBoard,
@@ -942,6 +954,7 @@ const emit = defineEmits<{
   (e: 'open-multitable', target: { sheetId: string; viewId: string } | null): void
   /** Mirrors the opened project into the shell's `?projectNo=` query. */
   (e: 'select-project-no', projectNo: string): void
+  (e: 'project-deleted'): void
   /**
    * 备料分批拉取第一期 step 4 PR-7: the open project's refresh stanza (values-free tokens / counts / booleans — the
    * parsed board `refresh` key), or null when none is open / the backend sends none. The shell's 拉取待确认 rail
@@ -993,6 +1006,8 @@ const handoffNotice = ref<string>('')
 const exportEmptyNotice = ref(false)
 const projectNoInputEl = ref<HTMLInputElement | null>(null)
 const directory = ref<StockPreparationOperatorDirectory | null>(null)
+const projectDeleteSucceeded = ref(false)
+let directoryGeneration = 0
 /** True once the FIRST directory read has settled (success or failure) — see `directoryLoaded` below. */
 const directoryLoaded = ref(false)
 /**
@@ -1754,20 +1769,25 @@ async function loadDirectory(): Promise<void> {
   // Read the face ONCE, up front: `showHome` can flip while the request is in flight, and a `finally`
   // that re-read it could label the response with the wrong mode.
   const home = showHome.value
+  const mine = ++directoryGeneration
   try {
     // See operatorHomeDirectory.ts for why the home call (and only it) opts in and throttles: the
     // confirmation queue's own directory read stays the plain, un-opted-in, un-throttled call too.
     if (home) void loadProjectTargetList()
-    directory.value = home
+    const next = home
       ? await readStockPreparationOperatorHomeDirectory(props.scope)
       : await readStockPreparationOperatorDirectory(props.scope)
+    if (mine === directoryGeneration) {
+      directory.value = next
+      if (home && next.deletedRecentProjectNos?.length) recentProjects.value = readStockPrepRecentProjects(props.scope)
+    }
   } catch {
-    directory.value = null
+    if (mine === directoryGeneration) directory.value = null
   } finally {
     // P0-2: lets the home page tell "the read failed" (directory stays null AFTER this settles) apart
     // from "still loading" (directory is null BEFORE it settles) — see StockPreparationOperatorHome
     // .vue's `directoryAvailable`.
-    directoryLoaded.value = true
+    if (mine === directoryGeneration) directoryLoaded.value = true
   }
 }
 
@@ -1818,6 +1838,7 @@ async function loadBoard(projectNo: string, mode: 'open' | 'refresh' = 'open'): 
       && readStockPrepRememberedPosture(target, props.scope) === 'pending_decision'
   }
   openedProjectNo.value = target
+  if (target) projectDeleteSucceeded.value = false
   if (!refresh) {
     board.value = null
     handoff.value = null
@@ -1885,6 +1906,28 @@ function goHome(): void {
   emit('select-project-no', '')
   void loadBoard('')
 }
+
+const stopProjectDelete = onStockPrepProjectDeleteCommitted(({ projectNo, scope }) => {
+  if (scope.tenantId !== props.scope.tenantId) return
+  recentProjects.value = readStockPrepRecentProjects(props.scope)
+  directoryGeneration += 1
+  directory.value = null
+  directoryLoaded.value = false
+  projectTargetListGeneration += 1
+  projectTargetList.value = null
+  if (projectNo !== openedProjectNo.value) {
+    void loadDirectory()
+    return
+  }
+  projectNoInput.value = ''
+  errorCode.value = null
+  errorReason.value = null
+  refreshing.value = false
+  projectDeleteSucceeded.value = true
+  emit('project-deleted')
+  goHome()
+})
+onBeforeUnmount(stopProjectDelete)
 
 async function focusProjectNoInput(): Promise<void> {
   await nextTick()
@@ -2140,6 +2183,7 @@ const projectTarget = ref<StockPrepProjectTargetState | null>(null)
 /** The tenant's registry rows, for 今天要处理; null = the switch is off or the list was unreadable. */
 const projectTargetList = ref<StockPrepProjectTargetList | null>(null)
 let projectTargetGeneration = 0
+let projectTargetListGeneration = 0
 
 function projectTargetClient(): StockPreparationProjectTargetApi {
   return props.projectTargetApi ?? createStockPreparationProjectTargetApi(props.scope)
@@ -2156,10 +2200,12 @@ async function loadProjectTarget(projectNo: string): Promise<void> {
 }
 
 async function loadProjectTargetList(): Promise<void> {
+  const mine = ++projectTargetListGeneration
   try {
-    projectTargetList.value = await projectTargetClient().list()
+    const list = await projectTargetClient().list()
+    if (mine === projectTargetListGeneration) projectTargetList.value = list
   } catch {
-    projectTargetList.value = null
+    if (mine === projectTargetListGeneration) projectTargetList.value = null
   }
 }
 
@@ -2627,6 +2673,18 @@ onMounted(async () => {
 
 .sp-board__back {
   display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--ms-space-2);
+}
+
+.sp-board__delete-success {
+  color: var(--ms-text-1);
+  background: color-mix(in srgb, var(--ms-color-success) 12%, var(--ms-bg-card));
+  border-inline-start: 3px solid var(--ms-color-success);
+  border-radius: var(--ms-radius-sm);
+  padding: var(--ms-space-3);
 }
 
 .sp-board__back-button {

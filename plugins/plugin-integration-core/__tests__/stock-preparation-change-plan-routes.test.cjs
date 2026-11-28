@@ -183,10 +183,11 @@ function setPilot(h, enabled) {
   }
 }
 
-function mount({ pilot = true, unwired = false, register = true, consultHook = null } = {}) {
+function mount({ pilot = true, unwired = false, register = true, consultHook = null, writerActivity } = {}) {
   const source = { data: F.firstPullSource() }
   const adapter = {
     async read(input = {}) {
+      if (source.beforeRead) await source.beforeRead()
       const rows = Array.isArray(source.data[input.object]) ? source.data[input.object] : []
       const matches = rows.filter((row) => Object.entries(input.filters || {}).every(([field, expected]) => row[field] === expected))
       return { records: matches.map(clone), done: true, nextCursor: null }
@@ -196,6 +197,7 @@ function mount({ pilot = true, unwired = false, register = true, consultHook = n
     tenantId: TENANT,
     projectNo: PROJECT,
     switchOn: true,
+    writerActivity,
     // Review fix N1: `consultHook(n, scope)` runs after the n-th consult answered (a decision landing between a route's
     // consult and its store transaction).
     refreshOptions: { lockOnRefreshDb: true, ...(typeof consultHook === 'function' ? { consultHook } : {}) },
@@ -1013,6 +1015,94 @@ test('CR-AU the read order: an audit failure on the page serves no receipt and n
     expectRefusal(await review(ng, { changePlanId: 'chp_cr_x', contentDigest: 'd', conclusion: 'handled', readReceipt: 'e'.repeat(32) }), { status: 404, code: CODES.CHANGE_PLAN_NOT_FOUND })
     assert.equal(ng.env.stepFourRowCount(), 0, 'no read wrote a step-4 row')
   } finally { ng.restore() }
+})
+
+function competingReplicas() {
+  const { lockProjectActivity } = require('../lib/stock-preparation-project-delete-activity.cjs')
+  const active = new Set()
+  const writerActivity = {
+    withConnection: work => work({ async query(sql, [, key]) {
+      if (sql.includes('try_advisory_lock_shared')) {
+        active.add(key)
+        return [{ locked: true }]
+      }
+      assert.match(sql, /pg_advisory_unlock_shared/)
+      return [{ released: active.delete(key) }]
+    } }),
+  }
+  return {
+    active, writerActivity,
+    deleteProject: scope => lockProjectActivity({ query: async (_sql, [, key]) => [{ locked: !active.has(key) }] }, scope),
+  }
+}
+
+test('a pull already reading its source on an OFF replica excludes cleanup on an ON replica', async () => {
+  const previous = process.env.STOCK_PREPARATION_PROJECT_DELETE_ENABLED
+  process.env.STOCK_PREPARATION_PROJECT_DELETE_ENABLED = 'false'
+  const replicas = competingReplicas()
+  const st = mount({ writerActivity: replicas.writerActivity })
+  let resume
+  const sourceWait = new Promise(resolve => { resume = resolve })
+  let started
+  const entered = new Promise(resolve => { started = resolve })
+  st.source.beforeRead = async () => { started(); await sourceWait }
+  const pull = st.dryRun()
+  try {
+    await Promise.race([entered, pull.then(res => { throw Error('pull ended before its source read: ' + res.statusCode) })])
+    process.env.STOCK_PREPARATION_PROJECT_DELETE_ENABLED = 'true'
+    await assert.rejects(replicas.deleteProject(st.scope), { code: 'STOCK_PREPARATION_PROJECT_DELETE_BUSY' })
+    resume()
+    assert.equal((await pull).statusCode, 200)
+    await replicas.deleteProject(st.scope)
+  } finally {
+    resume()
+    await pull
+    st.h.restore()
+    if (previous === undefined) delete process.env.STOCK_PREPARATION_PROJECT_DELETE_ENABLED
+    else process.env.STOCK_PREPARATION_PROJECT_DELETE_ENABLED = previous
+  }
+})
+
+test('a flag-off replica holds project activity until a written-plan GET has stored its last receipt', async () => {
+  const previous = process.env.STOCK_PREPARATION_PROJECT_DELETE_ENABLED
+  delete process.env.STOCK_PREPARATION_PROJECT_DELETE_ENABLED
+  const { active, writerActivity, deleteProject } = competingReplicas()
+  let st
+  let allowReceipt
+  let inFlight
+  try {
+    const world = await writtenWorld({ writerActivity })
+    st = world.st
+    const storage = st.h.context.storage
+    const write = storage.set.bind(storage)
+    let receiptStarted
+    const started = new Promise(resolve => { receiptStarted = resolve })
+    const releaseReceipt = new Promise(resolve => { allowReceipt = resolve })
+    storage.set = async (key, value) => {
+      if (key.startsWith(READ_RECEIPT_KEY_PREFIX)) {
+        receiptStarted()
+        await releaseReceipt
+      }
+      return write(key, value)
+    }
+    inFlight = current(st)
+    await Promise.race([started, inFlight.then(() => { throw Error('expected a written-plan receipt') })])
+    // The other replica enables cleanup and attempts the exclusive scope lock while the GET is suspended.
+    process.env.STOCK_PREPARATION_PROJECT_DELETE_ENABLED = 'true'
+    await assert.rejects(deleteProject(st.scope), { code: 'STOCK_PREPARATION_PROJECT_DELETE_BUSY' })
+    allowReceipt()
+    assert.equal((await inFlight).statusCode, 200)
+    await deleteProject(st.scope)
+    assert.equal(active.size, 0)
+    for (const key of st.receipts()) storage.delete(key)
+    assert.deepEqual(st.receipts(), [])
+  } finally {
+    allowReceipt?.()
+    if (inFlight) await inFlight
+    st?.h.restore()
+    if (previous === undefined) delete process.env.STOCK_PREPARATION_PROJECT_DELETE_ENABLED
+    else process.env.STOCK_PREPARATION_PROJECT_DELETE_ENABLED = previous
+  }
 })
 
 require('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('stock-preparation-change-plan-routes.test.cjs', tests)

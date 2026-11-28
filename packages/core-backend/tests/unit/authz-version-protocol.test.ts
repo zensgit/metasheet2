@@ -995,6 +995,38 @@ describe('C — the census', () => {
     expect(writers).toEqual([])
   })
 
+  it('C-02a cleanup requires an active D21 trigger set and origin session before the host writes shared grants', async () => {
+    const { prepareProjectDeleteSheetWrites } = await import('../../src/services/stock-preparation-project-delete-sheet-writes')
+    const selected = new Map([['shared', { recordIds: ['mine'] }]])
+    for (const fault of ['replica', 'disabled', 'foreign', 'none']) {
+      const calls: Array<{ statement: string; args?: unknown[] }> = []
+      const tx = { async query(statement: string, args?: unknown[]) {
+        calls.push({ statement, args })
+        if (statement.startsWith('SELECT DISTINCT sheet_id')) return [{ sheet_id: 'shared' }]
+        if (statement.includes("current_setting('session_replication_role')")) return [{ origin: fault !== 'replica' }]
+        if (statement === AUTHORIZATION_VERSION_TRIGGER_POSTURE_SQL) return fault === 'disabled' ? [] : AUTHORIZATION_VERSION_TRIGGERS.map(t =>
+          ({ enabled: 'O', trigger_name: t.trigger, table_name: t.table, function_name: t.fn }))
+        if (statement.includes('FOR KEY SHARE')) return fault === 'foreign' ? [] : [{ id: 'shared' }]
+        if (statement === SHEET_PERMISSION_VERSIONS_BUMP_SQL) return []
+        if (statement.startsWith('DELETE FROM public.record_permissions ')) return [{ n: 1 }]
+        throw new Error('unexpected statement')
+      } }
+      const prepare = prepareProjectDeleteSheetWrites(tx, 'tenant', 'project', { selected, dedicatedSheetId: null })
+      if (fault !== 'none') {
+        await expect(prepare).rejects.toMatchObject({ code: 'STOCK_PREPARATION_PROJECT_DELETE_' + (fault === 'foreign' ? 'AMBIGUOUS' : 'UNAVAILABLE') })
+        expect(calls.some(c => c.statement === SHEET_PERMISSION_VERSIONS_BUMP_SQL || c.statement.startsWith('DELETE FROM'))).toBe(false)
+        continue
+      }
+      const actions = await prepare
+      expect(await actions.deleteDependency('record_permissions')).toBe(1)
+      expect(calls.slice(-3).map(call => call.args?.[0])).toEqual(['shared', ['shared'], null])
+      expect(calls.at(-1)?.args).toEqual([null, ['shared'], ['mine']])
+      await expect(actions.deleteDedicatedSheet()).rejects.toMatchObject({ status: 409 })
+      // Runtime callers include JS plugins. Reject a string outside the compile-time enum.
+      await expect(actions.deleteDependency('users' as 'record_permissions')).rejects.toMatchObject({ status: 409 })
+    }
+  })
+
   it('C-03 only the migration and the protocol module write the two version tables (one-writer census over core-backend/src and the plugin roots)', () => {
     // Literal table names, the module's `${…_TABLE}` placeholders, and the migration's identifier() form.
     const VERSION_DML = /(INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(\s+TABLE)?)\s+"?(public\.)?((sheet_permission_versions|subject_authorization_versions)\b|\$\{(SHEET_PERMISSION_VERSIONS_TABLE|SUBJECT_AUTHORIZATION_VERSIONS_TABLE)\})|\$\{sql\.raw\(identifier\(table\)\)\}/i

@@ -8,13 +8,9 @@
 // server. This is that answer, as a page.
 //
 // WHAT THIS FILE DOES NOT DO. It does not widen the gate (still admin-tier, unchanged — D-2 in the
-// UX redesign leaves that owner-pending), does not add a filter the server does not already support,
-// and does not attempt to explain the store's `project_id` column-meaning split (P8 in
-// design-ops-overview.md: only FOUR of the fourteen actions stamp a real project number there —
-// generation_run/exception_resolve/prep_line_export/handoff_advance; the rest are NULL or an internal
-// handle). That split is why `STOCK_PREP_AUDIT_PROJECT_SCOPED_ACTIONS` below is a strict subset of
-// the full vocabulary: offering the other ten in a project-number search's action filter would offer
-// a filter that can only ever return zero rows.
+// UX redesign leaves that owner-pending) and uses the server's action and project-number filters.
+// The action picker offers the common project-number lookups. The unfiltered query can also show
+// other actions recorded with that same project number.
 //
 // THE QUERY DELIBERATELY CARRIES NO `workspaceId`, AND THAT IS THE WHOLE POINT OF THIS PARAGRAPH.
 // `stock-preparation-audit-store.cjs`'s `list` treats a supplied workspaceId as an EQUALITY filter
@@ -67,7 +63,7 @@ import { buildQuerySuffix, type IntegrationApiEnvelope, type IntegrationScope } 
 export const STOCK_PREPARATION_AUDIT_ROUTE = '/api/integration/stock-preparation/audit'
 
 /**
- * The full 14-action vocabulary, mirrored from `stock-preparation-audit-store.cjs`'s
+ * The full action vocabulary, mirrored from `stock-preparation-audit-store.cjs`'s
  * `STOCK_PREP_AUDIT_ACTIONS` (the DB CHECK constraint's own source of truth). Kept as a committed
  * constant rather than fetched: the vocabulary is closed and migration-frozen, exactly like every
  * other closed-vocabulary mirror in this workbench (`STOCK_PREP_STEP_OUTCOME`,
@@ -90,46 +86,25 @@ export const STOCK_PREP_AUDIT_ACTIONS = Object.freeze([
   'project_directory_read',
   'handoff_advance',
   'project_board_read',
+  'project_target_create',
+  'project_target_archive',
+  'project_target_restore',
+  'project_target_grant',
+  'project_fields_update',
+  'project_overview_refresh',
+  'project_pilot_enable',
+  'project_delete',
 ] as const)
 
 export type StockPrepAuditAction = typeof STOCK_PREP_AUDIT_ACTIONS[number]
 
-/**
- * The four actions whose `project_id` column is a real project number (P8). The ONLY actions a
- * project-number search can ever surface — see the file header for why the action filter is limited
- * to these rather than the full 14.
- *
- * RE-VERIFIED AGAINST ALL NINETEEN `audit.append` CALL SITES (this is the exact claim an adversarial
- * review challenged with "it is eleven, not four", so the evidence is written down rather than
- * asserted). Fourteen of those call sites DO pass a `projectId` key, but the VALUE splits in two:
- *
- *   - REAL PROJECT NUMBER (what an admin types into this panel's box) — `http-routes.cjs`:6008
- *     `reconcileProjectNo` (generation_run), :8249 `confirmProjectNo` (exception_resolve), :8355
- *     `projectNo` (prep_line_export), :8958 and :8990 `projectNo` (handoff_advance). These four
- *     actions are this list.
- *   - INTERNAL METASHEET HANDLE, NOT A PROJECT NUMBER — :7346/:7377/:7404 (mapping_*), :7437/:7464
- *     (unit_*), :7619/:7689 (exception_resolve), :7654 (generation_run), :7718
- *     (exception_bulk_resolve) all pass `input.projectId`, which arrives from the workbench views'
- *     `requestScope()` (`StockPreparationMappingConfirmView.vue`: `{ ...props.scope, projectId:
- *     props.projectId }`) carrying `StockPreparationWorkspace.vue`'s `selectedProjectId` — the ref
- *     whose own comment reads "The projectId is an internal MetaSheet handle — kept in state/URL,
- *     never rendered (values-free)", and which the shell deliberately keeps as a SECOND ref beside
- *     `selectedProjectNo` precisely so a handle is never confused with a project number.
- *     `persist_repair_once` is the same shape: `stock-preparation-sync-run-repair-once.cjs`:353 takes
- *     `projectId` from `planInputs.projectId` and keeps `sourceProjectNo` as a separate variable.
- *
- * The remaining call sites pass no projectId at all (:8012 source_binding_set, :8508
- * project_directory_read, :9158/:9182 project_board_read) and land as NULL.
- *
- * So a project-NUMBER search matches exactly the four below. Offering the other ten in this filter
- * would offer filters that can only ever return zero rows, and the permanent caveat line
- * (`STOCK_PREP_AUDIT_CAVEAT_SCOPE`, "只涵盖四类动作") is accurate as written.
- */
+/** Dedicated action filters for project-number lookup, including the project deletion audit. */
 export const STOCK_PREP_AUDIT_PROJECT_SCOPED_ACTIONS: readonly StockPrepAuditAction[] = Object.freeze([
   'generation_run',
   'exception_resolve',
   'prep_line_export',
   'handoff_advance',
+  'project_delete',
 ])
 
 /**

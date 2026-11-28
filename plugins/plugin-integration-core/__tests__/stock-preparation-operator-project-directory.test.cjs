@@ -228,6 +228,8 @@ function mainRow(stagingProjectId, sheetId, recordId, fields) {
  * "tenant A did not see them" proves nothing.
  */
 function mount({
+  writerActivity,
+  deletionSnapshot,
   ledgerProvisioned = true,
   directoryProvisioned = true,
   tenantPrincipalDirectory = { async verifyTenantMembership() { return { member: true } } },
@@ -437,6 +439,7 @@ function mount({
   const auditAppends = []
   const auditProbes = []
   const context = {
+    services: { stockPreparationProjectWriterActivity: writerActivity },
     api: {
       http: {
         addRoute(method, routePath, handler) {
@@ -467,6 +470,7 @@ function mount({
       : {},
   }
   const services = baseServices()
+  if (deletionSnapshot) services.stockPreparationProjectDelete = { deletionSnapshot }
   const auditListCalls = []
   services.stockPreparationAuditStore = {
     async append(entry) {
@@ -1507,6 +1511,53 @@ async function main() {
       'and it is the same answer, not a degraded one',
     )
     assert.equal(second.body.data.pullTargetReady, true)
+  })
+
+  await run('an OFF cleanup-capable directory re-reads a shared sheet after a peer removes its project rows', async () => {
+    const previous = process.env.STOCK_PREPARATION_PROJECT_DELETE_ENABLED
+    process.env.STOCK_PREPARATION_PROJECT_DELETE_ENABLED = 'false'
+    try {
+      const { routes, recordsA } = mount({
+        mainTableRows: [{ projectNo: PROJECT_A3_NO }],
+        writerActivity: { withConnection() { assert.fail('directory is a read') } },
+      })
+      const list = () => call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
+      const initial = await list()
+      assert.equal(initial.statusCode, 200)
+      assert.ok(initial.body.data.projects.some(row => row.projectNo === PROJECT_A3_NO))
+      const read = recordsA.queryRecords.bind(recordsA)
+      recordsA.queryRecords = input => input.sheetId === MAIN_SHEET_A ? [] : read(input)
+      const cleaned = await list()
+      assert.equal(cleaned.statusCode, 200)
+      assert.ok(cleaned.body.data.pullTargetReady)
+      assert.equal(cleaned.body.data.projects.some(row => row.projectNo === PROJECT_A3_NO), false)
+    } finally {
+      if (previous === undefined) delete process.env.STOCK_PREPARATION_PROJECT_DELETE_ENABLED
+      else process.env.STOCK_PREPARATION_PROJECT_DELETE_ENABLED = previous
+    }
+  })
+
+  await run('a deletion invalidates cached scans on another replica while unchanged requests share the scan', async () => {
+    let version = '0'
+    const { routes, queryLog } = mount({
+      mainTableRows: [{ projectNo: PROJECT_A3_NO }],
+      deletionSnapshot: async ({ tenantId, projectNos }) => {
+        assert.equal(tenantId, TENANT_A)
+        return { version, deleted: version === '1' ? projectNos : [] }
+      },
+    })
+    const list = recentProjectNos => call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: { ...UNION_QUERY, recentProjectNos } })
+    const scans = () => queryLog.filter(row => row.sheetId === MAIN_SHEET_A).length
+    const first = await list('REMOVED')
+    assert.deepEqual(first.body.data.deletedRecentProjectNos, [])
+    const initial = scans()
+    assert.ok(initial > 0)
+    await list('REMOVED')
+    assert.equal(scans(), initial)
+    version = '1'
+    assert.deepEqual((await list('REMOVED')).body.data.deletedRecentProjectNos, ['REMOVED'])
+    assert.equal(scans(), initial * 2)
+    assert.equal((await list('invalid project')).statusCode, 400)
   })
 
   await run('N1-n a WARM window is still not a way past the tenant gate', async () => {

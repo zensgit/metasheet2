@@ -106,6 +106,7 @@
         @navigate-stage="handleNavigateStage"
         @open-multitable="handleOpenFillTarget"
         @select-project-no="handleProjectNoSelect"
+        @project-deleted="onProjectDeleted"
         @refresh-changed="onRefreshChanged"
       />
       <!-- 项目查询 (P2-1) — 「怎么查询」。A SIBLING BRANCH of 今天要处理 / 项目备料, not a passenger
@@ -261,7 +262,7 @@
 // Boundary (mutation-tested gates): READONLY-FIRST — this shell has no write path, calls no service,
 // and only renders values-free copy. NAMING — the snapshot surface uses 快照批次 / "snapshot batch"
 // to avoid colliding with PLM view-state "snapshot" and k3WiseSetup "mapping" vocabularies.
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter, type LocationQueryRaw } from 'vue-router'
 import { useLocale } from '../../../composables/useLocale'
 import { getDefaultIntegrationScope } from '../../../services/integration/workbench'
@@ -301,6 +302,7 @@ import { readStockPrepMembers, type StockPrepMembersReadOutcome } from '../../..
 import { createStockPreparationInstallApi } from '../../../services/integration/stockPreparation/installRun'
 import { createStockPreparationProjectSyncApi } from '../../../services/integration/stockPreparation/projectSync'
 import { readStockPreparationOperatorHomeDirectory } from '../../../services/integration/stockPreparation/operatorHomeDirectory'
+import { onStockPrepProjectDeleteCommitted } from '../../../services/integration/stockPreparation/projectDelete'
 import type { StockPreparationFillTarget } from '../../../services/integration/stockPreparation/projectBoard'
 import {
   stockPrepAdminActionPlain,
@@ -1144,12 +1146,36 @@ function handleNavigateStage(viewKey: string, projectNo?: string): void {
  */
 const workspaceFillTarget = ref<StockPreparationFillTarget | null>(null)
 let workspaceFillTargetRequested = false
+let workspaceFillTargetGeneration = 0
+
+function onProjectDeleted(): void {
+  activeKey.value = 'home'
+}
+
+const stopProjectDelete = onStockPrepProjectDeleteCommitted((commit) => {
+  if (commit.scope.tenantId !== scope.tenantId) return
+  workspaceFillTargetGeneration += 1
+  workspaceFillTargetRequested = false
+  workspaceFillTarget.value = null
+  if (selectedProjectNo.value !== commit.projectNo) {
+    if (effectiveKey.value === 'project-workspace') void loadWorkspaceFillTarget()
+    return
+  }
+  currentRefresh.value = null
+  if (effectiveKey.value !== 'project-board') {
+    onProjectDeleted()
+    handleProjectNoSelect('')
+  }
+})
+onBeforeUnmount(stopProjectDelete)
 
 async function loadWorkspaceFillTarget(): Promise<void> {
   if (workspaceFillTargetRequested) return
   workspaceFillTargetRequested = true
+  const mine = ++workspaceFillTargetGeneration
   try {
     const directory = await readStockPreparationOperatorHomeDirectory(scope)
+    if (mine !== workspaceFillTargetGeneration) return
     const target = directory.fillTarget
     workspaceFillTarget.value = target
       && typeof target.sheetId === 'string' && target.sheetId.length > 0
@@ -1157,7 +1183,7 @@ async function loadWorkspaceFillTarget(): Promise<void> {
       ? target
       : null
   } catch {
-    workspaceFillTarget.value = null
+    if (mine === workspaceFillTargetGeneration) workspaceFillTarget.value = null
   }
 }
 

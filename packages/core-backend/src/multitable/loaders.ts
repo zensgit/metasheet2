@@ -1,3 +1,4 @@
+import { currentSheetMetadataEntry } from './stock-preparation-metadata-cache'
 import {
   normalizeJson,
   normalizeJsonArray,
@@ -103,10 +104,10 @@ export async function tryResolveView(
   viewId: string,
   cache: Map<string, MultitableViewConfig> = DEFAULT_VIEW_CACHE,
 ): Promise<MultitableViewConfig | null> {
-  const cached = cache.get(viewId)
-  if (cached) return cached
-
   const query = normalizeQueryArg(poolOrQuery)
+  const entry = await currentSheetMetadataEntry(query, cache.get(viewId)?.sheetId, cache, viewId)
+  if (entry.cached) return entry.cached
+
   const result = await query(
     'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1',
     [viewId],
@@ -125,6 +126,6 @@ export async function tryResolveView(
     hiddenFieldIds: normalizeJsonArray(row.hidden_field_ids),
     config: normalizeJson(row.config),
   }
-  cache.set(viewId, view)
+  entry.store(view)
   return view
 }

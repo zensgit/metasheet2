@@ -501,6 +501,17 @@ export const loginAuthorityManifest: Record<string, string[]> = {
     "upsertOne > dynamic insert into",
     "upsertOne > dynamic insert into [tableIdent, colIdents, placeholders]",
   ],
+  // Project cleanup removes registration rows from two fixed plugin registries.
+  "plugins/plugin-integration-core/lib/stock-preparation-project-delete-sheets.cjs": [
+    "deleteSheets > dynamic delete from [OWNERS]",
+    "deleteSheets > dynamic delete from [TARGETS]",
+  ],
+  // The challenge belongs to project deletion. Its insert and both deletion paths are counted.
+  "plugins/plugin-integration-core/lib/stock-preparation-project-delete.cjs": [
+    "confirm > dynamic delete from [CHALLENGES]",
+    "preview > dynamic delete from [CHALLENGES, CHALLENGES]",
+    "preview > dynamic insert into [CHALLENGES]",
+  ],
   "plugins/plugin-integration-core/scripts/run-gip-sqlserver-snapshot-page-sequence-executor.cjs": [
     "prepareFixture > dynamic insert into [TABLE, TABLE]",
   ],

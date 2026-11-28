@@ -206,15 +206,26 @@ test('RA-08 the audit entries and details pass the audit store\'s values-free ga
   assert.deepEqual({ ...lib.SHEET_CENSUS_AUDIT.modes }, { censusRead: 'sheet_census_read', acknowledged: 'remnant_acknowledged', revoked: 'remnant_acknowledgement_revoked' })
 })
 
-test('RA-09 an acknowledgement never reaches a lane: only the route layer, the plugin wiring, readiness (through this lib) and this lib name the ruling ledger', () => {
+test('RA-09 acknowledgement consumers stay closed and project cleanup can only remove rulings for its own tenant and project', () => {
   const fs = require('node:fs')
   const strip = (source) => source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
   const files = ['index.cjs', ...fs.readdirSync(LIB).filter((name) => name.endsWith('.cjs')).map((name) => `lib/${name}`)]
   const naming = (pattern) => files.filter((file) => pattern.test(strip(fs.readFileSync(path.join(__dirname, '..', file), 'utf8')))).sort()
-  // The store module and the table name: the store itself, the route layer and the plugin wiring.
-  assert.deepEqual(naming(/stock-preparation-component-ruling-store\.cjs|integration_stock_prep_component_ruling/), [
-    'index.cjs', 'lib/http-routes.cjs', 'lib/stock-preparation-component-ruling-store.cjs', 'lib/stock-preparation-remnant-acknowledgement.cjs',
+  const cleanup = 'lib/stock-preparation-project-delete-business.cjs'
+  const ledger = /stock-preparation-component-ruling-store\.cjs|integration_stock_prep_component_ruling/
+  assert.deepEqual(naming(ledger), [
+    'index.cjs', 'lib/http-routes.cjs', 'lib/stock-preparation-component-ruling-store.cjs', cleanup, 'lib/stock-preparation-remnant-acknowledgement.cjs',
   ])
+  // Cleanup records exactly one literal write. It cannot import the acknowledgement store,
+  // inspect a ruling, or turn a tenant/project delete into a broader mutation.
+  const cleanupSource = strip(fs.readFileSync(path.join(__dirname, '..', cleanup), 'utf8'))
+  const scopedWrite = "remove: 'DELETE FROM integration_stock_prep_component_ruling WHERE tenant_id = $1 AND project_no = $2',"
+  function hasOnlyScopedCleanup(source) {
+    return source.includes(scopedWrite) && !ledger.test(source.replace(scopedWrite, ''))
+  }
+  assert.ok(hasOnlyScopedCleanup(cleanupSource))
+  assert.equal(hasOnlyScopedCleanup(cleanupSource.replace(scopedWrite, scopedWrite.replace(' AND project_no = $2', ''))), false)
+  assert.equal(hasOnlyScopedCleanup(cleanupSource + "\nrequire('./stock-preparation-component-ruling-store.cjs')"), false)
   // The ledger's read and the one exemption rule: the route layer, readiness and this lib — no lane, no planner, no writer.
   assert.deepEqual(naming(/componentRulingStore|unacknowledgedRemnantHandles|listActiveRulings/), [
     'lib/http-routes.cjs', 'lib/stock-preparation-component-ruling-store.cjs', 'lib/stock-preparation-pilot-readiness.cjs', 'lib/stock-preparation-remnant-acknowledgement.cjs',

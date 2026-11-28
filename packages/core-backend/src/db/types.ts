@@ -109,6 +109,18 @@ export interface Database {
   meta_field_auto_number_sequences: MetaFieldAutoNumberSequencesTable
   meta_views: MetaViewsTable
   meta_records: MetaRecordsTable
+  meta_record_yjs_states: {
+    record_id: string
+    doc_state: Buffer
+    state_vector: Buffer | null
+    updated_at: Generated<Date>
+  }
+  meta_record_yjs_updates: {
+    id: Generated<string>
+    record_id: string
+    update_data: Buffer
+    created_at: CreatedAt
+  }
   meta_links: MetaLinksTable
   meta_comments: MetaCommentsTable
   meta_comment_reads: MetaCommentReadsTable
@@ -668,6 +680,7 @@ export interface MetaViewsTable {
 }
 
 export interface MetaRecordsTable {
+  yjs_incarnation: Generated<string | null>
   id: Generated<string>
   sheet_id: string
   data: JSONColumnType<Record<string, unknown>>

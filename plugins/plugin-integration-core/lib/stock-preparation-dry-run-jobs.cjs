@@ -228,6 +228,7 @@ async function launchDryRunJob(input = {}) {
     startedAt: isoAt(startedMs),
     finishedAt: null,
     instanceId: DRY_RUN_JOB_INSTANCE_ID,
+    ...(process.env.STOCK_PREPARATION_PROJECT_DELETE_ENABLED === 'true' ? { targetKey: ticket.targetKey } : {}),
   }
   await ticket.storage.set(ticket.recordKey, running)
   ticket.detached = true

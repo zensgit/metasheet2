@@ -118,6 +118,10 @@ function stableHash(value) {
   return crypto.createHash('sha256').update(String(value)).digest('hex').slice(0, 16)
 }
 
+function generationRunId(projectId, snapshotBatchId) {
+  return `stockprep_run_${stableHash(`${projectId}|${snapshotBatchId}`)}`
+}
+
 function stableLineId(snapshotBatchId, snapshotLineId) {
   return `stockprep_line_${stableHash(`${snapshotBatchId}|${snapshotLineId}`)}`
 }
@@ -344,7 +348,7 @@ function normalizeInput(input = {}) {
   return {
     projectId,
     snapshotBatchId,
-    runId: optionalString(input.runId) || `stockprep_run_${stableHash(`${projectId}|${snapshotBatchId}`)}`,
+    runId: optionalString(input.runId) || generationRunId(projectId, snapshotBatchId),
     bomSnapshotLines: asArray(input.bomSnapshotLines, 'bomSnapshotLines'),
     erpMaterials: asArray(input.erpMaterials, 'erpMaterials'),
     materialMappings: asArray(input.materialMappings, 'materialMappings'),
@@ -478,6 +482,7 @@ function generateStockPreparationMvp(input = {}) {
 }
 
 module.exports = {
+  generationRunId,
   EXCEPTION_TYPES,
   PREP_STATUSES,
   UNIT_STATUSES,

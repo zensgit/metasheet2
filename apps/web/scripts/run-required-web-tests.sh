@@ -2050,6 +2050,7 @@ exec npx vitest run \
   StockPreparationPrepLineView \
   StockPreparationProjectArchive \
   StockPreparationProjectBoard \
+  StockPreparationProjectDelete \
   StockPreparationProjectOverview \
   StockPreparationProjectQuery \
   StockPreparationProjectSync.spec.ts \

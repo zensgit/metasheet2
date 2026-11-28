@@ -1,5 +1,6 @@
 import * as Y from 'yjs'
 import type { YjsPersistenceAdapter } from './yjs-persistence-adapter'
+import { bindYjsRecord, getYjsRecordOwner, YjsRecordRetiredError, type YjsRecordIncarnation } from './yjs-record-incarnation'
 
 /**
  * Seeds a fresh Y.Doc's `fields` Y.Map from the record's current value in
@@ -36,6 +37,12 @@ export class YjsDocUnavailableError extends Error {
   }
 }
 
+interface PendingPurge {
+  recordId: string
+  owner: Promise<YjsRecordIncarnation | undefined>
+  running?: Promise<void>
+}
+
 export class YjsSyncService {
   private docs = new Map<string, { doc: Y.Doc; lastAccess: number }>()
   /**
@@ -46,8 +53,9 @@ export class YjsSyncService {
   private generations = new Map<string, number>()
   private pendingPersistence = new Map<string, Set<Promise<void>>>()
   /** Records whose invalidated state could not be removed: not served until a removal succeeds. */
-  private quarantined = new Set<string>()
+  private quarantined = new Map<string, PendingPurge>()
   private persistence: YjsPersistenceAdapter
+  private retiredListener?: (recordId: string) => void
   private cleanupTimer: NodeJS.Timeout
   private recordSeed: YjsRecordSeedFn | null
 
@@ -112,9 +120,26 @@ export class YjsSyncService {
     return this.generations.get(recordId) ?? 0
   }
 
-  private purgeAdapter(): ((ids: string[]) => Promise<void>) | null {
-    const adapter = this.persistence as YjsPersistenceAdapter & { purgeRecords?: (ids: string[]) => Promise<void> }
-    return typeof adapter.purgeRecords === 'function' ? adapter.purgeRecords.bind(adapter) : null
+  private startPurge(targets: PendingPurge[], settling: Promise<void>[] = []): Promise<void> {
+    const work = (async () => {
+      // Resolve owner promises immediately so a failed cold lookup is also observed.
+      const owners = await Promise.all(targets.map(target => target.owner))
+      await Promise.allSettled(settling)
+      const ids = targets.map(target => target.recordId)
+      if (typeof this.persistence.getRecordIncarnations === 'function') {
+        await this.persistence.purgeRecords(ids, owners.filter((owner): owner is YjsRecordIncarnation => owner != null))
+      } else {
+        // Persistence implementations without record generations retain the one-argument contract.
+        await this.persistence.purgeRecords(ids)
+      }
+      for (const target of targets) {
+        if (this.quarantined.get(target.recordId) === target) this.quarantined.delete(target.recordId)
+      }
+    })().finally(() => {
+      for (const target of targets) target.running = undefined
+    })
+    for (const target of targets) target.running = work
+    return work
   }
 
   private trackPersistence(recordId: string, work: Promise<void>): void {
@@ -127,23 +152,47 @@ export class YjsSyncService {
     })
   }
 
+  setRetiredListener(listener: (recordId: string) => void): void {
+    this.retiredListener = listener
+  }
+
+  /** A remote deletion can retire a cached document without a notification reaching this worker. */
+  async isCurrentDocument(recordId: string, doc: Y.Doc): Promise<boolean> {
+    const owner = getYjsRecordOwner(doc)
+    if (owner) {
+      const live = await this.persistence.getRecordIncarnation(recordId)
+      if (!live || live.incarnation !== owner.incarnation) {
+        this.retireDocument(recordId, doc)
+        return false
+      }
+    }
+    return this.docs.get(recordId)?.doc === doc
+  }
+
+  private retireDocument(recordId: string, doc: Y.Doc): void {
+    if (this.docs.get(recordId)?.doc !== doc) return
+    this.generations.set(recordId, this.generationOf(recordId) + 1)
+    this.docs.delete(recordId)
+    doc.destroy()
+    // The database cleanup already committed. Purging by record id here could erase a new doc.
+    this.retiredListener?.(recordId)
+  }
+
   async getOrCreateDoc(recordId: string): Promise<Y.Doc> {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const existing = this.docs.get(recordId)
-      if (existing) {
+      if (existing && await this.isCurrentDocument(recordId, existing.doc)) {
         existing.lastAccess = Date.now()
         return existing.doc
       }
-      if (this.quarantined.has(recordId)) {
-        // The state of an invalidated generation may still be persisted; it must not be loaded.
-        const purge = this.purgeAdapter()
-        if (!purge) throw new YjsDocUnavailableError()
+      const pending = this.quarantined.get(recordId)
+      if (pending) {
         try {
-          await purge([recordId])
+          await (pending.running ?? this.startPurge([pending]))
         } catch {
           throw new YjsDocUnavailableError()
         }
-        this.quarantined.delete(recordId)
+        if (this.quarantined.has(recordId)) continue
       }
       const generation = this.generationOf(recordId)
       const doc = await this.loadDocForGeneration(recordId, generation)
@@ -154,7 +203,11 @@ export class YjsSyncService {
 
   /** Null when the record was invalidated while this document was loading: it is not published. */
   private async loadDocForGeneration(recordId: string, generation: number): Promise<Y.Doc | null> {
+    const getOwner = this.persistence.getRecordIncarnation?.bind(this.persistence)
+    const owner = await getOwner?.(recordId)
+    if (owner === null) throw new YjsDocUnavailableError()
     const doc = new Y.Doc()
+    if (owner) bindYjsRecord(doc, owner)
 
     // Load persisted state
     const state = await this.persistence.loadDoc(recordId)
@@ -171,9 +224,11 @@ export class YjsSyncService {
       if (origin === 'persistence' || origin === 'seed') return
       // A document of an invalidated generation persists nothing more.
       if (this.generationOf(recordId) !== generation) return
-      this.trackPersistence(recordId, this.persistence.storeUpdate(recordId, update).catch((err) =>
-        console.error(`Failed to persist yjs update for ${recordId}:`, err),
-      ))
+      const write = owner ? this.persistence.storeUpdate(recordId, update, owner) : this.persistence.storeUpdate(recordId, update)
+      this.trackPersistence(recordId, write.catch((err) => {
+        if (err instanceof YjsRecordRetiredError) this.retireDocument(recordId, doc)
+        else console.error('Failed to persist collaborative update', err)
+      }))
     })
 
     // Only seed from meta_records if nothing had been persisted yet.
@@ -183,7 +238,11 @@ export class YjsSyncService {
       await this.seedFreshDoc(recordId, doc)
     }
 
-    if (this.generationOf(recordId) !== generation || this.quarantined.has(recordId)) {
+    // The snapshot and seed are independent reads. Never publish them if their owner disappeared
+    // between these reads. An unbound persistence double has no database identity to verify.
+    const latest = owner && await this.persistence.getRecordIncarnation(recordId)
+    if ((owner && (!latest || latest.incarnation !== owner.incarnation)) ||
+        this.generationOf(recordId) !== generation || this.quarantined.has(recordId)) {
       doc.destroy()
       return null
     }
@@ -224,29 +283,37 @@ export class YjsSyncService {
    */
   async invalidateDocs(recordIds: string[]): Promise<void> {
     if (recordIds.length === 0) return
+    const ids = [...new Set(recordIds)]
+    const cached = new Map<string, YjsRecordIncarnation>()
     const settling: Promise<void>[] = []
-    for (const recordId of recordIds) {
-      // New generation first: a concurrent loader of the old one will not publish its document.
+    for (const recordId of ids) {
       this.generations.set(recordId, this.generationOf(recordId) + 1)
       const entry = this.docs.get(recordId)
       if (entry) {
+        const owner = getYjsRecordOwner(entry.doc)
+        if (owner) cached.set(recordId, owner)
         entry.doc.destroy()
         this.docs.delete(recordId)
       }
+      const previous = this.quarantined.get(recordId)?.running
+      if (previous) settling.push(previous)
       for (const work of this.pendingPersistence.get(recordId) ?? []) settling.push(work)
     }
-    // Writes of the old generation that are already on their way are settled before the removal,
-    // so none of them can land after it.
-    await Promise.allSettled(settling)
-    const purge = this.purgeAdapter()
-    if (purge) {
-      try {
-        await purge(recordIds)
-      } catch (error) {
-        for (const recordId of recordIds) this.quarantined.add(recordId)
-        throw error
-      }
+    if (typeof this.persistence.purgeRecords !== 'function') {
+      await Promise.allSettled(settling)
+      return
     }
+    const cold = ids.filter(id => !cached.has(id))
+    const lookup = cold.length && typeof this.persistence.getRecordIncarnations === 'function'
+      ? this.persistence.getRecordIncarnations(cold).then(rows => new Map(rows.map(row => [row.recordId, row])))
+      : Promise.resolve(new Map<string, YjsRecordIncarnation>())
+    const targets = ids.map(recordId => {
+      const known = cached.get(recordId)
+      const target: PendingPurge = { recordId, owner: known ? Promise.resolve(known) : lookup.then(rows => rows.get(recordId)) }
+      this.quarantined.set(recordId, target)
+      return target
+    })
+    await this.startPurge(targets, settling)
   }
 
   async releaseDoc(recordId: string): Promise<void> {
@@ -257,10 +324,13 @@ export class YjsSyncService {
       try {
         await this.persistSnapshot(recordId, entry.doc)
       } catch (err) {
-        console.error(`[yjs] Failed to snapshot doc ${recordId} on release:`, err)
+        if (err instanceof YjsRecordRetiredError) this.retireDocument(recordId, entry.doc)
+        else console.error('[yjs] Failed to snapshot document on release', err)
       }
-      entry.doc.destroy()
-      this.docs.delete(recordId)
+      if (this.docs.get(recordId) === entry) {
+        entry.doc.destroy()
+        this.docs.delete(recordId)
+      }
     }
   }
 
@@ -271,10 +341,13 @@ export class YjsSyncService {
         try {
           await this.persistSnapshot(recordId, entry.doc)
         } catch (err) {
-          console.error(`[yjs] Failed to snapshot idle doc ${recordId}:`, err)
+          if (err instanceof YjsRecordRetiredError) this.retireDocument(recordId, entry.doc)
+          else console.error('[yjs] Failed to snapshot idle document', err)
         }
-        entry.doc.destroy()
-        this.docs.delete(recordId)
+        if (this.docs.get(recordId) === entry) {
+          entry.doc.destroy()
+          this.docs.delete(recordId)
+        }
       }
     }
   }
@@ -285,7 +358,7 @@ export class YjsSyncService {
       try {
         await this.persistSnapshot(recordId, entry.doc)
       } catch (err) {
-        console.error(`[yjs] Failed to snapshot doc ${recordId} on destroy:`, err)
+        if (!(err instanceof YjsRecordRetiredError)) console.error('[yjs] Failed to snapshot document on shutdown', err)
       }
       entry.doc.destroy()
     }

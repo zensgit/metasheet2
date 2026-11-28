@@ -158,6 +158,17 @@ export function readStockPrepRecentProjects(scope?: StockPrepMemoryScope): Stock
   return raw.filter(isValidEntry).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
 }
 
+export function forgetDeletedStockPrepProject(projectNo: string, scope?: StockPrepMemoryScope): void {
+  try {
+    const remaining = readStockPrepRecentProjects(scope).filter((entry) => entry.projectNo !== projectNo)
+    window.localStorage.setItem(resolveStorageKey(scope), JSON.stringify(remaining))
+    const hidden = readStockPrepHiddenProjects(scope)
+    if (hidden.includes(projectNo)) writeStockPrepHiddenProjects(hidden.filter((no) => no !== projectNo), scope)
+  } catch {
+    // A successful deletion remains successful when browser storage is unavailable.
+  }
+}
+
 /**
  * Every project number this principal asked the home page to stop showing (客户反馈 2026-09-24 #1a /
  * A8) — see `removeStockPrepRecentProject`. Malformed storage degrades to "nothing hidden", the same

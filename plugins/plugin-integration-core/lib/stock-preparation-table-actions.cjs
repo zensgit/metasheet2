@@ -1013,7 +1013,7 @@ function withoutDeployTimeProjectTargetMarker(action) {
  * left dangling by a later delete, or one written against a system whose kind no longer matches,
  * fails loudly at read time rather than reading the wrong place.
  */
-function createStockPreparationTableActionRegistry({ actions, resolveSourceBinding, resolveProjectTarget } = {}) {
+function createStockPreparationTableActionRegistry({ actions, resolveSourceBinding, resolveProjectTarget, checkDeletedProject } = {}) {
   const configs = new Map()
   for (const action of normalizeActionList(actions)) {
     const normalized = normalizeStockPreparationActionConfig(withoutDeployTimeProjectTargetMarker(action))
@@ -1112,6 +1112,12 @@ function createStockPreparationTableActionRegistry({ actions, resolveSourceBindi
       const action = configs.get(actionId)
       if (!action) {
         throw new StockPreparationTableActionError(422, 'TABLE_ACTION_NOT_CONFIGURED', `table action is not configured: ${actionId}`, { actionId })
+      }
+      // Refuse an already deleted project before even consulting its saved source binding.
+      // Provisioning and readiness lookups do not name a project and can still recreate it.
+      if (checkDeletedProject && optionalString(input.projectNo) && optionalString(input.tenantId)) {
+        await checkDeletedProject({ tenantId: optionalString(input.tenantId), projectNo: optionalString(input.projectNo),
+          targetPurpose: optionalString(input.targetPurpose) || 'write', boundTarget: action.target })
       }
       return applyProjectTarget(await applyPersistedSourceBinding(cloneJson(action), input), input)
     },
@@ -2034,6 +2040,10 @@ function conflictPolicyReviewForEvidence(review, plan) {
 
 function tokenStoreKey(token) {
   return `${DRY_RUN_TOKEN_PREFIX}${token}`
+}
+
+async function hasIssuedDryRunToken(tokenStore, token) {
+  return isPlainObject(await requireTokenStore(tokenStore).get(tokenStoreKey(token)))
 }
 
 function requireTokenStore(tokenStore) {
@@ -3841,6 +3851,7 @@ async function readStockPreparationSheetRepairSource(input = {}) {
 }
 
 module.exports = {
+  hasIssuedDryRunToken,
   DEFAULT_DRY_RUN_TOKEN_TTL_MS,
   GENERIC_TABLE_ACTION_KIND,
   LARGE_BOM_BACKGROUND_CAP_CEILINGS,

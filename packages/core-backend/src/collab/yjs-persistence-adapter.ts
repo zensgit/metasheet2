@@ -1,8 +1,36 @@
 import * as Y from 'yjs'
-import type { Kysely } from 'kysely'
+import { sql, type Kysely } from 'kysely'
+import type { Database } from '../db/types'
+import { getYjsRecordOwner, YjsRecordRetiredError, type YjsRecordIncarnation } from './yjs-record-incarnation'
 
 export class YjsPersistenceAdapter {
-  constructor(private db: Kysely<any>) {}
+  constructor(private db: Kysely<Database>) {}
+
+  async getRecordIncarnation(recordId: string): Promise<YjsRecordIncarnation | null> {
+    const row = await this.db.selectFrom('meta_records')
+      .select('yjs_incarnation')
+      .where('id', '=', recordId)
+      .executeTakeFirst()
+    return row ? { recordId, incarnation: row.yjs_incarnation } : null
+  }
+
+  async getRecordIncarnations(recordIds: string[]): Promise<YjsRecordIncarnation[]> {
+    if (!recordIds.length) return []
+    const rows = await this.db.selectFrom('meta_records').select(['id', 'yjs_incarnation'])
+      .where('id', 'in', recordIds).execute()
+    return rows.map(row => ({ recordId: row.id, incarnation: row.yjs_incarnation }))
+  }
+
+  private async lockOwner(tx: Kysely<Database>, recordId: string, owner: YjsRecordIncarnation): Promise<void> {
+    if (recordId !== owner.recordId) throw new YjsRecordRetiredError()
+    const row = await tx.selectFrom('meta_records')
+      .select('id')
+      .where('id', '=', owner.recordId)
+      .where(sql<boolean>`yjs_incarnation IS NOT DISTINCT FROM ${owner.incarnation}::uuid`)
+      .forKeyShare()
+      .executeTakeFirst()
+    if (!row) throw new YjsRecordRetiredError()
+  }
 
   async loadDoc(recordId: string): Promise<Uint8Array | null> {
     // Load snapshot if available
@@ -40,36 +68,38 @@ export class YjsPersistenceAdapter {
     return result
   }
 
-  async storeUpdate(recordId: string, update: Uint8Array): Promise<void> {
-    await this.db
-      .insertInto('meta_record_yjs_updates')
-      .values({
-        record_id: recordId,
-        update_data: Buffer.from(update),
-      })
-      .execute()
+  async storeUpdate(recordId: string, update: Uint8Array, owner?: YjsRecordIncarnation): Promise<void> {
+    const row = { record_id: recordId, update_data: Buffer.from(update) }
+    if (!owner) {
+      await this.db.insertInto('meta_record_yjs_updates').values(row).execute()
+      return
+    }
+    await this.db.transaction().execute(async (tx) => {
+      await this.lockOwner(tx, recordId, owner)
+      await tx.insertInto('meta_record_yjs_updates').values(row).execute()
+    })
   }
 
   async storeSnapshot(recordId: string, doc: Y.Doc): Promise<void> {
-    const state = Y.encodeStateAsUpdate(doc)
-    const stateVector = Y.encodeStateVector(doc)
+    const owner = getYjsRecordOwner(doc)
+    if (!owner) {
+      await this.writeSnapshot(this.db, recordId, doc)
+      return
+    }
+    await this.db.transaction().execute(async (tx) => {
+      await this.lockOwner(tx, recordId, owner)
+      await this.writeSnapshot(tx, recordId, doc)
+    })
+  }
 
-    await this.db
-      .insertInto('meta_record_yjs_states')
-      .values({
-        record_id: recordId,
-        doc_state: Buffer.from(state),
-        state_vector: Buffer.from(stateVector),
-        updated_at: new Date(),
-      })
-      .onConflict((oc) =>
-        oc.column('record_id').doUpdateSet({
-          doc_state: Buffer.from(state),
-          state_vector: Buffer.from(stateVector),
-          updated_at: new Date(),
-        }),
-      )
-      .execute()
+  private async writeSnapshot(db: Kysely<Database>, recordId: string, doc: Y.Doc): Promise<void> {
+    const values = {
+      doc_state: Buffer.from(Y.encodeStateAsUpdate(doc)),
+      state_vector: Buffer.from(Y.encodeStateVector(doc)),
+      updated_at: new Date(),
+    }
+    await db.insertInto('meta_record_yjs_states').values({ record_id: recordId, ...values })
+      .onConflict((oc) => oc.column('record_id').doUpdateSet(values)).execute()
   }
 
   /**
@@ -119,43 +149,33 @@ export class YjsPersistenceAdapter {
    * No-op for record IDs that have no rows. Best-effort — callers do
    * not fail their REST write on purge failure (see `index.ts`).
    */
-  async purgeRecords(recordIds: string[]): Promise<void> {
+  async purgeRecords(recordIds: string[], owners?: YjsRecordIncarnation[]): Promise<void> {
     if (recordIds.length === 0) return
     await this.db.transaction().execute(async (trx) => {
-      await trx
-        .deleteFrom('meta_record_yjs_states')
-        .where('record_id', 'in', recordIds)
-        .execute()
-      await trx
-        .deleteFrom('meta_record_yjs_updates')
-        .where('record_id', 'in', recordIds)
-        .execute()
+      let selected = recordIds
+      if (owners) {
+        // An old invalidation may retry after another process recreates the same ID. Lock
+        // matching live rows in this transaction before touching either persistence table.
+        const { rows } = await sql<{ id: string }>`
+          SELECT r.id FROM meta_records r
+          JOIN unnest(${owners.map(o => o.recordId)}::text[], ${owners.map(o => o.incarnation)}::uuid[]) AS target(id, incarnation)
+            ON r.id = target.id AND r.yjs_incarnation IS NOT DISTINCT FROM target.incarnation
+          WHERE r.id = ANY(${recordIds}::text[]) ORDER BY r.id FOR KEY SHARE OF r
+        `.execute(trx)
+        selected = rows.map(row => row.id)
+        if (!selected.length) return
+      }
+      await trx.deleteFrom('meta_record_yjs_states').where('record_id', 'in', selected).execute()
+      await trx.deleteFrom('meta_record_yjs_updates').where('record_id', 'in', selected).execute()
     })
   }
 
   async compactDoc(recordId: string, doc: Y.Doc): Promise<void> {
-    const state = Y.encodeStateAsUpdate(doc)
-    const stateVector = Y.encodeStateVector(doc)
-    const updatedAt = new Date()
-
+    const owner = getYjsRecordOwner(doc)
     await this.db.transaction().execute(async (trx) => {
-      await trx
-        .insertInto('meta_record_yjs_states')
-        .values({
-          record_id: recordId,
-          doc_state: Buffer.from(state),
-          state_vector: Buffer.from(stateVector),
-          updated_at: updatedAt,
-        })
-        .onConflict((oc) =>
-          oc.column('record_id').doUpdateSet({
-            doc_state: Buffer.from(state),
-            state_vector: Buffer.from(stateVector),
-            updated_at: updatedAt,
-          }),
-        )
-        .execute()
-
+      // A stale compact must also leave the replacement document's incremental rows alone.
+      if (owner) await this.lockOwner(trx, recordId, owner)
+      await this.writeSnapshot(trx, recordId, doc)
       await trx
         .deleteFrom('meta_record_yjs_updates')
         .where('record_id', '=', recordId)

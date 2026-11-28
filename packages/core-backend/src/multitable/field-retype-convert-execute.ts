@@ -240,7 +240,7 @@ async function enterFence(query: FieldRetypeConvertQuery, sheetId: string): Prom
 }
 
 /**
- * 行数只数不读，先于任何行锁：超上限的表不该先被整表 `FOR UPDATE` 再被拒。事务里**不**对缺表做 try/catch
+ * 行数只数不读，先于任何行锁：超上限的表不该先锁定整表记录再被拒。事务里**不**对缺表做 try/catch
  * （42P01 会让事务进入 aborted 状态）；回收站表早于本功能的迁移，缺表即部署错误，照常抛。
  */
 async function countScanRows(query: FieldRetypeConvertQuery, sheetId: string): Promise<{ live: number; trash: number }> {
@@ -250,13 +250,14 @@ async function countScanRows(query: FieldRetypeConvertQuery, sheetId: string): P
 }
 
 /**
- * 范围内 live 行 `FOR UPDATE`。三个按行表达式（is_object / has_key / cell）**就是**预览用的那一份文本
+ * 转换和撤销只更新 data、version 和 updated_at。活跃记录行用 FOR NO KEY UPDATE 锁住内容，
+ * 允许 Yjs 用 FOR KEY SHARE 核对记录身份并持久化协同更新。三个按行表达式（is_object / has_key / cell）**就是**预览用的那一份文本
  * （FIELD_RETYPE_CONVERT_CELL_COLUMNS，field-retype-convert-preview.ts），所以同一行在预览与执行里读出同一个结果、
  * 得到同一个单元格哈希；另取整行 `data`，写后快照要用。无 `ORDER BY`：次序由码元比较器在内存里定。
  */
 async function lockLiveRows(query: FieldRetypeConvertQuery, sheetId: string, fieldId: string): Promise<LockedLiveRow[]> {
   const res = await query(
-    `SELECT id, version, data, ${FIELD_RETYPE_CONVERT_CELL_COLUMNS} FROM meta_records WHERE sheet_id = $1 FOR UPDATE`,
+    `SELECT id, version, data, ${FIELD_RETYPE_CONVERT_CELL_COLUMNS} FROM meta_records WHERE sheet_id = $1 FOR NO KEY UPDATE`,
     [sheetId, fieldId],
   )
   return (res.rows as Array<{ id?: unknown; version?: unknown; data?: unknown; is_object?: unknown; has_key?: unknown; cell?: unknown }>).map((row) => ({
@@ -327,7 +328,7 @@ export type ExecuteFieldRetypeConvertOutcome =
 
 /**
  * 一次转换，一个事务。次序锁定（ADR §3.4-3.7）：
- *   栅栏 → 门 ③ ④ ⑤ → 表版本行（D21，无条件递增）→ 字段行 FOR UPDATE → 范围复核 → 规模 → live 行与本表回收站行 FOR UPDATE → **重算 planHash** 并整体校验凭证
+ *   栅栏 → 门 ③ ④ ⑤ → 表版本行（D21，无条件递增）→ 字段行 FOR UPDATE → 范围复核 → 规模 → live 行 FOR NO KEY UPDATE 与本表回收站行 FOR UPDATE → **重算 planHash** 并整体校验凭证
  *   → 预铸 convertRevisionId、mintOperation → **写前镜像（每条 live 行）** → 改字段 → 一条批量改写 → 每个被碰行一条
  *   记录修订 → 配置修订 → 作业行 → 审计行 → sealOperation。
  */
@@ -346,7 +347,7 @@ export async function executeFieldRetypeConvert(
 
   // D21 field-row writer rule（authz-version-protocol.ts）：表版本行在本事务第一把行锁（下面的字段行 FOR UPDATE）之前取，
   // 无条件。旧式 jsonb 字符串 property 会被 normalizeProperty 解析成对象，下面改字段的 UPDATE 因此会翻转可见性触发器的
-  // 标志位（字符串读作 false，对象读作 true）；若等触发器在字段行与每个 live 行的 FOR UPDATE 之后才取版本行，就与持有该行
+  // 标志位（字符串读作 false，对象读作 true）；若等触发器在字段与 live 记录上锁之后才取版本行，就与持有该行
   // FOR SHARE、再要被绑定记录 FOR SHARE 的准入事务成环（核验 r1 F2：40P01）。放在门之后，被门拒绝的调用方不碰版本行。
   // 本事务此后不插入 meta_sheets 的 FK 子行、也不更新 meta_sheets，所以不必先取表行的 KEY SHARE。
   await bumpSheetPermissionVersions(query, [sheetId])
@@ -587,7 +588,7 @@ function undoPrecondition(reason: FieldRetypeUndoPreconditionReason, extra: Reco
  *   1  已撤销 ⇒ 409 ALREADY_UNDONE
  *   2  前镜像 `FOR UPDATE`，行数 < record_count ⇒ 409 PRE_IMAGE_EXPIRED（先于 ①②③：整组被清后 ② 会把每条记录都报成「新增」）
  *   ①  字段行 `FOR UPDATE`，当前 {type, property} 与作业行目标端 jsonb 相等
- *   ②  live 行 `FOR UPDATE`，记录 id 集合 == 前镜像的 record_id 集合
+ *   ②  live 行 `FOR NO KEY UPDATE`，记录 id 集合 == 前镜像的 record_id 集合
  *   ②b 本表回收站行 `FOR UPDATE`，无行带「非字符串后态」
  *   ③  每行 `data->F` jsonb 等于信封 `post`（不比 version）
  * 通过后：写回 type / property → 按信封 `k` / `v` 四态精确回写（只碰原值 ≠ 后态的行）→ 每个被碰行一条记录修订 →
@@ -609,7 +610,7 @@ export async function undoFieldRetypeConvert(
 
   // 表级的两条先行（都不读任何记录、不取行锁），判定表 0-③ 随后连续执行：
   //   托管表并集（栅栏下复核）——转换之后表被插件登记 / 成了管线 staging 表，撤销同样不碰它；
-  //   规模——超上限的表不该先被整表 FOR UPDATE 再被拒。
+  //   规模——超上限的表不该先锁定整表记录再被拒。
   const managedReason = await resolveFieldRetypeConvertManagedSheetReason(query, sheetId)
   if (managedReason) return { ok: false, failure: fieldRetypeConvertNotSupported(managedReason) }
   const cap = resolveSheetRevertMaxRecords(env)
@@ -617,7 +618,7 @@ export async function undoFieldRetypeConvert(
   if (counted.live + counted.trash > cap) return { ok: false, failure: fieldRetypeConvertTooLarge(counted.live + counted.trash, cap) }
 
   // D21 field-row writer rule（authz-version-protocol.ts）：表版本行在本事务第一把行锁（作业行 FOR UPDATE，其后是前镜像、
-  // 字段行与每个 live 行的 FOR UPDATE）之前取，无条件。撤销把作业行里原样存的 source_property 写回字段——旧式 jsonb 字符串
+  // 字段与 live 记录的行锁）之前取，无条件。撤销把作业行里原样存的 source_property 写回字段——旧式 jsonb 字符串
   // 会盖掉转换写进去的对象，翻转可见性触发器的标志位；若等触发器在这些行锁之后才取版本行，就与准入事务成环（核验 r1 F2）。
   // 本事务此后不插入 meta_sheets 的 FK 子行、也不更新 meta_sheets，所以不必先取表行的 KEY SHARE。
   await bumpSheetPermissionVersions(query, [sheetId])

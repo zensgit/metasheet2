@@ -28,14 +28,14 @@ const rawSql = fs.readFileSync(migrationPath, 'utf8')
 // highest-numbered migration that replaces this constraint wins.
 const MIGRATIONS_DIR = path.join(repoRoot, 'packages', 'core-backend', 'migrations')
 const VOCABULARY_CONSTRAINT_RE = /ADD CONSTRAINT integration_stock_prep_audit_action_check CHECK \(action IN \(/
-const vocabularyMigrationFile = fs
+const priorVocabularyMigration = fs
   .readdirSync(MIGRATIONS_DIR)
   .filter((name) => name.endsWith('.sql'))
   .filter((name) => VOCABULARY_CONSTRAINT_RE.test(fs.readFileSync(path.join(MIGRATIONS_DIR, name), 'utf8')))
   .sort()
   .pop()
-assert.ok(vocabularyMigrationFile, 'at least one migration must install the closed action CHECK vocabulary')
-const vocabularyMigrationPath = path.join(MIGRATIONS_DIR, vocabularyMigrationFile)
+assert.ok(priorVocabularyMigration, 'at least one migration must install the closed action CHECK vocabulary')
+const vocabularyMigrationPath = path.join(MIGRATIONS_DIR, priorVocabularyMigration)
 const rawVocabularySql = fs.readFileSync(vocabularyMigrationPath, 'utf8')
 // Strip full-line SQL comments BEFORE matching so an assertion can never be satisfied by
 // commented-out DDL.
@@ -67,12 +67,46 @@ assert.match(block, /detail\s+JSONB NOT NULL DEFAULT '\{\}'::jsonb/, 'detail is 
 assert.match(
   vocabularySql,
   /DROP CONSTRAINT IF EXISTS integration_stock_prep_audit_action_check/,
-  `${vocabularyMigrationFile} replaces the preceding action check`,
+  `${priorVocabularyMigration} replaces the preceding action check`,
 )
 const checkMatch = vocabularySql.match(/ADD CONSTRAINT integration_stock_prep_audit_action_check CHECK \(action IN \(([\s\S]*?)\)\)/)
-assert.ok(checkMatch, `${vocabularyMigrationFile} installs the expanded closed CHECK vocabulary`)
+assert.ok(checkMatch, `${priorVocabularyMigration} installs the expanded closed CHECK vocabulary`)
 const checkActions = [...checkMatch[1].matchAll(/'([a-z_]+)'/g)].map((entry) => entry[1]).sort()
-assert.deepEqual(checkActions, [...STOCK_PREP_AUDIT_ACTIONS].sort(), 'CHECK vocabulary must stay set-equal to STOCK_PREP_AUDIT_ACTIONS')
+// The live migration stream continues with Kysely after the SQL stream. Compile its actual
+// up and down statements. A migration that keeps the action names only in a comment fails.
+async function main() {
+  const liveDir = path.join(repoRoot, 'packages/core-backend/src/db/migrations')
+  const file = fs.readdirSync(liveDir).sort().filter(name => name.endsWith('.ts')
+    && VOCABULARY_CONSTRAINT_RE.test(fs.readFileSync(path.join(liveDir, name), 'utf8'))).pop()
+  assert.ok(file, 'live Kysely audit migration must be present')
+  const migration = require('tsx/cjs/api').require(path.join(liveDir, file), __filename)
+  const { Kysely, PostgresDialect } = require('node:module').createRequire(path.join(repoRoot, 'packages/core-backend/package.json'))('kysely')
+  const statements = []
+  let hasEvidence = false
+  const client = {
+    query: async sql => {
+      statements.push(sql)
+      return { rows: /^SELECT EXISTS/i.test(sql) ? [{ present: hasEvidence }] : [] }
+    },
+    release() {},
+  }
+  const db = new Kysely({ dialect: new PostgresDialect({ pool: { connect: async () => client, end() {} } }) })
+  async function vocabulary(run) {
+    statements.length = 0
+    await run(db)
+    const ddl = statements.find(text => VOCABULARY_CONSTRAINT_RE.test(text))
+    assert.ok(ddl, 'executed migration installs the closed audit CHECK')
+    return [...ddl.matchAll(/'([a-z_]+)'/g)].map(match => match[1]).sort()
+  }
+  assert.deepEqual(await vocabulary(migration.up), [...STOCK_PREP_AUDIT_ACTIONS].sort())
+  assert.ok(!statements.some(text => /DROP TABLE/i.test(text)))
+  assert.deepEqual(await vocabulary(migration.down), checkActions)
+  hasEvidence = true
+  statements.length = 0
+  await assert.rejects(migration.down(db), /STOCK_PREPARATION_PROJECT_DELETE_AUDIT_PRESENT/)
+  assert.equal(statements.length, 1, 'an existing immutable audit prevents every downgrade write')
+  await db.destroy()
+}
 
 // No value-bearing business columns may ever exist on the audit table.
 for (const forbidden of ['drawing', 'quantity', 'qty', 'unit_symbol', 'message', 'credential', 'token', 'password', 'host', 'base_url']) {
@@ -83,4 +117,4 @@ for (const forbidden of ['drawing', 'quantity', 'qty', 'unit_symbol', 'message',
 assert.match(sql, new RegExp(`CREATE INDEX IF NOT EXISTS \\S+\\s+ON ${AUDIT_TABLE} \\(tenant_id, created_at DESC\\)`), 'tenant+time index exists')
 assert.match(sql, new RegExp(`CREATE INDEX IF NOT EXISTS \\S+\\s+ON ${AUDIT_TABLE} \\(tenant_id, action, created_at DESC\\)`), 'tenant+action index exists')
 
-console.log('✓ stock-preparation-audit-migration')
+require('./support/fail-closed-suite-runner.cjs').runFailClosedMain('stock-preparation-audit-migration.test.cjs', main)

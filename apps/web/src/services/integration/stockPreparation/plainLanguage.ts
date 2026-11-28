@@ -4474,7 +4474,7 @@ export function stockPrepHandoffOutcomePlain(outcome: string): StockPrepPlainEnt
 // this module) renders the `其他动作(${code})` fallback, because that fallback needs the raw code
 // interpolated and this file never receives one it did not already look up.
 //
-// THE COUNT MUST STAY AT TWENTY (14 + the six 一项目一张备料表 actions migration 088 lists). `StockPreparationOpsPanel.spec.ts` reads
+// `StockPreparationOpsPanel.spec.ts` reads
 // `STOCK_PREP_AUDIT_ACTIONS` straight out of `stock-preparation-audit-store.cjs` (the DB CHECK
 // constraint's own source of truth, same anti-vacuity discipline as
 // `StockPreparationPosturePlainLanguage.spec.ts`'s manifest read) and asserts `Object.keys(...).length`
@@ -4508,6 +4508,7 @@ export const STOCK_PREP_AUDIT_ACTION_PLAIN: Record<string, StockPrepPlainText> =
   project_overview_refresh: Object.freeze({ zh: '刷新了项目总览表', en: 'Refreshed the project overview sheet' }),
   // 备料分批拉取第一期 step 3 PR B (migration 101; register R-53 / R-54): the pilot enablement of one project sheet.
   project_pilot_enable: Object.freeze({ zh: '为一个项目的备料表启用了分批拉取试点', en: "Enabled the batch-refresh pilot on a project's 备料 sheet" }),
+  project_delete: Object.freeze({ zh: '删除了项目及全部备料数据', en: 'Deleted the project and all its stock-preparation data' }),
 })
 
 // R68 (#6414 / #6454 follow-up): ONE action, two meanings. The options-sync REPAIR leg
@@ -5091,8 +5092,8 @@ export const STOCK_PREP_AUDIT_ACTOR_UNKNOWN_ACTOR: StockPrepPlainText = Object.f
  * branch rather than inside any one of them.
  */
 export const STOCK_PREP_AUDIT_CAVEAT_SCOPE: StockPrepPlainText = Object.freeze({
-  zh: '这份记录只涵盖四类动作:确认、对账、导出、通知下一步。试算和写入不在这份记录里 —— 它们有自己的运行记录。所以「这里没有记录」不等于「没有人动过这个项目」。',
-  en: 'This trail covers only four kinds of action: confirm, reconcile, export, and handoff. Trial runs and writes are NOT in it — they have their own run records. So "nothing here" does not mean "nobody touched this project".',
+  zh: '按项目号查关联的审计记录。确认、对账、导出、通知下一步和项目删除可以按动作筛选。查不到审计时，仍可能有过操作。试算和拉取写入请查运行记录。',
+  en: 'Look up audit entries by project number. You can filter by confirmation, reconciliation, export, handoff, and project deletion. A project may have activity even when this search returns no audit entries. For trial runs and pull writes, check the run records.',
 })
 export const STOCK_PREP_AUDIT_CAVEAT_LIMIT: StockPrepPlainText = Object.freeze({
   zh: '只看了最近 100 条(最多 500,没有翻页)。项目多的时候,更早的动作会落在范围之外。',

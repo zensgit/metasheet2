@@ -21,6 +21,7 @@ const { createDb } = require('./lib/db.cjs')
 const { createExternalSystemRegistry } = require('./lib/external-systems.cjs')
 const { createConnectionResolver } = require('./lib/connection-resolver.cjs')
 const { createReadSourceConfigStore } = require('./lib/read-source-config-store.cjs')
+const { createStockPreparationProjectDelete, isProjectDeleted } = require('./lib/stock-preparation-project-delete.cjs')
 const { createStockPreparationAuditStore } = require('./lib/stock-preparation-audit-store.cjs')
 const { createStockPreparationSourceBindingStore } = require('./lib/stock-preparation-source-binding-store.cjs')
 const { createStockPreparationHandoffStore } = require('./lib/stock-preparation-handoff-store.cjs')
@@ -605,6 +606,17 @@ module.exports = {
         externalSystemRegistry,
         readSourceConfigStore,
         stockPreparationAuditStore,
+        stockPreparationProjectDeletionStatus: context.api.database?.transaction
+          ? scope => isProjectDeleted(context.api.database, scope) : null,
+        stockPreparationProjectDeleteAuthority: context.services?.stockPreparationProjectDeleteAuthority,
+        stockPreparationProjectDelete: context.api.database?.transaction && context.services?.stockPreparationProjectDeleteAuthority
+          && context.services?.stockPreparationProjectWriterActivity?.withConnection
+          ? createStockPreparationProjectDelete({
+              database: context.api.database,
+              auditStore: stockPreparationAuditStore,
+              authorizeWithin: context.services.stockPreparationProjectDeleteAuthority,
+            })
+          : null,
         stockPreparationSourceBindingStore,
         stockPreparationHandoffStore,
         stockPreparationProjectTargetStore,

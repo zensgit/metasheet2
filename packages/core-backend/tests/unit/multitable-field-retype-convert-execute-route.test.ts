@@ -285,12 +285,12 @@ describe('POST /fields/:fieldId/retype-execute (ADR §3)', () => {
       // the token's claims are untouched — the pool-side gates PASSED, the refusal is the database's
       expect(state.perms).toEqual(ADMIN_PERMS)
       expect([label, pg.transactionStatements[0]]).toEqual([label, 'SELECT pg_advisory_xact_lock(hashtext($1))'])
-      expect([label, pg.transactionStatements.filter((sql) => /FOR UPDATE/.test(sql))]).toEqual([label, []])
+      expect([label, pg.transactionStatements.filter((sql) => /FOR (?:NO KEY )?UPDATE/.test(sql))]).toEqual([label, []])
       // D21: the in-transaction gate precedes the sheet version bump — a refused caller never touches the version row
       expect([label, pg.transactionStatements.filter(isFakeSheetVersionBump), pg.world.sheetVersions]).toEqual([label, [], {}])
       // (b) revoked while the request is already past its pool-side gates
       ;({ pg } = await expectRefused(world(), (token) => execute({ previewToken: token, confirm: CONFIRM }), { status, code, transactions: 1 }, { pgOptions: atTheFence(revoke) }))
-      expect([label, pg.transactionStatements.filter((sql) => /FOR UPDATE/.test(sql))]).toEqual([label, []])
+      expect([label, pg.transactionStatements.filter((sql) => /FOR (?:NO KEY )?UPDATE/.test(sql))]).toEqual([label, []])
       expect([label, pg.transactionStatements.filter(isFakeSheetVersionBump)]).toEqual([label, []])
     }
     // control: the same request with the database unchanged converts
@@ -315,7 +315,7 @@ describe('POST /fields/:fieldId/retype-execute (ADR §3)', () => {
     ]
     for (const [label, change, status, code] of changes) {
       const { pg } = await expectRefused(world(), (token) => execute({ previewToken: token, confirm: CONFIRM }), { status, code, transactions: 1 }, { pgOptions: atTheFence(change) })
-      expect([label, pg.transactionStatements.filter((sql) => /FOR UPDATE/.test(sql))]).toEqual([label, []])
+      expect([label, pg.transactionStatements.filter((sql) => /FOR (?:NO KEY )?UPDATE/.test(sql))]).toEqual([label, []])
       expect([label, pg.transactionStatements.filter(isFakeSheetVersionBump)]).toEqual([label, []])
     }
   })
@@ -493,7 +493,7 @@ describe('POST /fields/:fieldId/retype-execute (ADR §3)', () => {
       })
       expect(pg.fences).toEqual([`meta:auto-number:sheet:${SHEET}`])
       expect(pg.rolledBack).toBe(1)
-      expect(pg.transactionStatements.filter((sql) => /FOR UPDATE/.test(sql))).toEqual([])
+      expect(pg.transactionStatements.filter((sql) => /FOR (?:NO KEY )?UPDATE/.test(sql))).toEqual([])
     }
   })
 
@@ -522,7 +522,7 @@ describe('POST /fields/:fieldId/retype-execute (ADR §3)', () => {
       // the plan was re-computed UNDER the fence and the row locks
       const tx = pg.transactionStatements
       expect(tx[0]).toContain('pg_advisory_xact_lock')
-      expect(tx.some((sql) => sql.includes('FROM meta_records WHERE sheet_id = $1 FOR UPDATE'))).toBe(true)
+      expect(tx.some((sql) => sql.includes('FROM meta_records WHERE sheet_id = $1 FOR NO KEY UPDATE'))).toBe(true)
       expect(tx.some((sql) => sql.includes('FROM meta_records_trash WHERE sheet_id = $1 FOR UPDATE'))).toBe(true)
     }
   })
@@ -579,7 +579,7 @@ describe('POST /fields/:fieldId/retype-execute (ADR §3)', () => {
     const { pg } = await expectRefused(world(records, { trash: [{ record_id: 't1', sheet_id: SHEET, data: {} }] }), (token) => execute({ previewToken: token, confirm: CONFIRM }), { status: 413, code: 'SHEET_TOO_LARGE', transactions: 1 }, {
       between: (p) => { p.world.trash.push({ record_id: 't2', sheet_id: SHEET, data: {} }) },
     })
-    expect(pg.transactionStatements.filter((sql) => /FROM meta_records(_trash)? WHERE sheet_id = \$1 FOR UPDATE/.test(sql))).toEqual([])
+    expect(pg.transactionStatements.filter((sql) => /FROM meta_records(_trash)? WHERE sheet_id = \$1 FOR (?:NO KEY )?UPDATE/.test(sql))).toEqual([])
 
     const ok = use(world(records, { trash: [{ record_id: 't1', sheet_id: SHEET, data: {} }] }))
     expect((await execute({ previewToken: await tokenFor(), confirm: CONFIRM })).status).toBe(200)
@@ -627,7 +627,7 @@ describe('POST /fields/:fieldId/retype-execute (ADR §3)', () => {
     const at = (needle: string) => tx.findIndex((sql) => sql.includes(needle))
     const order = [
       at('FROM meta_fields WHERE id = $1 FOR UPDATE'),
-      at('FROM meta_records WHERE sheet_id = $1 FOR UPDATE'),
+      at('FROM meta_records WHERE sheet_id = $1 FOR NO KEY UPDATE'),
       at('FROM meta_records_trash WHERE sheet_id = $1 FOR UPDATE'),
       at('INSERT INTO meta_field_value_tombstones'),
       at('UPDATE meta_fields SET type'),
@@ -805,7 +805,7 @@ describe('POST /fields/:fieldId/retype-execute (ADR §3)', () => {
     for (const code of ['40P01', '55P03', '40001']) {
       const pg = use(world(), {
         beforeStatement: (statement) => {
-          if (statement.inTransaction && statement.sql.includes('FROM meta_records WHERE sheet_id = $1 FOR UPDATE')) throw Object.assign(new Error('lock'), { code })
+          if (statement.inTransaction && statement.sql.includes('FROM meta_records WHERE sheet_id = $1 FOR NO KEY UPDATE')) throw Object.assign(new Error('lock'), { code })
         },
       })
       const token = await tokenFor()

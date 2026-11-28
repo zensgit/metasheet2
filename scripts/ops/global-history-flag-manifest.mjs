@@ -48,6 +48,16 @@
 /** @type {FlagSpec[]} */
 export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
   {
+    key: 'STOCK_PREPARATION_PROJECT_DELETE_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose: 'Allows a current-tenant platform administrator to preview and confirm permanent local stock-preparation project cleanup.',
+    source: 'plugins/plugin-integration-core/lib/stock-preparation-project-delete-routes.cjs#isProjectDeleteEnabled',
+  },
+  {
     key: 'ACCOUNT_CENTER_READ_ENABLED',
     type: 'boolean',
     activationValue: 'true',

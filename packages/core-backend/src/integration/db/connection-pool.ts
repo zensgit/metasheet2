@@ -249,8 +249,10 @@ export class ConnectionPool {
   }
 }
 
-class PoolManager {
+export class PoolManager {
   private main: ConnectionPool
+  private mainOptions!: ConnectionPoolOptions
+  private stockPreparationActivityPool?: ConnectionPool
   private readonly pools: Map<string, ConnectionPool> = new Map()
   private logger = new Logger('PoolManager')
 
@@ -305,8 +307,24 @@ class PoolManager {
   createPool(name: string, opts: ConnectionPoolOptions): ConnectionPool {
     const pool = new ConnectionPool({ ...opts, name })
     this.pools.set(name, pool)
-    if (name === 'main') this.main = pool
+    if (name === 'main') {
+      this.main = pool
+      this.mainOptions = opts
+    }
     return pool
+  }
+
+  // A slow stock-preparation writer can wait for upstream IO while holding its advisory
+  // lock. Its business queries must still have access to every connection in the main pool.
+  getStockPreparationActivityPool(): ConnectionPool {
+    const name = 'stock-preparation-writer-activity'
+    return this.stockPreparationActivityPool ??= new ConnectionPool({
+      ...this.mainOptions,
+      name,
+      min: 0,
+      max: Math.min(4, this.mainOptions.max ?? 20),
+      application_name: name,
+    })
   }
 
   /**
@@ -371,8 +389,10 @@ class PoolManager {
    * 优雅关闭所有连接池
    */
   async close(): Promise<void> {
+    const pools = Array.from(this.pools.values())
+    if (this.stockPreparationActivityPool) pools.push(this.stockPreparationActivityPool)
     await Promise.all(
-      Array.from(this.pools.values()).map(async (pool) => {
+      pools.map(async (pool) => {
         try {
           // Stop metrics collection before closing
           pool.stopMetricsCollection()

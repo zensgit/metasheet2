@@ -226,10 +226,11 @@ function baseServices() {
   }
 }
 
-function mount({ env = {}, provisioning = makeProvisioning(), records = makeRecordsApi(), db = makeMemoryDb(), withStore = true, configExtras = {}, serviceExtras = {} } = {}) {
+function mount({ env = {}, provisioning = makeProvisioning(), records = makeRecordsApi(), db = makeMemoryDb(), withStore = true, configExtras = {}, serviceExtras = {}, writerActivity } = {}) {
   const routes = new Map()
   const auditAppends = []
   const context = {
+    services: { stockPreparationProjectWriterActivity: writerActivity },
     api: {
       http: { addRoute(method, routePath, handler) { routes.set(`${method.toUpperCase()} ${routePath}`, handler) } },
       multitable: { provisioning, records: require('./support/stock-preparation-project-write-lock-kit.cjs').withFakeHostWriteFence(records) },
@@ -698,6 +699,57 @@ test('R-05 GET absent: status absent, may.create by tier, no handles, no IO beyo
   } finally { h.restore() }
 })
 
+test('policy save and revoke on OFF peers hold the resolved project or legacy tenant lock until KV writes finish', async () => {
+  const { lockProjectActivity } = require('../lib/stock-preparation-project-delete-activity.cjs')
+  for (const projectSheets of [true, false]) {
+    const expectedKey = JSON.stringify([TENANT, projectSheets ? PROJECT : null])
+    const active = new Set()
+    const writerActivity = { withConnection: work => work({ async query(sql, [, key]) {
+      if (sql.includes('try_advisory_lock_shared')) {
+        assert.equal(key, expectedKey)
+        active.add(key)
+        return [{ locked: true }]
+      }
+      return [{ released: active.delete(key) }]
+    } }) }
+    const h = mount({ writerActivity, env: {
+      [PROJECT_SHEETS_ENABLED_ENV]: String(projectSheets), STOCK_PREPARATION_PROJECT_DELETE_ENABLED: 'false',
+    } })
+    try {
+      if (projectSheets) registerActive(h)
+      const request = {
+        user: PLATFORM_ADMIN, params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID }, query: { projectNo: PROJECT },
+      }
+      const path = '/api/integration/table-actions/:actionId/conflict-policies'
+      const fingerprint = 'sha16:1111111111111111'
+      const store = h.context.storage
+      const mutations = []
+      for (const method of ['set', 'delete']) {
+        const run = store[method].bind(store)
+        store[method] = async (key, ...args) => {
+          if (key.startsWith('integration:table-action:conflict-policies:')) {
+            mutations.push(method)
+            await assert.rejects(lockProjectActivity({
+              query: async (_sql, [, owner]) => [{ locked: !active.has(owner) }],
+            }, { tenantId: TENANT, projectNo: PROJECT }), { code: 'STOCK_PREPARATION_PROJECT_DELETE_BUSY' })
+          }
+          return run(key, ...args)
+        }
+      }
+      const save = { conflictType: 'duplicate_expanded_key', policies: [{ fingerprint, policy: 'keep_multiple_rows' }] }
+      const remove = { conflictType: 'duplicate_expanded_key', fingerprints: [fingerprint] }
+      const denied = await call(h.routes, 'PUT', path, { ...request, user: PULLER, body: save })
+      assert.equal(denied.statusCode, 403)
+      for (const [method, body] of [['PUT', save], ['DELETE', remove]]) {
+        const res = await call(h.routes, method, path, { ...request, body })
+        assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+        assert.equal(active.size, 0)
+      }
+      assert.equal(mutations.length, 2)
+    } finally { h.restore() }
+  }
+})
+
 test('R-06 GET active: the handles and the counts from this project\'s sheet', async () => {
   const objectId = deriveProjectSheetObjectId(TENANT, PROJECT)
   const sheetId = `sheet_${PROJECT_ID}_${objectId}`.replace(/[^A-Za-z0-9_]/g, '_')
@@ -724,6 +776,27 @@ test('R-06 GET active: the handles and the counts from this project\'s sheet', a
     assert.deepEqual(res.body.data.may, { create: false, archive: false, restore: false })
     assert.ok(records.queries.every((q) => q.sheetId === sheetId), 'rows are counted in THIS project\'s sheet only')
     assert.ok(records.queries.every((q) => q.filters[physical('projectNo')] === PROJECT), 'narrowed to this project')
+  } finally { h.restore() }
+})
+
+test('an OFF cleanup-capable peer counts an empty same-number rebuild without waiting for the old scan TTL', async () => {
+  const objectId = deriveProjectSheetObjectId(TENANT, PROJECT)
+  const sheetId = `sheet_${PROJECT_ID}_${objectId}`.replace(/[^A-Za-z0-9_]/g, '_')
+  const rows = [{ id: 'before-deletion', data: { [`fld_${objectId.slice(-6)}_projectNo`]: PROJECT } }]
+  const records = makeRecordsApi({ [sheetId]: rows })
+  const h = mount({
+    env: { [PROJECT_SHEETS_ENABLED_ENV]: 'true', STOCK_PREPARATION_PROJECT_DELETE_ENABLED: 'false' },
+    records, serviceExtras: { stockPreparationProjectDeletionStatus: async () => false },
+  })
+  try {
+    registerActive(h)
+    const first = await getTarget(h.routes, FLOOR)
+    assert.equal(first.body.data.rowCount, 1)
+    rows.length = 0
+    const rebuilt = await getTarget(h.routes, FLOOR)
+    assert.equal(rebuilt.statusCode, 200)
+    assert.equal(rebuilt.body.data.sheetId, sheetId)
+    assert.equal(rebuilt.body.data.rowCount, 0)
   } finally { h.restore() }
 })
 

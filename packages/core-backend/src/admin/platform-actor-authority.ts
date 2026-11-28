@@ -30,9 +30,11 @@ function sortedAccessIds(ids: Array<string | null | undefined>): string[] {
 export async function lockSharedAccessSubjects(
   client: AccessGraphTransactionClient,
   ids: Array<string | null | undefined>,
+  options?: { lockOnly: true },
 ): Promise<Map<string, LockedAccessGraphUser>> {
   const sorted = sortedAccessIds(ids)
   for (const id of sorted) await lockNamespaceAdmissionWrites(client, id)
+  if (options?.lockOnly) return lockUsersForAccessGraphWrite(client, sorted, options)
   return lockUsersForAccessGraphWrite(client, sorted)
 }
 

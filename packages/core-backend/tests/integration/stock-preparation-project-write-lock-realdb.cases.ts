@@ -132,6 +132,7 @@ const tableActions = require(path.join(PLUGIN_LIB, 'stock-preparation-table-acti
 const { ensureStockPreparationSandboxTarget } = require(path.join(PLUGIN_LIB, 'stock-preparation-target-provisioning.cjs')) as any
 const { syncStockPreparationContractOptionsForObject } = require(path.join(PLUGIN_LIB, 'stock-preparation-option-sync.cjs')) as any
 const largeBomJobs = require(path.join(PLUGIN_LIB, 'stock-preparation-large-bom-jobs.cjs')) as any
+const dryRunJobs = require(path.join(PLUGIN_LIB, 'stock-preparation-dry-run-jobs.cjs'))
 // PR-0 (batch-refresh phase 2 step 4): the carry-confirm executor, driven under the real lease (D17, D18).
 const confirmWrites = require(path.join(PLUGIN_LIB, 'stock-preparation-confirm-writes.cjs')) as any
 
@@ -5190,23 +5191,36 @@ export function defineStockPreparationProjectWriteLockRealDbCases(): void {
           await st.pilotExit()
           const sync = await st.dryRun()
           expect(sync.body.data.status).toBe('suspended')
-          const job = await st.dryRunJob()
-          expect(job.statusCode, JSON.stringify(job.body)).toBe(202)
-          await waitUntil('S3A-23: the background dry-run finished', async () => Number((await q(`SELECT count(*)::int AS n FROM plugin_kv WHERE plugin = 'plugin-integration-core' AND key LIKE 'stock-preparation:dry-run-job:%' AND updated_at >= $1 AND value->>'status' <> 'running'`, [startedAt])).rows[0].n) > 0, 30000)
-          const PRIVATE = ['"holds":[', '"refresh":', '"handle":', '"planningInputs":', '"persistedHolds":', '"consult":', '"members":']
-          const leaks = (text: string) => [SENTINEL, ...PRIVATE].filter((needle) => text.includes(needle))
-          const kv = (await q(`SELECT key, value::text AS text FROM plugin_kv WHERE plugin = 'plugin-integration-core' AND updated_at >= $1`, [startedAt])).rows
-          const observed = {
-            syncResponse: leaks(JSON.stringify(sync.body)),
-            jobResponse: leaks(JSON.stringify(job.body)),
-            kvRowsWritten: kv.length > 0,
-            kv: kv.flatMap((row: any) => leaks(row.text)),
-            registry: leaks(JSON.stringify((await q('SELECT * FROM integration_stock_prep_project_target WHERE tenant_id = $1', [st.tenantId])).rows)),
-            metaRecords: Number((await q('SELECT count(*)::int AS n FROM meta_records WHERE data::text LIKE $1', [`%${SENTINEL}%`])).rows[0].n),
-            holdTableCarriesIt: Number((await q(`SELECT count(*)::int AS n FROM ${RT.hold} WHERE detail::text LIKE $1`, [`%${SENTINEL}%`])).rows[0].n) > 0,
+          const recordKey = dryRunJobs.__internals.dryRunJobRecordKey({
+            tenantId: st.tenantId, actionId: ACTION_ID, projectNo: st.projectNo, principal: st.users.puller.id, valueBearing: false,
+          })
+          try {
+            const job = await st.dryRunJob()
+            expect(job.statusCode, JSON.stringify(job.body)).toBe(202)
+            await waitUntil('S3A-23: the background dry-run finished', async () => {
+              const job = await q(`SELECT 1 FROM plugin_kv WHERE plugin = 'plugin-integration-core' AND key = $1
+                AND value->>'status' IN ('succeeded', 'failed')`, [recordKey])
+              return job.rows.length === 1
+            }, 30000)
+            const PRIVATE = ['"holds":[', '"refresh":', '"handle":', '"planningInputs":', '"persistedHolds":', '"consult":', '"members":']
+            const leaks = (text: string) => [SENTINEL, ...PRIVATE].filter((needle) => text.includes(needle))
+            const kv = (await q(`SELECT key, value::text AS text FROM plugin_kv WHERE plugin = 'plugin-integration-core' AND updated_at >= $1`, [startedAt])).rows
+            const observed = {
+              syncResponse: leaks(JSON.stringify(sync.body)),
+              jobResponse: leaks(JSON.stringify(job.body)),
+              kvRowsWritten: kv.length > 0,
+              kv: kv.flatMap((row: any) => leaks(row.text)),
+              registry: leaks(JSON.stringify((await q('SELECT * FROM integration_stock_prep_project_target WHERE tenant_id = $1', [st.tenantId])).rows)),
+              metaRecords: Number((await q('SELECT count(*)::int AS n FROM meta_records WHERE data::text LIKE $1', [`%${SENTINEL}%`])).rows[0].n),
+              holdTableCarriesIt: Number((await q(`SELECT count(*)::int AS n FROM ${RT.hold} WHERE detail::text LIKE $1`, [`%${SENTINEL}%`])).rows[0].n) > 0,
+            }
+            console.log(`[S3A-23] ${JSON.stringify(observed)}`)
+            expect(observed).toEqual({ syncResponse: [], jobResponse: [], kvRowsWritten: true, kv: [], registry: [], metaRecords: 0, holdTableCarriesIt: true })
+          } finally {
+            // This fixture's principal exists only in memory. Its opaque legacy receipt cannot be attributed after the test.
+            await dryRunJobs.settleDryRunJobsForTest(st.pluginContext.storage)
+            await q("DELETE FROM plugin_kv WHERE plugin = 'plugin-integration-core' AND key = $1", [recordKey])
           }
-          console.log(`[S3A-23] ${JSON.stringify(observed)}`)
-          expect(observed).toEqual({ syncResponse: [], jobResponse: [], kvRowsWritten: true, kv: [], registry: [], metaRecords: 0, holdTableCarriesIt: true })
         }, 180000)
 
         test('S3A-27 (R-13) step-4 rows on sheet A, the registry re-pointed to sheet B, switch ON: dry-run, reconcile, mvp-persist, carry, apply and the chunk route all 409 RETARGETED `sheet`; 0 source reads; no store write; no bump of B', async () => {

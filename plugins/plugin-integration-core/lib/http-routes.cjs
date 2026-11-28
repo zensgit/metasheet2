@@ -241,6 +241,10 @@ const ROUTES = [
   //                  `project_target_restore` once; restoring an active project is a typed 409. The
   //                  200 cap is not re-checked (an archived row already counts against it).
   // The static `project-targets` segment cannot collide with `projects/:projectNo/...`.
+  ['GET', '/api/integration/stock-preparation/projects/:projectNo/delete/receipt/:challengeId', 'stockPreparationProjectDeleteReceipt'],
+  ['GET', '/api/integration/stock-preparation/project-delete/access', 'stockPreparationProjectDeleteAccess'],
+  ['POST', '/api/integration/stock-preparation/projects/:projectNo/delete/preview', 'stockPreparationProjectDeletePreview'],
+  ['POST', '/api/integration/stock-preparation/projects/:projectNo/delete/confirm', 'stockPreparationProjectDeleteConfirm'],
   ['GET', '/api/integration/stock-preparation/project-targets', 'stockPreparationProjectTargetList'],
   ['GET', '/api/integration/stock-preparation/projects/:projectNo/target', 'stockPreparationProjectTargetGet'],
   ['POST', '/api/integration/stock-preparation/projects/:projectNo/target', 'stockPreparationProjectTargetCreate'],
@@ -608,6 +612,7 @@ const {
   PLM_STOCK_PREPARATION_ACTION_ID,
   StockPreparationTableActionError,
   __internals: tableActionInternals,
+  hasIssuedDryRunToken,
   applyStockPreparationAction,
   assertProductionCleanRowsWithinBound,
   assertStockPrepApplyAllowed,
@@ -1105,7 +1110,10 @@ const {
 // The shared shape rule for a 备料 business project number. See stock-preparation-common.cjs for why
 // this is a HANDLE and not free text: the same string reaches a record filter, an append-only audit
 // row, a durable cursor row and a DingTalk markdown body.
+const { withProjectDeleteActivity } = require('./stock-preparation-project-delete-activity.cjs')
+const { fenceProjectWriters } = require('./stock-preparation-project-delete-writers.cjs')
 const { isValidStockPrepProjectNo } = require('./stock-preparation-common.cjs')
+const { createProjectDeleteHandlers, isProjectDeleteEnabled } = require('./stock-preparation-project-delete-routes.cjs')
 // FOS-2: generic field-option-sync route — resolve a FOS preset (FOS-1 catalog), validate operator
 // option sets against the preset's source keys, and patch each mapped field's options + generic
 // `fieldOptionSync` metadata through the SAME kernel stock-prep uses (no parallel write path).
@@ -2477,6 +2485,10 @@ const STOCK_PREPARATION_VALUES_FREE_HANDLERS = new Set([
   'stockPreparationOperatorProjectBoard',
   'stockPreparationProjectTargetList',
   'stockPreparationProjectTargetGet',
+  'stockPreparationProjectDeleteAccess',
+  'stockPreparationProjectDeleteReceipt',
+  'stockPreparationProjectDeletePreview',
+  'stockPreparationProjectDeleteConfirm',
   'stockPreparationProjectTargetCreate',
   'stockPreparationProjectTargetArchive',
   'stockPreparationProjectTargetRestore',
@@ -3140,6 +3152,7 @@ const VALID_STOCK_PREPARATION_OPERATOR_PROJECT_DIRECTORY_QUERY_KEYS = new Set([
   'workspaceId',
   'includePendingCounts',
   'includePullTargets',
+  'recentProjectNos',
 ])
 // 通知下一步: the status READ. `projectNo` for the same reason the export uses it — the business
 // project number, which is what a person means by "this project".
@@ -4947,6 +4960,20 @@ function createHandlers(services, options = {}) {
   // by an already-proved-own sheet id; the module that owns it explains why that is safe. Only the
   // `?includePullTargets=1` path ever puts anything in it, because that is the only path that scans.
   const pullTargetScanCache = createPullTargetScanCache()
+  async function projectDirectoryScanContext(tenantId, projectNos = [], boundTarget = null) {
+    const deletion = services.stockPreparationProjectDelete
+    if (!deletion?.deletionSnapshot) {
+      return { cache: projectWriterActivityRequired() ? null : pullTargetScanCache, deleted: [] }
+    }
+    try {
+      const { version, deleted } = await deletion.deletionSnapshot({ tenantId, projectNos, boundTarget })
+      return { cache: { resolve: (key, run) => pullTargetScanCache.resolve(JSON.stringify([tenantId, version, key]), run) }, deleted }
+    } catch {
+      // An unreadable audit or ambiguous project must neither erase local history nor serve a stale scan.
+      return { cache: null, deleted: [] }
+    }
+  }
+
   // NO ROUTE FORWARDS A CALLER'S RAW `?workspaceId` INTO THE AUDIT TRAIL.
 //
 // `workspace_id` is a plain nullable TEXT column on that table, and the store cannot shape-gate it
@@ -5439,6 +5466,10 @@ function requireStockPreparationAudit() {
   const stockPreparationSqlServerRuntime =
     services && services.stockPreparationSqlServerRuntime
   const context = options.context || {}
+  const projectWriterActivity = context.services?.stockPreparationProjectWriterActivity
+  // Updated SQL hosts participate even before their local administrator enables deletion.
+  // A host that can observe durable deletions must refuse writes if its coordination port is lost.
+  const projectWriterActivityRequired = () => Boolean(projectWriterActivity || services.stockPreparationProjectDeletionStatus || isProjectDeleteEnabled())
   // Values-free warnings only (the pack read-back seam's degrade-to-legacy notice).
   const routeLogger = options.logger || (context && context.logger) || null
   const configuredTableActions = context && context.config
@@ -5600,6 +5631,11 @@ function requireStockPreparationAudit() {
       throw new HttpRouteError(501, STOCK_PREP_COMPONENT_RULING_ERROR_CODES.STORE_UNAVAILABLE, 'the component ruling ledger is not wired on this deployment; nothing is acknowledged without it', { reason: 'component_ruling_store' })
     }
     return store
+  }
+  // The ledger transaction alone cannot protect a census read made before it begins.
+  function withRulingActivity(tenantId, projectNo, operation) {
+    if (!projectWriterActivityRequired()) return operation()
+    return withProjectDeleteActivity(projectWriterActivity, { tenantId, projectNo }, operation)
   }
   // THE ONE project-scoped read of the census (both forms) and the acknowledgement's re-proof: the sheet is proven the
   // caller's own first (the table-action wall, unconditionally — the readSheetRows posture), then the planner's own reader
@@ -5955,18 +5991,29 @@ function requireStockPreparationAudit() {
           return binding ? binding.externalSystemId : null
         }
       : null,
+    checkDeletedProject: async ({ tenantId, projectNo, targetPurpose, boundTarget }) => {
+      if (stockPreparationProjectSheetsEnabled(process.env)) return
+      const enabled = isProjectDeleteEnabled()
+      if (targetPurpose !== 'write' && !(enabled && targetPurpose === 'read')) return
+      const status = services.stockPreparationProjectDeletionStatus || services.stockPreparationProjectDelete?.isDeleted
+      if (typeof status !== 'function') {
+        // Legacy hosts without a DB cleanup capability cannot have issued a deletion. The enabled
+        // feature on an incompletely wired host still fails closed.
+        if (enabled) throw new HttpRouteError(503, 'STOCK_PREPARATION_PROJECT_DELETE_UNAVAILABLE', 'Project cleanup status is unavailable')
+        return
+      }
+      if (await status({ tenantId, projectNo, boundTarget })) {
+        throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ABSENT', 'This project must be created before it can be pulled')
+      }
+    },
     resolveProjectTarget: stockPreparationProjectTargets
       ? async ({ tenantId, projectNo, targetPurpose, extensionFieldIds }) => resolveProjectTargetForAction({
           store: stockPreparationProjectTargets,
           provisioning: context && context.api && context.api.multitable && context.api.multitable.provisioning,
-          // The caller's OWN staging project — the tenant the registry is keyed by. Never a request
-          // projectId: the registry answers for the tenant the lookup was scoped to and nothing else.
           projectId: resolveIntegrationStagingProjectId(tenantId, undefined),
           tenantId,
           projectNo,
           targetPurpose,
-          // S2: the looked-up action's own declared `ext_` band (server config, threaded by the
-          // registry from the normalized action) — never a request field.
           extensionFieldIds,
           env: process.env,
         })
@@ -7884,6 +7931,11 @@ function requireStockPreparationAudit() {
     return mark.ticket
   }
 
+  function backgroundTrialCompletion(req) {
+    const mark = dryRunJobRequests.get(req) || dryRunJobRequests.get(requestOfGovernedPrincipalContext(req))
+    return mark.ticket.settled
+  }
+
   /** Launch the guarded closure detached; the stored failure is the synchronous route's own answer. */
   function launchTableActionDryRunJob(ticket, run) {
     return launchDryRunJob({
@@ -7989,24 +8041,37 @@ function requireStockPreparationAudit() {
         tenantPrincipalDirectory,
       })
       : null
+    // The activity lock, target lookup, source read and job result must use the same tenant.
+    const dryRunTenantId = valueScope ? valueScope.tenantId : resolveTenantId(req, {})
+    const run = () => runAuthorizedStockPrepPull(req, actionId, governedEntry, body, dryRunTenantId, includeMissingComponents)
+    if (!projectWriterActivityRequired()) return run()
+    const { projectNo } = normalizeActionParameters(body.parameters)
+    const scope = { tenantId: dryRunTenantId, projectNo }
+    // The HTTP background route answers as soon as it has persisted the running job. Its DB
+    // activity lock must outlive that response, including the final durable result write.
+    return new Promise((resolve, reject) => {
+      withProjectDeleteActivity(projectWriterActivity, scope, async () => {
+        const answer = await run()
+        if (answer.background) {
+          resolve(answer)
+          await backgroundTrialCompletion(req)
+        }
+        return answer
+      }).then(resolve, reject)
+    })
+  }
+
+  async function runAuthorizedStockPrepPull(req, actionId, governedEntry, body, dryRunTenantId, includeMissingComponents) {
     // S1: the project number rides into the lookup so the registry overlay can resolve THIS
     // project's sheet (switch on) — a pure read of the same body field `normalizeActionParameters`
     // validates a few lines down; with the switch off the registry ignores it.
-    const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, {
+    const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
       actionId,
+      tenantId: dryRunTenantId,
+      workspaceId: resolveWorkspaceId(req, {}),
       projectNo: firstString(isPlainObject(body.parameters) ? body.parameters.projectNo : undefined),
       targetPurpose: 'write',
-    })))
-    // ON THE VALUE PATH THE TENANT IS THE PROVEN ONE. `resolveTenantId` is right for the
-    // values-free trial and stays exactly where it was for it — but it accepts `user.tenantId`,
-    // which is header-fillable, and lets a tenantless platform admin steer `?tenantId=`. Since the
-    // tenant chosen here is the tenant whose PLM binding is opened, and the part numbers in the
-    // response come out of that PLM, the value path must not derive it from anything the request
-    // can move. `scope.tenantId` cannot differ from what `resolveTenantId` would have returned for
-    // any caller who reached this line — the scope has already refused every input that could make
-    // them differ — so this is not a behaviour change; it is the derivation being made unable to
-    // drift from the proof.
-    const dryRunTenantId = valueScope ? valueScope.tenantId : resolveTenantId(req, {})
+    }))
     // S1 (ADR §3 「租户墙」): a resolved project sheet must be the caller's own — no-op otherwise.
     await assertResolvedProjectTargetTenancy(action, dryRunTenantId)
     // R67 ④: the background lane claims the project's one in-flight slot HERE — every guard above
@@ -8217,6 +8282,22 @@ function requireStockPreparationAudit() {
   const VALID_TABLE_ACTION_DRY_RUN_JOB_QUERY_KEYS = new Set(['tenantId', 'workspaceId', 'projectNo', 'includeMissingComponents'])
 
   const handlers = {
+    ...createProjectDeleteHandlers({
+      database: context.api?.database,
+      authorizeWithin: services.stockPreparationProjectDeleteAuthority,
+      service: services.stockPreparationProjectDelete,
+      tenantPrincipalDirectory,
+      resolveBoundTarget: async tenantId => {
+        try {
+          const action = await tableActions.getTableAction({ tenantId, actionId: PLM_STOCK_PREPARATION_ACTION_ID, targetPurpose: 'readiness' })
+          return action.target
+        } catch (error) {
+          if (error.code === 'TABLE_ACTION_NOT_CONFIGURED' || error.code === 'TABLE_ACTION_NOT_FOUND') return null
+          throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_DELETE_AMBIGUOUS', 'The configured stock-preparation target could not be verified')
+        }
+      },
+      sendOk,
+    }),
     async status(req, res) {
       requireAccess(req, 'read')
       return sendOk(res, {
@@ -9748,6 +9829,17 @@ function requireStockPreparationAudit() {
       const applyTenantId = resolveTenantId(req, {})
       // S1 (ADR §3 「租户墙」): a resolved project sheet must be the caller's own — no-op otherwise.
       await assertResolvedProjectTargetTenancy(action, applyTenantId)
+      // A pre-cleanup token is removed by the deletion transaction. A duplicate delivery must
+      // stop before it acquires a new generation's write lease or publishes a refusal on its board.
+      // A live token still has to be atomically claimed and validated under the ordinary lease.
+      const replayProject = action.projectTarget?.projectNo || firstString(body.parameters?.projectNo)
+      const replayToken = firstString(body.confirm?.dryRunToken)
+      const cleanup = services.stockPreparationProjectDelete
+      if (replayToken && replayProject && typeof cleanup?.wasDeleted === 'function'
+        && !(await hasIssuedDryRunToken(context.storage, replayToken))
+        && await cleanup.wasDeleted({ tenantId: applyTenantId, projectNo: replayProject })) {
+        throw new HttpRouteError(409, 'TABLE_ACTION_DRY_RUN_TOKEN_INVALID', 'dry-run token unavailable')
+      }
       // Batch-refresh phase 0 step 1 — THE SHEET WRITE LEASE (S2/S3). One writer per target sheet (R-52)
       // across processes, held around everything below: the B2a claim, the credential load,
       // the token claim, the re-plan and every write. Acquired BEFORE all of them, so a busy refusal
@@ -12076,7 +12168,7 @@ function requireStockPreparationAudit() {
       let rowFacts = null
       try {
         const binding = await buildProjectTargetBinding({ provisioning, projectId: targetProjectId, target: row })
-        const scan = await scanPullTargetProjects(getMultitableRecordsApi(), { sheetId: row.sheetId, objectId: row.objectId }, binding, projectNo, { cache: pullTargetScanCache })
+        const scan = await scanPullTargetProjects(getMultitableRecordsApi(), { sheetId: row.sheetId, objectId: row.objectId }, binding, projectNo, { cache: (await projectDirectoryScanContext(scope.tenantId)).cache })
         rowFacts = scan && scan.ready ? scan : null
       } catch (error) {
         rowFacts = null
@@ -12659,28 +12751,30 @@ function requireStockPreparationAudit() {
         requiredTier: STOCK_PREP_ADMIN,
       })
       const tenantId = scope.tenantId
-      await requireStockPreparationAuditVocabulary(audit, audits.decisionAction, audits.decisionMigration, tenantId)
-      const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
-        tenantId,
-        actionId: PLM_STOCK_PREPARATION_ACTION_ID,
-        projectNo,
-        targetPurpose: 'write',
-      }))
-      await assertResolvedProjectTargetTenancy(action, tenantId)
-      // S6-5b (review of #6886): the re-proof runs behind the same key-column guard — a sheet that lost a key column is
-      // refused before its rows are read and before anything is recorded.
-      const rows = await readStockPreparationCensusRows(tenantId, action, projectNo, {}, stockPreparationCensusKeyFieldsGuard(tenantId, action))
-      const census = stockPreparationRemnantAcknowledgement.projectCensusOf(rows, { tenantId, projectNo })
-      stockPreparationRemnantAcknowledgement.assertRemnantPresent(census, body.componentHandle)
-      const row = await store.recordRemnantAcknowledgement({
-        tenantId,
-        sheetId: action.target.sheetId,
-        projectNo,
-        componentDigest: body.componentHandle,
-        basis: body.basis,
-        runbookRef: body.runbookRef,
-        recordedBy: scope.actorId,
-        auditWithin: remnantAcknowledgementAuditWithin(audit, scope),
+      const row = await withRulingActivity(tenantId, projectNo, async () => {
+        await requireStockPreparationAuditVocabulary(audit, audits.decisionAction, audits.decisionMigration, tenantId)
+        const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
+          tenantId,
+          actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+          projectNo,
+          targetPurpose: 'write',
+        }))
+        await assertResolvedProjectTargetTenancy(action, tenantId)
+        // S6-5b (review of #6886): the re-proof runs behind the same key-column guard — a sheet that lost a key column is
+        // refused before its rows are read and before anything is recorded.
+        const rows = await readStockPreparationCensusRows(tenantId, action, projectNo, {}, stockPreparationCensusKeyFieldsGuard(tenantId, action))
+        const census = stockPreparationRemnantAcknowledgement.projectCensusOf(rows, { tenantId, projectNo })
+        stockPreparationRemnantAcknowledgement.assertRemnantPresent(census, body.componentHandle)
+        return store.recordRemnantAcknowledgement({
+          tenantId,
+          sheetId: action.target.sheetId,
+          projectNo,
+          componentDigest: body.componentHandle,
+          basis: body.basis,
+          runbookRef: body.runbookRef,
+          recordedBy: scope.actorId,
+          auditWithin: remnantAcknowledgementAuditWithin(audit, scope),
+        })
       })
       return sendOk(res, stockPreparationRemnantAcknowledgement.acknowledgementAnswer(row, { created: true }), 201)
     },
@@ -12708,22 +12802,24 @@ function requireStockPreparationAudit() {
         requiredTier: STOCK_PREP_ADMIN,
       })
       const tenantId = scope.tenantId
-      await requireStockPreparationAuditVocabulary(audit, audits.decisionAction, audits.decisionMigration, tenantId)
-      const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
-        tenantId,
-        actionId: PLM_STOCK_PREPARATION_ACTION_ID,
-        projectNo,
-        targetPurpose: 'write',
-      }))
-      await assertResolvedProjectTargetTenancy(action, tenantId)
-      const row = await store.revokeRemnantAcknowledgement({
-        tenantId,
-        sheetId: action.target.sheetId,
-        projectNo,
-        rulingId: body.acknowledgementId,
-        runbookRef: body.runbookRef,
-        revokedBy: scope.actorId,
-        auditWithin: remnantAcknowledgementAuditWithin(audit, scope),
+      const row = await withRulingActivity(tenantId, projectNo, async () => {
+        await requireStockPreparationAuditVocabulary(audit, audits.decisionAction, audits.decisionMigration, tenantId)
+        const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
+          tenantId,
+          actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+          projectNo,
+          targetPurpose: 'write',
+        }))
+        await assertResolvedProjectTargetTenancy(action, tenantId)
+        return store.revokeRemnantAcknowledgement({
+          tenantId,
+          sheetId: action.target.sheetId,
+          projectNo,
+          rulingId: body.acknowledgementId,
+          runbookRef: body.runbookRef,
+          revokedBy: scope.actorId,
+          auditWithin: remnantAcknowledgementAuditWithin(audit, scope),
+        })
       })
       return sendOk(res, stockPreparationRemnantAcknowledgement.acknowledgementAnswer(row, { created: false }))
     },
@@ -14435,6 +14531,16 @@ function requireStockPreparationAudit() {
       // scan, no audit window, and a response and audit row whose key sets are unchanged. See the
       // query-key allowlist above for the cost argument the owner ruled on.
       const includePullTargets = firstString(input.includePullTargets) === '1'
+      let recent = []
+      if (input.recentProjectNos !== undefined) {
+        if (!includePullTargets || typeof input.recentProjectNos !== 'string') {
+          throw new HttpRouteError(400, 'STOCK_PREPARATION_OPERATOR_PROJECT_DIRECTORY_REQUEST_INVALID', 'Invalid recent projects')
+        }
+        recent = input.recentProjectNos.split(',')
+        if (recent.length > 30 || !recent.every(isValidStockPrepProjectNo)) {
+          throw new HttpRouteError(400, 'STOCK_PREPARATION_OPERATOR_PROJECT_DIRECTORY_REQUEST_INVALID', 'Invalid recent projects')
+        }
+      }
       // THE BOUND TABLE-ACTION TARGET — the sheet `apply` actually writes to, and the SECOND store
       // this directory is a union over (设计稿 N1). Without it the directory reads only the MVP
       // project ledger, which `mvp-persist` writes and `mvp-persist` is platform-admin: a project a
@@ -14484,6 +14590,9 @@ function requireStockPreparationAudit() {
           projectTargetRows = null
         }
       }
+      const scanContext = includePullTargets && (boundTarget || recent.length)
+        ? await projectDirectoryScanContext(scope.tenantId, recent, boundTarget)
+        : { cache: pullTargetScanCache, deleted: [] }
       const result = await listOperatorProjectDirectory({
         recordsApi: getMultitableRecordsApi(),
         provisioning: getMultitableProvisioning(),
@@ -14502,7 +14611,7 @@ function requireStockPreparationAudit() {
         // proved-own sheet; concurrent refreshes share one in-flight scan instead of starting one
         // each. The window lowers FREQUENCY only — it does not make a single scan cheaper, and it
         // does not lift the 50,000-row cap.
-        pullTargetScanCache,
+        pullTargetScanCache: scanContext.cache,
         // For `lastExportAt` only, and read through ONE bounded descending window rather than one
         // query per project — see `lastExportAtByProjectNo`. This route's own audit APPEND below is
         // unrelated and unchanged.
@@ -14551,6 +14660,10 @@ function requireStockPreparationAudit() {
           tenantClaimVerified: scope.tenantClaimVerified,
         },
       })
+      if (recent.length) {
+        res.setHeader?.('Cache-Control', 'private, no-store')
+        return sendOk(res, { ...result, deletedRecentProjectNos: scanContext.deleted })
+      }
       return sendOk(res, result)
     },
 
@@ -15980,6 +16093,18 @@ function requireStockPreparationAudit() {
       return sendOk(res, await runner.replayDeadLetter(replayInput), 202)
     },
   }
+
+  fenceProjectWriters(handlers, {
+    required: projectWriterActivityRequired,
+    activity: projectWriterActivity,
+    projectSheetsEnabled: () => stockPreparationProjectSheetsEnabled(process.env),
+    mvpPersistEnabled: stockPreparationTableActionMvpPersistEnabled,
+    authorize: requireAccess,
+    authorizeAction: (req, tier) => requireTableActionAccess(req,
+      firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID, tier, tenantPrincipalDirectory),
+    authTenant: resolveAuthUserTenantId,
+    routeTenant: req => resolveTenantId(req, {}),
+  })
 
   // R-69 1b-i: the request-free governed entries, for an in-process caller (1b-ii's port). Non-enumerable,
   // so nothing that walks the handler map (route registration, guards) sees an extra entry.
