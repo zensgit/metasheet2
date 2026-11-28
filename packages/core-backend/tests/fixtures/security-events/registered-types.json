@@ -1,0 +1,287 @@
+{
+  "admin.identity_rescrubbed": [
+    "system"
+  ],
+  "admin.login_grant_changed": [
+    "system"
+  ],
+  "admin.password_reset": [
+    "system"
+  ],
+  "admin.session_revocation_applied": [
+    "system"
+  ],
+  "admin.user_created": [
+    "system"
+  ],
+  "admin.user_purged": [
+    "system"
+  ],
+  "admin.user_recycled": [
+    "system"
+  ],
+  "admin.user_restored": [
+    "system"
+  ],
+  "admin.user_status_changed": [
+    "system"
+  ],
+  "admin.user_updated": [
+    "system"
+  ],
+  "admin_grant.enabled": [
+    "organization"
+  ],
+  "admin_grant.proof_issued": [
+    "organization"
+  ],
+  "admin_grant.proof_rejected": [
+    "organization"
+  ],
+  "api_token.issued": [
+    "system"
+  ],
+  "api_token.refused": [
+    "system"
+  ],
+  "api_token.revoked": [
+    "system"
+  ],
+  "api_token.rotated": [
+    "system"
+  ],
+  "attendance.allowlist_unavailable": [
+    "system"
+  ],
+  "attendance.audit_write_failed": [
+    "system"
+  ],
+  "audit.write_failed": [
+    "system"
+  ],
+  "auth.configuration_unavailable": [
+    "system"
+  ],
+  "auth.identity_repair_applied": [
+    "system"
+  ],
+  "auth.identity_repair_reanchored": [
+    "system"
+  ],
+  "auth.identity_repair_rolled_back": [
+    "system"
+  ],
+  "auth.invite_accepted": [
+    "system"
+  ],
+  "auth.invite_reissued": [
+    "system"
+  ],
+  "auth.invite_revoked": [
+    "system"
+  ],
+  "auth.login_denied": [
+    "system",
+    "organization"
+  ],
+  "auth.login_unavailable": [
+    "system",
+    "organization"
+  ],
+  "auth.password_changed": [
+    "system"
+  ],
+  "auth.rate_limited": [
+    "system"
+  ],
+  "auth.session_registered": [
+    "system",
+    "organization"
+  ],
+  "auth.session_revocation_applied": [
+    "system",
+    "organization"
+  ],
+  "auth.token_refused": [
+    "system"
+  ],
+  "auth.user_activated": [
+    "organization"
+  ],
+  "authorization.admission_changed": [
+    "system"
+  ],
+  "authorization.delegation_activated": [
+    "system"
+  ],
+  "authorization.delegation_changed": [
+    "system"
+  ],
+  "authorization.member_group_changed": [
+    "system"
+  ],
+  "authorization.operation_committed": [
+    "system"
+  ],
+  "authorization.operation_refused": [
+    "system"
+  ],
+  "authorization.outcome_unknown": [
+    "system"
+  ],
+  "authorization.role_assignment_changed": [
+    "system"
+  ],
+  "authorization.role_definition_changed": [
+    "system"
+  ],
+  "authorization.scope_template_changed": [
+    "system"
+  ],
+  "deprovision.effect_applied": [
+    "organization"
+  ],
+  "deprovision.effect_compensated": [
+    "organization"
+  ],
+  "deprovision.effect_superseded": [
+    "organization"
+  ],
+  "deprovision.followup_incomplete": [
+    "organization"
+  ],
+  "deprovision.restored": [
+    "organization"
+  ],
+  "deprovision.strict_grant_revoked": [
+    "organization"
+  ],
+  "directory.account_bound": [
+    "organization"
+  ],
+  "directory.account_unbound": [
+    "organization"
+  ],
+  "directory.alert_configuration_invalid": [
+    "system"
+  ],
+  "directory.approval_key_changed": [
+    "organization"
+  ],
+  "directory.binding_sweep_failed": [
+    "organization"
+  ],
+  "directory.deprovision_blocked": [
+    "organization"
+  ],
+  "directory.diagnostic_failed": [
+    "organization"
+  ],
+  "directory.freeze_schema_unavailable": [
+    "system"
+  ],
+  "directory.heartbeat_failed": [
+    "organization"
+  ],
+  "directory.inactive_linked_backlog": [
+    "organization"
+  ],
+  "directory.integration_changed": [
+    "organization"
+  ],
+  "directory.integration_identity_changed": [
+    "organization"
+  ],
+  "directory.invite_record_failed": [
+    "organization"
+  ],
+  "directory.post_commit_failed": [
+    "organization"
+  ],
+  "directory.schedule_invalid": [
+    "organization"
+  ],
+  "directory.scheduler_failed": [
+    "system",
+    "organization"
+  ],
+  "directory.projection_observed": [
+    "system",
+    "organization"
+  ],
+  "directory.sync_failed": [
+    "organization"
+  ],
+  "directory.user_admitted": [
+    "organization"
+  ],
+  "encrypted_store.material_unavailable": [
+    "system"
+  ],
+  "encrypted_store.probe_failed": [
+    "system"
+  ],
+  "encrypted_store.read_failed": [
+    "system"
+  ],
+  "encrypted_store.undecryptable": [
+    "system"
+  ],
+  "gateway.circuit_store_degraded": [
+    "system"
+  ],
+  "messaging.dead_letter_write_failed": [
+    "system"
+  ],
+  "messaging.dead_lettered": [
+    "system"
+  ],
+  "plugin.api_access_denied": [
+    "system"
+  ],
+  "plugin.permission_denied": [
+    "system"
+  ],
+  "plugin.threat_detected": [
+    "system"
+  ],
+  "security.action_committed": [
+    "organization"
+  ],
+  "security.action_refused": [
+    "system",
+    "organization"
+  ],
+  "security.proof_issued": [
+    "organization"
+  ],
+  "security.proof_rejected": [
+    "organization"
+  ],
+  "security.verification_unavailable": [
+    "system",
+    "organization"
+  ],
+  "system.component_recovered": [
+    "system",
+    "organization"
+  ],
+  "system.event_store_gap": [
+    "system"
+  ],
+  "webhook.auto_disabled": [
+    "system"
+  ],
+  "webhook.delivery_exhausted": [
+    "system"
+  ],
+  "webhook.redirect_refused": [
+    "system"
+  ],
+  "webhook.retry_tick_failed": [
+    "system"
+  ],
+  "webhook.target_refused": [
+    "system"
+  ]
+}
