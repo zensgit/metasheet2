@@ -54,6 +54,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { db } from '../../src/db/db'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { ApiTokenService } from '../../src/multitable/api-token-service'
+import { fixtureIssuanceCredential } from '../helpers/api-token-issuance-credential'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -171,7 +172,7 @@ describeIfDatabase('B1-G2 permission golden — OAPI token write re-gates M2/M3/
     )
 
     const svc = new ApiTokenService(db)
-    const w = await svc.createToken(WRITER, { name: 'b1g2-write', scopes: ['records:write'] })
+    const w = await svc.createToken(WRITER, { name: 'b1g2-write', scopes: ['records:write'] }, await fixtureIssuanceCredential(db, WRITER))
     tokWrite = w.plainTextToken
     tokWriteId = w.token.id
   })

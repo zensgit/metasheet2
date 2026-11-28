@@ -165,6 +165,7 @@ const grantDbFiles = [
   'tests/integration/realtime-authority-read.db.test.ts',
   'tests/integration/realtime-revalidation.db.test.ts',
   'tests/integration/realtime-yjs-startup-wiring.db.test.ts',
+  'tests/integration/api-token-issuance-fence.db.test.ts',
 ]
 
 function assertParallelWorkflow(doc) {

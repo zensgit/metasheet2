@@ -22,6 +22,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { db } from '../../src/db/db'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { ApiTokenService } from '../../src/multitable/api-token-service'
+import { fixtureIssuanceCredential } from '../helpers/api-token-issuance-credential'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -87,16 +88,16 @@ describeIfDatabase('OAPI-2a token WRITE routes (real DB)', () => {
     ])
 
     const svc = new ApiTokenService(db)
-    const w = await svc.createToken(WRITER, { name: 'w', scopes: ['records:write'] })
+    const w = await svc.createToken(WRITER, { name: 'w', scopes: ['records:write'] }, await fixtureIssuanceCredential(db, WRITER))
     tokWrite = w.plainTextToken
     tokWriteId = w.token.id
-    const ws = await svc.createToken(WRITER, { name: 'ws', scopes: ['records:read'] })
+    const ws = await svc.createToken(WRITER, { name: 'ws', scopes: ['records:read'] }, await fixtureIssuanceCredential(db, WRITER))
     tokWrongScope = ws.plainTextToken
     tokWrongScopeId = ws.token.id
-    const rv = await svc.createToken(WRITER, { name: 'rv', scopes: ['records:write'] })
+    const rv = await svc.createToken(WRITER, { name: 'rv', scopes: ['records:write'] }, await fixtureIssuanceCredential(db, WRITER))
     tokRevoked = rv.plainTextToken
     await svc.revokeToken(rv.token.id, WRITER)
-    const ro = await svc.createToken(RO, { name: 'ro', scopes: ['records:write'] })
+    const ro = await svc.createToken(RO, { name: 'ro', scopes: ['records:write'] }, await fixtureIssuanceCredential(db, RO))
     tokRoWrite = ro.plainTextToken
   })
 

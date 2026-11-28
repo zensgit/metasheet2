@@ -19,6 +19,7 @@ import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest'
 import { db } from '../../src/db/db'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { ApiTokenService } from '../../src/multitable/api-token-service'
+import { fixtureIssuanceCredential } from '../helpers/api-token-issuance-credential'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -94,15 +95,15 @@ describeIfDatabase('OAPI-4a scoped-token guard (real DB)', () => {
 
     const svc = new ApiTokenService(db)
     const rw = ['records:write', 'records:read', 'fields:read'] as const
-    const u = await svc.createToken(WRITER, { name: 'unscoped', scopes: [...rw] })
+    const u = await svc.createToken(WRITER, { name: 'unscoped', scopes: [...rw] }, await fixtureIssuanceCredential(db, WRITER))
     tUnscoped = u.plainTextToken; tUnscopedId = u.token.id
-    const ba = await svc.createToken(WRITER, { name: 'baseA', scopes: [...rw], baseIds: [BASE_A] })
+    const ba = await svc.createToken(WRITER, { name: 'baseA', scopes: [...rw], baseIds: [BASE_A] }, await fixtureIssuanceCredential(db, WRITER))
     tBaseA = ba.plainTextToken; tBaseAId = ba.token.id
-    const sa = await svc.createToken(WRITER, { name: 'sheetA1', scopes: [...rw], sheetIds: [SHEET_A1] })
+    const sa = await svc.createToken(WRITER, { name: 'sheetA1', scopes: [...rw], sheetIds: [SHEET_A1] }, await fixtureIssuanceCredential(db, WRITER))
     tSheetA1 = sa.plainTextToken; tSheetA1Id = sa.token.id
-    const bo = await svc.createToken(WRITER, { name: 'both', scopes: [...rw], baseIds: [BASE_A], sheetIds: [SHEET_A1] })
+    const bo = await svc.createToken(WRITER, { name: 'both', scopes: [...rw], baseIds: [BASE_A], sheetIds: [SHEET_A1] }, await fixtureIssuanceCredential(db, WRITER))
     tBoth = bo.plainTextToken
-    const bro = await svc.createToken(WRITER, { name: 'baseA-ro', scopes: ['records:read'], baseIds: [BASE_A] })
+    const bro = await svc.createToken(WRITER, { name: 'baseA-ro', scopes: ['records:read'], baseIds: [BASE_A] }, await fixtureIssuanceCredential(db, WRITER))
     tBaseAReadOnly = bro.plainTextToken
   })
 
@@ -207,7 +208,7 @@ describeIfDatabase('OAPI-4a scoped-token guard (real DB)', () => {
   // ── (h) rotateToken PRESERVES scope ───────────────────────────────────────
   test('T-h rotated token keeps its base scope (not widened to creator-wide)', async () => {
     const svc = new ApiTokenService(db)
-    const rotated = await svc.rotateToken(tBaseAId, WRITER)
+    const rotated = await svc.rotateToken(tBaseAId, WRITER, await fixtureIssuanceCredential(db, WRITER))
     expect(rotated.token.baseIds).toEqual([BASE_A])
     const tok = rotated.plainTextToken
     // still bounded: in-scope allowed, out-of-scope denied

@@ -25,6 +25,7 @@ import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { db } from '../../src/db/db'
 import { ApiTokenService } from '../../src/multitable/api-token-service'
+import { fixtureIssuanceCredential } from '../helpers/api-token-issuance-credential'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -81,11 +82,11 @@ describeIfDatabase('OAPI-1 comments:read API-token routes (real DB, full server)
     await q(`INSERT INTO meta_sheets (id, base_id, name) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [SHEET, BASE, 'OAPI-1 Comments Sheet'])
 
     const svc = new ApiTokenService(db)
-    tokCommentsC = (await svc.createToken(CREATOR_C, { name: 'c-read', scopes: ['comments:read'] })).plainTextToken
-    tokRecordsC = (await svc.createToken(CREATOR_C, { name: 'r-read', scopes: ['records:read'] })).plainTextToken
-    tokCommentsM = (await svc.createToken(CREATOR_M, { name: 'm-read', scopes: ['comments:read'] })).plainTextToken
-    tokCommentsN = (await svc.createToken(CREATOR_N, { name: 'n-read', scopes: ['comments:read'] })).plainTextToken
-    const revoked = await svc.createToken(CREATOR_C, { name: 'revoked', scopes: ['comments:read'] })
+    tokCommentsC = (await svc.createToken(CREATOR_C, { name: 'c-read', scopes: ['comments:read'] }, await fixtureIssuanceCredential(db, CREATOR_C))).plainTextToken
+    tokRecordsC = (await svc.createToken(CREATOR_C, { name: 'r-read', scopes: ['records:read'] }, await fixtureIssuanceCredential(db, CREATOR_C))).plainTextToken
+    tokCommentsM = (await svc.createToken(CREATOR_M, { name: 'm-read', scopes: ['comments:read'] }, await fixtureIssuanceCredential(db, CREATOR_M))).plainTextToken
+    tokCommentsN = (await svc.createToken(CREATOR_N, { name: 'n-read', scopes: ['comments:read'] }, await fixtureIssuanceCredential(db, CREATOR_N))).plainTextToken
+    const revoked = await svc.createToken(CREATOR_C, { name: 'revoked', scopes: ['comments:read'] }, await fixtureIssuanceCredential(db, CREATOR_C))
     tokRevokedC = revoked.plainTextToken
     await svc.revokeToken(revoked.token.id, CREATOR_C)
 

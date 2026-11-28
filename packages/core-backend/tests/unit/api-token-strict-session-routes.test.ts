@@ -225,9 +225,13 @@ describe('api token strict session route fence', () => {
     ...CREATE_PATHS.map((path) => ({ path, action: 'create' as const })),
     ...ROTATE_PATHS.map((path) => ({ path, action: 'rotate' as const })),
   ])('ordinary signed session passes POST $path to the $action stub', async ({ path, action }) => {
+    const bearer = ordinaryToken()
+    const issuedAt = authService.readTokenPayload(bearer)?.iat
+    expect(typeof issuedAt).toBe('number')
+    const credential = { expectedAccessGeneration: ACCESS_GENERATION, sessionId: 'sess.route-fence', issuedAt }
     const response = await request(pinned.url())
       .post(path)
-      .set('Authorization', `Bearer ${ordinaryToken()}`)
+      .set('Authorization', `Bearer ${bearer}`)
       .send(CREATE_BODY)
 
     expect(authGate.authenticate).toHaveBeenCalledTimes(1)
@@ -240,7 +244,7 @@ describe('api token strict session route fence', () => {
       expect(tokenService.createToken).toHaveBeenCalledWith(
         'user-ordinary',
         { name: 'bounded', scopes: ['records:read'], expiresAt: undefined, baseIds: undefined, sheetIds: undefined },
-        ACCESS_GENERATION,
+        credential,
       )
       expect(response.status).toBe(201)
       expect(response.body).toEqual({
@@ -252,7 +256,7 @@ describe('api token strict session route fence', () => {
     expect(trace).toEqual(['authenticate', 'rotate'])
     expect(tokenService.createToken).not.toHaveBeenCalled()
     expect(tokenService.rotateToken).toHaveBeenCalledTimes(1)
-    expect(tokenService.rotateToken).toHaveBeenCalledWith('route-token-1', 'user-ordinary', ACCESS_GENERATION)
+    expect(tokenService.rotateToken).toHaveBeenCalledWith('route-token-1', 'user-ordinary', credential)
     expect(response.status).toBe(200)
     expect(response.body).toEqual({
       ok: true,
