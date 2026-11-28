@@ -21,6 +21,9 @@ const SUPPORTED_SCHEMA_PROFILES = new Set([
   '19ef5b595d055ebd269bf58a4b8cd4312d95d022f4a2dcb9285c55d82346607d',
   // PostgreSQL 15, UTF-8 C with LF bodies.
   'f29f6b75a23223a5784ea86ad9dac74deeb02ffbe17e89af3dff87ce799f7f02',
+  // Full measured staging PG15 Alpine catalog: en_US.utf8, six origin-mode
+  // recovery triggers, the webhook activation hold, and B2/N78 additions.
+  '49ffece37de8bb24ce108156bb1803170fe96c6ccf64a7c8b3ea3183add50d34',
   // PostgreSQL 16, UTF-8 C with LF bodies on clean and in-place Windows upgrades.
   '619f688920f9dfd66bd7a4bb3b4fd093251878409c82e66ef0f56b45c2420740',
   // PostgreSQL 16, en_US.utf8/2.41 with LF bodies.

@@ -21,6 +21,20 @@ describe('authorization operation schema profile', () => {
     expect(isSupportedAuthorizationOperationSchema({ ordinary:true, digest:'unknown', d21Ready: true })).toBe(false)
     expect(isSupportedAuthorizationOperationSchema({ ordinary: true, digest: 'df64c6b5d2f1d1441bd5ce0fde9c63979123af3009cea573753b3b016f3f0925', d21Ready: true })).toBe(false)
   })
+
+  it('accepts only the full measured armed PG15 Alpine staging profile', () => {
+    const digest = '49ffece37de8bb24ce108156bb1803170fe96c6ccf64a7c8b3ea3183add50d34'
+    const baseDigest = 'e68f86e512384bede332535e0d51b8b164d1e880aadba5c0f439f5b9d2b8b2b9'
+    expect(isSupportedAuthorizationOperationSchema({ ordinary: true, digest })).toBe(true)
+    expect(isSupportedAuthorizationOperationSchema({ ordinary: false, digest })).toBe(false)
+    expect(isSupportedAuthorizationOperationSchema({ ordinary: true, digest: baseDigest })).toBe(false)
+    expect(isSupportedAuthorizationOperationSchema({
+      ordinary: true,
+      digest: 'unknown',
+      baseDigest,
+    })).toBe(false)
+  })
+
   it('locks the closed table set, qualified and without waiting', () => {
     expect(AUTHORIZATION_OPERATION_FENCE_TABLES).toHaveLength(22)
     expect(new Set(AUTHORIZATION_OPERATION_FENCE_TABLES).size).toBe(22)
