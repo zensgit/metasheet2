@@ -14,8 +14,8 @@
       </div>
     </header>
 
-    <p v-if="status" class="admin-page__status" :class="{ 'admin-page__status--error': statusTone === 'error' }">
-      {{ status }}
+    <p v-if="status.message" class="admin-page__status" :class="{ 'admin-page__status--error': status.tone === 'error' }">
+      {{ status.message }}
     </p>
 
     <div v-if="leavePromptOpen" class="admin-page__leave-shield" data-role-leave-shield>
@@ -216,8 +216,12 @@ type LoadedRoleBaseline = {
 
 const loading = ref(false)
 const busy = ref(false)
-const status = ref('')
-const statusTone = ref<'info' | 'error'>('info')
+type PageStatus = {
+  message: string
+  tone: 'info' | 'error'
+  pendingDeleteReadback?: true
+}
+const status = ref<PageStatus>({ message: '', tone: 'info' })
 const roles = ref<RoleCatalogItem[]>([])
 const permissions = ref<PermissionCatalogItem[]>([])
 const selectedRoleId = ref('')
@@ -445,8 +449,7 @@ function roleWriteErrorMessage(error: unknown, fallback: string): string {
 }
 
 function setStatus(message: string, tone: 'info' | 'error' = 'info'): void {
-  status.value = message
-  statusTone.value = tone
+  status.value = { message, tone }
 }
 
 async function readJson(response: Response): Promise<Record<string, unknown>> {
@@ -577,7 +580,9 @@ async function requestRefresh(): Promise<void> {
       return
     }
     const currentId = selectedRoleId.value
+    const retryDeleteReadback = status.value.pendingDeleteReadback
     const reloaded = await loadCatalog()
+    if (retryDeleteReadback) showDeleteResult(reloaded)
     if (!reloaded) return
     applyRole(currentId ? roles.value.find((role) => role.id === currentId) || null : null)
   } finally {
@@ -773,6 +778,18 @@ async function saveRole(options?: { keepDraftOnReadbackFailure?: boolean }): Pro
   }
 }
 
+function showDeleteResult(catalogReloaded: boolean): void {
+  if (catalogReloaded) {
+    setStatus('角色已删除')
+    return
+  }
+  status.value = {
+    message: '角色已删除，但角色目录未能刷新。请点击“刷新”重新加载目录。',
+    tone: 'error',
+    pendingDeleteReadback: true,
+  }
+}
+
 async function deleteRole(): Promise<void> {
   if (!isEditing.value || transitionBusy()) return
   if (!window.confirm(`确认删除角色 ${draftRoleName.value || draftRoleId.value}？`)) return
@@ -792,8 +809,8 @@ async function deleteRole(): Promise<void> {
     }
 
     resetForm()
-    await loadCatalog()
-    setStatus('角色已删除')
+    roles.value = roles.value.filter((role) => role.id !== editingId)
+    showDeleteResult(await loadCatalog())
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '删除角色失败', 'error')
   } finally {
