@@ -29,7 +29,7 @@ const { buildXlsxBufferMock } = vi.hoisted(() => ({ buildXlsxBufferMock: vi.fn((
 // rendered with, and `gridStubSeen.fetchRecord` records what the MetaGridTable stub received on its
 // own `:fetch-record` binding — so the HI-1 "same function the grid already receives" claim is
 // asserted by IDENTITY between the two stubs, not by a stringified attr or a source-text regex.
-const { inspectorStubSeen, gridStubSeen } = vi.hoisted(() => ({
+const { inspectorStubSeen, gridStubSeen, formStubSeen } = vi.hoisted(() => ({
   inspectorStubSeen: {
     openerEl: null as HTMLElement | null,
     renders: 0,
@@ -46,6 +46,12 @@ const { inspectorStubSeen, gridStubSeen } = vi.hoisted(() => ({
   gridStubSeen: {
     fetchRecord: undefined as ((recordId: string) => Promise<unknown>) | undefined,
     mentionSearch: undefined as ((query: string) => Promise<unknown>) | undefined,
+  },
+  // The record object and the attachment delete the MetaFormView stub was last rendered with, kept by identity: the
+  // real form re-seeds its whole draft whenever it is given a new record object. Reset per test in `beforeEach`.
+  formStubSeen: {
+    record: null as { id: string; version: number; data: Record<string, unknown> } | null,
+    deleteAttachmentFn: undefined as ((attachmentId: string, context?: { recordId?: string; fieldId?: string }) => Promise<unknown>) | undefined,
   },
 }))
 // PR-B2 round 2 (2026-09-05, record inspector v3 §1.3): the stub's answer to the workbench's
@@ -558,8 +564,10 @@ vi.mock('../src/multitable/components/MetaFormView.vue', () => ({
       record: { type: Object, default: null },
       deleteAttachmentFn: { type: Function, default: undefined },
     },
-    emits: ['submit', 'update:dirty'],
+    emits: ['submit', 'update:dirty', 'open-link-picker', 'open-person-picker'],
     render() {
+      formStubSeen.record = (this.$props.record as typeof formStubSeen.record) ?? null
+      formStubSeen.deleteAttachmentFn = this.$props.deleteAttachmentFn as typeof formStubSeen.deleteAttachmentFn
       return h('div', [
         // A remove in the form's attachment field, as the real form calls it (the record it shows, the field).
         ...['att_new', 'att_1'].map((attachmentId) => h(
@@ -573,6 +581,23 @@ vi.mock('../src/multitable/components/MetaFormView.vue', () => ({
           },
           `form-remove-${attachmentId}`,
         )),
+        // A link / person field's button: the real form emits the field alone, and the workbench opens its picker.
+        h(
+          'button',
+          {
+            'data-form-open-link-picker': 'true',
+            onClick: () => this.$emit('open-link-picker', { id: 'fld_parts', name: 'Parts', type: 'link' }),
+          },
+          'form-open-link-picker',
+        ),
+        h(
+          'button',
+          {
+            'data-form-open-person-picker': 'true',
+            onClick: () => this.$emit('open-person-picker', { id: 'fld_owner', name: 'Owner', type: 'person' }),
+          },
+          'form-open-person-picker',
+        ),
         h(
           'button',
           {
@@ -1643,6 +1668,8 @@ describe('MultitableWorkbench view wiring', () => {
     inspectorStubRealComments.enabled = false
     inspectorStubRealComments.realInspector = false
     gridStubSeen.fetchRecord = undefined
+    formStubSeen.record = null
+    formStubSeen.deleteAttachmentFn = undefined
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -3314,6 +3341,32 @@ describe('MultitableWorkbench view wiring', () => {
     container!.querySelector<HTMLButtonElement>('[data-form-submit="true"]')!.click()
     await flushUi()
     expect(workbenchMock.client.submitForm).toHaveBeenCalledWith('view_form', expect.objectContaining({ recordId: 'rec_1', expectedVersion }))
+  })
+
+  // The form re-seeds its whole draft (typed fields, unsaved uploads) whenever it is given a new record object: a
+  // removal that leaves the record copy as it is must leave the form the same object, not an equal one.
+  it('a form view, a file removed that the record\'s list does not hold (uploaded in the form, never saved): the form keeps the same record object, so its draft is not re-seeded', async () => {
+    workbenchMock.views.value = [
+      { id: 'view_form', sheetId: 'sheet_orders', name: 'Form', type: 'form' },
+    ]
+    workbenchMock.activeViewId.value = 'view_form'
+    workbenchMock.client.loadFormContext.mockResolvedValue({
+      fields: [{ id: 'fld_title', name: 'Title', type: 'text' }, { id: 'fld_files', name: 'Files', type: 'attachment' }],
+      record: { id: 'rec_1', version: 9, data: { fld_title: 'Form record', fld_files: ['att_1'] } },
+      rowActions: { canEdit: true, canDelete: true, canComment: true },
+    })
+    workbenchMock.client.deleteAttachment = vi.fn().mockResolvedValue({ deleted: 'att_new' })
+    mountWorkbench({ viewId: 'view_form', recordId: 'rec_1' })
+    await flushUi(8)
+    const before = formStubSeen.record
+    expect(before).toMatchObject({ id: 'rec_1', version: 9 })
+    // The form is not loaded again below: the record object it holds at the end is the one the removal left it.
+    const loads = workbenchMock.client.loadFormContext.mock.calls.length
+    await expect(formStubSeen.deleteAttachmentFn!('att_new', { recordId: 'rec_1', fieldId: 'fld_files' })).resolves.toBeUndefined()
+    await flushUi()
+    expect(workbenchMock.client.deleteAttachment).toHaveBeenCalledWith('att_new')
+    expect(workbenchMock.client.loadFormContext).toHaveBeenCalledTimes(loads)
+    expect(formStubSeen.record).toBe(before)
   })
 
   it('blocks form submit updates when scoped rowActions disallow edits', async () => {
@@ -5889,6 +5942,33 @@ describe('MultitableWorkbench view wiring', () => {
       expect(calls.map((call) => call[2])).toEqual([versionAtMerge, versionAtMerge + 1])
     })
 
+    // The removal's update of the copy waits for the record's drawer saves still out, and only then reads whether the
+    // copy's list holds the file: a save that added the file reaches the copy first, and the removal then takes it out.
+    it('a copy of the record shown, a file removed while the save that added it is still out: the copy takes that save, then the removal, and ends without the file one version past the save', async () => {
+      await openRec1()
+      const row = gridMock.rows.value.find((r: { id: string }) => r.id === 'rec_1')
+      row.data.fld_files = ['att_1']
+      mergeAnswer(row)
+      await realtimeMerge()('rec_1')
+      await flushUi()
+      const { answers, calls } = heldPatches(row)
+      container!.querySelector<HTMLButtonElement>('[data-patch-added-for="rec_1"]')!.click()
+      await flushUi()
+      expect(calls).toEqual([['fld_files', ['att_1', 'att_new'], 1]])
+      workbenchMock.client.deleteAttachment = vi.fn().mockResolvedValue({ deleted: 'att_new' })
+      // The removal is answered while the save is still out.
+      const removal = inspectorStubSeen.deleteAttachmentFn!('att_new', { recordId: 'rec_1', fieldId: 'fld_files' })
+      await flushUi()
+      expect(workbenchMock.client.deleteAttachment).toHaveBeenCalledWith('att_new')
+      answers[0](null)
+      await expect(removal).resolves.toBeUndefined()
+      await flushUi()
+      // The record leaves the page: from here on the drawer shows the copy.
+      gridMock.rows.value = gridMock.rows.value.filter((r: { id: string }) => r.id !== 'rec_1')
+      await flushUi()
+      expect(inspectorStubSeen.record).toMatchObject({ id: 'rec_1', version: 3, data: { fld_files: ['att_1'] } })
+    })
+
     it('a save the grid replaced unsent with a newer save of the field (CELL_WRITE_SUPERSEDED) shows nothing and leaves the field\'s inline error alone: the newer save answers for the field', async () => {
       await openRec1()
       rejectNextPatch('Title is too long', { status: 422, code: 'VALIDATION_ERROR', fieldErrors: { fld_title: 'Title is too long' } })
@@ -6538,6 +6618,30 @@ describe('MultitableWorkbench view wiring', () => {
       acceptNextPatch()
       await patchFor('rec_remote')
       expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_files', ['att_2'], 4, COPY_SAVE]])
+    })
+
+    it('an attachment delete on the shown deep-linked copy whose field holds one id as a plain string, not a list: the delete resolves, the copy moves one version on with that field emptied, and its next patch carries the new version', async () => {
+      workbenchMock.client.getRecord.mockResolvedValueOnce({
+        record: { id: 'rec_remote', version: 4, data: { fld_title: 'Remote', fld_files: 'att_1' } },
+        commentsScope: { containerType: 'meta_sheet', containerId: 'sheet_orders', targetType: 'meta_record', targetId: 'rec_remote' },
+        linkSummaries: {},
+        attachmentSummaries: { fld_files: [{ id: 'att_1', filename: 'att_1.txt' }] },
+      })
+      mountWorkbench({ recordId: 'rec_remote' })
+      await flushUi(8)
+      // The drawer stays on the copy, which holds the single id as a plain string.
+      expect(container!.querySelector('[data-record-drawer="rec_remote"]')).toBeTruthy()
+      expect(inspectorStubSeen.record).toMatchObject({ id: 'rec_remote', version: 4, data: { fld_files: 'att_1' } })
+      workbenchMock.client.deleteAttachment = vi.fn().mockResolvedValue({ deleted: 'att_1' })
+      // Awaited directly, so a rejected delete fails here as an assertion.
+      await expect(inspectorStubSeen.deleteAttachmentFn!('att_1', { recordId: 'rec_remote', fieldId: 'fld_files' })).resolves.toBeUndefined()
+      await flushUi()
+      expect(workbenchMock.client.deleteAttachment).toHaveBeenCalledWith('att_1')
+      expect(inspectorStubSeen.record).toMatchObject({ id: 'rec_remote', version: 5, data: { fld_files: [] } })
+      expect(container!.querySelector('[data-record-drawer="rec_remote"]')).toBeTruthy()
+      acceptNextPatch()
+      await patchFor('rec_remote')
+      expect(gridMock.patchCell.mock.calls).toEqual([['rec_remote', 'fld_files', ['att_2'], 5, COPY_SAVE]])
     })
 
     // --- a remove that ended after the drawer moved on also names the ids it took out ---

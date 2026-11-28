@@ -3059,7 +3059,8 @@ async function deleteAttachment(attachmentId: string, context?: MetaAttachmentUp
   // as it is, as the server leaves the record.
   const linked = deepLinkedRecord.value
   if (context?.recordId && context.fieldId && linked?.id === context.recordId) {
-    const storedIds = (linked.data[context.fieldId] as unknown[] | undefined)?.map(String) ?? []
+    const raw = linked.data[context.fieldId]
+    const storedIds = Array.isArray(raw) ? raw.map(String) : raw ? [String(raw)] : []
     if (storedIds.includes(attachmentId)) {
       deepLinkedRecord.value = {
         ...linked,
