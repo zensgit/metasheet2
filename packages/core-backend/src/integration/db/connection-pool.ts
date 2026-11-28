@@ -5,6 +5,7 @@ import { noteSettlementCoordinationMainPoolAccessV1 } from '../../attendance/coo
 import { Logger } from '../../core/logger'
 import type { RecoveryArchiveTransactionDepthProbe } from '../../multitable/recovery-archive-crypto'
 import { secretManager } from '../../security/SecretManager'
+import { databaseConnectionConfig } from './connection-config'
 import { coreMetrics } from '../metrics/metrics'
 
 export interface QueryOptions {
@@ -255,21 +256,10 @@ class PoolManager {
   private logger = new Logger('PoolManager')
 
   constructor() {
-    const connectionString = secretManager.get('DATABASE_URL', { required: process.env.NODE_ENV === 'production' })
+    const { connectionString, ssl, max } = databaseConnectionConfig(secretManager)
     if (!connectionString) {
       this.logger.warn('DATABASE_URL not set; database pool will use driver defaults and may fail to connect')
     }
-
-    const sslDisabledByEnv = ['false', '0', 'off', 'no'].includes((process.env.DB_SSL || '').trim().toLowerCase())
-    const ssl =
-      process.env.NODE_ENV === 'production' && !sslDisabledByEnv
-        ? {
-            rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false',
-            ca: process.env.DB_SSL_CA,
-            cert: process.env.DB_SSL_CERT,
-            key: process.env.DB_SSL_KEY,
-          }
-        : false
 
     this.main = this.createPool(
       'main',
@@ -277,7 +267,7 @@ class PoolManager {
         connectionString,
 
         // 连接池安全配置
-        max: parseInt(process.env.DB_POOL_MAX || '20', 10), // 最大连接数
+        max, // 最大连接数
         min: parseInt(process.env.DB_POOL_MIN || '2', 10),  // 最小连接数
 
         // 超时配置
