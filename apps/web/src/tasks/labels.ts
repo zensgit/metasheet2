@@ -744,7 +744,8 @@ export const TASKS_FMT_ZH = {
   /** Accessible name of a task row's remove button on the list page (design §4.2). */
   listRemoveTaskNamed: (title: string): string => `将「${title}」移出清单`,
   /** Members dialog (design §5.2): accessible names of a row's role select, remove and transfer
-   *  buttons, and the transfer's confirmation prompt — `userId` is the row's member. */
+   *  buttons, and the transfer's confirmation prompt — `userId` is the row's member as the dialog
+   *  shows it: the name, the id when there is none, or both when two rows share the name. */
   membersRoleFor: (userId: string): string => `「${userId}」的角色`,
   membersRemoveNamed: (userId: string): string => `移除成员「${userId}」`,
   membersTransferNamed: (userId: string): string => `将所有权转让给「${userId}」`,

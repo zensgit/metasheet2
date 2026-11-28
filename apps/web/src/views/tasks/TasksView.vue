@@ -395,7 +395,13 @@
                   </template>
                   <template v-else>
                     <span data-testid="tasks-detail-comment-body">{{ comment.deleted ? t.commentDeleted : comment.body }}</span>
-                    <span data-testid="tasks-detail-comment-author">{{ comment.authorId }}</span>
+                    <!-- The author by the name on the task (the id when it has none there); edit and delete go by the id. -->
+                    <span data-testid="tasks-detail-comment-author" :data-author-id="comment.authorId">{{ personName(comment.authorId) }}</span>
+                    <span
+                      v-if="isDeactivatedPerson(comment.authorId)"
+                      class="tasks-view__person-inactive"
+                      data-testid="tasks-detail-comment-author-inactive"
+                    >{{ t.memberInactiveMark }}</span>
                     <template v-if="canEditOwnComment(comment)">
                       <button
                         type="button"
