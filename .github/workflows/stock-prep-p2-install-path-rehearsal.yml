@@ -1,0 +1,285 @@
+name: Stock-prep package-2 install path rehearsal
+
+# TEST-ONLY. Rehearses the package-2 install path on a disposable GitHub-hosted
+# Windows runner: the package's own deploy-bootstrap .bat, install-deps 1 and
+# run-migrations 1, upgrading an R84 root (456 migrations) to F (474).
+#
+# This file and its helper (scripts/ci/stock-prep-p2-install-rehearsal.ps1) are
+# not packaged and never touch a site. They change runner-global state (pm2,
+# corepack, a PostgreSQL service), which is why they only run here.
+#
+# Inputs are read-only: F's non-publishing package build artifact (run below)
+# and the published onprem-r84 release assets. Nothing is published, tagged or
+# uploaded anywhere except this run's own artifact. Synthetic data only.
+#
+# Legs:
+#   upgrade job       leg 1 baseline R84 into an empty root and an empty DB,
+#                     leg 2 upgrade to F, leg 3 re-run of the same F install.
+#   failure-mode job  leg 1 again on a fresh runner, then leg 4: the F upgrade
+#                     with the health-check port closed after the migrations.
+#                     Leg 4 is evidence of the documented caveat, not a gate.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/stock-prep-p2-install-path-rehearsal.yml'
+      - 'scripts/ci/stock-prep-p2-install-rehearsal.ps1'
+      - 'scripts/ci/stock-prep-p2-pm2-owner-check.ps1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  F_RUN_ID: '43566476318'
+  F_ARTIFACT: multitable-onprem-package-43566476318-1
+  F_COMMIT: 220bd80ab62fc7e6b3b40b7d4263a712d9a09405
+  F_PKG: metasheet-multitable-onprem-v2.5.0-r85
+  F_ZIP_SHA256: f3f09d87511712f1dbe48f0274d4745c6bba6b4a5fe316c1c82c17dde95bd164
+  F_PS1_SHA256: 0c7f7ce8af5c71cc798f5bab21a1dd9014039c9902d6c82aca4e974f0b00bea7
+  F_BAT_SHA256: c83e6a6dc54f9f8ff031eab4c0ae62c6a7d9fcfce591642d39bd08c9c2f4f0ff
+  R84_TAG: onprem-r84
+  R84_COMMIT: beed2a1e1cd239975d695ce6ce4d7264e38c3a1e
+  R84_PKG: metasheet-multitable-onprem-v2.5.0-r84
+  R84_ZIP_SHA256: 22c6c528b2571defe9b722860a0ef885e9b57d3a7a51bc919f331fff5e895bd4
+  R84_PS1_SHA256: 0c7f7ce8af5c71cc798f5bab21a1dd9014039c9902d6c82aca4e974f0b00bea7
+  R84_BAT_SHA256: 0c3727c0efd0498fb00edd634a0d0e1f85bec7021257bc45e75ffb1c19d383dc
+  R84_APPLIED: '456'
+  F_APPLIED: '474'
+  F_NEW_MIGRATIONS: '18'
+  PM2_VERSION: '5.4.3'
+  # LF sha256 of the site pack's ps/02-pm2-owner-check.ps1 (= scripts/ci/stock-prep-p2-pm2-owner-check.ps1).
+  PM2OWNER_CHECK_SHA256: d0bb3283f20e82f89498f3508e18a37b8c084e79df09f7daa9b842fb63e72397
+
+jobs:
+  upgrade:
+    name: legs 1-3 (baseline R84, upgrade to F, re-run)
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - name: Checkout the harness only
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/ci
+          persist-credentials: false
+
+      - name: Download F package artifact (non-publishing build run)
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.F_ARTIFACT }}
+          run-id: ${{ env.F_RUN_ID }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: dl/f
+
+      - name: Download onprem-r84 zip and deploy-bootstrap (release assets)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p dl/r84
+          gh release download "$R84_TAG" -R "$GITHUB_REPOSITORY" -D dl/r84 \
+            -p "${R84_PKG}.zip" -p "${R84_PKG}.zip.sha256" \
+            -p "${R84_PKG}-deploy-bootstrap.ps1" -p "${R84_PKG}-deploy-bootstrap.ps1.sha256" \
+            -p "${R84_PKG}-deploy-bootstrap.bat" -p "${R84_PKG}-deploy-bootstrap.bat.sha256" \
+            -p SHA256SUMS
+          ls -1 dl/r84 dl/f
+
+      - name: Verify sha256 and provenance of both inputs
+        shell: powershell
+        run: |
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Prepare -R84Dir "$env:GITHUB_WORKSPACE\dl\r84" -FDir "$env:GITHUB_WORKSPACE\dl\f"
+          exit $LASTEXITCODE
+
+      - name: Preflight (PostgreSQL service, throwaway role and DB, pm2, port 80 stand-in)
+        shell: powershell
+        run: |
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Preflight
+          exit $LASTEXITCODE
+
+      - name: Leg 1 - baseline R84 into an empty root (deploy-bootstrap, 1 1)
+        timeout-minutes: 30
+        shell: powershell
+        run: |
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Install -Label leg1 -RegisterOnFreshPm2Defect -Bat "$env:GITHUB_WORKSPACE\dl\r84\${env:R84_PKG}-deploy-bootstrap.bat" -Zip "$env:GITHUB_WORKSPACE\dl\r84\${env:R84_PKG}.zip" -ExpectCommit $env:R84_COMMIT -ExpectApplied $env:R84_APPLIED -ExpectExecuted $env:R84_APPLIED
+          # The verdict reads the leg result file, so a stalled extended analysis cannot hide the leg.
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Verdict -Label leg1
+          exit $LASTEXITCODE
+
+      - name: Leg 2 - upgrade R84 to F (deploy-bootstrap, 1 1)
+        timeout-minutes: 30
+        shell: powershell
+        run: |
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Install -Label leg2 -Bat "$env:GITHUB_WORKSPACE\dl\f\${env:F_PKG}-deploy-bootstrap.bat" -Zip "$env:GITHUB_WORKSPACE\dl\f\${env:F_PKG}.zip" -ExpectCommit $env:F_COMMIT -ExpectApplied $env:F_APPLIED -ExpectExecuted $env:F_NEW_MIGRATIONS
+          # The verdict reads the leg result file, so a stalled extended analysis cannot hide the leg.
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Verdict -Label leg2
+          exit $LASTEXITCODE
+
+      # Install sheet step 2.3: the site pack's pm2 ownership check, run right after the upgrade.
+      # Gated at the end of the job (assert step), so a red here still lets leg 3 run.
+      - name: pm2 owner check after leg 2 (default PM2_HOME expects true, another PM2_HOME expects false)
+        id: pm2own
+        continue-on-error: true
+        timeout-minutes: 10
+        shell: powershell
+        run: |
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Pm2Owner -Label after-leg2-default -Pm2Home default -ExpectOwned true
+          $a = $LASTEXITCODE
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Pm2Owner -Label after-leg2-other-home -Pm2Home other -ExpectOwned false
+          $b = $LASTEXITCODE
+          if ($a -ne 0 -or $b -ne 0) { exit 1 }
+          exit 0
+
+      - name: Leg 3 - re-run the same F install (expects 0 migrations)
+        timeout-minutes: 30
+        shell: powershell
+        run: |
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Install -Label leg3 -Bat "$env:GITHUB_WORKSPACE\dl\f\${env:F_PKG}-deploy-bootstrap.bat" -Zip "$env:GITHUB_WORKSPACE\dl\f\${env:F_PKG}.zip" -ExpectCommit $env:F_COMMIT -ExpectApplied $env:F_APPLIED -ExpectExecuted 0
+          # The verdict reads the leg result file, so a stalled extended analysis cannot hide the leg.
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Verdict -Label leg3
+          exit $LASTEXITCODE
+
+      # Observation only: what `pm2 describe` answers under a PM2_HOME that never registered the app.
+      - name: pm2 describe under another PM2_HOME (observation, after leg 3)
+        if: always() && steps.pm2own.outcome != 'skipped'
+        continue-on-error: true
+        timeout-minutes: 10
+        shell: powershell
+        run: |
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Pm2DescribeOther
+          exit 0
+
+      - name: Assert the pm2 owner check
+        if: always()
+        shell: powershell
+        env:
+          PM2OWN_OUTCOME: ${{ steps.pm2own.outcome }}
+        run: |
+          if ($env:PM2OWN_OUTCOME -ne 'success') { Write-Host "pm2 owner check step outcome is '$env:PM2OWN_OUTCOME', expected 'success'"; exit 1 }
+          exit 0
+
+      - name: Diagnostics on failure
+        if: failure()
+        shell: powershell
+        run: |
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Diag
+
+      - name: Values-free summary
+        if: always()
+        shell: powershell
+        run: |
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Summary -Label upgrade
+
+      - name: Upload values-free results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2-install-rehearsal-upgrade-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.P2REH_WORK }}/out
+          if-no-files-found: warn
+          retention-days: 14
+
+  failure-mode:
+    name: leg 4 (post-migration failure, observed)
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - name: Checkout the harness only
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/ci
+          persist-credentials: false
+
+      - name: Download F package artifact (non-publishing build run)
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.F_ARTIFACT }}
+          run-id: ${{ env.F_RUN_ID }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: dl/f
+
+      - name: Download onprem-r84 zip and deploy-bootstrap (release assets)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p dl/r84
+          gh release download "$R84_TAG" -R "$GITHUB_REPOSITORY" -D dl/r84 \
+            -p "${R84_PKG}.zip" -p "${R84_PKG}.zip.sha256" \
+            -p "${R84_PKG}-deploy-bootstrap.ps1" -p "${R84_PKG}-deploy-bootstrap.ps1.sha256" \
+            -p "${R84_PKG}-deploy-bootstrap.bat" -p "${R84_PKG}-deploy-bootstrap.bat.sha256" \
+            -p SHA256SUMS
+          ls -1 dl/r84 dl/f
+
+      - name: Verify sha256 and provenance of both inputs
+        shell: powershell
+        run: |
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Prepare -R84Dir "$env:GITHUB_WORKSPACE\dl\r84" -FDir "$env:GITHUB_WORKSPACE\dl\f"
+          exit $LASTEXITCODE
+
+      - name: Preflight (PostgreSQL service, throwaway role and DB, pm2, port 80 stand-in)
+        shell: powershell
+        run: |
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Preflight
+          exit $LASTEXITCODE
+
+      - name: Leg 1 - baseline R84 into an empty root (fresh copy of the leg-1 state)
+        timeout-minutes: 30
+        shell: powershell
+        run: |
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Install -Label leg1 -RegisterOnFreshPm2Defect -Bat "$env:GITHUB_WORKSPACE\dl\r84\${env:R84_PKG}-deploy-bootstrap.bat" -Zip "$env:GITHUB_WORKSPACE\dl\r84\${env:R84_PKG}.zip" -ExpectCommit $env:R84_COMMIT -ExpectApplied $env:R84_APPLIED -ExpectExecuted $env:R84_APPLIED
+          # The verdict reads the leg result file, so a stalled extended analysis cannot hide the leg.
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Verdict -Label leg1
+          exit $LASTEXITCODE
+
+      # The only continue-on-error step: the injected failure. The health-check port (the harness
+      # stand-in on 127.0.0.1:80) is closed, so the apply fails AFTER migrate and pm2 restart.
+      - name: Leg 4 - F upgrade with the health-check port closed (injected failure)
+        timeout-minutes: 30
+        id: leg4
+        continue-on-error: true
+        shell: powershell
+        run: |
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Install -Label leg4 -Inject health-port-blocked -ExpectExit nonzero -Bat "$env:GITHUB_WORKSPACE\dl\f\${env:F_PKG}-deploy-bootstrap.bat" -Zip "$env:GITHUB_WORKSPACE\dl\f\${env:F_PKG}.zip" -ExpectCommit $env:F_COMMIT
+          # The verdict reads the leg result file, so a stalled extended analysis cannot hide the leg.
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Verdict -Label leg4 -ExpectExit nonzero
+          exit $LASTEXITCODE
+
+      - name: Leg 4 - assert the observed behaviour
+        shell: powershell
+        env:
+          LEG4_OUTCOME: ${{ steps.leg4.outcome }}
+        run: |
+          if ($env:LEG4_OUTCOME -ne 'failure') { Write-Host "leg 4 step outcome is '$env:LEG4_OUTCOME', expected 'failure'"; exit 1 }
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action AssertLeg4
+          exit $LASTEXITCODE
+
+      - name: Diagnostics on failure
+        if: failure()
+        shell: powershell
+        run: |
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Diag
+
+      - name: Values-free summary
+        if: always()
+        shell: powershell
+        run: |
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File scripts\ci\stock-prep-p2-install-rehearsal.ps1 -Action Summary -Label failure-mode
+
+      - name: Upload values-free results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2-install-rehearsal-failure-mode-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.P2REH_WORK }}/out
+          if-no-files-found: warn
+          retention-days: 14
