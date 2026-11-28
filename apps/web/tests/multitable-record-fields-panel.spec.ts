@@ -1006,6 +1006,25 @@ describe('MetaRecordFieldsPanel — a text box keeps its typing across its own c
     expect(box.value).toBe('zzz')
   })
 
+  it('typed, then undone, while a value landed, and the record then went back to what the box shows: leaving the box keeps that, not the value that landed', async () => {
+    const { container, set } = mountBoundPanel({ fields: [F_TEXT], record: textRecord('rec_A', 'n2'), onPatch: vi.fn() })
+    await flushUi()
+    const box = container.querySelector<HTMLInputElement>('#drawer_field_fld_text')!
+    box.focus()
+    expect(document.activeElement).toBe(box)
+    box.value = 'n2X'
+    set({ record: textRecord('rec_A', 'n3', 2) })
+    await flushUi()
+    expect(box.value).toBe('n2X')
+    // the typing undone, and the record back at the value the box shows
+    box.value = 'n2'
+    set({ record: textRecord('rec_A', 'n2', 3) })
+    await flushUi()
+    box.blur()
+    await flushUi()
+    expect(box.value).toBe('n2')
+  })
+
   it('a stored value the box holds differently (a line break in a single-line box) is not typing: a value that lands is shown', async () => {
     const { container, set } = mountBoundPanel({ fields: [F_TEXT], record: textRecord('rec_A', 'line1\nline2'), onPatch: vi.fn() })
     await flushUi()

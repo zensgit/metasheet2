@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, nextTick, ref } from 'vue'
+import { createApp, defineComponent, h, nextTick, ref, shallowRef } from 'vue'
 import MetaFormView from '../src/multitable/components/MetaFormView.vue'
 
 async function flushUi(cycles = 4) {
@@ -884,6 +884,212 @@ describe('MetaFormView attachment record binding', () => {
 
     view.unmount()
   })
+
+  it('keeps Save disabled and the field busy while an upload is out, also when the user goes for an earlier file\'s remove', async () => {
+    const upload = deferredFn<ReturnType<typeof attachment>>()
+    const remove = vi.fn().mockResolvedValue(undefined)
+    const view = mountForm({ record: REC_A(), uploadFn: upload.fn, deleteAttachmentFn: remove })
+    const saveButton = () => view.container.querySelector('.meta-form-view__submit') as HTMLButtonElement
+
+    try {
+      pickFiles(view.fileInput(), [new File(['one'], 'one.pdf', { type: 'application/pdf' })])
+      await flushUi()
+      upload.pending[0].resolve(attachment('att_n1', 'one.pdf'))
+      await flushUi()
+      pickFiles(view.fileInput(), [new File(['two'], 'two.pdf', { type: 'application/pdf' })])
+      await flushUi()
+      // The earlier file's remove, if the form offers it while the second upload runs.
+      ;(view.container.querySelectorAll('.meta-attachment-list__remove')[2] as HTMLButtonElement | undefined)?.click()
+      await flushUi()
+
+      expect(saveButton().disabled).toBe(true)
+      expect(view.container.querySelector('.meta-form-view__uploading')).not.toBeNull()
+      expect(view.fileInput().disabled).toBe(true)
+
+      upload.pending[1].resolve(attachment('att_n2', 'two.pdf'))
+      await flushUi()
+      expect(saveButton().disabled).toBe(false)
+    } finally {
+      view.unmount()
+    }
+  })
+
+  it('writes no deleted file back into the list when an upload ends after a remove', async () => {
+    const upload = deferredFn<ReturnType<typeof attachment>>()
+    const remove = vi.fn().mockResolvedValue(undefined)
+    const view = mountForm({ record: REC_A(), uploadFn: upload.fn, deleteAttachmentFn: remove })
+
+    try {
+      pickFiles(view.fileInput(), [new File(['one'], 'one.pdf', { type: 'application/pdf' })])
+      await flushUi()
+      upload.pending[0].resolve(attachment('att_n1', 'one.pdf'))
+      await flushUi()
+      pickFiles(view.fileInput(), [new File(['two'], 'two.pdf', { type: 'application/pdf' })])
+      await flushUi()
+      // The earlier file's remove, if the form offers it while the second upload runs.
+      ;(view.container.querySelectorAll('.meta-attachment-list__remove')[2] as HTMLButtonElement | undefined)?.click()
+      await flushUi()
+      upload.pending[1].resolve(attachment('att_n2', 'two.pdf'))
+      await flushUi()
+
+      const deletedIds = remove.mock.calls.map((call) => call[0])
+      const payload = await submitted(view)
+      // No id whose delete was answered is in what the form would submit, and the earlier upload is shown by its name.
+      expect((payload.fld_files as string[]).filter((id) => deletedIds.includes(id))).toEqual([])
+      expect(view.container.textContent).not.toContain('att_n1')
+      expect(payload).toEqual({ fld_title: 'Alpha', fld_files: ['att_a1', 'att_a2', 'att_n1', 'att_n2'] })
+    } finally {
+      view.unmount()
+    }
+  })
+
+  it('drops the files a clear-all already deleted when a later delete of it fails', async () => {
+    const upload = deferredFn<ReturnType<typeof attachment>>()
+    const remove = deferredFn()
+    // No stored file in the field: both files are uploads not saved yet.
+    const view = mountForm({ record: { id: 'rec_A', version: 1, data: { fld_title: 'Alpha' } }, uploadFn: upload.fn, deleteAttachmentFn: remove.fn })
+
+    try {
+      pickFiles(view.fileInput(), [new File(['one'], 'one.pdf', { type: 'application/pdf' })])
+      await flushUi()
+      upload.pending[0].resolve(attachment('att_n1', 'one.pdf'))
+      await flushUi()
+      pickFiles(view.fileInput(), [new File(['two'], 'two.pdf', { type: 'application/pdf' })])
+      await flushUi()
+      upload.pending[1].resolve(attachment('att_n2', 'two.pdf'))
+      await flushUi()
+
+      ;(view.container.querySelector('.meta-form-view__attachment-clear') as HTMLButtonElement).click()
+      await flushUi()
+      remove.pending[0].resolve()
+      await flushUi()
+      remove.pending[1].reject(new Error('Delete refused'))
+      await flushUi()
+
+      expect(remove.fn).toHaveBeenNthCalledWith(1, 'att_n1', { recordId: 'rec_A', fieldId: 'fld_files' })
+      expect(remove.fn).toHaveBeenNthCalledWith(2, 'att_n2', { recordId: 'rec_A', fieldId: 'fld_files' })
+      expect(fieldError(view)?.textContent).toBe('Delete refused')
+      expect(view.container.textContent).toContain('two.pdf')
+      // The file whose delete was answered leaves the list; it is not left behind as a bare id.
+      expect(view.container.textContent).not.toContain('att_n1')
+      expect(await submitted(view)).toEqual({ fld_title: 'Alpha', fld_files: ['att_n2'] })
+    } finally {
+      view.unmount()
+    }
+  })
+
+  it('keeps a clear-all whole when the user goes for a later file\'s remove while it runs', async () => {
+    const upload = deferredFn<ReturnType<typeof attachment>>()
+    // A delete stand-in, answered in the order the test chooses: a second delete of the same id fails.
+    const deleted = new Set<string>()
+    const deletes: Array<() => void> = []
+    const remove = vi.fn((id: string) => new Promise<void>((resolve, reject) => {
+      deletes.push(() => {
+        if (deleted.has(id)) {
+          reject(new Error('Delete refused'))
+        } else {
+          deleted.add(id)
+          resolve()
+        }
+      })
+    }))
+    const view = mountForm({ record: { id: 'rec_A', version: 1, data: { fld_title: 'Alpha' } }, uploadFn: upload.fn, deleteAttachmentFn: remove })
+    const saveButton = () => view.container.querySelector('.meta-form-view__submit') as HTMLButtonElement
+
+    try {
+      pickFiles(view.fileInput(), [new File(['one'], 'one.pdf', { type: 'application/pdf' })])
+      await flushUi()
+      upload.pending[0].resolve(attachment('att_n1', 'one.pdf'))
+      await flushUi()
+      pickFiles(view.fileInput(), [new File(['two'], 'two.pdf', { type: 'application/pdf' })])
+      await flushUi()
+      upload.pending[1].resolve(attachment('att_n2', 'two.pdf'))
+      await flushUi()
+
+      ;(view.container.querySelector('.meta-form-view__attachment-clear') as HTMLButtonElement).click()
+      await flushUi()
+      // The later file's remove, if the form offers it while the clear runs; its delete is answered first.
+      ;(view.container.querySelectorAll('.meta-attachment-list__remove')[1] as HTMLButtonElement | undefined)?.click()
+      await flushUi()
+      if (deletes.length > 1) {
+        deletes[1]()
+        await flushUi()
+      }
+      expect(saveButton().disabled).toBe(true)
+
+      // The clear's delete of the first file, then its delete of the second (sent only now).
+      deletes[0]()
+      await flushUi()
+      deletes[deletes.length - 1]()
+      await flushUi()
+
+      expect([...deleted].sort()).toEqual(['att_n1', 'att_n2'])
+      expect(fieldError(view)).toBeNull()
+      expect(await submitted(view)).toEqual({ fld_title: 'Alpha', fld_files: [] })
+    } finally {
+      view.unmount()
+    }
+  })
+
+  it('takes a failed clear-all\'s deleted files out of the list as the form holds it then, not as it was when the clear started', async () => {
+    const upload = deferredFn<ReturnType<typeof attachment>>()
+    const remove = deferredFn()
+    const view = mountForm({
+      record: { id: 'rec_A', version: 1, data: { fld_title: 'Alpha', fld_files: ['att_a1'] } },
+      uploadFn: upload.fn,
+      deleteAttachmentFn: remove.fn,
+    })
+
+    try {
+      pickFiles(view.fileInput(), [new File(['one'], 'one.pdf', { type: 'application/pdf' })])
+      await flushUi()
+      upload.pending[0].resolve(attachment('att_n1', 'one.pdf'))
+      await flushUi()
+
+      ;(view.container.querySelector('.meta-form-view__attachment-clear') as HTMLButtonElement).click()
+      await flushUi()
+      // Before the stored file's delete returns, the form gets a new copy of the same record without that file, as the
+      // workbench gives it after a stored file's delete; the form re-reads its draft from that copy.
+      view.record.value = { id: 'rec_A', version: 2, data: { fld_title: 'Alpha', fld_files: [] } }
+      await flushUi()
+      remove.pending[0].resolve()
+      await flushUi()
+      remove.pending[1].reject(new Error('Delete refused'))
+      await flushUi()
+
+      expect(remove.fn).toHaveBeenNthCalledWith(1, 'att_a1', { recordId: 'rec_A', fieldId: 'fld_files' })
+      expect(remove.fn).toHaveBeenNthCalledWith(2, 'att_n1', { recordId: 'rec_A', fieldId: 'fld_files' })
+      expect(fieldError(view)?.textContent).toBe('Delete refused')
+      expect(await submitted(view)).toEqual({ fld_title: 'Alpha', fld_files: [] })
+    } finally {
+      view.unmount()
+    }
+  })
+
+  it('leaves the next record\'s form data alone when the earlier record\'s clear-all fails on a later delete after the switch', async () => {
+    const remove = deferredFn()
+    const view = mountForm({ record: REC_A(), deleteAttachmentFn: remove.fn })
+
+    try {
+      ;(view.container.querySelector('.meta-form-view__attachment-clear') as HTMLButtonElement).click()
+      await flushUi()
+      // B has never had a value for the field, so any write to it shows up in the payload.
+      view.record.value = { id: 'rec_B', version: 1, data: { fld_title: 'Beta' } }
+      await flushUi()
+      remove.pending[0].resolve()
+      await flushUi()
+      remove.pending[1].reject(new Error('Delete refused'))
+      await flushUi()
+
+      expect(remove.fn).toHaveBeenNthCalledWith(1, 'att_a1', { recordId: 'rec_A', fieldId: 'fld_files' })
+      expect(remove.fn).toHaveBeenNthCalledWith(2, 'att_a2', { recordId: 'rec_A', fieldId: 'fld_files' })
+      expect(fieldError(view)).toBeNull()
+      expect(await submitted(view)).toEqual({ fld_title: 'Beta' })
+      expect(view.submitSpy.mock.calls[0][0]).not.toHaveProperty('fld_files')
+    } finally {
+      view.unmount()
+    }
+  })
 })
 
 // --- A4: multi-page / prefill / cross-page validation ---
@@ -1106,10 +1312,21 @@ describe('MetaFormView A4 form logic', () => {
 // A number box holding a draft it cannot read ("-", "1e") reports `validity.badInput`, and its value reads "".
 // jsdom never reports it, so the cells set it on the box.
 describe('MetaFormView number boxes: a draft the box cannot read', () => {
-  function mountNumberForm(options: { type?: string; pages?: boolean } = {}) {
+  function mountNumberForm(options: {
+    type?: string
+    pages?: boolean
+    initialValues?: { value: Record<string, unknown> | null }
+  } = {}) {
     const submitSpy = vi.fn()
     const container = document.createElement('div')
     document.body.appendChild(container)
+    // Held outside the render, so that the form can be drawn again with the same record, or be handed a new copy of it.
+    const record = shallowRef<{ id: string; version: number; data: Record<string, unknown> }>({
+      id: 'rec_1',
+      version: 1,
+      data: { fld_qty: 5, fld_note: 'kept' },
+    })
+    const message = ref<string | null>(null)
     const app = createApp({
       render() {
         return h(MetaFormView, {
@@ -1117,9 +1334,12 @@ describe('MetaFormView number boxes: a draft the box cannot read', () => {
             { id: 'fld_qty', name: 'Quantity', type: options.type ?? 'number' },
             { id: 'fld_note', name: 'Note', type: 'string' },
           ],
-          record: { id: 'rec_1', version: 1, data: { fld_qty: 5, fld_note: 'kept' } },
+          ...(options.initialValues
+            ? { record: null, initialValues: options.initialValues.value }
+            : { record: record.value }),
           loading: false,
           readOnly: false,
+          successMessage: message.value,
           ...(options.pages
             ? { formLayout: { pages: [{ id: 'p1', title: 'First', fieldIds: ['fld_qty'] }, { id: 'p2', title: 'Second', fieldIds: ['fld_note'] }] } }
             : {}),
@@ -1142,11 +1362,25 @@ describe('MetaFormView number boxes: a draft the box cannot read', () => {
       container.querySelector('form')!.dispatchEvent(new Event('submit'))
       await flushUi()
     }
+    /** The focus goes into the box, as before typing in it. */
+    function focus() {
+      box().focus()
+    }
+    /** The form is drawn again with nothing it holds changed: a success line comes or goes. */
+    async function redraw() {
+      message.value = message.value ? null : 'Saved'
+      await flushUi()
+    }
+    /** The form gets a new copy of the same record, with these values: a load of the form's values. */
+    async function replaceRecord(data: Record<string, unknown>) {
+      record.value = { id: 'rec_1', version: record.value.version + 1, data }
+      await flushUi()
+    }
     function unmount() {
       app.unmount()
       container.remove()
     }
-    return { container, submitSpy, box, type, submit, unmount }
+    return { container, submitSpy, box, type, submit, focus, redraw, replaceRecord, unmount }
   }
 
   it.each(['number', 'currency', 'percent'])('a %s box left on a draft it cannot read keeps the stored number: Save sends it as it was', async (type) => {
@@ -1201,5 +1435,139 @@ describe('MetaFormView number boxes: a draft the box cannot read', () => {
     await form.submit()
     expect(form.submitSpy).toHaveBeenCalledWith({ fld_qty: -3, fld_note: 'kept' })
     form.unmount()
+  })
+
+  // A focused box that holds typing of its own keeps it when the form is drawn again.
+  it.each(['number', 'currency', 'percent'])('a focused %s box holding a draft it cannot read keeps it through a redraw of the form', async (type) => {
+    const form = mountNumberForm({ type })
+    try {
+      await flushUi()
+      form.focus()
+      expect(document.activeElement).toBe(form.box())
+      await form.type('', true) // "-"
+      await form.redraw()
+      expect(form.box().value).toBe('')
+    } finally {
+      form.unmount()
+    }
+  })
+
+  it.each(['number', 'currency', 'percent'])('a focused %s box typed to "-0" (on the way to "-0.5") keeps "-0"', async (type) => {
+    const form = mountNumberForm({ type })
+    try {
+      await flushUi()
+      form.focus()
+      expect(document.activeElement).toBe(form.box())
+      await form.type('-0')
+      expect(form.box().value).toBe('-0')
+      await form.type('-0.5')
+      await form.submit()
+      expect(form.submitSpy).toHaveBeenCalledWith({ fld_qty: -0.5, fld_note: 'kept' })
+    } finally {
+      form.unmount()
+    }
+  })
+
+  // Controls (pass before the change too): leaving the box, typing in another field, and a load of the form's values
+  // still show the form's value.
+  it.each(['number', 'currency', 'percent'])('a focused %s box typed away from its number and back, then left, shows that number (what Save sends)', async (type) => {
+    const form = mountNumberForm({ type })
+    try {
+      await flushUi()
+      form.focus()
+      expect(document.activeElement).toBe(form.box())
+      await form.type('50') // a "0" typed after the 5
+      await form.type('5') // and taken back
+      form.box().blur()
+      await flushUi()
+      expect(form.box().value).toBe('5')
+      await form.submit()
+      expect(form.submitSpy).toHaveBeenCalledWith({ fld_qty: 5, fld_note: 'kept' })
+    } finally {
+      form.unmount()
+    }
+  })
+
+  it('a box left holding a draft it cannot read shows the stored number again when typing in another field redraws the form, and Save sends it', async () => {
+    const form = mountNumberForm()
+    try {
+      await flushUi()
+      form.focus()
+      expect(document.activeElement).toBe(form.box())
+      await form.type('', true) // "-"
+      const note = form.container.querySelector('#field_fld_note') as HTMLInputElement
+      note.focus()
+      expect(document.activeElement).toBe(note)
+      note.value = 'kept 2'
+      note.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushUi()
+      expect(form.box().value).toBe('5')
+      await form.submit()
+      expect(form.submitSpy).toHaveBeenCalledWith({ fld_qty: 5, fld_note: 'kept 2' })
+    } finally {
+      form.unmount()
+    }
+  })
+
+  it.each(['number', 'currency', 'percent'])('a new copy of the same record loaded while the focused %s box holds typing: the box shows the loaded number, which is what Save sends', async (type) => {
+    const form = mountNumberForm({ type })
+    try {
+      await flushUi()
+      form.focus()
+      expect(document.activeElement).toBe(form.box())
+      await form.type('12')
+      await form.replaceRecord({ fld_qty: 7, fld_note: 'kept' })
+      expect(form.box().value).toBe('7')
+      await form.submit()
+      expect(form.submitSpy).toHaveBeenCalledWith({ fld_qty: 7, fld_note: 'kept' })
+    } finally {
+      form.unmount()
+    }
+  })
+
+  it.each(['number', 'currency', 'percent'])('prefill arriving after typing in a focused %s box replaces the typing, and Save sends the prefilled number', async (type) => {
+    const initialValues = shallowRef<Record<string, unknown> | null>(null)
+    const form = mountNumberForm({ type, initialValues })
+    try {
+      await flushUi()
+      expect(form.box().value).toBe('')
+      form.focus()
+      expect(document.activeElement).toBe(form.box())
+      await form.type('12')
+      expect(form.box().value).toBe('12')
+      initialValues.value = { fld_qty: 4 }
+      await flushUi()
+      expect(document.activeElement).toBe(form.box())
+      expect(form.box().value).toBe('4')
+      await form.submit()
+      expect(form.submitSpy).toHaveBeenCalledTimes(1)
+      expect(form.submitSpy).toHaveBeenCalledWith({ fld_qty: 4 })
+    } finally {
+      form.unmount()
+    }
+  })
+
+  it.each(['number', 'currency', 'percent'])('Reset replaces typing in a focused %s box with the stored number, and Save sends that number', async (type) => {
+    const form = mountNumberForm({ type })
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    try {
+      await flushUi()
+      expect(form.box().value).toBe('5')
+      form.focus()
+      expect(document.activeElement).toBe(form.box())
+      await form.type('12')
+      expect(form.box().value).toBe('12')
+      form.container.querySelector<HTMLButtonElement>('.meta-form-view__reset')!.click()
+      await flushUi()
+      expect(confirmSpy).toHaveBeenCalledTimes(1)
+      expect(document.activeElement).toBe(form.box())
+      expect(form.box().value).toBe('5')
+      await form.submit()
+      expect(form.submitSpy).toHaveBeenCalledTimes(1)
+      expect(form.submitSpy).toHaveBeenCalledWith({ fld_qty: 5, fld_note: 'kept' })
+    } finally {
+      confirmSpy.mockRestore()
+      form.unmount()
+    }
   })
 })
