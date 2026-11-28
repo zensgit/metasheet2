@@ -2073,7 +2073,6 @@ exec npx vitest run \
   StockPreparationUnconfirmableHold \
   StockPreparationUnitConfirmView \
   StockPreparationWorkspace \
-  StockPreparationYidaInitialization \
   StockPreparationYidaOwnerSend \
   StockPreparationYidaPreview \
   stockPrepPermissionMatrix \
@@ -2133,6 +2132,7 @@ exec npx vitest run \
   webhook-target-hint \
   workflowHubView \
   xlsx-mapping \
+  yidaInitializationClient \
   yjs-document-reopen.spec.ts \
   yjs-document-resync.spec.ts \
   --reporter=dot

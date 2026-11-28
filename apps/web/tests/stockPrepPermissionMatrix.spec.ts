@@ -978,7 +978,8 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
     expect(board).not.toContain('hasPermission')
     // The board label promises no single-row send; only the preview's server-switch-gated entry does.
     expect(board).not.toContain('单行确认')
-    expect(preview).toContain('v-if="ownerSendEnabled && !ownerSendOpen"')
-    expect(preview).toContain('@send-enabled-change="ownerSendEnabled = $event"')
+    // 四步配置 (T-13): the entry shows only on an owner-authorized status reply that reports the send switch ON.
+    expect(preview).toContain(`v-if="state?.status === 'initialized' && (state.sendEnabled || ownerSendOpen)"`)
+    expect(preview).toContain('v-if="!ownerSendOpen" type="button" data-testid="sp-yida-owner-open"')
   })
 })

@@ -103,6 +103,28 @@ test('INTEGRATION_YIDA_CONNECTION_TEST_ENABLED manifest entry: exact true, dange
   for (const value of ['TRUE', ' true', 'true ', '1', 'yes', '', undefined]) assert.equal(isActivated(spec, value), false)
 })
 
+// YiDa 测试连接 form-definition read (ADR adr-yida-connection-test-20261028, addendum 2026-11-23): its own
+// default-OFF switch, danger high, exact literal only, independent of the send switch, every cited file real.
+test('INTEGRATION_YIDA_FORM_FIELDS_READ_ENABLED manifest entry: exact true, danger high, independent, sources exist', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.INTEGRATION_YIDA_FORM_FIELDS_READ_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.ok(spec.purpose.includes('Does not read, imply or require INTEGRATION_YIDA_OWNER_SEND_ENABLED'))
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+  for (const cited of spec.source.split('; ').map((entry) => entry.split('#')[0])) {
+    assert.ok(readFileSync(path.join(root, cited), 'utf8').length > 0, cited)
+  }
+  const host = readFileSync(path.join(root, 'packages/core-backend/src/index.ts'), 'utf8')
+  assert.ok(host.includes('readFormFieldsEnablement: () => process.env.INTEGRATION_YIDA_FORM_FIELDS_READ_ENABLED,'))
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of ['TRUE', ' true', 'true ', '1', 'yes', '', undefined]) assert.equal(isActivated(spec, value), false)
+})
+
 // YiDa 发料确认日期回写 (slice Y9a): the switch is danger high, exact literal only, read by the plugin module through
 // the exported predicate; the target list is a list (never a dependsOn). Both are read in the plugin lib, so the
 // completeness scan below covers the INTEGRATION_YIDA_ISSUE_CONFIRM_ family there (a phantom otherwise).

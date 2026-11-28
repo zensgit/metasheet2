@@ -29,6 +29,7 @@ export type YidaInitializationHttpPort = Readonly<{
 export type YidaConnectionTestHttpPort = Readonly<{
   test(actor: YidaOwnerActor, input: YidaConnectionTestInput, options: { signal: AbortSignal }): Promise<unknown>
   connectionTestEnabled(): boolean
+  formFieldsReadEnabled?(): boolean
 }>
 /** R-71 ⑦.5 cut-over reconciliation (INTEGRATION_YIDA_RECONCILE_READ_ENABLED exact 'true' only): read-only
  * paginated search + local insert-only evidence; never send authority. */
@@ -257,25 +258,59 @@ function initializationInput(value: unknown) {
   if (attestation.executionIdentity !== material.userId) fail()
   return { commandId: id(parsed.commandId), material, draft: candidate, attestation }
 }
-function connectionTestInput(value: unknown) {
-  const parsed = record(value, ['commandId', 'mode', 'material'])
+const YIDA_PATH_ID = /^[A-Za-z0-9_-]{1,128}$/u
+const YIDA_FIELD_ID = /^[A-Za-z0-9_-]{1,128}$/u
+const YIDA_COMPONENT = /^[A-Za-z][A-Za-z0-9]{0,63}$/u
+// ADR addendum 2026-11-23: `form` is accepted only while INTEGRATION_YIDA_FORM_FIELDS_READ_ENABLED reads exact
+// 'true'; OFF = the original closed body, so a form key is a plain 400 before any port.
+function connectionTestInput(value: unknown, formFieldsRead = false) {
+  const parsed = record(value, ['commandId', 'mode', 'material'], formFieldsRead ? ['form'] : [])
   if (parsed.mode !== 'candidate') fail()
   const material = record(parsed.material, ['appKey', 'appSecret'])
   for (const key of Object.keys(material)) credential(material[key], 4096)
   if (Buffer.byteLength(JSON.stringify(material), 'utf8') > 16 * 1024) fail()
+  let form: { appType: string; formUuid: string; systemToken: string; userId: string } | undefined
+  if (Object.hasOwn(parsed, 'form')) {
+    const target = record(parsed.form, ['appType', 'formUuid', 'systemToken', 'userId'])
+    for (const key of ['appType', 'formUuid']) if (typeof target[key] !== 'string' || !YIDA_PATH_ID.test(target[key] as string)) fail()
+    const systemToken = credential(target.systemToken, 4096)
+    const userId = literalId(target.userId)
+    if (/[\p{Cf}\p{Cs}]/u.test(userId)) fail()
+    form = { appType: target.appType as string, formUuid: target.formUuid as string, systemToken, userId }
+  }
   return { commandId: id(parsed.commandId), mode: 'candidate' as const,
-    material: { appKey: material.appKey as string, appSecret: material.appSecret as string } }
+    material: { appKey: material.appKey as string, appSecret: material.appSecret as string }, ...(form ? { form } : {}) }
 }
 const connectionTestOutcomes = ['ok', 'upstream_rejected', 'unreachable', 'timeout']
-function connectionTestView(value: unknown, commandId: string) {
-  const row = record(value, ['commandId', 'mode', 'outcome', 'tokenIssued', 'tokenRetained', 'externalWriteAttempted', 'canSend'])
+const formReadOutcomes = ['ok', 'upstream_rejected', 'unreachable', 'timeout', 'not_attempted']
+function formReadView(value: unknown) {
+  const row = record(value, ['outcome', 'fields'])
+  if (typeof row.outcome !== 'string' || !formReadOutcomes.includes(row.outcome) || !Array.isArray(row.fields)
+    || row.fields.length > 256 || (row.outcome !== 'ok' && row.fields.length !== 0)) fail()
+  const seen = new Set<string>()
+  const fields = row.fields.map(item => {
+    const field = record(item, ['fieldId', 'label', 'componentName', 'parentId'])
+    if (typeof field.fieldId !== 'string' || !YIDA_FIELD_ID.test(field.fieldId) || seen.has(field.fieldId)
+      || typeof field.componentName !== 'string' || !YIDA_COMPONENT.test(field.componentName)
+      || typeof field.label !== 'string' || field.label.length > 256 || /[\u0000-\u001f\u007f-\u009f]/u.test(field.label)
+      || (field.parentId !== null && (typeof field.parentId !== 'string' || !YIDA_FIELD_ID.test(field.parentId)))) fail()
+    seen.add(field.fieldId)
+    return { fieldId: field.fieldId, label: field.label, componentName: field.componentName, parentId: field.parentId }
+  })
+  return { outcome: row.outcome, fields }
+}
+function connectionTestView(value: unknown, commandId: string, formRequested = false) {
+  const row = record(value, ['commandId', 'mode', 'outcome', 'tokenIssued', 'tokenRetained', 'externalWriteAttempted', 'canSend'],
+    formRequested ? ['formRead'] : [])
   if (id(row.commandId) !== commandId || row.mode !== 'candidate' || typeof row.outcome !== 'string'
     || !connectionTestOutcomes.includes(row.outcome) || row.tokenIssued !== (row.outcome === 'ok')
-    || row.tokenRetained !== false || row.externalWriteAttempted !== false || row.canSend !== false) fail()
+    || row.tokenRetained !== false || row.externalWriteAttempted !== false || row.canSend !== false
+    || formRequested !== Object.hasOwn(row, 'formRead')) fail()
   return { commandId, mode: 'candidate', outcome: row.outcome, tokenIssued: row.outcome === 'ok',
-    tokenRetained: false, externalWriteAttempted: false, canSend: false }
+    tokenRetained: false, externalWriteAttempted: false, canSend: false, ...(formRequested ? { formRead: formReadView(row.formRead) } : {}) }
 }
-function initialization(value: unknown, sendEnabled: boolean, connectionTestEnabled: boolean, multiTargetEnabled = false) {
+function initialization(value: unknown, sendEnabled: boolean, connectionTestEnabled: boolean, multiTargetEnabled = false,
+  formFieldsReadEnabled = false) {
   const row = record(value, ['commandId', 'status', 'draft', 'canSend', 'tokenIssued', 'externalWriteAttempted'])
   if (!['ready', 'initialized'].includes(String(row.status)) || row.canSend !== false
     || row.tokenIssued !== false || row.externalWriteAttempted !== false
@@ -289,7 +324,9 @@ function initialization(value: unknown, sendEnabled: boolean, connectionTestEnab
     // running an older bundle (closed key set without it) keeps working on this backend.
     ...(connectionTestEnabled ? { connectionTestEnabled: true as const } : {}),
     // Y2: same absent-while-OFF rule, so an older bundle keeps its closed key set while the switch is off.
-    ...(multiTargetEnabled ? { multiTargetEnabled: true as const } : {}) }
+    ...(multiTargetEnabled ? { multiTargetEnabled: true as const } : {}),
+    // ADR addendum 2026-11-23: the form-field read bit, same absent-while-OFF rule.
+    ...(formFieldsReadEnabled ? { formFieldsReadEnabled: true as const } : {}) }
 }
 // YiDa 发料确认日期回写 recovery reply (slice Y9): ledger ids, closed kinds and fixed codes, the written day and zone.
 const writebackKinds = ['skip', 'retryable', 'outcome']
@@ -538,19 +575,22 @@ export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initia
   const sendEnabled = () => { try { return port.sendEnabled() === true } catch { return false } }
   // Same rule for the 测试连接 display bit: shown only on an owner-authorized reply, never authority.
   const connectionTestEnabled = () => { try { return connectionTestPort?.connectionTestEnabled() === true } catch { return false } }
+  // ADR addendum 2026-11-23: the form-field read. A shape bit for the connection-test body and a display bit, never
+  // authority (the runtime re-reads the switch before any DB work and again right before the exchange).
+  const formFieldsReadEnabled = () => { try { return connectionTestPort?.formFieldsReadEnabled?.() === true } catch { return false } }
   // R-71 ⑦.5 route gate: read per request (exact 'true' in the reconciliation runtime). Not a display bit (see initialization()).
   const reconcileEnabled = () => { try { return reconciliationPort?.reconcileEnabled() === true } catch { return false } }
   router.get('/initialization', route(200, async (req, owner, signal) => {
     empty(req.body)
     if (!initializationPort) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
     const result = await initializationPort.status(owner, { signal })
-    return dto(() => initialization(result, sendEnabled(), connectionTestEnabled(), multiTargetEnabled()))
+    return dto(() => initialization(result, sendEnabled(), connectionTestEnabled(), multiTargetEnabled(), formFieldsReadEnabled()))
   }))
   router.post('/initialization', route(201, async (req, owner, signal) => {
     const input = initializationInput(req.body)
     if (!initializationPort) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
     const result = await initializationPort.initialize(owner, input, { signal })
-    return dto(() => initialization(result, sendEnabled(), connectionTestEnabled(), multiTargetEnabled()))
+    return dto(() => initialization(result, sendEnabled(), connectionTestEnabled(), multiTargetEnabled(), formFieldsReadEnabled()))
   }))
   // Y2: list / register additional targets. While OFF these fall through to the generic 404 below.
   const whenMultiTarget = (handler: RequestHandler): RequestHandler => (req, res, next) => {
@@ -606,12 +646,13 @@ export function createIntegrationYidaOwnerRouter(port: YidaOwnerHttpPort, initia
       return dto(() => writebackRun(result))
   })))
   // Owner-run token-only connection test before initialization. The runtime authorizes; the route
-  // only closes the body and the DTO. No send authority, no form IO, nothing persisted.
+  // only closes the body and the DTO. No send authority, no form write, nothing persisted; with its own
+  // switch ON it may also read the named form's component definitions once (ADR addendum 2026-11-23).
   router.post('/initialization/connection-test', route(200, async (req, owner, signal) => {
-    const input = connectionTestInput(req.body)
+    const input = connectionTestInput(req.body, formFieldsReadEnabled())
     if (!connectionTestPort) fail('YIDA_OWNER_HTTP_UNAVAILABLE')
     const result = await connectionTestPort.test(owner, input, { signal })
-    return dto(() => connectionTestView(result, input.commandId))
+    return dto(() => connectionTestView(result, input.commandId, Object.hasOwn(input, 'form')))
   }))
   // R-71 ⑦.5 cut-over reconciliation. While its switch is OFF all three paths fall through to the generic 404 below
   // (a feature that is off is not visible); the runtime checks the switch again (DISABLED) as depth.

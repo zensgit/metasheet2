@@ -80,6 +80,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/index.ts#yidaConnectionTestRuntime; packages/core-backend/src/integration/yida-connection-test-runtime.ts; plugins/plugin-integration-core/lib/yida-connection-probe.cjs',
   },
   {
+    key: 'INTEGRATION_YIDA_FORM_FIELDS_READ_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      'Default OFF; byte-exact true lets the owner-run 测试连接 (which itself still needs INTEGRATION_YIDA_CONNECTION_TEST_ENABLED) also name one form: after its single token exchange succeeds, the plugin spends that token on exactly one GET of the fixed DingTalk endpoint 获取表单组件定义列表 (/v1.0/yida/forms/definitions/{appType}/{formUuid}, permission 宜搭表单数据读权限) with the pasted systemToken/userId, then drops the token. The reply carries field IDs, labels and component names only (at most 256), nothing is persisted, no form instance is read or written. Same authority as the test: anchor owner + live integration admin re-proved per call, one in flight, 5 s cooldown; the switch is read before any DB work and again right before the exchange. While OFF the connection-test body keeps its original closed key set (a form key is a 400) and the initialization reply has no formFieldsReadEnabled key. Does not read, imply or require INTEGRATION_YIDA_OWNER_SEND_ENABLED. It reads the customer YiDa form definition: enabling on a deployed machine and using real credentials are separate owner decisions (AGENTS.md owner-only steps).',
+    source: 'packages/core-backend/src/index.ts#yidaConnectionTestRuntime; packages/core-backend/src/integration/yida-connection-test-runtime.ts; plugins/plugin-integration-core/lib/yida-connection-probe.cjs',
+  },
+  {
     key: 'INTEGRATION_YIDA_MULTI_TARGET_ENABLED',
     type: 'boolean',
     activationValue: 'true',

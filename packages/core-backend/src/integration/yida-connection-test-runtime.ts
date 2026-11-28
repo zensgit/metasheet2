@@ -10,16 +10,26 @@ import { lockYidaInitializationSlot, type YidaInitializationDatabase } from './y
 // inside the plugin; this runtime receives a closed { outcome } only. It persists nothing, writes no
 // form, never reads INTEGRATION_YIDA_OWNER_SEND_ENABLED and never builds send authority.
 export type YidaConnectionTestActor = Readonly<{ actorId: string; tenantId: string; workspaceId: null }>
+/** ADR addendum 2026-11-23: the form whose component definitions are read once with the same token.
+ * Accepted only while INTEGRATION_YIDA_FORM_FIELDS_READ_ENABLED reads exact 'true'. */
+export type YidaConnectionTestForm = Readonly<{ appType: string; formUuid: string; systemToken: string; userId: string }>
 export type YidaConnectionTestInput = Readonly<{
   commandId: string; mode: 'candidate'; material: Readonly<{ appKey: string; appSecret: string }>
+  form?: YidaConnectionTestForm
 }>
 export type YidaConnectionTestOutcome = 'ok' | 'upstream_rejected' | 'unreachable' | 'timeout'
+export type YidaFormReadOutcome = 'ok' | 'upstream_rejected' | 'unreachable' | 'timeout' | 'not_attempted'
+export type YidaFormFieldDefinition = Readonly<{ fieldId: string; label: string; componentName: string; parentId: string | null }>
+export type YidaFormReadView = Readonly<{ outcome: YidaFormReadOutcome; fields: readonly YidaFormFieldDefinition[] }>
 export type YidaConnectionTestView = Readonly<{
   commandId: string; mode: 'candidate'; outcome: YidaConnectionTestOutcome; tokenIssued: boolean
   tokenRetained: false; externalWriteAttempted: false; canSend: false
+  /** Present exactly when the request named a form. */
+  formRead?: YidaFormReadView
 }>
 export type YidaConnectionProbe = Readonly<{
   probe(credentials: { appKey: string; appSecret: string }, options: { signal: AbortSignal }): Promise<unknown>
+  probeForm?(credentials: { appKey: string; appSecret: string }, form: YidaConnectionTestForm, options: { signal: AbortSignal }): Promise<unknown>
 }>
 export type YidaConnectionTestRuntimeBinding = Readonly<{
   createConnectionProbe(options: Readonly<{ fetch: typeof fetch }>): YidaConnectionProbe
@@ -28,6 +38,9 @@ export type YidaConnectionTestRuntimeDependencies = {
   database: YidaInitializationDatabase
   fetch: typeof fetch
   readEnablement?: () => unknown
+  // ADR addendum 2026-11-23: INTEGRATION_YIDA_FORM_FIELDS_READ_ENABLED (exact 'true'); absent = OFF. Gates
+  // only the optional form-definition read; the test itself still needs readEnablement.
+  readFormFieldsEnablement?: () => unknown
 }
 type Code = 'INPUT' | 'DISABLED' | 'DENIED' | 'CONFLICT' | 'THROTTLED' | 'CANCELLED' | 'INACTIVE' | 'UNAVAILABLE'
 const CODES = new Set<unknown>(['INPUT', 'DISABLED', 'DENIED', 'CONFLICT', 'THROTTLED', 'CANCELLED', 'INACTIVE', 'UNAVAILABLE'])
@@ -99,8 +112,25 @@ function captureActor(value: unknown): YidaConnectionTestActor {
   if (row.workspaceId !== null) fail('INPUT')
   return Object.freeze({ actorId: id(row.actorId), tenantId: id(row.tenantId), workspaceId: null })
 }
+const PATH_ID = /^[A-Za-z0-9_-]{1,128}$/u
+const FIELD_ID = /^[A-Za-z0-9_-]{1,128}$/u
+const COMPONENT = /^[A-Za-z][A-Za-z0-9]{0,63}$/u
+const FORM_OUTCOMES = new Set<unknown>(['ok', 'upstream_rejected', 'unreachable', 'timeout', 'not_attempted'])
+const MAX_FORM_FIELDS = 256
+function captureForm(value: unknown): YidaConnectionTestForm {
+  const form = record(value, ['appType', 'formUuid', 'systemToken', 'userId'])
+  // appType/formUuid become URL path segments: a closed identifier shape, nothing else.
+  for (const key of ['appType', 'formUuid']) if (typeof form[key] !== 'string' || !PATH_ID.test(form[key] as string)) fail('INPUT')
+  // systemToken: the initialization material rule (never trimmed). userId: the executionIdentity rule.
+  const systemToken = form.systemToken
+  if (typeof systemToken !== 'string' || !systemToken || systemToken.length > 4096 || systemToken.trim() !== systemToken
+    || /[\p{Cc}\p{Cf}\p{Cs}]/u.test(systemToken)) fail('INPUT')
+  const userId = id(form.userId)
+  if (/[\p{Cf}\p{Cs}]/u.test(userId)) fail('INPUT')
+  return Object.freeze({ appType: form.appType as string, formUuid: form.formUuid as string, systemToken, userId })
+}
 function captureInput(value: unknown): YidaConnectionTestInput {
-  const row = record(value, ['commandId', 'mode', 'material'])
+  const row = record(value, ['commandId', 'mode', 'material', 'form'], ['commandId', 'mode', 'material'])
   if (row.mode !== 'candidate') fail('INPUT')
   const material = record(row.material, ['appKey', 'appSecret'])
   // Never trimmed, and refused (INPUT) with surrounding whitespace or a control (Cc), invisible format (Cf)
@@ -113,7 +143,9 @@ function captureInput(value: unknown): YidaConnectionTestInput {
   }
   const appKey = material.appKey as string, appSecret = material.appSecret as string
   if (Buffer.byteLength(JSON.stringify({ appKey, appSecret }), 'utf8') > 16 * 1024) fail('INPUT')
-  return Object.freeze({ commandId: command(row.commandId), mode: 'candidate', material: Object.freeze({ appKey, appSecret }) })
+  const form = Object.hasOwn(row, 'form') ? captureForm(row.form) : undefined
+  return Object.freeze({ commandId: command(row.commandId), mode: 'candidate', material: Object.freeze({ appKey, appSecret }),
+    ...(form === undefined ? {} : { form }) })
 }
 function signal(value: unknown): AbortSignal | undefined {
   const parsed = record(value, ['signal'], [])
@@ -140,9 +172,39 @@ function receipt(value: unknown): 'ok' | 'upstream_rejected' | 'unreachable' {
     return row.outcome as 'ok' | 'upstream_rejected' | 'unreachable'
   } catch { fail('UNAVAILABLE') }
 }
-function view(commandId: string, outcome: YidaConnectionTestOutcome): YidaConnectionTestView {
+// probeForm receipt: closed, frozen { outcome, form }; form is { outcome } or (ok only) { outcome, fields }.
+// Each field is re-checked and copied here, so nothing but the four closed keys reaches the view.
+function formReceipt(value: unknown): { outcome: 'ok' | 'upstream_rejected' | 'unreachable'; form: YidaFormReadView } {
+  try {
+    if (!Object.isFrozen(value)) fail('UNAVAILABLE')
+    const row = record(value, ['outcome', 'form'])
+    if (!RECEIPT_OUTCOMES.has(row.outcome) || !Object.isFrozen(row.form)) fail('UNAVAILABLE')
+    const form = record(row.form, ['outcome', 'fields'], ['outcome'])
+    if (!FORM_OUTCOMES.has(form.outcome)) fail('UNAVAILABLE')
+    // A failed exchange never reads the form; an ok form answer always carries its fields, nothing else does.
+    if ((row.outcome !== 'ok') !== (form.outcome === 'not_attempted') || (form.outcome === 'ok') !== Object.hasOwn(form, 'fields')) fail('UNAVAILABLE')
+    let fields: YidaFormFieldDefinition[] = []
+    if (form.outcome === 'ok') {
+      const list = form.fields
+      if (!Array.isArray(list) || types.isProxy(list) || !Object.isFrozen(list) || list.length > MAX_FORM_FIELDS) fail('UNAVAILABLE')
+      const seen = new Set<string>()
+      fields = list.map(item => {
+        const field = record(item, ['fieldId', 'label', 'componentName', 'parentId'])
+        if (typeof field.fieldId !== 'string' || !FIELD_ID.test(field.fieldId) || seen.has(field.fieldId)
+          || typeof field.componentName !== 'string' || !COMPONENT.test(field.componentName)
+          || typeof field.label !== 'string' || field.label.length > 256 || /[\u0000-\u001f\u007f-\u009f]/u.test(field.label)
+          || (field.parentId !== null && (typeof field.parentId !== 'string' || !FIELD_ID.test(field.parentId)))) fail('UNAVAILABLE')
+        seen.add(field.fieldId)
+        return Object.freeze({ fieldId: field.fieldId, label: field.label, componentName: field.componentName, parentId: field.parentId as string | null })
+      })
+    }
+    return { outcome: row.outcome as 'ok' | 'upstream_rejected' | 'unreachable',
+      form: Object.freeze({ outcome: form.outcome as YidaFormReadOutcome, fields: Object.freeze(fields) }) }
+  } catch { fail('UNAVAILABLE') }
+}
+function view(commandId: string, outcome: YidaConnectionTestOutcome, formRead?: YidaFormReadView): YidaConnectionTestView {
   return Object.freeze({ commandId, mode: 'candidate', outcome, tokenIssued: outcome === 'ok',
-    tokenRetained: false, externalWriteAttempted: false, canSend: false })
+    tokenRetained: false, externalWriteAttempted: false, canSend: false, ...(formRead === undefined ? {} : { formRead }) })
 }
 type Run = { controller: AbortController; pending: Promise<unknown>; dependencies: Set<Promise<unknown>> }
 type Registration = { closed: boolean; createProbe: YidaConnectionTestRuntimeBinding['createConnectionProbe']; runs: Set<Run>; draining?: Promise<void> }
@@ -159,6 +221,8 @@ export function createYidaConnectionTestRuntime(dependencies: YidaConnectionTest
   const fetcher = dependencies.fetch
   const readEnablement = dependencies.readEnablement ?? (() => 'false')
   if (typeof readEnablement !== 'function') fail('UNAVAILABLE')
+  const readFormFieldsEnablement = dependencies.readFormFieldsEnablement ?? (() => 'false')
+  if (typeof readFormFieldsEnablement !== 'function') fail('UNAVAILABLE')
   let active: Registration | undefined, generation = 0, terminal = false, terminalDrain: Promise<void> | undefined
   // Admission limiter. Per process; only callers that already passed authorization reach it.
   let exchangeInFlight = false, lastExchangeStartedAt = Number.NEGATIVE_INFINITY
@@ -166,6 +230,15 @@ export function createYidaConnectionTestRuntime(dependencies: YidaConnectionTest
     let value: unknown
     try { value = readEnablement() } catch { fail('DISABLED') }
     if (value !== 'true') { consumeRejection(value); fail('DISABLED') }
+  }
+  // The form read has its own switch; asking for it while that switch is not the exact literal is DISABLED
+  // before any DB work, and again right before the exchange (never a silent fall back to the plain test).
+  function formFieldsEnabled(): boolean {
+    let value: unknown
+    try { value = readFormFieldsEnablement() } catch { return false }
+    if (value === 'true') return true
+    consumeRejection(value)
+    return false
   }
   function drain(state: Registration): Promise<void> {
     state.closed = true
@@ -181,6 +254,7 @@ export function createYidaConnectionTestRuntime(dependencies: YidaConnectionTest
       if (caller && abortGetter.call(caller)) fail('CANCELLED')
       // Fail closed before any DB work while the switch is not the exact literal.
       enabled()
+      if (input.form && !formFieldsEnabled()) fail('DISABLED')
       if (state.runs.size >= MAX_RUNS) fail('UNAVAILABLE')
       const controller = new AbortController(), abort = () => controller.abort()
       if (caller) addListener.call(caller, 'abort', abort, { once: true })
@@ -229,11 +303,14 @@ export function createYidaConnectionTestRuntime(dependencies: YidaConnectionTest
           const sinceLast = elapsedSince(lastExchangeStartedAt)
           if (sinceLast >= 0 && sinceLast < YIDA_CONNECTION_TEST_COOLDOWN_MS) fail('THROTTLED')
           enabled()
+          if (input.form && !formFieldsEnabled()) fail('DISABLED')
           const probe = record(state.createProbe(Object.freeze({
             // Charged to this run until the request actually settles, and aborted with it.
             fetch: ((request, init) => checked(() => fetcher(request, init))) as typeof fetch,
-          })), ['probe'])
+          })), ['probe', 'probeForm'], ['probe'])
           if (typeof probe.probe !== 'function' || types.isProxy(probe.probe)) fail('UNAVAILABLE')
+          // A plugin build without probeForm cannot read the form: INACTIVE (the page names the missing component).
+          if (input.form && (typeof probe.probeForm !== 'function' || types.isProxy(probe.probeForm))) fail('INACTIVE')
           // Last refusal before the exchange: a slow authorization phase never starts a late exchange.
           if (elapsedSince(enteredAt) > YIDA_CONNECTION_TEST_START_WINDOW_MS) fail('UNAVAILABLE')
           // Nothing below refuses before the exchange starts; the cooldown is stamped together with it.
@@ -244,23 +321,34 @@ export function createYidaConnectionTestRuntime(dependencies: YidaConnectionTest
           const timer = setTimeout(() => { timedOut = true; deadline.abort() }, YIDA_CONNECTION_TEST_BUDGET_MS)
           exchangeInFlight = true; lastExchangeStartedAt = Date.now()
           let outcome: YidaConnectionTestOutcome
+          let formRead: YidaFormReadView | undefined
           try {
             // The view is decided only after the probe (and so its fetch) settled; a fetch that
             // ignores the abort keeps this run, the limiter and stop()/drain waiting.
-            const value = await checked(() => (probe.probe as YidaConnectionProbe['probe'])(
-              { appKey: input.material.appKey, appSecret: input.material.appSecret }, { signal: deadline.signal }))
-            outcome = receipt(value)
+            const credentials = { appKey: input.material.appKey, appSecret: input.material.appSecret }
+            if (input.form) {
+              const target = { appType: input.form.appType, formUuid: input.form.formUuid, systemToken: input.form.systemToken, userId: input.form.userId }
+              const value = await checked(() => (probe.probeForm as NonNullable<YidaConnectionProbe['probeForm']>)(
+                credentials, target, { signal: deadline.signal }))
+              const parsed = formReceipt(value)
+              outcome = parsed.outcome; formRead = parsed.form
+            } else {
+              const value = await checked(() => (probe.probe as YidaConnectionProbe['probe'])(credentials, { signal: deadline.signal }))
+              outcome = receipt(value)
+            }
           } catch (error) {
             checkpoint()
             if (!timedOut) closeError(error)
+            // The deadline fired inside the exchange itself: the form was never read.
             outcome = 'timeout'
+            if (input.form) formRead = Object.freeze({ outcome: 'not_attempted', fields: Object.freeze([]) })
           } finally {
             clearTimeout(timer)
             removeListener.call(controller.signal, 'abort', abortProbe)
             exchangeInFlight = false
           }
           checkpoint()
-          return view(commandId, outcome)
+          return view(commandId, outcome, formRead)
         } catch (error) {
           try { checkpoint() } catch (control) { closeError(control) }
           closeError(error)
@@ -311,6 +399,8 @@ export function createYidaConnectionTestRuntime(dependencies: YidaConnectionTest
       consumeRejection(value)
       return false
     },
+    // Same rule for the form-definition read (ADR addendum 2026-11-23): display bit only, never authority.
+    formFieldsReadEnabled(): boolean { return formFieldsEnabled() },
     deactivate() { ++generation; return active ? drain(active) : Promise.resolve() },
     stop() { if (terminalDrain) return terminalDrain; terminal = true; ++generation; return terminalDrain = active ? drain(active) : Promise.resolve() },
   })

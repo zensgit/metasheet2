@@ -568,7 +568,6 @@ StockPreparationStageStepper
 StockPreparationUnconfirmableHold
 StockPreparationUnitConfirmView
 StockPreparationWorkspace
-StockPreparationYidaInitialization
 StockPreparationYidaOwnerSend
 StockPreparationYidaPreview
 stockPrepPermissionMatrix
@@ -669,5 +668,6 @@ view-manager-multitable-contract
 webhook-target-hint
 workflowHubView
 xlsx-mapping
+yidaInitializationClient
 yjs-document-reopen.spec.ts
 yjs-document-resync.spec.ts

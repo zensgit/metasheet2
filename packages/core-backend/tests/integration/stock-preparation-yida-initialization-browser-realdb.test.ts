@@ -5,7 +5,7 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { createYidaOwnerBrowserFixture, realBrowserData, realBrowserJson, type YidaOwnerBrowserFixture } from '../utils/stock-preparation-yida-owner-browser-fixture'
-import { createYidaOwnerHttpRealdbFixture, draftInput, principals, syntheticMaterial, tenant,
+import { createYidaOwnerHttpRealdbFixture, fourStepDraftInput, principals, syntheticMaterial, tenant,
   type Data, type Draft, type YidaOwnerHttpRealdbFixture } from '../utils/stock-preparation-yida-owner-http-fixture'
 import { parseYidaRuleTemplate } from '../../../../plugins/plugin-integration-core/lib/yida-rule-template.mjs'
 
@@ -28,9 +28,9 @@ databaseSuite('Approved A isolated initialization browser — empty slot and act
   let host: YidaOwnerHttpRealdbFixture, ui: YidaOwnerBrowserFixture | undefined
   let expectedAborts = 0
   let persistenceBefore: BrowserPersistence | undefined
-  const input = () => draftInput('equal_integer', 6)
+  const input = fourStepDraftInput
   const initializedCounts = [1, 1, 1, 1, 3, 1, 1, 1, 1]
-  beforeAll(async () => { host = await createYidaOwnerHttpRealdbFixture({ initialization: true }) }, 30000)
+  beforeAll(async () => { host = await createYidaOwnerHttpRealdbFixture({ initialization: true, connectionTest: true }) }, 30000)
   beforeEach(async () => { await host.reset(); expectedAborts = 0; persistenceBefore = undefined }, 30000)
   afterEach(async context => {
     try {
@@ -61,13 +61,13 @@ databaseSuite('Approved A isolated initialization browser — empty slot and act
     // Inspect presence and clearing together: initialization can unmount the
     // fieldset between separate browser calls. Never return private values.
     const controls = await ui!.page.evaluate(fields => fields.map(({ label, kind }) => {
-      const nodes = document.querySelectorAll(`[data-testid="sp-yida-init-${label}"]`)
+      const nodes = document.querySelectorAll(`[data-testid="sp-yida-${label}"]`)
       const control = nodes[0]
       return { label, count: nodes.length, absentOrEmpty: nodes.length === 0 || (nodes.length === 1
         && control instanceof HTMLInputElement && control.type === kind
         && (kind === 'checkbox' ? !control.checked : control.value === '')) }
-    }), [...materialFields.map(label => ({ label, kind: 'password' })),
-      ...['review', 'organization'].map(label => ({ label, kind: 'text' })),
+    }), [...materialFields.filter(label => label !== 'userId').map(label => ({ label, kind: 'password' })),
+      ...['userId', 'review', 'organization'].map(label => ({ label, kind: 'text' })),
       { label: 'ack', kind: 'checkbox' }])
     for (const control of controls) {
       expect(control.count, control.label).toBeLessThanOrEqual(1)
@@ -115,108 +115,69 @@ databaseSuite('Approved A isolated initialization browser — empty slot and act
     ui = await createYidaOwnerBrowserFixture({ apiOrigin: host.origin,
       ownerToken: asOtherAdmin ? host.tokens.otherOwner : host.tokens.owner,
       otherToken: asOtherAdmin ? host.tokens.owner : host.tokens.otherOwner, draftInput: input(), mode: 'parent' })
-    const page = ui.page, expected = input()
-    await page.getByTestId('sp-yida-preview-mode').selectOption('protocol')
-    await page.getByTestId('sp-yida-app-type').fill('synthetic_http_app')
-    await page.getByTestId('sp-yida-form-uuid').fill('synthetic_http_form')
-    await page.getByTestId('sp-yida-intent').selectOption('create')
-    const mappings = expected.config.fieldMap as Array<{ source: string; target: string; type: string; required: boolean }>
-    const catalog = expected.config.fieldCatalog as Array<{ id: string; control: string; required: boolean }>
-    const businessKey = expected.config.businessKey as string[], emptyKey = expected.config.emptyKeyFields as string[]
-    for (let index = 0; index < mappings.length; index++) {
-      if (index > 0) await page.getByTestId('sp-yida-map-add').click()
-      const mapping = mappings[index]
-      await page.getByTestId(`sp-yida-map-source-${index}`).fill(mapping.source)
-      await page.getByTestId(`sp-yida-map-target-${index}`).fill(mapping.target)
-      await page.getByTestId(`sp-yida-map-type-${index}`).selectOption(mapping.type)
-      await page.getByTestId(`sp-yida-map-required-${index}`).setChecked(mapping.required)
-      await page.getByTestId(`sp-yida-map-key-${index}`).setChecked(businessKey.includes(mapping.source))
-      await page.getByTestId(`sp-yida-map-empty-key-${index}`).setChecked(emptyKey.includes(mapping.source))
-      await page.getByTestId('sp-yida-catalog-add').click()
-      await page.getByTestId(`sp-yida-catalog-id-${index}`).fill(catalog[index].id)
-      await page.getByTestId(`sp-yida-catalog-control-${index}`).selectOption(catalog[index].control)
-      await page.getByTestId(`sp-yida-catalog-required-${index}`).setChecked(catalog[index].required)
-    }
-    await page.getByTestId('sp-yida-rows').fill(expected.rowsText)
-    await page.getByTestId('sp-yida-allocation-mode').selectOption('equal_integer')
-    await page.getByTestId('sp-yida-allocation-projects').fill('SYN-P1\nSYN-P2\nSYN-P3')
-    await page.getByTestId('sp-yida-allocation-project-field').selectOption('projectNo')
-    await page.getByTestId('sp-yida-allocation-quantity-field').selectOption('quantity')
-    await page.getByTestId('sp-yida-run').click()
-    await page.locator('[data-testid="sp-yida-initialization-open"]:enabled').waitFor()
-    expect(await page.getByTestId('sp-yida-summary').innerText()).toBe('共 3 行；计划创建 3；计划更新 0；无效 0；本地重复键 0。')
-    await page.getByTestId('sp-yida-initialization-open').click()
-    await page.getByTestId('stock-prep-yida-initialization-panel').waitFor()
     await ui.settled()
-    expect(ui.requests).toEqual([])
+    persistenceBefore = await readPersistence()
+    expect(ui.requests.map(request => [request.method, request.path])).toEqual([['GET', prefix + '/initialization']])
+    if (asOtherAdmin) {
+      expect(await realBrowserJson(await ui.initializationRead!, 403)).toEqual({ ok: false, error: { code: 'YIDA_INITIALIZATION_DENIED' } })
+    } else {
+      expect(await realBrowserData(await ui.initializationRead!, 200)).toMatchObject({ commandId: anchor.command_id, status: 'ready',
+        connectionTestEnabled: true, formFieldsReadEnabled: true })
+    }
     expect((await host.initializationProof()).counts).toEqual(Array(9).fill(0))
     await noSend()
-    persistenceBefore = await readPersistence()
-    const commandId = anchor.command_id as string
-    await preflightExport(commandId)
-    return commandId
+    return anchor.command_id as string
   }
-  async function fillPrivate() {
+
+  async function fillTarget() {
+    await ui!.page.getByTestId('sp-yida-app-type').fill('synthetic_http_app')
+    await ui!.page.getByTestId('sp-yida-form-uuid').fill('synthetic_http_form')
+  }
+
+  async function runLocalPreview() {
+    const page = ui!.page
+    await page.getByTestId('sp-yida-rows').fill(input().rowsText)
+    await page.getByTestId('sp-yida-allocation').locator('summary').click()
+    await page.getByTestId('sp-yida-allocation-mode').selectOption('equal_integer')
+    await page.getByTestId('sp-yida-allocation-projects').fill('SYN-P1\nSYN-P2\nSYN-P3')
+    await page.getByTestId('sp-yida-run').click()
+    await page.getByTestId('sp-yida-summary').filter({ hasText: '共 3 行；计划创建 3；无效 0；本地重复键 0。' }).waitFor()
+  }
+
+  async function prepareSave(commandId: string) {
+    const page = ui!.page
+    await page.getByTestId('sp-yida-status').filter({ hasText: '服务器已就绪' }).waitFor()
+    expect(await page.getByTestId('sp-yida-save-submit').isDisabled()).toBe(true)
+    expect(await page.getByTestId('sp-yida-owner-open').count()).toBe(0)
+    await fillTarget()
     const fields = syntheticMaterial()
-    for (const field of materialFields) await ui!.page.getByTestId('sp-yida-init-' + field).fill(fields[field])
-    await ui!.page.getByTestId('sp-yida-init-review').fill('synthetic-http-review')
-    await ui!.page.getByTestId('sp-yida-init-organization').fill('synthetic-http-organization')
-    await ui!.page.getByTestId('sp-yida-init-ack').check()
-    await noPrivatePersistence()
+    for (const field of materialFields) await page.getByTestId('sp-yida-' + field).fill(fields[field])
+    await page.getByTestId('sp-yida-review').fill('synthetic-http-review')
+    await page.getByTestId('sp-yida-organization').fill('synthetic-http-organization')
+    await page.getByTestId('sp-yida-ack').check()
+    const response = ui!.waitApi('POST', '/initialization/connection-test')
+    await page.getByTestId('sp-yida-connection-test').click()
+    const result = await realBrowserData(await response, 200)
+    expect(result).toMatchObject({ commandId, outcome: 'ok', formRead: { outcome: 'ok' } })
+    expect(JSON.stringify(result)).not.toContain('synthetic-probe-access-token')
+    await page.getByTestId('sp-yida-form-read-result').filter({ hasText: '已读到这张表单的 9 个字段' }).waitFor()
+    expect(host.connectionCalls).toEqual(['token', 'definitions'])
+    expect((await host.initializationProof()).counts).toEqual(Array(9).fill(0))
+    await runLocalPreview(); await noPrivatePersistence(); await noSend()
   }
-  async function exportWithoutPrivateValues(commandId: string) {
-    const before = await host.initializationProof(), requestsBefore = ui!.requests.length
-    await ui!.page.getByTestId('sp-yida-rule-export').click()
-    await ui!.settled()
-    // The real button invalidates the LOCAL preview and unmounts both panels.
-    // Do not pretend the client generation/draft remains alive after export.
-    expect(await ui!.page.getByTestId('stock-prep-yida-initialization-panel').count()).toBe(0)
-    expect(await ui!.page.getByTestId('sp-yida-result').count()).toBe(0)
-    const text = await ui!.page.getByTestId('sp-yida-rule-export-text').inputValue()
+
+  async function checkRuleArchive() {
+    const text = await ui!.page.getByTestId('sp-yida-rule-archive-text').inputValue()
     const decoded = JSON.stringify(JSON.parse(text))
     const fields = syntheticMaterial()
     const privateStrings = [...materialFields.flatMap(field => [fields[field], fields[field].trim()]),
-      'synthetic-http-review', 'synthetic-http-organization']
+      'synthetic-http-review', 'synthetic-http-organization', 'synthetic_http_app', 'synthetic_http_form']
     expect(privateStrings.some(value => text.includes(value) || decoded.includes(value))).toBe(false)
-    // Validate the actual DOM JSON with the actual pure template parser. This
-    // is not a replacement SDK, response, storage implementation or planner.
-    const exported = parseYidaRuleTemplate(text)
     const { target: _target, ...rules } = input().config
-    expect(exported).toEqual({ formatVersion: 1, kind: 'stock-preparation-yida-rule-template',
+    expect(parseYidaRuleTemplate(text)).toEqual({ formatVersion: 1, kind: 'stock-preparation-yida-rule-template',
       status: 'local-unverified', rules, allocation: { mode: 'equal_integer', projectField: 'projectNo', quantityField: 'quantity' } })
-    await noPrivateControls(); await noPrivatePersistence()
-    expect(ui!.requests.length).toBe(requestsBefore)
-    expect((await host.rows('integration_yida_initialization_anchor'))[0].command_id).toBe(commandId)
-    expect(await host.initializationProof()).toEqual(before)
-    await noSend()
   }
-  async function preflightExport(commandId: string) {
-    // Before the FIRST GET there is no observed client command to discard and
-    // no additional API request is needed. Fill real controls, export, then
-    // recompile the unchanged editor through its real DOM button and reopen.
-    await fillPrivate()
-    await exportWithoutPrivateValues(commandId)
-    await ui!.page.getByTestId('sp-yida-run').click()
-    await ui!.page.locator('[data-testid="sp-yida-initialization-open"]:enabled').waitFor()
-    expect(await ui!.page.getByTestId('sp-yida-summary').innerText()).toBe('共 3 行；计划创建 3；计划更新 0；无效 0；本地重复键 0。')
-    await ui!.page.getByTestId('sp-yida-initialization-open').click()
-    await ui!.page.getByTestId('stock-prep-yida-initialization-panel').waitFor()
-    await ui!.settled(); await noPrivateControls(); await noPrivatePersistence()
-    expect(ui!.requests).toEqual([])
-  }
-  async function observeReady(commandId: string, sendEnabled = false) {
-    const response = ui!.waitApi('GET', '/initialization')
-    await ui!.page.getByTestId('sp-yida-init-refresh').click()
-    expect(await realBrowserData(await response, 200)).toEqual({ commandId, status: 'ready', draft: null,
-      canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled })
-    if (!sendEnabled) expect(await ui!.page.getByTestId('sp-yida-owner-open').count()).toBe(0)
-    await ui!.page.getByTestId('sp-yida-init-ready').waitFor()
-    await ui!.settled()
-    // ON shows the CREATE entry, enabled until an initialization request locks it.
-    if (sendEnabled) expect(await ui!.page.getByTestId('sp-yida-owner-open').isDisabled()).toBe(false)
-    expect(await ui!.page.getByTestId('sp-yida-init-submit').isDisabled()).toBe(true)
-    await noSend()
-  }
+
   async function checkInitializationRequest(commandId: string) {
     const submitted = ui!.requests.filter(request => request.method === 'POST' && request.path === prefix + '/initialization')
     expect(submitted).toHaveLength(1)
@@ -225,38 +186,24 @@ databaseSuite('Approved A isolated initialization browser — empty slot and act
       executionIdentity: syntheticMaterial().userId,
     } })
   }
-  async function inspectRecovery(commandId: string, sendEnabled = false) {
-    const before = await host.initializationProof(), response = ui!.waitApi('GET', '/initialization')
-    await ui!.page.getByTestId('sp-yida-init-refresh').click()
-    const recovered = await realBrowserData(await response, 200)
-    expect(recovered).toMatchObject({ commandId, status: 'initialized', draft: { rowCount: 3, reused: true },
-      canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled })
-    await ui!.page.getByTestId('sp-yida-init-initialized').waitFor()
-    // Switch off means not visible: only an owner-authorized ON reply renders the CREATE entry.
-    if (sendEnabled) await ui!.page.getByTestId('sp-yida-owner-open').waitFor()
-    else expect(await ui!.page.getByTestId('sp-yida-owner-open').count()).toBe(0)
-    await ui!.settled(); await noPrivateControls(); await noPrivatePersistence()
-    expect(await host.initializationProof()).toEqual(before)
-    await noSend()
-    return recovered.draft as unknown as Draft
-  }
 
   it('real parent DOM initializes the empty slot while OFF without a CREATE entry; ON reveals it for one parent owner send', async () => {
     const commandId = await startParent()
-    await observeReady(commandId); await fillPrivate()
+    await prepareSave(commandId)
     const response = ui!.waitApi('POST', '/initialization')
-    await ui!.page.getByTestId('sp-yida-init-submit').click()
+    await ui!.page.getByTestId('sp-yida-save-submit').click()
     await ui!.settled(); await noPrivateControls(); await noPrivatePersistence()
     const result = await realBrowserData(await response, 201)
     expect(result).toMatchObject({ commandId, status: 'initialized', draft: { rowCount: 3, reused: false },
       canSend: false, tokenIssued: false, externalWriteAttempted: false, sendEnabled: false })
-    await ui!.page.getByTestId('sp-yida-init-initialized').waitFor()
+    await ui!.page.getByTestId('sp-yida-initialized').waitFor()
     expect((await host.initializationProof()).counts).toEqual(initializedCounts)
     const stored = (await host.rows('integration_yida_initializations'))[0], persisted = result.draft as Data
     expect(stored).toMatchObject({ command_id: commandId, owner_id: principals.owner, tenant_id: tenant,
       workspace_id: null, operation_id: persisted.operationId, credential_generation: 1 })
     await checkInitializationRequest(commandId); await noSend()
-    const draft = await inspectRecovery(commandId)
+    const draft = result.draft as unknown as Draft
+    await checkRuleArchive()
     // OFF: the UI offers no CREATE entry at all. The old draft/approval OFF denials stay real and
     // independent of the UI: verify them with actual returned row membership, never forged UI state.
     expect(await ui!.page.getByTestId('stock-prep-yida-owner-send-panel').count()).toBe(0)
@@ -271,18 +218,23 @@ databaseSuite('Approved A isolated initialization browser — empty slot and act
     expect(approval.body).toEqual({ ok: false, error: { code: 'YIDA_OWNER_RUNTIME_DISABLED' } })
     expect(host.sql).toEqual([]); expect(await host.initializationProof()).toEqual(before); await noSend()
     expect(ui!.requests.map(request => [request.method, request.path])).toEqual([
-      ['GET', prefix + '/initialization'], ['POST', prefix + '/initialization'], ['GET', prefix + '/initialization'],
+      ['GET', prefix + '/initialization'], ['POST', prefix + '/initialization/connection-test'], ['POST', prefix + '/initialization'],
     ])
-    // A post-success export closes the local panels but must not alter the permanent command or PG.
-    await exportWithoutPrivateValues(commandId)
-    // ON: the parent recompiles its unchanged DOM config; only the owner-authorized GET reveals the entry.
+    // On reload a real authorized read restores the permanent initialization, but not local preview rows.
     host.setEnablement('true')
-    const page = ui!.page, expected = input()
-    await page.getByTestId('sp-yida-run').click()
-    await page.getByTestId('sp-yida-initialization-open').click()
-    await page.getByTestId('stock-prep-yida-initialization-panel').waitFor()
-    expect(await page.getByTestId('sp-yida-owner-open').count()).toBe(0)
-    await inspectRecovery(commandId, true)
+    const page = ui!.page, expected = input(), reopened = ui!.waitApi('GET', '/initialization')
+    await page.reload()
+    expect(await realBrowserData(await reopened, 200)).toMatchObject({ commandId, status: 'initialized',
+      draft: { rowCount: 3, reused: true }, sendEnabled: true })
+    await page.getByTestId('sp-yida-initialized').waitFor()
+    expect(await page.getByTestId('sp-yida-owner-open').isDisabled()).toBe(true)
+    expect(await page.getByTestId('sp-yida-appSecret').isDisabled()).toBe(true)
+    await fillTarget()
+    const mappings = expected.config.fieldMap as Array<{ target: string }>
+    for (let index = 0; index < mappings.length; index++) {
+      await page.getByTestId(`sp-yida-map-target-${index}`).fill(mappings[index].target)
+    }
+    await runLocalPreview()
     await page.getByTestId('sp-yida-owner-open').click()
     await page.getByTestId('stock-prep-yida-owner-send-panel').waitFor()
     const saved = ui!.waitApi('POST', '/drafts')
@@ -304,7 +256,7 @@ databaseSuite('Approved A isolated initialization browser — empty slot and act
     const grant = await realBrowserData(await approved, 201)
     await page.getByTestId('sp-yida-owner-grant').waitFor()
     // The child's actual locked-change event must reach the actual parent.
-    expect(await page.locator('fieldset.sp-yida-preview__editor').evaluate(element => (element as HTMLFieldSetElement).disabled)).toBe(true)
+    expect(await page.locator('[data-testid="sp-yida-preview"]').evaluate(element => (element as HTMLFieldSetElement).disabled)).toBe(true)
     expect((await host.proof()).counts).toEqual([1, 0, 0, 1, 0, 0])
     expect([host.tokenPayloads.length, host.formPayloads.length]).toEqual([0, 0])
     const sentResponse = ui!.waitApi('POST', '/submissions')
@@ -318,71 +270,69 @@ databaseSuite('Approved A isolated initialization browser — empty slot and act
     expect((await host.proof()).counts).toEqual([1, 0, 1, 2, 1, 3])
     expect(await page.getByTestId('sp-yida-owner-submit').isDisabled()).toBe(true)
     expect(ui!.requests.map(request => [request.method, request.path])).toEqual([
-      ['GET', prefix + '/initialization'], ['POST', prefix + '/initialization'], ['GET', prefix + '/initialization'],
+      ['GET', prefix + '/initialization'], ['POST', prefix + '/initialization/connection-test'], ['POST', prefix + '/initialization'],
       ['GET', prefix + '/initialization'], ['POST', prefix + '/drafts'], ['POST', prefix + '/preview'],
       ['POST', prefix + '/approvals'], ['POST', prefix + '/submissions'],
     ])
     expect((await host.rows('integration_yida_initialization_anchor'))[0].command_id).toBe(commandId)
   }, 90000)
 
-  it('another actually qualified admin cannot obtain ready and its pretyped secret controls are cleared', async () => {
-    await startParent(true); await fillPrivate()
-    const before = await host.initializationProof(), response = ui!.waitApi('GET', '/initialization')
-    await ui!.page.getByTestId('sp-yida-init-refresh').click()
-    expect(await realBrowserJson(await response, 403)).toEqual({ ok: false, error: { code: 'YIDA_INITIALIZATION_DENIED' } })
-    // The refusal is shown by its own code, never as a session change.
-    await ui!.page.getByTestId('sp-yida-init-error').filter({ hasText: 'YIDA_INITIALIZATION_DENIED' }).waitFor()
-    await ui!.settled(); await noPrivateControls(); await noPrivatePersistence()
-    expect(await ui!.page.getByTestId('sp-yida-init-error').innerText()).toBe('YIDA_INITIALIZATION_DENIED')
-    expect(await ui!.page.getByTestId('sp-yida-owner-open').count()).toBe(0)
-    expect(await ui!.page.getByTestId('sp-yida-init-ready').count()).toBe(0)
-    expect(await ui!.page.getByTestId('sp-yida-init-submit').isDisabled()).toBe(true)
-    expect(await ui!.page.getByTestId('sp-yida-init-refresh').isDisabled()).toBe(true)
-    expect(ui!.requests.map(request => [request.method, request.path])).toEqual([['GET', prefix + '/initialization']])
+  it('another qualified admin gets a native refusal and cannot enter private material or save', async () => {
+    await startParent(true)
+    const page = ui!.page, before = await host.initializationProof()
+    await page.getByTestId('sp-yida-error').filter({ hasText: 'YIDA_INITIALIZATION_DENIED' }).waitFor()
+    expect(ui!.responseDiagnostics()).toMatchObject([{ operation: 'initialization', method: 'GET',
+      nativeConfirmed: true, upstreamStatus: 403, requestFinished: true }])
+    await noPrivateControls(); await noPrivatePersistence()
+    expect(await page.getByTestId('sp-yida-appSecret').isDisabled()).toBe(true)
+    expect(await page.getByTestId('sp-yida-save-submit').isDisabled()).toBe(true)
+    expect(await page.getByTestId('sp-yida-owner-open').count()).toBe(0)
+    expect(ui!.requests).toHaveLength(1)
+    expect(host.connectionCalls).toEqual([])
     expect(await host.initializationProof()).toEqual(before); await noSend()
   }, 60000)
 
-  it('withholding an actual committed 201 freezes POST, then only explicit same-command GET recovers initialized', async () => {
-    const commandId = await startParent()
-    // Switch ON: the CREATE entry renders, so only its initialization lock can keep it closed.
+  it('withholding a committed 201 freezes POST until an automatic same-command GET recovers initialized', async () => {
     host.setEnablement('true')
-    await observeReady(commandId, true); await fillPrivate()
-    const held = ui!.delayNext('POST', '/initialization'), response = ui!.waitApi('POST', '/initialization')
+    const commandId = await startParent()
+    await prepareSave(commandId)
+    const page = ui!.page, held = ui!.delayNext('POST', '/initialization')
+    const response = ui!.waitApi('POST', '/initialization')
+    const rejected = expect(response).rejects.toThrow('YIDA_OWNER_BROWSER_ACTUAL_REQUEST_FAILED')
     expectedAborts = 1
     try {
-      await ui!.page.getByTestId('sp-yida-init-submit').click()
-      // Reached means actual upstream response EOF/status, not a fabricated
-      // response or an invented producer receipt. DB independent session must
-      // see the complete COMMIT before the response is allowed to leave Vite.
+      await page.getByTestId('sp-yida-save-submit').click()
       await ui!.reached(held, 201)
       expect((await host.initializationProof()).counts).toEqual(initializedCounts)
-      await noSend(); await ui!.settled(); await noPrivateControls(); await noPrivatePersistence()
-      expect(await ui!.page.locator('fieldset.sp-yida-preview__editor').evaluate(element => (element as HTMLFieldSetElement).disabled)).toBe(true)
-      expect(await ui!.page.getByTestId('sp-yida-owner-open').isDisabled()).toBe(true)
-      // Keep the original real SDK's existing 15-second logical deadline. Do
-      // not install fake timers, alter its reader, resolve its promise or retry.
-      await ui!.page.getByTestId('sp-yida-init-error').filter({ hasText: 'YIDA_INITIALIZATION_CANCELLED' }).waitFor({ timeout: 20000 })
-      await expect(response).rejects.toThrow('YIDA_OWNER_BROWSER_ACTUAL_REQUEST_FAILED')
-      expect(ui!.responseDiagnostics().filter(row => row.operation === 'initialization' && row.method === 'POST')).toMatchObject([
-        { requestObserved: true, nativeConfirmed: true, upstreamStatus: 201, upstreamComplete: true,
-          browserFailure: 'aborted', requestFinished: false, settlement: 'failed' },
-      ])
-      expect(await ui!.page.getByTestId('sp-yida-init-uncertain').count()).toBe(1)
-      expect(await ui!.page.getByTestId('sp-yida-init-initialized').count()).toBe(0)
-      expect(await ui!.page.getByTestId('sp-yida-init-submit').isDisabled()).toBe(true)
-      expect(await ui!.page.getByTestId('sp-yida-owner-open').isDisabled()).toBe(true)
-      await checkInitializationRequest(commandId)
-      await noPrivatePersistence()
+      await noSend(); await noPrivateControls(); await noPrivatePersistence()
+      expect(await page.getByTestId('sp-yida-save-submit').isDisabled()).toBe(true)
+      expect(await page.getByTestId('sp-yida-owner-open').count()).toBe(0)
+      const proof = await host.initializationProof()
+      const recovery = ui!.delayNext('GET', '/initialization')
+      const recovered = ui!.waitApi('GET', '/initialization')
+      try {
+        await rejected
+        await ui!.reached(recovery, 200)
+        await page.getByTestId('sp-yida-status').filter({ hasText: '服务器状态未确认' }).waitFor()
+        expect(await page.getByTestId('sp-yida-save-submit').isDisabled()).toBe(true)
+        expect(await page.getByTestId('sp-yida-owner-open').count()).toBe(0)
+        await checkInitializationRequest(commandId)
+      } finally { recovery.release() }
+      expect(await realBrowserData(await recovered, 200)).toMatchObject({ commandId, status: 'initialized',
+        draft: { rowCount: 3, reused: true }, sendEnabled: true })
+      await page.getByTestId('sp-yida-initialized').waitFor()
+      await page.locator('[data-testid="sp-yida-owner-open"]:enabled').waitFor()
+      expect(await host.initializationProof()).toEqual(proof)
     } finally { held.release() }
     await ui!.settled()
-    const before = await host.initializationProof()
-    await inspectRecovery(commandId, true)
-    expect(await ui!.page.getByTestId('sp-yida-owner-open').isDisabled()).toBe(false)
-    expect(await host.initializationProof()).toEqual(before)
-    expect(await ui!.page.locator('fieldset.sp-yida-preview__editor').evaluate(element => (element as HTMLFieldSetElement).disabled)).toBe(false)
-    expect(ui!.requests.map(request => [request.method, request.path])).toEqual([
-      ['GET', prefix + '/initialization'], ['POST', prefix + '/initialization'], ['GET', prefix + '/initialization'],
+    expect(ui!.responseDiagnostics().filter(row => row.operation === 'initialization' && row.method === 'POST')).toMatchObject([
+      { requestObserved: true, nativeConfirmed: true, upstreamStatus: 201, upstreamComplete: true,
+        browserFailure: 'aborted', requestFinished: false, settlement: 'failed' },
     ])
-    await checkInitializationRequest(commandId); await noSend()
+    expect(ui!.requests.map(request => [request.method, request.path])).toEqual([
+      ['GET', prefix + '/initialization'], ['POST', prefix + '/initialization/connection-test'], ['POST', prefix + '/initialization'],
+      ['GET', prefix + '/initialization'],
+    ])
+    await checkInitializationRequest(commandId); await noPrivateControls(); await noPrivatePersistence(); await noSend()
   }, 60000)
 })
