@@ -716,6 +716,8 @@ PATCH /api/admin/users/<用户 id>/namespaces/stock-prep/admission
 
 **与 memo 开关并列**:上一段的 `MULTITABLE_ENABLE_REQUEST_METADATA_CACHE`(表元数据 memo)**仍然默认关闭**,与这里的批量查重开关各自独立、互不依赖。批量查重开关默认开、一般不需要客户操心;memo 开关是否要打开,取决于上一段说明的省下来的收益与并发窗口代价,目前判断收益有限,建议维持默认关闭。**关闭 memo 开关时的正确步骤(重要)**:实测发现"只删掉 `app.env` 里那一行再重启"**不可靠**——`pm2 restart --update-env` 只会把重启时当前环境里存在的变量合并进去,并**不会**因为某个变量从 `app.env` 里被删掉就把它从已经在跑的进程里清掉,进程可能仍带着旧值继续运行。正确做法分两步:①先把这一行**显式**改成 `MULTITABLE_ENABLE_REQUEST_METADATA_CACHE=false` 并重启一次;②确认已经生效后,再把这一行从 `app.env` 里删掉(删不删这一行不影响关闭状态,只是让配置文件保持干净)。**怎么确认现在到底开没开(两个开关通用做法)**:不要只看 `app.env` 里有没有这一行,要看后端进程实际读到的值——查一下 pm2 里该进程当前的环境变量,核对对应键的值,那才是真正生效的状态(批量查重开关另有上面那条更直接的 `idx_scan` 核对法)。
 
+Windows 演示机的后端由计划任务 `MetaSheet-PM2` 拉起 pm2-runtime，没有 God 的 `pm2.pid`。这种主机上不要裸跑 `pm2 env`：管道上没有人在听时，那条命令会在当前会话里另起一个空守护进程。官方只读核对是同一窗口先跑 `scripts/ops/02-pm2-owner-check.ps1`，末行必须是 `PM2OWNER_RESULT owned=true status=complete`，再跑 `scripts/ops/03-live-env-check.ps1 -InstallRoot <安装根目录>`。03 只在管道已经由本账号的 God 或本账号的 pm2-runtime 占着时才读一次 `pm2 jlist`，输出只有状态词，不打印值。`PM2_HOME` 不设时，这两个脚本在 `<用户目录>\.pm2-runtime` 存在且任务恰好一个的情况下用那一个目录。
+
 ### 后台上限:缺省推导公式与 222 现行值
 
 不写配置时,**后台上限 = 交互上限 × 倍数,再钳到代码硬顶**:
