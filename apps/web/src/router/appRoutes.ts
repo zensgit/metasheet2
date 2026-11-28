@@ -408,6 +408,11 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Approval Detail', titleZh: '审批详情', requiresAuth: true }
   },
   {
+    // Retain links already sent by the SLA breach notifier.
+    path: '/approval/:id',
+    redirect: ({ params, query, hash }) => ({ name: AppRouteNames.APPROVAL_DETAIL, params, query, hash })
+  },
+  {
     path: '/approval-templates',
     name: 'approval-template-list',
     component: () => import('../views/approval/TemplateCenterView.vue'),
