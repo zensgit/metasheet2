@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, type App as VueApp } from 'vue'
-import { routerKey } from 'vue-router'
+import { createMemoryHistory, createRouter, createWebHistory, routerKey, type RouteRecordRaw } from 'vue-router'
 import { resolveAdminRouteRedirect } from '../src/router/adminAccess'
 import { appRoutes } from '../src/router/appRoutes'
 import {
@@ -1961,5 +1961,64 @@ describe('approval admin capability client', () => {
     }
     useAuth().setToken(tokenFor('user-c'))
     expect(notified).toBe(1)
+  })
+})
+
+describe('approval deeplink compatibility', () => {
+  const placeholder = defineComponent({ render: () => h('div') })
+  // Keep every production match and redirect, without loading pages or calling instance APIs.
+  const routes = appRoutes.map(route =>
+    route.redirect ? route : { ...route, component: placeholder },
+  ) as RouteRecordRaw[]
+  const query = { from: ['sla', 'mail'], panel: 'history' }
+  const hash = '#timeline'
+  const encoded = '%E4%BE%8B-17'
+  const cleanPath = `/approvals/${encoded}?from=sla&from=mail&panel=history#timeline`
+  const legacyPath = `/approval/${encoded}?from=sla&from=mail&panel=history#timeline`
+
+  it('lands an existing link on the canonical instance with its full location', async () => {
+    const router = createRouter({ history: createMemoryHistory(), routes })
+    await router.push(legacyPath)
+    expect(router.currentRoute.value).toMatchObject({
+      name: 'approval-detail',
+      params: { id: '例-17' },
+      query,
+      hash,
+      fullPath: cleanPath,
+    })
+    expect(router.currentRoute.value.redirectedFrom?.fullPath).toBe(legacyPath)
+  })
+
+  it('keeps a web-history deep link under the deployment base', async () => {
+    const previous = window.location.href
+    const previousState = window.history.state
+    window.history.replaceState(null, '', `/metasheet${legacyPath}`)
+    const history = createWebHistory('/metasheet/')
+    try {
+      const router = createRouter({ history, routes })
+      await router.push(history.location)
+      expect(router.currentRoute.value.name).toBe('approval-detail')
+      expect(router.currentRoute.value.fullPath).toBe(cleanPath)
+      expect(window.location.pathname + window.location.search + window.location.hash)
+        .toBe(`/metasheet${cleanPath}`)
+    } finally {
+      history.destroy()
+      window.history.replaceState(previousState, '', previous)
+    }
+  })
+
+  it.each([
+    ['/approvals/instance-17', 'approval-detail'],
+    ['/approvals', 'approval-list'],
+    ['/approvals/new/template-17', 'approval-create'],
+    ['/approvals/metrics', 'approval-metrics'],
+    ['/approvals/batch-transfer', 'approval-batch-transfer'],
+    ['/m/approval-decision', 'approval-card-decision'],
+    ['/approval', 'home'],
+    ['/approval/instance-17/notes', 'home'],
+  ])('keeps the existing destination for %s', async (url, name) => {
+    const router = createRouter({ history: createMemoryHistory(), routes })
+    await router.push(url)
+    expect(router.currentRoute.value.name).toBe(name)
   })
 })
