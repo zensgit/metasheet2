@@ -40,6 +40,23 @@ describe('E1-A isolated capacity and server-side budgets', () => {
     expect(await repo.cleanup(false)).toEqual({ enabled: false, deliveries: 0, events: 0, activeExpired: false })
     expect(factory).not.toHaveBeenCalled()
   })
+  it('establishes a fresh connection for each write transaction', async () => {
+    let now = 0
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => now)
+    const first = mockClient(), second = mockClient(), work = vi.fn(async () => {})
+    second.client.connect = vi.fn(async () => { now += 100 })
+    const factory = vi.fn().mockReturnValueOnce(first.client).mockReturnValueOnce(second.client)
+    const connections = new EventConnections({ connectionString: 'postgres://fixture/fixture' }, factory)
+    try {
+      await connections.writeTransaction('background', async () => {})
+      expect(first.client.end).toHaveBeenCalledOnce()
+      await expect(connections.writeTransaction('foreground', work)).rejects.toThrow('E1_WRITE_UNAVAILABLE')
+      expect(factory).toHaveBeenCalledTimes(2)
+      expect(second.client.connect).toHaveBeenCalledOnce()
+      expect(second.trace).toEqual([])
+      expect(work).not.toHaveBeenCalled()
+    } finally { clock.mockRestore() }
+  })
   it('T20/P3-q write 3 saturation preserves reserved query 1 and returns a distinct retryable busy code', async () => {
     const hold = deferred(), clients: EventClient[] = [], configs: unknown[] = []
     const connections = new EventConnections({ connectionString: 'postgres://fixture/fixture' }, config => { configs.push(config); const c = mockClient().client; clients.push(c); return c })

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   isQuotedInTestExclude, parseYamlDocument, realDbStepWholeFileArgs, requireExecutableRealDbStep,
@@ -47,5 +47,39 @@ describe('E1-A required whole-file DB registration', () => {
     expect(db).toContain('expect(await currentCatalog()).toEqual(rawBaseline)')
     expect(source.match(/packages\/core-backend\/src\/security-events\/\*\*/g)).toHaveLength(2)
     expect(source.match(/packages\/core-backend\/tests\/fixtures\/security-events\/\*\*/g)).toHaveLength(2)
+  })
+})
+
+
+describe('security event database suite registration', () => {
+  const files = readdirSync(new URL('../integration/', import.meta.url)).filter(name => /^security-events-.*\.db\.test\.ts$/.test(name)).map(name => 'tests/integration/' + name).sort()
+  it('registers every database suite as a whole file in the approval lane', () => {
+    expect(files).toEqual(['tests/integration/security-events-directory.db.test.ts', 'tests/integration/security-events-schema.db.test.ts'])
+    const args = realDbStepWholeFileArgs(workflow, 'approval-real-db-integration')
+    const config = read('../../vitest.config.ts')
+    const contract = read('../../../../scripts/ops/plugin-tests-parallel-contract.test.mjs')
+    for (const suite of files) {
+      expect(args.filter((item: string) => item === suite)).toEqual([suite])
+      expect(isQuotedInTestExclude(config, suite)).toBe(true)
+      expect(contract).toContain(`'${suite}'`)
+    }
+  })
+  it('executes directory observations in every supported database lane with strict reporters', () => {
+    const source = read('../../../../.github/workflows/permission-authorization-operation-realdb.yml')
+    const job = parseYamlDocument(source).jobs['authorization-operation']
+    expect(job.strategy.matrix['postgres-major']).toEqual(['14', '15', '16', '17'])
+    const steps = job.steps.filter((step: { id?: string }) => step.id === 'security-events-directory-realdb')
+    expect(steps).toHaveLength(1)
+    const step = steps[0]
+    expect(step.if).toBeUndefined()
+    expect(step['continue-on-error']).toBeUndefined()
+    expect(step['working-directory']).toBe('packages/core-backend')
+    expect(step.env).toEqual({ DATABASE_URL: '${{ env.PERMISSION_COMMAND_PG_BASE_URL }}', EXPECT_DB: '1' })
+    expect(step.run.split('tests/integration/security-events-directory.db.test.ts')).toHaveLength(2)
+    expect(step.run).toContain('--reporter=default --reporter=json')
+    expect(step.run).toContain('--poolOptions.forks.minForks=1 --poolOptions.forks.maxForks=2 --cache=false --retry=0')
+    expect(step.run).toContain('node ../../scripts/ops/vitest-zero-skip.mjs ../../artifacts/e1b-realdb/vitest.json 1')
+    expect(step.run).not.toMatch(/--testNamePattern|(?:^|\s)-t\s|\|\|\s*true/)
+    expect(read('../integration/security-events-directory.db.test.ts')).not.toMatch(/\b(?:it|describe)\.(?:skip|todo|only)|describeIf/)
   })
 })

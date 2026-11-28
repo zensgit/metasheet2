@@ -125,3 +125,15 @@ jobs:
             --poolOptions.forks.minForks=1 --poolOptions.forks.maxForks=2 --no-cache --retry=0 \
             --reporter=verbose --reporter=json --outputFile=../../artifacts/e1a-realdb/vitest.json
           node ../../scripts/ops/vitest-zero-skip.mjs ../../artifacts/e1a-realdb/vitest.json 1
+      - name: Verify directory event observations
+        id: security-events-directory-realdb
+        working-directory: packages/core-backend
+        env:
+          DATABASE_URL: ${{ env.PERMISSION_COMMAND_PG_BASE_URL }}
+          EXPECT_DB: '1'
+        run: |
+          env -u CI node node_modules/vitest/vitest.mjs run --config vitest.integration.config.ts \
+            tests/integration/security-events-directory.db.test.ts \
+            --poolOptions.forks.minForks=1 --poolOptions.forks.maxForks=2 --cache=false --retry=0 \
+            --reporter=default --reporter=json --outputFile=../../artifacts/e1b-realdb/vitest.json
+          node ../../scripts/ops/vitest-zero-skip.mjs ../../artifacts/e1b-realdb/vitest.json 1

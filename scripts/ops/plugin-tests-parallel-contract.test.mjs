@@ -166,6 +166,7 @@ const grantDbFiles = [
   'tests/integration/realtime-revalidation.db.test.ts',
   'tests/integration/realtime-yjs-startup-wiring.db.test.ts',
   'tests/integration/security-events-schema.db.test.ts',
+  'tests/integration/security-events-directory.db.test.ts',
 ]
 
 function assertParallelWorkflow(doc) {

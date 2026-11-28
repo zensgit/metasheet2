@@ -1,11 +1,23 @@
 import { randomUUID } from 'node:crypto'
 import { EVENT_COLUMNS, readEventRows, type EventReadSnapshot, type VerifiedEventReadScope, type EventSql } from './runtime'
 import type { EventConnections, W1Capacity, W1Transaction } from './runtime'
-import { EventIdentityConflict, EventWriteUnavailable, writeFailure, internalId, sameEventIdentity, uuid, validSource, validateEvent, type EventCandidate, type ScopeAuthority } from './validation'
+import { EventIdentityConflict, EventWriteUnavailable, writeFailure, encodeSource, internalId, sameEventIdentity, uuid, validSource, validateEvent, type EventCandidate, type ScopeAuthority } from './validation'
 import { BOOLEAN_FACTS, COUNT_FACTS, eventRule } from './registry'
 
 export type Retention = Readonly<{ eventDays: number; deliveryDays: number }>
 export const CANDIDATE_RETENTION: Retention = Object.freeze({ eventDays: 365, deliveryDays: 90 })
+export type DirectorySchedulerObservation = Readonly<{
+  kind: 'schedule_invalid' | 'reclaim' | 'bootstrap' | 'refresh'
+  integrationId: string | null
+}>
+export type DirectoryRunObservation = Readonly<{
+  kind: 'diagnostic_failed' | 'binding_sweep_failed' | 'post_commit_failed'
+  runId: string
+  integrationId: string
+}>
+type DirectoryObservation = DirectorySchedulerObservation | DirectoryRunObservation
+export type ObservationDiagnostic = 'source_missing' | 'mapping_rejected' | 'event_identity_conflict' | 'event_store_unavailable'
+type ObservationSnapshot = Readonly<{ input: EventCandidate; authority: ScopeAuthority }>
 function retention(value: Retention): Retention {
   if (!Number.isSafeInteger(value.eventDays) || !Number.isSafeInteger(value.deliveryDays)
     || value.eventDays <= 0 || value.deliveryDays <= 0 || value.deliveryDays > value.eventDays || value.eventDays > 3650) throw new EventWriteUnavailable()
@@ -31,6 +43,7 @@ async function append(sql: EventSql, input: EventCandidate, authority: ScopeAuth
 
 /** No singleton/boot registration. No method changes an event fact or sends a message. */
 export class SecurityEventRepository {
+  #directoryBoot = randomUUID()
   readonly policy: Retention
   constructor(private readonly connections: EventConnections, private readonly w1: W1Capacity, policy: Retention = CANDIDATE_RETENTION) {
     this.policy = retention(policy)
@@ -39,7 +52,7 @@ export class SecurityEventRepository {
     try { return await this.w1.run(tx, sql => append(sql, input, authority, this.policy), proofUser) }
     catch (error) { throw writeFailure(error) }
   }
-  /** Call ONLY after the source COMMIT is confirmed. Every failure stays outside business retry/catch. */
+  /** Call after the observed action is settled, and after confirmed COMMIT for transactional facts. */
   async appendCommitted(input: EventCandidate, authority: ScopeAuthority, mode: 'foreground' | 'background' = 'foreground'): Promise<
     { recorded: true; eventId: string } | { recorded: false; code: 'E1_WRITE_UNAVAILABLE'; count_unknown: true; diagnostic?: 'event_identity_conflict' }
   > {
@@ -47,6 +60,66 @@ export class SecurityEventRepository {
       const eventId = await this.connections.writeTransaction(mode, sql => append(sql, input, authority, this.policy))
       return { recorded: true, eventId }
     } catch (error) { return { recorded: false, code: 'E1_WRITE_UNAVAILABLE', count_unknown: true, ...(error instanceof EventIdentityConflict ? { diagnostic: 'event_identity_conflict' as const } : {}) } }
+  }
+
+  /** The caller has completed its source action. Resolution and insertion share one write budget. */
+  async appendDirectoryObservation(observation: DirectoryObservation, occurredAt = new Date().toISOString()): Promise<{
+    recorded: boolean; retry?: ObservationSnapshot; diagnostic?: ObservationDiagnostic
+  }> {
+    let retry: ObservationSnapshot | undefined
+    let diagnostic: ObservationDiagnostic = 'mapping_rejected'
+    try {
+      const run = 'runId' in observation
+      const { integrationId, kind } = observation
+      if (run ? !['diagnostic_failed', 'binding_sweep_failed', 'post_commit_failed'].includes(kind) || !uuid(observation.runId)
+        : !['schedule_invalid', 'reclaim', 'bootstrap', 'refresh'].includes(kind)) throw new EventWriteUnavailable()
+      if (integrationId === null ? run || !['reclaim', 'bootstrap'].includes(kind) : !uuid(integrationId)) throw new EventWriteUnavailable()
+      if (['reclaim', 'bootstrap'].includes(kind) && integrationId !== null) throw new EventWriteUnavailable()
+      const snapshot = (orgId: string | null): ObservationSnapshot => {
+        const authority: ScopeAuthority = Object.freeze({ kind: 'integration', orgId })
+        const input: EventCandidate = Object.freeze({
+          id: randomUUID(), producer: 'directory',
+          event_type: run ? (kind === 'diagnostic_failed' ? 'directory.diagnostic_failed'
+            : kind === 'binding_sweep_failed' ? 'directory.binding_sweep_failed' : 'directory.post_commit_failed')
+            : kind === 'schedule_invalid' ? 'directory.schedule_invalid' : 'directory.scheduler_failed',
+          source_kind: run ? 'sync_run' : 'runtime_probe',
+          source_id: run ? observation.runId : kind === 'schedule_invalid'
+            ? encodeSource([this.#directoryBoot, integrationId!]) : kind === 'refresh' ? randomUUID() : this.#directoryBoot,
+          source_step: kind === 'diagnostic_failed' ? 'diagnostic' : kind === 'binding_sweep_failed' ? 'sweep' : kind,
+          actor_kind: 'system', actor_user_id: null, subject_user_id: null,
+          target_kind: run ? 'run' : integrationId === null ? null : 'integration',
+          target_id: run ? observation.runId : integrationId,
+          reason_code: null, record_origin: 'live', occurred_at: occurredAt, facts: Object.freeze({}),
+        })
+        validateEvent(input, authority)
+        return Object.freeze({ input, authority })
+      }
+      // System observations have a complete scope before connection admission.
+      if (integrationId === null) retry = snapshot(null)
+      diagnostic = 'event_store_unavailable'
+      await this.connections.writeTransaction('foreground', async sql => {
+        if (integrationId !== null) {
+          const result = await sql.query<{ id: string; org_id: string; run_id?: string }>(run
+            ? `SELECT i.id, i.org_id, r.id AS run_id FROM public.directory_integrations i
+              JOIN public.directory_sync_runs r ON r.integration_id=i.id
+              WHERE i.id=$1 AND r.id=$2${kind === 'diagnostic_failed' ? '' : " AND r.status='completed' AND r.finished_at IS NOT NULL"}`
+            : 'SELECT id, org_id FROM public.directory_integrations WHERE id=$1',
+          run ? [integrationId, observation.runId] : [integrationId])
+          const row = result.rows[0]
+          diagnostic = 'source_missing'
+          if (result.rows.length !== 1 || !row || row.id !== integrationId || !internalId(row.org_id)
+            || (run && row.run_id !== observation.runId)) throw new EventWriteUnavailable()
+          diagnostic = 'mapping_rejected'
+          retry = snapshot(row.org_id)
+        }
+        diagnostic = 'event_store_unavailable'
+        await append(sql, retry!.input, retry!.authority, this.policy)
+      })
+      return { recorded: true }
+    } catch (error) {
+      if (error instanceof EventIdentityConflict) return { recorded: false, diagnostic: 'event_identity_conflict' }
+      return { recorded: false, diagnostic, ...(retry ? { retry } : {}) }
+    }
   }
 
   /** Passive no-send planning primitive; scheduling and legacy eligibility belong to E1-F. */

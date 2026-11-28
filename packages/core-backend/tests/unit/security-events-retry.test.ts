@@ -50,3 +50,24 @@ it('T20 retains the frozen validated snapshot, not the caller objects or a later
   expect(Object.keys(first).sort()).toEqual(Object.keys(input).sort())
   expect(validateEvent(first, scope)).toMatchObject({ scope_kind: 'system', facts: { affected_count: 1 } })
 })
+
+it('expires delayed observations from invocation even when writes finish out of order', async () => {
+  let now = 100
+  const buffer = new EventRetryBuffer(() => now)
+  const input: EventCandidate = { id: randomUUID(), producer: 'directory', event_type: 'directory.diagnostic_failed',
+    source_kind: 'sync_run', source_id: randomUUID(), source_step: 'diagnostic', actor_kind: 'system', actor_user_id: null,
+    subject_user_id: null, target_kind: 'run', target_id: randomUUID(), reason_code: null, record_origin: 'live',
+    occurred_at: '2026-11-22T00:00:00Z', facts: {} }
+  const authority = { kind: 'integration' as const, orgId: 'org-A' }
+  const newer = { ...input, source_id: randomUUID() }
+  expect(buffer.offer(newer, authority, 100).retained).toBe(true)
+  expect(buffer.offer(input, authority, 0).retained).toBe(true)
+  now = 60000
+  expect(buffer.size).toBe(1)
+  const write = vi.fn(async () => ({ recorded: true }))
+  expect((await buffer.retryOne(write)).attempted).toBe(true)
+  expect(write).toHaveBeenCalledWith(expect.objectContaining({ source_id: newer.source_id }), authority)
+  expect(buffer.offer(input, authority, 0).retained).toBe(false)
+  for (const invalid of [NaN, Infinity, now + 1]) expect(buffer.offer(input, authority, invalid).retained).toBe(false)
+  expect(buffer.size).toBe(0)
+})
