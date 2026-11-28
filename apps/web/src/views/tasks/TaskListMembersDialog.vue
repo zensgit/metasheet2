@@ -48,7 +48,7 @@
             :data-user-id="row.userId"
             :data-role="row.role"
           >
-            <span data-testid="tasks-list-member-id">{{ row.userId }}</span>
+            <span data-testid="tasks-list-member-id">{{ memberLabel(row.userId) }}</span>
             <span data-testid="tasks-list-member-role">{{ roleLabel(row.role) }}</span>
             <span v-if="row.userId === list.createdBy" data-testid="tasks-list-member-creator">{{ t.membersCreatorMark }}</span>
             <!-- The select shows the server's role: `:value` follows the row, and only a server answer
@@ -56,7 +56,7 @@
             <select
               v-if="canChangeRole(row)"
               data-testid="tasks-list-member-role-select"
-              :aria-label="fmt.membersRoleFor(row.userId)"
+              :aria-label="fmt.membersRoleFor(memberLabel(row.userId))"
               :value="row.role"
               :disabled="pending"
               @change="onRoleChange(row, $event)"
@@ -69,13 +69,13 @@
                 v-if="confirmingTransferId !== row.userId"
                 type="button"
                 data-testid="tasks-list-member-transfer"
-                :aria-label="fmt.membersTransferNamed(row.userId)"
+                :aria-label="fmt.membersTransferNamed(memberLabel(row.userId))"
                 :disabled="pending"
                 @click="openTransferConfirm(row.userId)"
               >{{ t.membersTransfer }}</button>
               <span v-else data-testid="tasks-list-member-transfer-confirm">
                 <span id="tasks-list-member-transfer-prompt" role="status" data-testid="tasks-list-member-transfer-prompt">{{
-                  fmt.membersTransferPrompt(row.userId)
+                  fmt.membersTransferPrompt(memberLabel(row.userId))
                 }}</span>
                 <button
                   type="button"
@@ -96,7 +96,7 @@
               v-if="canRemove(row)"
               type="button"
               data-testid="tasks-list-member-remove"
-              :aria-label="fmt.membersRemoveNamed(row.userId)"
+              :aria-label="fmt.membersRemoveNamed(memberLabel(row.userId))"
               :disabled="pending"
               @click="onRemove(row.userId)"
             >{{ t.remove }}</button>
@@ -214,6 +214,11 @@
  * the leave button; a 404 / 403 / any other failure takes the dialog's banner; `ORG_MISSING`
  * switches the page to its guidance block.
  *
+ * Names. Each row shows the member by name from a people lookup: the id where the lookup gives no
+ * name, and the name with the id when two rows show the same name; the row controls' accessible
+ * names and the transfer prompt use the same text. The roster's ids are looked up when the roster
+ * read lands, and a typed add's id after its answer. Another account or org seen drops the names.
+ *
  * Focus: the title takes focus on open; Tab and Shift+Tab move through the dialog's controls and
  * wrap inside it (every Tab is moved by the shared trap, `[fe-12]`, except one the input method
  * took); Escape and the close button close it (both inert while a write is in flight) and the page
@@ -241,6 +246,7 @@ import {
   type WriteFailure,
 } from '../../tasks/tasksApi'
 import { notifyListsChanged } from '../../tasks/tasksListsBus'
+import { createTaskPeopleNames } from '../../tasks/taskPeopleNames'
 
 const props = defineProps<{
   /** The id every request of this dialog goes to (the page's route id). */
@@ -289,6 +295,8 @@ const newMemberId = ref('')
 const newMemberRole = ref<TaskListAssignableRole>('read')
 const confirmingTransferId = ref<string | null>(null)
 const confirmingLeave = ref(false)
+// The members by name (see the header).
+const memberNames = createTaskPeopleNames()
 
 const dialogRef = ref<HTMLElement | null>(null)
 const titleRef = ref<HTMLElement | null>(null)
@@ -344,6 +352,27 @@ function roleLabel(role: TaskListRole): string {
   return t.value.listRoleRead
 }
 
+// How many roster rows show each name, so that a name two rows share can be told apart by the id.
+const nameCounts = computed(() => {
+  const counts = new Map<string, number>()
+  const state = readState.value
+  if (state.kind !== 'ok') return counts
+  for (const row of state.members) {
+    const name = memberNames.nameOf(row.userId)
+    if (name) counts.set(name, (counts.get(name) ?? 0) + 1)
+  }
+  return counts
+})
+
+/** A member as the dialog shows them: the name, the id when the lookup gave none, and the name with
+ *  the id when another row shows the same name. Rows, their controls' names and the transfer prompt
+ *  all use it. */
+function memberLabel(userId: string): string {
+  const name = memberNames.nameOf(userId)
+  if (!name) return userId
+  return (nameCounts.value.get(name) ?? 0) > 1 ? `${name} · ${userId}` : name
+}
+
 const bannerMessage = computed<string | null>(() => {
   switch (banner.value) {
     case 'not_found':
@@ -378,6 +407,7 @@ async function loadMembers(options: { quiet?: boolean; reloadListOnNotFound?: bo
   switch (result.kind) {
     case 'ok':
       readState.value = { kind: 'ok', members: result.items.map(({ userId, role }) => ({ userId, role })) }
+      void memberNames.request(result.items.map(({ userId }) => userId))
       return
     case 'org_missing':
       emit('org-missing')
@@ -479,6 +509,7 @@ async function onAdd(): Promise<void> {
     if (result.kind === 'ok') {
       newMemberId.value = ''
       replaceRoster(result.members)
+      void memberNames.request([userId])
       return
     }
     await applyFailure(result, token, (code) => {
@@ -637,6 +668,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   readGeneration += 1
   writeToken += 1
+  memberNames.dispose()
   // A write still in flight hands the shared flag back here: an answer that lands after unmount
   // never reaches the page (the page can leave its list body — a re-read that ends in not_found —
   // while this dialog holds the flag).

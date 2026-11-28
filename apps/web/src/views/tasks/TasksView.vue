@@ -260,7 +260,24 @@
                 class="tasks-view__message"
                 data-testid="tasks-detail-children-empty"
               >{{ t.noChildren }}</p>
-              <form v-if="canEditTask" class="tasks-view__set-parent" data-testid="tasks-detail-set-parent-form" @submit.prevent="onSetParent">
+              <!-- The parent is picked by title; the task-id form stays as the secondary entry, folded
+                   until it is asked for. -->
+              <div v-if="canEditTask" class="tasks-view__parent-pick">
+                <button
+                  type="button"
+                  data-testid="tasks-detail-pick-parent"
+                  :disabled="detailActionPending"
+                  @click="openParentPicker"
+                >{{ t.pickParent }}</button>
+                <button
+                  type="button"
+                  class="tasks-view__link-button"
+                  data-testid="tasks-detail-set-parent-by-id-toggle"
+                  :aria-expanded="setParentByIdOpen ? 'true' : 'false'"
+                  @click="setParentByIdOpen = !setParentByIdOpen"
+                >{{ t.setParentByIdToggle }}</button>
+              </div>
+              <form v-if="canEditTask" v-show="setParentByIdOpen" class="tasks-view__set-parent" data-testid="tasks-detail-set-parent-form" @submit.prevent="onSetParent">
                 <input
                   v-model="parentInput"
                   type="text"
@@ -283,6 +300,15 @@
               <p v-if="parentError" class="tasks-view__message" data-testid="tasks-detail-parent-error" role="alert">
                 {{ codeMessage(parentError, t) }}
               </p>
+              <TaskPicker
+                v-if="canEditTask"
+                :visible="parentPickerOpen"
+                mode="parent"
+                :task-id="taskId ?? ''"
+                :before-request="peopleIdentityHolds"
+                @confirm="onParentPicked"
+                @close="closeParentPicker"
+              />
             </section>
 
             <!-- M3 §3.5: followers. §3.5's `GET /api/tasks/:id` never carries this list — see
@@ -395,7 +421,13 @@
                   </template>
                   <template v-else>
                     <span data-testid="tasks-detail-comment-body">{{ comment.deleted ? t.commentDeleted : comment.body }}</span>
-                    <span data-testid="tasks-detail-comment-author">{{ comment.authorId }}</span>
+                    <!-- The author by the name on the task (the id when it has none there); edit and delete go by the id. -->
+                    <span data-testid="tasks-detail-comment-author" :data-author-id="comment.authorId">{{ personName(comment.authorId) }}</span>
+                    <span
+                      v-if="isDeactivatedPerson(comment.authorId)"
+                      class="tasks-view__person-inactive"
+                      data-testid="tasks-detail-comment-author-inactive"
+                    >{{ t.memberInactiveMark }}</span>
                     <template v-if="canEditOwnComment(comment)">
                       <button
                         type="button"
@@ -555,6 +587,27 @@
                 <option value="all">{{ t.modeAll }}</option>
                 <option value="any">{{ t.modeAny }}</option>
               </select>
+              <fieldset class="tasks-view__create-assignees" :disabled="creating">
+                <legend>{{ t.createAssigneesLabel }}</legend>
+                <label>
+                  <input v-model="newCreatorAssigned" type="checkbox" data-testid="tasks-create-assign-self" />
+                  {{ t.createAssignSelf }}
+                </label>
+                <ul v-if="newAssignees.size" class="tasks-view__create-people">
+                  <li v-for="[id, name] in newAssignees" :key="id" data-testid="tasks-create-assignee" :data-person-id="id">
+                    <span>{{ name || id }}</span>
+                    <button type="button" data-testid="tasks-create-assignee-remove" :aria-label="`${t.remove} ${name || id}`" @click="newAssignees.delete(id)">{{ t.remove }}</button>
+                  </li>
+                </ul>
+                <button
+                  type="button"
+                  data-testid="tasks-create-pick-assignees"
+                  :disabled="currentUserStatus !== 'known'"
+                  @click="openCreatePeoplePicker"
+                >{{ t.pickAssignee }}</button>
+                <p v-if="currentUserStatus === 'pending'" role="status">{{ t.loading }}</p>
+                <p v-else-if="currentUserStatus === 'unavailable'" role="status">{{ t.createPeopleUnavailable }}</p>
+              </fieldset>
               <!-- The optional due date: with one, the create request carries the date (and the time
                    when set) with the browser's zone, the same zone the detail editor fills in, and
                    no reminder key, so the server sets the default reminder on create. A later
@@ -584,6 +637,13 @@
                 :disabled="creating || newTitle.trim().length === 0"
               >{{ t.create }}</button>
             </form>
+            <TaskPeoplePicker
+              :visible="createPeoplePickerOpen"
+              mode="assignee"
+              :before-request="canPickCreatePeople"
+              @confirm="onCreatePeoplePicked"
+              @close="createPeoplePickerOpen = false"
+            />
             <p v-if="newDueDate !== ''" id="tasks-create-due-note" class="tasks-view__note" data-testid="tasks-create-due-note">
               {{ t.createDueRemindNote }}
             </p>
@@ -593,16 +653,13 @@
             <p v-if="createErrorVisible" class="tasks-view__message" data-testid="tasks-create-error" role="alert">
               {{ createErrorInvalidTitle ? t.createInvalidTitle : createErrorCode ? codeMessage(createErrorCode, t) : t.createFailed }}
             </p>
-            <!-- A create the server took while 已完成 is on: the new task is not completed, so the
-                 reloaded list leaves it out. Say so inline, without switching the filter for the
-                 viewer (it is their remembered choice). The new task's page is always offered.
-                 The 未完成 switch is offered only in a view that lists the new task; in 关注中 /
-                 我委派的 the view leaves it out under any status, so the copy does not put it down
-                 to the filter alone. The search is named only when the view and status would
-                 otherwise list the new task, with the task's page only; when the view or status also
-                 leaves it out, their copy stands. Cleared by the next create, a status or view
-                 switch, and a route change. A search change drops only the search's reason, so a
-                 task the status or view still leaves out keeps its notice.
+            <!-- Explain why the new task is outside the current list without changing the viewer's
+                 choices. Always offer its page. Offer 未完成 only when the submitted assignees make
+                 the task belong to this view: 我委派的 includes it when another person was chosen,
+                 while 关注中 leaves it out. Name only the view when no status or search excludes it.
+                 Name the search alone only when the view and status otherwise include it.
+                 The next create, status or view switch, and route change clear the notice. A search
+                 change drops only the search reason, retaining any remaining view or status reason.
                  The role="status" region is always mounted and only its content comes and goes: a
                  polite live region that enters the page together with its text is not reliably
                  announced, while a change inside an existing one is. Empty, it takes no space. -->
@@ -615,7 +672,8 @@
                 <span data-testid="tasks-create-hidden-text">{{
                   createdHidden.bySearch && createdHidden.viewLists && !createdHidden.byStatus
                     ? t.createdHiddenBySearch
-                    : createdHidden.viewLists ? t.createdHiddenByFilter : t.createdHiddenByViewAndFilter
+                    : createdHidden.viewLists ? t.createdHiddenByFilter
+                      : createdHidden.byStatus || createdHidden.bySearch ? t.createdHiddenByViewAndFilter : t.createdHiddenByView
                 }}</span>
                 <button
                   v-if="createdHidden.viewLists && createdHidden.byStatus"
@@ -645,7 +703,7 @@
                  ([fe-33]). A row of an "all" mode task offers its complete / reopen on the task
                  detail instead: a list row carries no assignee state, and in that mode a click
                  can succeed and change nothing (the detail turns such a click off and says why). -->
-            <!-- The read returns the latest-updated page only: say so when it stopped short of its total. -->
+            <!-- Keep the loaded rows visible while another page is requested. -->
             <p
               v-if="listResult.kind === 'ok' && listResult.truncated && listResult.total !== null"
               class="tasks-view__message"
@@ -721,6 +779,17 @@
             <p v-else-if="listResult.kind === 'loading'" class="tasks-view__message" data-testid="tasks-list-loading">
               {{ t.loading }}
             </p>
+            <div v-if="listResult.kind === 'ok' && listResult.truncated" class="tasks-view__pagination" :aria-busy="loadingMore">
+              <button
+                type="button"
+                data-testid="tasks-list-load-more"
+                :disabled="loadingMore || refreshingList"
+                @click="loadMoreTasks"
+              >{{ loadingMore ? t.loading : t.loadMore }}</button>
+              <p v-if="loadMoreFailed" class="tasks-view__message" data-testid="tasks-list-load-more-error" role="alert">
+                {{ t.listLoadMoreFailed }}
+              </p>
+            </div>
             <!-- The empty line, including the search's no-match text, is said in an always-mounted
                  polite region, for the same reason as the created-task notice above. -->
             <div data-testid="tasks-list-empty-live" role="status">
@@ -833,6 +902,7 @@ import {
   type TaskDraft,
 } from '../../tasks/tasksDraft'
 import TaskPeoplePicker, { type TaskPeoplePicked, type TaskPeoplePickerMode } from '../../tasks/TaskPeoplePicker.vue'
+import TaskPicker, { type TaskPicked } from '../../tasks/TaskPicker.vue'
 import TaskDetailEditor from './TaskDetailEditor.vue'
 import TaskDetailLists, { type DetailListsError, type MyListsState } from './TaskDetailLists.vue'
 import TaskListsSidebar from './TaskListsSidebar.vue'
@@ -895,10 +965,8 @@ function clearSearchTimer(): void {
 
 type ListRenderState =
   | { kind: 'loading' }
-  // `truncated`: the read stopped short of its `total` (G2-core: handed to the assigned view's
-  // board, which under a status filter can no longer tell a row cut off by the page from a row the
-  // filter leaves out).
-  | { kind: 'ok'; items: TaskListItem[]; truncated: boolean; total: number | null }
+  // More task pages remain; personal sorting stays off until they have loaded.
+  | { kind: 'ok'; items: TaskListItem[]; truncated: boolean; total: number | null; nextOffset: number }
   | { kind: 'empty' }
   // `invalidSearch`: the server refused the search text (only text the box cannot rule out itself,
   // such as a paste that normalizes to more than the limit), so the viewer can act on it unlike a
@@ -906,6 +974,9 @@ type ListRenderState =
   | { kind: 'error'; invalidSearch?: boolean }
 
 const listResult = ref<ListRenderState>({ kind: 'loading' })
+const loadingMore = ref(false)
+const loadMoreFailed = ref(false)
+const refreshingList = ref(false)
 
 type DetailRenderState =
   | { kind: 'loading' }
@@ -925,6 +996,9 @@ const orgMissingFromAction = ref(false)
 
 const newTitle = ref('')
 const newCompletionMode = ref<CompletionMode>('all')
+const newCreatorAssigned = ref(true)
+const newAssignees = ref(new Map<string, string>())
+const createPeoplePickerOpen = ref(false)
 // The create form's due date and time, as their controls report them (`''` when empty). Clearing
 // the date clears the time too: the time control is off without a date.
 const newDueDate = ref('')
@@ -941,15 +1015,10 @@ watch([newDueDate, newDueTime], () => {
 const creating = ref(false)
 const createErrorVisible = ref(false)
 const createErrorInvalidTitle = ref(false)
-// M4: the contract code of a `validation` create failure (the allowlist of `createTask`), shown
-// through `codeMessage` like every inline code here.
-// RULED(2026-10-07): [R17] [N2] — an assignee who is not an active member of the org is 422
-// `INACTIVE_ORG_MEMBER`. The form sends no `assignees` (the creator alone, whom the server never
-// looks up), so no form input reaches that code; the date codes can come back for a due date the
-// pre-check let through.
+// Creation errors follow the current locale, including errors about the chosen people.
 const createErrorCode = ref<string | null>(null)
-// The task the last create made when the status filter it was made under leaves it out of the
-// list (`statusFilterHidesNewTask`), shown as an inline notice; `null` otherwise. `viewLists` is
+// The task the last create made when its view, status or search leaves it out of the list, shown
+// as an inline notice; `null` otherwise. `viewLists` is
 // whether the view it was made under lists it at all (`viewListsNewTask`), fixed at create time:
 // only then does switching the status filter reach it.
 // `byStatus`: the status filter leaves it out. `bySearch`: the new title does not hold the active
@@ -971,6 +1040,9 @@ const statusSwitcherRef = ref<HTMLElement | null>(null)
 // Subtasks / parent.
 const parentInput = ref('')
 const parentError = ref<string | null>(null)
+// The parent picked by title, and the task-id form folded until it is asked for.
+const parentPickerOpen = ref(false)
+const setParentByIdOpen = ref(false)
 
 // Assignees / completion mode. Both reuse `detailResult.task.assignees` for rendering — neither
 // keeps a separate local copy — because a successful mutation always reloads via `loadDetail`
@@ -1025,6 +1097,13 @@ function peopleIdentityHolds(): boolean {
   taskPeople.value = null
   taskPeopleGeneration += 1
   pickerMode.value = null
+  parentPickerOpen.value = false
+  setParentByIdOpen.value = false
+  resetCreatePeople()
+  currentUserId.value = null
+  currentUserStatus.value = 'pending'
+  currentUserFetchStarted = false
+  void ensureCurrentUser()
   return false
 }
 
@@ -1072,15 +1151,9 @@ const editingCommentId = ref<string | null>(null)
 const editingCommentBody = ref('')
 const editCommentError = ref<string | null>(null)
 
-// The viewer's own id — resolved ONCE (not re-fetched per task navigation) via `useAuth`, and
-// used for two gates the M3 contract leaves entirely to the client: which comments show
-// edit/delete (own-comment only), and whether the Leave button should render at all (only once a
-// followers response has confirmed the viewer IS one — §3.5's `leave` ability is follower-only;
-// a non-follower calling it gets a plain 404, so showing it unconditionally would invite that).
-// `'unavailable'` (the id itself could not be resolved) falls back to showing edit/delete on
-// EVERY comment — documented in the M3 frontend design doc — but does NOT extend to the Leave
-// button: an unresolvable id can never prove "the viewer is this follower", so Leave stays hidden
-// rather than guessing.
+// Re-read the viewer once per identity for the creator checkbox, comment controls and Leave.
+// An unavailable identity keeps the existing comment fallback, but cannot identify a follower
+// or combine Me with other assignees in the create form.
 const currentUserId = ref<string | null>(null)
 const currentUserStatus = ref<'pending' | 'known' | 'unavailable'>('pending')
 let currentUserFetchStarted = false
@@ -1088,12 +1161,14 @@ let currentUserFetchStarted = false
 async function ensureCurrentUser(): Promise<void> {
   if (currentUserFetchStarted) return
   currentUserFetchStarted = true
+  const switches = peopleIdentitySwitches
   let id: string | null = null
   try {
-    id = await useAuth().getCurrentUserId()
+    id = await useAuth().getCurrentUserId(true)
   } catch {
     id = null
   }
+  if (!peopleIdentityHolds() || switches !== peopleIdentitySwitches) return
   currentUserId.value = id
   currentUserStatus.value = id ? 'known' : 'unavailable'
 }
@@ -1162,6 +1237,11 @@ const actionErrorMessage = computed(() => {
 // Guards against a slow response for a superseded view (or a superseded reload) painting over a
 // newer one's result — the same shape as this codebase's other transition-safe reads.
 let listGeneration = 0
+let listIdentitySwitches = peopleIdentitySwitches
+
+function listIdentityHolds(): boolean {
+  return peopleIdentityHolds() && listIdentitySwitches === peopleIdentitySwitches
+}
 
 // Identifies "the list page" a row action (complete/reopen) — or the create form — started from,
 // mirroring the detail page's own `taskId.value !== id` guard (see `onDetailComplete`/
@@ -1171,13 +1251,12 @@ let listGeneration = 0
 // an await means the response belongs to a page the viewer isn't looking at anymore.
 let listPageToken = 0
 
-/** The list read both loaders make. Without search text the call keeps its three arguments, so the
- *  request is the one the page sent before search existed. */
-function readList(): ReturnType<typeof listTasks> {
+/** Every page uses the current view, status and title search. */
+function readList(page?: { offset: number }): ReturnType<typeof listTasks> {
   const q = activeSearch.value
   return q === ''
-    ? listTasks(currentView.value, undefined, currentStatus.value)
-    : listTasks(currentView.value, undefined, currentStatus.value, q)
+    ? listTasks(currentView.value, page, currentStatus.value)
+    : listTasks(currentView.value, page, currentStatus.value, q)
 }
 
 function failedListState(result: { kind: string; status?: number }): ListRenderState {
@@ -1187,6 +1266,11 @@ function failedListState(result: { kind: string; status?: number }): ListRenderS
 async function loadList(): Promise<void> {
   listGeneration += 1
   const mine = listGeneration
+  peopleIdentityHolds()
+  listIdentitySwitches = peopleIdentitySwitches
+  loadingMore.value = false
+  loadMoreFailed.value = false
+  refreshingList.value = false
   listResult.value = { kind: 'loading' }
   const result = await readList()
   if (mine !== listGeneration) return
@@ -1195,7 +1279,7 @@ async function loadList(): Promise<void> {
     listResult.value =
       result.items.length === 0
         ? { kind: 'empty' }
-        : { kind: 'ok', items: result.items, truncated: result.total !== undefined && result.items.length < result.total, total: result.total ?? null }
+        : { kind: 'ok', items: result.items, truncated: result.total !== undefined && result.items.length < result.total, total: result.total ?? null, nextOffset: result.items.length }
     return
   }
   if (result.kind === 'org_missing') {
@@ -1215,13 +1299,19 @@ async function loadList(): Promise<void> {
 async function reloadListQuietly(): Promise<void> {
   listGeneration += 1
   const mine = listGeneration
+  peopleIdentityHolds()
+  listIdentitySwitches = peopleIdentitySwitches
+  loadingMore.value = false
+  loadMoreFailed.value = false
+  refreshingList.value = true
   const result = await readList()
   if (mine !== listGeneration) return
+  refreshingList.value = false
   if (result.kind === 'ok') {
     listResult.value =
       result.items.length === 0
         ? { kind: 'empty' }
-        : { kind: 'ok', items: result.items, truncated: result.total !== undefined && result.items.length < result.total, total: result.total ?? null }
+        : { kind: 'ok', items: result.items, truncated: result.total !== undefined && result.items.length < result.total, total: result.total ?? null, nextOffset: result.items.length }
     return
   }
   if (result.kind === 'org_missing') {
@@ -1229,6 +1319,59 @@ async function reloadListQuietly(): Promise<void> {
     return
   }
   listResult.value = failedListState(result)
+}
+
+async function loadMoreTasks(): Promise<void> {
+  const state = listResult.value
+  if (state.kind !== 'ok' || !state.truncated || loadingMore.value || refreshingList.value || taskId.value || orgMissingFromAction.value) return
+  const mine = ++listGeneration
+  loadingMore.value = true
+  loadMoreFailed.value = false
+  try {
+    if (!listIdentityHolds()) {
+      await loadList()
+      return
+    }
+    const result = await readList({ offset: state.nextOffset })
+    if (mine !== listGeneration) return
+    if (!listIdentityHolds()) {
+      await loadList()
+      return
+    }
+    if (result.kind === 'org_missing') {
+      orgMissingFromAction.value = true
+      return
+    }
+    if (result.kind !== 'ok') {
+      loadMoreFailed.value = true
+      return
+    }
+    const itemsById = new Map(state.items.map((item) => [item.id, item]))
+    for (const item of result.items) itemsById.set(item.id, item)
+    const items = [...itemsById.values()]
+    const total = result.total ?? state.total
+    const truncated = total !== null && items.length < total
+    if (result.items.length === 0 && truncated) {
+      await loadList()
+      return
+    }
+    listResult.value = {
+      kind: 'ok',
+      items,
+      truncated,
+      total,
+      nextOffset: state.nextOffset + result.items.length,
+    }
+  } catch {
+    if (mine !== listGeneration) return
+    if (!listIdentityHolds()) {
+      await loadList()
+      return
+    }
+    loadMoreFailed.value = true
+  } finally {
+    if (mine === listGeneration) loadingMore.value = false
+  }
 }
 
 // Same out-of-order-resolution discipline as `listGeneration` above, for the detail read: a
@@ -1357,11 +1500,40 @@ function onShowOpenFromNotice(): void {
   void focusAfterSwap(() => statusSwitcherRef.value, 'tasks-status-switch-open')
 }
 
-/** After a create the server took: the title and the due fields are emptied (the mode stays). */
+function resetCreatePeople(): void {
+  newCreatorAssigned.value = true
+  newAssignees.value = new Map()
+  createPeoplePickerOpen.value = false
+}
+
+function canPickCreatePeople(): boolean {
+  return peopleIdentityHolds() && !taskId.value && contextState.value?.state === 'ready'
+    && !creating.value && currentUserStatus.value === 'known'
+}
+
+function openCreatePeoplePicker(event: MouseEvent): void {
+  if (!canPickCreatePeople()) return
+  if (event.currentTarget instanceof HTMLElement) event.currentTarget.focus()
+  createPeoplePickerOpen.value = true
+}
+
+function onCreatePeoplePicked(picked: TaskPeoplePicked): void {
+  if (!canPickCreatePeople()) return
+  const next = new Map(newAssignees.value)
+  for (const id of picked.ids) {
+    if (id === currentUserId.value) newCreatorAssigned.value = true
+    else next.set(id, picked.names[id] || '')
+  }
+  newAssignees.value = next
+  createPeoplePickerOpen.value = false
+}
+
+/** A successful create resets the draft, keeping the completion mode. */
 function clearCreateForm(): void {
   newTitle.value = ''
   newDueDate.value = ''
   newDueTime.value = ''
+  resetCreatePeople()
 }
 
 async function onCreate(): Promise<void> {
@@ -1372,6 +1544,10 @@ async function onCreate(): Promise<void> {
   createErrorInvalidTitle.value = false
   createErrorCode.value = null
   createDueError.value = null
+  if (!peopleIdentityHolds()) {
+    createErrorVisible.value = true
+    return
+  }
   // The zone is read only when a date is set: no date, no zone key and no zone read.
   const due = buildCreateDue(newDueDate.value, newDueTime.value, newDueDate.value === '' ? '' : usableViewerTimeZone())
   if (!due.ok) {
@@ -1380,8 +1556,18 @@ async function onCreate(): Promise<void> {
   }
   creating.value = true
   const page = listPageToken
+  const otherAssignees = [...newAssignees.value.keys()]
+  const viewLists = viewListsNewTask(currentView.value, newCreatorAssigned.value, otherAssignees.length > 0)
+  const assignees = newCreatorAssigned.value
+    ? otherAssignees.length === 0 ? undefined : [currentUserId.value!, ...otherAssignees]
+    : otherAssignees
   try {
-    const result = await createTask({ title, completionMode: newCompletionMode.value, ...due.keys })
+    const result = await createTask({
+      title,
+      completionMode: newCompletionMode.value,
+      ...(assignees === undefined ? {} : { assignees }),
+      ...due.keys,
+    })
     // Same page-moved-on guard as `onComplete`/`onReopen` below — a late org_missing here would
     // otherwise flip `orgMissingFromAction`, which the detail-page template checks FIRST (before
     // its own states), painting the guidance block over whatever the viewer navigated to. A late
@@ -1398,12 +1584,11 @@ async function onCreate(): Promise<void> {
     if (result.kind === 'ok') {
       clearCreateForm()
       notifyTasksChanged()
-      // Decided from the filter and the search text alone (a new task is never completed), not from
-      // the reloaded rows.
+      // Use the submitted people, status and search, even when the new row is outside the loaded page.
       const bySearch = activeSearch.value !== '' && !titleHoldsTaskSearch(title, activeSearch.value)
       const byStatus = statusFilterHidesNewTask(currentStatus.value)
-      if (bySearch || byStatus) {
-        createdHidden.value = { id: result.id, viewLists: viewListsNewTask(currentView.value), byStatus, bySearch }
+      if (bySearch || byStatus || !viewLists) {
+        createdHidden.value = { id: result.id, viewLists, byStatus, bySearch }
       }
       await loadList()
     } else if (result.kind === 'org_missing') {
@@ -1577,23 +1762,29 @@ function applyDetailFailure(
 }
 
 async function onSetParent(): Promise<void> {
-  const id = taskId.value
-  if (!id || detailActionPending.value) return
   const raw = parentInput.value.trim()
   if (!raw) return
+  await setParentTo(raw, { clearInput: true })
+}
+
+/** Sets the parent to `parentId`: from the task-id form (which is emptied on success) or from the
+ *  parent picker (which leaves the form as it is). */
+async function setParentTo(parentId: string, options: { clearInput: boolean }): Promise<void> {
+  const id = taskId.value
+  if (!id || detailActionPending.value) return
   parentError.value = null
   actionErrorKind.value = null
   const token = ++detailActionToken
   detailActionPending.value = true
   try {
-    const result = await setParent(id, raw)
+    const result = await setParent(id, parentId)
     if (token !== detailActionToken) {
       if (result.kind === 'ok') notifyTasksChanged()
       return
     }
     if (result.kind === 'ok') {
       orgMissingFromAction.value = false
-      parentInput.value = ''
+      if (options.clearInput) parentInput.value = ''
       notifyTasksChanged()
       await loadDetail(id)
       return
@@ -1602,6 +1793,23 @@ async function onSetParent(): Promise<void> {
   } finally {
     if (token === detailActionToken) detailActionPending.value = false
   }
+}
+
+/** The parent pick button: focused first (a click does not focus a button in macOS Safari), so the
+ *  picker hands focus back to it on close. */
+function openParentPicker(event: MouseEvent): void {
+  if (event.currentTarget instanceof HTMLElement) event.currentTarget.focus()
+  parentPickerOpen.value = true
+}
+
+function closeParentPicker(): void {
+  parentPickerOpen.value = false
+  peopleIdentityHolds()
+}
+
+function onParentPicked(picked: TaskPicked): void {
+  parentPickerOpen.value = false
+  void setParentTo(picked.id, { clearInput: false })
 }
 
 async function onMakeIndependent(): Promise<void> {
@@ -2264,6 +2472,7 @@ const onPeopleStorage = () => { peopleIdentityHolds() }
 if (typeof window !== 'undefined') window.addEventListener('storage', onPeopleStorage)
 
 onBeforeUnmount(() => {
+  listGeneration += 1
   unsubscribeLists()
   stopPeopleSessionSwitch()
   if (typeof window !== 'undefined') window.removeEventListener('storage', onPeopleStorage)
@@ -2342,6 +2551,7 @@ async function onRemoveTaskFromList(listId: string): Promise<void> {
 // looking at before — it belongs to that stale id, not the one now showing.
 watch(taskId, (id) => {
   if (contextState.value?.state !== 'ready') return
+  createPeoplePickerOpen.value = false
   actionErrorKind.value = null
   // A navigation away invalidates whatever detail action was in flight for the PREVIOUS id — bump
   // the token so that request's own `finally` (see `onDetailComplete`/`onDetailReopen`) can no
@@ -2381,6 +2591,8 @@ watch(taskId, (id) => {
   pickerMode.value = null
   addAssigneeByIdOpen.value = false
   addFollowerByIdOpen.value = false
+  parentPickerOpen.value = false
+  setParentByIdOpen.value = false
   taskPeople.value = null
   taskPeopleGeneration += 1
   newCommentBody.value = ''
@@ -2409,6 +2621,7 @@ watch(taskId, (id) => {
 onMounted(async () => {
   contextState.value = await loadTasksContext()
   if (contextState.value.state !== 'ready') return
+  void ensureCurrentUser()
   if (taskId.value) {
     await enterDetail(taskId.value)
   } else {
@@ -2418,7 +2631,8 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.tasks-view__member-pick {
+.tasks-view__member-pick,
+.tasks-view__parent-pick {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -2526,8 +2740,28 @@ onMounted(async () => {
 
 .tasks-view__create {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 16px;
+}
+
+.tasks-view__create-assignees {
+  flex-basis: 100%;
+  min-width: 0;
+  margin: 0;
+  border: 1px solid var(--el-border-color-lighter, #eee);
+}
+
+.tasks-view__create-people {
+  list-style: none;
+  padding: 0;
+}
+
+.tasks-view__create-people li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-wrap: anywhere;
 }
 
 .tasks-view__list {

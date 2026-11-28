@@ -37,13 +37,17 @@ export const TASKS_ZH = {
   statusFilterDone: '已完成',
   statusFilterAll: '全部',
   createTitlePlaceholder: '新建任务标题',
+  createAssigneesLabel: '负责人',
+  createAssignSelf: '我',
+  createPeopleUnavailable: '暂时无法确认当前用户，不能选择其他负责人。请刷新后重试。',
   create: '创建',
   createInvalidTitle: '标题为空或包含无法保存的字符',
   createFailed: '创建任务失败，请稍后重试',
   // after a create while 已完成 is on: the new task is not completed, so this filter hides it
   createdHiddenByFilter: '任务已创建。新任务尚未完成，当前筛选为「已完成」，所以列表中不显示它。',
-  // the same, in a view that leaves the new task out under any status (关注中 / 我委派的)
+  // The chosen view and an active filter both leave the new task out.
   createdHiddenByViewAndFilter: '任务已创建。当前视图和筛选下，列表中不显示它。',
+  createdHiddenByView: '任务已创建。当前视图下，列表中不显示它。',
   createdHiddenShowOpen: '查看未完成任务',
   createdHiddenOpenTask: '打开新任务',
   // the same, when the new task's title does not hold the search text
@@ -58,6 +62,7 @@ export const TASKS_ZH = {
   listEmptyOpen: '暂无未完成任务',
   listEmptyDone: '暂无已完成任务',
   listLoadFailed: '加载任务失败，请稍后重试',
+  listLoadMoreFailed: '未能加载更多任务，已加载的任务仍保留。请重试「加载更多」。',
   loading: '加载中…',
   statusOpen: '进行中',
   statusDone: '已完成',
@@ -112,6 +117,16 @@ export const TASKS_ZH = {
   setParentPlaceholder: '设为子任务（填写父任务ID）',
   setParent: '设置父任务',
   makeIndependent: '取消父任务',
+  // The task picker (TaskPicker.vue): the parent picked by title on the task page, a task picked by
+  // title on the list page.
+  pickParent: '选择父任务',
+  setParentByIdToggle: '按任务 ID 设置',
+  taskPickerSearchLabel: '搜索任务',
+  taskPickerSearchPlaceholder: '输入任务标题',
+  taskPickerTypeToSearch: '输入标题开始搜索',
+  taskPickerNoMatch: '没有匹配的任务',
+  taskPickerRefineSearch: '匹配的任务较多，请输入更完整的标题',
+  taskPickerLoadFailed: '加载任务失败，请稍后重试',
   followersHeading: '关注人',
   followersUnknown: '关注人列表在有变更后才会显示',
   addFollowerPlaceholder: '添加关注人（用户ID）',
@@ -273,6 +288,11 @@ export const TASKS_ZH = {
   listAddTaskLabel: '加入任务（任务 ID）',
   listAddTaskPlaceholder: '任务 ID',
   listAddTask: '加入任务',
+  listPickTask: '选择任务',
+  listCreateAndAdd: '创建并加入清单',
+  listCreatedAddFailed: '任务已创建，加入清单失败。',
+  listRetryAdd: '重试加入',
+  listAddTaskByIdToggle: '按任务 ID 加入',
   // RULED(2026-10-07): [own-25] (PR-3a, R12 (a1)) — adding needs a direct role on the task
   // (creator or assignee; an edit right that comes only from a list does not count), and the 404
   // folds that with a missing task and an unavailable list.
@@ -424,11 +444,15 @@ export const TASKS_EN: Record<keyof typeof TASKS_ZH, string> = {
   statusFilterDone: 'Completed',
   statusFilterAll: 'All',
   createTitlePlaceholder: 'New task title',
+  createAssigneesLabel: 'Assignees',
+  createAssignSelf: 'Me',
+  createPeopleUnavailable: 'Could not identify the current user to choose other assignees. Please refresh and try again.',
   create: 'Create',
   createInvalidTitle: 'The title is empty or contains characters that cannot be saved',
   createFailed: 'Could not create the task. Please try again later.',
   createdHiddenByFilter: 'Task created. It is not completed yet, so the current "Completed" filter does not show it.',
   createdHiddenByViewAndFilter: 'Task created. The current view and filter do not show it.',
+  createdHiddenByView: 'Task created. The current view does not show it.',
   createdHiddenShowOpen: 'Show tasks not completed',
   createdHiddenOpenTask: 'Open the new task',
   createdHiddenBySearch: 'Task created. The current search does not show it.',
@@ -440,6 +464,7 @@ export const TASKS_EN: Record<keyof typeof TASKS_ZH, string> = {
   listEmptyOpen: 'No incomplete tasks',
   listEmptyDone: 'No completed tasks',
   listLoadFailed: 'Could not load tasks. Please try again later.',
+  listLoadMoreFailed: 'Could not load more tasks. Your loaded tasks are still here. Try Load more again.',
   loading: 'Loading…',
   statusOpen: 'In progress',
   statusDone: 'Completed',
@@ -485,6 +510,14 @@ export const TASKS_EN: Record<keyof typeof TASKS_ZH, string> = {
   setParentPlaceholder: 'Make this a subtask (parent task ID)',
   setParent: 'Set parent task',
   makeIndependent: 'Remove parent task',
+  pickParent: 'Choose a parent task',
+  setParentByIdToggle: 'Set by task ID',
+  taskPickerSearchLabel: 'Search tasks',
+  taskPickerSearchPlaceholder: 'Task title',
+  taskPickerTypeToSearch: 'Type a title to search',
+  taskPickerNoMatch: 'No task matches',
+  taskPickerRefineSearch: 'Many tasks match. Type more of the title.',
+  taskPickerLoadFailed: 'Could not load tasks. Try again later.',
   followersHeading: 'Followers',
   followersUnknown: 'The follower list appears after a change is made',
   addFollowerPlaceholder: 'Add follower (user ID)',
@@ -620,6 +653,11 @@ export const TASKS_EN: Record<keyof typeof TASKS_ZH, string> = {
   listAddTaskLabel: 'Add a task (task ID)',
   listAddTaskPlaceholder: 'Task ID',
   listAddTask: 'Add task',
+  listPickTask: 'Choose a task',
+  listCreateAndAdd: 'Create and add to list',
+  listCreatedAddFailed: 'Task created. Could not add it to this list.',
+  listRetryAdd: 'Retry adding to list',
+  listAddTaskByIdToggle: 'Add by task ID',
   listAddTaskNotFound: 'The task does not exist, you are not its creator or an assignee, or the list is not available',
   listRemoveTask: 'Remove from list',
   listRemoveTaskConfirmPrompt: 'Remove this task from the list?',
@@ -744,7 +782,8 @@ export const TASKS_FMT_ZH = {
   /** Accessible name of a task row's remove button on the list page (design §4.2). */
   listRemoveTaskNamed: (title: string): string => `将「${title}」移出清单`,
   /** Members dialog (design §5.2): accessible names of a row's role select, remove and transfer
-   *  buttons, and the transfer's confirmation prompt — `userId` is the row's member. */
+   *  buttons, and the transfer's confirmation prompt — `userId` is the row's member as the dialog
+   *  shows it: the name, the id when there is none, or both when two rows share the name. */
   membersRoleFor: (userId: string): string => `「${userId}」的角色`,
   membersRemoveNamed: (userId: string): string => `移除成员「${userId}」`,
   membersTransferNamed: (userId: string): string => `将所有权转让给「${userId}」`,
@@ -764,9 +803,8 @@ export const TASKS_FMT_ZH = {
   /** G2-core (design §4.1): placed tasks the status filter leaves out; moves still count them. */
   groupsHiddenByFilter: (count: number): string => `另有 ${count} 项已分组任务不在当前状态筛选中，未显示`,
   groupsHiddenBySearch: (count: number): string => `另有 ${count} 项已分组任务不在当前搜索结果中，未显示`,
-  /** The task list read stopped short of its total (the server sends the latest-updated page only, under the status
-   *  filter too, so only a title search reaches the others). */
-  listTruncated: (shown: number, total: number): string => `共 ${total} 条任务，只显示最近更新的 ${shown} 条；可按标题搜索查找其余任务`,
+  /** Progress through the task list under the current filters. */
+  listTruncated: (shown: number, total: number): string => `共 ${total} 条任务，已加载 ${shown} 条；可加载更多或按标题搜索`,
 }
 
 export type TasksFmt = typeof TASKS_FMT_ZH
@@ -801,7 +839,7 @@ export const TASKS_FMT_EN: { [K in keyof TasksFmt]: (...args: Parameters<TasksFm
     count === 1
       ? '1 grouped task is outside the status filter and not shown'
       : `${count} grouped tasks are outside the status filter and not shown`,
-  listTruncated: (shown, total) => `Showing the ${shown} most recently updated of ${total} tasks. Search by title to find the others.`,
+  listTruncated: (shown, total) => `Loaded ${shown} of ${total} tasks. Load more or search by title.`,
 }
 
 /** Contract error code -> key of the plain-string table. Codes the M4 surfaces read with a

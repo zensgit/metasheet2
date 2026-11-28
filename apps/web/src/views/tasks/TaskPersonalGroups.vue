@@ -50,9 +50,7 @@ const props = defineProps<{
   rowsFiltered?: boolean
   /** Title search narrows the rows as well (the status filter may be 全部 meanwhile). */
   rowsSearched?: boolean
-  /** G2-core: the rows' read stopped short of its `total`. A placement whose task is not a row may
-   *  then be one the page cut off rather than one the filter left out, so the board is not told the
-   *  rows are filtered and the existing rule (`[fe-35]`: such a placement holds moves off) applies. */
+  /** More task pages remain. Keep all moves off until those rows have loaded. */
   rowsTruncated?: boolean
 }>()
 
@@ -76,6 +74,7 @@ let placementsGeneration = 0
 
 const truncated = computed(
   () =>
+    props.rowsTruncated === true ||
     (groupsResult.value.kind === 'ok' && groupsResult.value.truncated) ||
     (placementsResult.value.kind === 'ok' && placementsResult.value.truncated),
 )

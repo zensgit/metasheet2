@@ -2084,6 +2084,7 @@ exec npx vitest run \
   tasks-badge.spec.ts \
   tasks-context.spec.ts \
   tasks-counts-realtime.spec.ts \
+  tasks-create-assignees.spec.ts \
   tasks-detail-m3.spec.ts \
   tasks-detail-m4.spec.ts \
   tasks-detail-view.spec.ts \
@@ -2097,6 +2098,7 @@ exec npx vitest run \
   tasks-nav-badge.spec.ts \
   tasks-nav-feature-gate.spec.ts \
   tasks-nav-relogin.spec.ts \
+  tasks-pagination.spec.ts \
   tasks-people-picker.spec.ts \
   tasks-record-dispatch.spec.ts \
   tasks-record-panel.spec.ts \
