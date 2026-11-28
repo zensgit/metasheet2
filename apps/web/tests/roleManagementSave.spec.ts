@@ -197,6 +197,64 @@ describe('RoleManagementView — reserved role name (#6348 follow-up)', () => {
   })
 })
 
+describe('RoleManagementView — delete readback', () => {
+  it.each([0, 2])('reconciles one successful delete after %i catalog reload failures', async (failures) => {
+    const originalCatalog = roleCatalog(['stock-prep:read'])
+    const remainingRole = { ...originalCatalog.data.items[0], id: 'role-2', name: '其他角色' }
+    const refreshedRole = { ...remainingRole, name: '服务端更新后的角色' }
+    let deleted = false
+    let catalogFailures = 0
+    apiFetchMock.mockImplementation(async (url: string, init?: { method?: string }) => {
+      if (url === '/api/permissions') return jsonResponse({ ok: true, data: PERMISSIONS })
+      if (url === '/api/admin/roles') {
+        if (!deleted) return jsonResponse({
+          ok: true, data: { items: [...originalCatalog.data.items, remainingRole], total: 2 },
+        })
+        if (catalogFailures < failures) {
+          catalogFailures += 1
+          return jsonResponse({ ok: false }, 503)
+        }
+        return jsonResponse({ ok: true, data: { items: [refreshedRole], total: 1 } })
+      }
+      if (isRoleMembersGet(url)) return membersResponse()
+      if (url === '/api/roles/role-1' && init?.method === 'DELETE') {
+        deleted = true
+        return jsonResponse({ ok: true, data: { id: 'role-1' } })
+      }
+      throw new Error(`unexpected call ${url}`)
+    })
+
+    await mountView()
+    clickRole()
+    await flushUi()
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    try {
+      container!.querySelector<HTMLButtonElement>('.admin-page__footer .admin-page__button--danger')!.click()
+      await flushUi()
+      for (let attempt = 0; attempt < failures; attempt += 1) {
+        expect(statusText()).toBe('角色已删除，但角色目录未能刷新。请点击“刷新”重新加载目录。')
+        expect(container!.querySelector('.admin-page__status--error')).not.toBeNull()
+        const items = container!.querySelectorAll('.admin-page__item')
+        expect(items).toHaveLength(1)
+        expect(items[0].querySelector('strong')?.textContent).toBe(remainingRole.name)
+        container!.querySelector<HTMLButtonElement>('[data-role-refresh]')!.click()
+        await flushUi()
+      }
+      expect(statusText()).toBe('角色已删除')
+      expect(container!.querySelector('.admin-page__status--error')).toBeNull()
+      const items = container!.querySelectorAll('.admin-page__item')
+      expect(items).toHaveLength(1)
+      expect(items[0].querySelector('strong')?.textContent).toBe(refreshedRole.name)
+      expect(recordedCalls().filter(call => call.url === '/api/admin/roles')).toHaveLength(failures + 2)
+      expect(confirm).toHaveBeenCalledTimes(1)
+      expect(recordedCalls().filter(call => call.init?.method === 'DELETE').map(call => call.url))
+        .toEqual(['/api/roles/role-1'])
+    } finally {
+      confirm.mockRestore()
+    }
+  })
+})
+
 describe('RoleManagementView — save reconciliation', () => {
   it('does NOT claim a permission mismatch when it is the post-save RELOAD that failed', async () => {
     let rolesReads = 0
@@ -255,6 +313,11 @@ describe('RoleManagementView — save reconciliation', () => {
 
     expect(rolesReads).toBe(2)
     expect(statusText()).toContain('不一致')
+    const mismatch = statusText()
+    container!.querySelector<HTMLButtonElement>('[data-role-refresh]')!.click()
+    await flushUi()
+    expect(rolesReads).toBe(3)
+    expect(statusText()).toBe(mismatch)
   })
 
   it('submits the concurrency token the grid was loaded with', async () => {
