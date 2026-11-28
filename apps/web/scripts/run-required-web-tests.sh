@@ -2084,6 +2084,7 @@ exec npx vitest run \
   tasks-badge.spec.ts \
   tasks-context.spec.ts \
   tasks-counts-realtime.spec.ts \
+  tasks-create-assignees.spec.ts \
   tasks-detail-m3.spec.ts \
   tasks-detail-m4.spec.ts \
   tasks-detail-view.spec.ts \

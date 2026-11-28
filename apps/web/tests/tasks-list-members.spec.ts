@@ -39,10 +39,14 @@ const h_ = vi.hoisted(() => ({
   removeMemberReply: vi.fn(),
   /** `POST /api/task-lists/:id/transfer-owner` (id, serialized body). */
   transferReply: vi.fn(),
+  /** `GET /api/tasks/people?ids=…` (query): the people lookup that names the roster. */
+  peopleReply: vi.fn(),
 }))
 
 vi.mock('../src/utils/api', () => ({
   apiFetch: h_.apiFetch,
+  // No org header: the account-switch cells compare the token's subject.
+  authHeaders: () => ({}),
 }))
 
 vi.mock('../src/tasks/tasksContext', () => ({
@@ -68,6 +72,7 @@ vi.mock('../src/composables/useLocale', () => ({
 
 import TaskListView from '../src/views/tasks/TaskListView.vue'
 import { onListsChanged } from '../src/tasks/tasksListsBus'
+import { notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
 
 // ---------------------------------------------------------------------------------------------
 // Fixtures and the fake backend
@@ -157,6 +162,8 @@ async function fakeFetch(path: string, init?: FetchInit): Promise<Response> {
     if (method === 'PATCH') return h_.roleReply(id, userId, init?.body)
     if (method === 'DELETE') return h_.removeMemberReply(id, userId)
   }
+  // The people lookup that names the roster (`h_.peopleReply`; names nobody by default).
+  if (method === 'GET' && pathname === '/api/tasks/people') return h_.peopleReply(query)
   if (method === 'POST' && (match = /^\/api\/task-lists\/([^/]+)\/transfer-owner$/.exec(pathname))) {
     return h_.transferReply(decodeURIComponent(match[1]), init?.body)
   }
@@ -342,6 +349,7 @@ function pageControlsDisabled(el: HTMLElement): Record<string, boolean> {
     'tasks-list-detail-rename',
     'tasks-list-detail-archive',
     'tasks-list-detail-add-task-input',
+    'tasks-list-detail-pick-task',
     'tasks-list-detail-item-remove',
   ]) {
     out[id] = disabled(el, id)
@@ -401,6 +409,7 @@ beforeEach(() => {
     lists[id] = { ...lists[id], ownerId: userId, myRole: 'edit' }
     return jsonResponse(200, rosterBody(id))
   })
+  h_.peopleReply.mockReset().mockImplementation(() => jsonResponse(200, { items: [], truncated: false }))
 })
 
 afterEach(() => {
@@ -1125,6 +1134,7 @@ describe('members dialog — one write at a time with the page', () => {
       'tasks-list-detail-rename': true,
       'tasks-list-detail-archive': true,
       'tasks-list-detail-add-task-input': true,
+      'tasks-list-detail-pick-task': true,
       'tasks-list-detail-item-remove': true,
     })
     expect(must(el, 'tasks-list-detail').getAttribute('aria-busy')).toBe('true')
@@ -1146,6 +1156,7 @@ describe('members dialog — one write at a time with the page', () => {
       'tasks-list-detail-rename': false,
       'tasks-list-detail-archive': false,
       'tasks-list-detail-add-task-input': false,
+      'tasks-list-detail-pick-task': false,
       'tasks-list-detail-item-remove': false,
     })
     expect(must(el, 'tasks-list-detail').getAttribute('aria-busy')).toBe('false')
@@ -1700,5 +1711,137 @@ describe('members dialog — another list, and results that land late', () => {
     await flush()
     await click(el, 'tasks-list-detail-members')
     expect(errorSpots(el)).toEqual({})
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// Names on the roster
+// ---------------------------------------------------------------------------------------------
+
+/** The ids of each people lookup, in the order they were sent. */
+function lookups(): string[][] {
+  return h_.peopleReply.mock.calls.map(([query]) => (new URLSearchParams(query as string).get('ids') ?? '').split(','))
+}
+
+/** A lookup answer naming each `[id, name]`. */
+function named(people: Array<[string, string]>): Response {
+  return jsonResponse(200, { items: people.map(([id, name]) => ({ id, name, detail: '', canUseTasks: true })), truncated: false })
+}
+
+/** The text of each roster row's member cell, in rendered order. */
+function idTexts(el: ParentNode): Array<string | undefined> {
+  return shownAll(el, 'tasks-list-member-id').map((node) => node.textContent?.trim())
+}
+
+/** A JWT-shaped token the app's own payload reader understands (header and signature are not read). */
+function fakeToken(payload: Record<string, unknown>): string {
+  return `h.${btoa(JSON.stringify(payload)).replace(/=+$/, '')}.s`
+}
+const TOKEN_A = fakeToken({ sub: 'u1', exp: 4102444800 })
+const TOKEN_B = fakeToken({ sub: 'u9', exp: 4102444800 })
+
+/** Another tab signs in: the shared storage changes and this tab is told nothing. */
+function signIn(token: string): void {
+  localStorage.setItem('auth_token', token)
+}
+
+/** The same, plus the `storage` event a browser delivers to the other tabs. */
+function signInElsewhereWithEvent(token: string): void {
+  signIn(token)
+  window.dispatchEvent(new StorageEvent('storage', { key: 'auth_token', newValue: token }))
+}
+
+/** A sign-in in this tab: the session switch `useAuth` announces. */
+function signInHere(token: string): void {
+  signIn(token)
+  notifyAuthPrincipalChange()
+}
+
+const SEEN_SWITCHES: Array<[string, (token: string) => void]> = [
+  ['another tab (a storage change)', signInElsewhereWithEvent],
+  ['this tab (a session switch)', signInHere],
+]
+
+describe('members dialog — names', () => {
+  it("the rows, the row controls' names and the transfer prompt show the names; a member the lookup leaves out shows the id", async () => {
+    h_.peopleReply.mockImplementation(() => named([['u1', '张三'], ['u2', '李四']]))
+    const el = await openDialog()
+    expect(lookups()).toEqual([['u1', 'u2', 'u3']])
+    expect(idTexts(el)).toEqual(['张三', '李四', 'u3'])
+    expect(rows(el)).toEqual([
+      ['u1', 'owner'],
+      ['u2', 'edit'],
+      ['u3', 'read'],
+    ])
+    expect(roleSelect(el, 'u2').getAttribute('aria-label')).toBe('「李四」的角色')
+    expect(inRow(el, 'u2', 'tasks-list-member-transfer').getAttribute('aria-label')).toBe('将所有权转让给「李四」')
+    expect(inRow(el, 'u2', 'tasks-list-member-remove').getAttribute('aria-label')).toBe('移除成员「李四」')
+    expect(inRow(el, 'u3', 'tasks-list-member-remove').getAttribute('aria-label')).toBe('移除成员「u3」')
+    await click(rowOf(el, 'u2'), 'tasks-list-member-transfer')
+    expect(text(el, 'tasks-list-member-transfer-prompt')).toBe('确认将所有权转让给「李四」？转让后你将成为可编辑成员')
+  })
+
+  it('a roster of 100 is looked up as 50 and 50; two members with the same name show the name and the id', async () => {
+    rosters.tl_1 = [member('u1', 'owner'), ...Array.from({ length: 99 }, (_, i) => member(`m${String(i).padStart(3, '0')}`, 'read'))]
+    h_.peopleReply.mockImplementation(() => named([['m000', '王五'], ['m001', '王五'], ['m002', '赵六']]))
+    const el = await openDialog()
+    expect(lookups().map((ids) => ids.length)).toEqual([50, 50])
+    expect(inRow(el, 'm000', 'tasks-list-member-id').textContent?.trim()).toBe('王五 · m000')
+    expect(inRow(el, 'm001', 'tasks-list-member-id').textContent?.trim()).toBe('王五 · m001')
+    expect(inRow(el, 'm002', 'tasks-list-member-id').textContent?.trim()).toBe('赵六')
+    expect(inRow(el, 'm000', 'tasks-list-member-remove').getAttribute('aria-label')).toBe('移除成员「王五 · m000」')
+  })
+
+  it('a typed add looks up the new id only', async () => {
+    const el = await openDialog()
+    h_.peopleReply.mockImplementation(() => named([['u7', '孙七']]))
+    await typeInto(el, 'tasks-list-add-member-input', 'u7')
+    await submit(el, 'tasks-list-add-member-form')
+    expect(lookups()).toEqual([['u1', 'u2', 'u3'], ['u7']])
+    expect(inRow(el, 'u7', 'tasks-list-member-id').textContent?.trim()).toBe('孙七')
+  })
+
+  it('a 403 lookup leaves the ids, and a typed add after it looks up nothing', async () => {
+    h_.peopleReply.mockImplementation(() => jsonResponse(403, { error: 'Insufficient permissions' }))
+    const el = await openDialog()
+    await typeInto(el, 'tasks-list-add-member-input', 'u7')
+    await submit(el, 'tasks-list-add-member-form')
+    expect(lookups()).toEqual([['u1', 'u2', 'u3']])
+    expect(idTexts(el)).toEqual(['u1', 'u2', 'u3', 'u7'])
+  })
+
+  it('a lookup answered after the dialog closed is dropped; opened again, the roster is looked up again', async () => {
+    const late = deferred<Response>()
+    h_.peopleReply.mockImplementationOnce(() => late.promise)
+    const el = await openDialog()
+    await click(el, 'tasks-list-members-close')
+    late.resolve(named([['u2', '李四']]))
+    await flush()
+    await click(el, 'tasks-list-detail-members')
+    expect(lookups()).toEqual([['u1', 'u2', 'u3'], ['u1', 'u2', 'u3']])
+    expect(idTexts(el)).toEqual(['u1', 'u2', 'u3'])
+  })
+
+  describe('account switches', () => {
+    beforeEach(() => {
+      localStorage.removeItem('auth_token')
+      signIn(TOKEN_A)
+      h_.peopleReply.mockImplementation(() => named([['u2', '李四']]))
+    })
+
+    afterEach(() => {
+      localStorage.removeItem('auth_token')
+    })
+
+    for (const [how, switchTo] of SEEN_SWITCHES) {
+      it(`a switch to another account from ${how} drops the names`, async () => {
+        const el = await openDialog()
+        expect(idTexts(el)).toEqual(['u1', '李四', 'u3'])
+        switchTo(TOKEN_B)
+        await flush()
+        expect(idTexts(el)).toEqual(['u1', 'u2', 'u3'])
+        must(el, 'tasks-list-members-dialog')
+      })
+    }
   })
 })
