@@ -24,6 +24,7 @@ const h_ = vi.hoisted(() => ({
   listComments: vi.fn(),
   getCurrentUserId: vi.fn(),
   setParent: vi.fn(),
+  getParentCandidates: vi.fn(),
   addAssignee: vi.fn(),
   removeAssignee: vi.fn(),
   setCompletionMode: vi.fn(),
@@ -75,6 +76,10 @@ vi.mock('../src/tasks/tasksApi', async () => {
     reopenTask: h_.reopenTask,
     listComments: h_.listComments,
     setParent: h_.setParent,
+    // The parent picker's read, and the real path-segment check the task picker applies to the
+    // rows it hands back.
+    getParentCandidates: h_.getParentCandidates,
+    isPathSafeSegment: actual.isPathSafeSegment,
     addAssignee: h_.addAssignee,
     removeAssignee: h_.removeAssignee,
     setCompletionMode: h_.setCompletionMode,
@@ -245,6 +250,7 @@ beforeEach(() => {
   h_.listComments.mockReset().mockResolvedValue({ kind: 'ok', items: [], total: 0 })
   h_.getCurrentUserId.mockReset().mockResolvedValue(null)
   h_.setParent.mockReset()
+  h_.getParentCandidates.mockReset().mockResolvedValue({ kind: 'ok', items: [] })
   h_.addAssignee.mockReset()
   h_.removeAssignee.mockReset()
   h_.setCompletionMode.mockReset()
@@ -1876,5 +1882,251 @@ describe('TasksView detail — a comment posted while the list is not loaded sti
     await flush()
 
     expect(shownAll(el, 'tasks-detail-comment-body').map((node) => node.textContent)).toEqual(['older', 'posted'])
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// The parent picked by title: a picker over the task's parent candidates, read when it opens and
+// filtered here. The task-id form stays, folded under a toggle.
+// ---------------------------------------------------------------------------------------------
+
+describe('TasksView detail — the parent picked by title', () => {
+  const candidate = (id: string, title: string) => ({ id, title })
+
+  async function openParentPicker(el: HTMLElement): Promise<void> {
+    clickOn(el, 'tasks-detail-pick-parent')
+    await flush()
+  }
+
+  async function search(el: HTMLElement, value: string): Promise<void> {
+    typeInto(el, 'task-picker-search', value)
+    await flush()
+  }
+
+  function rowIds(el: HTMLElement): string[] {
+    return shownAll(el, 'task-picker-row').map((row) => row.getAttribute('data-task-id') ?? '')
+  }
+
+  function choose(el: HTMLElement, id: string): void {
+    el.querySelector<HTMLInputElement>(`[data-testid="task-picker-row"][data-task-id="${id}"] input[type="radio"]`)!.click()
+  }
+
+  async function pick(el: HTMLElement, term: string, id: string): Promise<void> {
+    await openParentPicker(el)
+    await search(el, term)
+    choose(el, id)
+    await flush()
+    clickOn(el, 'task-picker-confirm')
+    await flush()
+  }
+
+  it('the pick button sits next to a task-id form that is folded until its toggle opens it', async () => {
+    const el = await mountAt('/tasks/t1')
+    expect(shown(el, 'tasks-detail-pick-parent')?.textContent).toBe('选择父任务')
+    const toggle = shown(el, 'tasks-detail-set-parent-by-id-toggle') as HTMLButtonElement
+    const form = shown(el, 'tasks-detail-set-parent-form') as HTMLFormElement
+    expect(toggle.textContent).toBe('按任务 ID 设置')
+    expect(form.style.display).toBe('none')
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    toggle.click()
+    await flush()
+    expect(form.style.display).toBe('')
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    toggle.click()
+    await flush()
+    expect(form.style.display).toBe('none')
+  })
+
+  it('the candidates are not read on mount; each opening reads them once, and typing reads nothing more', async () => {
+    h_.getParentCandidates.mockResolvedValue({ kind: 'ok', items: [candidate('p1', 'Alpha')] })
+    const el = await mountAt('/tasks/t1')
+    expect(h_.getParentCandidates).not.toHaveBeenCalled()
+    await openParentPicker(el)
+    expect(h_.getParentCandidates.mock.calls).toEqual([['t1']])
+    await search(el, 'A')
+    await search(el, 'Al')
+    expect(rowIds(el)).toEqual(['p1'])
+    expect(h_.getParentCandidates).toHaveBeenCalledTimes(1)
+    clickOn(el, 'task-picker-cancel')
+    await flush()
+    expect(shown(el, 'task-picker')).toBeNull()
+    await openParentPicker(el)
+    expect(h_.getParentCandidates.mock.calls).toEqual([['t1'], ['t1']])
+  })
+
+  it('a blank term shows the hint; a term filters the titles, ignoring case', async () => {
+    h_.getParentCandidates.mockResolvedValue({ kind: 'ok', items: [candidate('p1', 'Alpha'), candidate('p2', 'Beta'), candidate('p3', 'alphabet')] })
+    const el = await mountAt('/tasks/t1')
+    await openParentPicker(el)
+    expect(shown(el, 'task-picker-type-hint')?.textContent).toBe('输入标题开始搜索')
+    expect(shown(el, 'task-picker-list')).toBeNull()
+    await search(el, '   ')
+    expect(shown(el, 'task-picker-type-hint')).toBeTruthy()
+    await search(el, 'ALPH')
+    expect(shown(el, 'task-picker-type-hint')).toBeNull()
+    expect(rowIds(el)).toEqual(['p1', 'p3'])
+    expect(shownAll(el, 'task-picker-title').map((node) => node.textContent)).toEqual(['Alpha', 'alphabet'])
+    expect(shownAll(el, 'task-picker-id')).toEqual([])
+  })
+
+  it('rows that share a title also show their ids', async () => {
+    h_.getParentCandidates.mockResolvedValue({ kind: 'ok', items: [candidate('p1', 'Same'), candidate('p2', 'Same'), candidate('p3', 'Other')] })
+    const el = await mountAt('/tasks/t1')
+    await openParentPicker(el)
+    await search(el, 'e')
+    expect(rowIds(el)).toEqual(['p1', 'p2', 'p3'])
+    const ids = shownAll(el, 'task-picker-row').map((row) => row.querySelector('[data-testid="task-picker-id"]')?.textContent ?? null)
+    expect(ids).toEqual(['p1', 'p2', null])
+  })
+
+  it('more than 50 matches show 50 rows and ask for more of the title; a term that matches nothing has its own copy', async () => {
+    h_.getParentCandidates.mockResolvedValue({ kind: 'ok', items: Array.from({ length: 51 }, (_, i) => candidate(`p${i}`, `Alpha ${i}`)) })
+    const el = await mountAt('/tasks/t1')
+    await openParentPicker(el)
+    await search(el, 'alpha')
+    expect(shownAll(el, 'task-picker-row')).toHaveLength(50)
+    expect(shown(el, 'task-picker-more')?.textContent).toBe('匹配的任务较多，请输入更完整的标题')
+    await search(el, 'Alpha 50')
+    expect(rowIds(el)).toEqual(['p50'])
+    expect(shown(el, 'task-picker-more')).toBeNull()
+    await search(el, 'zzz')
+    expect(shown(el, 'task-picker-list')).toBeNull()
+    expect(shown(el, 'task-picker-empty')?.textContent).toBe('没有匹配的任务')
+  })
+
+  it.each([
+    ['forbidden', () => Promise.resolve({ kind: 'forbidden' }), '您没有权限修改此任务'],
+    ['not found', () => Promise.resolve({ kind: 'not_found' }), '加载任务失败，请稍后重试'],
+    ['a failed read', () => Promise.resolve({ kind: 'error', status: 500 }), '加载任务失败，请稍后重试'],
+    ['a call that throws', () => Promise.reject(new Error('boom')), '加载任务失败，请稍后重试'],
+  ] as const)('candidates answered %s show their copy, with no rows', async (_label, reply, copy) => {
+    h_.getParentCandidates.mockImplementation(reply)
+    const el = await mountAt('/tasks/t1')
+    await openParentPicker(el)
+    expect(shown(el, 'task-picker-error')?.textContent).toBe(copy)
+    await search(el, 'a')
+    expect(shown(el, 'task-picker-error')?.textContent).toBe(copy)
+    expect(shown(el, 'task-picker-list')).toBeNull()
+    expect((shown(el, 'task-picker-confirm') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('confirm sets the chosen parent, then the badge hears it and the task is read again; the task-id form keeps its text', async () => {
+    h_.getParentCandidates.mockResolvedValue({ kind: 'ok', items: [candidate('p1', 'Alpha'), candidate('p2', 'Beta')] })
+    h_.setParent.mockResolvedValue({ kind: 'ok', id: 't1', parentId: 'p2', depth: 1 })
+    const el = await mountAt('/tasks/t1')
+    typeInto(el, 'tasks-detail-set-parent-input', 'typed')
+    await flush()
+    expect(shown(el, 'task-picker-confirm')).toBeNull()
+    await openParentPicker(el)
+    await search(el, 'a')
+    expect((shown(el, 'task-picker-confirm') as HTMLButtonElement).disabled).toBe(true)
+    choose(el, 'p2')
+    await flush()
+    expect((shown(el, 'task-picker-confirm') as HTMLButtonElement).disabled).toBe(false)
+    clickOn(el, 'task-picker-confirm')
+    await flush()
+    expect(h_.setParent.mock.calls).toEqual([['t1', 'p2']])
+    expect(h_.notifyTasksChanged).toHaveBeenCalledTimes(1)
+    expect(h_.getTask).toHaveBeenCalledTimes(2)
+    expect(shown(el, 'task-picker')).toBeNull()
+    expect((shown(el, 'tasks-detail-set-parent-input') as HTMLInputElement).value).toBe('typed')
+  })
+
+  it.each([
+    ['INVALID_PARENT', '无效的父任务'],
+    ['DEPTH_EXCEEDED', '任务层级已达上限'],
+  ] as const)('a pick answered %s shows its copy next to the parent controls', async (code, copy) => {
+    h_.getParentCandidates.mockResolvedValue({ kind: 'ok', items: [candidate('p1', 'Alpha')] })
+    h_.setParent.mockResolvedValue({ kind: 'validation', code })
+    const el = await mountAt('/tasks/t1')
+    await pick(el, 'Al', 'p1')
+    expect(shown(el, 'tasks-detail-parent-error')?.textContent?.trim()).toBe(copy)
+    expect(shown(el, 'tasks-action-error')).toBeNull()
+    expect(h_.getTask).toHaveBeenCalledTimes(1)
+  })
+
+  it('a pick answered 404 shows the page action error, not the parent error', async () => {
+    h_.getParentCandidates.mockResolvedValue({ kind: 'ok', items: [candidate('p1', 'Alpha')] })
+    h_.setParent.mockResolvedValue({ kind: 'not_found' })
+    const el = await mountAt('/tasks/t1')
+    await pick(el, 'Al', 'p1')
+    expect(shown(el, 'tasks-action-error')?.textContent?.trim()).toBe('操作失败，请稍后重试')
+    expect(shown(el, 'tasks-detail-parent-error')).toBeNull()
+  })
+
+  it('the pick button is disabled while the parent is being set', async () => {
+    const pending = deferred<{ kind: 'ok'; id: string; parentId: string | null; depth: number }>()
+    h_.getParentCandidates.mockResolvedValue({ kind: 'ok', items: [candidate('p1', 'Alpha')] })
+    h_.setParent.mockReturnValue(pending.promise)
+    const el = await mountAt('/tasks/t1')
+    await pick(el, 'Al', 'p1')
+    expect((shown(el, 'tasks-detail-pick-parent') as HTMLButtonElement).disabled).toBe(true)
+    expect((shown(el, 'tasks-detail-comment-submit') as HTMLButtonElement).disabled).toBe(true)
+    pending.resolve({ kind: 'ok', id: 't1', parentId: 'p1', depth: 1 })
+    await flush()
+    expect((shown(el, 'tasks-detail-pick-parent') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('candidates that land after the picker was closed and opened again are dropped', async () => {
+    const first = deferred<unknown>()
+    const second = deferred<unknown>()
+    h_.getParentCandidates.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+    const el = await mountAt('/tasks/t1')
+    await openParentPicker(el)
+    clickOn(el, 'task-picker-cancel')
+    await flush()
+    await openParentPicker(el)
+    await search(el, 'a')
+    first.resolve({ kind: 'ok', items: [candidate('p1', 'Alpha')] })
+    await flush()
+    expect(rowIds(el)).toEqual([])
+    expect(shown(el, 'task-picker-loading')).toBeTruthy()
+    second.resolve({ kind: 'ok', items: [candidate('p2', 'Another')] })
+    await flush()
+    expect(rowIds(el)).toEqual(['p2'])
+  })
+
+  it('candidates for the task left behind that land after a move to another task are dropped', async () => {
+    const forT1 = deferred<unknown>()
+    const forT2 = deferred<unknown>()
+    h_.getTask.mockImplementation(async (id: string) => ({ kind: 'ok', task: taskDetail({ id, title: `Title-${id}` }) }))
+    h_.getParentCandidates.mockImplementation((id: string) => (id === 't1' ? forT1.promise : forT2.promise))
+    const el = await mountAt('/tasks/t1')
+    await openParentPicker(el)
+    await router!.push('/tasks/t2')
+    await flush()
+    expect(shown(el, 'tasks-detail-title')?.textContent).toBe('Title-t2')
+    expect(shown(el, 'task-picker')).toBeNull()
+    await openParentPicker(el)
+    await search(el, 'a')
+    forT1.resolve({ kind: 'ok', items: [candidate('p1', 'Alpha')] })
+    await flush()
+    expect(rowIds(el)).toEqual([])
+    forT2.resolve({ kind: 'ok', items: [candidate('p2', 'Another')] })
+    await flush()
+    expect(rowIds(el)).toEqual(['p2'])
+    expect(h_.getParentCandidates.mock.calls).toEqual([['t1'], ['t2']])
+  })
+
+  it('Escape closes the picker only; closing puts focus back on the pick button', async () => {
+    const el = await mountAt('/tasks/t1')
+    const reached: string[] = []
+    el.addEventListener('keydown', (event) => { reached.push(event.key) })
+    ;(shown(el, 'tasks-detail-pick-parent') as HTMLButtonElement).focus()
+    await openParentPicker(el)
+    expect(document.activeElement).toBe(shown(el, 'task-picker-search'))
+    const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    shown(el, 'task-picker-search')!.dispatchEvent(escape)
+    await flush()
+    expect(escape.defaultPrevented).toBe(true)
+    expect(reached).toEqual([])
+    expect(shown(el, 'task-picker')).toBeNull()
+    expect(shown(el, 'tasks-detail')).toBeTruthy()
+    expect(document.activeElement).toBe(shown(el, 'tasks-detail-pick-parent'))
+    await openParentPicker(el)
+    clickOn(el, 'task-picker-cancel')
+    await flush()
+    expect(shown(el, 'task-picker')).toBeNull()
+    expect(document.activeElement).toBe(shown(el, 'tasks-detail-pick-parent'))
   })
 })

@@ -44,6 +44,7 @@ const h_ = vi.hoisted(() => ({
   reopenTask: vi.fn(),
   listComments: vi.fn(),
   setParent: vi.fn(),
+  getParentCandidates: vi.fn(),
   addAssignee: vi.fn(),
   removeAssignee: vi.fn(),
   setCompletionMode: vi.fn(),
@@ -110,11 +111,17 @@ vi.mock('../src/tasks/tasksApi', async () => {
     // Package 1b: the detail page reads the names on the task; a bare stub answers undefined,
     // which the page reads as "no names" and leaves the ids as they are.
     getTaskPeople: vi.fn(),
+    // The list page's activity and the members dialog look names up (a bare stub answers undefined,
+    // which leaves the ids).
+    resolvePeople: vi.fn(),
     createTask: h_.createTask,
     completeTask: h_.completeTask,
     reopenTask: h_.reopenTask,
     listComments: h_.listComments,
     setParent: h_.setParent,
+    // The parent picker's read, and the real path-segment check the task picker applies to rows.
+    getParentCandidates: h_.getParentCandidates,
+    isPathSafeSegment: actual.isPathSafeSegment,
     addAssignee: h_.addAssignee,
     removeAssignee: h_.removeAssignee,
     setCompletionMode: h_.setCompletionMode,
@@ -410,6 +417,7 @@ beforeEach(() => {
   h_.reopenTask.mockReset().mockResolvedValue({ kind: 'ok' })
   h_.listComments.mockReset().mockResolvedValue({ kind: 'ok', items: [], total: 0 })
   h_.setParent.mockReset().mockResolvedValue({ kind: 'ok' })
+  h_.getParentCandidates.mockReset().mockResolvedValue({ kind: 'ok', items: [] })
   h_.addAssignee.mockReset().mockResolvedValue({ kind: 'ok' })
   h_.removeAssignee.mockReset().mockResolvedValue({ kind: 'ok' })
   h_.setCompletionMode.mockReset().mockResolvedValue({ kind: 'ok' })
@@ -2512,5 +2520,92 @@ describe('locale flip after mount — the grouping board', () => {
     expect(must(boardRow(el, 't2'), 'tasks-group-move-up').getAttribute('aria-label')).toBe('Move "Task Two" up one place')
     expect(must(el, 'tasks-groups-refresh').textContent?.trim()).toBe('Refresh')
     expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// The task pickers: the parent picked by title on the task page, a task picked by title on the
+// list page.
+// ---------------------------------------------------------------------------------------------
+
+const pickerPause = () => new Promise<void>((resolve) => setTimeout(resolve, 350))
+
+describe('EN locale — the task pickers render no CJK', () => {
+  beforeEach(() => {
+    setLocale('en')
+  })
+
+  it('the task page: the pick button, the toggle, and the open picker with its hint, rows, the refine hint, no match and each failure', async () => {
+    h_.getParentCandidates.mockResolvedValue({
+      kind: 'ok',
+      items: [...Array.from({ length: 51 }, (_, i) => ({ id: `p${i}`, title: `Parent ${i}` })), { id: 'q1', title: 'Twin' }, { id: 'q2', title: 'Twin' }],
+    })
+    const el = await mountViewAt('/tasks/t1')
+    expect(must(el, 'tasks-detail-pick-parent').textContent).toBe('Choose a parent task')
+    expect(must(el, 'tasks-detail-set-parent-by-id-toggle').textContent).toBe('Set by task ID')
+    await click(el, 'tasks-detail-pick-parent')
+    expect(must(el, 'task-picker').getAttribute('aria-label')).toBe('Choose a parent task')
+    expect(must(el, 'task-picker-type-hint').textContent).toBe('Type a title to search')
+    expect(must(el, 'task-picker-search').getAttribute('placeholder')).toBe('Task title')
+    expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+    typeInto(el, 'task-picker-search', 'Parent')
+    await flush()
+    expect(must(el, 'task-picker-more').textContent).toBe('Many tasks match. Type more of the title.')
+    expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+    typeInto(el, 'task-picker-search', 'Twin')
+    await flush()
+    expect(el.querySelectorAll('[data-testid="task-picker-id"]')).toHaveLength(2)
+    expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+    typeInto(el, 'task-picker-search', 'zzz')
+    await flush()
+    expect(must(el, 'task-picker-empty').textContent).toBe('No task matches')
+    expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+    for (const [result, copy] of [
+      [{ kind: 'forbidden' }, 'You do not have permission to change this task'],
+      [{ kind: 'error', status: 500 }, 'Could not load tasks. Try again later.'],
+    ] as const) {
+      await click(el, 'task-picker-cancel')
+      h_.getParentCandidates.mockResolvedValue(result)
+      await click(el, 'tasks-detail-pick-parent')
+      expect(must(el, 'task-picker-error').textContent).toBe(copy)
+      expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+    }
+  })
+
+  it('the list page: the pick button, the toggle, and the open picker with its hint, a done row and the failure copy', async () => {
+    h_.listTasks.mockResolvedValue({ kind: 'ok', items: [listItem({ id: 't5', title: 'Task Five', status: 'done' })] })
+    const el = await mountListPage()
+    expect(must(el, 'tasks-list-detail-pick-task').textContent).toBe('Choose a task')
+    expect(must(el, 'tasks-list-detail-add-task-by-id-toggle').textContent).toBe('Add by task ID')
+    await click(el, 'tasks-list-detail-pick-task')
+    expect(must(el, 'task-picker').getAttribute('aria-label')).toBe('Choose a task')
+    expect(must(el, 'task-picker-type-hint').textContent).toBe('Type a title to search')
+    expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+    typeInto(el, 'task-picker-search', 'Task')
+    await pickerPause()
+    await flush()
+    expect(must(el, 'task-picker-done').textContent).toBe('Completed')
+    expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+    h_.listTasks.mockResolvedValue({ kind: 'org_missing' })
+    typeInto(el, 'task-picker-search', 'Tasks')
+    await pickerPause()
+    await flush()
+    expect(must(el, 'task-picker-error').textContent).toBe('Select an organization to view tasks')
+    expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+  })
+})
+
+describe('ZH locale — the task pickers render CJK (positive control)', () => {
+  it('both pick buttons and both open pickers', async () => {
+    const el = await mountViewAt('/tasks/t1')
+    expect(must(el, 'tasks-detail-pick-parent').textContent).toBe('选择父任务')
+    await click(el, 'tasks-detail-pick-parent')
+    expect(must(el, 'task-picker-type-hint').textContent).toBe('输入标题开始搜索')
+    expect(renderedTextAndAttributes(must(el, 'task-picker'))).toMatch(CJK)
+    unmountCurrent()
+    const list = await mountListPage()
+    expect(must(list, 'tasks-list-detail-pick-task').textContent).toBe('选择任务')
+    await click(list, 'tasks-list-detail-pick-task')
+    expect(renderedTextAndAttributes(must(list, 'task-picker'))).toMatch(CJK)
   })
 })

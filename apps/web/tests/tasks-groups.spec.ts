@@ -2022,6 +2022,7 @@ function pageControls(el: HTMLElement): Record<string, boolean> {
     rename: usable('tasks-list-detail-rename'),
     archive: usable('tasks-list-detail-archive'),
     addTask: usable('tasks-list-detail-add-task-input'),
+    pickTask: usable('tasks-list-detail-pick-task'),
     removeTask: shownAll(el, 'tasks-list-detail-item-remove').every((button) => !disabled(button)),
     members: usable('tasks-list-detail-members'),
   }
@@ -2084,7 +2085,7 @@ describe('/task-lists/:id — the reads', () => {
     must(el, 'tasks-list-detail-items')
     expect(rowOrder(el, 'tasks-list-detail-item')).toEqual(['t1', 't2', 't3'])
     expect(board(el)).toBeNull()
-    expect(pageControls(el)).toEqual({ rename: true, archive: true, addTask: true, removeTask: true, members: true })
+    expect(pageControls(el)).toEqual({ rename: true, archive: true, addTask: true, pickTask: true, removeTask: true, members: true })
   })
 
   it('a groups read that reports no org: the org guidance block', async () => {
@@ -2281,11 +2282,11 @@ describe('/task-lists/:id — one write at a time with the page', () => {
     h_.listPlaceReply.mockImplementationOnce(() => answer.promise)
     const el = await mountAt('/task-lists/tl_1')
     await clickIn(el, 't2', 'tasks-group-add-to-order')
-    expect(pageControls(el)).toEqual({ rename: false, archive: false, addTask: false, removeTask: false, members: true })
+    expect(pageControls(el)).toEqual({ rename: false, archive: false, addTask: false, pickTask: false, removeTask: false, members: true })
     expect(must(el, 'tasks-list-detail').getAttribute('aria-busy')).toBe('true')
     answer.resolve(applyPlace(listGroups.tl_1, listPlacements.tl_1, listRows.tl_1, 't2', '{"groupId":null,"position":0}'))
     await flush()
-    expect(pageControls(el)).toEqual({ rename: true, archive: true, addTask: true, removeTask: true, members: true })
+    expect(pageControls(el)).toEqual({ rename: true, archive: true, addTask: true, pickTask: true, removeTask: true, members: true })
   })
 
   it('a page write disables the board: no move, no handle, no group form; a dispatched move sends nothing', async () => {

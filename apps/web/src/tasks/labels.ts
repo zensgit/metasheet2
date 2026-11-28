@@ -112,6 +112,16 @@ export const TASKS_ZH = {
   setParentPlaceholder: '设为子任务（填写父任务ID）',
   setParent: '设置父任务',
   makeIndependent: '取消父任务',
+  // The task picker (TaskPicker.vue): the parent picked by title on the task page, a task picked by
+  // title on the list page.
+  pickParent: '选择父任务',
+  setParentByIdToggle: '按任务 ID 设置',
+  taskPickerSearchLabel: '搜索任务',
+  taskPickerSearchPlaceholder: '输入任务标题',
+  taskPickerTypeToSearch: '输入标题开始搜索',
+  taskPickerNoMatch: '没有匹配的任务',
+  taskPickerRefineSearch: '匹配的任务较多，请输入更完整的标题',
+  taskPickerLoadFailed: '加载任务失败，请稍后重试',
   followersHeading: '关注人',
   followersUnknown: '关注人列表在有变更后才会显示',
   addFollowerPlaceholder: '添加关注人（用户ID）',
@@ -273,6 +283,8 @@ export const TASKS_ZH = {
   listAddTaskLabel: '加入任务（任务 ID）',
   listAddTaskPlaceholder: '任务 ID',
   listAddTask: '加入任务',
+  listPickTask: '选择任务',
+  listAddTaskByIdToggle: '按任务 ID 加入',
   // RULED(2026-10-07): [own-25] (PR-3a, R12 (a1)) — adding needs a direct role on the task
   // (creator or assignee; an edit right that comes only from a list does not count), and the 404
   // folds that with a missing task and an unavailable list.
@@ -485,6 +497,14 @@ export const TASKS_EN: Record<keyof typeof TASKS_ZH, string> = {
   setParentPlaceholder: 'Make this a subtask (parent task ID)',
   setParent: 'Set parent task',
   makeIndependent: 'Remove parent task',
+  pickParent: 'Choose a parent task',
+  setParentByIdToggle: 'Set by task ID',
+  taskPickerSearchLabel: 'Search tasks',
+  taskPickerSearchPlaceholder: 'Task title',
+  taskPickerTypeToSearch: 'Type a title to search',
+  taskPickerNoMatch: 'No task matches',
+  taskPickerRefineSearch: 'Many tasks match. Type more of the title.',
+  taskPickerLoadFailed: 'Could not load tasks. Try again later.',
   followersHeading: 'Followers',
   followersUnknown: 'The follower list appears after a change is made',
   addFollowerPlaceholder: 'Add follower (user ID)',
@@ -620,6 +640,8 @@ export const TASKS_EN: Record<keyof typeof TASKS_ZH, string> = {
   listAddTaskLabel: 'Add a task (task ID)',
   listAddTaskPlaceholder: 'Task ID',
   listAddTask: 'Add task',
+  listPickTask: 'Choose a task',
+  listAddTaskByIdToggle: 'Add by task ID',
   listAddTaskNotFound: 'The task does not exist, you are not its creator or an assignee, or the list is not available',
   listRemoveTask: 'Remove from list',
   listRemoveTaskConfirmPrompt: 'Remove this task from the list?',
@@ -744,7 +766,8 @@ export const TASKS_FMT_ZH = {
   /** Accessible name of a task row's remove button on the list page (design §4.2). */
   listRemoveTaskNamed: (title: string): string => `将「${title}」移出清单`,
   /** Members dialog (design §5.2): accessible names of a row's role select, remove and transfer
-   *  buttons, and the transfer's confirmation prompt — `userId` is the row's member. */
+   *  buttons, and the transfer's confirmation prompt — `userId` is the row's member as the dialog
+   *  shows it: the name, the id when there is none, or both when two rows share the name. */
   membersRoleFor: (userId: string): string => `「${userId}」的角色`,
   membersRemoveNamed: (userId: string): string => `移除成员「${userId}」`,
   membersTransferNamed: (userId: string): string => `将所有权转让给「${userId}」`,

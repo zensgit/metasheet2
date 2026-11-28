@@ -41,10 +41,16 @@ const h_ = vi.hoisted(() => ({
   removeItemReply: vi.fn(),
   /** `GET /api/task-lists/:id/events?…` (id, query). */
   eventsReply: vi.fn(),
+  /** `GET /api/tasks?view=&status=&q=` (view, status, q) -> the response; an empty page by default. */
+  tasksReply: vi.fn(),
+  /** `GET /api/tasks/people?…` (query): the people lookup that names the activity's actors. */
+  peopleReply: vi.fn(),
 }))
 
 vi.mock('../src/utils/api', () => ({
   apiFetch: h_.apiFetch,
+  // No org header: the account-switch cells compare the token's subject.
+  authHeaders: () => ({}),
 }))
 
 vi.mock('../src/tasks/tasksContext', () => ({
@@ -71,6 +77,7 @@ vi.mock('../src/composables/useLocale', () => ({
 import TaskListView from '../src/views/tasks/TaskListView.vue'
 import { onListsChanged } from '../src/tasks/tasksListsBus'
 import { formatViewerInstant } from '../src/tasks/tasksDateDisplay'
+import { notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
 
 // ---------------------------------------------------------------------------------------------
 // Fixtures and the fake backend
@@ -149,12 +156,19 @@ async function fakeFetch(path: string, init?: FetchInit): Promise<Response> {
     return h_.removeItemReply(decodeURIComponent(match[1]), decodeURIComponent(match[2]))
   }
   if (method === 'GET' && (match = /^\/api\/task-lists\/([^/]+)\/events$/.exec(pathname))) return h_.eventsReply(decodeURIComponent(match[1]), query)
+  // The people lookup that names the activity's actors (`h_.peopleReply`; names nobody by default).
+  if (method === 'GET' && pathname === '/api/tasks/people') return h_.peopleReply(query)
   // M4 FE-7: the grouping board's two reads — a list with no custom groups and no placements yet
   // (tasks-groups.spec.ts covers the board itself).
   if (method === 'GET' && (match = /^\/api\/task-lists\/([^/]+)\/groups$/.exec(pathname))) {
     return page([{ id: `tg_${decodeURIComponent(match[1])}`, scope: 'list', name: '默认分组', position: 0, isDefault: true }], query)
   }
   if (method === 'GET' && /^\/api\/task-lists\/[^/]+\/group-items$/.test(pathname)) return page([], query)
+  // The task picker's search.
+  if (method === 'GET' && pathname === '/api/tasks') {
+    const params = new URLSearchParams(query)
+    return h_.tasksReply(params.get('view'), params.get('status'), params.get('q'))
+  }
   unexpected.push(`${method} ${path}`)
   return jsonResponse(599, {})
 }
@@ -342,6 +356,8 @@ beforeEach(() => {
     return jsonResponse(200, { listId: id, taskId })
   })
   h_.eventsReply.mockReset().mockImplementation((id: string, query: string) => page(events[id] ?? [], query))
+  h_.tasksReply.mockReset().mockImplementation(() => jsonResponse(200, { items: [], total: 0 }))
+  h_.peopleReply.mockReset().mockImplementation(() => jsonResponse(200, { items: [], truncated: false }))
 })
 
 afterEach(() => {
@@ -963,6 +979,7 @@ describe('list page — one write at a time', () => {
       'tasks-list-detail-archive',
       'tasks-list-detail-add-task-input',
       'tasks-list-detail-add-task-submit',
+      'tasks-list-detail-pick-task',
       'tasks-list-detail-item-remove',
     ]) {
       expect(disabled(el, id), id).toBe(true)
@@ -1366,5 +1383,585 @@ describe('list page — activity', () => {
     const el = await mountAt('/task-lists/tl_1')
     await click(el, 'tasks-list-detail-events-toggle')
     must(el, 'tasks-view-org-missing')
+  })
+})
+
+describe('list page — activity — names', () => {
+  /** The ids of each people lookup, in the order they were sent. */
+  const lookups = () => h_.peopleReply.mock.calls.map(([query]) => (new URLSearchParams(query as string).get('ids') ?? '').split(','))
+  const actorTexts = (el: HTMLElement) => shownAll(el, 'tasks-list-detail-event-actor').map((node) => node.textContent?.trim())
+  /** A lookup answer naming each `[id, name]`. */
+  const named = (people: Array<[string, string]>) =>
+    jsonResponse(200, { items: people.map(([id, name]) => ({ id, name, detail: '', canUseTasks: true })), truncated: false })
+  /** 150 events: the first page by u1 only, the second by u1 and u2. */
+  const twoPages = () =>
+    Array.from({ length: 150 }, (_, i) => event(`ev${String(i).padStart(3, '0')}`, 'renamed', { actorId: i < 100 || i % 2 === 0 ? 'u1' : 'u2' }))
+  /** `count` events, each by its own actor u0, u1, …, in that order. */
+  const ownActors = (count: number) =>
+    Array.from({ length: count }, (_, i) => event(`ev${String(i).padStart(2, '0')}`, 'renamed', { actorId: `u${i}` }))
+
+  it('names replace the actor ids, one lookup for the distinct actors of the page; an actor it leaves out, or whose id holds a comma, stays an id', async () => {
+    events.tl_1 = [
+      event('ev5', 'archived', { actorId: 'u2' }),
+      event('ev4', 'renamed'),
+      event('ev3', 'renamed'),
+      event('ev2', 'created', { actorId: 'u3' }),
+      event('ev1', 'created', { actorId: 'u,9' }),
+    ]
+    h_.peopleReply.mockImplementation(() => named([['u1', 'Ann'], ['u2', 'Bo'], ['u,9', 'Cy']]))
+    const el = await mountAt('/task-lists/tl_1')
+    expect(lookups()).toEqual([])
+    await click(el, 'tasks-list-detail-events-toggle')
+    await flush()
+    expect(lookups()).toEqual([['u2', 'u1', 'u3']])
+    expect(actorTexts(el)).toEqual(['Bo', 'Ann', 'Ann', 'u3', 'u,9'])
+  })
+
+  it('a page that lands after the panel closed is not looked up; reopening looks up the page it reads', async () => {
+    events.tl_1 = [event('ev1', 'renamed', { actorId: 'u2' })]
+    const first = deferred<Response>()
+    h_.eventsReply.mockImplementationOnce(() => first.promise)
+    const el = await mountAt('/task-lists/tl_1')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await click(el, 'tasks-list-detail-events-toggle')
+    first.resolve(jsonResponse(200, { items: [event('ev_old', 'created', { actorId: 'u9' })], total: 1 }))
+    await flush()
+    expect(lookups()).toEqual([])
+    await click(el, 'tasks-list-detail-events-toggle')
+    await flush()
+    expect(lookups()).toEqual([['u2']])
+  })
+
+  it('load more looks up only the actors not asked yet', async () => {
+    events.tl_1 = twoPages()
+    const el = await mountAt('/task-lists/tl_1')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await flush()
+    expect(lookups()).toEqual([['u1']])
+    await click(el, 'tasks-list-detail-events-more')
+    await flush()
+    expect(lookups()).toEqual([['u1'], ['u2']])
+  })
+
+  it('sixty actors are looked up as fifty, then ten once the first answer is in', async () => {
+    events.tl_1 = ownActors(60)
+    const firstLookup = deferred<Response>()
+    h_.peopleReply.mockImplementationOnce(() => firstLookup.promise)
+    const el = await mountAt('/task-lists/tl_1')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await flush()
+    expect(lookups().map((ids) => ids.length)).toEqual([50])
+    expect(lookups()[0]).toEqual(Array.from({ length: 50 }, (_, i) => `u${i}`))
+    firstLookup.resolve(named([['u0', 'Ann']]))
+    await flush()
+    expect(lookups().map((ids) => ids.length)).toEqual([50, 10])
+    expect(lookups()[1]).toEqual(Array.from({ length: 10 }, (_, i) => `u${50 + i}`))
+    expect(actorTexts(el).slice(0, 2)).toEqual(['Ann', 'u1'])
+  })
+
+  it('twenty actors with 255-character ids are looked up as sixteen and four, each part at most 4096 characters', async () => {
+    const longId = (i: number) => `${'a'.repeat(253)}${String(i).padStart(2, '0')}`
+    events.tl_1 = Array.from({ length: 20 }, (_, i) => event(`ev${String(i).padStart(2, '0')}`, 'renamed', { actorId: longId(i) }))
+    const el = await mountAt('/task-lists/tl_1')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await flush()
+    expect(lookups().map((ids) => ids.length)).toEqual([16, 4])
+    expect(lookups().map((ids) => ids.join(',').length)).toEqual([4095, 1023])
+    expect(actorTexts(el)[0]).toBe(longId(0))
+  })
+
+  it('a 403 lookup leaves the ids, and nothing is looked up again: not on reopening, not for the new actor of the next page', async () => {
+    events.tl_1 = twoPages()
+    h_.peopleReply.mockImplementation(() => jsonResponse(403, { error: 'Insufficient permissions' }))
+    const el = await mountAt('/task-lists/tl_1')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await flush()
+    expect(lookups()).toEqual([['u1']])
+    expect(actorTexts(el)[0]).toBe('u1')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await click(el, 'tasks-list-detail-events-more')
+    await flush()
+    expect(lookups()).toEqual([['u1']])
+    expect(actorTexts(el)).toContain('u2')
+  })
+
+  it.each([
+    ['a 429', () => jsonResponse(429, { error: { code: 'RATE_LIMITED' } })],
+    ['a 500', () => jsonResponse(500, {})],
+    ['a malformed 200', () => jsonResponse(200, { items: [{ id: 'u1' }], truncated: false })],
+    ['a transport failure', () => Promise.reject(new TypeError('network down'))],
+  ] as const)("%s leaves the IDs visible until reopening retries the lookup", async (_label, reply) => {
+    events.tl_1 = twoPages()
+    h_.peopleReply.mockImplementationOnce(reply).mockImplementation(() => named([['u1', 'Ann'], ['u2', 'Bo']]))
+    const el = await mountAt('/task-lists/tl_1')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await flush()
+    expect(actorTexts(el)[0]).toBe('u1')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await click(el, 'tasks-list-detail-events-more')
+    await flush()
+    expect(lookups()).toEqual([['u1'], ['u1'], ['u2']])
+    expect(new Set(actorTexts(el))).toEqual(new Set(['Ann', 'Bo']))
+  })
+
+  it('reopening retries the failed and unsent batches while keeping successful names', async () => {
+    const ids = Array.from({ length: 34 }, (_, i) => 'a'.repeat(253) + String(i).padStart(2, '0'))
+    events.tl_1 = ids.map((id, i) => event(String(i), 'renamed', { actorId: id }))
+    h_.peopleReply.mockImplementationOnce(() => named([[ids[0], 'Ann']]))
+      .mockImplementationOnce(() => jsonResponse(500, {}))
+      .mockImplementationOnce(() => named([[ids[16], 'Bo']]))
+      .mockImplementationOnce(() => named([[ids[32], 'Cy']]))
+    const el = await mountAt('/task-lists/tl_1')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await flush()
+    expect(lookups()).toEqual([ids.slice(0, 16), ids.slice(16, 32)])
+    expect(actorTexts(el)[16]).toBe(ids[16])
+    await click(el, 'tasks-list-detail-events-toggle')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await flush()
+    expect(lookups()).toEqual([ids.slice(0, 16), ids.slice(16, 32), ids.slice(16, 32), ids.slice(32)])
+    expect([0, 16, 32].map((index) => actorTexts(el)[index])).toEqual(['Ann', 'Bo', 'Cy'])
+  })
+
+  it("a route edge drops the old list's names: the new list's actor is asked again, and shows its id until the answer", async () => {
+    events.tl_1 = [event('ev1', 'renamed', { actorId: 'u2' })]
+    events.tl_2 = [event('ev_b', 'created', { listId: 'tl_2', actorId: 'u2' })]
+    h_.peopleReply.mockImplementationOnce(() => named([['u2', 'Bo']]))
+    const el = await mountAt('/task-lists/tl_1')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await flush()
+    expect(actorTexts(el)).toEqual(['Bo'])
+    const second = deferred<Response>()
+    h_.peopleReply.mockImplementationOnce(() => second.promise)
+    await go('/task-lists/tl_2')
+    await click(el, 'tasks-list-detail-events-toggle')
+    expect(lookups()).toEqual([['u2'], ['u2']])
+    expect(actorTexts(el)).toEqual(['u2'])
+    second.resolve(named([['u2', 'Bo']]))
+    await flush()
+    expect(actorTexts(el)).toEqual(['Bo'])
+  })
+
+  it('a lookup answered after the route moved on names nothing on the new list', async () => {
+    events.tl_1 = [event('ev1', 'renamed', { actorId: 'u2' })]
+    events.tl_2 = [event('ev_b', 'created', { listId: 'tl_2', actorId: 'u2' })]
+    const late = deferred<Response>()
+    h_.peopleReply.mockImplementationOnce(() => late.promise)
+    const el = await mountAt('/task-lists/tl_1')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await go('/task-lists/tl_2')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await flush()
+    late.resolve(named([['u2', 'Bo']]))
+    await flush()
+    expect(lookups()).toEqual([['u2'], ['u2']])
+    expect(actorTexts(el)).toEqual(['u2'])
+  })
+
+  it('nothing is looked up once the page is left: the rest of a split lookup is not sent', async () => {
+    events.tl_1 = ownActors(60)
+    const firstLookup = deferred<Response>()
+    h_.peopleReply.mockImplementationOnce(() => firstLookup.promise)
+    const el = await mountAt('/task-lists/tl_1')
+    await click(el, 'tasks-list-detail-events-toggle')
+    await go('/tasks')
+    must(el, 'other-page')
+    firstLookup.resolve(named([['u0', 'Ann']]))
+    await flush()
+    expect(lookups().map((ids) => ids.length)).toEqual([50])
+  })
+
+  describe('account switches', () => {
+    const fakeToken = (payload: Record<string, unknown>) => `h.${btoa(JSON.stringify(payload)).replace(/=+$/, '')}.s`
+    const TOKEN_A = fakeToken({ sub: 'u1', exp: 4102444800 })
+    const TOKEN_A_REFRESHED = fakeToken({ sub: 'u1', exp: 4102448400 })
+    const TOKEN_B = fakeToken({ sub: 'u9', exp: 4102444800 })
+    /** Another tab signs in: the shared storage changes and this tab is told nothing. */
+    const signIn = (token: string) => localStorage.setItem('auth_token', token)
+    /** The same, plus the `storage` event a browser delivers to the other tabs. */
+    const signInElsewhereWithEvent = (token: string) => {
+      signIn(token)
+      window.dispatchEvent(new StorageEvent('storage', { key: 'auth_token', newValue: token }))
+    }
+    /** A sign-in in this tab: the session switch `useAuth` announces. */
+    const signInHere = (token: string) => {
+      signIn(token)
+      notifyAuthPrincipalChange()
+    }
+
+    beforeEach(() => {
+      localStorage.removeItem('auth_token')
+      signIn(TOKEN_A)
+      events.tl_1 = [event('ev1', 'renamed', { actorId: 'u2' })]
+      h_.peopleReply.mockImplementation(() => named([['u2', 'Bo']]))
+    })
+
+    afterEach(() => {
+      localStorage.removeItem('auth_token')
+    })
+
+    for (const [how, switchTo] of [
+      ['another tab (a storage change)', signInElsewhereWithEvent],
+      ['this tab (a session switch)', signInHere],
+    ] as Array<[string, (token: string) => void]>) {
+      it(`a switch to another account from ${how} drops the names`, async () => {
+        const el = await mountAt('/task-lists/tl_1')
+        await click(el, 'tasks-list-detail-events-toggle')
+        await flush()
+        expect(actorTexts(el)).toEqual(['Bo'])
+        switchTo(TOKEN_B)
+        await flush()
+        expect(actorTexts(el)).toEqual(['u2'])
+      })
+
+      it(`a lookup asked before a switch seen from ${how} that lands after it is dropped`, async () => {
+        const late = deferred<Response>()
+        h_.peopleReply.mockImplementationOnce(() => late.promise)
+        const el = await mountAt('/task-lists/tl_1')
+        await click(el, 'tasks-list-detail-events-toggle')
+        expect(lookups()).toEqual([['u2']])
+        switchTo(TOKEN_B)
+        await flush()
+        late.resolve(named([['u2', 'Bo']]))
+        await flush()
+        expect(actorTexts(el)).toEqual(['u2'])
+      })
+    }
+
+    it('a lookup that lands after a silent switch to another account is dropped', async () => {
+      const late = deferred<Response>()
+      h_.peopleReply.mockImplementationOnce(() => late.promise)
+      const el = await mountAt('/task-lists/tl_1')
+      await click(el, 'tasks-list-detail-events-toggle')
+      expect(lookups()).toEqual([['u2']])
+      signIn(TOKEN_B)
+      late.resolve(named([['u2', 'Bo']]))
+      await flush()
+      expect(actorTexts(el)).toEqual(['u2'])
+    })
+
+    it('negative control: a token refresh for the same person keeps the names', async () => {
+      const el = await mountAt('/task-lists/tl_1')
+      await click(el, 'tasks-list-detail-events-toggle')
+      await flush()
+      expect(actorTexts(el)).toEqual(['Bo'])
+      signInElsewhereWithEvent(TOKEN_A_REFRESHED)
+      notifyAuthPrincipalChange()
+      await flush()
+      expect(actorTexts(el)).toEqual(['Bo'])
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// A task picked by title: the picker searches the viewer's created and assigned tasks after a
+// pause; the task-id form stays, folded under a toggle.
+// ---------------------------------------------------------------------------------------------
+
+describe('list page — a task picked by title', () => {
+  const pause = () => new Promise<void>((resolve) => setTimeout(resolve, 350))
+
+  const found = (rows: Array<Record<string, unknown>>, total = rows.length) => jsonResponse(200, { items: rows, total })
+
+  function taskSearches(): Array<{ view: string | null; status: string | null; q: string | null }> {
+    return fetchCalls()
+      .filter(([path, init]) => path.startsWith('/api/tasks?') && (init?.method ?? 'GET') === 'GET')
+      .map(([path]) => {
+        const params = new URLSearchParams(path.split('?')[1])
+        return { view: params.get('view'), status: params.get('status'), q: params.get('q') }
+      })
+  }
+
+  function placementReads(id = 'tl_1'): number {
+    return fetchCalls().filter(([path]) => path.startsWith(`/api/task-lists/${id}/group-items?`)).length
+  }
+
+  async function openTaskPicker(el: HTMLElement): Promise<void> {
+    await click(el, 'tasks-list-detail-pick-task')
+  }
+
+  async function searchTasks(el: HTMLElement, value: string): Promise<void> {
+    await typeInto(el, 'task-picker-search', value)
+    await pause()
+    await flush()
+  }
+
+  function pickerRowIds(el: HTMLElement): string[] {
+    return shownAll(el, 'task-picker-row').map((row) => row.getAttribute('data-task-id') ?? '')
+  }
+
+  function choose(el: HTMLElement, id: string): void {
+    el.querySelector<HTMLInputElement>(`[data-testid="task-picker-row"][data-task-id="${id}"] input[type="radio"]`)!.click()
+  }
+
+  it('the pick button sits next to a task-id form folded under its toggle; nothing is read on mount or for a blank term', async () => {
+    const el = await mountAt('/task-lists/tl_1')
+    expect(text(el, 'tasks-list-detail-pick-task')).toBe('选择任务')
+    const form = must(el, 'tasks-list-detail-add-task-form')
+    const toggle = must(el, 'tasks-list-detail-add-task-by-id-toggle')
+    expect(toggle.textContent?.trim()).toBe('按任务 ID 加入')
+    expect(form.style.display).toBe('none')
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    await click(el, 'tasks-list-detail-add-task-by-id-toggle')
+    expect(form.style.display).toBe('')
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    await openTaskPicker(el)
+    expect(text(el, 'task-picker-type-hint')).toBe('输入标题开始搜索')
+    await searchTasks(el, '   ')
+    expect(text(el, 'task-picker-type-hint')).toBe('输入标题开始搜索')
+    expect(taskSearches()).toEqual([])
+  })
+
+  it('a term is searched once after the pause, in the created and the assigned views, any status, as normalized', async () => {
+    const el = await mountAt('/task-lists/tl_1')
+    await openTaskPicker(el)
+    await typeInto(el, 'task-picker-search', '  Plan  ')
+    expect(taskSearches()).toEqual([])
+    await pause()
+    await flush()
+    expect(taskSearches()).toEqual([
+      { view: 'created', status: 'all', q: 'Plan' },
+      { view: 'assigned', status: 'all', q: 'Plan' },
+    ])
+  })
+
+  it('answers to an older term are dropped', async () => {
+    const late = deferred<Response>()
+    h_.tasksReply.mockImplementation((_view: string, _status: string, q: string) => (q === 'Pl' ? late.promise : found([item('t7', 'Plan A')])))
+    const el = await mountAt('/task-lists/tl_1')
+    await openTaskPicker(el)
+    await searchTasks(el, 'Pl')
+    expect(shown(el, 'task-picker-loading')).toBeTruthy()
+    await searchTasks(el, 'Plan')
+    expect(pickerRowIds(el)).toEqual(['t7'])
+    late.resolve(found([item('t6', 'Pl old')]))
+    await flush()
+    expect(pickerRowIds(el)).toEqual(['t7'])
+  })
+
+  it('an older answer arriving during the pause before the next search never supplies a choice', async () => {
+    const late = deferred<Response>()
+    h_.tasksReply.mockImplementation((view: string, _status: string, q: string) => {
+      if (view === 'assigned') return found([])
+      return q === 'Pl' ? late.promise : found([item('t7', 'Plan A')])
+    })
+    const el = await mountAt('/task-lists/tl_1')
+    await openTaskPicker(el)
+    await searchTasks(el, 'Pl')
+    await typeInto(el, 'task-picker-search', 'Plan')
+    late.resolve(found([item('t6', 'Pl old')]))
+    await flush()
+    expect(taskSearches().map((read) => read.q)).toEqual(['Pl', 'Pl'])
+    expect(pickerRowIds(el)).toEqual([])
+    expect(disabled(el, 'task-picker-confirm')).toBe(true)
+    await pause()
+    await flush()
+    expect(pickerRowIds(el)).toEqual(['t7'])
+  })
+
+  it('rows are merged by id, created first; tasks already in the list are left out; a done task is marked; a blank title shows the id', async () => {
+    h_.tasksReply.mockImplementation((view: string) => (view === 'created'
+      ? found([item('t5', 'Plan E'), item('t1', 'Task One'), item('t6', 'Plan F', { status: 'done' })])
+      : found([item('t6', 'Plan F', { status: 'done' }), item('t8', '  ')])))
+    const el = await mountAt('/task-lists/tl_1')
+    await openTaskPicker(el)
+    await searchTasks(el, 'Plan')
+    expect(pickerRowIds(el)).toEqual(['t5', 't6', 't8'])
+    const rows = shownAll(el, 'task-picker-row').map((row) => [
+      row.querySelector('[data-testid="task-picker-title"]')?.textContent,
+      row.querySelector('[data-testid="task-picker-done"]')?.textContent ?? null,
+    ])
+    expect(rows).toEqual([['Plan E', null], ['Plan F', '已完成'], ['t8', null]])
+  })
+
+  it("when the list's items were read only in part, no task is left out", async () => {
+    h_.itemsReply.mockImplementation((id: string, query: string) => {
+      const offset = Number(new URLSearchParams(query).get('offset'))
+      return jsonResponse(200, { items: offset === 0 ? items[id] : [], total: 5 })
+    })
+    h_.tasksReply.mockImplementation(() => found([item('t1', 'Task One'), item('t5', 'Task Five')]))
+    const el = await mountAt('/task-lists/tl_1')
+    must(el, 'tasks-list-detail-items-truncated')
+    await openTaskPicker(el)
+    await searchTasks(el, 'Task')
+    expect(pickerRowIds(el)).toEqual(['t1', 't5'])
+  })
+
+  it.each([
+    ['a row whose id cannot be placed in a path', () => found([item('t5', 'Plan E'), item('..', 'Plan Up')]), '加载任务失败，请稍后重试'],
+    ['a row with a status outside open and done', () => found([item('t5', 'Plan E', { status: 'archived' })]), '加载任务失败，请稍后重试'],
+    ['a 500', () => jsonResponse(500, {}), '加载任务失败，请稍后重试'],
+    ['a 403', () => jsonResponse(403, { error: 'Insufficient permissions' }), '您没有权限修改此任务'],
+    ['the degraded no-org body', () => jsonResponse(200, { degraded: true, reason: 'org_missing', items: [] }), '请先选择一个组织后再查看任务'],
+  ] as const)('%s in the assigned view shows its copy and no rows', async (_label, reply, copy) => {
+    h_.tasksReply.mockImplementation((view: string) => (view === 'assigned' ? reply() : found([item('t5', 'Plan E')])))
+    const el = await mountAt('/task-lists/tl_1')
+    await openTaskPicker(el)
+    await searchTasks(el, 'Plan')
+    expect(text(el, 'task-picker-error')).toBe(copy)
+    expect(pickerRowIds(el)).toEqual([])
+    expect(shown(el, 'tasks-view-org-missing')).toBeNull()
+  })
+
+  it('confirm adds the chosen task, then the items and the placements are read again; the task-id form keeps its text', async () => {
+    h_.tasksReply.mockImplementation((view: string) => (view === 'created' ? found([item('t9', 'Plan Nine')]) : found([])))
+    const el = await mountAt('/task-lists/tl_1')
+    await typeInto(el, 'tasks-list-detail-add-task-input', 'typed')
+    await openTaskPicker(el)
+    await searchTasks(el, 'Plan')
+    expect(disabled(el, 'task-picker-confirm')).toBe(true)
+    choose(el, 't9')
+    await flush()
+    await click(el, 'task-picker-confirm')
+    expect(requests('POST', '/api/task-lists/tl_1/items').map(([, init]) => init?.body)).toEqual([JSON.stringify({ taskId: 't9' })])
+    expect(shown(el, 'task-picker')).toBeNull()
+    expect(itemReads()).toBe(2)
+    expect(placementReads()).toBe(2)
+    expect(itemRows(el).map((row) => row[0])).toEqual(['t1', 't2', 't9'])
+    expect((must(el, 'tasks-list-detail-add-task-input') as HTMLInputElement).value).toBe('typed')
+    expect(h_.notifyTasksChanged).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['404', NOT_FOUND, '任务不存在、你不是它的创建人或负责人，或清单不可用'],
+    ['422 LIMIT', () => jsonResponse(422, { error: { code: 'LIMIT' } }), '一个任务最多属于 10 个清单'],
+  ] as const)('a pick answered %s shows its copy at the add error, outside the folded form', async (_label, reply, copy) => {
+    h_.addItemReply.mockImplementation(reply)
+    h_.tasksReply.mockImplementation(() => found([item('t9', 'Plan Nine')]))
+    const el = await mountAt('/task-lists/tl_1')
+    await openTaskPicker(el)
+    await searchTasks(el, 'Plan')
+    choose(el, 't9')
+    await flush()
+    await click(el, 'task-picker-confirm')
+    const error = must(el, 'tasks-list-detail-add-task-error')
+    expect(error.textContent?.trim()).toBe(copy)
+    expect(error.closest('form')).toBeNull()
+    expect(must(el, 'tasks-list-detail-add-task-form').style.display).toBe('none')
+    expect(shown(el, 'tasks-list-detail-banner')).toBeNull()
+    expect(itemReads()).toBe(1)
+  })
+
+  it('more than 50 rows, or a view read only in part, ask for more of the title', async () => {
+    h_.tasksReply.mockImplementation((view: string, _status: string, q: string) => {
+      if (q === 'Many') return view === 'created' ? found(Array.from({ length: 51 }, (_, i) => item(`m${i}`, `Many ${i}`))) : found([])
+      return view === 'assigned' ? found([item('t5', 'Cut five')], 120) : found([])
+    })
+    const el = await mountAt('/task-lists/tl_1')
+    await openTaskPicker(el)
+    await searchTasks(el, 'Many')
+    expect(shownAll(el, 'task-picker-row')).toHaveLength(50)
+    expect(text(el, 'task-picker-more')).toBe('匹配的任务较多，请输入更完整的标题')
+    await searchTasks(el, 'Cut')
+    expect(pickerRowIds(el)).toEqual(['t5'])
+    expect(text(el, 'task-picker-more')).toBe('匹配的任务较多，请输入更完整的标题')
+  })
+
+  it('a route edge closes the picker, folds the form, and an answer for the old list is not shown', async () => {
+    const late = deferred<Response>()
+    h_.tasksReply.mockImplementation(() => late.promise)
+    const el = await mountAt('/task-lists/tl_1')
+    await click(el, 'tasks-list-detail-add-task-by-id-toggle')
+    await openTaskPicker(el)
+    await searchTasks(el, 'Plan')
+    expect(shown(el, 'task-picker-loading')).toBeTruthy()
+    await go('/task-lists/tl_2')
+    expect(text(el, 'tasks-list-detail-title')).toBe('Chores')
+    expect(shown(el, 'task-picker')).toBeNull()
+    expect(must(el, 'tasks-list-detail-add-task-form').style.display).toBe('none')
+    expect(must(el, 'tasks-list-detail-add-task-by-id-toggle').getAttribute('aria-expanded')).toBe('false')
+    late.resolve(found([item('t7', 'Plan A')]))
+    await flush()
+    await openTaskPicker(el)
+    expect(pickerRowIds(el)).toEqual([])
+    expect(text(el, 'task-picker-type-hint')).toBe('输入标题开始搜索')
+  })
+
+  it('Tab and Shift+Tab stay inside the picker', async () => {
+    h_.tasksReply.mockImplementation((view: string) => (view === 'created' ? found([item('t9', 'Plan Nine')]) : found([])))
+    const el = await mountAt('/task-lists/tl_1')
+    await openTaskPicker(el)
+    await searchTasks(el, 'Plan')
+    choose(el, 't9')
+    await flush()
+    const reached: string[] = []
+    el.addEventListener('keydown', (event) => { reached.push(event.key) })
+    const press = (from: HTMLElement, shiftKey: boolean) => {
+      from.focus()
+      expect(document.activeElement).toBe(from)
+      const event = new KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true })
+      from.dispatchEvent(event)
+      return event
+    }
+    expect(press(must(el, 'task-picker-confirm'), false).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(must(el, 'task-picker-search'))
+    expect(press(must(el, 'task-picker-search'), true).defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(must(el, 'task-picker-confirm'))
+    expect(reached).toEqual([])
+  })
+
+  describe('with a signed-in account', () => {
+    /** A JWT-shaped token the app's own payload reader understands (header and signature are not read). */
+    const fakeToken = (payload: Record<string, unknown>) => `h.${btoa(JSON.stringify(payload)).replace(/=+$/, '')}.s`
+
+    afterEach(() => {
+      localStorage.removeItem('auth_token')
+    })
+
+    it('a search answer received after a silent account switch leaves the list picker empty', async () => {
+      localStorage.setItem('auth_token', fakeToken({ sub: 'u1' }))
+      const late = deferred<Response>()
+      h_.tasksReply.mockImplementation((view: string) => view === 'created' ? late.promise : found([]))
+      const el = await mountAt('/task-lists/tl_1')
+      await openTaskPicker(el)
+      await searchTasks(el, 'Plan')
+      must(el, 'task-picker-loading')
+      localStorage.setItem('auth_token', fakeToken({ sub: 'u9' }))
+      late.resolve(found([item('t9', 'Plan Nine')]))
+      await flush()
+      expect(pickerRowIds(el)).toEqual([])
+      must(el, 'task-picker-type-hint')
+      expect((must(el, 'task-picker-search') as HTMLInputElement).value).toBe('')
+    })
+
+    it('a silent account switch after choosing a task prevents the add on confirm', async () => {
+      localStorage.setItem('auth_token', fakeToken({ sub: 'u1' }))
+      h_.tasksReply.mockImplementation((view: string) => view === 'created' ? found([item('t9', 'Plan Nine')]) : found([]))
+      const el = await mountAt('/task-lists/tl_1')
+      await openTaskPicker(el)
+      await searchTasks(el, 'Plan')
+      choose(el, 't9')
+      await flush()
+      expect(disabled(el, 'task-picker-confirm')).toBe(false)
+      localStorage.setItem('auth_token', fakeToken({ sub: 'u9' }))
+      await click(el, 'task-picker-confirm')
+      expect(requests('POST', '/api/task-lists/tl_1/items')).toEqual([])
+      expect(pickerRowIds(el)).toEqual([])
+      expect(disabled(el, 'task-picker-confirm')).toBe(true)
+    })
+
+    it('another account signing in elsewhere clears the rows and the choice; confirm then sends nothing', async () => {
+      localStorage.setItem('auth_token', fakeToken({ sub: 'u1', exp: 4102444800 }))
+      h_.tasksReply.mockImplementation((view: string) => (view === 'created' ? found([item('t9', 'Plan Nine')]) : found([])))
+      const el = await mountAt('/task-lists/tl_1')
+      await openTaskPicker(el)
+      await searchTasks(el, 'Plan')
+      choose(el, 't9')
+      await flush()
+      expect(disabled(el, 'task-picker-confirm')).toBe(false)
+      const other = fakeToken({ sub: 'u9', exp: 4102444800 })
+      localStorage.setItem('auth_token', other)
+      window.dispatchEvent(new StorageEvent('storage', { key: 'auth_token', newValue: other }))
+      await flush()
+      expect(pickerRowIds(el)).toEqual([])
+      expect(text(el, 'task-picker-type-hint')).toBe('输入标题开始搜索')
+      expect((must(el, 'task-picker-search') as HTMLInputElement).value).toBe('')
+      expect(disabled(el, 'task-picker-confirm')).toBe(true)
+      ;(must(el, 'task-picker-confirm') as HTMLButtonElement).disabled = false
+      await click(el, 'task-picker-confirm')
+      expect(requests('POST', '/api/task-lists/tl_1/items')).toEqual([])
+    })
   })
 })
