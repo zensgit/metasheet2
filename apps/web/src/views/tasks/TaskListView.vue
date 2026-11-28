@@ -175,8 +175,36 @@
             role="status"
           >{{ t.listItemsTruncated }}</p>
 
+          <TaskListCreateForm
+            v-if="canCreateInList"
+            :key="listId"
+            ref="createForm"
+            :pending="pending"
+            :run-write="runListTaskCreation"
+            @add-failed="banner = { kind: $event }"
+            @org-missing="orgMissing = true"
+          />
+
+          <!-- A task is picked by title; the task-id form stays as the secondary entry, folded until it
+               is asked for. The add error sits below both, so a failed pick shows too. -->
+          <div v-if="canManage && itemsResult.kind === 'ok'" class="tasks-list-page__pick-task">
+            <button
+              type="button"
+              data-testid="tasks-list-detail-pick-task"
+              :disabled="pending"
+              @click="openTaskPicker"
+            >{{ t.listPickTask }}</button>
+            <button
+              type="button"
+              class="tasks-list-page__link-button"
+              data-testid="tasks-list-detail-add-task-by-id-toggle"
+              :aria-expanded="addTaskByIdOpen ? 'true' : 'false'"
+              @click="addTaskByIdOpen = !addTaskByIdOpen"
+            >{{ t.listAddTaskByIdToggle }}</button>
+          </div>
           <form
             v-if="canManage && itemsResult.kind === 'ok'"
+            v-show="addTaskByIdOpen"
             class="tasks-list-page__add-task"
             data-testid="tasks-list-detail-add-task-form"
             @submit.prevent="onAddTask"
@@ -197,14 +225,22 @@
             <button type="submit" data-testid="tasks-list-detail-add-task-submit" :disabled="pending || addTaskId.trim().length === 0">
               {{ t.listAddTask }}
             </button>
-            <p
-              v-if="addTaskErrorMessage"
-              id="tasks-list-detail-add-task-error"
-              class="tasks-list-page__error"
-              data-testid="tasks-list-detail-add-task-error"
-              role="alert"
-            >{{ addTaskErrorMessage }}</p>
           </form>
+          <p
+            v-if="canManage && itemsResult.kind === 'ok' && addTaskErrorMessage"
+            id="tasks-list-detail-add-task-error"
+            class="tasks-list-page__error"
+            data-testid="tasks-list-detail-add-task-error"
+            role="alert"
+          >{{ addTaskErrorMessage }}</p>
+          <TaskPicker
+            v-if="canManage && itemsResult.kind === 'ok'"
+            :visible="taskPickerOpen"
+            mode="list-item"
+            :exclude-ids="pickerExcludeIds"
+            @confirm="onTaskPicked"
+            @close="taskPickerOpen = false"
+          />
         </section>
 
         <section class="tasks-list-page__events" data-testid="tasks-list-detail-events-section">
@@ -237,7 +273,7 @@
                 data-testid="tasks-list-detail-event"
                 :data-event-type="event.eventType"
               >
-                <span data-testid="tasks-list-detail-event-actor">{{ event.actorId }}</span>
+                <span data-testid="tasks-list-detail-event-actor">{{ actorNames.nameOf(event.actorId) || event.actorId }}</span>
                 <span data-testid="tasks-list-detail-event-type">{{ listEventLabel(event.eventType, t) }}</span>
                 <time data-testid="tasks-list-detail-event-time" :datetime="event.occurredAt">
                   {{ formatViewerInstant(event.occurredAt, undefined, viewerLocale) }}
@@ -342,7 +378,9 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import TaskGroupBoard from './TaskGroupBoard.vue'
+import TaskListCreateForm from './TaskListCreateForm.vue'
 import TaskListMembersDialog from './TaskListMembersDialog.vue'
+import TaskPicker, { type TaskPicked } from '../../tasks/TaskPicker.vue'
 import { useAuth } from '../../composables/useAuth'
 import { useLocale } from '../../composables/useLocale'
 import {
@@ -378,6 +416,7 @@ import { formatViewerInstant } from '../../tasks/tasksDateDisplay'
 import { notifyListsChanged } from '../../tasks/tasksListsBus'
 import { checkListName, normalizeUserText } from '../../tasks/tasksDraft'
 import { focusAfterSwap } from '../../tasks/tasksFocus'
+import { createTaskPeopleNames } from '../../tasks/taskPeopleNames'
 
 const route = useRoute()
 const router = useRouter()
@@ -416,7 +455,7 @@ type PlacementsState =
   | { kind: 'ok'; placements: TaskPlacement[]; truncated: boolean }
   | { kind: 'unavailable' }
 
-type Banner = { kind: 'forbidden' } | { kind: 'not_found' } | { kind: 'error' } | { kind: 'code'; code: string }
+type Banner = { kind: 'org_missing' } | { kind: 'forbidden' } | { kind: 'not_found' } | { kind: 'error' } | { kind: 'code'; code: string }
 
 type AddTaskError = { kind: 'not_found' } | { kind: 'code'; code: string }
 
@@ -436,6 +475,14 @@ const renameError = ref<string | null>(null)
 
 const addTaskId = ref('')
 const addTaskError = ref<AddTaskError | null>(null)
+// A task picked by title, and the task-id form folded until it is asked for.
+const taskPickerOpen = ref(false)
+const addTaskByIdOpen = ref(false)
+// The tasks already in the list, left out of the picker; none while the items were read only in part.
+const pickerExcludeIds = computed<string[]>(() => {
+  const state = itemsResult.value
+  return state.kind === 'ok' && !state.truncated ? state.items.map((row) => row.id) : []
+})
 const confirmingRemoveId = ref<string | null>(null)
 
 const eventsOpen = ref(false)
@@ -445,6 +492,10 @@ const eventsTotal = ref(0)
 const eventsLastPageEmpty = ref(false)
 const eventsLoadingMore = ref(false)
 const eventsMoreFailed = ref(false)
+const createForm = ref<InstanceType<typeof TaskListCreateForm> | null>(null)
+// The activity's actors by name: the actors of each page that lands are looked up; an actor the
+// lookup gives no name is shown by id. Dropped on a route edge and when another account or org is seen.
+const actorNames = createTaskPeopleNames({ onSwitch: () => createForm.value?.reset() })
 
 const membersOpen = ref(false)
 const membersButton = ref<HTMLButtonElement | null>(null)
@@ -486,6 +537,8 @@ const canManage = computed(() => {
   return state.kind === 'ok' && (state.list.myRole === 'edit' || state.list.myRole === 'owner')
 })
 
+const canCreateInList = computed(() => canManage.value && itemsResult.value.kind === 'ok' && !orgMissing.value)
+
 // [fe-26] the creator half of archive / unarchive waits for the viewer's own id: hidden while the
 // id is pending, and when it could not be resolved.
 const canArchive = computed(() => {
@@ -505,6 +558,8 @@ const bannerMessage = computed<string | null>(() => {
   const current = banner.value
   if (!current) return null
   switch (current.kind) {
+    case 'org_missing':
+      return t.value.orgMissing
     case 'forbidden':
       return t.value.listWriteForbidden
     case 'not_found':
@@ -644,6 +699,7 @@ async function loadEventsFirstPage(): Promise<void> {
     eventsTotal.value = result.total
     eventsLastPageEmpty.value = result.items.length === 0
     eventsResult.value = { kind: 'ok', items: result.items }
+    void actorNames.request(result.items.map((event) => event.actorId))
     return
   }
   if (result.kind === 'org_missing') {
@@ -669,6 +725,7 @@ async function onLoadMoreEvents(): Promise<void> {
     if (state.kind === 'ok') {
       const seen = new Set(state.items.map((event) => event.id))
       eventsResult.value = { kind: 'ok', items: [...state.items, ...result.items.filter((event) => !seen.has(event.id))] }
+      void actorNames.request(result.items.map((event) => event.actorId))
     }
     return
   }
@@ -808,9 +865,16 @@ async function onArchive(archive: boolean): Promise<void> {
 // RULED(2026-10-07): [own-25] (PR-3a, R12 (a1)) — adding needs a direct role on the task; the 404
 // folds that with a missing task and an unavailable list, and the inline copy reads it that way.
 async function onAddTask(): Promise<void> {
-  const id = listId.value
   const taskId = addTaskId.value.trim()
-  if (pending.value || taskId.length === 0) return
+  if (taskId.length === 0) return
+  await addTaskById(taskId, { clearInput: true })
+}
+
+/** Adds `taskId` to the list: from the task-id form (which is emptied on success) or from the task
+ *  picker (which leaves the form as it is). */
+async function addTaskById(taskId: string, options: { clearInput: boolean }): Promise<void> {
+  const id = listId.value
+  if (pending.value) return
   addTaskError.value = null
   banner.value = null
   const token = ++writeToken
@@ -819,8 +883,8 @@ async function onAddTask(): Promise<void> {
     const result = await addTaskToList(id, taskId)
     if (token !== writeToken) return
     if (result.kind === 'ok') {
-      addTaskId.value = ''
-      await Promise.all([loadItems({ quiet: true }), loadPlacements({ quiet: true })])
+      if (options.clearInput) addTaskId.value = ''
+      await refreshListItems()
       return
     }
     if (result.kind === 'not_found') {
@@ -830,6 +894,42 @@ async function onAddTask(): Promise<void> {
     applyWriteFailure(result, (code) => {
       addTaskError.value = { kind: 'code', code }
     })
+  } finally {
+    if (token === writeToken) pending.value = false
+  }
+}
+
+/** The pick button: focused first (a click does not focus a button in macOS Safari), so the picker
+ *  hands focus back to it on close. */
+function openTaskPicker(event: MouseEvent): void {
+  if (event.currentTarget instanceof HTMLElement) event.currentTarget.focus()
+  taskPickerOpen.value = true
+}
+
+function onTaskPicked(picked: TaskPicked): void {
+  taskPickerOpen.value = false
+  void addTaskById(picked.id, { clearInput: false })
+}
+
+async function refreshListItems(): Promise<void> {
+  await Promise.all([loadItems({ quiet: true }), loadPlacements({ quiet: true })])
+}
+
+async function runListTaskCreation(
+  action: (id: string, isCurrent: () => boolean) => Promise<boolean>,
+): Promise<void> {
+  if (pending.value || !canCreateInList.value || !actorNames.identityHolds()) return
+  const id = listId.value
+  banner.value = null
+  addTaskError.value = null
+  const identity = actorNames.identitySwitches()
+  const token = ++writeToken
+  const isCurrent = () => token === writeToken && id === listId.value && canCreateInList.value
+    && actorNames.identityHolds() && identity === actorNames.identitySwitches()
+  pending.value = true
+  try {
+    const added = await action(id, isCurrent)
+    if (added && isCurrent()) await refreshListItems()
   } finally {
     if (token === writeToken) pending.value = false
   }
@@ -846,7 +946,7 @@ async function onRemoveTask(taskId: string): Promise<void> {
     if (token !== writeToken) return
     confirmingRemoveId.value = null
     if (result.kind === 'ok') {
-      await Promise.all([loadItems({ quiet: true }), loadPlacements({ quiet: true })])
+      await refreshListItems()
       return
     }
     applyWriteFailure(result, (code) => {
@@ -891,12 +991,15 @@ function resetPage(): void {
   banner.value = null
   closeRename()
   addTaskId.value = ''
+  taskPickerOpen.value = false
+  addTaskByIdOpen.value = false
   addTaskError.value = null
   confirmingRemoveId.value = null
   eventsOpen.value = false
   eventsResult.value = { kind: 'loading' }
   eventsMoreFailed.value = false
   eventsLoadingMore.value = false
+  actorNames.clear()
   membersOpen.value = false
 }
 
@@ -925,6 +1028,7 @@ onBeforeUnmount(() => {
   placementsGeneration += 1
   eventsGeneration += 1
   writeToken += 1
+  actorNames.dispose()
 })
 </script>
 
@@ -947,11 +1051,20 @@ onBeforeUnmount(() => {
 .tasks-list-page__meta,
 .tasks-list-page__actions,
 .tasks-list-page__rename,
-.tasks-list-page__add-task {
+.tasks-list-page__add-task,
+.tasks-list-page__pick-task {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+
+.tasks-list-page__link-button {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--ms-color-primary, #409eff);
+  cursor: pointer;
 }
 
 .tasks-list-page__event-list {

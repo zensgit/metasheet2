@@ -31,6 +31,7 @@ import {
   deleteComment,
   deleteTask,
   editComment,
+  getParentCandidates,
   getTask,
   isPathSafeSegment,
   leaveTask,
@@ -859,5 +860,59 @@ describe('path segments are URI-encoded in every M3 wrapper', () => {
     h.apiFetch.mockResolvedValue(jsonResponse(500, {}))
     await call()
     expect(lastCall()[0]).toBe(path)
+  })
+})
+
+describe('getParentCandidates', () => {
+  it('reads the candidates with GET, the task id encoded in the path; extra fields are left out', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(200, { items: [{ id: 'p1', title: 'Alpha', parentId: null }, { id: 'p 2', title: '' }] }))
+    const result = await getParentCandidates('t 1/x')
+    expect(h.apiFetch).toHaveBeenCalledTimes(1)
+    const [path, options] = lastCall()
+    expect(path).toBe('/api/tasks/t%201%2Fx/parent-candidates')
+    expect(options).toBeUndefined()
+    expect(result).toEqual({ kind: 'ok', items: [{ id: 'p1', title: 'Alpha' }, { id: 'p 2', title: '' }] })
+  })
+
+  it('an id that cannot be placed in a request path sends nothing and reads as not found', async () => {
+    for (const id of ['', '.', '..']) {
+      expect(await getParentCandidates(id), JSON.stringify(id)).toEqual({ kind: 'not_found' })
+    }
+    expect(h.apiFetch).not.toHaveBeenCalled()
+  })
+
+  it('a malformed row, a body without items, or a body that is not an object is an error', async () => {
+    const bodies: unknown[] = [
+      { items: [{ id: 'p1', title: 'Alpha' }, { id: 'p2' }] },
+      { items: [{ id: 'p1', title: 'Alpha' }, { id: '..', title: 'Up' }] },
+      { items: [{ id: '', title: 'Empty' }] },
+      { items: [{ id: 7, title: 'Number' }] },
+      { items: [{ id: 'p1', title: null }] },
+      { items: [null] },
+      { items: 'p1' },
+      {},
+      null,
+      'p1',
+    ]
+    for (const body of bodies) {
+      h.apiFetch.mockReset().mockResolvedValue(jsonResponse(200, body))
+      expect(await getParentCandidates('t1'), JSON.stringify(body)).toEqual({ kind: 'error', status: 200 })
+    }
+  })
+
+  it('maps 403, 404, any other status and a failed request to their kinds, and never throws', async () => {
+    const cases: Array<[Response | Error, unknown]> = [
+      [jsonResponse(403, { error: 'Insufficient permissions' }), { kind: 'forbidden' }],
+      [jsonResponse(404, { error: { code: 'NOT_FOUND' } }), { kind: 'not_found' }],
+      [jsonResponse(422, { error: { code: 'ORG_MISSING' } }), { kind: 'error', status: 422 }],
+      [jsonResponse(500, {}), { kind: 'error', status: 500 }],
+      [new TypeError('network down'), { kind: 'error', status: 0 }],
+    ]
+    for (const [reply, expected] of cases) {
+      h.apiFetch.mockReset()
+      if (reply instanceof Error) h.apiFetch.mockRejectedValue(reply)
+      else h.apiFetch.mockResolvedValue(reply)
+      expect(await getParentCandidates('t1')).toEqual(expected)
+    }
   })
 })
