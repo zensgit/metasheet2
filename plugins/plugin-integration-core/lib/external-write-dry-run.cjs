@@ -56,6 +56,14 @@ const SAFE_WRITE_ERROR_CODES = new Set([
   // write-source built without its probe, is a TARGET fact, not an opaque WRITE_FAILED.
   'METASHEET_MULTITABLE_STOCK_PREP_GOVERNED_SHEET',
   'STOCK_PREP_GOVERNED_SHEET_PROBE_UNWIRED',
+  // D2 (R-96 switch-on precondition): the write-source's fenced update of a stock-prep target found the row moved
+  // between its read and its write — a RETRYABLE row fact (the row was not written), not an opaque WRITE_FAILED.
+  'METASHEET_MULTITABLE_VERSION_CONFLICT',
+  // D2 round 2: an unreadable row version (NOT retryable, F5); a registered stock-prep sheet whose machine write-back
+  // columns could not be resolved from its binding, and a lookup key that IS one (F0) — refused before any row IO.
+  'METASHEET_MULTITABLE_VERSION_UNREADABLE',
+  'METASHEET_MULTITABLE_MACHINE_COLUMNS_UNRESOLVED',
+  'METASHEET_MULTITABLE_MACHINE_COLUMN_KEY_REFUSED',
   'DATA_SOURCE_BRIDGE_CONFIG_ERROR',
   'DATA_SOURCE_GENERIC_QUERY_DISABLED_REQUIRED',
   'DATA_SOURCE_NOT_C6_WRITE_TARGET',
@@ -573,6 +581,16 @@ function classifyExisting({ existingRows, targetRecord, writableFields }) {
   return allEqual ? 'skip' : 'update'
 }
 
+// D2 round 2 (F3): the fields the value diff compares — the writable fields, minus those the write-source names as
+// machine write-back columns (`machineColumnDiffExclusions`, optional: only the multitable write-source has it).
+async function valueDiffFields(dataSourceWrites, targetConfig) {
+  if (!dataSourceWrites || typeof dataSourceWrites.machineColumnDiffExclusions !== 'function') return targetConfig.writableFields
+  const excluded = await dataSourceWrites.machineColumnDiffExclusions(targetConfig.dataSourceId, targetConfig.object, targetConfig.writableFields.slice())
+  if (!Array.isArray(excluded) || excluded.length === 0) return targetConfig.writableFields
+  const skip = new Set(excluded)
+  return targetConfig.writableFields.filter((field) => !skip.has(field))
+}
+
 async function readSourceRows({ sourceAdapter, object, maxRows, filters }) {
   const records = []
   let cursor = null
@@ -785,6 +803,11 @@ async function computeExternalWritePlan(input = {}) {
   const planRows = []
   const policy = plannerWritePolicy(targetConfig, configuredAcceptancePolicy)
 
+  // D2 round 2 (F3): the writable fields that name a machine write-back column of a stock-prep target (only the
+  // multitable write-source answers, from what its `test()` resolved above) stay OUT of the value diff: the generic
+  // writer strips them anyway, so a difference there alone would plan an update that writes nothing — every run
+  // (churn, a version bump each apply). Every other target answers nothing and the diff is byte-identical.
+  const diffFields = await valueDiffFields(dataSourceWrites, targetConfig)
   const seenTargetKeyIdentities = new Set()
   for (const sourceRecord of sourceRead.records) {
     const transformed = transformRecord(sourceRecord, pipeline.fieldMappings || [])
@@ -840,7 +863,7 @@ async function computeExternalWritePlan(input = {}) {
     const decision = classifyExisting({
       existingRows,
       targetRecord: transformed.value,
-      writableFields: targetConfig.writableFields,
+      writableFields: diffFields,
     })
     const writeRow = writeRowFromRecord(transformed.value, targetConfig)
     counts[decision] += 1
@@ -1167,13 +1190,28 @@ async function applyExternalWrite(input = {}) {
         )
         counts.add += 1
       } else if (row.decision === 'update') {
-        await plan.dataSourceWrites.updateRows(
+        const updated = await plan.dataSourceWrites.updateRows(
           plan.targetConfig.dataSourceId,
           plan.targetConfig.object,
           [row.row],
           plan.policy,
           input.dataSourceOwnerPrincipal,
         )
+        // D2 round 2 (F3): the multitable write-source sent nothing for this row (its only change was a machine
+        // write-back column of a stock-prep target): a skip, not a write.
+        if (isPlainObject(updated) && updated.machineColumnsOnlySkipped === 1 && updated.rowCount === 0) {
+          counts.skip += 1
+          provenanceEvents.push(provenanceEvent({
+            pipeline: plan.pipeline,
+            revision: plan.revision,
+            runId,
+            targetKind: plan.targetConfig.kind,
+            row,
+            eventType: 'target_write_succeeded',
+            attrs: { decision: 'skip', writePerformed: false },
+          }))
+          continue
+        }
         counts.update += 1
       } else {
         counts.held += 1
