@@ -56,16 +56,9 @@ export function statusFilterHidesNewTask(status: TaskStatusFilter): boolean {
   return status === 'done'
 }
 
-/**
- * Whether a list view includes a task the list page's create form just made. That form sends no
- * assignees, so the creator is the new task's only assignee and nobody follows it: 分配给我,
- * 我创建的 and 任一角色 include it; 关注中 (needs a follower) and 我委派的 (needs another assignee)
- * do not, under any status. Switching the status filter therefore shows the new task only in the
- * views this returns `true` for.
- * This mirrors the server's create defaults (omitted assignees become the creator alone; a create
- * adds no follower). If those defaults change, revisit this predicate: the frontend cells encode
- * the same rule in their fake list read and would not notice.
- */
-export function viewListsNewTask(view: TaskView): boolean {
-  return view === 'assigned' || view === 'created' || view === 'any_role'
+/** Whether the chosen view includes the new task, given the people selected at creation. */
+export function viewListsNewTask(view: TaskView, creatorAssigned = true, hasOtherAssignees = false): boolean {
+  if (view === 'assigned') return creatorAssigned
+  if (view === 'delegated') return hasOtherAssignees
+  return view === 'created' || view === 'any_role'
 }

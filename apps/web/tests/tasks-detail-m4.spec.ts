@@ -34,7 +34,10 @@ const h_ = vi.hoisted(() => ({
   /** `GET /api/tasks/:id` (the decoded id) -> the response, or a promise of it. */
   detailReply: vi.fn(),
   peopleReply: vi.fn(),
+  peopleResolveReply: vi.fn(),
   peopleSearchReply: vi.fn(),
+  /** `GET /api/tasks/:id/comments?…` (decoded id, query) -> the response; an empty thread by default. */
+  commentsReply: vi.fn(),
   /** `GET /api/task-lists?…` (the query) -> the response, or a promise of it. */
   myListsReply: vi.fn(),
   /** `PATCH /api/tasks/:id` (id, serialized body) -> the response, or a promise of it. */
@@ -201,15 +204,17 @@ async function fakeFetch(path: string, init?: FetchInit): Promise<Response> {
   const [pathname, query = ''] = path.split('?')
   let match: RegExpExecArray | null
   if (method === 'GET' && pathname === '/api/tasks') return jsonResponse(200, { items: [], total: 0 })
-  // Package 1b: the people picker's search (`h_.peopleSearchReply`; the "type a name" marker by default).
+  // Keep member lookups separate from the people picker's searches.
   // Answered before the task-id pattern below, which `/api/tasks/people` would otherwise match.
-  if (method === 'GET' && pathname === '/api/tasks/people') return h_.peopleSearchReply(query)
+  if (method === 'GET' && pathname === '/api/tasks/people') {
+    return new URLSearchParams(query).has('ids') ? h_.peopleResolveReply(query) : h_.peopleSearchReply(query)
+  }
   if ((match = /^\/api\/tasks\/([^/]+)$/.exec(pathname))) {
     const id = decodeURIComponent(match[1])
     if (method === 'GET') return h_.detailReply(id)
     if (method === 'PATCH') return h_.patchReply(id, init?.body)
   }
-  if (method === 'GET' && /^\/api\/tasks\/[^/]+\/comments$/.test(pathname)) return jsonResponse(200, { items: [], total: 0 })
+  if (method === 'GET' && (match = /^\/api\/tasks\/([^/]+)\/comments$/.exec(pathname))) return h_.commentsReply(decodeURIComponent(match[1]), query)
   // Package 1b: the names on the task (`h_.peopleReply`; none by default).
   if (method === 'GET' && (match = /^\/api\/tasks\/([^/]+)\/people$/.exec(pathname))) return h_.peopleReply(decodeURIComponent(match[1]))
   if (method === 'GET' && pathname === '/api/task-lists') return h_.myListsReply(query)
@@ -367,7 +372,9 @@ beforeEach(() => {
   h_.getCurrentUserId.mockReset().mockResolvedValue('u1')
   h_.detailReply.mockReset().mockImplementation((id: string) => jsonResponse(200, detailBody({ id, title: id === 't1' ? 'Plan' : `Title-${id}` })))
   h_.peopleReply.mockReset().mockImplementation(() => jsonResponse(200, { people: {} }))
+  h_.peopleResolveReply.mockReset().mockImplementation(() => jsonResponse(200, { items: [], truncated: false }))
   h_.peopleSearchReply.mockReset().mockImplementation(() => jsonResponse(200, { items: [], hasMore: false, requiresQuery: true, limit: 20, minQueryLength: 1 }))
+  h_.commentsReply.mockReset().mockImplementation(() => jsonResponse(200, { items: [], total: 0 }))
   h_.myListsReply.mockReset().mockImplementation((query: string) => {
     const offset = Number(new URLSearchParams(query).get('offset'))
     return jsonResponse(200, { items: offset === 0 ? MY_LISTS : [], total: MY_LISTS.length })
@@ -1776,6 +1783,7 @@ const EDIT_CONTROLS = [
   'tasks-detail-completion-mode-select',
   'tasks-detail-set-parent-form',
   'tasks-detail-make-independent',
+  'tasks-detail-pick-parent',
   'tasks-detail-editor',
 ] as const
 
@@ -2185,6 +2193,91 @@ describe('package 1b — the names on the task', () => {
     expect(assigneeTexts(el)).toEqual(['u1', 'u2'])
     expect(shownAll(el, 'tasks-detail-person-inactive')).toEqual([])
   })
+
+  const commentRow = (id: string, authorId: string, over: Record<string, unknown> = {}) =>
+    ({ id, taskId: 't1', authorId, body: `Body ${id}`, deleted: false, createdAt: '2031-03-01T08:00:00.000Z', ...over })
+  const thread = (...items: Array<Record<string, unknown>>) => () => jsonResponse(200, { items, total: items.length })
+  const authorTexts = (el: HTMLElement) => shownAll(el, 'tasks-detail-comment-author').map((node) => node.textContent?.trim())
+
+  it('comment authors use task names, including tombstones; only assignees and followers are looked up for access', async () => {
+    h_.detailReply.mockImplementation(() => jsonResponse(200, body()))
+    h_.peopleReply.mockImplementation(() => jsonResponse(200, { people: {
+      u1: { name: '张三', status: 'active' },
+      u5: { name: '王五', status: 'active' },
+    } }))
+    h_.commentsReply.mockImplementation(thread(
+      commentRow('c1', 'u1'),
+      commentRow('c2', 'u5', { body: null, deleted: true }),
+      commentRow('c3', 'u8'),
+    ))
+    const el = await mountAt('/tasks/t1')
+    expect(authorTexts(el)).toEqual(['张三', '王五', 'u8'])
+    expect(shownAll(el, 'tasks-detail-comment-author').map((node) => node.getAttribute('data-author-id'))).toEqual(['u1', 'u5', 'u8'])
+    expect(shownAll(el, 'tasks-detail-comment-author-inactive')).toEqual([])
+    expect(requests('GET', '/api/tasks/t1/people')).toHaveLength(1)
+    expect(h_.peopleSearchReply).not.toHaveBeenCalled()
+    expect(h_.peopleResolveReply.mock.calls.map(([query]) => new URLSearchParams(query as string).get('ids')?.split(','))).toEqual([['u1', 'u2', 'u3', 'u5']])
+    expect(fetchCalls().filter(([path]) => path.startsWith('/api/tasks/people')).map(([path]) => path)).toEqual(['/api/tasks/people?ids=u1,u2,u3,u5'])
+  })
+
+  it('a read-only viewer sees comment authors from task names without any people search or access lookup', async () => {
+    h_.detailReply.mockImplementation(() => jsonResponse(200, { ...body(), canEdit: false }))
+    h_.peopleReply.mockImplementation(() => jsonResponse(200, { people: {
+      u1: { name: '张三', status: 'active' },
+      u5: { name: '王五', status: 'active' },
+    } }))
+    h_.commentsReply.mockImplementation(thread(
+      commentRow('c1', 'u1'),
+      commentRow('c2', 'u5', { body: null, deleted: true }),
+      commentRow('c3', 'u8'),
+    ))
+    const el = await mountAt('/tasks/t1')
+    expect(authorTexts(el)).toEqual(['张三', '王五', 'u8'])
+    expect(shownAll(el, 'tasks-detail-comment-author').map((node) => node.getAttribute('data-author-id'))).toEqual(['u1', 'u5', 'u8'])
+    expect(shownAll(el, 'tasks-detail-comment-author-inactive')).toEqual([])
+    expect(requests('GET', '/api/tasks/t1/people')).toHaveLength(1)
+    expect(h_.peopleSearchReply).not.toHaveBeenCalled()
+    expect(h_.peopleResolveReply).not.toHaveBeenCalled()
+    expect(fetchCalls().filter(([path]) => path.startsWith('/api/tasks/people'))).toEqual([])
+  })
+
+  it("a former member's comment carries 已停用 under its own mark; the marks on the assignee and follower rows count as before", async () => {
+    h_.detailReply.mockImplementation(() => jsonResponse(200, body()))
+    h_.peopleReply.mockImplementation(() => jsonResponse(200, { people: {
+      u2: { name: '李四', status: 'inactive' },
+      u5: { name: '王五', status: 'active' },
+    } }))
+    h_.commentsReply.mockImplementation(thread(commentRow('c1', 'u2'), commentRow('c2', 'u5')))
+    const el = await mountAt('/tasks/t1')
+    expect(authorTexts(el)).toEqual(['李四', '王五'])
+    const marks = shownAll(el, 'tasks-detail-comment-author-inactive')
+    expect(marks.map((node) => node.textContent?.trim())).toEqual(['已停用'])
+    expect(marks[0].closest('[data-testid="tasks-detail-comment"]')?.querySelector('[data-testid="tasks-detail-comment-author"]')?.getAttribute('data-author-id')).toBe('u2')
+    expect(shownAll(el, 'tasks-detail-person-inactive')).toHaveLength(1)
+  })
+
+  it("edit and delete still go by the author's id: shown on the viewer's own comment, not on another's with the same name", async () => {
+    h_.detailReply.mockImplementation(() => jsonResponse(200, body()))
+    h_.peopleReply.mockImplementation(() => jsonResponse(200, { people: {
+      u1: { name: '张三', status: 'active' },
+      u2: { name: '张三', status: 'active' },
+    } }))
+    h_.commentsReply.mockImplementation(thread(commentRow('c1', 'u1'), commentRow('c2', 'u2')))
+    const el = await mountAt('/tasks/t1')
+    const commentRows = shownAll(el, 'tasks-detail-comment')
+    expect(commentRows.map((row) => row.querySelector('[data-testid="tasks-detail-comment-author"]')?.textContent?.trim())).toEqual(['张三', '张三'])
+    expect(commentRows.map((row) => row.querySelector('[data-testid="tasks-detail-comment-edit"]') !== null)).toEqual([true, false])
+    expect(commentRows.map((row) => row.querySelector('[data-testid="tasks-detail-comment-delete"]') !== null)).toEqual([true, false])
+  })
+
+  it('a names read that fails leaves the comment authors as ids, with no mark', async () => {
+    h_.detailReply.mockImplementation(() => jsonResponse(200, body()))
+    h_.peopleReply.mockImplementation(() => jsonResponse(500, {}))
+    h_.commentsReply.mockImplementation(thread(commentRow('c1', 'u1'), commentRow('c2', 'u2')))
+    const el = await mountAt('/tasks/t1')
+    expect(authorTexts(el)).toEqual(['u1', 'u2'])
+    expect(shownAll(el, 'tasks-detail-comment-author-inactive')).toEqual([])
+  })
 })
 
 describe('package 1b — the people picker on the detail page', () => {
@@ -2492,6 +2585,21 @@ describe('package 1b — account switches on the detail page', () => {
     expect(el.textContent).not.toContain('zl***@example.test')
   })
 
+  it("a switch to another account from another tab drops the comment authors' names and their mark with the rest", async () => {
+    h_.commentsReply.mockImplementation(() => jsonResponse(200, { items: [
+      { id: 'c1', taskId: 't1', authorId: 'u1', body: 'Hello', deleted: false, createdAt: '2031-03-01T08:00:00.000Z' },
+      { id: 'c2', taskId: 't1', authorId: 'u2', body: 'Hi', deleted: false, createdAt: '2031-03-01T08:00:00.000Z' },
+    ], total: 2 }))
+    const el = await mountAt('/tasks/t1')
+    const authors = () => shownAll(el, 'tasks-detail-comment-author').map((node) => node.textContent?.trim())
+    expect(authors()).toEqual(['张三', '李四'])
+    expect(shownAll(el, 'tasks-detail-comment-author-inactive')).toHaveLength(1)
+    signInElsewhereWithEvent(TOKEN_B)
+    await flush()
+    expect(authors()).toEqual(['u1', 'u2'])
+    expect(shownAll(el, 'tasks-detail-comment-author-inactive')).toEqual([])
+  })
+
   it('after a silent switch with no read out, the next task read shows the new account\'s names', async () => {
     const el = await mountAt('/tasks/t1')
     expect(assigneeTexts(el)).toEqual(['张三', '李四'])
@@ -2711,4 +2819,100 @@ describe('package 1b — account switches on the detail page', () => {
       expect(h_.notifyTasksChanged).toHaveBeenCalledTimes(1)
     })
   }
+})
+
+describe('the parent picked by title — nothing is read before the picker opens', () => {
+  it('an editable task page sends no parent-candidates request', async () => {
+    h_.detailReply.mockImplementation(() => jsonResponse(200, memberBody({ canEdit: true, canManageMembers: true })))
+    const el = await mountAt('/tasks/t1')
+    must(el, 'tasks-detail-pick-parent')
+    expect(fetchCalls().filter(([path]) => path.includes('/parent-candidates'))).toEqual([])
+  })
+})
+
+describe('the parent picked by title — account switches', () => {
+  /** A JWT-shaped token the app's own payload reader understands (header and signature are not read). */
+  const fakeToken = (payload: Record<string, unknown>) => `h.${btoa(JSON.stringify(payload)).replace(/=+$/, '')}.s`
+  const TOKEN_A = fakeToken({ sub: 'u1', exp: 4102444800 })
+  const TOKEN_B = fakeToken({ sub: 'u9', exp: 4102444800 })
+
+  const signIn = (token: string) => localStorage.setItem('auth_token', token)
+  /** Another tab signs in: the shared storage changes and this tab is told nothing. */
+  const signInSilently = (token: string) => signIn(token)
+  /** The same, plus the `storage` event a browser delivers to the other tabs. */
+  const signInElsewhereWithEvent = (token: string) => {
+    signIn(token)
+    window.dispatchEvent(new StorageEvent('storage', { key: 'auth_token', newValue: token }))
+  }
+  /** A sign-in in this tab: the session switch `useAuth` announces. */
+  const signInHere = (token: string) => {
+    signIn(token)
+    notifyAuthPrincipalChange()
+  }
+
+  /** `GET /api/tasks/:id/parent-candidates` (the decoded id) -> the response, or a promise of it. */
+  const candidatesReply = vi.fn()
+
+  const parentRows = (el: HTMLElement) => shownAll(el, 'task-picker-row').map((row) => row.dataset.taskId)
+
+  async function searchParents(el: HTMLElement, value: string): Promise<void> {
+    const input = must(el, 'task-picker-search') as HTMLInputElement
+    input.value = value
+    input.dispatchEvent(new Event('input'))
+    await flush()
+  }
+
+  beforeEach(() => {
+    localStorage.removeItem('auth_token')
+    signIn(TOKEN_A)
+    h_.detailReply.mockImplementation(() => jsonResponse(200, memberBody({ canEdit: true, canManageMembers: true })))
+    candidatesReply.mockReset().mockImplementation(() => jsonResponse(200, { items: [{ id: 'p7', title: 'Launch plan' }] }))
+    // The candidates read is answered here; every other request goes to the file's fake backend.
+    h_.apiFetch.mockImplementation((path: string, init?: FetchInit) => {
+      const match = /^\/api\/tasks\/([^/]+)\/parent-candidates$/.exec(path)
+      return match ? candidatesReply(decodeURIComponent(match[1])) : fakeFetch(path, init)
+    })
+  })
+
+  afterEach(() => {
+    localStorage.removeItem('auth_token')
+  })
+
+  for (const [how, switchTo] of [
+    ['another tab (a storage change)', signInElsewhereWithEvent],
+    ['this tab (a session switch)', signInHere],
+  ] as Array<[string, (token: string) => void]>) {
+    it(`a switch to another account from ${how} closes the picker, drops its rows and folds the task-id form`, async () => {
+      const el = await mountAt('/tasks/t1')
+      await click(el, 'tasks-detail-set-parent-by-id-toggle')
+      expect(must(el, 'tasks-detail-set-parent-form').style.display).toBe('')
+      await click(el, 'tasks-detail-pick-parent')
+      await searchParents(el, 'Launch')
+      expect(parentRows(el)).toEqual(['p7'])
+      switchTo(TOKEN_B)
+      await flush()
+      expect(shown(el, 'task-picker')).toBeNull()
+      expect(el.textContent).not.toContain('Launch plan')
+      expect(must(el, 'tasks-detail-set-parent-form').style.display).toBe('none')
+    })
+  }
+
+  it('a candidates answer asked under one account that lands after a silent switch is not shown', async () => {
+    const late = deferred<Response>()
+    candidatesReply.mockImplementationOnce(() => late.promise)
+    const el = await mountAt('/tasks/t1')
+    await click(el, 'tasks-detail-pick-parent')
+    expect(candidatesReply.mock.calls).toEqual([['t1']])
+    await searchParents(el, 'Launch')
+    signInSilently(TOKEN_B)
+    late.resolve(jsonResponse(200, { items: [{ id: 'p7', title: 'Launch plan' }] }))
+    await flush()
+    expect(shown(el, 'task-picker')).toBeNull()
+    expect(parentRows(el)).toEqual([])
+    expect(el.textContent).not.toContain('Launch plan')
+    candidatesReply.mockImplementationOnce(() => jsonResponse(200, { items: [{ id: 'p8', title: 'New plan' }] }))
+    await click(el, 'tasks-detail-pick-parent')
+    await searchParents(el, 'plan')
+    expect(parentRows(el)).toEqual(['p8'])
+  })
 })
