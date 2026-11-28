@@ -24,6 +24,18 @@ export type RunValueStoreErrorCode =
   | 'RUN_VALUE_FORWARD_REF'
   | 'RUN_VALUE_CONSUMER_DENIED'
   | 'RUN_VALUE_DISPOSED'
+  // iPaaS S2-a (frozen once): used only by the rule-derived plan and the strict reference resolver in
+  // multitable/automation-step-outputs.ts. The seven codes above keep their meaning unchanged.
+  | 'RUN_VALUE_STEP_KEY_INVALID'
+  | 'RUN_VALUE_STEP_KEY_DUPLICATE'
+  | 'RUN_VALUE_PLAN_TOO_LARGE'
+  | 'RUN_VALUE_COLUMN_INVALID'
+  | 'RUN_VALUE_REF_SYNTAX'
+  | 'RUN_VALUE_REF_UNKNOWN'
+  | 'RUN_VALUE_REF_SELF'
+  | 'RUN_VALUE_FIRST_NOT_SINGLE'
+  | 'RUN_VALUE_OUTPUT_TOO_LARGE'
+  | 'RUN_VALUE_KEY_UNUSABLE'
 
 const ownErrors = new WeakSet<object>()
 export class RunValueStoreError extends Error {
@@ -75,6 +87,9 @@ export interface RunValueStore {
 const FORBIDDEN_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
 const MAX_ROWS = 10_000
 const MAX_STRING = 1024 * 1024
+/** The store's own hard limits, exported read-only for the rule-derived path (S2-a); values unchanged. */
+export const RUN_VALUE_STORE_MAX_ROWS = MAX_ROWS
+export const RUN_VALUE_MAX_STRING_LENGTH = MAX_STRING
 
 function fail(code: RunValueStoreErrorCode): never {
   throw new RunValueStoreError(code)
@@ -84,8 +99,11 @@ function canonicalString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= 255
 }
 
-/** Copy one row onto exactly the declared columns. Every value must be a finite JSON scalar. */
-function projectRow(value: unknown, columns: readonly string[]): RunValueRow {
+/**
+ * Copy one row onto exactly the declared columns. Every value must be a finite JSON scalar.
+ * Exported (unchanged) so the rule-derived path (S2-a) measures exactly what this store would hold.
+ */
+export function projectRow(value: unknown, columns: readonly string[]): RunValueRow {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail('RUN_VALUE_INPUT')
   const proto = Object.getPrototypeOf(value)
   if (proto !== Object.prototype && proto !== null) fail('RUN_VALUE_INPUT')
