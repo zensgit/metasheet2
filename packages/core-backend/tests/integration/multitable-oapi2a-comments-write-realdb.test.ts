@@ -17,6 +17,7 @@ import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { db } from '../../src/db/db'
 import { ApiTokenService } from '../../src/multitable/api-token-service'
+import { fixtureIssuanceCredential } from '../helpers/api-token-issuance-credential'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -75,13 +76,13 @@ describeIfDatabase('OAPI-2a comments:write token comment-create (real DB, full s
     await q(`INSERT INTO meta_sheets (id, base_id, name) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [SHEET, BASE, 'OAPI-2a Comments Sheet'])
 
     const svc = new ApiTokenService(db)
-    const w = await svc.createToken(CREATOR, { name: 'cw', scopes: ['comments:write'] })
+    const w = await svc.createToken(CREATOR, { name: 'cw', scopes: ['comments:write'] }, await fixtureIssuanceCredential(db, CREATOR))
     tokWrite = w.plainTextToken
     tokWriteId = w.token.id
-    const ws = await svc.createToken(CREATOR, { name: 'rr', scopes: ['records:read'] })
+    const ws = await svc.createToken(CREATOR, { name: 'rr', scopes: ['records:read'] }, await fixtureIssuanceCredential(db, CREATOR))
     tokWrongScope = ws.plainTextToken
     tokWrongScopeId = ws.token.id
-    const rv = await svc.createToken(CREATOR, { name: 'rv', scopes: ['comments:write'] })
+    const rv = await svc.createToken(CREATOR, { name: 'rv', scopes: ['comments:write'] }, await fixtureIssuanceCredential(db, CREATOR))
     tokRevoked = rv.plainTextToken
     await svc.revokeToken(rv.token.id, CREATOR)
 

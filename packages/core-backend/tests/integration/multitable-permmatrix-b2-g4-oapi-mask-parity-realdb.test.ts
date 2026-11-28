@@ -30,6 +30,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { db } from '../../src/db/db'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { ApiTokenService } from '../../src/multitable/api-token-service'
+import { fixtureIssuanceCredential } from '../helpers/api-token-issuance-credential'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -99,7 +100,7 @@ describeIfDatabase('W1-2 B2 G-4 — OAPI read-mask parity: token output ≡ crea
     await q('INSERT INTO record_permissions (sheet_id, record_id, subject_type, subject_id, access_level) VALUES ($1,$2,$3,$4,$5)', [SHEET_ID, REC_DENIED, 'user', CREATOR, 'none'])
 
     const svc = new ApiTokenService(db)
-    token = (await svc.createToken(CREATOR, { name: 'b2-g4-read', scopes: ['records:read'] })).plainTextToken
+    token = (await svc.createToken(CREATOR, { name: 'b2-g4-read', scopes: ['records:read'] }, await fixtureIssuanceCredential(db, CREATOR))).plainTextToken
   })
 
   afterAll(async () => {

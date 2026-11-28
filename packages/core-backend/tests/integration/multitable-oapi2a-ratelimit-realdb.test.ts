@@ -17,6 +17,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { db } from '../../src/db/db'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { ApiTokenService } from '../../src/multitable/api-token-service'
+import { fixtureIssuanceCredential } from '../helpers/api-token-issuance-credential'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -46,7 +47,7 @@ describeIfDatabase('OAPI-2a wrong-scope writes are rate-limited (real DB)', () =
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET_ID, BASE_ID, 'rl'])
 
     const svc = new ApiTokenService(db)
-    const r = await svc.createToken(CREATOR, { name: 'read', scopes: ['records:read'] })
+    const r = await svc.createToken(CREATOR, { name: 'read', scopes: ['records:read'] }, await fixtureIssuanceCredential(db, CREATOR))
     tokRead = r.plainTextToken
     tokReadId = r.token.id
   })

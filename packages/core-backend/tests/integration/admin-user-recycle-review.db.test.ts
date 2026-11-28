@@ -7,6 +7,7 @@ import { beforeAll, describe, expect, it } from 'vitest'
 import { query, transaction } from '../../src/db/pg'
 import { db } from '../../src/db/db'
 import { ApiTokenService } from '../../src/multitable/api-token-service'
+import { fixtureIssuanceCredential } from '../helpers/api-token-issuance-credential'
 import { authService } from '../../src/auth/AuthService'
 import { restoreDeprovisionEvent } from '../../src/directory/deprovision-evidence-api'
 import { adminUsersRouter } from '../../src/routes/admin-users'
@@ -135,7 +136,7 @@ describe('recycle review against a fresh migrated synthetic PostgreSQL database'
   it('revokes tokens on recycling and fails closed on a recycled or purged creator even if active', async () => {
     const service = new ApiTokenService(db)
     const userId = await seedUser()
-    const token = await service.createToken(userId, { name: 'Synthetic', scopes: ['records:read'] })
+    const token = await service.createToken(userId, { name: 'Synthetic', scopes: ['records:read'] }, await fixtureIssuanceCredential(db, userId))
     expect((await service.validateToken(token.plainTextToken)).valid).toBe(true)
     expect((await move(userId)).ok).toBe(true)
     expect((await query('SELECT revoked FROM multitable_api_tokens WHERE id = $1', [token.token.id])).rows).toEqual([{ revoked: true }])

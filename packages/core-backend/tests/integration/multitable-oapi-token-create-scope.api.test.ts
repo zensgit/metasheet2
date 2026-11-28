@@ -25,6 +25,7 @@ vi.mock('../../src/middleware/auth', () => {
   return { authenticate, authMiddleware: authenticate, default: authenticate }
 })
 
+import { authService } from '../../src/auth/AuthService'
 import { apiTokensRouter } from '../../src/routes/api-tokens'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
 import { poolManager } from '../../src/integration/db/connection-pool'
@@ -41,6 +42,19 @@ const SHEET_Y = `sheet_tc_y_${TS}`
 const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, params)
 let app: Express
 let mintedPlaintext = ''
+
+/** Signed session token of the creator, without a sid: issuance re-reads the watermark against its iat. */
+function creatorBearer(): string {
+  return `Bearer ${authService.createToken({
+    id: WRITER,
+    email: `${WRITER}@t.local`,
+    name: WRITER,
+    role: 'member',
+    permissions: [],
+    created_at: new Date(),
+    updated_at: new Date(),
+  })}`
+}
 
 describeIfDatabase('OAPI-4a REST token-create scope plumbing (real DB)', () => {
   beforeAll(async () => {
@@ -81,6 +95,7 @@ describeIfDatabase('OAPI-4a REST token-create scope plumbing (real DB)', () => {
   test('REST create accepts + persists baseIds (NOT stripped) and returns them', async () => {
     const res = await request(app)
       .post('/api/multitable/api-tokens')
+      .set('Authorization', creatorBearer())
       .send({ name: 'scoped-x', scopes: ['records:write', 'records:read'], baseIds: [BASE_X] })
     expect(res.status).toBe(201)
     expect(res.body?.data?.token?.baseIds).toEqual([BASE_X])
@@ -118,6 +133,7 @@ describeIfDatabase('OAPI-4a REST token-create scope plumbing (real DB)', () => {
   test('REST create accepts sheetIds too (not stripped)', async () => {
     const res = await request(app)
       .post('/api/multitable/api-tokens')
+      .set('Authorization', creatorBearer())
       .send({ name: 'scoped-sheet', scopes: ['records:read'], sheetIds: [SHEET_X] })
     expect(res.status).toBe(201)
     expect(res.body?.data?.token?.sheetIds).toEqual([SHEET_X])

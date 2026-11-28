@@ -1646,7 +1646,8 @@ describeIfDatabase('备料 option B — PLM columns of a project sheet: read-onl
       {
         const { ApiTokenService } = await import('../../src/multitable/api-token-service')
         const { db: tokenDb } = await import('../../src/db/db')
-        const minted = await new ApiTokenService(tokenDb).createToken(PB_FRONTLINE, { name: 'pb05b-token', scopes: ['records:write'] })
+        const { fixtureIssuanceCredential } = await import('../helpers/api-token-issuance-credential')
+        const minted = await new ApiTokenService(tokenDb).createToken(PB_FRONTLINE, { name: 'pb05b-token', scopes: ['records:write'] }, await fixtureIssuanceCredential(tokenDb, PB_FRONTLINE))
         try {
           const before = (await sheetData(c.sheetId)).length
           const viaToken = await request(pbApp)

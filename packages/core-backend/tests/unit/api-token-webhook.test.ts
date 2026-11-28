@@ -47,6 +47,21 @@ let executeQueue: unknown[]
 let executeTakeFirstQueue: unknown[]
 let selectArgCalls: unknown[][]
 
+/** Issuance input of an undated session with no sid, matching the creator row below. */
+const ISSUANCE = { expectedAccessGeneration: 0, sessionId: null, issuedAt: null }
+
+/** Raw issuance statements on the transaction connection, answered as for an active creator. */
+function issuanceRows(text: string): Record<string, unknown>[] {
+  if (text.includes('transaction_isolation')) return [{ isolation: 'read committed' }]
+  if (text.includes('AS previous')) return [{ previous: '0' }]
+  if (text.includes('FROM users WHERE id = $1 FOR SHARE')) {
+    return [{ role: 'user', is_active: true, activation_status: 'activated', access_generation: 0, deleted_at: null, purged_at: null }]
+  }
+  if (text.includes('FROM user_sessions')) return [{ present: 1 }]
+  if (text.includes('AS revoked')) return [{ revoked: false }]
+  return []
+}
+
 function makeChain(table?: string): Record<string, unknown> {
   let sharedCreatorFence = false
   const self: Record<string, unknown> = {}
@@ -91,6 +106,7 @@ function createMockDb(): Kysely<Database> {
             for (const m of ['selectFrom', 'insertInto', 'updateTable', 'deleteFrom']) {
               trxRoot[m] = vi.fn((table: string) => makeChain(table))
             }
+            trxRoot.executeQuery = vi.fn(async (compiled: { sql: string }) => ({ rows: issuanceRows(compiled.sql) }))
             return fn(trxRoot)
           },
         })
@@ -159,7 +175,7 @@ describe('ApiTokenService', () => {
     const result = await svc.createToken('user1', {
       name: 'Test Token',
       scopes: ['records:read'],
-    })
+    }, ISSUANCE)
     expect(result.plainTextToken).toMatch(/^mst_[0-9a-f]{32}$/)
   })
 
@@ -167,7 +183,7 @@ describe('ApiTokenService', () => {
     const result = await svc.createToken('user1', {
       name: 'Once',
       scopes: ['records:read'],
-    })
+    }, ISSUANCE)
     // Push mock rows for listTokens query
     executeQueue.push([{
       id: result.token.id,
@@ -192,7 +208,7 @@ describe('ApiTokenService', () => {
     const result = await svc.createToken('user1', {
       name: 'Hash check',
       scopes: ['records:read'],
-    })
+    }, ISSUANCE)
     const expectedHash = createHash('sha256')
       .update(result.plainTextToken)
       .digest('hex')
@@ -203,19 +219,19 @@ describe('ApiTokenService', () => {
     const result = await svc.createToken('user1', {
       name: 'Prefix',
       scopes: ['records:read'],
-    })
+    }, ISSUANCE)
     expect(result.token.tokenPrefix).toBe(result.plainTextToken.slice(0, 8))
   })
 
   test('createToken rejects empty name', async () => {
     await expect(
-      svc.createToken('user1', { name: '', scopes: ['records:read'] }),
+      svc.createToken('user1', { name: '', scopes: ['records:read'] }, ISSUANCE),
     ).rejects.toThrow('Token name is required')
   })
 
   test('createToken rejects empty scopes', async () => {
     await expect(
-      svc.createToken('user1', { name: 'No scopes', scopes: [] }),
+      svc.createToken('user1', { name: 'No scopes', scopes: [] }, ISSUANCE),
     ).rejects.toThrow('At least one scope is required')
   })
 
@@ -225,7 +241,7 @@ describe('ApiTokenService', () => {
     const created = await svc.createToken('user1', {
       name: 'Valid',
       scopes: ['records:read'],
-    })
+    }, ISSUANCE)
     executeTakeFirstQueue.push(tokenRow(created), { ...ACTIVE_CREATOR })
     executeQueue.push([{ id: created.token.id }]) // UPDATE ... RETURNING id
     const result = await svc.validateToken(created.plainTextToken)
@@ -253,7 +269,7 @@ describe('ApiTokenService', () => {
     const created = await svc.createToken('user1', {
       name: 'Used',
       scopes: ['records:read'],
-    })
+    }, ISSUANCE)
     expect(created.token.lastUsedAt).toBeUndefined()
     executeTakeFirstQueue.push(tokenRow(created), { ...ACTIVE_CREATOR })
     executeQueue.push([{ id: created.token.id }]) // UPDATE ... RETURNING id
@@ -265,7 +281,7 @@ describe('ApiTokenService', () => {
   })
 
   test('validateToken fails when creator is missing', async () => {
-    const created = await svc.createToken('user1', { name: 'NoCreator', scopes: ['records:read'] })
+    const created = await svc.createToken('user1', { name: 'NoCreator', scopes: ['records:read'] }, ISSUANCE)
     executeTakeFirstQueue.push(tokenRow(created), undefined)
     const result = await svc.validateToken(created.plainTextToken)
     expect(result.valid).toBe(false)
@@ -273,7 +289,7 @@ describe('ApiTokenService', () => {
   })
 
   test('validateToken fails when creator is pending_activation', async () => {
-    const created = await svc.createToken('user1', { name: 'PendingCreator', scopes: ['records:read'] })
+    const created = await svc.createToken('user1', { name: 'PendingCreator', scopes: ['records:read'] }, ISSUANCE)
     executeTakeFirstQueue.push(tokenRow(created), {
       ...ACTIVE_CREATOR,
       activation_status: 'pending_activation',
@@ -284,7 +300,7 @@ describe('ApiTokenService', () => {
   })
 
   test('validateToken fails when creator is inactive', async () => {
-    const created = await svc.createToken('user1', { name: 'InactiveCreator', scopes: ['records:read'] })
+    const created = await svc.createToken('user1', { name: 'InactiveCreator', scopes: ['records:read'] }, ISSUANCE)
     executeTakeFirstQueue.push(tokenRow(created), {
       ...ACTIVE_CREATOR,
       is_active: false,
@@ -295,7 +311,7 @@ describe('ApiTokenService', () => {
   })
 
   test('validateToken fails when creator activation_status is invalid', async () => {
-    const created = await svc.createToken('user1', { name: 'InvalidCreator', scopes: ['records:read'] })
+    const created = await svc.createToken('user1', { name: 'InvalidCreator', scopes: ['records:read'] }, ISSUANCE)
     executeTakeFirstQueue.push(tokenRow(created), {
       ...ACTIVE_CREATOR,
       activation_status: 'corrupted',
@@ -306,7 +322,7 @@ describe('ApiTokenService', () => {
   })
 
   test('validateToken creator query reads deleted_at and purged_at via to_jsonb(users)', async () => {
-    const created = await svc.createToken('user1', { name: 'JsonbCreator', scopes: ['records:read'] })
+    const created = await svc.createToken('user1', { name: 'JsonbCreator', scopes: ['records:read'] }, ISSUANCE)
     selectArgCalls = []
     executeTakeFirstQueue.push(tokenRow(created), { ...ACTIVE_CREATOR, deleted_at: null, purged_at: null })
     executeQueue.push([{ id: created.token.id }]) // UPDATE ... RETURNING id
@@ -319,7 +335,7 @@ describe('ApiTokenService', () => {
   })
 
   test('validateToken fails when creator is recycled despite is_active', async () => {
-    const created = await svc.createToken('user1', { name: 'RecycledCreator', scopes: ['records:read'] })
+    const created = await svc.createToken('user1', { name: 'RecycledCreator', scopes: ['records:read'] }, ISSUANCE)
     executeTakeFirstQueue.push(tokenRow(created), {
       ...ACTIVE_CREATOR,
       is_active: true,
@@ -332,7 +348,7 @@ describe('ApiTokenService', () => {
   })
 
   test('validateToken fails when creator is purged despite is_active', async () => {
-    const created = await svc.createToken('user1', { name: 'PurgedCreator', scopes: ['records:read'] })
+    const created = await svc.createToken('user1', { name: 'PurgedCreator', scopes: ['records:read'] }, ISSUANCE)
     executeTakeFirstQueue.push(tokenRow(created), {
       ...ACTIVE_CREATOR,
       is_active: true,
@@ -356,7 +372,7 @@ describe('ApiTokenService', () => {
       { label: 'purged', creator: { ...ACTIVE_CREATOR, is_active: true, deleted_at: null, purged_at: '2026-10-02T00:00:00.000Z' }, reason: /recycle bin/i },
     ] as const
     for (const c of cases) {
-      const created = await svc.createToken('user1', { name: c.label, scopes: ['records:read'] })
+      const created = await svc.createToken('user1', { name: c.label, scopes: ['records:read'] }, ISSUANCE)
       executeTakeFirstQueue.push(tokenRow(created), c.creator)
       const result = await svc.validateToken(created.plainTextToken)
       expect(result.valid, c.label).toBe(false)
@@ -370,7 +386,7 @@ describe('ApiTokenService', () => {
     const created = await svc.createToken('user1', {
       name: 'Revoke me',
       scopes: ['records:read'],
-    })
+    }, ISSUANCE)
     executeTakeFirstQueue.push({
       id: created.token.id,
       name: created.token.name,
@@ -405,7 +421,7 @@ describe('ApiTokenService', () => {
     const created = await svc.createToken('user1', {
       name: 'Ts',
       scopes: ['records:read'],
-    })
+    }, ISSUANCE)
     executeTakeFirstQueue.push({
       id: created.token.id,
       name: created.token.name,
@@ -439,7 +455,7 @@ describe('ApiTokenService', () => {
     const created = await svc.createToken('user1', {
       name: 'Protected',
       scopes: ['records:read'],
-    })
+    }, ISSUANCE)
     executeTakeFirstQueue.push({
       id: created.token.id,
       created_by: 'user1',
@@ -453,7 +469,7 @@ describe('ApiTokenService', () => {
     const created = await svc.createToken('user1', {
       name: 'Idem',
       scopes: ['records:read'],
-    })
+    }, ISSUANCE)
     executeTakeFirstQueue.push({
       id: created.token.id,
       created_by: 'user1',
@@ -479,7 +495,7 @@ describe('ApiTokenService', () => {
       name: 'Expired',
       scopes: ['records:read'],
       expiresAt: past,
-    })
+    }, ISSUANCE)
     executeTakeFirstQueue.push({
       id: created.token.id,
       name: created.token.name,
@@ -504,7 +520,7 @@ describe('ApiTokenService', () => {
       name: 'Future',
       scopes: ['records:read'],
       expiresAt: future,
-    })
+    }, ISSUANCE)
     executeTakeFirstQueue.push(
       tokenRow(created, { expires_at: future }),
       { ...ACTIVE_CREATOR },
@@ -520,7 +536,7 @@ describe('ApiTokenService', () => {
     const { token } = await svc.createToken('user1', {
       name: 'Scoped',
       scopes: ['records:read', 'records:write'],
-    })
+    }, ISSUANCE)
     expect(ApiTokenService.hasScope(token, 'records:read')).toBe(true)
     expect(ApiTokenService.hasScope(token, 'records:write')).toBe(true)
   })
@@ -529,7 +545,7 @@ describe('ApiTokenService', () => {
     const { token } = await svc.createToken('user1', {
       name: 'Limited',
       scopes: ['records:read'],
-    })
+    }, ISSUANCE)
     expect(ApiTokenService.hasScope(token, 'comments:write')).toBe(false)
   })
 
@@ -539,7 +555,7 @@ describe('ApiTokenService', () => {
     const { plainTextToken: oldPt, token: oldToken } = await svc.createToken('user1', {
       name: 'Rotate me',
       scopes: ['records:read', 'comments:read'],
-    })
+    }, ISSUANCE)
     executeTakeFirstQueue.push({
       id: oldToken.id,
       name: oldToken.name,
@@ -553,7 +569,7 @@ describe('ApiTokenService', () => {
     executeQueue.push([{ id: oldToken.id }]) // Old-token UPDATE ... RETURNING id
     const { plainTextToken: newPt, token: newToken } = await svc.rotateToken(
       oldToken.id,
-      'user1',
+      'user1', ISSUANCE,
     )
 
     executeTakeFirstQueue.push({
@@ -594,9 +610,9 @@ describe('ApiTokenService', () => {
   // ── Listing ───────────────────────────────────────────────────────
 
   test('listTokens returns only tokens for the given user', async () => {
-    const t1 = await svc.createToken('user1', { name: 'A', scopes: ['records:read'] })
-    await svc.createToken('user2', { name: 'B', scopes: ['records:read'] })
-    const t3 = await svc.createToken('user1', { name: 'C', scopes: ['records:write'] })
+    const t1 = await svc.createToken('user1', { name: 'A', scopes: ['records:read'] }, ISSUANCE)
+    await svc.createToken('user2', { name: 'B', scopes: ['records:read'] }, ISSUANCE)
+    const t3 = await svc.createToken('user1', { name: 'C', scopes: ['records:write'] }, ISSUANCE)
 
     executeQueue.push([
       {

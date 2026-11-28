@@ -22,6 +22,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 import { db } from '../../src/db/db'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { ApiTokenService } from '../../src/multitable/api-token-service'
+import { fixtureIssuanceCredential } from '../helpers/api-token-issuance-credential'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -62,10 +63,10 @@ describeIfDatabase('OAPI-1 read-only API-token routes (real DB)', () => {
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [REC_SECRET, SHEET_ID, JSON.stringify({ [STATUS]: 'secret' })])
 
     const svc = new ApiTokenService(db)
-    tokReadOk = (await svc.createToken(CREATOR, { name: 'read-ok', scopes: ['records:read'] })).plainTextToken
-    tokNoScope = (await svc.createToken(CREATOR, { name: 'no-scope', scopes: ['comments:read'] })).plainTextToken
-    tokFields = (await svc.createToken(CREATOR, { name: 'fields', scopes: ['fields:read'] })).plainTextToken
-    const revoked = await svc.createToken(CREATOR, { name: 'revoked', scopes: ['records:read'] })
+    tokReadOk = (await svc.createToken(CREATOR, { name: 'read-ok', scopes: ['records:read'] }, await fixtureIssuanceCredential(db, CREATOR))).plainTextToken
+    tokNoScope = (await svc.createToken(CREATOR, { name: 'no-scope', scopes: ['comments:read'] }, await fixtureIssuanceCredential(db, CREATOR))).plainTextToken
+    tokFields = (await svc.createToken(CREATOR, { name: 'fields', scopes: ['fields:read'] }, await fixtureIssuanceCredential(db, CREATOR))).plainTextToken
+    const revoked = await svc.createToken(CREATOR, { name: 'revoked', scopes: ['records:read'] }, await fixtureIssuanceCredential(db, CREATOR))
     tokRevoked = revoked.plainTextToken
     await svc.revokeToken(revoked.token.id, CREATOR)
   })

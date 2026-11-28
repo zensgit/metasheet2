@@ -41,6 +41,8 @@ import { AuthService, authService } from '../../src/auth/AuthService'
 import { jwtAuthMiddleware } from '../../src/auth/jwt-middleware'
 import { authRouter } from '../../src/routes/auth'
 import { ApiTokenService } from '../../src/multitable/api-token-service'
+import { issuanceCredentialFromSessionClaims } from '../../src/multitable/api-token-issuance'
+import { fixtureIssuanceCredential } from '../helpers/api-token-issuance-credential'
 import { probeEncryptedStores } from '../../src/security/encrypted-store-probe'
 import { ConnectionPool, poolManager } from '../../src/integration/db/connection-pool'
 import { db } from '../../src/db/db'
@@ -1381,10 +1383,14 @@ suite('DingTalk controlled login repair', () => {
       expect(login?.user.id).toBe(f.user)
       expect((await auth.verifyToken(login!.token))?.id).toBe(f.user)
       expect(await auth.refreshToken(login!.token)).toBeTruthy()
+      const loginGeneration = Number(
+        (await query('SELECT access_generation FROM users WHERE id=$1', [f.user]))
+          .rows[0].access_generation,
+      )
       const token = await api.createToken(f.user, {
         name: 'synthetic repair token',
         scopes: ['records:read'],
-      })
+      }, issuanceCredentialFromSessionClaims(auth.readTokenPayload(login!.token), f.user, loginGeneration))
       expect((await api.validateToken(token.plainTextToken)).valid).toBe(true)
       const proof = await f.verify(),
         preview = await previewDingTalkRepair(proof)
@@ -1396,10 +1402,14 @@ suite('DingTalk controlled login repair', () => {
       await new Promise((resolve) => setTimeout(resolve, 1100))
       const next = await auth.login(f.user, f.password)
       expect((await auth.verifyToken(next!.token))?.id).toBe(f.user)
+      const nextGeneration = Number(
+        (await query('SELECT access_generation FROM users WHERE id=$1', [f.user]))
+          .rows[0].access_generation,
+      )
       const nextToken = await api.createToken(f.user, {
         name: 'synthetic later token',
         scopes: ['records:read'],
-      })
+      }, issuanceCredentialFromSessionClaims(auth.readTokenPayload(next!.token), f.user, nextGeneration))
       const recovery = await previewDingTalkRepairRecovery(
         repair.id,
         f.admin,
@@ -2116,14 +2126,11 @@ suite('DingTalk controlled login repair', () => {
   it('rejects delayed API token creation and rotation certified before repair', async () => {
     const f = await fixture(),
       api = new ApiTokenService(db)
-    const generation = Number(
-      (await query('SELECT access_generation FROM users WHERE id=$1', [f.user]))
-        .rows[0].access_generation,
-    )
+    const certified = await fixtureIssuanceCredential(db, f.user)
     const original = await api.createToken(
       f.user,
       { name: 'synthetic original', scopes: ['records:read'] },
-      generation,
+      certified,
     )
     const proof = await f.verify(),
       p = await previewDingTalkRepair(proof)
@@ -2137,11 +2144,11 @@ suite('DingTalk controlled login repair', () => {
       api.createToken(
         f.user,
         { name: 'synthetic delayed', scopes: ['records:read'] },
-        generation,
+        certified,
       ),
     ).rejects.toThrow('Authentication changed')
     await expect(
-      api.rotateToken(original.token.id, f.user, generation),
+      api.rotateToken(original.token.id, f.user, certified),
     ).rejects.toThrow('Authentication changed')
     expect(
       (
@@ -2151,10 +2158,7 @@ suite('DingTalk controlled login repair', () => {
         )
       ).rows,
     ).toHaveLength(count)
-    const fresh = Number(
-      (await query('SELECT access_generation FROM users WHERE id=$1', [f.user]))
-        .rows[0].access_generation,
-    )
+    const fresh = await fixtureIssuanceCredential(db, f.user)
     const next = await api.createToken(
       f.user,
       { name: 'synthetic new authentication', scopes: ['records:read'] },

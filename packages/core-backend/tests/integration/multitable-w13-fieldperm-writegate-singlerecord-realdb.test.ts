@@ -27,6 +27,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 import { db } from '../../src/db/db'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { ApiTokenService } from '../../src/multitable/api-token-service'
+import { fixtureIssuanceCredential } from '../helpers/api-token-issuance-credential'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -119,7 +120,7 @@ describeIfDatabase('W1-3 GW4/GW5/GW6 — layer-3 per-subject field-write gate on
     // No field_permissions row for UNRESTRICTED_ID at all.
 
     const svc = new ApiTokenService(db)
-    const w = await svc.createToken(TOKEN_CREATOR_ID, { name: 'w13-gw4-write', scopes: ['records:write'] })
+    const w = await svc.createToken(TOKEN_CREATOR_ID, { name: 'w13-gw4-write', scopes: ['records:write'] }, await fixtureIssuanceCredential(db, TOKEN_CREATOR_ID))
     tokWrite = w.plainTextToken
     tokWriteId = w.token.id
   })
@@ -178,7 +179,7 @@ describeIfDatabase('W1-3 GW4/GW5/GW6 — layer-3 per-subject field-write gate on
 
   test('GW5 (mst_ token caller, UNRESTRICTED subject): single-record PATCH on the per-subject-locked field → 200, write lands', async () => {
     const svc = new ApiTokenService(db)
-    const w = await svc.createToken(UNRESTRICTED_ID, { name: 'w13-gw5-unrestricted', scopes: ['records:write'] })
+    const w = await svc.createToken(UNRESTRICTED_ID, { name: 'w13-gw5-unrestricted', scopes: ['records:write'] }, await fixtureIssuanceCredential(db, UNRESTRICTED_ID))
     const res = await request(app)
       .patch(`/api/multitable/records/${REC_GW5_TOKEN}`)
       .set('Authorization', `Bearer ${w.plainTextToken}`)

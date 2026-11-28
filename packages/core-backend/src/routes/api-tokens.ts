@@ -13,6 +13,12 @@ import { apiTokenBearer, StrictCredentialChainError } from '../auth/strict-crede
 import { classifyVerifiedSessionPayload } from '../auth/strict-dingtalk-entry'
 import { authenticate } from '../middleware/auth'
 import { ApiTokenService } from '../multitable/api-token-service'
+import {
+  ApiTokenIssuanceError,
+  issuanceAuthenticationChanged,
+  issuanceCredentialFromSessionClaims,
+  type ApiTokenIssuanceCredential,
+} from '../multitable/api-token-issuance'
 import { ALL_API_TOKEN_SCOPES } from '../multitable/api-tokens'
 import { DingTalkGroupDestinationService } from '../multitable/dingtalk-group-destination-service'
 import { toDingTalkGroupDestinationResponse } from '../multitable/dingtalk-group-destination-response'
@@ -308,6 +314,17 @@ function credentialGeneration(req: Request): number {
   return generation
 }
 
+/**
+ * Issuance input from the same bearer token that `authenticate` verified: the access generation of
+ * the authenticated user, and the sid and iat claims of that token. No other request field is read.
+ */
+function issuanceCredential(req: Request, userId: string): ApiTokenIssuanceCredential {
+  const generation = credentialGeneration(req)
+  const token = apiTokenBearer(req.headers.authorization)
+  if (!token) throw issuanceAuthenticationChanged()
+  return issuanceCredentialFromSessionClaims(authService.readTokenPayload(token), userId, generation)
+}
+
 function zodError(res: Response, err: z.ZodError): void {
   res.status(400).json({
     ok: false,
@@ -336,6 +353,14 @@ function rejectStrictApiTokenSession(req: Request, res: Response, next: NextFunc
 }
 
 function serviceErrorResponse(res: Response, err: unknown, action: string): void {
+  if (err instanceof ApiTokenIssuanceError) {
+    if (err.code === 'API_TOKEN_ISSUANCE_BUSY') res.set('Retry-After', '1')
+    res.status(err.statusCode).json({
+      ok: false,
+      error: { code: err.code, message: err.message },
+    })
+    return
+  }
   if (err instanceof StrictCredentialChainError && err.code === 'API_TOKEN_REVOKED_CONCURRENTLY') {
     res.status(err.statusCode).json({
       ok: false,
@@ -421,7 +446,7 @@ export function apiTokensRouter(): Router {
         expiresAt: input.expiresAt,
         baseIds: input.baseIds,
         sheetIds: input.sheetIds,
-      }, credentialGeneration(req))
+      }, issuanceCredential(req, userId))
       res.status(201).json({
         ok: true,
         data: {
@@ -461,7 +486,7 @@ export function apiTokensRouter(): Router {
       return
     }
     try {
-      const result = await apiTokenService.rotateToken(req.params.id, userId, credentialGeneration(req))
+      const result = await apiTokenService.rotateToken(req.params.id, userId, issuanceCredential(req, userId))
       res.json({
         ok: true,
         data: {

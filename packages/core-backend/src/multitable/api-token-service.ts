@@ -5,10 +5,11 @@
  */
 
 import { createHash, randomBytes } from 'crypto'
-import { sql, type Kysely } from 'kysely'
+import { CompiledQuery, sql, type Kysely } from 'kysely'
 import { Logger } from '../core/logger'
 import { refuseZeroReturning } from '../auth/strict-credential-chain'
 import { evaluateUserAuthenticationGate } from '../auth/user-activation'
+import { isSessionRenewalBusyError, lockUserAccessShared } from '../auth/user-access-lock'
 import type { Database } from '../db/types'
 import { nowTimestamp, toJsonValue } from '../db/type-helpers'
 import type {
@@ -17,6 +18,13 @@ import type {
   ApiTokenCreateResult,
   ApiTokenScope,
 } from './api-tokens'
+import {
+  issuanceAuthenticationChanged,
+  issuanceBusy,
+  issuanceUnavailable,
+  requireIssuanceCredential,
+  type ApiTokenIssuanceCredential,
+} from './api-token-issuance'
 
 const logger = new Logger('ApiTokenService')
 
@@ -33,6 +41,37 @@ function generatePlainTextToken(): string {
 function hashToken(plainText: string): string {
   return createHash('sha256').update(plainText).digest('hex')
 }
+
+type IssuanceClient = {
+  query: (text: string, args?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }>
+}
+
+/** Raw statements on the connection of the issuance transaction itself. */
+function issuanceClient(trx: Kysely<Database>): IssuanceClient {
+  return {
+    async query(text: string, args: unknown[] = []) {
+      const result = await trx.executeQuery(CompiledQuery.raw(text, args))
+      return { rows: result.rows as Record<string, unknown>[] }
+    },
+  }
+}
+
+const ISSUANCE_ISOLATION = 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED'
+const ISSUANCE_ISOLATION_PROBE = "SELECT current_setting('transaction_isolation') AS isolation"
+// One live session row with this id for this user. Read only, not locked.
+const ISSUANCE_SESSION_ROW = `SELECT 1 AS present
+  FROM user_sessions
+ WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL`
+// Dated token: any watermark at or after its iat revokes it.
+const ISSUANCE_DATED_WATERMARK = `SELECT EXISTS (
+  SELECT 1 FROM user_session_revocations
+   WHERE user_id = $1 AND revoked_after >= to_timestamp($2::double precision)
+) AS revoked`
+// Undated token: any watermark other than the epoch placeholder revokes it.
+const ISSUANCE_UNDATED_WATERMARK = `SELECT EXISTS (
+  SELECT 1 FROM user_session_revocations
+   WHERE user_id = $1 AND revoked_after <> TIMESTAMPTZ '1970-01-01 00:00:00+00'
+) AS revoked`
 
 /**
  * OAPI-4a — normalize an optional per-base/sheet scope list for PERSISTENCE: trim, drop empties, dedupe;
@@ -108,12 +147,38 @@ export class ApiTokenService {
     this.db = db
   }
 
-  private async fenceCredentialIssuance(trx: Kysely<Database>, userId: string, expectedAccessGeneration?: number): Promise<void> {
-    const row = await trx.selectFrom('users').select(['id', 'is_active', sql<number>`access_generation`.as('access_generation')])
-      .where('id', '=', userId).forShare().executeTakeFirst()
-    if (!row || row.is_active !== true || (expectedAccessGeneration !== undefined && Number(row.access_generation) !== expectedAccessGeneration)) {
-      throw new Error('Authentication changed; please sign in again')
+  /**
+   * Issuance fence shared by create and rotate. Runs first in the issuance transaction:
+   * 1. pin READ COMMITTED, then confirm it;
+   * 2. take the shared user access lock and the users row FOR SHARE, then compare activity and
+   *    access generation with the authenticated user;
+   * 3. after the lock, re-read the session row (when the token has a sid) and then the session
+   *    watermark, each as its own statement on this connection.
+   * Any refusal or read error ends the transaction before a token row is written.
+   */
+  private async fenceCredentialIssuance(trx: Kysely<Database>, userId: string, credential: ApiTokenIssuanceCredential): Promise<void> {
+    const client = issuanceClient(trx)
+    await client.query(ISSUANCE_ISOLATION)
+    const isolation = await client.query(ISSUANCE_ISOLATION_PROBE)
+    if (isolation.rows.length !== 1 || isolation.rows[0].isolation !== 'read committed') throw issuanceUnavailable()
+    let account: Awaited<ReturnType<typeof lockUserAccessShared>>
+    try {
+      account = await lockUserAccessShared(client, userId)
+    } catch (error) {
+      if (isSessionRenewalBusyError(error)) throw issuanceBusy()
+      throw error
     }
+    if (!account || account.is_active !== true || Number(account.access_generation) !== credential.expectedAccessGeneration) {
+      throw issuanceAuthenticationChanged()
+    }
+    if (credential.sessionId !== null) {
+      const session = await client.query(ISSUANCE_SESSION_ROW, [credential.sessionId, userId])
+      if (session.rows.length !== 1) throw issuanceAuthenticationChanged()
+    }
+    const watermark = credential.issuedAt !== null
+      ? await client.query(ISSUANCE_DATED_WATERMARK, [userId, credential.issuedAt])
+      : await client.query(ISSUANCE_UNDATED_WATERMARK, [userId])
+    if (watermark.rows.length !== 1 || watermark.rows[0].revoked !== false) throw issuanceAuthenticationChanged()
   }
 
   /**
@@ -122,8 +187,9 @@ export class ApiTokenService {
   async createToken(
     userId: string,
     input: ApiTokenCreateInput,
-    expectedAccessGeneration?: number,
+    credential: ApiTokenIssuanceCredential,
   ): Promise<ApiTokenCreateResult> {
+    const issuance = requireIssuanceCredential(credential)
     if (!input.name || input.name.trim().length === 0) {
       throw new Error('Token name is required')
     }
@@ -141,7 +207,7 @@ export class ApiTokenService {
     const sheetIds = normalizeScopeArray(input.sheetIds)
 
     await this.db.transaction().execute(async trx => {
-      await this.fenceCredentialIssuance(trx, userId, expectedAccessGeneration)
+      await this.fenceCredentialIssuance(trx, userId, issuance)
       await trx
       .insertInto('multitable_api_tokens')
       .values({
@@ -315,8 +381,9 @@ export class ApiTokenService {
   async rotateToken(
     tokenId: string,
     userId: string,
-    expectedAccessGeneration?: number,
+    credential: ApiTokenIssuanceCredential,
   ): Promise<ApiTokenCreateResult> {
+    const issuance = requireIssuanceCredential(credential)
     const row = await this.db
       .selectFrom('multitable_api_tokens')
       .selectAll()
@@ -334,7 +401,7 @@ export class ApiTokenService {
 
     // Revoke old + create new in a transaction
     return this.db.transaction().execute(async (trx) => {
-      await this.fenceCredentialIssuance(trx, userId, expectedAccessGeneration)
+      await this.fenceCredentialIssuance(trx, userId, issuance)
       const revokedRows = await trx
         .updateTable('multitable_api_tokens')
         .set({ revoked: true, revoked_at: nowTimestamp() })
