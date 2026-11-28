@@ -897,7 +897,7 @@ import { createWorkbenchUndo, drawerCommitContainers, installWorkbenchUndo, isWo
 import { resolveMentionDisplayField, resolvePrimaryField } from '../utils/recordDisplay'
 import { DEFAULT_GRID_PAGE_SIZE, GRID_PAGE_SIZE_OPTIONS, clampGridPageSize, readGridPageSize, writeGridPageSize } from '../utils/grid-page-size'
 import type { MetaRecordInspectorFieldLayout } from '../utils/recordDisplay'
-import { resolveButtonFieldProperty } from '../utils/field-config'
+import { attachmentLimitError, resolveButtonFieldProperty } from '../utils/field-config'
 import { DIALOG_META_REFRESH_INTERVAL_MS } from '../utils/dialog-meta-refresh'
 import {
   bulkFailure as fmtBulkFailure,
@@ -3059,7 +3059,8 @@ async function deleteAttachment(attachmentId: string, context?: MetaAttachmentUp
   // as it is, as the server leaves the record.
   const linked = deepLinkedRecord.value
   if (context?.recordId && context.fieldId && linked?.id === context.recordId) {
-    const storedIds = (linked.data[context.fieldId] as unknown[] | undefined)?.map(String) ?? []
+    const raw = linked.data[context.fieldId]
+    const storedIds = Array.isArray(raw) ? raw.map(String) : raw ? [String(raw)] : []
     if (storedIds.includes(attachmentId)) {
       deepLinkedRecord.value = {
         ...linked,
@@ -3932,7 +3933,16 @@ async function onDrawerPatch(fieldId: string, value: unknown, recordId?: string,
     // during an upload too. An upload that replaces the list names none, and is written as given.
     const raw = record.data[fieldId]
     const next = Array.isArray(raw) ? raw.map(String) : raw ? [String(raw)] : []
+    const before = next.length
     pushUniqueIds(next, added)
+    // The field's file limit was checked when the files were chosen; a file that reached the field meanwhile can
+    // make the merged list exceed it.
+    const field = grid.fields.value.find((item) => item.id === fieldId)
+    const overLimit = field && next.length > before ? attachmentLimitError(field, next.length, isZh.value) : null
+    if (overLimit) {
+      showError(overLimit)
+      return
+    }
     patchValue = next
   } else if (removed && !shown) {
     const raw = record.data[fieldId]
@@ -4275,7 +4285,8 @@ async function onLinkPickerConfirm(payload: { recordIds: string[]; summaries: Li
   if (!ensureCanEditRecord(recordId)) return
   const fieldId = linkPickerField.value.id
   const previousSummaries = selectedRecordLinkSummaries.value[fieldId] ?? grid.linkSummaries.value[recordId]?.[fieldId]
-  const row = grid.rows.value.find((r) => r.id === recordId)
+  // In a form view the record shown is the form's own (its copy, or one made from the grid's row), so the save is made on it.
+  const row = (manualRowsEditGate.value && isManualRowRecord(recordId)) ? grid.rows.value.find((r) => r.id === recordId) : pageRowFor(recordId)
   if (row) {
     // This save's own result, as in `commitDrawerPatch`: the grid's shared error read after the await may be an
     // older save's (one of the same record that fails while this one waits its turn).
@@ -4347,7 +4358,8 @@ async function onPersonPickerConfirm(payload: { userIds: string[]; summaries: Pe
   const recordId = personPickerRecordId.value
   if (!ensureCanEditRecord(recordId)) return
   const fieldId = personPickerField.value.id
-  const row = grid.rows.value.find((r) => r.id === recordId)
+  // In a form view the record shown is the form's own (its copy, or one made from the grid's row), so the save is made on it.
+  const row = (manualRowsEditGate.value && isManualRowRecord(recordId)) ? grid.rows.value.find((r) => r.id === recordId) : pageRowFor(recordId)
   if (row) {
     // This save's own result (see `onLinkPickerConfirm`).
     const write = grid.patchCell(row.id, fieldId, payload.userIds, row.version)

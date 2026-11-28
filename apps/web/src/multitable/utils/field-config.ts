@@ -460,19 +460,23 @@ export function isValidPhoneValue(value: unknown): boolean {
   return typeof value === 'string' && PHONE_REGEX.test(value.trim())
 }
 
+function attachmentLimitText(maxFiles: number, isZh: boolean): string {
+  if (maxFiles === 1) {
+    return isZh
+      ? '该字段只允许一个附件。添加新文件前请先清除当前文件。'
+      : 'This field only allows one attachment. Clear the current file before adding another.'
+  }
+  return isZh
+    ? `该字段最多允许 ${maxFiles} 个附件。`
+    : `This field allows up to ${maxFiles} attachments.`
+}
+
 export function validateAttachmentSelection(field: MetaField, files: FileList | File[], existingCount: number, isZh = false): string | null {
   if (field.type !== 'attachment') return null
   const { maxFiles, acceptedMimeTypes } = resolveAttachmentFieldProperty(field.property)
   const fileList = Array.from(files)
   if (maxFiles && existingCount + fileList.length > maxFiles && !shouldReplaceAttachmentSelection(field, fileList, existingCount)) {
-    if (maxFiles === 1) {
-      return isZh
-        ? '该字段只允许一个附件。添加新文件前请先清除当前文件。'
-        : 'This field only allows one attachment. Clear the current file before adding another.'
-    }
-    return isZh
-      ? `该字段最多允许 ${maxFiles} 个附件。`
-      : `This field allows up to ${maxFiles} attachments.`
+    return attachmentLimitText(maxFiles, isZh)
   }
   if (acceptedMimeTypes.length > 0) {
     const disallowed = fileList.find((file) => file.type && !acceptedMimeTypes.includes(file.type))
@@ -482,4 +486,13 @@ export function validateAttachmentSelection(field: MetaField, files: FileList | 
     }
   }
   return null
+}
+
+/** The field's file-limit text when a list of `count` attachment ids is over the field's limit; null when it is not,
+ *  when the field sets no limit, or when it is not an attachment field. A plain count: a list being written has no
+ *  replace case, unlike a selection (see shouldReplaceAttachmentSelection). */
+export function attachmentLimitError(field: MetaField, count: number, isZh = false): string | null {
+  if (field.type !== 'attachment') return null
+  const { maxFiles } = resolveAttachmentFieldProperty(field.property)
+  return maxFiles && count > maxFiles ? attachmentLimitText(maxFiles, isZh) : null
 }
