@@ -11,6 +11,7 @@ import { deriveDelegatedAdminNamespace } from '../rbac/namespace-admission'
 import {
   auditDelegatedAdminScopeCleanup,
   isAdminLevelPermissionCode,
+  unassignOrdinaryRoleMembers,
   unassignUserRoles,
   type RoleAssignmentResult,
 } from '../rbac/role-assignment'
@@ -864,10 +865,11 @@ export function rolesRouter(): Router {
    * all: a role_id ON DELETE CASCADE would remove every admin membership and bypass the
    * last-admin guard. That DELETE answers 409 before any membership or role write.
    *
-   * GRANTS GO WITH IT TOO (same roles, same transaction): `role_permissions` rows for the id are
-   * deleted, so a later POST of the same id by a roles:write holder starts from an EMPTY set and any
-   * admin code has to pass the gate again. An ordinary role's delete stays a `roles`-only write (the
-   * `roles:delete` census premise).
+   * Deleting an existing ordinary role removes its `user_roles` and `role_permissions` rows in this
+   * transaction, together with the `roles` row. A DELETE of an id with no `roles` row and no
+   * protection writes nothing and answers 200.
+   *
+   * GRANTS GO WITH IT TOO: the role's grants, memberships and catalog row commit together.
    */
   r.delete('/api/roles/:id', rbacGuard('roles', 'write'), async (req: Request, res: Response) => {
     const id = req.params.id
@@ -889,10 +891,7 @@ export function rolesRouter(): Router {
       let before: unknown = null
       let memberIds: string[] = []
       let membershipRemoval: RoleAssignmentResult | undefined
-      // Set immediately before the first membership / grant statement: a failure after it belongs to
-      // the `roles:delete-admin-role` recovery-census site (that write set reaches `user_roles` and
-      // `role_permissions`).
-      let removesMemberships = false
+      let removesProtectedMemberships = false
       try {
         await transaction(async (client) => {
           // FOR UPDATE, as the FIRST statement: PUT/POST take the same row lock before touching
@@ -914,7 +913,7 @@ export function rolesRouter(): Router {
             throw protectedRoleDeleteRefusal(id, protection)
           }
           if (protection && protection.kind !== 'platform_admin_role') {
-            removesMemberships = true
+            removesProtectedMemberships = true
             if (memberIds.length > 0) {
               membershipRemoval = await unassignUserRoles({
                 userIds: memberIds,
@@ -923,34 +922,36 @@ export function rolesRouter(): Router {
                 executor: client,
               })
             }
-            // The grants go too. With no role_id FK, `role_permissions` outlives the row, and POST
-            // (`INSERT … ON CONFLICT DO NOTHING`, then an early return when no codes are sent)
-            // re-creates the id WITH those leftover admin codes and without reaching the gate —
-            // and permission resolution joins user_roles to role_permissions without `roles`, so
-            // any surviving membership keeps them. Same transaction, so it commits with the rest.
-            await client.query('DELETE FROM role_permissions WHERE role_id=$1', [id])
           }
-          // D21 (Y5a): every member's subject authorization version row, sorted, before the role row
-          // goes and with it the `roles → user_roles` cascade where that FK exists (the cascade's
-          // trigger bumps would otherwise land in scan order, racing a concurrent multi-user
-          // revocation). It sits AFTER the namespace-admission locks above (the writer rule: locks
-          // outside the admission holder's set first, then the version row; every
-          // lockSharedAccessSubjects caller takes advisory → version row, so a version row taken
-          // before those locks is one half of a writer-vs-writer 40P01). A protected role took those
-          // locks and these same rows above, inside lockRoleCatalogAuthority (#6971:
-          // lockSharedAccessSubjects for the actor and every member — admission advisories, then
-          // their version rows in one sorted statement, then the users rows), and its membership
+          const removesOrdinaryRole = !protection && before !== null
+          // D21 (Y5a): every member's subject authorization version row, in one sorted statement,
+          // before the role row goes and with it the `roles → user_roles` cascade where that FK
+          // exists. It sits AFTER the namespace-admission locks above (the writer rule: locks
+          // outside the admission holder's set first, then the version row). A protected role took
+          // those locks and these same rows inside lockRoleCatalogAuthority, and its membership
           // removal took the rows again inside unassignUserRoles; here they are held. An ordinary
-          // role takes no admission lock and takes the version rows now.
-          await bumpSubjectAuthorizationVersions(client, memberIds)
-          await client.query('DELETE FROM roles WHERE id=$1', [id])
+          // role takes no admission lock; unassignOrdinaryRoleMembers takes its members' version
+          // rows, sorted, in one statement before its membership DELETE, so that is the ordinary
+          // path's only version-row statement. A request for a role that is not there and has no
+          // protection writes nothing.
+          if (removesProtectedMemberships) {
+            await bumpSubjectAuthorizationVersions(client, memberIds)
+          }
+          if (removesOrdinaryRole) {
+            membershipRemoval = await unassignOrdinaryRoleMembers(client, id)
+            memberIds = [...new Set([...memberIds, ...membershipRemoval.affectedUserIds])]
+          }
+          if (removesProtectedMemberships || removesOrdinaryRole) {
+            await client.query('DELETE FROM role_permissions WHERE role_id=$1', [id])
+            await client.query('DELETE FROM roles WHERE id=$1', [id])
+          }
         })
       } catch (error) {
         if (error instanceof RolePermissionRequestError) {
           await recordRoleWriteRefusal({ action: 'delete', actorId, roleId: id, error })
           return sendRolePermissionRequestError(res, error)
         }
-        if (removesMemberships) {
+        if (removesProtectedMemberships) {
           // O2-S2, census site `roles:delete-admin-role`: the membership removal DELETEs from
           // `user_roles` (trg_user_roles_recovery_authority_lock, user lease) and the grant removal
           // from `role_permissions` (trg_role_permissions_recovery_authority_lock, role lease), so a
@@ -958,8 +959,7 @@ export function rolesRouter(): Router {
           if (sendIfRecoveryConflict(res, error)) return
           return sendRoleWriteFailure(res, error, 'delete', id)
         }
-        // O2-S2, census site `roles:delete`: marker 40001 → retryable 409. This write set reaches
-        // `roles` only (see the L1 battery's NOT-DRIVEN ledger for why that holds on this schema).
+        // O2-S2, census site `roles:delete`: map a lease conflict on either cleanup write to 409.
         if (sendIfRecoveryConflict(res, error)) return
         return sendRoleWriteFailure(res, error, 'delete', id)
       }

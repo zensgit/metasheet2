@@ -799,9 +799,9 @@ export const NOT_DRIVEN_SITES = Object.freeze([
   },
   {
     site: 'roles:delete',
-    reason: 'no-trigger-on-target-table',
+    reason: 'orthogonal-fixture-cost',
     detail:
-      "DELETE /api/roles/:id of an ORDINARY role deletes only from `roles`, which carries none of the nine triggers (deleting a namespace main-admin or admin-equivalent role also removes its memberships and grants and is its own census site, roles:delete-admin-role, below). Its documented blocking path is a foreign-key cascade into a triggered child — and no such FK EXISTS on a schema built by this repo's migration chain (role_permissions is created by 20250924190000_create_rbac_tables.ts with only a permission_code FK; 033_create_rbac_core.sql's cascading role_permissions (:17) and user_roles (:36) versions are both no-op CREATE TABLE IF NOT EXISTS). Verified empirically: driving it under a held role lease returned 200, and pg_constraint shows no roles-referencing FK. Re-checked at runtime by buildRoleCascadeWitnessQuery over EVERY recovery-authority-triggered child of roles, for every parent-delete action that writes the child row (CASCADE / SET NULL / SET DEFAULT) — if any of them exists on the target database, the battery FAILS rather than keep this excuse.",
+      "Deleting an existing ordinary role can reach a user or role lease via explicitly removing its memberships and grants; it does not rely on a foreign key. This battery does not drive that route under a held lease with a dedicated ordinary-role fixture. The route's ordinary-role conflict mapping is covered by its unit census leg, not by an end-to-end battery result.",
   },
   {
     site: 'roles:delete-admin-role',
@@ -1754,25 +1754,14 @@ export async function runBattery({ env = process.env, options } = {}) {
     }
     log(lines, 'PHASE 0 VERDICT: SAME-DB - the application writes the database this battery leases')
 
-    // The NOT-DRIVEN excuses are not taken on trust. The one that is a SCHEMA claim rather than an
-    // architectural one is re-verified here; if it has stopped being true on this database, the
-    // battery fails and demands the surface be driven, instead of carrying a stale exemption.
-    //
-    // THIS PREMISE CHECK IS STRICTER THAN IT USED TO BE, deliberately. It now covers EVERY
-    // recovery-authority-triggered child of `roles` (not only `role_permissions` — `user_roles`
-    // carries `trg_user_roles_recovery_authority_lock` and 033_create_rbac_core.sql:36 gives it its
-    // own independent cascading FK) and EVERY parent-delete action that writes the child row
-    // (SET NULL and SET DEFAULT UPDATE the child and fire the same BEFORE INSERT OR UPDATE OR
-    // DELETE trigger, not just CASCADE). So this battery will now expire the `roles:delete` excuse
-    // — and exit 1 rather than produce evidence — in strictly MORE situations than before. That is
-    // the point: every one of those situations is a database on which `roles:delete` really is
-    // blockable and therefore really must be driven.
+    // Keep the schema guard against additional parent-triggered writes, independently of the
+    // ordinary role-delete path's explicit child writes and NOT-DRIVEN status.
     // SCHEMA/OID BINDING — the doors this query must be paired with. The query binds
     // `<canonical>.roles`; these doors establish that the canonical relation exists, that this
     // session's own view agrees with it, that the binding is unambiguous, and that this really is
     // the canonical recovery-authority surface. Without them, zero rows from a database that is not
     // the one we think we are observing would read as "nothing writes a triggered child" and
-    // quietly keep the exemption. `users` resolving in the same-DB proof above does NOT establish
+    // quietly accept an unverified schema. `users` resolving in the same-DB proof above does NOT establish
     // this: the two tables could sit in different schemas. Same client, same session as the
     // query it guards — that is the whole point.
     // SAME DOORS, SAME ORDER, SAME REASONS as the independent witness runner's
@@ -1818,13 +1807,13 @@ export async function runBattery({ env = process.env, options } = {}) {
     }))
     if (cascadePresent) {
       const offenders = roleDeleteChildWrites(cascadeRows).map((row) => describeRoleCascadeRow(row)).join('; ')
-      log(lines, `VERDICT: FAIL - deleting a role on this database writes into a recovery-authority-triggered table [${offenders}], so roles:delete IS blockable here; the ledger's NOT-DRIVEN exemption for it no longer holds and the surface must be driven`)
-      failures.push({ phase: 'preflight', failure: 'not_driven_reason_expired', reason: `roles:delete is drivable on this schema (parent-delete writes a triggered child: ${offenders}) but is listed NOT-DRIVEN` })
+      log(lines, `VERDICT: FAIL - a role parent delete can additionally write into a recovery-authority-triggered child [${offenders}]; this schema shape is not covered by the battery`)
+      failures.push({ phase: 'preflight', failure: 'not_driven_reason_expired', reason: `roles:delete has an uncovered FK-mediated child write: ${offenders}` })
       evidence.verdict = 'FAIL'
       evidence.finished_at = new Date().toISOString()
       return { exitCode: 1, evidence, lines }
     }
-    log(lines, 'PHASE 0 VERDICT: EXEMPTION-VALID - no foreign key writes a recovery-authority-triggered child of roles on a role delete, so the roles:delete NOT-DRIVEN reason still holds on this database')
+    log(lines, 'PHASE 0 VERDICT: NO-FK-MEDIATED-WRITE - explicit ordinary-role cleanup can still encounter recovery conflicts and is not driven by this battery')
 
     // ---------------- Phase 1 — seed (no lease held) ----------------------
     log(lines, '── phase 1 · seed synthetic subjects (no lease held) ──────────')

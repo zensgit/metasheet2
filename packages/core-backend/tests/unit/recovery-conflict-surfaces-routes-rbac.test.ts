@@ -286,22 +286,21 @@ describe('routes/roles.ts', () => {
     expect(res.body).toEqual({ ok: false, error: { code: 'ROLE_WRITE_FAILED', message: 'Role write failed' } })
   })
 
-  it('[recovery-census:roles:delete] DELETE /api/roles/:id: marker 40001 (FK cascade into role_permissions/user_roles) → 409', async () => {
-    // The delete now runs in ONE transaction (lock, classification, member snapshot, delete).
-    // An ORDINARY role's write set is the `roles` DELETE alone; where the cascading FK exists the
-    // marker surfaces from that statement.
-    const seen = scriptRoleDeleteTransaction({
-      codes: ['p:read'],
-      members: ['user-a'],
-      failOn: (sql) => (/^DELETE FROM roles WHERE id=/.test(sql) ? markerError() : null),
-    })
-    const res = mockResponse()
-    await invokeHandler(rolesRouter(), 'delete', '/api/roles/:id', {
-      params: { id: 'role-1' },
-    }, res)
-    expect(res.statusCode).toBe(409)
-    expect(res.body).toEqual(UNIFORM_409_BODY)
-    expect(seen.filter((sql) => /user_roles/.test(sql) && /^DELETE/.test(sql))).toEqual([])
+  it('[recovery-census:roles:delete] ordinary role cleanup: marker at either child write or parent DELETE → exact uniform retryable 409', async () => {
+    for (const table of ['user_roles', 'role_permissions', 'roles']) {
+      const seen = scriptRoleDeleteTransaction({
+        codes: ['p:read'],
+        members: ['user-a'],
+        failOn: (sql) => sql.startsWith(`DELETE FROM ${table} `) ? markerError() : null,
+      })
+      const res = mockResponse()
+      await invokeHandler(rolesRouter(), 'delete', '/api/roles/:id', {
+        params: { id: 'role-1' },
+      }, res)
+      expect(res.statusCode).toBe(409)
+      expect(res.body).toEqual(UNIFORM_409_BODY)
+      expect(seen.at(-1)).toMatch(new RegExp(`^DELETE FROM ${table} `))
+    }
     census.record('roles:delete')
   })
 
