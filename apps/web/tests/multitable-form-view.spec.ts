@@ -884,6 +884,212 @@ describe('MetaFormView attachment record binding', () => {
 
     view.unmount()
   })
+
+  it('keeps Save disabled and the field busy while an upload is out, also when the user goes for an earlier file\'s remove', async () => {
+    const upload = deferredFn<ReturnType<typeof attachment>>()
+    const remove = vi.fn().mockResolvedValue(undefined)
+    const view = mountForm({ record: REC_A(), uploadFn: upload.fn, deleteAttachmentFn: remove })
+    const saveButton = () => view.container.querySelector('.meta-form-view__submit') as HTMLButtonElement
+
+    try {
+      pickFiles(view.fileInput(), [new File(['one'], 'one.pdf', { type: 'application/pdf' })])
+      await flushUi()
+      upload.pending[0].resolve(attachment('att_n1', 'one.pdf'))
+      await flushUi()
+      pickFiles(view.fileInput(), [new File(['two'], 'two.pdf', { type: 'application/pdf' })])
+      await flushUi()
+      // The earlier file's remove, if the form offers it while the second upload runs.
+      ;(view.container.querySelectorAll('.meta-attachment-list__remove')[2] as HTMLButtonElement | undefined)?.click()
+      await flushUi()
+
+      expect(saveButton().disabled).toBe(true)
+      expect(view.container.querySelector('.meta-form-view__uploading')).not.toBeNull()
+      expect(view.fileInput().disabled).toBe(true)
+
+      upload.pending[1].resolve(attachment('att_n2', 'two.pdf'))
+      await flushUi()
+      expect(saveButton().disabled).toBe(false)
+    } finally {
+      view.unmount()
+    }
+  })
+
+  it('writes no deleted file back into the list when an upload ends after a remove', async () => {
+    const upload = deferredFn<ReturnType<typeof attachment>>()
+    const remove = vi.fn().mockResolvedValue(undefined)
+    const view = mountForm({ record: REC_A(), uploadFn: upload.fn, deleteAttachmentFn: remove })
+
+    try {
+      pickFiles(view.fileInput(), [new File(['one'], 'one.pdf', { type: 'application/pdf' })])
+      await flushUi()
+      upload.pending[0].resolve(attachment('att_n1', 'one.pdf'))
+      await flushUi()
+      pickFiles(view.fileInput(), [new File(['two'], 'two.pdf', { type: 'application/pdf' })])
+      await flushUi()
+      // The earlier file's remove, if the form offers it while the second upload runs.
+      ;(view.container.querySelectorAll('.meta-attachment-list__remove')[2] as HTMLButtonElement | undefined)?.click()
+      await flushUi()
+      upload.pending[1].resolve(attachment('att_n2', 'two.pdf'))
+      await flushUi()
+
+      const deletedIds = remove.mock.calls.map((call) => call[0])
+      const payload = await submitted(view)
+      // No id whose delete was answered is in what the form would submit, and the earlier upload is shown by its name.
+      expect((payload.fld_files as string[]).filter((id) => deletedIds.includes(id))).toEqual([])
+      expect(view.container.textContent).not.toContain('att_n1')
+      expect(payload).toEqual({ fld_title: 'Alpha', fld_files: ['att_a1', 'att_a2', 'att_n1', 'att_n2'] })
+    } finally {
+      view.unmount()
+    }
+  })
+
+  it('drops the files a clear-all already deleted when a later delete of it fails', async () => {
+    const upload = deferredFn<ReturnType<typeof attachment>>()
+    const remove = deferredFn()
+    // No stored file in the field: both files are uploads not saved yet.
+    const view = mountForm({ record: { id: 'rec_A', version: 1, data: { fld_title: 'Alpha' } }, uploadFn: upload.fn, deleteAttachmentFn: remove.fn })
+
+    try {
+      pickFiles(view.fileInput(), [new File(['one'], 'one.pdf', { type: 'application/pdf' })])
+      await flushUi()
+      upload.pending[0].resolve(attachment('att_n1', 'one.pdf'))
+      await flushUi()
+      pickFiles(view.fileInput(), [new File(['two'], 'two.pdf', { type: 'application/pdf' })])
+      await flushUi()
+      upload.pending[1].resolve(attachment('att_n2', 'two.pdf'))
+      await flushUi()
+
+      ;(view.container.querySelector('.meta-form-view__attachment-clear') as HTMLButtonElement).click()
+      await flushUi()
+      remove.pending[0].resolve()
+      await flushUi()
+      remove.pending[1].reject(new Error('Delete refused'))
+      await flushUi()
+
+      expect(remove.fn).toHaveBeenNthCalledWith(1, 'att_n1', { recordId: 'rec_A', fieldId: 'fld_files' })
+      expect(remove.fn).toHaveBeenNthCalledWith(2, 'att_n2', { recordId: 'rec_A', fieldId: 'fld_files' })
+      expect(fieldError(view)?.textContent).toBe('Delete refused')
+      expect(view.container.textContent).toContain('two.pdf')
+      // The file whose delete was answered leaves the list; it is not left behind as a bare id.
+      expect(view.container.textContent).not.toContain('att_n1')
+      expect(await submitted(view)).toEqual({ fld_title: 'Alpha', fld_files: ['att_n2'] })
+    } finally {
+      view.unmount()
+    }
+  })
+
+  it('keeps a clear-all whole when the user goes for a later file\'s remove while it runs', async () => {
+    const upload = deferredFn<ReturnType<typeof attachment>>()
+    // A delete stand-in, answered in the order the test chooses: a second delete of the same id fails.
+    const deleted = new Set<string>()
+    const deletes: Array<() => void> = []
+    const remove = vi.fn((id: string) => new Promise<void>((resolve, reject) => {
+      deletes.push(() => {
+        if (deleted.has(id)) {
+          reject(new Error('Delete refused'))
+        } else {
+          deleted.add(id)
+          resolve()
+        }
+      })
+    }))
+    const view = mountForm({ record: { id: 'rec_A', version: 1, data: { fld_title: 'Alpha' } }, uploadFn: upload.fn, deleteAttachmentFn: remove })
+    const saveButton = () => view.container.querySelector('.meta-form-view__submit') as HTMLButtonElement
+
+    try {
+      pickFiles(view.fileInput(), [new File(['one'], 'one.pdf', { type: 'application/pdf' })])
+      await flushUi()
+      upload.pending[0].resolve(attachment('att_n1', 'one.pdf'))
+      await flushUi()
+      pickFiles(view.fileInput(), [new File(['two'], 'two.pdf', { type: 'application/pdf' })])
+      await flushUi()
+      upload.pending[1].resolve(attachment('att_n2', 'two.pdf'))
+      await flushUi()
+
+      ;(view.container.querySelector('.meta-form-view__attachment-clear') as HTMLButtonElement).click()
+      await flushUi()
+      // The later file's remove, if the form offers it while the clear runs; its delete is answered first.
+      ;(view.container.querySelectorAll('.meta-attachment-list__remove')[1] as HTMLButtonElement | undefined)?.click()
+      await flushUi()
+      if (deletes.length > 1) {
+        deletes[1]()
+        await flushUi()
+      }
+      expect(saveButton().disabled).toBe(true)
+
+      // The clear's delete of the first file, then its delete of the second (sent only now).
+      deletes[0]()
+      await flushUi()
+      deletes[deletes.length - 1]()
+      await flushUi()
+
+      expect([...deleted].sort()).toEqual(['att_n1', 'att_n2'])
+      expect(fieldError(view)).toBeNull()
+      expect(await submitted(view)).toEqual({ fld_title: 'Alpha', fld_files: [] })
+    } finally {
+      view.unmount()
+    }
+  })
+
+  it('takes a failed clear-all\'s deleted files out of the list as the form holds it then, not as it was when the clear started', async () => {
+    const upload = deferredFn<ReturnType<typeof attachment>>()
+    const remove = deferredFn()
+    const view = mountForm({
+      record: { id: 'rec_A', version: 1, data: { fld_title: 'Alpha', fld_files: ['att_a1'] } },
+      uploadFn: upload.fn,
+      deleteAttachmentFn: remove.fn,
+    })
+
+    try {
+      pickFiles(view.fileInput(), [new File(['one'], 'one.pdf', { type: 'application/pdf' })])
+      await flushUi()
+      upload.pending[0].resolve(attachment('att_n1', 'one.pdf'))
+      await flushUi()
+
+      ;(view.container.querySelector('.meta-form-view__attachment-clear') as HTMLButtonElement).click()
+      await flushUi()
+      // Before the stored file's delete returns, the form gets a new copy of the same record without that file, as the
+      // workbench gives it after a stored file's delete; the form re-reads its draft from that copy.
+      view.record.value = { id: 'rec_A', version: 2, data: { fld_title: 'Alpha', fld_files: [] } }
+      await flushUi()
+      remove.pending[0].resolve()
+      await flushUi()
+      remove.pending[1].reject(new Error('Delete refused'))
+      await flushUi()
+
+      expect(remove.fn).toHaveBeenNthCalledWith(1, 'att_a1', { recordId: 'rec_A', fieldId: 'fld_files' })
+      expect(remove.fn).toHaveBeenNthCalledWith(2, 'att_n1', { recordId: 'rec_A', fieldId: 'fld_files' })
+      expect(fieldError(view)?.textContent).toBe('Delete refused')
+      expect(await submitted(view)).toEqual({ fld_title: 'Alpha', fld_files: [] })
+    } finally {
+      view.unmount()
+    }
+  })
+
+  it('leaves the next record\'s form data alone when the earlier record\'s clear-all fails on a later delete after the switch', async () => {
+    const remove = deferredFn()
+    const view = mountForm({ record: REC_A(), deleteAttachmentFn: remove.fn })
+
+    try {
+      ;(view.container.querySelector('.meta-form-view__attachment-clear') as HTMLButtonElement).click()
+      await flushUi()
+      // B has never had a value for the field, so any write to it shows up in the payload.
+      view.record.value = { id: 'rec_B', version: 1, data: { fld_title: 'Beta' } }
+      await flushUi()
+      remove.pending[0].resolve()
+      await flushUi()
+      remove.pending[1].reject(new Error('Delete refused'))
+      await flushUi()
+
+      expect(remove.fn).toHaveBeenNthCalledWith(1, 'att_a1', { recordId: 'rec_A', fieldId: 'fld_files' })
+      expect(remove.fn).toHaveBeenNthCalledWith(2, 'att_a2', { recordId: 'rec_A', fieldId: 'fld_files' })
+      expect(fieldError(view)).toBeNull()
+      expect(await submitted(view)).toEqual({ fld_title: 'Beta' })
+      expect(view.submitSpy.mock.calls[0][0]).not.toHaveProperty('fld_files')
+    } finally {
+      view.unmount()
+    }
+  })
 })
 
 // --- A4: multi-page / prefill / cross-page validation ---
