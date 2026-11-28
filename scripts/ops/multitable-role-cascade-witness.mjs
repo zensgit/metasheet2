@@ -5,11 +5,9 @@
  *
  * WHY THIS EXISTS
  * ---------------
- * The L1 exercise battery (`scripts/ops/multitable-l1-battery.mjs`) excuses census site
- * `roles:delete` with reason `no-trigger-on-target-table`. That excuse rests on a FACTUAL PREMISE
- * about the target database: deleting a role writes into NO table that carries a recovery-authority
- * trigger, so a `DELETE FROM roles` reaches no triggered table and no 40001 — and therefore no 409 —
- * can be constructed for it.
+ * The L1 exercise battery (`scripts/ops/multitable-l1-battery.mjs`) checks for additional
+ * FK-mediated writes during the parent DELETE. This witness measures that schema property only.
+ * The ordinary-role route's explicit cleanup can hit recovery-authority triggers without an FK.
  *
  * On the local/test schema the premise was verified empirically. On PRODUCTION it is currently only
  * INFERRED-STRONG: it is deduced from the prod migration ledger, which additionally ran the legacy
@@ -556,7 +554,7 @@ export function renderSummary(verdict, { target = 'unknown' } = {}) {
   lines.push('')
   lines.push(`- target: \`${target}\``)
   lines.push(`- verdict: \`${verdict.verdict}\``)
-  lines.push(`- premise (\`roles:delete\` excused as \`no-trigger-on-target-table\`): **${verdict.premise}**`)
+  lines.push(`- premise (no additional FK-mediated recovery-authority write): **${verdict.premise}**`)
   lines.push(`- reason: \`${verdict.reason}\``)
   if (verdict.detail) lines.push(`- detail: ${verdict.detail}`)
   if (verdict.presence) {
@@ -592,20 +590,15 @@ export function renderSummary(verdict, { target = 'unknown' } = {}) {
   lines.push('')
   if (verdict.verdict === 'ABSENT') {
     lines.push(
-      'Deleting a role on the observed database writes into no table that carries a'
-      + ' recovery-authority trigger — no foreign key from such a table to `roles` carries CASCADE,'
-      + ' SET NULL or SET DEFAULT — so the L1 battery\'s `roles:delete` NOT-DRIVEN excuse'
-      + ' (`no-trigger-on-target-table`) still holds there. The premise moves from INFERRED-STRONG'
-      + ' to **CONFIRMED** for this target.',
+      'The observed parent delete has no FK-mediated write into a recovery-authority-triggered'
+      + ' table. This does not cover the ordinary-role route\'s explicit membership or grant cleanup.',
     )
   } else if (verdict.verdict === 'PRESENT') {
     lines.push(
-      'Deleting a role on the observed database WRITES INTO a recovery-authority-triggered table'
-      + ' (see the rows above: CASCADE deletes the child row, SET NULL and SET DEFAULT update it —'
-      + ' all three fire a `BEFORE INSERT OR UPDATE OR DELETE` trigger). The `roles:delete` excuse'
-      + ' has stopped being true there: the battery re-checks this premise at runtime and would exit'
-      + ' 1 with `not_driven_reason_expired`, refusing to produce evidence. Amendment A1\'s'
-      + ' production-inheritance clause does not hold for this target as written.',
+      'The observed parent delete has an additional FK-mediated write into a'
+      + ' recovery-authority-triggered table. The battery rejects this schema shape at preflight'
+      + ' with exit 1 (`not_driven_reason_expired`); the route\'s explicit cleanup is not driven'
+      + ' by that battery regardless of foreign-key presence.',
     )
   } else {
     lines.push(

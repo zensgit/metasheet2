@@ -646,13 +646,33 @@ describe('W — writers bump FIRST', () => {
 
   it('W-02 role assignment bumps between the roles FOR SHARE review and the membership write; the autocommit routes now write inside a transaction whose mutex bumps first', () => {
     const roleAssignment = readFileSync(path.join(SRC, 'rbac', 'role-assignment.ts'), 'utf8')
-    for (const write of ['INSERT INTO user_roles', 'DELETE FROM user_roles']) {
-      const writeAt = roleAssignment.indexOf(write)
-      const bumpAt = roleAssignment.lastIndexOf('await bumpSubjectAuthorizationVersions(executor, userIds)', writeAt)
-      const reviewAt = roleAssignment.lastIndexOf("await assertDelegatedRoleCodesAssignable(executor, roleId, options.scope", writeAt)
-      expect(bumpAt).toBeGreaterThan(reviewAt)
-      expect(writeAt).toBeGreaterThan(bumpAt)
+    // Every membership write in the file, each checked inside the function that issues it: a bump
+    // in another writer earlier in the file does not cover this one.
+    const writers: string[] = []
+    for (const match of roleAssignment.matchAll(/(INSERT INTO|DELETE FROM) user_roles\b/g)) {
+      const writeAt = match.index!
+      const fnAt = roleAssignment.lastIndexOf('\nexport async function ', writeAt)
+      expect(fnAt, `${match[0]} at ${writeAt}`).toBeGreaterThan(0)
+      const fn = roleAssignment.slice(fnAt, writeAt)
+      writers.push(/^\nexport async function (\w+)\(/.exec(fn)?.[1] ?? '')
+      // A scoped writer bumps exactly the users it writes; the ordinary role writer's argument is pinned below.
+      const scoped = fn.includes('options.scope')
+      const bumpAt = fn.lastIndexOf(scoped
+        ? 'await bumpSubjectAuthorizationVersions(executor, userIds)'
+        : 'await bumpSubjectAuthorizationVersions(executor, ')
+      expect(bumpAt, `${writers.at(-1)}: ${match[0]}`).toBeGreaterThan(0)
+      // No other statement between the bump and the write (the one query call is the write's own).
+      expect(fn.slice(bumpAt).match(/executor\.query\(/g), `${writers.at(-1)}: ${match[0]}`).toHaveLength(1)
+      const reviewAt = fn.lastIndexOf("await assertDelegatedRoleCodesAssignable(executor, roleId, options.scope")
+      if (scoped) {
+        expect(reviewAt, `${writers.at(-1)}: ${match[0]}`).toBeGreaterThan(0)
+        expect(bumpAt).toBeGreaterThan(reviewAt)
+      }
     }
+    expect(writers).toEqual(['assignUserRoles', 'unassignUserRoles', 'unassignOrdinaryRoleMembers'])
+    // The ordinary role delete bumps exactly the members it read, by the id of the role it deletes.
+    const ordinary = roleAssignment.slice(roleAssignment.indexOf('\nexport async function unassignOrdinaryRoleMembers('))
+    expect(ordinary).toMatch(/const members = await executor\.query\(\s*'SELECT user_id FROM user_roles WHERE role_id = \$1',\s*\[roleId\],\s*\)\s*await bumpSubjectAuthorizationVersions\(executor, readAffectedUserIds\(members\.rows\)\)\s*const result = await executor\.query\(\s*'DELETE FROM user_roles WHERE role_id = \$1 RETURNING user_id',/)
     const permissions = readFileSync(path.join(SRC, 'routes', 'permissions.ts'), 'utf8')
     // #6924 moved the direct grant / revoke, the template apply and the legacy revoke into
     // writeLegacyAuthorizationException: one withAuthorizationInputTransaction whose R5 step is the

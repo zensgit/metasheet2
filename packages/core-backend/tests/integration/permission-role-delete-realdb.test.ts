@@ -23,6 +23,7 @@ import { authService } from '../../src/auth/AuthService'
 import { jwtAuthMiddleware } from '../../src/auth/jwt-middleware'
 import { pool, query, transaction } from '../../src/db/pg'
 import { lockUsersForAccessGraphWrite } from '../../src/directory/access-graph-mutex'
+import { listUserPermissions } from '../../src/rbac/service'
 import { adminUsersRouter } from '../../src/routes/admin-users'
 import { rolesRouter } from '../../src/routes/roles'
 import { lockSharedAccessSubjects } from '../../src/admin/platform-actor-authority'
@@ -213,6 +214,59 @@ describe('permission role delete real database', () => {
       await query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [adminId, 'admin'])
       await query('DELETE FROM role_permissions WHERE role_id = $1 AND permission_code = $2', [roleId, permission])
       await query('DELETE FROM permissions WHERE code = $1', [permission])
+    }
+  })
+
+  it('removes an ordinary role and its access while preserving access from another role', async () => {
+    const deletedRole = `${namespace}_reader`
+    const deletedPermission = `${namespace}:read`
+    const retainedPermission = `${namespace}:list`
+    let seeded = false
+    try {
+      await transaction(async (client) => {
+        await client.query('INSERT INTO roles (id, name) VALUES ($1, $1)', [deletedRole])
+        await client.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [holderId, deletedRole])
+        await client.query(
+          'INSERT INTO permissions (code, name) VALUES ($1, $1), ($2, $2)',
+          [deletedPermission, retainedPermission],
+        )
+        await client.query(
+          'INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, $2), ($3, $4)',
+          [deletedRole, deletedPermission, roleId, retainedPermission],
+        )
+        await client.query(
+          `INSERT INTO user_namespace_admissions (user_id, namespace, enabled, source)
+           VALUES ($1, $2, TRUE, 'platform_admin')`,
+          [holderId, namespace],
+        )
+      })
+      seeded = true
+      expect(await listUserPermissions(holderId)).toEqual(expect.arrayContaining([deletedPermission, retainedPermission]))
+
+      const response = await request(app).delete(`/api/roles/${deletedRole}`).auth(adminToken, { type: 'bearer' })
+
+      expect(response.status).toBe(200)
+      expect(response.body).toEqual({ ok: true, data: { id: deletedRole } })
+      expect(await count('SELECT count(*) AS n FROM roles WHERE id = $1', [deletedRole])).toBe(0)
+      expect(await count('SELECT count(*) AS n FROM user_roles WHERE role_id = $1', [deletedRole])).toBe(0)
+      expect(await count('SELECT count(*) AS n FROM role_permissions WHERE role_id = $1', [deletedRole])).toBe(0)
+      const permissions = await listUserPermissions(holderId)
+      expect(permissions).not.toContain(deletedPermission)
+      expect(permissions).toContain(retainedPermission)
+    } finally {
+      if (seeded) {
+        await transaction(async (client) => {
+          await client.query('DELETE FROM user_namespace_admissions WHERE user_id = $1 AND namespace = $2', [holderId, namespace])
+          await client.query('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [holderId, deletedRole])
+          await client.query(
+            'DELETE FROM role_permissions WHERE (role_id, permission_code) IN (($1, $2), ($3, $4))',
+            [deletedRole, deletedPermission, roleId, retainedPermission],
+          )
+          await client.query('DELETE FROM audit_logs WHERE resource_type = $1 AND resource_id = $2', ['role', deletedRole])
+          await client.query('DELETE FROM roles WHERE id = $1', [deletedRole])
+          await client.query('DELETE FROM permissions WHERE code = ANY($1::text[])', [[deletedPermission, retainedPermission]])
+        })
+      }
     }
   })
 
